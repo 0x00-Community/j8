@@ -1,0 +1,18 @@
+[package]
+name = "r8debugger"
+description = "r8 调试工具：r8dbg 命令行"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "r8dbg"
+path = "src/main.rs"
+
+[dependencies]
+r8frame.workspace = true
+r8bytecode = { workspace = true, features = ["compile"] }
+clap.workspace = true
+
+[lints]
+workspace = true

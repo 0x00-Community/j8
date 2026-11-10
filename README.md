@@ -11,6 +11,7 @@
 | `r8platform` | std | 实现 `Platform`（`DefaultPlatform`）：后台任务跑在 moremath `ThreadMulti` 线程池上（起一次复用、任务可借用调用方数据），时钟用 `Instant` |
 | `r8bytecode` | `no_std`（`compile` 要 std） | 累加器式寄存器字节码（`Insn` / `Function` / `Module`）；`compile` feature（缺省开）带 JS ⇒ 字节码编译器 `Module::try_from(&Source)`，用 oxc 解析 |
 | `r8macros` | proc-macro | 过程宏：`enums!("x.json")` 从 JSON 生成枚举（定义、`Display`、按字段类型取 `&mut`），用法见 `crates/macros/USAGE.md` |
+| `r8debugger` | std | 调试命令行 `r8dbg`（clap）：`r8dbg asm <file.js \| ->` / `r8dbg asm -e '<js>'` 打印字节码反汇编（`-o` 写文件） |
 | `r8executor` | `no_std`（`compile` 要 std） | 字节码执行器 `Executor`，**目前是最后一层**；`compile` feature 下实现 `Engine` |
 
 所有 JS 都先编成字节码再执行，不设 AST 解释层。
