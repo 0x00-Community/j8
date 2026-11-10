@@ -1,6 +1,6 @@
 //! JS ⇒ 字节码：表达式。结果都留在 acc。
 use oxc_ast::ast::{
-    Argument, ArrowFunctionBody, ArrowFunctionExpression, AssignmentExpression, AssignmentOperator, BinaryExpression, BinaryOperator, CallExpression, Expression, LogicalOperator, MemberExpression, ObjectExpression, ObjectPropertyKind, PropertyKind as PropertyKind_, SimpleAssignmentTarget, TemplateElement, UnaryOperator, UpdateExpression,
+    Argument, ArrayExpressionElement, ArrowFunctionBody, AssignmentTarget, AssignmentTargetMaybeDefault, AssignmentTargetProperty, ChainElement, ComputedMemberExpression, StaticMemberExpression, ArrowFunctionExpression, AssignmentExpression, AssignmentOperator, BinaryExpression, BinaryOperator, CallExpression, Expression, LogicalOperator, MemberExpression, ObjectExpression, ObjectPropertyKind, PropertyKind as PropertyKind_, SimpleAssignmentTarget, TemplateElement, UnaryOperator, UpdateExpression,
     UpdateOperator,
 };
 use oxc_span::{GetSpan, Span};
@@ -23,6 +23,32 @@ enum Assign {
     Binary(BinaryOp),
     /// `||=` / `&&=` / `??=`：左边已经满足就不求右边
     Logical(fn(crate::Label) -> Insn),
+}
+
+/// 数组字面量 / 实参里的一个元素。
+enum Element<'a> {
+    Value(&'a Expression<'a>),
+    Spread(&'a Expression<'a>),
+    Hole,
+}
+
+impl<'a> From<&'a ArrayExpressionElement<'a>> for Element<'a> {
+    fn from(e: &'a ArrayExpressionElement<'a>) -> Self {
+        match e {
+            ArrayExpressionElement::SpreadElement(s) => Element::Spread(&s.argument),
+            ArrayExpressionElement::Elision(_) => Element::Hole,
+            e => Element::Value(e.as_expression().expect("the rest are expressions")),
+        }
+    }
+}
+
+impl<'a> From<&'a Argument<'a>> for Element<'a> {
+    fn from(a: &'a Argument<'a>) -> Self {
+        match a {
+            Argument::SpreadElement(s) => Element::Spread(&s.argument),
+            a => Element::Value(a.as_expression().expect("the rest are expressions")),
+        }
+    }
 }
 
 /// 赋值目标：名字，或已经求好对象（与键）的属性。
@@ -135,14 +161,23 @@ impl<'a> Compiler<'a, '_> {
             Expression::ArrowFunctionExpression(a) => self.arrow(a)?,
             Expression::ClassExpression(c) => self.class(c, true)?,
             Expression::NewExpression(n) => {
-                let argc = u16::try_from(n.arguments.len()).map_err(|_| self.unsupported(n.span, "more than 65535 arguments"))?;
-                let callee = self.temps(1 + argc);
-                self.expr(&n.callee)?;
-                self.emit(Insn::Star(callee));
-                let args = Reg(callee.0 + 1);
-                self.arguments(&n.arguments, args)?;
-                self.emit(Insn::Construct { callee, args, argc });
-                self.release(callee);
+                if Self::has_spread(&n.arguments) {
+                    let callee = self.temp();
+                    self.expr(&n.callee)?;
+                    self.emit(Insn::Star(callee));
+                    let args = self.spread_array(n.arguments.iter().map(Element::from))?;
+                    self.emit(Insn::ConstructSpread { callee, args });
+                    self.release(callee);
+                } else {
+                    let argc = u16::try_from(n.arguments.len()).map_err(|_| self.unsupported(n.span, "more than 65535 arguments"))?;
+                    let callee = self.temps(1 + argc);
+                    self.expr(&n.callee)?;
+                    self.emit(Insn::Star(callee));
+                    let args = Reg(callee.0 + 1);
+                    self.arguments(&n.arguments, args)?;
+                    self.emit(Insn::Construct { callee, args, argc });
+                    self.release(callee);
+                }
             }
             Expression::UnaryExpression(u) => {
                 let op = match u.operator {
@@ -200,39 +235,42 @@ impl<'a> Compiler<'a, '_> {
                 self.emit(Insn::GetSuperKeyed { this });
                 self.release(this);
             }
-            Expression::StaticMemberExpression(m) => {
-                if m.optional {
-                    return Err(self.unsupported(m.span, "optional chaining"));
+            Expression::StaticMemberExpression(m) => self.static_member(m)?,
+            Expression::ComputedMemberExpression(m) => self.computed_member(m)?,
+            Expression::ChainExpression(c) => {
+                self.chains.push(Vec::new());
+                match &c.expression {
+                    ChainElement::CallExpression(call) => self.call(call)?,
+                    ChainElement::StaticMemberExpression(m) => self.static_member(m)?,
+                    ChainElement::ComputedMemberExpression(m) => self.computed_member(m)?,
+                    e => return Err(self.unsupported(e.span(), "chain element")),
                 }
-                self.expr(&m.object)?;
-                let obj = self.temp();
-                self.emit(Insn::Star(obj));
-                let name = self.name(m.property.name.as_str());
-                self.emit(Insn::GetNamed { obj, name });
-                self.release(obj);
-            }
-            Expression::ComputedMemberExpression(m) => {
-                if m.optional {
-                    return Err(self.unsupported(m.span, "optional chaining"));
+                let jumps = self.chains.pop().expect("this chain");
+                if !jumps.is_empty() {
+                    let end = self.jump(Insn::Jump);
+                    for j in jumps {
+                        self.land(j);
+                    }
+                    self.emit(Insn::LdaUndefined);
+                    self.land(end);
                 }
-                self.expr(&m.object)?;
-                let obj = self.temp();
-                self.emit(Insn::Star(obj));
-                self.expr(&m.expression)?;
-                self.emit(Insn::GetKeyed { obj });
-                self.release(obj);
             }
             Expression::ObjectExpression(o) => self.object(o)?,
             Expression::ArrayExpression(a) => {
-                let count = u16::try_from(a.elements.len()).map_err(|_| self.unsupported(a.span, "more than 65535 elements"))?;
-                let first = self.temps(count);
-                for (i, el) in (0..).zip(&a.elements) {
-                    let e = el.as_expression().ok_or_else(|| self.unsupported(el.span(), "spread / holes in array literals"))?;
-                    self.expr(e)?;
-                    self.emit(Insn::Star(Reg(first.0 + i)));
+                if a.elements.iter().all(|e| e.as_expression().is_some()) {
+                    let count = u16::try_from(a.elements.len()).map_err(|_| self.unsupported(a.span, "more than 65535 elements"))?;
+                    let first = self.temps(count);
+                    for (i, el) in (0..).zip(&a.elements) {
+                        self.expr(el.as_expression().expect("checked above"))?;
+                        self.emit(Insn::Star(Reg(first.0 + i)));
+                    }
+                    self.emit(Insn::CreateArray { first, count });
+                    self.release(first);
+                } else {
+                    let arr = self.spread_array(a.elements.iter().map(Element::from))?;
+                    self.emit(Insn::Ldar(arr));
+                    self.release(arr);
                 }
-                self.emit(Insn::CreateArray { first, count });
-                self.release(first);
             }
             e => return Err(self.unsupported(e.span(), "expression")),
         }
@@ -320,7 +358,15 @@ impl<'a> Compiler<'a, '_> {
     }
 
     fn assignment(&mut self, a: &'a AssignmentExpression<'a>) -> Result<(), Error> {
-        let t = a.left.as_simple_assignment_target().ok_or_else(|| self.unsupported(a.left.span(), "destructuring assignment"))?;
+        let Some(t) = a.left.as_simple_assignment_target() else {
+            self.expr(&a.right)?;
+            let v = self.temp();
+            self.emit(Insn::Star(v));
+            self.assign_target(&a.left, v)?;
+            self.emit(Insn::Ldar(v));
+            self.release(v);
+            return Ok(());
+        };
         let t = self.target(t)?;
         match Self::assign_kind(a.operator) {
             Assign::Plain => {
@@ -371,10 +417,15 @@ impl<'a> Compiler<'a, '_> {
 
     /// 调用：`callee`、`this`、实参排在连续的寄存器里。
     fn call(&mut self, c: &'a CallExpression<'a>) -> Result<(), Error> {
-        if c.optional {
-            return Err(self.unsupported(c.span, "optional calls"));
+        let spread = Self::has_spread(&c.arguments);
+        let argc = if spread { 0 } else { u16::try_from(c.arguments.len()).map_err(|_| self.unsupported(c.span, "more than 65535 arguments"))? };
+        if let (Expression::Super(_), true) = (&c.callee, spread) {
+            let args = self.spread_array(c.arguments.iter().map(Element::from))?;
+            self.emit(Insn::SuperCallSpread { args });
+            self.release(args);
+            self.store(crate::scope::THIS, true);
+            return Ok(());
         }
-        let argc = u16::try_from(c.arguments.len()).map_err(|_| self.unsupported(c.span, "more than 65535 arguments"))?;
         if let Expression::Super(_) = &c.callee {
             let args = self.temps(argc);
             self.arguments(&c.arguments, args)?;
@@ -392,15 +443,17 @@ impl<'a> Compiler<'a, '_> {
                 let name = self.name(m.property.name.as_str());
                 self.emit(Insn::GetSuper { this, name });
             }
-            Expression::StaticMemberExpression(m) if !m.optional => {
+            Expression::StaticMemberExpression(m) => {
                 self.expr(&m.object)?;
                 self.emit(Insn::Star(this));
+                self.optional(m.optional, m.span)?;
                 let name = self.name(m.property.name.as_str());
                 self.emit(Insn::GetNamed { obj: this, name });
             }
-            Expression::ComputedMemberExpression(m) if !m.optional => {
+            Expression::ComputedMemberExpression(m) => {
                 self.expr(&m.object)?;
                 self.emit(Insn::Star(this));
+                self.optional(m.optional, m.span)?;
                 self.expr(&m.expression)?;
                 self.emit(Insn::GetKeyed { obj: this });
             }
@@ -410,12 +463,176 @@ impl<'a> Compiler<'a, '_> {
                 self.expr(f)?;
             }
         }
+        self.optional(c.optional, c.span)?;
         self.emit(Insn::Star(callee));
-        let first = Reg(callee.0 + 2);
-        self.arguments(&c.arguments, first)?;
-        self.emit(Insn::Call { callee, this, args: first, argc });
+        if spread {
+            let args = self.spread_array(c.arguments.iter().map(Element::from))?;
+            self.emit(Insn::CallSpread { callee, this, args });
+            self.release(args);
+        } else {
+            let first = Reg(callee.0 + 2);
+            self.arguments(&c.arguments, first)?;
+            self.emit(Insn::Call { callee, this, args: first, argc });
+        }
         self.release(callee);
         Ok(())
+    }
+
+    fn static_member(&mut self, m: &'a StaticMemberExpression<'a>) -> Result<(), Error> {
+        self.expr(&m.object)?;
+        self.optional(m.optional, m.span)?;
+        let obj = self.temp();
+        self.emit(Insn::Star(obj));
+        let name = self.name(m.property.name.as_str());
+        self.emit(Insn::GetNamed { obj, name });
+        self.release(obj);
+        Ok(())
+    }
+
+    fn computed_member(&mut self, m: &'a ComputedMemberExpression<'a>) -> Result<(), Error> {
+        self.expr(&m.object)?;
+        self.optional(m.optional, m.span)?;
+        let obj = self.temp();
+        self.emit(Insn::Star(obj));
+        self.expr(&m.expression)?;
+        self.emit(Insn::GetKeyed { obj });
+        self.release(obj);
+        Ok(())
+    }
+
+    /// `?.`：acc 是 null / undefined 就跳到当前链的末尾。
+    fn optional(&mut self, optional: bool, span: Span) -> Result<(), Error> {
+        if optional {
+            let j = self.jump(Insn::JumpIfNullish);
+            if self.chains.is_empty() {
+                return Err(self.unsupported(span, "`?.` outside an optional chain"));
+            }
+            self.chains.last_mut().expect("checked above").push(j);
+        }
+        Ok(())
+    }
+
+    fn has_spread(args: &[Argument<'a>]) -> bool {
+        args.iter().any(|a| matches!(a, Argument::SpreadElement(_)))
+    }
+
+    /// 带展开 / 空位的元素序列建成一个数组，放进新的临时寄存器（调用方释放）。
+    fn spread_array(&mut self, elements: impl Iterator<Item = Element<'a>>) -> Result<Reg, Error> {
+        let arr = self.temp();
+        self.emit(Insn::CreateArray { first: arr, count: 0 });
+        self.emit(Insn::Star(arr));
+        for e in elements {
+            match e {
+                Element::Value(v) => {
+                    self.expr(v)?;
+                    self.emit(Insn::ArrayPush { arr });
+                }
+                Element::Spread(v) => {
+                    self.expr(v)?;
+                    self.emit(Insn::ArraySpread { arr });
+                }
+                Element::Hole => {
+                    self.emit(Insn::LdaUndefined);
+                    self.emit(Insn::ArrayPush { arr });
+                }
+            }
+        }
+        Ok(arr)
+    }
+
+    /// 解构赋值：把寄存器 `value` 里的值按赋值目标模式存进去。
+    fn assign_target(&mut self, t: &'a AssignmentTarget<'a>, value: Reg) -> Result<(), Error> {
+        match t {
+            AssignmentTarget::ArrayAssignmentTarget(a) => {
+                self.emit(Insn::Ldar(value));
+                self.emit(Insn::ToArray);
+                let arr = self.temp();
+                self.emit(Insn::Star(arr));
+                for (i, e) in (0u32..).zip(&a.elements) {
+                    let Some(e) = e else { continue };
+                    let k = self.constant(Constant::Number(f64::from(i)));
+                    self.emit(Insn::LdaConst(k));
+                    self.emit(Insn::GetKeyed { obj: arr });
+                    let v = self.temp();
+                    self.emit(Insn::Star(v));
+                    self.assign_maybe_default(e, v)?;
+                    self.release(v);
+                }
+                if let Some(r) = &a.rest {
+                    let from = u16::try_from(a.elements.len()).map_err(|_| self.unsupported(a.span, "more than 65535 elements"))?;
+                    self.emit(Insn::SliceFrom { arr, from });
+                    let v = self.temp();
+                    self.emit(Insn::Star(v));
+                    self.assign_target(&r.target, v)?;
+                    self.release(v);
+                }
+                self.release(arr);
+            }
+            AssignmentTarget::ObjectAssignmentTarget(o) => {
+                let n = u16::try_from(o.properties.len()).map_err(|_| self.unsupported(o.span, "more than 65535 properties"))?;
+                let keys = self.temps(n);
+                for (i, p) in (0u16..).zip(&o.properties) {
+                    let k = Reg(keys.0 + i);
+                    match p {
+                        AssignmentTargetProperty::AssignmentTargetPropertyIdentifier(id) => {
+                            let name = id.binding.name.as_str();
+                            let c = self.name(name);
+                            self.emit(Insn::LdaConst(c));
+                            self.emit(Insn::Star(k));
+                            self.emit(Insn::GetKeyed { obj: value });
+                            let v = self.temp();
+                            self.emit(Insn::Star(v));
+                            let v2 = match &id.init {
+                                Some(d) => self.with_default(v, d)?,
+                                None => v,
+                            };
+                            self.emit(Insn::Ldar(v2));
+                            self.store(name, false);
+                            self.release(v);
+                        }
+                        AssignmentTargetProperty::AssignmentTargetPropertyProperty(pp) => {
+                            self.property_key_into(&pp.name, pp.computed, k)?;
+                            self.emit(Insn::Ldar(k));
+                            self.emit(Insn::GetKeyed { obj: value });
+                            let v = self.temp();
+                            self.emit(Insn::Star(v));
+                            self.assign_maybe_default(&pp.binding, v)?;
+                            self.release(v);
+                        }
+                    }
+                }
+                if let Some(r) = &o.rest {
+                    self.emit(Insn::ObjectRest { src: value, keys, count: n });
+                    let v = self.temp();
+                    self.emit(Insn::Star(v));
+                    self.assign_target(&r.target, v)?;
+                    self.release(v);
+                } else if o.properties.is_empty() {
+                    self.require_object(value);
+                }
+                self.release(keys);
+            }
+            t => {
+                let s = t.as_simple_assignment_target().ok_or_else(|| self.unsupported(t.span(), "assignment target"))?;
+                let target = self.target(s)?;
+                self.emit(Insn::Ldar(value));
+                self.target_store(&target);
+                self.target_release(&target);
+            }
+        }
+        Ok(())
+    }
+
+    fn assign_maybe_default(&mut self, e: &'a AssignmentTargetMaybeDefault<'a>, value: Reg) -> Result<(), Error> {
+        match e {
+            AssignmentTargetMaybeDefault::AssignmentTargetWithDefault(d) => {
+                let v = self.with_default(value, &d.init)?;
+                self.assign_target(&d.binding, v)?;
+                self.release(v);
+                Ok(())
+            }
+            t => self.assign_target(t.as_assignment_target().ok_or_else(|| self.unsupported(t.span(), "assignment target"))?, value),
+        }
     }
 
     /// 实参逐个求值放进 `first` 起的连续寄存器。
@@ -469,8 +686,13 @@ impl<'a> Compiler<'a, '_> {
         let obj = self.temp();
         self.emit(Insn::Star(obj));
         for p in &o.properties {
-            let ObjectPropertyKind::ObjectProperty(p) = p else {
-                return Err(self.unsupported(p.span(), "object spread"));
+            let p = match p {
+                ObjectPropertyKind::ObjectProperty(p) => p,
+                ObjectPropertyKind::SpreadProperty(sp) => {
+                    self.expr(&sp.argument)?;
+                    self.emit(Insn::CopyData { obj });
+                    continue;
+                }
             };
             let kind = match p.kind {
                 PropertyKind_::Init => PropertyKind::Data,

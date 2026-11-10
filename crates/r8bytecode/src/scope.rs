@@ -4,7 +4,7 @@
 use std::collections::HashSet;
 
 use oxc_ast::ast::{
-    Argument, ArrayExpressionElement, ArrowFunctionBody, CatchClause, Class, ClassElement, ArrowFunctionExpression, AssignmentTarget, BindingIdentifier, BindingPattern, Expression, ForStatementInit, FormalParameters, Function, MemberExpression, ObjectPropertyKind, SimpleAssignmentTarget, Statement, VariableDeclaration, VariableDeclarationKind,
+    Argument, ArrayExpressionElement, ArrowFunctionBody, AssignmentTargetMaybeDefault, AssignmentTargetProperty, CatchClause, ChainElement, Class, ClassElement, ArrowFunctionExpression, AssignmentTarget, BindingIdentifier, BindingPattern, Expression, ForStatementInit, FormalParameters, Function, MemberExpression, ObjectPropertyKind, SimpleAssignmentTarget, Statement, VariableDeclaration, VariableDeclarationKind,
 };
 use oxc_span::Span;
 
@@ -65,12 +65,30 @@ impl<'a> Decls<'a> {
         Decl { name: id.name.as_str(), key: Self::key(id.span), kind }
     }
 
-    /// 变量声明里的简单绑定（解构在生成代码时报错，这里跳过）。
+    /// 模式里的全部绑定名。
+    fn pattern(&mut self, p: &'a BindingPattern<'a>, kind: DeclKind<'a>) {
+        match p {
+            BindingPattern::BindingIdentifier(id) => self.add(Self::ident(id, kind)),
+            BindingPattern::ObjectPattern(o) => {
+                o.properties.iter().for_each(|b| self.pattern(&b.value, kind));
+                if let Some(r) = &o.rest {
+                    self.pattern(&r.argument, kind);
+                }
+            }
+            BindingPattern::ArrayPattern(a) => {
+                a.elements.iter().flatten().for_each(|e| self.pattern(e, kind));
+                if let Some(r) = &a.rest {
+                    self.pattern(&r.argument, kind);
+                }
+            }
+            BindingPattern::AssignmentPattern(a) => self.pattern(&a.left, kind),
+        }
+    }
+
+    /// 变量声明里的绑定（含解构）。
     fn declarators(&mut self, d: &'a VariableDeclaration<'a>, kind: DeclKind<'a>) {
         for v in &d.declarations {
-            if let BindingPattern::BindingIdentifier(id) = &v.id {
-                self.add(Self::ident(id, kind));
-            }
+            self.pattern(&v.id, kind);
         }
     }
 
@@ -151,8 +169,8 @@ impl<'a> Decls<'a> {
     /// `catch (e)` 的形参那一层。
     pub fn catch_param(c: &'a CatchClause<'a>) -> Self {
         let mut d = Self::default();
-        if let Some(BindingPattern::BindingIdentifier(id)) = c.param.as_ref().map(|p| &p.pattern) {
-            d.add(Self::ident(id, DeclKind::Let));
+        if let Some(p) = &c.param {
+            d.pattern(&p.pattern, DeclKind::Let);
         }
         d
     }
@@ -176,9 +194,14 @@ impl<'a> Decls<'a> {
             d.add(Self::ident(id, DeclKind::SelfName));
         }
         for (i, p) in params.into_iter().flat_map(|p| p.items.iter()).enumerate() {
-            if let BindingPattern::BindingIdentifier(id) = &p.pattern {
-                d.add(Self::ident(id, DeclKind::Param(u16::try_from(i).unwrap_or(u16::MAX))));
+            match &p.pattern {
+                BindingPattern::BindingIdentifier(id) => d.add(Self::ident(id, DeclKind::Param(u16::try_from(i).unwrap_or(u16::MAX)))),
+                // 解构形参：寄存器里放原值，绑定另分配
+                pat => d.pattern(pat, DeclKind::Var),
             }
+        }
+        if let Some(r) = params.and_then(|p| p.rest.as_ref()) {
+            d.pattern(&r.rest.argument, DeclKind::Var);
         }
         d.vars(stmts);
         d.lexical(stmts);
@@ -311,7 +334,133 @@ impl<'a> Resolver<'a> {
     }
 
     fn params(&mut self, p: &'a FormalParameters<'a>) {
-        p.items.iter().filter_map(|i| i.initializer.as_deref()).for_each(|e| self.expr(e));
+        for i in &p.items {
+            if let Some(e) = &i.initializer {
+                self.expr(e);
+            }
+            self.pattern(&i.pattern);
+        }
+        if let Some(r) = &p.rest {
+            self.pattern(&r.rest.argument);
+        }
+    }
+
+    /// 模式里的默认值与计算键。
+    fn pattern(&mut self, p: &'a BindingPattern<'a>) {
+        match p {
+            BindingPattern::BindingIdentifier(_) => {}
+            BindingPattern::ObjectPattern(o) => {
+                for b in &o.properties {
+                    if b.computed
+                        && let Some(k) = b.key.as_expression()
+                    {
+                        self.expr(k);
+                    }
+                    self.pattern(&b.value);
+                }
+                if let Some(r) = &o.rest {
+                    self.pattern(&r.argument);
+                }
+            }
+            BindingPattern::ArrayPattern(a) => {
+                a.elements.iter().flatten().for_each(|e| self.pattern(e));
+                if let Some(r) = &a.rest {
+                    self.pattern(&r.argument);
+                }
+            }
+            BindingPattern::AssignmentPattern(a) => {
+                self.pattern(&a.left);
+                self.expr(&a.right);
+            }
+        }
+    }
+
+    /// 赋值目标（含解构赋值）里引用到的名字、对象、键、默认值。
+    fn target(&mut self, t: &'a AssignmentTarget<'a>) {
+        match t {
+            AssignmentTarget::ArrayAssignmentTarget(a) => {
+                for e in a.elements.iter().flatten() {
+                    self.maybe_default(e);
+                }
+                if let Some(r) = &a.rest {
+                    self.target(&r.target);
+                }
+            }
+            AssignmentTarget::ObjectAssignmentTarget(o) => {
+                for p in &o.properties {
+                    match p {
+                        AssignmentTargetProperty::AssignmentTargetPropertyIdentifier(i) => {
+                            self.reference(i.binding.name.as_str());
+                            if let Some(e) = &i.init {
+                                self.expr(e);
+                            }
+                        }
+                        AssignmentTargetProperty::AssignmentTargetPropertyProperty(p) => {
+                            if p.computed
+                                && let Some(k) = p.name.as_expression()
+                            {
+                                self.expr(k);
+                            }
+                            self.maybe_default(&p.binding);
+                        }
+                    }
+                }
+                if let Some(r) = &o.rest {
+                    self.target(&r.target);
+                }
+            }
+            t => {
+                if let Some(s) = t.as_simple_assignment_target() {
+                    self.simple_target(s);
+                }
+            }
+        }
+    }
+
+    fn maybe_default(&mut self, e: &'a AssignmentTargetMaybeDefault<'a>) {
+        match e {
+            AssignmentTargetMaybeDefault::AssignmentTargetWithDefault(d) => {
+                self.target(&d.binding);
+                self.expr(&d.init);
+            }
+            t => {
+                if let Some(t) = t.as_assignment_target() {
+                    self.target(t);
+                }
+            }
+        }
+    }
+
+    fn argument(&mut self, a: &'a Argument<'a>) {
+        match a {
+            Argument::SpreadElement(s) => self.expr(&s.argument),
+            a => {
+                if let Some(e) = a.as_expression() {
+                    self.expr(e);
+                }
+            }
+        }
+    }
+
+    fn chain(&mut self, c: &'a ChainElement<'a>) {
+        match c {
+            ChainElement::CallExpression(call) => {
+                self.expr(&call.callee);
+                call.arguments.iter().for_each(|a| self.argument(a));
+            }
+            c => {
+                if let Some(m) = c.as_member_expression() {
+                    match m {
+                        MemberExpression::StaticMemberExpression(m) => self.expr(&m.object),
+                        MemberExpression::ComputedMemberExpression(m) => {
+                            self.expr(&m.object);
+                            self.expr(&m.expression);
+                        }
+                        MemberExpression::PrivateFieldExpression(m) => self.expr(&m.object),
+                    }
+                }
+            }
+        }
     }
 
     fn statements(&mut self, stmts: &'a [Statement<'a>]) {
@@ -382,7 +531,12 @@ impl<'a> Resolver<'a> {
             Statement::TryStatement(t) => {
                 self.scoped(&Decls::block([t.block.body.as_slice()]), |r| r.statements(&t.block.body));
                 if let Some(c) = &t.handler {
-                    self.scoped(&Decls::catch_param(c), |r| r.scoped(&Decls::block([c.body.body.as_slice()]), |r| r.statements(&c.body.body)));
+                    self.scoped(&Decls::catch_param(c), |r| {
+                        if let Some(p) = &c.param {
+                            r.pattern(&p.pattern);
+                        }
+                        r.scoped(&Decls::block([c.body.body.as_slice()]), |r| r.statements(&c.body.body));
+                    });
                 }
                 if let Some(f) = &t.finalizer {
                     self.scoped(&Decls::block([f.body.as_slice()]), |r| r.statements(&f.body));
@@ -393,7 +547,12 @@ impl<'a> Resolver<'a> {
     }
 
     fn declaration(&mut self, d: &'a VariableDeclaration<'a>) {
-        d.declarations.iter().filter_map(|v| v.init.as_ref()).for_each(|e| self.expr(e));
+        for v in &d.declarations {
+            self.pattern(&v.id);
+            if let Some(e) = &v.init {
+                self.expr(e);
+            }
+        }
     }
 
     fn simple_target(&mut self, t: &'a SimpleAssignmentTarget<'a>) {
@@ -422,7 +581,7 @@ impl<'a> Resolver<'a> {
             Expression::ClassExpression(c) => self.class(c, true),
             Expression::NewExpression(n) => {
                 self.expr(&n.callee);
-                n.arguments.iter().filter_map(Argument::as_expression).for_each(|e| self.expr(e));
+                n.arguments.iter().for_each(|a| self.argument(a));
             }
             Expression::ParenthesizedExpression(p) => self.expr(&p.expression),
             Expression::UnaryExpression(u) => self.expr(&u.argument),
@@ -442,20 +601,14 @@ impl<'a> Resolver<'a> {
             Expression::SequenceExpression(s) => s.expressions.iter().for_each(|e| self.expr(e)),
             Expression::TemplateLiteral(t) => t.expressions.iter().for_each(|e| self.expr(e)),
             Expression::AssignmentExpression(a) => {
-                match &a.left {
-                    AssignmentTarget::AssignmentTargetIdentifier(id) => self.reference(id.name.as_str()),
-                    t => {
-                        if let Some(s) = t.as_simple_assignment_target() {
-                            self.simple_target(s);
-                        }
-                    }
-                }
+                self.target(&a.left);
                 self.expr(&a.right);
             }
+            Expression::ChainExpression(c) => self.chain(&c.expression),
             Expression::UpdateExpression(u) => self.simple_target(&u.argument),
             Expression::CallExpression(c) => {
                 self.expr(&c.callee);
-                c.arguments.iter().filter_map(Argument::as_expression).for_each(|e| self.expr(e));
+                c.arguments.iter().for_each(|a| self.argument(a));
             }
             Expression::StaticMemberExpression(m) => self.expr(&m.object),
             Expression::ComputedMemberExpression(m) => {
@@ -464,15 +617,29 @@ impl<'a> Resolver<'a> {
             }
             Expression::ObjectExpression(o) => {
                 for p in &o.properties {
-                    if let ObjectPropertyKind::ObjectProperty(p) = p {
-                        if let Some(k) = p.key.as_expression() {
-                            self.expr(k);
+                    match p {
+                        ObjectPropertyKind::ObjectProperty(p) => {
+                            if let Some(k) = p.key.as_expression() {
+                                self.expr(k);
+                            }
+                            self.expr(&p.value);
                         }
-                        self.expr(&p.value);
+                        ObjectPropertyKind::SpreadProperty(s) => self.expr(&s.argument),
                     }
                 }
             }
-            Expression::ArrayExpression(a) => a.elements.iter().filter_map(ArrayExpressionElement::as_expression).for_each(|e| self.expr(e)),
+            Expression::ArrayExpression(a) => {
+                for el in &a.elements {
+                    match el {
+                        ArrayExpressionElement::SpreadElement(s) => self.expr(&s.argument),
+                        el => {
+                            if let Some(e) = el.as_expression() {
+                                self.expr(e);
+                            }
+                        }
+                    }
+                }
+            }
             _ => {}
         }
     }

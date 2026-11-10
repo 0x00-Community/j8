@@ -299,6 +299,26 @@ impl Executor {
         e
     }
 
+    /// 数组的元素（快照）；不是数组给空。
+    fn items(v: Value<'_>) -> Vec<Value<'_>> {
+        match v {
+            Value::Object(o) => match &o.borrow().kind {
+                ObjectKind::Array(items) => items.clone(),
+                _ => Vec::new(),
+            },
+            _ => Vec::new(),
+        }
+    }
+
+    /// 往编译器建的数组末尾追加。
+    fn push<'gc>(a: &Agent<'gc, '_>, arr: Value<'gc>, items: impl IntoIterator<Item = Value<'gc>>) {
+        if let Value::Object(o) = arr
+            && let ObjectKind::Array(v) = &mut o.borrow_mut(a.mc).kind
+        {
+            v.extend(items);
+        }
+    }
+
     /// 对象字面量 / 类里定义一个属性（值或访问器函数是 `v`）。
     fn define<'gc>(a: &mut Agent<'gc, '_>, obj: Value<'gc>, key: &str, kind: PropertyKind, enumerable: bool, v: Value<'gc>) {
         let Value::Object(o) = obj else { return };
@@ -387,6 +407,77 @@ impl Executor {
                     if !acc.is_nullish() {
                         f.pc = l.0 as usize;
                     }
+                }
+                Insn::JumpIfNullish(l) => {
+                    if acc.is_nullish() {
+                        f.pc = l.0 as usize;
+                    }
+                }
+                Insn::JumpIfUndefined(l) => {
+                    if *acc == Value::Undefined {
+                        f.pc = l.0 as usize;
+                    }
+                }
+                Insn::JumpIfNotUndefined(l) => {
+                    if *acc != Value::Undefined {
+                        f.pc = l.0 as usize;
+                    }
+                }
+                Insn::CreateRest(from) => *acc = a.array(f.args.get(usize::from(from)..).unwrap_or(&[]).to_vec()).into(),
+                Insn::ArrayPush { arr } => Self::push(a, regs[r(arr)], [*acc]),
+                Insn::ArraySpread { arr } => {
+                    let items = a.to_list(*acc)?;
+                    Self::push(a, regs[r(arr)], items);
+                }
+                Insn::ToArray => {
+                    let items = a.to_list(*acc)?;
+                    *acc = a.array(items).into();
+                }
+                Insn::SliceFrom { arr, from } => {
+                    let items = Self::items(regs[r(arr)]);
+                    *acc = a.array(items.get(usize::from(from)..).unwrap_or(&[]).to_vec()).into();
+                }
+                Insn::CallSpread { callee, this, args } => {
+                    let level = depth + frames.len() + 1;
+                    if level >= STACK_LIMIT {
+                        return Err(a.throw(ErrorKind::Range, "Maximum call stack size exceeded"));
+                    }
+                    let list = Self::items(regs[r(args)]);
+                    match self.resolve(a, regs[r(callee)], regs[r(this)], list, level)? {
+                        Callee::Closure { closure, callee, this, args } => {
+                            let next = self.enter(a, regs, closure, callee, this, &args);
+                            frames.push(core::mem::replace(f, next));
+                        }
+                        Callee::Done(v) => *acc = v,
+                    }
+                }
+                Insn::ConstructSpread { callee, args } => {
+                    let level = depth + frames.len() + 1;
+                    if level >= STACK_LIMIT {
+                        return Err(a.throw(ErrorKind::Range, "Maximum call stack size exceeded"));
+                    }
+                    let list = Self::items(regs[r(args)]);
+                    let c = regs[r(callee)];
+                    match self.prepare(a, regs, c, list, c, level)? {
+                        Prepared::Frame(next) => frames.push(core::mem::replace(f, next)),
+                        Prepared::Done(v) => *acc = v,
+                    }
+                }
+                Insn::SuperCallSpread { args } => {
+                    let list = Self::items(regs[r(args)]);
+                    *acc = Self::super_call(a, regs, f, &list)?;
+                }
+                Insn::CopyData { obj } => {
+                    if let Value::Object(o) = regs[r(obj)] {
+                        a.copy_data(o, *acc, &[])?;
+                    }
+                }
+                Insn::ObjectRest { src, keys, count } => {
+                    let first = r(keys);
+                    let exclude = regs[first..first + usize::from(count)].iter().map(|&k| a.property_key(k)).collect::<Result<Vec<_>, _>>()?;
+                    let o = a.object();
+                    a.copy_data(o, regs[r(src)], &exclude)?;
+                    *acc = o.into();
                 }
                 Insn::CreateClosure(n) => {
                     let mut closure = Closure::new(FuncId(loaded.base + n), f.env);
@@ -616,6 +707,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(clippy::too_many_lines, reason = "一张用例表")]
     fn javascript_semantics() {
         let ok = [
             ("1 + 2 * 3", "7"),
@@ -686,6 +778,24 @@ mod tests {
             ("const o = {}; Object.defineProperty(o, 'x', { get() { return 7 } }); o.x + Object.keys(o).length", "7"),
             ("class A { m() {} } Object.keys(new A()).length + Object.keys({ p: 1 }).length", "1"),
             ("const o = Object.freeze({ a: 1 }); o.a = 2; o.a", "1"),
+            // 阶段 3：剩余 / 默认参数、展开、解构、可选链
+            ("function f(a, b = a + 1, ...rest) { return a + b + rest.length } f(1) + f(1, 5, 9, 9)", "11"),
+            ("const [x, , y = 3, ...z] = [1, 2, undefined, 4, 5]; x + y + z.join('')", "445"),
+            ("const { a, b: { c }, d = 4, ...rest } = { a: 1, b: { c: 2 }, e: 5, f: 6 }; a + c + d + Object.keys(rest).join()", "7e,f"),
+            ("let p = 1, q = 2; [p, q] = [q, p]; p * 10 + q", "21"),
+            ("let m, n; ({ m, n = 7 } = { m: 3 }); m + n", "10"),
+            ("function g({ x, y } = {}, [z] = [9]) { return (x ?? 0) + (y ?? 0) + z } g() + g({ x: 1, y: 2 }, [3])", "15"),
+            ("Math.max(...[1, 5, 3], 2)", "5"),
+            ("[0, ...[1, 2], ...'ab', , 3].join()", "0,1,2,a,b,,3"),
+            ("const o = { a: 1, ...{ b: 2, a: 3 }, c: 4 }; o.a + o.b + o.c", "9"),
+            ("class P { constructor(a, b) { this.s = a + b } } new P(...[2, 3]).s", "5"),
+            ("class A { constructor(...xs) { this.n = xs.length } } class B extends A { constructor(...xs) { super(...xs, 0) } } new B(1, 2).n", "3"),
+            ("const o = { a: { b: 1 }, f() { return this.a.b } }; [o?.a?.b, o.x?.y, o.f?.(), o.g?.(), o?.['a']?.b].join()", "1,,1,,1"),
+            ("null?.x.y.z", "undefined"),
+            ("function h({ k }) { return () => k } h({ k: 'c' })()", "c"),
+            ("try { throw { code: 7 } } catch ({ code }) { code }", "7"),
+            ("function d(a, b = () => a) { a = 2; return b() } d(1)", "2"),
+            ("const { length } = 'abc'; const [first] = 'xyz'; length + first", "3x"),
         ];
         for (src, want) in ok {
             assert_eq!(eval(src).0, Ok(String::from(want)), "{src}");
@@ -702,6 +812,8 @@ mod tests {
             ("class A {} class B extends A { constructor() {} } new B()", "ReferenceError: Must call super constructor in derived class before accessing 'this' or returning from derived constructor"),
             ("class A extends 3 {}", "TypeError: Class extends value 3 is not a constructor or null"),
             ("1 in 2", "TypeError: Cannot use 'in' operator to search for '1' in 2"),
+            ("const { x } = null", "TypeError: Cannot read properties of null (reading 'x')"),
+            ("[...1]", "TypeError: 1 is not iterable"),
         ];
         for (src, want) in thrown {
             assert_eq!(eval(src).0, Err(String::from(want)), "{src}");

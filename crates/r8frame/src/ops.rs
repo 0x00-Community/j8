@@ -617,6 +617,44 @@ impl<'gc> Agent<'gc, '_> {
         Ok(false)
     }
 
+    /// 展开 / 数组解构取元素：数组取元素，字符串按码点拆（迭代协议在阶段 4 接上）。
+    pub fn to_list(&mut self, v: Value<'gc>) -> Result<Vec<Value<'gc>>, Error> {
+        match v {
+            Value::Object(o) if matches!(o.borrow().kind, ObjectKind::Array(_)) => {
+                let ObjectKind::Array(items) = &o.borrow().kind else { unreachable!("checked to be an array") };
+                Ok(items.clone())
+            }
+            Value::String(s) => Ok(s.chars().map(|c| Value::String(self.string(c.encode_utf8(&mut [0; 4])))).collect()),
+            _ => {
+                let what = self.to_string(v)?;
+                Err(self.throw(ErrorKind::Type, &format!("{} is not iterable", &**what)))
+            }
+        }
+    }
+
+    /// 对象展开 / 剩余：把 `src` 的自有可枚举属性（数组下标在前）定义到 `target` 上，跳过 `exclude` 里的键。
+    pub fn copy_data(&mut self, target: JsObject<'gc>, src: Value<'gc>, exclude: &[JsString<'gc>]) -> Result<(), Error> {
+        let skip = |k: &str| exclude.iter().any(|e| ***e == *k);
+        let keys: Vec<JsString<'gc>> = match src {
+            Value::Object(o) => {
+                let data = o.borrow();
+                let mut keys = Vec::new();
+                if let ObjectKind::Array(items) = &data.kind {
+                    keys.extend((0..items.len()).map(|i| self.string(ryu_js::Buffer::new().format(f64::from(u32::try_from(i).unwrap_or(u32::MAX))))));
+                }
+                keys.extend(data.props.iter().filter(|(_, p)| p.enumerable).map(|&(k, _)| k));
+                keys
+            }
+            Value::String(s) => (0..s.encode_utf16().count()).map(|i| self.string(ryu_js::Buffer::new().format(f64::from(u32::try_from(i).unwrap_or(u32::MAX))))).collect(),
+            _ => return Ok(()),
+        };
+        for k in keys.into_iter().filter(|k| !skip(k)) {
+            let v = self.get_named(src, &k)?;
+            self.define(target, &k, Property::data(v));
+        }
+        Ok(())
+    }
+
     /// 构造调用要建的 `this`：原型取 `new_target.prototype`，不是对象就用 `Object.prototype`。
     pub fn create_this(&mut self, new_target: Value<'gc>) -> Result<JsObject<'gc>, Error> {
         let proto = match self.get_named(new_target, "prototype")? {

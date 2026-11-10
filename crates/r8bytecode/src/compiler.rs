@@ -132,6 +132,8 @@ pub(crate) struct Compiler<'a, 's> {
     levels: Vec<Level<'a>>,
     /// 脚本顶层的 `const`（是全局对象的属性，但不许再赋值）
     global_consts: HashSet<&'a str>,
+    /// 正在编的可选链：每条链里 `?.` 遇到 null / undefined 跳到链尾
+    pub(crate) chains: Vec<Vec<usize>>,
 }
 
 impl TryFrom<&Source<'_>> for Module {
@@ -146,7 +148,7 @@ impl TryFrom<&Source<'_>> for Module {
         }
         let program = &ret.program;
         let captured = Resolver::script(&program.body, Decls::this_key(program.span));
-        let mut c = Compiler { src, captured, module: Vec::new(), frames: Vec::new(), levels: Vec::new(), global_consts: HashSet::new() };
+        let mut c = Compiler { src, captured, module: Vec::new(), frames: Vec::new(), levels: Vec::new(), global_consts: HashSet::new(), chains: Vec::new() };
         c.script(program)?;
         Ok(Module { functions: c.module })
     }
@@ -350,23 +352,12 @@ impl<'a> Compiler<'a, '_> {
 
     /// 编一个函数，返回它在模块里的下标。
     pub(crate) fn function(&mut self, name: &str, kind: FunctionKind, this: Option<Key>, self_name: Option<&'a BindingIdentifier<'a>>, params: Option<&'a FormalParameters<'a>>, body: Body<'a>) -> Result<u32, Error> {
-        if let Some(r) = params.and_then(|p| p.rest.as_ref()) {
-            return Err(self.unsupported(r.span, "rest parameters"));
-        }
-        for p in params.into_iter().flat_map(|p| p.items.iter()) {
-            if !matches!(p.pattern, BindingPattern::BindingIdentifier(_)) {
-                return Err(self.unsupported(p.span, "destructuring parameters"));
-            }
-            if p.initializer.is_some() {
-                return Err(self.unsupported(p.span, "default parameters"));
-            }
-        }
         let count = params.map_or(0, |p| p.items.len());
         let n = u16::try_from(count).map_err(|_| self.unsupported(params.map_or(Span::default(), |p| p.span), "more than 65535 parameters"))?;
         let index = self.module.len();
         self.module.push(Function::default());
         let top = Reg::PARAMS + n;
-        let keeps_args = matches!(body, Body::DefaultConstructor { derived: true });
+        let keeps_args = matches!(body, Body::DefaultConstructor { derived: true }) || params.is_some_and(|p| p.rest.is_some());
         let out = Function { name: name.into(), kind, keeps_args, params: n, regs: top, ..Function::default() };
         self.frames.push(Frame { index, out, top, envs: 0, controls: Vec::new(), label: None, completion: None });
         let stmts = match body {
@@ -374,6 +365,9 @@ impl<'a> Compiler<'a, '_> {
             _ => &[],
         };
         self.enter(&Decls::function(this, self_name, params, stmts))?;
+        if let Some(p) = params {
+            self.prologue(p)?;
+        }
         match body {
             Body::Statements(s) => self.statements(s)?,
             Body::Expression(e) => {
@@ -393,6 +387,136 @@ impl<'a> Compiler<'a, '_> {
         let f = self.frames.pop().expect("the function's frame");
         self.module[f.index] = f.out;
         Ok(u32::try_from(index).expect("fewer than 2^32 functions"))
+    }
+
+    /// 形参序言：默认值、解构形参、剩余参数。
+    fn prologue(&mut self, params: &'a FormalParameters<'a>) -> Result<(), Error> {
+        for (i, p) in (0u16..).zip(&params.items) {
+            let reg = Reg(Reg::PARAMS + i);
+            if let Some(init) = &p.initializer {
+                self.emit(Insn::Ldar(reg));
+                let skip = self.jump(Insn::JumpIfNotUndefined);
+                self.expr(init)?;
+                self.emit(Insn::Star(reg));
+                self.land(skip);
+            }
+            match &p.pattern {
+                BindingPattern::BindingIdentifier(id) => {
+                    // 被捕获的形参进帧时已拷进环境，默认值算完要再拷一次
+                    let name = id.name.as_str();
+                    if p.initializer.is_some() && !matches!(self.lookup(name).0, Place::Reg(r) if r == reg) {
+                        self.emit(Insn::Ldar(reg));
+                        self.store(name, true);
+                    }
+                }
+                pat => self.bind_pattern(pat, reg, true)?,
+            }
+        }
+        if let Some(r) = &params.rest {
+            let from = u16::try_from(params.items.len()).map_err(|_| self.unsupported(r.span, "more than 65535 parameters"))?;
+            self.emit(Insn::CreateRest(from));
+            let t = self.temp();
+            self.emit(Insn::Star(t));
+            self.bind_pattern(&r.rest.argument, t, true)?;
+            self.release(t);
+        }
+        Ok(())
+    }
+
+    /// 把寄存器 `value` 里的值按模式绑到名字上（`init`：声明里的初始化）。
+    pub(crate) fn bind_pattern(&mut self, p: &'a BindingPattern<'a>, value: Reg, init: bool) -> Result<(), Error> {
+        match p {
+            BindingPattern::BindingIdentifier(id) => {
+                self.emit(Insn::Ldar(value));
+                self.store(id.name.as_str(), init);
+            }
+            BindingPattern::AssignmentPattern(a) => {
+                let t = self.with_default(value, &a.right)?;
+                self.bind_pattern(&a.left, t, init)?;
+                self.release(t);
+            }
+            BindingPattern::ObjectPattern(o) => {
+                let n = u16::try_from(o.properties.len()).map_err(|_| self.unsupported(o.span, "more than 65535 properties"))?;
+                let keys = self.temps(n);
+                for (i, b) in (0u16..).zip(&o.properties) {
+                    let k = Reg(keys.0 + i);
+                    self.property_key_into(&b.key, b.computed, k)?;
+                    self.emit(Insn::Ldar(k));
+                    self.emit(Insn::GetKeyed { obj: value });
+                    let t = self.temp();
+                    self.emit(Insn::Star(t));
+                    self.bind_pattern(&b.value, t, init)?;
+                    self.release(t);
+                }
+                if let Some(r) = &o.rest {
+                    self.emit(Insn::ObjectRest { src: value, keys, count: n });
+                    let t = self.temp();
+                    self.emit(Insn::Star(t));
+                    self.bind_pattern(&r.argument, t, init)?;
+                    self.release(t);
+                } else if o.properties.is_empty() {
+                    self.require_object(value);
+                }
+                self.release(keys);
+            }
+            BindingPattern::ArrayPattern(a) => {
+                self.emit(Insn::Ldar(value));
+                self.emit(Insn::ToArray);
+                let arr = self.temp();
+                self.emit(Insn::Star(arr));
+                for (i, e) in (0u32..).zip(&a.elements) {
+                    let Some(e) = e else { continue };
+                    let k = self.constant(Constant::Number(f64::from(i)));
+                    self.emit(Insn::LdaConst(k));
+                    self.emit(Insn::GetKeyed { obj: arr });
+                    let t = self.temp();
+                    self.emit(Insn::Star(t));
+                    self.bind_pattern(e, t, init)?;
+                    self.release(t);
+                }
+                if let Some(r) = &a.rest {
+                    let from = u16::try_from(a.elements.len()).map_err(|_| self.unsupported(a.span, "more than 65535 elements"))?;
+                    self.emit(Insn::SliceFrom { arr, from });
+                    let t = self.temp();
+                    self.emit(Insn::Star(t));
+                    self.bind_pattern(&r.argument, t, init)?;
+                    self.release(t);
+                }
+                self.release(arr);
+            }
+        }
+        Ok(())
+    }
+
+    /// `value` 是 `undefined` 就换成默认值：结果放一个新临时寄存器（调用方释放）。
+    pub(crate) fn with_default(&mut self, value: Reg, default: &'a Expression<'a>) -> Result<Reg, Error> {
+        let t = self.temp();
+        self.emit(Insn::Ldar(value));
+        self.emit(Insn::Star(t));
+        let skip = self.jump(Insn::JumpIfNotUndefined);
+        self.expr(default)?;
+        self.emit(Insn::Star(t));
+        self.land(skip);
+        Ok(t)
+    }
+
+    /// 解构 `null` / `undefined` 抛 TypeError（`{} = v` 没有属性可读时补这一下）。
+    pub(crate) fn require_object(&mut self, value: Reg) {
+        let k = self.name("constructor");
+        self.emit(Insn::GetNamed { obj: value, name: k });
+    }
+
+    /// 属性键求值放进寄存器 `k`（静态键是字符串常量）。
+    pub(crate) fn property_key_into(&mut self, key: &'a PropertyKey<'a>, computed: bool, k: Reg) -> Result<(), Error> {
+        match self.static_key(key, computed) {
+            Some(c) => {
+                let c = c?;
+                self.emit(Insn::LdaConst(c));
+            }
+            None => self.expr(key.as_expression().ok_or_else(|| self.unsupported(key.span(), "property key"))?)?,
+        }
+        self.emit(Insn::Star(k));
+        Ok(())
     }
 
     /// 普通函数（声明或表达式）：查掉不支持的种类。
@@ -735,10 +859,10 @@ impl<'a> Compiler<'a, '_> {
             self.land(at);
             self.scoped(&Decls::catch_param(c), |s| {
                 if let Some(p) = &c.param {
-                    let BindingPattern::BindingIdentifier(id) = &p.pattern else {
-                        return Err(s.unsupported(p.span, "destructuring catch parameters"));
-                    };
-                    s.store(id.name.as_str(), true);
+                    let t = s.temp();
+                    s.emit(Insn::Star(t));
+                    s.bind_pattern(&p.pattern, t, true)?;
+                    s.release(t);
                 }
                 s.block(&c.body)
             })?;
@@ -907,7 +1031,13 @@ impl<'a> Compiler<'a, '_> {
         }
         for v in &d.declarations {
             let BindingPattern::BindingIdentifier(id) = &v.id else {
-                return Err(self.unsupported(v.span, "destructuring"));
+                let init = v.init.as_ref().ok_or_else(|| self.unsupported(v.span, "a destructuring declaration without an initializer"))?;
+                self.expr(init)?;
+                let t = self.temp();
+                self.emit(Insn::Star(t));
+                self.bind_pattern(&v.id, t, true)?;
+                self.release(t);
+                continue;
             };
             match (&v.init, d.kind) {
                 (Some(e), _) => self.expr(e)?,

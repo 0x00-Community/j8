@@ -78,10 +78,11 @@ cargo build --target riscv64gc-unknown-none-elf -p r8frame -p r8bytecode -p r8ex
 - 内建对象（r8builtins）与宿主函数、`console.log`（经 `Platform::print`）、ToPrimitive（`valueOf` / `toString`）
 - `new`、类（构造器、方法、静态方法、getter / setter、`extends` / `super(...)` / `super.m()`、实例与静态字段，可继承宿主构造器如 `Error`）、对象字面量的方法与 getter / setter
 - 属性特性（可枚举 / 可写 / 可配置）、`Object.defineProperty` / `freeze`、`instanceof` / `in` / `delete`
+- 剩余 / 默认参数、展开（数组 / 调用 / `new` / `super` / 对象）、解构（声明 / 赋值 / 形参 / `catch`，含默认值与剩余）、可选链 `?.`
 
-还不支持（报 `Error::Unsupported`，带 `文件:行:列`）：`for-in` / `for-of`、解构、展开 / 剩余 / 默认参数、可选链、类的静态块 / 私有名 / 计算字段名、生成器 / `async`、正则 / BigInt 字面量。
+还不支持（报 `Error::Unsupported`，带 `文件:行:列`）：`for-in` / `for-of`、类的静态块 / 私有名 / 计算字段名、生成器 / `async`、正则 / BigInt 字面量。
 
-已知偏差：没有暂时性死区（`let` 声明前读到 `undefined`）、一次 `enter` 内不回收（长循环会一直涨内存）、脚本顶层 `let` / `const` 当全局属性。
+已知偏差：展开与数组解构只认数组和字符串（还没有迭代协议）、没有暂时性死区（`let` 声明前读到 `undefined`）、一次 `enter` 内不回收（长循环会一直涨内存）、脚本顶层 `let` / `const` 当全局属性。
 
 ## 约定
 
