@@ -1,26 +1,33 @@
-//! r8platform：[`Platform`] 的标准库实现。
+//! r8platform：[`Platform`] 的标准库实现，后台任务跑在 moremath 的 [`ThreadMulti`] 线程池上。
 use std::num::NonZeroUsize;
-use std::thread;
 use std::time::{Duration, Instant};
 
+use moremath::{Executor, ThreadMulti};
 use r8frame::{Platform, Task};
 
-/// 缺省平台：标准库线程，`run` 用作用域线程按工作线程数分批。
-#[derive(Debug)]
+/// 缺省平台：线程池起一次复用，任务可以借用调用方的数据。
 pub struct DefaultPlatform {
-    workers: NonZeroUsize,
+    pool: ThreadMulti,
     start: Instant,
 }
 
 impl Default for DefaultPlatform {
+    /// 每个 CPU 一个工作线程。
     fn default() -> Self {
-        Self { workers: thread::available_parallelism().unwrap_or(NonZeroUsize::MIN), start: Instant::now() }
+        Self { pool: ThreadMulti::default(), start: Instant::now() }
+    }
+}
+
+impl From<NonZeroUsize> for DefaultPlatform {
+    /// `n` 个工作线程（含调用线程）。
+    fn from(n: NonZeroUsize) -> Self {
+        Self { pool: ThreadMulti::from(n), start: Instant::now() }
     }
 }
 
 impl Platform for DefaultPlatform {
     fn workers(&self) -> NonZeroUsize {
-        self.workers
+        NonZeroUsize::new(self.pool.threads()).unwrap_or(NonZeroUsize::MIN)
     }
 
     fn now(&self) -> Duration {
@@ -28,13 +35,6 @@ impl Platform for DefaultPlatform {
     }
 
     fn run(&self, tasks: Vec<Task<'_>>) {
-        let mut tasks = tasks.into_iter();
-        loop {
-            let batch: Vec<Task<'_>> = tasks.by_ref().take(self.workers.get()).collect();
-            if batch.is_empty() {
-                break;
-            }
-            thread::scope(|s| batch.into_iter().for_each(|t| drop(s.spawn(t))));
-        }
+        self.pool.execute(tasks);
     }
 }

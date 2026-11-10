@@ -214,6 +214,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
+name = "moremath"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1bffe1cb9b0b2e53d64b54d16cfb42efad166dbe5c26c93e08c17c3ce72ca1e0"
+dependencies = [
+ "moremath-macros",
+]
+
+[[package]]
+name = "moremath-macros"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2b101f277740b24dde0c3d1294f8b2982317a473875464f9c9196e3fdb27adec"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "nonmax"
 version = "0.5.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -544,6 +564,7 @@ dependencies = [
 name = "r8platform"
 version = "0.1.0"
 dependencies = [
+ "moremath",
  "r8frame",
 ]
 

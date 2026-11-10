@@ -7,7 +7,7 @@
 | crate | std | 职责 |
 |---|---|---|
 | `r8frame` | `no_std` | 核心框架层：定义 trait（`Platform`、`Engine`）与通用结构体 / 枚举（`Isolate`、`Scope`、`Context`、`Global`、`Value`、`JsString`·`JsObject`、`Profiler`、`BinaryOp`、`Error`……），实现归各层 crate |
-| `r8platform` | std | 实现 `Platform`：标准库线程与时钟（`DefaultPlatform`） |
+| `r8platform` | std | 实现 `Platform`（`DefaultPlatform`）：后台任务跑在 moremath `ThreadMulti` 线程池上（起一次复用、任务可借用调用方数据），时钟用 `Instant` |
 | `r8bytecode` | `no_std`（`compile` 要 std） | 累加器式寄存器字节码（`Insn` / `Function` / `Module`）；`compile` feature（缺省开）带 JS ⇒ 字节码编译器 `Module::try_from(&Source)`，用 oxc 解析 |
 | `r8executor` | `no_std`（`compile` 要 std） | 字节码执行器 `Executor`，**目前是最后一层**；`compile` feature 下实现 `Engine` |
 
