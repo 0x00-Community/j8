@@ -86,6 +86,21 @@ cargo build --target riscv64gc-unknown-none-elf -p r8frame -p r8bytecode -p r8ex
 
 已知偏差：展开与数组解构只认数组和字符串（还没有迭代协议）、没有暂时性死区（`let` 声明前读到 `undefined`）、一次 `enter` 内不回收（长循环会一直涨内存）、脚本顶层 `let` / `const` 当全局属性。
 
+## test262
+
+`tests/test262` 是 tc39/test262 子模块（浅克隆，`git submodule update --init` 拉取），运行器 `tests/test262.rs` 挂在 dune 包下（`harness = false`，不另开 crate）：
+
+```sh
+cargo test -p dune --test test262 -- language/expressions/addition built-ins/Math   # 跑这些目录
+R8_TEST262_VERBOSE=1 cargo test -p dune --test test262 -- <路径>                    # 逐条列出没过的原因
+R8_TEST262_UPDATE=1 cargo test -p dune --test test262 -- <路径>                     # 结果写回基线
+cargo test -p dune --test test262                                                   # 只跑基线里的用例，掉了就失败
+```
+
+- 每个用例一个子进程、10 s 超时；结果分 pass / fail / unsupported（r8 报 `Error::Unsupported`）/ skip / timeout / crash，按目录汇总
+- 基线 `tests/test262.passing`：过了的用例一行一个；不带参数时只跑它做回归检查
+- 只跑非严格模式（`onlyStrict` 跑严格）；`module` 跳过；没有 `$262` 宿主对象；不支持写法的报错行号含拼进去的 harness
+
 ## 约定
 
 - 尽可能 `no_std`（`core` + `alloc`），要 std 的部分放在 feature 后面
