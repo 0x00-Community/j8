@@ -5,6 +5,9 @@ use r8frame::{Agent, Error, ErrorKind, JsString, Value};
 
 use crate::{Args, Installer};
 
+/// 字符串最长这么多 UTF-16 码元（同 V8 的 2^29 − 24），再长抛 RangeError
+const MAX_STRING_LENGTH: f64 = 536_870_888.0;
+
 /// `String` / `Number` 与原型方法。下标都按 UTF-16 码元算。
 pub(crate) struct Strings;
 
@@ -206,21 +209,37 @@ impl Strings {
         if n < 0.0 || n.is_infinite() {
             return Err(a.throw(ErrorKind::Range, "Invalid count value"));
         }
-        #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "已检查非负有限")]
-        let n = if n.is_nan() { 0 } else { n as usize };
-        Ok(a.string(&s.repeat(n)).into())
+        let n = if n.is_nan() { 0.0 } else { libm::trunc(n) };
+        if s.is_empty() || n == 0.0 {
+            return Ok(a.string("").into());
+        }
+        #[expect(clippy::cast_precision_loss, reason = "长度比较，精度足够")]
+        let total = s.encode_utf16().count() as f64 * n;
+        if total > MAX_STRING_LENGTH {
+            return Err(a.throw(ErrorKind::Range, "Invalid string length"));
+        }
+        #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "已检查非负、乘积不超过字符串上限")]
+        Ok(a.string(&s.repeat(n as usize)).into())
     }
 
     fn pad<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>], start: bool) -> Result<Value<'gc>, Error> {
         let u = Self::units(a, this)?;
-        let target = a.to_uint32(args.at(0))? as usize;
+        // ToLength：负数与 NaN 当 0
+        let target = libm::trunc(a.to_number(args.at(0))?);
         let fill: Vec<u16> = match args.at(1) {
             Value::Undefined => alloc::vec![u16::from(b' ')],
             v => a.to_string(v)?.encode_utf16().collect(),
         };
-        if target <= u.len() || fill.is_empty() {
+        #[expect(clippy::cast_precision_loss, reason = "长度比较，精度足够")]
+        let len = u.len() as f64;
+        if target.is_nan() || target <= len || fill.is_empty() {
             return Ok(Self::from_units(a, &u));
         }
+        if target > MAX_STRING_LENGTH {
+            return Err(a.throw(ErrorKind::Range, "Invalid string length"));
+        }
+        #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "已检查在 (len, 字符串上限] 内")]
+        let target = target as usize;
         let pad: Vec<u16> = fill.iter().copied().cycle().take(target - u.len()).collect();
         let out = if start { [pad, u].concat() } else { [u, pad].concat() };
         Ok(Self::from_units(a, &out))
