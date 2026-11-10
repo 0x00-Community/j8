@@ -564,6 +564,7 @@ dependencies = [
 name = "r8executor"
 version = "0.1.0"
 dependencies = [
+ "gc-arena",
  "r8builtins",
  "r8bytecode",
  "r8frame",

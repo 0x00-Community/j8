@@ -3,7 +3,7 @@ use core::ops::Deref;
 
 use gc_arena::{Collect, Gc, Mutation};
 
-use crate::{ErrorKind, JsObject, Native, NativeFn, ObjectData, ObjectKind, Scope, Value};
+use crate::{ErrorKind, JsObject, Native, NativeFn, ObjectData, ObjectKind, Property, Scope, Value};
 
 /// 一个执行环境的全部内建对象：全局对象与各原型。r8frame 只建空壳并连好原型链，
 /// 方法由 [`Intrinsics`] 的实现（r8builtins）装进去。
@@ -57,7 +57,7 @@ impl<'gc> Realm<'gc> {
     /// 在 `target` 上挂一个宿主方法。
     pub fn method(&self, mc: &Mutation<'gc>, target: JsObject<'gc>, name: &str, f: NativeFn) {
         let func = self.native(mc, f);
-        target.borrow_mut(mc).set(mc, name, Value::Object(func));
+        target.borrow_mut(mc).define(mc, name, Property::hidden(Value::Object(func)));
     }
 }
 

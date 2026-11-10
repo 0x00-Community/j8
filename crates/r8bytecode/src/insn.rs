@@ -40,6 +40,29 @@ impl PartialEq for Constant {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Const(pub u32);
 
+/// 函数的种类：决定能不能 `new`、能不能直接调。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum FunctionKind {
+    /// 普通函数：能调能 `new`
+    #[default]
+    Normal,
+    /// 箭头函数：不能 `new`，`this` / `super` 取外层
+    Arrow,
+    /// 方法、访问器、字段初始化：不能 `new`
+    Method,
+    /// 类构造器：只能 `new`；派生类的 `this` 要等 `super(...)`
+    Constructor { derived: bool },
+}
+
+/// 定义属性的方式。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum PropertyKind {
+    /// 数据属性（对象字面量：可枚举；类方法：不可枚举）
+    Data,
+    Getter,
+    Setter,
+}
+
 /// 一条指令。累加器 `acc` 是隐式的输入 / 输出。
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Insn {
@@ -88,6 +111,34 @@ pub enum Insn {
     JumpIfNotNullish(Label),
     /// acc = 本模块第 `n` 个函数的闭包，捕获当前环境
     CreateClosure(u32),
+    /// acc = 方法闭包（`super` 从 `home` 的原型找）
+    CreateMethod { func: u32, home: Reg },
+    /// acc = 类构造器（第 `func` 个函数）；`proto` 收到它的 `prototype` 对象；`parent` 是 `extends` 的值
+    CreateClass { func: u32, parent: Option<Reg>, proto: Reg },
+    /// 类构造器 `ctor` 的实例字段初始化函数 = acc
+    SetClassFields { ctor: Reg },
+    /// 在 `obj` 上定义属性 `name`，值（或访问器函数）是 acc
+    DefineNamed { obj: Reg, name: Const, kind: PropertyKind, enumerable: bool },
+    /// 同上，键在 `key`
+    DefineKeyed { obj: Reg, key: Reg, kind: PropertyKind, enumerable: bool },
+    /// acc = super.name（getter 的 `this` 是 `this`）
+    GetSuper { this: Reg, name: Const },
+    /// acc = super[acc]
+    GetSuperKeyed { this: Reg },
+    /// acc = super(args…)：构造父类、初始化 `this`、跑实例字段
+    SuperCall { args: Reg, argc: u16 },
+    /// 缺省派生构造器：拿原封不动的实参 `super(...arguments)`
+    SuperCallForward,
+    /// acc = new callee(args…)
+    Construct { callee: Reg, args: Reg, argc: u16 },
+    /// acc = reg instanceof acc
+    InstanceOf(Reg),
+    /// acc = reg in acc
+    In(Reg),
+    /// acc = delete obj.name
+    DeleteNamed { obj: Reg, name: Const },
+    /// acc = delete obj[acc]
+    DeleteKeyed { obj: Reg },
     /// acc = {}
     CreateObject,
     /// acc = [first, first+1, …]（`count` 个）
@@ -126,6 +177,9 @@ impl Insn {
 #[derive(Clone, Debug, Default)]
 pub struct Function {
     pub name: Box<str>,
+    pub kind: FunctionKind,
+    /// 进帧时把全部实参留在帧里（缺省派生构造器、剩余参数用）
+    pub keeps_args: bool,
     pub params: u16,
     pub regs: u16,
     pub insns: Vec<Insn>,
@@ -187,6 +241,23 @@ impl fmt::Display for Insn {
             Insn::JumpIfFalse(l) => write!(f, "jump.if_false @{}", l.0),
             Insn::JumpIfNotNullish(l) => write!(f, "jump.if_not_nullish @{}", l.0),
             Insn::CreateClosure(n) => write!(f, "create.closure fn#{n}"),
+            Insn::CreateMethod { func, home } => write!(f, "create.method fn#{func}, {home}"),
+            Insn::CreateClass { func, parent, proto } => match parent {
+                Some(p) => write!(f, "create.class fn#{func}, extends {p}, {proto}"),
+                None => write!(f, "create.class fn#{func}, {proto}"),
+            },
+            Insn::SetClassFields { ctor } => write!(f, "set.class_fields {ctor}"),
+            Insn::DefineNamed { obj, name, kind, enumerable } => write!(f, "define.named {obj}, #{}, {kind:?}, {enumerable}", name.0),
+            Insn::DefineKeyed { obj, key, kind, enumerable } => write!(f, "define.keyed {obj}, {key}, {kind:?}, {enumerable}"),
+            Insn::GetSuper { this, name } => write!(f, "get.super {this}, #{}", name.0),
+            Insn::GetSuperKeyed { this } => write!(f, "get.super_keyed {this}"),
+            Insn::SuperCall { args, argc } => write!(f, "super.call {args}, {argc}"),
+            Insn::SuperCallForward => f.write_str("super.call_forward"),
+            Insn::Construct { callee, args, argc } => write!(f, "construct {callee}, {args}, {argc}"),
+            Insn::InstanceOf(r) => write!(f, "instanceof {r}"),
+            Insn::In(r) => write!(f, "in {r}"),
+            Insn::DeleteNamed { obj, name } => write!(f, "delete.named {obj}, #{}", name.0),
+            Insn::DeleteKeyed { obj } => write!(f, "delete.keyed {obj}"),
             Insn::CreateObject => f.write_str("create.object"),
             Insn::CreateArray { first, count } => write!(f, "create.array {first}, {count}"),
             Insn::GetNamed { obj, name } => write!(f, "get.named {obj}, #{}", name.0),

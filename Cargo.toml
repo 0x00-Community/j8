@@ -34,6 +34,10 @@ must_use_candidate = "allow"
 float_cmp = "allow"
 # 内建函数里 a / f / x / y 这类短名是惯例
 many_single_char_names = "allow"
+# args / argc 这类成对的名字是惯例
+similar_names = "allow"
+# 两个分支都有内容时 match 比 if let ... else 好读
+single_match_else = "allow"
 
 [profile.dev]
 debug = "line-tables-only"

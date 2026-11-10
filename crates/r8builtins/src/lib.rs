@@ -38,8 +38,9 @@ struct Installer<'r, 'gc> {
 }
 
 impl<'gc> Installer<'_, 'gc> {
+    /// 内建属性：不可枚举。
     fn set(&self, target: JsObject<'gc>, name: &str, v: Value<'gc>) {
-        target.borrow_mut(self.mc).set(self.mc, name, v);
+        target.borrow_mut(self.mc).define(self.mc, name, r8frame::Property::hidden(v));
     }
 
     fn method(&self, target: JsObject<'gc>, name: &str, f: r8frame::NativeFn) {

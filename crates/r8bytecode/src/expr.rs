@@ -1,18 +1,20 @@
 //! JS ⇒ 字节码：表达式。结果都留在 acc。
 use oxc_ast::ast::{
-    ArrowFunctionBody, ArrowFunctionExpression, AssignmentExpression, AssignmentOperator, BinaryExpression, BinaryOperator, CallExpression, Expression, LogicalOperator, MemberExpression, ObjectExpression, ObjectPropertyKind, PropertyKey, PropertyKind, SimpleAssignmentTarget, TemplateElement, UnaryOperator, UpdateExpression,
+    Argument, ArrowFunctionBody, ArrowFunctionExpression, AssignmentExpression, AssignmentOperator, BinaryExpression, BinaryOperator, CallExpression, Expression, LogicalOperator, MemberExpression, ObjectExpression, ObjectPropertyKind, PropertyKind as PropertyKind_, SimpleAssignmentTarget, TemplateElement, UnaryOperator, UpdateExpression,
     UpdateOperator,
 };
 use oxc_span::{GetSpan, Span};
 use r8frame::{BinaryOp, CompareOp, Error, UnaryOp};
 
 use crate::compiler::{Body, Compiler, Place};
-use crate::{Const, Constant, Insn, Reg};
+use crate::{Const, Constant, FunctionKind, Insn, PropertyKind, Reg};
 
 /// 二元运算符 ⇒ 字节码运算。
 enum Operator {
     Binary(BinaryOp),
     Compare(CompareOp),
+    InstanceOf,
+    In,
 }
 
 /// 赋值运算符的三类。
@@ -31,8 +33,8 @@ enum Target<'a> {
 }
 
 impl<'a> Compiler<'a, '_> {
-    fn operator(&self, op: BinaryOperator, span: Span) -> Result<Operator, Error> {
-        Ok(match op {
+    fn operator(op: BinaryOperator) -> Operator {
+        match op {
             BinaryOperator::Addition => Operator::Binary(BinaryOp::Add),
             BinaryOperator::Subtraction => Operator::Binary(BinaryOp::Sub),
             BinaryOperator::Multiplication => Operator::Binary(BinaryOp::Mul),
@@ -53,8 +55,9 @@ impl<'a> Compiler<'a, '_> {
             BinaryOperator::GreaterThan => Operator::Compare(CompareOp::Gt),
             BinaryOperator::LessEqualThan => Operator::Compare(CompareOp::Le),
             BinaryOperator::GreaterEqualThan => Operator::Compare(CompareOp::Ge),
-            BinaryOperator::In | BinaryOperator::Instanceof => return Err(self.unsupported(span, op.as_str())),
-        })
+            BinaryOperator::In => Operator::In,
+            BinaryOperator::Instanceof => Operator::InstanceOf,
+        }
     }
 
     fn assign_kind(op: AssignmentOperator) -> Assign {
@@ -130,6 +133,17 @@ impl<'a> Compiler<'a, '_> {
                 self.emit(Insn::CreateClosure(n));
             }
             Expression::ArrowFunctionExpression(a) => self.arrow(a)?,
+            Expression::ClassExpression(c) => self.class(c, true)?,
+            Expression::NewExpression(n) => {
+                let argc = u16::try_from(n.arguments.len()).map_err(|_| self.unsupported(n.span, "more than 65535 arguments"))?;
+                let callee = self.temps(1 + argc);
+                self.expr(&n.callee)?;
+                self.emit(Insn::Star(callee));
+                let args = Reg(callee.0 + 1);
+                self.arguments(&n.arguments, args)?;
+                self.emit(Insn::Construct { callee, args, argc });
+                self.release(callee);
+            }
             Expression::UnaryExpression(u) => {
                 let op = match u.operator {
                     UnaryOperator::UnaryNegation => UnaryOp::Neg,
@@ -138,7 +152,7 @@ impl<'a> Compiler<'a, '_> {
                     UnaryOperator::BitwiseNot => UnaryOp::BitNot,
                     UnaryOperator::Typeof => UnaryOp::Typeof,
                     UnaryOperator::Void => UnaryOp::Void,
-                    UnaryOperator::Delete => return Err(self.unsupported(u.span, "delete")),
+                    UnaryOperator::Delete => return self.delete(&u.argument),
                 };
                 match (&u.argument, op) {
                     // `typeof 未声明的名字` 不抛错
@@ -174,6 +188,18 @@ impl<'a> Compiler<'a, '_> {
             Expression::AssignmentExpression(a) => self.assignment(a)?,
             Expression::UpdateExpression(u) => self.update(u)?,
             Expression::CallExpression(c) => self.call(c)?,
+            Expression::StaticMemberExpression(m) if matches!(m.object, Expression::Super(_)) => {
+                let this = self.this_temp();
+                let name = self.name(m.property.name.as_str());
+                self.emit(Insn::GetSuper { this, name });
+                self.release(this);
+            }
+            Expression::ComputedMemberExpression(m) if matches!(m.object, Expression::Super(_)) => {
+                let this = self.this_temp();
+                self.expr(&m.expression)?;
+                self.emit(Insn::GetSuperKeyed { this });
+                self.release(this);
+            }
             Expression::StaticMemberExpression(m) => {
                 if m.optional {
                     return Err(self.unsupported(m.span, "optional chaining"));
@@ -221,13 +247,13 @@ impl<'a> Compiler<'a, '_> {
             ArrowFunctionBody::FunctionBody(b) => Body::Statements(&b.statements),
             e => Body::Expression(e.as_expression().expect("an arrow's body is a block or an expression")),
         };
-        let n = self.function("", None, None, &a.params, body)?;
+        let n = self.function("", FunctionKind::Arrow, None, None, Some(&a.params), body)?;
         self.emit(Insn::CreateClosure(n));
         Ok(())
     }
 
     fn binary(&mut self, b: &'a BinaryExpression<'a>) -> Result<(), Error> {
-        let op = self.operator(b.operator, b.span)?;
+        let op = Self::operator(b.operator);
         self.expr(&b.left)?;
         let l = self.temp();
         self.emit(Insn::Star(l));
@@ -235,6 +261,8 @@ impl<'a> Compiler<'a, '_> {
         self.emit(match op {
             Operator::Binary(op) => Insn::Binary(op, l),
             Operator::Compare(op) => Insn::Compare(op, l),
+            Operator::InstanceOf => Insn::InstanceOf(l),
+            Operator::In => Insn::In(l),
         });
         self.release(l);
         Ok(())
@@ -347,9 +375,23 @@ impl<'a> Compiler<'a, '_> {
             return Err(self.unsupported(c.span, "optional calls"));
         }
         let argc = u16::try_from(c.arguments.len()).map_err(|_| self.unsupported(c.span, "more than 65535 arguments"))?;
+        if let Expression::Super(_) = &c.callee {
+            let args = self.temps(argc);
+            self.arguments(&c.arguments, args)?;
+            self.emit(Insn::SuperCall { args, argc });
+            self.release(args);
+            self.store(crate::scope::THIS, true);
+            return Ok(());
+        }
         let callee = self.temps(2 + argc);
         let this = Reg(callee.0 + 1);
         match &c.callee {
+            Expression::StaticMemberExpression(m) if matches!(m.object, Expression::Super(_)) => {
+                self.load(crate::scope::THIS);
+                self.emit(Insn::Star(this));
+                let name = self.name(m.property.name.as_str());
+                self.emit(Insn::GetSuper { this, name });
+            }
             Expression::StaticMemberExpression(m) if !m.optional => {
                 self.expr(&m.object)?;
                 self.emit(Insn::Star(this));
@@ -370,13 +412,55 @@ impl<'a> Compiler<'a, '_> {
         }
         self.emit(Insn::Star(callee));
         let first = Reg(callee.0 + 2);
-        for (i, a) in (0..).zip(&c.arguments) {
+        self.arguments(&c.arguments, first)?;
+        self.emit(Insn::Call { callee, this, args: first, argc });
+        self.release(callee);
+        Ok(())
+    }
+
+    /// 实参逐个求值放进 `first` 起的连续寄存器。
+    fn arguments(&mut self, args: &'a [Argument<'a>], first: Reg) -> Result<(), Error> {
+        for (i, a) in (0..).zip(args) {
             let e = a.as_expression().ok_or_else(|| self.unsupported(a.span(), "spread arguments"))?;
             self.expr(e)?;
             self.emit(Insn::Star(Reg(first.0 + i)));
         }
-        self.emit(Insn::Call { callee, this, args: first, argc });
-        self.release(callee);
+        Ok(())
+    }
+
+    /// `this` 读进一个临时寄存器（`super.x` 的接收者）。
+    fn this_temp(&mut self) -> Reg {
+        self.load(crate::scope::THIS);
+        let t = self.temp();
+        self.emit(Insn::Star(t));
+        t
+    }
+
+    /// `delete x`：属性删掉给结果；删名字（非严格模式）给 `false`；别的表达式求完给 `true`。
+    fn delete(&mut self, e: &'a Expression<'a>) -> Result<(), Error> {
+        match e {
+            Expression::StaticMemberExpression(m) => {
+                self.expr(&m.object)?;
+                let obj = self.temp();
+                self.emit(Insn::Star(obj));
+                let name = self.name(m.property.name.as_str());
+                self.emit(Insn::DeleteNamed { obj, name });
+                self.release(obj);
+            }
+            Expression::ComputedMemberExpression(m) => {
+                self.expr(&m.object)?;
+                let obj = self.temp();
+                self.emit(Insn::Star(obj));
+                self.expr(&m.expression)?;
+                self.emit(Insn::DeleteKeyed { obj });
+                self.release(obj);
+            }
+            Expression::Identifier(_) => _ = self.emit(Insn::LdaBool(false)),
+            e => {
+                self.expr(e)?;
+                self.emit(Insn::LdaBool(true));
+            }
+        }
         Ok(())
     }
 
@@ -388,33 +472,32 @@ impl<'a> Compiler<'a, '_> {
             let ObjectPropertyKind::ObjectProperty(p) = p else {
                 return Err(self.unsupported(p.span(), "object spread"));
             };
-            if p.kind != PropertyKind::Init {
-                return Err(self.unsupported(p.span, "getters / setters"));
-            }
-            let name = match &p.key {
-                PropertyKey::StaticIdentifier(id) => Some(id.name.as_str()),
-                PropertyKey::StringLiteral(s) if !p.computed => Some(s.value.as_str().ok_or_else(|| self.unsupported(s.span, "lone surrogates"))?),
-                PropertyKey::PrivateIdentifier(id) => return Err(self.unsupported(id.span, "private names")),
-                _ => None,
+            let kind = match p.kind {
+                PropertyKind_::Init => PropertyKind::Data,
+                PropertyKind_::Get => PropertyKind::Getter,
+                PropertyKind_::Set => PropertyKind::Setter,
             };
-            match (name, &p.key) {
-                (Some(n), _) => {
-                    self.expr(&p.value)?;
-                    let name = self.name(n);
-                    self.emit(Insn::SetNamed { obj, name });
-                }
-                (None, PropertyKey::NumericLiteral(n)) if !p.computed => {
-                    let name = self.name(ryu_js::Buffer::new().format(n.value));
-                    self.expr(&p.value)?;
-                    self.emit(Insn::SetNamed { obj, name });
-                }
-                (None, k) => {
-                    let k = k.as_expression().ok_or_else(|| self.unsupported(p.span, "property key"))?;
+            let key = match self.static_key(&p.key, p.computed) {
+                Some(k) => Ok(k?),
+                None => {
+                    let k = p.key.as_expression().ok_or_else(|| self.unsupported(p.span, "property key"))?;
                     self.expr(k)?;
                     let key = self.temp();
                     self.emit(Insn::Star(key));
-                    self.expr(&p.value)?;
-                    self.emit(Insn::SetKeyed { obj, key });
+                    Err(key)
+                }
+            };
+            match (&p.value, p.method || kind != PropertyKind::Data) {
+                (Expression::FunctionExpression(f), true) => {
+                    let n = self.method("", f, FunctionKind::Method)?;
+                    self.emit(Insn::CreateMethod { func: n, home: obj });
+                }
+                (v, _) => self.expr(v)?,
+            }
+            match key {
+                Ok(name) => _ = self.emit(Insn::DefineNamed { obj, name, kind, enumerable: true }),
+                Err(key) => {
+                    self.emit(Insn::DefineKeyed { obj, key, kind, enumerable: true });
                     self.release(key);
                 }
             }

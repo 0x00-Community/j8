@@ -2,13 +2,13 @@
 use std::collections::HashSet;
 
 use oxc_allocator::Allocator;
-use oxc_ast::ast::{BindingIdentifier, BindingPattern, BlockStatement, Expression, ForStatementInit, FormalParameters, Function as AstFunction, Program, Statement, SwitchStatement, TryStatement, VariableDeclaration, VariableDeclarationKind};
+use oxc_ast::ast::{BindingIdentifier, BindingPattern, BlockStatement, Class, ClassElement, Expression, MethodDefinitionKind, PropertyKey, ForStatementInit, FormalParameters, Function as AstFunction, Program, Statement, SwitchStatement, TryStatement, VariableDeclaration, VariableDeclarationKind};
 use oxc_parser::Parser;
 use oxc_span::{GetSpan, SourceType, Span};
 use r8frame::{CompareOp, Error, Source};
 
 use crate::scope::{Decl, DeclKind, Decls, Key, Resolver, THIS};
-use crate::{Const, Constant, Function, Insn, Label, Module, Reg};
+use crate::{Const, Constant, Function, FunctionKind, Insn, Label, Module, PropertyKind, Reg};
 
 /// 回填前的跳转目标
 const UNPATCHED: Label = Label(u32::MAX);
@@ -113,11 +113,15 @@ struct Frame<'a> {
     completion: Option<Reg>,
 }
 
-/// 函数体：语句，或箭头函数的表达式。
+/// 函数体：语句、箭头函数的表达式、类的字段初始化、缺省构造器。
 #[derive(Clone, Copy)]
 pub(crate) enum Body<'a> {
     Statements(&'a [Statement<'a>]),
     Expression(&'a Expression<'a>),
+    /// 类的实例（`statik` 为假）或静态字段：逐个在 `this` 上定义
+    Fields { class: &'a Class<'a>, statik: bool },
+    /// 没写 `constructor` 的类：派生类转手 `super(...arguments)`
+    DefaultConstructor { derived: bool },
 }
 
 pub(crate) struct Compiler<'a, 's> {
@@ -345,11 +349,11 @@ impl<'a> Compiler<'a, '_> {
     // ---- 函数 --------------------------------------------------------------------------
 
     /// 编一个函数，返回它在模块里的下标。
-    pub(crate) fn function(&mut self, name: &str, this: Option<Key>, self_name: Option<&'a BindingIdentifier<'a>>, params: &'a FormalParameters<'a>, body: Body<'a>) -> Result<u32, Error> {
-        if let Some(r) = &params.rest {
+    pub(crate) fn function(&mut self, name: &str, kind: FunctionKind, this: Option<Key>, self_name: Option<&'a BindingIdentifier<'a>>, params: Option<&'a FormalParameters<'a>>, body: Body<'a>) -> Result<u32, Error> {
+        if let Some(r) = params.and_then(|p| p.rest.as_ref()) {
             return Err(self.unsupported(r.span, "rest parameters"));
         }
-        for p in &params.items {
+        for p in params.into_iter().flat_map(|p| p.items.iter()) {
             if !matches!(p.pattern, BindingPattern::BindingIdentifier(_)) {
                 return Err(self.unsupported(p.span, "destructuring parameters"));
             }
@@ -357,15 +361,17 @@ impl<'a> Compiler<'a, '_> {
                 return Err(self.unsupported(p.span, "default parameters"));
             }
         }
-        let n = u16::try_from(params.items.len()).map_err(|_| self.unsupported(params.span, "more than 65535 parameters"))?;
+        let count = params.map_or(0, |p| p.items.len());
+        let n = u16::try_from(count).map_err(|_| self.unsupported(params.map_or(Span::default(), |p| p.span), "more than 65535 parameters"))?;
         let index = self.module.len();
         self.module.push(Function::default());
         let top = Reg::PARAMS + n;
-        let out = Function { name: name.into(), params: n, regs: top, ..Function::default() };
+        let keeps_args = matches!(body, Body::DefaultConstructor { derived: true });
+        let out = Function { name: name.into(), kind, keeps_args, params: n, regs: top, ..Function::default() };
         self.frames.push(Frame { index, out, top, envs: 0, controls: Vec::new(), label: None, completion: None });
         let stmts = match body {
             Body::Statements(s) => s,
-            Body::Expression(_) => &[],
+            _ => &[],
         };
         self.enter(&Decls::function(this, self_name, params, stmts))?;
         match body {
@@ -373,6 +379,12 @@ impl<'a> Compiler<'a, '_> {
             Body::Expression(e) => {
                 self.expr(e)?;
                 self.emit(Insn::Return);
+            }
+            Body::Fields { class, statik } => self.fields(class, statik)?,
+            Body::DefaultConstructor { derived } => {
+                if derived {
+                    self.emit(Insn::SuperCallForward);
+                }
             }
         }
         self.emit(Insn::LdaUndefined);
@@ -390,7 +402,149 @@ impl<'a> Compiler<'a, '_> {
         }
         let body = f.body.as_ref().ok_or_else(|| self.unsupported(f.span, "a function without a body"))?;
         let name = f.id.as_ref().map_or("", |id| id.name.as_str());
-        self.function(name, Some(Decls::this_key(f.span)), if self_name { f.id.as_ref() } else { None }, &f.params, Body::Statements(&body.statements))
+        self.function(name, FunctionKind::Normal, Some(Decls::this_key(f.span)), if self_name { f.id.as_ref() } else { None }, Some(&f.params), Body::Statements(&body.statements))
+    }
+
+    /// 方法（类方法、对象字面量方法、访问器）：不可 `new`。
+    pub(crate) fn method(&mut self, name: &str, f: &'a AstFunction<'a>, kind: FunctionKind) -> Result<u32, Error> {
+        if f.generator || f.r#async {
+            return Err(self.unsupported(f.span, "generator / async methods"));
+        }
+        let body = f.body.as_ref().ok_or_else(|| self.unsupported(f.span, "a method without a body"))?;
+        self.function(name, kind, Some(Decls::this_key(f.span)), None, Some(&f.params), Body::Statements(&body.statements))
+    }
+
+    /// 字段初始化函数的函数体：`this.k = v` 逐个定义（可枚举）。
+    fn fields(&mut self, class: &'a Class<'a>, statik: bool) -> Result<(), Error> {
+        for e in &class.body.body {
+            let ClassElement::PropertyDefinition(p) = e else { continue };
+            if p.r#static != statik {
+                continue;
+            }
+            let name = self.static_key(&p.key, p.computed).ok_or_else(|| self.unsupported(p.span, "computed field names"))??;
+            self.load(THIS);
+            let this = self.temp();
+            self.emit(Insn::Star(this));
+            match &p.value {
+                Some(v) => self.expr(v)?,
+                None => _ = self.emit(Insn::LdaUndefined),
+            }
+            self.emit(Insn::DefineNamed { obj: this, name, kind: PropertyKind::Data, enumerable: true });
+            self.release(this);
+        }
+        Ok(())
+    }
+
+    /// 非计算的属性键（标识符 / 字符串 / 数）的常量；计算键给 `None`。
+    pub(crate) fn static_key(&mut self, key: &'a PropertyKey<'a>, computed: bool) -> Option<Result<Const, Error>> {
+        if computed {
+            return None;
+        }
+        Some(match key {
+            PropertyKey::StaticIdentifier(id) => Ok(self.name(id.name.as_str())),
+            PropertyKey::StringLiteral(s) => match s.value.as_str() {
+                Some(t) => Ok(self.name(t)),
+                None => Err(self.unsupported(s.span, "lone surrogates")),
+            },
+            PropertyKey::NumericLiteral(n) => Ok(self.name(ryu_js::Buffer::new().format(n.value))),
+            PropertyKey::PrivateIdentifier(id) => Err(self.unsupported(id.span, "private names")),
+            _ => return None,
+        })
+    }
+
+    /// 类：构造器 + 原型方法 + 静态方法 + 字段初始化函数。结果（构造器）在 acc。
+    pub(crate) fn class(&mut self, c: &'a Class<'a>, expression: bool) -> Result<(), Error> {
+        let name = c.id.as_ref().map_or("", |id| id.name.as_str());
+        let parent = match &c.heritage {
+            Some(h) => {
+                self.expr(&h.expression)?;
+                let p = self.temp();
+                self.emit(Insn::Star(p));
+                Some(p)
+            }
+            None => None,
+        };
+        let named = expression && c.id.is_some();
+        if named {
+            self.enter(&Decls::class_name(c))?;
+        }
+        let derived = parent.is_some();
+        let ctor_def = c.body.body.iter().find_map(|e| match e {
+            ClassElement::MethodDefinition(m) if m.kind == MethodDefinitionKind::Constructor => Some(m),
+            _ => None,
+        });
+        let kind = FunctionKind::Constructor { derived };
+        let func = match ctor_def {
+            Some(m) => self.method(name, &m.value, kind)?,
+            None => self.function(name, kind, None, None, None, Body::DefaultConstructor { derived })?,
+        };
+        let proto = self.temp();
+        self.emit(Insn::CreateClass { func, parent, proto });
+        let ctor = self.temp();
+        self.emit(Insn::Star(ctor));
+        let (mut instance_fields, mut static_fields) = (false, false);
+        for e in &c.body.body {
+            match e {
+                ClassElement::MethodDefinition(m) if m.kind != MethodDefinitionKind::Constructor => {
+                    let target = if m.r#static { ctor } else { proto };
+                    let kind = match m.kind {
+                        MethodDefinitionKind::Get => PropertyKind::Getter,
+                        MethodDefinitionKind::Set => PropertyKind::Setter,
+                        _ => PropertyKind::Data,
+                    };
+                    match self.static_key(&m.key, m.computed) {
+                        Some(name) => {
+                            let name = name?;
+                            let f = self.method("", &m.value, FunctionKind::Method)?;
+                            self.emit(Insn::CreateMethod { func: f, home: target });
+                            self.emit(Insn::DefineNamed { obj: target, name, kind, enumerable: false });
+                        }
+                        None => {
+                            let k = m.key.as_expression().ok_or_else(|| self.unsupported(m.span, "method key"))?;
+                            self.expr(k)?;
+                            let key = self.temp();
+                            self.emit(Insn::Star(key));
+                            let f = self.method("", &m.value, FunctionKind::Method)?;
+                            self.emit(Insn::CreateMethod { func: f, home: target });
+                            self.emit(Insn::DefineKeyed { obj: target, key, kind, enumerable: false });
+                            self.release(key);
+                        }
+                    }
+                }
+                ClassElement::MethodDefinition(_) => {}
+                ClassElement::PropertyDefinition(p) => {
+                    if p.r#static { static_fields = true } else { instance_fields = true }
+                }
+                ClassElement::StaticBlock(b) => return Err(self.unsupported(b.span, "static blocks")),
+                e => return Err(self.unsupported(e.span(), "class element")),
+            }
+        }
+        if instance_fields {
+            let f = self.function("", FunctionKind::Method, Some(Decls::this_key(c.body.span)), None, None, Body::Fields { class: c, statik: false })?;
+            self.emit(Insn::CreateMethod { func: f, home: proto });
+            self.emit(Insn::SetClassFields { ctor });
+        }
+        if static_fields {
+            let f = self.function("", FunctionKind::Method, Some(Decls::this_key(c.span)), None, None, Body::Fields { class: c, statik: true })?;
+            self.emit(Insn::CreateMethod { func: f, home: ctor });
+            let callee = self.temps(2);
+            self.emit(Insn::Star(callee));
+            self.emit(Insn::Ldar(ctor));
+            self.emit(Insn::Star(Reg(callee.0 + 1)));
+            self.emit(Insn::Call { callee, this: Reg(callee.0 + 1), args: Reg(callee.0 + 2), argc: 0 });
+            self.release(callee);
+        }
+        self.emit(Insn::Ldar(ctor));
+        if named {
+            self.store(name, true);
+            self.leave();
+        } else {
+            self.release(proto);
+        }
+        if let Some(p) = parent {
+            self.release(p);
+        }
+        Ok(())
     }
 
     fn function_declaration(&mut self, f: &'a AstFunction<'a>) -> Result<u32, Error> {
@@ -637,6 +791,12 @@ impl<'a> Compiler<'a, '_> {
             }
             Statement::VariableDeclaration(d) => self.declaration(d)?,
             Statement::FunctionDeclaration(_) | Statement::EmptyStatement(_) => {}
+            Statement::ClassDeclaration(c) => {
+                self.class(c, false)?;
+                if let Some(id) = &c.id {
+                    self.store(id.name.as_str(), true);
+                }
+            }
             Statement::BlockStatement(b) => self.block(b)?,
             Statement::ReturnStatement(r) => {
                 match &r.argument {

@@ -9,8 +9,9 @@ extern crate alloc;
 use alloc::vec::Vec;
 use core::cell::Cell;
 
-use r8bytecode::{Constant, Function, Insn, Label, Module, Reg};
-use r8frame::{Agent, Closure, Env, Error, ErrorKind, FuncId, Invoke, JsEnv, ObjectData, ObjectKind, Value};
+use r8bytecode::{Constant, Function, FunctionKind, Insn, Label, Module, PropertyKind, Reg};
+use gc_arena::Gc;
+use r8frame::{Agent, Closure, Env, Error, ErrorKind, FuncId, Invoke, JsEnv, JsObject, ObjectData, ObjectKind, Property, Slot, Value};
 
 /// 调用深度上限（含宿主函数里重入的 JS），过了抛 RangeError
 const STACK_LIMIT: usize = 10_000;
@@ -35,6 +36,12 @@ struct Frame<'gc> {
     base: usize,
     env: Option<JsEnv<'gc>>,
     handlers: Vec<Handler<'gc>>,
+    /// `new.target`（普通调用是 `undefined`）
+    new_target: Value<'gc>,
+    /// 构造调用的 `this`：基类构造时一进帧就有，派生类等 `super(...)` 返回
+    new_this: Option<Value<'gc>>,
+    /// 全部实参（只有 `keeps_args` 的函数留）
+    args: Vec<Value<'gc>>,
 }
 
 /// 一次执行的全部状态。
@@ -72,6 +79,12 @@ enum Callee<'gc> {
     Done(Value<'gc>),
 }
 
+/// 构造调用的准备结果：要进一帧，或宿主构造器已经给出对象。
+enum Prepared<'gc> {
+    Frame(Frame<'gc>),
+    Done(Value<'gc>),
+}
+
 /// 字节码执行器。
 #[derive(Default)]
 pub struct Executor {
@@ -96,7 +109,7 @@ impl Executor {
     pub fn run_script<'gc>(&self, a: &mut Agent<'gc, '_>, main: FuncId) -> Result<Value<'gc>, Error> {
         let this = Value::Object(a.realm.global);
         let mut regs = Vec::new();
-        let f = self.enter(a, &mut regs, Closure { func: main, env: None }, Value::Undefined, this, &[]);
+        let f = self.enter(a, &mut regs, Closure::new(main, None), Value::Undefined, this, &[]);
         self.execute(a, State { regs, frames: Vec::new(), f, acc: Value::Undefined })
     }
 
@@ -104,6 +117,10 @@ impl Executor {
     fn resolve<'gc>(&self, a: &mut Agent<'gc, '_>, mut callee: Value<'gc>, mut this: Value<'gc>, mut args: Vec<Value<'gc>>, depth: usize) -> Result<Callee<'gc>, Error> {
         while let Value::Object(o) = callee {
             let kind = match &o.borrow().kind {
+                ObjectKind::Function(c) if matches!(self.function(c.func).func.kind, FunctionKind::Constructor { .. }) => {
+                    let name = &self.function(c.func).func.name;
+                    return Err(a.throw(ErrorKind::Type, &alloc::format!("Class constructor {name} cannot be invoked without 'new'")));
+                }
                 ObjectKind::Function(c) => return Ok(Callee::Closure { closure: *c, callee, this, args }),
                 ObjectKind::Native(n) => Ok(*n),
                 ObjectKind::Bound(b) => Err((b.target, b.this, b.args.clone())),
@@ -137,7 +154,140 @@ impl Executor {
         let params = usize::from(f.params).min(args.len());
         let first = base + usize::from(Reg::PARAMS);
         regs[first..first + params].copy_from_slice(&args[..params]);
-        Frame { func: closure.func, pc: 0, base, env: closure.env, handlers: Vec::new() }
+        let args = if f.keeps_args { args.to_vec() } else { Vec::new() };
+        Frame { func: closure.func, pc: 0, base, env: closure.env, handlers: Vec::new(), new_target: Value::Undefined, new_this: None, args }
+    }
+
+    /// 本帧正在跑的闭包（`r1` 里的被调函数）。
+    fn current<'gc>(regs: &[Value<'gc>], f: &Frame<'gc>) -> Option<Closure<'gc>> {
+        match regs[f.base + usize::from(Reg::CALLEE.0)] {
+            Value::Object(o) => match o.borrow().kind {
+                ObjectKind::Function(c) => Some(c),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// 准备构造调用：解开绑定函数；宿主构造器直接算；JS 构造器建好 `this`（派生类不建）并跑实例字段。
+    fn prepare<'gc>(&self, a: &mut Agent<'gc, '_>, regs: &mut Vec<Value<'gc>>, mut callee: Value<'gc>, mut args: Vec<Value<'gc>>, mut new_target: Value<'gc>, depth: usize) -> Result<Prepared<'gc>, Error> {
+        while let Value::Object(o) = callee {
+            let kind = match &o.borrow().kind {
+                ObjectKind::Function(c) => Ok(Ok(*c)),
+                ObjectKind::Native(n) => Ok(Err(*n)),
+                ObjectKind::Bound(b) => Err((b.target, b.args.clone())),
+                _ => break,
+            };
+            match kind {
+                Ok(Ok(closure)) => {
+                    let fkind = self.function(closure.func).func.kind;
+                    let this = match fkind {
+                        FunctionKind::Arrow | FunctionKind::Method => break,
+                        FunctionKind::Constructor { derived: true } => None,
+                        FunctionKind::Normal | FunctionKind::Constructor { derived: false } => {
+                            let this = a.create_this(new_target)?;
+                            if let Some(init) = closure.fields {
+                                a.call(init.into(), this.into(), &[])?;
+                            }
+                            Some(Value::Object(this))
+                        }
+                    };
+                    let mut f = self.enter(a, regs, closure, callee, this.unwrap_or_default(), &args);
+                    f.new_target = new_target;
+                    f.new_this = this;
+                    return Ok(Prepared::Frame(f));
+                }
+                Ok(Err(native)) => {
+                    let saved = self.depth.replace(depth);
+                    let r = (native.0)(a, Value::Undefined, &args);
+                    self.depth.set(saved);
+                    let obj = match r? {
+                        Value::Object(made) => made,
+                        _ => a.object(),
+                    };
+                    // `class X extends Error`：宿主构造器建的对象换成派生类的原型
+                    if !matches!(new_target, Value::Object(t) if Gc::ptr_eq(t, o))
+                        && let Value::Object(p) = a.get_named(new_target, "prototype")?
+                    {
+                        obj.borrow_mut(a.mc).proto = Some(p);
+                    }
+                    return Ok(Prepared::Done(obj.into()));
+                }
+                Err((target, mut bound_args)) => {
+                    if matches!(new_target, Value::Object(t) if Gc::ptr_eq(t, o)) {
+                        new_target = target;
+                    }
+                    bound_args.extend(args);
+                    (callee, args) = (target, bound_args);
+                }
+            }
+        }
+        let what = a.to_string(callee)?;
+        Err(a.throw(ErrorKind::Type, &alloc::format!("{} is not a constructor", &**what)))
+    }
+
+    /// 派生构造器里的 `super(args)`：构造父类（`new.target` 不变），初始化 `this`，跑实例字段。
+    fn super_call<'gc>(a: &mut Agent<'gc, '_>, regs: &[Value<'gc>], f: &mut Frame<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+        if f.new_this.is_some() {
+            return Err(a.throw(ErrorKind::Reference, "Super constructor may only be called once"));
+        }
+        let parent = match regs[f.base + usize::from(Reg::CALLEE.0)] {
+            Value::Object(o) => o.borrow().proto.map_or(Value::Null, Value::Object),
+            _ => Value::Undefined,
+        };
+        let this = a.construct(parent, args, f.new_target)?;
+        f.new_this = Some(this);
+        if let Some(init) = Self::current(regs, f).and_then(|c| c.fields) {
+            a.call(init.into(), this, &[])?;
+        }
+        Ok(this)
+    }
+
+    /// 构造调用返回时定结果：返回对象就用它，否则用 `this`（派生类没调 `super` 抛 ReferenceError）。
+    fn construct_result<'gc>(&self, a: &Agent<'gc, '_>, f: &Frame<'gc>, v: Value<'gc>) -> Result<Value<'gc>, Error> {
+        if matches!(v, Value::Object(_)) {
+            return Ok(v);
+        }
+        match (self.function(f.func).func.kind, f.new_this) {
+            (FunctionKind::Constructor { derived: true }, _) if v != Value::Undefined => Err(a.throw(ErrorKind::Type, "Derived constructors may only return object or undefined")),
+            (FunctionKind::Constructor { derived: true }, None) => Err(a.throw(ErrorKind::Reference, "Must call super constructor in derived class before accessing 'this' or returning from derived constructor")),
+            (_, Some(t)) => Ok(t),
+            (_, None) => Ok(v),
+        }
+    }
+
+    /// `super` 的查找起点：当前方法主对象的原型。
+    fn super_base<'gc>(a: &Agent<'gc, '_>, regs: &[Value<'gc>], f: &Frame<'gc>) -> Result<Value<'gc>, Error> {
+        let home = Self::current(regs, f).and_then(|c| c.home).ok_or_else(|| a.throw(ErrorKind::Syntax, "'super' keyword unexpected here"))?;
+        Ok(home.borrow().proto.map_or(Value::Null, Value::Object))
+    }
+
+    /// 建一个函数对象；普通函数带 `prototype`（`constructor` 指回来）。
+    fn function_object<'gc>(&self, a: &Agent<'gc, '_>, closure: Closure<'gc>, proto: JsObject<'gc>) -> JsObject<'gc> {
+        let fo = ObjectData { kind: ObjectKind::Function(closure), proto: Some(proto), ..ObjectData::default() }.alloc(a.mc);
+        if self.function(closure.func).func.kind == FunctionKind::Normal {
+            let p = a.object();
+            p.borrow_mut(a.mc).define(a.mc, "constructor", Property::hidden(fo.into()));
+            fo.borrow_mut(a.mc).define(a.mc, "prototype", Property { slot: Slot::Data(p.into()), enumerable: false, writable: true, configurable: false });
+        }
+        fo
+    }
+
+    /// `class … extends parent`：原型对象的原型与构造器的原型。
+    fn class_parents<'gc>(a: &mut Agent<'gc, '_>, parent: Option<Value<'gc>>) -> Result<(Option<JsObject<'gc>>, JsObject<'gc>), Error> {
+        match parent {
+            None => Ok((Some(a.realm.object_proto), a.realm.function_proto)),
+            Some(Value::Null) => Ok((None, a.realm.function_proto)),
+            Some(p @ Value::Object(o)) if o.borrow().kind.is_callable() => match a.get_named(p, "prototype")? {
+                Value::Object(pp) => Ok((Some(pp), o)),
+                Value::Null => Ok((None, o)),
+                _ => Err(a.throw(ErrorKind::Type, "Class extends value does not have valid prototype property")),
+            },
+            Some(p) => {
+                let what = a.to_string(p)?;
+                Err(a.throw(ErrorKind::Type, &alloc::format!("Class extends value {} is not a constructor or null", &**what)))
+            }
+        }
     }
 
     /// 往外第 `depth` 层环境。
@@ -147,6 +297,16 @@ impl Executor {
             e = e.borrow().parent.expect("an enclosing environment");
         }
         e
+    }
+
+    /// 对象字面量 / 类里定义一个属性（值或访问器函数是 `v`）。
+    fn define<'gc>(a: &mut Agent<'gc, '_>, obj: Value<'gc>, key: &str, kind: PropertyKind, enumerable: bool, v: Value<'gc>) {
+        let Value::Object(o) = obj else { return };
+        match (kind, v) {
+            (PropertyKind::Data, _) => a.define(o, key, Property { slot: Slot::Data(v), enumerable, writable: true, configurable: true }),
+            (PropertyKind::Getter | PropertyKind::Setter, Value::Object(func)) => a.define_accessor(o, key, func, kind == PropertyKind::Setter, enumerable),
+            _ => {}
+        }
     }
 
     /// 跑到最外层帧返回；异常先找处理器，接不住才往外抛。
@@ -169,6 +329,7 @@ impl Executor {
     }
 
     /// 主循环：出错直接返回，由 [`execute`](Self::execute) 展开。
+    #[expect(clippy::too_many_lines, reason = "一条指令一个分支，拆开反而难读")]
     fn run<'gc>(&self, a: &mut Agent<'gc, '_>, st: &mut State<'gc>, depth: usize) -> Result<Value<'gc>, Error> {
         let State { regs, frames, f, acc } = st;
         loop {
@@ -228,8 +389,82 @@ impl Executor {
                     }
                 }
                 Insn::CreateClosure(n) => {
-                    let closure = Closure { func: FuncId(loaded.base + n), env: f.env };
-                    *acc = ObjectData { kind: ObjectKind::Function(closure), proto: Some(a.realm.function_proto), ..ObjectData::default() }.alloc(a.mc).into();
+                    let mut closure = Closure::new(FuncId(loaded.base + n), f.env);
+                    if self.function(closure.func).func.kind == FunctionKind::Arrow {
+                        closure.home = Self::current(regs, f).and_then(|c| c.home);
+                    }
+                    *acc = self.function_object(a, closure, a.realm.function_proto).into();
+                }
+                Insn::CreateMethod { func: n, home } => {
+                    let mut closure = Closure::new(FuncId(loaded.base + n), f.env);
+                    if let Value::Object(h) = regs[r(home)] {
+                        closure.home = Some(h);
+                    }
+                    *acc = self.function_object(a, closure, a.realm.function_proto).into();
+                }
+                Insn::CreateClass { func: n, parent, proto } => {
+                    let (proto_parent, ctor_parent) = Self::class_parents(a, parent.map(|p| regs[r(p)]))?;
+                    let p = ObjectData { proto: proto_parent, ..ObjectData::default() }.alloc(a.mc);
+                    let mut closure = Closure::new(FuncId(loaded.base + n), f.env);
+                    closure.home = Some(p);
+                    let ctor = self.function_object(a, closure, ctor_parent);
+                    ctor.borrow_mut(a.mc).define(a.mc, "prototype", Property { slot: Slot::Data(p.into()), enumerable: false, writable: false, configurable: false });
+                    p.borrow_mut(a.mc).define(a.mc, "constructor", Property::hidden(ctor.into()));
+                    regs[r(proto)] = p.into();
+                    *acc = ctor.into();
+                }
+                Insn::SetClassFields { ctor } => {
+                    if let (Value::Object(c), Value::Object(init)) = (regs[r(ctor)], *acc)
+                        && let ObjectKind::Function(closure) = &mut c.borrow_mut(a.mc).kind
+                    {
+                        closure.fields = Some(init);
+                    }
+                }
+                Insn::DefineNamed { obj, name, kind, enumerable } => Self::define(a, regs[r(obj)], func.name_at(name), kind, enumerable, *acc),
+                Insn::DefineKeyed { obj, key, kind, enumerable } => {
+                    let k = a.property_key(regs[r(key)])?;
+                    Self::define(a, regs[r(obj)], &k, kind, enumerable, *acc);
+                }
+                Insn::GetSuper { this, name } => {
+                    let base = Self::super_base(a, regs, f)?;
+                    *acc = a.get(base, func.name_at(name), regs[r(this)])?;
+                }
+                Insn::GetSuperKeyed { this } => {
+                    let base = Self::super_base(a, regs, f)?;
+                    let k = a.property_key(*acc)?;
+                    *acc = a.get(base, &k, regs[r(this)])?;
+                }
+                Insn::SuperCall { args, argc } => {
+                    let first = r(args);
+                    let list = regs[first..first + usize::from(argc)].to_vec();
+                    *acc = Self::super_call(a, regs, f, &list)?;
+                }
+                Insn::SuperCallForward => {
+                    let list = core::mem::take(&mut f.args);
+                    *acc = Self::super_call(a, regs, f, &list)?;
+                }
+                Insn::Construct { callee, args, argc } => {
+                    let level = depth + frames.len() + 1;
+                    if level >= STACK_LIMIT {
+                        return Err(a.throw(ErrorKind::Range, "Maximum call stack size exceeded"));
+                    }
+                    let first = r(args);
+                    let list = regs[first..first + usize::from(argc)].to_vec();
+                    let c = regs[r(callee)];
+                    match self.prepare(a, regs, c, list, c, level)? {
+                        Prepared::Frame(next) => frames.push(core::mem::replace(f, next)),
+                        Prepared::Done(v) => *acc = v,
+                    }
+                }
+                Insn::InstanceOf(x) => *acc = a.instance_of(regs[r(x)], *acc)?.into(),
+                Insn::In(x) => {
+                    let k = a.property_key(regs[r(x)])?;
+                    *acc = a.has_property(*acc, &k)?.into();
+                }
+                Insn::DeleteNamed { obj, name } => *acc = a.delete(regs[r(obj)], func.name_at(name))?.into(),
+                Insn::DeleteKeyed { obj } => {
+                    let k = a.property_key(*acc)?;
+                    *acc = a.delete(regs[r(obj)], &k)?.into();
                 }
                 Insn::CreateObject => *acc = a.object().into(),
                 Insn::CreateArray { first, count } => *acc = a.array(regs[r(first)..r(first) + usize::from(count)].to_vec()).into(),
@@ -255,13 +490,18 @@ impl Executor {
                 Insn::PushHandler(target) => f.handlers.push(Handler { target, env: f.env }),
                 Insn::PopHandler => _ = f.handlers.pop(),
                 Insn::Throw => return Err(a.throw_value(*acc)),
-                Insn::Return => match frames.pop() {
-                    Some(caller) => {
-                        regs.truncate(f.base);
-                        *f = caller;
+                Insn::Return => {
+                    if f.new_target != Value::Undefined {
+                        *acc = self.construct_result(a, f, *acc)?;
                     }
-                    None => return Ok(*acc),
-                },
+                    match frames.pop() {
+                        Some(caller) => {
+                            regs.truncate(f.base);
+                            *f = caller;
+                        }
+                        None => return Ok(*acc),
+                    }
+                }
             }
         }
     }
@@ -278,12 +518,31 @@ impl<'gc> Invoke<'gc> for Executor {
             Callee::Closure { closure, callee, this, args } => {
                 let mut regs = Vec::new();
                 let f = self.enter(a, &mut regs, closure, callee, this, &args);
-                let saved = self.depth.replace(level);
-                let r = self.execute(a, State { regs, frames: Vec::new(), f, acc: Value::Undefined });
-                self.depth.set(saved);
-                r
+                self.run_frame(a, regs, f, level)
             }
         }
+    }
+
+    fn construct(&self, a: &mut Agent<'gc, '_>, callee: Value<'gc>, args: &[Value<'gc>], new_target: Value<'gc>) -> Result<Value<'gc>, Error> {
+        let level = self.depth.get() + 1;
+        if level >= STACK_LIMIT {
+            return Err(a.throw(ErrorKind::Range, "Maximum call stack size exceeded"));
+        }
+        let mut regs = Vec::new();
+        match self.prepare(a, &mut regs, callee, args.to_vec(), new_target, level)? {
+            Prepared::Done(v) => Ok(v),
+            Prepared::Frame(f) => self.run_frame(a, regs, f, level),
+        }
+    }
+}
+
+impl Executor {
+    /// 在新的执行状态里跑一帧到返回。
+    fn run_frame<'gc>(&self, a: &mut Agent<'gc, '_>, regs: Vec<Value<'gc>>, f: Frame<'gc>, level: usize) -> Result<Value<'gc>, Error> {
+        let saved = self.depth.replace(level);
+        let r = self.execute(a, State { regs, frames: Vec::new(), f, acc: Value::Undefined });
+        self.depth.set(saved);
+        r
     }
 }
 
@@ -408,6 +667,25 @@ mod tests {
             ("`${{ toString() { return 'obj' } }}`", "obj"),
             ("({}) + ''", "[object Object]"),
             ("'abc'.padStart(5, '-') + 'x'.repeat(3) + '  t '.trim()", "--abcxxxt"),
+            // 阶段 2：new、类、访问器、instanceof / in / delete
+            ("function P(x) { this.x = x } P.prototype.get = function () { return this.x }; new P(5).get()", "5"),
+            ("function F() { return { y: 1 } } new F().y", "1"),
+            ("class A { constructor(v) { this.v = v } get double() { return this.v * 2 } static make() { return new A(3) } } A.make().double", "6"),
+            ("class A { hi() { return 'A' } } class B extends A { hi() { return super.hi() + 'B' } } new B().hi()", "AB"),
+            ("class A { constructor(x) { this.x = x } } class B extends A { constructor(x) { super(x * 2); this.y = 1 } } const b = new B(2); b.x + b.y", "5"),
+            ("class A { constructor(a, b) { this.s = a + b } } class B extends A {} new B(1, 2).s", "3"),
+            ("class C { a = 1; b = this.a + 1; static s = 'st' } const c = new C(); c.a + c.b + C.s", "3st"),
+            ("class A { constructor() { this.base = 1 } } class B extends A { f = this.base + 1 } new B().f", "2"),
+            ("class A {} class B extends A {} const b = new B(); (b instanceof B) + ',' + (b instanceof A) + ',' + ({} instanceof A)", "true,true,false"),
+            ("const o = { a: 1 }; ('a' in o) + ',' + delete o.a + ',' + ('a' in o)", "true,true,false"),
+            ("const o = { _v: 1, get v() { return this._v }, set v(x) { this._v = x * 10 } }; o.v = 2; o.v", "20"),
+            ("class MyErr extends Error { constructor(m) { super(m); this.name = 'MyErr' } } try { throw new MyErr('boom') } catch (e) { (e instanceof MyErr) + ' ' + (e instanceof Error) + ' ' + e }", "true true MyErr: boom"),
+            ("new TypeError('x').message + (new Error() instanceof Error)", "xtrue"),
+            ("const K = class Inner { who() { return Inner.tag } }; K.tag = 'k'; new K().who()", "k"),
+            ("class A { v() { return 1 } } class B extends A { v() { return (() => super.v() + 1)() } } new B().v()", "2"),
+            ("const o = {}; Object.defineProperty(o, 'x', { get() { return 7 } }); o.x + Object.keys(o).length", "7"),
+            ("class A { m() {} } Object.keys(new A()).length + Object.keys({ p: 1 }).length", "1"),
+            ("const o = Object.freeze({ a: 1 }); o.a = 2; o.a", "1"),
         ];
         for (src, want) in ok {
             assert_eq!(eval(src).0, Ok(String::from(want)), "{src}");
@@ -420,6 +698,10 @@ mod tests {
             ("let u; u.x", "TypeError: Cannot read properties of undefined (reading 'x')"),
             ("try { throw 1 } finally { }", "1"),
             ("(1)()", "TypeError: 1 is not a function"),
+            ("class A {} A()", "TypeError: Class constructor A cannot be invoked without 'new'"),
+            ("class A {} class B extends A { constructor() {} } new B()", "ReferenceError: Must call super constructor in derived class before accessing 'this' or returning from derived constructor"),
+            ("class A extends 3 {}", "TypeError: Class extends value 3 is not a constructor or null"),
+            ("1 in 2", "TypeError: Cannot use 'in' operator to search for '1' in 2"),
         ];
         for (src, want) in thrown {
             assert_eq!(eval(src).0, Err(String::from(want)), "{src}");

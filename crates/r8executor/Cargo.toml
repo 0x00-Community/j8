@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 r8frame.workspace = true
 r8bytecode.workspace = true
+gc-arena.workspace = true
 
 [features]
 default = ["compile"]

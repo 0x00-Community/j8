@@ -32,12 +32,57 @@ impl<'gc> Env<'gc> {
     }
 }
 
-/// 闭包：函数编号加创建时的环境。
+/// 闭包：函数编号、创建时的环境、方法的主对象（`super` 从它的原型找）、类构造器的实例字段初始化函数。
 #[derive(Clone, Copy, Debug, Collect)]
 #[collect(no_drop)]
 pub struct Closure<'gc> {
     pub func: FuncId,
     pub env: Option<JsEnv<'gc>>,
+    pub home: Option<JsObject<'gc>>,
+    pub fields: Option<JsObject<'gc>>,
+}
+
+impl<'gc> Closure<'gc> {
+    pub fn new(func: FuncId, env: Option<JsEnv<'gc>>) -> Self {
+        Self { func, env, home: None, fields: None }
+    }
+}
+
+/// 属性的内容：数据，或一对访问器。
+#[derive(Clone, Copy, Debug, Collect)]
+#[collect(no_drop)]
+pub enum Slot<'gc> {
+    Data(Value<'gc>),
+    Accessor { get: Option<JsObject<'gc>>, set: Option<JsObject<'gc>> },
+}
+
+/// 一个属性：内容加特性。
+#[derive(Clone, Copy, Debug, Collect)]
+#[collect(no_drop)]
+pub struct Property<'gc> {
+    pub slot: Slot<'gc>,
+    pub enumerable: bool,
+    pub writable: bool,
+    pub configurable: bool,
+}
+
+impl<'gc> Property<'gc> {
+    /// 普通赋值建出来的属性：可枚举、可写、可配置。
+    pub fn data(v: Value<'gc>) -> Self {
+        Self { slot: Slot::Data(v), enumerable: true, writable: true, configurable: true }
+    }
+
+    /// 内建对象与类方法的属性：不可枚举。
+    pub fn hidden(v: Value<'gc>) -> Self {
+        Self { enumerable: false, ..Self::data(v) }
+    }
+
+    pub fn value(&self) -> Option<Value<'gc>> {
+        match self.slot {
+            Slot::Data(v) => Some(v),
+            Slot::Accessor { .. } => None,
+        }
+    }
 }
 
 /// 宿主函数对象的本体。
@@ -84,7 +129,7 @@ impl ObjectKind<'_> {
 #[collect(no_drop)]
 pub struct ObjectData<'gc> {
     pub kind: ObjectKind<'gc>,
-    pub props: Vec<(JsString<'gc>, Value<'gc>)>,
+    pub props: Vec<(JsString<'gc>, Property<'gc>)>,
     pub proto: Option<JsObject<'gc>>,
 }
 
@@ -103,23 +148,45 @@ impl fmt::Debug for ObjectData<'_> {
 
 impl<'gc> ObjectData<'gc> {
     /// 自有属性。
-    pub fn own(&self, key: &str) -> Option<Value<'gc>> {
-        self.props.iter().find_map(|&(k, v)| (**k == *key).then_some(v))
+    pub fn get_own(&self, key: &str) -> Option<Property<'gc>> {
+        self.props.iter().find_map(|&(k, p)| (**k == *key).then_some(p))
     }
 
-    /// 设自有属性；键是新的才放上堆。
+    /// 自有数据属性的值（访问器给 `None`）。
+    pub fn own(&self, key: &str) -> Option<Value<'gc>> {
+        self.get_own(key).and_then(|p| p.value())
+    }
+
+    /// 赋值：已有数据属性就改值（不可写就不动），没有就建一个普通属性。访问器由调用方先处理。
     pub fn set(&mut self, mc: &Mutation<'gc>, key: &str, value: Value<'gc>) {
         match self.props.iter_mut().find(|(k, _)| ***k == *key) {
-            Some((_, v)) => *v = value,
-            None => self.props.push((Gc::new(mc, Box::from(key)), value)),
+            Some((_, p)) => {
+                if p.writable {
+                    p.slot = Slot::Data(value);
+                }
+            }
+            None => self.props.push((Gc::new(mc, Box::from(key)), Property::data(value))),
         }
     }
 
-    /// 删自有属性，返回删没删。
+    /// 定义：整个替换（或新建）这个属性。
+    pub fn define(&mut self, mc: &Mutation<'gc>, key: &str, prop: Property<'gc>) {
+        match self.props.iter_mut().find(|(k, _)| ***k == *key) {
+            Some((_, p)) => *p = prop,
+            None => self.props.push((Gc::new(mc, Box::from(key)), prop)),
+        }
+    }
+
+    /// 删自有属性：不可配置的删不掉，返回删没删成（不存在也算成）。
     pub fn remove(&mut self, key: &str) -> bool {
-        let before = self.props.len();
-        self.props.retain(|(k, _)| ***k != *key);
-        before != self.props.len()
+        match self.props.iter().position(|(k, _)| ***k == *key) {
+            Some(i) if self.props[i].1.configurable => {
+                self.props.remove(i);
+                true
+            }
+            Some(_) => false,
+            None => true,
+        }
     }
 
     pub fn alloc(self, mc: &Mutation<'gc>) -> JsObject<'gc> {

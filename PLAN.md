@@ -15,10 +15,10 @@
 
 ## 阶段 2：对象模型
 
-- [ ] `new`：构造调用（`this` 是以 `F.prototype` 为原型的新对象，返回对象则替换）；函数带 `prototype` 属性
-- [ ] 类：`class` 声明 / 表达式、`constructor`、方法、静态方法、`extends` / `super(...)` / `super.m()`、字段
-- [ ] `instanceof`、`in`、`delete`
-- [ ] getter / setter：访问器属性（对象字面量与类里），属性读写走访问器
+- [x] `new`：构造调用（`this` 是以 `F.prototype` 为原型的新对象，返回对象则替换）；函数带 `prototype` 属性
+- [x] 类：`class` 声明 / 表达式、`constructor`、方法、静态方法、`extends` / `super(...)` / `super.m()`、字段（静态块、私有名、计算字段名还不支持）
+- [x] `instanceof`、`in`、`delete`
+- [x] getter / setter：访问器属性（对象字面量与类里），属性读写走访问器
 - [x] ToPrimitive（提前到阶段 1 做了，Error 对象要靠它打印）：`valueOf` / `toString`，`+` / 比较 / `==` / ToString 对对象都走它
 
 ## 阶段 3：解构、展开、参数

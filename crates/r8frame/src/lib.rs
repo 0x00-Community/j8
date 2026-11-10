@@ -30,7 +30,7 @@ pub use engine::{Engine, Source};
 pub use error::Error;
 pub use handle::Global;
 pub use isolate::{CreateParams, Isolate, Scope};
-pub use object::{Bound, Closure, Env, JsEnv, JsObject, JsString, Native, NativeFn, ObjectData, ObjectKind};
+pub use object::{Bound, Closure, Env, JsEnv, JsObject, JsString, Native, NativeFn, ObjectData, ObjectKind, Property, Slot};
 pub use ops::{BinaryOp, CompareOp, ErrorKind, Hint, UnaryOp};
 pub use platform::{Platform, Task};
 pub use profiler::{Counter, FuncId, Profiler};

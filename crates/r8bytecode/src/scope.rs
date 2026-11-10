@@ -4,7 +4,7 @@
 use std::collections::HashSet;
 
 use oxc_ast::ast::{
-    Argument, ArrayExpressionElement, ArrowFunctionBody, CatchClause, ArrowFunctionExpression, AssignmentTarget, BindingIdentifier, BindingPattern, Expression, ForStatementInit, FormalParameters, Function, MemberExpression, ObjectPropertyKind, SimpleAssignmentTarget, Statement, VariableDeclaration, VariableDeclarationKind,
+    Argument, ArrayExpressionElement, ArrowFunctionBody, CatchClause, Class, ClassElement, ArrowFunctionExpression, AssignmentTarget, BindingIdentifier, BindingPattern, Expression, ForStatementInit, FormalParameters, Function, MemberExpression, ObjectPropertyKind, SimpleAssignmentTarget, Statement, VariableDeclaration, VariableDeclarationKind,
 };
 use oxc_span::Span;
 
@@ -118,6 +118,11 @@ impl<'a> Decls<'a> {
                         self.add(Self::ident(id, DeclKind::Function(f)));
                     }
                 }
+                Statement::ClassDeclaration(c) => {
+                    if let Some(id) = &c.id {
+                        self.add(Self::ident(id, DeclKind::Let));
+                    }
+                }
                 _ => {}
             }
         }
@@ -153,7 +158,16 @@ impl<'a> Decls<'a> {
     }
 
     /// 函数体那一层：`this`、自己的名字、形参、`var`、顶层词法声明。
-    pub fn function(this: Option<Key>, self_name: Option<&'a BindingIdentifier<'a>>, params: &'a FormalParameters<'a>, stmts: &'a [Statement<'a>]) -> Self {
+    /// 具名类表达式里类自己的名字那一层。
+    pub fn class_name(c: &'a Class<'a>) -> Self {
+        let mut d = Self::default();
+        if let Some(id) = &c.id {
+            d.add(Self::ident(id, DeclKind::Const));
+        }
+        d
+    }
+
+    pub fn function(this: Option<Key>, self_name: Option<&'a BindingIdentifier<'a>>, params: Option<&'a FormalParameters<'a>>, stmts: &'a [Statement<'a>]) -> Self {
         let mut d = Self::default();
         if let Some(key) = this {
             d.add(Decl { name: THIS, key, kind: DeclKind::This });
@@ -161,7 +175,7 @@ impl<'a> Decls<'a> {
         if let Some(id) = self_name {
             d.add(Self::ident(id, DeclKind::SelfName));
         }
-        for (i, p) in params.items.iter().enumerate() {
+        for (i, p) in params.into_iter().flat_map(|p| p.items.iter()).enumerate() {
             if let BindingPattern::BindingIdentifier(id) = &p.pattern {
                 d.add(Self::ident(id, DeclKind::Param(u16::try_from(i).unwrap_or(u16::MAX))));
             }
@@ -226,7 +240,7 @@ impl<'a> Resolver<'a> {
 
     fn function(&mut self, f: &'a Function<'a>, self_name: bool) {
         let Some(body) = &f.body else { return };
-        let d = Decls::function(Some(Decls::this_key(f.span)), if self_name { f.id.as_ref() } else { None }, &f.params, &body.statements);
+        let d = Decls::function(Some(Decls::this_key(f.span)), if self_name { f.id.as_ref() } else { None }, Some(&f.params), &body.statements);
         let outer = self.enter_function(&d);
         self.params(&f.params);
         self.statements(&body.statements);
@@ -238,7 +252,7 @@ impl<'a> Resolver<'a> {
             ArrowFunctionBody::FunctionBody(b) => &b.statements,
             _ => &[],
         };
-        let d = Decls::function(None, None, &a.params, stmts);
+        let d = Decls::function(None, None, Some(&a.params), stmts);
         let outer = self.enter_function(&d);
         self.params(&a.params);
         match &a.body {
@@ -250,6 +264,50 @@ impl<'a> Resolver<'a> {
             }
         }
         self.leave_function(outer);
+    }
+
+    /// 类：`extends`、类名那一层、方法、计算键、字段初始化（各自一个合成函数）。
+    fn class(&mut self, c: &'a Class<'a>, expression: bool) {
+        if let Some(h) = &c.heritage {
+            self.expr(&h.expression);
+        }
+        let named = expression && c.id.is_some();
+        if named {
+            self.push(&Decls::class_name(c));
+        }
+        for e in &c.body.body {
+            match e {
+                ClassElement::MethodDefinition(m) => {
+                    if m.computed
+                        && let Some(k) = m.key.as_expression()
+                    {
+                        self.expr(k);
+                    }
+                    self.function(&m.value, false);
+                }
+                ClassElement::PropertyDefinition(p) if p.computed => {
+                    if let Some(k) = p.key.as_expression() {
+                        self.expr(k);
+                    }
+                }
+                _ => {}
+            }
+        }
+        for (statik, key) in [(false, Decls::this_key(c.body.span)), (true, Decls::this_key(c.span))] {
+            let outer = self.enter_function(&Decls::function(Some(key), None, None, &[]));
+            for e in &c.body.body {
+                if let ClassElement::PropertyDefinition(p) = e
+                    && p.r#static == statik
+                    && let Some(v) = &p.value
+                {
+                    self.expr(v);
+                }
+            }
+            self.leave_function(outer);
+        }
+        if named {
+            self.levels.pop();
+        }
     }
 
     fn params(&mut self, p: &'a FormalParameters<'a>) {
@@ -273,6 +331,7 @@ impl<'a> Resolver<'a> {
             Statement::ExpressionStatement(e) => self.expr(&e.expression),
             Statement::VariableDeclaration(d) => self.declaration(d),
             Statement::FunctionDeclaration(f) => self.function(f, false),
+            Statement::ClassDeclaration(c) => self.class(c, false),
             Statement::BlockStatement(b) => self.scoped(&Decls::block([b.body.as_slice()]), |r| r.statements(&b.body)),
             Statement::IfStatement(i) => {
                 self.expr(&i.test);
@@ -356,9 +415,15 @@ impl<'a> Resolver<'a> {
     fn expr(&mut self, e: &'a Expression<'a>) {
         match e {
             Expression::Identifier(id) => self.reference(id.name.as_str()),
-            Expression::ThisExpression(_) => self.reference(THIS),
+            // `super.x` / `super(...)` 都要读写 `this`
+            Expression::ThisExpression(_) | Expression::Super(_) => self.reference(THIS),
             Expression::FunctionExpression(f) => self.function(f, true),
             Expression::ArrowFunctionExpression(a) => self.arrow(a),
+            Expression::ClassExpression(c) => self.class(c, true),
+            Expression::NewExpression(n) => {
+                self.expr(&n.callee);
+                n.arguments.iter().filter_map(Argument::as_expression).for_each(|e| self.expr(e));
+            }
             Expression::ParenthesizedExpression(p) => self.expr(&p.expression),
             Expression::UnaryExpression(u) => self.expr(&u.argument),
             Expression::BinaryExpression(b) => {

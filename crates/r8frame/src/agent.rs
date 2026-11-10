@@ -6,6 +6,9 @@ use crate::{Context, Error, Platform, Profiler, Scope, Value};
 pub trait Invoke<'gc> {
     /// 调一个值；不可调就抛 TypeError。
     fn call(&self, agent: &mut Agent<'gc, '_>, callee: Value<'gc>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error>;
+
+    /// 构造调用（`new callee(...args)`，`new.target` 是 `new_target`）；不可构造就抛 TypeError。
+    fn construct(&self, agent: &mut Agent<'gc, '_>, callee: Value<'gc>, args: &[Value<'gc>], new_target: Value<'gc>) -> Result<Value<'gc>, Error>;
 }
 
 /// 一次运行的全部上下文：GC 堆、平台、剖析器、执行环境、回调。JS 的运算语义都挂在它上面。
@@ -30,5 +33,11 @@ impl<'gc> Agent<'gc, '_> {
     pub fn call(&mut self, callee: Value<'gc>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let invoke = self.invoke;
         invoke.call(self, callee, this, args)
+    }
+
+    /// 构造调用。
+    pub fn construct(&mut self, callee: Value<'gc>, args: &[Value<'gc>], new_target: Value<'gc>) -> Result<Value<'gc>, Error> {
+        let invoke = self.invoke;
+        invoke.construct(self, callee, args, new_target)
     }
 }
