@@ -34,6 +34,8 @@ struct Bound<'a> {
     name: &'a str,
     binding: Binding,
     constant: bool,
+    /// 暂时性死区到这个位置结束（`u32::MAX`：总要查）
+    ready: Option<u32>,
 }
 
 /// 生成代码时的一层作用域。
@@ -45,9 +47,30 @@ struct Level<'a> {
     env: bool,
     /// 进来前的寄存器栈顶，出去时退回
     mark: u16,
+    /// `switch` 的那层：分支可能跳过声明，死区检查省不掉
+    switch: bool,
 }
 
-/// 名字解析的结果。
+/// 名字解析的结果：在哪、是不是常量、读写前要不要查死区（给出声明结束的位置）。
+#[derive(Clone, Copy)]
+pub(crate) struct Resolved<'a> {
+    pub place: Place<'a>,
+    pub constant: bool,
+    /// `Some(ready)`：使用处在 `ready` 之前、或绑定在环境里 / `switch` 里，就要查
+    pub tdz: Option<(u32, bool)>,
+}
+
+impl Resolved<'_> {
+    /// 在 `pos` 处使用要不要查死区。
+    pub fn needs_check(&self, pos: u32) -> bool {
+        match self.tdz {
+            Some((ready, always)) => always || pos < ready,
+            None => false,
+        }
+    }
+}
+
+/// 名字的位置。
 #[derive(Clone, Copy)]
 pub(crate) enum Place<'a> {
     Reg(Reg),
@@ -148,8 +171,8 @@ pub(crate) struct Compiler<'a, 's> {
     module: Vec<Function>,
     frames: Vec<Frame<'a>>,
     levels: Vec<Level<'a>>,
-    /// 脚本顶层的 `const`（是全局对象的属性，但不许再赋值）
-    global_consts: HashSet<&'a str>,
+    /// 脚本顶层的 `let` / `const` / `class`：在脚本作用域里，初始化走 `InitLexical`
+    script_lexicals: HashSet<&'a str>,
     /// 正在编的可选链：每条链里 `?.` 遇到 null / undefined 跳到链尾
     pub(crate) chains: Vec<Vec<usize>>,
 }
@@ -166,7 +189,7 @@ impl TryFrom<&Source<'_>> for Module {
         }
         let program = &ret.program;
         let captured = Resolver::script(&program.body, Decls::this_key(program.span));
-        let mut c = Compiler { src, captured, module: Vec::new(), frames: Vec::new(), levels: Vec::new(), global_consts: HashSet::new(), chains: Vec::new() };
+        let mut c = Compiler { src, captured, module: Vec::new(), frames: Vec::new(), levels: Vec::new(), script_lexicals: HashSet::new(), chains: Vec::new() };
         c.script(program)?;
         Ok(Module { functions: c.module })
     }
@@ -258,7 +281,7 @@ impl<'a> Compiler<'a, '_> {
                     _ => Binding::Reg(self.temp()),
                 }
             };
-            names.push(Bound { name: d.name, binding, constant: matches!(d.kind, DeclKind::Const) });
+            names.push(Bound { name: d.name, binding, constant: matches!(d.kind, DeclKind::Const), ready: d.ready });
         }
         let env = slots > 0;
         if env {
@@ -266,7 +289,14 @@ impl<'a> Compiler<'a, '_> {
             self.frame().envs += 1;
         }
         let bindings: Vec<Binding> = names.iter().map(|n| n.binding).collect();
-        self.levels.push(Level { func, names, env, mark });
+        self.levels.push(Level { func, names, env, mark, switch: false });
+        // 暂时性死区：槽位先填未初始化标记
+        for (d, &b) in decls.0.iter().zip(&bindings) {
+            if d.ready.is_some() {
+                self.emit(Insn::LdaHole);
+                self.bind(b);
+            }
+        }
         for (d, b) in decls.0.iter().zip(bindings) {
             let fixed = match d.kind {
                 DeclKind::This => Some(Reg::THIS),
@@ -314,31 +344,42 @@ impl<'a> Compiler<'a, '_> {
     }
 
     /// 名字解析：由内向外，数经过几层环境；找不到就是全局。
-    pub(crate) fn lookup(&self, name: &'a str) -> (Place<'a>, bool) {
+    pub(crate) fn resolve(&self, name: &'a str) -> Resolved<'a> {
         let cur = self.frames.len() - 1;
         let mut depth = 0;
         for l in self.levels.iter().rev() {
             if let Some(n) = l.names.iter().find(|n| n.name == name) {
-                let place = match n.binding {
+                let (place, in_env) = match n.binding {
                     Binding::Reg(r) => {
                         assert_eq!(l.func, cur, "an outer function's binding `{name}` used from inside must be captured");
-                        Place::Reg(r)
+                        (Place::Reg(r), false)
                     }
-                    Binding::Env(slot) => Place::Env { depth, slot },
+                    Binding::Env(slot) => (Place::Env { depth, slot }, true),
                 };
-                return (place, n.constant);
+                return Resolved { place, constant: n.constant, tdz: n.ready.map(|r| (r, in_env || l.switch)) };
             }
             if l.env {
                 depth += 1;
             }
         }
-        (Place::Global(name), false)
+        Resolved { place: Place::Global(name), constant: false, tdz: None }
     }
 
-    /// 读一个名字进 acc。`undefined` / `NaN` / `Infinity` 没被遮住就是常量。
+    pub(crate) fn lookup(&self, name: &'a str) -> (Place<'a>, bool) {
+        let r = self.resolve(name);
+        (r.place, r.constant)
+    }
+
+    /// 读一个名字进 acc（不知道使用位置，死区按要查算）。
     pub(crate) fn load(&mut self, name: &'a str) {
-        let insn = match self.lookup(name).0 {
-            Place::Reg(r) => Insn::Ldar(r),
+        self.load_at(name, 0);
+    }
+
+    /// 在源码位置 `pos` 读一个名字进 acc。`undefined` / `NaN` / `Infinity` 没被遮住就是常量。
+    pub(crate) fn load_at(&mut self, name: &'a str, pos: u32) {
+        let r = self.resolve(name);
+        let insn = match r.place {
+            Place::Reg(reg) => Insn::Ldar(reg),
             Place::Env { depth, slot } => Insn::LdaEnv { depth, slot },
             Place::Global("undefined") => Insn::LdaUndefined,
             Place::Global("NaN") => Insn::LdaConst(self.constant(Constant::Number(f64::NAN))),
@@ -346,21 +387,31 @@ impl<'a> Compiler<'a, '_> {
             Place::Global(g) => Insn::LdaGlobal(self.name(g)),
         };
         self.emit(insn);
+        if r.needs_check(pos) {
+            let check = if name == THIS { Insn::CheckThis } else { Insn::CheckInit { name: self.name(name) } };
+            self.emit(check);
+        }
     }
 
-    /// 把 acc 存进一个名字；`init` 是声明里的初始化（`const` 只许这一次）。
+    /// 把 acc 存进一个名字；`init` 是声明里的初始化（`const` 只许这一次，也不查死区）。
     pub(crate) fn store(&mut self, name: &'a str, init: bool) {
-        let (place, constant) = self.lookup(name);
-        let constant = constant || matches!(place, Place::Global(g) if self.global_consts.contains(g));
-        if constant && !init {
-            let k = self.constant(Constant::String("TypeError: Assignment to constant variable.".into()));
-            self.emit(Insn::LdaConst(k));
-            self.emit(Insn::Throw);
+        let r = self.resolve(name);
+        if r.constant && !init {
+            self.emit(Insn::ThrowConstAssign);
             return;
         }
-        let insn = match place {
-            Place::Reg(r) => Insn::Star(r),
+        if !init && r.needs_check(0) {
+            let k = self.name(name);
+            match r.place {
+                Place::Reg(reg) => _ = self.emit(Insn::CheckReg { reg, name: k }),
+                Place::Env { depth, slot } => _ = self.emit(Insn::CheckEnv { depth, slot, name: k }),
+                Place::Global(_) => {}
+            }
+        }
+        let insn = match r.place {
+            Place::Reg(reg) => Insn::Star(reg),
             Place::Env { depth, slot } => Insn::StaEnv { depth, slot },
+            Place::Global(g) if init && self.script_lexicals.contains(g) => Insn::InitLexical { name: self.name(g) },
             Place::Global(g) => Insn::StaGlobal(self.name(g)),
         };
         self.emit(insn);
@@ -387,6 +438,12 @@ impl<'a> Compiler<'a, '_> {
             _ => &[],
         };
         self.enter(&Decls::function(this, self_name, params, stmts))?;
+        if flavor.kind == (FunctionKind::Constructor { derived: true })
+            && let Some(t) = self.levels.last_mut().and_then(|l| l.names.iter_mut().find(|n| n.name == THIS))
+        {
+            // 派生类构造器的 `this` 在 `super()` 之前没初始化
+            t.ready = Some(u32::MAX);
+        }
         if let Some(p) = params {
             self.prologue(p)?;
         }
@@ -832,10 +889,18 @@ impl<'a> Compiler<'a, '_> {
         self.frames.push(Frame { index: 0, out, top: Reg::PARAMS, envs: 0, controls: Vec::new(), label: None, completion: None, resume: None });
         let completion = self.temp();
         self.frame().completion = Some(completion);
-        self.enter(&Decls(vec![Decl { name: THIS, key: Decls::this_key(program.span), kind: DeclKind::This }]))?;
+        self.enter(&Decls(vec![Decl { name: THIS, key: Decls::this_key(program.span), kind: DeclKind::This, ready: None }]))?;
         let mut globals = Decls::default();
         globals.vars(&program.body);
         globals.lexical(&program.body);
+        // 顶层 `let` / `const` / `class` 先在脚本作用域里声明（未初始化）
+        for d in &globals.0 {
+            if let DeclKind::Let | DeclKind::Const = d.kind {
+                self.script_lexicals.insert(d.name);
+                let name = self.name(d.name);
+                self.emit(Insn::DeclareLexical { name, constant: matches!(d.kind, DeclKind::Const) });
+            }
+        }
         for d in &globals.0 {
             match d.kind {
                 DeclKind::Function(f) => {
@@ -845,10 +910,6 @@ impl<'a> Compiler<'a, '_> {
                 DeclKind::Var => {
                     let k = self.name(d.name);
                     self.emit(Insn::LdaGlobalOrUndefined(k));
-                }
-                DeclKind::Const => {
-                    self.global_consts.insert(d.name);
-                    continue;
                 }
                 _ => continue,
             }
@@ -1223,6 +1284,7 @@ impl<'a> Compiler<'a, '_> {
         let d = self.temp();
         self.emit(Insn::Star(d));
         self.scoped(&Decls::block(sw.cases.iter().map(|c| c.consequent.as_slice())), |c| {
+            c.levels.last_mut().expect("the switch scope").switch = true;
             let mut entries = Vec::with_capacity(sw.cases.len());
             for case in &sw.cases {
                 if let Some(t) = &case.test {

@@ -160,8 +160,8 @@ impl<'a> Compiler<'a, '_> {
                 }
                 self.release(acc);
             }
-            Expression::Identifier(id) => self.load(id.name.as_str()),
-            Expression::ThisExpression(_) => self.load(crate::scope::THIS),
+            Expression::Identifier(id) => self.load_at(id.name.as_str(), id.span.start),
+            Expression::ThisExpression(t) => self.load_at(crate::scope::THIS, t.span.start),
             Expression::ParenthesizedExpression(p) => self.expr(&p.expression)?,
             Expression::FunctionExpression(f) => {
                 let n = self.plain_function(f, true)?;

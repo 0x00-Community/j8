@@ -15,13 +15,16 @@ pub enum Value<'gc> {
     Symbol(JsSymbol<'gc>),
     BigInt(JsBigInt<'gc>),
     Object(JsObject<'gc>),
+    /// 暂时性死区里还没初始化的 `let` / `const` / `class` 绑定（以及派生类 `super()` 前的 `this`）。
+    /// 只在寄存器、环境槽与脚本作用域里出现，读写前检查掉，不会逃出到 JS。
+    Uninit,
 }
 
 /// 严格相等（`===`）：字符串比内容，对象比身份，`NaN` 不等于自己。
 impl PartialEq for Value<'_> {
     fn eq(&self, o: &Self) -> bool {
         match (self, o) {
-            (Value::Undefined, Value::Undefined) | (Value::Null, Value::Null) => true,
+            (Value::Undefined, Value::Undefined) | (Value::Null, Value::Null) | (Value::Uninit, Value::Uninit) => true,
             (Value::Bool(a), Value::Bool(b)) => a == b,
             (Value::Number(a), Value::Number(b)) => a == b,
             (Value::String(a), Value::String(b)) => **a == **b,

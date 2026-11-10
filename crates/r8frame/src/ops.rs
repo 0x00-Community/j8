@@ -241,7 +241,7 @@ impl<'gc> Agent<'gc, '_> {
 
     pub fn to_boolean(&self, v: Value<'gc>) -> bool {
         match v {
-            Value::Undefined | Value::Null => false,
+            Value::Undefined | Value::Null | Value::Uninit => false,
             Value::Bool(b) => b,
             Value::Number(x) => !(x == 0.0 || x.is_nan()),
             Value::String(s) => !s.is_empty(),
@@ -284,7 +284,7 @@ impl<'gc> Agent<'gc, '_> {
     /// ToNumber。
     pub fn to_number(&mut self, v: Value<'gc>) -> Result<f64, Error> {
         Ok(match v {
-            Value::Undefined => f64::NAN,
+            Value::Undefined | Value::Uninit => f64::NAN,
             Value::Null => 0.0,
             Value::Bool(b) => f64::from(u8::from(b)),
             Value::Number(x) => x,
@@ -310,7 +310,7 @@ impl<'gc> Agent<'gc, '_> {
     pub fn to_string(&mut self, v: Value<'gc>) -> Result<JsString<'gc>, Error> {
         Ok(match v {
             Value::String(s) => s,
-            Value::Undefined => self.string("undefined"),
+            Value::Undefined | Value::Uninit => self.string("undefined"),
             Value::Null => self.string("null"),
             Value::Bool(true) => self.string("true"),
             Value::Bool(false) => self.string("false"),
@@ -331,7 +331,7 @@ impl<'gc> Agent<'gc, '_> {
 
     pub fn type_of(&self, v: Value<'gc>) -> &'static str {
         match v {
-            Value::Undefined => "undefined",
+            Value::Undefined | Value::Uninit => "undefined",
             Value::Bool(_) => "boolean",
             Value::Number(_) => "number",
             Value::String(_) => "string",
@@ -461,7 +461,7 @@ impl<'gc> Agent<'gc, '_> {
             Value::Symbol(_) => Some(self.realm.symbol_proto),
             Value::BigInt(_) => Some(self.realm.bigint_proto),
             Value::Object(o) => Some(o),
-            Value::Undefined | Value::Null => None,
+            Value::Undefined | Value::Null | Value::Uninit => None,
         }
     }
 

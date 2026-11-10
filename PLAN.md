@@ -42,8 +42,8 @@
 
 ## 阶段 6：语义偏差
 
-- [ ] 暂时性死区：`let` / `const` / `class` 声明前读写抛 ReferenceError（槽位放“未初始化”哨兵）
-- [ ] 脚本顶层 `let` / `const` 放脚本作用域的声明式环境，不再是全局对象属性
+- [x] 暂时性死区：`let` / `const` / `class` 声明前读写抛 ReferenceError（槽位放“未初始化”哨兵）
+- [x] 脚本顶层 `let` / `const` 放脚本作用域的声明式环境，不再是全局对象属性
 - [ ] 运行中回收：执行器状态（帧、寄存器、acc）进 GC 根，按指令配额分片跑，片与片之间 `collect_debt`（`Engine` 接口改成拿 `&mut Isolate` 自己分片进入）
 
 ## 不在范围

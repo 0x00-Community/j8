@@ -38,6 +38,8 @@ pub(crate) struct Decl<'a> {
     pub name: &'a str,
     pub key: Key,
     pub kind: DeclKind<'a>,
+    /// `let` / `const` / `class`：声明在这个位置之后才初始化（暂时性死区）；其余没有
+    pub ready: Option<u32>,
 }
 
 /// 一层作用域声明的名字，同名只留一个（后来的函数声明覆盖前面的）。
@@ -62,33 +64,39 @@ impl<'a> Decls<'a> {
     }
 
     fn ident(id: &'a BindingIdentifier<'a>, kind: DeclKind<'a>) -> Decl<'a> {
-        Decl { name: id.name.as_str(), key: Self::key(id.span), kind }
+        Decl { name: id.name.as_str(), key: Self::key(id.span), kind, ready: None }
     }
 
-    /// 模式里的全部绑定名。
-    fn pattern(&mut self, p: &'a BindingPattern<'a>, kind: DeclKind<'a>) {
+    /// 带暂时性死区的绑定（`ready` 是声明结束的位置）。
+    fn lexical_ident(id: &'a BindingIdentifier<'a>, kind: DeclKind<'a>, ready: u32) -> Decl<'a> {
+        Decl { ready: Some(ready), ..Self::ident(id, kind) }
+    }
+
+    /// 模式里的全部绑定名（`ready`：暂时性死区到哪儿结束）。
+    fn pattern(&mut self, p: &'a BindingPattern<'a>, kind: DeclKind<'a>, ready: Option<u32>) {
         match p {
-            BindingPattern::BindingIdentifier(id) => self.add(Self::ident(id, kind)),
+            BindingPattern::BindingIdentifier(id) => self.add(Decl { ready, ..Self::ident(id, kind) }),
             BindingPattern::ObjectPattern(o) => {
-                o.properties.iter().for_each(|b| self.pattern(&b.value, kind));
+                o.properties.iter().for_each(|b| self.pattern(&b.value, kind, ready));
                 if let Some(r) = &o.rest {
-                    self.pattern(&r.argument, kind);
+                    self.pattern(&r.argument, kind, ready);
                 }
             }
             BindingPattern::ArrayPattern(a) => {
-                a.elements.iter().flatten().for_each(|e| self.pattern(e, kind));
+                a.elements.iter().flatten().for_each(|e| self.pattern(e, kind, ready));
                 if let Some(r) = &a.rest {
-                    self.pattern(&r.argument, kind);
+                    self.pattern(&r.argument, kind, ready);
                 }
             }
-            BindingPattern::AssignmentPattern(a) => self.pattern(&a.left, kind),
+            BindingPattern::AssignmentPattern(a) => self.pattern(&a.left, kind, ready),
         }
     }
 
     /// 变量声明里的绑定（含解构）。
     fn declarators(&mut self, d: &'a VariableDeclaration<'a>, kind: DeclKind<'a>) {
+        let lexical = matches!(kind, DeclKind::Let | DeclKind::Const);
         for v in &d.declarations {
-            self.pattern(&v.id, kind);
+            self.pattern(&v.id, kind, lexical.then_some(v.span.end));
         }
     }
 
@@ -154,7 +162,7 @@ impl<'a> Decls<'a> {
                 }
                 Statement::ClassDeclaration(c) => {
                     if let Some(id) = &c.id {
-                        self.add(Self::ident(id, DeclKind::Let));
+                        self.add(Self::lexical_ident(id, DeclKind::Let, c.span.end));
                     }
                 }
                 _ => {}
@@ -199,7 +207,7 @@ impl<'a> Decls<'a> {
     pub fn catch_param(c: &'a CatchClause<'a>) -> Self {
         let mut d = Self::default();
         if let Some(p) = &c.param {
-            d.pattern(&p.pattern, DeclKind::Let);
+            d.pattern(&p.pattern, DeclKind::Let, None);
         }
         d
     }
@@ -209,7 +217,7 @@ impl<'a> Decls<'a> {
     pub fn class_name(c: &'a Class<'a>) -> Self {
         let mut d = Self::default();
         if let Some(id) = &c.id {
-            d.add(Self::ident(id, DeclKind::Const));
+            d.add(Self::lexical_ident(id, DeclKind::Const, c.span.end));
         }
         d
     }
@@ -217,7 +225,7 @@ impl<'a> Decls<'a> {
     pub fn function(this: Option<Key>, self_name: Option<&'a BindingIdentifier<'a>>, params: Option<&'a FormalParameters<'a>>, stmts: &'a [Statement<'a>]) -> Self {
         let mut d = Self::default();
         if let Some(key) = this {
-            d.add(Decl { name: THIS, key, kind: DeclKind::This });
+            d.add(Decl { name: THIS, key, kind: DeclKind::This, ready: None });
         }
         if let Some(id) = self_name {
             d.add(Self::ident(id, DeclKind::SelfName));
@@ -226,11 +234,11 @@ impl<'a> Decls<'a> {
             match &p.pattern {
                 BindingPattern::BindingIdentifier(id) => d.add(Self::ident(id, DeclKind::Param(u16::try_from(i).unwrap_or(u16::MAX)))),
                 // 解构形参：寄存器里放原值，绑定另分配
-                pat => d.pattern(pat, DeclKind::Var),
+                pat => d.pattern(pat, DeclKind::Var, None),
             }
         }
         if let Some(r) = params.and_then(|p| p.rest.as_ref()) {
-            d.pattern(&r.rest.argument, DeclKind::Var);
+            d.pattern(&r.rest.argument, DeclKind::Var, None);
         }
         d.vars(stmts);
         d.lexical(stmts);

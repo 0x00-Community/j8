@@ -240,7 +240,8 @@ impl Executor {
                             Some(Value::Object(this))
                         }
                     };
-                    let mut f = self.enter(a, regs, closure, callee, this.unwrap_or_default(), &args);
+                    // 派生类构造器的 `this` 在 `super()` 之前是未初始化标记
+                    let mut f = self.enter(a, regs, closure, callee, this.unwrap_or(Value::Uninit), &args);
                     f.new_target = new_target;
                     f.new_this = this;
                     return Ok(Prepared::Frame(f));
@@ -352,6 +353,41 @@ impl Executor {
         e
     }
 
+    /// 未初始化就抛 ReferenceError（暂时性死区）。
+    fn check<'gc>(a: &Agent<'gc, '_>, v: Value<'gc>, name: &str) -> Result<(), Error> {
+        if v == Value::Uninit {
+            return Err(a.throw(ErrorKind::Reference, &alloc::format!("Cannot access '{name}' before initialization")));
+        }
+        Ok(())
+    }
+
+    /// 读全局名字：先脚本作用域（死区里抛错），再全局对象（含原型链）；都没有给 `None`。
+    fn global_get<'gc>(a: &mut Agent<'gc, '_>, name: &str) -> Result<Option<Value<'gc>>, Error> {
+        if let Some(v) = a.realm.script_scope.borrow().own(name) {
+            Self::check(a, v, name)?;
+            return Ok(Some(v));
+        }
+        let g = Value::Object(a.realm.global);
+        if a.has_property(g, name)? { Ok(Some(a.get_named(g, name)?)) } else { Ok(None) }
+    }
+
+    /// 写全局名字：脚本作用域里的查死区与 `const`，否则写全局对象。
+    fn global_set<'gc>(a: &mut Agent<'gc, '_>, name: &str, v: Value<'gc>) -> Result<(), Error> {
+        let scope = a.realm.script_scope;
+        let prop = scope.borrow().get_own(name);
+        match prop {
+            Some(p) => {
+                Self::check(a, p.value().unwrap_or_default(), name)?;
+                if !p.writable {
+                    return Err(a.throw(ErrorKind::Type, "Assignment to constant variable."));
+                }
+                scope.borrow_mut(a.mc).set(a.mc, name, v);
+                Ok(())
+            }
+            None => a.set_named(Value::Object(a.realm.global), name, v),
+        }
+    }
+
     /// 寄存器里的恢复方式。
     fn mode(v: Value<'_>) -> Resume {
         match v {
@@ -434,11 +470,40 @@ impl Executor {
                 Insn::Star(x) => regs[r(x)] = *acc,
                 Insn::LdaGlobal(k) => {
                     let name = func.name_at(k);
-                    let found = a.realm.global.borrow().own(name);
-                    *acc = found.ok_or_else(|| a.throw(ErrorKind::Reference, &alloc::format!("{name} is not defined")))?;
+                    *acc = Self::global_get(a, name)?.ok_or_else(|| a.throw(ErrorKind::Reference, &alloc::format!("{name} is not defined")))?;
                 }
-                Insn::LdaGlobalOrUndefined(k) => *acc = a.realm.global.borrow().own(func.name_at(k)).unwrap_or_default(),
-                Insn::StaGlobal(k) => a.realm.global.borrow_mut(a.mc).set(a.mc, func.name_at(k), *acc),
+                Insn::LdaGlobalOrUndefined(k) => *acc = Self::global_get(a, func.name_at(k))?.unwrap_or_default(),
+                Insn::StaGlobal(k) => Self::global_set(a, func.name_at(k), *acc)?,
+                Insn::LdaHole => *acc = Value::Uninit,
+                Insn::ThrowConstAssign => return Err(a.throw(ErrorKind::Type, "Assignment to constant variable.")),
+                Insn::CheckInit { name } => Self::check(a, *acc, func.name_at(name))?,
+                Insn::CheckReg { reg, name } => Self::check(a, regs[r(reg)], func.name_at(name))?,
+                Insn::CheckEnv { depth, slot, name } => {
+                    let v = Self::env_at(f.env, depth).borrow().slots[usize::from(slot)];
+                    Self::check(a, v, func.name_at(name))?;
+                }
+                Insn::CheckThis => {
+                    if *acc == Value::Uninit {
+                        return Err(a.throw(ErrorKind::Reference, "Must call super constructor in derived class before accessing 'this' or returning from derived constructor"));
+                    }
+                }
+                Insn::DeclareLexical { name, constant } => {
+                    let name = func.name_at(name);
+                    let scope = a.realm.script_scope;
+                    if scope.borrow().get_own(name).is_some() {
+                        return Err(a.throw(ErrorKind::Syntax, &alloc::format!("Identifier '{name}' has already been declared")));
+                    }
+                    scope.borrow_mut(a.mc).define(a.mc, name, Property { slot: Slot::Data(Value::Uninit), enumerable: false, writable: !constant, configurable: false });
+                }
+                Insn::InitLexical { name } => {
+                    let name = func.name_at(name);
+                    let scope = a.realm.script_scope;
+                    let mut d = scope.borrow_mut(a.mc);
+                    let prop = d.get_own(name).map(|p| Property { slot: Slot::Data(*acc), ..p });
+                    if let Some(p) = prop {
+                        d.define(a.mc, name, p);
+                    }
+                }
                 Insn::LdaEnv { depth, slot } => *acc = Self::env_at(f.env, depth).borrow().slots[usize::from(slot)],
                 Insn::StaEnv { depth, slot } => Self::env_at(f.env, depth).borrow_mut(a.mc).slots[usize::from(slot)] = *acc,
                 Insn::PushEnv(n) => f.env = Some(Env { slots: alloc::vec![Value::Undefined; usize::from(n)], parent: f.env }.alloc(a.mc)),
@@ -1049,6 +1114,11 @@ mod tests {
             ("(255n).toString(16) + String(-1n)", "ff-1"),
             ("Number(2n ** 53n) === 2 ** 53", "true"),
             ("-(2n) + ~5n", "-8"),
+            // 阶段 6：暂时性死区、脚本作用域
+            ("let s = 0; for (let i = 0; i < 3; i++) { let t = i; s += t } s", "3"),
+            ("function f() { let x = 1; { const y = x + 1; return y } } f()", "2"),
+            ("let lx = 1; var vx = 2; (globalThis.lx === undefined) + ',' + globalThis.vx + ',' + lx", "true,2,1"),
+            ("class A {} class B extends A { constructor() { super(); this.x = 1 } } new B().x", "1"),
         ];
         for (src, want) in ok {
             assert_eq!(eval(src).0, Ok(String::from(want)), "{src}");
@@ -1075,6 +1145,15 @@ mod tests {
             ("+1n", "TypeError: Cannot convert a BigInt value to a number"),
             ("1n >>> 1n", "TypeError: BigInts have no unsigned right shift, use >> instead"),
             ("new RegExp('a', 'gg')", "SyntaxError: Invalid flags supplied to RegExp constructor 'gg'"),
+            ("{ x; let x = 1 }", "ReferenceError: Cannot access 'x' before initialization"),
+            ("let y = y", "ReferenceError: Cannot access 'y' before initialization"),
+            ("function f() { return g() } const v = f(); function g() { return w } let w = 1", "ReferenceError: Cannot access 'w' before initialization"),
+            ("typeof z; let z", "ReferenceError: Cannot access 'z' before initialization"),
+            ("class A {} class B extends A { constructor() { this.x = 1; super() } } new B()", "ReferenceError: Must call super constructor in derived class before accessing 'this' or returning from derived constructor"),
+            ("function f() { const g = () => q; g(); let q = 1 } f()", "ReferenceError: Cannot access 'q' before initialization"),
+            ("switch (1) { case 0: let a = 1; case 1: a }", "ReferenceError: Cannot access 'a' before initialization"),
+            ("function f() { const k = 1; k = 2 } f()", "TypeError: Assignment to constant variable."),
+            ("function f() { m = 1; let m } f()", "ReferenceError: Cannot access 'm' before initialization"),
         ];
         for (src, want) in thrown {
             assert_eq!(eval(src).0, Err(String::from(want)), "{src}");

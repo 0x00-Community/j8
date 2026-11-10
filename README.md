@@ -85,10 +85,11 @@ cargo build --target riscv64gc-unknown-none-elf -p r8frame -p r8bytecode -p r8ex
 - 生成器（`yield` / `yield*`，`return()` / `throw()` 经过 `finally`）、Promise（`then` / `catch` / `finally` / `all` / `race`）、`async` / `await`，脚本跑完后排空微任务队列
 - 正则字面量与 `RegExp`（regress 引擎，按 UTF-16 码元匹配；`exec` / `test`、`g` / `y` 的 `lastIndex`、具名分组）与字符串的 `match` / `matchAll` / `replace` / `replaceAll` / `search` / `split`
 - BigInt 字面量与运算（任意精度，与 Number 混算抛 TypeError、可比较、`BigInt()` / `toString(radix)`）
+- 暂时性死区（`let` / `const` / `class` 与派生类 `super()` 前的 `this`；能证明已初始化的使用处编译期省掉检查）、脚本作用域（顶层 `let` / `const` / `class` 跨脚本共享、不挂在全局对象上）
 
 还不支持（报 `Error::Unsupported`，带 `文件:行:列`）：类的静态块 / 私有名 / 计算字段名、async 生成器 / `for await`。
 
-已知偏差：没有暂时性死区（`let` 声明前读到 `undefined`）、一次 `enter` 内不回收（长循环会一直涨内存）、脚本顶层 `let` / `const` 当全局属性。
+已知偏差：一次 `enter` 内不回收（长循环会一直涨内存）。
 
 ## test262
 

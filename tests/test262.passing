@@ -4782,7 +4782,9 @@ language/expressions/assignment/S11.13.1_A4_T2.js
 language/expressions/assignment/S11.13.1_A7_T4.js
 language/expressions/assignment/S8.12.5_A1.js
 language/expressions/assignment/S8.12.5_A2.js
+language/expressions/assignment/destructuring/default-expr-throws-iterator-return-is-not-callable.js
 language/expressions/assignment/destructuring/obj-prop-__proto__dup.js
+language/expressions/assignment/destructuring/target-assign-throws-iterator-return-is-not-callable.js
 language/expressions/assignment/dstr/array-elem-init-assignment.js
 language/expressions/assignment/dstr/array-elem-init-evaluation.js
 language/expressions/assignment/dstr/array-elem-init-in.js
@@ -4813,6 +4815,8 @@ language/expressions/assignment/dstr/array-elem-nested-obj-undefined.js
 language/expressions/assignment/dstr/array-elem-nested-obj-yield-expr.js
 language/expressions/assignment/dstr/array-elem-nested-obj-yield-ident-valid.js
 language/expressions/assignment/dstr/array-elem-nested-obj.js
+language/expressions/assignment/dstr/array-elem-put-const.js
+language/expressions/assignment/dstr/array-elem-put-let.js
 language/expressions/assignment/dstr/array-elem-put-obj-literal-optchain-prop-ref-init.js
 language/expressions/assignment/dstr/array-elem-put-obj-literal-prop-ref-init-active.js
 language/expressions/assignment/dstr/array-elem-put-obj-literal-prop-ref-init.js
@@ -4889,6 +4893,8 @@ language/expressions/assignment/dstr/array-rest-nested-obj-undefined.js
 language/expressions/assignment/dstr/array-rest-nested-obj-yield-expr.js
 language/expressions/assignment/dstr/array-rest-nested-obj-yield-ident-valid.js
 language/expressions/assignment/dstr/array-rest-nested-obj.js
+language/expressions/assignment/dstr/array-rest-put-const.js
+language/expressions/assignment/dstr/array-rest-put-let.js
 language/expressions/assignment/dstr/array-rest-put-prop-ref-no-get.js
 language/expressions/assignment/dstr/array-rest-put-prop-ref-user-err-iter-close-skip.js
 language/expressions/assignment/dstr/array-rest-put-prop-ref-user-err.js
@@ -4966,6 +4972,8 @@ language/expressions/assignment/dstr/obj-id-init-order.js
 language/expressions/assignment/dstr/obj-id-init-simple-no-strict.js
 language/expressions/assignment/dstr/obj-id-init-yield-expr.js
 language/expressions/assignment/dstr/obj-id-init-yield-ident-valid.js
+language/expressions/assignment/dstr/obj-id-put-const.js
+language/expressions/assignment/dstr/obj-id-put-let.js
 language/expressions/assignment/dstr/obj-id-put-unresolvable-no-strict.js
 language/expressions/assignment/dstr/obj-id-simple-no-strict.js
 language/expressions/assignment/dstr/obj-prop-elem-init-assignment-missing.js
@@ -5005,6 +5013,8 @@ language/expressions/assignment/dstr/obj-prop-nested-obj-undefined.js
 language/expressions/assignment/dstr/obj-prop-nested-obj-yield-expr.js
 language/expressions/assignment/dstr/obj-prop-nested-obj-yield-ident-valid.js
 language/expressions/assignment/dstr/obj-prop-nested-obj.js
+language/expressions/assignment/dstr/obj-prop-put-const.js
+language/expressions/assignment/dstr/obj-prop-put-let.js
 language/expressions/assignment/dstr/obj-prop-put-order.js
 language/expressions/assignment/dstr/obj-prop-put-prop-ref-no-get.js
 language/expressions/assignment/dstr/obj-prop-put-prop-ref-user-err.js
@@ -5015,6 +5025,7 @@ language/expressions/assignment/dstr/obj-rest-empty-obj.js
 language/expressions/assignment/dstr/obj-rest-getter-abrupt-get-error.js
 language/expressions/assignment/dstr/obj-rest-not-last-element-invalid.js
 language/expressions/assignment/dstr/obj-rest-number.js
+language/expressions/assignment/dstr/obj-rest-put-const.js
 language/expressions/assignment/dstr/obj-rest-same-name.js
 language/expressions/assignment/dstr/obj-rest-str-val.js
 language/expressions/assignment/dstr/obj-rest-symbol-val.js
@@ -6815,6 +6826,7 @@ language/expressions/class/poisoned-underscore-proto.js
 language/expressions/class/scope-gen-meth-paramsbody-var-close.js
 language/expressions/class/scope-meth-paramsbody-var-close.js
 language/expressions/class/scope-name-lex-close.js
+language/expressions/class/scope-name-lex-open-no-heritage.js
 language/expressions/class/scope-setter-paramsbody-var-close.js
 language/expressions/class/scope-static-gen-meth-paramsbody-var-close.js
 language/expressions/class/scope-static-meth-paramsbody-var-close.js
@@ -9436,7 +9448,9 @@ language/global-code/S10.1.7_A1_T1.js
 language/global-code/S10.4.1_A1_T2.js
 language/global-code/block-decl-strict.js
 language/global-code/decl-func-dup.js
+language/global-code/decl-lex-configurable-global.js
 language/global-code/decl-lex-deletion.js
+language/global-code/decl-lex.js
 language/global-code/export.js
 language/global-code/import.js
 language/global-code/switch-case-decl-strict.js
@@ -10443,6 +10457,8 @@ language/statements/class/definition/prototype-wiring.js
 language/statements/class/definition/setters-restricted-ids.js
 language/statements/class/definition/side-effects-in-extends.js
 language/statements/class/definition/side-effects-in-property-define.js
+language/statements/class/definition/this-access-restriction-2.js
+language/statements/class/definition/this-access-restriction.js
 language/statements/class/dstr/async-gen-meth-ary-ptrn-rest-init-ary.js
 language/statements/class/dstr/async-gen-meth-ary-ptrn-rest-init-id.js
 language/statements/class/dstr/async-gen-meth-ary-ptrn-rest-init-obj.js
@@ -11372,6 +11388,7 @@ language/statements/class/method/rest-params-trailing-comma-early-error.js
 language/statements/class/name-binding/basic.js
 language/statements/class/name-binding/expression.js
 language/statements/class/name-binding/in-extends-expression-grouped.js
+language/statements/class/name-binding/in-extends-expression.js
 language/statements/class/poisoned-underscore-proto.js
 language/statements/class/scope-gen-meth-paramsbody-var-close.js
 language/statements/class/scope-meth-paramsbody-var-close.js
@@ -11421,6 +11438,7 @@ language/statements/class/subclass/builtin-objects/Symbol/symbol-valid-as-extend
 language/statements/class/subclass/class-definition-null-proto-contains-return-override.js
 language/statements/class/subclass/class-definition-null-proto-missing-return-override.js
 language/statements/class/subclass/class-definition-null-proto-super.js
+language/statements/class/subclass/class-definition-null-proto-this.js
 language/statements/class/subclass/class-definition-parent-proto-null.js
 language/statements/class/subclass/default-constructor-2.js
 language/statements/class/subclass/default-constructor-spread-override.js
@@ -11444,6 +11462,7 @@ language/statements/class/subclass/superclass-bound-function.js
 language/statements/class/subclass/superclass-prototype-setter-constructor.js
 language/statements/class/subclass/superclass-prototype-setter-method-override.js
 language/statements/class/subclass/superclass-static-method-override.js
+language/statements/class/super/in-constructor-superproperty-evaluation.js
 language/statements/class/super/in-constructor.js
 language/statements/class/super/in-getter.js
 language/statements/class/super/in-methods.js
@@ -11461,6 +11480,9 @@ language/statements/class/syntax/class-expression-heritage-identifier-reference.
 language/statements/class/syntax/class-expression.js
 language/statements/class/syntax/class-method-propname-constructor.js
 language/statements/class/syntax/escaped-static.js
+language/statements/const/block-local-closure-get-before-initialization.js
+language/statements/const/block-local-use-before-initialization-in-declaration-statement.js
+language/statements/const/block-local-use-before-initialization-in-prior-statement.js
 language/statements/const/dstr/ary-init-iter-close.js
 language/statements/const/dstr/ary-init-iter-get-err-array-prototype.js
 language/statements/const/dstr/ary-init-iter-get-err.js
@@ -11541,11 +11563,17 @@ language/statements/const/dstr/obj-ptrn-prop-obj-init.js
 language/statements/const/dstr/obj-ptrn-prop-obj-value-null.js
 language/statements/const/dstr/obj-ptrn-prop-obj-value-undef.js
 language/statements/const/dstr/obj-ptrn-prop-obj.js
+language/statements/const/function-local-closure-get-before-initialization.js
+language/statements/const/function-local-use-before-initialization-in-declaration-statement.js
+language/statements/const/function-local-use-before-initialization-in-prior-statement.js
 language/statements/const/global-closure-get-before-initialization.js
 language/statements/const/static-init-await-binding-invalid.js
 language/statements/const/syntax/block-scope-syntax-const-declarations-mixed-with-without-initialiser.js
 language/statements/const/syntax/block-scope-syntax-const-declarations-mixed-without-with-initialiser.js
 language/statements/const/syntax/block-scope-syntax-const-declarations-without-initialiser.js
+language/statements/const/syntax/const-invalid-assignment-next-expression-for.js
+language/statements/const/syntax/const-invalid-assignment-statement-body-for-in.js
+language/statements/const/syntax/const-invalid-assignment-statement-body-for-of.js
 language/statements/const/syntax/const-outer-inner-let-bindings.js
 language/statements/const/syntax/const.js
 language/statements/const/syntax/with-initializer-case-expression-statement-list.js
@@ -13082,6 +13110,10 @@ language/statements/labeled/value-await-non-module-escaped.js
 language/statements/labeled/value-await-non-module.js
 language/statements/labeled/value-yield-non-strict-escaped.js
 language/statements/labeled/value-yield-non-strict.js
+language/statements/let/block-local-closure-get-before-initialization.js
+language/statements/let/block-local-closure-set-before-initialization.js
+language/statements/let/block-local-use-before-initialization-in-declaration-statement.js
+language/statements/let/block-local-use-before-initialization-in-prior-statement.js
 language/statements/let/dstr/ary-init-iter-close.js
 language/statements/let/dstr/ary-init-iter-get-err-array-prototype.js
 language/statements/let/dstr/ary-init-iter-get-err.js
@@ -13162,7 +13194,12 @@ language/statements/let/dstr/obj-ptrn-prop-obj-init.js
 language/statements/let/dstr/obj-ptrn-prop-obj-value-null.js
 language/statements/let/dstr/obj-ptrn-prop-obj-value-undef.js
 language/statements/let/dstr/obj-ptrn-prop-obj.js
+language/statements/let/function-local-closure-get-before-initialization.js
+language/statements/let/function-local-closure-set-before-initialization.js
+language/statements/let/function-local-use-before-initialization-in-declaration-statement.js
+language/statements/let/function-local-use-before-initialization-in-prior-statement.js
 language/statements/let/global-closure-get-before-initialization.js
+language/statements/let/global-closure-set-before-initialization.js
 language/statements/let/static-init-await-binding-invalid.js
 language/statements/let/syntax/escaped-let.js
 language/statements/let/syntax/let-closure-inside-condition.js

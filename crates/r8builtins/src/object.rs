@@ -91,7 +91,7 @@ impl Objects {
 
     fn to_string<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let tag = match this {
-            Value::Undefined => "Undefined",
+            Value::Undefined | Value::Uninit => "Undefined",
             Value::Null => "Null",
             Value::Object(o) => match o.borrow().kind {
                 ObjectKind::Array(_) => "Array",
