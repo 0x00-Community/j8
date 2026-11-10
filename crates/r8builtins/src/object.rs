@@ -11,8 +11,8 @@ impl Objects {
     /// `Object(v)`：对象原样返回，否则给一个新空对象。
     fn object<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         Ok(match args.at(0) {
-            v @ Value::Object(_) => v,
-            _ => a.object().into(),
+            Value::Undefined | Value::Null | Value::Uninit => a.object().into(),
+            v => a.to_object(v)?.into(),
         })
     }
 
@@ -72,11 +72,10 @@ impl Objects {
         Ok(target)
     }
 
-    fn get_prototype_of<'gc>(_: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        Ok(match args.at(0) {
-            Value::Object(o) => o.borrow().proto.map_or(Value::Null, Value::Object),
-            _ => Value::Null,
-        })
+    /// `Object.getPrototypeOf(v)`：先 ToObject（原始值给它那一类的原型，`undefined` / `null` 抛 TypeError）。
+    fn get_prototype_of<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+        let o = a.to_object(args.at(0))?;
+        Ok(o.borrow().proto.map_or(Value::Null, Value::Object))
     }
 
     /// `Object.create(proto)`。
@@ -90,7 +89,8 @@ impl Objects {
     }
 
     fn to_string<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        let tag = match this {
+        // 包装对象按里面的原始值给标签（`[object Boolean]` …）
+        let tag = match this.unwrapped() {
             Value::Undefined | Value::Uninit => "Undefined",
             Value::Null => "Null",
             Value::Object(o) => match o.borrow().kind {
@@ -235,6 +235,23 @@ impl Objects {
     fn boolean<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         Ok(a.to_boolean(args.at(0)).into())
     }
+
+    /// thisBooleanValue：布尔或 Boolean 包装对象，别的抛 TypeError。
+    fn this_boolean<'gc>(a: &Agent<'gc, '_>, this: Value<'gc>, method: &str) -> Result<bool, Error> {
+        match this.unwrapped() {
+            Value::Bool(b) => Ok(b),
+            _ => Err(a.throw(ErrorKind::Type, &alloc::format!("Boolean.prototype.{method} requires that 'this' be a Boolean"))),
+        }
+    }
+
+    fn boolean_to_string<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+        let b = Self::this_boolean(a, this, "toString")?;
+        Ok(a.string(if b { "true" } else { "false" }).into())
+    }
+
+    fn boolean_value_of<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+        Ok(Self::this_boolean(a, this, "valueOf")?.into())
+    }
 }
 
 impl Installer<'_, '_> {
@@ -263,7 +280,10 @@ impl Installer<'_, '_> {
         self.method(proto, "bind", Objects::bind);
         self.method(proto, "toString", Objects::function_to_string);
         let b = self.realm.boolean_proto;
+        // Boolean.prototype 本身是包着 false 的 Boolean 对象
+        b.borrow_mut(self.mc).kind = ObjectKind::Primitive(false.into());
         self.constructor("Boolean", Objects::boolean, b);
-        self.method(b, "valueOf", Objects::value_of);
+        self.method(b, "toString", Objects::boolean_to_string);
+        self.method(b, "valueOf", Objects::boolean_value_of);
     }
 }

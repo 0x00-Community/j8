@@ -220,6 +220,95 @@ pub enum Job<'gc> {
     Thenable { promise: JsObject<'gc>, thenable: Value<'gc>, then: Value<'gc> },
 }
 
+/// Map / Set 按 SameValueZero 找键用的排序键：`NaN` 只有一个、`-0` 当 `+0`，字符串与 BigInt 比内容，对象与 Symbol 比身份。
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum MapKey {
+    Undefined,
+    Null,
+    Bool(bool),
+    Number(u64),
+    String(Box<str>),
+    BigInt(Box<str>),
+    /// 对象 / Symbol 的地址（gc-arena 不搬对象，地址就是身份）
+    Ref(usize),
+}
+
+impl From<Value<'_>> for MapKey {
+    fn from(v: Value<'_>) -> Self {
+        match v {
+            Value::Undefined | Value::Uninit => MapKey::Undefined,
+            Value::Null => MapKey::Null,
+            Value::Bool(b) => MapKey::Bool(b),
+            Value::Number(x) if x.is_nan() => MapKey::Number(f64::NAN.to_bits()),
+            Value::Number(x) => MapKey::Number((x + 0.0).to_bits()),
+            Value::String(s) => MapKey::String((**s).into()),
+            Value::BigInt(b) => MapKey::BigInt(alloc::format!("{}", b.0).into()),
+            Value::Symbol(s) => MapKey::Ref(Gc::as_ptr(s) as usize),
+            Value::Object(o) => MapKey::Ref(Gc::as_ptr(o).cast::<u8>() as usize),
+        }
+    }
+}
+
+/// Map / Set 的存储：按插入顺序的条目（删掉的留空位，迭代中删改也能接着走）加按键找下标的索引。
+#[derive(Debug, Collect)]
+#[collect(no_drop)]
+pub struct Collection<'gc> {
+    pub entries: Vec<Option<(Value<'gc>, Value<'gc>)>>,
+    index: gc_arena::Static<alloc::collections::BTreeMap<MapKey, usize>>,
+    pub size: usize,
+    pub weak: bool,
+}
+
+impl<'gc> Collection<'gc> {
+    pub fn new(weak: bool) -> Self {
+        Self { entries: Vec::new(), index: gc_arena::Static(alloc::collections::BTreeMap::new()), size: 0, weak }
+    }
+
+    pub fn get(&self, key: Value<'gc>) -> Option<Value<'gc>> {
+        let i = *self.index.0.get(&MapKey::from(key))?;
+        self.entries[i].map(|(_, v)| v)
+    }
+
+    pub fn has(&self, key: Value<'gc>) -> bool {
+        self.index.0.contains_key(&MapKey::from(key))
+    }
+
+    /// 设值：已有就改，否则追加到末尾。`-0` 键存成 `+0`。
+    pub fn set(&mut self, key: Value<'gc>, value: Value<'gc>) {
+        // `-0 + 0` 是 `+0`
+        let key = match key {
+            Value::Number(x) => Value::Number(x + 0.0),
+            k => k,
+        };
+        match self.index.0.get(&MapKey::from(key)) {
+            Some(&i) => self.entries[i] = Some((key, value)),
+            None => {
+                self.index.0.insert(MapKey::from(key), self.entries.len());
+                self.entries.push(Some((key, value)));
+                self.size += 1;
+            }
+        }
+    }
+
+    pub fn delete(&mut self, key: Value<'gc>) -> bool {
+        match self.index.0.remove(&MapKey::from(key)) {
+            Some(i) => {
+                self.entries[i] = None;
+                self.size -= 1;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// 清空：条目都留成空位，正在走的迭代器走到末尾就停。
+    pub fn clear(&mut self) {
+        self.entries.iter_mut().for_each(|e| *e = None);
+        self.index.0.clear();
+        self.size = 0;
+    }
+}
+
 /// 对象的种类：普通对象之外带的内部槽。
 #[derive(Debug, Default, Collect)]
 #[collect(no_drop)]
@@ -237,6 +326,14 @@ pub enum ObjectKind<'gc> {
     /// Promise 的 resolve / reject 函数：共享一个「已经解决过」的标记
     Resolver { promise: JsObject<'gc>, reject: bool, done: Gc<'gc, Lock<bool>> },
     RegExp(RegExpData<'gc>),
+    /// 原始值包装对象（`new Boolean(…)` / `new Number(…)` / `new String(…)` / `Object(sym)` …）：存着被包的原始值
+    Primitive(Value<'gc>),
+    /// Map（`weak` 为真是 WeakMap）
+    Map(Collection<'gc>),
+    /// Set（值放在键与值两处；`weak` 为真是 WeakSet）
+    Set(Collection<'gc>),
+    /// Map / Set 的迭代器：活视图，按条目下标走（`target` 为 `None` 就是走完了）
+    CollectionIterator { target: Option<JsObject<'gc>>, index: usize, kind: IterKind },
 }
 
 impl ObjectKind<'_> {
@@ -254,7 +351,13 @@ pub struct ObjectData<'gc> {
     /// Symbol 键的属性
     pub symbols: Vec<(JsSymbol<'gc>, Property<'gc>)>,
     pub proto: Option<JsObject<'gc>>,
+    /// 数组：稀疏部分撑起来的长度。离稠密末尾太远的下标（与大 `length`）不进稠密部分、按普通属性存，
+    /// 实际长度取它与稠密部分长度的大者
+    pub sparse_length: u32,
 }
+
+/// 数组写下标时，离稠密末尾不超过这么远就补 `undefined` 写进稠密部分，再远按普通属性存
+const DENSE_GAP: usize = 1024;
 
 /// 只打种类与键：对象图有环（`F.prototype.constructor`），不能往下展开。
 impl fmt::Debug for ObjectData<'_> {
@@ -263,10 +366,13 @@ impl fmt::Debug for ObjectData<'_> {
             ObjectKind::Ordinary => "Object",
             ObjectKind::Array(_) => "Array",
             ObjectKind::Function(_) | ObjectKind::Native(_) | ObjectKind::Bound(_) | ObjectKind::Resolver { .. } => "Function",
-            ObjectKind::Iterator(_) => "Iterator",
+            ObjectKind::Iterator(_) | ObjectKind::CollectionIterator { .. } => "Iterator",
             ObjectKind::Coroutine(_) => "Generator",
             ObjectKind::Promise { .. } => "Promise",
             ObjectKind::RegExp(_) => "RegExp",
+            ObjectKind::Primitive(_) => "Primitive",
+            ObjectKind::Map(_) => "Map",
+            ObjectKind::Set(_) => "Set",
         };
         f.debug_list().entries(self.props.iter().map(|(k, _)| &**k)).finish()?;
         f.write_str(kind)
@@ -274,6 +380,85 @@ impl fmt::Debug for ObjectData<'_> {
 }
 
 impl<'gc> ObjectData<'gc> {
+    /// 数组长度；不是数组给 `None`。
+    pub fn array_length(&self) -> Option<u32> {
+        match &self.kind {
+            ObjectKind::Array(items) => Some(u32::try_from(items.len()).unwrap_or(u32::MAX).max(self.sparse_length)),
+            _ => None,
+        }
+    }
+
+    /// 数组写第 `i` 个元素（不是数组给 `false`）：离稠密末尾近就进稠密部分，远了按普通属性存。
+    pub fn write_index(&mut self, mc: &Mutation<'gc>, i: u32, value: Value<'gc>) -> bool {
+        let ObjectKind::Array(items) = &mut self.kind else { return false };
+        let at = i as usize;
+        if at < items.len() {
+            items[at] = value;
+        } else if at - items.len() <= DENSE_GAP {
+            self.grow_dense(at + 1);
+            if let ObjectKind::Array(items) = &mut self.kind {
+                items[at] = value;
+            }
+        } else {
+            self.set(mc, &alloc::format!("{i}"), value);
+            self.sparse_length = self.sparse_length.max(i + 1);
+        }
+        true
+    }
+
+    /// 数组稀疏部分的元素（稠密部分之后、按普通属性存的下标），按下标排好。
+    pub fn sparse_elements(&self) -> Vec<(u32, Value<'gc>)> {
+        let ObjectKind::Array(items) = &self.kind else { return Vec::new() };
+        if self.sparse_length as usize <= items.len() {
+            return Vec::new();
+        }
+        let mut out: Vec<(u32, Value<'gc>)> = self
+            .props
+            .iter()
+            .filter_map(|(k, p)| match (crate::ops::index_of_str(k), p.slot) {
+                (Some(i), Slot::Data(v)) if i as usize >= items.len() => Some((i, v)),
+                _ => None,
+            })
+            .collect();
+        out.sort_unstable_by_key(|&(i, _)| i);
+        out
+    }
+
+    /// 稠密部分长到 `len`（补 `undefined`），落进来的稀疏元素搬进稠密部分。
+    fn grow_dense(&mut self, len: usize) {
+        let ObjectKind::Array(items) = &mut self.kind else { return };
+        let old = items.len();
+        items.resize(len, Value::Undefined);
+        if self.sparse_length as usize > old {
+            self.props.retain(|(k, p)| match (crate::ops::index_of_str(k), p.slot) {
+                (Some(i), Slot::Data(v)) if (old..len).contains(&(i as usize)) => {
+                    items[i as usize] = v;
+                    false
+                }
+                _ => true,
+            });
+        }
+    }
+
+    /// 数组设长度：截掉 `n` 及以后的元素（含稀疏部分）；变长时近的补进稠密部分，远的只记长度。
+    pub fn set_array_length(&mut self, n: u32) {
+        let ObjectKind::Array(items) = &mut self.kind else { return };
+        let len = n as usize;
+        if len <= items.len() {
+            items.truncate(len);
+        }
+        if self.sparse_length > 0 {
+            self.props.retain(|(k, _)| crate::ops::index_of_str(k).is_none_or(|i| i < n));
+        }
+        let dense = items.len();
+        self.sparse_length = 0;
+        if len > dense && len - dense <= DENSE_GAP {
+            self.grow_dense(len);
+        } else if len > dense {
+            self.sparse_length = n;
+        }
+    }
+
     /// 自有属性。
     pub fn get_own(&self, key: &str) -> Option<Property<'gc>> {
         self.props.iter().find_map(|&(k, p)| (**k == *key).then_some(p))

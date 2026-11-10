@@ -9,6 +9,36 @@ use crate::{Args, Installer};
 /// `Array` 与 `Array.prototype`。
 struct Arrays;
 
+/// 查找用的数组快照：长度、稠密部分、稀疏部分（按下标排好）。没有的下标是空洞。
+struct Elements<'gc> {
+    len: f64,
+    dense: Vec<Value<'gc>>,
+    sparse: Vec<(u32, Value<'gc>)>,
+}
+
+impl<'gc> Elements<'gc> {
+    /// 从 `from` 往后的元素（跳过空洞）
+    fn forward(&self, from: f64) -> impl Iterator<Item = (f64, Value<'gc>)> + '_ {
+        let dense = self.dense.iter().enumerate().map(|(i, &v)| (Arrays::position(i), v));
+        let sparse = self.sparse.iter().map(|&(i, v)| (f64::from(i), v));
+        dense.chain(sparse).filter(move |&(i, _)| i >= from)
+    }
+
+    /// 从 `from` 往前的元素（跳过空洞）
+    fn backward(&self, from: f64) -> impl Iterator<Item = (f64, Value<'gc>)> + '_ {
+        let sparse = self.sparse.iter().rev().map(|&(i, v)| (f64::from(i), v));
+        let dense = self.dense.iter().enumerate().rev().map(|(i, &v)| (Arrays::position(i), v));
+        sparse.chain(dense).filter(move |&(i, _)| i <= from)
+    }
+
+    /// `[from, len)` 里有没有空洞
+    fn has_hole_from(&self, from: f64) -> bool {
+        #[expect(clippy::cast_precision_loss, reason = "元素个数不超过 2^32")]
+        let present = self.forward(from).count() as f64;
+        self.len - from > present
+    }
+}
+
 impl Arrays {
     /// `this` 必须是数组。
     fn this<'gc>(a: &Agent<'gc, '_>, this: Value<'gc>) -> Result<JsObject<'gc>, Error> {
@@ -29,6 +59,30 @@ impl Arrays {
         let o = Self::this(a, this)?;
         let ObjectKind::Array(items) = &mut o.borrow_mut(a.mc).kind else { unreachable!("checked to be an array") };
         Ok(f(items))
+    }
+
+    /// 下标 ⇒ 数（下标不超过 2^32 − 2，精确）
+    fn position(i: usize) -> f64 {
+        f64::from(u32::try_from(i).unwrap_or(u32::MAX))
+    }
+
+    fn elements<'gc>(a: &Agent<'gc, '_>, this: Value<'gc>) -> Result<Elements<'gc>, Error> {
+        let o = Self::this(a, this)?;
+        let d = o.borrow();
+        let ObjectKind::Array(items) = &d.kind else { unreachable!("checked to be an array") };
+        Ok(Elements { len: f64::from(d.array_length().unwrap_or(0)), dense: items.clone(), sparse: d.sparse_elements() })
+    }
+
+    /// ToIntegerOrInfinity
+    fn integer<'gc>(a: &mut Agent<'gc, '_>, v: Value<'gc>) -> Result<f64, Error> {
+        let x = a.to_number(v)?;
+        Ok(if x.is_nan() { 0.0 } else { libm::trunc(x) })
+    }
+
+    /// `indexOf` / `includes` 的起点：负数从末尾数，夹到 `[0, len]`
+    fn start_forward<'gc>(a: &mut Agent<'gc, '_>, v: Value<'gc>, len: f64) -> Result<f64, Error> {
+        let n = Self::integer(a, v)?;
+        Ok(if n >= 0.0 { n.min(len) } else { (len + n).max(0.0) })
     }
 
     fn index<'gc>(i: usize) -> Value<'gc> {
@@ -57,11 +111,27 @@ impl Arrays {
     }
 
     fn push<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        let n = Self::with_items(a, this, |items| {
-            items.extend_from_slice(args);
-            items.len()
-        })?;
-        Ok(Self::index(n))
+        let o = Self::this(a, this)?;
+        let (len, dense) = {
+            let d = o.borrow();
+            (d.array_length().unwrap_or(0), matches!(&d.kind, ObjectKind::Array(items) if items.len() == d.array_length().unwrap_or(0) as usize))
+        };
+        if dense {
+            let n = Self::with_items(a, this, |items| {
+                items.extend_from_slice(args);
+                items.len()
+            })?;
+            return Ok(Self::index(n));
+        }
+        // 有稀疏部分：逐个按下标写，再设长度（过了 2^32 − 1 抛 RangeError，已写的留着）
+        let mut n = f64::from(len);
+        for &v in args {
+            let key = a.to_string(Value::Number(n))?;
+            a.set_named(this, &key, v)?;
+            n += 1.0;
+        }
+        a.set_named(this, "length", Value::Number(n))?;
+        Ok(Value::Number(n))
     }
 
     fn pop<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
@@ -125,16 +195,27 @@ impl Arrays {
         Ok(this)
     }
 
+    /// `indexOf(x, fromIndex)`：严格相等，跳过空洞。
     fn index_of<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        let items = Self::items(a, this)?;
-        Ok(items.iter().position(|&v| v == args.at(0)).map_or(Value::Number(-1.0), Self::index))
+        let e = Self::elements(a, this)?;
+        if e.len == 0.0 {
+            return Ok(Value::Number(-1.0));
+        }
+        let from = Self::start_forward(a, args.at(1), e.len)?;
+        let want = args.at(0);
+        Ok(Value::Number(e.forward(from).find(|&(_, v)| v == want).map_or(-1.0, |(i, _)| i)))
     }
 
-    /// `includes` 用 SameValueZero：`NaN` 能找到自己。
+    /// `includes(x, fromIndex)` 用 SameValueZero：`NaN` 能找到自己，空洞当 `undefined`。
     fn includes<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+        let e = Self::elements(a, this)?;
+        if e.len == 0.0 {
+            return Ok(false.into());
+        }
+        let from = Self::start_forward(a, args.at(1), e.len)?;
         let want = args.at(0);
-        let items = Self::items(a, this)?;
-        Ok(items.iter().any(|&v| v == want || matches!((v, want), (Value::Number(x), Value::Number(y)) if x.is_nan() && y.is_nan())).into())
+        let same = |v: Value<'gc>| v == want || matches!((v, want), (Value::Number(x), Value::Number(y)) if x.is_nan() && y.is_nan());
+        Ok((e.forward(from).any(|(_, v)| same(v)) || (want == Value::Undefined && e.has_hole_from(from))).into())
     }
 
     /// 逐个调回调 `f(item, index, array)`。
@@ -347,8 +428,20 @@ impl Arrays {
         Ok(this)
     }
 
+    /// `lastIndexOf(x, fromIndex)`：从 `fromIndex`（缺省末尾）往前找，严格相等，跳过空洞。
     fn last_index_of<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        let items = Self::items(a, this)?;
-        Ok(items.iter().rposition(|&v| v == args.at(0)).map_or(Value::Number(-1.0), Self::index))
+        let e = Self::elements(a, this)?;
+        if e.len == 0.0 {
+            return Ok(Value::Number(-1.0));
+        }
+        let from = match args.get(1) {
+            None => e.len - 1.0,
+            Some(&v) => {
+                let n = Self::integer(a, v)?;
+                if n >= 0.0 { n.min(e.len - 1.0) } else { e.len + n }
+            }
+        };
+        let want = args.at(0);
+        Ok(Value::Number(e.backward(from).find(|&(_, v)| v == want).map_or(-1.0, |(i, _)| i)))
     }
 }

@@ -5,9 +5,11 @@ extern crate alloc;
 
 mod array;
 mod bigint;
+mod collections;
 mod error;
 mod global;
 mod iter;
+mod json;
 mod math;
 mod object;
 mod promise;
@@ -36,6 +38,8 @@ impl Intrinsics for Builtins {
         b.promise();
         b.bigint();
         b.regexp();
+        b.collections();
+        b.json();
     }
 }
 

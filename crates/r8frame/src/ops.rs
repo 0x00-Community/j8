@@ -196,7 +196,7 @@ fn index_of_number(x: f64) -> Option<u32> {
 }
 
 /// 规范下标的字符串形式（`"0"`、`"12"`，不带前导零）。
-fn index_of_str(s: &str) -> Option<u32> {
+pub(crate) fn index_of_str(s: &str) -> Option<u32> {
     let canonical = s == "0" || (!s.starts_with('0') && !s.is_empty() && s.bytes().all(|c| c.is_ascii_digit()));
     canonical.then(|| s.parse().ok()).flatten().filter(|&i| f64::from(i) <= MAX_INDEX)
 }
@@ -452,6 +452,15 @@ impl<'gc> Agent<'gc, '_> {
         })
     }
 
+    /// ToObject：对象原样，原始值包成包装对象（原型是它那一类的原型），`undefined` / `null` 抛 TypeError。
+    pub fn to_object(&self, v: Value<'gc>) -> Result<JsObject<'gc>, Error> {
+        match (v, self.proto_of(v)) {
+            (Value::Object(o), _) => Ok(o),
+            (_, Some(proto)) => Ok(ObjectData { kind: ObjectKind::Primitive(v), proto: Some(proto), ..ObjectData::default() }.alloc(self.mc)),
+            (_, None) => Err(self.throw(ErrorKind::Type, "Cannot convert undefined or null to object")),
+        }
+    }
+
     /// 原始值读属性时用的原型。
     fn proto_of(&self, v: Value<'gc>) -> Option<JsObject<'gc>> {
         match v {
@@ -480,17 +489,24 @@ impl<'gc> Agent<'gc, '_> {
 
     /// 数组 / 字符串的下标与 `length`。
     fn exotic(&self, target: Value<'gc>, key: &str) -> Option<Value<'gc>> {
-        match target {
-            Value::String(s) => match (key, index_of_str(key)) {
-                ("length", _) => Some(f64::from(u32::try_from(s.encode_utf16().count()).unwrap_or(u32::MAX)).into()),
-                (_, Some(i)) => s.encode_utf16().nth(i as usize).map(|u| self.string(&String::from_utf16_lossy(&[u])).into()),
-                _ => None,
-            },
-            Value::Object(o) => match (&o.borrow().kind, key, index_of_str(key)) {
-                (ObjectKind::Array(items), "length", _) => Some(f64::from(u32::try_from(items.len()).unwrap_or(u32::MAX)).into()),
-                (ObjectKind::Array(items), _, Some(i)) => Some(items.get(i as usize).copied().unwrap_or_default()),
-                _ => None,
-            },
+        let o = match target {
+            Value::String(s) => {
+                return match (key, index_of_str(key)) {
+                    ("length", _) => Some(f64::from(u32::try_from(s.encode_utf16().count()).unwrap_or(u32::MAX)).into()),
+                    (_, Some(i)) => s.encode_utf16().nth(i as usize).map(|u| self.string(&String::from_utf16_lossy(&[u])).into()),
+                    _ => None,
+                };
+            }
+            Value::Object(o) => o,
+            _ => return None,
+        };
+        let d = o.borrow();
+        match (&d.kind, key, index_of_str(key)) {
+            // String 包装对象的下标与 `length` 同字符串
+            (ObjectKind::Primitive(s @ Value::String(_)), _, _) => self.exotic(*s, key),
+            (ObjectKind::Array(_), "length", _) => d.array_length().map(|n| f64::from(n).into()),
+            // 稠密部分之外的下标是普通属性（稀疏元素），交给属性查找
+            (ObjectKind::Array(items), _, Some(i)) => items.get(i as usize).copied(),
             _ => None,
         }
     }
@@ -632,24 +648,17 @@ impl<'gc> Agent<'gc, '_> {
         }
         if let (Value::Object(o), Value::Number(x)) = (target, key)
             && let (ObjectKind::Array(items), Some(i)) = (&o.borrow().kind, index_of_number(x))
+            && let Some(&v) = items.get(i as usize)
         {
-            return Ok(items.get(i as usize).copied().unwrap_or_default());
+            return Ok(v);
         }
         let k = self.property_key(key)?;
         self.get_named(target, &k)
     }
 
-    /// 数组元素写：越过末尾补 `undefined`。是数组下标就写了返回 `true`。
+    /// 数组元素写（稠密 / 稀疏见 [`ObjectData::write_index`]）。是数组下标就写了返回 `true`。
     fn set_element(&self, o: JsObject<'gc>, key: &str, value: Value<'gc>) -> bool {
-        let mut data = o.borrow_mut(self.mc);
-        let ObjectKind::Array(items) = &mut data.kind else { return false };
-        let Some(i) = index_of_str(key) else { return false };
-        let i = i as usize;
-        if i >= items.len() {
-            items.resize(i + 1, Value::Undefined);
-        }
-        items[i] = value;
-        true
+        index_of_str(key).is_some_and(|i| o.borrow_mut(self.mc).write_index(self.mc, i, value))
     }
 
     /// `target.key = value`：原型链上有 setter 就调它，有不可写的数据属性就不写；原始值上的写悄悄丢掉。
@@ -663,10 +672,11 @@ impl<'gc> Agent<'gc, '_> {
             return Ok(());
         }
         if key == "length" && matches!(o.borrow().kind, ObjectKind::Array(_)) {
-            let n = self.to_uint32(value)? as usize;
-            if let ObjectKind::Array(items) = &mut o.borrow_mut(self.mc).kind {
-                items.resize(n, Value::Undefined);
+            let n = self.to_uint32(value)?;
+            if f64::from(n) != self.to_number(value)? {
+                return Err(self.throw(ErrorKind::Range, "Invalid array length"));
             }
+            o.borrow_mut(self.mc).set_array_length(n);
             return Ok(());
         }
         match Self::lookup(Some(o), key) {
@@ -686,13 +696,8 @@ impl<'gc> Agent<'gc, '_> {
         }
         if let (Value::Object(o), Value::Number(x)) = (target, key)
             && let Some(i) = index_of_number(x)
-            && let ObjectKind::Array(items) = &mut o.borrow_mut(self.mc).kind
+            && o.borrow_mut(self.mc).write_index(self.mc, i, value)
         {
-            let i = i as usize;
-            if i >= items.len() {
-                items.resize(i + 1, Value::Undefined);
-            }
-            items[i] = value;
             return Ok(());
         }
         let k = self.property_key(key)?;
@@ -728,7 +733,7 @@ impl<'gc> Agent<'gc, '_> {
         if let ObjectKind::Array(items) = &o.borrow().kind {
             match (key, index_of_str(key)) {
                 ("length", _) => return Ok(true),
-                (_, Some(i)) => return Ok((i as usize) < items.len()),
+                (_, Some(i)) if (i as usize) < items.len() => return Ok(true),
                 _ => {}
             }
         }
@@ -741,10 +746,10 @@ impl<'gc> Agent<'gc, '_> {
             Value::Undefined | Value::Null => Err(self.nullish_error(target, "delete", key)),
             Value::Object(o) => {
                 let mut data = o.borrow_mut(self.mc);
-                if let (ObjectKind::Array(items), Some(i)) = (&mut data.kind, index_of_str(key)) {
-                    if let Some(x) = items.get_mut(i as usize) {
-                        *x = Value::Undefined;
-                    }
+                if let (ObjectKind::Array(items), Some(i)) = (&mut data.kind, index_of_str(key))
+                    && let Some(x) = items.get_mut(i as usize)
+                {
+                    *x = Value::Undefined;
                     return Ok(true);
                 }
                 Ok(data.remove(key))

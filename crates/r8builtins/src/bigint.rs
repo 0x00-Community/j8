@@ -27,7 +27,7 @@ impl BigInts {
     }
 
     fn this<'gc>(a: &Agent<'gc, '_>, this: Value<'gc>) -> Result<r8frame::JsBigInt<'gc>, Error> {
-        match this {
+        match this.unwrapped() {
             Value::BigInt(b) => Ok(b),
             _ => Err(a.throw(ErrorKind::Type, "BigInt.prototype method called on a non-BigInt")),
         }

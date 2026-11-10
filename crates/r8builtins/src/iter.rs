@@ -16,7 +16,7 @@ impl Iters {
     }
 
     fn this_symbol<'gc>(a: &Agent<'gc, '_>, this: Value<'gc>) -> Result<r8frame::JsSymbol<'gc>, Error> {
-        match this {
+        match this.unwrapped() {
             Value::Symbol(s) => Ok(s),
             _ => Err(a.throw(ErrorKind::Type, "Symbol.prototype method called on a non-symbol")),
         }
@@ -30,6 +30,11 @@ impl Iters {
     fn symbol_description<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let s = Self::this_symbol(a, this)?;
         Ok(s.description.as_deref().map_or(Value::Undefined, |d| a.string(d).into()))
+    }
+
+    /// thisSymbolValue（`Symbol.prototype.valueOf`）
+    fn symbol_value_of<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+        Ok(Self::this_symbol(a, this)?.into())
     }
 
     fn this_value<'gc>(_: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
@@ -147,7 +152,7 @@ impl Installer<'_, '_> {
             self.set(ctor, name, Value::Symbol(s));
         }
         self.method(proto, "toString", Iters::symbol_to_string);
-        self.method(proto, "valueOf", Iters::this_value);
+        self.method(proto, "valueOf", Iters::symbol_value_of);
         self.getter(proto, "description", Iters::symbol_description);
         r.symbol_method(self.mc, r.iterator_proto, sym.iterator, Iters::this_value);
         // 数组：`values` 与 `[Symbol.iterator]` 是同一个函数

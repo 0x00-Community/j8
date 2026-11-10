@@ -40,6 +40,18 @@ impl Value<'_> {
     pub fn is_nullish(self) -> bool {
         matches!(self, Value::Undefined | Value::Null)
     }
+
+    /// 原始值包装对象 ⇒ 里面的原始值，别的原样。规范的 thisBooleanValue / thisNumberValue / thisStringValue 先过这一步。
+    #[must_use]
+    pub fn unwrapped(self) -> Self {
+        match self {
+            Value::Object(o) => match o.borrow().kind {
+                crate::ObjectKind::Primitive(v) => v,
+                _ => self,
+            },
+            _ => self,
+        }
+    }
 }
 
 impl From<bool> for Value<'_> {

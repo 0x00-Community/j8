@@ -51,6 +51,12 @@ pub struct Realm<'gc> {
     /// 正则字面量用的构造器：r8builtins 换上真的实现（用户改写全局 `RegExp` 不影响字面量）
     pub regexp_ctor: JsObject<'gc>,
     pub bigint_proto: JsObject<'gc>,
+    pub map_proto: JsObject<'gc>,
+    pub set_proto: JsObject<'gc>,
+    pub weakmap_proto: JsObject<'gc>,
+    pub weakset_proto: JsObject<'gc>,
+    /// Map / Set 迭代器的原型（`next`）
+    pub collection_iterator_proto: JsObject<'gc>,
     /// 脚本作用域：各脚本顶层的 `let` / `const` / `class`（跨脚本共享，不是全局对象的属性）
     pub script_scope: JsObject<'gc>,
     pub symbols: WellKnown<'gc>,
@@ -82,6 +88,11 @@ impl<'gc> Realm<'gc> {
             regexp_proto: derived(object_proto),
             regexp_ctor: ObjectData { kind: ObjectKind::Native(Native(Self::no_regexp)), ..ObjectData::default() }.alloc(mc),
             bigint_proto: derived(object_proto),
+            map_proto: derived(object_proto),
+            set_proto: derived(object_proto),
+            weakmap_proto: derived(object_proto),
+            weakset_proto: derived(object_proto),
+            collection_iterator_proto: derived(iterator_proto),
             script_scope: ObjectData::default().alloc(mc),
             symbols: WellKnown { iterator: symbol("iterator"), async_iterator: symbol("asyncIterator"), has_instance: symbol("hasInstance"), to_primitive: symbol("toPrimitive"), to_string_tag: symbol("toStringTag") },
             jobs: Gc::new(mc, RefLock::new(VecDeque::new())),

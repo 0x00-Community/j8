@@ -272,8 +272,11 @@ impl Executor {
                     let saved = self.depth.replace(depth);
                     let r = (native.0)(a, Value::Undefined, &args);
                     self.depth.set(saved);
+                    // 宿主构造器给原始值：Boolean / Number / String 包成包装对象；Symbol / BigInt 不能 `new`
                     let obj = match r? {
                         Value::Object(made) => made,
+                        v @ (Value::Bool(_) | Value::Number(_) | Value::String(_)) => a.to_object(v)?,
+                        Value::Symbol(_) | Value::BigInt(_) => break,
                         _ => a.object(),
                     };
                     // `class X extends Error`：宿主构造器建的对象换成派生类的原型
@@ -1202,6 +1205,27 @@ mod tests {
             ("class A {} class B extends A { constructor() { super(); this.x = 1 } } new B().x", "1"),
             ("'a'", "a"),
             ("'use strict'; 'b'", "b"),
+            // Map / Set / WeakMap / WeakSet
+            ("const m = new Map([[1, 'a'], ['1', 'b']]); m.set(NaN, 'n'); [m.get(1), m.get('1'), m.get(NaN), m.size, m.has(2)].join()", "a,b,n,3,false"),
+            ("1 / [...new Map([[-0, 1]]).keys()][0]", "Infinity"),
+            ("const s = new Set([1, 2, 3]); const out = []; for (const x of s) { out.push(x); if (x == 1) { s.delete(2); s.add(4) } } out.join()", "1,3,4"),
+            ("const m = new Map([['a', 1], ['b', 2]]); let r = ''; m.forEach((v, k) => r += k + v); r + [...m].join(';')", "a1b2a,1;b,2"),
+            ("[...new Set('hello')].join('')", "helo"),
+            ("const k = {}; const m = new Map([[k, 1]]); m.get(k) + ',' + m.get({})", "1,undefined"),
+            ("const s = new Set([1, 2]); s.clear(); s.size + ',' + s.has(1)", "0,false"),
+            ("const wm = new WeakMap(); const o = {}; wm.set(o, 5); `${wm.get(o)},${wm.has({})},${new WeakSet([o]).has(o)}`", "5,false,true"),
+            ("class M extends Map { constructor() { super([[1, 2]]) } } const x = new M(); x.get(1) + ',' + (x instanceof Map) + ',' + (x instanceof M)", "2,true,true"),
+            // JSON
+            (r"JSON.stringify({ a: 1, b: [true, null, 'x'], c: undefined, d: () => 1 })", r#"{"a":1,"b":[true,null,"x"]}"#),
+            (r"JSON.stringify([undefined, NaN, function () {}])", r"[null,null,null]"),
+            (r#"JSON.stringify('a"b\n')"#, r#""a\"b\n""#),
+            (r"JSON.stringify({ a: [1, 2], b: {} }, null, 2)", "{\n  \"a\": [\n    1,\n    2\n  ],\n  \"b\": {}\n}"),
+            (r"JSON.stringify({ a: 1, b: 2 }, (k, v) => k === 'b' ? undefined : v)", r#"{"a":1}"#),
+            (r"JSON.stringify({ a: 1, b: 2, c: 3 }, ['c', 'a'])", r#"{"c":3,"a":1}"#),
+            (r"JSON.stringify({ toJSON() { return 'x' } })", r#""x""#),
+            (r#"const o = JSON.parse('{"a": [1, 2.5e1, "s\\u0041"], "b": null}'); o.a[1] + o.a[2] + o.b"#, "25sAnull"),
+            (r"JSON.parse('[1, 2, 3]', (k, v) => typeof v === 'number' ? v * 2 : v).join()", "2,4,6"),
+            (r#"JSON.stringify(JSON.parse('{"x":{"y":[1,{"z":"w"}]}}'))"#, r#"{"x":{"y":[1,{"z":"w"}]}}"#),
         ];
         for (src, want) in ok {
             assert_eq!(eval(src).0, Ok(String::from(want)), "{src}");
@@ -1237,6 +1261,11 @@ mod tests {
             ("switch (1) { case 0: let a = 1; case 1: a }", "ReferenceError: Cannot access 'a' before initialization"),
             ("function f() { const k = 1; k = 2 } f()", "TypeError: Assignment to constant variable."),
             ("function f() { m = 1; let m } f()", "ReferenceError: Cannot access 'm' before initialization"),
+            (r"JSON.parse('{a: 1}')", "SyntaxError: Unexpected token 'a' in JSON at position 1 (expected a property name)"),
+            (r"JSON.parse('[1,]')", "SyntaxError: Unexpected token ']' in JSON at position 3 (expected a value)"),
+            ("const o = {}; o.self = o; JSON.stringify(o)", "TypeError: Converting circular structure to JSON"),
+            ("JSON.stringify(1n)", "TypeError: Do not know how to serialize a BigInt"),
+            ("new WeakMap().set(1, 1)", "TypeError: Invalid value used as weak map key"),
         ];
         for (src, want) in thrown {
             assert_eq!(eval(src).0, Err(String::from(want)), "{src}");

@@ -68,8 +68,12 @@ impl Strings {
         })
     }
 
+    /// thisStringValue（`toString` / `valueOf`）：字符串或 String 包装对象，别的抛 TypeError。
     fn to_string<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        Ok(Self::this(a, this)?.into())
+        match this.unwrapped() {
+            v @ Value::String(_) => Ok(v),
+            _ => Err(a.throw(ErrorKind::Type, "String.prototype.toString requires that 'this' be a String")),
+        }
     }
 
     fn char_at<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
@@ -267,7 +271,7 @@ impl Strings {
         /// 小数部分最多出这么多位
         const MAX_FRACTION_DIGITS: usize = 52;
         const DIGITS: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
-        let Value::Number(x) = this else {
+        let Value::Number(x) = this.unwrapped() else {
             return Err(a.throw(ErrorKind::Type, "Number.prototype.toString requires that 'this' be a Number"));
         };
         let radix = match args.at(0) {
@@ -278,7 +282,7 @@ impl Strings {
             return Err(a.throw(ErrorKind::Range, "toString() radix must be between 2 and 36"));
         }
         if radix == 10 || !x.is_finite() {
-            return Ok(a.to_string(this)?.into());
+            return Ok(a.to_string(Value::Number(x))?.into());
         }
         let r = f64::from(radix);
         let (neg, x) = (x < 0.0, libm::fabs(x));
@@ -311,18 +315,20 @@ impl Strings {
         Ok(a.string(&if neg { alloc::format!("-{s}") } else { s }).into())
     }
 
-    fn this_value<'gc>(_: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        Ok(this)
-    }
-
-    fn primitive_to_string<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        Ok(a.to_string(this)?.into())
+    /// thisNumberValue（`Number.prototype.valueOf`）：数或 Number 包装对象，别的抛 TypeError。
+    fn number_value_of<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+        match this.unwrapped() {
+            v @ Value::Number(_) => Ok(v),
+            _ => Err(a.throw(ErrorKind::Type, "Number.prototype.valueOf requires that 'this' be a Number")),
+        }
     }
 }
 
 impl Installer<'_, '_> {
     pub(crate) fn string(&mut self) {
         let proto = self.realm.string_proto;
+        // String.prototype 本身是包着 "" 的 String 对象
+        proto.borrow_mut(self.mc).kind = r8frame::ObjectKind::Primitive(self.text(""));
         self.constructor("String", Strings::string, proto);
         let methods: [(&str, r8frame::NativeFn); 25] = [
             ("toString", Strings::to_string),
@@ -358,6 +364,8 @@ impl Installer<'_, '_> {
 
     pub(crate) fn number(&mut self) {
         let proto = self.realm.number_proto;
+        // Number.prototype 本身是包着 +0 的 Number 对象
+        proto.borrow_mut(self.mc).kind = r8frame::ObjectKind::Primitive(0.0.into());
         let ctor = self.constructor("Number", Strings::number, proto);
         self.method(ctor, "isInteger", Strings::is_integer);
         self.method(ctor, "isSafeInteger", Strings::is_safe_integer);
@@ -371,7 +379,6 @@ impl Installer<'_, '_> {
         self.set(ctor, "NEGATIVE_INFINITY", f64::NEG_INFINITY.into());
         self.set(ctor, "NaN", f64::NAN.into());
         self.method(proto, "toString", Strings::number_to_string);
-        self.method(proto, "valueOf", Strings::this_value);
-        self.method(self.realm.boolean_proto, "toString", Strings::primitive_to_string);
+        self.method(proto, "valueOf", Strings::number_value_of);
     }
 }
