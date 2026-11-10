@@ -14,6 +14,7 @@
 extern crate alloc;
 
 mod agent;
+mod bigint;
 mod engine;
 mod error;
 mod handle;
@@ -31,7 +32,8 @@ pub use engine::{Engine, Source};
 pub use error::Error;
 pub use handle::Global;
 pub use isolate::{CreateParams, Isolate, Scope};
-pub use object::{Bound, Closure, Coroutine, CoroutineState, Env, IterKind, IteratorState, Job, JsEnv, JsObject, JsString, JsSymbol, Native, NativeFn, ObjectData, ObjectKind, Property, Reaction, Settled, Slot, Suspended, SymbolData};
+pub use object::{BigIntData, Bound, Closure, JsBigInt, RegExpData, Coroutine, CoroutineState, Env, IterKind, IteratorState, Job, JsEnv, JsObject, JsString, JsSymbol, Native, NativeFn, ObjectData, ObjectKind, Property, Reaction, Settled, Slot, Suspended, SymbolData};
+pub use bigint::Numeric;
 pub use ops::{BinaryOp, CompareOp, ErrorKind, Hint, IterRecord, UnaryOp};
 pub use platform::{Platform, Task};
 pub use profiler::{Counter, FuncId, Profiler};

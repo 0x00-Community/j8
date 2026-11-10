@@ -133,6 +133,15 @@ impl<'a> Compiler<'a, '_> {
                 self.emit(Insn::LdaConst(k));
             }
             Expression::BooleanLiteral(b) => _ = self.emit(Insn::LdaBool(b.value)),
+            Expression::BigIntLiteral(b) => {
+                let k = self.constant(Constant::BigInt((&*b.value).into()));
+                self.emit(Insn::LdaConst(k));
+            }
+            Expression::RegExpLiteral(r) => {
+                let pattern = self.name(&r.regex.pattern.text);
+                let flags = self.name(&r.regex.flags.to_string());
+                self.emit(Insn::CreateRegExp { pattern, flags });
+            }
             Expression::NullLiteral(_) => _ = self.emit(Insn::LdaNull),
             Expression::TemplateLiteral(t) => {
                 // q0 + e0 + q1 + … ：左边是字符串，`+` 就是 ToString 后拼接
@@ -414,7 +423,7 @@ impl<'a> Compiler<'a, '_> {
     fn update(&mut self, u: &'a UpdateExpression<'a>) -> Result<(), Error> {
         let t = self.target(&u.argument)?;
         self.target_load(&t);
-        self.emit(Insn::ToNumber);
+        self.emit(Insn::ToNumeric);
         let old = (!u.prefix).then(|| self.temp());
         if let Some(r) = old {
             self.emit(Insn::Star(r));

@@ -95,6 +95,7 @@ impl Objects {
             Value::Null => "Null",
             Value::Object(o) => match o.borrow().kind {
                 ObjectKind::Array(_) => "Array",
+                ObjectKind::RegExp(_) => "RegExp",
                 ref k if k.is_callable() => "Function",
                 _ => "Object",
             },
@@ -102,6 +103,7 @@ impl Objects {
             Value::Number(_) => "Number",
             Value::Bool(_) => "Boolean",
             Value::Symbol(_) => "Symbol",
+            Value::BigInt(_) => "BigInt",
         };
         Ok(a.string(&alloc::format!("[object {tag}]")).into())
     }

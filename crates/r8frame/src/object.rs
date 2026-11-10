@@ -19,6 +19,23 @@ pub struct SymbolData {
 /// 堆上的 Symbol。
 pub type JsSymbol<'gc> = Gc<'gc, SymbolData>;
 
+/// 一个 BigInt（任意精度整数）。
+#[derive(Debug, Collect)]
+#[collect(require_static)]
+pub struct BigIntData(pub num_bigint::BigInt);
+
+/// 堆上的 BigInt。
+pub type JsBigInt<'gc> = Gc<'gc, BigIntData>;
+
+/// 正则对象的本体：源码、flags，以及正则引擎编好的东西（类型擦除，由 r8builtins 解释）。
+#[derive(Debug, Collect)]
+#[collect(no_drop)]
+pub struct RegExpData<'gc> {
+    pub source: JsString<'gc>,
+    pub flags: JsString<'gc>,
+    pub compiled: Gc<'gc, gc_arena::Static<Box<dyn core::any::Any>>>,
+}
+
 /// 堆上的对象（内部可变，写经 gc-arena 的写屏障）。
 pub type JsObject<'gc> = Gc<'gc, RefLock<ObjectData<'gc>>>;
 
@@ -219,6 +236,7 @@ pub enum ObjectKind<'gc> {
     Promise { state: Settled<'gc>, reactions: Vec<Reaction<'gc>> },
     /// Promise 的 resolve / reject 函数：共享一个「已经解决过」的标记
     Resolver { promise: JsObject<'gc>, reject: bool, done: Gc<'gc, Lock<bool>> },
+    RegExp(RegExpData<'gc>),
 }
 
 impl ObjectKind<'_> {
@@ -248,6 +266,7 @@ impl fmt::Debug for ObjectData<'_> {
             ObjectKind::Iterator(_) => "Iterator",
             ObjectKind::Coroutine(_) => "Generator",
             ObjectKind::Promise { .. } => "Promise",
+            ObjectKind::RegExp(_) => "RegExp",
         };
         f.debug_list().entries(self.props.iter().map(|(k, _)| &**k)).finish()?;
         f.write_str(kind)

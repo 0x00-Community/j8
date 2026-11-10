@@ -1,6 +1,6 @@
 use gc_arena::{Collect, Gc};
 
-use crate::{JsObject, JsString, JsSymbol};
+use crate::{JsBigInt, JsObject, JsString, JsSymbol};
 
 /// JS 值：标量直接存，字符串与对象是 GC 指针，活在 `'gc` 里。
 #[derive(Clone, Copy, Debug, Default, Collect)]
@@ -13,6 +13,7 @@ pub enum Value<'gc> {
     Number(f64),
     String(JsString<'gc>),
     Symbol(JsSymbol<'gc>),
+    BigInt(JsBigInt<'gc>),
     Object(JsObject<'gc>),
 }
 
@@ -26,6 +27,7 @@ impl PartialEq for Value<'_> {
             (Value::String(a), Value::String(b)) => **a == **b,
             (Value::Object(a), Value::Object(b)) => Gc::ptr_eq(*a, *b),
             (Value::Symbol(a), Value::Symbol(b)) => Gc::ptr_eq(*a, *b),
+            (Value::BigInt(a), Value::BigInt(b)) => a.0 == b.0,
             _ => false,
         }
     }

@@ -6,7 +6,8 @@
       "derive": ["Clone", "Debug"],
       "variants": [
         {"name": "Number", "fields": [{"ty": "f64"}]},
-        {"name": "String", "fields": [{"ty": "Box<str>"}]}
+        {"name": "String", "fields": [{"ty": "Box<str>"}]},
+        {"name": "BigInt", "doc": "十进制数字串", "fields": [{"ty": "Box<str>"}]}
       ]
     },
     {
@@ -54,7 +55,7 @@
         {"name": "Binary", "doc": "acc = reg op acc", "fields": [{"ty": "BinaryOp", "show": "name"}, {"ty": "Reg"}]},
         {"name": "Compare", "doc": "acc = reg op acc（布尔）", "fields": [{"ty": "CompareOp", "show": "name"}, {"ty": "Reg"}]},
         {"name": "Unary", "doc": "acc = op acc", "fields": [{"ty": "UnaryOp", "show": "name"}]},
-        {"name": "ToNumber", "doc": "acc = ToNumber(acc)", "mnemonic": "to_number"},
+        {"name": "ToNumeric", "doc": "acc = ToNumeric(acc)（数或 BigInt，`++` / `--` 用）", "mnemonic": "to_numeric"},
         {"name": "Inc", "doc": "acc = acc + 1（acc 已是数）", "mnemonic": "inc"},
         {"name": "Dec", "doc": "acc = acc − 1（acc 已是数）", "mnemonic": "dec"},
         {"name": "Jump", "mnemonic": "jump", "fields": [{"ty": "Label"}]},
@@ -80,6 +81,7 @@
         {"name": "Yield", "doc": "挂起生成器交出 acc；恢复时 acc = 送进来的值，`mode` = 恢复方式", "mnemonic": "yield", "fields": [{"name": "mode", "ty": "Reg"}]},
         {"name": "Await", "doc": "挂起 async 函数等 acc；恢复时 acc = 结果，`mode` = 恢复方式", "mnemonic": "await", "fields": [{"name": "mode", "ty": "Reg"}]},
         {"name": "DelegateStep", "doc": "`yield*` 的一步：按 `mode` 把 acc 送给内层迭代器的 next / throw / return，acc = 结果对象", "mnemonic": "delegate.step", "fields": [{"name": "iter", "ty": "Reg"}, {"name": "mode", "ty": "Reg"}]},
+        {"name": "CreateRegExp", "doc": "acc = 正则字面量 /pattern/flags", "mnemonic": "create.regexp", "fields": [{"name": "pattern", "ty": "Const"}, {"name": "flags", "ty": "Const"}]},
         {"name": "CreateClosure", "doc": "acc = 本模块第 `n` 个函数的闭包，捕获当前环境", "mnemonic": "create.closure", "fields": [{"ty": "u32", "prefix": "fn#"}]},
         {"name": "CreateMethod", "doc": "acc = 方法闭包（`super` 从 `home` 的原型找）", "mnemonic": "create.method", "fields": [{"name": "func", "ty": "u32", "prefix": "fn#"}, {"name": "home", "ty": "Reg"}]},
         {"name": "CreateClass", "doc": "acc = 类构造器（第 `func` 个函数）；`proto` 收到它的 `prototype` 对象；`parent` 是 `extends` 的值", "mnemonic": "create.class", "fields": [{"name": "func", "ty": "u32", "prefix": "fn#"}, {"name": "parent", "ty": "Option<Reg>", "prefix": "extends "}, {"name": "proto", "ty": "Reg"}]},

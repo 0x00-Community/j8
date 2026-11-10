@@ -4,12 +4,14 @@
 extern crate alloc;
 
 mod array;
+mod bigint;
 mod error;
 mod global;
 mod iter;
 mod math;
 mod object;
 mod promise;
+mod regexp;
 mod string;
 
 use gc_arena::Mutation;
@@ -32,6 +34,8 @@ impl Intrinsics for Builtins {
         b.errors();
         b.iterators();
         b.promise();
+        b.bigint();
+        b.regexp();
     }
 }
 

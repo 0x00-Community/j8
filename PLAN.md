@@ -37,8 +37,8 @@
 
 ## 阶段 5：字面量
 
-- [ ] 正则字面量与 `RegExp`：用 JS 语义的正则引擎（regress），`test` / `exec` / 字符串 `match` / `replace`
-- [ ] BigInt 字面量与运算（num-bigint，`no_std`），`typeof` 为 `bigint`，与 Number 混算抛 TypeError
+- [x] 正则字面量与 `RegExp`：用 JS 语义的正则引擎（regress），`test` / `exec` / 字符串 `match` / `replace`
+- [x] BigInt 字面量与运算（num-bigint，`no_std`），`typeof` 为 `bigint`，与 Number 混算抛 TypeError
 
 ## 阶段 6：语义偏差
 

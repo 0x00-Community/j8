@@ -47,6 +47,10 @@ pub struct Realm<'gc> {
     /// %GeneratorPrototype%：`next` / `return` / `throw`
     pub generator_proto: JsObject<'gc>,
     pub promise_proto: JsObject<'gc>,
+    pub regexp_proto: JsObject<'gc>,
+    /// 正则字面量用的构造器：r8builtins 换上真的实现（用户改写全局 `RegExp` 不影响字面量）
+    pub regexp_ctor: JsObject<'gc>,
+    pub bigint_proto: JsObject<'gc>,
     pub symbols: WellKnown<'gc>,
     /// 微任务队列
     pub jobs: Gc<'gc, RefLock<VecDeque<Job<'gc>>>>,
@@ -73,6 +77,9 @@ impl<'gc> Realm<'gc> {
             string_iterator_proto: derived(iterator_proto),
             generator_proto: derived(iterator_proto),
             promise_proto: derived(object_proto),
+            regexp_proto: derived(object_proto),
+            regexp_ctor: ObjectData { kind: ObjectKind::Native(Native(Self::no_regexp)), ..ObjectData::default() }.alloc(mc),
+            bigint_proto: derived(object_proto),
             symbols: WellKnown { iterator: symbol("iterator"), async_iterator: symbol("asyncIterator"), has_instance: symbol("hasInstance"), to_primitive: symbol("toPrimitive"), to_string_tag: symbol("toStringTag") },
             jobs: Gc::new(mc, RefLock::new(VecDeque::new())),
             global: derived(object_proto),
@@ -84,6 +91,11 @@ impl<'gc> Realm<'gc> {
             boolean_proto: derived(object_proto),
             error_protos,
         }
+    }
+
+    /// 没装正则引擎时正则字面量抛 SyntaxError。
+    fn no_regexp<'g>(a: &mut crate::Agent<'g, '_>, _: Value<'g>, _: &[Value<'g>]) -> Result<Value<'g>, crate::Error> {
+        Err(a.throw(ErrorKind::Syntax, "regular expressions are not available in this realm"))
     }
 
     pub fn error_proto(&self, kind: ErrorKind) -> JsObject<'gc> {

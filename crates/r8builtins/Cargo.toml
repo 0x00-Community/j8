@@ -9,6 +9,9 @@ license.workspace = true
 r8frame.workspace = true
 gc-arena.workspace = true
 libm.workspace = true
+num-bigint.workspace = true
+num-traits.workspace = true
+regress.workspace = true
 ryu-js.workspace = true
 
 [lints]

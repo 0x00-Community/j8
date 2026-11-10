@@ -83,8 +83,10 @@ cargo build --target riscv64gc-unknown-none-elf -p r8frame -p r8bytecode -p r8ex
 - 剩余 / 默认参数、展开（数组 / 调用 / `new` / `super` / 对象）、解构（声明 / 赋值 / 形参 / `catch`，含默认值与剩余）、可选链 `?.`
 - Symbol（含 `Symbol.iterator` / `toPrimitive` / `hasInstance`）、迭代协议、`for-of`（`break` / `return` / 抛出时关迭代器）/ `for-in`
 - 生成器（`yield` / `yield*`，`return()` / `throw()` 经过 `finally`）、Promise（`then` / `catch` / `finally` / `all` / `race`）、`async` / `await`，脚本跑完后排空微任务队列
+- 正则字面量与 `RegExp`（regress 引擎，按 UTF-16 码元匹配；`exec` / `test`、`g` / `y` 的 `lastIndex`、具名分组）与字符串的 `match` / `matchAll` / `replace` / `replaceAll` / `search` / `split`
+- BigInt 字面量与运算（任意精度，与 Number 混算抛 TypeError、可比较、`BigInt()` / `toString(radix)`）
 
-还不支持（报 `Error::Unsupported`，带 `文件:行:列`）：类的静态块 / 私有名 / 计算字段名、async 生成器 / `for await`、正则 / BigInt 字面量。
+还不支持（报 `Error::Unsupported`，带 `文件:行:列`）：类的静态块 / 私有名 / 计算字段名、async 生成器 / `for await`。
 
 已知偏差：没有暂时性死区（`let` 声明前读到 `undefined`）、一次 `enter` 内不回收（长循环会一直涨内存）、脚本顶层 `let` / `const` 当全局属性。
 

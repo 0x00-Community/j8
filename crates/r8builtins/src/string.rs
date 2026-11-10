@@ -6,7 +6,7 @@ use r8frame::{Agent, Error, ErrorKind, JsString, Value};
 use crate::{Args, Installer};
 
 /// `String` / `Number` 与原型方法。下标都按 UTF-16 码元算。
-struct Strings;
+pub(crate) struct Strings;
 
 /// `Number.MAX_SAFE_INTEGER`
 const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
@@ -168,7 +168,7 @@ impl Strings {
     }
 
     /// `split(sep, limit)`：`sep` 是字符串（正则留给阶段 5）；空串按码元拆。
-    fn split<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    pub(crate) fn split<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let u = Self::units(a, this)?;
         let limit = match args.at(1) {
             Value::Undefined => usize::MAX,
@@ -238,8 +238,16 @@ impl Strings {
         Ok(a.string(&out).into())
     }
 
+    /// `Number(v)`：BigInt 换成最接近的数。
     fn number<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        Ok(if args.is_empty() { 0.0 } else { a.to_number(args[0])? }.into())
+        Ok(match args.first() {
+            None => 0.0,
+            Some(&v) => match a.to_numeric(v)? {
+                r8frame::Numeric::Number(x) => x,
+                r8frame::Numeric::BigInt(b) => num_traits::ToPrimitive::to_f64(&b.0).unwrap_or(f64::NAN),
+            },
+        }
+        .into())
     }
 
     fn is_integer<'gc>(_: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {

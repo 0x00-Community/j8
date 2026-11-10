@@ -193,6 +193,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
 
 [[package]]
+name = "foldhash"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
+
+[[package]]
 name = "gc-arena"
 version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -220,6 +226,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
 dependencies = [
  "allocator-api2",
+ "equivalent",
+ "foldhash",
 ]
 
 [[package]]
@@ -384,6 +392,16 @@ checksum = "610a5acd306ec67f907abe5567859a3c693fb9886eb1f012ab8f2a47bef3db51"
 
 [[package]]
 name = "num-bigint"
+version = "0.4.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c89e69e7e0f03bea5ef08013795c25018e101932225a656383bd384495ecc367"
+dependencies = [
+ "num-integer",
+ "num-traits",
+]
+
+[[package]]
+name = "num-bigint"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "93e7820bc0a80a0238e650327316f929ba18d5be054b647490a3a6a339f3e7c0"
@@ -408,6 +426,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "071dfc062690e90b734c0b2273ce72ad0ffa95f0c74596bc250dcfd960262841"
 dependencies = [
  "autocfg",
+ "libm",
 ]
 
 [[package]]
@@ -490,7 +509,7 @@ checksum = "c336b5de230f15686a2b6d3e8661d305ef3af9645efc1cf15ef5e7763fc38274"
 dependencies = [
  "itoa",
  "memchr",
- "num-bigint",
+ "num-bigint 0.5.1",
  "num-traits",
  "oxc_ast",
  "oxc_data_structures",
@@ -525,7 +544,7 @@ dependencies = [
  "bitflags",
  "cow-utils",
  "memchr",
- "num-bigint",
+ "num-bigint 0.5.1",
  "num-traits",
  "oxc_allocator",
  "oxc_ast",
@@ -687,7 +706,10 @@ version = "0.1.0"
 dependencies = [
  "gc-arena",
  "libm",
+ "num-bigint 0.4.8",
+ "num-traits",
  "r8frame",
+ "regress",
  "ryu-js",
 ]
 
@@ -730,6 +752,8 @@ version = "0.1.0"
 dependencies = [
  "gc-arena",
  "libm",
+ "num-bigint 0.4.8",
+ "num-traits",
  "ryu-js",
 ]
 
@@ -750,6 +774,16 @@ version = "0.1.0"
 dependencies = [
  "moremath",
  "r8frame",
+]
+
+[[package]]
+name = "regress"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32eef8b209c3c1c15dbad02c1f30f9539f00dc7253e0cbcdaae442a50a09d7c1"
+dependencies = [
+ "hashbrown",
+ "memchr",
 ]
 
 [[package]]

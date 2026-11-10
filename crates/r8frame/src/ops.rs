@@ -6,7 +6,9 @@ use alloc::vec::Vec;
 
 use gc_arena::Gc;
 
-use crate::{Agent, Error, IterKind, IteratorState, JsObject, JsString, JsSymbol, ObjectData, ObjectKind, Property, Slot, Value};
+use num_traits::Zero;
+
+use crate::{Agent, Error, Numeric, IterKind, IteratorState, JsObject, JsString, JsSymbol, ObjectData, ObjectKind, Property, Slot, Value};
 
 /// 二元运算（结果是值）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -243,6 +245,7 @@ impl<'gc> Agent<'gc, '_> {
             Value::Bool(b) => b,
             Value::Number(x) => !(x == 0.0 || x.is_nan()),
             Value::String(s) => !s.is_empty(),
+            Value::BigInt(b) => !b.0.is_zero(),
             Value::Symbol(_) | Value::Object(_) => true,
         }
     }
@@ -287,6 +290,7 @@ impl<'gc> Agent<'gc, '_> {
             Value::Number(x) => x,
             Value::String(s) => parse_number(&s),
             Value::Symbol(_) => return Err(self.throw(ErrorKind::Type, "Cannot convert a Symbol value to a number")),
+            Value::BigInt(_) => return Err(self.throw(ErrorKind::Type, "Cannot convert a BigInt value to a number")),
             Value::Object(_) => {
                 let p = self.to_primitive(v, Hint::Number)?;
                 return self.to_number(p);
@@ -312,6 +316,7 @@ impl<'gc> Agent<'gc, '_> {
             Value::Bool(false) => self.string("false"),
             Value::Number(x) => self.string(ryu_js::Buffer::new().format(x)),
             Value::Symbol(_) => return Err(self.throw(ErrorKind::Type, "Cannot convert a Symbol value to a string")),
+            Value::BigInt(b) => self.string(&format!("{}", b.0)),
             Value::Object(_) => {
                 let p = self.to_primitive(v, Hint::String)?;
                 return self.to_string(p);
@@ -331,39 +336,45 @@ impl<'gc> Agent<'gc, '_> {
             Value::Number(_) => "number",
             Value::String(_) => "string",
             Value::Symbol(_) => "symbol",
+            Value::BigInt(_) => "bigint",
             Value::Object(o) if o.borrow().kind.is_callable() => "function",
             Value::Null | Value::Object(_) => "object",
         }
     }
 
     pub fn binary(&mut self, op: BinaryOp, lhs: Value<'gc>, rhs: Value<'gc>) -> Result<Value<'gc>, Error> {
-        if op == BinaryOp::Add {
+        // 加法：两边先 ToPrimitive 看有没有字符串；其余运算左边整个 ToNumeric 完再轮到右边（求值顺序看得见）
+        let (l, r) = if op == BinaryOp::Add {
             let (l, r) = (self.to_primitive(lhs, Hint::Default)?, self.to_primitive(rhs, Hint::Default)?);
             if matches!(l, Value::String(_)) || matches!(r, Value::String(_)) {
                 let (a, b) = (self.to_string(l)?, self.to_string(r)?);
                 return Ok(self.string(&[&**a, &**b].concat()).into());
             }
-            return Ok((self.to_number(l)? + self.to_number(r)?).into());
-        }
-        if matches!(op, BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor | BinaryOp::Shl | BinaryOp::Shr | BinaryOp::UShr) {
-            let (x, y) = (self.to_int32(lhs)?, self.to_uint32(rhs)?);
-            let r = match op {
-                BinaryOp::BitAnd => f64::from(x & y.cast_signed()),
-                BinaryOp::BitOr => f64::from(x | y.cast_signed()),
-                BinaryOp::BitXor => f64::from(x ^ y.cast_signed()),
-                BinaryOp::Shl => f64::from(x.wrapping_shl(y & 31)),
-                BinaryOp::Shr => f64::from(x.wrapping_shr(y & 31)),
-                _ => f64::from(x.cast_unsigned() >> (y & 31)),
-            };
-            return Ok(r.into());
-        }
-        let (a, b) = (self.to_number(lhs)?, self.to_number(rhs)?);
+            (l, r)
+        } else {
+            (lhs, rhs)
+        };
+        let ln = self.to_numeric(l)?;
+        let rn = self.to_numeric(r)?;
+        let (a, b) = match (ln, rn) {
+            (Numeric::Number(a), Numeric::Number(b)) => (a, b),
+            (Numeric::BigInt(a), Numeric::BigInt(b)) => return self.bigint_binary(op, &a.0, &b.0),
+            _ => return Err(self.throw(ErrorKind::Type, "Cannot mix BigInt and other types, use explicit conversions")),
+        };
+        let (x, y) = (modulo_u32(a).cast_signed(), modulo_u32(b));
         Ok(match op {
+            BinaryOp::Add => a + b,
             BinaryOp::Sub => a - b,
             BinaryOp::Mul => a * b,
             BinaryOp::Div => a / b,
             BinaryOp::Rem => a % b,
-            _ => pow(a, b),
+            BinaryOp::Exp => pow(a, b),
+            BinaryOp::BitAnd => f64::from(x & y.cast_signed()),
+            BinaryOp::BitOr => f64::from(x | y.cast_signed()),
+            BinaryOp::BitXor => f64::from(x ^ y.cast_signed()),
+            BinaryOp::Shl => f64::from(x.wrapping_shl(y & 31)),
+            BinaryOp::Shr => f64::from(x.wrapping_shr(y & 31)),
+            BinaryOp::UShr => f64::from(x.cast_unsigned() >> (y & 31)),
         }
         .into())
     }
@@ -383,6 +394,13 @@ impl<'gc> Agent<'gc, '_> {
                 return self.loose_equals(a, p);
             }
             (Value::Symbol(_), _) | (_, Value::Symbol(_)) => false,
+            (Value::BigInt(x), Value::BigInt(y)) => x.0 == y.0,
+            (Value::BigInt(x), Value::String(s)) | (Value::String(s), Value::BigInt(x)) => Self::parse_bigint(&s).is_some_and(|y| x.0 == y),
+            (Value::BigInt(x), _) | (_, Value::BigInt(x)) => {
+                let other = if matches!(a, Value::BigInt(_)) { b } else { a };
+                let n = self.to_number(other)?;
+                Self::cmp_bigint_number(&x.0, n) == Some(core::cmp::Ordering::Equal)
+            }
             (Value::Number(_), Value::String(_)) | (Value::String(_), Value::Number(_)) | (Value::Bool(_), _) | (_, Value::Bool(_)) => self.to_number(a)? == self.to_number(b)?,
             _ => a == b,
         })
@@ -406,12 +424,12 @@ impl<'gc> Agent<'gc, '_> {
                         _ => ord.is_ge(),
                     });
                 }
-                let (a, b) = (self.to_number(l)?, self.to_number(r)?);
+                let Some(ord) = self.numeric_order(l, r)? else { return Ok(false) };
                 match op {
-                    CompareOp::Lt => a < b,
-                    CompareOp::Gt => a > b,
-                    CompareOp::Le => a <= b,
-                    _ => a >= b,
+                    CompareOp::Lt => ord.is_lt(),
+                    CompareOp::Gt => ord.is_gt(),
+                    CompareOp::Le => ord.is_le(),
+                    _ => ord.is_ge(),
                 }
             }
         })
@@ -419,10 +437,16 @@ impl<'gc> Agent<'gc, '_> {
 
     pub fn unary(&mut self, op: UnaryOp, v: Value<'gc>) -> Result<Value<'gc>, Error> {
         Ok(match op {
-            UnaryOp::Neg => (-self.to_number(v)?).into(),
+            UnaryOp::Neg => match self.to_numeric(v)? {
+                Numeric::Number(x) => (-x).into(),
+                Numeric::BigInt(b) => self.bigint(-&b.0),
+            },
             UnaryOp::Plus => self.to_number(v)?.into(),
             UnaryOp::Not => (!self.to_boolean(v)).into(),
-            UnaryOp::BitNot => f64::from(!self.to_int32(v)?).into(),
+            UnaryOp::BitNot => match self.to_numeric(v)? {
+                Numeric::Number(x) => f64::from(!modulo_u32(x).cast_signed()).into(),
+                Numeric::BigInt(b) => self.bigint(!&b.0),
+            },
             UnaryOp::Typeof => self.string(self.type_of(v)).into(),
             UnaryOp::Void => Value::Undefined,
         })
@@ -435,6 +459,7 @@ impl<'gc> Agent<'gc, '_> {
             Value::Number(_) => Some(self.realm.number_proto),
             Value::Bool(_) => Some(self.realm.boolean_proto),
             Value::Symbol(_) => Some(self.realm.symbol_proto),
+            Value::BigInt(_) => Some(self.realm.bigint_proto),
             Value::Object(o) => Some(o),
             Value::Undefined | Value::Null => None,
         }

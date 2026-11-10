@@ -427,6 +427,7 @@ impl Executor {
                     *acc = match &func.consts[k.0 as usize] {
                         Constant::Number(x) => (*x).into(),
                         Constant::String(s) => a.string(s).into(),
+                        Constant::BigInt(digits) => a.bigint(Agent::parse_bigint(digits).unwrap_or_default()),
                     }
                 }
                 Insn::Ldar(x) => *acc = regs[r(x)],
@@ -450,9 +451,19 @@ impl Executor {
                 Insn::Binary(op, x) => *acc = a.binary(op, regs[r(x)], *acc)?,
                 Insn::Compare(op, x) => *acc = a.compare(op, regs[r(x)], *acc)?.into(),
                 Insn::Unary(op) => *acc = a.unary(op, *acc)?,
-                Insn::ToNumber => *acc = a.to_number(*acc)?.into(),
-                Insn::Inc => *acc = (a.to_number(*acc)? + 1.0).into(),
-                Insn::Dec => *acc = (a.to_number(*acc)? - 1.0).into(),
+                Insn::ToNumeric => {
+                    *acc = match a.to_numeric(*acc)? {
+                        r8frame::Numeric::Number(x) => x.into(),
+                        r8frame::Numeric::BigInt(b) => Value::BigInt(b),
+                    }
+                }
+                Insn::Inc => *acc = a.increment(*acc, 1)?,
+                Insn::Dec => *acc = a.increment(*acc, -1)?,
+                Insn::CreateRegExp { pattern, flags } => {
+                    let (p, fl) = (a.string(func.name_at(pattern)), a.string(func.name_at(flags)));
+                    let ctor = a.realm.regexp_ctor;
+                    *acc = a.call(ctor.into(), Value::Undefined, &[p.into(), fl.into()])?;
+                }
                 Insn::Jump(l) => f.pc = l.0 as usize,
                 Insn::JumpIfTrue(l) => {
                     if a.to_boolean(*acc) {
@@ -1016,6 +1027,28 @@ mod tests {
             ("const o = { *[Symbol.iterator]() { yield 'a'; yield 'b' } }; [...o].join('')", "ab"),
             ("class C { *gen() { yield this.v } } const c = new C(); c.v = 5; c.gen().next().value", "5"),
             ("[...[1, 2].entries()].join(';') + [...[7].keys()]", "0,1;1,20"),
+            // 阶段 5：正则、BigInt
+            ("const m = /a(b)c/.exec('xabcx'); m.index + m[1] + m", "1babc,b"),
+            ("/^\\d+$/.test('123') && !/^\\d+$/.test('12a')", "true"),
+            ("'a1b22c333'.match(/\\d+/g).join()", "1,22,333"),
+            ("'2024-11-11'.replace(/(\\d+)-(\\d+)-(\\d+)/, '$3/$2/$1')", "11/11/2024"),
+            ("'aaa'.replace(/a/g, (m, i) => i)", "012"),
+            ("'a,b;c'.split(/[,;]/).join('|') + ' ' + 'abc'.split(/(b)/).join('|')", "a|b|c a|b|c"),
+            ("const { groups: { y, m } } = /(?<y>\\d{4})-(?<m>\\d{2})/.exec('2024-11'); y + m", "202411"),
+            ("const re = /o/g; let n = 0; while (re.exec('foo boo')) n++; n", "4"),
+            ("/x/gi.flags + /x/gi + new RegExp('a+', 'y').sticky", "gi/x/gitrue"),
+            ("'hello'.search(/l+/) + [...'a1b2'.matchAll(/[a-z](\\d)/g)].map(m => m[1]).join()", "21,2"),
+            ("'a.b.c'.replaceAll('.', '-') + 'x'.replace('x', '[$&]')", "a-b-c[x]"),
+            ("/É/i.test('é')", "true"),
+            ("2n ** 64n", "18446744073709551616"),
+            ("typeof 1n + (10n / 3n) + (-7n % 2n)", "bigint3-1"),
+            ("(1n << 100n) >> 99n", "2"),
+            ("10n > 9 && 10n == 10 && 10n !== 10 && 1n < 1.5 && 2n > '1'", "true"),
+            ("let x = 5n; x++; x * 2n", "12"),
+            ("BigInt('0x10') + BigInt(3) + BigInt(true)", "20"),
+            ("(255n).toString(16) + String(-1n)", "ff-1"),
+            ("Number(2n ** 53n) === 2 ** 53", "true"),
+            ("-(2n) + ~5n", "-8"),
         ];
         for (src, want) in ok {
             assert_eq!(eval(src).0, Ok(String::from(want)), "{src}");
@@ -1036,6 +1069,12 @@ mod tests {
             ("[...1]", "TypeError: 1 is not iterable"),
             ("for (const x of 5) {}", "TypeError: 5 is not iterable"),
             ("const it = (function* () { yield it.next() })(); it.next()", "TypeError: Generator is already running"),
+            ("1n + 1", "TypeError: Cannot mix BigInt and other types, use explicit conversions"),
+            ("1n / 0n", "RangeError: Division by zero"),
+            ("BigInt(1.5)", "RangeError: The number 1.5 cannot be converted to a BigInt because it is not an integer"),
+            ("+1n", "TypeError: Cannot convert a BigInt value to a number"),
+            ("1n >>> 1n", "TypeError: BigInts have no unsigned right shift, use >> instead"),
+            ("new RegExp('a', 'gg')", "SyntaxError: Invalid flags supplied to RegExp constructor 'gg'"),
         ];
         for (src, want) in thrown {
             assert_eq!(eval(src).0, Err(String::from(want)), "{src}");
