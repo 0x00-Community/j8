@@ -1,0 +1,93 @@
+{
+  "enums": [
+    {
+      "name": "Constant",
+      "doc": "常量池里的一项。数按位比（`0` 与 `-0` 不合并、`NaN` 能合并），`PartialEq` 在 insn.rs 手写。",
+      "derive": ["Clone", "Debug"],
+      "variants": [
+        {"name": "Number", "fields": [{"ty": "f64"}]},
+        {"name": "String", "fields": [{"ty": "Box<str>"}]}
+      ]
+    },
+    {
+      "name": "FunctionKind",
+      "doc": "函数的种类：决定能不能 `new`、能不能直接调。",
+      "derive": ["Clone", "Copy", "Debug", "Default", "PartialEq", "Eq", "Hash"],
+      "variants": [
+        {"name": "Normal", "doc": "普通函数：能调能 `new`", "default": true},
+        {"name": "Arrow", "doc": "箭头函数：不能 `new`，`this` / `super` 取外层"},
+        {"name": "Method", "doc": "方法、访问器、字段初始化：不能 `new`"},
+        {"name": "Constructor", "doc": "类构造器：只能 `new`；派生类的 `this` 要等 `super(...)`", "fields": [{"name": "derived", "ty": "bool"}]}
+      ]
+    },
+    {
+      "name": "PropertyKind",
+      "doc": "定义属性的方式。",
+      "derive": ["Clone", "Copy", "Debug", "PartialEq", "Eq", "Hash"],
+      "variants": [
+        {"name": "Data", "doc": "数据属性（对象字面量：可枚举；类方法：不可枚举）"},
+        {"name": "Getter"},
+        {"name": "Setter"}
+      ]
+    },
+    {
+      "name": "Insn",
+      "doc": "一条指令。累加器 `acc` 是隐式的输入 / 输出。",
+      "derive": ["Clone", "Copy", "Debug", "PartialEq"],
+      "display": true,
+      "accessors": [{"name": "target_mut", "ty": "Label", "doc": "跳转指令的目标（回填用）：带 `Label` 字段的指令都算。"}],
+      "variants": [
+        {"name": "LdaUndefined", "mnemonic": "lda.undefined"},
+        {"name": "LdaNull", "mnemonic": "lda.null"},
+        {"name": "LdaBool", "mnemonic": "lda.bool", "fields": [{"ty": "bool"}]},
+        {"name": "LdaConst", "doc": "acc = 常量", "mnemonic": "lda.const", "fields": [{"ty": "Const"}]},
+        {"name": "Ldar", "doc": "acc = reg", "mnemonic": "ldar", "fields": [{"ty": "Reg"}]},
+        {"name": "Star", "doc": "reg = acc", "mnemonic": "star", "fields": [{"ty": "Reg"}]},
+        {"name": "LdaGlobal", "doc": "acc = 全局对象的属性，没有就抛 ReferenceError", "mnemonic": "lda.global", "fields": [{"ty": "Const"}]},
+        {"name": "LdaGlobalOrUndefined", "doc": "同上，没有给 `undefined`（`typeof x`）", "mnemonic": "lda.global.or_undefined", "fields": [{"ty": "Const"}]},
+        {"name": "StaGlobal", "doc": "全局对象的属性 = acc", "mnemonic": "sta.global", "fields": [{"ty": "Const"}]},
+        {"name": "LdaEnv", "doc": "acc = 往外第 `depth` 层环境的 `slot`", "mnemonic": "lda.env", "fields": [{"name": "depth", "ty": "u16"}, {"name": "slot", "ty": "u16"}]},
+        {"name": "StaEnv", "doc": "往外第 `depth` 层环境的 `slot` = acc", "mnemonic": "sta.env", "fields": [{"name": "depth", "ty": "u16"}, {"name": "slot", "ty": "u16"}]},
+        {"name": "PushEnv", "doc": "进一层带 `slots` 个槽的新环境", "mnemonic": "push.env", "fields": [{"ty": "u16"}]},
+        {"name": "PopEnv", "doc": "退回外层环境", "mnemonic": "pop.env"},
+        {"name": "CloneEnv", "doc": "当前环境换成一份拷贝（`for (let …)` 每轮一份新绑定）", "mnemonic": "clone.env"},
+        {"name": "Binary", "doc": "acc = reg op acc", "fields": [{"ty": "BinaryOp", "show": "name"}, {"ty": "Reg"}]},
+        {"name": "Compare", "doc": "acc = reg op acc（布尔）", "fields": [{"ty": "CompareOp", "show": "name"}, {"ty": "Reg"}]},
+        {"name": "Unary", "doc": "acc = op acc", "fields": [{"ty": "UnaryOp", "show": "name"}]},
+        {"name": "ToNumber", "doc": "acc = ToNumber(acc)", "mnemonic": "to_number"},
+        {"name": "Inc", "doc": "acc = acc + 1（acc 已是数）", "mnemonic": "inc"},
+        {"name": "Dec", "doc": "acc = acc − 1（acc 已是数）", "mnemonic": "dec"},
+        {"name": "Jump", "mnemonic": "jump", "fields": [{"ty": "Label"}]},
+        {"name": "JumpIfTrue", "doc": "ToBoolean(acc) 为真就跳", "mnemonic": "jump.if_true", "fields": [{"ty": "Label"}]},
+        {"name": "JumpIfFalse", "mnemonic": "jump.if_false", "fields": [{"ty": "Label"}]},
+        {"name": "JumpIfNotNullish", "doc": "acc 不是 `undefined` / `null` 就跳（`??`）", "mnemonic": "jump.if_not_nullish", "fields": [{"ty": "Label"}]},
+        {"name": "CreateClosure", "doc": "acc = 本模块第 `n` 个函数的闭包，捕获当前环境", "mnemonic": "create.closure", "fields": [{"ty": "u32", "prefix": "fn#"}]},
+        {"name": "CreateMethod", "doc": "acc = 方法闭包（`super` 从 `home` 的原型找）", "mnemonic": "create.method", "fields": [{"name": "func", "ty": "u32", "prefix": "fn#"}, {"name": "home", "ty": "Reg"}]},
+        {"name": "CreateClass", "doc": "acc = 类构造器（第 `func` 个函数）；`proto` 收到它的 `prototype` 对象；`parent` 是 `extends` 的值", "mnemonic": "create.class", "fields": [{"name": "func", "ty": "u32", "prefix": "fn#"}, {"name": "parent", "ty": "Option<Reg>", "prefix": "extends "}, {"name": "proto", "ty": "Reg"}]},
+        {"name": "SetClassFields", "doc": "类构造器 `ctor` 的实例字段初始化函数 = acc", "mnemonic": "set.class_fields", "fields": [{"name": "ctor", "ty": "Reg"}]},
+        {"name": "DefineNamed", "doc": "在 `obj` 上定义属性 `name`，值（或访问器函数）是 acc", "mnemonic": "define.named", "fields": [{"name": "obj", "ty": "Reg"}, {"name": "name", "ty": "Const"}, {"name": "kind", "ty": "PropertyKind", "show": "debug"}, {"name": "enumerable", "ty": "bool"}]},
+        {"name": "DefineKeyed", "doc": "同上，键在 `key`", "mnemonic": "define.keyed", "fields": [{"name": "obj", "ty": "Reg"}, {"name": "key", "ty": "Reg"}, {"name": "kind", "ty": "PropertyKind", "show": "debug"}, {"name": "enumerable", "ty": "bool"}]},
+        {"name": "GetSuper", "doc": "acc = super.name（getter 的 `this` 是 `this`）", "mnemonic": "get.super", "fields": [{"name": "this", "ty": "Reg"}, {"name": "name", "ty": "Const"}]},
+        {"name": "GetSuperKeyed", "doc": "acc = super[acc]", "mnemonic": "get.super_keyed", "fields": [{"name": "this", "ty": "Reg"}]},
+        {"name": "SuperCall", "doc": "acc = super(args…)：构造父类、初始化 `this`、跑实例字段", "mnemonic": "super.call", "fields": [{"name": "args", "ty": "Reg"}, {"name": "argc", "ty": "u16"}]},
+        {"name": "SuperCallForward", "doc": "缺省派生构造器：拿原封不动的实参 `super(...arguments)`", "mnemonic": "super.call_forward"},
+        {"name": "Construct", "doc": "acc = new callee(args…)", "mnemonic": "construct", "fields": [{"name": "callee", "ty": "Reg"}, {"name": "args", "ty": "Reg"}, {"name": "argc", "ty": "u16"}]},
+        {"name": "InstanceOf", "doc": "acc = reg instanceof acc", "mnemonic": "instanceof", "fields": [{"ty": "Reg"}]},
+        {"name": "In", "doc": "acc = reg in acc", "mnemonic": "in", "fields": [{"ty": "Reg"}]},
+        {"name": "DeleteNamed", "doc": "acc = delete obj.name", "mnemonic": "delete.named", "fields": [{"name": "obj", "ty": "Reg"}, {"name": "name", "ty": "Const"}]},
+        {"name": "DeleteKeyed", "doc": "acc = delete obj[acc]", "mnemonic": "delete.keyed", "fields": [{"name": "obj", "ty": "Reg"}]},
+        {"name": "CreateObject", "doc": "acc = {}", "mnemonic": "create.object"},
+        {"name": "CreateArray", "doc": "acc = [first, first+1, …]（`count` 个）", "mnemonic": "create.array", "fields": [{"name": "first", "ty": "Reg"}, {"name": "count", "ty": "u16"}]},
+        {"name": "GetNamed", "doc": "acc = obj.name", "mnemonic": "get.named", "fields": [{"name": "obj", "ty": "Reg"}, {"name": "name", "ty": "Const"}]},
+        {"name": "SetNamed", "doc": "obj.name = acc", "mnemonic": "set.named", "fields": [{"name": "obj", "ty": "Reg"}, {"name": "name", "ty": "Const"}]},
+        {"name": "GetKeyed", "doc": "acc = obj[acc]", "mnemonic": "get.keyed", "fields": [{"name": "obj", "ty": "Reg"}]},
+        {"name": "SetKeyed", "doc": "obj[key] = acc", "mnemonic": "set.keyed", "fields": [{"name": "obj", "ty": "Reg"}, {"name": "key", "ty": "Reg"}]},
+        {"name": "Call", "doc": "acc = callee.call(this, args…)：`args` 起连续 `argc` 个寄存器", "mnemonic": "call", "fields": [{"name": "callee", "ty": "Reg"}, {"name": "this", "ty": "Reg"}, {"name": "args", "ty": "Reg"}, {"name": "argc", "ty": "u16"}]},
+        {"name": "PushHandler", "doc": "装一个异常处理器：抛出时跳到 `Label`（acc 是异常值），环境退回到装的时候", "mnemonic": "push.handler", "fields": [{"ty": "Label"}]},
+        {"name": "PopHandler", "doc": "卸掉最近装的处理器", "mnemonic": "pop.handler"},
+        {"name": "Throw", "doc": "抛出 acc", "mnemonic": "throw"},
+        {"name": "Return", "doc": "返回 acc", "mnemonic": "return"}
+      ]
+    }
+  ]
+}

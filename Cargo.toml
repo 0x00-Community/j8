@@ -13,6 +13,7 @@ r8platform = { path = "crates/r8platform" }
 r8builtins = { path = "crates/r8builtins" }
 r8bytecode = { path = "crates/r8bytecode", default-features = false }
 r8executor = { path = "crates/r8executor" }
+r8macros = { path = "crates/macros" }
 moremath = { version = "=0.2.2", default-features = false }
 libm = "0.2"
 gc-arena = { version = "0.7", default-features = false }

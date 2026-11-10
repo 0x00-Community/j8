@@ -19,12 +19,7 @@ impl Reg {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Label(pub u32);
 
-/// 常量池里的一项。数按位比（`0` 与 `-0` 不合并、`NaN` 能合并）。
-#[derive(Clone, Debug)]
-pub enum Constant {
-    Number(f64),
-    String(Box<str>),
-}
+r8macros::enums!("insn.json");
 
 impl PartialEq for Constant {
     fn eq(&self, o: &Self) -> bool {
@@ -39,139 +34,6 @@ impl PartialEq for Constant {
 /// 常量池下标。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Const(pub u32);
-
-/// 函数的种类：决定能不能 `new`、能不能直接调。
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-pub enum FunctionKind {
-    /// 普通函数：能调能 `new`
-    #[default]
-    Normal,
-    /// 箭头函数：不能 `new`，`this` / `super` 取外层
-    Arrow,
-    /// 方法、访问器、字段初始化：不能 `new`
-    Method,
-    /// 类构造器：只能 `new`；派生类的 `this` 要等 `super(...)`
-    Constructor { derived: bool },
-}
-
-/// 定义属性的方式。
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum PropertyKind {
-    /// 数据属性（对象字面量：可枚举；类方法：不可枚举）
-    Data,
-    Getter,
-    Setter,
-}
-
-/// 一条指令。累加器 `acc` 是隐式的输入 / 输出。
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Insn {
-    LdaUndefined,
-    LdaNull,
-    LdaBool(bool),
-    /// acc = 常量
-    LdaConst(Const),
-    /// acc = reg
-    Ldar(Reg),
-    /// reg = acc
-    Star(Reg),
-    /// acc = 全局对象的属性，没有就抛 ReferenceError
-    LdaGlobal(Const),
-    /// 同上，没有给 `undefined`（`typeof x`）
-    LdaGlobalOrUndefined(Const),
-    /// 全局对象的属性 = acc
-    StaGlobal(Const),
-    /// acc = 往外第 `depth` 层环境的 `slot`
-    LdaEnv { depth: u16, slot: u16 },
-    /// 往外第 `depth` 层环境的 `slot` = acc
-    StaEnv { depth: u16, slot: u16 },
-    /// 进一层带 `slots` 个槽的新环境
-    PushEnv(u16),
-    /// 退回外层环境
-    PopEnv,
-    /// 当前环境换成一份拷贝（`for (let …)` 每轮一份新绑定）
-    CloneEnv,
-    /// acc = reg op acc
-    Binary(BinaryOp, Reg),
-    /// acc = reg op acc（布尔）
-    Compare(CompareOp, Reg),
-    /// acc = op acc
-    Unary(UnaryOp),
-    /// acc = ToNumber(acc)
-    ToNumber,
-    /// acc = acc + 1（acc 已是数）
-    Inc,
-    /// acc = acc − 1（acc 已是数）
-    Dec,
-    Jump(Label),
-    /// ToBoolean(acc) 为真就跳
-    JumpIfTrue(Label),
-    JumpIfFalse(Label),
-    /// acc 不是 `undefined` / `null` 就跳（`??`）
-    JumpIfNotNullish(Label),
-    /// acc = 本模块第 `n` 个函数的闭包，捕获当前环境
-    CreateClosure(u32),
-    /// acc = 方法闭包（`super` 从 `home` 的原型找）
-    CreateMethod { func: u32, home: Reg },
-    /// acc = 类构造器（第 `func` 个函数）；`proto` 收到它的 `prototype` 对象；`parent` 是 `extends` 的值
-    CreateClass { func: u32, parent: Option<Reg>, proto: Reg },
-    /// 类构造器 `ctor` 的实例字段初始化函数 = acc
-    SetClassFields { ctor: Reg },
-    /// 在 `obj` 上定义属性 `name`，值（或访问器函数）是 acc
-    DefineNamed { obj: Reg, name: Const, kind: PropertyKind, enumerable: bool },
-    /// 同上，键在 `key`
-    DefineKeyed { obj: Reg, key: Reg, kind: PropertyKind, enumerable: bool },
-    /// acc = super.name（getter 的 `this` 是 `this`）
-    GetSuper { this: Reg, name: Const },
-    /// acc = super[acc]
-    GetSuperKeyed { this: Reg },
-    /// acc = super(args…)：构造父类、初始化 `this`、跑实例字段
-    SuperCall { args: Reg, argc: u16 },
-    /// 缺省派生构造器：拿原封不动的实参 `super(...arguments)`
-    SuperCallForward,
-    /// acc = new callee(args…)
-    Construct { callee: Reg, args: Reg, argc: u16 },
-    /// acc = reg instanceof acc
-    InstanceOf(Reg),
-    /// acc = reg in acc
-    In(Reg),
-    /// acc = delete obj.name
-    DeleteNamed { obj: Reg, name: Const },
-    /// acc = delete obj[acc]
-    DeleteKeyed { obj: Reg },
-    /// acc = {}
-    CreateObject,
-    /// acc = [first, first+1, …]（`count` 个）
-    CreateArray { first: Reg, count: u16 },
-    /// acc = obj.name
-    GetNamed { obj: Reg, name: Const },
-    /// obj.name = acc
-    SetNamed { obj: Reg, name: Const },
-    /// acc = obj[acc]
-    GetKeyed { obj: Reg },
-    /// obj[key] = acc
-    SetKeyed { obj: Reg, key: Reg },
-    /// acc = callee.call(this, args…)：`args` 起连续 `argc` 个寄存器
-    Call { callee: Reg, this: Reg, args: Reg, argc: u16 },
-    /// 装一个异常处理器：抛出时跳到 `Label`（acc 是异常值），环境退回到装的时候
-    PushHandler(Label),
-    /// 卸掉最近装的处理器
-    PopHandler,
-    /// 抛出 acc
-    Throw,
-    /// 返回 acc
-    Return,
-}
-
-impl Insn {
-    /// 跳转指令的目标（回填用）。
-    pub fn target_mut(&mut self) -> Option<&mut Label> {
-        match self {
-            Insn::Jump(l) | Insn::JumpIfTrue(l) | Insn::JumpIfFalse(l) | Insn::JumpIfNotNullish(l) | Insn::PushHandler(l) => Some(l),
-            _ => None,
-        }
-    }
-}
 
 /// 一个函数：名字、形参数、寄存器数、指令、常量池。
 #[derive(Clone, Debug, Default)]
@@ -213,63 +75,15 @@ impl fmt::Display for Reg {
     }
 }
 
-impl fmt::Display for Insn {
+impl fmt::Display for Const {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match *self {
-            Insn::LdaUndefined => f.write_str("lda.undefined"),
-            Insn::LdaNull => f.write_str("lda.null"),
-            Insn::LdaBool(b) => write!(f, "lda.bool {b}"),
-            Insn::LdaConst(k) => write!(f, "lda.const #{}", k.0),
-            Insn::Ldar(r) => write!(f, "ldar {r}"),
-            Insn::Star(r) => write!(f, "star {r}"),
-            Insn::LdaGlobal(k) => write!(f, "lda.global #{}", k.0),
-            Insn::LdaGlobalOrUndefined(k) => write!(f, "lda.global.or_undefined #{}", k.0),
-            Insn::StaGlobal(k) => write!(f, "sta.global #{}", k.0),
-            Insn::LdaEnv { depth, slot } => write!(f, "lda.env {depth}.{slot}"),
-            Insn::StaEnv { depth, slot } => write!(f, "sta.env {depth}.{slot}"),
-            Insn::PushEnv(n) => write!(f, "push.env {n}"),
-            Insn::PopEnv => f.write_str("pop.env"),
-            Insn::CloneEnv => f.write_str("clone.env"),
-            Insn::Binary(op, r) => write!(f, "{} {r}", op.name()),
-            Insn::Compare(op, r) => write!(f, "{} {r}", op.name()),
-            Insn::Unary(op) => f.write_str(op.name()),
-            Insn::ToNumber => f.write_str("to_number"),
-            Insn::Inc => f.write_str("inc"),
-            Insn::Dec => f.write_str("dec"),
-            Insn::Jump(l) => write!(f, "jump @{}", l.0),
-            Insn::JumpIfTrue(l) => write!(f, "jump.if_true @{}", l.0),
-            Insn::JumpIfFalse(l) => write!(f, "jump.if_false @{}", l.0),
-            Insn::JumpIfNotNullish(l) => write!(f, "jump.if_not_nullish @{}", l.0),
-            Insn::CreateClosure(n) => write!(f, "create.closure fn#{n}"),
-            Insn::CreateMethod { func, home } => write!(f, "create.method fn#{func}, {home}"),
-            Insn::CreateClass { func, parent, proto } => match parent {
-                Some(p) => write!(f, "create.class fn#{func}, extends {p}, {proto}"),
-                None => write!(f, "create.class fn#{func}, {proto}"),
-            },
-            Insn::SetClassFields { ctor } => write!(f, "set.class_fields {ctor}"),
-            Insn::DefineNamed { obj, name, kind, enumerable } => write!(f, "define.named {obj}, #{}, {kind:?}, {enumerable}", name.0),
-            Insn::DefineKeyed { obj, key, kind, enumerable } => write!(f, "define.keyed {obj}, {key}, {kind:?}, {enumerable}"),
-            Insn::GetSuper { this, name } => write!(f, "get.super {this}, #{}", name.0),
-            Insn::GetSuperKeyed { this } => write!(f, "get.super_keyed {this}"),
-            Insn::SuperCall { args, argc } => write!(f, "super.call {args}, {argc}"),
-            Insn::SuperCallForward => f.write_str("super.call_forward"),
-            Insn::Construct { callee, args, argc } => write!(f, "construct {callee}, {args}, {argc}"),
-            Insn::InstanceOf(r) => write!(f, "instanceof {r}"),
-            Insn::In(r) => write!(f, "in {r}"),
-            Insn::DeleteNamed { obj, name } => write!(f, "delete.named {obj}, #{}", name.0),
-            Insn::DeleteKeyed { obj } => write!(f, "delete.keyed {obj}"),
-            Insn::CreateObject => f.write_str("create.object"),
-            Insn::CreateArray { first, count } => write!(f, "create.array {first}, {count}"),
-            Insn::GetNamed { obj, name } => write!(f, "get.named {obj}, #{}", name.0),
-            Insn::SetNamed { obj, name } => write!(f, "set.named {obj}, #{}", name.0),
-            Insn::GetKeyed { obj } => write!(f, "get.keyed {obj}"),
-            Insn::SetKeyed { obj, key } => write!(f, "set.keyed {obj}, {key}"),
-            Insn::Call { callee, this, args, argc } => write!(f, "call {callee}, {this}, {args}, {argc}"),
-            Insn::PushHandler(l) => write!(f, "push.handler @{}", l.0),
-            Insn::PopHandler => f.write_str("pop.handler"),
-            Insn::Throw => f.write_str("throw"),
-            Insn::Return => f.write_str("return"),
-        }
+        write!(f, "#{}", self.0)
+    }
+}
+
+impl fmt::Display for Label {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "@{}", self.0)
     }
 }
 

@@ -7,6 +7,7 @@ license.workspace = true
 
 [dependencies]
 r8frame.workspace = true
+r8macros.workspace = true
 oxc_allocator = { workspace = true, optional = true }
 oxc_ast = { workspace = true, optional = true }
 oxc_parser = { workspace = true, optional = true }
