@@ -1,5 +1,5 @@
 //! mercedes：r8bytecode 字节码执行器。
-use r8::{Context, Engine, Error, FuncId, Source, Value};
+use r8frame::{Context, Engine, Error, FuncId, Source, Value};
 use r8bytecode::{Constant, Insn, Module};
 
 /// 字节码解释器。
@@ -46,7 +46,8 @@ impl Engine for Mercedes {
 
 #[cfg(test)]
 mod tests {
-    use r8::{CreateParams, DefaultPlatform, Isolate, Source, Value};
+    use r8frame::{CreateParams, Isolate, Source, Value};
+    use r8platform::DefaultPlatform;
 
     use crate::Mercedes;
 

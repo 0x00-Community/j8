@@ -212,8 +212,9 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 name = "mercedes"
 version = "0.1.0"
 dependencies = [
- "r8",
  "r8bytecode",
+ "r8frame",
+ "r8platform",
 ]
 
 [[package]]
@@ -516,7 +517,18 @@ dependencies = [
 ]
 
 [[package]]
-name = "r8"
+name = "r8bytecode"
+version = "0.1.0"
+dependencies = [
+ "oxc_allocator",
+ "oxc_ast",
+ "oxc_parser",
+ "oxc_span",
+ "r8frame",
+]
+
+[[package]]
+name = "r8frame"
 version = "0.1.0"
 dependencies = [
  "indexmap",
@@ -525,14 +537,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "r8bytecode"
+name = "r8platform"
 version = "0.1.0"
 dependencies = [
- "oxc_allocator",
- "oxc_ast",
- "oxc_parser",
- "oxc_span",
- "r8",
+ "r8frame",
 ]
 
 [[package]]

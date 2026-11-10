@@ -2,7 +2,7 @@ use oxc_allocator::Allocator;
 use oxc_ast::ast::{Expression, Statement, UnaryOperator};
 use oxc_parser::Parser;
 use oxc_span::{GetSpan, SourceType};
-use r8::{BinaryOp, Error, Source};
+use r8frame::{BinaryOp, Error, Source};
 
 use crate::{Constant, Function, Insn, Module, Reg};
 

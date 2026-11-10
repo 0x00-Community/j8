@@ -1,6 +1,6 @@
-//! r8 框架：引擎无关的抽象层。
+//! r8frame：核心框架层，定义 trait 与通用结构体 / 枚举，具体实现在各层 crate（如 r8platform 实现 [`Platform`]）。
 //!
-//! - [`Platform`]：线程与时钟，由嵌入方提供
+//! - [`Platform`]：线程与时钟（r8platform 提供标准库实现）
 //! - [`Isolate`]：一个独立的 JS 堆加句柄表加剖析器
 //! - [`Context`]：一个全局对象下的执行环境
 //! - [`HandleScope`] / [`Local`] / [`Global`]：栈上句柄与持久句柄
@@ -24,6 +24,6 @@ pub use handle::{Global, HandleScope, Local};
 pub use heap::{Heap, ObjId, Object, StrId};
 pub use isolate::{CreateParams, Isolate};
 pub use ops::BinaryOp;
-pub use platform::{DefaultPlatform, Platform, Task};
+pub use platform::{Platform, Task};
 pub use profiler::{Counter, FuncId, Profiler};
 pub use value::Value;

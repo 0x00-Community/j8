@@ -1,6 +1,6 @@
 use std::fmt;
 
-use r8::{BinaryOp, FuncId};
+use r8frame::{BinaryOp, FuncId};
 
 /// 寄存器（函数帧里的槽位）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

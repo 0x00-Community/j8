@@ -8,7 +8,8 @@ edition = "2024"
 license = "MIT"
 
 [workspace.dependencies]
-r8 = { path = "crates/r8" }
+r8frame = { path = "crates/r8frame" }
+r8platform = { path = "crates/r8platform" }
 r8bytecode = { path = "crates/r8bytecode" }
 mercedes = { path = "crates/mercedes" }
 indexmap = "2"

@@ -6,18 +6,20 @@
 
 | crate | 职责 |
 |---|---|
-| `r8` | 框架层：`Isolate` / `Platform` / `Context` / `HandleScope`·`Local`·`Global` / `Profiler` / `Heap` / `Value`，以及 `Engine` trait 与运算语义（`BinaryOp`、`Heap::binary`） |
+| `r8frame` | 核心框架层：定义 trait（`Platform`、`Engine`）与通用结构体 / 枚举（`Isolate`、`Context`、`HandleScope`·`Local`·`Global`、`Profiler`、`Heap`、`Value`、`BinaryOp`、`Error`……）。原则上只定义、实现归各层 crate；`Heap` / `Profiler` / 句柄表 / `Heap::binary` 目前仍有具体实现在这里，待拆 |
+| `r8platform` | 实现 `Platform`：标准库线程与时钟（`DefaultPlatform`） |
 | `r8bytecode` | JS ⇒ 字节码：累加器式寄存器字节码（`Insn` / `Function` / `Module`），`Module::try_from(&Source)` 编译 |
-| `mercedes` | 字节码执行器，**目前是最后一层** |
+| `mercedes` | 实现 `Engine`：字节码执行器，**目前是最后一层** |
 
 所有 JS 都先编成字节码再执行，不设 AST 解释层。
 
-依赖方向：`r8bytecode → r8`，`mercedes → r8 + r8bytecode`。
-框架层不依赖任何执行层，嵌入方选一个 `Engine` 交给 `Context::run`。
+依赖方向：各层只依赖 `r8frame`（`mercedes` 另依赖 `r8bytecode`），`r8frame` 不依赖任何层。
+嵌入方选一个 `Platform` 实现建 `Isolate`，选一个 `Engine` 交给 `Context::run`。
 
 ```rust
-use r8::{CreateParams, DefaultPlatform, Isolate, Source};
 use mercedes::Mercedes;
+use r8frame::{CreateParams, Isolate, Source};
+use r8platform::DefaultPlatform;
 
 let platform = DefaultPlatform::default();
 let mut isolate = Isolate::new(&platform, CreateParams::default());
