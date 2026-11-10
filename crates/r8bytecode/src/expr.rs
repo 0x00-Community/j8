@@ -107,7 +107,7 @@ impl<'a> Compiler<'a, '_> {
         }
     }
 
-    fn string_const(&mut self, s: Option<&str>, span: Span) -> Result<Const, Error> {
+    pub(crate) fn string_const(&mut self, s: Option<&str>, span: Span) -> Result<Const, Error> {
         let s = s.ok_or_else(|| self.unsupported(span, "lone surrogates"))?;
         Ok(self.constant(Constant::String(s.into())))
     }

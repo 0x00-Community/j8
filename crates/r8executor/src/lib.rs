@@ -1200,6 +1200,8 @@ mod tests {
             ("function f() { let x = 1; { const y = x + 1; return y } } f()", "2"),
             ("let lx = 1; var vx = 2; (globalThis.lx === undefined) + ',' + globalThis.vx + ',' + lx", "true,2,1"),
             ("class A {} class B extends A { constructor() { super(); this.x = 1 } } new B().x", "1"),
+            ("'a'", "a"),
+            ("'use strict'; 'b'", "b"),
         ];
         for (src, want) in ok {
             assert_eq!(eval(src).0, Ok(String::from(want)), "{src}");

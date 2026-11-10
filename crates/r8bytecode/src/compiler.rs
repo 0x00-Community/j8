@@ -916,6 +916,12 @@ impl<'a> Compiler<'a, '_> {
             let k = self.name(d.name);
             self.emit(Insn::StaGlobal(k));
         }
+        // 指令序言（`'use strict'` 等）在 oxc 里不在 body 里，但也是表达式语句，算完成值
+        for d in &program.directives {
+            let k = self.string_const(d.expression.value.as_str(), d.expression.span)?;
+            self.emit(Insn::LdaConst(k));
+            self.emit(Insn::Star(completion));
+        }
         self.statements(&program.body)?;
         self.emit(Insn::Ldar(completion));
         self.emit(Insn::Return);
