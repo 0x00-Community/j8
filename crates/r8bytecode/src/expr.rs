@@ -571,24 +571,47 @@ impl<'a> Compiler<'a, '_> {
         match t {
             AssignmentTarget::ArrayAssignmentTarget(a) => {
                 let iter = self.iterate(value);
-                for e in &a.elements {
-                    self.emit(Insn::IteratorNext { iter });
-                    let Some(e) = e else { continue };
-                    let v = self.temp();
-                    self.emit(Insn::Star(v));
-                    self.assign_maybe_default(e, v)?;
-                    self.release(v);
-                }
-                match &a.rest {
-                    Some(r) => {
-                        self.emit(Insn::IteratorRest { iter });
-                        let v = self.temp();
-                        self.emit(Insn::Star(v));
-                        self.assign_target(&r.target, v)?;
-                        self.release(v);
+                // 规范顺序：每个元素先求值目标引用、再走迭代器；中途抛出先关迭代器
+                self.closing_on_throw(iter, |c| {
+                    for e in &a.elements {
+                        let Some(e) = e else {
+                            c.emit(Insn::IteratorNext { iter });
+                            continue;
+                        };
+                        let (binding, default) = match e {
+                            AssignmentTargetMaybeDefault::AssignmentTargetWithDefault(d) => (&d.binding, Some(&d.init)),
+                            t => (t.as_assignment_target().ok_or_else(|| c.unsupported(t.span(), "assignment target"))?, None),
+                        };
+                        let pre = c.pre_target(binding)?;
+                        c.emit(Insn::IteratorNext { iter });
+                        let v = c.temp();
+                        c.emit(Insn::Star(v));
+                        let v2 = match default {
+                            Some(d) => c.with_default(v, d)?,
+                            None => v,
+                        };
+                        c.put_target(pre.as_ref(), binding, v2)?;
+                        c.release(v);
+                        if let Some(t) = &pre {
+                            c.target_release(t);
+                        }
                     }
-                    None => _ = self.emit(Insn::IteratorClose { iter }),
-                }
+                    match &a.rest {
+                        Some(r) => {
+                            let pre = c.pre_target(&r.target)?;
+                            c.emit(Insn::IteratorRest { iter });
+                            let v = c.temp();
+                            c.emit(Insn::Star(v));
+                            c.put_target(pre.as_ref(), &r.target, v)?;
+                            c.release(v);
+                            if let Some(t) = &pre {
+                                c.target_release(t);
+                            }
+                        }
+                        None => _ = c.emit(Insn::IteratorClose { iter }),
+                    }
+                    Ok(())
+                })?;
                 self.release(iter);
             }
             AssignmentTarget::ObjectAssignmentTarget(o) => {
@@ -644,6 +667,26 @@ impl<'a> Compiler<'a, '_> {
             }
         }
         Ok(())
+    }
+
+    /// 数组解构的元素：目标不是模式就先求值它的引用（对象与键进临时寄存器）；是模式给 `None`，取到值再展开。
+    fn pre_target(&mut self, t: &'a AssignmentTarget<'a>) -> Result<Option<Target<'a>>, Error> {
+        match t.as_simple_assignment_target() {
+            Some(s) => Ok(Some(self.target(s)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// 把 `v` 写进先求好的目标，或按嵌套模式展开。
+    fn put_target(&mut self, pre: Option<&Target<'a>>, t: &'a AssignmentTarget<'a>, v: Reg) -> Result<(), Error> {
+        match pre {
+            Some(target) => {
+                self.emit(Insn::Ldar(v));
+                self.target_store(target);
+                Ok(())
+            }
+            None => self.assign_target(t, v),
+        }
     }
 
     fn assign_maybe_default(&mut self, e: &'a AssignmentTargetMaybeDefault<'a>, value: Reg) -> Result<(), Error> {

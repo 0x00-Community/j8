@@ -5916,8 +5916,11 @@ language/expressions/assignment/S11.13.1_A4_T2.js
 language/expressions/assignment/S11.13.1_A7_T4.js
 language/expressions/assignment/S8.12.5_A1.js
 language/expressions/assignment/S8.12.5_A2.js
+language/expressions/assignment/destructuring/default-expr-throws-iterator-return-get-throws.js
 language/expressions/assignment/destructuring/default-expr-throws-iterator-return-is-not-callable.js
+language/expressions/assignment/destructuring/iterator-destructuring-property-reference-target-evaluation-order.js
 language/expressions/assignment/destructuring/obj-prop-__proto__dup.js
+language/expressions/assignment/destructuring/target-assign-throws-iterator-return-get-throws.js
 language/expressions/assignment/destructuring/target-assign-throws-iterator-return-is-not-callable.js
 language/expressions/assignment/dstr/array-elem-init-assignment.js
 language/expressions/assignment/dstr/array-elem-init-evaluation.js
@@ -5931,6 +5934,7 @@ language/expressions/assignment/dstr/array-elem-iter-get-err.js
 language/expressions/assignment/dstr/array-elem-iter-nrml-close-err.js
 language/expressions/assignment/dstr/array-elem-iter-nrml-close-null.js
 language/expressions/assignment/dstr/array-elem-iter-nrml-close-skip.js
+language/expressions/assignment/dstr/array-elem-iter-thrw-close-err.js
 language/expressions/assignment/dstr/array-elem-iter-thrw-close-skip.js
 language/expressions/assignment/dstr/array-elem-nested-array-invalid.js
 language/expressions/assignment/dstr/array-elem-nested-array-null.js
@@ -5971,8 +5975,10 @@ language/expressions/assignment/dstr/array-elem-trlg-iter-get-err.js
 language/expressions/assignment/dstr/array-elem-trlg-iter-list-nrml-close-err.js
 language/expressions/assignment/dstr/array-elem-trlg-iter-list-nrml-close-null.js
 language/expressions/assignment/dstr/array-elem-trlg-iter-list-nrml-close-skip.js
+language/expressions/assignment/dstr/array-elem-trlg-iter-list-thrw-close-err.js
 language/expressions/assignment/dstr/array-elem-trlg-iter-list-thrw-close-skip.js
 language/expressions/assignment/dstr/array-elem-trlg-iter-rest-nrml-close-skip.js
+language/expressions/assignment/dstr/array-elem-trlg-iter-rest-thrw-close-err.js
 language/expressions/assignment/dstr/array-elem-trlg-iter-rest-thrw-close-skip.js
 language/expressions/assignment/dstr/array-elision-iter-abpt.js
 language/expressions/assignment/dstr/array-elision-iter-get-err.js
@@ -6007,8 +6013,10 @@ language/expressions/assignment/dstr/array-rest-elision.js
 language/expressions/assignment/dstr/array-rest-init.js
 language/expressions/assignment/dstr/array-rest-iter-get-err.js
 language/expressions/assignment/dstr/array-rest-iter-nrml-close-skip.js
+language/expressions/assignment/dstr/array-rest-iter-thrw-close-err.js
 language/expressions/assignment/dstr/array-rest-iter-thrw-close-skip.js
 language/expressions/assignment/dstr/array-rest-iteration.js
+language/expressions/assignment/dstr/array-rest-lref-err.js
 language/expressions/assignment/dstr/array-rest-lref.js
 language/expressions/assignment/dstr/array-rest-nested-array-invalid.js
 language/expressions/assignment/dstr/array-rest-nested-array-iter-thrw-close-skip.js
@@ -12909,7 +12917,9 @@ language/statements/for-of/array-contract.js
 language/statements/for-of/array-expand-contract.js
 language/statements/for-of/array-expand.js
 language/statements/for-of/array.js
+language/statements/for-of/body-dstr-assign-error.js
 language/statements/for-of/body-dstr-assign.js
+language/statements/for-of/body-put-error.js
 language/statements/for-of/break-from-catch.js
 language/statements/for-of/break-from-finally.js
 language/statements/for-of/break-from-try.js
@@ -12944,6 +12954,7 @@ language/statements/for-of/dstr/array-elem-iter-get-err.js
 language/statements/for-of/dstr/array-elem-iter-nrml-close-err.js
 language/statements/for-of/dstr/array-elem-iter-nrml-close-null.js
 language/statements/for-of/dstr/array-elem-iter-nrml-close-skip.js
+language/statements/for-of/dstr/array-elem-iter-thrw-close-err.js
 language/statements/for-of/dstr/array-elem-iter-thrw-close-skip.js
 language/statements/for-of/dstr/array-elem-nested-array-invalid.js
 language/statements/for-of/dstr/array-elem-nested-array-null.js
@@ -12962,6 +12973,8 @@ language/statements/for-of/dstr/array-elem-nested-obj-undefined.js
 language/statements/for-of/dstr/array-elem-nested-obj-yield-expr.js
 language/statements/for-of/dstr/array-elem-nested-obj-yield-ident-valid.js
 language/statements/for-of/dstr/array-elem-nested-obj.js
+language/statements/for-of/dstr/array-elem-put-const.js
+language/statements/for-of/dstr/array-elem-put-let.js
 language/statements/for-of/dstr/array-elem-put-obj-literal-optchain-prop-ref-init.js
 language/statements/for-of/dstr/array-elem-put-obj-literal-prop-ref-init-active.js
 language/statements/for-of/dstr/array-elem-put-obj-literal-prop-ref-init.js
@@ -12982,8 +12995,10 @@ language/statements/for-of/dstr/array-elem-trlg-iter-get-err.js
 language/statements/for-of/dstr/array-elem-trlg-iter-list-nrml-close-err.js
 language/statements/for-of/dstr/array-elem-trlg-iter-list-nrml-close-null.js
 language/statements/for-of/dstr/array-elem-trlg-iter-list-nrml-close-skip.js
+language/statements/for-of/dstr/array-elem-trlg-iter-list-thrw-close-err.js
 language/statements/for-of/dstr/array-elem-trlg-iter-list-thrw-close-skip.js
 language/statements/for-of/dstr/array-elem-trlg-iter-rest-nrml-close-skip.js
+language/statements/for-of/dstr/array-elem-trlg-iter-rest-thrw-close-err.js
 language/statements/for-of/dstr/array-elem-trlg-iter-rest-thrw-close-skip.js
 language/statements/for-of/dstr/array-elision-iter-abpt.js
 language/statements/for-of/dstr/array-elision-iter-get-err.js
@@ -13018,8 +13033,10 @@ language/statements/for-of/dstr/array-rest-elision.js
 language/statements/for-of/dstr/array-rest-init.js
 language/statements/for-of/dstr/array-rest-iter-get-err.js
 language/statements/for-of/dstr/array-rest-iter-nrml-close-skip.js
+language/statements/for-of/dstr/array-rest-iter-thrw-close-err.js
 language/statements/for-of/dstr/array-rest-iter-thrw-close-skip.js
 language/statements/for-of/dstr/array-rest-iteration.js
+language/statements/for-of/dstr/array-rest-lref-err.js
 language/statements/for-of/dstr/array-rest-lref.js
 language/statements/for-of/dstr/array-rest-nested-array-invalid.js
 language/statements/for-of/dstr/array-rest-nested-array-iter-thrw-close-skip.js
@@ -13038,6 +13055,8 @@ language/statements/for-of/dstr/array-rest-nested-obj-undefined.js
 language/statements/for-of/dstr/array-rest-nested-obj-yield-expr.js
 language/statements/for-of/dstr/array-rest-nested-obj-yield-ident-valid.js
 language/statements/for-of/dstr/array-rest-nested-obj.js
+language/statements/for-of/dstr/array-rest-put-const.js
+language/statements/for-of/dstr/array-rest-put-let.js
 language/statements/for-of/dstr/array-rest-put-prop-ref-no-get.js
 language/statements/for-of/dstr/array-rest-put-prop-ref-user-err-iter-close-skip.js
 language/statements/for-of/dstr/array-rest-put-prop-ref-user-err.js
@@ -13234,6 +13253,8 @@ language/statements/for-of/dstr/obj-id-init-order.js
 language/statements/for-of/dstr/obj-id-init-simple-no-strict.js
 language/statements/for-of/dstr/obj-id-init-yield-expr.js
 language/statements/for-of/dstr/obj-id-init-yield-ident-valid.js
+language/statements/for-of/dstr/obj-id-put-const.js
+language/statements/for-of/dstr/obj-id-put-let.js
 language/statements/for-of/dstr/obj-id-put-unresolvable-no-strict.js
 language/statements/for-of/dstr/obj-id-simple-no-strict.js
 language/statements/for-of/dstr/obj-prop-elem-init-assignment-missing.js
@@ -13273,6 +13294,8 @@ language/statements/for-of/dstr/obj-prop-nested-obj-undefined.js
 language/statements/for-of/dstr/obj-prop-nested-obj-yield-expr.js
 language/statements/for-of/dstr/obj-prop-nested-obj-yield-ident-valid.js
 language/statements/for-of/dstr/obj-prop-nested-obj.js
+language/statements/for-of/dstr/obj-prop-put-const.js
+language/statements/for-of/dstr/obj-prop-put-let.js
 language/statements/for-of/dstr/obj-prop-put-order.js
 language/statements/for-of/dstr/obj-prop-put-prop-ref-no-get.js
 language/statements/for-of/dstr/obj-prop-put-prop-ref-user-err.js
@@ -13283,6 +13306,7 @@ language/statements/for-of/dstr/obj-rest-empty-obj.js
 language/statements/for-of/dstr/obj-rest-getter-abrupt-get-error.js
 language/statements/for-of/dstr/obj-rest-not-last-element-invalid.js
 language/statements/for-of/dstr/obj-rest-number.js
+language/statements/for-of/dstr/obj-rest-put-const.js
 language/statements/for-of/dstr/obj-rest-same-name.js
 language/statements/for-of/dstr/obj-rest-str-val.js
 language/statements/for-of/dstr/obj-rest-symbol-val.js
@@ -13404,6 +13428,8 @@ language/statements/for-of/iterator-close-non-object.js
 language/statements/for-of/iterator-close-non-throw-get-method-abrupt.js
 language/statements/for-of/iterator-close-non-throw-get-method-is-null.js
 language/statements/for-of/iterator-close-non-throw-get-method-non-callable.js
+language/statements/for-of/iterator-close-throw-get-method-abrupt.js
+language/statements/for-of/iterator-close-throw-get-method-non-callable.js
 language/statements/for-of/iterator-close-via-break.js
 language/statements/for-of/iterator-close-via-continue.js
 language/statements/for-of/iterator-close-via-return.js
@@ -13416,6 +13442,11 @@ language/statements/for-of/iterator-next-result-value-attr.js
 language/statements/for-of/let-array-with-newline.js
 language/statements/for-of/let-block-with-newline.js
 language/statements/for-of/let-identifier-with-newline.js
+language/statements/for-of/map-contract-expand.js
+language/statements/for-of/map-contract.js
+language/statements/for-of/map-expand-contract.js
+language/statements/for-of/map-expand.js
+language/statements/for-of/map.js
 language/statements/for-of/nested.js
 language/statements/for-of/return-from-catch.js
 language/statements/for-of/return-from-finally.js
@@ -13424,6 +13455,11 @@ language/statements/for-of/return.js
 language/statements/for-of/scope-body-lex-boundary.js
 language/statements/for-of/scope-body-lex-close.js
 language/statements/for-of/scope-body-var-none.js
+language/statements/for-of/set-contract-expand.js
+language/statements/for-of/set-contract.js
+language/statements/for-of/set-expand-contract.js
+language/statements/for-of/set-expand.js
+language/statements/for-of/set.js
 language/statements/for-of/string-astral.js
 language/statements/for-of/string-bmp.js
 language/statements/for-of/throw-from-catch.js
@@ -14924,6 +14960,7 @@ staging/sm/class/superPropStatics.js
 staging/sm/class/superThisStrictNoBoxing.js
 staging/sm/class/uninitializedThisError.js
 staging/sm/destructuring/array-default-class.js
+staging/sm/destructuring/array-iterator-close.js
 staging/sm/destructuring/iterator-primitive.js
 staging/sm/expressions/delete-constant-folded-and-or.js
 staging/sm/expressions/object-literal-accessor-property-name.js

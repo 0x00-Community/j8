@@ -807,6 +807,17 @@ impl Executor {
                         a.iterator_close(regs[d])?;
                     }
                 }
+                Insn::IteratorCloseQuiet { iter } => {
+                    let d = r(iter);
+                    if !a.to_boolean(regs[d + 2]) {
+                        regs[d + 2] = true.into();
+                        // 原来的异常优先：`return` 不可调或自己抛错都不管
+                        match a.iterator_close(regs[d]) {
+                            Ok(()) | Err(Error::Exception(_)) => {}
+                            Err(e) => return Err(e),
+                        }
+                    }
+                }
                 Insn::ForInKeys => {
                     let keys = a.for_in_keys(*acc)?;
                     *acc = a.array(keys).into();
@@ -1154,6 +1165,9 @@ mod tests {
             ("try { throw { code: 7 } } catch ({ code }) { code }", "7"),
             ("function d(a, b = () => a) { a = 2; return b() } d(1)", "2"),
             ("const { length } = 'abc'; const [first] = 'xyz'; length + first", "3x"),
+            ("var it = {}; let closed = 0; it[Symbol.iterator] = function () { return { next() { return { done: false } }, return() { closed++; return {} } } }; function t() { throw 'lhs' } let r; try { 0, [...{}[t()]] = it } catch (e) { r = e } r + closed", "lhs1"),
+            ("const log = []; const it = { [Symbol.iterator]() { return { next() { log.push('next'); return { done: false, value: 1 } }, return() { log.push('ret'); return {} } } } }; const o = { get p() { log.push('ref'); return {} } }; [o.p.x] = it; log.join()", "ref,next,ret"),
+            ("let c = 0; const it = { [Symbol.iterator]() { return { next: () => ({ done: false, value: undefined }), return() { c++; return {} } } } }; try { const [a = (() => { throw 1 })()] = it } catch {} c", "1"),
             // 阶段 4：Symbol、迭代、for-of / for-in、生成器
             ("const s = Symbol('d'); const o = { [s]: 1 }; o[s] + typeof s + s.description + String(s)", "1symboldSymbol(d)"),
             ("const o = { [Symbol.toPrimitive](h) { return h === 'number' ? 42 : 'str' } }; +o + ',' + `${o}`", "42,str"),

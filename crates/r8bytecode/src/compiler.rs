@@ -540,27 +540,50 @@ impl<'a> Compiler<'a, '_> {
             }
             BindingPattern::ArrayPattern(a) => {
                 let iter = self.iterate(value);
-                for e in &a.elements {
-                    self.emit(Insn::IteratorNext { iter });
-                    let Some(e) = e else { continue };
-                    let t = self.temp();
-                    self.emit(Insn::Star(t));
-                    self.bind_pattern(e, t, init)?;
-                    self.release(t);
-                }
-                match &a.rest {
-                    Some(r) => {
-                        self.emit(Insn::IteratorRest { iter });
-                        let t = self.temp();
-                        self.emit(Insn::Star(t));
-                        self.bind_pattern(&r.argument, t, init)?;
-                        self.release(t);
+                // 默认值等抛出时要先关迭代器
+                self.closing_on_throw(iter, |c| {
+                    for e in &a.elements {
+                        c.emit(Insn::IteratorNext { iter });
+                        let Some(e) = e else { continue };
+                        let t = c.temp();
+                        c.emit(Insn::Star(t));
+                        c.bind_pattern(e, t, init)?;
+                        c.release(t);
                     }
-                    None => _ = self.emit(Insn::IteratorClose { iter }),
-                }
+                    match &a.rest {
+                        Some(r) => {
+                            c.emit(Insn::IteratorRest { iter });
+                            let t = c.temp();
+                            c.emit(Insn::Star(t));
+                            c.bind_pattern(&r.argument, t, init)?;
+                            c.release(t);
+                        }
+                        None => _ = c.emit(Insn::IteratorClose { iter }),
+                    }
+                    Ok(())
+                })?;
                 self.release(iter);
             }
         }
+        Ok(())
+    }
+
+    /// 跑 `f`；期间抛出就先关掉迭代器 `iter`（没走完才调 `return`）再接着抛。
+    pub(crate) fn closing_on_throw(&mut self, iter: Reg, f: impl FnOnce(&mut Self) -> Result<(), Error>) -> Result<(), Error> {
+        let on_throw = self.jump(Insn::PushHandler);
+        self.frame().controls.push(Control::Handler);
+        f(self)?;
+        self.frame().controls.pop();
+        self.emit(Insn::PopHandler);
+        let end = self.jump(Insn::Jump);
+        self.land(on_throw);
+        let e = self.temp();
+        self.emit(Insn::Star(e));
+        self.emit(Insn::IteratorCloseQuiet { iter });
+        self.emit(Insn::Ldar(e));
+        self.emit(Insn::Throw);
+        self.release(e);
+        self.land(end);
         Ok(())
     }
 
@@ -617,7 +640,7 @@ impl<'a> Compiler<'a, '_> {
         // 循环体抛出：关迭代器再接着抛
         self.land(on_throw);
         self.emit(Insn::Star(v));
-        self.emit(Insn::IteratorClose { iter });
+        self.emit(Insn::IteratorCloseQuiet { iter });
         self.emit(Insn::Ldar(v));
         self.emit(Insn::Throw);
         self.pop_jump(broke, Some(top));

@@ -77,6 +77,7 @@
         {"name": "IteratorNext", "doc": "走一步：acc = 下一个值；走完了 acc = undefined 并置 `iter+2`", "mnemonic": "iterator.next", "fields": [{"name": "iter", "ty": "Reg"}]},
         {"name": "IteratorRest", "doc": "acc = 剩下的全部值组成的数组", "mnemonic": "iterator.rest", "fields": [{"name": "iter", "ty": "Reg"}]},
         {"name": "IteratorClose", "doc": "没走完就调迭代器的 `return`", "mnemonic": "iterator.close", "fields": [{"name": "iter", "ty": "Reg"}]},
+        {"name": "IteratorCloseQuiet", "doc": "抛出路径上关迭代器：没走完就调 `return`，它自己的错误丢掉（原来的异常优先）", "mnemonic": "iterator.close_quiet", "fields": [{"name": "iter", "ty": "Reg"}]},
         {"name": "ForInKeys", "doc": "acc = acc 的可枚举字符串键（自有在前，再沿原型链，去重）", "mnemonic": "for_in.keys"},
         {"name": "Yield", "doc": "挂起生成器交出 acc；恢复时 acc = 送进来的值，`mode` = 恢复方式", "mnemonic": "yield", "fields": [{"name": "mode", "ty": "Reg"}]},
         {"name": "Await", "doc": "挂起 async 函数等 acc；恢复时 acc = 结果，`mode` = 恢复方式", "mnemonic": "await", "fields": [{"name": "mode", "ty": "Reg"}]},
