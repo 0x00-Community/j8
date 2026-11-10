@@ -1,7 +1,7 @@
 use alloc::format;
 use alloc::string::String;
 
-use crate::{Context, Error, Scope, Value};
+use crate::{ContextRoot, Error, Global, Isolate};
 
 /// 一段脚本：源码与文件名（只用于报错）。
 #[derive(Clone, Copy, Debug)]
@@ -27,6 +27,7 @@ impl Source<'_> {
 
 /// 执行引擎的统一入口。
 pub trait Engine {
-    /// 在 `cx` 里跑完 `src`，返回最后一条表达式语句的值。
-    fn eval<'gc>(&mut self, scope: &mut Scope<'gc, '_>, cx: Context<'gc>, src: &Source<'_>) -> Result<Value<'gc>, Error>;
+    /// 在执行环境 `cx` 里跑完 `src`（含排空微任务），返回最后一条表达式语句的值。
+    /// 引擎自己分片进入 isolate，片与片之间回收。
+    fn eval(&mut self, isolate: &mut Isolate<'_>, cx: &ContextRoot, src: &Source<'_>) -> Result<Global, Error>;
 }

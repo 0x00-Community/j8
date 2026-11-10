@@ -8,7 +8,6 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use r8executor::Executor;
 use r8frame::{CreateParams, Isolate, Source};
 use r8platform::DefaultPlatform;
 
@@ -71,22 +70,19 @@ impl Job {
     fn run(&self) -> ExitCode {
         let platform = DefaultPlatform::default();
         let mut isolate = Isolate::new(&platform, CreateParams::default());
-        let mut executor = Executor::default();
-        isolate.enter(|scope| {
-            let mut session = Session::new(scope, &mut executor);
-            match self {
-                Job::Repl => session.repl(),
-                Job::Script { text, file, print } => match session.eval(&Source { text, file }) {
-                    Outcome::Value(v) => {
-                        if *print {
-                            println!("{v}");
-                        }
-                        ExitCode::SUCCESS
+        let mut session = Session::new(&mut isolate);
+        match self {
+            Job::Repl => session.repl(),
+            Job::Script { text, file, print } => match session.eval(&Source { text, file }) {
+                Outcome::Value(v) => {
+                    if *print {
+                        println!("{v}");
                     }
-                    failed => failed.report(),
-                },
-            }
-        })
+                    ExitCode::SUCCESS
+                }
+                failed => failed.report(),
+            },
+        }
     }
 }
 

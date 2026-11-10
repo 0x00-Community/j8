@@ -149,8 +149,4 @@ impl<'gc> Scope<'gc, '_> {
         Context(Gc::new(self.mc, realm))
     }
 
-    /// 在 `cx` 里用 `engine` 跑一段脚本。
-    pub fn run(&mut self, cx: Context<'gc>, engine: &mut impl crate::Engine, src: &crate::Source<'_>) -> Result<Value<'gc>, crate::Error> {
-        engine.eval(self, cx, src)
-    }
 }

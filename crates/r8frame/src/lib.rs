@@ -30,7 +30,7 @@ mod value;
 pub use agent::{Agent, Invoke, Resume, Step};
 pub use engine::{Engine, Source};
 pub use error::Error;
-pub use handle::Global;
+pub use handle::{ContextRoot, Global};
 pub use isolate::{CreateParams, Isolate, Scope};
 pub use object::{BigIntData, Bound, Closure, JsBigInt, RegExpData, Coroutine, CoroutineState, Env, IterKind, IteratorState, Job, JsEnv, JsObject, JsString, JsSymbol, Native, NativeFn, ObjectData, ObjectKind, Property, Reaction, Settled, Slot, Suspended, SymbolData};
 pub use bigint::Numeric;

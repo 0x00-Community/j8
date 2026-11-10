@@ -9,12 +9,16 @@ extern crate alloc;
 use alloc::vec::Vec;
 use core::cell::Cell;
 
-use r8bytecode::{Constant, Function, FunctionKind, Insn, Label, Module, PropertyKind, Reg};
-use gc_arena::Gc;
+use r8bytecode::{Constant, Function, FunctionKind, Insn, Module, PropertyKind, Reg};
+use gc_arena::{Collect, Gc};
 use r8frame::{Agent, Closure, Coroutine, CoroutineState, Env, Error, ErrorKind, FuncId, Invoke, IterRecord, JsEnv, JsObject, ObjectData, ObjectKind, Property, Resume, Slot, Step, Suspended, Value};
 
 /// 调用深度上限（含宿主函数里重入的 JS），过了抛 RangeError
 const STACK_LIMIT: usize = 10_000;
+
+/// 一片最多跑这么多条指令，片与片之间回收
+#[cfg(feature = "compile")]
+const SLICE: usize = 10_000;
 
 /// 一个已加载的函数：本体加它所在模块的第一个函数编号（`CreateClosure` 的下标相对它）。
 struct Loaded {
@@ -22,13 +26,17 @@ struct Loaded {
     func: Function,
 }
 
-/// 一个异常处理器：落点与装的时候的环境。
+/// 一个异常处理器：落点（指令下标）与装的时候的环境。
+#[derive(Collect)]
+#[collect(no_drop)]
 struct Handler<'gc> {
-    target: Label,
+    target: u32,
     env: Option<JsEnv<'gc>>,
 }
 
 /// 一个调用帧。
+#[derive(Collect)]
+#[collect(no_drop)]
 struct Frame<'gc> {
     func: FuncId,
     pc: usize,
@@ -44,7 +52,9 @@ struct Frame<'gc> {
     args: Vec<Value<'gc>>,
 }
 
-/// 一次执行的全部状态。
+/// 一次执行的全部状态（片与片之间挂在根上）。
+#[derive(Collect)]
+#[collect(no_drop)]
 struct State<'gc> {
     regs: Vec<Value<'gc>>,
     frames: Vec<Frame<'gc>>,
@@ -57,7 +67,7 @@ impl<'gc> State<'gc> {
     fn unwind(&mut self, v: Value<'gc>) -> bool {
         loop {
             if let Some(h) = self.f.handlers.pop() {
-                self.f.pc = h.target.0 as usize;
+                self.f.pc = h.target as usize;
                 self.f.env = h.env;
                 self.acc = v;
                 return true;
@@ -77,6 +87,9 @@ impl<'gc> State<'gc> {
 enum Outcome<'gc> {
     Return(Value<'gc>),
     Suspend { value: Value<'gc>, awaiting: bool, saved: Suspended<'gc> },
+    /// 指令配额用完：状态原样交回，下一片接着跑（只有分片执行的 `Engine::eval` 会用）
+    #[cfg_attr(not(feature = "compile"), expect(dead_code, reason = "只有 compile feature 的 Engine::eval 分片执行"))]
+    Paused(alloc::boxed::Box<State<'gc>>),
 }
 
 impl<'gc> Outcome<'gc> {
@@ -84,7 +97,7 @@ impl<'gc> Outcome<'gc> {
     fn returned(self) -> Value<'gc> {
         match self {
             Outcome::Return(v) => v,
-            Outcome::Suspend { .. } => unreachable!("only coroutines suspend"),
+            Outcome::Suspend { .. } | Outcome::Paused(_) => unreachable!("only coroutines suspend, only the outermost execution pauses"),
         }
     }
 }
@@ -126,7 +139,16 @@ impl Executor {
         let this = Value::Object(a.realm.global);
         let mut regs = Vec::new();
         let f = self.enter(a, &mut regs, Closure::new(main, None), Value::Undefined, this, &[]);
-        self.execute(a, State { regs, frames: Vec::new(), f, acc: Value::Undefined }).map(Outcome::returned)
+        self.execute(a, State { regs, frames: Vec::new(), f, acc: Value::Undefined }, None).map(Outcome::returned)
+    }
+
+    /// 脚本 `main` 的初始执行状态（`this` 是全局对象）。
+    #[cfg(feature = "compile")]
+    fn script_state<'gc>(&self, a: &mut Agent<'gc, '_>, main: FuncId) -> State<'gc> {
+        let this = Value::Object(a.realm.global);
+        let mut regs = Vec::new();
+        let f = self.enter(a, &mut regs, Closure::new(main, None), Value::Undefined, this, &[]);
+        State { regs, frames: Vec::new(), f, acc: Value::Undefined }
     }
 
     /// 协程函数被调：生成器给出还没跑的生成器对象；async 函数跑到第一个 `await`，给出它的 Promise。
@@ -427,11 +449,13 @@ impl Executor {
     }
 
     /// 跑到最外层帧返回；异常先找处理器，接不住才往外抛。
-    fn execute<'gc>(&self, a: &mut Agent<'gc, '_>, mut st: State<'gc>) -> Result<Outcome<'gc>, Error> {
+    /// `budget` 只给最外层：用完就带着状态停下。
+    fn execute<'gc>(&self, a: &mut Agent<'gc, '_>, mut st: State<'gc>, mut budget: Option<usize>) -> Result<Outcome<'gc>, Error> {
         let base = self.depth.get();
         let r = loop {
-            match self.run(a, &mut st, base) {
-                Ok(v) => break Ok(v),
+            match self.run(a, &mut st, base, &mut budget) {
+                Ok(Some(v)) => break Ok(v),
+                Ok(None) => break Ok(Outcome::Paused(alloc::boxed::Box::new(st))),
                 Err(Error::Exception(g)) => {
                     let v = a.local(&g);
                     if !st.unwind(v) {
@@ -447,9 +471,16 @@ impl Executor {
 
     /// 主循环：出错直接返回，由 [`execute`](Self::execute) 展开。
     #[expect(clippy::too_many_lines, reason = "一条指令一个分支，拆开反而难读")]
-    fn run<'gc>(&self, a: &mut Agent<'gc, '_>, st: &mut State<'gc>, depth: usize) -> Result<Outcome<'gc>, Error> {
+    fn run<'gc>(&self, a: &mut Agent<'gc, '_>, st: &mut State<'gc>, depth: usize, budget: &mut Option<usize>) -> Result<Option<Outcome<'gc>>, Error> {
         let State { regs, frames, f, acc } = st;
         loop {
+            // 配额用完：停在下一条指令之前，状态完整
+            if let Some(b) = budget {
+                if *b == 0 {
+                    return Ok(None);
+                }
+                *b -= 1;
+            }
             let loaded = self.function(f.func);
             let func = &loaded.func;
             let insn = func.insns[f.pc];
@@ -707,7 +738,7 @@ impl Executor {
                         Callee::Done(v) => *acc = v,
                     }
                 }
-                Insn::PushHandler(target) => f.handlers.push(Handler { target, env: f.env }),
+                Insn::PushHandler(target) => f.handlers.push(Handler { target: target.0, env: f.env }),
                 Insn::PopHandler => _ = f.handlers.pop(),
                 Insn::Throw => return Err(a.throw_value(*acc)),
                 Insn::Return => {
@@ -719,7 +750,7 @@ impl Executor {
                             regs.truncate(f.base);
                             *f = caller;
                         }
-                        None => return Ok(Outcome::Return(*acc)),
+                        None => return Ok(Some(Outcome::Return(*acc))),
                     }
                 }
                 Insn::Yield { mode } | Insn::Await { mode } => {
@@ -729,11 +760,11 @@ impl Executor {
                         pc: f.pc,
                         regs: core::mem::take(regs),
                         env: f.env,
-                        handlers: f.handlers.drain(..).map(|h| (h.target.0, h.env)).collect(),
+                        handlers: f.handlers.drain(..).map(|h| (h.target, h.env)).collect(),
                         args: core::mem::take(&mut f.args),
                         mode: Some(mode.0),
                     };
-                    return Ok(Outcome::Suspend { value: *acc, awaiting: matches!(insn, Insn::Await { .. }), saved });
+                    return Ok(Some(Outcome::Suspend { value: *acc, awaiting: matches!(insn, Insn::Await { .. }), saved }));
                 }
                 Insn::GetIterator { dst } => {
                     let rec = a.get_iterator(*acc)?;
@@ -857,7 +888,7 @@ impl<'gc> Invoke<'gc> for Executor {
         if let Some(m) = saved.mode {
             regs[usize::from(m)] = f64::from(mode).into();
         }
-        let handlers = saved.handlers.into_iter().map(|(t, env)| Handler { target: Label(t), env }).collect();
+        let handlers = saved.handlers.into_iter().map(|(target, env)| Handler { target, env }).collect();
         let f = Frame { func: saved.func, pc: saved.pc, base: 0, env: saved.env, handlers, new_target: Value::Undefined, new_this: None, args: saved.args };
         match self.run_state(a, State { regs, frames: Vec::new(), f, acc: value }, level) {
             Ok(Outcome::Return(v)) => {
@@ -868,6 +899,7 @@ impl<'gc> Invoke<'gc> for Executor {
                 Self::set_state(a, co, CoroutineState::Suspended(saved));
                 Ok(if awaiting { Step::Await(value) } else { Step::Yield(value) })
             }
+            Ok(Outcome::Paused(_)) => unreachable!("coroutine steps run without a budget"),
             Err(e) => {
                 Self::set_state(a, co, CoroutineState::Completed);
                 Err(e)
@@ -896,7 +928,7 @@ impl Executor {
 
     fn run_state<'gc>(&self, a: &mut Agent<'gc, '_>, st: State<'gc>, level: usize) -> Result<Outcome<'gc>, Error> {
         let saved = self.depth.replace(level);
-        let r = self.execute(a, st);
+        let r = self.execute(a, st, None);
         self.depth.set(saved);
         r
     }
@@ -909,15 +941,47 @@ impl Executor {
     }
 }
 
+/// 片与片之间挂在根上的执行状态。
+#[cfg(feature = "compile")]
+type Parked = gc_arena::DynamicRoot<gc_arena::Rootable![gc_arena::RefLock<Option<State<'_>>>]>;
+
+/// 一片跑完的结果。
+#[cfg(feature = "compile")]
+enum Slice {
+    Done(r8frame::Global),
+    Paused(Parked),
+}
+
 #[cfg(feature = "compile")]
 impl r8frame::Engine for Executor {
-    fn eval<'gc>(&mut self, scope: &mut r8frame::Scope<'gc, '_>, cx: r8frame::Context<'gc>, src: &r8frame::Source<'_>) -> Result<Value<'gc>, Error> {
+    /// 分片跑：每片最多 [`SLICE`] 条指令，停下时执行状态挂到根上，`enter` 返回时回收一段，再进来接着跑。
+    fn eval(&mut self, isolate: &mut r8frame::Isolate<'_>, cx: &r8frame::ContextRoot, src: &r8frame::Source<'_>) -> Result<r8frame::Global, Error> {
         let main = self.load(Module::try_from(src)?);
         let this: &Executor = self;
-        let mut agent = scope.agent(cx, this);
-        let v = this.run_script(&mut agent, main)?;
-        agent.run_jobs()?;
-        Ok(v)
+        let mut parked: Option<Parked> = None;
+        loop {
+            let previous = parked.take();
+            let slice = isolate.enter(|scope| -> Result<Slice, Error> {
+                let realm = scope.context_of(cx);
+                let mut a = scope.agent(realm, this);
+                let st = match previous {
+                    Some(root) => a.fetch(&root).borrow_mut(a.mc).take().expect("a parked state"),
+                    None => this.script_state(&mut a, main),
+                };
+                match this.execute(&mut a, st, Some(SLICE))? {
+                    Outcome::Paused(st) => Ok(Slice::Paused(a.stash(Gc::new(a.mc, gc_arena::RefLock::new(Some(*st)))))),
+                    Outcome::Return(v) => {
+                        a.run_jobs()?;
+                        Ok(Slice::Done(a.global(v)))
+                    }
+                    Outcome::Suspend { .. } => unreachable!("scripts do not suspend"),
+                }
+            })?;
+            match slice {
+                Slice::Done(g) => return Ok(g),
+                Slice::Paused(root) => parked = Some(root),
+            }
+        }
     }
 }
 
@@ -965,12 +1029,13 @@ mod tests {
         let platform = Capture::default();
         let mut isolate = Isolate::new(&platform, CreateParams::default());
         let mut executor = Executor::default();
+        let cx = isolate.enter(|scope| scope.persist(scope.context(&Builtins)));
+        let r = isolate.run(&mut executor, &cx, &Source { text: src, file: "t.js" });
         let r = isolate.enter(|scope| {
-            let cx = scope.context(&Builtins);
-            let r = scope.run(cx, &mut executor, &Source { text: src, file: "t.js" });
-            let mut agent = scope.agent(cx, &executor);
+            let realm = scope.context_of(&cx);
+            let mut agent = scope.agent(realm, &executor);
             let (ok, v) = match r {
-                Ok(v) => (true, v),
+                Ok(g) => (true, agent.local(&g)),
                 Err(Error::Exception(g)) => (false, agent.local(&g)),
                 Err(e) => return Err(alloc::format!("{e}")),
             };
@@ -978,6 +1043,22 @@ mod tests {
             if ok { Ok(text) } else { Err(text) }
         });
         (r, platform.0.into_inner().expect("an unpoisoned log"))
+    }
+
+    /// 长循环不停分配临时对象：一次 `eval` 跑完，期间已经完成了回收（分片之间回收）。
+    #[test]
+    fn collects_while_running() {
+        let platform = Capture::default();
+        let mut isolate = Isolate::new(&platform, CreateParams::default());
+        let mut executor = Executor::default();
+        let cx = isolate.enter(|scope| scope.persist(scope.context(&Builtins)));
+        let before = isolate.gc_cycles();
+        let src = "let s = 0; for (let i = 0; i < 300000; i++) { const o = { v: [i, i] }; s += o.v[0] % 2 } s";
+        let r = isolate.run(&mut executor, &cx, &Source { text: src, file: "t.js" });
+        assert!(r.is_ok());
+        let cycles = isolate.gc_cycles() - before;
+        std::println!("gc cycles during one eval: {cycles}");
+        assert!(cycles > 0, "no collection finished while the script ran");
     }
 
     #[test]

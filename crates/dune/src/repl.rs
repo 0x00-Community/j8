@@ -24,7 +24,7 @@ impl TryFrom<&str> for Command {
     }
 }
 
-impl Session<'_, '_, '_> {
+impl Session<'_, '_> {
     /// 一行一段源码，全部共用同一个全局对象；读到 EOF（Ctrl-D）或 `.exit` 结束。
     pub fn repl(&mut self) -> ExitCode {
         println!("dune {}（r8）。.help 列出命令，Ctrl-D 退出", env!("CARGO_PKG_VERSION"));

@@ -1,8 +1,9 @@
 use core::fmt;
 
+use gc_arena::arena::Root;
 use gc_arena::{DynamicRoot, Gc, Rootable};
 
-use crate::{Agent, Scope, Value};
+use crate::{Agent, Context, Scope, Value};
 
 /// 持久句柄：跨多次 [`Isolate::enter`](crate::Isolate::enter) 存活，drop 即放掉。
 pub struct Global(DynamicRoot<Rootable![Value<'_>]>);
@@ -13,7 +14,25 @@ impl fmt::Debug for Global {
     }
 }
 
+/// 跨多次 [`Isolate::enter`](crate::Isolate::enter) 保留的执行环境。
+pub struct ContextRoot(DynamicRoot<Rootable![Context<'_>]>);
+
+impl fmt::Debug for ContextRoot {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("ContextRoot")
+    }
+}
+
 impl<'gc> Agent<'gc, '_> {
+    /// 把任意可回收的东西挂到根上（执行引擎在片与片之间存执行状态用）。
+    pub fn stash<R: for<'a> Rootable<'a>>(&self, v: Gc<'gc, Root<'gc, R>>) -> DynamicRoot<R> {
+        self.roots.stash::<R>(self.mc, v)
+    }
+
+    pub fn fetch<R: for<'a> Rootable<'a>>(&self, root: &DynamicRoot<R>) -> Gc<'gc, Root<'gc, R>> {
+        self.roots.fetch(root)
+    }
+
     pub fn global(&self, v: Value<'gc>) -> Global {
         Global(self.roots.stash(self.mc, Gc::new(self.mc, v)))
     }
@@ -24,6 +43,16 @@ impl<'gc> Agent<'gc, '_> {
 }
 
 impl<'gc> Scope<'gc, '_> {
+    /// 把执行环境存成跨 `enter` 的句柄。
+    pub fn persist(&self, cx: Context<'gc>) -> ContextRoot {
+        ContextRoot(self.roots.stash::<Rootable![Context<'_>]>(self.mc, Gc::new(self.mc, cx)))
+    }
+
+    /// 取回执行环境。
+    pub fn context_of(&self, root: &ContextRoot) -> Context<'gc> {
+        *self.roots.fetch(&root.0)
+    }
+
     /// 把一个值升成持久句柄。
     pub fn global(&self, v: Value<'gc>) -> Global {
         Global(self.roots.stash(self.mc, Gc::new(self.mc, v)))

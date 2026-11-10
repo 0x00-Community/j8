@@ -2,7 +2,7 @@ use std::process::ExitCode;
 
 use r8builtins::Builtins;
 use r8executor::Executor;
-use r8frame::{Context, Error, Scope, Source, Value};
+use r8frame::{ContextRoot, Error, Global, Isolate, Source};
 
 /// 一段源码跑完的结果，都已按 ToString 转成文本。
 pub enum Outcome {
@@ -25,32 +25,34 @@ impl Outcome {
     }
 }
 
-/// 一次进入 isolate 里的执行环境：多段源码共用同一个全局对象（REPL 一行一段）。
-pub struct Session<'s, 'gc, 'i> {
-    scope: &'s mut Scope<'gc, 'i>,
-    executor: &'s mut Executor,
-    cx: Context<'gc>,
+/// 一个执行环境：多段源码共用同一个全局对象（REPL 一行一段），执行器与环境都活过多次进入。
+pub struct Session<'s, 'p> {
+    isolate: &'s mut Isolate<'p>,
+    executor: Executor,
+    cx: ContextRoot,
 }
 
-impl<'s, 'gc, 'i> Session<'s, 'gc, 'i> {
-    pub fn new(scope: &'s mut Scope<'gc, 'i>, executor: &'s mut Executor) -> Self {
-        let cx = scope.context(&Builtins);
-        Self { scope, executor, cx }
+impl<'s, 'p> Session<'s, 'p> {
+    pub fn new(isolate: &'s mut Isolate<'p>) -> Self {
+        let cx = isolate.enter(|scope| scope.persist(scope.context(&Builtins)));
+        Self { isolate, executor: Executor::default(), cx }
     }
 
-    /// 值 ⇒ 文本（ToString；它自己再抛就给个占位）
-    fn text(&mut self, v: Value<'gc>) -> String {
-        let mut agent = self.scope.agent(self.cx, &*self.executor);
-        agent.to_string(v).map_or_else(|_| String::from("<ToString threw>"), |s| String::from(&**s))
+    /// 持久句柄里的值 ⇒ 文本（ToString；它自己再抛就给个占位）
+    fn text(&mut self, g: &Global) -> String {
+        let (executor, cx) = (&self.executor, &self.cx);
+        self.isolate.enter(|scope| {
+            let realm = scope.context_of(cx);
+            let mut agent = scope.agent(realm, executor);
+            let v = agent.local(g);
+            agent.to_string(v).map_or_else(|_| String::from("<ToString threw>"), |s| String::from(&**s))
+        })
     }
 
     pub fn eval(&mut self, src: &Source<'_>) -> Outcome {
-        match self.scope.run(self.cx, &mut *self.executor, src) {
-            Ok(v) => Outcome::Value(self.text(v)),
-            Err(Error::Exception(g)) => {
-                let v = self.scope.local(&g);
-                Outcome::Thrown(self.text(v))
-            }
+        match self.isolate.run(&mut self.executor, &self.cx, src) {
+            Ok(g) => Outcome::Value(self.text(&g)),
+            Err(Error::Exception(g)) => Outcome::Thrown(self.text(&g)),
             Err(e) => Outcome::Failed(e.to_string()),
         }
     }

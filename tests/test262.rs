@@ -246,10 +246,11 @@ impl Case {
         let mut executor = Executor::default();
         let file = self.path.strip_prefix(Suite::test_dir()).unwrap_or(&self.path).display().to_string();
         let expected = self.meta.negative.as_ref();
+        let cx = isolate.enter(|scope| scope.persist(scope.context(&Builtins)));
+        let r = isolate.run(&mut executor, &cx, &Source { text: &src, file: &file });
         let (outcome, why) = isolate.enter(|scope| {
-            let cx = scope.context(&Builtins);
-            let r = scope.run(cx, &mut executor, &Source { text: &src, file: &file });
-            let mut agent = scope.agent(cx, &executor);
+            let realm = scope.context_of(&cx);
+            let mut agent = scope.agent(realm, &executor);
             match (r, expected) {
                 (Err(Error::Unsupported(m)), _) => (Outcome::Unsupported, m),
                 (Err(Error::Syntax(_)), Some(n)) if n.phase != Phase::Runtime && n.kind == ErrorType::SyntaxError => (Outcome::Pass, String::new()),

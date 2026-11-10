@@ -23,6 +23,7 @@
 堆用外部实现 [gc-arena](https://docs.rs/gc-arena)（增量标记清除，品牌生命周期，无 `'static`）：
 
 - `Isolate::enter(|scope| …)` 进入一次，`'gc` 是这次进入的品牌；闭包期间不回收，返回后按欠账增量回收
+- `Engine::eval` 拿 `&mut Isolate` 自己分片进入：每片最多一万条指令，停下时执行状态挂到根上、`enter` 返回时回收一段再接着跑；执行环境用 `ContextRoot` 跨片保留（宿主函数里重入的 JS 在当前片里跑完）
 - `Value<'gc>` 就是 V8 的 Local：出不了闭包，编译期保证
 - `Global` 是持久句柄（gc-arena `DynamicRoot`），跨多次 `enter` 存活，drop 即放掉
 
@@ -34,9 +35,11 @@ use r8platform::DefaultPlatform;
 
 let platform = DefaultPlatform::default();
 let mut isolate = Isolate::new(&platform, CreateParams::default());
+let mut executor = Executor::default();
+let cx = isolate.enter(|scope| scope.persist(scope.context(&Builtins)));
+let result = isolate.run(&mut executor, &cx, &Source { text: "1 + 2 * 3", file: "a.js" })?;
 isolate.enter(|scope| {
-    let cx = scope.context(&Builtins);
-    let v = scope.run(cx, &mut Executor, &Source { text: "1 + 2 * 3", file: "a.js" });
+    let v = scope.local(&result);
 });
 ```
 
@@ -89,7 +92,7 @@ cargo build --target riscv64gc-unknown-none-elf -p r8frame -p r8bytecode -p r8ex
 
 还不支持（报 `Error::Unsupported`，带 `文件:行:列`）：类的静态块 / 私有名 / 计算字段名、async 生成器 / `for await`。
 
-已知偏差：一次 `enter` 内不回收（长循环会一直涨内存）。
+已知偏差：宿主函数里重入的 JS（如 `map` 的回调）在当前片里跑完，期间不回收。
 
 ## test262
 
