@@ -1,0 +1,20 @@
+[package]
+name = "dune"
+description = "dune：r8 的 JavaScript 运行时命令行（对标 node / deno）"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "dune"
+path = "src/main.rs"
+
+[dependencies]
+r8frame.workspace = true
+r8platform.workspace = true
+r8builtins.workspace = true
+r8executor.workspace = true
+clap.workspace = true
+
+[lints]
+workspace = true
