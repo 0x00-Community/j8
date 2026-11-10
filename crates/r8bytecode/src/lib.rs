@@ -6,6 +6,10 @@ extern crate alloc;
 
 #[cfg(feature = "compile")]
 mod compiler;
+#[cfg(feature = "compile")]
+mod expr;
+#[cfg(feature = "compile")]
+mod scope;
 mod insn;
 
-pub use insn::{Constant, Function, Insn, Module, Reg};
+pub use insn::{Const, Constant, Function, Insn, Label, Module, Reg};

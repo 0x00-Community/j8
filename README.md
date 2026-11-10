@@ -46,10 +46,33 @@ cargo build --target riscv64gc-unknown-none-elf -p r8frame -p r8bytecode -p r8ex
 - `jspass`（本地外部仓库 `../jspass`）：字节码下降到 MLIR 方言
 - `tornado`：JIT 编译器与执行层调度器，按 `Profiler` 热度从 r8executor 升层，编不了就留在 r8executor
 
+## 字节码
+
+累加器式寄存器机（同 V8 Ignition）：结果都进隐式的 `acc`，二元运算 `acc = reg op acc`。
+
+- 调用约定：`r0` 是 `this`，`r1` 是被调函数本身（具名函数表达式靠它递归），形参从 `r2` 起；`Call` 的被调者、`this`、实参排在连续寄存器
+- 作用域：编译前预扫一遍（`scope.rs` 的 `Resolver`），找出被内层函数捕获的绑定放进堆上的 `Env` 链（`PushEnv` / `PopEnv` / `LdaEnv depth.slot`），其余放寄存器；`for (let …)` 每轮 `CloneEnv`，闭包各拿各的那一轮
+- 脚本顶层的 `var` / 函数 / `let` / `const` 是全局对象的属性（`LdaGlobal` / `StaGlobal`）
+- 执行器用显式帧栈（不靠宿主递归），调用深度上限 10000，超了抛 RangeError
+
+`r8executor` 里的 `javascript_semantics` 测试是一张逐条确定的 JS 语义表。
+
 ## 现状
 
-字节码编译器目前只支持：表达式语句、数字 / 字符串 / 布尔 / `null` / `undefined` 字面量、括号、一元 `-`、`+ - * / %`（`+` 遇字符串拼接）。
-其余写法报 `Error::Unsupported`，带 `文件:行:列`。
+支持：
+
+- 字面量（数 / 字符串 / 布尔 / `null` / 模板字符串）、对象字面量（含方法简写、计算键）、数组字面量
+- 全部算术、比较（`==` / `===` / 字符串按 UTF-16 比）、位运算、`**`、`typeof` / `void` / `!` / `~`、`&&` / `||` / `??`、`?:`、逗号
+- 赋值与复合赋值（含 `||=` / `&&=` / `??=`）、`++` / `--`，目标可以是名字或属性
+- `var` / `let` / `const`（块级作用域、对 `const` 赋值抛 TypeError）、函数声明提升
+- `if` / `while` / `do-while` / `for` / `switch` / 带标签的 `break` / `continue` / `return` / `throw`
+- 函数声明 / 表达式 / 箭头函数（词法 `this`）、闭包、方法调用的 `this`
+- 属性读写（数组下标与 `length`、字符串下标与 `length`、原型链读）
+- 抛出 ReferenceError / TypeError / RangeError（目前是 `"TypeError: …"` 字符串，还没有 Error 对象）
+
+还不支持（报 `Error::Unsupported`，带 `文件:行:列`）：`try` / `catch`、`new` / 类、`for-in` / `for-of`、解构、展开 / 剩余 / 默认参数、getter / setter、`in` / `instanceof`、`delete`、可选链、生成器 / `async`、正则 / BigInt 字面量。
+
+已知偏差：没有暂时性死区（`let` 声明前读到 `undefined`）、对象没有 ToPrimitive、没有内建对象与宿主函数（`console` 等）、一次 `enter` 内不回收（长循环会一直涨内存）、脚本顶层 `let` / `const` 当全局属性。
 
 ## 约定
 

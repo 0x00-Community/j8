@@ -11,11 +11,12 @@ oxc_allocator = { workspace = true, optional = true }
 oxc_ast = { workspace = true, optional = true }
 oxc_parser = { workspace = true, optional = true }
 oxc_span = { workspace = true, optional = true }
+ryu-js = { workspace = true, optional = true }
 
 [features]
 default = ["compile"]
 # JS ⇒ 字节码编译器（oxc 解析，要 std）；关掉只剩 no_std 的字节码类型
-compile = ["dep:oxc_allocator", "dep:oxc_ast", "dep:oxc_parser", "dep:oxc_span"]
+compile = ["dep:oxc_allocator", "dep:oxc_ast", "dep:oxc_parser", "dep:oxc_span", "dep:ryu-js"]
 
 [lints]
 workspace = true

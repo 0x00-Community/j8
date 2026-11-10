@@ -1,9 +1,9 @@
-use gc_arena::Collect;
+use gc_arena::{Collect, Gc};
 
 use crate::{JsObject, JsString};
 
 /// JS 值：标量直接存，字符串与对象是 GC 指针，活在 `'gc` 里。
-#[derive(Clone, Copy, Debug, PartialEq, Default, Collect)]
+#[derive(Clone, Copy, Debug, Default, Collect)]
 #[collect(no_drop)]
 pub enum Value<'gc> {
     #[default]
@@ -13,6 +13,26 @@ pub enum Value<'gc> {
     Number(f64),
     String(JsString<'gc>),
     Object(JsObject<'gc>),
+}
+
+/// 严格相等（`===`）：字符串比内容，对象比身份，`NaN` 不等于自己。
+impl PartialEq for Value<'_> {
+    fn eq(&self, o: &Self) -> bool {
+        match (self, o) {
+            (Value::Undefined, Value::Undefined) | (Value::Null, Value::Null) => true,
+            (Value::Bool(a), Value::Bool(b)) => a == b,
+            (Value::Number(a), Value::Number(b)) => a == b,
+            (Value::String(a), Value::String(b)) => **a == **b,
+            (Value::Object(a), Value::Object(b)) => Gc::ptr_eq(*a, *b),
+            _ => false,
+        }
+    }
+}
+
+impl Value<'_> {
+    pub fn is_nullish(self) -> bool {
+        matches!(self, Value::Undefined | Value::Null)
+    }
 }
 
 impl From<bool> for Value<'_> {

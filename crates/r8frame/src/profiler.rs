@@ -1,7 +1,10 @@
 use alloc::collections::BTreeMap;
 
+use gc_arena::Collect;
+
 /// 一个 JS 函数在 isolate 里的编号（各执行层共用）。
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Collect)]
+#[collect(require_static)]
 pub struct FuncId(pub u32);
 
 /// 一个函数的热度。

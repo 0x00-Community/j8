@@ -13,6 +13,7 @@ r8platform = { path = "crates/r8platform" }
 r8bytecode = { path = "crates/r8bytecode", default-features = false }
 r8executor = { path = "crates/r8executor" }
 moremath = { version = "=0.2.2", default-features = false }
+libm = "0.2"
 gc-arena = { version = "0.7", default-features = false }
 ryu-js = { version = "1", default-features = false }
 oxc_allocator = "0.158"
@@ -28,6 +29,8 @@ doc_markdown = "allow"
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"
 must_use_candidate = "allow"
+# JS 数值语义本来就是精确比较
+float_cmp = "allow"
 
 [profile.dev]
 debug = "line-tables-only"
