@@ -16,6 +16,7 @@ compile = ["r8bytecode/compile"]
 
 [dev-dependencies]
 r8platform.workspace = true
+r8builtins.workspace = true
 
 [lints]
 workspace = true

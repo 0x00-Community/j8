@@ -2,7 +2,7 @@ use core::fmt;
 
 use gc_arena::{DynamicRoot, Gc, Rootable};
 
-use crate::{Scope, Value};
+use crate::{Agent, Scope, Value};
 
 /// 持久句柄：跨多次 [`Isolate::enter`](crate::Isolate::enter) 存活，drop 即放掉。
 pub struct Global(DynamicRoot<Rootable![Value<'_>]>);
@@ -10,6 +10,16 @@ pub struct Global(DynamicRoot<Rootable![Value<'_>]>);
 impl fmt::Debug for Global {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("Global")
+    }
+}
+
+impl<'gc> Agent<'gc, '_> {
+    pub fn global(&self, v: Value<'gc>) -> Global {
+        Global(self.roots.stash(self.mc, Gc::new(self.mc, v)))
+    }
+
+    pub fn local(&self, g: &Global) -> Value<'gc> {
+        *self.roots.fetch(&g.0)
     }
 }
 

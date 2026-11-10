@@ -539,6 +539,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "r8builtins"
+version = "0.1.0"
+dependencies = [
+ "gc-arena",
+ "libm",
+ "r8frame",
+ "ryu-js",
+]
+
+[[package]]
 name = "r8bytecode"
 version = "0.1.0"
 dependencies = [
@@ -554,6 +564,7 @@ dependencies = [
 name = "r8executor"
 version = "0.1.0"
 dependencies = [
+ "r8builtins",
  "r8bytecode",
  "r8frame",
  "r8platform",

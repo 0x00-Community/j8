@@ -6,7 +6,8 @@
 
 | crate | std | 职责 |
 |---|---|---|
-| `r8frame` | `no_std` | 核心框架层：定义 trait（`Platform`、`Engine`）与通用结构体 / 枚举（`Isolate`、`Scope`、`Context`、`Global`、`Value`、`JsString`·`JsObject`、`Profiler`、`BinaryOp`、`Error`……），实现归各层 crate |
+| `r8frame` | `no_std` | 核心框架层：定义 trait（`Platform`、`Engine`、`Invoke`、`Intrinsics`）与通用结构体 / 枚举（`Isolate`、`Scope`、`Agent`、`Context`·`Realm`、`Global`、`Value`、`JsString`·`JsObject`、`Profiler`、`BinaryOp`、`Error`……），JS 运算语义挂在 `Agent` 上，实现归各层 crate |
+| `r8builtins` | `no_std` | 实现 `Intrinsics`：往 `Realm` 装 Object / Function / Array / String / Number / Boolean / Math / Error 系列 / `console` / `parseInt` 等 |
 | `r8platform` | std | 实现 `Platform`（`DefaultPlatform`）：后台任务跑在 moremath `ThreadMulti` 线程池上（起一次复用、任务可借用调用方数据），时钟用 `Instant` |
 | `r8bytecode` | `no_std`（`compile` 要 std） | 累加器式寄存器字节码（`Insn` / `Function` / `Module`）；`compile` feature（缺省开）带 JS ⇒ 字节码编译器 `Module::try_from(&Source)`，用 oxc 解析 |
 | `r8executor` | `no_std`（`compile` 要 std） | 字节码执行器 `Executor`，**目前是最后一层**；`compile` feature 下实现 `Engine` |
@@ -23,6 +24,7 @@
 - `Global` 是持久句柄（gc-arena `DynamicRoot`），跨多次 `enter` 存活，drop 即放掉
 
 ```rust
+use r8builtins::Builtins;
 use r8executor::Executor;
 use r8frame::{CreateParams, Isolate, Source};
 use r8platform::DefaultPlatform;
@@ -30,7 +32,7 @@ use r8platform::DefaultPlatform;
 let platform = DefaultPlatform::default();
 let mut isolate = Isolate::new(&platform, CreateParams::default());
 isolate.enter(|scope| {
-    let cx = scope.context();
+    let cx = scope.context(&Builtins);
     let v = scope.run(cx, &mut Executor, &Source { text: "1 + 2 * 3", file: "a.js" });
 });
 ```
@@ -53,7 +55,8 @@ cargo build --target riscv64gc-unknown-none-elf -p r8frame -p r8bytecode -p r8ex
 - 调用约定：`r0` 是 `this`，`r1` 是被调函数本身（具名函数表达式靠它递归），形参从 `r2` 起；`Call` 的被调者、`this`、实参排在连续寄存器
 - 作用域：编译前预扫一遍（`scope.rs` 的 `Resolver`），找出被内层函数捕获的绑定放进堆上的 `Env` 链（`PushEnv` / `PopEnv` / `LdaEnv depth.slot`），其余放寄存器；`for (let …)` 每轮 `CloneEnv`，闭包各拿各的那一轮
 - 脚本顶层的 `var` / 函数 / `let` / `const` 是全局对象的属性（`LdaGlobal` / `StaGlobal`）
-- 执行器用显式帧栈（不靠宿主递归），调用深度上限 10000，超了抛 RangeError
+- 执行器用显式帧栈（不靠宿主递归），调用深度上限 10000（含宿主函数里重入的 JS），超了抛 RangeError
+- 异常：每帧一个动态处理器栈（`PushHandler` / `PopHandler`），抛出时弹本帧处理器、没有就展开到调用者；`finally` 用（完成类型, 值）寄存器对，穿过它的 `return` / `break` / `continue` 先绕进去再接着走
 
 `r8executor` 里的 `javascript_semantics` 测试是一张逐条确定的 JS 语义表。
 
@@ -68,11 +71,12 @@ cargo build --target riscv64gc-unknown-none-elf -p r8frame -p r8bytecode -p r8ex
 - `if` / `while` / `do-while` / `for` / `switch` / 带标签的 `break` / `continue` / `return` / `throw`
 - 函数声明 / 表达式 / 箭头函数（词法 `this`）、闭包、方法调用的 `this`
 - 属性读写（数组下标与 `length`、字符串下标与 `length`、原型链读）
-- 抛出 ReferenceError / TypeError / RangeError（目前是 `"TypeError: …"` 字符串，还没有 Error 对象）
+- `try` / `catch` / `finally`（`finally` 里的 `return` / `break` / `continue` 与穿过 `finally` 的跳转都按规范）、Error 对象（`Error` / `TypeError` / `ReferenceError` / `RangeError` / `SyntaxError`）
+- 内建对象（r8builtins）与宿主函数、`console.log`（经 `Platform::print`）、ToPrimitive（`valueOf` / `toString`）
 
-还不支持（报 `Error::Unsupported`，带 `文件:行:列`）：`try` / `catch`、`new` / 类、`for-in` / `for-of`、解构、展开 / 剩余 / 默认参数、getter / setter、`in` / `instanceof`、`delete`、可选链、生成器 / `async`、正则 / BigInt 字面量。
+还不支持（报 `Error::Unsupported`，带 `文件:行:列`）：`new` / 类、`for-in` / `for-of`、解构、展开 / 剩余 / 默认参数、getter / setter、`in` / `instanceof`、`delete`、可选链、生成器 / `async`、正则 / BigInt 字面量。
 
-已知偏差：没有暂时性死区（`let` 声明前读到 `undefined`）、对象没有 ToPrimitive、没有内建对象与宿主函数（`console` 等）、一次 `enter` 内不回收（长循环会一直涨内存）、脚本顶层 `let` / `const` 当全局属性。
+已知偏差：没有暂时性死区（`let` 声明前读到 `undefined`）、一次 `enter` 内不回收（长循环会一直涨内存）、脚本顶层 `let` / `const` 当全局属性。
 
 ## 约定
 

@@ -4,7 +4,7 @@
 use std::collections::HashSet;
 
 use oxc_ast::ast::{
-    Argument, ArrayExpressionElement, ArrowFunctionBody, ArrowFunctionExpression, AssignmentTarget, BindingIdentifier, BindingPattern, Expression, ForStatementInit, FormalParameters, Function, MemberExpression, ObjectPropertyKind, SimpleAssignmentTarget, Statement, VariableDeclaration, VariableDeclarationKind,
+    Argument, ArrayExpressionElement, ArrowFunctionBody, CatchClause, ArrowFunctionExpression, AssignmentTarget, BindingIdentifier, BindingPattern, Expression, ForStatementInit, FormalParameters, Function, MemberExpression, ObjectPropertyKind, SimpleAssignmentTarget, Statement, VariableDeclaration, VariableDeclarationKind,
 };
 use oxc_span::Span;
 
@@ -139,6 +139,15 @@ impl<'a> Decls<'a> {
                 VariableDeclarationKind::Const => d.declarators(v, DeclKind::Const),
                 _ => {}
             }
+        }
+        d
+    }
+
+    /// `catch (e)` 的形参那一层。
+    pub fn catch_param(c: &'a CatchClause<'a>) -> Self {
+        let mut d = Self::default();
+        if let Some(BindingPattern::BindingIdentifier(id)) = c.param.as_ref().map(|p| &p.pattern) {
+            d.add(Self::ident(id, DeclKind::Let));
         }
         d
     }
@@ -311,6 +320,15 @@ impl<'a> Resolver<'a> {
                 }
             }
             Statement::ThrowStatement(t) => self.expr(&t.argument),
+            Statement::TryStatement(t) => {
+                self.scoped(&Decls::block([t.block.body.as_slice()]), |r| r.statements(&t.block.body));
+                if let Some(c) = &t.handler {
+                    self.scoped(&Decls::catch_param(c), |r| r.scoped(&Decls::block([c.body.body.as_slice()]), |r| r.statements(&c.body.body)));
+                }
+                if let Some(f) = &t.finalizer {
+                    self.scoped(&Decls::block([f.body.as_slice()]), |r| r.statements(&f.body));
+                }
+            }
             _ => {}
         }
     }

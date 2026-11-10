@@ -34,6 +34,10 @@ impl Platform for DefaultPlatform {
         self.start.elapsed()
     }
 
+    fn print(&self, line: &str) {
+        println!("{line}");
+    }
+
     fn run(&self, tasks: Vec<Task<'_>>) {
         self.pool.execute(tasks);
     }

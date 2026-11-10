@@ -102,6 +102,10 @@ pub enum Insn {
     SetKeyed { obj: Reg, key: Reg },
     /// acc = callee.call(this, args…)：`args` 起连续 `argc` 个寄存器
     Call { callee: Reg, this: Reg, args: Reg, argc: u16 },
+    /// 装一个异常处理器：抛出时跳到 `Label`（acc 是异常值），环境退回到装的时候
+    PushHandler(Label),
+    /// 卸掉最近装的处理器
+    PopHandler,
     /// 抛出 acc
     Throw,
     /// 返回 acc
@@ -112,7 +116,7 @@ impl Insn {
     /// 跳转指令的目标（回填用）。
     pub fn target_mut(&mut self) -> Option<&mut Label> {
         match self {
-            Insn::Jump(l) | Insn::JumpIfTrue(l) | Insn::JumpIfFalse(l) | Insn::JumpIfNotNullish(l) => Some(l),
+            Insn::Jump(l) | Insn::JumpIfTrue(l) | Insn::JumpIfFalse(l) | Insn::JumpIfNotNullish(l) | Insn::PushHandler(l) => Some(l),
             _ => None,
         }
     }
@@ -190,6 +194,8 @@ impl fmt::Display for Insn {
             Insn::GetKeyed { obj } => write!(f, "get.keyed {obj}"),
             Insn::SetKeyed { obj, key } => write!(f, "set.keyed {obj}, {key}"),
             Insn::Call { callee, this, args, argc } => write!(f, "call {callee}, {this}, {args}, {argc}"),
+            Insn::PushHandler(l) => write!(f, "push.handler @{}", l.0),
+            Insn::PopHandler => f.write_str("pop.handler"),
             Insn::Throw => f.write_str("throw"),
             Insn::Return => f.write_str("return"),
         }

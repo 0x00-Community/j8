@@ -14,6 +14,9 @@ pub trait Platform: Sync {
     /// 单调时钟：平台建起来以后过了多久
     fn now(&self) -> Duration;
 
+    /// 输出一行（`console.log`）。
+    fn print(&self, line: &str);
+
     /// 跑完一批后台任务再返回（任务可以借用调用方的数据）。
     fn run(&self, tasks: Vec<Task<'_>>);
 }

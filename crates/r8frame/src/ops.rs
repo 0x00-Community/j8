@@ -6,7 +6,7 @@ use alloc::vec::Vec;
 
 use gc_arena::Gc;
 
-use crate::{Error, JsString, ObjectKind, Scope, Value};
+use crate::{Agent, Error, JsObject, JsString, ObjectData, ObjectKind, Value};
 
 /// 二元运算（结果是值）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -49,12 +49,22 @@ pub enum UnaryOp {
     Void,
 }
 
-/// 抛出的内建错误种类。
+/// 内建错误种类（`Error` 本身在第一个）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ErrorKind {
+    Error,
     Type,
     Reference,
     Range,
+    Syntax,
+}
+
+/// ToPrimitive 的偏好。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Hint {
+    Default,
+    Number,
+    String,
 }
 
 impl BinaryOp {
@@ -105,11 +115,15 @@ impl UnaryOp {
 }
 
 impl ErrorKind {
+    pub const ALL: [ErrorKind; 5] = [ErrorKind::Error, ErrorKind::Type, ErrorKind::Reference, ErrorKind::Range, ErrorKind::Syntax];
+
     pub fn name(self) -> &'static str {
         match self {
+            ErrorKind::Error => "Error",
             ErrorKind::Type => "TypeError",
             ErrorKind::Reference => "ReferenceError",
             ErrorKind::Range => "RangeError",
+            ErrorKind::Syntax => "SyntaxError",
         }
     }
 }
@@ -178,16 +192,42 @@ fn index_of_str(s: &str) -> Option<u32> {
     canonical.then(|| s.parse().ok()).flatten().filter(|&i| f64::from(i) <= MAX_INDEX)
 }
 
-impl<'gc> Scope<'gc, '_> {
+impl<'gc> Agent<'gc, '_> {
     /// 字符串放上堆。
     pub fn string(&self, s: &str) -> JsString<'gc> {
         Gc::new(self.mc, Box::from(s))
     }
 
-    /// 抛出一个内建错误（值是 `"TypeError: …"` 字符串，还没有 Error 对象）。
+    /// 以 `Object.prototype` 为原型的空对象。
+    pub fn object(&self) -> JsObject<'gc> {
+        ObjectData { proto: Some(self.realm.object_proto), ..ObjectData::default() }.alloc(self.mc)
+    }
+
+    /// 以 `Array.prototype` 为原型的数组。
+    pub fn array(&self, items: Vec<Value<'gc>>) -> JsObject<'gc> {
+        ObjectData { kind: ObjectKind::Array(items), proto: Some(self.realm.array_proto), ..ObjectData::default() }.alloc(self.mc)
+    }
+
+    /// 一个 Error 对象（原型按种类取，自有 `message`）。
+    pub fn error(&self, kind: ErrorKind, message: &str) -> JsObject<'gc> {
+        let e = ObjectData { proto: Some(self.realm.error_proto(kind)), ..ObjectData::default() }.alloc(self.mc);
+        let m = self.string(message);
+        e.borrow_mut(self.mc).set(self.mc, "message", m.into());
+        e
+    }
+
+    /// 抛出一个内建错误。
     pub fn throw(&self, kind: ErrorKind, message: &str) -> Error {
-        let s = self.string(&format!("{}: {message}", kind.name()));
-        Error::Exception(self.global(s.into()))
+        Error::Exception(self.global(self.error(kind, message).into()))
+    }
+
+    /// 抛出任意值。
+    pub fn throw_value(&self, v: Value<'gc>) -> Error {
+        Error::Exception(self.global(v))
+    }
+
+    pub fn is_callable(&self, v: Value<'gc>) -> bool {
+        matches!(v, Value::Object(o) if o.borrow().kind.is_callable())
     }
 
     pub fn to_boolean(&self, v: Value<'gc>) -> bool {
@@ -200,116 +240,144 @@ impl<'gc> Scope<'gc, '_> {
         }
     }
 
-    /// ToNumber。对象还没有 ToPrimitive，先当 NaN。
-    pub fn to_number(&self, v: Value<'gc>) -> f64 {
-        match v {
-            Value::Undefined | Value::Object(_) => f64::NAN,
+    /// ToPrimitive：对象按偏好依次试 `valueOf` / `toString`，结果是原始值就用。
+    pub fn to_primitive(&mut self, v: Value<'gc>, hint: Hint) -> Result<Value<'gc>, Error> {
+        if !matches!(v, Value::Object(_)) {
+            return Ok(v);
+        }
+        let order = if hint == Hint::String { ["toString", "valueOf"] } else { ["valueOf", "toString"] };
+        for name in order {
+            let f = self.get_named(v, name)?;
+            if self.is_callable(f) {
+                let r = self.call(f, v, &[])?;
+                if !matches!(r, Value::Object(_)) {
+                    return Ok(r);
+                }
+            }
+        }
+        Err(self.throw(ErrorKind::Type, "Cannot convert object to primitive value"))
+    }
+
+    /// ToNumber。
+    pub fn to_number(&mut self, v: Value<'gc>) -> Result<f64, Error> {
+        Ok(match v {
+            Value::Undefined => f64::NAN,
             Value::Null => 0.0,
             Value::Bool(b) => f64::from(u8::from(b)),
             Value::Number(x) => x,
             Value::String(s) => parse_number(&s),
-        }
+            Value::Object(_) => {
+                let p = self.to_primitive(v, Hint::Number)?;
+                return self.to_number(p);
+            }
+        })
     }
 
-    pub fn to_int32(&self, v: Value<'gc>) -> i32 {
-        modulo_u32(self.to_number(v)).cast_signed()
+    pub fn to_int32(&mut self, v: Value<'gc>) -> Result<i32, Error> {
+        Ok(modulo_u32(self.to_number(v)?).cast_signed())
     }
 
-    pub fn to_uint32(&self, v: Value<'gc>) -> u32 {
-        modulo_u32(self.to_number(v))
+    pub fn to_uint32(&mut self, v: Value<'gc>) -> Result<u32, Error> {
+        Ok(modulo_u32(self.to_number(v)?))
     }
 
-    /// ToString。对象还没有 ToPrimitive，函数与普通对象给固定文本，数组按逗号连接。
-    pub fn to_string(&self, v: Value<'gc>) -> JsString<'gc> {
-        match v {
+    /// ToString。
+    pub fn to_string(&mut self, v: Value<'gc>) -> Result<JsString<'gc>, Error> {
+        Ok(match v {
             Value::String(s) => s,
             Value::Undefined => self.string("undefined"),
             Value::Null => self.string("null"),
             Value::Bool(true) => self.string("true"),
             Value::Bool(false) => self.string("false"),
             Value::Number(x) => self.string(ryu_js::Buffer::new().format(x)),
-            Value::Object(o) => match &o.borrow().kind {
-                ObjectKind::Array(items) => {
-                    let parts: Vec<String> = items.iter().map(|&e| if e.is_nullish() { String::new() } else { String::from(&**self.to_string(e)) }).collect();
-                    self.string(&parts.join(","))
-                }
-                ObjectKind::Function(_) => self.string("function () { [native code] }"),
-                ObjectKind::Ordinary => self.string("[object Object]"),
-            },
-        }
+            Value::Object(_) => {
+                let p = self.to_primitive(v, Hint::String)?;
+                return self.to_string(p);
+            }
+        })
     }
 
     pub fn type_of(&self, v: Value<'gc>) -> &'static str {
         match v {
             Value::Undefined => "undefined",
-            Value::Null => "object",
             Value::Bool(_) => "boolean",
             Value::Number(_) => "number",
             Value::String(_) => "string",
-            Value::Object(o) => match o.borrow().kind {
-                ObjectKind::Function(_) => "function",
-                _ => "object",
-            },
+            Value::Object(o) if o.borrow().kind.is_callable() => "function",
+            Value::Null | Value::Object(_) => "object",
         }
     }
 
-    pub fn binary(&self, op: BinaryOp, lhs: Value<'gc>, rhs: Value<'gc>) -> Value<'gc> {
-        if op == BinaryOp::Add && (matches!(lhs, Value::String(_) | Value::Object(_)) || matches!(rhs, Value::String(_) | Value::Object(_))) {
-            let (a, b) = (self.to_string(lhs), self.to_string(rhs));
-            return self.string(&[&**a, &**b].concat()).into();
+    pub fn binary(&mut self, op: BinaryOp, lhs: Value<'gc>, rhs: Value<'gc>) -> Result<Value<'gc>, Error> {
+        if op == BinaryOp::Add {
+            let (l, r) = (self.to_primitive(lhs, Hint::Default)?, self.to_primitive(rhs, Hint::Default)?);
+            if matches!(l, Value::String(_)) || matches!(r, Value::String(_)) {
+                let (a, b) = (self.to_string(l)?, self.to_string(r)?);
+                return Ok(self.string(&[&**a, &**b].concat()).into());
+            }
+            return Ok((self.to_number(l)? + self.to_number(r)?).into());
         }
-        let (a, b) = (self.to_number(lhs), self.to_number(rhs));
-        let int = |f: fn(i32, u32) -> i32| f64::from(f(self.to_int32(lhs), self.to_uint32(rhs)));
-        match op {
-            BinaryOp::Add => a + b,
+        if matches!(op, BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor | BinaryOp::Shl | BinaryOp::Shr | BinaryOp::UShr) {
+            let (x, y) = (self.to_int32(lhs)?, self.to_uint32(rhs)?);
+            let r = match op {
+                BinaryOp::BitAnd => f64::from(x & y.cast_signed()),
+                BinaryOp::BitOr => f64::from(x | y.cast_signed()),
+                BinaryOp::BitXor => f64::from(x ^ y.cast_signed()),
+                BinaryOp::Shl => f64::from(x.wrapping_shl(y & 31)),
+                BinaryOp::Shr => f64::from(x.wrapping_shr(y & 31)),
+                _ => f64::from(x.cast_unsigned() >> (y & 31)),
+            };
+            return Ok(r.into());
+        }
+        let (a, b) = (self.to_number(lhs)?, self.to_number(rhs)?);
+        Ok(match op {
             BinaryOp::Sub => a - b,
             BinaryOp::Mul => a * b,
             BinaryOp::Div => a / b,
             BinaryOp::Rem => a % b,
-            BinaryOp::Exp => pow(a, b),
-            BinaryOp::BitAnd => int(|x, y| x & y.cast_signed()),
-            BinaryOp::BitOr => int(|x, y| x | y.cast_signed()),
-            BinaryOp::BitXor => int(|x, y| x ^ y.cast_signed()),
-            BinaryOp::Shl => int(|x, y| x.wrapping_shl(y & 31)),
-            BinaryOp::Shr => int(|x, y| x.wrapping_shr(y & 31)),
-            BinaryOp::UShr => f64::from(self.to_uint32(lhs) >> (self.to_uint32(rhs) & 31)),
+            _ => pow(a, b),
         }
-        .into()
+        .into())
     }
 
-    /// 宽松相等（`==`）。对象对原始值还没有 ToPrimitive，按不等。
-    pub fn loose_equals(&self, a: Value<'gc>, b: Value<'gc>) -> bool {
-        match (a, b) {
+    /// 宽松相等（`==`）。
+    pub fn loose_equals(&mut self, a: Value<'gc>, b: Value<'gc>) -> Result<bool, Error> {
+        Ok(match (a, b) {
             _ if a.is_nullish() && b.is_nullish() => true,
             (Value::Undefined | Value::Null, _) | (_, Value::Undefined | Value::Null) => false,
-            (Value::Number(_), Value::String(_)) | (Value::String(_), Value::Number(_)) | (Value::Bool(_), _) | (_, Value::Bool(_)) => {
-                if matches!(a, Value::Object(_)) || matches!(b, Value::Object(_)) {
-                    return false;
-                }
-                self.to_number(a) == self.to_number(b)
+            (Value::Object(_), Value::Object(_)) => a == b,
+            (Value::Object(_), _) => {
+                let p = self.to_primitive(a, Hint::Default)?;
+                return self.loose_equals(p, b);
             }
+            (_, Value::Object(_)) => {
+                let p = self.to_primitive(b, Hint::Default)?;
+                return self.loose_equals(a, p);
+            }
+            (Value::Number(_), Value::String(_)) | (Value::String(_), Value::Number(_)) | (Value::Bool(_), _) | (_, Value::Bool(_)) => self.to_number(a)? == self.to_number(b)?,
             _ => a == b,
-        }
+        })
     }
 
-    pub fn compare(&self, op: CompareOp, lhs: Value<'gc>, rhs: Value<'gc>) -> bool {
-        match op {
-            CompareOp::Eq => self.loose_equals(lhs, rhs),
-            CompareOp::Ne => !self.loose_equals(lhs, rhs),
+    pub fn compare(&mut self, op: CompareOp, lhs: Value<'gc>, rhs: Value<'gc>) -> Result<bool, Error> {
+        Ok(match op {
+            CompareOp::Eq => self.loose_equals(lhs, rhs)?,
+            CompareOp::Ne => !self.loose_equals(lhs, rhs)?,
             CompareOp::StrictEq => lhs == rhs,
             CompareOp::StrictNe => lhs != rhs,
             CompareOp::Lt | CompareOp::Gt | CompareOp::Le | CompareOp::Ge => {
-                if let (Value::String(a), Value::String(b)) = (lhs, rhs) {
+                let (l, r) = (self.to_primitive(lhs, Hint::Number)?, self.to_primitive(rhs, Hint::Number)?);
+                if let (Value::String(a), Value::String(b)) = (l, r) {
                     // 按 UTF-16 码元比
                     let ord = a.encode_utf16().cmp(b.encode_utf16());
-                    return match op {
+                    return Ok(match op {
                         CompareOp::Lt => ord.is_lt(),
                         CompareOp::Gt => ord.is_gt(),
                         CompareOp::Le => ord.is_le(),
                         _ => ord.is_ge(),
-                    };
+                    });
                 }
-                let (a, b) = (self.to_number(lhs), self.to_number(rhs));
+                let (a, b) = (self.to_number(l)?, self.to_number(r)?);
                 match op {
                     CompareOp::Lt => a < b,
                     CompareOp::Gt => a > b,
@@ -317,78 +385,107 @@ impl<'gc> Scope<'gc, '_> {
                     _ => a >= b,
                 }
             }
-        }
+        })
     }
 
-    pub fn unary(&self, op: UnaryOp, v: Value<'gc>) -> Value<'gc> {
-        match op {
-            UnaryOp::Neg => (-self.to_number(v)).into(),
-            UnaryOp::Plus => self.to_number(v).into(),
+    pub fn unary(&mut self, op: UnaryOp, v: Value<'gc>) -> Result<Value<'gc>, Error> {
+        Ok(match op {
+            UnaryOp::Neg => (-self.to_number(v)?).into(),
+            UnaryOp::Plus => self.to_number(v)?.into(),
             UnaryOp::Not => (!self.to_boolean(v)).into(),
-            UnaryOp::BitNot => f64::from(!self.to_int32(v)).into(),
+            UnaryOp::BitNot => f64::from(!self.to_int32(v)?).into(),
             UnaryOp::Typeof => self.string(self.type_of(v)).into(),
             UnaryOp::Void => Value::Undefined,
+        })
+    }
+
+    /// 原始值读属性时用的原型。
+    fn proto_of(&self, v: Value<'gc>) -> Option<JsObject<'gc>> {
+        match v {
+            Value::String(_) => Some(self.realm.string_proto),
+            Value::Number(_) => Some(self.realm.number_proto),
+            Value::Bool(_) => Some(self.realm.boolean_proto),
+            Value::Object(o) => Some(o),
+            Value::Undefined | Value::Null => None,
         }
     }
 
     /// `target.key`：数组下标与 `length`、字符串下标与 `length`、沿原型链找属性。
-    pub fn get_named(&self, target: Value<'gc>, key: &str) -> Result<Value<'gc>, Error> {
+    pub fn get_named(&mut self, target: Value<'gc>, key: &str) -> Result<Value<'gc>, Error> {
         match target {
-            Value::Undefined | Value::Null => Err(self.throw(ErrorKind::Type, &format!("cannot read property '{key}' of {}", &**self.to_string(target)))),
-            Value::String(s) => Ok(match (key, index_of_str(key)) {
-                ("length", _) => f64::from(u32::try_from(s.encode_utf16().count()).unwrap_or(u32::MAX)).into(),
-                (_, Some(i)) => s.encode_utf16().nth(i as usize).map_or(Value::Undefined, |u| self.string(&String::from_utf16_lossy(&[u])).into()),
-                _ => Value::Undefined,
-            }),
+            Value::Undefined | Value::Null => {
+                let what = if target == Value::Undefined { "undefined" } else { "null" };
+                return Err(self.throw(ErrorKind::Type, &format!("Cannot read properties of {what} (reading '{key}')")));
+            }
+            Value::String(s) => match (key, index_of_str(key)) {
+                ("length", _) => return Ok(f64::from(u32::try_from(s.encode_utf16().count()).unwrap_or(u32::MAX)).into()),
+                (_, Some(i)) => return Ok(s.encode_utf16().nth(i as usize).map_or(Value::Undefined, |u| self.string(&String::from_utf16_lossy(&[u])).into())),
+                _ => {}
+            },
             Value::Object(o) => {
-                let data = o.borrow();
-                if let ObjectKind::Array(items) = &data.kind {
+                if let ObjectKind::Array(items) = &o.borrow().kind {
                     match (key, index_of_str(key)) {
                         ("length", _) => return Ok(f64::from(u32::try_from(items.len()).unwrap_or(u32::MAX)).into()),
                         (_, Some(i)) => return Ok(items.get(i as usize).copied().unwrap_or_default()),
                         _ => {}
                     }
                 }
-                let mut cur = Some(o);
-                while let Some(c) = cur {
-                    let d = c.borrow();
-                    if let Some(v) = d.own(key) {
-                        return Ok(v);
-                    }
-                    cur = d.proto;
-                }
-                Ok(Value::Undefined)
             }
-            Value::Bool(_) | Value::Number(_) => Ok(Value::Undefined),
+            Value::Bool(_) | Value::Number(_) => {}
         }
+        let mut cur = self.proto_of(target);
+        while let Some(c) = cur {
+            let d = c.borrow();
+            if let Some(v) = d.own(key) {
+                return Ok(v);
+            }
+            cur = d.proto;
+        }
+        Ok(Value::Undefined)
+    }
+
+    /// 属性键：ToString（数组下标的数快路在调用处）。
+    fn key(&mut self, key: Value<'gc>) -> Result<JsString<'gc>, Error> {
+        self.to_string(key)
     }
 
     /// `target[key]`。
-    pub fn get_keyed(&self, target: Value<'gc>, key: Value<'gc>) -> Result<Value<'gc>, Error> {
+    pub fn get_keyed(&mut self, target: Value<'gc>, key: Value<'gc>) -> Result<Value<'gc>, Error> {
         if let (Value::Object(o), Value::Number(x)) = (target, key)
             && let (ObjectKind::Array(items), Some(i)) = (&o.borrow().kind, index_of_number(x))
         {
             return Ok(items.get(i as usize).copied().unwrap_or_default());
         }
-        let k = self.to_string(key);
+        let k = self.key(key)?;
         self.get_named(target, &k)
     }
 
     /// `target.key = value`：数组下标写元素（越过末尾补 `undefined`），原始值上的写悄悄丢掉。
-    pub fn set_named(&self, target: Value<'gc>, key: &str, value: Value<'gc>) -> Result<(), Error> {
+    pub fn set_named(&mut self, target: Value<'gc>, key: &str, value: Value<'gc>) -> Result<(), Error> {
         match target {
-            Value::Undefined | Value::Null => Err(self.throw(ErrorKind::Type, &format!("cannot set property '{key}' of {}", &**self.to_string(target)))),
+            Value::Undefined | Value::Null => {
+                let what = if target == Value::Undefined { "undefined" } else { "null" };
+                Err(self.throw(ErrorKind::Type, &format!("Cannot set properties of {what} (setting '{key}')")))
+            }
             Value::Object(o) => {
                 let mut data = o.borrow_mut(self.mc);
-                if let ObjectKind::Array(items) = &mut data.kind
-                    && let Some(i) = index_of_str(key)
-                {
-                    let i = i as usize;
-                    if i >= items.len() {
-                        items.resize(i + 1, Value::Undefined);
+                if let ObjectKind::Array(items) = &mut data.kind {
+                    if let Some(i) = index_of_str(key) {
+                        let i = i as usize;
+                        if i >= items.len() {
+                            items.resize(i + 1, Value::Undefined);
+                        }
+                        items[i] = value;
+                        return Ok(());
                     }
-                    items[i] = value;
-                    return Ok(());
+                    if key == "length" {
+                        drop(data);
+                        let n = self.to_uint32(value)? as usize;
+                        if let ObjectKind::Array(items) = &mut o.borrow_mut(self.mc).kind {
+                            items.resize(n, Value::Undefined);
+                        }
+                        return Ok(());
+                    }
                 }
                 data.set(self.mc, key, value);
                 Ok(())
@@ -398,8 +495,19 @@ impl<'gc> Scope<'gc, '_> {
     }
 
     /// `target[key] = value`。
-    pub fn set_keyed(&self, target: Value<'gc>, key: Value<'gc>, value: Value<'gc>) -> Result<(), Error> {
-        let k = self.to_string(key);
+    pub fn set_keyed(&mut self, target: Value<'gc>, key: Value<'gc>, value: Value<'gc>) -> Result<(), Error> {
+        if let (Value::Object(o), Value::Number(x)) = (target, key)
+            && let Some(i) = index_of_number(x)
+            && let ObjectKind::Array(items) = &mut o.borrow_mut(self.mc).kind
+        {
+            let i = i as usize;
+            if i >= items.len() {
+                items.resize(i + 1, Value::Undefined);
+            }
+            items[i] = value;
+            return Ok(());
+        }
+        let k = self.key(key)?;
         self.set_named(target, &k, value)
     }
 }

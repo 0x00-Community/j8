@@ -10,6 +10,7 @@ license = "MIT"
 [workspace.dependencies]
 r8frame = { path = "crates/r8frame" }
 r8platform = { path = "crates/r8platform" }
+r8builtins = { path = "crates/r8builtins" }
 r8bytecode = { path = "crates/r8bytecode", default-features = false }
 r8executor = { path = "crates/r8executor" }
 moremath = { version = "=0.2.2", default-features = false }
@@ -31,6 +32,8 @@ missing_panics_doc = "allow"
 must_use_candidate = "allow"
 # JS 数值语义本来就是精确比较
 float_cmp = "allow"
+# 内建函数里 a / f / x / y 这类短名是惯例
+many_single_char_names = "allow"
 
 [profile.dev]
 debug = "line-tables-only"

@@ -6,13 +6,14 @@
 //! - [`Isolate`]：一个独立的 JS 世界，持有 GC 堆与剖析器
 //! - [`Scope`]：一次进入 isolate 的作用域；其中的 [`Value`] 就是 V8 的 Local，离开作用域即不可见
 //! - [`Global`]：持久句柄，跨多次 `enter` 存活，drop 即放掉
-//! - [`Context`]：一个全局对象下的执行环境
+//! - [`Context`] / [`Realm`]：执行环境，带全局对象与各内建原型（[`Intrinsics`] 由 r8builtins 实现）
+//! - [`Agent`]：一次运行的上下文，JS 运算语义挂在它上面；要调回 JS 时经 [`Invoke`]（执行引擎实现）
 //! - [`Profiler`]：调用 / 回边计数
 //! - [`Engine`]：执行引擎（r8executor）实现的统一入口
 #![no_std]
 extern crate alloc;
 
-mod context;
+mod agent;
 mod engine;
 mod error;
 mod handle;
@@ -21,15 +22,17 @@ mod object;
 mod ops;
 mod platform;
 mod profiler;
+mod realm;
 mod value;
 
-pub use context::Context;
+pub use agent::{Agent, Invoke};
 pub use engine::{Engine, Source};
 pub use error::Error;
 pub use handle::Global;
 pub use isolate::{CreateParams, Isolate, Scope};
-pub use object::{Closure, Env, JsEnv, JsObject, JsString, ObjectData, ObjectKind};
-pub use ops::{BinaryOp, CompareOp, ErrorKind, UnaryOp};
+pub use object::{Bound, Closure, Env, JsEnv, JsObject, JsString, Native, NativeFn, ObjectData, ObjectKind};
+pub use ops::{BinaryOp, CompareOp, ErrorKind, Hint, UnaryOp};
 pub use platform::{Platform, Task};
 pub use profiler::{Counter, FuncId, Profiler};
+pub use realm::{Context, Intrinsics, Realm};
 pub use value::Value;

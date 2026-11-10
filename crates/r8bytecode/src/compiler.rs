@@ -2,7 +2,7 @@
 use std::collections::HashSet;
 
 use oxc_allocator::Allocator;
-use oxc_ast::ast::{BindingIdentifier, BindingPattern, Expression, ForStatementInit, FormalParameters, Function as AstFunction, Program, Statement, SwitchStatement, VariableDeclaration, VariableDeclarationKind};
+use oxc_ast::ast::{BindingIdentifier, BindingPattern, BlockStatement, Expression, ForStatementInit, FormalParameters, Function as AstFunction, Program, Statement, SwitchStatement, TryStatement, VariableDeclaration, VariableDeclarationKind};
 use oxc_parser::Parser;
 use oxc_span::{GetSpan, SourceType, Span};
 use r8frame::{CompareOp, Error, Source};
@@ -12,6 +12,15 @@ use crate::{Const, Constant, Function, Insn, Label, Module, Reg};
 
 /// 回填前的跳转目标
 const UNPATCHED: Label = Label(u32::MAX);
+
+/// finally 的完成类型：正常落下
+const COMPLETION_NORMAL: f64 = 0.0;
+/// finally 的完成类型：带着异常进来，出去接着抛
+const COMPLETION_THROW: f64 = 1.0;
+/// finally 的完成类型：带着返回值进来，出去接着返回
+const COMPLETION_RETURN: f64 = 2.0;
+/// finally 的完成类型：第 n 个绕道的 break / continue 是这个数加 n
+const COMPLETION_ROUTE: f64 = 3.0;
 
 /// 一个名字绑在哪儿。
 #[derive(Clone, Copy)]
@@ -58,6 +67,37 @@ struct Jump<'a> {
     envs: u16,
 }
 
+/// 穿过 finally 的 `break` / `continue`：finally 跑完再接着跳。
+#[derive(Clone, Copy)]
+struct Route<'a> {
+    span: Span,
+    label: Option<&'a str>,
+    cont: bool,
+}
+
+/// 一个 finally：完成类型与值的寄存器、跳进来的地方、绕道的跳转。
+struct Finally<'a> {
+    kind: Reg,
+    value: Reg,
+    envs: u16,
+    entries: Vec<usize>,
+    routes: Vec<Route<'a>>,
+}
+
+/// 控制栈的一层：跳转目标、装着的异常处理器、finally。
+enum Control<'a> {
+    Jump(Jump<'a>),
+    Handler,
+    Finally(Finally<'a>),
+}
+
+/// 跳出去要做的事：退几层环境、卸几个处理器、落到哪。
+enum Exit {
+    Jump(usize),
+    Finally(usize),
+    Function,
+}
+
 /// 正在编的一个函数。
 struct Frame<'a> {
     index: usize,
@@ -66,7 +106,7 @@ struct Frame<'a> {
     top: u16,
     /// 当前有几层本函数的环境
     envs: u16,
-    jumps: Vec<Jump<'a>>,
+    controls: Vec<Control<'a>>,
     /// 下一个循环 / `switch` 的标签
     label: Option<&'a str>,
     /// 脚本的完成值放这里（只有脚本本身有）
@@ -322,7 +362,7 @@ impl<'a> Compiler<'a, '_> {
         self.module.push(Function::default());
         let top = Reg::PARAMS + n;
         let out = Function { name: name.into(), params: n, regs: top, ..Function::default() };
-        self.frames.push(Frame { index, out, top, envs: 0, jumps: Vec::new(), label: None, completion: None });
+        self.frames.push(Frame { index, out, top, envs: 0, controls: Vec::new(), label: None, completion: None });
         let stmts = match body {
             Body::Statements(s) => s,
             Body::Expression(_) => &[],
@@ -361,7 +401,7 @@ impl<'a> Compiler<'a, '_> {
     fn script(&mut self, program: &'a Program<'a>) -> Result<(), Error> {
         self.module.push(Function::default());
         let out = Function { name: "main".into(), regs: Reg::PARAMS, ..Function::default() };
-        self.frames.push(Frame { index: 0, out, top: Reg::PARAMS, envs: 0, jumps: Vec::new(), label: None, completion: None });
+        self.frames.push(Frame { index: 0, out, top: Reg::PARAMS, envs: 0, controls: Vec::new(), label: None, completion: None });
         let completion = self.temp();
         self.frame().completion = Some(completion);
         self.enter(&Decls(vec![Decl { name: THIS, key: Decls::this_key(program.span), kind: DeclKind::This }]))?;
@@ -405,11 +445,11 @@ impl<'a> Compiler<'a, '_> {
     fn push_jump(&mut self, label: Option<&'a str>, breakable: bool, continuable: bool) {
         let f = self.frame();
         let envs = f.envs;
-        f.jumps.push(Jump { label, breakable, continuable, breaks: Vec::new(), continues: Vec::new(), envs });
+        f.controls.push(Control::Jump(Jump { label, breakable, continuable, breaks: Vec::new(), continues: Vec::new(), envs }));
     }
 
     fn pop_jump(&mut self, brk: Label, cont: Option<Label>) {
-        let j = self.frame().jumps.pop().expect("a jump target");
+        let Some(Control::Jump(j)) = self.frame().controls.pop() else { unreachable!("the innermost control is this jump target") };
         j.breaks.into_iter().for_each(|at| self.patch(at, brk));
         if let Some(c) = cont {
             j.continues.into_iter().for_each(|at| self.patch(at, c));
@@ -421,25 +461,168 @@ impl<'a> Compiler<'a, '_> {
         self.frame().label.take()
     }
 
-    /// `break` / `continue`：退掉多进的环境再跳。
-    fn exit(&mut self, span: Span, label: Option<&'a str>, cont: bool) -> Result<(), Error> {
+    /// 由内向外找跳出去的落点：先碰到 finally 就绕进它；`target` 为 `None` 是 `return`。
+    fn exit_plan(&self, target: Option<(Option<&'a str>, bool)>) -> (Exit, u16) {
         let f = self.frames.last().expect("inside a function");
-        let i = f
-            .jumps
-            .iter()
-            .rposition(|j| match (label, cont) {
-                (Some(l), false) => j.label == Some(l),
-                (Some(l), true) => j.label == Some(l) && j.continuable,
-                (None, false) => j.breakable,
-                (None, true) => j.continuable,
-            })
-            .ok_or_else(|| self.unsupported(span, "a jump with no target"))?;
-        for _ in f.jumps[i].envs..f.envs {
+        let mut handlers = 0;
+        for (i, c) in f.controls.iter().enumerate().rev() {
+            match c {
+                Control::Handler => handlers += 1,
+                Control::Finally(_) => return (Exit::Finally(i), handlers),
+                Control::Jump(j) => {
+                    let hit = match target {
+                        Some((Some(l), false)) => j.label == Some(l),
+                        Some((Some(l), true)) => j.label == Some(l) && j.continuable,
+                        Some((None, false)) => j.breakable,
+                        Some((None, true)) => j.continuable,
+                        None => false,
+                    };
+                    if hit {
+                        return (Exit::Jump(i), handlers);
+                    }
+                }
+            }
+        }
+        (Exit::Function, handlers)
+    }
+
+    /// 退掉多进的环境与处理器，回到控制栈第 `i` 层（它进来时有 `envs` 层环境）。
+    fn unwind_to(&mut self, envs: u16, handlers: u16) {
+        for _ in envs..self.frame().envs {
             self.emit(Insn::PopEnv);
         }
+        for _ in 0..handlers {
+            self.emit(Insn::PopHandler);
+        }
+    }
+
+    /// 跳进第 `i` 层的 finally，带上完成类型 `kind`。
+    fn enter_finally(&mut self, i: usize, handlers: u16, kind: f64) {
+        let Control::Finally(fin) = &self.frame().controls[i] else { unreachable!("a finally") };
+        let (envs, kind_reg) = (fin.envs, fin.kind);
+        self.unwind_to(envs, handlers);
+        let k = self.constant(Constant::Number(kind));
+        self.emit(Insn::LdaConst(k));
+        self.emit(Insn::Star(kind_reg));
         let at = self.jump(Insn::Jump);
-        let j = &mut self.frame().jumps[i];
-        if cont { j.continues.push(at) } else { j.breaks.push(at) }
+        let Control::Finally(fin) = &mut self.frame().controls[i] else { unreachable!("a finally") };
+        fin.entries.push(at);
+    }
+
+    /// `break` / `continue`：退掉多进的环境与处理器再跳；中间隔着 finally 就先绕进它。
+    fn exit(&mut self, span: Span, label: Option<&'a str>, cont: bool) -> Result<(), Error> {
+        match self.exit_plan(Some((label, cont))) {
+            (Exit::Jump(i), handlers) => {
+                let Control::Jump(j) = &self.frame().controls[i] else { unreachable!("a jump target") };
+                let envs = j.envs;
+                self.unwind_to(envs, handlers);
+                let at = self.jump(Insn::Jump);
+                let Control::Jump(j) = &mut self.frame().controls[i] else { unreachable!("a jump target") };
+                if cont { j.continues.push(at) } else { j.breaks.push(at) }
+                Ok(())
+            }
+            (Exit::Finally(i), handlers) => {
+                let Control::Finally(fin) = &mut self.frame().controls[i] else { unreachable!("a finally") };
+                let n = fin.routes.len();
+                fin.routes.push(Route { span, label, cont });
+                self.enter_finally(i, handlers, COMPLETION_ROUTE + f64::from(u32::try_from(n).expect("fewer than 2^32 routes")));
+                Ok(())
+            }
+            (Exit::Function, _) => Err(self.unsupported(span, "a jump with no target")),
+        }
+    }
+
+    /// `return`（值在 acc）：中间隔着 finally 就先把值存好绕进它。
+    fn ret(&mut self) {
+        match self.exit_plan(None) {
+            (Exit::Finally(i), handlers) => {
+                let Control::Finally(fin) = &self.frame().controls[i] else { unreachable!("a finally") };
+                let value = fin.value;
+                self.emit(Insn::Star(value));
+                self.enter_finally(i, handlers, COMPLETION_RETURN);
+            }
+            _ => _ = self.emit(Insn::Return),
+        }
+    }
+
+    fn block(&mut self, b: &'a BlockStatement<'a>) -> Result<(), Error> {
+        self.scoped(&Decls::block([b.body.as_slice()]), |c| c.statements(&b.body))
+    }
+
+    /// 按完成类型分派：是 `kind` 就做 `then`。
+    fn on_completion(&mut self, reg: Reg, kind: f64, then: impl FnOnce(&mut Self) -> Result<(), Error>) -> Result<(), Error> {
+        let k = self.constant(Constant::Number(kind));
+        self.emit(Insn::LdaConst(k));
+        self.emit(Insn::Compare(CompareOp::StrictEq, reg));
+        let skip = self.jump(Insn::JumpIfFalse);
+        then(self)?;
+        self.land(skip);
+        Ok(())
+    }
+
+    /// `try` / `catch` / `finally`。
+    fn try_statement(&mut self, t: &'a TryStatement<'a>) -> Result<(), Error> {
+        let fin = t.finalizer.as_ref().map(|_| {
+            let kind = self.temp();
+            let value = self.temp();
+            let envs = self.frame().envs;
+            self.frame().controls.push(Control::Finally(Finally { kind, value, envs, entries: Vec::new(), routes: Vec::new() }));
+            let at = self.jump(Insn::PushHandler);
+            self.frame().controls.push(Control::Handler);
+            (kind, value, at)
+        });
+        if let Some(c) = &t.handler {
+            let at = self.jump(Insn::PushHandler);
+            self.frame().controls.push(Control::Handler);
+            self.block(&t.block)?;
+            self.frame().controls.pop();
+            self.emit(Insn::PopHandler);
+            let end = self.jump(Insn::Jump);
+            self.land(at);
+            self.scoped(&Decls::catch_param(c), |s| {
+                if let Some(p) = &c.param {
+                    let BindingPattern::BindingIdentifier(id) = &p.pattern else {
+                        return Err(s.unsupported(p.span, "destructuring catch parameters"));
+                    };
+                    s.store(id.name.as_str(), true);
+                }
+                s.block(&c.body)
+            })?;
+            self.land(end);
+        } else {
+            self.block(&t.block)?;
+        }
+        let Some((kind, value, at)) = fin else { return Ok(()) };
+        self.frame().controls.pop();
+        self.emit(Insn::PopHandler);
+        let normal = self.constant(Constant::Number(COMPLETION_NORMAL));
+        self.emit(Insn::LdaConst(normal));
+        self.emit(Insn::Star(kind));
+        let fall = self.jump(Insn::Jump);
+        // 抛出进来：存好异常值
+        self.land(at);
+        self.emit(Insn::Star(value));
+        let throw = self.constant(Constant::Number(COMPLETION_THROW));
+        self.emit(Insn::LdaConst(throw));
+        self.emit(Insn::Star(kind));
+        self.land(fall);
+        let Some(Control::Finally(f)) = self.frame().controls.pop() else { unreachable!("the innermost control is this finally") };
+        f.entries.into_iter().for_each(|e| self.land(e));
+        self.block(t.finalizer.as_ref().expect("checked above"))?;
+        self.on_completion(kind, COMPLETION_THROW, |s| {
+            s.emit(Insn::Ldar(value));
+            s.emit(Insn::Throw);
+            Ok(())
+        })?;
+        self.on_completion(kind, COMPLETION_RETURN, |s| {
+            s.emit(Insn::Ldar(value));
+            s.ret();
+            Ok(())
+        })?;
+        for (n, r) in (0u32..).zip(f.routes) {
+            self.on_completion(kind, COMPLETION_ROUTE + f64::from(n), |s| s.exit(r.span, r.label, r.cont))?;
+        }
+        self.release(kind);
         Ok(())
     }
 
@@ -454,14 +637,15 @@ impl<'a> Compiler<'a, '_> {
             }
             Statement::VariableDeclaration(d) => self.declaration(d)?,
             Statement::FunctionDeclaration(_) | Statement::EmptyStatement(_) => {}
-            Statement::BlockStatement(b) => self.scoped(&Decls::block([b.body.as_slice()]), |c| c.statements(&b.body))?,
+            Statement::BlockStatement(b) => self.block(b)?,
             Statement::ReturnStatement(r) => {
                 match &r.argument {
                     Some(e) => self.expr(e)?,
                     None => _ = self.emit(Insn::LdaUndefined),
                 }
-                self.emit(Insn::Return);
+                self.ret();
             }
+            Statement::TryStatement(t) => self.try_statement(t)?,
             Statement::ThrowStatement(t) => {
                 self.expr(&t.argument)?;
                 self.emit(Insn::Throw);
