@@ -536,17 +536,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "r8eval"
-version = "0.1.0"
-dependencies = [
- "oxc_allocator",
- "oxc_ast",
- "oxc_parser",
- "oxc_span",
- "r8",
-]
-
-[[package]]
 name = "rustc-hash"
 version = "2.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"

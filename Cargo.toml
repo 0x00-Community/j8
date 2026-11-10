@@ -9,7 +9,6 @@ license = "MIT"
 
 [workspace.dependencies]
 r8 = { path = "crates/r8" }
-r8eval = { path = "crates/r8eval" }
 r8bytecode = { path = "crates/r8bytecode" }
 mercedes = { path = "crates/mercedes" }
 indexmap = "2"

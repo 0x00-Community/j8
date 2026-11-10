@@ -2,7 +2,7 @@ use oxc_allocator::Allocator;
 use oxc_ast::ast::{Expression, Statement, UnaryOperator};
 use oxc_parser::Parser;
 use oxc_span::{GetSpan, SourceType};
-use r8::{BinaryOp, Error, Source, Tier};
+use r8::{BinaryOp, Error, Source};
 
 use crate::{Constant, Function, Insn, Module, Reg};
 
@@ -34,8 +34,7 @@ impl TryFrom<&Source<'_>> for Module {
 
 impl Emit<'_> {
     fn unsupported(&self, offset: u32, what: &str) -> Error {
-        // 字节码层的不支持算在执行它的 mercedes 上
-        self.src.unsupported(Tier::Mercedes, offset, what)
+        self.src.unsupported(offset, what)
     }
 
     fn constant(&mut self, c: Constant) -> Insn {

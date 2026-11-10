@@ -1,5 +1,5 @@
 //! mercedes：r8bytecode 字节码执行器。
-use r8::{Context, Engine, Error, FuncId, Source, Tier, Value};
+use r8::{Context, Engine, Error, FuncId, Source, Value};
 use r8bytecode::{Constant, Insn, Module};
 
 /// 字节码解释器。
@@ -38,10 +38,6 @@ impl Mercedes {
 }
 
 impl Engine for Mercedes {
-    fn tier(&self) -> Tier {
-        Tier::Mercedes
-    }
-
     fn eval(&mut self, cx: &mut Context<'_, '_>, src: &Source<'_>) -> Result<Value, Error> {
         let module = Module::try_from(src)?;
         self.call(cx, &module, Module::MAIN)

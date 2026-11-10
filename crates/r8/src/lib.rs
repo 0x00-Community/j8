@@ -5,7 +5,7 @@
 //! - [`Context`]：一个全局对象下的执行环境
 //! - [`HandleScope`] / [`Local`] / [`Global`]：栈上句柄与持久句柄
 //! - [`Profiler`]：调用 / 回边计数
-//! - [`Engine`]：各执行层（r8eval / mercedes）实现的统一入口
+//! - [`Engine`]：执行引擎（mercedes）实现的统一入口
 mod context;
 mod engine;
 mod error;
@@ -18,7 +18,7 @@ mod profiler;
 mod value;
 
 pub use context::Context;
-pub use engine::{Engine, Source, Tier};
+pub use engine::{Engine, Source};
 pub use error::Error;
 pub use handle::{Global, HandleScope, Local};
 pub use heap::{Heap, ObjId, Object, StrId};
