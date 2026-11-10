@@ -10,15 +10,14 @@ license = "MIT"
 [workspace.dependencies]
 r8frame = { path = "crates/r8frame" }
 r8platform = { path = "crates/r8platform" }
-r8bytecode = { path = "crates/r8bytecode" }
-mercedes = { path = "crates/mercedes" }
-indexmap = "2"
-ryu-js = "1"
+r8bytecode = { path = "crates/r8bytecode", default-features = false }
+r8executor = { path = "crates/r8executor" }
+gc-arena = { version = "0.7", default-features = false }
+ryu-js = { version = "1", default-features = false }
 oxc_allocator = "0.158"
 oxc_ast = "0.158"
 oxc_parser = "0.158"
 oxc_span = "0.158"
-oxc_syntax = "0.158"
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }

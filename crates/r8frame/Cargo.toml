@@ -6,9 +6,8 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-indexmap.workspace = true
+gc-arena.workspace = true
 ryu-js.workspace = true
-oxc_syntax.workspace = true
 
 [lints]
 workspace = true

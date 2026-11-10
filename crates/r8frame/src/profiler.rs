@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use alloc::collections::BTreeMap;
 
 /// 一个 JS 函数在 isolate 里的编号（各执行层共用）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -15,7 +15,7 @@ pub struct Counter {
 #[derive(Debug, Default)]
 pub struct Profiler {
     enabled: bool,
-    counters: HashMap<FuncId, Counter>,
+    counters: BTreeMap<FuncId, Counter>,
 }
 
 impl Profiler {

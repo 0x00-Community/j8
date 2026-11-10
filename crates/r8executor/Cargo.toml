@@ -1,5 +1,5 @@
 [package]
-name = "mercedes"
+name = "r8executor"
 description = "r8 字节码执行器"
 version.workspace = true
 edition.workspace = true
@@ -8,6 +8,11 @@ license.workspace = true
 [dependencies]
 r8frame.workspace = true
 r8bytecode.workspace = true
+
+[features]
+default = ["compile"]
+# 带上 JS ⇒ 字节码编译，实现 Engine（要 std）；关掉只剩 no_std 的执行器
+compile = ["r8bytecode/compile"]
 
 [dev-dependencies]
 r8platform.workspace = true

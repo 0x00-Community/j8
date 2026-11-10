@@ -1,5 +1,5 @@
 use oxc_allocator::Allocator;
-use oxc_ast::ast::{Expression, Statement, UnaryOperator};
+use oxc_ast::ast::{BinaryOperator, Expression, Statement, UnaryOperator};
 use oxc_parser::Parser;
 use oxc_span::{GetSpan, SourceType};
 use r8frame::{BinaryOp, Error, Source};
@@ -37,6 +37,18 @@ impl Emit<'_> {
         self.src.unsupported(offset, what)
     }
 
+    /// oxc 运算符 ⇒ r8 运算（两边都是外部类型，孤儿规则不让写 `TryFrom`）。
+    fn binary_op(op: BinaryOperator) -> Option<BinaryOp> {
+        Some(match op {
+            BinaryOperator::Addition => BinaryOp::Add,
+            BinaryOperator::Subtraction => BinaryOp::Sub,
+            BinaryOperator::Multiplication => BinaryOp::Mul,
+            BinaryOperator::Division => BinaryOp::Div,
+            BinaryOperator::Remainder => BinaryOp::Rem,
+            _ => return None,
+        })
+    }
+
     fn constant(&mut self, c: Constant) -> Insn {
         let k = self.func.consts.iter().position(|x| *x == c).unwrap_or_else(|| {
             self.func.consts.push(c);
@@ -70,7 +82,7 @@ impl Emit<'_> {
                 Insn::Negate
             }
             Expression::BinaryExpression(b) => {
-                let op = BinaryOp::try_from(b.operator).map_err(|op| self.unsupported(b.span.start, op.as_str()))?;
+                let op = Self::binary_op(b.operator).ok_or_else(|| self.unsupported(b.span.start, b.operator.as_str()))?;
                 self.expression(&b.left)?;
                 let r = Reg(self.top);
                 self.top += 1;

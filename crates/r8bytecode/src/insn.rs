@@ -1,4 +1,6 @@
-use std::fmt;
+use alloc::boxed::Box;
+use alloc::vec::Vec;
+use core::fmt;
 
 use r8frame::{BinaryOp, FuncId};
 

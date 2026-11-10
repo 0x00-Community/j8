@@ -1,6 +1,7 @@
 //! r8platform：[`Platform`] 的标准库实现。
 use std::num::NonZeroUsize;
 use std::thread;
+use std::time::{Duration, Instant};
 
 use r8frame::{Platform, Task};
 
@@ -8,17 +9,22 @@ use r8frame::{Platform, Task};
 #[derive(Debug)]
 pub struct DefaultPlatform {
     workers: NonZeroUsize,
+    start: Instant,
 }
 
 impl Default for DefaultPlatform {
     fn default() -> Self {
-        Self { workers: thread::available_parallelism().unwrap_or(NonZeroUsize::MIN) }
+        Self { workers: thread::available_parallelism().unwrap_or(NonZeroUsize::MIN), start: Instant::now() }
     }
 }
 
 impl Platform for DefaultPlatform {
     fn workers(&self) -> NonZeroUsize {
         self.workers
+    }
+
+    fn now(&self) -> Duration {
+        self.start.elapsed()
     }
 
     fn run(&self, tasks: Vec<Task<'_>>) {
