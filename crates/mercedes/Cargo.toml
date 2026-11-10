@@ -1,0 +1,13 @@
+[package]
+name = "mercedes"
+description = "r8 字节码执行器"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+r8.workspace = true
+r8bytecode.workspace = true
+
+[lints]
+workspace = true
