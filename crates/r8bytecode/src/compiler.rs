@@ -2,10 +2,10 @@
 use std::collections::HashSet;
 
 use oxc_allocator::Allocator;
-use oxc_ast::ast::{BindingIdentifier, BindingPattern, BlockStatement, Class, ClassElement, Expression, MethodDefinitionKind, PropertyKey, ForStatementInit, FormalParameters, Function as AstFunction, Program, Statement, SwitchStatement, TryStatement, VariableDeclaration, VariableDeclarationKind};
+use oxc_ast::ast::{BindingIdentifier, BindingPattern, BlockStatement, Class, ClassElement, Expression, MethodDefinitionKind, PropertyKey, ForStatementInit, FormalParameters, Function as AstFunction, ForInStatement, ForOfStatement, ForStatementLeft, Program, Statement, SwitchStatement, TryStatement, VariableDeclaration, VariableDeclarationKind};
 use oxc_parser::Parser;
 use oxc_span::{GetSpan, SourceType, Span};
-use r8frame::{CompareOp, Error, Source};
+use r8frame::{CompareOp, Error, Resume, Source};
 
 use crate::scope::{Decl, DeclKind, Decls, Key, Resolver, THIS};
 use crate::{Const, Constant, Function, FunctionKind, Insn, Label, Module, PropertyKind, Reg};
@@ -89,9 +89,25 @@ enum Control<'a> {
     Jump(Jump<'a>),
     Handler,
     Finally(Finally<'a>),
+    /// `for-of` 的迭代器（记录在这三个寄存器）：跳出去要先关掉它
+    Iterator(Reg),
 }
 
-/// 跳出去要做的事：退几层环境、卸几个处理器、落到哪。
+/// 函数的种类与风味（生成器、async）。
+#[derive(Clone, Copy, Default)]
+pub(crate) struct Flavor {
+    pub kind: FunctionKind,
+    pub generator: bool,
+    pub asynchronous: bool,
+}
+
+impl From<FunctionKind> for Flavor {
+    fn from(kind: FunctionKind) -> Self {
+        Self { kind, ..Self::default() }
+    }
+}
+
+/// 跳出去落到哪：控制栈第几层的跳转目标 / finally，或直接离开函数。
 enum Exit {
     Jump(usize),
     Finally(usize),
@@ -111,6 +127,8 @@ struct Frame<'a> {
     label: Option<&'a str>,
     /// 脚本的完成值放这里（只有脚本本身有）
     completion: Option<Reg>,
+    /// 生成器 / async 函数恢复时写恢复方式的寄存器
+    resume: Option<Reg>,
 }
 
 /// 函数体：语句、箭头函数的表达式、类的字段初始化、缺省构造器。
@@ -351,15 +369,19 @@ impl<'a> Compiler<'a, '_> {
     // ---- 函数 --------------------------------------------------------------------------
 
     /// 编一个函数，返回它在模块里的下标。
-    pub(crate) fn function(&mut self, name: &str, kind: FunctionKind, this: Option<Key>, self_name: Option<&'a BindingIdentifier<'a>>, params: Option<&'a FormalParameters<'a>>, body: Body<'a>) -> Result<u32, Error> {
+    pub(crate) fn function(&mut self, name: &str, flavor: Flavor, this: Option<Key>, self_name: Option<&'a BindingIdentifier<'a>>, params: Option<&'a FormalParameters<'a>>, body: Body<'a>) -> Result<u32, Error> {
         let count = params.map_or(0, |p| p.items.len());
         let n = u16::try_from(count).map_err(|_| self.unsupported(params.map_or(Span::default(), |p| p.span), "more than 65535 parameters"))?;
         let index = self.module.len();
         self.module.push(Function::default());
         let top = Reg::PARAMS + n;
         let keeps_args = matches!(body, Body::DefaultConstructor { derived: true }) || params.is_some_and(|p| p.rest.is_some());
-        let out = Function { name: name.into(), kind, keeps_args, params: n, regs: top, ..Function::default() };
-        self.frames.push(Frame { index, out, top, envs: 0, controls: Vec::new(), label: None, completion: None });
+        let out = Function { name: name.into(), kind: flavor.kind, keeps_args, generator: flavor.generator, asynchronous: flavor.asynchronous, params: n, regs: top, ..Function::default() };
+        self.frames.push(Frame { index, out, top, envs: 0, controls: Vec::new(), label: None, completion: None, resume: None });
+        if flavor.generator || flavor.asynchronous {
+            let mode = self.temp();
+            self.frame().resume = Some(mode);
+        }
         let stmts = match body {
             Body::Statements(s) => s,
             _ => &[],
@@ -460,32 +482,156 @@ impl<'a> Compiler<'a, '_> {
                 self.release(keys);
             }
             BindingPattern::ArrayPattern(a) => {
-                self.emit(Insn::Ldar(value));
-                self.emit(Insn::ToArray);
-                let arr = self.temp();
-                self.emit(Insn::Star(arr));
-                for (i, e) in (0u32..).zip(&a.elements) {
+                let iter = self.iterate(value);
+                for e in &a.elements {
+                    self.emit(Insn::IteratorNext { iter });
                     let Some(e) = e else { continue };
-                    let k = self.constant(Constant::Number(f64::from(i)));
-                    self.emit(Insn::LdaConst(k));
-                    self.emit(Insn::GetKeyed { obj: arr });
                     let t = self.temp();
                     self.emit(Insn::Star(t));
                     self.bind_pattern(e, t, init)?;
                     self.release(t);
                 }
-                if let Some(r) = &a.rest {
-                    let from = u16::try_from(a.elements.len()).map_err(|_| self.unsupported(a.span, "more than 65535 elements"))?;
-                    self.emit(Insn::SliceFrom { arr, from });
-                    let t = self.temp();
-                    self.emit(Insn::Star(t));
-                    self.bind_pattern(&r.argument, t, init)?;
-                    self.release(t);
+                match &a.rest {
+                    Some(r) => {
+                        self.emit(Insn::IteratorRest { iter });
+                        let t = self.temp();
+                        self.emit(Insn::Star(t));
+                        self.bind_pattern(&r.argument, t, init)?;
+                        self.release(t);
+                    }
+                    None => _ = self.emit(Insn::IteratorClose { iter }),
                 }
-                self.release(arr);
+                self.release(iter);
             }
         }
         Ok(())
+    }
+
+    /// 取寄存器 `value` 的迭代器：迭代器记录占三个连续寄存器（调用方释放）。
+    pub(crate) fn iterate(&mut self, value: Reg) -> Reg {
+        self.emit(Insn::Ldar(value));
+        let iter = self.temps(3);
+        self.emit(Insn::GetIterator { dst: iter });
+        iter
+    }
+
+    /// `for-of` / `for-in` 的左边：声明（含解构）或赋值目标，值在 `v`。
+    fn for_left(&mut self, left: &'a ForStatementLeft<'a>, v: Reg) -> Result<(), Error> {
+        match left {
+            ForStatementLeft::VariableDeclaration(d) => {
+                let decl = d.declarations.first().ok_or_else(|| self.unsupported(d.span, "an empty declaration"))?;
+                self.bind_pattern(&decl.id, v, true)
+            }
+            t => self.assign_target(t.as_assignment_target().ok_or_else(|| self.unsupported(t.span(), "for-in / for-of target"))?, v),
+        }
+    }
+
+    /// `for (left of right) body`：迭代器协议；`break` / `return` / 抛出都关掉迭代器。
+    fn for_of(&mut self, f: &'a ForOfStatement<'a>) -> Result<(), Error> {
+        if f.r#await {
+            return Err(self.unsupported(f.span, "for await"));
+        }
+        let label = self.take_label();
+        self.expr(&f.right)?;
+        let src = self.temp();
+        self.emit(Insn::Star(src));
+        let iter = self.iterate(src);
+        self.frame().controls.push(Control::Iterator(iter));
+        let v = self.temp();
+        let top = self.here();
+        self.emit(Insn::IteratorNext { iter });
+        self.emit(Insn::Star(v));
+        self.emit(Insn::Ldar(Reg(iter.0 + 2)));
+        let done = self.jump(Insn::JumpIfTrue);
+        self.push_jump(label, true, true);
+        let on_throw = self.jump(Insn::PushHandler);
+        self.frame().controls.push(Control::Handler);
+        self.scoped(&Decls::for_head(&f.left), |c| {
+            c.for_left(&f.left, v)?;
+            c.statement(&f.body)
+        })?;
+        self.frame().controls.pop();
+        self.emit(Insn::PopHandler);
+        self.emit(Insn::Jump(top));
+        // break 落这里：关迭代器
+        let broke = self.here();
+        self.emit(Insn::IteratorClose { iter });
+        let end = self.jump(Insn::Jump);
+        // 循环体抛出：关迭代器再接着抛
+        self.land(on_throw);
+        self.emit(Insn::Star(v));
+        self.emit(Insn::IteratorClose { iter });
+        self.emit(Insn::Ldar(v));
+        self.emit(Insn::Throw);
+        self.pop_jump(broke, Some(top));
+        self.land(done);
+        self.land(end);
+        self.frame().controls.pop();
+        self.release(src);
+        Ok(())
+    }
+
+    /// `for (left in right) body`：先取键表快照，按下标走。
+    fn for_in(&mut self, f: &'a ForInStatement<'a>) -> Result<(), Error> {
+        let label = self.take_label();
+        self.expr(&f.right)?;
+        self.emit(Insn::ForInKeys);
+        let keys = self.temp();
+        self.emit(Insn::Star(keys));
+        let i = self.temp();
+        let zero = self.constant(Constant::Number(0.0));
+        self.emit(Insn::LdaConst(zero));
+        self.emit(Insn::Star(i));
+        let v = self.temp();
+        let top = self.here();
+        let length = self.name("length");
+        self.emit(Insn::GetNamed { obj: keys, name: length });
+        self.emit(Insn::Compare(CompareOp::Lt, i));
+        let exit = self.jump(Insn::JumpIfFalse);
+        self.emit(Insn::Ldar(i));
+        self.emit(Insn::GetKeyed { obj: keys });
+        self.emit(Insn::Star(v));
+        self.push_jump(label, true, true);
+        self.scoped(&Decls::for_head(&f.left), |c| {
+            c.for_left(&f.left, v)?;
+            c.statement(&f.body)
+        })?;
+        let cont = self.here();
+        self.emit(Insn::Ldar(i));
+        self.emit(Insn::Inc);
+        self.emit(Insn::Star(i));
+        self.emit(Insn::Jump(top));
+        self.land(exit);
+        let end = self.here();
+        self.pop_jump(end, Some(cont));
+        self.release(keys);
+        Ok(())
+    }
+
+    /// `yield` / `await` 之后：按恢复方式分派（`return` 经过 finally、`throw` 在这里抛），否则 acc 是送进来的值。
+    pub(crate) fn resume_dispatch(&mut self, mode: Reg, returnable: bool) -> Result<(), Error> {
+        let v = self.temp();
+        self.emit(Insn::Star(v));
+        if returnable {
+            self.on_completion(mode, f64::from(Resume::Return), |s| {
+                s.emit(Insn::Ldar(v));
+                s.ret();
+                Ok(())
+            })?;
+        }
+        self.on_completion(mode, f64::from(Resume::Throw), |s| {
+            s.emit(Insn::Ldar(v));
+            s.emit(Insn::Throw);
+            Ok(())
+        })?;
+        self.emit(Insn::Ldar(v));
+        self.release(v);
+        Ok(())
+    }
+
+    /// 生成器 / async 函数恢复方式的寄存器；不在里面就报错。
+    pub(crate) fn resume_reg(&mut self, span: Span, what: &str) -> Result<Reg, Error> {
+        self.frame().resume.ok_or_else(|| self.unsupported(span, what))
     }
 
     /// `value` 是 `undefined` 就换成默认值：结果放一个新临时寄存器（调用方释放）。
@@ -520,22 +666,26 @@ impl<'a> Compiler<'a, '_> {
     }
 
     /// 普通函数（声明或表达式）：查掉不支持的种类。
-    pub(crate) fn plain_function(&mut self, f: &'a AstFunction<'a>, self_name: bool) -> Result<u32, Error> {
-        if f.generator || f.r#async {
-            return Err(self.unsupported(f.span, "generators / async functions"));
+    /// 函数节点的风味（async 生成器还不支持）。
+    pub(crate) fn flavor(&self, f: &AstFunction<'_>, kind: FunctionKind) -> Result<Flavor, Error> {
+        if f.generator && f.r#async {
+            return Err(self.unsupported(f.span, "async generators"));
         }
+        Ok(Flavor { kind, generator: f.generator, asynchronous: f.r#async })
+    }
+
+    pub(crate) fn plain_function(&mut self, f: &'a AstFunction<'a>, self_name: bool) -> Result<u32, Error> {
+        let flavor = self.flavor(f, FunctionKind::Normal)?;
         let body = f.body.as_ref().ok_or_else(|| self.unsupported(f.span, "a function without a body"))?;
         let name = f.id.as_ref().map_or("", |id| id.name.as_str());
-        self.function(name, FunctionKind::Normal, Some(Decls::this_key(f.span)), if self_name { f.id.as_ref() } else { None }, Some(&f.params), Body::Statements(&body.statements))
+        self.function(name, flavor, Some(Decls::this_key(f.span)), if self_name { f.id.as_ref() } else { None }, Some(&f.params), Body::Statements(&body.statements))
     }
 
     /// 方法（类方法、对象字面量方法、访问器）：不可 `new`。
     pub(crate) fn method(&mut self, name: &str, f: &'a AstFunction<'a>, kind: FunctionKind) -> Result<u32, Error> {
-        if f.generator || f.r#async {
-            return Err(self.unsupported(f.span, "generator / async methods"));
-        }
+        let flavor = self.flavor(f, kind)?;
         let body = f.body.as_ref().ok_or_else(|| self.unsupported(f.span, "a method without a body"))?;
-        self.function(name, kind, Some(Decls::this_key(f.span)), None, Some(&f.params), Body::Statements(&body.statements))
+        self.function(name, flavor, Some(Decls::this_key(f.span)), None, Some(&f.params), Body::Statements(&body.statements))
     }
 
     /// 字段初始化函数的函数体：`this.k = v` 逐个定义（可枚举）。
@@ -600,7 +750,7 @@ impl<'a> Compiler<'a, '_> {
         let kind = FunctionKind::Constructor { derived };
         let func = match ctor_def {
             Some(m) => self.method(name, &m.value, kind)?,
-            None => self.function(name, kind, None, None, None, Body::DefaultConstructor { derived })?,
+            None => self.function(name, kind.into(), None, None, None, Body::DefaultConstructor { derived })?,
         };
         let proto = self.temp();
         self.emit(Insn::CreateClass { func, parent, proto });
@@ -644,12 +794,12 @@ impl<'a> Compiler<'a, '_> {
             }
         }
         if instance_fields {
-            let f = self.function("", FunctionKind::Method, Some(Decls::this_key(c.body.span)), None, None, Body::Fields { class: c, statik: false })?;
+            let f = self.function("", FunctionKind::Method.into(), Some(Decls::this_key(c.body.span)), None, None, Body::Fields { class: c, statik: false })?;
             self.emit(Insn::CreateMethod { func: f, home: proto });
             self.emit(Insn::SetClassFields { ctor });
         }
         if static_fields {
-            let f = self.function("", FunctionKind::Method, Some(Decls::this_key(c.span)), None, None, Body::Fields { class: c, statik: true })?;
+            let f = self.function("", FunctionKind::Method.into(), Some(Decls::this_key(c.span)), None, None, Body::Fields { class: c, statik: true })?;
             self.emit(Insn::CreateMethod { func: f, home: ctor });
             let callee = self.temps(2);
             self.emit(Insn::Star(callee));
@@ -679,7 +829,7 @@ impl<'a> Compiler<'a, '_> {
     fn script(&mut self, program: &'a Program<'a>) -> Result<(), Error> {
         self.module.push(Function::default());
         let out = Function { name: "main".into(), regs: Reg::PARAMS, ..Function::default() };
-        self.frames.push(Frame { index: 0, out, top: Reg::PARAMS, envs: 0, controls: Vec::new(), label: None, completion: None });
+        self.frames.push(Frame { index: 0, out, top: Reg::PARAMS, envs: 0, controls: Vec::new(), label: None, completion: None, resume: None });
         let completion = self.temp();
         self.frame().completion = Some(completion);
         self.enter(&Decls(vec![Decl { name: THIS, key: Decls::this_key(program.span), kind: DeclKind::This }]))?;
@@ -740,13 +890,11 @@ impl<'a> Compiler<'a, '_> {
     }
 
     /// 由内向外找跳出去的落点：先碰到 finally 就绕进它；`target` 为 `None` 是 `return`。
-    fn exit_plan(&self, target: Option<(Option<&'a str>, bool)>) -> (Exit, u16) {
+    fn exit_plan(&self, target: Option<(Option<&'a str>, bool)>) -> Exit {
         let f = self.frames.last().expect("inside a function");
-        let mut handlers = 0;
         for (i, c) in f.controls.iter().enumerate().rev() {
             match c {
-                Control::Handler => handlers += 1,
-                Control::Finally(_) => return (Exit::Finally(i), handlers),
+                Control::Finally(_) => return Exit::Finally(i),
                 Control::Jump(j) => {
                     let hit = match target {
                         Some((Some(l), false)) => j.label == Some(l),
@@ -756,29 +904,42 @@ impl<'a> Compiler<'a, '_> {
                         None => false,
                     };
                     if hit {
-                        return (Exit::Jump(i), handlers);
+                        return Exit::Jump(i);
                     }
                 }
+                Control::Handler | Control::Iterator(_) => {}
             }
         }
-        (Exit::Function, handlers)
+        Exit::Function
     }
 
-    /// 退掉多进的环境与处理器，回到控制栈第 `i` 层（它进来时有 `envs` 层环境）。
-    fn unwind_to(&mut self, envs: u16, handlers: u16) {
-        for _ in envs..self.frame().envs {
-            self.emit(Insn::PopEnv);
+    /// 离开控制栈第 `from` 层及以上：退掉多进的环境（`envs` 是落点的环境层数），由内向外卸处理器、关迭代器。
+    /// 都不碰 acc。
+    fn leave_controls(&mut self, from: usize, envs: Option<u16>) {
+        if let Some(e) = envs {
+            for _ in e..self.frame().envs {
+                self.emit(Insn::PopEnv);
+            }
         }
-        for _ in 0..handlers {
-            self.emit(Insn::PopHandler);
+        let actions: Vec<Insn> = self.frame().controls[from..]
+            .iter()
+            .rev()
+            .filter_map(|c| match c {
+                Control::Handler => Some(Insn::PopHandler),
+                Control::Iterator(iter) => Some(Insn::IteratorClose { iter: *iter }),
+                _ => None,
+            })
+            .collect();
+        for a in actions {
+            self.emit(a);
         }
     }
 
     /// 跳进第 `i` 层的 finally，带上完成类型 `kind`。
-    fn enter_finally(&mut self, i: usize, handlers: u16, kind: f64) {
+    fn enter_finally(&mut self, i: usize, kind: f64) {
         let Control::Finally(fin) = &self.frame().controls[i] else { unreachable!("a finally") };
         let (envs, kind_reg) = (fin.envs, fin.kind);
-        self.unwind_to(envs, handlers);
+        self.leave_controls(i + 1, Some(envs));
         let k = self.constant(Constant::Number(kind));
         self.emit(Insn::LdaConst(k));
         self.emit(Insn::Star(kind_reg));
@@ -787,39 +948,42 @@ impl<'a> Compiler<'a, '_> {
         fin.entries.push(at);
     }
 
-    /// `break` / `continue`：退掉多进的环境与处理器再跳；中间隔着 finally 就先绕进它。
+    /// `break` / `continue`：退掉多进的环境与处理器、关掉经过的迭代器再跳；中间隔着 finally 就先绕进它。
     fn exit(&mut self, span: Span, label: Option<&'a str>, cont: bool) -> Result<(), Error> {
         match self.exit_plan(Some((label, cont))) {
-            (Exit::Jump(i), handlers) => {
+            Exit::Jump(i) => {
                 let Control::Jump(j) = &self.frame().controls[i] else { unreachable!("a jump target") };
                 let envs = j.envs;
-                self.unwind_to(envs, handlers);
+                self.leave_controls(i + 1, Some(envs));
                 let at = self.jump(Insn::Jump);
                 let Control::Jump(j) = &mut self.frame().controls[i] else { unreachable!("a jump target") };
                 if cont { j.continues.push(at) } else { j.breaks.push(at) }
                 Ok(())
             }
-            (Exit::Finally(i), handlers) => {
+            Exit::Finally(i) => {
                 let Control::Finally(fin) = &mut self.frame().controls[i] else { unreachable!("a finally") };
                 let n = fin.routes.len();
                 fin.routes.push(Route { span, label, cont });
-                self.enter_finally(i, handlers, COMPLETION_ROUTE + f64::from(u32::try_from(n).expect("fewer than 2^32 routes")));
+                self.enter_finally(i, COMPLETION_ROUTE + f64::from(u32::try_from(n).expect("fewer than 2^32 routes")));
                 Ok(())
             }
-            (Exit::Function, _) => Err(self.unsupported(span, "a jump with no target")),
+            Exit::Function => Err(self.unsupported(span, "a jump with no target")),
         }
     }
 
-    /// `return`（值在 acc）：中间隔着 finally 就先把值存好绕进它。
-    fn ret(&mut self) {
+    /// `return`（值在 acc）：中间隔着 finally 就先把值存好绕进它；经过的迭代器都关掉。
+    pub(crate) fn ret(&mut self) {
         match self.exit_plan(None) {
-            (Exit::Finally(i), handlers) => {
+            Exit::Finally(i) => {
                 let Control::Finally(fin) = &self.frame().controls[i] else { unreachable!("a finally") };
                 let value = fin.value;
                 self.emit(Insn::Star(value));
-                self.enter_finally(i, handlers, COMPLETION_RETURN);
+                self.enter_finally(i, COMPLETION_RETURN);
             }
-            _ => _ = self.emit(Insn::Return),
+            _ => {
+                self.leave_controls(0, None);
+                self.emit(Insn::Return);
+            }
         }
     }
 
@@ -828,7 +992,7 @@ impl<'a> Compiler<'a, '_> {
     }
 
     /// 按完成类型分派：是 `kind` 就做 `then`。
-    fn on_completion(&mut self, reg: Reg, kind: f64, then: impl FnOnce(&mut Self) -> Result<(), Error>) -> Result<(), Error> {
+    pub(crate) fn on_completion(&mut self, reg: Reg, kind: f64, then: impl FnOnce(&mut Self) -> Result<(), Error>) -> Result<(), Error> {
         let k = self.constant(Constant::Number(kind));
         self.emit(Insn::LdaConst(k));
         self.emit(Insn::Compare(CompareOp::StrictEq, reg));
@@ -1007,7 +1171,7 @@ impl<'a> Compiler<'a, '_> {
             }
             Statement::LabeledStatement(l) => {
                 let name = l.label.name.as_str();
-                if matches!(l.body, Statement::WhileStatement(_) | Statement::DoWhileStatement(_) | Statement::ForStatement(_) | Statement::SwitchStatement(_)) {
+                if matches!(l.body, Statement::WhileStatement(_) | Statement::DoWhileStatement(_) | Statement::ForStatement(_) | Statement::ForOfStatement(_) | Statement::ForInStatement(_) | Statement::SwitchStatement(_)) {
                     self.frame().label = Some(name);
                     self.statement(&l.body)?;
                 } else {
@@ -1020,6 +1184,8 @@ impl<'a> Compiler<'a, '_> {
             Statement::BreakStatement(b) => self.exit(b.span, b.label.as_ref().map(|l| l.name.as_str()), false)?,
             Statement::ContinueStatement(c) => self.exit(c.span, c.label.as_ref().map(|l| l.name.as_str()), true)?,
             Statement::SwitchStatement(sw) => self.switch(sw)?,
+            Statement::ForOfStatement(f) => self.for_of(f)?,
+            Statement::ForInStatement(f) => self.for_in(f)?,
             s => return Err(self.unsupported(s.span(), "statement")),
         }
         Ok(())

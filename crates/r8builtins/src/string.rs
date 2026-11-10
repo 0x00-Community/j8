@@ -61,7 +61,11 @@ impl Strings {
     }
 
     fn string<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        Ok(if args.is_empty() { a.string("").into() } else { a.to_string(args[0])?.into() })
+        Ok(match args.first() {
+            None => a.string("").into(),
+            Some(&Value::Symbol(s)) => a.symbol_descriptive(s).into(),
+            Some(&v) => a.to_string(v)?.into(),
+        })
     }
 
     fn to_string<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {

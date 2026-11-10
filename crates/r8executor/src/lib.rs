@@ -11,7 +11,7 @@ use core::cell::Cell;
 
 use r8bytecode::{Constant, Function, FunctionKind, Insn, Label, Module, PropertyKind, Reg};
 use gc_arena::Gc;
-use r8frame::{Agent, Closure, Env, Error, ErrorKind, FuncId, Invoke, JsEnv, JsObject, ObjectData, ObjectKind, Property, Slot, Value};
+use r8frame::{Agent, Closure, Coroutine, CoroutineState, Env, Error, ErrorKind, FuncId, Invoke, IterRecord, JsEnv, JsObject, ObjectData, ObjectKind, Property, Resume, Slot, Step, Suspended, Value};
 
 /// 调用深度上限（含宿主函数里重入的 JS），过了抛 RangeError
 const STACK_LIMIT: usize = 10_000;
@@ -73,6 +73,22 @@ impl<'gc> State<'gc> {
     }
 }
 
+/// 一次执行停下来的方式：返回，或协程在 `yield` / `await` 处挂起（带着存下的帧）。
+enum Outcome<'gc> {
+    Return(Value<'gc>),
+    Suspend { value: Value<'gc>, awaiting: bool, saved: Suspended<'gc> },
+}
+
+impl<'gc> Outcome<'gc> {
+    /// 普通函数只会返回（`yield` / `await` 只在协程自己的那一帧里出现）。
+    fn returned(self) -> Value<'gc> {
+        match self {
+            Outcome::Return(v) => v,
+            Outcome::Suspend { .. } => unreachable!("only coroutines suspend"),
+        }
+    }
+}
+
 /// 调用解析的结果：要进一帧的闭包，或宿主函数已经算完的值。
 enum Callee<'gc> {
     Closure { closure: Closure<'gc>, callee: Value<'gc>, this: Value<'gc>, args: Vec<Value<'gc>> },
@@ -110,7 +126,31 @@ impl Executor {
         let this = Value::Object(a.realm.global);
         let mut regs = Vec::new();
         let f = self.enter(a, &mut regs, Closure::new(main, None), Value::Undefined, this, &[]);
-        self.execute(a, State { regs, frames: Vec::new(), f, acc: Value::Undefined })
+        self.execute(a, State { regs, frames: Vec::new(), f, acc: Value::Undefined }).map(Outcome::returned)
+    }
+
+    /// 协程函数被调：生成器给出还没跑的生成器对象；async 函数跑到第一个 `await`，给出它的 Promise。
+    fn start<'gc>(&self, a: &mut Agent<'gc, '_>, closure: Closure<'gc>, callee: Value<'gc>, this: Value<'gc>, args: &[Value<'gc>], depth: usize) -> Result<Value<'gc>, Error> {
+        let mut regs = Vec::new();
+        let f = self.enter(a, &mut regs, closure, callee, this, args);
+        let saved = Suspended { func: f.func, pc: 0, regs, env: f.env, handlers: Vec::new(), args: f.args, mode: None };
+        let generator = self.function(closure.func).func.generator;
+        let proto = if generator {
+            match a.get_named(callee, "prototype")? {
+                Value::Object(p) => p,
+                _ => a.realm.generator_proto,
+            }
+        } else {
+            a.realm.object_proto
+        };
+        let promise = (!generator).then(|| a.new_promise());
+        let co = ObjectData { kind: ObjectKind::Coroutine(Coroutine { state: CoroutineState::Suspended(saved), fresh: true, promise }), proto: Some(proto), ..ObjectData::default() }.alloc(a.mc);
+        let Some(p) = promise else { return Ok(co.into()) };
+        let outer = self.depth.replace(depth);
+        let r = a.drive(co, Resume::Next, Value::Undefined);
+        self.depth.set(outer);
+        r?;
+        Ok(p.into())
     }
 
     /// 解开绑定函数、直接调宿主函数；剩下 JS 闭包交给调用者进帧。
@@ -121,7 +161,12 @@ impl Executor {
                     let name = &self.function(c.func).func.name;
                     return Err(a.throw(ErrorKind::Type, &alloc::format!("Class constructor {name} cannot be invoked without 'new'")));
                 }
+                ObjectKind::Function(c) if { let f = &self.function(c.func).func; f.generator || f.asynchronous } => {
+                    let c = *c;
+                    return self.start(a, c, callee, this, &args, depth).map(Callee::Done);
+                }
                 ObjectKind::Function(c) => return Ok(Callee::Closure { closure: *c, callee, this, args }),
+                ObjectKind::Resolver { .. } => return a.run_resolver(o, args.first().copied().unwrap_or_default()).map(Callee::Done),
                 ObjectKind::Native(n) => Ok(*n),
                 ObjectKind::Bound(b) => Err((b.target, b.this, b.args.clone())),
                 _ => break,
@@ -180,8 +225,11 @@ impl Executor {
             };
             match kind {
                 Ok(Ok(closure)) => {
-                    let fkind = self.function(closure.func).func.kind;
-                    let this = match fkind {
+                    let func = &self.function(closure.func).func;
+                    if func.generator || func.asynchronous {
+                        break;
+                    }
+                    let this = match func.kind {
                         FunctionKind::Arrow | FunctionKind::Method => break,
                         FunctionKind::Constructor { derived: true } => None,
                         FunctionKind::Normal | FunctionKind::Constructor { derived: false } => {
@@ -265,7 +313,12 @@ impl Executor {
     /// 建一个函数对象；普通函数带 `prototype`（`constructor` 指回来）。
     fn function_object<'gc>(&self, a: &Agent<'gc, '_>, closure: Closure<'gc>, proto: JsObject<'gc>) -> JsObject<'gc> {
         let fo = ObjectData { kind: ObjectKind::Function(closure), proto: Some(proto), ..ObjectData::default() }.alloc(a.mc);
-        if self.function(closure.func).func.kind == FunctionKind::Normal {
+        let func = &self.function(closure.func).func;
+        if func.generator {
+            // 生成器函数的 `prototype` 是它产出的生成器的原型（没有 `constructor`）
+            let p = ObjectData { proto: Some(a.realm.generator_proto), ..ObjectData::default() }.alloc(a.mc);
+            fo.borrow_mut(a.mc).define(a.mc, "prototype", Property { slot: Slot::Data(p.into()), enumerable: false, writable: true, configurable: false });
+        } else if func.kind == FunctionKind::Normal && !func.asynchronous {
             let p = a.object();
             p.borrow_mut(a.mc).define(a.mc, "constructor", Property::hidden(fo.into()));
             fo.borrow_mut(a.mc).define(a.mc, "prototype", Property { slot: Slot::Data(p.into()), enumerable: false, writable: true, configurable: false });
@@ -299,6 +352,14 @@ impl Executor {
         e
     }
 
+    /// 寄存器里的恢复方式。
+    fn mode(v: Value<'_>) -> Resume {
+        match v {
+            Value::Number(x) => Resume::ALL.into_iter().find(|&m| f64::from(m) == x).unwrap_or(Resume::Next),
+            _ => Resume::Next,
+        }
+    }
+
     /// 数组的元素（快照）；不是数组给空。
     fn items(v: Value<'_>) -> Vec<Value<'_>> {
         match v {
@@ -330,7 +391,7 @@ impl Executor {
     }
 
     /// 跑到最外层帧返回；异常先找处理器，接不住才往外抛。
-    fn execute<'gc>(&self, a: &mut Agent<'gc, '_>, mut st: State<'gc>) -> Result<Value<'gc>, Error> {
+    fn execute<'gc>(&self, a: &mut Agent<'gc, '_>, mut st: State<'gc>) -> Result<Outcome<'gc>, Error> {
         let base = self.depth.get();
         let r = loop {
             match self.run(a, &mut st, base) {
@@ -350,7 +411,7 @@ impl Executor {
 
     /// 主循环：出错直接返回，由 [`execute`](Self::execute) 展开。
     #[expect(clippy::too_many_lines, reason = "一条指令一个分支，拆开反而难读")]
-    fn run<'gc>(&self, a: &mut Agent<'gc, '_>, st: &mut State<'gc>, depth: usize) -> Result<Value<'gc>, Error> {
+    fn run<'gc>(&self, a: &mut Agent<'gc, '_>, st: &mut State<'gc>, depth: usize) -> Result<Outcome<'gc>, Error> {
         let State { regs, frames, f, acc } = st;
         loop {
             let loaded = self.function(f.func);
@@ -429,14 +490,6 @@ impl Executor {
                     let items = a.to_list(*acc)?;
                     Self::push(a, regs[r(arr)], items);
                 }
-                Insn::ToArray => {
-                    let items = a.to_list(*acc)?;
-                    *acc = a.array(items).into();
-                }
-                Insn::SliceFrom { arr, from } => {
-                    let items = Self::items(regs[r(arr)]);
-                    *acc = a.array(items.get(usize::from(from)..).unwrap_or(&[]).to_vec()).into();
-                }
                 Insn::CallSpread { callee, this, args } => {
                     let level = depth + frames.len() + 1;
                     if level >= STACK_LIMIT {
@@ -474,7 +527,7 @@ impl Executor {
                 }
                 Insn::ObjectRest { src, keys, count } => {
                     let first = r(keys);
-                    let exclude = regs[first..first + usize::from(count)].iter().map(|&k| a.property_key(k)).collect::<Result<Vec<_>, _>>()?;
+                    let exclude = regs[first..first + usize::from(count)].iter().filter(|k| !matches!(k, Value::Symbol(_))).map(|&k| a.property_key(k)).collect::<Result<Vec<_>, _>>()?;
                     let o = a.object();
                     a.copy_data(o, regs[r(src)], &exclude)?;
                     *acc = o.into();
@@ -513,8 +566,14 @@ impl Executor {
                 }
                 Insn::DefineNamed { obj, name, kind, enumerable } => Self::define(a, regs[r(obj)], func.name_at(name), kind, enumerable, *acc),
                 Insn::DefineKeyed { obj, key, kind, enumerable } => {
-                    let k = a.property_key(regs[r(key)])?;
-                    Self::define(a, regs[r(obj)], &k, kind, enumerable, *acc);
+                    if let Value::Object(o) = regs[r(obj)] {
+                        let k = regs[r(key)];
+                        match (kind, *acc) {
+                            (PropertyKind::Data, v) => a.define_keyed(o, k, Property { slot: Slot::Data(v), enumerable, writable: true, configurable: true })?,
+                            (PropertyKind::Getter | PropertyKind::Setter, Value::Object(func)) => a.define_accessor_keyed(o, k, func, kind == PropertyKind::Setter, enumerable)?,
+                            _ => {}
+                        }
+                    }
                 }
                 Insn::GetSuper { this, name } => {
                     let base = Self::super_base(a, regs, f)?;
@@ -548,15 +607,9 @@ impl Executor {
                     }
                 }
                 Insn::InstanceOf(x) => *acc = a.instance_of(regs[r(x)], *acc)?.into(),
-                Insn::In(x) => {
-                    let k = a.property_key(regs[r(x)])?;
-                    *acc = a.has_property(*acc, &k)?.into();
-                }
+                Insn::In(x) => *acc = a.has_keyed(*acc, regs[r(x)])?.into(),
                 Insn::DeleteNamed { obj, name } => *acc = a.delete(regs[r(obj)], func.name_at(name))?.into(),
-                Insn::DeleteKeyed { obj } => {
-                    let k = a.property_key(*acc)?;
-                    *acc = a.delete(regs[r(obj)], &k)?.into();
-                }
+                Insn::DeleteKeyed { obj } => *acc = a.delete_keyed(regs[r(obj)], *acc)?.into(),
                 Insn::CreateObject => *acc = a.object().into(),
                 Insn::CreateArray { first, count } => *acc = a.array(regs[r(first)..r(first) + usize::from(count)].to_vec()).into(),
                 Insn::GetNamed { obj, name } => *acc = a.get_named(regs[r(obj)], func.name_at(name))?,
@@ -590,8 +643,86 @@ impl Executor {
                             regs.truncate(f.base);
                             *f = caller;
                         }
-                        None => return Ok(*acc),
+                        None => return Ok(Outcome::Return(*acc)),
                     }
+                }
+                Insn::Yield { mode } | Insn::Await { mode } => {
+                    debug_assert!(frames.is_empty() && f.base == 0, "a coroutine suspends from its own bottom frame");
+                    let saved = Suspended {
+                        func: f.func,
+                        pc: f.pc,
+                        regs: core::mem::take(regs),
+                        env: f.env,
+                        handlers: f.handlers.drain(..).map(|h| (h.target.0, h.env)).collect(),
+                        args: core::mem::take(&mut f.args),
+                        mode: Some(mode.0),
+                    };
+                    return Ok(Outcome::Suspend { value: *acc, awaiting: matches!(insn, Insn::Await { .. }), saved });
+                }
+                Insn::GetIterator { dst } => {
+                    let rec = a.get_iterator(*acc)?;
+                    let d = r(dst);
+                    regs[d] = rec.iterator;
+                    regs[d + 1] = rec.next;
+                    regs[d + 2] = false.into();
+                }
+                Insn::IteratorNext { iter } => {
+                    let d = r(iter);
+                    *acc = Value::Undefined;
+                    if !a.to_boolean(regs[d + 2]) {
+                        // 走一步出错也算走完（不再调 `return`）
+                        regs[d + 2] = true.into();
+                        if let Some(v) = a.iterator_step(IterRecord { iterator: regs[d], next: regs[d + 1] })? {
+                            regs[d + 2] = false.into();
+                            *acc = v;
+                        }
+                    }
+                }
+                Insn::IteratorRest { iter } => {
+                    let d = r(iter);
+                    let mut rest = Vec::new();
+                    if !a.to_boolean(regs[d + 2]) {
+                        regs[d + 2] = true.into();
+                        let rec = IterRecord { iterator: regs[d], next: regs[d + 1] };
+                        while let Some(v) = a.iterator_step(rec)? {
+                            rest.push(v);
+                        }
+                    }
+                    *acc = a.array(rest).into();
+                }
+                Insn::IteratorClose { iter } => {
+                    let d = r(iter);
+                    if !a.to_boolean(regs[d + 2]) {
+                        regs[d + 2] = true.into();
+                        a.iterator_close(regs[d])?;
+                    }
+                }
+                Insn::ForInKeys => {
+                    let keys = a.for_in_keys(*acc)?;
+                    *acc = a.array(keys).into();
+                }
+                Insn::DelegateStep { iter, mode } => {
+                    let d = r(iter);
+                    let it = regs[d];
+                    let result = match Self::mode(regs[r(mode)]) {
+                        Resume::Next => a.call(regs[d + 1], it, &[*acc])?,
+                        Resume::Throw => {
+                            let th = a.get_named(it, "throw")?;
+                            if th.is_nullish() {
+                                a.iterator_close(it)?;
+                                return Err(a.throw(ErrorKind::Type, "The iterator does not provide a 'throw' method"));
+                            }
+                            a.call(th, it, &[*acc])?
+                        }
+                        Resume::Return => {
+                            let ret = a.get_named(it, "return")?;
+                            if ret.is_nullish() { a.iter_result(*acc, true).into() } else { a.call(ret, it, &[*acc])? }
+                        }
+                    };
+                    if !matches!(result, Value::Object(_)) {
+                        return Err(a.throw(ErrorKind::Type, "Iterator result is not an object"));
+                    }
+                    *acc = result;
                 }
             }
         }
@@ -614,6 +745,60 @@ impl<'gc> Invoke<'gc> for Executor {
         }
     }
 
+    fn resume(&self, a: &mut Agent<'gc, '_>, co: JsObject<'gc>, mode: Resume, value: Value<'gc>) -> Result<Step<'gc>, Error> {
+        let level = self.depth.get() + 1;
+        if level >= STACK_LIMIT {
+            return Err(a.throw(ErrorKind::Range, "Maximum call stack size exceeded"));
+        }
+        let taken = {
+            let mut d = co.borrow_mut(a.mc);
+            let ObjectKind::Coroutine(c) = &mut d.kind else { unreachable!("resume is only called on coroutines") };
+            match core::mem::replace(&mut c.state, CoroutineState::Running) {
+                CoroutineState::Suspended(s) => Ok((s, core::mem::replace(&mut c.fresh, false))),
+                other => {
+                    c.state = other;
+                    Err(matches!(c.state, CoroutineState::Running))
+                }
+            }
+        };
+        let (saved, fresh) = match taken {
+            Ok(t) => t,
+            Err(true) => return Err(a.throw(ErrorKind::Type, "Generator is already running")),
+            // 已经跑完
+            Err(false) => {
+                return match mode {
+                    Resume::Next => Ok(Step::Done(Value::Undefined)),
+                    Resume::Return => Ok(Step::Done(value)),
+                    Resume::Throw => Err(a.throw_value(value)),
+                };
+            }
+        };
+        if fresh && mode != Resume::Next {
+            Self::set_state(a, co, CoroutineState::Completed);
+            return if mode == Resume::Return { Ok(Step::Done(value)) } else { Err(a.throw_value(value)) };
+        }
+        let mut regs = saved.regs;
+        if let Some(m) = saved.mode {
+            regs[usize::from(m)] = f64::from(mode).into();
+        }
+        let handlers = saved.handlers.into_iter().map(|(t, env)| Handler { target: Label(t), env }).collect();
+        let f = Frame { func: saved.func, pc: saved.pc, base: 0, env: saved.env, handlers, new_target: Value::Undefined, new_this: None, args: saved.args };
+        match self.run_state(a, State { regs, frames: Vec::new(), f, acc: value }, level) {
+            Ok(Outcome::Return(v)) => {
+                Self::set_state(a, co, CoroutineState::Completed);
+                Ok(Step::Done(v))
+            }
+            Ok(Outcome::Suspend { value, awaiting, saved }) => {
+                Self::set_state(a, co, CoroutineState::Suspended(saved));
+                Ok(if awaiting { Step::Await(value) } else { Step::Yield(value) })
+            }
+            Err(e) => {
+                Self::set_state(a, co, CoroutineState::Completed);
+                Err(e)
+            }
+        }
+    }
+
     fn construct(&self, a: &mut Agent<'gc, '_>, callee: Value<'gc>, args: &[Value<'gc>], new_target: Value<'gc>) -> Result<Value<'gc>, Error> {
         let level = self.depth.get() + 1;
         if level >= STACK_LIMIT {
@@ -630,10 +815,21 @@ impl<'gc> Invoke<'gc> for Executor {
 impl Executor {
     /// 在新的执行状态里跑一帧到返回。
     fn run_frame<'gc>(&self, a: &mut Agent<'gc, '_>, regs: Vec<Value<'gc>>, f: Frame<'gc>, level: usize) -> Result<Value<'gc>, Error> {
+        self.run_state(a, State { regs, frames: Vec::new(), f, acc: Value::Undefined }, level).map(Outcome::returned)
+    }
+
+    fn run_state<'gc>(&self, a: &mut Agent<'gc, '_>, st: State<'gc>, level: usize) -> Result<Outcome<'gc>, Error> {
         let saved = self.depth.replace(level);
-        let r = self.execute(a, State { regs, frames: Vec::new(), f, acc: Value::Undefined });
+        let r = self.execute(a, st);
         self.depth.set(saved);
         r
+    }
+
+    /// 把协程的状态换成 `state`。
+    fn set_state<'gc>(a: &Agent<'gc, '_>, co: JsObject<'gc>, state: CoroutineState<'gc>) {
+        if let ObjectKind::Coroutine(c) = &mut co.borrow_mut(a.mc).kind {
+            c.state = state;
+        }
     }
 }
 
@@ -643,7 +839,9 @@ impl r8frame::Engine for Executor {
         let main = self.load(Module::try_from(src)?);
         let this: &Executor = self;
         let mut agent = scope.agent(cx, this);
-        this.run_script(&mut agent, main)
+        let v = this.run_script(&mut agent, main)?;
+        agent.run_jobs()?;
+        Ok(v)
     }
 }
 
@@ -796,6 +994,28 @@ mod tests {
             ("try { throw { code: 7 } } catch ({ code }) { code }", "7"),
             ("function d(a, b = () => a) { a = 2; return b() } d(1)", "2"),
             ("const { length } = 'abc'; const [first] = 'xyz'; length + first", "3x"),
+            // 阶段 4：Symbol、迭代、for-of / for-in、生成器
+            ("const s = Symbol('d'); const o = { [s]: 1 }; o[s] + typeof s + s.description + String(s)", "1symboldSymbol(d)"),
+            ("const o = { [Symbol.toPrimitive](h) { return h === 'number' ? 42 : 'str' } }; +o + ',' + `${o}`", "42,str"),
+            ("const it = { [Symbol.iterator]() { let i = 0; return { next: () => ({ value: i, done: i++ >= 3 }) } } }; [...it].join()", "0,1,2"),
+            ("let s = 0; for (const x of [1, 2, 3]) s += x; s", "6"),
+            ("let r = ''; for (const c of 'héllo') r = c + r; r", "olléh"),
+            ("const fs = []; for (const x of [1, 2]) fs.push(() => x); fs[0]() + fs[1]()", "3"),
+            ("let closed = 0; const it = { [Symbol.iterator]() { return { next: () => ({ value: 1, done: false }), return() { closed++; return {} } } } }; for (const x of it) break; for (const x of it) { try { throw 0 } catch {} break } function f() { for (const x of it) return 1 } f(); closed", "3"),
+            ("let s = ''; for (const [k, v] of Object.entries({ a: 1, b: 2 })) s += k + v; s", "a1b2"),
+            ("const o = { a: 1, b: 2 }; let s = ''; for (const k in o) s += k; for (const i in ['x', 'y']) s += i; s", "ab01"),
+            ("function P() { this.own = 1 } P.prototype.inh = 2; let s = ''; for (const k in new P()) s += k; s", "owninh"),
+            ("let s = ''; outer: for (const a of [1, 2]) { for (const b of [1, 2]) { if (b == 2) continue outer; s += a + '' + b } } s", "1121"),
+            ("function* g() { yield 1; yield 2; return 3 } const it = g(); [it.next().value, it.next().value, it.next().value, it.next().done].join()", "1,2,3,true"),
+            ("function* g() { let i = 0; while (i < 3) yield i++ } [...g()].join()", "0,1,2"),
+            ("function* g() { const x = yield 1; yield x * 2 } const it = g(); it.next(); it.next(21).value", "42"),
+            ("const log = []; function* g() { try { yield 1; yield 2 } finally { log.push('f') } } const it = g(); it.next(); [it.return(9).value, it.next().done, log.join()].join()", "9,true,f"),
+            ("function* g() { try { yield 1 } catch (e) { yield 'caught ' + e } } const it = g(); it.next(); it.throw('x').value", "caught x"),
+            ("function* inner() { yield 1; yield 2; return 'r' } function* outer() { const v = yield* inner(); yield v } [...outer()].join()", "1,2,r"),
+            ("function* nat() { let n = 0; while (true) yield n++ } const [a, b, c] = nat(); a + b + c", "3"),
+            ("const o = { *[Symbol.iterator]() { yield 'a'; yield 'b' } }; [...o].join('')", "ab"),
+            ("class C { *gen() { yield this.v } } const c = new C(); c.v = 5; c.gen().next().value", "5"),
+            ("[...[1, 2].entries()].join(';') + [...[7].keys()]", "0,1;1,20"),
         ];
         for (src, want) in ok {
             assert_eq!(eval(src).0, Ok(String::from(want)), "{src}");
@@ -814,11 +1034,32 @@ mod tests {
             ("1 in 2", "TypeError: Cannot use 'in' operator to search for '1' in 2"),
             ("const { x } = null", "TypeError: Cannot read properties of null (reading 'x')"),
             ("[...1]", "TypeError: 1 is not iterable"),
+            ("for (const x of 5) {}", "TypeError: 5 is not iterable"),
+            ("const it = (function* () { yield it.next() })(); it.next()", "TypeError: Generator is already running"),
         ];
         for (src, want) in thrown {
             assert_eq!(eval(src).0, Err(String::from(want)), "{src}");
         }
         let (r, out) = eval("console.log('a', 1, [2, 3]); console.log(); 0");
         assert_eq!((r, out), (Ok(String::from("0")), alloc::vec![String::from("a 1 2,3"), String::new()]));
+        // 阶段 4：Promise 与 async（结果看微任务跑完后的输出顺序）
+        let printed = [
+            ("Promise.resolve(1).then(v => console.log('then', v)); console.log('sync')", "sync|then 1"),
+            ("async function f() { const x = await Promise.resolve(2); return x * 3 } f().then(v => console.log(v)); console.log('first')", "first|6"),
+            ("async function f() { throw new Error('bad') } f().catch(e => console.log(e.message))", "bad"),
+            ("async function f() { try { await Promise.reject('no') } catch (e) { return 'caught ' + e } } f().then(console.log)", "caught no"),
+            ("Promise.all([1, Promise.resolve(2), new Promise(r => r(3))]).then(v => console.log(v.join()))", "1,2,3"),
+            ("Promise.resolve().then(() => console.log('a')).then(() => console.log('c')); Promise.resolve().then(() => console.log('b'))", "a|b|c"),
+            ("const f = async x => x + 1; f(1).then(console.log)", "2"),
+            ("Promise.resolve({ then(r) { r(7) } }).then(console.log)", "7"),
+            ("Promise.reject(1).finally(() => console.log('fin')).catch(e => console.log('e', e))", "fin|e 1"),
+            ("async function a() { console.log('a1'); await 0; console.log('a2') } a(); console.log('main')", "a1|main|a2"),
+            ("class K { async m() { return this.v } } const k = new K(); k.v = 'mv'; k.m().then(console.log)", "mv"),
+        ];
+        for (src, want) in printed {
+            let (r, out) = eval(src);
+            assert!(r.is_ok(), "{src}: {r:?}");
+            assert_eq!(out.join("|"), want, "{src}");
+        }
     }
 }

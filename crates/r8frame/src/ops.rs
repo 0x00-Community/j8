@@ -6,7 +6,7 @@ use alloc::vec::Vec;
 
 use gc_arena::Gc;
 
-use crate::{Agent, Error, JsObject, JsString, ObjectData, ObjectKind, Property, Slot, Value};
+use crate::{Agent, Error, IterKind, IteratorState, JsObject, JsString, JsSymbol, ObjectData, ObjectKind, Property, Slot, Value};
 
 /// 二元运算（结果是值）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -128,6 +128,13 @@ impl ErrorKind {
     }
 }
 
+/// 一个迭代器记录：迭代器对象与它的 `next` 方法。
+#[derive(Clone, Copy, Debug)]
+pub struct IterRecord<'gc> {
+    pub iterator: Value<'gc>,
+    pub next: Value<'gc>,
+}
+
 /// 2^32：ToInt32 / ToUint32 的模。
 const TWO_POW_32: f64 = 4_294_967_296.0;
 
@@ -236,7 +243,7 @@ impl<'gc> Agent<'gc, '_> {
             Value::Bool(b) => b,
             Value::Number(x) => !(x == 0.0 || x.is_nan()),
             Value::String(s) => !s.is_empty(),
-            Value::Object(_) => true,
+            Value::Symbol(_) | Value::Object(_) => true,
         }
     }
 
@@ -244,6 +251,19 @@ impl<'gc> Agent<'gc, '_> {
     pub fn to_primitive(&mut self, v: Value<'gc>, hint: Hint) -> Result<Value<'gc>, Error> {
         if !matches!(v, Value::Object(_)) {
             return Ok(v);
+        }
+        let exotic = self.get_symbol(v, self.realm.symbols.to_primitive, v)?;
+        if !exotic.is_nullish() {
+            let h = self.string(match hint {
+                Hint::Default => "default",
+                Hint::Number => "number",
+                Hint::String => "string",
+            });
+            let r = self.call(exotic, v, &[h.into()])?;
+            if matches!(r, Value::Object(_)) {
+                return Err(self.throw(ErrorKind::Type, "Cannot convert object to primitive value"));
+            }
+            return Ok(r);
         }
         let order = if hint == Hint::String { ["toString", "valueOf"] } else { ["valueOf", "toString"] };
         for name in order {
@@ -266,6 +286,7 @@ impl<'gc> Agent<'gc, '_> {
             Value::Bool(b) => f64::from(u8::from(b)),
             Value::Number(x) => x,
             Value::String(s) => parse_number(&s),
+            Value::Symbol(_) => return Err(self.throw(ErrorKind::Type, "Cannot convert a Symbol value to a number")),
             Value::Object(_) => {
                 let p = self.to_primitive(v, Hint::Number)?;
                 return self.to_number(p);
@@ -290,11 +311,17 @@ impl<'gc> Agent<'gc, '_> {
             Value::Bool(true) => self.string("true"),
             Value::Bool(false) => self.string("false"),
             Value::Number(x) => self.string(ryu_js::Buffer::new().format(x)),
+            Value::Symbol(_) => return Err(self.throw(ErrorKind::Type, "Cannot convert a Symbol value to a string")),
             Value::Object(_) => {
                 let p = self.to_primitive(v, Hint::String)?;
                 return self.to_string(p);
             }
         })
+    }
+
+    /// `String(sym)` / 报错信息里的 Symbol：`Symbol(描述)`。
+    pub fn symbol_descriptive(&self, s: JsSymbol<'gc>) -> JsString<'gc> {
+        self.string(&format!("Symbol({})", s.description.as_deref().unwrap_or("")))
     }
 
     pub fn type_of(&self, v: Value<'gc>) -> &'static str {
@@ -303,6 +330,7 @@ impl<'gc> Agent<'gc, '_> {
             Value::Bool(_) => "boolean",
             Value::Number(_) => "number",
             Value::String(_) => "string",
+            Value::Symbol(_) => "symbol",
             Value::Object(o) if o.borrow().kind.is_callable() => "function",
             Value::Null | Value::Object(_) => "object",
         }
@@ -345,7 +373,7 @@ impl<'gc> Agent<'gc, '_> {
         Ok(match (a, b) {
             _ if a.is_nullish() && b.is_nullish() => true,
             (Value::Undefined | Value::Null, _) | (_, Value::Undefined | Value::Null) => false,
-            (Value::Object(_), Value::Object(_)) => a == b,
+            (Value::Object(_), Value::Object(_)) | (Value::Symbol(_), Value::Symbol(_)) => a == b,
             (Value::Object(_), _) => {
                 let p = self.to_primitive(a, Hint::Default)?;
                 return self.loose_equals(p, b);
@@ -354,6 +382,7 @@ impl<'gc> Agent<'gc, '_> {
                 let p = self.to_primitive(b, Hint::Default)?;
                 return self.loose_equals(a, p);
             }
+            (Value::Symbol(_), _) | (_, Value::Symbol(_)) => false,
             (Value::Number(_), Value::String(_)) | (Value::String(_), Value::Number(_)) | (Value::Bool(_), _) | (_, Value::Bool(_)) => self.to_number(a)? == self.to_number(b)?,
             _ => a == b,
         })
@@ -405,6 +434,7 @@ impl<'gc> Agent<'gc, '_> {
             Value::String(_) => Some(self.realm.string_proto),
             Value::Number(_) => Some(self.realm.number_proto),
             Value::Bool(_) => Some(self.realm.boolean_proto),
+            Value::Symbol(_) => Some(self.realm.symbol_proto),
             Value::Object(o) => Some(o),
             Value::Undefined | Value::Null => None,
         }
@@ -470,8 +500,111 @@ impl<'gc> Agent<'gc, '_> {
         self.to_string(key)
     }
 
+    /// 沿原型链找 Symbol 键的属性。
+    fn lookup_symbol(start: Option<JsObject<'gc>>, key: JsSymbol<'gc>) -> Option<Property<'gc>> {
+        let mut cur = start;
+        while let Some(c) = cur {
+            let d = c.borrow();
+            if let Some(p) = d.get_own_symbol(key) {
+                return Some(p);
+            }
+            cur = d.proto;
+        }
+        None
+    }
+
+    /// `holder[sym]`，getter 的 `this` 是 `receiver`。
+    pub fn get_symbol(&mut self, holder: Value<'gc>, key: JsSymbol<'gc>, receiver: Value<'gc>) -> Result<Value<'gc>, Error> {
+        if holder.is_nullish() {
+            let what = self.symbol_descriptive(key);
+            return Err(self.nullish_error(holder, "read", &what));
+        }
+        match Self::lookup_symbol(self.proto_of(holder), key).map(|p| p.slot) {
+            Some(Slot::Data(v)) => Ok(v),
+            Some(Slot::Accessor { get: Some(g), .. }) => self.call(g.into(), receiver, &[]),
+            None | Some(Slot::Accessor { get: None, .. }) => Ok(Value::Undefined),
+        }
+    }
+
+    /// `target[sym] = value`。
+    pub fn set_symbol(&mut self, target: Value<'gc>, key: JsSymbol<'gc>, value: Value<'gc>) -> Result<(), Error> {
+        let o = match target {
+            Value::Undefined | Value::Null => {
+                let what = self.symbol_descriptive(key);
+                return Err(self.nullish_error(target, "set", &what));
+            }
+            Value::Object(o) => o,
+            _ => return Ok(()),
+        };
+        match Self::lookup_symbol(Some(o), key) {
+            Some(Property { slot: Slot::Accessor { set: Some(s), .. }, .. }) => {
+                self.call(s.into(), target, &[value])?;
+            }
+            Some(Property { slot: Slot::Accessor { set: None, .. }, .. } | Property { writable: false, .. }) => {}
+            Some(_) if o.borrow().get_own_symbol(key).is_some() => {
+                let mut d = o.borrow_mut(self.mc);
+                if let Some((_, p)) = d.symbols.iter_mut().find(|(k, _)| Gc::ptr_eq(*k, key)) {
+                    p.slot = Slot::Data(value);
+                }
+            }
+            _ => o.borrow_mut(self.mc).define_symbol(key, Property::data(value)),
+        }
+        Ok(())
+    }
+
+    /// `key in target`，键是任意值。
+    pub fn has_keyed(&mut self, target: Value<'gc>, key: Value<'gc>) -> Result<bool, Error> {
+        if let Value::Symbol(k) = key {
+            let Value::Object(o) = target else {
+                return Err(self.throw(ErrorKind::Type, "Cannot use 'in' operator to search for a symbol in a non-object"));
+            };
+            return Ok(Self::lookup_symbol(Some(o), k).is_some());
+        }
+        let k = self.property_key(key)?;
+        self.has_property(target, &k)
+    }
+
+    /// `delete target[key]`，键是任意值。
+    pub fn delete_keyed(&mut self, target: Value<'gc>, key: Value<'gc>) -> Result<bool, Error> {
+        if let (Value::Symbol(k), Value::Object(o)) = (key, target) {
+            return Ok(o.borrow_mut(self.mc).remove_symbol(k));
+        }
+        let k = self.property_key(key)?;
+        self.delete(target, &k)
+    }
+
+    /// 定义属性，键是任意值（计算键）。
+    pub fn define_keyed(&mut self, o: JsObject<'gc>, key: Value<'gc>, prop: Property<'gc>) -> Result<(), Error> {
+        if let Value::Symbol(k) = key {
+            o.borrow_mut(self.mc).define_symbol(k, prop);
+            return Ok(());
+        }
+        let k = self.property_key(key)?;
+        self.define(o, &k, prop);
+        Ok(())
+    }
+
+    /// 定义访问器的一半，键是任意值。
+    pub fn define_accessor_keyed(&mut self, o: JsObject<'gc>, key: Value<'gc>, f: JsObject<'gc>, setter: bool, enumerable: bool) -> Result<(), Error> {
+        if let Value::Symbol(k) = key {
+            let (mut get, mut set) = match o.borrow().get_own_symbol(k).map(|p| p.slot) {
+                Some(Slot::Accessor { get, set }) => (get, set),
+                _ => (None, None),
+            };
+            if setter { set = Some(f) } else { get = Some(f) }
+            o.borrow_mut(self.mc).define_symbol(k, Property { slot: Slot::Accessor { get, set }, enumerable, writable: true, configurable: true });
+            return Ok(());
+        }
+        let k = self.property_key(key)?;
+        self.define_accessor(o, &k, f, setter, enumerable);
+        Ok(())
+    }
+
     /// `target[key]`。
     pub fn get_keyed(&mut self, target: Value<'gc>, key: Value<'gc>) -> Result<Value<'gc>, Error> {
+        if let Value::Symbol(k) = key {
+            return self.get_symbol(target, k, target);
+        }
         if let (Value::Object(o), Value::Number(x)) = (target, key)
             && let (ObjectKind::Array(items), Some(i)) = (&o.borrow().kind, index_of_number(x))
         {
@@ -523,6 +656,9 @@ impl<'gc> Agent<'gc, '_> {
 
     /// `target[key] = value`。
     pub fn set_keyed(&mut self, target: Value<'gc>, key: Value<'gc>, value: Value<'gc>) -> Result<(), Error> {
+        if let Value::Symbol(k) = key {
+            return self.set_symbol(target, k, value);
+        }
         if let (Value::Object(o), Value::Number(x)) = (target, key)
             && let Some(i) = index_of_number(x)
             && let ObjectKind::Array(items) = &mut o.borrow_mut(self.mc).kind
@@ -592,8 +728,15 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    /// `v instanceof f`：沿 `v` 的原型链找 `f.prototype`（绑定函数换成目标）。
+    /// `v instanceof f`：先看 `f[Symbol.hasInstance]`，再沿 `v` 的原型链找 `f.prototype`（绑定函数换成目标）。
     pub fn instance_of(&mut self, v: Value<'gc>, f: Value<'gc>) -> Result<bool, Error> {
+        if matches!(f, Value::Object(_)) {
+            let h = self.get_symbol(f, self.realm.symbols.has_instance, f)?;
+            if !h.is_nullish() {
+                let r = self.call(h, f, &[v])?;
+                return Ok(self.to_boolean(r));
+            }
+        }
         if !self.is_callable(f) {
             return Err(self.throw(ErrorKind::Type, "Right-hand side of 'instanceof' is not callable"));
         }
@@ -617,19 +760,80 @@ impl<'gc> Agent<'gc, '_> {
         Ok(false)
     }
 
-    /// 展开 / 数组解构取元素：数组取元素，字符串按码点拆（迭代协议在阶段 4 接上）。
-    pub fn to_list(&mut self, v: Value<'gc>) -> Result<Vec<Value<'gc>>, Error> {
-        match v {
-            Value::Object(o) if matches!(o.borrow().kind, ObjectKind::Array(_)) => {
-                let ObjectKind::Array(items) = &o.borrow().kind else { unreachable!("checked to be an array") };
-                Ok(items.clone())
-            }
-            Value::String(s) => Ok(s.chars().map(|c| Value::String(self.string(c.encode_utf8(&mut [0; 4])))).collect()),
-            _ => {
-                let what = self.to_string(v)?;
-                Err(self.throw(ErrorKind::Type, &format!("{} is not iterable", &**what)))
-            }
+    /// GetIterator：调 `v[Symbol.iterator]()`，取它的 `next`。
+    pub fn get_iterator(&mut self, v: Value<'gc>) -> Result<IterRecord<'gc>, Error> {
+        let method = if v.is_nullish() { Value::Undefined } else { self.get_symbol(v, self.realm.symbols.iterator, v)? };
+        if !self.is_callable(method) {
+            let what = match v {
+                Value::Symbol(s) => self.symbol_descriptive(s),
+                _ => self.to_string(v)?,
+            };
+            return Err(self.throw(ErrorKind::Type, &format!("{} is not iterable", &**what)));
         }
+        let iterator = self.call(method, v, &[])?;
+        if !matches!(iterator, Value::Object(_)) {
+            return Err(self.throw(ErrorKind::Type, "Result of the Symbol.iterator method is not an object"));
+        }
+        let next = self.get_named(iterator, "next")?;
+        Ok(IterRecord { iterator, next })
+    }
+
+    /// 走一步：完了给 `None`。
+    pub fn iterator_step(&mut self, it: IterRecord<'gc>) -> Result<Option<Value<'gc>>, Error> {
+        let r = self.call(it.next, it.iterator, &[])?;
+        if !matches!(r, Value::Object(_)) {
+            let what = self.to_string(r)?;
+            return Err(self.throw(ErrorKind::Type, &format!("Iterator result {} is not an object", &**what)));
+        }
+        let done = self.get_named(r, "done")?;
+        if self.to_boolean(done) { Ok(None) } else { Ok(Some(self.get_named(r, "value")?)) }
+    }
+
+    /// 提前结束迭代：有 `return` 就调它。
+    pub fn iterator_close(&mut self, iterator: Value<'gc>) -> Result<(), Error> {
+        let ret = self.get_named(iterator, "return")?;
+        if ret.is_nullish() {
+            return Ok(());
+        }
+        let r = self.call(ret, iterator, &[])?;
+        if !matches!(r, Value::Object(_)) {
+            return Err(self.throw(ErrorKind::Type, "Iterator result is not an object"));
+        }
+        Ok(())
+    }
+
+    /// 迭代结果对象 `{ value, done }`。
+    pub fn iter_result(&self, value: Value<'gc>, done: bool) -> JsObject<'gc> {
+        let o = self.object();
+        let mut d = o.borrow_mut(self.mc);
+        d.set(self.mc, "value", value);
+        d.set(self.mc, "done", done.into());
+        drop(d);
+        o
+    }
+
+    /// 内建迭代器对象（数组 / 字符串）。
+    pub fn builtin_iterator(&self, state: IteratorState<'gc>) -> JsObject<'gc> {
+        let proto = match state {
+            IteratorState::Array { .. } => self.realm.array_iterator_proto,
+            IteratorState::String { .. } => self.realm.string_iterator_proto,
+        };
+        ObjectData { kind: ObjectKind::Iterator(state), proto: Some(proto), ..ObjectData::default() }.alloc(self.mc)
+    }
+
+    /// 数组迭代器（`values` / `keys` / `entries`）。
+    pub fn array_iterator(&self, target: Value<'gc>, kind: IterKind) -> JsObject<'gc> {
+        self.builtin_iterator(IteratorState::Array { target: Some(target), index: 0, kind })
+    }
+
+    /// 展开 / 剩余元素：把可迭代对象走完。
+    pub fn to_list(&mut self, v: Value<'gc>) -> Result<Vec<Value<'gc>>, Error> {
+        let it = self.get_iterator(v)?;
+        let mut out = Vec::new();
+        while let Some(x) = self.iterator_step(it)? {
+            out.push(x);
+        }
+        Ok(out)
     }
 
     /// 对象展开 / 剩余：把 `src` 的自有可枚举属性（数组下标在前）定义到 `target` 上，跳过 `exclude` 里的键。
@@ -652,7 +856,56 @@ impl<'gc> Agent<'gc, '_> {
             let v = self.get_named(src, &k)?;
             self.define(target, &k, Property::data(v));
         }
+        if let Value::Object(o) = src {
+            let syms: Vec<JsSymbol<'gc>> = o.borrow().symbols.iter().filter(|(_, p)| p.enumerable).map(|&(k, _)| k).collect();
+            for k in syms {
+                let v = self.get_symbol(src, k, src)?;
+                target.borrow_mut(self.mc).define_symbol(k, Property::data(v));
+            }
+        }
         Ok(())
+    }
+
+    /// `for-in` 要走的键：自有在前、再沿原型链，可枚举的字符串键，去重（被不可枚举属性遮住的也不出）。
+    pub fn for_in_keys(&mut self, v: Value<'gc>) -> Result<Vec<Value<'gc>>, Error> {
+        let index = |i: usize| ryu_js::Buffer::new().format(f64::from(u32::try_from(i).unwrap_or(u32::MAX))).into();
+        let mut seen: Vec<alloc::boxed::Box<str>> = Vec::new();
+        let mut out = Vec::new();
+        let mut cur = match v {
+            Value::Undefined | Value::Null => return Ok(out),
+            Value::String(s) => {
+                for i in 0..s.encode_utf16().count() {
+                    let k: alloc::boxed::Box<str> = index(i);
+                    out.push(self.string(&k).into());
+                    seen.push(k);
+                }
+                Some(self.realm.string_proto)
+            }
+            other => self.proto_of(other),
+        };
+        while let Some(o) = cur {
+            let d = o.borrow();
+            if let ObjectKind::Array(items) = &d.kind {
+                for i in 0..items.len() {
+                    let k: alloc::boxed::Box<str> = index(i);
+                    if !seen.contains(&k) {
+                        out.push(self.string(&k).into());
+                        seen.push(k);
+                    }
+                }
+            }
+            for (k, p) in &d.props {
+                if seen.iter().any(|s| **s == ***k) {
+                    continue;
+                }
+                seen.push((&***k).into());
+                if p.enumerable {
+                    out.push(Value::String(*k));
+                }
+            }
+            cur = d.proto;
+        }
+        Ok(out)
     }
 
     /// 构造调用要建的 `this`：原型取 `new_target.prototype`，不是对象就用 `Object.prototype`。

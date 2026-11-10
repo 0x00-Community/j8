@@ -42,6 +42,10 @@ pub struct Function {
     pub kind: FunctionKind,
     /// 进帧时把全部实参留在帧里（缺省派生构造器、剩余参数用）
     pub keeps_args: bool,
+    /// 生成器函数：调用时不跑，返回生成器
+    pub generator: bool,
+    /// async 函数：调用时跑到第一个 `await`，返回 Promise
+    pub asynchronous: bool,
     pub params: u16,
     pub regs: u16,
     pub insns: Vec<Insn>,

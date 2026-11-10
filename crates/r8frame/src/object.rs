@@ -2,12 +2,22 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::fmt;
 
-use gc_arena::{Collect, Gc, Mutation, RefLock};
+use gc_arena::{Collect, Gc, Lock, Mutation, RefLock};
 
 use crate::{Agent, Error, FuncId, Value};
 
 /// 堆上的字符串。
 pub type JsString<'gc> = Gc<'gc, Box<str>>;
+
+/// 一个 Symbol：只有描述，身份就是指针。
+#[derive(Debug, Collect)]
+#[collect(require_static)]
+pub struct SymbolData {
+    pub description: Option<Box<str>>,
+}
+
+/// 堆上的 Symbol。
+pub type JsSymbol<'gc> = Gc<'gc, SymbolData>;
 
 /// 堆上的对象（内部可变，写经 gc-arena 的写屏障）。
 pub type JsObject<'gc> = Gc<'gc, RefLock<ObjectData<'gc>>>;
@@ -105,6 +115,94 @@ pub struct Bound<'gc> {
     pub args: Vec<Value<'gc>>,
 }
 
+/// 数组迭代器给什么。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Collect)]
+#[collect(require_static)]
+pub enum IterKind {
+    Values,
+    Keys,
+    Entries,
+}
+
+/// 内建迭代器的状态。
+#[derive(Debug, Collect)]
+#[collect(no_drop)]
+pub enum IteratorState<'gc> {
+    /// 数组（或类数组）按下标走，`target` 为 `None` 就是走完了
+    Array { target: Option<Value<'gc>>, index: usize, kind: IterKind },
+    /// 字符串按码点走（`pos` 是 UTF-8 字节位置）
+    String { s: JsString<'gc>, pos: usize },
+}
+
+/// 挂起的一帧：生成器 / async 函数在 `yield` / `await` 处存下的全部执行状态。
+#[derive(Debug, Collect)]
+#[collect(no_drop)]
+pub struct Suspended<'gc> {
+    pub func: FuncId,
+    pub pc: usize,
+    pub regs: Vec<Value<'gc>>,
+    pub env: Option<JsEnv<'gc>>,
+    /// 装着的异常处理器：（落点, 装时的环境）
+    pub handlers: Vec<(u32, Option<JsEnv<'gc>>)>,
+    pub args: Vec<Value<'gc>>,
+    /// 恢复时写恢复方式的寄存器（还没开始跑时没有）
+    pub mode: Option<u16>,
+}
+
+/// 协程（生成器 / async 函数）的状态。
+#[derive(Debug, Collect)]
+#[collect(no_drop)]
+pub enum CoroutineState<'gc> {
+    /// 还没开始或停在 `yield` / `await`
+    Suspended(Suspended<'gc>),
+    /// 正在跑（重入 `next` 抛 TypeError）
+    Running,
+    Completed,
+}
+
+/// 生成器或 async 函数的协程；async 函数带着它的结果 Promise。
+#[derive(Debug, Collect)]
+#[collect(no_drop)]
+pub struct Coroutine<'gc> {
+    pub state: CoroutineState<'gc>,
+    /// 还没跑过第一步（这时 `return` / `throw` 直接结束）
+    pub fresh: bool,
+    pub promise: Option<JsObject<'gc>>,
+}
+
+/// Promise 的状态。
+#[derive(Clone, Copy, Debug, Collect)]
+#[collect(no_drop)]
+pub enum Settled<'gc> {
+    Pending,
+    Fulfilled(Value<'gc>),
+    Rejected(Value<'gc>),
+}
+
+/// Promise 落定后要做的事。
+#[derive(Clone, Copy, Debug, Collect)]
+#[collect(no_drop)]
+pub enum Reaction<'gc> {
+    /// `then(onFulfilled, onRejected)`，结果交给 `derived`
+    Then { on_fulfilled: Value<'gc>, on_rejected: Value<'gc>, derived: Option<JsObject<'gc>> },
+    /// `await`：恢复这个协程
+    Await { coroutine: JsObject<'gc> },
+    /// `Promise.all` 的第 `index` 个：兑现就填进 `values`，`remaining` 减到 0 兑现 `result`；拒绝就拒绝 `result`
+    All { values: JsObject<'gc>, index: u32, remaining: Gc<'gc, Lock<u32>>, result: JsObject<'gc> },
+    /// `finally(f)`：调 `f()`，`derived` 照原样落定（`f` 抛错就拒绝）
+    Finally { on_finally: Value<'gc>, derived: JsObject<'gc> },
+}
+
+/// 微任务。
+#[derive(Clone, Copy, Debug, Collect)]
+#[collect(no_drop)]
+pub enum Job<'gc> {
+    /// 一个反应：`value` 是落定的值，`rejected` 说是拒绝
+    Reaction { reaction: Reaction<'gc>, value: Value<'gc>, rejected: bool },
+    /// 用 thenable 解决 Promise：调 `then.call(thenable, resolve, reject)`
+    Thenable { promise: JsObject<'gc>, thenable: Value<'gc>, then: Value<'gc> },
+}
+
 /// 对象的种类：普通对象之外带的内部槽。
 #[derive(Debug, Default, Collect)]
 #[collect(no_drop)]
@@ -116,11 +214,16 @@ pub enum ObjectKind<'gc> {
     Function(Closure<'gc>),
     Native(Native),
     Bound(Bound<'gc>),
+    Iterator(IteratorState<'gc>),
+    Coroutine(Coroutine<'gc>),
+    Promise { state: Settled<'gc>, reactions: Vec<Reaction<'gc>> },
+    /// Promise 的 resolve / reject 函数：共享一个「已经解决过」的标记
+    Resolver { promise: JsObject<'gc>, reject: bool, done: Gc<'gc, Lock<bool>> },
 }
 
 impl ObjectKind<'_> {
     pub fn is_callable(&self) -> bool {
-        matches!(self, ObjectKind::Function(_) | ObjectKind::Native(_) | ObjectKind::Bound(_))
+        matches!(self, ObjectKind::Function(_) | ObjectKind::Native(_) | ObjectKind::Bound(_) | ObjectKind::Resolver { .. })
     }
 }
 
@@ -130,6 +233,8 @@ impl ObjectKind<'_> {
 pub struct ObjectData<'gc> {
     pub kind: ObjectKind<'gc>,
     pub props: Vec<(JsString<'gc>, Property<'gc>)>,
+    /// Symbol 键的属性
+    pub symbols: Vec<(JsSymbol<'gc>, Property<'gc>)>,
     pub proto: Option<JsObject<'gc>>,
 }
 
@@ -139,7 +244,10 @@ impl fmt::Debug for ObjectData<'_> {
         let kind = match self.kind {
             ObjectKind::Ordinary => "Object",
             ObjectKind::Array(_) => "Array",
-            ObjectKind::Function(_) | ObjectKind::Native(_) | ObjectKind::Bound(_) => "Function",
+            ObjectKind::Function(_) | ObjectKind::Native(_) | ObjectKind::Bound(_) | ObjectKind::Resolver { .. } => "Function",
+            ObjectKind::Iterator(_) => "Iterator",
+            ObjectKind::Coroutine(_) => "Generator",
+            ObjectKind::Promise { .. } => "Promise",
         };
         f.debug_list().entries(self.props.iter().map(|(k, _)| &**k)).finish()?;
         f.write_str(kind)
@@ -174,6 +282,28 @@ impl<'gc> ObjectData<'gc> {
         match self.props.iter_mut().find(|(k, _)| ***k == *key) {
             Some((_, p)) => *p = prop,
             None => self.props.push((Gc::new(mc, Box::from(key)), prop)),
+        }
+    }
+
+    pub fn get_own_symbol(&self, key: JsSymbol<'gc>) -> Option<Property<'gc>> {
+        self.symbols.iter().find_map(|&(k, p)| Gc::ptr_eq(k, key).then_some(p))
+    }
+
+    pub fn define_symbol(&mut self, key: JsSymbol<'gc>, prop: Property<'gc>) {
+        match self.symbols.iter_mut().find(|(k, _)| Gc::ptr_eq(*k, key)) {
+            Some((_, p)) => *p = prop,
+            None => self.symbols.push((key, prop)),
+        }
+    }
+
+    pub fn remove_symbol(&mut self, key: JsSymbol<'gc>) -> bool {
+        match self.symbols.iter().position(|(k, _)| Gc::ptr_eq(*k, key)) {
+            Some(i) if self.symbols[i].1.configurable => {
+                self.symbols.remove(i);
+                true
+            }
+            Some(_) => false,
+            None => true,
         }
     }
 

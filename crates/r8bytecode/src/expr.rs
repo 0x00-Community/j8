@@ -4,9 +4,9 @@ use oxc_ast::ast::{
     UpdateOperator,
 };
 use oxc_span::{GetSpan, Span};
-use r8frame::{BinaryOp, CompareOp, Error, UnaryOp};
+use r8frame::{BinaryOp, CompareOp, Error, Resume, UnaryOp};
 
-use crate::compiler::{Body, Compiler, Place};
+use crate::compiler::{Body, Compiler, Flavor, Place};
 use crate::{Const, Constant, FunctionKind, Insn, PropertyKind, Reg};
 
 /// 二元运算符 ⇒ 字节码运算。
@@ -160,6 +160,26 @@ impl<'a> Compiler<'a, '_> {
             }
             Expression::ArrowFunctionExpression(a) => self.arrow(a)?,
             Expression::ClassExpression(c) => self.class(c, true)?,
+            Expression::YieldExpression(y) => {
+                let mode = self.resume_reg(y.span, "yield outside a generator")?;
+                match (&y.argument, y.delegate) {
+                    (Some(a), true) => self.yield_star(a, mode)?,
+                    (a, _) => {
+                        match a {
+                            Some(a) => self.expr(a)?,
+                            None => _ = self.emit(Insn::LdaUndefined),
+                        }
+                        self.emit(Insn::Yield { mode });
+                        self.resume_dispatch(mode, true)?;
+                    }
+                }
+            }
+            Expression::AwaitExpression(e) => {
+                let mode = self.resume_reg(e.span, "await outside an async function")?;
+                self.expr(&e.argument)?;
+                self.emit(Insn::Await { mode });
+                self.resume_dispatch(mode, false)?;
+            }
             Expression::NewExpression(n) => {
                 if Self::has_spread(&n.arguments) {
                     let callee = self.temp();
@@ -278,14 +298,11 @@ impl<'a> Compiler<'a, '_> {
     }
 
     fn arrow(&mut self, a: &'a ArrowFunctionExpression<'a>) -> Result<(), Error> {
-        if a.r#async {
-            return Err(self.unsupported(a.span, "async arrow functions"));
-        }
         let body = match &a.body {
             ArrowFunctionBody::FunctionBody(b) => Body::Statements(&b.statements),
             e => Body::Expression(e.as_expression().expect("an arrow's body is a block or an expression")),
         };
-        let n = self.function("", FunctionKind::Arrow, None, None, Some(&a.params), body)?;
+        let n = self.function("", Flavor { kind: FunctionKind::Arrow, generator: false, asynchronous: a.r#async }, None, None, Some(&a.params), body)?;
         self.emit(Insn::CreateClosure(n));
         Ok(())
     }
@@ -541,32 +558,29 @@ impl<'a> Compiler<'a, '_> {
     }
 
     /// 解构赋值：把寄存器 `value` 里的值按赋值目标模式存进去。
-    fn assign_target(&mut self, t: &'a AssignmentTarget<'a>, value: Reg) -> Result<(), Error> {
+    pub(crate) fn assign_target(&mut self, t: &'a AssignmentTarget<'a>, value: Reg) -> Result<(), Error> {
         match t {
             AssignmentTarget::ArrayAssignmentTarget(a) => {
-                self.emit(Insn::Ldar(value));
-                self.emit(Insn::ToArray);
-                let arr = self.temp();
-                self.emit(Insn::Star(arr));
-                for (i, e) in (0u32..).zip(&a.elements) {
+                let iter = self.iterate(value);
+                for e in &a.elements {
+                    self.emit(Insn::IteratorNext { iter });
                     let Some(e) = e else { continue };
-                    let k = self.constant(Constant::Number(f64::from(i)));
-                    self.emit(Insn::LdaConst(k));
-                    self.emit(Insn::GetKeyed { obj: arr });
                     let v = self.temp();
                     self.emit(Insn::Star(v));
                     self.assign_maybe_default(e, v)?;
                     self.release(v);
                 }
-                if let Some(r) = &a.rest {
-                    let from = u16::try_from(a.elements.len()).map_err(|_| self.unsupported(a.span, "more than 65535 elements"))?;
-                    self.emit(Insn::SliceFrom { arr, from });
-                    let v = self.temp();
-                    self.emit(Insn::Star(v));
-                    self.assign_target(&r.target, v)?;
-                    self.release(v);
+                match &a.rest {
+                    Some(r) => {
+                        self.emit(Insn::IteratorRest { iter });
+                        let v = self.temp();
+                        self.emit(Insn::Star(v));
+                        self.assign_target(&r.target, v)?;
+                        self.release(v);
+                    }
+                    None => _ = self.emit(Insn::IteratorClose { iter }),
                 }
-                self.release(arr);
+                self.release(iter);
             }
             AssignmentTarget::ObjectAssignmentTarget(o) => {
                 let n = u16::try_from(o.properties.len()).map_err(|_| self.unsupported(o.span, "more than 65535 properties"))?;
@@ -633,6 +647,40 @@ impl<'a> Compiler<'a, '_> {
             }
             t => self.assign_target(t.as_assignment_target().ok_or_else(|| self.unsupported(t.span(), "assignment target"))?, value),
         }
+    }
+
+    /// `yield* a`：把恢复方式与送进来的值原样转给内层迭代器，它走完时的值是表达式的值。
+    fn yield_star(&mut self, a: &'a Expression<'a>, mode: Reg) -> Result<(), Error> {
+        self.expr(a)?;
+        let src = self.temp();
+        self.emit(Insn::Star(src));
+        let iter = self.iterate(src);
+        let next = self.constant(Constant::Number(f64::from(Resume::Next)));
+        self.emit(Insn::LdaConst(next));
+        self.emit(Insn::Star(mode));
+        self.emit(Insn::LdaUndefined);
+        let result = self.temp();
+        let top = self.here();
+        self.emit(Insn::DelegateStep { iter, mode });
+        self.emit(Insn::Star(result));
+        let done = self.name("done");
+        self.emit(Insn::GetNamed { obj: result, name: done });
+        let finished = self.jump(Insn::JumpIfTrue);
+        let value = self.name("value");
+        self.emit(Insn::GetNamed { obj: result, name: value });
+        self.emit(Insn::Yield { mode });
+        self.emit(Insn::Jump(top));
+        self.land(finished);
+        self.emit(Insn::GetNamed { obj: result, name: value });
+        self.emit(Insn::Star(result));
+        self.on_completion(mode, f64::from(Resume::Return), |s| {
+            s.emit(Insn::Ldar(result));
+            s.ret();
+            Ok(())
+        })?;
+        self.emit(Insn::Ldar(result));
+        self.release(src);
+        Ok(())
     }
 
     /// 实参逐个求值放进 `first` 起的连续寄存器。

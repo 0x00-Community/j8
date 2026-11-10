@@ -1,6 +1,6 @@
 use gc_arena::{Collect, Gc};
 
-use crate::{JsObject, JsString};
+use crate::{JsObject, JsString, JsSymbol};
 
 /// JS 值：标量直接存，字符串与对象是 GC 指针，活在 `'gc` 里。
 #[derive(Clone, Copy, Debug, Default, Collect)]
@@ -12,6 +12,7 @@ pub enum Value<'gc> {
     Bool(bool),
     Number(f64),
     String(JsString<'gc>),
+    Symbol(JsSymbol<'gc>),
     Object(JsObject<'gc>),
 }
 
@@ -24,6 +25,7 @@ impl PartialEq for Value<'_> {
             (Value::Number(a), Value::Number(b)) => a == b,
             (Value::String(a), Value::String(b)) => **a == **b,
             (Value::Object(a), Value::Object(b)) => Gc::ptr_eq(*a, *b),
+            (Value::Symbol(a), Value::Symbol(b)) => Gc::ptr_eq(*a, *b),
             _ => false,
         }
     }
@@ -50,6 +52,12 @@ impl From<f64> for Value<'_> {
 impl<'gc> From<JsString<'gc>> for Value<'gc> {
     fn from(s: JsString<'gc>) -> Self {
         Value::String(s)
+    }
+}
+
+impl<'gc> From<JsSymbol<'gc>> for Value<'gc> {
+    fn from(s: JsSymbol<'gc>) -> Self {
+        Value::Symbol(s)
     }
 }
 

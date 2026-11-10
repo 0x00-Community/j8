@@ -101,6 +101,7 @@ impl Objects {
             Value::String(_) => "String",
             Value::Number(_) => "Number",
             Value::Bool(_) => "Boolean",
+            Value::Symbol(_) => "Symbol",
         };
         Ok(a.string(&alloc::format!("[object {tag}]")).into())
     }

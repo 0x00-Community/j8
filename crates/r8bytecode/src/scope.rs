@@ -4,7 +4,7 @@
 use std::collections::HashSet;
 
 use oxc_ast::ast::{
-    Argument, ArrayExpressionElement, ArrowFunctionBody, AssignmentTargetMaybeDefault, AssignmentTargetProperty, CatchClause, ChainElement, Class, ClassElement, ArrowFunctionExpression, AssignmentTarget, BindingIdentifier, BindingPattern, Expression, ForStatementInit, FormalParameters, Function, MemberExpression, ObjectPropertyKind, SimpleAssignmentTarget, Statement, VariableDeclaration, VariableDeclarationKind,
+    Argument, ArrayExpressionElement, ArrowFunctionBody, AssignmentTargetMaybeDefault, AssignmentTargetProperty, CatchClause, ChainElement, Class, ClassElement, ArrowFunctionExpression, AssignmentTarget, BindingIdentifier, BindingPattern, Expression, ForStatementInit, ForStatementLeft, FormalParameters, Function, MemberExpression, ObjectPropertyKind, SimpleAssignmentTarget, Statement, VariableDeclaration, VariableDeclarationKind,
 };
 use oxc_span::Span;
 
@@ -119,6 +119,22 @@ impl<'a> Decls<'a> {
                 }
                 self.var_in(&f.body);
             }
+            Statement::ForInStatement(f) => {
+                if let ForStatementLeft::VariableDeclaration(d) = &f.left
+                    && d.kind == VariableDeclarationKind::Var
+                {
+                    self.declarators(d, DeclKind::Var);
+                }
+                self.var_in(&f.body);
+            }
+            Statement::ForOfStatement(f) => {
+                if let ForStatementLeft::VariableDeclaration(d) = &f.left
+                    && d.kind == VariableDeclarationKind::Var
+                {
+                    self.declarators(d, DeclKind::Var);
+                }
+                self.var_in(&f.body);
+            }
             Statement::LabeledStatement(l) => self.var_in(&l.body),
             Statement::SwitchStatement(sw) => sw.cases.iter().for_each(|c| self.vars(&c.consequent)),
             _ => {}
@@ -157,6 +173,19 @@ impl<'a> Decls<'a> {
     pub fn for_init(init: Option<&'a ForStatementInit<'a>>) -> Self {
         let mut d = Self::default();
         if let Some(ForStatementInit::VariableDeclaration(v)) = init {
+            match v.kind {
+                VariableDeclarationKind::Let => d.declarators(v, DeclKind::Let),
+                VariableDeclarationKind::Const => d.declarators(v, DeclKind::Const),
+                _ => {}
+            }
+        }
+        d
+    }
+
+    /// `for (let x of …)` / `for (const k in …)` 的头（每轮一份）。
+    pub fn for_head(left: &'a ForStatementLeft<'a>) -> Self {
+        let mut d = Self::default();
+        if let ForStatementLeft::VariableDeclaration(v) = left {
             match v.kind {
                 VariableDeclarationKind::Let => d.declarators(v, DeclKind::Let),
                 VariableDeclarationKind::Const => d.declarators(v, DeclKind::Const),
@@ -510,6 +539,8 @@ impl<'a> Resolver<'a> {
                 f.test.iter().chain(&f.update).for_each(|e| r.expr(e));
                 r.statement(&f.body);
             }),
+            Statement::ForInStatement(f) => self.for_each(&f.left, &f.right, &f.body),
+            Statement::ForOfStatement(f) => self.for_each(&f.left, &f.right, &f.body),
             Statement::LabeledStatement(l) => self.statement(&l.body),
             Statement::SwitchStatement(sw) => {
                 self.expr(&sw.discriminant);
@@ -544,6 +575,22 @@ impl<'a> Resolver<'a> {
             }
             _ => {}
         }
+    }
+
+    /// `for-in` / `for-of`：右边在外面求，左边与循环体在每轮的那层里。
+    fn for_each(&mut self, left: &'a ForStatementLeft<'a>, right: &'a Expression<'a>, body: &'a Statement<'a>) {
+        self.expr(right);
+        self.scoped(&Decls::for_head(left), |r| {
+            match left {
+                ForStatementLeft::VariableDeclaration(d) => r.declaration(d),
+                t => {
+                    if let Some(t) = t.as_assignment_target() {
+                        r.target(t);
+                    }
+                }
+            }
+            r.statement(body);
+        });
     }
 
     fn declaration(&mut self, d: &'a VariableDeclaration<'a>) {
@@ -605,6 +652,12 @@ impl<'a> Resolver<'a> {
                 self.expr(&a.right);
             }
             Expression::ChainExpression(c) => self.chain(&c.expression),
+            Expression::YieldExpression(y) => {
+                if let Some(a) = &y.argument {
+                    self.expr(a);
+                }
+            }
+            Expression::AwaitExpression(a) => self.expr(&a.argument),
             Expression::UpdateExpression(u) => self.simple_target(&u.argument),
             Expression::CallExpression(c) => {
                 self.expr(&c.callee);

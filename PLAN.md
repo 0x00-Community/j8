@@ -30,10 +30,10 @@
 
 ## 阶段 4：迭代与生成器
 
-- [ ] 迭代协议：`Symbol`（先只做 `Symbol.iterator` 等内建 symbol）、数组 / 字符串迭代器
-- [ ] `for-of`（含解构绑定、`break` 时调 `return`）、`for-in`（自有 + 原型链可枚举字符串键）
-- [ ] 生成器：`function*` / `yield` / `yield*`；帧挂起到堆上的生成器对象，`next` / `return` / `throw` 恢复
-- [ ] `async` / `await`：Promise（`then` / `catch` / `resolve` / `reject`）、微任务队列，`async` 函数按生成器方式挂起
+- [x] 迭代协议：`Symbol`（先只做 `Symbol.iterator` 等内建 symbol）、数组 / 字符串迭代器
+- [x] `for-of`（含解构绑定、`break` 时调 `return`）、`for-in`（自有 + 原型链可枚举字符串键）
+- [x] 生成器：`function*` / `yield` / `yield*`；帧挂起到堆上的生成器对象，`next` / `return` / `throw` 恢复
+- [x] `async` / `await`（async 生成器与 `for await` 还不支持）：Promise（`then` / `catch` / `resolve` / `reject`）、微任务队列，`async` 函数按生成器方式挂起
 
 ## 阶段 5：字面量
 

@@ -6,8 +6,10 @@ extern crate alloc;
 mod array;
 mod error;
 mod global;
+mod iter;
 mod math;
 mod object;
+mod promise;
 mod string;
 
 use gc_arena::Mutation;
@@ -28,6 +30,8 @@ impl Intrinsics for Builtins {
         b.number();
         b.math();
         b.errors();
+        b.iterators();
+        b.promise();
     }
 }
 
@@ -54,6 +58,12 @@ impl<'gc> Installer<'_, 'gc> {
         self.set(proto, "constructor", ctor.into());
         self.set(self.realm.global, name, ctor.into());
         ctor
+    }
+
+    /// 宿主 getter（不可枚举）。
+    fn getter(&self, target: JsObject<'gc>, name: &str, f: r8frame::NativeFn) {
+        let g = self.realm.native(self.mc, f);
+        target.borrow_mut(self.mc).define(self.mc, name, r8frame::Property { slot: r8frame::Slot::Accessor { get: Some(g), set: None }, enumerable: false, writable: false, configurable: true });
     }
 
     /// 堆上的字符串值。
