@@ -92,6 +92,6 @@ let obj = handle.instance(&agent, Counter { n: 1.0 });  // Rust 这边建实例
 | `#[js(skip)]` | 不导出 |
 
 形参按类型取：`&mut Agent` 传当前 agent；`This` 是原样的 `this`；`Rest` 是剩下的全部实参；
-别的按 `FromJs` 依次转（`f64` / `i32` / `u32` / `usize` / `bool` / `String` / `JsString` / `JsObject` / `Value` /
+`&str` 先 ToString 再借出；别的按 `FromJs` 依次转（`f64` / `i32` / `u32` / `usize` / `bool` / `String` / `JsString` / `JsObject` / `Value` /
 `Option<T>` / `Vec<T>`）。返回值按 `IntoJs` 转，`Result<T, Error>` 出错就抛。形参里的生命周期写 `'gc`。
 `&self` / `&mut self` 方法重入同一个对象时抛 TypeError（不 panic）。只要静态方法的可以 `install_namespace` 成普通对象。

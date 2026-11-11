@@ -15,11 +15,12 @@ r8platform.workspace = true
 r8builtins.workspace = true
 r8executor.workspace = true
 clap.workspace = true
+r8binding.workspace = true
 
 # test262 一致性测试，源码在仓库根 tests/（不另开 crate）
 [[test]]
 name = "test262"
-path = "../tests/test262.rs"
+path = "../../tests/test262.rs"
 harness = false
 
 [dev-dependencies]

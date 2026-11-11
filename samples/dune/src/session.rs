@@ -33,9 +33,35 @@ pub struct Session<'s, 'p> {
 }
 
 impl<'s, 'p> Session<'s, 'p> {
-    pub fn new(isolate: &'s mut Isolate<'p>) -> Self {
+    /// 新环境：内建对象、node 式全局（`process` / `__dune`）、序言（`require`）。
+    pub fn new(isolate: &'s mut Isolate<'p>, script: &str, args: &[String]) -> Self {
+        let executor = Executor::default();
         let cx = isolate.enter(|scope| scope.persist(scope.context(&Builtins)));
-        Self { isolate, executor: Executor::default(), cx }
+        isolate.enter(|scope| {
+            let realm = scope.context_of(&cx);
+            let mut a = scope.agent(realm, &executor);
+            crate::node::Node::install(&mut a, script, args);
+        });
+        let mut s = Self { isolate, executor, cx };
+        if let Outcome::Thrown(e) | Outcome::Failed(e) = s.eval(&Source { text: crate::node::PRELUDE, file: "[prelude]" }) {
+            eprintln!("dune: prelude failed: {e}");
+        }
+        s
+    }
+
+    /// 字符串字面量（JSON 写法）。
+    pub fn quote(s: &str) -> String {
+        let mut out = String::from("\"");
+        for c in s.chars() {
+            match c {
+                '"' => out.push_str("\\\""),
+                '\\' => out.push_str("\\\\"),
+                '\n' => out.push_str("\\n"),
+                c => out.push(c),
+            }
+        }
+        out.push('"');
+        out
     }
 
     /// 持久句柄里的值 ⇒ 文本（ToString；它自己再抛就给个占位）

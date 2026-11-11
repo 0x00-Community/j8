@@ -172,6 +172,7 @@ name = "dune"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "r8binding",
  "r8builtins",
  "r8executor",
  "r8frame",

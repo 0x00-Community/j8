@@ -32,6 +32,8 @@ enum Param {
     Rest(usize),
     /// 第 `usize` 个实参，按 `FromJs` 转
     Arg(usize, Box<Type>),
+    /// 第 `usize` 个实参：ToString 后借出 `&str`
+    Str(usize),
 }
 
 /// 解析好的一个方法。
@@ -121,10 +123,15 @@ impl Method {
         let mut index = 0;
         for input in &f.sig.inputs {
             let FnArg::Typed(t) = input else { continue };
+            let is_str = matches!(&*t.ty, Type::Reference(r) if r.mutability.is_none() && matches!(&*r.elem, Type::Path(p) if p.path.is_ident("str")));
             let param = match Names::last_segment(&t.ty).as_deref() {
                 Some("Agent") => Param::Agent,
                 Some("This") => Param::This,
                 Some("Rest") => Param::Rest(index),
+                _ if is_str => {
+                    index += 1;
+                    Param::Str(index - 1)
+                }
                 _ => {
                     index += 1;
                     Param::Arg(index - 1, t.ty.clone())
@@ -157,6 +164,10 @@ impl Method {
                 Param::Arg(at, ty) => {
                     prepare.push(quote!(let #var = <#ty as ::r8binding::FromJs<'gc>>::from_js(a, ::r8binding::Glue::arg(args, #at))?;));
                     call_args.push(quote!(#var));
+                }
+                Param::Str(at) => {
+                    prepare.push(quote!(let #var = <::r8binding::frame::JsString<'gc> as ::r8binding::FromJs<'gc>>::from_js(a, ::r8binding::Glue::arg(args, #at))?;));
+                    call_args.push(quote!(&**#var));
                 }
             }
         }
