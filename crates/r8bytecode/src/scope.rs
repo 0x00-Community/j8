@@ -625,6 +625,14 @@ impl<'a> Resolver<'a> {
         }
         self.params(&f.params);
         self.statements(&body.statements);
+        // 非严格、简单形参又用到 arguments：形参要放进环境，arguments 的下标映射过去
+        let simple = f.params.rest.is_none() && f.params.items.iter().all(|i| i.initializer.is_none() && matches!(i.pattern, BindingPattern::BindingIdentifier(_)));
+        let args_key = ARGUMENTS_KEY | (Decls::this_key(f.span) & POSITION_MASK);
+        if !self.strict && simple && self.used.contains(&args_key) {
+            for d in d.0.iter().filter(|d| matches!(d.kind, DeclKind::Param(_))) {
+                self.captured.insert(d.key);
+            }
+        }
         self.leave_function(outer);
         self.strict = saved;
     }

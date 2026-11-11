@@ -334,7 +334,7 @@ impl Objects {
                 let is_array = a.is_array(o.into())?;
                 let tag = match &o.borrow().kind {
                     _ if is_array => "Array",
-                    ObjectKind::Arguments => "Arguments",
+                    ObjectKind::Arguments(_) => "Arguments",
                     k if k.is_callable() => "Function",
                     ObjectKind::Error => "Error",
                     ObjectKind::Primitive(Value::Bool(_)) => "Boolean",

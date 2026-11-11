@@ -41,6 +41,21 @@ struct Bound<'a> {
     self_name: bool,
 }
 
+/// 形参 i ⇒ 它在函数层环境里的槽位（同名形参取后一个）。
+fn alloc_vec_slots(decls: &Decls<'_>, level: &Level<'_>) -> Vec<Option<u16>> {
+    let mut slots: Vec<Option<u16>> = Vec::new();
+    for (d, n) in decls.0.iter().zip(&level.names) {
+        if let (DeclKind::Param(i), Binding::Env(slot)) = (d.kind, n.binding) {
+            let i = usize::from(i);
+            if slots.len() <= i {
+                slots.resize(i + 1, None);
+            }
+            slots[i] = Some(slot);
+        }
+    }
+    slots
+}
+
 /// 生成代码时的一层作用域。
 struct Level<'a> {
     /// 属于第几层函数（`frames` 下标）
@@ -160,6 +175,7 @@ enum Exit {
 }
 
 /// 正在编的一个函数。
+#[expect(clippy::struct_excessive_bools, reason = "编译中的函数状态：几个互不相关的开关")]
 struct Frame<'a> {
     index: usize,
     out: Function,
@@ -186,6 +202,8 @@ struct Frame<'a> {
     eval_vars: Option<&'a str>,
     /// 正在编形参序言（这里的 eval 看不见函数体的词法声明）
     prologue: bool,
+    /// 形参都是简单名字（没有默认值、解构、剩余）
+    simple_params: bool,
 }
 
 /// 函数体：语句、箭头函数的表达式、类的字段初始化、缺省构造器。
@@ -512,8 +530,14 @@ impl<'a> Compiler<'a, '_> {
                     None
                 }
                 DeclKind::Arguments if self.used.contains(&d.key) => {
-                    // 建 arguments 要全部实参
+                    // 建 arguments 要全部实参；非严格、简单形参时下标映射到形参的槽位
                     self.frame().out.keeps_args = true;
+                    if self.frame().simple_params && !self.frame().strict {
+                        let level = self.levels.last().expect("the function level");
+                        let mut slots = alloc_vec_slots(decls, level);
+                        slots.truncate(usize::from(self.frame().out.params));
+                        self.frame().out.mapped_params = slots;
+                    }
                     self.emit(Insn::CreateArguments);
                     self.bind(b);
                     None
@@ -743,7 +767,7 @@ impl<'a> Compiler<'a, '_> {
         // 类里的函数（方法、构造器、字段初始化）都是严格的
         let strict = flavor.strict || self.class_depth > 0 || self.frames.last().is_some_and(|f| f.strict);
         let out = Function { name: name.into(), kind: flavor.kind, keeps_args, generator: flavor.generator, asynchronous: flavor.asynchronous, mode: strict.into(), params: n, length, regs: top, ..Function::default() };
-        self.frames.push(Frame { index, out, top, envs: 0, controls: Vec::new(), label: None, completion: None, resume: None, async_generator: false, strict, annexb: Vec::new(), var_level: None, eval_vars: None, prologue: false });
+        self.frames.push(Frame { index, out, top, envs: 0, controls: Vec::new(), label: None, completion: None, resume: None, async_generator: false, strict, annexb: Vec::new(), var_level: None, eval_vars: None, prologue: false, simple_params: false });
         if flavor.generator || flavor.asynchronous {
             let mode = self.temp();
             self.frame().resume = Some(mode);
@@ -753,6 +777,7 @@ impl<'a> Compiler<'a, '_> {
             Body::Statements(s) => s,
             _ => &[],
         };
+        self.frame().simple_params = params.is_some_and(|p| p.rest.is_none() && p.items.iter().all(|i| i.initializer.is_none() && matches!(i.pattern, BindingPattern::BindingIdentifier(_))));
         let eval_vars = params.filter(|p| !strict && self.eval_fns.contains(&p.span.start)).map(|p| Hidden::eval_vars(self.alloc, p));
         self.enter(&Decls::function(this, self_name, params, stmts, !strict, eval_vars))?;
         if let Some(h) = eval_vars {
@@ -1447,7 +1472,7 @@ impl<'a> Compiler<'a, '_> {
         self.module.push(Function::default());
         let eval = local.is_some();
         let out = Function { name: "main".into(), regs: Reg::PARAMS, mode: strict.into(), ..Function::default() };
-        self.frames.push(Frame { index: 0, out, top: Reg::PARAMS, envs: 0, controls: Vec::new(), label: None, completion: None, resume: None, async_generator: false, strict, annexb: Vec::new(), var_level: None, eval_vars: None, prologue: false });
+        self.frames.push(Frame { index: 0, out, top: Reg::PARAMS, envs: 0, controls: Vec::new(), label: None, completion: None, resume: None, async_generator: false, strict, annexb: Vec::new(), var_level: None, eval_vars: None, prologue: false, simple_params: false });
         let completion = self.temp();
         self.frame().completion = Some(completion);
         // 直接 eval 的代码用调用处的 `this`（经外层作用域表解析）

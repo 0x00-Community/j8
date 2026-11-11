@@ -192,6 +192,13 @@ impl<'gc> Agent<'gc, '_> {
                 Some(Property { slot: Slot::Data(len.into()), enumerable: false, writable: !d.length_readonly, configurable: false })
             }
             (ObjectKind::Primitive(Value::String(s)), Key::Str(k)) => self.string_own(*s, k).or_else(|| d.own_slot(key)),
+            (ObjectKind::Arguments(Some(map)), Key::Str(k)) => {
+                let slot = index_of_str(k).and_then(|i| map.slots.get(i as usize).copied().flatten());
+                match (d.own_slot(key), slot) {
+                    (Some(p), Some(s)) => Some(Property { slot: Slot::Data(map.env.borrow().slots[usize::from(s)]), ..p }),
+                    (p, _) => p,
+                }
+            }
             _ => d.own_slot(key),
         })
     }
@@ -236,7 +243,53 @@ impl<'gc> Agent<'gc, '_> {
             }
             _ => {}
         }
+        if let Some(slot) = Self::mapped_slot(o, key) {
+            return Ok(self.arguments_define(o, key, desc, slot));
+        }
         Ok(self.ordinary_define(o, key, &desc))
+    }
+
+    /// 映射的 arguments 下标：给出形参的槽位。
+    fn mapped_slot(o: JsObject<'gc>, key: Key<'_, 'gc>) -> Option<u16> {
+        let Key::Str(k) = key else { return None };
+        match &o.borrow().kind {
+            ObjectKind::Arguments(Some(map)) => index_of_str(k).and_then(|i| map.slots.get(i as usize).copied().flatten()),
+            _ => None,
+        }
+    }
+
+    fn unmap(&self, o: JsObject<'gc>, key: Key<'_, 'gc>) {
+        if let (Key::Str(k), ObjectKind::Arguments(Some(map))) = (key, &mut o.borrow_mut(self.mc).kind)
+            && let Some(s) = index_of_str(k).and_then(|i| map.slots.get_mut(i as usize))
+        {
+            *s = None;
+        }
+    }
+
+    /// arguments 的 [[DefineOwnProperty]]（映射的下标）。
+    fn arguments_define(&mut self, o: JsObject<'gc>, key: Key<'_, 'gc>, desc: Descriptor<'gc>, slot: u16) -> bool {
+        let env = match &o.borrow().kind {
+            ObjectKind::Arguments(Some(map)) => map.env,
+            _ => return self.ordinary_define(o, key, &desc),
+        };
+        let mut d = desc;
+        if d.is_data() && d.value.is_none() && d.writable == Some(false) {
+            d.value = Some(env.borrow().slots[usize::from(slot)]);
+        }
+        if !self.ordinary_define(o, key, &d) {
+            return false;
+        }
+        if desc.is_accessor() {
+            self.unmap(o, key);
+        } else {
+            if let Some(v) = desc.value {
+                env.borrow_mut(self.mc).slots[usize::from(slot)] = v;
+            }
+            if desc.writable == Some(false) {
+                self.unmap(o, key);
+            }
+        }
+        true
     }
 
     /// OrdinaryDefineOwnProperty。
@@ -342,6 +395,7 @@ impl<'gc> Agent<'gc, '_> {
             None => Ok(true),
             Some(p) if p.configurable => {
                 o.borrow_mut(self.mc).unstore(self.mc, key);
+                self.unmap(o, key);
                 Ok(true)
             }
             Some(_) => Ok(false),

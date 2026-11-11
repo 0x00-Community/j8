@@ -248,7 +248,7 @@ impl Arrays {
             let d = p.borrow();
             let indexed = match &d.kind {
                 ObjectKind::Array(items) => !items.is_empty(),
-                ObjectKind::Ordinary | ObjectKind::Error | ObjectKind::Arguments => false,
+                ObjectKind::Ordinary | ObjectKind::Error | ObjectKind::Arguments(_) => false,
                 _ => true,
             };
             if indexed || d.sparse_length > 0 || d.props.iter().any(|(k, _)| k.as_bytes().first().is_some_and(u8::is_ascii_digit)) {

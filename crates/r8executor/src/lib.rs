@@ -560,8 +560,13 @@ impl Executor {
     }
 
     /// 本帧的 arguments 对象：全部实参作可枚举下标属性，`length` / `callee` / `[Symbol.iterator]` 不可枚举。
-    fn arguments<'gc>(a: &mut Agent<'gc, '_>, regs: &[Value<'gc>], f: &Frame<'gc>, self_strict: bool) -> Result<Value<'gc>, Error> {
-        let o = ObjectData { kind: ObjectKind::Arguments, proto: Some(a.realm.object_proto), ..ObjectData::default() }.alloc(a.mc);
+    fn arguments<'gc>(a: &mut Agent<'gc, '_>, regs: &[Value<'gc>], f: &Frame<'gc>, self_strict: bool, mapped: &[Option<u16>]) -> Result<Value<'gc>, Error> {
+        // 映射：只到实参个数为止
+        let map = match (self_strict, f.env) {
+            (false, Some(env)) if !mapped.is_empty() => Some(r8frame::ArgumentsMap { env, slots: mapped.iter().take(f.args.len()).copied().collect() }),
+            _ => None,
+        };
+        let o = ObjectData { kind: ObjectKind::Arguments(map), proto: Some(a.realm.object_proto), ..ObjectData::default() }.alloc(a.mc);
         let hidden = |v: Value<'gc>| Property { slot: Slot::Data(v), enumerable: false, writable: true, configurable: true };
         for (i, &v) in f.args.iter().enumerate() {
             let k = alloc::string::String::from(ryu_js::Buffer::new().format(f64::from(u32::try_from(i).unwrap_or(u32::MAX))));
@@ -1131,7 +1136,7 @@ impl Executor {
                     }
                 }
                 Insn::LdaNewTarget => *acc = f.new_target,
-                Insn::CreateArguments => *acc = Self::arguments(a, regs, f, func.mode.into())?,
+                Insn::CreateArguments => *acc = Self::arguments(a, regs, f, func.mode.into(), &func.mapped_params)?,
                 Insn::GetTemplateObject { site, first, count } => {
                     let key = (f.func.0, site);
                     let cached = a.realm.templates.borrow().get(&key).copied();

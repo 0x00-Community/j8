@@ -510,14 +510,22 @@ pub struct ViewData<'gc> {
     pub length: Option<usize>,
 }
 
+/// 映射的 arguments：形参所在的环境与每个下标对应的槽位（删掉 / 改成访问器后就不再映射）。
+#[derive(Clone, Debug, Collect)]
+#[collect(no_drop)]
+pub struct ArgumentsMap<'gc> {
+    pub env: JsEnv<'gc>,
+    pub slots: Vec<Option<u16>>,
+}
+
 /// 对象的种类：普通对象之外带的内部槽。
 #[derive(Debug, Default, Collect)]
 #[collect(no_drop)]
 pub enum ObjectKind<'gc> {
     #[default]
     Ordinary,
-    /// 非映射的 arguments 对象（`Object.prototype.toString` 认它）
-    Arguments,
+    /// arguments 对象（`Object.prototype.toString` 认它）；非严格、简单形参时第 i 个下标映射到形参的环境槽位
+    Arguments(Option<ArgumentsMap<'gc>>),
     /// Error 实例（有 [[ErrorData]]）
     Error,
     /// 数组元素（下标属性存在这里，`length` 就是它的长度）
@@ -599,7 +607,7 @@ pub struct ObjectData<'gc> {
 impl fmt::Debug for ObjectData<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let kind = match self.kind {
-            ObjectKind::Ordinary | ObjectKind::Arguments => "Object",
+            ObjectKind::Ordinary | ObjectKind::Arguments(_) => "Object",
             ObjectKind::Error => "Error",
             ObjectKind::Array(_) => "Array",
             ObjectKind::Function(_) | ObjectKind::Native(_) | ObjectKind::Bound(_) | ObjectKind::Resolver { .. } | ObjectKind::NativeClosure(_) => "Function",

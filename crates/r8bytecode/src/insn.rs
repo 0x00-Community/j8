@@ -91,6 +91,8 @@ pub struct Function {
     pub consts: Vec<Constant>,
     /// 函数里各处直接 eval 的作用域表（`CallEval` 的 `scope` 是下标）
     pub scopes: Vec<EvalScope>,
+    /// 映射的 arguments：第 i 个实参对应的形参环境槽位（非严格、简单形参才有）
+    pub mapped_params: Vec<Option<u16>>,
 }
 
 impl Function {
