@@ -19,6 +19,12 @@ pub trait Platform: Sync {
         Duration::ZERO
     }
 
+    /// 模块加载：`referrer` 里写的 `specifier` ⇒（规范化的路径, 源码）；找不到给 `None`。
+    fn load_module(&self, referrer: &str, specifier: &str) -> Option<(alloc::string::String, alloc::string::String)> {
+        let _ = (referrer, specifier);
+        None
+    }
+
     /// 输出一行（`console.log`）。
     fn print(&self, line: &str);
 

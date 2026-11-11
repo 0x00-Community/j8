@@ -182,6 +182,9 @@ impl<'gc> Agent<'gc, '_> {
             let (t, h) = parts?;
             return self.proxy_get_own_property(t, h, key);
         }
+        if let (Some(b), Key::Str(k)) = (Self::namespace_export(o, key), key) {
+            return self.namespace_own(b, k);
+        }
         if let Some(i) = Self::typed_numeric(o, key) {
             return Ok(self.typed_get(o, i).map(Property::data));
         }
@@ -212,6 +215,13 @@ impl<'gc> Agent<'gc, '_> {
         if let Some(parts) = self.proxy_parts(o) {
             let (t, h) = parts?;
             return self.proxy_define_own_property(t, h, key, desc);
+        }
+        if let (Some(b), Key::Str(k)) = (Self::namespace_export(o, key), key) {
+            let Some(cur) = self.namespace_own(b, k)? else { return Ok(false) };
+            if desc.configurable == Some(true) || desc.enumerable == Some(false) || desc.is_accessor() || desc.writable == Some(false) {
+                return Ok(false);
+            }
+            return Ok(desc.value.is_none_or(|v| cur.value().is_some_and(|c| c.same_value(v))));
         }
         if let Some(i) = Self::typed_numeric(o, key) {
             if !Self::typed_has(o, i) || desc.configurable == Some(false) || desc.enumerable == Some(false) || desc.is_accessor() || desc.writable == Some(false) {
@@ -388,6 +398,9 @@ impl<'gc> Agent<'gc, '_> {
             let (t, h) = parts?;
             return self.proxy_delete(t, h, key);
         }
+        if let Some(b) = Self::namespace_export(o, key) {
+            return Ok(b.is_none());
+        }
         if let Some(i) = Self::typed_numeric(o, key) {
             return Ok(!Self::typed_has(o, i));
         }
@@ -407,6 +420,9 @@ impl<'gc> Agent<'gc, '_> {
         if let Some(parts) = self.proxy_parts(o) {
             let (t, h) = parts?;
             return self.proxy_own_keys(t, h);
+        }
+        if let Some(keys) = Self::namespace_keys(o) {
+            return Ok(keys);
         }
         let d = o.borrow();
         let mut indices: Vec<(u32, Option<JsString<'gc>>)> = Vec::new();
@@ -469,6 +485,9 @@ impl<'gc> Agent<'gc, '_> {
         if let Some(parts) = self.proxy_parts(o) {
             let (t, h) = parts?;
             return self.proxy_set_prototype_of(t, h, proto);
+        }
+        if matches!(o.borrow().kind, ObjectKind::ModuleNamespace(_)) {
+            return Ok(proto.is_none());
         }
         let (current, extensible) = {
             let d = o.borrow();

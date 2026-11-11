@@ -122,7 +122,7 @@ impl<'a> Decls<'a> {
     }
 
     /// 变量声明里的绑定（含解构）。
-    fn declarators(&mut self, d: &'a VariableDeclaration<'a>, kind: DeclKind<'a>) {
+    pub(crate) fn declarators(&mut self, d: &'a VariableDeclaration<'a>, kind: DeclKind<'a>) {
         let lexical = matches!(kind, DeclKind::Let | DeclKind::Const);
         for v in &d.declarations {
             self.pattern(&v.id, kind, lexical.then_some(v.span.end));
@@ -1056,6 +1056,12 @@ impl<'a> Resolver<'a> {
             }
             Expression::ChainExpression(c) => self.chain(&c.expression),
             Expression::NewTarget(_) => self.reference(NEW_TARGET),
+            Expression::ImportExpression(i) => {
+                self.expr(&i.source);
+                if let Some(o) = &i.options {
+                    self.expr(o);
+                }
+            }
             Expression::TaggedTemplateExpression(t) => {
                 self.expr(&t.tag);
                 t.quasi.expressions.iter().for_each(|e| self.expr(e));

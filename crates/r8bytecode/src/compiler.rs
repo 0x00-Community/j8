@@ -6,7 +6,7 @@ use oxc_ast::ast::{Directive, BindingIdentifier, BindingPattern, BlockStatement,
 use oxc_parser::{ParseOptions, Parser};
 use oxc_semantic::SemanticBuilder;
 use oxc_span::{GetSpan, SourceType, Span};
-use r8frame::{CodeKind, CompareOp, Error, Resume, Source};
+use r8frame::{CodeKind, CompareOp, Error, ImportEntry, ImportName, ModuleInfo, Resume, Source};
 
 use crate::scope::{Decl, DeclKind, Decls, Hidden, Key, Resolver, THIS};
 use crate::{Const, Constant, EvalName, EvalScope, Function, FunctionKind, Insn, Label, Module, PropertyKind, Reg};
@@ -29,6 +29,8 @@ enum Binding {
     Reg(Reg),
     /// 本层环境的槽位
     Env(u16),
+    /// 模块的第几个导入绑定（运行时经模块记录读出口方的槽位）
+    Import(u16),
 }
 
 struct Bound<'a> {
@@ -55,6 +57,9 @@ fn alloc_vec_slots(decls: &Decls<'_>, level: &Level<'_>) -> Vec<Option<u16>> {
     }
     slots
 }
+
+/// `export default 表达式` / 匿名默认导出用的绑定名
+const DEFAULT_BINDING: &str = "*default*";
 
 /// 生成代码时的一层作用域。
 struct Level<'a> {
@@ -94,6 +99,7 @@ pub(crate) enum Place<'a> {
     Reg(Reg),
     Env { depth: u16, slot: u16 },
     Global(&'a str),
+    Import(u16),
 }
 
 /// `break` / `continue` 的去处。
@@ -293,8 +299,222 @@ impl Module {
     }
 }
 
+/// 模块顶层的一个名字：环境槽位（带是不是词法声明、是不是 const），或导入绑定。
+#[derive(Clone, Copy)]
+enum ModuleName {
+    Slot { slot: u16, lexical: bool, constant: bool },
+    Import(u16),
+}
+
+/// 收集模块顶层名字与模块信息时的状态。
+struct Layout<'a> {
+    names: Vec<(&'a str, ModuleName)>,
+    info: ModuleInfo,
+    slots: u16,
+    /// （导出名, 本地名）：最后再分本地导出与转导出
+    local_exports: Vec<(&'a str, &'a str)>,
+    /// 导入绑定名 ⇒ 导入编号
+    imports: Vec<(&'a str, usize)>,
+}
+
+impl<'a> Layout<'a> {
+    fn export_name(n: &oxc_ast::ast::ModuleExportName<'a>) -> &'a str {
+        use oxc_ast::ast::ModuleExportName;
+        match n {
+            ModuleExportName::IdentifierName(i) => i.name.as_str(),
+            ModuleExportName::IdentifierReference(i) => i.name.as_str(),
+            ModuleExportName::StringLiteral(s) => s.value.as_str().unwrap_or_default(),
+        }
+    }
+
+    fn request(&mut self, spec: &str) -> usize {
+        match self.info.requests.iter().position(|r| **r == *spec) {
+            Some(i) => i,
+            None => {
+                self.info.requests.push(spec.into());
+                self.info.requests.len() - 1
+            }
+        }
+    }
+
+    fn declare(&mut self, name: &'a str, lexical: bool, constant: bool) {
+        if self.names.iter().any(|(n, _)| *n == name) {
+            return;
+        }
+        self.names.push((name, ModuleName::Slot { slot: self.slots, lexical, constant }));
+        if lexical {
+            self.info.lexical.push(self.slots);
+        }
+        self.slots += 1;
+    }
+
+    fn variables(&mut self, v: &'a VariableDeclaration<'a>) -> Vec<&'a str> {
+        let mut ds = Decls::default();
+        ds.declarators(v, DeclKind::Var);
+        let lexical = v.kind != VariableDeclarationKind::Var;
+        let names: Vec<&'a str> = ds.0.iter().map(|x| x.name).collect();
+        for &n in &names {
+            self.declare(n, lexical, v.kind == VariableDeclarationKind::Const);
+        }
+        names
+    }
+
+    fn declaration(&mut self, d: &'a oxc_ast::ast::Declaration<'a>) -> Vec<&'a str> {
+        use oxc_ast::ast::Declaration;
+        match d {
+            Declaration::VariableDeclaration(v) => self.variables(v),
+            Declaration::FunctionDeclaration(f) => f.id.iter().map(|id| {
+                self.declare(id.name.as_str(), false, false);
+                id.name.as_str()
+            }).collect(),
+            Declaration::ClassDeclaration(c) => c.id.iter().map(|id| {
+                self.declare(id.name.as_str(), true, false);
+                id.name.as_str()
+            }).collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// 导出：本地绑定给槽位；导出的其实是导入绑定的转成间接导出。
+    fn finish(mut self) -> (Vec<(&'a str, ModuleName)>, ModuleInfo) {
+        for (exported, local) in core::mem::take(&mut self.local_exports) {
+            if let Some(&(_, idx)) = self.imports.iter().find(|(n, _)| *n == local) {
+                let e = self.info.imports[idx].clone();
+                self.info.indirect_exports.push((exported.into(), e.request, e.name));
+            } else if let Some(&(_, ModuleName::Slot { slot, .. })) = self.names.iter().find(|(n, _)| *n == local) {
+                self.info.local_exports.push((exported.into(), slot));
+            }
+        }
+        self.info.slots = self.slots;
+        (self.names, self.info)
+    }
+}
+
+impl Module {
+    /// 编一个模块：给出字节码与模块信息（请求、导入、导出、环境布局）。
+    pub fn compile_module(src: &Source<'_>) -> Result<(Self, ModuleInfo), Error> {
+        let allocator = Allocator::default();
+        let options = ParseOptions { parse_regular_expression: true, ..ParseOptions::default() };
+        let ret = Parser::new(&allocator, src.text, SourceType::mjs()).with_options(options).parse();
+        if let Some(d) = ret.diagnostics.first() {
+            return Err(Error::Syntax(format!("{}: {d}", src.file)));
+        }
+        let program = &ret.program;
+        let checked = SemanticBuilder::new().with_check_syntax_error(true).build(program);
+        if let Some(d) = checked.diagnostics.errors().next() {
+            return Err(Error::Syntax(format!("{}: {d}", src.file)));
+        }
+        let scoping = checked.semantic.scoping();
+        let eval_scopes: HashSet<oxc_syntax::scope::ScopeId> = scoping.scope_descendants_from_root().filter(|&id| scoping.scope_flags(id).contains_direct_eval()).collect();
+        let (names, info) = Self::module_layout(program);
+        let order: Vec<&str> = names.iter().map(|&(n, _)| n).collect();
+        let (captured, used, eval_fns) = Resolver::script(&program.body, Decls::this_key(program.span), &allocator, None, true, eval_scopes, Some(&[order]));
+        let mut c = Compiler { src, alloc: &allocator, captured, used, sites: 0, class_depth: 0, module: Vec::new(), frames: Vec::new(), levels: Vec::new(), script_lexicals: HashSet::new(), chains: Vec::new(), eval_fns };
+        let bound = names
+            .iter()
+            .map(|&(name, n)| match n {
+                ModuleName::Slot { slot, lexical, constant } => Bound { name, binding: Binding::Env(slot), constant, ready: lexical.then_some(u32::MAX), self_name: false },
+                ModuleName::Import(i) => Bound { name, binding: Binding::Import(i), constant: true, ready: None, self_name: false },
+            })
+            .collect();
+        c.levels.push(Level { func: usize::MAX, names: bound, env: true, mark: 0, switch: false });
+        c.module_body(program)?;
+        Ok((Module { functions: c.module }, info))
+    }
+
+    /// 模块顶层的名字与模块信息：槽位 0 是 `this`（undefined），之后按声明顺序。
+    fn module_layout<'a>(program: &'a Program<'a>) -> (Vec<(&'a str, ModuleName)>, ModuleInfo) {
+        use oxc_ast::ast::{ExportDefaultDeclarationKind, ImportDeclarationSpecifier};
+        let mut l = Layout { names: alloc::vec![(THIS, ModuleName::Slot { slot: 0, lexical: false, constant: true })], info: ModuleInfo::default(), slots: 1, local_exports: Vec::new(), imports: Vec::new() };
+        for s in &program.body {
+            match s {
+                Statement::ImportDeclaration(i) => {
+                    let req = l.request(i.source.value.as_str().unwrap_or_default());
+                    for sp in i.specifiers.iter().flatten() {
+                        let (local, name) = match sp {
+                            ImportDeclarationSpecifier::ImportSpecifier(x) => (x.local.name.as_str(), ImportName::Named(Layout::export_name(&x.imported).into())),
+                            ImportDeclarationSpecifier::ImportDefaultSpecifier(x) => (x.local.name.as_str(), ImportName::Named("default".into())),
+                            ImportDeclarationSpecifier::ImportNamespaceSpecifier(x) => (x.local.name.as_str(), ImportName::Namespace),
+                        };
+                        let idx = u16::try_from(l.info.imports.len()).unwrap_or(u16::MAX);
+                        l.info.imports.push(ImportEntry { request: req, name });
+                        l.names.push((local, ModuleName::Import(idx)));
+                        l.imports.push((local, usize::from(idx)));
+                    }
+                }
+                Statement::ExportDeclaration(e) => {
+                    for n in l.declaration(&e.declaration) {
+                        l.local_exports.push((n, n));
+                    }
+                }
+                Statement::ExportFromDeclaration(e) => {
+                    let req = l.request(e.source.value.as_str().unwrap_or_default());
+                    for sp in &e.specifiers {
+                        l.info.indirect_exports.push((Layout::export_name(&sp.exported).into(), req, ImportName::Named(Layout::export_name(&sp.local).into())));
+                    }
+                }
+                Statement::ExportNamedDeclaration(e) => {
+                    for sp in &e.specifiers {
+                        l.local_exports.push((Layout::export_name(&sp.exported), Layout::export_name(&sp.local)));
+                    }
+                }
+                Statement::ExportDefaultDeclaration(e) => {
+                    let local = match &e.declaration {
+                        ExportDefaultDeclarationKind::FunctionDeclaration(f) => {
+                            let n = f.id.as_ref().map_or(DEFAULT_BINDING, |id| id.name.as_str());
+                            l.declare(n, false, false);
+                            n
+                        }
+                        ExportDefaultDeclarationKind::ClassDeclaration(c) => {
+                            let n = c.id.as_ref().map_or(DEFAULT_BINDING, |id| id.name.as_str());
+                            l.declare(n, true, false);
+                            n
+                        }
+                        _ => {
+                            l.declare(DEFAULT_BINDING, true, false);
+                            DEFAULT_BINDING
+                        }
+                    };
+                    l.local_exports.push(("default", local));
+                }
+                Statement::ExportAllDeclaration(e) => {
+                    let req = l.request(e.source.value.as_str().unwrap_or_default());
+                    match &e.exported {
+                        Some(n) => l.info.indirect_exports.push((Layout::export_name(n).into(), req, ImportName::Namespace)),
+                        None => l.info.star_exports.push(req),
+                    }
+                }
+                Statement::VariableDeclaration(v) => _ = l.variables(v),
+                Statement::FunctionDeclaration(f) => {
+                    if let Some(id) = &f.id {
+                        l.declare(id.name.as_str(), false, false);
+                    }
+                }
+                Statement::ClassDeclaration(c) => {
+                    if let Some(id) = &c.id {
+                        l.declare(id.name.as_str(), true, false);
+                    }
+                }
+                _ => {}
+            }
+        }
+        // 块里的 var 也在模块顶层
+        let mut vars = Decls::default();
+        vars.vars(&program.body);
+        for d in &vars.0 {
+            l.declare(d.name, false, false);
+        }
+        l.finish()
+    }
+}
+
 impl<'a> Compiler<'a, '_> {
     // ---- 基础 --------------------------------------------------------------------------
+
+    /// 正在编的文件名（动态 import 的相对路径基准）。
+    pub(crate) fn file(&self) -> &'a str {
+        self.alloc.alloc_str(self.src.file)
+    }
 
     pub(crate) fn unsupported(&self, span: Span, what: &str) -> Error {
         self.src.unsupported(span.start, what)
@@ -318,6 +538,7 @@ impl<'a> Compiler<'a, '_> {
                         let insn = match n.binding {
                             Binding::Reg(r) => Insn::Star(r),
                             Binding::Env(slot) => Insn::StaEnv { depth, slot },
+                            Binding::Import(_) => Insn::ThrowConstAssign,
                         };
                         self.emit(insn);
                         return;
@@ -398,7 +619,7 @@ impl<'a> Compiler<'a, '_> {
                 .filter(|n| !(hide_lexical && n.ready.is_some()))
                 .filter_map(|n| match n.binding {
                     Binding::Env(slot) => Some(EvalName { name: n.name.into(), slot, constant: n.constant, tdz: n.ready.is_some(), self_name: n.self_name }),
-                    Binding::Reg(_) => None,
+                    Binding::Reg(_) | Binding::Import(_) => None,
                 })
                 .collect();
             levels.push(names);
@@ -557,6 +778,7 @@ impl<'a> Compiler<'a, '_> {
         match b {
             Binding::Reg(r) => self.emit(Insn::Star(r)),
             Binding::Env(slot) => self.emit(Insn::StaEnv { depth: 0, slot }),
+            Binding::Import(_) => self.emit(Insn::ThrowConstAssign),
         };
     }
 
@@ -589,6 +811,7 @@ impl<'a> Compiler<'a, '_> {
                         (Place::Reg(r), false)
                     }
                     Binding::Env(slot) => (Place::Env { depth, slot }, true),
+                    Binding::Import(i) => (Place::Import(i), false),
                 };
                 return Resolved { place, constant: n.constant, tdz: n.ready.map(|r| (r, in_env || l.switch)) };
             }
@@ -682,6 +905,7 @@ impl<'a> Compiler<'a, '_> {
             Place::Global("NaN") => Insn::LdaConst(self.constant(Constant::Number(f64::NAN))),
             Place::Global("Infinity") => Insn::LdaConst(self.constant(Constant::Number(f64::INFINITY))),
             Place::Global(g) => Insn::LdaGlobal(self.name(g)),
+            Place::Import(index) => Insn::LdaImport { index },
         };
         self.emit(insn);
         if r.needs_check(pos) {
@@ -740,7 +964,7 @@ impl<'a> Compiler<'a, '_> {
             match r.place {
                 Place::Reg(reg) => _ = self.emit(Insn::CheckReg { reg, name: k }),
                 Place::Env { depth, slot } => _ = self.emit(Insn::CheckEnv { depth, slot, name: k }),
-                Place::Global(_) => {}
+                Place::Global(_) | Place::Import(_) => {}
             }
         }
         let insn = match r.place {
@@ -748,6 +972,7 @@ impl<'a> Compiler<'a, '_> {
             Place::Env { depth, slot } => Insn::StaEnv { depth, slot },
             Place::Global(g) if init && self.script_lexicals.contains(g) => Insn::InitLexical { name: self.name(g) },
             Place::Global(g) => Insn::StaGlobal { name: self.name(g), strict: self.strict_here() },
+            Place::Import(_) => Insn::ThrowConstAssign,
         };
         self.emit(insn);
     }
@@ -1463,6 +1688,66 @@ impl<'a> Compiler<'a, '_> {
 
     fn function_declaration(&mut self, f: &'a AstFunction<'a>) -> Result<u32, Error> {
         self.plain_function(f, false, "")
+    }
+
+    /// 模块主体：顶层名字都在模块环境里（外层那一层），先建好提升的函数，再按顺序跑语句。
+    fn module_body(&mut self, program: &'a Program<'a>) -> Result<(), Error> {
+        use oxc_ast::ast::{Declaration, ExportDefaultDeclarationKind};
+        self.module.push(Function::default());
+        let out = Function { name: "main".into(), regs: Reg::PARAMS, mode: true.into(), ..Function::default() };
+        self.frames.push(Frame { index: 0, out, top: Reg::PARAMS, envs: 0, controls: Vec::new(), label: None, completion: None, resume: None, async_generator: false, strict: true, annexb: Vec::new(), var_level: None, eval_vars: None, prologue: false, simple_params: false });
+        for s in &program.body {
+            let (f, name, inferred) = match s {
+                Statement::FunctionDeclaration(f) => (f, f.id.as_ref().map(|i| i.name.as_str()), ""),
+                Statement::ExportDeclaration(e) => match &e.declaration {
+                    Declaration::FunctionDeclaration(f) => (f, f.id.as_ref().map(|i| i.name.as_str()), ""),
+                    _ => continue,
+                },
+                Statement::ExportDefaultDeclaration(e) => match &e.declaration {
+                    ExportDefaultDeclarationKind::FunctionDeclaration(f) => (f, Some(f.id.as_ref().map_or(DEFAULT_BINDING, |i| i.name.as_str())), "default"),
+                    _ => continue,
+                },
+                _ => continue,
+            };
+            let Some(name) = name else { continue };
+            let n = self.plain_function(f, false, inferred)?;
+            self.emit(Insn::CreateClosure(n));
+            self.store(name, true);
+        }
+        for s in &program.body {
+            match s {
+                Statement::ImportDeclaration(_) | Statement::ExportAllDeclaration(_) | Statement::FunctionDeclaration(_) | Statement::ExportNamedDeclaration(_) | Statement::ExportFromDeclaration(_) => {}
+                Statement::ExportDeclaration(e) => match &e.declaration {
+                    Declaration::VariableDeclaration(v) => self.declaration(v)?,
+                    Declaration::ClassDeclaration(c) => {
+                        self.class(c, "")?;
+                        if let Some(id) = &c.id {
+                            self.store(id.name.as_str(), true);
+                        }
+                    }
+                    Declaration::FunctionDeclaration(_) => {}
+                    _ => return Err(self.unsupported(e.span, "declaration")),
+                },
+                Statement::ExportDefaultDeclaration(e) => match &e.declaration {
+                    ExportDefaultDeclarationKind::FunctionDeclaration(_) => {}
+                    ExportDefaultDeclarationKind::ClassDeclaration(c) => {
+                        self.class(c, "default")?;
+                        self.store(c.id.as_ref().map_or(DEFAULT_BINDING, |i| i.name.as_str()), true);
+                    }
+                    other => {
+                        let e = other.as_expression().ok_or_else(|| self.unsupported(e.span, "default export"))?;
+                        self.expr_named(e, "default")?;
+                        self.store(DEFAULT_BINDING, true);
+                    }
+                },
+                s => self.statement(s)?,
+            }
+        }
+        self.emit(Insn::LdaUndefined);
+        self.emit(Insn::Return);
+        let f = self.frames.pop().expect("the module's frame");
+        self.module[f.index] = f.out;
+        Ok(())
     }
 
     /// 脚本本身：顶层 `var` / 函数声明 / `let` / `const` 都是全局对象的属性。

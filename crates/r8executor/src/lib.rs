@@ -728,6 +728,8 @@ impl Executor {
                     }
                 }
                 Insn::ToObject => *acc = a.to_object(*acc)?.into(),
+                // 模块：编译器已产出模块信息，加载 / 链接 / 求值还没接上
+                Insn::LdaImport { .. } | Insn::DynamicImport { .. } | Insn::ImportMeta => return Err(Error::Unsupported(alloc::string::String::from("modules"))),
                 Insn::CreateNullObject => *acc = ObjectData::default().alloc(a.mc).into(),
                 Insn::DeclareEvalVar { obj, name } => {
                     if let Value::Object(o) = regs[r(obj)] {

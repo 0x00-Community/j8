@@ -555,6 +555,8 @@ pub enum ObjectKind<'gc> {
     ArrayBuffer(BufferData),
     /// Date：时间值（毫秒，无效是 NaN）
     Date(f64),
+    /// 模块命名空间对象：导出名（排好序）与解析到的绑定
+    ModuleNamespace(Vec<(JsString<'gc>, crate::ResolvedBinding<'gc>)>),
     /// WeakRef（目前强引用目标）
     WeakRef(Value<'gc>),
     /// FinalizationRegistry：清理回调与登记的（目标, 携带值, 注销令牌）（目前强引用，不会触发清理）
@@ -614,6 +616,7 @@ impl fmt::Debug for ObjectData<'_> {
             ObjectKind::Proxy(_) => "Proxy",
             ObjectKind::ArrayBuffer(_) => "ArrayBuffer",
             ObjectKind::Date(_) => "Date",
+            ObjectKind::ModuleNamespace(_) => "Module",
             ObjectKind::WeakRef(_) => "WeakRef",
             ObjectKind::FinalizationRegistry { .. } => "FinalizationRegistry",
             ObjectKind::RegExpStringIterator { .. } => "RegExp String Iterator",

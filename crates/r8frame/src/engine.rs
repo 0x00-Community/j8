@@ -30,4 +30,10 @@ pub trait Engine {
     /// 在执行环境 `cx` 里跑完 `src`（含排空微任务），返回最后一条表达式语句的值。
     /// 引擎自己分片进入 isolate，片与片之间回收。
     fn eval(&mut self, isolate: &mut Isolate<'_>, cx: &ContextRoot, src: &Source<'_>) -> Result<Global, Error>;
+
+    /// 把 `src` 当模块加载、链接、求值（含它导入的模块，排空微任务）。
+    fn eval_module(&mut self, isolate: &mut Isolate<'_>, cx: &ContextRoot, src: &Source<'_>) -> Result<Global, Error> {
+        let _ = (isolate, cx);
+        Err(src.unsupported(0, "modules"))
+    }
 }

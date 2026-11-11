@@ -523,6 +523,12 @@ impl<'gc> Agent<'gc, '_> {
             if let Some(i) = Self::typed_numeric(cur, key) {
                 return Ok(self.typed_get(cur, i).unwrap_or_default());
             }
+            if let (Some(b), Key::Str(k)) = (Self::namespace_export(cur, key), key) {
+                return match b {
+                    Some(b) => self.binding_value(b, k),
+                    None => Ok(Value::Undefined),
+                };
+            }
             if let Some(p) = self.get_own_property(cur, key)? {
                 return match p.slot {
                     Slot::Data(v) => Ok(v),
@@ -578,6 +584,9 @@ impl<'gc> Agent<'gc, '_> {
             if let Some(parts) = self.proxy_parts(cur) {
                 let (t, h) = parts?;
                 return self.proxy_set(t, h, key, value, receiver);
+            }
+            if matches!(cur.borrow().kind, ObjectKind::ModuleNamespace(_)) {
+                return Ok(false);
             }
             if let Some(i) = Self::typed_numeric(cur, key) {
                 if matches!(receiver, Value::Object(r) if Gc::ptr_eq(r, cur)) {
@@ -668,6 +677,9 @@ impl<'gc> Agent<'gc, '_> {
             }
             if let Some(i) = Self::typed_numeric(cur, key) {
                 return Ok(Self::typed_has(cur, i));
+            }
+            if let Some(b) = Self::namespace_export(cur, key) {
+                return Ok(b.is_some());
             }
             if self.get_own_property(cur, key)?.is_some() {
                 return Ok(true);

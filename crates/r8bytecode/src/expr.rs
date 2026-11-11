@@ -173,6 +173,19 @@ impl<'a> Compiler<'a, '_> {
             Expression::ArrowFunctionExpression(a) => self.arrow(a, "")?,
             Expression::ClassExpression(c) => self.class(c, "")?,
             Expression::NewTarget(t) => self.load_at(crate::scope::NEW_TARGET, t.span.start),
+            Expression::ImportMeta(_) => _ = self.emit(Insn::ImportMeta),
+            Expression::ImportExpression(i) => {
+                self.expr(&i.source)?;
+                if let Some(o) = &i.options {
+                    let spec = self.temp();
+                    self.emit(Insn::Star(spec));
+                    self.expr(o)?;
+                    self.emit(Insn::Ldar(spec));
+                    self.release(spec);
+                }
+                let referrer = self.name(self.file());
+                self.emit(Insn::DynamicImport { referrer });
+            }
             Expression::TaggedTemplateExpression(t) => self.tagged_template(t)?,
             Expression::YieldExpression(y) => {
                 let mode = self.resume_reg(y.span, "yield outside a generator")?;

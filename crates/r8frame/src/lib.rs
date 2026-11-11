@@ -19,6 +19,7 @@ mod engine;
 mod error;
 mod handle;
 mod isolate;
+mod module;
 mod object;
 mod ops;
 mod platform;
@@ -40,6 +41,7 @@ pub use object::{ArgumentsMap, BigIntData, Bound, BufferData, Capability, Closur
 pub use bigint::Numeric;
 pub use ops::{BinaryOp, CompareOp, ErrorKind, Hint, IterRecord, UnaryOp};
 pub use platform::{Platform, Task};
+pub use module::{ImportEntry, ImportName, ModuleInfo, ModuleRecord, ModuleStatus, Resolution, ResolvedBinding};
 pub use profiler::{Counter, FuncId, Profiler};
 pub use typed::{Element, canonical_numeric, f16_to_f64, f64_to_f16};
 pub use property::{Descriptor, Integrity, Key, PropertyKey};

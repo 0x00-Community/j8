@@ -49,6 +49,11 @@ impl<'p> Isolate<'p> {
         engine.eval(self, cx, src)
     }
 
+    /// 跑一个模块（见 [`Engine::eval_module`](crate::Engine::eval_module)）。
+    pub fn run_module(&mut self, engine: &mut impl crate::Engine, cx: &crate::ContextRoot, src: &crate::Source<'_>) -> Result<crate::Global, crate::Error> {
+        engine.eval_module(self, cx, src)
+    }
+
     pub fn profiler(&self) -> &Profiler {
         &self.profiler
     }

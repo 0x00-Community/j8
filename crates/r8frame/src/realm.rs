@@ -116,6 +116,8 @@ pub struct Realm<'gc> {
     /// 脚本作用域：各脚本顶层的 `let` / `const` / `class`（跨脚本共享，不是全局对象的属性）
     pub script_scope: JsObject<'gc>,
     pub symbols: WellKnown<'gc>,
+    /// 加载过的模块（编号就是下标）
+    pub modules: Gc<'gc, RefLock<alloc::vec::Vec<crate::ModuleRecord<'gc>>>>,
     /// `Symbol.for` 的全局登记表
     pub symbol_registry: Gc<'gc, RefLock<alloc::vec::Vec<(JsString<'gc>, JsSymbol<'gc>)>>>,
     /// `Math.random` 的状态（xorshift，0 表示还没播种）
@@ -199,6 +201,7 @@ impl<'gc> Realm<'gc> {
             },
             jobs: Gc::new(mc, RefLock::new(VecDeque::new())),
             symbol_registry: Gc::new(mc, RefLock::new(alloc::vec::Vec::new())),
+            modules: Gc::new(mc, RefLock::new(alloc::vec::Vec::new())),
             random_state: Gc::new(mc, gc_arena::lock::Lock::new(0)),
             templates: Gc::new(mc, RefLock::new(alloc::collections::BTreeMap::new())),
             global: derived(object_proto),
