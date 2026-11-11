@@ -18,7 +18,11 @@ impl<'gc> Agent<'gc, '_> {
     /// Promise 的一对 resolve / reject 函数（共享「已经解决过」的标记）。
     pub fn promise_resolvers(&self, promise: JsObject<'gc>) -> (JsObject<'gc>, JsObject<'gc>) {
         let done = Gc::new(self.mc, Lock::new(false));
-        let make = |reject| ObjectData { kind: ObjectKind::Resolver { promise, reject, done }, proto: Some(self.realm.function_proto), ..ObjectData::default() }.alloc(self.mc);
+        let make = |reject| {
+            let f = ObjectData { kind: ObjectKind::Resolver { promise, reject, done }, proto: Some(self.realm.function_proto), ..ObjectData::default() }.alloc(self.mc);
+            self.realm.name_function(self.mc, f, "", Some(1));
+            f
+        };
         (make(false), make(true))
     }
 
@@ -105,10 +109,11 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    /// `Promise.resolve(v)`：是 Promise 就原样，否则包一个。
+    /// PromiseResolve(%Promise%, v)：是 `constructor` 为 %Promise% 的 Promise 就原样，否则包一个。
     pub fn promise_resolve(&mut self, v: Value<'gc>) -> Result<JsObject<'gc>, Error> {
         if let Value::Object(o) = v
             && Self::is_promise(v)
+            && matches!(self.get_named(v, "constructor")?, Value::Object(c) if Gc::ptr_eq(c, self.realm.promise_ctor))
         {
             return Ok(o);
         }
@@ -203,7 +208,7 @@ impl<'gc> Agent<'gc, '_> {
     fn run_job(&mut self, job: Job<'gc>) -> Result<(), Error> {
         match job {
             Job::Reaction { reaction: Reaction::Await { coroutine }, value, rejected } => self.drive(coroutine, if rejected { Resume::Throw } else { Resume::Next }, value),
-            Job::Reaction { reaction: Reaction::Then { on_fulfilled, on_rejected, derived }, value, rejected } => {
+            Job::Reaction { reaction: Reaction::Then { on_fulfilled, on_rejected, capability }, value, rejected } => {
                 let handler = if rejected { on_rejected } else { on_fulfilled };
                 let outcome = if self.is_callable(handler) {
                     match self.call(handler, Value::Undefined, &[value]) {
@@ -216,43 +221,17 @@ impl<'gc> Agent<'gc, '_> {
                 } else {
                     Ok(value)
                 };
-                match (derived, outcome) {
-                    (Some(d), Ok(r)) => self.resolve_promise(d, r)?,
-                    (Some(d), Err(reason)) => self.reject_promise(d, reason),
-                    (None, _) => {}
-                }
-                Ok(())
-            }
-            Job::Reaction { reaction: Reaction::All { values, index, remaining, result }, value, rejected } => {
-                if rejected {
-                    self.reject_promise(result, value);
-                    return Ok(());
-                }
-                if let ObjectKind::Array(items) = &mut values.borrow_mut(self.mc).kind
-                    && let Some(slot) = items.get_mut(index as usize)
-                {
-                    *slot = value;
-                }
-                let left = remaining.get() - 1;
-                remaining.set(self.mc, left);
-                if left == 0 {
-                    self.resolve_promise(result, values.into())?;
-                }
-                Ok(())
-            }
-            Job::Reaction { reaction: Reaction::Finally { on_finally, derived }, value, rejected } => {
-                if self.is_callable(on_finally) {
-                    match self.call(on_finally, Value::Undefined, &[]) {
-                        Ok(_) => {}
-                        Err(Error::Exception(g)) => {
-                            let reason = self.local(&g);
-                            self.reject_promise(derived, reason);
-                            return Ok(());
-                        }
+                if let Some(cap) = capability {
+                    let r = match outcome {
+                        Ok(r) => self.call(cap.resolve, Value::Undefined, &[r]),
+                        Err(reason) => self.call(cap.reject, Value::Undefined, &[reason]),
+                    };
+                    // 任务里抛出的交给宿主报告，别的任务照跑
+                    match r {
+                        Ok(_) | Err(Error::Exception(_)) => {}
                         Err(e) => return Err(e),
                     }
                 }
-                if rejected { self.reject_promise(derived, value) } else { self.resolve_promise(derived, value)? }
                 Ok(())
             }
             Job::Thenable { promise, thenable, then } => {

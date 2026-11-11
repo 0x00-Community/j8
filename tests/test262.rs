@@ -169,6 +169,10 @@ struct Capture {
 }
 
 impl Platform for Capture {
+    fn wall_clock(&self) -> Duration {
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default()
+    }
+
     fn workers(&self) -> NonZeroUsize {
         NonZeroUsize::MIN
     }

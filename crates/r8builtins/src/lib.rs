@@ -8,6 +8,7 @@ mod asyncgen;
 mod bigint;
 mod buffer;
 mod collections;
+mod date;
 mod error;
 mod function;
 mod global;
@@ -20,7 +21,9 @@ mod promise;
 mod reflect;
 mod regexp;
 mod string;
+mod text;
 mod typed;
+mod weak;
 
 use gc_arena::Mutation;
 use r8frame::{Intrinsics, JsObject, Realm, Value};
@@ -50,6 +53,9 @@ impl Intrinsics for Builtins {
         b.async_generators();
         b.json();
         b.buffers();
+        b.date();
+        b.texts();
+        b.weaks();
         b.typed_arrays();
         b.reflect();
         b.tags();
@@ -107,6 +113,7 @@ impl<'gc> Installer<'_, 'gc> {
             (r.collection_iterator_proto, "Map Iterator"),
             (r.set_iterator_proto, "Set Iterator"),
             (r.iterator_helper_proto, "Iterator Helper"),
+            (r.regexp_string_iterator_proto, "RegExp String Iterator"),
             (r.string_iterator_proto, "String Iterator"),
         ];
         for name in ["Math", "JSON"] {

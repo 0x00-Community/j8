@@ -59,7 +59,12 @@ impl Strings {
         Ok(r)
     }
 
-    fn find(hay: &[u16], needle: &[u16], from: usize) -> Option<usize> {
+    /// JS 的 WhiteSpace 与 LineTerminator（U+0085 不算，U+FEFF 算）。
+    pub(crate) fn is_space(c: char) -> bool {
+        (c.is_whitespace() && c != '\u{85}') || c == '\u{feff}'
+    }
+
+    pub(crate) fn find(hay: &[u16], needle: &[u16], from: usize) -> Option<usize> {
         (from..=hay.len().checked_sub(needle.len())?).find(|&i| hay[i..].starts_with(needle))
     }
 
@@ -162,17 +167,17 @@ impl Strings {
 
     fn trim<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let s = Self::this(a, this)?;
-        Ok(a.string(s.trim_matches(|c: char| c.is_whitespace() || c == '\u{feff}')).into())
+        Ok(a.string(s.trim_matches(Self::is_space)).into())
     }
 
     fn trim_start<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let s = Self::this(a, this)?;
-        Ok(a.string(s.trim_start_matches(|c: char| c.is_whitespace() || c == '\u{feff}')).into())
+        Ok(a.string(s.trim_start_matches(Self::is_space)).into())
     }
 
     fn trim_end<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let s = Self::this(a, this)?;
-        Ok(a.string(s.trim_end_matches(|c: char| c.is_whitespace() || c == '\u{feff}')).into())
+        Ok(a.string(s.trim_end_matches(Self::is_space)).into())
     }
 
     /// `split(sep, limit)`：`sep` 是字符串（正则留给阶段 5）；空串按码元拆。

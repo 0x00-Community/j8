@@ -60,7 +60,7 @@ impl Collections {
 
     /// 弱集合的键必须是对象（或 Symbol）。
     fn weak_key<'gc>(a: &Agent<'gc, '_>, key: Value<'gc>, what: &str) -> Result<(), Error> {
-        if matches!(key, Value::Object(_) | Value::Symbol(_)) {
+        if a.can_be_held_weakly(key) {
             Ok(())
         } else {
             Err(a.throw(ErrorKind::Type, &alloc::format!("Invalid value used {what}")))

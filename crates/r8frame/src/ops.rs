@@ -59,6 +59,9 @@ pub enum ErrorKind {
     Reference,
     Range,
     Syntax,
+    Eval,
+    Uri,
+    Aggregate,
 }
 
 /// ToPrimitive 的偏好。
@@ -117,7 +120,7 @@ impl UnaryOp {
 }
 
 impl ErrorKind {
-    pub const ALL: [ErrorKind; 5] = [ErrorKind::Error, ErrorKind::Type, ErrorKind::Reference, ErrorKind::Range, ErrorKind::Syntax];
+    pub const ALL: [ErrorKind; 8] = [ErrorKind::Error, ErrorKind::Type, ErrorKind::Reference, ErrorKind::Range, ErrorKind::Syntax, ErrorKind::Eval, ErrorKind::Uri, ErrorKind::Aggregate];
 
     pub fn name(self) -> &'static str {
         match self {
@@ -126,6 +129,9 @@ impl ErrorKind {
             ErrorKind::Reference => "ReferenceError",
             ErrorKind::Range => "RangeError",
             ErrorKind::Syntax => "SyntaxError",
+            ErrorKind::Eval => "EvalError",
+            ErrorKind::Uri => "URIError",
+            ErrorKind::Aggregate => "AggregateError",
         }
     }
 }
@@ -146,7 +152,7 @@ const MAX_INDEX: f64 = 4_294_967_294.0;
 
 /// 字符串 ⇒ 数（StringToNumber）：前后空白、`Infinity`、`0x` / `0o` / `0b` 前缀、十进制。
 pub(crate) fn parse_number(s: &str) -> f64 {
-    let t = s.trim_matches(|c: char| c.is_whitespace() || c == '\u{feff}');
+    let t = s.trim_matches(|c: char| (c.is_whitespace() && c != '\u{85}') || c == '\u{feff}');
     match t {
         "" => 0.0,
         "Infinity" | "+Infinity" => f64::INFINITY,
@@ -831,6 +837,15 @@ impl<'gc> Agent<'gc, '_> {
     /// `delete target.key`：不可配置的删不掉。
     pub fn delete(&mut self, target: Value<'gc>, key: &str) -> Result<bool, Error> {
         self.delete_key(target, Key::Str(key))
+    }
+
+    /// CanBeHeldWeakly：对象，或者没在 `Symbol.for` 登记过的 Symbol。
+    pub fn can_be_held_weakly(&self, v: Value<'gc>) -> bool {
+        match v {
+            Value::Object(_) => true,
+            Value::Symbol(s) => !self.realm.symbol_registry.borrow().iter().any(|(_, x)| Gc::ptr_eq(*x, s)),
+            _ => false,
+        }
     }
 
     /// 报错信息里的值：不调用户代码（ToString 可观察，报错不能用）。

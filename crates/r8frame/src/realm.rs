@@ -5,7 +5,7 @@ use alloc::collections::VecDeque;
 
 use gc_arena::{Collect, Gc, Mutation, RefLock};
 
-use crate::{ErrorKind, Job, JsObject, JsSymbol, Native, NativeFn, ObjectData, ObjectKind, Property, Scope, SymbolData, Value};
+use crate::{ErrorKind, Job, JsObject, JsString, JsSymbol, Native, NativeFn, ObjectData, ObjectKind, Property, Scope, SymbolData, Value};
 
 /// 规范里的内建 Symbol（`Symbol.iterator` 等）。
 #[derive(Clone, Copy, Collect)]
@@ -79,6 +79,8 @@ pub struct Realm<'gc> {
     /// %AsyncGeneratorPrototype%：`next` / `return` / `throw` 都返回 Promise
     pub async_generator_proto: JsObject<'gc>,
     pub promise_proto: JsObject<'gc>,
+    /// %Promise%（r8builtins 把它装成构造器）
+    pub promise_ctor: JsObject<'gc>,
     pub regexp_proto: JsObject<'gc>,
     /// 正则字面量用的构造器：r8builtins 换上真的实现（用户改写全局 `RegExp` 不影响字面量）
     pub regexp_ctor: JsObject<'gc>,
@@ -97,6 +99,11 @@ pub struct Realm<'gc> {
     pub iterator_helper_proto: JsObject<'gc>,
     /// %WrapForValidIteratorPrototype%
     pub wrap_iterator_proto: JsObject<'gc>,
+    pub date_proto: JsObject<'gc>,
+    pub weak_ref_proto: JsObject<'gc>,
+    pub finalization_registry_proto: JsObject<'gc>,
+    /// %RegExpStringIteratorPrototype%
+    pub regexp_string_iterator_proto: JsObject<'gc>,
     pub array_buffer_proto: JsObject<'gc>,
     pub shared_array_buffer_proto: JsObject<'gc>,
     pub data_view_proto: JsObject<'gc>,
@@ -109,6 +116,10 @@ pub struct Realm<'gc> {
     /// 脚本作用域：各脚本顶层的 `let` / `const` / `class`（跨脚本共享，不是全局对象的属性）
     pub script_scope: JsObject<'gc>,
     pub symbols: WellKnown<'gc>,
+    /// `Symbol.for` 的全局登记表
+    pub symbol_registry: Gc<'gc, RefLock<alloc::vec::Vec<(JsString<'gc>, JsSymbol<'gc>)>>>,
+    /// `Math.random` 的状态（xorshift，0 表示还没播种）
+    pub random_state: Gc<'gc, gc_arena::lock::Lock<u64>>,
     /// 微任务队列
     pub jobs: Gc<'gc, RefLock<VecDeque<Job<'gc>>>>,
     /// 标签模板的模板对象：按（函数编号, 调用点）缓存，同一处每次同一个
@@ -135,6 +146,10 @@ impl<'gc> Realm<'gc> {
         let typed_array_ctor = placeholder(function_proto);
         let typed_array_proto = derived(object_proto);
         Self {
+            date_proto: derived(object_proto),
+            weak_ref_proto: derived(object_proto),
+            finalization_registry_proto: derived(object_proto),
+            regexp_string_iterator_proto: derived(iterator_proto),
             array_buffer_proto: derived(object_proto),
             shared_array_buffer_proto: derived(object_proto),
             data_view_proto: derived(object_proto),
@@ -153,6 +168,7 @@ impl<'gc> Realm<'gc> {
             async_generator_function_proto: derived(function_proto),
             async_generator_proto: derived(async_iterator_proto),
             promise_proto: derived(object_proto),
+            promise_ctor: placeholder(function_proto),
             regexp_proto: derived(object_proto),
             regexp_ctor: ObjectData { kind: ObjectKind::Native(Native::function(Self::no_regexp)), ..ObjectData::default() }.alloc(mc),
             eval: ObjectData { kind: ObjectKind::Native(Native::function(Self::no_eval)), proto: Some(function_proto), ..ObjectData::default() }.alloc(mc),
@@ -182,6 +198,8 @@ impl<'gc> Realm<'gc> {
                 split: symbol("split"),
             },
             jobs: Gc::new(mc, RefLock::new(VecDeque::new())),
+            symbol_registry: Gc::new(mc, RefLock::new(alloc::vec::Vec::new())),
+            random_state: Gc::new(mc, gc_arena::lock::Lock::new(0)),
             templates: Gc::new(mc, RefLock::new(alloc::collections::BTreeMap::new())),
             global: derived(object_proto),
             object_proto,

@@ -341,6 +341,7 @@ impl Objects {
                     ObjectKind::Primitive(Value::Number(_)) => "Number",
                     ObjectKind::Primitive(Value::String(_)) => "String",
                     ObjectKind::RegExp(_) => "RegExp",
+                    ObjectKind::Date(_) => "Date",
                     _ => "Object",
                 };
                 let t = a.get_symbol(o.into(), a.realm.symbols.to_string_tag, o.into())?;

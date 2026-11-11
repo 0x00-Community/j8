@@ -33,11 +33,11 @@
 
 ## 阶段 5：Date / RegExp / 字符串数字
 
-- [ ] Date
-- [ ] RegExp 的 Symbol 协议、flags、lastIndex、`d`、compile、escape
-- [ ] String 补全
-- [ ] Number 格式化、Math 补全
-- [ ] Symbol.for、Error 补全、URI 函数、Promise 补全与子类化、WeakRef / FinalizationRegistry
+- [x] Date（本地时区按 UTC）
+- [x] RegExp 的 Symbol 协议、RegExpExec、flags 通用 getter、lastIndex、`d`、species、compile、escape
+- [x] String 补全（fromCodePoint / raw / normalize / annexB 等；字符串还按 UTF-8 存，孤立代理项会丢）
+- [x] Number 格式化（toFixed / toPrecision / toExponential 精确十进制）、Math 补全（含 sumPrecise / f16round）
+- [x] Symbol.for、EvalError / URIError / AggregateError、cause、URI 函数、Promise 按 NewPromiseCapability 重写（子类、allSettled / any / withResolvers / try）、WeakRef / FinalizationRegistry（强引用）
 
 ## 阶段 6：语言动态部分
 

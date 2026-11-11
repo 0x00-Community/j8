@@ -34,6 +34,8 @@ pub struct RegExpData<'gc> {
     pub source: JsString<'gc>,
     pub flags: JsString<'gc>,
     pub compiled: Gc<'gc, gc_arena::Static<Box<dyn core::any::Any>>>,
+    /// annexB 的旧特性（`compile`）能用：只有 %RegExp% 自己建的（子类实例不行）
+    pub legacy: bool,
 }
 
 /// 堆上的对象（内部可变，写经 gc-arena 的写屏障）。
@@ -230,14 +232,19 @@ pub enum Settled<'gc> {
 #[derive(Clone, Copy, Debug, Collect)]
 #[collect(no_drop)]
 pub enum Reaction<'gc> {
-    /// `then(onFulfilled, onRejected)`，结果交给 `derived`
-    Then { on_fulfilled: Value<'gc>, on_rejected: Value<'gc>, derived: Option<JsObject<'gc>> },
+    /// `then(onFulfilled, onRejected)`，结果交给能力记录的 resolve / reject（没有就丢掉）
+    Then { on_fulfilled: Value<'gc>, on_rejected: Value<'gc>, capability: Option<Capability<'gc>> },
     /// `await`：恢复这个协程
     Await { coroutine: JsObject<'gc> },
-    /// `Promise.all` 的第 `index` 个：兑现就填进 `values`，`remaining` 减到 0 兑现 `result`；拒绝就拒绝 `result`
-    All { values: JsObject<'gc>, index: u32, remaining: Gc<'gc, Lock<u32>>, result: JsObject<'gc> },
-    /// `finally(f)`：调 `f()`，`derived` 照原样落定（`f` 抛错就拒绝）
-    Finally { on_finally: Value<'gc>, derived: JsObject<'gc> },
+}
+
+/// PromiseCapability：结果 Promise 与它的 resolve / reject 函数。
+#[derive(Clone, Copy, Debug, Collect)]
+#[collect(no_drop)]
+pub struct Capability<'gc> {
+    pub promise: Value<'gc>,
+    pub resolve: Value<'gc>,
+    pub reject: Value<'gc>,
 }
 
 /// 微任务。
@@ -538,6 +545,14 @@ pub enum ObjectKind<'gc> {
     /// `Iterator.from` 包出来的迭代器
     WrappedIterator(crate::IterRecord<'gc>),
     ArrayBuffer(BufferData),
+    /// Date：时间值（毫秒，无效是 NaN）
+    Date(f64),
+    /// WeakRef（目前强引用目标）
+    WeakRef(Value<'gc>),
+    /// FinalizationRegistry：清理回调与登记的（目标, 携带值, 注销令牌）（目前强引用，不会触发清理）
+    FinalizationRegistry { cleanup: Value<'gc>, cells: Vec<(Value<'gc>, Value<'gc>, Value<'gc>)> },
+    /// `matchAll` 的迭代器：匹配器、字符串、带不带 `g`、按码点走、走完没有
+    RegExpStringIterator { matcher: JsObject<'gc>, string: JsString<'gc>, global: bool, unicode: bool, done: bool },
     /// TypedArray：`length` 是元素个数
     TypedArray(ElementKind, ViewData<'gc>),
     /// DataView：`length` 是字节数
@@ -550,12 +565,22 @@ impl ObjectKind<'_> {
     }
 }
 
+/// 属性表超过这么多项才建索引
+const PROP_INDEX_THRESHOLD: usize = 32;
+
+/// 属性键 ⇒ 在属性表里的下标。
+#[derive(Debug, Default, Collect)]
+#[collect(require_static)]
+pub struct PropIndex(Option<alloc::collections::BTreeMap<Box<str>, usize>>);
+
 /// 对象：种类、按插入顺序的属性表、原型。
 #[derive(Default, Collect)]
 #[collect(no_drop)]
 pub struct ObjectData<'gc> {
     pub kind: ObjectKind<'gc>,
     pub props: Vec<(JsString<'gc>, Property<'gc>)>,
+    /// 属性多了以后的键 ⇒ 下标索引（少的时候直接线性找）
+    pub prop_index: PropIndex,
     /// Symbol 键的属性
     pub symbols: Vec<(JsSymbol<'gc>, Property<'gc>)>,
     /// 私有成员（`#x`）：键是类求值时生成的私有名，和普通属性分开，反射看不见
@@ -580,6 +605,10 @@ impl fmt::Debug for ObjectData<'_> {
             ObjectKind::Function(_) | ObjectKind::Native(_) | ObjectKind::Bound(_) | ObjectKind::Resolver { .. } | ObjectKind::NativeClosure(_) => "Function",
             ObjectKind::Proxy(_) => "Proxy",
             ObjectKind::ArrayBuffer(_) => "ArrayBuffer",
+            ObjectKind::Date(_) => "Date",
+            ObjectKind::WeakRef(_) => "WeakRef",
+            ObjectKind::FinalizationRegistry { .. } => "FinalizationRegistry",
+            ObjectKind::RegExpStringIterator { .. } => "RegExp String Iterator",
             ObjectKind::TypedArray(..) => "TypedArray",
             ObjectKind::DataView(_) => "DataView",
             ObjectKind::Iterator(_) | ObjectKind::CollectionIterator { .. } | ObjectKind::IteratorHelper(_) | ObjectKind::WrappedIterator(_) => "Iterator",
@@ -624,7 +653,7 @@ impl<'gc> ObjectData<'gc> {
         let len = u32::try_from(items.len()).unwrap_or(u32::MAX);
         let moved: Vec<Value<'gc>> = items.drain(from..).collect();
         for (i, v) in (from..).zip(moved) {
-            self.props.push((Gc::new(mc, Box::from(alloc::format!("{i}").as_str())), Property::data(v)));
+            self.push_prop(mc, &alloc::format!("{i}"), Property::data(v));
         }
         self.sparse_length = self.sparse_length.max(len);
     }
@@ -654,10 +683,12 @@ impl<'gc> ObjectData<'gc> {
         if len <= items.len() {
             items.truncate(len);
         }
+        let dense = items.len();
         if self.sparse_length > 0 {
             self.props.retain(|(k, _)| crate::ops::index_of_str(k).is_none_or(|i| i < n));
+            self.reindex();
         }
-        self.sparse_length = if len > items.len() { n } else { 0 };
+        self.sparse_length = if len > dense { n } else { 0 };
     }
 
     /// 自有属性（只看存着的：数组稠密部分、普通属性、Symbol 键；数组 `length` 与字符串下标由 Agent 补）。
@@ -714,14 +745,41 @@ impl<'gc> ObjectData<'gc> {
                 {
                     self.spill(mc, i as usize);
                 }
-                self.props.retain(|(n, _)| ***n != *k);
+                if let Some(i) = self.position(k) {
+                    self.props.remove(i);
+                    self.reindex();
+                }
             }
         }
     }
 
+    /// 属性在表里的下标。
+    fn position(&self, key: &str) -> Option<usize> {
+        match &self.prop_index.0 {
+            Some(m) => m.get(key).copied(),
+            None => self.props.iter().position(|(k, _)| ***k == *key),
+        }
+    }
+
+    /// 追加一项（索引跟着加，表够大了就建索引）。
+    fn push_prop(&mut self, mc: &Mutation<'gc>, key: &str, prop: Property<'gc>) {
+        self.props.push((Gc::new(mc, Box::from(key)), prop));
+        let at = self.props.len() - 1;
+        match &mut self.prop_index.0 {
+            Some(m) => _ = m.insert(Box::from(key), at),
+            None if self.props.len() >= PROP_INDEX_THRESHOLD => self.reindex(),
+            None => {}
+        }
+    }
+
+    /// 删过属性后重建索引。
+    fn reindex(&mut self) {
+        self.prop_index.0 = (self.props.len() >= PROP_INDEX_THRESHOLD).then(|| self.props.iter().enumerate().map(|(i, (k, _))| (Box::from(&***k), i)).collect());
+    }
+
     /// 自有属性。
     pub fn get_own(&self, key: &str) -> Option<Property<'gc>> {
-        self.props.iter().find_map(|&(k, p)| (**k == *key).then_some(p))
+        self.position(key).map(|i| self.props[i].1)
     }
 
     /// 自有数据属性的值（访问器给 `None`）。
@@ -731,21 +789,22 @@ impl<'gc> ObjectData<'gc> {
 
     /// 赋值：已有数据属性就改值（不可写就不动），没有就建一个普通属性。访问器由调用方先处理。
     pub fn set(&mut self, mc: &Mutation<'gc>, key: &str, value: Value<'gc>) {
-        match self.props.iter_mut().find(|(k, _)| ***k == *key) {
-            Some((_, p)) => {
+        match self.position(key) {
+            Some(i) => {
+                let p = &mut self.props[i].1;
                 if p.writable {
                     p.slot = Slot::Data(value);
                 }
             }
-            None => self.props.push((Gc::new(mc, Box::from(key)), Property::data(value))),
+            None => self.push_prop(mc, key, Property::data(value)),
         }
     }
 
     /// 定义：整个替换（或新建）这个属性。
     pub fn define(&mut self, mc: &Mutation<'gc>, key: &str, prop: Property<'gc>) {
-        match self.props.iter_mut().find(|(k, _)| ***k == *key) {
-            Some((_, p)) => *p = prop,
-            None => self.props.push((Gc::new(mc, Box::from(key)), prop)),
+        match self.position(key) {
+            Some(i) => self.props[i].1 = prop,
+            None => self.push_prop(mc, key, prop),
         }
     }
 
@@ -773,9 +832,10 @@ impl<'gc> ObjectData<'gc> {
 
     /// 删自有属性：不可配置的删不掉，返回删没删成（不存在也算成）。
     pub fn remove(&mut self, key: &str) -> bool {
-        match self.props.iter().position(|(k, _)| ***k == *key) {
+        match self.position(key) {
             Some(i) if self.props[i].1.configurable => {
                 self.props.remove(i);
+                self.reindex();
                 true
             }
             Some(_) => false,

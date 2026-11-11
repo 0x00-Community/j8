@@ -9,6 +9,9 @@ impl Errors {
     /// `XxxError(message)`：第 `K` 种（按 [`ErrorKind::ALL`]）。
     fn construct<'gc, const K: usize>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let kind = ErrorKind::ALL[K];
+        // AggregateError(errors, message, options)：实参往后错一位
+        let all = args;
+        let args = if kind == ErrorKind::Aggregate { all.get(1..).unwrap_or(&[]) } else { all };
         let proto = a.proto_from_ctor(a.new_target, a.realm.error_proto(kind))?;
         let e = a.error(kind, "");
         e.borrow_mut(a.mc).proto = Some(proto);
@@ -24,6 +27,11 @@ impl Errors {
         {
             let cause = a.get_named(options, "cause")?;
             e.borrow_mut(a.mc).define(a.mc, "cause", r8frame::Property::hidden(cause));
+        }
+        if kind == ErrorKind::Aggregate {
+            let list = a.to_list(all.at(0))?;
+            let arr = a.array(list);
+            e.borrow_mut(a.mc).define(a.mc, "errors", r8frame::Property::hidden(arr.into()));
         }
         Ok(e.into())
     }
@@ -51,10 +59,25 @@ impl Errors {
 
 impl Installer<'_, '_> {
     pub(crate) fn errors(&mut self) {
-        let ctors: [r8frame::NativeFn; ErrorKind::ALL.len()] = [Errors::construct::<0>, Errors::construct::<1>, Errors::construct::<2>, Errors::construct::<3>, Errors::construct::<4>];
+        let ctors: [r8frame::NativeFn; ErrorKind::ALL.len()] = [
+            Errors::construct::<0>,
+            Errors::construct::<1>,
+            Errors::construct::<2>,
+            Errors::construct::<3>,
+            Errors::construct::<4>,
+            Errors::construct::<5>,
+            Errors::construct::<6>,
+            Errors::construct::<7>,
+        ];
+        let mut base = None;
         for (kind, f) in ErrorKind::ALL.into_iter().zip(ctors) {
             let proto = self.realm.error_proto(kind);
-            self.constructor(kind.name(), f, proto, 1);
+            let ctor = self.constructor(kind.name(), f, proto, if kind == ErrorKind::Aggregate { 2 } else { 1 });
+            // NativeError 构造器的原型是 Error 构造器
+            match base {
+                None => base = Some(ctor),
+                Some(b) => ctor.borrow_mut(self.mc).proto = Some(b),
+            }
             self.set(proto, "name", self.text(kind.name()));
             self.set(proto, "message", self.text(""));
         }

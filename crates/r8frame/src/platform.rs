@@ -14,6 +14,11 @@ pub trait Platform: Sync {
     /// 单调时钟：平台建起来以后过了多久
     fn now(&self) -> Duration;
 
+    /// 墙上时钟：Unix 纪元以来过了多久（`Date`）；没有就是纪元本身。
+    fn wall_clock(&self) -> Duration {
+        Duration::ZERO
+    }
+
     /// 输出一行（`console.log`）。
     fn print(&self, line: &str);
 

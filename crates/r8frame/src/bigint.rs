@@ -80,7 +80,7 @@ impl<'gc> Agent<'gc, '_> {
 
     /// StringToBigInt：前后空白、`0x` / `0o` / `0b` 前缀、带符号的十进制；空串是 0。
     pub fn parse_bigint(s: &str) -> Option<BigInt> {
-        let t = s.trim_matches(|c: char| c.is_whitespace() || c == '\u{feff}');
+        let t = s.trim_matches(|c: char| (c.is_whitespace() && c != '\u{85}') || c == '\u{feff}');
         if t.is_empty() {
             return Some(BigInt::zero());
         }

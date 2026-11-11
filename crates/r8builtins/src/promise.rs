@@ -1,22 +1,102 @@
 use alloc::vec::Vec;
 
-use gc_arena::{Gc, Lock};
-use r8frame::{Agent, Error, ErrorKind, JsObject, ObjectKind, Reaction, Value};
+use r8frame::{Agent, Capability, Error, ErrorKind, JsObject, Key, NativeClosure, ObjectData, ObjectKind, Property, Reaction, Slot, Value};
 
+use crate::buffer::Buffers;
 use crate::{Args, Installer};
 
-/// `Promise` 与原型方法。
+/// `Promise` 与原型方法（按规范经 NewPromiseCapability，子类也能用）。
 struct Promises;
 
+/// 组合器的种类。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Combinator {
+    All,
+    AllSettled,
+    Any,
+    Race,
+}
+
+/// 元素函数的状态槽（NativeClosure 的 slots 下标）。
+mod slot {
+    /// 共享的「已经调过」标记（一个元素的兑现 / 拒绝函数共用）：数组 `[bool]`
+    pub const CALLED: usize = 0;
+    pub const INDEX: usize = 1;
+    /// 结果列表（内部数组）
+    pub const VALUES: usize = 2;
+    /// 能力记录的 resolve（Any 是 reject）
+    pub const SETTLE: usize = 3;
+    /// 剩下几个：数组 `[n]`
+    pub const REMAINING: usize = 4;
+}
+
 impl Promises {
-    fn this<'gc>(a: &Agent<'gc, '_>, this: Value<'gc>) -> Result<JsObject<'gc>, Error> {
-        match this {
-            Value::Object(o) if matches!(o.borrow().kind, ObjectKind::Promise { .. }) => Ok(o),
-            _ => Err(a.throw(ErrorKind::Type, "Promise.prototype method called on a non-promise")),
+    fn is_intrinsic<'gc>(a: &Agent<'gc, '_>, c: Value<'gc>) -> bool {
+        matches!(c, Value::Object(o) if gc_arena::Gc::ptr_eq(o, a.realm.promise_ctor))
+    }
+
+    fn closure<'gc>(a: &Agent<'gc, '_>, f: r8frame::ClosureFn, slots: Vec<Value<'gc>>, length: u32) -> JsObject<'gc> {
+        let o = ObjectData { kind: ObjectKind::NativeClosure(NativeClosure { f, slots }), proto: Some(a.realm.function_proto), ..ObjectData::default() }.alloc(a.mc);
+        a.realm.name_function(a.mc, o, "", Some(length));
+        o
+    }
+
+    fn slots(f: JsObject<'_>) -> Vec<Value<'_>> {
+        match &f.borrow().kind {
+            ObjectKind::NativeClosure(c) => c.slots.clone(),
+            _ => Vec::new(),
         }
     }
 
-    /// `new Promise(executor)`：同步调 `executor(resolve, reject)`，它抛错就拒绝。
+    fn set_slot<'gc>(a: &Agent<'gc, '_>, f: JsObject<'gc>, i: usize, v: Value<'gc>) {
+        if let ObjectKind::NativeClosure(c) = &mut f.borrow_mut(a.mc).kind {
+            c.slots[i] = v;
+        }
+    }
+
+    /// GetCapabilitiesExecutor：只能各设一次。
+    fn capability_executor<'gc>(a: &mut Agent<'gc, '_>, f: JsObject<'gc>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+        let s = Self::slots(f);
+        if s[0] != Value::Undefined || s[1] != Value::Undefined {
+            return Err(a.throw(ErrorKind::Type, "Promise executor has already been invoked with non-undefined arguments"));
+        }
+        Self::set_slot(a, f, 0, args.at(0));
+        Self::set_slot(a, f, 1, args.at(1));
+        Ok(Value::Undefined)
+    }
+
+    /// NewPromiseCapability(C)。
+    fn new_capability<'gc>(a: &mut Agent<'gc, '_>, c: Value<'gc>) -> Result<Capability<'gc>, Error> {
+        if Self::is_intrinsic(a, c) {
+            let p = a.new_promise();
+            let (resolve, reject) = a.promise_resolvers(p);
+            return Ok(Capability { promise: p.into(), resolve: resolve.into(), reject: reject.into() });
+        }
+        if !a.is_constructor(c) {
+            return Err(a.throw(ErrorKind::Type, "Promise capability constructor is not a constructor"));
+        }
+        let executor = Self::closure(a, Self::capability_executor, alloc::vec![Value::Undefined, Value::Undefined], 2);
+        let promise = a.construct(c, &[executor.into()], c)?;
+        let s = Self::slots(executor);
+        if !a.is_callable(s[0]) || !a.is_callable(s[1]) {
+            return Err(a.throw(ErrorKind::Type, "Promise resolve or reject function is not callable"));
+        }
+        Ok(Capability { promise, resolve: s[0], reject: s[1] })
+    }
+
+    /// PromiseResolve(C, x)。
+    fn resolve_with<'gc>(a: &mut Agent<'gc, '_>, c: Value<'gc>, x: Value<'gc>) -> Result<Value<'gc>, Error> {
+        if Agent::is_promise(x) {
+            let xc = a.get_named(x, "constructor")?;
+            if xc.same_value(c) {
+                return Ok(x);
+            }
+        }
+        let cap = Self::new_capability(a, c)?;
+        a.call(cap.resolve, Value::Undefined, &[x])?;
+        Ok(cap.promise)
+    }
+
     fn construct<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let executor = args.at(0);
         if a.new_target == Value::Undefined {
@@ -26,155 +106,335 @@ impl Promises {
             let what = a.describe(executor);
             return Err(a.throw(ErrorKind::Type, &alloc::format!("Promise resolver {what} is not a function")));
         }
-        let p = a.new_promise();
         let proto = a.proto_from_ctor(a.new_target, a.realm.promise_proto)?;
+        let p = a.new_promise();
         p.borrow_mut(a.mc).proto = Some(proto);
         let (resolve, reject) = a.promise_resolvers(p);
         match a.call(executor, Value::Undefined, &[resolve.into(), reject.into()]) {
             Ok(_) => {}
             Err(Error::Exception(g)) => {
                 let reason = a.local(&g);
-                a.run_resolver(reject, reason)?;
+                a.call(reject.into(), Value::Undefined, &[reason])?;
             }
             Err(e) => return Err(e),
         }
         Ok(p.into())
     }
 
-    fn resolve<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        Ok(a.promise_resolve(args.at(0))?.into())
-    }
-
-    fn reject<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        let p = a.new_promise();
-        a.reject_promise(p, args.at(0));
-        Ok(p.into())
-    }
-
-    /// `Promise.all(iterable)`。
-    fn all<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        Self::combine(a, this, args.at(0), false)
-    }
-
-    /// `Promise.race(iterable)`：谁先落定用谁。
-    fn race<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        Self::combine(a, this, args.at(0), true)
-    }
-
-    /// `all` / `race` 共用：出错（迭代器、`C.resolve`、`then`）都变成拒绝结果 Promise，不往外抛。
-    fn combine<'gc>(a: &mut Agent<'gc, '_>, ctor: Value<'gc>, iterable: Value<'gc>, race: bool) -> Result<Value<'gc>, Error> {
-        if !matches!(ctor, Value::Object(_)) {
-            return Err(a.throw(ErrorKind::Type, "Promise.all / race called on a non-object"));
+    fn this_object<'gc>(a: &Agent<'gc, '_>, this: Value<'gc>) -> Result<Value<'gc>, Error> {
+        match this {
+            Value::Object(_) => Ok(this),
+            _ => Err(a.throw(ErrorKind::Type, "Promise method called on a non-object")),
         }
-        let result = a.new_promise();
-        match Self::feed(a, ctor, iterable, result, race) {
-            Ok(()) => {}
+    }
+
+    fn resolve<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+        let c = Self::this_object(a, this)?;
+        Self::resolve_with(a, c, args.at(0))
+    }
+
+    fn reject<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+        let cap = Self::new_capability(a, this)?;
+        a.call(cap.reject, Value::Undefined, &[args.at(0)])?;
+        Ok(cap.promise)
+    }
+
+    fn with_resolvers<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+        let cap = Self::new_capability(a, this)?;
+        let o = a.object();
+        a.create_data_property_or_throw(o, Key::Str("promise"), cap.promise)?;
+        a.create_data_property_or_throw(o, Key::Str("resolve"), cap.resolve)?;
+        a.create_data_property_or_throw(o, Key::Str("reject"), cap.reject)?;
+        Ok(o.into())
+    }
+
+    /// `Promise.try(f, ...args)`。
+    fn try_<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+        let c = Self::this_object(a, this)?;
+        let cap = Self::new_capability(a, c)?;
+        match a.call(args.at(0), Value::Undefined, args.get(1..).unwrap_or(&[])) {
+            Ok(v) => a.call(cap.resolve, Value::Undefined, &[v])?,
             Err(Error::Exception(g)) => {
                 let reason = a.local(&g);
-                a.reject_promise(result, reason);
+                a.call(cap.reject, Value::Undefined, &[reason])?
             }
             Err(e) => return Err(e),
-        }
-        Ok(result.into())
-    }
-
-    /// 逐个从迭代器取值（不先取完：迭代器可以是无穷的），`C.resolve(v)` 后挂到结果上。
-    /// 迭代器自己出错不关它；`resolve` / `then` 出错先关迭代器（关的时候再出错以原错误为准）。
-    fn feed<'gc>(a: &mut Agent<'gc, '_>, ctor: Value<'gc>, iterable: Value<'gc>, result: JsObject<'gc>, race: bool) -> Result<(), Error> {
-        let it = a.get_iterator(iterable)?;
-        let resolve = match a.get_named(ctor, "resolve") {
-            Ok(f) if a.is_callable(f) => f,
-            Ok(_) => {
-                let e = a.throw(ErrorKind::Type, "Promise resolve is not a function");
-                return Self::close(a, it.iterator, e);
-            }
-            Err(e) => return Self::close(a, it.iterator, e),
         };
-        let values = a.array(Vec::new());
-        // 比元素数多 1：取完才减掉这一个，免得中途全兑现就提前落定
-        let remaining = Gc::new(a.mc, Lock::new(1u32));
-        let (resolve_result, reject_result) = a.promise_resolvers(result);
-        let mut index = 0u32;
-        while let Some(v) = a.iterator_step(it)? {
-            let step = Self::item(a, ctor, resolve, v, race.then_some(resolve_result), reject_result, Reaction::All { values, index, remaining, result });
-            if let Err(e) = step {
-                return Self::close(a, it.iterator, e);
-            }
-            index += 1;
-        }
-        if !race {
-            let left = remaining.get() - 1;
-            remaining.set(a.mc, left);
-            if left == 0 {
-                a.resolve_promise(result, values.into())?;
-            }
-        }
-        Ok(())
+        Ok(cap.promise)
     }
 
-    /// 一项：`next = C.resolve(v)`，再 `next.then(…)`。`race` 给 `Some(结果的 resolve)`；`all` 用 `all` 反应填 `values`。
-    fn item<'gc>(a: &mut Agent<'gc, '_>, ctor: Value<'gc>, resolve: Value<'gc>, v: Value<'gc>, race: Option<JsObject<'gc>>, reject: JsObject<'gc>, all: Reaction<'gc>) -> Result<(), Error> {
-        let next = a.call(resolve, ctor, &[v])?;
-        if let Reaction::All { values, index, remaining, .. } = all {
-            values.borrow_mut(a.mc).store(a.mc, r8frame::Key::Str(&alloc::format!("{index}")), r8frame::Property::data(Value::Undefined));
-            remaining.set(a.mc, remaining.get() + 1);
+    fn this_promise<'gc>(a: &Agent<'gc, '_>, this: Value<'gc>) -> Result<JsObject<'gc>, Error> {
+        match this {
+            Value::Object(o) if Agent::is_promise(this) => Ok(o),
+            _ => Err(a.throw(ErrorKind::Type, "Promise.prototype method called on a non-promise")),
         }
-        let then = a.get_named(next, "then")?;
-        let intrinsic = matches!(then, Value::Object(f) if matches!(f.borrow().kind, ObjectKind::Native(n) if core::ptr::fn_addr_eq(n.f, Self::then as r8frame::NativeFn)));
-        match (next, intrinsic, race) {
-            // 原生 Promise 配原生 `then`：直接挂内部反应
-            (Value::Object(p), true, Some(_)) if Self::this(a, next).is_ok() => {
-                let Reaction::All { result, .. } = all else { unreachable!("feed passes an all reaction") };
-                a.perform_then(p, Reaction::Then { on_fulfilled: Value::Undefined, on_rejected: Value::Undefined, derived: Some(result) });
-            }
-            (Value::Object(p), true, None) if Self::this(a, next).is_ok() => a.perform_then(p, all),
-            // 别的 `then`：照规范调它；`all` 的元素经一个中间 Promise 接回 `all` 反应
-            (_, _, Some(resolve_result)) => {
-                a.call(then, next, &[resolve_result.into(), reject.into()])?;
-            }
-            (_, _, None) => {
-                let element = a.new_promise();
-                let (on_fulfilled, _) = a.promise_resolvers(element);
-                a.perform_then(element, all);
-                a.call(then, next, &[on_fulfilled.into(), reject.into()])?;
-            }
-        }
-        Ok(())
-    }
-
-    /// IteratorClose 后把原错误交回去（关闭本身出的错丢掉）。
-    fn close<'gc>(a: &mut Agent<'gc, '_>, iterator: Value<'gc>, e: Error) -> Result<(), Error> {
-        let _ = a.iterator_close(iterator);
-        Err(e)
     }
 
     fn then<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        let p = Self::this(a, this)?;
-        let derived = a.new_promise();
-        a.perform_then(p, Reaction::Then { on_fulfilled: args.at(0), on_rejected: args.at(1), derived: Some(derived) });
-        Ok(derived.into())
+        let p = Self::this_promise(a, this)?;
+        let c = Buffers::species_constructor(a, this, a.realm.promise_ctor.into())?;
+        let cap = Self::new_capability(a, c)?;
+        a.perform_then(p, Reaction::Then { on_fulfilled: args.at(0), on_rejected: args.at(1), capability: Some(cap) });
+        Ok(cap.promise)
     }
 
     fn catch<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        Self::then(a, this, &[Value::Undefined, args.at(0)])
+        let then = a.get_named(this, "then")?;
+        a.call(then, this, &[Value::Undefined, args.at(0)])
     }
 
+    /// `finally(f)`：`then(thenFinally, catchFinally)`，两者先调 `f()` 再把原来的值 / 原因接上。
     fn finally<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        let p = Self::this(a, this)?;
-        let derived = a.new_promise();
-        a.perform_then(p, Reaction::Finally { on_finally: args.at(0), derived });
-        Ok(derived.into())
+        let p = Self::this_object(a, this)?;
+        let c = Buffers::species_constructor(a, p, a.realm.promise_ctor.into())?;
+        let f = args.at(0);
+        let (then_f, catch_f): (Value<'gc>, Value<'gc>) = if a.is_callable(f) {
+            (Self::closure(a, Self::then_finally, alloc::vec![f, c], 1).into(), Self::closure(a, Self::catch_finally, alloc::vec![f, c], 1).into())
+        } else {
+            (f, f)
+        };
+        let then = a.get_named(p, "then")?;
+        a.call(then, p, &[then_f, catch_f])
+    }
+
+    fn finally_step<'gc>(a: &mut Agent<'gc, '_>, f: JsObject<'gc>, v: Value<'gc>, rethrow: bool) -> Result<Value<'gc>, Error> {
+        let s = Self::slots(f);
+        let result = a.call(s[0], Value::Undefined, &[])?;
+        let p = Self::resolve_with(a, s[1], result)?;
+        let thunk = Self::closure(a, if rethrow { Self::thrower } else { Self::value_thunk }, alloc::vec![v], 0);
+        let then = a.get_named(p, "then")?;
+        a.call(then, p, &[thunk.into()])
+    }
+
+    fn then_finally<'gc>(a: &mut Agent<'gc, '_>, f: JsObject<'gc>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+        Self::finally_step(a, f, args.at(0), false)
+    }
+
+    fn catch_finally<'gc>(a: &mut Agent<'gc, '_>, f: JsObject<'gc>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+        Self::finally_step(a, f, args.at(0), true)
+    }
+
+    fn value_thunk<'gc>(_: &mut Agent<'gc, '_>, f: JsObject<'gc>, _: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+        Ok(Self::slots(f)[0])
+    }
+
+    fn thrower<'gc>(a: &mut Agent<'gc, '_>, f: JsObject<'gc>, _: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+        Err(a.throw_value(Self::slots(f)[0]))
+    }
+
+    fn all<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+        Self::combine(a, this, args.at(0), Combinator::All)
+    }
+
+    fn all_settled<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+        Self::combine(a, this, args.at(0), Combinator::AllSettled)
+    }
+
+    fn any<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+        Self::combine(a, this, args.at(0), Combinator::Any)
+    }
+
+    fn race<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+        Self::combine(a, this, args.at(0), Combinator::Race)
+    }
+
+    /// IfAbruptRejectPromise：异常交给能力记录的 reject，给出结果 Promise。
+    fn reject_on<'gc>(a: &mut Agent<'gc, '_>, cap: &Capability<'gc>, e: Error) -> Result<Value<'gc>, Error> {
+        match e {
+            Error::Exception(g) => {
+                let reason = a.local(&g);
+                a.call(cap.reject, Value::Undefined, &[reason])?;
+                Ok(cap.promise)
+            }
+            e => Err(e),
+        }
+    }
+
+    fn combine<'gc>(a: &mut Agent<'gc, '_>, c: Value<'gc>, iterable: Value<'gc>, how: Combinator) -> Result<Value<'gc>, Error> {
+        let cap = Self::new_capability(a, c)?;
+        let resolve = match a.get_named(c, "resolve") {
+            Ok(f) if a.is_callable(f) => f,
+            Ok(_) => {
+                let e = a.throw(ErrorKind::Type, "Promise resolve is not a function");
+                return Self::reject_on(a, &cap, e);
+            }
+            Err(e) => return Self::reject_on(a, &cap, e),
+        };
+        let it = match a.get_iterator(iterable) {
+            Ok(it) => it,
+            Err(e) => return Self::reject_on(a, &cap, e),
+        };
+        let mut done = false;
+        match Self::perform(a, c, resolve, it, &cap, how, &mut done) {
+            Ok(v) => Ok(v),
+            Err(e) => {
+                let e = if done {
+                    e
+                } else {
+                    let _ = a.iterator_close(it.iterator);
+                    e
+                };
+                Self::reject_on(a, &cap, e)
+            }
+        }
+    }
+
+    fn box_value<'gc>(a: &Agent<'gc, '_>, v: Value<'gc>) -> Value<'gc> {
+        a.array(alloc::vec![v]).into()
+    }
+
+    fn remaining_add<'gc>(a: &mut Agent<'gc, '_>, remaining: Value<'gc>, d: f64) -> Result<f64, Error> {
+        let n = a.get_index(remaining, 0.0)?;
+        let Value::Number(n) = n else { return Ok(0.0) };
+        a.set_index(remaining, 0.0, (n + d).into())?;
+        Ok(n + d)
+    }
+
+    fn perform<'gc>(a: &mut Agent<'gc, '_>, c: Value<'gc>, resolve: Value<'gc>, it: r8frame::IterRecord<'gc>, cap: &Capability<'gc>, how: Combinator, done: &mut bool) -> Result<Value<'gc>, Error> {
+        let values = a.array(Vec::new());
+        let remaining = Self::box_value(a, 1.0.into());
+        let mut index = 0.0;
+        loop {
+            let next = match a.iterator_step(it) {
+                Ok(n) => n,
+                Err(e) => {
+                    *done = true;
+                    return Err(e);
+                }
+            };
+            let Some(v) = next else {
+                *done = true;
+                if how != Combinator::Race && Self::remaining_add(a, remaining, -1.0)? == 0.0 {
+                    Self::finish(a, how, values, cap)?;
+                }
+                return Ok(cap.promise);
+            };
+            if how != Combinator::Race {
+                a.create_index(values, index, Value::Undefined)?;
+            }
+            let next_promise = a.call(resolve, c, &[v])?;
+            let element = |a: &mut Agent<'gc, '_>, f: r8frame::ClosureFn, settle: Value<'gc>, called: Value<'gc>| -> Value<'gc> {
+                Self::closure(a, f, alloc::vec![called, index.into(), values.into(), settle, remaining], 1).into()
+            };
+            let (on_fulfilled, on_rejected) = match how {
+                Combinator::Race => (cap.resolve, cap.reject),
+                Combinator::All => {
+                    let called = Self::box_value(a, false.into());
+                    (element(a, Self::all_element, cap.resolve, called), cap.reject)
+                }
+                Combinator::AllSettled => {
+                    let called = Self::box_value(a, false.into());
+                    (element(a, Self::settled_fulfilled, cap.resolve, called), element(a, Self::settled_rejected, cap.resolve, called))
+                }
+                Combinator::Any => {
+                    let called = Self::box_value(a, false.into());
+                    (cap.resolve, element(a, Self::any_element, cap.reject, called))
+                }
+            };
+            if how != Combinator::Race {
+                Self::remaining_add(a, remaining, 1.0)?;
+            }
+            let then = a.get_named(next_promise, "then")?;
+            a.call(then, next_promise, &[on_fulfilled, on_rejected])?;
+            index += 1.0;
+        }
+    }
+
+    /// 全部到齐：All / AllSettled 兑现成数组，Any 拒绝成 AggregateError。
+    fn finish<'gc>(a: &mut Agent<'gc, '_>, how: Combinator, values: JsObject<'gc>, cap: &Capability<'gc>) -> Result<(), Error> {
+        let list = a.list_from_array_like(values.into())?;
+        let arr = a.array(list);
+        if how == Combinator::Any {
+            let e = a.error(ErrorKind::Aggregate, "All promises were rejected");
+            e.borrow_mut(a.mc).define(a.mc, "errors", Property::hidden(arr.into()));
+            a.call(cap.reject, Value::Undefined, &[e.into()])?;
+        } else {
+            a.call(cap.resolve, Value::Undefined, &[arr.into()])?;
+        }
+        Ok(())
+    }
+
+    /// 元素函数的共同部分：只第一次有效，填进第 `index` 个，减到 0 就落定。
+    fn element_step<'gc>(a: &mut Agent<'gc, '_>, f: JsObject<'gc>, v: Value<'gc>, how: Combinator) -> Result<Value<'gc>, Error> {
+        let s = Self::slots(f);
+        if a.get_index(s[slot::CALLED], 0.0)? == Value::Bool(true) {
+            return Ok(Value::Undefined);
+        }
+        a.set_index(s[slot::CALLED], 0.0, true.into())?;
+        let (Value::Number(index), Value::Object(values)) = (s[slot::INDEX], s[slot::VALUES]) else { return Ok(Value::Undefined) };
+        a.create_index(values, index, v)?;
+        if Self::remaining_add(a, s[slot::REMAINING], -1.0)? == 0.0 {
+            let Value::Object(values) = s[slot::VALUES] else { return Ok(Value::Undefined) };
+            let list = a.list_from_array_like(values.into())?;
+            let arr = a.array(list);
+            if how == Combinator::Any {
+                let e = a.error(ErrorKind::Aggregate, "All promises were rejected");
+                e.borrow_mut(a.mc).define(a.mc, "errors", Property::hidden(arr.into()));
+                return a.call(s[slot::SETTLE], Value::Undefined, &[e.into()]);
+            }
+            return a.call(s[slot::SETTLE], Value::Undefined, &[arr.into()]);
+        }
+        Ok(Value::Undefined)
+    }
+
+    fn all_element<'gc>(a: &mut Agent<'gc, '_>, f: JsObject<'gc>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+        Self::element_step(a, f, args.at(0), Combinator::All)
+    }
+
+    fn any_element<'gc>(a: &mut Agent<'gc, '_>, f: JsObject<'gc>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+        Self::element_step(a, f, args.at(0), Combinator::Any)
+    }
+
+    fn settled<'gc>(a: &mut Agent<'gc, '_>, f: JsObject<'gc>, v: Value<'gc>, fulfilled: bool) -> Result<Value<'gc>, Error> {
+        let s = Self::slots(f);
+        if a.get_index(s[slot::CALLED], 0.0)? == Value::Bool(true) {
+            return Ok(Value::Undefined);
+        }
+        let o = a.object();
+        let status = a.string(if fulfilled { "fulfilled" } else { "rejected" });
+        a.create_data_property_or_throw(o, Key::Str("status"), status.into())?;
+        a.create_data_property_or_throw(o, Key::Str(if fulfilled { "value" } else { "reason" }), v)?;
+        Self::element_step(a, f, o.into(), Combinator::AllSettled)
+    }
+
+    fn settled_fulfilled<'gc>(a: &mut Agent<'gc, '_>, f: JsObject<'gc>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+        Self::settled(a, f, args.at(0), true)
+    }
+
+    fn settled_rejected<'gc>(a: &mut Agent<'gc, '_>, f: JsObject<'gc>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+        Self::settled(a, f, args.at(0), false)
+    }
+
+    fn species<'gc>(_: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+        Ok(this)
     }
 }
 
 impl Installer<'_, '_> {
     pub(crate) fn promise(&mut self) {
-        let proto = self.realm.promise_proto;
-        let ctor = self.constructor("Promise", Promises::construct, proto, 1);
-        self.method(ctor, "resolve", Promises::resolve, 1);
-        self.method(ctor, "reject", Promises::reject, 1);
-        self.method(ctor, "all", Promises::all, 1);
-        self.method(ctor, "race", Promises::race, 1);
+        let r = self.realm;
+        let proto = r.promise_proto;
+        let ctor = r.promise_ctor;
+        ctor.borrow_mut(self.mc).kind = ObjectKind::Native(r8frame::Native { f: Promises::construct, constructor: true });
+        r.name_function(self.mc, ctor, "Promise", Some(1));
+        ctor.borrow_mut(self.mc).define(self.mc, "prototype", Property { slot: Slot::Data(proto.into()), enumerable: false, writable: false, configurable: false });
+        self.set(proto, "constructor", ctor.into());
+        self.set(r.global, "Promise", ctor.into());
+        let statics: [(&str, r8frame::NativeFn, u32); 8] = [
+            ("all", Promises::all, 1),
+            ("allSettled", Promises::all_settled, 1),
+            ("any", Promises::any, 1),
+            ("race", Promises::race, 1),
+            ("reject", Promises::reject, 1),
+            ("resolve", Promises::resolve, 1),
+            ("try", Promises::try_, 1),
+            ("withResolvers", Promises::with_resolvers, 0),
+        ];
+        for (name, f, n) in statics {
+            self.method(ctor, name, f, n);
+        }
+        let species = r.named_native(self.mc, Promises::species, "get [Symbol.species]", 0);
+        ctor.borrow_mut(self.mc).define_symbol(r.symbols.species, Property { slot: Slot::Accessor { get: Some(species), set: None }, enumerable: false, writable: false, configurable: true });
         self.method(proto, "then", Promises::then, 2);
         self.method(proto, "catch", Promises::catch, 1);
         self.method(proto, "finally", Promises::finally, 1);
