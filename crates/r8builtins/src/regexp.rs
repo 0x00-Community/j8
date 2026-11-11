@@ -43,6 +43,29 @@ impl Regexps {
         regress::Regex::with_flags(source, engine.as_str()).map_err(|e| a.throw(ErrorKind::Syntax, &alloc::format!("Invalid regular expression: /{source}/{flags}: {e}")))
     }
 
+    /// 编好的正则：先查 realm 上的缓存（同样的源码与标志共享一份），没有再编并记下。
+    fn compiled<'gc>(a: &Agent<'gc, '_>, source: &str, flags: &str) -> Result<Gc<'gc, Static<Box<dyn core::any::Any>>>, Error> {
+        /// 缓存最多记这么多份
+        const CACHE_SIZE: usize = 64;
+        let cache = a.realm.regexp_cache;
+        let hit = cache.borrow().iter().position(|c| *c.source == *source && *c.flags == *flags);
+        if let Some(i) = hit {
+            let mut c = cache.borrow_mut(a.mc);
+            let entry = c.remove(i).expect("just found");
+            let compiled = entry.compiled;
+            c.push_back(entry);
+            return Ok(compiled);
+        }
+        let regex = Self::compile(a, source, flags)?;
+        let compiled = Gc::new(a.mc, Static(Box::new(regex) as Box<dyn core::any::Any>));
+        let mut c = cache.borrow_mut(a.mc);
+        if c.len() >= CACHE_SIZE {
+            c.pop_front();
+        }
+        c.push_back(r8frame::RegExpCompiled { source: source.into(), flags: flags.into(), compiled });
+        Ok(compiled)
+    }
+
     /// IsRegExp：看 `Symbol.match`，没有就看是不是正则对象。
     fn is_regexp<'gc>(a: &mut Agent<'gc, '_>, v: Value<'gc>) -> Result<bool, Error> {
         if !matches!(v, Value::Object(_)) {
@@ -63,8 +86,7 @@ impl Regexps {
     fn initialize<'gc>(a: &mut Agent<'gc, '_>, o: JsObject<'gc>, pattern: Value<'gc>, flags: Value<'gc>) -> Result<(), Error> {
         let source = if pattern == Value::Undefined { a.string("") } else { a.to_string(pattern)? };
         let flags = if flags == Value::Undefined { a.string("") } else { a.to_string(flags)? };
-        let regex = Self::compile(a, &source, &flags)?;
-        let compiled = Gc::new(a.mc, Static(Box::new(regex) as Box<dyn core::any::Any>));
+        let compiled = Self::compiled(a, &source, &flags)?;
         let legacy = matches!(&o.borrow().kind, ObjectKind::RegExp(d) if d.legacy);
         o.borrow_mut(a.mc).kind = ObjectKind::RegExp(RegExpData { source, flags, compiled, legacy });
         a.set_named(o.into(), "lastIndex", 0.0.into())
@@ -76,8 +98,7 @@ impl Regexps {
         // 先放一个空正则占位，记下能不能用 annexB 的 `compile`（子类实例不能）
         let legacy = new_target == Value::Undefined || Self::is_regexp_ctor(new_target);
         let empty = a.string("");
-        let regex = Self::compile(a, "", "")?;
-        let compiled = Gc::new(a.mc, Static(Box::new(regex) as Box<dyn core::any::Any>));
+        let compiled = Self::compiled(a, "", "")?;
         let kind = ObjectKind::RegExp(RegExpData { source: empty, flags: empty, compiled, legacy });
         let o = ObjectData { kind, proto: Some(proto), ..ObjectData::default() }.alloc(a.mc);
         o.borrow_mut(a.mc).define("lastIndex", Property { slot: Slot::Data(Value::Undefined), enumerable: false, writable: true, configurable: false });
@@ -173,6 +194,15 @@ impl Regexps {
         Some(Found { range: m.range(), groups: m.captures, named })
     }
 
+    /// 全 ASCII 的串直接按 UTF-8 匹配（字节下标就是码元下标），省掉整串转 UTF-16。
+    fn find_ascii(o: JsObject<'_>, s: &str, start: usize) -> Option<Found> {
+        let (_, _, compiled) = Self::data(o);
+        let re = compiled.0.downcast_ref::<regress::Regex>().expect("a regress regex");
+        let m = re.find_from(s, start).next()?;
+        let named = m.named_groups().map(|(n, r)| (String::from(n), r)).collect();
+        Some(Found { range: m.range(), groups: m.captures, named })
+    }
+
     fn text<'gc>(a: &Agent<'gc, '_>, units: &[u16], r: Option<core::ops::Range<usize>>) -> Value<'gc> {
         r.map_or(Value::Undefined, |r| a.string(&String::from_utf16_lossy(&units[r])).into())
     }
@@ -191,9 +221,12 @@ impl Regexps {
         let last = a.to_length(li)?;
         let flags = Self::data(o).1;
         let (global, sticky, indices) = (flags.contains('g'), flags.contains('y'), flags.contains('d'));
-        let units: Vec<u16> = s.encode_utf16().collect();
+        // 全 ASCII：不转 UTF-16，按 UTF-8 匹配、按字节切
+        let ascii = s.is_ascii();
+        let units: Vec<u16> = if ascii { Vec::new() } else { s.encode_utf16().collect() };
+        let text = |a: &Agent<'gc, '_>, r: Option<core::ops::Range<usize>>| if ascii { r.map_or(Value::Undefined, |r| a.string(&s[r]).into()) } else { Self::text(a, &units, r) };
         #[expect(clippy::cast_precision_loss, reason = "字符串长度远小于 2^53")]
-        let len = units.len() as f64;
+        let len = (if ascii { s.len() } else { units.len() }) as f64;
         let last = if global || sticky { last } else { 0.0 };
         if last > len {
             if global || sticky {
@@ -203,7 +236,8 @@ impl Regexps {
         }
         #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "已检查不超过长度")]
         let start = last as usize;
-        let Some(m) = Self::find(o, &units, start).filter(|m| !sticky || m.range.start == start) else {
+        let found = if ascii { Self::find_ascii(o, &s, start) } else { Self::find(o, &units, start) };
+        let Some(m) = found.filter(|m| !sticky || m.range.start == start) else {
             if global || sticky {
                 a.set_named(o.into(), "lastIndex", 0.0.into())?;
             }
@@ -215,17 +249,17 @@ impl Regexps {
         let arr = a.array(Vec::new());
         a.create_data_property_or_throw(arr, Key::Str("index"), Self::index(m.range.start))?;
         a.create_data_property_or_throw(arr, Key::Str("input"), s.into())?;
-        let whole = Self::text(a, &units, Some(m.range.clone()));
+        let whole = text(a, Some(m.range.clone()));
         a.create_index(arr, 0.0, whole)?;
         let groups = if m.named.is_empty() { None } else { Some(ObjectData::default().alloc(a.mc)) };
         a.create_data_property_or_throw(arr, Key::Str("groups"), groups.map_or(Value::Undefined, Value::Object))?;
         for (i, g) in (1..).zip(&m.groups) {
-            let v = Self::text(a, &units, g.clone());
+            let v = text(a, g.clone());
             a.create_index(arr, f64::from(i), v)?;
         }
         if let Some(g) = groups {
             for (n, r) in &m.named {
-                let v = Self::text(a, &units, r.clone());
+                let v = text(a, r.clone());
                 a.create_data_property_or_throw(g, Key::Str(n), v)?;
             }
         }

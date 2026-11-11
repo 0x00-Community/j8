@@ -126,6 +126,17 @@ pub struct Realm<'gc> {
     pub jobs: Gc<'gc, RefLock<VecDeque<Job<'gc>>>>,
     /// 标签模板的模板对象：按（函数编号, 调用点）缓存，同一处每次同一个
     pub templates: Gc<'gc, RefLock<alloc::collections::BTreeMap<(u32, u32), JsObject<'gc>>>>,
+    /// 编好的正则按（源码, 标志）共享（编好的不可变）；最近用的放后面，满了丢最前面的
+    pub regexp_cache: Gc<'gc, RefLock<VecDeque<RegExpCompiled<'gc>>>>,
+}
+
+/// 一份编好的正则：源码、标志、执行层的编译结果。
+#[derive(Clone, Collect)]
+#[collect(no_drop)]
+pub struct RegExpCompiled<'gc> {
+    pub source: crate::SmallStr,
+    pub flags: crate::SmallStr,
+    pub compiled: Gc<'gc, gc_arena::Static<alloc::boxed::Box<dyn core::any::Any>>>,
 }
 
 impl fmt::Debug for Realm<'_> {
@@ -200,6 +211,7 @@ impl<'gc> Realm<'gc> {
                 split: symbol("split"),
             },
             jobs: Gc::new(mc, RefLock::new(VecDeque::new())),
+            regexp_cache: Gc::new(mc, RefLock::new(VecDeque::new())),
             symbol_registry: Gc::new(mc, RefLock::new(alloc::vec::Vec::new())),
             modules: Gc::new(mc, RefLock::new(alloc::vec::Vec::new())),
             random_state: Gc::new(mc, gc_arena::lock::Lock::new(0)),
