@@ -80,7 +80,7 @@ impl Regexps {
         let compiled = Gc::new(a.mc, Static(Box::new(regex) as Box<dyn core::any::Any>));
         let kind = ObjectKind::RegExp(RegExpData { source: empty, flags: empty, compiled, legacy });
         let o = ObjectData { kind, proto: Some(proto), ..ObjectData::default() }.alloc(a.mc);
-        o.borrow_mut(a.mc).define(a.mc, "lastIndex", Property { slot: Slot::Data(Value::Undefined), enumerable: false, writable: true, configurable: false });
+        o.borrow_mut(a.mc).define("lastIndex", Property { slot: Slot::Data(Value::Undefined), enumerable: false, writable: true, configurable: false });
         Ok(o)
     }
 

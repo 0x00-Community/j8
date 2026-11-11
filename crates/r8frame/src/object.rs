@@ -121,12 +121,31 @@ pub struct Native {
     pub f: NativeFn,
     /// 能 `new`（内建构造器）；能的时候 [`Agent::new_target`] 告诉它是不是构造调用
     pub constructor: bool,
+    /// 执行层可以不进宿主、直接展开成对目标的调用（`call` / `apply`）
+    pub forward: Forward,
+}
+
+/// 只是换个方式调别的函数的内建函数。执行层把它展开成普通调用，被调的 JS 留在执行层自己的帧栈上
+/// （不在宿主函数里重入，照样分片、回收）。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Forward {
+    #[default]
+    No,
+    /// `Function.prototype.call`：`this` 是目标，第一个实参是新的 `this`，其余照传
+    Call,
+    /// `Function.prototype.apply`：`this` 是目标，第一个实参是新的 `this`，第二个是类数组实参表
+    Apply,
 }
 
 impl Native {
     /// 普通宿主函数（不能 `new`）。
     pub fn function(f: NativeFn) -> Self {
-        Self { f, constructor: false }
+        Self { f, constructor: false, forward: Forward::No }
+    }
+
+    /// 内建构造器（能 `new`）。
+    pub fn constructor(f: NativeFn) -> Self {
+        Self { f, constructor: true, forward: Forward::No }
     }
 }
 
@@ -586,14 +605,39 @@ const PROP_INDEX_THRESHOLD: usize = 32;
 /// 属性键 ⇒ 在属性表里的下标。
 #[derive(Debug, Default, Collect)]
 #[collect(require_static)]
-pub struct PropIndex(Option<alloc::collections::BTreeMap<Box<str>, usize>>);
+pub struct PropIndex(Option<alloc::collections::BTreeMap<PropKey, usize>>);
+
+/// 字符串属性的键：短的（不超过 23 字节，绝大多数属性名）内联存、建属性不分配，长的共享一份堆上副本。
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Collect)]
+#[collect(require_static)]
+pub struct PropKey(smol_str::SmolStr);
+
+impl core::ops::Deref for PropKey {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl core::borrow::Borrow<str> for PropKey {
+    fn borrow(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<&str> for PropKey {
+    fn from(s: &str) -> Self {
+        Self(smol_str::SmolStr::new(s))
+    }
+}
 
 /// 对象：种类、按插入顺序的属性表、原型。
 #[derive(Default, Collect)]
 #[collect(no_drop)]
 pub struct ObjectData<'gc> {
     pub kind: ObjectKind<'gc>,
-    pub props: Vec<(JsString<'gc>, Property<'gc>)>,
+    pub props: Vec<(PropKey, Property<'gc>)>,
     /// 属性多了以后的键 ⇒ 下标索引（少的时候直接线性找）
     pub prop_index: PropIndex,
     /// Symbol 键的属性
@@ -662,7 +706,7 @@ impl<'gc> ObjectData<'gc> {
     }
 
     /// 稠密部分从第 `from` 个起搬成按下标存的普通属性（要给这些元素不同的特性、或删掉其中一个时）。
-    pub fn spill(&mut self, mc: &Mutation<'gc>, from: usize) {
+    pub fn spill(&mut self, from: usize) {
         let ObjectKind::Array(items) = &mut self.kind else { return };
         if from >= items.len() {
             return;
@@ -670,7 +714,7 @@ impl<'gc> ObjectData<'gc> {
         let len = u32::try_from(items.len()).unwrap_or(u32::MAX);
         let moved: Vec<Value<'gc>> = items.drain(from..).collect();
         for (i, v) in (from..).zip(moved) {
-            self.push_prop(mc, &alloc::format!("{i}"), Property::data(v));
+            self.push_prop(&alloc::format!("{i}"), Property::data(v));
         }
         self.sparse_length = self.sparse_length.max(len);
     }
@@ -724,7 +768,7 @@ impl<'gc> ObjectData<'gc> {
     }
 
     /// 存一个自有属性（已经验过能存）：数组的下标能进稠密部分就进，不能就按普通属性存并撑长度。
-    pub fn store(&mut self, mc: &Mutation<'gc>, key: Key<'_, 'gc>, prop: Property<'gc>) {
+    pub fn store(&mut self, key: Key<'_, 'gc>, prop: Property<'gc>) {
         let k = match key {
             Key::Sym(s) => return self.define_symbol(s, prop),
             Key::Str(k) => k,
@@ -742,25 +786,25 @@ impl<'gc> ObjectData<'gc> {
                     items.push(v);
                     return;
                 }
-                _ if at < items.len() => self.spill(mc, at),
+                _ if at < items.len() => self.spill(at),
                 _ => {}
             }
         }
-        self.define(mc, k, prop);
+        self.define(k, prop);
         if let (ObjectKind::Array(_), Some(i)) = (&self.kind, crate::ops::index_of_str(k)) {
             self.sparse_length = self.sparse_length.max(i.saturating_add(1));
         }
     }
 
     /// 删一个自有属性（不查可配置）。
-    pub fn unstore(&mut self, mc: &Mutation<'gc>, key: Key<'_, 'gc>) {
+    pub fn unstore(&mut self, key: Key<'_, 'gc>) {
         match key {
             Key::Sym(s) => self.symbols.retain(|(k, _)| !Gc::ptr_eq(*k, s)),
             Key::Str(k) => {
                 if let (ObjectKind::Array(items), Some(i)) = (&self.kind, crate::ops::index_of_str(k))
                     && (i as usize) < items.len()
                 {
-                    self.spill(mc, i as usize);
+                    self.spill(i as usize);
                 }
                 if let Some(i) = self.position(k) {
                     self.props.remove(i);
@@ -774,16 +818,17 @@ impl<'gc> ObjectData<'gc> {
     fn position(&self, key: &str) -> Option<usize> {
         match &self.prop_index.0 {
             Some(m) => m.get(key).copied(),
-            None => self.props.iter().position(|(k, _)| ***k == *key),
+            None => self.props.iter().position(|(k, _)| **k == *key),
         }
     }
 
     /// 追加一项（索引跟着加，表够大了就建索引）。
-    fn push_prop(&mut self, mc: &Mutation<'gc>, key: &str, prop: Property<'gc>) {
-        self.props.push((Gc::new(mc, Box::from(key)), prop));
+    fn push_prop(&mut self, key: &str, prop: Property<'gc>) {
+        let key = PropKey::from(key);
+        self.props.push((key.clone(), prop));
         let at = self.props.len() - 1;
         match &mut self.prop_index.0 {
-            Some(m) => _ = m.insert(Box::from(key), at),
+            Some(m) => _ = m.insert(key, at),
             None if self.props.len() >= PROP_INDEX_THRESHOLD => self.reindex(),
             None => {}
         }
@@ -791,7 +836,7 @@ impl<'gc> ObjectData<'gc> {
 
     /// 删过属性后重建索引。
     fn reindex(&mut self) {
-        self.prop_index.0 = (self.props.len() >= PROP_INDEX_THRESHOLD).then(|| self.props.iter().enumerate().map(|(i, (k, _))| (Box::from(&***k), i)).collect());
+        self.prop_index.0 = (self.props.len() >= PROP_INDEX_THRESHOLD).then(|| self.props.iter().enumerate().map(|(i, (k, _))| (k.clone(), i)).collect());
     }
 
     /// 自有属性。
@@ -805,7 +850,7 @@ impl<'gc> ObjectData<'gc> {
     }
 
     /// 赋值：已有数据属性就改值（不可写就不动），没有就建一个普通属性。访问器由调用方先处理。
-    pub fn set(&mut self, mc: &Mutation<'gc>, key: &str, value: Value<'gc>) {
+    pub fn set(&mut self, key: &str, value: Value<'gc>) {
         match self.position(key) {
             Some(i) => {
                 let p = &mut self.props[i].1;
@@ -813,15 +858,15 @@ impl<'gc> ObjectData<'gc> {
                     p.slot = Slot::Data(value);
                 }
             }
-            None => self.push_prop(mc, key, Property::data(value)),
+            None => self.push_prop(key, Property::data(value)),
         }
     }
 
     /// 定义：整个替换（或新建）这个属性。
-    pub fn define(&mut self, mc: &Mutation<'gc>, key: &str, prop: Property<'gc>) {
+    pub fn define(&mut self, key: &str, prop: Property<'gc>) {
         match self.position(key) {
             Some(i) => self.props[i].1 = prop,
-            None => self.push_prop(mc, key, prop),
+            None => self.push_prop(key, prop),
         }
     }
 

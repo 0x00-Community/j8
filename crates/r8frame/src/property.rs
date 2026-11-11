@@ -310,7 +310,7 @@ impl<'gc> Agent<'gc, '_> {
         };
         match validate(extensible, desc, current) {
             Some(p) => {
-                o.borrow_mut(self.mc).store(self.mc, key, p);
+                o.borrow_mut(self.mc).store(key, p);
                 true
             }
             None => false,
@@ -407,7 +407,7 @@ impl<'gc> Agent<'gc, '_> {
         match self.get_own_property(o, key)? {
             None => Ok(true),
             Some(p) if p.configurable => {
-                o.borrow_mut(self.mc).unstore(self.mc, key);
+                o.borrow_mut(self.mc).unstore(key);
                 self.unmap(o, key);
                 Ok(true)
             }
@@ -442,10 +442,10 @@ impl<'gc> Agent<'gc, '_> {
             }
             _ => {}
         }
-        for &(k, _) in &d.props {
-            match index_of_str(&k) {
-                Some(i) => indices.push((i, Some(k))),
-                None => strings.push(PropertyKey::String(k)),
+        for (k, _) in &d.props {
+            match index_of_str(k) {
+                Some(i) => indices.push((i, None)),
+                None => strings.push(PropertyKey::String(self.string(k))),
             }
         }
         indices.sort_unstable_by_key(|&(i, _)| i);
@@ -592,16 +592,16 @@ impl<'gc> Agent<'gc, '_> {
         let mut d = o.borrow_mut(self.mc);
         match p.slot {
             Slot::Data(v) => {
-                d.set(self.mc, "value", v);
-                d.set(self.mc, "writable", p.writable.into());
+                d.set("value", v);
+                d.set("writable", p.writable.into());
             }
             Slot::Accessor { get, set } => {
-                d.set(self.mc, "get", get.map_or(Value::Undefined, Value::Object));
-                d.set(self.mc, "set", set.map_or(Value::Undefined, Value::Object));
+                d.set("get", get.map_or(Value::Undefined, Value::Object));
+                d.set("set", set.map_or(Value::Undefined, Value::Object));
             }
         }
-        d.set(self.mc, "enumerable", p.enumerable.into());
-        d.set(self.mc, "configurable", p.configurable.into());
+        d.set("enumerable", p.enumerable.into());
+        d.set("configurable", p.configurable.into());
         drop(d);
         o.into()
     }

@@ -149,7 +149,7 @@ impl Node {
     pub fn install<'gc>(a: &mut Agent<'gc, '_>, script: &str, args: &[String]) {
         let global = a.realm.global;
         let native = a.object();
-        global.borrow_mut(a.mc).define(a.mc, "__dune", Property::hidden(native.into()));
+        global.borrow_mut(a.mc).define("__dune", Property::hidden(native.into()));
         Fs::install(a, native);
         Paths::install(a, native);
         let process = Process::install(a, global);
@@ -159,7 +159,7 @@ impl Node {
         let env = a.object();
         for (k, v) in std::env::vars() {
             let v = a.string(&v);
-            env.borrow_mut(a.mc).set(a.mc, &k, v.into());
+            env.borrow_mut(a.mc).set(&k, v.into());
         }
         let props: [(&str, Value<'gc>); 5] = [
             ("argv", argv.into()),
@@ -174,6 +174,6 @@ impl Node {
     }
 
     fn set<'gc>(a: &Agent<'gc, '_>, o: JsObject<'gc>, k: &str, v: Value<'gc>) {
-        o.borrow_mut(a.mc).define(a.mc, k, Property::data(v));
+        o.borrow_mut(a.mc).define(k, Property::data(v));
     }
 }

@@ -169,22 +169,22 @@ impl<'gc> Agent<'gc, '_> {
         let o = self.object();
         let mut data = o.borrow_mut(self.mc);
         if let Some(v) = d.value {
-            data.set(self.mc, "value", v);
+            data.set("value", v);
         }
         if let Some(w) = d.writable {
-            data.set(self.mc, "writable", w.into());
+            data.set("writable", w.into());
         }
         if let Some(g) = d.get {
-            data.set(self.mc, "get", g.map_or(Value::Undefined, Value::Object));
+            data.set("get", g.map_or(Value::Undefined, Value::Object));
         }
         if let Some(s) = d.set {
-            data.set(self.mc, "set", s.map_or(Value::Undefined, Value::Object));
+            data.set("set", s.map_or(Value::Undefined, Value::Object));
         }
         if let Some(e) = d.enumerable {
-            data.set(self.mc, "enumerable", e.into());
+            data.set("enumerable", e.into());
         }
         if let Some(c) = d.configurable {
-            data.set(self.mc, "configurable", c.into());
+            data.set("configurable", c.into());
         }
         drop(data);
         o.into()

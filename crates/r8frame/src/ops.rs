@@ -89,6 +89,25 @@ impl BinaryOp {
             BinaryOp::UShr => "ushr",
         }
     }
+
+    /// 两边都已是数时的结果（各执行层的快路，也是 [`Agent::binary`] 的最后一步）。
+    #[inline]
+    pub fn numbers(self, a: f64, b: f64) -> f64 {
+        match self {
+            BinaryOp::Add => a + b,
+            BinaryOp::Sub => a - b,
+            BinaryOp::Mul => a * b,
+            BinaryOp::Div => a / b,
+            BinaryOp::Rem => remainder(a, b),
+            BinaryOp::Exp => pow(a, b),
+            BinaryOp::BitAnd => f64::from(to_int32(a) & to_int32(b)),
+            BinaryOp::BitOr => f64::from(to_int32(a) | to_int32(b)),
+            BinaryOp::BitXor => f64::from(to_int32(a) ^ to_int32(b)),
+            BinaryOp::Shl => f64::from(to_int32(a).wrapping_shl(modulo_u32(b) & 31)),
+            BinaryOp::Shr => f64::from(to_int32(a).wrapping_shr(modulo_u32(b) & 31)),
+            BinaryOp::UShr => f64::from(modulo_u32(a) >> (modulo_u32(b) & 31)),
+        }
+    }
 }
 
 impl CompareOp {
@@ -102,6 +121,19 @@ impl CompareOp {
             CompareOp::Gt => "gt",
             CompareOp::Le => "le",
             CompareOp::Ge => "ge",
+        }
+    }
+
+    /// 两边都是数时的结果（`NaN` 与谁比都不成立，`==` 与 `===` 对数一样）。
+    #[inline]
+    pub fn numbers(self, a: f64, b: f64) -> bool {
+        match self {
+            CompareOp::Eq | CompareOp::StrictEq => a == b,
+            CompareOp::Ne | CompareOp::StrictNe => a != b,
+            CompareOp::Lt => a < b,
+            CompareOp::Gt => a > b,
+            CompareOp::Le => a <= b,
+            CompareOp::Ge => a >= b,
         }
     }
 }
@@ -182,6 +214,17 @@ pub(crate) fn parse_number(s: &str) -> f64 {
 pub const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
 
 fn modulo_u32(x: f64) -> u32 {
+    // 快路：已经是 i32 / u32 范围内的整数（绝大多数位运算的操作数），直接截
+    #[expect(clippy::cast_possible_truncation, reason = "下面比较确认没截掉东西")]
+    let i = x as i32;
+    if f64::from(i) == x {
+        return i.cast_unsigned();
+    }
+    #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "下面比较确认没截掉东西")]
+    let u = x as u32;
+    if f64::from(u) == x {
+        return u;
+    }
     if !x.is_finite() {
         return 0;
     }
@@ -191,6 +234,26 @@ fn modulo_u32(x: f64) -> u32 {
     #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "m 已规约到 [0, 2^32)")]
     let u = m as u32;
     u
+}
+
+/// ToInt32
+fn to_int32(x: f64) -> i32 {
+    modulo_u32(x).cast_signed()
+}
+
+/// `%`：两边是安全整数时用整数取余（结果为 0 时带被除数的符号），否则走浮点 `fmod`。
+fn remainder(a: f64, b: f64) -> f64 {
+    if a.abs() <= MAX_SAFE_INTEGER && b.abs() <= MAX_SAFE_INTEGER && b != 0.0 {
+        #[expect(clippy::cast_possible_truncation, reason = "已检查在安全整数范围内，下面比较确认是整数")]
+        let (x, y) = (a as i64, b as i64);
+        #[expect(clippy::cast_precision_loss, reason = "安全整数范围内精确")]
+        if x as f64 == a && y as f64 == b {
+            #[expect(clippy::cast_precision_loss, reason = "余数绝对值小于除数，精确")]
+            let r = (x % y) as f64;
+            return if r == 0.0 { 0.0f64.copysign(a) } else { r };
+        }
+    }
+    a % b
 }
 
 /// `**`：JS 与 C `pow` 不同的地方是 `±1 ** ±∞` 与 `x ** NaN` 都是 NaN。
@@ -231,7 +294,7 @@ impl<'gc> Agent<'gc, '_> {
     pub fn error(&self, kind: ErrorKind, message: &str) -> JsObject<'gc> {
         let e = ObjectData { kind: ObjectKind::Error, proto: Some(self.realm.error_proto(kind)), ..ObjectData::default() }.alloc(self.mc);
         let m = self.string(message);
-        e.borrow_mut(self.mc).define(self.mc, "message", Property::hidden(m.into()));
+        e.borrow_mut(self.mc).define("message", Property::hidden(m.into()));
         e
     }
 
@@ -353,6 +416,9 @@ impl<'gc> Agent<'gc, '_> {
     }
 
     pub fn binary(&mut self, op: BinaryOp, lhs: Value<'gc>, rhs: Value<'gc>) -> Result<Value<'gc>, Error> {
+        if let (Value::Number(a), Value::Number(b)) = (lhs, rhs) {
+            return Ok(op.numbers(a, b).into());
+        }
         // 加法：两边先 ToPrimitive 看有没有字符串；其余运算左边整个 ToNumeric 完再轮到右边（求值顺序看得见）
         let (l, r) = if op == BinaryOp::Add {
             let (l, r) = (self.to_primitive(lhs, Hint::Default)?, self.to_primitive(rhs, Hint::Default)?);
@@ -371,22 +437,7 @@ impl<'gc> Agent<'gc, '_> {
             (Numeric::BigInt(a), Numeric::BigInt(b)) => return self.bigint_binary(op, &a.0, &b.0),
             _ => return Err(self.throw(ErrorKind::Type, "Cannot mix BigInt and other types, use explicit conversions")),
         };
-        let (x, y) = (modulo_u32(a).cast_signed(), modulo_u32(b));
-        Ok(match op {
-            BinaryOp::Add => a + b,
-            BinaryOp::Sub => a - b,
-            BinaryOp::Mul => a * b,
-            BinaryOp::Div => a / b,
-            BinaryOp::Rem => a % b,
-            BinaryOp::Exp => pow(a, b),
-            BinaryOp::BitAnd => f64::from(x & y.cast_signed()),
-            BinaryOp::BitOr => f64::from(x | y.cast_signed()),
-            BinaryOp::BitXor => f64::from(x ^ y.cast_signed()),
-            BinaryOp::Shl => f64::from(x.wrapping_shl(y & 31)),
-            BinaryOp::Shr => f64::from(x.wrapping_shr(y & 31)),
-            BinaryOp::UShr => f64::from(x.cast_unsigned() >> (y & 31)),
-        }
-        .into())
+        Ok(op.numbers(a, b).into())
     }
 
     /// 宽松相等（`==`）。
@@ -417,6 +468,9 @@ impl<'gc> Agent<'gc, '_> {
     }
 
     pub fn compare(&mut self, op: CompareOp, lhs: Value<'gc>, rhs: Value<'gc>) -> Result<bool, Error> {
+        if let (Value::Number(a), Value::Number(b)) = (lhs, rhs) {
+            return Ok(op.numbers(a, b));
+        }
         Ok(match op {
             CompareOp::Eq => self.loose_equals(lhs, rhs)?,
             CompareOp::Ne => !self.loose_equals(lhs, rhs)?,
@@ -834,7 +888,7 @@ impl<'gc> Agent<'gc, '_> {
             _ => (None, None),
         };
         if setter { set = Some(f) } else { get = Some(f) }
-        o.borrow_mut(self.mc).store(self.mc, key, Property { slot: Slot::Accessor { get, set }, enumerable, writable: true, configurable: true });
+        o.borrow_mut(self.mc).store(key, Property { slot: Slot::Accessor { get, set }, enumerable, writable: true, configurable: true });
     }
 
     /// `key in target`（含原型链与数组下标）。
@@ -1073,8 +1127,8 @@ impl<'gc> Agent<'gc, '_> {
     pub fn iter_result(&self, value: Value<'gc>, done: bool) -> JsObject<'gc> {
         let o = self.object();
         let mut d = o.borrow_mut(self.mc);
-        d.set(self.mc, "value", value);
-        d.set(self.mc, "done", done.into());
+        d.set("value", value);
+        d.set("done", done.into());
         drop(d);
         o
     }

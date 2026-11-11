@@ -25,6 +25,9 @@ impl<'gc> Agent<'gc, '_> {
 
     /// ToNumeric：BigInt 原样，其余 ToNumber。
     pub fn to_numeric(&mut self, v: Value<'gc>) -> Result<Numeric<'gc>, Error> {
+        if let Value::Number(x) = v {
+            return Ok(Numeric::Number(x));
+        }
         match self.to_primitive(v, Hint::Number)? {
             Value::BigInt(b) => Ok(Numeric::BigInt(b)),
             p => Ok(Numeric::Number(self.to_number(p)?)),
@@ -72,6 +75,9 @@ impl<'gc> Agent<'gc, '_> {
 
     /// `++` / `--`（`delta` 是 ±1）。
     pub fn increment(&mut self, v: Value<'gc>, delta: i8) -> Result<Value<'gc>, Error> {
+        if let Value::Number(x) = v {
+            return Ok((x + f64::from(delta)).into());
+        }
         Ok(match self.to_numeric(v)? {
             Numeric::Number(x) => (x + f64::from(delta)).into(),
             Numeric::BigInt(b) => self.bigint(&b.0 + BigInt::from(delta)),

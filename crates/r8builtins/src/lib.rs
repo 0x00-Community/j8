@@ -71,7 +71,7 @@ struct Installer<'r, 'gc> {
 impl<'gc> Installer<'_, 'gc> {
     /// 内建属性：不可枚举。
     fn set(&self, target: JsObject<'gc>, name: &str, v: Value<'gc>) {
-        target.borrow_mut(self.mc).define(self.mc, name, r8frame::Property::hidden(v));
+        target.borrow_mut(self.mc).define(name, r8frame::Property::hidden(v));
     }
 
     /// 宿主方法，`length` 是 `n`。
@@ -86,7 +86,7 @@ impl<'gc> Installer<'_, 'gc> {
             native.constructor = true;
         }
         // 内建构造器的 prototype：不可写、不可枚举、不可配置
-        ctor.borrow_mut(self.mc).define(self.mc, "prototype", r8frame::Property { slot: r8frame::Slot::Data(proto.into()), enumerable: false, writable: false, configurable: false });
+        ctor.borrow_mut(self.mc).define("prototype", r8frame::Property { slot: r8frame::Slot::Data(proto.into()), enumerable: false, writable: false, configurable: false });
         self.set(proto, "constructor", ctor.into());
         self.set(self.realm.global, name, ctor.into());
         ctor
@@ -137,7 +137,7 @@ impl<'gc> Installer<'_, 'gc> {
     /// 宿主 getter（不可枚举）。
     fn getter(&self, target: JsObject<'gc>, name: &str, f: r8frame::NativeFn) {
         let g = self.realm.named_native(self.mc, f, &alloc::format!("get {name}"), 0);
-        target.borrow_mut(self.mc).define(self.mc, name, r8frame::Property { slot: r8frame::Slot::Accessor { get: Some(g), set: None }, enumerable: false, writable: false, configurable: true });
+        target.borrow_mut(self.mc).define(name, r8frame::Property { slot: r8frame::Slot::Accessor { get: Some(g), set: None }, enumerable: false, writable: false, configurable: true });
     }
 
     /// 堆上的字符串值。

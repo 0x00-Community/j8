@@ -506,8 +506,8 @@ impl Objects {
         let prop = |v: Value<'gc>| Property { slot: Slot::Data(v), enumerable: false, writable: false, configurable: true };
         let n = a.string(&name);
         let mut d = f.borrow_mut(a.mc);
-        d.define(a.mc, "length", prop(length.into()));
-        d.define(a.mc, "name", prop(n.into()));
+        d.define("length", prop(length.into()));
+        d.define("name", prop(n.into()));
         drop(d);
         Ok(f.into())
     }
@@ -617,7 +617,7 @@ impl Installer<'_, '_> {
         // `__proto__` 是访问器
         let get = self.realm.named_native(self.mc, Objects::proto_getter, "get __proto__", 0);
         let set = self.realm.named_native(self.mc, Objects::proto_setter, "set __proto__", 1);
-        proto.borrow_mut(self.mc).define(self.mc, "__proto__", Property { slot: Slot::Accessor { get: Some(get), set: Some(set) }, enumerable: false, writable: false, configurable: true });
+        proto.borrow_mut(self.mc).define("__proto__", Property { slot: Slot::Accessor { get: Some(get), set: Some(set) }, enumerable: false, writable: false, configurable: true });
     }
 
     pub(crate) fn function(&mut self) {
@@ -626,6 +626,15 @@ impl Installer<'_, '_> {
         self.realm.name_function(self.mc, proto, "", Some(0));
         self.method(proto, "call", Objects::call, 1);
         self.method(proto, "apply", Objects::apply, 2);
+        // 执行层直接展开 call / apply（宿主实现留着，目标不可调等情形还走它）
+        for (name, forward) in [("call", r8frame::Forward::Call), ("apply", r8frame::Forward::Apply)] {
+            let f = proto.borrow().own(name);
+            if let Some(Value::Object(f)) = f
+                && let ObjectKind::Native(n) = &mut f.borrow_mut(self.mc).kind
+            {
+                n.forward = forward;
+            }
+        }
         self.method(proto, "bind", Objects::bind, 1);
         self.method(proto, "toString", Objects::function_to_string, 0);
         let has_instance = self.realm.named_native(self.mc, Objects::has_instance, "[Symbol.hasInstance]", 1);

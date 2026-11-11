@@ -136,7 +136,7 @@ impl Executor {
         }
         let meta = ObjectData::default().alloc(a.mc);
         let url = a.realm.modules.borrow()[m as usize].path;
-        meta.borrow_mut(a.mc).set(a.mc, "url", url.into());
+        meta.borrow_mut(a.mc).set("url", url.into());
         a.realm.modules.borrow_mut(a.mc)[m as usize].meta = Some(meta);
         Ok(meta.into())
     }

@@ -261,7 +261,7 @@ impl<'gc> Writer<'gc> {
         if let ObjectKind::Array(items) = &d.kind {
             keys.extend((0..items.len()).map(|i| a.string(ryu_js::Buffer::new().format(f64::from(u32::try_from(i).unwrap_or(u32::MAX))))));
         }
-        keys.extend(d.props.iter().filter(|(_, p)| p.enumerable).map(|&(k, _)| k));
+        keys.extend(d.props.iter().filter(|(_, p)| p.enumerable).map(|(k, _)| a.string(k)));
         keys
     }
 
@@ -382,7 +382,7 @@ impl Json {
             return Ok(v);
         }
         let root = a.object();
-        root.borrow_mut(a.mc).set(a.mc, "", v);
+        root.borrow_mut(a.mc).set("", v);
         let key = a.string("");
         Self::revive(a, root.into(), key, reviver)
     }
@@ -438,7 +438,7 @@ impl Json {
         };
         let mut w = Writer { gap, indent: String::new(), allow, replacer, stack: Vec::new() };
         let wrapper = ObjectData { proto: Some(a.realm.object_proto), ..ObjectData::default() }.alloc(a.mc);
-        wrapper.borrow_mut(a.mc).set(a.mc, "", args.at(0));
+        wrapper.borrow_mut(a.mc).set("", args.at(0));
         let key = a.string("");
         let mut out = String::new();
         if w.property(a, wrapper.into(), key, &mut out)? { Ok(a.string(&out).into()) } else { Ok(Value::Undefined) }

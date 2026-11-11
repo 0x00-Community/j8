@@ -30,17 +30,17 @@ pub trait Class: Any + Sized {
         let (f, length) = Self::CONSTRUCTOR.unwrap_or((Glue::illegal_constructor, 0));
         let ctor = a.realm.named_native(a.mc, f, Self::NAME, length);
         if let ObjectKind::Native(n) = &mut ctor.borrow_mut(a.mc).kind {
-            *n = Native { f, constructor: true };
+            *n = Native::constructor(f);
         }
         let proto = a.object();
-        ctor.borrow_mut(a.mc).define(a.mc, "prototype", Property { slot: Slot::Data(proto.into()), enumerable: false, writable: false, configurable: false });
-        proto.borrow_mut(a.mc).define(a.mc, "constructor", Property::hidden(ctor.into()));
+        ctor.borrow_mut(a.mc).define("prototype", Property { slot: Slot::Data(proto.into()), enumerable: false, writable: false, configurable: false });
+        proto.borrow_mut(a.mc).define("constructor", Property::hidden(ctor.into()));
         for m in Self::MEMBERS {
             Glue::member(a, ctor, proto, m);
         }
         let tag = a.string(Self::NAME);
         proto.borrow_mut(a.mc).define_symbol(a.realm.symbols.to_string_tag, Property { slot: Slot::Data(tag.into()), enumerable: false, writable: false, configurable: true });
-        target.borrow_mut(a.mc).define(a.mc, Self::NAME, Property::hidden(ctor.into()));
+        target.borrow_mut(a.mc).define(Self::NAME, Property::hidden(ctor.into()));
         ClassHandle { ctor, proto }
     }
 }
@@ -57,7 +57,7 @@ pub trait Object {
         for m in Self::MEMBERS {
             Glue::member(a, o, o, m);
         }
-        target.borrow_mut(a.mc).define(a.mc, Self::NAME, Property::hidden(o.into()));
+        target.borrow_mut(a.mc).define(Self::NAME, Property::hidden(o.into()));
         o
     }
 }
@@ -88,7 +88,7 @@ impl Glue {
             Member::Accessor { name, get, set } => {
                 let get = get.map(|f| a.realm.named_native(a.mc, f, &alloc::format!("get {name}"), 0));
                 let set = set.map(|f| a.realm.named_native(a.mc, f, &alloc::format!("set {name}"), 1));
-                proto.borrow_mut(a.mc).define(a.mc, name, Property { slot: Slot::Accessor { get, set }, enumerable: false, writable: false, configurable: true });
+                proto.borrow_mut(a.mc).define(name, Property { slot: Slot::Accessor { get, set }, enumerable: false, writable: false, configurable: true });
             }
         }
     }
@@ -96,7 +96,7 @@ impl Glue {
     /// `#[r8::function]`：在 `target` 上装一个 JS 函数。
     pub fn function<'gc>(a: &Agent<'gc, '_>, target: JsObject<'gc>, name: &str, f: NativeFn, length: u32) -> JsObject<'gc> {
         let func = a.realm.named_native(a.mc, f, name, length);
-        target.borrow_mut(a.mc).define(a.mc, name, Property::hidden(func.into()));
+        target.borrow_mut(a.mc).define(name, Property::hidden(func.into()));
         func
     }
 

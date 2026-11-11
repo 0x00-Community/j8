@@ -78,17 +78,17 @@ impl<'gc> Installer<'_, 'gc> {
                 n.constructor = true;
             }
             let fixed = |v: Value<'gc>| Property { slot: Slot::Data(v), enumerable: false, writable: false, configurable: false };
-            c.borrow_mut(self.mc).define(self.mc, "prototype", fixed(proto.into()));
+            c.borrow_mut(self.mc).define("prototype", fixed(proto.into()));
             c.borrow_mut(self.mc).proto = Some(ctor);
-            proto.borrow_mut(self.mc).define(self.mc, "constructor", Property { writable: false, ..Property::hidden(c.into()) });
+            proto.borrow_mut(self.mc).define("constructor", Property { writable: false, ..Property::hidden(c.into()) });
             if let Some(i) = instances {
-                proto.borrow_mut(self.mc).define(self.mc, "prototype", Property { writable: false, ..Property::hidden(i.into()) });
-                i.borrow_mut(self.mc).define(self.mc, "constructor", Property { writable: false, ..Property::hidden(proto.into()) });
+                proto.borrow_mut(self.mc).define("prototype", Property { writable: false, ..Property::hidden(i.into()) });
+                i.borrow_mut(self.mc).define("constructor", Property { writable: false, ..Property::hidden(proto.into()) });
             }
         }
         // %eval% 是 Realm 里预留的那个对象（执行器靠它认出直接 eval）
         r.eval.borrow_mut(self.mc).kind = ObjectKind::Native(Native::function(Functions::eval));
         r.name_function(self.mc, r.eval, "eval", Some(1));
-        r.global.borrow_mut(self.mc).define(self.mc, "eval", Property::hidden(r.eval.into()));
+        r.global.borrow_mut(self.mc).define("eval", Property::hidden(r.eval.into()));
     }
 }

@@ -1007,7 +1007,7 @@ impl Installer<'_, '_> {
         // `[Symbol.unscopables]`：`with` 语句里不暴露的方法名
         let unscopables = ObjectData::default().alloc(self.mc);
         for name in ["at", "copyWithin", "entries", "fill", "find", "findIndex", "findLast", "findLastIndex", "flat", "flatMap", "includes", "keys", "toReversed", "toSorted", "toSpliced", "values"] {
-            unscopables.borrow_mut(self.mc).define(self.mc, name, Property::data(true.into()));
+            unscopables.borrow_mut(self.mc).define(name, Property::data(true.into()));
         }
         proto.borrow_mut(self.mc).define_symbol(self.realm.symbols.unscopables, Property { slot: Slot::Data(unscopables.into()), enumerable: false, writable: false, configurable: true });
     }

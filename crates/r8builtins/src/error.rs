@@ -18,7 +18,7 @@ impl Errors {
         e.borrow_mut(a.mc).remove("message");
         if args.at(0) != Value::Undefined {
             let m = a.to_string(args.at(0))?;
-            e.borrow_mut(a.mc).define(a.mc, "message", r8frame::Property::hidden(m.into()));
+            e.borrow_mut(a.mc).define("message", r8frame::Property::hidden(m.into()));
         }
         // InstallErrorCause
         let options = args.at(1);
@@ -26,12 +26,12 @@ impl Errors {
             && a.has_key(opts, r8frame::Key::Str("cause"))?
         {
             let cause = a.get_named(options, "cause")?;
-            e.borrow_mut(a.mc).define(a.mc, "cause", r8frame::Property::hidden(cause));
+            e.borrow_mut(a.mc).define("cause", r8frame::Property::hidden(cause));
         }
         if kind == ErrorKind::Aggregate {
             let list = a.to_list(all.at(0))?;
             let arr = a.array(list);
-            e.borrow_mut(a.mc).define(a.mc, "errors", r8frame::Property::hidden(arr.into()));
+            e.borrow_mut(a.mc).define("errors", r8frame::Property::hidden(arr.into()));
         }
         Ok(e.into())
     }

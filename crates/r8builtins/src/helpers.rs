@@ -422,7 +422,7 @@ impl Installer<'_, '_> {
         if let ObjectKind::Native(n) = &mut ctor.borrow_mut(self.mc).kind {
             n.constructor = true;
         }
-        ctor.borrow_mut(self.mc).define(self.mc, "prototype", Property { slot: Slot::Data(proto.into()), enumerable: false, writable: false, configurable: false });
+        ctor.borrow_mut(self.mc).define("prototype", Property { slot: Slot::Data(proto.into()), enumerable: false, writable: false, configurable: false });
         self.set(r.global, "Iterator", ctor.into());
         self.method(ctor, "from", Helpers::from, 1);
         let methods: [(&str, r8frame::NativeFn, u32); 11] = [
@@ -447,7 +447,7 @@ impl Installer<'_, '_> {
             Property { slot: Slot::Accessor { get: Some(g), set: Some(s) }, enumerable: false, writable: false, configurable: true }
         };
         let ctor_prop = accessor(Helpers::ctor_get, Helpers::ctor_set, "constructor");
-        proto.borrow_mut(self.mc).define(self.mc, "constructor", ctor_prop);
+        proto.borrow_mut(self.mc).define("constructor", ctor_prop);
         let tag_prop = accessor(Helpers::tag_get, Helpers::tag_set, "[Symbol.toStringTag]");
         proto.borrow_mut(self.mc).define_symbol(r.symbols.to_string_tag, tag_prop);
         self.method(r.iterator_helper_proto, "next", Helpers::helper_next, 0);

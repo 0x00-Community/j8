@@ -346,7 +346,7 @@ impl Promises {
         let arr = a.array(list);
         if how == Combinator::Any {
             let e = a.error(ErrorKind::Aggregate, "All promises were rejected");
-            e.borrow_mut(a.mc).define(a.mc, "errors", Property::hidden(arr.into()));
+            e.borrow_mut(a.mc).define("errors", Property::hidden(arr.into()));
             a.call(cap.reject, Value::Undefined, &[e.into()])?;
         } else {
             a.call(cap.resolve, Value::Undefined, &[arr.into()])?;
@@ -369,7 +369,7 @@ impl Promises {
             let arr = a.array(list);
             if how == Combinator::Any {
                 let e = a.error(ErrorKind::Aggregate, "All promises were rejected");
-                e.borrow_mut(a.mc).define(a.mc, "errors", Property::hidden(arr.into()));
+                e.borrow_mut(a.mc).define("errors", Property::hidden(arr.into()));
                 return a.call(s[slot::SETTLE], Value::Undefined, &[e.into()]);
             }
             return a.call(s[slot::SETTLE], Value::Undefined, &[arr.into()]);
@@ -415,9 +415,9 @@ impl Installer<'_, '_> {
         let r = self.realm;
         let proto = r.promise_proto;
         let ctor = r.promise_ctor;
-        ctor.borrow_mut(self.mc).kind = ObjectKind::Native(r8frame::Native { f: Promises::construct, constructor: true });
+        ctor.borrow_mut(self.mc).kind = ObjectKind::Native(r8frame::Native::constructor(Promises::construct));
         r.name_function(self.mc, ctor, "Promise", Some(1));
-        ctor.borrow_mut(self.mc).define(self.mc, "prototype", Property { slot: Slot::Data(proto.into()), enumerable: false, writable: false, configurable: false });
+        ctor.borrow_mut(self.mc).define("prototype", Property { slot: Slot::Data(proto.into()), enumerable: false, writable: false, configurable: false });
         self.set(proto, "constructor", ctor.into());
         self.set(r.global, "Promise", ctor.into());
         let statics: [(&str, r8frame::NativeFn, u32); 8] = [

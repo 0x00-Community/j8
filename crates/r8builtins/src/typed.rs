@@ -798,9 +798,9 @@ impl<'gc> Installer<'_, 'gc> {
         let r = self.realm;
         let base = r.typed_array_ctor;
         let proto = r.typed_array_proto;
-        base.borrow_mut(self.mc).kind = ObjectKind::Native(r8frame::Native { f: Typed::abstract_ctor, constructor: true });
+        base.borrow_mut(self.mc).kind = ObjectKind::Native(r8frame::Native::constructor(Typed::abstract_ctor));
         r.name_function(self.mc, base, "TypedArray", Some(0));
-        base.borrow_mut(self.mc).define(self.mc, "prototype", Property { slot: Slot::Data(proto.into()), enumerable: false, writable: false, configurable: false });
+        base.borrow_mut(self.mc).define("prototype", Property { slot: Slot::Data(proto.into()), enumerable: false, writable: false, configurable: false });
         self.set(proto, "constructor", base.into());
         self.method(base, "from", Typed::from, 1);
         self.method(base, "of", Typed::of, 0);
@@ -869,14 +869,14 @@ impl<'gc> Installer<'_, 'gc> {
         for (i, (kind, f)) in ElementKind::ALL.into_iter().zip(ctors).enumerate() {
             let c = r.typed_ctors[i];
             let p = r.typed_protos[i];
-            c.borrow_mut(self.mc).kind = ObjectKind::Native(r8frame::Native { f, constructor: true });
+            c.borrow_mut(self.mc).kind = ObjectKind::Native(r8frame::Native::constructor(f));
             r.name_function(self.mc, c, kind.name(), Some(3));
             let fixed = |v: Value<'gc>| Property { slot: Slot::Data(v), enumerable: false, writable: false, configurable: false };
             #[expect(clippy::cast_precision_loss, reason = "元素字节数是 1 / 2 / 4 / 8")]
             let bytes = Value::Number(kind.size() as f64);
-            c.borrow_mut(self.mc).define(self.mc, "prototype", fixed(p.into()));
-            c.borrow_mut(self.mc).define(self.mc, "BYTES_PER_ELEMENT", fixed(bytes));
-            p.borrow_mut(self.mc).define(self.mc, "BYTES_PER_ELEMENT", fixed(bytes));
+            c.borrow_mut(self.mc).define("prototype", fixed(p.into()));
+            c.borrow_mut(self.mc).define("BYTES_PER_ELEMENT", fixed(bytes));
+            p.borrow_mut(self.mc).define("BYTES_PER_ELEMENT", fixed(bytes));
             self.set(p, "constructor", c.into());
             self.set(r.global, kind.name(), c.into());
         }

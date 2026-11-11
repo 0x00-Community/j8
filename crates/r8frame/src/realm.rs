@@ -238,9 +238,9 @@ impl<'gc> Realm<'gc> {
         let prop = |v: Value<'gc>| Property { slot: crate::Slot::Data(v), enumerable: false, writable: false, configurable: true };
         let mut d = f.borrow_mut(mc);
         if let Some(n) = length {
-            d.define(mc, "length", prop(f64::from(n).into()));
+            d.define("length", prop(f64::from(n).into()));
         }
-        d.define(mc, "name", prop(Value::String(Gc::new(mc, alloc::boxed::Box::from(name)))));
+        d.define("name", prop(Value::String(Gc::new(mc, alloc::boxed::Box::from(name)))));
     }
 
     /// 带 `name` 的宿主函数对象。
@@ -259,7 +259,7 @@ impl<'gc> Realm<'gc> {
     /// 在 `target` 上挂一个宿主方法。
     pub fn method(&self, mc: &Mutation<'gc>, target: JsObject<'gc>, name: &str, f: NativeFn, length: u32) {
         let func = self.named_native(mc, f, name, length);
-        target.borrow_mut(mc).define(mc, name, Property::hidden(Value::Object(func)));
+        target.borrow_mut(mc).define(name, Property::hidden(Value::Object(func)));
     }
 }
 

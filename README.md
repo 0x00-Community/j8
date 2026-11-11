@@ -106,7 +106,7 @@ cargo build --target riscv64gc-unknown-none-elf -p r8frame -p r8bytecode -p r8ex
 
 还不支持（报 `Error::Unsupported`，带 `文件:行:列`）：模块的顶层 await、形参表达式里 eval 的 `arguments` 冲突规则。test262 基线 42430 条，补齐计划见 PLAN.md。
 
-已知偏差：宿主函数里重入的 JS（如 `map` 的回调）在当前片里跑完，期间不回收。
+已知偏差：宿主函数里重入的 JS（如 `map` 的回调）在当前片里跑完，期间不回收（`Function.prototype.call` / `apply` 由执行器直接展开成普通调用，不算重入）。
 
 ## test262
 

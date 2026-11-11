@@ -120,7 +120,7 @@ impl<'p> Runtime<'p> {
             let mut a = scope.agent(realm, &executor);
             let native = a.object();
             let global = a.realm.global;
-            global.borrow_mut(a.mc).define(a.mc, "__native", Property::hidden(native.into()));
+            global.borrow_mut(a.mc).define("__native", Property::hidden(native.into()));
             KvStore::install(&mut a, native);
         });
         let mut rt = Self { isolate, executor, cx };

@@ -112,6 +112,8 @@ enum CallStep<'gc> {
     Proxy,
     NativeClosure(r8frame::ClosureFn),
     Native(r8frame::Native),
+    /// `call` / `apply`：目标可调就展开成对它的调用
+    Forward(r8frame::Native),
     Bound(Value<'gc>, Value<'gc>, Vec<Value<'gc>>),
 }
 
@@ -236,10 +238,27 @@ impl Executor {
                 ObjectKind::Resolver { .. } => CallStep::Resolver,
                 ObjectKind::Proxy(p) if p.callable => CallStep::Proxy,
                 ObjectKind::NativeClosure(c) => CallStep::NativeClosure(c.f),
+                ObjectKind::Native(n) if n.forward != r8frame::Forward::No => CallStep::Forward(*n),
                 ObjectKind::Native(n) => CallStep::Native(*n),
                 ObjectKind::Bound(b) => CallStep::Bound(b.target, b.this, b.args.clone()),
                 _ => break,
             };
+            if let CallStep::Forward(n) = step
+                && a.is_callable(this)
+            {
+                let target = this;
+                let mut rest = args.into_iter();
+                this = rest.next().unwrap_or_default();
+                args = match n.forward {
+                    r8frame::Forward::Apply => match rest.next().unwrap_or_default() {
+                        Value::Undefined | Value::Null => Vec::new(),
+                        list => a.list_from_array_like(list)?,
+                    },
+                    _ => rest.collect(),
+                };
+                callee = target;
+                continue;
+            }
             let saved = self.depth.replace(depth);
             let r = match step {
                 CallStep::Closure(c) => {
@@ -262,7 +281,7 @@ impl Executor {
                     a.new_target = outer;
                     r
                 }
-                CallStep::Native(n) => {
+                CallStep::Native(n) | CallStep::Forward(n) => {
                     let outer = core::mem::replace(&mut a.new_target, Value::Undefined);
                     let r = (n.f)(a, this, &args);
                     a.new_target = outer;
@@ -435,11 +454,11 @@ impl Executor {
             // 生成器函数的 `prototype` 是它产出的生成器的原型（没有 `constructor`）
             let base = if func.asynchronous { a.realm.async_generator_proto } else { a.realm.generator_proto };
             let p = ObjectData { proto: Some(base), ..ObjectData::default() }.alloc(a.mc);
-            fo.borrow_mut(a.mc).define(a.mc, "prototype", Property { slot: Slot::Data(p.into()), enumerable: false, writable: true, configurable: false });
+            fo.borrow_mut(a.mc).define("prototype", Property { slot: Slot::Data(p.into()), enumerable: false, writable: true, configurable: false });
         } else if func.kind == FunctionKind::Normal && !func.asynchronous {
             let p = a.object();
-            p.borrow_mut(a.mc).define(a.mc, "constructor", Property::hidden(fo.into()));
-            fo.borrow_mut(a.mc).define(a.mc, "prototype", Property { slot: Slot::Data(p.into()), enumerable: false, writable: true, configurable: false });
+            p.borrow_mut(a.mc).define("constructor", Property::hidden(fo.into()));
+            fo.borrow_mut(a.mc).define("prototype", Property { slot: Slot::Data(p.into()), enumerable: false, writable: true, configurable: false });
         }
         fo
     }
@@ -528,7 +547,7 @@ impl Executor {
             (Some(p), Some(_)) if p.configurable => fresh,
             (Some(p), Some(v)) => Property { slot: Slot::Data(v), ..p },
         };
-        global.borrow_mut(a.mc).define(a.mc, name, prop);
+        global.borrow_mut(a.mc).define(name, prop);
     }
 
     /// 写全局名字：脚本作用域里的查死区与 `const`，否则写全局对象。
@@ -542,7 +561,7 @@ impl Executor {
                 if !p.writable {
                     return Err(a.throw(ErrorKind::Type, "Assignment to constant variable."));
                 }
-                scope.borrow_mut(a.mc).set(a.mc, name, v);
+                scope.borrow_mut(a.mc).set(name, v);
                 Ok(())
             }
             None => {
@@ -574,18 +593,18 @@ impl Executor {
         let hidden = |v: Value<'gc>| Property { slot: Slot::Data(v), enumerable: false, writable: true, configurable: true };
         for (i, &v) in f.args.iter().enumerate() {
             let k = alloc::string::String::from(ryu_js::Buffer::new().format(f64::from(u32::try_from(i).unwrap_or(u32::MAX))));
-            o.borrow_mut(a.mc).define(a.mc, &k, Property::data(v));
+            o.borrow_mut(a.mc).define(&k, Property::data(v));
         }
         let len = f64::from(u32::try_from(f.args.len()).unwrap_or(u32::MAX));
         let values = a.get_symbol(Value::Object(a.realm.array_proto), a.realm.symbols.iterator, Value::Undefined)?;
         let mut d = o.borrow_mut(a.mc);
-        d.define(a.mc, "length", hidden(len.into()));
+        d.define("length", hidden(len.into()));
         if self_strict {
             // 严格模式：读写 callee 都抛 TypeError
             let thrower = a.realm.named_native(a.mc, Self::throw_type_error, "", 0);
-            d.define(a.mc, "callee", Property { slot: Slot::Accessor { get: Some(thrower), set: Some(thrower) }, enumerable: false, writable: false, configurable: false });
+            d.define("callee", Property { slot: Slot::Accessor { get: Some(thrower), set: Some(thrower) }, enumerable: false, writable: false, configurable: false });
         } else {
-            d.define(a.mc, "callee", hidden(regs[f.base + usize::from(Reg::CALLEE.0)]));
+            d.define("callee", hidden(regs[f.base + usize::from(Reg::CALLEE.0)]));
         }
         d.define_symbol(a.realm.symbols.iterator, hidden(values));
         drop(d);
@@ -619,7 +638,7 @@ impl Executor {
             let len = d.array_length().unwrap_or(0);
             match &mut d.kind {
                 ObjectKind::Array(dense) if dense.len() == len as usize => dense.push(v),
-                _ => d.store(a.mc, r8frame::Key::Str(&alloc::format!("{len}")), Property::data(v)),
+                _ => d.store(r8frame::Key::Str(&alloc::format!("{len}")), Property::data(v)),
             }
         }
     }
@@ -717,7 +736,7 @@ impl Executor {
                     if scope.borrow().get_own(name).is_some() || a.realm.global.borrow().get_own(name).is_some_and(|p| !p.configurable) {
                         return Err(a.throw(ErrorKind::Syntax, &alloc::format!("Identifier '{name}' has already been declared")));
                     }
-                    scope.borrow_mut(a.mc).define(a.mc, name, Property { slot: Slot::Data(Value::Uninit), enumerable: false, writable: !constant, configurable: false });
+                    scope.borrow_mut(a.mc).define(name, Property { slot: Slot::Data(Value::Uninit), enumerable: false, writable: !constant, configurable: false });
                 }
                 Insn::CheckDeclare { name, function } => Self::check_declare(a, func.name_at(name), function)?,
                 Insn::DeclareVar { name, deletable } => Self::declare_global(a, func.name_at(name), None, deletable),
@@ -766,7 +785,7 @@ impl Executor {
                     let mut d = scope.borrow_mut(a.mc);
                     let prop = d.get_own(name).map(|p| Property { slot: Slot::Data(*acc), ..p });
                     if let Some(p) = prop {
-                        d.define(a.mc, name, p);
+                        d.define(name, p);
                     }
                 }
                 Insn::LdaEnv { depth, slot } => *acc = Self::env_at(f.env, depth).borrow().slots[usize::from(slot)],
@@ -778,17 +797,31 @@ impl Executor {
                     let copy = Env { slots: e.borrow().slots.clone(), parent: e.borrow().parent };
                     f.env = Some(copy.alloc(a.mc));
                 }
-                Insn::Binary(op, x) => *acc = a.binary(op, regs[r(x)], *acc)?,
-                Insn::Compare(op, x) => *acc = a.compare(op, regs[r(x)], *acc)?.into(),
-                Insn::Unary(op) => *acc = a.unary(op, *acc)?,
-                Insn::ToNumeric => {
-                    *acc = match a.to_numeric(*acc)? {
-                        r8frame::Numeric::Number(x) => x.into(),
-                        r8frame::Numeric::BigInt(b) => Value::BigInt(b),
+                // 两边都是数的快路就地算，别的交给 Agent
+                Insn::Binary(op, x) => {
+                    *acc = match (regs[r(x)], *acc) {
+                        (Value::Number(lhs), Value::Number(rhs)) => op.numbers(lhs, rhs).into(),
+                        (lhs, rhs) => a.binary(op, lhs, rhs)?,
                     }
                 }
-                Insn::Inc => *acc = a.increment(*acc, 1)?,
-                Insn::Dec => *acc = a.increment(*acc, -1)?,
+                Insn::Compare(op, x) => {
+                    *acc = match (regs[r(x)], *acc) {
+                        (Value::Number(lhs), Value::Number(rhs)) => op.numbers(lhs, rhs),
+                        (lhs, rhs) => a.compare(op, lhs, rhs)?,
+                    }
+                    .into();
+                }
+                Insn::Unary(op) => *acc = a.unary(op, *acc)?,
+                Insn::ToNumeric => {
+                    if !matches!(*acc, Value::Number(_)) {
+                        *acc = match a.to_numeric(*acc)? {
+                            r8frame::Numeric::Number(x) => x.into(),
+                            r8frame::Numeric::BigInt(b) => Value::BigInt(b),
+                        }
+                    }
+                }
+                Insn::Inc => *acc = if let Value::Number(x) = *acc { (x + 1.0).into() } else { a.increment(*acc, 1)? },
+                Insn::Dec => *acc = if let Value::Number(x) = *acc { (x - 1.0).into() } else { a.increment(*acc, -1)? },
                 Insn::CreateRegExp { pattern, flags } => {
                     let (p, fl) = (a.string(func.name_at(pattern)), a.string(func.name_at(flags)));
                     let ctor = a.realm.regexp_ctor;
@@ -900,8 +933,8 @@ impl Executor {
                     let mut closure = Closure::new(FuncId(loaded.base + n), f.env);
                     closure.home = Some(p);
                     let ctor = self.function_object(a, closure, ctor_parent);
-                    ctor.borrow_mut(a.mc).define(a.mc, "prototype", Property { slot: Slot::Data(p.into()), enumerable: false, writable: false, configurable: false });
-                    p.borrow_mut(a.mc).define(a.mc, "constructor", Property::hidden(ctor.into()));
+                    ctor.borrow_mut(a.mc).define("prototype", Property { slot: Slot::Data(p.into()), enumerable: false, writable: false, configurable: false });
+                    p.borrow_mut(a.mc).define("constructor", Property::hidden(ctor.into()));
                     regs[r(proto)] = p.into();
                     *acc = ctor.into();
                 }
@@ -1157,7 +1190,7 @@ impl Executor {
                             let cooked = a.array(regs[start..start + n].to_vec());
                             let raw = a.array(regs[start + n..start + 2 * n].to_vec());
                             let frozen = |v: Value<'gc>| Property { slot: Slot::Data(v), enumerable: false, writable: false, configurable: false };
-                            cooked.borrow_mut(a.mc).define(a.mc, "raw", frozen(raw.into()));
+                            cooked.borrow_mut(a.mc).define("raw", frozen(raw.into()));
                             a.realm.templates.borrow_mut(a.mc).insert(key, cooked);
                             cooked.into()
                         }
