@@ -1089,6 +1089,22 @@ impl<'gc> Agent<'gc, '_> {
 
     /// CreateDataPropertyOrThrow(O, i, v)。
     pub fn create_index(&mut self, o: JsObject<'gc>, i: f64, v: Value<'gc>) -> Result<(), Error> {
+        // 快路：真数组的稠密部分里改值，或正好接在稠密末尾（可扩展、length 可写、后面没有稀疏元素）追加
+        if let Some(n) = index_of_number(i) {
+            let mut d = o.borrow_mut(self.mc);
+            let append = !d.non_extensible && !d.length_readonly && d.sparse_length <= n;
+            if let ObjectKind::Array(items) = &mut d.kind {
+                let at = n as usize;
+                if at < items.len() {
+                    items[at] = v;
+                    return Ok(());
+                }
+                if at == items.len() && append {
+                    items.push(v);
+                    return Ok(());
+                }
+            }
+        }
         self.create_data_property_or_throw(o, Key::Str(&Self::index_key(i)), v)
     }
 

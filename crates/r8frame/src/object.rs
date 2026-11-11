@@ -661,6 +661,8 @@ pub struct ObjectData<'gc> {
     pub non_extensible: bool,
     /// 数组的 `length` 不可写
     pub length_readonly: bool,
+    /// 属性表里有过数字开头的键（只置不清；数组方法的快路靠它一眼确认原型上没有下标属性）
+    pub digit_keys: bool,
 }
 
 /// 只打种类与键：对象图有环（`F.prototype.constructor`），不能往下展开。
@@ -872,6 +874,7 @@ impl<'gc> ObjectData<'gc> {
 
     /// 追加一项（索引跟着加，表够大了就建索引）。
     fn push_prop(&mut self, key: &str, prop: Property<'gc>) {
+        self.digit_keys |= key.as_bytes().first().is_some_and(u8::is_ascii_digit);
         let key = SmallStr::from(key);
         self.props.push((key.clone(), prop));
         let at = self.props.len() - 1;

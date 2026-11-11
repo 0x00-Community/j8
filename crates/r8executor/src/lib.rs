@@ -321,6 +321,15 @@ impl Executor {
         Err(a.throw(ErrorKind::Type, &alloc::format!("{what} is not a function")))
     }
 
+    /// 被调的是普通 JS 函数（不是类构造器 / 生成器 / async）就给出它的闭包：可以直接开帧。
+    fn plain_closure<'gc>(&self, callee: Value<'gc>) -> Option<(Closure<'gc>, Rc<Loaded>)> {
+        let Value::Object(o) = callee else { return None };
+        let ObjectKind::Function(c) = o.borrow().kind else { return None };
+        let loaded = self.function(c.func);
+        let g = &loaded.func;
+        (!g.generator && !g.asynchronous && !matches!(g.kind, FunctionKind::Constructor { .. })).then_some((c, loaded))
+    }
+
     /// 建一帧：在寄存器文件末尾开出本函数的寄存器，按调用约定放 `this`、自身、实参。
     fn enter<'gc>(&self, a: &mut Agent<'gc, '_>, regs: &mut Vec<Value<'gc>>, closure: Closure<'gc>, callee: Value<'gc>, this: Value<'gc>, args: &[Value<'gc>]) -> Frame<'gc> {
         let f_loaded = self.function(closure.func);
@@ -1127,21 +1136,12 @@ impl Executor {
                     let first = r(args);
                     // 快路：被调的是普通 JS 函数（不是类构造器 / 生成器 / async），直接从寄存器开帧
                     let target = regs[r(callee)];
-                    let closure = match target {
-                        Value::Object(o) if matches!(insn, Insn::Call { .. }) => match o.borrow().kind {
-                            ObjectKind::Function(c) => Some(c),
-                            _ => None,
-                        },
-                        _ => None,
-                    };
-                    if let Some(c) = closure {
-                        let loaded = self.function(c.func);
-                        let g = &loaded.func;
-                        if !g.generator && !g.asynchronous && !matches!(g.kind, FunctionKind::Constructor { .. }) {
-                            let next = Self::enter_regs(a, regs, g, c, target, regs[r(this)], first, usize::from(argc));
-                            frames.push(core::mem::replace(f, next));
-                            continue;
-                        }
+                    if matches!(insn, Insn::Call { .. })
+                        && let Some((c, loaded)) = self.plain_closure(target)
+                    {
+                        let next = Self::enter_regs(a, regs, &loaded.func, c, target, regs[r(this)], first, usize::from(argc));
+                        frames.push(core::mem::replace(f, next));
+                        continue;
                     }
                     let list = regs[first..first + usize::from(argc)].to_vec();
                     match self.resolve(a, regs[r(callee)], regs[r(this)], list, level)? {
@@ -1353,6 +1353,12 @@ impl<'gc> Invoke<'gc> for Executor {
         let level = self.depth.get() + 1;
         if level >= STACK_LIMIT {
             return Err(a.throw(ErrorKind::Range, "Maximum call stack size exceeded"));
+        }
+        // 快路：普通 JS 函数（不是类构造器 / 生成器 / async）直接开帧，实参不先拷成 Vec 过调用解析
+        if let Some((c, _)) = self.plain_closure(callee) {
+            let mut regs = Vec::new();
+            let f = self.enter(a, &mut regs, c, callee, this, args);
+            return self.run_frame(a, regs, f, level);
         }
         match self.resolve(a, callee, this, args.to_vec(), level)? {
             Callee::Done(v) => Ok(v),

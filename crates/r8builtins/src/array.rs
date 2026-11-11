@@ -251,7 +251,7 @@ impl Arrays {
                 ObjectKind::Ordinary | ObjectKind::Error | ObjectKind::Arguments(_) => false,
                 _ => true,
             };
-            if indexed || d.sparse_length > 0 || d.props.iter().any(|(k, _)| k.as_bytes().first().is_some_and(u8::is_ascii_digit)) {
+            if indexed || d.sparse_length > 0 || d.digit_keys {
                 return false;
             }
             cur = d.proto;
