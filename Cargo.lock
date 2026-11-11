@@ -176,6 +176,7 @@ dependencies = [
  "r8builtins",
  "r8executor",
  "r8frame",
+ "r8jit",
  "r8platform",
  "serde",
  "serde_yaml",
@@ -363,6 +364,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3bd1574e617a9a6c1f8f8181bd7e841e1f20e4277607ef28945765188d6284d4"
 
 [[package]]
+name = "libc"
+version = "0.2.191"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
+
+[[package]]
 name = "libm"
 version = "0.2.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -379,6 +386,50 @@ name = "memchr"
 version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
+
+[[package]]
+name = "mlirformat"
+version = "0.8.0"
+source = "git+https://github.com/Jabberwocky238/mlirformat.git?tag=0.8.0#f443f2404d6521a6a84f66a913123eb1f64910ae"
+dependencies = [
+ "mlirformat-macros",
+ "moremath",
+ "serde",
+ "smallvec",
+ "thiserror",
+]
+
+[[package]]
+name = "mlirformat-macros"
+version = "0.8.0"
+source = "git+https://github.com/Jabberwocky238/mlirformat.git?tag=0.8.0#f443f2404d6521a6a84f66a913123eb1f64910ae"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "mlirpass"
+version = "0.10.1"
+dependencies = [
+ "libm",
+ "mlirformat",
+ "mlirpass-macros",
+ "moremath",
+ "serde",
+ "smallvec",
+ "thiserror",
+]
+
+[[package]]
+name = "mlirpass-macros"
+version = "0.5.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
 
 [[package]]
 name = "moremath"
@@ -801,6 +852,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "r8compiler"
+version = "0.1.0"
+dependencies = [
+ "mlirpass",
+ "r8bytecode",
+ "r8frame",
+]
+
+[[package]]
 name = "r8debugger"
 version = "0.1.0"
 dependencies = [
@@ -833,6 +893,17 @@ dependencies = [
  "rustc-hash",
  "ryu-js",
  "smol_str",
+]
+
+[[package]]
+name = "r8jit"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "r8bytecode",
+ "r8compiler",
+ "r8executor",
+ "r8frame",
 ]
 
 [[package]]
@@ -1054,6 +1125,26 @@ dependencies = [
  "icu_segmenter",
  "smawk",
  "unicode-width",
+]
+
+[[package]]
+name = "thiserror"
+version = "2.0.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "09e52cb86a36cede5cb101bf8908837b3e4c6e5e59fe7fd85c23fb56200d189e"
+dependencies = [
+ "thiserror-impl",
+]
+
+[[package]]
+name = "thiserror-impl"
+version = "2.0.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fe5197923287db20a58125f0bc85c062f7f2c892de97b18c356f9efb14b28524"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.10",
 ]
 
 [[package]]

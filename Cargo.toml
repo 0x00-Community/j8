@@ -41,6 +41,11 @@ r8platform = { path = "crates/r8platform" }
 r8builtins = { path = "crates/r8builtins" }
 r8bytecode = { path = "crates/r8bytecode", default-features = false }
 r8executor = { path = "crates/r8executor" }
+r8compiler = { path = "crates/r8compiler" }
+r8jit = { path = "crates/r8jit" }
+# 机器码后端（target.x86_64 还没发版，先用本地检出）
+mlirpass = { path = "../mlirpass", default-features = false, features = ["target.x86_64"] }
+libc = "0.2"
 r8macros = { path = "crates/macros" }
 r8binding = { path = "crates/r8binding" }
 r8 = { path = "." }

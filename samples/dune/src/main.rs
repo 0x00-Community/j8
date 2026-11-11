@@ -28,6 +28,9 @@ struct Cli {
     /// 跑这段源码并打印结果
     #[arg(short, long, conflicts_with = "file")]
     print: Option<String>,
+    /// 开 JIT：热函数编成 x86-64 机器码跑（r8jit）
+    #[arg(long)]
+    jit: bool,
     /// 交给脚本的参数（`process.argv` 里脚本路径之后）
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     args: Vec<String>,
@@ -79,14 +82,15 @@ impl TryFrom<Cli> for Job {
 }
 
 impl Job {
-    fn run(&self) -> ExitCode {
+    /// 跑；`jit` 时普通 JS 函数热了编成机器码。
+    fn run(&self, jit: bool) -> ExitCode {
         let platform = DefaultPlatform::default();
         let mut isolate = Isolate::new(&platform, CreateParams::default());
         let (script, args) = match self {
             Job::Main { file, args } => (file.as_str(), args.as_slice()),
             _ => ("[eval]", &[][..]),
         };
-        let mut session = Session::new(&mut isolate, script, args);
+        let mut session = Session::new(&mut isolate, script, args, jit);
         match self {
             Job::Repl => session.repl(),
             Job::Main { file, .. } => {
@@ -110,8 +114,10 @@ impl Job {
 }
 
 fn main() -> ExitCode {
-    match Job::try_from(Cli::parse()) {
-        Ok(job) => job.run(),
+    let cli = Cli::parse();
+    let jit = cli.jit;
+    match Job::try_from(cli) {
+        Ok(job) => job.run(jit),
         Err(e) => {
             eprintln!("dune: {e}");
             ExitCode::FAILURE

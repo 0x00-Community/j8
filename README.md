@@ -53,10 +53,19 @@ isolate.enter(|scope| {
 cargo build --target riscv64gc-unknown-none-elf -p r8frame -p r8bytecode -p r8executor --no-default-features
 ```
 
-## 规划（未开工，只停留在设计）
+## JIT（第一档）
 
-- `jspass`（本地外部仓库 `../jspass`）：字节码下降到 MLIR 方言
-- `tornado`：JIT 编译器与执行层调度器，按 `Profiler` 热度从 r8executor 升层，编不了就留在 r8executor
+`dune --jit a.js` 开 JIT；`R8_TEST262_JIT=1 cargo test -p dune --test test262` 开着 JIT（每个函数第一次调用就编）跑基线。
+
+- `r8compiler`（`no_std`）：字节码函数 ⇒ MLIR（`llvm` 方言，文本）⇒ mlirpass `target.x86_64`（`X86_64Emit`）⇒ x86-64 机器码。
+  机器码是 `extern "C" fn(regs, acc) -> u64`，直接读写本帧寄存器文件与累加器里的 `Value`（布局见 `r8frame::ValueTag`：16 字节、首字节标签、第 8 字节起载荷）；
+  返回 0 是函数返回了，`pc + 1` 是停在第 pc 条指令之前（`r8executor::Exit`），解释器从那里接着跑
+- 第一档只收纯数值的函数：寄存器读写、数 / 布尔常量、四则（取余、乘方、位运算调运行时函数）与比较、`++` / `--`、跳转、死区检查、返回；
+  操作数不是数等快路前提不成立就退回解释器；别的指令（调用、属性、闭包……）整个函数不编
+- `r8jit`（std，x86-64 Unix）：实现执行器的 `Tier`（`Executor::with_tier`）。普通 JS 函数进帧前先问它：调用次数过阈值（缺省 100）就编、
+  `mmap` 成可执行内存、填运行时函数地址；有机器码就直接跑
+- mlirpass 的 `target.x86_64` 还没发版，workspace 先用本地检出 `../mlirpass`
+- 还没有：循环里的热点替换（OSR，只调一次的函数里的热循环编不到）、寄存器分配（后端每个值一个栈槽）、调用 / 属性等快路
 
 ## 字节码
 
@@ -114,6 +123,7 @@ cargo build --target riscv64gc-unknown-none-elf -p r8frame -p r8bytecode -p r8ex
 
 ```sh
 cargo test -p dune --test test262 -- language/expressions/addition built-ins/Math   # 跑这些目录
+R8_TEST262_JIT=1 cargo test -p dune --test test262                                   # 开 JIT（每个函数第一次调用就编）对拍
 R8_TEST262_VERBOSE=1 cargo test -p dune --test test262 -- <路径>                    # 逐条列出没过的原因
 R8_TEST262_UPDATE=1 cargo test -p dune --test test262 -- <路径>                     # 结果写回基线
 cargo test -p dune --test test262                                                   # 只跑基线里的用例，掉了就失败

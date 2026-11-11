@@ -149,9 +149,36 @@ enum Prepared<'gc> {
     Done(Value<'gc>),
 }
 
+/// 比解释更快的一层（JIT）：执行器进一个普通 JS 函数（不是构造器 / 生成器 / async）的帧之前先问它。
+pub trait Tier {
+    /// 函数 `id`（字节码 `func`）要进帧了，本帧的寄存器是 `regs`（实参已放好）、累加器是 `acc`：
+    /// 有机器码就在它们上面跑，给出怎么出来的；没有（还不热、编不了）给 `None`，照常解释。
+    fn enter(&self, id: FuncId, func: &Function, regs: &mut [Value<'_>], acc: &mut Value<'_>) -> Option<Exit>;
+}
+
+/// 机器码怎么出来的。机器码的返回值：0 是 [`Return`](Exit::Return)，`pc + 1` 是 [`Resume(pc)`](Exit::Resume)。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Exit {
+    /// 函数返回了，结果在累加器里
+    Return,
+    /// 停在第 `pc` 条指令之前（还没执行它），解释器从这里接着跑
+    Resume(u32),
+}
+
+impl From<u64> for Exit {
+    fn from(code: u64) -> Self {
+        match code {
+            0 => Exit::Return,
+            n => Exit::Resume(u32::try_from(n - 1).unwrap_or(u32::MAX)),
+        }
+    }
+}
+
 /// 字节码执行器。
 #[derive(Default)]
 pub struct Executor {
+    /// 比解释更快的一层（没有就只解释）
+    tier: Option<Rc<dyn Tier>>,
     /// 已加载的函数：只追加（`eval` / `Function` 构造器在执行中途也会加），帧里持有 `Rc`
     code: RefCell<Vec<Rc<Loaded>>>,
     /// 当前调用深度（各层重入的 `execute` 加起来）
@@ -161,6 +188,31 @@ pub struct Executor {
 }
 
 impl Executor {
+    /// 带上一层 JIT：普通 JS 函数进帧前先问它。
+    #[must_use]
+    pub fn with_tier(mut self, tier: Rc<dyn Tier>) -> Self {
+        self.tier = Some(tier);
+        self
+    }
+
+    /// 进帧前先问 JIT 层。函数已经在机器码里跑完（结果在 `acc`，帧的寄存器已退掉）给 `true`；
+    /// 机器码中途退回就把帧的 `pc` 改到它停下的地方，照常解释。
+    fn tiered<'gc>(&self, func: &Function, regs: &mut Vec<Value<'gc>>, f: &mut Frame<'gc>, acc: &mut Value<'gc>) -> bool {
+        let Some(tier) = &self.tier else { return false };
+        let end = f.base + usize::from(func.regs);
+        match tier.enter(f.func, func, &mut regs[f.base..end], acc) {
+            Some(Exit::Return) => {
+                regs.truncate(f.base);
+                true
+            }
+            Some(Exit::Resume(pc)) => {
+                f.pc = pc as usize;
+                false
+            }
+            None => false,
+        }
+    }
+
     /// 装进一个模块，返回脚本本身的函数编号。
     pub fn load(&self, module: Module) -> FuncId {
         let mut code = self.code.borrow_mut();
@@ -1139,8 +1191,10 @@ impl Executor {
                     if matches!(insn, Insn::Call { .. })
                         && let Some((c, loaded)) = self.plain_closure(target)
                     {
-                        let next = Self::enter_regs(a, regs, &loaded.func, c, target, regs[r(this)], first, usize::from(argc));
-                        frames.push(core::mem::replace(f, next));
+                        let mut next = Self::enter_regs(a, regs, &loaded.func, c, target, regs[r(this)], first, usize::from(argc));
+                        if !self.tiered(&loaded.func, regs, &mut next, acc) {
+                            frames.push(core::mem::replace(f, next));
+                        }
                         continue;
                     }
                     let list = regs[first..first + usize::from(argc)].to_vec();
@@ -1355,10 +1409,14 @@ impl<'gc> Invoke<'gc> for Executor {
             return Err(a.throw(ErrorKind::Range, "Maximum call stack size exceeded"));
         }
         // 快路：普通 JS 函数（不是类构造器 / 生成器 / async）直接开帧，实参不先拷成 Vec 过调用解析
-        if let Some((c, _)) = self.plain_closure(callee) {
+        if let Some((c, loaded)) = self.plain_closure(callee) {
             let mut regs = Vec::new();
-            let f = self.enter(a, &mut regs, c, callee, this, args);
-            return self.run_frame(a, regs, f, level);
+            let mut f = self.enter(a, &mut regs, c, callee, this, args);
+            let mut acc = Value::Undefined;
+            if self.tiered(&loaded.func, &mut regs, &mut f, &mut acc) {
+                return Ok(acc);
+            }
+            return self.run_state(a, State { regs, frames: Vec::new(), f, acc }, level).map(Outcome::returned);
         }
         match self.resolve(a, callee, this, args.to_vec(), level)? {
             Callee::Done(v) => Ok(v),

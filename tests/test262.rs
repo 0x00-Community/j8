@@ -29,6 +29,8 @@ const BASELINE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/test262
 const CASE_ENV: &str = "R8_TEST262_CASE";
 const UPDATE_ENV: &str = "R8_TEST262_UPDATE";
 const VERBOSE_ENV: &str = "R8_TEST262_VERBOSE";
+/// 开 JIT（阈值 0：每个函数第一次调用就编），拿全部用例对拍机器码
+const JIT_ENV: &str = "R8_TEST262_JIT";
 /// 单个用例的时限
 const TIMEOUT: Duration = Duration::from_secs(10);
 /// 等子进程时的轮询间隔
@@ -257,7 +259,7 @@ impl Case {
         };
         let platform = Capture { start: Instant::now(), lines: Mutex::default() };
         let mut isolate = Isolate::new(&platform, CreateParams::default());
-        let mut executor = Executor::default();
+        let mut executor = if std::env::var_os(JIT_ENV).is_some() { Executor::default().with_tier(std::rc::Rc::new(r8jit::Jit::from(0))) } else { Executor::default() };
         let file = self.path.strip_prefix(Suite::test_dir()).unwrap_or(&self.path).display().to_string();
         let expected = self.meta.negative.as_ref();
         let cx = isolate.enter(|scope| scope.persist(scope.context(&Builtins)));

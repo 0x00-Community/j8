@@ -3,22 +3,47 @@ use gc_arena::{Collect, Gc};
 use crate::{JsBigInt, JsObject, JsString, JsSymbol};
 
 /// JS 值：标量直接存，字符串与对象是 GC 指针，活在 `'gc` 里。
+///
+/// 内存布局固定（`repr(C, u8)`，见 [`ValueTag`]）：JIT 出的机器码直接读写寄存器文件里的值。
 #[derive(Clone, Copy, Debug, Default, Collect)]
 #[collect(no_drop)]
+#[repr(C, u8)]
 pub enum Value<'gc> {
     #[default]
-    Undefined,
-    Null,
-    Bool(bool),
-    Number(f64),
-    String(JsString<'gc>),
-    Symbol(JsSymbol<'gc>),
-    BigInt(JsBigInt<'gc>),
-    Object(JsObject<'gc>),
+    Undefined = ValueTag::UNDEFINED,
+    Null = ValueTag::NULL,
+    Bool(bool) = ValueTag::BOOL,
+    Number(f64) = ValueTag::NUMBER,
+    String(JsString<'gc>) = ValueTag::STRING,
+    Symbol(JsSymbol<'gc>) = ValueTag::SYMBOL,
+    BigInt(JsBigInt<'gc>) = ValueTag::BIGINT,
+    Object(JsObject<'gc>) = ValueTag::OBJECT,
     /// 暂时性死区里还没初始化的 `let` / `const` / `class` 绑定（以及派生类 `super()` 前的 `this`）。
     /// 只在寄存器、环境槽与脚本作用域里出现，读写前检查掉，不会逃出到 JS。
-    Uninit,
+    Uninit = ValueTag::UNINIT,
 }
+
+/// [`Value`] 在内存里的样子：共 [`SIZE`](Self::SIZE) 字节，第 0 字节是下面这些标签之一，
+/// 载荷（布尔一个字节、数的 `f64` 位、GC 指针）从第 [`PAYLOAD`](Self::PAYLOAD) 字节起。
+pub struct ValueTag;
+
+impl ValueTag {
+    pub const UNDEFINED: u8 = 0;
+    pub const NULL: u8 = 1;
+    pub const BOOL: u8 = 2;
+    pub const NUMBER: u8 = 3;
+    pub const STRING: u8 = 4;
+    pub const SYMBOL: u8 = 5;
+    pub const BIGINT: u8 = 6;
+    pub const OBJECT: u8 = 7;
+    pub const UNINIT: u8 = 8;
+    /// 一个值占的字节数
+    pub const SIZE: usize = 16;
+    /// 载荷的字节偏移（`repr(C, u8)`：标签之后按载荷里最大的对齐 8 字节排）
+    pub const PAYLOAD: usize = 8;
+}
+
+const _: () = assert!(core::mem::size_of::<Value<'static>>() == ValueTag::SIZE);
 
 /// 严格相等（`===`）：字符串比内容，对象比身份，`NaN` 不等于自己。
 impl PartialEq for Value<'_> {

@@ -1,0 +1,16 @@
+[package]
+name = "r8jit"
+description = "r8 JIT：挑热点函数交给 r8compiler、装载机器码、替换解释执行（快路不成立就退回解释器）"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+r8frame.workspace = true
+r8bytecode.workspace = true
+r8executor.workspace = true
+r8compiler.workspace = true
+libc.workspace = true
+
+[lints]
+workspace = true

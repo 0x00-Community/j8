@@ -34,8 +34,8 @@ pub struct Session<'s, 'p> {
 
 impl<'s, 'p> Session<'s, 'p> {
     /// 新环境：内建对象、node 式全局（`process` / `__dune`）、序言（`require`）。
-    pub fn new(isolate: &'s mut Isolate<'p>, script: &str, args: &[String]) -> Self {
-        let executor = Executor::default();
+    pub fn new(isolate: &'s mut Isolate<'p>, script: &str, args: &[String], jit: bool) -> Self {
+        let executor = if jit { Executor::default().with_tier(std::rc::Rc::new(r8jit::Jit::default())) } else { Executor::default() };
         let cx = isolate.enter(|scope| scope.persist(scope.context(&Builtins)));
         isolate.enter(|scope| {
             let realm = scope.context_of(&cx);
