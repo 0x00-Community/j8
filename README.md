@@ -15,6 +15,7 @@
 | `r8macros` | proc-macro | 过程宏：`enums!("x.json")` 从 JSON 生成枚举（定义、`Display`、按字段类型取 `&mut`），用法见 `crates/macros/USAGE.md` |
 | `samples/dune` | std | 基于 r8 的 node 式二进制（`require` / `module` / `fs` / `path` / `process`，原生部分用 `#[r8::object]` 绑定）：`dune a.js` / `dune run a.js`（`-` 读标准输入）、`dune -e '<js>'`、`dune -p '<js>'` 打印结果、不带参数进 REPL（`.help` / `.exit`）；没接住的异常打 `Uncaught …` 退出码 1 |
 | `samples/workerd` | std | 用 r8 加载 Cloudflare Worker（ES 模块 `export default { fetch }`）与 Durable Object：`workerd examples/counter.js --bind COUNTER=Counter --request "GET /c/inc?name=a"` 或 `--port 8787` 起 HTTP 服务；Fetch API 子集与 DO 在 JS 序言里，存储是 `#[r8::class]` 绑定的 Rust KV |
+| `samples/benchv8` | std | 同一组 JS 基准在 r8 与 V8（rusty_v8 152，带 JIT / `--jitless`）上的耗时对比：`cd samples/benchv8 && cargo run --release`；依赖 V8 预编译库，自成 workspace（根 workspace 已 exclude） |
 | `r8debugger` | std | 调试命令行 `r8dbg`（clap）：`r8dbg asm <file.js \| ->` / `r8dbg asm -e '<js>'` 打印字节码反汇编（`-o` 写文件） |
 | `r8executor` | `no_std`（`compile` 要 std） | 字节码执行器 `Executor`，**目前是最后一层**；`compile` feature 下实现 `Engine` |
 

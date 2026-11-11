@@ -27,6 +27,8 @@ workspace = true
 [workspace]
 resolver = "3"
 members = ["crates/*", "samples/*", "debugger"]
+# 对比 V8 的基准要下载 rusty_v8 的预编译库，自成一个 workspace
+exclude = ["samples/benchv8"]
 
 [workspace.package]
 version = "0.1.0"

@@ -1,0 +1,277 @@
+//! benchv8：同一组 JS 基准在 r8 与 V8（rusty_v8）上的耗时对比。
+//!
+//! ```text
+//! cargo run --release                    # 三种引擎各跑一遍，出对比表
+//! cargo run --release -- --engine r8     # 只跑一种：r8 / v8 / v8-jitless
+//! cargo run --release -- --runs 10       # 每个基准跑几次取最短（缺省 5）
+//! ```
+//! V8 的 `--jitless` 是进程级开关，所以每种引擎在自己的子进程里跑；计时只算编译 + 执行，
+//! 每次都换一个新的执行环境（脚本顶层的 `let` / `const` 不会撞上一次的）。
+use std::process::{Command, ExitCode};
+use std::time::Instant;
+
+/// 基准：名字与源码（脚本的完成值是校验和，三种引擎要一致）。
+const BENCHES: [(&str, &str); 11] = [
+    ("fib", include_str!("../bench/fib.js")),
+    ("loop", include_str!("../bench/loop.js")),
+    ("objects", include_str!("../bench/objects.js")),
+    ("array", include_str!("../bench/array.js")),
+    ("sort", include_str!("../bench/sort.js")),
+    ("string", include_str!("../bench/string.js")),
+    ("closures", include_str!("../bench/closures.js")),
+    ("classes", include_str!("../bench/classes.js")),
+    ("collections", include_str!("../bench/collections.js")),
+    ("json", include_str!("../bench/json.js")),
+    ("regexp", include_str!("../bench/regexp.js")),
+];
+
+/// 每个基准缺省跑几次（取最短）
+const DEFAULT_RUNS: usize = 5;
+
+/// 参加对比的引擎。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Engine {
+    R8,
+    V8,
+    V8Jitless,
+}
+
+impl Engine {
+    const ALL: [Engine; 3] = [Engine::R8, Engine::V8Jitless, Engine::V8];
+
+    fn name(self) -> &'static str {
+        match self {
+            Engine::R8 => "r8",
+            Engine::V8 => "v8",
+            Engine::V8Jitless => "v8-jitless",
+        }
+    }
+}
+
+impl TryFrom<&str> for Engine {
+    type Error = String;
+
+    fn try_from(s: &str) -> Result<Self, String> {
+        Engine::ALL
+            .into_iter()
+            .find(|e| e.name() == s)
+            .ok_or_else(|| format!("unknown engine {s} (r8 / v8 / v8-jitless)"))
+    }
+}
+
+/// 一个基准的结果：最短耗时（毫秒）与校验和；出错给错误文本。
+type Outcome = Result<(f64, String), String>;
+
+/// 在 r8 上跑。
+struct R8Runner;
+
+impl R8Runner {
+    fn run(src: &str, runs: usize) -> Outcome {
+        use r8builtins::Builtins;
+        use r8executor::Executor;
+        use r8frame::{CreateParams, Error, Isolate, Source};
+        let platform = r8platform::DefaultPlatform::default();
+        let mut isolate = Isolate::new(&platform, CreateParams::default());
+        let mut executor = Executor::default();
+        let mut best = f64::INFINITY;
+        let mut result = String::new();
+        for _ in 0..runs {
+            let cx = isolate.enter(|scope| scope.persist(scope.context(&Builtins)));
+            let start = Instant::now();
+            let r = isolate.run(
+                &mut executor,
+                &cx,
+                &Source {
+                    text: src,
+                    file: "bench.js",
+                },
+            );
+            best = best.min(start.elapsed().as_secs_f64() * 1e3);
+            let text = isolate.enter(|scope| {
+                let realm = scope.context_of(&cx);
+                let mut a = scope.agent(realm, &executor);
+                match r {
+                    Ok(g) => {
+                        let v = a.local(&g);
+                        a.to_string(v)
+                            .map(|s| String::from(&**s))
+                            .map_err(|e| e.to_string())
+                    }
+                    Err(Error::Exception(g)) => {
+                        let v = a.local(&g);
+                        Err(a.to_string(v).map_or_else(
+                            |_| String::from("exception"),
+                            |s| format!("Uncaught {}", &**s),
+                        ))
+                    }
+                    Err(e) => Err(e.to_string()),
+                }
+            })?;
+            result = text;
+        }
+        Ok((best, result))
+    }
+}
+
+/// 在 V8 上跑。
+struct V8Runner;
+
+impl V8Runner {
+    fn init(jitless: bool) {
+        if jitless {
+            v8::V8::set_flags_from_string("--jitless");
+        }
+        let platform = v8::new_default_platform(0, false).make_shared();
+        v8::V8::initialize_platform(platform);
+        v8::V8::initialize();
+    }
+
+    fn run(src: &str, runs: usize) -> Outcome {
+        let isolate = &mut v8::Isolate::new(v8::CreateParams::default());
+        let mut best = f64::INFINITY;
+        let mut result = String::new();
+        for _ in 0..runs {
+            v8::scope!(let handle_scope, isolate);
+            let context = v8::Context::new(handle_scope, Default::default());
+            let scope = &mut v8::ContextScope::new(handle_scope, context);
+            v8::tc_scope!(let tc, scope);
+            let code = v8::String::new(tc, src).ok_or("source too large")?;
+            let start = Instant::now();
+            let value = v8::Script::compile(tc, code, None).and_then(|s| s.run(tc));
+            best = best.min(start.elapsed().as_secs_f64() * 1e3);
+            match value {
+                Some(v) => result = v.to_rust_string_lossy(tc),
+                None => {
+                    let e = tc
+                        .exception()
+                        .map_or_else(|| String::from("exception"), |e| e.to_rust_string_lossy(tc));
+                    return Err(format!("Uncaught {e}"));
+                }
+            }
+        }
+        Ok((best, result))
+    }
+}
+
+impl Engine {
+    /// 子进程：跑这种引擎的全部基准，一行一个：`名字\t毫秒\t校验和` 或 `名字\tERR\t错误`。
+    fn run_all(self, runs: usize) {
+        let engine = self;
+        if engine != Engine::R8 {
+            V8Runner::init(engine == Engine::V8Jitless);
+        }
+        for (name, src) in BENCHES {
+            let r = match engine {
+                Engine::R8 => R8Runner::run(src, runs),
+                Engine::V8 | Engine::V8Jitless => V8Runner::run(src, runs),
+            };
+            match r {
+                Ok((ms, sum)) => println!("{name}\t{ms:.2}\t{sum}"),
+                Err(e) => println!("{name}\tERR\t{}", e.replace(['\t', '\n'], " ")),
+            }
+        }
+    }
+}
+
+/// 一行结果。
+struct Row {
+    ms: Option<f64>,
+    sum: String,
+}
+
+/// 主进程的对比表。
+struct Comparison;
+
+impl Comparison {
+    /// 每种引擎起一个子进程，汇总成表。
+    fn run(runs: usize) -> Result<(), String> {
+        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        let mut table: Vec<Vec<Row>> = Vec::new();
+        for engine in Engine::ALL {
+            eprintln!("benchv8: running {} …", engine.name());
+            let out = Command::new(&exe)
+                .args(["--engine", engine.name(), "--runs", &runs.to_string()])
+                .output()
+                .map_err(|e| e.to_string())?;
+            let text = String::from_utf8_lossy(&out.stdout);
+            let rows = BENCHES
+                .iter()
+                .map(|(name, _)| {
+                    let line = text.lines().find(|l| l.split('\t').next() == Some(name));
+                    let mut parts = line.unwrap_or("").splitn(3, '\t').skip(1);
+                    let ms = parts.next().and_then(|m| m.parse().ok());
+                    Row {
+                        ms,
+                        sum: parts.next().unwrap_or("crashed").to_owned(),
+                    }
+                })
+                .collect();
+            table.push(rows);
+        }
+        let ms = |r: &Row| {
+            r.ms.map_or_else(|| String::from("—"), |m| format!("{m:.1}"))
+        };
+        let ratio = |a: &Row, b: &Row| match (a.ms, b.ms) {
+            (Some(x), Some(y)) if y > 0.0 => format!("{:.1}×", x / y),
+            _ => String::from("—"),
+        };
+        println!(
+            "{:<12} {:>10} {:>14} {:>10} {:>14} {:>10}  check",
+            "bench", "r8 ms", "v8-jitless ms", "v8 ms", "r8/jitless", "r8/v8"
+        );
+        for (i, (name, _)) in BENCHES.iter().enumerate() {
+            let (r8, jl, v8) = (&table[0][i], &table[1][i], &table[2][i]);
+            let check = if r8.sum == v8.sum && jl.sum == v8.sum {
+                String::from("ok")
+            } else {
+                format!("r8={} v8={}", r8.sum, v8.sum)
+            };
+            println!(
+                "{:<12} {:>10} {:>14} {:>10} {:>14} {:>10}  {}",
+                name,
+                ms(r8),
+                ms(jl),
+                ms(v8),
+                ratio(r8, jl),
+                ratio(r8, v8),
+                check
+            );
+        }
+        let geo = |a: usize, b: usize| {
+            let logs: Vec<f64> = (0..BENCHES.len())
+                .filter_map(|i| Some((table[a][i].ms? / table[b][i].ms?).ln()))
+                .collect();
+            (logs.iter().sum::<f64>() / logs.len().max(1) as f64).exp()
+        };
+        println!(
+            "geomean      r8/jitless {:.1}×   r8/v8 {:.1}×",
+            geo(0, 1),
+            geo(0, 2)
+        );
+        Ok(())
+    }
+}
+
+fn main() -> ExitCode {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let flag = |name: &str| {
+        args.iter()
+            .position(|a| a == name)
+            .and_then(|i| args.get(i + 1))
+            .cloned()
+    };
+    let runs = flag("--runs")
+        .and_then(|r| r.parse().ok())
+        .unwrap_or(DEFAULT_RUNS);
+    let r = match flag("--engine") {
+        Some(e) => Engine::try_from(e.as_str()).map(|engine| engine.run_all(runs)),
+        None => Comparison::run(runs),
+    };
+    match r {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("benchv8: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
