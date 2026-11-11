@@ -751,6 +751,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "r8binding"
+version = "0.1.0"
+dependencies = [
+ "gc-arena",
+ "r8builtins",
+ "r8executor",
+ "r8frame",
+ "r8macros",
+ "r8platform",
+]
+
+[[package]]
 name = "r8builtins"
 version = "0.1.0"
 dependencies = [

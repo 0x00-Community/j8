@@ -1,0 +1,65 @@
+//! `#[r8binding::class]` 生成的绑定在真引擎里跑一遍。
+#![expect(clippy::needless_pass_by_value, clippy::unnecessary_wraps, reason = "绑定的形参按值收、返回 Result 是要测的写法")]
+use r8binding::{Class, Rest};
+use r8builtins::Builtins;
+use r8executor::Executor;
+use r8frame::{Agent, CreateParams, Error, Isolate, Source, Value};
+use r8platform::DefaultPlatform;
+
+struct Counter {
+    n: f64,
+}
+
+#[r8binding::class]
+impl Counter {
+    #[js(constructor)]
+    fn new(start: Option<f64>) -> Self {
+        Self { n: start.unwrap_or(0.0) }
+    }
+
+    fn inc(&mut self, by: f64) -> f64 {
+        self.n += by;
+        self.n
+    }
+
+    #[js(getter)]
+    fn value(&self) -> f64 {
+        self.n
+    }
+
+    #[js(setter, name = "value")]
+    fn set_value(&mut self, v: f64) {
+        self.n = v;
+    }
+
+    fn sum(items: Rest<'_>) -> usize {
+        items.0.len()
+    }
+
+    fn describe<'gc>(&self, a: &mut Agent<'gc, '_>, label: String) -> Result<Value<'gc>, Error> {
+        Ok(a.string(&format!("{label}={}", self.n)).into())
+    }
+}
+
+#[test]
+fn class_binding() {
+    let platform = DefaultPlatform::default();
+    let mut isolate = Isolate::new(&platform, CreateParams::default());
+    let mut executor = Executor::default();
+    let cx = isolate.enter(|scope| scope.persist(scope.context(&Builtins)));
+    isolate.enter(|scope| {
+        let realm = scope.context_of(&cx);
+        let mut a = scope.agent(realm, &executor);
+        let global = a.realm.global;
+        Counter::install(&mut a, global);
+    });
+    let src = "const c = new Counter(2); c.inc(3); c.value = c.value * 2; [c.value, c.describe('n'), Counter.sum(1, 2, 3), c instanceof Counter, String(Object.prototype.toString.call(c))].join()";
+    let r = isolate.run(&mut executor, &cx, &Source { text: src, file: "t.js" });
+    let text = isolate.enter(|scope| {
+        let realm = scope.context_of(&cx);
+        let mut a = scope.agent(realm, &executor);
+        let v = a.local(&r.expect("the script runs"));
+        String::from(&**a.to_string(v).expect("a string"))
+    });
+    assert_eq!(text, "10,n=10,3,true,[object Counter]");
+}

@@ -1,0 +1,19 @@
+[package]
+name = "r8binding"
+description = "r8 的 Rust ⇄ JS 绑定：类型转换、宿主对象、把 Rust 类型导出成 JS 类（过程宏在 r8macros）"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+r8frame.workspace = true
+r8macros.workspace = true
+gc-arena.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+r8executor.workspace = true
+r8builtins.workspace = true
+r8platform.workspace = true

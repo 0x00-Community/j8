@@ -518,6 +518,9 @@ pub struct ArgumentsMap<'gc> {
     pub slots: Vec<Option<u16>>,
 }
 
+/// 宿主对象里的 Rust 数据（按类型取出，可变借用经 `RefCell`）。
+pub type HostData<'gc> = Gc<'gc, gc_arena::Static<core::cell::RefCell<Box<dyn core::any::Any>>>>;
+
 /// 对象的种类：普通对象之外带的内部槽。
 #[derive(Debug, Default, Collect)]
 #[collect(no_drop)]
@@ -555,6 +558,8 @@ pub enum ObjectKind<'gc> {
     ArrayBuffer(BufferData),
     /// Date：时间值（毫秒，无效是 NaN）
     Date(f64),
+    /// 宿主对象：绑定层（r8binding）放进来的 Rust 数据（不含 GC 指针，按类型取出）
+    Host(HostData<'gc>),
     /// 模块命名空间对象：导出名（排好序）与解析到的绑定
     ModuleNamespace(Vec<(JsString<'gc>, crate::ResolvedBinding<'gc>)>),
     /// WeakRef（目前强引用目标）
@@ -616,6 +621,7 @@ impl fmt::Debug for ObjectData<'_> {
             ObjectKind::Proxy(_) => "Proxy",
             ObjectKind::ArrayBuffer(_) => "ArrayBuffer",
             ObjectKind::Date(_) => "Date",
+            ObjectKind::Host(_) => "Host",
             ObjectKind::ModuleNamespace(_) => "Module",
             ObjectKind::WeakRef(_) => "WeakRef",
             ObjectKind::FinalizationRegistry { .. } => "FinalizationRegistry",
