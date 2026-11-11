@@ -594,6 +594,15 @@ pub enum ObjectKind<'gc> {
 }
 
 impl ObjectKind<'_> {
+    /// 自有属性就是属性表里的那些：[[GetOwnProperty]] / [[GetPrototypeOf]] 都是普通的
+    /// （不是 Proxy / 数组 / 类型化数组 / 模块命名空间 / 字符串包装 / arguments），查属性可以走快路。
+    pub fn has_ordinary_properties(&self) -> bool {
+        !matches!(
+            self,
+            ObjectKind::Proxy(_) | ObjectKind::Array(_) | ObjectKind::TypedArray(..) | ObjectKind::ModuleNamespace(_) | ObjectKind::Primitive(Value::String(_)) | ObjectKind::Arguments(_)
+        )
+    }
+
     pub fn is_callable(&self) -> bool {
         matches!(self, ObjectKind::Function(_) | ObjectKind::Native(_) | ObjectKind::Bound(_) | ObjectKind::Resolver { .. } | ObjectKind::NativeClosure(_) | ObjectKind::Proxy(ProxyData { callable: true, .. }))
     }
@@ -756,7 +765,9 @@ impl<'gc> ObjectData<'gc> {
     pub fn own_slot(&self, key: Key<'_, 'gc>) -> Option<Property<'gc>> {
         match key {
             Key::Str(k) => {
-                if let (ObjectKind::Array(items), Some(i)) = (&self.kind, crate::ops::index_of_str(k))
+                // 先看是不是数组再解析下标：普通对象查属性不用解析
+                if let ObjectKind::Array(items) = &self.kind
+                    && let Some(i) = crate::ops::index_of_str(k)
                     && let Some(&v) = items.get(i as usize)
                 {
                     return Some(Property::data(v));
@@ -768,6 +779,31 @@ impl<'gc> ObjectData<'gc> {
     }
 
     /// 存一个自有属性（已经验过能存）：数组的下标能进稠密部分就进，不能就按普通属性存并撑长度。
+    /// 普通对象写属性的快路（OrdinarySet 在接收者自己身上的那一步）：自有可写数据属性就改值，
+    /// 没有且可扩展就新建普通数据属性。给出 `Some(成没成)`；要走慢路（有访问器 / 不是普通对象）给 `None`。
+    pub fn ordinary_put(&mut self, key: Key<'_, 'gc>, value: Value<'gc>) -> Option<bool> {
+        if !self.kind.has_ordinary_properties() {
+            return None;
+        }
+        let slot = match key {
+            Key::Str(k) => self.position(k).map(|i| &mut self.props[i].1),
+            Key::Sym(s) => self.symbols.iter_mut().find(|(k, _)| Gc::ptr_eq(*k, s)).map(|(_, p)| p),
+        };
+        match slot {
+            Some(Property { slot: Slot::Data(v), writable: true, .. }) => {
+                *v = value;
+                Some(true)
+            }
+            Some(Property { slot: Slot::Data(_), writable: false, .. }) => Some(false),
+            Some(_) => None,
+            None if self.non_extensible => Some(false),
+            None => {
+                self.store(key, Property::data(value));
+                Some(true)
+            }
+        }
+    }
+
     pub fn store(&mut self, key: Key<'_, 'gc>, prop: Property<'gc>) {
         let k = match key {
             Key::Sym(s) => return self.define_symbol(s, prop),

@@ -570,6 +570,26 @@ impl<'gc> Agent<'gc, '_> {
     pub fn object_get(&mut self, o: JsObject<'gc>, key: Key<'_, 'gc>, receiver: Value<'gc>) -> Result<Value<'gc>, Error> {
         let mut cur = o;
         loop {
+            // 快路：普通对象一次借用查完自有属性，没有就直接上原型
+            let fast = {
+                let d = cur.borrow();
+                d.kind.has_ordinary_properties().then(|| (d.own_slot(key), d.proto))
+            };
+            match fast {
+                Some((Some(p), _)) => {
+                    return match p.slot {
+                        Slot::Data(v) => Ok(v),
+                        Slot::Accessor { get: Some(g), .. } => self.call(g.into(), receiver, &[]),
+                        Slot::Accessor { get: None, .. } => Ok(Value::Undefined),
+                    };
+                }
+                Some((None, Some(proto))) => {
+                    cur = proto;
+                    continue;
+                }
+                Some((None, None)) => return Ok(Value::Undefined),
+                None => {}
+            }
             if let Some(parts) = self.proxy_parts(cur) {
                 let (t, h) = parts?;
                 return self.proxy_get(t, h, key, receiver);
@@ -635,6 +655,20 @@ impl<'gc> Agent<'gc, '_> {
     pub fn object_set(&mut self, o: JsObject<'gc>, key: Key<'_, 'gc>, value: Value<'gc>, receiver: Value<'gc>) -> Result<bool, Error> {
         let mut cur = o;
         let found = loop {
+            // 快路：普通对象一次借用查完自有属性，没有就直接上原型
+            let fast = {
+                let d = cur.borrow();
+                d.kind.has_ordinary_properties().then(|| (d.own_slot(key), d.proto))
+            };
+            match fast {
+                Some((Some(p), _)) => break Some(p),
+                Some((None, Some(proto))) => {
+                    cur = proto;
+                    continue;
+                }
+                Some((None, None)) => break None,
+                None => {}
+            }
             if let Some(parts) = self.proxy_parts(cur) {
                 let (t, h) = parts?;
                 return self.proxy_set(t, h, key, value, receiver);
@@ -668,6 +702,9 @@ impl<'gc> Agent<'gc, '_> {
             _ => {}
         }
         let Value::Object(r) = receiver else { return Ok(false) };
+        if let Some(done) = r.borrow_mut(self.mc).ordinary_put(key, value) {
+            return Ok(done);
+        }
         match self.get_own_property(r, key)? {
             Some(Property { slot: Slot::Accessor { .. }, .. } | Property { writable: false, .. }) => Ok(false),
             Some(_) => self.define_own_property(r, key, Descriptor::value(value)),
