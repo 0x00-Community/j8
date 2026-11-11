@@ -1,6 +1,6 @@
 //! JS ⇒ 字节码：表达式。结果都留在 acc。
 use oxc_ast::ast::{
-    Argument, ArrayExpressionElement, ArrowFunctionBody, AssignmentTarget, AssignmentTargetMaybeDefault, AssignmentTargetProperty, ChainElement, ComputedMemberExpression, PrivateFieldExpression, StaticMemberExpression, ArrowFunctionExpression, AssignmentExpression, AssignmentOperator, BinaryExpression, BinaryOperator, CallExpression, Expression, LogicalOperator, MemberExpression, ObjectExpression, ObjectPropertyKind, PropertyKind as PropertyKind_, SimpleAssignmentTarget, TemplateElement, UnaryOperator, UpdateExpression,
+    Argument, ArrayAssignmentTarget, ArrayExpressionElement, ArrowFunctionBody, AssignmentTarget, AssignmentTargetMaybeDefault, AssignmentTargetProperty, ChainElement, ComputedMemberExpression, PrivateFieldExpression, StaticMemberExpression, TaggedTemplateExpression, ArrowFunctionExpression, AssignmentExpression, AssignmentOperator, BinaryExpression, BinaryOperator, CallExpression, Expression, LogicalOperator, MemberExpression, MethodDefinitionKind, ObjectExpression, ObjectPropertyKind, PropertyKind as PropertyKind_, SimpleAssignmentTarget, TemplateElement, UnaryOperator, UpdateExpression,
     UpdateOperator,
 };
 use oxc_span::{GetSpan, Span};
@@ -167,11 +167,13 @@ impl<'a> Compiler<'a, '_> {
             Expression::ThisExpression(t) => self.load_at(crate::scope::THIS, t.span.start),
             Expression::ParenthesizedExpression(p) => self.expr(&p.expression)?,
             Expression::FunctionExpression(f) => {
-                let n = self.plain_function(f, true)?;
+                let n = self.plain_function(f, true, "")?;
                 self.emit(Insn::CreateClosure(n));
             }
-            Expression::ArrowFunctionExpression(a) => self.arrow(a)?,
-            Expression::ClassExpression(c) => self.class(c)?,
+            Expression::ArrowFunctionExpression(a) => self.arrow(a, "")?,
+            Expression::ClassExpression(c) => self.class(c, "")?,
+            Expression::NewTarget(t) => self.load_at(crate::scope::NEW_TARGET, t.span.start),
+            Expression::TaggedTemplateExpression(t) => self.tagged_template(t)?,
             Expression::YieldExpression(y) => {
                 let mode = self.resume_reg(y.span, "yield outside a generator")?;
                 let async_generator = self.is_async_generator();
@@ -326,12 +328,83 @@ impl<'a> Compiler<'a, '_> {
         Ok(())
     }
 
-    fn arrow(&mut self, a: &'a ArrowFunctionExpression<'a>) -> Result<(), Error> {
+    /// 匿名函数 / 箭头函数 / 匿名类按规范推断名字（NamedEvaluation）；别的照常求值。
+    pub(crate) fn expr_named(&mut self, e: &'a Expression<'a>, name: &'a str) -> Result<(), Error> {
+        match e {
+            Expression::FunctionExpression(f) if f.id.is_none() => {
+                let n = self.plain_function(f, true, name)?;
+                self.emit(Insn::CreateClosure(n));
+                Ok(())
+            }
+            Expression::ArrowFunctionExpression(a) => self.arrow(a, name),
+            Expression::ClassExpression(c) if c.id.is_none() => self.class(c, name),
+            Expression::ParenthesizedExpression(p) => self.expr_named(&p.expression, name),
+            e => self.expr(e),
+        }
+    }
+
+    /// 标签模板：`tag(模板对象, ...替换值)`，模板对象按调用点缓存（cooked 串非法转义时是 undefined）。
+    fn tagged_template(&mut self, t: &'a TaggedTemplateExpression<'a>) -> Result<(), Error> {
+        let subs = &t.quasi.expressions;
+        let argc = u16::try_from(subs.len() + 1).map_err(|_| self.unsupported(t.span, "more than 65535 substitutions"))?;
+        let callee = self.temps(2 + argc);
+        let this = Reg(callee.0 + 1);
+        let args = Reg(callee.0 + 2);
+        match &t.tag {
+            Expression::StaticMemberExpression(m) => {
+                self.expr(&m.object)?;
+                self.emit(Insn::Star(this));
+                let name = self.name(m.property.name.as_str());
+                self.emit(Insn::GetNamed { obj: this, name });
+            }
+            Expression::ComputedMemberExpression(m) => {
+                self.expr(&m.object)?;
+                self.emit(Insn::Star(this));
+                self.expr(&m.expression)?;
+                self.emit(Insn::GetKeyed { obj: this });
+            }
+            tag => {
+                self.emit(Insn::LdaUndefined);
+                self.emit(Insn::Star(this));
+                self.expr(tag)?;
+            }
+        }
+        self.emit(Insn::Star(callee));
+        let count = u16::try_from(t.quasi.quasis.len()).map_err(|_| self.unsupported(t.span, "too many template parts"))?;
+        let strings = self.temps(count * 2);
+        for (i, q) in (0u16..).zip(&t.quasi.quasis) {
+            match q.value.cooked.and_then(|c| c.as_str().map(str::to_owned)) {
+                Some(c) => {
+                    let k = self.constant(Constant::String(c.into()));
+                    self.emit(Insn::LdaConst(k));
+                }
+                None => _ = self.emit(Insn::LdaUndefined),
+            }
+            self.emit(Insn::Star(Reg(strings.0 + i)));
+            let raw = self.constant(Constant::String((&*q.value.raw).into()));
+            self.emit(Insn::LdaConst(raw));
+            self.emit(Insn::Star(Reg(strings.0 + count + i)));
+        }
+        let site = self.sites;
+        self.sites += 1;
+        self.emit(Insn::GetTemplateObject { site, first: strings, count });
+        self.release(strings);
+        self.emit(Insn::Star(args));
+        for (i, e) in (1u16..).zip(subs) {
+            self.expr(e)?;
+            self.emit(Insn::Star(Reg(args.0 + i)));
+        }
+        self.emit(Insn::Call { callee, this, args, argc });
+        self.release(callee);
+        Ok(())
+    }
+
+    fn arrow(&mut self, a: &'a ArrowFunctionExpression<'a>, name: &str) -> Result<(), Error> {
         let body = match &a.body {
             ArrowFunctionBody::FunctionBody(b) => Body::Statements(&b.statements),
             e => Body::Expression(e.as_expression().expect("an arrow's body is a block or an expression")),
         };
-        let n = self.function("", Flavor { kind: FunctionKind::Arrow, generator: false, asynchronous: a.r#async }, None, None, Some(&a.params), body)?;
+        let n = self.function(name, Flavor { kind: FunctionKind::Arrow, generator: false, asynchronous: a.r#async }, None, None, Some(&a.params), body)?;
         self.emit(Insn::CreateClosure(n));
         Ok(())
     }
@@ -430,7 +503,10 @@ impl<'a> Compiler<'a, '_> {
         let t = self.target(t)?;
         match Self::assign_kind(a.operator) {
             Assign::Plain => {
-                self.expr(&a.right)?;
+                match &t {
+                    Target::Name(n) => self.expr_named(&a.right, n)?,
+                    _ => self.expr(&a.right)?,
+                }
                 self.target_store(&t);
             }
             Assign::Binary(op) => {
@@ -445,7 +521,10 @@ impl<'a> Compiler<'a, '_> {
             Assign::Logical(skip) => {
                 self.target_load(&t);
                 let at = self.jump(skip);
-                self.expr(&a.right)?;
+                match &t {
+                    Target::Name(n) => self.expr_named(&a.right, n)?,
+                    _ => self.expr(&a.right)?,
+                }
                 self.target_store(&t);
                 self.land(at);
             }
@@ -622,51 +701,7 @@ impl<'a> Compiler<'a, '_> {
     /// 解构赋值：把寄存器 `value` 里的值按赋值目标模式存进去。
     pub(crate) fn assign_target(&mut self, t: &'a AssignmentTarget<'a>, value: Reg) -> Result<(), Error> {
         match t {
-            AssignmentTarget::ArrayAssignmentTarget(a) => {
-                let iter = self.iterate(value);
-                // 规范顺序：每个元素先求值目标引用、再走迭代器；中途抛出先关迭代器
-                self.closing_on_throw(iter, |c| {
-                    for e in &a.elements {
-                        let Some(e) = e else {
-                            c.emit(Insn::IteratorNext { iter });
-                            continue;
-                        };
-                        let (binding, default) = match e {
-                            AssignmentTargetMaybeDefault::AssignmentTargetWithDefault(d) => (&d.binding, Some(&d.init)),
-                            t => (t.as_assignment_target().ok_or_else(|| c.unsupported(t.span(), "assignment target"))?, None),
-                        };
-                        let pre = c.pre_target(binding)?;
-                        c.emit(Insn::IteratorNext { iter });
-                        let v = c.temp();
-                        c.emit(Insn::Star(v));
-                        let v2 = match default {
-                            Some(d) => c.with_default(v, d)?,
-                            None => v,
-                        };
-                        c.put_target(pre.as_ref(), binding, v2)?;
-                        c.release(v);
-                        if let Some(t) = &pre {
-                            c.target_release(t);
-                        }
-                    }
-                    match &a.rest {
-                        Some(r) => {
-                            let pre = c.pre_target(&r.target)?;
-                            c.emit(Insn::IteratorRest { iter });
-                            let v = c.temp();
-                            c.emit(Insn::Star(v));
-                            c.put_target(pre.as_ref(), &r.target, v)?;
-                            c.release(v);
-                            if let Some(t) = &pre {
-                                c.target_release(t);
-                            }
-                        }
-                        None => _ = c.emit(Insn::IteratorClose { iter }),
-                    }
-                    Ok(())
-                })?;
-                self.release(iter);
-            }
+            AssignmentTarget::ArrayAssignmentTarget(a) => self.assign_array(a, value)?,
             AssignmentTarget::ObjectAssignmentTarget(o) => {
                 let n = u16::try_from(o.properties.len()).map_err(|_| self.unsupported(o.span, "more than 65535 properties"))?;
                 let keys = self.temps(n);
@@ -682,7 +717,7 @@ impl<'a> Compiler<'a, '_> {
                             let v = self.temp();
                             self.emit(Insn::Star(v));
                             let v2 = match &id.init {
-                                Some(d) => self.with_default(v, d)?,
+                                Some(d) => self.with_default(v, d, Some(name))?,
                                 None => v,
                             };
                             self.emit(Insn::Ldar(v2));
@@ -722,6 +757,58 @@ impl<'a> Compiler<'a, '_> {
         Ok(())
     }
 
+    /// 数组解构赋值：规范顺序——每个元素先求值目标引用、再走迭代器；中途抛出先关迭代器。
+    fn assign_array(&mut self, a: &'a ArrayAssignmentTarget<'a>, value: Reg) -> Result<(), Error> {
+        let iter = self.iterate(value);
+        // 规范顺序：每个元素先求值目标引用、再走迭代器；中途抛出先关迭代器
+        self.closing_on_throw(iter, |c| {
+            for e in &a.elements {
+                let Some(e) = e else {
+                    c.emit(Insn::IteratorNext { iter });
+                    continue;
+                };
+                let (binding, default) = match e {
+                    AssignmentTargetMaybeDefault::AssignmentTargetWithDefault(d) => (&d.binding, Some(&d.init)),
+                    t => (t.as_assignment_target().ok_or_else(|| c.unsupported(t.span(), "assignment target"))?, None),
+                };
+                let pre = c.pre_target(binding)?;
+                c.emit(Insn::IteratorNext { iter });
+                let v = c.temp();
+                c.emit(Insn::Star(v));
+                let name = match binding {
+                    AssignmentTarget::AssignmentTargetIdentifier(id) => Some(id.name.as_str()),
+                    _ => None,
+                };
+                let v2 = match default {
+                    Some(d) => c.with_default(v, d, name)?,
+                    None => v,
+                };
+                c.put_target(pre.as_ref(), binding, v2)?;
+                c.release(v);
+                if let Some(t) = &pre {
+                    c.target_release(t);
+                }
+            }
+            match &a.rest {
+                Some(r) => {
+                    let pre = c.pre_target(&r.target)?;
+                    c.emit(Insn::IteratorRest { iter });
+                    let v = c.temp();
+                    c.emit(Insn::Star(v));
+                    c.put_target(pre.as_ref(), &r.target, v)?;
+                    c.release(v);
+                    if let Some(t) = &pre {
+                        c.target_release(t);
+                    }
+                }
+                None => _ = c.emit(Insn::IteratorClose { iter }),
+            }
+            Ok(())
+        })?;
+        self.release(iter);
+        Ok(())
+    }
+
     /// 数组解构的元素：目标不是模式就先求值它的引用（对象与键进临时寄存器）；是模式给 `None`，取到值再展开。
     fn pre_target(&mut self, t: &'a AssignmentTarget<'a>) -> Result<Option<Target<'a>>, Error> {
         match t.as_simple_assignment_target() {
@@ -745,7 +832,11 @@ impl<'a> Compiler<'a, '_> {
     fn assign_maybe_default(&mut self, e: &'a AssignmentTargetMaybeDefault<'a>, value: Reg) -> Result<(), Error> {
         match e {
             AssignmentTargetMaybeDefault::AssignmentTargetWithDefault(d) => {
-                let v = self.with_default(value, &d.init)?;
+                let name = match &d.binding {
+                    AssignmentTarget::AssignmentTargetIdentifier(id) => Some(id.name.as_str()),
+                    _ => None,
+                };
+                let v = self.with_default(value, &d.init, name)?;
                 self.assign_target(&d.binding, v)?;
                 self.release(v);
                 Ok(())
@@ -914,10 +1005,20 @@ impl<'a> Compiler<'a, '_> {
             };
             match (&p.value, p.method || kind != PropertyKind::Data) {
                 (Expression::FunctionExpression(f), true) => {
-                    let n = self.method("", f, FunctionKind::Method)?;
+                    let mkind = match p.kind {
+                        PropertyKind_::Get => MethodDefinitionKind::Get,
+                        PropertyKind_::Set => MethodDefinitionKind::Set,
+                        PropertyKind_::Init => MethodDefinitionKind::Method,
+                    };
+                    let fname = self.method_name(&p.key, p.computed, mkind);
+                    let n = self.method(fname, f, FunctionKind::Method)?;
                     self.emit(Insn::CreateMethod { func: n, home: obj });
                 }
-                (v, _) => self.expr(v)?,
+                (v, _) => match self.static_name(&p.key, p.computed) {
+                    // `__proto__: function () {}` 不推断名字
+                    Some(n) if n != "__proto__" || p.shorthand => self.expr_named(v, n)?,
+                    _ => self.expr(v)?,
+                },
             }
             match key {
                 Ok(name) => _ = self.emit(Insn::DefineNamed { obj, name, kind, enumerable: true }),

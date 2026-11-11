@@ -156,7 +156,7 @@ impl Installer<'_, '_> {
         self.getter(proto, "description", Iters::symbol_description);
         r.symbol_method(self.mc, r.iterator_proto, sym.iterator, Iters::this_value);
         // 数组：`values` 与 `[Symbol.iterator]` 是同一个函数
-        let values = r.native(self.mc, Iters::values);
+        let values = r.named_native(self.mc, Iters::values, "values");
         self.set(r.array_proto, "values", values.into());
         r.array_proto.borrow_mut(self.mc).define_symbol(sym.iterator, r8frame::Property::hidden(values.into()));
         self.method(r.array_proto, "keys", Iters::keys);

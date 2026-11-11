@@ -63,7 +63,7 @@ impl<'gc> Installer<'_, 'gc> {
 
     /// 全局对象上的一个构造器：宿主函数，`prototype` ⇄ `constructor` 互指。
     fn constructor(&self, name: &str, f: r8frame::NativeFn, proto: JsObject<'gc>) -> JsObject<'gc> {
-        let ctor = self.realm.native(self.mc, f);
+        let ctor = self.realm.named_native(self.mc, f, name);
         self.set(ctor, "prototype", proto.into());
         self.set(proto, "constructor", ctor.into());
         self.set(self.realm.global, name, ctor.into());
@@ -72,7 +72,7 @@ impl<'gc> Installer<'_, 'gc> {
 
     /// 宿主 getter（不可枚举）。
     fn getter(&self, target: JsObject<'gc>, name: &str, f: r8frame::NativeFn) {
-        let g = self.realm.native(self.mc, f);
+        let g = self.realm.named_native(self.mc, f, &alloc::format!("get {name}"));
         target.borrow_mut(self.mc).define(self.mc, name, r8frame::Property { slot: r8frame::Slot::Accessor { get: Some(g), set: None }, enumerable: false, writable: false, configurable: true });
     }
 

@@ -224,8 +224,26 @@ impl Objects {
         if !a.is_callable(this) {
             return Err(a.throw(ErrorKind::Type, "Bind must be called on a function"));
         }
-        let bound = Bound { target: this, this: args.at(0), args: args.get(1..).unwrap_or(&[]).to_vec() };
-        Ok(ObjectData { kind: ObjectKind::Bound(bound), proto: Some(a.realm.function_proto), ..ObjectData::default() }.alloc(a.mc).into())
+        let pre = args.get(1..).unwrap_or(&[]).to_vec();
+        // length = max(0, 目标的 length − 预先绑定的实参个数)；name = "bound " + 目标的 name
+        let length = match a.get_named(this, "length")? {
+            Value::Number(n) if n.is_finite() => (libm::trunc(n) - f64::from(u32::try_from(pre.len()).unwrap_or(u32::MAX))).max(0.0),
+            Value::Number(n) if n == f64::INFINITY => n,
+            _ => 0.0,
+        };
+        let name = match a.get_named(this, "name")? {
+            Value::String(s) => alloc::format!("bound {}", &**s),
+            _ => alloc::string::String::from("bound "),
+        };
+        let bound = Bound { target: this, this: args.at(0), args: pre };
+        let f = ObjectData { kind: ObjectKind::Bound(bound), proto: Some(a.realm.function_proto), ..ObjectData::default() }.alloc(a.mc);
+        let prop = |v: Value<'gc>| Property { slot: Slot::Data(v), enumerable: false, writable: false, configurable: true };
+        let n = a.string(&name);
+        let mut d = f.borrow_mut(a.mc);
+        d.define(a.mc, "length", prop(length.into()));
+        d.define(a.mc, "name", prop(n.into()));
+        drop(d);
+        Ok(f.into())
     }
 
     fn function_to_string<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {

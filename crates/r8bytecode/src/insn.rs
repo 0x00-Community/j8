@@ -47,6 +47,8 @@ pub struct Function {
     /// async 函数：调用时跑到第一个 `await`，返回 Promise
     pub asynchronous: bool,
     pub params: u16,
+    /// 函数的 `length`：第一个带默认值的形参（或剩余参数）之前的形参个数
+    pub length: u16,
     pub regs: u16,
     pub insns: Vec<Insn>,
     pub consts: Vec<Constant>,

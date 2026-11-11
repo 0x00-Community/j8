@@ -15,8 +15,23 @@ pub(crate) type Key = u64;
 /// `this` 的键与普通绑定的键分开
 const THIS_KEY: Key = 1 << 32;
 
+/// `new.target` 伪绑定的键空间
+const NEW_TARGET_KEY: Key = 2 << 32;
+
+/// `arguments` 伪绑定的键空间
+const ARGUMENTS_KEY: Key = 3 << 32;
+
+/// 键里的源码位置部分
+const POSITION_MASK: Key = (1 << 32) - 1;
+
 /// `this` 这个名字不可能是标识符，拿来当伪绑定名
 pub(crate) const THIS: &str = "this";
+
+/// `new.target` 也不是标识符
+pub(crate) const NEW_TARGET: &str = "new.target";
+
+/// 非箭头函数里没被别的声明遮住的 `arguments`
+pub(crate) const ARGUMENTS: &str = "arguments";
 
 /// 一个声明的种类。
 #[derive(Clone, Copy)]
@@ -32,6 +47,10 @@ pub(crate) enum DeclKind<'a> {
     Const,
     /// 函数声明：进作用域时建闭包
     Function(&'a Function<'a>),
+    /// 非箭头函数的 `new.target`（用到才在入口取）
+    NewTarget,
+    /// 非箭头函数的 `arguments` 对象（用到才在入口建）
+    Arguments,
 }
 
 #[derive(Clone, Copy)]
@@ -252,6 +271,7 @@ impl<'a> Decls<'a> {
         let mut d = Self::default();
         if let Some(key) = this {
             d.add(Decl { name: THIS, key, kind: DeclKind::This, ready: None });
+            d.add(Decl { name: NEW_TARGET, key: NEW_TARGET_KEY | (key & POSITION_MASK), kind: DeclKind::NewTarget, ready: None });
         }
         if let Some(id) = self_name {
             d.add(Self::ident(id, DeclKind::SelfName));
@@ -268,6 +288,10 @@ impl<'a> Decls<'a> {
         }
         d.vars(stmts);
         d.lexical(stmts);
+        // 放最后：同名的形参 / 变量 / 函数声明优先
+        if let Some(key) = this {
+            d.add(Decl { name: ARGUMENTS, key: ARGUMENTS_KEY | (key & POSITION_MASK), kind: DeclKind::Arguments, ready: None });
+        }
         d
     }
 }
@@ -308,15 +332,18 @@ pub(crate) struct Resolver<'a> {
     func: u32,
     alloc: &'a Allocator,
     pub captured: HashSet<Key>,
+    /// 被引用到的绑定（`new.target` / `arguments` 用到才在入口准备）
+    pub used: HashSet<Key>,
 }
 
 impl<'a> Resolver<'a> {
     /// 脚本：顶层声明是全局对象的属性，不进作用域；只有 `this`。
-    pub fn script(stmts: &'a [Statement<'a>], this: Key, alloc: &'a Allocator) -> HashSet<Key> {
-        let mut r = Self { levels: Vec::new(), funcs: 0, func: 0, alloc, captured: HashSet::new() };
+    /// 给出（被捕获的绑定, 被引用到的绑定）。
+    pub fn script(stmts: &'a [Statement<'a>], this: Key, alloc: &'a Allocator) -> (HashSet<Key>, HashSet<Key>) {
+        let mut r = Self { levels: Vec::new(), funcs: 0, func: 0, alloc, captured: HashSet::new(), used: HashSet::new() };
         r.levels.push(Level { func: 0, names: vec![(THIS, this)] });
         r.statements(stmts);
-        r.captured
+        (r.captured, r.used)
     }
 
     fn push(&mut self, d: &Decls<'a>) {
@@ -329,6 +356,7 @@ impl<'a> Resolver<'a> {
                 if l.func != self.func {
                     self.captured.insert(key);
                 }
+                self.used.insert(key);
                 return;
             }
         }
@@ -731,6 +759,11 @@ impl<'a> Resolver<'a> {
                 self.expr(&a.right);
             }
             Expression::ChainExpression(c) => self.chain(&c.expression),
+            Expression::NewTarget(_) => self.reference(NEW_TARGET),
+            Expression::TaggedTemplateExpression(t) => {
+                self.expr(&t.tag);
+                t.quasi.expressions.iter().for_each(|e| self.expr(e));
+            }
             Expression::YieldExpression(y) => {
                 if let Some(a) = &y.argument {
                     self.expr(a);

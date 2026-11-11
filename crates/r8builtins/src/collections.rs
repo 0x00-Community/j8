@@ -278,7 +278,7 @@ impl Installer<'_, '_> {
             self.method(map, name, f);
         }
         self.method(map, "values", Collections::values);
-        let entries = r.native(self.mc, Collections::entries);
+        let entries = r.named_native(self.mc, Collections::entries, "entries");
         self.set(map, "entries", entries.into());
         map.borrow_mut(self.mc).define_symbol(iter, r8frame::Property::hidden(entries.into()));
         self.getter(map, "size", Collections::size);
@@ -296,7 +296,7 @@ impl Installer<'_, '_> {
         for (name, f) in methods {
             self.method(set, name, f);
         }
-        let values = r.native(self.mc, Collections::values);
+        let values = r.named_native(self.mc, Collections::values, "values");
         self.set(set, "values", values.into());
         self.set(set, "keys", values.into());
         set.borrow_mut(self.mc).define_symbol(iter, r8frame::Property::hidden(values.into()));

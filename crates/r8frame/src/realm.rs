@@ -66,6 +66,8 @@ pub struct Realm<'gc> {
     pub symbols: WellKnown<'gc>,
     /// 微任务队列
     pub jobs: Gc<'gc, RefLock<VecDeque<Job<'gc>>>>,
+    /// 标签模板的模板对象：按（函数编号, 调用点）缓存，同一处每次同一个
+    pub templates: Gc<'gc, RefLock<alloc::collections::BTreeMap<(u32, u32), JsObject<'gc>>>>,
 }
 
 impl fmt::Debug for Realm<'_> {
@@ -103,6 +105,7 @@ impl<'gc> Realm<'gc> {
             script_scope: ObjectData::default().alloc(mc),
             symbols: WellKnown { iterator: symbol("iterator"), async_iterator: symbol("asyncIterator"), has_instance: symbol("hasInstance"), to_primitive: symbol("toPrimitive"), to_string_tag: symbol("toStringTag") },
             jobs: Gc::new(mc, RefLock::new(VecDeque::new())),
+            templates: Gc::new(mc, RefLock::new(alloc::collections::BTreeMap::new())),
             global: derived(object_proto),
             object_proto,
             function_proto: derived(object_proto),
@@ -128,15 +131,32 @@ impl<'gc> Realm<'gc> {
         ObjectData { kind: ObjectKind::Native(Native(f)), proto: Some(self.function_proto), ..ObjectData::default() }.alloc(mc)
     }
 
-    /// 在 `target` 上挂一个以 Symbol 为键的宿主方法。
-    pub fn symbol_method(&self, mc: &Mutation<'gc>, target: JsObject<'gc>, key: JsSymbol<'gc>, f: NativeFn) {
+    /// 给函数对象定义 `name`（与可选的 `length`）：不可枚举、不可写、可配置，`length` 在前。
+    pub fn name_function(&self, mc: &Mutation<'gc>, f: JsObject<'gc>, name: &str, length: Option<u32>) {
+        let prop = |v: Value<'gc>| Property { slot: crate::Slot::Data(v), enumerable: false, writable: false, configurable: true };
+        let mut d = f.borrow_mut(mc);
+        if let Some(n) = length {
+            d.define(mc, "length", prop(f64::from(n).into()));
+        }
+        d.define(mc, "name", prop(Value::String(Gc::new(mc, alloc::boxed::Box::from(name)))));
+    }
+
+    /// 带 `name` 的宿主函数对象。
+    pub fn named_native(&self, mc: &Mutation<'gc>, f: NativeFn, name: &str) -> JsObject<'gc> {
         let func = self.native(mc, f);
+        self.name_function(mc, func, name, None);
+        func
+    }
+
+    /// 在 `target` 上挂一个以 Symbol 为键的宿主方法（名字是 `[描述]`）。
+    pub fn symbol_method(&self, mc: &Mutation<'gc>, target: JsObject<'gc>, key: JsSymbol<'gc>, f: NativeFn) {
+        let func = self.named_native(mc, f, &alloc::format!("[{}]", key.description.as_deref().unwrap_or("")));
         target.borrow_mut(mc).define_symbol(key, Property::hidden(Value::Object(func)));
     }
 
     /// 在 `target` 上挂一个宿主方法。
     pub fn method(&self, mc: &Mutation<'gc>, target: JsObject<'gc>, name: &str, f: NativeFn) {
-        let func = self.native(mc, f);
+        let func = self.named_native(mc, f, name);
         target.borrow_mut(mc).define(mc, name, Property::hidden(Value::Object(func)));
     }
 }

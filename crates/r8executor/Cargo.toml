@@ -9,6 +9,7 @@ license.workspace = true
 r8frame.workspace = true
 r8bytecode.workspace = true
 gc-arena.workspace = true
+ryu-js.workspace = true
 
 [features]
 default = ["compile"]

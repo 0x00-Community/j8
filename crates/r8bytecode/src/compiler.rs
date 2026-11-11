@@ -180,6 +180,10 @@ pub(crate) struct Compiler<'a, 's> {
     src: &'s Source<'s>,
     /// AST 的分配器：类作用域的隐藏绑定名（`#x` 等）也分配在这里
     pub(crate) alloc: &'a Allocator,
+    /// 被引用到的绑定（`new.target` / `arguments` 用到才准备）
+    used: HashSet<Key>,
+    /// 标签模板调用点的编号（模板对象按（函数, 编号）缓存）
+    pub(crate) sites: u32,
     captured: HashSet<Key>,
     module: Vec<Function>,
     frames: Vec<Frame<'a>>,
@@ -201,8 +205,8 @@ impl TryFrom<&Source<'_>> for Module {
             return Err(Error::Syntax(format!("{}: {d}", src.file)));
         }
         let program = &ret.program;
-        let captured = Resolver::script(&program.body, Decls::this_key(program.span), &allocator);
-        let mut c = Compiler { src, alloc: &allocator, captured, module: Vec::new(), frames: Vec::new(), levels: Vec::new(), script_lexicals: HashSet::new(), chains: Vec::new() };
+        let (captured, used) = Resolver::script(&program.body, Decls::this_key(program.span), &allocator);
+        let mut c = Compiler { src, alloc: &allocator, captured, used, sites: 0, module: Vec::new(), frames: Vec::new(), levels: Vec::new(), script_lexicals: HashSet::new(), chains: Vec::new() };
         c.script(program)?;
         Ok(Module { functions: c.module })
     }
@@ -321,7 +325,19 @@ impl<'a> Compiler<'a, '_> {
                     self.bind(b);
                     None
                 }
-                DeclKind::Var | DeclKind::Let | DeclKind::Const => None,
+                DeclKind::NewTarget if self.used.contains(&d.key) => {
+                    self.emit(Insn::LdaNewTarget);
+                    self.bind(b);
+                    None
+                }
+                DeclKind::Arguments if self.used.contains(&d.key) => {
+                    // 建 arguments 要全部实参
+                    self.frame().out.keeps_args = true;
+                    self.emit(Insn::CreateArguments);
+                    self.bind(b);
+                    None
+                }
+                DeclKind::Var | DeclKind::Let | DeclKind::Const | DeclKind::NewTarget | DeclKind::Arguments => None,
             };
             if let (Some(r), Binding::Env(_)) = (fixed, b) {
                 self.emit(Insn::Ldar(r));
@@ -440,7 +456,9 @@ impl<'a> Compiler<'a, '_> {
         self.module.push(Function::default());
         let top = Reg::PARAMS + n;
         let keeps_args = matches!(body, Body::DefaultConstructor { derived: true }) || params.is_some_and(|p| p.rest.is_some());
-        let out = Function { name: name.into(), kind: flavor.kind, keeps_args, generator: flavor.generator, asynchronous: flavor.asynchronous, params: n, regs: top, ..Function::default() };
+        // length：第一个带默认值的形参之前的个数（剩余参数不算）
+        let length = u16::try_from(params.map_or(0, |p| p.items.iter().take_while(|i| i.initializer.is_none()).count())).unwrap_or(u16::MAX);
+        let out = Function { name: name.into(), kind: flavor.kind, keeps_args, generator: flavor.generator, asynchronous: flavor.asynchronous, params: n, length, regs: top, ..Function::default() };
         self.frames.push(Frame { index, out, top, envs: 0, controls: Vec::new(), label: None, completion: None, resume: None, async_generator: false });
         if flavor.generator || flavor.asynchronous {
             let mode = self.temp();
@@ -489,7 +507,10 @@ impl<'a> Compiler<'a, '_> {
             if let Some(init) = &p.initializer {
                 self.emit(Insn::Ldar(reg));
                 let skip = self.jump(Insn::JumpIfNotUndefined);
-                self.expr(init)?;
+                match &p.pattern {
+                    BindingPattern::BindingIdentifier(id) => self.expr_named(init, id.name.as_str())?,
+                    _ => self.expr(init)?,
+                }
                 self.emit(Insn::Star(reg));
                 self.land(skip);
             }
@@ -524,7 +545,11 @@ impl<'a> Compiler<'a, '_> {
                 self.store(id.name.as_str(), init);
             }
             BindingPattern::AssignmentPattern(a) => {
-                let t = self.with_default(value, &a.right)?;
+                let name = match &a.left {
+                    BindingPattern::BindingIdentifier(id) => Some(id.name.as_str()),
+                    _ => None,
+                };
+                let t = self.with_default(value, &a.right, name)?;
                 self.bind_pattern(&a.left, t, init)?;
                 self.release(t);
             }
@@ -793,12 +818,16 @@ impl<'a> Compiler<'a, '_> {
     }
 
     /// `value` 是 `undefined` 就换成默认值：结果放一个新临时寄存器（调用方释放）。
-    pub(crate) fn with_default(&mut self, value: Reg, default: &'a Expression<'a>) -> Result<Reg, Error> {
+    /// `name` 是默认值是匿名函数时推断给它的名字。
+    pub(crate) fn with_default(&mut self, value: Reg, default: &'a Expression<'a>, name: Option<&'a str>) -> Result<Reg, Error> {
         let t = self.temp();
         self.emit(Insn::Ldar(value));
         self.emit(Insn::Star(t));
         let skip = self.jump(Insn::JumpIfNotUndefined);
-        self.expr(default)?;
+        match name {
+            Some(n) => self.expr_named(default, n)?,
+            None => self.expr(default)?,
+        }
         self.emit(Insn::Star(t));
         self.land(skip);
         Ok(t)
@@ -824,10 +853,11 @@ impl<'a> Compiler<'a, '_> {
     }
 
     /// 普通函数（声明或表达式）：查掉不支持的种类。
-    pub(crate) fn plain_function(&mut self, f: &'a AstFunction<'a>, self_name: bool) -> Result<u32, Error> {
+    /// 普通函数；匿名的用推断出的名字 `inferred`。
+    pub(crate) fn plain_function(&mut self, f: &'a AstFunction<'a>, self_name: bool, inferred: &str) -> Result<u32, Error> {
         let flavor = Flavor::from((f, FunctionKind::Normal));
         let body = f.body.as_ref().ok_or_else(|| self.unsupported(f.span, "a function without a body"))?;
-        let name = f.id.as_ref().map_or("", |id| id.name.as_str());
+        let name = f.id.as_ref().map_or(inferred, |id| id.name.as_str());
         self.function(name, flavor, Some(Decls::this_key(f.span)), if self_name { f.id.as_ref() } else { None }, Some(&f.params), Body::Statements(&body.statements))
     }
 
@@ -861,8 +891,12 @@ impl<'a> Compiler<'a, '_> {
         for e in &class.body.body {
             match e {
                 ClassElement::PropertyDefinition(p) if p.r#static == statik => {
+                    let fname = self.static_name(&p.key, p.computed);
                     let value = |c: &mut Self| match &p.value {
-                        Some(v) => c.expr(v),
+                        Some(v) => match fname {
+                            Some(n) => c.expr_named(v, n),
+                            None => c.expr(v),
+                        },
                         None => {
                             c.emit(Insn::LdaUndefined);
                             Ok(())
@@ -902,6 +936,30 @@ impl<'a> Compiler<'a, '_> {
             MethodDefinitionKind::Get => PropertyKind::Getter,
             MethodDefinitionKind::Set => PropertyKind::Setter,
             MethodDefinitionKind::Method | MethodDefinitionKind::Constructor => PropertyKind::Data,
+        }
+    }
+
+    /// 非计算的属性键的文本（函数名推断用；私有名带 `#`）；计算键给 `None`。
+    pub(crate) fn static_name(&self, key: &'a PropertyKey<'a>, computed: bool) -> Option<&'a str> {
+        if computed {
+            return None;
+        }
+        match key {
+            PropertyKey::StaticIdentifier(id) => Some(id.name.as_str()),
+            PropertyKey::StringLiteral(s) => s.value.as_str(),
+            PropertyKey::NumericLiteral(n) => Some(self.alloc.alloc_str(ryu_js::Buffer::new().format(n.value))),
+            PropertyKey::PrivateIdentifier(id) => Some(Hidden::private(self.alloc, id)),
+            _ => None,
+        }
+    }
+
+    /// 方法 / 访问器的函数名：键名，访问器前面加 `get ` / `set `；计算键给空（运行时才知道）。
+    pub(crate) fn method_name(&self, key: &'a PropertyKey<'a>, computed: bool, kind: MethodDefinitionKind) -> &'a str {
+        let Some(n) = self.static_name(key, computed) else { return "" };
+        match kind {
+            MethodDefinitionKind::Get => self.alloc.alloc_str(&format!("get {n}")),
+            MethodDefinitionKind::Set => self.alloc.alloc_str(&format!("set {n}")),
+            MethodDefinitionKind::Method | MethodDefinitionKind::Constructor => n,
         }
     }
 
@@ -951,7 +1009,8 @@ impl<'a> Compiler<'a, '_> {
 
     /// 私有方法 / 访问器：函数只建一次存进隐藏绑定；静态的现在就装到构造器（`target`）上，实例的构造时装。
     fn private_method(&mut self, m: &'a MethodDefinition<'a>, id: &'a PrivateIdentifier<'a>, target: Reg) -> Result<(), Error> {
-        let f = self.method("", &m.value, FunctionKind::Method)?;
+        let fname = self.method_name(&m.key, false, m.kind);
+        let f = self.method(fname, &m.value, FunctionKind::Method)?;
         self.emit(Insn::CreateMethod { func: f, home: target });
         self.store(Hidden::method(self.alloc, id, m.kind), true);
         if m.r#static {
@@ -965,8 +1024,9 @@ impl<'a> Compiler<'a, '_> {
         Ok(())
     }
 
-    pub(crate) fn class(&mut self, c: &'a Class<'a>) -> Result<(), Error> {
-        let name = c.id.as_ref().map_or("", |id| id.name.as_str());
+    /// 类；匿名的构造器用推断出的名字 `inferred`。
+    pub(crate) fn class(&mut self, c: &'a Class<'a>, inferred: &'a str) -> Result<(), Error> {
+        let name = c.id.as_ref().map_or(inferred, |id| id.name.as_str());
         let parent = match &c.heritage {
             Some(h) => {
                 self.expr(&h.expression)?;
@@ -1010,7 +1070,8 @@ impl<'a> Compiler<'a, '_> {
                     match self.static_key(&m.key, m.computed) {
                         Some(name) => {
                             let name = name?;
-                            let f = self.method("", &m.value, FunctionKind::Method)?;
+                            let fname = self.method_name(&m.key, m.computed, m.kind);
+                            let f = self.method(fname, &m.value, FunctionKind::Method)?;
                             self.emit(Insn::CreateMethod { func: f, home: target });
                             self.emit(Insn::DefineNamed { obj: target, name, kind, enumerable: false });
                         }
@@ -1065,7 +1126,7 @@ impl<'a> Compiler<'a, '_> {
     }
 
     fn function_declaration(&mut self, f: &'a AstFunction<'a>) -> Result<u32, Error> {
-        self.plain_function(f, false)
+        self.plain_function(f, false, "")
     }
 
     /// 脚本本身：顶层 `var` / 函数声明 / `let` / `const` 都是全局对象的属性。
@@ -1357,7 +1418,7 @@ impl<'a> Compiler<'a, '_> {
             Statement::VariableDeclaration(d) => self.declaration(d)?,
             Statement::FunctionDeclaration(_) | Statement::EmptyStatement(_) => {}
             Statement::ClassDeclaration(c) => {
-                self.class(c)?;
+                self.class(c, "")?;
                 if let Some(id) = &c.id {
                     self.store(id.name.as_str(), true);
                 }
@@ -1491,7 +1552,7 @@ impl<'a> Compiler<'a, '_> {
                 continue;
             };
             match (&v.init, d.kind) {
-                (Some(e), _) => self.expr(e)?,
+                (Some(e), _) => self.expr_named(e, id.name.as_str())?,
                 // 循环体里的 `let x;` 每轮都要回到 undefined
                 (None, VariableDeclarationKind::Let) => _ = self.emit(Insn::LdaUndefined),
                 (None, _) => continue,

@@ -342,6 +342,7 @@ impl Executor {
     fn function_object<'gc>(&self, a: &Agent<'gc, '_>, closure: Closure<'gc>, proto: JsObject<'gc>) -> JsObject<'gc> {
         let fo = ObjectData { kind: ObjectKind::Function(closure), proto: Some(proto), ..ObjectData::default() }.alloc(a.mc);
         let func = &self.function(closure.func).func;
+        a.realm.name_function(a.mc, fo, &func.name, Some(u32::from(func.length)));
         if func.generator {
             // 生成器函数的 `prototype` 是它产出的生成器的原型（没有 `constructor`）
             let base = if func.asynchronous { a.realm.async_generator_proto } else { a.realm.generator_proto };
@@ -422,6 +423,24 @@ impl Executor {
             Value::Symbol(s) => s,
             _ => unreachable!("the compiler loads a private name here"),
         }
+    }
+
+    /// 本帧的 arguments 对象：全部实参作可枚举下标属性，`length` / `callee` / `[Symbol.iterator]` 不可枚举。
+    fn arguments<'gc>(a: &mut Agent<'gc, '_>, regs: &[Value<'gc>], f: &Frame<'gc>) -> Result<Value<'gc>, Error> {
+        let o = a.object();
+        let hidden = |v: Value<'gc>| Property { slot: Slot::Data(v), enumerable: false, writable: true, configurable: true };
+        for (i, &v) in f.args.iter().enumerate() {
+            let k = alloc::string::String::from(ryu_js::Buffer::new().format(f64::from(u32::try_from(i).unwrap_or(u32::MAX))));
+            o.borrow_mut(a.mc).define(a.mc, &k, Property::data(v));
+        }
+        let len = f64::from(u32::try_from(f.args.len()).unwrap_or(u32::MAX));
+        let values = a.get_symbol(Value::Object(a.realm.array_proto), a.realm.symbols.iterator, Value::Undefined)?;
+        let mut d = o.borrow_mut(a.mc);
+        d.define(a.mc, "length", hidden(len.into()));
+        d.define(a.mc, "callee", hidden(regs[f.base + usize::from(Reg::CALLEE.0)]));
+        d.define_symbol(a.realm.symbols.iterator, hidden(values));
+        drop(d);
+        Ok(o.into())
     }
 
     /// 寄存器里的恢复方式。
@@ -898,6 +917,24 @@ impl Executor {
                         }
                     }
                 }
+                Insn::LdaNewTarget => *acc = f.new_target,
+                Insn::CreateArguments => *acc = Self::arguments(a, regs, f)?,
+                Insn::GetTemplateObject { site, first, count } => {
+                    let key = (f.func.0, site);
+                    let cached = a.realm.templates.borrow().get(&key).copied();
+                    *acc = match cached {
+                        Some(o) => o.into(),
+                        None => {
+                            let (start, n) = (r(first), usize::from(count));
+                            let cooked = a.array(regs[start..start + n].to_vec());
+                            let raw = a.array(regs[start + n..start + 2 * n].to_vec());
+                            let frozen = |v: Value<'gc>| Property { slot: Slot::Data(v), enumerable: false, writable: false, configurable: false };
+                            cooked.borrow_mut(a.mc).define(a.mc, "raw", frozen(raw.into()));
+                            a.realm.templates.borrow_mut(a.mc).insert(key, cooked);
+                            cooked.into()
+                        }
+                    };
+                }
                 Insn::ForInKeys => {
                     let keys = a.for_in_keys(*acc)?;
                     *acc = a.array(keys).into();
@@ -1308,6 +1345,18 @@ mod tests {
             ("class C { #a = 1; inc() { this.#a += 2; this.#a++; return this.#a } } new C().inc()", "4"),
             ("class C { static { var v = 1; this.v = v } } C.v + typeof v", "1undefined"),
             ("let i = 0; class C { [i++] = 'a'; [i++] = 'b' } const c1 = new C(), c2 = new C(); c1[0] + c1[1] + c2[0] + i", "aba2"),
+            // 函数的 name / length、new.target、标签模板、arguments
+            ("function f(a, b = 1, c) {} const g = () => 0; let h = function () {}; const o = { m() {}, get x() { return 1 }, k: () => 0 }; class C { static s() {} } [f.name, f.length, g.name, h.name, o.m.name, Object.getOwnPropertyDescriptor(o, 'x').get.name, o.k.name, C.name, C.s.name, (class {}).name, [].map.name, f.bind(null, 1).name, f.bind(null, 1).length].join()", "f,1,g,h,m,get x,k,C,s,,map,bound f,0"),
+            ("let x; x = function () {}; const { y = () => 0 } = {}; [x.name, y.name, (function (z = class {}) { return z.name })()].join()", "x,y,z"),
+            ("function F() { this.t = new.target === F } function G() { return new.target } [new F().t, G() === undefined, (() => { function H() { this.t = (() => new.target)() === H } return new H().t })()].join()", "true,true,true"),
+            ("function tag(s, ...v) { return s.raw.join('|') + ':' + s.join('|') + ':' + v.join() } tag`a${1}b${2}c`", "a|b|c:a|b|c:1,2"),
+            ("function t(s) { return s } const sites = []; for (let i = 0; i < 2; i++) sites.push(t`x`); sites[0] === sites[1] && t`x` !== sites[0]", "true"),
+            (r"function t(s) { return s.raw[0] + (s[0] === undefined) } t`\unicode`", r"\unicodetrue"),
+            ("const o = { f(s) { return this.k + s[0] }, k: 'k' }; o.f`!`", "k!"),
+            ("function f() { return arguments.length + ':' + [...arguments].join() + ':' + arguments[1] } f(1, 2, 3)", "3:1,2,3:2"),
+            ("function f() { const g = () => arguments[0]; return g() } f('lex')", "lex"),
+            ("function f(arguments) { return arguments } f(5)", "5"),
+            ("function f() { return Object.keys(arguments).join() + (arguments.callee === f) } f('a', 'b')", "0,1true"),
             // Map / Set / WeakMap / WeakSet
             ("const m = new Map([[1, 'a'], ['1', 'b']]); m.set(NaN, 'n'); [m.get(1), m.get('1'), m.get(NaN), m.size, m.has(2)].join()", "a,b,n,3,false"),
             ("1 / [...new Map([[-0, 1]]).keys()][0]", "Infinity"),

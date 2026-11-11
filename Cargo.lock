@@ -744,6 +744,7 @@ dependencies = [
  "r8bytecode",
  "r8frame",
  "r8platform",
+ "ryu-js",
 ]
 
 [[package]]
