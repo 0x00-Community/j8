@@ -100,7 +100,7 @@ cargo build --target riscv64gc-unknown-none-elf -p r8frame -p r8bytecode -p r8ex
 - Proxy / Reflect、Iterator 助手、Set 方法（union 等）、Map.groupBy
 - 宿主函数区分能否 `new`，内建构造器按 `new.target` 定原型（`class X extends Map` 等）
 
-还不支持（报 `Error::Unsupported`，带 `文件:行:列`）：模块、形参表达式里 eval 的 `arguments` 冲突规则。test262 基线 41423 条，补齐计划见 PLAN.md。
+还不支持（报 `Error::Unsupported`，带 `文件:行:列`）：模块、形参表达式里 eval 的 `arguments` 冲突规则。test262 基线 41457 条，补齐计划见 PLAN.md。
 
 已知偏差：宿主函数里重入的 JS（如 `map` 的回调）在当前片里跑完，期间不回收。
 
