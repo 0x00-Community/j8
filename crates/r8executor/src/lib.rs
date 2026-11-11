@@ -183,7 +183,14 @@ impl Executor {
         };
         let promise = (!generator).then(|| a.new_promise());
         let co = ObjectData { kind: ObjectKind::Coroutine(Coroutine::new(saved, promise, generator && asynchronous)), proto: Some(proto), ..ObjectData::default() }.alloc(a.mc);
-        let Some(p) = promise else { return Ok(co.into()) };
+        let Some(p) = promise else {
+            // 先跑形参初始化，停在编译器放的初始挂起点
+            let outer = self.depth.replace(depth);
+            let r = a.resume(co, Resume::Next, Value::Undefined);
+            self.depth.set(outer);
+            r?;
+            return Ok(co.into());
+        };
         let outer = self.depth.replace(depth);
         let r = a.drive(co, Resume::Next, Value::Undefined);
         self.depth.set(outer);

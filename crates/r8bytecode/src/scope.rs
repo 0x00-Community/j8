@@ -24,6 +24,9 @@ const ARGUMENTS_KEY: Key = 3 << 32;
 /// 键里的源码位置部分
 const POSITION_MASK: Key = (1 << 32) - 1;
 
+/// annexB 块级函数在外层建的 `var` 绑定：键 = 这个标记 | 函数名的位置
+const ANNEXB_KEY: Key = 4 << 32;
+
 /// `this` 这个名字不可能是标识符，拿来当伪绑定名
 pub(crate) const THIS: &str = "this";
 
@@ -190,6 +193,147 @@ impl<'a> Decls<'a> {
         }
     }
 
+    /// annexB B.3.2：可以在外层再建一个 `var` 的块级普通函数声明（换成 `var F` 不会和沿途的词法声明、
+    /// 形参冲突）。`outer` 是函数顶层的形参与词法名字。
+    pub fn annexb(stmts: &'a [Statement<'a>], outer: Vec<&'a str>) -> Vec<&'a Function<'a>> {
+        let mut out = Vec::new();
+        let mut stack = alloc::vec![outer];
+        for s in stmts {
+            Self::annexb_stmt(s, &mut stack, &mut out);
+        }
+        out
+    }
+
+    /// 非严格函数：annexB 块级函数在函数层再加的 `var`（已经有同名的就不加）。
+    fn annexb_vars(&mut self, stmts: &'a [Statement<'a>], params: Option<&'a FormalParameters<'a>>) {
+        for f in Self::annexb_functions(stmts, params) {
+            if let (Some(id), Some(key)) = (&f.id, Self::annexb_key(f)) {
+                self.add(Decl { name: id.name.as_str(), key, kind: DeclKind::Var, ready: None });
+            }
+        }
+    }
+
+    /// 函数体（或脚本，`params` 为空）里能按 annexB 提升的块级函数（`arguments` 除外）。
+    pub fn annexb_functions(stmts: &'a [Statement<'a>], params: Option<&'a FormalParameters<'a>>) -> Vec<&'a Function<'a>> {
+        let mut top = Self::default();
+        top.lexical(stmts);
+        let mut outer: Vec<&'a str> = top.0.iter().filter(|d| !matches!(d.kind, DeclKind::Function(_))).map(|d| d.name).collect();
+        let mut ps = Self::default();
+        for p in params.into_iter().flat_map(|p| p.items.iter()) {
+            ps.pattern(&p.pattern, DeclKind::Var, None);
+        }
+        if let Some(r) = params.and_then(|p| p.rest.as_ref()) {
+            ps.pattern(&r.rest.argument, DeclKind::Var, None);
+        }
+        outer.extend(ps.0.iter().map(|d| d.name));
+        let mut found = Self::annexb(stmts, outer);
+        found.retain(|f| f.id.as_ref().is_some_and(|id| id.name != ARGUMENTS));
+        found
+    }
+
+    /// 脚本：annexB 块级函数的名字当全局 `var` 声明。
+    pub fn annexb_globals(&mut self, hoisted: &[&'a Function<'a>]) {
+        for f in hoisted {
+            if let (Some(id), Some(key)) = (&f.id, Self::annexb_key(f)) {
+                self.add(Decl { name: id.name.as_str(), key, kind: DeclKind::Var, ready: None });
+            }
+        }
+    }
+
+    /// annexB 的 `var` 绑定的键。
+    pub fn annexb_key(f: &Function<'_>) -> Option<Key> {
+        f.id.as_ref().map(|id| ANNEXB_KEY | Self::key(id.span))
+    }
+
+    fn annexb_stmt(s: &'a Statement<'a>, stack: &mut Vec<Vec<&'a str>>, out: &mut Vec<&'a Function<'a>>) {
+        match s {
+            Statement::BlockStatement(b) => Self::annexb_block(&[b.body.as_slice()], stack, out),
+            Statement::IfStatement(i) => {
+                for clause in core::iter::once(&i.consequent).chain(i.alternate.as_ref()) {
+                    if matches!(clause, Statement::FunctionDeclaration(_)) {
+                        Self::annexb_block(&[core::slice::from_ref(clause)], stack, out);
+                    } else {
+                        Self::annexb_stmt(clause, stack, out);
+                    }
+                }
+            }
+            Statement::WhileStatement(w) => Self::annexb_stmt(&w.body, stack, out),
+            Statement::DoWhileStatement(w) => Self::annexb_stmt(&w.body, stack, out),
+            Statement::ForStatement(f) => {
+                let mut head = Self::default();
+                if let Some(ForStatementInit::VariableDeclaration(d)) = &f.init
+                    && d.kind != VariableDeclarationKind::Var
+                {
+                    head.declarators(d, DeclKind::Let);
+                }
+                stack.push(head.0.iter().map(|d| d.name).collect());
+                Self::annexb_stmt(&f.body, stack, out);
+                stack.pop();
+            }
+            Statement::ForInStatement(f) => Self::annexb_loop(&f.left, &f.body, stack, out),
+            Statement::ForOfStatement(f) => Self::annexb_loop(&f.left, &f.body, stack, out),
+            Statement::LabeledStatement(l) => Self::annexb_stmt(&l.body, stack, out),
+            Statement::SwitchStatement(sw) => {
+                let cases: Vec<&'a [Statement<'a>]> = sw.cases.iter().map(|c| c.consequent.as_slice()).collect();
+                Self::annexb_block(&cases, stack, out);
+            }
+            Statement::TryStatement(t) => {
+                Self::annexb_block(&[t.block.body.as_slice()], stack, out);
+                if let Some(h) = &t.handler {
+                    // 简单的 catch 参数可以被 var 重新声明（B.3.4），解构的不行
+                    let mut names = Self::default();
+                    if let Some(p) = &h.param
+                        && !matches!(p.pattern, BindingPattern::BindingIdentifier(_))
+                    {
+                        names.pattern(&p.pattern, DeclKind::Let, None);
+                    }
+                    stack.push(names.0.iter().map(|d| d.name).collect());
+                    Self::annexb_block(&[h.body.body.as_slice()], stack, out);
+                    stack.pop();
+                }
+                if let Some(f) = &t.finalizer {
+                    Self::annexb_block(&[f.body.as_slice()], stack, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn annexb_loop(left: &'a ForStatementLeft<'a>, body: &'a Statement<'a>, stack: &mut Vec<Vec<&'a str>>, out: &mut Vec<&'a Function<'a>>) {
+        let mut head = Self::default();
+        if let ForStatementLeft::VariableDeclaration(d) = left
+            && d.kind != VariableDeclarationKind::Var
+        {
+            head.declarators(d, DeclKind::Let);
+        }
+        stack.push(head.0.iter().map(|d| d.name).collect());
+        Self::annexb_stmt(body, stack, out);
+        stack.pop();
+    }
+
+    fn annexb_block(parts: &[&'a [Statement<'a>]], stack: &mut Vec<Vec<&'a str>>, out: &mut Vec<&'a Function<'a>>) {
+        let mut lexical = Self::default();
+        for p in parts {
+            lexical.lexical(p);
+        }
+        for f in parts.iter().flat_map(|p| p.iter()).filter_map(|s| match s {
+            Statement::FunctionDeclaration(f) if !f.generator && !f.r#async => Some(f),
+            _ => None,
+        }) {
+            let Some(id) = &f.id else { continue };
+            let name = id.name.as_str();
+            let other_lexical = lexical.0.iter().any(|d| d.name == name && !matches!(d.kind, DeclKind::Function(_)));
+            if !other_lexical && !stack.iter().flatten().any(|n| *n == name) {
+                out.push(f);
+            }
+        }
+        stack.push(lexical.0.iter().map(|d| d.name).collect());
+        for s in parts.iter().flat_map(|p| p.iter()) {
+            Self::annexb_stmt(s, stack, out);
+        }
+        stack.pop();
+    }
+
     /// 一个块（或 `switch` 的全部分支）。
     pub fn block(stmts: impl IntoIterator<Item = &'a [Statement<'a>]>) -> Self {
         let mut d = Self::default();
@@ -280,7 +424,7 @@ impl<'a> Decls<'a> {
     }
 
     /// 函数体那一层：`this`、自己的名字、形参、`var`、顶层词法声明。
-    pub fn function(this: Option<Key>, self_name: Option<&'a BindingIdentifier<'a>>, params: Option<&'a FormalParameters<'a>>, stmts: &'a [Statement<'a>]) -> Self {
+    pub fn function(this: Option<Key>, self_name: Option<&'a BindingIdentifier<'a>>, params: Option<&'a FormalParameters<'a>>, stmts: &'a [Statement<'a>], sloppy: bool) -> Self {
         let mut d = Self::default();
         if let Some(key) = this {
             d.add(Decl { name: THIS, key, kind: DeclKind::This, ready: None });
@@ -301,6 +445,9 @@ impl<'a> Decls<'a> {
         }
         d.vars(stmts);
         d.lexical(stmts);
+        if sloppy {
+            d.annexb_vars(stmts, params);
+        }
         // 放最后：同名的形参 / 变量 / 函数声明优先
         if let Some(key) = this {
             d.add(Decl { name: ARGUMENTS, key: ARGUMENTS_KEY | (key & POSITION_MASK), kind: DeclKind::Arguments, ready: None });
@@ -347,13 +494,15 @@ pub(crate) struct Resolver<'a> {
     pub captured: HashSet<Key>,
     /// 被引用到的绑定（`new.target` / `arguments` 用到才在入口准备）
     pub used: HashSet<Key>,
+    /// 当前代码是不是严格的（决定有没有 annexB 的块级函数提升）
+    strict: bool,
 }
 
 impl<'a> Resolver<'a> {
     /// 脚本：顶层声明是全局对象的属性，不进作用域；只有 `this`。
     /// 给出（被捕获的绑定, 被引用到的绑定）。
-    pub fn script(stmts: &'a [Statement<'a>], this: Key, alloc: &'a Allocator, local: Option<&Decls<'a>>) -> (HashSet<Key>, HashSet<Key>) {
-        let mut r = Self { levels: Vec::new(), funcs: 0, func: 0, alloc, captured: HashSet::new(), used: HashSet::new() };
+    pub fn script(stmts: &'a [Statement<'a>], this: Key, alloc: &'a Allocator, local: Option<&Decls<'a>>, strict: bool) -> (HashSet<Key>, HashSet<Key>) {
+        let mut r = Self { levels: Vec::new(), funcs: 0, func: 0, alloc, captured: HashSet::new(), used: HashSet::new(), strict };
         r.levels.push(Level { func: 0, names: vec![(THIS, this)] });
         if let Some(d) = local {
             r.push(d);
@@ -393,11 +542,14 @@ impl<'a> Resolver<'a> {
 
     fn function(&mut self, f: &'a Function<'a>, self_name: bool) {
         let Some(body) = &f.body else { return };
-        let d = Decls::function(Some(Decls::this_key(f.span)), if self_name { f.id.as_ref() } else { None }, Some(&f.params), &body.statements);
+        let saved = self.strict;
+        self.strict = saved || body.directives.iter().any(|d| d.directive.as_str() == "use strict");
+        let d = Decls::function(Some(Decls::this_key(f.span)), if self_name { f.id.as_ref() } else { None }, Some(&f.params), &body.statements, !self.strict);
         let outer = self.enter_function(&d);
         self.params(&f.params);
         self.statements(&body.statements);
         self.leave_function(outer);
+        self.strict = saved;
     }
 
     fn arrow(&mut self, a: &'a ArrowFunctionExpression<'a>) {
@@ -405,7 +557,11 @@ impl<'a> Resolver<'a> {
             ArrowFunctionBody::FunctionBody(b) => &b.statements,
             _ => &[],
         };
-        let d = Decls::function(None, None, Some(&a.params), stmts);
+        let saved = self.strict;
+        if let ArrowFunctionBody::FunctionBody(b) = &a.body {
+            self.strict = saved || b.directives.iter().any(|d| d.directive.as_str() == "use strict");
+        }
+        let d = Decls::function(None, None, Some(&a.params), stmts, !self.strict);
         let outer = self.enter_function(&d);
         self.params(&a.params);
         match &a.body {
@@ -417,10 +573,18 @@ impl<'a> Resolver<'a> {
             }
         }
         self.leave_function(outer);
+        self.strict = saved;
     }
 
-    /// 类：`extends`、类作用域、方法、计算键、字段初始化与静态块（各自一个合成函数）。
+    /// 类：`extends`、类作用域、方法、计算键、字段初始化与静态块（各自一个合成函数）。类体全是严格代码。
     fn class(&mut self, c: &'a Class<'a>) {
+        let saved = self.strict;
+        self.strict = true;
+        self.class_body(c);
+        self.strict = saved;
+    }
+
+    fn class_body(&mut self, c: &'a Class<'a>) {
         if let Some(h) = &c.heritage {
             self.expr(&h.expression);
         }
@@ -444,7 +608,7 @@ impl<'a> Resolver<'a> {
             }
         }
         for (statik, key) in [(false, Decls::this_key(c.body.span)), (true, Decls::this_key(c.span))] {
-            let outer = self.enter_function(&Decls::function(Some(key), None, None, &[]));
+            let outer = self.enter_function(&Decls::function(Some(key), None, None, &[], false));
             for e in &c.body.body {
                 match e {
                     // 实例初始化函数里要装私有方法：读私有名与方法函数
@@ -623,18 +787,36 @@ impl<'a> Resolver<'a> {
         self.levels.pop();
     }
 
+    /// `if` 的分支：直接是函数声明的当成只有它的块（annexB B.3.3）。
+    fn clause(&mut self, s: &'a Statement<'a>) {
+        if matches!(s, Statement::FunctionDeclaration(_)) {
+            let one = core::slice::from_ref(s);
+            self.scoped(&Decls::block([one]), |r| r.statements(one));
+        } else {
+            self.statement(s);
+        }
+    }
+
     fn statement(&mut self, s: &'a Statement<'a>) {
         match s {
             Statement::ExpressionStatement(e) => self.expr(&e.expression),
             Statement::VariableDeclaration(d) => self.declaration(d),
-            Statement::FunctionDeclaration(f) => self.function(f, false),
+            Statement::FunctionDeclaration(f) => {
+                // annexB：块级函数执行到声明处要写外层的 `var`
+                if !self.strict
+                    && let Some(key) = Decls::annexb_key(f)
+                {
+                    self.used.insert(key);
+                }
+                self.function(f, false);
+            }
             Statement::ClassDeclaration(c) => self.class(c),
             Statement::BlockStatement(b) => self.scoped(&Decls::block([b.body.as_slice()]), |r| r.statements(&b.body)),
             Statement::IfStatement(i) => {
                 self.expr(&i.test);
-                self.statement(&i.consequent);
+                self.clause(&i.consequent);
                 if let Some(a) = &i.alternate {
-                    self.statement(a);
+                    self.clause(a);
                 }
             }
             Statement::WhileStatement(w) => {

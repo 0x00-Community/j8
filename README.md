@@ -100,7 +100,7 @@ cargo build --target riscv64gc-unknown-none-elf -p r8frame -p r8bytecode -p r8ex
 - Proxy / Reflect、Iterator 助手、Set 方法（union 等）、Map.groupBy
 - 宿主函数区分能否 `new`，内建构造器按 `new.target` 定原型（`class X extends Map` 等）
 
-还不支持（报 `Error::Unsupported`，带 `文件:行:列`）：`with`、模块、非严格的直接 eval（现在按间接 eval 跑，看不见外层局部变量）。test262 基线 39950 条，补齐计划见 PLAN.md。
+还不支持（报 `Error::Unsupported`，带 `文件:行:列`）：`with`、模块、非严格的直接 eval（现在按间接 eval 跑，看不见外层局部变量）。test262 基线 40883 条，补齐计划见 PLAN.md。
 
 已知偏差：宿主函数里重入的 JS（如 `map` 的回调）在当前片里跑完，期间不回收。
 

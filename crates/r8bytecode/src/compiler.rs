@@ -176,6 +176,10 @@ struct Frame<'a> {
     async_generator: bool,
     /// 严格模式
     strict: bool,
+    /// annexB：执行到声明处要把值写到外层 `var` 的块级函数（按函数节点的起始位置）
+    annexb: Vec<u32>,
+    /// 函数层（`var` 所在）的作用域层下标；脚本是全局
+    var_level: Option<usize>,
 }
 
 /// 函数体：语句、箭头函数的表达式、类的字段初始化、缺省构造器。
@@ -236,7 +240,7 @@ impl Module {
         }
         let strict = kind == CodeKind::StrictEval || Flavor::use_strict(&program.directives);
         let local = (kind != CodeKind::Script).then(|| Decls::eval_local(&program.body, strict));
-        let (captured, used) = Resolver::script(&program.body, Decls::this_key(program.span), &allocator, local.as_ref());
+        let (captured, used) = Resolver::script(&program.body, Decls::this_key(program.span), &allocator, local.as_ref(), strict);
         let mut c = Compiler { src, alloc: &allocator, captured, used, sites: 0, class_depth: 0, module: Vec::new(), frames: Vec::new(), levels: Vec::new(), script_lexicals: HashSet::new(), chains: Vec::new() };
         c.script(program, local.as_ref(), strict)?;
         Ok(Module { functions: c.module })
@@ -248,6 +252,40 @@ impl<'a> Compiler<'a, '_> {
 
     pub(crate) fn unsupported(&self, span: Span, what: &str) -> Error {
         self.src.unsupported(span.start, what)
+    }
+
+    /// annexB：块级函数声明执行到这里，把块里的函数值写到外层的 `var`（函数层绑定或全局）。
+    fn annexb_copy(&mut self, f: &'a oxc_ast::ast::Function<'a>) {
+        let Some(id) = &f.id else { return };
+        if !self.frame().annexb.contains(&f.span.start) {
+            return;
+        }
+        let name = id.name.as_str();
+        self.load(name);
+        match self.frame().var_level {
+            Some(level) => {
+                let mut depth = 0;
+                for (i, l) in self.levels.iter().enumerate().rev() {
+                    if i <= level
+                        && let Some(n) = l.names.iter().find(|n| n.name == name)
+                    {
+                        let insn = match n.binding {
+                            Binding::Reg(r) => Insn::Star(r),
+                            Binding::Env(slot) => Insn::StaEnv { depth, slot },
+                        };
+                        self.emit(insn);
+                        return;
+                    }
+                    if l.env {
+                        depth += 1;
+                    }
+                }
+            }
+            None => {
+                let k = self.name(name);
+                self.emit(Insn::StaGlobal { name: k, strict: false });
+            }
+        }
     }
 
     /// 这里的代码是不是严格的：函数本身严格，或者在类体里（`extends` 与计算键在外层函数里求值，也是严格代码）。
@@ -502,7 +540,7 @@ impl<'a> Compiler<'a, '_> {
         // 类里的函数（方法、构造器、字段初始化）都是严格的
         let strict = flavor.strict || self.class_depth > 0 || self.frames.last().is_some_and(|f| f.strict);
         let out = Function { name: name.into(), kind: flavor.kind, keeps_args, generator: flavor.generator, asynchronous: flavor.asynchronous, mode: strict.into(), params: n, length, regs: top, ..Function::default() };
-        self.frames.push(Frame { index, out, top, envs: 0, controls: Vec::new(), label: None, completion: None, resume: None, async_generator: false, strict });
+        self.frames.push(Frame { index, out, top, envs: 0, controls: Vec::new(), label: None, completion: None, resume: None, async_generator: false, strict, annexb: Vec::new(), var_level: None });
         if flavor.generator || flavor.asynchronous {
             let mode = self.temp();
             self.frame().resume = Some(mode);
@@ -512,7 +550,11 @@ impl<'a> Compiler<'a, '_> {
             Body::Statements(s) => s,
             _ => &[],
         };
-        self.enter(&Decls::function(this, self_name, params, stmts))?;
+        self.enter(&Decls::function(this, self_name, params, stmts, !strict))?;
+        if !strict {
+            self.frame().var_level = Some(self.levels.len() - 1);
+            self.frame().annexb = Decls::annexb_functions(stmts, params).iter().map(|f| f.span.start).collect();
+        }
         if flavor.kind == (FunctionKind::Constructor { derived: true })
             && let Some(t) = self.levels.last_mut().and_then(|l| l.names.iter_mut().find(|n| n.name == THIS))
         {
@@ -521,6 +563,14 @@ impl<'a> Compiler<'a, '_> {
         }
         if let Some(p) = params {
             self.prologue(p)?;
+        }
+        // 生成器：形参与声明都准备好了才挂起（调用时就跑到这里，形参出错同步抛），第一次 next 从这里接着跑
+        if flavor.generator
+            && let Some(mode) = self.frame().resume
+        {
+            self.emit(Insn::LdaUndefined);
+            self.emit(Insn::Yield { mode });
+            self.resume_dispatch(mode, true)?;
         }
         match body {
             Body::Statements(s) => self.statements(s)?,
@@ -1186,7 +1236,7 @@ impl<'a> Compiler<'a, '_> {
         self.module.push(Function::default());
         let eval = local.is_some();
         let out = Function { name: "main".into(), regs: Reg::PARAMS, mode: strict.into(), ..Function::default() };
-        self.frames.push(Frame { index: 0, out, top: Reg::PARAMS, envs: 0, controls: Vec::new(), label: None, completion: None, resume: None, async_generator: false, strict });
+        self.frames.push(Frame { index: 0, out, top: Reg::PARAMS, envs: 0, controls: Vec::new(), label: None, completion: None, resume: None, async_generator: false, strict, annexb: Vec::new(), var_level: None });
         let completion = self.temp();
         self.frame().completion = Some(completion);
         self.enter(&Decls(vec![Decl { name: THIS, key: Decls::this_key(program.span), kind: DeclKind::This, ready: None }]))?;
@@ -1194,6 +1244,12 @@ impl<'a> Compiler<'a, '_> {
         if !(eval && strict) {
             globals.vars(&program.body);
             globals.lexical(&program.body);
+        }
+        // annexB：脚本里块级函数也在全局建 `var`
+        if !strict && !eval {
+            let hoisted = Decls::annexb_functions(&program.body, None);
+            self.frame().annexb = hoisted.iter().map(|f| f.span.start).collect();
+            globals.annexb_globals(&hoisted);
         }
         if let Some(d) = local {
             self.enter(d)?;
@@ -1390,6 +1446,16 @@ impl<'a> Compiler<'a, '_> {
         }
     }
 
+    /// `if` 的分支：直接是函数声明的当成只有它的块（annexB B.3.3）。
+    fn clause(&mut self, s: &'a Statement<'a>) -> Result<(), Error> {
+        if matches!(s, Statement::FunctionDeclaration(_)) {
+            let one = core::slice::from_ref(s);
+            self.scoped(&Decls::block([one]), |c| c.statements(one))
+        } else {
+            self.statement(s)
+        }
+    }
+
     fn block(&mut self, b: &'a BlockStatement<'a>) -> Result<(), Error> {
         self.scoped(&Decls::block([b.body.as_slice()]), |c| c.statements(&b.body))
     }
@@ -1481,7 +1547,8 @@ impl<'a> Compiler<'a, '_> {
                 }
             }
             Statement::VariableDeclaration(d) => self.declaration(d)?,
-            Statement::FunctionDeclaration(_) | Statement::EmptyStatement(_) => {}
+            Statement::FunctionDeclaration(f) => self.annexb_copy(f),
+            Statement::EmptyStatement(_) => {}
             Statement::ClassDeclaration(c) => {
                 self.class(c, "")?;
                 if let Some(id) = &c.id {
@@ -1512,11 +1579,11 @@ impl<'a> Compiler<'a, '_> {
             Statement::IfStatement(i) => {
                 self.expr(&i.test)?;
                 let skip = self.jump(Insn::JumpIfFalse);
-                self.statement(&i.consequent)?;
+                self.clause(&i.consequent)?;
                 if let Some(a) = &i.alternate {
                     let end = self.jump(Insn::Jump);
                     self.land(skip);
-                    self.statement(a)?;
+                    self.clause(a)?;
                     self.land(end);
                 } else {
                     self.land(skip);
