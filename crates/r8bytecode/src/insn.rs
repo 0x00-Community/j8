@@ -55,6 +55,21 @@ impl From<Mode> for bool {
     }
 }
 
+/// 直接 eval 处看得见的一个绑定：名字、在那层环境里的槽位、是不是 `const`、要不要查死区。
+#[derive(Clone, Debug)]
+pub struct EvalName {
+    pub name: Box<str>,
+    pub slot: u16,
+    pub constant: bool,
+    pub tdz: bool,
+    /// 具名函数表达式自己的名字：赋值非严格悄悄丢掉、严格抛 TypeError
+    pub self_name: bool,
+}
+
+/// 直接 eval 处的作用域表：由内向外，一层对应环境链上的一个环境。
+#[derive(Clone, Debug, Default)]
+pub struct EvalScope(pub Vec<Vec<EvalName>>);
+
 /// 一个函数：名字、形参数、寄存器数、指令、常量池。
 #[derive(Clone, Debug, Default)]
 pub struct Function {
@@ -74,6 +89,8 @@ pub struct Function {
     pub regs: u16,
     pub insns: Vec<Insn>,
     pub consts: Vec<Constant>,
+    /// 函数里各处直接 eval 的作用域表（`CallEval` 的 `scope` 是下标）
+    pub scopes: Vec<EvalScope>,
 }
 
 impl Function {

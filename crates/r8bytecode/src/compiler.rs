@@ -9,7 +9,7 @@ use oxc_span::{GetSpan, SourceType, Span};
 use r8frame::{CodeKind, CompareOp, Error, Resume, Source};
 
 use crate::scope::{Decl, DeclKind, Decls, Hidden, Key, Resolver, THIS};
-use crate::{Const, Constant, Function, FunctionKind, Insn, Label, Module, PropertyKind, Reg};
+use crate::{Const, Constant, EvalName, EvalScope, Function, FunctionKind, Insn, Label, Module, PropertyKind, Reg};
 
 /// 回填前的跳转目标
 const UNPATCHED: Label = Label(u32::MAX);
@@ -37,6 +37,8 @@ struct Bound<'a> {
     constant: bool,
     /// 暂时性死区到这个位置结束（`u32::MAX`：总要查）
     ready: Option<u32>,
+    /// 具名函数表达式自己的名字（不可改）
+    self_name: bool,
 }
 
 /// 生成代码时的一层作用域。
@@ -180,6 +182,10 @@ struct Frame<'a> {
     annexb: Vec<u32>,
     /// 函数层（`var` 所在）的作用域层下标；脚本是全局
     var_level: Option<usize>,
+    /// 直接 eval 的代码：调用函数里装 eval var 的对象（annexB 的块级函数写到这里）
+    eval_vars: Option<&'a str>,
+    /// 正在编形参序言（这里的 eval 看不见函数体的词法声明）
+    prologue: bool,
 }
 
 /// 函数体：语句、箭头函数的表达式、类的字段初始化、缺省构造器。
@@ -211,6 +217,8 @@ pub(crate) struct Compiler<'a, 's> {
     script_lexicals: HashSet<&'a str>,
     /// 正在编的可选链：每条链里 `?.` 遇到 null / undefined 跳到链尾
     pub(crate) chains: Vec<Vec<usize>>,
+    /// 含直接 eval 的函数（按形参表的起始位置）
+    eval_fns: HashSet<u32>,
 }
 
 impl TryFrom<&Source<'_>> for Module {
@@ -225,6 +233,15 @@ impl TryFrom<&Source<'_>> for Module {
 impl Module {
     /// 按种类编：脚本的顶层词法声明进脚本作用域；eval 代码的只在它自己里面。
     pub fn compile(src: &Source<'_>, kind: CodeKind) -> Result<Self, Error> {
+        Self::compile_in(src, kind, None)
+    }
+
+    /// 直接 eval 的代码：`outer` 是调用处看得见的绑定（运行时 eval 代码的环境接在调用处的环境链上）。
+    pub fn compile_direct(src: &Source<'_>, strict: bool, outer: &EvalScope) -> Result<Self, Error> {
+        Self::compile_in(src, if strict { CodeKind::StrictEval } else { CodeKind::Eval }, Some(outer))
+    }
+
+    fn compile_in(src: &Source<'_>, kind: CodeKind, outer: Option<&EvalScope>) -> Result<Self, Error> {
         let allocator = Allocator::default();
         // 脚本（非模块）；正则字面量解析时就校验
         let options = ParseOptions { parse_regular_expression: true, ..ParseOptions::default() };
@@ -238,10 +255,21 @@ impl Module {
         if let Some(d) = checked.diagnostics.errors().next() {
             return Err(Error::Syntax(format!("{}: {d}", src.file)));
         }
+        // 含直接 eval 的函数：它们的绑定都放进环境，非严格的再放一个装 eval `var` 的对象
+        let scoping = checked.semantic.scoping();
+        let eval_scopes: HashSet<oxc_syntax::scope::ScopeId> = scoping.scope_descendants_from_root().filter(|&id| scoping.scope_flags(id).contains_direct_eval()).collect();
+        let outer_names: Option<Vec<Vec<&str>>> = outer.map(|o| o.0.iter().map(|l| l.iter().map(|n| allocator.alloc_str(&n.name)).collect()).collect());
         let strict = kind == CodeKind::StrictEval || Flavor::use_strict(&program.directives);
         let local = (kind != CodeKind::Script).then(|| Decls::eval_local(&program.body, strict));
-        let (captured, used) = Resolver::script(&program.body, Decls::this_key(program.span), &allocator, local.as_ref(), strict);
-        let mut c = Compiler { src, alloc: &allocator, captured, used, sites: 0, class_depth: 0, module: Vec::new(), frames: Vec::new(), levels: Vec::new(), script_lexicals: HashSet::new(), chains: Vec::new() };
+        let (captured, used, eval_fns) = Resolver::script(&program.body, Decls::this_key(program.span), &allocator, local.as_ref(), strict, eval_scopes, outer_names.as_deref());
+        let mut c = Compiler { src, alloc: &allocator, captured, used, sites: 0, class_depth: 0, module: Vec::new(), frames: Vec::new(), levels: Vec::new(), script_lexicals: HashSet::new(), chains: Vec::new(), eval_fns };
+        if let (Some(o), Some(names)) = (outer, &outer_names) {
+            // 调用处的环境链：由外向内压成作用域层（都在环境里，槽位照抄）
+            for (level, names) in o.0.iter().zip(names).rev() {
+                let bound = level.iter().zip(names).map(|(n, &name)| Bound { name, binding: Binding::Env(n.slot), constant: n.constant, ready: n.tdz.then_some(u32::MAX), self_name: n.self_name }).collect();
+                c.levels.push(Level { func: usize::MAX, names: bound, env: true, mark: 0, switch: false });
+            }
+        }
         c.script(program, local.as_ref(), strict)?;
         Ok(Module { functions: c.module })
     }
@@ -281,11 +309,85 @@ impl<'a> Compiler<'a, '_> {
                     }
                 }
             }
-            None => {
-                let k = self.name(name);
-                self.emit(Insn::StaGlobal { name: k, strict: false });
+            None => match self.frame().eval_vars {
+                Some(vars) => {
+                    let v = self.temp();
+                    self.emit(Insn::Star(v));
+                    let obj = self.temp();
+                    self.load(vars);
+                    self.emit(Insn::Star(obj));
+                    self.emit(Insn::Ldar(v));
+                    let k = self.name(name);
+                    self.emit(Insn::SetNamed { obj, name: k, strict: false });
+                    self.release(obj);
+                    self.release(v);
+                }
+                None => {
+                    let k = self.name(name);
+                    self.emit(Insn::StaGlobal { name: k, strict: false });
+                }
+            },
+        }
+    }
+
+    /// EvalDeclarationInstantiation 的冲突检查：eval 的 `var` / 函数名和调用处到变量环境之间的词法声明同名。
+    fn eval_conflicts(&self, globals: &Decls<'a>) -> Result<(), Error> {
+        for d in globals.0.iter().filter(|d| matches!(d.kind, DeclKind::Var | DeclKind::Function(_))) {
+            if self.outer_lexical(d.name) {
+                return Err(Error::Syntax(format!("{}: Identifier '{}' has already been declared", self.src.file, d.name)));
             }
         }
+        Ok(())
+    }
+
+    /// 直接 eval 处到变量环境之间（含变量环境那层）有没有叫这个名字的词法声明。
+    fn outer_lexical(&self, name: &str) -> bool {
+        for l in self.levels.iter().rev().filter(|l| l.func == usize::MAX) {
+            if l.names.iter().any(|n| n.name == name && n.ready.is_some() && !n.self_name) {
+                return true;
+            }
+            if l.names.first().is_some_and(|n| Hidden::is_eval_vars(n.name)) {
+                break;
+            }
+        }
+        false
+    }
+
+    /// 名字解析到的是不是具名函数表达式自己的名字。
+    fn is_self_name(&self, name: &str) -> bool {
+        self.levels.iter().rev().find_map(|l| l.names.iter().find(|n| n.name == name)).is_some_and(|n| n.self_name)
+    }
+
+    /// 直接 eval 的代码：调用函数那一层（装 eval var 的对象的隐藏名, 那层已有的名字）。
+    fn eval_var_level(&self) -> Option<(&'a str, Vec<&'a str>)> {
+        self.levels.iter().rev().filter(|l| l.func == usize::MAX).find_map(|l| {
+            let first = l.names.first()?;
+            Hidden::is_eval_vars(first.name).then(|| (first.name, l.names.iter().map(|n| n.name).collect()))
+        })
+    }
+
+    /// 直接 eval 处的作用域表：现在看得见的全部（都在环境里的）绑定，由内向外一层一个环境。
+    pub(crate) fn eval_scope(&mut self) -> u16 {
+        let mut levels = Vec::new();
+        let cur = self.frames.len() - 1;
+        let prologue = self.frame().prologue;
+        for l in self.levels.iter().rev().filter(|l| l.env) {
+            // 形参表达式里：函数体顶层的 let / const / class 还看不见
+            let hide_lexical = prologue && l.func == cur;
+            let names = l
+                .names
+                .iter()
+                .filter(|n| !(hide_lexical && n.ready.is_some()))
+                .filter_map(|n| match n.binding {
+                    Binding::Env(slot) => Some(EvalName { name: n.name.into(), slot, constant: n.constant, tdz: n.ready.is_some(), self_name: n.self_name }),
+                    Binding::Reg(_) => None,
+                })
+                .collect();
+            levels.push(names);
+        }
+        let scopes = &mut self.frame().out.scopes;
+        scopes.push(EvalScope(levels));
+        u16::try_from(scopes.len() - 1).unwrap_or(u16::MAX)
     }
 
     /// 这里的代码是不是严格的：函数本身严格，或者在类体里（`extends` 与计算键在外层函数里求值，也是严格代码）。
@@ -377,7 +479,7 @@ impl<'a> Compiler<'a, '_> {
                     _ => Binding::Reg(self.temp()),
                 }
             };
-            names.push(Bound { name: d.name, binding, constant: matches!(d.kind, DeclKind::Const), ready: d.ready });
+            names.push(Bound { name: d.name, binding, constant: matches!(d.kind, DeclKind::Const), ready: d.ready, self_name: matches!(d.kind, DeclKind::SelfName) });
         }
         let env = slots > 0;
         if env {
@@ -510,7 +612,8 @@ impl<'a> Compiler<'a, '_> {
             self.emit(Insn::Star(obj));
             self.emit(Insn::WithHas { obj, name: k });
             let skip = self.jump(Insn::JumpIfFalse);
-            if let Some(t) = this_reg {
+            // 装 eval var 的对象相当于声明式环境：调用的 `this` 不是它
+            if let Some(t) = this_reg.filter(|_| !Hidden::is_eval_vars(hidden)) {
                 self.emit(Insn::Ldar(obj));
                 self.emit(Insn::Star(t));
             }
@@ -597,6 +700,12 @@ impl<'a> Compiler<'a, '_> {
     }
 
     fn store_static(&mut self, name: &'a str, init: bool) {
+        if !init && self.is_self_name(name) {
+            if self.strict_here() {
+                self.emit(Insn::ThrowConstAssign);
+            }
+            return;
+        }
         let r = self.resolve(name);
         if r.constant && !init {
             self.emit(Insn::ThrowConstAssign);
@@ -634,7 +743,7 @@ impl<'a> Compiler<'a, '_> {
         // 类里的函数（方法、构造器、字段初始化）都是严格的
         let strict = flavor.strict || self.class_depth > 0 || self.frames.last().is_some_and(|f| f.strict);
         let out = Function { name: name.into(), kind: flavor.kind, keeps_args, generator: flavor.generator, asynchronous: flavor.asynchronous, mode: strict.into(), params: n, length, regs: top, ..Function::default() };
-        self.frames.push(Frame { index, out, top, envs: 0, controls: Vec::new(), label: None, completion: None, resume: None, async_generator: false, strict, annexb: Vec::new(), var_level: None });
+        self.frames.push(Frame { index, out, top, envs: 0, controls: Vec::new(), label: None, completion: None, resume: None, async_generator: false, strict, annexb: Vec::new(), var_level: None, eval_vars: None, prologue: false });
         if flavor.generator || flavor.asynchronous {
             let mode = self.temp();
             self.frame().resume = Some(mode);
@@ -644,7 +753,12 @@ impl<'a> Compiler<'a, '_> {
             Body::Statements(s) => s,
             _ => &[],
         };
-        self.enter(&Decls::function(this, self_name, params, stmts, !strict))?;
+        let eval_vars = params.filter(|p| !strict && self.eval_fns.contains(&p.span.start)).map(|p| Hidden::eval_vars(self.alloc, p));
+        self.enter(&Decls::function(this, self_name, params, stmts, !strict, eval_vars))?;
+        if let Some(h) = eval_vars {
+            self.emit(Insn::CreateNullObject);
+            self.store(h, true);
+        }
         if !strict {
             self.frame().var_level = Some(self.levels.len() - 1);
             self.frame().annexb = Decls::annexb_functions(stmts, params).iter().map(|f| f.span.start).collect();
@@ -656,7 +770,9 @@ impl<'a> Compiler<'a, '_> {
             t.ready = Some(u32::MAX);
         }
         if let Some(p) = params {
+            self.frame().prologue = true;
             self.prologue(p)?;
+            self.frame().prologue = false;
         }
         // 生成器：形参与声明都准备好了才挂起（调用时就跑到这里，形参出错同步抛），第一次 next 从这里接着跑
         if flavor.generator
@@ -1326,14 +1442,19 @@ impl<'a> Compiler<'a, '_> {
 
     /// 脚本本身：顶层 `var` / 函数声明 / `let` / `const` 都是全局对象的属性。
     /// `local` 是 eval 代码自己那一层的声明（脚本没有）；严格的 eval 代码什么都不落到全局。
+    #[expect(clippy::too_many_lines, reason = "脚本 / eval 代码的声明实例化按规范一步步写")]
     fn script(&mut self, program: &'a Program<'a>, local: Option<&Decls<'a>>, strict: bool) -> Result<(), Error> {
         self.module.push(Function::default());
         let eval = local.is_some();
         let out = Function { name: "main".into(), regs: Reg::PARAMS, mode: strict.into(), ..Function::default() };
-        self.frames.push(Frame { index: 0, out, top: Reg::PARAMS, envs: 0, controls: Vec::new(), label: None, completion: None, resume: None, async_generator: false, strict, annexb: Vec::new(), var_level: None });
+        self.frames.push(Frame { index: 0, out, top: Reg::PARAMS, envs: 0, controls: Vec::new(), label: None, completion: None, resume: None, async_generator: false, strict, annexb: Vec::new(), var_level: None, eval_vars: None, prologue: false });
         let completion = self.temp();
         self.frame().completion = Some(completion);
-        self.enter(&Decls(vec![Decl { name: THIS, key: Decls::this_key(program.span), kind: DeclKind::This, ready: None }]))?;
+        // 直接 eval 的代码用调用处的 `this`（经外层作用域表解析）
+        let direct = !self.levels.is_empty();
+        if !direct {
+            self.enter(&Decls(vec![Decl { name: THIS, key: Decls::this_key(program.span), kind: DeclKind::This, ready: None }]))?;
+        }
         let mut globals = Decls::default();
         if !(eval && strict) {
             globals.vars(&program.body);
@@ -1347,6 +1468,53 @@ impl<'a> Compiler<'a, '_> {
         }
         if let Some(d) = local {
             self.enter(d)?;
+        }
+        // 非严格的直接 eval：`var` 和调用处到变量环境之间的词法声明同名是 SyntaxError
+        if direct && eval && !strict {
+            self.eval_conflicts(&globals)?;
+        }
+        // annexB：eval 代码里的块级函数也落到变量环境（和外层词法声明冲突的不提升）
+        if eval && !strict {
+            let mut hoisted = Decls::annexb_functions(&program.body, None);
+            hoisted.retain(|f| f.id.as_ref().is_some_and(|id| !self.outer_lexical(id.name.as_str())));
+            self.frame().annexb = hoisted.iter().map(|f| f.span.start).collect();
+            globals.annexb_globals(&hoisted);
+        }
+        // 非严格的直接 eval：`var` / 函数声明落到调用函数里（已有同名绑定就用它，否则放进装 eval var 的对象）
+        if direct && eval && !strict && let Some((vars, statics)) = self.eval_var_level() {
+            self.frame().eval_vars = Some(vars);
+            for d in &globals.0 {
+                match d.kind {
+                    DeclKind::Var if !statics.contains(&d.name) => {
+                        let obj = self.temp();
+                        self.load(vars);
+                        self.emit(Insn::Star(obj));
+                        let name = self.name(d.name);
+                        self.emit(Insn::DeclareEvalVar { obj, name });
+                        self.release(obj);
+                    }
+                    DeclKind::Function(f) => {
+                        let n = self.function_declaration(f)?;
+                        self.emit(Insn::CreateClosure(n));
+                        if statics.contains(&d.name) {
+                            self.store(d.name, false);
+                        } else {
+                            let v = self.temp();
+                            self.emit(Insn::Star(v));
+                            let obj = self.temp();
+                            self.load(vars);
+                            self.emit(Insn::Star(obj));
+                            self.emit(Insn::Ldar(v));
+                            let name = self.name(d.name);
+                            self.emit(Insn::DefineNamed { obj, name, kind: PropertyKind::Data, enumerable: true });
+                            self.release(obj);
+                            self.release(v);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            globals.0.retain(|d| !matches!(d.kind, DeclKind::Var | DeclKind::Function(_)));
         }
         // 先查全部函数、`var` 能不能声明，一个不行就什么都不建
         for d in &globals.0 {

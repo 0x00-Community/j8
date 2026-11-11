@@ -27,6 +27,12 @@ const POSITION_MASK: Key = (1 << 32) - 1;
 /// annexB 块级函数在外层建的 `var` 绑定：键 = 这个标记 | 函数名的位置
 const ANNEXB_KEY: Key = 4 << 32;
 
+/// 含直接 eval 的函数放 eval 声明的 `var` 的对象：键 = 这个标记 | 形参表的位置
+const EVAL_VARS_KEY: Key = 5 << 32;
+
+/// 直接 eval 代码看到的外层绑定：键 = 这个标记 | 序号
+const OUTER_KEY: Key = 6 << 32;
+
 /// `this` 这个名字不可能是标识符，拿来当伪绑定名
 pub(crate) const THIS: &str = "this";
 
@@ -429,8 +435,12 @@ impl<'a> Decls<'a> {
     }
 
     /// 函数体那一层：`this`、自己的名字、形参、`var`、顶层词法声明。
-    pub fn function(this: Option<Key>, self_name: Option<&'a BindingIdentifier<'a>>, params: Option<&'a FormalParameters<'a>>, stmts: &'a [Statement<'a>], sloppy: bool) -> Self {
+    pub fn function(this: Option<Key>, self_name: Option<&'a BindingIdentifier<'a>>, params: Option<&'a FormalParameters<'a>>, stmts: &'a [Statement<'a>], sloppy: bool, eval_vars: Option<&'a str>) -> Self {
         let mut d = Self::default();
+        // 放最前：名字解析到函数层还没找到时先查它（同 `with`）
+        if let (Some(name), Some(p)) = (eval_vars, params) {
+            d.add(Decl { name, key: EVAL_VARS_KEY | Self::key(p.span), kind: DeclKind::Var, ready: None });
+        }
         if let Some(key) = this {
             d.add(Decl { name: THIS, key, kind: DeclKind::This, ready: None });
             d.add(Decl { name: NEW_TARGET, key: NEW_TARGET_KEY | (key & POSITION_MASK), kind: DeclKind::NewTarget, ready: None });
@@ -466,6 +476,16 @@ impl<'a> Decls<'a> {
 pub(crate) struct Hidden;
 
 impl Hidden {
+    /// 含直接 eval 的非严格函数放 eval 声明的 `var` 的对象（按 `with` 对象处理）。
+    pub fn eval_vars<'a>(alloc: &'a Allocator, params: &FormalParameters<'_>) -> &'a str {
+        alloc.alloc_str(&format!("%with@eval@{}", params.span.start))
+    }
+
+    /// 是不是放 eval `var` 的对象。
+    pub fn is_eval_vars(name: &str) -> bool {
+        name.starts_with("%with@eval@")
+    }
+
     /// `with` 语句的对象（作用域里的隐藏绑定）。
     pub fn with(alloc: &Allocator, span: Span) -> &str {
         alloc.alloc_str(&format!("%with@{}", span.start))
@@ -511,19 +531,34 @@ pub(crate) struct Resolver<'a> {
     pub used: HashSet<Key>,
     /// 当前代码是不是严格的（决定有没有 annexB 的块级函数提升）
     strict: bool,
+    /// 含直接 eval 的作用域（oxc_semantic 标的，含祖先）
+    eval_scopes: HashSet<oxc_syntax::scope::ScopeId>,
+    /// 含直接 eval 的函数（按形参表的起始位置），交给编译器
+    pub eval_fns: HashSet<u32>,
 }
 
 impl<'a> Resolver<'a> {
     /// 脚本：顶层声明是全局对象的属性，不进作用域；只有 `this`。
     /// 给出（被捕获的绑定, 被引用到的绑定）。
-    pub fn script(stmts: &'a [Statement<'a>], this: Key, alloc: &'a Allocator, local: Option<&Decls<'a>>, strict: bool) -> (HashSet<Key>, HashSet<Key>) {
-        let mut r = Self { levels: Vec::new(), funcs: 0, func: 0, alloc, captured: HashSet::new(), used: HashSet::new(), strict };
-        r.levels.push(Level { func: 0, names: vec![(THIS, this)] });
+    /// `outer` 是直接 eval 处看得见的外层绑定（由内向外，一层一个环境）；有它时 eval 代码不另建 `this`。
+    pub fn script(stmts: &'a [Statement<'a>], this: Key, alloc: &'a Allocator, local: Option<&Decls<'a>>, strict: bool, eval_scopes: HashSet<oxc_syntax::scope::ScopeId>, outer: Option<&[Vec<&'a str>]>) -> (HashSet<Key>, HashSet<Key>, HashSet<u32>) {
+        let mut r = Self { levels: Vec::new(), funcs: 0, func: 0, alloc, captured: HashSet::new(), used: HashSet::new(), strict, eval_scopes, eval_fns: HashSet::new() };
+        let mut n = 0;
+        for level in outer.unwrap_or(&[]).iter().rev() {
+            let names = level.iter().map(|&name| {
+                n += 1;
+                (name, OUTER_KEY | n)
+            });
+            r.levels.push(Level { func: u32::MAX, names: names.collect() });
+        }
+        if outer.is_none() {
+            r.levels.push(Level { func: 0, names: vec![(THIS, this)] });
+        }
         if let Some(d) = local {
             r.push(d);
         }
         r.statements(stmts);
-        (r.captured, r.used)
+        (r.captured, r.used, r.eval_fns)
     }
 
     fn push(&mut self, d: &Decls<'a>) {
@@ -551,6 +586,16 @@ impl<'a> Resolver<'a> {
         }
     }
 
+    /// 直接 eval 看得见的绑定都得在环境里：现在栈上的全部记为被捕获。
+    fn capture_all(&mut self) {
+        for l in &self.levels {
+            for &(_, key) in &l.names {
+                self.captured.insert(key);
+                self.used.insert(key);
+            }
+        }
+    }
+
     fn enter_function(&mut self, d: &Decls<'a>) -> u32 {
         self.funcs += 1;
         let outer = self.func;
@@ -568,8 +613,16 @@ impl<'a> Resolver<'a> {
         let Some(body) = &f.body else { return };
         let saved = self.strict;
         self.strict = saved || body.directives.iter().any(|d| d.directive.as_str() == "use strict");
-        let d = Decls::function(Some(Decls::this_key(f.span)), if self_name { f.id.as_ref() } else { None }, Some(&f.params), &body.statements, !self.strict);
+        let eval = f.scope_id.get().is_some_and(|id| self.eval_scopes.contains(&id));
+        if eval {
+            self.eval_fns.insert(f.params.span.start);
+        }
+        let vars = (eval && !self.strict).then(|| Hidden::eval_vars(self.alloc, &f.params));
+        let d = Decls::function(Some(Decls::this_key(f.span)), if self_name { f.id.as_ref() } else { None }, Some(&f.params), &body.statements, !self.strict, vars);
         let outer = self.enter_function(&d);
+        if eval {
+            self.capture_all();
+        }
         self.params(&f.params);
         self.statements(&body.statements);
         self.leave_function(outer);
@@ -585,8 +638,16 @@ impl<'a> Resolver<'a> {
         if let ArrowFunctionBody::FunctionBody(b) = &a.body {
             self.strict = saved || b.directives.iter().any(|d| d.directive.as_str() == "use strict");
         }
-        let d = Decls::function(None, None, Some(&a.params), stmts, !self.strict);
+        let eval = a.scope_id.get().is_some_and(|id| self.eval_scopes.contains(&id));
+        if eval {
+            self.eval_fns.insert(a.params.span.start);
+        }
+        let vars = (eval && !self.strict).then(|| Hidden::eval_vars(self.alloc, &a.params));
+        let d = Decls::function(None, None, Some(&a.params), stmts, !self.strict, vars);
         let outer = self.enter_function(&d);
+        if eval {
+            self.capture_all();
+        }
         self.params(&a.params);
         match &a.body {
             ArrowFunctionBody::FunctionBody(_) => self.statements(stmts),
@@ -632,7 +693,7 @@ impl<'a> Resolver<'a> {
             }
         }
         for (statik, key) in [(false, Decls::this_key(c.body.span)), (true, Decls::this_key(c.span))] {
-            let outer = self.enter_function(&Decls::function(Some(key), None, None, &[], false));
+            let outer = self.enter_function(&Decls::function(Some(key), None, None, &[], false, None));
             for e in &c.body.body {
                 match e {
                     // 实例初始化函数里要装私有方法：读私有名与方法函数
@@ -999,6 +1060,9 @@ impl<'a> Resolver<'a> {
             Expression::AwaitExpression(a) => self.expr(&a.argument),
             Expression::UpdateExpression(u) => self.simple_target(&u.argument),
             Expression::CallExpression(c) => {
+                if matches!(&c.callee, Expression::Identifier(id) if id.name == "eval") {
+                    self.capture_all();
+                }
                 self.expr(&c.callee);
                 c.arguments.iter().for_each(|a| self.argument(a));
             }

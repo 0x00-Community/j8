@@ -155,6 +155,31 @@ impl Executor {
         self.execute(a, State { regs, frames: Vec::new(), f, acc: Value::Undefined }, None).map(Outcome::returned)
     }
 
+    /// 直接 eval：按调用处的作用域表编译，跑在调用处的环境链上。
+    #[cfg_attr(not(feature = "compile"), expect(unused_variables, reason = "没有编译器就只能报错"))]
+    fn direct_eval<'gc>(&self, a: &mut Agent<'gc, '_>, src: &str, table: &r8bytecode::EvalScope, env: Option<r8frame::JsEnv<'gc>>, strict: bool, level: usize) -> Result<Value<'gc>, Error> {
+        #[cfg(feature = "compile")]
+        {
+            let module = match Module::compile_direct(&r8frame::Source { text: src, file: "[eval]" }, strict, table) {
+                Ok(m) => m,
+                Err(Error::Syntax(m)) => return Err(a.throw(ErrorKind::Syntax, &m)),
+                Err(e) => return Err(e),
+            };
+            let main = self.load(module);
+            if level >= STACK_LIMIT {
+                return Err(a.throw(ErrorKind::Range, "Maximum call stack size exceeded"));
+            }
+            let saved = self.depth.replace(level);
+            let mut regs = Vec::new();
+            let f = self.enter(a, &mut regs, Closure::new(main, env), Value::Undefined, Value::Undefined, &[]);
+            let r = self.execute(a, State { regs, frames: Vec::new(), f, acc: Value::Undefined }, None).map(Outcome::returned);
+            self.depth.set(saved);
+            r
+        }
+        #[cfg(not(feature = "compile"))]
+        Err(a.throw(ErrorKind::Syntax, "dynamic code needs the compile feature"))
+    }
+
     /// 脚本 `main` 的初始执行状态（`this` 是全局对象）。
     #[cfg(feature = "compile")]
     fn script_state<'gc>(&self, a: &mut Agent<'gc, '_>, main: FuncId) -> State<'gc> {
@@ -698,6 +723,15 @@ impl Executor {
                     }
                 }
                 Insn::ToObject => *acc = a.to_object(*acc)?.into(),
+                Insn::CreateNullObject => *acc = ObjectData::default().alloc(a.mc).into(),
+                Insn::DeclareEvalVar { obj, name } => {
+                    if let Value::Object(o) = regs[r(obj)] {
+                        let key = r8frame::Key::Str(func.name_at(name));
+                        if !a.has_own_property(o, key)? {
+                            a.create_data_property(o, key, Value::Undefined)?;
+                        }
+                    }
+                }
                 Insn::WithHas { obj, name } => {
                     let o = regs[r(obj)];
                     let key = func.name_at(name);
@@ -923,17 +957,19 @@ impl Executor {
                 Insn::SetNamed { obj, name, strict } => a.put_named(regs[r(obj)], func.name_at(name), *acc, strict)?,
                 Insn::GetKeyed { obj } => *acc = a.get_keyed(regs[r(obj)], *acc)?,
                 Insn::SetKeyed { obj, key, strict } => a.put_keyed(regs[r(obj)], regs[r(key)], *acc, strict)?,
-                Insn::CallEval { callee, args, argc, .. } if matches!(regs[r(callee)], Value::Object(o) if Gc::ptr_eq(o, a.realm.eval)) => {
-                    *acc = match (argc, regs[r(args)]) {
-                        (0, _) => Value::Undefined,
-                        (_, Value::String(s)) => {
+                Insn::CallEval { callee, args, argc, scope, .. } if matches!(regs[r(callee)], Value::Object(o) if Gc::ptr_eq(o, a.realm.eval)) => {
+                    let first = if argc == 0 { None } else { Some(regs[r(args)]) };
+                    *acc = match first {
+                        None => Value::Undefined,
+                        Some(Value::String(s)) => {
                             let src = alloc::string::String::from(&**s);
-                            self.eval_code(a, &src, r8frame::CodeKind::StrictEval)?
+                            let table = &func.scopes[usize::from(scope)];
+                            self.direct_eval(a, &src, table, f.env, func.mode == Mode::Strict, depth + frames.len() + 1)?
                         }
-                        (_, v) => v,
+                        Some(v) => v,
                     };
                 }
-                Insn::Call { callee, this, args, argc } | Insn::CallEval { callee, this, args, argc } => {
+                Insn::Call { callee, this, args, argc } | Insn::CallEval { callee, this, args, argc, .. } => {
                     let level = depth + frames.len() + 1;
                     if level >= STACK_LIMIT {
                         return Err(a.throw(ErrorKind::Range, "Maximum call stack size exceeded"));

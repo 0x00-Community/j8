@@ -634,8 +634,12 @@ impl<'a> Compiler<'a, '_> {
         } else {
             let first = Reg(callee.0 + 2);
             self.arguments(&c.arguments, first)?;
-            let direct_eval = self.strict_here() && matches!(&c.callee, Expression::Identifier(id) if id.name == "eval");
-            self.emit(if direct_eval { Insn::CallEval { callee, this, args: first, argc } } else { Insn::Call { callee, this, args: first, argc } });
+            if matches!(&c.callee, Expression::Identifier(id) if id.name == "eval") {
+                let scope = self.eval_scope();
+                self.emit(Insn::CallEval { callee, this, args: first, argc, scope });
+            } else {
+                self.emit(Insn::Call { callee, this, args: first, argc });
+            }
         }
         self.release(callee);
         Ok(())

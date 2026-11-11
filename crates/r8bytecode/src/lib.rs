@@ -12,4 +12,4 @@ mod expr;
 mod scope;
 mod insn;
 
-pub use insn::{Const, Constant, Function, FunctionKind, Insn, Label, Mode, Module, PropertyKind, Reg};
+pub use insn::{Const, Constant, EvalName, EvalScope, Function, FunctionKind, Insn, Label, Mode, Module, PropertyKind, Reg};

@@ -41,7 +41,7 @@
 
 ## 阶段 6：语言动态部分
 
-- [ ] 非严格的直接 eval（外层名字表、`var` 进函数变量环境）
+- [x] 直接 eval：调用处看得见的绑定都放进环境，CallEval 带作用域表，eval 代码接在调用处的环境链上跑；非严格的 `var` / 函数落到调用函数（已有同名用它，否则进一个按 with 查的 eval var 对象）；词法冲突报 SyntaxError；eval 里的 annexB 块级函数（形参表达式里 eval 声明 `var arguments` 的冲突规则还没做）
 - [x] `with`（体内名字先查 with 对象、看 `Symbol.unscopables`，内层函数也能看到；调用的 `this` 是对象）
 - [x] annexB 块级函数提升（函数与脚本，含 if 子句里的函数声明；eval 代码里的还没有）
 - [x] 生成器 / async 生成器调用时就初始化形参（出错同步抛）
