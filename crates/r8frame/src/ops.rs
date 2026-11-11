@@ -1,5 +1,4 @@
 //! JS 规范里的运算语义（各执行层共用同一份）：类型转换、运算符、属性存取。
-use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -277,7 +276,7 @@ pub(crate) fn index_of_str(s: &str) -> Option<u32> {
 impl<'gc> Agent<'gc, '_> {
     /// 字符串放上堆。
     pub fn string(&self, s: &str) -> JsString<'gc> {
-        Gc::new(self.mc, Box::from(s))
+        Gc::new(self.mc, crate::SmallStr::from(s))
     }
 
     /// 以 `Object.prototype` 为原型的空对象。

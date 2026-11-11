@@ -240,7 +240,7 @@ impl<'gc> Realm<'gc> {
         if let Some(n) = length {
             d.define("length", prop(f64::from(n).into()));
         }
-        d.define("name", prop(Value::String(Gc::new(mc, alloc::boxed::Box::from(name)))));
+        d.define("name", prop(Value::String(Gc::new(mc, crate::SmallStr::from(name)))));
     }
 
     /// 带 `name` 的宿主函数对象。

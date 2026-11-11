@@ -7,7 +7,7 @@ use gc_arena::{Collect, Gc, Lock, Mutation, RefLock};
 use crate::{Agent, Error, FuncId, Key, Value};
 
 /// 堆上的字符串。
-pub type JsString<'gc> = Gc<'gc, Box<str>>;
+pub type JsString<'gc> = Gc<'gc, SmallStr>;
 
 /// 一个 Symbol：只有描述，身份就是指针。
 #[derive(Debug, Collect)]
@@ -614,14 +614,14 @@ const PROP_INDEX_THRESHOLD: usize = 32;
 /// 属性键 ⇒ 在属性表里的下标。
 #[derive(Debug, Default, Collect)]
 #[collect(require_static)]
-pub struct PropIndex(Option<alloc::collections::BTreeMap<PropKey, usize>>);
+pub struct PropIndex(Option<alloc::collections::BTreeMap<SmallStr, usize>>);
 
-/// 字符串属性的键：短的（不超过 23 字节，绝大多数属性名）内联存、建属性不分配，长的共享一份堆上副本。
+/// 字符串（属性键与 JS 字符串值共用）：短的（不超过 23 字节）内联存、不另外分配，长的共享一份堆上副本。
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Collect)]
 #[collect(require_static)]
-pub struct PropKey(smol_str::SmolStr);
+pub struct SmallStr(smol_str::SmolStr);
 
-impl core::ops::Deref for PropKey {
+impl core::ops::Deref for SmallStr {
     type Target = str;
 
     fn deref(&self) -> &str {
@@ -629,13 +629,13 @@ impl core::ops::Deref for PropKey {
     }
 }
 
-impl core::borrow::Borrow<str> for PropKey {
+impl core::borrow::Borrow<str> for SmallStr {
     fn borrow(&self) -> &str {
         &self.0
     }
 }
 
-impl From<&str> for PropKey {
+impl From<&str> for SmallStr {
     fn from(s: &str) -> Self {
         Self(smol_str::SmolStr::new(s))
     }
@@ -646,7 +646,7 @@ impl From<&str> for PropKey {
 #[collect(no_drop)]
 pub struct ObjectData<'gc> {
     pub kind: ObjectKind<'gc>,
-    pub props: Vec<(PropKey, Property<'gc>)>,
+    pub props: Vec<(SmallStr, Property<'gc>)>,
     /// 属性多了以后的键 ⇒ 下标索引（少的时候直接线性找）
     pub prop_index: PropIndex,
     /// Symbol 键的属性
@@ -872,7 +872,7 @@ impl<'gc> ObjectData<'gc> {
 
     /// 追加一项（索引跟着加，表够大了就建索引）。
     fn push_prop(&mut self, key: &str, prop: Property<'gc>) {
-        let key = PropKey::from(key);
+        let key = SmallStr::from(key);
         self.props.push((key.clone(), prop));
         let at = self.props.len() - 1;
         match &mut self.prop_index.0 {

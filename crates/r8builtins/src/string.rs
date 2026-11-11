@@ -98,8 +98,15 @@ impl Strings {
     }
 
     fn index_of<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        let u = Self::units(a, this)?;
-        let n: Vec<u16> = a.to_string(args.at(0))?.encode_utf16().collect();
+        let s = Self::this(a, this)?;
+        let n = a.to_string(args.at(0))?;
+        // 全 ASCII：字节下标就是 UTF-16 码元下标，直接在 UTF-8 上找
+        if s.is_ascii() {
+            let from = Self::clamp(a, args.at(1), s.len(), 0)?;
+            return Ok(s[from..].find(&**n).map_or(Value::Number(-1.0), |i| Self::count(from + i)));
+        }
+        let u: Vec<u16> = s.encode_utf16().collect();
+        let n: Vec<u16> = n.encode_utf16().collect();
         let from = Self::clamp(a, args.at(1), u.len(), 0)?;
         Ok(Self::find(&u, &n, from).map_or(Value::Number(-1.0), Self::count))
     }
@@ -182,30 +189,29 @@ impl Strings {
 
     /// `split(sep, limit)`：`sep` 是字符串（正则留给阶段 5）；空串按码元拆。
     pub(crate) fn split<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        let u = Self::units(a, this)?;
+        let s = Self::this(a, this)?;
         let limit = match args.at(1) {
             Value::Undefined => usize::MAX,
             v => a.to_uint32(v)? as usize,
         };
-        let parts: Vec<Vec<u16>> = match args.at(0) {
-            Value::Undefined => alloc::vec![u],
+        let items: Vec<Value<'gc>> = match args.at(0) {
+            Value::Undefined if limit == 0 => Vec::new(),
+            Value::Undefined => alloc::vec![s.into()],
             sep => {
-                let sep: Vec<u16> = a.to_string(sep)?.encode_utf16().collect();
+                let sep = a.to_string(sep)?;
                 if sep.is_empty() {
-                    u.iter().map(|&c| alloc::vec![c]).collect()
-                } else {
-                    let mut out = Vec::new();
-                    let mut start = 0;
-                    while let Some(i) = Self::find(&u, &sep, start) {
-                        out.push(u[start..i].to_vec());
-                        start = i + sep.len();
+                    // 空分隔符：按 UTF-16 码元一个一个拆（全 ASCII 时就是逐字节）
+                    if s.is_ascii() {
+                        s.as_bytes().iter().take(limit).map(|&c| a.string(core::str::from_utf8(&[c]).unwrap_or_default()).into()).collect()
+                    } else {
+                        s.encode_utf16().take(limit).map(|c| Self::from_units(a, &[c])).collect()
                     }
-                    out.push(u[start..].to_vec());
-                    out
+                } else {
+                    // 串都是合法 UTF-8：在 UTF-8 上切和按 UTF-16 码元切结果一样，不用来回转
+                    s.split(&**sep).take(limit).map(|p| a.string(p).into()).collect()
                 }
             }
         };
-        let items = parts.iter().take(limit).map(|p| Self::from_units(a, p)).collect();
         Ok(a.array(items).into())
     }
 
