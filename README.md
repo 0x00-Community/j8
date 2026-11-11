@@ -64,7 +64,7 @@ cargo build --target riscv64gc-unknown-none-elf -p r8frame -p r8bytecode -p r8ex
   操作数不是数等快路前提不成立就退回解释器；别的指令（调用、属性、闭包……）整个函数不编
 - `r8jit`（std，x86-64 Unix）：实现执行器的 `Tier`（`Executor::with_tier`）。普通 JS 函数进帧前先问它：调用次数过阈值（缺省 100）就编、
   `mmap` 成可执行内存、填运行时函数地址；有机器码就直接跑
-- mlirpass 的 `target.x86_64` 还没发版，workspace 先用本地检出 `../mlirpass`
+- 机器码后端是 mlirpass（crates.io，`=0.10.3`，`target.x86_64`）；MLIR 用 `llvm` 方言的自定义写法（mlirformat 0.8.1 起真解析）
 - 还没有：循环里的热点替换（OSR，只调一次的函数里的热循环编不到）、寄存器分配（后端每个值一个栈槽）、调用 / 属性等快路
 
 ## 字节码

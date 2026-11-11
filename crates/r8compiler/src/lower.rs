@@ -17,19 +17,21 @@ pub struct Unsupported {
     pub insn: Insn,
 }
 
-/// `fcmp` 的谓词（LLVM `FCmpPredicate` 的编号）
+/// `llvm.fcmp` 的谓词（自定义写法里的名字）
 struct FCmp;
 
 impl FCmp {
-    const OEQ: u8 = 1;
-    const OGT: u8 = 2;
-    const OGE: u8 = 3;
-    const OLT: u8 = 4;
-    const OLE: u8 = 5;
-    const ONE: u8 = 6;
-    const UNE: u8 = 13;
+    const OEQ: &str = "oeq";
+    const OGT: &str = "ogt";
+    const OGE: &str = "oge";
+    const OLT: &str = "olt";
+    const OLE: &str = "ole";
+    /// 有序且不等（`NaN` 给假）
+    const ONE: &str = "one";
+    /// 无序或不等（`NaN` 给真，`!=` 的语义）
+    const UNE: &str = "une";
 
-    fn of(op: CompareOp) -> u8 {
+    fn of(op: CompareOp) -> &'static str {
         match op {
             CompareOp::Eq | CompareOp::StrictEq => Self::OEQ,
             CompareOp::Ne | CompareOp::StrictNe => Self::UNE,
@@ -41,10 +43,9 @@ impl FCmp {
     }
 }
 
-/// `icmp eq` 的谓词编号
-const ICMP_EQ: u8 = 0;
-/// `icmp ne` 的谓词编号
-const ICMP_NE: u8 = 1;
+/// `llvm.icmp` 的谓词
+const ICMP_EQ: &str = "eq";
+const ICMP_NE: &str = "ne";
 
 /// 一个字节码函数 ⇒ MLIR 文本（`llvm` 方言）。
 ///
@@ -83,12 +84,12 @@ impl<'f> Lower<'f> {
         }
         let mut m = String::from("module {\n");
         for h in &l.helpers {
-            let _ = writeln!(m, "  \"llvm.func\"() <{{function_type = !llvm.func<f64 (f64, f64)>, sym_name = \"{h}\"}}> ({{}}) : () -> ()");
+            let _ = writeln!(m, "  llvm.func @{h}(f64, f64) -> f64");
         }
-        let _ = writeln!(m, "  \"llvm.func\"() <{{function_type = !llvm.func<i64 (!llvm.ptr, !llvm.ptr)>, sym_name = \"{ENTRY}\"}}> ({{");
-        m.push_str("  ^entry(%regs: !llvm.ptr, %acc: !llvm.ptr):\n    llvm.br ^i0\n");
+        let _ = writeln!(m, "  llvm.func @{ENTRY}(%regs: !llvm.ptr, %acc: !llvm.ptr) -> i64 {{");
+        m.push_str("    llvm.br ^i0\n");
         m.push_str(&l.out);
-        m.push_str("  }) : () -> ()\n}\n");
+        m.push_str("  }\n}\n");
         Ok(m)
     }
 
@@ -126,12 +127,12 @@ impl<'f> Lower<'f> {
     /// 寄存器 `r` 的值（`%regs` 里第 r 个）第 `off` 字节的地址
     fn reg_addr(&mut self, r: Reg, off: usize) -> V {
         let at = usize::from(r.0) * ValueTag::SIZE + off;
-        self.def(&alloc::format!("\"llvm.getelementptr\"(%regs) <{{elem_type = i8, rawConstantIndices = array<i32: {at}>}}> : (!llvm.ptr) -> !llvm.ptr"))
+        self.def(&alloc::format!("llvm.getelementptr %regs[{at}] : (!llvm.ptr) -> !llvm.ptr, i8"))
     }
 
     /// 累加器第 `off` 字节的地址
     fn acc_addr(&mut self, off: usize) -> V {
-        self.def(&alloc::format!("\"llvm.getelementptr\"(%acc) <{{elem_type = i8, rawConstantIndices = array<i32: {off}>}}> : (!llvm.ptr) -> !llvm.ptr"))
+        self.def(&alloc::format!("llvm.getelementptr %acc[{off}] : (!llvm.ptr) -> !llvm.ptr, i8"))
     }
 
     fn load(&mut self, p: &str, ty: &str) -> V {
@@ -149,12 +150,12 @@ impl<'f> Lower<'f> {
         self.icmp(ICMP_EQ, &t, &c, "i8")
     }
 
-    fn icmp(&mut self, pred: u8, a: &str, b: &str, ty: &str) -> V {
-        self.def(&alloc::format!("\"llvm.icmp\"({a}, {b}) <{{predicate = {pred} : i64}}> : ({ty}, {ty}) -> i1"))
+    fn icmp(&mut self, pred: &str, a: &str, b: &str, ty: &str) -> V {
+        self.def(&alloc::format!("llvm.icmp \"{pred}\" {a}, {b} : {ty}"))
     }
 
-    fn fcmp(&mut self, pred: u8, a: &str, b: &str) -> V {
-        self.def(&alloc::format!("\"llvm.fcmp\"({a}, {b}) <{{predicate = {pred} : i64}}> : (f64, f64) -> i1"))
+    fn fcmp(&mut self, pred: &str, a: &str, b: &str) -> V {
+        self.def(&alloc::format!("llvm.fcmp \"{pred}\" {a}, {b} : f64"))
     }
 
     /// 条件不成立就退回解释器（停在 `pc`），成立接着往下（新开一个块）。
@@ -281,7 +282,7 @@ impl<'f> Lower<'f> {
                     op => {
                         let sym = Helper::Number(op).symbol().ok_or(unsupported)?;
                         self.helpers.insert(sym);
-                        self.def(&alloc::format!("\"llvm.call\"({a}, {b}) <{{callee = @{sym}, operandSegmentSizes = array<i32: 2, 0>, op_bundle_sizes = array<i32>}}> : (f64, f64) -> f64"))
+                        self.def(&alloc::format!("llvm.call @{sym}({a}, {b}) : (f64, f64) -> f64"))
                     }
                 };
                 self.put_number(&v);
