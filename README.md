@@ -94,7 +94,10 @@ cargo build --target riscv64gc-unknown-none-elf -p r8frame -p r8bytecode -p r8ex
 - 动态代码：全局 `Function` / `eval`（间接）、生成器 / async 函数构造器；早期错误（oxc_semantic 检查 + 正则字面量解析时校验）编译期报 SyntaxError
 - 严格模式（指令序言 / 类体 / 外层继承）：非严格调用的 `this` 换成全局对象或包装对象，严格模式下失败的赋值 / 删除抛 TypeError、给没声明的名字赋值抛 ReferenceError、`arguments.callee` 抛 TypeError；严格代码里的 `eval(…)` 按直接 eval 跑（代码严格、`var` 留在自己里面）
 
-还不支持（报 `Error::Unsupported`，带 `文件:行:列`）：`with`、模块、非严格的直接 eval（现在按间接 eval 跑，看不见外层局部变量）。test262 基线 26950 条，补齐计划见 PLAN.md。
+- 属性模型按规范的对象内部方法（ValidateAndApplyPropertyDescriptor、数组空洞与按元素的特性、`length` 只读、不可扩展、字符串包装对象的下标），`Object` / `Array` 的全部方法（Array 方法对类数组通用、species）
+- 宿主函数区分能否 `new`，内建构造器按 `new.target` 定原型（`class X extends Map` 等）
+
+还不支持（报 `Error::Unsupported`，带 `文件:行:列`）：`with`、模块、非严格的直接 eval（现在按间接 eval 跑，看不见外层局部变量）。test262 基线 32126 条，补齐计划见 PLAN.md。
 
 已知偏差：宿主函数里重入的 JS（如 `map` 的回调）在当前片里跑完，期间不回收。
 

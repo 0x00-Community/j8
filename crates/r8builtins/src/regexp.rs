@@ -56,7 +56,8 @@ impl Regexps {
         };
         let regex = Self::compile(a, &source, &flags)?;
         let compiled = Gc::new(a.mc, Static(Box::new(regex) as Box<dyn core::any::Any>));
-        let o = ObjectData { kind: ObjectKind::RegExp(RegExpData { source, flags, compiled }), proto: Some(a.realm.regexp_proto), ..ObjectData::default() }.alloc(a.mc);
+        let proto = a.proto_from_ctor(a.new_target, a.realm.regexp_proto)?;
+        let o = ObjectData { kind: ObjectKind::RegExp(RegExpData { source, flags, compiled }), proto: Some(proto), ..ObjectData::default() }.alloc(a.mc);
         o.borrow_mut(a.mc).define(a.mc, "lastIndex", Property { slot: Slot::Data(0.0.into()), enumerable: false, writable: true, configurable: false });
         Ok(o.into())
     }
@@ -478,31 +479,31 @@ impl Regexps {
 impl Installer<'_, '_> {
     pub(crate) fn regexp(&mut self) {
         let proto = self.realm.regexp_proto;
-        self.constructor("RegExp", Regexps::construct, proto);
+        self.constructor("RegExp", Regexps::construct, proto, 2);
         // 正则字面量用的内部构造器
-        self.realm.regexp_ctor.borrow_mut(self.mc).kind = ObjectKind::Native(r8frame::Native(Regexps::construct));
-        self.method(proto, "exec", Regexps::exec);
-        self.method(proto, "test", Regexps::test);
-        self.method(proto, "toString", Regexps::to_string);
-        let getters: [(&str, r8frame::NativeFn); 8] = [
-            ("source", Regexps::source),
-            ("flags", Regexps::flags),
-            ("global", Regexps::global),
-            ("ignoreCase", Regexps::ignore_case),
-            ("multiline", Regexps::multiline),
-            ("dotAll", Regexps::dot_all),
-            ("unicode", Regexps::unicode),
-            ("sticky", Regexps::sticky),
+        self.realm.regexp_ctor.borrow_mut(self.mc).kind = ObjectKind::Native(r8frame::Native::function(Regexps::construct));
+        self.method(proto, "exec", Regexps::exec, 1);
+        self.method(proto, "test", Regexps::test, 1);
+        self.method(proto, "toString", Regexps::to_string, 0);
+        let getters: [(&str, r8frame::NativeFn, u32); 8] = [
+            ("source", Regexps::source, 0),
+            ("flags", Regexps::flags, 0),
+            ("global", Regexps::global, 0),
+            ("ignoreCase", Regexps::ignore_case, 0),
+            ("multiline", Regexps::multiline, 0),
+            ("dotAll", Regexps::dot_all, 0),
+            ("unicode", Regexps::unicode, 0),
+            ("sticky", Regexps::sticky, 0),
         ];
-        for (name, f) in getters {
+        for (name, f, _) in getters {
             self.getter(proto, name, f);
         }
         let s = self.realm.string_proto;
-        self.method(s, "match", Regexps::string_match);
-        self.method(s, "matchAll", Regexps::match_all);
-        self.method(s, "search", Regexps::search);
-        self.method(s, "replace", Regexps::replace);
-        self.method(s, "replaceAll", Regexps::replace_all);
-        self.method(s, "split", Regexps::split);
+        self.method(s, "match", Regexps::string_match, 1);
+        self.method(s, "matchAll", Regexps::match_all, 1);
+        self.method(s, "search", Regexps::search, 1);
+        self.method(s, "replace", Regexps::replace, 2);
+        self.method(s, "replaceAll", Regexps::replace_all, 2);
+        self.method(s, "split", Regexps::split, 2);
     }
 }

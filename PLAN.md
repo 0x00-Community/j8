@@ -14,10 +14,11 @@
 
 ## 阶段 2：Object / Array / 属性模型
 
-- [ ] `extensible`：preventExtensions / isExtensible / seal / isSealed / isFrozen
-- [ ] Object 补全：defineProperties、getOwnPropertySymbols / Descriptors、setPrototypeOf、fromEntries、is、hasOwn、groupBy、propertyIsEnumerable、isPrototypeOf、`__proto__` 与 `__defineGetter__` 等；字面量 `__proto__: v`
-- [ ] Array 方法对类数组通用，补 from / splice / copyWithin / flat / flatMap / findLast(Index) / reduceRight / toReversed / toSorted / toSpliced / with / unscopables / species
-- [ ] 内建函数的 `length`
+- [x] 对象内部方法（r8frame property.rs）：[[GetOwnProperty]] / [[DefineOwnProperty]]（ValidateAndApplyPropertyDescriptor、ArraySetLength、字符串包装对象）/ [[OwnPropertyKeys]] / 可扩展性 / 原型；数组稠密部分 + 按下标存的普通属性（空洞、不同特性的元素）
+- [x] `extensible`：preventExtensions / isExtensible / seal / isSealed / isFrozen
+- [x] Object 补全：defineProperties、getOwnPropertySymbols / Descriptors、setPrototypeOf、fromEntries、is、hasOwn、groupBy、propertyIsEnumerable、isPrototypeOf、`__proto__` 与 `__defineGetter__` 等；字面量 `__proto__: v`
+- [x] Array 方法对类数组通用，补 from / splice / copyWithin / flat / flatMap / findLast(Index) / reduceRight / toReversed / toSorted / toSpliced / with / unscopables / species
+- [x] 内建函数的 `length`；宿主函数分能否 `new`，构造器经 `Agent::new_target` 按 new.target 定原型；`[Symbol.toStringTag]`
 
 ## 阶段 3：反射与迭代器
 

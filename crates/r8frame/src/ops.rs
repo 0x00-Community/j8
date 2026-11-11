@@ -8,7 +8,7 @@ use gc_arena::Gc;
 
 use num_traits::Zero;
 
-use crate::{Agent, Error, Numeric, IterKind, IteratorState, JsObject, JsString, JsSymbol, ObjectData, ObjectKind, Property, Slot, Value};
+use crate::{Agent, Descriptor, Error, Key, Numeric, IterKind, IteratorState, JsObject, JsString, JsSymbol, ObjectData, ObjectKind, Property, PropertyKey, Slot, Value};
 
 /// 二元运算（结果是值）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -171,6 +171,9 @@ fn parse_number(s: &str) -> f64 {
 }
 
 /// 数 ⇒ 32 位整数的模 2^32 余数（ToInt32 / ToUint32 共用）。
+/// 2^53 − 1
+pub const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
+
 fn modulo_u32(x: f64) -> u32 {
     if !x.is_finite() {
         return 0;
@@ -219,7 +222,7 @@ impl<'gc> Agent<'gc, '_> {
 
     /// 一个 Error 对象（原型按种类取，自有 `message`）。
     pub fn error(&self, kind: ErrorKind, message: &str) -> JsObject<'gc> {
-        let e = ObjectData { proto: Some(self.realm.error_proto(kind)), ..ObjectData::default() }.alloc(self.mc);
+        let e = ObjectData { kind: ObjectKind::Error, proto: Some(self.realm.error_proto(kind)), ..ObjectData::default() }.alloc(self.mc);
         let m = self.string(message);
         e.borrow_mut(self.mc).define(self.mc, "message", Property::hidden(m.into()));
         e
@@ -474,66 +477,50 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    /// 沿原型链找属性（不含数组 / 字符串的下标与 `length`）。
-    fn lookup(start: Option<JsObject<'gc>>, key: &str) -> Option<Property<'gc>> {
-        let mut cur = start;
-        while let Some(c) = cur {
-            let d = c.borrow();
-            if let Some(p) = d.get_own(key) {
-                return Some(p);
-            }
-            cur = d.proto;
-        }
-        None
-    }
-
-    /// 数组 / 字符串的下标与 `length`。
-    fn exotic(&self, target: Value<'gc>, key: &str) -> Option<Value<'gc>> {
-        let o = match target {
-            Value::String(s) => {
-                return match (key, index_of_str(key)) {
-                    ("length", _) => Some(f64::from(u32::try_from(s.encode_utf16().count()).unwrap_or(u32::MAX)).into()),
-                    (_, Some(i)) => s.encode_utf16().nth(i as usize).map(|u| self.string(&String::from_utf16_lossy(&[u])).into()),
-                    _ => None,
-                };
-            }
-            Value::Object(o) => o,
-            _ => return None,
-        };
-        let d = o.borrow();
-        match (&d.kind, key, index_of_str(key)) {
-            // String 包装对象的下标与 `length` 同字符串
-            (ObjectKind::Primitive(s @ Value::String(_)), _, _) => self.exotic(*s, key),
-            (ObjectKind::Array(_), "length", _) => d.array_length().map(|n| f64::from(n).into()),
-            // 稠密部分之外的下标是普通属性（稀疏元素），交给属性查找
-            (ObjectKind::Array(items), _, Some(i)) => items.get(i as usize).copied(),
-            _ => None,
-        }
-    }
-
     fn nullish_error(&self, target: Value<'gc>, verb: &str, key: &str) -> Error {
         let what = if target == Value::Undefined { "undefined" } else { "null" };
         self.throw(ErrorKind::Type, &format!("Cannot {verb} properties of {what} (reading '{key}')"))
     }
 
+    /// [[Get]]：`holder` 上（沿原型链）读 `key`，getter 的 `this` 是 `receiver`。
+    pub fn get_key(&mut self, holder: Value<'gc>, key: Key<'_, 'gc>, receiver: Value<'gc>) -> Result<Value<'gc>, Error> {
+        if holder.is_nullish() {
+            let k = self.key_text(key);
+            return Err(self.nullish_error(holder, "read", &k));
+        }
+        // 字符串的下标与 `length` 不必包一层
+        if let (Value::String(s), Key::Str(k)) = (holder, key) {
+            if k == "length" {
+                return Ok(f64::from(u32::try_from(s.encode_utf16().count()).unwrap_or(u32::MAX)).into());
+            }
+            if let Some(i) = index_of_str(k)
+                && let Some(u) = s.encode_utf16().nth(i as usize)
+            {
+                return Ok(self.string(&String::from_utf16_lossy(&[u])).into());
+            }
+        }
+        let mut cur = self.proto_of(holder);
+        while let Some(o) = cur {
+            if let Some(p) = self.get_own_property(o, key)? {
+                return match p.slot {
+                    Slot::Data(v) => Ok(v),
+                    Slot::Accessor { get: Some(g), .. } => self.call(g.into(), receiver, &[]),
+                    Slot::Accessor { get: None, .. } => Ok(Value::Undefined),
+                };
+            }
+            cur = o.borrow().proto;
+        }
+        Ok(Value::Undefined)
+    }
+
     /// `holder` 上（沿原型链）读 `key`，getter 的 `this` 是 `receiver`。
     pub fn get(&mut self, holder: Value<'gc>, key: &str, receiver: Value<'gc>) -> Result<Value<'gc>, Error> {
-        if holder.is_nullish() {
-            return Err(self.nullish_error(holder, "read", key));
-        }
-        if let Some(v) = self.exotic(holder, key) {
-            return Ok(v);
-        }
-        match Self::lookup(self.proto_of(holder), key).map(|p| p.slot) {
-            Some(Slot::Data(v)) => Ok(v),
-            Some(Slot::Accessor { get: Some(g), .. }) => self.call(g.into(), receiver, &[]),
-            None | Some(Slot::Accessor { get: None, .. }) => Ok(Value::Undefined),
-        }
+        self.get_key(holder, Key::Str(key), receiver)
     }
 
     /// `target.key`。
     pub fn get_named(&mut self, target: Value<'gc>, key: &str) -> Result<Value<'gc>, Error> {
-        self.get(target, key, target)
+        self.get_key(target, Key::Str(key), target)
     }
 
     /// 属性键：ToString（数组下标的数快路在调用处）。
@@ -541,65 +528,46 @@ impl<'gc> Agent<'gc, '_> {
         self.to_string(key)
     }
 
-    /// 沿原型链找 Symbol 键的属性。
-    fn lookup_symbol(start: Option<JsObject<'gc>>, key: JsSymbol<'gc>) -> Option<Property<'gc>> {
-        let mut cur = start;
-        while let Some(c) = cur {
-            let d = c.borrow();
-            if let Some(p) = d.get_own_symbol(key) {
-                return Some(p);
-            }
-            cur = d.proto;
-        }
-        None
-    }
-
     /// `holder[sym]`，getter 的 `this` 是 `receiver`。
     pub fn get_symbol(&mut self, holder: Value<'gc>, key: JsSymbol<'gc>, receiver: Value<'gc>) -> Result<Value<'gc>, Error> {
-        if holder.is_nullish() {
-            let what = self.symbol_descriptive(key);
-            return Err(self.nullish_error(holder, "read", &what));
+        self.get_key(holder, Key::Sym(key), receiver)
+    }
+
+    /// [[Set]]（OrdinarySet）：沿原型链找到的 setter 就调它，不可写的数据属性不写，否则在 `receiver` 上改 / 建。
+    /// 给出写成没有。
+    pub fn set_key(&mut self, target: Value<'gc>, key: Key<'_, 'gc>, value: Value<'gc>, receiver: Value<'gc>) -> Result<bool, Error> {
+        if target.is_nullish() {
+            let k = self.key_text(key);
+            return Err(self.nullish_error(target, "set", &k));
         }
-        match Self::lookup_symbol(self.proto_of(holder), key).map(|p| p.slot) {
-            Some(Slot::Data(v)) => Ok(v),
-            Some(Slot::Accessor { get: Some(g), .. }) => self.call(g.into(), receiver, &[]),
-            None | Some(Slot::Accessor { get: None, .. }) => Ok(Value::Undefined),
+        let mut found = None;
+        let mut cur = self.proto_of(target);
+        while let Some(o) = cur {
+            if let Some(p) = self.get_own_property(o, key)? {
+                found = Some(p);
+                break;
+            }
+            cur = o.borrow().proto;
+        }
+        match found {
+            Some(Property { slot: Slot::Accessor { set: Some(s), .. }, .. }) => {
+                self.call(s.into(), receiver, &[value])?;
+                return Ok(true);
+            }
+            Some(Property { slot: Slot::Accessor { set: None, .. }, .. } | Property { writable: false, .. }) => return Ok(false),
+            _ => {}
+        }
+        let Value::Object(r) = receiver else { return Ok(false) };
+        match self.get_own_property(r, key)? {
+            Some(Property { slot: Slot::Accessor { .. }, .. } | Property { writable: false, .. }) => Ok(false),
+            Some(_) => self.define_own_property(r, key, Descriptor::value(value)),
+            None => self.create_data_property(r, key, value),
         }
     }
 
-    /// `target[sym] = value`，给出写成没有（不可写 / 没有 setter / 原始值上没有 setter 时是 `false`）。
+    /// `target[sym] = value`，给出写成没有。
     pub fn try_set_symbol(&mut self, target: Value<'gc>, key: JsSymbol<'gc>, value: Value<'gc>) -> Result<bool, Error> {
-        let o = match target {
-            Value::Undefined | Value::Null => {
-                let what = self.symbol_descriptive(key);
-                return Err(self.nullish_error(target, "set", &what));
-            }
-            Value::Object(o) => o,
-            prim => {
-                return match Self::lookup_symbol(self.proto_of(prim), key) {
-                    Some(Property { slot: Slot::Accessor { set: Some(s), .. }, .. }) => self.call(s.into(), target, &[value]).map(|_| true),
-                    _ => Ok(false),
-                };
-            }
-        };
-        Ok(match Self::lookup_symbol(Some(o), key) {
-            Some(Property { slot: Slot::Accessor { set: Some(s), .. }, .. }) => {
-                self.call(s.into(), target, &[value])?;
-                true
-            }
-            Some(Property { slot: Slot::Accessor { set: None, .. }, .. } | Property { writable: false, .. }) => false,
-            Some(_) if o.borrow().get_own_symbol(key).is_some() => {
-                let mut d = o.borrow_mut(self.mc);
-                if let Some((_, p)) = d.symbols.iter_mut().find(|(k, _)| Gc::ptr_eq(*k, key)) {
-                    p.slot = Slot::Data(value);
-                }
-                true
-            }
-            _ => {
-                o.borrow_mut(self.mc).define_symbol(key, Property::data(value));
-                true
-            }
-        })
+        self.set_key(target, Key::Sym(key), value, target)
     }
 
     /// `target[sym] = value`：写不成抛 TypeError（规范里内建函数的 Set(…, true)）。
@@ -612,55 +580,85 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
+    /// 写不成的 TypeError：不可扩展的对象上加新属性，或者写只读属性。
+    fn set_failure(&self, target: Value<'gc>, key: &str) -> Error {
+        if let Value::Object(o) = target {
+            let d = o.borrow();
+            if d.non_extensible && d.own_slot(Key::Str(key)).is_none() {
+                return self.throw(ErrorKind::Type, &format!("Cannot add property {key}, object is not extensible"));
+            }
+        }
+        self.read_only(key)
+    }
+
     fn read_only(&self, key: &str) -> Error {
         self.throw(ErrorKind::Type, &format!("Cannot assign to read only property '{key}'"))
     }
 
     /// `key in target`，键是任意值。
     pub fn has_keyed(&mut self, target: Value<'gc>, key: Value<'gc>) -> Result<bool, Error> {
-        if let Value::Symbol(k) = key {
-            let Value::Object(o) = target else {
-                return Err(self.throw(ErrorKind::Type, "Cannot use 'in' operator to search for a symbol in a non-object"));
+        let Value::Object(o) = target else {
+            let what = match key {
+                Value::Symbol(_) => String::from("a symbol"),
+                k => format!("'{}'", &**self.to_string(k)?),
             };
-            return Ok(Self::lookup_symbol(Some(o), k).is_some());
+            let t = self.to_string(target)?;
+            return Err(self.throw(ErrorKind::Type, &format!("Cannot use 'in' operator to search for {what} in {}", &**t)));
+        };
+        match self.to_property_key(key)? {
+            PropertyKey::Symbol(k) => self.has_key(o, Key::Sym(k)),
+            PropertyKey::String(k) => self.has_key(o, Key::Str(&k)),
         }
-        let k = self.property_key(key)?;
-        self.has_property(target, &k)
+    }
+
+    /// [[HasProperty]]：自有或原型链上有。
+    pub fn has_key(&mut self, o: JsObject<'gc>, key: Key<'_, 'gc>) -> Result<bool, Error> {
+        let mut cur = Some(o);
+        while let Some(x) = cur {
+            if self.get_own_property(x, key)?.is_some() {
+                return Ok(true);
+            }
+            cur = x.borrow().proto;
+        }
+        Ok(false)
     }
 
     /// `delete target[key]`，键是任意值。
     pub fn delete_keyed(&mut self, target: Value<'gc>, key: Value<'gc>) -> Result<bool, Error> {
-        if let (Value::Symbol(k), Value::Object(o)) = (key, target) {
-            return Ok(o.borrow_mut(self.mc).remove_symbol(k));
+        if target.is_nullish() {
+            let k = self.to_string(key)?;
+            return Err(self.nullish_error(target, "delete", &k));
         }
-        let k = self.property_key(key)?;
-        self.delete(target, &k)
+        match self.to_property_key(key)? {
+            PropertyKey::Symbol(k) => self.delete_key(target, Key::Sym(k)),
+            PropertyKey::String(k) => self.delete_key(target, Key::Str(&k)),
+        }
+    }
+
+    /// `delete target.key`：原始值先包成对象（字符串的下标与 `length` 删不掉）。
+    pub fn delete_key(&mut self, target: Value<'gc>, key: Key<'_, 'gc>) -> Result<bool, Error> {
+        if target.is_nullish() {
+            let k = self.key_text(key);
+            return Err(self.nullish_error(target, "delete", &k));
+        }
+        let o = self.to_object(target)?;
+        self.delete_property(o, key)
     }
 
     /// 定义属性，键是任意值（计算键）。
     pub fn define_keyed(&mut self, o: JsObject<'gc>, key: Value<'gc>, prop: Property<'gc>) -> Result<(), Error> {
-        if let Value::Symbol(k) = key {
-            o.borrow_mut(self.mc).define_symbol(k, prop);
-            return Ok(());
+        match self.to_property_key(key)? {
+            PropertyKey::Symbol(k) => self.define_key(o, Key::Sym(k), prop),
+            PropertyKey::String(k) => self.define_key(o, Key::Str(&k), prop),
         }
-        let k = self.property_key(key)?;
-        self.define(o, &k, prop);
-        Ok(())
     }
 
     /// 定义访问器的一半，键是任意值。
     pub fn define_accessor_keyed(&mut self, o: JsObject<'gc>, key: Value<'gc>, f: JsObject<'gc>, setter: bool, enumerable: bool) -> Result<(), Error> {
-        if let Value::Symbol(k) = key {
-            let (mut get, mut set) = match o.borrow().get_own_symbol(k).map(|p| p.slot) {
-                Some(Slot::Accessor { get, set }) => (get, set),
-                _ => (None, None),
-            };
-            if setter { set = Some(f) } else { get = Some(f) }
-            o.borrow_mut(self.mc).define_symbol(k, Property { slot: Slot::Accessor { get, set }, enumerable, writable: true, configurable: true });
-            return Ok(());
+        match self.to_property_key(key)? {
+            PropertyKey::Symbol(k) => self.define_accessor_key(o, Key::Sym(k), f, setter, enumerable),
+            PropertyKey::String(k) => self.define_accessor_key(o, Key::Str(&k), f, setter, enumerable),
         }
-        let k = self.property_key(key)?;
-        self.define_accessor(o, &k, f, setter, enumerable);
         Ok(())
     }
 
@@ -675,55 +673,29 @@ impl<'gc> Agent<'gc, '_> {
         {
             return Ok(v);
         }
-        let k = self.property_key(key)?;
-        self.get_named(target, &k)
+        if target.is_nullish() {
+            let k = self.to_string(key)?;
+            return Err(self.nullish_error(target, "read", &k));
+        }
+        match self.to_property_key(key)? {
+            PropertyKey::Symbol(k) => self.get_symbol(target, k, target),
+            PropertyKey::String(k) => self.get_named(target, &k),
+        }
     }
 
-    /// 数组元素写（稠密 / 稀疏见 [`ObjectData::write_index`]）。是数组下标就写了返回 `true`。
-    fn set_element(&self, o: JsObject<'gc>, key: &str, value: Value<'gc>) -> bool {
-        index_of_str(key).is_some_and(|i| o.borrow_mut(self.mc).write_index(self.mc, i, value))
-    }
-
-    /// `target.key = value`：原型链上有 setter 就调它，有不可写的数据属性就不写。给出写成没有。
+    /// `target.key = value`：给出写成没有。
     pub fn try_set_named(&mut self, target: Value<'gc>, key: &str, value: Value<'gc>) -> Result<bool, Error> {
-        let o = match target {
-            Value::Undefined | Value::Null => return Err(self.nullish_error(target, "set", key)),
-            Value::Object(o) => o,
-            prim => {
-                // 原始值：只有原型链上的 setter 能接
-                return match Self::lookup(self.proto_of(prim), key) {
-                    Some(Property { slot: Slot::Accessor { set: Some(s), .. }, .. }) => self.call(s.into(), target, &[value]).map(|_| true),
-                    _ => Ok(false),
-                };
-            }
-        };
-        if self.set_element(o, key, value) {
+        if let (Value::Object(o), Some(i)) = (target, index_of_str(key))
+            && o.borrow_mut(self.mc).write_index(i, value)
+        {
             return Ok(true);
         }
-        if key == "length" && matches!(o.borrow().kind, ObjectKind::Array(_)) {
-            let n = self.to_uint32(value)?;
-            if f64::from(n) != self.to_number(value)? {
-                return Err(self.throw(ErrorKind::Range, "Invalid array length"));
-            }
-            o.borrow_mut(self.mc).set_array_length(n);
-            return Ok(true);
-        }
-        Ok(match Self::lookup(Some(o), key) {
-            Some(Property { slot: Slot::Accessor { set: Some(s), .. }, .. }) => {
-                self.call(s.into(), target, &[value])?;
-                true
-            }
-            Some(Property { slot: Slot::Accessor { set: None, .. }, .. } | Property { writable: false, .. }) => false,
-            _ => {
-                o.borrow_mut(self.mc).set(self.mc, key, value);
-                true
-            }
-        })
+        self.set_key(target, Key::Str(key), value, target)
     }
 
     /// `target.key = value`：写不成抛 TypeError（规范里内建函数的 Set(…, true)）。
     pub fn set_named(&mut self, target: Value<'gc>, key: &str, value: Value<'gc>) -> Result<(), Error> {
-        if self.try_set_named(target, key, value)? { Ok(()) } else { Err(self.read_only(key)) }
+        if self.try_set_named(target, key, value)? { Ok(()) } else { Err(self.set_failure(target, key)) }
     }
 
     /// `target[key] = value`，给出写成没有。
@@ -733,12 +705,18 @@ impl<'gc> Agent<'gc, '_> {
         }
         if let (Value::Object(o), Value::Number(x)) = (target, key)
             && let Some(i) = index_of_number(x)
-            && o.borrow_mut(self.mc).write_index(self.mc, i, value)
+            && o.borrow_mut(self.mc).write_index(i, value)
         {
             return Ok(true);
         }
-        let k = self.property_key(key)?;
-        self.try_set_named(target, &k, value)
+        if target.is_nullish() {
+            let k = self.to_string(key)?;
+            return Err(self.nullish_error(target, "set", &k));
+        }
+        match self.to_property_key(key)? {
+            PropertyKey::Symbol(k) => self.try_set_symbol(target, k, value),
+            PropertyKey::String(k) => self.try_set_named(target, &k, value),
+        }
     }
 
     /// `target[key] = value`：写不成抛 TypeError。
@@ -763,24 +741,32 @@ impl<'gc> Agent<'gc, '_> {
         if strict { self.set_keyed(target, key, value) } else { self.try_set_keyed(target, key, value).map(drop) }
     }
 
-    /// 定义自有属性（对象字面量、类）：数组下标写元素。
-    pub fn define(&mut self, o: JsObject<'gc>, key: &str, prop: Property<'gc>) {
-        if let (Slot::Data(v), true) = (prop.slot, prop.enumerable)
-            && self.set_element(o, key, v)
-        {
-            return;
+    /// 定义自有属性（对象字面量、类、CreateDataPropertyOrThrow）：定义不成抛 TypeError。
+    pub fn define(&mut self, o: JsObject<'gc>, key: &str, prop: Property<'gc>) -> Result<(), Error> {
+        self.define_key(o, Key::Str(key), prop)
+    }
+
+    pub fn define_key(&mut self, o: JsObject<'gc>, key: Key<'_, 'gc>, prop: Property<'gc>) -> Result<(), Error> {
+        if self.define_own_property(o, key, prop.into())? {
+            Ok(())
+        } else {
+            let k = self.key_text(key);
+            Err(self.throw(ErrorKind::Type, &format!("Cannot define property {k}, object is not extensible")))
         }
-        o.borrow_mut(self.mc).define(self.mc, key, prop);
     }
 
     /// 定义访问器的一半（另一半已有就保留）。
     pub fn define_accessor(&mut self, o: JsObject<'gc>, key: &str, f: JsObject<'gc>, setter: bool, enumerable: bool) {
-        let (mut get, mut set) = match o.borrow().get_own(key).map(|p| p.slot) {
+        self.define_accessor_key(o, Key::Str(key), f, setter, enumerable);
+    }
+
+    fn define_accessor_key(&mut self, o: JsObject<'gc>, key: Key<'_, 'gc>, f: JsObject<'gc>, setter: bool, enumerable: bool) {
+        let (mut get, mut set) = match o.borrow().own_slot(key).map(|p| p.slot) {
             Some(Slot::Accessor { get, set }) => (get, set),
             _ => (None, None),
         };
         if setter { set = Some(f) } else { get = Some(f) }
-        o.borrow_mut(self.mc).define(self.mc, key, Property { slot: Slot::Accessor { get, set }, enumerable, writable: true, configurable: true });
+        o.borrow_mut(self.mc).store(self.mc, key, Property { slot: Slot::Accessor { get, set }, enumerable, writable: true, configurable: true });
     }
 
     /// `key in target`（含原型链与数组下标）。
@@ -789,45 +775,61 @@ impl<'gc> Agent<'gc, '_> {
             let what = self.to_string(target)?;
             return Err(self.throw(ErrorKind::Type, &format!("Cannot use 'in' operator to search for '{key}' in {}", &**what)));
         };
-        if let ObjectKind::Array(items) = &o.borrow().kind {
-            match (key, index_of_str(key)) {
-                ("length", _) => return Ok(true),
-                (_, Some(i)) if (i as usize) < items.len() => return Ok(true),
-                _ => {}
-            }
-        }
-        Ok(Self::lookup(Some(o), key).is_some())
+        self.has_key(o, Key::Str(key))
     }
 
-    /// `delete target[key]`：数组下标置 `undefined`（还没有空洞），不可配置的删不掉。
+    /// `delete target.key`：不可配置的删不掉。
     pub fn delete(&mut self, target: Value<'gc>, key: &str) -> Result<bool, Error> {
-        match target {
-            Value::Undefined | Value::Null => Err(self.nullish_error(target, "delete", key)),
+        self.delete_key(target, Key::Str(key))
+    }
+
+    /// 报错信息里的值：不调用户代码（ToString 可观察，报错不能用）。
+    pub fn describe(&self, v: Value<'gc>) -> String {
+        match v {
+            Value::Undefined | Value::Uninit => String::from("undefined"),
+            Value::Null => String::from("null"),
+            Value::Bool(b) => String::from(if b { "true" } else { "false" }),
+            Value::Number(x) => String::from(ryu_js::Buffer::new().format(x)),
+            Value::String(s) => format!("\"{}\"", &**s),
+            Value::Symbol(s) => String::from(&**self.symbol_descriptive(s)),
+            Value::BigInt(b) => format!("{}n", b.0),
             Value::Object(o) => {
-                let mut data = o.borrow_mut(self.mc);
-                if let (ObjectKind::Array(items), Some(i)) = (&mut data.kind, index_of_str(key))
-                    && let Some(x) = items.get_mut(i as usize)
-                {
-                    *x = Value::Undefined;
-                    return Ok(true);
+                let d = o.borrow();
+                if d.kind.is_callable() {
+                    match d.get_own("name").and_then(|p| p.value()) {
+                        Some(Value::String(n)) if !n.is_empty() => String::from(&**n),
+                        _ => String::from("function"),
+                    }
+                } else if matches!(d.kind, ObjectKind::Array(_)) {
+                    String::from("[object Array]")
+                } else {
+                    String::from("#<Object>")
                 }
-                Ok(data.remove(key))
             }
-            _ => Ok(true),
         }
     }
 
-    /// `v instanceof f`：先看 `f[Symbol.hasInstance]`，再沿 `v` 的原型链找 `f.prototype`（绑定函数换成目标）。
+    /// `v instanceof f`：先看 `f[Symbol.hasInstance]`，再按 OrdinaryHasInstance。
     pub fn instance_of(&mut self, v: Value<'gc>, f: Value<'gc>) -> Result<bool, Error> {
-        if matches!(f, Value::Object(_)) {
-            let h = self.get_symbol(f, self.realm.symbols.has_instance, f)?;
-            if !h.is_nullish() {
-                let r = self.call(h, f, &[v])?;
-                return Ok(self.to_boolean(r));
-            }
+        if !matches!(f, Value::Object(_)) {
+            let what = self.describe(f);
+            return Err(self.throw(ErrorKind::Type, &format!("Right-hand side of 'instanceof' is not an object: {what}")));
+        }
+        let h = self.get_symbol(f, self.realm.symbols.has_instance, f)?;
+        if !h.is_nullish() {
+            let r = self.call(h, f, &[v])?;
+            return Ok(self.to_boolean(r));
         }
         if !self.is_callable(f) {
             return Err(self.throw(ErrorKind::Type, "Right-hand side of 'instanceof' is not callable"));
+        }
+        self.ordinary_has_instance(f, v)
+    }
+
+    /// OrdinaryHasInstance：绑定函数换成目标，再沿 `v` 的原型链找 `f.prototype`。
+    pub fn ordinary_has_instance(&mut self, f: Value<'gc>, v: Value<'gc>) -> Result<bool, Error> {
+        if !self.is_callable(f) {
+            return Ok(false);
         }
         if let Value::Object(o) = f
             && let ObjectKind::Bound(b) = &o.borrow().kind
@@ -835,18 +837,107 @@ impl<'gc> Agent<'gc, '_> {
             let target = b.target;
             return self.instance_of(v, target);
         }
+        let Value::Object(o) = v else { return Ok(false) };
         let Value::Object(proto) = self.get_named(f, "prototype")? else {
             return Err(self.throw(ErrorKind::Type, "Function has non-object prototype in instanceof check"));
         };
-        let Value::Object(o) = v else { return Ok(false) };
-        let mut cur = o.borrow().proto;
+        let mut cur = self.get_prototype_of(o)?;
         while let Some(c) = cur {
             if Gc::ptr_eq(c, proto) {
                 return Ok(true);
             }
-            cur = c.borrow().proto;
+            cur = self.get_prototype_of(c)?;
         }
         Ok(false)
+    }
+
+    /// ToIntegerOrInfinity。
+    pub fn to_integer_or_infinity(&mut self, v: Value<'gc>) -> Result<f64, Error> {
+        let x = self.to_number(v)?;
+        Ok(if x.is_nan() { 0.0 } else { libm::trunc(x) + 0.0 })
+    }
+
+    /// ToLength：夹到 `[0, 2^53 − 1]`。
+    pub fn to_length(&mut self, v: Value<'gc>) -> Result<f64, Error> {
+        let n = self.to_integer_or_infinity(v)?;
+        Ok(n.clamp(0.0, MAX_SAFE_INTEGER))
+    }
+
+    /// LengthOfArrayLike。
+    pub fn length_of_array_like(&mut self, o: Value<'gc>) -> Result<f64, Error> {
+        let len = self.get_named(o, "length")?;
+        self.to_length(len)
+    }
+
+    /// 数下标 ⇒ 属性键文本。
+    pub fn index_key(i: f64) -> String {
+        String::from(ryu_js::Buffer::new().format(i))
+    }
+
+    /// `o[i]`（数组稠密部分走快路）。
+    pub fn get_index(&mut self, o: Value<'gc>, i: f64) -> Result<Value<'gc>, Error> {
+        if let Value::Object(x) = o
+            && let (ObjectKind::Array(items), Some(n)) = (&x.borrow().kind, index_of_number(i))
+            && let Some(&v) = items.get(n as usize)
+        {
+            return Ok(v);
+        }
+        self.get_named(o, &Self::index_key(i))
+    }
+
+    /// `o[i] = v`，写不成抛 TypeError（Set(O, P, V, true)）。
+    pub fn set_index(&mut self, o: Value<'gc>, i: f64, v: Value<'gc>) -> Result<(), Error> {
+        if let (Value::Object(x), Some(n)) = (o, index_of_number(i))
+            && x.borrow_mut(self.mc).write_index(n, v)
+        {
+            return Ok(());
+        }
+        self.set_named(o, &Self::index_key(i), v)
+    }
+
+    /// HasProperty(O, i)。
+    pub fn has_index(&mut self, o: JsObject<'gc>, i: f64) -> Result<bool, Error> {
+        if let (ObjectKind::Array(items), Some(n)) = (&o.borrow().kind, index_of_number(i))
+            && (n as usize) < items.len()
+        {
+            return Ok(true);
+        }
+        self.has_key(o, Key::Str(&Self::index_key(i)))
+    }
+
+    /// DeletePropertyOrThrow(O, i)。
+    pub fn delete_index(&mut self, o: JsObject<'gc>, i: f64) -> Result<(), Error> {
+        let k = Self::index_key(i);
+        if self.delete_property(o, Key::Str(&k))? {
+            Ok(())
+        } else {
+            Err(self.throw(ErrorKind::Type, &format!("Cannot delete property '{k}' of {}", "[object Array]")))
+        }
+    }
+
+    /// CreateDataPropertyOrThrow(O, i, v)。
+    pub fn create_index(&mut self, o: JsObject<'gc>, i: f64, v: Value<'gc>) -> Result<(), Error> {
+        self.create_data_property_or_throw(o, Key::Str(&Self::index_key(i)), v)
+    }
+
+    /// IsArray。
+    pub fn is_array(&mut self, v: Value<'gc>) -> Result<bool, Error> {
+        Ok(matches!(v, Value::Object(o) if matches!(o.borrow().kind, ObjectKind::Array(_))))
+    }
+
+    /// CreateListFromArrayLike。
+    pub fn list_from_array_like(&mut self, v: Value<'gc>) -> Result<Vec<Value<'gc>>, Error> {
+        if !matches!(v, Value::Object(_)) {
+            return Err(self.throw(ErrorKind::Type, "CreateListFromArrayLike called on non-object"));
+        }
+        let len = self.length_of_array_like(v)?;
+        let mut out = Vec::new();
+        let mut i = 0.0;
+        while i < len {
+            out.push(self.get_index(v, i)?);
+            i += 1.0;
+        }
+        Ok(out)
     }
 
     /// GetIterator：调 `v[Symbol.iterator]()`，取它的 `next`。
@@ -925,31 +1016,22 @@ impl<'gc> Agent<'gc, '_> {
         Ok(out)
     }
 
-    /// 对象展开 / 剩余：把 `src` 的自有可枚举属性（数组下标在前）定义到 `target` 上，跳过 `exclude` 里的键。
+    /// 对象展开 / 剩余（CopyDataProperties）：把 `src` 的自有可枚举属性定义到 `target` 上，跳过 `exclude` 里的键。
     pub fn copy_data(&mut self, target: JsObject<'gc>, src: Value<'gc>, exclude: &[JsString<'gc>]) -> Result<(), Error> {
-        let skip = |k: &str| exclude.iter().any(|e| ***e == *k);
-        let keys: Vec<JsString<'gc>> = match src {
-            Value::Object(o) => {
-                let data = o.borrow();
-                let mut keys = Vec::new();
-                if let ObjectKind::Array(items) = &data.kind {
-                    keys.extend((0..items.len()).map(|i| self.string(ryu_js::Buffer::new().format(f64::from(u32::try_from(i).unwrap_or(u32::MAX))))));
-                }
-                keys.extend(data.props.iter().filter(|(_, p)| p.enumerable).map(|&(k, _)| k));
-                keys
-            }
-            Value::String(s) => (0..s.encode_utf16().count()).map(|i| self.string(ryu_js::Buffer::new().format(f64::from(u32::try_from(i).unwrap_or(u32::MAX))))).collect(),
-            _ => return Ok(()),
-        };
-        for k in keys.into_iter().filter(|k| !skip(k)) {
-            let v = self.get_named(src, &k)?;
-            self.define(target, &k, Property::data(v));
+        if src.is_nullish() {
+            return Ok(());
         }
-        if let Value::Object(o) = src {
-            let syms: Vec<JsSymbol<'gc>> = o.borrow().symbols.iter().filter(|(_, p)| p.enumerable).map(|&(k, _)| k).collect();
-            for k in syms {
-                let v = self.get_symbol(src, k, src)?;
-                target.borrow_mut(self.mc).define_symbol(k, Property::data(v));
+        let from = self.to_object(src)?;
+        for k in self.own_property_keys(from)? {
+            if let PropertyKey::String(s) = k
+                && exclude.iter().any(|e| ***e == **s)
+            {
+                continue;
+            }
+            let key = k.key();
+            if self.get_own_property(from, key)?.is_some_and(|p| p.enumerable) {
+                let v = self.get_key(from.into(), key, from.into())?;
+                self.create_data_property_or_throw(target, key, v)?;
             }
         }
         Ok(())
@@ -957,42 +1039,24 @@ impl<'gc> Agent<'gc, '_> {
 
     /// `for-in` 要走的键：自有在前、再沿原型链，可枚举的字符串键，去重（被不可枚举属性遮住的也不出）。
     pub fn for_in_keys(&mut self, v: Value<'gc>) -> Result<Vec<Value<'gc>>, Error> {
-        let index = |i: usize| ryu_js::Buffer::new().format(f64::from(u32::try_from(i).unwrap_or(u32::MAX))).into();
-        let mut seen: Vec<alloc::boxed::Box<str>> = Vec::new();
+        let mut seen: Vec<JsString<'gc>> = Vec::new();
         let mut out = Vec::new();
-        let mut cur = match v {
-            Value::Undefined | Value::Null => return Ok(out),
-            Value::String(s) => {
-                for i in 0..s.encode_utf16().count() {
-                    let k: alloc::boxed::Box<str> = index(i);
-                    out.push(self.string(&k).into());
-                    seen.push(k);
-                }
-                Some(self.realm.string_proto)
-            }
-            other => self.proto_of(other),
-        };
+        if v.is_nullish() {
+            return Ok(out);
+        }
+        let mut cur = Some(self.to_object(v)?);
         while let Some(o) = cur {
-            let d = o.borrow();
-            if let ObjectKind::Array(items) = &d.kind {
-                for i in 0..items.len() {
-                    let k: alloc::boxed::Box<str> = index(i);
-                    if !seen.contains(&k) {
-                        out.push(self.string(&k).into());
-                        seen.push(k);
-                    }
-                }
-            }
-            for (k, p) in &d.props {
-                if seen.iter().any(|s| **s == ***k) {
+            for k in self.own_property_keys(o)? {
+                let PropertyKey::String(s) = k else { continue };
+                if seen.iter().any(|x| **x == *s) {
                     continue;
                 }
-                seen.push((&***k).into());
-                if p.enumerable {
-                    out.push(Value::String(*k));
+                seen.push(s);
+                if self.get_own_property(o, Key::Str(&s))?.is_some_and(|p| p.enumerable) {
+                    out.push(Value::String(s));
                 }
             }
-            cur = d.proto;
+            cur = self.get_prototype_of(o)?;
         }
         Ok(out)
     }

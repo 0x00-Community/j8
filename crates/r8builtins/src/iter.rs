@@ -42,15 +42,18 @@ impl Iters {
     }
 
     fn values<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        Ok(a.array_iterator(this, IterKind::Values).into())
+        let o = a.to_object(this)?;
+        Ok(a.array_iterator(o.into(), IterKind::Values).into())
     }
 
     fn keys<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        Ok(a.array_iterator(this, IterKind::Keys).into())
+        let o = a.to_object(this)?;
+        Ok(a.array_iterator(o.into(), IterKind::Keys).into())
     }
 
     fn entries<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        Ok(a.array_iterator(this, IterKind::Entries).into())
+        let o = a.to_object(this)?;
+        Ok(a.array_iterator(o.into(), IterKind::Entries).into())
     }
 
     fn string_iterator<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
@@ -147,25 +150,26 @@ impl Installer<'_, '_> {
         let r = self.realm;
         let sym = r.symbols;
         let proto = r.symbol_proto;
-        let ctor = self.constructor("Symbol", Iters::symbol, proto);
+        let ctor = self.constructor("Symbol", Iters::symbol, proto, 0);
+        self.not_constructor(ctor);
         for (name, s) in sym.all() {
             self.set(ctor, name, Value::Symbol(s));
         }
-        self.method(proto, "toString", Iters::symbol_to_string);
-        self.method(proto, "valueOf", Iters::symbol_value_of);
+        self.method(proto, "toString", Iters::symbol_to_string, 0);
+        self.method(proto, "valueOf", Iters::symbol_value_of, 0);
         self.getter(proto, "description", Iters::symbol_description);
-        r.symbol_method(self.mc, r.iterator_proto, sym.iterator, Iters::this_value);
+        r.symbol_method(self.mc, r.iterator_proto, sym.iterator, Iters::this_value, 0);
         // 数组：`values` 与 `[Symbol.iterator]` 是同一个函数
-        let values = r.named_native(self.mc, Iters::values, "values");
+        let values = r.named_native(self.mc, Iters::values, "values", 0);
         self.set(r.array_proto, "values", values.into());
         r.array_proto.borrow_mut(self.mc).define_symbol(sym.iterator, r8frame::Property::hidden(values.into()));
-        self.method(r.array_proto, "keys", Iters::keys);
-        self.method(r.array_proto, "entries", Iters::entries);
-        self.method(r.array_iterator_proto, "next", Iters::array_next);
-        r.symbol_method(self.mc, r.string_proto, sym.iterator, Iters::string_iterator);
-        self.method(r.string_iterator_proto, "next", Iters::string_next);
-        self.method(r.generator_proto, "next", Iters::generator_next);
-        self.method(r.generator_proto, "return", Iters::generator_return);
-        self.method(r.generator_proto, "throw", Iters::generator_throw);
+        self.method(r.array_proto, "keys", Iters::keys, 0);
+        self.method(r.array_proto, "entries", Iters::entries, 0);
+        self.method(r.array_iterator_proto, "next", Iters::array_next, 0);
+        r.symbol_method(self.mc, r.string_proto, sym.iterator, Iters::string_iterator, 0);
+        self.method(r.string_iterator_proto, "next", Iters::string_next, 0);
+        self.method(r.generator_proto, "next", Iters::generator_next, 1);
+        self.method(r.generator_proto, "return", Iters::generator_return, 1);
+        self.method(r.generator_proto, "throw", Iters::generator_throw, 1);
     }
 }

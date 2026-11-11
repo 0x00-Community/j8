@@ -44,6 +44,7 @@ impl Intrinsics for Builtins {
         b.collections();
         b.async_generators();
         b.json();
+        b.tags();
     }
 }
 
@@ -59,13 +60,17 @@ impl<'gc> Installer<'_, 'gc> {
         target.borrow_mut(self.mc).define(self.mc, name, r8frame::Property::hidden(v));
     }
 
-    fn method(&self, target: JsObject<'gc>, name: &str, f: r8frame::NativeFn) {
-        self.realm.method(self.mc, target, name, f);
+    /// 宿主方法，`length` 是 `n`。
+    fn method(&self, target: JsObject<'gc>, name: &str, f: r8frame::NativeFn, n: u32) {
+        self.realm.method(self.mc, target, name, f, n);
     }
 
-    /// 全局对象上的一个构造器：宿主函数，`prototype` ⇄ `constructor` 互指。
-    fn constructor(&self, name: &str, f: r8frame::NativeFn, proto: JsObject<'gc>) -> JsObject<'gc> {
-        let ctor = self.realm.named_native(self.mc, f, name);
+    /// 全局对象上的一个构造器（`length` 是 `n`）：宿主函数，`prototype` ⇄ `constructor` 互指。
+    fn constructor(&self, name: &str, f: r8frame::NativeFn, proto: JsObject<'gc>, n: u32) -> JsObject<'gc> {
+        let ctor = self.realm.named_native(self.mc, f, name, n);
+        if let r8frame::ObjectKind::Native(native) = &mut ctor.borrow_mut(self.mc).kind {
+            native.constructor = true;
+        }
         // 内建构造器的 prototype：不可写、不可枚举、不可配置
         ctor.borrow_mut(self.mc).define(self.mc, "prototype", r8frame::Property { slot: r8frame::Slot::Data(proto.into()), enumerable: false, writable: false, configurable: false });
         self.set(proto, "constructor", ctor.into());
@@ -73,14 +78,47 @@ impl<'gc> Installer<'_, 'gc> {
         ctor
     }
 
-    /// 给函数补 `length`（不可枚举、不可写、可配置）。
-    fn length(&self, f: JsObject<'gc>, n: u32) {
-        f.borrow_mut(self.mc).define(self.mc, "length", r8frame::Property { slot: r8frame::Slot::Data(f64::from(n).into()), enumerable: false, writable: false, configurable: true });
+    /// 各原型的 `[Symbol.toStringTag]`（不可写、不可枚举、可配置）。
+    fn tags(&self) {
+        let r = self.realm;
+        let global = |name: &str| r.global.borrow().own(name).and_then(|v| if let Value::Object(o) = v { Some(o) } else { None });
+        let mut tagged = alloc::vec![
+            (r.symbol_proto, "Symbol"),
+            (r.bigint_proto, "BigInt"),
+            (r.map_proto, "Map"),
+            (r.set_proto, "Set"),
+            (r.weakmap_proto, "WeakMap"),
+            (r.weakset_proto, "WeakSet"),
+            (r.promise_proto, "Promise"),
+            (r.generator_proto, "Generator"),
+            (r.async_generator_proto, "AsyncGenerator"),
+            (r.generator_function_proto, "GeneratorFunction"),
+            (r.async_function_proto, "AsyncFunction"),
+            (r.async_generator_function_proto, "AsyncGeneratorFunction"),
+            (r.array_iterator_proto, "Array Iterator"),
+            (r.string_iterator_proto, "String Iterator"),
+        ];
+        for name in ["Math", "JSON"] {
+            if let Some(o) = global(name) {
+                tagged.push((o, name));
+            }
+        }
+        for (o, tag) in tagged {
+            let v = self.text(tag);
+            o.borrow_mut(self.mc).define_symbol(r.symbols.to_string_tag, r8frame::Property { slot: r8frame::Slot::Data(v), enumerable: false, writable: false, configurable: true });
+        }
+    }
+
+    /// Symbol / BigInt：挂成构造器的样子，但不能 `new`。
+    fn not_constructor(&self, f: JsObject<'gc>) {
+        if let r8frame::ObjectKind::Native(native) = &mut f.borrow_mut(self.mc).kind {
+            native.constructor = false;
+        }
     }
 
     /// 宿主 getter（不可枚举）。
     fn getter(&self, target: JsObject<'gc>, name: &str, f: r8frame::NativeFn) {
-        let g = self.realm.named_native(self.mc, f, &alloc::format!("get {name}"));
+        let g = self.realm.named_native(self.mc, f, &alloc::format!("get {name}"), 0);
         target.borrow_mut(self.mc).define(self.mc, name, r8frame::Property { slot: r8frame::Slot::Accessor { get: Some(g), set: None }, enumerable: false, writable: false, configurable: true });
     }
 

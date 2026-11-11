@@ -64,11 +64,12 @@ impl Strings {
     }
 
     fn string<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        Ok(match args.first() {
-            None => a.string("").into(),
-            Some(&Value::Symbol(s)) => a.symbol_descriptive(s).into(),
-            Some(&v) => a.to_string(v)?.into(),
-        })
+        let s: Value<'gc> = match (args.first(), a.new_target) {
+            (None, _) => a.string("").into(),
+            (Some(&Value::Symbol(s)), Value::Undefined) => a.symbol_descriptive(s).into(),
+            (Some(&v), _) => a.to_string(v)?.into(),
+        };
+        a.wrap_primitive(s, a.realm.string_proto)
     }
 
     /// thisStringValue（`toString` / `valueOf`）：字符串或 String 包装对象，别的抛 TypeError。
@@ -263,14 +264,14 @@ impl Strings {
 
     /// `Number(v)`：BigInt 换成最接近的数。
     fn number<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        Ok(match args.first() {
+        let n = match args.first() {
             None => 0.0,
             Some(&v) => match a.to_numeric(v)? {
                 r8frame::Numeric::Number(x) => x,
                 r8frame::Numeric::BigInt(b) => num_traits::ToPrimitive::to_f64(&b.0).unwrap_or(f64::NAN),
             },
-        }
-        .into())
+        };
+        a.wrap_primitive(n.into(), a.realm.number_proto)
     }
 
     fn is_integer<'gc>(_: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
@@ -348,36 +349,36 @@ impl Installer<'_, '_> {
         let proto = self.realm.string_proto;
         // String.prototype 本身是包着 "" 的 String 对象
         proto.borrow_mut(self.mc).kind = r8frame::ObjectKind::Primitive(self.text(""));
-        self.constructor("String", Strings::string, proto);
-        let methods: [(&str, r8frame::NativeFn); 25] = [
-            ("toString", Strings::to_string),
-            ("valueOf", Strings::to_string),
-            ("charAt", Strings::char_at),
-            ("charCodeAt", Strings::char_code_at),
-            ("indexOf", Strings::index_of),
-            ("lastIndexOf", Strings::last_index_of),
-            ("includes", Strings::includes),
-            ("startsWith", Strings::starts_with),
-            ("endsWith", Strings::ends_with),
-            ("slice", Strings::slice),
-            ("substring", Strings::substring),
-            ("at", Strings::at),
-            ("toUpperCase", Strings::to_upper_case),
-            ("toLowerCase", Strings::to_lower_case),
-            ("trim", Strings::trim),
-            ("trimStart", Strings::trim_start),
-            ("trimEnd", Strings::trim_end),
-            ("split", Strings::split),
-            ("repeat", Strings::repeat),
-            ("padStart", Strings::pad_start),
-            ("padEnd", Strings::pad_end),
-            ("concat", Strings::concat),
-            ("toLocaleUpperCase", Strings::to_upper_case),
-            ("toLocaleLowerCase", Strings::to_lower_case),
-            ("trimLeft", Strings::trim_start),
+        self.constructor("String", Strings::string, proto, 1);
+        let methods: [(&str, r8frame::NativeFn, u32); 25] = [
+            ("toString", Strings::to_string, 0),
+            ("valueOf", Strings::to_string, 0),
+            ("charAt", Strings::char_at, 1),
+            ("charCodeAt", Strings::char_code_at, 1),
+            ("indexOf", Strings::index_of, 1),
+            ("lastIndexOf", Strings::last_index_of, 1),
+            ("includes", Strings::includes, 1),
+            ("startsWith", Strings::starts_with, 1),
+            ("endsWith", Strings::ends_with, 1),
+            ("slice", Strings::slice, 2),
+            ("substring", Strings::substring, 2),
+            ("at", Strings::at, 1),
+            ("toUpperCase", Strings::to_upper_case, 0),
+            ("toLowerCase", Strings::to_lower_case, 0),
+            ("trim", Strings::trim, 0),
+            ("trimStart", Strings::trim_start, 0),
+            ("trimEnd", Strings::trim_end, 0),
+            ("split", Strings::split, 2),
+            ("repeat", Strings::repeat, 1),
+            ("padStart", Strings::pad_start, 1),
+            ("padEnd", Strings::pad_end, 1),
+            ("concat", Strings::concat, 1),
+            ("toLocaleUpperCase", Strings::to_upper_case, 0),
+            ("toLocaleLowerCase", Strings::to_lower_case, 0),
+            ("trimLeft", Strings::trim_start, 0),
         ];
-        for (name, f) in methods {
-            self.method(proto, name, f);
+        for (name, f, n) in methods {
+            self.method(proto, name, f, n);
         }
     }
 
@@ -385,10 +386,10 @@ impl Installer<'_, '_> {
         let proto = self.realm.number_proto;
         // Number.prototype 本身是包着 +0 的 Number 对象
         proto.borrow_mut(self.mc).kind = r8frame::ObjectKind::Primitive(0.0.into());
-        let ctor = self.constructor("Number", Strings::number, proto);
-        self.method(ctor, "isInteger", Strings::is_integer);
-        self.method(ctor, "isSafeInteger", Strings::is_safe_integer);
-        self.method(ctor, "isNaN", Strings::number_is_nan);
+        let ctor = self.constructor("Number", Strings::number, proto, 1);
+        self.method(ctor, "isInteger", Strings::is_integer, 1);
+        self.method(ctor, "isSafeInteger", Strings::is_safe_integer, 1);
+        self.method(ctor, "isNaN", Strings::number_is_nan, 1);
         self.set(ctor, "MAX_SAFE_INTEGER", MAX_SAFE_INTEGER.into());
         self.set(ctor, "MIN_SAFE_INTEGER", (-MAX_SAFE_INTEGER).into());
         self.set(ctor, "EPSILON", f64::EPSILON.into());
@@ -397,7 +398,7 @@ impl Installer<'_, '_> {
         self.set(ctor, "POSITIVE_INFINITY", f64::INFINITY.into());
         self.set(ctor, "NEGATIVE_INFINITY", f64::NEG_INFINITY.into());
         self.set(ctor, "NaN", f64::NAN.into());
-        self.method(proto, "toString", Strings::number_to_string);
-        self.method(proto, "valueOf", Strings::number_value_of);
+        self.method(proto, "toString", Strings::number_to_string, 1);
+        self.method(proto, "valueOf", Strings::number_value_of, 0);
     }
 }

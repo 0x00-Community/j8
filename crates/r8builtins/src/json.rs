@@ -87,7 +87,7 @@ impl<'gc> Parser<'_, '_, 'gc, '_> {
             self.expect(b':', "expected ':'")?;
             let v = self.value()?;
             // CreateDataProperty：`__proto__` 也只是普通键
-            self.a.define(o, &k, Property::data(v));
+            self.a.define(o, &k, Property::data(v))?;
             match self.peek() {
                 Some(b',') => self.pos += 1,
                 Some(b'}') => {
@@ -397,7 +397,7 @@ impl Json {
                 if nv == Value::Undefined {
                     a.delete(v, &k)?;
                 } else {
-                    a.define(o, &k, Property::data(nv));
+                    a.create_data_property(o, r8frame::Key::Str(&k), nv)?;
                 }
             }
         }
@@ -448,8 +448,8 @@ impl Json {
 impl Installer<'_, '_> {
     pub(crate) fn json(&mut self) {
         let j = self.plain();
-        self.method(j, "parse", Json::parse);
-        self.method(j, "stringify", Json::stringify);
+        self.method(j, "parse", Json::parse, 2);
+        self.method(j, "stringify", Json::stringify, 3);
         self.set(self.realm.global, "JSON", j.into());
     }
 }

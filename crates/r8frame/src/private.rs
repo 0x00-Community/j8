@@ -59,6 +59,9 @@ impl<'gc> Agent<'gc, '_> {
     pub fn private_define(&mut self, obj: Value<'gc>, key: JsSymbol<'gc>, prop: Property<'gc>) -> Result<(), Error> {
         let o = self.private_holder(obj, key, "define")?;
         let existing = Self::private_lookup(o, key);
+        if existing.is_none() && o.borrow().non_extensible {
+            return Err(self.throw(ErrorKind::Type, &alloc::format!("Cannot define private field {} on a non-extensible object", Self::private_label(key))));
+        }
         let merged = match (existing, prop.slot) {
             (None, _) => prop,
             (Some(Property { slot: Slot::Accessor { get, set }, .. }), Slot::Accessor { get: g2, set: s2 }) if (get.is_none() || g2.is_none()) && (set.is_none() || s2.is_none()) => {
@@ -79,7 +82,7 @@ impl<'gc> Agent<'gc, '_> {
         match obj {
             Value::Object(o) => Ok(Self::private_lookup(o, key).is_some()),
             _ => {
-                let what = self.to_string(obj).map_or_else(|_| alloc::string::String::from("value"), |s| alloc::string::String::from(&**s));
+                let what = self.describe(obj);
                 Err(self.throw(ErrorKind::Type, &alloc::format!("Cannot use 'in' operator to search for '{}' in {what}", Self::private_label(key))))
             }
         }

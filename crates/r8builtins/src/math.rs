@@ -119,14 +119,14 @@ impl Installer<'_, '_> {
             Math::unary::<18>,
         ];
         for ((name, _), f) in UNARY.iter().zip(unary) {
-            self.method(m, name, f);
+            self.method(m, name, f, 1);
         }
-        self.method(m, "round", Math::round);
-        self.method(m, "pow", Math::pow);
-        self.method(m, "atan2", Math::atan2);
-        self.method(m, "max", Math::max);
-        self.method(m, "min", Math::min);
-        self.method(m, "hypot", Math::hypot);
+        self.method(m, "round", Math::round, 1);
+        self.method(m, "pow", Math::pow, 2);
+        self.method(m, "atan2", Math::atan2, 2);
+        self.method(m, "max", Math::max, 2);
+        self.method(m, "min", Math::min, 2);
+        self.method(m, "hypot", Math::hypot, 2);
         for (name, v) in [("PI", core::f64::consts::PI), ("E", core::f64::consts::E), ("LN2", core::f64::consts::LN_2), ("LN10", core::f64::consts::LN_10), ("LOG2E", core::f64::consts::LOG2_E), ("LOG10E", core::f64::consts::LOG10_E), ("SQRT2", core::f64::consts::SQRT_2), ("SQRT1_2", core::f64::consts::FRAC_1_SQRT_2)] {
             self.set(m, name, v.into());
         }

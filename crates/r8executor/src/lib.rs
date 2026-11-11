@@ -203,7 +203,9 @@ impl Executor {
             match kind {
                 Ok(n) => {
                     let saved = self.depth.replace(depth);
-                    let r = (n.0)(a, this, &args);
+                    let outer = core::mem::replace(&mut a.new_target, Value::Undefined);
+                    let r = (n.f)(a, this, &args);
+                    a.new_target = outer;
                     self.depth.set(saved);
                     return r.map(Callee::Done);
                 }
@@ -213,8 +215,8 @@ impl Executor {
                 }
             }
         }
-        let what = a.to_string(callee)?;
-        Err(a.throw(ErrorKind::Type, &alloc::format!("{} is not a function", &**what)))
+        let what = a.describe(callee);
+        Err(a.throw(ErrorKind::Type, &alloc::format!("{what} is not a function")))
     }
 
     /// 建一帧：在寄存器文件末尾开出本函数的寄存器，按调用约定放 `this`、自身、实参。
@@ -285,22 +287,16 @@ impl Executor {
                     return Ok(Prepared::Frame(f));
                 }
                 Ok(Err(native)) => {
-                    let saved = self.depth.replace(depth);
-                    let r = (native.0)(a, Value::Undefined, &args);
-                    self.depth.set(saved);
-                    // 宿主构造器给原始值：Boolean / Number / String 包成包装对象；Symbol / BigInt 不能 `new`
-                    let obj = match r? {
-                        Value::Object(made) => made,
-                        v @ (Value::Bool(_) | Value::Number(_) | Value::String(_)) => a.to_object(v)?,
-                        Value::Symbol(_) | Value::BigInt(_) => break,
-                        _ => a.object(),
-                    };
-                    // `class X extends Error`：宿主构造器建的对象换成派生类的原型
-                    if !matches!(new_target, Value::Object(t) if Gc::ptr_eq(t, o))
-                        && let Value::Object(p) = a.get_named(new_target, "prototype")?
-                    {
-                        obj.borrow_mut(a.mc).proto = Some(p);
+                    if !native.constructor {
+                        break;
                     }
+                    // 宿主构造器自己按 `new.target` 定原型（`class X extends Map` 等）
+                    let saved = self.depth.replace(depth);
+                    let outer = core::mem::replace(&mut a.new_target, new_target);
+                    let r = (native.f)(a, Value::Undefined, &args);
+                    a.new_target = outer;
+                    self.depth.set(saved);
+                    let Value::Object(obj) = r? else { unreachable!("built-in constructors return objects") };
                     return Ok(Prepared::Done(obj.into()));
                 }
                 Err((target, mut bound_args)) => {
@@ -312,8 +308,8 @@ impl Executor {
                 }
             }
         }
-        let what = a.to_string(callee)?;
-        Err(a.throw(ErrorKind::Type, &alloc::format!("{} is not a constructor", &**what)))
+        let what = a.describe(callee);
+        Err(a.throw(ErrorKind::Type, &alloc::format!("{what} is not a constructor")))
     }
 
     /// 派生构造器里的 `super(args)`：构造父类（`new.target` 不变），初始化 `this`，跑实例字段。
@@ -440,9 +436,13 @@ impl Executor {
         if a.realm.script_scope.borrow().get_own(name).is_some() {
             return Err(a.throw(ErrorKind::Syntax, &alloc::format!("Identifier '{name}' has already been declared")));
         }
-        let existing = a.realm.global.borrow().get_own(name);
+        let (existing, extensible) = {
+            let g = a.realm.global.borrow();
+            (g.get_own(name), !g.non_extensible)
+        };
         match existing {
             Some(p) if function && !p.configurable && !(p.writable && p.enumerable && matches!(p.slot, Slot::Data(_))) => Err(a.throw(ErrorKind::Type, &alloc::format!("Cannot redefine property: {name}"))),
+            None if !extensible => Err(a.throw(ErrorKind::Type, &alloc::format!("Cannot declare global {name}: the global object is not extensible"))),
             _ => Ok(()),
         }
     }
@@ -495,7 +495,7 @@ impl Executor {
 
     /// 本帧的 arguments 对象：全部实参作可枚举下标属性，`length` / `callee` / `[Symbol.iterator]` 不可枚举。
     fn arguments<'gc>(a: &mut Agent<'gc, '_>, regs: &[Value<'gc>], f: &Frame<'gc>, self_strict: bool) -> Result<Value<'gc>, Error> {
-        let o = a.object();
+        let o = ObjectData { kind: ObjectKind::Arguments, proto: Some(a.realm.object_proto), ..ObjectData::default() }.alloc(a.mc);
         let hidden = |v: Value<'gc>| Property { slot: Slot::Data(v), enumerable: false, writable: true, configurable: true };
         for (i, &v) in f.args.iter().enumerate() {
             let k = alloc::string::String::from(ryu_js::Buffer::new().format(f64::from(u32::try_from(i).unwrap_or(u32::MAX))));
@@ -507,7 +507,7 @@ impl Executor {
         d.define(a.mc, "length", hidden(len.into()));
         if self_strict {
             // 严格模式：读写 callee 都抛 TypeError
-            let thrower = a.realm.named_native(a.mc, Self::throw_type_error, "");
+            let thrower = a.realm.named_native(a.mc, Self::throw_type_error, "", 0);
             d.define(a.mc, "callee", Property { slot: Slot::Accessor { get: Some(thrower), set: Some(thrower) }, enumerable: false, writable: false, configurable: false });
         } else {
             d.define(a.mc, "callee", hidden(regs[f.base + usize::from(Reg::CALLEE.0)]));
@@ -538,21 +538,26 @@ impl Executor {
 
     /// 往编译器建的数组末尾追加。
     fn push<'gc>(a: &Agent<'gc, '_>, arr: Value<'gc>, items: impl IntoIterator<Item = Value<'gc>>) {
-        if let Value::Object(o) = arr
-            && let ObjectKind::Array(v) = &mut o.borrow_mut(a.mc).kind
-        {
-            v.extend(items);
+        let Value::Object(o) = arr else { return };
+        let mut d = o.borrow_mut(a.mc);
+        for v in items {
+            let len = d.array_length().unwrap_or(0);
+            match &mut d.kind {
+                ObjectKind::Array(dense) if dense.len() == len as usize => dense.push(v),
+                _ => d.store(a.mc, r8frame::Key::Str(&alloc::format!("{len}")), Property::data(v)),
+            }
         }
     }
 
     /// 对象字面量 / 类里定义一个属性（值或访问器函数是 `v`）。
-    fn define<'gc>(a: &mut Agent<'gc, '_>, obj: Value<'gc>, key: &str, kind: PropertyKind, enumerable: bool, v: Value<'gc>) {
-        let Value::Object(o) = obj else { return };
+    fn define<'gc>(a: &mut Agent<'gc, '_>, obj: Value<'gc>, key: &str, kind: PropertyKind, enumerable: bool, v: Value<'gc>) -> Result<(), Error> {
+        let Value::Object(o) = obj else { return Ok(()) };
         match (kind, v) {
-            (PropertyKind::Data, _) => a.define(o, key, Property { slot: Slot::Data(v), enumerable, writable: true, configurable: true }),
+            (PropertyKind::Data, _) => a.define(o, key, Property { slot: Slot::Data(v), enumerable, writable: true, configurable: true })?,
             (PropertyKind::Getter | PropertyKind::Setter, Value::Object(func)) => a.define_accessor(o, key, func, kind == PropertyKind::Setter, enumerable),
             _ => {}
         }
+        Ok(())
     }
 
     /// 跑到最外层帧返回；异常先找处理器，接不住才往外抛。
@@ -616,7 +621,7 @@ impl Executor {
                     *acc = Self::global_get(a, name)?.ok_or_else(|| a.throw(ErrorKind::Reference, &alloc::format!("{name} is not defined")))?;
                 }
                 Insn::LdaGlobalOrUndefined(k) => *acc = Self::global_get(a, func.name_at(k))?.unwrap_or_default(),
-                Insn::StaGlobal(k) => Self::global_set(a, func.name_at(k), *acc, func.mode.into())?,
+                Insn::StaGlobal { name, strict } => Self::global_set(a, func.name_at(name), *acc, strict)?,
                 Insn::LdaHole => *acc = Value::Uninit,
                 Insn::ThrowConstAssign => return Err(a.throw(ErrorKind::Type, "Assignment to constant variable.")),
                 Insn::CheckInit { name } => Self::check(a, *acc, func.name_at(name))?,
@@ -642,6 +647,15 @@ impl Executor {
                 Insn::CheckDeclare { name, function } => Self::check_declare(a, func.name_at(name), function)?,
                 Insn::DeclareVar { name, deletable } => Self::declare_global(a, func.name_at(name), None, deletable),
                 Insn::DeclareFunction { name, deletable } => Self::declare_global(a, func.name_at(name), Some(*acc), deletable),
+                Insn::SetProtoLiteral { obj } => {
+                    if let Value::Object(o) = regs[r(obj)] {
+                        match *acc {
+                            Value::Object(p) => o.borrow_mut(a.mc).proto = Some(p),
+                            Value::Null => o.borrow_mut(a.mc).proto = None,
+                            _ => {}
+                        }
+                    }
+                }
                 Insn::InitLexical { name } => {
                     let name = func.name_at(name);
                     let scope = a.realm.script_scope;
@@ -709,6 +723,13 @@ impl Executor {
                 }
                 Insn::CreateRest(from) => *acc = a.array(f.args.get(usize::from(from)..).unwrap_or(&[]).to_vec()).into(),
                 Insn::ArrayPush { arr } => Self::push(a, regs[r(arr)], [*acc]),
+                Insn::ArrayHole { arr } => {
+                    if let Value::Object(o) = regs[r(arr)] {
+                        let mut d = o.borrow_mut(a.mc);
+                        let len = d.array_length().unwrap_or(0);
+                        d.set_array_length(len + 1);
+                    }
+                }
                 Insn::ArraySpread { arr } => {
                     let items = a.to_list(*acc)?;
                     Self::push(a, regs[r(arr)], items);
@@ -787,7 +808,7 @@ impl Executor {
                         closure.fields = Some(init);
                     }
                 }
-                Insn::DefineNamed { obj, name, kind, enumerable } => Self::define(a, regs[r(obj)], func.name_at(name), kind, enumerable, *acc),
+                Insn::DefineNamed { obj, name, kind, enumerable } => Self::define(a, regs[r(obj)], func.name_at(name), kind, enumerable, *acc)?,
                 Insn::DefineKeyed { obj, key, kind, enumerable } => {
                     if let Value::Object(o) = regs[r(obj)] {
                         let k = regs[r(key)];
@@ -831,22 +852,22 @@ impl Executor {
                 }
                 Insn::InstanceOf(x) => *acc = a.instance_of(regs[r(x)], *acc)?.into(),
                 Insn::In(x) => *acc = a.has_keyed(*acc, regs[r(x)])?.into(),
-                Insn::DeleteNamed { obj, name } => {
+                Insn::DeleteNamed { obj, name, strict } => {
                     let ok = a.delete(regs[r(obj)], func.name_at(name))?;
-                    Self::check_delete(a, ok, func.mode.into())?;
+                    Self::check_delete(a, ok, strict)?;
                     *acc = ok.into();
                 }
-                Insn::DeleteKeyed { obj } => {
+                Insn::DeleteKeyed { obj, strict } => {
                     let ok = a.delete_keyed(regs[r(obj)], *acc)?;
-                    Self::check_delete(a, ok, func.mode.into())?;
+                    Self::check_delete(a, ok, strict)?;
                     *acc = ok.into();
                 }
                 Insn::CreateObject => *acc = a.object().into(),
                 Insn::CreateArray { first, count } => *acc = a.array(regs[r(first)..r(first) + usize::from(count)].to_vec()).into(),
                 Insn::GetNamed { obj, name } => *acc = a.get_named(regs[r(obj)], func.name_at(name))?,
-                Insn::SetNamed { obj, name } => a.put_named(regs[r(obj)], func.name_at(name), *acc, func.mode.into())?,
+                Insn::SetNamed { obj, name, strict } => a.put_named(regs[r(obj)], func.name_at(name), *acc, strict)?,
                 Insn::GetKeyed { obj } => *acc = a.get_keyed(regs[r(obj)], *acc)?,
-                Insn::SetKeyed { obj, key } => a.put_keyed(regs[r(obj)], regs[r(key)], *acc, func.mode.into())?,
+                Insn::SetKeyed { obj, key, strict } => a.put_keyed(regs[r(obj)], regs[r(key)], *acc, strict)?,
                 Insn::CallEval { callee, args, argc, .. } if matches!(regs[r(callee)], Value::Object(o) if Gc::ptr_eq(o, a.realm.eval)) => {
                     *acc = match (argc, regs[r(args)]) {
                         (0, _) => Value::Undefined,
@@ -1082,6 +1103,12 @@ impl<'gc> Invoke<'gc> for Executor {
                 self.run_frame(a, regs, f, level)
             }
         }
+    }
+
+    fn constructs(&self, closure: &Closure<'gc>) -> bool {
+        let loaded = self.function(closure.func);
+        let f = &loaded.func;
+        !f.generator && !f.asynchronous && matches!(f.kind, FunctionKind::Normal | FunctionKind::Constructor { .. })
     }
 
     fn eval_code(&self, a: &mut Agent<'gc, '_>, src: &str, kind: r8frame::CodeKind) -> Result<Value<'gc>, Error> {
@@ -1514,6 +1541,19 @@ mod tests {
             ("(function () { return typeof this }).call(1)", "object"),
             ("const o = Object.freeze({ a: 1 }); o.a = 2; o.a", "1"),
             ("class C { m() { return typeof this } } const m = new C().m; m()", "undefined"),
+            // 属性模型与 Object / Array
+            ("Object.keys({ b: 1, 2: 1, a: 1, 1: 1 }).join()", "1,2,b,a"),
+            ("Object.getOwnPropertyNames([1, 2]).join()", "0,1,length"),
+            ("const a = [1, 2, 3]; delete a[1]; (1 in a) + ',' + a.length", "false,3"),
+            ("const f = Object.freeze([1]); let e; try { f.push(2) } catch (x) { e = x.name } Object.isFrozen(f) + e + f.length", "trueTypeError1"),
+            ("Array.prototype.map.call({ length: 2, 0: 'a', 1: 'b' }, x => x + x).join()", "aa,bb"),
+            ("[1, [2, [3, [4]]]].flat(Infinity).join() + '|' + [3, 1, 2].toSorted().join() + '|' + [1, 2, 3].with(1, 9).join()", "1,2,3,4|1,2,3|1,9,3"),
+            ("({ __proto__: Array.prototype }) instanceof Array", "true"),
+            ("Object.fromEntries([['a', 1], ['b', 2]]).b + Object.entries({ x: 3 })[0][1]", "5"),
+            ("class M extends Map {} const m = new M(); (m instanceof M) + ',' + m.size", "true,0"),
+            ("Math.max.length + [].push.length + Object.defineProperty.length + typeof new Number(1)", "6object"),
+            ("const a = [1, 2, 3]; a.length = 1; a.splice(0, 0, 'x', 'y'); a.join() + Array.from({ length: 2 }, (_, i) => i * 2).join()", "x,y,10,2"),
+            ("const o = Object.preventExtensions({ a: 1 }); o.b = 2; Object.isExtensible(o) + ',' + ('b' in o) + ',' + Object.isSealed(Object.seal({}))", "false,false,true"),
         ];
         for (src, want) in ok {
             assert_eq!(eval(src).0, Ok(String::from(want)), "{src}");
@@ -1560,6 +1600,9 @@ mod tests {
             ("class C { #x; static f(o) { return #x in o } } C.f(1)", "TypeError: Cannot use 'in' operator to search for '#x' in 1"),            ("'use strict'; undeclaredStrict = 1", "ReferenceError: undeclaredStrict is not defined"),
             ("'use strict'; const o = Object.freeze({ a: 1 }); o.a = 2", "TypeError: Cannot assign to read only property 'a'"),
             ("(function () { 'use strict'; return arguments.callee })()", "TypeError: 'caller', 'callee', and 'arguments' properties may not be accessed on strict mode functions or the arguments objects for calls to them"),
+            ("new Math.max()", "TypeError: max is not a constructor"),
+            ("Map()", "TypeError: Constructor Map requires 'new'"),
+            ("'use strict'; Object.preventExtensions([]).push(1)", "TypeError: Cannot add property 0, object is not extensible"),
             ("eval('let let = 1')", "SyntaxError: [eval]: `let` cannot be declared as a variable name inside of a `let` declaration"),
         ];
         for (src, want) in thrown {

@@ -481,8 +481,8 @@ impl<'a> Compiler<'a, '_> {
     fn target_store(&mut self, t: &Target<'a>) {
         match *t {
             Target::Name(n) => self.store(n, false),
-            Target::Named { obj, name } => _ = self.emit(Insn::SetNamed { obj, name }),
-            Target::Keyed { obj, key } => _ = self.emit(Insn::SetKeyed { obj, key }),
+            Target::Named { obj, name } => _ = self.emit(Insn::SetNamed { obj, name, strict: self.strict_here() }),
+            Target::Keyed { obj, key } => _ = self.emit(Insn::SetKeyed { obj, key, strict: self.strict_here() }),
             Target::Private { obj, key } => _ = self.emit(Insn::SetPrivate { obj, key }),
         }
     }
@@ -628,7 +628,7 @@ impl<'a> Compiler<'a, '_> {
         } else {
             let first = Reg(callee.0 + 2);
             self.arguments(&c.arguments, first)?;
-            let direct_eval = self.strict() && matches!(&c.callee, Expression::Identifier(id) if id.name == "eval");
+            let direct_eval = self.strict_here() && matches!(&c.callee, Expression::Identifier(id) if id.name == "eval");
             self.emit(if direct_eval { Insn::CallEval { callee, this, args: first, argc } } else { Insn::Call { callee, this, args: first, argc } });
         }
         self.release(callee);
@@ -700,10 +700,7 @@ impl<'a> Compiler<'a, '_> {
                     self.expr(v)?;
                     self.emit(Insn::ArraySpread { arr });
                 }
-                Element::Hole => {
-                    self.emit(Insn::LdaUndefined);
-                    self.emit(Insn::ArrayPush { arr });
-                }
+                Element::Hole => _ = self.emit(Insn::ArrayHole { arr }),
             }
         }
         Ok(arr)
@@ -966,7 +963,7 @@ impl<'a> Compiler<'a, '_> {
                 let obj = self.temp();
                 self.emit(Insn::Star(obj));
                 let name = self.name(m.property.name.as_str());
-                self.emit(Insn::DeleteNamed { obj, name });
+                self.emit(Insn::DeleteNamed { obj, name, strict: self.strict_here() });
                 self.release(obj);
             }
             Expression::ComputedMemberExpression(m) => {
@@ -974,7 +971,7 @@ impl<'a> Compiler<'a, '_> {
                 let obj = self.temp();
                 self.emit(Insn::Star(obj));
                 self.expr(&m.expression)?;
-                self.emit(Insn::DeleteKeyed { obj });
+                self.emit(Insn::DeleteKeyed { obj, strict: self.strict_here() });
                 self.release(obj);
             }
             Expression::Identifier(_) => _ = self.emit(Insn::LdaBool(false)),
@@ -1031,7 +1028,9 @@ impl<'a> Compiler<'a, '_> {
                     _ => self.expr(v)?,
                 },
             }
+            let proto_setter = !p.computed && !p.shorthand && !p.method && kind == PropertyKind::Data && self.static_name(&p.key, false).is_some_and(|n| n == "__proto__");
             match key {
+                Ok(_) if proto_setter => _ = self.emit(Insn::SetProtoLiteral { obj }),
                 Ok(name) => _ = self.emit(Insn::DefineNamed { obj, name, kind, enumerable: true }),
                 Err(key) => {
                     self.emit(Insn::DefineKeyed { obj, key, kind, enumerable: true });

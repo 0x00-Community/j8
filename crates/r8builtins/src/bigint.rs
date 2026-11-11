@@ -52,8 +52,9 @@ impl BigInts {
 impl Installer<'_, '_> {
     pub(crate) fn bigint(&mut self) {
         let proto = self.realm.bigint_proto;
-        self.constructor("BigInt", BigInts::construct, proto);
-        self.method(proto, "toString", BigInts::to_string);
-        self.method(proto, "valueOf", BigInts::value_of);
+        let ctor = self.constructor("BigInt", BigInts::construct, proto, 1);
+        self.not_constructor(ctor);
+        self.method(proto, "toString", BigInts::to_string, 0);
+        self.method(proto, "valueOf", BigInts::value_of, 0);
     }
 }

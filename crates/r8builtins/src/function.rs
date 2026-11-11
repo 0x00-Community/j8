@@ -21,7 +21,17 @@ impl Functions {
             b => String::from(&**a.to_string(b)?),
         };
         let src = alloc::format!("({prefix} anonymous({}\n) {{\n{body}\n}})", params.join(","));
-        a.eval_code(&src, CodeKind::Eval)
+        let new_target = a.new_target;
+        let f = a.eval_code(&src, CodeKind::Eval)?;
+        // 子类（`class F extends Function`）构造时原型取 new.target.prototype
+        if let Value::Object(fo) = f
+            && new_target != Value::Undefined
+        {
+            let fallback = fo.borrow().proto.unwrap_or(a.realm.function_proto);
+            let proto = a.proto_from_ctor(new_target, fallback)?;
+            fo.borrow_mut(a.mc).proto = Some(proto);
+        }
+        Ok(f)
     }
 
     fn function<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
@@ -55,8 +65,7 @@ impl Functions {
 impl<'gc> Installer<'_, 'gc> {
     pub(crate) fn functions(&mut self) {
         let r = self.realm;
-        let ctor = self.constructor("Function", Functions::function, r.function_proto);
-        self.length(ctor, 1);
+        let ctor = self.constructor("Function", Functions::function, r.function_proto, 1);
         // 生成器 / async 函数构造器不是全局的：经各自原型的 `constructor` 取到
         let kinds: [(&str, r8frame::NativeFn, r8frame::JsObject<'gc>, Option<r8frame::JsObject<'gc>>); 3] = [
             ("GeneratorFunction", Functions::generator_function, r.generator_function_proto, Some(r.generator_proto)),
@@ -64,8 +73,10 @@ impl<'gc> Installer<'_, 'gc> {
             ("AsyncGeneratorFunction", Functions::async_generator_function, r.async_generator_function_proto, Some(r.async_generator_proto)),
         ];
         for (name, f, proto, instances) in kinds {
-            let c = r.named_native(self.mc, f, name);
-            self.length(c, 1);
+            let c = r.named_native(self.mc, f, name, 1);
+            if let ObjectKind::Native(n) = &mut c.borrow_mut(self.mc).kind {
+                n.constructor = true;
+            }
             let fixed = |v: Value<'gc>| Property { slot: Slot::Data(v), enumerable: false, writable: false, configurable: false };
             c.borrow_mut(self.mc).define(self.mc, "prototype", fixed(proto.into()));
             c.borrow_mut(self.mc).proto = Some(ctor);
@@ -76,7 +87,7 @@ impl<'gc> Installer<'_, 'gc> {
             }
         }
         // %eval% 是 Realm 里预留的那个对象（执行器靠它认出直接 eval）
-        r.eval.borrow_mut(self.mc).kind = ObjectKind::Native(Native(Functions::eval));
+        r.eval.borrow_mut(self.mc).kind = ObjectKind::Native(Native::function(Functions::eval));
         r.name_function(self.mc, r.eval, "eval", Some(1));
         r.global.borrow_mut(self.mc).define(self.mc, "eval", Property::hidden(r.eval.into()));
     }

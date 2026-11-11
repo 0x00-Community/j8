@@ -40,10 +40,10 @@ impl AsyncGenerators {
 impl Installer<'_, '_> {
     pub(crate) fn async_generators(&mut self) {
         let r = self.realm;
-        r.symbol_method(self.mc, r.async_iterator_proto, r.symbols.async_iterator, AsyncGenerators::this_value);
+        r.symbol_method(self.mc, r.async_iterator_proto, r.symbols.async_iterator, AsyncGenerators::this_value, 0);
         let p = r.async_generator_proto;
-        self.method(p, "next", AsyncGenerators::next);
-        self.method(p, "return", AsyncGenerators::return_);
-        self.method(p, "throw", AsyncGenerators::throw);
+        self.method(p, "next", AsyncGenerators::next, 1);
+        self.method(p, "return", AsyncGenerators::return_, 1);
+        self.method(p, "throw", AsyncGenerators::throw, 1);
     }
 }

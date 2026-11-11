@@ -81,11 +81,11 @@ impl Installer<'_, '_> {
             g.borrow_mut(self.mc).define(self.mc, name, r8frame::Property { slot: r8frame::Slot::Data(v), enumerable: false, writable: false, configurable: false });
         }
         let console = self.plain();
-        self.method(console, "log", Global::log);
+        self.method(console, "log", Global::log, 0);
         self.set(g, "console", console.into());
-        self.method(g, "isNaN", Global::is_nan);
-        self.method(g, "isFinite", Global::is_finite);
-        self.method(g, "parseInt", Global::parse_int);
-        self.method(g, "parseFloat", Global::parse_float);
+        self.method(g, "isNaN", Global::is_nan, 1);
+        self.method(g, "isFinite", Global::is_finite, 1);
+        self.method(g, "parseInt", Global::parse_int, 2);
+        self.method(g, "parseFloat", Global::parse_float, 1);
     }
 }

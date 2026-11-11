@@ -4,7 +4,7 @@ use core::fmt;
 
 use gc_arena::{Collect, Gc, Lock, Mutation, RefLock};
 
-use crate::{Agent, Error, FuncId, Value};
+use crate::{Agent, Error, FuncId, Key, Value};
 
 /// 堆上的字符串。
 pub type JsString<'gc> = Gc<'gc, Box<str>>;
@@ -115,7 +115,18 @@ impl<'gc> Property<'gc> {
 /// 宿主函数对象的本体。
 #[derive(Clone, Copy, Collect)]
 #[collect(require_static)]
-pub struct Native(pub NativeFn);
+pub struct Native {
+    pub f: NativeFn,
+    /// 能 `new`（内建构造器）；能的时候 [`Agent::new_target`] 告诉它是不是构造调用
+    pub constructor: bool,
+}
+
+impl Native {
+    /// 普通宿主函数（不能 `new`）。
+    pub fn function(f: NativeFn) -> Self {
+        Self { f, constructor: false }
+    }
+}
 
 impl fmt::Debug for Native {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -334,6 +345,10 @@ impl<'gc> Collection<'gc> {
 pub enum ObjectKind<'gc> {
     #[default]
     Ordinary,
+    /// 非映射的 arguments 对象（`Object.prototype.toString` 认它）
+    Arguments,
+    /// Error 实例（有 [[ErrorData]]）
+    Error,
     /// 数组元素（下标属性存在这里，`length` 就是它的长度）
     Array(Vec<Value<'gc>>),
     Function(Closure<'gc>),
@@ -372,19 +387,21 @@ pub struct ObjectData<'gc> {
     /// 私有成员（`#x`）：键是类求值时生成的私有名，和普通属性分开，反射看不见
     pub privates: Vec<(JsSymbol<'gc>, Property<'gc>)>,
     pub proto: Option<JsObject<'gc>>,
-    /// 数组：稀疏部分撑起来的长度。离稠密末尾太远的下标（与大 `length`）不进稠密部分、按普通属性存，
-    /// 实际长度取它与稠密部分长度的大者
+    /// 数组：稀疏部分撑起来的长度。稠密部分（`ObjectKind::Array` 里，全是可写可枚举可配置的数据属性、没有空洞）
+    /// 之外的下标按普通属性存，实际长度取它与稠密部分长度的大者
     pub sparse_length: u32,
+    /// 不可扩展（`Object.preventExtensions` / `seal` / `freeze`）
+    pub non_extensible: bool,
+    /// 数组的 `length` 不可写
+    pub length_readonly: bool,
 }
-
-/// 数组写下标时，离稠密末尾不超过这么远就补 `undefined` 写进稠密部分，再远按普通属性存
-const DENSE_GAP: usize = 1024;
 
 /// 只打种类与键：对象图有环（`F.prototype.constructor`），不能往下展开。
 impl fmt::Debug for ObjectData<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let kind = match self.kind {
-            ObjectKind::Ordinary => "Object",
+            ObjectKind::Ordinary | ObjectKind::Arguments => "Object",
+            ObjectKind::Error => "Error",
             ObjectKind::Array(_) => "Array",
             ObjectKind::Function(_) | ObjectKind::Native(_) | ObjectKind::Bound(_) | ObjectKind::Resolver { .. } => "Function",
             ObjectKind::Iterator(_) | ObjectKind::CollectionIterator { .. } => "Iterator",
@@ -409,22 +426,29 @@ impl<'gc> ObjectData<'gc> {
         }
     }
 
-    /// 数组写第 `i` 个元素（不是数组给 `false`）：离稠密末尾近就进稠密部分，远了按普通属性存。
-    pub fn write_index(&mut self, mc: &Mutation<'gc>, i: u32, value: Value<'gc>) -> bool {
-        let ObjectKind::Array(items) = &mut self.kind else { return false };
-        let at = i as usize;
-        if at < items.len() {
-            items[at] = value;
-        } else if at - items.len() <= DENSE_GAP {
-            self.grow_dense(at + 1);
-            if let ObjectKind::Array(items) = &mut self.kind {
-                items[at] = value;
+    /// 快路：改稠密部分里已有的第 `i` 个元素，改了给 `true`（别的情况走完整的属性写）。
+    pub fn write_index(&mut self, i: u32, value: Value<'gc>) -> bool {
+        match &mut self.kind {
+            ObjectKind::Array(items) if (i as usize) < items.len() => {
+                items[i as usize] = value;
+                true
             }
-        } else {
-            self.set(mc, &alloc::format!("{i}"), value);
-            self.sparse_length = self.sparse_length.max(i + 1);
+            _ => false,
         }
-        true
+    }
+
+    /// 稠密部分从第 `from` 个起搬成按下标存的普通属性（要给这些元素不同的特性、或删掉其中一个时）。
+    pub fn spill(&mut self, mc: &Mutation<'gc>, from: usize) {
+        let ObjectKind::Array(items) = &mut self.kind else { return };
+        if from >= items.len() {
+            return;
+        }
+        let len = u32::try_from(items.len()).unwrap_or(u32::MAX);
+        let moved: Vec<Value<'gc>> = items.drain(from..).collect();
+        for (i, v) in (from..).zip(moved) {
+            self.props.push((Gc::new(mc, Box::from(alloc::format!("{i}").as_str())), Property::data(v)));
+        }
+        self.sparse_length = self.sparse_length.max(len);
     }
 
     /// 数组稀疏部分的元素（稠密部分之后、按普通属性存的下标），按下标排好。
@@ -445,23 +469,7 @@ impl<'gc> ObjectData<'gc> {
         out
     }
 
-    /// 稠密部分长到 `len`（补 `undefined`），落进来的稀疏元素搬进稠密部分。
-    fn grow_dense(&mut self, len: usize) {
-        let ObjectKind::Array(items) = &mut self.kind else { return };
-        let old = items.len();
-        items.resize(len, Value::Undefined);
-        if self.sparse_length as usize > old {
-            self.props.retain(|(k, p)| match (crate::ops::index_of_str(k), p.slot) {
-                (Some(i), Slot::Data(v)) if (old..len).contains(&(i as usize)) => {
-                    items[i as usize] = v;
-                    false
-                }
-                _ => true,
-            });
-        }
-    }
-
-    /// 数组设长度：截掉 `n` 及以后的元素（含稀疏部分）；变长时近的补进稠密部分，远的只记长度。
+    /// 数组设长度：截掉 `n` 及以后的元素（含按下标存的）；变长只记长度（新的位置是空洞）。
     pub fn set_array_length(&mut self, n: u32) {
         let ObjectKind::Array(items) = &mut self.kind else { return };
         let len = n as usize;
@@ -471,12 +479,65 @@ impl<'gc> ObjectData<'gc> {
         if self.sparse_length > 0 {
             self.props.retain(|(k, _)| crate::ops::index_of_str(k).is_none_or(|i| i < n));
         }
-        let dense = items.len();
-        self.sparse_length = 0;
-        if len > dense && len - dense <= DENSE_GAP {
-            self.grow_dense(len);
-        } else if len > dense {
-            self.sparse_length = n;
+        self.sparse_length = if len > items.len() { n } else { 0 };
+    }
+
+    /// 自有属性（只看存着的：数组稠密部分、普通属性、Symbol 键；数组 `length` 与字符串下标由 Agent 补）。
+    pub fn own_slot(&self, key: Key<'_, 'gc>) -> Option<Property<'gc>> {
+        match key {
+            Key::Str(k) => {
+                if let (ObjectKind::Array(items), Some(i)) = (&self.kind, crate::ops::index_of_str(k))
+                    && let Some(&v) = items.get(i as usize)
+                {
+                    return Some(Property::data(v));
+                }
+                self.get_own(k)
+            }
+            Key::Sym(s) => self.get_own_symbol(s),
+        }
+    }
+
+    /// 存一个自有属性（已经验过能存）：数组的下标能进稠密部分就进，不能就按普通属性存并撑长度。
+    pub fn store(&mut self, mc: &Mutation<'gc>, key: Key<'_, 'gc>, prop: Property<'gc>) {
+        let k = match key {
+            Key::Sym(s) => return self.define_symbol(s, prop),
+            Key::Str(k) => k,
+        };
+        let plain = prop.enumerable && prop.writable && prop.configurable;
+        let stored = matches!(self.kind, ObjectKind::Array(_)) && self.get_own(k).is_some();
+        if let (ObjectKind::Array(items), Some(i)) = (&mut self.kind, crate::ops::index_of_str(k)) {
+            let at = i as usize;
+            match (prop.slot, plain) {
+                (Slot::Data(v), true) if at < items.len() => {
+                    items[at] = v;
+                    return;
+                }
+                (Slot::Data(v), true) if at == items.len() && !stored => {
+                    items.push(v);
+                    return;
+                }
+                _ if at < items.len() => self.spill(mc, at),
+                _ => {}
+            }
+        }
+        self.define(mc, k, prop);
+        if let (ObjectKind::Array(_), Some(i)) = (&self.kind, crate::ops::index_of_str(k)) {
+            self.sparse_length = self.sparse_length.max(i.saturating_add(1));
+        }
+    }
+
+    /// 删一个自有属性（不查可配置）。
+    pub fn unstore(&mut self, mc: &Mutation<'gc>, key: Key<'_, 'gc>) {
+        match key {
+            Key::Sym(s) => self.symbols.retain(|(k, _)| !Gc::ptr_eq(*k, s)),
+            Key::Str(k) => {
+                if let (ObjectKind::Array(items), Some(i)) = (&self.kind, crate::ops::index_of_str(k))
+                    && (i as usize) < items.len()
+                {
+                    self.spill(mc, i as usize);
+                }
+                self.props.retain(|(n, _)| ***n != *k);
+            }
         }
     }
 

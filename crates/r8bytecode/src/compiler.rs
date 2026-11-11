@@ -250,6 +250,11 @@ impl<'a> Compiler<'a, '_> {
         self.src.unsupported(span.start, what)
     }
 
+    /// 这里的代码是不是严格的：函数本身严格，或者在类体里（`extends` 与计算键在外层函数里求值，也是严格代码）。
+    pub(crate) fn strict_here(&self) -> bool {
+        self.strict() || self.class_depth > 0
+    }
+
     /// 当前函数是不是严格模式。
     pub(crate) fn strict(&self) -> bool {
         self.frames.last().is_some_and(|f| f.strict)
@@ -477,7 +482,7 @@ impl<'a> Compiler<'a, '_> {
             Place::Reg(reg) => Insn::Star(reg),
             Place::Env { depth, slot } => Insn::StaEnv { depth, slot },
             Place::Global(g) if init && self.script_lexicals.contains(g) => Insn::InitLexical { name: self.name(g) },
-            Place::Global(g) => Insn::StaGlobal(self.name(g)),
+            Place::Global(g) => Insn::StaGlobal { name: self.name(g), strict: self.strict_here() },
         };
         self.emit(insn);
     }

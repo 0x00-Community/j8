@@ -16,12 +16,34 @@ pub struct WellKnown<'gc> {
     pub has_instance: JsSymbol<'gc>,
     pub to_primitive: JsSymbol<'gc>,
     pub to_string_tag: JsSymbol<'gc>,
+    pub species: JsSymbol<'gc>,
+    pub unscopables: JsSymbol<'gc>,
+    pub is_concat_spreadable: JsSymbol<'gc>,
+    pub match_: JsSymbol<'gc>,
+    pub match_all: JsSymbol<'gc>,
+    pub replace: JsSymbol<'gc>,
+    pub search: JsSymbol<'gc>,
+    pub split: JsSymbol<'gc>,
 }
 
 impl<'gc> WellKnown<'gc> {
     /// 名字 ⇒ 字段，r8builtins 挂到 `Symbol` 上用。
-    pub fn all(&self) -> [(&'static str, JsSymbol<'gc>); 5] {
-        [("iterator", self.iterator), ("asyncIterator", self.async_iterator), ("hasInstance", self.has_instance), ("toPrimitive", self.to_primitive), ("toStringTag", self.to_string_tag)]
+    pub fn all(&self) -> [(&'static str, JsSymbol<'gc>); 13] {
+        [
+            ("iterator", self.iterator),
+            ("asyncIterator", self.async_iterator),
+            ("hasInstance", self.has_instance),
+            ("toPrimitive", self.to_primitive),
+            ("toStringTag", self.to_string_tag),
+            ("species", self.species),
+            ("unscopables", self.unscopables),
+            ("isConcatSpreadable", self.is_concat_spreadable),
+            ("match", self.match_),
+            ("matchAll", self.match_all),
+            ("replace", self.replace),
+            ("search", self.search),
+            ("split", self.split),
+        ]
     }
 }
 
@@ -107,8 +129,8 @@ impl<'gc> Realm<'gc> {
             async_generator_proto: derived(async_iterator_proto),
             promise_proto: derived(object_proto),
             regexp_proto: derived(object_proto),
-            regexp_ctor: ObjectData { kind: ObjectKind::Native(Native(Self::no_regexp)), ..ObjectData::default() }.alloc(mc),
-            eval: ObjectData { kind: ObjectKind::Native(Native(Self::no_eval)), proto: Some(function_proto), ..ObjectData::default() }.alloc(mc),
+            regexp_ctor: ObjectData { kind: ObjectKind::Native(Native::function(Self::no_regexp)), ..ObjectData::default() }.alloc(mc),
+            eval: ObjectData { kind: ObjectKind::Native(Native::function(Self::no_eval)), proto: Some(function_proto), ..ObjectData::default() }.alloc(mc),
             bigint_proto: derived(object_proto),
             map_proto: derived(object_proto),
             set_proto: derived(object_proto),
@@ -116,7 +138,21 @@ impl<'gc> Realm<'gc> {
             weakset_proto: derived(object_proto),
             collection_iterator_proto: derived(iterator_proto),
             script_scope: ObjectData::default().alloc(mc),
-            symbols: WellKnown { iterator: symbol("iterator"), async_iterator: symbol("asyncIterator"), has_instance: symbol("hasInstance"), to_primitive: symbol("toPrimitive"), to_string_tag: symbol("toStringTag") },
+            symbols: WellKnown {
+                iterator: symbol("iterator"),
+                async_iterator: symbol("asyncIterator"),
+                has_instance: symbol("hasInstance"),
+                to_primitive: symbol("toPrimitive"),
+                to_string_tag: symbol("toStringTag"),
+                species: symbol("species"),
+                unscopables: symbol("unscopables"),
+                is_concat_spreadable: symbol("isConcatSpreadable"),
+                match_: symbol("match"),
+                match_all: symbol("matchAll"),
+                replace: symbol("replace"),
+                search: symbol("search"),
+                split: symbol("split"),
+            },
             jobs: Gc::new(mc, RefLock::new(VecDeque::new())),
             templates: Gc::new(mc, RefLock::new(alloc::collections::BTreeMap::new())),
             global: derived(object_proto),
@@ -145,7 +181,7 @@ impl<'gc> Realm<'gc> {
 
     /// 一个宿主函数对象（原型是 `Function.prototype`）。
     pub fn native(&self, mc: &Mutation<'gc>, f: NativeFn) -> JsObject<'gc> {
-        ObjectData { kind: ObjectKind::Native(Native(f)), proto: Some(self.function_proto), ..ObjectData::default() }.alloc(mc)
+        ObjectData { kind: ObjectKind::Native(Native::function(f)), proto: Some(self.function_proto), ..ObjectData::default() }.alloc(mc)
     }
 
     /// 给函数对象定义 `name`（与可选的 `length`）：不可枚举、不可写、可配置，`length` 在前。
@@ -159,21 +195,21 @@ impl<'gc> Realm<'gc> {
     }
 
     /// 带 `name` 的宿主函数对象。
-    pub fn named_native(&self, mc: &Mutation<'gc>, f: NativeFn, name: &str) -> JsObject<'gc> {
+    pub fn named_native(&self, mc: &Mutation<'gc>, f: NativeFn, name: &str, length: u32) -> JsObject<'gc> {
         let func = self.native(mc, f);
-        self.name_function(mc, func, name, None);
+        self.name_function(mc, func, name, Some(length));
         func
     }
 
     /// 在 `target` 上挂一个以 Symbol 为键的宿主方法（名字是 `[描述]`）。
-    pub fn symbol_method(&self, mc: &Mutation<'gc>, target: JsObject<'gc>, key: JsSymbol<'gc>, f: NativeFn) {
-        let func = self.named_native(mc, f, &alloc::format!("[{}]", key.description.as_deref().unwrap_or("")));
+    pub fn symbol_method(&self, mc: &Mutation<'gc>, target: JsObject<'gc>, key: JsSymbol<'gc>, f: NativeFn, length: u32) {
+        let func = self.named_native(mc, f, &alloc::format!("[{}]", key.description.as_deref().unwrap_or("")), length);
         target.borrow_mut(mc).define_symbol(key, Property::hidden(Value::Object(func)));
     }
 
     /// 在 `target` 上挂一个宿主方法。
-    pub fn method(&self, mc: &Mutation<'gc>, target: JsObject<'gc>, name: &str, f: NativeFn) {
-        let func = self.named_native(mc, f, name);
+    pub fn method(&self, mc: &Mutation<'gc>, target: JsObject<'gc>, name: &str, f: NativeFn, length: u32) {
+        let func = self.named_native(mc, f, name, length);
         target.borrow_mut(mc).define(mc, name, Property::hidden(Value::Object(func)));
     }
 }

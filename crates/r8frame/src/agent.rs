@@ -1,6 +1,6 @@
 use gc_arena::{Collect, DynamicRootSet, Mutation};
 
-use crate::{Context, Error, Platform, Profiler, Scope, Value};
+use crate::{Context, Error, JsObject, Platform, Profiler, Scope, Value};
 
 /// 动态代码的种类。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -58,6 +58,8 @@ pub trait Invoke<'gc> {
 
     /// 编译并在当前执行环境跑一段代码，给出完成值；语法错抛 SyntaxError，没有编译器的引擎也抛 SyntaxError。
     fn eval_code(&self, agent: &mut Agent<'gc, '_>, src: &str, kind: CodeKind) -> Result<Value<'gc>, Error>;
+    /// 这个闭包能不能 `new`（普通函数与类构造器能；箭头函数、方法、生成器、async 函数不能）。
+    fn constructs(&self, closure: &crate::Closure<'gc>) -> bool;
 
     /// 恢复一个协程（`ObjectKind::Coroutine`）跑一步：`Next` 把 `value` 当 `yield` / `await` 的结果，
     /// `Throw` 在挂起处抛出，`Return` 在挂起处返回（经过 finally）。
@@ -71,13 +73,15 @@ pub struct Agent<'gc, 'x> {
     pub platform: &'x dyn Platform,
     pub profiler: &'x mut Profiler,
     pub realm: Context<'gc>,
+    /// 正在跑的宿主函数是构造调用时的 `new.target`，普通调用是 `undefined`（执行器调宿主函数前设好）
+    pub new_target: Value<'gc>,
     invoke: &'x dyn Invoke<'gc>,
 }
 
 impl<'gc> Scope<'gc, '_> {
     /// 在执行环境 `realm` 里、以 `invoke` 回调 JS，借出一个 agent。
     pub fn agent<'x>(&'x mut self, realm: Context<'gc>, invoke: &'x dyn Invoke<'gc>) -> Agent<'gc, 'x> {
-        Agent { mc: self.mc, roots: self.roots, platform: self.platform, profiler: &mut *self.profiler, realm, invoke }
+        Agent { mc: self.mc, roots: self.roots, platform: self.platform, profiler: &mut *self.profiler, realm, new_target: Value::Undefined, invoke }
     }
 }
 
@@ -86,6 +90,42 @@ impl<'gc> Agent<'gc, '_> {
     pub fn call(&mut self, callee: Value<'gc>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let invoke = self.invoke;
         invoke.call(self, callee, this, args)
+    }
+
+    /// IsConstructor。
+    pub fn is_constructor(&self, v: Value<'gc>) -> bool {
+        let Value::Object(o) = v else { return false };
+        match &o.borrow().kind {
+            crate::ObjectKind::Function(c) => self.invoke.constructs(c),
+            crate::ObjectKind::Native(n) => n.constructor,
+            crate::ObjectKind::Bound(b) => self.is_constructor(b.target),
+            _ => false,
+        }
+    }
+
+    /// GetPrototypeFromConstructor：`new_target.prototype` 是对象就用它，否则用 `fallback`。
+    pub fn proto_from_ctor(&mut self, new_target: Value<'gc>, fallback: JsObject<'gc>) -> Result<JsObject<'gc>, Error> {
+        if new_target == Value::Undefined {
+            return Ok(fallback);
+        }
+        match self.get_named(new_target, "prototype")? {
+            Value::Object(p) => Ok(p),
+            _ => Ok(fallback),
+        }
+    }
+
+    /// OrdinaryCreateFromConstructor：按当前宿主构造调用的 `new.target` 定原型（普通调用用 `fallback`）。
+    pub fn create_from_ctor(&mut self, fallback: JsObject<'gc>, kind: crate::ObjectKind<'gc>) -> Result<JsObject<'gc>, Error> {
+        let proto = self.proto_from_ctor(self.new_target, fallback)?;
+        Ok(crate::ObjectData { kind, proto: Some(proto), ..crate::ObjectData::default() }.alloc(self.mc))
+    }
+
+    /// Boolean / Number / String 构造器的结尾：普通调用给原始值，构造调用包成包装对象。
+    pub fn wrap_primitive(&mut self, v: Value<'gc>, fallback: JsObject<'gc>) -> Result<Value<'gc>, Error> {
+        if self.new_target == Value::Undefined {
+            return Ok(v);
+        }
+        Ok(self.create_from_ctor(fallback, crate::ObjectKind::Primitive(v))?.into())
     }
 
     /// 编译并跑一段动态代码。

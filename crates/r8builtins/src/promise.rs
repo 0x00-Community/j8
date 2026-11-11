@@ -19,10 +19,16 @@ impl Promises {
     /// `new Promise(executor)`：同步调 `executor(resolve, reject)`，它抛错就拒绝。
     fn construct<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let executor = args.at(0);
+        if a.new_target == Value::Undefined {
+            return Err(a.throw(ErrorKind::Type, "Promise constructor cannot be invoked without 'new'"));
+        }
         if !a.is_callable(executor) {
-            return Err(a.throw(ErrorKind::Type, "Promise resolver is not a function"));
+            let what = a.describe(executor);
+            return Err(a.throw(ErrorKind::Type, &alloc::format!("Promise resolver {what} is not a function")));
         }
         let p = a.new_promise();
+        let proto = a.proto_from_ctor(a.new_target, a.realm.promise_proto)?;
+        p.borrow_mut(a.mc).proto = Some(proto);
         let (resolve, reject) = a.promise_resolvers(p);
         match a.call(executor, Value::Undefined, &[resolve.into(), reject.into()]) {
             Ok(_) => {}
@@ -110,11 +116,11 @@ impl Promises {
     fn item<'gc>(a: &mut Agent<'gc, '_>, ctor: Value<'gc>, resolve: Value<'gc>, v: Value<'gc>, race: Option<JsObject<'gc>>, reject: JsObject<'gc>, all: Reaction<'gc>) -> Result<(), Error> {
         let next = a.call(resolve, ctor, &[v])?;
         if let Reaction::All { values, index, remaining, .. } = all {
-            values.borrow_mut(a.mc).write_index(a.mc, index, Value::Undefined);
+            values.borrow_mut(a.mc).store(a.mc, r8frame::Key::Str(&alloc::format!("{index}")), r8frame::Property::data(Value::Undefined));
             remaining.set(a.mc, remaining.get() + 1);
         }
         let then = a.get_named(next, "then")?;
-        let intrinsic = matches!(then, Value::Object(f) if matches!(f.borrow().kind, ObjectKind::Native(n) if core::ptr::fn_addr_eq(n.0, Self::then as r8frame::NativeFn)));
+        let intrinsic = matches!(then, Value::Object(f) if matches!(f.borrow().kind, ObjectKind::Native(n) if core::ptr::fn_addr_eq(n.f, Self::then as r8frame::NativeFn)));
         match (next, intrinsic, race) {
             // 原生 Promise 配原生 `then`：直接挂内部反应
             (Value::Object(p), true, Some(_)) if Self::this(a, next).is_ok() => {
@@ -164,13 +170,13 @@ impl Promises {
 impl Installer<'_, '_> {
     pub(crate) fn promise(&mut self) {
         let proto = self.realm.promise_proto;
-        let ctor = self.constructor("Promise", Promises::construct, proto);
-        self.method(ctor, "resolve", Promises::resolve);
-        self.method(ctor, "reject", Promises::reject);
-        self.method(ctor, "all", Promises::all);
-        self.method(ctor, "race", Promises::race);
-        self.method(proto, "then", Promises::then);
-        self.method(proto, "catch", Promises::catch);
-        self.method(proto, "finally", Promises::finally);
+        let ctor = self.constructor("Promise", Promises::construct, proto, 1);
+        self.method(ctor, "resolve", Promises::resolve, 1);
+        self.method(ctor, "reject", Promises::reject, 1);
+        self.method(ctor, "all", Promises::all, 1);
+        self.method(ctor, "race", Promises::race, 1);
+        self.method(proto, "then", Promises::then, 2);
+        self.method(proto, "catch", Promises::catch, 1);
+        self.method(proto, "finally", Promises::finally, 1);
     }
 }

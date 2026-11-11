@@ -13,14 +13,17 @@ enum Shape {
 }
 
 impl Collections {
-    fn make<'gc>(a: &Agent<'gc, '_>, shape: Shape, weak: bool) -> JsObject<'gc> {
-        let (kind, proto) = match (shape, weak) {
-            (Shape::Map, false) => (ObjectKind::Map(Collection::new(false)), a.realm.map_proto),
-            (Shape::Map, true) => (ObjectKind::Map(Collection::new(true)), a.realm.weakmap_proto),
-            (Shape::Set, false) => (ObjectKind::Set(Collection::new(false)), a.realm.set_proto),
-            (Shape::Set, true) => (ObjectKind::Set(Collection::new(true)), a.realm.weakset_proto),
+    fn make<'gc>(a: &mut Agent<'gc, '_>, shape: Shape, weak: bool) -> Result<JsObject<'gc>, Error> {
+        let (kind, proto, name) = match (shape, weak) {
+            (Shape::Map, false) => (ObjectKind::Map(Collection::new(false)), a.realm.map_proto, "Map"),
+            (Shape::Map, true) => (ObjectKind::Map(Collection::new(true)), a.realm.weakmap_proto, "WeakMap"),
+            (Shape::Set, false) => (ObjectKind::Set(Collection::new(false)), a.realm.set_proto, "Set"),
+            (Shape::Set, true) => (ObjectKind::Set(Collection::new(true)), a.realm.weakset_proto, "WeakSet"),
         };
-        ObjectData { kind, proto: Some(proto), ..ObjectData::default() }.alloc(a.mc)
+        if a.new_target == Value::Undefined {
+            return Err(a.throw(ErrorKind::Type, &alloc::format!("Constructor {name} requires 'new'")));
+        }
+        a.create_from_ctor(proto, kind)
     }
 
     /// `this` 是不是这种集合（弱 / 非弱也要对得上）。
@@ -58,7 +61,7 @@ impl Collections {
 
     /// 构造：可选的可迭代对象逐项放进去（Map 的每项要是 `[键, 值]` 对象）。
     fn construct<'gc>(a: &mut Agent<'gc, '_>, args: &[Value<'gc>], shape: Shape, weak: bool) -> Result<Value<'gc>, Error> {
-        let o = Self::make(a, shape, weak);
+        let o = Self::make(a, shape, weak)?;
         let source = args.at(0);
         if source.is_nullish() {
             return Ok(o.into());
@@ -264,55 +267,55 @@ impl Installer<'_, '_> {
         let iter = r.symbols.iterator;
         // Map：`entries` 与 `[Symbol.iterator]` 是同一个函数
         let map = r.map_proto;
-        self.constructor("Map", Collections::map, map);
-        let methods: [(&str, r8frame::NativeFn); 7] = [
-            ("get", Collections::map_get),
-            ("set", Collections::map_set),
-            ("has", Collections::map_has),
-            ("delete", Collections::map_delete),
-            ("clear", Collections::clear),
-            ("forEach", Collections::for_each),
-            ("keys", Collections::keys),
+        self.constructor("Map", Collections::map, map, 0);
+        let methods: [(&str, r8frame::NativeFn, u32); 7] = [
+            ("get", Collections::map_get, 1),
+            ("set", Collections::map_set, 2),
+            ("has", Collections::map_has, 1),
+            ("delete", Collections::map_delete, 1),
+            ("clear", Collections::clear, 0),
+            ("forEach", Collections::for_each, 1),
+            ("keys", Collections::keys, 0),
         ];
-        for (name, f) in methods {
-            self.method(map, name, f);
+        for (name, f, n) in methods {
+            self.method(map, name, f, n);
         }
-        self.method(map, "values", Collections::values);
-        let entries = r.named_native(self.mc, Collections::entries, "entries");
+        self.method(map, "values", Collections::values, 0);
+        let entries = r.named_native(self.mc, Collections::entries, "entries", 0);
         self.set(map, "entries", entries.into());
         map.borrow_mut(self.mc).define_symbol(iter, r8frame::Property::hidden(entries.into()));
         self.getter(map, "size", Collections::size);
         // Set：`values` / `keys` / `[Symbol.iterator]` 是同一个函数
         let set = r.set_proto;
-        self.constructor("Set", Collections::set_ctor, set);
-        let methods: [(&str, r8frame::NativeFn); 6] = [
-            ("add", Collections::set_add),
-            ("has", Collections::set_has),
-            ("delete", Collections::set_delete),
-            ("clear", Collections::clear),
-            ("forEach", Collections::for_each),
-            ("entries", Collections::entries),
+        self.constructor("Set", Collections::set_ctor, set, 0);
+        let methods: [(&str, r8frame::NativeFn, u32); 6] = [
+            ("add", Collections::set_add, 1),
+            ("has", Collections::set_has, 1),
+            ("delete", Collections::set_delete, 1),
+            ("clear", Collections::clear, 0),
+            ("forEach", Collections::for_each, 1),
+            ("entries", Collections::entries, 0),
         ];
-        for (name, f) in methods {
-            self.method(set, name, f);
+        for (name, f, n) in methods {
+            self.method(set, name, f, n);
         }
-        let values = r.named_native(self.mc, Collections::values, "values");
+        let values = r.named_native(self.mc, Collections::values, "values", 0);
         self.set(set, "values", values.into());
         self.set(set, "keys", values.into());
         set.borrow_mut(self.mc).define_symbol(iter, r8frame::Property::hidden(values.into()));
         self.getter(set, "size", Collections::size);
-        self.method(r.collection_iterator_proto, "next", Collections::next);
+        self.method(r.collection_iterator_proto, "next", Collections::next, 0);
         // 弱集合
         let wm = r.weakmap_proto;
-        self.constructor("WeakMap", Collections::weak_map, wm);
-        self.method(wm, "get", Collections::weak_get);
-        self.method(wm, "set", Collections::weak_set_entry);
-        self.method(wm, "has", Collections::weak_map_has);
-        self.method(wm, "delete", Collections::weak_map_delete);
+        self.constructor("WeakMap", Collections::weak_map, wm, 0);
+        self.method(wm, "get", Collections::weak_get, 1);
+        self.method(wm, "set", Collections::weak_set_entry, 2);
+        self.method(wm, "has", Collections::weak_map_has, 1);
+        self.method(wm, "delete", Collections::weak_map_delete, 1);
         let ws = r.weakset_proto;
-        self.constructor("WeakSet", Collections::weak_set, ws);
-        self.method(ws, "add", Collections::weak_add);
-        self.method(ws, "has", Collections::weak_set_has);
-        self.method(ws, "delete", Collections::weak_set_delete);
+        self.constructor("WeakSet", Collections::weak_set, ws, 0);
+        self.method(ws, "add", Collections::weak_add, 1);
+        self.method(ws, "has", Collections::weak_set_has, 1);
+        self.method(ws, "delete", Collections::weak_set_delete, 1);
     }
 }

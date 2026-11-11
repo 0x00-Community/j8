@@ -37,6 +37,14 @@ impl PartialEq for Value<'_> {
 }
 
 impl Value<'_> {
+    /// SameValue：同 `===`，但 `NaN` 等于自己、`+0` 不等于 `-0`。
+    pub fn same_value(self, o: Self) -> bool {
+        match (self, o) {
+            (Value::Number(a), Value::Number(b)) => (a.is_nan() && b.is_nan()) || (a == b && a.is_sign_negative() == b.is_sign_negative()),
+            _ => self == o,
+        }
+    }
+
     pub fn is_nullish(self) -> bool {
         matches!(self, Value::Undefined | Value::Null)
     }

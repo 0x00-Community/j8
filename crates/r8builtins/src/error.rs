@@ -9,15 +9,21 @@ impl Errors {
     /// `XxxError(message)`：第 `K` 种（按 [`ErrorKind::ALL`]）。
     fn construct<'gc, const K: usize>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let kind = ErrorKind::ALL[K];
-        let e = match args.at(0) {
-            Value::Undefined => a.error(kind, ""),
-            m => {
-                let m = a.to_string(m)?;
-                a.error(kind, &m)
-            }
-        };
-        if args.at(0) == Value::Undefined {
-            e.borrow_mut(a.mc).remove("message");
+        let proto = a.proto_from_ctor(a.new_target, a.realm.error_proto(kind))?;
+        let e = a.error(kind, "");
+        e.borrow_mut(a.mc).proto = Some(proto);
+        e.borrow_mut(a.mc).remove("message");
+        if args.at(0) != Value::Undefined {
+            let m = a.to_string(args.at(0))?;
+            e.borrow_mut(a.mc).define(a.mc, "message", r8frame::Property::hidden(m.into()));
+        }
+        // InstallErrorCause
+        let options = args.at(1);
+        if let Value::Object(opts) = options
+            && a.has_key(opts, r8frame::Key::Str("cause"))?
+        {
+            let cause = a.get_named(options, "cause")?;
+            e.borrow_mut(a.mc).define(a.mc, "cause", r8frame::Property::hidden(cause));
         }
         Ok(e.into())
     }
@@ -48,10 +54,10 @@ impl Installer<'_, '_> {
         let ctors: [r8frame::NativeFn; ErrorKind::ALL.len()] = [Errors::construct::<0>, Errors::construct::<1>, Errors::construct::<2>, Errors::construct::<3>, Errors::construct::<4>];
         for (kind, f) in ErrorKind::ALL.into_iter().zip(ctors) {
             let proto = self.realm.error_proto(kind);
-            self.constructor(kind.name(), f, proto);
+            self.constructor(kind.name(), f, proto, 1);
             self.set(proto, "name", self.text(kind.name()));
             self.set(proto, "message", self.text(""));
         }
-        self.method(self.realm.error_proto(ErrorKind::Error), "toString", Errors::to_string);
+        self.method(self.realm.error_proto(ErrorKind::Error), "toString", Errors::to_string, 0);
     }
 }
