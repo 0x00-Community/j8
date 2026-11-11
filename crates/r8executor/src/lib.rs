@@ -303,9 +303,28 @@ impl Executor {
 
     /// 建一帧：在寄存器文件末尾开出本函数的寄存器，按调用约定放 `this`、自身、实参。
     fn enter<'gc>(&self, a: &mut Agent<'gc, '_>, regs: &mut Vec<Value<'gc>>, closure: Closure<'gc>, callee: Value<'gc>, this: Value<'gc>, args: &[Value<'gc>]) -> Frame<'gc> {
-        a.profiler.enter(closure.func);
         let f_loaded = self.function(closure.func);
+        let (base, first) = Self::open_frame(a, regs, &f_loaded.func, closure, callee, this);
         let f = &f_loaded.func;
+        let params = usize::from(f.params).min(args.len());
+        regs[first..first + params].copy_from_slice(&args[..params]);
+        let args = if f.keeps_args { args.to_vec() } else { Vec::new() };
+        Frame { func: closure.func, pc: 0, base, env: closure.env, handlers: Vec::new(), new_target: Value::Undefined, new_this: None, args }
+    }
+
+    /// 同 [`enter`](Self::enter)，实参就在寄存器文件里（`Call` 的快路：不先拷成 `Vec`）。
+    #[expect(clippy::too_many_arguments, reason = "调用约定的各部分")]
+    fn enter_regs<'gc>(a: &mut Agent<'gc, '_>, regs: &mut Vec<Value<'gc>>, f: &Function, closure: Closure<'gc>, callee: Value<'gc>, this: Value<'gc>, args: usize, argc: usize) -> Frame<'gc> {
+        let (base, first) = Self::open_frame(a, regs, f, closure, callee, this);
+        let params = usize::from(f.params).min(argc);
+        regs.copy_within(args..args + params, first);
+        let args = if f.keeps_args { regs[args..args + argc].to_vec() } else { Vec::new() };
+        Frame { func: closure.func, pc: 0, base, env: closure.env, handlers: Vec::new(), new_target: Value::Undefined, new_this: None, args }
+    }
+
+    /// 在寄存器文件末尾开出 `f` 的寄存器，放好 `this` 与自身；给出帧基址与第一个形参的位置。
+    fn open_frame<'gc>(a: &mut Agent<'gc, '_>, regs: &mut Vec<Value<'gc>>, f: &Function, closure: Closure<'gc>, callee: Value<'gc>, this: Value<'gc>) -> (usize, usize) {
+        a.profiler.enter(closure.func);
         let base = regs.len();
         regs.resize(base + usize::from(f.regs), Value::Undefined);
         // 非严格函数：`this` 是 null / undefined 换成全局对象，原始值包成对象（箭头函数不用自己的 `this`）
@@ -317,11 +336,7 @@ impl Executor {
         };
         regs[base + usize::from(Reg::THIS.0)] = this;
         regs[base + usize::from(Reg::CALLEE.0)] = callee;
-        let params = usize::from(f.params).min(args.len());
-        let first = base + usize::from(Reg::PARAMS);
-        regs[first..first + params].copy_from_slice(&args[..params]);
-        let args = if f.keeps_args { args.to_vec() } else { Vec::new() };
-        Frame { func: closure.func, pc: 0, base, env: closure.env, handlers: Vec::new(), new_target: Value::Undefined, new_this: None, args }
+        (base, base + usize::from(Reg::PARAMS))
     }
 
     /// 本帧正在跑的闭包（`r1` 里的被调函数）。
@@ -1023,6 +1038,24 @@ impl Executor {
                         return Err(a.throw(ErrorKind::Range, "Maximum call stack size exceeded"));
                     }
                     let first = r(args);
+                    // 快路：被调的是普通 JS 函数（不是类构造器 / 生成器 / async），直接从寄存器开帧
+                    let target = regs[r(callee)];
+                    let closure = match target {
+                        Value::Object(o) if matches!(insn, Insn::Call { .. }) => match o.borrow().kind {
+                            ObjectKind::Function(c) => Some(c),
+                            _ => None,
+                        },
+                        _ => None,
+                    };
+                    if let Some(c) = closure {
+                        let loaded = self.function(c.func);
+                        let g = &loaded.func;
+                        if !g.generator && !g.asynchronous && !matches!(g.kind, FunctionKind::Constructor { .. }) {
+                            let next = Self::enter_regs(a, regs, g, c, target, regs[r(this)], first, usize::from(argc));
+                            frames.push(core::mem::replace(f, next));
+                            continue;
+                        }
+                    }
                     let list = regs[first..first + usize::from(argc)].to_vec();
                     match self.resolve(a, regs[r(callee)], regs[r(this)], list, level)? {
                         Callee::Closure { closure, callee, this, args } => {

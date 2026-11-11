@@ -822,6 +822,19 @@ impl<'a> Compiler<'a, '_> {
         Resolved { place: Place::Global(name), constant: false, tdz: None }
     }
 
+    /// 名字在本函数的寄存器里、在 `pos` 处不用查死区、也不在 `with` 里：给出那个寄存器。
+    /// 只有本函数自己的代码能改它（被内层函数捕获的绑定在环境里，不在寄存器里）。
+    pub(crate) fn register_of(&self, name: &'a str, pos: u32) -> Option<Reg> {
+        if !self.with_chain(name).is_empty() {
+            return None;
+        }
+        let r = self.resolve(name);
+        match r.place {
+            Place::Reg(reg) if !r.needs_check(pos) => Some(reg),
+            _ => None,
+        }
+    }
+
     pub(crate) fn lookup(&self, name: &'a str) -> (Place<'a>, bool) {
         let r = self.resolve(name);
         (r.place, r.constant)
@@ -2112,12 +2125,13 @@ impl<'a> Compiler<'a, '_> {
     #[expect(clippy::too_many_lines, reason = "一种语句一个分支，拆开反而难读")]
     fn statement(&mut self, s: &'a Statement<'a>) -> Result<(), Error> {
         match s {
-            Statement::ExpressionStatement(e) => {
-                self.expr(&e.expression)?;
-                if let Some(c) = self.frame().completion {
+            Statement::ExpressionStatement(e) => match self.frame().completion {
+                Some(c) => {
+                    self.expr(&e.expression)?;
                     self.emit(Insn::Star(c));
                 }
-            }
+                None => self.effect(&e.expression)?,
+            },
             Statement::VariableDeclaration(d) => self.declaration(d)?,
             Statement::FunctionDeclaration(f) => self.annexb_copy(f),
             Statement::EmptyStatement(_) => {}
@@ -2208,7 +2222,7 @@ impl<'a> Compiler<'a, '_> {
                         c.emit(Insn::CloneEnv);
                     }
                     if let Some(u) = &f.update {
-                        c.expr(u)?;
+                        c.effect(u)?;
                     }
                     c.emit(Insn::Jump(top));
                     if let Some(e) = exit {

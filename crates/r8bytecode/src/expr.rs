@@ -11,6 +11,7 @@ use crate::scope::Hidden;
 use crate::{Const, Constant, FunctionKind, Insn, PropertyKind, Reg};
 
 /// 二元运算符 ⇒ 字节码运算。
+#[derive(Clone, Copy)]
 enum Operator {
     Binary(BinaryOp),
     Compare(CompareOp),
@@ -429,18 +430,47 @@ impl<'a> Compiler<'a, '_> {
 
     fn binary(&mut self, b: &'a BinaryExpression<'a>) -> Result<(), Error> {
         let op = Self::operator(b.operator);
+        // 左边是寄存器里的变量、右边改不了它：直接拿它的寄存器当左操作数，不先拷进临时寄存器
+        if let Expression::Identifier(id) = &b.left
+            && Self::cannot_assign(&b.right)
+            && let Some(l) = self.register_of(id.name.as_str(), id.span.start)
+        {
+            self.expr(&b.right)?;
+            self.emit(Self::binary_insn(op, l));
+            return Ok(());
+        }
         self.expr(&b.left)?;
         let l = self.temp();
         self.emit(Insn::Star(l));
         self.expr(&b.right)?;
-        self.emit(match op {
+        self.emit(Self::binary_insn(op, l));
+        self.release(l);
+        Ok(())
+    }
+
+    /// acc = `l` op acc
+    fn binary_insn(op: Operator, l: Reg) -> Insn {
+        match op {
             Operator::Binary(op) => Insn::Binary(op, l),
             Operator::Compare(op) => Insn::Compare(op, l),
             Operator::InstanceOf => Insn::InstanceOf(l),
             Operator::In => Insn::In(l),
-        });
-        self.release(l);
-        Ok(())
+        }
+    }
+
+    /// 求值 `e` 不会给本函数的寄存器变量赋值：只由字面量、名字、`this`、静态成员读和一元 / 二元 / 逻辑 / 条件运算组成
+    /// （运算里调到的用户代码在别的函数里，碰不到本函数寄存器里的变量）。
+    fn cannot_assign(e: &Expression<'_>) -> bool {
+        match e {
+            Expression::NumericLiteral(_) | Expression::StringLiteral(_) | Expression::BooleanLiteral(_) | Expression::NullLiteral(_) | Expression::BigIntLiteral(_) | Expression::Identifier(_) | Expression::ThisExpression(_) => true,
+            Expression::ParenthesizedExpression(p) => Self::cannot_assign(&p.expression),
+            Expression::UnaryExpression(u) => u.operator != UnaryOperator::Delete && Self::cannot_assign(&u.argument),
+            Expression::BinaryExpression(b) => Self::cannot_assign(&b.left) && Self::cannot_assign(&b.right),
+            Expression::LogicalExpression(l) => Self::cannot_assign(&l.left) && Self::cannot_assign(&l.right),
+            Expression::ConditionalExpression(c) => Self::cannot_assign(&c.test) && Self::cannot_assign(&c.consequent) && Self::cannot_assign(&c.alternate),
+            Expression::StaticMemberExpression(m) => Self::cannot_assign(&m.object),
+            _ => false,
+        }
     }
 
     /// 求出赋值目标的对象（与键）放进临时寄存器。
@@ -551,11 +581,25 @@ impl<'a> Compiler<'a, '_> {
         Ok(())
     }
 
+    /// 求值 `e`，结果不用（函数里的表达式语句、`for` 的更新部分）：后置 `++` / `--` 不留旧值。
+    pub(crate) fn effect(&mut self, e: &'a Expression<'a>) -> Result<(), Error> {
+        match e {
+            Expression::UpdateExpression(u) => self.update_as(u, true),
+            Expression::ParenthesizedExpression(p) => self.effect(&p.expression),
+            _ => self.expr(e),
+        }
+    }
+
     fn update(&mut self, u: &'a UpdateExpression<'a>) -> Result<(), Error> {
+        self.update_as(u, false)
+    }
+
+    /// `++` / `--`；`discard` 时结果没人用，后置的也不留旧值。
+    fn update_as(&mut self, u: &'a UpdateExpression<'a>, discard: bool) -> Result<(), Error> {
         let t = self.target(&u.argument)?;
         self.target_load(&t);
         self.emit(Insn::ToNumeric);
-        let old = (!u.prefix).then(|| self.temp());
+        let old = (!u.prefix && !discard).then(|| self.temp());
         if let Some(r) = old {
             self.emit(Insn::Star(r));
         }
