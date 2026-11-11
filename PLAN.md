@@ -29,7 +29,7 @@
 
 ## 阶段 4：二进制数据
 
-- [ ] ArrayBuffer / SharedArrayBuffer / DataView / TypedArray（11 种）/ Atomics
+- [x] ArrayBuffer（可调大小、transfer、分离）/ SharedArrayBuffer（可增长）/ DataView / TypedArray（12 种，含 Float16）/ Atomics（单线程语义；多 agent 的用例跑不了）；`$262.detachArrayBuffer`
 
 ## 阶段 5：Date / RegExp / 字符串数字
 

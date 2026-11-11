@@ -401,6 +401,108 @@ pub struct IteratorHelper<'gc> {
     pub inner: Option<crate::IterRecord<'gc>>,
 }
 
+/// TypedArray 的元素类型。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Collect)]
+#[collect(require_static)]
+pub enum ElementKind {
+    Int8,
+    Uint8,
+    Uint8Clamped,
+    Int16,
+    Uint16,
+    Int32,
+    Uint32,
+    Float16,
+    Float32,
+    Float64,
+    BigInt64,
+    BigUint64,
+}
+
+impl ElementKind {
+    pub const ALL: [ElementKind; 12] = [
+        ElementKind::Int8,
+        ElementKind::Uint8,
+        ElementKind::Uint8Clamped,
+        ElementKind::Int16,
+        ElementKind::Uint16,
+        ElementKind::Int32,
+        ElementKind::Uint32,
+        ElementKind::Float16,
+        ElementKind::Float32,
+        ElementKind::Float64,
+        ElementKind::BigInt64,
+        ElementKind::BigUint64,
+    ];
+
+    /// 一个元素几个字节。
+    pub fn size(self) -> usize {
+        match self {
+            ElementKind::Int8 | ElementKind::Uint8 | ElementKind::Uint8Clamped => 1,
+            ElementKind::Int16 | ElementKind::Uint16 | ElementKind::Float16 => 2,
+            ElementKind::Int32 | ElementKind::Uint32 | ElementKind::Float32 => 4,
+            ElementKind::Float64 | ElementKind::BigInt64 | ElementKind::BigUint64 => 8,
+        }
+    }
+
+    /// 构造器名。
+    pub fn name(self) -> &'static str {
+        match self {
+            ElementKind::Int8 => "Int8Array",
+            ElementKind::Uint8 => "Uint8Array",
+            ElementKind::Uint8Clamped => "Uint8ClampedArray",
+            ElementKind::Int16 => "Int16Array",
+            ElementKind::Uint16 => "Uint16Array",
+            ElementKind::Int32 => "Int32Array",
+            ElementKind::Uint32 => "Uint32Array",
+            ElementKind::Float16 => "Float16Array",
+            ElementKind::Float32 => "Float32Array",
+            ElementKind::Float64 => "Float64Array",
+            ElementKind::BigInt64 => "BigInt64Array",
+            ElementKind::BigUint64 => "BigUint64Array",
+        }
+    }
+
+    /// DataView 方法名里的类型（`getInt8` 的 `Int8`）。
+    pub fn view_name(self) -> &'static str {
+        match self {
+            ElementKind::Int8 => "Int8",
+            ElementKind::Uint8 | ElementKind::Uint8Clamped => "Uint8",
+            ElementKind::Int16 => "Int16",
+            ElementKind::Uint16 => "Uint16",
+            ElementKind::Int32 => "Int32",
+            ElementKind::Uint32 => "Uint32",
+            ElementKind::Float16 => "Float16",
+            ElementKind::Float32 => "Float32",
+            ElementKind::Float64 => "Float64",
+            ElementKind::BigInt64 => "BigInt64",
+            ElementKind::BigUint64 => "BigUint64",
+        }
+    }
+
+    pub fn is_bigint(self) -> bool {
+        matches!(self, ElementKind::BigInt64 | ElementKind::BigUint64)
+    }
+}
+
+/// ArrayBuffer / SharedArrayBuffer 的本体：字节（分离后没有）、可调大小的上限、是不是共享的。
+#[derive(Debug, Collect)]
+#[collect(require_static)]
+pub struct BufferData {
+    pub bytes: Option<Vec<u8>>,
+    pub max: Option<usize>,
+    pub shared: bool,
+}
+
+/// TypedArray / DataView 看的那段：所在的缓冲、起点、长度（`None` 是跟着缓冲变长短）。
+#[derive(Clone, Copy, Debug, Collect)]
+#[collect(no_drop)]
+pub struct ViewData<'gc> {
+    pub buffer: JsObject<'gc>,
+    pub offset: usize,
+    pub length: Option<usize>,
+}
+
 /// 对象的种类：普通对象之外带的内部槽。
 #[derive(Debug, Default, Collect)]
 #[collect(no_drop)]
@@ -435,6 +537,11 @@ pub enum ObjectKind<'gc> {
     IteratorHelper(IteratorHelper<'gc>),
     /// `Iterator.from` 包出来的迭代器
     WrappedIterator(crate::IterRecord<'gc>),
+    ArrayBuffer(BufferData),
+    /// TypedArray：`length` 是元素个数
+    TypedArray(ElementKind, ViewData<'gc>),
+    /// DataView：`length` 是字节数
+    DataView(ViewData<'gc>),
 }
 
 impl ObjectKind<'_> {
@@ -472,6 +579,9 @@ impl fmt::Debug for ObjectData<'_> {
             ObjectKind::Array(_) => "Array",
             ObjectKind::Function(_) | ObjectKind::Native(_) | ObjectKind::Bound(_) | ObjectKind::Resolver { .. } | ObjectKind::NativeClosure(_) => "Function",
             ObjectKind::Proxy(_) => "Proxy",
+            ObjectKind::ArrayBuffer(_) => "ArrayBuffer",
+            ObjectKind::TypedArray(..) => "TypedArray",
+            ObjectKind::DataView(_) => "DataView",
             ObjectKind::Iterator(_) | ObjectKind::CollectionIterator { .. } | ObjectKind::IteratorHelper(_) | ObjectKind::WrappedIterator(_) => "Iterator",
             ObjectKind::Coroutine(_) => "Generator",
             ObjectKind::Promise { .. } => "Promise",

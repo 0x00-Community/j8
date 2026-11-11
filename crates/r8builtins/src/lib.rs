@@ -6,6 +6,7 @@ extern crate alloc;
 mod array;
 mod asyncgen;
 mod bigint;
+mod buffer;
 mod collections;
 mod error;
 mod function;
@@ -19,6 +20,7 @@ mod promise;
 mod reflect;
 mod regexp;
 mod string;
+mod typed;
 
 use gc_arena::Mutation;
 use r8frame::{Intrinsics, JsObject, Realm, Value};
@@ -47,6 +49,8 @@ impl Intrinsics for Builtins {
         b.collections();
         b.async_generators();
         b.json();
+        b.buffers();
+        b.typed_arrays();
         b.reflect();
         b.tags();
     }

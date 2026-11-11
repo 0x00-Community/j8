@@ -182,6 +182,9 @@ impl<'gc> Agent<'gc, '_> {
             let (t, h) = parts?;
             return self.proxy_get_own_property(t, h, key);
         }
+        if let Some(i) = Self::typed_numeric(o, key) {
+            return Ok(self.typed_get(o, i).map(Property::data));
+        }
         let d = o.borrow();
         Ok(match (&d.kind, key) {
             (ObjectKind::Array(_), Key::Str("length")) => {
@@ -202,6 +205,15 @@ impl<'gc> Agent<'gc, '_> {
         if let Some(parts) = self.proxy_parts(o) {
             let (t, h) = parts?;
             return self.proxy_define_own_property(t, h, key, desc);
+        }
+        if let Some(i) = Self::typed_numeric(o, key) {
+            if !Self::typed_has(o, i) || desc.configurable == Some(false) || desc.enumerable == Some(false) || desc.is_accessor() || desc.writable == Some(false) {
+                return Ok(false);
+            }
+            if let Some(v) = desc.value {
+                self.typed_set(o, i, v)?;
+            }
+            return Ok(true);
         }
         let (array, string) = match &o.borrow().kind {
             ObjectKind::Array(_) => (true, None),
@@ -323,6 +335,9 @@ impl<'gc> Agent<'gc, '_> {
             let (t, h) = parts?;
             return self.proxy_delete(t, h, key);
         }
+        if let Some(i) = Self::typed_numeric(o, key) {
+            return Ok(!Self::typed_has(o, i));
+        }
         match self.get_own_property(o, key)? {
             None => Ok(true),
             Some(p) if p.configurable => {
@@ -350,6 +365,10 @@ impl<'gc> Agent<'gc, '_> {
             ObjectKind::Primitive(Value::String(s)) => {
                 indices.extend((0..u32::try_from(s.encode_utf16().count()).unwrap_or(u32::MAX)).map(|i| (i, None)));
                 strings.push(PropertyKey::String(self.string("length")));
+            }
+            ObjectKind::TypedArray(k, v) => {
+                let len = Self::view_length(v, k.size()).unwrap_or(0);
+                indices.extend((0..u32::try_from(len).unwrap_or(u32::MAX)).map(|i| (i, None)));
             }
             _ => {}
         }

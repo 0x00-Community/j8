@@ -282,10 +282,11 @@ impl Case {
     }
 }
 
-/// 宿主对象 `$262`：evalScript 走间接 eval，createRealm / detachArrayBuffer 还没有。
-const HOST_262: &str = "var $262 = { global: globalThis, gc: function () {}, evalScript: function (s) { return (0, eval)(s); }, \
+/// 宿主对象 `$262`：evalScript 走间接 eval，detachArrayBuffer 借 `transfer`（先存好，用例改了原型也不受影响），
+/// createRealm 还没有。
+const HOST_262: &str = "var $262 = (function (transfer) { return { global: globalThis, gc: function () {}, evalScript: function (s) { return (0, eval)(s); }, \
 createRealm: function () { throw new TypeError('createRealm is not supported'); }, \
-detachArrayBuffer: function () { throw new TypeError('detachArrayBuffer is not supported'); }, agent: {} };\n";
+detachArrayBuffer: function (b) { transfer.call(b); return null; }, agent: {} }; })(ArrayBuffer.prototype.transfer);\n";
 
 /// 父进程：一个用例的子进程结果。
 struct Ran {

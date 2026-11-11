@@ -145,7 +145,7 @@ const TWO_POW_32: f64 = 4_294_967_296.0;
 const MAX_INDEX: f64 = 4_294_967_294.0;
 
 /// 字符串 ⇒ 数（StringToNumber）：前后空白、`Infinity`、`0x` / `0o` / `0b` 前缀、十进制。
-fn parse_number(s: &str) -> f64 {
+pub(crate) fn parse_number(s: &str) -> f64 {
     let t = s.trim_matches(|c: char| c.is_whitespace() || c == '\u{feff}');
     match t {
         "" => 0.0,
@@ -514,6 +514,9 @@ impl<'gc> Agent<'gc, '_> {
                 let (t, h) = parts?;
                 return self.proxy_get(t, h, key, receiver);
             }
+            if let Some(i) = Self::typed_numeric(cur, key) {
+                return Ok(self.typed_get(cur, i).unwrap_or_default());
+            }
             if let Some(p) = self.get_own_property(cur, key)? {
                 return match p.slot {
                     Slot::Data(v) => Ok(v),
@@ -569,6 +572,15 @@ impl<'gc> Agent<'gc, '_> {
             if let Some(parts) = self.proxy_parts(cur) {
                 let (t, h) = parts?;
                 return self.proxy_set(t, h, key, value, receiver);
+            }
+            if let Some(i) = Self::typed_numeric(cur, key) {
+                if matches!(receiver, Value::Object(r) if Gc::ptr_eq(r, cur)) {
+                    self.typed_set(cur, i, value)?;
+                    return Ok(true);
+                }
+                if !Self::typed_has(cur, i) {
+                    return Ok(true);
+                }
             }
             if let Some(p) = self.get_own_property(cur, key)? {
                 break Some(p);
@@ -647,6 +659,9 @@ impl<'gc> Agent<'gc, '_> {
             if let Some(parts) = self.proxy_parts(cur) {
                 let (t, h) = parts?;
                 return self.proxy_has(t, h, key);
+            }
+            if let Some(i) = Self::typed_numeric(cur, key) {
+                return Ok(Self::typed_has(cur, i));
             }
             if self.get_own_property(cur, key)?.is_some() {
                 return Ok(true);
@@ -911,6 +926,11 @@ impl<'gc> Agent<'gc, '_> {
 
     /// `o[i]`（数组稠密部分走快路）。
     pub fn get_index(&mut self, o: Value<'gc>, i: f64) -> Result<Value<'gc>, Error> {
+        if let Value::Object(x) = o
+            && matches!(x.borrow().kind, ObjectKind::TypedArray(..))
+        {
+            return Ok(self.typed_get(x, i).unwrap_or_default());
+        }
         if let Value::Object(x) = o
             && let (ObjectKind::Array(items), Some(n)) = (&x.borrow().kind, index_of_number(i))
             && let Some(&v) = items.get(n as usize)

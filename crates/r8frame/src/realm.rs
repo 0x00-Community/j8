@@ -97,6 +97,15 @@ pub struct Realm<'gc> {
     pub iterator_helper_proto: JsObject<'gc>,
     /// %WrapForValidIteratorPrototype%
     pub wrap_iterator_proto: JsObject<'gc>,
+    pub array_buffer_proto: JsObject<'gc>,
+    pub shared_array_buffer_proto: JsObject<'gc>,
+    pub data_view_proto: JsObject<'gc>,
+    /// %TypedArray% 与 %TypedArray.prototype%
+    pub typed_array_ctor: JsObject<'gc>,
+    pub typed_array_proto: JsObject<'gc>,
+    /// 各具体 TypedArray 的构造器与原型（按 [`ElementKind::ALL`](crate::ElementKind::ALL) 排）
+    pub typed_ctors: [JsObject<'gc>; 12],
+    pub typed_protos: [JsObject<'gc>; 12],
     /// 脚本作用域：各脚本顶层的 `let` / `const` / `class`（跨脚本共享，不是全局对象的属性）
     pub script_scope: JsObject<'gc>,
     pub symbols: WellKnown<'gc>,
@@ -122,7 +131,17 @@ impl<'gc> Realm<'gc> {
         let iterator_proto = derived(object_proto);
         let async_iterator_proto = derived(object_proto);
         let function_proto = derived(object_proto);
+        let placeholder = |proto: JsObject<'gc>| ObjectData { kind: ObjectKind::Native(Native::function(Self::no_regexp)), proto: Some(proto), ..ObjectData::default() }.alloc(mc);
+        let typed_array_ctor = placeholder(function_proto);
+        let typed_array_proto = derived(object_proto);
         Self {
+            array_buffer_proto: derived(object_proto),
+            shared_array_buffer_proto: derived(object_proto),
+            data_view_proto: derived(object_proto),
+            typed_array_ctor,
+            typed_array_proto,
+            typed_ctors: [(); 12].map(|()| placeholder(typed_array_ctor)),
+            typed_protos: [(); 12].map(|()| derived(typed_array_proto)),
             symbol_proto: derived(object_proto),
             iterator_proto,
             array_iterator_proto: derived(iterator_proto),

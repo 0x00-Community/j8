@@ -31,6 +31,45 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
+    /// ToBigInt：数不能直接转（抛 TypeError），字符串按 StringToBigInt（不合法抛 SyntaxError）。
+    pub fn to_bigint(&mut self, v: Value<'gc>) -> Result<BigInt, Error> {
+        match self.to_primitive(v, Hint::Number)? {
+            Value::BigInt(b) => Ok(b.0.clone()),
+            Value::Bool(t) => Ok(BigInt::from(u8::from(t))),
+            Value::String(s) => Self::parse_bigint(&s).ok_or_else(|| self.throw(ErrorKind::Syntax, &alloc::format!("Cannot convert {} to a BigInt", &**s))),
+            other => {
+                let what = self.describe(other);
+                Err(self.throw(ErrorKind::Type, &alloc::format!("Cannot convert {what} to a BigInt")))
+            }
+        }
+    }
+
+    /// BigInt 按 2^bits 取模，`signed` 时落到有符号范围（BigInt.asIntN / asUintN、BigInt64Array 的元素）。
+    pub fn wrap_bigint(b: &BigInt, bits: u64, signed: bool) -> BigInt {
+        if bits == 0 {
+            return BigInt::zero();
+        }
+        let m = BigInt::one() << bits;
+        let mut r = ((b % &m) + &m) % &m;
+        if signed && r >= (BigInt::one() << (bits - 1)) {
+            r -= m;
+        }
+        r
+    }
+
+    /// ToIndex：`undefined` 是 0，不是 `[0, 2^53 − 1]` 里的整数抛 RangeError。
+    pub fn to_index(&mut self, v: Value<'gc>) -> Result<usize, Error> {
+        if v == Value::Undefined {
+            return Ok(0);
+        }
+        let n = self.to_integer_or_infinity(v)?;
+        if !(0.0..=crate::ops::MAX_SAFE_INTEGER).contains(&n) {
+            return Err(self.throw(ErrorKind::Range, "Invalid index"));
+        }
+        #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "已检查在 [0, 2^53 − 1] 里")]
+        Ok(n as usize)
+    }
+
     /// `++` / `--`（`delta` 是 ±1）。
     pub fn increment(&mut self, v: Value<'gc>, delta: i8) -> Result<Value<'gc>, Error> {
         Ok(match self.to_numeric(v)? {
