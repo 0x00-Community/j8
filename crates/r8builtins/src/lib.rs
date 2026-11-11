@@ -4,6 +4,7 @@
 extern crate alloc;
 
 mod array;
+mod asyncgen;
 mod bigint;
 mod collections;
 mod error;
@@ -39,6 +40,7 @@ impl Intrinsics for Builtins {
         b.bigint();
         b.regexp();
         b.collections();
+        b.async_generators();
         b.json();
     }
 }

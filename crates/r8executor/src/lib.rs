@@ -156,17 +156,19 @@ impl Executor {
         let mut regs = Vec::new();
         let f = self.enter(a, &mut regs, closure, callee, this, args);
         let saved = Suspended { func: f.func, pc: 0, regs, env: f.env, handlers: Vec::new(), args: f.args, mode: None };
-        let generator = self.function(closure.func).func.generator;
+        let func = &self.function(closure.func).func;
+        let (generator, asynchronous) = (func.generator, func.asynchronous);
         let proto = if generator {
             match a.get_named(callee, "prototype")? {
                 Value::Object(p) => p,
+                _ if asynchronous => a.realm.async_generator_proto,
                 _ => a.realm.generator_proto,
             }
         } else {
             a.realm.object_proto
         };
         let promise = (!generator).then(|| a.new_promise());
-        let co = ObjectData { kind: ObjectKind::Coroutine(Coroutine { state: CoroutineState::Suspended(saved), fresh: true, promise }), proto: Some(proto), ..ObjectData::default() }.alloc(a.mc);
+        let co = ObjectData { kind: ObjectKind::Coroutine(Coroutine::new(saved, promise, generator && asynchronous)), proto: Some(proto), ..ObjectData::default() }.alloc(a.mc);
         let Some(p) = promise else { return Ok(co.into()) };
         let outer = self.depth.replace(depth);
         let r = a.drive(co, Resume::Next, Value::Undefined);
@@ -342,7 +344,8 @@ impl Executor {
         let func = &self.function(closure.func).func;
         if func.generator {
             // 生成器函数的 `prototype` 是它产出的生成器的原型（没有 `constructor`）
-            let p = ObjectData { proto: Some(a.realm.generator_proto), ..ObjectData::default() }.alloc(a.mc);
+            let base = if func.asynchronous { a.realm.async_generator_proto } else { a.realm.generator_proto };
+            let p = ObjectData { proto: Some(base), ..ObjectData::default() }.alloc(a.mc);
             fo.borrow_mut(a.mc).define(a.mc, "prototype", Property { slot: Slot::Data(p.into()), enumerable: false, writable: true, configurable: false });
         } else if func.kind == FunctionKind::Normal && !func.asynchronous {
             let p = a.object();
@@ -844,6 +847,57 @@ impl Executor {
                         *acc = a.property_key(*acc)?.into();
                     }
                 }
+                Insn::GetAsyncIterator { dst } => {
+                    let d = r(dst);
+                    let v = *acc;
+                    let method = if v.is_nullish() { Value::Undefined } else { a.get_symbol(v, a.realm.symbols.async_iterator, v)? };
+                    let (iterator, next, sync) = if method.is_nullish() {
+                        let rec = a.get_iterator(v)?;
+                        (rec.iterator, rec.next, true)
+                    } else {
+                        let it = a.call(method, v, &[])?;
+                        if !matches!(it, Value::Object(_)) {
+                            return Err(a.throw(ErrorKind::Type, "Result of the Symbol.asyncIterator method is not an object"));
+                        }
+                        let next = a.get_named(it, "next")?;
+                        (it, next, false)
+                    };
+                    regs[d] = iterator;
+                    regs[d + 1] = next;
+                    regs[d + 2] = false.into();
+                    regs[d + 3] = sync.into();
+                }
+                Insn::IteratorCall { iter } => {
+                    let d = r(iter);
+                    *acc = a.call(regs[d + 1], regs[d], &[])?;
+                }
+                Insn::IteratorResult { iter } => {
+                    let d = r(iter);
+                    let result = *acc;
+                    if !matches!(result, Value::Object(_)) {
+                        regs[d + 2] = true.into();
+                        let what = a.to_string(result)?;
+                        return Err(a.throw(ErrorKind::Type, &alloc::format!("Iterator result {} is not an object", &**what)));
+                    }
+                    let done = a.get_named(result, "done")?;
+                    if a.to_boolean(done) {
+                        regs[d + 2] = true.into();
+                        *acc = Value::Undefined;
+                    } else {
+                        *acc = a.get_named(result, "value")?;
+                    }
+                }
+                Insn::AsyncIteratorReturn { iter } => {
+                    let d = r(iter);
+                    *acc = Value::Undefined;
+                    if !a.to_boolean(regs[d + 2]) {
+                        regs[d + 2] = true.into();
+                        let ret = a.get_named(regs[d], "return")?;
+                        if !ret.is_nullish() {
+                            *acc = a.call(ret, regs[d], &[])?;
+                        }
+                    }
+                }
                 Insn::ForInKeys => {
                     let keys = a.for_in_keys(*acc)?;
                     *acc = a.array(keys).into();
@@ -1338,6 +1392,14 @@ mod tests {
             ("Promise.reject(1).finally(() => console.log('fin')).catch(e => console.log('e', e))", "fin|e 1"),
             ("async function a() { console.log('a1'); await 0; console.log('a2') } a(); console.log('main')", "a1|main|a2"),
             ("class K { async m() { return this.v } } const k = new K(); k.v = 'mv'; k.m().then(console.log)", "mv"),
+            // async 生成器、for await
+            ("async function* g() { yield 1; const x = yield 2; yield x * 10; return 'end' } (async () => { const it = g(); const r = []; r.push((await it.next()).value); r.push((await it.next()).value); r.push((await it.next(4)).value); const last = await it.next(); r.push(last.value, last.done); console.log(r.join()) })()", "1,2,40,end,true"),
+            ("async function* nums() { for (let i = 0; i < 3; i++) { await null; yield i } } (async () => { let s = ''; for await (const n of nums()) s += n; for await (const v of [Promise.resolve('a'), 'b']) s += v; console.log(s) })()", "012ab"),
+            ("async function* g() { try { yield 1; yield 2 } finally { console.log('cleanup') } } (async () => { for await (const x of g()) { console.log(x); break } console.log('after') })()", "1|cleanup|after"),
+            ("const it = (async function* () { yield 1 })(); Promise.all([it.next(), it.next(), it.next()]).then(rs => console.log(rs.map(r => r.value + ':' + r.done).join()))", "1:false,undefined:true,undefined:true"),
+            ("async function* inner() { yield 1; await null; yield 2; return 'r' } async function* outer() { const v = yield* inner(); yield v; yield* [Promise.resolve(3), 4] } (async () => { const out = []; for await (const x of outer()) out.push(x); console.log(out.join()) })()", "1,2,r,3,4"),
+            ("async function* inner() { try { yield 1; yield 2 } finally { console.log('inner fin') } } async function* outer() { yield* inner() } (async () => { const it = outer(); await it.next(); const r = await it.return(7); console.log(r.value, r.done) })()", "inner fin|7 true"),
+            ("async function* g() { throw new Error('boom') } g().next().catch(e => console.log(e.message))", "boom"),
         ];
         for (src, want) in printed {
             let (r, out) = eval(src);

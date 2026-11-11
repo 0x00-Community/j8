@@ -174,12 +174,19 @@ impl<'a> Compiler<'a, '_> {
             Expression::ClassExpression(c) => self.class(c)?,
             Expression::YieldExpression(y) => {
                 let mode = self.resume_reg(y.span, "yield outside a generator")?;
+                let async_generator = self.is_async_generator();
                 match (&y.argument, y.delegate) {
+                    (Some(a), true) if async_generator => self.yield_star_async(a, mode)?,
                     (Some(a), true) => self.yield_star(a, mode)?,
                     (a, _) => {
                         match a {
                             Some(a) => self.expr(a)?,
                             None => _ = self.emit(Insn::LdaUndefined),
+                        }
+                        if async_generator {
+                            // async 生成器里 `yield v` 先等 v
+                            self.emit(Insn::Await { mode });
+                            self.resume_dispatch(mode, false)?;
                         }
                         self.emit(Insn::Yield { mode });
                         self.resume_dispatch(mode, true)?;
@@ -778,6 +785,56 @@ impl<'a> Compiler<'a, '_> {
         })?;
         self.emit(Insn::Ldar(result));
         self.release(src);
+        Ok(())
+    }
+
+    /// async 生成器里的 `yield* a`：async 迭代器协议，内层每步的结果先等；退回同步迭代器时值也等。
+    /// `await` 恢复时会改写 `mode`，所以委托用的恢复方式另存一份。
+    fn yield_star_async(&mut self, a: &'a Expression<'a>, mode: Reg) -> Result<(), Error> {
+        self.expr(a)?;
+        let iter = self.temps(4);
+        self.emit(Insn::GetAsyncIterator { dst: iter });
+        let next = self.constant(Constant::Number(f64::from(Resume::Next)));
+        self.emit(Insn::LdaConst(next));
+        self.emit(Insn::Star(mode));
+        self.emit(Insn::LdaUndefined);
+        let delegated = self.temp();
+        let result = self.temp();
+        let top = self.here();
+        self.emit(Insn::DelegateStep { iter, mode });
+        self.emit(Insn::Star(result));
+        self.emit(Insn::Ldar(mode));
+        self.emit(Insn::Star(delegated));
+        self.emit(Insn::Ldar(result));
+        self.emit(Insn::Await { mode });
+        self.resume_dispatch(mode, false)?;
+        self.emit(Insn::Star(result));
+        let done = self.name("done");
+        self.emit(Insn::GetNamed { obj: result, name: done });
+        let finished = self.jump(Insn::JumpIfTrue);
+        let value = self.name("value");
+        self.emit(Insn::GetNamed { obj: result, name: value });
+        self.emit(Insn::Star(result));
+        self.emit(Insn::Ldar(Reg(iter.0 + 3)));
+        let not_sync = self.jump(Insn::JumpIfFalse);
+        self.emit(Insn::Ldar(result));
+        self.emit(Insn::Await { mode });
+        self.resume_dispatch(mode, false)?;
+        self.emit(Insn::Star(result));
+        self.land(not_sync);
+        self.emit(Insn::Ldar(result));
+        self.emit(Insn::Yield { mode });
+        self.emit(Insn::Jump(top));
+        self.land(finished);
+        self.emit(Insn::GetNamed { obj: result, name: value });
+        self.emit(Insn::Star(result));
+        self.on_completion(delegated, f64::from(Resume::Return), |s| {
+            s.emit(Insn::Ldar(result));
+            s.ret();
+            Ok(())
+        })?;
+        self.emit(Insn::Ldar(result));
+        self.release(iter);
         Ok(())
     }
 

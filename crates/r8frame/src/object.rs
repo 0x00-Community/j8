@@ -185,6 +185,25 @@ pub struct Coroutine<'gc> {
     /// 还没跑过第一步（这时 `return` / `throw` 直接结束）
     pub fresh: bool,
     pub promise: Option<JsObject<'gc>>,
+    /// async 生成器：排着的 `next` / `throw` / `return` 请求，队头是正在处理的那个
+    pub requests: Option<alloc::collections::VecDeque<Request<'gc>>>,
+}
+
+impl<'gc> Coroutine<'gc> {
+    /// 一个还没开始的协程：生成器（`promise` 与 `requests` 都没有）、async 函数（带结果 Promise）、
+    /// async 生成器（带请求队列）。
+    pub fn new(saved: Suspended<'gc>, promise: Option<JsObject<'gc>>, async_generator: bool) -> Self {
+        Self { state: CoroutineState::Suspended(saved), fresh: true, promise, requests: async_generator.then(alloc::collections::VecDeque::new) }
+    }
+}
+
+/// async 生成器的一个请求：怎么恢复、送进去的值、给调用者的 Promise。
+#[derive(Clone, Copy, Debug, Collect)]
+#[collect(no_drop)]
+pub struct Request<'gc> {
+    pub mode: crate::Resume,
+    pub value: Value<'gc>,
+    pub promise: JsObject<'gc>,
 }
 
 /// Promise 的状态。

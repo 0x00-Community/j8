@@ -1,9 +1,10 @@
-use gc_arena::{DynamicRootSet, Mutation};
+use gc_arena::{Collect, DynamicRootSet, Mutation};
 
 use crate::{Context, Error, Platform, Profiler, Scope, Value};
 
 /// 恢复协程的方式。
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Collect)]
+#[collect(require_static)]
 pub enum Resume {
     Next,
     Throw,

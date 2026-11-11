@@ -114,6 +114,8 @@ enum Control<'a> {
     Finally(Finally<'a>),
     /// `for-of` 的迭代器（记录在这三个寄存器）：跳出去要先关掉它
     Iterator(Reg),
+    /// `for await` 的迭代器（记录在这四个寄存器）：跳出去要先调 `return` 并等它
+    AsyncIterator(Reg),
 }
 
 /// 函数的种类与风味（生成器、async）。
@@ -122,6 +124,13 @@ pub(crate) struct Flavor {
     pub kind: FunctionKind,
     pub generator: bool,
     pub asynchronous: bool,
+}
+
+/// 函数节点的风味：生成器 / async 照节点，种类由调用方给。
+impl From<(&AstFunction<'_>, FunctionKind)> for Flavor {
+    fn from((f, kind): (&AstFunction<'_>, FunctionKind)) -> Self {
+        Self { kind, generator: f.generator, asynchronous: f.r#async }
+    }
 }
 
 impl From<FunctionKind> for Flavor {
@@ -152,6 +161,8 @@ struct Frame<'a> {
     completion: Option<Reg>,
     /// 生成器 / async 函数恢复时写恢复方式的寄存器
     resume: Option<Reg>,
+    /// async 生成器：`yield` / `return` 先等值
+    async_generator: bool,
 }
 
 /// 函数体：语句、箭头函数的表达式、类的字段初始化、缺省构造器。
@@ -430,10 +441,11 @@ impl<'a> Compiler<'a, '_> {
         let top = Reg::PARAMS + n;
         let keeps_args = matches!(body, Body::DefaultConstructor { derived: true }) || params.is_some_and(|p| p.rest.is_some());
         let out = Function { name: name.into(), kind: flavor.kind, keeps_args, generator: flavor.generator, asynchronous: flavor.asynchronous, params: n, regs: top, ..Function::default() };
-        self.frames.push(Frame { index, out, top, envs: 0, controls: Vec::new(), label: None, completion: None, resume: None });
+        self.frames.push(Frame { index, out, top, envs: 0, controls: Vec::new(), label: None, completion: None, resume: None, async_generator: false });
         if flavor.generator || flavor.asynchronous {
             let mode = self.temp();
             self.frame().resume = Some(mode);
+            self.frame().async_generator = flavor.generator && flavor.asynchronous;
         }
         let stmts = match body {
             Body::Statements(s) => s,
@@ -609,9 +621,64 @@ impl<'a> Compiler<'a, '_> {
     }
 
     /// `for (left of right) body`：迭代器协议；`break` / `return` / 抛出都关掉迭代器。
+    /// `for await (left of right) body`：async 迭代器（没有就退回同步迭代器并等每个值），每步等 `next()` 的结果；
+    /// `break` / `return` 穿出去时调 `return` 并等它，循环体抛出时关掉迭代器。
+    fn for_await(&mut self, f: &'a ForOfStatement<'a>) -> Result<(), Error> {
+        let mode = self.resume_reg(f.span, "for await outside an async function")?;
+        let label = self.take_label();
+        self.expr(&f.right)?;
+        let iter = self.temps(4);
+        self.emit(Insn::GetAsyncIterator { dst: iter });
+        self.frame().controls.push(Control::AsyncIterator(iter));
+        let v = self.temp();
+        let top = self.here();
+        self.emit(Insn::IteratorCall { iter });
+        self.emit(Insn::Await { mode });
+        self.resume_dispatch(mode, false)?;
+        self.emit(Insn::IteratorResult { iter });
+        self.emit(Insn::Star(v));
+        self.emit(Insn::Ldar(Reg(iter.0 + 2)));
+        let done = self.jump(Insn::JumpIfTrue);
+        // 退回同步迭代器时值本身也要等
+        self.emit(Insn::Ldar(Reg(iter.0 + 3)));
+        let not_sync = self.jump(Insn::JumpIfFalse);
+        self.emit(Insn::Ldar(v));
+        self.emit(Insn::Await { mode });
+        self.resume_dispatch(mode, false)?;
+        self.emit(Insn::Star(v));
+        self.land(not_sync);
+        self.push_jump(label, true, true);
+        let on_throw = self.jump(Insn::PushHandler);
+        self.frame().controls.push(Control::Handler);
+        self.scoped(&Decls::for_head(&f.left), |c| {
+            c.for_left(&f.left, v)?;
+            c.statement(&f.body)
+        })?;
+        self.frame().controls.pop();
+        self.emit(Insn::PopHandler);
+        self.emit(Insn::Jump(top));
+        // break 落这里：调 return 并等它
+        let broke = self.here();
+        self.emit(Insn::AsyncIteratorReturn { iter });
+        self.emit(Insn::Await { mode });
+        self.resume_dispatch(mode, false)?;
+        let end = self.jump(Insn::Jump);
+        self.land(on_throw);
+        self.emit(Insn::Star(v));
+        self.emit(Insn::IteratorCloseQuiet { iter });
+        self.emit(Insn::Ldar(v));
+        self.emit(Insn::Throw);
+        self.pop_jump(broke, Some(top));
+        self.land(done);
+        self.land(end);
+        self.frame().controls.pop();
+        self.release(iter);
+        Ok(())
+    }
+
     fn for_of(&mut self, f: &'a ForOfStatement<'a>) -> Result<(), Error> {
         if f.r#await {
-            return Err(self.unsupported(f.span, "for await"));
+            return self.for_await(f);
         }
         let label = self.take_label();
         self.expr(&f.right)?;
@@ -697,6 +764,11 @@ impl<'a> Compiler<'a, '_> {
         if returnable {
             self.on_completion(mode, f64::from(Resume::Return), |s| {
                 s.emit(Insn::Ldar(v));
+                if s.frame().async_generator {
+                    // async 生成器的 return(v) 先等 v
+                    s.emit(Insn::Await { mode });
+                    s.resume_dispatch(mode, false)?;
+                }
                 s.ret();
                 Ok(())
             })?;
@@ -709,6 +781,10 @@ impl<'a> Compiler<'a, '_> {
         self.emit(Insn::Ldar(v));
         self.release(v);
         Ok(())
+    }
+
+    pub(crate) fn is_async_generator(&mut self) -> bool {
+        self.frame().async_generator
     }
 
     /// 生成器 / async 函数恢复方式的寄存器；不在里面就报错。
@@ -748,16 +824,8 @@ impl<'a> Compiler<'a, '_> {
     }
 
     /// 普通函数（声明或表达式）：查掉不支持的种类。
-    /// 函数节点的风味（async 生成器还不支持）。
-    pub(crate) fn flavor(&self, f: &AstFunction<'_>, kind: FunctionKind) -> Result<Flavor, Error> {
-        if f.generator && f.r#async {
-            return Err(self.unsupported(f.span, "async generators"));
-        }
-        Ok(Flavor { kind, generator: f.generator, asynchronous: f.r#async })
-    }
-
     pub(crate) fn plain_function(&mut self, f: &'a AstFunction<'a>, self_name: bool) -> Result<u32, Error> {
-        let flavor = self.flavor(f, FunctionKind::Normal)?;
+        let flavor = Flavor::from((f, FunctionKind::Normal));
         let body = f.body.as_ref().ok_or_else(|| self.unsupported(f.span, "a function without a body"))?;
         let name = f.id.as_ref().map_or("", |id| id.name.as_str());
         self.function(name, flavor, Some(Decls::this_key(f.span)), if self_name { f.id.as_ref() } else { None }, Some(&f.params), Body::Statements(&body.statements))
@@ -765,7 +833,7 @@ impl<'a> Compiler<'a, '_> {
 
     /// 方法（类方法、对象字面量方法、访问器）：不可 `new`。
     pub(crate) fn method(&mut self, name: &str, f: &'a AstFunction<'a>, kind: FunctionKind) -> Result<u32, Error> {
-        let flavor = self.flavor(f, kind)?;
+        let flavor = Flavor::from((f, kind));
         let body = f.body.as_ref().ok_or_else(|| self.unsupported(f.span, "a method without a body"))?;
         self.function(name, flavor, Some(Decls::this_key(f.span)), None, Some(&f.params), Body::Statements(&body.statements))
     }
@@ -1004,7 +1072,7 @@ impl<'a> Compiler<'a, '_> {
     fn script(&mut self, program: &'a Program<'a>) -> Result<(), Error> {
         self.module.push(Function::default());
         let out = Function { name: "main".into(), regs: Reg::PARAMS, ..Function::default() };
-        self.frames.push(Frame { index: 0, out, top: Reg::PARAMS, envs: 0, controls: Vec::new(), label: None, completion: None, resume: None });
+        self.frames.push(Frame { index: 0, out, top: Reg::PARAMS, envs: 0, controls: Vec::new(), label: None, completion: None, resume: None, async_generator: false });
         let completion = self.temp();
         self.frame().completion = Some(completion);
         self.enter(&Decls(vec![Decl { name: THIS, key: Decls::this_key(program.span), kind: DeclKind::This, ready: None }]))?;
@@ -1092,31 +1160,55 @@ impl<'a> Compiler<'a, '_> {
                         return Exit::Jump(i);
                     }
                 }
-                Control::Handler | Control::Iterator(_) => {}
+                Control::Handler | Control::Iterator(_) | Control::AsyncIterator(_) => {}
             }
         }
         Exit::Function
     }
 
-    /// 离开控制栈第 `from` 层及以上：退掉多进的环境（`envs` 是落点的环境层数），由内向外卸处理器、关迭代器。
-    /// 都不碰 acc。
+    /// 离开控制栈第 `from` 层及以上：退掉多进的环境（`envs` 是落点的环境层数），由内向外卸处理器、关迭代器
+    /// （async 迭代器还要等 `return` 的结果）。acc 原样留着。
     fn leave_controls(&mut self, from: usize, envs: Option<u16>) {
         if let Some(e) = envs {
             for _ in e..self.frame().envs {
                 self.emit(Insn::PopEnv);
             }
         }
-        let actions: Vec<Insn> = self.frame().controls[from..]
+        let actions: Vec<Control<'a>> = self.frame().controls[from..]
             .iter()
             .rev()
             .filter_map(|c| match c {
-                Control::Handler => Some(Insn::PopHandler),
-                Control::Iterator(iter) => Some(Insn::IteratorClose { iter: *iter }),
+                Control::Handler => Some(Control::Handler),
+                Control::Iterator(i) => Some(Control::Iterator(*i)),
+                Control::AsyncIterator(i) => Some(Control::AsyncIterator(*i)),
                 _ => None,
             })
             .collect();
         for a in actions {
-            self.emit(a);
+            match a {
+                Control::Handler => _ = self.emit(Insn::PopHandler),
+                Control::Iterator(iter) => _ = self.emit(Insn::IteratorClose { iter }),
+                Control::AsyncIterator(iter) => {
+                    let mode = self.frame().resume.expect("for await is inside an async function");
+                    let saved = self.temp();
+                    self.emit(Insn::Star(saved));
+                    self.emit(Insn::AsyncIteratorReturn { iter });
+                    self.emit(Insn::Await { mode });
+                    // 等 `return` 时抛出照样往外抛
+                    let v = self.temp();
+                    self.emit(Insn::Star(v));
+                    let k = self.constant(Constant::Number(f64::from(Resume::Throw)));
+                    self.emit(Insn::LdaConst(k));
+                    self.emit(Insn::Compare(CompareOp::StrictEq, mode));
+                    let skip = self.jump(Insn::JumpIfFalse);
+                    self.emit(Insn::Ldar(v));
+                    self.emit(Insn::Throw);
+                    self.land(skip);
+                    self.emit(Insn::Ldar(saved));
+                    self.release(saved);
+                }
+                _ => {}
+            }
         }
     }
 
@@ -1273,7 +1365,15 @@ impl<'a> Compiler<'a, '_> {
             Statement::BlockStatement(b) => self.block(b)?,
             Statement::ReturnStatement(r) => {
                 match &r.argument {
-                    Some(e) => self.expr(e)?,
+                    Some(e) => {
+                        self.expr(e)?;
+                        if self.frame().async_generator {
+                            // async 生成器里 `return v` 先等 v
+                            let mode = self.resume_reg(r.span, "return")?;
+                            self.emit(Insn::Await { mode });
+                            self.resume_dispatch(mode, false)?;
+                        }
+                    }
                     None => _ = self.emit(Insn::LdaUndefined),
                 }
                 self.ret();

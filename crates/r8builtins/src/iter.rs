@@ -118,7 +118,7 @@ impl Iters {
     /// 生成器的 `next` / `return` / `throw`：恢复一步，包成 `{ value, done }`。
     fn resume<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, mode: Resume, v: Value<'gc>) -> Result<Value<'gc>, Error> {
         let co = match this {
-            Value::Object(o) if matches!(&o.borrow().kind, ObjectKind::Coroutine(c) if c.promise.is_none()) => o,
+            Value::Object(o) if matches!(&o.borrow().kind, ObjectKind::Coroutine(c) if c.promise.is_none() && c.requests.is_none()) => o,
             _ => return Err(a.throw(ErrorKind::Type, "Generator method called on an incompatible receiver")),
         };
         Ok(match a.resume(co, mode, v)? {

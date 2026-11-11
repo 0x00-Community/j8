@@ -3,7 +3,7 @@ use alloc::vec::Vec;
 
 use gc_arena::{Gc, Lock};
 
-use crate::{Agent, Error, ErrorKind, Job, JsObject, ObjectData, ObjectKind, Reaction, Resume, Settled, Step, Value};
+use crate::{Agent, Coroutine, Error, ErrorKind, Job, JsObject, ObjectData, ObjectKind, Reaction, Request, Resume, Settled, Step, Value};
 
 impl<'gc> Agent<'gc, '_> {
     /// 一个待定的 Promise。
@@ -118,11 +118,15 @@ impl<'gc> Agent<'gc, '_> {
     }
 
     /// async 协程跑一步：停在 `await` 就挂到被等的 Promise 上；跑完兑现、抛出拒绝它的结果 Promise。
+    /// async 生成器另走 [`drive_async_generator`](Self::drive_async_generator)。
     pub fn drive(&mut self, coroutine: JsObject<'gc>, mode: Resume, value: Value<'gc>) -> Result<(), Error> {
-        let promise = match &coroutine.borrow().kind {
-            ObjectKind::Coroutine(c) => c.promise,
-            _ => None,
+        let (promise, async_generator) = match &coroutine.borrow().kind {
+            ObjectKind::Coroutine(c) => (c.promise, c.requests.is_some()),
+            _ => (None, false),
         };
+        if async_generator {
+            return self.drive_async_generator(coroutine, mode, value);
+        }
         let Some(promise) = promise else { unreachable!("an async coroutine carries its promise") };
         match self.resume(coroutine, mode, value) {
             Ok(Step::Await(v)) => {
@@ -138,6 +142,61 @@ impl<'gc> Agent<'gc, '_> {
             Err(e) => return Err(e),
         }
         Ok(())
+    }
+
+    /// async 生成器收一个请求（`next` / `throw` / `return`），给出这个请求的 Promise；空闲着就马上开始处理。
+    pub fn async_generator_enqueue(&mut self, coroutine: JsObject<'gc>, mode: Resume, value: Value<'gc>) -> Result<JsObject<'gc>, Error> {
+        let promise = self.new_promise();
+        let idle = {
+            let mut d = coroutine.borrow_mut(self.mc);
+            let ObjectKind::Coroutine(Coroutine { requests: Some(q), .. }) = &mut d.kind else { unreachable!("an async generator") };
+            q.push_back(Request { mode, value, promise });
+            q.len() == 1
+        };
+        if idle {
+            self.drive_async_generator(coroutine, mode, value)?;
+        }
+        Ok(promise)
+    }
+
+    /// 队头请求的 Promise 用结果落定、出队；队里还有就接着处理下一个。
+    fn settle_request(&mut self, coroutine: JsObject<'gc>, outcome: Result<(Value<'gc>, bool), Value<'gc>>) -> Result<(), Error> {
+        let (done_req, next) = {
+            let mut d = coroutine.borrow_mut(self.mc);
+            let ObjectKind::Coroutine(Coroutine { requests: Some(q), .. }) = &mut d.kind else { unreachable!("an async generator") };
+            (q.pop_front(), q.front().copied())
+        };
+        if let Some(req) = done_req {
+            match outcome {
+                Ok((v, done)) => {
+                    let r = self.iter_result(v, done);
+                    self.resolve_promise(req.promise, r.into())?;
+                }
+                Err(reason) => self.reject_promise(req.promise, reason),
+            }
+        }
+        match next {
+            Some(n) => self.drive_async_generator(coroutine, n.mode, n.value),
+            None => Ok(()),
+        }
+    }
+
+    /// async 生成器跑一步：停在 `await` 等着；`yield` / 跑完 / 抛出就落定队头请求。
+    fn drive_async_generator(&mut self, coroutine: JsObject<'gc>, mode: Resume, value: Value<'gc>) -> Result<(), Error> {
+        match self.resume(coroutine, mode, value) {
+            Ok(Step::Await(v)) => {
+                let p = self.promise_resolve(v)?;
+                self.perform_then(p, Reaction::Await { coroutine });
+                Ok(())
+            }
+            Ok(Step::Yield(v)) => self.settle_request(coroutine, Ok((v, false))),
+            Ok(Step::Done(v)) => self.settle_request(coroutine, Ok((v, true))),
+            Err(Error::Exception(g)) => {
+                let reason = self.local(&g);
+                self.settle_request(coroutine, Err(reason))
+            }
+            Err(e) => Err(e),
+        }
     }
 
     /// 做一个微任务。

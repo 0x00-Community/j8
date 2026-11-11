@@ -46,6 +46,10 @@ pub struct Realm<'gc> {
     pub string_iterator_proto: JsObject<'gc>,
     /// %GeneratorPrototype%：`next` / `return` / `throw`
     pub generator_proto: JsObject<'gc>,
+    /// %AsyncIteratorPrototype%：`[Symbol.asyncIterator]() { return this }`
+    pub async_iterator_proto: JsObject<'gc>,
+    /// %AsyncGeneratorPrototype%：`next` / `return` / `throw` 都返回 Promise
+    pub async_generator_proto: JsObject<'gc>,
     pub promise_proto: JsObject<'gc>,
     pub regexp_proto: JsObject<'gc>,
     /// 正则字面量用的构造器：r8builtins 换上真的实现（用户改写全局 `RegExp` 不影响字面量）
@@ -78,12 +82,15 @@ impl<'gc> Realm<'gc> {
         let error_protos = ErrorKind::ALL.map(|k| if k == ErrorKind::Error { error } else { derived(error) });
         let symbol = |d: &str| Gc::new(mc, SymbolData { description: Some(alloc::format!("Symbol.{d}").into()) });
         let iterator_proto = derived(object_proto);
+        let async_iterator_proto = derived(object_proto);
         Self {
             symbol_proto: derived(object_proto),
             iterator_proto,
             array_iterator_proto: derived(iterator_proto),
             string_iterator_proto: derived(iterator_proto),
             generator_proto: derived(iterator_proto),
+            async_iterator_proto,
+            async_generator_proto: derived(async_iterator_proto),
             promise_proto: derived(object_proto),
             regexp_proto: derived(object_proto),
             regexp_ctor: ObjectData { kind: ObjectKind::Native(Native(Self::no_regexp)), ..ObjectData::default() }.alloc(mc),
