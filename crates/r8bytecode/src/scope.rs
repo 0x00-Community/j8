@@ -258,6 +258,19 @@ impl<'a> Decls<'a> {
         d
     }
 
+    /// eval 代码顶层的 `let` / `const` / `class`（函数声明仍是全局的）。
+    pub fn eval_lexical(stmts: &'a [Statement<'a>]) -> Self {
+        let mut d = Self::default();
+        d.lexical(stmts);
+        d.0.retain(|x| matches!(x.kind, DeclKind::Let | DeclKind::Const));
+        d
+    }
+
+    /// eval 代码自己那一层：非严格只有顶层词法声明（`var` 进全局）；严格的连 `var` / 函数声明也在里面。
+    pub fn eval_local(stmts: &'a [Statement<'a>], strict: bool) -> Self {
+        if strict { Self::static_block(stmts) } else { Self::eval_lexical(stmts) }
+    }
+
     /// 静态块：自己一层 `var` 作用域，加顶层词法声明。
     pub fn static_block(stmts: &'a [Statement<'a>]) -> Self {
         let mut d = Self::default();
@@ -339,9 +352,12 @@ pub(crate) struct Resolver<'a> {
 impl<'a> Resolver<'a> {
     /// 脚本：顶层声明是全局对象的属性，不进作用域；只有 `this`。
     /// 给出（被捕获的绑定, 被引用到的绑定）。
-    pub fn script(stmts: &'a [Statement<'a>], this: Key, alloc: &'a Allocator) -> (HashSet<Key>, HashSet<Key>) {
+    pub fn script(stmts: &'a [Statement<'a>], this: Key, alloc: &'a Allocator, local: Option<&Decls<'a>>) -> (HashSet<Key>, HashSet<Key>) {
         let mut r = Self { levels: Vec::new(), funcs: 0, func: 0, alloc, captured: HashSet::new(), used: HashSet::new() };
         r.levels.push(Level { func: 0, names: vec![(THIS, this)] });
+        if let Some(d) = local {
+            r.push(d);
+        }
         r.statements(stmts);
         (r.captured, r.used)
     }

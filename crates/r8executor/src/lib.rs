@@ -7,9 +7,10 @@
 extern crate alloc;
 
 use alloc::vec::Vec;
-use core::cell::Cell;
+use alloc::rc::Rc;
+use core::cell::{Cell, RefCell};
 
-use r8bytecode::{Constant, Function, FunctionKind, Insn, Module, PropertyKind, Reg};
+use r8bytecode::{Constant, Function, FunctionKind, Insn, Mode, Module, PropertyKind, Reg};
 use gc_arena::{Collect, Gc};
 use r8frame::{Agent, Closure, Coroutine, CoroutineState, Env, Error, ErrorKind, FuncId, Invoke, IterRecord, JsEnv, JsObject, ObjectData, ObjectKind, Property, Resume, Slot, Step, Suspended, Value};
 
@@ -117,21 +118,23 @@ enum Prepared<'gc> {
 /// 字节码执行器。
 #[derive(Default)]
 pub struct Executor {
-    code: Vec<Loaded>,
+    /// 已加载的函数：只追加（`eval` / `Function` 构造器在执行中途也会加），帧里持有 `Rc`
+    code: RefCell<Vec<Rc<Loaded>>>,
     /// 当前调用深度（各层重入的 `execute` 加起来）
     depth: Cell<usize>,
 }
 
 impl Executor {
     /// 装进一个模块，返回脚本本身的函数编号。
-    pub fn load(&mut self, module: Module) -> FuncId {
-        let base = u32::try_from(self.code.len()).expect("fewer than 2^32 functions");
-        self.code.extend(module.functions.into_iter().map(|func| Loaded { base, func }));
+    pub fn load(&self, module: Module) -> FuncId {
+        let mut code = self.code.borrow_mut();
+        let base = u32::try_from(code.len()).expect("fewer than 2^32 functions");
+        code.extend(module.functions.into_iter().map(|func| Rc::new(Loaded { base, func })));
         FuncId(base + Module::MAIN)
     }
 
-    fn function(&self, f: FuncId) -> &Loaded {
-        &self.code[f.0 as usize]
+    fn function(&self, f: FuncId) -> Rc<Loaded> {
+        Rc::clone(&self.code.borrow()[f.0 as usize])
     }
 
     /// 跑脚本 `main`（`this` 是全局对象）。
@@ -156,7 +159,8 @@ impl Executor {
         let mut regs = Vec::new();
         let f = self.enter(a, &mut regs, closure, callee, this, args);
         let saved = Suspended { func: f.func, pc: 0, regs, env: f.env, handlers: Vec::new(), args: f.args, mode: None };
-        let func = &self.function(closure.func).func;
+        let func_loaded = self.function(closure.func);
+        let func = &func_loaded.func;
         let (generator, asynchronous) = (func.generator, func.asynchronous);
         let proto = if generator {
             match a.get_named(callee, "prototype")? {
@@ -182,10 +186,11 @@ impl Executor {
         while let Value::Object(o) = callee {
             let kind = match &o.borrow().kind {
                 ObjectKind::Function(c) if matches!(self.function(c.func).func.kind, FunctionKind::Constructor { .. }) => {
-                    let name = &self.function(c.func).func.name;
+                    let loaded = self.function(c.func);
+                    let name = &loaded.func.name;
                     return Err(a.throw(ErrorKind::Type, &alloc::format!("Class constructor {name} cannot be invoked without 'new'")));
                 }
-                ObjectKind::Function(c) if { let f = &self.function(c.func).func; f.generator || f.asynchronous } => {
+                ObjectKind::Function(c) if { let l = self.function(c.func); l.func.generator || l.func.asynchronous } => {
                     let c = *c;
                     return self.start(a, c, callee, this, &args, depth).map(Callee::Done);
                 }
@@ -215,9 +220,17 @@ impl Executor {
     /// 建一帧：在寄存器文件末尾开出本函数的寄存器，按调用约定放 `this`、自身、实参。
     fn enter<'gc>(&self, a: &mut Agent<'gc, '_>, regs: &mut Vec<Value<'gc>>, closure: Closure<'gc>, callee: Value<'gc>, this: Value<'gc>, args: &[Value<'gc>]) -> Frame<'gc> {
         a.profiler.enter(closure.func);
-        let f = &self.function(closure.func).func;
+        let f_loaded = self.function(closure.func);
+        let f = &f_loaded.func;
         let base = regs.len();
         regs.resize(base + usize::from(f.regs), Value::Undefined);
+        // 非严格函数：`this` 是 null / undefined 换成全局对象，原始值包成对象（箭头函数不用自己的 `this`）
+        let this = match this {
+            _ if f.mode == Mode::Strict || f.kind == FunctionKind::Arrow => this,
+            Value::Undefined | Value::Null => Value::Object(a.realm.global),
+            Value::Object(_) | Value::Uninit => this,
+            prim => a.to_object(prim).map_or(prim, Value::Object),
+        };
         regs[base + usize::from(Reg::THIS.0)] = this;
         regs[base + usize::from(Reg::CALLEE.0)] = callee;
         let params = usize::from(f.params).min(args.len());
@@ -249,7 +262,8 @@ impl Executor {
             };
             match kind {
                 Ok(Ok(closure)) => {
-                    let func = &self.function(closure.func).func;
+                    let func_loaded = self.function(closure.func);
+                    let func = &func_loaded.func;
                     if func.generator || func.asynchronous {
                         break;
                     }
@@ -340,8 +354,16 @@ impl Executor {
 
     /// 建一个函数对象；普通函数带 `prototype`（`constructor` 指回来）。
     fn function_object<'gc>(&self, a: &Agent<'gc, '_>, closure: Closure<'gc>, proto: JsObject<'gc>) -> JsObject<'gc> {
+        let func_loaded = self.function(closure.func);
+        let func = &func_loaded.func;
+        // 缺省原型按函数种类：生成器 / async / async 生成器各有自己的 %XFunction.prototype%
+        let proto = match (Gc::ptr_eq(proto, a.realm.function_proto), func.generator, func.asynchronous) {
+            (true, true, true) => a.realm.async_generator_function_proto,
+            (true, true, false) => a.realm.generator_function_proto,
+            (true, false, true) => a.realm.async_function_proto,
+            _ => proto,
+        };
         let fo = ObjectData { kind: ObjectKind::Function(closure), proto: Some(proto), ..ObjectData::default() }.alloc(a.mc);
-        let func = &self.function(closure.func).func;
         a.realm.name_function(a.mc, fo, &func.name, Some(u32::from(func.length)));
         if func.generator {
             // 生成器函数的 `prototype` 是它产出的生成器的原型（没有 `constructor`）
@@ -382,6 +404,19 @@ impl Executor {
         e
     }
 
+    /// %ThrowTypeError%：严格模式 `arguments.callee` 的访问器。
+    fn throw_type_error<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+        Err(a.throw(ErrorKind::Type, "'caller', 'callee', and 'arguments' properties may not be accessed on strict mode functions or the arguments objects for calls to them"))
+    }
+
+    /// 严格模式下删不掉（不可配置）抛 TypeError。
+    fn check_delete(a: &Agent<'_, '_>, ok: bool, strict: bool) -> Result<(), Error> {
+        if strict && !ok {
+            return Err(a.throw(ErrorKind::Type, "Cannot delete a non-configurable property"));
+        }
+        Ok(())
+    }
+
     /// 未初始化就抛 ReferenceError（暂时性死区）。
     fn check<'gc>(a: &Agent<'gc, '_>, v: Value<'gc>, name: &str) -> Result<(), Error> {
         if v == Value::Uninit {
@@ -400,8 +435,35 @@ impl Executor {
         if a.has_property(g, name)? { Ok(Some(a.get_named(g, name)?)) } else { Ok(None) }
     }
 
+    /// 顶层 `var` / 函数声明之前查能不能声明（CanDeclareGlobalVar / CanDeclareGlobalFunction）。
+    fn check_declare(a: &mut Agent<'_, '_>, name: &str, function: bool) -> Result<(), Error> {
+        if a.realm.script_scope.borrow().get_own(name).is_some() {
+            return Err(a.throw(ErrorKind::Syntax, &alloc::format!("Identifier '{name}' has already been declared")));
+        }
+        let existing = a.realm.global.borrow().get_own(name);
+        match existing {
+            Some(p) if function && !p.configurable && !(p.writable && p.enumerable && matches!(p.slot, Slot::Data(_))) => Err(a.throw(ErrorKind::Type, &alloc::format!("Cannot redefine property: {name}"))),
+            _ => Ok(()),
+        }
+    }
+
+    /// 顶层 `var`（`value` 为空）/ 函数声明落到全局对象上（已经查过能声明）。
+    fn declare_global<'gc>(a: &Agent<'gc, '_>, name: &str, value: Option<Value<'gc>>, deletable: bool) {
+        let global = a.realm.global;
+        let existing = global.borrow().get_own(name);
+        let fresh = Property { slot: Slot::Data(value.unwrap_or_default()), enumerable: true, writable: true, configurable: deletable };
+        let prop = match (existing, value) {
+            (None, _) => fresh,
+            (Some(_), None) => return,
+            (Some(p), Some(_)) if p.configurable => fresh,
+            (Some(p), Some(v)) => Property { slot: Slot::Data(v), ..p },
+        };
+        global.borrow_mut(a.mc).define(a.mc, name, prop);
+    }
+
     /// 写全局名字：脚本作用域里的查死区与 `const`，否则写全局对象。
-    fn global_set<'gc>(a: &mut Agent<'gc, '_>, name: &str, v: Value<'gc>) -> Result<(), Error> {
+    /// 严格模式下给没声明过的名字赋值抛 ReferenceError。
+    fn global_set<'gc>(a: &mut Agent<'gc, '_>, name: &str, v: Value<'gc>, strict: bool) -> Result<(), Error> {
         let scope = a.realm.script_scope;
         let prop = scope.borrow().get_own(name);
         match prop {
@@ -413,7 +475,13 @@ impl Executor {
                 scope.borrow_mut(a.mc).set(a.mc, name, v);
                 Ok(())
             }
-            None => a.set_named(Value::Object(a.realm.global), name, v),
+            None => {
+                let g = Value::Object(a.realm.global);
+                if strict && !a.has_property(g, name)? {
+                    return Err(a.throw(ErrorKind::Reference, &alloc::format!("{name} is not defined")));
+                }
+                a.put_named(g, name, v, strict)
+            }
         }
     }
 
@@ -426,7 +494,7 @@ impl Executor {
     }
 
     /// 本帧的 arguments 对象：全部实参作可枚举下标属性，`length` / `callee` / `[Symbol.iterator]` 不可枚举。
-    fn arguments<'gc>(a: &mut Agent<'gc, '_>, regs: &[Value<'gc>], f: &Frame<'gc>) -> Result<Value<'gc>, Error> {
+    fn arguments<'gc>(a: &mut Agent<'gc, '_>, regs: &[Value<'gc>], f: &Frame<'gc>, self_strict: bool) -> Result<Value<'gc>, Error> {
         let o = a.object();
         let hidden = |v: Value<'gc>| Property { slot: Slot::Data(v), enumerable: false, writable: true, configurable: true };
         for (i, &v) in f.args.iter().enumerate() {
@@ -437,7 +505,13 @@ impl Executor {
         let values = a.get_symbol(Value::Object(a.realm.array_proto), a.realm.symbols.iterator, Value::Undefined)?;
         let mut d = o.borrow_mut(a.mc);
         d.define(a.mc, "length", hidden(len.into()));
-        d.define(a.mc, "callee", hidden(regs[f.base + usize::from(Reg::CALLEE.0)]));
+        if self_strict {
+            // 严格模式：读写 callee 都抛 TypeError
+            let thrower = a.realm.named_native(a.mc, Self::throw_type_error, "");
+            d.define(a.mc, "callee", Property { slot: Slot::Accessor { get: Some(thrower), set: Some(thrower) }, enumerable: false, writable: false, configurable: false });
+        } else {
+            d.define(a.mc, "callee", hidden(regs[f.base + usize::from(Reg::CALLEE.0)]));
+        }
         d.define_symbol(a.realm.symbols.iterator, hidden(values));
         drop(d);
         Ok(o.into())
@@ -506,6 +580,7 @@ impl Executor {
     #[expect(clippy::too_many_lines, reason = "一条指令一个分支，拆开反而难读")]
     fn run<'gc>(&self, a: &mut Agent<'gc, '_>, st: &mut State<'gc>, depth: usize, budget: &mut Option<usize>) -> Result<Option<Outcome<'gc>>, Error> {
         let State { regs, frames, f, acc } = st;
+        let mut cur: Option<(FuncId, Rc<Loaded>)> = None;
         loop {
             // 配额用完：停在下一条指令之前，状态完整
             if let Some(b) = budget {
@@ -514,7 +589,11 @@ impl Executor {
                 }
                 *b -= 1;
             }
-            let loaded = self.function(f.func);
+            // 换了函数才重取（Rc 克隆）
+            if cur.as_ref().is_none_or(|(id, _)| *id != f.func) {
+                cur = Some((f.func, self.function(f.func)));
+            }
+            let loaded = &*cur.as_ref().expect("just set").1;
             let func = &loaded.func;
             let insn = func.insns[f.pc];
             f.pc += 1;
@@ -537,7 +616,7 @@ impl Executor {
                     *acc = Self::global_get(a, name)?.ok_or_else(|| a.throw(ErrorKind::Reference, &alloc::format!("{name} is not defined")))?;
                 }
                 Insn::LdaGlobalOrUndefined(k) => *acc = Self::global_get(a, func.name_at(k))?.unwrap_or_default(),
-                Insn::StaGlobal(k) => Self::global_set(a, func.name_at(k), *acc)?,
+                Insn::StaGlobal(k) => Self::global_set(a, func.name_at(k), *acc, func.mode.into())?,
                 Insn::LdaHole => *acc = Value::Uninit,
                 Insn::ThrowConstAssign => return Err(a.throw(ErrorKind::Type, "Assignment to constant variable.")),
                 Insn::CheckInit { name } => Self::check(a, *acc, func.name_at(name))?,
@@ -554,11 +633,15 @@ impl Executor {
                 Insn::DeclareLexical { name, constant } => {
                     let name = func.name_at(name);
                     let scope = a.realm.script_scope;
-                    if scope.borrow().get_own(name).is_some() {
+                    // 和脚本作用域里的名字、不可配置的全局属性（以前的 `var`、`undefined` 等）都冲突
+                    if scope.borrow().get_own(name).is_some() || a.realm.global.borrow().get_own(name).is_some_and(|p| !p.configurable) {
                         return Err(a.throw(ErrorKind::Syntax, &alloc::format!("Identifier '{name}' has already been declared")));
                     }
                     scope.borrow_mut(a.mc).define(a.mc, name, Property { slot: Slot::Data(Value::Uninit), enumerable: false, writable: !constant, configurable: false });
                 }
+                Insn::CheckDeclare { name, function } => Self::check_declare(a, func.name_at(name), function)?,
+                Insn::DeclareVar { name, deletable } => Self::declare_global(a, func.name_at(name), None, deletable),
+                Insn::DeclareFunction { name, deletable } => Self::declare_global(a, func.name_at(name), Some(*acc), deletable),
                 Insn::InitLexical { name } => {
                     let name = func.name_at(name);
                     let scope = a.realm.script_scope;
@@ -748,15 +831,33 @@ impl Executor {
                 }
                 Insn::InstanceOf(x) => *acc = a.instance_of(regs[r(x)], *acc)?.into(),
                 Insn::In(x) => *acc = a.has_keyed(*acc, regs[r(x)])?.into(),
-                Insn::DeleteNamed { obj, name } => *acc = a.delete(regs[r(obj)], func.name_at(name))?.into(),
-                Insn::DeleteKeyed { obj } => *acc = a.delete_keyed(regs[r(obj)], *acc)?.into(),
+                Insn::DeleteNamed { obj, name } => {
+                    let ok = a.delete(regs[r(obj)], func.name_at(name))?;
+                    Self::check_delete(a, ok, func.mode.into())?;
+                    *acc = ok.into();
+                }
+                Insn::DeleteKeyed { obj } => {
+                    let ok = a.delete_keyed(regs[r(obj)], *acc)?;
+                    Self::check_delete(a, ok, func.mode.into())?;
+                    *acc = ok.into();
+                }
                 Insn::CreateObject => *acc = a.object().into(),
                 Insn::CreateArray { first, count } => *acc = a.array(regs[r(first)..r(first) + usize::from(count)].to_vec()).into(),
                 Insn::GetNamed { obj, name } => *acc = a.get_named(regs[r(obj)], func.name_at(name))?,
-                Insn::SetNamed { obj, name } => a.set_named(regs[r(obj)], func.name_at(name), *acc)?,
+                Insn::SetNamed { obj, name } => a.put_named(regs[r(obj)], func.name_at(name), *acc, func.mode.into())?,
                 Insn::GetKeyed { obj } => *acc = a.get_keyed(regs[r(obj)], *acc)?,
-                Insn::SetKeyed { obj, key } => a.set_keyed(regs[r(obj)], regs[r(key)], *acc)?,
-                Insn::Call { callee, this, args, argc } => {
+                Insn::SetKeyed { obj, key } => a.put_keyed(regs[r(obj)], regs[r(key)], *acc, func.mode.into())?,
+                Insn::CallEval { callee, args, argc, .. } if matches!(regs[r(callee)], Value::Object(o) if Gc::ptr_eq(o, a.realm.eval)) => {
+                    *acc = match (argc, regs[r(args)]) {
+                        (0, _) => Value::Undefined,
+                        (_, Value::String(s)) => {
+                            let src = alloc::string::String::from(&**s);
+                            self.eval_code(a, &src, r8frame::CodeKind::StrictEval)?
+                        }
+                        (_, v) => v,
+                    };
+                }
+                Insn::Call { callee, this, args, argc } | Insn::CallEval { callee, this, args, argc } => {
                     let level = depth + frames.len() + 1;
                     if level >= STACK_LIMIT {
                         return Err(a.throw(ErrorKind::Range, "Maximum call stack size exceeded"));
@@ -918,7 +1019,7 @@ impl Executor {
                     }
                 }
                 Insn::LdaNewTarget => *acc = f.new_target,
-                Insn::CreateArguments => *acc = Self::arguments(a, regs, f)?,
+                Insn::CreateArguments => *acc = Self::arguments(a, regs, f, func.mode.into())?,
                 Insn::GetTemplateObject { site, first, count } => {
                     let key = (f.func.0, site);
                     let cached = a.realm.templates.borrow().get(&key).copied();
@@ -980,6 +1081,31 @@ impl<'gc> Invoke<'gc> for Executor {
                 let f = self.enter(a, &mut regs, closure, callee, this, &args);
                 self.run_frame(a, regs, f, level)
             }
+        }
+    }
+
+    fn eval_code(&self, a: &mut Agent<'gc, '_>, src: &str, kind: r8frame::CodeKind) -> Result<Value<'gc>, Error> {
+        #[cfg(feature = "compile")]
+        {
+            let module = match Module::compile(&r8frame::Source { text: src, file: "[eval]" }, kind) {
+                Ok(m) => m,
+                Err(Error::Syntax(m)) => return Err(a.throw(ErrorKind::Syntax, &m)),
+                Err(e) => return Err(e),
+            };
+            let main = self.load(module);
+            let level = self.depth.get() + 1;
+            if level >= STACK_LIMIT {
+                return Err(a.throw(ErrorKind::Range, "Maximum call stack size exceeded"));
+            }
+            let saved = self.depth.replace(level);
+            let r = self.run_script(a, main);
+            self.depth.set(saved);
+            r
+        }
+        #[cfg(not(feature = "compile"))]
+        {
+            let _ = (src, kind);
+            Err(a.throw(ErrorKind::Syntax, "dynamic code needs the compile feature"))
         }
     }
 
@@ -1377,7 +1503,17 @@ mod tests {
             (r"JSON.stringify({ toJSON() { return 'x' } })", r#""x""#),
             (r#"const o = JSON.parse('{"a": [1, 2.5e1, "s\\u0041"], "b": null}'); o.a[1] + o.a[2] + o.b"#, "25sAnull"),
             (r"JSON.parse('[1, 2, 3]', (k, v) => typeof v === 'number' ? v * 2 : v).join()", "2,4,6"),
-            (r#"JSON.stringify(JSON.parse('{"x":{"y":[1,{"z":"w"}]}}'))"#, r#"{"x":{"y":[1,{"z":"w"}]}}"#),
+            (r#"JSON.stringify(JSON.parse('{"x":{"y":[1,{"z":"w"}]}}'))"#, r#"{"x":{"y":[1,{"z":"w"}]}}"#),            // 动态代码与严格模式
+            ("new Function('a', 'b', 'return a + b')(2, 3)", "5"),
+            ("Function('return typeof this')()", "object"),
+            ("var gv = 1; eval('gv + 1')", "2"),
+            ("eval('var ev = 4'); ev", "4"),
+            ("const GF = Object.getPrototypeOf(function* () {}).constructor; GF('yield 1; yield 2')().next().value", "1"),
+            ("(function () { return this === globalThis })()", "true"),
+            ("(function () { 'use strict'; return typeof this })()", "undefined"),
+            ("(function () { return typeof this }).call(1)", "object"),
+            ("const o = Object.freeze({ a: 1 }); o.a = 2; o.a", "1"),
+            ("class C { m() { return typeof this } } const m = new C().m; m()", "undefined"),
         ];
         for (src, want) in ok {
             assert_eq!(eval(src).0, Ok(String::from(want)), "{src}");
@@ -1421,7 +1557,10 @@ mod tests {
             ("class C { #x = 1; static read(o) { return o.#x } } C.read({})", "TypeError: Cannot read private member #x from an object whose class did not declare it"),
             ("class C { #m() {} f() { this.#m = 1 } } new C().f()", "TypeError: Private method #m is not writable"),
             ("class C { get #g() { return 1 } f() { this.#g = 2 } } new C().f()", "TypeError: '#g' was defined without a setter"),
-            ("class C { #x; static f(o) { return #x in o } } C.f(1)", "TypeError: Cannot use 'in' operator to search for '#x' in 1"),
+            ("class C { #x; static f(o) { return #x in o } } C.f(1)", "TypeError: Cannot use 'in' operator to search for '#x' in 1"),            ("'use strict'; undeclaredStrict = 1", "ReferenceError: undeclaredStrict is not defined"),
+            ("'use strict'; const o = Object.freeze({ a: 1 }); o.a = 2", "TypeError: Cannot assign to read only property 'a'"),
+            ("(function () { 'use strict'; return arguments.callee })()", "TypeError: 'caller', 'callee', and 'arguments' properties may not be accessed on strict mode functions or the arguments objects for calls to them"),
+            ("eval('let let = 1')", "SyntaxError: [eval]: `let` cannot be declared as a variable name inside of a `let` declaration"),
         ];
         for (src, want) in thrown {
             assert_eq!(eval(src).0, Err(String::from(want)), "{src}");

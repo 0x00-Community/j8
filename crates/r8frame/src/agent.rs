@@ -2,6 +2,17 @@ use gc_arena::{Collect, DynamicRootSet, Mutation};
 
 use crate::{Context, Error, Platform, Profiler, Scope, Value};
 
+/// 动态代码的种类。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum CodeKind {
+    /// 间接 `eval` / `Function` 构造器：顶层 `let` / `const` 只在这段代码里
+    Eval,
+    /// 严格代码里的直接 `eval`：代码本身严格，`var` 与函数声明也只在它自己里面
+    StrictEval,
+    /// 一段新脚本（`$262.evalScript`）：顶层词法声明进脚本作用域
+    Script,
+}
+
 /// 恢复协程的方式。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Collect)]
 #[collect(require_static)]
@@ -45,6 +56,9 @@ pub trait Invoke<'gc> {
     /// 构造调用（`new callee(...args)`，`new.target` 是 `new_target`）；不可构造就抛 TypeError。
     fn construct(&self, agent: &mut Agent<'gc, '_>, callee: Value<'gc>, args: &[Value<'gc>], new_target: Value<'gc>) -> Result<Value<'gc>, Error>;
 
+    /// 编译并在当前执行环境跑一段代码，给出完成值；语法错抛 SyntaxError，没有编译器的引擎也抛 SyntaxError。
+    fn eval_code(&self, agent: &mut Agent<'gc, '_>, src: &str, kind: CodeKind) -> Result<Value<'gc>, Error>;
+
     /// 恢复一个协程（`ObjectKind::Coroutine`）跑一步：`Next` 把 `value` 当 `yield` / `await` 的结果，
     /// `Throw` 在挂起处抛出，`Return` 在挂起处返回（经过 finally）。
     fn resume(&self, agent: &mut Agent<'gc, '_>, coroutine: crate::JsObject<'gc>, mode: Resume, value: Value<'gc>) -> Result<Step<'gc>, Error>;
@@ -72,6 +86,12 @@ impl<'gc> Agent<'gc, '_> {
     pub fn call(&mut self, callee: Value<'gc>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let invoke = self.invoke;
         invoke.call(self, callee, this, args)
+    }
+
+    /// 编译并跑一段动态代码。
+    pub fn eval_code(&mut self, src: &str, kind: CodeKind) -> Result<Value<'gc>, Error> {
+        let invoke = self.invoke;
+        invoke.eval_code(self, src, kind)
     }
 
     /// 恢复协程一步。

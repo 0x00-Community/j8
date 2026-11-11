@@ -2,10 +2,11 @@
 use std::collections::HashSet;
 
 use oxc_allocator::Allocator;
-use oxc_ast::ast::{BindingIdentifier, BindingPattern, BlockStatement, Class, ClassElement, Expression, MethodDefinition, MethodDefinitionKind, PrivateIdentifier, PropertyKey, ForStatementInit, FormalParameters, Function as AstFunction, ForInStatement, ForOfStatement, ForStatementLeft, Program, Statement, SwitchStatement, TryStatement, VariableDeclaration, VariableDeclarationKind};
-use oxc_parser::Parser;
+use oxc_ast::ast::{Directive, BindingIdentifier, BindingPattern, BlockStatement, Class, ClassElement, Expression, MethodDefinition, MethodDefinitionKind, PrivateIdentifier, PropertyKey, ForStatementInit, FormalParameters, Function as AstFunction, ForInStatement, ForOfStatement, ForStatementLeft, Program, Statement, SwitchStatement, TryStatement, VariableDeclaration, VariableDeclarationKind};
+use oxc_parser::{ParseOptions, Parser};
+use oxc_semantic::SemanticBuilder;
 use oxc_span::{GetSpan, SourceType, Span};
-use r8frame::{CompareOp, Error, Resume, Source};
+use r8frame::{CodeKind, CompareOp, Error, Resume, Source};
 
 use crate::scope::{Decl, DeclKind, Decls, Hidden, Key, Resolver, THIS};
 use crate::{Const, Constant, Function, FunctionKind, Insn, Label, Module, PropertyKind, Reg};
@@ -124,12 +125,22 @@ pub(crate) struct Flavor {
     pub kind: FunctionKind,
     pub generator: bool,
     pub asynchronous: bool,
+    /// 自己就是严格的（函数体开头 `'use strict'`、类体里）；外层严格的照样继承
+    pub strict: bool,
 }
 
 /// 函数节点的风味：生成器 / async 照节点，种类由调用方给。
 impl From<(&AstFunction<'_>, FunctionKind)> for Flavor {
     fn from((f, kind): (&AstFunction<'_>, FunctionKind)) -> Self {
-        Self { kind, generator: f.generator, asynchronous: f.r#async }
+        let strict = f.body.as_ref().is_some_and(|b| Self::use_strict(&b.directives));
+        Self { kind, generator: f.generator, asynchronous: f.r#async, strict }
+    }
+}
+
+impl Flavor {
+    /// 指令序言里有没有 `'use strict'`（原文正好这样写，不带转义）。
+    pub fn use_strict(directives: &[Directive<'_>]) -> bool {
+        directives.iter().any(|d| d.directive.as_str() == "use strict")
     }
 }
 
@@ -163,6 +174,8 @@ struct Frame<'a> {
     resume: Option<Reg>,
     /// async 生成器：`yield` / `return` 先等值
     async_generator: bool,
+    /// 严格模式
+    strict: bool,
 }
 
 /// 函数体：语句、箭头函数的表达式、类的字段初始化、缺省构造器。
@@ -184,6 +197,8 @@ pub(crate) struct Compiler<'a, 's> {
     used: HashSet<Key>,
     /// 标签模板调用点的编号（模板对象按（函数, 编号）缓存）
     pub(crate) sites: u32,
+    /// 正在编几层类体（类体里全是严格代码）
+    class_depth: u32,
     captured: HashSet<Key>,
     module: Vec<Function>,
     frames: Vec<Frame<'a>>,
@@ -199,15 +214,31 @@ impl TryFrom<&Source<'_>> for Module {
 
     /// 编一个脚本：最后一条表达式语句的值是返回值。
     fn try_from(src: &Source<'_>) -> Result<Self, Error> {
+        Self::compile(src, CodeKind::Script)
+    }
+}
+
+impl Module {
+    /// 按种类编：脚本的顶层词法声明进脚本作用域；eval 代码的只在它自己里面。
+    pub fn compile(src: &Source<'_>, kind: CodeKind) -> Result<Self, Error> {
         let allocator = Allocator::default();
-        let ret = Parser::new(&allocator, src.text, SourceType::cjs()).parse();
+        // 脚本（非模块）；正则字面量解析时就校验
+        let options = ParseOptions { parse_regular_expression: true, ..ParseOptions::default() };
+        let ret = Parser::new(&allocator, src.text, SourceType::script()).with_options(options).parse();
         if let Some(d) = ret.diagnostics.first() {
             return Err(Error::Syntax(format!("{}: {d}", src.file)));
         }
         let program = &ret.program;
-        let (captured, used) = Resolver::script(&program.body, Decls::this_key(program.span), &allocator);
-        let mut c = Compiler { src, alloc: &allocator, captured, used, sites: 0, module: Vec::new(), frames: Vec::new(), levels: Vec::new(), script_lexicals: HashSet::new(), chains: Vec::new() };
-        c.script(program)?;
+        // 早期错误（重复声明、非法的 break / super / new.target……）：oxc 的语法分析不管，要 semantic 检查
+        let checked = SemanticBuilder::new().with_check_syntax_error(true).build(program);
+        if let Some(d) = checked.diagnostics.errors().next() {
+            return Err(Error::Syntax(format!("{}: {d}", src.file)));
+        }
+        let strict = kind == CodeKind::StrictEval || Flavor::use_strict(&program.directives);
+        let local = (kind != CodeKind::Script).then(|| Decls::eval_local(&program.body, strict));
+        let (captured, used) = Resolver::script(&program.body, Decls::this_key(program.span), &allocator, local.as_ref());
+        let mut c = Compiler { src, alloc: &allocator, captured, used, sites: 0, class_depth: 0, module: Vec::new(), frames: Vec::new(), levels: Vec::new(), script_lexicals: HashSet::new(), chains: Vec::new() };
+        c.script(program, local.as_ref(), strict)?;
         Ok(Module { functions: c.module })
     }
 }
@@ -217,6 +248,11 @@ impl<'a> Compiler<'a, '_> {
 
     pub(crate) fn unsupported(&self, span: Span, what: &str) -> Error {
         self.src.unsupported(span.start, what)
+    }
+
+    /// 当前函数是不是严格模式。
+    pub(crate) fn strict(&self) -> bool {
+        self.frames.last().is_some_and(|f| f.strict)
     }
 
     fn frame(&mut self) -> &mut Frame<'a> {
@@ -458,8 +494,10 @@ impl<'a> Compiler<'a, '_> {
         let keeps_args = matches!(body, Body::DefaultConstructor { derived: true }) || params.is_some_and(|p| p.rest.is_some());
         // length：第一个带默认值的形参之前的个数（剩余参数不算）
         let length = u16::try_from(params.map_or(0, |p| p.items.iter().take_while(|i| i.initializer.is_none()).count())).unwrap_or(u16::MAX);
-        let out = Function { name: name.into(), kind: flavor.kind, keeps_args, generator: flavor.generator, asynchronous: flavor.asynchronous, params: n, length, regs: top, ..Function::default() };
-        self.frames.push(Frame { index, out, top, envs: 0, controls: Vec::new(), label: None, completion: None, resume: None, async_generator: false });
+        // 类里的函数（方法、构造器、字段初始化）都是严格的
+        let strict = flavor.strict || self.class_depth > 0 || self.frames.last().is_some_and(|f| f.strict);
+        let out = Function { name: name.into(), kind: flavor.kind, keeps_args, generator: flavor.generator, asynchronous: flavor.asynchronous, mode: strict.into(), params: n, length, regs: top, ..Function::default() };
+        self.frames.push(Frame { index, out, top, envs: 0, controls: Vec::new(), label: None, completion: None, resume: None, async_generator: false, strict });
         if flavor.generator || flavor.asynchronous {
             let mode = self.temp();
             self.frame().resume = Some(mode);
@@ -1026,6 +1064,14 @@ impl<'a> Compiler<'a, '_> {
 
     /// 类；匿名的构造器用推断出的名字 `inferred`。
     pub(crate) fn class(&mut self, c: &'a Class<'a>, inferred: &'a str) -> Result<(), Error> {
+        // 类体（含 extends）全是严格代码
+        self.class_depth += 1;
+        let r = self.class_body(c, inferred);
+        self.class_depth -= 1;
+        r
+    }
+
+    fn class_body(&mut self, c: &'a Class<'a>, inferred: &'a str) -> Result<(), Error> {
         let name = c.id.as_ref().map_or(inferred, |id| id.name.as_str());
         let parent = match &c.heritage {
             Some(h) => {
@@ -1130,18 +1176,32 @@ impl<'a> Compiler<'a, '_> {
     }
 
     /// 脚本本身：顶层 `var` / 函数声明 / `let` / `const` 都是全局对象的属性。
-    fn script(&mut self, program: &'a Program<'a>) -> Result<(), Error> {
+    /// `local` 是 eval 代码自己那一层的声明（脚本没有）；严格的 eval 代码什么都不落到全局。
+    fn script(&mut self, program: &'a Program<'a>, local: Option<&Decls<'a>>, strict: bool) -> Result<(), Error> {
         self.module.push(Function::default());
-        let out = Function { name: "main".into(), regs: Reg::PARAMS, ..Function::default() };
-        self.frames.push(Frame { index: 0, out, top: Reg::PARAMS, envs: 0, controls: Vec::new(), label: None, completion: None, resume: None, async_generator: false });
+        let eval = local.is_some();
+        let out = Function { name: "main".into(), regs: Reg::PARAMS, mode: strict.into(), ..Function::default() };
+        self.frames.push(Frame { index: 0, out, top: Reg::PARAMS, envs: 0, controls: Vec::new(), label: None, completion: None, resume: None, async_generator: false, strict });
         let completion = self.temp();
         self.frame().completion = Some(completion);
         self.enter(&Decls(vec![Decl { name: THIS, key: Decls::this_key(program.span), kind: DeclKind::This, ready: None }]))?;
         let mut globals = Decls::default();
-        globals.vars(&program.body);
-        globals.lexical(&program.body);
-        // 顶层 `let` / `const` / `class` 先在脚本作用域里声明（未初始化）
+        if !(eval && strict) {
+            globals.vars(&program.body);
+            globals.lexical(&program.body);
+        }
+        if let Some(d) = local {
+            self.enter(d)?;
+        }
+        // 先查全部函数、`var` 能不能声明，一个不行就什么都不建
         for d in &globals.0 {
+            if let DeclKind::Function(_) | DeclKind::Var = d.kind {
+                let name = self.name(d.name);
+                self.emit(Insn::CheckDeclare { name, function: matches!(d.kind, DeclKind::Function(_)) });
+            }
+        }
+        // 脚本顶层的 `let` / `const` / `class` 先在脚本作用域里声明（未初始化）
+        for d in globals.0.iter().filter(|_| !eval) {
             if let DeclKind::Let | DeclKind::Const = d.kind {
                 self.script_lexicals.insert(d.name);
                 let name = self.name(d.name);
@@ -1153,15 +1213,15 @@ impl<'a> Compiler<'a, '_> {
                 DeclKind::Function(f) => {
                     let n = self.function_declaration(f)?;
                     self.emit(Insn::CreateClosure(n));
+                    let name = self.name(d.name);
+                    self.emit(Insn::DeclareFunction { name, deletable: eval });
                 }
                 DeclKind::Var => {
-                    let k = self.name(d.name);
-                    self.emit(Insn::LdaGlobalOrUndefined(k));
+                    let name = self.name(d.name);
+                    self.emit(Insn::DeclareVar { name, deletable: eval });
                 }
-                _ => continue,
+                _ => {}
             }
-            let k = self.name(d.name);
-            self.emit(Insn::StaGlobal(k));
         }
         // 指令序言（`'use strict'` 等）在 oxc 里不在 body 里，但也是表达式语句，算完成值
         for d in &program.directives {

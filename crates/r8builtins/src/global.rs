@@ -76,6 +76,10 @@ impl Installer<'_, '_> {
     pub(crate) fn global(&mut self) {
         let g = self.realm.global;
         self.set(g, "globalThis", g.into());
+        // 值属性：不可写、不可枚举、不可配置
+        for (name, v) in [("undefined", Value::Undefined), ("NaN", f64::NAN.into()), ("Infinity", f64::INFINITY.into())] {
+            g.borrow_mut(self.mc).define(self.mc, name, r8frame::Property { slot: r8frame::Slot::Data(v), enumerable: false, writable: false, configurable: false });
+        }
         let console = self.plain();
         self.method(console, "log", Global::log);
         self.set(g, "console", console.into());

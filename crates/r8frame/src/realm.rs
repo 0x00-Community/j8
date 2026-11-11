@@ -46,6 +46,12 @@ pub struct Realm<'gc> {
     pub string_iterator_proto: JsObject<'gc>,
     /// %GeneratorPrototype%：`next` / `return` / `throw`
     pub generator_proto: JsObject<'gc>,
+    /// %GeneratorFunction.prototype%：生成器函数对象的原型
+    pub generator_function_proto: JsObject<'gc>,
+    /// %AsyncFunction.prototype%
+    pub async_function_proto: JsObject<'gc>,
+    /// %AsyncGeneratorFunction.prototype%
+    pub async_generator_function_proto: JsObject<'gc>,
     /// %AsyncIteratorPrototype%：`[Symbol.asyncIterator]() { return this }`
     pub async_iterator_proto: JsObject<'gc>,
     /// %AsyncGeneratorPrototype%：`next` / `return` / `throw` 都返回 Promise
@@ -54,6 +60,8 @@ pub struct Realm<'gc> {
     pub regexp_proto: JsObject<'gc>,
     /// 正则字面量用的构造器：r8builtins 换上真的实现（用户改写全局 `RegExp` 不影响字面量）
     pub regexp_ctor: JsObject<'gc>,
+    /// %eval%：严格代码里直接调用它时按直接 eval 处理
+    pub eval: JsObject<'gc>,
     pub bigint_proto: JsObject<'gc>,
     pub map_proto: JsObject<'gc>,
     pub set_proto: JsObject<'gc>,
@@ -85,6 +93,7 @@ impl<'gc> Realm<'gc> {
         let symbol = |d: &str| Gc::new(mc, SymbolData { description: Some(alloc::format!("Symbol.{d}").into()) });
         let iterator_proto = derived(object_proto);
         let async_iterator_proto = derived(object_proto);
+        let function_proto = derived(object_proto);
         Self {
             symbol_proto: derived(object_proto),
             iterator_proto,
@@ -92,10 +101,14 @@ impl<'gc> Realm<'gc> {
             string_iterator_proto: derived(iterator_proto),
             generator_proto: derived(iterator_proto),
             async_iterator_proto,
+            generator_function_proto: derived(function_proto),
+            async_function_proto: derived(function_proto),
+            async_generator_function_proto: derived(function_proto),
             async_generator_proto: derived(async_iterator_proto),
             promise_proto: derived(object_proto),
             regexp_proto: derived(object_proto),
             regexp_ctor: ObjectData { kind: ObjectKind::Native(Native(Self::no_regexp)), ..ObjectData::default() }.alloc(mc),
+            eval: ObjectData { kind: ObjectKind::Native(Native(Self::no_eval)), proto: Some(function_proto), ..ObjectData::default() }.alloc(mc),
             bigint_proto: derived(object_proto),
             map_proto: derived(object_proto),
             set_proto: derived(object_proto),
@@ -108,7 +121,7 @@ impl<'gc> Realm<'gc> {
             templates: Gc::new(mc, RefLock::new(alloc::collections::BTreeMap::new())),
             global: derived(object_proto),
             object_proto,
-            function_proto: derived(object_proto),
+            function_proto,
             array_proto: derived(object_proto),
             string_proto: derived(object_proto),
             number_proto: derived(object_proto),
@@ -120,6 +133,10 @@ impl<'gc> Realm<'gc> {
     /// 没装正则引擎时正则字面量抛 SyntaxError。
     fn no_regexp<'g>(a: &mut crate::Agent<'g, '_>, _: Value<'g>, _: &[Value<'g>]) -> Result<Value<'g>, crate::Error> {
         Err(a.throw(ErrorKind::Syntax, "regular expressions are not available in this realm"))
+    }
+
+    fn no_eval<'g>(a: &mut crate::Agent<'g, '_>, _: Value<'g>, _: &[Value<'g>]) -> Result<Value<'g>, crate::Error> {
+        Err(a.throw(ErrorKind::Type, "eval is not available in this realm"))
     }
 
     pub fn error_proto(&self, kind: ErrorKind) -> JsObject<'gc> {

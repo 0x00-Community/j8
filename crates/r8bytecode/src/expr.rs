@@ -404,7 +404,11 @@ impl<'a> Compiler<'a, '_> {
             ArrowFunctionBody::FunctionBody(b) => Body::Statements(&b.statements),
             e => Body::Expression(e.as_expression().expect("an arrow's body is a block or an expression")),
         };
-        let n = self.function(name, Flavor { kind: FunctionKind::Arrow, generator: false, asynchronous: a.r#async }, None, None, Some(&a.params), body)?;
+        let strict = match &a.body {
+            ArrowFunctionBody::FunctionBody(b) => Flavor::use_strict(&b.directives),
+            _ => false,
+        };
+        let n = self.function(name, Flavor { kind: FunctionKind::Arrow, generator: false, asynchronous: a.r#async, strict }, None, None, Some(&a.params), body)?;
         self.emit(Insn::CreateClosure(n));
         Ok(())
     }
@@ -582,6 +586,12 @@ impl<'a> Compiler<'a, '_> {
                 let name = self.name(m.property.name.as_str());
                 self.emit(Insn::GetSuper { this, name });
             }
+            Expression::ComputedMemberExpression(m) if matches!(m.object, Expression::Super(_)) => {
+                self.load(crate::scope::THIS);
+                self.emit(Insn::Star(this));
+                self.expr(&m.expression)?;
+                self.emit(Insn::GetSuperKeyed { this });
+            }
             Expression::StaticMemberExpression(m) => {
                 self.expr(&m.object)?;
                 self.emit(Insn::Star(this));
@@ -618,7 +628,8 @@ impl<'a> Compiler<'a, '_> {
         } else {
             let first = Reg(callee.0 + 2);
             self.arguments(&c.arguments, first)?;
-            self.emit(Insn::Call { callee, this, args: first, argc });
+            let direct_eval = self.strict() && matches!(&c.callee, Expression::Identifier(id) if id.name == "eval");
+            self.emit(if direct_eval { Insn::CallEval { callee, this, args: first, argc } } else { Insn::Call { callee, this, args: first, argc } });
         }
         self.release(callee);
         Ok(())

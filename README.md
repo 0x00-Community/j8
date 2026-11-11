@@ -90,7 +90,11 @@ cargo build --target riscv64gc-unknown-none-elf -p r8frame -p r8bytecode -p r8ex
 - BigInt 字面量与运算（任意精度，与 Number 混算抛 TypeError、可比较、`BigInt()` / `toString(radix)`）
 - 暂时性死区（`let` / `const` / `class` 与派生类 `super()` 前的 `this`；能证明已初始化的使用处编译期省掉检查）、脚本作用域（顶层 `let` / `const` / `class` 跨脚本共享、不挂在全局对象上）
 
-还不支持（报 `Error::Unsupported`，带 `文件:行:列`）：类的静态块 / 私有名 / 计算字段名、async 生成器 / `for await`。
+- 类的静态块 / 私有名（字段、方法、访问器、`#x in o`）/ 计算字段名、async 生成器 / `for await`、标签模板（按调用点缓存）、`new.target`、`arguments`
+- 动态代码：全局 `Function` / `eval`（间接）、生成器 / async 函数构造器；早期错误（oxc_semantic 检查 + 正则字面量解析时校验）编译期报 SyntaxError
+- 严格模式（指令序言 / 类体 / 外层继承）：非严格调用的 `this` 换成全局对象或包装对象，严格模式下失败的赋值 / 删除抛 TypeError、给没声明的名字赋值抛 ReferenceError、`arguments.callee` 抛 TypeError；严格代码里的 `eval(…)` 按直接 eval 跑（代码严格、`var` 留在自己里面）
+
+还不支持（报 `Error::Unsupported`，带 `文件:行:列`）：`with`、模块、非严格的直接 eval（现在按间接 eval 跑，看不见外层局部变量）。test262 基线 26950 条，补齐计划见 PLAN.md。
 
 已知偏差：宿主函数里重入的 JS（如 `map` 的回调）在当前片里跑完，期间不回收。
 

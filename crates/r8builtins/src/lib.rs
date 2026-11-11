@@ -8,6 +8,7 @@ mod asyncgen;
 mod bigint;
 mod collections;
 mod error;
+mod function;
 mod global;
 mod iter;
 mod json;
@@ -29,6 +30,7 @@ impl Intrinsics for Builtins {
         let mut b = Installer { mc, realm };
         b.global();
         b.object();
+        b.functions();
         b.function();
         b.array();
         b.string();
@@ -64,10 +66,16 @@ impl<'gc> Installer<'_, 'gc> {
     /// 全局对象上的一个构造器：宿主函数，`prototype` ⇄ `constructor` 互指。
     fn constructor(&self, name: &str, f: r8frame::NativeFn, proto: JsObject<'gc>) -> JsObject<'gc> {
         let ctor = self.realm.named_native(self.mc, f, name);
-        self.set(ctor, "prototype", proto.into());
+        // 内建构造器的 prototype：不可写、不可枚举、不可配置
+        ctor.borrow_mut(self.mc).define(self.mc, "prototype", r8frame::Property { slot: r8frame::Slot::Data(proto.into()), enumerable: false, writable: false, configurable: false });
         self.set(proto, "constructor", ctor.into());
         self.set(self.realm.global, name, ctor.into());
         ctor
+    }
+
+    /// 给函数补 `length`（不可枚举、不可写、可配置）。
+    fn length(&self, f: JsObject<'gc>, n: u32) {
+        f.borrow_mut(self.mc).define(self.mc, "length", r8frame::Property { slot: r8frame::Slot::Data(f64::from(n).into()), enumerable: false, writable: false, configurable: true });
     }
 
     /// 宿主 getter（不可枚举）。

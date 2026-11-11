@@ -1,51 +1,47 @@
-# r8 计划：补齐未支持的写法与已知偏差
+# r8 计划：test262 核心 ECMAScript 补齐
 
-结构改动：运算挂在 r8frame 的 `Agent` 上、经 `Invoke`（执行器实现）调回 JS；`Context` 指向 `Realm`，内建对象由 r8builtins 实现 `Intrinsics` 装进去。
+主线是提高 test262 通过率。每个阶段：语义表加用例 → clippy 干净 → riscv `no_std` 编过 → 快照里跑 test262 基线零回归 → 相关目录 `R8_TEST262_UPDATE=1` 记新过的 → 提交推送。
 
-范围：README「还不支持」与「已知偏差」两节里的每一项。按依赖排序分阶段，每阶段做完就在
-`r8executor` 的语义测试表里加确定的用例，clippy 干净 + `no_std` 目标编过再提交。
+不在范围：Temporal、intl402、ShadowRealm、显式资源管理（using / DisposableStack）、import defer、decorators、source phase imports。
 
-## 阶段 1：异常与宿主函数（其余阶段的地基）
+## 阶段 1：基础设施
 
-- [x] Error 对象：`Error` / `TypeError` / `ReferenceError` / `RangeError` / `SyntaxError`，带 `name` / `message`，内建错误改抛对象
-- [x] `try` / `catch` / `finally`：帧内动态处理器栈（`PushHandler` / `PopHandler`），抛出时按帧展开；`finally` 走 `break` / `continue` / `return` 也要执行
-- [x] 宿主函数：r8frame 定义 `NativeFn`（`ObjectKind::Native`），执行器的 `Call` 能调它
-- [x] 内建对象骨架：`Object.prototype` / `Function.prototype` / `Array.prototype` / `globalThis`，挂进 `Context`
-- [x] `console.log`：宿主函数，输出交给嵌入方（r8frame 定义输出 trait，r8platform 写 stdout）
+- [x] 动态代码：`Invoke::eval_code`，全局 `Function` / `eval`、GeneratorFunction / AsyncFunction / AsyncGeneratorFunction 构造器
+- [x] 早期错误：oxc_semantic 检查、正则字面量解析时校验
+- [x] 严格模式：`this` 包装、失败赋值 / 删除、未声明赋值、`arguments.callee`；严格代码里的直接 eval
+- [x] 全局声明：顶层 `var` / 函数先查后建（CanDeclareGlobalVar / Function）、`undefined` / `NaN` / `Infinity` 值属性
+- [x] `$262`：`global` / `evalScript` / `gc`（`createRealm` / `detachArrayBuffer` 抛 TypeError，阶段 4 接上后者）
 
-## 阶段 2：对象模型
+## 阶段 2：Object / Array / 属性模型
 
-- [x] `new`：构造调用（`this` 是以 `F.prototype` 为原型的新对象，返回对象则替换）；函数带 `prototype` 属性
-- [x] 类：`class` 声明 / 表达式、`constructor`、方法、静态方法、`extends` / `super(...)` / `super.m()`、字段（静态块、私有名、计算字段名还不支持）
-- [x] `instanceof`、`in`、`delete`
-- [x] getter / setter：访问器属性（对象字面量与类里），属性读写走访问器
-- [x] ToPrimitive（提前到阶段 1 做了，Error 对象要靠它打印）：`valueOf` / `toString`，`+` / 比较 / `==` / ToString 对对象都走它
+- [ ] `extensible`：preventExtensions / isExtensible / seal / isSealed / isFrozen
+- [ ] Object 补全：defineProperties、getOwnPropertySymbols / Descriptors、setPrototypeOf、fromEntries、is、hasOwn、groupBy、propertyIsEnumerable、isPrototypeOf、`__proto__` 与 `__defineGetter__` 等；字面量 `__proto__: v`
+- [ ] Array 方法对类数组通用，补 from / splice / copyWithin / flat / flatMap / findLast(Index) / reduceRight / toReversed / toSorted / toSpliced / with / unscopables / species
+- [ ] 内建函数的 `length`
 
-## 阶段 3：解构、展开、参数
+## 阶段 3：反射与迭代器
 
-- [x] 剩余参数 `...rest`、默认参数（含引用前面的形参）
-- [x] 展开：数组字面量、调用实参（`CallSpread` / `ConstructSpread` / `SuperCallSpread`）、对象字面量（数组与字符串，迭代协议在阶段 4 接上）
-- [x] 解构：声明 / 赋值 / 形参，数组与对象模式、默认值、剩余
-- [x] 可选链：`a?.b` / `a?.[k]` / `a?.()`，短路到整条链末尾
+- [ ] Reflect
+- [ ] Proxy（含 revocable）
+- [ ] Iterator 助手
+- [ ] Set 方法、Map.groupBy
 
-## 阶段 4：迭代与生成器
+## 阶段 4：二进制数据
 
-- [x] 迭代协议：`Symbol`（先只做 `Symbol.iterator` 等内建 symbol）、数组 / 字符串迭代器
-- [x] `for-of`（含解构绑定、`break` 时调 `return`）、`for-in`（自有 + 原型链可枚举字符串键）
-- [x] 生成器：`function*` / `yield` / `yield*`；帧挂起到堆上的生成器对象，`next` / `return` / `throw` 恢复
-- [x] `async` / `await`（async 生成器与 `for await` 还不支持）：Promise（`then` / `catch` / `resolve` / `reject`）、微任务队列，`async` 函数按生成器方式挂起
+- [ ] ArrayBuffer / SharedArrayBuffer / DataView / TypedArray（11 种）/ Atomics
 
-## 阶段 5：字面量
+## 阶段 5：Date / RegExp / 字符串数字
 
-- [x] 正则字面量与 `RegExp`：用 JS 语义的正则引擎（regress），`test` / `exec` / 字符串 `match` / `replace`
-- [x] BigInt 字面量与运算（num-bigint，`no_std`），`typeof` 为 `bigint`，与 Number 混算抛 TypeError
+- [ ] Date
+- [ ] RegExp 的 Symbol 协议、flags、lastIndex、`d`、compile、escape
+- [ ] String 补全
+- [ ] Number 格式化、Math 补全
+- [ ] Symbol.for、Error 补全、URI 函数、Promise 补全与子类化、WeakRef / FinalizationRegistry
 
-## 阶段 6：语义偏差
+## 阶段 6：语言动态部分
 
-- [x] 暂时性死区：`let` / `const` / `class` 声明前读写抛 ReferenceError（槽位放“未初始化”哨兵）
-- [x] 脚本顶层 `let` / `const` 放脚本作用域的声明式环境，不再是全局对象属性
-- [x] 运行中回收：执行器状态（帧、寄存器、acc）进 GC 根，按指令配额分片跑，片与片之间 `collect_debt`（`Engine` 接口改成拿 `&mut Isolate` 自己分片进入）
-
-## 不在范围
-
-JIT（tornado / jspass，仍只是规划）、模块（`import` / `export`）、`with` / `eval`、Proxy / Reflect、完整标准库。
+- [ ] 非严格的直接 eval（外层名字表、`var` 进函数变量环境）
+- [ ] `with`
+- [ ] annexB 语言（块级函数提升、HTML 注释等）
+- [ ] arguments 与形参联动
+- [ ] 模块与动态 import

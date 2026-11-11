@@ -567,30 +567,53 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    /// `target[sym] = value`。
-    pub fn set_symbol(&mut self, target: Value<'gc>, key: JsSymbol<'gc>, value: Value<'gc>) -> Result<(), Error> {
+    /// `target[sym] = value`，给出写成没有（不可写 / 没有 setter / 原始值上没有 setter 时是 `false`）。
+    pub fn try_set_symbol(&mut self, target: Value<'gc>, key: JsSymbol<'gc>, value: Value<'gc>) -> Result<bool, Error> {
         let o = match target {
             Value::Undefined | Value::Null => {
                 let what = self.symbol_descriptive(key);
                 return Err(self.nullish_error(target, "set", &what));
             }
             Value::Object(o) => o,
-            _ => return Ok(()),
+            prim => {
+                return match Self::lookup_symbol(self.proto_of(prim), key) {
+                    Some(Property { slot: Slot::Accessor { set: Some(s), .. }, .. }) => self.call(s.into(), target, &[value]).map(|_| true),
+                    _ => Ok(false),
+                };
+            }
         };
-        match Self::lookup_symbol(Some(o), key) {
+        Ok(match Self::lookup_symbol(Some(o), key) {
             Some(Property { slot: Slot::Accessor { set: Some(s), .. }, .. }) => {
                 self.call(s.into(), target, &[value])?;
+                true
             }
-            Some(Property { slot: Slot::Accessor { set: None, .. }, .. } | Property { writable: false, .. }) => {}
+            Some(Property { slot: Slot::Accessor { set: None, .. }, .. } | Property { writable: false, .. }) => false,
             Some(_) if o.borrow().get_own_symbol(key).is_some() => {
                 let mut d = o.borrow_mut(self.mc);
                 if let Some((_, p)) = d.symbols.iter_mut().find(|(k, _)| Gc::ptr_eq(*k, key)) {
                     p.slot = Slot::Data(value);
                 }
+                true
             }
-            _ => o.borrow_mut(self.mc).define_symbol(key, Property::data(value)),
+            _ => {
+                o.borrow_mut(self.mc).define_symbol(key, Property::data(value));
+                true
+            }
+        })
+    }
+
+    /// `target[sym] = value`：写不成抛 TypeError（规范里内建函数的 Set(…, true)）。
+    pub fn set_symbol(&mut self, target: Value<'gc>, key: JsSymbol<'gc>, value: Value<'gc>) -> Result<(), Error> {
+        if self.try_set_symbol(target, key, value)? {
+            Ok(())
+        } else {
+            let what = self.symbol_descriptive(key);
+            Err(self.read_only(&what))
         }
-        Ok(())
+    }
+
+    fn read_only(&self, key: &str) -> Error {
+        self.throw(ErrorKind::Type, &format!("Cannot assign to read only property '{key}'"))
     }
 
     /// `key in target`，键是任意值。
@@ -661,15 +684,21 @@ impl<'gc> Agent<'gc, '_> {
         index_of_str(key).is_some_and(|i| o.borrow_mut(self.mc).write_index(self.mc, i, value))
     }
 
-    /// `target.key = value`：原型链上有 setter 就调它，有不可写的数据属性就不写；原始值上的写悄悄丢掉。
-    pub fn set_named(&mut self, target: Value<'gc>, key: &str, value: Value<'gc>) -> Result<(), Error> {
+    /// `target.key = value`：原型链上有 setter 就调它，有不可写的数据属性就不写。给出写成没有。
+    pub fn try_set_named(&mut self, target: Value<'gc>, key: &str, value: Value<'gc>) -> Result<bool, Error> {
         let o = match target {
             Value::Undefined | Value::Null => return Err(self.nullish_error(target, "set", key)),
             Value::Object(o) => o,
-            _ => return Ok(()),
+            prim => {
+                // 原始值：只有原型链上的 setter 能接
+                return match Self::lookup(self.proto_of(prim), key) {
+                    Some(Property { slot: Slot::Accessor { set: Some(s), .. }, .. }) => self.call(s.into(), target, &[value]).map(|_| true),
+                    _ => Ok(false),
+                };
+            }
         };
         if self.set_element(o, key, value) {
-            return Ok(());
+            return Ok(true);
         }
         if key == "length" && matches!(o.borrow().kind, ObjectKind::Array(_)) {
             let n = self.to_uint32(value)?;
@@ -677,31 +706,61 @@ impl<'gc> Agent<'gc, '_> {
                 return Err(self.throw(ErrorKind::Range, "Invalid array length"));
             }
             o.borrow_mut(self.mc).set_array_length(n);
-            return Ok(());
+            return Ok(true);
         }
-        match Self::lookup(Some(o), key) {
+        Ok(match Self::lookup(Some(o), key) {
             Some(Property { slot: Slot::Accessor { set: Some(s), .. }, .. }) => {
                 self.call(s.into(), target, &[value])?;
+                true
             }
-            Some(Property { slot: Slot::Accessor { set: None, .. }, .. } | Property { writable: false, .. }) => {}
-            _ => o.borrow_mut(self.mc).set(self.mc, key, value),
-        }
-        Ok(())
+            Some(Property { slot: Slot::Accessor { set: None, .. }, .. } | Property { writable: false, .. }) => false,
+            _ => {
+                o.borrow_mut(self.mc).set(self.mc, key, value);
+                true
+            }
+        })
     }
 
-    /// `target[key] = value`。
-    pub fn set_keyed(&mut self, target: Value<'gc>, key: Value<'gc>, value: Value<'gc>) -> Result<(), Error> {
+    /// `target.key = value`：写不成抛 TypeError（规范里内建函数的 Set(…, true)）。
+    pub fn set_named(&mut self, target: Value<'gc>, key: &str, value: Value<'gc>) -> Result<(), Error> {
+        if self.try_set_named(target, key, value)? { Ok(()) } else { Err(self.read_only(key)) }
+    }
+
+    /// `target[key] = value`，给出写成没有。
+    pub fn try_set_keyed(&mut self, target: Value<'gc>, key: Value<'gc>, value: Value<'gc>) -> Result<bool, Error> {
         if let Value::Symbol(k) = key {
-            return self.set_symbol(target, k, value);
+            return self.try_set_symbol(target, k, value);
         }
         if let (Value::Object(o), Value::Number(x)) = (target, key)
             && let Some(i) = index_of_number(x)
             && o.borrow_mut(self.mc).write_index(self.mc, i, value)
         {
-            return Ok(());
+            return Ok(true);
         }
         let k = self.property_key(key)?;
-        self.set_named(target, &k, value)
+        self.try_set_named(target, &k, value)
+    }
+
+    /// `target[key] = value`：写不成抛 TypeError。
+    pub fn set_keyed(&mut self, target: Value<'gc>, key: Value<'gc>, value: Value<'gc>) -> Result<(), Error> {
+        if self.try_set_keyed(target, key, value)? {
+            Ok(())
+        } else {
+            let k = match key {
+                Value::Symbol(s) => self.symbol_descriptive(s),
+                k => self.to_string(k)?,
+            };
+            Err(self.read_only(&k))
+        }
+    }
+
+    /// JS 代码里的赋值：严格模式写不成抛 TypeError，非严格悄悄丢掉。
+    pub fn put_named(&mut self, target: Value<'gc>, key: &str, value: Value<'gc>, strict: bool) -> Result<(), Error> {
+        if strict { self.set_named(target, key, value) } else { self.try_set_named(target, key, value).map(drop) }
+    }
+
+    pub fn put_keyed(&mut self, target: Value<'gc>, key: Value<'gc>, value: Value<'gc>, strict: bool) -> Result<(), Error> {
+        if strict { self.set_keyed(target, key, value) } else { self.try_set_keyed(target, key, value).map(drop) }
     }
 
     /// 定义自有属性（对象字面量、类）：数组下标写元素。

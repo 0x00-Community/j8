@@ -28,7 +28,7 @@ mod promise;
 mod realm;
 mod value;
 
-pub use agent::{Agent, Invoke, Resume, Step};
+pub use agent::{Agent, CodeKind, Invoke, Resume, Step};
 pub use engine::{Engine, Source};
 pub use error::Error;
 pub use handle::{ContextRoot, Global};

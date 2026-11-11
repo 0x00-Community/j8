@@ -26,6 +26,7 @@ oxc_allocator = "0.158"
 oxc_ast = "0.158"
 oxc_parser = "0.158"
 oxc_span = "0.158"
+oxc_semantic = "0.158"
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }

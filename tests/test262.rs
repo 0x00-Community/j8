@@ -218,6 +218,7 @@ impl Case {
         if self.has(Flag::OnlyStrict) {
             src.push_str("\"use strict\";\n");
         }
+        src.push_str(HOST_262);
         let mut harness = vec!["assert.js", "sta.js"];
         if self.has(Flag::Async) {
             src.push_str("function print(m) { console.log(m); }\n");
@@ -280,6 +281,11 @@ impl Case {
         (outcome, why)
     }
 }
+
+/// 宿主对象 `$262`：evalScript 走间接 eval，createRealm / detachArrayBuffer 还没有。
+const HOST_262: &str = "var $262 = { global: globalThis, gc: function () {}, evalScript: function (s) { return (0, eval)(s); }, \
+createRealm: function () { throw new TypeError('createRealm is not supported'); }, \
+detachArrayBuffer: function () { throw new TypeError('detachArrayBuffer is not supported'); }, agent: {} };\n";
 
 /// 父进程：一个用例的子进程结果。
 struct Ran {

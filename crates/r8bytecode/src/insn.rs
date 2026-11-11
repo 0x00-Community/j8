@@ -35,6 +35,26 @@ impl PartialEq for Constant {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Const(pub u32);
 
+/// 代码的模式：非严格 / 严格。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Mode {
+    #[default]
+    Sloppy,
+    Strict,
+}
+
+impl From<bool> for Mode {
+    fn from(strict: bool) -> Self {
+        if strict { Self::Strict } else { Self::Sloppy }
+    }
+}
+
+impl From<Mode> for bool {
+    fn from(m: Mode) -> Self {
+        m == Mode::Strict
+    }
+}
+
 /// 一个函数：名字、形参数、寄存器数、指令、常量池。
 #[derive(Clone, Debug, Default)]
 pub struct Function {
@@ -46,6 +66,8 @@ pub struct Function {
     pub generator: bool,
     /// async 函数：调用时跑到第一个 `await`，返回 Promise
     pub asynchronous: bool,
+    /// 严格模式：`this` 不换成全局对象、失败的赋值 / 删除抛错
+    pub mode: Mode,
     pub params: u16,
     /// 函数的 `length`：第一个带默认值的形参（或剩余参数）之前的形参个数
     pub length: u16,
