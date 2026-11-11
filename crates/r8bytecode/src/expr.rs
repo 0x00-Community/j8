@@ -548,6 +548,30 @@ impl<'a> Compiler<'a, '_> {
             self.release(v);
             return Ok(());
         };
+        // `o.x = v` / `o[k] = v`：对象在寄存器里、右边（和键）改不了它，直接写，不先拷对象
+        if a.operator == AssignmentOperator::Assign
+            && Self::cannot_assign(&a.right)
+            && let Some(m) = t.as_member_expression()
+        {
+            match m {
+                MemberExpression::StaticMemberExpression(m) if let Some(obj) = self.in_register(&m.object) => {
+                    let name = self.name(m.property.name.as_str());
+                    self.expr(&a.right)?;
+                    self.emit(Insn::SetNamed { obj, name, strict: self.strict_here() });
+                    return Ok(());
+                }
+                MemberExpression::ComputedMemberExpression(m) if Self::cannot_assign(&m.expression) && let Some(obj) = self.in_register(&m.object) => {
+                    self.expr(&m.expression)?;
+                    let key = self.temp();
+                    self.emit(Insn::Star(key));
+                    self.expr(&a.right)?;
+                    self.emit(Insn::SetKeyed { obj, key, strict: self.strict_here() });
+                    self.release(key);
+                    return Ok(());
+                }
+                _ => {}
+            }
+        }
         let t = self.target(t)?;
         match Self::assign_kind(a.operator) {
             Assign::Plain => {
@@ -702,7 +726,24 @@ impl<'a> Compiler<'a, '_> {
         Ok(())
     }
 
+    /// `e` 是本函数寄存器里的变量或 `this`（这里不用查死区、不在 `with` 里）就给出那个寄存器，读它不用先拷进临时寄存器。
+    fn in_register(&self, e: &'a Expression<'a>) -> Option<Reg> {
+        match e {
+            Expression::Identifier(id) => self.register_of(id.name.as_str(), id.span.start),
+            Expression::ThisExpression(t) => self.register_of(crate::scope::THIS, t.span.start),
+            Expression::ParenthesizedExpression(p) => self.in_register(&p.expression),
+            _ => None,
+        }
+    }
+
     fn static_member(&mut self, m: &'a StaticMemberExpression<'a>) -> Result<(), Error> {
+        if !m.optional
+            && let Some(obj) = self.in_register(&m.object)
+        {
+            let name = self.name(m.property.name.as_str());
+            self.emit(Insn::GetNamed { obj, name });
+            return Ok(());
+        }
         self.expr(&m.object)?;
         self.optional(m.optional, m.span)?;
         let obj = self.temp();
@@ -726,6 +767,15 @@ impl<'a> Compiler<'a, '_> {
     }
 
     fn computed_member(&mut self, m: &'a ComputedMemberExpression<'a>) -> Result<(), Error> {
+        // 对象在寄存器里、键改不了它：先求键，直接用对象的寄存器
+        if !m.optional
+            && Self::cannot_assign(&m.expression)
+            && let Some(obj) = self.in_register(&m.object)
+        {
+            self.expr(&m.expression)?;
+            self.emit(Insn::GetKeyed { obj });
+            return Ok(());
+        }
         self.expr(&m.object)?;
         self.optional(m.optional, m.span)?;
         let obj = self.temp();
