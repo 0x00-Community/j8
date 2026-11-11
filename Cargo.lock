@@ -826,9 +826,11 @@ name = "r8frame"
 version = "0.1.0"
 dependencies = [
  "gc-arena",
+ "hashbrown",
  "libm",
  "num-bigint 0.4.8",
  "num-traits",
+ "rustc-hash",
  "ryu-js",
  "smol_str",
 ]

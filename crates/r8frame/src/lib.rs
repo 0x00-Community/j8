@@ -39,7 +39,7 @@ pub use handle::{ContextRoot, Global};
 pub use isolate::{CreateParams, Isolate, Scope};
 pub use object::{ArgumentsMap, HostData, BigIntData, Bound, BufferData, Capability, Closure, ClosureFn, ElementKind, ViewData, HelperKind, HelperState, IteratorHelper, NativeClosure, ProxyData, Collection, MapKey, Request, JsBigInt, RegExpData, Coroutine, CoroutineState, Env, IterKind, IteratorState, Job, JsEnv, JsObject, JsString, JsSymbol, Forward, Native, NativeFn, ObjectData, ObjectKind, SmallStr, Property, Reaction, Settled, Slot, Suspended, SymbolData};
 pub use bigint::Numeric;
-pub use ops::{BinaryOp, CompareOp, ErrorKind, Hint, IterRecord, UnaryOp};
+pub use ops::{number_text, BinaryOp, CompareOp, ErrorKind, Hint, IterRecord, UnaryOp};
 pub use platform::{Platform, Task};
 pub use module::{ImportEntry, ImportName, ModuleInfo, ModuleRecord, ModuleStatus, Resolution, ResolvedBinding};
 pub use profiler::{Counter, FuncId, Profiler};

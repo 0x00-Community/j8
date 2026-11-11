@@ -235,6 +235,34 @@ fn modulo_u32(x: f64) -> u32 {
     u
 }
 
+/// Number::toString(x)：安全整数直接按十进制写进栈上缓冲（短，成 [`SmallStr`](crate::SmallStr) 不分配），其余交给 ryu-js。
+pub fn number_text(x: f64) -> crate::SmallStr {
+    #[expect(clippy::cast_possible_truncation, reason = "下面比较确认是安全整数")]
+    let i = x as i64;
+    #[expect(clippy::cast_precision_loss, reason = "安全整数范围内精确")]
+    if x.abs() <= MAX_SAFE_INTEGER && i as f64 == x {
+        // 最长 "-9007199254740991"
+        let mut buf = [0u8; 20];
+        let mut at = buf.len();
+        let mut n = i.unsigned_abs();
+        loop {
+            at -= 1;
+            let digit = (n % 10) as u8;
+            buf[at] = b'0' + digit;
+            n /= 10;
+            if n == 0 {
+                break;
+            }
+        }
+        if i < 0 {
+            at -= 1;
+            buf[at] = b'-';
+        }
+        return crate::SmallStr::from(core::str::from_utf8(&buf[at..]).unwrap_or_default());
+    }
+    crate::SmallStr::from(ryu_js::Buffer::new().format(x))
+}
+
 /// ToInt32
 fn to_int32(x: f64) -> i32 {
     modulo_u32(x).cast_signed()
@@ -386,7 +414,7 @@ impl<'gc> Agent<'gc, '_> {
             Value::Null => self.string("null"),
             Value::Bool(true) => self.string("true"),
             Value::Bool(false) => self.string("false"),
-            Value::Number(x) => self.string(ryu_js::Buffer::new().format(x)),
+            Value::Number(x) => Gc::new(self.mc, number_text(x)),
             Value::Symbol(_) => return Err(self.throw(ErrorKind::Type, "Cannot convert a Symbol value to a string")),
             Value::BigInt(b) => self.string(&format!("{}", b.0)),
             Value::Object(_) => {
@@ -956,7 +984,7 @@ impl<'gc> Agent<'gc, '_> {
             Value::Undefined | Value::Uninit => String::from("undefined"),
             Value::Null => String::from("null"),
             Value::Bool(b) => String::from(if b { "true" } else { "false" }),
-            Value::Number(x) => String::from(ryu_js::Buffer::new().format(x)),
+            Value::Number(x) => String::from(&*number_text(x)),
             Value::String(s) => format!("\"{}\"", &**s),
             Value::Symbol(s) => String::from(&**self.symbol_descriptive(s)),
             Value::BigInt(b) => format!("{}n", b.0),
@@ -1038,7 +1066,7 @@ impl<'gc> Agent<'gc, '_> {
 
     /// 数下标 ⇒ 属性键文本。
     pub fn index_key(i: f64) -> String {
-        String::from(ryu_js::Buffer::new().format(i))
+        String::from(&*number_text(i))
     }
 
     /// `o[i]`（数组稠密部分走快路）。

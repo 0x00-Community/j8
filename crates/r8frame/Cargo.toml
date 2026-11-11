@@ -8,6 +8,8 @@ license.workspace = true
 [dependencies]
 gc-arena.workspace = true
 smol_str.workspace = true
+hashbrown.workspace = true
+rustc-hash.workspace = true
 ryu-js.workspace = true
 libm.workspace = true
 num-bigint.workspace = true

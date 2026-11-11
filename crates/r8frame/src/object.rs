@@ -276,14 +276,15 @@ pub enum Job<'gc> {
     Thenable { promise: JsObject<'gc>, thenable: Value<'gc>, then: Value<'gc> },
 }
 
-/// Map / Set 按 SameValueZero 找键用的排序键：`NaN` 只有一个、`-0` 当 `+0`，字符串与 BigInt 比内容，对象与 Symbol 比身份。
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+/// Map / Set 按 SameValueZero 找键用的键：`NaN` 只有一个、`-0` 当 `+0`，字符串与 BigInt 比内容，对象与 Symbol 比身份。
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum MapKey {
     Undefined,
     Null,
     Bool(bool),
     Number(u64),
-    String(Box<str>),
+    /// 字符串值本身（短串内联、长串共享，查找时不分配）
+    String(SmallStr),
     BigInt(Box<str>),
     /// 对象 / Symbol 的地址（gc-arena 不搬对象，地址就是身份）
     Ref(usize),
@@ -297,7 +298,7 @@ impl From<Value<'_>> for MapKey {
             Value::Bool(b) => MapKey::Bool(b),
             Value::Number(x) if x.is_nan() => MapKey::Number(f64::NAN.to_bits()),
             Value::Number(x) => MapKey::Number((x + 0.0).to_bits()),
-            Value::String(s) => MapKey::String((**s).into()),
+            Value::String(s) => MapKey::String((*s).clone()),
             Value::BigInt(b) => MapKey::BigInt(alloc::format!("{}", b.0).into()),
             Value::Symbol(s) => MapKey::Ref(Gc::as_ptr(s) as usize),
             Value::Object(o) => MapKey::Ref(Gc::as_ptr(o).cast::<u8>() as usize),
@@ -310,14 +311,14 @@ impl From<Value<'_>> for MapKey {
 #[collect(no_drop)]
 pub struct Collection<'gc> {
     pub entries: Vec<Option<(Value<'gc>, Value<'gc>)>>,
-    index: gc_arena::Static<alloc::collections::BTreeMap<MapKey, usize>>,
+    index: gc_arena::Static<hashbrown::HashMap<MapKey, usize, core::hash::BuildHasherDefault<rustc_hash::FxHasher>>>,
     pub size: usize,
     pub weak: bool,
 }
 
 impl<'gc> Collection<'gc> {
     pub fn new(weak: bool) -> Self {
-        Self { entries: Vec::new(), index: gc_arena::Static(alloc::collections::BTreeMap::new()), size: 0, weak }
+        Self { entries: Vec::new(), index: gc_arena::Static(hashbrown::HashMap::default()), size: 0, weak }
     }
 
     pub fn get(&self, key: Value<'gc>) -> Option<Value<'gc>> {
