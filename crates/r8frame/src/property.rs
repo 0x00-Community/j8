@@ -178,6 +178,10 @@ impl<'gc> Agent<'gc, '_> {
 
     /// [[GetOwnProperty]]。
     pub fn get_own_property(&mut self, o: JsObject<'gc>, key: Key<'_, 'gc>) -> Result<Option<Property<'gc>>, Error> {
+        if let Some(parts) = self.proxy_parts(o) {
+            let (t, h) = parts?;
+            return self.proxy_get_own_property(t, h, key);
+        }
         let d = o.borrow();
         Ok(match (&d.kind, key) {
             (ObjectKind::Array(_), Key::Str("length")) => {
@@ -195,6 +199,10 @@ impl<'gc> Agent<'gc, '_> {
 
     /// [[DefineOwnProperty]]：给出成没成。
     pub fn define_own_property(&mut self, o: JsObject<'gc>, key: Key<'_, 'gc>, desc: Descriptor<'gc>) -> Result<bool, Error> {
+        if let Some(parts) = self.proxy_parts(o) {
+            let (t, h) = parts?;
+            return self.proxy_define_own_property(t, h, key, desc);
+        }
         let (array, string) = match &o.borrow().kind {
             ObjectKind::Array(_) => (true, None),
             ObjectKind::Primitive(Value::String(s)) => (false, Some(*s)),
@@ -311,6 +319,10 @@ impl<'gc> Agent<'gc, '_> {
 
     /// [[Delete]]：不可配置的删不掉（给 `false`），没有也算删成。
     pub fn delete_property(&mut self, o: JsObject<'gc>, key: Key<'_, 'gc>) -> Result<bool, Error> {
+        if let Some(parts) = self.proxy_parts(o) {
+            let (t, h) = parts?;
+            return self.proxy_delete(t, h, key);
+        }
         match self.get_own_property(o, key)? {
             None => Ok(true),
             Some(p) if p.configurable => {
@@ -323,6 +335,10 @@ impl<'gc> Agent<'gc, '_> {
 
     /// [[OwnPropertyKeys]]：数组下标从小到大，再字符串键按建立顺序，再 Symbol 键按建立顺序。
     pub fn own_property_keys(&mut self, o: JsObject<'gc>) -> Result<Vec<PropertyKey<'gc>>, Error> {
+        if let Some(parts) = self.proxy_parts(o) {
+            let (t, h) = parts?;
+            return self.proxy_own_keys(t, h);
+        }
         let d = o.borrow();
         let mut indices: Vec<(u32, Option<JsString<'gc>>)> = Vec::new();
         let mut strings = Vec::new();
@@ -351,20 +367,36 @@ impl<'gc> Agent<'gc, '_> {
     }
 
     pub fn is_extensible(&mut self, o: JsObject<'gc>) -> Result<bool, Error> {
+        if let Some(parts) = self.proxy_parts(o) {
+            let (t, h) = parts?;
+            return self.proxy_is_extensible(t, h);
+        }
         Ok(!o.borrow().non_extensible)
     }
 
     pub fn prevent_extensions(&mut self, o: JsObject<'gc>) -> Result<bool, Error> {
+        if let Some(parts) = self.proxy_parts(o) {
+            let (t, h) = parts?;
+            return self.proxy_prevent_extensions(t, h);
+        }
         o.borrow_mut(self.mc).non_extensible = true;
         Ok(true)
     }
 
     pub fn get_prototype_of(&mut self, o: JsObject<'gc>) -> Result<Option<JsObject<'gc>>, Error> {
+        if let Some(parts) = self.proxy_parts(o) {
+            let (t, h) = parts?;
+            return self.proxy_get_prototype_of(t, h);
+        }
         Ok(o.borrow().proto)
     }
 
     /// [[SetPrototypeOf]]：不可扩展的只能设成原来那个；成环不行；`Object.prototype` 的原型不可改。
     pub fn set_prototype_of(&mut self, o: JsObject<'gc>, proto: Option<JsObject<'gc>>) -> Result<bool, Error> {
+        if let Some(parts) = self.proxy_parts(o) {
+            let (t, h) = parts?;
+            return self.proxy_set_prototype_of(t, h, proto);
+        }
         let (current, extensible) = {
             let d = o.borrow();
             (d.proto, !d.non_extensible)
@@ -379,6 +411,9 @@ impl<'gc> Agent<'gc, '_> {
         while let Some(x) = p {
             if Gc::ptr_eq(x, o) {
                 return Ok(false);
+            }
+            if matches!(x.borrow().kind, ObjectKind::Proxy(_)) {
+                break;
             }
             p = x.borrow().proto;
         }

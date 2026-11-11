@@ -10,11 +10,13 @@ mod collections;
 mod error;
 mod function;
 mod global;
+mod helpers;
 mod iter;
 mod json;
 mod math;
 mod object;
 mod promise;
+mod reflect;
 mod regexp;
 mod string;
 
@@ -38,12 +40,14 @@ impl Intrinsics for Builtins {
         b.math();
         b.errors();
         b.iterators();
+        b.helpers();
         b.promise();
         b.bigint();
         b.regexp();
         b.collections();
         b.async_generators();
         b.json();
+        b.reflect();
         b.tags();
     }
 }
@@ -96,6 +100,9 @@ impl<'gc> Installer<'_, 'gc> {
             (r.async_function_proto, "AsyncFunction"),
             (r.async_generator_function_proto, "AsyncGeneratorFunction"),
             (r.array_iterator_proto, "Array Iterator"),
+            (r.collection_iterator_proto, "Map Iterator"),
+            (r.set_iterator_proto, "Set Iterator"),
+            (r.iterator_helper_proto, "Iterator Helper"),
             (r.string_iterator_proto, "String Iterator"),
         ];
         for name in ["Math", "JSON"] {

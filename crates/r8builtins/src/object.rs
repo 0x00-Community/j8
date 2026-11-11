@@ -5,7 +5,7 @@ use r8frame::{Agent, Bound, Descriptor, Error, ErrorKind, Integrity, IterKind, J
 use crate::{Args, Installer};
 
 /// `Object` / `Function` / `Boolean` 与它们的原型方法。
-struct Objects;
+pub(crate) struct Objects;
 
 impl Objects {
     /// `new.target` 是不是 `Object` 自己。

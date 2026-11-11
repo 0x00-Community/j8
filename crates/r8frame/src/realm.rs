@@ -91,6 +91,12 @@ pub struct Realm<'gc> {
     pub weakset_proto: JsObject<'gc>,
     /// Map / Set 迭代器的原型（`next`）
     pub collection_iterator_proto: JsObject<'gc>,
+    /// %SetIteratorPrototype%（`collection_iterator_proto` 是 Map 的）
+    pub set_iterator_proto: JsObject<'gc>,
+    /// %IteratorHelperPrototype%
+    pub iterator_helper_proto: JsObject<'gc>,
+    /// %WrapForValidIteratorPrototype%
+    pub wrap_iterator_proto: JsObject<'gc>,
     /// 脚本作用域：各脚本顶层的 `let` / `const` / `class`（跨脚本共享，不是全局对象的属性）
     pub script_scope: JsObject<'gc>,
     pub symbols: WellKnown<'gc>,
@@ -137,6 +143,9 @@ impl<'gc> Realm<'gc> {
             weakmap_proto: derived(object_proto),
             weakset_proto: derived(object_proto),
             collection_iterator_proto: derived(iterator_proto),
+            set_iterator_proto: derived(iterator_proto),
+            iterator_helper_proto: derived(iterator_proto),
+            wrap_iterator_proto: derived(iterator_proto),
             script_scope: ObjectData::default().alloc(mc),
             symbols: WellKnown {
                 iterator: symbol("iterator"),

@@ -103,6 +103,16 @@ impl<'gc> Outcome<'gc> {
     }
 }
 
+/// 调一个对象时要做的事（先从对象里取出来，放掉借用再做）。
+enum CallStep<'gc> {
+    Closure(Closure<'gc>),
+    Resolver,
+    Proxy,
+    NativeClosure(r8frame::ClosureFn),
+    Native(r8frame::Native),
+    Bound(Value<'gc>, Value<'gc>, Vec<Value<'gc>>),
+}
+
 /// 调用解析的结果：要进一帧的闭包，或宿主函数已经算完的值。
 enum Callee<'gc> {
     Closure { closure: Closure<'gc>, callee: Value<'gc>, this: Value<'gc>, args: Vec<Value<'gc>> },
@@ -184,36 +194,53 @@ impl Executor {
     /// 解开绑定函数、直接调宿主函数；剩下 JS 闭包交给调用者进帧。
     fn resolve<'gc>(&self, a: &mut Agent<'gc, '_>, mut callee: Value<'gc>, mut this: Value<'gc>, mut args: Vec<Value<'gc>>, depth: usize) -> Result<Callee<'gc>, Error> {
         while let Value::Object(o) = callee {
-            let kind = match &o.borrow().kind {
-                ObjectKind::Function(c) if matches!(self.function(c.func).func.kind, FunctionKind::Constructor { .. }) => {
-                    let loaded = self.function(c.func);
-                    let name = &loaded.func.name;
-                    return Err(a.throw(ErrorKind::Type, &alloc::format!("Class constructor {name} cannot be invoked without 'new'")));
-                }
-                ObjectKind::Function(c) if { let l = self.function(c.func); l.func.generator || l.func.asynchronous } => {
-                    let c = *c;
-                    return self.start(a, c, callee, this, &args, depth).map(Callee::Done);
-                }
-                ObjectKind::Function(c) => return Ok(Callee::Closure { closure: *c, callee, this, args }),
-                ObjectKind::Resolver { .. } => return a.run_resolver(o, args.first().copied().unwrap_or_default()).map(Callee::Done),
-                ObjectKind::Native(n) => Ok(*n),
-                ObjectKind::Bound(b) => Err((b.target, b.this, b.args.clone())),
+            // 先把要做的事取出来，借用放掉之后再调（被调的代码可能改这个函数对象）
+            let step = match &o.borrow().kind {
+                ObjectKind::Function(c) => CallStep::Closure(*c),
+                ObjectKind::Resolver { .. } => CallStep::Resolver,
+                ObjectKind::Proxy(p) if p.callable => CallStep::Proxy,
+                ObjectKind::NativeClosure(c) => CallStep::NativeClosure(c.f),
+                ObjectKind::Native(n) => CallStep::Native(*n),
+                ObjectKind::Bound(b) => CallStep::Bound(b.target, b.this, b.args.clone()),
                 _ => break,
             };
-            match kind {
-                Ok(n) => {
-                    let saved = self.depth.replace(depth);
+            let saved = self.depth.replace(depth);
+            let r = match step {
+                CallStep::Closure(c) => {
+                    self.depth.set(saved);
+                    let loaded = self.function(c.func);
+                    let f = &loaded.func;
+                    if matches!(f.kind, FunctionKind::Constructor { .. }) {
+                        return Err(a.throw(ErrorKind::Type, &alloc::format!("Class constructor {} cannot be invoked without 'new'", f.name)));
+                    }
+                    if f.generator || f.asynchronous {
+                        return self.start(a, c, callee, this, &args, depth).map(Callee::Done);
+                    }
+                    return Ok(Callee::Closure { closure: c, callee, this, args });
+                }
+                CallStep::Resolver => a.run_resolver(o, args.first().copied().unwrap_or_default()),
+                CallStep::Proxy => a.proxy_call(o, this, &args),
+                CallStep::NativeClosure(f) => {
+                    let outer = core::mem::replace(&mut a.new_target, Value::Undefined);
+                    let r = f(a, o, this, &args);
+                    a.new_target = outer;
+                    r
+                }
+                CallStep::Native(n) => {
                     let outer = core::mem::replace(&mut a.new_target, Value::Undefined);
                     let r = (n.f)(a, this, &args);
                     a.new_target = outer;
-                    self.depth.set(saved);
-                    return r.map(Callee::Done);
+                    r
                 }
-                Err((target, bound_this, mut bound_args)) => {
+                CallStep::Bound(target, bound_this, mut bound_args) => {
+                    self.depth.set(saved);
                     bound_args.extend(args);
                     (callee, this, args) = (target, bound_this, bound_args);
+                    continue;
                 }
-            }
+            };
+            self.depth.set(saved);
+            return r.map(Callee::Done);
         }
         let what = a.describe(callee);
         Err(a.throw(ErrorKind::Type, &alloc::format!("{what} is not a function")))
@@ -259,7 +286,8 @@ impl Executor {
             let kind = match &o.borrow().kind {
                 ObjectKind::Function(c) => Ok(Ok(*c)),
                 ObjectKind::Native(n) => Ok(Err(*n)),
-                ObjectKind::Bound(b) => Err((b.target, b.args.clone())),
+                ObjectKind::Bound(b) => Err(Some((b.target, b.args.clone()))),
+                ObjectKind::Proxy(p) if p.constructor => Err(None),
                 _ => break,
             };
             match kind {
@@ -299,7 +327,13 @@ impl Executor {
                     let Value::Object(obj) = r? else { unreachable!("built-in constructors return objects") };
                     return Ok(Prepared::Done(obj.into()));
                 }
-                Err((target, mut bound_args)) => {
+                Err(None) => {
+                    let saved = self.depth.replace(depth);
+                    let r = a.proxy_construct(o, &args, new_target);
+                    self.depth.set(saved);
+                    return r.map(Prepared::Done);
+                }
+                Err(Some((target, mut bound_args))) => {
                     if matches!(new_target, Value::Object(t) if Gc::ptr_eq(t, o)) {
                         new_target = target;
                     }
@@ -1553,6 +1587,13 @@ mod tests {
             ("class M extends Map {} const m = new M(); (m instanceof M) + ',' + m.size", "true,0"),
             ("Math.max.length + [].push.length + Object.defineProperty.length + typeof new Number(1)", "6object"),
             ("const a = [1, 2, 3]; a.length = 1; a.splice(0, 0, 'x', 'y'); a.join() + Array.from({ length: 2 }, (_, i) => i * 2).join()", "x,y,10,2"),
+            // Proxy / Reflect / Iterator 助手 / Set 方法
+            ("const log = []; const p = new Proxy({ a: 1 }, { get(t, k, r) { log.push(k); return Reflect.get(t, k, r) } }); p.a + log.join()", "1a"),
+            ("const f = new Proxy(function (x) { return x * 2 }, { apply(t, th, args) { return t(...args) + 1 } }); f(5) + typeof f", "11function"),
+            ("const { proxy, revoke } = Proxy.revocable({}, {}); revoke(); let e; try { proxy.x } catch (x) { e = x.name } e", "TypeError"),
+            ("function* g() { yield 1; yield 2; yield 3; yield 4 } g().map(x => x * 10).filter(x => x > 10).take(2).toArray().join() + '|' + g().drop(2).reduce((a, b) => a + b)", "20,30|7"),
+            ("new Set([1, 2, 3]).union(new Set([3, 4])).size + [...new Set([1, 2, 3]).difference(new Set([2]))].join()", "41,3"),
+            ("Map.groupBy([1, 2, 3], x => x % 2).get(1).join() + Reflect.ownKeys({ b: 1, 1: 0 }).join()", "1,31,b"),
             ("const o = Object.preventExtensions({ a: 1 }); o.b = 2; Object.isExtensible(o) + ',' + ('b' in o) + ',' + Object.isSealed(Object.seal({}))", "false,false,true"),
         ];
         for (src, want) in ok {

@@ -99,6 +99,7 @@ impl<'gc> Agent<'gc, '_> {
             crate::ObjectKind::Function(c) => self.invoke.constructs(c),
             crate::ObjectKind::Native(n) => n.constructor,
             crate::ObjectKind::Bound(b) => self.is_constructor(b.target),
+            crate::ObjectKind::Proxy(p) => p.constructor,
             _ => false,
         }
     }

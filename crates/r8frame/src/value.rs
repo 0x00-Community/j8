@@ -36,6 +36,13 @@ impl PartialEq for Value<'_> {
     }
 }
 
+impl<'gc> Value<'gc> {
+    /// 原型（可能没有）⇒ 值：没有就是 `null`。
+    pub fn from_proto(p: Option<crate::JsObject<'gc>>) -> Self {
+        p.map_or(Value::Null, Value::Object)
+    }
+}
+
 impl Value<'_> {
     /// SameValue：同 `===`，但 `NaN` 等于自己、`+0` 不等于 `-0`。
     pub fn same_value(self, o: Self) -> bool {

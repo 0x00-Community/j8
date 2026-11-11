@@ -339,6 +339,68 @@ impl<'gc> Collection<'gc> {
     }
 }
 
+/// 带状态的宿主函数：调用时拿到自己（状态在 `slots` 里）。
+pub type ClosureFn = for<'gc, 'x> fn(&mut Agent<'gc, 'x>, JsObject<'gc>, Value<'gc>, &[Value<'gc>]) -> Result<Value<'gc>, Error>;
+
+/// 带状态的宿主函数对象的本体（Promise 的元素函数、Proxy 的撤销函数等）。
+#[derive(Collect)]
+#[collect(no_drop)]
+pub struct NativeClosure<'gc> {
+    #[collect(require_static)]
+    pub f: ClosureFn,
+    pub slots: Vec<Value<'gc>>,
+}
+
+impl fmt::Debug for NativeClosure<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("NativeClosure").field("slots", &self.slots.len()).finish()
+    }
+}
+
+/// Proxy：目标与处理器（撤销后都是 `None`）；能不能调用 / 构造在建的时候按目标定下。
+#[derive(Clone, Copy, Debug, Collect)]
+#[collect(no_drop)]
+pub struct ProxyData<'gc> {
+    pub target: Option<JsObject<'gc>>,
+    pub handler: Option<JsObject<'gc>>,
+    pub callable: bool,
+    pub constructor: bool,
+}
+
+/// Iterator 助手的种类（`map` / `filter` / `take` / `drop` / `flatMap`）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Collect)]
+#[collect(require_static)]
+pub enum HelperKind {
+    Map,
+    Filter,
+    Take,
+    Drop,
+    FlatMap,
+}
+
+/// Iterator 助手（生成器式）的状态。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Collect)]
+#[collect(require_static)]
+pub enum HelperState {
+    Start,
+    Suspended,
+    Running,
+    Done,
+}
+
+/// Iterator 助手：底层迭代器、回调、`take` / `drop` 剩下的个数、计数、`flatMap` 正在走的内层迭代器。
+#[derive(Clone, Copy, Debug, Collect)]
+#[collect(no_drop)]
+pub struct IteratorHelper<'gc> {
+    pub kind: HelperKind,
+    pub state: HelperState,
+    pub underlying: crate::IterRecord<'gc>,
+    pub f: Value<'gc>,
+    pub remaining: f64,
+    pub counter: f64,
+    pub inner: Option<crate::IterRecord<'gc>>,
+}
+
 /// 对象的种类：普通对象之外带的内部槽。
 #[derive(Debug, Default, Collect)]
 #[collect(no_drop)]
@@ -367,12 +429,17 @@ pub enum ObjectKind<'gc> {
     /// Set（值放在键与值两处；`weak` 为真是 WeakSet）
     Set(Collection<'gc>),
     /// Map / Set 的迭代器：活视图，按条目下标走（`target` 为 `None` 就是走完了）
-    CollectionIterator { target: Option<JsObject<'gc>>, index: usize, kind: IterKind },
+    CollectionIterator { target: Option<JsObject<'gc>>, index: usize, kind: IterKind, set: bool },
+    NativeClosure(NativeClosure<'gc>),
+    Proxy(ProxyData<'gc>),
+    IteratorHelper(IteratorHelper<'gc>),
+    /// `Iterator.from` 包出来的迭代器
+    WrappedIterator(crate::IterRecord<'gc>),
 }
 
 impl ObjectKind<'_> {
     pub fn is_callable(&self) -> bool {
-        matches!(self, ObjectKind::Function(_) | ObjectKind::Native(_) | ObjectKind::Bound(_) | ObjectKind::Resolver { .. })
+        matches!(self, ObjectKind::Function(_) | ObjectKind::Native(_) | ObjectKind::Bound(_) | ObjectKind::Resolver { .. } | ObjectKind::NativeClosure(_) | ObjectKind::Proxy(ProxyData { callable: true, .. }))
     }
 }
 
@@ -403,8 +470,9 @@ impl fmt::Debug for ObjectData<'_> {
             ObjectKind::Ordinary | ObjectKind::Arguments => "Object",
             ObjectKind::Error => "Error",
             ObjectKind::Array(_) => "Array",
-            ObjectKind::Function(_) | ObjectKind::Native(_) | ObjectKind::Bound(_) | ObjectKind::Resolver { .. } => "Function",
-            ObjectKind::Iterator(_) | ObjectKind::CollectionIterator { .. } => "Iterator",
+            ObjectKind::Function(_) | ObjectKind::Native(_) | ObjectKind::Bound(_) | ObjectKind::Resolver { .. } | ObjectKind::NativeClosure(_) => "Function",
+            ObjectKind::Proxy(_) => "Proxy",
+            ObjectKind::Iterator(_) | ObjectKind::CollectionIterator { .. } | ObjectKind::IteratorHelper(_) | ObjectKind::WrappedIterator(_) => "Iterator",
             ObjectKind::Coroutine(_) => "Generator",
             ObjectKind::Promise { .. } => "Promise",
             ObjectKind::RegExp(_) => "RegExp",

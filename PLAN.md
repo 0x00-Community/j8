@@ -22,10 +22,10 @@
 
 ## 阶段 3：反射与迭代器
 
-- [ ] Reflect
-- [ ] Proxy（含 revocable）
-- [ ] Iterator 助手
-- [ ] Set 方法、Map.groupBy
+- [x] Reflect
+- [x] Proxy（含 revocable）：r8frame proxy.rs，内部方法入口与调用 / 构造分派到 trap 并查不变式
+- [x] Iterator 助手（全局 Iterator、Iterator.from、map / filter / take / drop / flatMap / reduce / toArray / forEach / some / every / find）
+- [x] Set 方法、Map.groupBy
 
 ## 阶段 4：二进制数据
 

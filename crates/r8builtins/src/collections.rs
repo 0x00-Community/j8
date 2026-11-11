@@ -5,6 +5,14 @@ use crate::{Args, Installer};
 /// Map / Set / WeakMap / WeakSet。弱集合目前强引用键（还没有 ephemeron），只多了「键必须是对象」的检查。
 struct Collections;
 
+/// GetSetRecord 的结果。
+struct SetRecord<'gc> {
+    set: Value<'gc>,
+    size: f64,
+    has: Value<'gc>,
+    keys: Value<'gc>,
+}
+
 /// 集合的种类。
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Shape {
@@ -60,29 +68,36 @@ impl Collections {
     }
 
     /// 构造：可选的可迭代对象逐项放进去（Map 的每项要是 `[键, 值]` 对象）。
+    /// 构造：有可迭代的初值就逐项调新对象的 `set` / `add`（被改掉了也照调）。
     fn construct<'gc>(a: &mut Agent<'gc, '_>, args: &[Value<'gc>], shape: Shape, weak: bool) -> Result<Value<'gc>, Error> {
         let o = Self::make(a, shape, weak)?;
         let source = args.at(0);
         if source.is_nullish() {
             return Ok(o.into());
         }
+        let adder = a.get_named(o.into(), if shape == Shape::Map { "set" } else { "add" })?;
+        if !a.is_callable(adder) {
+            return Err(a.throw(ErrorKind::Type, "'set' / 'add' of the new collection is not a function"));
+        }
         let it = a.get_iterator(source)?;
         while let Some(item) = a.iterator_step(it)? {
-            let (k, v) = match shape {
-                Shape::Set => (item, item),
-                Shape::Map => {
-                    if !matches!(item, Value::Object(_)) {
-                        a.iterator_close(it.iterator)?;
-                        let what = a.to_string(item)?;
-                        return Err(a.throw(ErrorKind::Type, &alloc::format!("Iterator value {} is not an entry object", &**what)));
+            let r = (|| {
+                let entry = match shape {
+                    Shape::Set => alloc::vec![item],
+                    Shape::Map => {
+                        if !matches!(item, Value::Object(_)) {
+                            let what = a.describe(item);
+                            return Err(a.throw(ErrorKind::Type, &alloc::format!("Iterator value {what} is not an entry object")));
+                        }
+                        alloc::vec![a.get_index(item, 0.0)?, a.get_index(item, 1.0)?]
                     }
-                    (a.get_keyed(item, 0.0.into())?, a.get_keyed(item, 1.0.into())?)
-                }
-            };
-            if weak {
-                Self::weak_key(a, k, if shape == Shape::Map { "as weak map key" } else { "in weak set" })?;
+                };
+                a.call(adder, o.into(), &entry)
+            })();
+            if let Err(e) = r {
+                let _ = a.iterator_close(it.iterator);
+                return Err(e);
             }
-            Self::with(a, o, |c| c.set(k, v));
         }
         Ok(o.into())
     }
@@ -141,20 +156,23 @@ impl Collections {
         Ok(Self::with(a, o, |c| c.delete(args.at(0))).into())
     }
 
-    /// Map / Set 共用的：`this` 是两者之一（非弱）。
-    fn either<'gc>(a: &Agent<'gc, '_>, this: Value<'gc>) -> Result<JsObject<'gc>, Error> {
-        Self::this(a, this, Shape::Map, false).or_else(|_| Self::this(a, this, Shape::Set, false))
+    fn shape(set: bool) -> Shape {
+        if set { Shape::Set } else { Shape::Map }
     }
 
-    fn clear<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        let o = Self::either(a, this)?;
+    fn clear<'gc, const SET: bool>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+        let o = Self::this(a, this, Self::shape(SET), false)?;
         Self::with(a, o, Collection::clear);
         Ok(Value::Undefined)
     }
 
-    fn size<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        let o = Self::either(a, this)?;
-        Ok(f64::from(u32::try_from(Self::with(a, o, |c| c.size)).unwrap_or(u32::MAX)).into())
+    fn size<'gc, const SET: bool>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+        let o = Self::this(a, this, Self::shape(SET), false)?;
+        Ok(Self::size_of(a, o).into())
+    }
+
+    fn size_of<'gc>(a: &Agent<'gc, '_>, o: JsObject<'gc>) -> f64 {
+        f64::from(u32::try_from(Self::with(a, o, |c| c.size)).unwrap_or(u32::MAX))
     }
 
     /// 第 `i` 个及以后第一个还在的条目。
@@ -163,8 +181,8 @@ impl Collections {
     }
 
     /// `forEach(cb, thisArg)`：活着走，回调里加的项也会走到。Set 的回调是 `(值, 值, set)`。
-    fn for_each<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        let o = Self::either(a, this)?;
+    fn for_each<'gc, const SET: bool>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+        let o = Self::this(a, this, Self::shape(SET), false)?;
         let f = args.at(0);
         if !a.is_callable(f) {
             return Err(a.throw(ErrorKind::Type, "callback is not a function"));
@@ -177,31 +195,36 @@ impl Collections {
         Ok(Value::Undefined)
     }
 
-    fn iterator<'gc>(a: &Agent<'gc, '_>, o: JsObject<'gc>, kind: IterKind) -> Value<'gc> {
-        ObjectData { kind: ObjectKind::CollectionIterator { target: Some(o), index: 0, kind }, proto: Some(a.realm.collection_iterator_proto), ..ObjectData::default() }.alloc(a.mc).into()
+    fn iterator<'gc>(a: &Agent<'gc, '_>, o: JsObject<'gc>, kind: IterKind, set: bool) -> Value<'gc> {
+        let proto = if set { a.realm.set_iterator_proto } else { a.realm.collection_iterator_proto };
+        ObjectData { kind: ObjectKind::CollectionIterator { target: Some(o), index: 0, kind, set }, proto: Some(proto), ..ObjectData::default() }.alloc(a.mc).into()
     }
 
-    fn entries<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        let o = Self::either(a, this)?;
-        Ok(Self::iterator(a, o, IterKind::Entries))
+    fn entries<'gc, const SET: bool>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+        let o = Self::this(a, this, Self::shape(SET), false)?;
+        Ok(Self::iterator(a, o, IterKind::Entries, SET))
     }
 
-    fn keys<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        let o = Self::either(a, this)?;
-        Ok(Self::iterator(a, o, IterKind::Keys))
+    fn keys<'gc, const SET: bool>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+        let o = Self::this(a, this, Self::shape(SET), false)?;
+        Ok(Self::iterator(a, o, IterKind::Keys, SET))
     }
 
-    fn values<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        let o = Self::either(a, this)?;
-        Ok(Self::iterator(a, o, IterKind::Values))
+    fn values<'gc, const SET: bool>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+        let o = Self::this(a, this, Self::shape(SET), false)?;
+        Ok(Self::iterator(a, o, IterKind::Values, SET))
     }
 
     /// 迭代器的 `next`：从记下的下标往后找下一个还在的条目。
-    fn next<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        let Value::Object(it) = this else {
-            return Err(a.throw(ErrorKind::Type, "next method called on an incompatible receiver"));
+    fn next<'gc, const SET: bool>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+        let state = match this {
+            Value::Object(it) => match it.borrow().kind {
+                ObjectKind::CollectionIterator { target, index, kind, set } if set == SET => Some((it, target, index, kind)),
+                _ => None,
+            },
+            _ => None,
         };
-        let ObjectKind::CollectionIterator { target, index, kind } = it.borrow().kind else {
+        let Some((it, target, index, kind)) = state else {
             return Err(a.throw(ErrorKind::Type, "next method called on an incompatible receiver"));
         };
         let found = target.and_then(|o| Self::entry_from(a, o, index));
@@ -218,6 +241,215 @@ impl Collections {
             IterKind::Entries => a.array(alloc::vec![k, v]).into(),
         };
         Ok(a.iter_result(out, false).into())
+    }
+
+    /// `Map.groupBy(items, callback)`。
+    fn group_by<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+        let groups = crate::object::Objects::group(a, args.at(0), args.at(1), false)?;
+        let m = ObjectData { kind: ObjectKind::Map(Collection::new(false)), proto: Some(a.realm.map_proto), ..ObjectData::default() }.alloc(a.mc);
+        for (k, items) in groups {
+            let arr = a.array(items);
+            Self::with(a, m, |c| c.set(k, arr.into()));
+        }
+        Ok(m.into())
+    }
+
+    /// GetSetRecord：`size` 是数（不是 NaN、不是负数），`has` / `keys` 可调用。
+    fn set_record<'gc>(a: &mut Agent<'gc, '_>, other: Value<'gc>) -> Result<SetRecord<'gc>, Error> {
+        if !matches!(other, Value::Object(_)) {
+            return Err(a.throw(ErrorKind::Type, "The argument must be a set-like object"));
+        }
+        let raw = a.get_named(other, "size")?;
+        let n = a.to_number(raw)?;
+        if n.is_nan() {
+            return Err(a.throw(ErrorKind::Type, "The 'size' of a set-like object must be a number"));
+        }
+        let size = a.to_integer_or_infinity(n.into())?;
+        if size < 0.0 {
+            return Err(a.throw(ErrorKind::Range, "The 'size' of a set-like object must not be negative"));
+        }
+        let has = a.get_named(other, "has")?;
+        if !a.is_callable(has) {
+            return Err(a.throw(ErrorKind::Type, "The 'has' of a set-like object must be a function"));
+        }
+        let keys = a.get_named(other, "keys")?;
+        if !a.is_callable(keys) {
+            return Err(a.throw(ErrorKind::Type, "The 'keys' of a set-like object must be a function"));
+        }
+        Ok(SetRecord { set: other, size, has, keys })
+    }
+
+    /// 另一个集合的 `keys()` 迭代器。
+    fn keys_iterator<'gc>(a: &mut Agent<'gc, '_>, r: &SetRecord<'gc>) -> Result<r8frame::IterRecord<'gc>, Error> {
+        let iterator = a.call(r.keys, r.set, &[])?;
+        if !matches!(iterator, Value::Object(_)) {
+            return Err(a.throw(ErrorKind::Type, "keys() of a set-like object must return an object"));
+        }
+        let next = a.get_named(iterator, "next")?;
+        Ok(r8frame::IterRecord { iterator, next })
+    }
+
+    /// `-0` 规整成 `+0`。
+    fn canonical(v: Value<'_>) -> Value<'_> {
+        match v {
+            Value::Number(0.0) => Value::Number(0.0),
+            v => v,
+        }
+    }
+
+    /// 一个新 Set，装着 `items`。
+    fn new_set<'gc>(a: &Agent<'gc, '_>, items: impl IntoIterator<Item = Value<'gc>>) -> Value<'gc> {
+        let mut c = Collection::new(false);
+        for v in items {
+            c.set(v, v);
+        }
+        ObjectData { kind: ObjectKind::Set(c), proto: Some(a.realm.set_proto), ..ObjectData::default() }.alloc(a.mc).into()
+    }
+
+    fn set_values<'gc>(a: &Agent<'gc, '_>, o: JsObject<'gc>) -> alloc::vec::Vec<Value<'gc>> {
+        Self::with(a, o, |c| c.entries.iter().flatten().map(|&(k, _)| k).collect())
+    }
+
+    fn union<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+        let o = Self::this(a, this, Shape::Set, false)?;
+        let r = Self::set_record(a, args.at(0))?;
+        let it = Self::keys_iterator(a, &r)?;
+        let mut out = Self::set_values(a, o);
+        while let Some(v) = a.iterator_step(it)? {
+            let v = Self::canonical(v);
+            if !out.iter().any(|x| Self::same(*x, v)) {
+                out.push(v);
+            }
+        }
+        Ok(Self::new_set(a, out))
+    }
+
+    fn same<'gc>(x: Value<'gc>, y: Value<'gc>) -> bool {
+        x == y || matches!((x, y), (Value::Number(p), Value::Number(q)) if p.is_nan() && q.is_nan())
+    }
+
+    fn intersection<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+        let o = Self::this(a, this, Shape::Set, false)?;
+        let r = Self::set_record(a, args.at(0))?;
+        let mut out: alloc::vec::Vec<Value<'gc>> = alloc::vec::Vec::new();
+        if Self::size_of(a, o) <= r.size {
+            let mut i = 0;
+            while let Some((j, e, _)) = Self::entry_from(a, o, i) {
+                let hit = a.call(r.has, r.set, &[e])?;
+                if a.to_boolean(hit) && !out.iter().any(|x| Self::same(*x, e)) {
+                    out.push(e);
+                }
+                i = j + 1;
+            }
+        } else {
+            let it = Self::keys_iterator(a, &r)?;
+            while let Some(v) = a.iterator_step(it)? {
+                let v = Self::canonical(v);
+                if Self::with(a, o, |c| c.has(v)) && !out.iter().any(|x| Self::same(*x, v)) {
+                    out.push(v);
+                }
+            }
+        }
+        Ok(Self::new_set(a, out))
+    }
+
+    fn difference<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+        let o = Self::this(a, this, Shape::Set, false)?;
+        let r = Self::set_record(a, args.at(0))?;
+        let mut out = Self::set_values(a, o);
+        if Self::size_of(a, o) <= r.size {
+            let mut keep = alloc::vec::Vec::new();
+            for e in out {
+                let hit = a.call(r.has, r.set, &[e])?;
+                if !a.to_boolean(hit) {
+                    keep.push(e);
+                }
+            }
+            out = keep;
+        } else {
+            let it = Self::keys_iterator(a, &r)?;
+            while let Some(v) = a.iterator_step(it)? {
+                let v = Self::canonical(v);
+                out.retain(|x| !Self::same(*x, v));
+            }
+        }
+        Ok(Self::new_set(a, out))
+    }
+
+    fn symmetric_difference<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+        let o = Self::this(a, this, Shape::Set, false)?;
+        let r = Self::set_record(a, args.at(0))?;
+        let it = Self::keys_iterator(a, &r)?;
+        let mut out = Self::set_values(a, o);
+        while let Some(v) = a.iterator_step(it)? {
+            let v = Self::canonical(v);
+            let in_result = out.iter().position(|x| Self::same(*x, v));
+            if Self::with(a, o, |c| c.has(v)) {
+                if let Some(i) = in_result {
+                    out.remove(i);
+                }
+            } else if in_result.is_none() {
+                out.push(v);
+            }
+        }
+        Ok(Self::new_set(a, out))
+    }
+
+    fn is_subset_of<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+        let o = Self::this(a, this, Shape::Set, false)?;
+        let r = Self::set_record(a, args.at(0))?;
+        if Self::size_of(a, o) > r.size {
+            return Ok(false.into());
+        }
+        let mut i = 0;
+        while let Some((j, e, _)) = Self::entry_from(a, o, i) {
+            let hit = a.call(r.has, r.set, &[e])?;
+            if !a.to_boolean(hit) {
+                return Ok(false.into());
+            }
+            i = j + 1;
+        }
+        Ok(true.into())
+    }
+
+    fn is_superset_of<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+        let o = Self::this(a, this, Shape::Set, false)?;
+        let r = Self::set_record(a, args.at(0))?;
+        if Self::size_of(a, o) < r.size {
+            return Ok(false.into());
+        }
+        let it = Self::keys_iterator(a, &r)?;
+        while let Some(v) = a.iterator_step(it)? {
+            if !Self::with(a, o, |c| c.has(v)) {
+                a.iterator_close(it.iterator)?;
+                return Ok(false.into());
+            }
+        }
+        Ok(true.into())
+    }
+
+    fn is_disjoint_from<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+        let o = Self::this(a, this, Shape::Set, false)?;
+        let r = Self::set_record(a, args.at(0))?;
+        if Self::size_of(a, o) <= r.size {
+            let mut i = 0;
+            while let Some((j, e, _)) = Self::entry_from(a, o, i) {
+                let hit = a.call(r.has, r.set, &[e])?;
+                if a.to_boolean(hit) {
+                    return Ok(false.into());
+                }
+                i = j + 1;
+            }
+        } else {
+            let it = Self::keys_iterator(a, &r)?;
+            while let Some(v) = a.iterator_step(it)? {
+                if Self::with(a, o, |c| c.has(v)) {
+                    a.iterator_close(it.iterator)?;
+                    return Ok(false.into());
+                }
+            }
+        }
+        Ok(true.into())
     }
 
     fn weak_get<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
@@ -267,44 +499,53 @@ impl Installer<'_, '_> {
         let iter = r.symbols.iterator;
         // Map：`entries` 与 `[Symbol.iterator]` 是同一个函数
         let map = r.map_proto;
-        self.constructor("Map", Collections::map, map, 0);
-        let methods: [(&str, r8frame::NativeFn, u32); 7] = [
+        let map_ctor = self.constructor("Map", Collections::map, map, 0);
+        self.method(map_ctor, "groupBy", Collections::group_by, 2);
+        let methods: [(&str, r8frame::NativeFn, u32); 8] = [
             ("get", Collections::map_get, 1),
             ("set", Collections::map_set, 2),
             ("has", Collections::map_has, 1),
             ("delete", Collections::map_delete, 1),
-            ("clear", Collections::clear, 0),
-            ("forEach", Collections::for_each, 1),
-            ("keys", Collections::keys, 0),
+            ("clear", Collections::clear::<false>, 0),
+            ("forEach", Collections::for_each::<false>, 1),
+            ("keys", Collections::keys::<false>, 0),
+            ("values", Collections::values::<false>, 0),
         ];
         for (name, f, n) in methods {
             self.method(map, name, f, n);
         }
-        self.method(map, "values", Collections::values, 0);
-        let entries = r.named_native(self.mc, Collections::entries, "entries", 0);
+        let entries = r.named_native(self.mc, Collections::entries::<false>, "entries", 0);
         self.set(map, "entries", entries.into());
         map.borrow_mut(self.mc).define_symbol(iter, r8frame::Property::hidden(entries.into()));
-        self.getter(map, "size", Collections::size);
+        self.getter(map, "size", Collections::size::<false>);
         // Set：`values` / `keys` / `[Symbol.iterator]` 是同一个函数
         let set = r.set_proto;
         self.constructor("Set", Collections::set_ctor, set, 0);
-        let methods: [(&str, r8frame::NativeFn, u32); 6] = [
+        let methods: [(&str, r8frame::NativeFn, u32); 13] = [
             ("add", Collections::set_add, 1),
             ("has", Collections::set_has, 1),
             ("delete", Collections::set_delete, 1),
-            ("clear", Collections::clear, 0),
-            ("forEach", Collections::for_each, 1),
-            ("entries", Collections::entries, 0),
+            ("clear", Collections::clear::<true>, 0),
+            ("forEach", Collections::for_each::<true>, 1),
+            ("entries", Collections::entries::<true>, 0),
+            ("union", Collections::union, 1),
+            ("intersection", Collections::intersection, 1),
+            ("difference", Collections::difference, 1),
+            ("symmetricDifference", Collections::symmetric_difference, 1),
+            ("isSubsetOf", Collections::is_subset_of, 1),
+            ("isSupersetOf", Collections::is_superset_of, 1),
+            ("isDisjointFrom", Collections::is_disjoint_from, 1),
         ];
         for (name, f, n) in methods {
             self.method(set, name, f, n);
         }
-        let values = r.named_native(self.mc, Collections::values, "values", 0);
+        let values = r.named_native(self.mc, Collections::values::<true>, "values", 0);
         self.set(set, "values", values.into());
         self.set(set, "keys", values.into());
         set.borrow_mut(self.mc).define_symbol(iter, r8frame::Property::hidden(values.into()));
-        self.getter(set, "size", Collections::size);
-        self.method(r.collection_iterator_proto, "next", Collections::next, 0);
+        self.getter(set, "size", Collections::size::<true>);
+        self.method(r.collection_iterator_proto, "next", Collections::next::<false>, 0);
+        self.method(r.set_iterator_proto, "next", Collections::next::<true>, 0);
         // 弱集合
         let wm = r.weakmap_proto;
         self.constructor("WeakMap", Collections::weak_map, wm, 0);

@@ -22,9 +22,9 @@ use r8frame::{CreateParams, Error, Isolate, Platform, Source, Task};
 use serde::Deserialize;
 
 /// test262 检出（子模块）
-const ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/test262");
+const ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../tests/test262");
 /// 基线：过了的用例，一行一个（相对 `test/`）
-const BASELINE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/test262.passing");
+const BASELINE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../tests/test262.passing");
 /// 子进程要跑的用例
 const CASE_ENV: &str = "R8_TEST262_CASE";
 const UPDATE_ENV: &str = "R8_TEST262_UPDATE";

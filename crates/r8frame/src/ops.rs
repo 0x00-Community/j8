@@ -131,7 +131,8 @@ impl ErrorKind {
 }
 
 /// 一个迭代器记录：迭代器对象与它的 `next` 方法。
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, gc_arena::Collect)]
+#[collect(no_drop)]
 pub struct IterRecord<'gc> {
     pub iterator: Value<'gc>,
     pub next: Value<'gc>,
@@ -499,18 +500,32 @@ impl<'gc> Agent<'gc, '_> {
                 return Ok(self.string(&String::from_utf16_lossy(&[u])).into());
             }
         }
-        let mut cur = self.proto_of(holder);
-        while let Some(o) = cur {
-            if let Some(p) = self.get_own_property(o, key)? {
+        match self.proto_of(holder) {
+            Some(o) => self.object_get(o, key, receiver),
+            None => Ok(Value::Undefined),
+        }
+    }
+
+    /// 对象的 [[Get]]：沿原型链找（碰到 Proxy 交给它）。
+    pub fn object_get(&mut self, o: JsObject<'gc>, key: Key<'_, 'gc>, receiver: Value<'gc>) -> Result<Value<'gc>, Error> {
+        let mut cur = o;
+        loop {
+            if let Some(parts) = self.proxy_parts(cur) {
+                let (t, h) = parts?;
+                return self.proxy_get(t, h, key, receiver);
+            }
+            if let Some(p) = self.get_own_property(cur, key)? {
                 return match p.slot {
                     Slot::Data(v) => Ok(v),
                     Slot::Accessor { get: Some(g), .. } => self.call(g.into(), receiver, &[]),
                     Slot::Accessor { get: None, .. } => Ok(Value::Undefined),
                 };
             }
-            cur = o.borrow().proto;
+            match self.get_prototype_of(cur)? {
+                Some(n) => cur = n,
+                None => return Ok(Value::Undefined),
+            }
         }
-        Ok(Value::Undefined)
     }
 
     /// `holder` 上（沿原型链）读 `key`，getter 的 `this` 是 `receiver`。
@@ -540,15 +555,29 @@ impl<'gc> Agent<'gc, '_> {
             let k = self.key_text(key);
             return Err(self.nullish_error(target, "set", &k));
         }
-        let mut found = None;
-        let mut cur = self.proto_of(target);
-        while let Some(o) = cur {
-            if let Some(p) = self.get_own_property(o, key)? {
-                found = Some(p);
-                break;
-            }
-            cur = o.borrow().proto;
+        match self.proto_of(target) {
+            Some(o) => self.object_set(o, key, value, receiver),
+            None => Ok(false),
         }
+    }
+
+    /// 对象的 [[Set]]（OrdinarySet）：沿原型链找到的 setter 就调它，不可写的数据属性不写，否则在 `receiver` 上改 / 建；
+    /// 碰到 Proxy 交给它。
+    pub fn object_set(&mut self, o: JsObject<'gc>, key: Key<'_, 'gc>, value: Value<'gc>, receiver: Value<'gc>) -> Result<bool, Error> {
+        let mut cur = o;
+        let found = loop {
+            if let Some(parts) = self.proxy_parts(cur) {
+                let (t, h) = parts?;
+                return self.proxy_set(t, h, key, value, receiver);
+            }
+            if let Some(p) = self.get_own_property(cur, key)? {
+                break Some(p);
+            }
+            match self.get_prototype_of(cur)? {
+                Some(n) => cur = n,
+                None => break None,
+            }
+        };
         match found {
             Some(Property { slot: Slot::Accessor { set: Some(s), .. }, .. }) => {
                 self.call(s.into(), receiver, &[value])?;
@@ -613,14 +642,20 @@ impl<'gc> Agent<'gc, '_> {
 
     /// [[HasProperty]]：自有或原型链上有。
     pub fn has_key(&mut self, o: JsObject<'gc>, key: Key<'_, 'gc>) -> Result<bool, Error> {
-        let mut cur = Some(o);
-        while let Some(x) = cur {
-            if self.get_own_property(x, key)?.is_some() {
+        let mut cur = o;
+        loop {
+            if let Some(parts) = self.proxy_parts(cur) {
+                let (t, h) = parts?;
+                return self.proxy_has(t, h, key);
+            }
+            if self.get_own_property(cur, key)?.is_some() {
                 return Ok(true);
             }
-            cur = x.borrow().proto;
+            match self.get_prototype_of(cur)? {
+                Some(n) => cur = n,
+                None => return Ok(false),
+            }
         }
-        Ok(false)
     }
 
     /// `delete target[key]`，键是任意值。
@@ -922,7 +957,12 @@ impl<'gc> Agent<'gc, '_> {
 
     /// IsArray。
     pub fn is_array(&mut self, v: Value<'gc>) -> Result<bool, Error> {
-        Ok(matches!(v, Value::Object(o) if matches!(o.borrow().kind, ObjectKind::Array(_))))
+        let Value::Object(o) = v else { return Ok(false) };
+        if let Some(parts) = self.proxy_parts(o) {
+            let (t, _) = parts?;
+            return self.is_array(t.into());
+        }
+        Ok(matches!(o.borrow().kind, ObjectKind::Array(_)))
     }
 
     /// CreateListFromArrayLike。
