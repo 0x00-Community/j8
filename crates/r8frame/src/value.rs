@@ -22,6 +22,7 @@ pub enum Value<'gc> {
 
 /// 严格相等（`===`）：字符串比内容，对象比身份，`NaN` 不等于自己。
 impl PartialEq for Value<'_> {
+    #[inline]
     fn eq(&self, o: &Self) -> bool {
         match (self, o) {
             (Value::Undefined, Value::Undefined) | (Value::Null, Value::Null) | (Value::Uninit, Value::Uninit) => true,

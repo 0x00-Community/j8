@@ -7,6 +7,7 @@
 extern crate alloc;
 
 use alloc::vec::Vec;
+use alloc::boxed::Box;
 use alloc::rc::Rc;
 use core::cell::{Cell, RefCell};
 
@@ -27,6 +28,25 @@ const SLICE: usize = 10_000;
 struct Loaded {
     base: u32,
     func: Function,
+    /// 按常量下标：全局名上次在哪找到（读写全局名的内联缓存）
+    globals: Box<[Cell<GlobalSlot>]>,
+}
+
+impl From<(u32, Function)> for Loaded {
+    fn from((base, func): (u32, Function)) -> Self {
+        let globals = func.consts.iter().map(|_| Cell::new(GlobalSlot::Unknown)).collect();
+        Self { base, func, globals }
+    }
+}
+
+/// 全局名的位置缓存。只存属性表下标、不存 GC 指针：用之前核对那一项的键，对不上就走慢路重查。
+#[derive(Clone, Copy, Debug)]
+enum GlobalSlot {
+    Unknown,
+    /// 脚本作用域（顶层 `let` / `const` / `class`）属性表的第几项
+    Scope(u32),
+    /// 全局对象属性表的第几项；当时脚本作用域有几项（多了就可能被新的顶层 `let` 遮住，要重查）
+    Global { at: u32, scope_len: u32 },
 }
 
 /// 一个异常处理器：落点（指令下标）与装的时候的环境。
@@ -145,7 +165,7 @@ impl Executor {
     pub fn load(&self, module: Module) -> FuncId {
         let mut code = self.code.borrow_mut();
         let base = u32::try_from(code.len()).expect("fewer than 2^32 functions");
-        code.extend(module.functions.into_iter().map(|func| Rc::new(Loaded { base, func })));
+        code.extend(module.functions.into_iter().map(|func| Rc::new(Loaded::from((base, func)))));
         FuncId(base + Module::MAIN)
     }
 
@@ -518,10 +538,80 @@ impl Executor {
     }
 
     /// 未初始化就抛 ReferenceError（暂时性死区）。
+    #[inline]
     fn check<'gc>(a: &Agent<'gc, '_>, v: Value<'gc>, name: &str) -> Result<(), Error> {
-        if v == Value::Uninit {
-            return Err(a.throw(ErrorKind::Reference, &alloc::format!("Cannot access '{name}' before initialization")));
+        if matches!(v, Value::Uninit) {
+            return Err(Self::uninitialized(a, name));
         }
+        Ok(())
+    }
+
+    /// 死区指令的检查：名字只在真要抛错时才从常量池取。
+    #[inline]
+    fn check_const<'gc>(a: &Agent<'gc, '_>, v: Value<'gc>, func: &Function, name: r8bytecode::Const) -> Result<(), Error> {
+        if matches!(v, Value::Uninit) {
+            return Err(Self::uninitialized(a, func.name_at(name)));
+        }
+        Ok(())
+    }
+
+    #[cold]
+    fn uninitialized(a: &Agent<'_, '_>, name: &str) -> Error {
+        a.throw(ErrorKind::Reference, &alloc::format!("Cannot access '{name}' before initialization"))
+    }
+
+    /// 按缓存读全局名：命中给出值（脚本作用域的还要查死区），没命中给 `None`。
+    fn global_cached<'gc>(a: &Agent<'gc, '_>, slot: GlobalSlot, name: &str) -> Option<Value<'gc>> {
+        let scope = a.realm.script_scope.borrow();
+        match slot {
+            GlobalSlot::Scope(at) => scope.prop_at(at as usize, name).and_then(|p| p.value()),
+            GlobalSlot::Global { at, scope_len } if scope.props.len() == scope_len as usize => a.realm.global.borrow().prop_at(at as usize, name).and_then(|p| p.value()),
+            _ => None,
+        }
+    }
+
+    /// 全局名现在在哪（自有数据属性才缓存）。
+    fn global_locate(a: &Agent<'_, '_>, name: &str) -> GlobalSlot {
+        let scope = a.realm.script_scope.borrow();
+        let own = |d: &r8frame::ObjectData<'_>| d.position(name).filter(|&i| matches!(d.props[i].1.slot, Slot::Data(_))).and_then(|i| u32::try_from(i).ok());
+        if let Some(at) = own(&scope) {
+            return GlobalSlot::Scope(at);
+        }
+        if scope.position(name).is_some() {
+            return GlobalSlot::Unknown;
+        }
+        match (own(&a.realm.global.borrow()), u32::try_from(scope.props.len())) {
+            (Some(at), Ok(scope_len)) => GlobalSlot::Global { at, scope_len },
+            _ => GlobalSlot::Unknown,
+        }
+    }
+
+    /// `lda.global`：先按缓存，没命中走慢路再记下位置。
+    fn global_load<'gc>(a: &mut Agent<'gc, '_>, cache: &Cell<GlobalSlot>, name: &str) -> Result<Value<'gc>, Error> {
+        if let Some(v) = Self::global_cached(a, cache.get(), name) {
+            Self::check(a, v, name)?;
+            return Ok(v);
+        }
+        let v = Self::global_get(a, name)?.ok_or_else(|| a.throw(ErrorKind::Reference, &alloc::format!("{name} is not defined")))?;
+        cache.set(Self::global_locate(a, name));
+        Ok(v)
+    }
+
+    /// `sta.global`：缓存命中且是可写数据属性就原地改（脚本作用域的还要查死区），否则走慢路再记下位置。
+    fn global_store<'gc>(a: &mut Agent<'gc, '_>, cache: &Cell<GlobalSlot>, name: &str, v: Value<'gc>, strict: bool) -> Result<(), Error> {
+        let (target, at) = match cache.get() {
+            GlobalSlot::Scope(at) => (a.realm.script_scope, at),
+            GlobalSlot::Global { at, scope_len } if a.realm.script_scope.borrow().props.len() == scope_len as usize => (a.realm.global, at),
+            _ => (a.realm.global, u32::MAX),
+        };
+        let hit = target.borrow().prop_at(at as usize, name);
+        if let Some(Property { slot: Slot::Data(old), writable: true, .. }) = hit {
+            Self::check(a, old, name)?;
+            target.borrow_mut(a.mc).set_at(at as usize, v);
+            return Ok(());
+        }
+        Self::global_set(a, name, v, strict)?;
+        cache.set(Self::global_locate(a, name));
         Ok(())
     }
 
@@ -725,22 +815,19 @@ impl Executor {
                 }
                 Insn::Ldar(x) => *acc = regs[r(x)],
                 Insn::Star(x) => regs[r(x)] = *acc,
-                Insn::LdaGlobal(k) => {
-                    let name = func.name_at(k);
-                    *acc = Self::global_get(a, name)?.ok_or_else(|| a.throw(ErrorKind::Reference, &alloc::format!("{name} is not defined")))?;
-                }
+                Insn::LdaGlobal(k) => *acc = Self::global_load(a, &loaded.globals[k.0 as usize], func.name_at(k))?,
                 Insn::LdaGlobalOrUndefined(k) => *acc = Self::global_get(a, func.name_at(k))?.unwrap_or_default(),
-                Insn::StaGlobal { name, strict } => Self::global_set(a, func.name_at(name), *acc, strict)?,
+                Insn::StaGlobal { name, strict } => Self::global_store(a, &loaded.globals[name.0 as usize], func.name_at(name), *acc, strict)?,
                 Insn::LdaHole => *acc = Value::Uninit,
                 Insn::ThrowConstAssign => return Err(a.throw(ErrorKind::Type, "Assignment to constant variable.")),
-                Insn::CheckInit { name } => Self::check(a, *acc, func.name_at(name))?,
-                Insn::CheckReg { reg, name } => Self::check(a, regs[r(reg)], func.name_at(name))?,
+                Insn::CheckInit { name } => Self::check_const(a, *acc, func, name)?,
+                Insn::CheckReg { reg, name } => Self::check_const(a, regs[r(reg)], func, name)?,
                 Insn::CheckEnv { depth, slot, name } => {
                     let v = Self::env_at(f.env, depth).borrow().slots[usize::from(slot)];
-                    Self::check(a, v, func.name_at(name))?;
+                    Self::check_const(a, v, func, name)?;
                 }
                 Insn::CheckThis => {
-                    if *acc == Value::Uninit {
+                    if matches!(*acc, Value::Uninit) {
                         return Err(a.throw(ErrorKind::Reference, "Must call super constructor in derived class before accessing 'this' or returning from derived constructor"));
                     }
                 }
@@ -864,12 +951,12 @@ impl Executor {
                     }
                 }
                 Insn::JumpIfUndefined(l) => {
-                    if *acc == Value::Undefined {
+                    if matches!(*acc, Value::Undefined) {
                         f.pc = l.0 as usize;
                     }
                 }
                 Insn::JumpIfNotUndefined(l) => {
-                    if *acc != Value::Undefined {
+                    if !matches!(*acc, Value::Undefined) {
                         f.pc = l.0 as usize;
                     }
                 }
@@ -1069,7 +1156,7 @@ impl Executor {
                 Insn::PopHandler => _ = f.handlers.pop(),
                 Insn::Throw => return Err(a.throw_value(*acc)),
                 Insn::Return => {
-                    if f.new_target != Value::Undefined {
+                    if !matches!(f.new_target, Value::Undefined) {
                         *acc = self.construct_result(a, f, *acc)?;
                     }
                     match frames.pop() {

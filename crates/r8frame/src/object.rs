@@ -851,7 +851,19 @@ impl<'gc> ObjectData<'gc> {
     }
 
     /// 属性在表里的下标。
-    fn position(&self, key: &str) -> Option<usize> {
+    /// 属性表第 `at` 项正好是 `key` 的话给出它（执行层缓存了下标，用之前核对）。
+    pub fn prop_at(&self, at: usize, key: &str) -> Option<Property<'gc>> {
+        self.props.get(at).filter(|(k, _)| **k == *key).map(|(_, p)| *p)
+    }
+
+    /// 改属性表第 `at` 项的值（调用方已用 [`prop_at`](Self::prop_at) 核对过是可写数据属性）。
+    pub fn set_at(&mut self, at: usize, value: Value<'gc>) {
+        if let Some((_, p)) = self.props.get_mut(at) {
+            p.slot = Slot::Data(value);
+        }
+    }
+
+    pub fn position(&self, key: &str) -> Option<usize> {
         match &self.prop_index.0 {
             Some(m) => m.get(key).copied(),
             None => self.props.iter().position(|(k, _)| **k == *key),
