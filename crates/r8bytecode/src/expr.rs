@@ -1,12 +1,13 @@
 //! JS ⇒ 字节码：表达式。结果都留在 acc。
 use oxc_ast::ast::{
-    Argument, ArrayExpressionElement, ArrowFunctionBody, AssignmentTarget, AssignmentTargetMaybeDefault, AssignmentTargetProperty, ChainElement, ComputedMemberExpression, StaticMemberExpression, ArrowFunctionExpression, AssignmentExpression, AssignmentOperator, BinaryExpression, BinaryOperator, CallExpression, Expression, LogicalOperator, MemberExpression, ObjectExpression, ObjectPropertyKind, PropertyKind as PropertyKind_, SimpleAssignmentTarget, TemplateElement, UnaryOperator, UpdateExpression,
+    Argument, ArrayExpressionElement, ArrowFunctionBody, AssignmentTarget, AssignmentTargetMaybeDefault, AssignmentTargetProperty, ChainElement, ComputedMemberExpression, PrivateFieldExpression, StaticMemberExpression, ArrowFunctionExpression, AssignmentExpression, AssignmentOperator, BinaryExpression, BinaryOperator, CallExpression, Expression, LogicalOperator, MemberExpression, ObjectExpression, ObjectPropertyKind, PropertyKind as PropertyKind_, SimpleAssignmentTarget, TemplateElement, UnaryOperator, UpdateExpression,
     UpdateOperator,
 };
 use oxc_span::{GetSpan, Span};
 use r8frame::{BinaryOp, CompareOp, Error, Resume, UnaryOp};
 
 use crate::compiler::{Body, Compiler, Flavor, Place};
+use crate::scope::Hidden;
 use crate::{Const, Constant, FunctionKind, Insn, PropertyKind, Reg};
 
 /// 二元运算符 ⇒ 字节码运算。
@@ -56,6 +57,8 @@ enum Target<'a> {
     Name(&'a str),
     Named { obj: Reg, name: Const },
     Keyed { obj: Reg, key: Reg },
+    /// `obj.#x`：私有名在 `key`
+    Private { obj: Reg, key: Reg },
 }
 
 impl<'a> Compiler<'a, '_> {
@@ -168,7 +171,7 @@ impl<'a> Compiler<'a, '_> {
                 self.emit(Insn::CreateClosure(n));
             }
             Expression::ArrowFunctionExpression(a) => self.arrow(a)?,
-            Expression::ClassExpression(c) => self.class(c, true)?,
+            Expression::ClassExpression(c) => self.class(c)?,
             Expression::YieldExpression(y) => {
                 let mode = self.resume_reg(y.span, "yield outside a generator")?;
                 match (&y.argument, y.delegate) {
@@ -265,6 +268,15 @@ impl<'a> Compiler<'a, '_> {
                 self.release(this);
             }
             Expression::StaticMemberExpression(m) => self.static_member(m)?,
+            Expression::PrivateFieldExpression(m) => self.private_member(m)?,
+            Expression::PrivateInExpression(p) => {
+                self.expr(&p.right)?;
+                let obj = self.temp();
+                self.emit(Insn::Star(obj));
+                self.load(Hidden::private(self.alloc, &p.left));
+                self.emit(Insn::HasPrivate { obj });
+                self.release(obj);
+            }
             Expression::ComputedMemberExpression(m) => self.computed_member(m)?,
             Expression::ChainExpression(c) => {
                 self.chains.push(Vec::new());
@@ -272,7 +284,8 @@ impl<'a> Compiler<'a, '_> {
                     ChainElement::CallExpression(call) => self.call(call)?,
                     ChainElement::StaticMemberExpression(m) => self.static_member(m)?,
                     ChainElement::ComputedMemberExpression(m) => self.computed_member(m)?,
-                    e => return Err(self.unsupported(e.span(), "chain element")),
+                    ChainElement::PrivateFieldExpression(m) => self.private_member(m)?,
+                    ChainElement::TSNonNullExpression(e) => return Err(self.unsupported(e.span, "TypeScript non-null assertions")),
                 }
                 let jumps = self.chains.pop().expect("this chain");
                 if !jumps.is_empty() {
@@ -353,6 +366,15 @@ impl<'a> Compiler<'a, '_> {
                 self.emit(Insn::Star(key));
                 Ok(Target::Keyed { obj, key })
             }
+            Some(MemberExpression::PrivateFieldExpression(m)) => {
+                self.expr(&m.object)?;
+                let obj = self.temp();
+                self.emit(Insn::Star(obj));
+                self.load(Hidden::private(self.alloc, &m.field));
+                let key = self.temp();
+                self.emit(Insn::Star(key));
+                Ok(Target::Private { obj, key })
+            }
             _ => Err(self.unsupported(t.span(), "assignment target")),
         }
     }
@@ -365,6 +387,10 @@ impl<'a> Compiler<'a, '_> {
                 self.emit(Insn::Ldar(key));
                 self.emit(Insn::GetKeyed { obj });
             }
+            Target::Private { obj, key } => {
+                self.emit(Insn::Ldar(key));
+                self.emit(Insn::GetPrivate { obj });
+            }
         }
     }
 
@@ -373,13 +399,14 @@ impl<'a> Compiler<'a, '_> {
             Target::Name(n) => self.store(n, false),
             Target::Named { obj, name } => _ = self.emit(Insn::SetNamed { obj, name }),
             Target::Keyed { obj, key } => _ = self.emit(Insn::SetKeyed { obj, key }),
+            Target::Private { obj, key } => _ = self.emit(Insn::SetPrivate { obj, key }),
         }
     }
 
     fn target_release(&mut self, t: &Target<'a>) {
         match *t {
             Target::Name(_) => {}
-            Target::Named { obj, .. } | Target::Keyed { obj, .. } => self.release(obj),
+            Target::Named { obj, .. } | Target::Keyed { obj, .. } | Target::Private { obj, .. } => self.release(obj),
         }
     }
 
@@ -483,6 +510,13 @@ impl<'a> Compiler<'a, '_> {
                 self.expr(&m.expression)?;
                 self.emit(Insn::GetKeyed { obj: this });
             }
+            Expression::PrivateFieldExpression(m) => {
+                self.expr(&m.object)?;
+                self.emit(Insn::Star(this));
+                self.optional(m.optional, m.span)?;
+                self.load(Hidden::private(self.alloc, &m.field));
+                self.emit(Insn::GetPrivate { obj: this });
+            }
             f => {
                 self.emit(Insn::LdaUndefined);
                 self.emit(Insn::Star(this));
@@ -511,6 +545,18 @@ impl<'a> Compiler<'a, '_> {
         self.emit(Insn::Star(obj));
         let name = self.name(m.property.name.as_str());
         self.emit(Insn::GetNamed { obj, name });
+        self.release(obj);
+        Ok(())
+    }
+
+    /// `obj.#x`。
+    fn private_member(&mut self, m: &'a PrivateFieldExpression<'a>) -> Result<(), Error> {
+        self.expr(&m.object)?;
+        self.optional(m.optional, m.span)?;
+        let obj = self.temp();
+        self.emit(Insn::Star(obj));
+        self.load(Hidden::private(self.alloc, &m.field));
+        self.emit(Insn::GetPrivate { obj });
         self.release(obj);
         Ok(())
     }

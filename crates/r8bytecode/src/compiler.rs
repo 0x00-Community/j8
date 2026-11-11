@@ -2,12 +2,12 @@
 use std::collections::HashSet;
 
 use oxc_allocator::Allocator;
-use oxc_ast::ast::{BindingIdentifier, BindingPattern, BlockStatement, Class, ClassElement, Expression, MethodDefinitionKind, PropertyKey, ForStatementInit, FormalParameters, Function as AstFunction, ForInStatement, ForOfStatement, ForStatementLeft, Program, Statement, SwitchStatement, TryStatement, VariableDeclaration, VariableDeclarationKind};
+use oxc_ast::ast::{BindingIdentifier, BindingPattern, BlockStatement, Class, ClassElement, Expression, MethodDefinition, MethodDefinitionKind, PrivateIdentifier, PropertyKey, ForStatementInit, FormalParameters, Function as AstFunction, ForInStatement, ForOfStatement, ForStatementLeft, Program, Statement, SwitchStatement, TryStatement, VariableDeclaration, VariableDeclarationKind};
 use oxc_parser::Parser;
 use oxc_span::{GetSpan, SourceType, Span};
 use r8frame::{CompareOp, Error, Resume, Source};
 
-use crate::scope::{Decl, DeclKind, Decls, Key, Resolver, THIS};
+use crate::scope::{Decl, DeclKind, Decls, Hidden, Key, Resolver, THIS};
 use crate::{Const, Constant, Function, FunctionKind, Insn, Label, Module, PropertyKind, Reg};
 
 /// 回填前的跳转目标
@@ -167,6 +167,8 @@ pub(crate) enum Body<'a> {
 
 pub(crate) struct Compiler<'a, 's> {
     src: &'s Source<'s>,
+    /// AST 的分配器：类作用域的隐藏绑定名（`#x` 等）也分配在这里
+    pub(crate) alloc: &'a Allocator,
     captured: HashSet<Key>,
     module: Vec<Function>,
     frames: Vec<Frame<'a>>,
@@ -188,8 +190,8 @@ impl TryFrom<&Source<'_>> for Module {
             return Err(Error::Syntax(format!("{}: {d}", src.file)));
         }
         let program = &ret.program;
-        let captured = Resolver::script(&program.body, Decls::this_key(program.span));
-        let mut c = Compiler { src, captured, module: Vec::new(), frames: Vec::new(), levels: Vec::new(), script_lexicals: HashSet::new(), chains: Vec::new() };
+        let captured = Resolver::script(&program.body, Decls::this_key(program.span), &allocator);
+        let mut c = Compiler { src, alloc: &allocator, captured, module: Vec::new(), frames: Vec::new(), levels: Vec::new(), script_lexicals: HashSet::new(), chains: Vec::new() };
         c.script(program)?;
         Ok(Module { functions: c.module })
     }
@@ -768,25 +770,71 @@ impl<'a> Compiler<'a, '_> {
         self.function(name, flavor, Some(Decls::this_key(f.span)), None, Some(&f.params), Body::Statements(&body.statements))
     }
 
-    /// 字段初始化函数的函数体：`this.k = v` 逐个定义（可枚举）。
+    /// 字段初始化函数的函数体：实例的先装私有方法 / 访问器，再按顺序定义字段（公开的可枚举、私有的进私有表）；
+    /// 静态的还按顺序跑静态块。
     fn fields(&mut self, class: &'a Class<'a>, statik: bool) -> Result<(), Error> {
-        for e in &class.body.body {
-            let ClassElement::PropertyDefinition(p) = e else { continue };
-            if p.r#static != statik {
-                continue;
+        self.load(THIS);
+        let this = self.temp();
+        self.emit(Insn::Star(this));
+        let key = self.temp();
+        if !statik {
+            for e in &class.body.body {
+                if let ClassElement::MethodDefinition(m) = e
+                    && !m.r#static
+                    && let PropertyKey::PrivateIdentifier(id) = &m.key
+                {
+                    self.load(Hidden::private(self.alloc, id));
+                    self.emit(Insn::Star(key));
+                    self.load(Hidden::method(self.alloc, id, m.kind));
+                    self.emit(Insn::DefinePrivate { obj: this, key, kind: Self::method_kind(m.kind), writable: false });
+                }
             }
-            let name = self.static_key(&p.key, p.computed).ok_or_else(|| self.unsupported(p.span, "computed field names"))??;
-            self.load(THIS);
-            let this = self.temp();
-            self.emit(Insn::Star(this));
-            match &p.value {
-                Some(v) => self.expr(v)?,
-                None => _ = self.emit(Insn::LdaUndefined),
-            }
-            self.emit(Insn::DefineNamed { obj: this, name, kind: PropertyKind::Data, enumerable: true });
-            self.release(this);
         }
+        for e in &class.body.body {
+            match e {
+                ClassElement::PropertyDefinition(p) if p.r#static == statik => {
+                    let value = |c: &mut Self| match &p.value {
+                        Some(v) => c.expr(v),
+                        None => {
+                            c.emit(Insn::LdaUndefined);
+                            Ok(())
+                        }
+                    };
+                    match &p.key {
+                        PropertyKey::PrivateIdentifier(id) => {
+                            self.load(Hidden::private(self.alloc, id));
+                            self.emit(Insn::Star(key));
+                            value(self)?;
+                            self.emit(Insn::DefinePrivate { obj: this, key, kind: PropertyKind::Data, writable: true });
+                        }
+                        _ if p.computed => {
+                            self.load(Hidden::field_key(self.alloc, p.span));
+                            self.emit(Insn::Star(key));
+                            value(self)?;
+                            self.emit(Insn::DefineKeyed { obj: this, key, kind: PropertyKind::Data, enumerable: true });
+                        }
+                        k => {
+                            let name = self.static_key(k, false).ok_or_else(|| self.unsupported(p.span, "field name"))??;
+                            value(self)?;
+                            self.emit(Insn::DefineNamed { obj: this, name, kind: PropertyKind::Data, enumerable: true });
+                        }
+                    }
+                }
+                ClassElement::StaticBlock(b) if statik => self.scoped(&Decls::static_block(&b.body), |c| c.statements(&b.body))?,
+                _ => {}
+            }
+        }
+        self.release(this);
         Ok(())
+    }
+
+    /// 方法定义的种类 ⇒ 属性的种类。
+    fn method_kind(kind: MethodDefinitionKind) -> PropertyKind {
+        match kind {
+            MethodDefinitionKind::Get => PropertyKind::Getter,
+            MethodDefinitionKind::Set => PropertyKind::Setter,
+            MethodDefinitionKind::Method | MethodDefinitionKind::Constructor => PropertyKind::Data,
+        }
     }
 
     /// 非计算的属性键（标识符 / 字符串 / 数）的常量；计算键给 `None`。
@@ -807,7 +855,49 @@ impl<'a> Compiler<'a, '_> {
     }
 
     /// 类：构造器 + 原型方法 + 静态方法 + 字段初始化函数。结果（构造器）在 acc。
-    pub(crate) fn class(&mut self, c: &'a Class<'a>, expression: bool) -> Result<(), Error> {
+    /// 类里每个私有名一个新的私有键（getter / setter 共用一个），存进类作用域的绑定。
+    fn private_names(&mut self, c: &'a Class<'a>) {
+        let mut seen: Vec<&'a str> = Vec::new();
+        for e in &c.body.body {
+            let id = match e {
+                ClassElement::MethodDefinition(m) => match &m.key {
+                    PropertyKey::PrivateIdentifier(id) => id,
+                    _ => continue,
+                },
+                ClassElement::PropertyDefinition(p) => match &p.key {
+                    PropertyKey::PrivateIdentifier(id) => id,
+                    _ => continue,
+                },
+                _ => continue,
+            };
+            let binding = Hidden::private(self.alloc, id);
+            if seen.contains(&binding) {
+                continue;
+            }
+            seen.push(binding);
+            let desc = self.name(binding);
+            self.emit(Insn::CreatePrivateName { desc });
+            self.store(binding, true);
+        }
+    }
+
+    /// 私有方法 / 访问器：函数只建一次存进隐藏绑定；静态的现在就装到构造器（`target`）上，实例的构造时装。
+    fn private_method(&mut self, m: &'a MethodDefinition<'a>, id: &'a PrivateIdentifier<'a>, target: Reg) -> Result<(), Error> {
+        let f = self.method("", &m.value, FunctionKind::Method)?;
+        self.emit(Insn::CreateMethod { func: f, home: target });
+        self.store(Hidden::method(self.alloc, id, m.kind), true);
+        if m.r#static {
+            let key = self.temp();
+            self.load(Hidden::private(self.alloc, id));
+            self.emit(Insn::Star(key));
+            self.load(Hidden::method(self.alloc, id, m.kind));
+            self.emit(Insn::DefinePrivate { obj: target, key, kind: Self::method_kind(m.kind), writable: false });
+            self.release(key);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn class(&mut self, c: &'a Class<'a>) -> Result<(), Error> {
         let name = c.id.as_ref().map_or("", |id| id.name.as_str());
         let parent = match &c.heritage {
             Some(h) => {
@@ -818,10 +908,8 @@ impl<'a> Compiler<'a, '_> {
             }
             None => None,
         };
-        let named = expression && c.id.is_some();
-        if named {
-            self.enter(&Decls::class_name(c))?;
-        }
+        self.enter(&Decls::class_scope(c, self.alloc))?;
+        self.private_names(c);
         let derived = parent.is_some();
         let ctor_def = c.body.body.iter().find_map(|e| match e {
             ClassElement::MethodDefinition(m) if m.kind == MethodDefinitionKind::Constructor => Some(m),
@@ -836,16 +924,21 @@ impl<'a> Compiler<'a, '_> {
         self.emit(Insn::CreateClass { func, parent, proto });
         let ctor = self.temp();
         self.emit(Insn::Star(ctor));
+        // 类体里的类名：构造器一建好就初始化（静态块、静态字段里就能用）
+        if c.id.is_some() {
+            self.store(name, true);
+        }
         let (mut instance_fields, mut static_fields) = (false, false);
         for e in &c.body.body {
             match e {
                 ClassElement::MethodDefinition(m) if m.kind != MethodDefinitionKind::Constructor => {
                     let target = if m.r#static { ctor } else { proto };
-                    let kind = match m.kind {
-                        MethodDefinitionKind::Get => PropertyKind::Getter,
-                        MethodDefinitionKind::Set => PropertyKind::Setter,
-                        _ => PropertyKind::Data,
-                    };
+                    let kind = Self::method_kind(m.kind);
+                    if let PropertyKey::PrivateIdentifier(id) = &m.key {
+                        self.private_method(m, id, target)?;
+                        if m.r#static { static_fields = true } else { instance_fields = true }
+                        continue;
+                    }
                     match self.static_key(&m.key, m.computed) {
                         Some(name) => {
                             let name = name?;
@@ -867,9 +960,16 @@ impl<'a> Compiler<'a, '_> {
                 }
                 ClassElement::MethodDefinition(_) => {}
                 ClassElement::PropertyDefinition(p) => {
+                    if p.computed && !matches!(p.key, PropertyKey::PrivateIdentifier(_)) {
+                        // 计算字段名在类定义时求一次
+                        let k = p.key.as_expression().ok_or_else(|| self.unsupported(p.span, "field key"))?;
+                        self.expr(k)?;
+                        self.emit(Insn::ToPropertyKey);
+                        self.store(Hidden::field_key(self.alloc, p.span), true);
+                    }
                     if p.r#static { static_fields = true } else { instance_fields = true }
                 }
-                ClassElement::StaticBlock(b) => return Err(self.unsupported(b.span, "static blocks")),
+                ClassElement::StaticBlock(_) => static_fields = true,
                 e => return Err(self.unsupported(e.span(), "class element")),
             }
         }
@@ -889,12 +989,7 @@ impl<'a> Compiler<'a, '_> {
             self.release(callee);
         }
         self.emit(Insn::Ldar(ctor));
-        if named {
-            self.store(name, true);
-            self.leave();
-        } else {
-            self.release(proto);
-        }
+        self.leave();
         if let Some(p) = parent {
             self.release(p);
         }
@@ -1170,7 +1265,7 @@ impl<'a> Compiler<'a, '_> {
             Statement::VariableDeclaration(d) => self.declaration(d)?,
             Statement::FunctionDeclaration(_) | Statement::EmptyStatement(_) => {}
             Statement::ClassDeclaration(c) => {
-                self.class(c, false)?;
+                self.class(c)?;
                 if let Some(id) = &c.id {
                     self.store(id.name.as_str(), true);
                 }

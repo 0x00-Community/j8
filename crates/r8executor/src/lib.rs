@@ -413,6 +413,14 @@ impl Executor {
         }
     }
 
+    /// 编译器放进寄存器的私有名。
+    fn private_key(v: Value<'_>) -> r8frame::JsSymbol<'_> {
+        match v {
+            Value::Symbol(s) => s,
+            _ => unreachable!("the compiler loads a private name here"),
+        }
+    }
+
     /// 寄存器里的恢复方式。
     fn mode(v: Value<'_>) -> Resume {
         match v {
@@ -818,6 +826,24 @@ impl Executor {
                         }
                     }
                 }
+                Insn::CreatePrivateName { desc } => *acc = Value::Symbol(a.private_name(func.name_at(desc))),
+                Insn::GetPrivate { obj } => *acc = a.private_get(regs[r(obj)], Self::private_key(*acc))?,
+                Insn::SetPrivate { obj, key } => a.private_set(regs[r(obj)], Self::private_key(regs[r(key)]), *acc)?,
+                Insn::DefinePrivate { obj, key, kind, writable } => {
+                    let slot = match (kind, *acc) {
+                        (PropertyKind::Getter, Value::Object(f)) => Slot::Accessor { get: Some(f), set: None },
+                        (PropertyKind::Setter, Value::Object(f)) => Slot::Accessor { get: None, set: Some(f) },
+                        (_, v) => Slot::Data(v),
+                    };
+                    let prop = Property { slot, enumerable: false, writable, configurable: false };
+                    a.private_define(regs[r(obj)], Self::private_key(regs[r(key)]), prop)?;
+                }
+                Insn::HasPrivate { obj } => *acc = a.private_has(regs[r(obj)], Self::private_key(*acc))?.into(),
+                Insn::ToPropertyKey => {
+                    if !matches!(*acc, Value::Symbol(_)) {
+                        *acc = a.property_key(*acc)?.into();
+                    }
+                }
                 Insn::ForInKeys => {
                     let keys = a.for_in_keys(*acc)?;
                     *acc = a.array(keys).into();
@@ -1219,6 +1245,15 @@ mod tests {
             ("class A {} class B extends A { constructor() { super(); this.x = 1 } } new B().x", "1"),
             ("'a'", "a"),
             ("'use strict'; 'b'", "b"),
+            // 类的私有名、静态块、计算字段名
+            ("class C { #x = 1; #m() { return this.#x + 1 } get #g() { return this.#x * 10 } set #g(v) { this.#x = v } run() { this.#g = 5; return [this.#m(), this.#g, #x in this, #x in {}].join() } } new C().run()", "6,50,true,false"),
+            ("class A { static #count = 0; static inc() { return ++A.#count } static { A.inc(); A.inc() } static get n() { return A.#count } } A.n", "2"),
+            ("let k = 'dyn'; class C { [k + 1] = 5; static [k] = 6 } [new C().dyn1, C.dyn].join()", "5,6"),
+            ("class C { #m() { return 1 } same(o) { return this.#m === o.#m } } new C().same(new C())", "true"),
+            ("class B { #p = 2; static has(o) { return #p in o } } class D extends B { #q = 3; q() { return this.#q } } const o = new D(); [B.has(o), o.q()].join()", "true,3"),
+            ("class C { #a = 1; inc() { this.#a += 2; this.#a++; return this.#a } } new C().inc()", "4"),
+            ("class C { static { var v = 1; this.v = v } } C.v + typeof v", "1undefined"),
+            ("let i = 0; class C { [i++] = 'a'; [i++] = 'b' } const c1 = new C(), c2 = new C(); c1[0] + c1[1] + c2[0] + i", "aba2"),
             // Map / Set / WeakMap / WeakSet
             ("const m = new Map([[1, 'a'], ['1', 'b']]); m.set(NaN, 'n'); [m.get(1), m.get('1'), m.get(NaN), m.size, m.has(2)].join()", "a,b,n,3,false"),
             ("1 / [...new Map([[-0, 1]]).keys()][0]", "Infinity"),
@@ -1280,6 +1315,10 @@ mod tests {
             ("const o = {}; o.self = o; JSON.stringify(o)", "TypeError: Converting circular structure to JSON"),
             ("JSON.stringify(1n)", "TypeError: Do not know how to serialize a BigInt"),
             ("new WeakMap().set(1, 1)", "TypeError: Invalid value used as weak map key"),
+            ("class C { #x = 1; static read(o) { return o.#x } } C.read({})", "TypeError: Cannot read private member #x from an object whose class did not declare it"),
+            ("class C { #m() {} f() { this.#m = 1 } } new C().f()", "TypeError: Private method #m is not writable"),
+            ("class C { get #g() { return 1 } f() { this.#g = 2 } } new C().f()", "TypeError: '#g' was defined without a setter"),
+            ("class C { #x; static f(o) { return #x in o } } C.f(1)", "TypeError: Cannot use 'in' operator to search for '#x' in 1"),
         ];
         for (src, want) in thrown {
             assert_eq!(eval(src).0, Err(String::from(want)), "{src}");

@@ -22,6 +22,7 @@ mod isolate;
 mod object;
 mod ops;
 mod platform;
+mod private;
 mod profiler;
 mod promise;
 mod realm;

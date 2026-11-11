@@ -350,6 +350,8 @@ pub struct ObjectData<'gc> {
     pub props: Vec<(JsString<'gc>, Property<'gc>)>,
     /// Symbol 键的属性
     pub symbols: Vec<(JsSymbol<'gc>, Property<'gc>)>,
+    /// 私有成员（`#x`）：键是类求值时生成的私有名，和普通属性分开，反射看不见
+    pub privates: Vec<(JsSymbol<'gc>, Property<'gc>)>,
     pub proto: Option<JsObject<'gc>>,
     /// 数组：稀疏部分撑起来的长度。离稠密末尾太远的下标（与大 `length`）不进稠密部分、按普通属性存，
     /// 实际长度取它与稠密部分长度的大者

@@ -4,8 +4,9 @@
 use std::collections::HashSet;
 
 use oxc_ast::ast::{
-    Argument, ArrayExpressionElement, ArrowFunctionBody, AssignmentTargetMaybeDefault, AssignmentTargetProperty, CatchClause, ChainElement, Class, ClassElement, ArrowFunctionExpression, AssignmentTarget, BindingIdentifier, BindingPattern, Expression, ForStatementInit, ForStatementLeft, FormalParameters, Function, MemberExpression, ObjectPropertyKind, SimpleAssignmentTarget, Statement, VariableDeclaration, VariableDeclarationKind,
+    Argument, ArrayExpressionElement, ArrowFunctionBody, AssignmentTargetMaybeDefault, AssignmentTargetProperty, CatchClause, ChainElement, Class, ClassElement, ArrowFunctionExpression, AssignmentTarget, BindingIdentifier, BindingPattern, Expression, ForStatementInit, ForStatementLeft, FormalParameters, Function, MemberExpression, MethodDefinitionKind, ObjectPropertyKind, PrivateIdentifier, PropertyKey, SimpleAssignmentTarget, Statement, VariableDeclaration, VariableDeclarationKind,
 };
+use oxc_allocator::Allocator;
 use oxc_span::Span;
 
 /// 一个绑定的身份：声明处的位置（`this` 另占一个名字空间）。
@@ -212,16 +213,41 @@ impl<'a> Decls<'a> {
         d
     }
 
-    /// 函数体那一层：`this`、自己的名字、形参、`var`、顶层词法声明。
-    /// 具名类表达式里类自己的名字那一层。
-    pub fn class_name(c: &'a Class<'a>) -> Self {
+    /// 类作用域：类自己的名字（类体里用，声明与表达式都有），加各个私有名、私有方法函数、计算字段键的隐藏绑定。
+    pub fn class_scope(c: &'a Class<'a>, alloc: &'a Allocator) -> Self {
         let mut d = Self::default();
         if let Some(id) = &c.id {
             d.add(Self::lexical_ident(id, DeclKind::Const, c.span.end));
         }
+        let hidden = |name, span: Span| Decl { name, key: Self::key(span), kind: DeclKind::Const, ready: None };
+        for e in &c.body.body {
+            match e {
+                ClassElement::MethodDefinition(m) => {
+                    if let PropertyKey::PrivateIdentifier(id) = &m.key {
+                        d.add(hidden(Hidden::private(alloc, id), id.span));
+                        d.add(hidden(Hidden::method(alloc, id, m.kind), m.value.span));
+                    }
+                }
+                ClassElement::PropertyDefinition(p) => match &p.key {
+                    PropertyKey::PrivateIdentifier(id) => d.add(hidden(Hidden::private(alloc, id), id.span)),
+                    _ if p.computed => d.add(hidden(Hidden::field_key(alloc, p.span), p.span)),
+                    _ => {}
+                },
+                _ => {}
+            }
+        }
         d
     }
 
+    /// 静态块：自己一层 `var` 作用域，加顶层词法声明。
+    pub fn static_block(stmts: &'a [Statement<'a>]) -> Self {
+        let mut d = Self::default();
+        d.vars(stmts);
+        d.lexical(stmts);
+        d
+    }
+
+    /// 函数体那一层：`this`、自己的名字、形参、`var`、顶层词法声明。
     pub fn function(this: Option<Key>, self_name: Option<&'a BindingIdentifier<'a>>, params: Option<&'a FormalParameters<'a>>, stmts: &'a [Statement<'a>]) -> Self {
         let mut d = Self::default();
         if let Some(key) = this {
@@ -246,6 +272,29 @@ impl<'a> Decls<'a> {
     }
 }
 
+/// 类作用域里的隐藏绑定名：私有名 `#x`、私有方法的函数 `#x@method` / `@get` / `@set`、计算字段的键 `%key@位置`。
+/// 这些都不是合法标识符，不会和用户的名字撞。
+pub(crate) struct Hidden;
+
+impl Hidden {
+    pub fn private<'a>(alloc: &'a Allocator, id: &PrivateIdentifier<'_>) -> &'a str {
+        alloc.alloc_str(&format!("#{}", id.name.as_str()))
+    }
+
+    pub fn method<'a>(alloc: &'a Allocator, id: &PrivateIdentifier<'_>, kind: MethodDefinitionKind) -> &'a str {
+        let suffix = match kind {
+            MethodDefinitionKind::Get => "get",
+            MethodDefinitionKind::Set => "set",
+            MethodDefinitionKind::Method | MethodDefinitionKind::Constructor => "method",
+        };
+        alloc.alloc_str(&format!("#{}@{suffix}", id.name.as_str()))
+    }
+
+    pub fn field_key(alloc: &Allocator, span: Span) -> &str {
+        alloc.alloc_str(&format!("%key@{}", span.start))
+    }
+}
+
 /// 预扫的一层作用域：属于哪个函数、声明了什么。
 struct Level<'a> {
     func: u32,
@@ -253,18 +302,18 @@ struct Level<'a> {
 }
 
 /// 预扫：找出被内层函数引用到的绑定。
-#[derive(Default)]
 pub(crate) struct Resolver<'a> {
     levels: Vec<Level<'a>>,
     funcs: u32,
     func: u32,
+    alloc: &'a Allocator,
     pub captured: HashSet<Key>,
 }
 
 impl<'a> Resolver<'a> {
     /// 脚本：顶层声明是全局对象的属性，不进作用域；只有 `this`。
-    pub fn script(stmts: &'a [Statement<'a>], this: Key) -> HashSet<Key> {
-        let mut r = Self::default();
+    pub fn script(stmts: &'a [Statement<'a>], this: Key, alloc: &'a Allocator) -> HashSet<Key> {
+        let mut r = Self { levels: Vec::new(), funcs: 0, func: 0, alloc, captured: HashSet::new() };
         r.levels.push(Level { func: 0, names: vec![(THIS, this)] });
         r.statements(stmts);
         r.captured
@@ -326,15 +375,12 @@ impl<'a> Resolver<'a> {
         self.leave_function(outer);
     }
 
-    /// 类：`extends`、类名那一层、方法、计算键、字段初始化（各自一个合成函数）。
-    fn class(&mut self, c: &'a Class<'a>, expression: bool) {
+    /// 类：`extends`、类作用域、方法、计算键、字段初始化与静态块（各自一个合成函数）。
+    fn class(&mut self, c: &'a Class<'a>) {
         if let Some(h) = &c.heritage {
             self.expr(&h.expression);
         }
-        let named = expression && c.id.is_some();
-        if named {
-            self.push(&Decls::class_name(c));
-        }
+        self.push(&Decls::class_scope(c, self.alloc));
         for e in &c.body.body {
             match e {
                 ClassElement::MethodDefinition(m) => {
@@ -356,18 +402,36 @@ impl<'a> Resolver<'a> {
         for (statik, key) in [(false, Decls::this_key(c.body.span)), (true, Decls::this_key(c.span))] {
             let outer = self.enter_function(&Decls::function(Some(key), None, None, &[]));
             for e in &c.body.body {
-                if let ClassElement::PropertyDefinition(p) = e
-                    && p.r#static == statik
-                    && let Some(v) = &p.value
-                {
-                    self.expr(v);
+                match e {
+                    // 实例初始化函数里要装私有方法：读私有名与方法函数
+                    ClassElement::MethodDefinition(m) if !statik && !m.r#static => {
+                        if let PropertyKey::PrivateIdentifier(id) = &m.key {
+                            self.reference(Hidden::private(self.alloc, id));
+                            self.reference(Hidden::method(self.alloc, id, m.kind));
+                        }
+                    }
+                    ClassElement::PropertyDefinition(p) if p.r#static == statik => {
+                        match &p.key {
+                            PropertyKey::PrivateIdentifier(id) => self.reference(Hidden::private(self.alloc, id)),
+                            _ if p.computed => self.reference(Hidden::field_key(self.alloc, p.span)),
+                            _ => {}
+                        }
+                        if let Some(v) = &p.value {
+                            self.expr(v);
+                        }
+                    }
+                    ClassElement::StaticBlock(b) if statik => self.scoped(&Decls::static_block(&b.body), |r| r.statements(&b.body)),
+                    _ => {}
                 }
             }
             self.leave_function(outer);
         }
-        if named {
-            self.levels.pop();
-        }
+        self.levels.pop();
+    }
+
+    fn private_reference(&mut self, id: &PrivateIdentifier<'_>) {
+        let name = format!("#{}", id.name.as_str());
+        self.reference(&name);
     }
 
     fn params(&mut self, p: &'a FormalParameters<'a>) {
@@ -493,7 +557,10 @@ impl<'a> Resolver<'a> {
                             self.expr(&m.object);
                             self.expr(&m.expression);
                         }
-                        MemberExpression::PrivateFieldExpression(m) => self.expr(&m.object),
+                        MemberExpression::PrivateFieldExpression(m) => {
+                            self.private_reference(&m.field);
+                            self.expr(&m.object);
+                        }
                     }
                 }
             }
@@ -517,7 +584,7 @@ impl<'a> Resolver<'a> {
             Statement::ExpressionStatement(e) => self.expr(&e.expression),
             Statement::VariableDeclaration(d) => self.declaration(d),
             Statement::FunctionDeclaration(f) => self.function(f, false),
-            Statement::ClassDeclaration(c) => self.class(c, false),
+            Statement::ClassDeclaration(c) => self.class(c),
             Statement::BlockStatement(b) => self.scoped(&Decls::block([b.body.as_slice()]), |r| r.statements(&b.body)),
             Statement::IfStatement(i) => {
                 self.expr(&i.test);
@@ -620,7 +687,11 @@ impl<'a> Resolver<'a> {
                         self.expr(&m.object);
                         self.expr(&m.expression);
                     }
-                    _ => {}
+                    Some(MemberExpression::PrivateFieldExpression(m)) => {
+                        self.private_reference(&m.field);
+                        self.expr(&m.object);
+                    }
+                    None => {}
                 }
             }
         }
@@ -633,7 +704,7 @@ impl<'a> Resolver<'a> {
             Expression::ThisExpression(_) | Expression::Super(_) => self.reference(THIS),
             Expression::FunctionExpression(f) => self.function(f, true),
             Expression::ArrowFunctionExpression(a) => self.arrow(a),
-            Expression::ClassExpression(c) => self.class(c, true),
+            Expression::ClassExpression(c) => self.class(c),
             Expression::NewExpression(n) => {
                 self.expr(&n.callee);
                 n.arguments.iter().for_each(|a| self.argument(a));
@@ -672,6 +743,14 @@ impl<'a> Resolver<'a> {
                 c.arguments.iter().for_each(|a| self.argument(a));
             }
             Expression::StaticMemberExpression(m) => self.expr(&m.object),
+            Expression::PrivateFieldExpression(m) => {
+                self.private_reference(&m.field);
+                self.expr(&m.object);
+            }
+            Expression::PrivateInExpression(p) => {
+                self.private_reference(&p.left);
+                self.expr(&p.right);
+            }
             Expression::ComputedMemberExpression(m) => {
                 self.expr(&m.object);
                 self.expr(&m.expression);
