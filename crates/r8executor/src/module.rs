@@ -38,6 +38,7 @@ impl Executor {
     }
 
     /// 链接：解析各模块的导入与转导出（找不到 / 有歧义给 `Error::Syntax`）。
+    #[cfg(feature = "compile")]
     pub(crate) fn link(a: &mut Agent<'_, '_>, m: u32, seen: &mut Vec<u32>) -> Result<(), Error> {
         if seen.contains(&m) {
             return Ok(());
@@ -77,6 +78,7 @@ impl Executor {
     }
 
     /// 求值：依赖先求值（成环的跳过），每个模块只跑一次；出过错的再求值照样抛那个错。
+    #[cfg(feature = "compile")]
     pub(crate) fn evaluate(&self, a: &mut Agent<'_, '_>, m: u32, depth: usize) -> Result<(), Error> {
         let (status, error, requested, main, env) = {
             let mods = a.realm.modules.borrow();
