@@ -7,13 +7,8 @@ license.workspace = true
 
 [dependencies]
 r8frame.workspace = true
-r8macros.workspace = true
 gc-arena.workspace = true
 
 [lints]
 workspace = true
 
-[dev-dependencies]
-r8executor.workspace = true
-r8builtins.workspace = true
-r8platform.workspace = true

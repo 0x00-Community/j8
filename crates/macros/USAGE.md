@@ -53,15 +53,20 @@ r8macros::enums!("insn.json");
 
 `Option<_>` 字段为 `None` 时在 `Display` 里整个不出现。
 
-## `#[r8binding::class]`（r8binding 的类绑定）
+## 绑定宏：`#[r8::class]` / `#[r8::object]` / `#[r8::function]`
 
-写在 `impl` 块上：每个方法生成一个转换外壳（`fn(agent, this, args) -> Result<Value>`），并实现 `r8binding::Class`。
+三个宏各一个文件（`class.rs` / `object.rs` / `function.rs`），共用的读 `#[js(…)]`、分析签名、生成转换外壳在 `method.rs`。
+从仓库根的 `r8` 包用（`r8/src/lib.rs` 聚合导出宏与 r8binding 的 trait），生成代码走 `::r8::` 路径。
+
+### `#[r8::class]`：Rust 类型导出成 JS 类
+
+写在 `impl` 块上：每个方法生成一个转换外壳（`fn(agent, this, args) -> Result<Value>`），并实现 `r8::Class`。
 类型本身不用改；实例是宿主对象（`ObjectKind::Host`），里面放一份 Rust 值。
 
 ```rust
 struct Counter { n: f64 }
 
-#[r8binding::class]               // 或 #[r8binding::class("名字")]，缺省用类型名
+#[r8::class]                      // 或 #[r8::class("名字")]，缺省用类型名
 impl Counter {
     #[js(constructor)]            // `new Counter(…)`；普通调用抛 TypeError
     fn new(start: Option<f64>) -> Self { Self { n: start.unwrap_or(0.0) } }
@@ -75,23 +80,47 @@ impl Counter {
     fn set_value(&mut self, v: f64) { self.n = v }
 
     fn zero() -> f64 { 0.0 }      // 没有 self：构造器上的静态方法
-
-    fn describe<'gc>(&self, a: &mut Agent<'gc, '_>, label: String) -> Result<Value<'gc>, Error> { … }
 }
 
 let handle = Counter::install(&mut agent, global);     // 全局 `Counter`，给出构造器与原型
 let obj = handle.instance(&agent, Counter { n: 1.0 });  // Rust 这边建实例
 ```
 
+### `#[r8::object]`：只有关联函数的 `impl` 块导出成普通对象
+
+```rust
+struct Fs;
+
+#[r8::object("fs")]
+impl Fs {
+    fn exists_sync(path: &str) -> bool { … }        // fs.existsSync
+    #[js(getter)]
+    fn sep() -> String { "/".into() }               // fs.sep（访问器）
+}
+
+Fs::install(&mut agent, global);                    // 全局 `fs`
+```
+
+### `#[r8::function]`：一个函数导出成 JS 函数
+
+```rust
+#[r8::function]                    // 或 #[r8::function("名字")]
+fn greet(name: &str) -> String { format!("hi {name}") }
+
+greet::install(&mut agent, global);   // 原函数照留；旁边生成同名模块，`greet::NATIVE` 是宿主函数
+```
+
+### 标注与形参
+
 | 标注 | 含义 |
 |---|---|
 | `#[js(constructor)]` | 构造器（返回 `Self` 或 `Result<Self, Error>`）；没有就是不能 `new` 的类 |
-| `#[js(getter)]` / `#[js(setter)]` | 原型上的访问器，同名的配成一对 |
+| `#[js(getter)]` / `#[js(setter)]` | 访问器，同名的配成一对 |
 | `#[js(static)]` | 静态方法（没有 `self` 的缺省就是） |
 | `#[js(name = "…")]` | JS 里的名字 |
 | `#[js(skip)]` | 不导出 |
 
-形参按类型取：`&mut Agent` 传当前 agent；`This` 是原样的 `this`；`Rest` 是剩下的全部实参；
-`&str` 先 ToString 再借出；别的按 `FromJs` 依次转（`f64` / `i32` / `u32` / `usize` / `bool` / `String` / `JsString` / `JsObject` / `Value` /
+形参按类型取：`&mut Agent` 传当前 agent；`This` 是原样的 `this`；`Rest` 是剩下的全部实参；`&str` 先 ToString 再借出；
+别的按 `FromJs` 依次转（`f64` / `i32` / `u32` / `usize` / `bool` / `String` / `JsString` / `JsObject` / `Value` /
 `Option<T>` / `Vec<T>`）。返回值按 `IntoJs` 转，`Result<T, Error>` 出错就抛。形参里的生命周期写 `'gc`。
-`&self` / `&mut self` 方法重入同一个对象时抛 TypeError（不 panic）。只要静态方法的可以 `install_namespace` 成普通对象。
+`&self` / `&mut self` 方法重入同一个对象时抛 TypeError（不 panic）。

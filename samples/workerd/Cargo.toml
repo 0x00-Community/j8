@@ -14,7 +14,7 @@ r8frame.workspace = true
 r8platform.workspace = true
 r8builtins.workspace = true
 r8executor.workspace = true
-r8binding.workspace = true
+r8.workspace = true
 clap.workspace = true
 
 [lints]

@@ -1,6 +1,6 @@
-//! `#[r8binding::class]` 生成的绑定在真引擎里跑一遍。
+//! `#[r8::class]` / `#[r8::object]` / `#[r8::function]` 生成的绑定在真引擎里跑一遍。
 #![expect(clippy::needless_pass_by_value, clippy::unnecessary_wraps, reason = "绑定的形参按值收、返回 Result 是要测的写法")]
-use r8binding::{Class, Rest};
+use r8::{Class, Object, Rest};
 use r8builtins::Builtins;
 use r8executor::Executor;
 use r8frame::{Agent, CreateParams, Error, Isolate, Source, Value};
@@ -10,7 +10,7 @@ struct Counter {
     n: f64,
 }
 
-#[r8binding::class]
+#[r8::class]
 impl Counter {
     #[js(constructor)]
     fn new(start: Option<f64>) -> Self {
@@ -41,6 +41,26 @@ impl Counter {
     }
 }
 
+/// 普通对象：方法与访问器。
+struct Calc;
+
+#[r8::object("calc")]
+impl Calc {
+    fn twice(x: f64) -> f64 {
+        x * 2.0
+    }
+
+    #[js(getter)]
+    fn answer() -> f64 {
+        42.0
+    }
+}
+
+#[r8::function]
+fn greet(name: &str) -> String {
+    format!("hi {name}")
+}
+
 #[test]
 fn class_binding() {
     let platform = DefaultPlatform::default();
@@ -52,8 +72,10 @@ fn class_binding() {
         let mut a = scope.agent(realm, &executor);
         let global = a.realm.global;
         Counter::install(&mut a, global);
+        Calc::install(&mut a, global);
+        greet::install(&mut a, global);
     });
-    let src = "const c = new Counter(2); c.inc(3); c.value = c.value * 2; [c.value, c.describe('n'), Counter.sum(1, 2, 3), c instanceof Counter, String(Object.prototype.toString.call(c))].join()";
+    let src = "const c = new Counter(2); c.inc(3); c.value = c.value * 2; [c.value, c.describe('n'), Counter.sum(1, 2, 3), c instanceof Counter, String(Object.prototype.toString.call(c)), calc.twice(4), calc.answer, greet('r8'), greet.length].join()";
     let r = isolate.run(&mut executor, &cx, &Source { text: src, file: "t.js" });
     let text = isolate.enter(|scope| {
         let realm = scope.context_of(&cx);
@@ -61,5 +83,5 @@ fn class_binding() {
         let v = a.local(&r.expect("the script runs"));
         String::from(&**a.to_string(v).expect("a string"))
     });
-    assert_eq!(text, "10,n=10,3,true,[object Counter]");
+    assert_eq!(text, "10,n=10,3,true,[object Counter],8,42,hi r8,1");
 }

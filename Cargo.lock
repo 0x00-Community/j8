@@ -172,7 +172,7 @@ name = "dune"
 version = "0.1.0"
 dependencies = [
  "clap",
- "r8binding",
+ "r8",
  "r8builtins",
  "r8executor",
  "r8frame",
@@ -752,15 +752,23 @@ dependencies = [
 ]
 
 [[package]]
-name = "r8binding"
+name = "r8"
 version = "0.1.0"
 dependencies = [
- "gc-arena",
+ "r8binding",
  "r8builtins",
  "r8executor",
  "r8frame",
  "r8macros",
  "r8platform",
+]
+
+[[package]]
+name = "r8binding"
+version = "0.1.0"
+dependencies = [
+ "gc-arena",
+ "r8frame",
 ]
 
 [[package]]
@@ -1136,7 +1144,7 @@ name = "workerd"
 version = "0.1.0"
 dependencies = [
  "clap",
- "r8binding",
+ "r8",
  "r8builtins",
  "r8executor",
  "r8frame",

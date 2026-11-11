@@ -17,7 +17,7 @@ pub enum Member {
     Static { name: &'static str, f: NativeFn, length: u32 },
 }
 
-/// 一个导出到 JS 的 Rust 类型（一般由 [`class`](crate::class) 宏生成）。
+/// 一个导出成 JS 类的 Rust 类型（一般由 `#[r8::class]` 生成）。
 pub trait Class: Any + Sized {
     /// JS 里的类名
     const NAME: &'static str;
@@ -43,17 +43,22 @@ pub trait Class: Any + Sized {
         target.borrow_mut(a.mc).define(a.mc, Self::NAME, Property::hidden(ctor.into()));
         ClassHandle { ctor, proto }
     }
+}
 
-    /// 只要静态成员：在 `target` 上装一个叫 `name` 的普通对象（`console` / `process` 这类）。
-    fn install_namespace<'gc>(a: &mut Agent<'gc, '_>, target: JsObject<'gc>, name: &str) -> JsObject<'gc> {
-        let ns = a.object();
+/// 一个导出成普通对象的 Rust 类型（`console` / `process` 这类，一般由 `#[r8::object]` 生成）。
+pub trait Object {
+    /// 装在 `target` 上的属性名
+    const NAME: &'static str;
+    const MEMBERS: &'static [Member];
+
+    /// 在 `target` 上装这个对象，给出它。
+    fn install<'gc>(a: &mut Agent<'gc, '_>, target: JsObject<'gc>) -> JsObject<'gc> {
+        let o = a.object();
         for m in Self::MEMBERS {
-            if let Member::Static { name, f, length } = *m {
-                a.realm.method(a.mc, ns, name, f, length);
-            }
+            Glue::member(a, o, o, m);
         }
-        target.borrow_mut(a.mc).define(a.mc, name, Property::hidden(ns.into()));
-        ns
+        target.borrow_mut(a.mc).define(a.mc, Self::NAME, Property::hidden(o.into()));
+        o
     }
 }
 
@@ -86,6 +91,13 @@ impl Glue {
                 proto.borrow_mut(a.mc).define(a.mc, name, Property { slot: Slot::Accessor { get, set }, enumerable: false, writable: false, configurable: true });
             }
         }
+    }
+
+    /// `#[r8::function]`：在 `target` 上装一个 JS 函数。
+    pub fn function<'gc>(a: &Agent<'gc, '_>, target: JsObject<'gc>, name: &str, f: NativeFn, length: u32) -> JsObject<'gc> {
+        let func = a.realm.named_native(a.mc, f, name, length);
+        target.borrow_mut(a.mc).define(a.mc, name, Property::hidden(func.into()));
+        func
     }
 
     /// 不能 `new` 的类的构造器。

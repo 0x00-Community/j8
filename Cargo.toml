@@ -1,3 +1,29 @@
+[package]
+name = "r8"
+description = "r8：Rust 重写的 V8。根包聚合导出：绑定宏 #[r8::class] / #[r8::object] / #[r8::function] 与它们要用的 trait、类型"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+# tests/ 下的 test262.rs 挂在 dune 包下，这里只认 binding
+autotests = false
+
+[dependencies]
+r8frame.workspace = true
+r8binding.workspace = true
+r8macros.workspace = true
+
+[dev-dependencies]
+r8executor.workspace = true
+r8builtins.workspace = true
+r8platform.workspace = true
+
+[[test]]
+name = "binding"
+path = "tests/binding.rs"
+
+[lints]
+workspace = true
+
 [workspace]
 resolver = "3"
 members = ["crates/*", "samples/*", "debugger"]
@@ -15,6 +41,7 @@ r8bytecode = { path = "crates/r8bytecode", default-features = false }
 r8executor = { path = "crates/r8executor" }
 r8macros = { path = "crates/macros" }
 r8binding = { path = "crates/r8binding" }
+r8 = { path = "." }
 clap = { version = "4.6", features = ["derive"] }
 moremath = { version = "=0.2.2", default-features = false }
 libm = "0.2"

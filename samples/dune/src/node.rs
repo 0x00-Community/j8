@@ -1,8 +1,8 @@
-//! node 式的宿主接口：`fs` / `path` / `process` 的原生部分用 r8binding 绑定，`require` 与 CommonJS 包装在
+//! node 式的宿主接口：`fs` / `path` / `process` 的原生部分用 `#[r8::object]` 绑定，`require` 与 CommonJS 包装在
 //! [`PRELUDE`] 里用 JS 写。原生部分挂在不可枚举的全局 `__dune` 上，序言把它们包成模块。
 use std::path::{Component, Path, PathBuf};
 
-use r8binding::{Class, Rest};
+use r8::{Object, Rest};
 use r8frame::{Agent, Error, ErrorKind, JsObject, Property, Value};
 
 /// 序言：`require`（CommonJS，模块缓存、相对路径、`.js` / `.json` / 目录 `index.js`）、`module`、`process`。
@@ -11,7 +11,7 @@ pub const PRELUDE: &str = include_str!("prelude.js");
 /// `fs` 的同步接口。
 pub struct Fs;
 
-#[r8binding::class]
+#[r8::object("fs")]
 impl Fs {
     fn read_file_sync<'gc>(a: &mut Agent<'gc, '_>, path: &str, encoding: Option<Value<'gc>>) -> Result<String, Error> {
         let _ = encoding;
@@ -61,7 +61,7 @@ impl Fs {
 /// `path`（POSIX）。
 pub struct Paths;
 
-#[r8binding::class("path")]
+#[r8::object("path")]
 impl Paths {
     fn join<'gc>(parts: Rest<'gc>, a: &mut Agent<'gc, '_>) -> Result<String, Error> {
         let mut p = PathBuf::new();
@@ -126,7 +126,7 @@ impl Paths {
 /// `process` 的方法（属性在 [`Node::install`] 里放）。
 pub struct Process;
 
-#[r8binding::class]
+#[r8::object("process")]
 impl Process {
     fn exit(code: Option<i32>) {
         std::process::exit(code.unwrap_or(0));
@@ -150,9 +150,9 @@ impl Node {
         let global = a.realm.global;
         let native = a.object();
         global.borrow_mut(a.mc).define(a.mc, "__dune", Property::hidden(native.into()));
-        Fs::install_namespace(a, native, "fs");
-        Paths::install_namespace(a, native, "path");
-        let process = Process::install_namespace(a, global, "process");
+        Fs::install(a, native);
+        Paths::install(a, native);
+        let process = Process::install(a, global);
         let mut argv: Vec<Value<'gc>> = vec![a.string("dune").into(), a.string(script).into()];
         argv.extend(args.iter().map(|s| Value::from(a.string(s))));
         let argv = a.array(argv);

@@ -5,7 +5,7 @@
 //! workerd examples/counter.js --bind COUNTER=Counter --port 8787
 //! ```
 //! Fetch API 的子集与 Durable Object 在 `prelude.js` 里用 JS 写；每个对象的存储是 Rust 的 [`KvStore`]，
-//! 经 `#[r8binding::class]` 绑定成 `__native.KvStore`。
+//! 经 `#[r8::class]` 绑定成 `__native.KvStore`。
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::Parser;
-use r8binding::Class;
+use r8::Class;
 use r8builtins::Builtins;
 use r8executor::Executor;
 use r8frame::{ContextRoot, CreateParams, Error, Isolate, Property, Source};
@@ -48,7 +48,7 @@ struct KvStore {
     map: BTreeMap<String, String>,
 }
 
-#[r8binding::class]
+#[r8::class]
 impl KvStore {
     #[js(constructor)]
     fn new() -> Self {

@@ -7,13 +7,14 @@
 | crate | std | 职责 |
 |---|---|---|
 | `r8frame` | `no_std` | 核心框架层：定义 trait（`Platform`、`Engine`、`Invoke`、`Intrinsics`）与通用结构体 / 枚举（`Isolate`、`Scope`、`Agent`、`Context`·`Realm`、`Global`、`Value`、`JsString`·`JsObject`、`Profiler`、`BinaryOp`、`Error`……），JS 运算语义挂在 `Agent` 上，实现归各层 crate |
-| `r8binding` | `no_std` | Rust ⇄ JS 绑定：`FromJs` / `IntoJs`、宿主对象、`#[r8binding::class]` 把 Rust 类型导出成 JS 类（宏在 r8macros，见 `crates/macros/USAGE.md`） |
+| `r8`（仓库根 `src/`） | `no_std` | 聚合导出：`#[r8::class]` / `#[r8::object]` / `#[r8::function]`（宏在 r8macros，见 `crates/macros/USAGE.md`）与 r8binding 的 trait |
+| `r8binding` | `no_std` | Rust ⇄ JS 绑定的运行时：`FromJs` / `IntoJs`、宿主对象、`Class` / `Object` |
 | `r8builtins` | `no_std` | 实现 `Intrinsics`：往 `Realm` 装 Object / Function / Array / String / Number / Boolean / Math / Error 系列 / `console` / `parseInt` 等 |
 | `r8platform` | std | 实现 `Platform`（`DefaultPlatform`）：后台任务跑在 moremath `ThreadMulti` 线程池上（起一次复用、任务可借用调用方数据），时钟用 `Instant` |
 | `r8bytecode` | `no_std`（`compile` 要 std） | 累加器式寄存器字节码（`Insn` / `Function` / `Module`）；`compile` feature（缺省开）带 JS ⇒ 字节码编译器 `Module::try_from(&Source)`，用 oxc 解析 |
 | `r8macros` | proc-macro | 过程宏：`enums!("x.json")` 从 JSON 生成枚举（定义、`Display`、按字段类型取 `&mut`），用法见 `crates/macros/USAGE.md` |
-| `samples/dune` | std | 基于 r8 的 node 式二进制（`require` / `module` / `fs` / `path` / `process`，原生部分用 r8binding 绑定）：`dune a.js` / `dune run a.js`（`-` 读标准输入）、`dune -e '<js>'`、`dune -p '<js>'` 打印结果、不带参数进 REPL（`.help` / `.exit`）；没接住的异常打 `Uncaught …` 退出码 1 |
-| `samples/workerd` | std | 用 r8 加载 Cloudflare Worker（ES 模块 `export default { fetch }`）与 Durable Object：`workerd examples/counter.js --bind COUNTER=Counter --request "GET /c/inc?name=a"` 或 `--port 8787` 起 HTTP 服务；Fetch API 子集与 DO 在 JS 序言里，存储是 r8binding 绑定的 Rust KV |
+| `samples/dune` | std | 基于 r8 的 node 式二进制（`require` / `module` / `fs` / `path` / `process`，原生部分用 `#[r8::object]` 绑定）：`dune a.js` / `dune run a.js`（`-` 读标准输入）、`dune -e '<js>'`、`dune -p '<js>'` 打印结果、不带参数进 REPL（`.help` / `.exit`）；没接住的异常打 `Uncaught …` 退出码 1 |
+| `samples/workerd` | std | 用 r8 加载 Cloudflare Worker（ES 模块 `export default { fetch }`）与 Durable Object：`workerd examples/counter.js --bind COUNTER=Counter --request "GET /c/inc?name=a"` 或 `--port 8787` 起 HTTP 服务；Fetch API 子集与 DO 在 JS 序言里，存储是 `#[r8::class]` 绑定的 Rust KV |
 | `r8debugger` | std | 调试命令行 `r8dbg`（clap）：`r8dbg asm <file.js \| ->` / `r8dbg asm -e '<js>'` 打印字节码反汇编（`-o` 写文件） |
 | `r8executor` | `no_std`（`compile` 要 std） | 字节码执行器 `Executor`，**目前是最后一层**；`compile` feature 下实现 `Engine` |
 
