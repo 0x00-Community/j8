@@ -1,0 +1,21 @@
+[package]
+name = "workerd"
+description = "workerd：用 r8 加载 Cloudflare Worker（ES 模块 + Durable Object）的最小宿主"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "workerd"
+path = "src/main.rs"
+
+[dependencies]
+r8frame.workspace = true
+r8platform.workspace = true
+r8builtins.workspace = true
+r8executor.workspace = true
+r8binding.workspace = true
+clap.workspace = true
+
+[lints]
+workspace = true
