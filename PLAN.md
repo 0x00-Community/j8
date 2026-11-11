@@ -46,4 +46,4 @@
 - [x] annexB 块级函数提升（函数与脚本，含 if 子句里的函数声明；eval 代码里的还没有）
 - [x] 生成器 / async 生成器调用时就初始化形参（出错同步抛）
 - [x] arguments 与形参联动（非严格、简单形参：形参放进环境，下标映射到槽位，删除 / 改访问器 / 改只读后断开）
-- [ ] 模块与动态 import（编译器已产出模块信息 / 导入绑定 / 命名空间对象的属性行为；执行器的加载、链接、求值与运行器还没接）
+- [x] 模块与动态 import：模块环境、导入绑定实时读出口方槽位、ResolveExport（间接 / 星号 / 歧义）、命名空间对象、import()、import.meta、`Platform::load_module`；运行器先跑 harness 脚本再跑模块（顶层 await、import defer / source phase 还没有）

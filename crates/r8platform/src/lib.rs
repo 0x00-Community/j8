@@ -38,6 +38,14 @@ impl Platform for DefaultPlatform {
         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default()
     }
 
+    /// 相对说明符按引用者所在目录解析，规范化后读文件。
+    fn load_module(&self, referrer: &str, specifier: &str) -> Option<(String, String)> {
+        let base = std::path::Path::new(referrer).parent().unwrap_or_else(|| std::path::Path::new("."));
+        let path = std::fs::canonicalize(base.join(specifier)).ok()?;
+        let text = std::fs::read_to_string(&path).ok()?;
+        Some((path.display().to_string(), text))
+    }
+
     fn print(&self, line: &str) {
         println!("{line}");
     }

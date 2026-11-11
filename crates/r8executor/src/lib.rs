@@ -12,6 +12,8 @@ use core::cell::{Cell, RefCell};
 
 use r8bytecode::{Constant, Function, FunctionKind, Insn, Mode, Module, PropertyKind, Reg};
 use gc_arena::{Collect, Gc};
+mod module;
+
 use r8frame::{Agent, Closure, Coroutine, CoroutineState, Env, Error, ErrorKind, FuncId, Invoke, IterRecord, JsEnv, JsObject, ObjectData, ObjectKind, Property, Resume, Slot, Step, Suspended, Value};
 
 /// 调用深度上限（含宿主函数里重入的 JS），过了抛 RangeError
@@ -132,6 +134,8 @@ pub struct Executor {
     code: RefCell<Vec<Rc<Loaded>>>,
     /// 当前调用深度（各层重入的 `execute` 加起来）
     depth: Cell<usize>,
+    /// 模块的代码：函数编号起点 ⇒ 模块编号（导入绑定、import.meta 用）
+    module_of: RefCell<alloc::collections::BTreeMap<u32, u32>>,
 }
 
 impl Executor {
@@ -728,8 +732,12 @@ impl Executor {
                     }
                 }
                 Insn::ToObject => *acc = a.to_object(*acc)?.into(),
-                // 模块：编译器已产出模块信息，加载 / 链接 / 求值还没接上
-                Insn::LdaImport { .. } | Insn::DynamicImport { .. } | Insn::ImportMeta => return Err(Error::Unsupported(alloc::string::String::from("modules"))),
+                Insn::LdaImport { index } => *acc = self.import_value(a, loaded.base, index)?,
+                Insn::ImportMeta => *acc = self.import_meta(a, loaded.base)?,
+                Insn::DynamicImport { referrer } => {
+                    let level = depth + frames.len() + 1;
+                    *acc = self.dynamic_import(a, func.name_at(referrer), *acc, level)?;
+                }
                 Insn::CreateNullObject => *acc = ObjectData::default().alloc(a.mc).into(),
                 Insn::DeclareEvalVar { obj, name } => {
                     if let Value::Object(o) = regs[r(obj)] {
@@ -1364,6 +1372,21 @@ impl r8frame::Engine for Executor {
                 Slice::Paused(root) => parked = Some(root),
             }
         }
+    }
+
+    /// 模块不分片：一次进入跑完加载、链接、求值与微任务。
+    fn eval_module(&mut self, isolate: &mut r8frame::Isolate<'_>, cx: &r8frame::ContextRoot, src: &r8frame::Source<'_>) -> Result<r8frame::Global, Error> {
+        let this: &Executor = self;
+        isolate.enter(|scope| {
+            let realm = scope.context_of(cx);
+            let mut a = scope.agent(realm, this);
+            #[cfg(feature = "compile")]
+            this.run_module(&mut a, src.file, src.text, 0)?;
+            #[cfg(not(feature = "compile"))]
+            return Err(src.unsupported(0, "modules"));
+            a.run_jobs()?;
+            Ok(a.global(Value::Undefined))
+        })
     }
 }
 

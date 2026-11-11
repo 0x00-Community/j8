@@ -173,6 +173,15 @@ impl Platform for Capture {
         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default()
     }
 
+    /// 模块：相对路径按引用者（相对 `test/` 或绝对路径）所在目录解析。
+    fn load_module(&self, referrer: &str, specifier: &str) -> Option<(String, String)> {
+        let referrer = Suite::test_dir().join(referrer);
+        let base = referrer.parent()?;
+        let path = std::fs::canonicalize(base.join(specifier)).ok()?;
+        let text = std::fs::read_to_string(&path).ok()?;
+        Some((path.display().to_string(), text))
+    }
+
     fn workers(&self) -> NonZeroUsize {
         NonZeroUsize::MIN
     }
@@ -233,15 +242,15 @@ impl Case {
             src.push_str(&std::fs::read_to_string(&p).map_err(|e| format!("{}: {e}", p.display()))?);
             src.push('\n');
         }
-        src.push_str(&self.text);
+        // 模块用例：harness 先当脚本跑（全局），模块只是用例本身
+        if !self.has(Flag::Module) {
+            src.push_str(&self.text);
+        }
         Ok(src)
     }
 
     /// 在本进程里跑，给出结果与原因。
     fn run(&self) -> (Outcome, String) {
-        if self.has(Flag::Module) {
-            return (Outcome::Skip, "module".into());
-        }
         let src = match self.source() {
             Ok(s) => s,
             Err(e) => return (Outcome::Fail, e),
@@ -252,7 +261,14 @@ impl Case {
         let file = self.path.strip_prefix(Suite::test_dir()).unwrap_or(&self.path).display().to_string();
         let expected = self.meta.negative.as_ref();
         let cx = isolate.enter(|scope| scope.persist(scope.context(&Builtins)));
-        let r = isolate.run(&mut executor, &cx, &Source { text: &src, file: &file });
+        let r = if self.has(Flag::Module) {
+            match isolate.run(&mut executor, &cx, &Source { text: &src, file: "[harness]" }) {
+                Ok(_) => isolate.run_module(&mut executor, &cx, &Source { text: &self.text, file: &file }),
+                e => e,
+            }
+        } else {
+            isolate.run(&mut executor, &cx, &Source { text: &src, file: &file })
+        };
         let (outcome, why) = isolate.enter(|scope| {
             let realm = scope.context_of(&cx);
             let mut agent = scope.agent(realm, &executor);
