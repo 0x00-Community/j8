@@ -1,5 +1,6 @@
 //! ES 模块的加载、链接、求值（同步：依赖经 `Platform::load_module` 读进来；还不支持顶层 await）。
-use alloc::rc::Rc;
+#![cfg_attr(not(feature = "compile"), allow(unused_imports, reason = "加载 / 链接 / 求值都要编译器，没有时只剩导入绑定的读"))]
+
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -22,8 +23,8 @@ impl Executor {
         }
         let env = r8frame::Env { slots, parent: None }.alloc(a.mc);
         let index = u32::try_from(a.realm.modules.borrow().len()).unwrap_or(u32::MAX);
-        let info = Rc::new(info);
-        let record = r8frame::ModuleRecord { path: a.string(path), env, info: Rc::clone(&info), main, status: ModuleStatus::Linked, error: None, requested: Vec::new(), imports: Vec::new(), namespace: None, meta: None };
+        let info = alloc::rc::Rc::new(info);
+        let record = r8frame::ModuleRecord { path: a.string(path), env, info: alloc::rc::Rc::clone(&info), main, status: ModuleStatus::Linked, error: None, requested: Vec::new(), imports: Vec::new(), namespace: None, meta: None };
         a.realm.modules.borrow_mut(a.mc).push(record);
         self.module_of.borrow_mut().insert(main.0 - r8bytecode::Module::MAIN, index);
         let mut requested = Vec::with_capacity(info.requests.len());
@@ -47,7 +48,7 @@ impl Executor {
         let (info, requested, path, done) = {
             let mods = a.realm.modules.borrow();
             let r = &mods[m as usize];
-            (Rc::clone(&r.info), r.requested.clone(), String::from(&**r.path), r.imports.len() == r.info.imports.len() && !r.info.imports.is_empty())
+            (alloc::rc::Rc::clone(&r.info), r.requested.clone(), String::from(&**r.path), r.imports.len() == r.info.imports.len() && !r.info.imports.is_empty())
         };
         for &r in &requested {
             Self::link(a, r, seen)?;
