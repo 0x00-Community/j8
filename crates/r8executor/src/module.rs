@@ -3,8 +3,7 @@ use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use r8bytecode::Module;
-use r8frame::{Agent, Closure, Env, Error, ErrorKind, ImportName, ModuleRecord, ModuleStatus, ObjectData, Resolution, ResolvedBinding, Value};
+use r8frame::{Agent, Closure, Error, ErrorKind, ImportName, ModuleStatus, ObjectData, Resolution, ResolvedBinding, Value};
 
 use crate::{Executor, Outcome, State};
 
@@ -15,18 +14,18 @@ impl Executor {
         if let Some(i) = a.realm.modules.borrow().iter().position(|m| **m.path == *path) {
             return Ok(u32::try_from(i).unwrap_or(u32::MAX));
         }
-        let (module, info) = Module::compile_module(&r8frame::Source { text, file: path })?;
+        let (module, info) = r8bytecode::Module::compile_module(&r8frame::Source { text, file: path })?;
         let main = self.load(module);
         let mut slots = alloc::vec![Value::Undefined; usize::from(info.slots)];
         for &s in &info.lexical {
             slots[usize::from(s)] = Value::Uninit;
         }
-        let env = Env { slots, parent: None }.alloc(a.mc);
+        let env = r8frame::Env { slots, parent: None }.alloc(a.mc);
         let index = u32::try_from(a.realm.modules.borrow().len()).unwrap_or(u32::MAX);
         let info = Rc::new(info);
-        let record = ModuleRecord { path: a.string(path), env, info: Rc::clone(&info), main, status: ModuleStatus::Linked, error: None, requested: Vec::new(), imports: Vec::new(), namespace: None, meta: None };
+        let record = r8frame::ModuleRecord { path: a.string(path), env, info: Rc::clone(&info), main, status: ModuleStatus::Linked, error: None, requested: Vec::new(), imports: Vec::new(), namespace: None, meta: None };
         a.realm.modules.borrow_mut(a.mc).push(record);
-        self.module_of.borrow_mut().insert(main.0 - Module::MAIN, index);
+        self.module_of.borrow_mut().insert(main.0 - r8bytecode::Module::MAIN, index);
         let mut requested = Vec::with_capacity(info.requests.len());
         for spec in &info.requests {
             let Some((p, t)) = a.platform.load_module(path, spec) else {
