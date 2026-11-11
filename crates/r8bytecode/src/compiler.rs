@@ -483,8 +483,70 @@ impl<'a> Compiler<'a, '_> {
         self.load_at(name, 0);
     }
 
+    /// 名字和它的静态绑定之间隔着的 `with`（由内向外，给出各自对象的隐藏名）。
+    pub(crate) fn with_chain(&self, name: &'a str) -> Vec<&'a str> {
+        let mut out = Vec::new();
+        for l in self.levels.iter().rev() {
+            if l.names.iter().any(|n| n.name == name) {
+                break;
+            }
+            if let Some(n) = l.names.first()
+                && Hidden::is_with(n.name)
+            {
+                out.push(n.name);
+            }
+        }
+        out
+    }
+
+    /// 依次查 `with` 对象：有这个名字就读它（`this_reg` 给了就把对象放进去当调用的 `this`），跳到末尾。
+    /// 给出要接到末尾的跳转。
+    fn with_reads(&mut self, name: &'a str, chain: &[&'a str], this_reg: Option<Reg>) -> Vec<usize> {
+        let k = self.name(name);
+        let obj = self.temp();
+        let mut ends = Vec::new();
+        for &hidden in chain {
+            self.load(hidden);
+            self.emit(Insn::Star(obj));
+            self.emit(Insn::WithHas { obj, name: k });
+            let skip = self.jump(Insn::JumpIfFalse);
+            if let Some(t) = this_reg {
+                self.emit(Insn::Ldar(obj));
+                self.emit(Insn::Star(t));
+            }
+            self.emit(Insn::GetNamed { obj, name: k });
+            ends.push(self.jump(Insn::Jump));
+            self.land(skip);
+        }
+        self.release(obj);
+        ends
+    }
+
+    /// 读一个名字，`with` 里先查对象；`typeof` 用的找不到给 `undefined`；调用用的把对象放进 `this_reg`。
+    pub(crate) fn load_dynamic(&mut self, name: &'a str, typeof_safe: bool, this_reg: Option<Reg>) {
+        let chain = self.with_chain(name);
+        let ends = self.with_reads(name, &chain, this_reg);
+        match self.resolve(name).place {
+            Place::Global(g) if typeof_safe && !matches!(g, "undefined" | "NaN" | "Infinity") => {
+                let k = self.name(g);
+                self.emit(Insn::LdaGlobalOrUndefined(k));
+            }
+            _ => self.load_static(name, 0),
+        }
+        for e in ends {
+            self.land(e);
+        }
+    }
+
     /// 在源码位置 `pos` 读一个名字进 acc。`undefined` / `NaN` / `Infinity` 没被遮住就是常量。
     pub(crate) fn load_at(&mut self, name: &'a str, pos: u32) {
+        if !self.with_chain(name).is_empty() {
+            return self.load_dynamic(name, false, None);
+        }
+        self.load_static(name, pos);
+    }
+
+    fn load_static(&mut self, name: &'a str, pos: u32) {
         let r = self.resolve(name);
         let insn = match r.place {
             Place::Reg(reg) => Insn::Ldar(reg),
@@ -503,6 +565,38 @@ impl<'a> Compiler<'a, '_> {
 
     /// 把 acc 存进一个名字；`init` 是声明里的初始化（`const` 只许这一次，也不查死区）。
     pub(crate) fn store(&mut self, name: &'a str, init: bool) {
+        let chain = self.with_chain(name);
+        if chain.is_empty() {
+            return self.store_static(name, init);
+        }
+        // `with` 里：对象上有这个名字就写它，否则写静态绑定
+        let value = self.temp();
+        self.emit(Insn::Star(value));
+        let k = self.name(name);
+        let obj = self.temp();
+        let strict = self.strict_here();
+        let mut ends = Vec::new();
+        for hidden in chain {
+            self.load(hidden);
+            self.emit(Insn::Star(obj));
+            self.emit(Insn::WithHas { obj, name: k });
+            let skip = self.jump(Insn::JumpIfFalse);
+            self.emit(Insn::Ldar(value));
+            self.emit(Insn::SetNamed { obj, name: k, strict });
+            ends.push(self.jump(Insn::Jump));
+            self.land(skip);
+        }
+        self.emit(Insn::Ldar(value));
+        self.store_static(name, init);
+        for e in ends {
+            self.land(e);
+        }
+        self.emit(Insn::Ldar(value));
+        self.release(obj);
+        self.release(value);
+    }
+
+    fn store_static(&mut self, name: &'a str, init: bool) {
         let r = self.resolve(name);
         if r.constant && !init {
             self.emit(Insn::ThrowConstAssign);
@@ -1645,6 +1739,15 @@ impl<'a> Compiler<'a, '_> {
                     let end = c.here();
                     c.pop_jump(end, Some(cont));
                     Ok(())
+                })?;
+            }
+            Statement::WithStatement(w) => {
+                self.expr(&w.object)?;
+                self.emit(Insn::ToObject);
+                let hidden = Hidden::with(self.alloc, w.span);
+                self.scoped(&Decls::with_scope(hidden, w.span), |c| {
+                    c.store(hidden, true);
+                    c.statement(&w.body)
                 })?;
             }
             Statement::LabeledStatement(l) => {

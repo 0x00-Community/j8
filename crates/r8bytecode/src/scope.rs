@@ -334,6 +334,11 @@ impl<'a> Decls<'a> {
         stack.pop();
     }
 
+    /// `with` 体外面那一层：只有 with 对象的隐藏绑定。
+    pub fn with_scope(name: &'a str, span: Span) -> Self {
+        Self(alloc::vec![Decl { name, key: Self::key(span), kind: DeclKind::Let, ready: None }])
+    }
+
     /// 一个块（或 `switch` 的全部分支）。
     pub fn block(stmts: impl IntoIterator<Item = &'a [Statement<'a>]>) -> Self {
         let mut d = Self::default();
@@ -461,6 +466,16 @@ impl<'a> Decls<'a> {
 pub(crate) struct Hidden;
 
 impl Hidden {
+    /// `with` 语句的对象（作用域里的隐藏绑定）。
+    pub fn with(alloc: &Allocator, span: Span) -> &str {
+        alloc.alloc_str(&format!("%with@{}", span.start))
+    }
+
+    /// 是不是 `with` 对象的隐藏名。
+    pub fn is_with(name: &str) -> bool {
+        name.starts_with("%with@")
+    }
+
     pub fn private<'a>(alloc: &'a Allocator, id: &PrivateIdentifier<'_>) -> &'a str {
         alloc.alloc_str(&format!("#{}", id.name.as_str()))
     }
@@ -523,6 +538,15 @@ impl<'a> Resolver<'a> {
                 }
                 self.used.insert(key);
                 return;
+            }
+            // 经过的 `with`：名字可能落在它的对象上，对象也要拿得到
+            if let Some(&(w, key)) = l.names.first()
+                && Hidden::is_with(w)
+            {
+                if l.func != self.func {
+                    self.captured.insert(key);
+                }
+                self.used.insert(key);
             }
         }
     }
@@ -842,6 +866,11 @@ impl<'a> Resolver<'a> {
             }),
             Statement::ForInStatement(f) => self.for_each(&f.left, &f.right, &f.body),
             Statement::ForOfStatement(f) => self.for_each(&f.left, &f.right, &f.body),
+            Statement::WithStatement(w) => {
+                self.expr(&w.object);
+                let hidden = Hidden::with(self.alloc, w.span);
+                self.scoped(&Decls::with_scope(hidden, w.span), |r| r.statement(&w.body));
+            }
             Statement::LabeledStatement(l) => self.statement(&l.body),
             Statement::SwitchStatement(sw) => {
                 self.expr(&sw.discriminant);

@@ -232,6 +232,7 @@ impl<'a> Compiler<'a, '_> {
                 };
                 match (&u.argument, op) {
                     // `typeof 未声明的名字` 不抛错
+                    (Expression::Identifier(id), UnaryOp::Typeof) if !self.with_chain(id.name.as_str()).is_empty() => self.load_dynamic(id.name.as_str(), true, None),
                     (Expression::Identifier(id), UnaryOp::Typeof) if matches!(self.lookup(id.name.as_str()).0, Place::Global(g) if !matches!(g, "undefined" | "NaN" | "Infinity")) => {
                         let k = self.name(id.name.as_str());
                         self.emit(Insn::LdaGlobalOrUndefined(k));
@@ -612,6 +613,11 @@ impl<'a> Compiler<'a, '_> {
                 self.optional(m.optional, m.span)?;
                 self.load(Hidden::private(self.alloc, &m.field));
                 self.emit(Insn::GetPrivate { obj: this });
+            }
+            Expression::Identifier(id) if !self.with_chain(id.name.as_str()).is_empty() => {
+                self.emit(Insn::LdaUndefined);
+                self.emit(Insn::Star(this));
+                self.load_dynamic(id.name.as_str(), false, Some(this));
             }
             f => {
                 self.emit(Insn::LdaUndefined);

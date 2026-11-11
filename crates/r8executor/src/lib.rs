@@ -697,6 +697,20 @@ impl Executor {
                         }
                     }
                 }
+                Insn::ToObject => *acc = a.to_object(*acc)?.into(),
+                Insn::WithHas { obj, name } => {
+                    let o = regs[r(obj)];
+                    let key = func.name_at(name);
+                    let mut found = matches!(o, Value::Object(x) if a.has_key(x, r8frame::Key::Str(key))?);
+                    if found {
+                        let u = a.get_symbol(o, a.realm.symbols.unscopables, o)?;
+                        if matches!(u, Value::Object(_)) {
+                            let blocked = a.get_named(u, key)?;
+                            found = !a.to_boolean(blocked);
+                        }
+                    }
+                    *acc = found.into();
+                }
                 Insn::InitLexical { name } => {
                     let name = func.name_at(name);
                     let scope = a.realm.script_scope;
