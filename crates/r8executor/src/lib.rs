@@ -1986,6 +1986,8 @@ mod tests {
             ("const { groups: { y, m } } = /(?<y>\\d{4})-(?<m>\\d{2})/.exec('2024-11'); y + m", "202411"),
             ("const re = /o/g; let n = 0; while (re.exec('foo boo')) n++; n", "4"),
             ("/x/gi.flags + /x/gi + new RegExp('a+', 'y').sticky", "gi/x/gitrue"),
+            // 不是正则对象（空对象）调内建正则方法：抛 TypeError（快路先核对是不是原样的正则）
+            ("let e; try { RegExp.prototype.test.call({}) } catch (x) { e = x.name } e", "TypeError"),
             ("'hello'.search(/l+/) + [...'a1b2'.matchAll(/[a-z](\\d)/g)].map(m => m[1]).join()", "21,2"),
             ("'a.b.c'.replaceAll('.', '-') + 'x'.replace('x', '[$&]')", "a-b-c[x]"),
             ("/É/i.test('é')", "true"),

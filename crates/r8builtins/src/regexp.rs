@@ -292,10 +292,13 @@ impl Regexps {
             && d.props.len() == 1
             && &**d.props.key(0) == "lastIndex"
             && d.props.attrs(0).writable();
+        if !own_ok {
+            return None;
+        }
         let Slot::Data(Value::Number(last)) = d.props.slot(0) else { return None };
         drop(d);
         let pristine = a.realm.regexp_pristine.borrow();
-        let p = pristine.as_ref().filter(|_| own_ok)?;
+        let p = pristine.as_ref()?;
         let proto = a.realm.regexp_proto.borrow();
         let same = |x: Slot<'gc>, y: Slot<'gc>| match (x, y) {
             (Slot::Data(Value::Object(x)), Slot::Data(Value::Object(y))) | (Slot::Accessor { get: Some(x), .. }, Slot::Accessor { get: Some(y), .. }) => Gc::ptr_eq(x, y),
