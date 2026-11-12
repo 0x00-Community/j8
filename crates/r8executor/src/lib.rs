@@ -30,12 +30,16 @@ struct Loaded {
     func: Function,
     /// 按常量下标：全局名上次在哪找到（读写全局名的内联缓存）
     globals: Box<[Cell<GlobalSlot>]>,
+    /// JIT 层说过进帧时不用再问它
+    no_tier_enter: Cell<bool>,
+    /// JIT 层说过循环往回跳时不用再问它
+    no_tier_loops: Cell<bool>,
 }
 
 impl From<(u32, Function)> for Loaded {
     fn from((base, func): (u32, Function)) -> Self {
         let globals = func.consts.iter().map(|_| Cell::new(GlobalSlot::Unknown)).collect();
-        Self { base, func, globals }
+        Self { base, func, globals, no_tier_enter: Cell::new(false), no_tier_loops: Cell::new(false) }
     }
 }
 
@@ -152,8 +156,24 @@ enum Prepared<'gc> {
 /// 比解释更快的一层（JIT）：执行器进一个普通 JS 函数（不是构造器 / 生成器 / async）的帧之前先问它。
 pub trait Tier {
     /// 函数 `id`（字节码 `func`）要进帧了，本帧的寄存器是 `regs`（实参已放好）、累加器是 `acc`：
-    /// 有机器码就在它们上面跑，给出怎么出来的；没有（还不热、编不了）给 `None`，照常解释。
-    fn enter(&self, id: FuncId, func: &Function, regs: &mut [Value<'_>], acc: &mut Value<'_>) -> Option<Exit>;
+    /// 有机器码就在它们上面跑（[`Tiered::Ran`]）；还不热给 [`Tiered::NotYet`]；编不了或不能整体跑给 [`Tiered::Never`]。
+    fn enter(&self, id: FuncId, func: &Function, regs: &mut [Value<'_>], acc: &mut Value<'_>) -> Tiered;
+
+    /// 本帧往回跳到第 `header` 条指令（循环又转了一圈），寄存器与累加器是此刻的：循环热了、有机器码就从循环头
+    /// 接着在机器码里跑（OSR），给出它停在哪（总是 [`Exit::Resume`]：遇到 `return` 也停下交给解释器收尾）；
+    /// 不切进去给 [`Tiered::NotYet`]（以后都不会切给 [`Tiered::Never`]）。
+    fn backedge(&self, id: FuncId, func: &Function, header: u32, regs: &mut [Value<'_>], acc: &mut Value<'_>) -> Tiered;
+}
+
+/// JIT 层的回答。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Tiered {
+    /// 在机器码里跑了，这样出来的
+    Ran(Exit),
+    /// 这次不跑（还不热等），以后还问
+    NotYet,
+    /// 这个函数（进帧 / 循环）以后都不用问了：执行器记下，不再调
+    Never,
 }
 
 /// 机器码怎么出来的。机器码的返回值：0 是 [`Return`](Exit::Return)，`pc + 1` 是 [`Resume(pc)`](Exit::Resume)。
@@ -197,19 +217,43 @@ impl Executor {
 
     /// 进帧前先问 JIT 层。函数已经在机器码里跑完（结果在 `acc`，帧的寄存器已退掉）给 `true`；
     /// 机器码中途退回就把帧的 `pc` 改到它停下的地方，照常解释。
-    fn tiered<'gc>(&self, func: &Function, regs: &mut Vec<Value<'gc>>, f: &mut Frame<'gc>, acc: &mut Value<'gc>) -> bool {
+    #[inline(never)]
+    fn tiered<'gc>(&self, loaded: &Loaded, regs: &mut Vec<Value<'gc>>, f: &mut Frame<'gc>, acc: &mut Value<'gc>) -> bool {
         let Some(tier) = &self.tier else { return false };
-        let end = f.base + usize::from(func.regs);
-        match tier.enter(f.func, func, &mut regs[f.base..end], acc) {
-            Some(Exit::Return) => {
+        if loaded.no_tier_enter.get() {
+            return false;
+        }
+        let end = f.base + usize::from(loaded.func.regs);
+        match tier.enter(f.func, &loaded.func, &mut regs[f.base..end], acc) {
+            Tiered::Ran(Exit::Return) => {
                 regs.truncate(f.base);
                 true
             }
-            Some(Exit::Resume(pc)) => {
+            Tiered::Ran(Exit::Resume(pc)) => {
                 f.pc = pc as usize;
                 false
             }
-            None => false,
+            Tiered::NotYet => false,
+            Tiered::Never => {
+                loaded.no_tier_enter.set(true);
+                false
+            }
+        }
+    }
+
+    /// 往回跳到 `header` 时问 JIT 层要不要切进机器码（OSR）；切进去了就把帧的 `pc` 改到机器码停下的地方。
+    #[inline(never)]
+    fn osr<'gc>(&self, loaded: &Loaded, regs: &mut [Value<'gc>], f: &mut Frame<'gc>, acc: &mut Value<'gc>, header: usize) {
+        let Some(tier) = &self.tier else { return };
+        if loaded.no_tier_loops.get() {
+            return;
+        }
+        let end = f.base + usize::from(loaded.func.regs);
+        let Ok(header) = u32::try_from(header) else { return };
+        match tier.backedge(f.func, &loaded.func, header, &mut regs[f.base..end], acc) {
+            Tiered::Ran(Exit::Resume(pc)) => f.pc = pc as usize,
+            Tiered::Never => loaded.no_tier_loops.set(true),
+            Tiered::Ran(Exit::Return) | Tiered::NotYet => {}
         }
     }
 
@@ -990,15 +1034,30 @@ impl Executor {
                     let ctor = a.realm.regexp_ctor;
                     *acc = a.call(ctor.into(), Value::Undefined, &[p.into(), fl.into()])?;
                 }
-                Insn::Jump(l) => f.pc = l.0 as usize,
+                // 往回跳（目标不在这条之后）是循环又转一圈：有 JIT 层就问它要不要从循环头切进机器码
+                Insn::Jump(l) => {
+                    let back = (l.0 as usize) < f.pc;
+                    f.pc = l.0 as usize;
+                    if back && self.tier.is_some() {
+                        self.osr(loaded, regs, f, acc, f.pc);
+                    }
+                }
                 Insn::JumpIfTrue(l) => {
                     if a.to_boolean(*acc) {
+                        let back = (l.0 as usize) < f.pc;
                         f.pc = l.0 as usize;
+                        if back && self.tier.is_some() {
+                            self.osr(loaded, regs, f, acc, f.pc);
+                        }
                     }
                 }
                 Insn::JumpIfFalse(l) => {
                     if !a.to_boolean(*acc) {
+                        let back = (l.0 as usize) < f.pc;
                         f.pc = l.0 as usize;
+                        if back && self.tier.is_some() {
+                            self.osr(loaded, regs, f, acc, f.pc);
+                        }
                     }
                 }
                 Insn::JumpIfNotNullish(l) => {
@@ -1192,7 +1251,7 @@ impl Executor {
                         && let Some((c, loaded)) = self.plain_closure(target)
                     {
                         let mut next = Self::enter_regs(a, regs, &loaded.func, c, target, regs[r(this)], first, usize::from(argc));
-                        if !self.tiered(&loaded.func, regs, &mut next, acc) {
+                        if !self.tiered(&loaded, regs, &mut next, acc) {
                             frames.push(core::mem::replace(f, next));
                         }
                         continue;
@@ -1413,7 +1472,7 @@ impl<'gc> Invoke<'gc> for Executor {
             let mut regs = Vec::new();
             let mut f = self.enter(a, &mut regs, c, callee, this, args);
             let mut acc = Value::Undefined;
-            if self.tiered(&loaded.func, &mut regs, &mut f, &mut acc) {
+            if self.tiered(&loaded, &mut regs, &mut f, &mut acc) {
                 return Ok(acc);
             }
             return self.run_state(a, State { regs, frames: Vec::new(), f, acc }, level).map(Outcome::returned);

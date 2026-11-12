@@ -55,17 +55,19 @@ cargo build --target riscv64gc-unknown-none-elf -p r8frame -p r8bytecode -p r8ex
 
 ## JIT（第一档）
 
-`dune --jit a.js` 开 JIT；`R8_TEST262_JIT=1 cargo test -p dune --test test262` 开着 JIT（每个函数第一次调用就编）跑基线。
+`dune --jit a.js` 开 JIT；`R8_TEST262_JIT=1 cargo test -p dune --test test262` 开着 JIT（每个函数第一次调用、每个循环第一次往回跳就编）跑基线。
 
-- `r8compiler`（`no_std`）：字节码函数 ⇒ MLIR（`llvm` 方言，文本）⇒ mlirpass `target.x86_64`（`X86_64Emit`）⇒ x86-64 机器码。
-  机器码是 `extern "C" fn(regs, acc) -> u64`，直接读写本帧寄存器文件与累加器里的 `Value`（布局见 `r8frame::ValueTag`：16 字节、首字节标签、第 8 字节起载荷）；
-  返回 0 是函数返回了，`pc + 1` 是停在第 pc 条指令之前（`r8executor::Exit`），解释器从那里接着跑
-- 第一档只收纯数值的函数：寄存器读写、数 / 布尔常量、四则（取余、乘方、位运算调运行时函数）与比较、`++` / `--`、跳转、死区检查、返回；
-  操作数不是数等快路前提不成立就退回解释器；别的指令（调用、属性、闭包……）整个函数不编
-- `r8jit`（std，x86-64 Unix）：实现执行器的 `Tier`（`Executor::with_tier`）。普通 JS 函数进帧前先问它：调用次数过阈值（缺省 100）就编、
-  `mmap` 成可执行内存、填运行时函数地址；有机器码就直接跑
+- `r8compiler`（`no_std`）：字节码函数 ⇒ MLIR（`llvm` 方言）⇒ mlirpass `target.x86_64` ⇒ x86-64 机器码（`Compiler` 建一次反复用，只装 builtin 与 `llvm` 方言）。
+  机器码是 `extern "C" fn(regs, acc, start) -> u64`，直接读写本帧寄存器文件与累加器里的 `Value`（布局见 `r8frame::ValueTag`：16 字节、首字节标签、第 8 字节起载荷）；
+  `start` 是 0 从函数开头进、`h + 1` 从循环头 `h` 进（OSR）；返回 0 是函数返回了，`pc + 1` 是停在第 pc 条指令之前（`r8executor::Exit`），解释器从那里接着跑
+- 第一档收的指令：寄存器读写、数 / 布尔常量、四则（取余、乘方、位运算调运行时函数）与比较、`++` / `--`、跳转、死区检查、返回；
+  操作数不是数等快路前提不成立就退回解释器；别的指令（调用、属性、闭包……）机器码停在它之前交给解释器
+- 能整体在机器码里跑的函数进帧时就跑；别的函数只从「循环体里没有交给解释器的指令」的循环头切进去（OSR，从中途进的遇到 `return` 也交回解释器收尾）；
+  两样都没有的函数不编
+- `r8jit`（std，x86-64 Unix）：实现执行器的 `Tier`（`Executor::with_tier`）：调用次数过阈值（缺省 100）或循环圈数过 10 倍阈值就编、
+  `mmap` 成可执行内存、填运行时函数地址；回答 `Tiered::Never` 的函数执行器记下、以后不再问
 - 机器码后端是 mlirpass（crates.io，`=0.10.3`，`target.x86_64`）；MLIR 用 `llvm` 方言的自定义写法（mlirformat 0.8.1 起真解析）
-- 还没有：循环里的热点替换（OSR，只调一次的函数里的热循环编不到）、寄存器分配（后端每个值一个栈槽）、调用 / 属性等快路
+- 还没有：寄存器分配（后端每个值一个栈槽）、调用 / 属性 / 全局名等快路
 
 ## 字节码
 

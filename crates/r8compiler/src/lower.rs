@@ -1,5 +1,6 @@
 use alloc::collections::BTreeSet;
 use alloc::string::String;
+use alloc::vec::Vec;
 use core::fmt::Write;
 
 use r8bytecode::{Constant, Function, Insn, Reg};
@@ -10,7 +11,7 @@ use crate::Helper;
 /// 机器码入口函数的符号名
 pub(crate) const ENTRY: &str = "r8_jit_entry";
 
-/// 第一档不收的指令（整函数不编）：第几条、是什么。
+/// 第一档不收的指令（机器码停在它之前，交给解释器执行）：第几条、是什么。
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Unsupported {
     pub pc: u32,
@@ -59,6 +60,15 @@ pub(crate) struct Lower<'f> {
     deopts: BTreeSet<u32>,
     /// 用到的运行时函数
     helpers: BTreeSet<&'static str>,
+    /// 第一档不收、停下交给解释器的指令
+    exits: Vec<Unsupported>,
+}
+
+/// 翻好的模块与它的概况。
+pub(crate) struct Lowered {
+    pub(crate) text: String,
+    pub(crate) exits: Vec<Unsupported>,
+    pub(crate) headers: Vec<u32>,
 }
 
 /// 一个 SSA 值的名字
@@ -66,11 +76,17 @@ type V = String;
 
 impl<'f> Lower<'f> {
     /// 整个模块：运行时函数的声明 + 入口函数。
-    pub(crate) fn module(func: &'f Function) -> Result<String, Unsupported> {
-        let mut l = Lower { func, out: String::new(), next: 0, deopts: BTreeSet::new(), helpers: BTreeSet::new() };
+    pub(crate) fn module(func: &'f Function) -> Lowered {
+        let mut l = Lower { func, out: String::new(), next: 0, deopts: BTreeSet::new(), helpers: BTreeSet::new(), exits: Vec::new() };
+        let loops = Self::loops(func);
         for (pc, &insn) in (0u32..).zip(&func.insns) {
             l.label(&alloc::format!("i{pc}"));
-            l.insn(pc, insn)?;
+            if let Err(u) = l.insn(pc, insn) {
+                // 第一档不收的指令：停在它之前，交给解释器执行
+                l.exits.push(u);
+                l.deopts.insert(pc);
+                l.line(&alloc::format!("llvm.br ^d{pc}"));
+            }
         }
         if func.insns.is_empty() {
             l.label("i0");
@@ -86,11 +102,37 @@ impl<'f> Lower<'f> {
         for h in &l.helpers {
             let _ = writeln!(m, "  llvm.func @{h}(f64, f64) -> f64");
         }
-        let _ = writeln!(m, "  llvm.func @{ENTRY}(%regs: !llvm.ptr, %acc: !llvm.ptr) -> i64 {{");
-        m.push_str("    llvm.br ^i0\n");
+        let _ = writeln!(m, "  llvm.func @{ENTRY}(%regs: !llvm.ptr, %acc: !llvm.ptr, %start: i64) -> i64 {{");
+        // 能从中途进的循环：循环体里没有停下交给解释器的指令（否则每圈都要进出一次，不划算）
+        let mut headers: Vec<u32> = loops.iter().filter(|&&(h, back)| !l.exits.iter().any(|u| (h..=back).contains(&u.pc))).map(|&(h, _)| h).collect();
+        headers.sort_unstable();
+        headers.dedup();
+        // 入口分派：`%start` 是 0 从头进，`h + 1` 从循环头 `h` 进（OSR）
+        let mut dispatch = Lower { func, out: String::new(), next: l.next, deopts: BTreeSet::new(), helpers: BTreeSet::new(), exits: Vec::new() };
+        for &h in &headers {
+            let k = dispatch.int(u64::from(h) + 1, 64);
+            let hit = dispatch.icmp(ICMP_EQ, "%start", &k, "i64");
+            let next = dispatch.fresh();
+            let name = next.trim_start_matches('%');
+            dispatch.line(&alloc::format!("llvm.cond_br {hit}, ^i{h}, ^e{name}"));
+            dispatch.label(&alloc::format!("e{name}"));
+        }
+        dispatch.line("llvm.br ^i0");
+        m.push_str(&dispatch.out);
         m.push_str(&l.out);
         m.push_str("  }\n}\n");
-        Ok(m)
+        Lowered { text: m, exits: l.exits, headers }
+    }
+
+    /// 循环：（循环头, 往回跳的那条），循环头是往回跳的目标（OSR 从这里进）。
+    fn loops(func: &Function) -> Vec<(u32, u32)> {
+        (0u32..)
+            .zip(&func.insns)
+            .filter_map(|(pc, insn)| match insn {
+                Insn::Jump(l) | Insn::JumpIfTrue(l) | Insn::JumpIfFalse(l) if l.0 <= pc => Some((l.0, pc)),
+                _ => None,
+            })
+            .collect()
     }
 
     fn line(&mut self, s: &str) {
@@ -245,6 +287,18 @@ impl<'f> Lower<'f> {
         self.def(&alloc::format!("llvm.select {k1}, {v}, {f} : i1, i1"))
     }
 
+    /// `return`：从头进的函数返回（出口码 0）；从循环中途进的（OSR）帧要解释器收尾，停在这条 `return` 之前。
+    fn ret(&mut self, pc: u32) {
+        self.deopts.insert(pc);
+        let z = self.int(0, 64);
+        let whole = self.icmp(ICMP_EQ, "%start", &z, "i64");
+        let ret = self.fresh();
+        let name = ret.trim_start_matches('%');
+        self.line(&alloc::format!("llvm.cond_br {whole}, ^r{name}, ^d{pc}"));
+        self.label(&alloc::format!("r{name}"));
+        self.line(&alloc::format!("llvm.return {z} : i64"));
+    }
+
     fn insn(&mut self, pc: u32, insn: Insn) -> Result<(), Unsupported> {
         let unsupported = Unsupported { pc, insn };
         match insn {
@@ -328,8 +382,7 @@ impl<'f> Lower<'f> {
                 return Ok(());
             }
             Insn::Return => {
-                let z = self.int(0, 64);
-                self.line(&alloc::format!("llvm.return {z} : i64"));
+                self.ret(pc);
                 return Ok(());
             }
             _ => return Err(unsupported),
