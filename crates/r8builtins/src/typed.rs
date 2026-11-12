@@ -438,12 +438,16 @@ impl Typed {
         let end = Self::relative(a, args.at(2), lenf, lenf)?;
         let (_, _, view, len) = Self::validate(a, o.into())?;
         let end = end.min(Self::f(len));
-        let mut k = start;
-        while k < end {
-            #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "已夹到 [0, len]")]
-            let i = k as usize;
-            a.write_raw(view.buffer, view.offset + i * kind.size(), kind, &e);
-            k += 1.0;
+        // 编码一次，借一次缓冲，在线程池上按块铺满
+        let pattern = kind.encode(&e);
+        let size = kind.size();
+        #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "已夹到 [0, len]")]
+        let (from, to) = (view.offset + start as usize * size, view.offset + end.max(start) as usize * size);
+        let par = a.par();
+        if let ObjectKind::ArrayBuffer(b) = &mut view.buffer.borrow_mut(a.mc).kind
+            && let Some(dst) = b.bytes.as_mut().and_then(|x| x.get_mut(from..to))
+        {
+            par.each_mut(dst, size, &|c: &mut [u8]| c.chunks_exact_mut(size).for_each(|e| e.copy_from_slice(&pattern)));
         }
         Ok(o.into())
     }
@@ -478,6 +482,31 @@ impl Typed {
             return Ok(not_found);
         }
         let mut k = if n >= 0.0 { n } else { (lenf + n).max(0.0) };
+        // 找的是数、元素不是 BigInt：借一次缓冲，在线程池上分块解码比较（只扫此刻还在界内的：界外读出 undefined，等不了数）
+        if let Value::Number(w) = want
+            && let Some((kind, view)) = Agent::typed_array(o)
+            && !kind.is_bigint()
+        {
+            #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "已夹到 [0, len]")]
+            let from = k as usize;
+            let end = Agent::view_length(&view, kind.size()).unwrap_or(0).min(len);
+            let buffer = view.buffer.borrow();
+            let ObjectKind::ArrayBuffer(b) = &buffer.kind else { return Ok(not_found) };
+            let bytes = b.bytes.as_deref().unwrap_or(&[]);
+            let size = kind.size();
+            let hit = |x: f64| x == w || (zero && x.is_nan() && w.is_nan());
+            let found = a.par().find_first(end.saturating_sub(from), &|r: core::ops::Range<usize>| {
+                r.into_iter().find(|&i| {
+                    let at = view.offset + (from + i) * size;
+                    bytes.get(at..at + size).is_some_and(|e| matches!(kind.decode(e), r8framework::Element::Number(x) if hit(x)))
+                })
+            });
+            return Ok(match found {
+                Some(_) if zero => true.into(),
+                Some(i) => Self::f(from + i).into(),
+                None => not_found,
+            });
+        }
         while k < lenf {
             let v = a.typed_get(o, k);
             let hit = match v {

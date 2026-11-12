@@ -56,6 +56,30 @@ impl Par<'_> {
         out
     }
 
+    /// 按块就地处理：块长是 `unit` 的整数倍（如元素字节数），大的切块并行
+    pub fn each_mut<T: Send>(self, v: &mut [T], unit: usize, f: &(dyn Fn(&mut [T]) + Sync)) {
+        let unit = unit.max(1);
+        if !self.worth(v.len() / unit) {
+            f(v);
+            return;
+        }
+        let size = self.chunk(v.len() / unit) * unit;
+        let jobs: Vec<Job<'_>> = v.chunks_mut(size).map(|c| Box::new(move || f(c)) as Job<'_>).collect();
+        self.0.run(jobs);
+    }
+
+    /// `[0, n)` 里第一个满足的位置：`f` 查一段给出段里的第一个，各段并行查，取最小的
+    pub fn find_first(self, n: usize, f: &(dyn Fn(core::ops::Range<usize>) -> Option<usize> + Sync)) -> Option<usize> {
+        if !self.worth(n) {
+            return f(0..n);
+        }
+        let size = self.chunk(n);
+        let mut found: Vec<Option<usize>> = (0..n).step_by(size).map(|_| None).collect();
+        let jobs: Vec<Job<'_>> = found.iter_mut().zip((0..n).step_by(size)).map(|(o, s)| Box::new(move || *o = f(s..(s + size).min(n))) as Job<'_>).collect();
+        self.0.run(jobs);
+        found.into_iter().flatten().min()
+    }
+
     /// 稳定排序：各块分别排好，再一轮轮两两并行归并
     pub fn sort_by<T: Copy + Send + Sync>(self, v: &mut [T], cmp: &(dyn Fn(&T, &T) -> Ordering + Sync)) {
         if !self.worth(v.len()) {
