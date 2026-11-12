@@ -121,8 +121,7 @@ impl<'f> Lower<'f> {
         // 局部变量（mem2reg 提成 SSA），从帧里读一次
         dispatch.line("%one = llvm.mlir.constant(1 : i64) : i64");
         for (local, base, at) in dispatch.locals() {
-            // 通用写法：mlirformat 还读不懂 `llvm.alloca` 的自定义写法
-            dispatch.line(&alloc::format!("{local} = \"llvm.alloca\"(%one) <{{elem_type = i64}}> : (i64) -> !llvm.ptr"));
+            dispatch.line(&alloc::format!("{local} = llvm.alloca %one x i64 : (i64) -> !llvm.ptr"));
             let p = dispatch.frame_addr(base, at);
             let w = dispatch.def(&alloc::format!("llvm.load {p} : !llvm.ptr -> i64"));
             dispatch.line(&alloc::format!("llvm.store {w}, {local} : i64, !llvm.ptr"));
