@@ -13,6 +13,7 @@ use core::cell::{Cell, RefCell};
 
 use r8virtasm::{Constant, Function, FunctionKind, Insn, Mode, Module, PropertyKind, Reg};
 use r8gc::{Collect, Gc};
+mod ic;
 mod module;
 
 use r8framework::{Agent, Closure, Coroutine, CoroutineState, Env, Error, ErrorKind, FuncId, Invoke, IterRecord, JsEnv, JsObject, ObjectData, ObjectKind, Property, Resume, Slot, Step, Suspended, Value};
@@ -34,12 +35,15 @@ struct Loaded {
     no_tier_enter: Cell<bool>,
     /// JIT 层说过循环往回跳时不用再问它
     no_tier_loops: Cell<bool>,
+    /// 按指令下标：属性读写的内联缓存（只有 `get.named` / `set.named` / `define.named` 用）
+    ics: Box<[ic::Ic]>,
 }
 
 impl From<(u32, Function)> for Loaded {
     fn from((base, func): (u32, Function)) -> Self {
         let globals = func.consts.iter().map(|_| Cell::new(GlobalSlot::Unknown)).collect();
-        Self { base, func, globals, no_tier_enter: Cell::new(false), no_tier_loops: Cell::new(false) }
+        let ics = func.insns.iter().map(|_| ic::Ic::default()).collect();
+        Self { base, func, globals, no_tier_enter: Cell::new(false), no_tier_loops: Cell::new(false), ics }
     }
 }
 
@@ -678,7 +682,7 @@ impl Executor {
     /// 全局名现在在哪（自有数据属性才缓存）。
     fn global_locate(a: &Agent<'_, '_>, name: &str) -> GlobalSlot {
         let scope = a.realm.script_scope.borrow();
-        let own = |d: &r8framework::ObjectData<'_>| d.position(name).filter(|&i| matches!(d.props[i].1.slot, Slot::Data(_))).and_then(|i| u32::try_from(i).ok());
+        let own = |d: &r8framework::ObjectData<'_>| d.position(name).filter(|&i| matches!(d.props.slot(i), Slot::Data(_))).and_then(|i| u32::try_from(i).ok());
         if let Some(at) = own(&scope) {
             return GlobalSlot::Scope(at);
         }
@@ -1194,7 +1198,19 @@ impl Executor {
                             closure.fields = Some(init);
                         }
                     }
-                    Insn::DefineNamed { obj, name, kind, enumerable } => Self::define(a, regs[r(obj)], func.name_at(name), kind, enumerable, *acc)?,
+                    Insn::DefineNamed { obj, name, kind, enumerable } => {
+                        let ic = &loaded.ics[f.pc - 1];
+                        match regs[r(obj)] {
+                            Value::Object(o) if kind == PropertyKind::Data => {
+                                if !ic.set(a.mc, o, *acc, false) {
+                                    let before = ic::Before::from(o);
+                                    Self::define(a, regs[r(obj)], func.name_at(name), kind, enumerable, *acc)?;
+                                    ic.fill_set(o, func.name_at(name), before, false);
+                                }
+                            }
+                            target => Self::define(a, target, func.name_at(name), kind, enumerable, *acc)?,
+                        }
+                    }
                     Insn::DefineKeyed { obj, key, kind, enumerable } => {
                         if let Value::Object(o) = regs[r(obj)] {
                             let k = regs[r(key)];
@@ -1253,8 +1269,33 @@ impl Executor {
                     }
                     Insn::CreateObject => *acc = a.object().into(),
                     Insn::CreateArray { first, count } => *acc = a.array(regs[r(first)..r(first) + usize::from(count)].to_vec()).into(),
-                    Insn::GetNamed { obj, name } => *acc = a.get_named(regs[r(obj)], func.name_at(name))?,
-                    Insn::SetNamed { obj, name, strict } => a.put_named(regs[r(obj)], func.name_at(name), *acc, strict)?,
+                    Insn::GetNamed { obj, name } => {
+                        let ic = &loaded.ics[f.pc - 1];
+                        *acc = match regs[r(obj)] {
+                            Value::Object(o) => match ic.get(o) {
+                                Some(v) => v,
+                                None => {
+                                    let v = a.get_named(Value::Object(o), func.name_at(name))?;
+                                    ic.fill_get(o, func.name_at(name));
+                                    v
+                                }
+                            },
+                            target => a.get_named(target, func.name_at(name))?,
+                        };
+                    }
+                    Insn::SetNamed { obj, name, strict } => {
+                        let ic = &loaded.ics[f.pc - 1];
+                        match regs[r(obj)] {
+                            Value::Object(o) => {
+                                if !ic.set(a.mc, o, *acc, true) {
+                                    let before = ic::Before::from(o);
+                                    a.put_named(Value::Object(o), func.name_at(name), *acc, strict)?;
+                                    ic.fill_set(o, func.name_at(name), before, true);
+                                }
+                            }
+                            target => a.put_named(target, func.name_at(name), *acc, strict)?,
+                        }
+                    }
                     Insn::GetKeyed { obj } => *acc = a.get_keyed(regs[r(obj)], *acc)?,
                     Insn::SetKeyed { obj, key, strict } => a.put_keyed(regs[r(obj)], regs[r(key)], *acc, strict)?,
                     Insn::CallEval { callee, args, argc, scope, .. } if matches!(regs[r(callee)], Value::Object(o) if Gc::ptr_eq(o, a.realm.eval)) => {

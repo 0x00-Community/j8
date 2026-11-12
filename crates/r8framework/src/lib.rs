@@ -30,6 +30,7 @@ mod profiler;
 mod property;
 mod promise;
 mod realm;
+mod shape;
 mod value;
 
 pub use agent::{Agent, CodeKind, Invoke, Resume, Step};
@@ -41,6 +42,7 @@ pub use object::{ArgumentsMap, HostData, BigIntData, Bound, BufferData, Capabili
 pub use bigint::Numeric;
 pub use ops::{number_text, BinaryOp, CompareOp, ErrorKind, Hint, IterRecord, UnaryOp};
 pub use platform::{Platform, Task};
+pub use shape::{Attrs, Props, Shape};
 pub use r8gc::Pool;
 pub use module::{ImportEntry, ImportName, ModuleInfo, ModuleRecord, ModuleStatus, Resolution, ResolvedBinding};
 pub use profiler::{Counter, FuncId, Profiler};

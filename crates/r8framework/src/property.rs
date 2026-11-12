@@ -442,7 +442,7 @@ impl<'gc> Agent<'gc, '_> {
             }
             _ => {}
         }
-        for (k, _) in &d.props {
+        for (k, _) in d.props.iter() {
             match index_of_str(k) {
                 Some(i) => indices.push((i, None)),
                 None => strings.push(PropertyKey::String(self.string(k))),

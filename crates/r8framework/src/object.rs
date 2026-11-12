@@ -646,13 +646,6 @@ impl ObjectKind<'_> {
     }
 }
 
-/// 属性表超过这么多项才建索引
-const PROP_INDEX_THRESHOLD: usize = 32;
-
-/// 属性键 ⇒ 在属性表里的下标。
-#[derive(Debug, Default, Collect)]
-#[collect(require_static)]
-pub struct PropIndex(Option<alloc::collections::BTreeMap<SmallStr, usize>>);
 
 /// 字符串（属性键与 JS 字符串值共用）：短的（不超过 23 字节）内联存、不另外分配，长的共享一份堆上副本。
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Collect)]
@@ -684,9 +677,11 @@ impl From<&str> for SmallStr {
 #[collect(no_drop)]
 pub struct ObjectData<'gc> {
     pub kind: ObjectKind<'gc>,
-    pub props: Vec<(SmallStr, Property<'gc>)>,
-    /// 属性多了以后的键 ⇒ 下标索引（少的时候直接线性找）
-    pub prop_index: PropIndex,
+    /// 字符串键的属性：形状（隐藏类）加槽，按插入顺序
+    pub props: crate::Props<'gc>,
+    /// 以这个对象为原型的对象从哪个空形状起步（同原型、同样加属性的对象因此共享形状）。没有 `Gc`，改它不用写屏障
+    #[collect(require_static)]
+    pub shape_root: core::cell::RefCell<Option<alloc::rc::Rc<crate::Shape>>>,
     /// Symbol 键的属性
     pub symbols: Vec<(JsSymbol<'gc>, Property<'gc>)>,
     /// 私有成员（`#x`）：键是类求值时生成的私有名，和普通属性分开，反射看不见
@@ -795,8 +790,7 @@ impl<'gc> ObjectData<'gc> {
         }
         let dense = items.len();
         if self.sparse_length > 0 {
-            self.props.retain(|(k, _)| crate::ops::index_of_str(k).is_none_or(|i| i < n));
-            self.reindex();
+            self.props.retain(|k| crate::ops::index_of_str(k).is_none_or(|i| i < n));
         }
         self.sparse_length = if len > dense { n } else { 0 };
     }
@@ -825,16 +819,16 @@ impl<'gc> ObjectData<'gc> {
         if !self.kind.has_ordinary_properties() {
             return None;
         }
-        let slot = match key {
-            Key::Str(k) => self.position(k).map(|i| &mut self.props[i].1),
-            Key::Sym(s) => self.symbols.iter_mut().find(|(k, _)| Gc::ptr_eq(*k, s)).map(|(_, p)| p),
+        let found = match key {
+            Key::Str(k) => self.props.position(k).map(|i| (self.props.attrs(i).writable(), self.props.slot_mut(i))),
+            Key::Sym(s) => self.symbols.iter_mut().find(|(k, _)| Gc::ptr_eq(*k, s)).map(|(_, p)| (p.writable, &mut p.slot)),
         };
-        match slot {
-            Some(Property { slot: Slot::Data(v), writable: true, .. }) => {
+        match found {
+            Some((true, Slot::Data(v))) => {
                 *v = value;
                 Some(true)
             }
-            Some(Property { slot: Slot::Data(_), writable: false, .. }) => Some(false),
+            Some((false, Slot::Data(_))) => Some(false),
             Some(_) => None,
             None if self.non_extensible => Some(false),
             None => {
@@ -884,7 +878,6 @@ impl<'gc> ObjectData<'gc> {
                 }
                 if let Some(i) = self.position(k) {
                     self.props.remove(i);
-                    self.reindex();
                 }
             }
         }
@@ -893,44 +886,41 @@ impl<'gc> ObjectData<'gc> {
     /// 属性在表里的下标。
     /// 属性表第 `at` 项正好是 `key` 的话给出它（执行层缓存了下标，用之前核对）。
     pub fn prop_at(&self, at: usize, key: &str) -> Option<Property<'gc>> {
-        self.props.get(at).filter(|(k, _)| **k == *key).map(|(_, p)| *p)
+        (at < self.props.len() && **self.props.key(at) == *key).then(|| self.props.get(at))
     }
 
     /// 改属性表第 `at` 项的值（调用方已用 [`prop_at`](Self::prop_at) 核对过是可写数据属性）。
     pub fn set_at(&mut self, at: usize, value: Value<'gc>) {
-        if let Some((_, p)) = self.props.get_mut(at) {
-            p.slot = Slot::Data(value);
+        if at < self.props.len() {
+            *self.props.slot_mut(at) = Slot::Data(value);
         }
     }
 
     pub fn position(&self, key: &str) -> Option<usize> {
-        match &self.prop_index.0 {
-            Some(m) => m.get(key).copied(),
-            None => self.props.iter().position(|(k, _)| **k == *key),
-        }
+        self.props.position(key)
     }
 
-    /// 追加一项（索引跟着加，表够大了就建索引）。
+    /// 追加一项（形状沿转移表走）。
     fn push_prop(&mut self, key: &str, prop: Property<'gc>) {
         self.digit_keys |= key.as_bytes().first().is_some_and(u8::is_ascii_digit);
-        let key = SmallStr::from(key);
-        self.props.push((key.clone(), prop));
-        let at = self.props.len() - 1;
-        match &mut self.prop_index.0 {
-            Some(m) => _ = m.insert(key, at),
-            None if self.props.len() >= PROP_INDEX_THRESHOLD => self.reindex(),
-            None => {}
-        }
+        let proto = self.proto;
+        self.props.push(key, prop, || proto.and_then(|p| p.try_borrow().ok().map(|d| d.root_shape())));
     }
 
-    /// 删过属性后重建索引。
-    fn reindex(&mut self) {
-        self.prop_index.0 = (self.props.len() >= PROP_INDEX_THRESHOLD).then(|| self.props.iter().enumerate().map(|(i, (k, _))| (k.clone(), i)).collect());
+    /// 以这个对象为原型的对象起步的空形状（没有就建）
+    pub fn root_shape(&self) -> alloc::rc::Rc<crate::Shape> {
+        self.shape_root.borrow_mut().get_or_insert_with(crate::Props::empty).clone()
+    }
+
+    /// 追加一项，形状直接换成 `to`（执行层的内联缓存给的：从当前形状加 `key` 就是它）。
+    pub fn push_to(&mut self, key: &str, to: alloc::rc::Rc<crate::Shape>, slot: Slot<'gc>) {
+        self.digit_keys |= key.as_bytes().first().is_some_and(u8::is_ascii_digit);
+        self.props.push_to(to, slot);
     }
 
     /// 自有属性。
     pub fn get_own(&self, key: &str) -> Option<Property<'gc>> {
-        self.position(key).map(|i| self.props[i].1)
+        self.position(key).map(|i| self.props.get(i))
     }
 
     /// 自有数据属性的值（访问器给 `None`）。
@@ -942,9 +932,8 @@ impl<'gc> ObjectData<'gc> {
     pub fn set(&mut self, key: &str, value: Value<'gc>) {
         match self.position(key) {
             Some(i) => {
-                let p = &mut self.props[i].1;
-                if p.writable {
-                    p.slot = Slot::Data(value);
+                if self.props.attrs(i).writable() {
+                    *self.props.slot_mut(i) = Slot::Data(value);
                 }
             }
             None => self.push_prop(key, Property::data(value)),
@@ -954,7 +943,7 @@ impl<'gc> ObjectData<'gc> {
     /// 定义：整个替换（或新建）这个属性。
     pub fn define(&mut self, key: &str, prop: Property<'gc>) {
         match self.position(key) {
-            Some(i) => self.props[i].1 = prop,
+            Some(i) => self.props.replace(i, prop),
             None => self.push_prop(key, prop),
         }
     }
@@ -984,9 +973,8 @@ impl<'gc> ObjectData<'gc> {
     /// 删自有属性：不可配置的删不掉，返回删没删成（不存在也算成）。
     pub fn remove(&mut self, key: &str) -> bool {
         match self.position(key) {
-            Some(i) if self.props[i].1.configurable => {
+            Some(i) if self.props.attrs(i).configurable() => {
                 self.props.remove(i);
-                self.reindex();
                 true
             }
             Some(_) => false,
