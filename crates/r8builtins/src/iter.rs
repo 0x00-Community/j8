@@ -12,7 +12,7 @@ impl Iters {
             Value::Undefined => None,
             d => Some((&**a.to_string(d)?).into()),
         };
-        Ok(Value::Symbol(gc_arena::Gc::new(a.mc, SymbolData { description })))
+        Ok(Value::Symbol(r8gc::Gc::new(a.mc, SymbolData { description })))
     }
 
     fn this_symbol<'gc>(a: &Agent<'gc, '_>, this: Value<'gc>) -> Result<r8frame::JsSymbol<'gc>, Error> {

@@ -199,7 +199,7 @@ impl Buffers {
         if !ok {
             return Err(a.throw(ErrorKind::Type, "species constructor did not return a usable buffer"));
         }
-        if gc_arena::Gc::ptr_eq(n, o) {
+        if r8gc::Gc::ptr_eq(n, o) {
             return Err(a.throw(ErrorKind::Type, "species constructor returned the same buffer"));
         }
         #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "已夹到 [0, len]")]

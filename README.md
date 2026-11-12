@@ -10,7 +10,7 @@
 | `r8`（仓库根 `src/`） | `no_std` | 聚合导出：`#[r8::class]` / `#[r8::object]` / `#[r8::function]`（宏在 r8macros，见 `crates/macros/USAGE.md`）与 r8binding 的 trait |
 | `r8binding` | `no_std` | Rust ⇄ JS 绑定的运行时：`FromJs` / `IntoJs`、宿主对象、`Class` / `Object` |
 | `r8builtins` | `no_std` | 实现 `Intrinsics`：往 `Realm` 装 Object / Function / Array / String / Number / Boolean / Math / Error 系列 / `console` / `parseInt` 等 |
-| `r8platform` | std | 实现 `Platform`（`DefaultPlatform`）：后台任务跑在 moremath `ThreadMulti` 线程池上（起一次复用、任务可借用调用方数据），时钟用 `Instant` |
+| `r8platform` | std | 实现 `Platform`（`DefaultPlatform`）：后台任务与 GC 跑在 moremath `ThreadMulti` 线程池上（起一次复用、任务可借用调用方数据，经 `r8gc::Pool`），时钟用 `Instant` |
 | `r8virtasm` | `no_std`（`compile` 要 std） | 虚拟指令集：累加器式寄存器字节码（`Insn` / `Function` / `Module`）；反汇编 `module.to_string()`、汇编 `text.parse::<Module>()`，互为逆；`compile` feature（缺省开）带 JS ⇒ 字节码编译器 `Module::try_from(&Source)`，用 oxc 解析 |
 | `r8macros` | proc-macro | 过程宏：`enums!("x.json")` 从 JSON 生成枚举（定义、`Display`、按字段类型取 `&mut`），用法见 `crates/macros/USAGE.md` |
 | `samples/dune` | std | 基于 r8 的 node 式二进制（`require` / `module` / `fs` / `path` / `process`，原生部分用 `#[r8::object]` 绑定）：`dune a.js` / `dune run a.js`（`-` 读标准输入）、`dune -e '<js>'`、`dune -p '<js>'` 打印结果、不带参数进 REPL（`.help` / `.exit`）；没接住的异常打 `Uncaught …` 退出码 1 |
@@ -24,12 +24,18 @@
 
 ### 堆与句柄
 
-堆用外部实现 [gc-arena](https://docs.rs/gc-arena)（增量标记清除，品牌生命周期，无 `'static`）：
+堆用独立发布的 [r8gc](https://crates.io/crates/r8gc)（仓库 GitHub Jabberwocky238/r8gc、gitea jw238/r8gc）：分代（新生代碰撞分配、次回收复制提升）、
+可移动（稀疏页搬空压缩）、增量标记，标记 / 次回收 / 清扫 / 压缩在平台的线程池上并行；品牌生命周期，无 `'static`。
+
+- `Platform` 的父 trait 是 `r8gc::Pool`（`threads` / `run`）：后台任务与 GC 共用一个池（`DefaultPlatform` 的 moremath `ThreadMulti`）
+- 回收只在 `enter` 之外发生，那时所有 `Gc` 都在根下面，所以对象能搬：⛔ 在不经 `Collect` 遍历的地方（`Static`、旁路缓存）存 `Gc` 或对象地址；
+  按地址哈希的（Map / Set 的索引）在 `relocate` 里跟着改（见 `Collection`）
+- 大容器在次回收里会整个重扫：`Collection` 记着「上次以来写过的条目从哪开始」，次回收只看那以后的（`Relocate::young_only`）
 
 - `Isolate::enter(|scope| …)` 进入一次，`'gc` 是这次进入的品牌；闭包期间不回收，返回后按欠账增量回收
 - `Engine::eval` 拿 `&mut Isolate` 自己分片进入：每片最多一万条指令，停下时执行状态挂到根上、`enter` 返回时回收一段再接着跑；执行环境用 `ContextRoot` 跨片保留（宿主函数里重入的 JS 在当前片里跑完）
 - `Value<'gc>` 就是 V8 的 Local：出不了闭包，编译期保证
-- `Global` 是持久句柄（gc-arena `DynamicRoot`），跨多次 `enter` 存活，drop 即放掉
+- `Global` 是持久句柄（r8gc `DynamicRoot`），跨多次 `enter` 存活，drop 即放掉
 
 ```rust
 use r8builtins::Builtins;

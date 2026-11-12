@@ -338,7 +338,7 @@ impl Helpers {
                 let mut cur = a.get_prototype_of(it)?;
                 let mut found = false;
                 while let Some(p) = cur {
-                    if gc_arena::Gc::ptr_eq(p, a.realm.iterator_proto) {
+                    if r8gc::Gc::ptr_eq(p, a.realm.iterator_proto) {
                         found = true;
                         break;
                     }
@@ -393,7 +393,7 @@ impl Helpers {
         let Value::Object(o) = this else {
             return Err(a.throw(ErrorKind::Type, "setter called on a non-object"));
         };
-        if gc_arena::Gc::ptr_eq(o, a.realm.iterator_proto) {
+        if r8gc::Gc::ptr_eq(o, a.realm.iterator_proto) {
             return Err(a.throw(ErrorKind::Type, "Cannot assign to this property of Iterator.prototype"));
         }
         if a.get_own_property(o, key)?.is_none() {

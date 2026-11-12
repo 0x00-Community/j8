@@ -1,4 +1,4 @@
-use gc_arena::{Collect, DynamicRootSet, Mutation};
+use r8gc::{Collect, DynamicRootSet, Mutation};
 
 use crate::{Context, Error, JsObject, Platform, Profiler, Scope, Value};
 

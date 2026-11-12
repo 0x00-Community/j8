@@ -3,7 +3,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use gc_arena::Gc;
+use r8gc::Gc;
 
 use num_traits::Zero;
 
@@ -174,7 +174,7 @@ impl ErrorKind {
 }
 
 /// 一个迭代器记录：迭代器对象与它的 `next` 方法。
-#[derive(Clone, Copy, Debug, gc_arena::Collect)]
+#[derive(Clone, Copy, Debug, r8gc::Collect)]
 #[collect(no_drop)]
 pub struct IterRecord<'gc> {
     pub iterator: Value<'gc>,

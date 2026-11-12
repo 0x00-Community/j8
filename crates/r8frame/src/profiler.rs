@@ -1,6 +1,6 @@
 use alloc::collections::BTreeMap;
 
-use gc_arena::Collect;
+use r8gc::Collect;
 
 /// 一个 JS 函数在 isolate 里的编号（各执行层共用）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Collect)]

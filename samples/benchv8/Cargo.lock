@@ -242,27 +242,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "gc-arena"
-version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "160a11f93020eea95cb4c59e2eda2e4c6353f75aa4fbb01f2bf8729b2e4d6dd2"
-dependencies = [
- "gc-arena-derive",
-]
-
-[[package]]
-name = "gc-arena-derive"
-version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cd3d24b051bd5a5f44e66bac510393d3d484ef776bb560f6504668239f35959a"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
- "synstructure 0.13.2",
-]
-
-[[package]]
 name = "glob"
 version = "0.3.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -893,38 +872,23 @@ dependencies = [
 name = "r8builtins"
 version = "0.1.0"
 dependencies = [
- "gc-arena",
  "libm",
  "num-bigint 0.4.8",
  "num-traits",
  "r8frame",
+ "r8gc",
  "regress",
  "ryu-js",
  "unicode-normalization",
 ]
 
 [[package]]
-name = "r8virtasm"
-version = "0.1.0"
-dependencies = [
- "oxc_allocator",
- "oxc_ast",
- "oxc_parser",
- "oxc_semantic",
- "oxc_span",
- "oxc_syntax",
- "r8frame",
- "r8macros",
- "ryu-js",
-]
-
-[[package]]
 name = "r8executor"
 version = "0.1.0"
 dependencies = [
- "gc-arena",
- "r8virtasm",
  "r8frame",
+ "r8gc",
+ "r8virtasm",
  "ryu-js",
 ]
 
@@ -932,11 +896,32 @@ dependencies = [
 name = "r8frame"
 version = "0.1.0"
 dependencies = [
- "gc-arena",
+ "hashbrown",
  "libm",
  "num-bigint 0.4.8",
  "num-traits",
+ "r8gc",
+ "rustc-hash",
  "ryu-js",
+ "smol_str",
+]
+
+[[package]]
+name = "r8gc"
+version = "0.1.0"
+dependencies = [
+ "moremath",
+ "r8gc-macros",
+]
+
+[[package]]
+name = "r8gc-macros"
+version = "0.1.1"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+ "synstructure 0.13.2",
 ]
 
 [[package]]
@@ -956,6 +941,22 @@ version = "0.1.0"
 dependencies = [
  "moremath",
  "r8frame",
+ "r8gc",
+]
+
+[[package]]
+name = "r8virtasm"
+version = "0.1.0"
+dependencies = [
+ "oxc_allocator",
+ "oxc_ast",
+ "oxc_parser",
+ "oxc_semantic",
+ "oxc_span",
+ "oxc_syntax",
+ "r8frame",
+ "r8macros",
+ "ryu-js",
 ]
 
 [[package]]
@@ -1119,6 +1120,12 @@ name = "smawk"
 version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e8e2fb0f499abb4d162f2bedad68f5ef91a1682b5a03596ddb67efd37768d100"
+
+[[package]]
+name = "smol_str"
+version = "0.3.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eeb7109d23f319619d4cc0de5464613c8b7b1a09db2774a58101459cf6be2f10"
 
 [[package]]
 name = "stable_deref_trait"

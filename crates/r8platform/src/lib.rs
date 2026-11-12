@@ -25,11 +25,18 @@ impl From<NonZeroUsize> for DefaultPlatform {
     }
 }
 
-impl Platform for DefaultPlatform {
-    fn workers(&self) -> NonZeroUsize {
-        NonZeroUsize::new(self.pool.threads()).unwrap_or(NonZeroUsize::MIN)
+/// 后台任务与 GC 都跑在同一个线程池上。
+impl r8gc::Pool for DefaultPlatform {
+    fn threads(&self) -> usize {
+        Executor::threads(&self.pool)
     }
 
+    fn run(&self, tasks: Vec<Task<'_>>) {
+        self.pool.execute(tasks);
+    }
+}
+
+impl Platform for DefaultPlatform {
     fn now(&self) -> Duration {
         self.start.elapsed()
     }
@@ -48,9 +55,5 @@ impl Platform for DefaultPlatform {
 
     fn print(&self, line: &str) {
         println!("{line}");
-    }
-
-    fn run(&self, tasks: Vec<Task<'_>>) {
-        self.pool.execute(tasks);
     }
 }

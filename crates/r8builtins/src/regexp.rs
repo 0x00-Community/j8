@@ -3,7 +3,7 @@ use core::fmt::Write;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use gc_arena::{Gc, Static};
+use r8gc::{Gc, Static};
 use r8frame::{Agent, Error, ErrorKind, JsObject, JsString, Key, ObjectData, ObjectKind, Property, RegExpData, Slot, Value};
 
 use crate::buffer::Buffers;

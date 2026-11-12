@@ -3,7 +3,7 @@
 use alloc::format;
 use alloc::vec::Vec;
 
-use gc_arena::Gc;
+use r8gc::Gc;
 
 use crate::ops::index_of_str;
 use crate::{Agent, Error, ErrorKind, JsObject, JsString, JsSymbol, ObjectKind, Property, Slot, Value};

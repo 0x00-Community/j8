@@ -9,7 +9,6 @@
 //! 模式：只跑非严格模式，`onlyStrict` 的跑严格模式；`module` 跳过。
 use std::collections::BTreeSet;
 use std::io::Read;
-use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 use std::sync::Mutex;
@@ -170,6 +169,18 @@ struct Capture {
     lines: Mutex<Vec<String>>,
 }
 
+impl r8frame::Pool for Capture {
+    fn threads(&self) -> usize {
+        1
+    }
+
+    fn run(&self, tasks: Vec<Task<'_>>) {
+        for t in tasks {
+            t();
+        }
+    }
+}
+
 impl Platform for Capture {
     fn wall_clock(&self) -> Duration {
         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default()
@@ -184,10 +195,6 @@ impl Platform for Capture {
         Some((path.display().to_string(), text))
     }
 
-    fn workers(&self) -> NonZeroUsize {
-        NonZeroUsize::MIN
-    }
-
     fn now(&self) -> Duration {
         self.start.elapsed()
     }
@@ -196,11 +203,6 @@ impl Platform for Capture {
         self.lines.lock().expect("an unpoisoned log").push(line.into());
     }
 
-    fn run(&self, tasks: Vec<Task<'_>>) {
-        for t in tasks {
-            t();
-        }
-    }
 }
 
 /// 一个用例文件。
@@ -295,7 +297,7 @@ impl Case {
             }
         });
         if outcome == Outcome::Pass && self.has(Flag::Async) {
-            let lines = platform.lines.into_inner().expect("an unpoisoned log");
+            let lines = std::mem::take(&mut *platform.lines.lock().expect("an unpoisoned log"));
             if !lines.iter().any(|l| l == ASYNC_DONE) {
                 return (Outcome::Fail, format!("async: {}", lines.join(" | ")));
             }

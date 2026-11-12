@@ -12,7 +12,7 @@ use alloc::rc::Rc;
 use core::cell::{Cell, RefCell};
 
 use r8virtasm::{Constant, Function, FunctionKind, Insn, Mode, Module, PropertyKind, Reg};
-use gc_arena::{Collect, Gc};
+use r8gc::{Collect, Gc};
 mod module;
 
 use r8frame::{Agent, Closure, Coroutine, CoroutineState, Env, Error, ErrorKind, FuncId, Invoke, IterRecord, JsEnv, JsObject, ObjectData, ObjectKind, Property, Resume, Slot, Step, Suspended, Value};
@@ -1609,7 +1609,7 @@ impl Executor {
 
 /// 片与片之间挂在根上的执行状态。
 #[cfg(feature = "compile")]
-type Parked = gc_arena::DynamicRoot<gc_arena::Rootable![gc_arena::RefLock<Option<State<'_>>>]>;
+type Parked = r8gc::DynamicRoot<r8gc::Rootable![r8gc::RefLock<Option<State<'_>>>]>;
 
 /// 一片跑完的结果。
 #[cfg(feature = "compile")]
@@ -1635,7 +1635,7 @@ impl r8frame::Engine for Executor {
                     None => this.script_state(&mut a, main),
                 };
                 match this.execute(&mut a, st, Some(SLICE))? {
-                    Outcome::Paused(st) => Ok(Slice::Paused(a.stash(Gc::new(a.mc, gc_arena::RefLock::new(Some(*st)))))),
+                    Outcome::Paused(st) => Ok(Slice::Paused(a.stash(Gc::new(a.mc, r8gc::RefLock::new(Some(*st)))))),
                     Outcome::Return(v) => {
                         a.run_jobs()?;
                         Ok(Slice::Done(a.global(v)))
@@ -1672,7 +1672,6 @@ mod tests {
 
     use alloc::string::String;
     use alloc::vec::Vec;
-    use core::num::NonZeroUsize;
     use core::time::Duration;
     use std::sync::Mutex;
 
@@ -1685,23 +1684,25 @@ mod tests {
     #[derive(Default)]
     struct Capture(Mutex<Vec<String>>);
 
-    impl Platform for Capture {
-        fn workers(&self) -> NonZeroUsize {
-            NonZeroUsize::MIN
-        }
-
-        fn now(&self) -> Duration {
-            Duration::ZERO
-        }
-
-        fn print(&self, line: &str) {
-            self.0.lock().expect("an unpoisoned log").push(String::from(line));
+    impl r8frame::Pool for Capture {
+        fn threads(&self) -> usize {
+            1
         }
 
         fn run(&self, tasks: Vec<Task<'_>>) {
             for t in tasks {
                 t();
             }
+        }
+    }
+
+    impl Platform for Capture {
+        fn now(&self) -> Duration {
+            Duration::ZERO
+        }
+
+        fn print(&self, line: &str) {
+            self.0.lock().expect("an unpoisoned log").push(String::from(line));
         }
     }
 
@@ -1723,6 +1724,8 @@ mod tests {
             let text = agent.to_string(v).map_or_else(|_| String::from("<ToString threw>"), |s| String::from(&**s));
             if ok { Ok(text) } else { Err(text) }
         });
+        // 堆借着平台：先拆 isolate 再取日志
+        drop(isolate);
         (r, platform.0.into_inner().expect("an unpoisoned log"))
     }
 

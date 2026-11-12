@@ -1,7 +1,7 @@
 //! BigInt 的语义：ToNumeric、解析、运算、与 Number 比较。
 use core::cmp::Ordering;
 
-use gc_arena::Gc;
+use r8gc::Gc;
 use num_bigint::BigInt;
 use num_traits::{FromPrimitive, One, Signed, ToPrimitive, Zero};
 

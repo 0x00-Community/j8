@@ -1,7 +1,7 @@
 use core::fmt;
 
-use gc_arena::arena::Root;
-use gc_arena::{DynamicRoot, Gc, Rootable};
+use r8gc::Root;
+use r8gc::{DynamicRoot, Gc, Rootable};
 
 use crate::{Agent, Context, Scope, Value};
 
@@ -25,11 +25,19 @@ impl fmt::Debug for ContextRoot {
 
 impl<'gc> Agent<'gc, '_> {
     /// 把任意可回收的东西挂到根上（执行引擎在片与片之间存执行状态用）。
-    pub fn stash<R: for<'a> Rootable<'a>>(&self, v: Gc<'gc, Root<'gc, R>>) -> DynamicRoot<R> {
+    pub fn stash<R>(&self, v: Gc<'gc, Root<'gc, R>>) -> DynamicRoot<R>
+    where
+        R: for<'a> Rootable<'a>,
+        for<'a> Root<'a, R>: Sized,
+    {
         self.roots.stash::<R>(self.mc, v)
     }
 
-    pub fn fetch<R: for<'a> Rootable<'a>>(&self, root: &DynamicRoot<R>) -> Gc<'gc, Root<'gc, R>> {
+    pub fn fetch<R>(&self, root: &DynamicRoot<R>) -> Gc<'gc, Root<'gc, R>>
+    where
+        R: for<'a> Rootable<'a>,
+        for<'a> Root<'a, R>: Sized,
+    {
         self.roots.fetch(root)
     }
 

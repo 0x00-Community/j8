@@ -1,4 +1,4 @@
-use gc_arena::{Collect, Gc};
+use r8gc::{Collect, Gc};
 
 use crate::{JsBigInt, JsObject, JsString, JsSymbol};
 

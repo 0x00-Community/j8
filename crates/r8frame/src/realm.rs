@@ -3,7 +3,7 @@ use core::ops::Deref;
 
 use alloc::collections::VecDeque;
 
-use gc_arena::{Collect, Gc, Mutation, RefLock};
+use r8gc::{Collect, Gc, Mutation, RefLock};
 
 use crate::{ErrorKind, Job, JsObject, JsString, JsSymbol, Native, NativeFn, ObjectData, ObjectKind, Property, Scope, SymbolData, Value};
 
@@ -121,7 +121,7 @@ pub struct Realm<'gc> {
     /// `Symbol.for` 的全局登记表
     pub symbol_registry: Gc<'gc, RefLock<alloc::vec::Vec<(JsString<'gc>, JsSymbol<'gc>)>>>,
     /// `Math.random` 的状态（xorshift，0 表示还没播种）
-    pub random_state: Gc<'gc, gc_arena::lock::Lock<u64>>,
+    pub random_state: Gc<'gc, r8gc::Lock<u64>>,
     /// 微任务队列
     pub jobs: Gc<'gc, RefLock<VecDeque<Job<'gc>>>>,
     /// 标签模板的模板对象：按（函数编号, 调用点）缓存，同一处每次同一个
@@ -136,7 +136,7 @@ pub struct Realm<'gc> {
 pub struct RegExpCompiled<'gc> {
     pub source: crate::SmallStr,
     pub flags: crate::SmallStr,
-    pub compiled: Gc<'gc, gc_arena::Static<alloc::boxed::Box<dyn core::any::Any>>>,
+    pub compiled: Gc<'gc, r8gc::Static<alloc::boxed::Box<dyn core::any::Any>>>,
 }
 
 impl fmt::Debug for Realm<'_> {
@@ -214,7 +214,7 @@ impl<'gc> Realm<'gc> {
             regexp_cache: Gc::new(mc, RefLock::new(VecDeque::new())),
             symbol_registry: Gc::new(mc, RefLock::new(alloc::vec::Vec::new())),
             modules: Gc::new(mc, RefLock::new(alloc::vec::Vec::new())),
-            random_state: Gc::new(mc, gc_arena::lock::Lock::new(0)),
+            random_state: Gc::new(mc, r8gc::Lock::new(0)),
             templates: Gc::new(mc, RefLock::new(alloc::collections::BTreeMap::new())),
             global: derived(object_proto),
             object_proto,

@@ -25,7 +25,7 @@ mod text;
 mod typed;
 mod weak;
 
-use gc_arena::Mutation;
+use r8gc::Mutation;
 use r8frame::{Intrinsics, JsObject, Realm, Value};
 
 /// 缺省的内建对象集合。
@@ -142,7 +142,7 @@ impl<'gc> Installer<'_, 'gc> {
 
     /// 堆上的字符串值。
     fn text(&self, s: &str) -> Value<'gc> {
-        Value::String(gc_arena::Gc::new(self.mc, r8frame::SmallStr::from(s)))
+        Value::String(r8gc::Gc::new(self.mc, r8frame::SmallStr::from(s)))
     }
 
     /// 一个普通对象（原型 `Object.prototype`）。

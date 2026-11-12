@@ -177,7 +177,7 @@ impl Collections {
 
     /// 第 `i` 个及以后第一个还在的条目。
     fn entry_from<'gc>(a: &Agent<'gc, '_>, o: JsObject<'gc>, i: usize) -> Option<(usize, Value<'gc>, Value<'gc>)> {
-        Self::with(a, o, |c| c.entries.iter().enumerate().skip(i).find_map(|(j, e)| e.map(|(k, v)| (j, k, v))))
+        Self::with(a, o, |c| c.entries().iter().enumerate().skip(i).find_map(|(j, e)| e.map(|(k, v)| (j, k, v))))
     }
 
     /// `forEach(cb, thisArg)`：活着走，回调里加的项也会走到。Set 的回调是 `(值, 值, set)`。
@@ -307,7 +307,7 @@ impl Collections {
     }
 
     fn set_values<'gc>(a: &Agent<'gc, '_>, o: JsObject<'gc>) -> alloc::vec::Vec<Value<'gc>> {
-        Self::with(a, o, |c| c.entries.iter().flatten().map(|&(k, _)| k).collect())
+        Self::with(a, o, |c| c.entries().iter().flatten().map(|&(k, _)| k).collect())
     }
 
     fn union<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {

@@ -2,7 +2,7 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::fmt;
 
-use gc_arena::{Collect, Gc, Lock, Mutation, RefLock};
+use r8gc::{Collect, Gc, Lock, Mutation, RefLock};
 
 use crate::{Agent, Error, FuncId, Key, Value};
 
@@ -33,7 +33,7 @@ pub type JsBigInt<'gc> = Gc<'gc, BigIntData>;
 pub struct RegExpData<'gc> {
     pub source: JsString<'gc>,
     pub flags: JsString<'gc>,
-    pub compiled: Gc<'gc, gc_arena::Static<Box<dyn core::any::Any>>>,
+    pub compiled: Gc<'gc, r8gc::Static<Box<dyn core::any::Any>>>,
     /// annexB 的旧特性（`compile`）能用：只有 %RegExp% 自己建的（子类实例不行）
     pub legacy: bool,
 }
@@ -286,7 +286,7 @@ pub enum MapKey {
     /// 字符串值本身（短串内联、长串共享，查找时不分配）
     String(SmallStr),
     BigInt(Box<str>),
-    /// 对象 / Symbol 的地址（gc-arena 不搬对象，地址就是身份）
+    /// 对象 / Symbol 的地址（回收会搬对象：搬过之后 `Collection` 重建索引）
     Ref(usize),
 }
 
@@ -307,18 +307,52 @@ impl From<Value<'_>> for MapKey {
 }
 
 /// Map / Set 的存储：按插入顺序的条目（删掉的留空位，迭代中删改也能接着走）加按键找下标的索引。
-#[derive(Debug, Collect)]
-#[collect(no_drop)]
+/// 索引按对象地址找键，回收搬了键之后重建（手写 `Collect`）。
+#[derive(Debug)]
 pub struct Collection<'gc> {
-    pub entries: Vec<Option<(Value<'gc>, Value<'gc>)>>,
-    index: gc_arena::Static<hashbrown::HashMap<MapKey, usize, core::hash::BuildHasherDefault<rustc_hash::FxHasher>>>,
+    entries: Vec<Option<(Value<'gc>, Value<'gc>)>>,
+    /// 自上次次回收以来，可能写进了新生代指针的条目从这里开始（追加的天然在它后面）
+    young_from: usize,
+    index: r8gc::Static<hashbrown::HashMap<MapKey, usize, core::hash::BuildHasherDefault<rustc_hash::FxHasher>>>,
     pub size: usize,
     pub weak: bool,
 }
 
+unsafe impl<'gc> Collect<'gc> for Collection<'gc> {
+    fn trace(&self, t: &mut r8gc::Trace<'_>) {
+        t.trace(&self.entries);
+    }
+
+    /// 搬了的键（对象 / Symbol，按地址进索引）才在索引里换成新地址。
+    /// 搬前的地址（新生代 / 要搬空的页）与搬后的不重叠，先删后插不会碰到别的键。
+    /// 次回收只看上次以来写过的条目（更早的只指向老年代，不会变）。
+    fn relocate(&mut self, r: &mut r8gc::Relocate<'_>) {
+        let from = if r.young_only() { self.young_from } else { 0 };
+        self.young_from = self.entries.len();
+        for (i, entry) in self.entries.iter_mut().enumerate().skip(from) {
+            let Some((k, v)) = entry else { continue };
+            let old = matches!(k, Value::Object(_) | Value::Symbol(_)).then(|| MapKey::from(*k));
+            r.relocate(k);
+            r.relocate(v);
+            if let Some(old) = old {
+                let new = MapKey::from(*k);
+                if new != old {
+                    self.index.0.remove(&old);
+                    self.index.0.insert(new, i);
+                }
+            }
+        }
+    }
+}
+
 impl<'gc> Collection<'gc> {
     pub fn new(weak: bool) -> Self {
-        Self { entries: Vec::new(), index: gc_arena::Static(hashbrown::HashMap::default()), size: 0, weak }
+        Self { entries: Vec::new(), young_from: 0, index: r8gc::Static(hashbrown::HashMap::default()), size: 0, weak }
+    }
+
+    /// 按插入顺序的条目（删掉的是空位）
+    pub fn entries(&self) -> &[Option<(Value<'gc>, Value<'gc>)>] {
+        &self.entries
     }
 
     pub fn get(&self, key: Value<'gc>) -> Option<Value<'gc>> {
@@ -338,7 +372,10 @@ impl<'gc> Collection<'gc> {
             k => k,
         };
         match self.index.0.get(&MapKey::from(key)) {
-            Some(&i) => self.entries[i] = Some((key, value)),
+            Some(&i) => {
+                self.entries[i] = Some((key, value));
+                self.young_from = self.young_from.min(i);
+            }
             None => {
                 self.index.0.insert(MapKey::from(key), self.entries.len());
                 self.entries.push(Some((key, value)));
@@ -539,7 +576,7 @@ pub struct ArgumentsMap<'gc> {
 }
 
 /// 宿主对象里的 Rust 数据（按类型取出，可变借用经 `RefCell`）。
-pub type HostData<'gc> = Gc<'gc, gc_arena::Static<core::cell::RefCell<Box<dyn core::any::Any>>>>;
+pub type HostData<'gc> = Gc<'gc, r8gc::Static<core::cell::RefCell<Box<dyn core::any::Any>>>>;
 
 /// 对象的种类：普通对象之外带的内部槽。
 #[derive(Debug, Default, Collect)]

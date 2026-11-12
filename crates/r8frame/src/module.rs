@@ -2,7 +2,7 @@
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
-use gc_arena::{Collect, Gc};
+use r8gc::{Collect, Gc};
 
 use crate::{Agent, Error, ErrorKind, FuncId, JsEnv, JsObject, JsString, Key, ObjectKind, Property, PropertyKey, Slot, Value};
 

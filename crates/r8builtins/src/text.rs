@@ -453,7 +453,7 @@ impl Texts {
         if let Some(&(_, s)) = a.realm.symbol_registry.borrow().iter().find(|(k, _)| ***k == **key) {
             return Ok(s.into());
         }
-        let s: JsSymbol<'gc> = gc_arena::Gc::new(a.mc, SymbolData { description: Some((&**key).into()) });
+        let s: JsSymbol<'gc> = r8gc::Gc::new(a.mc, SymbolData { description: Some((&**key).into()) });
         a.realm.symbol_registry.borrow_mut(a.mc).push((key, s));
         Ok(s.into())
     }
@@ -463,7 +463,7 @@ impl Texts {
             let t = a.describe(args.at(0));
             return Err(a.throw(ErrorKind::Type, &alloc::format!("{t} is not a symbol")));
         };
-        Ok(a.realm.symbol_registry.borrow().iter().find(|(_, x)| gc_arena::Gc::ptr_eq(*x, s)).map_or(Value::Undefined, |&(k, _)| k.into()))
+        Ok(a.realm.symbol_registry.borrow().iter().find(|(_, x)| r8gc::Gc::ptr_eq(*x, s)).map_or(Value::Undefined, |&(k, _)| k.into()))
     }
 
     fn symbol_to_primitive<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {

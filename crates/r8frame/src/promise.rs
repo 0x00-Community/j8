@@ -1,7 +1,7 @@
 //! Promise 与微任务：解决 / 拒绝、`then` 的反应、async 协程的驱动、排空队列。
 use alloc::vec::Vec;
 
-use gc_arena::{Gc, Lock};
+use r8gc::{Gc, Lock};
 
 use crate::{Agent, Coroutine, Error, ErrorKind, Job, JsObject, ObjectData, ObjectKind, Reaction, Request, Resume, Settled, Step, Value};
 

@@ -7,7 +7,7 @@ license.workspace = true
 
 [dependencies]
 r8frame.workspace = true
-gc-arena.workspace = true
+r8gc.workspace = true
 libm.workspace = true
 num-bigint.workspace = true
 num-traits.workspace = true

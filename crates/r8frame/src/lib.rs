@@ -41,6 +41,7 @@ pub use object::{ArgumentsMap, HostData, BigIntData, Bound, BufferData, Capabili
 pub use bigint::Numeric;
 pub use ops::{number_text, BinaryOp, CompareOp, ErrorKind, Hint, IterRecord, UnaryOp};
 pub use platform::{Platform, Task};
+pub use r8gc::Pool;
 pub use module::{ImportEntry, ImportName, ModuleInfo, ModuleRecord, ModuleStatus, Resolution, ResolvedBinding};
 pub use profiler::{Counter, FuncId, Profiler};
 pub use typed::{Element, canonical_numeric, f16_to_f64, f64_to_f16};

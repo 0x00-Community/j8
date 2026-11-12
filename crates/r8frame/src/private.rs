@@ -1,7 +1,7 @@
 //! 类的私有成员（`#x`）：只在对象自己身上找，不走原型链；没有就抛 TypeError。
 use alloc::boxed::Box;
 
-use gc_arena::Gc;
+use r8gc::Gc;
 
 use crate::{Agent, Error, ErrorKind, JsObject, JsSymbol, Property, Slot, SymbolData, Value};
 

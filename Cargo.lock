@@ -207,27 +207,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
-name = "gc-arena"
-version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "160a11f93020eea95cb4c59e2eda2e4c6353f75aa4fbb01f2bf8729b2e4d6dd2"
-dependencies = [
- "gc-arena-derive",
-]
-
-[[package]]
-name = "gc-arena-derive"
-version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cd3d24b051bd5a5f44e66bac510393d3d484ef776bb560f6504668239f35959a"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
- "synstructure 0.13.2",
-]
-
-[[package]]
 name = "hashbrown"
 version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -824,19 +803,19 @@ dependencies = [
 name = "r8binding"
 version = "0.1.0"
 dependencies = [
- "gc-arena",
  "r8frame",
+ "r8gc",
 ]
 
 [[package]]
 name = "r8builtins"
 version = "0.1.0"
 dependencies = [
- "gc-arena",
  "libm",
  "num-bigint 0.4.8",
  "num-traits",
  "r8frame",
+ "r8gc",
  "regress",
  "ryu-js",
  "unicode-normalization",
@@ -864,9 +843,9 @@ dependencies = [
 name = "r8executor"
 version = "0.1.0"
 dependencies = [
- "gc-arena",
  "r8builtins",
  "r8frame",
+ "r8gc",
  "r8platform",
  "r8virtasm",
  "ryu-js",
@@ -876,14 +855,36 @@ dependencies = [
 name = "r8frame"
 version = "0.1.0"
 dependencies = [
- "gc-arena",
  "hashbrown",
  "libm",
  "num-bigint 0.4.8",
  "num-traits",
+ "r8gc",
  "rustc-hash",
  "ryu-js",
  "smol_str",
+]
+
+[[package]]
+name = "r8gc"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "26a0bf76e595dc4220472daf0e279929866f178354758fb1fab8c78af0b7e78c"
+dependencies = [
+ "moremath",
+ "r8gc-macros",
+]
+
+[[package]]
+name = "r8gc-macros"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0463a1e8654c844dbc3a7aee9db0972519e30ed96641dd8eec7f60988c93e077"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+ "synstructure 0.13.2",
 ]
 
 [[package]]
@@ -914,6 +915,7 @@ version = "0.1.0"
 dependencies = [
  "moremath",
  "r8frame",
+ "r8gc",
 ]
 
 [[package]]

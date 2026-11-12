@@ -1,4 +1,4 @@
-use gc_arena::{Arena, Collect, DynamicRootSet, Mutation, Rootable};
+use r8gc::{Collect, DynamicRootSet, Mutation, R8Heap, Rootable};
 
 use crate::{Platform, Profiler};
 
@@ -16,10 +16,10 @@ struct Roots<'gc> {
     set: DynamicRootSet<'gc>,
 }
 
-/// 一个独立的 JS 世界：GC 堆加剖析器；平台由嵌入方借给它。
+/// 一个独立的 JS 世界：GC 堆加剖析器；平台由嵌入方借给它（GC 在平台的线程池上并行）。
 pub struct Isolate<'p> {
     platform: &'p dyn Platform,
-    arena: Arena<Rootable![Roots<'_>]>,
+    arena: R8Heap<'p, Rootable![Roots<'_>]>,
     profiler: Profiler,
 }
 
@@ -35,7 +35,7 @@ impl<'p> Isolate<'p> {
     pub fn new(platform: &'p dyn Platform, params: CreateParams) -> Self {
         let mut profiler = Profiler::default();
         profiler.enable(params.profile);
-        let arena = Arena::new(|mc| Roots { set: DynamicRootSet::new(mc) });
+        let arena = R8Heap::new(platform, |mc| Roots { set: DynamicRootSet::new(mc) });
         Self { platform, arena, profiler }
     }
 
