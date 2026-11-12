@@ -280,6 +280,99 @@ impl Regexps {
         Ok(arr.into())
     }
 
+    /// 正则对象与 `RegExp.prototype` 都还是原样：对象自有属性只有可写的数值 `lastIndex`、原型是 `%RegExp.prototype%`，
+    /// 原型上 `exec` / `flags` / 各标志 getter 都还是装好时的那些。这时按规范走一圈协议（读 flags、读写 lastIndex、
+    /// 调 exec、读结果数组）观察不到区别，可以直接匹配。给出对象与 `lastIndex` 的值。
+    fn pristine<'gc>(a: &Agent<'gc, '_>, r: Value<'gc>) -> Option<(JsObject<'gc>, f64)> {
+        let Value::Object(o) = r else { return None };
+        let d = o.borrow();
+        let own_ok = matches!(d.kind, ObjectKind::RegExp(_))
+            && d.proto.is_some_and(|p| Gc::ptr_eq(p, a.realm.regexp_proto))
+            && d.symbols.is_empty()
+            && d.props.len() == 1
+            && &**d.props.key(0) == "lastIndex"
+            && d.props.attrs(0).writable();
+        let Slot::Data(Value::Number(last)) = d.props.slot(0) else { return None };
+        drop(d);
+        let pristine = a.realm.regexp_pristine.borrow();
+        let p = pristine.as_ref().filter(|_| own_ok)?;
+        let proto = a.realm.regexp_proto.borrow();
+        let same = |x: Slot<'gc>, y: Slot<'gc>| match (x, y) {
+            (Slot::Data(Value::Object(x)), Slot::Data(Value::Object(y))) | (Slot::Accessor { get: Some(x), .. }, Slot::Accessor { get: Some(y), .. }) => Gc::ptr_eq(x, y),
+            _ => false,
+        };
+        let intact = proto.props.shape().is_some_and(|s| alloc::rc::Rc::ptr_eq(s, &p.shape)) && p.slots.iter().all(|&(i, orig)| same(proto.props.slot(i), orig));
+        intact.then_some((o, last))
+    }
+
+    /// 改原样正则的 `lastIndex`（[`pristine`](Self::pristine) 核对过：第 0 项、可写）
+    fn set_last<'gc>(a: &Agent<'gc, '_>, o: JsObject<'gc>, i: usize) {
+        o.borrow_mut(a.mc).set_at(0, Self::index(i));
+    }
+
+    /// 原样正则从 `start` 起找（全 ASCII 按字节，否则按 UTF-16 码元 `units`）
+    fn find_in(o: JsObject<'_>, s: &str, units: &[u16], start: usize) -> Option<Found> {
+        if s.is_ascii() { Self::find_ascii(o, s, start) } else { Self::find(o, units, start) }
+    }
+
+    /// 原样正则的 RegExpBuiltinExec，不建结果数组：按 `g` / `y` 读写 `lastIndex`，给出匹配
+    fn quick_exec<'gc>(a: &mut Agent<'gc, '_>, o: JsObject<'gc>, last: f64, s: &str, units: &[u16]) -> Result<Option<Found>, Error> {
+        let flags = Self::data(o).1;
+        let (global, sticky) = (flags.contains('g'), flags.contains('y'));
+        let len = if s.is_ascii() { s.len() } else { units.len() };
+        let last = if global || sticky { a.to_length(last.into())? } else { 0.0 };
+        #[expect(clippy::cast_precision_loss, reason = "字符串长度远小于 2^53")]
+        let fits = last <= len as f64;
+        #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "已检查不超过长度")]
+        let start = last as usize;
+        let found = if fits { Self::find_in(o, s, units, start).filter(|m| !sticky || m.range.start == start) } else { None };
+        if global || sticky {
+            Self::set_last(a, o, found.as_ref().map_or(0, |m| m.range.end));
+        }
+        Ok(found)
+    }
+
+    /// 原样正则、替换值是字符串的 `[Symbol.replace]`。模板里有 `$<` 而正则可能有具名分组时给 `None`（走慢路，此前没有副作用）
+    fn quick_replace<'gc>(a: &mut Agent<'gc, '_>, o: JsObject<'gc>, last: f64, s: JsString<'gc>, with: JsString<'gc>) -> Result<Option<Value<'gc>>, Error> {
+        let (source, flags, _) = Self::data(o);
+        if with.contains("$<") && source.contains("(?<") {
+            return Ok(None);
+        }
+        let (global, sticky, unicode) = (flags.contains('g'), flags.contains('y'), flags.contains('u') || flags.contains('v'));
+        let units: Vec<u16> = s.encode_utf16().collect();
+        let mut found = Vec::new();
+        if global {
+            let mut start = 0;
+            while start <= units.len() {
+                let Some(m) = Self::find_in(o, &s, &units, start).filter(|m| !sticky || m.range.start == start) else { break };
+                #[expect(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "下标远小于 2^53")]
+                let next = if m.range.is_empty() { Self::advance(&units, m.range.end as f64, unicode) as usize } else { m.range.end };
+                found.push(m);
+                start = next;
+            }
+            Self::set_last(a, o, 0);
+        } else {
+            found.extend(Self::quick_exec(a, o, last, &s, &units)?);
+        }
+        let template: Vec<u16> = with.encode_utf16().collect();
+        let dollar = template.contains(&u16::from(b'$'));
+        let mut out: Vec<u16> = Vec::with_capacity(units.len());
+        let mut next = 0;
+        for m in found {
+            let (start, end) = (m.range.start, m.range.end);
+            out.extend_from_slice(&units[next..start]);
+            if dollar {
+                let captures: Vec<Value<'gc>> = m.groups.iter().map(|g| Self::text(a, &units, g.clone())).collect();
+                out.extend(Self::substitution(a, &units[start..end], &units, start, &captures, Value::Undefined, &template)?);
+            } else {
+                out.extend_from_slice(&template);
+            }
+            next = end;
+        }
+        out.extend_from_slice(&units[next..]);
+        Ok(Some(a.string(&String::from_utf16_lossy(&out)).into()))
+    }
+
     /// RegExpExec：`exec` 被换掉了就调它（结果要是对象或 null）。
     fn regexp_exec<'gc>(a: &mut Agent<'gc, '_>, r: Value<'gc>, s: JsString<'gc>) -> Result<Value<'gc>, Error> {
         let exec = a.get_named(r, "exec")?;
@@ -303,6 +396,10 @@ impl Regexps {
     fn test<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let r = Self::this_object(a, this)?;
         let s = a.to_string(args.at(0))?;
+        if let Some((o, last)) = Self::pristine(a, r) {
+            let units: Vec<u16> = if s.is_ascii() { Vec::new() } else { s.encode_utf16().collect() };
+            return Ok(Self::quick_exec(a, o, last, &s, &units)?.is_some().into());
+        }
         Ok((Self::regexp_exec(a, r, s)? != Value::Null).into())
     }
 
@@ -563,7 +660,13 @@ impl Regexps {
         let mut with = args.at(1);
         let functional = a.is_callable(with);
         if !functional {
-            with = a.to_string(with)?.into();
+            let w = a.to_string(with)?;
+            if let Some((o, last)) = Self::pristine(a, r)
+                && let Some(v) = Self::quick_replace(a, o, last, s, w)?
+            {
+                return Ok(v);
+            }
+            with = w.into();
         }
         let flags = Self::get_flags(a, r)?;
         let global = flags.contains('g');
@@ -917,6 +1020,13 @@ impl<'gc> Installer<'_, 'gc> {
         for (name, f) in flags {
             self.getter(proto, name, f);
         }
+        // 记下装好时的样子：exec / flags / 各标志 getter 的槽
+        let pristine = {
+            let d = proto.borrow();
+            let slots = ["exec", "flags"].into_iter().chain(FLAG_PROPERTIES.map(|(_, n)| n)).filter_map(|n| d.props.position(n).map(|i| (i, d.props.slot(i)))).collect();
+            d.props.shape().map(|shape| r8framework::RegExpPristine { shape: alloc::rc::Rc::clone(shape), slots })
+        };
+        *r.regexp_pristine.borrow_mut(self.mc) = pristine;
         let symbols: [(r8framework::JsSymbol<'gc>, r8framework::NativeFn, u32); 5] = [
             (r.symbols.match_, Regexps::match_symbol, 1),
             (r.symbols.match_all, Regexps::match_all_symbol, 1),

@@ -128,6 +128,17 @@ pub struct Realm<'gc> {
     pub templates: Gc<'gc, RefLock<alloc::collections::BTreeMap<(u32, u32), JsObject<'gc>>>>,
     /// 编好的正则按（源码, 标志）共享（编好的不可变）；最近用的放后面，满了丢最前面的
     pub regexp_cache: Gc<'gc, RefLock<VecDeque<RegExpCompiled<'gc>>>>,
+    /// `RegExp.prototype` 装好时的样子（内建正则方法据此判断能不能跳过协议直接匹配）
+    pub regexp_pristine: Gc<'gc, RefLock<Option<RegExpPristine<'gc>>>>,
+}
+
+/// `RegExp.prototype` 装好时的形状，及 `exec` / `flags` / 各标志 getter 所在的槽与原来的内容。
+#[derive(Collect)]
+#[collect(no_drop)]
+pub struct RegExpPristine<'gc> {
+    #[collect(require_static)]
+    pub shape: alloc::rc::Rc<crate::Shape>,
+    pub slots: alloc::vec::Vec<(usize, crate::Slot<'gc>)>,
 }
 
 /// 一份编好的正则：源码、标志、执行层的编译结果。
@@ -212,6 +223,7 @@ impl<'gc> Realm<'gc> {
             },
             jobs: Gc::new(mc, RefLock::new(VecDeque::new())),
             regexp_cache: Gc::new(mc, RefLock::new(VecDeque::new())),
+            regexp_pristine: Gc::new(mc, RefLock::new(None)),
             symbol_registry: Gc::new(mc, RefLock::new(alloc::vec::Vec::new())),
             modules: Gc::new(mc, RefLock::new(alloc::vec::Vec::new())),
             random_state: Gc::new(mc, r8gc::Lock::new(0)),
