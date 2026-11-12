@@ -19,6 +19,8 @@ impl Reg {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Label(pub u32);
 
+use crate::asm::{AsmError, Operand, Operands};
+
 r8macros::enums!("insn.json");
 
 impl PartialEq for Constant {
@@ -131,20 +133,5 @@ impl fmt::Display for Const {
 impl fmt::Display for Label {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "@{}", self.0)
-    }
-}
-
-impl fmt::Display for Module {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for (i, func) in self.functions.iter().enumerate() {
-            writeln!(f, "fn#{i} {} (params {}, regs {}):", func.name, func.params, func.regs)?;
-            for (k, c) in func.consts.iter().enumerate() {
-                writeln!(f, "  #{k} = {c:?}")?;
-            }
-            for (pc, insn) in func.insns.iter().enumerate() {
-                writeln!(f, "  @{pc:<4} {insn}")?;
-            }
-        }
-        Ok(())
     }
 }

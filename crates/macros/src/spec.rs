@@ -20,6 +20,9 @@ pub struct EnumSpec {
     /// 生成 `Display`：助记符 + 操作数
     #[serde(default)]
     pub display: bool,
+    /// 生成汇编（`Display` 的逆）：`display` 开 ⇒ `FromStr`；全是单元变体 ⇒ 按变体名的 `Operand`
+    #[serde(default)]
+    pub asm: bool,
     /// 生成按字段类型取 `&mut` 的方法
     #[serde(default)]
     pub accessors: Vec<Accessor>,

@@ -25,6 +25,7 @@
       "name": "PropertyKind",
       "doc": "定义属性的方式。",
       "derive": ["Clone", "Copy", "Debug", "PartialEq", "Eq", "Hash"],
+      "asm": true,
       "variants": [
         {"name": "Data", "doc": "数据属性（对象字面量：可枚举；类方法：不可枚举）"},
         {"name": "Getter"},
@@ -36,6 +37,7 @@
       "doc": "一条指令。累加器 `acc` 是隐式的输入 / 输出。",
       "derive": ["Clone", "Copy", "Debug", "PartialEq"],
       "display": true,
+      "asm": true,
       "accessors": [{"name": "target_mut", "ty": "Label", "doc": "跳转指令的目标（回填用）：带 `Label` 字段的指令都算。"}],
       "variants": [
         {"name": "LdaUndefined", "mnemonic": "lda.undefined"},

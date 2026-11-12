@@ -72,6 +72,8 @@ pub enum Hint {
 }
 
 impl BinaryOp {
+    pub const ALL: [BinaryOp; 12] = [BinaryOp::Add, BinaryOp::Sub, BinaryOp::Mul, BinaryOp::Div, BinaryOp::Rem, BinaryOp::Exp, BinaryOp::BitAnd, BinaryOp::BitOr, BinaryOp::BitXor, BinaryOp::Shl, BinaryOp::Shr, BinaryOp::UShr];
+
     pub fn name(self) -> &'static str {
         match self {
             BinaryOp::Add => "add",
@@ -110,6 +112,8 @@ impl BinaryOp {
 }
 
 impl CompareOp {
+    pub const ALL: [CompareOp; 8] = [CompareOp::Eq, CompareOp::Ne, CompareOp::StrictEq, CompareOp::StrictNe, CompareOp::Lt, CompareOp::Gt, CompareOp::Le, CompareOp::Ge];
+
     pub fn name(self) -> &'static str {
         match self {
             CompareOp::Eq => "eq",
@@ -138,6 +142,8 @@ impl CompareOp {
 }
 
 impl UnaryOp {
+    pub const ALL: [UnaryOp; 6] = [UnaryOp::Neg, UnaryOp::Plus, UnaryOp::Not, UnaryOp::BitNot, UnaryOp::Typeof, UnaryOp::Void];
+
     pub fn name(self) -> &'static str {
         match self {
             UnaryOp::Neg => "neg",

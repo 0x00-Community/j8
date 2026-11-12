@@ -5,7 +5,7 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
-use asm::Asm;
+use asm::{Asm, Disasm};
 
 /// r8 调试工具
 #[derive(Parser)]
@@ -17,13 +17,16 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// JS ⇒ 字节码，打印反汇编
+    /// JS ⇒ 字节码，打印反汇编清单
+    Disasm(Disasm),
+    /// 汇编反汇编清单，打印规范化后的清单
     Asm(Asm),
 }
 
 impl Command {
     fn run(&self) -> Result<(), String> {
         match self {
+            Command::Disasm(d) => d.run(),
             Command::Asm(a) => a.run(),
         }
     }

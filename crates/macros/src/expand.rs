@@ -31,6 +31,11 @@ impl EnumSpec {
             .collect::<Result<Vec<_>>>()?;
         let variants = self.variants.iter().map(|v| v.decl(self)).collect::<Result<Vec<_>>>()?;
         let display = if self.display { self.display_impl()? } else { TokenStream::new() };
+        let asm = match (self.asm, self.display) {
+            (false, _) => TokenStream::new(),
+            (true, true) => self.parse_impl()?,
+            (true, false) => self.operand_impl()?,
+        };
         let accessors = self.accessors.iter().map(|a| a.expand(self)).collect::<Result<Vec<_>>>()?;
         let accessors = if accessors.is_empty() {
             TokenStream::new()
@@ -42,6 +47,7 @@ impl EnumSpec {
             #[derive(#(#derive),*)]
             pub enum #ident { #(#variants,)* }
             #display
+            #asm
             #accessors
         })
     }
@@ -60,7 +66,99 @@ impl EnumSpec {
     }
 }
 
+impl EnumSpec {
+    /// `FromStr`：`Display` 的逆。助记符先认，认不出再按 `show: name` 字段的类型试；操作数交给调用处的 `Operands`
+    fn parse_impl(&self) -> Result<TokenStream> {
+        let ident = self.ident();
+        let mut arms = Vec::new();
+        let mut named = Vec::new();
+        for v in &self.variants {
+            let head = v.fields.iter().zip(v.bindings()).find(|(f, _)| matches!(f.show, Show::Name));
+            match (head, &v.mnemonic) {
+                (None, Some(m)) => {
+                    let build = v.assemble(self, None)?;
+                    arms.push(quote! { #m => #build, });
+                }
+                (Some((f, b)), None) => {
+                    let ty = f.ty(self, v)?;
+                    let build = v.assemble(self, Some(&b))?;
+                    named.push(quote! { if let Ok(#b) = <#ty as Operand>::operand(head) { #build } else });
+                }
+                _ => return Err(err(format_args!("{}::{}: needs exactly one of `mnemonic` or a `show: name` field", self.name, v.name))),
+            }
+        }
+        Ok(quote! {
+            impl ::core::str::FromStr for #ident {
+                type Err = AsmError;
+                fn from_str(text: &str) -> ::core::result::Result<Self, AsmError> {
+                    let (head, mut ops) = Operands::split(text);
+                    let value = match head {
+                        #(#arms)*
+                        _ => #(#named)* { return Err(AsmError::Mnemonic(head.into())) }
+                    };
+                    ops.finish()?;
+                    Ok(value)
+                }
+            }
+        })
+    }
+
+    /// `Operand`：按变体名（即 `Debug`）认，只收单元变体
+    fn operand_impl(&self) -> Result<TokenStream> {
+        let ident = self.ident();
+        let arms = self
+            .variants
+            .iter()
+            .map(|v| {
+                if !v.fields.is_empty() {
+                    return Err(err(format_args!("{}::{}: `asm` without `display` needs unit variants", self.name, v.name)));
+                }
+                let (name, vi) = (&v.name, v.ident());
+                Ok(quote! { #name => Ok(Self::#vi), })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(quote! {
+            impl Operand for #ident {
+                fn operand(text: &str) -> ::core::result::Result<Self, AsmError> {
+                    match text { #(#arms)* _ => Err(AsmError::Operand(text.into())) }
+                }
+            }
+        })
+    }
+}
+
 impl VariantSpec {
+    /// 按字段次序从 `ops` 取操作数建变体；`head` 是已从助记符位置认出来的 `show: name` 字段
+    fn assemble(&self, owner: &EnumSpec, head: Option<&Ident>) -> Result<TokenStream> {
+        let ident = self.ident();
+        let values = self
+            .fields
+            .iter()
+            .map(|f| {
+                if matches!(f.show, Show::Name) {
+                    return Ok(head.map_or_else(TokenStream::new, |h| quote! { #h }));
+                }
+                let prefix = &f.prefix;
+                Ok(match FieldSpec::option_inner(&f.ty(owner, self)?) {
+                    Some(_) if prefix.is_empty() => {
+                        return Err(err(format_args!("{}::{}: an `Option` field needs a `prefix` to be assembled", owner.name, self.name)));
+                    }
+                    Some(_) => quote! { ops.optional(#prefix)? },
+                    None => quote! { ops.next(#prefix)? },
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(match self.named(owner)? {
+            None => quote! { Self::#ident },
+            Some(true) => {
+                let names = self.bindings();
+                quote! { Self::#ident { #(#names: #values),* } }
+            }
+            Some(false) => quote! { Self::#ident ( #(#values),* ) },
+        })
+    }
+
+
     fn ident(&self) -> Ident {
         format_ident!("{}", self.name)
     }

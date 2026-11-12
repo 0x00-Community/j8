@@ -2,16 +2,16 @@ use std::io::{Read, Write};
 use std::path::PathBuf;
 
 use clap::Args;
-use r8virtasm::Module;
 use r8frame::Source;
+use r8virtasm::Module;
 
-/// `r8dbg asm`：把 JS 编成字节码并打印反汇编。
+/// 输入（文件 / 标准输入 / 命令行）与输出（文件 / 标准输出）。
 #[derive(Args)]
-pub struct Asm {
-    /// JS 文件；`-` 读标准输入
+pub struct Io {
+    /// 输入文件；`-` 读标准输入
     #[arg(required_unless_present = "eval", conflicts_with = "eval")]
     file: Option<PathBuf>,
-    /// 直接给 JS 源码
+    /// 直接给输入文本
     #[arg(short, long)]
     eval: Option<String>,
     /// 写到文件，缺省标准输出
@@ -19,9 +19,9 @@ pub struct Asm {
     output: Option<PathBuf>,
 }
 
-impl Asm {
-    /// 源码与报错用的文件名
-    fn source(&self) -> Result<(String, String), String> {
+impl Io {
+    /// 输入文本与报错用的文件名
+    fn input(&self) -> Result<(String, String), String> {
         match (&self.eval, &self.file) {
             (Some(code), _) => Ok((code.clone(), "<eval>".into())),
             (None, Some(p)) if p.as_os_str() == "-" => {
@@ -37,13 +37,40 @@ impl Asm {
         }
     }
 
-    pub fn run(&self) -> Result<(), String> {
-        let (text, file) = self.source()?;
-        let module = Module::try_from(&Source { text: &text, file: &file }).map_err(|e| e.to_string())?;
-        let listing = module.to_string();
+    fn write(&self, listing: &str) -> Result<(), String> {
         match &self.output {
             Some(p) => std::fs::write(p, listing).map_err(|e| format!("{}: {e}", p.display())),
             None => std::io::stdout().lock().write_all(listing.as_bytes()).map_err(|e| e.to_string()),
         }
+    }
+}
+
+/// `r8dbg disasm`：JS 编成字节码，打印反汇编清单。
+#[derive(Args)]
+pub struct Disasm {
+    #[command(flatten)]
+    io: Io,
+}
+
+impl Disasm {
+    pub fn run(&self) -> Result<(), String> {
+        let (text, file) = self.io.input()?;
+        let module = Module::try_from(&Source { text: &text, file: &file }).map_err(|e| e.to_string())?;
+        self.io.write(&module.to_string())
+    }
+}
+
+/// `r8dbg asm`：汇编反汇编清单（`r8dbg disasm` 的输出），打印规范化后的清单。
+#[derive(Args)]
+pub struct Asm {
+    #[command(flatten)]
+    io: Io,
+}
+
+impl Asm {
+    pub fn run(&self) -> Result<(), String> {
+        let (text, file) = self.io.input()?;
+        let module = text.parse::<Module>().map_err(|e| format!("{file}: {e}"))?;
+        self.io.write(&module.to_string())
     }
 }

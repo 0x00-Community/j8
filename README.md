@@ -11,12 +11,12 @@
 | `r8binding` | `no_std` | Rust ⇄ JS 绑定的运行时：`FromJs` / `IntoJs`、宿主对象、`Class` / `Object` |
 | `r8builtins` | `no_std` | 实现 `Intrinsics`：往 `Realm` 装 Object / Function / Array / String / Number / Boolean / Math / Error 系列 / `console` / `parseInt` 等 |
 | `r8platform` | std | 实现 `Platform`（`DefaultPlatform`）：后台任务跑在 moremath `ThreadMulti` 线程池上（起一次复用、任务可借用调用方数据），时钟用 `Instant` |
-| `r8virtasm` | `no_std`（`compile` 要 std） | 累加器式寄存器字节码（`Insn` / `Function` / `Module`）；`compile` feature（缺省开）带 JS ⇒ 字节码编译器 `Module::try_from(&Source)`，用 oxc 解析 |
+| `r8virtasm` | `no_std`（`compile` 要 std） | 虚拟指令集：累加器式寄存器字节码（`Insn` / `Function` / `Module`）；反汇编 `module.to_string()`、汇编 `text.parse::<Module>()`，互为逆；`compile` feature（缺省开）带 JS ⇒ 字节码编译器 `Module::try_from(&Source)`，用 oxc 解析 |
 | `r8macros` | proc-macro | 过程宏：`enums!("x.json")` 从 JSON 生成枚举（定义、`Display`、按字段类型取 `&mut`），用法见 `crates/macros/USAGE.md` |
 | `samples/dune` | std | 基于 r8 的 node 式二进制（`require` / `module` / `fs` / `path` / `process`，原生部分用 `#[r8::object]` 绑定）：`dune a.js` / `dune run a.js`（`-` 读标准输入）、`dune -e '<js>'`、`dune -p '<js>'` 打印结果、不带参数进 REPL（`.help` / `.exit`）；没接住的异常打 `Uncaught …` 退出码 1 |
 | `samples/workerd` | std | 用 r8 加载 Cloudflare Worker（ES 模块 `export default { fetch }`）与 Durable Object：`workerd examples/counter.js --bind COUNTER=Counter --request "GET /c/inc?name=a"` 或 `--port 8787` 起 HTTP 服务；Fetch API 子集与 DO 在 JS 序言里，存储是 `#[r8::class]` 绑定的 Rust KV |
 | `samples/benchv8` | std | 同一组 JS 基准在 r8 与 V8（rusty_v8 152，带 JIT / `--jitless`）上的耗时对比：`cd samples/benchv8 && cargo run --release`；依赖 V8 预编译库，自成 workspace（根 workspace 已 exclude） |
-| `r8debugger` | std | 调试命令行 `r8dbg`（clap）：`r8dbg asm <file.js \| ->` / `r8dbg asm -e '<js>'` 打印字节码反汇编（`-o` 写文件） |
+| `r8debugger` | std | 调试命令行 `r8dbg`（clap）：`r8dbg disasm <file.js \| ->` / `r8dbg disasm -e '<js>'` 打印反汇编清单；`r8dbg asm <file.r8s \| ->` 汇编清单、打印规范化后的清单（`-o` 写文件） |
 | `r8executor` | `no_std`（`compile` 要 std） | 字节码执行器 `Executor`，**目前是最后一层**；`compile` feature 下实现 `Engine` |
 
 所有 JS 都先编成字节码再执行，不设 AST 解释层。
@@ -74,6 +74,21 @@ cargo build --target riscv64gc-unknown-none-elf -p r8frame -p r8virtasm -p r8exe
 累加器式寄存器机（同 V8 Ignition）：结果都进隐式的 `acc`，二元运算 `acc = reg op acc`。
 
 指令与 r8virtasm 的全部枚举（`Insn` / `Constant` / `FunctionKind` / `PropertyKind`）定义在 `crates/r8virtasm/insn.json`，由 `r8macros::enums!` 生成，⛔ 手写枚举；加指令只改 JSON（带 `Label` 字段的自动算跳转，进 `target_mut`）。
+
+### 汇编 / 反汇编
+
+清单一个函数一段：函数头 `fn#i "名字" 种类 模式 params N length N regs N [generator] [async] [keeps_args]`，下面缩进的行依次是
+`.mapped`（映射的 arguments 槽位，`-` 是不映射）、常量 `#k = number … | string "…" | bigint …`、
+直接 eval 的作用域表 `scope#k = ["x" 3 const tdz] [ … ]`、指令 `@pc 助记符 操作数, …`；`;` 起到行尾是注释。编号必须按顺序写。
+
+```text
+fn#0 "main" normal sloppy params 0 length 0 regs 3
+  #0 = string "x"
+  @0    lda.const #0
+  @1    return
+```
+
+一条指令的写法与 `Display` 同源：insn.json 里 `Insn` 开了 `asm`，`r8macros::enums!` 一并生成 `FromStr for Insn`，加指令不用改汇编器。
 
 - 调用约定：`r0` 是 `this`，`r1` 是被调函数本身（具名函数表达式靠它递归），形参从 `r2` 起；`Call` 的被调者、`this`、实参排在连续寄存器
 - 作用域：编译前预扫一遍（`scope.rs` 的 `Resolver`），找出被内层函数捕获的绑定放进堆上的 `Env` 链（`PushEnv` / `PopEnv` / `LdaEnv depth.slot`），其余放寄存器；`for (let …)` 每轮 `CloneEnv`，闭包各拿各的那一轮
