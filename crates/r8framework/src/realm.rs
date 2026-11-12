@@ -57,6 +57,8 @@ pub struct Realm<'gc> {
     pub function_proto: JsObject<'gc>,
     pub array_proto: JsObject<'gc>,
     pub string_proto: JsObject<'gc>,
+    /// ASCII 单字符的字符串（`s[i]` / `charAt` 不用每次分配）
+    pub chars: alloc::vec::Vec<crate::JsString<'gc>>,
     pub number_proto: JsObject<'gc>,
     pub boolean_proto: JsObject<'gc>,
     /// 按 [`ErrorKind`] 排的错误原型（`Error.prototype` 在第一个）
@@ -233,6 +235,7 @@ impl<'gc> Realm<'gc> {
             function_proto,
             array_proto: derived(object_proto),
             string_proto: derived(object_proto),
+            chars: (0u8..128).map(|c| Gc::new(mc, crate::JsStr::from(alloc::string::String::from(char::from(c)).as_str()))).collect(),
             number_proto: derived(object_proto),
             boolean_proto: derived(object_proto),
             error_protos,
@@ -264,7 +267,7 @@ impl<'gc> Realm<'gc> {
         if let Some(n) = length {
             d.define("length", prop(f64::from(n).into()));
         }
-        d.define("name", prop(Value::String(Gc::new(mc, crate::SmallStr::from(name)))));
+        d.define("name", prop(Value::String(Gc::new(mc, crate::JsStr::from(name)))));
     }
 
     /// 带 `name` 的宿主函数对象。

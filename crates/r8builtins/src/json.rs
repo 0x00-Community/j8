@@ -259,7 +259,7 @@ impl<'gc> Writer<'gc> {
         let d = o.borrow();
         let mut keys = Vec::new();
         if let ObjectKind::Array(items) = &d.kind {
-            keys.extend((0..items.len()).map(|i| r8gc::Gc::new(a.mc, r8framework::number_text(f64::from(u32::try_from(i).unwrap_or(u32::MAX))))));
+            keys.extend((0..items.len()).map(|i| r8gc::Gc::new(a.mc, r8framework::JsStr::from(r8framework::number_text(f64::from(u32::try_from(i).unwrap_or(u32::MAX)))))));
         }
         keys.extend(d.props.iter().filter(|(_, p)| p.enumerable).map(|(k, _)| a.string(k)));
         keys
@@ -351,7 +351,7 @@ impl<'gc> Writer<'gc> {
                 out.push(',');
             }
             self.newline(out);
-            let k = r8gc::Gc::new(a.mc, r8framework::number_text(f64::from(i)));
+            let k = r8gc::Gc::new(a.mc, r8framework::JsStr::from(r8framework::number_text(f64::from(i))));
             if !self.property(a, o.into(), k, out)? {
                 out.push_str("null");
             }

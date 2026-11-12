@@ -309,8 +309,16 @@ pub(crate) fn index_of_str(s: &str) -> Option<u32> {
 
 impl<'gc> Agent<'gc, '_> {
     /// 字符串放上堆。
+    /// 一个 UTF-16 码元的字符串（ASCII 用现成的）
+    pub fn unit_string(&self, u: u16) -> JsString<'gc> {
+        match self.realm.chars.get(usize::from(u)) {
+            Some(&s) => s,
+            None => self.string(&alloc::string::String::from_utf16_lossy(&[u])),
+        }
+    }
+
     pub fn string(&self, s: &str) -> JsString<'gc> {
-        Gc::new(self.mc, crate::SmallStr::from(s))
+        Gc::new(self.mc, crate::JsStr::from(s))
     }
 
     /// 以 `Object.prototype` 为原型的空对象。
@@ -352,7 +360,7 @@ impl<'gc> Agent<'gc, '_> {
             Value::Bool(b) => b,
             Value::Number(x) => !(x == 0.0 || x.is_nan()),
             // 按字节数看，不拼平绳索
-            Value::String(s) => s.byte_len() != 0,
+            Value::String(s) => s.text().byte_len() != 0,
             Value::BigInt(b) => !b.0.is_zero(),
             Value::Symbol(_) | Value::Object(_) => true,
         }
@@ -422,7 +430,7 @@ impl<'gc> Agent<'gc, '_> {
             Value::Null => self.string("null"),
             Value::Bool(true) => self.string("true"),
             Value::Bool(false) => self.string("false"),
-            Value::Number(x) => Gc::new(self.mc, number_text(x)),
+            Value::Number(x) => Gc::new(self.mc, crate::JsStr::from(number_text(x))),
             Value::Symbol(_) => return Err(self.throw(ErrorKind::Type, "Cannot convert a Symbol value to a string")),
             Value::BigInt(b) => self.string(&format!("{}", b.0)),
             Value::Object(_) => {
@@ -459,7 +467,7 @@ impl<'gc> Agent<'gc, '_> {
             let (l, r) = (self.to_primitive(lhs, Hint::Default)?, self.to_primitive(rhs, Hint::Default)?);
             if matches!(l, Value::String(_)) || matches!(r, Value::String(_)) {
                 let (a, b) = (self.to_string(l)?, self.to_string(r)?);
-                return Ok(Value::String(Gc::new(self.mc, crate::SmallStr::concat(&a, &b))));
+                return Ok(Value::String(Gc::new(self.mc, crate::JsStr::from(crate::SmallStr::concat(a.text(), b.text())))));
             }
             (l, r)
         } else {
@@ -587,12 +595,12 @@ impl<'gc> Agent<'gc, '_> {
         // 字符串的下标与 `length` 不必包一层
         if let (Value::String(s), Key::Str(k)) = (holder, key) {
             if k == "length" {
-                return Ok(f64::from(u32::try_from(s.encode_utf16().count()).unwrap_or(u32::MAX)).into());
+                return Ok(f64::from(u32::try_from(s.utf16_len()).unwrap_or(u32::MAX)).into());
             }
             if let Some(i) = index_of_str(k)
-                && let Some(u) = s.encode_utf16().nth(i as usize)
+                && let Some(u) = s.code_unit(i as usize)
             {
-                return Ok(self.string(&String::from_utf16_lossy(&[u])).into());
+                return Ok(self.unit_string(u).into());
             }
         }
         match self.proto_of(holder) {
@@ -867,6 +875,18 @@ impl<'gc> Agent<'gc, '_> {
         {
             return Ok(v);
         }
+        // 类型化数组的数字键：直接取元素，不看原型链（键 -0 转成字符串是 "0"）
+        if let (Value::Object(o), Value::Number(x)) = (target, key)
+            && matches!(o.borrow().kind, ObjectKind::TypedArray(..))
+        {
+            return Ok(self.typed_get(o, x + 0.0).unwrap_or_default());
+        }
+        // 字符串的下标：UTF-16 码元，O(1)
+        if let (Value::String(s), Value::Number(x)) = (target, key)
+            && let Some(u) = index_of_number(x).and_then(|i| s.code_unit(i as usize))
+        {
+            return Ok(self.unit_string(u).into());
+        }
         if target.is_nullish() {
             let k = self.to_string(key)?;
             return Err(self.nullish_error(target, "read", &k));
@@ -901,6 +921,13 @@ impl<'gc> Agent<'gc, '_> {
             && let Some(i) = index_of_number(x)
             && o.borrow_mut(self.mc).write_index(i, value)
         {
+            return Ok(true);
+        }
+        // 类型化数组的数字键：接收者就是它自己，写元素（越界也算成）
+        if let (Value::Object(o), Value::Number(x)) = (target, key)
+            && matches!(o.borrow().kind, ObjectKind::TypedArray(..))
+        {
+            self.typed_set(o, x + 0.0, value)?;
             return Ok(true);
         }
         if target.is_nullish() {

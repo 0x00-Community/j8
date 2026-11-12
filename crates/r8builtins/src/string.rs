@@ -86,15 +86,15 @@ impl Strings {
     }
 
     fn char_at<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        let u = Self::units(a, this)?;
-        let i = Self::clamp(a, args.at(0), u.len(), 0)?;
-        Ok(Self::from_units(a, u.get(i..=i).unwrap_or(&[])))
+        let s = Self::this(a, this)?;
+        let i = Self::clamp(a, args.at(0), s.utf16_len(), 0)?;
+        Ok(s.code_unit(i).map_or_else(|| a.string("").into(), |u| a.unit_string(u).into()))
     }
 
     fn char_code_at<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        let u = Self::units(a, this)?;
-        let i = Self::clamp(a, args.at(0), u.len(), 0)?;
-        Ok(u.get(i).map_or(f64::NAN, |&c| f64::from(c)).into())
+        let s = Self::this(a, this)?;
+        let i = Self::clamp(a, args.at(0), s.utf16_len(), 0)?;
+        Ok(s.code_unit(i).map_or(f64::NAN, f64::from).into())
     }
 
     fn index_of<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
@@ -139,26 +139,28 @@ impl Strings {
     }
 
     fn slice<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        let u = Self::units(a, this)?;
-        let start = Self::relative(a, args.at(0), u.len(), 0)?;
-        let end = Self::relative(a, args.at(1), u.len(), u.len())?;
-        Ok(Self::from_units(a, u.get(start..end.max(start)).unwrap_or(&[])))
+        let s = Self::this(a, this)?;
+        let len = s.utf16_len();
+        let start = Self::relative(a, args.at(0), len, 0)?;
+        let end = Self::relative(a, args.at(1), len, len)?;
+        Ok(a.string(&s.units().substring(start..end.max(start))).into())
     }
 
     fn substring<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        let u = Self::units(a, this)?;
-        let s = Self::clamp(a, args.at(0), u.len(), 0)?;
-        let e = Self::clamp(a, args.at(1), u.len(), u.len())?;
-        Ok(Self::from_units(a, &u[s.min(e)..s.max(e)]))
+        let st = Self::this(a, this)?;
+        let len = st.utf16_len();
+        let s = Self::clamp(a, args.at(0), len, 0)?;
+        let e = Self::clamp(a, args.at(1), len, len)?;
+        Ok(a.string(&st.units().substring(s.min(e)..s.max(e))).into())
     }
 
     fn at<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        let u = Self::units(a, this)?;
+        let s = Self::this(a, this)?;
         let x = libm::trunc(a.to_number(args.at(0))?);
-        let len = f64::from(u32::try_from(u.len()).unwrap_or(u32::MAX));
+        let len = f64::from(u32::try_from(s.utf16_len()).unwrap_or(u32::MAX));
         let i = if x < 0.0 { len + x } else { x };
         #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "已检查在 [0, len) 里")]
-        let v = if (0.0..len).contains(&i) { Self::from_units(a, &u[i as usize..=i as usize]) } else { Value::Undefined };
+        let v = if (0.0..len).contains(&i) { s.code_unit(i as usize).map_or(Value::Undefined, |u| a.unit_string(u).into()) } else { Value::Undefined };
         Ok(v)
     }
 

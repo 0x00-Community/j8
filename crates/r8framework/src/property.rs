@@ -170,10 +170,10 @@ impl<'gc> Agent<'gc, '_> {
     fn string_own(&self, s: JsString<'gc>, key: &str) -> Option<Property<'gc>> {
         let fixed = |v: Value<'gc>, enumerable| Property { slot: Slot::Data(v), enumerable, writable: false, configurable: false };
         if key == "length" {
-            return Some(fixed(f64::from(u32::try_from(s.encode_utf16().count()).unwrap_or(u32::MAX)).into(), false));
+            return Some(fixed(f64::from(u32::try_from(s.utf16_len()).unwrap_or(u32::MAX)).into(), false));
         }
-        let unit = s.encode_utf16().nth(index_of_str(key)? as usize)?;
-        Some(fixed(self.string(&alloc::string::String::from_utf16_lossy(&[unit])).into(), true))
+        let unit = s.code_unit(index_of_str(key)? as usize)?;
+        Some(fixed(self.unit_string(unit).into(), true))
     }
 
     /// [[GetOwnProperty]]。
@@ -433,7 +433,7 @@ impl<'gc> Agent<'gc, '_> {
                 strings.push(PropertyKey::String(self.string("length")));
             }
             ObjectKind::Primitive(Value::String(s)) => {
-                indices.extend((0..u32::try_from(s.encode_utf16().count()).unwrap_or(u32::MAX)).map(|i| (i, None)));
+                indices.extend((0..u32::try_from(s.utf16_len()).unwrap_or(u32::MAX)).map(|i| (i, None)));
                 strings.push(PropertyKey::String(self.string("length")));
             }
             ObjectKind::TypedArray(k, v) => {

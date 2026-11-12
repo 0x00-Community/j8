@@ -7,7 +7,7 @@ use r8gc::{Collect, Gc, Lock, Mutation, RefLock};
 use crate::{Agent, Error, FuncId, Key, Value};
 
 /// 堆上的字符串。
-pub type JsString<'gc> = Gc<'gc, SmallStr>;
+pub type JsString<'gc> = Gc<'gc, crate::text::JsStr>;
 
 /// 一个 Symbol：只有描述，身份就是指针。
 #[derive(Debug, Collect)]
@@ -298,7 +298,7 @@ impl From<Value<'_>> for MapKey {
             Value::Bool(b) => MapKey::Bool(b),
             Value::Number(x) if x.is_nan() => MapKey::Number(f64::NAN.to_bits()),
             Value::Number(x) => MapKey::Number((x + 0.0).to_bits()),
-            Value::String(s) => MapKey::String((*s).clone()),
+            Value::String(s) => MapKey::String(s.text().clone()),
             Value::BigInt(b) => MapKey::BigInt(alloc::format!("{}", b.0).into()),
             Value::Symbol(s) => MapKey::Ref(Gc::as_ptr(s) as usize),
             Value::Object(o) => MapKey::Ref(Gc::as_ptr(o).cast::<u8>() as usize),
@@ -647,7 +647,7 @@ impl ObjectKind<'_> {
 }
 
 
-pub use crate::text::SmallStr;
+pub use crate::text::{JsStr, SmallStr, Units};
 
 /// 多数对象没有的一串东西（Symbol 键属性、私有成员）：空着只占一个指针。
 #[derive(Collect)]
