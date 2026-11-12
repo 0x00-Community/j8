@@ -455,6 +455,9 @@ impl Arrays {
             Value::Undefined => a.string(","),
             v => a.to_string(v)?,
         };
+        if let Some(s) = Self::join_plain(a, o, len, &sep) {
+            return Ok(a.string(&s).into());
+        }
         let mut out = String::new();
         let mut k = 0.0;
         while k < len {
@@ -468,6 +471,57 @@ impl Arrays {
             k += 1.0;
         }
         Ok(a.string(&out).into())
+    }
+
+    /// 稠密数组、元素都是原始值：逐个取元素与 ToString 都观察不到，抽成纯数据拼（数转字符串在线程池上并行）。
+    /// 不满足给 `None`。
+    fn join_plain<'gc>(a: &Agent<'gc, '_>, o: JsObject<'gc>, len: f64, sep: &str) -> Option<String> {
+        /// 一个元素的样子（不带 GC 指针，能交给别的线程）
+        #[derive(Clone, Copy)]
+        enum Part<'s> {
+            Number(f64),
+            Text(&'s str),
+        }
+        let d = o.borrow();
+        let ObjectKind::Array(items) = &d.kind else { return None };
+        #[expect(clippy::cast_precision_loss, reason = "元素个数远小于 2^53")]
+        let dense = items.len() as f64 == len && d.sparse_length == 0;
+        if !dense || !items.iter().all(|v| matches!(v, Value::Number(_) | Value::String(_) | Value::Bool(_) | Value::Null | Value::Undefined)) {
+            return None;
+        }
+        let parts: Vec<Part<'_>> = items
+            .iter()
+            .map(|v| match v {
+                Value::Number(x) => Part::Number(*x),
+                Value::String(s) => Part::Text(s),
+                Value::Bool(true) => Part::Text("true"),
+                Value::Bool(false) => Part::Text("false"),
+                _ => Part::Text(""),
+            })
+            .collect();
+        // 各块各自拼（数直接格式化进块的缓冲），再按顺序连起来
+        let pieces = a.par().chunks(&parts, &|chunk: &[Part<'_>]| {
+            let mut s = String::new();
+            for (i, p) in chunk.iter().enumerate() {
+                if i > 0 {
+                    s.push_str(sep);
+                }
+                match *p {
+                    Part::Number(x) => s.push_str(&r8framework::number_text(x)),
+                    Part::Text(t) => s.push_str(t),
+                }
+            }
+            s
+        });
+        let total = pieces.iter().map(String::len).sum::<usize>() + sep.len() * pieces.len().saturating_sub(1);
+        let mut out = String::with_capacity(total);
+        for (i, p) in pieces.iter().enumerate() {
+            if i > 0 {
+                out.push_str(sep);
+            }
+            out.push_str(p);
+        }
+        Some(out)
     }
 
     fn to_string<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {

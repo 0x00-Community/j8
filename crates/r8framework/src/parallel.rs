@@ -44,6 +44,18 @@ impl Par<'_> {
         out
     }
 
+    /// 按块处理：`f` 拿到连续的一块，结果按块的顺序给出（小的整个一块）
+    pub fn chunks<T: Sync, R: Send + Default>(self, input: &[T], f: &(dyn Fn(&[T]) -> R + Sync)) -> Vec<R> {
+        if !self.worth(input.len()) {
+            return alloc::vec![f(input)];
+        }
+        let size = self.chunk(input.len());
+        let mut out: Vec<R> = core::iter::repeat_with(R::default).take(input.len().div_ceil(size)).collect();
+        let jobs: Vec<Job<'_>> = out.iter_mut().zip(input.chunks(size)).map(|(o, c)| Box::new(move || *o = f(c)) as Job<'_>).collect();
+        self.0.run(jobs);
+        out
+    }
+
     /// 稳定排序：各块分别排好，再一轮轮两两并行归并
     pub fn sort_by<T: Copy + Send + Sync>(self, v: &mut [T], cmp: &(dyn Fn(&T, &T) -> Ordering + Sync)) {
         if !self.worth(v.len()) {
