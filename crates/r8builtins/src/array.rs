@@ -812,6 +812,37 @@ impl Arrays {
         })
     }
 
+    /// 不带比较函数、元素都是数 / 字符串 / 布尔 / null / undefined：这些的 ToString 没有副作用，可以先把键算好
+    /// （数转字符串在线程池上并行），再在线程池上并行稳定排序；undefined 排最后。有别的元素给 `None`（逐个比较）。
+    fn sort_plain<'gc>(a: &Agent<'gc, '_>, items: &[Value<'gc>]) -> Option<Vec<Value<'gc>>> {
+        if !items.iter().all(|v| matches!(v, Value::Number(_) | Value::String(_) | Value::Bool(_) | Value::Null | Value::Undefined)) {
+            return None;
+        }
+        let (undef, rest): (Vec<Value<'gc>>, Vec<Value<'gc>>) = items.iter().copied().partition(|v| *v == Value::Undefined);
+        let numbers: Vec<f64> = rest.iter().filter_map(|v| if let Value::Number(x) = v { Some(*x) } else { None }).collect();
+        let texts: Vec<String> = a.par().map(&numbers, &|&x| String::from(&*r8framework::number_text(x)));
+        let mut next = texts.iter();
+        let keys: Vec<&str> = rest
+            .iter()
+            .map(|v| match v {
+                Value::Number(_) => next.next().map_or("", String::as_str),
+                Value::String(s) => &***s,
+                Value::Bool(true) => "true",
+                Value::Bool(false) => "false",
+                _ => "null",
+            })
+            .collect();
+        // 没有 U+E000 以上的字符时 UTF-8 字节序与 UTF-16 码元序一致
+        let bytewise = keys.iter().all(|k| !k.chars().any(|c| c >= '\u{E000}'));
+        let mut order: Vec<u32> = (0..u32::try_from(keys.len()).ok()?).collect();
+        let cmp = |&i: &u32, &j: &u32| {
+            let (x, y) = (keys[i as usize], keys[j as usize]);
+            if bytewise { x.cmp(y) } else { x.encode_utf16().cmp(y.encode_utf16()) }
+        };
+        a.par().sort_by(&mut order, &cmp);
+        Some(order.iter().map(|&i| rest[i as usize]).chain(undef).collect())
+    }
+
     /// 稳定的归并排序（比较函数可能抛错，不能用 `sort_by`）。
     fn merge_sort<'gc>(a: &mut Agent<'gc, '_>, f: Value<'gc>, v: Vec<Value<'gc>>) -> Result<Vec<Value<'gc>>, Error> {
         if v.len() <= 1 {
@@ -855,7 +886,11 @@ impl Arrays {
             }
             k += 1.0;
         }
-        let sorted = Self::merge_sort(a, f, items)?;
+        let plain = if f == Value::Undefined { Self::sort_plain(a, &items) } else { None };
+        let sorted = match plain {
+            Some(s) => s,
+            None => Self::merge_sort(a, f, items)?,
+        };
         #[expect(clippy::cast_precision_loss, reason = "元素个数远小于 2^53")]
         let count = sorted.len() as f64;
         for (j, v) in (0..).zip(sorted) {
@@ -880,7 +915,11 @@ impl Arrays {
             items.push(a.get_index(o.into(), k)?);
             k += 1.0;
         }
-        let sorted = Self::merge_sort(a, f, items)?;
+        let plain = if f == Value::Undefined { Self::sort_plain(a, &items) } else { None };
+        let sorted = match plain {
+            Some(s) => s,
+            None => Self::merge_sort(a, f, items)?,
+        };
         for (j, v) in (0..).zip(sorted) {
             a.create_index(arr, f64::from(j), v)?;
         }

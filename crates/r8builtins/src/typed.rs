@@ -594,9 +594,25 @@ impl Typed {
         })
     }
 
+    /// 缺省的数值序：NaN 排最后，-0 在 +0 前
+    fn numeric_order(x: f64, y: f64) -> Ordering {
+        match (x.is_nan(), y.is_nan()) {
+            (true, true) => Ordering::Equal,
+            (true, false) => Ordering::Greater,
+            (false, true) => Ordering::Less,
+            (false, false) => x.total_cmp(&y),
+        }
+    }
+
     fn sorted<'gc>(a: &mut Agent<'gc, '_>, f: Value<'gc>, v: Vec<Value<'gc>>) -> Result<Vec<Value<'gc>>, Error> {
         if v.len() <= 1 {
             return Ok(v);
+        }
+        // 不带比较函数、元素都是数：按数值并行排序（不调用户代码）
+        if f == Value::Undefined && v.iter().all(|x| matches!(x, Value::Number(_))) {
+            let mut xs: Vec<f64> = v.iter().map(|x| if let Value::Number(n) = x { *n } else { 0.0 }).collect();
+            a.par().sort_by(&mut xs, &|x, y| Self::numeric_order(*x, *y));
+            return Ok(xs.into_iter().map(Value::Number).collect());
         }
         let mut right = v;
         let left = right.drain(..right.len() / 2).collect();

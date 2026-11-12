@@ -309,6 +309,11 @@ pub(crate) fn index_of_str(s: &str) -> Option<u32> {
 
 impl<'gc> Agent<'gc, '_> {
     /// 字符串放上堆。
+    /// 借平台的线程池做并行活（只给不碰 GC 堆的纯数据）
+    pub fn par(&self) -> crate::Par<'_> {
+        crate::Par(self.platform)
+    }
+
     /// 一个 UTF-16 码元的字符串（ASCII 用现成的）
     pub fn unit_string(&self, u: u16) -> JsString<'gc> {
         match self.realm.chars.get(usize::from(u)) {
