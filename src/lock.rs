@@ -53,6 +53,7 @@ impl<'gc, T: Copy + 'gc> Gc<'gc, Lock<T>> {
 
 unsafe impl<'gc, T: Collect<'gc> + Copy + 'gc> Collect<'gc> for Lock<T> {
     const NEEDS_TRACE: bool = T::NEEDS_TRACE;
+    const PARALLEL_DROP: bool = T::PARALLEL_DROP;
 
     fn trace(&self, t: &mut Trace<'_>) {
         t.trace(&self.get());
@@ -123,6 +124,7 @@ impl<'gc, T: 'gc> Gc<'gc, RefLock<T>> {
 
 unsafe impl<'gc, T: Collect<'gc> + 'gc> Collect<'gc> for RefLock<T> {
     const NEEDS_TRACE: bool = T::NEEDS_TRACE;
+    const PARALLEL_DROP: bool = T::PARALLEL_DROP;
 
     fn trace(&self, t: &mut Trace<'_>) {
         // SAFETY: 回收只在 `mutate` 之外，没有借出中的 RefMut

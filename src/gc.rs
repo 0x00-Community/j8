@@ -60,6 +60,8 @@ impl<'gc, T: 'gc> From<Ptr> for Gc<'gc, T> {
 }
 
 unsafe impl<'gc, T: 'gc> Collect<'gc> for Gc<'gc, T> {
+    /// 指针本身没有析构
+    const PARALLEL_DROP: bool = true;
     #[inline]
     fn trace(&self, t: &mut Trace<'_>) {
         t.ptr(self.erase());

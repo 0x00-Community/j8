@@ -9,6 +9,8 @@
 //! API 沿用 gc-arena 的形状（`Gc` / `Lock` / `RefLock` / `Rootable!` / `DynamicRootSet`）。
 #![no_std]
 extern crate alloc;
+#[cfg(feature = "std")]
+extern crate std;
 
 mod arena;
 mod collect;

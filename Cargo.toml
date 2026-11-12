@@ -10,13 +10,16 @@ keywords = ["gc", "garbage-collector", "generational", "no-std"]
 categories = ["memory-management", "no-std"]
 
 [dependencies]
-r8gc-macros = { path = "macros", version = "=0.1.0" }
+r8gc-macros = { path = "macros", version = "=0.1.1" }
 moremath = { version = "=0.2.2", default-features = false, features = ["alloc"] }
 
 [dev-dependencies]
 moremath = { version = "=0.2.2", features = ["std"] }
 
 [features]
+default = ["std"]
+# 等待时先自旋、久了让出 CPU（没有 std 只能一直自旋，机器忙时并行回收会被拖慢）
+std = []
 # 每次回收后把整个老年代的边校验一遍（调试用，很慢）
 verify = []
 

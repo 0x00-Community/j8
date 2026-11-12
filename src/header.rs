@@ -1,5 +1,4 @@
 //! 对象头与类型表：每个对象前面紧挨着 16 字节的头。头是原子的：并行回收时多个线程同时认领、转发。
-use core::hint::spin_loop;
 use core::mem::{align_of, needs_drop, size_of};
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
@@ -77,6 +76,7 @@ impl Header {
 
     /// 搬之前认领：别人正在搬就等它搬完
     pub(crate) fn claim(&self) -> Claim {
+        let mut backoff = crate::parallel::Backoff::default();
         loop {
             let f = self.flags.load(Ordering::Acquire);
             if f & Flags::OLD != 0 {
@@ -86,7 +86,7 @@ impl Header {
                 return Claim::Forwarded(Ptr::from(self.meta.load(Ordering::Acquire)));
             }
             if f & Flags::BUSY != 0 {
-                spin_loop();
+                backoff.wait();
                 continue;
             }
             if self.flags.compare_exchange_weak(f, f | Flags::BUSY, Ordering::AcqRel, Ordering::Relaxed).is_ok() {
@@ -126,6 +126,8 @@ pub(crate) struct VTable {
     pub(crate) trace: unsafe fn(Ptr, &mut Trace<'_>),
     pub(crate) relocate: unsafe fn(Ptr, &mut Relocate<'_>),
     pub(crate) drop: Option<unsafe fn(Ptr)>,
+    /// 死了能在线程池上析构
+    pub(crate) parallel_drop: bool,
 }
 
 impl VTable {
@@ -140,6 +142,7 @@ impl VTable {
             trace: Ptr::trace_as::<T>,
             relocate: Ptr::relocate_as::<T>,
             drop: if needs_drop::<T>() { Some(Ptr::drop_as::<T>) } else { None },
+            parallel_drop: T::PARALLEL_DROP,
         }
     }
 }

@@ -72,8 +72,8 @@ impl Derive<'_> {
         }
     }
 
-    /// 不标 `require_static` 的字段才要遍历；标了的字段加 `'static` 约束
-    fn filter_static_fields(&mut self) {
+    /// 不标 `require_static` 的字段才要遍历；标了的字段加 `'static` 约束。返回有没有这样的字段
+    fn filter_static_fields(&mut self) -> bool {
         let mut statics = Vec::new();
         let errors = &mut self.errors;
         self.s.filter(|b| match Self::attr(&b.ast().attrs) {
@@ -97,9 +97,11 @@ impl Derive<'_> {
                 true
             }
         });
+        let any = !statics.is_empty();
         for ty in statics {
             self.s.add_where_predicate(syn::parse_quote! { #ty: 'static });
         }
+        any
     }
 
     /// 类型只有一个生命周期参数时就是 `'gc`
@@ -125,7 +127,7 @@ impl Derive<'_> {
                 }
             }));
         }
-        self.filter_static_fields();
+        let has_static = self.filter_static_fields();
         if let syn::Data::Enum(_) = self.s.ast().data {
             for v in self.s.variants() {
                 if let Some(a) = v.ast().attrs.iter().find(|a| a.path().is_ident("collect")) {
@@ -134,10 +136,13 @@ impl Derive<'_> {
             }
         }
         let mut needs_trace = quote!(false);
+        // 能并行析构：没有自定义 Drop（no_drop），也没有不知底细的 'static 字段，且各字段都能
+        let mut parallel_drop = if self.options.mode == Some(Mode::NoDrop) && !has_static { quote!(true) } else { quote!(false) };
         for b in self.s.variants().iter().flat_map(synstructure::VariantInfo::bindings) {
             let ty = &b.ast().ty;
             let span = b.ast().span().resolved_at(Span::call_site());
             quote_spanned!(span=> || <#ty as ::r8gc::Collect>::NEEDS_TRACE).to_tokens(&mut needs_trace);
+            quote_spanned!(span=> && <#ty as ::r8gc::Collect>::PARALLEL_DROP).to_tokens(&mut parallel_drop);
         }
         let trace = self.s.each(|b| quote! { t.trace(#b); });
         let mut mutable = self.s.clone();
@@ -157,6 +162,7 @@ impl Derive<'_> {
         Ok(s.gen_impl(quote! {
             gen unsafe impl #generics ::r8gc::Collect<#gc> for @Self #bound {
                 const NEEDS_TRACE: bool = #needs_trace;
+                const PARALLEL_DROP: bool = #parallel_drop;
 
                 #[inline]
                 fn trace(&self, t: &mut ::r8gc::Trace<'_>) {

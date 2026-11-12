@@ -33,6 +33,27 @@ impl<X: Executor> Pool for X {
     }
 }
 
+/// 等别的线程：先自旋，久了让出 CPU（线程比核多、持锁的人被换下去时不陪着空转）。
+#[derive(Default)]
+pub(crate) struct Backoff(u32);
+
+impl Backoff {
+    /// 自旋这么多轮之后改为让出 CPU
+    const SPINS: u32 = 64;
+
+    pub(crate) fn wait(&mut self) {
+        if self.0 < Self::SPINS {
+            self.0 += 1;
+            spin_loop();
+        } else {
+            #[cfg(feature = "std")]
+            std::thread::yield_now();
+            #[cfg(not(feature = "std"))]
+            spin_loop();
+        }
+    }
+}
+
 /// 很短的临界区用的自旋锁（`no_std`）。
 pub(crate) struct Spin<T> {
     locked: AtomicBool,
@@ -55,8 +76,9 @@ impl<T> Spin<T> {
     }
 
     pub(crate) fn lock(&self) -> SpinGuard<'_, T> {
+        let mut backoff = Backoff::default();
         while self.locked.compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
-            spin_loop();
+            backoff.wait();
         }
         SpinGuard(self)
     }
@@ -134,7 +156,7 @@ impl Work {
     /// 调用线程先单干这么多个对象：活少就不惊动线程池
     const SOLO: usize = 4096;
     /// 空闲的工人等这么多轮还没活就收工（不陪到最后空转）
-    const RETIRE: usize = 1 << 14;
+    const RETIRE: usize = 1 << 10;
 
     /// 用 `pool` 让 `workers` 一起做完 `initial`（及做的过程中冒出来的）。
     /// 给了 `budget` 就每个工人做到那么多字节为止；没做完的返回。
@@ -186,6 +208,7 @@ impl Work {
                 continue;
             }
             self.idle.fetch_add(1, Ordering::SeqCst);
+            let mut backoff = Backoff::default();
             for spins in 0.. {
                 if spins == Self::RETIRE {
                     // 收工：一直算空闲，别人分出来的活由还在干的人自己拿回去
@@ -199,7 +222,7 @@ impl Work {
                 if self.idle.load(Ordering::SeqCst) == self.started.load(Ordering::SeqCst) {
                     return;
                 }
-                spin_loop();
+                backoff.wait();
             }
         }
     }

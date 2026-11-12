@@ -131,6 +131,12 @@ where
         &self.cx.metrics
     }
 
+    /// 死对象（类型 `Collect::PARALLEL_DROP` 的）在线程池上并行析构。缺省关：
+    /// glibc 的 malloc 跨线程释放要抢原线程的 arena 锁，并行反而更慢；换 jemalloc / mimalloc 这类再开。
+    pub fn set_parallel_drop(&mut self, on: bool) {
+        self.cx.parallel_drop = on;
+    }
+
     /// 主回收进行到哪了
     pub fn phase(&self) -> Phase {
         self.cx.phase()

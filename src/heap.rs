@@ -16,6 +16,8 @@ const PAGE: usize = 256 << 10;
 const SPARSE: usize = 4;
 /// 能腾出的空间不到这么多就不压缩
 const COMPACT_MIN: usize = 1 << 20;
+/// 能腾出的空间也要到老年代的这么几分之一（分母）才压缩：压缩要把整个堆的指针改一遍
+const COMPACT_FRACTION: usize = 8;
 /// 晋升缓冲一次领几个槽
 const LAB_SLOTS: usize = 64;
 /// 空页留着复用：至少留这么多页（还给系统再要回来要 mmap、缺页）
@@ -114,12 +116,13 @@ impl Page {
         })
     }
 
+    #[cfg(feature = "verify")]
     fn contains(&self, p: Ptr) -> bool {
         p.addr() & !(PAGE - 1) == self.base.as_ptr() as usize
     }
 
-    /// 清扫一页：没标记、不用析构的直接收回；要析构的交回调用线程。返回空槽与要析构的
-    fn sweep(&mut self, marked: impl Fn(u32) -> bool) -> (Vec<Ptr>, Vec<Ptr>) {
+    /// 清扫一页：没标记的析构（能在这个线程上析构的就地做）、收回；不能的交回调用线程。返回空槽与要交回的
+    fn sweep(&mut self, marked: impl Fn(u32) -> bool, parallel_drop: bool) -> (Vec<Ptr>, Vec<Ptr>) {
         let (mut free, mut dead) = (Vec::new(), Vec::new());
         self.live = 0;
         for p in self.slots() {
@@ -129,9 +132,11 @@ impl Page {
                 free.push(p);
             } else if marked(f) {
                 self.live += 1;
-            } else if p.vtable().drop.is_some() {
+            } else if p.vtable().drop.is_some() && !(parallel_drop && p.vtable().parallel_drop) {
                 dead.push(p);
             } else {
+                // SAFETY: 没标记 ⇒ 不可达，只析构这一次；类型允许在这个线程上析构
+                unsafe { p.drop_value() };
                 h.free();
                 free.push(p);
             }
@@ -226,9 +231,9 @@ impl OldSpace {
     }
 
     /// 清扫（各页并行）：没标记的收回，要析构的在调用线程上析构；空页还给分配器。返回活着的字节
-    pub(crate) fn sweep(&mut self, pool: &dyn Pool, epoch: bool) -> usize {
+    pub(crate) fn sweep(&mut self, pool: &dyn Pool, epoch: bool, parallel_drop: bool) -> usize {
         let marked = move |f: u32| (f & Flags::MARK != 0) == epoch;
-        let swept = split(pool, &mut self.pages, &|pages: &mut [Page]| pages.iter_mut().map(|p| p.sweep(marked)).collect::<Vec<_>>());
+        let swept = split(pool, &mut self.pages, &|pages: &mut [Page]| pages.iter_mut().map(|p| p.sweep(marked, parallel_drop)).collect::<Vec<_>>());
         self.free.iter_mut().for_each(Vec::clear);
         let mut bytes = 0;
         let mut kept = Vec::with_capacity(self.pages.len());
@@ -274,14 +279,16 @@ impl OldSpace {
                 reclaim += PAGE - p.live * p.slot();
             }
         }
-        if reclaim < COMPACT_MIN {
+        if reclaim < COMPACT_MIN.max(self.bytes / COMPACT_FRACTION) {
             self.pages.iter_mut().for_each(|p| p.evacuate = false);
             return Vec::new();
         }
-        let pages = &self.pages;
+        let mut evacuating: Vec<usize> = self.pages.iter().filter(|p| p.evacuate).map(|p| p.base.as_ptr() as usize).collect();
+        evacuating.sort_unstable();
         for free in &mut self.free {
-            free.retain(|&s| !pages.iter().any(|g| g.evacuate && g.contains(s)));
+            free.retain(|s| evacuating.binary_search(&(s.addr() & !(PAGE - 1))).is_err());
         }
+        let pages = &self.pages;
         pages.iter().filter(|p| p.evacuate).flat_map(|p| p.slots().map(move |s| (s, p.class))).filter(|(s, _)| s.header().flags() & Flags::FREE == 0).collect()
     }
 
@@ -375,7 +382,8 @@ impl Drop for Lab<'_> {
     fn drop(&mut self) {
         for (class, &(at, end)) in self.bump.iter().enumerate() {
             let size = SizeClass::SLOTS[class];
-            self.slots[class].extend((at..end).step_by(size).map(|a| Ptr::at_slot(NonNull::new(a as *mut u8).expect("page slot"))).inspect(|p| p.header().free()));
+            self.slots[class]
+                .extend((at..end).step_by(size).map(|a| Ptr::at_slot(NonNull::new(a as *mut u8).expect("page slot"))).inspect(|p| p.header().free()));
         }
         let mut old = self.old.lock();
         for (class, slots) in self.slots.iter_mut().enumerate() {

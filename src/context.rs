@@ -99,6 +99,10 @@ impl<'a> Promoter<'a> {
 }
 
 impl Mover for Promoter<'_> {
+    fn young_only(&self) -> bool {
+        true
+    }
+
     /// 新生代对象搬进老年代（别的线程搬过了就用它搬的）
     fn forward(&mut self, p: Ptr) -> Ptr {
         let h = p.header();
@@ -164,6 +168,8 @@ pub(crate) struct Context {
     threshold: Cell<usize>,
     /// 上一步标记时老年代的大小
     marked_at: Cell<usize>,
+    /// 允许的类型死了在线程池上析构（分配器跨线程释放快时才划算）
+    pub(crate) parallel_drop: bool,
     pub(crate) metrics: Metrics,
 }
 
@@ -180,6 +186,7 @@ impl Context {
             remembered: RefCell::default(),
             threshold: Cell::new(MIN_HEAP),
             marked_at: Cell::new(0),
+            parallel_drop: false,
             metrics: Metrics::default(),
         }
     }
@@ -334,11 +341,21 @@ impl Context {
             let gray: Vec<Ptr> = workers.iter_mut().flat_map(|w| take(&mut w.gray)).collect();
             (gray, workers.iter().map(|w| w.promoted).sum::<usize>())
         };
-        for p in take(&mut self.nursery.get_mut().drops) {
-            if p.header().forwarded().is_none() {
-                // SAFETY: 没被搬走 ⇒ 不可达；只析构这一次
+        // 没被搬走的就是死了：能在线程池上析构的并行做，别的留给调用线程
+        let mut drops = take(&mut self.nursery.get_mut().drops);
+        drops.retain(|p| p.header().forwarded().is_none());
+        let parallel = self.parallel_drop;
+        let serial: Vec<Vec<Ptr>> = split(if parallel { pool } else { &moremath::ThreadSingle }, &mut drops, &|chunk: &mut [Ptr]| {
+            let (anywhere, here): (Vec<Ptr>, Vec<Ptr>) = chunk.iter().partition(|p| parallel && p.vtable().parallel_drop);
+            for p in anywhere {
+                // SAFETY: 不可达，只析构这一次；类型允许在这个线程上析构
                 unsafe { p.drop_value() };
             }
+            here
+        });
+        for p in serial.into_iter().flatten() {
+            // SAFETY: 同上，在调用线程上
+            unsafe { p.drop_value() };
         }
         let g = self.gray.get_mut();
         if marking {
@@ -365,7 +382,7 @@ impl Context {
         initial.append(&mut m.stack);
         let left = self.mark(pool, initial, None);
         debug_assert!(left.is_empty());
-        let live = self.old.get_mut().sweep(pool, self.epoch.get());
+        let live = self.old.get_mut().sweep(pool, self.epoch.get(), self.parallel_drop);
         self.verify("after sweep");
         self.phase.set(Phase::Sleep);
         self.compact(pool, root);

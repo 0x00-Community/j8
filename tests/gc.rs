@@ -196,3 +196,50 @@ fn wide_graph_marks_in_parallel() {
     let total: usize = a.mutate(|_, root| root.nodes.iter().map(|&n| sum(Some(n)).1).sum());
     assert_eq!(total, (0..FANOUT * FANOUT * 16).sum::<usize>());
 }
+
+/// 析构计数用原子量：能在线程池上析构
+struct Shared(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+// SAFETY: 没有 Gc；Arc 与原子量在哪个线程析构都行
+unsafe impl Collect<'_> for Shared {
+    const NEEDS_TRACE: bool = false;
+    const PARALLEL_DROP: bool = true;
+}
+
+impl Drop for Shared {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// 根是一串 `Shared`
+type SharedHeap<'p> = R8Heap<'p, Rootable![Vec<Gc<'_, Shared>>]>;
+
+#[test]
+fn parallel_drop_exactly_once() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    const { assert!(<Node<'_> as Collect>::PARALLEL_DROP && !<Counted as Collect>::PARALLEL_DROP) };
+    let dropped = Arc::new(AtomicUsize::new(0));
+    let pool = ThreadMulti::default();
+    {
+        let mut a: SharedHeap<'_> = R8Heap::new(&pool, |_| Vec::new());
+        a.set_parallel_drop(true);
+        a.mutate_root(|mc, keep| {
+            for i in 0..100_000 {
+                let s = Gc::new(mc, Shared(dropped.clone()));
+                if i % 4 == 0 {
+                    keep.push(s);
+                }
+            }
+        });
+        // 死在新生代的（次回收里并行析构）
+        a.collect_all();
+        assert_eq!(dropped.load(Ordering::Relaxed), 75_000);
+        // 死在老年代的（清扫里并行析构）
+        a.mutate_root(|_, keep| keep.truncate(5_000));
+        a.collect_all();
+        assert_eq!(dropped.load(Ordering::Relaxed), 95_000);
+    }
+    assert_eq!(dropped.load(Ordering::Relaxed), 100_000);
+}

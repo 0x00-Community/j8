@@ -22,6 +22,11 @@ pub unsafe trait Collect<'gc> {
     /// 值里不可能有 `Gc` 时设 `false`，回收器整个跳过它
     const NEEDS_TRACE: bool = true;
 
+    /// 死了以后能在线程池的别的线程上析构（与别的死对象同时）：没有自定义 `Drop`，
+    /// 各字段的析构也都不碰线程相关或跨对象共享的非原子状态（如 `Rc`）。
+    /// 缺省 `false`：在调用线程上析构。派生宏按字段推出来。
+    const PARALLEL_DROP: bool = false;
+
     /// 对每个 `Gc` 调 [`Trace::trace`]
     #[inline]
     fn trace(&self, _t: &mut Trace<'_>) {}
@@ -39,6 +44,11 @@ pub(crate) trait Visit {
 /// 搬对象时改一个字段的工人（晋升 / 压缩）。
 pub(crate) trait Mover {
     fn forward(&mut self, p: Ptr) -> Ptr;
+
+    /// 只有指向新生代的指针会变
+    fn young_only(&self) -> bool {
+        false
+    }
 }
 
 /// 标记时的访问器（每个回收线程各一个）。
@@ -87,6 +97,12 @@ impl<'a> Relocate<'a> {
         self.moves
     }
 
+    /// 这一趟只有指向新生代的指针会变（次回收）：容器可以跳过自上次次回收以来没写过新指针的部分。
+    /// 否则（压缩）任何指针都可能变，得全改一遍。
+    pub fn young_only(&self) -> bool {
+        self.mover.young_only()
+    }
+
     #[inline]
     pub(crate) fn ptr(&mut self, p: Ptr) -> Ptr {
         let q = self.mover.forward(p);
@@ -97,11 +113,12 @@ impl<'a> Relocate<'a> {
     }
 }
 
-/// 不含 `Gc` 的类型：什么都不用做
+/// 不含 `Gc` 的类型：什么都不用做；析构只是还内存，哪个线程都行
 macro_rules! leaf {
     ($($ty:ty),* $(,)?) => {$(
         unsafe impl<'gc> Collect<'gc> for $ty {
             const NEEDS_TRACE: bool = false;
+            const PARALLEL_DROP: bool = true;
         }
     )*};
 }
@@ -119,10 +136,12 @@ leaf_static!(Rc, Cell, RefCell);
 
 unsafe impl<T: ?Sized> Collect<'_> for PhantomData<T> {
     const NEEDS_TRACE: bool = false;
+    const PARALLEL_DROP: bool = true;
 }
 
 unsafe impl<T: ?Sized + 'static> Collect<'_> for &'static T {
     const NEEDS_TRACE: bool = false;
+    const PARALLEL_DROP: bool = true;
 }
 
 /// 逐个元素遍历的容器
@@ -130,6 +149,7 @@ macro_rules! sequence {
     ($($ty:ty),*) => {$(
         unsafe impl<'gc, T: Collect<'gc>> Collect<'gc> for $ty {
             const NEEDS_TRACE: bool = T::NEEDS_TRACE;
+            const PARALLEL_DROP: bool = T::PARALLEL_DROP;
 
             #[inline]
             fn trace(&self, t: &mut Trace<'_>) {
@@ -147,6 +167,7 @@ sequence!(Option<T>, Vec<T>, VecDeque<T>, [T]);
 
 unsafe impl<'gc, T: Collect<'gc>, const N: usize> Collect<'gc> for [T; N] {
     const NEEDS_TRACE: bool = T::NEEDS_TRACE;
+    const PARALLEL_DROP: bool = T::PARALLEL_DROP;
 
     fn trace(&self, t: &mut Trace<'_>) {
         for v in self {
@@ -163,6 +184,7 @@ unsafe impl<'gc, T: Collect<'gc>, const N: usize> Collect<'gc> for [T; N] {
 
 unsafe impl<'gc, T: Collect<'gc> + ?Sized> Collect<'gc> for Box<T> {
     const NEEDS_TRACE: bool = T::NEEDS_TRACE;
+    const PARALLEL_DROP: bool = T::PARALLEL_DROP;
 
     fn trace(&self, t: &mut Trace<'_>) {
         t.trace(&**self);
@@ -175,6 +197,7 @@ unsafe impl<'gc, T: Collect<'gc> + ?Sized> Collect<'gc> for Box<T> {
 
 unsafe impl<'gc, T: Collect<'gc>, E: Collect<'gc>> Collect<'gc> for Result<T, E> {
     const NEEDS_TRACE: bool = T::NEEDS_TRACE || E::NEEDS_TRACE;
+    const PARALLEL_DROP: bool = T::PARALLEL_DROP && E::PARALLEL_DROP;
 
     fn trace(&self, t: &mut Trace<'_>) {
         match self {
@@ -217,6 +240,7 @@ macro_rules! tuple {
     ($(($($n:tt $t:ident),+)),*) => {$(
         unsafe impl<'gc, $($t: Collect<'gc>),+> Collect<'gc> for ($($t,)+) {
             const NEEDS_TRACE: bool = false $(|| $t::NEEDS_TRACE)+;
+            const PARALLEL_DROP: bool = true $(&& $t::PARALLEL_DROP)+;
 
             fn trace(&self, t: &mut Trace<'_>) {
                 $(t.trace(&self.$n);)+

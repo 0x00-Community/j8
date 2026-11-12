@@ -40,9 +40,23 @@ heap.collect_all();
 
 回收耗时随线程数的变化见 `cargo run --release --example bench -- <线程数>`。
 
+## 并行
+
+回收各阶段切成任务交给借来的 `Pool`（自带工作窃取）：标记、次回收的复制提升、清扫、压缩的搬迁与改指针都并行；
+活少时在调用线程上先做（不惊动线程池），等待时先自旋、久了让出 CPU（`std` feature）。
+
+死对象的析构缺省在调用线程上做：类型的 `Collect::PARALLEL_DROP`（派生宏按字段推出：`no_drop` 且各字段都能）说明它能在别的线程析构，
+`R8Heap::set_parallel_drop(true)` 才真的并行析构 —— glibc 的 malloc 跨线程释放要抢原线程的 arena 锁，并行反而更慢，
+换 jemalloc / mimalloc 这类分配器再开。
+
 ## Feature
 
+- `std`（缺省开）：等待时让出 CPU。`no_std` 用 `default-features = false`（只能自旋，机器忙时并行回收会被拖慢）
 - `verify`：每次回收后把整个老年代的边校验一遍（调试用，很慢）
+
+## 测试
+
+`tests/gc.rs` 一条一条跑（`cargo test --test gc -- --exact <名字>`），加 `--features verify` 带上堆校验。
 
 ## 许可
 
