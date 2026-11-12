@@ -55,7 +55,8 @@ impl<'a> From<&'a Argument<'a>> for Element<'a> {
 
 /// 赋值目标：名字，或已经求好对象（与键）的属性。
 enum Target<'a> {
-    Name(&'a str),
+    /// 名字与它在源码里的位置（判断要不要查死区）
+    Name(&'a str, u32),
     Named { obj: Reg, name: Const },
     Keyed { obj: Reg, key: Reg },
     /// `obj.#x`：私有名在 `key`
@@ -476,7 +477,7 @@ impl<'a> Compiler<'a, '_> {
     /// 求出赋值目标的对象（与键）放进临时寄存器。
     fn target(&mut self, t: &'a SimpleAssignmentTarget<'a>) -> Result<Target<'a>, Error> {
         if let SimpleAssignmentTarget::AssignmentTargetIdentifier(id) = t {
-            return Ok(Target::Name(id.name.as_str()));
+            return Ok(Target::Name(id.name.as_str(), id.span.start));
         }
         match t.as_member_expression() {
             Some(MemberExpression::StaticMemberExpression(m)) => {
@@ -509,7 +510,7 @@ impl<'a> Compiler<'a, '_> {
 
     fn target_load(&mut self, t: &Target<'a>) {
         match *t {
-            Target::Name(n) => self.load(n),
+            Target::Name(n, pos) => self.load_at(n, pos),
             Target::Named { obj, name } => _ = self.emit(Insn::GetNamed { obj, name }),
             Target::Keyed { obj, key } => {
                 self.emit(Insn::Ldar(key));
@@ -524,7 +525,7 @@ impl<'a> Compiler<'a, '_> {
 
     fn target_store(&mut self, t: &Target<'a>) {
         match *t {
-            Target::Name(n) => self.store(n, false),
+            Target::Name(n, pos) => self.store_at(n, false, pos),
             Target::Named { obj, name } => _ = self.emit(Insn::SetNamed { obj, name, strict: self.strict_here() }),
             Target::Keyed { obj, key } => _ = self.emit(Insn::SetKeyed { obj, key, strict: self.strict_here() }),
             Target::Private { obj, key } => _ = self.emit(Insn::SetPrivate { obj, key }),
@@ -533,7 +534,7 @@ impl<'a> Compiler<'a, '_> {
 
     fn target_release(&mut self, t: &Target<'a>) {
         match *t {
-            Target::Name(_) => {}
+            Target::Name(..) => {}
             Target::Named { obj, .. } | Target::Keyed { obj, .. } | Target::Private { obj, .. } => self.release(obj),
         }
     }
@@ -576,7 +577,7 @@ impl<'a> Compiler<'a, '_> {
         match Self::assign_kind(a.operator) {
             Assign::Plain => {
                 match &t {
-                    Target::Name(n) => self.expr_named(&a.right, n)?,
+                    Target::Name(n, _) => self.expr_named(&a.right, n)?,
                     _ => self.expr(&a.right)?,
                 }
                 self.target_store(&t);
@@ -594,7 +595,7 @@ impl<'a> Compiler<'a, '_> {
                 self.target_load(&t);
                 let at = self.jump(skip);
                 match &t {
-                    Target::Name(n) => self.expr_named(&a.right, n)?,
+                    Target::Name(n, _) => self.expr_named(&a.right, n)?,
                     _ => self.expr(&a.right)?,
                 }
                 self.target_store(&t);
@@ -622,9 +623,10 @@ impl<'a> Compiler<'a, '_> {
     fn update_as(&mut self, u: &'a UpdateExpression<'a>, discard: bool) -> Result<(), Error> {
         let t = self.target(&u.argument)?;
         self.target_load(&t);
-        self.emit(Insn::ToNumeric);
+        // `Inc` / `Dec` 自己做 ToNumeric；只有后置且要旧值时才单独转一次留着
         let old = (!u.prefix && !discard).then(|| self.temp());
         if let Some(r) = old {
+            self.emit(Insn::ToNumeric);
             self.emit(Insn::Star(r));
         }
         self.emit(match u.operator {

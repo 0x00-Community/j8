@@ -20,7 +20,7 @@ use r8framework::{Agent, Closure, Coroutine, CoroutineState, Env, Error, ErrorKi
 /// 调用深度上限（含宿主函数里重入的 JS），过了抛 RangeError
 const STACK_LIMIT: usize = 10_000;
 
-/// 一片最多跑这么多条指令，片与片之间回收
+/// 一片最多走这么多步（进一个帧、往回跳一次各算一步：别的指令只往前走，步数之间的指令有限），片与片之间回收
 #[cfg(feature = "compile")]
 const SLICE: usize = 10_000;
 
@@ -885,576 +885,610 @@ impl Executor {
         r
     }
 
-    /// 主循环：出错直接返回，由 [`execute`](Self::execute) 展开。
+    /// 配额扣一步；用完了返回 `true`（调用方停下，状态完整）
+    #[inline]
+    fn spent(budget: &mut Option<usize>) -> bool {
+        match budget {
+            Some(0) => true,
+            Some(b) => {
+                *b -= 1;
+                false
+            }
+            None => false,
+        }
+    }
+
+    /// 主循环：外层每进一个帧（开始、调用、返回）取一次函数，内层逐条取指令分派；
+    /// 换帧的指令 `continue 'frame`。出错直接返回，由 [`execute`](Self::execute) 展开。
     #[expect(clippy::too_many_lines, reason = "一条指令一个分支，拆开反而难读")]
     fn run<'gc>(&self, a: &mut Agent<'gc, '_>, st: &mut State<'gc>, depth: usize, budget: &mut Option<usize>) -> Result<Option<Outcome<'gc>>, Error> {
         let State { regs, frames, f, acc } = st;
-        let mut cur: Option<(FuncId, Rc<Loaded>)> = None;
-        loop {
-            // 配额用完：停在下一条指令之前，状态完整
-            if let Some(b) = budget {
-                if *b == 0 {
-                    return Ok(None);
-                }
-                *b -= 1;
+        'frame: loop {
+            // 配额用完：停在这一帧的下一条指令之前，状态完整
+            if Self::spent(budget) {
+                return Ok(None);
             }
-            // 换了函数才重取（Rc 克隆）
-            if cur.as_ref().is_none_or(|(id, _)| *id != f.func) {
-                cur = Some((f.func, self.function(f.func)));
-            }
-            let loaded = &*cur.as_ref().expect("just set").1;
+            let cur = self.function(f.func);
+            let loaded = &*cur;
             let func = &loaded.func;
-            let insn = func.insns[f.pc];
-            f.pc += 1;
-            let r = |r: Reg| f.base + usize::from(r.0);
-            match insn {
-                Insn::LdaUndefined => *acc = Value::Undefined,
-                Insn::LdaNull => *acc = Value::Null,
-                Insn::LdaBool(b) => *acc = b.into(),
-                Insn::LdaConst(k) => {
-                    *acc = match &func.consts[k.0 as usize] {
-                        Constant::Number(x) => (*x).into(),
-                        Constant::String(s) => a.string(s).into(),
-                        Constant::BigInt(digits) => a.bigint(Agent::parse_bigint(digits).unwrap_or_default()),
-                    }
-                }
-                Insn::Ldar(x) => *acc = regs[r(x)],
-                Insn::Star(x) => regs[r(x)] = *acc,
-                Insn::LdaGlobal(k) => *acc = Self::global_load(a, &loaded.globals[k.0 as usize], func.name_at(k))?,
-                Insn::LdaGlobalOrUndefined(k) => *acc = Self::global_get(a, func.name_at(k))?.unwrap_or_default(),
-                Insn::StaGlobal { name, strict } => Self::global_store(a, &loaded.globals[name.0 as usize], func.name_at(name), *acc, strict)?,
-                Insn::LdaHole => *acc = Value::Uninit,
-                Insn::ThrowConstAssign => return Err(a.throw(ErrorKind::Type, "Assignment to constant variable.")),
-                Insn::CheckInit { name } => Self::check_const(a, *acc, func, name)?,
-                Insn::CheckReg { reg, name } => Self::check_const(a, regs[r(reg)], func, name)?,
-                Insn::CheckEnv { depth, slot, name } => {
-                    let v = Self::env_at(f.env, depth).borrow().slots[usize::from(slot)];
-                    Self::check_const(a, v, func, name)?;
-                }
-                Insn::CheckThis => {
-                    if matches!(*acc, Value::Uninit) {
-                        return Err(a.throw(ErrorKind::Reference, "Must call super constructor in derived class before accessing 'this' or returning from derived constructor"));
-                    }
-                }
-                Insn::DeclareLexical { name, constant } => {
-                    let name = func.name_at(name);
-                    let scope = a.realm.script_scope;
-                    // 和脚本作用域里的名字、不可配置的全局属性（以前的 `var`、`undefined` 等）都冲突
-                    if scope.borrow().get_own(name).is_some() || a.realm.global.borrow().get_own(name).is_some_and(|p| !p.configurable) {
-                        return Err(a.throw(ErrorKind::Syntax, &alloc::format!("Identifier '{name}' has already been declared")));
-                    }
-                    scope.borrow_mut(a.mc).define(name, Property { slot: Slot::Data(Value::Uninit), enumerable: false, writable: !constant, configurable: false });
-                }
-                Insn::CheckDeclare { name, function } => Self::check_declare(a, func.name_at(name), function)?,
-                Insn::DeclareVar { name, deletable } => Self::declare_global(a, func.name_at(name), None, deletable),
-                Insn::DeclareFunction { name, deletable } => Self::declare_global(a, func.name_at(name), Some(*acc), deletable),
-                Insn::SetProtoLiteral { obj } => {
-                    if let Value::Object(o) = regs[r(obj)] {
-                        match *acc {
-                            Value::Object(p) => o.borrow_mut(a.mc).proto = Some(p),
-                            Value::Null => o.borrow_mut(a.mc).proto = None,
-                            _ => {}
+            loop {
+                let insn = func.insns[f.pc];
+                f.pc += 1;
+                let r = |r: Reg| f.base + usize::from(r.0);
+                match insn {
+                    Insn::LdaUndefined => *acc = Value::Undefined,
+                    Insn::LdaNull => *acc = Value::Null,
+                    Insn::LdaBool(b) => *acc = b.into(),
+                    Insn::LdaConst(k) => {
+                        *acc = match &func.consts[k.0 as usize] {
+                            Constant::Number(x) => (*x).into(),
+                            Constant::String(s) => a.string(s).into(),
+                            Constant::BigInt(digits) => a.bigint(Agent::parse_bigint(digits).unwrap_or_default()),
                         }
                     }
-                }
-                Insn::ToObject => *acc = a.to_object(*acc)?.into(),
-                Insn::LdaImport { index } => *acc = self.import_value(a, loaded.base, index)?,
-                Insn::ImportMeta => *acc = self.import_meta(a, loaded.base)?,
-                Insn::DynamicImport { referrer } => {
-                    let level = depth + frames.len() + 1;
-                    *acc = self.dynamic_import(a, func.name_at(referrer), *acc, level)?;
-                }
-                Insn::CreateNullObject => *acc = ObjectData::default().alloc(a.mc).into(),
-                Insn::DeclareEvalVar { obj, name } => {
-                    if let Value::Object(o) = regs[r(obj)] {
-                        let key = r8framework::Key::Str(func.name_at(name));
-                        if !a.has_own_property(o, key)? {
-                            a.create_data_property(o, key, Value::Undefined)?;
+                    Insn::Ldar(x) => *acc = regs[r(x)],
+                    Insn::Star(x) => regs[r(x)] = *acc,
+                    Insn::LdaGlobal(k) => *acc = Self::global_load(a, &loaded.globals[k.0 as usize], func.name_at(k))?,
+                    Insn::LdaGlobalOrUndefined(k) => *acc = Self::global_get(a, func.name_at(k))?.unwrap_or_default(),
+                    Insn::StaGlobal { name, strict } => Self::global_store(a, &loaded.globals[name.0 as usize], func.name_at(name), *acc, strict)?,
+                    Insn::LdaHole => *acc = Value::Uninit,
+                    Insn::ThrowConstAssign => return Err(a.throw(ErrorKind::Type, "Assignment to constant variable.")),
+                    Insn::CheckInit { name } => Self::check_const(a, *acc, func, name)?,
+                    Insn::CheckReg { reg, name } => Self::check_const(a, regs[r(reg)], func, name)?,
+                    Insn::CheckEnv { depth, slot, name } => {
+                        let v = Self::env_at(f.env, depth).borrow().slots[usize::from(slot)];
+                        Self::check_const(a, v, func, name)?;
+                    }
+                    Insn::CheckThis => {
+                        if matches!(*acc, Value::Uninit) {
+                            return Err(a.throw(ErrorKind::Reference, "Must call super constructor in derived class before accessing 'this' or returning from derived constructor"));
                         }
                     }
-                }
-                Insn::WithHas { obj, name } => {
-                    let o = regs[r(obj)];
-                    let key = func.name_at(name);
-                    let mut found = matches!(o, Value::Object(x) if a.has_key(x, r8framework::Key::Str(key))?);
-                    if found {
-                        let u = a.get_symbol(o, a.realm.symbols.unscopables, o)?;
-                        if matches!(u, Value::Object(_)) {
-                            let blocked = a.get_named(u, key)?;
-                            found = !a.to_boolean(blocked);
+                    Insn::DeclareLexical { name, constant } => {
+                        let name = func.name_at(name);
+                        let scope = a.realm.script_scope;
+                        // 和脚本作用域里的名字、不可配置的全局属性（以前的 `var`、`undefined` 等）都冲突
+                        if scope.borrow().get_own(name).is_some() || a.realm.global.borrow().get_own(name).is_some_and(|p| !p.configurable) {
+                            return Err(a.throw(ErrorKind::Syntax, &alloc::format!("Identifier '{name}' has already been declared")));
                         }
+                        scope.borrow_mut(a.mc).define(name, Property { slot: Slot::Data(Value::Uninit), enumerable: false, writable: !constant, configurable: false });
                     }
-                    *acc = found.into();
-                }
-                Insn::InitLexical { name } => {
-                    let name = func.name_at(name);
-                    let scope = a.realm.script_scope;
-                    let mut d = scope.borrow_mut(a.mc);
-                    let prop = d.get_own(name).map(|p| Property { slot: Slot::Data(*acc), ..p });
-                    if let Some(p) = prop {
-                        d.define(name, p);
-                    }
-                }
-                Insn::LdaEnv { depth, slot } => *acc = Self::env_at(f.env, depth).borrow().slots[usize::from(slot)],
-                Insn::StaEnv { depth, slot } => Self::env_at(f.env, depth).borrow_mut(a.mc).slots[usize::from(slot)] = *acc,
-                Insn::PushEnv(n) => f.env = Some(Env { slots: alloc::vec![Value::Undefined; usize::from(n)], parent: f.env }.alloc(a.mc)),
-                Insn::PopEnv => f.env = Self::env_at(f.env, 0).borrow().parent,
-                Insn::CloneEnv => {
-                    let e = Self::env_at(f.env, 0);
-                    let copy = Env { slots: e.borrow().slots.clone(), parent: e.borrow().parent };
-                    f.env = Some(copy.alloc(a.mc));
-                }
-                // 两边都是数的快路就地算，别的交给 Agent
-                Insn::Binary(op, x) => {
-                    *acc = match (regs[r(x)], *acc) {
-                        (Value::Number(lhs), Value::Number(rhs)) => op.numbers(lhs, rhs).into(),
-                        (lhs, rhs) => a.binary(op, lhs, rhs)?,
-                    }
-                }
-                Insn::Compare(op, x) => {
-                    *acc = match (regs[r(x)], *acc) {
-                        (Value::Number(lhs), Value::Number(rhs)) => op.numbers(lhs, rhs),
-                        (lhs, rhs) => a.compare(op, lhs, rhs)?,
-                    }
-                    .into();
-                }
-                Insn::Unary(op) => *acc = a.unary(op, *acc)?,
-                Insn::ToNumeric => {
-                    if !matches!(*acc, Value::Number(_)) {
-                        *acc = match a.to_numeric(*acc)? {
-                            r8framework::Numeric::Number(x) => x.into(),
-                            r8framework::Numeric::BigInt(b) => Value::BigInt(b),
-                        }
-                    }
-                }
-                Insn::Inc => *acc = if let Value::Number(x) = *acc { (x + 1.0).into() } else { a.increment(*acc, 1)? },
-                Insn::Dec => *acc = if let Value::Number(x) = *acc { (x - 1.0).into() } else { a.increment(*acc, -1)? },
-                Insn::CreateRegExp { pattern, flags } => {
-                    let (p, fl) = (a.string(func.name_at(pattern)), a.string(func.name_at(flags)));
-                    let ctor = a.realm.regexp_ctor;
-                    *acc = a.call(ctor.into(), Value::Undefined, &[p.into(), fl.into()])?;
-                }
-                // 往回跳（目标不在这条之后）是循环又转一圈：有 JIT 层就问它要不要从循环头切进机器码
-                Insn::Jump(l) => {
-                    let back = (l.0 as usize) < f.pc;
-                    f.pc = l.0 as usize;
-                    if back && self.tier.is_some() {
-                        self.osr(loaded, regs, f, acc, f.pc);
-                    }
-                }
-                Insn::JumpIfTrue(l) => {
-                    if a.to_boolean(*acc) {
-                        let back = (l.0 as usize) < f.pc;
-                        f.pc = l.0 as usize;
-                        if back && self.tier.is_some() {
-                            self.osr(loaded, regs, f, acc, f.pc);
-                        }
-                    }
-                }
-                Insn::JumpIfFalse(l) => {
-                    if !a.to_boolean(*acc) {
-                        let back = (l.0 as usize) < f.pc;
-                        f.pc = l.0 as usize;
-                        if back && self.tier.is_some() {
-                            self.osr(loaded, regs, f, acc, f.pc);
-                        }
-                    }
-                }
-                Insn::JumpIfNotNullish(l) => {
-                    if !acc.is_nullish() {
-                        f.pc = l.0 as usize;
-                    }
-                }
-                Insn::JumpIfNullish(l) => {
-                    if acc.is_nullish() {
-                        f.pc = l.0 as usize;
-                    }
-                }
-                Insn::JumpIfUndefined(l) => {
-                    if matches!(*acc, Value::Undefined) {
-                        f.pc = l.0 as usize;
-                    }
-                }
-                Insn::JumpIfNotUndefined(l) => {
-                    if !matches!(*acc, Value::Undefined) {
-                        f.pc = l.0 as usize;
-                    }
-                }
-                Insn::CreateRest(from) => *acc = a.array(f.args.get(usize::from(from)..).unwrap_or(&[]).to_vec()).into(),
-                Insn::ArrayPush { arr } => Self::push(a, regs[r(arr)], [*acc]),
-                Insn::ArrayHole { arr } => {
-                    if let Value::Object(o) = regs[r(arr)] {
-                        let mut d = o.borrow_mut(a.mc);
-                        let len = d.array_length().unwrap_or(0);
-                        d.set_array_length(len + 1);
-                    }
-                }
-                Insn::ArraySpread { arr } => {
-                    let items = a.to_list(*acc)?;
-                    Self::push(a, regs[r(arr)], items);
-                }
-                Insn::CallSpread { callee, this, args } => {
-                    let level = depth + frames.len() + 1;
-                    if level >= STACK_LIMIT {
-                        return Err(a.throw(ErrorKind::Range, "Maximum call stack size exceeded"));
-                    }
-                    let list = Self::items(regs[r(args)]);
-                    match self.resolve(a, regs[r(callee)], regs[r(this)], list, level)? {
-                        Callee::Closure { closure, callee, this, args } => {
-                            let next = self.enter(a, regs, closure, callee, this, &args);
-                            frames.push(core::mem::replace(f, next));
-                        }
-                        Callee::Done(v) => *acc = v,
-                    }
-                }
-                Insn::ConstructSpread { callee, args } => {
-                    let level = depth + frames.len() + 1;
-                    if level >= STACK_LIMIT {
-                        return Err(a.throw(ErrorKind::Range, "Maximum call stack size exceeded"));
-                    }
-                    let list = Self::items(regs[r(args)]);
-                    let c = regs[r(callee)];
-                    match self.prepare(a, regs, c, list, c, level)? {
-                        Prepared::Frame(next) => frames.push(core::mem::replace(f, next)),
-                        Prepared::Done(v) => *acc = v,
-                    }
-                }
-                Insn::SuperCallSpread { args } => {
-                    let list = Self::items(regs[r(args)]);
-                    *acc = Self::super_call(a, regs, f, &list)?;
-                }
-                Insn::CopyData { obj } => {
-                    if let Value::Object(o) = regs[r(obj)] {
-                        a.copy_data(o, *acc, &[])?;
-                    }
-                }
-                Insn::ObjectRest { src, keys, count } => {
-                    let first = r(keys);
-                    let exclude = regs[first..first + usize::from(count)].iter().filter(|k| !matches!(k, Value::Symbol(_))).map(|&k| a.property_key(k)).collect::<Result<Vec<_>, _>>()?;
-                    let o = a.object();
-                    a.copy_data(o, regs[r(src)], &exclude)?;
-                    *acc = o.into();
-                }
-                Insn::CreateClosure(n) => {
-                    let mut closure = Closure::new(FuncId(loaded.base + n), f.env);
-                    if self.function(closure.func).func.kind == FunctionKind::Arrow {
-                        closure.home = Self::current(regs, f).and_then(|c| c.home);
-                    }
-                    *acc = self.function_object(a, closure, a.realm.function_proto).into();
-                }
-                Insn::CreateMethod { func: n, home } => {
-                    let mut closure = Closure::new(FuncId(loaded.base + n), f.env);
-                    if let Value::Object(h) = regs[r(home)] {
-                        closure.home = Some(h);
-                    }
-                    *acc = self.function_object(a, closure, a.realm.function_proto).into();
-                }
-                Insn::CreateClass { func: n, parent, proto } => {
-                    let (proto_parent, ctor_parent) = Self::class_parents(a, parent.map(|p| regs[r(p)]))?;
-                    let p = ObjectData { proto: proto_parent, ..ObjectData::default() }.alloc(a.mc);
-                    let mut closure = Closure::new(FuncId(loaded.base + n), f.env);
-                    closure.home = Some(p);
-                    let ctor = self.function_object(a, closure, ctor_parent);
-                    ctor.borrow_mut(a.mc).define("prototype", Property { slot: Slot::Data(p.into()), enumerable: false, writable: false, configurable: false });
-                    p.borrow_mut(a.mc).define("constructor", Property::hidden(ctor.into()));
-                    regs[r(proto)] = p.into();
-                    *acc = ctor.into();
-                }
-                Insn::SetClassFields { ctor } => {
-                    if let (Value::Object(c), Value::Object(init)) = (regs[r(ctor)], *acc)
-                        && let ObjectKind::Function(closure) = &mut c.borrow_mut(a.mc).kind
-                    {
-                        closure.fields = Some(init);
-                    }
-                }
-                Insn::DefineNamed { obj, name, kind, enumerable } => Self::define(a, regs[r(obj)], func.name_at(name), kind, enumerable, *acc)?,
-                Insn::DefineKeyed { obj, key, kind, enumerable } => {
-                    if let Value::Object(o) = regs[r(obj)] {
-                        let k = regs[r(key)];
-                        match (kind, *acc) {
-                            (PropertyKind::Data, v) => a.define_keyed(o, k, Property { slot: Slot::Data(v), enumerable, writable: true, configurable: true })?,
-                            (PropertyKind::Getter | PropertyKind::Setter, Value::Object(func)) => a.define_accessor_keyed(o, k, func, kind == PropertyKind::Setter, enumerable)?,
-                            _ => {}
-                        }
-                    }
-                }
-                Insn::GetSuper { this, name } => {
-                    let base = Self::super_base(a, regs, f)?;
-                    *acc = a.get(base, func.name_at(name), regs[r(this)])?;
-                }
-                Insn::GetSuperKeyed { this } => {
-                    let base = Self::super_base(a, regs, f)?;
-                    let k = a.property_key(*acc)?;
-                    *acc = a.get(base, &k, regs[r(this)])?;
-                }
-                Insn::SuperCall { args, argc } => {
-                    let first = r(args);
-                    let list = regs[first..first + usize::from(argc)].to_vec();
-                    *acc = Self::super_call(a, regs, f, &list)?;
-                }
-                Insn::SuperCallForward => {
-                    let list = core::mem::take(&mut f.args);
-                    *acc = Self::super_call(a, regs, f, &list)?;
-                }
-                Insn::Construct { callee, args, argc } => {
-                    let level = depth + frames.len() + 1;
-                    if level >= STACK_LIMIT {
-                        return Err(a.throw(ErrorKind::Range, "Maximum call stack size exceeded"));
-                    }
-                    let first = r(args);
-                    let list = regs[first..first + usize::from(argc)].to_vec();
-                    let c = regs[r(callee)];
-                    match self.prepare(a, regs, c, list, c, level)? {
-                        Prepared::Frame(next) => frames.push(core::mem::replace(f, next)),
-                        Prepared::Done(v) => *acc = v,
-                    }
-                }
-                Insn::InstanceOf(x) => *acc = a.instance_of(regs[r(x)], *acc)?.into(),
-                Insn::In(x) => *acc = a.has_keyed(*acc, regs[r(x)])?.into(),
-                Insn::DeleteNamed { obj, name, strict } => {
-                    let ok = a.delete(regs[r(obj)], func.name_at(name))?;
-                    Self::check_delete(a, ok, strict)?;
-                    *acc = ok.into();
-                }
-                Insn::DeleteKeyed { obj, strict } => {
-                    let ok = a.delete_keyed(regs[r(obj)], *acc)?;
-                    Self::check_delete(a, ok, strict)?;
-                    *acc = ok.into();
-                }
-                Insn::CreateObject => *acc = a.object().into(),
-                Insn::CreateArray { first, count } => *acc = a.array(regs[r(first)..r(first) + usize::from(count)].to_vec()).into(),
-                Insn::GetNamed { obj, name } => *acc = a.get_named(regs[r(obj)], func.name_at(name))?,
-                Insn::SetNamed { obj, name, strict } => a.put_named(regs[r(obj)], func.name_at(name), *acc, strict)?,
-                Insn::GetKeyed { obj } => *acc = a.get_keyed(regs[r(obj)], *acc)?,
-                Insn::SetKeyed { obj, key, strict } => a.put_keyed(regs[r(obj)], regs[r(key)], *acc, strict)?,
-                Insn::CallEval { callee, args, argc, scope, .. } if matches!(regs[r(callee)], Value::Object(o) if Gc::ptr_eq(o, a.realm.eval)) => {
-                    let first = if argc == 0 { None } else { Some(regs[r(args)]) };
-                    *acc = match first {
-                        None => Value::Undefined,
-                        Some(Value::String(s)) => {
-                            let src = alloc::string::String::from(&**s);
-                            let table = &func.scopes[usize::from(scope)];
-                            self.direct_eval(a, &src, table, f.env, func.mode == Mode::Strict, depth + frames.len() + 1)?
-                        }
-                        Some(v) => v,
-                    };
-                }
-                Insn::Call { callee, this, args, argc } | Insn::CallEval { callee, this, args, argc, .. } => {
-                    let level = depth + frames.len() + 1;
-                    if level >= STACK_LIMIT {
-                        return Err(a.throw(ErrorKind::Range, "Maximum call stack size exceeded"));
-                    }
-                    let first = r(args);
-                    // 快路：被调的是普通 JS 函数（不是类构造器 / 生成器 / async），直接从寄存器开帧
-                    let target = regs[r(callee)];
-                    if matches!(insn, Insn::Call { .. })
-                        && let Some((c, loaded)) = self.plain_closure(target)
-                    {
-                        let mut next = Self::enter_regs(a, regs, &loaded.func, c, target, regs[r(this)], first, usize::from(argc));
-                        if !self.tiered(&loaded, regs, &mut next, acc) {
-                            frames.push(core::mem::replace(f, next));
-                        }
-                        continue;
-                    }
-                    let list = regs[first..first + usize::from(argc)].to_vec();
-                    match self.resolve(a, regs[r(callee)], regs[r(this)], list, level)? {
-                        Callee::Closure { closure, callee, this, args } => {
-                            let next = self.enter(a, regs, closure, callee, this, &args);
-                            frames.push(core::mem::replace(f, next));
-                        }
-                        Callee::Done(v) => *acc = v,
-                    }
-                }
-                Insn::PushHandler(target) => f.handlers.push(Handler { target: target.0, env: f.env }),
-                Insn::PopHandler => _ = f.handlers.pop(),
-                Insn::Throw => return Err(a.throw_value(*acc)),
-                Insn::Return => {
-                    if !matches!(f.new_target, Value::Undefined) {
-                        *acc = self.construct_result(a, f, *acc)?;
-                    }
-                    match frames.pop() {
-                        Some(caller) => {
-                            regs.truncate(f.base);
-                            *f = caller;
-                        }
-                        None => return Ok(Some(Outcome::Return(*acc))),
-                    }
-                }
-                Insn::Yield { mode } | Insn::Await { mode } => {
-                    debug_assert!(frames.is_empty() && f.base == 0, "a coroutine suspends from its own bottom frame");
-                    let saved = Suspended {
-                        func: f.func,
-                        pc: f.pc,
-                        regs: core::mem::take(regs),
-                        env: f.env,
-                        handlers: f.handlers.drain(..).map(|h| (h.target, h.env)).collect(),
-                        args: core::mem::take(&mut f.args),
-                        mode: Some(mode.0),
-                    };
-                    return Ok(Some(Outcome::Suspend { value: *acc, awaiting: matches!(insn, Insn::Await { .. }), saved }));
-                }
-                Insn::GetIterator { dst } => {
-                    let rec = a.get_iterator(*acc)?;
-                    let d = r(dst);
-                    regs[d] = rec.iterator;
-                    regs[d + 1] = rec.next;
-                    regs[d + 2] = false.into();
-                }
-                Insn::IteratorNext { iter } => {
-                    let d = r(iter);
-                    *acc = Value::Undefined;
-                    if !a.to_boolean(regs[d + 2]) {
-                        // 走一步出错也算走完（不再调 `return`）
-                        regs[d + 2] = true.into();
-                        if let Some(v) = a.iterator_step(IterRecord { iterator: regs[d], next: regs[d + 1] })? {
-                            regs[d + 2] = false.into();
-                            *acc = v;
-                        }
-                    }
-                }
-                Insn::IteratorRest { iter } => {
-                    let d = r(iter);
-                    let mut rest = Vec::new();
-                    if !a.to_boolean(regs[d + 2]) {
-                        regs[d + 2] = true.into();
-                        let rec = IterRecord { iterator: regs[d], next: regs[d + 1] };
-                        while let Some(v) = a.iterator_step(rec)? {
-                            rest.push(v);
-                        }
-                    }
-                    *acc = a.array(rest).into();
-                }
-                Insn::IteratorClose { iter } => {
-                    let d = r(iter);
-                    if !a.to_boolean(regs[d + 2]) {
-                        regs[d + 2] = true.into();
-                        a.iterator_close(regs[d])?;
-                    }
-                }
-                Insn::IteratorCloseQuiet { iter } => {
-                    let d = r(iter);
-                    if !a.to_boolean(regs[d + 2]) {
-                        regs[d + 2] = true.into();
-                        // 原来的异常优先：`return` 不可调或自己抛错都不管
-                        match a.iterator_close(regs[d]) {
-                            Ok(()) | Err(Error::Exception(_)) => {}
-                            Err(e) => return Err(e),
-                        }
-                    }
-                }
-                Insn::CreatePrivateName { desc } => *acc = Value::Symbol(a.private_name(func.name_at(desc))),
-                Insn::GetPrivate { obj } => *acc = a.private_get(regs[r(obj)], Self::private_key(*acc))?,
-                Insn::SetPrivate { obj, key } => a.private_set(regs[r(obj)], Self::private_key(regs[r(key)]), *acc)?,
-                Insn::DefinePrivate { obj, key, kind, writable } => {
-                    let slot = match (kind, *acc) {
-                        (PropertyKind::Getter, Value::Object(f)) => Slot::Accessor { get: Some(f), set: None },
-                        (PropertyKind::Setter, Value::Object(f)) => Slot::Accessor { get: None, set: Some(f) },
-                        (_, v) => Slot::Data(v),
-                    };
-                    let prop = Property { slot, enumerable: false, writable, configurable: false };
-                    a.private_define(regs[r(obj)], Self::private_key(regs[r(key)]), prop)?;
-                }
-                Insn::HasPrivate { obj } => *acc = a.private_has(regs[r(obj)], Self::private_key(*acc))?.into(),
-                Insn::ToPropertyKey => {
-                    if !matches!(*acc, Value::Symbol(_)) {
-                        *acc = a.property_key(*acc)?.into();
-                    }
-                }
-                Insn::GetAsyncIterator { dst } => {
-                    let d = r(dst);
-                    let v = *acc;
-                    let method = if v.is_nullish() { Value::Undefined } else { a.get_symbol(v, a.realm.symbols.async_iterator, v)? };
-                    let (iterator, next, sync) = if method.is_nullish() {
-                        let rec = a.get_iterator(v)?;
-                        (rec.iterator, rec.next, true)
-                    } else {
-                        let it = a.call(method, v, &[])?;
-                        if !matches!(it, Value::Object(_)) {
-                            return Err(a.throw(ErrorKind::Type, "Result of the Symbol.asyncIterator method is not an object"));
-                        }
-                        let next = a.get_named(it, "next")?;
-                        (it, next, false)
-                    };
-                    regs[d] = iterator;
-                    regs[d + 1] = next;
-                    regs[d + 2] = false.into();
-                    regs[d + 3] = sync.into();
-                }
-                Insn::IteratorCall { iter } => {
-                    let d = r(iter);
-                    *acc = a.call(regs[d + 1], regs[d], &[])?;
-                }
-                Insn::IteratorResult { iter } => {
-                    let d = r(iter);
-                    let result = *acc;
-                    if !matches!(result, Value::Object(_)) {
-                        regs[d + 2] = true.into();
-                        let what = a.to_string(result)?;
-                        return Err(a.throw(ErrorKind::Type, &alloc::format!("Iterator result {} is not an object", &**what)));
-                    }
-                    let done = a.get_named(result, "done")?;
-                    if a.to_boolean(done) {
-                        regs[d + 2] = true.into();
-                        *acc = Value::Undefined;
-                    } else {
-                        *acc = a.get_named(result, "value")?;
-                    }
-                }
-                Insn::AsyncIteratorReturn { iter } => {
-                    let d = r(iter);
-                    *acc = Value::Undefined;
-                    if !a.to_boolean(regs[d + 2]) {
-                        regs[d + 2] = true.into();
-                        let ret = a.get_named(regs[d], "return")?;
-                        if !ret.is_nullish() {
-                            *acc = a.call(ret, regs[d], &[])?;
-                        }
-                    }
-                }
-                Insn::LdaNewTarget => *acc = f.new_target,
-                Insn::CreateArguments => *acc = Self::arguments(a, regs, f, func.mode.into(), &func.mapped_params)?,
-                Insn::GetTemplateObject { site, first, count } => {
-                    let key = (f.func.0, site);
-                    let cached = a.realm.templates.borrow().get(&key).copied();
-                    *acc = match cached {
-                        Some(o) => o.into(),
-                        None => {
-                            let (start, n) = (r(first), usize::from(count));
-                            let cooked = a.array(regs[start..start + n].to_vec());
-                            let raw = a.array(regs[start + n..start + 2 * n].to_vec());
-                            let frozen = |v: Value<'gc>| Property { slot: Slot::Data(v), enumerable: false, writable: false, configurable: false };
-                            cooked.borrow_mut(a.mc).define("raw", frozen(raw.into()));
-                            a.realm.templates.borrow_mut(a.mc).insert(key, cooked);
-                            cooked.into()
-                        }
-                    };
-                }
-                Insn::ForInKeys => {
-                    let keys = a.for_in_keys(*acc)?;
-                    *acc = a.array(keys).into();
-                }
-                Insn::DelegateStep { iter, mode } => {
-                    let d = r(iter);
-                    let it = regs[d];
-                    let result = match Self::mode(regs[r(mode)]) {
-                        Resume::Next => a.call(regs[d + 1], it, &[*acc])?,
-                        Resume::Throw => {
-                            let th = a.get_named(it, "throw")?;
-                            if th.is_nullish() {
-                                a.iterator_close(it)?;
-                                return Err(a.throw(ErrorKind::Type, "The iterator does not provide a 'throw' method"));
+                    Insn::CheckDeclare { name, function } => Self::check_declare(a, func.name_at(name), function)?,
+                    Insn::DeclareVar { name, deletable } => Self::declare_global(a, func.name_at(name), None, deletable),
+                    Insn::DeclareFunction { name, deletable } => Self::declare_global(a, func.name_at(name), Some(*acc), deletable),
+                    Insn::SetProtoLiteral { obj } => {
+                        if let Value::Object(o) = regs[r(obj)] {
+                            match *acc {
+                                Value::Object(p) => o.borrow_mut(a.mc).proto = Some(p),
+                                Value::Null => o.borrow_mut(a.mc).proto = None,
+                                _ => {}
                             }
-                            a.call(th, it, &[*acc])?
                         }
-                        Resume::Return => {
-                            let ret = a.get_named(it, "return")?;
-                            if ret.is_nullish() { a.iter_result(*acc, true).into() } else { a.call(ret, it, &[*acc])? }
-                        }
-                    };
-                    if !matches!(result, Value::Object(_)) {
-                        return Err(a.throw(ErrorKind::Type, "Iterator result is not an object"));
                     }
-                    *acc = result;
+                    Insn::ToObject => *acc = a.to_object(*acc)?.into(),
+                    Insn::LdaImport { index } => *acc = self.import_value(a, loaded.base, index)?,
+                    Insn::ImportMeta => *acc = self.import_meta(a, loaded.base)?,
+                    Insn::DynamicImport { referrer } => {
+                        let level = depth + frames.len() + 1;
+                        *acc = self.dynamic_import(a, func.name_at(referrer), *acc, level)?;
+                    }
+                    Insn::CreateNullObject => *acc = ObjectData::default().alloc(a.mc).into(),
+                    Insn::DeclareEvalVar { obj, name } => {
+                        if let Value::Object(o) = regs[r(obj)] {
+                            let key = r8framework::Key::Str(func.name_at(name));
+                            if !a.has_own_property(o, key)? {
+                                a.create_data_property(o, key, Value::Undefined)?;
+                            }
+                        }
+                    }
+                    Insn::WithHas { obj, name } => {
+                        let o = regs[r(obj)];
+                        let key = func.name_at(name);
+                        let mut found = matches!(o, Value::Object(x) if a.has_key(x, r8framework::Key::Str(key))?);
+                        if found {
+                            let u = a.get_symbol(o, a.realm.symbols.unscopables, o)?;
+                            if matches!(u, Value::Object(_)) {
+                                let blocked = a.get_named(u, key)?;
+                                found = !a.to_boolean(blocked);
+                            }
+                        }
+                        *acc = found.into();
+                    }
+                    Insn::InitLexical { name } => {
+                        let name = func.name_at(name);
+                        let scope = a.realm.script_scope;
+                        let mut d = scope.borrow_mut(a.mc);
+                        let prop = d.get_own(name).map(|p| Property { slot: Slot::Data(*acc), ..p });
+                        if let Some(p) = prop {
+                            d.define(name, p);
+                        }
+                    }
+                    Insn::LdaEnv { depth, slot } => *acc = Self::env_at(f.env, depth).borrow().slots[usize::from(slot)],
+                    Insn::StaEnv { depth, slot } => Self::env_at(f.env, depth).borrow_mut(a.mc).slots[usize::from(slot)] = *acc,
+                    Insn::PushEnv(n) => f.env = Some(Env { slots: alloc::vec![Value::Undefined; usize::from(n)], parent: f.env }.alloc(a.mc)),
+                    Insn::PopEnv => f.env = Self::env_at(f.env, 0).borrow().parent,
+                    Insn::CloneEnv => {
+                        let e = Self::env_at(f.env, 0);
+                        let copy = Env { slots: e.borrow().slots.clone(), parent: e.borrow().parent };
+                        f.env = Some(copy.alloc(a.mc));
+                    }
+                    // 两边都是数的快路就地算，别的交给 Agent
+                    Insn::Binary(op, x) => {
+                        *acc = match (regs[r(x)], *acc) {
+                            (Value::Number(lhs), Value::Number(rhs)) => op.numbers(lhs, rhs).into(),
+                            (lhs, rhs) => a.binary(op, lhs, rhs)?,
+                        }
+                    }
+                    Insn::Compare(op, x) => {
+                        *acc = match (regs[r(x)], *acc) {
+                            (Value::Number(lhs), Value::Number(rhs)) => op.numbers(lhs, rhs),
+                            (lhs, rhs) => a.compare(op, lhs, rhs)?,
+                        }
+                        .into();
+                    }
+                    Insn::Unary(op) => *acc = a.unary(op, *acc)?,
+                    Insn::ToNumeric => {
+                        if !matches!(*acc, Value::Number(_)) {
+                            *acc = match a.to_numeric(*acc)? {
+                                r8framework::Numeric::Number(x) => x.into(),
+                                r8framework::Numeric::BigInt(b) => Value::BigInt(b),
+                            }
+                        }
+                    }
+                    Insn::Inc => *acc = if let Value::Number(x) = *acc { (x + 1.0).into() } else { a.increment(*acc, 1)? },
+                    Insn::Dec => *acc = if let Value::Number(x) = *acc { (x - 1.0).into() } else { a.increment(*acc, -1)? },
+                    Insn::CreateRegExp { pattern, flags } => {
+                        let (p, fl) = (a.string(func.name_at(pattern)), a.string(func.name_at(flags)));
+                        let ctor = a.realm.regexp_ctor;
+                        *acc = a.call(ctor.into(), Value::Undefined, &[p.into(), fl.into()])?;
+                    }
+                    // 往回跳（目标不在这条之后）是循环又转一圈：有 JIT 层就问它要不要从循环头切进机器码
+                    Insn::Jump(l) => {
+                        let back = (l.0 as usize) < f.pc;
+                        f.pc = l.0 as usize;
+                        if back {
+                            if self.tier.is_some() {
+                                self.osr(loaded, regs, f, acc, f.pc);
+                            }
+                            if Self::spent(budget) {
+                                return Ok(None);
+                            }
+                        }
+                    }
+                    Insn::JumpIfTrue(l) => {
+                        if a.to_boolean(*acc) {
+                            let back = (l.0 as usize) < f.pc;
+                            f.pc = l.0 as usize;
+                            if back {
+                                if self.tier.is_some() {
+                                    self.osr(loaded, regs, f, acc, f.pc);
+                                }
+                                if Self::spent(budget) {
+                                    return Ok(None);
+                                }
+                            }
+                        }
+                    }
+                    Insn::JumpIfFalse(l) => {
+                        if !a.to_boolean(*acc) {
+                            let back = (l.0 as usize) < f.pc;
+                            f.pc = l.0 as usize;
+                            if back {
+                                if self.tier.is_some() {
+                                    self.osr(loaded, regs, f, acc, f.pc);
+                                }
+                                if Self::spent(budget) {
+                                    return Ok(None);
+                                }
+                            }
+                        }
+                    }
+                    Insn::JumpIfNotNullish(l) => {
+                        if !acc.is_nullish() {
+                            f.pc = l.0 as usize;
+                        }
+                    }
+                    Insn::JumpIfNullish(l) => {
+                        if acc.is_nullish() {
+                            f.pc = l.0 as usize;
+                        }
+                    }
+                    Insn::JumpIfUndefined(l) => {
+                        if matches!(*acc, Value::Undefined) {
+                            f.pc = l.0 as usize;
+                        }
+                    }
+                    Insn::JumpIfNotUndefined(l) => {
+                        if !matches!(*acc, Value::Undefined) {
+                            f.pc = l.0 as usize;
+                        }
+                    }
+                    Insn::CreateRest(from) => *acc = a.array(f.args.get(usize::from(from)..).unwrap_or(&[]).to_vec()).into(),
+                    Insn::ArrayPush { arr } => Self::push(a, regs[r(arr)], [*acc]),
+                    Insn::ArrayHole { arr } => {
+                        if let Value::Object(o) = regs[r(arr)] {
+                            let mut d = o.borrow_mut(a.mc);
+                            let len = d.array_length().unwrap_or(0);
+                            d.set_array_length(len + 1);
+                        }
+                    }
+                    Insn::ArraySpread { arr } => {
+                        let items = a.to_list(*acc)?;
+                        Self::push(a, regs[r(arr)], items);
+                    }
+                    Insn::CallSpread { callee, this, args } => {
+                        let level = depth + frames.len() + 1;
+                        if level >= STACK_LIMIT {
+                            return Err(a.throw(ErrorKind::Range, "Maximum call stack size exceeded"));
+                        }
+                        let list = Self::items(regs[r(args)]);
+                        match self.resolve(a, regs[r(callee)], regs[r(this)], list, level)? {
+                            Callee::Closure { closure, callee, this, args } => {
+                                let next = self.enter(a, regs, closure, callee, this, &args);
+                                frames.push(core::mem::replace(f, next));
+                                continue 'frame;
+                            }
+                            Callee::Done(v) => *acc = v,
+                        }
+                    }
+                    Insn::ConstructSpread { callee, args } => {
+                        let level = depth + frames.len() + 1;
+                        if level >= STACK_LIMIT {
+                            return Err(a.throw(ErrorKind::Range, "Maximum call stack size exceeded"));
+                        }
+                        let list = Self::items(regs[r(args)]);
+                        let c = regs[r(callee)];
+                        match self.prepare(a, regs, c, list, c, level)? {
+                            Prepared::Frame(next) => {
+                                frames.push(core::mem::replace(f, next));
+                                continue 'frame;
+                            }
+                            Prepared::Done(v) => *acc = v,
+                        }
+                    }
+                    Insn::SuperCallSpread { args } => {
+                        let list = Self::items(regs[r(args)]);
+                        *acc = Self::super_call(a, regs, f, &list)?;
+                    }
+                    Insn::CopyData { obj } => {
+                        if let Value::Object(o) = regs[r(obj)] {
+                            a.copy_data(o, *acc, &[])?;
+                        }
+                    }
+                    Insn::ObjectRest { src, keys, count } => {
+                        let first = r(keys);
+                        let exclude = regs[first..first + usize::from(count)].iter().filter(|k| !matches!(k, Value::Symbol(_))).map(|&k| a.property_key(k)).collect::<Result<Vec<_>, _>>()?;
+                        let o = a.object();
+                        a.copy_data(o, regs[r(src)], &exclude)?;
+                        *acc = o.into();
+                    }
+                    Insn::CreateClosure(n) => {
+                        let mut closure = Closure::new(FuncId(loaded.base + n), f.env);
+                        if self.function(closure.func).func.kind == FunctionKind::Arrow {
+                            closure.home = Self::current(regs, f).and_then(|c| c.home);
+                        }
+                        *acc = self.function_object(a, closure, a.realm.function_proto).into();
+                    }
+                    Insn::CreateMethod { func: n, home } => {
+                        let mut closure = Closure::new(FuncId(loaded.base + n), f.env);
+                        if let Value::Object(h) = regs[r(home)] {
+                            closure.home = Some(h);
+                        }
+                        *acc = self.function_object(a, closure, a.realm.function_proto).into();
+                    }
+                    Insn::CreateClass { func: n, parent, proto } => {
+                        let (proto_parent, ctor_parent) = Self::class_parents(a, parent.map(|p| regs[r(p)]))?;
+                        let p = ObjectData { proto: proto_parent, ..ObjectData::default() }.alloc(a.mc);
+                        let mut closure = Closure::new(FuncId(loaded.base + n), f.env);
+                        closure.home = Some(p);
+                        let ctor = self.function_object(a, closure, ctor_parent);
+                        ctor.borrow_mut(a.mc).define("prototype", Property { slot: Slot::Data(p.into()), enumerable: false, writable: false, configurable: false });
+                        p.borrow_mut(a.mc).define("constructor", Property::hidden(ctor.into()));
+                        regs[r(proto)] = p.into();
+                        *acc = ctor.into();
+                    }
+                    Insn::SetClassFields { ctor } => {
+                        if let (Value::Object(c), Value::Object(init)) = (regs[r(ctor)], *acc)
+                            && let ObjectKind::Function(closure) = &mut c.borrow_mut(a.mc).kind
+                        {
+                            closure.fields = Some(init);
+                        }
+                    }
+                    Insn::DefineNamed { obj, name, kind, enumerable } => Self::define(a, regs[r(obj)], func.name_at(name), kind, enumerable, *acc)?,
+                    Insn::DefineKeyed { obj, key, kind, enumerable } => {
+                        if let Value::Object(o) = regs[r(obj)] {
+                            let k = regs[r(key)];
+                            match (kind, *acc) {
+                                (PropertyKind::Data, v) => a.define_keyed(o, k, Property { slot: Slot::Data(v), enumerable, writable: true, configurable: true })?,
+                                (PropertyKind::Getter | PropertyKind::Setter, Value::Object(func)) => a.define_accessor_keyed(o, k, func, kind == PropertyKind::Setter, enumerable)?,
+                                _ => {}
+                            }
+                        }
+                    }
+                    Insn::GetSuper { this, name } => {
+                        let base = Self::super_base(a, regs, f)?;
+                        *acc = a.get(base, func.name_at(name), regs[r(this)])?;
+                    }
+                    Insn::GetSuperKeyed { this } => {
+                        let base = Self::super_base(a, regs, f)?;
+                        let k = a.property_key(*acc)?;
+                        *acc = a.get(base, &k, regs[r(this)])?;
+                    }
+                    Insn::SuperCall { args, argc } => {
+                        let first = r(args);
+                        let list = regs[first..first + usize::from(argc)].to_vec();
+                        *acc = Self::super_call(a, regs, f, &list)?;
+                    }
+                    Insn::SuperCallForward => {
+                        let list = core::mem::take(&mut f.args);
+                        *acc = Self::super_call(a, regs, f, &list)?;
+                    }
+                    Insn::Construct { callee, args, argc } => {
+                        let level = depth + frames.len() + 1;
+                        if level >= STACK_LIMIT {
+                            return Err(a.throw(ErrorKind::Range, "Maximum call stack size exceeded"));
+                        }
+                        let first = r(args);
+                        let list = regs[first..first + usize::from(argc)].to_vec();
+                        let c = regs[r(callee)];
+                        match self.prepare(a, regs, c, list, c, level)? {
+                            Prepared::Frame(next) => {
+                                frames.push(core::mem::replace(f, next));
+                                continue 'frame;
+                            }
+                            Prepared::Done(v) => *acc = v,
+                        }
+                    }
+                    Insn::InstanceOf(x) => *acc = a.instance_of(regs[r(x)], *acc)?.into(),
+                    Insn::In(x) => *acc = a.has_keyed(*acc, regs[r(x)])?.into(),
+                    Insn::DeleteNamed { obj, name, strict } => {
+                        let ok = a.delete(regs[r(obj)], func.name_at(name))?;
+                        Self::check_delete(a, ok, strict)?;
+                        *acc = ok.into();
+                    }
+                    Insn::DeleteKeyed { obj, strict } => {
+                        let ok = a.delete_keyed(regs[r(obj)], *acc)?;
+                        Self::check_delete(a, ok, strict)?;
+                        *acc = ok.into();
+                    }
+                    Insn::CreateObject => *acc = a.object().into(),
+                    Insn::CreateArray { first, count } => *acc = a.array(regs[r(first)..r(first) + usize::from(count)].to_vec()).into(),
+                    Insn::GetNamed { obj, name } => *acc = a.get_named(regs[r(obj)], func.name_at(name))?,
+                    Insn::SetNamed { obj, name, strict } => a.put_named(regs[r(obj)], func.name_at(name), *acc, strict)?,
+                    Insn::GetKeyed { obj } => *acc = a.get_keyed(regs[r(obj)], *acc)?,
+                    Insn::SetKeyed { obj, key, strict } => a.put_keyed(regs[r(obj)], regs[r(key)], *acc, strict)?,
+                    Insn::CallEval { callee, args, argc, scope, .. } if matches!(regs[r(callee)], Value::Object(o) if Gc::ptr_eq(o, a.realm.eval)) => {
+                        let first = if argc == 0 { None } else { Some(regs[r(args)]) };
+                        *acc = match first {
+                            None => Value::Undefined,
+                            Some(Value::String(s)) => {
+                                let src = alloc::string::String::from(&**s);
+                                let table = &func.scopes[usize::from(scope)];
+                                self.direct_eval(a, &src, table, f.env, func.mode == Mode::Strict, depth + frames.len() + 1)?
+                            }
+                            Some(v) => v,
+                        };
+                    }
+                    Insn::Call { callee, this, args, argc } | Insn::CallEval { callee, this, args, argc, .. } => {
+                        let level = depth + frames.len() + 1;
+                        if level >= STACK_LIMIT {
+                            return Err(a.throw(ErrorKind::Range, "Maximum call stack size exceeded"));
+                        }
+                        let first = r(args);
+                        // 快路：被调的是普通 JS 函数（不是类构造器 / 生成器 / async），直接从寄存器开帧
+                        let target = regs[r(callee)];
+                        if matches!(insn, Insn::Call { .. })
+                            && let Some((c, loaded)) = self.plain_closure(target)
+                        {
+                            let mut next = Self::enter_regs(a, regs, &loaded.func, c, target, regs[r(this)], first, usize::from(argc));
+                            if !self.tiered(&loaded, regs, &mut next, acc) {
+                                frames.push(core::mem::replace(f, next));
+                                continue 'frame;
+                            }
+                            continue;
+                        }
+                        let list = regs[first..first + usize::from(argc)].to_vec();
+                        match self.resolve(a, regs[r(callee)], regs[r(this)], list, level)? {
+                            Callee::Closure { closure, callee, this, args } => {
+                                let next = self.enter(a, regs, closure, callee, this, &args);
+                                frames.push(core::mem::replace(f, next));
+                                continue 'frame;
+                            }
+                            Callee::Done(v) => *acc = v,
+                        }
+                    }
+                    Insn::PushHandler(target) => f.handlers.push(Handler { target: target.0, env: f.env }),
+                    Insn::PopHandler => _ = f.handlers.pop(),
+                    Insn::Throw => return Err(a.throw_value(*acc)),
+                    Insn::Return => {
+                        if !matches!(f.new_target, Value::Undefined) {
+                            *acc = self.construct_result(a, f, *acc)?;
+                        }
+                        match frames.pop() {
+                            Some(caller) => {
+                                regs.truncate(f.base);
+                                *f = caller;
+                                continue 'frame;
+                            }
+                            None => return Ok(Some(Outcome::Return(*acc))),
+                        }
+                    }
+                    Insn::Yield { mode } | Insn::Await { mode } => {
+                        debug_assert!(frames.is_empty() && f.base == 0, "a coroutine suspends from its own bottom frame");
+                        let saved = Suspended {
+                            func: f.func,
+                            pc: f.pc,
+                            regs: core::mem::take(regs),
+                            env: f.env,
+                            handlers: f.handlers.drain(..).map(|h| (h.target, h.env)).collect(),
+                            args: core::mem::take(&mut f.args),
+                            mode: Some(mode.0),
+                        };
+                        return Ok(Some(Outcome::Suspend { value: *acc, awaiting: matches!(insn, Insn::Await { .. }), saved }));
+                    }
+                    Insn::GetIterator { dst } => {
+                        let rec = a.get_iterator(*acc)?;
+                        let d = r(dst);
+                        regs[d] = rec.iterator;
+                        regs[d + 1] = rec.next;
+                        regs[d + 2] = false.into();
+                    }
+                    Insn::IteratorNext { iter } => {
+                        let d = r(iter);
+                        *acc = Value::Undefined;
+                        if !a.to_boolean(regs[d + 2]) {
+                            // 走一步出错也算走完（不再调 `return`）
+                            regs[d + 2] = true.into();
+                            if let Some(v) = a.iterator_step(IterRecord { iterator: regs[d], next: regs[d + 1] })? {
+                                regs[d + 2] = false.into();
+                                *acc = v;
+                            }
+                        }
+                    }
+                    Insn::IteratorRest { iter } => {
+                        let d = r(iter);
+                        let mut rest = Vec::new();
+                        if !a.to_boolean(regs[d + 2]) {
+                            regs[d + 2] = true.into();
+                            let rec = IterRecord { iterator: regs[d], next: regs[d + 1] };
+                            while let Some(v) = a.iterator_step(rec)? {
+                                rest.push(v);
+                            }
+                        }
+                        *acc = a.array(rest).into();
+                    }
+                    Insn::IteratorClose { iter } => {
+                        let d = r(iter);
+                        if !a.to_boolean(regs[d + 2]) {
+                            regs[d + 2] = true.into();
+                            a.iterator_close(regs[d])?;
+                        }
+                    }
+                    Insn::IteratorCloseQuiet { iter } => {
+                        let d = r(iter);
+                        if !a.to_boolean(regs[d + 2]) {
+                            regs[d + 2] = true.into();
+                            // 原来的异常优先：`return` 不可调或自己抛错都不管
+                            match a.iterator_close(regs[d]) {
+                                Ok(()) | Err(Error::Exception(_)) => {}
+                                Err(e) => return Err(e),
+                            }
+                        }
+                    }
+                    Insn::CreatePrivateName { desc } => *acc = Value::Symbol(a.private_name(func.name_at(desc))),
+                    Insn::GetPrivate { obj } => *acc = a.private_get(regs[r(obj)], Self::private_key(*acc))?,
+                    Insn::SetPrivate { obj, key } => a.private_set(regs[r(obj)], Self::private_key(regs[r(key)]), *acc)?,
+                    Insn::DefinePrivate { obj, key, kind, writable } => {
+                        let slot = match (kind, *acc) {
+                            (PropertyKind::Getter, Value::Object(f)) => Slot::Accessor { get: Some(f), set: None },
+                            (PropertyKind::Setter, Value::Object(f)) => Slot::Accessor { get: None, set: Some(f) },
+                            (_, v) => Slot::Data(v),
+                        };
+                        let prop = Property { slot, enumerable: false, writable, configurable: false };
+                        a.private_define(regs[r(obj)], Self::private_key(regs[r(key)]), prop)?;
+                    }
+                    Insn::HasPrivate { obj } => *acc = a.private_has(regs[r(obj)], Self::private_key(*acc))?.into(),
+                    Insn::ToPropertyKey => {
+                        if !matches!(*acc, Value::Symbol(_)) {
+                            *acc = a.property_key(*acc)?.into();
+                        }
+                    }
+                    Insn::GetAsyncIterator { dst } => {
+                        let d = r(dst);
+                        let v = *acc;
+                        let method = if v.is_nullish() { Value::Undefined } else { a.get_symbol(v, a.realm.symbols.async_iterator, v)? };
+                        let (iterator, next, sync) = if method.is_nullish() {
+                            let rec = a.get_iterator(v)?;
+                            (rec.iterator, rec.next, true)
+                        } else {
+                            let it = a.call(method, v, &[])?;
+                            if !matches!(it, Value::Object(_)) {
+                                return Err(a.throw(ErrorKind::Type, "Result of the Symbol.asyncIterator method is not an object"));
+                            }
+                            let next = a.get_named(it, "next")?;
+                            (it, next, false)
+                        };
+                        regs[d] = iterator;
+                        regs[d + 1] = next;
+                        regs[d + 2] = false.into();
+                        regs[d + 3] = sync.into();
+                    }
+                    Insn::IteratorCall { iter } => {
+                        let d = r(iter);
+                        *acc = a.call(regs[d + 1], regs[d], &[])?;
+                    }
+                    Insn::IteratorResult { iter } => {
+                        let d = r(iter);
+                        let result = *acc;
+                        if !matches!(result, Value::Object(_)) {
+                            regs[d + 2] = true.into();
+                            let what = a.to_string(result)?;
+                            return Err(a.throw(ErrorKind::Type, &alloc::format!("Iterator result {} is not an object", &**what)));
+                        }
+                        let done = a.get_named(result, "done")?;
+                        if a.to_boolean(done) {
+                            regs[d + 2] = true.into();
+                            *acc = Value::Undefined;
+                        } else {
+                            *acc = a.get_named(result, "value")?;
+                        }
+                    }
+                    Insn::AsyncIteratorReturn { iter } => {
+                        let d = r(iter);
+                        *acc = Value::Undefined;
+                        if !a.to_boolean(regs[d + 2]) {
+                            regs[d + 2] = true.into();
+                            let ret = a.get_named(regs[d], "return")?;
+                            if !ret.is_nullish() {
+                                *acc = a.call(ret, regs[d], &[])?;
+                            }
+                        }
+                    }
+                    Insn::LdaNewTarget => *acc = f.new_target,
+                    Insn::CreateArguments => *acc = Self::arguments(a, regs, f, func.mode.into(), &func.mapped_params)?,
+                    Insn::GetTemplateObject { site, first, count } => {
+                        let key = (f.func.0, site);
+                        let cached = a.realm.templates.borrow().get(&key).copied();
+                        *acc = match cached {
+                            Some(o) => o.into(),
+                            None => {
+                                let (start, n) = (r(first), usize::from(count));
+                                let cooked = a.array(regs[start..start + n].to_vec());
+                                let raw = a.array(regs[start + n..start + 2 * n].to_vec());
+                                let frozen = |v: Value<'gc>| Property { slot: Slot::Data(v), enumerable: false, writable: false, configurable: false };
+                                cooked.borrow_mut(a.mc).define("raw", frozen(raw.into()));
+                                a.realm.templates.borrow_mut(a.mc).insert(key, cooked);
+                                cooked.into()
+                            }
+                        };
+                    }
+                    Insn::ForInKeys => {
+                        let keys = a.for_in_keys(*acc)?;
+                        *acc = a.array(keys).into();
+                    }
+                    Insn::DelegateStep { iter, mode } => {
+                        let d = r(iter);
+                        let it = regs[d];
+                        let result = match Self::mode(regs[r(mode)]) {
+                            Resume::Next => a.call(regs[d + 1], it, &[*acc])?,
+                            Resume::Throw => {
+                                let th = a.get_named(it, "throw")?;
+                                if th.is_nullish() {
+                                    a.iterator_close(it)?;
+                                    return Err(a.throw(ErrorKind::Type, "The iterator does not provide a 'throw' method"));
+                                }
+                                a.call(th, it, &[*acc])?
+                            }
+                            Resume::Return => {
+                                let ret = a.get_named(it, "return")?;
+                                if ret.is_nullish() { a.iter_result(*acc, true).into() } else { a.call(ret, it, &[*acc])? }
+                            }
+                        };
+                        if !matches!(result, Value::Object(_)) {
+                            return Err(a.throw(ErrorKind::Type, "Iterator result is not an object"));
+                        }
+                        *acc = result;
+                    }
                 }
             }
         }

@@ -929,9 +929,14 @@ impl<'a> Compiler<'a, '_> {
 
     /// 把 acc 存进一个名字；`init` 是声明里的初始化（`const` 只许这一次，也不查死区）。
     pub(crate) fn store(&mut self, name: &'a str, init: bool) {
+        self.store_at(name, init, 0);
+    }
+
+    /// 同 [`store`](Self::store)，`pos` 是赋值处在源码里的位置：声明之后的不用查死区。
+    pub(crate) fn store_at(&mut self, name: &'a str, init: bool, pos: u32) {
         let chain = self.with_chain(name);
         if chain.is_empty() {
-            return self.store_static(name, init);
+            return self.store_static(name, init, pos);
         }
         // `with` 里：对象上有这个名字就写它，否则写静态绑定
         let value = self.temp();
@@ -951,7 +956,7 @@ impl<'a> Compiler<'a, '_> {
             self.land(skip);
         }
         self.emit(Insn::Ldar(value));
-        self.store_static(name, init);
+        self.store_static(name, init, pos);
         for e in ends {
             self.land(e);
         }
@@ -960,7 +965,7 @@ impl<'a> Compiler<'a, '_> {
         self.release(value);
     }
 
-    fn store_static(&mut self, name: &'a str, init: bool) {
+    fn store_static(&mut self, name: &'a str, init: bool, pos: u32) {
         if !init && self.is_self_name(name) {
             if self.strict_here() {
                 self.emit(Insn::ThrowConstAssign);
@@ -972,7 +977,7 @@ impl<'a> Compiler<'a, '_> {
             self.emit(Insn::ThrowConstAssign);
             return;
         }
-        if !init && r.needs_check(0) {
+        if !init && r.needs_check(pos) {
             let k = self.name(name);
             match r.place {
                 Place::Reg(reg) => _ = self.emit(Insn::CheckReg { reg, name: k }),
