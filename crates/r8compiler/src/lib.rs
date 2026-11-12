@@ -26,7 +26,7 @@ pub use lower::Unsupported;
 use alloc::vec::Vec;
 
 use mlirpass::mlirformat::MlirOpt;
-use mlirpass::{Body, Ctx, Emit, Interfaces, X86_64Emit};
+use mlirpass::{Body, Ctx, Emit, Interfaces, PassManager, Passes, X86_64Emit};
 use r8virtasm::Function;
 
 /// 一个函数的机器码：字节与要填的绝对地址（运行时函数）。
@@ -61,22 +61,30 @@ pub enum CompileError {
 pub struct Compiler {
     opt: MlirOpt,
     interfaces: Interfaces<'static>,
+    /// 出机器码之前的优化：局部变量提成 SSA（mem2reg）、化简、公共子表达式
+    pipeline: PassManager,
 }
 
 impl Default for Compiler {
-    /// 只装要用的：builtin（`module`）与 `llvm` 方言、`llvm` 的手写形式（`llvm.func` / `icmp` / `call` / …）；
-    /// 出机器码不问 op 接口。比 `MlirOpt::upstream()` 轻得多（JIT 第一次编函数时才建）。
+    /// 只装要用的：builtin（`module`）与 `llvm` 方言、`llvm` 的手写形式（`llvm.func` / `icmp` / `call` / …）。
+    /// 比 `MlirOpt::upstream()` 轻得多（JIT 第一次编函数时才建）。
     fn default() -> Self {
         let mut opt = MlirOpt::new();
         opt.load(mlirpass::mlirformat::builtin::BuiltinDialect).load(mlirpass::mlirformat::llvm::LlvmDialect);
         for t in mlirpass::mlirformat::llvm_hand::LlvmHand::templates() {
             opt.inject(t);
         }
-        Self { opt, interfaces: Interfaces::new() }
+        let passes = Passes::upstream();
+        let mut pipeline = PassManager::parse(&passes, Self::PIPELINE).expect("the pipeline names passes mlirpass always has");
+        pipeline.verify_each = false;
+        Self { opt, interfaces: Interfaces::upstream(), pipeline }
     }
 }
 
 impl Compiler {
+    /// 出机器码之前跑的 pass
+    const PIPELINE: &str = "builtin.module(llvm.func(mem2reg, canonicalize, cse))";
+
     /// 字节码函数 ⇒ 机器码。
     pub fn compile(&self, func: &Function) -> Result<Native, CompileError> {
         let lowered = lower::Lower::module(func);
@@ -84,7 +92,9 @@ impl Compiler {
             return Err(CompileError::Useless);
         }
         let backend = |e: mlirpass::mlirformat::Error| CompileError::Backend(e.0);
-        let body = Body::parse(Ctx::new(&self.opt, &self.interfaces), &lowered.text).map_err(backend)?;
+        let mut body = Body::parse(Ctx::new(&self.opt, &self.interfaces), &lowered.text).map_err(backend)?;
+        let root = body.root;
+        self.pipeline.run(&mut body, root).map_err(backend)?;
         let codes = X86_64Emit.emit(&body, body.root).map_err(backend)?;
         let code = codes.into_iter().find(|c| c.name == lower::ENTRY).ok_or_else(|| CompileError::Backend("no entry function".into()))?;
         let relocs = code

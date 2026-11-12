@@ -43,7 +43,7 @@ r8virtasm = { path = "crates/r8virtasm", default-features = false }
 r8executor = { path = "crates/r8executor" }
 r8compiler = { path = "crates/r8compiler" }
 r8jit = { path = "crates/r8jit" }
-mlirpass = { version = "=0.10.3", default-features = false, features = ["target.x86_64"] }
+mlirpass = { version = "=0.10.4", default-features = false, features = ["target.x86_64"] }
 libc = "0.2"
 r8macros = { path = "crates/macros" }
 r8binding = { path = "crates/r8binding" }

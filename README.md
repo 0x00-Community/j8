@@ -66,8 +66,10 @@ cargo build --target riscv64gc-unknown-none-elf -p r8frame -p r8virtasm -p r8exe
   两样都没有的函数不编
 - `r8jit`（std，x86-64 Unix）：实现执行器的 `Tier`（`Executor::with_tier`）：调用次数过阈值（缺省 100）或循环圈数过 10 倍阈值就编、
   `mmap` 成可执行内存、填运行时函数地址；回答 `Tiered::Never` 的函数执行器记下、以后不再问
-- 机器码后端是 mlirpass（crates.io，`=0.10.3`，`target.x86_64`）；MLIR 用 `llvm` 方言的自定义写法（mlirformat 0.8.1 起真解析）
-- 还没有：寄存器分配（后端每个值一个栈槽）、调用 / 属性 / 全局名等快路
+- 寄存器文件与累加器在机器码里是局部变量（每个寄存器一对 `llvm.alloca`：标签、载荷）：进来时从帧读一次、所有出口经同一个写回块写回帧；
+  出机器码前跑 mlirpass `llvm.func(mem2reg, canonicalize, cse)`，局部变量提成 SSA，块之间按块参数传值
+- 机器码后端是 mlirpass（crates.io，`=0.10.4`，`target.x86_64`，带线性扫描寄存器分配）；MLIR 用 `llvm` 方言的自定义写法（mlirformat 0.8.1 起真解析）
+- 还没有：调用 / 属性 / 全局名等快路
 
 ## 字节码
 

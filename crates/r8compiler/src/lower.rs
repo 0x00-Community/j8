@@ -50,8 +50,9 @@ const ICMP_NE: &str = "ne";
 
 /// 一个字节码函数 ⇒ MLIR 文本（`llvm` 方言）。
 ///
-/// 每条指令一个块 `^iN`；要退回解释器的指令另有 `^dN`（返回 `N + 1`）。累加器与寄存器都在内存里
-/// （`%acc` / `%regs` 指向的 [`Value`](r8frame::Value)），每条指令读写它们，块之间不传值。
+/// 每条指令一个块 `^iN`；要退回解释器的指令另有 `^dN`（返回 `N + 1`）。累加器与每个寄存器是一对局部变量
+/// （`llvm.alloca`：标签、载荷）：入口从帧（`%acc` / `%regs` 指向的 [`Value`](r8frame::Value)）读进来，
+/// 所有出口都跳到写回块 `^x` 写回帧再返回；局部变量之后由 mem2reg 提成 SSA。
 pub(crate) struct Lower<'f> {
     func: &'f Function,
     out: String,
@@ -90,14 +91,22 @@ impl<'f> Lower<'f> {
         }
         if func.insns.is_empty() {
             l.label("i0");
-            l.line("%r = llvm.mlir.constant(0 : i64) : i64");
-            l.line("llvm.return %r : i64");
+            let z = l.int(0, 64);
+            l.line(&alloc::format!("llvm.br ^x({z} : i64)"));
         }
         for pc in core::mem::take(&mut l.deopts) {
             l.label(&alloc::format!("d{pc}"));
             let c = l.int(u64::from(pc) + 1, 64);
-            l.line(&alloc::format!("llvm.return {c} : i64"));
+            l.line(&alloc::format!("llvm.br ^x({c} : i64)"));
         }
+        // 收尾块：局部变量一次写回帧里，带着出口码返回
+        l.label("x(%code: i64)");
+        for (local, base, at) in l.locals() {
+            let w = l.def(&alloc::format!("llvm.load {local} : !llvm.ptr -> i64"));
+            let p = l.frame_addr(base, at);
+            l.line(&alloc::format!("llvm.store {w}, {p} : i64, !llvm.ptr"));
+        }
+        l.line("llvm.return %code : i64");
         let mut m = String::from("module {\n");
         for h in &l.helpers {
             let _ = writeln!(m, "  llvm.func @{h}(f64, f64) -> f64");
@@ -109,6 +118,15 @@ impl<'f> Lower<'f> {
         headers.dedup();
         // 入口分派：`%start` 是 0 从头进，`h + 1` 从循环头 `h` 进（OSR）
         let mut dispatch = Lower { func, out: String::new(), next: l.next, deopts: BTreeSet::new(), helpers: BTreeSet::new(), exits: Vec::new() };
+        // 局部变量（mem2reg 提成 SSA），从帧里读一次
+        dispatch.line("%one = llvm.mlir.constant(1 : i64) : i64");
+        for (local, base, at) in dispatch.locals() {
+            // 通用写法：mlirformat 还读不懂 `llvm.alloca` 的自定义写法
+            dispatch.line(&alloc::format!("{local} = \"llvm.alloca\"(%one) <{{elem_type = i64}}> : (i64) -> !llvm.ptr"));
+            let p = dispatch.frame_addr(base, at);
+            let w = dispatch.def(&alloc::format!("llvm.load {p} : !llvm.ptr -> i64"));
+            dispatch.line(&alloc::format!("llvm.store {w}, {local} : i64, !llvm.ptr"));
+        }
         for &h in &headers {
             let k = dispatch.int(u64::from(h) + 1, 64);
             let hit = dispatch.icmp(ICMP_EQ, "%start", &k, "i64");
@@ -166,23 +184,51 @@ impl<'f> Lower<'f> {
         self.def(&alloc::format!("llvm.mlir.constant(0x{:016X} : f64) : f64", x.to_bits()))
     }
 
-    /// 寄存器 `r` 的值（`%regs` 里第 r 个）第 `off` 字节的地址
-    fn reg_addr(&mut self, r: Reg, off: usize) -> V {
-        let at = usize::from(r.0) * ValueTag::SIZE + off;
-        self.def(&alloc::format!("llvm.getelementptr %regs[{at}] : (!llvm.ptr) -> !llvm.ptr, i8"))
+    /// 寄存器 `r` 的标签字（`off` 0）或载荷字（`off` = 载荷偏移）所在的局部变量
+    fn reg_addr(r: Reg, off: usize) -> V {
+        if off == 0 { alloc::format!("%rt{}", r.0) } else { alloc::format!("%rp{}", r.0) }
     }
 
-    /// 累加器第 `off` 字节的地址
-    fn acc_addr(&mut self, off: usize) -> V {
-        self.def(&alloc::format!("llvm.getelementptr %acc[{off}] : (!llvm.ptr) -> !llvm.ptr, i8"))
+    /// 累加器的标签字 / 载荷字所在的局部变量
+    fn acc_addr(off: usize) -> V {
+        String::from(if off == 0 { "%at" } else { "%ap" })
     }
 
+    /// 读局部变量（都按 i64 存）成 `ty`：`i8` 取低字节（标签、布尔），`f64` 按位换（数）
     fn load(&mut self, p: &str, ty: &str) -> V {
-        self.def(&alloc::format!("llvm.load {p} : !llvm.ptr -> {ty}"))
+        let w = self.def(&alloc::format!("llvm.load {p} : !llvm.ptr -> i64"));
+        match ty {
+            "i8" => self.def(&alloc::format!("llvm.trunc {w} : i64 to i8")),
+            "f64" => self.def(&alloc::format!("llvm.bitcast {w} : i64 to f64")),
+            _ => w,
+        }
     }
 
+    /// 写局部变量：`ty` 的值按 i64 存
     fn store(&mut self, v: &str, p: &str, ty: &str) {
-        self.line(&alloc::format!("llvm.store {v}, {p} : {ty}, !llvm.ptr"));
+        let w = match ty {
+            "i8" => self.def(&alloc::format!("llvm.zext {v} : i8 to i64")),
+            "f64" => self.def(&alloc::format!("llvm.bitcast {v} : f64 to i64")),
+            _ => String::from(v),
+        };
+        self.line(&alloc::format!("llvm.store {w}, {p} : i64, !llvm.ptr"));
+    }
+
+    /// 帧里（`%regs` / `%acc`）第 `at` 字节的地址
+    fn frame_addr(&mut self, base: &str, at: usize) -> V {
+        self.def(&alloc::format!("llvm.getelementptr {base}[{at}] : (!llvm.ptr) -> !llvm.ptr, i8"))
+    }
+
+    /// 全部局部变量：（局部变量, 帧里的基址, 字节偏移）
+    fn locals(&self) -> Vec<(String, &'static str, usize)> {
+        let mut out = Vec::new();
+        for r in 0..usize::from(self.func.regs) {
+            out.push((alloc::format!("%rt{r}"), "%regs", r * ValueTag::SIZE));
+            out.push((alloc::format!("%rp{r}"), "%regs", r * ValueTag::SIZE + ValueTag::PAYLOAD));
+        }
+        out.push((String::from("%at"), "%acc", 0));
+        out.push((String::from("%ap"), "%acc", ValueTag::PAYLOAD));
+        out
     }
 
     /// 地址 `p` 处的值是不是标签 `tag`（i1）
@@ -211,7 +257,7 @@ impl<'f> Lower<'f> {
 
     /// 累加器写成数 `x`
     fn put_number(&mut self, x: &str) {
-        let (tp, pp) = (self.acc_addr(0), self.acc_addr(ValueTag::PAYLOAD));
+        let (tp, pp) = (Self::acc_addr(0), Self::acc_addr(ValueTag::PAYLOAD));
         let tag = self.int(u64::from(ValueTag::NUMBER), 64);
         self.store(&tag, &tp, "i64");
         self.store(x, &pp, "f64");
@@ -219,7 +265,7 @@ impl<'f> Lower<'f> {
 
     /// 累加器写成布尔 `b`（i1）
     fn put_bool(&mut self, b: &str) {
-        let (tp, pp) = (self.acc_addr(0), self.acc_addr(ValueTag::PAYLOAD));
+        let (tp, pp) = (Self::acc_addr(0), Self::acc_addr(ValueTag::PAYLOAD));
         let tag = self.int(u64::from(ValueTag::BOOL), 64);
         self.store(&tag, &tp, "i64");
         let byte = self.def(&alloc::format!("llvm.zext {b} : i1 to i8"));
@@ -228,7 +274,7 @@ impl<'f> Lower<'f> {
 
     /// 累加器写成只有标签的值（undefined / null / 未初始化）
     fn put_tag(&mut self, tag: u8) {
-        let tp = self.acc_addr(0);
+        let tp = Self::acc_addr(0);
         let t = self.int(u64::from(tag), 64);
         self.store(&t, &tp, "i64");
     }
@@ -242,20 +288,20 @@ impl<'f> Lower<'f> {
 
     /// 寄存器 `r` 与累加器都是数：给出（r 的数, 累加器的数），不是就退回解释器。
     fn numbers(&mut self, pc: u32, r: Reg) -> (V, V) {
-        let (rt, at) = (self.reg_addr(r, 0), self.acc_addr(0));
+        let (rt, at) = (Self::reg_addr(r, 0), Self::acc_addr(0));
         let (a, b) = (self.tag_is(&rt, ValueTag::NUMBER), self.tag_is(&at, ValueTag::NUMBER));
         let both = self.def(&alloc::format!("llvm.and {a}, {b} : i1"));
         self.guard(pc, &both);
-        let (rp, ap) = (self.reg_addr(r, ValueTag::PAYLOAD), self.acc_addr(ValueTag::PAYLOAD));
+        let (rp, ap) = (Self::reg_addr(r, ValueTag::PAYLOAD), Self::acc_addr(ValueTag::PAYLOAD));
         (self.load(&rp, "f64"), self.load(&ap, "f64"))
     }
 
     /// 累加器是数：给出它，不是就退回解释器。
     fn acc_number(&mut self, pc: u32) -> V {
-        let at = self.acc_addr(0);
+        let at = Self::acc_addr(0);
         let ok = self.tag_is(&at, ValueTag::NUMBER);
         self.guard(pc, &ok);
-        let ap = self.acc_addr(ValueTag::PAYLOAD);
+        let ap = Self::acc_addr(ValueTag::PAYLOAD);
         self.load(&ap, "f64")
     }
 
@@ -265,7 +311,7 @@ impl<'f> Lower<'f> {
 
     /// ToBoolean(acc)，只认布尔 / 数 / undefined / null，别的退回解释器。
     fn truthy(&mut self, pc: u32) -> V {
-        let at = self.acc_addr(0);
+        let at = Self::acc_addr(0);
         let is_bool = self.tag_is(&at, ValueTag::BOOL);
         let is_num = self.tag_is(&at, ValueTag::NUMBER);
         let is_undef = self.tag_is(&at, ValueTag::UNDEFINED);
@@ -274,7 +320,7 @@ impl<'f> Lower<'f> {
         let k2 = self.def(&alloc::format!("llvm.or {is_undef}, {is_null} : i1"));
         let known = self.def(&alloc::format!("llvm.or {k1}, {k2} : i1"));
         self.guard(pc, &known);
-        let pp = self.acc_addr(ValueTag::PAYLOAD);
+        let pp = Self::acc_addr(ValueTag::PAYLOAD);
         let byte = self.load(&pp, "i8");
         let zero8 = self.int(0, 8);
         let b = self.icmp(ICMP_NE, &byte, &zero8, "i8");
@@ -296,7 +342,7 @@ impl<'f> Lower<'f> {
         let name = ret.trim_start_matches('%');
         self.line(&alloc::format!("llvm.cond_br {whole}, ^r{name}, ^d{pc}"));
         self.label(&alloc::format!("r{name}"));
-        self.line(&alloc::format!("llvm.return {z} : i64"));
+        self.line(&alloc::format!("llvm.br ^x({z} : i64)"));
     }
 
     fn insn(&mut self, pc: u32, insn: Insn) -> Result<(), Unsupported> {
@@ -317,13 +363,13 @@ impl<'f> Lower<'f> {
                 _ => return Err(unsupported),
             },
             Insn::Ldar(r) => {
-                let from = (self.reg_addr(r, 0), self.reg_addr(r, ValueTag::PAYLOAD));
-                let to = (self.acc_addr(0), self.acc_addr(ValueTag::PAYLOAD));
+                let from = (Self::reg_addr(r, 0), Self::reg_addr(r, ValueTag::PAYLOAD));
+                let to = (Self::acc_addr(0), Self::acc_addr(ValueTag::PAYLOAD));
                 self.copy(&from, &to);
             }
             Insn::Star(r) => {
-                let from = (self.acc_addr(0), self.acc_addr(ValueTag::PAYLOAD));
-                let to = (self.reg_addr(r, 0), self.reg_addr(r, ValueTag::PAYLOAD));
+                let from = (Self::acc_addr(0), Self::acc_addr(ValueTag::PAYLOAD));
+                let to = (Self::reg_addr(r, 0), Self::reg_addr(r, ValueTag::PAYLOAD));
                 self.copy(&from, &to);
             }
             Insn::Binary(op, r) => {
@@ -357,14 +403,14 @@ impl<'f> Lower<'f> {
                 self.put_number(&v);
             }
             Insn::CheckInit { .. } => {
-                let at = self.acc_addr(0);
+                let at = Self::acc_addr(0);
                 let t = self.load(&at, "i8");
                 let u = self.int(u64::from(ValueTag::UNINIT), 8);
                 let ok = self.icmp(ICMP_NE, &t, &u, "i8");
                 self.guard(pc, &ok);
             }
             Insn::CheckReg { reg, .. } => {
-                let at = self.reg_addr(reg, 0);
+                let at = Self::reg_addr(reg, 0);
                 let t = self.load(&at, "i8");
                 let u = self.int(u64::from(ValueTag::UNINIT), 8);
                 let ok = self.icmp(ICMP_NE, &t, &u, "i8");

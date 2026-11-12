@@ -413,9 +413,9 @@ dependencies = [
 
 [[package]]
 name = "mlirpass"
-version = "0.10.3"
+version = "0.10.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "48b7d6434dc8f8898c86030c967cf553e768a4525d52246cddda11450eae889c"
+checksum = "b4deaf752b92a68669599eb7dc476ba9c5a8097cf621352a60802e3d7978f00b"
 dependencies = [
  "libm",
  "mlirformat",
@@ -843,27 +843,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "r8virtasm"
-version = "0.1.0"
-dependencies = [
- "oxc_allocator",
- "oxc_ast",
- "oxc_parser",
- "oxc_semantic",
- "oxc_span",
- "oxc_syntax",
- "r8frame",
- "r8macros",
- "ryu-js",
-]
-
-[[package]]
 name = "r8compiler"
 version = "0.1.0"
 dependencies = [
  "mlirpass",
- "r8virtasm",
  "r8frame",
+ "r8virtasm",
 ]
 
 [[package]]
@@ -871,8 +856,8 @@ name = "r8debugger"
 version = "0.1.0"
 dependencies = [
  "clap",
- "r8virtasm",
  "r8frame",
+ "r8virtasm",
 ]
 
 [[package]]
@@ -881,9 +866,9 @@ version = "0.1.0"
 dependencies = [
  "gc-arena",
  "r8builtins",
- "r8virtasm",
  "r8frame",
  "r8platform",
+ "r8virtasm",
  "ryu-js",
 ]
 
@@ -906,10 +891,10 @@ name = "r8jit"
 version = "0.1.0"
 dependencies = [
  "libc",
- "r8virtasm",
  "r8compiler",
  "r8executor",
  "r8frame",
+ "r8virtasm",
 ]
 
 [[package]]
@@ -929,6 +914,21 @@ version = "0.1.0"
 dependencies = [
  "moremath",
  "r8frame",
+]
+
+[[package]]
+name = "r8virtasm"
+version = "0.1.0"
+dependencies = [
+ "oxc_allocator",
+ "oxc_ast",
+ "oxc_parser",
+ "oxc_semantic",
+ "oxc_span",
+ "oxc_syntax",
+ "r8frame",
+ "r8macros",
+ "ryu-js",
 ]
 
 [[package]]
