@@ -1,4 +1,4 @@
-//! r8bytecode：累加器式寄存器字节码（r8executor 执行）。
+//! r8virtasm：r8 的虚拟指令集——累加器式寄存器字节码（r8executor 执行）。
 //!
 //! 字节码类型是 `no_std`；`compile` feature 带上 JS ⇒ 字节码编译器（`Module::try_from(&Source)`）。
 #![cfg_attr(not(feature = "compile"), no_std)]

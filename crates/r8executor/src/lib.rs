@@ -1,4 +1,4 @@
-//! r8executor：r8bytecode 字节码执行器（`no_std`）。
+//! r8executor：r8virtasm 字节码执行器（`no_std`）。
 //!
 //! 显式帧栈（不靠宿主递归），所有帧共用一个寄存器文件；被捕获的绑定在堆上的 [`Env`] 链里。
 //! 异常：每帧一个动态处理器栈（`PushHandler` / `PopHandler`），抛出时弹本帧处理器，没有就展开到调用者。
@@ -11,7 +11,7 @@ use alloc::boxed::Box;
 use alloc::rc::Rc;
 use core::cell::{Cell, RefCell};
 
-use r8bytecode::{Constant, Function, FunctionKind, Insn, Mode, Module, PropertyKind, Reg};
+use r8virtasm::{Constant, Function, FunctionKind, Insn, Mode, Module, PropertyKind, Reg};
 use gc_arena::{Collect, Gc};
 mod module;
 
@@ -279,7 +279,7 @@ impl Executor {
 
     /// 直接 eval：按调用处的作用域表编译，跑在调用处的环境链上。
     #[cfg_attr(not(feature = "compile"), expect(unused_variables, reason = "没有编译器就只能报错"))]
-    fn direct_eval<'gc>(&self, a: &mut Agent<'gc, '_>, src: &str, table: &r8bytecode::EvalScope, env: Option<r8frame::JsEnv<'gc>>, strict: bool, level: usize) -> Result<Value<'gc>, Error> {
+    fn direct_eval<'gc>(&self, a: &mut Agent<'gc, '_>, src: &str, table: &r8virtasm::EvalScope, env: Option<r8frame::JsEnv<'gc>>, strict: bool, level: usize) -> Result<Value<'gc>, Error> {
         #[cfg(feature = "compile")]
         {
             let module = match Module::compile_direct(&r8frame::Source { text: src, file: "[eval]" }, strict, table) {
@@ -653,7 +653,7 @@ impl Executor {
 
     /// 死区指令的检查：名字只在真要抛错时才从常量池取。
     #[inline]
-    fn check_const<'gc>(a: &Agent<'gc, '_>, v: Value<'gc>, func: &Function, name: r8bytecode::Const) -> Result<(), Error> {
+    fn check_const<'gc>(a: &Agent<'gc, '_>, v: Value<'gc>, func: &Function, name: r8virtasm::Const) -> Result<(), Error> {
         if matches!(v, Value::Uninit) {
             return Err(Self::uninitialized(a, func.name_at(name)));
         }

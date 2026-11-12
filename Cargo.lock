@@ -843,7 +843,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "r8bytecode"
+name = "r8virtasm"
 version = "0.1.0"
 dependencies = [
  "oxc_allocator",
@@ -862,7 +862,7 @@ name = "r8compiler"
 version = "0.1.0"
 dependencies = [
  "mlirpass",
- "r8bytecode",
+ "r8virtasm",
  "r8frame",
 ]
 
@@ -871,7 +871,7 @@ name = "r8debugger"
 version = "0.1.0"
 dependencies = [
  "clap",
- "r8bytecode",
+ "r8virtasm",
  "r8frame",
 ]
 
@@ -881,7 +881,7 @@ version = "0.1.0"
 dependencies = [
  "gc-arena",
  "r8builtins",
- "r8bytecode",
+ "r8virtasm",
  "r8frame",
  "r8platform",
  "ryu-js",
@@ -906,7 +906,7 @@ name = "r8jit"
 version = "0.1.0"
 dependencies = [
  "libc",
- "r8bytecode",
+ "r8virtasm",
  "r8compiler",
  "r8executor",
  "r8frame",

@@ -2,7 +2,7 @@ use std::io::{Read, Write};
 use std::path::PathBuf;
 
 use clap::Args;
-use r8bytecode::Module;
+use r8virtasm::Module;
 use r8frame::Source;
 
 /// `r8dbg asm`：把 JS 编成字节码并打印反汇编。

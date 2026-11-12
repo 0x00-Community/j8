@@ -7,7 +7,7 @@ license.workspace = true
 
 [dependencies]
 r8frame.workspace = true
-r8bytecode.workspace = true
+r8virtasm.workspace = true
 mlirpass.workspace = true
 
 [lints]

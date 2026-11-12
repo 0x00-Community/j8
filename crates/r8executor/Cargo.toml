@@ -7,14 +7,14 @@ license.workspace = true
 
 [dependencies]
 r8frame.workspace = true
-r8bytecode.workspace = true
+r8virtasm.workspace = true
 gc-arena.workspace = true
 ryu-js.workspace = true
 
 [features]
 default = ["compile"]
 # 带上 JS ⇒ 字节码编译，实现 Engine（要 std）；关掉只剩 no_std 的执行器
-compile = ["r8bytecode/compile"]
+compile = ["r8virtasm/compile"]
 
 [dev-dependencies]
 r8platform.workspace = true

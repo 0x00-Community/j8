@@ -904,7 +904,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "r8bytecode"
+name = "r8virtasm"
 version = "0.1.0"
 dependencies = [
  "oxc_allocator",
@@ -923,7 +923,7 @@ name = "r8executor"
 version = "0.1.0"
 dependencies = [
  "gc-arena",
- "r8bytecode",
+ "r8virtasm",
  "r8frame",
  "ryu-js",
 ]

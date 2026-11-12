@@ -1,7 +1,7 @@
 //! r8compiler：字节码函数 ⇒ 原始机器码（`no_std`）。
 //!
 //! ```text
-//! r8bytecode::Function ─ Lower ─▶ MLIR（llvm 方言）─ mlirpass X86_64Emit ─▶ x86-64 机器码 + 要填的地址
+//! r8virtasm::Function ─ Lower ─▶ MLIR（llvm 方言）─ mlirpass X86_64Emit ─▶ x86-64 机器码 + 要填的地址
 //! ```
 //!
 //! 出来的机器码是 System V 函数 `extern "C" fn(regs: *mut Value, acc: *mut Value, start: u64) -> u64`：直接在本帧的寄存器文件
@@ -27,7 +27,7 @@ use alloc::vec::Vec;
 
 use mlirpass::mlirformat::MlirOpt;
 use mlirpass::{Body, Ctx, Emit, Interfaces, X86_64Emit};
-use r8bytecode::Function;
+use r8virtasm::Function;
 
 /// 一个函数的机器码：字节与要填的绝对地址（运行时函数）。
 #[derive(Clone, Debug)]

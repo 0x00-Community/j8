@@ -11,7 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 r8frame.workspace = true
-r8bytecode = { workspace = true, features = ["compile"] }
+r8virtasm = { workspace = true, features = ["compile"] }
 clap.workspace = true
 
 [lints]

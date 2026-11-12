@@ -1,6 +1,6 @@
 [package]
-name = "r8bytecode"
-description = "r8 字节码：JavaScript ⇒ 字节码"
+name = "r8virtasm"
+description = "r8 虚拟指令集：字节码定义、JavaScript ⇒ 字节码"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

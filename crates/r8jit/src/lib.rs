@@ -15,7 +15,7 @@ mod helpers;
 
 use core::cell::RefCell;
 
-use r8bytecode::Function;
+use r8virtasm::Function;
 use r8compiler::Compiler;
 use r8executor::{Tier, Tiered};
 use r8frame::{FuncId, Value};

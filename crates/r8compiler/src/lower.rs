@@ -3,7 +3,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::Write;
 
-use r8bytecode::{Constant, Function, Insn, Reg};
+use r8virtasm::{Constant, Function, Insn, Reg};
 use r8frame::{BinaryOp, CompareOp, ValueTag};
 
 use crate::Helper;
