@@ -2,7 +2,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::Write;
 
-use r8framework::{Agent, Error, ErrorKind, JsObject, JsString, ObjectData, ObjectKind, Property, Value};
+use r8framework::{Agent, Error, ErrorKind, JsObject, JsString, ObjectData, ObjectKind, Property, SmallStr, Value};
 
 use crate::{Args, Installer};
 
@@ -86,8 +86,8 @@ impl<'gc> Parser<'_, '_, 'gc, '_> {
             self.skip_ws();
             self.expect(b':', "expected ':'")?;
             let v = self.value()?;
-            // CreateDataProperty：`__proto__` 也只是普通键
-            self.a.define(o, &k, Property::data(v))?;
+            // CreateDataProperty：新建的普通对象一定成；`__proto__` 也只是普通键，重复的键整个换掉
+            o.borrow_mut(self.a.mc).define(&k, Property::data(v));
             match self.peek() {
                 Some(b',') => self.pos += 1,
                 Some(b'}') => {
@@ -254,28 +254,30 @@ impl<'gc> Writer<'gc> {
         out.push('"');
     }
 
-    /// 自有可枚举字符串键（数组下标在前）。
-    fn keys(o: JsObject<'gc>, a: &Agent<'gc, '_>) -> Vec<JsString<'gc>> {
+    /// 自有可枚举字符串键（数组下标在前）。键不建成 JS 字符串（短的内联），要传给 `toJSON` / 替换函数时才建。
+    fn keys(o: JsObject<'gc>) -> Vec<SmallStr> {
         let d = o.borrow();
         let mut keys = Vec::new();
         if let ObjectKind::Array(items) = &d.kind {
-            keys.extend((0..items.len()).map(|i| r8gc::Gc::new(a.mc, r8framework::JsStr::from(r8framework::number_text(f64::from(u32::try_from(i).unwrap_or(u32::MAX)))))));
+            keys.extend((0..items.len()).map(|i| r8framework::number_text(f64::from(u32::try_from(i).unwrap_or(u32::MAX)))));
         }
-        keys.extend(d.props.iter().filter(|(_, p)| p.enumerable).map(|(k, _)| a.string(k)));
+        keys.extend(d.props.iter().filter(|(_, p)| p.enumerable).map(|(k, _)| k.clone()));
         keys
     }
 
     /// SerializeJSONProperty：`toJSON`、替换函数、按类型输出；`undefined` / 函数 / Symbol 给 `None`（省掉）。
-    fn property(&mut self, a: &mut Agent<'gc, '_>, holder: Value<'gc>, key: JsString<'gc>, out: &mut String) -> Result<bool, Error> {
-        let mut v = a.get_named(holder, &key)?;
+    fn property(&mut self, a: &mut Agent<'gc, '_>, holder: Value<'gc>, key: &SmallStr, out: &mut String) -> Result<bool, Error> {
+        let mut v = a.get_named(holder, key)?;
         if matches!(v, Value::Object(_) | Value::BigInt(_)) {
             let to_json = a.get_named(v, "toJSON")?;
             if a.is_callable(to_json) {
-                v = a.call(to_json, v, &[key.into()])?;
+                let k = a.string(key);
+                v = a.call(to_json, v, &[k.into()])?;
             }
         }
         if let Some(r) = self.replacer {
-            v = a.call(r, holder, &[key.into(), v])?;
+            let k = a.string(key);
+            v = a.call(r, holder, &[k.into(), v])?;
         }
         match v {
             Value::Null | Value::Number(_) if !matches!(v, Value::Number(x) if x.is_finite()) => out.push_str("null"),
@@ -310,8 +312,8 @@ impl<'gc> Writer<'gc> {
         let outer = self.indent.clone();
         self.indent.push_str(&self.gap);
         let keys = match &self.allow {
-            Some(k) => k.clone(),
-            None => Self::keys(o, a),
+            Some(k) => k.iter().map(|s| s.text().clone()).collect(),
+            None => Self::keys(o),
         };
         out.push('{');
         let mut first = true;
@@ -326,7 +328,7 @@ impl<'gc> Writer<'gc> {
             if !self.gap.is_empty() {
                 out.push(' ');
             }
-            if self.property(a, o.into(), k, out)? {
+            if self.property(a, o.into(), &k, out)? {
                 first = false;
             } else {
                 out.truncate(mark);
@@ -351,8 +353,8 @@ impl<'gc> Writer<'gc> {
                 out.push(',');
             }
             self.newline(out);
-            let k = r8gc::Gc::new(a.mc, r8framework::JsStr::from(r8framework::number_text(f64::from(i))));
-            if !self.property(a, o.into(), k, out)? {
+            let k = r8framework::number_text(f64::from(i));
+            if !self.property(a, o.into(), &k, out)? {
                 out.push_str("null");
             }
         }
@@ -391,8 +393,9 @@ impl Json {
     fn revive<'gc>(a: &mut Agent<'gc, '_>, holder: Value<'gc>, key: JsString<'gc>, reviver: Value<'gc>) -> Result<Value<'gc>, Error> {
         let v = a.get_named(holder, &key)?;
         if let Value::Object(o) = v {
-            let keys = Writer::keys(o, a);
+            let keys = Writer::keys(o);
             for k in keys {
+                let k = a.string(&k);
                 let nv = Self::revive(a, v, k, reviver)?;
                 if nv == Value::Undefined {
                     a.delete(v, &k)?;
@@ -439,9 +442,9 @@ impl Json {
         let mut w = Writer { gap, indent: String::new(), allow, replacer, stack: Vec::new() };
         let wrapper = ObjectData { proto: Some(a.realm.object_proto), ..ObjectData::default() }.alloc(a.mc);
         wrapper.borrow_mut(a.mc).set("", args.at(0));
-        let key = a.string("");
+        let key = SmallStr::from("");
         let mut out = String::new();
-        if w.property(a, wrapper.into(), key, &mut out)? { Ok(a.string(&out).into()) } else { Ok(Value::Undefined) }
+        if w.property(a, wrapper.into(), &key, &mut out)? { Ok(a.string(&out).into()) } else { Ok(Value::Undefined) }
     }
 }
 

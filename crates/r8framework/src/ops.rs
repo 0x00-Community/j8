@@ -331,6 +331,11 @@ impl<'gc> Agent<'gc, '_> {
         ObjectData { proto: Some(self.realm.object_proto), ..ObjectData::default() }.alloc(self.mc)
     }
 
+    /// 同 [`object`](Self::object)，按 `capacity` 个属性预留槽（字面量）
+    pub fn object_with(&self, capacity: usize) -> JsObject<'gc> {
+        ObjectData { proto: Some(self.realm.object_proto), props: crate::Props::with_capacity(capacity), ..ObjectData::default() }.alloc(self.mc)
+    }
+
     /// 以 `Array.prototype` 为原型的数组。
     pub fn array(&self, items: Vec<Value<'gc>>) -> JsObject<'gc> {
         ObjectData { kind: ObjectKind::Array(items), proto: Some(self.realm.array_proto), ..ObjectData::default() }.alloc(self.mc)

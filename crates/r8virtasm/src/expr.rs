@@ -1103,7 +1103,8 @@ impl<'a> Compiler<'a, '_> {
     }
 
     fn object(&mut self, o: &'a ObjectExpression<'a>) -> Result<(), Error> {
-        self.emit(Insn::CreateObject);
+        let capacity = u16::try_from(o.properties.len()).unwrap_or(u16::MAX);
+        self.emit(Insn::CreateObject { capacity });
         let obj = self.temp();
         self.emit(Insn::Star(obj));
         for p in &o.properties {

@@ -1271,7 +1271,7 @@ impl Executor {
                         Self::check_delete(a, ok, strict)?;
                         *acc = ok.into();
                     }
-                    Insn::CreateObject => *acc = a.object().into(),
+                    Insn::CreateObject { capacity } => *acc = a.object_with(usize::from(capacity)).into(),
                     Insn::CreateArray { first, count } => *acc = a.array(regs[r(first)..r(first) + usize::from(count)].to_vec()).into(),
                     Insn::GetNamed { obj, name } => {
                         let ic = &loaded.ics[f.pc - 1];

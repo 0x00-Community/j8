@@ -134,7 +134,7 @@
         {"name": "In", "doc": "acc = reg in acc", "mnemonic": "in", "fields": [{"ty": "Reg"}]},
         {"name": "DeleteNamed", "doc": "acc = delete obj.name", "mnemonic": "delete.named", "fields": [{"name": "obj", "ty": "Reg"}, {"name": "name", "ty": "Const"}, {"name": "strict", "ty": "bool"}]},
         {"name": "DeleteKeyed", "doc": "acc = delete obj[acc]", "mnemonic": "delete.keyed", "fields": [{"name": "obj", "ty": "Reg"}, {"name": "strict", "ty": "bool"}]},
-        {"name": "CreateObject", "doc": "acc = {}", "mnemonic": "create.object"},
+        {"name": "CreateObject", "doc": "acc = {}，按 `capacity` 个属性预留槽（字面量里的属性数）", "mnemonic": "create.object", "fields": [{"name": "capacity", "ty": "u16"}]},
         {"name": "CreateArray", "doc": "acc = [first, first+1, …]（`count` 个）", "mnemonic": "create.array", "fields": [{"name": "first", "ty": "Reg"}, {"name": "count", "ty": "u16"}]},
         {"name": "GetNamed", "doc": "acc = obj.name", "mnemonic": "get.named", "fields": [{"name": "obj", "ty": "Reg"}, {"name": "name", "ty": "Const"}]},
         {"name": "SetNamed", "doc": "obj.name = acc（`strict`：写不成抛 TypeError）", "mnemonic": "set.named", "fields": [{"name": "obj", "ty": "Reg"}, {"name": "name", "ty": "Const"}, {"name": "strict", "ty": "bool"}]},

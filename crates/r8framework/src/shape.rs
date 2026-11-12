@@ -131,6 +131,11 @@ pub struct Props<'gc> {
 }
 
 impl<'gc> Props<'gc> {
+    /// 空的，按 `n` 个属性预留槽
+    pub fn with_capacity(n: usize) -> Self {
+        Self { shape: None, slots: Vec::with_capacity(n) }
+    }
+
     pub fn len(&self) -> usize {
         self.slots.len()
     }
