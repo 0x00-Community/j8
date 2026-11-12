@@ -1028,11 +1028,30 @@ impl Executor {
                         }
                     }
                     Insn::Compare(op, x) => {
-                        *acc = match (regs[r(x)], *acc) {
+                        let c = match (regs[r(x)], *acc) {
                             (Value::Number(lhs), Value::Number(rhs)) => op.numbers(lhs, rhs),
                             (lhs, rhs) => a.compare(op, lhs, rhs)?,
+                        };
+                        *acc = c.into();
+                        // 紧跟条件跳转（循环条件、`if`）：比较的结果就是布尔，直接跳，省一次分派
+                        let taken = match func.insns.get(f.pc) {
+                            Some(&Insn::JumpIfFalse(l)) => (!c).then_some(l),
+                            Some(&Insn::JumpIfTrue(l)) => c.then_some(l),
+                            _ => continue,
+                        };
+                        f.pc += 1;
+                        if let Some(l) = taken {
+                            let back = (l.0 as usize) < f.pc;
+                            f.pc = l.0 as usize;
+                            if back {
+                                if self.tier.is_some() {
+                                    self.osr(a.platform, loaded, regs, f, acc, f.pc);
+                                }
+                                if Self::spent(budget) {
+                                    return Ok(None);
+                                }
+                            }
                         }
-                        .into();
                     }
                     Insn::Unary(op) => *acc = a.unary(op, *acc)?,
                     Insn::ToNumeric => {
