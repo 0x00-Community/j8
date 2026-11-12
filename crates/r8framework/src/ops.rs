@@ -1160,7 +1160,8 @@ impl<'gc> Agent<'gc, '_> {
         // 快路：真数组的稠密部分里改值，或正好接在稠密末尾（可扩展、length 可写、后面没有稀疏元素）追加
         if let Some(n) = index_of_number(i) {
             let mut d = o.borrow_mut(self.mc);
-            let append = !d.non_extensible && !d.length_readonly && d.sparse_length <= n;
+            // 稀疏部分要么在 n 之前结束，要么根本没有元素（从没有过数字键：只是撑起来的长度，如 `new Array(len)`）
+            let append = !d.non_extensible && !d.length_readonly && (d.sparse_length <= n || !d.digit_keys);
             if let ObjectKind::Array(items) = &mut d.kind {
                 let at = n as usize;
                 if at < items.len() {
