@@ -342,7 +342,63 @@ impl<'gc> Writer<'gc> {
         Ok(())
     }
 
+    /// 不带替换函数、不缩进、稠密且元素都是原始值的数组：原始值不查 `toJSON`，逐个取元素观察不到，
+    /// 各块在线程池上并行写成 JSON 再连起来。不满足给 `false`（什么都没写）。
+    fn plain_array(&self, a: &Agent<'gc, '_>, o: JsObject<'gc>, out: &mut String) -> bool {
+        /// 一个元素的样子（不带 GC 指针，能交给别的线程）
+        #[derive(Clone, Copy)]
+        enum Part<'s> {
+            Number(f64),
+            Text(&'s str),
+            Raw(&'static str),
+        }
+        if self.replacer.is_some() || !self.gap.is_empty() {
+            return false;
+        }
+        let d = o.borrow();
+        let ObjectKind::Array(items) = &d.kind else { return false };
+        if d.sparse_length as usize > items.len() || !items.iter().all(|v| matches!(v, Value::Number(_) | Value::String(_) | Value::Bool(_) | Value::Null | Value::Undefined)) {
+            return false;
+        }
+        let parts: Vec<Part<'_>> = items
+            .iter()
+            .map(|v| match v {
+                Value::Number(x) if x.is_finite() => Part::Number(*x),
+                Value::String(s) => Part::Text(s),
+                Value::Bool(true) => Part::Raw("true"),
+                Value::Bool(false) => Part::Raw("false"),
+                _ => Part::Raw("null"),
+            })
+            .collect();
+        let pieces = a.par().chunks(&parts, &|chunk: &[Part<'_>]| {
+            let mut s = String::new();
+            for (i, p) in chunk.iter().enumerate() {
+                if i > 0 {
+                    s.push(',');
+                }
+                match *p {
+                    Part::Number(x) => s.push_str(&r8framework::number_text(x)),
+                    Part::Text(t) => Self::quote(&mut s, t),
+                    Part::Raw(r) => s.push_str(r),
+                }
+            }
+            s
+        });
+        out.push('[');
+        for (i, p) in pieces.iter().enumerate() {
+            if i > 0 {
+                out.push(',');
+            }
+            out.push_str(p);
+        }
+        out.push(']');
+        true
+    }
+
     fn array(&mut self, a: &mut Agent<'gc, '_>, o: JsObject<'gc>, out: &mut String) -> Result<(), Error> {
+        if self.plain_array(a, o, out) {
+            return Ok(());
+        }
         let outer = self.indent.clone();
         self.indent.push_str(&self.gap);
         let len = a.get_named(o.into(), "length")?;
