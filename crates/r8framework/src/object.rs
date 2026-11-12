@@ -689,6 +689,20 @@ impl<T> Few<T> {
             v.retain(keep);
         }
     }
+
+    pub fn pop(&mut self) -> Option<T> {
+        self.0.as_mut()?.pop()
+    }
+
+    pub fn into_vec(self) -> Vec<T> {
+        self.0.map_or_else(Vec::new, |v| *v)
+    }
+}
+
+impl<T> From<Vec<T>> for Few<T> {
+    fn from(v: Vec<T>) -> Self {
+        Self((!v.is_empty()).then(|| Box::new(v)))
+    }
 }
 
 /// 对象：种类、按插入顺序的属性表、原型。

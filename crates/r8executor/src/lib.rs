@@ -16,7 +16,7 @@ use r8gc::{Collect, Gc};
 mod ic;
 mod module;
 
-use r8framework::{Agent, Closure, Coroutine, CoroutineState, Env, Error, ErrorKind, FuncId, Invoke, IterRecord, JsEnv, JsObject, ObjectData, ObjectKind, Property, Resume, Slot, Step, Suspended, Value};
+use r8framework::{Agent, Few, Closure, Coroutine, CoroutineState, Env, Error, ErrorKind, FuncId, Invoke, IterRecord, JsEnv, JsObject, ObjectData, ObjectKind, Property, Resume, Slot, Step, Suspended, Value};
 
 /// 调用深度上限（含宿主函数里重入的 JS），过了抛 RangeError
 const STACK_LIMIT: usize = 10_000;
@@ -74,13 +74,13 @@ struct Frame<'gc> {
     /// 寄存器文件里本帧的起点
     base: usize,
     env: Option<JsEnv<'gc>>,
-    handlers: Vec<Handler<'gc>>,
+    handlers: Few<Handler<'gc>>,
     /// `new.target`（普通调用是 `undefined`）
     new_target: Value<'gc>,
     /// 构造调用的 `this`：基类构造时一进帧就有，派生类等 `super(...)` 返回
     new_this: Option<Value<'gc>>,
     /// 全部实参（只有 `keeps_args` 的函数留）
-    args: Vec<Value<'gc>>,
+    args: Few<Value<'gc>>,
 }
 
 /// 一次执行的全部状态（片与片之间挂在根上）。
@@ -319,7 +319,7 @@ impl Executor {
     fn start<'gc>(&self, a: &mut Agent<'gc, '_>, closure: Closure<'gc>, callee: Value<'gc>, this: Value<'gc>, args: &[Value<'gc>], depth: usize) -> Result<Value<'gc>, Error> {
         let mut regs = Vec::new();
         let f = self.enter(a, &mut regs, closure, callee, this, args);
-        let saved = Suspended { func: f.func, pc: 0, regs, env: f.env, handlers: Vec::new(), args: f.args, mode: None };
+        let saved = Suspended { func: f.func, pc: 0, regs, env: f.env, handlers: Vec::new(), args: f.args.into_vec(), mode: None };
         let func_loaded = self.function(closure.func);
         let func = &func_loaded.func;
         let (generator, asynchronous) = (func.generator, func.asynchronous);
@@ -437,8 +437,8 @@ impl Executor {
         let f = &f_loaded.func;
         let params = usize::from(f.params).min(args.len());
         regs[first..first + params].copy_from_slice(&args[..params]);
-        let args = if f.keeps_args { args.to_vec() } else { Vec::new() };
-        Frame { func: closure.func, pc: 0, base, env: closure.env, handlers: Vec::new(), new_target: Value::Undefined, new_this: None, args }
+        let args = if f.keeps_args { args.to_vec().into() } else { Few::default() };
+        Frame { func: closure.func, pc: 0, base, env: closure.env, handlers: Few::default(), new_target: Value::Undefined, new_this: None, args }
     }
 
     /// 同 [`enter`](Self::enter)，实参就在寄存器文件里（`Call` 的快路：不先拷成 `Vec`）。
@@ -447,8 +447,8 @@ impl Executor {
         let (base, first) = Self::open_frame(a, regs, f, closure, callee, this);
         let params = usize::from(f.params).min(argc);
         regs.copy_within(args..args + params, first);
-        let args = if f.keeps_args { regs[args..args + argc].to_vec() } else { Vec::new() };
-        Frame { func: closure.func, pc: 0, base, env: closure.env, handlers: Vec::new(), new_target: Value::Undefined, new_this: None, args }
+        let args = if f.keeps_args { regs[args..args + argc].to_vec().into() } else { Few::default() };
+        Frame { func: closure.func, pc: 0, base, env: closure.env, handlers: Few::default(), new_target: Value::Undefined, new_this: None, args }
     }
 
     /// 在寄存器文件末尾开出 `f` 的寄存器，放好 `this` 与自身；给出帧基址与第一个形参的位置。
@@ -907,12 +907,14 @@ impl Executor {
     #[expect(clippy::too_many_lines, reason = "一条指令一个分支，拆开反而难读")]
     fn run<'gc>(&self, a: &mut Agent<'gc, '_>, st: &mut State<'gc>, depth: usize, budget: &mut Option<usize>) -> Result<Option<Outcome<'gc>>, Error> {
         let State { regs, frames, f, acc } = st;
+        // 调用的快路已经取到被调函数时交给下一帧用，省一次查表
+        let mut entering: Option<Rc<Loaded>> = None;
         'frame: loop {
             // 配额用完：停在这一帧的下一条指令之前，状态完整
             if Self::spent(budget) {
                 return Ok(None);
             }
-            let cur = self.function(f.func);
+            let cur = entering.take().unwrap_or_else(|| self.function(f.func));
             let loaded = &*cur;
             let func = &loaded.func;
             loop {
@@ -1237,7 +1239,7 @@ impl Executor {
                         *acc = Self::super_call(a, regs, f, &list)?;
                     }
                     Insn::SuperCallForward => {
-                        let list = core::mem::take(&mut f.args);
+                        let list = core::mem::take(&mut f.args).into_vec();
                         *acc = Self::super_call(a, regs, f, &list)?;
                     }
                     Insn::Construct { callee, args, argc } => {
@@ -1325,6 +1327,7 @@ impl Executor {
                             let mut next = Self::enter_regs(a, regs, &loaded.func, c, target, regs[r(this)], first, usize::from(argc));
                             if !self.tiered(&loaded, regs, &mut next, acc) {
                                 frames.push(core::mem::replace(f, next));
+                                entering = Some(loaded);
                                 continue 'frame;
                             }
                             continue;
@@ -1362,8 +1365,8 @@ impl Executor {
                             pc: f.pc,
                             regs: core::mem::take(regs),
                             env: f.env,
-                            handlers: f.handlers.drain(..).map(|h| (h.target, h.env)).collect(),
-                            args: core::mem::take(&mut f.args),
+                            handlers: core::mem::take(&mut f.handlers).into_vec().into_iter().map(|h| (h.target, h.env)).collect(),
+                            args: core::mem::take(&mut f.args).into_vec(),
                             mode: Some(mode.0),
                         };
                         return Ok(Some(Outcome::Suspend { value: *acc, awaiting: matches!(insn, Insn::Await { .. }), saved }));
@@ -1630,8 +1633,8 @@ impl<'gc> Invoke<'gc> for Executor {
         if let Some(m) = saved.mode {
             regs[usize::from(m)] = f64::from(mode).into();
         }
-        let handlers = saved.handlers.into_iter().map(|(target, env)| Handler { target, env }).collect();
-        let f = Frame { func: saved.func, pc: saved.pc, base: 0, env: saved.env, handlers, new_target: Value::Undefined, new_this: None, args: saved.args };
+        let handlers = saved.handlers.into_iter().map(|(target, env)| Handler { target, env }).collect::<Vec<_>>().into();
+        let f = Frame { func: saved.func, pc: saved.pc, base: 0, env: saved.env, handlers, new_target: Value::Undefined, new_this: None, args: saved.args.into() };
         match self.run_state(a, State { regs, frames: Vec::new(), f, acc: value }, level) {
             Ok(Outcome::Return(v)) => {
                 Self::set_state(a, co, CoroutineState::Completed);
