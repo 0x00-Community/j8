@@ -47,7 +47,7 @@ impl<'gc> WellKnown<'gc> {
     }
 }
 
-/// 一个执行环境的全部内建对象：全局对象与各原型。r8frame 只建空壳并连好原型链，
+/// 一个执行环境的全部内建对象：全局对象与各原型。r8framework 只建空壳并连好原型链，
 /// 方法由 [`Intrinsics`] 的实现（r8builtins）装进去。
 #[derive(Collect)]
 #[collect(no_drop)]

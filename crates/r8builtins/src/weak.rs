@@ -1,4 +1,4 @@
-use r8frame::{Agent, Error, ErrorKind, JsObject, ObjectKind, Value};
+use r8framework::{Agent, Error, ErrorKind, JsObject, ObjectKind, Value};
 
 use crate::{Args, Installer};
 
@@ -91,7 +91,7 @@ impl Installer<'_, '_> {
         self.method(fr, "unregister", Weaks::unregister, 1);
         for (o, tag) in [(wr, "WeakRef"), (fr, "FinalizationRegistry")] {
             let v = self.text(tag);
-            o.borrow_mut(self.mc).define_symbol(r.symbols.to_string_tag, r8frame::Property { slot: r8frame::Slot::Data(v), enumerable: false, writable: false, configurable: true });
+            o.borrow_mut(self.mc).define_symbol(r.symbols.to_string_tag, r8framework::Property { slot: r8framework::Slot::Data(v), enumerable: false, writable: false, configurable: true });
         }
     }
 }

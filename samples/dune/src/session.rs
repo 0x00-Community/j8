@@ -2,7 +2,7 @@ use std::process::ExitCode;
 
 use r8builtins::Builtins;
 use r8executor::Executor;
-use r8frame::{ContextRoot, Error, Global, Isolate, Source};
+use r8framework::{ContextRoot, Error, Global, Isolate, Source};
 
 /// 一段源码跑完的结果，都已按 ToString 转成文本。
 pub enum Outcome {

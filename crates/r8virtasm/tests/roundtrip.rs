@@ -1,5 +1,5 @@
 //! 汇编是反汇编的逆：反汇编清单读回来逐字段相同。
-use r8frame::Source;
+use r8framework::Source;
 use r8virtasm::Module;
 
 #[test]

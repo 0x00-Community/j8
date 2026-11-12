@@ -1,7 +1,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use r8frame::{Agent, Error, Value};
+use r8framework::{Agent, Error, Value};
 
 use crate::{Args, Installer};
 
@@ -78,7 +78,7 @@ impl Installer<'_, '_> {
         self.set(g, "globalThis", g.into());
         // 值属性：不可写、不可枚举、不可配置
         for (name, v) in [("undefined", Value::Undefined), ("NaN", f64::NAN.into()), ("Infinity", f64::INFINITY.into())] {
-            g.borrow_mut(self.mc).define(name, r8frame::Property { slot: r8frame::Slot::Data(v), enumerable: false, writable: false, configurable: false });
+            g.borrow_mut(self.mc).define(name, r8framework::Property { slot: r8framework::Slot::Data(v), enumerable: false, writable: false, configurable: false });
         }
         let console = self.plain();
         self.method(console, "log", Global::log, 0);

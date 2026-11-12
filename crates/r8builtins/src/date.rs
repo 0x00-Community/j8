@@ -1,7 +1,7 @@
 use alloc::format;
 use alloc::string::String;
 
-use r8frame::{Agent, Error, ErrorKind, Hint, JsObject, ObjectKind, Property, Slot, Value};
+use r8framework::{Agent, Error, ErrorKind, Hint, JsObject, ObjectKind, Property, Slot, Value};
 
 use crate::{Args, Installer};
 
@@ -654,7 +654,7 @@ impl Installer<'_, '_> {
         self.method(ctor, "now", Dates::date_now, 0);
         self.method(ctor, "parse", Dates::date_parse, 1);
         self.method(ctor, "UTC", Dates::date_utc, 7);
-        let getters: [(&str, r8frame::NativeFn); 8] = [
+        let getters: [(&str, r8framework::NativeFn); 8] = [
             ("FullYear", Dates::get::<0>),
             ("Month", Dates::get::<1>),
             ("Date", Dates::get::<2>),
@@ -668,7 +668,7 @@ impl Installer<'_, '_> {
             self.method(proto, &alloc::format!("get{name}"), f, 0);
             self.method(proto, &alloc::format!("getUTC{name}"), f, 0);
         }
-        let setters: [(&str, r8frame::NativeFn, u32); 7] = [
+        let setters: [(&str, r8framework::NativeFn, u32); 7] = [
             ("Milliseconds", Dates::set_milliseconds, 1),
             ("Seconds", Dates::set_seconds, 2),
             ("Minutes", Dates::set_minutes, 3),
@@ -681,7 +681,7 @@ impl Installer<'_, '_> {
             self.method(proto, &alloc::format!("set{name}"), f, n);
             self.method(proto, &alloc::format!("setUTC{name}"), f, n);
         }
-        let methods: [(&str, r8frame::NativeFn, u32); 15] = [
+        let methods: [(&str, r8framework::NativeFn, u32); 15] = [
             ("getTime", Dates::get_time, 0),
             ("getTimezoneOffset", Dates::get_timezone_offset, 0),
             ("getYear", Dates::get_year, 0),

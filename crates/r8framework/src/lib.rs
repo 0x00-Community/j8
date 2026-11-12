@@ -1,4 +1,4 @@
-//! r8frame：核心框架层，定义 trait 与通用结构体 / 枚举，具体实现在各层 crate（如 r8platform 实现 [`Platform`]）。
+//! r8framework：核心框架层，定义 trait 与通用结构体 / 枚举，具体实现在各层 crate（如 r8platform 实现 [`Platform`]）。
 //!
 //! 堆用 [gc-arena](https://docs.rs/gc-arena)：所有 JS 值带品牌生命周期 `'gc`，只能活在一次 [`Isolate::enter`] 里。
 //!

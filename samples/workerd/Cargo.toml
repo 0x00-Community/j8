@@ -10,7 +10,7 @@ name = "workerd"
 path = "src/main.rs"
 
 [dependencies]
-r8frame.workspace = true
+r8framework.workspace = true
 r8platform.workspace = true
 r8builtins.workspace = true
 r8executor.workspace = true

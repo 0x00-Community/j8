@@ -26,7 +26,7 @@ mod typed;
 mod weak;
 
 use r8gc::Mutation;
-use r8frame::{Intrinsics, JsObject, Realm, Value};
+use r8framework::{Intrinsics, JsObject, Realm, Value};
 
 /// 缺省的内建对象集合。
 #[derive(Debug, Default, Clone, Copy)]
@@ -71,22 +71,22 @@ struct Installer<'r, 'gc> {
 impl<'gc> Installer<'_, 'gc> {
     /// 内建属性：不可枚举。
     fn set(&self, target: JsObject<'gc>, name: &str, v: Value<'gc>) {
-        target.borrow_mut(self.mc).define(name, r8frame::Property::hidden(v));
+        target.borrow_mut(self.mc).define(name, r8framework::Property::hidden(v));
     }
 
     /// 宿主方法，`length` 是 `n`。
-    fn method(&self, target: JsObject<'gc>, name: &str, f: r8frame::NativeFn, n: u32) {
+    fn method(&self, target: JsObject<'gc>, name: &str, f: r8framework::NativeFn, n: u32) {
         self.realm.method(self.mc, target, name, f, n);
     }
 
     /// 全局对象上的一个构造器（`length` 是 `n`）：宿主函数，`prototype` ⇄ `constructor` 互指。
-    fn constructor(&self, name: &str, f: r8frame::NativeFn, proto: JsObject<'gc>, n: u32) -> JsObject<'gc> {
+    fn constructor(&self, name: &str, f: r8framework::NativeFn, proto: JsObject<'gc>, n: u32) -> JsObject<'gc> {
         let ctor = self.realm.named_native(self.mc, f, name, n);
-        if let r8frame::ObjectKind::Native(native) = &mut ctor.borrow_mut(self.mc).kind {
+        if let r8framework::ObjectKind::Native(native) = &mut ctor.borrow_mut(self.mc).kind {
             native.constructor = true;
         }
         // 内建构造器的 prototype：不可写、不可枚举、不可配置
-        ctor.borrow_mut(self.mc).define("prototype", r8frame::Property { slot: r8frame::Slot::Data(proto.into()), enumerable: false, writable: false, configurable: false });
+        ctor.borrow_mut(self.mc).define("prototype", r8framework::Property { slot: r8framework::Slot::Data(proto.into()), enumerable: false, writable: false, configurable: false });
         self.set(proto, "constructor", ctor.into());
         self.set(self.realm.global, name, ctor.into());
         ctor
@@ -123,31 +123,31 @@ impl<'gc> Installer<'_, 'gc> {
         }
         for (o, tag) in tagged {
             let v = self.text(tag);
-            o.borrow_mut(self.mc).define_symbol(r.symbols.to_string_tag, r8frame::Property { slot: r8frame::Slot::Data(v), enumerable: false, writable: false, configurable: true });
+            o.borrow_mut(self.mc).define_symbol(r.symbols.to_string_tag, r8framework::Property { slot: r8framework::Slot::Data(v), enumerable: false, writable: false, configurable: true });
         }
     }
 
     /// Symbol / BigInt：挂成构造器的样子，但不能 `new`。
     fn not_constructor(&self, f: JsObject<'gc>) {
-        if let r8frame::ObjectKind::Native(native) = &mut f.borrow_mut(self.mc).kind {
+        if let r8framework::ObjectKind::Native(native) = &mut f.borrow_mut(self.mc).kind {
             native.constructor = false;
         }
     }
 
     /// 宿主 getter（不可枚举）。
-    fn getter(&self, target: JsObject<'gc>, name: &str, f: r8frame::NativeFn) {
+    fn getter(&self, target: JsObject<'gc>, name: &str, f: r8framework::NativeFn) {
         let g = self.realm.named_native(self.mc, f, &alloc::format!("get {name}"), 0);
-        target.borrow_mut(self.mc).define(name, r8frame::Property { slot: r8frame::Slot::Accessor { get: Some(g), set: None }, enumerable: false, writable: false, configurable: true });
+        target.borrow_mut(self.mc).define(name, r8framework::Property { slot: r8framework::Slot::Accessor { get: Some(g), set: None }, enumerable: false, writable: false, configurable: true });
     }
 
     /// 堆上的字符串值。
     fn text(&self, s: &str) -> Value<'gc> {
-        Value::String(r8gc::Gc::new(self.mc, r8frame::SmallStr::from(s)))
+        Value::String(r8gc::Gc::new(self.mc, r8framework::SmallStr::from(s)))
     }
 
     /// 一个普通对象（原型 `Object.prototype`）。
     fn plain(&self) -> JsObject<'gc> {
-        r8frame::ObjectData { proto: Some(self.realm.object_proto), ..r8frame::ObjectData::default() }.alloc(self.mc)
+        r8framework::ObjectData { proto: Some(self.realm.object_proto), ..r8framework::ObjectData::default() }.alloc(self.mc)
     }
 }
 

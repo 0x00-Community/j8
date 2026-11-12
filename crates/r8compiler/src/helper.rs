@@ -1,4 +1,4 @@
-use r8frame::BinaryOp;
+use r8framework::BinaryOp;
 
 /// 机器码调的运行时函数（地址由装载方填，见 [`Native::relocs`](crate::Native::relocs)）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

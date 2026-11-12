@@ -8,7 +8,7 @@ license.workspace = true
 autotests = false
 
 [dependencies]
-r8frame.workspace = true
+r8framework.workspace = true
 r8binding.workspace = true
 r8macros.workspace = true
 
@@ -36,7 +36,7 @@ edition = "2024"
 license = "MIT"
 
 [workspace.dependencies]
-r8frame = { path = "crates/r8frame" }
+r8framework = { path = "crates/r8framework" }
 r8platform = { path = "crates/r8platform" }
 r8builtins = { path = "crates/r8builtins" }
 r8virtasm = { path = "crates/r8virtasm", default-features = false }
@@ -51,7 +51,7 @@ r8 = { path = "." }
 clap = { version = "4.6", features = ["derive"] }
 moremath = { version = "=0.2.2", default-features = false }
 libm = "0.2"
-r8gc = "=0.1.0"
+r8gc = { version = "=0.1.0", default-features = false }
 smol_str = { version = "0.3", default-features = false }
 hashbrown = { version = "0.17", default-features = false }
 rustc-hash = { version = "2", default-features = false }

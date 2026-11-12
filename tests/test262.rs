@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 
 use r8builtins::Builtins;
 use r8executor::Executor;
-use r8frame::{CreateParams, Error, Isolate, Platform, Source, Task};
+use r8framework::{CreateParams, Error, Isolate, Platform, Source, Task};
 use serde::Deserialize;
 
 /// test262 检出（子模块）
@@ -169,7 +169,7 @@ struct Capture {
     lines: Mutex<Vec<String>>,
 }
 
-impl r8frame::Pool for Capture {
+impl r8framework::Pool for Capture {
     fn threads(&self) -> usize {
         1
     }

@@ -4,7 +4,7 @@ use alloc::vec::Vec;
 
 use num_bigint::BigInt;
 use num_traits::{One, Signed, ToPrimitive, Zero};
-use r8frame::{Agent, Error, ErrorKind, JsSymbol, SymbolData, Value};
+use r8framework::{Agent, Error, ErrorKind, JsSymbol, SymbolData, Value};
 use unicode_normalization::UnicodeNormalization;
 
 use crate::{Args, Installer};
@@ -45,7 +45,7 @@ impl Texts {
         let mut units = Vec::with_capacity(args.len());
         for &v in args {
             let n = a.to_number(v)?;
-            let u = r8frame::ElementKind::Uint16.encode(&r8frame::Element::Number(n));
+            let u = r8framework::ElementKind::Uint16.encode(&r8framework::Element::Number(n));
             units.push(u16::from_le_bytes([u[0], u[1]]));
         }
         Ok(a.string(&String::from_utf16_lossy(&units)).into())
@@ -90,7 +90,7 @@ impl Texts {
         Ok(a.string(&out).into())
     }
 
-    fn this_string<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>) -> Result<r8frame::JsString<'gc>, Error> {
+    fn this_string<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>) -> Result<r8framework::JsString<'gc>, Error> {
         if this.is_nullish() {
             return Err(a.throw(ErrorKind::Type, "String.prototype method called on null or undefined"));
         }
@@ -345,7 +345,7 @@ impl Texts {
     }
 
     fn f16round<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        Self::unary(a, args, |x| r8frame::f16_to_f64(r8frame::f64_to_f16(x)))
+        Self::unary(a, args, |x| r8framework::f16_to_f64(r8framework::f64_to_f16(x)))
     }
 
     fn clz32<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
@@ -681,7 +681,7 @@ impl<'gc> Installer<'_, 'gc> {
             self.method(ctor, "raw", Texts::raw, 1);
         }
         let sp = r.string_proto;
-        let methods: [(&str, r8frame::NativeFn, u32); 19] = [
+        let methods: [(&str, r8framework::NativeFn, u32); 19] = [
             ("codePointAt", Texts::code_point_at, 1),
             ("isWellFormed", Texts::is_well_formed, 0),
             ("toWellFormed", Texts::to_well_formed, 0),
@@ -725,7 +725,7 @@ impl<'gc> Installer<'_, 'gc> {
         self.method(np, "toLocaleString", Texts::to_locale_string, 0);
         // Math
         if let Value::Object(m) = self.global_fn("Math") {
-            let math: [(&str, r8frame::NativeFn, u32); 12] = [
+            let math: [(&str, r8framework::NativeFn, u32); 12] = [
                 ("sinh", Texts::sinh, 1),
                 ("cosh", Texts::cosh, 1),
                 ("tanh", Texts::tanh, 1),
@@ -749,7 +749,7 @@ impl<'gc> Installer<'_, 'gc> {
             self.method(ctor, "keyFor", Texts::key_for, 1);
         }
         let tp = r.named_native(self.mc, Texts::symbol_to_primitive, "[Symbol.toPrimitive]", 1);
-        r.symbol_proto.borrow_mut(self.mc).define_symbol(r.symbols.to_primitive, r8frame::Property { slot: r8frame::Slot::Data(tp.into()), enumerable: false, writable: false, configurable: true });
+        r.symbol_proto.borrow_mut(self.mc).define_symbol(r.symbols.to_primitive, r8framework::Property { slot: r8framework::Slot::Data(tp.into()), enumerable: false, writable: false, configurable: true });
         // BigInt
         if let Value::Object(ctor) = self.global_fn("BigInt") {
             self.method(ctor, "asIntN", Texts::as_int_n, 2);

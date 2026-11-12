@@ -8,7 +8,7 @@ use alloc::vec::Vec;
 use core::fmt;
 use core::str::FromStr;
 
-use r8frame::{BinaryOp, CompareOp, UnaryOp};
+use r8framework::{BinaryOp, CompareOp, UnaryOp};
 
 use crate::disasm::{KINDS, MODES};
 use crate::{Const, Constant, EvalName, EvalScope, Function, FunctionKind, Label, Mode, Module, Reg};

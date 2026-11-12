@@ -3,7 +3,7 @@
 use std::path::{Component, Path, PathBuf};
 
 use r8::{Object, Rest};
-use r8frame::{Agent, Error, ErrorKind, JsObject, Property, Value};
+use r8framework::{Agent, Error, ErrorKind, JsObject, Property, Value};
 
 /// 序言：`require`（CommonJS，模块缓存、相对路径、`.js` / `.json` / 目录 `index.js`）、`module`、`process`。
 pub const PRELUDE: &str = include_str!("prelude.js");

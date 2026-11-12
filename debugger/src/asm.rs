@@ -2,7 +2,7 @@ use std::io::{Read, Write};
 use std::path::PathBuf;
 
 use clap::Args;
-use r8frame::Source;
+use r8framework::Source;
 use r8virtasm::Module;
 
 /// 输入（文件 / 标准输入 / 命令行）与输出（文件 / 标准输出）。

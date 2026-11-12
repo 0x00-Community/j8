@@ -6,7 +6,7 @@ use oxc_ast::ast::{Directive, BindingIdentifier, BindingPattern, BlockStatement,
 use oxc_parser::{ParseOptions, Parser};
 use oxc_semantic::SemanticBuilder;
 use oxc_span::{GetSpan, SourceType, Span};
-use r8frame::{CodeKind, CompareOp, Error, ImportEntry, ImportName, ModuleInfo, Resume, Source};
+use r8framework::{CodeKind, CompareOp, Error, ImportEntry, ImportName, ModuleInfo, Resume, Source};
 
 use crate::scope::{Decl, DeclKind, Decls, Hidden, Key, Resolver, THIS};
 use crate::{Const, Constant, EvalName, EvalScope, Function, FunctionKind, Insn, Label, Module, PropertyKind, Reg};

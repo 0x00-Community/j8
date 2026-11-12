@@ -3,7 +3,7 @@ use std::num::NonZeroUsize;
 use std::time::{Duration, Instant};
 
 use moremath::{Executor, ThreadMulti};
-use r8frame::{Platform, Task};
+use r8framework::{Platform, Task};
 
 /// 缺省平台：线程池起一次复用，任务可以借用调用方的数据。
 pub struct DefaultPlatform {

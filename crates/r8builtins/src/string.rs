@@ -1,7 +1,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use r8frame::{Agent, Error, ErrorKind, JsString, Value};
+use r8framework::{Agent, Error, ErrorKind, JsString, Value};
 
 use crate::{Args, Installer};
 
@@ -278,8 +278,8 @@ impl Strings {
         let n = match args.first() {
             None => 0.0,
             Some(&v) => match a.to_numeric(v)? {
-                r8frame::Numeric::Number(x) => x,
-                r8frame::Numeric::BigInt(b) => num_traits::ToPrimitive::to_f64(&b.0).unwrap_or(f64::NAN),
+                r8framework::Numeric::Number(x) => x,
+                r8framework::Numeric::BigInt(b) => num_traits::ToPrimitive::to_f64(&b.0).unwrap_or(f64::NAN),
             },
         };
         a.wrap_primitive(n.into(), a.realm.number_proto)
@@ -359,9 +359,9 @@ impl Installer<'_, '_> {
     pub(crate) fn string(&mut self) {
         let proto = self.realm.string_proto;
         // String.prototype 本身是包着 "" 的 String 对象
-        proto.borrow_mut(self.mc).kind = r8frame::ObjectKind::Primitive(self.text(""));
+        proto.borrow_mut(self.mc).kind = r8framework::ObjectKind::Primitive(self.text(""));
         self.constructor("String", Strings::string, proto, 1);
-        let methods: [(&str, r8frame::NativeFn, u32); 25] = [
+        let methods: [(&str, r8framework::NativeFn, u32); 25] = [
             ("toString", Strings::to_string, 0),
             ("valueOf", Strings::to_string, 0),
             ("charAt", Strings::char_at, 1),
@@ -396,7 +396,7 @@ impl Installer<'_, '_> {
     pub(crate) fn number(&mut self) {
         let proto = self.realm.number_proto;
         // Number.prototype 本身是包着 +0 的 Number 对象
-        proto.borrow_mut(self.mc).kind = r8frame::ObjectKind::Primitive(0.0.into());
+        proto.borrow_mut(self.mc).kind = r8framework::ObjectKind::Primitive(0.0.into());
         let ctor = self.constructor("Number", Strings::number, proto, 1);
         self.method(ctor, "isInteger", Strings::is_integer, 1);
         self.method(ctor, "isSafeInteger", Strings::is_safe_integer, 1);

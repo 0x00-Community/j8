@@ -35,7 +35,7 @@ version = "0.1.0"
 dependencies = [
  "r8builtins",
  "r8executor",
- "r8frame",
+ "r8framework",
  "r8platform",
  "v8",
 ]
@@ -875,7 +875,7 @@ dependencies = [
  "libm",
  "num-bigint 0.4.8",
  "num-traits",
- "r8frame",
+ "r8framework",
  "r8gc",
  "regress",
  "ryu-js",
@@ -886,14 +886,14 @@ dependencies = [
 name = "r8executor"
 version = "0.1.0"
 dependencies = [
- "r8frame",
+ "r8framework",
  "r8gc",
  "r8virtasm",
  "ryu-js",
 ]
 
 [[package]]
-name = "r8frame"
+name = "r8framework"
 version = "0.1.0"
 dependencies = [
  "hashbrown",
@@ -940,7 +940,7 @@ name = "r8platform"
 version = "0.1.0"
 dependencies = [
  "moremath",
- "r8frame",
+ "r8framework",
  "r8gc",
 ]
 
@@ -954,7 +954,7 @@ dependencies = [
  "oxc_semantic",
  "oxc_span",
  "oxc_syntax",
- "r8frame",
+ "r8framework",
  "r8macros",
  "ryu-js",
 ]

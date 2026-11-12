@@ -1,6 +1,6 @@
 use alloc::vec::Vec;
 
-use r8frame::{Agent, Capability, Error, ErrorKind, JsObject, Key, NativeClosure, ObjectData, ObjectKind, Property, Reaction, Slot, Value};
+use r8framework::{Agent, Capability, Error, ErrorKind, JsObject, Key, NativeClosure, ObjectData, ObjectKind, Property, Reaction, Slot, Value};
 
 use crate::buffer::Buffers;
 use crate::{Args, Installer};
@@ -35,7 +35,7 @@ impl Promises {
         matches!(c, Value::Object(o) if r8gc::Gc::ptr_eq(o, a.realm.promise_ctor))
     }
 
-    fn closure<'gc>(a: &Agent<'gc, '_>, f: r8frame::ClosureFn, slots: Vec<Value<'gc>>, length: u32) -> JsObject<'gc> {
+    fn closure<'gc>(a: &Agent<'gc, '_>, f: r8framework::ClosureFn, slots: Vec<Value<'gc>>, length: u32) -> JsObject<'gc> {
         let o = ObjectData { kind: ObjectKind::NativeClosure(NativeClosure { f, slots }), proto: Some(a.realm.function_proto), ..ObjectData::default() }.alloc(a.mc);
         a.realm.name_function(a.mc, o, "", Some(length));
         o
@@ -290,7 +290,7 @@ impl Promises {
         Ok(n + d)
     }
 
-    fn perform<'gc>(a: &mut Agent<'gc, '_>, c: Value<'gc>, resolve: Value<'gc>, it: r8frame::IterRecord<'gc>, cap: &Capability<'gc>, how: Combinator, done: &mut bool) -> Result<Value<'gc>, Error> {
+    fn perform<'gc>(a: &mut Agent<'gc, '_>, c: Value<'gc>, resolve: Value<'gc>, it: r8framework::IterRecord<'gc>, cap: &Capability<'gc>, how: Combinator, done: &mut bool) -> Result<Value<'gc>, Error> {
         let values = a.array(Vec::new());
         let remaining = Self::box_value(a, 1.0.into());
         let mut index = 0.0;
@@ -313,7 +313,7 @@ impl Promises {
                 a.create_index(values, index, Value::Undefined)?;
             }
             let next_promise = a.call(resolve, c, &[v])?;
-            let element = |a: &mut Agent<'gc, '_>, f: r8frame::ClosureFn, settle: Value<'gc>, called: Value<'gc>| -> Value<'gc> {
+            let element = |a: &mut Agent<'gc, '_>, f: r8framework::ClosureFn, settle: Value<'gc>, called: Value<'gc>| -> Value<'gc> {
                 Self::closure(a, f, alloc::vec![called, index.into(), values.into(), settle, remaining], 1).into()
             };
             let (on_fulfilled, on_rejected) = match how {
@@ -415,12 +415,12 @@ impl Installer<'_, '_> {
         let r = self.realm;
         let proto = r.promise_proto;
         let ctor = r.promise_ctor;
-        ctor.borrow_mut(self.mc).kind = ObjectKind::Native(r8frame::Native::constructor(Promises::construct));
+        ctor.borrow_mut(self.mc).kind = ObjectKind::Native(r8framework::Native::constructor(Promises::construct));
         r.name_function(self.mc, ctor, "Promise", Some(1));
         ctor.borrow_mut(self.mc).define("prototype", Property { slot: Slot::Data(proto.into()), enumerable: false, writable: false, configurable: false });
         self.set(proto, "constructor", ctor.into());
         self.set(r.global, "Promise", ctor.into());
-        let statics: [(&str, r8frame::NativeFn, u32); 8] = [
+        let statics: [(&str, r8framework::NativeFn, u32); 8] = [
             ("all", Promises::all, 1),
             ("allSettled", Promises::all_settled, 1),
             ("any", Promises::any, 1),

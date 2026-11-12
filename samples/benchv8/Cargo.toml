@@ -11,7 +11,7 @@ publish = false
 
 [dependencies]
 v8 = "=152.2.0"
-r8frame = { path = "../../crates/r8frame" }
+r8framework = { path = "../../crates/r8framework" }
 r8platform = { path = "../../crates/r8platform" }
 r8builtins = { path = "../../crates/r8builtins" }
 r8executor = { path = "../../crates/r8executor" }

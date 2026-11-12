@@ -4,7 +4,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use r8gc::{Gc, Static};
-use r8frame::{Agent, Error, ErrorKind, JsObject, JsString, Key, ObjectData, ObjectKind, Property, RegExpData, Slot, Value};
+use r8framework::{Agent, Error, ErrorKind, JsObject, JsString, Key, ObjectData, ObjectKind, Property, RegExpData, Slot, Value};
 
 use crate::buffer::Buffers;
 use crate::string::Strings;
@@ -62,7 +62,7 @@ impl Regexps {
         if c.len() >= CACHE_SIZE {
             c.pop_front();
         }
-        c.push_back(r8frame::RegExpCompiled { source: source.into(), flags: flags.into(), compiled });
+        c.push_back(r8framework::RegExpCompiled { source: source.into(), flags: flags.into(), compiled });
         Ok(compiled)
     }
 
@@ -79,7 +79,7 @@ impl Regexps {
     }
 
     fn is_regexp_ctor(v: Value<'_>) -> bool {
-        matches!(v, Value::Object(f) if matches!(f.borrow().kind, ObjectKind::Native(n) if core::ptr::fn_addr_eq(n.f, Self::construct as r8frame::NativeFn)))
+        matches!(v, Value::Object(f) if matches!(f.borrow().kind, ObjectKind::Native(n) if core::ptr::fn_addr_eq(n.f, Self::construct as r8framework::NativeFn)))
     }
 
     /// RegExpInitialize：编好装进 `o`，`lastIndex` 置 0。
@@ -767,7 +767,7 @@ impl Regexps {
     }
 
     /// GetMethod(v, sym)：没有给 `None`，不可调用抛 TypeError。
-    fn method_of<'gc>(a: &mut Agent<'gc, '_>, v: Value<'gc>, sym: r8frame::JsSymbol<'gc>) -> Result<Option<Value<'gc>>, Error> {
+    fn method_of<'gc>(a: &mut Agent<'gc, '_>, v: Value<'gc>, sym: r8framework::JsSymbol<'gc>) -> Result<Option<Value<'gc>>, Error> {
         let f = a.get_symbol(v, sym, v)?;
         if f.is_nullish() {
             return Ok(None);
@@ -780,7 +780,7 @@ impl Regexps {
     }
 
     /// match / search：有对应的 Symbol 方法就交给它，否则新建正则再调。
-    fn dispatch<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, arg: Value<'gc>, sym: r8frame::JsSymbol<'gc>, flags: Value<'gc>) -> Result<Value<'gc>, Error> {
+    fn dispatch<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, arg: Value<'gc>, sym: r8framework::JsSymbol<'gc>, flags: Value<'gc>) -> Result<Value<'gc>, Error> {
         let o = Self::subject(a, this)?;
         if matches!(arg, Value::Object(_))
             && let Some(f) = Self::method_of(a, arg, sym)?
@@ -897,14 +897,14 @@ impl<'gc> Installer<'_, 'gc> {
         let species = r.named_native(self.mc, Regexps::species, "get [Symbol.species]", 0);
         ctor.borrow_mut(self.mc).define_symbol(r.symbols.species, Property { slot: Slot::Accessor { get: Some(species), set: None }, enumerable: false, writable: false, configurable: true });
         // 正则字面量用的内部构造器
-        r.regexp_ctor.borrow_mut(self.mc).kind = ObjectKind::Native(r8frame::Native::function(Regexps::construct));
+        r.regexp_ctor.borrow_mut(self.mc).kind = ObjectKind::Native(r8framework::Native::function(Regexps::construct));
         self.method(proto, "exec", Regexps::exec, 1);
         self.method(proto, "test", Regexps::test, 1);
         self.method(proto, "toString", Regexps::to_string, 0);
         self.method(proto, "compile", Regexps::compile_method, 2);
         self.getter(proto, "source", Regexps::source);
         self.getter(proto, "flags", Regexps::flags);
-        let flags: [(&str, r8frame::NativeFn); 8] = [
+        let flags: [(&str, r8framework::NativeFn); 8] = [
             ("hasIndices", Regexps::flag::<'d'>),
             ("global", Regexps::flag::<'g'>),
             ("ignoreCase", Regexps::flag::<'i'>),
@@ -917,7 +917,7 @@ impl<'gc> Installer<'_, 'gc> {
         for (name, f) in flags {
             self.getter(proto, name, f);
         }
-        let symbols: [(r8frame::JsSymbol<'gc>, r8frame::NativeFn, u32); 5] = [
+        let symbols: [(r8framework::JsSymbol<'gc>, r8framework::NativeFn, u32); 5] = [
             (r.symbols.match_, Regexps::match_symbol, 1),
             (r.symbols.match_all, Regexps::match_all_symbol, 1),
             (r.symbols.replace, Regexps::replace_symbol, 2),

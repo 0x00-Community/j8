@@ -30,6 +30,6 @@ pub use class::{Class, ClassHandle, Member, Object};
 pub use convert::{FromJs, IntoJs, Rest, This};
 
 #[doc(hidden)]
-pub use r8frame as frame;
+pub use r8framework as frame;
 #[doc(hidden)]
 pub use class::Glue;

@@ -12,4 +12,4 @@ pub use r8macros::{class, function, object};
 
 #[doc(hidden)]
 pub use r8binding::Glue;
-pub use r8frame as frame;
+pub use r8framework as frame;

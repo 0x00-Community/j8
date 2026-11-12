@@ -6,7 +6,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-r8frame.workspace = true
+r8framework.workspace = true
 r8gc.workspace = true
 
 [lints]

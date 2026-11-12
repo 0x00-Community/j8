@@ -1,4 +1,4 @@
-use r8frame::{Agent, Error, ErrorKind, JsObject, NativeClosure, ObjectData, ObjectKind, Property, ProxyData, Value};
+use r8framework::{Agent, Error, ErrorKind, JsObject, NativeClosure, ObjectData, ObjectKind, Property, ProxyData, Value};
 
 use crate::{Args, Installer};
 
@@ -28,8 +28,8 @@ impl Reflects {
         let revoke = ObjectData { kind: ObjectKind::NativeClosure(NativeClosure { f: Self::revoke, slots: alloc::vec![p.into()] }), proto: Some(a.realm.function_proto), ..ObjectData::default() }.alloc(a.mc);
         a.realm.name_function(a.mc, revoke, "", Some(0));
         let out = a.object();
-        a.create_data_property_or_throw(out, r8frame::Key::Str("proxy"), p.into())?;
-        a.create_data_property_or_throw(out, r8frame::Key::Str("revoke"), revoke.into())?;
+        a.create_data_property_or_throw(out, r8framework::Key::Str("proxy"), p.into())?;
+        a.create_data_property_or_throw(out, r8framework::Key::Str("revoke"), revoke.into())?;
         Ok(out.into())
     }
 
@@ -163,7 +163,7 @@ impl Installer<'_, '_> {
         self.method(proxy, "revocable", Reflects::revocable, 2);
         self.set(r.global, "Proxy", proxy.into());
         let reflect = self.plain();
-        let methods: [(&str, r8frame::NativeFn, u32); 13] = [
+        let methods: [(&str, r8framework::NativeFn, u32); 13] = [
             ("apply", Reflects::apply, 3),
             ("construct", Reflects::construct, 2),
             ("defineProperty", Reflects::define_property, 3),
@@ -182,7 +182,7 @@ impl Installer<'_, '_> {
             self.method(reflect, name, f, n);
         }
         let tag = self.text("Reflect");
-        reflect.borrow_mut(self.mc).define_symbol(r.symbols.to_string_tag, Property { slot: r8frame::Slot::Data(tag), enumerable: false, writable: false, configurable: true });
+        reflect.borrow_mut(self.mc).define_symbol(r.symbols.to_string_tag, Property { slot: r8framework::Slot::Data(tag), enumerable: false, writable: false, configurable: true });
         self.set(r.global, "Reflect", reflect.into());
     }
 }

@@ -15,7 +15,7 @@ use r8virtasm::{Constant, Function, FunctionKind, Insn, Mode, Module, PropertyKi
 use r8gc::{Collect, Gc};
 mod module;
 
-use r8frame::{Agent, Closure, Coroutine, CoroutineState, Env, Error, ErrorKind, FuncId, Invoke, IterRecord, JsEnv, JsObject, ObjectData, ObjectKind, Property, Resume, Slot, Step, Suspended, Value};
+use r8framework::{Agent, Closure, Coroutine, CoroutineState, Env, Error, ErrorKind, FuncId, Invoke, IterRecord, JsEnv, JsObject, ObjectData, ObjectKind, Property, Resume, Slot, Step, Suspended, Value};
 
 /// 调用深度上限（含宿主函数里重入的 JS），过了抛 RangeError
 const STACK_LIMIT: usize = 10_000;
@@ -134,10 +134,10 @@ enum CallStep<'gc> {
     Closure(Closure<'gc>),
     Resolver,
     Proxy,
-    NativeClosure(r8frame::ClosureFn),
-    Native(r8frame::Native),
+    NativeClosure(r8framework::ClosureFn),
+    Native(r8framework::Native),
     /// `call` / `apply`：目标可调就展开成对它的调用
-    Forward(r8frame::Native),
+    Forward(r8framework::Native),
     Bound(Value<'gc>, Value<'gc>, Vec<Value<'gc>>),
 }
 
@@ -279,10 +279,10 @@ impl Executor {
 
     /// 直接 eval：按调用处的作用域表编译，跑在调用处的环境链上。
     #[cfg_attr(not(feature = "compile"), expect(unused_variables, reason = "没有编译器就只能报错"))]
-    fn direct_eval<'gc>(&self, a: &mut Agent<'gc, '_>, src: &str, table: &r8virtasm::EvalScope, env: Option<r8frame::JsEnv<'gc>>, strict: bool, level: usize) -> Result<Value<'gc>, Error> {
+    fn direct_eval<'gc>(&self, a: &mut Agent<'gc, '_>, src: &str, table: &r8virtasm::EvalScope, env: Option<r8framework::JsEnv<'gc>>, strict: bool, level: usize) -> Result<Value<'gc>, Error> {
         #[cfg(feature = "compile")]
         {
-            let module = match Module::compile_direct(&r8frame::Source { text: src, file: "[eval]" }, strict, table) {
+            let module = match Module::compile_direct(&r8framework::Source { text: src, file: "[eval]" }, strict, table) {
                 Ok(m) => m,
                 Err(Error::Syntax(m)) => return Err(a.throw(ErrorKind::Syntax, &m)),
                 Err(e) => return Err(e),
@@ -354,7 +354,7 @@ impl Executor {
                 ObjectKind::Resolver { .. } => CallStep::Resolver,
                 ObjectKind::Proxy(p) if p.callable => CallStep::Proxy,
                 ObjectKind::NativeClosure(c) => CallStep::NativeClosure(c.f),
-                ObjectKind::Native(n) if n.forward != r8frame::Forward::No => CallStep::Forward(*n),
+                ObjectKind::Native(n) if n.forward != r8framework::Forward::No => CallStep::Forward(*n),
                 ObjectKind::Native(n) => CallStep::Native(*n),
                 ObjectKind::Bound(b) => CallStep::Bound(b.target, b.this, b.args.clone()),
                 _ => break,
@@ -366,7 +366,7 @@ impl Executor {
                 let mut rest = args.into_iter();
                 this = rest.next().unwrap_or_default();
                 args = match n.forward {
-                    r8frame::Forward::Apply => match rest.next().unwrap_or_default() {
+                    r8framework::Forward::Apply => match rest.next().unwrap_or_default() {
                         Value::Undefined | Value::Null => Vec::new(),
                         list => a.list_from_array_like(list)?,
                     },
@@ -678,7 +678,7 @@ impl Executor {
     /// 全局名现在在哪（自有数据属性才缓存）。
     fn global_locate(a: &Agent<'_, '_>, name: &str) -> GlobalSlot {
         let scope = a.realm.script_scope.borrow();
-        let own = |d: &r8frame::ObjectData<'_>| d.position(name).filter(|&i| matches!(d.props[i].1.slot, Slot::Data(_))).and_then(|i| u32::try_from(i).ok());
+        let own = |d: &r8framework::ObjectData<'_>| d.position(name).filter(|&i| matches!(d.props[i].1.slot, Slot::Data(_))).and_then(|i| u32::try_from(i).ok());
         if let Some(at) = own(&scope) {
             return GlobalSlot::Scope(at);
         }
@@ -785,7 +785,7 @@ impl Executor {
     }
 
     /// 编译器放进寄存器的私有名。
-    fn private_key(v: Value<'_>) -> r8frame::JsSymbol<'_> {
+    fn private_key(v: Value<'_>) -> r8framework::JsSymbol<'_> {
         match v {
             Value::Symbol(s) => s,
             _ => unreachable!("the compiler loads a private name here"),
@@ -796,7 +796,7 @@ impl Executor {
     fn arguments<'gc>(a: &mut Agent<'gc, '_>, regs: &[Value<'gc>], f: &Frame<'gc>, self_strict: bool, mapped: &[Option<u16>]) -> Result<Value<'gc>, Error> {
         // 映射：只到实参个数为止
         let map = match (self_strict, f.env) {
-            (false, Some(env)) if !mapped.is_empty() => Some(r8frame::ArgumentsMap { env, slots: mapped.iter().take(f.args.len()).copied().collect() }),
+            (false, Some(env)) if !mapped.is_empty() => Some(r8framework::ArgumentsMap { env, slots: mapped.iter().take(f.args.len()).copied().collect() }),
             _ => None,
         };
         let o = ObjectData { kind: ObjectKind::Arguments(map), proto: Some(a.realm.object_proto), ..ObjectData::default() }.alloc(a.mc);
@@ -848,7 +848,7 @@ impl Executor {
             let len = d.array_length().unwrap_or(0);
             match &mut d.kind {
                 ObjectKind::Array(dense) if dense.len() == len as usize => dense.push(v),
-                _ => d.store(r8frame::Key::Str(&alloc::format!("{len}")), Property::data(v)),
+                _ => d.store(r8framework::Key::Str(&alloc::format!("{len}")), Property::data(v)),
             }
         }
     }
@@ -967,7 +967,7 @@ impl Executor {
                 Insn::CreateNullObject => *acc = ObjectData::default().alloc(a.mc).into(),
                 Insn::DeclareEvalVar { obj, name } => {
                     if let Value::Object(o) = regs[r(obj)] {
-                        let key = r8frame::Key::Str(func.name_at(name));
+                        let key = r8framework::Key::Str(func.name_at(name));
                         if !a.has_own_property(o, key)? {
                             a.create_data_property(o, key, Value::Undefined)?;
                         }
@@ -976,7 +976,7 @@ impl Executor {
                 Insn::WithHas { obj, name } => {
                     let o = regs[r(obj)];
                     let key = func.name_at(name);
-                    let mut found = matches!(o, Value::Object(x) if a.has_key(x, r8frame::Key::Str(key))?);
+                    let mut found = matches!(o, Value::Object(x) if a.has_key(x, r8framework::Key::Str(key))?);
                     if found {
                         let u = a.get_symbol(o, a.realm.symbols.unscopables, o)?;
                         if matches!(u, Value::Object(_)) {
@@ -1022,8 +1022,8 @@ impl Executor {
                 Insn::ToNumeric => {
                     if !matches!(*acc, Value::Number(_)) {
                         *acc = match a.to_numeric(*acc)? {
-                            r8frame::Numeric::Number(x) => x.into(),
-                            r8frame::Numeric::BigInt(b) => Value::BigInt(b),
+                            r8framework::Numeric::Number(x) => x.into(),
+                            r8framework::Numeric::BigInt(b) => Value::BigInt(b),
                         }
                     }
                 }
@@ -1493,10 +1493,10 @@ impl<'gc> Invoke<'gc> for Executor {
         !f.generator && !f.asynchronous && matches!(f.kind, FunctionKind::Normal | FunctionKind::Constructor { .. })
     }
 
-    fn eval_code(&self, a: &mut Agent<'gc, '_>, src: &str, kind: r8frame::CodeKind) -> Result<Value<'gc>, Error> {
+    fn eval_code(&self, a: &mut Agent<'gc, '_>, src: &str, kind: r8framework::CodeKind) -> Result<Value<'gc>, Error> {
         #[cfg(feature = "compile")]
         {
-            let module = match Module::compile(&r8frame::Source { text: src, file: "[eval]" }, kind) {
+            let module = match Module::compile(&r8framework::Source { text: src, file: "[eval]" }, kind) {
                 Ok(m) => m,
                 Err(Error::Syntax(m)) => return Err(a.throw(ErrorKind::Syntax, &m)),
                 Err(e) => return Err(e),
@@ -1614,14 +1614,14 @@ type Parked = r8gc::DynamicRoot<r8gc::Rootable![r8gc::RefLock<Option<State<'_>>>
 /// 一片跑完的结果。
 #[cfg(feature = "compile")]
 enum Slice {
-    Done(r8frame::Global),
+    Done(r8framework::Global),
     Paused(Parked),
 }
 
 #[cfg(feature = "compile")]
-impl r8frame::Engine for Executor {
+impl r8framework::Engine for Executor {
     /// 分片跑：每片最多 [`SLICE`] 条指令，停下时执行状态挂到根上，`enter` 返回时回收一段，再进来接着跑。
-    fn eval(&mut self, isolate: &mut r8frame::Isolate<'_>, cx: &r8frame::ContextRoot, src: &r8frame::Source<'_>) -> Result<r8frame::Global, Error> {
+    fn eval(&mut self, isolate: &mut r8framework::Isolate<'_>, cx: &r8framework::ContextRoot, src: &r8framework::Source<'_>) -> Result<r8framework::Global, Error> {
         let main = self.load(Module::try_from(src)?);
         let this: &Executor = self;
         let mut parked: Option<Parked> = None;
@@ -1651,7 +1651,7 @@ impl r8frame::Engine for Executor {
     }
 
     /// 模块不分片：一次进入跑完加载、链接、求值与微任务。
-    fn eval_module(&mut self, isolate: &mut r8frame::Isolate<'_>, cx: &r8frame::ContextRoot, src: &r8frame::Source<'_>) -> Result<r8frame::Global, Error> {
+    fn eval_module(&mut self, isolate: &mut r8framework::Isolate<'_>, cx: &r8framework::ContextRoot, src: &r8framework::Source<'_>) -> Result<r8framework::Global, Error> {
         let this: &Executor = self;
         isolate.enter(|scope| {
             let realm = scope.context_of(cx);
@@ -1676,7 +1676,7 @@ mod tests {
     use std::sync::Mutex;
 
     use r8builtins::Builtins;
-    use r8frame::{CreateParams, Error, Isolate, Platform, Source, Task};
+    use r8framework::{CreateParams, Error, Isolate, Platform, Source, Task};
 
     use crate::Executor;
 
@@ -1684,7 +1684,7 @@ mod tests {
     #[derive(Default)]
     struct Capture(Mutex<Vec<String>>);
 
-    impl r8frame::Pool for Capture {
+    impl r8framework::Pool for Capture {
         fn threads(&self) -> usize {
             1
         }

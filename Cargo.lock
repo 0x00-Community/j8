@@ -175,7 +175,7 @@ dependencies = [
  "r8",
  "r8builtins",
  "r8executor",
- "r8frame",
+ "r8framework",
  "r8jit",
  "r8platform",
  "serde",
@@ -794,7 +794,7 @@ dependencies = [
  "r8binding",
  "r8builtins",
  "r8executor",
- "r8frame",
+ "r8framework",
  "r8macros",
  "r8platform",
 ]
@@ -803,7 +803,7 @@ dependencies = [
 name = "r8binding"
 version = "0.1.0"
 dependencies = [
- "r8frame",
+ "r8framework",
  "r8gc",
 ]
 
@@ -814,7 +814,7 @@ dependencies = [
  "libm",
  "num-bigint 0.4.8",
  "num-traits",
- "r8frame",
+ "r8framework",
  "r8gc",
  "regress",
  "ryu-js",
@@ -826,7 +826,7 @@ name = "r8compiler"
 version = "0.1.0"
 dependencies = [
  "mlirpass",
- "r8frame",
+ "r8framework",
  "r8virtasm",
 ]
 
@@ -835,7 +835,7 @@ name = "r8debugger"
 version = "0.1.0"
 dependencies = [
  "clap",
- "r8frame",
+ "r8framework",
  "r8virtasm",
 ]
 
@@ -844,7 +844,7 @@ name = "r8executor"
 version = "0.1.0"
 dependencies = [
  "r8builtins",
- "r8frame",
+ "r8framework",
  "r8gc",
  "r8platform",
  "r8virtasm",
@@ -852,7 +852,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "r8frame"
+name = "r8framework"
 version = "0.1.0"
 dependencies = [
  "hashbrown",
@@ -894,7 +894,7 @@ dependencies = [
  "libc",
  "r8compiler",
  "r8executor",
- "r8frame",
+ "r8framework",
  "r8virtasm",
 ]
 
@@ -914,7 +914,7 @@ name = "r8platform"
 version = "0.1.0"
 dependencies = [
  "moremath",
- "r8frame",
+ "r8framework",
  "r8gc",
 ]
 
@@ -928,7 +928,7 @@ dependencies = [
  "oxc_semantic",
  "oxc_span",
  "oxc_syntax",
- "r8frame",
+ "r8framework",
  "r8macros",
  "ryu-js",
 ]
@@ -1255,7 +1255,7 @@ dependencies = [
  "r8",
  "r8builtins",
  "r8executor",
- "r8frame",
+ "r8framework",
  "r8platform",
 ]
 

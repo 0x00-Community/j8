@@ -1,4 +1,4 @@
-use r8frame::{Agent, Collection, Error, ErrorKind, IterKind, JsObject, ObjectData, ObjectKind, Value};
+use r8framework::{Agent, Collection, Error, ErrorKind, IterKind, JsObject, ObjectData, ObjectKind, Value};
 
 use crate::{Args, Installer};
 
@@ -280,13 +280,13 @@ impl Collections {
     }
 
     /// 另一个集合的 `keys()` 迭代器。
-    fn keys_iterator<'gc>(a: &mut Agent<'gc, '_>, r: &SetRecord<'gc>) -> Result<r8frame::IterRecord<'gc>, Error> {
+    fn keys_iterator<'gc>(a: &mut Agent<'gc, '_>, r: &SetRecord<'gc>) -> Result<r8framework::IterRecord<'gc>, Error> {
         let iterator = a.call(r.keys, r.set, &[])?;
         if !matches!(iterator, Value::Object(_)) {
             return Err(a.throw(ErrorKind::Type, "keys() of a set-like object must return an object"));
         }
         let next = a.get_named(iterator, "next")?;
-        Ok(r8frame::IterRecord { iterator, next })
+        Ok(r8framework::IterRecord { iterator, next })
     }
 
     /// `-0` 规整成 `+0`。
@@ -501,7 +501,7 @@ impl Installer<'_, '_> {
         let map = r.map_proto;
         let map_ctor = self.constructor("Map", Collections::map, map, 0);
         self.method(map_ctor, "groupBy", Collections::group_by, 2);
-        let methods: [(&str, r8frame::NativeFn, u32); 8] = [
+        let methods: [(&str, r8framework::NativeFn, u32); 8] = [
             ("get", Collections::map_get, 1),
             ("set", Collections::map_set, 2),
             ("has", Collections::map_has, 1),
@@ -516,12 +516,12 @@ impl Installer<'_, '_> {
         }
         let entries = r.named_native(self.mc, Collections::entries::<false>, "entries", 0);
         self.set(map, "entries", entries.into());
-        map.borrow_mut(self.mc).define_symbol(iter, r8frame::Property::hidden(entries.into()));
+        map.borrow_mut(self.mc).define_symbol(iter, r8framework::Property::hidden(entries.into()));
         self.getter(map, "size", Collections::size::<false>);
         // Set：`values` / `keys` / `[Symbol.iterator]` 是同一个函数
         let set = r.set_proto;
         self.constructor("Set", Collections::set_ctor, set, 0);
-        let methods: [(&str, r8frame::NativeFn, u32); 13] = [
+        let methods: [(&str, r8framework::NativeFn, u32); 13] = [
             ("add", Collections::set_add, 1),
             ("has", Collections::set_has, 1),
             ("delete", Collections::set_delete, 1),
@@ -542,7 +542,7 @@ impl Installer<'_, '_> {
         let values = r.named_native(self.mc, Collections::values::<true>, "values", 0);
         self.set(set, "values", values.into());
         self.set(set, "keys", values.into());
-        set.borrow_mut(self.mc).define_symbol(iter, r8frame::Property::hidden(values.into()));
+        set.borrow_mut(self.mc).define_symbol(iter, r8framework::Property::hidden(values.into()));
         self.getter(set, "size", Collections::size::<true>);
         self.method(r.collection_iterator_proto, "next", Collections::next::<false>, 0);
         self.method(r.set_iterator_proto, "next", Collections::next::<true>, 0);

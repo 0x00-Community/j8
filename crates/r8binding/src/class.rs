@@ -4,7 +4,7 @@ use core::any::Any;
 use core::cell::{Ref, RefCell, RefMut};
 
 use r8gc::{Gc, Static};
-use r8frame::{Agent, Error, ErrorKind, HostData, JsObject, Native, NativeFn, ObjectData, ObjectKind, Property, Slot, Value};
+use r8framework::{Agent, Error, ErrorKind, HostData, JsObject, Native, NativeFn, ObjectData, ObjectKind, Property, Slot, Value};
 
 /// 类的一个成员（宿主函数都是宏生成的转换外壳）。
 #[derive(Clone, Copy)]

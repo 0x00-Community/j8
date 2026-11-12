@@ -2,7 +2,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::cmp::Ordering;
 
-use r8frame::{Agent, Error, ErrorKind, JsObject, ObjectData, ObjectKind, Property, Slot, Value};
+use r8framework::{Agent, Error, ErrorKind, JsObject, ObjectData, ObjectKind, Property, Slot, Value};
 
 use crate::{Args, Installer};
 
@@ -167,7 +167,7 @@ impl Arrays {
                 return Err(a.throw(ErrorKind::Type, "Result of the Symbol.iterator method is not an object"));
             }
             let next = a.get_named(iterator, "next")?;
-            let it = r8frame::IterRecord { iterator, next };
+            let it = r8framework::IterRecord { iterator, next };
             let mut k = 0.0;
             while let Some(v) = a.iterator_step(it)? {
                 let r = (|| {
@@ -964,7 +964,7 @@ impl Installer<'_, '_> {
         self.method(ctor, "from", Arrays::from, 1);
         let species = self.realm.named_native(self.mc, Arrays::species, "get [Symbol.species]", 0);
         ctor.borrow_mut(self.mc).define_symbol(self.realm.symbols.species, Property { slot: Slot::Accessor { get: Some(species), set: None }, enumerable: false, writable: false, configurable: true });
-        let methods: [(&str, r8frame::NativeFn, u32); 34] = [
+        let methods: [(&str, r8framework::NativeFn, u32); 34] = [
             ("at", Arrays::at, 1),
             ("concat", Arrays::concat, 1),
             ("copyWithin", Arrays::copy_within, 2),

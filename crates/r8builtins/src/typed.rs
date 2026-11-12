@@ -2,7 +2,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::cmp::Ordering;
 
-use r8frame::{Agent, Element, ElementKind, Error, ErrorKind, IterKind, JsObject, ObjectData, ObjectKind, Property, Slot, Value, ViewData};
+use r8framework::{Agent, Element, ElementKind, Error, ErrorKind, IterKind, JsObject, ObjectData, ObjectKind, Property, Slot, Value, ViewData};
 
 use crate::buffer::Buffers;
 use crate::{Args, Installer};
@@ -140,7 +140,7 @@ impl Typed {
                 return Err(a.throw(ErrorKind::Type, "Result of the Symbol.iterator method is not an object"));
             }
             let next = a.get_named(iterator, "next")?;
-            let it = r8frame::IterRecord { iterator, next };
+            let it = r8framework::IterRecord { iterator, next };
             let mut out = Vec::new();
             while let Some(v) = a.iterator_step(it)? {
                 out.push(v);
@@ -236,7 +236,7 @@ impl Typed {
                 return Err(a.throw(ErrorKind::Type, "Result of the Symbol.iterator method is not an object"));
             }
             let next = a.get_named(iterator, "next")?;
-            let it = r8frame::IterRecord { iterator, next };
+            let it = r8framework::IterRecord { iterator, next };
             let mut out = Vec::new();
             while let Some(v) = a.iterator_step(it)? {
                 out.push(v);
@@ -798,7 +798,7 @@ impl<'gc> Installer<'_, 'gc> {
         let r = self.realm;
         let base = r.typed_array_ctor;
         let proto = r.typed_array_proto;
-        base.borrow_mut(self.mc).kind = ObjectKind::Native(r8frame::Native::constructor(Typed::abstract_ctor));
+        base.borrow_mut(self.mc).kind = ObjectKind::Native(r8framework::Native::constructor(Typed::abstract_ctor));
         r.name_function(self.mc, base, "TypedArray", Some(0));
         base.borrow_mut(self.mc).define("prototype", Property { slot: Slot::Data(proto.into()), enumerable: false, writable: false, configurable: false });
         self.set(proto, "constructor", base.into());
@@ -812,7 +812,7 @@ impl<'gc> Installer<'_, 'gc> {
         self.getter(proto, "length", Typed::length);
         let tag = r.named_native(self.mc, Typed::to_string_tag, "get [Symbol.toStringTag]", 0);
         proto.borrow_mut(self.mc).define_symbol(r.symbols.to_string_tag, Property { slot: Slot::Accessor { get: Some(tag), set: None }, enumerable: false, writable: false, configurable: true });
-        let methods: [(&str, r8frame::NativeFn, u32); 30] = [
+        let methods: [(&str, r8framework::NativeFn, u32); 30] = [
             ("at", Typed::at, 1),
             ("copyWithin", Typed::copy_within, 2),
             ("entries", Typed::entries, 0),
@@ -852,7 +852,7 @@ impl<'gc> Installer<'_, 'gc> {
         proto.borrow_mut(self.mc).define_symbol(r.symbols.iterator, Property::hidden(values));
         let to_string = r.array_proto.borrow().own("toString").unwrap_or_default();
         self.set(proto, "toString", to_string);
-        let ctors: [r8frame::NativeFn; 12] = [
+        let ctors: [r8framework::NativeFn; 12] = [
             Typed::construct::<0>,
             Typed::construct::<1>,
             Typed::construct::<2>,
@@ -869,7 +869,7 @@ impl<'gc> Installer<'_, 'gc> {
         for (i, (kind, f)) in ElementKind::ALL.into_iter().zip(ctors).enumerate() {
             let c = r.typed_ctors[i];
             let p = r.typed_protos[i];
-            c.borrow_mut(self.mc).kind = ObjectKind::Native(r8frame::Native::constructor(f));
+            c.borrow_mut(self.mc).kind = ObjectKind::Native(r8framework::Native::constructor(f));
             r.name_function(self.mc, c, kind.name(), Some(3));
             let fixed = |v: Value<'gc>| Property { slot: Slot::Data(v), enumerable: false, writable: false, configurable: false };
             #[expect(clippy::cast_precision_loss, reason = "元素字节数是 1 / 2 / 4 / 8")]

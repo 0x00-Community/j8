@@ -1,6 +1,6 @@
 use alloc::vec::Vec;
 
-use r8frame::{Agent, BufferData, ElementKind, Error, ErrorKind, JsObject, ObjectKind, Property, Slot, Value, ViewData};
+use r8framework::{Agent, BufferData, ElementKind, Error, ErrorKind, JsObject, ObjectKind, Property, Slot, Value, ViewData};
 
 use crate::{Args, Installer};
 
@@ -28,7 +28,7 @@ impl Buffers {
             return Err(a.throw(ErrorKind::Range, "Array buffer allocation failed"));
         }
         let data = BufferData { bytes: Some(alloc::vec![0; len]), max, shared };
-        Ok(r8frame::ObjectData { kind: ObjectKind::ArrayBuffer(data), proto: Some(proto), ..r8frame::ObjectData::default() }.alloc(a.mc))
+        Ok(r8framework::ObjectData { kind: ObjectKind::ArrayBuffer(data), proto: Some(proto), ..r8framework::ObjectData::default() }.alloc(a.mc))
     }
 
     /// `this` 是（共享 / 非共享）缓冲。
@@ -292,7 +292,7 @@ impl Buffers {
             return Err(a.throw(ErrorKind::Range, "Invalid DataView length"));
         }
         let view = ViewData { buffer, offset, length };
-        Ok(r8frame::ObjectData { kind: ObjectKind::DataView(view), proto: Some(proto), ..r8frame::ObjectData::default() }.alloc(a.mc).into())
+        Ok(r8framework::ObjectData { kind: ObjectKind::DataView(view), proto: Some(proto), ..r8framework::ObjectData::default() }.alloc(a.mc).into())
     }
 
     fn this_view<'gc>(a: &Agent<'gc, '_>, this: Value<'gc>) -> Result<ViewData<'gc>, Error> {
@@ -409,8 +409,8 @@ impl Buffers {
     }
 
     /// Atomics 的数：BigInt 类型 ToBigInt，别的 ToIntegerOrInfinity。
-    fn atomic_value<'gc>(a: &mut Agent<'gc, '_>, kind: ElementKind, v: Value<'gc>) -> Result<r8frame::Element, Error> {
-        if kind.is_bigint() { Ok(r8frame::Element::BigInt(a.to_bigint(v)?)) } else { Ok(r8frame::Element::Number(a.to_integer_or_infinity(v)?)) }
+    fn atomic_value<'gc>(a: &mut Agent<'gc, '_>, kind: ElementKind, v: Value<'gc>) -> Result<r8framework::Element, Error> {
+        if kind.is_bigint() { Ok(r8framework::Element::BigInt(a.to_bigint(v)?)) } else { Ok(r8framework::Element::Number(a.to_integer_or_infinity(v)?)) }
     }
 
     fn raw(bytes: &[u8]) -> u64 {
@@ -495,8 +495,8 @@ impl Buffers {
         Self::revalidate(a, buffer, at, kind)?;
         a.write_raw(buffer, at, kind, &v);
         Ok(match v {
-            r8frame::Element::Number(x) => (x + 0.0).into(),
-            r8frame::Element::BigInt(b) => a.bigint(b),
+            r8framework::Element::Number(x) => (x + 0.0).into(),
+            r8framework::Element::BigInt(b) => a.bigint(b),
         })
     }
 
@@ -516,7 +516,7 @@ impl Buffers {
             return Err(a.throw(ErrorKind::Type, "Atomics.wait requires a shared TypedArray"));
         }
         let (kind, buffer, at) = Self::atomic_target(a, args.at(0), args.at(1), true)?;
-        let v = if kind.is_bigint() { r8frame::Element::BigInt(Agent::wrap_bigint(&a.to_bigint(args.at(2))?, 64, true)) } else { r8frame::Element::Number(f64::from(a.to_int32(args.at(2))?)) };
+        let v = if kind.is_bigint() { r8framework::Element::BigInt(Agent::wrap_bigint(&a.to_bigint(args.at(2))?, 64, true)) } else { r8framework::Element::Number(f64::from(a.to_int32(args.at(2))?)) };
         let t = a.to_number(args.at(3))?;
         let _ = if t.is_nan() { f64::INFINITY } else { t.max(0.0) };
         let cur = Self::bytes_of(buffer).unwrap_or_default()[at..at + kind.size()].to_vec();
@@ -582,7 +582,7 @@ impl<'gc> Installer<'_, 'gc> {
         self.getter(dv, "buffer", Buffers::view_buffer);
         self.getter(dv, "byteLength", Buffers::view_byte_length);
         self.getter(dv, "byteOffset", Buffers::view_byte_offset);
-        let getters: [r8frame::NativeFn; 12] = [
+        let getters: [r8framework::NativeFn; 12] = [
             Buffers::get_value::<0>,
             Buffers::get_value::<1>,
             Buffers::get_value::<2>,
@@ -596,7 +596,7 @@ impl<'gc> Installer<'_, 'gc> {
             Buffers::get_value::<10>,
             Buffers::get_value::<11>,
         ];
-        let setters: [r8frame::NativeFn; 12] = [
+        let setters: [r8framework::NativeFn; 12] = [
             Buffers::set_value::<0>,
             Buffers::set_value::<1>,
             Buffers::set_value::<2>,
@@ -620,7 +620,7 @@ impl<'gc> Installer<'_, 'gc> {
         tag(dv, "DataView");
         // Atomics
         let atomics = self.plain();
-        let methods: [(&str, r8frame::NativeFn, u32); 13] = [
+        let methods: [(&str, r8framework::NativeFn, u32); 13] = [
             ("add", Buffers::add, 3),
             ("and", Buffers::and, 3),
             ("compareExchange", Buffers::compare_exchange, 4),

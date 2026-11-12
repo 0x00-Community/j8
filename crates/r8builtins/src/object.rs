@@ -1,6 +1,6 @@
 use alloc::vec::Vec;
 
-use r8frame::{Agent, Bound, Descriptor, Error, ErrorKind, Integrity, IterKind, JsObject, Key, ObjectData, ObjectKind, Property, PropertyKey, Slot, Value};
+use r8framework::{Agent, Bound, Descriptor, Error, ErrorKind, Integrity, IterKind, JsObject, Key, ObjectData, ObjectKind, Property, PropertyKey, Slot, Value};
 
 use crate::{Args, Installer};
 
@@ -10,7 +10,7 @@ pub(crate) struct Objects;
 impl Objects {
     /// `new.target` 是不是 `Object` 自己。
     fn is_object_ctor(v: Value<'_>) -> bool {
-        matches!(v, Value::Object(f) if matches!(f.borrow().kind, ObjectKind::Native(n) if core::ptr::fn_addr_eq(n.f, Self::object as r8frame::NativeFn)))
+        matches!(v, Value::Object(f) if matches!(f.borrow().kind, ObjectKind::Native(n) if core::ptr::fn_addr_eq(n.f, Self::object as r8framework::NativeFn)))
     }
 
     /// `Object(v)`：子类构造时按 `new.target` 建；否则对象原样返回、`undefined` / `null` 给新空对象、原始值包装。
@@ -571,7 +571,7 @@ impl Installer<'_, '_> {
     pub(crate) fn object(&mut self) {
         let proto = self.realm.object_proto;
         let ctor = self.constructor("Object", Objects::object, proto, 1);
-        let statics: [(&str, r8frame::NativeFn, u32); 23] = [
+        let statics: [(&str, r8framework::NativeFn, u32); 23] = [
             ("assign", Objects::assign, 2),
             ("create", Objects::create, 2),
             ("defineProperties", Objects::define_properties, 2),
@@ -599,7 +599,7 @@ impl Installer<'_, '_> {
         for (name, f, n) in statics {
             self.method(ctor, name, f, n);
         }
-        let methods: [(&str, r8frame::NativeFn, u32); 10] = [
+        let methods: [(&str, r8framework::NativeFn, u32); 10] = [
             ("hasOwnProperty", Objects::has_own_property, 1),
             ("isPrototypeOf", Objects::is_prototype_of, 1),
             ("propertyIsEnumerable", Objects::property_is_enumerable, 1),
@@ -622,12 +622,12 @@ impl Installer<'_, '_> {
 
     pub(crate) fn function(&mut self) {
         let proto = self.realm.function_proto;
-        proto.borrow_mut(self.mc).kind = ObjectKind::Native(r8frame::Native::function(Objects::noop));
+        proto.borrow_mut(self.mc).kind = ObjectKind::Native(r8framework::Native::function(Objects::noop));
         self.realm.name_function(self.mc, proto, "", Some(0));
         self.method(proto, "call", Objects::call, 1);
         self.method(proto, "apply", Objects::apply, 2);
         // 执行层直接展开 call / apply（宿主实现留着，目标不可调等情形还走它）
-        for (name, forward) in [("call", r8frame::Forward::Call), ("apply", r8frame::Forward::Apply)] {
+        for (name, forward) in [("call", r8framework::Forward::Call), ("apply", r8framework::Forward::Apply)] {
             let f = proto.borrow().own(name);
             if let Some(Value::Object(f)) = f
                 && let ObjectKind::Native(n) = &mut f.borrow_mut(self.mc).kind

@@ -69,7 +69,7 @@ impl R8Runner {
     fn run(src: &str, runs: usize) -> Outcome {
         use r8builtins::Builtins;
         use r8executor::Executor;
-        use r8frame::{CreateParams, Error, Isolate, Source};
+        use r8framework::{CreateParams, Error, Isolate, Source};
         let platform = r8platform::DefaultPlatform::default();
         let mut isolate = Isolate::new(&platform, CreateParams::default());
         let mut executor = Executor::default();

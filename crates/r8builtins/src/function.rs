@@ -1,7 +1,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use r8frame::{Agent, CodeKind, Error, Native, ObjectKind, Property, Slot, Value};
+use r8framework::{Agent, CodeKind, Error, Native, ObjectKind, Property, Slot, Value};
 
 use crate::{Args, Installer};
 
@@ -67,7 +67,7 @@ impl<'gc> Installer<'_, 'gc> {
         let r = self.realm;
         let ctor = self.constructor("Function", Functions::function, r.function_proto, 1);
         // 生成器 / async 函数构造器不是全局的：经各自原型的 `constructor` 取到
-        let kinds: [(&str, r8frame::NativeFn, r8frame::JsObject<'gc>, Option<r8frame::JsObject<'gc>>); 3] = [
+        let kinds: [(&str, r8framework::NativeFn, r8framework::JsObject<'gc>, Option<r8framework::JsObject<'gc>>); 3] = [
             ("GeneratorFunction", Functions::generator_function, r.generator_function_proto, Some(r.generator_proto)),
             ("AsyncFunction", Functions::async_function, r.async_function_proto, None),
             ("AsyncGeneratorFunction", Functions::async_generator_function, r.async_generator_function_proto, Some(r.async_generator_proto)),

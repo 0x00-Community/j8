@@ -6,7 +6,7 @@
 
 | crate | std | 职责 |
 |---|---|---|
-| `r8frame` | `no_std` | 核心框架层：定义 trait（`Platform`、`Engine`、`Invoke`、`Intrinsics`）与通用结构体 / 枚举（`Isolate`、`Scope`、`Agent`、`Context`·`Realm`、`Global`、`Value`、`JsString`·`JsObject`、`Profiler`、`BinaryOp`、`Error`……），JS 运算语义挂在 `Agent` 上，实现归各层 crate |
+| `r8framework` | `no_std` | 核心框架层：定义 trait（`Platform`、`Engine`、`Invoke`、`Intrinsics`）与通用结构体 / 枚举（`Isolate`、`Scope`、`Agent`、`Context`·`Realm`、`Global`、`Value`、`JsString`·`JsObject`、`Profiler`、`BinaryOp`、`Error`……），JS 运算语义挂在 `Agent` 上，实现归各层 crate |
 | `r8`（仓库根 `src/`） | `no_std` | 聚合导出：`#[r8::class]` / `#[r8::object]` / `#[r8::function]`（宏在 r8macros，见 `crates/macros/USAGE.md`）与 r8binding 的 trait |
 | `r8binding` | `no_std` | Rust ⇄ JS 绑定的运行时：`FromJs` / `IntoJs`、宿主对象、`Class` / `Object` |
 | `r8builtins` | `no_std` | 实现 `Intrinsics`：往 `Realm` 装 Object / Function / Array / String / Number / Boolean / Math / Error 系列 / `console` / `parseInt` 等 |
@@ -20,7 +20,7 @@
 | `r8executor` | `no_std`（`compile` 要 std） | 字节码执行器 `Executor`，**目前是最后一层**；`compile` feature 下实现 `Engine` |
 
 所有 JS 都先编成字节码再执行，不设 AST 解释层。
-依赖方向：各层只依赖 `r8frame`（`r8executor` 另依赖 `r8virtasm`），`r8frame` 不依赖任何层。
+依赖方向：各层只依赖 `r8framework`（`r8executor` 另依赖 `r8virtasm`），`r8framework` 不依赖任何层。
 
 ### 堆与句柄
 
@@ -40,7 +40,7 @@
 ```rust
 use r8builtins::Builtins;
 use r8executor::Executor;
-use r8frame::{CreateParams, Isolate, Source};
+use r8framework::{CreateParams, Isolate, Source};
 use r8platform::DefaultPlatform;
 
 let platform = DefaultPlatform::default();
@@ -56,7 +56,7 @@ isolate.enter(|scope| {
 验证 `no_std`：
 
 ```sh
-cargo build --target riscv64gc-unknown-none-elf -p r8frame -p r8virtasm -p r8executor --no-default-features
+cargo build --target riscv64gc-unknown-none-elf -p r8framework -p r8virtasm -p r8executor --no-default-features
 ```
 
 ## JIT（第一档）
@@ -64,7 +64,7 @@ cargo build --target riscv64gc-unknown-none-elf -p r8frame -p r8virtasm -p r8exe
 `dune --jit a.js` 开 JIT；`R8_TEST262_JIT=1 cargo test -p dune --test test262` 开着 JIT（每个函数第一次调用、每个循环第一次往回跳就编）跑基线。
 
 - `r8compiler`（`no_std`）：字节码函数 ⇒ MLIR（`llvm` 方言）⇒ mlirpass `target.x86_64` ⇒ x86-64 机器码（`Compiler` 建一次反复用，只装 builtin 与 `llvm` 方言）。
-  机器码是 `extern "C" fn(regs, acc, start) -> u64`，直接读写本帧寄存器文件与累加器里的 `Value`（布局见 `r8frame::ValueTag`：16 字节、首字节标签、第 8 字节起载荷）；
+  机器码是 `extern "C" fn(regs, acc, start) -> u64`，直接读写本帧寄存器文件与累加器里的 `Value`（布局见 `r8framework::ValueTag`：16 字节、首字节标签、第 8 字节起载荷）；
   `start` 是 0 从函数开头进、`h + 1` 从循环头 `h` 进（OSR）；返回 0 是函数返回了，`pc + 1` 是停在第 pc 条指令之前（`r8executor::Exit`），解释器从那里接着跑
 - 第一档收的指令：寄存器读写、数 / 布尔常量、四则（取余、乘方、位运算调运行时函数）与比较、`++` / `--`、跳转、死区检查、返回；
   操作数不是数等快路前提不成立就退回解释器；别的指令（调用、属性、闭包……）机器码停在它之前交给解释器

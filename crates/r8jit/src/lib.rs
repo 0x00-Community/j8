@@ -18,7 +18,7 @@ use core::cell::RefCell;
 use r8virtasm::Function;
 use r8compiler::Compiler;
 use r8executor::{Tier, Tiered};
-use r8frame::{FuncId, Value};
+use r8framework::{FuncId, Value};
 
 use code::Code;
 

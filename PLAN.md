@@ -14,7 +14,7 @@
 
 ## 阶段 2：Object / Array / 属性模型
 
-- [x] 对象内部方法（r8frame property.rs）：[[GetOwnProperty]] / [[DefineOwnProperty]]（ValidateAndApplyPropertyDescriptor、ArraySetLength、字符串包装对象）/ [[OwnPropertyKeys]] / 可扩展性 / 原型；数组稠密部分 + 按下标存的普通属性（空洞、不同特性的元素）
+- [x] 对象内部方法（r8framework property.rs）：[[GetOwnProperty]] / [[DefineOwnProperty]]（ValidateAndApplyPropertyDescriptor、ArraySetLength、字符串包装对象）/ [[OwnPropertyKeys]] / 可扩展性 / 原型；数组稠密部分 + 按下标存的普通属性（空洞、不同特性的元素）
 - [x] `extensible`：preventExtensions / isExtensible / seal / isSealed / isFrozen
 - [x] Object 补全：defineProperties、getOwnPropertySymbols / Descriptors、setPrototypeOf、fromEntries、is、hasOwn、groupBy、propertyIsEnumerable、isPrototypeOf、`__proto__` 与 `__defineGetter__` 等；字面量 `__proto__: v`
 - [x] Array 方法对类数组通用，补 from / splice / copyWithin / flat / flatMap / findLast(Index) / reduceRight / toReversed / toSorted / toSpliced / with / unscopables / species
@@ -23,7 +23,7 @@
 ## 阶段 3：反射与迭代器
 
 - [x] Reflect
-- [x] Proxy（含 revocable）：r8frame proxy.rs，内部方法入口与调用 / 构造分派到 trap 并查不变式
+- [x] Proxy（含 revocable）：r8framework proxy.rs，内部方法入口与调用 / 构造分派到 trap 并查不变式
 - [x] Iterator 助手（全局 Iterator、Iterator.from、map / filter / take / drop / flatMap / reduce / toArray / forEach / some / every / find）
 - [x] Set 方法、Map.groupBy
 

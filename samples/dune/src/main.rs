@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use r8frame::{CreateParams, Isolate, Source};
+use r8framework::{CreateParams, Isolate, Source};
 use r8platform::DefaultPlatform;
 
 use session::{Outcome, Session};

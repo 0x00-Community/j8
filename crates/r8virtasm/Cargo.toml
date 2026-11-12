@@ -6,7 +6,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-r8frame.workspace = true
+r8framework.workspace = true
 r8macros.workspace = true
 oxc_allocator = { workspace = true, optional = true }
 oxc_ast = { workspace = true, optional = true }

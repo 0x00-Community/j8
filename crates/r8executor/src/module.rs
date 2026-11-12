@@ -4,7 +4,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use r8frame::{Agent, Closure, Error, ErrorKind, ImportName, ModuleStatus, ObjectData, Resolution, ResolvedBinding, Value};
+use r8framework::{Agent, Closure, Error, ErrorKind, ImportName, ModuleStatus, ObjectData, Resolution, ResolvedBinding, Value};
 
 use crate::{Executor, Outcome, State};
 
@@ -15,16 +15,16 @@ impl Executor {
         if let Some(i) = a.realm.modules.borrow().iter().position(|m| **m.path == *path) {
             return Ok(u32::try_from(i).unwrap_or(u32::MAX));
         }
-        let (module, info) = r8virtasm::Module::compile_module(&r8frame::Source { text, file: path })?;
+        let (module, info) = r8virtasm::Module::compile_module(&r8framework::Source { text, file: path })?;
         let main = self.load(module);
         let mut slots = alloc::vec![Value::Undefined; usize::from(info.slots)];
         for &s in &info.lexical {
             slots[usize::from(s)] = Value::Uninit;
         }
-        let env = r8frame::Env { slots, parent: None }.alloc(a.mc);
+        let env = r8framework::Env { slots, parent: None }.alloc(a.mc);
         let index = u32::try_from(a.realm.modules.borrow().len()).unwrap_or(u32::MAX);
         let info = alloc::rc::Rc::new(info);
-        let record = r8frame::ModuleRecord { path: a.string(path), env, info: alloc::rc::Rc::clone(&info), main, status: ModuleStatus::Linked, error: None, requested: Vec::new(), imports: Vec::new(), namespace: None, meta: None };
+        let record = r8framework::ModuleRecord { path: a.string(path), env, info: alloc::rc::Rc::clone(&info), main, status: ModuleStatus::Linked, error: None, requested: Vec::new(), imports: Vec::new(), namespace: None, meta: None };
         a.realm.modules.borrow_mut(a.mc).push(record);
         self.module_of.borrow_mut().insert(main.0 - r8virtasm::Module::MAIN, index);
         let mut requested = Vec::with_capacity(info.requests.len());

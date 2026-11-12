@@ -10,7 +10,7 @@ name = "r8dbg"
 path = "src/main.rs"
 
 [dependencies]
-r8frame.workspace = true
+r8framework.workspace = true
 r8virtasm = { workspace = true, features = ["compile"] }
 clap.workspace = true
 

@@ -4,7 +4,7 @@ use oxc_ast::ast::{
     UpdateOperator,
 };
 use oxc_span::{GetSpan, Span};
-use r8frame::{BinaryOp, CompareOp, Error, Resume, UnaryOp};
+use r8framework::{BinaryOp, CompareOp, Error, Resume, UnaryOp};
 
 use crate::compiler::{Body, Compiler, Flavor, Place};
 use crate::scope::Hidden;

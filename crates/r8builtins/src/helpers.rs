@@ -1,6 +1,6 @@
 use alloc::vec::Vec;
 
-use r8frame::{Agent, Error, ErrorKind, HelperKind, HelperState, IterRecord, IteratorHelper, JsObject, Key, ObjectData, ObjectKind, Property, Slot, Value};
+use r8framework::{Agent, Error, ErrorKind, HelperKind, HelperState, IterRecord, IteratorHelper, JsObject, Key, ObjectData, ObjectKind, Property, Slot, Value};
 
 use crate::{Args, Installer};
 
@@ -17,7 +17,7 @@ enum Probe {
 
 impl Helpers {
     fn is_iterator_ctor(v: Value<'_>) -> bool {
-        matches!(v, Value::Object(f) if matches!(f.borrow().kind, ObjectKind::Native(n) if core::ptr::fn_addr_eq(n.f, Self::iterator as r8frame::NativeFn)))
+        matches!(v, Value::Object(f) if matches!(f.borrow().kind, ObjectKind::Native(n) if core::ptr::fn_addr_eq(n.f, Self::iterator as r8framework::NativeFn)))
     }
 
     /// `Iterator` 是抽象类：只能被子类构造。
@@ -425,7 +425,7 @@ impl Installer<'_, '_> {
         ctor.borrow_mut(self.mc).define("prototype", Property { slot: Slot::Data(proto.into()), enumerable: false, writable: false, configurable: false });
         self.set(r.global, "Iterator", ctor.into());
         self.method(ctor, "from", Helpers::from, 1);
-        let methods: [(&str, r8frame::NativeFn, u32); 11] = [
+        let methods: [(&str, r8framework::NativeFn, u32); 11] = [
             ("map", Helpers::map, 1),
             ("filter", Helpers::filter, 1),
             ("take", Helpers::take, 1),
@@ -441,7 +441,7 @@ impl Installer<'_, '_> {
         for (name, f, n) in methods {
             self.method(proto, name, f, n);
         }
-        let accessor = |get: r8frame::NativeFn, set: r8frame::NativeFn, name: &str| {
+        let accessor = |get: r8framework::NativeFn, set: r8framework::NativeFn, name: &str| {
             let g = r.named_native(self.mc, get, &alloc::format!("get {name}"), 0);
             let s = r.named_native(self.mc, set, &alloc::format!("set {name}"), 1);
             Property { slot: Slot::Accessor { get: Some(g), set: Some(s) }, enumerable: false, writable: false, configurable: true }

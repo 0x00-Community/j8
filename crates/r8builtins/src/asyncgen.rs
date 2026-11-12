@@ -1,4 +1,4 @@
-use r8frame::{Agent, Error, ErrorKind, ObjectKind, Resume, Value};
+use r8framework::{Agent, Error, ErrorKind, ObjectKind, Resume, Value};
 
 use crate::{Args, Installer};
 

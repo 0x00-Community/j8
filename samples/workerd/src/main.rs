@@ -17,7 +17,7 @@ use clap::Parser;
 use r8::Class;
 use r8builtins::Builtins;
 use r8executor::Executor;
-use r8frame::{ContextRoot, CreateParams, Error, Isolate, Property, Source};
+use r8framework::{ContextRoot, CreateParams, Error, Isolate, Property, Source};
 use r8platform::DefaultPlatform;
 
 /// Fetch API 与 Durable Object 的 JS 部分。
@@ -72,7 +72,7 @@ impl KvStore {
     }
 
     /// `newUniqueId()` 用：时间戳加计数，十六进制。
-    fn unique_id(a: &mut r8frame::Agent<'_, '_>) -> String {
+    fn unique_id(a: &mut r8framework::Agent<'_, '_>) -> String {
         format!("{:032x}", a.platform.wall_clock().as_nanos())
     }
 }
@@ -135,7 +135,7 @@ impl<'p> Runtime<'p> {
         self.isolate.enter(|scope| {
             let realm = scope.context_of(cx);
             let mut a = scope.agent(realm, executor);
-            let text = |a: &mut r8frame::Agent<'_, '_>, g: &r8frame::Global| {
+            let text = |a: &mut r8framework::Agent<'_, '_>, g: &r8framework::Global| {
                 let v = a.local(g);
                 a.to_string(v).map_or_else(|_| String::from("<ToString threw>"), |s| String::from(&**s))
             };

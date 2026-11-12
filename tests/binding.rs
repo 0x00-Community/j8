@@ -3,7 +3,7 @@
 use r8::{Class, Object, Rest};
 use r8builtins::Builtins;
 use r8executor::Executor;
-use r8frame::{Agent, CreateParams, Error, Isolate, Source, Value};
+use r8framework::{Agent, CreateParams, Error, Isolate, Source, Value};
 use r8platform::DefaultPlatform;
 
 struct Counter {

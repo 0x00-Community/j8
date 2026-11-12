@@ -5,7 +5,7 @@
 //! ```
 //!
 //! 出来的机器码是 System V 函数 `extern "C" fn(regs: *mut Value, acc: *mut Value, start: u64) -> u64`：直接在本帧的寄存器文件
-//! 与累加器上跑（[`Value`](r8frame::Value) 的内存布局见 [`ValueTag`](r8frame::ValueTag)），返回 0 表示函数返回了（结果在累加器），
+//! 与累加器上跑（[`Value`](r8framework::Value) 的内存布局见 [`ValueTag`](r8framework::ValueTag)），返回 0 表示函数返回了（结果在累加器），
 //! 返回 `pc + 1` 表示停在第 `pc` 条指令之前（r8executor 的 `Exit`）。
 //!
 //! 第一档收的指令：寄存器读写、数与布尔常量、四则运算与比较、`++` / `--`、跳转、死区检查、返回。

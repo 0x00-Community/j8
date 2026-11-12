@@ -1,4 +1,4 @@
-use r8frame::{Agent, Error, ErrorKind, IterKind, IteratorState, ObjectKind, Resume, Step, SymbolData, Value};
+use r8framework::{Agent, Error, ErrorKind, IterKind, IteratorState, ObjectKind, Resume, Step, SymbolData, Value};
 
 use crate::{Args, Installer};
 
@@ -15,7 +15,7 @@ impl Iters {
         Ok(Value::Symbol(r8gc::Gc::new(a.mc, SymbolData { description })))
     }
 
-    fn this_symbol<'gc>(a: &Agent<'gc, '_>, this: Value<'gc>) -> Result<r8frame::JsSymbol<'gc>, Error> {
+    fn this_symbol<'gc>(a: &Agent<'gc, '_>, this: Value<'gc>) -> Result<r8framework::JsSymbol<'gc>, Error> {
         match this.unwrapped() {
             Value::Symbol(s) => Ok(s),
             _ => Err(a.throw(ErrorKind::Type, "Symbol.prototype method called on a non-symbol")),
@@ -64,7 +64,7 @@ impl Iters {
         Ok(a.builtin_iterator(IteratorState::String { s, pos: 0 }).into())
     }
 
-    fn state<'gc>(a: &Agent<'gc, '_>, this: Value<'gc>) -> Result<r8frame::JsObject<'gc>, Error> {
+    fn state<'gc>(a: &Agent<'gc, '_>, this: Value<'gc>) -> Result<r8framework::JsObject<'gc>, Error> {
         match this {
             Value::Object(o) if matches!(o.borrow().kind, ObjectKind::Iterator(_)) => Ok(o),
             _ => Err(a.throw(ErrorKind::Type, "next method called on an incompatible receiver")),
@@ -162,7 +162,7 @@ impl Installer<'_, '_> {
         // 数组：`values` 与 `[Symbol.iterator]` 是同一个函数
         let values = r.named_native(self.mc, Iters::values, "values", 0);
         self.set(r.array_proto, "values", values.into());
-        r.array_proto.borrow_mut(self.mc).define_symbol(sym.iterator, r8frame::Property::hidden(values.into()));
+        r.array_proto.borrow_mut(self.mc).define_symbol(sym.iterator, r8framework::Property::hidden(values.into()));
         self.method(r.array_proto, "keys", Iters::keys, 0);
         self.method(r.array_proto, "entries", Iters::entries, 0);
         self.method(r.array_iterator_proto, "next", Iters::array_next, 0);

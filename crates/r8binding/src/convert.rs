@@ -2,7 +2,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use r8frame::{Agent, Error, ErrorKind, JsObject, JsString, Value};
+use r8framework::{Agent, Error, ErrorKind, JsObject, JsString, Value};
 
 /// JS 值 ⇒ Rust 值（宿主函数的实参）。
 pub trait FromJs<'gc>: Sized {

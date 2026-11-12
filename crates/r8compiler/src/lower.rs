@@ -4,7 +4,7 @@ use alloc::vec::Vec;
 use core::fmt::Write;
 
 use r8virtasm::{Constant, Function, Insn, Reg};
-use r8frame::{BinaryOp, CompareOp, ValueTag};
+use r8framework::{BinaryOp, CompareOp, ValueTag};
 
 use crate::Helper;
 
@@ -51,7 +51,7 @@ const ICMP_NE: &str = "ne";
 /// 一个字节码函数 ⇒ MLIR 文本（`llvm` 方言）。
 ///
 /// 每条指令一个块 `^iN`；要退回解释器的指令另有 `^dN`（返回 `N + 1`）。累加器与每个寄存器是一对局部变量
-/// （`llvm.alloca`：标签、载荷）：入口从帧（`%acc` / `%regs` 指向的 [`Value`](r8frame::Value)）读进来，
+/// （`llvm.alloca`：标签、载荷）：入口从帧（`%acc` / `%regs` 指向的 [`Value`](r8framework::Value)）读进来，
 /// 所有出口都跳到写回块 `^x` 写回帧再返回；局部变量之后由 mem2reg 提成 SSA。
 pub(crate) struct Lower<'f> {
     func: &'f Function,

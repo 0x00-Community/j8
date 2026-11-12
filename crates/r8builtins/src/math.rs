@@ -1,4 +1,4 @@
-use r8frame::{Agent, Error, Value};
+use r8framework::{Agent, Error, Value};
 
 use crate::{Args, Installer};
 
@@ -50,7 +50,7 @@ impl Math {
 
     fn pow<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let (x, y) = (args.at(0), args.at(1));
-        a.binary(r8frame::BinaryOp::Exp, x, y)
+        a.binary(r8framework::BinaryOp::Exp, x, y)
     }
 
     fn atan2<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
@@ -97,7 +97,7 @@ impl Math {
 impl Installer<'_, '_> {
     pub(crate) fn math(&mut self) {
         let m = self.plain();
-        let unary: [r8frame::NativeFn; UNARY.len()] = [
+        let unary: [r8framework::NativeFn; UNARY.len()] = [
             Math::unary::<0>,
             Math::unary::<1>,
             Math::unary::<2>,
