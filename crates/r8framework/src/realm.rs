@@ -132,6 +132,8 @@ pub struct Realm<'gc> {
     pub regexp_cache: Gc<'gc, RefLock<VecDeque<RegExpCompiled<'gc>>>>,
     /// `RegExp.prototype` 装好时的样子（内建正则方法据此判断能不能跳过协议直接匹配）
     pub regexp_pristine: Gc<'gc, RefLock<Option<RegExpPristine<'gc>>>>,
+    /// 内建的数组迭代器 / 字符串迭代器 `next`（迭代记录里的 `next` 是它们时不建结果对象，直接走一步）
+    pub builtin_nexts: Gc<'gc, RefLock<[Option<JsObject<'gc>>; 2]>>,
 }
 
 /// `RegExp.prototype` 装好时的形状，及 `exec` / `flags` / 各标志 getter 所在的槽与原来的内容。
@@ -226,6 +228,7 @@ impl<'gc> Realm<'gc> {
             jobs: Gc::new(mc, RefLock::new(VecDeque::new())),
             regexp_cache: Gc::new(mc, RefLock::new(VecDeque::new())),
             regexp_pristine: Gc::new(mc, RefLock::new(None)),
+            builtin_nexts: Gc::new(mc, RefLock::new([None, None])),
             symbol_registry: Gc::new(mc, RefLock::new(alloc::vec::Vec::new())),
             modules: Gc::new(mc, RefLock::new(alloc::vec::Vec::new())),
             random_state: Gc::new(mc, r8gc::Lock::new(0)),

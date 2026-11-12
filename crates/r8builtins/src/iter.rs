@@ -74,48 +74,15 @@ impl Iters {
     /// 数组迭代器的 `next`：每次重读 `length`（迭代中改数组看得见）。
     fn array_next<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let o = Self::state(a, this)?;
-        let ObjectKind::Iterator(IteratorState::Array { target, index, kind }) = o.borrow().kind else {
-            return Err(a.throw(ErrorKind::Type, "next method called on an incompatible receiver"));
-        };
-        let Some(target) = target else { return Ok(a.iter_result(Value::Undefined, true).into()) };
-        let len = a.get_named(target, "length")?;
-        let len = a.to_number(len)?;
-        let i = f64::from(u32::try_from(index).unwrap_or(u32::MAX));
-        // len 是 NaN 时也算走完
-        let finished = i.partial_cmp(&len) != Some(core::cmp::Ordering::Less);
-        if let ObjectKind::Iterator(IteratorState::Array { target, index, .. }) = &mut o.borrow_mut(a.mc).kind {
-            if finished {
-                *target = None;
-            } else {
-                *index += 1;
-            }
-        }
-        if finished {
-            return Ok(a.iter_result(Value::Undefined, true).into());
-        }
-        let v = match kind {
-            IterKind::Keys => i.into(),
-            IterKind::Values => a.get_keyed(target, i.into())?,
-            IterKind::Entries => {
-                let v = a.get_keyed(target, i.into())?;
-                a.array(alloc::vec![i.into(), v]).into()
-            }
-        };
-        Ok(a.iter_result(v, false).into())
+        let v = a.array_iter_step(o)?;
+        Ok(a.iter_result(v.unwrap_or_default(), v.is_none()).into())
     }
 
     /// 字符串迭代器的 `next`：一次一个码点。
     fn string_next<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let o = Self::state(a, this)?;
-        let ObjectKind::Iterator(IteratorState::String { s, pos }) = o.borrow().kind else {
-            return Err(a.throw(ErrorKind::Type, "next method called on an incompatible receiver"));
-        };
-        let Some(c) = s[pos..].chars().next() else { return Ok(a.iter_result(Value::Undefined, true).into()) };
-        if let ObjectKind::Iterator(IteratorState::String { pos, .. }) = &mut o.borrow_mut(a.mc).kind {
-            *pos += c.len_utf8();
-        }
-        let v = a.string(c.encode_utf8(&mut [0; 4]));
-        Ok(a.iter_result(v.into(), false).into())
+        let v = a.string_iter_step(o)?;
+        Ok(a.iter_result(v.unwrap_or_default(), v.is_none()).into())
     }
 
     /// 生成器的 `next` / `return` / `throw`：恢复一步，包成 `{ value, done }`。
@@ -168,6 +135,12 @@ impl Installer<'_, '_> {
         self.method(r.array_iterator_proto, "next", Iters::array_next, 0);
         r.symbol_method(self.mc, r.string_proto, sym.iterator, Iters::string_iterator, 0);
         self.method(r.string_iterator_proto, "next", Iters::string_next, 0);
+        // 记下内建的 `next`：迭代记录里的 `next` 是它们时，执行层直接走一步不建结果对象
+        let nexts = [r.array_iterator_proto, r.string_iterator_proto].map(|o| match o.borrow().own("next") {
+            Some(Value::Object(f)) => Some(f),
+            _ => None,
+        });
+        *r.builtin_nexts.borrow_mut(self.mc) = nexts;
         self.method(r.generator_proto, "next", Iters::generator_next, 1);
         self.method(r.generator_proto, "return", Iters::generator_return, 1);
         self.method(r.generator_proto, "throw", Iters::generator_throw, 1);

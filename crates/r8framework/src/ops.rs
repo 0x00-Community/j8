@@ -1219,8 +1219,78 @@ impl<'gc> Agent<'gc, '_> {
         Ok(IterRecord { iterator, next })
     }
 
+    /// 数组迭代器走一步（每次重读 `length`，迭代中改数组看得见）：完了给 `None` 并记成走完。
+    pub fn array_iter_step(&mut self, o: JsObject<'gc>) -> Result<Option<Value<'gc>>, Error> {
+        let ObjectKind::Iterator(IteratorState::Array { target, index, kind }) = o.borrow().kind else {
+            return Err(self.throw(ErrorKind::Type, "next method called on an incompatible receiver"));
+        };
+        let Some(target) = target else { return Ok(None) };
+        // 稠密数组的长度直接取（与读 `length` 一样，没有可观察的步骤）
+        let len = match target {
+            Value::Object(t) => match &t.borrow().kind {
+                ObjectKind::Array(items) if t.borrow().sparse_length == 0 => Some(items.len()),
+                _ => None,
+            },
+            _ => None,
+        };
+        let len = match len {
+            #[expect(clippy::cast_precision_loss, reason = "元素个数远小于 2^53")]
+            Some(n) => n as f64,
+            None => {
+                let l = self.get_named(target, "length")?;
+                self.to_number(l)?
+            }
+        };
+        let i = f64::from(u32::try_from(index).unwrap_or(u32::MAX));
+        // len 是 NaN 时也算走完
+        let finished = i.partial_cmp(&len) != Some(core::cmp::Ordering::Less);
+        if let ObjectKind::Iterator(IteratorState::Array { target, index, .. }) = &mut o.borrow_mut(self.mc).kind {
+            if finished {
+                *target = None;
+            } else {
+                *index += 1;
+            }
+        }
+        if finished {
+            return Ok(None);
+        }
+        Ok(Some(match kind {
+            IterKind::Keys => i.into(),
+            IterKind::Values => self.get_keyed(target, i.into())?,
+            IterKind::Entries => {
+                let v = self.get_keyed(target, i.into())?;
+                self.array(alloc::vec![i.into(), v]).into()
+            }
+        }))
+    }
+
+    /// 字符串迭代器走一步（一个码点）：完了给 `None`。
+    pub fn string_iter_step(&mut self, o: JsObject<'gc>) -> Result<Option<Value<'gc>>, Error> {
+        let ObjectKind::Iterator(IteratorState::String { s, pos }) = o.borrow().kind else {
+            return Err(self.throw(ErrorKind::Type, "next method called on an incompatible receiver"));
+        };
+        let Some(c) = s[pos..].chars().next() else { return Ok(None) };
+        if let ObjectKind::Iterator(IteratorState::String { pos, .. }) = &mut o.borrow_mut(self.mc).kind {
+            *pos += c.len_utf8();
+        }
+        Ok(Some(if c.is_ascii() { self.unit_string(u16::from(c as u8)) } else { self.string(c.encode_utf8(&mut [0; 4])) }.into()))
+    }
+
     /// 走一步：完了给 `None`。
     pub fn iterator_step(&mut self, it: IterRecord<'gc>) -> Result<Option<Value<'gc>>, Error> {
+        // `next` 就是内建的数组 / 字符串迭代器 `next`：它建的结果对象读不出别的，直接走一步
+        if let (Value::Object(n), Value::Object(o)) = (it.next, it.iterator) {
+            let [array, string] = *self.realm.builtin_nexts.borrow();
+            let (is_array, is_string) = match &o.borrow().kind {
+                ObjectKind::Iterator(IteratorState::Array { .. }) => (true, false),
+                ObjectKind::Iterator(IteratorState::String { .. }) => (false, true),
+                _ => (false, false),
+            };
+            let builtin = if is_array { array } else if is_string { string } else { None };
+            if builtin.is_some_and(|k| Gc::ptr_eq(k, n)) {
+                return if is_array { self.array_iter_step(o) } else { self.string_iter_step(o) };
+            }
+        }
         let r = self.call(it.next, it.iterator, &[])?;
         if !matches!(r, Value::Object(_)) {
             let what = self.to_string(r)?;
