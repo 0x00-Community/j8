@@ -645,6 +645,15 @@ impl<'a> Compiler<'a, '_> {
 
     pub(crate) fn emit(&mut self, i: Insn) -> usize {
         let out = &mut self.frame().out;
+        // 能精确放进 i32 的数常量（不含 -0）直接放进指令
+        let i = match i {
+            Insn::LdaConst(k) => match out.consts.get(k.0 as usize) {
+                #[expect(clippy::cast_possible_truncation, reason = "下面核对过转回来相等")]
+                Some(&Constant::Number(x)) if f64::from(x as i32) == x && !(x == 0.0 && x.is_sign_negative()) => Insn::LdaSmi(x as i32),
+                _ => i,
+            },
+            _ => i,
+        };
         out.insns.push(i);
         out.insns.len() - 1
     }

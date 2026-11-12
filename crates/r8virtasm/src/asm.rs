@@ -75,7 +75,7 @@ macro_rules! parsed {
         }
     )*};
 }
-parsed!(bool, u16, u32, usize);
+parsed!(bool, i32, u16, u32, usize);
 
 /// 按 `name()` 反查 `ALL`
 macro_rules! by_name {

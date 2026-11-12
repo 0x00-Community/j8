@@ -1,3 +1,4 @@
+use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use r8framework::{Agent, Bound, Descriptor, Error, ErrorKind, Integrity, IterKind, JsObject, Key, ObjectData, ObjectKind, Property, PropertyKey, Slot, Value};
@@ -487,7 +488,7 @@ impl Objects {
         let pre = args.get(1..).unwrap_or(&[]).to_vec();
         let proto = a.get_prototype_of(target)?;
         let bound = Bound { target: this, this: args.at(0), args: pre.clone() };
-        let f = ObjectData { kind: ObjectKind::Bound(bound), proto, ..ObjectData::default() }.alloc(a.mc);
+        let f = ObjectData { kind: ObjectKind::Bound(Box::new(bound)), proto, ..ObjectData::default() }.alloc(a.mc);
         let mut length = 0.0;
         if a.has_own_property(target, Key::Str("length"))?
             && let Value::Number(n) = a.get_named(this, "length")?

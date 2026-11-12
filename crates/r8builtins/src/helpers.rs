@@ -1,3 +1,4 @@
+use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use r8framework::{Agent, Error, ErrorKind, HelperKind, HelperState, IterRecord, IteratorHelper, JsObject, Key, ObjectData, ObjectKind, Property, Slot, Value};
@@ -69,7 +70,7 @@ impl Helpers {
     fn make<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, kind: HelperKind, f: Value<'gc>, remaining: f64) -> Result<Value<'gc>, Error> {
         let underlying = Self::direct(a, this)?;
         let h = IteratorHelper { kind, state: HelperState::Start, underlying, f, remaining, counter: 0.0, inner: None };
-        Ok(ObjectData { kind: ObjectKind::IteratorHelper(h), proto: Some(a.realm.iterator_helper_proto), ..ObjectData::default() }.alloc(a.mc).into())
+        Ok(ObjectData { kind: ObjectKind::IteratorHelper(Box::new(h)), proto: Some(a.realm.iterator_helper_proto), ..ObjectData::default() }.alloc(a.mc).into())
     }
 
     fn with_callback<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>], kind: HelperKind) -> Result<Value<'gc>, Error> {
@@ -196,8 +197,8 @@ impl Helpers {
 
     fn helper<'gc>(a: &Agent<'gc, '_>, this: Value<'gc>) -> Result<(JsObject<'gc>, IteratorHelper<'gc>), Error> {
         match this {
-            Value::Object(o) => match o.borrow().kind {
-                ObjectKind::IteratorHelper(h) => Ok((o, h)),
+            Value::Object(o) => match &o.borrow().kind {
+                ObjectKind::IteratorHelper(h) => Ok((o, **h)),
                 _ => Err(a.throw(ErrorKind::Type, "Iterator Helper method called on an incompatible receiver")),
             },
             _ => Err(a.throw(ErrorKind::Type, "Iterator Helper method called on an incompatible receiver")),
@@ -206,7 +207,7 @@ impl Helpers {
 
     fn store<'gc>(a: &Agent<'gc, '_>, o: JsObject<'gc>, h: IteratorHelper<'gc>) {
         if let ObjectKind::IteratorHelper(x) = &mut o.borrow_mut(a.mc).kind {
-            *x = h;
+            **x = h;
         }
     }
 

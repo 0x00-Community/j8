@@ -3,7 +3,7 @@ use alloc::vec::Vec;
 
 use r8gc::{Gc, Lock};
 
-use crate::{Agent, Coroutine, Error, ErrorKind, Job, JsObject, ObjectData, ObjectKind, Reaction, Request, Resume, Settled, Step, Value};
+use crate::{Agent, Error, ErrorKind, Job, JsObject, ObjectData, ObjectKind, Reaction, Request, Resume, Settled, Step, Value};
 
 impl<'gc> Agent<'gc, '_> {
     /// 一个待定的 Promise。
@@ -154,7 +154,8 @@ impl<'gc> Agent<'gc, '_> {
         let promise = self.new_promise();
         let idle = {
             let mut d = coroutine.borrow_mut(self.mc);
-            let ObjectKind::Coroutine(Coroutine { requests: Some(q), .. }) = &mut d.kind else { unreachable!("an async generator") };
+            let ObjectKind::Coroutine(c) = &mut d.kind else { unreachable!("an async generator") };
+            let Some(q) = &mut c.requests else { unreachable!("an async generator") };
             q.push_back(Request { mode, value, promise });
             q.len() == 1
         };
@@ -168,7 +169,8 @@ impl<'gc> Agent<'gc, '_> {
     fn settle_request(&mut self, coroutine: JsObject<'gc>, outcome: Result<(Value<'gc>, bool), Value<'gc>>) -> Result<(), Error> {
         let (done_req, next) = {
             let mut d = coroutine.borrow_mut(self.mc);
-            let ObjectKind::Coroutine(Coroutine { requests: Some(q), .. }) = &mut d.kind else { unreachable!("an async generator") };
+            let ObjectKind::Coroutine(c) = &mut d.kind else { unreachable!("an async generator") };
+            let Some(q) = &mut c.requests else { unreachable!("an async generator") };
             (q.pop_front(), q.front().copied())
         };
         if let Some(req) = done_req {

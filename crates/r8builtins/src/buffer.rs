@@ -1,3 +1,4 @@
+use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use r8framework::{Agent, BufferData, ElementKind, Error, ErrorKind, JsObject, ObjectKind, Property, Slot, Value, ViewData};
@@ -28,7 +29,7 @@ impl Buffers {
             return Err(a.throw(ErrorKind::Range, "Array buffer allocation failed"));
         }
         let data = BufferData { bytes: Some(alloc::vec![0; len]), max, shared };
-        Ok(r8framework::ObjectData { kind: ObjectKind::ArrayBuffer(data), proto: Some(proto), ..r8framework::ObjectData::default() }.alloc(a.mc))
+        Ok(r8framework::ObjectData { kind: ObjectKind::ArrayBuffer(Box::new(data)), proto: Some(proto), ..r8framework::ObjectData::default() }.alloc(a.mc))
     }
 
     /// `this` 是（共享 / 非共享）缓冲。

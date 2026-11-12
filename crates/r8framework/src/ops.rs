@@ -345,12 +345,14 @@ impl<'gc> Agent<'gc, '_> {
         matches!(v, Value::Object(o) if o.borrow().kind.is_callable())
     }
 
+    #[inline]
     pub fn to_boolean(&self, v: Value<'gc>) -> bool {
         match v {
             Value::Undefined | Value::Null | Value::Uninit => false,
             Value::Bool(b) => b,
             Value::Number(x) => !(x == 0.0 || x.is_nan()),
-            Value::String(s) => !s.is_empty(),
+            // 按字节数看，不拼平绳索
+            Value::String(s) => s.byte_len() != 0,
             Value::BigInt(b) => !b.0.is_zero(),
             Value::Symbol(_) | Value::Object(_) => true,
         }

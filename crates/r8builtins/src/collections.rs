@@ -1,3 +1,4 @@
+use alloc::boxed::Box;
 use r8framework::{Agent, Collection, Error, ErrorKind, IterKind, JsObject, ObjectData, ObjectKind, Value};
 
 use crate::{Args, Installer};
@@ -23,10 +24,10 @@ enum Shape {
 impl Collections {
     fn make<'gc>(a: &mut Agent<'gc, '_>, shape: Shape, weak: bool) -> Result<JsObject<'gc>, Error> {
         let (kind, proto, name) = match (shape, weak) {
-            (Shape::Map, false) => (ObjectKind::Map(Collection::new(false)), a.realm.map_proto, "Map"),
-            (Shape::Map, true) => (ObjectKind::Map(Collection::new(true)), a.realm.weakmap_proto, "WeakMap"),
-            (Shape::Set, false) => (ObjectKind::Set(Collection::new(false)), a.realm.set_proto, "Set"),
-            (Shape::Set, true) => (ObjectKind::Set(Collection::new(true)), a.realm.weakset_proto, "WeakSet"),
+            (Shape::Map, false) => (ObjectKind::Map(Box::new(Collection::new(false))), a.realm.map_proto, "Map"),
+            (Shape::Map, true) => (ObjectKind::Map(Box::new(Collection::new(true))), a.realm.weakmap_proto, "WeakMap"),
+            (Shape::Set, false) => (ObjectKind::Set(Box::new(Collection::new(false))), a.realm.set_proto, "Set"),
+            (Shape::Set, true) => (ObjectKind::Set(Box::new(Collection::new(true))), a.realm.weakset_proto, "WeakSet"),
         };
         if a.new_target == Value::Undefined {
             return Err(a.throw(ErrorKind::Type, &alloc::format!("Constructor {name} requires 'new'")));
@@ -246,7 +247,7 @@ impl Collections {
     /// `Map.groupBy(items, callback)`。
     fn group_by<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let groups = crate::object::Objects::group(a, args.at(0), args.at(1), false)?;
-        let m = ObjectData { kind: ObjectKind::Map(Collection::new(false)), proto: Some(a.realm.map_proto), ..ObjectData::default() }.alloc(a.mc);
+        let m = ObjectData { kind: ObjectKind::Map(Box::new(Collection::new(false))), proto: Some(a.realm.map_proto), ..ObjectData::default() }.alloc(a.mc);
         for (k, items) in groups {
             let arr = a.array(items);
             Self::with(a, m, |c| c.set(k, arr.into()));
@@ -303,7 +304,7 @@ impl Collections {
         for v in items {
             c.set(v, v);
         }
-        ObjectData { kind: ObjectKind::Set(c), proto: Some(a.realm.set_proto), ..ObjectData::default() }.alloc(a.mc).into()
+        ObjectData { kind: ObjectKind::Set(Box::new(c)), proto: Some(a.realm.set_proto), ..ObjectData::default() }.alloc(a.mc).into()
     }
 
     fn set_values<'gc>(a: &Agent<'gc, '_>, o: JsObject<'gc>) -> alloc::vec::Vec<Value<'gc>> {

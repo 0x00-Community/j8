@@ -592,9 +592,9 @@ pub enum ObjectKind<'gc> {
     Array(Vec<Value<'gc>>),
     Function(Closure<'gc>),
     Native(Native),
-    Bound(Bound<'gc>),
+    Bound(Box<Bound<'gc>>),
     Iterator(IteratorState<'gc>),
-    Coroutine(Coroutine<'gc>),
+    Coroutine(Box<Coroutine<'gc>>),
     Promise { state: Settled<'gc>, reactions: Vec<Reaction<'gc>> },
     /// Promise 的 resolve / reject 函数：共享一个「已经解决过」的标记
     Resolver { promise: JsObject<'gc>, reject: bool, done: Gc<'gc, Lock<bool>> },
@@ -602,17 +602,17 @@ pub enum ObjectKind<'gc> {
     /// 原始值包装对象（`new Boolean(…)` / `new Number(…)` / `new String(…)` / `Object(sym)` …）：存着被包的原始值
     Primitive(Value<'gc>),
     /// Map（`weak` 为真是 WeakMap）
-    Map(Collection<'gc>),
+    Map(Box<Collection<'gc>>),
     /// Set（值放在键与值两处；`weak` 为真是 WeakSet）
-    Set(Collection<'gc>),
+    Set(Box<Collection<'gc>>),
     /// Map / Set 的迭代器：活视图，按条目下标走（`target` 为 `None` 就是走完了）
     CollectionIterator { target: Option<JsObject<'gc>>, index: usize, kind: IterKind, set: bool },
     NativeClosure(NativeClosure<'gc>),
     Proxy(ProxyData<'gc>),
-    IteratorHelper(IteratorHelper<'gc>),
+    IteratorHelper(Box<IteratorHelper<'gc>>),
     /// `Iterator.from` 包出来的迭代器
     WrappedIterator(crate::IterRecord<'gc>),
-    ArrayBuffer(BufferData),
+    ArrayBuffer(Box<BufferData>),
     /// Date：时间值（毫秒，无效是 NaN）
     Date(f64),
     /// 宿主对象：绑定层（r8binding）放进来的 Rust 数据（不含 GC 指针，按类型取出）
@@ -649,6 +649,48 @@ impl ObjectKind<'_> {
 
 pub use crate::text::SmallStr;
 
+/// 多数对象没有的一串东西（Symbol 键属性、私有成员）：空着只占一个指针。
+#[derive(Collect)]
+#[collect(no_drop)]
+#[expect(clippy::box_collection, reason = "装箱就是为了空着时只占一个指针（Vec 本身要三个字）")]
+pub struct Few<T>(Option<Box<Vec<T>>>);
+
+impl<T> Default for Few<T> {
+    fn default() -> Self {
+        Self(None)
+    }
+}
+
+impl<T> core::ops::Deref for Few<T> {
+    type Target = [T];
+
+    fn deref(&self) -> &[T] {
+        self.0.as_deref().map_or(&[], |v| v)
+    }
+}
+
+impl<T> core::ops::DerefMut for Few<T> {
+    fn deref_mut(&mut self) -> &mut [T] {
+        self.0.as_deref_mut().map_or(&mut [], |v| v)
+    }
+}
+
+impl<T> Few<T> {
+    pub fn push(&mut self, t: T) {
+        self.0.get_or_insert_default().push(t);
+    }
+
+    pub fn remove(&mut self, i: usize) -> T {
+        self.0.as_mut().expect("an index into a non-empty list").remove(i)
+    }
+
+    pub fn retain(&mut self, keep: impl FnMut(&T) -> bool) {
+        if let Some(v) = &mut self.0 {
+            v.retain(keep);
+        }
+    }
+}
+
 /// 对象：种类、按插入顺序的属性表、原型。
 #[derive(Default, Collect)]
 #[collect(no_drop)]
@@ -660,9 +702,9 @@ pub struct ObjectData<'gc> {
     #[collect(require_static)]
     pub shape_root: core::cell::RefCell<Option<alloc::rc::Rc<crate::Shape>>>,
     /// Symbol 键的属性
-    pub symbols: Vec<(JsSymbol<'gc>, Property<'gc>)>,
+    pub symbols: Few<(JsSymbol<'gc>, Property<'gc>)>,
     /// 私有成员（`#x`）：键是类求值时生成的私有名，和普通属性分开，反射看不见
-    pub privates: Vec<(JsSymbol<'gc>, Property<'gc>)>,
+    pub privates: Few<(JsSymbol<'gc>, Property<'gc>)>,
     pub proto: Option<JsObject<'gc>>,
     /// 数组：稀疏部分撑起来的长度。稠密部分（`ObjectKind::Array` 里，全是可写可枚举可配置的数据属性、没有空洞）
     /// 之外的下标按普通属性存，实际长度取它与稠密部分长度的大者

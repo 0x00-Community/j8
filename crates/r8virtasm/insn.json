@@ -44,6 +44,7 @@
         {"name": "LdaNull", "mnemonic": "lda.null"},
         {"name": "LdaBool", "mnemonic": "lda.bool", "fields": [{"ty": "bool"}]},
         {"name": "LdaConst", "doc": "acc = 常量", "mnemonic": "lda.const", "fields": [{"ty": "Const"}]},
+        {"name": "LdaSmi", "doc": "acc = 小整数（能精确放进 i32 的数，不查常量池）", "mnemonic": "lda.smi", "fields": [{"ty": "i32"}]},
         {"name": "Ldar", "doc": "acc = reg", "mnemonic": "ldar", "fields": [{"ty": "Reg"}]},
         {"name": "Star", "doc": "reg = acc", "mnemonic": "star", "fields": [{"ty": "Reg"}]},
         {"name": "LdaGlobal", "doc": "acc = 全局对象的属性，没有就抛 ReferenceError", "mnemonic": "lda.global", "fields": [{"ty": "Const"}]},

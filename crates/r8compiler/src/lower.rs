@@ -354,6 +354,10 @@ impl<'f> Lower<'f> {
                 let v = self.int(u64::from(b), 1);
                 self.put_bool(&v);
             }
+            Insn::LdaSmi(n) => {
+                let v = self.float(f64::from(n));
+                self.put_number(&v);
+            }
             Insn::LdaConst(k) => match self.func.consts.get(k.0 as usize) {
                 Some(Constant::Number(x)) => {
                     let v = self.float(*x);

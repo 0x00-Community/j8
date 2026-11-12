@@ -333,7 +333,7 @@ impl Executor {
             a.realm.object_proto
         };
         let promise = (!generator).then(|| a.new_promise());
-        let co = ObjectData { kind: ObjectKind::Coroutine(Coroutine::new(saved, promise, generator && asynchronous)), proto: Some(proto), ..ObjectData::default() }.alloc(a.mc);
+        let co = ObjectData { kind: ObjectKind::Coroutine(Box::new(Coroutine::new(saved, promise, generator && asynchronous))), proto: Some(proto), ..ObjectData::default() }.alloc(a.mc);
         let Some(p) = promise else {
             // 先跑形参初始化，停在编译器放的初始挂起点
             let outer = self.depth.replace(depth);
@@ -923,6 +923,7 @@ impl Executor {
                     Insn::LdaUndefined => *acc = Value::Undefined,
                     Insn::LdaNull => *acc = Value::Null,
                     Insn::LdaBool(b) => *acc = b.into(),
+                    Insn::LdaSmi(n) => *acc = f64::from(n).into(),
                     Insn::LdaConst(k) => {
                         *acc = match &func.consts[k.0 as usize] {
                             Constant::Number(x) => (*x).into(),
