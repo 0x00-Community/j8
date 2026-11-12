@@ -80,6 +80,38 @@ impl Par<'_> {
         found.into_iter().flatten().min()
     }
 
+    /// 在 `hay` 里找 `needle` 第一次出现的字节位置：1 MiB 以上切成带重叠的块并行找（单线程的查找本身已经很快）
+    pub fn find_str(self, hay: &str, needle: &str) -> Option<usize> {
+        /// 串不到这么长就直接找
+        const PAR_FIND_MIN: usize = 1 << 20;
+        if hay.len() < PAR_FIND_MIN || self.0.threads() == 1 || needle.is_empty() {
+            return hay.find(needle);
+        }
+        let size = hay.len().div_ceil(self.0.threads() * CHUNKS_PER_THREAD);
+        // 块边界挪到字符边界上
+        let boundary = |mut i: usize| {
+            while i < hay.len() && !hay.is_char_boundary(i) {
+                i += 1;
+            }
+            i.min(hay.len())
+        };
+        let starts: Vec<usize> = (0..hay.len()).step_by(size).map(boundary).collect();
+        let mut found: Vec<Option<usize>> = starts.iter().map(|_| None).collect();
+        let jobs: Vec<Job<'_>> = found
+            .iter_mut()
+            .zip(&starts)
+            .map(|(o, &s)| {
+                Box::new(move || {
+                    // 块尾多看 needle.len() − 1 字节：跨块的匹配算在开头所在的块
+                    let end = boundary((s + size + needle.len() - 1).min(hay.len()));
+                    *o = hay[s..end].find(needle).filter(|&i| i < size).map(|i| s + i);
+                }) as Job<'_>
+            })
+            .collect();
+        self.0.run(jobs);
+        found.into_iter().flatten().min()
+    }
+
     /// 稳定排序：各块分别排好，再一轮轮两两并行归并
     pub fn sort_by<T: Copy + Send + Sync>(self, v: &mut [T], cmp: &(dyn Fn(&T, &T) -> Ordering + Sync)) {
         if !self.worth(v.len()) {

@@ -103,7 +103,7 @@ impl Strings {
         // 全 ASCII：字节下标就是 UTF-16 码元下标，直接在 UTF-8 上找
         if s.is_ascii() {
             let from = Self::clamp(a, args.at(1), s.len(), 0)?;
-            return Ok(s[from..].find(&**n).map_or(Value::Number(-1.0), |i| Self::count(from + i)));
+            return Ok(a.par().find_str(&s[from..], &n).map_or(Value::Number(-1.0), |i| Self::count(from + i)));
         }
         let u: Vec<u16> = s.encode_utf16().collect();
         let n: Vec<u16> = n.encode_utf16().collect();
@@ -118,24 +118,51 @@ impl Strings {
         Ok(last.and_then(|l| (0..=l).rev().find(|&i| u[i..].starts_with(&n))).map_or(Value::Number(-1.0), Self::count))
     }
 
+    /// includes / startsWith / endsWith 的公共部分：`this` 转字符串、参数不能是正则、查找串转字符串
+    fn needle<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>], method: &str) -> Result<(JsString<'gc>, JsString<'gc>), Error> {
+        let s = Self::this(a, this)?;
+        if crate::regexp::Regexps::is_regexp(a, args.at(0))? {
+            return Err(a.throw(ErrorKind::Type, &alloc::format!("First argument to String.prototype.{method} must not be a regular expression")));
+        }
+        let n = a.to_string(args.at(0))?;
+        Ok((s, n))
+    }
+
     fn includes<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        let u = Self::units(a, this)?;
-        let n: Vec<u16> = a.to_string(args.at(0))?.encode_utf16().collect();
-        Ok(Self::find(&u, &n, 0).is_some().into())
+        let (s, n) = Self::needle(a, this, args, "includes")?;
+        let len = s.utf16_len();
+        let from = Self::clamp(a, args.at(1), len, 0)?;
+        // 纯 ASCII：在 UTF-8 上找（字节下标就是码元下标；大串切块并行）
+        if s.is_ascii() {
+            return Ok(a.par().find_str(&s[from..], &n).is_some().into());
+        }
+        let u = s.units().to_vec();
+        let n: Vec<u16> = n.encode_utf16().collect();
+        Ok(Self::find(&u, &n, from).is_some().into())
     }
 
     fn starts_with<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        let u = Self::units(a, this)?;
-        let n: Vec<u16> = a.to_string(args.at(0))?.encode_utf16().collect();
-        let from = Self::clamp(a, args.at(1), u.len(), 0)?;
-        Ok(u[from..].starts_with(&n).into())
+        let (s, n) = Self::needle(a, this, args, "startsWith")?;
+        let len = s.utf16_len();
+        let from = Self::clamp(a, args.at(1), len, 0)?;
+        if s.is_ascii() {
+            return Ok(s[from..].starts_with(&**n).into());
+        }
+        let u = s.units();
+        let n: Vec<u16> = n.encode_utf16().collect();
+        Ok((from + n.len() <= len && n.iter().enumerate().all(|(i, &c)| u.get(from + i) == Some(c))).into())
     }
 
     fn ends_with<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        let u = Self::units(a, this)?;
-        let n: Vec<u16> = a.to_string(args.at(0))?.encode_utf16().collect();
-        let end = Self::clamp(a, args.at(1), u.len(), u.len())?;
-        Ok(u[..end].ends_with(&n).into())
+        let (s, n) = Self::needle(a, this, args, "endsWith")?;
+        let len = s.utf16_len();
+        let end = Self::clamp(a, args.at(1), len, len)?;
+        if s.is_ascii() {
+            return Ok(s[..end].ends_with(&**n).into());
+        }
+        let u = s.units();
+        let n: Vec<u16> = n.encode_utf16().collect();
+        Ok((n.len() <= end && n.iter().enumerate().all(|(i, &c)| u.get(end - n.len() + i) == Some(c))).into())
     }
 
     fn slice<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {

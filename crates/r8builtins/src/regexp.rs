@@ -30,7 +30,7 @@ struct Found {
 }
 
 /// `RegExp` 与正则相关的字符串方法。下标都按 UTF-16 码元算。
-struct Regexps;
+pub(crate) struct Regexps;
 
 impl Regexps {
     /// 编译：flags 先查合法再挑出引擎要的那几个。
@@ -67,7 +67,7 @@ impl Regexps {
     }
 
     /// IsRegExp：看 `Symbol.match`，没有就看是不是正则对象。
-    fn is_regexp<'gc>(a: &mut Agent<'gc, '_>, v: Value<'gc>) -> Result<bool, Error> {
+    pub(crate) fn is_regexp<'gc>(a: &mut Agent<'gc, '_>, v: Value<'gc>) -> Result<bool, Error> {
         if !matches!(v, Value::Object(_)) {
             return Ok(false);
         }
