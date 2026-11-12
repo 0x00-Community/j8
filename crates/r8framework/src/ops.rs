@@ -457,7 +457,7 @@ impl<'gc> Agent<'gc, '_> {
             let (l, r) = (self.to_primitive(lhs, Hint::Default)?, self.to_primitive(rhs, Hint::Default)?);
             if matches!(l, Value::String(_)) || matches!(r, Value::String(_)) {
                 let (a, b) = (self.to_string(l)?, self.to_string(r)?);
-                return Ok(self.string(&[&**a, &**b].concat()).into());
+                return Ok(Value::String(Gc::new(self.mc, crate::SmallStr::concat(&a, &b))));
             }
             (l, r)
         } else {

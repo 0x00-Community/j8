@@ -647,30 +647,7 @@ impl ObjectKind<'_> {
 }
 
 
-/// 字符串（属性键与 JS 字符串值共用）：短的（不超过 23 字节）内联存、不另外分配，长的共享一份堆上副本。
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Collect)]
-#[collect(require_static)]
-pub struct SmallStr(smol_str::SmolStr);
-
-impl core::ops::Deref for SmallStr {
-    type Target = str;
-
-    fn deref(&self) -> &str {
-        &self.0
-    }
-}
-
-impl core::borrow::Borrow<str> for SmallStr {
-    fn borrow(&self) -> &str {
-        &self.0
-    }
-}
-
-impl From<&str> for SmallStr {
-    fn from(s: &str) -> Self {
-        Self(smol_str::SmolStr::new(s))
-    }
-}
+pub use crate::text::SmallStr;
 
 /// 对象：种类、按插入顺序的属性表、原型。
 #[derive(Default, Collect)]

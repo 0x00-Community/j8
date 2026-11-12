@@ -31,6 +31,7 @@ mod property;
 mod promise;
 mod realm;
 mod shape;
+mod text;
 mod value;
 
 pub use agent::{Agent, CodeKind, Invoke, Resume, Step};
