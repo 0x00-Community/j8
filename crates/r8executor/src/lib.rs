@@ -1333,6 +1333,23 @@ impl Executor {
                             }
                             continue;
                         }
+                        // 快路：被调的是宿主函数，实参直接从寄存器文件切片传，不拷成 Vec、不过调用解析
+                        let native = match target {
+                            Value::Object(o) => match &o.borrow().kind {
+                                ObjectKind::Native(n) if matches!(insn, Insn::Call { .. }) && n.forward == r8framework::Forward::No => Some(*n),
+                                _ => None,
+                            },
+                            _ => None,
+                        };
+                        if let Some(n) = native {
+                            let saved = self.depth.replace(level);
+                            let outer = core::mem::replace(&mut a.new_target, Value::Undefined);
+                            let v = (n.f)(a, regs[r(this)], &regs[first..first + usize::from(argc)]);
+                            a.new_target = outer;
+                            self.depth.set(saved);
+                            *acc = v?;
+                            continue;
+                        }
                         let list = regs[first..first + usize::from(argc)].to_vec();
                         match self.resolve(a, regs[r(callee)], regs[r(this)], list, level)? {
                             Callee::Closure { closure, callee, this, args } => {

@@ -1105,6 +1105,12 @@ impl<'gc> Agent<'gc, '_> {
 
     /// LengthOfArrayLike。
     pub fn length_of_array_like(&mut self, o: Value<'gc>) -> Result<f64, Error> {
+        // 真数组的 `length` 就是存着的长度（不可能是访问器）
+        if let Value::Object(x) = o
+            && let Some(n) = x.borrow().array_length()
+        {
+            return Ok(f64::from(n));
+        }
         let len = self.get_named(o, "length")?;
         self.to_length(len)
     }
