@@ -371,13 +371,15 @@ impl<'gc> Collection<'gc> {
             Value::Number(x) => Value::Number(x + 0.0),
             k => k,
         };
-        match self.index.0.get(&MapKey::from(key)) {
-            Some(&i) => {
+        // 只算一次哈希
+        match self.index.0.entry(MapKey::from(key)) {
+            hashbrown::hash_map::Entry::Occupied(e) => {
+                let i = *e.get();
                 self.entries[i] = Some((key, value));
                 self.young_from = self.young_from.min(i);
             }
-            None => {
-                self.index.0.insert(MapKey::from(key), self.entries.len());
+            hashbrown::hash_map::Entry::Vacant(e) => {
+                e.insert(self.entries.len());
                 self.entries.push(Some((key, value)));
                 self.size += 1;
             }
