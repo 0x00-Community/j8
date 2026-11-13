@@ -448,9 +448,12 @@ impl Executor {
 
     /// 建一帧：在寄存器文件末尾开出本函数的寄存器，按调用约定放 `this`、自身、实参。
     fn enter<'gc>(&self, a: &mut Agent<'gc, '_>, regs: &mut Vec<Value<'gc>>, closure: Closure<'gc>, callee: Value<'gc>, this: Value<'gc>, args: &[Value<'gc>]) -> Frame<'gc> {
-        let f_loaded = self.function(closure.func);
-        let (base, first) = Self::open_frame(a, regs, &f_loaded.func, closure, callee, this);
-        let f = &f_loaded.func;
+        Self::enter_func(a, regs, &self.function(closure.func).func, closure, callee, this, args)
+    }
+
+    /// 同 [`enter`](Self::enter)，函数已经取到了。
+    fn enter_func<'gc>(a: &mut Agent<'gc, '_>, regs: &mut Vec<Value<'gc>>, f: &Function, closure: Closure<'gc>, callee: Value<'gc>, this: Value<'gc>, args: &[Value<'gc>]) -> Frame<'gc> {
+        let (base, first) = Self::open_frame(a, regs, f, closure, callee, this);
         let params = usize::from(f.params).min(args.len());
         regs[first..first + params].copy_from_slice(&args[..params]);
         let args = if f.keeps_args { args.to_vec().into() } else { Few::default() };
@@ -1685,7 +1688,7 @@ impl<'gc> Invoke<'gc> for Executor {
         // 快路：普通 JS 函数（不是类构造器 / 生成器 / async）直接开帧，实参不先拷成 Vec 过调用解析
         if let Some((c, loaded)) = self.plain_closure(callee) {
             let mut regs = a.take_regs();
-            let mut f = self.enter(a, &mut regs, c, callee, this, args);
+            let mut f = Self::enter_func(a, &mut regs, &loaded.func, c, callee, this, args);
             let mut acc = Value::Undefined;
             if self.tiered(a.platform, &loaded, &mut regs, &mut f, &mut acc) {
                 a.give_regs(regs);

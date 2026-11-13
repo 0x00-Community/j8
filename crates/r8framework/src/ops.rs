@@ -296,9 +296,10 @@ fn pow(a: f64, b: f64) -> f64 {
 
 /// 规范下标：非负整数且小于 2^32 − 1。
 fn index_of_number(x: f64) -> Option<u32> {
-    #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "已检查是 [0, 2^32 − 2] 内的整数")]
-    let i = ((0.0..=MAX_INDEX).contains(&x) && libm::trunc(x) == x).then_some(x as u32);
-    i
+    // 转 u32 是饱和的（负数、NaN 得 0，太大得 u32::MAX），转回来相等就是整数；-0 当 0
+    #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "转回来核对相等")]
+    let n = x as u32;
+    (f64::from(n) == x && x <= MAX_INDEX).then_some(n)
 }
 
 /// 规范下标的字符串形式（`"0"`、`"12"`，不带前导零）。
@@ -1094,7 +1095,16 @@ impl<'gc> Agent<'gc, '_> {
     /// ToIntegerOrInfinity。
     pub fn to_integer_or_infinity(&mut self, v: Value<'gc>) -> Result<f64, Error> {
         let x = self.to_number(v)?;
-        Ok(if x.is_nan() { 0.0 } else { libm::trunc(x) + 0.0 })
+        /// 绝对值小于它的数转 i64 不会溢出（转回来就是截掉小数，-0 也成 +0）
+        const I64_SAFE: f64 = 9_223_372_036_854_775_808.0;
+        #[expect(clippy::cast_possible_truncation, clippy::cast_precision_loss, reason = "绝对值小于 2^63；截掉小数正是要的")]
+        Ok(if x.is_nan() {
+            0.0
+        } else if x.abs() < I64_SAFE {
+            (x as i64) as f64
+        } else {
+            libm::trunc(x) + 0.0
+        })
     }
 
     /// ToLength：夹到 `[0, 2^53 − 1]`。
@@ -1154,6 +1164,16 @@ impl<'gc> Agent<'gc, '_> {
             return Ok(true);
         }
         self.has_key(o, Key::Str(&Self::index_key(i)))
+    }
+
+    /// HasProperty(O, i) 为真就 Get(O, i)，否则 `None`（数组方法逐个元素访问）。真数组的稠密部分一次借用直接取。
+    pub fn present_index(&mut self, o: JsObject<'gc>, i: f64) -> Result<Option<Value<'gc>>, Error> {
+        if let (ObjectKind::Array(items), Some(n)) = (&o.borrow().kind, index_of_number(i))
+            && let Some(&v) = items.get(n as usize)
+        {
+            return Ok(Some(v));
+        }
+        if self.has_index(o, i)? { self.get_index(o.into(), i).map(Some) } else { Ok(None) }
     }
 
     /// DeletePropertyOrThrow(O, i)。

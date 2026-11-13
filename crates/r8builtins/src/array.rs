@@ -299,8 +299,7 @@ impl Arrays {
     /// 把 `[from, from + count)` 挪到 `to` 起（空洞照搬成删除），按方向逐个来。
     fn move_range<'gc>(a: &mut Agent<'gc, '_>, o: JsObject<'gc>, from: f64, to: f64, count: f64) -> Result<(), Error> {
         let step = |a: &mut Agent<'gc, '_>, f: f64, t: f64| -> Result<(), Error> {
-            if a.has_index(o, f)? {
-                let v = a.get_index(o.into(), f)?;
+            if let Some(v) = a.present_index(o, f)? {
                 a.set_index(o.into(), t, v)
             } else {
                 a.delete_index(o, t)
@@ -347,8 +346,7 @@ impl Arrays {
         let arr = Self::species_create(a, o, count)?;
         let mut n = 0.0;
         while k < end {
-            if a.has_index(o, k)? {
-                let v = a.get_index(o.into(), k)?;
+            if let Some(v) = a.present_index(o, k)? {
                 a.create_index(arr, n, v)?;
             }
             k += 1.0;
@@ -660,8 +658,7 @@ impl Arrays {
         };
         let (mut k, mut to) = (0.0, 0.0);
         while k < len {
-            if a.has_index(o, k)? {
-                let v = a.get_index(o.into(), k)?;
+            if let Some(v) = a.present_index(o, k)? {
                 let r = a.call(f, this_arg, &[v, k.into(), o.into()])?;
                 match (how, out) {
                     (Visit::Map, Some(arr)) => a.create_index(arr, k, r)?,
@@ -755,15 +752,14 @@ impl Arrays {
                 }
                 let k = index(i);
                 i += 1.0;
-                if a.has_index(o, k)? {
-                    break a.get_index(o.into(), k)?;
+                if let Some(v) = a.present_index(o, k)? {
+                    break v;
                 }
             }
         };
         while i < len {
             let k = index(i);
-            if a.has_index(o, k)? {
-                let v = a.get_index(o.into(), k)?;
+            if let Some(v) = a.present_index(o, k)? {
                 acc = a.call(f, Value::Undefined, &[acc, v, k.into(), o.into()])?;
             }
             i += 1.0;
