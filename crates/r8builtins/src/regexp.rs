@@ -29,6 +29,22 @@ struct Found {
     named: Vec<(String, Option<core::ops::Range<usize>>)>,
 }
 
+/// 编好的正则：引擎的正则，加上「整个模式就是一段字面量」时的那段字（直接按子串找，不走回溯引擎）。
+struct Compiled {
+    regex: regress::Regex,
+    atom: Option<Box<str>>,
+}
+
+impl Compiled {
+    /// 模式里的语法字符：一个都没有（且不忽略大小写）就是字面量
+    const SYNTAX: &'static str = "\\^$.|?*+()[]{}/";
+
+    fn new(regex: regress::Regex, source: &str, flags: &str) -> Self {
+        let atom = (!source.is_empty() && !flags.contains('i') && !source.contains(|c| Self::SYNTAX.contains(c))).then(|| source.into());
+        Self { regex, atom }
+    }
+}
+
 /// `RegExp` 与正则相关的字符串方法。下标都按 UTF-16 码元算。
 pub(crate) struct Regexps;
 
@@ -56,7 +72,7 @@ impl Regexps {
             c.push_back(entry);
             return Ok(compiled);
         }
-        let regex = Self::compile(a, source, flags)?;
+        let regex = Compiled::new(Self::compile(a, source, flags)?, source, flags);
         let compiled = Gc::new(a.mc, Static(Box::new(regex) as Box<dyn core::any::Any>));
         let mut c = cache.borrow_mut(a.mc);
         if c.len() >= CACHE_SIZE {
@@ -188,7 +204,7 @@ impl Regexps {
     /// 从 `start` 起找第一个匹配（`u` / `v` 按码点，否则按码元）。
     fn find(o: JsObject<'_>, units: &[u16], start: usize) -> Option<Found> {
         let (_, flags, compiled) = Self::data(o);
-        let re = compiled.0.downcast_ref::<regress::Regex>().expect("a regress regex");
+        let re = &compiled.0.downcast_ref::<Compiled>().expect("a compiled regex").regex;
         let m = if flags.contains('u') || flags.contains('v') { re.find_from_utf16(units, start).next() } else { re.find_from_ucs2(units, start).next() }?;
         let named = m.named_groups().map(|(n, r)| (String::from(n), r)).collect();
         Some(Found { range: m.range(), groups: m.captures, named })
@@ -197,8 +213,12 @@ impl Regexps {
     /// 全 ASCII 的串直接按 UTF-8 匹配（字节下标就是码元下标），省掉整串转 UTF-16。
     fn find_ascii(o: JsObject<'_>, s: &str, start: usize) -> Option<Found> {
         let (_, _, compiled) = Self::data(o);
-        let re = compiled.0.downcast_ref::<regress::Regex>().expect("a regress regex");
-        let m = re.find_from(s, start).next()?;
+        let c = compiled.0.downcast_ref::<Compiled>().expect("a compiled regex");
+        if let Some(atom) = &c.atom {
+            let at = start + s[start..].find(&**atom)?;
+            return Some(Found { range: at..at + atom.len(), groups: Vec::new(), named: Vec::new() });
+        }
+        let m = c.regex.find_from(s, start).next()?;
         let named = m.named_groups().map(|(n, r)| (String::from(n), r)).collect();
         Some(Found { range: m.range(), groups: m.captures, named })
     }
