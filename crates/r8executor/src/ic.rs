@@ -203,9 +203,8 @@ impl Ic {
                 if d.non_extensible || (assign && !self.chain_intact(d.proto, usize::from(self.depth.get()))) {
                     return false;
                 }
-                let key = to.key(to.len() - 1).clone();
                 drop(d);
-                o.borrow_mut(mc).push_to(&key, Rc::clone(to), Slot::Data(v));
+                o.borrow_mut(mc).push_to(Rc::clone(to), Slot::Data(v));
                 true
             }
         }

@@ -945,9 +945,9 @@ impl<'gc> ObjectData<'gc> {
         self.shape_root.borrow_mut().get_or_insert_with(crate::Props::empty).clone()
     }
 
-    /// 追加一项，形状直接换成 `to`（执行层的内联缓存给的：从当前形状加 `key` 就是它）。
-    pub fn push_to(&mut self, key: &str, to: alloc::rc::Rc<crate::Shape>, slot: Slot<'gc>) {
-        self.digit_keys |= key.as_bytes().first().is_some_and(u8::is_ascii_digit);
+    /// 追加一项，形状直接换成 `to`（执行层的内联缓存给的：从当前形状加一个键就是它，新键是它的最后一个）。
+    pub fn push_to(&mut self, to: alloc::rc::Rc<crate::Shape>, slot: Slot<'gc>) {
+        self.digit_keys |= to.key(to.len() - 1).as_bytes().first().is_some_and(u8::is_ascii_digit);
         self.props.push_to(to, slot);
     }
 

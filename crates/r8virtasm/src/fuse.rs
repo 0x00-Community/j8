@@ -85,7 +85,11 @@ impl Function {
             moved[at] = u32::try_from(out.len()).expect("fewer than 2^32 instructions");
             let inner = |k: usize| at + k < n && !target[at + k];
             let (insn, used) = Insn::fuse_at(&self.insns, at, inner).unwrap_or((self.insns[at], 1));
-            out.push(insn);
+            // 刚互相复制过的两个寄存器再反着复制一遍：什么都不改（acc 也已经是这个值），不是落点就丢掉
+            let undo = matches!((out.last(), insn), (Some(&Insn::Mov { dst, src }), Insn::Mov { dst: d2, src: s2 }) if d2 == src && s2 == dst);
+            if !(undo && !target[at]) {
+                out.push(insn);
+            }
             at += used;
         }
         moved[n] = u32::try_from(out.len()).expect("fewer than 2^32 instructions");

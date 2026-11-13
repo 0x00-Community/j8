@@ -101,7 +101,7 @@ fn#0 "main" normal sloppy params 0 length 0 regs 3
 - 调用约定：`r0` 是 `this`，`r1` 是被调函数本身（具名函数表达式靠它递归），形参从 `r2` 起；`Call` 的被调者、`this`、实参排在连续寄存器
 - 作用域：编译前预扫一遍（`scope.rs` 的 `Resolver`），找出被内层函数捕获的绑定放进堆上的 `Env` 链（`PushEnv` / `PopEnv` / `LdaEnv depth.slot`），其余放寄存器；`for (let …)` 每轮 `CloneEnv`，闭包各拿各的那一轮
 - 脚本顶层的 `var` / 函数 / `let` / `const` 是全局对象的属性（`LdaGlobal` / `StaGlobal`）
-- 编译完每个函数跑一遍窥孔融合（`fuse.rs` 的 `Function::fuse`）：`lda.smi n; add r` ⇒ `add.smi r, n`、`ldar y; add x` ⇒ `add.reg x, y`（比较同理）、`ldar a; star b` ⇒ `mov b, a`、`ldar r; inc; star r` ⇒ `inc.reg r`、`star r; ldar r` ⇒ `star r`；
+- 编译完每个函数跑一遍窥孔融合（`fuse.rs` 的 `Function::fuse`）：`lda.smi n; add r` ⇒ `add.smi r, n`、`ldar y; add x` ⇒ `add.reg x, y`（比较同理）、`ldar a; star b` ⇒ `mov b, a`、`ldar r; inc; star r` ⇒ `inc.reg r`、`star r; ldar r` ⇒ `star r`、紧接着的 `mov b, a; mov a, b` 丢掉第二条；
   组里第一条之后有跳转落点就不融合，跳转目标按新下标改写。融合指令的语义就是原来几条依次执行（`Insn::unfused` 拆回），JIT 照拆回的逐条下降；手写的清单不融合
 - 执行器用显式帧栈（不靠宿主递归），调用深度上限 10000（含宿主函数里重入的 JS），超了抛 RangeError
 - 异常：每帧一个动态处理器栈（`PushHandler` / `PopHandler`），抛出时弹本帧处理器、没有就展开到调用者；`finally` 用（完成类型, 值）寄存器对，穿过它的 `return` / `break` / `continue` 先绕进去再接着走
