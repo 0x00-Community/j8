@@ -42,6 +42,15 @@ impl Texts {
     // ---- String ----
 
     fn from_char_code<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+        // 一个码元、不是代理：直接编进栈上缓冲（ToUint16 = ToUint32 的低 16 位）
+        if let [v] = args {
+            #[expect(clippy::cast_possible_truncation, reason = "ToUint16 就是取低 16 位")]
+            let u = a.to_uint32(*v)? as u16;
+            if let Some(c) = char::from_u32(u32::from(u)) {
+                return Ok(a.string(c.encode_utf8(&mut [0; 4])).into());
+            }
+            return Ok(a.string(&String::from_utf16_lossy(&[u])).into());
+        }
         let mut units = Vec::with_capacity(args.len());
         for &v in args {
             let n = a.to_number(v)?;
