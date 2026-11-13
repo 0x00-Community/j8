@@ -47,6 +47,7 @@ r8macros::enums!("insn.json");
 | `accessors` | 枚举 | 生成 `pub fn name(&mut self) -> Option<&mut ty>`：每个变体里第一个类型为 `ty` 的字段，没有给 `None`。`target_mut`（`ty: Label`）就是这样来的，加带 `Label` 字段的指令自动算跳转 |
 | `name` / `doc` | 变体 | 变体名、文档 |
 | `mnemonic` | 变体 | `Display` 的助记符；`display` 开时与 `show: name` 字段二选一 |
+| `suffix` | 变体 | 配 `show: name` 字段：助记符写成 `名字.后缀`（同组名字的另一种操作数形式，如 `add.smi r2, 1` 与 `add r2` 并存） |
 | `default` | 变体 | `#[default]` |
 | `fields` | 变体 | 字段表；全带 `name` ⇒ 结构体变体，全不带 ⇒ 元组变体，混用报错 |
 | `ty` | 字段 | Rust 类型 |

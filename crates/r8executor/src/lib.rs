@@ -935,6 +935,43 @@ impl Executor {
                 let insn = &func.insns[f.pc];
                 f.pc += 1;
                 let r = |r: Reg| f.base + usize::from(r.0);
+                // 两边都是数的快路就地算，别的交给 Agent
+                macro_rules! binary {
+                    ($op:expr, $lhs:expr, $rhs:expr) => {
+                        *acc = match ($lhs, $rhs) {
+                            (Value::Number(lhs), Value::Number(rhs)) => $op.numbers(lhs, rhs).into(),
+                            (lhs, rhs) => a.binary($op, lhs, rhs)?,
+                        }
+                    };
+                }
+                macro_rules! compare {
+                    ($op:expr, $lhs:expr, $rhs:expr) => {{
+                        let c = match ($lhs, $rhs) {
+                            (Value::Number(lhs), Value::Number(rhs)) => $op.numbers(lhs, rhs),
+                            (lhs, rhs) => a.compare($op, lhs, rhs)?,
+                        };
+                        *acc = c.into();
+                        // 紧跟条件跳转（循环条件、`if`）：比较的结果就是布尔，直接跳，省一次分派
+                        let taken = match func.insns.get(f.pc) {
+                            Some(&Insn::JumpIfFalse(l)) => (!c).then_some(l),
+                            Some(&Insn::JumpIfTrue(l)) => c.then_some(l),
+                            _ => continue,
+                        };
+                        f.pc += 1;
+                        if let Some(l) = taken {
+                            let back = (l.0 as usize) < f.pc;
+                            f.pc = l.0 as usize;
+                            if back {
+                                if self.tier.is_some() {
+                                    self.osr(a.platform, loaded, regs, f, acc, f.pc);
+                                }
+                                if Self::spent(budget) {
+                                    return Ok(None);
+                                }
+                            }
+                        }
+                    }};
+                }
                 match *insn {
                     Insn::LdaUndefined => {
                         *acc = Value::Undefined;
@@ -1043,38 +1080,20 @@ impl Executor {
                         let copy = Env { slots: e.borrow().slots.clone(), parent: e.borrow().parent };
                         f.env = Some(copy.alloc(a.mc));
                     }
-                    // 两边都是数的快路就地算，别的交给 Agent
-                    Insn::Binary(op, x) => {
-                        *acc = match (regs[r(x)], *acc) {
-                            (Value::Number(lhs), Value::Number(rhs)) => op.numbers(lhs, rhs).into(),
-                            (lhs, rhs) => a.binary(op, lhs, rhs)?,
-                        };
+                    Insn::Binary(op, x) => binary!(op, regs[r(x)], *acc),
+                    Insn::BinarySmi(op, x, n) => binary!(op, regs[r(x)], Value::Number(f64::from(n))),
+                    Insn::BinaryReg(op, x, y) => binary!(op, regs[r(x)], regs[r(y)]),
+                    Insn::Compare(op, x) => compare!(op, regs[r(x)], *acc),
+                    Insn::CompareSmi(op, x, n) => compare!(op, regs[r(x)], Value::Number(f64::from(n))),
+                    Insn::CompareReg(op, x, y) => compare!(op, regs[r(x)], regs[r(y)]),
+                    Insn::Mov { dst, src } => {
+                        *acc = regs[r(src)];
+                        regs[r(dst)] = *acc;
                     }
-                    Insn::Compare(op, x) => {
-                        let c = match (regs[r(x)], *acc) {
-                            (Value::Number(lhs), Value::Number(rhs)) => op.numbers(lhs, rhs),
-                            (lhs, rhs) => a.compare(op, lhs, rhs)?,
-                        };
-                        *acc = c.into();
-                        // 紧跟条件跳转（循环条件、`if`）：比较的结果就是布尔，直接跳，省一次分派
-                        let taken = match func.insns.get(f.pc) {
-                            Some(&Insn::JumpIfFalse(l)) => (!c).then_some(l),
-                            Some(&Insn::JumpIfTrue(l)) => c.then_some(l),
-                            _ => continue,
-                        };
-                        f.pc += 1;
-                        if let Some(l) = taken {
-                            let back = (l.0 as usize) < f.pc;
-                            f.pc = l.0 as usize;
-                            if back {
-                                if self.tier.is_some() {
-                                    self.osr(a.platform, loaded, regs, f, acc, f.pc);
-                                }
-                                if Self::spent(budget) {
-                                    return Ok(None);
-                                }
-                            }
-                        }
+                    Insn::IncReg(x) | Insn::DecReg(x) => {
+                        let d = if matches!(*insn, Insn::IncReg(_)) { 1 } else { -1 };
+                        *acc = if let Value::Number(v) = regs[r(x)] { (v + f64::from(d)).into() } else { a.increment(regs[r(x)], d)? };
+                        regs[r(x)] = *acc;
                     }
                     Insn::Unary(op) => *acc = a.unary(op, *acc)?,
                     Insn::ToNumeric => {

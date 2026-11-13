@@ -295,6 +295,7 @@ impl Module {
             }
         }
         c.script(program, local.as_ref(), strict)?;
+        c.module.iter_mut().for_each(Function::fuse);
         Ok(Module { functions: c.module })
     }
 }
@@ -419,6 +420,7 @@ impl Module {
             .collect();
         c.levels.push(Level { func: usize::MAX, names: bound, env: true, mark: 0, switch: false });
         c.module_body(program)?;
+        c.module.iter_mut().for_each(Function::fuse);
         Ok((Module { functions: c.module }, info))
     }
 

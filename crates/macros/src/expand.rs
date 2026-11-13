@@ -90,7 +90,13 @@ impl EnumSpec {
                 (Some((f, b)), None) => {
                     let ty = f.ty(self, v)?;
                     let build = v.assemble(self, Some(&b))?;
-                    named.push(quote! { if let Ok(#b) = <#ty as Operand>::operand(head) { #build } else });
+                    named.push(match &v.suffix {
+                        Some(s) => {
+                            let s = format!(".{s}");
+                            quote! { if let Some(Ok(#b)) = head.strip_suffix(#s).map(<#ty as Operand>::operand) { #build } else }
+                        }
+                        None => quote! { if let Ok(#b) = <#ty as Operand>::operand(head) { #build } else },
+                    });
                 }
                 _ => return Err(err(format_args!("{}::{}: needs exactly one of `mnemonic` or a `show: name` field", self.name, v.name))),
             }
@@ -220,7 +226,13 @@ impl VariantSpec {
         let pattern = self.pattern(owner)?;
         let head = self.fields.iter().zip(self.bindings()).find(|(f, _)| matches!(f.show, Show::Name));
         let head = match (head, &self.mnemonic) {
-            (Some((_, b)), None) => quote! { f.write_str(#b.name())?; },
+            (Some((_, b)), None) => match &self.suffix {
+                Some(s) => {
+                    let s = format!(".{s}");
+                    quote! { f.write_str(#b.name())?; f.write_str(#s)?; }
+                }
+                None => quote! { f.write_str(#b.name())?; },
+            },
             (None, Some(m)) => quote! { f.write_str(#m)?; },
             _ => return Err(err(format_args!("{}::{}: needs exactly one of `mnemonic` or a `show: name` field", owner.name, self.name))),
         };

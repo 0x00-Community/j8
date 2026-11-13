@@ -14,7 +14,9 @@ mod expr;
 mod scope;
 mod asm;
 mod disasm;
+mod fuse;
 mod insn;
 
 pub use asm::AsmError;
+pub use fuse::Unfused;
 pub use insn::{Const, Constant, EvalName, EvalScope, Function, FunctionKind, Insn, Label, Mode, Module, PropertyKind, Reg};

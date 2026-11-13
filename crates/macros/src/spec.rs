@@ -51,6 +51,9 @@ pub struct VariantSpec {
     /// `Display` 的助记符；有 `show: name` 的字段时由它代替
     #[serde(default)]
     pub mnemonic: Option<String>,
+    /// 配 `show: name` 字段：助记符是 `名字.后缀`（同一组名字的另一种操作数形式，如 `add.smi`）
+    #[serde(default)]
+    pub suffix: Option<String>,
     /// `#[default]`
     #[serde(default)]
     pub default: bool,

@@ -344,7 +344,18 @@ impl<'f> Lower<'f> {
         self.line(&alloc::format!("llvm.br ^x({z} : i64)"));
     }
 
+    /// 一条指令；融合指令按拆回的原指令依次下降（同一个 `pc`：中途退回解释器就整条重做，前几条只写 acc）。
     fn insn(&mut self, pc: u32, insn: Insn) -> Result<(), Unsupported> {
+        let Some(parts) = insn.unfused() else { return self.step(pc, insn, true) };
+        let (last, init) = parts.split_last().expect("a fused instruction has parts");
+        for &p in init {
+            self.step(pc, p, false)?;
+        }
+        self.step(pc, *last, true)
+    }
+
+    /// 下降一条原指令；`last` 为假时不接到下一块（融合指令的中间部分）。
+    fn step(&mut self, pc: u32, insn: Insn, last: bool) -> Result<(), Unsupported> {
         let unsupported = Unsupported { pc, insn };
         match insn {
             Insn::LdaUndefined => self.put_tag(ValueTag::UNDEFINED),
@@ -435,6 +446,9 @@ impl<'f> Lower<'f> {
                 return Ok(());
             }
             _ => return Err(unsupported),
+        }
+        if !last {
+            return Ok(());
         }
         if pc as usize + 1 >= self.func.insns.len() {
             // 最后一条指令落到函数末尾：按返回 undefined 处理之前不该发生，退回解释器
