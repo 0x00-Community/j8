@@ -36,6 +36,13 @@ impl EnumSpec {
             (true, true) => self.parse_impl()?,
             (true, false) => self.operand_impl()?,
         };
+        let repr = match &self.repr {
+            Some(r) => {
+                let r = format_ident!("{r}");
+                quote! { #[repr(#r)] }
+            }
+            None => TokenStream::new(),
+        };
         let accessors = self.accessors.iter().map(|a| a.expand(self)).collect::<Result<Vec<_>>>()?;
         let accessors = if accessors.is_empty() {
             TokenStream::new()
@@ -45,6 +52,7 @@ impl EnumSpec {
         Ok(quote! {
             #[doc = #doc]
             #[derive(#(#derive),*)]
+            #repr
             pub enum #ident { #(#variants,)* }
             #display
             #asm

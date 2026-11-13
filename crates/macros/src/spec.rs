@@ -17,6 +17,9 @@ pub struct EnumSpec {
     /// 原样进 `#[derive(...)]`
     #[serde(default)]
     pub derive: Vec<String>,
+    /// 判别式的整数类型（`#[repr(..)]`）：不给就由编译器挑（可能借字段的空位编码，取判别式要多几条指令）
+    #[serde(default)]
+    pub repr: Option<String>,
     /// 生成 `Display`：助记符 + 操作数
     #[serde(default)]
     pub display: bool,

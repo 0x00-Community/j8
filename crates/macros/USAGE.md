@@ -41,6 +41,7 @@ r8macros::enums!("insn.json");
 |---|---|---|
 | `name` / `doc` | 枚举 | 枚举名、文档（必填） |
 | `derive` | 枚举 | 原样进 `#[derive(...)]`；要手写的 trait（如按位比的 `PartialEq`）就不列 |
+| `repr` | 枚举 | 判别式的整数类型，原样进 `#[repr(..)]`（如 `"u16"`）；不给由编译器挑，可能借字段空位编码（取判别式要多几条指令） |
 | `display` | 枚举 | 生成 `Display`：`助记符 操作数, 操作数` |
 | `asm` | 枚举 | 生成汇编（`Display` 的逆）：开了 `display` ⇒ `FromStr`（`Err = AsmError`，操作数按字段次序经 `Operands` 取、各类型实现 `Operand`）；没开 ⇒ 只收单元变体，按变体名实现 `Operand`。`AsmError` / `Operand` / `Operands` 要在调用处可见；`Option` 字段要有 `prefix` |
 | `accessors` | 枚举 | 生成 `pub fn name(&mut self) -> Option<&mut ty>`：每个变体里第一个类型为 `ty` 的字段，没有给 `None`。`target_mut`（`ty: Label`）就是这样来的，加带 `Label` 字段的指令自动算跳转 |

@@ -919,10 +919,10 @@ impl Executor {
             let loaded = &*cur;
             let func = &loaded.func;
             loop {
-                let insn = func.insns[f.pc];
+                let insn = &func.insns[f.pc];
                 f.pc += 1;
                 let r = |r: Reg| f.base + usize::from(r.0);
-                match insn {
+                match *insn {
                     Insn::LdaUndefined => *acc = Value::Undefined,
                     Insn::LdaNull => *acc = Value::Null,
                     Insn::LdaBool(b) => *acc = b.into(),
@@ -1341,7 +1341,7 @@ impl Executor {
                         let first = r(args);
                         // 快路：被调的是普通 JS 函数（不是类构造器 / 生成器 / async），直接从寄存器开帧
                         let target = regs[r(callee)];
-                        if matches!(insn, Insn::Call { .. })
+                        if matches!(*insn, Insn::Call { .. })
                             && let Some((c, loaded)) = self.plain_closure(target)
                         {
                             let mut next = Self::enter_regs(a, regs, &loaded.func, c, target, regs[r(this)], first, usize::from(argc));
@@ -1355,7 +1355,7 @@ impl Executor {
                         // 快路：被调的是宿主函数，实参直接从寄存器文件切片传，不拷成 Vec、不过调用解析
                         let native = match target {
                             Value::Object(o) => match &o.borrow().kind {
-                                ObjectKind::Native(n) if matches!(insn, Insn::Call { .. }) && n.forward == r8framework::Forward::No => Some(*n),
+                                ObjectKind::Native(n) if matches!(*insn, Insn::Call { .. }) && n.forward == r8framework::Forward::No => Some(*n),
                                 _ => None,
                             },
                             _ => None,
@@ -1406,7 +1406,7 @@ impl Executor {
                             args: core::mem::take(&mut f.args).into_vec(),
                             mode: Some(mode.0),
                         };
-                        return Ok(Some(Outcome::Suspend { value: *acc, awaiting: matches!(insn, Insn::Await { .. }), saved }));
+                        return Ok(Some(Outcome::Suspend { value: *acc, awaiting: matches!(*insn, Insn::Await { .. }), saved }));
                     }
                     Insn::GetIterator { dst } => {
                         let rec = a.get_iterator(*acc)?;
