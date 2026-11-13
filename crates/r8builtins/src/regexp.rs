@@ -4,7 +4,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use r8gc::{Gc, Static};
-use r8framework::{Agent, Error, ErrorKind, JsObject, JsString, Key, ObjectData, ObjectKind, Property, RegExpData, Slot, Value};
+use r8framework::{Agent, Error, ErrorKind, JsObject, JsString, Key, ObjectData, ObjectKind, Property, RegExpData, Slot, Units, Value};
 
 use crate::buffer::Buffers;
 use crate::string::Strings;
@@ -313,16 +313,19 @@ impl Regexps {
         o.borrow_mut(a.mc).set_at(0, Self::index(i));
     }
 
-    /// 原样正则从 `start` 起找（全 ASCII 按字节，否则按 UTF-16 码元 `units`）
-    fn find_in(o: JsObject<'_>, s: &str, units: &[u16], start: usize) -> Option<Found> {
-        if s.is_ascii() { Self::find_ascii(o, s, start) } else { Self::find(o, units, start) }
+    /// 原样正则从 `start` 起找（全 ASCII 按字节，否则按 UTF-16 码元）
+    fn find_in(o: JsObject<'_>, s: &str, units: Units<'_>, start: usize) -> Option<Found> {
+        match units {
+            Units::Ascii(_) => Self::find_ascii(o, s, start),
+            Units::Wide(w) => Self::find(o, w, start),
+        }
     }
 
     /// 原样正则的 RegExpBuiltinExec，不建结果数组：按 `g` / `y` 读写 `lastIndex`，给出匹配
-    fn quick_exec<'gc>(a: &mut Agent<'gc, '_>, o: JsObject<'gc>, last: f64, s: &str, units: &[u16]) -> Result<Option<Found>, Error> {
+    fn quick_exec<'gc>(a: &mut Agent<'gc, '_>, o: JsObject<'gc>, last: f64, s: &str, units: Units<'_>) -> Result<Option<Found>, Error> {
         let flags = Self::data(o).1;
         let (global, sticky) = (flags.contains('g'), flags.contains('y'));
-        let len = if s.is_ascii() { s.len() } else { units.len() };
+        let len = units.len();
         let last = if global || sticky { a.to_length(last.into())? } else { 0.0 };
         #[expect(clippy::cast_precision_loss, reason = "字符串长度远小于 2^53")]
         let fits = last <= len as f64;
@@ -342,21 +345,40 @@ impl Regexps {
             return Ok(None);
         }
         let (global, sticky, unicode) = (flags.contains('g'), flags.contains('y'), flags.contains('u') || flags.contains('v'));
-        let units: Vec<u16> = s.encode_utf16().collect();
+        let units = s.units();
         let mut found = Vec::new();
         if global {
             let mut start = 0;
             while start <= units.len() {
-                let Some(m) = Self::find_in(o, &s, &units, start).filter(|m| !sticky || m.range.start == start) else { break };
-                #[expect(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "下标远小于 2^53")]
-                let next = if m.range.is_empty() { Self::advance(&units, m.range.end as f64, unicode) as usize } else { m.range.end };
+                let Some(m) = Self::find_in(o, &s, units, start).filter(|m| !sticky || m.range.start == start) else { break };
+                let next = match (m.range.is_empty(), units) {
+                    (false, _) => m.range.end,
+                    (true, Units::Ascii(_)) => m.range.end + 1,
+                    #[expect(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "下标远小于 2^53")]
+                    (true, Units::Wide(w)) => Self::advance(w, m.range.end as f64, unicode) as usize,
+                };
                 found.push(m);
                 start = next;
             }
             Self::set_last(a, o, 0);
         } else {
-            found.extend(Self::quick_exec(a, o, last, &s, &units)?);
+            found.extend(Self::quick_exec(a, o, last, &s, units)?);
         }
+        // 全 ASCII、模板里没有 `$`：直接按 UTF-8 拼（字节下标就是码元下标）
+        if let Units::Ascii(_) = units
+            && !with.contains('$')
+        {
+            let mut out = String::with_capacity(s.len());
+            let mut next = 0;
+            for m in found {
+                out.push_str(&s[next..m.range.start]);
+                out.push_str(&with);
+                next = m.range.end;
+            }
+            out.push_str(&s[next..]);
+            return Ok(Some(a.string(&out).into()));
+        }
+        let units = units.to_vec();
         let template: Vec<u16> = with.encode_utf16().collect();
         let dollar = template.contains(&u16::from(b'$'));
         let mut out: Vec<u16> = Vec::with_capacity(units.len());
@@ -400,8 +422,7 @@ impl Regexps {
         let r = Self::this_object(a, this)?;
         let s = a.to_string(args.at(0))?;
         if let Some((o, last)) = Self::pristine(a, r) {
-            let units: Vec<u16> = if s.is_ascii() { Vec::new() } else { s.encode_utf16().collect() };
-            return Ok(Self::quick_exec(a, o, last, &s, &units)?.is_some().into());
+            return Ok(Self::quick_exec(a, o, last, &s, s.units())?.is_some().into());
         }
         Ok((Self::regexp_exec(a, r, s)? != Value::Null).into())
     }
@@ -659,7 +680,6 @@ impl Regexps {
     fn replace_symbol<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let r = Self::this_object(a, this)?;
         let s = a.to_string(args.at(0))?;
-        let units: Vec<u16> = s.encode_utf16().collect();
         let mut with = args.at(1);
         let functional = a.is_callable(with);
         if !functional {
@@ -671,6 +691,7 @@ impl Regexps {
             }
             with = w.into();
         }
+        let units: Vec<u16> = s.encode_utf16().collect();
         let flags = Self::get_flags(a, r)?;
         let global = flags.contains('g');
         let unicode = flags.contains('u') || flags.contains('v');
