@@ -131,6 +131,17 @@ impl Regexps {
     /// `RegExp(pattern, flags)` / `new RegExp(…)`。
     fn construct<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let (pattern, flags) = (args.at(0), args.at(1));
+        // 快路：普通调用、源码与标志都是字符串（正则字面量就这样建）。RegExpAlloc + RegExpInitialize 合成一步：
+        // 原型就是本 realm 的 `RegExp.prototype`，编好再建对象，`lastIndex` 直接定义成 0（新对象上的 Set 观察不到区别）
+        if a.new_target == Value::Undefined
+            && let (Value::String(source), Value::String(flags)) = (pattern, flags)
+        {
+            let compiled = Self::compiled(a, &source, &flags)?;
+            let kind = ObjectKind::RegExp(RegExpData { source, flags, compiled, legacy: true });
+            let o = ObjectData { kind, proto: Some(a.realm.regexp_proto), ..ObjectData::default() }.alloc(a.mc);
+            o.borrow_mut(a.mc).define("lastIndex", Property { slot: Slot::Data(0.0.into()), enumerable: false, writable: true, configurable: false });
+            return Ok(o.into());
+        }
         let pattern_is_regexp = Self::is_regexp(a, pattern)?;
         let mut new_target = a.new_target;
         if new_target == Value::Undefined {
