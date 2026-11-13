@@ -936,6 +936,26 @@ impl Executor {
         r
     }
 
+    /// 不限配额跑到最外层帧返回（宿主函数里回调 JS 用：执行状态不会停下，跑完寄存器文件还给调用方复用）。
+    fn execute_to_end<'gc>(&self, a: &mut Agent<'gc, '_>, st: &mut State<'gc>) -> Result<Value<'gc>, Error> {
+        let base = self.depth.get();
+        let r = loop {
+            match self.run(a, st, base, &mut None) {
+                Ok(Some(v)) => break Ok(v.returned()),
+                Ok(None) => unreachable!("no budget, no pause"),
+                Err(Error::Exception(g)) => {
+                    let v = a.local(&g);
+                    if !st.unwind(v) {
+                        break Err(Error::Exception(g));
+                    }
+                }
+                Err(e) => break Err(e),
+            }
+        };
+        self.depth.set(base);
+        r
+    }
+
     /// 配额扣一步；用完了返回 `true`（调用方停下，状态完整）
     #[inline]
     fn spent(budget: &mut Option<usize>) -> bool {
@@ -1664,13 +1684,19 @@ impl<'gc> Invoke<'gc> for Executor {
         }
         // 快路：普通 JS 函数（不是类构造器 / 生成器 / async）直接开帧，实参不先拷成 Vec 过调用解析
         if let Some((c, loaded)) = self.plain_closure(callee) {
-            let mut regs = Vec::new();
+            let mut regs = a.take_regs();
             let mut f = self.enter(a, &mut regs, c, callee, this, args);
             let mut acc = Value::Undefined;
             if self.tiered(a.platform, &loaded, &mut regs, &mut f, &mut acc) {
+                a.give_regs(regs);
                 return Ok(acc);
             }
-            return self.run_state(a, State { regs, frames: Vec::new(), f, acc }, level).map(Outcome::returned);
+            let mut st = State { regs, frames: Vec::new(), f, acc };
+            let saved = self.depth.replace(level);
+            let r = self.execute_to_end(a, &mut st);
+            self.depth.set(saved);
+            a.give_regs(st.regs);
+            return r;
         }
         match self.resolve(a, callee, this, args.to_vec(), level)? {
             Callee::Done(v) => Ok(v),

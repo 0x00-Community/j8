@@ -1,3 +1,5 @@
+use alloc::vec::Vec;
+
 use r8gc::{Collect, DynamicRootSet, Mutation};
 
 use crate::{Context, Error, JsObject, Platform, Profiler, Scope, Value};
@@ -76,12 +78,32 @@ pub struct Agent<'gc, 'x> {
     /// 正在跑的宿主函数是构造调用时的 `new.target`，普通调用是 `undefined`（执行器调宿主函数前设好）
     pub new_target: Value<'gc>,
     invoke: &'x dyn Invoke<'gc>,
+    /// 用完还回来的空寄存器文件（宿主函数回调 JS 时每次都要一个，复用省掉分配）
+    spare_regs: Vec<Vec<Value<'gc>>>,
 }
 
 impl<'gc> Scope<'gc, '_> {
     /// 在执行环境 `realm` 里、以 `invoke` 回调 JS，借出一个 agent。
     pub fn agent<'x>(&'x mut self, realm: Context<'gc>, invoke: &'x dyn Invoke<'gc>) -> Agent<'gc, 'x> {
-        Agent { mc: self.mc, roots: self.roots, platform: self.platform, profiler: &mut *self.profiler, realm, new_target: Value::Undefined, invoke }
+        Agent { mc: self.mc, roots: self.roots, platform: self.platform, profiler: &mut *self.profiler, realm, new_target: Value::Undefined, invoke, spare_regs: Vec::new() }
+    }
+}
+
+impl<'gc> Agent<'gc, '_> {
+    /// 留着复用的寄存器文件最多几个
+    const SPARE_REGS: usize = 8;
+
+    /// 借一个空的寄存器文件（执行器开新的执行状态用）
+    pub fn take_regs(&mut self) -> Vec<Value<'gc>> {
+        self.spare_regs.pop().unwrap_or_default()
+    }
+
+    /// 还回寄存器文件（清空后留着下次用）
+    pub fn give_regs(&mut self, mut regs: Vec<Value<'gc>>) {
+        if self.spare_regs.len() < Self::SPARE_REGS {
+            regs.clear();
+            self.spare_regs.push(regs);
+        }
     }
 }
 
