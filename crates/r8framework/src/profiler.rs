@@ -26,16 +26,24 @@ impl Profiler {
         self.enabled = on;
     }
 
+    /// 进帧计数（没开就只是一次判断：解释器每次调用都走这里）
+    #[inline]
     pub fn enter(&mut self, f: FuncId) {
         if self.enabled {
-            self.counters.entry(f).or_default().calls += 1;
+            self.counter_mut(f).calls += 1;
         }
     }
 
+    #[inline]
     pub fn backedge(&mut self, f: FuncId) {
         if self.enabled {
-            self.counters.entry(f).or_default().backedges += 1;
+            self.counter_mut(f).backedges += 1;
         }
+    }
+
+    #[inline(never)]
+    fn counter_mut(&mut self, f: FuncId) -> &mut Counter {
+        self.counters.entry(f).or_default()
     }
 
     pub fn counter(&self, f: FuncId) -> Counter {

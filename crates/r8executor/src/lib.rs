@@ -37,13 +37,16 @@ struct Loaded {
     no_tier_loops: Cell<bool>,
     /// 按指令下标：属性读写的内联缓存（只有 `get.named` / `set.named` / `define.named` 用）
     ics: Box<[ic::Ic]>,
+    /// 普通函数（不是类构造器 / 生成器 / async）：调用时直接开帧
+    plain: bool,
 }
 
 impl From<(u32, Function)> for Loaded {
     fn from((base, func): (u32, Function)) -> Self {
         let globals = func.consts.iter().map(|_| Cell::new(GlobalSlot::Unknown)).collect();
         let ics = func.insns.iter().map(|_| ic::Ic::default()).collect();
-        Self { base, func, globals, no_tier_enter: Cell::new(false), no_tier_loops: Cell::new(false), ics }
+        let plain = !func.generator && !func.asynchronous && !matches!(func.kind, FunctionKind::Constructor { .. });
+        Self { base, func, globals, no_tier_enter: Cell::new(false), no_tier_loops: Cell::new(false), ics, plain }
     }
 }
 
@@ -222,9 +225,16 @@ impl Executor {
 
     /// 进帧前先问 JIT 层。函数已经在机器码里跑完（结果在 `acc`，帧的寄存器已退掉）给 `true`；
     /// 机器码中途退回就把帧的 `pc` 改到它停下的地方，照常解释。
-    #[inline(never)]
+    #[inline]
     fn tiered<'gc>(&self, pool: &dyn r8framework::Pool, loaded: &Loaded, regs: &mut Vec<Value<'gc>>, f: &mut Frame<'gc>, acc: &mut Value<'gc>) -> bool {
-        let Some(tier) = &self.tier else { return false };
+        match &self.tier {
+            Some(tier) => Self::tier_enter(&**tier, pool, loaded, regs, f, acc),
+            None => false,
+        }
+    }
+
+    #[inline(never)]
+    fn tier_enter<'gc>(tier: &dyn Tier, pool: &dyn r8framework::Pool, loaded: &Loaded, regs: &mut Vec<Value<'gc>>, f: &mut Frame<'gc>, acc: &mut Value<'gc>) -> bool {
         if loaded.no_tier_enter.get() {
             return false;
         }
@@ -270,6 +280,7 @@ impl Executor {
         FuncId(base + Module::MAIN)
     }
 
+    #[inline]
     fn function(&self, f: FuncId) -> Rc<Loaded> {
         Rc::clone(&self.code.borrow()[f.0 as usize])
     }
@@ -423,12 +434,12 @@ impl Executor {
     }
 
     /// 被调的是普通 JS 函数（不是类构造器 / 生成器 / async）就给出它的闭包：可以直接开帧。
+    #[inline]
     fn plain_closure<'gc>(&self, callee: Value<'gc>) -> Option<(Closure<'gc>, Rc<Loaded>)> {
         let Value::Object(o) = callee else { return None };
         let ObjectKind::Function(c) = o.borrow().kind else { return None };
         let loaded = self.function(c.func);
-        let g = &loaded.func;
-        (!g.generator && !g.asynchronous && !matches!(g.kind, FunctionKind::Constructor { .. })).then_some((c, loaded))
+        loaded.plain.then_some((c, loaded))
     }
 
     /// 建一帧：在寄存器文件末尾开出本函数的寄存器，按调用约定放 `this`、自身、实参。
@@ -444,6 +455,7 @@ impl Executor {
 
     /// 同 [`enter`](Self::enter)，实参就在寄存器文件里（`Call` 的快路：不先拷成 `Vec`）。
     #[expect(clippy::too_many_arguments, reason = "调用约定的各部分")]
+    #[inline]
     fn enter_regs<'gc>(a: &mut Agent<'gc, '_>, regs: &mut Vec<Value<'gc>>, f: &Function, closure: Closure<'gc>, callee: Value<'gc>, this: Value<'gc>, args: usize, argc: usize) -> Frame<'gc> {
         let (base, first) = Self::open_frame(a, regs, f, closure, callee, this);
         let params = usize::from(f.params).min(argc);
@@ -453,6 +465,7 @@ impl Executor {
     }
 
     /// 在寄存器文件末尾开出 `f` 的寄存器，放好 `this` 与自身；给出帧基址与第一个形参的位置。
+    #[inline]
     fn open_frame<'gc>(a: &mut Agent<'gc, '_>, regs: &mut Vec<Value<'gc>>, f: &Function, closure: Closure<'gc>, callee: Value<'gc>, this: Value<'gc>) -> (usize, usize) {
         a.profiler.enter(closure.func);
         let base = regs.len();
@@ -923,20 +936,28 @@ impl Executor {
                 f.pc += 1;
                 let r = |r: Reg| f.base + usize::from(r.0);
                 match *insn {
-                    Insn::LdaUndefined => *acc = Value::Undefined,
+                    Insn::LdaUndefined => {
+                        *acc = Value::Undefined;
+                    }
                     Insn::LdaNull => *acc = Value::Null,
                     Insn::LdaBool(b) => *acc = b.into(),
-                    Insn::LdaSmi(n) => *acc = f64::from(n).into(),
+                    Insn::LdaSmi(n) => {
+                        *acc = f64::from(n).into();
+                    }
                     Insn::LdaConst(k) => {
                         *acc = match &func.consts[k.0 as usize] {
                             Constant::Number(x) => (*x).into(),
                             Constant::String(s) => a.string(s).into(),
                             Constant::BigInt(digits) => a.bigint(Agent::parse_bigint(digits).unwrap_or_default()),
-                        }
+                        };
                     }
-                    Insn::Ldar(x) => *acc = regs[r(x)],
+                    Insn::Ldar(x) => {
+                        *acc = regs[r(x)];
+                    }
                     Insn::Star(x) => regs[r(x)] = *acc,
-                    Insn::LdaGlobal(k) => *acc = Self::global_load(a, &loaded.globals[k.0 as usize], func.name_at(k))?,
+                    Insn::LdaGlobal(k) => {
+                        *acc = Self::global_load(a, &loaded.globals[k.0 as usize], func.name_at(k))?;
+                    }
                     Insn::LdaGlobalOrUndefined(k) => *acc = Self::global_get(a, func.name_at(k))?.unwrap_or_default(),
                     Insn::StaGlobal { name, strict } => Self::global_store(a, &loaded.globals[name.0 as usize], func.name_at(name), *acc, strict)?,
                     Insn::LdaHole => *acc = Value::Uninit,
@@ -1011,7 +1032,9 @@ impl Executor {
                             d.define(name, p);
                         }
                     }
-                    Insn::LdaEnv { depth, slot } => *acc = Self::env_at(f.env, depth).borrow().slots[usize::from(slot)],
+                    Insn::LdaEnv { depth, slot } => {
+                        *acc = Self::env_at(f.env, depth).borrow().slots[usize::from(slot)];
+                    }
                     Insn::StaEnv { depth, slot } => Self::env_at(f.env, depth).borrow_mut(a.mc).slots[usize::from(slot)] = *acc,
                     Insn::PushEnv(n) => f.env = Some(Env { slots: alloc::vec![Value::Undefined; usize::from(n)], parent: f.env }.alloc(a.mc)),
                     Insn::PopEnv => f.env = Self::env_at(f.env, 0).borrow().parent,
@@ -1025,7 +1048,7 @@ impl Executor {
                         *acc = match (regs[r(x)], *acc) {
                             (Value::Number(lhs), Value::Number(rhs)) => op.numbers(lhs, rhs).into(),
                             (lhs, rhs) => a.binary(op, lhs, rhs)?,
-                        }
+                        };
                     }
                     Insn::Compare(op, x) => {
                         let c = match (regs[r(x)], *acc) {
@@ -1062,8 +1085,12 @@ impl Executor {
                             }
                         }
                     }
-                    Insn::Inc => *acc = if let Value::Number(x) = *acc { (x + 1.0).into() } else { a.increment(*acc, 1)? },
-                    Insn::Dec => *acc = if let Value::Number(x) = *acc { (x - 1.0).into() } else { a.increment(*acc, -1)? },
+                    Insn::Inc => {
+                        *acc = if let Value::Number(x) = *acc { (x + 1.0).into() } else { a.increment(*acc, 1)? };
+                    }
+                    Insn::Dec => {
+                        *acc = if let Value::Number(x) = *acc { (x - 1.0).into() } else { a.increment(*acc, -1)? };
+                    }
                     Insn::CreateRegExp { pattern, flags } => {
                         let (p, fl) = (a.string(func.name_at(pattern)), a.string(func.name_at(flags)));
                         let ctor = a.realm.regexp_ctor;
