@@ -39,6 +39,10 @@ struct Loaded {
     ics: Box<[ic::Ic]>,
     /// 普通函数（不是类构造器 / 生成器 / async）：调用时直接开帧
     plain: bool,
+    /// 上次构造出的实例有几个属性：下次建 `this` 按它预留槽
+    instance_size: Cell<u8>,
+    /// 构造时读 `new.target.prototype` 的内联缓存
+    prototype: ic::Ic,
 }
 
 impl From<(u32, Function)> for Loaded {
@@ -46,7 +50,7 @@ impl From<(u32, Function)> for Loaded {
         let globals = func.consts.iter().map(|_| Cell::new(GlobalSlot::Unknown)).collect();
         let ics = func.insns.iter().map(|_| ic::Ic::default()).collect();
         let plain = !func.generator && !func.asynchronous && !matches!(func.kind, FunctionKind::Constructor { .. });
-        Self { base, func, globals, no_tier_enter: Cell::new(false), no_tier_loops: Cell::new(false), ics, plain }
+        Self { base, func, globals, no_tier_enter: Cell::new(false), no_tier_loops: Cell::new(false), ics, plain, instance_size: Cell::new(0), prototype: ic::Ic::default() }
     }
 }
 
@@ -514,7 +518,7 @@ impl Executor {
                         FunctionKind::Arrow | FunctionKind::Method => break,
                         FunctionKind::Constructor { derived: true } => None,
                         FunctionKind::Normal | FunctionKind::Constructor { derived: false } => {
-                            let this = a.create_this(new_target)?;
+                            let this = Self::create_this(a, &func_loaded, new_target)?;
                             if let Some(init) = closure.fields {
                                 a.call(init.into(), this.into(), &[])?;
                             }
@@ -559,6 +563,25 @@ impl Executor {
         Err(a.throw(ErrorKind::Type, &alloc::format!("{what} is not a constructor")))
     }
 
+    /// 构造时建 `this`：原型取 `new.target.prototype`。`new.target` 就是构造器本身（直接 `new`）时读它走构造器的内联缓存，
+    /// 槽按这个构造器上次的实例预留。
+    fn create_this<'gc>(a: &mut Agent<'gc, '_>, ctor: &Loaded, new_target: Value<'gc>) -> Result<JsObject<'gc>, Error> {
+        let proto = match new_target {
+            Value::Object(o) => match ctor.prototype.get(o) {
+                Some(v) => v,
+                None => {
+                    let v = a.get_named(new_target, "prototype")?;
+                    ctor.prototype.fill_get(o, "prototype");
+                    v
+                }
+            },
+            _ => a.get_named(new_target, "prototype")?,
+        };
+        let proto = if let Value::Object(p) = proto { p } else { a.realm.object_proto };
+        let props = r8framework::Props::with_capacity(usize::from(ctor.instance_size.get()));
+        Ok(ObjectData { proto: Some(proto), props, ..ObjectData::default() }.alloc(a.mc))
+    }
+
     /// 派生构造器里的 `super(args)`：构造父类（`new.target` 不变），初始化 `this`，跑实例字段。
     fn super_call<'gc>(a: &mut Agent<'gc, '_>, regs: &[Value<'gc>], f: &mut Frame<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         if f.new_this.is_some() {
@@ -577,11 +600,21 @@ impl Executor {
     }
 
     /// 构造调用返回时定结果：返回对象就用它，否则用 `this`（派生类没调 `super` 抛 ReferenceError）。
+    /// 构造调用返回：返回值是对象就用它，否则用 `this`；顺带记下实例有几个属性（下次建 `this` 按它预留槽）。
     fn construct_result<'gc>(&self, a: &Agent<'gc, '_>, f: &Frame<'gc>, v: Value<'gc>) -> Result<Value<'gc>, Error> {
+        let loaded = self.function(f.func);
+        let r = self.construct_value(a, &loaded, f, v);
+        if let Ok(Value::Object(o)) = r {
+            loaded.instance_size.set(u8::try_from(o.borrow().props.len()).unwrap_or(u8::MAX));
+        }
+        r
+    }
+
+    fn construct_value<'gc>(&self, a: &Agent<'gc, '_>, loaded: &Loaded, f: &Frame<'gc>, v: Value<'gc>) -> Result<Value<'gc>, Error> {
         if matches!(v, Value::Object(_)) {
             return Ok(v);
         }
-        match (self.function(f.func).func.kind, f.new_this) {
+        match (loaded.func.kind, f.new_this) {
             (FunctionKind::Constructor { derived: true }, _) if v != Value::Undefined => Err(a.throw(ErrorKind::Type, "Derived constructors may only return object or undefined")),
             (FunctionKind::Constructor { derived: true }, None) => Err(a.throw(ErrorKind::Reference, "Must call super constructor in derived class before accessing 'this' or returning from derived constructor")),
             (_, Some(t)) => Ok(t),
@@ -1314,8 +1347,8 @@ impl Executor {
                             return Err(a.throw(ErrorKind::Range, "Maximum call stack size exceeded"));
                         }
                         let first = r(args);
-                        let list = regs[first..first + usize::from(argc)].to_vec();
                         let c = regs[r(callee)];
+                        let list = regs[first..first + usize::from(argc)].to_vec();
                         match self.prepare(a, regs, c, list, c, level)? {
                             Prepared::Frame(next) => {
                                 frames.push(core::mem::replace(f, next));
