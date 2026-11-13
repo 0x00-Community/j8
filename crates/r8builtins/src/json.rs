@@ -16,7 +16,7 @@ struct Parser<'s, 'a, 'gc, 'x> {
     pos: usize,
 }
 
-impl<'gc> Parser<'_, '_, 'gc, '_> {
+impl<'s, 'gc> Parser<'s, '_, 'gc, '_> {
     fn error(&self, what: &str) -> Error {
         let found = self.text[self.pos..].chars().next().map_or_else(|| String::from("end of JSON input"), |c| alloc::format!("token '{c}'"));
         self.a.throw(ErrorKind::Syntax, &alloc::format!("Unexpected {found} in JSON at position {} ({what})", self.pos))
@@ -128,7 +128,22 @@ impl<'gc> Parser<'_, '_, 'gc, '_> {
     }
 
     /// 字符串（当前在开头的引号上）。`\u` 代理对拼起来，落单的代理换成 U+FFFD。
-    fn string(&mut self) -> Result<String, Error> {
+    fn string(&mut self) -> Result<alloc::borrow::Cow<'s, str>, Error> {
+        // 没有转义（最常见）：直接借原文；UTF-8 多字节序列里不会出现 `"` `\\` 与控制字符，可以按字节扫
+        let start = self.pos + 1;
+        let text: &'s str = self.text;
+        let end = text.as_bytes()[start..].iter().position(|&b| b == b'"' || b == b'\\' || b < 0x20).map(|i| start + i);
+        if let Some(end) = end
+            && text.as_bytes()[end] == b'"'
+        {
+            self.pos = end + 1;
+            return Ok(alloc::borrow::Cow::Borrowed(&text[start..end]));
+        }
+        self.escaped().map(alloc::borrow::Cow::Owned)
+    }
+
+    /// 带转义的字符串（当前在开头的引号上）。
+    fn escaped(&mut self) -> Result<String, Error> {
         self.pos += 1;
         let mut out = String::new();
         let mut units: Vec<u16> = Vec::new();
@@ -234,23 +249,32 @@ struct Writer<'gc> {
 impl<'gc> Writer<'gc> {
     /// 带引号与转义的字符串。
     fn quote(out: &mut String, s: &str) {
+        out.reserve(s.len() + 2);
         out.push('"');
-        for c in s.chars() {
-            match c {
-                '"' => out.push_str("\\\""),
-                '\\' => out.push_str("\\\\"),
-                '\u{8}' => out.push_str("\\b"),
-                '\u{c}' => out.push_str("\\f"),
-                '\n' => out.push_str("\\n"),
-                '\r' => out.push_str("\\r"),
-                '\t' => out.push_str("\\t"),
-                c if u32::from(c) < 0x20 => {
-                    // 写进 String 不会失败
-                    let _ = write!(out, "\\u{:04x}", u32::from(c));
-                }
-                c => out.push(c),
+        // 不用转义的整段照抄（要转义的只有 ASCII：UTF-8 多字节序列里不会出现）
+        let mut from = 0;
+        for (i, &b) in s.as_bytes().iter().enumerate() {
+            let esc = match b {
+                b'"' => "\\\"",
+                b'\\' => "\\\\",
+                0x8 => "\\b",
+                0xc => "\\f",
+                b'\n' => "\\n",
+                b'\r' => "\\r",
+                b'\t' => "\\t",
+                0..0x20 => "",
+                _ => continue,
+            };
+            out.push_str(&s[from..i]);
+            if esc.is_empty() {
+                // 写进 String 不会失败
+                let _ = write!(out, "\\u{:04x}", b);
+            } else {
+                out.push_str(esc);
             }
+            from = i + 1;
         }
+        out.push_str(&s[from..]);
         out.push('"');
     }
 
@@ -284,7 +308,7 @@ impl<'gc> Writer<'gc> {
             Value::Bool(true) => out.push_str("true"),
             Value::Bool(false) => out.push_str("false"),
             Value::String(s) => Self::quote(out, &s),
-            Value::Number(_) => out.push_str(&a.to_string(v)?),
+            Value::Number(x) => out.push_str(&r8framework::number_text(x)),
             Value::BigInt(_) => return Err(a.throw(ErrorKind::Type, "Do not know how to serialize a BigInt")),
             Value::Object(o) if !o.borrow().kind.is_callable() => {
                 if self.stack.iter().any(|&s| r8gc::Gc::ptr_eq(s, o)) {
