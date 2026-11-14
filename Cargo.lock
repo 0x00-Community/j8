@@ -868,8 +868,6 @@ dependencies = [
 [[package]]
 name = "r8gc"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "26a0bf76e595dc4220472daf0e279929866f178354758fb1fab8c78af0b7e78c"
 dependencies = [
  "moremath",
  "r8gc-macros",
@@ -878,8 +876,6 @@ dependencies = [
 [[package]]
 name = "r8gc-macros"
 version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0463a1e8654c844dbc3a7aee9db0972519e30ed96641dd8eec7f60988c93e077"
 dependencies = [
  "proc-macro2",
  "quote",

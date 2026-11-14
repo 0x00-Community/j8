@@ -26,7 +26,7 @@ workspace = true
 
 [workspace]
 resolver = "3"
-members = ["crates/*", "samples/*", "debugger"]
+members = ["crates/*", "crates/r8gc/macros", "samples/*", "debugger"]
 # 对比 V8 的基准要下载 rusty_v8 的预编译库，自成一个 workspace
 exclude = ["samples/benchv8"]
 
@@ -34,6 +34,7 @@ exclude = ["samples/benchv8"]
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
+repository = "https://github.com/0x00-Community/r8"
 
 [workspace.dependencies]
 r8framework = { path = "crates/r8framework" }
@@ -51,7 +52,7 @@ r8 = { path = "." }
 clap = { version = "4.6", features = ["derive"] }
 moremath = { version = "=0.2.2", default-features = false }
 libm = "0.2"
-r8gc = { version = "=0.1.0", default-features = false }
+r8gc = { path = "crates/r8gc", default-features = false }
 smol_str = { version = "0.3", default-features = false }
 hashbrown = { version = "0.17", default-features = false }
 rustc-hash = { version = "2", default-features = false }
