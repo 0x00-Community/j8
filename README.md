@@ -1,42 +1,120 @@
+<a id="top"></a>
+<div align="center">
+
 # r8
 
-用 Rust 重写 V8。Cargo workspace，多 crate 组织。
+### V8, rewritten in Rust.
+**A bytecode interpreter, a JIT built on MLIR and a generational parallel GC of our own, `no_std` wherever possible.**
 
-## 结构
+[![Rust](https://img.shields.io/badge/Rust-100%25-orange?style=for-the-badge&logo=rust)](https://www.rust-lang.org)
+[![test262](https://img.shields.io/badge/test262-42%2C443%20passing-success?style=for-the-badge)](#-test262)
+[![no_std](https://img.shields.io/badge/no__std-core%20layers-blue?style=for-the-badge)](#-crates)
+[![License](https://img.shields.io/badge/License-MIT-brightgreen?style=for-the-badge)](#-license)
 
-| crate | std | 职责 |
+[![ECMAScript](https://img.shields.io/badge/ECMAScript-core%20language-F7DF1E?style=flat-square&logo=javascript&logoColor=black)](#-status)
+[![JIT](https://img.shields.io/badge/JIT-x86--64%20via%20MLIR-262D3A?style=flat-square&logo=llvm)](#-jit-tier-one)
+[![GC](https://img.shields.io/badge/GC-generational%20%C2%B7%20moving%20%C2%B7%20parallel-8A2BE2?style=flat-square)](#-heap-and-handles)
+[![riscv64](https://img.shields.io/badge/riscv64-none--elf-283272?style=flat-square&logo=riscv)](#-crates)
+
+**🇺🇸 English** · [🇨🇳 简体中文](README.zh-CN.md)
+
+</div>
+
+---
+
+## ⚡ What is r8
+
+r8 is **a JavaScript engine written from scratch in Rust**, layered the way V8 is: every piece of JS is first compiled to
+accumulator-style bytecode (like V8's Ignition) and run by the executor, while hot functions and hot loops go to a JIT that
+emits x86-64 machine code. The heap is the repository's own GC (`crates/r8gc`).
+
+🎯 **The main line:** the test262 pass rate. Core ECMAScript is filled in stage by stage following [PLAN.md](PLAN.md), with
+zero regressions against the baseline at every step.
+
+🧩 **Embeddable:** `#[r8::class]` / `#[r8::object]` / `#[r8::function]` bind Rust types to JS in one line. Two sample hosts
+come with it: `dune`, a node-style runtime, and `workerd`, a Cloudflare Worker-style runtime.
+
+## 🔥 Why it's different
+
+| | |
+| --- | --- |
+| 🦀 **All Rust** | Parsing is oxc; everything else, from bytecode to GC, is ours. No C++ engine underneath. |
+| 🧱 **Bytecode first** | There is no AST interpreter: all JS (including `eval` and `Function`) is compiled to bytecode. The instruction set is generated from `insn.json`, and assembling / disassembling are exact inverses. |
+| 🧬 **A JIT on MLIR** | Bytecode ⇒ the MLIR `llvm` dialect ⇒ the x86-64 backend of [mlirpass](https://crates.io/crates/mlirpass) (linear-scan register allocation), with OSR. |
+| ♻️ **Our own GC** | Generational, moving (compacting), incremental marking; marking, minor collections, sweeping and compaction run in parallel on a thread pool. `'gc` brand lifetimes guarantee at compile time that handles never escape. |
+| 📦 **`no_std` wherever possible** | The framework, bytecode, executor and builtins are `core` + `alloc` and build for `riscv64gc-unknown-none-elf`. |
+| 🚫 **No `'static`** | No global state. Background tasks borrow the caller's data, and several isolates share one thread pool. |
+
+## 🏆 Numbers
+
+| ✔️ Check | Result |
+| --- | --- |
+| 📜 test262 baseline | **42,443** tests passing (sloppy mode plus `onlyStrict`; Temporal, intl402 and the like are out of scope, see PLAN.md), zero regressions on every commit |
+| 🧮 JIT | `R8_TEST262_JIT=1` runs the same baseline with the JIT on (every function compiled on its first call) |
+| ⏱️ vs V8 jitless | **3.7×** slower, geometric mean over 11 benchmarks; checksums identical on all three engines |
+| 🚄 vs V8 (with JIT) | **9.4×** slower, geometric mean; the gap is mostly calls and allocation, see [benchmark.md](samples/benchv8/benchmark.md) |
+
+## 🚀 Quick start
+
+```sh
+# 🟢 the node-style runtime: run a script / evaluate / REPL
+cargo run --release -p dune -- a.js
+cargo run --release -p dune -- -p '[1, 2, 3].map(x => x * 2)'
+cargo run --release -p dune                     # REPL (.help / .exit)
+cargo run --release -p dune -- --jit a.js       # with the JIT
+
+# ☁️ Cloudflare Worker style: ES modules + Durable Objects
+cargo run -p workerd -- samples/workerd/examples/counter.js --bind COUNTER=Counter --request "GET /c/inc?name=a"
+
+# 🔬 look at the bytecode
+cargo run -p r8debugger -- disasm -e 'let s = 0; for (let i = 0; i < 10; i++) s += i; s'
+
+# 📜 the test262 regression run (git submodule update --init first)
+cargo test --release -p dune --test test262
+
+# 🥊 benchmarks against V8 (downloads rusty_v8's prebuilt library)
+cd samples/benchv8 && cargo run --release
+```
+
+## 🧱 Crates
+
+A Cargo workspace of several crates.
+
+| crate | std | What it does |
 |---|---|---|
-| `r8framework` | `no_std` | 核心框架层：定义 trait（`Platform`、`Engine`、`Invoke`、`Intrinsics`）与通用结构体 / 枚举（`Isolate`、`Scope`、`Agent`、`Context`·`Realm`、`Global`、`Value`、`JsString`·`JsObject`、`Profiler`、`BinaryOp`、`Error`……），JS 运算语义挂在 `Agent` 上，实现归各层 crate |
-| `r8`（仓库根 `src/`） | `no_std` | 聚合导出：`#[r8::class]` / `#[r8::object]` / `#[r8::function]`（宏在 r8macros，见 `crates/macros/USAGE.md`）与 r8binding 的 trait |
-| `r8binding` | `no_std` | Rust ⇄ JS 绑定的运行时：`FromJs` / `IntoJs`、宿主对象、`Class` / `Object` |
-| `r8builtins` | `no_std` | 实现 `Intrinsics`：往 `Realm` 装 Object / Function / Array / String / Number / Boolean / Math / Error 系列 / `console` / `parseInt` 等 |
-| `r8platform` | std | 实现 `Platform`（`DefaultPlatform`）：后台任务与 GC 跑在 moremath `ThreadMulti` 线程池上（起一次复用、任务可借用调用方数据，经 `r8gc::Pool`），时钟用 `Instant` |
-| `r8virtasm` | `no_std`（`compile` 要 std） | 虚拟指令集：累加器式寄存器字节码（`Insn` / `Function` / `Module`）；反汇编 `module.to_string()`、汇编 `text.parse::<Module>()`，互为逆；`compile` feature（缺省开）带 JS ⇒ 字节码编译器 `Module::try_from(&Source)`，用 oxc 解析 |
-| `r8gc` | `no_std`（`std` feature 缺省开） | 堆：分代、可移动、并行的 GC，`'gc` 品牌生命周期，回收跑在平台线程池上（见下「堆与句柄」）；`#[derive(Collect)]` 由 `r8gc::Collect` 暴露（过程宏实现在 `crates/r8gc/macros`，只被 r8gc 依赖） |
-| `r8macros` | proc-macro | 过程宏：`enums!("x.json")` 从 JSON 生成枚举（定义、`Display`、按字段类型取 `&mut`），用法见 `crates/macros/USAGE.md` |
-| `samples/dune` | std | 基于 r8 的 node 式二进制（`require` / `module` / `fs` / `path` / `process`，原生部分用 `#[r8::object]` 绑定）：`dune a.js` / `dune run a.js`（`-` 读标准输入）、`dune -e '<js>'`、`dune -p '<js>'` 打印结果、不带参数进 REPL（`.help` / `.exit`）；没接住的异常打 `Uncaught …` 退出码 1 |
-| `samples/workerd` | std | 用 r8 加载 Cloudflare Worker（ES 模块 `export default { fetch }`）与 Durable Object：`workerd examples/counter.js --bind COUNTER=Counter --request "GET /c/inc?name=a"` 或 `--port 8787` 起 HTTP 服务；Fetch API 子集与 DO 在 JS 序言里，存储是 `#[r8::class]` 绑定的 Rust KV |
-| `samples/benchv8` | std | 同一组 JS 基准在 r8 与 V8（rusty_v8 152，带 JIT / `--jitless`）上的耗时对比：`cd samples/benchv8 && cargo run --release`；依赖 V8 预编译库，自成 workspace（根 workspace 已 exclude） |
-| `r8debugger` | std | 调试命令行 `r8dbg`（clap）：`r8dbg disasm <file.js \| ->` / `r8dbg disasm -e '<js>'` 打印反汇编清单；`r8dbg asm <file.r8s \| ->` 汇编清单、打印规范化后的清单（`-o` 写文件） |
-| `r8executor` | `no_std`（`compile` 要 std） | 字节码执行器 `Executor`，**目前是最后一层**；`compile` feature 下实现 `Engine` |
+| `r8framework` | `no_std` | The core framework: defines the traits (`Platform`, `Engine`, `Invoke`, `Intrinsics`) and the shared structs / enums (`Isolate`, `Scope`, `Agent`, `Context` / `Realm`, `Global`, `Value`, `JsString` / `JsObject`, `Profiler`, `BinaryOp`, `Error` …). JS operation semantics hang off `Agent`; the implementations belong to the other crates |
+| `r8` (repository root `src/`) | `no_std` | Re-exports: `#[r8::class]` / `#[r8::object]` / `#[r8::function]` (the macros live in r8macros, see `crates/macros/USAGE.md`) and the r8binding traits |
+| `r8binding` | `no_std` | The Rust ⇄ JS binding runtime: `FromJs` / `IntoJs`, host objects, `Class` / `Object` |
+| `r8builtins` | `no_std` | Implements `Intrinsics`: installs Object / Function / Array / String / Number / Boolean / Math / the Error family / `console` / `parseInt` and so on into a `Realm` |
+| `r8platform` | std | Implements `Platform` (`DefaultPlatform`): background tasks and the GC run on a moremath `ThreadMulti` pool (started once and reused; tasks may borrow the caller's data, through `r8gc::Pool`), the clock is `Instant` |
+| `r8gc` | `no_std` (`std` feature on by default) | The heap: a generational, moving, parallel GC with `'gc` brand lifetimes, collecting on the platform's thread pool (see "Heap and handles" below); `#[derive(Collect)]` is exposed as `r8gc::Collect` (the proc macro lives in `crates/r8gc/macros`, which only r8gc depends on) |
+| `r8virtasm` | `no_std` (`compile` needs std) | The virtual instruction set: accumulator-style register bytecode (`Insn` / `Function` / `Module`); disassemble with `module.to_string()`, assemble with `text.parse::<Module>()`, each the inverse of the other. The `compile` feature (on by default) brings the JS ⇒ bytecode compiler `Module::try_from(&Source)`, parsing with oxc |
+| `r8macros` | proc-macro | Procedural macros: `enums!("x.json")` generates enums from JSON (definitions, `Display`, `&mut` accessors by field type); see `crates/macros/USAGE.md` |
+| `samples/dune` | std | A node-style binary on top of r8 (`require` / `module` / `fs` / `path` / `process`, native parts bound with `#[r8::object]`): `dune a.js` / `dune run a.js` (`-` reads standard input), `dune -e '<js>'`, `dune -p '<js>'` to print the result, no arguments for a REPL (`.help` / `.exit`); an uncaught exception prints `Uncaught …` and exits with 1 |
+| `samples/workerd` | std | Loads Cloudflare Workers (ES modules with `export default { fetch }`) and Durable Objects with r8: `workerd examples/counter.js --bind COUNTER=Counter --request "GET /c/inc?name=a"`, or `--port 8787` for an HTTP server; the Fetch API subset and DOs live in a JS prelude, storage is a Rust KV bound with `#[r8::class]` |
+| `samples/benchv8` | std | The same JS benchmarks timed on r8 and V8 (rusty_v8 152, with JIT / `--jitless`): `cd samples/benchv8 && cargo run --release`; depends on V8's prebuilt library, so it is its own workspace (excluded from the root one) |
+| `r8debugger` | std | The `r8dbg` command line (clap): `r8dbg disasm <file.js \| ->` / `r8dbg disasm -e '<js>'` prints the disassembly; `r8dbg asm <file.r8s \| ->` assembles a listing and prints it normalized (`-o` writes a file) |
+| `r8executor` | `no_std` (`compile` needs std) | The bytecode `Executor`, **currently the last layer**; implements `Engine` under the `compile` feature |
 
-所有 JS 都先编成字节码再执行，不设 AST 解释层。
-依赖方向：各层只依赖 `r8framework`（`r8executor` 另依赖 `r8virtasm`），`r8framework` 不依赖任何层。
+All JS is compiled to bytecode before it runs; there is no AST interpreter.
+Dependency direction: every layer depends only on `r8framework` (`r8executor` also on `r8virtasm`), and `r8framework` depends on no layer.
 
-### 堆与句柄
+### 🧹 Heap and handles
 
-堆用仓库内的 `crates/r8gc`（过程宏经 `r8gc` 本身导出）：分代（新生代碰撞分配、次回收复制提升）、
-可移动（稀疏页搬空压缩）、增量标记，标记 / 次回收 / 清扫 / 压缩在平台的线程池上并行；品牌生命周期，无 `'static`。
+The heap is the in-repository `crates/r8gc` (its proc macros are exported through `r8gc` itself): generational (bump allocation
+in the young generation, minor collections copy and promote), moving (sparse pages are evacuated and compacted), with incremental
+marking; marking, minor collections, sweeping and compaction run in parallel on the platform's thread pool. Brand lifetimes, no `'static`.
 
-- `Platform` 的父 trait 是 `r8gc::Pool`（`threads` / `run`）：后台任务与 GC 共用一个池（`DefaultPlatform` 的 moremath `ThreadMulti`）
-- 回收只在 `enter` 之外发生，那时所有 `Gc` 都在根下面，所以对象能搬：⛔ 在不经 `Collect` 遍历的地方（`Static`、旁路缓存）存 `Gc` 或对象地址；
-  按地址哈希的（Map / Set 的索引）在 `relocate` 里跟着改（见 `Collection`）
-- 大容器在次回收里会整个重扫：`Collection` 记着「上次以来写过的条目从哪开始」，次回收只看那以后的（`Relocate::young_only`）
+- `Platform`'s supertrait is `r8gc::Pool` (`threads` / `run`): background tasks and the GC share one pool (`DefaultPlatform`'s moremath `ThreadMulti`)
+- Collection only happens outside `enter`, when every `Gc` is under a root, so objects can move: ⛔ storing a `Gc` or an object address anywhere that
+  is not traversed by `Collect` (`Static`, side caches); anything hashed by address (the indexes of Map / Set) is updated in `relocate` (see `Collection`)
+- Large containers would be rescanned whole on every minor collection: `Collection` remembers "where the entries written since last time start", and a
+  minor collection only looks at those (`Relocate::young_only`)
 
-- `Isolate::enter(|scope| …)` 进入一次，`'gc` 是这次进入的品牌；闭包期间不回收，返回后按欠账增量回收
-- `Engine::eval` 拿 `&mut Isolate` 自己分片进入：每片最多一万条指令，停下时执行状态挂到根上、`enter` 返回时回收一段再接着跑；执行环境用 `ContextRoot` 跨片保留（宿主函数里重入的 JS 在当前片里跑完）
-- `Value<'gc>` 就是 V8 的 Local：出不了闭包，编译期保证
-- `Global` 是持久句柄（r8gc `DynamicRoot`），跨多次 `enter` 存活，drop 即放掉
+- `Isolate::enter(|scope| …)` enters once, and `'gc` is the brand of that entry; nothing is collected during the closure, and after it returns collection proceeds incrementally according to the debt
+- `Engine::eval` takes `&mut Isolate` and enters in slices itself: at most ten thousand instructions per slice; when it stops, the execution state is put under a root, and when `enter` returns a step of collection runs before execution continues. The execution context survives across slices as a `ContextRoot` (JS re-entered from a host function runs to completion within the current slice)
+- `Value<'gc>` is V8's Local: it cannot leave the closure, guaranteed at compile time
+- `Global` is a persistent handle (an r8gc `DynamicRoot`) that lives across many `enter`s and is released on drop
 
 ```rust
 use r8builtins::Builtins;
@@ -54,41 +132,41 @@ isolate.enter(|scope| {
 });
 ```
 
-验证 `no_std`：
+Checking `no_std`:
 
 ```sh
 cargo build --target riscv64gc-unknown-none-elf -p r8framework -p r8virtasm -p r8executor --no-default-features
 ```
 
-## JIT（第一档）
+## 🧬 JIT (tier one)
 
-`dune --jit a.js` 开 JIT；`R8_TEST262_JIT=1 cargo test -p dune --test test262` 开着 JIT（每个函数第一次调用、每个循环第一次往回跳就编）跑基线。
+`dune --jit a.js` turns the JIT on; `R8_TEST262_JIT=1 cargo test -p dune --test test262` runs the baseline with the JIT on (every function is compiled on its first call, every loop on its first back edge).
 
-- `r8compiler`（`no_std`）：字节码函数 ⇒ MLIR（`llvm` 方言）⇒ mlirpass `target.x86_64` ⇒ x86-64 机器码（`Compiler` 建一次反复用，只装 builtin 与 `llvm` 方言）。
-  机器码是 `extern "C" fn(regs, acc, start) -> u64`，直接读写本帧寄存器文件与累加器里的 `Value`（布局见 `r8framework::ValueTag`：16 字节、首字节标签、第 8 字节起载荷）；
-  `start` 是 0 从函数开头进、`h + 1` 从循环头 `h` 进（OSR）；返回 0 是函数返回了，`pc + 1` 是停在第 pc 条指令之前（`r8executor::Exit`），解释器从那里接着跑
-- 第一档收的指令：寄存器读写、数 / 布尔常量、四则（取余、乘方、位运算调运行时函数）与比较、`++` / `--`、跳转、死区检查、返回；
-  操作数不是数等快路前提不成立就退回解释器；别的指令（调用、属性、闭包……）机器码停在它之前交给解释器
-- 能整体在机器码里跑的函数进帧时就跑；别的函数只从「循环体里没有交给解释器的指令」的循环头切进去（OSR，从中途进的遇到 `return` 也交回解释器收尾）；
-  两样都没有的函数不编
-- `r8jit`（std，x86-64 Unix）：实现执行器的 `Tier`（`Executor::with_tier`）：调用次数过阈值（缺省 100）或循环圈数过 10 倍阈值就编、
-  `mmap` 成可执行内存、填运行时函数地址；回答 `Tiered::Never` 的函数执行器记下、以后不再问
-- 寄存器文件与累加器在机器码里是局部变量（每个寄存器一对 `llvm.alloca`：标签、载荷）：进来时从帧读一次、所有出口经同一个写回块写回帧；
-  出机器码前跑 mlirpass `llvm.func(mem2reg, canonicalize, cse)`，局部变量提成 SSA，块之间按块参数传值
-- 机器码后端是 mlirpass（crates.io，`=0.10.4`，`target.x86_64`，带线性扫描寄存器分配）；MLIR 用 `llvm` 方言的自定义写法（mlirformat 0.8.1 起真解析）
-- 还没有：调用 / 属性 / 全局名等快路
+- `r8compiler` (`no_std`): bytecode function ⇒ MLIR (`llvm` dialect) ⇒ mlirpass `target.x86_64` ⇒ x86-64 machine code (one `Compiler` is built and reused, loading only the builtin and `llvm` dialects).
+  The machine code is `extern "C" fn(regs, acc, start) -> u64` and reads and writes the frame's register file and accumulator `Value`s directly (layout in `r8framework::ValueTag`: 16 bytes, tag in the first byte, payload from byte 8);
+  `start` 0 enters at the top of the function, `h + 1` enters at loop header `h` (OSR); returning 0 means the function returned, `pc + 1` means it stopped before instruction pc (`r8executor::Exit`) and the interpreter carries on from there
+- Instructions in tier one: register reads and writes, number / boolean constants, arithmetic (remainder, exponentiation and bitwise operations call runtime functions) and comparisons, `++` / `--`, jumps, TDZ checks, returns;
+  when a fast-path precondition fails (an operand is not a number, say) it falls back to the interpreter; for any other instruction (calls, properties, closures …) the machine code stops before it and hands over to the interpreter
+- A function that can run entirely in machine code runs it on frame entry; any other function is only entered at loop headers whose loop body hands nothing to the interpreter (OSR; entered midway, a `return` is also handed back to the interpreter to finish);
+  functions with neither are not compiled
+- `r8jit` (std, x86-64 Unix): implements the executor's `Tier` (`Executor::with_tier`): compiles once the call count passes a threshold (100 by default) or the loop iterations pass 10× the threshold,
+  `mmap`s executable memory and fills in runtime function addresses; the executor remembers functions answered with `Tiered::Never` and never asks again
+- The register file and accumulator are local variables inside the machine code (a pair of `llvm.alloca` per register: tag and payload): read from the frame once on entry, written back to the frame through one shared write-back block on every exit;
+  before leaving MLIR it runs mlirpass `llvm.func(mem2reg, canonicalize, cse)`, so the locals become SSA values passed between blocks as block arguments
+- The machine code backend is mlirpass (crates.io, `=0.10.4`, `target.x86_64`, with linear-scan register allocation); the MLIR uses the custom form of the `llvm` dialect (really parsed since mlirformat 0.8.1)
+- Not yet: fast paths for calls / properties / global names
 
-## 字节码
+## 🔣 Bytecode
 
-累加器式寄存器机（同 V8 Ignition）：结果都进隐式的 `acc`，二元运算 `acc = reg op acc`。
+An accumulator register machine (like V8's Ignition): results go into the implicit `acc`, and binary operations are `acc = reg op acc`.
 
-指令与 r8virtasm 的全部枚举（`Insn` / `Constant` / `FunctionKind` / `PropertyKind`）定义在 `crates/r8virtasm/insn.json`，由 `r8macros::enums!` 生成，⛔ 手写枚举；加指令只改 JSON（带 `Label` 字段的自动算跳转，进 `target_mut`）。
+The instructions and every r8virtasm enum (`Insn` / `Constant` / `FunctionKind` / `PropertyKind`) are defined in `crates/r8virtasm/insn.json` and generated by `r8macros::enums!`; ⛔ hand-written enums. Adding an instruction only touches the JSON (fields of type `Label` get jump targets computed automatically and go into `target_mut`).
 
-### 汇编 / 反汇编
+### Assembling / disassembling
 
-清单一个函数一段：函数头 `fn#i "名字" 种类 模式 params N length N regs N [generator] [async] [keeps_args]`，下面缩进的行依次是
-`.mapped`（映射的 arguments 槽位，`-` 是不映射）、常量 `#k = number … | string "…" | bigint …`、
-直接 eval 的作用域表 `scope#k = ["x" 3 const tdz] [ … ]`、指令 `@pc 助记符 操作数, …`；`;` 起到行尾是注释。编号必须按顺序写。
+One section per function in a listing: the function header `fn#i "name" kind mode params N length N regs N [generator] [async] [keeps_args]`, followed by indented lines in order:
+`.mapped` (the mapped arguments slots, `-` for unmapped), constants `#k = number … | string "…" | bigint …`,
+the scope table for direct eval `scope#k = ["x" 3 const tdz] [ … ]`, and instructions `@pc mnemonic operand, …`; `;` starts a comment to the end of the line. Numbers must be written in order.
 
 ```text
 fn#0 "main" normal sloppy params 0 length 0 regs 3
@@ -97,76 +175,88 @@ fn#0 "main" normal sloppy params 0 length 0 regs 3
   @1    return
 ```
 
-一条指令的写法与 `Display` 同源：insn.json 里 `Insn` 开了 `asm`，`r8macros::enums!` 一并生成 `FromStr for Insn`，加指令不用改汇编器。
+An instruction is written the same way `Display` prints it: `Insn` has `asm` turned on in insn.json, so `r8macros::enums!` also generates `FromStr for Insn`, and adding an instruction does not touch the assembler.
 
-- 调用约定：`r0` 是 `this`，`r1` 是被调函数本身（具名函数表达式靠它递归），形参从 `r2` 起；`Call` 的被调者、`this`、实参排在连续寄存器
-- 作用域：编译前预扫一遍（`scope.rs` 的 `Resolver`），找出被内层函数捕获的绑定放进堆上的 `Env` 链（`PushEnv` / `PopEnv` / `LdaEnv depth.slot`），其余放寄存器；`for (let …)` 每轮 `CloneEnv`，闭包各拿各的那一轮
-- 脚本顶层的 `var` / 函数 / `let` / `const` 是全局对象的属性（`LdaGlobal` / `StaGlobal`）
-- 编译完每个函数跑一遍窥孔融合（`fuse.rs` 的 `Function::fuse`）：`lda.smi n; add r` ⇒ `add.smi r, n`、`ldar y; add x` ⇒ `add.reg x, y`（比较同理）、`ldar a; star b` ⇒ `mov b, a`、`ldar r; inc; star r` ⇒ `inc.reg r`、`star r; ldar r` ⇒ `star r`、紧接着的 `mov b, a; mov a, b` 丢掉第二条；
-  组里第一条之后有跳转落点就不融合，跳转目标按新下标改写。融合指令的语义就是原来几条依次执行（`Insn::unfused` 拆回），JIT 照拆回的逐条下降；手写的清单不融合
-- 执行器用显式帧栈（不靠宿主递归），调用深度上限 10000（含宿主函数里重入的 JS），超了抛 RangeError
-- 异常：每帧一个动态处理器栈（`PushHandler` / `PopHandler`），抛出时弹本帧处理器、没有就展开到调用者；`finally` 用（完成类型, 值）寄存器对，穿过它的 `return` / `break` / `continue` 先绕进去再接着走
+- Calling convention: `r0` is `this`, `r1` is the callee itself (named function expressions recurse through it), parameters start at `r2`; a `Call`'s callee, `this` and arguments sit in consecutive registers
+- Scopes: a pre-pass before compiling (`Resolver` in `scope.rs`) finds bindings captured by inner functions and puts them on the heap `Env` chain (`PushEnv` / `PopEnv` / `LdaEnv depth.slot`), the rest go in registers; `for (let …)` does a `CloneEnv` every iteration so each closure gets its own iteration
+- Top-level `var` / functions / `let` / `const` in a script are properties of the global object (`LdaGlobal` / `StaGlobal`)
+- After compiling, every function goes through peephole fusion (`Function::fuse` in `fuse.rs`): `lda.smi n; add r` ⇒ `add.smi r, n`, `ldar y; add x` ⇒ `add.reg x, y` (comparisons likewise), `ldar a; star b` ⇒ `mov b, a`, `ldar r; inc; star r` ⇒ `inc.reg r`, `star r; ldar r` ⇒ `star r`, and of `mov b, a; mov a, b` back to back the second is dropped;
+  a group is not fused if a jump lands after its first instruction, and jump targets are rewritten to the new indexes. A fused instruction means exactly the original instructions run in order (`Insn::unfused` splits it back), and the JIT lowers the split-back instructions one by one; hand-written listings are not fused
+- The executor uses an explicit frame stack (no host recursion), with a call depth limit of 10000 (including JS re-entered from host functions); going over throws a RangeError
+- Exceptions: one dynamic handler stack per frame (`PushHandler` / `PopHandler`); a throw pops this frame's handler, or unwinds to the caller if there is none; `finally` uses a (completion type, value) register pair, and a `return` / `break` / `continue` passing through it detours into it first and then carries on
 
-`r8executor` 里的 `javascript_semantics` 测试是一张逐条确定的 JS 语义表。
+The `javascript_semantics` test in `r8executor` is a table of JS semantics, each entry certain.
 
-## 现状
+## 📋 Status
 
-支持：
+Supported:
 
-- 字面量（数 / 字符串 / 布尔 / `null` / 模板字符串）、对象字面量（含方法简写、计算键）、数组字面量
-- 全部算术、比较（`==` / `===` / 字符串按 UTF-16 比）、位运算、`**`、`typeof` / `void` / `!` / `~`、`&&` / `||` / `??`、`?:`、逗号
-- 赋值与复合赋值（含 `||=` / `&&=` / `??=`）、`++` / `--`，目标可以是名字或属性
-- `var` / `let` / `const`（块级作用域、对 `const` 赋值抛 TypeError）、函数声明提升
-- `if` / `while` / `do-while` / `for` / `switch` / 带标签的 `break` / `continue` / `return` / `throw`
-- 函数声明 / 表达式 / 箭头函数（词法 `this`）、闭包、方法调用的 `this`
-- 属性读写（数组下标与 `length`、字符串下标与 `length`、原型链读）
-- `try` / `catch` / `finally`（`finally` 里的 `return` / `break` / `continue` 与穿过 `finally` 的跳转都按规范）、Error 对象（`Error` / `TypeError` / `ReferenceError` / `RangeError` / `SyntaxError`）
-- 内建对象（r8builtins）与宿主函数、`console.log`（经 `Platform::print`）、ToPrimitive（`valueOf` / `toString`）
-- `new`、类（构造器、方法、静态方法、getter / setter、`extends` / `super(...)` / `super.m()`、实例与静态字段，可继承宿主构造器如 `Error`）、对象字面量的方法与 getter / setter
-- 属性特性（可枚举 / 可写 / 可配置）、`Object.defineProperty` / `freeze`、`instanceof` / `in` / `delete`
-- 剩余 / 默认参数、展开（数组 / 调用 / `new` / `super` / 对象）、解构（声明 / 赋值 / 形参 / `catch`，含默认值与剩余）、可选链 `?.`
-- Symbol（含 `Symbol.iterator` / `toPrimitive` / `hasInstance`）、迭代协议、`for-of`（`break` / `return` / 抛出时关迭代器）/ `for-in`
-- 生成器（`yield` / `yield*`，`return()` / `throw()` 经过 `finally`）、Promise（`then` / `catch` / `finally` / `all` / `race`）、`async` / `await`，脚本跑完后排空微任务队列
-- 正则字面量与 `RegExp`（regress 引擎，按 UTF-16 码元匹配；`exec` / `test`、`g` / `y` 的 `lastIndex`、具名分组）与字符串的 `match` / `matchAll` / `replace` / `replaceAll` / `search` / `split`
-- BigInt 字面量与运算（任意精度，与 Number 混算抛 TypeError、可比较、`BigInt()` / `toString(radix)`）
-- 暂时性死区（`let` / `const` / `class` 与派生类 `super()` 前的 `this`；能证明已初始化的使用处编译期省掉检查）、脚本作用域（顶层 `let` / `const` / `class` 跨脚本共享、不挂在全局对象上）
+- Literals (number / string / boolean / `null` / template strings), object literals (including method shorthand and computed keys), array literals
+- All arithmetic, comparisons (`==` / `===`, strings compared by UTF-16), bitwise operations, `**`, `typeof` / `void` / `!` / `~`, `&&` / `||` / `??`, `?:`, comma
+- Assignment and compound assignment (including `||=` / `&&=` / `??=`), `++` / `--`, with a name or a property as the target
+- `var` / `let` / `const` (block scoping, assigning to a `const` throws TypeError), function declaration hoisting
+- `if` / `while` / `do-while` / `for` / `switch` / labeled `break` / `continue` / `return` / `throw`
+- Function declarations / expressions / arrow functions (lexical `this`), closures, `this` in method calls
+- Property reads and writes (array indexes and `length`, string indexes and `length`, prototype chain reads)
+- `try` / `catch` / `finally` (`return` / `break` / `continue` inside `finally` and jumps through `finally` all follow the spec), Error objects (`Error` / `TypeError` / `ReferenceError` / `RangeError` / `SyntaxError`)
+- Builtins (r8builtins) and host functions, `console.log` (through `Platform::print`), ToPrimitive (`valueOf` / `toString`)
+- `new`, classes (constructors, methods, static methods, getters / setters, `extends` / `super(...)` / `super.m()`, instance and static fields, inheriting from host constructors such as `Error`), methods and getters / setters in object literals
+- Property attributes (enumerable / writable / configurable), `Object.defineProperty` / `freeze`, `instanceof` / `in` / `delete`
+- Rest / default parameters, spread (array / call / `new` / `super` / object), destructuring (declarations / assignment / parameters / `catch`, with defaults and rest), optional chaining `?.`
+- Symbols (including `Symbol.iterator` / `toPrimitive` / `hasInstance`), the iteration protocol, `for-of` (closing the iterator on `break` / `return` / throw) / `for-in`
+- Generators (`yield` / `yield*`, `return()` / `throw()` through `finally`), Promises (`then` / `catch` / `finally` / `all` / `race`), `async` / `await`, with the microtask queue drained after the script finishes
+- Regex literals and `RegExp` (the regress engine, matching by UTF-16 code unit; `exec` / `test`, `lastIndex` for `g` / `y`, named groups) and the string methods `match` / `matchAll` / `replace` / `replaceAll` / `search` / `split`
+- BigInt literals and arithmetic (arbitrary precision; mixing with Number throws TypeError, comparable, `BigInt()` / `toString(radix)`)
+- The temporal dead zone (`let` / `const` / `class` and `this` before `super()` in derived classes; checks are dropped at compile time where initialization can be proven), the script scope (top-level `let` / `const` / `class` shared across scripts, not on the global object)
 
-- 类的静态块 / 私有名（字段、方法、访问器、`#x in o`）/ 计算字段名、async 生成器 / `for await`、标签模板（按调用点缓存）、`new.target`、`arguments`
-- 动态代码：全局 `Function` / `eval`（间接）、生成器 / async 函数构造器；早期错误（oxc_semantic 检查 + 正则字面量解析时校验）编译期报 SyntaxError
-- 严格模式（指令序言 / 类体 / 外层继承）：非严格调用的 `this` 换成全局对象或包装对象，严格模式下失败的赋值 / 删除抛 TypeError、给没声明的名字赋值抛 ReferenceError、`arguments.callee` 抛 TypeError；严格代码里的 `eval(…)` 按直接 eval 跑（代码严格、`var` 留在自己里面）
+- Class static blocks / private names (fields, methods, accessors, `#x in o`) / computed field names, async generators / `for await`, tagged templates (cached per call site), `new.target`, `arguments`
+- Dynamic code: global `Function` / `eval` (indirect), the generator / async function constructors; early errors (oxc_semantic checks plus validation when regex literals are parsed) are reported as SyntaxError at compile time
+- Strict mode (directive prologues / class bodies / inherited from the outside): in sloppy calls `this` becomes the global object or a wrapper object; in strict mode failed assignments / deletes throw TypeError, assigning to an undeclared name throws ReferenceError, `arguments.callee` throws TypeError; `eval(…)` in strict code runs as a direct eval (the code is strict, its `var`s stay inside it)
 
-- 属性模型按规范的对象内部方法（ValidateAndApplyPropertyDescriptor、数组空洞与按元素的特性、`length` 只读、不可扩展、字符串包装对象的下标），`Object` / `Array` 的全部方法（Array 方法对类数组通用、species）
-- Date、RegExp 的 Symbol 协议、String / Number / Math / Symbol / URI 函数补全、Promise 子类化与组合器、WeakRef / FinalizationRegistry（强引用）
-- ArrayBuffer / SharedArrayBuffer / DataView / TypedArray（含 Float16、长度跟随可调大小缓冲）/ Atomics
-- Proxy / Reflect、Iterator 助手、Set 方法（union 等）、Map.groupBy
-- 宿主函数区分能否 `new`，内建构造器按 `new.target` 定原型（`class X extends Map` 等）
+- The property model follows the spec's object internal methods (ValidateAndApplyPropertyDescriptor, array holes and per-element attributes, read-only `length`, non-extensible objects, indexes on string wrapper objects); every method of `Object` / `Array` (Array methods are generic over array-likes, species)
+- Date, RegExp's Symbol protocol, String / Number / Math / Symbol / URI functions completed, Promise subclassing and combinators, WeakRef / FinalizationRegistry (strong references)
+- ArrayBuffer / SharedArrayBuffer / DataView / TypedArray (including Float16 and lengths that track resizable buffers) / Atomics
+- Proxy / Reflect, Iterator helpers, Set methods (union and friends), Map.groupBy
+- Host functions distinguish whether they can be `new`ed, and builtin constructors pick the prototype from `new.target` (`class X extends Map` and the like)
 
-还不支持（报 `Error::Unsupported`，带 `文件:行:列`）：模块的顶层 await、形参表达式里 eval 的 `arguments` 冲突规则。test262 基线 42430 条，补齐计划见 PLAN.md。
+Not supported yet (reported as `Error::Unsupported`, with `file:line:column`): top-level await in modules, and the rule about `arguments` conflicting with eval in parameter expressions. The test262 baseline is in `tests/test262.passing`; the plan for the rest is in PLAN.md.
 
-已知偏差：宿主函数里重入的 JS（如 `map` 的回调）在当前片里跑完，期间不回收（`Function.prototype.call` / `apply` 由执行器直接展开成普通调用，不算重入）。
+Known deviation: JS re-entered from a host function (the callback of `map`, say) runs to completion within the current slice, and nothing is collected meanwhile (`Function.prototype.call` / `apply` are expanded by the executor into ordinary calls and do not count as re-entry).
 
-## test262
+## 📜 test262
 
-`tests/test262` 是 tc39/test262 子模块（浅克隆，`git submodule update --init` 拉取），运行器 `tests/test262.rs` 挂在 dune 包下（`harness = false`，不另开 crate）：
+`tests/test262` is the tc39/test262 submodule (a shallow clone, fetched with `git submodule update --init`); the runner `tests/test262.rs` hangs off the dune package (`harness = false`, no separate crate):
 
 ```sh
-cargo test -p dune --test test262 -- language/expressions/addition built-ins/Math   # 跑这些目录
-R8_TEST262_JIT=1 cargo test -p dune --test test262                                   # 开 JIT（每个函数第一次调用就编）对拍
-R8_TEST262_VERBOSE=1 cargo test -p dune --test test262 -- <路径>                    # 逐条列出没过的原因
-R8_TEST262_UPDATE=1 cargo test -p dune --test test262 -- <路径>                     # 结果写回基线
-cargo test -p dune --test test262                                                   # 只跑基线里的用例，掉了就失败
+cargo test -p dune --test test262 -- language/expressions/addition built-ins/Math   # run these directories
+R8_TEST262_JIT=1 cargo test -p dune --test test262                                   # with the JIT on (every function compiled on its first call)
+R8_TEST262_VERBOSE=1 cargo test -p dune --test test262 -- <path>                    # list why each failing test failed
+R8_TEST262_UPDATE=1 cargo test -p dune --test test262 -- <path>                     # write the results back to the baseline
+cargo test -p dune --test test262                                                   # run only the baseline tests, fail if any drops
 ```
 
-- 每个用例一个子进程、10 s 超时；结果分 pass / fail / unsupported（r8 报 `Error::Unsupported`）/ skip / timeout / crash，按目录汇总
-- 基线 `tests/test262.passing`：过了的用例一行一个；不带参数时只跑它做回归检查
-- 只跑非严格模式（`onlyStrict` 跑严格）；`module` 跳过；没有 `$262` 宿主对象；不支持写法的报错行号含拼进去的 harness
+- One subprocess per test with a 10 s timeout; results are pass / fail / unsupported (r8 reported `Error::Unsupported`) / skip / timeout / crash, summarized by directory
+- The baseline `tests/test262.passing`: one passing test per line; with no arguments only these run, as a regression check
+- Only sloppy mode runs (`onlyStrict` runs strict); `module` is skipped; there is no `$262` host object; line numbers in errors for unsupported syntax include the prepended harness
 
-## 约定
+## ✍️ Conventions
 
-- 尽可能 `no_std`（`core` + `alloc`），要 std 的部分放在 feature 后面
+- `no_std` (`core` + `alloc`) wherever possible; parts that need std go behind a feature
 
-- 子模块私有 `mod`，crate 根 `pub use` 平铺导出，⛔ `pub mod`
-- ⛔ `static` 与 `'static` 生命周期（枚举里的 `&'static str` 名字除外）；后台任务用 `Task<'t>` 借用调用方数据
-- 字符串反序列化后立即转枚举，⛔ 拿字符串做判断
-- 转换走 `From` / `TryFrom`
-- 单元测试只钉确定的事实（每次只跑一个，`timeout 15`）
+- Submodules are private `mod`s, the crate root flattens exports with `pub use`; ⛔ `pub mod`
+- ⛔ `static` and the `'static` lifetime (except `&'static str` names inside enums); background tasks borrow the caller's data with `Task<'t>`
+- Strings are turned into enums right after deserialization; ⛔ making decisions on strings
+- Conversions go through `From` / `TryFrom`
+- Unit tests only pin down facts that are certain (run one at a time, with `timeout 15`)
+
+## 📄 License
+
+MIT. The API shape of `crates/r8gc` comes from [gc-arena](https://github.com/kyren/gc-arena) (see `crates/r8gc/LICENSE-gc-arena`).
+
+<div align="center">
+
+**🦀 Same language, written another way.**
+
+[⬆️ Back to top](#top) · [🇨🇳 简体中文](README.zh-CN.md)
+
+</div>
