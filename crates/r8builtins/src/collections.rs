@@ -3,10 +3,11 @@ use r8framework::{Agent, Collection, Error, ErrorKind, IterKind, JsObject, Objec
 
 use crate::{Args, Installer};
 
-/// Map / Set / WeakMap / WeakSet。弱集合目前强引用键（还没有 ephemeron），只多了「键必须是对象」的检查。
+/// Map / Set / WeakMap / WeakSet. Weak collections currently hold their keys strongly (no ephemerons yet); the only
+/// addition is the "key must be an object" check.
 struct Collections;
 
-/// GetSetRecord 的结果。
+/// Result of GetSetRecord.
 struct SetRecord<'gc> {
     set: Value<'gc>,
     size: f64,
@@ -14,7 +15,7 @@ struct SetRecord<'gc> {
     keys: Value<'gc>,
 }
 
-/// 集合的种类。
+/// Kind of collection.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Shape {
     Map,
@@ -35,7 +36,7 @@ impl Collections {
         a.create_from_ctor(proto, kind)
     }
 
-    /// `this` 是不是这种集合（弱 / 非弱也要对得上）。
+    /// Whether `this` is this kind of collection (weak / non-weak must match too).
     fn this<'gc>(a: &Agent<'gc, '_>, this: Value<'gc>, shape: Shape, weak: bool) -> Result<JsObject<'gc>, Error> {
         let ok = match this {
             Value::Object(o) => match &o.borrow().kind {
@@ -51,7 +52,7 @@ impl Collections {
         }
     }
 
-    /// 对集合本体做事。
+    /// Operate on the collection's underlying data.
     fn with<'gc, R>(a: &Agent<'gc, '_>, o: JsObject<'gc>, f: impl FnOnce(&mut Collection<'gc>) -> R) -> R {
         match &mut o.borrow_mut(a.mc).kind {
             ObjectKind::Map(c) | ObjectKind::Set(c) => f(c),
@@ -59,7 +60,7 @@ impl Collections {
         }
     }
 
-    /// 弱集合的键必须是对象（或 Symbol）。
+    /// Keys of weak collections must be objects (or Symbols).
     fn weak_key<'gc>(a: &Agent<'gc, '_>, key: Value<'gc>, what: &str) -> Result<(), Error> {
         if a.can_be_held_weakly(key) {
             Ok(())
@@ -68,8 +69,8 @@ impl Collections {
         }
     }
 
-    /// 构造：可选的可迭代对象逐项放进去（Map 的每项要是 `[键, 值]` 对象）。
-    /// 构造：有可迭代的初值就逐项调新对象的 `set` / `add`（被改掉了也照调）。
+    /// Construct: add each item of the optional iterable (each Map item must be a `[key, value]` object). Construct: if
+    /// an initial iterable is given, call the new object's `set` / `add` for each item (even if it has been replaced).
     fn construct<'gc>(a: &mut Agent<'gc, '_>, args: &[Value<'gc>], shape: Shape, weak: bool) -> Result<Value<'gc>, Error> {
         let o = Self::make(a, shape, weak)?;
         let source = args.at(0);
@@ -176,12 +177,13 @@ impl Collections {
         f64::from(u32::try_from(Self::with(a, o, |c| c.size)).unwrap_or(u32::MAX))
     }
 
-    /// 第 `i` 个及以后第一个还在的条目。
+    /// The first live entry at or after index `i`.
     fn entry_from<'gc>(a: &Agent<'gc, '_>, o: JsObject<'gc>, i: usize) -> Option<(usize, Value<'gc>, Value<'gc>)> {
         Self::with(a, o, |c| c.entries().iter().enumerate().skip(i).find_map(|(j, e)| e.map(|(k, v)| (j, k, v))))
     }
 
-    /// `forEach(cb, thisArg)`：活着走，回调里加的项也会走到。Set 的回调是 `(值, 值, set)`。
+    /// `forEach(cb, thisArg)`: iterates live, so items added in the callback are visited too. Set's callback receives
+    /// `(value, value, set)`.
     fn for_each<'gc, const SET: bool>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let o = Self::this(a, this, Self::shape(SET), false)?;
         let f = args.at(0);
@@ -216,7 +218,7 @@ impl Collections {
         Ok(Self::iterator(a, o, IterKind::Values, SET))
     }
 
-    /// 迭代器的 `next`：从记下的下标往后找下一个还在的条目。
+    /// The iterator's `next`: search forward from the recorded index for the next live entry.
     fn next<'gc, const SET: bool>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let state = match this {
             Value::Object(it) => match it.borrow().kind {
@@ -244,7 +246,7 @@ impl Collections {
         Ok(a.iter_result(out, false).into())
     }
 
-    /// `Map.groupBy(items, callback)`。
+    /// `Map.groupBy(items, callback)`.
     fn group_by<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let groups = crate::object::Objects::group(a, args.at(0), args.at(1), false)?;
         let m = ObjectData { kind: ObjectKind::Map(Box::new(Collection::new(false))), proto: Some(a.realm.map_proto), ..ObjectData::default() }.alloc(a.mc);
@@ -255,7 +257,7 @@ impl Collections {
         Ok(m.into())
     }
 
-    /// GetSetRecord：`size` 是数（不是 NaN、不是负数），`has` / `keys` 可调用。
+    /// GetSetRecord: `size` is a number (not NaN, not negative); `has` / `keys` are callable.
     fn set_record<'gc>(a: &mut Agent<'gc, '_>, other: Value<'gc>) -> Result<SetRecord<'gc>, Error> {
         if !matches!(other, Value::Object(_)) {
             return Err(a.throw(ErrorKind::Type, "The argument must be a set-like object"));
@@ -280,7 +282,7 @@ impl Collections {
         Ok(SetRecord { set: other, size, has, keys })
     }
 
-    /// 另一个集合的 `keys()` 迭代器。
+    /// The `keys()` iterator of the other collection.
     fn keys_iterator<'gc>(a: &mut Agent<'gc, '_>, r: &SetRecord<'gc>) -> Result<r8framework::IterRecord<'gc>, Error> {
         let iterator = a.call(r.keys, r.set, &[])?;
         if !matches!(iterator, Value::Object(_)) {
@@ -290,7 +292,7 @@ impl Collections {
         Ok(r8framework::IterRecord { iterator, next })
     }
 
-    /// `-0` 规整成 `+0`。
+    /// Normalize `-0` to `+0`.
     fn canonical(v: Value<'_>) -> Value<'_> {
         match v {
             Value::Number(0.0) => Value::Number(0.0),
@@ -298,7 +300,7 @@ impl Collections {
         }
     }
 
-    /// 一个新 Set，装着 `items`。
+    /// A new Set containing `items`.
     fn new_set<'gc>(a: &Agent<'gc, '_>, items: impl IntoIterator<Item = Value<'gc>>) -> Value<'gc> {
         let mut c = Collection::new(false);
         for v in items {
@@ -498,7 +500,7 @@ impl Installer<'_, '_> {
     pub(crate) fn collections(&mut self) {
         let r = self.realm;
         let iter = r.symbols.iterator;
-        // Map：`entries` 与 `[Symbol.iterator]` 是同一个函数
+        // Map: `entries` and `[Symbol.iterator]` are the same function
         let map = r.map_proto;
         let map_ctor = self.constructor("Map", Collections::map, map, 0);
         self.method(map_ctor, "groupBy", Collections::group_by, 2);
@@ -519,7 +521,7 @@ impl Installer<'_, '_> {
         self.set(map, "entries", entries.into());
         map.borrow_mut(self.mc).define_symbol(iter, r8framework::Property::hidden(entries.into()));
         self.getter(map, "size", Collections::size::<false>);
-        // Set：`values` / `keys` / `[Symbol.iterator]` 是同一个函数
+        // Set: `values` / `keys` / `[Symbol.iterator]` are the same function
         let set = r.set_proto;
         self.constructor("Set", Collections::set_ctor, set, 0);
         let methods: [(&str, r8framework::NativeFn, u32); 13] = [
@@ -547,7 +549,7 @@ impl Installer<'_, '_> {
         self.getter(set, "size", Collections::size::<true>);
         self.method(r.collection_iterator_proto, "next", Collections::next::<false>, 0);
         self.method(r.set_iterator_proto, "next", Collections::next::<true>, 0);
-        // 弱集合
+        // Weak collections
         let wm = r.weakmap_proto;
         self.constructor("WeakMap", Collections::weak_map, wm, 0);
         self.method(wm, "get", Collections::weak_get, 1);

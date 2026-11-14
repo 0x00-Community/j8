@@ -5,10 +5,10 @@ use r8framework::{Agent, Capability, Error, ErrorKind, JsObject, Key, NativeClos
 use crate::buffer::Buffers;
 use crate::{Args, Installer};
 
-/// `Promise` 与原型方法（按规范经 NewPromiseCapability，子类也能用）。
+/// `Promise` and its prototype methods (via NewPromiseCapability per spec, so subclasses work too).
 struct Promises;
 
-/// 组合器的种类。
+/// Kind of combinator.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Combinator {
     All,
@@ -17,16 +17,16 @@ enum Combinator {
     Race,
 }
 
-/// 元素函数的状态槽（NativeClosure 的 slots 下标）。
+/// State slots of element functions (indices into the NativeClosure slots).
 mod slot {
-    /// 共享的「已经调过」标记（一个元素的兑现 / 拒绝函数共用）：数组 `[bool]`
+    /// Shared "already called" flag (shared by an element's resolve / reject functions): array `[bool]`
     pub const CALLED: usize = 0;
     pub const INDEX: usize = 1;
-    /// 结果列表（内部数组）
+    /// Result list (internal array)
     pub const VALUES: usize = 2;
-    /// 能力记录的 resolve（Any 是 reject）
+    /// The capability record's resolve (reject for Any)
     pub const SETTLE: usize = 3;
-    /// 剩下几个：数组 `[n]`
+    /// Remaining count: array `[n]`
     pub const REMAINING: usize = 4;
 }
 
@@ -54,7 +54,7 @@ impl Promises {
         }
     }
 
-    /// GetCapabilitiesExecutor：只能各设一次。
+    /// GetCapabilitiesExecutor: each can be set only once.
     fn capability_executor<'gc>(a: &mut Agent<'gc, '_>, f: JsObject<'gc>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let s = Self::slots(f);
         if s[0] != Value::Undefined || s[1] != Value::Undefined {
@@ -65,7 +65,7 @@ impl Promises {
         Ok(Value::Undefined)
     }
 
-    /// NewPromiseCapability(C)。
+    /// NewPromiseCapability(C).
     fn new_capability<'gc>(a: &mut Agent<'gc, '_>, c: Value<'gc>) -> Result<Capability<'gc>, Error> {
         if Self::is_intrinsic(a, c) {
             let p = a.new_promise();
@@ -84,7 +84,7 @@ impl Promises {
         Ok(Capability { promise, resolve: s[0], reject: s[1] })
     }
 
-    /// PromiseResolve(C, x)。
+    /// PromiseResolve(C, x).
     fn resolve_with<'gc>(a: &mut Agent<'gc, '_>, c: Value<'gc>, x: Value<'gc>) -> Result<Value<'gc>, Error> {
         if Agent::is_promise(x) {
             let xc = a.get_named(x, "constructor")?;
@@ -148,7 +148,7 @@ impl Promises {
         Ok(o.into())
     }
 
-    /// `Promise.try(f, ...args)`。
+    /// `Promise.try(f, ...args)`.
     fn try_<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let c = Self::this_object(a, this)?;
         let cap = Self::new_capability(a, c)?;
@@ -183,7 +183,8 @@ impl Promises {
         a.call(then, this, &[Value::Undefined, args.at(0)])
     }
 
-    /// `finally(f)`：`then(thenFinally, catchFinally)`，两者先调 `f()` 再把原来的值 / 原因接上。
+    /// `finally(f)`: `then(thenFinally, catchFinally)`; both call `f()` first, then pass on the original value /
+    /// reason.
     fn finally<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let p = Self::this_object(a, this)?;
         let c = Buffers::species_constructor(a, p, a.realm.promise_ctor.into())?;
@@ -238,7 +239,7 @@ impl Promises {
         Self::combine(a, this, args.at(0), Combinator::Race)
     }
 
-    /// IfAbruptRejectPromise：异常交给能力记录的 reject，给出结果 Promise。
+    /// IfAbruptRejectPromise: hand the exception to the capability record's reject and return the result Promise.
     fn reject_on<'gc>(a: &mut Agent<'gc, '_>, cap: &Capability<'gc>, e: Error) -> Result<Value<'gc>, Error> {
         match e {
             Error::Exception(g) => {
@@ -340,7 +341,7 @@ impl Promises {
         }
     }
 
-    /// 全部到齐：All / AllSettled 兑现成数组，Any 拒绝成 AggregateError。
+    /// Everything is in: All / AllSettled fulfill with an array, Any rejects with an AggregateError.
     fn finish<'gc>(a: &mut Agent<'gc, '_>, how: Combinator, values: JsObject<'gc>, cap: &Capability<'gc>) -> Result<(), Error> {
         let list = a.list_from_array_like(values.into())?;
         let arr = a.array(list);
@@ -354,7 +355,8 @@ impl Promises {
         Ok(())
     }
 
-    /// 元素函数的共同部分：只第一次有效，填进第 `index` 个，减到 0 就落定。
+    /// Common part of element functions: only the first call takes effect; fill slot `index`, settle when the count
+    /// reaches 0.
     fn element_step<'gc>(a: &mut Agent<'gc, '_>, f: JsObject<'gc>, v: Value<'gc>, how: Combinator) -> Result<Value<'gc>, Error> {
         let s = Self::slots(f);
         if a.get_index(s[slot::CALLED], 0.0)? == Value::Bool(true) {

@@ -1,4 +1,4 @@
-//! JS 规范里的运算语义（各执行层共用同一份）：类型转换、运算符、属性存取。
+//! Operation semantics from the JS spec (shared by all execution layers): type conversion, operators, property access.
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -9,7 +9,7 @@ use num_traits::Zero;
 
 use crate::{Agent, Descriptor, Error, Key, Numeric, IterKind, IteratorState, JsObject, JsString, JsSymbol, ObjectData, ObjectKind, Property, PropertyKey, Slot, Value};
 
-/// 二元运算（结果是值）。
+/// Binary operations (the result is a value).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum BinaryOp {
     Add,
@@ -26,7 +26,7 @@ pub enum BinaryOp {
     UShr,
 }
 
-/// 比较（结果是布尔）。
+/// Comparisons (the result is a boolean).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum CompareOp {
     Eq,
@@ -39,7 +39,7 @@ pub enum CompareOp {
     Ge,
 }
 
-/// 一元运算。
+/// Unary operations.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum UnaryOp {
     Neg,
@@ -50,7 +50,7 @@ pub enum UnaryOp {
     Void,
 }
 
-/// 内建错误种类（`Error` 本身在第一个）。
+/// Built-in error kinds (`Error` itself comes first).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ErrorKind {
     Error,
@@ -63,7 +63,7 @@ pub enum ErrorKind {
     Aggregate,
 }
 
-/// ToPrimitive 的偏好。
+/// The preference for ToPrimitive.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Hint {
     Default,
@@ -91,7 +91,8 @@ impl BinaryOp {
         }
     }
 
-    /// 两边都已是数时的结果（各执行层的快路，也是 [`Agent::binary`] 的最后一步）。
+    /// The result when both sides are already numbers (the fast path of each execution layer, and the last step of
+    /// [`Agent::binary`]).
     #[inline]
     pub fn numbers(self, a: f64, b: f64) -> f64 {
         match self {
@@ -127,7 +128,7 @@ impl CompareOp {
         }
     }
 
-    /// 两边都是数时的结果（`NaN` 与谁比都不成立，`==` 与 `===` 对数一样）。
+    /// The result when both sides are numbers (`NaN` compares false with anything; `==` and `===` agree on numbers).
     #[inline]
     pub fn numbers(self, a: f64, b: f64) -> bool {
         match self {
@@ -173,7 +174,7 @@ impl ErrorKind {
     }
 }
 
-/// 一个迭代器记录：迭代器对象与它的 `next` 方法。
+/// An iterator record: the iterator object and its `next` method.
 #[derive(Clone, Copy, Debug, r8gc::Collect)]
 #[collect(no_drop)]
 pub struct IterRecord<'gc> {
@@ -181,13 +182,13 @@ pub struct IterRecord<'gc> {
     pub next: Value<'gc>,
 }
 
-/// 2^32：ToInt32 / ToUint32 的模。
+/// 2^32: the modulus of ToInt32 / ToUint32.
 const TWO_POW_32: f64 = 4_294_967_296.0;
 
-/// 数组下标上限（`length` 最大 2^32 − 1）。
+/// Upper bound of array indices (`length` is at most 2^32 − 1).
 const MAX_INDEX: f64 = 4_294_967_294.0;
 
-/// 字符串 ⇒ 数（StringToNumber）：前后空白、`Infinity`、`0x` / `0o` / `0b` 前缀、十进制。
+/// String ⇒ number (StringToNumber): leading / trailing whitespace, `Infinity`, `0x` / `0o` / `0b` prefixes, decimal.
 pub(crate) fn parse_number(s: &str) -> f64 {
     let t = s.trim_matches(|c: char| (c.is_whitespace() && c != '\u{85}') || c == '\u{feff}');
     match t {
@@ -214,18 +215,18 @@ pub(crate) fn parse_number(s: &str) -> f64 {
     }
 }
 
-/// 数 ⇒ 32 位整数的模 2^32 余数（ToInt32 / ToUint32 共用）。
+/// Number ⇒ the remainder of a 32-bit integer modulo 2^32 (shared by ToInt32 / ToUint32).
 /// 2^53 − 1
 pub const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
 
 fn modulo_u32(x: f64) -> u32 {
-    // 快路：已经是 i32 / u32 范围内的整数（绝大多数位运算的操作数），直接截
-    #[expect(clippy::cast_possible_truncation, reason = "下面比较确认没截掉东西")]
+    // Fast path: already an integer in the i32 / u32 range (the operand of most bitwise operations); truncate directly
+    #[expect(clippy::cast_possible_truncation, reason = "the comparison below confirms nothing was truncated")]
     let i = x as i32;
     if f64::from(i) == x {
         return i.cast_unsigned();
     }
-    #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "下面比较确认没截掉东西")]
+    #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "the comparison below confirms nothing was truncated")]
     let u = x as u32;
     if f64::from(u) == x {
         return u;
@@ -235,19 +236,20 @@ fn modulo_u32(x: f64) -> u32 {
     }
     let m = libm::trunc(x) % TWO_POW_32;
     let m = if m < 0.0 { m + TWO_POW_32 } else { m };
-    // m 在 [0, 2^32) 里且是整数
-    #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "m 已规约到 [0, 2^32)")]
+    // m is an integer in [0, 2^32)
+    #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "m is already reduced to [0, 2^32)")]
     let u = m as u32;
     u
 }
 
-/// Number::toString(x)：安全整数直接按十进制写进栈上缓冲（短，成 [`SmallStr`](crate::SmallStr) 不分配），其余交给 ryu-js。
+/// Number::toString(x): safe integers are written in decimal straight into a stack buffer (short, so it becomes a
+/// [`SmallStr`](crate::SmallStr) without allocating); everything else goes to ryu-js.
 pub fn number_text(x: f64) -> crate::SmallStr {
-    #[expect(clippy::cast_possible_truncation, reason = "下面比较确认是安全整数")]
+    #[expect(clippy::cast_possible_truncation, reason = "the comparison below confirms it is a safe integer")]
     let i = x as i64;
-    #[expect(clippy::cast_precision_loss, reason = "安全整数范围内精确")]
+    #[expect(clippy::cast_precision_loss, reason = "exact within the safe integer range")]
     if x.abs() <= MAX_SAFE_INTEGER && i as f64 == x {
-        // 最长 "-9007199254740991"
+        // Longest is "-9007199254740991"
         let mut buf = [0u8; 20];
         let mut at = buf.len();
         let mut n = i.unsigned_abs();
@@ -274,14 +276,15 @@ fn to_int32(x: f64) -> i32 {
     modulo_u32(x).cast_signed()
 }
 
-/// `%`：两边是安全整数时用整数取余（结果为 0 时带被除数的符号），否则走浮点 `fmod`。
+/// `%`: when both sides are safe integers use integer remainder (a zero result takes the dividend's sign), otherwise
+/// use floating-point `fmod`.
 fn remainder(a: f64, b: f64) -> f64 {
     if a.abs() <= MAX_SAFE_INTEGER && b.abs() <= MAX_SAFE_INTEGER && b != 0.0 {
-        #[expect(clippy::cast_possible_truncation, reason = "已检查在安全整数范围内，下面比较确认是整数")]
+        #[expect(clippy::cast_possible_truncation, reason = "checked to be in the safe integer range; the comparison below confirms it is an integer")]
         let (x, y) = (a as i64, b as i64);
-        #[expect(clippy::cast_precision_loss, reason = "安全整数范围内精确")]
+        #[expect(clippy::cast_precision_loss, reason = "exact within the safe integer range")]
         if x as f64 == a && y as f64 == b {
-            #[expect(clippy::cast_precision_loss, reason = "余数绝对值小于除数，精确")]
+            #[expect(clippy::cast_precision_loss, reason = "the remainder's magnitude is below the divisor's; exact")]
             let r = (x % y) as f64;
             return if r == 0.0 { 0.0f64.copysign(a) } else { r };
         }
@@ -289,33 +292,34 @@ fn remainder(a: f64, b: f64) -> f64 {
     a % b
 }
 
-/// `**`：JS 与 C `pow` 不同的地方是 `±1 ** ±∞` 与 `x ** NaN` 都是 NaN。
+/// `**`: where JS differs from C `pow` is that `±1 ** ±∞` and `x ** NaN` are both NaN.
 fn pow(a: f64, b: f64) -> f64 {
     if b.is_nan() || ((a == 1.0 || a == -1.0) && b.is_infinite()) { f64::NAN } else { libm::pow(a, b) }
 }
 
-/// 规范下标：非负整数且小于 2^32 − 1。
+/// Canonical index: a non-negative integer less than 2^32 − 1.
 fn index_of_number(x: f64) -> Option<u32> {
-    // 转 u32 是饱和的（负数、NaN 得 0，太大得 u32::MAX），转回来相等就是整数；-0 当 0
-    #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "转回来核对相等")]
+    // Conversion to u32 saturates (negative and NaN give 0, too large gives u32::MAX); equal after converting back
+    // means an integer; -0 counts as 0
+    #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "converted back and checked for equality")]
     let n = x as u32;
     (f64::from(n) == x && x <= MAX_INDEX).then_some(n)
 }
 
-/// 规范下标的字符串形式（`"0"`、`"12"`，不带前导零）。
+/// The string form of a canonical index (`"0"`, `"12"`, no leading zeros).
 pub(crate) fn index_of_str(s: &str) -> Option<u32> {
     let canonical = s == "0" || (!s.starts_with('0') && !s.is_empty() && s.bytes().all(|c| c.is_ascii_digit()));
     canonical.then(|| s.parse().ok()).flatten().filter(|&i| f64::from(i) <= MAX_INDEX)
 }
 
 impl<'gc> Agent<'gc, '_> {
-    /// 字符串放上堆。
-    /// 借平台的线程池做并行活（只给不碰 GC 堆的纯数据）
+    /// Put a string on the heap.
+    /// Borrow the platform's thread pool for parallel work (only for plain data that doesn't touch the GC heap)
     pub fn par(&self) -> crate::Par<'_> {
         crate::Par(self.platform)
     }
 
-    /// 一个 UTF-16 码元的字符串（ASCII 用现成的）
+    /// A string of one UTF-16 code unit (ASCII uses the prebuilt ones)
     pub fn unit_string(&self, u: u16) -> JsString<'gc> {
         match self.realm.chars.get(usize::from(u)) {
             Some(&s) => s,
@@ -327,22 +331,22 @@ impl<'gc> Agent<'gc, '_> {
         Gc::new(self.mc, crate::JsStr::from(s))
     }
 
-    /// 以 `Object.prototype` 为原型的空对象。
+    /// An empty object with `Object.prototype` as its prototype.
     pub fn object(&self) -> JsObject<'gc> {
         ObjectData { proto: Some(self.realm.object_proto), ..ObjectData::default() }.alloc(self.mc)
     }
 
-    /// 同 [`object`](Self::object)，按 `capacity` 个属性预留槽（字面量）
+    /// Same as [`object`](Self::object), reserving slots for `capacity` properties (literals)
     pub fn object_with(&self, capacity: usize) -> JsObject<'gc> {
         ObjectData { proto: Some(self.realm.object_proto), props: crate::Props::with_capacity(capacity), ..ObjectData::default() }.alloc(self.mc)
     }
 
-    /// 以 `Array.prototype` 为原型的数组。
+    /// An array with `Array.prototype` as its prototype.
     pub fn array(&self, items: Vec<Value<'gc>>) -> JsObject<'gc> {
         ObjectData { kind: ObjectKind::Array(items), proto: Some(self.realm.array_proto), ..ObjectData::default() }.alloc(self.mc)
     }
 
-    /// 一个 Error 对象（原型按种类取，自有 `message`）。
+    /// An Error object (prototype chosen by kind, with an own `message`).
     pub fn error(&self, kind: ErrorKind, message: &str) -> JsObject<'gc> {
         let e = ObjectData { kind: ObjectKind::Error, proto: Some(self.realm.error_proto(kind)), ..ObjectData::default() }.alloc(self.mc);
         let m = self.string(message);
@@ -350,12 +354,12 @@ impl<'gc> Agent<'gc, '_> {
         e
     }
 
-    /// 抛出一个内建错误。
+    /// Throw a built-in error.
     pub fn throw(&self, kind: ErrorKind, message: &str) -> Error {
         Error::Exception(self.global(self.error(kind, message).into()))
     }
 
-    /// 抛出任意值。
+    /// Throw an arbitrary value.
     pub fn throw_value(&self, v: Value<'gc>) -> Error {
         Error::Exception(self.global(v))
     }
@@ -370,14 +374,14 @@ impl<'gc> Agent<'gc, '_> {
             Value::Undefined | Value::Null | Value::Uninit => false,
             Value::Bool(b) => b,
             Value::Number(x) => !(x == 0.0 || x.is_nan()),
-            // 按字节数看，不拼平绳索
+            // Judge by byte count, without flattening the rope
             Value::String(s) => s.text().byte_len() != 0,
             Value::BigInt(b) => !b.0.is_zero(),
             Value::Symbol(_) | Value::Object(_) => true,
         }
     }
 
-    /// ToPrimitive：对象按偏好依次试 `valueOf` / `toString`，结果是原始值就用。
+    /// ToPrimitive: for objects, try `valueOf` / `toString` in preference order and use the first primitive result.
     pub fn to_primitive(&mut self, v: Value<'gc>, hint: Hint) -> Result<Value<'gc>, Error> {
         if !matches!(v, Value::Object(_)) {
             return Ok(v);
@@ -408,7 +412,7 @@ impl<'gc> Agent<'gc, '_> {
         Err(self.throw(ErrorKind::Type, "Cannot convert object to primitive value"))
     }
 
-    /// ToNumber。
+    /// ToNumber.
     pub fn to_number(&mut self, v: Value<'gc>) -> Result<f64, Error> {
         Ok(match v {
             Value::Undefined | Value::Uninit => f64::NAN,
@@ -433,7 +437,7 @@ impl<'gc> Agent<'gc, '_> {
         Ok(modulo_u32(self.to_number(v)?))
     }
 
-    /// ToString。
+    /// ToString.
     pub fn to_string(&mut self, v: Value<'gc>) -> Result<JsString<'gc>, Error> {
         Ok(match v {
             Value::String(s) => s,
@@ -451,7 +455,7 @@ impl<'gc> Agent<'gc, '_> {
         })
     }
 
-    /// `String(sym)` / 报错信息里的 Symbol：`Symbol(描述)`。
+    /// A Symbol in `String(sym)` / error messages: `Symbol(description)`.
     pub fn symbol_descriptive(&self, s: JsSymbol<'gc>) -> JsString<'gc> {
         self.string(&format!("Symbol({})", s.description.as_deref().unwrap_or("")))
     }
@@ -473,7 +477,8 @@ impl<'gc> Agent<'gc, '_> {
         if let (Value::Number(a), Value::Number(b)) = (lhs, rhs) {
             return Ok(op.numbers(a, b).into());
         }
-        // 加法：两边先 ToPrimitive 看有没有字符串；其余运算左边整个 ToNumeric 完再轮到右边（求值顺序看得见）
+        // Addition: ToPrimitive both sides first to see whether either is a string; other operations finish ToNumeric
+        // on the whole left side before the right (the evaluation order is observable)
         let (l, r) = if op == BinaryOp::Add {
             let (l, r) = (self.to_primitive(lhs, Hint::Default)?, self.to_primitive(rhs, Hint::Default)?);
             if matches!(l, Value::String(_)) || matches!(r, Value::String(_)) {
@@ -494,7 +499,7 @@ impl<'gc> Agent<'gc, '_> {
         Ok(op.numbers(a, b).into())
     }
 
-    /// 宽松相等（`==`）。
+    /// Loose equality (`==`).
     pub fn loose_equals(&mut self, a: Value<'gc>, b: Value<'gc>) -> Result<bool, Error> {
         Ok(match (a, b) {
             _ if a.is_nullish() && b.is_nullish() => true,
@@ -533,7 +538,7 @@ impl<'gc> Agent<'gc, '_> {
             CompareOp::Lt | CompareOp::Gt | CompareOp::Le | CompareOp::Ge => {
                 let (l, r) = (self.to_primitive(lhs, Hint::Number)?, self.to_primitive(rhs, Hint::Number)?);
                 if let (Value::String(a), Value::String(b)) = (l, r) {
-                    // 按 UTF-16 码元比
+                    // Compare by UTF-16 code unit
                     let ord = a.encode_utf16().cmp(b.encode_utf16());
                     return Ok(match op {
                         CompareOp::Lt => ord.is_lt(),
@@ -570,7 +575,8 @@ impl<'gc> Agent<'gc, '_> {
         })
     }
 
-    /// ToObject：对象原样，原始值包成包装对象（原型是它那一类的原型），`undefined` / `null` 抛 TypeError。
+    /// ToObject: objects as is, primitives wrapped in wrapper objects (whose prototype is that kind's prototype);
+    /// `undefined` / `null` throw a TypeError.
     pub fn to_object(&self, v: Value<'gc>) -> Result<JsObject<'gc>, Error> {
         match (v, self.proto_of(v)) {
             (Value::Object(o), _) => Ok(o),
@@ -579,7 +585,7 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    /// 原始值读属性时用的原型。
+    /// The prototype used when reading a property of a primitive.
     fn proto_of(&self, v: Value<'gc>) -> Option<JsObject<'gc>> {
         match v {
             Value::String(_) => Some(self.realm.string_proto),
@@ -597,13 +603,13 @@ impl<'gc> Agent<'gc, '_> {
         self.throw(ErrorKind::Type, &format!("Cannot {verb} properties of {what} (reading '{key}')"))
     }
 
-    /// [[Get]]：`holder` 上（沿原型链）读 `key`，getter 的 `this` 是 `receiver`。
+    /// [[Get]]: read `key` on `holder` (along the prototype chain); a getter's `this` is `receiver`.
     pub fn get_key(&mut self, holder: Value<'gc>, key: Key<'_, 'gc>, receiver: Value<'gc>) -> Result<Value<'gc>, Error> {
         if holder.is_nullish() {
             let k = self.key_text(key);
             return Err(self.nullish_error(holder, "read", &k));
         }
-        // 字符串的下标与 `length` 不必包一层
+        // String indices and `length` don't need a wrapper
         if let (Value::String(s), Key::Str(k)) = (holder, key) {
             if k == "length" {
                 return Ok(f64::from(u32::try_from(s.utf16_len()).unwrap_or(u32::MAX)).into());
@@ -620,11 +626,12 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    /// 对象的 [[Get]]：沿原型链找（碰到 Proxy 交给它）。
+    /// [[Get]] of an object: search along the prototype chain (handing off to a Proxy if one is met).
     pub fn object_get(&mut self, o: JsObject<'gc>, key: Key<'_, 'gc>, receiver: Value<'gc>) -> Result<Value<'gc>, Error> {
         let mut cur = o;
         loop {
-            // 快路：普通对象一次借用查完自有属性，没有就直接上原型
+            // Fast path: an ordinary object checks its own properties in one borrow, and goes straight to the prototype
+            // if not found
             let fast = {
                 let d = cur.borrow();
                 d.kind.has_ordinary_properties().then(|| (d.own_slot(key), d.proto))
@@ -671,28 +678,28 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    /// `holder` 上（沿原型链）读 `key`，getter 的 `this` 是 `receiver`。
+    /// Read `key` on `holder` (along the prototype chain); a getter's `this` is `receiver`.
     pub fn get(&mut self, holder: Value<'gc>, key: &str, receiver: Value<'gc>) -> Result<Value<'gc>, Error> {
         self.get_key(holder, Key::Str(key), receiver)
     }
 
-    /// `target.key`。
+    /// `target.key`.
     pub fn get_named(&mut self, target: Value<'gc>, key: &str) -> Result<Value<'gc>, Error> {
         self.get_key(target, Key::Str(key), target)
     }
 
-    /// 属性键：ToString（数组下标的数快路在调用处）。
+    /// Property key: ToString (the number fast path for array indices is at the call site).
     pub fn property_key(&mut self, key: Value<'gc>) -> Result<JsString<'gc>, Error> {
         self.to_string(key)
     }
 
-    /// `holder[sym]`，getter 的 `this` 是 `receiver`。
+    /// `holder[sym]`; a getter's `this` is `receiver`.
     pub fn get_symbol(&mut self, holder: Value<'gc>, key: JsSymbol<'gc>, receiver: Value<'gc>) -> Result<Value<'gc>, Error> {
         self.get_key(holder, Key::Sym(key), receiver)
     }
 
-    /// [[Set]]（OrdinarySet）：沿原型链找到的 setter 就调它，不可写的数据属性不写，否则在 `receiver` 上改 / 建。
-    /// 给出写成没有。
+    /// [[Set]] (OrdinarySet): call a setter found along the prototype chain, don't write a non-writable data property,
+    /// otherwise update / create on `receiver`. Returns whether the write succeeded.
     pub fn set_key(&mut self, target: Value<'gc>, key: Key<'_, 'gc>, value: Value<'gc>, receiver: Value<'gc>) -> Result<bool, Error> {
         if target.is_nullish() {
             let k = self.key_text(key);
@@ -704,12 +711,13 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    /// 对象的 [[Set]]（OrdinarySet）：沿原型链找到的 setter 就调它，不可写的数据属性不写，否则在 `receiver` 上改 / 建；
-    /// 碰到 Proxy 交给它。
+    /// [[Set]] of an object (OrdinarySet): call a setter found along the prototype chain, don't write a non-writable
+    /// data property, otherwise update / create on `receiver`; hand off to a Proxy if one is met.
     pub fn object_set(&mut self, o: JsObject<'gc>, key: Key<'_, 'gc>, value: Value<'gc>, receiver: Value<'gc>) -> Result<bool, Error> {
         let mut cur = o;
         let found = loop {
-            // 快路：普通对象一次借用查完自有属性，没有就直接上原型
+            // Fast path: an ordinary object checks its own properties in one borrow, and goes straight to the prototype
+            // if not found
             let fast = {
                 let d = cur.borrow();
                 d.kind.has_ordinary_properties().then(|| (d.own_slot(key), d.proto))
@@ -766,12 +774,12 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    /// `target[sym] = value`，给出写成没有。
+    /// `target[sym] = value`; returns whether the write succeeded.
     pub fn try_set_symbol(&mut self, target: Value<'gc>, key: JsSymbol<'gc>, value: Value<'gc>) -> Result<bool, Error> {
         self.set_key(target, Key::Sym(key), value, target)
     }
 
-    /// `target[sym] = value`：写不成抛 TypeError（规范里内建函数的 Set(…, true)）。
+    /// `target[sym] = value`: throws a TypeError if the write fails (Set(…, true) of built-in functions in the spec).
     pub fn set_symbol(&mut self, target: Value<'gc>, key: JsSymbol<'gc>, value: Value<'gc>) -> Result<(), Error> {
         if self.try_set_symbol(target, key, value)? {
             Ok(())
@@ -781,7 +789,8 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    /// 写不成的 TypeError：不可扩展的对象上加新属性，或者写只读属性。
+    /// The TypeError for a failed write: adding a new property to a non-extensible object, or writing a read-only
+    /// property.
     fn set_failure(&self, target: Value<'gc>, key: &str) -> Error {
         if let Value::Object(o) = target {
             let d = o.borrow();
@@ -796,7 +805,7 @@ impl<'gc> Agent<'gc, '_> {
         self.throw(ErrorKind::Type, &format!("Cannot assign to read only property '{key}'"))
     }
 
-    /// `key in target`，键是任意值。
+    /// `key in target`, with an arbitrary value as the key.
     pub fn has_keyed(&mut self, target: Value<'gc>, key: Value<'gc>) -> Result<bool, Error> {
         let Value::Object(o) = target else {
             let what = match key {
@@ -812,7 +821,7 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    /// [[HasProperty]]：自有或原型链上有。
+    /// [[HasProperty]]: present as an own property or on the prototype chain.
     pub fn has_key(&mut self, o: JsObject<'gc>, key: Key<'_, 'gc>) -> Result<bool, Error> {
         let mut cur = o;
         loop {
@@ -836,7 +845,7 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    /// `delete target[key]`，键是任意值。
+    /// `delete target[key]`, with an arbitrary value as the key.
     pub fn delete_keyed(&mut self, target: Value<'gc>, key: Value<'gc>) -> Result<bool, Error> {
         if target.is_nullish() {
             let k = self.to_string(key)?;
@@ -848,7 +857,7 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    /// `delete target.key`：原始值先包成对象（字符串的下标与 `length` 删不掉）。
+    /// `delete target.key`: primitives are wrapped in an object first (string indices and `length` can't be deleted).
     pub fn delete_key(&mut self, target: Value<'gc>, key: Key<'_, 'gc>) -> Result<bool, Error> {
         if target.is_nullish() {
             let k = self.key_text(key);
@@ -858,7 +867,7 @@ impl<'gc> Agent<'gc, '_> {
         self.delete_property(o, key)
     }
 
-    /// 定义属性，键是任意值（计算键）。
+    /// Define a property, with an arbitrary value as the key (computed key).
     pub fn define_keyed(&mut self, o: JsObject<'gc>, key: Value<'gc>, prop: Property<'gc>) -> Result<(), Error> {
         match self.to_property_key(key)? {
             PropertyKey::Symbol(k) => self.define_key(o, Key::Sym(k), prop),
@@ -866,7 +875,7 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    /// 定义访问器的一半，键是任意值。
+    /// Define half of an accessor, with an arbitrary value as the key.
     pub fn define_accessor_keyed(&mut self, o: JsObject<'gc>, key: Value<'gc>, f: JsObject<'gc>, setter: bool, enumerable: bool) -> Result<(), Error> {
         match self.to_property_key(key)? {
             PropertyKey::Symbol(k) => self.define_accessor_key(o, Key::Sym(k), f, setter, enumerable),
@@ -875,7 +884,7 @@ impl<'gc> Agent<'gc, '_> {
         Ok(())
     }
 
-    /// `target[key]`。
+    /// `target[key]`.
     pub fn get_keyed(&mut self, target: Value<'gc>, key: Value<'gc>) -> Result<Value<'gc>, Error> {
         if let Value::Symbol(k) = key {
             return self.get_symbol(target, k, target);
@@ -886,13 +895,14 @@ impl<'gc> Agent<'gc, '_> {
         {
             return Ok(v);
         }
-        // 类型化数组的数字键：直接取元素，不看原型链（键 -0 转成字符串是 "0"）
+        // Numeric keys of typed arrays: take the element directly, without looking at the prototype chain (key -0
+        // converts to the string "0")
         if let (Value::Object(o), Value::Number(x)) = (target, key)
             && matches!(o.borrow().kind, ObjectKind::TypedArray(..))
         {
             return Ok(self.typed_get(o, x + 0.0).unwrap_or_default());
         }
-        // 字符串的下标：UTF-16 码元，O(1)
+        // String indices: UTF-16 code units, O(1)
         if let (Value::String(s), Value::Number(x)) = (target, key)
             && let Some(u) = index_of_number(x).and_then(|i| s.code_unit(i as usize))
         {
@@ -908,7 +918,7 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    /// `target.key = value`：给出写成没有。
+    /// `target.key = value`: returns whether the write succeeded.
     pub fn try_set_named(&mut self, target: Value<'gc>, key: &str, value: Value<'gc>) -> Result<bool, Error> {
         if let (Value::Object(o), Some(i)) = (target, index_of_str(key))
             && o.borrow_mut(self.mc).write_index(i, value)
@@ -918,12 +928,12 @@ impl<'gc> Agent<'gc, '_> {
         self.set_key(target, Key::Str(key), value, target)
     }
 
-    /// `target.key = value`：写不成抛 TypeError（规范里内建函数的 Set(…, true)）。
+    /// `target.key = value`: throws a TypeError if the write fails (Set(…, true) of built-in functions in the spec).
     pub fn set_named(&mut self, target: Value<'gc>, key: &str, value: Value<'gc>) -> Result<(), Error> {
         if self.try_set_named(target, key, value)? { Ok(()) } else { Err(self.set_failure(target, key)) }
     }
 
-    /// `target[key] = value`，给出写成没有。
+    /// `target[key] = value`; returns whether the write succeeded.
     pub fn try_set_keyed(&mut self, target: Value<'gc>, key: Value<'gc>, value: Value<'gc>) -> Result<bool, Error> {
         if let Value::Symbol(k) = key {
             return self.try_set_symbol(target, k, value);
@@ -934,7 +944,8 @@ impl<'gc> Agent<'gc, '_> {
         {
             return Ok(true);
         }
-        // 类型化数组的数字键：接收者就是它自己，写元素（越界也算成）
+        // Numeric keys of typed arrays: the receiver is the array itself; write the element (out of bounds also counts
+        // as success)
         if let (Value::Object(o), Value::Number(x)) = (target, key)
             && matches!(o.borrow().kind, ObjectKind::TypedArray(..))
         {
@@ -951,7 +962,7 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    /// `target[key] = value`：写不成抛 TypeError。
+    /// `target[key] = value`: throws a TypeError if the write fails.
     pub fn set_keyed(&mut self, target: Value<'gc>, key: Value<'gc>, value: Value<'gc>) -> Result<(), Error> {
         if self.try_set_keyed(target, key, value)? {
             Ok(())
@@ -964,7 +975,7 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    /// JS 代码里的赋值：严格模式写不成抛 TypeError，非严格悄悄丢掉。
+    /// Assignment in JS code: a failed write throws a TypeError in strict mode and is silently dropped in sloppy mode.
     pub fn put_named(&mut self, target: Value<'gc>, key: &str, value: Value<'gc>, strict: bool) -> Result<(), Error> {
         if strict { self.set_named(target, key, value) } else { self.try_set_named(target, key, value).map(drop) }
     }
@@ -973,7 +984,8 @@ impl<'gc> Agent<'gc, '_> {
         if strict { self.set_keyed(target, key, value) } else { self.try_set_keyed(target, key, value).map(drop) }
     }
 
-    /// 定义自有属性（对象字面量、类、CreateDataPropertyOrThrow）：定义不成抛 TypeError。
+    /// Define an own property (object literals, classes, CreateDataPropertyOrThrow): throws a TypeError if the
+    /// definition fails.
     pub fn define(&mut self, o: JsObject<'gc>, key: &str, prop: Property<'gc>) -> Result<(), Error> {
         self.define_key(o, Key::Str(key), prop)
     }
@@ -987,7 +999,7 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    /// 定义访问器的一半（另一半已有就保留）。
+    /// Define half of an accessor (the other half is kept if present).
     pub fn define_accessor(&mut self, o: JsObject<'gc>, key: &str, f: JsObject<'gc>, setter: bool, enumerable: bool) {
         self.define_accessor_key(o, Key::Str(key), f, setter, enumerable);
     }
@@ -1001,7 +1013,7 @@ impl<'gc> Agent<'gc, '_> {
         o.borrow_mut(self.mc).store(key, Property { slot: Slot::Accessor { get, set }, enumerable, writable: true, configurable: true });
     }
 
-    /// `key in target`（含原型链与数组下标）。
+    /// `key in target` (including the prototype chain and array indices).
     pub fn has_property(&mut self, target: Value<'gc>, key: &str) -> Result<bool, Error> {
         let Value::Object(o) = target else {
             let what = self.to_string(target)?;
@@ -1010,12 +1022,12 @@ impl<'gc> Agent<'gc, '_> {
         self.has_key(o, Key::Str(key))
     }
 
-    /// `delete target.key`：不可配置的删不掉。
+    /// `delete target.key`: non-configurable ones can't be deleted.
     pub fn delete(&mut self, target: Value<'gc>, key: &str) -> Result<bool, Error> {
         self.delete_key(target, Key::Str(key))
     }
 
-    /// CanBeHeldWeakly：对象，或者没在 `Symbol.for` 登记过的 Symbol。
+    /// CanBeHeldWeakly: an object, or a Symbol not registered with `Symbol.for`.
     pub fn can_be_held_weakly(&self, v: Value<'gc>) -> bool {
         match v {
             Value::Object(_) => true,
@@ -1024,7 +1036,7 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    /// 报错信息里的值：不调用户代码（ToString 可观察，报错不能用）。
+    /// A value in error messages: calls no user code (ToString is observable, so error reporting can't use it).
     pub fn describe(&self, v: Value<'gc>) -> String {
         match v {
             Value::Undefined | Value::Uninit => String::from("undefined"),
@@ -1050,7 +1062,7 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    /// `v instanceof f`：先看 `f[Symbol.hasInstance]`，再按 OrdinaryHasInstance。
+    /// `v instanceof f`: check `f[Symbol.hasInstance]` first, then OrdinaryHasInstance.
     pub fn instance_of(&mut self, v: Value<'gc>, f: Value<'gc>) -> Result<bool, Error> {
         if !matches!(f, Value::Object(_)) {
             let what = self.describe(f);
@@ -1067,7 +1079,8 @@ impl<'gc> Agent<'gc, '_> {
         self.ordinary_has_instance(f, v)
     }
 
-    /// OrdinaryHasInstance：绑定函数换成目标，再沿 `v` 的原型链找 `f.prototype`。
+    /// OrdinaryHasInstance: a bound function is replaced by its target, then search `v`'s prototype chain for
+    /// `f.prototype`.
     pub fn ordinary_has_instance(&mut self, f: Value<'gc>, v: Value<'gc>) -> Result<bool, Error> {
         if !self.is_callable(f) {
             return Ok(false);
@@ -1092,12 +1105,13 @@ impl<'gc> Agent<'gc, '_> {
         Ok(false)
     }
 
-    /// ToIntegerOrInfinity。
+    /// ToIntegerOrInfinity.
     pub fn to_integer_or_infinity(&mut self, v: Value<'gc>) -> Result<f64, Error> {
         let x = self.to_number(v)?;
-        /// 绝对值小于它的数转 i64 不会溢出（转回来就是截掉小数，-0 也成 +0）
+        /// Numbers with magnitude below this convert to i64 without overflow (converting back drops the fraction; -0
+        /// also becomes +0)
         const I64_SAFE: f64 = 9_223_372_036_854_775_808.0;
-        #[expect(clippy::cast_possible_truncation, clippy::cast_precision_loss, reason = "绝对值小于 2^63；截掉小数正是要的")]
+        #[expect(clippy::cast_possible_truncation, clippy::cast_precision_loss, reason = "magnitude below 2^63; dropping the fraction is intended")]
         Ok(if x.is_nan() {
             0.0
         } else if x.abs() < I64_SAFE {
@@ -1107,15 +1121,15 @@ impl<'gc> Agent<'gc, '_> {
         })
     }
 
-    /// ToLength：夹到 `[0, 2^53 − 1]`。
+    /// ToLength: clamp to `[0, 2^53 − 1]`.
     pub fn to_length(&mut self, v: Value<'gc>) -> Result<f64, Error> {
         let n = self.to_integer_or_infinity(v)?;
         Ok(n.clamp(0.0, MAX_SAFE_INTEGER))
     }
 
-    /// LengthOfArrayLike。
+    /// LengthOfArrayLike.
     pub fn length_of_array_like(&mut self, o: Value<'gc>) -> Result<f64, Error> {
-        // 真数组的 `length` 就是存着的长度（不可能是访问器）
+        // A real array's `length` is the stored length (it can't be an accessor)
         if let Value::Object(x) = o
             && let Some(n) = x.borrow().array_length()
         {
@@ -1125,12 +1139,12 @@ impl<'gc> Agent<'gc, '_> {
         self.to_length(len)
     }
 
-    /// 数下标 ⇒ 属性键文本。
+    /// Number index ⇒ property key text.
     pub fn index_key(i: f64) -> String {
         String::from(&*number_text(i))
     }
 
-    /// `o[i]`（数组稠密部分走快路）。
+    /// `o[i]` (fast path for the array dense part).
     pub fn get_index(&mut self, o: Value<'gc>, i: f64) -> Result<Value<'gc>, Error> {
         if let Value::Object(x) = o
             && matches!(x.borrow().kind, ObjectKind::TypedArray(..))
@@ -1146,7 +1160,7 @@ impl<'gc> Agent<'gc, '_> {
         self.get_named(o, &Self::index_key(i))
     }
 
-    /// `o[i] = v`，写不成抛 TypeError（Set(O, P, V, true)）。
+    /// `o[i] = v`; throws a TypeError if the write fails (Set(O, P, V, true)).
     pub fn set_index(&mut self, o: Value<'gc>, i: f64, v: Value<'gc>) -> Result<(), Error> {
         if let (Value::Object(x), Some(n)) = (o, index_of_number(i))
             && x.borrow_mut(self.mc).write_index(n, v)
@@ -1156,7 +1170,7 @@ impl<'gc> Agent<'gc, '_> {
         self.set_named(o, &Self::index_key(i), v)
     }
 
-    /// HasProperty(O, i)。
+    /// HasProperty(O, i).
     pub fn has_index(&mut self, o: JsObject<'gc>, i: f64) -> Result<bool, Error> {
         if let (ObjectKind::Array(items), Some(n)) = (&o.borrow().kind, index_of_number(i))
             && (n as usize) < items.len()
@@ -1166,7 +1180,8 @@ impl<'gc> Agent<'gc, '_> {
         self.has_key(o, Key::Str(&Self::index_key(i)))
     }
 
-    /// HasProperty(O, i) 为真就 Get(O, i)，否则 `None`（数组方法逐个元素访问）。真数组的稠密部分一次借用直接取。
+    /// If HasProperty(O, i) is true, Get(O, i), otherwise `None` (array methods accessing element by element). The
+    /// dense part of a real array is read directly in one borrow.
     pub fn present_index(&mut self, o: JsObject<'gc>, i: f64) -> Result<Option<Value<'gc>>, Error> {
         if let (ObjectKind::Array(items), Some(n)) = (&o.borrow().kind, index_of_number(i))
             && let Some(&v) = items.get(n as usize)
@@ -1176,7 +1191,7 @@ impl<'gc> Agent<'gc, '_> {
         if self.has_index(o, i)? { self.get_index(o.into(), i).map(Some) } else { Ok(None) }
     }
 
-    /// DeletePropertyOrThrow(O, i)。
+    /// DeletePropertyOrThrow(O, i).
     pub fn delete_index(&mut self, o: JsObject<'gc>, i: f64) -> Result<(), Error> {
         let k = Self::index_key(i);
         if self.delete_property(o, Key::Str(&k))? {
@@ -1186,12 +1201,14 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    /// CreateDataPropertyOrThrow(O, i, v)。
+    /// CreateDataPropertyOrThrow(O, i, v).
     pub fn create_index(&mut self, o: JsObject<'gc>, i: f64, v: Value<'gc>) -> Result<(), Error> {
-        // 快路：真数组的稠密部分里改值，或正好接在稠密末尾（可扩展、length 可写、后面没有稀疏元素）追加
+        // Fast path: update a value in a real array's dense part, or append right at the dense end (extensible, length
+        // writable, no sparse elements after it)
         if let Some(n) = index_of_number(i) {
             let mut d = o.borrow_mut(self.mc);
-            // 稀疏部分要么在 n 之前结束，要么根本没有元素（从没有过数字键：只是撑起来的长度，如 `new Array(len)`）
+            // The sparse part either ends before n or has no elements at all (never had a numeric key: just an extended
+            // length, as in `new Array(len)`)
             let append = !d.non_extensible && !d.length_readonly && (d.sparse_length <= n || !d.digit_keys);
             if let ObjectKind::Array(items) = &mut d.kind {
                 let at = n as usize;
@@ -1208,7 +1225,7 @@ impl<'gc> Agent<'gc, '_> {
         self.create_data_property_or_throw(o, Key::Str(&Self::index_key(i)), v)
     }
 
-    /// IsArray。
+    /// IsArray.
     pub fn is_array(&mut self, v: Value<'gc>) -> Result<bool, Error> {
         let Value::Object(o) = v else { return Ok(false) };
         if let Some(parts) = self.proxy_parts(o) {
@@ -1218,7 +1235,7 @@ impl<'gc> Agent<'gc, '_> {
         Ok(matches!(o.borrow().kind, ObjectKind::Array(_)))
     }
 
-    /// CreateListFromArrayLike。
+    /// CreateListFromArrayLike.
     pub fn list_from_array_like(&mut self, v: Value<'gc>) -> Result<Vec<Value<'gc>>, Error> {
         if !matches!(v, Value::Object(_)) {
             return Err(self.throw(ErrorKind::Type, "CreateListFromArrayLike called on non-object"));
@@ -1233,7 +1250,7 @@ impl<'gc> Agent<'gc, '_> {
         Ok(out)
     }
 
-    /// GetIterator：调 `v[Symbol.iterator]()`，取它的 `next`。
+    /// GetIterator: call `v[Symbol.iterator]()` and take its `next`.
     pub fn get_iterator(&mut self, v: Value<'gc>) -> Result<IterRecord<'gc>, Error> {
         let method = if v.is_nullish() { Value::Undefined } else { self.get_symbol(v, self.realm.symbols.iterator, v)? };
         if !self.is_callable(method) {
@@ -1251,13 +1268,14 @@ impl<'gc> Agent<'gc, '_> {
         Ok(IterRecord { iterator, next })
     }
 
-    /// 数组迭代器走一步（每次重读 `length`，迭代中改数组看得见）：完了给 `None` 并记成走完。
+    /// Advance an array iterator one step (rereads `length` each time, so changes to the array during iteration are
+    /// visible): returns `None` when done and marks it done.
     pub fn array_iter_step(&mut self, o: JsObject<'gc>) -> Result<Option<Value<'gc>>, Error> {
         let ObjectKind::Iterator(IteratorState::Array { target, index, kind }) = o.borrow().kind else {
             return Err(self.throw(ErrorKind::Type, "next method called on an incompatible receiver"));
         };
         let Some(target) = target else { return Ok(None) };
-        // 稠密数组的长度直接取（与读 `length` 一样，没有可观察的步骤）
+        // Take a dense array's length directly (same as reading `length`, with no observable steps)
         let len = match target {
             Value::Object(t) => match &t.borrow().kind {
                 ObjectKind::Array(items) if t.borrow().sparse_length == 0 => Some(items.len()),
@@ -1266,7 +1284,7 @@ impl<'gc> Agent<'gc, '_> {
             _ => None,
         };
         let len = match len {
-            #[expect(clippy::cast_precision_loss, reason = "元素个数远小于 2^53")]
+            #[expect(clippy::cast_precision_loss, reason = "the element count is far below 2^53")]
             Some(n) => n as f64,
             None => {
                 let l = self.get_named(target, "length")?;
@@ -1274,7 +1292,7 @@ impl<'gc> Agent<'gc, '_> {
             }
         };
         let i = f64::from(u32::try_from(index).unwrap_or(u32::MAX));
-        // len 是 NaN 时也算走完
+        // A NaN len also counts as done
         let finished = i.partial_cmp(&len) != Some(core::cmp::Ordering::Less);
         if let ObjectKind::Iterator(IteratorState::Array { target, index, .. }) = &mut o.borrow_mut(self.mc).kind {
             if finished {
@@ -1296,7 +1314,7 @@ impl<'gc> Agent<'gc, '_> {
         }))
     }
 
-    /// 字符串迭代器走一步（一个码点）：完了给 `None`。
+    /// Advance a string iterator one step (one code point): returns `None` when done.
     pub fn string_iter_step(&mut self, o: JsObject<'gc>) -> Result<Option<Value<'gc>>, Error> {
         let ObjectKind::Iterator(IteratorState::String { s, pos }) = o.borrow().kind else {
             return Err(self.throw(ErrorKind::Type, "next method called on an incompatible receiver"));
@@ -1308,9 +1326,10 @@ impl<'gc> Agent<'gc, '_> {
         Ok(Some(if c.is_ascii() { self.unit_string(u16::from(c as u8)) } else { self.string(c.encode_utf8(&mut [0; 4])) }.into()))
     }
 
-    /// 走一步：完了给 `None`。
+    /// Advance one step: returns `None` when done.
     pub fn iterator_step(&mut self, it: IterRecord<'gc>) -> Result<Option<Value<'gc>>, Error> {
-        // `next` 就是内建的数组 / 字符串迭代器 `next`：它建的结果对象读不出别的，直接走一步
+        // `next` is the built-in array / string iterator `next`: the result object it builds can't be observed
+        // otherwise, so step directly
         if let (Value::Object(n), Value::Object(o)) = (it.next, it.iterator) {
             let [array, string] = *self.realm.builtin_nexts.borrow();
             let (is_array, is_string) = match &o.borrow().kind {
@@ -1332,7 +1351,7 @@ impl<'gc> Agent<'gc, '_> {
         if self.to_boolean(done) { Ok(None) } else { Ok(Some(self.get_named(r, "value")?)) }
     }
 
-    /// 提前结束迭代：有 `return` 就调它。
+    /// Close an iterator early: call `return` if there is one.
     pub fn iterator_close(&mut self, iterator: Value<'gc>) -> Result<(), Error> {
         let ret = self.get_named(iterator, "return")?;
         if ret.is_nullish() {
@@ -1345,7 +1364,7 @@ impl<'gc> Agent<'gc, '_> {
         Ok(())
     }
 
-    /// 迭代结果对象 `{ value, done }`。
+    /// An iterator result object `{ value, done }`.
     pub fn iter_result(&self, value: Value<'gc>, done: bool) -> JsObject<'gc> {
         let o = self.object();
         let mut d = o.borrow_mut(self.mc);
@@ -1355,7 +1374,7 @@ impl<'gc> Agent<'gc, '_> {
         o
     }
 
-    /// 内建迭代器对象（数组 / 字符串）。
+    /// A built-in iterator object (array / string).
     pub fn builtin_iterator(&self, state: IteratorState<'gc>) -> JsObject<'gc> {
         let proto = match state {
             IteratorState::Array { .. } => self.realm.array_iterator_proto,
@@ -1364,12 +1383,12 @@ impl<'gc> Agent<'gc, '_> {
         ObjectData { kind: ObjectKind::Iterator(state), proto: Some(proto), ..ObjectData::default() }.alloc(self.mc)
     }
 
-    /// 数组迭代器（`values` / `keys` / `entries`）。
+    /// An array iterator (`values` / `keys` / `entries`).
     pub fn array_iterator(&self, target: Value<'gc>, kind: IterKind) -> JsObject<'gc> {
         self.builtin_iterator(IteratorState::Array { target: Some(target), index: 0, kind })
     }
 
-    /// 展开 / 剩余元素：把可迭代对象走完。
+    /// Spread / rest elements: run the iterable to completion.
     pub fn to_list(&mut self, v: Value<'gc>) -> Result<Vec<Value<'gc>>, Error> {
         let it = self.get_iterator(v)?;
         let mut out = Vec::new();
@@ -1379,7 +1398,8 @@ impl<'gc> Agent<'gc, '_> {
         Ok(out)
     }
 
-    /// 对象展开 / 剩余（CopyDataProperties）：把 `src` 的自有可枚举属性定义到 `target` 上，跳过 `exclude` 里的键。
+    /// Object spread / rest (CopyDataProperties): define `src`'s own enumerable properties on `target`, skipping keys
+    /// in `exclude`.
     pub fn copy_data(&mut self, target: JsObject<'gc>, src: Value<'gc>, exclude: &[JsString<'gc>]) -> Result<(), Error> {
         if src.is_nullish() {
             return Ok(());
@@ -1400,7 +1420,8 @@ impl<'gc> Agent<'gc, '_> {
         Ok(())
     }
 
-    /// `for-in` 要走的键：自有在前、再沿原型链，可枚举的字符串键，去重（被不可枚举属性遮住的也不出）。
+    /// The keys `for-in` walks: own first, then along the prototype chain; enumerable string keys, deduplicated (those
+    /// shadowed by non-enumerable properties don't appear either).
     pub fn for_in_keys(&mut self, v: Value<'gc>) -> Result<Vec<Value<'gc>>, Error> {
         let mut seen: Vec<JsString<'gc>> = Vec::new();
         let mut out = Vec::new();
@@ -1424,7 +1445,8 @@ impl<'gc> Agent<'gc, '_> {
         Ok(out)
     }
 
-    /// 构造调用要建的 `this`：原型取 `new_target.prototype`，不是对象就用 `Object.prototype`。
+    /// The `this` a construct call creates: prototype taken from `new_target.prototype`, or `Object.prototype` if that
+    /// isn't an object.
     pub fn create_this(&mut self, new_target: Value<'gc>) -> Result<JsObject<'gc>, Error> {
         let proto = match self.get_named(new_target, "prototype")? {
             Value::Object(p) => p,

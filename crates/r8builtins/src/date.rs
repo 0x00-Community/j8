@@ -5,27 +5,27 @@ use r8framework::{Agent, Error, ErrorKind, Hint, JsObject, ObjectKind, Property,
 
 use crate::{Args, Installer};
 
-/// `Date`：时间值是毫秒数，本地时区按 UTC（LocalTZA = 0）。
+/// `Date`: time values are milliseconds; the local time zone is UTC (LocalTZA = 0).
 struct Dates;
 
 const MS_PER_SECOND: f64 = 1000.0;
 const MS_PER_MINUTE: f64 = 60_000.0;
 const MS_PER_HOUR: f64 = 3_600_000.0;
 const MS_PER_DAY: f64 = 86_400_000.0;
-/// TimeClip 的范围：±1 亿天
+/// Range of TimeClip: ±100 million days
 const MAX_TIME: f64 = 8.64e15;
-/// 年份超过这么大就不可能落在 TimeClip 的范围里
+/// A year larger than this cannot fall within the TimeClip range
 const MAX_YEAR: f64 = 400_000.0;
-/// 平均一年的天数（格里历 400 年周期）
+/// Average number of days per year (Gregorian 400-year cycle)
 const DAYS_PER_YEAR: f64 = 365.2425;
-/// 每月第一天在平年里是第几天
+/// Day of a common year on which each month starts
 const MONTH_START: [f64; 13] = [0.0, 31.0, 59.0, 90.0, 120.0, 151.0, 181.0, 212.0, 243.0, 273.0, 304.0, 334.0, 365.0];
 const WEEKDAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-/// toString 里的时区
+/// Time zone shown by toString
 const TIME_ZONE: &str = "GMT+0000 (Coordinated Universal Time)";
 
-/// 时间值里取哪一个字段。
+/// Which field to extract from a time value.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Field {
     Year,
@@ -38,7 +38,7 @@ enum Field {
     Milliseconds,
 }
 
-/// setter 改哪一组字段：起始字段与最多几个实参。
+/// Which group of fields a setter changes: the first field and the maximum number of arguments.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Setter {
     Milliseconds,
@@ -50,7 +50,7 @@ enum Setter {
     FullYear,
 }
 
-/// 正模。
+/// Non-negative modulo.
 fn modulo(a: f64, b: f64) -> f64 {
     let r = a % b;
     if r < 0.0 { r + b } else { r + 0.0 }
@@ -92,7 +92,7 @@ impl Dates {
         if Self::days_in_year(y) == 366.0 { 1.0 } else { 0.0 }
     }
 
-    /// 月份第一天（年内第几天，闰年二月之后加一）。
+    /// First day of a month (day within the year, plus one after February in leap years).
     fn month_start(m: usize, y: f64) -> f64 {
         MONTH_START[m] + if m >= 2 { Self::leap(y) } else { 0.0 }
     }
@@ -101,7 +101,7 @@ impl Dates {
         let y = Self::year_from_time(t);
         let d = Self::day(t) - Self::day_from_year(y);
         let m = (0..12).rev().find(|&m| d >= Self::month_start(m, y)).unwrap_or(0);
-        #[expect(clippy::cast_precision_loss, reason = "月份小于 12")]
+        #[expect(clippy::cast_precision_loss, reason = "month is less than 12")]
         let mf = m as f64;
         (mf, d - Self::month_start(m, y) + 1.0)
     }
@@ -135,7 +135,7 @@ impl Dates {
         if ym.abs() > MAX_YEAR {
             return f64::NAN;
         }
-        #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "已取模到 [0, 12)")]
+        #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "reduced modulo to [0, 12)")]
         let mn = modulo(m, 12.0) as usize;
         Self::day_from_year(ym) + Self::month_start(mn, ym) + dt - 1.0
     }
@@ -152,7 +152,7 @@ impl Dates {
         if !t.is_finite() || t.abs() > MAX_TIME { f64::NAN } else { libm::trunc(t) + 0.0 }
     }
 
-    /// 两位数的年份是 1900 年代。
+    /// Two-digit years are in the 1900s.
     fn full_year(y: f64) -> f64 {
         if y.is_nan() {
             return y;
@@ -163,7 +163,7 @@ impl Dates {
 
     fn now(a: &Agent<'_, '_>) -> f64 {
         let d = a.platform.wall_clock();
-        #[expect(clippy::cast_precision_loss, reason = "毫秒数远小于 2^53")]
+        #[expect(clippy::cast_precision_loss, reason = "millisecond count is far below 2^53")]
         let ms = d.as_millis() as f64;
         ms
     }
@@ -178,21 +178,21 @@ impl Dates {
         }
     }
 
-    // ---- 格式化 ----
+    // ---- Formatting ----
 
     fn year_text(y: f64) -> String {
-        #[expect(clippy::cast_possible_truncation, reason = "年份在 ±275760 里")]
+        #[expect(clippy::cast_possible_truncation, reason = "year is within ±275760")]
         let yi = y as i64;
         if yi >= 0 { format!("{yi:04}") } else { format!("-{:04}", -yi) }
     }
 
     fn int(x: f64) -> i64 {
-        #[expect(clippy::cast_possible_truncation, reason = "日期字段都是小整数")]
+        #[expect(clippy::cast_possible_truncation, reason = "date fields are all small integers")]
         let i = x as i64;
         i
     }
 
-    /// 星期 / 月份表的下标。
+    /// Index into the weekday / month tables.
     fn slot(x: f64) -> usize {
         usize::try_from(Self::int(x)).unwrap_or(0)
     }
@@ -249,9 +249,9 @@ impl Dates {
         )
     }
 
-    // ---- 解析 ----
+    // ---- Parsing ----
 
-    /// 解析 ISO 格式、toString / toUTCString 的输出；不认得给 NaN。
+    /// Parse ISO format and the output of toString / toUTCString; anything unrecognized gives NaN.
     fn parse(s: &str) -> f64 {
         Self::parse_iso(s).or_else(|| Self::parse_text(s)).map_or(f64::NAN, Self::time_clip)
     }
@@ -295,7 +295,7 @@ impl Dates {
         if !(1.0..=12.0).contains(&month) {
             return None;
         }
-        #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "已检查在 [1, 12]")]
+        #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "checked to be in [1, 12]")]
         let mi = month as usize - 1;
         let days = Self::month_start(mi + 1, year) - Self::month_start(mi, year);
         if !(1.0..=days).contains(&day) {
@@ -346,7 +346,7 @@ impl Dates {
                     }
                     offset = (oh * 60.0 + om) * MS_PER_MINUTE * if neg { -1.0 } else { 1.0 };
                 }
-                // 没写时区的日期时间是本地时间（这里本地就是 UTC）
+                // A date-time without a time zone is local time (which is UTC here)
                 _ => {}
             }
             if i != b.len() {
@@ -360,7 +360,7 @@ impl Dates {
         Some(t - offset)
     }
 
-    /// `Tue Feb 01 2022 00:00:00 GMT+0000 (…)` 与 `Tue, 01 Feb 2022 00:00:00 GMT`。
+    /// `Tue Feb 01 2022 00:00:00 GMT+0000 (…)` and `Tue, 01 Feb 2022 00:00:00 GMT`.
     fn parse_text(s: &str) -> Option<f64> {
         let s = s.split('(').next()?.trim();
         let words: alloc::vec::Vec<&str> = s.split(|c: char| c.is_whitespace() || c == ',').filter(|w| !w.is_empty()).collect();
@@ -370,7 +370,7 @@ impl Dates {
         let mut offset = 0.0;
         for w in words {
             if let Some(m) = MONTHS.iter().position(|m| w.len() >= 3 && m.eq_ignore_ascii_case(&w[..3])) {
-                #[expect(clippy::cast_precision_loss, reason = "月份小于 12")]
+                #[expect(clippy::cast_precision_loss, reason = "month is less than 12")]
                 let mf = m as f64;
                 month = Some(mf);
             } else if WEEKDAYS.iter().any(|d| w.len() >= 3 && d.eq_ignore_ascii_case(&w[..3])) {
@@ -394,14 +394,14 @@ impl Dates {
         }
         let month = month?;
         let [a, b] = nums[..] else { return None };
-        // 「日 年」或「年 日」都有可能：大于 31 的是年
+        // Either "day year" or "year day" is possible: the one greater than 31 is the year
         let (day, year) = if a > 31.0 { (b, a) } else { (a, b) };
         let t = time.unwrap_or_default();
         let (h, m, sec) = (t.first().copied().unwrap_or(0.0), t.get(1).copied().unwrap_or(0.0), t.get(2).copied().unwrap_or(0.0));
         Some(Self::make_date(Self::make_day(year, month, day), Self::make_time(h, m, sec, 0.0)) - offset)
     }
 
-    // ---- 构造与静态方法 ----
+    // ---- Constructor and static methods ----
 
     fn date<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         if a.new_target == Value::Undefined {
@@ -431,7 +431,7 @@ impl Dates {
         Ok(a.create_from_ctor(a.realm.date_proto, ObjectKind::Date(tv))?.into())
     }
 
-    /// 年、月、日、时、分、秒、毫秒（后面的可缺）⇒ 时间值。
+    /// Year, month, day, hours, minutes, seconds, milliseconds (trailing ones may be omitted) ⇒ time value.
     fn from_parts<'gc>(a: &mut Agent<'gc, '_>, args: &[Value<'gc>]) -> Result<f64, Error> {
         let defaults = [f64::NAN, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0];
         let mut n = defaults;
@@ -465,7 +465,7 @@ impl Dates {
         Ok(Self::time_clip(Self::make_date(Self::make_day(y, n[1], n[2]), Self::make_time(n[3], n[4], n[5], n[6]))).into())
     }
 
-    // ---- 原型方法 ----
+    // ---- Prototype methods ----
 
     fn get<'gc, const F: u8>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let (_, t) = Self::this_time(a, this)?;
@@ -502,7 +502,7 @@ impl Dates {
         Ok(Self::store(a, o, t))
     }
 
-    /// setMilliseconds / setSeconds / … / setFullYear（本地与 UTC 一样）。
+    /// setMilliseconds / setSeconds / … / setFullYear (local and UTC are the same).
     fn set<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>], which: Setter) -> Result<Value<'gc>, Error> {
         let (o, t) = Self::this_time(a, this)?;
         let count = match which {
@@ -602,7 +602,7 @@ impl Dates {
         Ok(Self::this_time(a, this)?.1.into())
     }
 
-    /// `Date.prototype[Symbol.toPrimitive](hint)`。
+    /// `Date.prototype[Symbol.toPrimitive](hint)`.
     fn to_primitive<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         if !matches!(this, Value::Object(_)) {
             return Err(a.throw(ErrorKind::Type, "Date.prototype[Symbol.toPrimitive] called on a non-object"));
@@ -625,7 +625,7 @@ impl Dates {
     }
 }
 
-/// setter 一族：一个宿主函数对应一种 [`Setter`]。
+/// The setter family: each host function corresponds to one [`Setter`].
 macro_rules! setters {
     ($($name:ident => $which:ident),* $(,)?) => {
         impl Dates {
@@ -701,7 +701,7 @@ impl Installer<'_, '_> {
         for (name, f, n) in methods {
             self.method(proto, name, f, n);
         }
-        // toGMTString 与 toUTCString 是同一个函数
+        // toGMTString is the same function as toUTCString
         let utc = proto.borrow().own("toUTCString").unwrap_or_default();
         self.set(proto, "toGMTString", utc);
         let tp = r.named_native(self.mc, Dates::to_primitive, "[Symbol.toPrimitive]", 1);

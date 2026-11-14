@@ -1,6 +1,6 @@
-//! r8builtins：[`Intrinsics`] 的实现，往新建的 [`Realm`] 里装内建对象（`no_std`）。
+//! r8builtins: implementation of [`Intrinsics`]; installs the built-in objects into a new [`Realm`] (`no_std`).
 #![no_std]
-#![expect(clippy::unnecessary_wraps, reason = "宿主函数的签名统一是 NativeFn，不能因为某个不会失败就去掉 Result")]
+#![expect(clippy::unnecessary_wraps, reason = "host functions all share the NativeFn signature; Result can't be dropped just because one cannot fail")]
 extern crate alloc;
 
 mod array;
@@ -28,7 +28,7 @@ mod weak;
 use r8gc::Mutation;
 use r8framework::{Intrinsics, JsObject, Realm, Value};
 
-/// 缺省的内建对象集合。
+/// The default set of built-in objects.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Builtins;
 
@@ -62,37 +62,38 @@ impl Intrinsics for Builtins {
     }
 }
 
-/// 装内建对象时的上下文。
+/// Context for installing built-in objects.
 struct Installer<'r, 'gc> {
     mc: &'r Mutation<'gc>,
     realm: &'r Realm<'gc>,
 }
 
 impl<'gc> Installer<'_, 'gc> {
-    /// 内建属性：不可枚举。
+    /// Built-in property: non-enumerable.
     fn set(&self, target: JsObject<'gc>, name: &str, v: Value<'gc>) {
         target.borrow_mut(self.mc).define(name, r8framework::Property::hidden(v));
     }
 
-    /// 宿主方法，`length` 是 `n`。
+    /// Host method whose `length` is `n`.
     fn method(&self, target: JsObject<'gc>, name: &str, f: r8framework::NativeFn, n: u32) {
         self.realm.method(self.mc, target, name, f, n);
     }
 
-    /// 全局对象上的一个构造器（`length` 是 `n`）：宿主函数，`prototype` ⇄ `constructor` 互指。
+    /// A constructor on the global object (`length` is `n`): a host function, with `prototype` ⇄ `constructor` pointing
+    /// at each other.
     fn constructor(&self, name: &str, f: r8framework::NativeFn, proto: JsObject<'gc>, n: u32) -> JsObject<'gc> {
         let ctor = self.realm.named_native(self.mc, f, name, n);
         if let r8framework::ObjectKind::Native(native) = &mut ctor.borrow_mut(self.mc).kind {
             native.constructor = true;
         }
-        // 内建构造器的 prototype：不可写、不可枚举、不可配置
+        // prototype of a built-in constructor: non-writable, non-enumerable, non-configurable
         ctor.borrow_mut(self.mc).define("prototype", r8framework::Property { slot: r8framework::Slot::Data(proto.into()), enumerable: false, writable: false, configurable: false });
         self.set(proto, "constructor", ctor.into());
         self.set(self.realm.global, name, ctor.into());
         ctor
     }
 
-    /// 各原型的 `[Symbol.toStringTag]`（不可写、不可枚举、可配置）。
+    /// `[Symbol.toStringTag]` of each prototype (non-writable, non-enumerable, configurable).
     fn tags(&self) {
         let r = self.realm;
         let global = |name: &str| r.global.borrow().own(name).and_then(|v| if let Value::Object(o) = v { Some(o) } else { None });
@@ -127,31 +128,31 @@ impl<'gc> Installer<'_, 'gc> {
         }
     }
 
-    /// Symbol / BigInt：挂成构造器的样子，但不能 `new`。
+    /// Symbol / BigInt: installed like constructors, but cannot be `new`ed.
     fn not_constructor(&self, f: JsObject<'gc>) {
         if let r8framework::ObjectKind::Native(native) = &mut f.borrow_mut(self.mc).kind {
             native.constructor = false;
         }
     }
 
-    /// 宿主 getter（不可枚举）。
+    /// Host getter (non-enumerable).
     fn getter(&self, target: JsObject<'gc>, name: &str, f: r8framework::NativeFn) {
         let g = self.realm.named_native(self.mc, f, &alloc::format!("get {name}"), 0);
         target.borrow_mut(self.mc).define(name, r8framework::Property { slot: r8framework::Slot::Accessor { get: Some(g), set: None }, enumerable: false, writable: false, configurable: true });
     }
 
-    /// 堆上的字符串值。
+    /// A string value on the heap.
     fn text(&self, s: &str) -> Value<'gc> {
         Value::String(r8gc::Gc::new(self.mc, r8framework::JsStr::from(s)))
     }
 
-    /// 一个普通对象（原型 `Object.prototype`）。
+    /// A plain object (prototype `Object.prototype`).
     fn plain(&self) -> JsObject<'gc> {
         r8framework::ObjectData { proto: Some(self.realm.object_proto), ..r8framework::ObjectData::default() }.alloc(self.mc)
     }
 }
 
-/// 取实参，缺了就是 `undefined`。
+/// Get an argument; `undefined` if missing.
 trait Args<'gc> {
     fn at(&self, i: usize) -> Value<'gc>;
 }

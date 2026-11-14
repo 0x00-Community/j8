@@ -1,6 +1,6 @@
 [package]
 name = "r8jit"
-description = "r8 JIT：挑热点函数交给 r8compiler、装载机器码、替换解释执行（快路不成立就退回解释器）"
+description = "r8 JIT: picks hot functions for r8compiler, loads the machine code and replaces interpretation (falls back to the interpreter when a fast path doesn't hold)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

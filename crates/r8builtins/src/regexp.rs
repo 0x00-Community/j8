@@ -10,33 +10,34 @@ use crate::buffer::Buffers;
 use crate::string::Strings;
 use crate::{Args, Installer};
 
-/// 合法的正则 flags
+/// Valid regex flags
 const FLAGS: &str = "dgimsuvy";
 
-/// 交给正则引擎的 flags（其余是 JS 层的：`g` / `y` / `d`）
+/// Flags passed to the regex engine (the rest are handled at the JS level: `g` / `y` / `d`)
 const ENGINE_FLAGS: &str = "imsuv";
 
-/// `flags` getter 读的属性，按规范顺序。
+/// Properties read by the `flags` getter, in spec order.
 const FLAG_PROPERTIES: [(char, &str); 8] = [('d', "hasIndices"), ('g', "global"), ('i', "ignoreCase"), ('m', "multiline"), ('s', "dotAll"), ('u', "unicode"), ('v', "unicodeSets"), ('y', "sticky")];
 
-/// 2^32 − 1：`split` 缺省的上限
+/// 2^32 − 1: default limit of `split`
 const MAX_SPLIT: f64 = 4_294_967_295.0;
 
-/// 一次匹配：整体与各分组的 UTF-16 下标范围、具名分组。
+/// One match: UTF-16 index ranges of the whole match and of each group, plus named groups.
 struct Found {
     range: core::ops::Range<usize>,
     groups: Vec<Option<core::ops::Range<usize>>>,
     named: Vec<(String, Option<core::ops::Range<usize>>)>,
 }
 
-/// 编好的正则：引擎的正则，加上「整个模式就是一段字面量」时的那段字（直接按子串找，不走回溯引擎）。
+/// Compiled regex: the engine's regex, plus the literal text when the whole pattern is a single literal (searched as a
+/// plain substring, bypassing the backtracking engine).
 struct Compiled {
     regex: regress::Regex,
     atom: Option<Box<str>>,
 }
 
 impl Compiled {
-    /// 模式里的语法字符：一个都没有（且不忽略大小写）就是字面量
+    /// Syntax characters in a pattern: if there are none (and case is not ignored), the pattern is a literal
     const SYNTAX: &'static str = "\\^$.|?*+()[]{}/";
 
     fn new(regex: regress::Regex, source: &str, flags: &str) -> Self {
@@ -45,11 +46,11 @@ impl Compiled {
     }
 }
 
-/// `RegExp` 与正则相关的字符串方法。下标都按 UTF-16 码元算。
+/// `RegExp` and the regex-related string methods. All indices are in UTF-16 code units.
 pub(crate) struct Regexps;
 
 impl Regexps {
-    /// 编译：flags 先查合法再挑出引擎要的那几个。
+    /// Compile: validate the flags first, then pick out the ones the engine needs.
     fn compile(a: &Agent<'_, '_>, source: &str, flags: &str) -> Result<regress::Regex, Error> {
         let bad = flags.chars().enumerate().any(|(i, c)| !FLAGS.contains(c) || flags[..i].contains(c)) || (flags.contains('u') && flags.contains('v'));
         if bad {
@@ -59,9 +60,10 @@ impl Regexps {
         regress::Regex::with_flags(source, engine.as_str()).map_err(|e| a.throw(ErrorKind::Syntax, &alloc::format!("Invalid regular expression: /{source}/{flags}: {e}")))
     }
 
-    /// 编好的正则：先查 realm 上的缓存（同样的源码与标志共享一份），没有再编并记下。
+    /// Compiled regex: look up the realm's cache first (identical source and flags share one copy); otherwise compile
+    /// it and record it.
     fn compiled<'gc>(a: &Agent<'gc, '_>, source: &str, flags: &str) -> Result<Gc<'gc, Static<Box<dyn core::any::Any>>>, Error> {
-        /// 缓存最多记这么多份
+        /// Maximum number of entries in the cache
         const CACHE_SIZE: usize = 64;
         let cache = a.realm.regexp_cache;
         let hit = cache.borrow().iter().position(|c| *c.source == *source && *c.flags == *flags);
@@ -82,7 +84,7 @@ impl Regexps {
         Ok(compiled)
     }
 
-    /// IsRegExp：看 `Symbol.match`，没有就看是不是正则对象。
+    /// IsRegExp: check `Symbol.match`; if absent, check whether it is a RegExp object.
     pub(crate) fn is_regexp<'gc>(a: &mut Agent<'gc, '_>, v: Value<'gc>) -> Result<bool, Error> {
         if !matches!(v, Value::Object(_)) {
             return Ok(false);
@@ -98,7 +100,7 @@ impl Regexps {
         matches!(v, Value::Object(f) if matches!(f.borrow().kind, ObjectKind::Native(n) if core::ptr::fn_addr_eq(n.f, Self::construct as r8framework::NativeFn)))
     }
 
-    /// RegExpInitialize：编好装进 `o`，`lastIndex` 置 0。
+    /// RegExpInitialize: compile and install into `o`, setting `lastIndex` to 0.
     fn initialize<'gc>(a: &mut Agent<'gc, '_>, o: JsObject<'gc>, pattern: Value<'gc>, flags: Value<'gc>) -> Result<(), Error> {
         let source = if pattern == Value::Undefined { a.string("") } else { a.to_string(pattern)? };
         let flags = if flags == Value::Undefined { a.string("") } else { a.to_string(flags)? };
@@ -108,10 +110,11 @@ impl Regexps {
         a.set_named(o.into(), "lastIndex", 0.0.into())
     }
 
-    /// RegExpAlloc：原型取 new.target 的，`lastIndex` 可写不可枚举不可配置。
+    /// RegExpAlloc: prototype taken from new.target; `lastIndex` is writable, non-enumerable, non-configurable.
     fn alloc<'gc>(a: &mut Agent<'gc, '_>, new_target: Value<'gc>) -> Result<JsObject<'gc>, Error> {
         let proto = a.proto_from_ctor(new_target, a.realm.regexp_proto)?;
-        // 先放一个空正则占位，记下能不能用 annexB 的 `compile`（子类实例不能）
+        // Start with an empty regex as a placeholder, and record whether Annex B `compile` may be used (not on subclass
+        // instances)
         let legacy = new_target == Value::Undefined || Self::is_regexp_ctor(new_target);
         let empty = a.string("");
         let compiled = Self::compiled(a, "", "")?;
@@ -121,18 +124,19 @@ impl Regexps {
         Ok(o)
     }
 
-    /// RegExpCreate(P, F)。
+    /// RegExpCreate(P, F).
     fn create<'gc>(a: &mut Agent<'gc, '_>, pattern: Value<'gc>, flags: Value<'gc>) -> Result<JsObject<'gc>, Error> {
         let o = Self::alloc(a, Value::Undefined)?;
         Self::initialize(a, o, pattern, flags)?;
         Ok(o)
     }
 
-    /// `RegExp(pattern, flags)` / `new RegExp(…)`。
+    /// `RegExp(pattern, flags)` / `new RegExp(…)`.
     fn construct<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let (pattern, flags) = (args.at(0), args.at(1));
-        // 快路：普通调用、源码与标志都是字符串（正则字面量就这样建）。RegExpAlloc + RegExpInitialize 合成一步：
-        // 原型就是本 realm 的 `RegExp.prototype`，编好再建对象，`lastIndex` 直接定义成 0（新对象上的 Set 观察不到区别）
+        // Fast path: plain call, source and flags both strings (this is how regex literals are created). RegExpAlloc +
+        // RegExpInitialize merged into one step: the prototype is this realm's `RegExp.prototype`; compile first, then
+        // create the object, and define `lastIndex` directly as 0 (a Set on a fresh object is indistinguishable)
         if a.new_target == Value::Undefined
             && let (Value::String(source), Value::String(flags)) = (pattern, flags)
         {
@@ -168,7 +172,7 @@ impl Regexps {
         Ok(o.into())
     }
 
-    /// `RegExp.prototype.compile(pattern, flags)`（annexB）。
+    /// `RegExp.prototype.compile(pattern, flags)` (annexB).
     fn compile_method<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let o = Self::this(a, this)?;
         if !matches!(&o.borrow().kind, ObjectKind::RegExp(d) if d.legacy) {
@@ -188,7 +192,7 @@ impl Regexps {
         Ok(o.into())
     }
 
-    /// 是正则对象就给出来。
+    /// Returns it if it is a RegExp object.
     fn regexp(v: Value<'_>) -> Option<JsObject<'_>> {
         match v {
             Value::Object(o) if matches!(o.borrow().kind, ObjectKind::RegExp(_)) => Some(o),
@@ -212,7 +216,7 @@ impl Regexps {
         (d.source, d.flags, d.compiled)
     }
 
-    /// 从 `start` 起找第一个匹配（`u` / `v` 按码点，否则按码元）。
+    /// Find the first match starting at `start` (by code point with `u` / `v`, otherwise by code unit).
     fn find(o: JsObject<'_>, units: &[u16], start: usize) -> Option<Found> {
         let (_, flags, compiled) = Self::data(o);
         let re = &compiled.0.downcast_ref::<Compiled>().expect("a compiled regex").regex;
@@ -221,7 +225,8 @@ impl Regexps {
         Some(Found { range: m.range(), groups: m.captures, named })
     }
 
-    /// 全 ASCII 的串直接按 UTF-8 匹配（字节下标就是码元下标），省掉整串转 UTF-16。
+    /// All-ASCII strings are matched directly as UTF-8 (byte index = code unit index), skipping the conversion of the
+    /// whole string to UTF-16.
     fn find_ascii(o: JsObject<'_>, s: &str, start: usize) -> Option<Found> {
         let (_, _, compiled) = Self::data(o);
         let c = compiled.0.downcast_ref::<Compiled>().expect("a compiled regex");
@@ -246,17 +251,17 @@ impl Regexps {
         r.map_or(Value::Undefined, |r| a.array(alloc::vec![Self::index(r.start), Self::index(r.end)]).into())
     }
 
-    /// RegExpBuiltinExec。
+    /// RegExpBuiltinExec.
     fn builtin_exec<'gc>(a: &mut Agent<'gc, '_>, o: JsObject<'gc>, s: JsString<'gc>) -> Result<Value<'gc>, Error> {
         let li = a.get_named(o.into(), "lastIndex")?;
         let last = a.to_length(li)?;
         let flags = Self::data(o).1;
         let (global, sticky, indices) = (flags.contains('g'), flags.contains('y'), flags.contains('d'));
-        // 全 ASCII：不转 UTF-16，按 UTF-8 匹配、按字节切
+        // All ASCII: no UTF-16 conversion; match as UTF-8 and slice by byte
         let ascii = s.is_ascii();
         let units: Vec<u16> = if ascii { Vec::new() } else { s.encode_utf16().collect() };
         let text = |a: &Agent<'gc, '_>, r: Option<core::ops::Range<usize>>| if ascii { r.map_or(Value::Undefined, |r| a.string(&s[r]).into()) } else { Self::text(a, &units, r) };
-        #[expect(clippy::cast_precision_loss, reason = "字符串长度远小于 2^53")]
+        #[expect(clippy::cast_precision_loss, reason = "string length is far below 2^53")]
         let len = (if ascii { s.len() } else { units.len() }) as f64;
         let last = if global || sticky { last } else { 0.0 };
         if last > len {
@@ -265,7 +270,7 @@ impl Regexps {
             }
             return Ok(Value::Null);
         }
-        #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "已检查不超过长度")]
+        #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "checked not to exceed the length")]
         let start = last as usize;
         let found = if ascii { Self::find_ascii(o, &s, start) } else { Self::find(o, &units, start) };
         let Some(m) = found.filter(|m| !sticky || m.range.start == start) else {
@@ -311,9 +316,11 @@ impl Regexps {
         Ok(arr.into())
     }
 
-    /// 正则对象与 `RegExp.prototype` 都还是原样：对象自有属性只有可写的数值 `lastIndex`、原型是 `%RegExp.prototype%`，
-    /// 原型上 `exec` / `flags` / 各标志 getter 都还是装好时的那些。这时按规范走一圈协议（读 flags、读写 lastIndex、
-    /// 调 exec、读结果数组）观察不到区别，可以直接匹配。给出对象与 `lastIndex` 的值。
+    /// The RegExp object and `RegExp.prototype` are both pristine: the object's only own property is a writable numeric
+    /// `lastIndex`, its prototype is `%RegExp.prototype%`, and `exec` / `flags` / the flag getters on the prototype are
+    /// still the ones installed at setup. Then walking through the spec protocol (reading flags, reading/writing
+    /// lastIndex, calling exec, reading the result array) is unobservable, so we can match directly. Returns the object
+    /// and the value of `lastIndex`.
     fn pristine<'gc>(a: &Agent<'gc, '_>, r: Value<'gc>) -> Option<(JsObject<'gc>, f64)> {
         let Value::Object(o) = r else { return None };
         let d = o.borrow();
@@ -339,12 +346,12 @@ impl Regexps {
         intact.then_some((o, last))
     }
 
-    /// 改原样正则的 `lastIndex`（[`pristine`](Self::pristine) 核对过：第 0 项、可写）
+    /// Set `lastIndex` of a pristine regex ([`pristine`](Self::pristine) checked it: slot 0, writable)
     fn set_last<'gc>(a: &Agent<'gc, '_>, o: JsObject<'gc>, i: usize) {
         o.borrow_mut(a.mc).set_at(0, Self::index(i));
     }
 
-    /// 原样正则从 `start` 起找（全 ASCII 按字节，否则按 UTF-16 码元）
+    /// Search a pristine regex from `start` (by byte if all ASCII, otherwise by UTF-16 code unit)
     fn find_in(o: JsObject<'_>, s: &str, units: Units<'_>, start: usize) -> Option<Found> {
         match units {
             Units::Ascii(_) => Self::find_ascii(o, s, start),
@@ -352,15 +359,16 @@ impl Regexps {
         }
     }
 
-    /// 原样正则的 RegExpBuiltinExec，不建结果数组：按 `g` / `y` 读写 `lastIndex`，给出匹配
+    /// RegExpBuiltinExec for a pristine regex without building a result array: reads/writes `lastIndex` according to
+    /// `g` / `y`, returns the match
     fn quick_exec<'gc>(a: &mut Agent<'gc, '_>, o: JsObject<'gc>, last: f64, s: &str, units: Units<'_>) -> Result<Option<Found>, Error> {
         let flags = Self::data(o).1;
         let (global, sticky) = (flags.contains('g'), flags.contains('y'));
         let len = units.len();
         let last = if global || sticky { a.to_length(last.into())? } else { 0.0 };
-        #[expect(clippy::cast_precision_loss, reason = "字符串长度远小于 2^53")]
+        #[expect(clippy::cast_precision_loss, reason = "string length is far below 2^53")]
         let fits = last <= len as f64;
-        #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "已检查不超过长度")]
+        #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "checked not to exceed the length")]
         let start = last as usize;
         let found = if fits { Self::find_in(o, s, units, start).filter(|m| !sticky || m.range.start == start) } else { None };
         if global || sticky {
@@ -369,7 +377,8 @@ impl Regexps {
         Ok(found)
     }
 
-    /// 原样正则、替换值是字符串的 `[Symbol.replace]`。模板里有 `$<` 而正则可能有具名分组时给 `None`（走慢路，此前没有副作用）
+    /// `[Symbol.replace]` for a pristine regex with a string replacement. Returns `None` when the template contains
+    /// `$<` and the regex may have named groups (take the slow path; no side effects so far)
     fn quick_replace<'gc>(a: &mut Agent<'gc, '_>, o: JsObject<'gc>, last: f64, s: JsString<'gc>, with: JsString<'gc>) -> Result<Option<Value<'gc>>, Error> {
         let (source, flags, _) = Self::data(o);
         if with.contains("$<") && source.contains("(?<") {
@@ -385,7 +394,7 @@ impl Regexps {
                 let next = match (m.range.is_empty(), units) {
                     (false, _) => m.range.end,
                     (true, Units::Ascii(_)) => m.range.end + 1,
-                    #[expect(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "下标远小于 2^53")]
+                    #[expect(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "index is far below 2^53")]
                     (true, Units::Wide(w)) => Self::advance(w, m.range.end as f64, unicode) as usize,
                 };
                 found.push(m);
@@ -395,7 +404,7 @@ impl Regexps {
         } else {
             found.extend(Self::quick_exec(a, o, last, &s, units)?);
         }
-        // 全 ASCII、模板里没有 `$`：直接按 UTF-8 拼（字节下标就是码元下标）
+        // All ASCII and no `$` in the template: join directly as UTF-8 (byte index = code unit index)
         if let Units::Ascii(_) = units
             && !with.contains('$')
         {
@@ -429,7 +438,7 @@ impl Regexps {
         Ok(Some(a.string(&String::from_utf16_lossy(&out)).into()))
     }
 
-    /// RegExpExec：`exec` 被换掉了就调它（结果要是对象或 null）。
+    /// RegExpExec: if `exec` has been replaced, call it (the result must be an object or null).
     fn regexp_exec<'gc>(a: &mut Agent<'gc, '_>, r: Value<'gc>, s: JsString<'gc>) -> Result<Value<'gc>, Error> {
         let exec = a.get_named(r, "exec")?;
         if a.is_callable(exec) {
@@ -467,7 +476,7 @@ impl Regexps {
         Ok(a.string(&alloc::format!("/{}/{}", &**p, &**f)).into())
     }
 
-    /// EscapeRegExpPattern：`/` 与换行转义，空串写成 `(?:)`。
+    /// EscapeRegExpPattern: escape `/` and line terminators; the empty string becomes `(?:)`.
     fn escape_pattern(source: &str) -> String {
         if source.is_empty() {
             return String::from("(?:)");
@@ -507,7 +516,7 @@ impl Regexps {
         Ok(a.string(&s).into())
     }
 
-    /// `flags`：按规范顺序读各个 flag 属性（通用，不要求是正则对象）。
+    /// `flags`: read each flag property in spec order (generic; does not require a RegExp object).
     fn flags<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let r = Self::this_object(a, this)?;
         let mut out = String::new();
@@ -520,7 +529,7 @@ impl Regexps {
         Ok(a.string(&out).into())
     }
 
-    /// RegExpHasFlag：`RegExp.prototype` 本身给 `undefined`。
+    /// RegExpHasFlag: `RegExp.prototype` itself gives `undefined`.
     fn flag<'gc, const C: char>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let Value::Object(o) = this else { return Err(a.throw(ErrorKind::Type, "RegExp flag getter called on a non-object")) };
         match Self::regexp(this) {
@@ -535,12 +544,12 @@ impl Regexps {
         Ok(String::from(&**a.to_string(f)?))
     }
 
-    /// AdvanceStringIndex。
+    /// AdvanceStringIndex.
     fn advance(units: &[u16], index: f64, unicode: bool) -> f64 {
         if !unicode {
             return index + 1.0;
         }
-        #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "下标非负")]
+        #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "index is non-negative")]
         let i = index as usize;
         let lead = units.get(i).copied();
         let trail = units.get(i + 1).copied();
@@ -550,7 +559,7 @@ impl Regexps {
         }
     }
 
-    /// 空匹配后把 `lastIndex` 往前挪。
+    /// Advance `lastIndex` after an empty match.
     fn step_last_index<'gc>(a: &mut Agent<'gc, '_>, r: Value<'gc>, units: &[u16], unicode: bool) -> Result<(), Error> {
         let li = a.get_named(r, "lastIndex")?;
         let this_index = a.to_length(li)?;
@@ -636,7 +645,7 @@ impl Regexps {
         Ok(a.iter_result(m, false).into())
     }
 
-    /// GetSubstitution：替换模板里的 `$$` / `$&` / `` $` `` / `$'` / `$n` / `$nn` / `$<name>`。
+    /// GetSubstitution: `$$` / `$&` / `` $` `` / `$'` / `$n` / `$nn` / `$<name>` in a replacement template.
     fn substitution<'gc>(a: &mut Agent<'gc, '_>, matched: &[u16], units: &[u16], position: usize, captures: &[Value<'gc>], named: Value<'gc>, template: &[u16]) -> Result<Vec<u16>, Error> {
         let dollar = u16::from(b'$');
         let digit = |c: u16| char::from_u32(u32::from(c)).and_then(|c| c.to_digit(10));
@@ -753,9 +762,9 @@ impl Regexps {
             let matched: Vec<u16> = a.to_string(matched)?.encode_utf16().collect();
             let pos = a.get_named(result, "index")?;
             let pos = a.to_integer_or_infinity(pos)?;
-            #[expect(clippy::cast_precision_loss, reason = "字符串长度远小于 2^53")]
+            #[expect(clippy::cast_precision_loss, reason = "string length is far below 2^53")]
             let pos = pos.clamp(0.0, units.len() as f64);
-            #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "已夹到 [0, 长度]")]
+            #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "clamped to [0, length]")]
             let position = pos as usize;
             let mut captures = Vec::new();
             let mut k = 1.0;
@@ -829,7 +838,7 @@ impl Regexps {
             return Ok(arr.into());
         }
         let units: Vec<u16> = s.encode_utf16().collect();
-        #[expect(clippy::cast_precision_loss, reason = "字符串长度远小于 2^53")]
+        #[expect(clippy::cast_precision_loss, reason = "string length is far below 2^53")]
         let size = units.len() as f64;
         if units.is_empty() {
             if Self::regexp_exec(a, splitter, s)? == Value::Null {
@@ -838,7 +847,7 @@ impl Regexps {
             return Ok(arr.into());
         }
         let slice = |a: &Agent<'gc, '_>, from: f64, to: f64| {
-            #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "下标在 [0, 长度]")]
+            #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "index is in [0, length]")]
             let (f, t) = (from as usize, to as usize);
             Self::text(a, &units, Some(f..t.max(f)))
         };
@@ -886,7 +895,7 @@ impl Regexps {
         Ok(this)
     }
 
-    /// `RegExp.escape(s)`。
+    /// `RegExp.escape(s)`.
     fn escape<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let Value::String(s) = args.at(0) else { return Err(a.throw(ErrorKind::Type, "RegExp.escape requires a string")) };
         let mut out = String::new();
@@ -915,7 +924,7 @@ impl Regexps {
         Ok(a.string(&out).into())
     }
 
-    // ---- 字符串方法：按 Symbol 协议分派 ----
+    // ---- String methods: dispatched through the Symbol protocol ----
 
     fn subject<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>) -> Result<Value<'gc>, Error> {
         if this.is_nullish() {
@@ -924,7 +933,7 @@ impl Regexps {
         Ok(this)
     }
 
-    /// GetMethod(v, sym)：没有给 `None`，不可调用抛 TypeError。
+    /// GetMethod(v, sym): `None` if absent; throws TypeError if not callable.
     fn method_of<'gc>(a: &mut Agent<'gc, '_>, v: Value<'gc>, sym: r8framework::JsSymbol<'gc>) -> Result<Option<Value<'gc>>, Error> {
         let f = a.get_symbol(v, sym, v)?;
         if f.is_nullish() {
@@ -937,7 +946,8 @@ impl Regexps {
         Ok(Some(f))
     }
 
-    /// match / search：有对应的 Symbol 方法就交给它，否则新建正则再调。
+    /// match / search: delegate to the corresponding Symbol method if there is one, otherwise create a regex and call
+    /// it.
     fn dispatch<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, arg: Value<'gc>, sym: r8framework::JsSymbol<'gc>, flags: Value<'gc>) -> Result<Value<'gc>, Error> {
         let o = Self::subject(a, this)?;
         if matches!(arg, Value::Object(_))
@@ -959,7 +969,7 @@ impl Regexps {
         Self::dispatch(a, this, args.at(0), a.realm.symbols.search, Value::Undefined)
     }
 
-    /// matchAll / replaceAll 的正则必须带 `g`。
+    /// The regex passed to matchAll / replaceAll must have `g`.
     fn require_global<'gc>(a: &mut Agent<'gc, '_>, v: Value<'gc>, method: &str) -> Result<(), Error> {
         if Self::is_regexp(a, v)? {
             let flags = a.get_named(v, "flags")?;
@@ -1054,7 +1064,7 @@ impl<'gc> Installer<'_, 'gc> {
         self.method(ctor, "escape", Regexps::escape, 1);
         let species = r.named_native(self.mc, Regexps::species, "get [Symbol.species]", 0);
         ctor.borrow_mut(self.mc).define_symbol(r.symbols.species, Property { slot: Slot::Accessor { get: Some(species), set: None }, enumerable: false, writable: false, configurable: true });
-        // 正则字面量用的内部构造器
+        // Internal constructor used by regex literals
         r.regexp_ctor.borrow_mut(self.mc).kind = ObjectKind::Native(r8framework::Native::function(Regexps::construct));
         self.method(proto, "exec", Regexps::exec, 1);
         self.method(proto, "test", Regexps::test, 1);
@@ -1075,7 +1085,7 @@ impl<'gc> Installer<'_, 'gc> {
         for (name, f) in flags {
             self.getter(proto, name, f);
         }
-        // 记下装好时的样子：exec / flags / 各标志 getter 的槽
+        // Record the state at setup: slots for exec / flags / the flag getters
         let pristine = {
             let d = proto.borrow();
             let slots = ["exec", "flags"].into_iter().chain(FLAG_PROPERTIES.map(|(_, n)| n)).filter_map(|n| d.props.position(n).map(|i| (i, d.props.slot(i)))).collect();

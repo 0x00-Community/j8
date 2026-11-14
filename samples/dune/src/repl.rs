@@ -5,7 +5,7 @@ use r8framework::Source;
 
 use crate::session::{Outcome, Session};
 
-/// REPL 里以 `.` 开头的命令。
+/// REPL commands starting with `.`.
 #[derive(Clone, Copy)]
 enum Command {
     Exit,
@@ -13,7 +13,7 @@ enum Command {
 }
 
 impl Command {
-    const TABLE: [(Self, &str, &str); 2] = [(Self::Exit, ".exit", "退出"), (Self::Help, ".help", "列出命令")];
+    const TABLE: [(Self, &str, &str); 2] = [(Self::Exit, ".exit", "Exit"), (Self::Help, ".help", "List commands")];
 }
 
 impl TryFrom<&str> for Command {
@@ -25,13 +25,13 @@ impl TryFrom<&str> for Command {
 }
 
 impl Session<'_, '_> {
-    /// 一行一段源码，全部共用同一个全局对象；读到 EOF（Ctrl-D）或 `.exit` 结束。
+    /// One piece of source per line, all sharing one global object; ends at EOF (Ctrl-D) or `.exit`.
     pub fn repl(&mut self) -> ExitCode {
-        println!("dune {}（r8）。.help 列出命令，Ctrl-D 退出", env!("CARGO_PKG_VERSION"));
+        println!("dune {} (r8). .help lists commands, Ctrl-D exits", env!("CARGO_PKG_VERSION"));
         let mut lines = std::io::stdin().lock().lines();
         loop {
             print!("> ");
-            // 提示符写不出去也不影响读输入
+            // Failing to write the prompt doesn't affect reading input
             let _ = std::io::stdout().flush();
             let Some(Ok(line)) = lines.next() else { break };
             let line = line.trim();

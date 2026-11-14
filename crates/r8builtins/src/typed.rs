@@ -7,10 +7,11 @@ use r8framework::{Agent, Element, ElementKind, Error, ErrorKind, IterKind, JsObj
 use crate::buffer::Buffers;
 use crate::{Args, Installer};
 
-/// `%TypedArray%` 与各具体 TypedArray。
+/// `%TypedArray%` and the concrete TypedArrays.
 struct Typed;
 
-/// 回调方法怎么收（与 Array 的同名方法一致，只是不跳空洞）。
+/// How a callback method collects its results (same as the Array methods of the same name, except holes aren't
+/// skipped).
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Visit {
     ForEach,
@@ -26,12 +27,13 @@ enum Visit {
 
 impl Typed {
     fn usize_value<'gc>(n: usize) -> Value<'gc> {
-        #[expect(clippy::cast_precision_loss, reason = "长度远小于 2^53")]
+        #[expect(clippy::cast_precision_loss, reason = "length is far below 2^53")]
         let x = n as f64;
         x.into()
     }
 
-    /// ValidateTypedArray：给出（对象, 元素类型, 视图, 长度）；不是 TypedArray 或越界抛 TypeError。
+    /// ValidateTypedArray: returns (object, element type, view, length); throws TypeError if not a TypedArray or out of
+    /// bounds.
     fn validate<'gc>(a: &Agent<'gc, '_>, v: Value<'gc>) -> Result<(JsObject<'gc>, ElementKind, ViewData<'gc>, usize), Error> {
         let Value::Object(o) = v else { return Err(a.throw(ErrorKind::Type, "this is not a typed array")) };
         let Some((k, view)) = Agent::typed_array(o) else { return Err(a.throw(ErrorKind::Type, "this is not a typed array")) };
@@ -41,7 +43,7 @@ impl Typed {
         }
     }
 
-    /// 新建一个装 `len` 个元素的 TypedArray（新缓冲）。
+    /// Create a TypedArray holding `len` elements (with a new buffer).
     fn create<'gc>(a: &mut Agent<'gc, '_>, kind: ElementKind, proto: JsObject<'gc>, len: usize) -> Result<JsObject<'gc>, Error> {
         let Some(bytes) = len.checked_mul(kind.size()) else { return Err(a.throw(ErrorKind::Range, "Invalid typed array length")) };
         let buffer = Buffers::allocate(a, a.realm.array_buffer_proto, bytes, None, false)?;
@@ -52,8 +54,8 @@ impl Typed {
         ElementKind::ALL.iter().position(|&k| k == kind).unwrap_or(0)
     }
 
-    /// 具体构造器：`K` 是元素类型下标。
-    #[expect(clippy::too_many_lines, reason = "规范里四种实参的初始化写在一起")]
+    /// Concrete constructor: `K` is the element type index.
+    #[expect(clippy::too_many_lines, reason = "the spec initializes from four kinds of argument in one place")]
     fn construct<'gc, const K: usize>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let kind = ElementKind::ALL[K];
         if a.new_target == Value::Undefined {
@@ -65,7 +67,7 @@ impl Typed {
             let proto = a.proto_from_ctor(a.new_target, a.realm.typed_protos[K])?;
             return Ok(Self::create(a, kind, proto, len)?.into());
         };
-        // 缓冲上建视图
+        // View over a buffer
         if matches!(src.borrow().kind, ObjectKind::ArrayBuffer(_)) {
             let proto = a.proto_from_ctor(a.new_target, a.realm.typed_protos[K])?;
             let size = kind.size();
@@ -108,7 +110,7 @@ impl Typed {
             let view = ViewData { buffer: src, offset, length };
             return Ok(ObjectData { kind: ObjectKind::TypedArray(kind, view), proto: Some(proto), ..ObjectData::default() }.alloc(a.mc).into());
         }
-        // 从另一个 TypedArray 拷
+        // Copy from another TypedArray
         if let Some((sk, sview)) = Agent::typed_array(src) {
             let proto = a.proto_from_ctor(a.new_target, a.realm.typed_protos[K])?;
             let Some(len) = Agent::view_length(&sview, sk.size()) else {
@@ -126,7 +128,7 @@ impl Typed {
             }
             return Ok(out.into());
         }
-        // 可迭代对象或类数组
+        // Iterable or array-like
         let proto = a.proto_from_ctor(a.new_target, a.realm.typed_protos[K])?;
         let using = a.get_symbol(first, a.realm.symbols.iterator, first)?;
         let values = if using.is_nullish() {
@@ -157,7 +159,7 @@ impl Typed {
             }
             None => {
                 let len = a.length_of_array_like(first)?;
-                #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "ToLength 的结果")]
+                #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "result of ToLength")]
                 let out = Self::create(a, kind, proto, len as usize)?;
                 let mut k = 0.0;
                 while k < len {
@@ -171,12 +173,13 @@ impl Typed {
         Ok(out.into())
     }
 
-    /// `%TypedArray%` 本身不能调也不能 `new`。
+    /// `%TypedArray%` itself can be neither called nor `new`ed.
     fn abstract_ctor<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         Err(a.throw(ErrorKind::Type, "Abstract class TypedArray not directly constructable"))
     }
 
-    /// TypedArrayCreateFromConstructor：构造完要是没越界的 TypedArray，只给了一个长度时不能比它短。
+    /// TypedArrayCreateFromConstructor: the result must be an in-bounds TypedArray, and if only a length was given it
+    /// must not be shorter than that.
     fn create_from_ctor<'gc>(a: &mut Agent<'gc, '_>, ctor: Value<'gc>, args: &[Value<'gc>]) -> Result<(JsObject<'gc>, ElementKind, usize), Error> {
         let made = a.construct(ctor, args, ctor)?;
         let (o, k, _, len) = Self::validate(a, made)?;
@@ -188,7 +191,7 @@ impl Typed {
         Ok((o, k, len))
     }
 
-    /// TypedArraySpeciesCreate：结果的内容类型（BigInt / 数）要和样本一致。
+    /// TypedArraySpeciesCreate: the result's content type (BigInt / Number) must match the exemplar's.
     fn species_create<'gc>(a: &mut Agent<'gc, '_>, exemplar: JsObject<'gc>, kind: ElementKind, args: &[Value<'gc>]) -> Result<JsObject<'gc>, Error> {
         let default = a.realm.typed_ctors[Self::index_of_kind(kind)].into();
         let ctor = Buffers::species_constructor(a, exemplar.into(), default)?;
@@ -203,7 +206,7 @@ impl Typed {
         Ok(this)
     }
 
-    /// `%TypedArray%.from(source, mapFn, thisArg)`。
+    /// `%TypedArray%.from(source, mapFn, thisArg)`.
     fn from<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         if !a.is_constructor(this) {
             return Err(a.throw(ErrorKind::Type, "TypedArray.from: this is not a constructor"));
@@ -218,7 +221,8 @@ impl Typed {
             let like = a.to_object(source)?;
             let len = a.length_of_array_like(like.into())?;
             let mut k = 0.0;
-            // 类数组：先建结果再逐个读（读的副作用在建之后）
+            // Array-like: create the result first, then read element by element (the reads' side effects happen after
+            // creation)
             let (target, _, _) = Self::create_from_ctor(a, this, &[len.into()])?;
             while k < len {
                 let v = a.get_index(like.into(), k)?;
@@ -306,7 +310,7 @@ impl Typed {
 
     fn at<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let (o, _, _, len) = Self::validate(a, this)?;
-        #[expect(clippy::cast_precision_loss, reason = "长度远小于 2^53")]
+        #[expect(clippy::cast_precision_loss, reason = "length is far below 2^53")]
         let len = len as f64;
         let rel = a.to_integer_or_infinity(args.at(0))?;
         let k = if rel >= 0.0 { rel } else { len + rel };
@@ -328,7 +332,7 @@ impl Typed {
         let backward = matches!(how, Visit::FindLast | Visit::FindLastIndex);
         for i in 0..len {
             let k = if backward { len - 1 - i } else { i };
-            #[expect(clippy::cast_precision_loss, reason = "长度远小于 2^53")]
+            #[expect(clippy::cast_precision_loss, reason = "length is far below 2^53")]
             let kf = k as f64;
             let v = a.get_index(o.into(), kf)?;
             let r = a.call(f, this_arg, &[v, kf.into(), o.into()])?;
@@ -365,7 +369,7 @@ impl Typed {
     }
 }
 
-/// 回调方法：一个宿主函数对应一种 [`Visit`]。
+/// Callback methods: each host function corresponds to one [`Visit`].
 macro_rules! visits {
     ($($name:ident => $how:ident),* $(,)?) => {
         impl Typed {
@@ -417,7 +421,7 @@ impl Typed {
     }
 
     fn f(n: usize) -> f64 {
-        #[expect(clippy::cast_precision_loss, reason = "长度远小于 2^53")]
+        #[expect(clippy::cast_precision_loss, reason = "length is far below 2^53")]
         let x = n as f64;
         x
     }
@@ -438,10 +442,10 @@ impl Typed {
         let end = Self::relative(a, args.at(2), lenf, lenf)?;
         let (_, _, view, len) = Self::validate(a, o.into())?;
         let end = end.min(Self::f(len));
-        // 编码一次，借一次缓冲，在线程池上按块铺满
+        // Encode once, borrow the buffer once, fill it chunk by chunk on the thread pool
         let pattern = kind.encode(&e);
         let size = kind.size();
-        #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "已夹到 [0, len]")]
+        #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "clamped to [0, len]")]
         let (from, to) = (view.offset + start as usize * size, view.offset + end.max(start) as usize * size);
         let par = a.par();
         if let ObjectKind::ArrayBuffer(b) = &mut view.buffer.borrow_mut(a.mc).kind
@@ -452,7 +456,7 @@ impl Typed {
         Ok(o.into())
     }
 
-    /// SameValueZero / 严格相等的查找。
+    /// Lookup by SameValueZero / strict equality.
     fn search<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>], last: bool, zero: bool) -> Result<Value<'gc>, Error> {
         let (o, _, _, len) = Self::validate(a, this)?;
         let not_found: Value<'gc> = if zero { false.into() } else { (-1.0).into() };
@@ -482,12 +486,14 @@ impl Typed {
             return Ok(not_found);
         }
         let mut k = if n >= 0.0 { n } else { (lenf + n).max(0.0) };
-        // 找的是数、元素不是 BigInt：借一次缓冲，在线程池上分块解码比较（只扫此刻还在界内的：界外读出 undefined，等不了数）
+        // Searching for a Number and elements aren't BigInt: borrow the buffer once and decode and compare chunks in
+        // parallel on the thread pool (only scan what is still in bounds now: out-of-bounds reads give undefined, which
+        // can't equal a Number)
         if let Value::Number(w) = want
             && let Some((kind, view)) = Agent::typed_array(o)
             && !kind.is_bigint()
         {
-            #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "已夹到 [0, len]")]
+            #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "clamped to [0, len]")]
             let from = k as usize;
             let end = Agent::view_length(&view, kind.size()).unwrap_or(0).min(len);
             let buffer = view.buffer.borrow();
@@ -570,7 +576,7 @@ impl Typed {
         Ok(a.string(&out).into())
     }
 
-    /// 整段元素读出来。
+    /// Read out the whole range of elements.
     fn elements<'gc>(a: &Agent<'gc, '_>, kind: ElementKind, view: &ViewData<'gc>, len: usize) -> Vec<Value<'gc>> {
         (0..len).filter_map(|i| Agent::read_raw(view.buffer, view.offset + i * kind.size(), kind)).map(|e| a.element_value(e)).collect()
     }
@@ -604,7 +610,7 @@ impl Typed {
         Ok(out.into())
     }
 
-    /// 缺省比较：数从小到大（-0 在 +0 前），NaN 最后。
+    /// Default comparison: numbers ascending (-0 before +0), NaN last.
     fn order<'gc>(a: &mut Agent<'gc, '_>, f: Value<'gc>, x: Value<'gc>, y: Value<'gc>) -> Result<Ordering, Error> {
         if f != Value::Undefined {
             let r = a.call(f, Value::Undefined, &[x, y])?;
@@ -623,7 +629,7 @@ impl Typed {
         })
     }
 
-    /// 缺省的数值序：NaN 排最后，-0 在 +0 前
+    /// Default numeric order: NaN last, -0 before +0
     fn numeric_order(x: f64, y: f64) -> Ordering {
         match (x.is_nan(), y.is_nan()) {
             (true, true) => Ordering::Equal,
@@ -637,7 +643,7 @@ impl Typed {
         if v.len() <= 1 {
             return Ok(v);
         }
-        // 不带比较函数、元素都是数：按数值并行排序（不调用户代码）
+        // No comparator and all elements are Numbers: sort numerically in parallel (no user code is called)
         if f == Value::Undefined && v.iter().all(|x| matches!(x, Value::Number(_))) {
             let mut xs: Vec<f64> = v.iter().map(|x| if let Value::Number(n) = x { *n } else { 0.0 }).collect();
             a.par().sort_by(&mut xs, &|x, y| Self::numeric_order(*x, *y));
@@ -674,7 +680,7 @@ impl Typed {
         let (o, kind, view, len) = Self::validate(a, this)?;
         let values = Self::elements(a, kind, &view, len);
         let sorted = Self::sorted(a, args.at(0), values)?;
-        // 比较函数可能缩小了缓冲：只写还在界内的
+        // The comparator may have shrunk the buffer: only write what is still in bounds
         let len = Agent::view_length(&view, kind.size()).unwrap_or(0);
         Self::write_all(a, kind, &view, &sorted[..len.min(sorted.len())]);
         Ok(o.into())
@@ -722,7 +728,7 @@ impl Typed {
             let mut k = start;
             let mut n = 0.0;
             while k < end {
-                #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "已夹到 [0, len]")]
+                #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "clamped to [0, len]")]
                 let i = k as usize;
                 if let Some(e) = Agent::read_raw(view.buffer, view.offset + i * kind.size(), kind) {
                     let v = a.element_value(e);
@@ -750,7 +756,7 @@ impl Typed {
         Ok(Self::species_create(a, o, kind, &ctor_args)?.into())
     }
 
-    /// `set(source, offset)`。
+    /// `set(source, offset)`.
     fn set<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let (kind, _) = Self::this_typed(a, this)?;
         let Value::Object(target) = this else { unreachable!("checked above") };
@@ -772,9 +778,9 @@ impl Typed {
             if offset == f64::INFINITY || Self::f(slen) + offset > Self::f(tlen) {
                 return Err(a.throw(ErrorKind::Range, "offset is out of bounds"));
             }
-            #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "已检查在界内")]
+            #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "checked to be in bounds")]
             let off = offset as usize;
-            // 先全读出来（同一个缓冲时也不互相覆盖）
+            // Read everything out first (so the same buffer doesn't overwrite itself)
             let items: Vec<Element> = (0..slen).filter_map(|i| Agent::read_raw(sview.buffer, sview.offset + i * sk.size(), sk)).collect();
             for (i, e) in items.iter().enumerate() {
                 a.write_raw(tview.buffer, tview.offset + (off + i) * kind.size(), kind, e);
@@ -805,7 +811,7 @@ impl Typed {
         if count > 0.0 {
             let (_, _, view, len) = Self::validate(a, o.into())?;
             let size = kind.size();
-            #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "已夹到 [0, len]")]
+            #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "clamped to [0, len]")]
             let (to, from, count) = (to as usize, from as usize, count as usize);
             let byte_len = len * size;
             let (src, dst) = (from * size, to * size);
@@ -892,7 +898,7 @@ impl<'gc> Installer<'_, 'gc> {
         for (name, f, n) in methods {
             self.method(proto, name, f, n);
         }
-        // `[Symbol.iterator]` 与 `values` 同一个函数，`toString` 与 Array.prototype.toString 同一个
+        // `[Symbol.iterator]` is the same function as `values`, and `toString` the same as Array.prototype.toString
         let values = proto.borrow().own("values").unwrap_or_default();
         proto.borrow_mut(self.mc).define_symbol(r.symbols.iterator, Property::hidden(values));
         let to_string = r.array_proto.borrow().own("toString").unwrap_or_default();
@@ -917,7 +923,7 @@ impl<'gc> Installer<'_, 'gc> {
             c.borrow_mut(self.mc).kind = ObjectKind::Native(r8framework::Native::constructor(f));
             r.name_function(self.mc, c, kind.name(), Some(3));
             let fixed = |v: Value<'gc>| Property { slot: Slot::Data(v), enumerable: false, writable: false, configurable: false };
-            #[expect(clippy::cast_precision_loss, reason = "元素字节数是 1 / 2 / 4 / 8")]
+            #[expect(clippy::cast_precision_loss, reason = "element size is 1 / 2 / 4 / 8 bytes")]
             let bytes = Value::Number(kind.size() as f64);
             c.borrow_mut(self.mc).define("prototype", fixed(p.into()));
             c.borrow_mut(self.mc).define("BYTES_PER_ELEMENT", fixed(bytes));

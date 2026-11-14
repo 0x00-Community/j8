@@ -1,5 +1,6 @@
-// workerd 的序言：Fetch API 的最小子集（Headers / Request / Response / URL / URLSearchParams）与 Durable Object。
-// 存储的原生部分（每个对象一份 KV）是 Rust 用 r8binding 绑定的 `__native.KvStore`。
+// workerd's prelude: a minimal subset of the Fetch API (Headers / Request / Response / URL / URLSearchParams)
+// and Durable Objects.
+// The native part of storage (one KV per object) is `__native.KvStore`, bound from Rust with r8binding.
 (function (native) {
   'use strict';
 
@@ -115,7 +116,7 @@
     equals(other) { return other instanceof DurableObjectId && other.name === this.name; }
   }
 
-  /** `state.storage`：值按 JSON 存进原生 KV，接口全是 Promise。 */
+  /** `state.storage`: values are stored as JSON in the native KV; the whole interface is Promise-based. */
   class DurableObjectStorage {
     constructor(kv) { this._kv = kv; }
     get(key) {
@@ -152,7 +153,7 @@
     waitUntil() {}
   }
 
-  /** `env.X`：按 id 取对象（同一个 id 同一个实例，各自一份存储）。 */
+  /** `env.X`: get an object by id (same id, same instance; each has its own storage). */
   class DurableObjectNamespace {
     constructor(cls, env) { this._cls = cls; this._env = env; this._live = new Map(); }
     idFromName(name) { return new DurableObjectId(String(name)); }
@@ -175,7 +176,7 @@
 
   Object.assign(globalThis, { Headers, Request, Response, URL, URLSearchParams });
 
-  // 宿主（Rust）这边调的入口
+  // Entry points called from the host (Rust) side
   globalThis.__workerd = {
     worker: null,
     env: {},
@@ -198,7 +199,7 @@
         .then((r) => r.text().then((b) => { this.result = { status: r.status, headers: [...r.headers], body: b }; }))
         .catch((e) => { this.result = { status: 500, headers: [['content-type', 'text/plain']], body: String((e && e.stack) || e) + '\n' }; });
     },
-    // 结果按「状态行、头一行一个、空行、正文」给 Rust
+    // The result goes to Rust as "status line, one header per line, blank line, body"
     take() {
       const r = this.result || { status: 500, headers: [], body: 'the worker did not respond\n' };
       const head = r.headers.map(([k, v]) => k + ': ' + v + '\n').join('');

@@ -1,11 +1,12 @@
-//! 回收器的确定事实：活的留着、值不变；死的析构恰好一次；老对象经写屏障收进的新对象活着；稀疏的页会被压缩。
+//! Deterministic facts about the collector: live objects stay with their values unchanged; dead ones are dropped
+//! exactly once; new objects stored into old ones through the write barrier stay alive; sparse pages get compacted.
 use std::cell::Cell;
 use std::rc::Rc;
 
 use moremath::ThreadMulti;
 use r8gc::{Collect, DynamicRootSet, Gc, Pool, R8Heap, RefLock, Rootable};
 
-/// 析构时计数
+/// Counts on drop
 #[derive(Collect)]
 #[collect(require_static)]
 struct Counted(Rc<Cell<usize>>);
@@ -39,7 +40,7 @@ fn heap(pool: &dyn Pool) -> R8Heap<'_, Rootable![Root<'_>]> {
     R8Heap::new(pool, |mc| Root { list: None, keep: Vec::new(), nodes: Vec::new(), roots: DynamicRootSet::new(mc) })
 }
 
-/// 链表的值依次是 n-1 … 0，每个节点带 4 个 u64
+/// The list's values are n-1 … 0 in order; each node carries 4 u64s
 fn sum(list: Option<List<'_>>) -> (usize, usize) {
     let (mut count, mut total, mut at) = (0, 0, list);
     while let Some(n) = at {
@@ -59,7 +60,7 @@ fn survives_minor_major_and_compaction() {
         let mut head = None;
         for value in 0..N {
             head = Some(Gc::new(mc, RefLock::new(Node { value, next: head, payload: vec![value as u64; 4] })));
-            // 垃圾：留下稀疏的页
+            // Garbage: leaves sparse pages behind
             for _ in 0..9 {
                 Gc::new(mc, RefLock::new(Node { value, next: None, payload: Vec::new() }));
             }
@@ -99,13 +100,13 @@ fn barrier_keeps_young_reachable_from_old() {
     let pool = ThreadMulti::default();
     let mut a = heap(&pool);
     a.mutate_root(|mc, root| root.list = Some(Gc::new(mc, RefLock::new(Node { value: 1, next: None, payload: vec![1; 4] }))));
-    // 头节点进老年代
+    // The head node moves into the old generation
     a.collect_all();
     a.mutate(|mc, root| {
         let head = root.list.expect("head");
         head.borrow_mut(mc).next = Some(Gc::new(mc, RefLock::new(Node { value: 2, next: None, payload: vec![2; 4] })));
     });
-    // 只做次回收：新节点只能靠记忆集找到
+    // Minor collection only: the new node can only be found through the remembered set
     a.collect_debt();
     a.mutate(|mc, _| {
         for _ in 0..(5 << 20) / 32 {
@@ -125,7 +126,7 @@ fn compacts_sparse_pages() {
     a.mutate_root(|mc, root| {
         root.nodes = (0..N).map(|value| Gc::new(mc, RefLock::new(Node { value, next: None, payload: vec![value as u64; 4] }))).collect();
     });
-    // 全部进老年代，再放掉 15/16：页变稀疏
+    // Promote everything to the old generation, then drop 15/16: pages become sparse
     a.collect_all();
     a.mutate_root(|_, root| root.nodes.retain(|n| n.borrow().value % 16 == 0));
     a.collect_all();
@@ -178,7 +179,7 @@ fn wide_graph_marks_in_parallel() {
     const FANOUT: usize = 64;
     let pool = ThreadMulti::default();
     let mut a = heap(&pool);
-    // 两层的宽树：64 × 64 个叶子，各带一条 16 节点的链
+    // A two-level wide tree: 64 × 64 leaves, each with a 16-node chain
     a.mutate_root(|mc, root| {
         root.nodes = (0..FANOUT * FANOUT)
             .map(|i| {
@@ -197,10 +198,10 @@ fn wide_graph_marks_in_parallel() {
     assert_eq!(total, (0..FANOUT * FANOUT * 16).sum::<usize>());
 }
 
-/// 析构计数用原子量：能在线程池上析构
+/// Drop counter uses an atomic: can be dropped on the thread pool
 struct Shared(std::sync::Arc<std::sync::atomic::AtomicUsize>);
 
-// SAFETY: 没有 Gc；Arc 与原子量在哪个线程析构都行
+// SAFETY: no Gc inside; Arc and atomics can be dropped on any thread
 unsafe impl Collect<'_> for Shared {
     const NEEDS_TRACE: bool = false;
     const PARALLEL_DROP: bool = true;
@@ -212,7 +213,7 @@ impl Drop for Shared {
     }
 }
 
-/// 根是一串 `Shared`
+/// The root is a list of `Shared`
 type SharedHeap<'p> = R8Heap<'p, Rootable![Vec<Gc<'_, Shared>>]>;
 
 #[test]
@@ -233,10 +234,10 @@ fn parallel_drop_exactly_once() {
                 }
             }
         });
-        // 死在新生代的（次回收里并行析构）
+        // Those that die in the young generation (dropped in parallel during minor collection)
         a.collect_all();
         assert_eq!(dropped.load(Ordering::Relaxed), 75_000);
-        // 死在老年代的（清扫里并行析构）
+        // Those that die in the old generation (dropped in parallel during sweeping)
         a.mutate_root(|_, keep| keep.truncate(5_000));
         a.collect_all();
         assert_eq!(dropped.load(Ordering::Relaxed), 95_000);

@@ -1,4 +1,4 @@
-//! JS ⇒ 字节码：作用域与函数、语句。表达式在 `expr.rs`。
+//! JS ⇒ bytecode: scopes, functions, statements. Expressions are in `expr.rs`.
 use std::collections::HashSet;
 
 use oxc_allocator::Allocator;
@@ -11,25 +11,25 @@ use r8framework::{CodeKind, CompareOp, Error, ImportEntry, ImportName, ModuleInf
 use crate::scope::{Decl, DeclKind, Decls, Hidden, Key, Resolver, THIS};
 use crate::{Const, Constant, EvalName, EvalScope, Function, FunctionKind, Insn, Label, Module, PropertyKind, Reg};
 
-/// 回填前的跳转目标
+/// Jump target before backpatching
 const UNPATCHED: Label = Label(u32::MAX);
 
-/// finally 的完成类型：正常落下
+/// finally completion type: normal fall-through
 const COMPLETION_NORMAL: f64 = 0.0;
-/// finally 的完成类型：带着异常进来，出去接着抛
+/// finally completion type: entered with an exception, rethrows on exit
 const COMPLETION_THROW: f64 = 1.0;
-/// finally 的完成类型：带着返回值进来，出去接着返回
+/// finally completion type: entered with a return value, keeps returning on exit
 const COMPLETION_RETURN: f64 = 2.0;
-/// finally 的完成类型：第 n 个绕道的 break / continue 是这个数加 n
+/// finally completion type: the n-th detoured break / continue is this number plus n
 const COMPLETION_ROUTE: f64 = 3.0;
 
-/// 一个名字绑在哪儿。
+/// Where a name is bound.
 #[derive(Clone, Copy)]
 enum Binding {
     Reg(Reg),
-    /// 本层环境的槽位
+    /// A slot in this level's environment
     Env(u16),
-    /// 模块的第几个导入绑定（运行时经模块记录读出口方的槽位）
+    /// The module's n-th import binding (at runtime, read via the module record from the exporter's slot)
     Import(u16),
 }
 
@@ -37,13 +37,13 @@ struct Bound<'a> {
     name: &'a str,
     binding: Binding,
     constant: bool,
-    /// 暂时性死区到这个位置结束（`u32::MAX`：总要查）
+    /// The temporal dead zone ends at this position (`u32::MAX`: always check)
     ready: Option<u32>,
-    /// 具名函数表达式自己的名字（不可改）
+    /// The own name of a named function expression (immutable)
     self_name: bool,
 }
 
-/// 形参 i ⇒ 它在函数层环境里的槽位（同名形参取后一个）。
+/// Parameter i ⇒ its slot in the function-level environment (for duplicate parameter names, the last one wins).
 fn alloc_vec_slots(decls: &Decls<'_>, level: &Level<'_>) -> Vec<Option<u16>> {
     let mut slots: Vec<Option<u16>> = Vec::new();
     for (d, n) in decls.0.iter().zip(&level.names) {
@@ -58,33 +58,35 @@ fn alloc_vec_slots(decls: &Decls<'_>, level: &Level<'_>) -> Vec<Option<u16>> {
     slots
 }
 
-/// `export default 表达式` / 匿名默认导出用的绑定名
+/// Binding name for `export default expression` / an anonymous default export
 const DEFAULT_BINDING: &str = "*default*";
 
-/// 生成代码时的一层作用域。
+/// One scope level during code generation.
 struct Level<'a> {
-    /// 属于第几层函数（`frames` 下标）
+    /// Which function level it belongs to (index into `frames`)
     func: usize,
     names: Vec<Bound<'a>>,
-    /// 这层有没有堆上的环境
+    /// Whether this level has a heap environment
     env: bool,
-    /// 进来前的寄存器栈顶，出去时退回
+    /// The register stack top before entering, restored on exit
     mark: u16,
-    /// `switch` 的那层：分支可能跳过声明，死区检查省不掉
+    /// The level of a `switch`: cases may skip over declarations, so TDZ checks cannot be elided
     switch: bool,
 }
 
-/// 名字解析的结果：在哪、是不是常量、读写前要不要查死区（给出声明结束的位置）。
+/// Result of name resolution: where it is, whether it is constant, and whether reads / writes need a TDZ check (giving
+/// the position where the declaration ends).
 #[derive(Clone, Copy)]
 pub(crate) struct Resolved<'a> {
     pub place: Place<'a>,
     pub constant: bool,
-    /// `Some(ready)`：使用处在 `ready` 之前、或绑定在环境里 / `switch` 里，就要查
+    /// `Some(ready)`: a check is needed if the use is before `ready`, or the binding is in an environment / in a
+    /// `switch`
     pub tdz: Option<(u32, bool)>,
 }
 
 impl Resolved<'_> {
-    /// 在 `pos` 处使用要不要查死区。
+    /// Whether a use at `pos` needs a TDZ check.
     pub fn needs_check(&self, pos: u32) -> bool {
         match self.tdz {
             Some((ready, always)) => always || pos < ready,
@@ -93,7 +95,7 @@ impl Resolved<'_> {
     }
 }
 
-/// 名字的位置。
+/// Where a name lives.
 #[derive(Clone, Copy)]
 pub(crate) enum Place<'a> {
     Reg(Reg),
@@ -102,19 +104,19 @@ pub(crate) enum Place<'a> {
     Import(u16),
 }
 
-/// `break` / `continue` 的去处。
+/// Where a `break` / `continue` goes.
 struct Jump<'a> {
     label: Option<&'a str>,
-    /// 不带标签的 `break` 能不能跳出它（循环与 `switch` 能，带标签的块不能）
+    /// Whether an unlabeled `break` can exit it (loops and `switch` can, labeled blocks cannot)
     breakable: bool,
     continuable: bool,
     breaks: Vec<usize>,
     continues: Vec<usize>,
-    /// 进它时本函数有几层环境：跳出去要退掉多出来的
+    /// How many environment levels this function had on entering it: jumping out must pop the extra ones
     envs: u16,
 }
 
-/// 穿过 finally 的 `break` / `continue`：finally 跑完再接着跳。
+/// A `break` / `continue` passing through a finally: the jump continues after the finally runs.
 #[derive(Clone, Copy)]
 struct Route<'a> {
     span: Span,
@@ -122,7 +124,7 @@ struct Route<'a> {
     cont: bool,
 }
 
-/// 一个 finally：完成类型与值的寄存器、跳进来的地方、绕道的跳转。
+/// A finally: registers for the completion type and value, where it is entered, and the detoured jumps.
 struct Finally<'a> {
     kind: Reg,
     value: Reg,
@@ -131,28 +133,30 @@ struct Finally<'a> {
     routes: Vec<Route<'a>>,
 }
 
-/// 控制栈的一层：跳转目标、装着的异常处理器、finally。
+/// One level of the control stack: jump targets, an installed exception handler, a finally.
 enum Control<'a> {
     Jump(Jump<'a>),
     Handler,
     Finally(Finally<'a>),
-    /// `for-of` 的迭代器（记录在这三个寄存器）：跳出去要先关掉它
+    /// The iterator of a `for-of` (its record is in these three registers): must be closed before jumping out
     Iterator(Reg),
-    /// `for await` 的迭代器（记录在这四个寄存器）：跳出去要先调 `return` 并等它
+    /// The iterator of a `for await` (its record is in these four registers): jumping out must call `return` and await
+    /// it first
     AsyncIterator(Reg),
 }
 
-/// 函数的种类与风味（生成器、async）。
+/// Function kind and flavor (generator, async).
 #[derive(Clone, Copy, Default)]
 pub(crate) struct Flavor {
     pub kind: FunctionKind,
     pub generator: bool,
     pub asynchronous: bool,
-    /// 自己就是严格的（函数体开头 `'use strict'`、类体里）；外层严格的照样继承
+    /// Strict on its own (`'use strict'` at the start of the body, inside a class body); strictness of an enclosing
+    /// scope is inherited regardless
     pub strict: bool,
 }
 
-/// 函数节点的风味：生成器 / async 照节点，种类由调用方给。
+/// Flavor of a function node: generator / async from the node, kind given by the caller.
 impl From<(&AstFunction<'_>, FunctionKind)> for Flavor {
     fn from((f, kind): (&AstFunction<'_>, FunctionKind)) -> Self {
         let strict = f.body.as_ref().is_some_and(|b| Self::use_strict(&b.directives));
@@ -161,7 +165,7 @@ impl From<(&AstFunction<'_>, FunctionKind)> for Flavor {
 }
 
 impl Flavor {
-    /// 指令序言里有没有 `'use strict'`（原文正好这样写，不带转义）。
+    /// Whether the directive prologue contains `'use strict'` (written exactly so, without escapes).
     pub fn use_strict(directives: &[Directive<'_>]) -> bool {
         directives.iter().any(|d| d.directive.as_str() == "use strict")
     }
@@ -173,113 +177,119 @@ impl From<FunctionKind> for Flavor {
     }
 }
 
-/// 跳出去落到哪：控制栈第几层的跳转目标 / finally，或直接离开函数。
+/// Where a jump out lands: the jump target / finally of a control stack level, or leaving the function directly.
 enum Exit {
     Jump(usize),
     Finally(usize),
     Function,
 }
 
-/// 正在编的一个函数。
-#[expect(clippy::struct_excessive_bools, reason = "编译中的函数状态：几个互不相关的开关")]
+/// A function being compiled.
+#[expect(clippy::struct_excessive_bools, reason = "state of a function being compiled: several unrelated flags")]
 struct Frame<'a> {
     index: usize,
     out: Function,
-    /// 下一个空寄存器
+    /// The next free register
     top: u16,
-    /// 当前有几层本函数的环境
+    /// How many environment levels of this function are currently active
     envs: u16,
     controls: Vec<Control<'a>>,
-    /// 下一个循环 / `switch` 的标签
+    /// The label for the next loop / `switch`
     label: Option<&'a str>,
-    /// 脚本的完成值放这里（只有脚本本身有）
+    /// The script's completion value goes here (only the script itself has one)
     completion: Option<Reg>,
-    /// 生成器 / async 函数恢复时写恢复方式的寄存器
+    /// The register a generator / async function writes the resume mode to when resumed
     resume: Option<Reg>,
-    /// async 生成器：`yield` / `return` 先等值
+    /// Async generator: `yield` / `return` await the value first
     async_generator: bool,
-    /// 严格模式
+    /// Strict mode
     strict: bool,
-    /// annexB：执行到声明处要把值写到外层 `var` 的块级函数（按函数节点的起始位置）
+    /// annexB: block-level functions whose value must be written to the outer `var` when execution reaches the
+    /// declaration (by start position of the function node)
     annexb: Vec<u32>,
-    /// 函数层（`var` 所在）的作用域层下标；脚本是全局
+    /// Index of the function-level scope (where `var`s live); global for a script
     var_level: Option<usize>,
-    /// 直接 eval 的代码：调用函数里装 eval var 的对象（annexB 的块级函数写到这里）
+    /// Direct eval code: the object in the calling function that holds eval vars (annexB block-level functions write
+    /// here)
     eval_vars: Option<&'a str>,
-    /// 正在编形参序言（这里的 eval 看不见函数体的词法声明）
+    /// Compiling the parameter prologue (an eval here cannot see the body's lexical declarations)
     prologue: bool,
-    /// 形参都是简单名字（没有默认值、解构、剩余）
+    /// All parameters are simple names (no default values, destructuring, or rest)
     simple_params: bool,
 }
 
-/// 函数体：语句、箭头函数的表达式、类的字段初始化、缺省构造器。
+/// A function body: statements, an arrow function's expression, class field initializers, a default constructor.
 #[derive(Clone, Copy)]
 pub(crate) enum Body<'a> {
     Statements(&'a [Statement<'a>]),
     Expression(&'a Expression<'a>),
-    /// 类的实例（`statik` 为假）或静态字段：逐个在 `this` 上定义
+    /// Instance (`statik` false) or static fields of a class: defined one by one on `this`
     Fields { class: &'a Class<'a>, statik: bool },
-    /// 没写 `constructor` 的类：派生类转手 `super(...arguments)`
+    /// A class without a `constructor`: a derived class forwards `super(...arguments)`
     DefaultConstructor { derived: bool },
 }
 
 pub(crate) struct Compiler<'a, 's> {
     src: &'s Source<'s>,
-    /// AST 的分配器：类作用域的隐藏绑定名（`#x` 等）也分配在这里
+    /// The AST allocator: hidden binding names in class scopes (`#x` etc.) are allocated here too
     pub(crate) alloc: &'a Allocator,
-    /// 被引用到的绑定（`new.target` / `arguments` 用到才准备）
+    /// Referenced bindings (`new.target` / `arguments` are prepared only if used)
     used: HashSet<Key>,
-    /// 标签模板调用点的编号（模板对象按（函数, 编号）缓存）
+    /// Number of tagged template call sites (template objects are cached by (function, number))
     pub(crate) sites: u32,
-    /// 正在编几层类体（类体里全是严格代码）
+    /// How many class bodies are being compiled (a class body is entirely strict code)
     class_depth: u32,
     captured: HashSet<Key>,
     module: Vec<Function>,
     frames: Vec<Frame<'a>>,
     levels: Vec<Level<'a>>,
-    /// 脚本顶层的 `let` / `const` / `class`：在脚本作用域里，初始化走 `InitLexical`
+    /// Top-level `let` / `const` / `class` of a script: in the script scope, initialized via `InitLexical`
     script_lexicals: HashSet<&'a str>,
-    /// 正在编的可选链：每条链里 `?.` 遇到 null / undefined 跳到链尾
+    /// Optional chains being compiled: in each chain, `?.` jumps to the end of the chain on null / undefined
     pub(crate) chains: Vec<Vec<usize>>,
-    /// 含直接 eval 的函数（按形参表的起始位置）
+    /// Functions containing a direct eval (by start position of the parameter list)
     eval_fns: HashSet<u32>,
 }
 
 impl TryFrom<&Source<'_>> for Module {
     type Error = Error;
 
-    /// 编一个脚本：最后一条表达式语句的值是返回值。
+    /// Compiles a script: the value of the last expression statement is the return value.
     fn try_from(src: &Source<'_>) -> Result<Self, Error> {
         Self::compile(src, CodeKind::Script)
     }
 }
 
 impl Module {
-    /// 按种类编：脚本的顶层词法声明进脚本作用域；eval 代码的只在它自己里面。
+    /// Compiles by kind: a script's top-level lexical declarations go into the script scope; eval code's stay within
+    /// itself.
     pub fn compile(src: &Source<'_>, kind: CodeKind) -> Result<Self, Error> {
         Self::compile_in(src, kind, None)
     }
 
-    /// 直接 eval 的代码：`outer` 是调用处看得见的绑定（运行时 eval 代码的环境接在调用处的环境链上）。
+    /// Direct eval code: `outer` is the bindings visible at the call site (at runtime the eval code's environment hangs
+    /// off the call site's environment chain).
     pub fn compile_direct(src: &Source<'_>, strict: bool, outer: &EvalScope) -> Result<Self, Error> {
         Self::compile_in(src, if strict { CodeKind::StrictEval } else { CodeKind::Eval }, Some(outer))
     }
 
     fn compile_in(src: &Source<'_>, kind: CodeKind, outer: Option<&EvalScope>) -> Result<Self, Error> {
         let allocator = Allocator::default();
-        // 脚本（非模块）；正则字面量解析时就校验
+        // Script (not module); regular expression literals are validated during parsing
         let options = ParseOptions { parse_regular_expression: true, ..ParseOptions::default() };
         let ret = Parser::new(&allocator, src.text, SourceType::script()).with_options(options).parse();
         if let Some(d) = ret.diagnostics.first() {
             return Err(Error::Syntax(format!("{}: {d}", src.file)));
         }
         let program = &ret.program;
-        // 早期错误（重复声明、非法的 break / super / new.target……）：oxc 的语法分析不管，要 semantic 检查
+        // Early errors (duplicate declarations, illegal break / super / new.target, …): oxc's parser does not check
+        // them, the semantic check is needed
         let checked = SemanticBuilder::new().with_check_syntax_error(true).build(program);
         if let Some(d) = checked.diagnostics.errors().next() {
             return Err(Error::Syntax(format!("{}: {d}", src.file)));
         }
-        // 含直接 eval 的函数：它们的绑定都放进环境，非严格的再放一个装 eval `var` 的对象
+        // Functions containing a direct eval: all their bindings go into environments, and sloppy ones get an extra
+        // object holding eval `var`s
         let scoping = checked.semantic.scoping();
         let eval_scopes: HashSet<oxc_syntax::scope::ScopeId> = scoping.scope_descendants_from_root().filter(|&id| scoping.scope_flags(id).contains_direct_eval()).collect();
         let outer_names: Option<Vec<Vec<&str>>> = outer.map(|o| o.0.iter().map(|l| l.iter().map(|n| allocator.alloc_str(&n.name)).collect()).collect());
@@ -288,7 +298,8 @@ impl Module {
         let (captured, used, eval_fns) = Resolver::script(&program.body, Decls::this_key(program.span), &allocator, local.as_ref(), strict, eval_scopes, outer_names.as_deref());
         let mut c = Compiler { src, alloc: &allocator, captured, used, sites: 0, class_depth: 0, module: Vec::new(), frames: Vec::new(), levels: Vec::new(), script_lexicals: HashSet::new(), chains: Vec::new(), eval_fns };
         if let (Some(o), Some(names)) = (outer, &outer_names) {
-            // 调用处的环境链：由外向内压成作用域层（都在环境里，槽位照抄）
+            // The call site's environment chain: pushed outermost first as scope levels (all in environments, slots
+            // copied as is)
             for (level, names) in o.0.iter().zip(names).rev() {
                 let bound = level.iter().zip(names).map(|(n, &name)| Bound { name, binding: Binding::Env(n.slot), constant: n.constant, ready: n.tdz.then_some(u32::MAX), self_name: n.self_name }).collect();
                 c.levels.push(Level { func: usize::MAX, names: bound, env: true, mark: 0, switch: false });
@@ -300,21 +311,22 @@ impl Module {
     }
 }
 
-/// 模块顶层的一个名字：环境槽位（带是不是词法声明、是不是 const），或导入绑定。
+/// A top-level module name: an environment slot (with whether it is a lexical declaration and whether it is const), or
+/// an import binding.
 #[derive(Clone, Copy)]
 enum ModuleName {
     Slot { slot: u16, lexical: bool, constant: bool },
     Import(u16),
 }
 
-/// 收集模块顶层名字与模块信息时的状态。
+/// State while collecting top-level module names and module info.
 struct Layout<'a> {
     names: Vec<(&'a str, ModuleName)>,
     info: ModuleInfo,
     slots: u16,
-    /// （导出名, 本地名）：最后再分本地导出与转导出
+    /// (export name, local name): split into local exports and re-exports at the end
     local_exports: Vec<(&'a str, &'a str)>,
-    /// 导入绑定名 ⇒ 导入编号
+    /// Import binding name ⇒ import number
     imports: Vec<(&'a str, usize)>,
 }
 
@@ -376,7 +388,7 @@ impl<'a> Layout<'a> {
         }
     }
 
-    /// 导出：本地绑定给槽位；导出的其实是导入绑定的转成间接导出。
+    /// Exports: local bindings get slots; exports that are actually import bindings become indirect exports.
     fn finish(mut self) -> (Vec<(&'a str, ModuleName)>, ModuleInfo) {
         for (exported, local) in core::mem::take(&mut self.local_exports) {
             if let Some(&(_, idx)) = self.imports.iter().find(|(n, _)| *n == local) {
@@ -392,7 +404,7 @@ impl<'a> Layout<'a> {
 }
 
 impl Module {
-    /// 编一个模块：给出字节码与模块信息（请求、导入、导出、环境布局）。
+    /// Compiles a module: gives the bytecode and the module info (requests, imports, exports, environment layout).
     pub fn compile_module(src: &Source<'_>) -> Result<(Self, ModuleInfo), Error> {
         let allocator = Allocator::default();
         let options = ParseOptions { parse_regular_expression: true, ..ParseOptions::default() };
@@ -424,7 +436,7 @@ impl Module {
         Ok((Module { functions: c.module }, info))
     }
 
-    /// 模块顶层的名字与模块信息：槽位 0 是 `this`（undefined），之后按声明顺序。
+    /// Top-level module names and module info: slot 0 is `this` (undefined), then in declaration order.
     fn module_layout<'a>(program: &'a Program<'a>) -> (Vec<(&'a str, ModuleName)>, ModuleInfo) {
         use oxc_ast::ast::{ExportDefaultDeclarationKind, ImportDeclarationSpecifier};
         let mut l = Layout { names: alloc::vec![(THIS, ModuleName::Slot { slot: 0, lexical: false, constant: true })], info: ModuleInfo::default(), slots: 1, local_exports: Vec::new(), imports: Vec::new() };
@@ -500,7 +512,7 @@ impl Module {
                 _ => {}
             }
         }
-        // 块里的 var 也在模块顶层
+        // `var`s in blocks are also at the module top level
         let mut vars = Decls::default();
         vars.vars(&program.body);
         for d in &vars.0 {
@@ -511,9 +523,9 @@ impl Module {
 }
 
 impl<'a> Compiler<'a, '_> {
-    // ---- 基础 --------------------------------------------------------------------------
+    // ---- Basics ------------------------------------------------------------------------
 
-    /// 正在编的文件名（动态 import 的相对路径基准）。
+    /// The file name being compiled (base for relative paths in dynamic import).
     pub(crate) fn file(&self) -> &'a str {
         self.alloc.alloc_str(self.src.file)
     }
@@ -522,7 +534,8 @@ impl<'a> Compiler<'a, '_> {
         self.src.unsupported(span.start, what)
     }
 
-    /// annexB：块级函数声明执行到这里，把块里的函数值写到外层的 `var`（函数层绑定或全局）。
+    /// annexB: when execution reaches a block-level function declaration, writes the function value from the block to
+    /// the outer `var` (a function-level binding or a global).
     fn annexb_copy(&mut self, f: &'a oxc_ast::ast::Function<'a>) {
         let Some(id) = &f.id else { return };
         if !self.frame().annexb.contains(&f.span.start) {
@@ -571,7 +584,8 @@ impl<'a> Compiler<'a, '_> {
         }
     }
 
-    /// EvalDeclarationInstantiation 的冲突检查：eval 的 `var` / 函数名和调用处到变量环境之间的词法声明同名。
+    /// Conflict check of EvalDeclarationInstantiation: an eval `var` / function name equal to a lexical declaration
+    /// between the call site and the variable environment.
     fn eval_conflicts(&self, globals: &Decls<'a>) -> Result<(), Error> {
         for d in globals.0.iter().filter(|d| matches!(d.kind, DeclKind::Var | DeclKind::Function(_))) {
             if self.outer_lexical(d.name) {
@@ -581,7 +595,8 @@ impl<'a> Compiler<'a, '_> {
         Ok(())
     }
 
-    /// 直接 eval 处到变量环境之间（含变量环境那层）有没有叫这个名字的词法声明。
+    /// Whether there is a lexical declaration with this name between the direct eval and the variable environment
+    /// (including the variable environment level).
     fn outer_lexical(&self, name: &str) -> bool {
         for l in self.levels.iter().rev().filter(|l| l.func == usize::MAX) {
             if l.names.iter().any(|n| n.name == name && n.ready.is_some() && !n.self_name) {
@@ -594,12 +609,13 @@ impl<'a> Compiler<'a, '_> {
         false
     }
 
-    /// 名字解析到的是不是具名函数表达式自己的名字。
+    /// Whether the name resolves to the own name of a named function expression.
     fn is_self_name(&self, name: &str) -> bool {
         self.levels.iter().rev().find_map(|l| l.names.iter().find(|n| n.name == name)).is_some_and(|n| n.self_name)
     }
 
-    /// 直接 eval 的代码：调用函数那一层（装 eval var 的对象的隐藏名, 那层已有的名字）。
+    /// Direct eval code: the calling function's level (hidden name of the object holding eval vars, names already at
+    /// that level).
     fn eval_var_level(&self) -> Option<(&'a str, Vec<&'a str>)> {
         self.levels.iter().rev().filter(|l| l.func == usize::MAX).find_map(|l| {
             let first = l.names.first()?;
@@ -607,13 +623,14 @@ impl<'a> Compiler<'a, '_> {
         })
     }
 
-    /// 直接 eval 处的作用域表：现在看得见的全部（都在环境里的）绑定，由内向外一层一个环境。
+    /// Scope table at a direct eval: all bindings currently visible (all in environments), innermost first, one
+    /// environment per level.
     pub(crate) fn eval_scope(&mut self) -> u16 {
         let mut levels = Vec::new();
         let cur = self.frames.len() - 1;
         let prologue = self.frame().prologue;
         for l in self.levels.iter().rev().filter(|l| l.env) {
-            // 形参表达式里：函数体顶层的 let / const / class 还看不见
+            // In parameter expressions: the top-level let / const / class of the function body are not visible yet
             let hide_lexical = prologue && l.func == cur;
             let names = l
                 .names
@@ -631,12 +648,13 @@ impl<'a> Compiler<'a, '_> {
         u16::try_from(scopes.len() - 1).unwrap_or(u16::MAX)
     }
 
-    /// 这里的代码是不是严格的：函数本身严格，或者在类体里（`extends` 与计算键在外层函数里求值，也是严格代码）。
+    /// Whether the code here is strict: the function itself is strict, or it is inside a class body (`extends` and
+    /// computed keys are evaluated in the outer function, also as strict code).
     pub(crate) fn strict_here(&self) -> bool {
         self.strict() || self.class_depth > 0
     }
 
-    /// 当前函数是不是严格模式。
+    /// Whether the current function is in strict mode.
     pub(crate) fn strict(&self) -> bool {
         self.frames.last().is_some_and(|f| f.strict)
     }
@@ -647,10 +665,10 @@ impl<'a> Compiler<'a, '_> {
 
     pub(crate) fn emit(&mut self, i: Insn) -> usize {
         let out = &mut self.frame().out;
-        // 能精确放进 i32 的数常量（不含 -0）直接放进指令
+        // Number constants exactly representable as i32 (excluding -0) go directly into the instruction
         let i = match i {
             Insn::LdaConst(k) => match out.consts.get(k.0 as usize) {
-                #[expect(clippy::cast_possible_truncation, reason = "下面核对过转回来相等")]
+                #[expect(clippy::cast_possible_truncation, reason = "checked below that it round-trips")]
                 Some(&Constant::Number(x)) if f64::from(x as i32) == x && !(x == 0.0 && x.is_sign_negative()) => Insn::LdaSmi(x as i32),
                 _ => i,
             },
@@ -664,7 +682,7 @@ impl<'a> Compiler<'a, '_> {
         Label(u32::try_from(self.frame().out.insns.len()).expect("fewer than 2^32 instructions"))
     }
 
-    /// 发一条目标待回填的跳转。
+    /// Emits a jump whose target is to be backpatched.
     pub(crate) fn jump(&mut self, mk: fn(Label) -> Insn) -> usize {
         self.emit(mk(UNPATCHED))
     }
@@ -673,7 +691,7 @@ impl<'a> Compiler<'a, '_> {
         *self.frame().out.insns[at].target_mut().expect("a jump") = to;
     }
 
-    /// 把 `at` 处的跳转指到这里。
+    /// Points the jump at `at` here.
     pub(crate) fn land(&mut self, at: usize) {
         let to = self.here();
         self.patch(at, to);
@@ -692,7 +710,7 @@ impl<'a> Compiler<'a, '_> {
         self.constant(Constant::String(s.into()))
     }
 
-    /// 连续 `n` 个临时寄存器，按栈的次序 [`release`](Self::release)。
+    /// `n` consecutive temporary registers, [`release`](Self::release)d in stack order.
     pub(crate) fn temps(&mut self, n: u16) -> Reg {
         let f = self.frame();
         let r = Reg(f.top);
@@ -709,9 +727,10 @@ impl<'a> Compiler<'a, '_> {
         self.frame().top = r.0;
     }
 
-    // ---- 作用域 ------------------------------------------------------------------------
+    // ---- Scopes ------------------------------------------------------------------------
 
-    /// 进一层作用域：分配绑定（被捕获的进环境），拷进被捕获的 `this` / 形参，建函数声明的闭包。
+    /// Enters a scope level: allocates bindings (captured ones go into the environment), copies in the captured `this`
+    /// / parameters, creates closures for function declarations.
     fn enter(&mut self, decls: &Decls<'a>) -> Result<(), Error> {
         let func = self.frames.len() - 1;
         let mark = self.frame().top;
@@ -738,7 +757,7 @@ impl<'a> Compiler<'a, '_> {
         }
         let bindings: Vec<Binding> = names.iter().map(|n| n.binding).collect();
         self.levels.push(Level { func, names, env, mark, switch: false });
-        // 暂时性死区：槽位先填未初始化标记
+        // Temporal dead zone: slots are first filled with the uninitialized marker
         for (d, &b) in decls.0.iter().zip(&bindings) {
             if d.ready.is_some() {
                 self.emit(Insn::LdaHole);
@@ -762,7 +781,8 @@ impl<'a> Compiler<'a, '_> {
                     None
                 }
                 DeclKind::Arguments if self.used.contains(&d.key) => {
-                    // 建 arguments 要全部实参；非严格、简单形参时下标映射到形参的槽位
+                    // Creating arguments needs all arguments; with sloppy mode and simple parameters, indices map to
+                    // the parameter slots
                     self.frame().out.keeps_args = true;
                     if self.frame().simple_params && !self.frame().strict {
                         let level = self.levels.last().expect("the function level");
@@ -784,7 +804,7 @@ impl<'a> Compiler<'a, '_> {
         Ok(())
     }
 
-    /// 把 acc 存进本层刚分配的绑定。
+    /// Stores acc into the binding just allocated at this level.
     fn bind(&mut self, b: Binding) {
         match b {
             Binding::Reg(r) => self.emit(Insn::Star(r)),
@@ -793,7 +813,7 @@ impl<'a> Compiler<'a, '_> {
         };
     }
 
-    /// 出一层块作用域。
+    /// Leaves a block scope level.
     fn leave(&mut self) {
         let l = self.levels.pop().expect("a scope to leave");
         if l.env {
@@ -810,7 +830,7 @@ impl<'a> Compiler<'a, '_> {
         Ok(())
     }
 
-    /// 名字解析：由内向外，数经过几层环境；找不到就是全局。
+    /// Name resolution: innermost first, counting the environment levels passed; global if not found.
     pub(crate) fn resolve(&self, name: &'a str) -> Resolved<'a> {
         let cur = self.frames.len() - 1;
         let mut depth = 0;
@@ -833,8 +853,9 @@ impl<'a> Compiler<'a, '_> {
         Resolved { place: Place::Global(name), constant: false, tdz: None }
     }
 
-    /// 名字在本函数的寄存器里、在 `pos` 处不用查死区、也不在 `with` 里：给出那个寄存器。
-    /// 只有本函数自己的代码能改它（被内层函数捕获的绑定在环境里，不在寄存器里）。
+    /// If the name is in this function's registers, needs no TDZ check at `pos`, and is not inside `with`, gives that
+    /// register. Only this function's own code can change it (bindings captured by inner functions are in environments,
+    /// not registers).
     pub(crate) fn register_of(&self, name: &'a str, pos: u32) -> Option<Reg> {
         if !self.with_chain(name).is_empty() {
             return None;
@@ -851,12 +872,12 @@ impl<'a> Compiler<'a, '_> {
         (r.place, r.constant)
     }
 
-    /// 读一个名字进 acc（不知道使用位置，死区按要查算）。
+    /// Reads a name into acc (use position unknown, so the TDZ is checked).
     pub(crate) fn load(&mut self, name: &'a str) {
         self.load_at(name, 0);
     }
 
-    /// 名字和它的静态绑定之间隔着的 `with`（由内向外，给出各自对象的隐藏名）。
+    /// The `with`s between a name and its static binding (innermost first, giving the hidden name of each object).
     pub(crate) fn with_chain(&self, name: &'a str) -> Vec<&'a str> {
         let mut out = Vec::new();
         for l in self.levels.iter().rev() {
@@ -872,8 +893,8 @@ impl<'a> Compiler<'a, '_> {
         out
     }
 
-    /// 依次查 `with` 对象：有这个名字就读它（`this_reg` 给了就把对象放进去当调用的 `this`），跳到末尾。
-    /// 给出要接到末尾的跳转。
+    /// Checks the `with` objects in turn: if one has the name, reads it (putting the object into `this_reg`, if given,
+    /// as the call's `this`) and jumps to the end. Gives the jumps to patch to the end.
     fn with_reads(&mut self, name: &'a str, chain: &[&'a str], this_reg: Option<Reg>) -> Vec<usize> {
         let k = self.name(name);
         let obj = self.temp();
@@ -883,7 +904,7 @@ impl<'a> Compiler<'a, '_> {
             self.emit(Insn::Star(obj));
             self.emit(Insn::WithHas { obj, name: k });
             let skip = self.jump(Insn::JumpIfFalse);
-            // 装 eval var 的对象相当于声明式环境：调用的 `this` 不是它
+            // The object holding eval vars acts as a declarative environment: it is not the call's `this`
             if let Some(t) = this_reg.filter(|_| !Hidden::is_eval_vars(hidden)) {
                 self.emit(Insn::Ldar(obj));
                 self.emit(Insn::Star(t));
@@ -896,7 +917,8 @@ impl<'a> Compiler<'a, '_> {
         ends
     }
 
-    /// 读一个名字，`with` 里先查对象；`typeof` 用的找不到给 `undefined`；调用用的把对象放进 `this_reg`。
+    /// Reads a name, checking the object first inside `with`; for `typeof` gives `undefined` when not found; for calls
+    /// puts the object into `this_reg`.
     pub(crate) fn load_dynamic(&mut self, name: &'a str, typeof_safe: bool, this_reg: Option<Reg>) {
         let chain = self.with_chain(name);
         let ends = self.with_reads(name, &chain, this_reg);
@@ -912,7 +934,7 @@ impl<'a> Compiler<'a, '_> {
         }
     }
 
-    /// 在源码位置 `pos` 读一个名字进 acc。`undefined` / `NaN` / `Infinity` 没被遮住就是常量。
+    /// Reads a name into acc at source position `pos`. `undefined` / `NaN` / `Infinity` are constants unless shadowed.
     pub(crate) fn load_at(&mut self, name: &'a str, pos: u32) {
         if !self.with_chain(name).is_empty() {
             return self.load_dynamic(name, false, None);
@@ -938,18 +960,20 @@ impl<'a> Compiler<'a, '_> {
         }
     }
 
-    /// 把 acc 存进一个名字；`init` 是声明里的初始化（`const` 只许这一次，也不查死区）。
+    /// Stores acc into a name; `init` is the initialization in a declaration (the only time `const` allows it, with no
+    /// TDZ check).
     pub(crate) fn store(&mut self, name: &'a str, init: bool) {
         self.store_at(name, init, 0);
     }
 
-    /// 同 [`store`](Self::store)，`pos` 是赋值处在源码里的位置：声明之后的不用查死区。
+    /// Same as [`store`](Self::store); `pos` is the source position of the assignment: no TDZ check after the
+    /// declaration.
     pub(crate) fn store_at(&mut self, name: &'a str, init: bool, pos: u32) {
         let chain = self.with_chain(name);
         if chain.is_empty() {
             return self.store_static(name, init, pos);
         }
-        // `with` 里：对象上有这个名字就写它，否则写静态绑定
+        // Inside `with`: if the object has this name write to it, otherwise write the static binding
         let value = self.temp();
         self.emit(Insn::Star(value));
         let k = self.name(name);
@@ -1006,9 +1030,9 @@ impl<'a> Compiler<'a, '_> {
         self.emit(insn);
     }
 
-    // ---- 函数 --------------------------------------------------------------------------
+    // ---- Functions ---------------------------------------------------------------------
 
-    /// 编一个函数，返回它在模块里的下标。
+    /// Compiles a function, returning its index in the module.
     pub(crate) fn function(&mut self, name: &str, flavor: Flavor, this: Option<Key>, self_name: Option<&'a BindingIdentifier<'a>>, params: Option<&'a FormalParameters<'a>>, body: Body<'a>) -> Result<u32, Error> {
         let count = params.map_or(0, |p| p.items.len());
         let n = u16::try_from(count).map_err(|_| self.unsupported(params.map_or(Span::default(), |p| p.span), "more than 65535 parameters"))?;
@@ -1016,9 +1040,10 @@ impl<'a> Compiler<'a, '_> {
         self.module.push(Function::default());
         let top = Reg::PARAMS + n;
         let keeps_args = matches!(body, Body::DefaultConstructor { derived: true }) || params.is_some_and(|p| p.rest.is_some());
-        // length：第一个带默认值的形参之前的个数（剩余参数不算）
+        // length: the number of parameters before the first one with a default value (the rest parameter does not
+        // count)
         let length = u16::try_from(params.map_or(0, |p| p.items.iter().take_while(|i| i.initializer.is_none()).count())).unwrap_or(u16::MAX);
-        // 类里的函数（方法、构造器、字段初始化）都是严格的
+        // Functions in a class (methods, constructors, field initializers) are all strict
         let strict = flavor.strict || self.class_depth > 0 || self.frames.last().is_some_and(|f| f.strict);
         let out = Function { name: name.into(), kind: flavor.kind, keeps_args, generator: flavor.generator, asynchronous: flavor.asynchronous, mode: strict.into(), params: n, length, regs: top, ..Function::default() };
         self.frames.push(Frame { index, out, top, envs: 0, controls: Vec::new(), label: None, completion: None, resume: None, async_generator: false, strict, annexb: Vec::new(), var_level: None, eval_vars: None, prologue: false, simple_params: false });
@@ -1045,7 +1070,7 @@ impl<'a> Compiler<'a, '_> {
         if flavor.kind == (FunctionKind::Constructor { derived: true })
             && let Some(t) = self.levels.last_mut().and_then(|l| l.names.iter_mut().find(|n| n.name == THIS))
         {
-            // 派生类构造器的 `this` 在 `super()` 之前没初始化
+            // In a derived class constructor `this` is uninitialized before `super()`
             t.ready = Some(u32::MAX);
         }
         if let Some(p) = params {
@@ -1053,7 +1078,8 @@ impl<'a> Compiler<'a, '_> {
             self.prologue(p)?;
             self.frame().prologue = false;
         }
-        // 生成器：形参与声明都准备好了才挂起（调用时就跑到这里，形参出错同步抛），第一次 next 从这里接着跑
+        // Generator: suspend only after parameters and declarations are set up (a call runs up to here, so parameter
+        // errors throw synchronously); the first next resumes from here
         if flavor.generator
             && let Some(mode) = self.frame().resume
         {
@@ -1082,7 +1108,7 @@ impl<'a> Compiler<'a, '_> {
         Ok(u32::try_from(index).expect("fewer than 2^32 functions"))
     }
 
-    /// 形参序言：默认值、解构形参、剩余参数。
+    /// Parameter prologue: default values, destructured parameters, rest parameter.
     fn prologue(&mut self, params: &'a FormalParameters<'a>) -> Result<(), Error> {
         for (i, p) in (0u16..).zip(&params.items) {
             let reg = Reg(Reg::PARAMS + i);
@@ -1098,7 +1124,8 @@ impl<'a> Compiler<'a, '_> {
             }
             match &p.pattern {
                 BindingPattern::BindingIdentifier(id) => {
-                    // 被捕获的形参进帧时已拷进环境，默认值算完要再拷一次
+                    // Captured parameters were copied into the environment on frame entry; after the default value is
+                    // computed they must be copied again
                     let name = id.name.as_str();
                     if p.initializer.is_some() && !matches!(self.lookup(name).0, Place::Reg(r) if r == reg) {
                         self.emit(Insn::Ldar(reg));
@@ -1119,7 +1146,7 @@ impl<'a> Compiler<'a, '_> {
         Ok(())
     }
 
-    /// 把寄存器 `value` 里的值按模式绑到名字上（`init`：声明里的初始化）。
+    /// Binds the value in register `value` to names according to the pattern (`init`: initialization in a declaration).
     pub(crate) fn bind_pattern(&mut self, p: &'a BindingPattern<'a>, value: Reg, init: bool) -> Result<(), Error> {
         match p {
             BindingPattern::BindingIdentifier(id) => {
@@ -1161,7 +1188,7 @@ impl<'a> Compiler<'a, '_> {
             }
             BindingPattern::ArrayPattern(a) => {
                 let iter = self.iterate(value);
-                // 默认值等抛出时要先关迭代器
+                // If a default value throws, the iterator must be closed first
                 self.closing_on_throw(iter, |c| {
                     for e in &a.elements {
                         c.emit(Insn::IteratorNext { iter });
@@ -1189,7 +1216,7 @@ impl<'a> Compiler<'a, '_> {
         Ok(())
     }
 
-    /// 跑 `f`；期间抛出就先关掉迭代器 `iter`（没走完才调 `return`）再接着抛。
+    /// Runs `f`; if it throws, closes iterator `iter` first (calling `return` only if not done) and then rethrows.
     pub(crate) fn closing_on_throw(&mut self, iter: Reg, f: impl FnOnce(&mut Self) -> Result<(), Error>) -> Result<(), Error> {
         let on_throw = self.jump(Insn::PushHandler);
         self.frame().controls.push(Control::Handler);
@@ -1208,7 +1235,8 @@ impl<'a> Compiler<'a, '_> {
         Ok(())
     }
 
-    /// 取寄存器 `value` 的迭代器：迭代器记录占三个连续寄存器（调用方释放）。
+    /// Gets the iterator of register `value`: the iterator record takes three consecutive registers (the caller frees
+    /// them).
     pub(crate) fn iterate(&mut self, value: Reg) -> Reg {
         self.emit(Insn::Ldar(value));
         let iter = self.temps(3);
@@ -1216,7 +1244,8 @@ impl<'a> Compiler<'a, '_> {
         iter
     }
 
-    /// `for-of` / `for-in` 的左边：声明（含解构）或赋值目标，值在 `v`。
+    /// The left side of `for-of` / `for-in`: a declaration (including destructuring) or an assignment target, with the
+    /// value in `v`.
     fn for_left(&mut self, left: &'a ForStatementLeft<'a>, v: Reg) -> Result<(), Error> {
         match left {
             ForStatementLeft::VariableDeclaration(d) => {
@@ -1227,9 +1256,10 @@ impl<'a> Compiler<'a, '_> {
         }
     }
 
-    /// `for (left of right) body`：迭代器协议；`break` / `return` / 抛出都关掉迭代器。
-    /// `for await (left of right) body`：async 迭代器（没有就退回同步迭代器并等每个值），每步等 `next()` 的结果；
-    /// `break` / `return` 穿出去时调 `return` 并等它，循环体抛出时关掉迭代器。
+    /// `for (left of right) body`: iterator protocol; `break` / `return` / a throw all close the iterator.
+    /// `for await (left of right) body`: async iterator (falling back to the sync iterator and awaiting each value when
+    /// absent), awaiting the result of `next()` at each step; `break` / `return` passing out call `return` and await
+    /// it, a throw from the body closes the iterator.
     fn for_await(&mut self, f: &'a ForOfStatement<'a>) -> Result<(), Error> {
         let mode = self.resume_reg(f.span, "for await outside an async function")?;
         let label = self.take_label();
@@ -1246,7 +1276,7 @@ impl<'a> Compiler<'a, '_> {
         self.emit(Insn::Star(v));
         self.emit(Insn::Ldar(Reg(iter.0 + 2)));
         let done = self.jump(Insn::JumpIfTrue);
-        // 退回同步迭代器时值本身也要等
+        // When falling back to the sync iterator the value itself is awaited too
         self.emit(Insn::Ldar(Reg(iter.0 + 3)));
         let not_sync = self.jump(Insn::JumpIfFalse);
         self.emit(Insn::Ldar(v));
@@ -1264,7 +1294,7 @@ impl<'a> Compiler<'a, '_> {
         self.frame().controls.pop();
         self.emit(Insn::PopHandler);
         self.emit(Insn::Jump(top));
-        // break 落这里：调 return 并等它
+        // break lands here: call return and await it
         let broke = self.here();
         self.emit(Insn::AsyncIteratorReturn { iter });
         self.emit(Insn::Await { mode });
@@ -1309,11 +1339,11 @@ impl<'a> Compiler<'a, '_> {
         self.frame().controls.pop();
         self.emit(Insn::PopHandler);
         self.emit(Insn::Jump(top));
-        // break 落这里：关迭代器
+        // break lands here: close the iterator
         let broke = self.here();
         self.emit(Insn::IteratorClose { iter });
         let end = self.jump(Insn::Jump);
-        // 循环体抛出：关迭代器再接着抛
+        // Throw from the body: close the iterator and rethrow
         self.land(on_throw);
         self.emit(Insn::Star(v));
         self.emit(Insn::IteratorCloseQuiet { iter });
@@ -1327,7 +1357,7 @@ impl<'a> Compiler<'a, '_> {
         Ok(())
     }
 
-    /// `for (left in right) body`：先取键表快照，按下标走。
+    /// `for (left in right) body`: takes a snapshot of the key list first and walks it by index.
     fn for_in(&mut self, f: &'a ForInStatement<'a>) -> Result<(), Error> {
         let label = self.take_label();
         self.expr(&f.right)?;
@@ -1364,7 +1394,8 @@ impl<'a> Compiler<'a, '_> {
         Ok(())
     }
 
-    /// `yield` / `await` 之后：按恢复方式分派（`return` 经过 finally、`throw` 在这里抛），否则 acc 是送进来的值。
+    /// After `yield` / `await`: dispatches on the resume mode (`return` goes through finally, `throw` throws here),
+    /// otherwise acc is the value sent in.
     pub(crate) fn resume_dispatch(&mut self, mode: Reg, returnable: bool) -> Result<(), Error> {
         let v = self.temp();
         self.emit(Insn::Star(v));
@@ -1372,7 +1403,7 @@ impl<'a> Compiler<'a, '_> {
             self.on_completion(mode, f64::from(Resume::Return), |s| {
                 s.emit(Insn::Ldar(v));
                 if s.frame().async_generator {
-                    // async 生成器的 return(v) 先等 v
+                    // return(v) of an async generator awaits v first
                     s.emit(Insn::Await { mode });
                     s.resume_dispatch(mode, false)?;
                 }
@@ -1394,13 +1425,14 @@ impl<'a> Compiler<'a, '_> {
         self.frame().async_generator
     }
 
-    /// 生成器 / async 函数恢复方式的寄存器；不在里面就报错。
+    /// The register holding a generator / async function's resume mode; an error if not inside one.
     pub(crate) fn resume_reg(&mut self, span: Span, what: &str) -> Result<Reg, Error> {
         self.frame().resume.ok_or_else(|| self.unsupported(span, what))
     }
 
-    /// `value` 是 `undefined` 就换成默认值：结果放一个新临时寄存器（调用方释放）。
-    /// `name` 是默认值是匿名函数时推断给它的名字。
+    /// Replaces `value` with the default value if it is `undefined`: the result goes into a new temporary register (the
+    /// caller frees it).
+    /// `name` is the name inferred for the default value when it is an anonymous function.
     pub(crate) fn with_default(&mut self, value: Reg, default: &'a Expression<'a>, name: Option<&'a str>) -> Result<Reg, Error> {
         let t = self.temp();
         self.emit(Insn::Ldar(value));
@@ -1415,13 +1447,13 @@ impl<'a> Compiler<'a, '_> {
         Ok(t)
     }
 
-    /// 解构 `null` / `undefined` 抛 TypeError（`{} = v` 没有属性可读时补这一下）。
+    /// Destructuring `null` / `undefined` throws TypeError (added for `{} = v`, where there is no property to read).
     pub(crate) fn require_object(&mut self, value: Reg) {
         let k = self.name("constructor");
         self.emit(Insn::GetNamed { obj: value, name: k });
     }
 
-    /// 属性键求值放进寄存器 `k`（静态键是字符串常量）。
+    /// Evaluates a property key into register `k` (a static key is a string constant).
     pub(crate) fn property_key_into(&mut self, key: &'a PropertyKey<'a>, computed: bool, k: Reg) -> Result<(), Error> {
         match self.static_key(key, computed) {
             Some(c) => {
@@ -1434,8 +1466,8 @@ impl<'a> Compiler<'a, '_> {
         Ok(())
     }
 
-    /// 普通函数（声明或表达式）：查掉不支持的种类。
-    /// 普通函数；匿名的用推断出的名字 `inferred`。
+    /// Ordinary function (declaration or expression): rejects unsupported kinds.
+    /// Ordinary function; an anonymous one uses the inferred name `inferred`.
     pub(crate) fn plain_function(&mut self, f: &'a AstFunction<'a>, self_name: bool, inferred: &str) -> Result<u32, Error> {
         let flavor = Flavor::from((f, FunctionKind::Normal));
         let body = f.body.as_ref().ok_or_else(|| self.unsupported(f.span, "a function without a body"))?;
@@ -1443,15 +1475,16 @@ impl<'a> Compiler<'a, '_> {
         self.function(name, flavor, Some(Decls::this_key(f.span)), if self_name { f.id.as_ref() } else { None }, Some(&f.params), Body::Statements(&body.statements))
     }
 
-    /// 方法（类方法、对象字面量方法、访问器）：不可 `new`。
+    /// Method (class method, object literal method, accessor): not `new`able.
     pub(crate) fn method(&mut self, name: &str, f: &'a AstFunction<'a>, kind: FunctionKind) -> Result<u32, Error> {
         let flavor = Flavor::from((f, kind));
         let body = f.body.as_ref().ok_or_else(|| self.unsupported(f.span, "a method without a body"))?;
         self.function(name, flavor, Some(Decls::this_key(f.span)), None, Some(&f.params), Body::Statements(&body.statements))
     }
 
-    /// 字段初始化函数的函数体：实例的先装私有方法 / 访问器，再按顺序定义字段（公开的可枚举、私有的进私有表）；
-    /// 静态的还按顺序跑静态块。
+    /// The body of a field initializer function: for instances, first install private methods / accessors, then define
+    /// fields in order (public ones enumerable, private ones into the private table); for statics, also run static
+    /// blocks in order.
     fn fields(&mut self, class: &'a Class<'a>, statik: bool) -> Result<(), Error> {
         self.load(THIS);
         let this = self.temp();
@@ -1512,7 +1545,7 @@ impl<'a> Compiler<'a, '_> {
         Ok(())
     }
 
-    /// 方法定义的种类 ⇒ 属性的种类。
+    /// Method definition kind ⇒ property kind.
     fn method_kind(kind: MethodDefinitionKind) -> PropertyKind {
         match kind {
             MethodDefinitionKind::Get => PropertyKind::Getter,
@@ -1521,7 +1554,8 @@ impl<'a> Compiler<'a, '_> {
         }
     }
 
-    /// 非计算的属性键的文本（函数名推断用；私有名带 `#`）；计算键给 `None`。
+    /// The text of a non-computed property key (for function name inference; private names include `#`); `None` for
+    /// computed keys.
     pub(crate) fn static_name(&self, key: &'a PropertyKey<'a>, computed: bool) -> Option<&'a str> {
         if computed {
             return None;
@@ -1535,7 +1569,8 @@ impl<'a> Compiler<'a, '_> {
         }
     }
 
-    /// 方法 / 访问器的函数名：键名，访问器前面加 `get ` / `set `；计算键给空（运行时才知道）。
+    /// Function name of a method / accessor: the key name, prefixed with `get ` / `set ` for accessors; empty for
+    /// computed keys (known only at runtime).
     pub(crate) fn method_name(&self, key: &'a PropertyKey<'a>, computed: bool, kind: MethodDefinitionKind) -> &'a str {
         let Some(n) = self.static_name(key, computed) else { return "" };
         match kind {
@@ -1545,7 +1580,7 @@ impl<'a> Compiler<'a, '_> {
         }
     }
 
-    /// 非计算的属性键（标识符 / 字符串 / 数）的常量；计算键给 `None`。
+    /// The constant for a non-computed property key (identifier / string / number); `None` for computed keys.
     pub(crate) fn static_key(&mut self, key: &'a PropertyKey<'a>, computed: bool) -> Option<Result<Const, Error>> {
         if computed {
             return None;
@@ -1562,8 +1597,10 @@ impl<'a> Compiler<'a, '_> {
         })
     }
 
-    /// 类：构造器 + 原型方法 + 静态方法 + 字段初始化函数。结果（构造器）在 acc。
-    /// 类里每个私有名一个新的私有键（getter / setter 共用一个），存进类作用域的绑定。
+    /// Class: constructor + prototype methods + static methods + field initializer functions. The result (the
+    /// constructor) is in acc.
+    /// Each private name in the class gets a new private key (shared by getter / setter), stored in a binding of the
+    /// class scope.
     fn private_names(&mut self, c: &'a Class<'a>) {
         let mut seen: Vec<&'a str> = Vec::new();
         for e in &c.body.body {
@@ -1589,7 +1626,8 @@ impl<'a> Compiler<'a, '_> {
         }
     }
 
-    /// 私有方法 / 访问器：函数只建一次存进隐藏绑定；静态的现在就装到构造器（`target`）上，实例的构造时装。
+    /// Private methods / accessors: the function is created only once and stored in a hidden binding; static ones are
+    /// installed on the constructor (`target`) now, instance ones at construction.
     fn private_method(&mut self, m: &'a MethodDefinition<'a>, id: &'a PrivateIdentifier<'a>, target: Reg) -> Result<(), Error> {
         let fname = self.method_name(&m.key, false, m.kind);
         let f = self.method(fname, &m.value, FunctionKind::Method)?;
@@ -1606,9 +1644,9 @@ impl<'a> Compiler<'a, '_> {
         Ok(())
     }
 
-    /// 类；匿名的构造器用推断出的名字 `inferred`。
+    /// Class; an anonymous constructor uses the inferred name `inferred`.
     pub(crate) fn class(&mut self, c: &'a Class<'a>, inferred: &'a str) -> Result<(), Error> {
-        // 类体（含 extends）全是严格代码
+        // The class body (including extends) is entirely strict code
         self.class_depth += 1;
         let r = self.class_body(c, inferred);
         self.class_depth -= 1;
@@ -1642,7 +1680,8 @@ impl<'a> Compiler<'a, '_> {
         self.emit(Insn::CreateClass { func, parent, proto });
         let ctor = self.temp();
         self.emit(Insn::Star(ctor));
-        // 类体里的类名：构造器一建好就初始化（静态块、静态字段里就能用）
+        // The class name inside the class body: initialized as soon as the constructor is created (usable in static
+        // blocks and static fields)
         if c.id.is_some() {
             self.store(name, true);
         }
@@ -1680,7 +1719,7 @@ impl<'a> Compiler<'a, '_> {
                 ClassElement::MethodDefinition(_) => {}
                 ClassElement::PropertyDefinition(p) => {
                     if p.computed && !matches!(p.key, PropertyKey::PrivateIdentifier(_)) {
-                        // 计算字段名在类定义时求一次
+                        // Computed field names are evaluated once at class definition
                         let k = p.key.as_expression().ok_or_else(|| self.unsupported(p.span, "field key"))?;
                         self.expr(k)?;
                         self.emit(Insn::ToPropertyKey);
@@ -1719,7 +1758,8 @@ impl<'a> Compiler<'a, '_> {
         self.plain_function(f, false, "")
     }
 
-    /// 模块主体：顶层名字都在模块环境里（外层那一层），先建好提升的函数，再按顺序跑语句。
+    /// Module body: top-level names all live in the module environment (the outer level); create the hoisted functions
+    /// first, then run the statements in order.
     fn module_body(&mut self, program: &'a Program<'a>) -> Result<(), Error> {
         use oxc_ast::ast::{Declaration, ExportDefaultDeclarationKind};
         self.module.push(Function::default());
@@ -1779,9 +1819,11 @@ impl<'a> Compiler<'a, '_> {
         Ok(())
     }
 
-    /// 脚本本身：顶层 `var` / 函数声明 / `let` / `const` 都是全局对象的属性。
-    /// `local` 是 eval 代码自己那一层的声明（脚本没有）；严格的 eval 代码什么都不落到全局。
-    #[expect(clippy::too_many_lines, reason = "脚本 / eval 代码的声明实例化按规范一步步写")]
+    /// The script itself: top-level `var` / function declarations / `let` / `const` are all properties of the global
+    /// object.
+    /// `local` is the declarations of the eval code's own level (scripts have none); strict eval code puts nothing into
+    /// the global.
+    #[expect(clippy::too_many_lines, reason = "declaration instantiation follows the spec step by step")]
     fn script(&mut self, program: &'a Program<'a>, local: Option<&Decls<'a>>, strict: bool) -> Result<(), Error> {
         self.module.push(Function::default());
         let eval = local.is_some();
@@ -1789,7 +1831,7 @@ impl<'a> Compiler<'a, '_> {
         self.frames.push(Frame { index: 0, out, top: Reg::PARAMS, envs: 0, controls: Vec::new(), label: None, completion: None, resume: None, async_generator: false, strict, annexb: Vec::new(), var_level: None, eval_vars: None, prologue: false, simple_params: false });
         let completion = self.temp();
         self.frame().completion = Some(completion);
-        // 直接 eval 的代码用调用处的 `this`（经外层作用域表解析）
+        // Direct eval code uses the call site's `this` (resolved via the outer scope table)
         let direct = !self.levels.is_empty();
         if !direct {
             self.enter(&Decls(vec![Decl { name: THIS, key: Decls::this_key(program.span), kind: DeclKind::This, ready: None }]))?;
@@ -1799,7 +1841,7 @@ impl<'a> Compiler<'a, '_> {
             globals.vars(&program.body);
             globals.lexical(&program.body);
         }
-        // annexB：脚本里块级函数也在全局建 `var`
+        // annexB: block-level functions in a script also create a global `var`
         if !strict && !eval {
             let hoisted = Decls::annexb_functions(&program.body, None);
             self.frame().annexb = hoisted.iter().map(|f| f.span.start).collect();
@@ -1808,18 +1850,21 @@ impl<'a> Compiler<'a, '_> {
         if let Some(d) = local {
             self.enter(d)?;
         }
-        // 非严格的直接 eval：`var` 和调用处到变量环境之间的词法声明同名是 SyntaxError
+        // Sloppy direct eval: a `var` with the same name as a lexical declaration between the call site and the
+        // variable environment is a SyntaxError
         if direct && eval && !strict {
             self.eval_conflicts(&globals)?;
         }
-        // annexB：eval 代码里的块级函数也落到变量环境（和外层词法声明冲突的不提升）
+        // annexB: block-level functions in eval code also land in the variable environment (not hoisted if they
+        // conflict with outer lexical declarations)
         if eval && !strict {
             let mut hoisted = Decls::annexb_functions(&program.body, None);
             hoisted.retain(|f| f.id.as_ref().is_some_and(|id| !self.outer_lexical(id.name.as_str())));
             self.frame().annexb = hoisted.iter().map(|f| f.span.start).collect();
             globals.annexb_globals(&hoisted);
         }
-        // 非严格的直接 eval：`var` / 函数声明落到调用函数里（已有同名绑定就用它，否则放进装 eval var 的对象）
+        // Sloppy direct eval: `var` / function declarations land in the calling function (using an existing binding
+        // with the same name, otherwise the object holding eval vars)
         if direct && eval && !strict && let Some((vars, statics)) = self.eval_var_level() {
             self.frame().eval_vars = Some(vars);
             for d in &globals.0 {
@@ -1855,14 +1900,14 @@ impl<'a> Compiler<'a, '_> {
             }
             globals.0.retain(|d| !matches!(d.kind, DeclKind::Var | DeclKind::Function(_)));
         }
-        // 先查全部函数、`var` 能不能声明，一个不行就什么都不建
+        // First check that all functions and `var`s can be declared; if any cannot, create nothing
         for d in &globals.0 {
             if let DeclKind::Function(_) | DeclKind::Var = d.kind {
                 let name = self.name(d.name);
                 self.emit(Insn::CheckDeclare { name, function: matches!(d.kind, DeclKind::Function(_)) });
             }
         }
-        // 脚本顶层的 `let` / `const` / `class` 先在脚本作用域里声明（未初始化）
+        // Top-level `let` / `const` / `class` of a script are first declared (uninitialized) in the script scope
         for d in globals.0.iter().filter(|_| !eval) {
             if let DeclKind::Let | DeclKind::Const = d.kind {
                 self.script_lexicals.insert(d.name);
@@ -1885,7 +1930,8 @@ impl<'a> Compiler<'a, '_> {
                 _ => {}
             }
         }
-        // 指令序言（`'use strict'` 等）在 oxc 里不在 body 里，但也是表达式语句，算完成值
+        // The directive prologue (`'use strict'` etc.) is not in body in oxc, but it consists of expression statements
+        // and counts toward the completion value
         for d in &program.directives {
             let k = self.string_const(d.expression.value.as_str(), d.expression.span)?;
             self.emit(Insn::LdaConst(k));
@@ -1900,7 +1946,7 @@ impl<'a> Compiler<'a, '_> {
         Ok(())
     }
 
-    // ---- 语句 --------------------------------------------------------------------------
+    // ---- Statements --------------------------------------------------------------------
 
     fn statements(&mut self, stmts: &'a [Statement<'a>]) -> Result<(), Error> {
         stmts.iter().try_for_each(|s| self.statement(s))
@@ -1920,12 +1966,13 @@ impl<'a> Compiler<'a, '_> {
         }
     }
 
-    /// 循环 / `switch` 用掉挂着的标签。
+    /// A loop / `switch` consumes the pending labels.
     fn take_label(&mut self) -> Option<&'a str> {
         self.frame().label.take()
     }
 
-    /// 由内向外找跳出去的落点：先碰到 finally 就绕进它；`target` 为 `None` 是 `return`。
+    /// Finds where a jump out lands, innermost first: detours into the first finally encountered; `target` of `None`
+    /// means `return`.
     fn exit_plan(&self, target: Option<(Option<&'a str>, bool)>) -> Exit {
         let f = self.frames.last().expect("inside a function");
         for (i, c) in f.controls.iter().enumerate().rev() {
@@ -1949,8 +1996,9 @@ impl<'a> Compiler<'a, '_> {
         Exit::Function
     }
 
-    /// 离开控制栈第 `from` 层及以上：退掉多进的环境（`envs` 是落点的环境层数），由内向外卸处理器、关迭代器
-    /// （async 迭代器还要等 `return` 的结果）。acc 原样留着。
+    /// Leaves control stack levels `from` and above: pops the extra environments (`envs` is the landing point's
+    /// environment depth), and innermost first removes handlers and closes iterators (async iterators also await the
+    /// result of `return`). acc is left as is.
     fn leave_controls(&mut self, from: usize, envs: Option<u16>) {
         if let Some(e) = envs {
             for _ in e..self.frame().envs {
@@ -1977,7 +2025,7 @@ impl<'a> Compiler<'a, '_> {
                     self.emit(Insn::Star(saved));
                     self.emit(Insn::AsyncIteratorReturn { iter });
                     self.emit(Insn::Await { mode });
-                    // 等 `return` 时抛出照样往外抛
+                    // A throw while awaiting `return` propagates outward as usual
                     let v = self.temp();
                     self.emit(Insn::Star(v));
                     let k = self.constant(Constant::Number(f64::from(Resume::Throw)));
@@ -1995,7 +2043,7 @@ impl<'a> Compiler<'a, '_> {
         }
     }
 
-    /// 跳进第 `i` 层的 finally，带上完成类型 `kind`。
+    /// Jumps into the finally of level `i`, carrying completion type `kind`.
     fn enter_finally(&mut self, i: usize, kind: f64) {
         let Control::Finally(fin) = &self.frame().controls[i] else { unreachable!("a finally") };
         let (envs, kind_reg) = (fin.envs, fin.kind);
@@ -2008,7 +2056,8 @@ impl<'a> Compiler<'a, '_> {
         fin.entries.push(at);
     }
 
-    /// `break` / `continue`：退掉多进的环境与处理器、关掉经过的迭代器再跳；中间隔着 finally 就先绕进它。
+    /// `break` / `continue`: pops the extra environments and handlers, closes the iterators passed, then jumps; detours
+    /// into any finally in between first.
     fn exit(&mut self, span: Span, label: Option<&'a str>, cont: bool) -> Result<(), Error> {
         match self.exit_plan(Some((label, cont))) {
             Exit::Jump(i) => {
@@ -2031,7 +2080,8 @@ impl<'a> Compiler<'a, '_> {
         }
     }
 
-    /// `return`（值在 acc）：中间隔着 finally 就先把值存好绕进它；经过的迭代器都关掉。
+    /// `return` (value in acc): if a finally is in between, stores the value and detours into it first; closes all
+    /// iterators passed.
     pub(crate) fn ret(&mut self) {
         match self.exit_plan(None) {
             Exit::Finally(i) => {
@@ -2047,7 +2097,7 @@ impl<'a> Compiler<'a, '_> {
         }
     }
 
-    /// `if` 的分支：直接是函数声明的当成只有它的块（annexB B.3.3）。
+    /// Branches of `if`: a bare function declaration is treated as a block containing only it (annexB B.3.3).
     fn clause(&mut self, s: &'a Statement<'a>) -> Result<(), Error> {
         if matches!(s, Statement::FunctionDeclaration(_)) {
             let one = core::slice::from_ref(s);
@@ -2061,7 +2111,7 @@ impl<'a> Compiler<'a, '_> {
         self.scoped(&Decls::block([b.body.as_slice()]), |c| c.statements(&b.body))
     }
 
-    /// 按完成类型分派：是 `kind` 就做 `then`。
+    /// Dispatches on the completion type: runs `then` if it is `kind`.
     pub(crate) fn on_completion(&mut self, reg: Reg, kind: f64, then: impl FnOnce(&mut Self) -> Result<(), Error>) -> Result<(), Error> {
         let k = self.constant(Constant::Number(kind));
         self.emit(Insn::LdaConst(k));
@@ -2072,7 +2122,7 @@ impl<'a> Compiler<'a, '_> {
         Ok(())
     }
 
-    /// `try` / `catch` / `finally`。
+    /// `try` / `catch` / `finally`.
     fn try_statement(&mut self, t: &'a TryStatement<'a>) -> Result<(), Error> {
         let fin = t.finalizer.as_ref().map(|_| {
             let kind = self.temp();
@@ -2111,7 +2161,7 @@ impl<'a> Compiler<'a, '_> {
         self.emit(Insn::LdaConst(normal));
         self.emit(Insn::Star(kind));
         let fall = self.jump(Insn::Jump);
-        // 抛出进来：存好异常值
+        // Entered by a throw: save the exception value
         self.land(at);
         self.emit(Insn::Star(value));
         let throw = self.constant(Constant::Number(COMPLETION_THROW));
@@ -2138,7 +2188,7 @@ impl<'a> Compiler<'a, '_> {
         Ok(())
     }
 
-    #[expect(clippy::too_many_lines, reason = "一种语句一个分支，拆开反而难读")]
+    #[expect(clippy::too_many_lines, reason = "one arm per statement kind; splitting it would hurt readability")]
     fn statement(&mut self, s: &'a Statement<'a>) -> Result<(), Error> {
         match s {
             Statement::ExpressionStatement(e) => match self.frame().completion {
@@ -2163,7 +2213,7 @@ impl<'a> Compiler<'a, '_> {
                     Some(e) => {
                         self.expr(e)?;
                         if self.frame().async_generator {
-                            // async 生成器里 `return v` 先等 v
+                            // In an async generator `return v` awaits v first
                             let mode = self.resume_reg(r.span, "return")?;
                             self.emit(Insn::Await { mode });
                             self.resume_dispatch(mode, false)?;
@@ -2234,7 +2284,7 @@ impl<'a> Compiler<'a, '_> {
                     c.statement(&f.body)?;
                     let cont = c.here();
                     if c.levels.last().is_some_and(|l| l.env) {
-                        // 每轮一份新的 `let` 绑定，上一轮的闭包留着旧的
+                        // A fresh `let` binding per iteration; closures from the previous iteration keep the old one
                         c.emit(Insn::CloneEnv);
                     }
                     if let Some(u) = &f.update {
@@ -2296,7 +2346,7 @@ impl<'a> Compiler<'a, '_> {
             };
             match (&v.init, d.kind) {
                 (Some(e), _) => self.expr_named(e, id.name.as_str())?,
-                // 循环体里的 `let x;` 每轮都要回到 undefined
+                // `let x;` in a loop body must reset to undefined every iteration
                 (None, VariableDeclarationKind::Let) => _ = self.emit(Insn::LdaUndefined),
                 (None, _) => continue,
             }
@@ -2305,7 +2355,7 @@ impl<'a> Compiler<'a, '_> {
         Ok(())
     }
 
-    /// `switch`：逐个 `case` 严格相等比较跳进分支体，分支体按顺序落下去。
+    /// `switch`: compares each `case` with strict equality to jump into its body; bodies fall through in order.
     fn switch(&mut self, sw: &'a SwitchStatement<'a>) -> Result<(), Error> {
         let label = self.take_label();
         self.expr(&sw.discriminant)?;

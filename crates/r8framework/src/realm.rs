@@ -7,7 +7,7 @@ use r8gc::{Collect, Gc, Mutation, RefLock};
 
 use crate::{ErrorKind, Job, JsObject, JsString, JsSymbol, Native, NativeFn, ObjectData, ObjectKind, Property, Scope, SymbolData, Value};
 
-/// 规范里的内建 Symbol（`Symbol.iterator` 等）。
+/// The spec's built-in Symbols (`Symbol.iterator` etc.).
 #[derive(Clone, Copy, Collect)]
 #[collect(no_drop)]
 pub struct WellKnown<'gc> {
@@ -27,7 +27,7 @@ pub struct WellKnown<'gc> {
 }
 
 impl<'gc> WellKnown<'gc> {
-    /// 名字 ⇒ 字段，r8builtins 挂到 `Symbol` 上用。
+    /// Name ⇒ field; used by r8builtins to attach them to `Symbol`.
     pub fn all(&self) -> [(&'static str, JsSymbol<'gc>); 13] {
         [
             ("iterator", self.iterator),
@@ -47,8 +47,8 @@ impl<'gc> WellKnown<'gc> {
     }
 }
 
-/// 一个执行环境的全部内建对象：全局对象与各原型。r8framework 只建空壳并连好原型链，
-/// 方法由 [`Intrinsics`] 的实现（r8builtins）装进去。
+/// All built-in objects of an execution context: the global object and the prototypes. r8framework only creates empty
+/// shells and links the prototype chains; the methods are installed by the [`Intrinsics`] implementation (r8builtins).
 #[derive(Collect)]
 #[collect(no_drop)]
 pub struct Realm<'gc> {
@@ -57,45 +57,46 @@ pub struct Realm<'gc> {
     pub function_proto: JsObject<'gc>,
     pub array_proto: JsObject<'gc>,
     pub string_proto: JsObject<'gc>,
-    /// ASCII 单字符的字符串（`s[i]` / `charAt` 不用每次分配）
+    /// Single-character ASCII strings (so `s[i]` / `charAt` don't allocate each time)
     pub chars: alloc::vec::Vec<crate::JsString<'gc>>,
     pub number_proto: JsObject<'gc>,
     pub boolean_proto: JsObject<'gc>,
-    /// 按 [`ErrorKind`] 排的错误原型（`Error.prototype` 在第一个）
+    /// Error prototypes ordered by [`ErrorKind`] (`Error.prototype` first)
     pub error_protos: [JsObject<'gc>; ErrorKind::ALL.len()],
     pub symbol_proto: JsObject<'gc>,
-    /// %IteratorPrototype%：`[Symbol.iterator]() { return this }`
+    /// %IteratorPrototype%: `[Symbol.iterator]() { return this }`
     pub iterator_proto: JsObject<'gc>,
     pub array_iterator_proto: JsObject<'gc>,
     pub string_iterator_proto: JsObject<'gc>,
-    /// %GeneratorPrototype%：`next` / `return` / `throw`
+    /// %GeneratorPrototype%: `next` / `return` / `throw`
     pub generator_proto: JsObject<'gc>,
-    /// %GeneratorFunction.prototype%：生成器函数对象的原型
+    /// %GeneratorFunction.prototype%: the prototype of generator function objects
     pub generator_function_proto: JsObject<'gc>,
     /// %AsyncFunction.prototype%
     pub async_function_proto: JsObject<'gc>,
     /// %AsyncGeneratorFunction.prototype%
     pub async_generator_function_proto: JsObject<'gc>,
-    /// %AsyncIteratorPrototype%：`[Symbol.asyncIterator]() { return this }`
+    /// %AsyncIteratorPrototype%: `[Symbol.asyncIterator]() { return this }`
     pub async_iterator_proto: JsObject<'gc>,
-    /// %AsyncGeneratorPrototype%：`next` / `return` / `throw` 都返回 Promise
+    /// %AsyncGeneratorPrototype%: `next` / `return` / `throw` all return Promises
     pub async_generator_proto: JsObject<'gc>,
     pub promise_proto: JsObject<'gc>,
-    /// %Promise%（r8builtins 把它装成构造器）
+    /// %Promise% (r8builtins installs it as a constructor)
     pub promise_ctor: JsObject<'gc>,
     pub regexp_proto: JsObject<'gc>,
-    /// 正则字面量用的构造器：r8builtins 换上真的实现（用户改写全局 `RegExp` 不影响字面量）
+    /// The constructor used by regex literals: r8builtins swaps in the real implementation (user code overwriting the
+    /// global `RegExp` doesn't affect literals)
     pub regexp_ctor: JsObject<'gc>,
-    /// %eval%：严格代码里直接调用它时按直接 eval 处理
+    /// %eval%: a direct call to it in strict code is treated as a direct eval
     pub eval: JsObject<'gc>,
     pub bigint_proto: JsObject<'gc>,
     pub map_proto: JsObject<'gc>,
     pub set_proto: JsObject<'gc>,
     pub weakmap_proto: JsObject<'gc>,
     pub weakset_proto: JsObject<'gc>,
-    /// Map / Set 迭代器的原型（`next`）
+    /// The prototype of Map / Set iterators (`next`)
     pub collection_iterator_proto: JsObject<'gc>,
-    /// %SetIteratorPrototype%（`collection_iterator_proto` 是 Map 的）
+    /// %SetIteratorPrototype% (`collection_iterator_proto` is Map's)
     pub set_iterator_proto: JsObject<'gc>,
     /// %IteratorHelperPrototype%
     pub iterator_helper_proto: JsObject<'gc>,
@@ -109,34 +110,41 @@ pub struct Realm<'gc> {
     pub array_buffer_proto: JsObject<'gc>,
     pub shared_array_buffer_proto: JsObject<'gc>,
     pub data_view_proto: JsObject<'gc>,
-    /// %TypedArray% 与 %TypedArray.prototype%
+    /// %TypedArray% and %TypedArray.prototype%
     pub typed_array_ctor: JsObject<'gc>,
     pub typed_array_proto: JsObject<'gc>,
-    /// 各具体 TypedArray 的构造器与原型（按 [`ElementKind::ALL`](crate::ElementKind::ALL) 排）
+    /// Constructors and prototypes of each concrete TypedArray (ordered by
+    /// [`ElementKind::ALL`](crate::ElementKind::ALL))
     pub typed_ctors: [JsObject<'gc>; 12],
     pub typed_protos: [JsObject<'gc>; 12],
-    /// 脚本作用域：各脚本顶层的 `let` / `const` / `class`（跨脚本共享，不是全局对象的属性）
+    /// Script scope: top-level `let` / `const` / `class` of each script (shared across scripts, not properties of the
+    /// global object)
     pub script_scope: JsObject<'gc>,
     pub symbols: WellKnown<'gc>,
-    /// 加载过的模块（编号就是下标）
+    /// Loaded modules (the index is the module id)
     pub modules: Gc<'gc, RefLock<alloc::vec::Vec<crate::ModuleRecord<'gc>>>>,
-    /// `Symbol.for` 的全局登记表
+    /// The global registry of `Symbol.for`
     pub symbol_registry: Gc<'gc, RefLock<alloc::vec::Vec<(JsString<'gc>, JsSymbol<'gc>)>>>,
-    /// `Math.random` 的状态（xorshift，0 表示还没播种）
+    /// The state of `Math.random` (xorshift; 0 means not yet seeded)
     pub random_state: Gc<'gc, r8gc::Lock<u64>>,
-    /// 微任务队列
+    /// The microtask queue
     pub jobs: Gc<'gc, RefLock<VecDeque<Job<'gc>>>>,
-    /// 标签模板的模板对象：按（函数编号, 调用点）缓存，同一处每次同一个
+    /// Template objects of tagged templates: cached by (function index, call site), so the same site always gets the
+    /// same one
     pub templates: Gc<'gc, RefLock<alloc::collections::BTreeMap<(u32, u32), JsObject<'gc>>>>,
-    /// 编好的正则按（源码, 标志）共享（编好的不可变）；最近用的放后面，满了丢最前面的
+    /// Compiled regexes shared by (source, flags) (compiled ones are immutable); most recently used at the back, the
+    /// front one dropped when full
     pub regexp_cache: Gc<'gc, RefLock<VecDeque<RegExpCompiled<'gc>>>>,
-    /// `RegExp.prototype` 装好时的样子（内建正则方法据此判断能不能跳过协议直接匹配）
+    /// What `RegExp.prototype` looked like when installed (built-in regex methods use it to decide whether they can
+    /// skip the protocol and match directly)
     pub regexp_pristine: Gc<'gc, RefLock<Option<RegExpPristine<'gc>>>>,
-    /// 内建的数组迭代器 / 字符串迭代器 `next`（迭代记录里的 `next` 是它们时不建结果对象，直接走一步）
+    /// The built-in array iterator / string iterator `next` (when an iterator record's `next` is one of them, no result
+    /// object is created; it steps directly)
     pub builtin_nexts: Gc<'gc, RefLock<[Option<JsObject<'gc>>; 2]>>,
 }
 
-/// `RegExp.prototype` 装好时的形状，及 `exec` / `flags` / 各标志 getter 所在的槽与原来的内容。
+/// The shape of `RegExp.prototype` when installed, plus the slots holding `exec` / `flags` / each flag getter and their
+/// original contents.
 #[derive(Collect)]
 #[collect(no_drop)]
 pub struct RegExpPristine<'gc> {
@@ -145,7 +153,7 @@ pub struct RegExpPristine<'gc> {
     pub slots: alloc::vec::Vec<(usize, crate::Slot<'gc>)>,
 }
 
-/// 一份编好的正则：源码、标志、执行层的编译结果。
+/// One compiled regex: source, flags, the execution layer's compiled result.
 #[derive(Clone, Collect)]
 #[collect(no_drop)]
 pub struct RegExpCompiled<'gc> {
@@ -245,7 +253,7 @@ impl<'gc> Realm<'gc> {
         }
     }
 
-    /// 没装正则引擎时正则字面量抛 SyntaxError。
+    /// Without a regex engine, regex literals throw a SyntaxError.
     fn no_regexp<'g>(a: &mut crate::Agent<'g, '_>, _: Value<'g>, _: &[Value<'g>]) -> Result<Value<'g>, crate::Error> {
         Err(a.throw(ErrorKind::Syntax, "regular expressions are not available in this realm"))
     }
@@ -258,12 +266,13 @@ impl<'gc> Realm<'gc> {
         self.error_protos[kind as usize]
     }
 
-    /// 一个宿主函数对象（原型是 `Function.prototype`）。
+    /// A host function object (its prototype is `Function.prototype`).
     pub fn native(&self, mc: &Mutation<'gc>, f: NativeFn) -> JsObject<'gc> {
         ObjectData { kind: ObjectKind::Native(Native::function(f)), proto: Some(self.function_proto), ..ObjectData::default() }.alloc(mc)
     }
 
-    /// 给函数对象定义 `name`（与可选的 `length`）：不可枚举、不可写、可配置，`length` 在前。
+    /// Define `name` (and optionally `length`) on a function object: non-enumerable, non-writable, configurable,
+    /// `length` first.
     pub fn name_function(&self, mc: &Mutation<'gc>, f: JsObject<'gc>, name: &str, length: Option<u32>) {
         let prop = |v: Value<'gc>| Property { slot: crate::Slot::Data(v), enumerable: false, writable: false, configurable: true };
         let mut d = f.borrow_mut(mc);
@@ -273,27 +282,28 @@ impl<'gc> Realm<'gc> {
         d.define("name", prop(Value::String(Gc::new(mc, crate::JsStr::from(name)))));
     }
 
-    /// 带 `name` 的宿主函数对象。
+    /// A host function object with a `name`.
     pub fn named_native(&self, mc: &Mutation<'gc>, f: NativeFn, name: &str, length: u32) -> JsObject<'gc> {
         let func = self.native(mc, f);
         self.name_function(mc, func, name, Some(length));
         func
     }
 
-    /// 在 `target` 上挂一个以 Symbol 为键的宿主方法（名字是 `[描述]`）。
+    /// Attach a Symbol-keyed host method on `target` (its name is `[description]`).
     pub fn symbol_method(&self, mc: &Mutation<'gc>, target: JsObject<'gc>, key: JsSymbol<'gc>, f: NativeFn, length: u32) {
         let func = self.named_native(mc, f, &alloc::format!("[{}]", key.description.as_deref().unwrap_or("")), length);
         target.borrow_mut(mc).define_symbol(key, Property::hidden(Value::Object(func)));
     }
 
-    /// 在 `target` 上挂一个宿主方法。
+    /// Attach a host method on `target`.
     pub fn method(&self, mc: &Mutation<'gc>, target: JsObject<'gc>, name: &str, f: NativeFn, length: u32) {
         let func = self.named_native(mc, f, name, length);
         target.borrow_mut(mc).define(name, Property::hidden(Value::Object(func)));
     }
 }
 
-/// 执行环境：指向一个 [`Realm`]。要跨 `enter` 保留，把 `global` 存成 [`Global`](crate::Global)。
+/// An execution context: points to a [`Realm`]. To keep it across `enter`, store `global` as a
+/// [`Global`](crate::Global).
 #[derive(Clone, Copy, Debug, Collect)]
 #[collect(no_drop)]
 pub struct Context<'gc>(Gc<'gc, Realm<'gc>>);
@@ -306,13 +316,13 @@ impl<'gc> Deref for Context<'gc> {
     }
 }
 
-/// 往新建的 [`Realm`] 里装内建对象（r8builtins 实现）。
+/// Installs built-in objects into a newly created [`Realm`] (implemented by r8builtins).
 pub trait Intrinsics {
     fn install<'gc>(&self, mc: &Mutation<'gc>, realm: &Realm<'gc>);
 }
 
 impl<'gc> Scope<'gc, '_> {
-    /// 新建一个执行环境并装好内建对象。
+    /// Create a new execution context and install its built-in objects.
     pub fn context(&self, intrinsics: &dyn Intrinsics) -> Context<'gc> {
         let realm = Realm::new(self.mc);
         intrinsics.install(self.mc, &realm);

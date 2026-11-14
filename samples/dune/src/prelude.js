@@ -1,4 +1,4 @@
-// dune 的序言：在用户代码之前跑一次。CommonJS 的 require / module，内置模块 fs / path / process。
+// dune's prelude: runs once before user code. CommonJS require / module, built-in modules fs / path / process.
 (function (native) {
   'use strict';
   const fs = native.fs;
@@ -29,7 +29,7 @@
     if (request.startsWith('./') || request.startsWith('../') || request.startsWith('/')) {
       found = resolveFile(path.resolve(from, request));
     } else {
-      // node_modules：从当前目录往上找
+      // node_modules: search upward from the current directory
       let dir = from;
       for (;;) {
         found = resolveFile(path.join(dir, 'node_modules', request));
@@ -72,6 +72,6 @@
   globalThis.require = makeRequire(process.cwd());
   process.nextTick = function (f, ...args) { Promise.resolve().then(() => f(...args)); };
   Object.defineProperty(globalThis, 'global', { value: globalThis, writable: true, configurable: true });
-  // 跑入口脚本：按 CommonJS 模块包起来
+  // Run the entry script, wrapped as a CommonJS module
   native.runMain = function (file) { return load(path.resolve(process.cwd(), file)); };
 })(globalThis.__dune);

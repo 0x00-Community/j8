@@ -1,4 +1,5 @@
-//! 回收器：mutator 一侧（分配、写屏障，单线程）与回收的各阶段（标记、次回收、清扫、压缩，在线程池上并行）。
+//! The collector: the mutator side (allocation, write barrier; single-threaded) and the collection phases (marking,
+//! minor collection, sweeping, compaction; parallel on the thread pool).
 use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
 use core::mem::take;
@@ -10,30 +11,30 @@ use crate::heap::{Lab, NURSERY_LIMIT, Nursery, OldSpace};
 use crate::parallel::{Pool, Spin, Work, Worker, split};
 use crate::{Collect, Metrics, Relocate, Trace};
 
-/// 老年代至少长到这么大才开始第一轮主回收
+/// The old generation must grow at least this large before the first major collection starts
 const MIN_HEAP: usize = 8 << 20;
-/// 主回收后，下一轮在老年代长到活对象的几倍时开始
+/// After a major collection, the next one starts when the old generation grows to this multiple of the live objects
 const GROWTH: usize = 2;
-/// 增量标记每步至少做这么多字节
+/// Each incremental marking step does at least this many bytes
 const MARK_STEP: usize = 256 << 10;
-/// 增量标记每步做的量是这段时间老年代长出来的几倍
+/// Each incremental marking step does this multiple of what the old generation grew in the meantime
 const MARK_RATIO: usize = 2;
 
-/// 主回收进行到哪了。
+/// How far the major collection has progressed.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Phase {
-    /// 没在主回收
+    /// No major collection in progress
     Sleep,
-    /// 增量标记中
+    /// Incremental marking in progress
     Mark,
 }
 
-/// 纪元 `epoch` 下「标记过」的标记位
+/// The mark bit meaning "marked" under epoch `epoch`
 fn marked_bit(epoch: bool) -> u32 {
     if epoch { Flags::MARK } else { 0 }
 }
 
-/// 标记的工人：认领白对象压栈，出栈时遍历变黑。
+/// The marking worker: claims white objects and pushes them; traces them when popped, turning them black.
 struct Marker {
     epoch: bool,
     stack: Vec<Ptr>,
@@ -46,7 +47,8 @@ impl Marker {
 }
 
 impl Visit for Marker {
-    /// 白的认领成灰压栈（不用遍历的直接变黑）；别的线程先认领了就算了
+    /// Claims a white object as gray and pushes it (objects that need no tracing turn black directly); skips it if
+    /// another thread claimed it first
     #[inline]
     fn visit(&mut self, p: Ptr) {
         let needs = p.vtable().needs_trace;
@@ -74,19 +76,19 @@ impl Worker for Marker {
     fn process(&mut self, p: Ptr) -> usize {
         let marked = marked_bit(self.epoch);
         p.header().update(|f| Some(f & !(Flags::GRAY | Flags::MARK) | marked));
-        // SAFETY: 灰对象归认领它的线程，mutator 停着
+        // SAFETY: a gray object belongs to the thread that claimed it; the mutator is stopped
         unsafe { p.trace(&mut Trace::new(self)) };
         p.vtable().size
     }
 }
 
-/// 次回收的工人：把新生代对象搬进老年代，改搬过去的对象的字段。
+/// The minor-collection worker: moves young objects into the old generation and updates the fields of moved objects.
 struct Promoter<'a> {
     lab: Lab<'a>,
     epoch: bool,
-    /// 主回收在标记：搬过去的要进灰队列
+    /// The major collection is marking: moved objects must go into the gray queue
     marking: bool,
-    /// 搬过去、字段还没改的
+    /// Moved objects whose fields have not been updated yet
     stack: Vec<Ptr>,
     gray: Vec<Ptr>,
     promoted: usize,
@@ -103,7 +105,7 @@ impl Mover for Promoter<'_> {
         true
     }
 
-    /// 新生代对象搬进老年代（别的线程搬过了就用它搬的）
+    /// Moves a young object into the old generation (if another thread already moved it, uses that copy)
     fn forward(&mut self, p: Ptr) -> Ptr {
         let h = p.header();
         match h.claim() {
@@ -112,10 +114,11 @@ impl Mover for Promoter<'_> {
             Claim::Mine => {
                 let vt = p.vtable();
                 let q = self.lab.slot(vt.class);
-                // 标记中搬过去的这一轮都留着：要遍历的进灰队列，不用遍历的直接黑
+                // Objects moved during marking survive this cycle: those needing tracing go into the gray queue,
+                // the rest become black directly
                 let gray = self.marking && vt.needs_trace;
                 let mark = if gray { Flags::GRAY | (marked_bit(self.epoch) ^ Flags::MARK) } else { marked_bit(self.epoch) };
-                // SAFETY: 归我的空槽；p 由 BUSY 位独占
+                // SAFETY: a free slot we own; p is held exclusively through the BUSY bit
                 unsafe { p.copy_to(vt, q, Flags::OLD | mark) };
                 h.forward(q);
                 if gray {
@@ -137,13 +140,13 @@ impl Worker for Promoter<'_> {
     }
 
     fn process(&mut self, p: Ptr) -> usize {
-        // SAFETY: 刚搬过去的或记忆集里的老对象，各归一个线程
+        // SAFETY: a just-moved object or an old object from the remembered set, each owned by one thread
         unsafe { p.relocate(&mut Relocate::new(self)) };
         p.vtable().size
     }
 }
 
-/// 压缩时改字段：指向已搬走对象的换成新地址。
+/// Updates fields during compaction: pointers to moved objects are replaced by the new addresses.
 struct Compactor;
 
 impl Mover for Compactor {
@@ -154,21 +157,22 @@ impl Mover for Compactor {
 
 pub(crate) struct Context {
     phase: Cell<Phase>,
-    /// 标记位等于它才算标记过
+    /// The mark bit counts as marked only when equal to this
     epoch: Cell<bool>,
-    /// 新生代当前块的碰撞区
+    /// Bump region of the young generation's current block
     cursor: Cell<usize>,
     end: Cell<usize>,
     nursery: RefCell<Nursery>,
     old: Spin<OldSpace>,
     gray: RefCell<Vec<Ptr>>,
-    /// 可能指向新生代的老对象
+    /// Old objects that may point into the young generation
     remembered: RefCell<Vec<Ptr>>,
-    /// 老年代长到这么大开始主回收
+    /// A major collection starts when the old generation grows this large
     threshold: Cell<usize>,
-    /// 上一步标记时老年代的大小
+    /// Size of the old generation at the previous marking step
     marked_at: Cell<usize>,
-    /// 允许的类型死了在线程池上析构（分配器跨线程释放快时才划算）
+    /// Dead objects of eligible types are dropped on the thread pool (worthwhile only when the allocator frees fast
+    /// across threads)
     pub(crate) parallel_drop: bool,
     pub(crate) metrics: Metrics,
 }
@@ -208,7 +212,8 @@ impl Context {
         (f & Flags::MARK != 0) == self.epoch.get()
     }
 
-    /// 新对象的标记位：标记中算没标记（可达的会被标到）；不在标记中算标记过（下轮翻纪元后自然没标记）
+    /// Mark bit for new objects: during marking they count as unmarked (reachable ones will get marked); otherwise as
+    /// marked (they become unmarked naturally when the next cycle flips the epoch)
     #[inline]
     fn fresh(&self) -> u32 {
         match self.phase.get() {
@@ -217,13 +222,13 @@ impl Context {
         }
     }
 
-    // ---- 分配（mutator） ----
+    // ---- Allocation (mutator) ----
 
     #[inline]
     pub(crate) fn alloc<'gc, T: Collect<'gc>>(&self, value: T) -> Ptr {
         let vt = &<T as Typed<'gc>>::VTABLE;
         let p = if vt.class == SizeClass::LARGE { self.alloc_large(vt) } else { self.bump(vt) };
-        // SAFETY: 刚分到的槽，按 T 的大小与对齐
+        // SAFETY: a freshly allocated slot, sized and aligned for T
         unsafe { p.cast::<T>().write(value) };
         p
     }
@@ -236,7 +241,7 @@ impl Context {
         }
         self.cursor.set(at + vt.slot);
         let p = Ptr::at_slot(NonNull::new(at as *mut u8).expect("nursery slot"));
-        // SAFETY: 碰撞区里新划出的槽
+        // SAFETY: a slot newly carved out of the bump region
         unsafe { p.init(vt, self.fresh()) };
         if vt.drop.is_some() {
             self.nursery.borrow_mut().drops.push(p);
@@ -251,19 +256,21 @@ impl Context {
         start
     }
 
-    /// 大对象直接进老年代；字段可能指向新生代，先进记忆集
+    /// Large objects go straight into the old generation; their fields may point into the young generation, so they
+    /// start in the remembered set
     #[cold]
     fn alloc_large(&self, vt: &VTable) -> Ptr {
         let p = self.old.lock().alloc_large(vt);
-        // SAFETY: 大对象的头在值前面，属于这块分配
+        // SAFETY: a large object's header precedes the value and belongs to this allocation
         unsafe { p.init(vt, Flags::OLD | Flags::LARGE | Flags::REMEMBERED | self.fresh()) };
         self.remembered.borrow_mut().push(p);
         p
     }
 
-    // ---- 写屏障（mutator） ----
+    // ---- Write barrier (mutator) ----
 
-    /// 对象 `p` 要收进新指针之前调：老对象进记忆集；标记中的黑对象变回灰
+    /// Called before object `p` receives a new pointer: old objects go into the remembered set; black objects turn
+    /// gray again during marking
     #[inline]
     pub(crate) fn barrier(&self, p: Ptr) {
         let f = p.header().flags();
@@ -287,9 +294,10 @@ impl Context {
         self.gray.borrow_mut().push(p);
     }
 
-    // ---- 标记 ----
+    // ---- Marking ----
 
-    /// 并行标记：从 `initial` 出发；给了 `budget` 就做到那么多字节为止，返回没做完的
+    /// Parallel marking starting from `initial`; with a `budget`, stops after that many bytes and returns the
+    /// unfinished work
     fn mark(&self, pool: &dyn Pool, initial: Vec<Ptr>, budget: Option<usize>) -> Vec<Ptr> {
         if initial.is_empty() {
             return initial;
@@ -308,7 +316,7 @@ impl Context {
         self.gray.get_mut().append(&mut m.stack);
     }
 
-    /// 标记一步；灰的做完了返回 `true`
+    /// One marking step; returns `true` once the gray objects are exhausted
     fn step(&mut self, pool: &dyn Pool) -> bool {
         let old = self.old_bytes();
         let budget = MARK_STEP.max(old.saturating_sub(self.marked_at.get()) * MARK_RATIO);
@@ -319,15 +327,17 @@ impl Context {
         self.gray.get_mut().is_empty()
     }
 
-    // ---- 次回收 ----
+    // ---- Minor collection ----
 
-    /// 次回收：从根和记忆集出发，把活着的新对象并行搬进老年代，其余析构，新生代清空
+    /// Minor collection: starting from the root and the remembered set, moves live young objects into the old
+    /// generation in parallel, drops the rest, and empties the young generation
     pub(crate) fn minor<'gc, R: Collect<'gc> + ?Sized>(&mut self, pool: &dyn Pool, root: &mut R) {
         let (epoch, marking) = (self.epoch.get(), self.phase.get() == Phase::Mark);
         let remembered = take(self.remembered.get_mut());
         let (gray, promoted) = {
             let mut workers: Vec<Promoter<'_>> = (0..pool.threads()).map(|_| Promoter::new(&self.old, epoch, marking)).collect();
-            // 根只有一个，在调用线程上改；它直接引用的新对象搬过去后进初始工作
+            // There is only one root, updated on the calling thread; the young objects it references directly
+            // become the initial work after being moved
             Relocate::new(&mut workers[0]).relocate(root);
             let mut initial = take(&mut workers[0].stack);
             for p in remembered {
@@ -341,25 +351,27 @@ impl Context {
             let gray: Vec<Ptr> = workers.iter_mut().flat_map(|w| take(&mut w.gray)).collect();
             (gray, workers.iter().map(|w| w.promoted).sum::<usize>())
         };
-        // 没被搬走的就是死了：能在线程池上析构的并行做，别的留给调用线程
+        // Whatever was not moved is dead: those that can be dropped on the thread pool are dropped in parallel,
+        // the rest are left to the calling thread
         let mut drops = take(&mut self.nursery.get_mut().drops);
         drops.retain(|p| p.header().forwarded().is_none());
         let parallel = self.parallel_drop;
         let serial: Vec<Vec<Ptr>> = split(if parallel { pool } else { &moremath::ThreadSingle }, &mut drops, &|chunk: &mut [Ptr]| {
             let (anywhere, here): (Vec<Ptr>, Vec<Ptr>) = chunk.iter().partition(|p| parallel && p.vtable().parallel_drop);
             for p in anywhere {
-                // SAFETY: 不可达，只析构这一次；类型允许在这个线程上析构
+                // SAFETY: unreachable and dropped only this once; the type allows dropping on this thread
                 unsafe { p.drop_value() };
             }
             here
         });
         for p in serial.into_iter().flatten() {
-            // SAFETY: 同上，在调用线程上
+            // SAFETY: as above, on the calling thread
             unsafe { p.drop_value() };
         }
         let g = self.gray.get_mut();
         if marking {
-            // 灰队列里的新对象：活的已在老年代另排了队，死的不要了
+            // Young objects in the gray queue: live ones are already queued again in the old generation; dead ones are
+            // discarded
             g.retain(|p| p.header().flags() & Flags::OLD != 0);
             g.extend(gray);
         }
@@ -371,9 +383,9 @@ impl Context {
         self.verify("after minor");
     }
 
-    // ---- 主回收收尾 ----
+    // ---- Finishing the major collection ----
 
-    /// 标记做完（并行、原子）、清扫（并行）、值得就压缩（并行）
+    /// Finishes marking (parallel, atomic), sweeps (parallel), and compacts when worthwhile (parallel)
     fn finish<'gc, R: Collect<'gc> + ?Sized>(&mut self, pool: &dyn Pool, root: &mut R) {
         self.minor(pool, root);
         let mut m = Marker::new(self.epoch.get());
@@ -391,7 +403,7 @@ impl Context {
         self.metrics.major.set(self.metrics.major.get() + 1);
     }
 
-    /// 搬空稀疏的页（并行复制），再把所有指向它们的字段改过来（并行）
+    /// Evacuates sparse pages (parallel copy), then updates every field pointing into them (parallel)
     fn compact<'gc, R: Collect<'gc> + ?Sized>(&mut self, pool: &dyn Pool, root: &mut R) {
         let mut moving = self.old.get_mut().select_evacuation();
         if moving.is_empty() {
@@ -405,7 +417,7 @@ impl Context {
             for &(p, class) in &*chunk {
                 let vt = p.vtable();
                 let q = lab.slot(class);
-                // SAFETY: 归这个任务的空槽；p 在要搬空的页里，只出现一次
+                // SAFETY: a free slot owned by this task; p is in a page being evacuated and appears only once
                 unsafe { p.copy_to(vt, q, flags) };
                 p.header().forward(q);
             }
@@ -414,7 +426,7 @@ impl Context {
         let mut live = self.old.get_mut().live();
         split(pool, &mut live, &|chunk: &mut [Ptr]| {
             for &p in chunk.iter().filter(|p| p.vtable().needs_trace) {
-                // SAFETY: 活着的老对象，各归一个任务
+                // SAFETY: live old objects, each owned by one task
                 unsafe { p.relocate(&mut Relocate::new(&mut Compactor)) };
             }
         });
@@ -422,9 +434,10 @@ impl Context {
         self.metrics.compactions.set(self.metrics.compactions.get() + 1);
     }
 
-    // ---- 节奏 ----
+    // ---- Pacing ----
 
-    /// 按欠账做一段：新生代满了做次回收；老年代过了阈值开始 / 推进主回收
+    /// Does a step according to the allocation debt: a minor collection when the young generation is full; starts /
+    /// advances the major collection once the old generation passes its threshold
     pub(crate) fn collect_debt<'gc, R: Collect<'gc> + ?Sized>(&mut self, pool: &dyn Pool, root: &mut R) {
         if self.young_bytes() >= NURSERY_LIMIT {
             self.minor(pool, root);
@@ -436,7 +449,7 @@ impl Context {
         }
     }
 
-    /// 完整回收一轮（含次回收与压缩）
+    /// One full collection cycle (including minor collection and compaction)
     pub(crate) fn collect_all<'gc, R: Collect<'gc> + ?Sized>(&mut self, pool: &dyn Pool, root: &mut R) {
         if self.phase.get() == Phase::Sleep {
             self.start_major(root);
@@ -444,14 +457,15 @@ impl Context {
         self.finish(pool, root);
     }
 
-    // ---- 调试校验（feature `verify`） ----
+    // ---- Debug verification (feature `verify`) ----
 
-    /// 老年代每个对象的每条边：目标得是活着、没搬走、不是空槽的老对象（新生代须为空）
+    /// Every edge of every old-generation object: the target must be a live, unmoved, non-free old object (the young
+    /// generation must be empty)
     #[allow(clippy::unused_self)]
     fn verify(&mut self, stage: &'static str) {
         #[cfg(feature = "verify")]
         {
-            /// 校验一条边
+            /// Verifies one edge
             struct Verifier<'a> {
                 old: &'a OldSpace,
                 stage: &'static str,
@@ -468,7 +482,7 @@ impl Context {
             let old = self.old.get_mut();
             for p in old.live().into_iter().filter(|p| p.vtable().needs_trace) {
                 let mut v = Verifier { old, stage, owner: p };
-                // SAFETY: 活着的老对象
+                // SAFETY: a live old object
                 unsafe { p.trace(&mut Trace::new(&mut v)) };
             }
         }
@@ -480,7 +494,8 @@ impl Drop for Context {
     fn drop(&mut self) {
         for p in take(&mut self.nursery.get_mut().drops) {
             if p.header().forwarded().is_none() {
-                // SAFETY: 整个堆在拆，新对象各析构一次（老年代的由 OldSpace 析构）
+                // SAFETY: the whole heap is being torn down; each young object is dropped once (old ones are
+                // dropped by OldSpace)
                 unsafe { p.drop_value() };
             }
         }

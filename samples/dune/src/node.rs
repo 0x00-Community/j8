@@ -1,14 +1,16 @@
-//! node 式的宿主接口：`fs` / `path` / `process` 的原生部分用 `#[r8::object]` 绑定，`require` 与 CommonJS 包装在
-//! [`PRELUDE`] 里用 JS 写。原生部分挂在不可枚举的全局 `__dune` 上，序言把它们包成模块。
+//! Node-style host interface: the native parts of `fs` / `path` / `process` are bound with `#[r8::object]`; `require`
+//! and the CommonJS wrapper are written in JS in [`PRELUDE`]. The native parts hang off the non-enumerable global
+//! `__dune`, and the prelude wraps them as modules.
 use std::path::{Component, Path, PathBuf};
 
 use r8::{Object, Rest};
 use r8framework::{Agent, Error, ErrorKind, JsObject, Property, Value};
 
-/// 序言：`require`（CommonJS，模块缓存、相对路径、`.js` / `.json` / 目录 `index.js`）、`module`、`process`。
+/// Prelude: `require` (CommonJS, module cache, relative paths, `.js` / `.json` / directory `index.js`), `module`,
+/// `process`.
 pub const PRELUDE: &str = include_str!("prelude.js");
 
-/// `fs` 的同步接口。
+/// The synchronous `fs` interface.
 pub struct Fs;
 
 #[r8::object("fs")]
@@ -47,7 +49,7 @@ impl Fs {
         std::fs::remove_file(path).map_err(|e| Self::io(a, "unlink", path, &e))
     }
 
-    /// 是不是目录（`require` 解析目录模块用）。
+    /// Whether it is a directory (used by `require` to resolve directory modules).
     fn is_directory(path: &str) -> bool {
         Path::new(path).is_dir()
     }
@@ -58,7 +60,7 @@ impl Fs {
     }
 }
 
-/// `path`（POSIX）。
+/// `path` (POSIX).
 pub struct Paths;
 
 #[r8::object("path")]
@@ -103,7 +105,7 @@ impl Paths {
         Path::new(path).is_absolute()
     }
 
-    /// 去掉 `.` / `..`（不访问文件系统）。
+    /// Remove `.` / `..` (without touching the file system).
     #[js(skip)]
     fn normalize_path(p: &Path) -> String {
         let mut out = PathBuf::new();
@@ -123,7 +125,7 @@ impl Paths {
     }
 }
 
-/// `process` 的方法（属性在 [`Node::install`] 里放）。
+/// Methods of `process` (properties are set in [`Node::install`]).
 pub struct Process;
 
 #[r8::object("process")]
@@ -141,11 +143,11 @@ impl Process {
     }
 }
 
-/// 装 node 式的全局：`__dune`（原生部分）与 `process`。
+/// Install node-style globals: `__dune` (the native part) and `process`.
 pub struct Node;
 
 impl Node {
-    /// `argv` 是脚本路径之后的参数（前面补上 `dune` 与脚本路径）。
+    /// `argv` is the arguments after the script path (`dune` and the script path are prepended).
     pub fn install<'gc>(a: &mut Agent<'gc, '_>, script: &str, args: &[String]) {
         let global = a.realm.global;
         let native = a.object();

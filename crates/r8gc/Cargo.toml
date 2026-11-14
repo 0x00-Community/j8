@@ -1,6 +1,6 @@
 [package]
 name = "r8gc"
-description = "分代、可移动（压缩）、并行的 Rust GC，'gc 品牌生命周期，回收跑在 moremath 线程池上"
+description = "Generational, moving (compacting), parallel GC for Rust with a 'gc brand lifetime; collection runs on the moremath thread pool"
 edition.workspace = true
 license.workspace = true
 
@@ -13,9 +13,10 @@ moremath = { version = "=0.2.2", features = ["std"] }
 
 [features]
 default = ["std"]
-# 等待时先自旋、久了让出 CPU（没有 std 只能一直自旋，机器忙时并行回收会被拖慢）
+# Spin first while waiting, yield the CPU after a while (without std it can only spin, which slows parallel
+# collection on a busy machine)
 std = []
-# 每次回收后把整个老年代的边校验一遍（调试用，很慢）
+# Verify every edge in the old generation after each collection (for debugging; very slow)
 verify = []
 
 [lints]

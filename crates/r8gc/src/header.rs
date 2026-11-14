@@ -1,50 +1,52 @@
-//! 对象头与类型表：每个对象前面紧挨着 16 字节的头。头是原子的：并行回收时多个线程同时认领、转发。
+//! Object headers and vtables: each object is immediately preceded by a 16-byte header. Headers are atomic: during
+//! parallel collection several threads claim and forward objects concurrently.
 use core::mem::{align_of, needs_drop, size_of};
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
 use crate::{Collect, Relocate, Trace};
 
-/// 对象头的大小，也是对象的对齐上限（更大的对齐走大对象）
+/// Size of the object header, also the maximum object alignment (larger alignments go to large objects)
 pub(crate) const HEADER: usize = size_of::<Header>();
 
-/// 头里的标志位。
+/// Flag bits in the header.
 pub(crate) struct Flags;
 
 impl Flags {
-    /// 在老年代（页或大对象）；没有就是在新生代
+    /// In the old generation (page or large object); otherwise in the young generation
     pub(crate) const OLD: u32 = 1;
-    /// 标记位：与当前纪元相同才算标记过（每轮主回收翻一次纪元，不用逐个清）
+    /// Mark bit: counts as marked only if it equals the current epoch (the epoch flips each major collection, so bits
+    /// need not be cleared one by one)
     pub(crate) const MARK: u32 = 1 << 1;
-    /// 在某个灰色栈里（已认领、还没遍历）
+    /// In some gray stack (claimed, not yet traced)
     pub(crate) const GRAY: u32 = 1 << 2;
-    /// 老对象在记忆集里（可能指向新生代）
+    /// Old object in the remembered set (may point into the young generation)
     pub(crate) const REMEMBERED: u32 = 1 << 3;
-    /// 已搬走：`meta` 是新地址
+    /// Moved: `meta` is the new address
     pub(crate) const FORWARDED: u32 = 1 << 4;
-    /// 大对象（单独分配，不搬）
+    /// Large object (allocated separately, never moved)
     pub(crate) const LARGE: u32 = 1 << 5;
-    /// 老年代页里的空槽
+    /// Free slot in an old-generation page
     pub(crate) const FREE: u32 = 1 << 6;
-    /// 正被某个线程搬：别的线程等它装好转发地址
+    /// Being moved by some thread: other threads wait until it installs the forwarding address
     pub(crate) const BUSY: u32 = 1 << 7;
 }
 
-/// 对象头。
+/// Object header.
 #[repr(C, align(16))]
 pub(crate) struct Header {
-    /// 类型表地址；搬走后是新对象的地址
+    /// Address of the vtable; after the move, the address of the new object
     meta: AtomicUsize,
     flags: AtomicU32,
 }
 
-/// 搬一个新生代对象前认领它的结果。
+/// Result of claiming a young-generation object before moving it.
 pub(crate) enum Claim {
-    /// 本来就在老年代
+    /// Already in the old generation
     Old,
-    /// 已经搬走了
+    /// Already moved
     Forwarded(Ptr),
-    /// 归我搬
+    /// Ours to move
     Mine,
 }
 
@@ -68,13 +70,14 @@ impl Header {
         self.flags.fetch_and(f, Ordering::Relaxed);
     }
 
-    /// 按 `f` 改标志（返回 `None` 就不改，CAS 失败重来）；返回是否改成了
+    /// Updates the flags with `f` (no change if it returns `None`; retries on CAS failure); returns whether the update
+    /// happened
     #[inline]
     pub(crate) fn update(&self, f: impl FnMut(u32) -> Option<u32>) -> bool {
         self.flags.fetch_update(Ordering::AcqRel, Ordering::Acquire, f).is_ok()
     }
 
-    /// 搬之前认领：别人正在搬就等它搬完
+    /// Claims before moving: if someone else is moving it, waits until they finish
     pub(crate) fn claim(&self) -> Claim {
         let mut backoff = crate::parallel::Backoff::default();
         loop {
@@ -95,38 +98,38 @@ impl Header {
         }
     }
 
-    /// 搬完：头改记新地址
+    /// Move finished: the header now records the new address
     pub(crate) fn forward(&self, to: Ptr) {
         self.meta.store(to.addr(), Ordering::Release);
         self.flags.store(Flags::FORWARDED, Ordering::Release);
     }
 
-    /// 搬到了哪
+    /// Where it was moved to
     pub(crate) fn forwarded(&self) -> Option<Ptr> {
         (self.flags.load(Ordering::Acquire) & Flags::FORWARDED != 0).then(|| Ptr::from(self.meta.load(Ordering::Acquire)))
     }
 
-    /// 标成空槽
+    /// Marks it as a free slot
     pub(crate) fn free(&self) {
         self.meta.store(0, Ordering::Relaxed);
         self.flags.store(Flags::FREE, Ordering::Relaxed);
     }
 }
 
-/// 一种类型的回收操作。按类型常量提升出来，头里只存它的地址。
+/// The collection operations for one type. Promoted per type as a constant; the header only stores its address.
 pub(crate) struct VTable {
-    /// 值的大小与对齐
+    /// Size and alignment of the value
     pub(crate) size: usize,
     pub(crate) align: usize,
-    /// 头 + 值，按 16 字节取整
+    /// Header + value, rounded up to 16 bytes
     pub(crate) slot: usize,
-    /// 老年代的尺寸档；`SizeClass::LARGE` 是大对象
+    /// Old-generation size class; `SizeClass::LARGE` means a large object
     pub(crate) class: usize,
     pub(crate) needs_trace: bool,
     pub(crate) trace: unsafe fn(Ptr, &mut Trace<'_>),
     pub(crate) relocate: unsafe fn(Ptr, &mut Relocate<'_>),
     pub(crate) drop: Option<unsafe fn(Ptr)>,
-    /// 死了能在线程池上析构
+    /// Can be dropped on the thread pool once dead
     pub(crate) parallel_drop: bool,
 }
 
@@ -147,23 +150,23 @@ impl VTable {
     }
 }
 
-/// 每种类型一张类型表（常量，取地址时提升成只读数据）。
+/// One vtable per type (a constant, promoted to read-only data when its address is taken).
 pub(crate) trait Typed<'gc>: Collect<'gc> + Sized {
     const VTABLE: VTable = VTable::of::<Self>();
 }
 
 impl<'gc, T: Collect<'gc>> Typed<'gc> for T {}
 
-/// 老年代的尺寸档：页里的槽一样大。
+/// Old-generation size classes: all slots in a page have the same size.
 pub(crate) struct SizeClass;
 
 impl SizeClass {
-    /// 各档的槽大小（含头）
+    /// Slot size of each class (including the header)
     pub(crate) const SLOTS: [usize; 32] = [
         16, 32, 48, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384, 448, 512, 640, 768, 896, 1024, 1280, 1536, 1792, 2048, 2560, 3072, 3584, 4096, 5120,
         6144, 7168, 8192,
     ];
-    /// 超过最大档：大对象
+    /// Beyond the largest class: large object
     pub(crate) const LARGE: usize = Self::SLOTS.len();
 
     const fn of(slot: usize) -> usize {
@@ -178,11 +181,12 @@ impl SizeClass {
     }
 }
 
-/// 擦除了类型的对象指针：指向值（头在它前面 [`HEADER`] 字节）。
+/// Type-erased object pointer: points at the value (the header is [`HEADER`] bytes before it).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) struct Ptr(NonNull<u8>);
 
-// SAFETY: 只是地址。并行回收时 mutator 停着，每个对象同一时刻只归一个线程（头上的原子位认领）
+// SAFETY: just an address. During parallel collection the mutator is stopped, and each object belongs to one
+// thread at a time (claimed through the atomic bits in the header)
 unsafe impl Send for Ptr {}
 unsafe impl Sync for Ptr {}
 
@@ -199,9 +203,9 @@ impl<T> From<NonNull<T>> for Ptr {
 }
 
 impl Ptr {
-    /// 槽的起点（头所在）⇒ 值
+    /// Start of the slot (where the header is) ⇒ the value
     pub(crate) fn at_slot(base: NonNull<u8>) -> Self {
-        // SAFETY: 槽至少有一个头大
+        // SAFETY: a slot is at least as large as a header
         Self(unsafe { base.add(HEADER) })
     }
 
@@ -221,30 +225,31 @@ impl Ptr {
 
     #[inline]
     pub(crate) fn header<'a>(self) -> &'a Header {
-        // SAFETY: 每个对象前面都有头，对象活着头就活着
+        // SAFETY: every object has a header in front of it, which is alive as long as the object is
         unsafe { self.0.sub(HEADER).cast::<Header>().as_ref() }
     }
 
-    /// 没搬走的对象的类型表
+    /// The vtable of an object that has not been moved
     #[inline]
     pub(crate) fn vtable<'a>(self) -> &'a VTable {
         debug_assert!(self.header().flags() & (Flags::FORWARDED | Flags::FREE) == 0, "vtable of a moved or freed object {self:?}");
-        // SAFETY: 没搬走时 meta 是 `VTable` 常量的地址
+        // SAFETY: while not moved, meta is the address of a `VTable` constant
         unsafe { &*(self.header().meta.load(Ordering::Relaxed) as *const VTable) }
     }
 
-    /// 写对象头
+    /// Writes the object header
     ///
     /// # Safety
-    /// 前面 [`HEADER`] 字节是这个槽自己的。
+    /// The preceding [`HEADER`] bytes belong to this slot.
     pub(crate) unsafe fn init(self, vt: &VTable, flags: u32) {
         unsafe { self.0.sub(HEADER).cast::<Header>().write(Header::new(vt, flags)) };
     }
 
-    /// 把值复制到空槽 `to` 并写好它的头（值按字节搬：Rust 值都能按位移动）
+    /// Copies the value into the free slot `to` and writes its header (the value is moved bytewise: every Rust value
+    /// can be moved bitwise)
     ///
     /// # Safety
-    /// `to` 是同尺寸档、归调用方的空槽；`vt` 是这个对象的类型表。
+    /// `to` is a free slot of the same size class owned by the caller; `vt` is this object's vtable.
     pub(crate) unsafe fn copy_to(self, vt: &VTable, to: Ptr, flags: u32) {
         unsafe {
             core::ptr::copy_nonoverlapping(self.as_ptr(), to.as_ptr(), vt.size);
@@ -265,19 +270,19 @@ impl Ptr {
     }
 
     /// # Safety
-    /// 对象活着、没搬走，且此刻只有当前线程在动它。
+    /// The object is alive and not moved, and only the current thread is touching it right now.
     pub(crate) unsafe fn trace(self, t: &mut Trace<'_>) {
         unsafe { (self.vtable().trace)(self, t) }
     }
 
     /// # Safety
-    /// 同 [`Ptr::trace`]。
+    /// Same as [`Ptr::trace`].
     pub(crate) unsafe fn relocate(self, r: &mut Relocate<'_>) {
         unsafe { (self.vtable().relocate)(self, r) }
     }
 
     /// # Safety
-    /// 对象死了、没搬走、只析构一次。
+    /// The object is dead, not moved, and dropped only once.
     pub(crate) unsafe fn drop_value(self) {
         if let Some(d) = self.vtable().drop {
             unsafe { d(self) }

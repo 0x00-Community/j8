@@ -1,4 +1,4 @@
-// 字符串拼接、split / join、indexOf
+// String concatenation, split / join, indexOf
 let s = '';
 for (let i = 0; i < 50000; i++) s += String.fromCharCode(97 + (i % 26));
 let n = 0;

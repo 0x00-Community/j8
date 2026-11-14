@@ -1,5 +1,5 @@
-//! 回收耗时随线程数的变化：大的活堆（宽树 + 链）上做完整回收与次回收。
-//! `cargo run --release --example bench -- <线程数>`
+//! Collection time versus thread count: full and minor collections on a large live heap (wide tree + chains).
+//! `cargo run --release --example bench -- <threads>`
 use std::num::NonZeroUsize;
 use std::time::Instant;
 
@@ -20,7 +20,7 @@ struct Root<'gc> {
     chains: Vec<Gc<'gc, RefLock<Node<'gc>>>>,
 }
 
-/// 链的条数与每条的长度：共 400 万个节点
+/// Number of chains and the length of each: 4 million nodes in total
 const CHAINS: usize = 1 << 14;
 const LENGTH: usize = 256;
 
@@ -44,7 +44,7 @@ fn main() {
     let build = t.elapsed();
     let mut times = Vec::new();
     for round in 0..4 {
-        // 每轮放掉一半的链：老年代变稀疏，触发压缩
+        // Drop half of the chains each round: the old generation becomes sparse, triggering compaction
         if round > 0 {
             heap.mutate_root(|_, root| {
                 let keep = root.chains.len() / 2;

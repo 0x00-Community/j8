@@ -1,11 +1,11 @@
-//! workerd：用 r8 加载 Cloudflare Worker（ES 模块）与 Durable Object 的最小宿主。
+//! workerd: a minimal host that loads Cloudflare Workers (ES modules) and Durable Objects with r8.
 //!
 //! ```text
 //! workerd examples/counter.js --bind COUNTER=Counter --request "GET /counter/inc?name=a"
 //! workerd examples/counter.js --bind COUNTER=Counter --port 8787
 //! ```
-//! Fetch API 的子集与 Durable Object 在 `prelude.js` 里用 JS 写；每个对象的存储是 Rust 的 [`KvStore`]，
-//! 经 `#[r8::class]` 绑定成 `__native.KvStore`。
+//! The Fetch API subset and Durable Objects are written in JS in `prelude.js`; each object's storage is the Rust
+//! [`KvStore`], bound as `__native.KvStore` via `#[r8::class]`.
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -20,29 +20,29 @@ use r8executor::Executor;
 use r8framework::{ContextRoot, CreateParams, Error, Isolate, Property, Source};
 use r8platform::DefaultPlatform;
 
-/// Fetch API 与 Durable Object 的 JS 部分。
+/// The JS part of the Fetch API and Durable Objects.
 const PRELUDE: &str = include_str!("prelude.js");
-/// 请求的缺省主机名（URL 要绝对）
+/// Default host name for requests (URLs must be absolute)
 const HOST: &str = "http://localhost";
 
-/// 加载一个 Worker，按请求调它的 `fetch`
+/// Load a Worker and call its `fetch` for each request
 #[derive(Parser)]
 #[command(name = "workerd", version)]
 struct Cli {
-    /// Worker 脚本（ES 模块，`export default { fetch }`）
+    /// Worker script (ES module, `export default { fetch }`)
     script: PathBuf,
-    /// Durable Object 绑定：`env 里的名字=导出的类名`
+    /// Durable Object binding: `name in env=exported class name`
     #[arg(long = "bind", value_name = "NAME=CLASS")]
     bindings: Vec<String>,
-    /// 一次性请求：`"方法 路径"`，可以给多次；给了就不起服务
+    /// One-shot request: `"METHOD path"`, may be repeated; if given, no server is started
     #[arg(long = "request", value_name = "METHOD PATH")]
     requests: Vec<String>,
-    /// HTTP 服务的端口
+    /// Port for the HTTP server
     #[arg(long, default_value_t = 8787)]
     port: u16,
 }
 
-/// 一个 Durable Object 的存储（键 ⇒ JSON 文本）。
+/// Storage of one Durable Object (key ⇒ JSON text).
 #[derive(Default)]
 struct KvStore {
     map: BTreeMap<String, String>,
@@ -71,13 +71,13 @@ impl KvStore {
         self.map.keys().cloned().collect()
     }
 
-    /// `newUniqueId()` 用：时间戳加计数，十六进制。
+    /// For `newUniqueId()`: timestamp plus counter, in hex.
     fn unique_id(a: &mut r8framework::Agent<'_, '_>) -> String {
         format!("{:032x}", a.platform.wall_clock().as_nanos())
     }
 }
 
-/// 收到的一个 HTTP 请求。
+/// A received HTTP request.
 struct HttpRequest {
     method: String,
     path: String,
@@ -85,7 +85,7 @@ struct HttpRequest {
     body: String,
 }
 
-/// Worker 的一个响应。
+/// A response from the Worker.
 struct Reply {
     status: u16,
     headers: Vec<(String, String)>,
@@ -93,7 +93,7 @@ struct Reply {
 }
 
 impl From<&str> for Reply {
-    /// `__workerd.take()` 的文本：状态行、头一行一个、空行、正文。
+    /// The text from `__workerd.take()`: status line, one header per line, blank line, body.
     fn from(text: &str) -> Self {
         let (head, body) = text.split_once("\n\n").unwrap_or((text, ""));
         let mut lines = head.lines();
@@ -103,7 +103,7 @@ impl From<&str> for Reply {
     }
 }
 
-/// 运行中的 Worker：一个 isolate、一个执行环境。
+/// A running Worker: one isolate, one execution environment.
 struct Runtime<'p> {
     isolate: Isolate<'p>,
     executor: Executor,
@@ -128,7 +128,7 @@ impl<'p> Runtime<'p> {
         Ok(rt)
     }
 
-    /// 跑一段脚本，给出结果的 ToString。
+    /// Run a script and return ToString of the result.
     fn eval(&mut self, text: &str, file: &str) -> Result<String, String> {
         let r = self.isolate.run(&mut self.executor, &self.cx, &Source { text, file });
         let (executor, cx) = (&self.executor, &self.cx);
@@ -147,7 +147,7 @@ impl<'p> Runtime<'p> {
         })
     }
 
-    /// 字符串字面量（JSON 写法）。
+    /// String literal (JSON syntax).
     fn quote(s: &str) -> String {
         let mut out = String::from("\"");
         for c in s.chars() {
@@ -164,7 +164,7 @@ impl<'p> Runtime<'p> {
         out
     }
 
-    /// 动态 import 进 Worker 模块，装好 Durable Object 绑定。
+    /// Dynamically import the Worker module and install the Durable Object bindings.
     fn load(&mut self, script: &str, bindings: &[(String, String)]) -> Result<(), String> {
         let pairs: Vec<String> = bindings.iter().map(|(n, c)| format!("[{}, {}]", Self::quote(n), Self::quote(c))).collect();
         let src = format!(
@@ -179,7 +179,7 @@ impl<'p> Runtime<'p> {
         }
     }
 
-    /// 把一个请求交给 Worker 的 `fetch`，跑到它的 Promise 落定。
+    /// Hand a request to the Worker's `fetch` and run until its Promise settles.
     fn dispatch(&mut self, method: &str, path: &str, headers: &[(String, String)], body: &str) -> Reply {
         let url = if path.starts_with("http://") || path.starts_with("https://") { path.to_owned() } else { format!("{HOST}{path}") };
         let hs: Vec<String> = headers.iter().map(|(k, v)| format!("[{}, {}]", Self::quote(k), Self::quote(v))).collect();
@@ -193,7 +193,7 @@ impl<'p> Runtime<'p> {
         }
     }
 
-    /// 读一个 HTTP/1.1 请求（请求行、头、按 Content-Length 的正文）。
+    /// Read an HTTP/1.1 request (request line, headers, body by Content-Length).
     fn read_request(stream: &mut TcpStream) -> Option<HttpRequest> {
         let mut reader = BufReader::new(stream);
         let mut line = String::new();
@@ -222,7 +222,7 @@ impl<'p> Runtime<'p> {
         Some(HttpRequest { method, path, headers, body: String::from_utf8_lossy(&body).into_owned() })
     }
 
-    /// HTTP 服务：一个连接一个请求（`Connection: close`）。
+    /// HTTP server: one request per connection (`Connection: close`).
     fn serve(&mut self, port: u16) -> Result<(), String> {
         let listener = TcpListener::bind(("127.0.0.1", port)).map_err(|e| format!("bind 127.0.0.1:{port}: {e}"))?;
         eprintln!("workerd: listening on http://127.0.0.1:{port}");

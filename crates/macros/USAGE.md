@@ -1,27 +1,29 @@
-# r8macros 用法
+# r8macros usage
 
 ## `enums!("x.json")`
 
-从调用方 crate 根目录（`CARGO_MANIFEST_DIR`）下的 JSON 生成枚举。JSON 是唯一来源：⛔ 手写这些枚举，改指令只改 JSON。
-JSON 一改调用方自动重编（生成代码 `include_bytes!` 了它）；未知字段报错。
+Generates enums from a JSON file under the calling crate's root directory (`CARGO_MANIFEST_DIR`). The JSON is the
+single source of truth: ⛔ do not hand-write these enums; to change instructions, change only the JSON.
+The caller is rebuilt automatically whenever the JSON changes (the generated code `include_bytes!`s it); unknown fields
+are errors.
 
 ```rust
 r8macros::enums!("insn.json");
 ```
 
-生成代码里用到的类型（`Reg`、`Label`、`BinaryOp`……）要在调用处可见。
+Types used by the generated code (`Reg`, `Label`, `BinaryOp`, ...) must be in scope at the call site.
 
-### JSON 格式
+### JSON format
 
 ```json
 {
   "enums": [
     {
       "name": "Insn",
-      "doc": "一条指令。",
+      "doc": "An instruction.",
       "derive": ["Clone", "Copy", "Debug", "PartialEq"],
       "display": true,
-      "accessors": [{"name": "target_mut", "ty": "Label", "doc": "跳转目标"}],
+      "accessors": [{"name": "target_mut", "ty": "Label", "doc": "Jump target"}],
       "variants": [
         {"name": "Ldar", "mnemonic": "ldar", "doc": "acc = reg", "fields": [{"ty": "Reg"}]},
         {"name": "Jump", "mnemonic": "jump", "fields": [{"ty": "Label"}]},
@@ -37,44 +39,47 @@ r8macros::enums!("insn.json");
 }
 ```
 
-| 键 | 位置 | 含义 |
+| Key | Level | Meaning |
 |---|---|---|
-| `name` / `doc` | 枚举 | 枚举名、文档（必填） |
-| `derive` | 枚举 | 原样进 `#[derive(...)]`；要手写的 trait（如按位比的 `PartialEq`）就不列 |
-| `repr` | 枚举 | 判别式的整数类型，原样进 `#[repr(..)]`（如 `"u16"`）；不给由编译器挑，可能借字段空位编码（取判别式要多几条指令） |
-| `display` | 枚举 | 生成 `Display`：`助记符 操作数, 操作数` |
-| `asm` | 枚举 | 生成汇编（`Display` 的逆）：开了 `display` ⇒ `FromStr`（`Err = AsmError`，操作数按字段次序经 `Operands` 取、各类型实现 `Operand`）；没开 ⇒ 只收单元变体，按变体名实现 `Operand`。`AsmError` / `Operand` / `Operands` 要在调用处可见；`Option` 字段要有 `prefix` |
-| `accessors` | 枚举 | 生成 `pub fn name(&mut self) -> Option<&mut ty>`：每个变体里第一个类型为 `ty` 的字段，没有给 `None`。`target_mut`（`ty: Label`）就是这样来的，加带 `Label` 字段的指令自动算跳转 |
-| `name` / `doc` | 变体 | 变体名、文档 |
-| `mnemonic` | 变体 | `Display` 的助记符；`display` 开时与 `show: name` 字段二选一 |
-| `suffix` | 变体 | 配 `show: name` 字段：助记符写成 `名字.后缀`（同组名字的另一种操作数形式，如 `add.smi r2, 1` 与 `add r2` 并存） |
-| `default` | 变体 | `#[default]` |
-| `fields` | 变体 | 字段表；全带 `name` ⇒ 结构体变体，全不带 ⇒ 元组变体，混用报错 |
-| `ty` | 字段 | Rust 类型 |
-| `prefix` | 字段 | `Display` 时值前面的字（`fn#`、`extends `） |
-| `show` | 字段 | `display`（缺省，`{}`）/ `debug`（`{:?}`）/ `name`（`x.name()` 代替助记符） |
+| `name` / `doc` | enum | Enum name and docs (required) |
+| `derive` | enum | Passed as-is into `#[derive(...)]`; leave out traits that are written by hand (e.g. a bitwise `PartialEq`) |
+| `repr` | enum | Integer type of the discriminant, passed as-is into `#[repr(..)]` (e.g. `"u16"`); if omitted, the compiler chooses and may use a niche in a field for the encoding (reading the discriminant then costs a few extra instructions) |
+| `display` | enum | Generate `Display`: `mnemonic operand, operand` |
+| `asm` | enum | Generate assembly (the inverse of `Display`): with `display` on ⇒ `FromStr` (`Err = AsmError`; operands are taken through `Operands` in field order, and each type implements `Operand`); without it ⇒ unit variants only, implementing `Operand` by variant name. `AsmError` / `Operand` / `Operands` must be in scope at the call site; `Option` fields need a `prefix` |
+| `accessors` | enum | Generate `pub fn name(&mut self) -> Option<&mut ty>`: the first field of type `ty` in each variant, `None` if there is none. This is how `target_mut` (`ty: Label`) is produced, so adding an instruction with a `Label` field automatically makes it count as a jump |
+| `name` / `doc` | variant | Variant name and docs |
+| `mnemonic` | variant | Mnemonic for `Display`; with `display` on, use either this or a `show: name` field |
+| `suffix` | variant | Used with a `show: name` field: the mnemonic becomes `name.suffix` (another operand form of the same group of names, e.g. `add.smi r2, 1` alongside `add r2`) |
+| `default` | variant | `#[default]` |
+| `fields` | variant | Field list; all with `name` ⇒ struct variant, none with `name` ⇒ tuple variant; mixing is an error |
+| `ty` | field | Rust type |
+| `prefix` | field | Text written before the value in `Display` (`fn#`, `extends `) |
+| `show` | field | `display` (default, `{}`) / `debug` (`{:?}`) / `name` (`x.name()` replaces the mnemonic) |
 
-`Option<_>` 字段为 `None` 时在 `Display` 里整个不出现。
+An `Option<_>` field that is `None` is omitted entirely from `Display`.
 
-## 绑定宏：`#[r8::class]` / `#[r8::object]` / `#[r8::function]`
+## Binding macros: `#[r8::class]` / `#[r8::object]` / `#[r8::function]`
 
-三个宏各一个文件（`class.rs` / `object.rs` / `function.rs`），共用的读 `#[js(…)]`、分析签名、生成转换外壳在 `method.rs`。
-从仓库根的 `r8` 包用（`r8/src/lib.rs` 聚合导出宏与 r8binding 的 trait），生成代码走 `::r8::` 路径。
+Each of the three macros has its own file (`class.rs` / `object.rs` / `function.rs`); the shared code that reads
+`#[js(…)]`, analyzes signatures and generates the conversion wrapper is in `method.rs`.
+Use them through the `r8` package at the repository root (`r8/src/lib.rs` re-exports the macros together with
+r8binding's traits); the generated code uses `::r8::` paths.
 
-### `#[r8::class]`：Rust 类型导出成 JS 类
+### `#[r8::class]`: export a Rust type as a JS class
 
-写在 `impl` 块上：每个方法生成一个转换外壳（`fn(agent, this, args) -> Result<Value>`），并实现 `r8::Class`。
-类型本身不用改；实例是宿主对象（`ObjectKind::Host`），里面放一份 Rust 值。
+Placed on an `impl` block: generates a conversion wrapper (`fn(agent, this, args) -> Result<Value>`) for each method
+and implements `r8::Class`. The type itself needs no changes; instances are host objects (`ObjectKind::Host`) holding a
+Rust value.
 
 ```rust
 struct Counter { n: f64 }
 
-#[r8::class]                      // 或 #[r8::class("名字")]，缺省用类型名
+#[r8::class]                      // or #[r8::class("name")]; defaults to the type name
 impl Counter {
-    #[js(constructor)]            // `new Counter(…)`；普通调用抛 TypeError
+    #[js(constructor)]            // `new Counter(…)`; a plain call throws a TypeError
     fn new(start: Option<f64>) -> Self { Self { n: start.unwrap_or(0.0) } }
 
-    fn inc(&mut self, by: f64) -> f64 { self.n += by; self.n }       // 原型方法，名字转 camelCase
+    fn inc(&mut self, by: f64) -> f64 { self.n += by; self.n }       // prototype method; name converted to camelCase
 
     #[js(getter)]
     fn value(&self) -> f64 { self.n }
@@ -82,14 +87,14 @@ impl Counter {
     #[js(setter, name = "value")]
     fn set_value(&mut self, v: f64) { self.n = v }
 
-    fn zero() -> f64 { 0.0 }      // 没有 self：构造器上的静态方法
+    fn zero() -> f64 { 0.0 }      // no self: static method on the constructor
 }
 
-let handle = Counter::install(&mut agent, global);     // 全局 `Counter`，给出构造器与原型
-let obj = handle.instance(&agent, Counter { n: 1.0 });  // Rust 这边建实例
+let handle = Counter::install(&mut agent, global);     // global `Counter`; returns the constructor and prototype
+let obj = handle.instance(&agent, Counter { n: 1.0 });  // create an instance from Rust
 ```
 
-### `#[r8::object]`：只有关联函数的 `impl` 块导出成普通对象
+### `#[r8::object]`: export an `impl` block containing only associated functions as a plain object
 
 ```rust
 struct Fs;
@@ -98,32 +103,35 @@ struct Fs;
 impl Fs {
     fn exists_sync(path: &str) -> bool { … }        // fs.existsSync
     #[js(getter)]
-    fn sep() -> String { "/".into() }               // fs.sep（访问器）
+    fn sep() -> String { "/".into() }               // fs.sep (accessor)
 }
 
-Fs::install(&mut agent, global);                    // 全局 `fs`
+Fs::install(&mut agent, global);                    // global `fs`
 ```
 
-### `#[r8::function]`：一个函数导出成 JS 函数
+### `#[r8::function]`: export a function as a JS function
 
 ```rust
-#[r8::function]                    // 或 #[r8::function("名字")]
+#[r8::function]                    // or #[r8::function("name")]
 fn greet(name: &str) -> String { format!("hi {name}") }
 
-greet::install(&mut agent, global);   // 原函数照留；旁边生成同名模块，`greet::NATIVE` 是宿主函数
+// The original function is kept; a module of the same name is generated next to it,
+// and `greet::NATIVE` is the host function
+greet::install(&mut agent, global);
 ```
 
-### 标注与形参
+### Attributes and parameters
 
-| 标注 | 含义 |
+| Attribute | Meaning |
 |---|---|
-| `#[js(constructor)]` | 构造器（返回 `Self` 或 `Result<Self, Error>`）；没有就是不能 `new` 的类 |
-| `#[js(getter)]` / `#[js(setter)]` | 访问器，同名的配成一对 |
-| `#[js(static)]` | 静态方法（没有 `self` 的缺省就是） |
-| `#[js(name = "…")]` | JS 里的名字 |
-| `#[js(skip)]` | 不导出 |
+| `#[js(constructor)]` | Constructor (returns `Self` or `Result<Self, Error>`); without one, the class cannot be `new`ed |
+| `#[js(getter)]` / `#[js(setter)]` | Accessor; a getter and setter with the same name form a pair |
+| `#[js(static)]` | Static method (the default for methods without `self`) |
+| `#[js(name = "…")]` | The name in JS |
+| `#[js(skip)]` | Not exported |
 
-形参按类型取：`&mut Agent` 传当前 agent；`This` 是原样的 `this`；`Rest` 是剩下的全部实参；`&str` 先 ToString 再借出；
-别的按 `FromJs` 依次转（`f64` / `i32` / `u32` / `usize` / `bool` / `String` / `JsString` / `JsObject` / `Value` /
-`Option<T>` / `Vec<T>`）。返回值按 `IntoJs` 转，`Result<T, Error>` 出错就抛。形参里的生命周期写 `'gc`。
-`&self` / `&mut self` 方法重入同一个对象时抛 TypeError（不 panic）。
+Parameters are taken by type: `&mut Agent` receives the current agent; `This` is the raw `this`; `Rest` is all remaining
+arguments; `&str` is converted with ToString and then borrowed; anything else is converted in order with `FromJs`
+(`f64` / `i32` / `u32` / `usize` / `bool` / `String` / `JsString` / `JsObject` / `Value` / `Option<T>` / `Vec<T>`).
+Return values are converted with `IntoJs`; `Result<T, Error>` throws on error. Write lifetimes in parameters as `'gc`.
+`&self` / `&mut self` methods that re-enter the same object throw a TypeError (no panic).

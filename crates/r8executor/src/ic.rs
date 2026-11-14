@@ -1,11 +1,14 @@
-//! 属性读写的内联缓存：每处 `get.named` / `set.named` / `define.named` 一个。
+//! Inline caches for property reads/writes: one per `get.named` / `set.named` / `define.named` site.
 //!
-//! 只认形状地址（回收会搬对象，缓存里不能存对象指针），另持有 `Weak` 让认过的地址不被别的形状复用。
-//! 字典形状会原地改（地址不变内容变），一律不缓存。
+//! Keyed only by shape address (GC moves objects, so the cache must not hold object pointers); also holds a `Weak` so a
+//! recognized address is not reused by another shape.
+//! Dictionary shapes mutate in place (same address, different contents), so they are never cached.
 //!
-//! - 读：接收者自有的数据属性，或往上第 1..=[`DEPTH`] 层原型上的（沿途各层形状都核对）
-//! - 写：接收者自有、可写的数据属性
-//! - 加属性：原形状 ⇒ 新形状；赋值的还要核对整条原型链各层的形状（链上没人中途加同名的 setter / 只读属性）
+//! - Read: a data property owned by the receiver, or by a prototype 1..=[`DEPTH`] levels up (the shape of every level
+//! on the way is checked)
+//! - Write: a writable data property owned by the receiver
+//! - Add property: old shape ⇒ new shape; assignments also check the shape of every level of the prototype chain (no
+//! one on the chain has since added a setter / read-only property of the same name)
 use alloc::rc::{Rc, Weak};
 use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
@@ -13,22 +16,22 @@ use core::cell::{Cell, RefCell};
 use r8framework::{JsObject, ObjectData, ObjectKind, Shape, Slot, Value};
 use r8gc::Mutation;
 
-/// 还没有形状的空对象在缓存里的地址（真的形状地址按 8 对齐，不会是它）
+/// Address in the cache of an empty object that has no shape yet (real shape addresses are 8-aligned, so never this)
 const EMPTY: usize = 1;
-/// 最多缓存几层原型
+/// Maximum number of prototype levels cached
 const DEPTH: usize = 4;
 
-/// 对象当前形状的地址
+/// Address of the object's current shape
 fn addr(d: &ObjectData<'_>) -> usize {
     d.props.shape().map_or(EMPTY, |s| Rc::as_ptr(s) as usize)
 }
 
-/// 自有属性全在形状里（名字也过了 [`Ic::name_ok`]）、形状不会原地改
+/// All own properties are in the shape (and their names pass [`Ic::name_ok`]), and the shape does not mutate in place
 fn plain(d: &ObjectData<'_>) -> bool {
     !matches!(d.kind, ObjectKind::Proxy(_) | ObjectKind::TypedArray(..) | ObjectKind::ModuleNamespace(_)) && d.props.shape().is_none_or(|s| !s.is_dict())
 }
 
-/// 改之前的样子（给加属性的缓存比对）。
+/// What it looked like before the change (compared against by the add-property cache).
 #[derive(Clone, Copy)]
 pub(crate) struct Before {
     shape: usize,
@@ -43,25 +46,26 @@ impl From<JsObject<'_>> for Before {
     }
 }
 
-/// 一处属性读写的缓存。
+/// The cache for one property read/write site.
 #[derive(Default)]
 pub(crate) struct Ic {
-    /// 接收者的形状地址（0：没缓存）
+    /// Receiver shape address (0: nothing cached)
     shape: Cell<usize>,
-    /// 槽号
+    /// Slot index
     slot: Cell<u32>,
-    /// 读：往上第几层原型持有（0 是自有）；加属性：原型链有几层（核对到底）
+    /// Read: how many prototype levels up holds it (0 is own); add property: how many levels the prototype chain has
+    /// (checked to the end)
     depth: Cell<u8>,
-    /// 各层原型的形状地址
+    /// Shape addresses of each prototype level
     chain: [Cell<usize>; DEPTH],
-    /// 加属性：转移到的形状
+    /// Add property: the shape transitioned to
     to: RefCell<Option<Rc<Shape>>>,
-    /// 保住认过的形状地址
+    /// Keeps the recognized shape addresses alive
     keep: RefCell<Vec<Weak<Shape>>>,
 }
 
 impl Ic {
-    /// 数组的 `length`、下标与像数的名字（类型化数组）走各自的特殊逻辑，不缓存
+    /// Array `length`, indices and number-like names (typed arrays) take their own special paths and are not cached
     fn name_ok(name: &str) -> bool {
         name != "length" && name != "NaN" && name != "Infinity" && !name.starts_with(|c: char| c.is_ascii_digit() || c == '-')
     }
@@ -79,7 +83,7 @@ impl Ic {
         addr(d)
     }
 
-    /// 沿原型链核对 `depth`（≥ 1）层形状，给出最后一层
+    /// Checks `depth` (≥ 1) shape levels along the prototype chain, returning the last level
     fn holder<'gc>(&self, mut proto: Option<JsObject<'gc>>, depth: usize) -> Option<JsObject<'gc>> {
         let mut last = None;
         for c in &self.chain[..depth] {
@@ -94,7 +98,7 @@ impl Ic {
         last
     }
 
-    /// 整条原型链（`depth` 层后到头）各层形状都没变
+    /// Every shape level of the whole prototype chain (ending after `depth` levels) is unchanged
     fn chain_intact(&self, mut proto: Option<JsObject<'_>>, depth: usize) -> bool {
         for c in &self.chain[..depth] {
             let Some(p) = proto else { return false };
@@ -107,7 +111,7 @@ impl Ic {
         proto.is_none()
     }
 
-    // ---- 读 ----
+    // ---- Read ----
 
     #[inline]
     pub(crate) fn get<'gc>(&self, o: JsObject<'gc>) -> Option<Value<'gc>> {
@@ -132,7 +136,7 @@ impl Ic {
         }
     }
 
-    /// 慢路读完后记下在哪找到的
+    /// After a slow-path read, records where it was found
     pub(crate) fn fill_get(&self, o: JsObject<'_>, name: &str) {
         self.reset();
         if !Self::name_ok(name) {
@@ -176,9 +180,9 @@ impl Ic {
         }
     }
 
-    // ---- 写 / 加属性 ----
+    // ---- Write / add property ----
 
-    /// 命中就写好返回 `true`
+    /// On a hit, writes and returns `true`
     #[inline]
     pub(crate) fn set<'gc>(&self, mc: &Mutation<'gc>, o: JsObject<'gc>, v: Value<'gc>, assign: bool) -> bool {
         let want = self.shape.get();
@@ -188,7 +192,7 @@ impl Ic {
         }
         let to = self.to.borrow();
         match &*to {
-            // 改自有的可写数据属性
+            // Modify an own writable data property
             None => {
                 let slot = self.slot.get() as usize;
                 if !matches!(d.props.slot(slot), Slot::Data(_)) {
@@ -198,7 +202,7 @@ impl Ic {
                 o.borrow_mut(mc).set_at(slot, v);
                 true
             }
-            // 加属性：可扩展；赋值的还要整条原型链没变
+            // Add property: extensible; assignments also require the whole prototype chain to be unchanged
             Some(to) => {
                 if d.non_extensible || (assign && !self.chain_intact(d.proto, usize::from(self.depth.get()))) {
                     return false;
@@ -210,7 +214,8 @@ impl Ic {
         }
     }
 
-    /// 慢路写完后记下：改了自有属性，或加了一个属性（`assign`：赋值，要核对原型链）
+    /// After a slow-path write, records it: an own property was modified, or a property was added (`assign`: an
+    /// assignment, so the prototype chain must be checked)
     pub(crate) fn fill_set(&self, o: JsObject<'_>, name: &str, before: Before, assign: bool) {
         self.reset();
         if !Self::name_ok(name) || !before.plain {
@@ -247,7 +252,8 @@ impl Ic {
             }
             self.depth.set(u8::try_from(depth).unwrap_or(u8::MAX));
         }
-        // 起始形状是 `to` 的父形状（子形状强引用父形状），`to` 活着它的地址就不会被复用
+        // The starting shape is the parent of `to` (child shapes hold their parent strongly), so while `to` is alive
+        // its address cannot be reused
         *self.to.borrow_mut() = Some(to);
         self.shape.set(before.shape);
     }

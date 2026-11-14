@@ -1,7 +1,7 @@
-//! 回收计数。
+//! Collection counters.
 use core::cell::Cell;
 
-/// 各种回收做过几次。
+/// How many times each kind of collection has run.
 #[derive(Default, Debug)]
 pub struct Metrics {
     pub(crate) minor: Cell<usize>,
@@ -11,27 +11,27 @@ pub struct Metrics {
 }
 
 impl Metrics {
-    /// 次回收（新生代）次数
+    /// Number of minor (young-generation) collections
     pub fn minor_count(&self) -> usize {
         self.minor.get()
     }
 
-    /// 主回收（整堆标记清扫）次数
+    /// Number of major (whole-heap mark-sweep) collections
     pub fn major_count(&self) -> usize {
         self.major.get()
     }
 
-    /// 压缩次数
+    /// Number of compactions
     pub fn compaction_count(&self) -> usize {
         self.compactions.get()
     }
 
-    /// 从新生代提升进老年代的对象数
+    /// Number of objects promoted from the young generation to the old generation
     pub fn promoted_count(&self) -> usize {
         self.promoted.get()
     }
 
-    /// 完整回收的轮数（同主回收次数）
+    /// Number of full collection cycles (same as the number of major collections)
     pub fn total_gc_count(&self) -> usize {
         self.major.get()
     }

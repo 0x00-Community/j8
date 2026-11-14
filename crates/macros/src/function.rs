@@ -1,5 +1,6 @@
-//! `#[r8::function]` / `#[r8::function("名字")]`：写在函数上，原函数照留，旁边生成同名模块，
-//! `名字::install(&mut agent, target)` 把它装成 `target` 上的 JS 函数（`名字::NATIVE` 是宿主函数本身）。
+//! `#[r8::function]` / `#[r8::function("name")]`: placed on a function; the original function is kept and a
+//! module of the same name is generated next to it. `name::install(&mut agent, target)` installs it as a JS
+//! function on `target` (`name::NATIVE` is the host function itself).
 use proc_macro2::TokenStream;
 use quote::quote;
 use syn::{ItemFn, LitStr};
@@ -26,10 +27,10 @@ pub fn expand(attr: TokenStream, mut item: ItemFn) -> syn::Result<TokenStream> {
 
             #wrapper
 
-            /// 宿主函数本身
+            /// The host function itself
             pub const NATIVE: ::r8::frame::NativeFn = #w;
 
-            /// 装成 `target` 上的 JS 函数，给出函数对象。
+            /// Installs it as a JS function on `target` and returns the function object.
             pub fn install<'gc>(a: &mut ::r8::frame::Agent<'gc, '_>, target: ::r8::frame::JsObject<'gc>) -> ::r8::frame::JsObject<'gc> {
                 ::r8::Glue::function(a, target, #js, NATIVE, #length)
             }

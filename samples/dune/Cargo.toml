@@ -1,6 +1,6 @@
 [package]
 name = "dune"
-description = "dune：r8 的 JavaScript 运行时命令行（对标 node / deno）"
+description = "dune: the r8 JavaScript runtime CLI (comparable to node / deno)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -18,7 +18,7 @@ r8jit.workspace = true
 clap.workspace = true
 r8.workspace = true
 
-# test262 一致性测试，源码在仓库根 tests/（不另开 crate）
+# test262 conformance tests; the source lives in tests/ at the repo root (no separate crate)
 [[test]]
 name = "test262"
 path = "../../tests/test262.rs"

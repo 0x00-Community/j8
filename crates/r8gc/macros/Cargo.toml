@@ -1,6 +1,6 @@
 [package]
 name = "r8gc-macros"
-description = "r8gc 的过程宏：#[derive(Collect)] 等"
+description = "Procedural macros for r8gc: #[derive(Collect)] and others"
 edition.workspace = true
 license.workspace = true
 

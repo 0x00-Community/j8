@@ -5,10 +5,10 @@ use r8framework::{Agent, Error, ErrorKind, HelperKind, HelperState, IterRecord, 
 
 use crate::{Args, Installer};
 
-/// 全局 `Iterator`、`Iterator.prototype` 上的助手方法、`Iterator.from`。
+/// The global `Iterator`, the helper methods on `Iterator.prototype`, and `Iterator.from`.
 struct Helpers;
 
-/// `some` / `every` / `find` 怎么收。
+/// How `some` / `every` / `find` collect their result.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Probe {
     Some,
@@ -21,7 +21,7 @@ impl Helpers {
         matches!(v, Value::Object(f) if matches!(f.borrow().kind, ObjectKind::Native(n) if core::ptr::fn_addr_eq(n.f, Self::iterator as r8framework::NativeFn)))
     }
 
-    /// `Iterator` 是抽象类：只能被子类构造。
+    /// `Iterator` is abstract: it can only be constructed through a subclass.
     fn iterator<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         if a.new_target == Value::Undefined || Self::is_iterator_ctor(a.new_target) {
             return Err(a.throw(ErrorKind::Type, "Abstract class Iterator not directly constructable"));
@@ -29,13 +29,13 @@ impl Helpers {
         Ok(a.create_from_ctor(a.realm.iterator_proto, ObjectKind::Ordinary)?.into())
     }
 
-    /// GetIteratorDirect。
+    /// GetIteratorDirect.
     fn direct<'gc>(a: &mut Agent<'gc, '_>, o: Value<'gc>) -> Result<IterRecord<'gc>, Error> {
         let next = a.get_named(o, "next")?;
         Ok(IterRecord { iterator: o, next })
     }
 
-    /// `this` 要是对象。
+    /// `this` must be an object.
     fn this_object<'gc>(a: &Agent<'gc, '_>, this: Value<'gc>) -> Result<Value<'gc>, Error> {
         match this {
             Value::Object(_) => Ok(this),
@@ -43,7 +43,7 @@ impl Helpers {
         }
     }
 
-    /// 实参校验失败：先关掉 `this` 这个迭代器再抛。
+    /// Argument validation failed: close the `this` iterator first, then throw.
     fn reject<'gc>(a: &mut Agent<'gc, '_>, iterator: Value<'gc>, kind: ErrorKind, message: &str) -> Error {
         let e = a.throw(kind, message);
         let _ = a.iterator_close(iterator);
@@ -59,7 +59,7 @@ impl Helpers {
         }
     }
 
-    /// 出错时悄悄关掉底层迭代器，原错误照抛。
+    /// On error, quietly close the underlying iterator and rethrow the original error.
     fn close_on<'gc, T>(a: &mut Agent<'gc, '_>, iterator: Value<'gc>, r: Result<T, Error>) -> Result<T, Error> {
         if r.is_err() {
             let _ = a.iterator_close(iterator);
@@ -91,7 +91,7 @@ impl Helpers {
         Self::with_callback(a, this, args, HelperKind::FlatMap)
     }
 
-    /// `take` / `drop` 的个数：不是 NaN、不是负数（可以是 +∞）。
+    /// Count for `take` / `drop`: not NaN, not negative (may be +∞).
     fn limited<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>], kind: HelperKind) -> Result<Value<'gc>, Error> {
         let this = Self::this_object(a, this)?;
         let n = a.to_number(args.at(0));
@@ -114,7 +114,7 @@ impl Helpers {
         Self::limited(a, this, args, HelperKind::Drop)
     }
 
-    /// GetIteratorFlattenable：`strings` 时字符串也行，别的原始值抛 TypeError。
+    /// GetIteratorFlattenable: with `strings`, strings are accepted too; other primitives throw TypeError.
     fn flattenable<'gc>(a: &mut Agent<'gc, '_>, v: Value<'gc>, strings: bool) -> Result<IterRecord<'gc>, Error> {
         match v {
             Value::Object(_) => {}
@@ -132,7 +132,7 @@ impl Helpers {
         Self::direct(a, iterator)
     }
 
-    /// 助手跑一步：给出产出的值，走完给 `None`。
+    /// Run the helper one step: returns the produced value, or `None` when done.
     fn step<'gc>(a: &mut Agent<'gc, '_>, h: &mut IteratorHelper<'gc>) -> Result<Option<Value<'gc>>, Error> {
         let under = h.underlying;
         loop {
@@ -244,7 +244,7 @@ impl Helpers {
         Ok(a.iter_result(Value::Undefined, true).into())
     }
 
-    /// 消费型方法的开头：校验回调、取 `next`。
+    /// Start of a consuming method: validate the callback, get `next`.
     fn consumer<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, f: Value<'gc>) -> Result<IterRecord<'gc>, Error> {
         let this = Self::this_object(a, this)?;
         Self::callable(a, this, f)?;
@@ -331,7 +331,7 @@ impl Helpers {
         Self::probe(a, this, args, Probe::Find)
     }
 
-    /// `Iterator.from(o)`：已经继承 Iterator.prototype 的原样给，否则包一层。
+    /// `Iterator.from(o)`: returned as is if it already inherits from Iterator.prototype, otherwise wrapped.
     fn from<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let rec = Self::flattenable(a, args.at(0), true)?;
         let inherits = match rec.iterator {
@@ -379,17 +379,18 @@ impl Helpers {
         a.call(ret, r.iterator, &[])
     }
 
-    /// `Iterator.prototype[Symbol.toStringTag]` 的 getter。
+    /// Getter for `Iterator.prototype[Symbol.toStringTag]`.
     fn tag_get<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         Ok(a.string("Iterator").into())
     }
 
-    /// `Iterator.prototype.constructor` 的 getter。
+    /// Getter for `Iterator.prototype.constructor`.
     fn ctor_get<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         Ok(a.realm.global.borrow().own("Iterator").unwrap_or_default())
     }
 
-    /// SetterThatIgnoresPrototypeProperties：在 Iterator.prototype 本身上写抛 TypeError，别的对象上建 / 改自有属性。
+    /// SetterThatIgnoresPrototypeProperties: writing on Iterator.prototype itself throws TypeError; on other objects it
+    /// creates / changes an own property.
     fn ignoring_setter<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, key: Key<'_, 'gc>, v: Value<'gc>) -> Result<Value<'gc>, Error> {
         let Value::Object(o) = this else {
             return Err(a.throw(ErrorKind::Type, "setter called on a non-object"));

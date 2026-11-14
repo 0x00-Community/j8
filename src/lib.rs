@@ -1,10 +1,11 @@
-//! r8：嵌入方用的门面。绑定宏与它们生成的代码要用的东西都从这里取：
+//! r8: the facade for embedders. The binding macros and everything their generated code needs come from here:
 //!
-//! - `#[r8::class]`：`impl` 块导出成 JS 类（构造器、原型方法、访问器、静态方法）
-//! - `#[r8::object]`：只有关联函数的 `impl` 块导出成普通对象（`console` / `process` 这类）
-//! - `#[r8::function]`：一个函数导出成 JS 函数
+//! - `#[r8::class]`: exports an `impl` block as a JS class (constructor, prototype methods, accessors, static methods)
+//! - `#[r8::object]`: exports an `impl` block of associated functions only as a plain object
+//!   (like `console` / `process`)
+//! - `#[r8::function]`: exports a function as a JS function
 //!
-//! 用法见 `crates/macros/USAGE.md`。
+//! See `crates/macros/USAGE.md` for usage.
 #![no_std]
 
 pub use r8binding::{Class, ClassHandle, FromJs, IntoJs, Member, Object, Rest, This};

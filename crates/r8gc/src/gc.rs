@@ -1,4 +1,4 @@
-//! `Gc<'gc, T>`：指向回收堆的指针，品牌 `'gc` 保证出不了 `mutate`。
+//! `Gc<'gc, T>`: a pointer into the collected heap; the `'gc` brand guarantees it cannot escape `mutate`.
 use core::borrow::Borrow;
 use core::cell::Cell;
 use core::cmp::Ordering;
@@ -11,14 +11,15 @@ use core::ptr::NonNull;
 use crate::header::Ptr;
 use crate::{Collect, Mutation, Relocate, Trace};
 
-/// 回收堆上的 `T`。`Copy`，零开销；`'gc` 不变，值出不了 [`R8Heap::mutate`](crate::R8Heap::mutate)。
+/// A `T` on the collected heap. `Copy`, zero-cost; `'gc` is invariant, so the value cannot escape
+/// [`R8Heap::mutate`](crate::R8Heap::mutate).
 pub struct Gc<'gc, T: 'gc> {
     ptr: NonNull<T>,
     _brand: PhantomData<(&'gc T, Cell<&'gc ()>)>,
 }
 
 impl<'gc, T: Collect<'gc> + 'gc> Gc<'gc, T> {
-    /// 在堆上放一个值
+    /// Places a value on the heap
     #[inline]
     pub fn new(mc: &Mutation<'gc>, t: T) -> Self {
         Self::from(mc.cx().alloc(t))
@@ -26,23 +27,23 @@ impl<'gc, T: Collect<'gc> + 'gc> Gc<'gc, T> {
 }
 
 impl<'gc, T: 'gc> Gc<'gc, T> {
-    /// 是不是同一个对象（只在一次 `mutate` 里有意义：回收会搬对象）
+    /// Whether both are the same object (meaningful only within one `mutate`: collection moves objects)
     #[inline]
     pub fn ptr_eq(a: Self, b: Self) -> bool {
         a.ptr == b.ptr
     }
 
-    /// 对象地址（只在一次 `mutate` 里有意义：回收会搬对象）
+    /// The object's address (meaningful only within one `mutate`: collection moves objects)
     #[inline]
     pub fn as_ptr(gc: Self) -> *const T {
         gc.ptr.as_ptr()
     }
 
-    /// 借出整个 `'gc` 期间（与 gc-arena 同名，按值取 `self`）
+    /// Borrows for the whole `'gc` lifetime (same name as in gc-arena; takes `self` by value)
     #[inline]
     #[allow(clippy::should_implement_trait)]
     pub fn as_ref(self) -> &'gc T {
-        // SAFETY: 品牌保证 'gc 期间不回收，对象活着
+        // SAFETY: the brand guarantees no collection during 'gc, so the object is alive
         unsafe { self.ptr.as_ref() }
     }
 
@@ -60,7 +61,7 @@ impl<'gc, T: 'gc> From<Ptr> for Gc<'gc, T> {
 }
 
 unsafe impl<'gc, T: 'gc> Collect<'gc> for Gc<'gc, T> {
-    /// 指针本身没有析构
+    /// The pointer itself has no destructor
     const PARALLEL_DROP: bool = true;
     #[inline]
     fn trace(&self, t: &mut Trace<'_>) {
@@ -120,7 +121,7 @@ impl<'gc, T: 'gc> fmt::Pointer for Gc<'gc, T> {
     }
 }
 
-/// 比较、哈希都按值（同 `Box`）
+/// Comparison and hashing are by value (like `Box`)
 impl<'gc, T: PartialEq + 'gc> PartialEq for Gc<'gc, T> {
     fn eq(&self, o: &Self) -> bool {
         **self == **o

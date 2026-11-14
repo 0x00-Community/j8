@@ -1,7 +1,8 @@
-//! 汇编：文本 ⇒ `Module`，是 disasm.rs 里 `Display for Module` 的逆。
+//! Assembly: text ⇒ `Module`, the inverse of `Display for Module` in disasm.rs.
 //!
-//! 一条指令的写法由 insn.json 定（`enums!` 的 `asm` 生成 `FromStr for Insn`，与 `Display` 同源），
-//! 这里只管操作数、函数头、常量池、作用域表这些手写结构。`;` 起到行尾是注释。
+//! How an instruction is written is defined by insn.json (`asm` in `enums!` generates `FromStr for Insn`, from the
+//! same source as `Display`); this file only handles the hand-written structures: operands, function headers, the
+//! constant pool, and scope tables. A `;` starts a comment that runs to the end of the line.
 use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -13,22 +14,22 @@ use r8framework::{BinaryOp, CompareOp, UnaryOp};
 use crate::disasm::{KINDS, MODES};
 use crate::{Const, Constant, EvalName, EvalScope, Function, FunctionKind, Label, Mode, Module, Reg};
 
-/// 汇编出错。
+/// An assembly error.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AsmError {
-    /// 不认识的助记符
+    /// Unknown mnemonic
     Mnemonic(Box<str>),
-    /// 写错的操作数
+    /// Malformed operand
     Operand(Box<str>),
-    /// 少了操作数
+    /// Missing operand
     Missing,
-    /// 多出来的内容
+    /// Unexpected trailing content
     Extra(Box<str>),
-    /// 该是（第一个）却看到（第二个）
+    /// Expected (the first) but found (the second)
     Expected(&'static str, Box<str>),
-    /// 编号不连续：该是（第一个）却写了（第二个）
+    /// Index out of sequence: expected (the first) but got (the second)
     Index(usize, usize),
-    /// 第几行（从 1 数）出的错
+    /// The line (1-based) where the error occurred
     Line(usize, Box<AsmError>),
 }
 
@@ -48,12 +49,12 @@ impl fmt::Display for AsmError {
 
 impl core::error::Error for AsmError {}
 
-/// 一个操作数（或函数头里的一个词）的文本形式 ⇒ 值。
+/// The text form of an operand (or of a word in a function header) ⇒ value.
 pub(crate) trait Operand: Sized {
     fn operand(text: &str) -> Result<Self, AsmError>;
 }
 
-/// 带固定前缀的编号：`r3` / `#3` / `@3`
+/// An index with a fixed prefix: `r3` / `#3` / `@3`
 macro_rules! prefixed {
     ($($ty:ident $prefix:literal),*) => {$(
         impl Operand for $ty {
@@ -65,7 +66,7 @@ macro_rules! prefixed {
 }
 prefixed!(Reg "r", Const "#", Label "@");
 
-/// 照 `FromStr` 读的
+/// Read via `FromStr`
 macro_rules! parsed {
     ($($ty:ty),*) => {$(
         impl Operand for $ty {
@@ -77,7 +78,7 @@ macro_rules! parsed {
 }
 parsed!(bool, i32, u16, u32, usize);
 
-/// 按 `name()` 反查 `ALL`
+/// Reverse lookup in `ALL` by `name()`
 macro_rules! by_name {
     ($($ty:ty),*) => {$(
         impl Operand for $ty {
@@ -89,7 +90,7 @@ macro_rules! by_name {
 }
 by_name!(BinaryOp, CompareOp, UnaryOp);
 
-/// 按（值, 名字）表反查
+/// Reverse lookup in a (value, name) table
 macro_rules! by_table {
     ($($ty:ty = $table:expr),*) => {$(
         impl Operand for $ty {
@@ -102,7 +103,7 @@ macro_rules! by_table {
 by_table!(FunctionKind = KINDS, Mode = MODES);
 
 impl Operand for f64 {
-    /// `{:?}` 的写法（`NaN` / `inf` / `-0.0` 都认）；非规范 NaN 是 `nan:0x…`（按位）
+    /// As written by `{:?}` (`NaN` / `inf` / `-0.0` all accepted); a non-canonical NaN is `nan:0x…` (bitwise)
     fn operand(text: &str) -> Result<Self, AsmError> {
         match text.strip_prefix("nan:0x") {
             Some(hex) => u64::from_str_radix(hex, 16).map(f64::from_bits).map_err(|_| AsmError::Operand(text.into())),
@@ -111,11 +112,12 @@ impl Operand for f64 {
     }
 }
 
-/// 一条指令助记符后面的操作数：逗号分隔，生成的 `FromStr for Insn` 按字段次序取。
+/// The operands after an instruction mnemonic: comma-separated, taken in field order by the generated
+/// `FromStr for Insn`.
 pub(crate) struct Operands<'a>(Option<&'a str>);
 
 impl<'a> Operands<'a> {
-    /// 拆成助记符与操作数
+    /// Splits into mnemonic and operands
     pub(crate) fn split(text: &'a str) -> (&'a str, Self) {
         let text = text.trim();
         match text.split_once(char::is_whitespace) {
@@ -135,13 +137,13 @@ impl<'a> Operands<'a> {
         Some(a.trim())
     }
 
-    /// 下一个操作数，去掉前缀 `prefix`（`fn#` 等）
+    /// The next operand, with the prefix `prefix` (`fn#` etc.) stripped
     pub(crate) fn next<T: Operand>(&mut self, prefix: &str) -> Result<T, AsmError> {
         let text = self.take().ok_or(AsmError::Missing)?;
         T::operand(text.strip_prefix(prefix).ok_or_else(|| AsmError::Operand(text.into()))?.trim_start())
     }
 
-    /// 以 `prefix` 开头才是它（`Option` 字段，`None` 时整个不写）
+    /// Only present if it starts with `prefix` (an `Option` field, omitted entirely when `None`)
     pub(crate) fn optional<T: Operand>(&mut self, prefix: &str) -> Result<Option<T>, AsmError> {
         match self.peek() {
             Some(text) if text.starts_with(prefix) => self.next(prefix).map(Some),
@@ -157,11 +159,11 @@ impl<'a> Operands<'a> {
     }
 }
 
-/// 一行的词法：词、标点、带转义的字符串。
+/// Lexer for one line: words, punctuation, strings with escapes.
 struct Cursor<'a>(&'a str);
 
 impl<'a> Cursor<'a> {
-    /// 只剩空白或注释
+    /// Only whitespace or a comment remains
     fn at_end(&mut self) -> bool {
         self.0 = self.0.trim_start();
         self.0.is_empty() || self.0.starts_with(';')
@@ -180,7 +182,7 @@ impl<'a> Cursor<'a> {
         if self.eat(lit) { Ok(()) } else { Err(AsmError::Expected(lit, self.0.into())) }
     }
 
-    /// 到空白或 `,` `[` `]` `;` 为止；行尾 / 标点前给空串
+    /// Up to whitespace or `,` `[` `]` `;`; an empty string at end of line / before punctuation
     fn word(&mut self) -> &'a str {
         self.0 = self.0.trim_start();
         let end = self.0.find(|c: char| c.is_whitespace() || matches!(c, ',' | '[' | ']' | ';')).unwrap_or(self.0.len());
@@ -193,7 +195,7 @@ impl<'a> Cursor<'a> {
         T::operand(self.word())
     }
 
-    /// 编号必须是 `want`（顺序写出来的）
+    /// The index must be `want` (written in sequence)
     fn index(&mut self, want: usize) -> Result<(), AsmError> {
         match self.value::<usize>()? {
             got if got == want => Ok(()),
@@ -201,7 +203,7 @@ impl<'a> Cursor<'a> {
         }
     }
 
-    /// `{:?}` 写出的字符串：`\n` `\r` `\t` `\0` `\\` `\"` `\'` `\u{…}`
+    /// A string as written by `{:?}`: `\n` `\r` `\t` `\0` `\\` `\"` `\'` `\u{…}`
     fn string(&mut self) -> Result<Box<str>, AsmError> {
         self.expect("\"")?;
         let mut out = String::new();
@@ -232,7 +234,7 @@ impl<'a> Cursor<'a> {
 }
 
 impl Function {
-    /// 函数头 `"名字" 种类 模式 params N length N regs N [generator] [async] [keeps_args]`（`fn#i` 之后）
+    /// Function header `"name" kind mode params N length N regs N [generator] [async] [keeps_args]` (after `fn#i`)
     fn header(c: &mut Cursor<'_>) -> Result<Self, AsmError> {
         let mut f = Function { name: c.string()?, kind: c.value()?, mode: c.value()?, ..Function::default() };
         c.expect("params")?;
@@ -253,7 +255,7 @@ impl Function {
         Ok(f)
     }
 
-    /// 函数体里的一行（函数头之后）
+    /// A line in the function body (after the header)
     fn line(&mut self, c: &mut Cursor<'_>) -> Result<(), AsmError> {
         if c.eat(".mapped") {
             loop {
@@ -298,7 +300,7 @@ impl Constant {
 }
 
 impl EvalScope {
-    /// 由内向外每层一对 `[…]`，层内 `"名字" 槽位 [const] [tdz] [self_name]` 逗号分隔
+    /// One `[…]` per level, innermost first; within a level, comma-separated `"name" slot [const] [tdz] [self_name]`
     fn parse(c: &mut Cursor<'_>) -> Result<Self, AsmError> {
         let mut scope = EvalScope::default();
         while c.eat("[") {
@@ -340,7 +342,7 @@ impl Module {
     }
 }
 
-/// 汇编：`text.parse::<Module>()`。
+/// Assembly: `text.parse::<Module>()`.
 impl FromStr for Module {
     type Err = AsmError;
 

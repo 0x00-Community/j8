@@ -1,4 +1,4 @@
-//! Promise 与微任务：解决 / 拒绝、`then` 的反应、async 协程的驱动、排空队列。
+//! Promises and microtasks: resolve / reject, `then` reactions, driving async coroutines, draining the queue.
 use alloc::vec::Vec;
 
 use r8gc::{Gc, Lock};
@@ -6,7 +6,7 @@ use r8gc::{Gc, Lock};
 use crate::{Agent, Error, ErrorKind, Job, JsObject, ObjectData, ObjectKind, Reaction, Request, Resume, Settled, Step, Value};
 
 impl<'gc> Agent<'gc, '_> {
-    /// 一个待定的 Promise。
+    /// A pending Promise.
     pub fn new_promise(&self) -> JsObject<'gc> {
         ObjectData { kind: ObjectKind::Promise { state: Settled::Pending, reactions: Vec::new() }, proto: Some(self.realm.promise_proto), ..ObjectData::default() }.alloc(self.mc)
     }
@@ -15,7 +15,7 @@ impl<'gc> Agent<'gc, '_> {
         matches!(v, Value::Object(o) if matches!(o.borrow().kind, ObjectKind::Promise { .. }))
     }
 
-    /// Promise 的一对 resolve / reject 函数（共享「已经解决过」的标记）。
+    /// A Promise's pair of resolve / reject functions (sharing an "already resolved" flag).
     pub fn promise_resolvers(&self, promise: JsObject<'gc>) -> (JsObject<'gc>, JsObject<'gc>) {
         let done = Gc::new(self.mc, Lock::new(false));
         let make = |reject| {
@@ -26,7 +26,7 @@ impl<'gc> Agent<'gc, '_> {
         (make(false), make(true))
     }
 
-    /// 调一个 resolve / reject 函数。
+    /// Call a resolve / reject function.
     pub fn run_resolver(&mut self, f: JsObject<'gc>, value: Value<'gc>) -> Result<Value<'gc>, Error> {
         let ObjectKind::Resolver { promise, reject, done } = f.borrow().kind else { unreachable!("a resolver function") };
         if !done.get() {
@@ -44,7 +44,7 @@ impl<'gc> Agent<'gc, '_> {
         self.realm.jobs.borrow_mut(self.mc).push_back(job);
     }
 
-    /// 落定：记下结果，把挂着的反应都排进队列。
+    /// Settle: record the result and enqueue all pending reactions.
     fn settle(&mut self, promise: JsObject<'gc>, value: Value<'gc>, rejected: bool) {
         let reactions = {
             let mut d = promise.borrow_mut(self.mc);
@@ -64,7 +64,8 @@ impl<'gc> Agent<'gc, '_> {
         self.settle(promise, reason, true);
     }
 
-    /// 用一个值解决：自己解决自己抛 TypeError；thenable 排一个任务去调它的 `then`；否则直接兑现。
+    /// Resolve with a value: resolving with itself throws a TypeError; a thenable enqueues a job to call its `then`;
+    /// otherwise fulfill directly.
     pub fn resolve_promise(&mut self, promise: JsObject<'gc>, value: Value<'gc>) -> Result<(), Error> {
         if let Value::Object(o) = value {
             if Gc::ptr_eq(o, promise) {
@@ -90,7 +91,7 @@ impl<'gc> Agent<'gc, '_> {
         Ok(())
     }
 
-    /// 挂一个反应：已经落定就直接排进队列。
+    /// Attach a reaction: if already settled, enqueue it directly.
     pub fn perform_then(&mut self, promise: JsObject<'gc>, reaction: Reaction<'gc>) {
         let settled = {
             let mut d = promise.borrow_mut(self.mc);
@@ -109,7 +110,8 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    /// PromiseResolve(%Promise%, v)：是 `constructor` 为 %Promise% 的 Promise 就原样，否则包一个。
+    /// PromiseResolve(%Promise%, v): a Promise whose `constructor` is %Promise% is returned as is; anything else is
+    /// wrapped.
     pub fn promise_resolve(&mut self, v: Value<'gc>) -> Result<JsObject<'gc>, Error> {
         if let Value::Object(o) = v
             && Self::is_promise(v)
@@ -122,8 +124,9 @@ impl<'gc> Agent<'gc, '_> {
         Ok(p)
     }
 
-    /// async 协程跑一步：停在 `await` 就挂到被等的 Promise 上；跑完兑现、抛出拒绝它的结果 Promise。
-    /// async 生成器另走 [`drive_async_generator`](Self::drive_async_generator)。
+    /// Run an async coroutine one step: when stopped at `await`, attach to the awaited Promise; on completion fulfill,
+    /// and on a throw reject, its result Promise. Async generators go through
+    /// [`drive_async_generator`](Self::drive_async_generator) instead.
     pub fn drive(&mut self, coroutine: JsObject<'gc>, mode: Resume, value: Value<'gc>) -> Result<(), Error> {
         let (promise, async_generator) = match &coroutine.borrow().kind {
             ObjectKind::Coroutine(c) => (c.promise, c.requests.is_some()),
@@ -149,7 +152,8 @@ impl<'gc> Agent<'gc, '_> {
         Ok(())
     }
 
-    /// async 生成器收一个请求（`next` / `throw` / `return`），给出这个请求的 Promise；空闲着就马上开始处理。
+    /// An async generator receives a request (`next` / `throw` / `return`) and returns that request's Promise; if idle,
+    /// processing starts immediately.
     pub fn async_generator_enqueue(&mut self, coroutine: JsObject<'gc>, mode: Resume, value: Value<'gc>) -> Result<JsObject<'gc>, Error> {
         let promise = self.new_promise();
         let idle = {
@@ -165,7 +169,8 @@ impl<'gc> Agent<'gc, '_> {
         Ok(promise)
     }
 
-    /// 队头请求的 Promise 用结果落定、出队；队里还有就接着处理下一个。
+    /// Settle the head request's Promise with the result and dequeue it; if the queue isn't empty, go on to the next
+    /// one.
     fn settle_request(&mut self, coroutine: JsObject<'gc>, outcome: Result<(Value<'gc>, bool), Value<'gc>>) -> Result<(), Error> {
         let (done_req, next) = {
             let mut d = coroutine.borrow_mut(self.mc);
@@ -188,7 +193,8 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    /// async 生成器跑一步：停在 `await` 等着；`yield` / 跑完 / 抛出就落定队头请求。
+    /// Run an async generator one step: wait when stopped at `await`; on `yield` / completion / throw, settle the head
+    /// request.
     fn drive_async_generator(&mut self, coroutine: JsObject<'gc>, mode: Resume, value: Value<'gc>) -> Result<(), Error> {
         match self.resume(coroutine, mode, value) {
             Ok(Step::Await(v)) => {
@@ -206,7 +212,7 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    /// 做一个微任务。
+    /// Run one microtask.
     fn run_job(&mut self, job: Job<'gc>) -> Result<(), Error> {
         match job {
             Job::Reaction { reaction: Reaction::Await { coroutine }, value, rejected } => self.drive(coroutine, if rejected { Resume::Throw } else { Resume::Next }, value),
@@ -228,7 +234,7 @@ impl<'gc> Agent<'gc, '_> {
                         Ok(r) => self.call(cap.resolve, Value::Undefined, &[r]),
                         Err(reason) => self.call(cap.reject, Value::Undefined, &[reason]),
                     };
-                    // 任务里抛出的交给宿主报告，别的任务照跑
+                    // Exceptions thrown in a job are reported to the host; other jobs keep running
                     match r {
                         Ok(_) | Err(Error::Exception(_)) => {}
                         Err(e) => return Err(e),
@@ -250,7 +256,7 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    /// 排空微任务队列（任务里排进来的新任务也一并做完）。
+    /// Drain the microtask queue (new jobs enqueued by jobs are also run to completion).
     pub fn run_jobs(&mut self) -> Result<(), Error> {
         loop {
             let job = self.realm.jobs.borrow_mut(self.mc).pop_front();

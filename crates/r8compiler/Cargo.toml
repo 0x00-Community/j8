@@ -1,6 +1,6 @@
 [package]
 name = "r8compiler"
-description = "r8 编译器：字节码 ⇒ MLIR（llvm 方言）⇒ mlirpass ⇒ 原始机器码"
+description = "r8 compiler: bytecode ⇒ MLIR (llvm dialect) ⇒ mlirpass ⇒ raw machine code"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

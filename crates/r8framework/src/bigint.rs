@@ -1,4 +1,4 @@
-//! BigInt 的语义：ToNumeric、解析、运算、与 Number 比较。
+//! BigInt semantics: ToNumeric, parsing, arithmetic, comparison with Number.
 use core::cmp::Ordering;
 
 use r8gc::Gc;
@@ -7,10 +7,10 @@ use num_traits::{FromPrimitive, One, Signed, ToPrimitive, Zero};
 
 use crate::{Agent, BigIntData, BinaryOp, Error, ErrorKind, Hint, JsBigInt, Value};
 
-/// 移位量上限（位）：再大的结果放不下
+/// Upper bound of the shift amount (in bits): any larger result wouldn't fit
 const MAX_SHIFT: i64 = 1 << 30;
 
-/// ToNumeric 的结果。
+/// The result of ToNumeric.
 #[derive(Clone, Copy, Debug)]
 pub enum Numeric<'gc> {
     Number(f64),
@@ -18,12 +18,12 @@ pub enum Numeric<'gc> {
 }
 
 impl<'gc> Agent<'gc, '_> {
-    /// 堆上的 BigInt 值。
+    /// A BigInt value on the heap.
     pub fn bigint(&self, b: BigInt) -> Value<'gc> {
         Value::BigInt(Gc::new(self.mc, BigIntData(b)))
     }
 
-    /// ToNumeric：BigInt 原样，其余 ToNumber。
+    /// ToNumeric: BigInts as is, everything else ToNumber.
     pub fn to_numeric(&mut self, v: Value<'gc>) -> Result<Numeric<'gc>, Error> {
         if let Value::Number(x) = v {
             return Ok(Numeric::Number(x));
@@ -34,7 +34,8 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    /// ToBigInt：数不能直接转（抛 TypeError），字符串按 StringToBigInt（不合法抛 SyntaxError）。
+    /// ToBigInt: numbers can't be converted directly (throws a TypeError); strings go through StringToBigInt (throws a
+    /// SyntaxError if invalid).
     pub fn to_bigint(&mut self, v: Value<'gc>) -> Result<BigInt, Error> {
         match self.to_primitive(v, Hint::Number)? {
             Value::BigInt(b) => Ok(b.0.clone()),
@@ -47,7 +48,8 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    /// BigInt 按 2^bits 取模，`signed` 时落到有符号范围（BigInt.asIntN / asUintN、BigInt64Array 的元素）。
+    /// A BigInt modulo 2^bits, mapped into the signed range when `signed` (BigInt.asIntN / asUintN, BigInt64Array
+    /// elements).
     pub fn wrap_bigint(b: &BigInt, bits: u64, signed: bool) -> BigInt {
         if bits == 0 {
             return BigInt::zero();
@@ -60,7 +62,7 @@ impl<'gc> Agent<'gc, '_> {
         r
     }
 
-    /// ToIndex：`undefined` 是 0，不是 `[0, 2^53 − 1]` 里的整数抛 RangeError。
+    /// ToIndex: `undefined` is 0; an integer outside `[0, 2^53 − 1]` throws a RangeError.
     pub fn to_index(&mut self, v: Value<'gc>) -> Result<usize, Error> {
         if v == Value::Undefined {
             return Ok(0);
@@ -69,11 +71,11 @@ impl<'gc> Agent<'gc, '_> {
         if !(0.0..=crate::ops::MAX_SAFE_INTEGER).contains(&n) {
             return Err(self.throw(ErrorKind::Range, "Invalid index"));
         }
-        #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "已检查在 [0, 2^53 − 1] 里")]
+        #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "checked to be in [0, 2^53 − 1]")]
         Ok(n as usize)
     }
 
-    /// `++` / `--`（`delta` 是 ±1）。
+    /// `++` / `--` (`delta` is ±1).
     pub fn increment(&mut self, v: Value<'gc>, delta: i8) -> Result<Value<'gc>, Error> {
         if let Value::Number(x) = v {
             return Ok((x + f64::from(delta)).into());
@@ -84,7 +86,8 @@ impl<'gc> Agent<'gc, '_> {
         })
     }
 
-    /// StringToBigInt：前后空白、`0x` / `0o` / `0b` 前缀、带符号的十进制；空串是 0。
+    /// StringToBigInt: leading / trailing whitespace, `0x` / `0o` / `0b` prefixes, signed decimal; the empty string is
+    /// 0.
     pub fn parse_bigint(s: &str) -> Option<BigInt> {
         let t = s.trim_matches(|c: char| (c.is_whitespace() && c != '\u{85}') || c == '\u{feff}');
         if t.is_empty() {
@@ -109,19 +112,19 @@ impl<'gc> Agent<'gc, '_> {
             return Some(if neg { -n } else { n });
         }
         let digits = &t.as_bytes()[2..];
-        // num-bigint 收下划线，规范不收
+        // num-bigint accepts underscores; the spec doesn't
         if digits.is_empty() || !digits.iter().all(|&c| char::from(c).is_digit(radix)) {
             return None;
         }
         BigInt::parse_bytes(digits, radix)
     }
 
-    /// 整数值的 Number ⇒ BigInt（不是整数给 `None`）。
+    /// An integral Number ⇒ BigInt (`None` if not an integer).
     pub fn number_to_bigint(x: f64) -> Option<BigInt> {
         (x.is_finite() && libm::trunc(x) == x).then(|| BigInt::from_f64(x)).flatten()
     }
 
-    /// BigInt 与 Number 按数学值比（NaN 不可比）。
+    /// Compare a BigInt and a Number by mathematical value (NaN is incomparable).
     pub fn cmp_bigint_number(a: &BigInt, x: f64) -> Option<Ordering> {
         if x.is_nan() {
             return None;
@@ -138,7 +141,8 @@ impl<'gc> Agent<'gc, '_> {
         })
     }
 
-    /// 关系比较的数值部分（两边已是原始值、不全是字符串）：`None` 是不可比。
+    /// The numeric part of relational comparison (both sides already primitives, not both strings): `None` means
+    /// incomparable.
     pub(crate) fn numeric_order(&mut self, l: Value<'gc>, r: Value<'gc>) -> Result<Option<Ordering>, Error> {
         Ok(match (l, r) {
             (Value::BigInt(a), Value::String(s)) => Self::parse_bigint(&s).map(|b| a.0.cmp(&b)),
@@ -152,7 +156,7 @@ impl<'gc> Agent<'gc, '_> {
         })
     }
 
-    /// 移位：`left` 为真左移，量为负反过来；右移向 −∞ 取整。
+    /// Shift: shifts left when `left` is true, reversed for a negative amount; right shifts round toward −∞.
     fn shift(&self, a: &BigInt, by: &BigInt, left: bool) -> Result<BigInt, Error> {
         let n = by.to_i64().filter(|n| n.abs() <= MAX_SHIFT).ok_or_else(|| self.throw(ErrorKind::Range, "Maximum BigInt size exceeded"))?;
         let n = if left { n } else { -n };
@@ -160,14 +164,14 @@ impl<'gc> Agent<'gc, '_> {
         Ok(if n >= 0 { a << amount } else { a >> amount })
     }
 
-    /// 两个 BigInt 的二元运算。
+    /// A binary operation on two BigInts.
     pub(crate) fn bigint_binary(&self, op: BinaryOp, a: &BigInt, b: &BigInt) -> Result<Value<'gc>, Error> {
         let r = match op {
             BinaryOp::Add => a + b,
             BinaryOp::Sub => a - b,
             BinaryOp::Mul => a * b,
             BinaryOp::Div | BinaryOp::Rem if b.is_zero() => return Err(self.throw(ErrorKind::Range, "Division by zero")),
-            // num-bigint 的 / 与 % 都向 0 取整，和规范一样
+            // num-bigint's / and % both round toward 0, matching the spec
             BinaryOp::Div => a / b,
             BinaryOp::Rem => a % b,
             BinaryOp::Exp => {
@@ -192,7 +196,7 @@ impl<'gc> Agent<'gc, '_> {
     }
 }
 
-/// 偶数判断（`(±1)^e` 的符号用）。
+/// Evenness check (for the sign of `(±1)^e`).
 trait Parity {
     fn is_even(&self) -> bool;
 }

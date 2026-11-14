@@ -1,12 +1,15 @@
-//! test262 一致性测试（`harness = false`，挂在 dune 包下：`cargo test -p dune --test test262`）。
+//! test262 conformance tests (`harness = false`, part of the dune package: `cargo test -p dune --test test262`).
 //!
-//! - 不带参数：只跑基线 `tests/test262.passing` 里的用例，有掉下去的就失败（回归检查）
-//! - 带参数：跑 `tests/test262/test/` 下这些目录 / 文件，如 `-- language/expressions/addition built-ins/Math`
-//! - `R8_TEST262_UPDATE=1`：把这次跑到的用例的结果写回基线（没跑到的条目保留）
-//! - `R8_TEST262_VERBOSE=1`：逐条打印没过的原因
+//! - No arguments: run only the cases in the baseline `tests/test262.passing`; fail if any regress (regression check)
+//! - With arguments: run these directories / files under `tests/test262/test/`,
+//!   e.g. `-- language/expressions/addition built-ins/Math`
+//! - `R8_TEST262_UPDATE=1`: write the results of the cases run this time back to the baseline
+//!   (entries not run are kept)
+//! - `R8_TEST262_VERBOSE=1`: print the reason for each failure
 //!
-//! 每个用例在子进程里跑（本测试二进制带 `R8_TEST262_CASE` 再起一次），死循环靠超时杀、崩溃不连累别的用例。
-//! 模式：只跑非严格模式，`onlyStrict` 的跑严格模式；`module` 跳过。
+//! Each case runs in a child process (this test binary started again with `R8_TEST262_CASE`): infinite loops are killed
+//! by a timeout, and crashes don't take other cases down.
+//! Modes: only non-strict mode is run, `onlyStrict` cases run in strict mode; `module` is skipped.
 use std::collections::BTreeSet;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -20,26 +23,26 @@ use r8executor::Executor;
 use r8framework::{CreateParams, Error, Isolate, Platform, Source, Task};
 use serde::Deserialize;
 
-/// test262 检出（子模块）
+/// test262 checkout (submodule)
 const ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/test262");
-/// 基线：过了的用例，一行一个（相对 `test/`）
+/// Baseline: passing cases, one per line (relative to `test/`)
 const BASELINE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/test262.passing");
-/// 子进程要跑的用例
+/// The case a child process runs
 const CASE_ENV: &str = "R8_TEST262_CASE";
 const UPDATE_ENV: &str = "R8_TEST262_UPDATE";
 const VERBOSE_ENV: &str = "R8_TEST262_VERBOSE";
-/// 开 JIT（阈值 0：每个函数第一次调用就编），拿全部用例对拍机器码
+/// Enable the JIT (threshold 0: every function is compiled on its first call) to cross-check machine code on all cases
 const JIT_ENV: &str = "R8_TEST262_JIT";
-/// 单个用例的时限
+/// Time limit for a single case
 const TIMEOUT: Duration = Duration::from_secs(10);
-/// 等子进程时的轮询间隔
+/// Polling interval while waiting for a child process
 const POLL: Duration = Duration::from_millis(2);
-/// 异步用例跑完时 `$DONE` 打出的行
+/// The line `$DONE` prints when an async case finishes
 const ASYNC_DONE: &str = "Test262:AsyncTestComplete";
-/// 汇总表按路径前几段分组
+/// The summary table groups by the first few path segments
 const GROUP_DEPTH: usize = 2;
 
-/// 用例头上 `/*--- … ---*/` 里的元数据（只取用得到的键）。
+/// Metadata in the `/*--- … ---*/` header of a case (only the keys we use).
 #[derive(Deserialize, Default)]
 struct Meta {
     #[serde(default)]
@@ -90,7 +93,7 @@ impl Phase {
     }
 }
 
-/// 期望抛出的错误构造器。
+/// The error constructor expected to be thrown.
 #[derive(Deserialize, Clone, Copy, PartialEq, Eq)]
 enum ErrorType {
     SyntaxError,
@@ -119,18 +122,18 @@ impl ErrorType {
     }
 }
 
-/// 一个用例的结果；子进程用退出码回报。
+/// The result of one case; the child process reports it through its exit code.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u8)]
 enum Outcome {
     Pass = 0,
     Fail = 1,
-    /// r8 报 `Error::Unsupported`
+    /// r8 reported `Error::Unsupported`
     Unsupported = 2,
-    /// 没跑（`module`）
+    /// Not run (`module`)
     Skip = 3,
     Timeout = 4,
-    /// 子进程崩了（panic / 栈溢出 / 被信号杀）
+    /// The child process crashed (panic / stack overflow / killed by a signal)
     Crash = 5,
 }
 
@@ -163,7 +166,7 @@ impl TryFrom<i32> for Outcome {
     }
 }
 
-/// 截下 `print` / `console.log` 的单线程平台。
+/// Single-threaded platform that captures `print` / `console.log`.
 struct Capture {
     start: Instant,
     lines: Mutex<Vec<String>>,
@@ -186,7 +189,7 @@ impl Platform for Capture {
         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default()
     }
 
-    /// 模块：相对路径按引用者（相对 `test/` 或绝对路径）所在目录解析。
+    /// Modules: relative paths resolve against the referrer's directory (referrer relative to `test/` or absolute).
     fn load_module(&self, referrer: &str, specifier: &str) -> Option<(String, String)> {
         let referrer = Suite::test_dir().join(referrer);
         let base = referrer.parent()?;
@@ -205,7 +208,7 @@ impl Platform for Capture {
 
 }
 
-/// 一个用例文件。
+/// One case file.
 struct Case {
     path: PathBuf,
     text: String,
@@ -226,7 +229,7 @@ impl Case {
         self.meta.flags.contains(&flag)
     }
 
-    /// 拼上 harness 的完整源码。
+    /// The full source with the harness prepended.
     fn source(&self) -> Result<String, String> {
         if self.has(Flag::Raw) {
             return Ok(self.text.clone());
@@ -246,14 +249,14 @@ impl Case {
             src.push_str(&std::fs::read_to_string(&p).map_err(|e| format!("{}: {e}", p.display()))?);
             src.push('\n');
         }
-        // 模块用例：harness 先当脚本跑（全局），模块只是用例本身
+        // Module cases: the harness runs first as a script (global), the module is just the case itself
         if !self.has(Flag::Module) {
             src.push_str(&self.text);
         }
         Ok(src)
     }
 
-    /// 在本进程里跑，给出结果与原因。
+    /// Run in this process, returning the result and the reason.
     fn run(&self) -> (Outcome, String) {
         let src = match self.source() {
             Ok(s) => s,
@@ -306,22 +309,22 @@ impl Case {
     }
 }
 
-/// 宿主对象 `$262`：evalScript 走间接 eval，detachArrayBuffer 借 `transfer`（先存好，用例改了原型也不受影响），
-/// createRealm 还没有。
+/// Host object `$262`: evalScript uses indirect eval, detachArrayBuffer borrows `transfer` (saved up front, so a case
+/// modifying the prototype doesn't affect it); createRealm is not implemented yet.
 const HOST_262: &str = "var $262 = (function (transfer) { return { global: globalThis, gc: function () {}, evalScript: function (s) { return (0, eval)(s); }, \
 createRealm: function () { throw new TypeError('createRealm is not supported'); }, \
 detachArrayBuffer: function (b) { transfer.call(b); return null; }, agent: {} }; })(ArrayBuffer.prototype.transfer);\n";
 
-/// 父进程：一个用例的子进程结果。
+/// Parent process: the child process's result for one case.
 struct Ran {
     rel: String,
     outcome: Outcome,
     why: String,
 }
 
-/// 父进程的一次运行。
+/// One run of the parent process.
 struct Suite {
-    /// 相对 `test/` 的路径
+    /// Path relative to `test/`
     cases: Vec<String>,
     exe: PathBuf,
 }
@@ -335,7 +338,7 @@ impl Suite {
         std::fs::read_to_string(BASELINE).unwrap_or_default().lines().filter(|l| !l.is_empty()).map(String::from).collect()
     }
 
-    /// `dir` 下全部用例（`_FIXTURE` 是被别的用例引用的，不单跑）
+    /// All cases under `dir` (`_FIXTURE` files are referenced by other cases and aren't run on their own)
     fn walk(dir: &Path, out: &mut Vec<String>) {
         let Ok(rd) = std::fs::read_dir(dir) else { return };
         for e in rd.flatten() {
@@ -387,7 +390,7 @@ impl Suite {
                 Ok(Some(s)) => break Some(s),
                 Ok(None) if start.elapsed() < TIMEOUT => std::thread::sleep(POLL),
                 _ => {
-                    // 已经超时，杀不掉也只能放着
+                    // Already timed out; if it can't be killed, there's nothing more to do
                     let _ = child.kill();
                     let _ = child.wait();
                     break None;
@@ -405,7 +408,7 @@ impl Suite {
         Ran { rel: rel.into(), outcome, why: why.trim().into() }
     }
 
-    /// 并行跑完全部用例（工作线程数取 CPU 数的一半，给别的活留余量）。
+    /// Run all cases in parallel (worker threads = half the CPU count, leaving headroom for other work).
     fn run(&self) -> Vec<Ran> {
         let jobs = std::thread::available_parallelism().map_or(1, |n| (n.get() / 2).max(1));
         let next = AtomicUsize::new(0);
@@ -426,7 +429,7 @@ impl Suite {
     }
 }
 
-/// 汇总与基线对比。
+/// Summary and comparison with the baseline.
 struct Report<'r> {
     ran: &'r [Ran],
 }
@@ -441,7 +444,7 @@ impl Report<'_> {
     fn row(label: &str, c: &[usize; Outcome::ALL.len()]) {
         let total: usize = c.iter().sum();
         let cols: Vec<String> = c.iter().map(|n| format!("{n:>12}")).collect();
-        #[expect(clippy::cast_precision_loss, reason = "百分比")]
+        #[expect(clippy::cast_precision_loss, reason = "percentage")]
         let pct = if total == 0 { 0.0 } else { c[Outcome::Pass as usize] as f64 * 100.0 / total as f64 };
         println!("{label:<48}{}{total:>8}{pct:>7.1}%", cols.concat());
     }
@@ -462,12 +465,13 @@ impl Report<'_> {
         }
     }
 
-    /// 路径前 `GROUP_DEPTH` 段
+    /// The first `GROUP_DEPTH` path segments
     fn group(rel: &str) -> &str {
         rel.match_indices('/').nth(GROUP_DEPTH - 1).map_or(rel, |(i, _)| &rel[..i])
     }
 
-    /// 和基线比：返回掉下去的用例。`update` 时把这次的结果写回基线。
+    /// Compare with the baseline and return the regressed cases. With `update`, write this run's results back to the
+    /// baseline.
     fn against_baseline(&self, update: bool) -> Result<Vec<&str>, String> {
         let base = Suite::baseline();
         let passing: BTreeSet<&str> = self.ran.iter().filter(|r| r.outcome == Outcome::Pass).map(|r| r.rel.as_str()).collect();
@@ -497,7 +501,7 @@ fn main() -> ExitCode {
         }
         return outcome.into();
     }
-    // cargo test 会顺带传 `--quiet` 之类的开关，只认路径
+    // cargo test also passes flags like `--quiet`; only paths are recognized
     let filters: Vec<String> = std::env::args().skip(1).filter(|a| !a.starts_with('-')).collect();
     let suite = match Suite::new(&filters) {
         Ok(s) => s,

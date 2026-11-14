@@ -1,4 +1,5 @@
-//! 二进制数据：元素的编解码（含 Float16）、TypedArray 的长度与越界、整数下标特殊对象的属性行为（规范 10.4.5）。
+//! Binary data: element encoding / decoding (including Float16), TypedArray length and out-of-bounds handling, and the
+//! property behavior of integer-indexed exotic objects (spec 10.4.5).
 use alloc::vec::Vec;
 
 use num_bigint::BigInt;
@@ -8,21 +9,22 @@ use crate::{Agent, ElementKind, Error, JsObject, Key, ObjectKind, Value, ViewDat
 
 /// 2^32
 const TWO_32: f64 = 4_294_967_296.0;
-/// Float16 的指数偏置
+/// Float16 exponent bias
 const F16_BIAS: i32 = 15;
-/// Float16 尾数位数
+/// Float16 mantissa bit count
 const F16_MANTISSA: u32 = 10;
-/// Float16 指数全 1（无穷 / NaN）
+/// Float16 all-ones exponent (infinity / NaN)
 const F16_EXP_MAX: u16 = 0x1f;
 
-/// 要写进缓冲的数：TypedArray 先按元素类型转好（ToNumber / ToBigInt）再查下标。
+/// A number to be written into a buffer: a TypedArray converts it by element type first (ToNumber / ToBigInt), then
+/// checks the index.
 #[derive(Clone, Debug)]
 pub enum Element {
     Number(f64),
     BigInt(BigInt),
 }
 
-/// 浮点数 ⇒ 2^bits 取模后的无符号整数（ToInt8 / ToUint16 … 的公共部分）。
+/// Float ⇒ unsigned integer modulo 2^bits (the common part of ToInt8 / ToUint16 …).
 fn modulo(x: f64, bits: u32) -> u64 {
     if !x.is_finite() {
         return 0;
@@ -30,12 +32,12 @@ fn modulo(x: f64, bits: u32) -> u64 {
     let t = libm::trunc(x);
     let m = if bits == 32 { TWO_32 } else { f64::from(1u32 << bits) };
     let r = t - libm::floor(t / m) * m;
-    #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "已取模到 [0, 2^bits)")]
+    #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "already reduced modulo to [0, 2^bits)")]
     let r = r as u64;
     r
 }
 
-/// ToUint8Clamp：夹到 [0, 255]，一半时取偶数。
+/// ToUint8Clamp: clamp to [0, 255], rounding half to even.
 fn clamp_u8(x: f64) -> u8 {
     if x.is_nan() || x <= 0.0 {
         return 0;
@@ -44,15 +46,15 @@ fn clamp_u8(x: f64) -> u8 {
         return 255;
     }
     let f = libm::floor(x);
-    // 比一半大进位，正好一半时往偶数靠
+    // Round up above one half; at exactly one half round toward even
     let up = f + 0.5 < x || (f + 0.5 == x && f % 2.0 != 0.0);
     let r = if up { f + 1.0 } else { f };
-    #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "已夹到 [0, 255]")]
+    #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "already clamped to [0, 255]")]
     let r = r as u8;
     r
 }
 
-/// f64 ⇒ Float16 位（就近舍入、一半取偶，一次舍入不经过 f32）。
+/// f64 ⇒ Float16 bits (round to nearest, ties to even, in a single rounding without going through f32).
 pub fn f64_to_f16(x: f64) -> u16 {
     let bits = x.to_bits();
     let sign = u16::from(bits >> 63 != 0) << 15;
@@ -63,15 +65,15 @@ pub fn f64_to_f16(x: f64) -> u16 {
     if a == 0.0 {
         return sign;
     }
-    // 最大有限值 65504，舍入到无穷的分界是 65520
+    // The largest finite value is 65504; the boundary for rounding to infinity is 65520
     if a >= 65520.0 {
         return sign | (F16_EXP_MAX << F16_MANTISSA);
     }
-    // 2^-24 是最小的非规格数；按 2^-24 为单位就近取偶
+    // 2^-24 is the smallest subnormal; round to nearest even in units of 2^-24
     let e = libm::floor(libm::log2(a));
-    #[expect(clippy::cast_possible_truncation, reason = "指数在 [-1075, 16] 里")]
+    #[expect(clippy::cast_possible_truncation, reason = "the exponent is in [-1075, 16]")]
     let mut e = e as i32;
-    // log2 可能差一，校正
+    // log2 may be off by one; correct it
     if libm::ldexp(1.0, e) > a {
         e -= 1;
     } else if libm::ldexp(1.0, e + 1) <= a {
@@ -84,11 +86,11 @@ pub fn f64_to_f16(x: f64) -> u16 {
     if frac > 0.5 || (frac == 0.5 && m % 2.0 != 0.0) {
         m += 1.0;
     }
-    #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "尾数不超过 2^11")]
+    #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "the mantissa is at most 2^11")]
     let m = m as u32;
     if !normal {
-        // 非规格数（舍入后可能进成最小规格数，位模式正好连续）
-        #[expect(clippy::cast_possible_truncation, reason = "不超过 2^10")]
+        // Subnormal (rounding may carry into the smallest normal; the bit patterns are exactly contiguous)
+        #[expect(clippy::cast_possible_truncation, reason = "at most 2^10")]
         return sign | m as u16;
     }
     let mut exp = e + F16_BIAS;
@@ -100,12 +102,12 @@ pub fn f64_to_f16(x: f64) -> u16 {
     if exp >= i32::from(F16_EXP_MAX) {
         return sign | (F16_EXP_MAX << F16_MANTISSA);
     }
-    #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "指数在 [1, 30]、尾数 10 位")]
+    #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "exponent in [1, 30], mantissa 10 bits")]
     let r = sign | ((exp as u16) << F16_MANTISSA) | ((mant & ((1 << F16_MANTISSA) - 1)) as u16);
     r
 }
 
-/// Float16 位 ⇒ f64。
+/// Float16 bits ⇒ f64.
 pub fn f16_to_f64(h: u16) -> f64 {
     let sign = if h & 0x8000 != 0 { -1.0 } else { 1.0 };
     let exp = (h >> F16_MANTISSA) & F16_EXP_MAX;
@@ -119,7 +121,7 @@ pub fn f16_to_f64(h: u16) -> f64 {
 }
 
 impl ElementKind {
-    /// 编码成小端字节。
+    /// Encode into little-endian bytes.
     pub fn encode(self, v: &Element) -> Vec<u8> {
         match (self, v) {
             (ElementKind::BigInt64 | ElementKind::BigUint64, Element::BigInt(b)) => {
@@ -129,15 +131,15 @@ impl ElementKind {
             (_, Element::Number(x)) => {
                 let x = *x;
                 match self {
-                    #[expect(clippy::cast_possible_truncation, reason = "已取模")]
+                    #[expect(clippy::cast_possible_truncation, reason = "already reduced modulo")]
                     ElementKind::Int8 | ElementKind::Uint8 => alloc::vec![modulo(x, 8) as u8],
                     ElementKind::Uint8Clamped => alloc::vec![clamp_u8(x)],
-                    #[expect(clippy::cast_possible_truncation, reason = "已取模")]
+                    #[expect(clippy::cast_possible_truncation, reason = "already reduced modulo")]
                     ElementKind::Int16 | ElementKind::Uint16 => (modulo(x, 16) as u16).to_le_bytes().to_vec(),
-                    #[expect(clippy::cast_possible_truncation, reason = "已取模")]
+                    #[expect(clippy::cast_possible_truncation, reason = "already reduced modulo")]
                     ElementKind::Int32 | ElementKind::Uint32 => (modulo(x, 32) as u32).to_le_bytes().to_vec(),
                     ElementKind::Float16 => f64_to_f16(x).to_le_bytes().to_vec(),
-                    #[expect(clippy::cast_possible_truncation, reason = "Float32 就是要舍入")]
+                    #[expect(clippy::cast_possible_truncation, reason = "Float32 is meant to round")]
                     ElementKind::Float32 => (x as f32).to_le_bytes().to_vec(),
                     ElementKind::Float64 => x.to_le_bytes().to_vec(),
                     ElementKind::BigInt64 | ElementKind::BigUint64 => alloc::vec![0; 8],
@@ -147,7 +149,7 @@ impl ElementKind {
         }
     }
 
-    /// 从小端字节解出来。
+    /// Decode from little-endian bytes.
     pub fn decode(self, b: &[u8]) -> Element {
         let arr = |n: usize| {
             let mut x = [0u8; 8];
@@ -170,7 +172,7 @@ impl ElementKind {
     }
 }
 
-/// CanonicalNumericIndexString：`"-0"` 或者 ToString(ToNumber(s)) 正好是它自己。
+/// CanonicalNumericIndexString: `"-0"`, or ToString(ToNumber(s)) is exactly itself.
 pub fn canonical_numeric(key: &str) -> Option<f64> {
     if key == "-0" {
         return Some(-0.0);
@@ -184,7 +186,7 @@ pub fn canonical_numeric(key: &str) -> Option<f64> {
 }
 
 impl<'gc> Agent<'gc, '_> {
-    /// 缓冲的字节数（分离了给 `None`）。
+    /// The buffer's byte count (`None` if detached).
     pub fn buffer_len(buffer: JsObject<'gc>) -> Option<usize> {
         match &buffer.borrow().kind {
             ObjectKind::ArrayBuffer(b) => b.bytes.as_ref().map(Vec::len),
@@ -192,7 +194,8 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    /// 视图（TypedArray 按元素、DataView 按字节）当前的长度：越界 / 分离给 `None`。
+    /// The view's current length (by element for a TypedArray, by byte for a DataView): `None` if out of bounds /
+    /// detached.
     pub fn view_length(view: &ViewData<'gc>, size: usize) -> Option<usize> {
         let len = Self::buffer_len(view.buffer)?;
         if view.offset > len {
@@ -204,7 +207,7 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    /// 是 TypedArray 就给出元素类型与视图。
+    /// If it is a TypedArray, returns the element type and the view.
     pub fn typed_array(o: JsObject<'gc>) -> Option<(ElementKind, ViewData<'gc>)> {
         match o.borrow().kind {
             ObjectKind::TypedArray(k, v) => Some((k, v)),
@@ -212,24 +215,24 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    /// TypedArray 的长度（越界给 0）。
+    /// The length of a TypedArray (0 if out of bounds).
     pub fn typed_length(o: JsObject<'gc>) -> usize {
         Self::typed_array(o).and_then(|(k, v)| Self::view_length(&v, k.size())).unwrap_or(0)
     }
 
-    /// IsValidIntegerIndex：整数、不是 -0、在长度内。
+    /// IsValidIntegerIndex: an integer, not -0, within the length.
     fn valid_index(o: JsObject<'gc>, i: f64) -> Option<usize> {
         let (k, v) = Self::typed_array(o)?;
         if i != libm::trunc(i) || (i == 0.0 && i.is_sign_negative()) || i < 0.0 {
             return None;
         }
         let len = Self::view_length(&v, k.size())?;
-        #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "已检查是非负整数")]
+        #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "checked to be a non-negative integer")]
         let n = i as usize;
         (i < 9_007_199_254_740_992.0 && n < len).then_some(n)
     }
 
-    /// 元素 ⇒ JS 值。
+    /// Element ⇒ JS value.
     pub fn element_value(&self, e: Element) -> Value<'gc> {
         match e {
             Element::Number(x) => x.into(),
@@ -237,7 +240,7 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    /// 读 TypedArray 的第 `i` 个元素（下标不合法给 `None`）。
+    /// Read the `i`-th element of a TypedArray (`None` if the index is invalid).
     pub fn typed_get(&self, o: JsObject<'gc>, i: f64) -> Option<Value<'gc>> {
         let n = Self::valid_index(o, i)?;
         let (k, v) = Self::typed_array(o)?;
@@ -245,7 +248,7 @@ impl<'gc> Agent<'gc, '_> {
         Some(self.element_value(e))
     }
 
-    /// 缓冲第 `at` 字节起读一个元素。
+    /// Read one element from the buffer starting at byte `at`.
     pub fn read_raw(buffer: JsObject<'gc>, at: usize, k: ElementKind) -> Option<Element> {
         match &buffer.borrow().kind {
             ObjectKind::ArrayBuffer(b) => b.bytes.as_ref().and_then(|bytes| bytes.get(at..at + k.size())).map(|s| k.decode(s)),
@@ -253,7 +256,7 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    /// 缓冲第 `at` 字节起写一个元素。
+    /// Write one element into the buffer starting at byte `at`.
     pub fn write_raw(&self, buffer: JsObject<'gc>, at: usize, k: ElementKind, e: &Element) {
         let bytes = k.encode(e);
         if let ObjectKind::ArrayBuffer(b) = &mut buffer.borrow_mut(self.mc).kind
@@ -263,12 +266,12 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    /// 按元素类型转数（BigInt 类型 ToBigInt，别的 ToNumber）。
+    /// Convert to a number by element type (ToBigInt for BigInt types, ToNumber otherwise).
     pub fn to_element(&mut self, k: ElementKind, v: Value<'gc>) -> Result<Element, Error> {
         if k.is_bigint() { Ok(Element::BigInt(self.to_bigint(v)?)) } else { Ok(Element::Number(self.to_number(v)?)) }
     }
 
-    /// TypedArraySetElement：先转数，下标合法才写。
+    /// TypedArraySetElement: convert to a number first, and write only if the index is valid.
     pub fn typed_set(&mut self, o: JsObject<'gc>, i: f64, v: Value<'gc>) -> Result<(), Error> {
         let Some((k, _)) = Self::typed_array(o) else { return Ok(()) };
         let e = self.to_element(k, v)?;
@@ -280,7 +283,7 @@ impl<'gc> Agent<'gc, '_> {
         Ok(())
     }
 
-    /// TypedArray 上的数字键：给出规范化后的下标。
+    /// A numeric key on a TypedArray: returns the canonicalized index.
     pub(crate) fn typed_numeric(o: JsObject<'gc>, key: Key<'_, 'gc>) -> Option<f64> {
         let Key::Str(k) = key else { return None };
         if !matches!(o.borrow().kind, ObjectKind::TypedArray(..)) {

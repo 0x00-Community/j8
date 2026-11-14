@@ -1,24 +1,26 @@
-//! 内建函数的并行：数据量大时把纯数据的活切块放到平台的线程池上（分叉—汇合，跑完才返回）。
+//! Parallelism for built-in functions: with large data, plain-data work is split into chunks on the platform's thread
+//! pool (fork–join; returns only when all is done).
 //!
-//! 只做不碰 GC 堆、不调用户代码的部分（`Value` 带 `'gc` 品牌，不能跨线程）：调用方先把要排序的键、要转换的数
-//! 抽成普通数据，并行算完再写回。
+//! Only the parts that don't touch the GC heap or call user code (`Value` carries the `'gc` brand and can't cross
+//! threads): the caller first extracts the keys to sort or the numbers to convert into plain data, computes in
+//! parallel, then writes the results back.
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::cmp::Ordering;
 
 use r8gc::{Job, Pool};
 
-/// 元素少于这么多就在调用线程上做（切块与汇合的开销不划算）
+/// Below this many elements, do the work on the calling thread (the cost of splitting and joining isn't worth it)
 const PAR_MIN: usize = 1 << 14;
-/// 每个线程分几块（块小一点，先做完的线程接着拿）
+/// Chunks per thread (smaller chunks, so threads that finish first pick up more)
 const CHUNKS_PER_THREAD: usize = 2;
 
-/// 借平台的线程池做并行活。
+/// Borrow the platform's thread pool for parallel work.
 #[derive(Clone, Copy)]
 pub struct Par<'p>(pub &'p dyn Pool);
 
 impl Par<'_> {
-    /// 切成几块
+    /// How many chunks to split into
     fn chunk(self, len: usize) -> usize {
         len.div_ceil(self.0.threads() * CHUNKS_PER_THREAD).max(1)
     }
@@ -27,7 +29,7 @@ impl Par<'_> {
         len >= PAR_MIN && self.0.threads() > 1
     }
 
-    /// `out[i] = f(&input[i])`，大的切块并行
+    /// `out[i] = f(&input[i])`; large inputs are split into chunks in parallel
     pub fn map<T: Sync, R: Send + Default>(self, input: &[T], f: &(dyn Fn(&T) -> R + Sync)) -> Vec<R> {
         let mut out: Vec<R> = core::iter::repeat_with(R::default).take(input.len()).collect();
         if !self.worth(input.len()) {
@@ -44,7 +46,8 @@ impl Par<'_> {
         out
     }
 
-    /// 按块处理：`f` 拿到连续的一块，结果按块的顺序给出（小的整个一块）
+    /// Process by chunk: `f` gets a contiguous chunk, results are given in chunk order (small inputs are one whole
+    /// chunk)
     pub fn chunks<T: Sync, R: Send + Default>(self, input: &[T], f: &(dyn Fn(&[T]) -> R + Sync)) -> Vec<R> {
         if !self.worth(input.len()) {
             return alloc::vec![f(input)];
@@ -56,7 +59,8 @@ impl Par<'_> {
         out
     }
 
-    /// 按块就地处理：块长是 `unit` 的整数倍（如元素字节数），大的切块并行
+    /// Process chunks in place: chunk lengths are multiples of `unit` (e.g. the element byte size); large inputs are
+    /// split into chunks in parallel
     pub fn each_mut<T: Send>(self, v: &mut [T], unit: usize, f: &(dyn Fn(&mut [T]) + Sync)) {
         let unit = unit.max(1);
         if !self.worth(v.len() / unit) {
@@ -68,7 +72,8 @@ impl Par<'_> {
         self.0.run(jobs);
     }
 
-    /// `[0, n)` 里第一个满足的位置：`f` 查一段给出段里的第一个，各段并行查，取最小的
+    /// The first position in `[0, n)` that matches: `f` checks a range and returns the first match in it; ranges are
+    /// checked in parallel and the smallest is taken
     pub fn find_first(self, n: usize, f: &(dyn Fn(core::ops::Range<usize>) -> Option<usize> + Sync)) -> Option<usize> {
         if !self.worth(n) {
             return f(0..n);
@@ -80,15 +85,16 @@ impl Par<'_> {
         found.into_iter().flatten().min()
     }
 
-    /// 在 `hay` 里找 `needle` 第一次出现的字节位置：1 MiB 以上切成带重叠的块并行找（单线程的查找本身已经很快）
+    /// Find the byte position of the first occurrence of `needle` in `hay`: from 1 MiB up, split into overlapping
+    /// chunks searched in parallel (single-threaded search itself is already fast)
     pub fn find_str(self, hay: &str, needle: &str) -> Option<usize> {
-        /// 串不到这么长就直接找
+        /// Search directly when the string is shorter than this
         const PAR_FIND_MIN: usize = 1 << 20;
         if hay.len() < PAR_FIND_MIN || self.0.threads() == 1 || needle.is_empty() {
             return hay.find(needle);
         }
         let size = hay.len().div_ceil(self.0.threads() * CHUNKS_PER_THREAD);
-        // 块边界挪到字符边界上
+        // Move chunk boundaries onto character boundaries
         let boundary = |mut i: usize| {
             while i < hay.len() && !hay.is_char_boundary(i) {
                 i += 1;
@@ -102,7 +108,8 @@ impl Par<'_> {
             .zip(&starts)
             .map(|(o, &s)| {
                 Box::new(move || {
-                    // 块尾多看 needle.len() − 1 字节：跨块的匹配算在开头所在的块
+                    // Look needle.len() − 1 bytes past the chunk end: a match spanning chunks belongs to the chunk
+                    // where it starts
                     let end = boundary((s + size + needle.len() - 1).min(hay.len()));
                     *o = hay[s..end].find(needle).filter(|&i| i < size).map(|i| s + i);
                 }) as Job<'_>
@@ -112,7 +119,7 @@ impl Par<'_> {
         found.into_iter().flatten().min()
     }
 
-    /// 稳定排序：各块分别排好，再一轮轮两两并行归并
+    /// Stable sort: sort each chunk separately, then merge pairwise in parallel, round after round
     pub fn sort_by<T: Copy + Send + Sync>(self, v: &mut [T], cmp: &(dyn Fn(&T, &T) -> Ordering + Sync)) {
         if !self.worth(v.len()) {
             v.sort_by(cmp);
@@ -141,13 +148,13 @@ impl Par<'_> {
             in_buf = !in_buf;
             width *= 2;
         }
-        // 结果停在缓冲里：抄回去
+        // The result ended up in the buffer: copy it back
         if in_buf {
             dst.copy_from_slice(src);
         }
     }
 
-    /// 两段排好的归并进 `out`（相等时左边的在前：稳定）
+    /// Merge two sorted runs into `out` (on ties the left one comes first: stable)
     fn merge<T: Copy>(l: &[T], r: &[T], out: &mut [T], cmp: &(dyn Fn(&T, &T) -> Ordering + Sync)) {
         let (mut i, mut j) = (0, 0);
         for o in out.iter_mut() {

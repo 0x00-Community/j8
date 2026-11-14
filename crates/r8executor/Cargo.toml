@@ -1,6 +1,6 @@
 [package]
 name = "r8executor"
-description = "r8 字节码执行器"
+description = "r8 bytecode executor"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -13,7 +13,7 @@ ryu-js.workspace = true
 
 [features]
 default = ["compile"]
-# 带上 JS ⇒ 字节码编译，实现 Engine（要 std）；关掉只剩 no_std 的执行器
+# Brings in JS ⇒ bytecode compilation and implements Engine (needs std); without it only the no_std executor remains
 compile = ["r8virtasm/compile"]
 
 [dev-dependencies]
