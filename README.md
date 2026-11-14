@@ -12,7 +12,7 @@
 | `r8builtins` | `no_std` | 实现 `Intrinsics`：往 `Realm` 装 Object / Function / Array / String / Number / Boolean / Math / Error 系列 / `console` / `parseInt` 等 |
 | `r8platform` | std | 实现 `Platform`（`DefaultPlatform`）：后台任务与 GC 跑在 moremath `ThreadMulti` 线程池上（起一次复用、任务可借用调用方数据，经 `r8gc::Pool`），时钟用 `Instant` |
 | `r8virtasm` | `no_std`（`compile` 要 std） | 虚拟指令集：累加器式寄存器字节码（`Insn` / `Function` / `Module`）；反汇编 `module.to_string()`、汇编 `text.parse::<Module>()`，互为逆；`compile` feature（缺省开）带 JS ⇒ 字节码编译器 `Module::try_from(&Source)`，用 oxc 解析 |
-| `r8gc` | `no_std`（`std` feature 缺省开） | 堆：分代、可移动、并行的 GC，`'gc` 品牌生命周期，回收跑在平台线程池上（见下「堆与句柄」）；`#[derive(Collect)]` 在 `crates/r8gc/macros` |
+| `r8gc` | `no_std`（`std` feature 缺省开） | 堆：分代、可移动、并行的 GC，`'gc` 品牌生命周期，回收跑在平台线程池上（见下「堆与句柄」）；`#[derive(Collect)]` 由 `r8gc::Collect` 暴露（过程宏实现在 `crates/r8gc/macros`，只被 r8gc 依赖） |
 | `r8macros` | proc-macro | 过程宏：`enums!("x.json")` 从 JSON 生成枚举（定义、`Display`、按字段类型取 `&mut`），用法见 `crates/macros/USAGE.md` |
 | `samples/dune` | std | 基于 r8 的 node 式二进制（`require` / `module` / `fs` / `path` / `process`，原生部分用 `#[r8::object]` 绑定）：`dune a.js` / `dune run a.js`（`-` 读标准输入）、`dune -e '<js>'`、`dune -p '<js>'` 打印结果、不带参数进 REPL（`.help` / `.exit`）；没接住的异常打 `Uncaught …` 退出码 1 |
 | `samples/workerd` | std | 用 r8 加载 Cloudflare Worker（ES 模块 `export default { fetch }`）与 Durable Object：`workerd examples/counter.js --bind COUNTER=Counter --request "GET /c/inc?name=a"` 或 `--port 8787` 起 HTTP 服务；Fetch API 子集与 DO 在 JS 序言里，存储是 `#[r8::class]` 绑定的 Rust KV |
@@ -25,7 +25,7 @@
 
 ### 堆与句柄
 
-堆用仓库内的 `crates/r8gc`（过程宏在 `crates/r8gc/macros`）：分代（新生代碰撞分配、次回收复制提升）、
+堆用仓库内的 `crates/r8gc`（过程宏经 `r8gc` 本身导出）：分代（新生代碰撞分配、次回收复制提升）、
 可移动（稀疏页搬空压缩）、增量标记，标记 / 次回收 / 清扫 / 压缩在平台的线程池上并行；品牌生命周期，无 `'static`。
 
 - `Platform` 的父 trait 是 `r8gc::Pool`（`threads` / `run`）：后台任务与 GC 共用一个池（`DefaultPlatform` 的 moremath `ThreadMulti`）
