@@ -2,11 +2,11 @@ use r8framework::{Agent, Error, ErrorKind, ObjectKind, Resume, Value};
 
 use crate::{Args, Installer};
 
-/// %AsyncGeneratorPrototype% 与 %AsyncIteratorPrototype%。
+/// %AsyncGeneratorPrototype% and %AsyncIteratorPrototype%.
 struct AsyncGenerators;
 
 impl AsyncGenerators {
-    /// `next` / `return` / `throw`：排进请求队列，给出这个请求的 Promise（`this` 不对给一个拒绝的 Promise）。
+    /// `next` / `return` / `throw`: enqueue the request and return its Promise (a rejected Promise if `this` is wrong).
     fn enqueue<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, mode: Resume, v: Value<'gc>) -> Result<Value<'gc>, Error> {
         let co = match this {
             Value::Object(o) if matches!(&o.borrow().kind, ObjectKind::Coroutine(c) if c.requests.is_some()) => o,

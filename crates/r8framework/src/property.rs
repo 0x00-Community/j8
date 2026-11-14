@@ -1,5 +1,6 @@
-//! 对象的内部方法（规范 10.1 普通对象、10.4 数组与字符串包装对象）：自有属性的查 / 定义 / 删、
-//! 自有键、可扩展性、原型。属性存取（ops.rs）沿原型链经它们走。
+//! Internal methods of objects (spec 10.1 ordinary objects, 10.4 arrays and string wrapper objects): get / define /
+//! delete own properties, own keys, extensibility, prototype. Property access (ops.rs) goes through them along the
+//! prototype chain.
 use alloc::format;
 use alloc::vec::Vec;
 
@@ -8,7 +9,7 @@ use r8gc::Gc;
 use crate::ops::index_of_str;
 use crate::{Agent, Error, ErrorKind, JsObject, JsString, JsSymbol, ObjectKind, Property, Slot, Value};
 
-/// 借来的属性键：字符串键不必先上堆。
+/// A borrowed property key: string keys need not go onto the heap first.
 #[derive(Clone, Copy, Debug)]
 pub enum Key<'k, 'gc> {
     Str(&'k str),
@@ -21,7 +22,7 @@ impl<'k> From<&'k str> for Key<'k, '_> {
     }
 }
 
-/// 堆上的属性键（自有键列表里的一项）。
+/// A property key on the heap (one entry in an own-keys list).
 #[derive(Clone, Copy, Debug)]
 pub enum PropertyKey<'gc> {
     String(JsString<'gc>),
@@ -46,8 +47,8 @@ impl<'gc> From<PropertyKey<'gc>> for Value<'gc> {
     }
 }
 
-/// 属性描述符：每个字段都可能缺（`Object.defineProperty` 只改给了的）。
-/// `get` / `set` 外层 `None` 是没给，`Some(None)` 是给了 `undefined`。
+/// A property descriptor: any field may be absent (`Object.defineProperty` changes only the given ones). For `get` /
+/// `set`, an outer `None` means not given, and `Some(None)` means given as `undefined`.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Descriptor<'gc> {
     pub value: Option<Value<'gc>>,
@@ -71,19 +72,19 @@ impl<'gc> Descriptor<'gc> {
         !self.is_accessor() && !self.is_data()
     }
 
-    /// 只给值（赋值改已有属性用）。
+    /// Only a value (used when assignment updates an existing property).
     pub fn value(v: Value<'gc>) -> Self {
         Self { value: Some(v), ..Self::default() }
     }
 
-    /// 缺的字段补缺省值（`false` / `undefined`）。
+    /// Fill absent fields with defaults (`false` / `undefined`).
     pub fn complete(&self) -> Property<'gc> {
         let slot = if self.is_accessor() { Slot::Accessor { get: self.get.flatten(), set: self.set.flatten() } } else { Slot::Data(self.value.unwrap_or_default()) };
         Property { slot, enumerable: self.enumerable.unwrap_or(false), writable: self.writable.unwrap_or(false), configurable: self.configurable.unwrap_or(false) }
     }
 }
 
-/// 完整的属性 ⇒ 每个字段都给了的描述符。
+/// A complete property ⇒ a descriptor with every field given.
 impl<'gc> From<Property<'gc>> for Descriptor<'gc> {
     fn from(p: Property<'gc>) -> Self {
         let base = Self { enumerable: Some(p.enumerable), configurable: Some(p.configurable), ..Self::default() };
@@ -94,7 +95,7 @@ impl<'gc> From<Property<'gc>> for Descriptor<'gc> {
     }
 }
 
-/// SetIntegrityLevel / TestIntegrityLevel 的档。
+/// The levels of SetIntegrityLevel / TestIntegrityLevel.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Integrity {
     Sealed,
@@ -109,7 +110,7 @@ fn same_object<'gc>(a: Option<JsObject<'gc>>, b: Option<JsObject<'gc>>) -> bool 
     }
 }
 
-/// ValidateAndApplyPropertyDescriptor：能改就给出改完的属性，不能给 `None`。
+/// ValidateAndApplyPropertyDescriptor: returns the updated property if the change is allowed, `None` otherwise.
 pub fn validate<'gc>(extensible: bool, desc: &Descriptor<'gc>, current: Option<Property<'gc>>) -> Option<Property<'gc>> {
     let Some(cur) = current else {
         return extensible.then(|| desc.complete());
@@ -166,7 +167,7 @@ pub fn validate<'gc>(extensible: bool, desc: &Descriptor<'gc>, current: Option<P
 }
 
 impl<'gc> Agent<'gc, '_> {
-    /// 字符串包装对象的下标与 `length`（不可写、不可配置）。
+    /// Indices and `length` of a string wrapper object (non-writable, non-configurable).
     fn string_own(&self, s: JsString<'gc>, key: &str) -> Option<Property<'gc>> {
         let fixed = |v: Value<'gc>, enumerable| Property { slot: Slot::Data(v), enumerable, writable: false, configurable: false };
         if key == "length" {
@@ -176,7 +177,7 @@ impl<'gc> Agent<'gc, '_> {
         Some(fixed(self.unit_string(unit).into(), true))
     }
 
-    /// [[GetOwnProperty]]。
+    /// [[GetOwnProperty]].
     pub fn get_own_property(&mut self, o: JsObject<'gc>, key: Key<'_, 'gc>) -> Result<Option<Property<'gc>>, Error> {
         if let Some(parts) = self.proxy_parts(o) {
             let (t, h) = parts?;
@@ -210,7 +211,7 @@ impl<'gc> Agent<'gc, '_> {
         Ok(self.get_own_property(o, key)?.is_some())
     }
 
-    /// [[DefineOwnProperty]]：给出成没成。
+    /// [[DefineOwnProperty]]: returns whether it succeeded.
     pub fn define_own_property(&mut self, o: JsObject<'gc>, key: Key<'_, 'gc>, desc: Descriptor<'gc>) -> Result<bool, Error> {
         if let Some(parts) = self.proxy_parts(o) {
             let (t, h) = parts?;
@@ -259,7 +260,7 @@ impl<'gc> Agent<'gc, '_> {
         Ok(self.ordinary_define(o, key, &desc))
     }
 
-    /// 映射的 arguments 下标：给出形参的槽位。
+    /// A mapped arguments index: returns the parameter's slot.
     fn mapped_slot(o: JsObject<'gc>, key: Key<'_, 'gc>) -> Option<u16> {
         let Key::Str(k) = key else { return None };
         match &o.borrow().kind {
@@ -276,7 +277,7 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    /// arguments 的 [[DefineOwnProperty]]（映射的下标）。
+    /// [[DefineOwnProperty]] of arguments (mapped indices).
     fn arguments_define(&mut self, o: JsObject<'gc>, key: Key<'_, 'gc>, desc: Descriptor<'gc>, slot: u16) -> bool {
         let env = match &o.borrow().kind {
             ObjectKind::Arguments(Some(map)) => map.env,
@@ -302,7 +303,7 @@ impl<'gc> Agent<'gc, '_> {
         true
     }
 
-    /// OrdinaryDefineOwnProperty。
+    /// OrdinaryDefineOwnProperty.
     fn ordinary_define(&self, o: JsObject<'gc>, key: Key<'_, 'gc>, desc: &Descriptor<'gc>) -> bool {
         let (current, extensible) = {
             let d = o.borrow();
@@ -317,7 +318,7 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    /// ArraySetLength。
+    /// ArraySetLength.
     fn array_set_length(&mut self, o: JsObject<'gc>, desc: Descriptor<'gc>) -> Result<bool, Error> {
         let length_prop = |a: &mut Self| a.get_own_property(o, Key::Str("length")).map(|p| p.expect("arrays have a length"));
         let Some(v) = desc.value else {
@@ -351,7 +352,7 @@ impl<'gc> Agent<'gc, '_> {
             d.length_readonly = !p.writable;
             return Ok(true);
         }
-        // 从后往前删；碰到不可配置的元素就停在它后面
+        // Delete from the back; on hitting a non-configurable element, stop just after it
         let blocker = d.props.iter().filter(|(_, p)| !p.configurable).filter_map(|(k, _)| index_of_str(k)).filter(|&i| i >= new_len).max();
         let ok = blocker.is_none();
         d.set_array_length(blocker.map_or(new_len, |i| i + 1));
@@ -359,7 +360,7 @@ impl<'gc> Agent<'gc, '_> {
         Ok(ok)
     }
 
-    /// DefinePropertyOrThrow。
+    /// DefinePropertyOrThrow.
     pub fn define_property_or_throw(&mut self, o: JsObject<'gc>, key: Key<'_, 'gc>, desc: Descriptor<'gc>) -> Result<(), Error> {
         if self.define_own_property(o, key, desc)? {
             Ok(())
@@ -369,12 +370,12 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    /// CreateDataProperty：可写可枚举可配置的数据属性。
+    /// CreateDataProperty: a writable, enumerable, configurable data property.
     pub fn create_data_property(&mut self, o: JsObject<'gc>, key: Key<'_, 'gc>, v: Value<'gc>) -> Result<bool, Error> {
         self.define_own_property(o, key, Property::data(v).into())
     }
 
-    /// CreateDataPropertyOrThrow。
+    /// CreateDataPropertyOrThrow.
     pub fn create_data_property_or_throw(&mut self, o: JsObject<'gc>, key: Key<'_, 'gc>, v: Value<'gc>) -> Result<(), Error> {
         if self.create_data_property(o, key, v)? {
             Ok(())
@@ -384,7 +385,7 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    /// 报错里的键。
+    /// The key for error messages.
     pub fn key_text(&self, key: Key<'_, 'gc>) -> alloc::string::String {
         match key {
             Key::Str(s) => s.into(),
@@ -392,7 +393,7 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    /// [[Delete]]：不可配置的删不掉（给 `false`），没有也算删成。
+    /// [[Delete]]: non-configurable ones can't be deleted (returns `false`); a nonexistent one counts as deleted.
     pub fn delete_property(&mut self, o: JsObject<'gc>, key: Key<'_, 'gc>) -> Result<bool, Error> {
         if let Some(parts) = self.proxy_parts(o) {
             let (t, h) = parts?;
@@ -415,7 +416,8 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    /// [[OwnPropertyKeys]]：数组下标从小到大，再字符串键按建立顺序，再 Symbol 键按建立顺序。
+    /// [[OwnPropertyKeys]]: array indices in ascending order, then string keys in creation order, then Symbol keys in
+    /// creation order.
     pub fn own_property_keys(&mut self, o: JsObject<'gc>) -> Result<Vec<PropertyKey<'gc>>, Error> {
         if let Some(parts) = self.proxy_parts(o) {
             let (t, h) = parts?;
@@ -480,7 +482,8 @@ impl<'gc> Agent<'gc, '_> {
         Ok(o.borrow().proto)
     }
 
-    /// [[SetPrototypeOf]]：不可扩展的只能设成原来那个；成环不行；`Object.prototype` 的原型不可改。
+    /// [[SetPrototypeOf]]: a non-extensible object can only be set to its current prototype; cycles are not allowed;
+    /// the prototype of `Object.prototype` can't be changed.
     pub fn set_prototype_of(&mut self, o: JsObject<'gc>, proto: Option<JsObject<'gc>>) -> Result<bool, Error> {
         if let Some(parts) = self.proxy_parts(o) {
             let (t, h) = parts?;
@@ -513,7 +516,7 @@ impl<'gc> Agent<'gc, '_> {
         Ok(true)
     }
 
-    /// SetIntegrityLevel。
+    /// SetIntegrityLevel.
     pub fn set_integrity_level(&mut self, o: JsObject<'gc>, level: Integrity) -> Result<bool, Error> {
         if !self.prevent_extensions(o)? {
             return Ok(false);
@@ -530,7 +533,7 @@ impl<'gc> Agent<'gc, '_> {
         Ok(true)
     }
 
-    /// TestIntegrityLevel。
+    /// TestIntegrityLevel.
     pub fn test_integrity_level(&mut self, o: JsObject<'gc>, level: Integrity) -> Result<bool, Error> {
         if self.is_extensible(o)? {
             return Ok(false);
@@ -545,7 +548,7 @@ impl<'gc> Agent<'gc, '_> {
         Ok(true)
     }
 
-    /// ToPropertyDescriptor。
+    /// ToPropertyDescriptor.
     pub fn to_property_descriptor(&mut self, v: Value<'gc>) -> Result<Descriptor<'gc>, Error> {
         if !matches!(v, Value::Object(_)) {
             let t = self.describe(v);
@@ -585,7 +588,7 @@ impl<'gc> Agent<'gc, '_> {
         Ok(d)
     }
 
-    /// FromPropertyDescriptor：没有属性给 `undefined`。
+    /// FromPropertyDescriptor: `undefined` if there is no property.
     pub fn from_property_descriptor(&mut self, p: Option<Property<'gc>>) -> Value<'gc> {
         let Some(p) = p else { return Value::Undefined };
         let o = self.object();
@@ -606,7 +609,7 @@ impl<'gc> Agent<'gc, '_> {
         o.into()
     }
 
-    /// 把一个值当属性键（ToPropertyKey）：Symbol 原样，别的 ToString。
+    /// Use a value as a property key (ToPropertyKey): Symbols as is, everything else ToString.
     pub fn to_property_key(&mut self, v: Value<'gc>) -> Result<PropertyKey<'gc>, Error> {
         match self.to_primitive(v, crate::Hint::String)? {
             Value::Symbol(s) => Ok(PropertyKey::Symbol(s)),

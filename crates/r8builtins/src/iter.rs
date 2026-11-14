@@ -2,11 +2,11 @@ use r8framework::{Agent, Error, ErrorKind, IterKind, IteratorState, ObjectKind, 
 
 use crate::{Args, Installer};
 
-/// `Symbol`、内建迭代器、生成器原型。
+/// `Symbol`, built-in iterators, generator prototypes.
 struct Iters;
 
 impl Iters {
-    /// `Symbol(描述)`。
+    /// `Symbol(description)`.
     fn symbol<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let description = match args.at(0) {
             Value::Undefined => None,
@@ -32,7 +32,7 @@ impl Iters {
         Ok(s.description.as_deref().map_or(Value::Undefined, |d| a.string(d).into()))
     }
 
-    /// thisSymbolValue（`Symbol.prototype.valueOf`）
+    /// thisSymbolValue (`Symbol.prototype.valueOf`)
     fn symbol_value_of<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         Ok(Self::this_symbol(a, this)?.into())
     }
@@ -71,21 +71,21 @@ impl Iters {
         }
     }
 
-    /// 数组迭代器的 `next`：每次重读 `length`（迭代中改数组看得见）。
+    /// `next` of array iterators: re-reads `length` each time (changes to the array during iteration are visible).
     fn array_next<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let o = Self::state(a, this)?;
         let v = a.array_iter_step(o)?;
         Ok(a.iter_result(v.unwrap_or_default(), v.is_none()).into())
     }
 
-    /// 字符串迭代器的 `next`：一次一个码点。
+    /// `next` of string iterators: one code point at a time.
     fn string_next<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let o = Self::state(a, this)?;
         let v = a.string_iter_step(o)?;
         Ok(a.iter_result(v.unwrap_or_default(), v.is_none()).into())
     }
 
-    /// 生成器的 `next` / `return` / `throw`：恢复一步，包成 `{ value, done }`。
+    /// Generator `next` / `return` / `throw`: resume one step, wrap the result in `{ value, done }`.
     fn resume<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, mode: Resume, v: Value<'gc>) -> Result<Value<'gc>, Error> {
         let co = match this {
             Value::Object(o) if matches!(&o.borrow().kind, ObjectKind::Coroutine(c) if c.promise.is_none() && c.requests.is_none()) => o,
@@ -126,7 +126,7 @@ impl Installer<'_, '_> {
         self.method(proto, "valueOf", Iters::symbol_value_of, 0);
         self.getter(proto, "description", Iters::symbol_description);
         r.symbol_method(self.mc, r.iterator_proto, sym.iterator, Iters::this_value, 0);
-        // 数组：`values` 与 `[Symbol.iterator]` 是同一个函数
+        // Array: `values` and `[Symbol.iterator]` are the same function
         let values = r.named_native(self.mc, Iters::values, "values", 0);
         self.set(r.array_proto, "values", values.into());
         r.array_proto.borrow_mut(self.mc).define_symbol(sym.iterator, r8framework::Property::hidden(values.into()));
@@ -135,7 +135,8 @@ impl Installer<'_, '_> {
         self.method(r.array_iterator_proto, "next", Iters::array_next, 0);
         r.symbol_method(self.mc, r.string_proto, sym.iterator, Iters::string_iterator, 0);
         self.method(r.string_iterator_proto, "next", Iters::string_next, 0);
-        // 记下内建的 `next`：迭代记录里的 `next` 是它们时，执行层直接走一步不建结果对象
+        // Record the built-in `next`s: when an iterator record's `next` is one of them, the execution layer steps
+        // directly without creating a result object
         let nexts = [r.array_iterator_proto, r.string_iterator_proto].map(|o| match o.borrow().own("next") {
             Some(Value::Object(f)) => Some(f),
             _ => None,

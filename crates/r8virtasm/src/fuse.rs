@@ -1,13 +1,15 @@
-//! 编译后的窥孔融合：几条常连着出现的指令并成一条，少几次分派。
+//! Post-compile peephole fusion: a few instructions that often appear together become one, saving dispatches.
 //!
-//! 只融合「后面几条都不是跳转落点」的组合：落点只可能在组的第一条，跳转目标按新下标改写。
-//! 融合指令的语义就是那几条依次执行，所以 JIT 从中途退回解释器时整条重做也一样（前几条只写 acc）。
+//! Only groups whose later instructions are not jump targets are fused: a target can only be the first instruction
+//! of the group, and jump targets are rewritten to the new indices. A fused instruction means exactly those
+//! instructions executed in order, so when the JIT bails out to the interpreter midway, redoing the whole fused
+//! instruction is the same (the leading ones only write acc).
 use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::{Function, Insn};
 
-/// 一条融合指令拆回的原指令（至多三条）。
+/// The original instructions a fused instruction splits back into (at most three).
 pub struct Unfused {
     parts: [Insn; 3],
     len: usize,
@@ -34,7 +36,7 @@ impl From<(Insn, Insn, Insn)> for Unfused {
 }
 
 impl Insn {
-    /// 融合指令拆回原来的几条；不是融合指令给 `None`。
+    /// Splits a fused instruction back into the originals; `None` if it is not a fused instruction.
     #[must_use]
     pub fn unfused(self) -> Option<Unfused> {
         Some(match self {
@@ -49,13 +51,14 @@ impl Insn {
         })
     }
 
-    /// 从 `at` 起能并成一条的：（融合后的指令, 吃掉几条）。`inner(k)`：第 `at + k` 条存在且不是跳转落点。
+    /// What can be fused into one starting at `at`: (fused instruction, number consumed).
+    /// `inner(k)`: instruction `at + k` exists and is not a jump target.
     fn fuse_at(insns: &[Insn], at: usize, inner: impl Fn(usize) -> bool) -> Option<(Insn, usize)> {
         let next = |k: usize| inner(k).then(|| insns[at + k]);
         match (insns[at], next(1), next(2)) {
             (Insn::Ldar(x), Some(Insn::Inc), Some(Insn::Star(y))) if x == y => Some((Insn::IncReg(x), 3)),
             (Insn::Ldar(x), Some(Insn::Dec), Some(Insn::Star(y))) if x == y => Some((Insn::DecReg(x), 3)),
-            // 存完马上读回同一个寄存器：acc 本来就是它
+            // Store then immediately load the same register: acc already holds it
             (Insn::Star(x), Some(Insn::Ldar(y)), _) if x == y => Some((Insn::Star(x), 2)),
             (Insn::Ldar(src), Some(Insn::Star(dst)), _) => Some((Insn::Mov { dst, src }, 2)),
             (Insn::LdaSmi(n), Some(Insn::Binary(op, x)), _) => Some((Insn::BinarySmi(op, x, n), 2)),
@@ -68,7 +71,7 @@ impl Insn {
 }
 
 impl Function {
-    /// 窥孔融合（见模块文档）。
+    /// Peephole fusion (see the module docs).
     pub fn fuse(&mut self) {
         let n = self.insns.len();
         let mut target = vec![false; n + 1];
@@ -78,14 +81,15 @@ impl Function {
             }
         }
         let mut out = Vec::with_capacity(n);
-        // 旧下标 ⇒ 新下标（只有组的第一条与末尾会被跳到）
+        // Old index ⇒ new index (only the first instruction of a group and the end can be jumped to)
         let mut moved = vec![0u32; n + 1];
         let mut at = 0;
         while at < n {
             moved[at] = u32::try_from(out.len()).expect("fewer than 2^32 instructions");
             let inner = |k: usize| at + k < n && !target[at + k];
             let (insn, used) = Insn::fuse_at(&self.insns, at, inner).unwrap_or((self.insns[at], 1));
-            // 刚互相复制过的两个寄存器再反着复制一遍：什么都不改（acc 也已经是这个值），不是落点就丢掉
+            // Copying back between two registers that were just copied changes nothing (acc already has the value):
+            // drop it unless it is a jump target
             let undo = matches!((out.last(), insn), (Some(&Insn::Mov { dst, src }), Insn::Mov { dst: d2, src: s2 }) if d2 == src && s2 == dst);
             if !(undo && !target[at]) {
                 out.push(insn);

@@ -2,28 +2,29 @@ use r8gc::{Collect, DynamicRootSet, Mutation, R8Heap, Rootable};
 
 use crate::{Platform, Profiler};
 
-/// 建 isolate 的参数。
+/// Parameters for creating an isolate.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct CreateParams {
-    /// 开不开剖析器
+    /// Whether to enable the profiler
     pub profile: bool,
 }
 
-/// GC 堆的根：持久句柄都挂在这里。
+/// The root of the GC heap: all persistent handles hang off it.
 #[derive(Collect)]
 #[collect(no_drop)]
 struct Roots<'gc> {
     set: DynamicRootSet<'gc>,
 }
 
-/// 一个独立的 JS 世界：GC 堆加剖析器；平台由嵌入方借给它（GC 在平台的线程池上并行）。
+/// An independent JS world: a GC heap plus a profiler; the platform is lent to it by the embedder (the GC runs in
+/// parallel on the platform's thread pool).
 pub struct Isolate<'p> {
     platform: &'p dyn Platform,
     arena: R8Heap<'p, Rootable![Roots<'_>]>,
     profiler: Profiler,
 }
 
-/// 一次进入 isolate：`'gc` 是这次进入的品牌，其中的值出不了闭包。
+/// One entry into an isolate: `'gc` is the brand of this entry, and values inside it can't escape the closure.
 pub struct Scope<'gc, 'i> {
     pub mc: &'gc Mutation<'gc>,
     pub(crate) roots: &'gc DynamicRootSet<'gc>,
@@ -39,17 +40,17 @@ impl<'p> Isolate<'p> {
         Self { platform, arena, profiler }
     }
 
-    /// 完成过几轮回收。
+    /// How many collection cycles have completed.
     pub fn gc_cycles(&self) -> usize {
         self.arena.metrics().total_gc_count()
     }
 
-    /// 在执行环境 `cx` 里用 `engine` 跑一段脚本。
+    /// Run a script with `engine` in execution context `cx`.
     pub fn run(&mut self, engine: &mut impl crate::Engine, cx: &crate::ContextRoot, src: &crate::Source<'_>) -> Result<crate::Global, crate::Error> {
         engine.eval(self, cx, src)
     }
 
-    /// 跑一个模块（见 [`Engine::eval_module`](crate::Engine::eval_module)）。
+    /// Run a module (see [`Engine::eval_module`](crate::Engine::eval_module)).
     pub fn run_module(&mut self, engine: &mut impl crate::Engine, cx: &crate::ContextRoot, src: &crate::Source<'_>) -> Result<crate::Global, crate::Error> {
         engine.eval_module(self, cx, src)
     }
@@ -58,7 +59,8 @@ impl<'p> Isolate<'p> {
         &self.profiler
     }
 
-    /// 进入 isolate 跑 `f`；`f` 期间不回收，返回后按欠账做一段增量回收。
+    /// Enter the isolate and run `f`; no collection happens during `f`, and afterwards an incremental collection slice
+    /// is done according to the accrued debt.
     pub fn enter<R>(&mut self, f: impl for<'gc> FnOnce(&mut Scope<'gc, '_>) -> R) -> R {
         let (platform, profiler) = (self.platform, &mut self.profiler);
         let r = self.arena.mutate(|mc, roots| f(&mut Scope { mc, roots: &roots.set, platform, profiler }));

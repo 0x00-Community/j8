@@ -1,5 +1,6 @@
-//! `#[r8::object]`：写在只有关联函数的 `impl` 块上，导出成一个普通对象（`console` / `process` 这类）：
-//! 函数是对象的方法，`#[js(getter)]` / `#[js(setter)]` 是对象的访问器。生成 `r8::Object` 实现。
+//! `#[r8::object]`: placed on an `impl` block containing only associated functions; exports it as a plain
+//! object (like `console` / `process`): the functions are the object's methods, and `#[js(getter)]` /
+//! `#[js(setter)]` are the object's accessors. Generates an `r8::Object` implementation.
 use proc_macro2::TokenStream;
 use quote::quote;
 use syn::ItemImpl;

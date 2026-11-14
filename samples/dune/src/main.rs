@@ -1,6 +1,7 @@
-//! dune：r8 的 JavaScript 运行时，对标 node / deno。
+//! dune: the r8 JavaScript runtime, comparable to node / deno.
 //!
-//! `dune a.js` / `dune run a.js` 跑文件，`dune -e '<js>'` 跑源码（`-p` 再打印结果），不带参数进 REPL。
+//! `dune a.js` / `dune run a.js` runs a file, `dune -e '<js>'` runs source (`-p` also prints the result), no arguments
+//! starts the REPL.
 mod node;
 mod repl;
 mod session;
@@ -14,47 +15,47 @@ use r8platform::DefaultPlatform;
 
 use session::{Outcome, Session};
 
-/// r8 的 JavaScript 运行时
+/// The r8 JavaScript runtime
 #[derive(Parser)]
 #[command(name = "dune", version, args_conflicts_with_subcommands = true)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
-    /// 要跑的脚本（同 `dune run`）；`-` 读标准输入
+    /// Script to run (same as `dune run`); `-` reads stdin
     file: Option<PathBuf>,
-    /// 跑这段源码
+    /// Run this source
     #[arg(short, long, conflicts_with_all = ["file", "print"])]
     eval: Option<String>,
-    /// 跑这段源码并打印结果
+    /// Run this source and print the result
     #[arg(short, long, conflicts_with = "file")]
     print: Option<String>,
-    /// 开 JIT：热函数编成 x86-64 机器码跑（r8jit）
+    /// Enable the JIT: hot functions are compiled to x86-64 machine code (r8jit)
     #[arg(long)]
     jit: bool,
-    /// 交给脚本的参数（`process.argv` 里脚本路径之后）
+    /// Arguments passed to the script (after the script path in `process.argv`)
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     args: Vec<String>,
 }
 
 #[derive(Subcommand)]
 enum Command {
-    /// 跑一个脚本文件
+    /// Run a script file
     Run {
-        /// 脚本；`-` 读标准输入
+        /// Script; `-` reads stdin
         file: PathBuf,
-        /// 交给脚本的参数
+        /// Arguments passed to the script
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
-    /// 交互式 REPL（不带参数时的缺省）
+    /// Interactive REPL (the default with no arguments)
     Repl,
 }
 
-/// 这次要做什么。
+/// What to do this time.
 enum Job {
-    /// 跑源码，`print` 时打印结果
+    /// Run source; print the result when `print` is set
     Script { text: String, file: String, print: bool },
-    /// 跑脚本文件（按 CommonJS 模块，`require` / `module` / `__dirname` 可用）
+    /// Run a script file (as a CommonJS module; `require` / `module` / `__dirname` are available)
     Main { file: String, args: Vec<String> },
     Repl,
 }
@@ -82,7 +83,7 @@ impl TryFrom<Cli> for Job {
 }
 
 impl Job {
-    /// 跑；`jit` 时普通 JS 函数热了编成机器码。
+    /// Run; with `jit`, ordinary JS functions are compiled to machine code once hot.
     fn run(&self, jit: bool) -> ExitCode {
         let platform = DefaultPlatform::default();
         let mut isolate = Isolate::new(&platform, CreateParams::default());

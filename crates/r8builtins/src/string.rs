@@ -5,17 +5,17 @@ use r8framework::{Agent, Error, ErrorKind, JsString, Value};
 
 use crate::{Args, Installer};
 
-/// 字符串最长这么多 UTF-16 码元（同 V8 的 2^29 − 24），再长抛 RangeError
+/// Maximum string length in UTF-16 code units (same as V8's 2^29 − 24); anything longer throws RangeError
 const MAX_STRING_LENGTH: f64 = 536_870_888.0;
 
-/// `String` / `Number` 与原型方法。下标都按 UTF-16 码元算。
+/// `String` / `Number` and their prototype methods. All indices are in UTF-16 code units.
 pub(crate) struct Strings;
 
 /// `Number.MAX_SAFE_INTEGER`
 const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
 
 impl Strings {
-    /// `this` 转字符串（`null` / `undefined` 上调抛 TypeError）。
+    /// Convert `this` to a string (throws TypeError when called on `null` / `undefined`).
     fn this<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>) -> Result<JsString<'gc>, Error> {
         if this.is_nullish() {
             return Err(a.throw(ErrorKind::Type, "String.prototype method called on null or undefined"));
@@ -35,18 +35,18 @@ impl Strings {
         Value::Number(f64::from(u32::try_from(n).unwrap_or(u32::MAX)))
     }
 
-    /// 实参转成 `[0, len]` 里的整数下标（负数夹到 0）。
+    /// Convert an argument to an integer index in `[0, len]` (negatives clamp to 0).
     fn clamp<'gc>(a: &mut Agent<'gc, '_>, v: Value<'gc>, len: usize, default: usize) -> Result<usize, Error> {
         if v == Value::Undefined {
             return Ok(default);
         }
         let x = libm::trunc(a.to_number(v)?);
-        #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "已夹到 [0, len]")]
+        #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "clamped to [0, len]")]
         let r = if x.is_nan() || x <= 0.0 { 0 } else { (x.min(f64::from(u32::try_from(len).unwrap_or(u32::MAX)))) as usize };
         Ok(r)
     }
 
-    /// 相对下标（负数从末尾数）。
+    /// Relative index (negative counts from the end).
     fn relative<'gc>(a: &mut Agent<'gc, '_>, v: Value<'gc>, len: usize, default: usize) -> Result<usize, Error> {
         if v == Value::Undefined {
             return Ok(default);
@@ -54,12 +54,12 @@ impl Strings {
         let x = libm::trunc(a.to_number(v)?);
         let len_f = f64::from(u32::try_from(len).unwrap_or(u32::MAX));
         let r = if x < 0.0 { (len_f + x).max(0.0) } else { x.min(len_f) };
-        #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "已夹到 [0, len]")]
+        #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "clamped to [0, len]")]
         let r = if r.is_nan() { 0 } else { r as usize };
         Ok(r)
     }
 
-    /// JS 的 WhiteSpace 与 LineTerminator（U+0085 不算，U+FEFF 算）。
+    /// JS WhiteSpace and LineTerminator (U+0085 excluded, U+FEFF included).
     pub(crate) fn is_space(c: char) -> bool {
         (c.is_whitespace() && c != '\u{85}') || c == '\u{feff}'
     }
@@ -77,7 +77,7 @@ impl Strings {
         a.wrap_primitive(s, a.realm.string_proto)
     }
 
-    /// thisStringValue（`toString` / `valueOf`）：字符串或 String 包装对象，别的抛 TypeError。
+    /// thisStringValue (`toString` / `valueOf`): a string or String wrapper object; anything else throws TypeError.
     fn to_string<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         match this.unwrapped() {
             v @ Value::String(_) => Ok(v),
@@ -100,7 +100,7 @@ impl Strings {
     fn index_of<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let s = Self::this(a, this)?;
         let n = a.to_string(args.at(0))?;
-        // 全 ASCII：字节下标就是 UTF-16 码元下标，直接在 UTF-8 上找
+        // All ASCII: byte index = UTF-16 code unit index, so search directly in UTF-8
         if s.is_ascii() {
             let from = Self::clamp(a, args.at(1), s.len(), 0)?;
             return Ok(a.par().find_str(&s[from..], &n).map_or(Value::Number(-1.0), |i| Self::count(from + i)));
@@ -118,7 +118,8 @@ impl Strings {
         Ok(last.and_then(|l| (0..=l).rev().find(|&i| u[i..].starts_with(&n))).map_or(Value::Number(-1.0), Self::count))
     }
 
-    /// includes / startsWith / endsWith 的公共部分：`this` 转字符串、参数不能是正则、查找串转字符串
+    /// Shared part of includes / startsWith / endsWith: convert `this` to a string, reject a regex argument, convert
+    /// the search string to a string
     fn needle<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>], method: &str) -> Result<(JsString<'gc>, JsString<'gc>), Error> {
         let s = Self::this(a, this)?;
         if crate::regexp::Regexps::is_regexp(a, args.at(0))? {
@@ -132,7 +133,8 @@ impl Strings {
         let (s, n) = Self::needle(a, this, args, "includes")?;
         let len = s.utf16_len();
         let from = Self::clamp(a, args.at(1), len, 0)?;
-        // 纯 ASCII：在 UTF-8 上找（字节下标就是码元下标；大串切块并行）
+        // Pure ASCII: search in UTF-8 (byte index = code unit index; large strings are split into chunks searched in
+        // parallel)
         if s.is_ascii() {
             return Ok(a.par().find_str(&s[from..], &n).is_some().into());
         }
@@ -186,7 +188,7 @@ impl Strings {
         let x = libm::trunc(a.to_number(args.at(0))?);
         let len = f64::from(u32::try_from(s.utf16_len()).unwrap_or(u32::MAX));
         let i = if x < 0.0 { len + x } else { x };
-        #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "已检查在 [0, len) 里")]
+        #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "checked to be in [0, len)")]
         let v = if (0.0..len).contains(&i) { s.code_unit(i as usize).map_or(Value::Undefined, |u| a.unit_string(u).into()) } else { Value::Undefined };
         Ok(v)
     }
@@ -216,7 +218,7 @@ impl Strings {
         Ok(a.string(s.trim_end_matches(Self::is_space)).into())
     }
 
-    /// `split(sep, limit)`：`sep` 是字符串（正则留给阶段 5）；空串按码元拆。
+    /// `split(sep, limit)`: `sep` is a string (regexes are left to phase 5); an empty string splits by code unit.
     pub(crate) fn split<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let s = Self::this(a, this)?;
         let limit = match args.at(1) {
@@ -229,14 +231,15 @@ impl Strings {
             sep => {
                 let sep = a.to_string(sep)?;
                 if sep.is_empty() {
-                    // 空分隔符：按 UTF-16 码元一个一个拆（全 ASCII 时就是逐字节）
+                    // Empty separator: split one UTF-16 code unit at a time (byte by byte when all ASCII)
                     if s.is_ascii() {
                         s.as_bytes().iter().take(limit).map(|&c| a.string(core::str::from_utf8(&[c]).unwrap_or_default()).into()).collect()
                     } else {
                         s.encode_utf16().take(limit).map(|c| Self::from_units(a, &[c])).collect()
                     }
                 } else {
-                    // 串都是合法 UTF-8：在 UTF-8 上切和按 UTF-16 码元切结果一样，不用来回转
+                    // All strings are valid UTF-8: splitting in UTF-8 gives the same result as splitting by UTF-16 code
+                    // unit, so no round-trip conversion is needed
                     s.split(&**sep).take(limit).map(|p| a.string(p).into()).collect()
                 }
             }
@@ -254,24 +257,24 @@ impl Strings {
         if s.is_empty() || n == 0.0 {
             return Ok(a.string("").into());
         }
-        #[expect(clippy::cast_precision_loss, reason = "长度比较，精度足够")]
+        #[expect(clippy::cast_precision_loss, reason = "length comparison; precision is sufficient")]
         let total = s.encode_utf16().count() as f64 * n;
         if total > MAX_STRING_LENGTH {
             return Err(a.throw(ErrorKind::Range, "Invalid string length"));
         }
-        #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "已检查非负、乘积不超过字符串上限")]
+        #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "checked non-negative and the product within the string limit")]
         Ok(a.string(&s.repeat(n as usize)).into())
     }
 
     fn pad<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>], start: bool) -> Result<Value<'gc>, Error> {
         let u = Self::units(a, this)?;
-        // ToLength：负数与 NaN 当 0
+        // ToLength: negatives and NaN become 0
         let target = libm::trunc(a.to_number(args.at(0))?);
         let fill: Vec<u16> = match args.at(1) {
             Value::Undefined => alloc::vec![u16::from(b' ')],
             v => a.to_string(v)?.encode_utf16().collect(),
         };
-        #[expect(clippy::cast_precision_loss, reason = "长度比较，精度足够")]
+        #[expect(clippy::cast_precision_loss, reason = "length comparison; precision is sufficient")]
         let len = u.len() as f64;
         if target.is_nan() || target <= len || fill.is_empty() {
             return Ok(Self::from_units(a, &u));
@@ -279,7 +282,7 @@ impl Strings {
         if target > MAX_STRING_LENGTH {
             return Err(a.throw(ErrorKind::Range, "Invalid string length"));
         }
-        #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "已检查在 (len, 字符串上限] 内")]
+        #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "checked to be in (len, string limit]")]
         let target = target as usize;
         let pad: Vec<u16> = fill.iter().copied().cycle().take(target - u.len()).collect();
         let out = if start { [pad, u].concat() } else { [u, pad].concat() };
@@ -302,7 +305,7 @@ impl Strings {
         Ok(a.string(&out).into())
     }
 
-    /// `Number(v)`：BigInt 换成最接近的数。
+    /// `Number(v)`: a BigInt becomes the nearest Number.
     fn number<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let n = match args.first() {
             None => 0.0,
@@ -326,9 +329,10 @@ impl Strings {
         Ok(matches!(args.at(0), Value::Number(x) if x.is_nan()).into())
     }
 
-    /// `n.toString(radix)`：整数部分逐位除，小数部分逐位乘（最多到双精度能区分的位数）。
+    /// `n.toString(radix)`: divide out the integer part digit by digit, multiply out the fraction digit by digit (up to
+    /// the number of digits a double can distinguish).
     fn number_to_string<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        /// 小数部分最多出这么多位
+        /// Maximum number of fraction digits produced
         const MAX_FRACTION_DIGITS: usize = 52;
         const DIGITS: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
         let Value::Number(x) = this.unwrapped() else {
@@ -350,7 +354,7 @@ impl Strings {
         let mut digits = Vec::new();
         loop {
             let d = libm::fmod(int, r);
-            #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "余数在 [0, radix)")]
+            #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "remainder is in [0, radix)")]
             digits.push(DIGITS[d as usize]);
             int = libm::trunc(int / r);
             if int == 0.0 {
@@ -363,7 +367,7 @@ impl Strings {
             for _ in 0..MAX_FRACTION_DIGITS {
                 frac *= r;
                 let d = libm::trunc(frac);
-                #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "在 [0, radix)")]
+                #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "in [0, radix)")]
                 digits.push(DIGITS[d as usize]);
                 frac -= d;
                 if frac == 0.0 {
@@ -375,7 +379,7 @@ impl Strings {
         Ok(a.string(&if neg { alloc::format!("-{s}") } else { s }).into())
     }
 
-    /// thisNumberValue（`Number.prototype.valueOf`）：数或 Number 包装对象，别的抛 TypeError。
+    /// thisNumberValue (`Number.prototype.valueOf`): a Number or Number wrapper object; anything else throws TypeError.
     fn number_value_of<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         match this.unwrapped() {
             v @ Value::Number(_) => Ok(v),
@@ -387,7 +391,7 @@ impl Strings {
 impl Installer<'_, '_> {
     pub(crate) fn string(&mut self) {
         let proto = self.realm.string_proto;
-        // String.prototype 本身是包着 "" 的 String 对象
+        // String.prototype itself is a String object wrapping ""
         proto.borrow_mut(self.mc).kind = r8framework::ObjectKind::Primitive(self.text(""));
         self.constructor("String", Strings::string, proto, 1);
         let methods: [(&str, r8framework::NativeFn, u32); 25] = [
@@ -424,7 +428,7 @@ impl Installer<'_, '_> {
 
     pub(crate) fn number(&mut self) {
         let proto = self.realm.number_proto;
-        // Number.prototype 本身是包着 +0 的 Number 对象
+        // Number.prototype itself is a Number object wrapping +0
         proto.borrow_mut(self.mc).kind = r8framework::ObjectKind::Primitive(0.0.into());
         let ctor = self.constructor("Number", Strings::number, proto, 1);
         self.method(ctor, "isInteger", Strings::is_integer, 1);

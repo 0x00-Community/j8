@@ -1,16 +1,17 @@
-//! benchv8：同一组 JS 基准在 r8 与 V8（rusty_v8）上的耗时对比。
+//! benchv8: timing comparison of the same JS benchmarks on r8 and V8 (rusty_v8).
 //!
 //! ```text
-//! cargo run --release                    # 三种引擎各跑一遍，出对比表
-//! cargo run --release -- --engine r8     # 只跑一种：r8 / v8 / v8-jitless
-//! cargo run --release -- --runs 10       # 每个基准跑几次取最短（缺省 5）
+//! cargo run --release                    # run all three engines once each and print the comparison table
+//! cargo run --release -- --engine r8     # run only one: r8 / v8 / v8-jitless
+//! cargo run --release -- --runs 10       # runs per benchmark, the shortest is kept (default 5)
 //! ```
-//! V8 的 `--jitless` 是进程级开关，所以每种引擎在自己的子进程里跑；计时只算编译 + 执行，
-//! 每次都换一个新的执行环境（脚本顶层的 `let` / `const` 不会撞上一次的）。
+//! V8's `--jitless` is a process-wide flag, so each engine runs in its own child process; timing covers compile +
+//! execute only, and each run uses a fresh execution environment (top-level `let` / `const` don't collide with the
+//! previous run's).
 use std::process::{Command, ExitCode};
 use std::time::Instant;
 
-/// 基准：名字与源码（脚本的完成值是校验和，三种引擎要一致）。
+/// Benchmarks: name and source (the script's completion value is a checksum that must match across the three engines).
 const BENCHES: [(&str, &str); 11] = [
     ("fib", include_str!("../bench/fib.js")),
     ("loop", include_str!("../bench/loop.js")),
@@ -25,10 +26,10 @@ const BENCHES: [(&str, &str); 11] = [
     ("regexp", include_str!("../bench/regexp.js")),
 ];
 
-/// 每个基准缺省跑几次（取最短）
+/// Default runs per benchmark (the shortest is kept)
 const DEFAULT_RUNS: usize = 5;
 
-/// 参加对比的引擎。
+/// Engines in the comparison.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Engine {
     R8,
@@ -59,10 +60,10 @@ impl TryFrom<&str> for Engine {
     }
 }
 
-/// 一个基准的结果：最短耗时（毫秒）与校验和；出错给错误文本。
+/// Result of one benchmark: shortest time (milliseconds) and checksum; error text on failure.
 type Outcome = Result<(f64, String), String>;
 
-/// 在 r8 上跑。
+/// Run on r8.
 struct R8Runner;
 
 impl R8Runner {
@@ -113,7 +114,7 @@ impl R8Runner {
     }
 }
 
-/// 在 V8 上跑。
+/// Run on V8.
 struct V8Runner;
 
 impl V8Runner {
@@ -154,7 +155,7 @@ impl V8Runner {
 }
 
 impl Engine {
-    /// 子进程：跑这种引擎的全部基准，一行一个：`名字\t毫秒\t校验和` 或 `名字\tERR\t错误`。
+    /// Child process: run all benchmarks on this engine, one line each: `name\tms\tchecksum` or `name\tERR\terror`.
     fn run_all(self, runs: usize) {
         let engine = self;
         if engine != Engine::R8 {
@@ -173,17 +174,17 @@ impl Engine {
     }
 }
 
-/// 一行结果。
+/// One result line.
 struct Row {
     ms: Option<f64>,
     sum: String,
 }
 
-/// 主进程的对比表。
+/// The main process's comparison table.
 struct Comparison;
 
 impl Comparison {
-    /// 每种引擎起一个子进程，汇总成表。
+    /// Start one child process per engine and collect the results into a table.
     fn run(runs: usize) -> Result<(), String> {
         let exe = std::env::current_exe().map_err(|e| e.to_string())?;
         let mut table: Vec<Vec<Row>> = Vec::new();

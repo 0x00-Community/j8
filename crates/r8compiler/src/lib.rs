@@ -1,19 +1,23 @@
-//! r8compiler：字节码函数 ⇒ 原始机器码（`no_std`）。
+//! r8compiler: bytecode function ⇒ raw machine code (`no_std`).
 //!
 //! ```text
-//! r8virtasm::Function ─ Lower ─▶ MLIR（llvm 方言）─ mlirpass X86_64Emit ─▶ x86-64 机器码 + 要填的地址
+//! r8virtasm::Function ─ Lower ─▶ MLIR (llvm dialect) ─ mlirpass X86_64Emit ─▶ x86-64 machine code + addresses to patch
 //! ```
 //!
-//! 出来的机器码是 System V 函数 `extern "C" fn(regs: *mut Value, acc: *mut Value, start: u64) -> u64`：直接在本帧的寄存器文件
-//! 与累加器上跑（[`Value`](r8framework::Value) 的内存布局见 [`ValueTag`](r8framework::ValueTag)），返回 0 表示函数返回了（结果在累加器），
-//! 返回 `pc + 1` 表示停在第 `pc` 条指令之前（r8executor 的 `Exit`）。
+//! The resulting machine code is a System V function `extern "C" fn(regs: *mut Value, acc: *mut Value, start: u64) ->
+//! u64`: it runs directly on this frame's register file and accumulator (see [`ValueTag`](r8framework::ValueTag) for
+//! the memory layout of [`Value`](r8framework::Value)); returning 0 means the function returned (result in the
+//! accumulator), returning `pc + 1` means it stopped before instruction `pc` (r8executor's `Exit`).
 //!
-//! 第一档收的指令：寄存器读写、数与布尔常量、四则运算与比较、`++` / `--`、跳转、死区检查、返回。
-//! 运行时操作数不是数（或别的快路前提不成立）就停在那条指令之前退出，解释器从那里接着跑；
-//! 别的指令（调用、属性、闭包……）也是停在它之前交给解释器（[`Native::exits`]）。
+//! Instructions accepted by the first tier: register reads/writes, number and boolean constants, arithmetic and
+//! comparisons, `++` / `--`, jumps, TDZ checks, return. If a runtime operand is not a number (or another fast-path
+//! precondition fails), it exits before that instruction and the interpreter continues from there; other instructions
+//! (calls, properties, closures, ...) also stop before themselves and are handed to the interpreter
+//! ([`Native::exits`]).
 //!
-//! 第三个参数是从哪进：0 从函数开头，`h + 1` 从循环头 `h`（[`Native::entries`]，循环跑到一半切进来，OSR）。
-//! 从循环中途进的遇到 `return` 也停下，帧由解释器收尾。
+//! The third argument is where to enter: 0 at the function start, `h + 1` at loop header `h` ([`Native::entries`]:
+//! switching in halfway through a running loop, i.e. OSR). Code entered midway through a loop also stops at `return`,
+//! and the interpreter finishes the frame.
 #![no_std]
 extern crate alloc;
 
@@ -29,45 +33,49 @@ use mlirpass::mlirformat::MlirOpt;
 use mlirpass::{Body, Ctx, Emit, Interfaces, PassManager, Passes, X86_64Emit};
 use r8virtasm::Function;
 
-/// 一个函数的机器码：字节与要填的绝对地址（运行时函数）。
+/// A function's machine code: bytes and the absolute addresses (runtime functions) to patch.
 #[derive(Clone, Debug)]
 pub struct Native {
     pub bytes: Vec<u8>,
-    /// （字节偏移，要填谁的地址）：每处是 8 字节小端绝对地址
+    /// (byte offset, whose address to patch): each is an 8-byte little-endian absolute address
     pub relocs: Vec<(usize, Helper)>,
-    /// 机器码停下交给解释器执行的指令（第一档不收的）；空的话整个函数都在机器码里
+    /// Instructions where machine code stops and hands off to the interpreter (not accepted by the first tier); if
+    /// empty, the whole function is in machine code
     pub exits: Vec<Unsupported>,
-    /// 能从中途进的循环头（OSR）：第三个参数传 `h + 1` 就从第 `h` 条指令开始
+    /// Loop headers that can be entered midway (OSR): passing `h + 1` as the third argument starts at instruction `h`
     pub entries: Vec<u32>,
 }
 
 impl Native {
-    /// 整个函数都在机器码里（没有停下交给解释器的指令）。
+    /// The whole function is in machine code (no instruction stops and hands off to the interpreter).
     pub fn pure(&self) -> bool {
         self.exits.is_empty()
     }
 }
 
-/// 编译出错。
+/// Compilation error.
 #[derive(Clone, Debug)]
 pub enum CompileError {
-    /// 机器码帮不上忙：函数不能整体在机器码里跑（有要交给解释器的指令），也没有能切进去的循环
+    /// Machine code can't help: the function cannot run as a whole in machine code (it has instructions to hand to the
+    /// interpreter), and there is no loop to switch into
     Useless,
-    /// 后端拒收（带原因）
+    /// Rejected by the backend (with the reason)
     Backend(alloc::string::String),
 }
 
-/// ⭐ 编译器：MLIR 的方言表与 op 接口只建一次，反复编函数。
+/// ⭐ The compiler: the MLIR dialect table and op interfaces are built once, then functions are compiled repeatedly.
 pub struct Compiler {
     opt: MlirOpt,
     interfaces: Interfaces<'static>,
-    /// 出机器码之前的优化：局部变量提成 SSA（mem2reg）、化简、公共子表达式
+    /// Optimizations before emitting machine code: promoting locals to SSA (mem2reg), simplification, common
+    /// subexpression elimination
     pipeline: PassManager,
 }
 
 impl Default for Compiler {
-    /// 只装要用的：builtin（`module`）与 `llvm` 方言、`llvm` 的手写形式（`llvm.func` / `icmp` / `call` / …）。
-    /// 比 `MlirOpt::upstream()` 轻得多（JIT 第一次编函数时才建）。
+    /// Installs only what is needed: builtin (`module`) and the `llvm` dialect, plus `llvm`'s hand-written forms
+    /// (`llvm.func` / `icmp` / `call` / …). Much lighter than `MlirOpt::upstream()` (built only when the JIT first
+    /// compiles a function).
     fn default() -> Self {
         let mut opt = MlirOpt::new();
         opt.load(mlirpass::mlirformat::builtin::BuiltinDialect).load(mlirpass::mlirformat::llvm::LlvmDialect);
@@ -82,10 +90,10 @@ impl Default for Compiler {
 }
 
 impl Compiler {
-    /// 出机器码之前跑的 pass
+    /// Passes run before emitting machine code
     const PIPELINE: &str = "builtin.module(llvm.func(mem2reg, canonicalize, cse))";
 
-    /// 字节码函数 ⇒ 机器码。
+    /// Bytecode function ⇒ machine code.
     pub fn compile(&self, func: &Function) -> Result<Native, CompileError> {
         let lowered = lower::Lower::module(func);
         if !lowered.exits.is_empty() && lowered.headers.is_empty() {

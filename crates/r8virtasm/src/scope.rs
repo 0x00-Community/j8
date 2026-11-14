@@ -1,6 +1,8 @@
-//! 作用域：每层声明了哪些名字（[`Decls`]），以及哪些绑定被内层函数捕获（[`Resolver`]）。
+//! Scopes: which names each level declares ([`Decls`]), and which bindings are captured by inner functions
+//! ([`Resolver`]).
 //!
-//! 预扫一遍和生成代码用同一套 [`Decls`]，名字解析的结果才一致：被捕获的绑定放堆上的环境，其余放寄存器。
+//! The pre-scan and code generation use the same [`Decls`] so that name resolution agrees: captured bindings live in
+//! heap environments, the rest in registers.
 use std::collections::HashSet;
 
 use oxc_ast::ast::{
@@ -9,56 +11,58 @@ use oxc_ast::ast::{
 use oxc_allocator::Allocator;
 use oxc_span::Span;
 
-/// 一个绑定的身份：声明处的位置（`this` 另占一个名字空间）。
+/// A binding's identity: the position of its declaration (`this` has a separate namespace).
 pub(crate) type Key = u64;
 
-/// `this` 的键与普通绑定的键分开
+/// Keys of `this` are kept apart from keys of ordinary bindings
 const THIS_KEY: Key = 1 << 32;
 
-/// `new.target` 伪绑定的键空间
+/// Key space of the `new.target` pseudo-binding
 const NEW_TARGET_KEY: Key = 2 << 32;
 
-/// `arguments` 伪绑定的键空间
+/// Key space of the `arguments` pseudo-binding
 const ARGUMENTS_KEY: Key = 3 << 32;
 
-/// 键里的源码位置部分
+/// The source position part of a key
 const POSITION_MASK: Key = (1 << 32) - 1;
 
-/// annexB 块级函数在外层建的 `var` 绑定：键 = 这个标记 | 函数名的位置
+/// The `var` binding an annexB block-level function creates in the outer scope: key = this tag | position of the
+/// function name
 const ANNEXB_KEY: Key = 4 << 32;
 
-/// 含直接 eval 的函数放 eval 声明的 `var` 的对象：键 = 这个标记 | 形参表的位置
+/// The object where a function containing a direct eval keeps eval-declared `var`s: key = this tag | position of the
+/// parameter list
 const EVAL_VARS_KEY: Key = 5 << 32;
 
-/// 直接 eval 代码看到的外层绑定：键 = 这个标记 | 序号
+/// Outer bindings seen by direct eval code: key = this tag | index
 const OUTER_KEY: Key = 6 << 32;
 
-/// `this` 这个名字不可能是标识符，拿来当伪绑定名
+/// `this` can never be an identifier, so it serves as a pseudo-binding name
 pub(crate) const THIS: &str = "this";
 
-/// `new.target` 也不是标识符
+/// `new.target` is not an identifier either
 pub(crate) const NEW_TARGET: &str = "new.target";
 
-/// 非箭头函数里没被别的声明遮住的 `arguments`
+/// `arguments` in a non-arrow function, not shadowed by another declaration
 pub(crate) const ARGUMENTS: &str = "arguments";
 
-/// 一个声明的种类。
+/// The kind of a declaration.
 #[derive(Clone, Copy)]
 pub(crate) enum DeclKind<'a> {
-    /// 非箭头函数的 `this`（`r0`）
+    /// `this` of a non-arrow function (`r0`)
     This,
-    /// 具名函数表达式里自己的名字（`r1`）
+    /// The own name inside a named function expression (`r1`)
     SelfName,
-    /// 第 n 个形参
+    /// The n-th parameter
     Param(u16),
     Var,
     Let,
     Const,
-    /// 函数声明：进作用域时建闭包
+    /// Function declaration: the closure is created on entering the scope
     Function(&'a Function<'a>),
-    /// 非箭头函数的 `new.target`（用到才在入口取）
+    /// `new.target` of a non-arrow function (fetched at entry only if used)
     NewTarget,
-    /// 非箭头函数的 `arguments` 对象（用到才在入口建）
+    /// The `arguments` object of a non-arrow function (created at entry only if used)
     Arguments,
 }
 
@@ -67,11 +71,12 @@ pub(crate) struct Decl<'a> {
     pub name: &'a str,
     pub key: Key,
     pub kind: DeclKind<'a>,
-    /// `let` / `const` / `class`：声明在这个位置之后才初始化（暂时性死区）；其余没有
+    /// `let` / `const` / `class`: initialized only after the declaration at this position (temporal dead zone); none
+    /// for the rest
     pub ready: Option<u32>,
 }
 
-/// 一层作用域声明的名字，同名只留一个（后来的函数声明覆盖前面的）。
+/// The names declared by one scope level, one per name (a later function declaration overrides earlier ones).
 #[derive(Default)]
 pub(crate) struct Decls<'a>(pub Vec<Decl<'a>>);
 
@@ -96,12 +101,12 @@ impl<'a> Decls<'a> {
         Decl { name: id.name.as_str(), key: Self::key(id.span), kind, ready: None }
     }
 
-    /// 带暂时性死区的绑定（`ready` 是声明结束的位置）。
+    /// A binding with a temporal dead zone (`ready` is where the declaration ends).
     fn lexical_ident(id: &'a BindingIdentifier<'a>, kind: DeclKind<'a>, ready: u32) -> Decl<'a> {
         Decl { ready: Some(ready), ..Self::ident(id, kind) }
     }
 
-    /// 模式里的全部绑定名（`ready`：暂时性死区到哪儿结束）。
+    /// All binding names in a pattern (`ready`: where the temporal dead zone ends).
     fn pattern(&mut self, p: &'a BindingPattern<'a>, kind: DeclKind<'a>, ready: Option<u32>) {
         match p {
             BindingPattern::BindingIdentifier(id) => self.add(Decl { ready, ..Self::ident(id, kind) }),
@@ -121,7 +126,7 @@ impl<'a> Decls<'a> {
         }
     }
 
-    /// 变量声明里的绑定（含解构）。
+    /// The bindings in a variable declaration (including destructuring).
     pub(crate) fn declarators(&mut self, d: &'a VariableDeclaration<'a>, kind: DeclKind<'a>) {
         let lexical = matches!(kind, DeclKind::Let | DeclKind::Const);
         for v in &d.declarations {
@@ -129,7 +134,7 @@ impl<'a> Decls<'a> {
         }
     }
 
-    /// `var`：穿过块、不进函数。
+    /// `var`: passes through blocks, does not enter functions.
     pub fn vars(&mut self, stmts: &'a [Statement<'a>]) {
         for s in stmts {
             self.var_in(s);
@@ -178,7 +183,7 @@ impl<'a> Decls<'a> {
         }
     }
 
-    /// 词法声明（`let` / `const` / 函数声明），只看这一层。
+    /// Lexical declarations (`let` / `const` / function declarations), at this level only.
     pub fn lexical(&mut self, stmts: &'a [Statement<'a>]) {
         for s in stmts {
             match s {
@@ -199,8 +204,9 @@ impl<'a> Decls<'a> {
         }
     }
 
-    /// annexB B.3.2：可以在外层再建一个 `var` 的块级普通函数声明（换成 `var F` 不会和沿途的词法声明、
-    /// 形参冲突）。`outer` 是函数顶层的形参与词法名字。
+    /// annexB B.3.2: block-level ordinary function declarations that may also create a `var` in the outer scope
+    /// (replacing them with `var F` would not conflict with lexical declarations along the way or with parameters).
+    /// `outer` holds the parameters and lexical names at the function's top level.
     pub fn annexb(stmts: &'a [Statement<'a>], outer: Vec<&'a str>) -> Vec<&'a Function<'a>> {
         let mut out = Vec::new();
         let mut stack = alloc::vec![outer];
@@ -210,7 +216,8 @@ impl<'a> Decls<'a> {
         out
     }
 
-    /// 非严格函数：annexB 块级函数在函数层再加的 `var`（已经有同名的就不加）。
+    /// Sloppy function: the extra `var`s annexB block-level functions add at the function level (not added if one with
+    /// the same name exists).
     fn annexb_vars(&mut self, stmts: &'a [Statement<'a>], params: Option<&'a FormalParameters<'a>>) {
         for f in Self::annexb_functions(stmts, params) {
             if let (Some(id), Some(key)) = (&f.id, Self::annexb_key(f)) {
@@ -219,7 +226,8 @@ impl<'a> Decls<'a> {
         }
     }
 
-    /// 函数体（或脚本，`params` 为空）里能按 annexB 提升的块级函数（`arguments` 除外）。
+    /// Block-level functions in a function body (or a script, with empty `params`) that can be hoisted per annexB
+    /// (except `arguments`).
     pub fn annexb_functions(stmts: &'a [Statement<'a>], params: Option<&'a FormalParameters<'a>>) -> Vec<&'a Function<'a>> {
         let mut top = Self::default();
         top.lexical(stmts);
@@ -237,7 +245,7 @@ impl<'a> Decls<'a> {
         found
     }
 
-    /// 脚本：annexB 块级函数的名字当全局 `var` 声明。
+    /// Script: names of annexB block-level functions become global `var` declarations.
     pub fn annexb_globals(&mut self, hoisted: &[&'a Function<'a>]) {
         for f in hoisted {
             if let (Some(id), Some(key)) = (&f.id, Self::annexb_key(f)) {
@@ -246,7 +254,7 @@ impl<'a> Decls<'a> {
         }
     }
 
-    /// annexB 的 `var` 绑定的键。
+    /// The key of an annexB `var` binding.
     pub fn annexb_key(f: &Function<'_>) -> Option<Key> {
         f.id.as_ref().map(|id| ANNEXB_KEY | Self::key(id.span))
     }
@@ -286,7 +294,7 @@ impl<'a> Decls<'a> {
             Statement::TryStatement(t) => {
                 Self::annexb_block(&[t.block.body.as_slice()], stack, out);
                 if let Some(h) = &t.handler {
-                    // 简单的 catch 参数可以被 var 重新声明（B.3.4），解构的不行
+                    // A simple catch parameter can be redeclared by var (B.3.4), a destructured one cannot
                     let mut names = Self::default();
                     if let Some(p) = &h.param
                         && !matches!(p.pattern, BindingPattern::BindingIdentifier(_))
@@ -340,19 +348,19 @@ impl<'a> Decls<'a> {
         stack.pop();
     }
 
-    /// `with` 体外面那一层：只有 with 对象的隐藏绑定。
+    /// The level just outside a `with` body: only the hidden binding of the with object.
     pub fn with_scope(name: &'a str, span: Span) -> Self {
         Self(alloc::vec![Decl { name, key: Self::key(span), kind: DeclKind::Let, ready: None }])
     }
 
-    /// 一个块（或 `switch` 的全部分支）。
+    /// A block (or all the cases of a `switch`).
     pub fn block(stmts: impl IntoIterator<Item = &'a [Statement<'a>]>) -> Self {
         let mut d = Self::default();
         stmts.into_iter().for_each(|s| d.lexical(s));
         d
     }
 
-    /// `for (let …; …)` 的头。
+    /// The head of `for (let …; …)`.
     pub fn for_init(init: Option<&'a ForStatementInit<'a>>) -> Self {
         let mut d = Self::default();
         if let Some(ForStatementInit::VariableDeclaration(v)) = init {
@@ -365,7 +373,7 @@ impl<'a> Decls<'a> {
         d
     }
 
-    /// `for (let x of …)` / `for (const k in …)` 的头（每轮一份）。
+    /// The head of `for (let x of …)` / `for (const k in …)` (one per iteration).
     pub fn for_head(left: &'a ForStatementLeft<'a>) -> Self {
         let mut d = Self::default();
         if let ForStatementLeft::VariableDeclaration(v) = left {
@@ -378,7 +386,7 @@ impl<'a> Decls<'a> {
         d
     }
 
-    /// `catch (e)` 的形参那一层。
+    /// The level of the `catch (e)` parameter.
     pub fn catch_param(c: &'a CatchClause<'a>) -> Self {
         let mut d = Self::default();
         if let Some(p) = &c.param {
@@ -387,7 +395,8 @@ impl<'a> Decls<'a> {
         d
     }
 
-    /// 类作用域：类自己的名字（类体里用，声明与表达式都有），加各个私有名、私有方法函数、计算字段键的隐藏绑定。
+    /// Class scope: the class's own name (used in the class body, for both declarations and expressions), plus hidden
+    /// bindings for each private name, private method function, and computed field key.
     pub fn class_scope(c: &'a Class<'a>, alloc: &'a Allocator) -> Self {
         let mut d = Self::default();
         if let Some(id) = &c.id {
@@ -413,7 +422,7 @@ impl<'a> Decls<'a> {
         d
     }
 
-    /// eval 代码顶层的 `let` / `const` / `class`（函数声明仍是全局的）。
+    /// Top-level `let` / `const` / `class` of eval code (function declarations are still global).
     pub fn eval_lexical(stmts: &'a [Statement<'a>]) -> Self {
         let mut d = Self::default();
         d.lexical(stmts);
@@ -421,12 +430,13 @@ impl<'a> Decls<'a> {
         d
     }
 
-    /// eval 代码自己那一层：非严格只有顶层词法声明（`var` 进全局）；严格的连 `var` / 函数声明也在里面。
+    /// The eval code's own level: sloppy has only top-level lexical declarations (`var` goes to the global); strict has
+    /// `var` / function declarations in it too.
     pub fn eval_local(stmts: &'a [Statement<'a>], strict: bool) -> Self {
         if strict { Self::static_block(stmts) } else { Self::eval_lexical(stmts) }
     }
 
-    /// 静态块：自己一层 `var` 作用域，加顶层词法声明。
+    /// Static block: its own `var` scope, plus top-level lexical declarations.
     pub fn static_block(stmts: &'a [Statement<'a>]) -> Self {
         let mut d = Self::default();
         d.vars(stmts);
@@ -434,10 +444,11 @@ impl<'a> Decls<'a> {
         d
     }
 
-    /// 函数体那一层：`this`、自己的名字、形参、`var`、顶层词法声明。
+    /// The function body level: `this`, the own name, parameters, `var`s, top-level lexical declarations.
     pub fn function(this: Option<Key>, self_name: Option<&'a BindingIdentifier<'a>>, params: Option<&'a FormalParameters<'a>>, stmts: &'a [Statement<'a>], sloppy: bool, eval_vars: Option<&'a str>) -> Self {
         let mut d = Self::default();
-        // 放最前：名字解析到函数层还没找到时先查它（同 `with`）
+        // Placed first: when name resolution reaches the function level without a match, this is checked first (same as
+        // `with`)
         if let (Some(name), Some(p)) = (eval_vars, params) {
             d.add(Decl { name, key: EVAL_VARS_KEY | Self::key(p.span), kind: DeclKind::Var, ready: None });
         }
@@ -451,7 +462,7 @@ impl<'a> Decls<'a> {
         for (i, p) in params.into_iter().flat_map(|p| p.items.iter()).enumerate() {
             match &p.pattern {
                 BindingPattern::BindingIdentifier(id) => d.add(Self::ident(id, DeclKind::Param(u16::try_from(i).unwrap_or(u16::MAX)))),
-                // 解构形参：寄存器里放原值，绑定另分配
+                // Destructured parameter: the register holds the original value, the bindings are allocated separately
                 pat => d.pattern(pat, DeclKind::Var, None),
             }
         }
@@ -463,7 +474,7 @@ impl<'a> Decls<'a> {
         if sloppy {
             d.annexb_vars(stmts, params);
         }
-        // 放最后：同名的形参 / 变量 / 函数声明优先
+        // Placed last: a parameter / variable / function declaration with the same name takes precedence
         if let Some(key) = this {
             d.add(Decl { name: ARGUMENTS, key: ARGUMENTS_KEY | (key & POSITION_MASK), kind: DeclKind::Arguments, ready: None });
         }
@@ -471,27 +482,28 @@ impl<'a> Decls<'a> {
     }
 }
 
-/// 类作用域里的隐藏绑定名：私有名 `#x`、私有方法的函数 `#x@method` / `@get` / `@set`、计算字段的键 `%key@位置`。
-/// 这些都不是合法标识符，不会和用户的名字撞。
+/// Hidden binding names in a class scope: private name `#x`, private method functions `#x@method` / `@get` / `@set`,
+/// computed field key `%key@<pos>`. None of these are valid identifiers, so they never clash with user names.
 pub(crate) struct Hidden;
 
 impl Hidden {
-    /// 含直接 eval 的非严格函数放 eval 声明的 `var` 的对象（按 `with` 对象处理）。
+    /// The object where a sloppy function containing a direct eval keeps eval-declared `var`s (treated as a `with`
+    /// object).
     pub fn eval_vars<'a>(alloc: &'a Allocator, params: &FormalParameters<'_>) -> &'a str {
         alloc.alloc_str(&format!("%with@eval@{}", params.span.start))
     }
 
-    /// 是不是放 eval `var` 的对象。
+    /// Whether this is the object holding eval `var`s.
     pub fn is_eval_vars(name: &str) -> bool {
         name.starts_with("%with@eval@")
     }
 
-    /// `with` 语句的对象（作用域里的隐藏绑定）。
+    /// The object of a `with` statement (a hidden binding in the scope).
     pub fn with(alloc: &Allocator, span: Span) -> &str {
         alloc.alloc_str(&format!("%with@{}", span.start))
     }
 
-    /// 是不是 `with` 对象的隐藏名。
+    /// Whether this is the hidden name of a `with` object.
     pub fn is_with(name: &str) -> bool {
         name.starts_with("%with@")
     }
@@ -514,33 +526,34 @@ impl Hidden {
     }
 }
 
-/// 预扫的一层作用域：属于哪个函数、声明了什么。
+/// One pre-scanned scope level: which function it belongs to and what it declares.
 struct Level<'a> {
     func: u32,
     names: Vec<(&'a str, Key)>,
 }
 
-/// 预扫：找出被内层函数引用到的绑定。
+/// Pre-scan: finds the bindings referenced by inner functions.
 pub(crate) struct Resolver<'a> {
     levels: Vec<Level<'a>>,
     funcs: u32,
     func: u32,
     alloc: &'a Allocator,
     pub captured: HashSet<Key>,
-    /// 被引用到的绑定（`new.target` / `arguments` 用到才在入口准备）
+    /// Referenced bindings (`new.target` / `arguments` are prepared at entry only if used)
     pub used: HashSet<Key>,
-    /// 当前代码是不是严格的（决定有没有 annexB 的块级函数提升）
+    /// Whether the current code is strict (decides whether annexB block-level function hoisting applies)
     strict: bool,
-    /// 含直接 eval 的作用域（oxc_semantic 标的，含祖先）
+    /// Scopes containing a direct eval (marked by oxc_semantic, including ancestors)
     eval_scopes: HashSet<oxc_syntax::scope::ScopeId>,
-    /// 含直接 eval 的函数（按形参表的起始位置），交给编译器
+    /// Functions containing a direct eval (by start position of the parameter list), handed to the compiler
     pub eval_fns: HashSet<u32>,
 }
 
 impl<'a> Resolver<'a> {
-    /// 脚本：顶层声明是全局对象的属性，不进作用域；只有 `this`。
-    /// 给出（被捕获的绑定, 被引用到的绑定）。
-    /// `outer` 是直接 eval 处看得见的外层绑定（由内向外，一层一个环境）；有它时 eval 代码不另建 `this`。
+    /// Script: top-level declarations are properties of the global object and do not enter a scope; only `this` does.
+    /// Gives (captured bindings, referenced bindings).
+    /// `outer` is the outer bindings visible at a direct eval (innermost first, one environment per level); when
+    /// present, eval code does not create its own `this`.
     pub fn script(stmts: &'a [Statement<'a>], this: Key, alloc: &'a Allocator, local: Option<&Decls<'a>>, strict: bool, eval_scopes: HashSet<oxc_syntax::scope::ScopeId>, outer: Option<&[Vec<&'a str>]>) -> (HashSet<Key>, HashSet<Key>, HashSet<u32>) {
         let mut r = Self { levels: Vec::new(), funcs: 0, func: 0, alloc, captured: HashSet::new(), used: HashSet::new(), strict, eval_scopes, eval_fns: HashSet::new() };
         let mut n = 0;
@@ -574,7 +587,7 @@ impl<'a> Resolver<'a> {
                 self.used.insert(key);
                 return;
             }
-            // 经过的 `with`：名字可能落在它的对象上，对象也要拿得到
+            // A `with` passed through: the name may resolve to its object, so the object must be reachable too
             if let Some(&(w, key)) = l.names.first()
                 && Hidden::is_with(w)
             {
@@ -586,7 +599,8 @@ impl<'a> Resolver<'a> {
         }
     }
 
-    /// 直接 eval 看得见的绑定都得在环境里：现在栈上的全部记为被捕获。
+    /// Every binding visible to a direct eval must be in an environment: mark everything currently on the stack as
+    /// captured.
     fn capture_all(&mut self) {
         for l in &self.levels {
             for &(_, key) in &l.names {
@@ -625,7 +639,8 @@ impl<'a> Resolver<'a> {
         }
         self.params(&f.params);
         self.statements(&body.statements);
-        // 非严格、简单形参又用到 arguments：形参要放进环境，arguments 的下标映射过去
+        // Sloppy, simple parameters, and arguments is used: the parameters go into the environment and arguments
+        // indices map onto them
         let simple = f.params.rest.is_none() && f.params.items.iter().all(|i| i.initializer.is_none() && matches!(i.pattern, BindingPattern::BindingIdentifier(_)));
         let args_key = ARGUMENTS_KEY | (Decls::this_key(f.span) & POSITION_MASK);
         if !self.strict && simple && self.used.contains(&args_key) {
@@ -669,7 +684,8 @@ impl<'a> Resolver<'a> {
         self.strict = saved;
     }
 
-    /// 类：`extends`、类作用域、方法、计算键、字段初始化与静态块（各自一个合成函数）。类体全是严格代码。
+    /// Class: `extends`, the class scope, methods, computed keys, field initializers and static blocks (each its own
+    /// synthetic function). A class body is entirely strict code.
     fn class(&mut self, c: &'a Class<'a>) {
         let saved = self.strict;
         self.strict = true;
@@ -704,7 +720,7 @@ impl<'a> Resolver<'a> {
             let outer = self.enter_function(&Decls::function(Some(key), None, None, &[], false, None));
             for e in &c.body.body {
                 match e {
-                    // 实例初始化函数里要装私有方法：读私有名与方法函数
+                    // The instance initializer installs private methods: read the private names and method functions
                     ClassElement::MethodDefinition(m) if !statik && !m.r#static => {
                         if let PropertyKey::PrivateIdentifier(id) = &m.key {
                             self.reference(Hidden::private(self.alloc, id));
@@ -747,7 +763,7 @@ impl<'a> Resolver<'a> {
         }
     }
 
-    /// 模式里的默认值与计算键。
+    /// Default values and computed keys in a pattern.
     fn pattern(&mut self, p: &'a BindingPattern<'a>) {
         match p {
             BindingPattern::BindingIdentifier(_) => {}
@@ -777,7 +793,7 @@ impl<'a> Resolver<'a> {
         }
     }
 
-    /// 赋值目标（含解构赋值）里引用到的名字、对象、键、默认值。
+    /// Names, objects, keys and default values referenced in an assignment target (including destructuring assignment).
     fn target(&mut self, t: &'a AssignmentTarget<'a>) {
         match t {
             AssignmentTarget::ArrayAssignmentTarget(a) => {
@@ -880,7 +896,7 @@ impl<'a> Resolver<'a> {
         self.levels.pop();
     }
 
-    /// `if` 的分支：直接是函数声明的当成只有它的块（annexB B.3.3）。
+    /// Branches of `if`: a bare function declaration is treated as a block containing only it (annexB B.3.3).
     fn clause(&mut self, s: &'a Statement<'a>) {
         if matches!(s, Statement::FunctionDeclaration(_)) {
             let one = core::slice::from_ref(s);
@@ -895,7 +911,7 @@ impl<'a> Resolver<'a> {
             Statement::ExpressionStatement(e) => self.expr(&e.expression),
             Statement::VariableDeclaration(d) => self.declaration(d),
             Statement::FunctionDeclaration(f) => {
-                // annexB：块级函数执行到声明处要写外层的 `var`
+                // annexB: when execution reaches the declaration, a block-level function writes the outer `var`
                 if !self.strict
                     && let Some(key) = Decls::annexb_key(f)
                 {
@@ -976,7 +992,7 @@ impl<'a> Resolver<'a> {
         }
     }
 
-    /// `for-in` / `for-of`：右边在外面求，左边与循环体在每轮的那层里。
+    /// `for-in` / `for-of`: the right side is evaluated outside, the left side and the body in the per-iteration level.
     fn for_each(&mut self, left: &'a ForStatementLeft<'a>, right: &'a Expression<'a>, body: &'a Statement<'a>) {
         self.expr(right);
         self.scoped(&Decls::for_head(left), |r| {
@@ -1024,7 +1040,7 @@ impl<'a> Resolver<'a> {
     fn expr(&mut self, e: &'a Expression<'a>) {
         match e {
             Expression::Identifier(id) => self.reference(id.name.as_str()),
-            // `super.x` / `super(...)` 都要读写 `this`
+            // `super.x` / `super(...)` both read and write `this`
             Expression::ThisExpression(_) | Expression::Super(_) => self.reference(THIS),
             Expression::FunctionExpression(f) => self.function(f, true),
             Expression::ArrowFunctionExpression(a) => self.arrow(a),

@@ -6,48 +6,50 @@ use r8gc::{Collect, Gc, Lock, Mutation, RefLock};
 
 use crate::{Agent, Error, FuncId, Key, Value};
 
-/// 堆上的字符串。
+/// A string on the heap.
 pub type JsString<'gc> = Gc<'gc, crate::text::JsStr>;
 
-/// 一个 Symbol：只有描述，身份就是指针。
+/// A Symbol: just a description; its identity is the pointer.
 #[derive(Debug, Collect)]
 #[collect(require_static)]
 pub struct SymbolData {
     pub description: Option<Box<str>>,
 }
 
-/// 堆上的 Symbol。
+/// A Symbol on the heap.
 pub type JsSymbol<'gc> = Gc<'gc, SymbolData>;
 
-/// 一个 BigInt（任意精度整数）。
+/// A BigInt (arbitrary-precision integer).
 #[derive(Debug, Collect)]
 #[collect(require_static)]
 pub struct BigIntData(pub num_bigint::BigInt);
 
-/// 堆上的 BigInt。
+/// A BigInt on the heap.
 pub type JsBigInt<'gc> = Gc<'gc, BigIntData>;
 
-/// 正则对象的本体：源码、flags，以及正则引擎编好的东西（类型擦除，由 r8builtins 解释）。
+/// The body of a RegExp object: source, flags, and what the regex engine compiled (type-erased, interpreted by
+/// r8builtins).
 #[derive(Debug, Collect)]
 #[collect(no_drop)]
 pub struct RegExpData<'gc> {
     pub source: JsString<'gc>,
     pub flags: JsString<'gc>,
     pub compiled: Gc<'gc, r8gc::Static<Box<dyn core::any::Any>>>,
-    /// annexB 的旧特性（`compile`）能用：只有 %RegExp% 自己建的（子类实例不行）
+    /// The Annex B legacy feature (`compile`) is usable: only for objects created by %RegExp% itself (not subclass
+    /// instances)
     pub legacy: bool,
 }
 
-/// 堆上的对象（内部可变，写经 gc-arena 的写屏障）。
+/// An object on the heap (interior mutability; writes go through gc-arena's write barrier).
 pub type JsObject<'gc> = Gc<'gc, RefLock<ObjectData<'gc>>>;
 
-/// 堆上的作用域环境：被内层函数捕获的绑定放在这里，按槽位存。
+/// A scope environment on the heap: bindings captured by inner functions live here, stored by slot.
 pub type JsEnv<'gc> = Gc<'gc, RefLock<Env<'gc>>>;
 
-/// 宿主函数：`this` 与实参进，值或异常出。
+/// A host function: takes `this` and arguments, returns a value or an exception.
 pub type NativeFn = for<'gc, 'x> fn(&mut Agent<'gc, 'x>, Value<'gc>, &[Value<'gc>]) -> Result<Value<'gc>, Error>;
 
-/// 一层作用域环境，`parent` 指向外层。
+/// One scope environment layer; `parent` points to the outer one.
 #[derive(Debug, Collect)]
 #[collect(no_drop)]
 pub struct Env<'gc> {
@@ -61,7 +63,8 @@ impl<'gc> Env<'gc> {
     }
 }
 
-/// 闭包：函数编号、创建时的环境、方法的主对象（`super` 从它的原型找）、类构造器的实例字段初始化函数。
+/// A closure: function index, the environment at creation, the method's home object (`super` looks up from its
+/// prototype), and the class constructor's instance field initializer.
 #[derive(Clone, Copy, Debug, Collect)]
 #[collect(no_drop)]
 pub struct Closure<'gc> {
@@ -77,7 +80,7 @@ impl<'gc> Closure<'gc> {
     }
 }
 
-/// 属性的内容：数据，或一对访问器。
+/// The contents of a property: data, or a pair of accessors.
 #[derive(Clone, Copy, Debug, Collect)]
 #[collect(no_drop)]
 pub enum Slot<'gc> {
@@ -85,7 +88,7 @@ pub enum Slot<'gc> {
     Accessor { get: Option<JsObject<'gc>>, set: Option<JsObject<'gc>> },
 }
 
-/// 一个属性：内容加特性。
+/// A property: contents plus attributes.
 #[derive(Clone, Copy, Debug, Collect)]
 #[collect(no_drop)]
 pub struct Property<'gc> {
@@ -96,12 +99,12 @@ pub struct Property<'gc> {
 }
 
 impl<'gc> Property<'gc> {
-    /// 普通赋值建出来的属性：可枚举、可写、可配置。
+    /// A property created by plain assignment: enumerable, writable, configurable.
     pub fn data(v: Value<'gc>) -> Self {
         Self { slot: Slot::Data(v), enumerable: true, writable: true, configurable: true }
     }
 
-    /// 内建对象与类方法的属性：不可枚举。
+    /// A property of built-in objects and class methods: non-enumerable.
     pub fn hidden(v: Value<'gc>) -> Self {
         Self { enumerable: false, ..Self::data(v) }
     }
@@ -114,36 +117,40 @@ impl<'gc> Property<'gc> {
     }
 }
 
-/// 宿主函数对象的本体。
+/// The body of a host function object.
 #[derive(Clone, Copy, Collect)]
 #[collect(require_static)]
 pub struct Native {
     pub f: NativeFn,
-    /// 能 `new`（内建构造器）；能的时候 [`Agent::new_target`] 告诉它是不是构造调用
+    /// Can be `new`ed (built-in constructor); when it can, [`Agent::new_target`] tells it whether this is a construct
+    /// call
     pub constructor: bool,
-    /// 执行层可以不进宿主、直接展开成对目标的调用（`call` / `apply`）
+    /// The execution layer may skip the host and expand it into a direct call to the target (`call` / `apply`)
     pub forward: Forward,
 }
 
-/// 只是换个方式调别的函数的内建函数。执行层把它展开成普通调用，被调的 JS 留在执行层自己的帧栈上
-/// （不在宿主函数里重入，照样分片、回收）。
+/// A built-in function that merely calls another function in a different way. The execution layer expands it into a
+/// plain call, and the callee's JS stays on the execution layer's own frame stack (not reentered from inside a host
+/// function, so it is still time-sliced and collected).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Forward {
     #[default]
     No,
-    /// `Function.prototype.call`：`this` 是目标，第一个实参是新的 `this`，其余照传
+    /// `Function.prototype.call`: `this` is the target, the first argument is the new `this`, the rest are passed
+    /// through
     Call,
-    /// `Function.prototype.apply`：`this` 是目标，第一个实参是新的 `this`，第二个是类数组实参表
+    /// `Function.prototype.apply`: `this` is the target, the first argument is the new `this`, the second is an
+    /// array-like argument list
     Apply,
 }
 
 impl Native {
-    /// 普通宿主函数（不能 `new`）。
+    /// A plain host function (cannot be `new`ed).
     pub fn function(f: NativeFn) -> Self {
         Self { f, constructor: false, forward: Forward::No }
     }
 
-    /// 内建构造器（能 `new`）。
+    /// A built-in constructor (can be `new`ed).
     pub fn constructor(f: NativeFn) -> Self {
         Self { f, constructor: true, forward: Forward::No }
     }
@@ -155,7 +162,8 @@ impl fmt::Debug for Native {
     }
 }
 
-/// `Function.prototype.bind` 的结果：调用时换成目标，`this` 与前置实参固定。
+/// The result of `Function.prototype.bind`: calls are redirected to the target, with `this` and leading arguments
+/// fixed.
 #[derive(Debug, Collect)]
 #[collect(no_drop)]
 pub struct Bound<'gc> {
@@ -164,7 +172,7 @@ pub struct Bound<'gc> {
     pub args: Vec<Value<'gc>>,
 }
 
-/// 数组迭代器给什么。
+/// What an array iterator yields.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Collect)]
 #[collect(require_static)]
 pub enum IterKind {
@@ -173,17 +181,17 @@ pub enum IterKind {
     Entries,
 }
 
-/// 内建迭代器的状态。
+/// The state of a built-in iterator.
 #[derive(Debug, Collect)]
 #[collect(no_drop)]
 pub enum IteratorState<'gc> {
-    /// 数组（或类数组）按下标走，`target` 为 `None` 就是走完了
+    /// An array (or array-like) walked by index; `target` being `None` means it is done
     Array { target: Option<Value<'gc>>, index: usize, kind: IterKind },
-    /// 字符串按码点走（`pos` 是 UTF-8 字节位置）
+    /// A string walked by code point (`pos` is a UTF-8 byte position)
     String { s: JsString<'gc>, pos: usize },
 }
 
-/// 挂起的一帧：生成器 / async 函数在 `yield` / `await` 处存下的全部执行状态。
+/// A suspended frame: the full execution state a generator / async function saved at `yield` / `await`.
 #[derive(Debug, Collect)]
 #[collect(no_drop)]
 pub struct Suspended<'gc> {
@@ -191,45 +199,45 @@ pub struct Suspended<'gc> {
     pub pc: usize,
     pub regs: Vec<Value<'gc>>,
     pub env: Option<JsEnv<'gc>>,
-    /// 装着的异常处理器：（落点, 装时的环境）
+    /// Installed exception handlers: (landing pad, environment at install time)
     pub handlers: Vec<(u32, Option<JsEnv<'gc>>)>,
     pub args: Vec<Value<'gc>>,
-    /// 恢复时写恢复方式的寄存器（还没开始跑时没有）
+    /// The register that receives the resume kind on resumption (absent before it starts running)
     pub mode: Option<u16>,
 }
 
-/// 协程（生成器 / async 函数）的状态。
+/// The state of a coroutine (generator / async function).
 #[derive(Debug, Collect)]
 #[collect(no_drop)]
 pub enum CoroutineState<'gc> {
-    /// 还没开始或停在 `yield` / `await`
+    /// Not started yet, or stopped at `yield` / `await`
     Suspended(Suspended<'gc>),
-    /// 正在跑（重入 `next` 抛 TypeError）
+    /// Running (reentering `next` throws a TypeError)
     Running,
     Completed,
 }
 
-/// 生成器或 async 函数的协程；async 函数带着它的结果 Promise。
+/// The coroutine of a generator or async function; an async function carries its result Promise.
 #[derive(Debug, Collect)]
 #[collect(no_drop)]
 pub struct Coroutine<'gc> {
     pub state: CoroutineState<'gc>,
-    /// 还没跑过第一步（这时 `return` / `throw` 直接结束）
+    /// Has not run its first step yet (at this point `return` / `throw` finish it directly)
     pub fresh: bool,
     pub promise: Option<JsObject<'gc>>,
-    /// async 生成器：排着的 `next` / `throw` / `return` 请求，队头是正在处理的那个
+    /// Async generator: queued `next` / `throw` / `return` requests; the head is the one being processed
     pub requests: Option<alloc::collections::VecDeque<Request<'gc>>>,
 }
 
 impl<'gc> Coroutine<'gc> {
-    /// 一个还没开始的协程：生成器（`promise` 与 `requests` 都没有）、async 函数（带结果 Promise）、
-    /// async 生成器（带请求队列）。
+    /// A coroutine that has not started: generator (neither `promise` nor `requests`), async function (with a result
+    /// Promise), async generator (with a request queue).
     pub fn new(saved: Suspended<'gc>, promise: Option<JsObject<'gc>>, async_generator: bool) -> Self {
         Self { state: CoroutineState::Suspended(saved), fresh: true, promise, requests: async_generator.then(alloc::collections::VecDeque::new) }
     }
 }
 
-/// async 生成器的一个请求：怎么恢复、送进去的值、给调用者的 Promise。
+/// One request to an async generator: how to resume, the value sent in, and the Promise for the caller.
 #[derive(Clone, Copy, Debug, Collect)]
 #[collect(no_drop)]
 pub struct Request<'gc> {
@@ -238,7 +246,7 @@ pub struct Request<'gc> {
     pub promise: JsObject<'gc>,
 }
 
-/// Promise 的状态。
+/// The state of a Promise.
 #[derive(Clone, Copy, Debug, Collect)]
 #[collect(no_drop)]
 pub enum Settled<'gc> {
@@ -247,17 +255,17 @@ pub enum Settled<'gc> {
     Rejected(Value<'gc>),
 }
 
-/// Promise 落定后要做的事。
+/// What to do once a Promise settles.
 #[derive(Clone, Copy, Debug, Collect)]
 #[collect(no_drop)]
 pub enum Reaction<'gc> {
-    /// `then(onFulfilled, onRejected)`，结果交给能力记录的 resolve / reject（没有就丢掉）
+    /// `then(onFulfilled, onRejected)`; the result goes to the capability record's resolve / reject (dropped if absent)
     Then { on_fulfilled: Value<'gc>, on_rejected: Value<'gc>, capability: Option<Capability<'gc>> },
-    /// `await`：恢复这个协程
+    /// `await`: resume this coroutine
     Await { coroutine: JsObject<'gc> },
 }
 
-/// PromiseCapability：结果 Promise 与它的 resolve / reject 函数。
+/// PromiseCapability: the result Promise and its resolve / reject functions.
 #[derive(Clone, Copy, Debug, Collect)]
 #[collect(no_drop)]
 pub struct Capability<'gc> {
@@ -266,27 +274,28 @@ pub struct Capability<'gc> {
     pub reject: Value<'gc>,
 }
 
-/// 微任务。
+/// A microtask.
 #[derive(Clone, Copy, Debug, Collect)]
 #[collect(no_drop)]
 pub enum Job<'gc> {
-    /// 一个反应：`value` 是落定的值，`rejected` 说是拒绝
+    /// A reaction: `value` is the settled value, `rejected` says whether it was a rejection
     Reaction { reaction: Reaction<'gc>, value: Value<'gc>, rejected: bool },
-    /// 用 thenable 解决 Promise：调 `then.call(thenable, resolve, reject)`
+    /// Resolve a Promise with a thenable: call `then.call(thenable, resolve, reject)`
     Thenable { promise: JsObject<'gc>, thenable: Value<'gc>, then: Value<'gc> },
 }
 
-/// Map / Set 按 SameValueZero 找键用的键：`NaN` 只有一个、`-0` 当 `+0`，字符串与 BigInt 比内容，对象与 Symbol 比身份。
+/// The key Map / Set use to find keys by SameValueZero: only one `NaN`, `-0` treated as `+0`, strings and BigInts
+/// compared by content, objects and Symbols by identity.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum MapKey {
     Undefined,
     Null,
     Bool(bool),
     Number(u64),
-    /// 字符串值本身（短串内联、长串共享，查找时不分配）
+    /// The string value itself (short strings inline, long strings shared; no allocation on lookup)
     String(SmallStr),
     BigInt(Box<str>),
-    /// 对象 / Symbol 的地址（回收会搬对象：搬过之后 `Collection` 重建索引）
+    /// The address of an object / Symbol (collection moves objects: after a move `Collection` rebuilds its index)
     Ref(usize),
 }
 
@@ -306,12 +315,14 @@ impl From<Value<'_>> for MapKey {
     }
 }
 
-/// Map / Set 的存储：按插入顺序的条目（删掉的留空位，迭代中删改也能接着走）加按键找下标的索引。
-/// 索引按对象地址找键，回收搬了键之后重建（手写 `Collect`）。
+/// Map / Set storage: entries in insertion order (deleted ones are left as holes, so iteration can continue across
+/// deletions and modifications) plus an index from key to position. The index finds keys by object address and is
+/// rebuilt after collection moves keys (hand-written `Collect`).
 #[derive(Debug)]
 pub struct Collection<'gc> {
     entries: Vec<Option<(Value<'gc>, Value<'gc>)>>,
-    /// 自上次次回收以来，可能写进了新生代指针的条目从这里开始（追加的天然在它后面）
+    /// Entries that may have had young-generation pointers written into them since the last minor collection start here
+    /// (appended ones naturally come after it)
     young_from: usize,
     index: r8gc::Static<hashbrown::HashMap<MapKey, usize, core::hash::BuildHasherDefault<rustc_hash::FxHasher>>>,
     pub size: usize,
@@ -323,9 +334,10 @@ unsafe impl<'gc> Collect<'gc> for Collection<'gc> {
         t.trace(&self.entries);
     }
 
-    /// 搬了的键（对象 / Symbol，按地址进索引）才在索引里换成新地址。
-    /// 搬前的地址（新生代 / 要搬空的页）与搬后的不重叠，先删后插不会碰到别的键。
-    /// 次回收只看上次以来写过的条目（更早的只指向老年代，不会变）。
+    /// Only moved keys (objects / Symbols, indexed by address) get their new address in the index. Pre-move addresses
+    /// (young generation / pages being evacuated) never overlap post-move ones, so delete-then-insert never hits
+    /// another key. A minor collection only looks at entries written since the last one (older ones only point into the
+    /// old generation and do not change).
     fn relocate(&mut self, r: &mut r8gc::Relocate<'_>) {
         let from = if r.young_only() { self.young_from } else { 0 };
         self.young_from = self.entries.len();
@@ -350,7 +362,7 @@ impl<'gc> Collection<'gc> {
         Self { entries: Vec::new(), young_from: 0, index: r8gc::Static(hashbrown::HashMap::default()), size: 0, weak }
     }
 
-    /// 按插入顺序的条目（删掉的是空位）
+    /// Entries in insertion order (deleted ones are holes)
     pub fn entries(&self) -> &[Option<(Value<'gc>, Value<'gc>)>] {
         &self.entries
     }
@@ -364,14 +376,14 @@ impl<'gc> Collection<'gc> {
         self.index.0.contains_key(&MapKey::from(key))
     }
 
-    /// 设值：已有就改，否则追加到末尾。`-0` 键存成 `+0`。
+    /// Set a value: update it if present, otherwise append at the end. A `-0` key is stored as `+0`.
     pub fn set(&mut self, key: Value<'gc>, value: Value<'gc>) {
-        // `-0 + 0` 是 `+0`
+        // `-0 + 0` is `+0`
         let key = match key {
             Value::Number(x) => Value::Number(x + 0.0),
             k => k,
         };
-        // 只算一次哈希
+        // Hash only once
         match self.index.0.entry(MapKey::from(key)) {
             hashbrown::hash_map::Entry::Occupied(e) => {
                 let i = *e.get();
@@ -397,7 +409,7 @@ impl<'gc> Collection<'gc> {
         }
     }
 
-    /// 清空：条目都留成空位，正在走的迭代器走到末尾就停。
+    /// Clear: every entry becomes a hole; an iterator in progress stops when it reaches the end.
     pub fn clear(&mut self) {
         self.entries.iter_mut().for_each(|e| *e = None);
         self.index.0.clear();
@@ -405,10 +417,10 @@ impl<'gc> Collection<'gc> {
     }
 }
 
-/// 带状态的宿主函数：调用时拿到自己（状态在 `slots` 里）。
+/// A host function with state: receives itself when called (the state is in `slots`).
 pub type ClosureFn = for<'gc, 'x> fn(&mut Agent<'gc, 'x>, JsObject<'gc>, Value<'gc>, &[Value<'gc>]) -> Result<Value<'gc>, Error>;
 
-/// 带状态的宿主函数对象的本体（Promise 的元素函数、Proxy 的撤销函数等）。
+/// The body of a stateful host function object (Promise element functions, Proxy revoke functions, etc.).
 #[derive(Collect)]
 #[collect(no_drop)]
 pub struct NativeClosure<'gc> {
@@ -423,7 +435,8 @@ impl fmt::Debug for NativeClosure<'_> {
     }
 }
 
-/// Proxy：目标与处理器（撤销后都是 `None`）；能不能调用 / 构造在建的时候按目标定下。
+/// Proxy: target and handler (both `None` after revocation); whether it is callable / constructible is fixed at
+/// creation from the target.
 #[derive(Clone, Copy, Debug, Collect)]
 #[collect(no_drop)]
 pub struct ProxyData<'gc> {
@@ -433,7 +446,7 @@ pub struct ProxyData<'gc> {
     pub constructor: bool,
 }
 
-/// Iterator 助手的种类（`map` / `filter` / `take` / `drop` / `flatMap`）。
+/// The kind of an Iterator helper (`map` / `filter` / `take` / `drop` / `flatMap`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Collect)]
 #[collect(require_static)]
 pub enum HelperKind {
@@ -444,7 +457,7 @@ pub enum HelperKind {
     FlatMap,
 }
 
-/// Iterator 助手（生成器式）的状态。
+/// The state of an Iterator helper (generator-style).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Collect)]
 #[collect(require_static)]
 pub enum HelperState {
@@ -454,7 +467,8 @@ pub enum HelperState {
     Done,
 }
 
-/// Iterator 助手：底层迭代器、回调、`take` / `drop` 剩下的个数、计数、`flatMap` 正在走的内层迭代器。
+/// Iterator helper: the underlying iterator, the callback, the count left for `take` / `drop`, a counter, and the inner
+/// iterator `flatMap` is walking.
 #[derive(Clone, Copy, Debug, Collect)]
 #[collect(no_drop)]
 pub struct IteratorHelper<'gc> {
@@ -467,7 +481,7 @@ pub struct IteratorHelper<'gc> {
     pub inner: Option<crate::IterRecord<'gc>>,
 }
 
-/// TypedArray 的元素类型。
+/// The element type of a TypedArray.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Collect)]
 #[collect(require_static)]
 pub enum ElementKind {
@@ -501,7 +515,7 @@ impl ElementKind {
         ElementKind::BigUint64,
     ];
 
-    /// 一个元素几个字节。
+    /// Bytes per element.
     pub fn size(self) -> usize {
         match self {
             ElementKind::Int8 | ElementKind::Uint8 | ElementKind::Uint8Clamped => 1,
@@ -511,7 +525,7 @@ impl ElementKind {
         }
     }
 
-    /// 构造器名。
+    /// Constructor name.
     pub fn name(self) -> &'static str {
         match self {
             ElementKind::Int8 => "Int8Array",
@@ -529,7 +543,7 @@ impl ElementKind {
         }
     }
 
-    /// DataView 方法名里的类型（`getInt8` 的 `Int8`）。
+    /// The type in DataView method names (`Int8` in `getInt8`).
     pub fn view_name(self) -> &'static str {
         match self {
             ElementKind::Int8 => "Int8",
@@ -551,7 +565,8 @@ impl ElementKind {
     }
 }
 
-/// ArrayBuffer / SharedArrayBuffer 的本体：字节（分离后没有）、可调大小的上限、是不是共享的。
+/// The body of an ArrayBuffer / SharedArrayBuffer: bytes (absent once detached), the resizable maximum, and whether it
+/// is shared.
 #[derive(Debug, Collect)]
 #[collect(require_static)]
 pub struct BufferData {
@@ -560,7 +575,7 @@ pub struct BufferData {
     pub shared: bool,
 }
 
-/// TypedArray / DataView 看的那段：所在的缓冲、起点、长度（`None` 是跟着缓冲变长短）。
+/// The range a TypedArray / DataView views: its buffer, offset, and length (`None` tracks the buffer's length).
 #[derive(Clone, Copy, Debug, Collect)]
 #[collect(no_drop)]
 pub struct ViewData<'gc> {
@@ -569,7 +584,8 @@ pub struct ViewData<'gc> {
     pub length: Option<usize>,
 }
 
-/// 映射的 arguments：形参所在的环境与每个下标对应的槽位（删掉 / 改成访问器后就不再映射）。
+/// Mapped arguments: the environment holding the parameters and the slot each index maps to (no longer mapped once
+/// deleted / turned into an accessor).
 #[derive(Clone, Debug, Collect)]
 #[collect(no_drop)]
 pub struct ArgumentsMap<'gc> {
@@ -577,20 +593,21 @@ pub struct ArgumentsMap<'gc> {
     pub slots: Vec<Option<u16>>,
 }
 
-/// 宿主对象里的 Rust 数据（按类型取出，可变借用经 `RefCell`）。
+/// Rust data inside a host object (retrieved by type; mutable borrows via `RefCell`).
 pub type HostData<'gc> = Gc<'gc, r8gc::Static<core::cell::RefCell<Box<dyn core::any::Any>>>>;
 
-/// 对象的种类：普通对象之外带的内部槽。
+/// The kind of an object: internal slots carried beyond those of an ordinary object.
 #[derive(Debug, Default, Collect)]
 #[collect(no_drop)]
 pub enum ObjectKind<'gc> {
     #[default]
     Ordinary,
-    /// arguments 对象（`Object.prototype.toString` 认它）；非严格、简单形参时第 i 个下标映射到形参的环境槽位
+    /// An arguments object (recognized by `Object.prototype.toString`); for sloppy-mode functions with simple
+    /// parameters, index i maps to the parameter's environment slot
     Arguments(Option<ArgumentsMap<'gc>>),
-    /// Error 实例（有 [[ErrorData]]）
+    /// An Error instance (has [[ErrorData]])
     Error,
-    /// 数组元素（下标属性存在这里，`length` 就是它的长度）
+    /// Array elements (index properties live here; `length` is its length)
     Array(Vec<Value<'gc>>),
     Function(Closure<'gc>),
     Native(Native),
@@ -598,44 +615,47 @@ pub enum ObjectKind<'gc> {
     Iterator(IteratorState<'gc>),
     Coroutine(Box<Coroutine<'gc>>),
     Promise { state: Settled<'gc>, reactions: Vec<Reaction<'gc>> },
-    /// Promise 的 resolve / reject 函数：共享一个「已经解决过」的标记
+    /// Promise resolve / reject functions: share one "already resolved" flag
     Resolver { promise: JsObject<'gc>, reject: bool, done: Gc<'gc, Lock<bool>> },
     RegExp(RegExpData<'gc>),
-    /// 原始值包装对象（`new Boolean(…)` / `new Number(…)` / `new String(…)` / `Object(sym)` …）：存着被包的原始值
+    /// Primitive wrapper object (`new Boolean(…)` / `new Number(…)` / `new String(…)` / `Object(sym)` …): holds the
+    /// wrapped primitive
     Primitive(Value<'gc>),
-    /// Map（`weak` 为真是 WeakMap）
+    /// Map (a WeakMap when `weak` is true)
     Map(Box<Collection<'gc>>),
-    /// Set（值放在键与值两处；`weak` 为真是 WeakSet）
+    /// Set (values stored as both key and value; a WeakSet when `weak` is true)
     Set(Box<Collection<'gc>>),
-    /// Map / Set 的迭代器：活视图，按条目下标走（`target` 为 `None` 就是走完了）
+    /// Map / Set iterator: a live view walking by entry index (`target` being `None` means it is done)
     CollectionIterator { target: Option<JsObject<'gc>>, index: usize, kind: IterKind, set: bool },
     NativeClosure(NativeClosure<'gc>),
     Proxy(ProxyData<'gc>),
     IteratorHelper(Box<IteratorHelper<'gc>>),
-    /// `Iterator.from` 包出来的迭代器
+    /// An iterator wrapped by `Iterator.from`
     WrappedIterator(crate::IterRecord<'gc>),
     ArrayBuffer(Box<BufferData>),
-    /// Date：时间值（毫秒，无效是 NaN）
+    /// Date: the time value (milliseconds; NaN when invalid)
     Date(f64),
-    /// 宿主对象：绑定层（r8binding）放进来的 Rust 数据（不含 GC 指针，按类型取出）
+    /// Host object: Rust data put here by the binding layer (r8binding) (no GC pointers; retrieved by type)
     Host(HostData<'gc>),
-    /// 模块命名空间对象：导出名（排好序）与解析到的绑定
+    /// Module namespace object: export names (sorted) and the bindings they resolve to
     ModuleNamespace(Vec<(JsString<'gc>, crate::ResolvedBinding<'gc>)>),
-    /// WeakRef（目前强引用目标）
+    /// WeakRef (currently holds its target strongly)
     WeakRef(Value<'gc>),
-    /// FinalizationRegistry：清理回调与登记的（目标, 携带值, 注销令牌）（目前强引用，不会触发清理）
+    /// FinalizationRegistry: the cleanup callback and registrations of (target, held value, unregister token)
+    /// (currently strong; cleanup never fires)
     FinalizationRegistry { cleanup: Value<'gc>, cells: Vec<(Value<'gc>, Value<'gc>, Value<'gc>)> },
-    /// `matchAll` 的迭代器：匹配器、字符串、带不带 `g`、按码点走、走完没有
+    /// The `matchAll` iterator: matcher, string, whether it has `g`, whether it walks by code point, whether it is done
     RegExpStringIterator { matcher: JsObject<'gc>, string: JsString<'gc>, global: bool, unicode: bool, done: bool },
-    /// TypedArray：`length` 是元素个数
+    /// TypedArray: `length` is the element count
     TypedArray(ElementKind, ViewData<'gc>),
-    /// DataView：`length` 是字节数
+    /// DataView: `length` is the byte count
     DataView(ViewData<'gc>),
 }
 
 impl ObjectKind<'_> {
-    /// 自有属性就是属性表里的那些：[[GetOwnProperty]] / [[GetPrototypeOf]] 都是普通的
-    /// （不是 Proxy / 数组 / 类型化数组 / 模块命名空间 / 字符串包装 / arguments），查属性可以走快路。
+    /// Own properties are exactly those in the property table: [[GetOwnProperty]] / [[GetPrototypeOf]] are both
+    /// ordinary (not a Proxy / array / typed array / module namespace / string wrapper / arguments), so property lookup
+    /// can take the fast path.
     pub fn has_ordinary_properties(&self) -> bool {
         !matches!(
             self,
@@ -651,10 +671,11 @@ impl ObjectKind<'_> {
 
 pub use crate::text::{JsStr, SmallStr, Units};
 
-/// 多数对象没有的一串东西（Symbol 键属性、私有成员）：空着只占一个指针。
+/// A set of things most objects don't have (Symbol-keyed properties, private members): takes a single pointer when
+/// empty.
 #[derive(Collect)]
 #[collect(no_drop)]
-#[expect(clippy::box_collection, reason = "装箱就是为了空着时只占一个指针（Vec 本身要三个字）")]
+#[expect(clippy::box_collection, reason = "boxed so an empty one is a single pointer (a Vec itself is three words)")]
 pub struct Few<T>(Option<Box<Vec<T>>>);
 
 impl<T> Default for Few<T> {
@@ -707,33 +728,37 @@ impl<T> From<Vec<T>> for Few<T> {
     }
 }
 
-/// 对象：种类、按插入顺序的属性表、原型。
+/// An object: kind, property table in insertion order, prototype.
 #[derive(Default, Collect)]
 #[collect(no_drop)]
 pub struct ObjectData<'gc> {
     pub kind: ObjectKind<'gc>,
-    /// 字符串键的属性：形状（隐藏类）加槽，按插入顺序
+    /// String-keyed properties: shape (hidden class) plus slots, in insertion order
     pub props: crate::Props<'gc>,
-    /// 以这个对象为原型的对象从哪个空形状起步（同原型、同样加属性的对象因此共享形状）。没有 `Gc`，改它不用写屏障
+    /// The empty shape that objects with this object as prototype start from (so objects with the same prototype that
+    /// add properties the same way share shapes). Not a `Gc`, so changing it needs no write barrier
     #[collect(require_static)]
     pub shape_root: core::cell::RefCell<Option<alloc::rc::Rc<crate::Shape>>>,
-    /// Symbol 键的属性
+    /// Symbol-keyed properties
     pub symbols: Few<(JsSymbol<'gc>, Property<'gc>)>,
-    /// 私有成员（`#x`）：键是类求值时生成的私有名，和普通属性分开，反射看不见
+    /// Private members (`#x`): keys are private names generated when the class is evaluated; kept apart from ordinary
+    /// properties and invisible to reflection
     pub privates: Few<(JsSymbol<'gc>, Property<'gc>)>,
     pub proto: Option<JsObject<'gc>>,
-    /// 数组：稀疏部分撑起来的长度。稠密部分（`ObjectKind::Array` 里，全是可写可枚举可配置的数据属性、没有空洞）
-    /// 之外的下标按普通属性存，实际长度取它与稠密部分长度的大者
+    /// Array: the length extended by the sparse part. Indices outside the dense part (in `ObjectKind::Array`: all
+    /// writable, enumerable, configurable data properties with no holes) are stored as ordinary properties; the actual
+    /// length is the larger of this and the dense part's length
     pub sparse_length: u32,
-    /// 不可扩展（`Object.preventExtensions` / `seal` / `freeze`）
+    /// Not extensible (`Object.preventExtensions` / `seal` / `freeze`)
     pub non_extensible: bool,
-    /// 数组的 `length` 不可写
+    /// The array's `length` is not writable
     pub length_readonly: bool,
-    /// 属性表里有过数字开头的键（只置不清；数组方法的快路靠它一眼确认原型上没有下标属性）
+    /// The property table has had a key starting with a digit (set only, never cleared; array method fast paths rely on
+    /// it to confirm at a glance that the prototype has no index properties)
     pub digit_keys: bool,
 }
 
-/// 只打种类与键：对象图有环（`F.prototype.constructor`），不能往下展开。
+/// Prints only kind and keys: the object graph has cycles (`F.prototype.constructor`), so it cannot be expanded.
 impl fmt::Debug for ObjectData<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let kind = match self.kind {
@@ -765,7 +790,7 @@ impl fmt::Debug for ObjectData<'_> {
 }
 
 impl<'gc> ObjectData<'gc> {
-    /// 数组长度；不是数组给 `None`。
+    /// Array length; `None` if not an array.
     pub fn array_length(&self) -> Option<u32> {
         match &self.kind {
             ObjectKind::Array(items) => Some(u32::try_from(items.len()).unwrap_or(u32::MAX).max(self.sparse_length)),
@@ -773,7 +798,8 @@ impl<'gc> ObjectData<'gc> {
         }
     }
 
-    /// 快路：改稠密部分里已有的第 `i` 个元素，改了给 `true`（别的情况走完整的属性写）。
+    /// Fast path: update the existing `i`-th element of the dense part; returns `true` if updated (other cases take the
+    /// full property write).
     pub fn write_index(&mut self, i: u32, value: Value<'gc>) -> bool {
         match &mut self.kind {
             ObjectKind::Array(items) if (i as usize) < items.len() => {
@@ -784,7 +810,8 @@ impl<'gc> ObjectData<'gc> {
         }
     }
 
-    /// 稠密部分从第 `from` 个起搬成按下标存的普通属性（要给这些元素不同的特性、或删掉其中一个时）。
+    /// Move the dense part from element `from` onward into ordinary index-keyed properties (when those elements need
+    /// different attributes, or one of them is deleted).
     pub fn spill(&mut self, from: usize) {
         let ObjectKind::Array(items) = &mut self.kind else { return };
         if from >= items.len() {
@@ -798,7 +825,8 @@ impl<'gc> ObjectData<'gc> {
         self.sparse_length = self.sparse_length.max(len);
     }
 
-    /// 数组稀疏部分的元素（稠密部分之后、按普通属性存的下标），按下标排好。
+    /// Elements of the array's sparse part (indices after the dense part, stored as ordinary properties), sorted by
+    /// index.
     pub fn sparse_elements(&self) -> Vec<(u32, Value<'gc>)> {
         let ObjectKind::Array(items) = &self.kind else { return Vec::new() };
         if self.sparse_length as usize <= items.len() {
@@ -816,7 +844,8 @@ impl<'gc> ObjectData<'gc> {
         out
     }
 
-    /// 数组设长度：截掉 `n` 及以后的元素（含按下标存的）；变长只记长度（新的位置是空洞）。
+    /// Set an array's length: truncate elements at `n` and beyond (including index-keyed ones); growing only records
+    /// the length (new positions are holes).
     pub fn set_array_length(&mut self, n: u32) {
         let ObjectKind::Array(items) = &mut self.kind else { return };
         let len = n as usize;
@@ -830,11 +859,13 @@ impl<'gc> ObjectData<'gc> {
         self.sparse_length = if len > dense { n } else { 0 };
     }
 
-    /// 自有属性（只看存着的：数组稠密部分、普通属性、Symbol 键；数组 `length` 与字符串下标由 Agent 补）。
+    /// Own property (only what is stored: the array dense part, ordinary properties, Symbol keys; array `length` and
+    /// string indices are supplied by Agent).
     pub fn own_slot(&self, key: Key<'_, 'gc>) -> Option<Property<'gc>> {
         match key {
             Key::Str(k) => {
-                // 先看是不是数组再解析下标：普通对象查属性不用解析
+                // Check for an array before parsing the index: ordinary objects don't need to parse to look up a
+                // property
                 if let ObjectKind::Array(items) = &self.kind
                     && let Some(i) = crate::ops::index_of_str(k)
                     && let Some(&v) = items.get(i as usize)
@@ -847,9 +878,11 @@ impl<'gc> ObjectData<'gc> {
         }
     }
 
-    /// 存一个自有属性（已经验过能存）：数组的下标能进稠密部分就进，不能就按普通属性存并撑长度。
-    /// 普通对象写属性的快路（OrdinarySet 在接收者自己身上的那一步）：自有可写数据属性就改值，
-    /// 没有且可扩展就新建普通数据属性。给出 `Some(成没成)`；要走慢路（有访问器 / 不是普通对象）给 `None`。
+    /// Store an own property (already validated as storable): an array index goes into the dense part if it can,
+    /// otherwise it is stored as an ordinary property and extends the length. Fast path for ordinary-object property
+    /// writes (the OrdinarySet step on the receiver itself): an own writable data property gets its value updated; if
+    /// absent and extensible, a new ordinary data property is created. Returns `Some(succeeded)`; returns `None` when
+    /// the slow path is needed (accessor / not an ordinary object).
     pub fn ordinary_put(&mut self, key: Key<'_, 'gc>, value: Value<'gc>) -> Option<bool> {
         if !self.kind.has_ordinary_properties() {
             return None;
@@ -901,7 +934,7 @@ impl<'gc> ObjectData<'gc> {
         }
     }
 
-    /// 删一个自有属性（不查可配置）。
+    /// Delete an own property (configurability not checked).
     pub fn unstore(&mut self, key: Key<'_, 'gc>) {
         match key {
             Key::Sym(s) => self.symbols.retain(|(k, _)| !Gc::ptr_eq(*k, s)),
@@ -918,13 +951,15 @@ impl<'gc> ObjectData<'gc> {
         }
     }
 
-    /// 属性在表里的下标。
-    /// 属性表第 `at` 项正好是 `key` 的话给出它（执行层缓存了下标，用之前核对）。
+    /// The index of a property in the table.
+    /// Returns it if entry `at` of the property table is exactly `key` (the execution layer caches the index and checks
+    /// it before use).
     pub fn prop_at(&self, at: usize, key: &str) -> Option<Property<'gc>> {
         (at < self.props.len() && **self.props.key(at) == *key).then(|| self.props.get(at))
     }
 
-    /// 改属性表第 `at` 项的值（调用方已用 [`prop_at`](Self::prop_at) 核对过是可写数据属性）。
+    /// Update the value of entry `at` of the property table (the caller has already checked with
+    /// [`prop_at`](Self::prop_at) that it is a writable data property).
     pub fn set_at(&mut self, at: usize, value: Value<'gc>) {
         if at < self.props.len() {
             *self.props.slot_mut(at) = Slot::Data(value);
@@ -935,35 +970,37 @@ impl<'gc> ObjectData<'gc> {
         self.props.position(key)
     }
 
-    /// 追加一项（形状沿转移表走）。
+    /// Append an entry (the shape follows the transition table).
     fn push_prop(&mut self, key: &str, prop: Property<'gc>) {
         self.digit_keys |= key.as_bytes().first().is_some_and(u8::is_ascii_digit);
         let proto = self.proto;
         self.props.push(key, prop, || proto.and_then(|p| p.try_borrow().ok().map(|d| d.root_shape())));
     }
 
-    /// 以这个对象为原型的对象起步的空形状（没有就建）
+    /// The empty shape that objects with this object as prototype start from (created if absent)
     pub fn root_shape(&self) -> alloc::rc::Rc<crate::Shape> {
         self.shape_root.borrow_mut().get_or_insert_with(crate::Props::empty).clone()
     }
 
-    /// 追加一项，形状直接换成 `to`（执行层的内联缓存给的：从当前形状加一个键就是它，新键是它的最后一个）。
+    /// Append an entry, switching the shape directly to `to` (given by the execution layer's inline cache: adding one
+    /// key to the current shape yields it, and the new key is its last one).
     pub fn push_to(&mut self, to: alloc::rc::Rc<crate::Shape>, slot: Slot<'gc>) {
         self.digit_keys |= to.key(to.len() - 1).as_bytes().first().is_some_and(u8::is_ascii_digit);
         self.props.push_to(to, slot);
     }
 
-    /// 自有属性。
+    /// Own property.
     pub fn get_own(&self, key: &str) -> Option<Property<'gc>> {
         self.position(key).map(|i| self.props.get(i))
     }
 
-    /// 自有数据属性的值（访问器给 `None`）。
+    /// The value of an own data property (`None` for accessors).
     pub fn own(&self, key: &str) -> Option<Value<'gc>> {
         self.get_own(key).and_then(|p| p.value())
     }
 
-    /// 赋值：已有数据属性就改值（不可写就不动），没有就建一个普通属性。访问器由调用方先处理。
+    /// Assignment: update the value of an existing data property (no-op if not writable), otherwise create an ordinary
+    /// property. Accessors are handled by the caller first.
     pub fn set(&mut self, key: &str, value: Value<'gc>) {
         match self.position(key) {
             Some(i) => {
@@ -975,7 +1012,7 @@ impl<'gc> ObjectData<'gc> {
         }
     }
 
-    /// 定义：整个替换（或新建）这个属性。
+    /// Define: replace (or create) this property as a whole.
     pub fn define(&mut self, key: &str, prop: Property<'gc>) {
         match self.position(key) {
             Some(i) => self.props.replace(i, prop),
@@ -1005,7 +1042,8 @@ impl<'gc> ObjectData<'gc> {
         }
     }
 
-    /// 删自有属性：不可配置的删不掉，返回删没删成（不存在也算成）。
+    /// Delete an own property: non-configurable ones can't be deleted; returns whether it was deleted (nonexistent
+    /// counts as deleted).
     pub fn remove(&mut self, key: &str) -> bool {
         match self.position(key) {
             Some(i) if self.props.attrs(i).configurable() => {

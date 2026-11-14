@@ -1,15 +1,20 @@
-//! r8framework：核心框架层，定义 trait 与通用结构体 / 枚举，具体实现在各层 crate（如 r8platform 实现 [`Platform`]）。
+//! r8framework: the core framework layer. It defines traits and common structs / enums; concrete implementations live
+//! in the per-layer crates (e.g. r8platform implements [`Platform`]).
 //!
-//! 堆用 [gc-arena](https://docs.rs/gc-arena)：所有 JS 值带品牌生命周期 `'gc`，只能活在一次 [`Isolate::enter`] 里。
+//! The heap uses [gc-arena](https://docs.rs/gc-arena): every JS value carries the branded lifetime `'gc` and can only
+//! live within one [`Isolate::enter`].
 //!
-//! - [`Platform`]：线程与时钟（r8platform 提供标准库实现）
-//! - [`Isolate`]：一个独立的 JS 世界，持有 GC 堆与剖析器
-//! - [`Scope`]：一次进入 isolate 的作用域；其中的 [`Value`] 就是 V8 的 Local，离开作用域即不可见
-//! - [`Global`]：持久句柄，跨多次 `enter` 存活，drop 即放掉
-//! - [`Context`] / [`Realm`]：执行环境，带全局对象与各内建原型（[`Intrinsics`] 由 r8builtins 实现）
-//! - [`Agent`]：一次运行的上下文，JS 运算语义挂在它上面；要调回 JS 时经 [`Invoke`]（执行引擎实现）
-//! - [`Profiler`]：调用 / 回边计数
-//! - [`Engine`]：执行引擎（r8executor）实现的统一入口
+//! - [`Platform`]: threads and clocks (r8platform provides a standard library implementation)
+//! - [`Isolate`]: an independent JS world, holding the GC heap and the profiler
+//! - [`Scope`]: the scope of one entry into an isolate; a [`Value`] in it is V8's Local and becomes invisible once the
+//!   scope is left
+//! - [`Global`]: a persistent handle, surviving across multiple `enter` calls and released on drop
+//! - [`Context`] / [`Realm`]: the execution context, with the global object and the built-in prototypes ([`Intrinsics`]
+//!   is implemented by r8builtins)
+//! - [`Agent`]: the context of one run; JS operation semantics hang off it, and calls back into JS go through
+//!   [`Invoke`] (implemented by the execution engine)
+//! - [`Profiler`]: call / back-edge counters
+//! - [`Engine`]: the unified entry point implemented by the execution engine (r8executor)
 #![no_std]
 extern crate alloc;
 

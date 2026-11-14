@@ -1,5 +1,6 @@
-//! ES 模块的加载、链接、求值（同步：依赖经 `Platform::load_module` 读进来；还不支持顶层 await）。
-#![cfg_attr(not(feature = "compile"), allow(unused_imports, reason = "加载 / 链接 / 求值都要编译器，没有时只剩导入绑定的读"))]
+//! Loading, linking and evaluation of ES modules (synchronous: dependencies are read in via `Platform::load_module`;
+//! top-level await is not supported yet).
+#![cfg_attr(not(feature = "compile"), allow(unused_imports, reason = "loading / linking / evaluation all need the compiler; without it only reads of import bindings remain"))]
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -9,7 +10,8 @@ use r8framework::{Agent, Closure, Error, ErrorKind, ImportName, ModuleStatus, Ob
 use crate::{Executor, Outcome, State};
 
 impl Executor {
-    /// 加载 `path` 的模块与它的依赖（已加载过直接给编号）。编译 / 找不到依赖给 `Error::Syntax`。
+    /// Loads the module at `path` and its dependencies (an already-loaded module just returns its id). A compile error
+    /// or a missing dependency gives `Error::Syntax`.
     #[cfg(feature = "compile")]
     pub(crate) fn load_module(&self, a: &mut Agent<'_, '_>, path: &str, text: &str) -> Result<u32, Error> {
         if let Some(i) = a.realm.modules.borrow().iter().position(|m| **m.path == *path) {
@@ -38,7 +40,7 @@ impl Executor {
         Ok(index)
     }
 
-    /// 链接：解析各模块的导入与转导出（找不到 / 有歧义给 `Error::Syntax`）。
+    /// Linking: resolves each module's imports and re-exports (unresolvable / ambiguous gives `Error::Syntax`).
     #[cfg(feature = "compile")]
     pub(crate) fn link(a: &mut Agent<'_, '_>, m: u32, seen: &mut Vec<u32>) -> Result<(), Error> {
         if seen.contains(&m) {
@@ -78,7 +80,8 @@ impl Executor {
         Ok(())
     }
 
-    /// 求值：依赖先求值（成环的跳过），每个模块只跑一次；出过错的再求值照样抛那个错。
+    /// Evaluation: dependencies are evaluated first (cycles skipped), each module runs only once; re-evaluating a
+    /// module that threw throws the same error again.
     #[cfg(feature = "compile")]
     pub(crate) fn evaluate(&self, a: &mut Agent<'_, '_>, m: u32, depth: usize) -> Result<(), Error> {
         let (status, error, requested, main, env) = {
@@ -116,19 +119,19 @@ impl Executor {
         r
     }
 
-    /// 函数所在的模块（脚本里的函数给 `None`）。
+    /// The module a function belongs to (`None` for functions in scripts).
     pub(crate) fn module_index(&self, base: u32) -> Option<u32> {
         self.module_of.borrow().get(&base).copied()
     }
 
-    /// `LdaImport`：本模块第 `index` 个导入绑定的值。
+    /// `LdaImport`: the value of this module's `index`-th import binding.
     pub(crate) fn import_value<'gc>(&self, a: &mut Agent<'gc, '_>, base: u32, index: u16) -> Result<Value<'gc>, Error> {
         let Some(m) = self.module_index(base) else { return Err(a.throw(ErrorKind::Reference, "import binding outside a module")) };
         let b = a.realm.modules.borrow()[m as usize].imports[usize::from(index)];
         a.binding_value(b, "import")
     }
 
-    /// `import.meta`：每个模块一个（没有原型）。
+    /// `import.meta`: one per module (no prototype).
     pub(crate) fn import_meta<'gc>(&self, a: &mut Agent<'gc, '_>, base: u32) -> Result<Value<'gc>, Error> {
         let Some(m) = self.module_index(base) else { return Err(a.throw(ErrorKind::Syntax, "Cannot use 'import.meta' outside a module")) };
         if let Some(meta) = a.realm.modules.borrow()[m as usize].meta {
@@ -141,7 +144,7 @@ impl Executor {
         Ok(meta.into())
     }
 
-    /// 加载、链接、求值一个模块，给出它的编号。
+    /// Loads, links and evaluates a module, returning its id.
     #[cfg(feature = "compile")]
     pub(crate) fn run_module(&self, a: &mut Agent<'_, '_>, path: &str, text: &str, depth: usize) -> Result<u32, Error> {
         let m = self.load_module(a, path, text)?;
@@ -150,7 +153,8 @@ impl Executor {
         Ok(m)
     }
 
-    /// `import(specifier)`：给出 Promise；加载 / 链接 / 求值都在这里同步做完，结果兑现成命名空间对象。
+    /// `import(specifier)`: returns a Promise; loading / linking / evaluation all happen synchronously here, and the
+    /// Promise is fulfilled with the namespace object.
     pub(crate) fn dynamic_import<'gc>(&self, a: &mut Agent<'gc, '_>, referrer: &str, specifier: Value<'gc>, depth: usize) -> Result<Value<'gc>, Error> {
         let promise = a.new_promise();
         let r = (|| -> Result<Value<'gc>, Error> {

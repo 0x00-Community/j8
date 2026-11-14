@@ -2,7 +2,8 @@ use r8framework::{Agent, Error, ErrorKind, JsObject, ObjectKind, Value};
 
 use crate::{Args, Installer};
 
-/// `WeakRef` 与 `FinalizationRegistry`（还没有弱引用：目标一直活着，清理回调不会被调）。
+/// `WeakRef` and `FinalizationRegistry` (no weak references yet: targets stay alive forever and cleanup callbacks are
+/// never called).
 struct Weaks;
 
 impl Weaks {

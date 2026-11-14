@@ -1,12 +1,16 @@
-//! r8gc：分代、可移动（压缩）、并行的 Rust GC，`'gc` 品牌生命周期。
+//! r8gc: a generational, moving (compacting), parallel GC for Rust with a `'gc` brand lifetime.
 //!
-//! - 新生代按块碰撞分配；次回收从根与记忆集出发把活对象并行复制进老年代（写屏障维护记忆集）
-//! - 老年代按尺寸档分页；主回收增量标记（纪元翻转、后向写屏障），标记 / 清扫 / 压缩都在线程池上并行
-//! - 线程池是借来的 [`Pool`]：moremath 的 `ThreadMulti`（`ThreadSingle`）直接能用，几个 [`R8Heap`] 可共用一个
-//! - 回收只在 [`R8Heap::mutate`] 之外发生，那时所有 `Gc` 都在根下面，所以对象能搬：
-//!   [`Collect`] 除了 `trace` 还有 `relocate`，把字段改成搬后的地址
+//! - The young generation uses per-block bump allocation; a minor collection starts from the roots and the
+//!   remembered set and copies live objects into the old generation in parallel (the write barrier maintains the
+//!   remembered set)
+//! - The old generation is paged by size class; a major collection marks incrementally (epoch flip, backward write
+//!   barrier), and marking / sweeping / compaction all run in parallel on the thread pool
+//! - The thread pool is a borrowed [`Pool`]: moremath's `ThreadMulti` (`ThreadSingle`) works directly, and several
+//!   [`R8Heap`]s can share one
+//! - Collection happens only outside [`R8Heap::mutate`], when every `Gc` is reachable from the roots, so objects
+//!   can move: besides `trace`, [`Collect`] has `relocate`, which updates fields to the moved addresses
 //!
-//! API 沿用 gc-arena 的形状（`Gc` / `Lock` / `RefLock` / `Rootable!` / `DynamicRootSet`）。
+//! The API follows the shape of gc-arena (`Gc` / `Lock` / `RefLock` / `Rootable!` / `DynamicRootSet`).
 #![no_std]
 extern crate alloc;
 #[cfg(feature = "std")]

@@ -1,4 +1,4 @@
-// JSON 序列化与解析
+// JSON serialization and parsing
 const data = [];
 for (let i = 0; i < 2000; i++) data.push({ id: i, name: 'item' + i, tags: ['a', 'b', 'c'], nested: { v: i / 3 } });
 let total = 0;

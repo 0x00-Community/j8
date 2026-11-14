@@ -1,19 +1,20 @@
 use r8compiler::Helper;
 use r8framework::BinaryOp;
 
-/// 机器码调的运行时函数（`extern "C"`，地址填进机器码）。
+/// Runtime functions called from machine code (`extern "C"`, addresses patched into the machine code).
 pub(crate) struct Helpers;
 
-/// 两个数做二元运算 `OP`（[`BinaryOp`] 的下标），与解释器同一份实现
+/// Binary operation `OP` (an index into [`BinaryOp`]) on two numbers; same implementation as the interpreter
 extern "C" fn number<const OP: usize>(a: f64, b: f64) -> f64 {
     Helpers::OPS[OP].numbers(a, b)
 }
 
 impl Helpers {
-    /// 运行时函数按下标找运算
+    /// The operation of each runtime function, by index
     const OPS: [BinaryOp; 8] = [BinaryOp::Rem, BinaryOp::Exp, BinaryOp::BitAnd, BinaryOp::BitOr, BinaryOp::BitXor, BinaryOp::Shl, BinaryOp::Shr, BinaryOp::UShr];
 
-    /// 运行时函数 `h` 的地址（四则运算机器码里直接算，没有运行时函数）。
+    /// Address of runtime function `h` (the four arithmetic ops are computed directly in machine code and have no
+    /// runtime function).
     pub(crate) fn address(h: Helper) -> Option<usize> {
         let Helper::Number(op) = h;
         let f: extern "C" fn(f64, f64) -> f64 = match op {

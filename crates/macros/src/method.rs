@@ -1,9 +1,10 @@
-//! 三个绑定宏共用：读 `#[js(…)]`、分析签名、生成转换外壳（`fn(agent, this, args) -> Result<Value>`）。
+//! Shared by the three binding macros: reads `#[js(…)]`, analyzes signatures, generates the conversion wrapper
+//! (`fn(agent, this, args) -> Result<Value>`).
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use syn::{FnArg, Ident, ImplItemFn, LitStr, ReturnType, Type};
 
-/// 方法在 JS 里是什么。
+/// What the method is in JS.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Role {
     Constructor,
@@ -14,7 +15,7 @@ pub(crate) enum Role {
     Skip,
 }
 
-/// 接收者。
+/// The receiver.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Receiver {
     None,
@@ -22,21 +23,21 @@ pub(crate) enum Receiver {
     Mutable,
 }
 
-/// 一个形参从哪来。
+/// Where a parameter comes from.
 enum Param {
     /// `&mut Agent`
     Agent,
-    /// `This`：原样的 `this`
+    /// `This`: the raw `this`
     This,
-    /// `Rest`：第 `usize` 个起的全部实参
+    /// `Rest`: all arguments starting at index `usize`
     Rest(usize),
-    /// 第 `usize` 个实参，按 `FromJs` 转
+    /// Argument at index `usize`, converted with `FromJs`
     Arg(usize, Box<Type>),
-    /// 第 `usize` 个实参：ToString 后借出 `&str`
+    /// Argument at index `usize`: borrowed as `&str` after ToString
     Str(usize),
 }
 
-/// 解析好的一个方法。
+/// A parsed method.
 pub(crate) struct Method {
     pub(crate) rust: Ident,
     pub(crate) js: String,
@@ -47,11 +48,11 @@ pub(crate) struct Method {
     returns_result: bool,
 }
 
-/// 名字工具。
+/// Name utilities.
 pub(crate) struct Names;
 
 impl Names {
-    /// 类型路径的最后一段名字。
+    /// The name of the last segment of a type path.
     pub(crate) fn last_segment(ty: &Type) -> Option<String> {
     match ty {
         Type::Path(p) => p.path.segments.last().map(|s| s.ident.to_string()),
@@ -60,7 +61,7 @@ impl Names {
     }
     }
 
-    /// `snake_case` ⇒ `camelCase`。
+    /// `snake_case` ⇒ `camelCase`.
     pub(crate) fn camel(name: &str) -> String {
     let mut out = String::new();
     let mut up = false;
@@ -79,13 +80,13 @@ impl Names {
 }
 
 impl Method {
-    /// 读 `#[js(…)]`（读完从方法上去掉），分析签名。
-    /// 读方法（`impl` 块里的）。
+    /// Reads `#[js(…)]` (removing it from the method afterwards) and analyzes the signature.
+    /// Reads a method (inside an `impl` block).
     pub(crate) fn parse(f: &mut ImplItemFn) -> syn::Result<Self> {
         Self::parse_parts(&mut f.attrs, &f.sig)
     }
 
-    /// 读一个函数的 `#[js(…)]`（读完去掉）与签名。
+    /// Reads a function's `#[js(…)]` (removing it afterwards) and its signature.
     pub(crate) fn parse_parts(attrs: &mut Vec<syn::Attribute>, sig: &syn::Signature) -> syn::Result<Self> {
         let mut role = None;
         let mut name = None;
@@ -155,8 +156,8 @@ impl Method {
         format_ident!("__r8_js_{}", self.rust)
     }
 
-    /// 转换外壳：`fn(agent, this, args) -> Result<Value>`。
-    /// `owner` 是调用原函数的路径前缀（`Self` 或 `super`）。
+    /// Conversion wrapper: `fn(agent, this, args) -> Result<Value>`.
+    /// `owner` is the path prefix used to call the original function (`Self` or `super`).
     pub(crate) fn wrapper(&self, class: &str, owner: &TokenStream) -> TokenStream {
         let name = self.wrapper_name();
         let rust = &self.rust;
@@ -218,14 +219,15 @@ impl Method {
 }
 
 
-/// 一个 `impl` 块里要导出的全部方法与 JS 名字（`class` / `object` 共用）。
+/// All methods to export from an `impl` block, plus the JS name (shared by `class` / `object`).
 pub(crate) struct Bound {
     pub(crate) name: syn::LitStr,
     pub(crate) methods: Vec<Method>,
 }
 
 impl Bound {
-    /// 读 `impl` 块：属性实参是 JS 名字（缺省用类型名）；`#[js(skip)]` 的不要。
+    /// Reads an `impl` block: the attribute argument is the JS name (defaults to the type name); `#[js(skip)]`
+    /// methods are left out.
     pub(crate) fn of_impl(attr: TokenStream, item: &mut syn::ItemImpl) -> syn::Result<Self> {
         let name = if attr.is_empty() {
             let n = Names::last_segment(&item.self_ty).ok_or_else(|| syn::Error::new_spanned(&item.self_ty, "cannot name this type"))?;
@@ -250,7 +252,8 @@ impl Bound {
         self.methods.iter().map(|m| m.wrapper(&self.name.value(), &owner)).collect()
     }
 
-    /// `r8::Member` 表：方法、静态方法、同名的 getter / setter 配成一个访问器。
+    /// The `r8::Member` table: methods, static methods, and getter / setter pairs with the same name combined into
+    /// one accessor.
     pub(crate) fn members(&self) -> Vec<TokenStream> {
         let native = quote!(::r8::frame::NativeFn);
         let mut members = Vec::new();

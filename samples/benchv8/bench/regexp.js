@@ -1,4 +1,4 @@
-// 正则匹配与替换
+// Regex matching and replacement
 const text = 'The quick brown fox 123 jumps over the lazy dog 4567 ';
 let c = 0;
 for (let i = 0; i < 20000; i++) {

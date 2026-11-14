@@ -1,4 +1,5 @@
-//! `Static<T>`：`'static` 的值原样放进回收对象（里面不可能有 `Gc`，不遍历）。
+//! `Static<T>`: a `'static` value stored as-is in a collected object (it cannot contain a `Gc`, so it is
+//! not traced).
 use core::borrow::{Borrow, BorrowMut};
 use core::ops::{Deref, DerefMut};
 

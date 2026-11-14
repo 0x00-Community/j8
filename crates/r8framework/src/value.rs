@@ -2,9 +2,10 @@ use r8gc::{Collect, Gc};
 
 use crate::{JsBigInt, JsObject, JsString, JsSymbol};
 
-/// JS 值：标量直接存，字符串与对象是 GC 指针，活在 `'gc` 里。
+/// A JS value: scalars are stored directly, strings and objects are GC pointers living in `'gc`.
 ///
-/// 内存布局固定（`repr(C, u8)`，见 [`ValueTag`]）：JIT 出的机器码直接读写寄存器文件里的值。
+/// The memory layout is fixed (`repr(C, u8)`, see [`ValueTag`]): JIT-generated machine code reads and writes values in
+/// the register file directly.
 #[derive(Clone, Copy, Debug, Default, Collect)]
 #[collect(no_drop)]
 #[repr(C, u8)]
@@ -18,13 +19,15 @@ pub enum Value<'gc> {
     Symbol(JsSymbol<'gc>) = ValueTag::SYMBOL,
     BigInt(JsBigInt<'gc>) = ValueTag::BIGINT,
     Object(JsObject<'gc>) = ValueTag::OBJECT,
-    /// 暂时性死区里还没初始化的 `let` / `const` / `class` 绑定（以及派生类 `super()` 前的 `this`）。
-    /// 只在寄存器、环境槽与脚本作用域里出现，读写前检查掉，不会逃出到 JS。
+    /// A `let` / `const` / `class` binding in the temporal dead zone that is not yet initialized (and `this` before
+    /// `super()` in a derived class). Appears only in registers, environment slots, and the script scope; checked away
+    /// before reads and writes, so it never escapes to JS.
     Uninit = ValueTag::UNINIT,
 }
 
-/// [`Value`] 在内存里的样子：共 [`SIZE`](Self::SIZE) 字节，第 0 字节是下面这些标签之一，
-/// 载荷（布尔一个字节、数的 `f64` 位、GC 指针）从第 [`PAYLOAD`](Self::PAYLOAD) 字节起。
+/// What a [`Value`] looks like in memory: [`SIZE`](Self::SIZE) bytes in total; byte 0 is one of the tags below, and the
+/// payload (one byte for a boolean, the `f64` bits for a number, a GC pointer) starts at byte
+/// [`PAYLOAD`](Self::PAYLOAD).
 pub struct ValueTag;
 
 impl ValueTag {
@@ -37,15 +40,16 @@ impl ValueTag {
     pub const BIGINT: u8 = 6;
     pub const OBJECT: u8 = 7;
     pub const UNINIT: u8 = 8;
-    /// 一个值占的字节数
+    /// The number of bytes a value takes
     pub const SIZE: usize = 16;
-    /// 载荷的字节偏移（`repr(C, u8)`：标签之后按载荷里最大的对齐 8 字节排）
+    /// The byte offset of the payload (`repr(C, u8)`: after the tag, aligned to the payload's largest alignment, 8
+    /// bytes)
     pub const PAYLOAD: usize = 8;
 }
 
 const _: () = assert!(core::mem::size_of::<Value<'static>>() == ValueTag::SIZE);
 
-/// 严格相等（`===`）：字符串比内容，对象比身份，`NaN` 不等于自己。
+/// Strict equality (`===`): strings compare by content, objects by identity, and `NaN` is not equal to itself.
 impl PartialEq for Value<'_> {
     #[inline]
     fn eq(&self, o: &Self) -> bool {
@@ -63,14 +67,14 @@ impl PartialEq for Value<'_> {
 }
 
 impl<'gc> Value<'gc> {
-    /// 原型（可能没有）⇒ 值：没有就是 `null`。
+    /// Prototype (possibly absent) ⇒ value: `null` if absent.
     pub fn from_proto(p: Option<crate::JsObject<'gc>>) -> Self {
         p.map_or(Value::Null, Value::Object)
     }
 }
 
 impl Value<'_> {
-    /// SameValue：同 `===`，但 `NaN` 等于自己、`+0` 不等于 `-0`。
+    /// SameValue: like `===`, but `NaN` equals itself and `+0` does not equal `-0`.
     pub fn same_value(self, o: Self) -> bool {
         match (self, o) {
             (Value::Number(a), Value::Number(b)) => (a.is_nan() && b.is_nan()) || (a == b && a.is_sign_negative() == b.is_sign_negative()),
@@ -82,7 +86,8 @@ impl Value<'_> {
         matches!(self, Value::Undefined | Value::Null)
     }
 
-    /// 原始值包装对象 ⇒ 里面的原始值，别的原样。规范的 thisBooleanValue / thisNumberValue / thisStringValue 先过这一步。
+    /// A primitive wrapper object ⇒ the primitive inside; anything else as is. The spec's thisBooleanValue /
+    /// thisNumberValue / thisStringValue go through this step first.
     #[must_use]
     pub fn unwrapped(self) -> Self {
         match self {

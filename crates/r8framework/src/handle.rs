@@ -5,7 +5,8 @@ use r8gc::{DynamicRoot, Gc, Rootable};
 
 use crate::{Agent, Context, Scope, Value};
 
-/// 持久句柄：跨多次 [`Isolate::enter`](crate::Isolate::enter) 存活，drop 即放掉。
+/// A persistent handle: survives across multiple [`Isolate::enter`](crate::Isolate::enter) calls and is released on
+/// drop.
 pub struct Global(DynamicRoot<Rootable![Value<'_>]>);
 
 impl fmt::Debug for Global {
@@ -14,7 +15,7 @@ impl fmt::Debug for Global {
     }
 }
 
-/// 跨多次 [`Isolate::enter`](crate::Isolate::enter) 保留的执行环境。
+/// An execution context kept across multiple [`Isolate::enter`](crate::Isolate::enter) calls.
 pub struct ContextRoot(DynamicRoot<Rootable![Context<'_>]>);
 
 impl fmt::Debug for ContextRoot {
@@ -24,7 +25,7 @@ impl fmt::Debug for ContextRoot {
 }
 
 impl<'gc> Agent<'gc, '_> {
-    /// 把任意可回收的东西挂到根上（执行引擎在片与片之间存执行状态用）。
+    /// Attach anything collectable to the root (the execution engine uses it to store execution state between slices).
     pub fn stash<R>(&self, v: Gc<'gc, Root<'gc, R>>) -> DynamicRoot<R>
     where
         R: for<'a> Rootable<'a>,
@@ -51,22 +52,22 @@ impl<'gc> Agent<'gc, '_> {
 }
 
 impl<'gc> Scope<'gc, '_> {
-    /// 把执行环境存成跨 `enter` 的句柄。
+    /// Store an execution context as a handle that survives across `enter`.
     pub fn persist(&self, cx: Context<'gc>) -> ContextRoot {
         ContextRoot(self.roots.stash::<Rootable![Context<'_>]>(self.mc, Gc::new(self.mc, cx)))
     }
 
-    /// 取回执行环境。
+    /// Get the execution context back.
     pub fn context_of(&self, root: &ContextRoot) -> Context<'gc> {
         *self.roots.fetch(&root.0)
     }
 
-    /// 把一个值升成持久句柄。
+    /// Promote a value to a persistent handle.
     pub fn global(&self, v: Value<'gc>) -> Global {
         Global(self.roots.stash(self.mc, Gc::new(self.mc, v)))
     }
 
-    /// 取回持久句柄的值（V8 的 `Local::New(isolate, global)`）。
+    /// Get the value of a persistent handle back (V8's `Local::New(isolate, global)`).
     pub fn local(&self, g: &Global) -> Value<'gc> {
         *self.roots.fetch(&g.0)
     }

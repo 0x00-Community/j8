@@ -1,15 +1,20 @@
 # r8gc
 
-分代、可移动（压缩）、并行的 Rust GC，`'gc` 品牌生命周期，`no_std`（需要 `alloc`）。
+A generational, moving (compacting), parallel GC for Rust with a `'gc` brand lifetime; `no_std` (requires `alloc`).
 
-- 新生代按块碰撞分配；次回收从根与记忆集出发，把活对象并行复制进老年代（写屏障维护记忆集）
-- 老年代按尺寸档分页；主回收增量标记（纪元翻转、后向写屏障），标记 / 清扫 / 压缩都在线程池上并行
-- 线程池是借来的 `Pool`：[moremath](https://crates.io/crates/moremath) 的 `ThreadMulti` / `ThreadSingle` 直接能用，几个 `R8Heap` 可共用一个
-- 回收只在 `R8Heap::mutate` 之外发生，那时所有 `Gc` 都在根下面，所以对象能搬：`Collect` 除了 `trace` 还有 `relocate`
+- The young generation uses per-block bump allocation; a minor collection starts from the roots and the remembered set
+  and copies live objects into the old generation in parallel (the write barrier maintains the remembered set)
+- The old generation is paged by size class; a major collection marks incrementally (epoch flip, backward write
+  barrier), and marking / sweeping / compaction all run in parallel on the thread pool
+- The thread pool is a borrowed `Pool`: [moremath](https://crates.io/crates/moremath)'s `ThreadMulti` / `ThreadSingle`
+  work directly, and several `R8Heap`s can share one
+- Collection happens only outside `R8Heap::mutate`, when every `Gc` is reachable from the roots, so objects can move:
+  besides `trace`, `Collect` has `relocate`
 
-API 沿用 [gc-arena](https://github.com/kyren/gc-arena) 的形状（`Gc` / `Lock` / `RefLock` / `Rootable!` / `DynamicRootSet`）。
+The API follows the shape of [gc-arena](https://github.com/kyren/gc-arena) (`Gc` / `Lock` / `RefLock` / `Rootable!` /
+`DynamicRootSet`).
 
-## 用法
+## Usage
 
 ```rust
 use moremath::ThreadMulti;
@@ -38,26 +43,32 @@ heap.mutate_root(|mc, root| {
 heap.collect_all();
 ```
 
-回收耗时随线程数的变化见 `cargo run --release --example bench -- <线程数>`。
+For collection time versus thread count, see `cargo run --release --example bench -- <threads>`.
 
-## 并行
+## Parallelism
 
-回收各阶段切成任务交给借来的 `Pool`（自带工作窃取）：标记、次回收的复制提升、清扫、压缩的搬迁与改指针都并行；
-活少时在调用线程上先做（不惊动线程池），等待时先自旋、久了让出 CPU（`std` feature）。
+Each collection phase is split into tasks handed to the borrowed `Pool` (with built-in work stealing): marking, copying
+promotion in minor collections, sweeping, and moving and pointer updating during compaction all run in parallel.
+When there is little work it is done on the calling thread first (without involving the thread pool); while waiting,
+threads spin first and yield the CPU after a while (`std` feature).
 
-死对象的析构缺省在调用线程上做：类型的 `Collect::PARALLEL_DROP`（派生宏按字段推出：`no_drop` 且各字段都能）说明它能在别的线程析构，
-`R8Heap::set_parallel_drop(true)` 才真的并行析构 —— glibc 的 malloc 跨线程释放要抢原线程的 arena 锁，并行反而更慢，
-换 jemalloc / mimalloc 这类分配器再开。
+Dead objects are dropped on the calling thread by default: a type's `Collect::PARALLEL_DROP` (inferred from the fields
+by the derive macro: `no_drop` and every field allows it) says it can be dropped on another thread, but objects are only
+actually dropped in parallel with `R8Heap::set_parallel_drop(true)`. With glibc's malloc, freeing across threads
+contends for the original thread's arena lock, so parallel is actually slower; turn it on with an allocator like
+jemalloc / mimalloc.
 
-## Feature
+## Features
 
-- `std`（缺省开）：等待时让出 CPU。`no_std` 用 `default-features = false`（只能自旋，机器忙时并行回收会被拖慢）
-- `verify`：每次回收后把整个老年代的边校验一遍（调试用，很慢）
+- `std` (on by default): yield the CPU while waiting. For `no_std` use `default-features = false` (it can only spin,
+  which slows parallel collection on a busy machine)
+- `verify`: verify every edge in the old generation after each collection (for debugging; very slow)
 
-## 测试
+## Tests
 
-`tests/gc.rs` 一条一条跑（`cargo test --test gc -- --exact <名字>`），加 `--features verify` 带上堆校验。
+Run `tests/gc.rs` one test at a time (`cargo test --test gc -- --exact <name>`); add `--features verify` to include
+heap verification.
 
-## 许可
+## License
 
-MIT。部分设计与代码来自 gc-arena，其许可见 `LICENSE-gc-arena`。
+MIT. Parts of the design and code come from gc-arena; see `LICENSE-gc-arena` for its license.

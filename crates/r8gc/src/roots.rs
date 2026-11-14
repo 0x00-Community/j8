@@ -1,4 +1,4 @@
-//! 动态根：把 `Gc` 存成跨 `mutate` 的句柄（句柄 drop 即放掉）。
+//! Dynamic roots: store a `Gc` as a handle that lives across `mutate` calls (dropping the handle releases it).
 use alloc::rc::Rc;
 use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
@@ -7,14 +7,14 @@ use core::marker::PhantomData;
 use crate::header::Ptr;
 use crate::{Collect, Gc, Mutation, Relocate, Root, Rootable, Trace};
 
-/// 句柄共享的槽表。
+/// Slot table shared by the handles.
 #[derive(Default)]
 struct Slots {
     ptrs: RefCell<Vec<Option<Ptr>>>,
     free: RefCell<Vec<usize>>,
 }
 
-/// 一组动态根，放在 `R8Heap` 的根里。
+/// A set of dynamic roots, stored in the `R8Heap`'s root.
 pub struct DynamicRootSet<'gc> {
     slots: Rc<Slots>,
     _brand: PhantomData<Cell<&'gc ()>>,
@@ -35,7 +35,7 @@ impl<'gc> DynamicRootSet<'gc> {
         Self { slots: Rc::default(), _brand: PhantomData }
     }
 
-    /// 把 `v` 挂到根上（根每次回收都整个重扫，不用写屏障）
+    /// Attaches `v` to the root (the root is fully rescanned on every collection, so no write barrier is needed)
     pub fn stash<R>(&self, _mc: &Mutation<'gc>, v: Gc<'gc, Root<'gc, R>>) -> DynamicRoot<R>
     where
         R: for<'a> Rootable<'a>,
@@ -53,7 +53,7 @@ impl<'gc> DynamicRootSet<'gc> {
         DynamicRoot { slots: self.slots.clone(), index, _root: PhantomData }
     }
 
-    /// 取回。句柄必须出自这一组，否则 panic。
+    /// Fetches it back. The handle must come from this set, otherwise this panics.
     pub fn fetch<R>(&self, root: &DynamicRoot<R>) -> Gc<'gc, Root<'gc, R>>
     where
         R: for<'a> Rootable<'a>,
@@ -63,7 +63,7 @@ impl<'gc> DynamicRootSet<'gc> {
         Gc::from(self.slots.ptrs.borrow()[root.index].expect("live dynamic root"))
     }
 
-    /// 句柄是不是出自这一组
+    /// Whether the handle comes from this set
     pub fn contains<R>(&self, root: &DynamicRoot<R>) -> bool
     where
         R: for<'a> Rootable<'a>,
@@ -73,7 +73,7 @@ impl<'gc> DynamicRootSet<'gc> {
     }
 }
 
-/// 跨 `mutate` 的根句柄。
+/// A root handle that lives across `mutate` calls.
 pub struct DynamicRoot<R>
 where
     R: for<'a> Rootable<'a>,

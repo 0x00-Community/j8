@@ -5,13 +5,13 @@ use r8framework::{Agent, BufferData, ElementKind, Error, ErrorKind, JsObject, Ob
 
 use crate::{Args, Installer};
 
-/// `ArrayBuffer` / `SharedArrayBuffer` / `DataView` / `Atomics`。
+/// `ArrayBuffer` / `SharedArrayBuffer` / `DataView` / `Atomics`.
 pub(crate) struct Buffers;
 
-/// 一次最多分配这么多字节，再多抛 RangeError
+/// Maximum number of bytes allocated at once; more throws RangeError
 const MAX_BYTES: usize = 1 << 31;
 
-/// Atomics 的读改写操作。
+/// Atomics read-modify-write operations.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Rmw {
     Add,
@@ -23,7 +23,7 @@ enum Rmw {
 }
 
 impl Buffers {
-    /// 新缓冲（字节全 0）。
+    /// A new buffer (all bytes zero).
     pub(crate) fn allocate<'gc>(a: &mut Agent<'gc, '_>, proto: JsObject<'gc>, len: usize, max: Option<usize>, shared: bool) -> Result<JsObject<'gc>, Error> {
         if len > MAX_BYTES || max.is_some_and(|m| m > MAX_BYTES) {
             return Err(a.throw(ErrorKind::Range, "Array buffer allocation failed"));
@@ -32,7 +32,7 @@ impl Buffers {
         Ok(r8framework::ObjectData { kind: ObjectKind::ArrayBuffer(Box::new(data)), proto: Some(proto), ..r8framework::ObjectData::default() }.alloc(a.mc))
     }
 
-    /// `this` 是（共享 / 非共享）缓冲。
+    /// `this` is a (shared / non-shared) buffer.
     fn this_buffer<'gc>(a: &Agent<'gc, '_>, this: Value<'gc>, shared: bool) -> Result<JsObject<'gc>, Error> {
         match this {
             Value::Object(o) if matches!(&o.borrow().kind, ObjectKind::ArrayBuffer(b) if b.shared == shared) => Ok(o),
@@ -89,7 +89,7 @@ impl Buffers {
     }
 
     fn number<'gc>(n: usize) -> Value<'gc> {
-        #[expect(clippy::cast_precision_loss, reason = "字节数不超过 2^31")]
+        #[expect(clippy::cast_precision_loss, reason = "byte count is at most 2^31")]
         let x = n as f64;
         x.into()
     }
@@ -126,7 +126,7 @@ impl Buffers {
         }
     }
 
-    /// `resize` / `grow`：`grow` 不能缩。
+    /// `resize` / `grow`: `grow` cannot shrink.
     fn resize_with<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>], shared: bool) -> Result<Value<'gc>, Error> {
         let o = Self::this_buffer(a, this, shared)?;
         let Some(max) = Self::info(o).1 else {
@@ -152,7 +152,7 @@ impl Buffers {
         Self::resize_with(a, this, args, true)
     }
 
-    /// SpeciesConstructor(o, fallback)。
+    /// SpeciesConstructor(o, fallback).
     pub(crate) fn species_constructor<'gc>(a: &mut Agent<'gc, '_>, o: Value<'gc>, fallback: Value<'gc>) -> Result<Value<'gc>, Error> {
         let c = a.get_named(o, "constructor")?;
         if c == Value::Undefined {
@@ -180,7 +180,7 @@ impl Buffers {
         let Some(len) = Self::info(o).0 else {
             return Err(a.throw(ErrorKind::Type, "Cannot slice a detached ArrayBuffer"));
         };
-        #[expect(clippy::cast_precision_loss, reason = "字节数不超过 2^31")]
+        #[expect(clippy::cast_precision_loss, reason = "byte count is at most 2^31")]
         let lenf = len as f64;
         let rel = |a: &mut Agent<'gc, '_>, v: Value<'gc>, default: f64| -> Result<f64, Error> {
             if v == Value::Undefined {
@@ -203,7 +203,7 @@ impl Buffers {
         if r8gc::Gc::ptr_eq(n, o) {
             return Err(a.throw(ErrorKind::Type, "species constructor returned the same buffer"));
         }
-        #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "已夹到 [0, len]")]
+        #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "clamped to [0, len]")]
         let (first, new_len) = (first as usize, new_len as usize);
         if Self::info(n).0.unwrap_or(0) < new_len {
             return Err(a.throw(ErrorKind::Type, "species constructor returned a too small buffer"));
@@ -229,7 +229,7 @@ impl Buffers {
         Self::slice_with(a, this, args, true)
     }
 
-    /// `transfer` / `transferToFixedLength`：新缓冲接过字节，原来的分离。
+    /// `transfer` / `transferToFixedLength`: a new buffer takes over the bytes and the original is detached.
     fn transfer_with<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>], keep_resizable: bool) -> Result<Value<'gc>, Error> {
         let o = Self::this_buffer(a, this, false)?;
         let new_len = match args.at(0) {
@@ -287,7 +287,7 @@ impl Buffers {
             }
         };
         let proto = a.proto_from_ctor(a.new_target, a.realm.data_view_proto)?;
-        // 取原型可能跑了用户代码改了缓冲：再查一遍
+        // Getting the prototype may have run user code that changed the buffer: check again
         let Some(len) = Self::info(buffer).0 else { return Err(a.throw(ErrorKind::Type, "Cannot construct a DataView on a detached ArrayBuffer")) };
         if offset > len || length.is_some_and(|n| offset + n > len) {
             return Err(a.throw(ErrorKind::Range, "Invalid DataView length"));
@@ -326,7 +326,7 @@ impl Buffers {
         }
     }
 
-    /// GetViewValue：`K` 是元素类型下标。
+    /// GetViewValue: `K` is the element type index.
     fn get_value<'gc, const K: usize>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let kind = ElementKind::ALL[K];
         let v = Self::this_view(a, this)?;
@@ -340,7 +340,7 @@ impl Buffers {
         Ok(a.element_value(kind.decode(&bytes)))
     }
 
-    /// 视图里第 `index` 字节起放得下一个元素：给出缓冲里的位置。
+    /// An element fits starting at byte `index` of the view: returns its position in the buffer.
     fn view_access<'gc>(a: &Agent<'gc, '_>, v: &ViewData<'gc>, index: usize, kind: ElementKind) -> Result<usize, Error> {
         let Some(len) = Agent::view_length(v, 1) else { return Err(a.throw(ErrorKind::Type, "DataView is out of bounds")) };
         if index + kind.size() > len {
@@ -370,7 +370,7 @@ impl Buffers {
 
     // ---- Atomics ----
 
-    /// ValidateIntegerTypedArray + ValidateAtomicAccess：给出（元素类型, 缓冲, 字节位置）。
+    /// ValidateIntegerTypedArray + ValidateAtomicAccess: returns (element type, buffer, byte position).
     fn atomic_target<'gc>(a: &mut Agent<'gc, '_>, ta: Value<'gc>, index: Value<'gc>, waitable: bool) -> Result<(ElementKind, JsObject<'gc>, usize), Error> {
         let (kind, view, len) = Self::integer_array(a, ta, waitable)?;
         let i = a.to_index(index)?;
@@ -380,7 +380,7 @@ impl Buffers {
         Ok((kind, view.buffer, view.offset + i * kind.size()))
     }
 
-    /// ValidateIntegerTypedArray：给出（元素类型, 视图, 长度）。
+    /// ValidateIntegerTypedArray: returns (element type, view, length).
     fn integer_array<'gc>(a: &mut Agent<'gc, '_>, ta: Value<'gc>, waitable: bool) -> Result<(ElementKind, ViewData<'gc>, usize), Error> {
         let Some((kind, view)) = (match ta {
             Value::Object(o) => Agent::typed_array(o),
@@ -400,7 +400,7 @@ impl Buffers {
         Ok((kind, view, len))
     }
 
-    /// 转好要写的值之后再查一遍（转值可能分离 / 缩小了缓冲）。
+    /// Check again after converting the value to write (the conversion may have detached / shrunk the buffer).
     fn revalidate<'gc>(a: &Agent<'gc, '_>, buffer: JsObject<'gc>, at: usize, kind: ElementKind) -> Result<(), Error> {
         match Self::info(buffer).0 {
             None => Err(a.throw(ErrorKind::Type, "TypedArray is detached")),
@@ -409,7 +409,7 @@ impl Buffers {
         }
     }
 
-    /// Atomics 的数：BigInt 类型 ToBigInt，别的 ToIntegerOrInfinity。
+    /// Numbers for Atomics: ToBigInt for BigInt types, ToIntegerOrInfinity otherwise.
     fn atomic_value<'gc>(a: &mut Agent<'gc, '_>, kind: ElementKind, v: Value<'gc>) -> Result<r8framework::Element, Error> {
         if kind.is_bigint() { Ok(r8framework::Element::BigInt(a.to_bigint(v)?)) } else { Ok(r8framework::Element::Number(a.to_integer_or_infinity(v)?)) }
     }
@@ -510,7 +510,8 @@ impl Buffers {
         matches!(&buffer.borrow().kind, ObjectKind::ArrayBuffer(b) if b.shared)
     }
 
-    /// `Atomics.wait`：单线程里没人能唤醒，值不等给 "not-equal"，否则按超时给 "timed-out"。
+    /// `Atomics.wait`: nobody can wake us up on a single thread; gives "not-equal" if the value differs, otherwise
+    /// "timed-out" per the timeout.
     fn wait<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let (_, view, _) = Self::integer_array(a, args.at(0), true)?;
         if !Self::shared(view.buffer) {

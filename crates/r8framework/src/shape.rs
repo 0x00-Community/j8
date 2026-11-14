@@ -1,8 +1,11 @@
-//! 形状（隐藏类）：对象自有字符串键属性的布局——键与特性，按加入顺序；值另存在对象的槽里。
+//! Shapes (hidden classes): the layout of an object's own string-keyed properties — keys and attributes, in insertion
+//! order; the values are stored separately in the object's slots.
 //!
-//! 同样方式建出来的对象共享形状：加属性沿转移表走到（或建出）子形状，执行层按「形状 ⇒ 槽号」做内联缓存。
-//! 形状里没有 `Gc` 指针（回收会搬对象），用 `Rc` 管理；转移表存 `Weak`，没对象用的形状自然释放。
-//! 删属性、改特性、键太多时复制出一份字典形状，归一个对象独占、原地改，内联缓存不收它。
+//! Objects built the same way share shapes: adding a property follows the transition table to (or creates) a child
+//! shape, and the execution layer keeps an inline cache keyed by "shape ⇒ slot index". Shapes contain no `Gc` pointers
+//! (collection moves objects) and are managed with `Rc`; the transition table stores `Weak`, so shapes no object uses
+//! are freed naturally. Deleting a property, changing attributes, or having too many keys copies out a dictionary
+//! shape, owned exclusively by one object and modified in place; inline caches don't accept it.
 use alloc::rc::{Rc, Weak};
 use alloc::vec::Vec;
 use core::cell::RefCell;
@@ -13,12 +16,13 @@ use rustc_hash::FxHasher;
 
 use crate::{Property, SmallStr, Slot};
 
-/// 键不超过这么多就线性找，多了建索引
+/// Up to this many keys, search linearly; beyond that, build an index
 const LINEAR: usize = 8;
-/// 共享形状最多这么多个键，再加就转成字典形状（转移链太长不划算）
+/// A shared shape has at most this many keys; adding more converts to a dictionary shape (overly long transition chains
+/// aren't worth it)
 const MAX_FAST: usize = 64;
 
-/// 属性特性（数据还是访问器看槽里存的是什么）。
+/// Property attributes (whether it is data or an accessor depends on what the slot holds).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Attrs(u8);
 
@@ -46,15 +50,16 @@ impl From<&Property<'_>> for Attrs {
     }
 }
 
-/// 一个形状。
+/// A shape.
 pub struct Shape {
     keys: Vec<(SmallStr, Attrs)>,
     index: Option<hashbrown::HashMap<SmallStr, u32, BuildHasherDefault<FxHasher>>>,
-    /// 加一个键（及特性）走到的子形状
+    /// Child shapes reached by adding a key (with attributes)
     transitions: RefCell<Vec<(SmallStr, Attrs, Weak<Shape>)>>,
-    /// 从哪个形状加一个键来的：子形状保住整条链（对象只持有最终形状，中间的不能被释放）
+    /// The shape this one came from by adding a key: a child shape keeps the whole chain alive (objects only hold the
+    /// final shape, and the intermediate ones must not be freed)
     _parent: Option<Rc<Shape>>,
-    /// 字典形状：一个对象独占，原地改
+    /// Dictionary shape: owned exclusively by one object, modified in place
     dict: bool,
 }
 
@@ -77,7 +82,7 @@ impl Shape {
         self.keys.is_empty()
     }
 
-    /// 字典形状不进内联缓存（会原地改）
+    /// Dictionary shapes don't go into inline caches (they are modified in place)
     pub fn is_dict(&self) -> bool {
         self.dict
     }
@@ -97,7 +102,7 @@ impl Shape {
         self.keys[i].1
     }
 
-    /// 加一个键后的形状（共享：查转移表，没有就建并登记）
+    /// The shape after adding a key (shared: look up the transition table; create and register one if absent)
     fn child(self: &Rc<Self>, key: &str, attrs: Attrs) -> Rc<Self> {
         let mut t = self.transitions.borrow_mut();
         if let Some(c) = t.iter().find(|(k, a, _)| **k == *key && *a == attrs).and_then(|(_, _, w)| w.upgrade()) {
@@ -112,7 +117,8 @@ impl Shape {
         child
     }
 
-    /// 独占可改的字典形状（已经是字典且独占就原地用，否则复制一份）
+    /// An exclusively owned, modifiable dictionary shape (used in place if already a dictionary and exclusively owned,
+    /// otherwise copied)
     fn dict_mut(this: &mut Rc<Self>) -> &mut Self {
         if !this.dict || Rc::get_mut(this).is_none() {
             *this = Rc::new(Self::new(this.keys.clone(), true));
@@ -121,7 +127,7 @@ impl Shape {
     }
 }
 
-/// 一个对象的字符串键属性：形状（`None` 是空）加按形状顺序的槽。
+/// An object's string-keyed properties: shape (`None` when empty) plus slots in shape order.
 #[derive(Default, Collect)]
 #[collect(no_drop)]
 pub struct Props<'gc> {
@@ -131,7 +137,7 @@ pub struct Props<'gc> {
 }
 
 impl<'gc> Props<'gc> {
-    /// 空的，按 `n` 个属性预留槽
+    /// Empty, reserving slots for `n` properties
     pub fn with_capacity(n: usize) -> Self {
         Self { shape: None, slots: Vec::with_capacity(n) }
     }
@@ -144,7 +150,7 @@ impl<'gc> Props<'gc> {
         self.slots.is_empty()
     }
 
-    /// 当前形状（内联缓存按它的地址认）
+    /// The current shape (inline caches identify it by address)
     pub fn shape(&self) -> Option<&Rc<Shape>> {
         self.shape.as_ref()
     }
@@ -174,17 +180,18 @@ impl<'gc> Props<'gc> {
         &mut self.slots[i]
     }
 
-    /// 按加入顺序的（键, 属性）
+    /// (key, property) pairs in insertion order
     pub fn iter(&self) -> impl Iterator<Item = (&SmallStr, Property<'gc>)> {
         (0..self.len()).map(|i| (self.key(i), self.get(i)))
     }
 
-    /// 一个空的共享形状（以某个对象为原型的对象都从它起步，见 `ObjectData::shape_root`）
+    /// An empty shared shape (all objects with a given object as prototype start from it; see `ObjectData::shape_root`)
     pub fn empty() -> Rc<Shape> {
         Rc::new(Shape::new(Vec::new(), false))
     }
 
-    /// 追加一个新键（调用方保证原来没有）；空对象从 `root` 起步（没有就自己建一条不共享的）
+    /// Append a new key (the caller guarantees it isn't present); an empty object starts from `root` (if absent, it
+    /// builds an unshared chain of its own)
     pub fn push(&mut self, key: &str, prop: Property<'gc>, root: impl FnOnce() -> Option<Rc<Shape>>) {
         let attrs = Attrs::from(&prop);
         if self.shape.is_none() {
@@ -206,14 +213,16 @@ impl<'gc> Props<'gc> {
         self.slots.push(prop.slot);
     }
 
-    /// 追加一个新键，形状直接换成 `to`（执行层缓存过：从当前形状加这个键就是 `to`）
+    /// Append a new key, switching the shape directly to `to` (cached by the execution layer: adding this key to the
+    /// current shape gives `to`)
     pub fn push_to(&mut self, to: Rc<Shape>, slot: Slot<'gc>) {
         debug_assert_eq!(to.len(), self.len() + 1);
         self.shape = Some(to);
         self.slots.push(slot);
     }
 
-    /// 加一个键会走到的共享形状（执行层用它填内联缓存；字典形状给 `None`）
+    /// The shared shape that adding a key would reach (the execution layer uses it to fill inline caches; `None` for
+    /// dictionary shapes)
     pub fn transition(&self, key: &str, prop: &Property<'gc>) -> Option<Rc<Shape>> {
         let attrs = Attrs::from(prop);
         match &self.shape {
@@ -223,7 +232,7 @@ impl<'gc> Props<'gc> {
         }
     }
 
-    /// 整个替换第 `i` 项（特性变了就转成字典形状）
+    /// Replace entry `i` as a whole (converts to a dictionary shape if the attributes change)
     pub fn replace(&mut self, i: usize, prop: Property<'gc>) {
         let attrs = Attrs::from(&prop);
         if let Some(s) = &mut self.shape
@@ -234,7 +243,7 @@ impl<'gc> Props<'gc> {
         self.slots[i] = prop.slot;
     }
 
-    /// 删第 `i` 项（转成字典形状）
+    /// Delete entry `i` (converts to a dictionary shape)
     pub fn remove(&mut self, i: usize) {
         if let Some(s) = &mut self.shape {
             let d = Shape::dict_mut(s);
@@ -244,7 +253,7 @@ impl<'gc> Props<'gc> {
         self.slots.remove(i);
     }
 
-    /// 只留下键满足 `keep` 的（删了就转成字典形状）
+    /// Keep only those whose key satisfies `keep` (converts to a dictionary shape if anything is deleted)
     pub fn retain(&mut self, keep: impl Fn(&str) -> bool) {
         let Some(s) = &self.shape else { return };
         let gone: Vec<usize> = (0..s.len()).filter(|&i| !keep(s.key(i))).collect();

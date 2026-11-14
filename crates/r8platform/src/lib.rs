@@ -1,31 +1,32 @@
-//! r8platform：[`Platform`] 的标准库实现，后台任务跑在 moremath 的 [`ThreadMulti`] 线程池上。
+//! r8platform: the standard-library implementation of [`Platform`]; background tasks run on moremath's
+//! [`ThreadMulti`] thread pool.
 use std::num::NonZeroUsize;
 use std::time::{Duration, Instant};
 
 use moremath::{Executor, ThreadMulti};
 use r8framework::{Platform, Task};
 
-/// 缺省平台：线程池起一次复用，任务可以借用调用方的数据。
+/// Default platform: the thread pool is started once and reused; tasks may borrow the caller's data.
 pub struct DefaultPlatform {
     pool: ThreadMulti,
     start: Instant,
 }
 
 impl Default for DefaultPlatform {
-    /// 每个 CPU 一个工作线程。
+    /// One worker thread per CPU.
     fn default() -> Self {
         Self { pool: ThreadMulti::default(), start: Instant::now() }
     }
 }
 
 impl From<NonZeroUsize> for DefaultPlatform {
-    /// `n` 个工作线程（含调用线程）。
+    /// `n` worker threads (including the calling thread).
     fn from(n: NonZeroUsize) -> Self {
         Self { pool: ThreadMulti::from(n), start: Instant::now() }
     }
 }
 
-/// 后台任务与 GC 都跑在同一个线程池上。
+/// Background tasks and the GC run on the same thread pool.
 impl r8gc::Pool for DefaultPlatform {
     fn threads(&self) -> usize {
         Executor::threads(&self.pool)
@@ -45,7 +46,7 @@ impl Platform for DefaultPlatform {
         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default()
     }
 
-    /// 相对说明符按引用者所在目录解析，规范化后读文件。
+    /// Relative specifiers resolve against the referrer's directory; the file is read after normalization.
     fn load_module(&self, referrer: &str, specifier: &str) -> Option<(String, String)> {
         let base = std::path::Path::new(referrer).parent().unwrap_or_else(|| std::path::Path::new("."));
         let path = std::fs::canonicalize(base.join(specifier)).ok()?;

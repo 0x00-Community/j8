@@ -1,24 +1,24 @@
-//! JS 值 ⇄ Rust 值。
+//! JS values ⇄ Rust values.
 use alloc::string::String;
 use alloc::vec::Vec;
 
 use r8framework::{Agent, Error, ErrorKind, JsObject, JsString, Value};
 
-/// JS 值 ⇒ Rust 值（宿主函数的实参）。
+/// JS value ⇒ Rust value (arguments of a host function).
 pub trait FromJs<'gc>: Sized {
     fn from_js(a: &mut Agent<'gc, '_>, v: Value<'gc>) -> Result<Self, Error>;
 }
 
-/// Rust 值 ⇒ JS 值（宿主函数的返回值）。
+/// Rust value ⇒ JS value (return value of a host function).
 pub trait IntoJs<'gc> {
     fn into_js(self, a: &mut Agent<'gc, '_>) -> Result<Value<'gc>, Error>;
 }
 
-/// 方法里要原样的 `this`。
+/// The raw `this` for a method.
 #[derive(Clone, Copy, Debug)]
 pub struct This<'gc>(pub Value<'gc>);
 
-/// 剩下的全部实参（放在最后一个形参）。
+/// All remaining arguments (placed in the last parameter).
 #[derive(Clone, Debug)]
 pub struct Rest<'gc>(pub Vec<Value<'gc>>);
 
@@ -46,7 +46,7 @@ impl<'gc> FromJs<'gc> for u32 {
     }
 }
 
-/// 下标 / 长度：ToIndex。
+/// Index / length: ToIndex.
 impl<'gc> FromJs<'gc> for usize {
     fn from_js(a: &mut Agent<'gc, '_>, v: Value<'gc>) -> Result<Self, Error> {
         a.to_index(v)
@@ -83,14 +83,14 @@ impl<'gc> FromJs<'gc> for JsObject<'gc> {
     }
 }
 
-/// `undefined` / `null` 是 `None`。
+/// `undefined` / `null` is `None`.
 impl<'gc, T: FromJs<'gc>> FromJs<'gc> for Option<T> {
     fn from_js(a: &mut Agent<'gc, '_>, v: Value<'gc>) -> Result<Self, Error> {
         if v.is_nullish() { Ok(None) } else { T::from_js(a, v).map(Some) }
     }
 }
 
-/// 可迭代对象逐项转。
+/// Converts an iterable item by item.
 impl<'gc, T: FromJs<'gc>> FromJs<'gc> for Vec<T> {
     fn from_js(a: &mut Agent<'gc, '_>, v: Value<'gc>) -> Result<Self, Error> {
         a.to_list(v)?.into_iter().map(|x| T::from_js(a, x)).collect()
@@ -129,7 +129,7 @@ impl<'gc> IntoJs<'gc> for u32 {
 
 impl<'gc> IntoJs<'gc> for usize {
     fn into_js(self, _: &mut Agent<'gc, '_>) -> Result<Value<'gc>, Error> {
-        #[expect(clippy::cast_precision_loss, reason = "长度 / 下标远小于 2^53")]
+        #[expect(clippy::cast_precision_loss, reason = "lengths / indices are far below 2^53")]
         let x = self as f64;
         Ok(x.into())
     }
@@ -165,7 +165,7 @@ impl<'gc> IntoJs<'gc> for JsObject<'gc> {
     }
 }
 
-/// `None` 是 `undefined`。
+/// `None` is `undefined`.
 impl<'gc, T: IntoJs<'gc>> IntoJs<'gc> for Option<T> {
     fn into_js(self, a: &mut Agent<'gc, '_>) -> Result<Value<'gc>, Error> {
         match self {
@@ -175,7 +175,7 @@ impl<'gc, T: IntoJs<'gc>> IntoJs<'gc> for Option<T> {
     }
 }
 
-/// 数组。
+/// An array.
 impl<'gc, T: IntoJs<'gc>> IntoJs<'gc> for Vec<T> {
     fn into_js(self, a: &mut Agent<'gc, '_>) -> Result<Value<'gc>, Error> {
         let items = self.into_iter().map(|x| x.into_js(a)).collect::<Result<Vec<_>, _>>()?;
@@ -183,7 +183,7 @@ impl<'gc, T: IntoJs<'gc>> IntoJs<'gc> for Vec<T> {
     }
 }
 
-/// 出错就抛。
+/// Throws on error.
 impl<'gc, T: IntoJs<'gc>> IntoJs<'gc> for Result<T, Error> {
     fn into_js(self, a: &mut Agent<'gc, '_>) -> Result<Value<'gc>, Error> {
         self?.into_js(a)

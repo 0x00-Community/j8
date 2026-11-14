@@ -1,8 +1,9 @@
-//! r8virtasm：r8 的虚拟指令集——累加器式寄存器字节码（r8executor 执行）。
+//! r8virtasm: r8's virtual instruction set, an accumulator-based register bytecode (run by r8executor).
 //!
-//! 汇编 / 反汇编：`text.parse::<Module>()` / `module.to_string()`，互为逆。
+//! Assembly / disassembly: `text.parse::<Module>()` / `module.to_string()`, inverses of each other.
 //!
-//! 字节码类型是 `no_std`；`compile` feature 带上 JS ⇒ 字节码编译器（`Module::try_from(&Source)`）。
+//! The bytecode types are `no_std`; the `compile` feature adds the JS ⇒ bytecode compiler
+//! (`Module::try_from(&Source)`).
 #![cfg_attr(not(feature = "compile"), no_std)]
 extern crate alloc;
 

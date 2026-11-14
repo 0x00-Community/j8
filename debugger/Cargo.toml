@@ -1,6 +1,6 @@
 [package]
 name = "r8debugger"
-description = "r8 调试工具：r8dbg 命令行"
+description = "r8 debugging tool: the r8dbg CLI"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

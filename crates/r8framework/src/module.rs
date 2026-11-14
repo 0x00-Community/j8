@@ -1,4 +1,5 @@
-//! ES 模块：编译器产出的静态信息、运行时的模块记录、导出解析、命名空间对象的属性行为（规范 10.4.6）。
+//! ES modules: static information produced by the compiler, runtime module records, export resolution, and the property
+//! behavior of namespace objects (spec 10.4.6).
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
@@ -6,38 +7,38 @@ use r8gc::{Collect, Gc};
 
 use crate::{Agent, Error, ErrorKind, FuncId, JsEnv, JsObject, JsString, Key, ObjectKind, Property, PropertyKey, Slot, Value};
 
-/// 导入的是什么：某个名字，或整个命名空间（`import * as ns` / `export * as ns from`）。
+/// What is imported: a name, or the whole namespace (`import * as ns` / `export * as ns from`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ImportName {
     Named(Box<str>),
     Namespace,
 }
 
-/// 一条导入：从第 `request` 个请求的模块导入 `name`（下标就是导入绑定的编号）。
+/// One import: import `name` from the module of the `request`-th request (the index is the import binding's id).
 #[derive(Clone, Debug)]
 pub struct ImportEntry {
     pub request: usize,
     pub name: ImportName,
 }
 
-/// 编译器给出的模块静态信息。
+/// Static module information produced by the compiler.
 #[derive(Clone, Debug, Default)]
 pub struct ModuleInfo {
-    /// `from` 后面的模块说明符（去重，按出现顺序）
+    /// The module specifiers after `from` (deduplicated, in order of appearance)
     pub requests: Vec<Box<str>>,
     pub imports: Vec<ImportEntry>,
-    /// 本模块自己的导出：导出名 ⇒ 模块环境槽位
+    /// This module's own exports: export name ⇒ module environment slot
     pub local_exports: Vec<(Box<str>, u16)>,
-    /// 转导出：导出名 ⇒（请求, 导入名）
+    /// Re-exports: export name ⇒ (request, import name)
     pub indirect_exports: Vec<(Box<str>, usize, ImportName)>,
     /// `export * from`
     pub star_exports: Vec<usize>,
-    /// 模块环境的槽位数；哪些槽位是 `let` / `const` / `class`（开始时未初始化）
+    /// The number of module environment slots; which slots are `let` / `const` / `class` (uninitialized at start)
     pub slots: u16,
     pub lexical: Vec<u16>,
 }
 
-/// 模块的状态。
+/// The state of a module.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Collect)]
 #[collect(require_static)]
 pub enum ModuleStatus {
@@ -46,7 +47,7 @@ pub enum ModuleStatus {
     Evaluated,
 }
 
-/// 解析好的一个绑定：某个模块环境的槽位，或某个模块的命名空间对象。
+/// A resolved binding: a slot in some module environment, or some module's namespace object.
 #[derive(Clone, Copy, Debug, Collect)]
 #[collect(no_drop)]
 pub enum ResolvedBinding<'gc> {
@@ -54,7 +55,7 @@ pub enum ResolvedBinding<'gc> {
     Namespace(u32),
 }
 
-/// 运行时的模块记录（放在 Realm 里，按加载顺序编号）。
+/// A runtime module record (kept in the Realm, numbered in load order).
 #[derive(Collect)]
 #[collect(no_drop)]
 pub struct ModuleRecord<'gc> {
@@ -64,11 +65,11 @@ pub struct ModuleRecord<'gc> {
     pub info: alloc::rc::Rc<ModuleInfo>,
     pub main: FuncId,
     pub status: ModuleStatus,
-    /// 求值抛出的异常（再导入同一个模块照样抛）
+    /// The exception thrown during evaluation (importing the same module again throws it again)
     pub error: Option<Value<'gc>>,
-    /// 各请求对应的模块编号
+    /// The module id for each request
     pub requested: Vec<u32>,
-    /// 各导入绑定解析到哪里
+    /// Where each import binding resolves to
     pub imports: Vec<ResolvedBinding<'gc>>,
     pub namespace: Option<JsObject<'gc>>,
     pub meta: Option<JsObject<'gc>>,
@@ -80,7 +81,7 @@ impl core::fmt::Debug for ModuleRecord<'_> {
     }
 }
 
-/// ResolveExport 的结果。
+/// The result of ResolveExport.
 #[derive(Clone, Copy, Debug)]
 pub enum Resolution<'gc> {
     Found(ResolvedBinding<'gc>),
@@ -89,7 +90,7 @@ pub enum Resolution<'gc> {
 }
 
 impl ResolvedBinding<'_> {
-    /// 是不是同一个绑定。
+    /// Whether this is the same binding.
     fn same(self, other: Self) -> bool {
         match (self, other) {
             (ResolvedBinding::Slot(e1, s1), ResolvedBinding::Slot(e2, s2)) => Gc::ptr_eq(e1, e2) && s1 == s2,
@@ -106,7 +107,7 @@ impl<'gc> Agent<'gc, '_> {
         (r.info.clone(), r.env, r.requested.clone())
     }
 
-    /// ResolveExport(module, name)。
+    /// ResolveExport(module, name).
     pub fn resolve_export(&self, m: u32, name: &str, seen: &mut Vec<(u32, Box<str>)>) -> Resolution<'gc> {
         if seen.iter().any(|(x, n)| *x == m && **n == *name) {
             return Resolution::NotFound;
@@ -141,7 +142,7 @@ impl<'gc> Agent<'gc, '_> {
         found.map_or(Resolution::NotFound, Resolution::Found)
     }
 
-    /// GetExportedNames(module)。
+    /// GetExportedNames(module).
     pub fn exported_names(&self, m: u32, seen: &mut Vec<u32>) -> Vec<Box<str>> {
         if seen.contains(&m) {
             return Vec::new();
@@ -159,7 +160,7 @@ impl<'gc> Agent<'gc, '_> {
         out
     }
 
-    /// 绑定的当前值（还没初始化抛 ReferenceError）。
+    /// The binding's current value (throws a ReferenceError if not yet initialized).
     pub fn binding_value(&mut self, b: ResolvedBinding<'gc>, name: &str) -> Result<Value<'gc>, Error> {
         match b {
             ResolvedBinding::Slot(env, slot) => match env.borrow().slots[usize::from(slot)] {
@@ -170,7 +171,8 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    /// 模块的命名空间对象（第一次要时建，导出名排好序记下解析结果）。
+    /// The module's namespace object (created on first request, recording export names in sorted order with their
+    /// resolutions).
     pub fn module_namespace(&mut self, m: u32) -> JsObject<'gc> {
         if let Some(ns) = self.realm.modules.borrow()[m as usize].namespace {
             return ns;
@@ -190,8 +192,8 @@ impl<'gc> Agent<'gc, '_> {
         ns
     }
 
-    /// 命名空间对象上的导出（不是命名空间对象或不是字符串键给 `None`）。
-    #[expect(clippy::option_option, reason = "外层：是不是命名空间对象的字符串键；内层：有没有这个导出")]
+    /// An export on a namespace object (`None` if not a namespace object or not a string key).
+    #[expect(clippy::option_option, reason = "outer: whether it is a string key on a namespace object; inner: whether that export exists")]
     pub(crate) fn namespace_export(o: JsObject<'gc>, key: Key<'_, 'gc>) -> Option<Option<ResolvedBinding<'gc>>> {
         let Key::Str(k) = key else { return None };
         match &o.borrow().kind {
@@ -200,14 +202,14 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    /// 命名空间对象的 [[GetOwnProperty]]（字符串键）。
+    /// [[GetOwnProperty]] of a namespace object (string keys).
     pub(crate) fn namespace_own(&mut self, b: Option<ResolvedBinding<'gc>>, key: &str) -> Result<Option<Property<'gc>>, Error> {
         let Some(b) = b else { return Ok(None) };
         let v = self.binding_value(b, key)?;
         Ok(Some(Property { slot: Slot::Data(v), enumerable: true, writable: true, configurable: false }))
     }
 
-    /// 命名空间对象的自有键：导出名（已排序）再 Symbol 键。
+    /// Own keys of a namespace object: export names (sorted), then Symbol keys.
     pub(crate) fn namespace_keys(o: JsObject<'gc>) -> Option<Vec<PropertyKey<'gc>>> {
         let d = o.borrow();
         let ObjectKind::ModuleNamespace(exports) = &d.kind else { return None };

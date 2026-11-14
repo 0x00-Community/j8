@@ -1,4 +1,4 @@
-//! 汇编是反汇编的逆：反汇编清单读回来逐字段相同。
+//! Assembly is the inverse of disassembly: a disassembly listing reads back identical field by field.
 use r8framework::Source;
 use r8virtasm::Module;
 

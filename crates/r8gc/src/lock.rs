@@ -1,10 +1,10 @@
-//! `Lock` / `RefLock`：放在 `Gc` 里的可变单元，写的时候经写屏障。
+//! `Lock` / `RefLock`: mutable cells placed inside a `Gc`; writes go through the write barrier.
 use core::cell::{BorrowError, BorrowMutError, Cell, Ref, RefCell, RefMut};
 use core::fmt;
 
 use crate::{Collect, Gc, Mutation, Relocate, Trace};
 
-/// `Cell` 的回收版：`Gc<Lock<T>>::set` 要 `&Mutation`。
+/// Collectable version of `Cell`: `Gc<Lock<T>>::set` requires `&Mutation`.
 #[derive(Default)]
 pub struct Lock<T>(Cell<T>);
 
@@ -64,7 +64,7 @@ unsafe impl<'gc, T: Collect<'gc> + Copy + 'gc> Collect<'gc> for Lock<T> {
     }
 }
 
-/// `RefCell` 的回收版：`Gc<RefLock<T>>::borrow_mut` 要 `&Mutation`。
+/// Collectable version of `RefCell`: `Gc<RefLock<T>>::borrow_mut` requires `&Mutation`.
 #[derive(Default)]
 pub struct RefLock<T>(RefCell<T>);
 
@@ -127,7 +127,7 @@ unsafe impl<'gc, T: Collect<'gc> + 'gc> Collect<'gc> for RefLock<T> {
     const PARALLEL_DROP: bool = T::PARALLEL_DROP;
 
     fn trace(&self, t: &mut Trace<'_>) {
-        // SAFETY: 回收只在 `mutate` 之外，没有借出中的 RefMut
+        // SAFETY: collection only happens outside `mutate`, so no RefMut is outstanding
         t.trace(unsafe { &*self.0.as_ptr() });
     }
 

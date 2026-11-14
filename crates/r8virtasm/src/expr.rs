@@ -1,4 +1,4 @@
-//! JS ⇒ 字节码：表达式。结果都留在 acc。
+//! JS ⇒ bytecode: expressions. Results are always left in acc.
 use oxc_ast::ast::{
     Argument, ArrayAssignmentTarget, ArrayExpressionElement, ArrowFunctionBody, AssignmentTarget, AssignmentTargetMaybeDefault, AssignmentTargetProperty, ChainElement, ComputedMemberExpression, PrivateFieldExpression, StaticMemberExpression, TaggedTemplateExpression, ArrowFunctionExpression, AssignmentExpression, AssignmentOperator, BinaryExpression, BinaryOperator, CallExpression, Expression, LogicalOperator, MemberExpression, MethodDefinitionKind, ObjectExpression, ObjectPropertyKind, PropertyKind as PropertyKind_, SimpleAssignmentTarget, TemplateElement, UnaryOperator, UpdateExpression,
     UpdateOperator,
@@ -10,7 +10,7 @@ use crate::compiler::{Body, Compiler, Flavor, Place};
 use crate::scope::Hidden;
 use crate::{Const, Constant, FunctionKind, Insn, PropertyKind, Reg};
 
-/// 二元运算符 ⇒ 字节码运算。
+/// Binary operator ⇒ bytecode operation.
 #[derive(Clone, Copy)]
 enum Operator {
     Binary(BinaryOp),
@@ -19,15 +19,15 @@ enum Operator {
     In,
 }
 
-/// 赋值运算符的三类。
+/// The three kinds of assignment operator.
 enum Assign {
     Plain,
     Binary(BinaryOp),
-    /// `||=` / `&&=` / `??=`：左边已经满足就不求右边
+    /// `||=` / `&&=` / `??=`: the right side is not evaluated if the left side already satisfies the condition
     Logical(fn(crate::Label) -> Insn),
 }
 
-/// 数组字面量 / 实参里的一个元素。
+/// An element of an array literal / argument list.
 enum Element<'a> {
     Value(&'a Expression<'a>),
     Spread(&'a Expression<'a>),
@@ -53,13 +53,13 @@ impl<'a> From<&'a Argument<'a>> for Element<'a> {
     }
 }
 
-/// 赋值目标：名字，或已经求好对象（与键）的属性。
+/// Assignment target: a name, or a property whose object (and key) are already evaluated.
 enum Target<'a> {
-    /// 名字与它在源码里的位置（判断要不要查死区）
+    /// The name and its position in the source (to decide whether a TDZ check is needed)
     Name(&'a str, u32),
     Named { obj: Reg, name: Const },
     Keyed { obj: Reg, key: Reg },
-    /// `obj.#x`：私有名在 `key`
+    /// `obj.#x`: the private name is in `key`
     Private { obj: Reg, key: Reg },
 }
 
@@ -117,7 +117,7 @@ impl<'a> Compiler<'a, '_> {
         Ok(self.constant(Constant::String(s.into())))
     }
 
-    /// 模板字面量的一段（按转义处理后的文本）。
+    /// A segment of a template literal (text after escape processing).
     fn quasi(&mut self, q: &TemplateElement<'a>) -> Result<Const, Error> {
         let cooked = match q.value.cooked {
             Some(c) => c.as_str(),
@@ -126,7 +126,7 @@ impl<'a> Compiler<'a, '_> {
         self.string_const(cooked, q.span)
     }
 
-    #[expect(clippy::too_many_lines, reason = "一种表达式一个分支，拆开反而难读")]
+    #[expect(clippy::too_many_lines, reason = "one arm per expression kind; splitting it would hurt readability")]
     pub(crate) fn expr(&mut self, e: &'a Expression<'a>) -> Result<(), Error> {
         match e {
             Expression::NumericLiteral(n) => {
@@ -149,7 +149,7 @@ impl<'a> Compiler<'a, '_> {
             }
             Expression::NullLiteral(_) => _ = self.emit(Insn::LdaNull),
             Expression::TemplateLiteral(t) => {
-                // q0 + e0 + q1 + … ：左边是字符串，`+` 就是 ToString 后拼接
+                // q0 + e0 + q1 + …: the left side is a string, so `+` is ToString followed by concatenation
                 let first = t.quasis.first().expect("a template has a first quasi");
                 let k = self.quasi(first)?;
                 self.emit(Insn::LdaConst(k));
@@ -201,7 +201,7 @@ impl<'a> Compiler<'a, '_> {
                             None => _ = self.emit(Insn::LdaUndefined),
                         }
                         if async_generator {
-                            // async 生成器里 `yield v` 先等 v
+                            // In an async generator `yield v` awaits v first
                             self.emit(Insn::Await { mode });
                             self.resume_dispatch(mode, false)?;
                         }
@@ -246,7 +246,7 @@ impl<'a> Compiler<'a, '_> {
                     UnaryOperator::Delete => return self.delete(&u.argument),
                 };
                 match (&u.argument, op) {
-                    // `typeof 未声明的名字` 不抛错
+                    // `typeof` of an undeclared name does not throw
                     (Expression::Identifier(id), UnaryOp::Typeof) if !self.with_chain(id.name.as_str()).is_empty() => self.load_dynamic(id.name.as_str(), true, None),
                     (Expression::Identifier(id), UnaryOp::Typeof) if matches!(self.lookup(id.name.as_str()).0, Place::Global(g) if !matches!(g, "undefined" | "NaN" | "Infinity")) => {
                         let k = self.name(id.name.as_str());
@@ -344,7 +344,8 @@ impl<'a> Compiler<'a, '_> {
         Ok(())
     }
 
-    /// 匿名函数 / 箭头函数 / 匿名类按规范推断名字（NamedEvaluation）；别的照常求值。
+    /// Anonymous functions / arrow functions / anonymous classes get an inferred name per the spec (NamedEvaluation);
+    /// everything else is evaluated as usual.
     pub(crate) fn expr_named(&mut self, e: &'a Expression<'a>, name: &'a str) -> Result<(), Error> {
         match e {
             Expression::FunctionExpression(f) if f.id.is_none() => {
@@ -359,7 +360,8 @@ impl<'a> Compiler<'a, '_> {
         }
     }
 
-    /// 标签模板：`tag(模板对象, ...替换值)`，模板对象按调用点缓存（cooked 串非法转义时是 undefined）。
+    /// Tagged template: `tag(templateObject, ...substitutions)`; the template object is cached per call site (a cooked
+    /// string is undefined when it has an invalid escape).
     fn tagged_template(&mut self, t: &'a TaggedTemplateExpression<'a>) -> Result<(), Error> {
         let subs = &t.quasi.expressions;
         let argc = u16::try_from(subs.len() + 1).map_err(|_| self.unsupported(t.span, "more than 65535 substitutions"))?;
@@ -431,7 +433,8 @@ impl<'a> Compiler<'a, '_> {
 
     fn binary(&mut self, b: &'a BinaryExpression<'a>) -> Result<(), Error> {
         let op = Self::operator(b.operator);
-        // 左边是寄存器里的变量、右边改不了它：直接拿它的寄存器当左操作数，不先拷进临时寄存器
+        // The left side is a variable in a register and the right side cannot change it: use its register directly as
+        // the left operand instead of copying it into a temporary register first
         if let Expression::Identifier(id) = &b.left
             && Self::cannot_assign(&b.right)
             && let Some(l) = self.register_of(id.name.as_str(), id.span.start)
@@ -459,8 +462,9 @@ impl<'a> Compiler<'a, '_> {
         }
     }
 
-    /// 求值 `e` 不会给本函数的寄存器变量赋值：只由字面量、名字、`this`、静态成员读和一元 / 二元 / 逻辑 / 条件运算组成
-    /// （运算里调到的用户代码在别的函数里，碰不到本函数寄存器里的变量）。
+    /// Evaluating `e` cannot assign to this function's register variables: it consists only of literals, names, `this`,
+    /// static member reads, and unary / binary / logical / conditional operations (user code called by these operations
+    /// lives in other functions and cannot touch the variables in this function's registers).
     fn cannot_assign(e: &Expression<'_>) -> bool {
         match e {
             Expression::NumericLiteral(_) | Expression::StringLiteral(_) | Expression::BooleanLiteral(_) | Expression::NullLiteral(_) | Expression::BigIntLiteral(_) | Expression::Identifier(_) | Expression::ThisExpression(_) => true,
@@ -474,7 +478,7 @@ impl<'a> Compiler<'a, '_> {
         }
     }
 
-    /// 求出赋值目标的对象（与键）放进临时寄存器。
+    /// Evaluates the object (and key) of an assignment target into temporary registers.
     fn target(&mut self, t: &'a SimpleAssignmentTarget<'a>) -> Result<Target<'a>, Error> {
         if let SimpleAssignmentTarget::AssignmentTargetIdentifier(id) = t {
             return Ok(Target::Name(id.name.as_str(), id.span.start));
@@ -549,7 +553,8 @@ impl<'a> Compiler<'a, '_> {
             self.release(v);
             return Ok(());
         };
-        // `o.x = v` / `o[k] = v`：对象在寄存器里、右边（和键）改不了它，直接写，不先拷对象
+        // `o.x = v` / `o[k] = v`: the object is in a register and the right side (and the key) cannot change it, so
+        // write directly without copying the object first
         if a.operator == AssignmentOperator::Assign
             && Self::cannot_assign(&a.right)
             && let Some(m) = t.as_member_expression()
@@ -606,7 +611,8 @@ impl<'a> Compiler<'a, '_> {
         Ok(())
     }
 
-    /// 求值 `e`，结果不用（函数里的表达式语句、`for` 的更新部分）：后置 `++` / `--` 不留旧值。
+    /// Evaluates `e` with the result unused (expression statements in functions, the update part of `for`): postfix
+    /// `++` / `--` does not keep the old value.
     pub(crate) fn effect(&mut self, e: &'a Expression<'a>) -> Result<(), Error> {
         match e {
             Expression::UpdateExpression(u) => self.update_as(u, true),
@@ -619,11 +625,12 @@ impl<'a> Compiler<'a, '_> {
         self.update_as(u, false)
     }
 
-    /// `++` / `--`；`discard` 时结果没人用，后置的也不留旧值。
+    /// `++` / `--`; with `discard` the result is unused, so postfix does not keep the old value either.
     fn update_as(&mut self, u: &'a UpdateExpression<'a>, discard: bool) -> Result<(), Error> {
         let t = self.target(&u.argument)?;
         self.target_load(&t);
-        // `Inc` / `Dec` 自己做 ToNumeric；只有后置且要旧值时才单独转一次留着
+        // `Inc` / `Dec` do ToNumeric themselves; convert separately and keep the result only for postfix when the old
+        // value is needed
         let old = (!u.prefix && !discard).then(|| self.temp());
         if let Some(r) = old {
             self.emit(Insn::ToNumeric);
@@ -642,7 +649,7 @@ impl<'a> Compiler<'a, '_> {
         Ok(())
     }
 
-    /// 调用：`callee`、`this`、实参排在连续的寄存器里。
+    /// Call: `callee`, `this` and the arguments are laid out in consecutive registers.
     fn call(&mut self, c: &'a CallExpression<'a>) -> Result<(), Error> {
         let spread = Self::has_spread(&c.arguments);
         let argc = if spread { 0 } else { u16::try_from(c.arguments.len()).map_err(|_| self.unsupported(c.span, "more than 65535 arguments"))? };
@@ -728,7 +735,8 @@ impl<'a> Compiler<'a, '_> {
         Ok(())
     }
 
-    /// `e` 是本函数寄存器里的变量或 `this`（这里不用查死区、不在 `with` 里）就给出那个寄存器，读它不用先拷进临时寄存器。
+    /// If `e` is a variable in this function's registers or `this` (no TDZ check needed here, not inside `with`), gives
+    /// that register, so reading it needs no copy into a temporary register.
     fn in_register(&self, e: &'a Expression<'a>) -> Option<Reg> {
         match e {
             Expression::Identifier(id) => self.register_of(id.name.as_str(), id.span.start),
@@ -756,7 +764,7 @@ impl<'a> Compiler<'a, '_> {
         Ok(())
     }
 
-    /// `obj.#x`。
+    /// `obj.#x`.
     fn private_member(&mut self, m: &'a PrivateFieldExpression<'a>) -> Result<(), Error> {
         self.expr(&m.object)?;
         self.optional(m.optional, m.span)?;
@@ -769,7 +777,8 @@ impl<'a> Compiler<'a, '_> {
     }
 
     fn computed_member(&mut self, m: &'a ComputedMemberExpression<'a>) -> Result<(), Error> {
-        // 对象在寄存器里、键改不了它：先求键，直接用对象的寄存器
+        // The object is in a register and the key cannot change it: evaluate the key first and use the object's
+        // register directly
         if !m.optional
             && Self::cannot_assign(&m.expression)
             && let Some(obj) = self.in_register(&m.object)
@@ -788,7 +797,7 @@ impl<'a> Compiler<'a, '_> {
         Ok(())
     }
 
-    /// `?.`：acc 是 null / undefined 就跳到当前链的末尾。
+    /// `?.`: if acc is null / undefined, jump to the end of the current chain.
     fn optional(&mut self, optional: bool, span: Span) -> Result<(), Error> {
         if optional {
             let j = self.jump(Insn::JumpIfNullish);
@@ -804,7 +813,8 @@ impl<'a> Compiler<'a, '_> {
         args.iter().any(|a| matches!(a, Argument::SpreadElement(_)))
     }
 
-    /// 带展开 / 空位的元素序列建成一个数组，放进新的临时寄存器（调用方释放）。
+    /// Builds a sequence of elements with spreads / holes into an array in a new temporary register (the caller frees
+    /// it).
     fn spread_array(&mut self, elements: impl Iterator<Item = Element<'a>>) -> Result<Reg, Error> {
         let arr = self.temp();
         self.emit(Insn::CreateArray { first: arr, count: 0 });
@@ -825,7 +835,7 @@ impl<'a> Compiler<'a, '_> {
         Ok(arr)
     }
 
-    /// 解构赋值：把寄存器 `value` 里的值按赋值目标模式存进去。
+    /// Destructuring assignment: stores the value in register `value` according to the assignment target pattern.
     pub(crate) fn assign_target(&mut self, t: &'a AssignmentTarget<'a>, value: Reg) -> Result<(), Error> {
         match t {
             AssignmentTarget::ArrayAssignmentTarget(a) => self.assign_array(a, value)?,
@@ -884,10 +894,12 @@ impl<'a> Compiler<'a, '_> {
         Ok(())
     }
 
-    /// 数组解构赋值：规范顺序——每个元素先求值目标引用、再走迭代器；中途抛出先关迭代器。
+    /// Array destructuring assignment, in spec order: for each element, evaluate the target reference first, then step
+    /// the iterator; on a throw midway, close the iterator first.
     fn assign_array(&mut self, a: &'a ArrayAssignmentTarget<'a>, value: Reg) -> Result<(), Error> {
         let iter = self.iterate(value);
-        // 规范顺序：每个元素先求值目标引用、再走迭代器；中途抛出先关迭代器
+        // Spec order: for each element, evaluate the target reference first, then step the iterator; on a throw midway,
+        // close the iterator first
         self.closing_on_throw(iter, |c| {
             for e in &a.elements {
                 let Some(e) = e else {
@@ -936,7 +948,8 @@ impl<'a> Compiler<'a, '_> {
         Ok(())
     }
 
-    /// 数组解构的元素：目标不是模式就先求值它的引用（对象与键进临时寄存器）；是模式给 `None`，取到值再展开。
+    /// An element of array destructuring: if the target is not a pattern, evaluate its reference first (object and key
+    /// go into temporary registers); for a pattern gives `None`, expanded once the value is available.
     fn pre_target(&mut self, t: &'a AssignmentTarget<'a>) -> Result<Option<Target<'a>>, Error> {
         match t.as_simple_assignment_target() {
             Some(s) => Ok(Some(self.target(s)?)),
@@ -944,7 +957,7 @@ impl<'a> Compiler<'a, '_> {
         }
     }
 
-    /// 把 `v` 写进先求好的目标，或按嵌套模式展开。
+    /// Writes `v` into the previously evaluated target, or expands it per the nested pattern.
     fn put_target(&mut self, pre: Option<&Target<'a>>, t: &'a AssignmentTarget<'a>, v: Reg) -> Result<(), Error> {
         match pre {
             Some(target) => {
@@ -972,7 +985,8 @@ impl<'a> Compiler<'a, '_> {
         }
     }
 
-    /// `yield* a`：把恢复方式与送进来的值原样转给内层迭代器，它走完时的值是表达式的值。
+    /// `yield* a`: forwards the resume mode and the value sent in to the inner iterator unchanged; its completion value
+    /// is the value of the expression.
     fn yield_star(&mut self, a: &'a Expression<'a>, mode: Reg) -> Result<(), Error> {
         self.expr(a)?;
         let src = self.temp();
@@ -1006,8 +1020,9 @@ impl<'a> Compiler<'a, '_> {
         Ok(())
     }
 
-    /// async 生成器里的 `yield* a`：async 迭代器协议，内层每步的结果先等；退回同步迭代器时值也等。
-    /// `await` 恢复时会改写 `mode`，所以委托用的恢复方式另存一份。
+    /// `yield* a` in an async generator: async iterator protocol; each step's result from the inner iterator is awaited
+    /// first, and when falling back to a sync iterator the value is awaited too. Resuming from `await` overwrites
+    /// `mode`, so the resume mode used for delegation is saved separately.
     fn yield_star_async(&mut self, a: &'a Expression<'a>, mode: Reg) -> Result<(), Error> {
         self.expr(a)?;
         let iter = self.temps(4);
@@ -1056,7 +1071,7 @@ impl<'a> Compiler<'a, '_> {
         Ok(())
     }
 
-    /// 实参逐个求值放进 `first` 起的连续寄存器。
+    /// Evaluates the arguments one by one into consecutive registers starting at `first`.
     fn arguments(&mut self, args: &'a [Argument<'a>], first: Reg) -> Result<(), Error> {
         for (i, a) in (0..).zip(args) {
             let e = a.as_expression().ok_or_else(|| self.unsupported(a.span(), "spread arguments"))?;
@@ -1066,7 +1081,7 @@ impl<'a> Compiler<'a, '_> {
         Ok(())
     }
 
-    /// `this` 读进一个临时寄存器（`super.x` 的接收者）。
+    /// Reads `this` into a temporary register (the receiver of `super.x`).
     fn this_temp(&mut self) -> Reg {
         self.load(crate::scope::THIS);
         let t = self.temp();
@@ -1074,7 +1089,8 @@ impl<'a> Compiler<'a, '_> {
         t
     }
 
-    /// `delete x`：属性删掉给结果；删名字（非严格模式）给 `false`；别的表达式求完给 `true`。
+    /// `delete x`: a property delete gives the result; deleting a name (sloppy mode) gives `false`; any other
+    /// expression is evaluated and gives `true`.
     fn delete(&mut self, e: &'a Expression<'a>) -> Result<(), Error> {
         match e {
             Expression::StaticMemberExpression(m) => {
@@ -1143,7 +1159,7 @@ impl<'a> Compiler<'a, '_> {
                     self.emit(Insn::CreateMethod { func: n, home: obj });
                 }
                 (v, _) => match self.static_name(&p.key, p.computed) {
-                    // `__proto__: function () {}` 不推断名字
+                    // `__proto__: function () {}` does not infer a name
                     Some(n) if n != "__proto__" || p.shorthand => self.expr_named(v, n)?,
                     _ => self.expr(v)?,
                 },

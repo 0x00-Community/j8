@@ -6,15 +6,16 @@ use r8framework::{Agent, Error, ErrorKind, JsObject, ObjectData, ObjectKind, Pro
 
 use crate::{Args, Installer};
 
-/// `Array` 与 `Array.prototype`：方法都按规范对任意类数组通用（经 `length` 与下标属性）。
+/// `Array` and `Array.prototype`: per spec, every method works generically on any array-like (via `length` and index
+/// properties).
 struct Arrays;
 
-/// 2^53 − 1：类数组长度的上限
+/// 2^53 − 1: maximum length of an array-like
 const MAX_LENGTH: f64 = 9_007_199_254_740_991.0;
-/// 2^32 − 1：真数组长度的上限
+/// 2^32 − 1: maximum length of a true array
 const MAX_ARRAY_LENGTH: f64 = 4_294_967_295.0;
 
-/// 回调方法的结果怎么收。
+/// How a callback method collects its results.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Visit {
     ForEach,
@@ -24,7 +25,7 @@ enum Visit {
     Every,
 }
 
-/// `find` 一族：方向与给值还是下标。
+/// The `find` family: direction, and whether to return the value or the index.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Find {
     Value,
@@ -34,26 +35,26 @@ enum Find {
 }
 
 impl Arrays {
-    /// O = ToObject(this)，len = LengthOfArrayLike(O)。
+    /// O = ToObject(this), len = LengthOfArrayLike(O).
     fn target<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>) -> Result<(JsObject<'gc>, f64), Error> {
         let o = a.to_object(this)?;
         let len = a.length_of_array_like(o.into())?;
         Ok((o, len))
     }
 
-    /// ArrayCreate(len)：长度超过 2^32 − 1 抛 RangeError，元素全是空洞。
+    /// ArrayCreate(len): throws RangeError if the length exceeds 2^32 − 1; all elements are holes.
     fn create<'gc>(a: &mut Agent<'gc, '_>, len: f64, proto: Option<JsObject<'gc>>) -> Result<JsObject<'gc>, Error> {
         if len > MAX_ARRAY_LENGTH {
             return Err(a.throw(ErrorKind::Range, "Invalid array length"));
         }
-        #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "已检查在 [0, 2^32 − 1] 里")]
+        #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "checked to be in [0, 2^32 − 1]")]
         let n = len as u32;
         let arr = ObjectData { kind: ObjectKind::Array(Vec::new()), proto: Some(proto.unwrap_or(a.realm.array_proto)), ..ObjectData::default() }.alloc(a.mc);
         arr.borrow_mut(a.mc).set_array_length(n);
         Ok(arr)
     }
 
-    /// ArraySpeciesCreate(original, len)。
+    /// ArraySpeciesCreate(original, len).
     fn species_create<'gc>(a: &mut Agent<'gc, '_>, original: JsObject<'gc>, len: f64) -> Result<JsObject<'gc>, Error> {
         if !a.is_array(original.into())? {
             return Self::create(a, len, None);
@@ -77,12 +78,12 @@ impl Arrays {
         }
     }
 
-    /// `Set(O, "length", n, true)`。
+    /// `Set(O, "length", n, true)`.
     fn set_length<'gc>(a: &mut Agent<'gc, '_>, o: JsObject<'gc>, n: f64) -> Result<(), Error> {
         a.set_named(o.into(), "length", n.into())
     }
 
-    /// 相对下标（负数从末尾数），夹到 `[0, len]`；`undefined` 给 `default`。
+    /// Relative index (negative counts from the end), clamped to `[0, len]`; `undefined` gives `default`.
     fn relative<'gc>(a: &mut Agent<'gc, '_>, v: Value<'gc>, len: f64, default: f64) -> Result<f64, Error> {
         if v == Value::Undefined {
             return Ok(default);
@@ -100,7 +101,7 @@ impl Arrays {
         }
     }
 
-    /// `new Array(...)` / `Array(...)`。
+    /// `new Array(...)` / `Array(...)`.
     fn array<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let proto = a.proto_from_ctor(a.new_target, a.realm.array_proto)?;
         match args {
@@ -124,7 +125,7 @@ impl Arrays {
         Ok(a.is_array(args.at(0))?.into())
     }
 
-    /// `this` 能构造就 `new this(len?)`，否则 ArrayCreate。
+    /// `new this(len?)` if `this` is a constructor, otherwise ArrayCreate.
     fn construct_this<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, len: Option<f64>) -> Result<JsObject<'gc>, Error> {
         if a.is_constructor(this) {
             let args: Vec<Value<'gc>> = len.map(Value::from).into_iter().collect();
@@ -137,9 +138,9 @@ impl Arrays {
         }
     }
 
-    /// `Array.of(...items)`。
+    /// `Array.of(...items)`.
     fn of<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        #[expect(clippy::cast_precision_loss, reason = "实参个数远小于 2^53")]
+        #[expect(clippy::cast_precision_loss, reason = "argument count is far below 2^53")]
         let len = args.len() as f64;
         let arr = Self::construct_this(a, this, Some(len))?;
         for (k, &v) in (0..).zip(args) {
@@ -149,7 +150,7 @@ impl Arrays {
         Ok(arr.into())
     }
 
-    /// `Array.from(items, mapFn, thisArg)`。
+    /// `Array.from(items, mapFn, thisArg)`.
     fn from<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let (items, mapper, this_arg) = (args.at(0), args.at(1), args.at(2));
         let mapping = mapper != Value::Undefined;
@@ -216,18 +217,18 @@ impl Arrays {
 
     fn push<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let (o, len) = Self::target(a, this)?;
-        // 快路：稠密、可扩展的真数组，直接追加
+        // Fast path: dense, extensible true array; append directly
         if Self::no_indexed_protos(o) {
             let mut d = o.borrow_mut(a.mc);
             let fast = !d.non_extensible && !d.length_readonly && d.sparse_length == 0;
             if let (true, ObjectKind::Array(items)) = (fast, &mut d.kind) {
                 items.extend_from_slice(args);
-                #[expect(clippy::cast_precision_loss, reason = "数组长度不超过 2^32")]
+                #[expect(clippy::cast_precision_loss, reason = "array length is at most 2^32")]
                 let n = items.len() as f64;
                 return Ok(n.into());
             }
         }
-        #[expect(clippy::cast_precision_loss, reason = "实参个数远小于 2^53")]
+        #[expect(clippy::cast_precision_loss, reason = "argument count is far below 2^53")]
         let count = args.len() as f64;
         if len + count > MAX_LENGTH {
             return Err(a.throw(ErrorKind::Type, "Pushing elements past 2^53 - 1 length"));
@@ -241,7 +242,8 @@ impl Arrays {
         Ok(n.into())
     }
 
-    /// 原型链上（数组本身之外）没有下标属性与访问器：追加 / 前移时不会碰到 setter。
+    /// No index properties or accessors on the prototype chain (other than on the array itself): appending / shifting
+    /// never hits a setter.
     fn no_indexed_protos(o: JsObject<'_>) -> bool {
         let mut cur = o.borrow().proto;
         while let Some(p) = cur {
@@ -279,7 +281,7 @@ impl Arrays {
             return Ok(Value::Undefined);
         }
         let first = a.get_index(o.into(), 0.0)?;
-        // 快路：稠密真数组整体前移
+        // Fast path: shift a dense true array as a whole
         if Self::no_indexed_protos(o) {
             let mut d = o.borrow_mut(a.mc);
             let fast = !d.non_extensible && !d.length_readonly && d.sparse_length == 0;
@@ -296,7 +298,8 @@ impl Arrays {
         Ok(first)
     }
 
-    /// 把 `[from, from + count)` 挪到 `to` 起（空洞照搬成删除），按方向逐个来。
+    /// Move `[from, from + count)` to start at `to` (holes are carried over as deletions), one element at a time in the
+    /// appropriate direction.
     fn move_range<'gc>(a: &mut Agent<'gc, '_>, o: JsObject<'gc>, from: f64, to: f64, count: f64) -> Result<(), Error> {
         let step = |a: &mut Agent<'gc, '_>, f: f64, t: f64| -> Result<(), Error> {
             if let Some(v) = a.present_index(o, f)? {
@@ -323,7 +326,7 @@ impl Arrays {
 
     fn unshift<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let (o, len) = Self::target(a, this)?;
-        #[expect(clippy::cast_precision_loss, reason = "实参个数远小于 2^53")]
+        #[expect(clippy::cast_precision_loss, reason = "argument count is far below 2^53")]
         let count = args.len() as f64;
         if count > 0.0 {
             if len + count > MAX_LENGTH {
@@ -360,7 +363,7 @@ impl Arrays {
         let (o, len) = Self::target(a, this)?;
         let start = Self::relative(a, args.at(0), len, 0.0)?;
         let items = args.get(2..).unwrap_or(&[]);
-        #[expect(clippy::cast_precision_loss, reason = "实参个数远小于 2^53")]
+        #[expect(clippy::cast_precision_loss, reason = "argument count is far below 2^53")]
         let item_count = items.len() as f64;
         let delete_count = match args.len() {
             0 => 0.0,
@@ -388,7 +391,7 @@ impl Arrays {
         Ok(removed.into())
     }
 
-    /// splice 里挪动删除区之后的元素：删 `delete_count` 个、留出 `item_count` 个位置。
+    /// In splice, move the elements after the deleted range: remove `delete_count`, make room for `item_count`.
     fn shift_tail<'gc>(a: &mut Agent<'gc, '_>, o: JsObject<'gc>, len: f64, start: f64, delete_count: f64, item_count: f64) -> Result<(), Error> {
         if item_count < delete_count {
             Self::move_range(a, o, start + delete_count, start + item_count, len - start - delete_count)?;
@@ -403,7 +406,7 @@ impl Arrays {
         Ok(())
     }
 
-    /// IsConcatSpreadable。
+    /// IsConcatSpreadable.
     fn spreadable<'gc>(a: &mut Agent<'gc, '_>, v: Value<'gc>) -> Result<bool, Error> {
         if !matches!(v, Value::Object(_)) {
             return Ok(false);
@@ -471,10 +474,11 @@ impl Arrays {
         Ok(a.string(&out).into())
     }
 
-    /// 稠密数组、元素都是原始值：逐个取元素与 ToString 都观察不到，抽成纯数据拼（数转字符串在线程池上并行）。
-    /// 不满足给 `None`。
+    /// Dense array whose elements are all primitives: reading each element and ToString are both unobservable, so join
+    /// it as plain data (number-to-string conversion runs in parallel on the thread pool). Returns `None` if these
+    /// conditions don't hold.
     fn join_plain<'gc>(a: &Agent<'gc, '_>, o: JsObject<'gc>, len: f64, sep: &str) -> Option<String> {
-        /// 一个元素的样子（不带 GC 指针，能交给别的线程）
+        /// Shape of one element (no GC pointers, so it can be handed to other threads)
         #[derive(Clone, Copy)]
         enum Part<'s> {
             Number(f64),
@@ -482,7 +486,7 @@ impl Arrays {
         }
         let d = o.borrow();
         let ObjectKind::Array(items) = &d.kind else { return None };
-        #[expect(clippy::cast_precision_loss, reason = "元素个数远小于 2^53")]
+        #[expect(clippy::cast_precision_loss, reason = "element count is far below 2^53")]
         let dense = items.len() as f64 == len && d.sparse_length == 0;
         if !dense || !items.iter().all(|v| matches!(v, Value::Number(_) | Value::String(_) | Value::Bool(_) | Value::Null | Value::Undefined)) {
             return None;
@@ -497,7 +501,8 @@ impl Arrays {
                 _ => Part::Text(""),
             })
             .collect();
-        // 各块各自拼（数直接格式化进块的缓冲），再按顺序连起来
+        // Each chunk is joined on its own (numbers formatted straight into the chunk's buffer), then the chunks are
+        // concatenated in order
         let pieces = a.par().chunks(&parts, &|chunk: &[Part<'_>]| {
             let mut s = String::new();
             for (i, p) in chunk.iter().enumerate() {
@@ -621,7 +626,7 @@ impl Arrays {
         Ok((-1.0).into())
     }
 
-    /// SameValueZero：`NaN` 等于自己。
+    /// SameValueZero: `NaN` equals itself.
     fn same_value_zero<'gc>(x: Value<'gc>, y: Value<'gc>) -> bool {
         x == y || matches!((x, y), (Value::Number(p), Value::Number(q)) if p.is_nan() && q.is_nan())
     }
@@ -646,7 +651,7 @@ impl Arrays {
         Ok(false.into())
     }
 
-    /// forEach / map / filter / some / every：跳过空洞，逐个调 `f(item, index, O)`。
+    /// forEach / map / filter / some / every: skip holes, call `f(item, index, O)` for each element.
     fn visit<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>], how: Visit) -> Result<Value<'gc>, Error> {
         let (o, len) = Self::target(a, this)?;
         let (f, this_arg) = (args.at(0), args.at(1));
@@ -701,7 +706,7 @@ impl Arrays {
         Self::visit(a, this, args, Visit::Every)
     }
 
-    /// find / findIndex / findLast / findLastIndex：不跳空洞。
+    /// find / findIndex / findLast / findLastIndex: holes are not skipped.
     fn find_by<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>], how: Find) -> Result<Value<'gc>, Error> {
         let (o, len) = Self::target(a, this)?;
         let (f, this_arg) = (args.at(0), args.at(1));
@@ -736,7 +741,7 @@ impl Arrays {
         Self::find_by(a, this, args, Find::LastIndex)
     }
 
-    /// reduce / reduceRight。
+    /// reduce / reduceRight.
     fn fold<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>], right: bool) -> Result<Value<'gc>, Error> {
         let (o, len) = Self::target(a, this)?;
         let f = args.at(0);
@@ -798,8 +803,8 @@ impl Arrays {
         Ok(o.into())
     }
 
-    /// FlattenIntoArray：给出下一个目标下标。
-    #[expect(clippy::too_many_arguments, reason = "规范的抽象操作就是这些参数")]
+    /// FlattenIntoArray: returns the next target index.
+    #[expect(clippy::too_many_arguments, reason = "these are exactly the parameters of the spec's abstract operation")]
     fn flatten<'gc>(a: &mut Agent<'gc, '_>, target: JsObject<'gc>, source: JsObject<'gc>, len: f64, start: f64, depth: f64, mapper: Value<'gc>, this_arg: Value<'gc>) -> Result<f64, Error> {
         let mut to = start;
         let mut k = 0.0;
@@ -845,7 +850,8 @@ impl Arrays {
         Ok(arr.into())
     }
 
-    /// SortCompare：`undefined` 排最后；有比较函数按它的符号（NaN 当 0），否则按 ToString 的 UTF-16 序。
+    /// SortCompare: `undefined` sorts last; with a comparator, order by its sign (NaN counts as 0), otherwise by the
+    /// UTF-16 order of ToString.
     fn order<'gc>(a: &mut Agent<'gc, '_>, f: Value<'gc>, x: Value<'gc>, y: Value<'gc>) -> Result<Ordering, Error> {
         Ok(match (x, y) {
             (Value::Undefined, Value::Undefined) => Ordering::Equal,
@@ -862,8 +868,10 @@ impl Arrays {
         })
     }
 
-    /// 不带比较函数、元素都是数 / 字符串 / 布尔 / null / undefined：这些的 ToString 没有副作用，可以先把键算好
-    /// （数转字符串在线程池上并行），再在线程池上并行稳定排序；undefined 排最后。有别的元素给 `None`（逐个比较）。
+    /// No comparator, and all elements are numbers / strings / booleans / null / undefined: their ToString has no side
+    /// effects, so the keys can be computed up front (number-to-string conversion in parallel on the thread pool), then
+    /// stable-sorted in parallel on the thread pool; undefined sorts last. Any other element gives `None` (compare one
+    /// by one).
     fn sort_plain<'gc>(a: &Agent<'gc, '_>, items: &[Value<'gc>]) -> Option<Vec<Value<'gc>>> {
         if !items.iter().all(|v| matches!(v, Value::Number(_) | Value::String(_) | Value::Bool(_) | Value::Null | Value::Undefined)) {
             return None;
@@ -882,7 +890,7 @@ impl Arrays {
                 _ => "null",
             })
             .collect();
-        // 没有 U+E000 以上的字符时 UTF-8 字节序与 UTF-16 码元序一致
+        // Without characters at or above U+E000, UTF-8 byte order matches UTF-16 code unit order
         let bytewise = keys.iter().all(|k| !k.chars().any(|c| c >= '\u{E000}'));
         let mut order: Vec<u32> = (0..u32::try_from(keys.len()).ok()?).collect();
         let cmp = |&i: &u32, &j: &u32| {
@@ -893,7 +901,7 @@ impl Arrays {
         Some(order.iter().map(|&i| rest[i as usize]).chain(undef).collect())
     }
 
-    /// 稳定的归并排序（比较函数可能抛错，不能用 `sort_by`）。
+    /// Stable merge sort (the comparator may throw, so `sort_by` can't be used).
     fn merge_sort<'gc>(a: &mut Agent<'gc, '_>, f: Value<'gc>, v: Vec<Value<'gc>>) -> Result<Vec<Value<'gc>>, Error> {
         if v.len() <= 1 {
             return Ok(v);
@@ -941,7 +949,7 @@ impl Arrays {
             Some(s) => s,
             None => Self::merge_sort(a, f, items)?,
         };
-        #[expect(clippy::cast_precision_loss, reason = "元素个数远小于 2^53")]
+        #[expect(clippy::cast_precision_loss, reason = "element count is far below 2^53")]
         let count = sorted.len() as f64;
         for (j, v) in (0..).zip(sorted) {
             a.set_index(o.into(), f64::from(j), v)?;
@@ -992,7 +1000,7 @@ impl Arrays {
         let (o, len) = Self::target(a, this)?;
         let start = Self::relative(a, args.at(0), len, 0.0)?;
         let items = args.get(2..).unwrap_or(&[]);
-        #[expect(clippy::cast_precision_loss, reason = "实参个数远小于 2^53")]
+        #[expect(clippy::cast_precision_loss, reason = "argument count is far below 2^53")]
         let insert = items.len() as f64;
         let skip = match args.len() {
             0 => 0.0,
@@ -1045,7 +1053,7 @@ impl Arrays {
 impl Installer<'_, '_> {
     pub(crate) fn array(&mut self) {
         let proto = self.realm.array_proto;
-        // Array.prototype 本身是个空数组
+        // Array.prototype itself is an empty array
         proto.borrow_mut(self.mc).kind = ObjectKind::Array(Vec::new());
         let ctor = self.constructor("Array", Arrays::array, proto, 1);
         self.method(ctor, "isArray", Arrays::is_array, 1);
@@ -1093,7 +1101,7 @@ impl Installer<'_, '_> {
             self.method(proto, name, f, n);
         }
         self.method(proto, "with", Arrays::with, 2);
-        // `[Symbol.unscopables]`：`with` 语句里不暴露的方法名
+        // `[Symbol.unscopables]`: method names not exposed inside `with` statements
         let unscopables = ObjectData::default().alloc(self.mc);
         for name in ["at", "copyWithin", "entries", "fill", "find", "findIndex", "findLast", "findLastIndex", "flat", "flatMap", "includes", "keys", "toReversed", "toSorted", "toSpliced", "values"] {
             unscopables.borrow_mut(self.mc).define(name, Property::data(true.into()));

@@ -1,4 +1,5 @@
-//! 并行：线程池接口（moremath 的任何 `Executor` 都是）、自旋锁、工作窃取的驱动。
+//! Parallelism: the thread pool interface (any moremath `Executor` qualifies), a spin lock, and the work-stealing
+//! driver.
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::cell::UnsafeCell;
@@ -10,16 +11,16 @@ use moremath::Executor;
 
 use crate::header::Ptr;
 
-/// 交给线程池的一个任务：借用 `'t` 的数据，跑完才返回。
+/// A task handed to the thread pool: borrows data for `'t`, and the call returns only after it has run.
 pub type Job<'t> = Box<dyn FnOnce() + Send + 't>;
 
-/// 回收用的线程池。moremath 的 `ThreadSingle` / `ThreadMulti` 都实现了它；
-/// 嵌入方也可以拿自己的池实现（几个堆可以共用一个池）。
+/// The thread pool used for collection. moremath's `ThreadSingle` / `ThreadMulti` both implement it;
+/// embedders can also implement it with their own pool (several heaps can share one pool).
 pub trait Pool {
-    /// 同时能跑几个任务
+    /// How many tasks can run concurrently
     fn threads(&self) -> usize;
 
-    /// 跑完 `jobs` 才返回（任务可以借用调用方的数据）
+    /// Returns only after `jobs` have finished (tasks may borrow the caller's data)
     fn run(&self, jobs: Vec<Job<'_>>);
 }
 
@@ -33,12 +34,13 @@ impl<X: Executor> Pool for X {
     }
 }
 
-/// 等别的线程：先自旋，久了让出 CPU（线程比核多、持锁的人被换下去时不陪着空转）。
+/// Waiting for other threads: spin first, then yield the CPU after a while (so we don't spin uselessly when there
+/// are more threads than cores and the lock holder has been descheduled).
 #[derive(Default)]
 pub(crate) struct Backoff(u32);
 
 impl Backoff {
-    /// 自旋这么多轮之后改为让出 CPU
+    /// After this many spins, switch to yielding the CPU
     const SPINS: u32 = 64;
 
     pub(crate) fn wait(&mut self) {
@@ -54,13 +56,13 @@ impl Backoff {
     }
 }
 
-/// 很短的临界区用的自旋锁（`no_std`）。
+/// A spin lock for very short critical sections (`no_std`).
 pub(crate) struct Spin<T> {
     locked: AtomicBool,
     value: UnsafeCell<T>,
 }
 
-// SAFETY: 同一时刻只有拿到锁的线程碰 value
+// SAFETY: only the thread holding the lock touches value at any time
 unsafe impl<T: Send> Sync for Spin<T> {}
 unsafe impl<T: Send> Send for Spin<T> {}
 
@@ -94,14 +96,14 @@ impl<T> Deref for SpinGuard<'_, T> {
     type Target = T;
 
     fn deref(&self) -> &T {
-        // SAFETY: 拿着锁
+        // SAFETY: the lock is held
         unsafe { &*self.0.value.get() }
     }
 }
 
 impl<T> DerefMut for SpinGuard<'_, T> {
     fn deref_mut(&mut self) -> &mut T {
-        // SAFETY: 拿着锁
+        // SAFETY: the lock is held
         unsafe { &mut *self.0.value.get() }
     }
 }
@@ -112,11 +114,11 @@ impl<T> Drop for SpinGuard<'_, T> {
     }
 }
 
-/// 把 `items` 切成块并行处理，结果按块的顺序返回。
+/// Splits `items` into chunks processed in parallel; results are returned in chunk order.
 pub(crate) fn split<T: Send, R: Send>(pool: &dyn Pool, items: &mut [T], f: &(dyn Fn(&mut [T]) -> R + Sync)) -> Vec<R> {
-    /// 每个线程分几块（块小一点，先做完的线程接着拿，忙闲均匀）
+    /// Chunks per thread (smaller chunks let threads that finish early take more, balancing the load)
     const CHUNKS_PER_THREAD: usize = 4;
-    /// 不到这么多就在调用线程上做，不惊动线程池
+    /// Below this many, do the work on the calling thread without involving the thread pool
     const SOLO: usize = 256;
     if items.is_empty() {
         return Vec::new();
@@ -131,35 +133,37 @@ pub(crate) fn split<T: Send, R: Send>(pool: &dyn Pool, items: &mut [T], f: &(dyn
     out.into_iter().map(|r| r.expect("job ran")).collect()
 }
 
-/// 工作窃取里的一个工人：有自己的栈，一次处理一个对象。
+/// A worker in work stealing: has its own stack and processes one object at a time.
 pub(crate) trait Worker: Send {
     fn stack(&mut self) -> &mut Vec<Ptr>;
 
-    /// 处理一个对象（可能往自己的栈里压新的）；返回做了多少字节的活
+    /// Processes one object (possibly pushing new ones onto its own stack); returns how many bytes of work were done
     fn process(&mut self, p: Ptr) -> usize;
 }
 
-/// 工作窃取：每个工人一个本地栈，压得多了分一半到公共栈，空了从公共栈拿；全员空闲就结束。
+/// Work stealing: each worker has a local stack; when it grows large, half is moved to the shared stack, and an
+/// empty worker takes from the shared stack. Finishes when every worker is idle.
 pub(crate) struct Work {
     shared: Spin<Vec<Ptr>>,
-    /// 公共栈里有几个（不拿锁就能看）
+    /// Number of items in the shared stack (readable without taking the lock)
     pending: AtomicUsize,
-    /// 开工了几个（线程池忙时有的工人晚开工，甚至别人都做完了才开工）
+    /// Number of workers that have started (when the pool is busy, some workers start late, possibly after everyone
+    /// else has finished)
     started: AtomicUsize,
     idle: AtomicUsize,
     workers: usize,
 }
 
 impl Work {
-    /// 本地栈超过它才往外分
+    /// Only share out when the local stack exceeds this
     const SHARE: usize = 64;
-    /// 调用线程先单干这么多个对象：活少就不惊动线程池
+    /// The calling thread first processes this many objects alone: with little work, the pool is not involved
     const SOLO: usize = 4096;
-    /// 空闲的工人等这么多轮还没活就收工（不陪到最后空转）
+    /// An idle worker retires after waiting this many rounds without work (instead of spinning until the end)
     const RETIRE: usize = 1 << 10;
 
-    /// 用 `pool` 让 `workers` 一起做完 `initial`（及做的过程中冒出来的）。
-    /// 给了 `budget` 就每个工人做到那么多字节为止；没做完的返回。
+    /// Uses `pool` to have `workers` process `initial` (and anything discovered along the way) together.
+    /// With a `budget`, each worker stops after that many bytes; unfinished work is returned.
     pub(crate) fn run<W: Worker>(pool: &dyn Pool, mut initial: Vec<Ptr>, workers: &mut [W], mut budget: Option<usize>) -> Vec<Ptr> {
         let first = &mut workers[0];
         first.stack().append(&mut initial);
@@ -177,7 +181,7 @@ impl Work {
         if initial.is_empty() {
             return initial;
         }
-        // 剩下的全放公共栈：不预先分给可能晚开工的工人
+        // Put the rest on the shared stack: don't pre-assign it to workers that may start late
         let pending = AtomicUsize::new(initial.len());
         let work = Self { shared: Spin::new(initial), pending, started: AtomicUsize::new(0), idle: AtomicUsize::new(0), workers: workers.len() };
         let jobs: Vec<Job<'_>> = workers.iter_mut().map(|w| Box::new(|| work.drive(w, budget)) as Job<'_>).collect();
@@ -197,7 +201,7 @@ impl Work {
                 if let Some(b) = &mut budget {
                     *b = b.saturating_sub(done);
                     if *b == 0 {
-                        // 做够了：算永久空闲，剩下的留在栈里
+                        // Budget used up: count as permanently idle, leave the rest on the stack
                         self.idle.fetch_add(1, Ordering::SeqCst);
                         return;
                     }
@@ -211,14 +215,15 @@ impl Work {
             let mut backoff = Backoff::default();
             for spins in 0.. {
                 if spins == Self::RETIRE {
-                    // 收工：一直算空闲，别人分出来的活由还在干的人自己拿回去
+                    // Retire: stay counted as idle; work shared out by others is taken back by those still working
                     return;
                 }
                 if self.pending.load(Ordering::SeqCst) > 0 {
                     self.idle.fetch_sub(1, Ordering::SeqCst);
                     break;
                 }
-                // 开工了的都闲着、公共栈也空：做完了（没开工的来了也只会空手走）
+                // All started workers are idle and the shared stack is empty: done (workers that haven't started
+                // yet will leave empty-handed)
                 if self.idle.load(Ordering::SeqCst) == self.started.load(Ordering::SeqCst) {
                     return;
                 }
@@ -227,7 +232,7 @@ impl Work {
         }
     }
 
-    /// 本地压多了而公共栈不多：分一半出去
+    /// The local stack is large and the shared stack is not: share half of it
     fn share(&self, stack: &mut Vec<Ptr>) {
         if stack.len() > 2 * Self::SHARE && self.pending.load(Ordering::Relaxed) < self.workers * Self::SHARE {
             let mut shared = self.shared.lock();
@@ -236,7 +241,7 @@ impl Work {
         }
     }
 
-    /// 从公共栈拿一批
+    /// Takes a batch from the shared stack
     fn steal(&self, stack: &mut Vec<Ptr>) -> bool {
         if self.pending.load(Ordering::SeqCst) == 0 {
             return false;

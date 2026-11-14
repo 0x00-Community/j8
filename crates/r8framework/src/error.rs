@@ -3,14 +3,15 @@ use core::fmt;
 
 use crate::Global;
 
-/// 框架与各执行层共用的错误。
+/// The error shared by the framework and all execution layers.
 #[derive(Debug)]
 pub enum Error {
-    /// 源码读不进来，带位置
+    /// The source couldn't be read, with a location
     Syntax(String),
-    /// 还不支持的写法，带位置
+    /// Syntax not supported yet, with a location
     Unsupported(String),
-    /// JS 抛出的异常（值存成持久句柄，错误能带出 `enter`）
+    /// An exception thrown by JS (the value is stored as a persistent handle, so the error can be carried out of
+    /// `enter`)
     Exception(Global),
 }
 

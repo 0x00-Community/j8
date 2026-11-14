@@ -1,14 +1,16 @@
 use r8framework::BinaryOp;
 
-/// 机器码调的运行时函数（地址由装载方填，见 [`Native::relocs`](crate::Native::relocs)）。
+/// Runtime functions called from machine code (addresses filled in by the loader; see
+/// [`Native::relocs`](crate::Native::relocs)).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Helper {
-    /// `extern "C" fn(f64, f64) -> f64`：两个数做这个二元运算（四则以外的：取余、乘方、位运算）
+    /// `extern "C" fn(f64, f64) -> f64`: applies this binary operation to two numbers (ops other than the four
+    /// arithmetic ones: remainder, exponentiation, bitwise ops)
     Number(BinaryOp),
 }
 
 impl Helper {
-    /// 全部运行时函数与它们在 MLIR 里的符号名（名字只在这里出现一次）。
+    /// All runtime functions and their symbol names in MLIR (each name appears only here).
     const TABLE: [(Helper, &'static str); 8] = [
         (Helper::Number(BinaryOp::Rem), "r8_number_rem"),
         (Helper::Number(BinaryOp::Exp), "r8_number_exp"),
@@ -30,7 +32,7 @@ impl Helper {
         all
     };
 
-    /// 在 MLIR 里的符号名；四则运算不经运行时函数（给 `None`）。
+    /// Symbol name in MLIR; the four arithmetic ops don't go through runtime functions (`None`).
     pub fn symbol(self) -> Option<&'static str> {
         Self::TABLE.iter().find(|(h, _)| *h == self).map(|(_, s)| *s)
     }

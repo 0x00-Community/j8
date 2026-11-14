@@ -2,14 +2,14 @@ use r8framework::{Agent, Error, ErrorKind, Value};
 
 use crate::{Args, Installer};
 
-/// 各 Error 构造器与 `Error.prototype.toString`。
+/// The Error constructors and `Error.prototype.toString`.
 struct Errors;
 
 impl Errors {
-    /// `XxxError(message)`：第 `K` 种（按 [`ErrorKind::ALL`]）。
+    /// `XxxError(message)`: kind `K` (per [`ErrorKind::ALL`]).
     fn construct<'gc, const K: usize>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let kind = ErrorKind::ALL[K];
-        // AggregateError(errors, message, options)：实参往后错一位
+        // AggregateError(errors, message, options): arguments are shifted by one
         let all = args;
         let args = if kind == ErrorKind::Aggregate { all.get(1..).unwrap_or(&[]) } else { all };
         let proto = a.proto_from_ctor(a.new_target, a.realm.error_proto(kind))?;
@@ -36,7 +36,7 @@ impl Errors {
         Ok(e.into())
     }
 
-    /// `name: message`，有一边空就只给另一边。
+    /// `name: message`; if either side is empty, just the other.
     fn to_string<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         if !matches!(this, Value::Object(_)) {
             return Err(a.throw(ErrorKind::Type, "Error.prototype.toString called on non-object"));
@@ -73,7 +73,7 @@ impl Installer<'_, '_> {
         for (kind, f) in ErrorKind::ALL.into_iter().zip(ctors) {
             let proto = self.realm.error_proto(kind);
             let ctor = self.constructor(kind.name(), f, proto, if kind == ErrorKind::Aggregate { 2 } else { 1 });
-            // NativeError 构造器的原型是 Error 构造器
+            // The prototype of a NativeError constructor is the Error constructor
             match base {
                 None => base = Some(ctor),
                 Some(b) => ctor.borrow_mut(self.mc).proto = Some(b),

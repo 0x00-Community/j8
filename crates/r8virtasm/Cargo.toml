@@ -1,6 +1,6 @@
 [package]
 name = "r8virtasm"
-description = "r8 虚拟指令集：字节码定义、JavaScript ⇒ 字节码"
+description = "r8 virtual instruction set: bytecode definitions, JavaScript ⇒ bytecode"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -18,7 +18,7 @@ ryu-js = { workspace = true, optional = true }
 
 [features]
 default = ["compile"]
-# JS ⇒ 字节码编译器（oxc 解析，要 std）；关掉只剩 no_std 的字节码类型
+# JS ⇒ bytecode compiler (oxc parser, needs std); without it only the no_std bytecode types remain
 compile = ["dep:oxc_allocator", "dep:oxc_ast", "dep:oxc_parser", "dep:oxc_span", "dep:oxc_semantic", "dep:oxc_syntax", "dep:ryu-js"]
 
 [lints]
