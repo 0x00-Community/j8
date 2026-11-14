@@ -1,16 +1,11 @@
 [package]
 name = "r8gc"
 description = "分代、可移动（压缩）、并行的 Rust GC，'gc 品牌生命周期，回收跑在 moremath 线程池上"
-version.workspace = true
 edition.workspace = true
 license.workspace = true
-repository.workspace = true
-readme = "README.md"
-keywords = ["gc", "garbage-collector", "generational", "no-std"]
-categories = ["memory-management", "no-std"]
 
 [dependencies]
-r8gc-macros = { path = "macros", version = "=0.1.1" }
+r8gc-macros = { path = "macros" }
 moremath = { version = "=0.2.2", default-features = false, features = ["alloc"] }
 
 [dev-dependencies]

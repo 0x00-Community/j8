@@ -1,10 +1,8 @@
 [package]
 name = "r8gc-macros"
 description = "r8gc 的过程宏：#[derive(Collect)] 等"
-version = "0.1.1"
 edition.workspace = true
 license.workspace = true
-repository.workspace = true
 
 [lib]
 proc-macro = true

@@ -25,7 +25,7 @@
 
 ### 堆与句柄
 
-堆用 `crates/r8gc`（也发布在 [crates.io](https://crates.io/crates/r8gc)；过程宏 `crates/r8gc/macros` 即 r8gc-macros）：分代（新生代碰撞分配、次回收复制提升）、
+堆用仓库内的 `crates/r8gc`（过程宏在 `crates/r8gc/macros`）：分代（新生代碰撞分配、次回收复制提升）、
 可移动（稀疏页搬空压缩）、增量标记，标记 / 次回收 / 清扫 / 压缩在平台的线程池上并行；品牌生命周期，无 `'static`。
 
 - `Platform` 的父 trait 是 `r8gc::Pool`（`threads` / `run`）：后台任务与 GC 共用一个池（`DefaultPlatform` 的 moremath `ThreadMulti`）
