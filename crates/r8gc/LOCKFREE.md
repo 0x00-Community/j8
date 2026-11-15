@@ -95,7 +95,10 @@ r8gc 和 r8taskqueue 共用，各自不再复制：
 | P2 多 mutator | 完成：每线程 `Mutation`、`Tlab`、安全点闸门、`collect_*_shared(&self)`、动态根无锁、`Gc` / `R8Heap` 的 `Send` / `Sync`；`tests/threads.rs` | 805465a |
 | P3a 原子单元 | 完成：`Lock<T: Word>` 是一个字的原子单元（含 `compare_exchange`），`Lock<Option<Gc>>` 即原子指针槽 | 468b8d9 |
 | P3 `AtomicValue` | 完成：`Value: Word`（8 字节 NaN-boxing），`Lock<Value>` 即原子值槽 | 31b437d |
-| P3b 对象模型 | 未开始：要改 r8framework / r8builtins / r8executor 约 360 处 `borrow` / `borrow_mut` | — |
+| P3b 第 1 步 Realm 容器 | 完成：`jobs` 用 `GcQueue`，其余 `CowLock`，正则缓存 64 桶直接映射原子槽 | 3d13bdc |
+| P3b 第 2 步 环境 | 完成：`JsEnv = Gc<Env>`，槽 `Box<[Lock<Value>]>` | b34c835 |
+| Value 8 字节 | 完成：`ValueKind` 视图 + NaN-boxing 的 `Value(u64)`，JIT 降级改单字；`as_number` / `as_object` 快路 | 42af316、d2675a8 |
+| P3b 第 3–6 步 对象模型 | 未开始：属性表、`ObjectKind` 可变部分、`Shape`、调用点 | — |
 | P4 执行器 | 未开始 | — |
 
 性能（`examples/bench` 首次 `collect_all`，去锁前 → 现在）：1 线程约 245 → 255 ms、4 线程 185 → 200 ms、8 线程 150 → 180 ms；
