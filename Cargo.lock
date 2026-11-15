@@ -923,6 +923,7 @@ name = "r8taskqueue"
 version = "0.1.2"
 dependencies = [
  "moremath",
+ "r8lockfree",
 ]
 
 [[package]]

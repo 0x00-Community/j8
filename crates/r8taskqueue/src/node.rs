@@ -1,19 +1,18 @@
 //! 任务节点：依赖计数、下游表、家族（并查集），全部原子操作。
 //!
 //! - 依赖计数 `wait`：还没做完的依赖个数；谁把它减到 0，谁把节点推进就绪队列
-//! - 下游表 `succ`：Treiber 栈，CAS 压入；做完时 `swap` 成封口标记、整表取走（之后的压入看到封口 ⇒ 依赖已做完）。
-//!   只有压入是并发的，弹出只在封口时独占整表，没有 ABA
+//! - 下游表 `succ`：r8lockfree 的 [`PushList`]，做完时封口、整表取走（之后的压入被退回 ⇒ 依赖已做完）
 //! - 家族 `parent`：并查集的父指针，CAS 只从空设一次、之后不改（不做路径压缩，免回收竞争）；
 //!   总是后建的挂到先建的下面，父指针的序号严格递减 ⇒ 不成环，根是家族里最早的任务（「爹」）
-use alloc::boxed::Box;
 use alloc::sync::Arc;
 use core::cell::UnsafeCell;
 use core::fmt;
 use core::ptr;
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
 
+use r8lockfree::{Fifo, PushList};
+
 use crate::Task;
-use crate::fifo::Fifo;
 
 /// 任务的身份：[`crate::ITaskPoll::add`] 发的句柄，给别的任务的 [`crate::ITask::depend`] 用；拿着它节点就不会释放。
 #[derive(Clone)]
@@ -55,17 +54,6 @@ impl fmt::Debug for TaskId<'_> {
     }
 }
 
-/// 下游表的一项。
-struct Link<'a> {
-    node: TaskId<'a>,
-    next: *mut Link<'a>,
-}
-
-impl Link<'_> {
-    /// 封口标记：节点已做完，不再收下游（`Link` 对齐 ≥ 2，真指针不会是 1）
-    const SEALED: *mut Self = ptr::without_provenance_mut(1);
-}
-
 pub(crate) struct Node<'a> {
     /// 塞进来的次序（家族里谁先谁后）
     seq: usize,
@@ -73,8 +61,8 @@ pub(crate) struct Node<'a> {
     task: UnsafeCell<Option<Task<'a>>>,
     /// 还没做完的依赖个数（登记期间多 1 作保护）
     wait: AtomicUsize,
-    /// 下游表头，或 [`Link::SEALED`]
-    succ: AtomicPtr<Link<'a>>,
+    /// 依赖它的任务；做完时封口
+    succ: PushList<TaskId<'a>>,
     /// 家族里的父节点（持一份强引用），根为空
     parent: AtomicPtr<Node<'a>>,
     /// 取消标记（只在根上置）
@@ -90,7 +78,7 @@ impl<'a> Node<'a> {
             seq,
             task: UnsafeCell::new(Some(task)),
             wait: AtomicUsize::new(1),
-            succ: AtomicPtr::new(ptr::null_mut()),
+            succ: PushList::default(),
             parent: AtomicPtr::new(ptr::null_mut()),
             cancelled: AtomicBool::new(false),
         }
@@ -135,20 +123,7 @@ impl<'a> Node<'a> {
 
     /// 登记一个下游；已封口（做完了）退回。
     pub(crate) fn push_succ(&self, node: TaskId<'a>) -> Result<(), TaskId<'a>> {
-        let link = Box::into_raw(Box::new(Link { node, next: ptr::null_mut() }));
-        let mut head = self.succ.load(Ordering::Acquire);
-        loop {
-            if head == Link::SEALED {
-                // SAFETY: link 刚造出来、没压进去
-                return Err(unsafe { Box::from_raw(link) }.node);
-            }
-            // SAFETY: link 还没发布，只有这里在写
-            unsafe { (*link).next = head };
-            match self.succ.compare_exchange_weak(head, link, Ordering::AcqRel, Ordering::Acquire) {
-                Ok(_) => return Ok(()),
-                Err(h) => head = h,
-            }
-        }
+        self.succ.push(node)
     }
 
     /// 做完：丢掉任务、封口、放行下游（等齐的推进 `ready`）。
@@ -158,13 +133,9 @@ impl<'a> Node<'a> {
     pub(crate) unsafe fn complete(&self, ready: &Fifo<TaskId<'a>>) {
         // SAFETY: 调用者保证独占
         drop(unsafe { (*self.task.get()).take() });
-        let mut p = self.succ.swap(Link::SEALED, Ordering::AcqRel);
-        while !p.is_null() && p != Link::SEALED {
-            // SAFETY: 封口后整表归这里独占，每项是 push_succ 里 Box::into_raw 的
-            let link = unsafe { Box::from_raw(p) };
-            p = link.next;
-            if link.node.0.release() {
-                ready.push(link.node);
+        for node in self.succ.seal() {
+            if node.0.release() {
+                ready.push(node);
             }
         }
     }
@@ -225,12 +196,6 @@ impl Drop for Node<'_> {
         if !parent.is_null() {
             // SAFETY: union 里替父指针加的那份强引用
             unsafe { Arc::decrement_strong_count(parent) };
-        }
-        let mut p = *self.succ.get_mut();
-        while !p.is_null() && p != Link::SEALED {
-            // SAFETY: 独占；没封口的下游表项都是 push_succ 里 Box::into_raw 的
-            let link = unsafe { Box::from_raw(p) };
-            p = link.next;
         }
     }
 }

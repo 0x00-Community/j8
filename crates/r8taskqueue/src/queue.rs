@@ -6,8 +6,8 @@ use core::num::NonZeroUsize;
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 
 use moremath::{Execute, Executor};
+use r8lockfree::Fifo;
 
-use crate::fifo::Fifo;
 use crate::node::{Node, TaskId};
 use crate::{Fault, Flow, ITaskPoll, Quota, Ran, Refused, Stop, Task};
 
