@@ -46,7 +46,7 @@ impl<'gc, T: Copy + 'gc> Gc<'gc, Lock<T>> {
     }
 
     pub fn set(self, mc: &Mutation<'gc>, t: T) {
-        mc.cx().barrier(self.erase());
+        mc.barrier(self.erase());
         self.as_ref().0.set(t);
     }
 }
@@ -112,12 +112,12 @@ impl<'gc, T: 'gc> Gc<'gc, RefLock<T>> {
     }
 
     pub fn borrow_mut(self, mc: &Mutation<'gc>) -> RefMut<'gc, T> {
-        mc.cx().barrier(self.erase());
+        mc.barrier(self.erase());
         self.as_ref().0.borrow_mut()
     }
 
     pub fn try_borrow_mut(self, mc: &Mutation<'gc>) -> Result<RefMut<'gc, T>, BorrowMutError> {
-        mc.cx().barrier(self.erase());
+        mc.barrier(self.erase());
         self.as_ref().0.try_borrow_mut()
     }
 }

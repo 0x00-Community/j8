@@ -1,6 +1,7 @@
 //! 只压入的 Treiber 栈：CAS 压入；取走是 `swap` 整表（取空或封口），没有并发弹出 ⇒ 没有 ABA。
 //! 封口后再压入被退回（用来表示「主人已经做完，不再收」）。
 use alloc::boxed::Box;
+use alloc::vec::Vec;
 use core::ptr;
 use core::sync::atomic::{AtomicPtr, Ordering};
 
@@ -74,6 +75,20 @@ impl<T> PushList<T> {
     pub fn is_empty(&self) -> bool {
         let head = self.head.load(Ordering::Acquire);
         head.is_null() || head == Self::SEALED
+    }
+}
+
+impl<T> PushList<Vec<T>> {
+    /// 取走所有批并拼成一个：最大的那批当底、其余接在后面（只有一批时不复制）。
+    pub fn take_concat(&self) -> Vec<T> {
+        let mut batches: Vec<Vec<T>> = self.take().collect();
+        let Some(big) = batches.iter().enumerate().max_by_key(|(_, b)| b.len()).map(|(i, _)| i) else { return Vec::new() };
+        let mut out = batches.swap_remove(big);
+        out.reserve(batches.iter().map(Vec::len).sum());
+        for b in batches {
+            out.extend(b);
+        }
+        out
     }
 }
 

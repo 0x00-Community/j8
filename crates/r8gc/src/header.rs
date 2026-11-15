@@ -60,9 +60,10 @@ impl Header {
         self.flags.load(Ordering::Relaxed)
     }
 
+    /// Sets the bits `f`; returns the flags before (whoever turns a bit on sees it off here)
     #[inline]
-    pub(crate) fn or_flags(&self, f: u32) {
-        self.flags.fetch_or(f, Ordering::Relaxed);
+    pub(crate) fn or_flags(&self, f: u32) -> u32 {
+        self.flags.fetch_or(f, Ordering::AcqRel)
     }
 
     #[inline]

@@ -22,7 +22,7 @@ impl<'gc, T: Collect<'gc> + 'gc> Gc<'gc, T> {
     /// Places a value on the heap
     #[inline]
     pub fn new(mc: &Mutation<'gc>, t: T) -> Self {
-        Self::from(mc.cx().alloc(t))
+        Self::from(mc.alloc(t))
     }
 }
 
@@ -73,6 +73,11 @@ unsafe impl<'gc, T: 'gc> Collect<'gc> for Gc<'gc, T> {
         self.ptr = r.ptr(self.erase()).cast();
     }
 }
+
+// SAFETY: a `Gc` is a shared reference to its target: it may cross threads when `&T` may
+unsafe impl<'gc, T: Sync + 'gc> Send for Gc<'gc, T> {}
+// SAFETY: as above
+unsafe impl<'gc, T: Sync + 'gc> Sync for Gc<'gc, T> {}
 
 impl<'gc, T: 'gc> Copy for Gc<'gc, T> {}
 

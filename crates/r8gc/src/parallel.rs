@@ -15,7 +15,7 @@ pub type Job<'t> = Box<dyn FnOnce() + Send + 't>;
 
 /// The thread pool used for collection. moremath's `ThreadSingle` / `ThreadMulti` both implement it;
 /// embedders can also implement it with their own pool (several heaps can share one pool).
-pub trait Pool {
+pub trait Pool: Sync {
     /// How many tasks can run concurrently
     fn threads(&self) -> usize;
 
@@ -23,7 +23,7 @@ pub trait Pool {
     fn run(&self, jobs: Vec<Job<'_>>);
 }
 
-impl<X: Executor> Pool for X {
+impl<X: Executor + Sync> Pool for X {
     fn threads(&self) -> usize {
         Executor::threads(self)
     }

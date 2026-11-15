@@ -1,12 +1,15 @@
-//! The collector: the mutator side (allocation, write barrier; single-threaded) and the collection phases (marking,
-//! minor collection, sweeping, compaction; parallel on the thread pool).
+//! The collector: shared state the mutators read (atomic, lock-free) and the collection phases (marking, minor
+//! collection, sweeping, compaction; parallel on the thread pool, while no mutator runs). The mutator side
+//! (allocation, write barrier) is [`crate::Mutation`].
+use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::cell::{Cell, RefCell};
 use core::mem::take;
-use core::ptr::NonNull;
+use core::sync::atomic::{AtomicBool, Ordering};
+
+use r8lockfree::PushList;
 
 use crate::collect::{Mover, Visit};
-use crate::header::{Claim, Flags, Ptr, SizeClass, Typed, VTable};
+use crate::header::{Claim, Flags, Ptr, SizeClass, VTable};
 use crate::heap::{Lab, NURSERY_LIMIT, Nursery, OldSpace};
 use crate::parallel::{Pool, Work, Worker, split};
 use crate::{Collect, Metrics, Relocate, Trace};
@@ -30,7 +33,7 @@ pub enum Phase {
 }
 
 /// The mark bit meaning "marked" under epoch `epoch`
-fn marked_bit(epoch: bool) -> u32 {
+pub(crate) fn marked_bit(epoch: bool) -> u32 {
     if epoch { Flags::MARK } else { 0 }
 }
 
@@ -156,142 +159,102 @@ impl Mover for Compactor {
 }
 
 pub(crate) struct Context {
-    phase: Cell<Phase>,
-    /// The mark bit counts as marked only when equal to this
-    epoch: Cell<bool>,
-    /// Bump region of the young generation's current block
-    cursor: Cell<usize>,
-    end: Cell<usize>,
-    nursery: RefCell<Nursery>,
+    /// A major collection is marking. Changes only during collection, while no mutator runs; mutators copy it when
+    /// they enter `mutate`
+    marking: AtomicBool,
+    /// The mark bit counts as marked only when equal to this (changes only during collection, like `marking`)
+    epoch: AtomicBool,
+    nursery: Nursery,
     old: OldSpace,
-    gray: RefCell<Vec<Ptr>>,
-    /// Old objects that may point into the young generation
-    remembered: RefCell<Vec<Ptr>>,
+    /// Handed in by mutators as they leave `mutate` (lock-free): objects the barrier grayed again, old objects that
+    /// may point into the young generation, young objects with drop glue
+    gray_in: PushList<Vec<Ptr>>,
+    remembered_in: PushList<Vec<Ptr>>,
+    drops_in: PushList<Vec<Ptr>>,
+    /// The collector's gray queue (touched only during collection)
+    gray: Vec<Ptr>,
     /// A major collection starts when the old generation grows this large
-    threshold: Cell<usize>,
+    threshold: usize,
     /// Size of the old generation at the previous marking step
-    marked_at: Cell<usize>,
+    marked_at: usize,
     /// Dead objects of eligible types are dropped on the thread pool (worthwhile only when the allocator frees fast
     /// across threads)
     pub(crate) parallel_drop: bool,
-    pub(crate) metrics: Metrics,
+    /// Shared with the heap handle, which reads it without touching the context
+    pub(crate) metrics: Arc<Metrics>,
 }
 
 impl Context {
     pub(crate) fn new() -> Self {
         Self {
-            phase: Cell::new(Phase::Sleep),
-            epoch: Cell::new(false),
-            cursor: Cell::new(0),
-            end: Cell::new(0),
-            nursery: RefCell::default(),
+            marking: AtomicBool::new(false),
+            epoch: AtomicBool::new(false),
+            nursery: Nursery::default(),
             old: OldSpace::default(),
-            gray: RefCell::default(),
-            remembered: RefCell::default(),
-            threshold: Cell::new(MIN_HEAP),
-            marked_at: Cell::new(0),
+            gray_in: PushList::default(),
+            remembered_in: PushList::default(),
+            drops_in: PushList::default(),
+            gray: Vec::new(),
+            threshold: MIN_HEAP,
+            marked_at: 0,
             parallel_drop: false,
-            metrics: Metrics::default(),
+            metrics: Arc::default(),
         }
     }
 
     pub(crate) fn phase(&self) -> Phase {
-        self.phase.get()
+        if self.marking() { Phase::Mark } else { Phase::Sleep }
+    }
+
+    pub(crate) fn marking(&self) -> bool {
+        self.marking.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn epoch(&self) -> bool {
+        self.epoch.load(Ordering::Acquire)
     }
 
     pub(crate) fn young_bytes(&self) -> usize {
-        self.nursery.borrow().used(self.cursor.get())
+        self.nursery.used()
     }
 
     pub(crate) fn old_bytes(&self) -> usize {
         self.old.bytes()
     }
 
-    #[inline]
-    fn is_marked(&self, f: u32) -> bool {
-        (f & Flags::MARK != 0) == self.epoch.get()
+    /// Which young generation is current: allocation buffers from an earlier one point into reset blocks
+    pub(crate) fn generation(&self) -> usize {
+        self.metrics.minor_count()
     }
 
-    /// Mark bit for new objects: during marking they count as unmarked (reachable ones will get marked); otherwise as
-    /// marked (they become unmarked naturally when the next cycle flips the epoch)
-    #[inline]
-    fn fresh(&self) -> u32 {
-        match self.phase.get() {
-            Phase::Mark => marked_bit(self.epoch.get()) ^ Flags::MARK,
-            Phase::Sleep => marked_bit(self.epoch.get()),
+    /// A fresh young-generation block for a mutator's allocation buffer, as `[start, end)`
+    pub(crate) fn refill(&self) -> (usize, usize) {
+        self.nursery.refill()
+    }
+
+    /// A large object (header not written): straight into the old generation
+    pub(crate) fn alloc_large(&self, vt: &VTable) -> Ptr {
+        self.old.alloc_large(vt)
+    }
+
+    /// A mutator leaving `mutate` hands in what it recorded
+    pub(crate) fn hand_in(&self, gray: Vec<Ptr>, remembered: Vec<Ptr>, drops: Vec<Ptr>) {
+        for (list, v) in [(&self.gray_in, gray), (&self.remembered_in, remembered), (&self.drops_in, drops)] {
+            if !v.is_empty() {
+                // These lists are never sealed
+                let _ = list.push(v);
+            }
         }
     }
 
-    // ---- Allocation (mutator) ----
-
-    #[inline]
-    pub(crate) fn alloc<'gc, T: Collect<'gc>>(&self, value: T) -> Ptr {
-        let vt = &<T as Typed<'gc>>::VTABLE;
-        let p = if vt.class == SizeClass::LARGE { self.alloc_large(vt) } else { self.bump(vt) };
-        // SAFETY: a freshly allocated slot, sized and aligned for T
-        unsafe { p.cast::<T>().write(value) };
-        p
-    }
-
-    #[inline]
-    fn bump(&self, vt: &VTable) -> Ptr {
-        let mut at = self.cursor.get();
-        if self.end.get() - at < vt.slot {
-            at = self.refill();
+    /// Objects grayed again by mutators join the collector's gray queue
+    fn absorb_gray(&mut self) {
+        let more = self.gray_in.take_concat();
+        if self.gray.is_empty() {
+            self.gray = more;
+        } else {
+            self.gray.extend(more);
         }
-        self.cursor.set(at + vt.slot);
-        let p = Ptr::at_slot(NonNull::new(at as *mut u8).expect("nursery slot"));
-        // SAFETY: a slot newly carved out of the bump region
-        unsafe { p.init(vt, self.fresh()) };
-        if vt.drop.is_some() {
-            self.nursery.borrow_mut().drops.push(p);
-        }
-        p
-    }
-
-    #[cold]
-    fn refill(&self) -> usize {
-        let (start, end) = self.nursery.borrow_mut().refill();
-        self.end.set(end);
-        start
-    }
-
-    /// Large objects go straight into the old generation; their fields may point into the young generation, so they
-    /// start in the remembered set
-    #[cold]
-    fn alloc_large(&self, vt: &VTable) -> Ptr {
-        let p = self.old.alloc_large(vt);
-        // SAFETY: a large object's header precedes the value and belongs to this allocation
-        unsafe { p.init(vt, Flags::OLD | Flags::LARGE | Flags::REMEMBERED | self.fresh()) };
-        self.remembered.borrow_mut().push(p);
-        p
-    }
-
-    // ---- Write barrier (mutator) ----
-
-    /// Called before object `p` receives a new pointer: old objects go into the remembered set; black objects turn
-    /// gray again during marking
-    #[inline]
-    pub(crate) fn barrier(&self, p: Ptr) {
-        let f = p.header().flags();
-        if f & (Flags::OLD | Flags::REMEMBERED) == Flags::OLD {
-            self.remember(p);
-        }
-        if self.phase.get() == Phase::Mark && f & Flags::GRAY == 0 && self.is_marked(f) {
-            self.gray_again(p);
-        }
-    }
-
-    #[cold]
-    fn remember(&self, p: Ptr) {
-        p.header().or_flags(Flags::REMEMBERED);
-        self.remembered.borrow_mut().push(p);
-    }
-
-    #[cold]
-    fn gray_again(&self, p: Ptr) {
-        p.header().or_flags(Flags::GRAY);
-        self.gray.borrow_mut().push(p);
     }
 
     // ---- Marking ----
@@ -303,28 +266,28 @@ impl Context {
             return initial;
         }
         let threads = pool.threads();
-        let mut workers: Vec<Marker> = (0..threads).map(|_| Marker::new(self.epoch.get())).collect();
+        let mut workers: Vec<Marker> = (0..threads).map(|_| Marker::new(self.epoch())).collect();
         Work::run(pool, initial, &mut workers, budget.map(|b| b.div_ceil(threads)))
     }
 
     fn start_major<'gc, R: Collect<'gc> + ?Sized>(&mut self, root: &R) {
-        self.epoch.set(!self.epoch.get());
-        self.phase.set(Phase::Mark);
-        self.marked_at.set(self.old_bytes());
-        let mut m = Marker::new(self.epoch.get());
+        self.epoch.store(!self.epoch(), Ordering::Release);
+        self.marking.store(true, Ordering::Release);
+        self.marked_at = self.old_bytes();
+        let mut m = Marker::new(self.epoch());
         Trace::new(&mut m).trace(root);
-        self.gray.get_mut().append(&mut m.stack);
+        self.gray.append(&mut m.stack);
     }
 
     /// One marking step; returns `true` once the gray objects are exhausted
     fn step(&mut self, pool: &dyn Pool) -> bool {
+        self.absorb_gray();
         let old = self.old_bytes();
-        let budget = MARK_STEP.max(old.saturating_sub(self.marked_at.get()) * MARK_RATIO);
-        self.marked_at.set(old);
-        let initial = take(self.gray.get_mut());
-        let left = self.mark(pool, initial, Some(budget));
-        *self.gray.get_mut() = left;
-        self.gray.get_mut().is_empty()
+        let budget = MARK_STEP.max(old.saturating_sub(self.marked_at) * MARK_RATIO);
+        self.marked_at = old;
+        let initial = take(&mut self.gray);
+        self.gray = self.mark(pool, initial, Some(budget));
+        self.gray.is_empty()
     }
 
     // ---- Minor collection ----
@@ -332,10 +295,10 @@ impl Context {
     /// Minor collection: starting from the root and the remembered set, moves live young objects into the old
     /// generation in parallel, drops the rest, and empties the young generation
     pub(crate) fn minor<'gc, R: Collect<'gc> + ?Sized>(&mut self, pool: &dyn Pool, root: &mut R) {
-        let (epoch, marking) = (self.epoch.get(), self.phase.get() == Phase::Mark);
+        let (epoch, marking) = (self.epoch(), self.marking());
         // Slots handed back by the last parallel phase become claimable again
         self.old.settle();
-        let remembered = take(self.remembered.get_mut());
+        let remembered = self.remembered_in.take_concat();
         let (gray, promoted) = {
             let mut workers: Vec<Promoter<'_>> = (0..pool.threads()).map(|_| Promoter::new(&self.old, epoch, marking)).collect();
             // There is only one root, updated on the calling thread; the young objects it references directly
@@ -355,7 +318,7 @@ impl Context {
         };
         // Whatever was not moved is dead: those that can be dropped on the thread pool are dropped in parallel,
         // the rest are left to the calling thread
-        let mut drops = take(&mut self.nursery.get_mut().drops);
+        let mut drops = self.drops_in.take_concat();
         drops.retain(|p| p.header().forwarded().is_none());
         let parallel = self.parallel_drop;
         let serial: Vec<Vec<Ptr>> = split(if parallel { pool } else { &moremath::ThreadSingle }, &mut drops, &|chunk: &mut [Ptr]| {
@@ -370,18 +333,18 @@ impl Context {
             // SAFETY: as above, on the calling thread
             unsafe { p.drop_value() };
         }
-        let g = self.gray.get_mut();
+        self.absorb_gray();
+        let g = &mut self.gray;
         if marking {
             // Young objects in the gray queue: live ones are already queued again in the old generation; dead ones are
             // discarded
             g.retain(|p| p.header().flags() & Flags::OLD != 0);
             g.extend(gray);
         }
-        self.nursery.get_mut().reset();
-        self.cursor.set(0);
-        self.end.set(0);
-        self.metrics.minor.set(self.metrics.minor.get() + 1);
-        self.metrics.promoted.set(self.metrics.promoted.get() + promoted);
+        self.nursery.reset();
+        // Advancing the generation invalidates every allocation buffer handed out from the reset blocks
+        self.metrics.minor.fetch_add(1, Ordering::AcqRel);
+        self.metrics.promoted.fetch_add(promoted, Ordering::Relaxed);
         self.verify("after minor");
     }
 
@@ -390,19 +353,20 @@ impl Context {
     /// Finishes marking (parallel, atomic), sweeps (parallel), and compacts when worthwhile (parallel)
     fn finish<'gc, R: Collect<'gc> + ?Sized>(&mut self, pool: &dyn Pool, root: &mut R) {
         self.minor(pool, root);
-        let mut m = Marker::new(self.epoch.get());
+        let mut m = Marker::new(self.epoch());
         Trace::new(&mut m).trace(&*root);
-        let mut initial = take(self.gray.get_mut());
+        self.absorb_gray();
+        let mut initial = take(&mut self.gray);
         initial.append(&mut m.stack);
         let left = self.mark(pool, initial, None);
         debug_assert!(left.is_empty());
-        let live = self.old.sweep(pool, self.epoch.get(), self.parallel_drop);
+        let live = self.old.sweep(pool, self.epoch(), self.parallel_drop);
         self.verify("after sweep");
-        self.phase.set(Phase::Sleep);
+        self.marking.store(false, Ordering::Release);
         self.compact(pool, root);
         self.verify("after compact");
-        self.threshold.set(MIN_HEAP.max(live * GROWTH));
-        self.metrics.major.set(self.metrics.major.get() + 1);
+        self.threshold = MIN_HEAP.max(live * GROWTH);
+        self.metrics.major.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Evacuates sparse pages (parallel copy), then updates every field pointing into them (parallel)
@@ -411,7 +375,7 @@ impl Context {
         if moving.is_empty() {
             return;
         }
-        let flags = Flags::OLD | marked_bit(self.epoch.get());
+        let flags = Flags::OLD | marked_bit(self.epoch());
         let moved = moving.iter().map(|&(_, class)| SizeClass::SLOTS[class]).sum();
         let old = &self.old;
         split(pool, &mut moving, &|chunk: &mut [(Ptr, usize)]| {
@@ -433,7 +397,7 @@ impl Context {
             }
         });
         self.old.release_evacuated(moved);
-        self.metrics.compactions.set(self.metrics.compactions.get() + 1);
+        self.metrics.compactions.fetch_add(1, Ordering::Relaxed);
     }
 
     // ---- Pacing ----
@@ -444,8 +408,8 @@ impl Context {
         if self.young_bytes() >= NURSERY_LIMIT {
             self.minor(pool, root);
         }
-        match self.phase.get() {
-            Phase::Sleep if self.old_bytes() >= self.threshold.get() => self.start_major(root),
+        match self.phase() {
+            Phase::Sleep if self.old_bytes() >= self.threshold => self.start_major(root),
             Phase::Mark if self.step(pool) => self.finish(pool, root),
             Phase::Sleep | Phase::Mark => {}
         }
@@ -453,7 +417,7 @@ impl Context {
 
     /// One full collection cycle (including minor collection and compaction)
     pub(crate) fn collect_all<'gc, R: Collect<'gc> + ?Sized>(&mut self, pool: &dyn Pool, root: &mut R) {
-        if self.phase.get() == Phase::Sleep {
+        if !self.marking() {
             self.start_major(root);
         }
         self.finish(pool, root);
@@ -494,7 +458,7 @@ impl Context {
 
 impl Drop for Context {
     fn drop(&mut self) {
-        for p in take(&mut self.nursery.get_mut().drops) {
+        for p in self.drops_in.take().flatten() {
             if p.header().forwarded().is_none() {
                 // SAFETY: the whole heap is being torn down; each young object is dropped once (old ones are
                 // dropped by OldSpace)

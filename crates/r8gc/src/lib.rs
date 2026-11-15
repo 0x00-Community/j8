@@ -28,7 +28,7 @@ mod parallel;
 mod roots;
 mod static_wrapper;
 
-pub use arena::{__DynRootable, Mutation, R8Heap, Root, Rootable};
+pub use arena::{__DynRootable, Mutation, R8Heap, Root, Rootable, Tlab};
 pub use collect::{__MustNotImplDrop, Collect, Relocate, Trace};
 pub use context::Phase;
 pub use gc::Gc;

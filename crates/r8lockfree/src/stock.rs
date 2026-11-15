@@ -35,8 +35,11 @@ impl<T: Copy> Stock<T> {
 
     /// 领一个。
     pub fn claim_one(&self) -> Option<T> {
-        let mut out = Vec::new();
-        (self.claim(1, &mut out) == 1).then(|| out[0])
+        let len = self.items.len();
+        if self.cursor.load(Ordering::Relaxed) >= len {
+            return None;
+        }
+        self.items.get(self.cursor.fetch_add(1, Ordering::AcqRel)).copied()
     }
 
     /// 并发时还回一批（下次 [`Stock::settle`] 后才能再领到）。

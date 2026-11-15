@@ -37,16 +37,16 @@ fn raw(layout: Layout) -> NonNull<u8> {
     NonNull::new(unsafe { alloc(layout) }).unwrap_or_else(|| handle_alloc_error(layout))
 }
 
-/// The young generation: a list of blocks, with bump allocation in the current block (the cursor lives in
-/// `Context`).
+/// The young generation: blocks handed out to the mutators' allocation buffers (lock-free: any number of mutators
+/// refill at once); a minor collection empties it all, while it is held exclusively.
 #[derive(Default)]
 pub(crate) struct Nursery {
-    /// Blocks in use; the last one is the current block
-    chunks: Vec<NonNull<u8>>,
-    /// Blocks kept for reuse after collection
-    spare: Vec<NonNull<u8>>,
-    /// Young objects to drop: those not moved during a minor collection are dead
-    pub(crate) drops: Vec<Ptr>,
+    /// Blocks handed out since the last minor collection
+    chunks: SegVec<Block>,
+    /// Blocks kept for reuse
+    spare: Stock<Block>,
+    /// Bytes handed out (whole blocks)
+    used: AtomicUsize,
 }
 
 impl Nursery {
@@ -55,41 +55,51 @@ impl Nursery {
         Err(_) => panic!("chunk layout"),
     };
 
-    /// Switches to a new block and returns its `[start, end)`
-    pub(crate) fn refill(&mut self) -> (usize, usize) {
-        let c = self.spare.pop().unwrap_or_else(|| raw(Self::LAYOUT));
-        self.chunks.push(c);
+    /// Hands out a fresh block as `[start, end)`
+    pub(crate) fn refill(&self) -> (usize, usize) {
+        let c = self.spare.claim_one().map_or_else(|| raw(Self::LAYOUT), |b| b.0);
+        self.chunks.push(Block(c));
+        self.used.fetch_add(CHUNK, Ordering::AcqRel);
         let start = c.as_ptr() as usize;
         (start, start + CHUNK)
     }
 
-    /// Bytes used (`cursor` is the current block's cursor)
-    pub(crate) fn used(&self, cursor: usize) -> usize {
-        match self.chunks.last() {
-            Some(c) => (self.chunks.len() - 1) * CHUNK + (cursor - c.as_ptr() as usize),
-            None => 0,
-        }
+    /// Bytes handed out since the last minor collection
+    pub(crate) fn used(&self) -> usize {
+        self.used.load(Ordering::Acquire)
     }
 
-    /// Clears everything: some blocks are kept for reuse
+    /// Empties everything (exclusively): some blocks are kept for reuse
     pub(crate) fn reset(&mut self) {
-        self.spare.append(&mut self.chunks);
-        while self.spare.len() > NURSERY_LIMIT / CHUNK {
-            let c = self.spare.pop().expect("spare chunk");
-            // SAFETY: allocated with LAYOUT
-            unsafe { dealloc(c.as_ptr(), Self::LAYOUT) }
+        for b in self.chunks.take() {
+            if self.spare.len() < NURSERY_LIMIT / CHUNK {
+                self.spare.push(b);
+            } else {
+                // SAFETY: allocated with LAYOUT, nothing lives in it any more
+                unsafe { dealloc(b.0.as_ptr(), Self::LAYOUT) }
+            }
         }
+        *self.used.get_mut() = 0;
     }
 }
 
 impl Drop for Nursery {
     fn drop(&mut self) {
-        for c in self.chunks.drain(..).chain(self.spare.drain(..)) {
+        for b in self.chunks.take().into_iter().chain(self.spare.take()) {
             // SAFETY: allocated with LAYOUT
-            unsafe { dealloc(c.as_ptr(), Self::LAYOUT) }
+            unsafe { dealloc(b.0.as_ptr(), Self::LAYOUT) }
         }
     }
 }
+
+/// The base address of a block of heap memory (a young-generation chunk or an old-generation page).
+#[derive(Clone, Copy)]
+pub(crate) struct Block(NonNull<u8>);
+
+// SAFETY: just an address; the memory behind it belongs to whoever claims it
+unsafe impl Send for Block {}
+// SAFETY: see above
+unsafe impl Sync for Block {}
 
 /// An old-generation page: filled with slots of one size class; free slots are marked `FREE` in their header.
 struct Page {
@@ -168,22 +178,13 @@ unsafe impl Send for Large {}
 // SAFETY: see above
 unsafe impl Sync for Large {}
 
-/// The base address of an empty page kept for reuse.
-#[derive(Clone, Copy)]
-struct Base(NonNull<u8>);
-
-// SAFETY: just an address; the page behind it belongs to whoever claims it from the stock
-unsafe impl Send for Base {}
-// SAFETY: see above
-unsafe impl Sync for Base {}
-
 /// The old generation. Lock-free: during collection several workers open pages, claim free slots, hand back
 /// unused ones and allocate large objects at once (all atomic); sweeping, compaction and settling happen while it
 /// is held exclusively.
 pub(crate) struct OldSpace {
     pages: SegVec<Page>,
     /// Emptied pages kept for reuse
-    spare: Stock<Base>,
+    spare: Stock<Block>,
     /// Free slots per size class
     free: [Stock<Ptr>; SizeClass::LARGE],
     large: SegVec<Large>,
@@ -230,7 +231,7 @@ impl OldSpace {
     /// Empty pages are kept for reuse and returned to the system only when there are too many
     fn retire(&mut self, base: NonNull<u8>) {
         if self.spare.len() < SPARE_MIN.max(self.pages.len() / SPARE_RATIO) {
-            self.spare.push(Base(base));
+            self.spare.push(Block(base));
         } else {
             // SAFETY: allocated with Page::LAYOUT, and no live objects remain in it
             unsafe { dealloc(base.as_ptr(), Page::LAYOUT) }
