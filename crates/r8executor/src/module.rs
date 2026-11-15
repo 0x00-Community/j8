@@ -23,7 +23,7 @@ impl Executor {
         for &s in &info.lexical {
             slots[usize::from(s)] = Value::Uninit;
         }
-        let env = r8framework::Env { slots, parent: None }.alloc(a.mc);
+        let env = r8framework::Env::new(slots, None).alloc(a.mc);
         let info = alloc::rc::Rc::new(info);
         let record = r8framework::ModuleRecord { path: a.string(path), env, info: alloc::rc::Rc::clone(&info), main, status: ModuleStatus::Linked, error: None, requested: Vec::new(), imports: Vec::new(), namespace: None, meta: None };
         let index = a.push_module(&record);

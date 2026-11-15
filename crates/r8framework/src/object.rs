@@ -44,22 +44,51 @@ pub struct RegExpData<'gc> {
 pub type JsObject<'gc> = Gc<'gc, RefLock<ObjectData<'gc>>>;
 
 /// A scope environment on the heap: bindings captured by inner functions live here, stored by slot.
-pub type JsEnv<'gc> = Gc<'gc, RefLock<Env<'gc>>>;
+pub type JsEnv<'gc> = Gc<'gc, Env<'gc>>;
 
 /// A host function: takes `this` and arguments, returns a value or an exception.
 pub type NativeFn = for<'gc, 'x> fn(&mut Agent<'gc, 'x>, Value<'gc>, &[Value<'gc>]) -> Result<Value<'gc>, Error>;
 
-/// One scope environment layer; `parent` points to the outer one.
+/// One scope environment layer; `parent` points to the outer one. The number of slots is fixed at creation; each
+/// slot is an atomic cell, so any thread may read and write it.
 #[derive(Debug, Collect)]
 #[collect(no_drop)]
 pub struct Env<'gc> {
-    pub slots: Vec<Value<'gc>>,
+    slots: Box<[Lock<Value<'gc>>]>,
     pub parent: Option<JsEnv<'gc>>,
 }
 
 impl<'gc> Env<'gc> {
+    /// An environment holding `slots`
+    pub fn new(slots: Vec<Value<'gc>>, parent: Option<JsEnv<'gc>>) -> Self {
+        Self { slots: slots.into_iter().map(Lock::new).collect(), parent }
+    }
+
+    /// An environment of `n` slots, all `undefined`
+    pub fn with_len(n: usize, parent: Option<JsEnv<'gc>>) -> Self {
+        Self { slots: (0..n).map(|_| Lock::new(Value::Undefined)).collect(), parent }
+    }
+
     pub fn alloc(self, mc: &Mutation<'gc>) -> JsEnv<'gc> {
-        Gc::new(mc, RefLock::new(self))
+        Gc::new(mc, self)
+    }
+
+    /// Slot `i`
+    #[inline]
+    pub fn get(&self, i: usize) -> Value<'gc> {
+        self.slots[i].get()
+    }
+
+    /// The current values of every slot (a copy, e.g. for a per-iteration binding environment)
+    pub fn values(&self) -> Vec<Value<'gc>> {
+        self.slots.iter().map(Lock::get).collect()
+    }
+
+    /// Writes slot `i` of `env`
+    #[inline]
+    pub fn set(env: JsEnv<'gc>, mc: &Mutation<'gc>, i: usize, v: Value<'gc>) {
+        // SAFETY: the slot is part of `env` itself (its own boxed slice, traced by its `Collect`)
+        unsafe { env.slots[i].set_in(mc, env, v) };
     }
 }
 

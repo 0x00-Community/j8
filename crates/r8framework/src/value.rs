@@ -69,6 +69,7 @@ impl ValueWord {
     /// The low 48 bits: the payload
     const PAYLOAD: u64 = (1 << Self::TAG_SHIFT) - 1;
 
+    #[inline]
     fn boxed(tag: u8, payload: u64) -> u64 {
         debug_assert!(payload <= Self::PAYLOAD, "GC address beyond 48 bits");
         Self::BOXED | ((u64::from(tag) + 1) << Self::TAG_SHIFT) | payload
@@ -76,6 +77,7 @@ impl ValueWord {
 }
 
 impl r8gc::Word for Value<'_> {
+    #[inline]
     fn into_word(self) -> u64 {
         match self {
             Value::Number(n) if n.is_nan() => ValueWord::CANONICAL_NAN,
@@ -91,6 +93,7 @@ impl r8gc::Word for Value<'_> {
         }
     }
 
+    #[inline]
     fn from_word(w: u64) -> Self {
         let nibble = (w >> ValueWord::TAG_SHIFT) & ValueWord::TAG_MASK;
         if w & ValueWord::BOXED != ValueWord::BOXED || nibble == 0 {

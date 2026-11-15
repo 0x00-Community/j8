@@ -112,6 +112,17 @@ impl<T: Word> Lock<T> {
         *self.word.get_mut() = t.into_word();
     }
 
+    /// Stores into a cell that is part of the object `owner` (its write barrier runs first). Lets an object keep many
+    /// atomic cells (an array of them, say) without a `Gc` per cell.
+    ///
+    /// # Safety
+    /// The cell must belong to `owner` itself — one of its fields, or memory it owns and traces — and not be reached
+    /// through another `Gc`; otherwise the collector may miss the stored pointer and free its target early.
+    pub unsafe fn set_in<'gc, O: 'gc>(&self, mc: &Mutation<'gc>, owner: Gc<'gc, O>, t: T) {
+        mc.barrier(owner.erase());
+        self.word.store(t.into_word(), Ordering::Release);
+    }
+
     /// Compare-and-swap without the barrier: the caller has run the barrier on the object that owns this cell
     pub(crate) fn cas_raw(&self, current: T, new: T) -> Result<T, T> {
         self.word.compare_exchange(current.into_word(), new.into_word(), Ordering::AcqRel, Ordering::Acquire).map(T::from_word).map_err(T::from_word)

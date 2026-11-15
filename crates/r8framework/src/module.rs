@@ -186,7 +186,7 @@ impl<'gc> Agent<'gc, '_> {
     /// The binding's current value (throws a ReferenceError if not yet initialized).
     pub fn binding_value(&mut self, b: ResolvedBinding<'gc>, name: &str) -> Result<Value<'gc>, Error> {
         match b {
-            ResolvedBinding::Slot(env, slot) => match env.borrow().slots[usize::from(slot)] {
+            ResolvedBinding::Slot(env, slot) => match env.get(usize::from(slot)) {
                 Value::Uninit => Err(self.throw(ErrorKind::Reference, &alloc::format!("Cannot access '{name}' before initialization"))),
                 v => Ok(v),
             },

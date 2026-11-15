@@ -199,7 +199,7 @@ impl<'gc> Agent<'gc, '_> {
             (ObjectKind::Arguments(Some(map)), Key::Str(k)) => {
                 let slot = index_of_str(k).and_then(|i| map.slots.get(i as usize).copied().flatten());
                 match (d.own_slot(key), slot) {
-                    (Some(p), Some(s)) => Some(Property { slot: Slot::Data(map.env.borrow().slots[usize::from(s)]), ..p }),
+                    (Some(p), Some(s)) => Some(Property { slot: Slot::Data(map.env.get(usize::from(s))), ..p }),
                     (p, _) => p,
                 }
             }
@@ -285,7 +285,7 @@ impl<'gc> Agent<'gc, '_> {
         };
         let mut d = desc;
         if d.is_data() && d.value.is_none() && d.writable == Some(false) {
-            d.value = Some(env.borrow().slots[usize::from(slot)]);
+            d.value = Some(env.get(usize::from(slot)));
         }
         if !self.ordinary_define(o, key, &d) {
             return false;
@@ -294,7 +294,7 @@ impl<'gc> Agent<'gc, '_> {
             self.unmap(o, key);
         } else {
             if let Some(v) = desc.value {
-                env.borrow_mut(self.mc).slots[usize::from(slot)] = v;
+                crate::Env::set(env, self.mc, usize::from(slot), v);
             }
             if desc.writable == Some(false) {
                 self.unmap(o, key);

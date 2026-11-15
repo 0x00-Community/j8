@@ -712,7 +712,7 @@ impl Executor {
     fn env_at(env: Option<JsEnv<'_>>, depth: u16) -> JsEnv<'_> {
         let mut e = env.expect("a scope with an environment");
         for _ in 0..depth {
-            e = e.borrow().parent.expect("an enclosing environment");
+            e = e.parent.expect("an enclosing environment");
         }
         e
     }
@@ -1101,7 +1101,7 @@ impl Executor {
                     Insn::CheckInit { name } => Self::check_const(a, *acc, func, name)?,
                     Insn::CheckReg { reg, name } => Self::check_const(a, regs[r(reg)], func, name)?,
                     Insn::CheckEnv { depth, slot, name } => {
-                        let v = Self::env_at(f.env, depth).borrow().slots[usize::from(slot)];
+                        let v = Self::env_at(f.env, depth).get(usize::from(slot));
                         Self::check_const(a, v, func, name)?;
                     }
                     Insn::CheckThis => {
@@ -1170,14 +1170,14 @@ impl Executor {
                         }
                     }
                     Insn::LdaEnv { depth, slot } => {
-                        *acc = Self::env_at(f.env, depth).borrow().slots[usize::from(slot)];
+                        *acc = Self::env_at(f.env, depth).get(usize::from(slot));
                     }
-                    Insn::StaEnv { depth, slot } => Self::env_at(f.env, depth).borrow_mut(a.mc).slots[usize::from(slot)] = *acc,
-                    Insn::PushEnv(n) => f.env = Some(Env { slots: alloc::vec![Value::Undefined; usize::from(n)], parent: f.env }.alloc(a.mc)),
-                    Insn::PopEnv => f.env = Self::env_at(f.env, 0).borrow().parent,
+                    Insn::StaEnv { depth, slot } => Env::set(Self::env_at(f.env, depth), a.mc, usize::from(slot), *acc),
+                    Insn::PushEnv(n) => f.env = Some(Env::with_len(usize::from(n), f.env).alloc(a.mc)),
+                    Insn::PopEnv => f.env = Self::env_at(f.env, 0).parent,
                     Insn::CloneEnv => {
                         let e = Self::env_at(f.env, 0);
-                        let copy = Env { slots: e.borrow().slots.clone(), parent: e.borrow().parent };
+                        let copy = Env::new(e.values(), e.parent);
                         f.env = Some(copy.alloc(a.mc));
                     }
                     Insn::Binary(op, x) => binary!(op, regs[r(x)], *acc),
