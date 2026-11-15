@@ -49,6 +49,69 @@ impl ValueTag {
 
 const _: () = assert!(core::mem::size_of::<Value<'static>>() == ValueTag::SIZE);
 
+/// The one-word (NaN-boxed) form of a [`Value`], so a value fits an atomic slot: `r8gc::Lock<Value>` is an atomic
+/// value cell any thread may read and write.
+///
+/// Numbers are their own bits (every NaN becomes the canonical positive quiet NaN). Everything else lives in the
+/// negative NaN space: the top 16 bits are `0xFFF0 | (tag + 1)` (never 0 there, so `-Infinity` = `0xFFF0…0` cannot
+/// collide) and the low 48 bits carry the payload (a bool, or a GC address: user-space addresses fit in 48 bits).
+pub struct ValueWord;
+
+impl ValueWord {
+    /// The canonical NaN every number NaN is stored as
+    const CANONICAL_NAN: u64 = 0x7FF8_0000_0000_0000;
+    /// Top 12 bits of every boxed value (a negative NaN)
+    const BOXED: u64 = 0xFFF0_0000_0000_0000;
+    /// Where the (tag + 1) nibble sits
+    const TAG_SHIFT: u32 = 48;
+    /// The (tag + 1) nibble
+    const TAG_MASK: u64 = 0xF;
+    /// The low 48 bits: the payload
+    const PAYLOAD: u64 = (1 << Self::TAG_SHIFT) - 1;
+
+    fn boxed(tag: u8, payload: u64) -> u64 {
+        debug_assert!(payload <= Self::PAYLOAD, "GC address beyond 48 bits");
+        Self::BOXED | ((u64::from(tag) + 1) << Self::TAG_SHIFT) | payload
+    }
+}
+
+impl r8gc::Word for Value<'_> {
+    fn into_word(self) -> u64 {
+        match self {
+            Value::Number(n) if n.is_nan() => ValueWord::CANONICAL_NAN,
+            Value::Number(n) => n.to_bits(),
+            Value::Undefined => ValueWord::boxed(ValueTag::UNDEFINED, 0),
+            Value::Null => ValueWord::boxed(ValueTag::NULL, 0),
+            Value::Uninit => ValueWord::boxed(ValueTag::UNINIT, 0),
+            Value::Bool(b) => ValueWord::boxed(ValueTag::BOOL, u64::from(b)),
+            Value::String(g) => ValueWord::boxed(ValueTag::STRING, g.into_word()),
+            Value::Symbol(g) => ValueWord::boxed(ValueTag::SYMBOL, g.into_word()),
+            Value::BigInt(g) => ValueWord::boxed(ValueTag::BIGINT, g.into_word()),
+            Value::Object(g) => ValueWord::boxed(ValueTag::OBJECT, g.into_word()),
+        }
+    }
+
+    fn from_word(w: u64) -> Self {
+        let nibble = (w >> ValueWord::TAG_SHIFT) & ValueWord::TAG_MASK;
+        if w & ValueWord::BOXED != ValueWord::BOXED || nibble == 0 {
+            return Value::Number(f64::from_bits(w));
+        }
+        let payload = w & ValueWord::PAYLOAD;
+        // The nibble is 1..=15, so the tag fits a byte
+        match u8::try_from(nibble - 1).unwrap_or(u8::MAX) {
+            ValueTag::UNDEFINED => Value::Undefined,
+            ValueTag::NULL => Value::Null,
+            ValueTag::UNINIT => Value::Uninit,
+            ValueTag::BOOL => Value::Bool(payload != 0),
+            ValueTag::STRING => Value::String(Gc::from_word(payload)),
+            ValueTag::SYMBOL => Value::Symbol(Gc::from_word(payload)),
+            ValueTag::BIGINT => Value::BigInt(Gc::from_word(payload)),
+            ValueTag::OBJECT => Value::Object(Gc::from_word(payload)),
+            tag => unreachable!("boxed value with tag {tag}"),
+        }
+    }
+}
+
 /// Strict equality (`===`): strings compare by content, objects by identity, and `NaN` is not equal to itself.
 impl PartialEq for Value<'_> {
     #[inline]
@@ -127,5 +190,23 @@ impl<'gc> From<JsSymbol<'gc>> for Value<'gc> {
 impl<'gc> From<JsObject<'gc>> for Value<'gc> {
     fn from(o: JsObject<'gc>) -> Self {
         Value::Object(o)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use r8gc::Word;
+
+    use super::Value;
+
+    /// Scalars survive the one-word form; every NaN comes back as a NaN; ±0 and ±∞ keep their sign
+    #[test]
+    fn word_round_trip() {
+        for v in [Value::Undefined, Value::Null, Value::Uninit, Value::Bool(true), Value::Bool(false)] {
+            assert!(Value::from_word(v.into_word()).same_value(v));
+        }
+        for n in [0.0, -0.0, 1.5, -2.0, f64::INFINITY, f64::NEG_INFINITY, f64::MAX, f64::MIN_POSITIVE, f64::NAN, -f64::NAN] {
+            assert!(Value::from_word(Value::Number(n).into_word()).same_value(Value::Number(n)), "{n}");
+        }
     }
 }
