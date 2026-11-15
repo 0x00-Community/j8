@@ -40,7 +40,7 @@ impl Reflects {
             ObjectKind::NativeClosure(c) => core::mem::take(&mut c.slots[0]),
             _ => Value::Undefined,
         };
-        if let ValueKind::Object(p) = target.kind()
+        if let Some(p) = target.as_object()
             && let ObjectKind::Proxy(d) = &mut p.borrow_mut(a.mc).kind
         {
             d.target = None;

@@ -4,7 +4,7 @@ use alloc::vec::Vec;
 use core::fmt::Write;
 
 use r8virtasm::{Constant, Function, Insn, Reg};
-use r8framework::{BinaryOp, CompareOp, ValueTag};
+use r8framework::{BinaryOp, CompareOp, ValueBits, ValueTag};
 
 use crate::Helper;
 
@@ -32,6 +32,8 @@ impl FCmp {
     const ONE: &str = "one";
     /// Unordered or not equal (`NaN` gives true; the semantics of `!=`)
     const UNE: &str = "une";
+    /// Unordered (either is `NaN`)
+    const UNO: &str = "uno";
 
     fn of(op: CompareOp) -> &'static str {
         match op {
@@ -48,11 +50,13 @@ impl FCmp {
 /// Predicates of `llvm.icmp`
 const ICMP_EQ: &str = "eq";
 const ICMP_NE: &str = "ne";
+/// Unsigned less than
+const ICMP_ULT: &str = "ult";
 
 /// One bytecode function ⇒ MLIR text (`llvm` dialect).
 ///
 /// One block `^iN` per instruction; instructions that may bail out to the interpreter also get a `^dN` (returns `N +
-/// 1`). The accumulator and each register are a pair of locals (`llvm.alloca`: tag, payload): the entry reads them from
+/// 1`). The accumulator and each register are one local each (`llvm.alloca`: the NaN-boxed value word): the entry reads them from
 /// the frame (the [`Value`](r8framework::Value)s pointed to by `%acc` / `%regs`), and every exit jumps to the
 /// write-back block `^x`, which writes them back to the frame and returns; mem2reg later promotes the locals to SSA.
 pub(crate) struct Lower<'f> {
@@ -181,27 +185,30 @@ impl<'f> Lower<'f> {
         self.def(&alloc::format!("llvm.mlir.constant({x} : i{bits}) : i{bits}"))
     }
 
+    /// A value word as an `i64` constant (written signed: boxed words are above `i64::MAX`)
+    fn word(&mut self, w: u64) -> V {
+        self.def(&alloc::format!("llvm.mlir.constant({} : i64) : i64", w.cast_signed()))
+    }
+
     fn float(&mut self, x: f64) -> V {
         // Written as a bit pattern, so `NaN` / infinities / `-0` are all preserved
         self.def(&alloc::format!("llvm.mlir.constant(0x{:016X} : f64) : f64", x.to_bits()))
     }
 
-    /// The local holding register `r`'s tag word (`off` 0) or payload word (`off` = payload offset)
-    fn reg_addr(r: Reg, off: usize) -> V {
-        if off == 0 { alloc::format!("%rt{}", r.0) } else { alloc::format!("%rp{}", r.0) }
+    /// The local holding register `r`'s value word
+    fn reg_addr(r: Reg) -> V {
+        alloc::format!("%r{}", r.0)
     }
 
-    /// The locals holding the accumulator's tag word / payload word
-    fn acc_addr(off: usize) -> V {
-        String::from(if off == 0 { "%at" } else { "%ap" })
+    /// The local holding the accumulator's value word
+    fn acc_addr() -> V {
+        String::from("%a")
     }
 
-    /// Reads a local (all stored as i64) as `ty`: `i8` takes the low byte (tags, booleans), `f64` is a bitcast
-    /// (numbers)
+    /// Reads a local (all stored as i64) as `ty`: `f64` is a bitcast (numbers)
     fn load(&mut self, p: &str, ty: &str) -> V {
         let w = self.def(&alloc::format!("llvm.load {p} : !llvm.ptr -> i64"));
         match ty {
-            "i8" => self.def(&alloc::format!("llvm.trunc {w} : i64 to i8")),
             "f64" => self.def(&alloc::format!("llvm.bitcast {w} : i64 to f64")),
             _ => w,
         }
@@ -210,7 +217,6 @@ impl<'f> Lower<'f> {
     /// Writes a local: the `ty` value is stored as i64
     fn store(&mut self, v: &str, p: &str, ty: &str) {
         let w = match ty {
-            "i8" => self.def(&alloc::format!("llvm.zext {v} : i8 to i64")),
             "f64" => self.def(&alloc::format!("llvm.bitcast {v} : f64 to i64")),
             _ => String::from(v),
         };
@@ -224,21 +230,21 @@ impl<'f> Lower<'f> {
 
     /// All locals: (local, base address in the frame, byte offset)
     fn locals(&self) -> Vec<(String, &'static str, usize)> {
-        let mut out = Vec::new();
-        for r in 0..usize::from(self.func.regs) {
-            out.push((alloc::format!("%rt{r}"), "%regs", r * ValueTag::SIZE));
-            out.push((alloc::format!("%rp{r}"), "%regs", r * ValueTag::SIZE + ValueTag::PAYLOAD));
-        }
-        out.push((String::from("%at"), "%acc", 0));
-        out.push((String::from("%ap"), "%acc", ValueTag::PAYLOAD));
+        let mut out: Vec<(String, &'static str, usize)> = (0..usize::from(self.func.regs)).map(|r| (alloc::format!("%r{r}"), "%regs", r * ValueTag::SIZE)).collect();
+        out.push((String::from("%a"), "%acc", 0));
         out
     }
 
-    /// Whether the value at address `p` has tag `tag` (i1)
-    fn tag_is(&mut self, p: &str, tag: u8) -> V {
-        let t = self.load(p, "i8");
-        let c = self.int(u64::from(tag), 8);
-        self.icmp(ICMP_EQ, &t, &c, "i8")
+    /// Whether value word `w` is a number (i1): every word below the boxed range is
+    fn is_number(&mut self, w: &str) -> V {
+        let min = self.word(ValueBits::BOXED_MIN);
+        self.icmp(ICMP_ULT, w, &min, "i64")
+    }
+
+    /// Whether value word `w` is exactly `bits` (i1)
+    fn is_word(&mut self, w: &str, bits: u64) -> V {
+        let c = self.word(bits);
+        self.icmp(ICMP_EQ, w, &c, "i64")
     }
 
     fn icmp(&mut self, pred: &str, a: &str, b: &str, ty: &str) -> V {
@@ -259,55 +265,62 @@ impl<'f> Lower<'f> {
         self.label(&alloc::format!("k{name}"));
     }
 
-    /// Writes number `x` to the accumulator
+    /// Writes number `x` to the accumulator (any NaN becomes the canonical one: a negative NaN would read as a boxed
+    /// value)
     fn put_number(&mut self, x: &str) {
-        let (tp, pp) = (Self::acc_addr(0), Self::acc_addr(ValueTag::PAYLOAD));
-        let tag = self.int(u64::from(ValueTag::NUMBER), 64);
-        self.store(&tag, &tp, "i64");
-        self.store(x, &pp, "f64");
+        let bits = self.def(&alloc::format!("llvm.bitcast {x} : f64 to i64"));
+        let nan = self.fcmp(FCmp::UNO, x, x);
+        let canon = self.word(ValueBits::CANONICAL_NAN);
+        let w = self.def(&alloc::format!("llvm.select {nan}, {canon}, {bits} : i1, i64"));
+        self.store(&w, &Self::acc_addr(), "i64");
     }
 
     /// Writes boolean `b` (i1) to the accumulator
     fn put_bool(&mut self, b: &str) {
-        let (tp, pp) = (Self::acc_addr(0), Self::acc_addr(ValueTag::PAYLOAD));
-        let tag = self.int(u64::from(ValueTag::BOOL), 64);
-        self.store(&tag, &tp, "i64");
-        let byte = self.def(&alloc::format!("llvm.zext {b} : i1 to i8"));
-        self.store(&byte, &pp, "i8");
+        let low = self.def(&alloc::format!("llvm.zext {b} : i1 to i64"));
+        let f = self.word(ValueBits::FALSE);
+        let w = self.def(&alloc::format!("llvm.or {f}, {low} : i64"));
+        self.store(&w, &Self::acc_addr(), "i64");
     }
 
-    /// Writes a tag-only value (undefined / null / uninitialized) to the accumulator
-    fn put_tag(&mut self, tag: u8) {
-        let tp = Self::acc_addr(0);
-        let t = self.int(u64::from(tag), 64);
-        self.store(&t, &tp, "i64");
+    /// Writes a constant value word (undefined / null / uninitialized) to the accumulator
+    fn put_word(&mut self, bits: u64) {
+        let w = self.word(bits);
+        self.store(&w, &Self::acc_addr(), "i64");
     }
 
-    /// Moves between two 16-byte values (tag word and payload word)
-    fn copy(&mut self, from: &(V, V), to: &(V, V)) {
-        let (a, b) = (self.load(&from.0, "i64"), self.load(&from.1, "i64"));
-        self.store(&a, &to.0, "i64");
-        self.store(&b, &to.1, "i64");
+    /// Moves a value word between two locals
+    fn copy(&mut self, from: &str, to: &str) {
+        let w = self.load(from, "i64");
+        self.store(&w, to, "i64");
     }
 
     /// Register `r` and the accumulator are both numbers: gives (r's number, the accumulator's number); otherwise bails
     /// out to the interpreter.
     fn numbers(&mut self, pc: u32, r: Reg) -> (V, V) {
-        let (rt, at) = (Self::reg_addr(r, 0), Self::acc_addr(0));
-        let (a, b) = (self.tag_is(&rt, ValueTag::NUMBER), self.tag_is(&at, ValueTag::NUMBER));
+        let (rw, aw) = (self.load(&Self::reg_addr(r), "i64"), self.load(&Self::acc_addr(), "i64"));
+        let (a, b) = (self.is_number(&rw), self.is_number(&aw));
         let both = self.def(&alloc::format!("llvm.and {a}, {b} : i1"));
         self.guard(pc, &both);
-        let (rp, ap) = (Self::reg_addr(r, ValueTag::PAYLOAD), Self::acc_addr(ValueTag::PAYLOAD));
-        (self.load(&rp, "f64"), self.load(&ap, "f64"))
+        let x = self.def(&alloc::format!("llvm.bitcast {rw} : i64 to f64"));
+        let y = self.def(&alloc::format!("llvm.bitcast {aw} : i64 to f64"));
+        (x, y)
     }
 
     /// The accumulator is a number: gives it; otherwise bails out to the interpreter.
     fn acc_number(&mut self, pc: u32) -> V {
-        let at = Self::acc_addr(0);
-        let ok = self.tag_is(&at, ValueTag::NUMBER);
+        let w = self.load(&Self::acc_addr(), "i64");
+        let ok = self.is_number(&w);
         self.guard(pc, &ok);
-        let ap = Self::acc_addr(ValueTag::PAYLOAD);
-        self.load(&ap, "f64")
+        self.def(&alloc::format!("llvm.bitcast {w} : i64 to f64"))
+    }
+
+    /// The local `p` is not an uninitialized binding; otherwise bails out to the interpreter.
+    fn initialized(&mut self, pc: u32, p: &str) {
+        let w = self.load(p, "i64");
+        let u = self.word(ValueBits::UNINIT);
+        let ok = self.icmp(ICMP_NE, &w, &u, "i64");
+        self.guard(pc, &ok);
     }
 
     fn next_block(&mut self, pc: u32) {
@@ -316,20 +329,19 @@ impl<'f> Lower<'f> {
 
     /// ToBoolean(acc), only for booleans / numbers / undefined / null; anything else bails out to the interpreter.
     fn truthy(&mut self, pc: u32) -> V {
-        let at = Self::acc_addr(0);
-        let is_bool = self.tag_is(&at, ValueTag::BOOL);
-        let is_num = self.tag_is(&at, ValueTag::NUMBER);
-        let is_undef = self.tag_is(&at, ValueTag::UNDEFINED);
-        let is_null = self.tag_is(&at, ValueTag::NULL);
+        let w = self.load(&Self::acc_addr(), "i64");
+        let is_num = self.is_number(&w);
+        let one = self.word(1);
+        let base = self.def(&alloc::format!("llvm.or {w}, {one} : i64"));
+        let is_bool = self.is_word(&base, ValueBits::TRUE);
+        let is_undef = self.is_word(&w, ValueBits::UNDEFINED);
+        let is_null = self.is_word(&w, ValueBits::NULL);
         let k1 = self.def(&alloc::format!("llvm.or {is_bool}, {is_num} : i1"));
         let k2 = self.def(&alloc::format!("llvm.or {is_undef}, {is_null} : i1"));
         let known = self.def(&alloc::format!("llvm.or {k1}, {k2} : i1"));
         self.guard(pc, &known);
-        let pp = Self::acc_addr(ValueTag::PAYLOAD);
-        let byte = self.load(&pp, "i8");
-        let zero8 = self.int(0, 8);
-        let b = self.icmp(ICMP_NE, &byte, &zero8, "i8");
-        let x = self.load(&pp, "f64");
+        let b = self.is_word(&w, ValueBits::TRUE);
+        let x = self.def(&alloc::format!("llvm.bitcast {w} : i64 to f64"));
         let zero = self.float(0.0);
         // Non-zero and not NaN
         let n = self.fcmp(FCmp::ONE, &x, &zero);
@@ -367,9 +379,9 @@ impl<'f> Lower<'f> {
     fn step(&mut self, pc: u32, insn: Insn, last: bool) -> Result<(), Unsupported> {
         let unsupported = Unsupported { pc, insn };
         match insn {
-            Insn::LdaUndefined => self.put_tag(ValueTag::UNDEFINED),
-            Insn::LdaNull => self.put_tag(ValueTag::NULL),
-            Insn::LdaHole => self.put_tag(ValueTag::UNINIT),
+            Insn::LdaUndefined => self.put_word(ValueBits::UNDEFINED),
+            Insn::LdaNull => self.put_word(ValueBits::NULL),
+            Insn::LdaHole => self.put_word(ValueBits::UNINIT),
             Insn::LdaBool(b) => {
                 let v = self.int(u64::from(b), 1);
                 self.put_bool(&v);
@@ -385,16 +397,8 @@ impl<'f> Lower<'f> {
                 }
                 _ => return Err(unsupported),
             },
-            Insn::Ldar(r) => {
-                let from = (Self::reg_addr(r, 0), Self::reg_addr(r, ValueTag::PAYLOAD));
-                let to = (Self::acc_addr(0), Self::acc_addr(ValueTag::PAYLOAD));
-                self.copy(&from, &to);
-            }
-            Insn::Star(r) => {
-                let from = (Self::acc_addr(0), Self::acc_addr(ValueTag::PAYLOAD));
-                let to = (Self::reg_addr(r, 0), Self::reg_addr(r, ValueTag::PAYLOAD));
-                self.copy(&from, &to);
-            }
+            Insn::Ldar(r) => self.copy(&Self::reg_addr(r), &Self::acc_addr()),
+            Insn::Star(r) => self.copy(&Self::acc_addr(), &Self::reg_addr(r)),
             Insn::Binary(op, r) => {
                 let (a, b) = self.numbers(pc, r);
                 let v = match op {
@@ -425,20 +429,8 @@ impl<'f> Lower<'f> {
                 let v = self.def(&alloc::format!("llvm.{op} {x}, {one} : f64"));
                 self.put_number(&v);
             }
-            Insn::CheckInit { .. } => {
-                let at = Self::acc_addr(0);
-                let t = self.load(&at, "i8");
-                let u = self.int(u64::from(ValueTag::UNINIT), 8);
-                let ok = self.icmp(ICMP_NE, &t, &u, "i8");
-                self.guard(pc, &ok);
-            }
-            Insn::CheckReg { reg, .. } => {
-                let at = Self::reg_addr(reg, 0);
-                let t = self.load(&at, "i8");
-                let u = self.int(u64::from(ValueTag::UNINIT), 8);
-                let ok = self.icmp(ICMP_NE, &t, &u, "i8");
-                self.guard(pc, &ok);
-            }
+            Insn::CheckInit { .. } => self.initialized(pc, &Self::acc_addr()),
+            Insn::CheckReg { reg, .. } => self.initialized(pc, &Self::reg_addr(reg)),
             Insn::Jump(l) => {
                 self.line(&alloc::format!("llvm.br ^i{}", l.0));
                 return Ok(());

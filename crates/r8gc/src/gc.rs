@@ -47,6 +47,16 @@ impl<'gc, T: 'gc> Gc<'gc, T> {
         unsafe { self.ptr.as_ref() }
     }
 
+    /// The object at `addr` (the inverse of `Word::into_word`), without checking for null.
+    ///
+    /// # Safety
+    /// `addr` is the address of a live `T` in this heap (as given by `Word::into_word` of a `Gc<'gc, T>`), so not 0.
+    #[inline]
+    pub unsafe fn from_addr_unchecked(addr: usize) -> Self {
+        // SAFETY: the caller vouches it is a live object's address, so not null
+        Self { ptr: unsafe { NonNull::new_unchecked(addr as *mut T) }, _brand: PhantomData }
+    }
+
     #[inline]
     pub(crate) fn erase(self) -> Ptr {
         Ptr::from(self.ptr)

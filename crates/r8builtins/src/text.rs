@@ -394,7 +394,7 @@ impl Texts {
         let it = a.get_iterator(items)?;
         let (mut sum, mut pos_inf, mut neg_inf, mut nan, mut all_neg_zero) = (BigInt::zero(), false, false, false, true);
         while let Some(v) = a.iterator_step(it)? {
-            let ValueKind::Number(x) = v.kind() else {
+            let Some(x) = v.as_number() else {
                 let _ = a.iterator_close(it.iterator);
                 return Err(a.throw(ErrorKind::Type, "Math.sumPrecise items must be numbers"));
             };
@@ -696,7 +696,7 @@ impl<'gc> Installer<'_, 'gc> {
     pub(crate) fn texts(&mut self) {
         let r = self.realm;
         let string = self.global_fn("String");
-        if let ValueKind::Object(ctor) = string.kind() {
+        if let Some(ctor) = string.as_object() {
             self.method(ctor, "fromCharCode", Texts::from_char_code, 1);
             self.method(ctor, "fromCodePoint", Texts::from_code_point, 1);
             self.method(ctor, "raw", Texts::raw, 1);
@@ -732,7 +732,7 @@ impl<'gc> Installer<'_, 'gc> {
             self.set(sp, alias, f);
         }
         // Number
-        if let ValueKind::Object(ctor) = self.global_fn("Number").kind() {
+        if let Some(ctor) = self.global_fn("Number").as_object() {
             self.method(ctor, "isFinite", Texts::is_finite, 1);
             for name in ["parseFloat", "parseInt"] {
                 let f = self.global_fn(name);
@@ -745,7 +745,7 @@ impl<'gc> Installer<'_, 'gc> {
         self.method(np, "toPrecision", Texts::to_precision, 1);
         self.method(np, "toLocaleString", Texts::to_locale_string, 0);
         // Math
-        if let ValueKind::Object(m) = self.global_fn("Math").kind() {
+        if let Some(m) = self.global_fn("Math").as_object() {
             let math: [(&str, r8framework::NativeFn, u32); 12] = [
                 ("sinh", Texts::sinh, 1),
                 ("cosh", Texts::cosh, 1),
@@ -765,14 +765,14 @@ impl<'gc> Installer<'_, 'gc> {
             }
         }
         // Symbol
-        if let ValueKind::Object(ctor) = self.global_fn("Symbol").kind() {
+        if let Some(ctor) = self.global_fn("Symbol").as_object() {
             self.method(ctor, "for", Texts::symbol_for, 1);
             self.method(ctor, "keyFor", Texts::key_for, 1);
         }
         let tp = r.named_native(self.mc, Texts::symbol_to_primitive, "[Symbol.toPrimitive]", 1);
         r.symbol_proto.borrow_mut(self.mc).define_symbol(r.symbols.to_primitive, r8framework::Property { slot: r8framework::Slot::Data(tp.into()), enumerable: false, writable: false, configurable: true });
         // BigInt
-        if let ValueKind::Object(ctor) = self.global_fn("BigInt").kind() {
+        if let Some(ctor) = self.global_fn("BigInt").as_object() {
             self.method(ctor, "asIntN", Texts::as_int_n, 2);
             self.method(ctor, "asUintN", Texts::as_uint_n, 2);
         }

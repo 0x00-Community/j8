@@ -465,7 +465,7 @@ impl Executor {
     /// frame can be opened directly.
     #[inline]
     fn plain_closure<'gc>(&self, callee: Value<'gc>) -> Option<(Closure<'gc>, Rc<Loaded>)> {
-        let ValueKind::Object(o) = callee.kind() else { return None };
+        let o = callee.as_object()?;
         let ObjectKind::Function(c) = o.borrow().kind else { return None };
         let loaded = self.function(c.func);
         loaded.plain.then_some((c, loaded))
@@ -574,7 +574,7 @@ impl Executor {
                     let r = (native.f)(a, Value::Undefined, &args);
                     a.new_target = outer;
                     self.depth.set(saved);
-                    let ValueKind::Object(obj) = (r?).kind() else { unreachable!("built-in constructors return objects") };
+                    let Some(obj) = (r?).as_object() else { unreachable!("built-in constructors return objects") };
                     return Ok(Prepared::Done(obj.into()));
                 }
                 Err(None) => {
@@ -611,7 +611,7 @@ impl Executor {
             },
             _ => a.get_named(new_target, "prototype")?,
         };
-        let proto = if let ValueKind::Object(p) = proto.kind() { p } else { a.realm.object_proto };
+        let proto = if let Some(p) = proto.as_object() { p } else { a.realm.object_proto };
         let props = r8framework::Props::with_capacity(usize::from(ctor.instance_size.get()));
         Ok(ObjectData { proto: Some(proto), props, ..ObjectData::default() }.alloc(a.mc))
     }
@@ -650,7 +650,7 @@ impl Executor {
     }
 
     fn construct_value<'gc>(&self, a: &Agent<'gc, '_>, loaded: &Loaded, f: &Frame<'gc>, v: Value<'gc>) -> Result<Value<'gc>, Error> {
-        if matches!(v.kind(), ValueKind::Object(_)) {
+        if v.as_object().is_some() {
             return Ok(v);
         }
         match (loaded.func.kind, f.new_this) {
@@ -939,7 +939,7 @@ impl Executor {
 
     /// Appends to the end of an array built by the compiler.
     fn push<'gc>(a: &Agent<'gc, '_>, arr: Value<'gc>, items: impl IntoIterator<Item = Value<'gc>>) {
-        let ValueKind::Object(o) = arr.kind() else { return };
+        let Some(o) = arr.as_object() else { return };
         let mut d = o.borrow_mut(a.mc);
         for v in items {
             let len = d.array_length().unwrap_or(0);
@@ -952,7 +952,7 @@ impl Executor {
 
     /// Defines a property in an object literal / class (the value or accessor function is `v`).
     fn define<'gc>(a: &mut Agent<'gc, '_>, obj: Value<'gc>, key: &str, kind: PropertyKind, enumerable: bool, v: Value<'gc>) -> Result<(), Error> {
-        let ValueKind::Object(o) = obj.kind() else { return Ok(()) };
+        let Some(o) = obj.as_object() else { return Ok(()) };
         match (kind, v.kind()) {
             (PropertyKind::Data, _) => a.define(o, key, Property { slot: Slot::Data(v), enumerable, writable: true, configurable: true })?,
             (PropertyKind::Getter | PropertyKind::Setter, ValueKind::Object(func)) => a.define_accessor(o, key, func, kind == PropertyKind::Setter, enumerable),
@@ -1038,18 +1038,20 @@ impl Executor {
                 let r = |r: Reg| f.base + usize::from(r.0);
                 // Fast path when both sides are numbers computes in place; everything else goes to the Agent
                 macro_rules! binary {
-                    ($op:expr, $lhs:expr, $rhs:expr) => {
-                        *acc = match ($lhs.kind(), $rhs.kind()) {
-                            (ValueKind::Number(lhs), ValueKind::Number(rhs)) => $op.numbers(lhs, rhs).into(),
-                            (lhs, rhs) => a.binary($op, Value::from(lhs), Value::from(rhs))?,
+                    ($op:expr, $lhs:expr, $rhs:expr) => {{
+                        let (lhs, rhs) = ($lhs, $rhs);
+                        *acc = match (lhs.as_number(), rhs.as_number()) {
+                            (Some(x), Some(y)) => $op.numbers(x, y).into(),
+                            _ => a.binary($op, lhs, rhs)?,
                         }
-                    };
+                    }};
                 }
                 macro_rules! compare {
                     ($op:expr, $lhs:expr, $rhs:expr) => {{
-                        let c = match ($lhs.kind(), $rhs.kind()) {
-                            (ValueKind::Number(lhs), ValueKind::Number(rhs)) => $op.numbers(lhs, rhs),
-                            (lhs, rhs) => a.compare($op, Value::from(lhs), Value::from(rhs))?,
+                        let (lhs, rhs) = ($lhs, $rhs);
+                        let c = match (lhs.as_number(), rhs.as_number()) {
+                            (Some(x), Some(y)) => $op.numbers(x, y),
+                            _ => a.compare($op, lhs, rhs)?,
                         };
                         *acc = c.into();
                         // Immediately followed by a conditional jump (loop condition, `if`): the comparison result is
@@ -1126,7 +1128,7 @@ impl Executor {
                     Insn::DeclareVar { name, deletable } => Self::declare_global(a, func.name_at(name), None, deletable),
                     Insn::DeclareFunction { name, deletable } => Self::declare_global(a, func.name_at(name), Some(*acc), deletable),
                     Insn::SetProtoLiteral { obj } => {
-                        if let ValueKind::Object(o) = regs[r(obj)].kind() {
+                        if let Some(o) = regs[r(obj)].as_object() {
                             match (*acc).kind() {
                                 ValueKind::Object(p) => o.borrow_mut(a.mc).proto = Some(p),
                                 ValueKind::Null => o.borrow_mut(a.mc).proto = None,
@@ -1143,7 +1145,7 @@ impl Executor {
                     }
                     Insn::CreateNullObject => *acc = ObjectData::default().alloc(a.mc).into(),
                     Insn::DeclareEvalVar { obj, name } => {
-                        if let ValueKind::Object(o) = regs[r(obj)].kind() {
+                        if let Some(o) = regs[r(obj)].as_object() {
                             let key = r8framework::Key::Str(func.name_at(name));
                             if !a.has_own_property(o, key)? {
                                 a.create_data_property(o, key, Value::Undefined)?;
@@ -1156,7 +1158,7 @@ impl Executor {
                         let mut found = matches!(o.kind(), ValueKind::Object(x) if a.has_key(x, r8framework::Key::Str(key))?);
                         if found {
                             let u = a.get_symbol(o, a.realm.symbols.unscopables, o)?;
-                            if matches!(u.kind(), ValueKind::Object(_)) {
+                            if u.as_object().is_some() {
                                 let blocked = a.get_named(u, key)?;
                                 found = !a.to_boolean(blocked);
                             }
@@ -1195,12 +1197,12 @@ impl Executor {
                     }
                     Insn::IncReg(x) | Insn::DecReg(x) => {
                         let d = if matches!(*insn, Insn::IncReg(_)) { 1 } else { -1 };
-                        *acc = if let ValueKind::Number(v) = regs[r(x)].kind() { (v + f64::from(d)).into() } else { a.increment(regs[r(x)], d)? };
+                        *acc = if let Some(v) = regs[r(x)].as_number() { (v + f64::from(d)).into() } else { a.increment(regs[r(x)], d)? };
                         regs[r(x)] = *acc;
                     }
                     Insn::Unary(op) => *acc = a.unary(op, *acc)?,
                     Insn::ToNumeric => {
-                        if !matches!((*acc).kind(), ValueKind::Number(_)) {
+                        if !acc.is_number() {
                             *acc = match a.to_numeric(*acc)? {
                                 r8framework::Numeric::Number(x) => x.into(),
                                 r8framework::Numeric::BigInt(b) => Value::BigInt(b),
@@ -1208,10 +1210,10 @@ impl Executor {
                         }
                     }
                     Insn::Inc => {
-                        *acc = if let ValueKind::Number(x) = (*acc).kind() { (x + 1.0).into() } else { a.increment(*acc, 1)? };
+                        *acc = if let Some(x) = acc.as_number() { (x + 1.0).into() } else { a.increment(*acc, 1)? };
                     }
                     Insn::Dec => {
-                        *acc = if let ValueKind::Number(x) = (*acc).kind() { (x - 1.0).into() } else { a.increment(*acc, -1)? };
+                        *acc = if let Some(x) = acc.as_number() { (x - 1.0).into() } else { a.increment(*acc, -1)? };
                     }
                     Insn::CreateRegExp { pattern, flags } => {
                         let (p, fl) = (a.string(func.name_at(pattern)), a.string(func.name_at(flags)));
@@ -1283,7 +1285,7 @@ impl Executor {
                     Insn::CreateRest(from) => *acc = a.array(f.args.get(usize::from(from)..).unwrap_or(&[]).to_vec()).into(),
                     Insn::ArrayPush { arr } => Self::push(a, regs[r(arr)], [*acc]),
                     Insn::ArrayHole { arr } => {
-                        if let ValueKind::Object(o) = regs[r(arr)].kind() {
+                        if let Some(o) = regs[r(arr)].as_object() {
                             let mut d = o.borrow_mut(a.mc);
                             let len = d.array_length().unwrap_or(0);
                             d.set_array_length(len + 1);
@@ -1328,7 +1330,7 @@ impl Executor {
                         *acc = Self::super_call(a, regs, f, &list)?;
                     }
                     Insn::CopyData { obj } => {
-                        if let ValueKind::Object(o) = regs[r(obj)].kind() {
+                        if let Some(o) = regs[r(obj)].as_object() {
                             a.copy_data(o, *acc, &[])?;
                         }
                     }
@@ -1348,7 +1350,7 @@ impl Executor {
                     }
                     Insn::CreateMethod { func: n, home } => {
                         let mut closure = Closure::new(FuncId(loaded.base + n), f.env);
-                        if let ValueKind::Object(h) = regs[r(home)].kind() {
+                        if let Some(h) = regs[r(home)].as_object() {
                             closure.home = Some(h);
                         }
                         *acc = self.function_object(a, closure, a.realm.function_proto).into();
@@ -1385,7 +1387,7 @@ impl Executor {
                         }
                     }
                     Insn::DefineKeyed { obj, key, kind, enumerable } => {
-                        if let ValueKind::Object(o) = regs[r(obj)].kind() {
+                        if let Some(o) = regs[r(obj)].as_object() {
                             let k = regs[r(key)];
                             match (kind, (*acc).kind()) {
                                 (PropertyKind::Data, v) => a.define_keyed(o, k, Property { slot: Slot::Data(Value::from(v)), enumerable, writable: true, configurable: true })?,
@@ -1637,7 +1639,7 @@ impl Executor {
                             (rec.iterator, rec.next, true)
                         } else {
                             let it = a.call(method, v, &[])?;
-                            if !matches!(it.kind(), ValueKind::Object(_)) {
+                            if it.as_object().is_none() {
                                 return Err(a.throw(ErrorKind::Type, "Result of the Symbol.asyncIterator method is not an object"));
                             }
                             let next = a.get_named(it, "next")?;
@@ -1655,7 +1657,7 @@ impl Executor {
                     Insn::IteratorResult { iter } => {
                         let d = r(iter);
                         let result = *acc;
-                        if !matches!(result.kind(), ValueKind::Object(_)) {
+                        if result.as_object().is_none() {
                             regs[d + 2] = true.into();
                             let what = a.to_string(result)?;
                             return Err(a.throw(ErrorKind::Type, &alloc::format!("Iterator result {} is not an object", &**what)));
@@ -1726,7 +1728,7 @@ impl Executor {
                                 if ret.is_nullish() { a.iter_result(*acc, true).into() } else { a.call(ret, it, &[*acc])? }
                             }
                         };
-                        if !matches!(result.kind(), ValueKind::Object(_)) {
+                        if result.as_object().is_none() {
                             return Err(a.throw(ErrorKind::Type, "Iterator result is not an object"));
                         }
                         *acc = result;

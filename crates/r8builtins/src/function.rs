@@ -26,7 +26,7 @@ impl Functions {
         let new_target = a.new_target;
         let f = a.eval_code(&src, CodeKind::Eval)?;
         // When constructing a subclass (`class F extends Function`), the prototype comes from new.target.prototype
-        if let ValueKind::Object(fo) = f.kind()
+        if let Some(fo) = f.as_object()
             && new_target != Value::Undefined
         {
             let fallback = fo.borrow().proto.unwrap_or(a.realm.function_proto);

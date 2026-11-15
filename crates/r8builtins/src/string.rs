@@ -336,7 +336,7 @@ impl Strings {
         /// Maximum number of fraction digits produced
         const MAX_FRACTION_DIGITS: usize = 52;
         const DIGITS: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
-        let ValueKind::Number(x) = this.unwrapped().kind() else {
+        let Some(x) = this.unwrapped().as_number() else {
             return Err(a.throw(ErrorKind::Type, "Number.prototype.toString requires that 'this' be a Number"));
         };
         let radix = match args.at(0).kind() {

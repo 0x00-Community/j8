@@ -298,7 +298,7 @@ impl<'gc> Agent<'gc, '_> {
     pub(crate) fn proxy_own_keys(&mut self, target: JsObject<'gc>, handler: JsObject<'gc>) -> Result<Vec<PropertyKey<'gc>>, Error> {
         let Some(trap) = self.trap(handler, Trap::OwnKeys)? else { return self.own_property_keys(target) };
         let arr = self.call(trap, handler.into(), &[target.into()])?;
-        if !matches!(arr.kind(), ValueKind::Object(_)) {
+        if arr.as_object().is_none() {
             return Err(self.throw(ErrorKind::Type, "ownKeys trap result must be an object"));
         }
         let mut keys: Vec<PropertyKey<'gc>> = Vec::new();

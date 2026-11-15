@@ -287,7 +287,7 @@ impl Promises {
 
     fn remaining_add<'gc>(a: &mut Agent<'gc, '_>, remaining: Value<'gc>, d: f64) -> Result<f64, Error> {
         let n = a.get_index(remaining, 0.0)?;
-        let ValueKind::Number(n) = n.kind() else { return Ok(0.0) };
+        let Some(n) = n.as_number() else { return Ok(0.0) };
         a.set_index(remaining, 0.0, (n + d).into())?;
         Ok(n + d)
     }
@@ -367,7 +367,7 @@ impl Promises {
         let (ValueKind::Number(index), ValueKind::Object(values)) = (s[slot::INDEX].kind(), s[slot::VALUES].kind()) else { return Ok(Value::Undefined) };
         a.create_index(values, index, v)?;
         if Self::remaining_add(a, s[slot::REMAINING], -1.0)? == 0.0 {
-            let ValueKind::Object(values) = s[slot::VALUES].kind() else { return Ok(Value::Undefined) };
+            let Some(values) = s[slot::VALUES].as_object() else { return Ok(Value::Undefined) };
             let list = a.list_from_array_like(values.into())?;
             let arr = a.array(list);
             if how == Combinator::Any {

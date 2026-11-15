@@ -110,7 +110,7 @@ impl Objects {
             return Err(a.throw(ErrorKind::Type, "Object.setPrototypeOf called on null or undefined"));
         }
         let proto = Self::proto_arg(a, args.at(1))?;
-        let ValueKind::Object(o) = target.kind() else { return Ok(target) };
+        let Some(o) = target.as_object() else { return Ok(target) };
         if !a.set_prototype_of(o, proto)? {
             return Err(a.throw(ErrorKind::Type, "Cannot set prototype: object is not extensible or the chain would be cyclic"));
         }
@@ -200,7 +200,7 @@ impl Objects {
     }
 
     fn integrity<'gc>(a: &mut Agent<'gc, '_>, v: Value<'gc>, level: Integrity) -> Result<Value<'gc>, Error> {
-        if let ValueKind::Object(o) = v.kind()
+        if let Some(o) = v.as_object()
             && !a.set_integrity_level(o, level)?
         {
             return Err(a.throw(ErrorKind::Type, "Cannot freeze or seal the object"));
@@ -209,7 +209,7 @@ impl Objects {
     }
 
     fn prevent_extensions<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        if let ValueKind::Object(o) = args.at(0).kind()
+        if let Some(o) = args.at(0).as_object()
             && !a.prevent_extensions(o)?
         {
             return Err(a.throw(ErrorKind::Type, "Cannot prevent extensions"));
@@ -261,7 +261,7 @@ impl Objects {
         let it = a.get_iterator(iterable)?;
         while let Some(item) = a.iterator_step(it)? {
             let r = (|| {
-                if !matches!(item.kind(), ValueKind::Object(_)) {
+                if item.as_object().is_none() {
                     let t = a.describe(item);
                     return Err(a.throw(ErrorKind::Type, &alloc::format!("Iterator value {t} is not an entry object")));
                 }
@@ -342,7 +342,7 @@ impl Objects {
                     k if k.is_callable() => "Function",
                     ObjectKind::Error => "Error",
                     ObjectKind::Primitive(v) if matches!(v.kind(), ValueKind::Bool(_)) => "Boolean",
-                    ObjectKind::Primitive(v) if matches!(v.kind(), ValueKind::Number(_)) => "Number",
+                    ObjectKind::Primitive(v) if v.is_number() => "Number",
                     ObjectKind::Primitive(v) if matches!(v.kind(), ValueKind::String(_)) => "String",
                     ObjectKind::RegExp(_) => "RegExp",
                     ObjectKind::Date(_) => "Date",
@@ -370,7 +370,7 @@ impl Objects {
     }
 
     fn is_prototype_of<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        let ValueKind::Object(v) = args.at(0).kind() else { return Ok(false.into()) };
+        let Some(v) = args.at(0).as_object() else { return Ok(false.into()) };
         let o = a.to_object(this)?;
         let mut cur = a.get_prototype_of(v)?;
         while let Some(c) = cur {
@@ -402,7 +402,7 @@ impl Objects {
             ValueKind::Null => None,
             _ => return Ok(Value::Undefined),
         };
-        let ValueKind::Object(o) = this.kind() else { return Ok(Value::Undefined) };
+        let Some(o) = this.as_object() else { return Ok(Value::Undefined) };
         if !a.set_prototype_of(o, proto)? {
             return Err(a.throw(ErrorKind::Type, "Cyclic __proto__ value or object is not extensible"));
         }
@@ -483,7 +483,7 @@ impl Objects {
     /// `f.bind(this, ...args)`: `length` = max(0, target's length − number of bound arguments), `name` = "bound " +
     /// target's name.
     fn bind<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        let ValueKind::Object(target) = this.kind() else {
+        let Some(target) = this.as_object() else {
             return Err(a.throw(ErrorKind::Type, "Bind must be called on a function"));
         };
         if !a.is_callable(this) {

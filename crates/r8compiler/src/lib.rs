@@ -5,7 +5,7 @@
 //! ```
 //!
 //! The resulting machine code is a System V function `extern "C" fn(regs: *mut Value, acc: *mut Value, start: u64) ->
-//! u64`: it runs directly on this frame's register file and accumulator (see [`ValueTag`](r8framework::ValueTag) for
+//! u64`: it runs directly on this frame's register file and accumulator (see [`ValueBits`](r8framework::ValueBits) for
 //! the memory layout of [`Value`](r8framework::Value)); returning 0 means the function returned (result in the
 //! accumulator), returning `pc + 1` means it stopped before instruction `pc` (r8executor's `Exit`).
 //!

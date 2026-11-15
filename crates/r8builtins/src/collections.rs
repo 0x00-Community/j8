@@ -88,7 +88,7 @@ impl Collections {
                 let entry = match shape {
                     Shape::Set => alloc::vec![item],
                     Shape::Map => {
-                        if !matches!(item.kind(), ValueKind::Object(_)) {
+                        if item.as_object().is_none() {
                             let what = a.describe(item);
                             return Err(a.throw(ErrorKind::Type, &alloc::format!("Iterator value {what} is not an entry object")));
                         }
@@ -260,7 +260,7 @@ impl Collections {
 
     /// GetSetRecord: `size` is a number (not NaN, not negative); `has` / `keys` are callable.
     fn set_record<'gc>(a: &mut Agent<'gc, '_>, other: Value<'gc>) -> Result<SetRecord<'gc>, Error> {
-        if !matches!(other.kind(), ValueKind::Object(_)) {
+        if other.as_object().is_none() {
             return Err(a.throw(ErrorKind::Type, "The argument must be a set-like object"));
         }
         let raw = a.get_named(other, "size")?;
@@ -286,7 +286,7 @@ impl Collections {
     /// The `keys()` iterator of the other collection.
     fn keys_iterator<'gc>(a: &mut Agent<'gc, '_>, r: &SetRecord<'gc>) -> Result<r8framework::IterRecord<'gc>, Error> {
         let iterator = a.call(r.keys, r.set, &[])?;
-        if !matches!(iterator.kind(), ValueKind::Object(_)) {
+        if iterator.as_object().is_none() {
             return Err(a.throw(ErrorKind::Type, "keys() of a set-like object must return an object"));
         }
         let next = a.get_named(iterator, "next")?;

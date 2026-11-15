@@ -43,7 +43,7 @@ impl Code {
     pub(crate) fn run(&self, regs: &mut [Value<'_>], acc: &mut Value<'_>, start: u64) -> Exit {
         // SAFETY: the machine code was compiled by r8compiler for this function; it only reads and writes `regs` (no
         // more than the function's register count; the executor guarantees the slice is long enough) and `acc` per the
-        // `ValueTag` layout, only writes numbers / booleans / tag-only values (creates no GC pointers), does not
+        // `ValueBits` layout, only writes numbers / booleans / constant words (creates no GC pointers), does not
         // allocate, and touches no other memory
         let code = unsafe {
             let entry: Entry = core::mem::transmute::<*mut libc::c_void, Entry>(self.at);

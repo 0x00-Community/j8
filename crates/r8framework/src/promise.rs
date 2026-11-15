@@ -68,7 +68,7 @@ impl<'gc> Agent<'gc, '_> {
     /// Resolve with a value: resolving with itself throws a TypeError; a thenable enqueues a job to call its `then`;
     /// otherwise fulfill directly.
     pub fn resolve_promise(&mut self, promise: JsObject<'gc>, value: Value<'gc>) -> Result<(), Error> {
-        if let ValueKind::Object(o) = value.kind() {
+        if let Some(o) = value.as_object() {
             if Gc::ptr_eq(o, promise) {
                 let e = self.error(ErrorKind::Type, "Chaining cycle detected for promise");
                 self.reject_promise(promise, e.into());
@@ -114,7 +114,7 @@ impl<'gc> Agent<'gc, '_> {
     /// PromiseResolve(%Promise%, v): a Promise whose `constructor` is %Promise% is returned as is; anything else is
     /// wrapped.
     pub fn promise_resolve(&mut self, v: Value<'gc>) -> Result<JsObject<'gc>, Error> {
-        if let ValueKind::Object(o) = v.kind()
+        if let Some(o) = v.as_object()
             && Self::is_promise(v)
             && matches!((self.get_named(v, "constructor")?).kind(), ValueKind::Object(c) if Gc::ptr_eq(c, self.realm.promise_ctor))
         {

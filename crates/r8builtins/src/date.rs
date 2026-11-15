@@ -587,7 +587,7 @@ impl Dates {
     fn to_json<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let o = a.to_object(this)?;
         let tv = a.to_primitive(o.into(), Hint::Number)?;
-        if let ValueKind::Number(x) = tv.kind()
+        if let Some(x) = tv.as_number()
             && !x.is_finite()
         {
             return Ok(Value::Null);
@@ -605,7 +605,7 @@ impl Dates {
 
     /// `Date.prototype[Symbol.toPrimitive](hint)`.
     fn to_primitive<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        if !matches!(this.kind(), ValueKind::Object(_)) {
+        if this.as_object().is_none() {
             return Err(a.throw(ErrorKind::Type, "Date.prototype[Symbol.toPrimitive] called on a non-object"));
         }
         let order = match args.at(0).kind() {
@@ -617,7 +617,7 @@ impl Dates {
             let f = a.get_named(this, name)?;
             if a.is_callable(f) {
                 let r = a.call(f, this, &[])?;
-                if !matches!(r.kind(), ValueKind::Object(_)) {
+                if r.as_object().is_none() {
                     return Ok(r);
                 }
             }

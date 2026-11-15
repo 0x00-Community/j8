@@ -23,7 +23,7 @@ impl Errors {
         }
         // InstallErrorCause
         let options = args.at(1);
-        if let ValueKind::Object(opts) = options.kind()
+        if let Some(opts) = options.as_object()
             && a.has_key(opts, r8framework::Key::Str("cause"))?
         {
             let cause = a.get_named(options, "cause")?;
@@ -39,7 +39,7 @@ impl Errors {
 
     /// `name: message`; if either side is empty, just the other.
     fn to_string<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        if !matches!(this.kind(), ValueKind::Object(_)) {
+        if this.as_object().is_none() {
             return Err(a.throw(ErrorKind::Type, "Error.prototype.toString called on non-object"));
         }
         let name = match (a.get_named(this, "name")?).kind() {

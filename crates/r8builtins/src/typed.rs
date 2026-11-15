@@ -36,7 +36,7 @@ impl Typed {
     /// ValidateTypedArray: returns (object, element type, view, length); throws TypeError if not a TypedArray or out of
     /// bounds.
     fn validate<'gc>(a: &Agent<'gc, '_>, v: Value<'gc>) -> Result<(JsObject<'gc>, ElementKind, ViewData<'gc>, usize), Error> {
-        let ValueKind::Object(o) = v.kind() else { return Err(a.throw(ErrorKind::Type, "this is not a typed array")) };
+        let Some(o) = v.as_object() else { return Err(a.throw(ErrorKind::Type, "this is not a typed array")) };
         let Some((k, view)) = Agent::typed_array(o) else { return Err(a.throw(ErrorKind::Type, "this is not a typed array")) };
         match Agent::view_length(&view, k.size()) {
             Some(len) => Ok((o, k, view, len)),
@@ -63,7 +63,7 @@ impl Typed {
             return Err(a.throw(ErrorKind::Type, &alloc::format!("Constructor {} requires 'new'", kind.name())));
         }
         let first = args.at(0);
-        let ValueKind::Object(src) = first.kind() else {
+        let Some(src) = first.as_object() else {
             let len = a.to_index(first)?;
             let proto = a.proto_from_ctor(a.new_target, a.realm.typed_protos[K])?;
             return Ok(Self::create(a, kind, proto, len)?.into());
@@ -139,7 +139,7 @@ impl Typed {
                 return Err(a.throw(ErrorKind::Type, "Symbol.iterator is not a function"));
             }
             let iterator = a.call(using, first, &[])?;
-            if !matches!(iterator.kind(), ValueKind::Object(_)) {
+            if iterator.as_object().is_none() {
                 return Err(a.throw(ErrorKind::Type, "Result of the Symbol.iterator method is not an object"));
             }
             let next = a.get_named(iterator, "next")?;
@@ -238,7 +238,7 @@ impl Typed {
                 return Err(a.throw(ErrorKind::Type, "Symbol.iterator is not a function"));
             }
             let iterator = a.call(using, source, &[])?;
-            if !matches!(iterator.kind(), ValueKind::Object(_)) {
+            if iterator.as_object().is_none() {
                 return Err(a.throw(ErrorKind::Type, "Result of the Symbol.iterator method is not an object"));
             }
             let next = a.get_named(iterator, "next")?;
@@ -491,7 +491,7 @@ impl Typed {
         // Searching for a Number and elements aren't BigInt: borrow the buffer once and decode and compare chunks in
         // parallel on the thread pool (only scan what is still in bounds now: out-of-bounds reads give undefined, which
         // can't equal a Number)
-        if let ValueKind::Number(w) = want.kind()
+        if let Some(w) = want.as_number()
             && let Some((kind, view)) = Agent::typed_array(o)
             && !kind.is_bigint()
         {
@@ -646,8 +646,8 @@ impl Typed {
             return Ok(v);
         }
         // No comparator and all elements are Numbers: sort numerically in parallel (no user code is called)
-        if f == Value::Undefined && v.iter().all(|x| matches!(x.kind(), ValueKind::Number(_))) {
-            let mut xs: Vec<f64> = v.iter().map(|x| if let ValueKind::Number(n) = x.kind() { n } else { 0.0 }).collect();
+        if f == Value::Undefined && v.iter().all(|x| x.is_number()) {
+            let mut xs: Vec<f64> = v.iter().map(|x| x.as_number().unwrap_or(0.0)).collect();
             a.par().sort_by(&mut xs, &|x, y| Self::numeric_order(*x, *y));
             return Ok(xs.into_iter().map(Value::Number).collect());
         }
@@ -745,7 +745,7 @@ impl Typed {
 
     fn subarray<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let (kind, view) = Self::this_typed(a, this)?;
-        let ValueKind::Object(o) = this.kind() else { unreachable!("checked above") };
+        let Some(o) = this.as_object() else { unreachable!("checked above") };
         let len = Self::f(Agent::view_length(&view, kind.size()).unwrap_or(0));
         let start = Self::relative(a, args.at(0), len, 0.0)?;
         let tracking = view.length.is_none() && args.at(1) == Value::Undefined;
@@ -761,14 +761,14 @@ impl Typed {
     /// `set(source, offset)`.
     fn set<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let (kind, _) = Self::this_typed(a, this)?;
-        let ValueKind::Object(target) = this.kind() else { unreachable!("checked above") };
+        let Some(target) = this.as_object() else { unreachable!("checked above") };
         let offset = a.to_integer_or_infinity(args.at(1))?;
         if offset < 0.0 {
             return Err(a.throw(ErrorKind::Range, "offset is out of bounds"));
         }
         let (_, _, tview, tlen) = Self::validate(a, this)?;
         let source = args.at(0);
-        if let ValueKind::Object(s) = source.kind()
+        if let Some(s) = source.as_object()
             && let Some((sk, sview)) = Agent::typed_array(s)
         {
             let Some(slen) = Agent::view_length(&sview, sk.size()) else {

@@ -61,7 +61,7 @@ impl Arrays {
             return Self::create(a, len, None);
         }
         let mut c = a.get_named(original.into(), "constructor")?;
-        if matches!(c.kind(), ValueKind::Object(_)) {
+        if c.as_object().is_some() {
             c = a.get_symbol(c, a.realm.symbols.species, c)?;
             if c == Value::Null {
                 c = Value::Undefined;
@@ -107,7 +107,7 @@ impl Arrays {
         let proto = a.proto_from_ctor(a.new_target, a.realm.array_proto)?;
         match *args {
             [] => Ok(Self::create(a, 0.0, Some(proto))?.into()),
-            [v] if let ValueKind::Number(n) = v.kind() => {
+            [v] if let Some(n) = v.as_number() => {
                 let len = a.to_uint32(Value::Number(n))?;
                 if f64::from(len) != n {
                     return Err(a.throw(ErrorKind::Range, "Invalid array length"));
@@ -165,7 +165,7 @@ impl Arrays {
             }
             let arr = Self::construct_this(a, this, None)?;
             let iterator = a.call(using, items, &[])?;
-            if !matches!(iterator.kind(), ValueKind::Object(_)) {
+            if iterator.as_object().is_none() {
                 return Err(a.throw(ErrorKind::Type, "Result of the Symbol.iterator method is not an object"));
             }
             let next = a.get_named(iterator, "next")?;
@@ -409,7 +409,7 @@ impl Arrays {
 
     /// IsConcatSpreadable.
     fn spreadable<'gc>(a: &mut Agent<'gc, '_>, v: Value<'gc>) -> Result<bool, Error> {
-        if !matches!(v.kind(), ValueKind::Object(_)) {
+        if v.as_object().is_none() {
             return Ok(false);
         }
         let s = a.get_symbol(v, a.realm.symbols.is_concat_spreadable, v)?;
@@ -425,7 +425,7 @@ impl Arrays {
         let mut n = 0.0;
         for e in core::iter::once(Value::Object(o)).chain(args.iter().copied()) {
             if Self::spreadable(a, e)? {
-                let ValueKind::Object(eo) = e.kind() else { unreachable!("spreadable values are objects") };
+                let Some(eo) = e.as_object() else { unreachable!("spreadable values are objects") };
                 let len = a.length_of_array_like(e)?;
                 if n + len > MAX_LENGTH {
                     return Err(a.throw(ErrorKind::Type, "Concatenation exceeds 2^53 - 1 length"));
@@ -816,7 +816,7 @@ impl Arrays {
                     v = a.call(mapper, this_arg, &[v, k.into(), source.into()])?;
                 }
                 if depth > 0.0 && a.is_array(v)? {
-                    let ValueKind::Object(inner) = v.kind() else { unreachable!("arrays are objects") };
+                    let Some(inner) = v.as_object() else { unreachable!("arrays are objects") };
                     let inner_len = a.length_of_array_like(v)?;
                     to = Self::flatten(a, target, inner, inner_len, to, depth - 1.0, Value::Undefined, Value::Undefined)?;
                 } else {
@@ -878,7 +878,7 @@ impl Arrays {
             return None;
         }
         let (undef, rest): (Vec<Value<'gc>>, Vec<Value<'gc>>) = items.iter().copied().partition(|v| *v == Value::Undefined);
-        let numbers: Vec<f64> = rest.iter().filter_map(|v| if let ValueKind::Number(x) = v.kind() { Some(x) } else { None }).collect();
+        let numbers: Vec<f64> = rest.iter().filter_map(|v| v.as_number()).collect();
         let texts: Vec<String> = a.par().map(&numbers, &|&x| String::from(&*r8framework::number_text(x)));
         let mut next = texts.iter();
         let keys: Vec<&str> = rest

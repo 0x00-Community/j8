@@ -57,4 +57,4 @@ pub use profiler::{Counter, FuncId, Profiler};
 pub use typed::{Element, canonical_numeric, f16_to_f64, f64_to_f16};
 pub use property::{Descriptor, Integrity, Key, PropertyKey};
 pub use realm::{Context, Intrinsics, Realm, RegExpCompiled, RegExpPristine, WellKnown};
-pub use value::{Value, ValueKind, ValueTag};
+pub use value::{Value, ValueBits, ValueKind, ValueTag};

@@ -127,7 +127,7 @@ impl Helpers {
         }
         let method = a.get_symbol(v, a.realm.symbols.iterator, v)?;
         let iterator = if method.is_nullish() { v } else { a.call(method, v, &[])? };
-        if !matches!(iterator.kind(), ValueKind::Object(_)) {
+        if iterator.as_object().is_none() {
             return Err(a.throw(ErrorKind::Type, "the iterator is not an object"));
         }
         Self::direct(a, iterator)
@@ -393,7 +393,7 @@ impl Helpers {
     /// SetterThatIgnoresPrototypeProperties: writing on Iterator.prototype itself throws TypeError; on other objects it
     /// creates / changes an own property.
     fn ignoring_setter<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, key: Key<'_, 'gc>, v: Value<'gc>) -> Result<Value<'gc>, Error> {
-        let ValueKind::Object(o) = this.kind() else {
+        let Some(o) = this.as_object() else {
             return Err(a.throw(ErrorKind::Type, "setter called on a non-object"));
         };
         if r8gc::Gc::ptr_eq(o, a.realm.iterator_proto) {

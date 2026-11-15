@@ -159,7 +159,7 @@ impl Buffers {
         if c == Value::Undefined {
             return Ok(fallback);
         }
-        if !matches!(c.kind(), ValueKind::Object(_)) {
+        if c.as_object().is_none() {
             return Err(a.throw(ErrorKind::Type, "object.constructor is not an object"));
         }
         let s = a.get_symbol(c, a.realm.symbols.species, c)?;
@@ -196,7 +196,7 @@ impl Buffers {
         let fallback = Self::global_ctor(a, if shared { "SharedArrayBuffer" } else { "ArrayBuffer" });
         let ctor = Self::species_constructor(a, o.into(), fallback)?;
         let made = a.construct(ctor, &[new_len.into()], ctor)?;
-        let ValueKind::Object(n) = made.kind() else { return Err(a.throw(ErrorKind::Type, "species constructor returned a non-object")) };
+        let Some(n) = made.as_object() else { return Err(a.throw(ErrorKind::Type, "species constructor returned a non-object")) };
         let ok = matches!(&n.borrow().kind, ObjectKind::ArrayBuffer(b) if b.shared == shared && b.bytes.is_some());
         if !ok {
             return Err(a.throw(ErrorKind::Type, "species constructor did not return a usable buffer"));
@@ -267,7 +267,7 @@ impl Buffers {
         if a.new_target == Value::Undefined {
             return Err(a.throw(ErrorKind::Type, "Constructor DataView requires 'new'"));
         }
-        let ValueKind::Object(buffer) = args.at(0).kind() else { return Err(a.throw(ErrorKind::Type, "First argument to DataView constructor must be an ArrayBuffer")) };
+        let Some(buffer) = args.at(0).as_object() else { return Err(a.throw(ErrorKind::Type, "First argument to DataView constructor must be an ArrayBuffer")) };
         if !matches!(buffer.borrow().kind, ObjectKind::ArrayBuffer(_)) {
             return Err(a.throw(ErrorKind::Type, "First argument to DataView constructor must be an ArrayBuffer"));
         }

@@ -26,7 +26,7 @@ impl<'gc> Agent<'gc, '_> {
 
     /// ToNumeric: BigInts as is, everything else ToNumber.
     pub fn to_numeric(&mut self, v: Value<'gc>) -> Result<Numeric<'gc>, Error> {
-        if let ValueKind::Number(x) = v.kind() {
+        if let Some(x) = v.as_number() {
             return Ok(Numeric::Number(x));
         }
         match (self.to_primitive(v, Hint::Number)?).kind() {
@@ -78,7 +78,7 @@ impl<'gc> Agent<'gc, '_> {
 
     /// `++` / `--` (`delta` is ±1).
     pub fn increment(&mut self, v: Value<'gc>, delta: i8) -> Result<Value<'gc>, Error> {
-        if let ValueKind::Number(x) = v.kind() {
+        if let Some(x) = v.as_number() {
             return Ok((x + f64::from(delta)).into());
         }
         Ok(match self.to_numeric(v)? {

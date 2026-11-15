@@ -274,7 +274,7 @@ impl<'gc> Writer<'gc> {
             out.push_str(&s[from..i]);
             if esc.is_empty() {
                 // Writing into a String can't fail
-                let _ = write!(out, "\\u{:04x}", b);
+                let _ = write!(out, "\\u{b:04x}");
             } else {
                 out.push_str(esc);
             }
@@ -482,7 +482,7 @@ impl Json {
     /// `undefined` deletes the property.
     fn revive<'gc>(a: &mut Agent<'gc, '_>, holder: Value<'gc>, key: JsString<'gc>, reviver: Value<'gc>) -> Result<Value<'gc>, Error> {
         let v = a.get_named(holder, &key)?;
-        if let ValueKind::Object(o) = v.kind() {
+        if let Some(o) = v.as_object() {
             let keys = Writer::keys(o);
             for k in keys {
                 let k = a.string(&k);

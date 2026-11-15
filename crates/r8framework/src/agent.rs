@@ -124,7 +124,7 @@ impl<'gc> Agent<'gc, '_> {
 
     /// IsConstructor.
     pub fn is_constructor(&self, v: Value<'gc>) -> bool {
-        let ValueKind::Object(o) = v.kind() else { return false };
+        let Some(o) = v.as_object() else { return false };
         match &o.borrow().kind {
             crate::ObjectKind::Function(c) => self.invoke.constructs(c),
             crate::ObjectKind::Native(n) => n.constructor,

@@ -384,7 +384,7 @@ impl<'gc> Agent<'gc, '_> {
 
     /// ToPrimitive: for objects, try `valueOf` / `toString` in preference order and use the first primitive result.
     pub fn to_primitive(&mut self, v: Value<'gc>, hint: Hint) -> Result<Value<'gc>, Error> {
-        if !matches!(v.kind(), ValueKind::Object(_)) {
+        if v.as_object().is_none() {
             return Ok(v);
         }
         let exotic = self.get_symbol(v, self.realm.symbols.to_primitive, v)?;
@@ -395,7 +395,7 @@ impl<'gc> Agent<'gc, '_> {
                 Hint::String => "string",
             });
             let r = self.call(exotic, v, &[h.into()])?;
-            if matches!(r.kind(), ValueKind::Object(_)) {
+            if r.as_object().is_some() {
                 return Err(self.throw(ErrorKind::Type, "Cannot convert object to primitive value"));
             }
             return Ok(r);
@@ -405,7 +405,7 @@ impl<'gc> Agent<'gc, '_> {
             let f = self.get_named(v, name)?;
             if self.is_callable(f) {
                 let r = self.call(f, v, &[])?;
-                if !matches!(r.kind(), ValueKind::Object(_)) {
+                if r.as_object().is_none() {
                     return Ok(r);
                 }
             }
@@ -764,7 +764,7 @@ impl<'gc> Agent<'gc, '_> {
             Some(Property { slot: Slot::Accessor { set: None, .. }, .. } | Property { writable: false, .. }) => return Ok(false),
             _ => {}
         }
-        let ValueKind::Object(r) = receiver.kind() else { return Ok(false) };
+        let Some(r) = receiver.as_object() else { return Ok(false) };
         if let Some(done) = r.borrow_mut(self.mc).ordinary_put(key, value) {
             return Ok(done);
         }
@@ -793,7 +793,7 @@ impl<'gc> Agent<'gc, '_> {
     /// The TypeError for a failed write: adding a new property to a non-extensible object, or writing a read-only
     /// property.
     fn set_failure(&self, target: Value<'gc>, key: &str) -> Error {
-        if let ValueKind::Object(o) = target.kind() {
+        if let Some(o) = target.as_object() {
             let d = o.borrow();
             if d.non_extensible && d.own_slot(Key::Str(key)).is_none() {
                 return self.throw(ErrorKind::Type, &format!("Cannot add property {key}, object is not extensible"));
@@ -808,7 +808,7 @@ impl<'gc> Agent<'gc, '_> {
 
     /// `key in target`, with an arbitrary value as the key.
     pub fn has_keyed(&mut self, target: Value<'gc>, key: Value<'gc>) -> Result<bool, Error> {
-        let ValueKind::Object(o) = target.kind() else {
+        let Some(o) = target.as_object() else {
             let what = match key.kind() {
                 ValueKind::Symbol(_) => String::from("a symbol"),
                 k => format!("'{}'", &**self.to_string(k.into())?),
@@ -1016,7 +1016,7 @@ impl<'gc> Agent<'gc, '_> {
 
     /// `key in target` (including the prototype chain and array indices).
     pub fn has_property(&mut self, target: Value<'gc>, key: &str) -> Result<bool, Error> {
-        let ValueKind::Object(o) = target.kind() else {
+        let Some(o) = target.as_object() else {
             let what = self.to_string(target)?;
             return Err(self.throw(ErrorKind::Type, &format!("Cannot use 'in' operator to search for '{key}' in {}", &**what)));
         };
@@ -1065,7 +1065,7 @@ impl<'gc> Agent<'gc, '_> {
 
     /// `v instanceof f`: check `f[Symbol.hasInstance]` first, then OrdinaryHasInstance.
     pub fn instance_of(&mut self, v: Value<'gc>, f: Value<'gc>) -> Result<bool, Error> {
-        if !matches!(f.kind(), ValueKind::Object(_)) {
+        if f.as_object().is_none() {
             let what = self.describe(f);
             return Err(self.throw(ErrorKind::Type, &format!("Right-hand side of 'instanceof' is not an object: {what}")));
         }
@@ -1086,14 +1086,14 @@ impl<'gc> Agent<'gc, '_> {
         if !self.is_callable(f) {
             return Ok(false);
         }
-        if let ValueKind::Object(o) = f.kind()
+        if let Some(o) = f.as_object()
             && let ObjectKind::Bound(b) = &o.borrow().kind
         {
             let target = b.target;
             return self.instance_of(v, target);
         }
-        let ValueKind::Object(o) = v.kind() else { return Ok(false) };
-        let ValueKind::Object(proto) = (self.get_named(f, "prototype")?).kind() else {
+        let Some(o) = v.as_object() else { return Ok(false) };
+        let Some(proto) = (self.get_named(f, "prototype")?).as_object() else {
             return Err(self.throw(ErrorKind::Type, "Function has non-object prototype in instanceof check"));
         };
         let mut cur = self.get_prototype_of(o)?;
@@ -1131,7 +1131,7 @@ impl<'gc> Agent<'gc, '_> {
     /// LengthOfArrayLike.
     pub fn length_of_array_like(&mut self, o: Value<'gc>) -> Result<f64, Error> {
         // A real array's `length` is the stored length (it can't be an accessor)
-        if let ValueKind::Object(x) = o.kind()
+        if let Some(x) = o.as_object()
             && let Some(n) = x.borrow().array_length()
         {
             return Ok(f64::from(n));
@@ -1147,12 +1147,12 @@ impl<'gc> Agent<'gc, '_> {
 
     /// `o[i]` (fast path for the array dense part).
     pub fn get_index(&mut self, o: Value<'gc>, i: f64) -> Result<Value<'gc>, Error> {
-        if let ValueKind::Object(x) = o.kind()
+        if let Some(x) = o.as_object()
             && matches!(x.borrow().kind, ObjectKind::TypedArray(..))
         {
             return Ok(self.typed_get(x, i).unwrap_or_default());
         }
-        if let ValueKind::Object(x) = o.kind()
+        if let Some(x) = o.as_object()
             && let (ObjectKind::Array(items), Some(n)) = (&x.borrow().kind, index_of_number(i))
             && let Some(&v) = items.get(n as usize)
         {
@@ -1228,7 +1228,7 @@ impl<'gc> Agent<'gc, '_> {
 
     /// IsArray.
     pub fn is_array(&mut self, v: Value<'gc>) -> Result<bool, Error> {
-        let ValueKind::Object(o) = v.kind() else { return Ok(false) };
+        let Some(o) = v.as_object() else { return Ok(false) };
         if let Some(parts) = self.proxy_parts(o) {
             let (t, _) = parts?;
             return self.is_array(t.into());
@@ -1238,7 +1238,7 @@ impl<'gc> Agent<'gc, '_> {
 
     /// CreateListFromArrayLike.
     pub fn list_from_array_like(&mut self, v: Value<'gc>) -> Result<Vec<Value<'gc>>, Error> {
-        if !matches!(v.kind(), ValueKind::Object(_)) {
+        if v.as_object().is_none() {
             return Err(self.throw(ErrorKind::Type, "CreateListFromArrayLike called on non-object"));
         }
         let len = self.length_of_array_like(v)?;
@@ -1262,7 +1262,7 @@ impl<'gc> Agent<'gc, '_> {
             return Err(self.throw(ErrorKind::Type, &format!("{} is not iterable", &**what)));
         }
         let iterator = self.call(method, v, &[])?;
-        if !matches!(iterator.kind(), ValueKind::Object(_)) {
+        if iterator.as_object().is_none() {
             return Err(self.throw(ErrorKind::Type, "Result of the Symbol.iterator method is not an object"));
         }
         let next = self.get_named(iterator, "next")?;
@@ -1344,7 +1344,7 @@ impl<'gc> Agent<'gc, '_> {
             }
         }
         let r = self.call(it.next, it.iterator, &[])?;
-        if !matches!(r.kind(), ValueKind::Object(_)) {
+        if r.as_object().is_none() {
             let what = self.to_string(r)?;
             return Err(self.throw(ErrorKind::Type, &format!("Iterator result {} is not an object", &**what)));
         }
@@ -1359,7 +1359,7 @@ impl<'gc> Agent<'gc, '_> {
             return Ok(());
         }
         let r = self.call(ret, iterator, &[])?;
-        if !matches!(r.kind(), ValueKind::Object(_)) {
+        if r.as_object().is_none() {
             return Err(self.throw(ErrorKind::Type, "Iterator result is not an object"));
         }
         Ok(())

@@ -551,7 +551,7 @@ impl<'gc> Agent<'gc, '_> {
 
     /// ToPropertyDescriptor.
     pub fn to_property_descriptor(&mut self, v: Value<'gc>) -> Result<Descriptor<'gc>, Error> {
-        if !matches!(v.kind(), ValueKind::Object(_)) {
+        if v.as_object().is_none() {
             let t = self.describe(v);
             return Err(self.throw(ErrorKind::Type, &format!("Property description must be an object: {t}")));
         }
