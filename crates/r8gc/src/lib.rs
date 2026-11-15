@@ -32,7 +32,7 @@ pub use arena::{__DynRootable, Mutation, R8Heap, Root, Rootable, Tlab};
 pub use collect::{__MustNotImplDrop, Collect, Relocate, Trace};
 pub use context::Phase;
 pub use gc::Gc;
-pub use lock::{Lock, RefLock};
+pub use lock::{Lock, RefLock, Word};
 pub use metrics::Metrics;
 pub use parallel::{Job, Pool};
 pub use r8gc_macros::{__unelide_lifetimes, Collect};

@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread;
 
 use moremath::ThreadMulti;
-use r8gc::{Collect, DynamicRoot, DynamicRootSet, Gc, R8Heap, Rootable, Tlab};
+use r8gc::{Collect, DynamicRoot, DynamicRootSet, Gc, Lock, R8Heap, Rootable, Tlab};
 
 /// Mutating threads
 const THREADS: usize = if cfg!(miri) { 2 } else { 4 };
@@ -22,6 +22,8 @@ const LEN: usize = 2_000;
 const LEN: usize = 8;
 /// Lists each thread keeps alive at a time
 const KEEP: usize = 3;
+/// Each thread collects after this many allocations
+const COLLECT_EVERY: usize = if cfg!(miri) { 8 } else { 512 };
 /// Collection threads in the pool
 const POOL: NonZeroUsize = NonZeroUsize::new(if cfg!(miri) { 1 } else { 2 }).unwrap();
 
@@ -132,8 +134,6 @@ impl Drop for Counted {
 fn drops_exactly_once_across_threads() {
     /// Objects each thread allocates
     const EACH: usize = if cfg!(miri) { 16 } else { 4_000 };
-    /// Each thread collects after this many allocations
-    const COLLECT_EVERY: usize = if cfg!(miri) { 8 } else { 512 };
     let pool = ThreadMulti::from(POOL);
     let heap = heap(&pool);
     let dropped = Arc::new(AtomicUsize::new(0));
@@ -167,4 +167,56 @@ fn drops_exactly_once_across_threads() {
     drop(heap);
     assert_eq!(dropped.load(Ordering::Relaxed), THREADS * EACH);
     drop(kept);
+}
+
+#[derive(Collect)]
+#[collect(no_drop)]
+struct Shared<'gc> {
+    /// Top of a lock-free stack living in the heap
+    top: Gc<'gc, Lock<Option<Gc<'gc, Node<'gc>>>>>,
+}
+
+/// Threads push onto one in-heap stack with compare-exchange while others collect: nothing is lost, and the old
+/// cell receiving young pointers keeps them alive (write barrier).
+#[test]
+fn atomic_cells_shared_across_threads() {
+    /// Nodes each thread pushes
+    const EACH: usize = if cfg!(miri) { 8 } else { 5_000 };
+    let pool = ThreadMulti::from(POOL);
+    let heap: R8Heap<'_, Rootable![Shared<'_>]> = R8Heap::new(&pool, |mc| Shared { top: Gc::new(mc, Lock::new(None)) });
+    let heap = &heap;
+    // The cell is old before anyone pushes young nodes into it
+    heap.collect_all_shared();
+    thread::scope(|s| {
+        for t in 0..THREADS {
+            s.spawn(move || {
+                let mut tlab = Tlab::default();
+                for i in 0..EACH {
+                    heap.mutate_in(&mut tlab, |mc, root| {
+                        let mut seen = root.top.get();
+                        loop {
+                            let node = Gc::new(mc, Node { value: t * EACH + i, next: seen });
+                            match root.top.compare_exchange(mc, seen, Some(node)) {
+                                Ok(_) => break,
+                                Err(now) => seen = now,
+                            }
+                        }
+                    });
+                    if i % COLLECT_EVERY == 0 {
+                        heap.collect_debt_shared();
+                    }
+                }
+            });
+        }
+        s.spawn(|| {
+            for _ in 0..if cfg!(miri) { 1 } else { 20 } {
+                heap.collect_all_shared();
+                thread::yield_now();
+            }
+        });
+    });
+    heap.collect_all_shared();
+    let n = THREADS * EACH;
+    let (count, total) = heap.mutate(|_, root| root.top.get().map_or((0, 0), walk));
+    assert_eq!((count, total), (n, n * (n - 1) / 2));
 }
