@@ -5,11 +5,11 @@ use r8framework::{Agent, Error, Value};
 
 use crate::{Args, Installer};
 
-/// 全局函数与 `console`。
+/// Global functions and `console`.
 struct Global;
 
 impl Global {
-    /// `console.log(...)`：ToString 后空格连接交给平台输出。
+    /// `console.log(...)`: ToString each argument, join with spaces, and hand the result to the platform for output.
     fn log<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let parts = args.iter().map(|&v| a.to_string(v).map(|s| String::from(&**s))).collect::<Result<Vec<_>, _>>()?;
         a.platform.print(&parts.join(" "));
@@ -24,11 +24,11 @@ impl Global {
         Ok(a.to_number(args.at(0))?.is_finite().into())
     }
 
-    /// `parseInt(s, radix)`：跳过前导空白，可带符号与 `0x`，读到第一个非数字为止。
+    /// `parseInt(s, radix)`: skip leading whitespace, accept an optional sign and `0x`, read up to the first non-digit.
     fn parse_int<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        /// 缺省进制
+        /// Default radix
         const DECIMAL: u32 = 10;
-        /// `0x` 前缀的进制
+        /// Radix for the `0x` prefix
         const HEX: u32 = 16;
         let s = a.to_string(args.at(0))?;
         let mut t = s.trim_start();
@@ -58,7 +58,7 @@ impl Global {
         Ok((if negative { -n } else { n }).into())
     }
 
-    /// `parseFloat(s)`：最长的十进制数前缀。
+    /// `parseFloat(s)`: the longest decimal number prefix.
     fn parse_float<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let s = a.to_string(args.at(0))?;
         let t = s.trim_start();
@@ -76,7 +76,7 @@ impl Installer<'_, '_> {
     pub(crate) fn global(&mut self) {
         let g = self.realm.global;
         self.set(g, "globalThis", g.into());
-        // 值属性：不可写、不可枚举、不可配置
+        // Value properties: non-writable, non-enumerable, non-configurable
         for (name, v) in [("undefined", Value::Undefined), ("NaN", f64::NAN.into()), ("Infinity", f64::INFINITY.into())] {
             g.borrow_mut(self.mc).define(name, r8framework::Property { slot: r8framework::Slot::Data(v), enumerable: false, writable: false, configurable: false });
         }

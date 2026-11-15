@@ -1,4 +1,4 @@
-// 闭包创建与调用
+// Closure creation and calls
 function make(k) { let c = 0; return (x) => (c += x * k); }
 let t = 0;
 for (let i = 0; i < 1000; i++) {

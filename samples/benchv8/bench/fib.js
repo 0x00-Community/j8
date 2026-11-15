@@ -1,3 +1,3 @@
-// 递归调用
+// Recursive calls
 function fib(n) { return n < 2 ? n : fib(n - 1) + fib(n - 2); }
 fib(27);

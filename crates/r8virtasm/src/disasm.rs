@@ -1,4 +1,4 @@
-//! 反汇编：`Module` ⇒ 文本，信息完整（`FromStr for Module` 读回来逐项相同，见 asm.rs）。
+//! Disassembly: `Module` ⇒ text, lossless (`FromStr for Module` reads it back identical item by item, see asm.rs).
 //!
 //! ```text
 //! fn#0 "main" normal sloppy params 0 length 0 regs 3
@@ -11,7 +11,7 @@ use core::fmt;
 
 use crate::{Constant, EvalName, EvalScope, Function, FunctionKind, Mode, Module};
 
-/// 函数种类的写法
+/// How a function kind is written
 pub(crate) const KINDS: [(FunctionKind, &str); 5] = [
     (FunctionKind::Normal, "normal"),
     (FunctionKind::Arrow, "arrow"),
@@ -20,10 +20,10 @@ pub(crate) const KINDS: [(FunctionKind, &str); 5] = [
     (FunctionKind::Constructor { derived: true }, "constructor.derived"),
 ];
 
-/// 模式的写法
+/// How a mode is written
 pub(crate) const MODES: [(Mode, &str); 2] = [(Mode::Sloppy, "sloppy"), (Mode::Strict, "strict")];
 
-/// 按（值, 名字）表写出
+/// Writes via a (value, name) table
 macro_rules! by_table {
     ($($ty:ty = $table:expr),*) => {$(
         impl fmt::Display for $ty {
@@ -72,7 +72,7 @@ impl fmt::Display for EvalScope {
 }
 
 impl fmt::Display for Function {
-    /// 函数头之后的各行（函数头要 `fn#i`，由 `Module` 写）
+    /// The lines after the function header (the header needs `fn#i`, so `Module` writes it)
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{:?} {} {} params {} length {} regs {}", self.name, self.kind, self.mode, self.params, self.length, self.regs)?;
         for (on, word) in [(self.generator, " generator"), (self.asynchronous, " async"), (self.keeps_args, " keeps_args")] {
@@ -105,7 +105,7 @@ impl fmt::Display for Function {
     }
 }
 
-/// 反汇编：`module.to_string()`。
+/// Disassembly: `module.to_string()`.
 impl fmt::Display for Module {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         for (i, func) in self.functions.iter().enumerate() {

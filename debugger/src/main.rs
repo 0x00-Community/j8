@@ -1,4 +1,4 @@
-//! r8dbg：r8 的调试命令行。
+//! r8dbg: the r8 debugging CLI.
 mod asm;
 
 use std::process::ExitCode;
@@ -7,7 +7,7 @@ use clap::{Parser, Subcommand};
 
 use asm::{Asm, Disasm};
 
-/// r8 调试工具
+/// r8 debugging tool
 #[derive(Parser)]
 #[command(name = "r8dbg", version)]
 struct Cli {
@@ -17,9 +17,9 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// JS ⇒ 字节码，打印反汇编清单
+    /// JS ⇒ bytecode, print the disassembly listing
     Disasm(Disasm),
-    /// 汇编反汇编清单，打印规范化后的清单
+    /// Assemble a disassembly listing, print the normalized listing
     Asm(Asm),
 }
 

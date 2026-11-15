@@ -1,26 +1,26 @@
-# r8 与 V8 的性能对比
+# r8 vs. V8 performance
 
-同一组 JS 基准（`bench/*.js`）分别在 r8、V8 `--jitless`（纯解释器）、V8（带 JIT）上跑。V8 经 rusty_v8 `=152.2.0` 嵌入。
+The same set of JS benchmarks (`bench/*.js`) runs on r8, V8 `--jitless` (interpreter only) and V8 (with JIT). V8 is embedded via rusty_v8 `=152.2.0`.
 
-## 跑法
+## Running
 
 ```text
 cd samples/benchv8
-cargo run --release                     # 三种引擎各跑一遍，出对比表
-cargo run --release -- --engine r8      # 只跑一种：r8 / v8 / v8-jitless
-cargo run --release -- --runs 10        # 每个基准跑几次取最短（缺省 5）
+cargo run --release                     # run all three engines once each and print the comparison table
+cargo run --release -- --engine r8      # run only one: r8 / v8 / v8-jitless
+cargo run --release -- --runs 10        # runs per benchmark, the shortest is kept (default 5)
 ```
 
-- V8 的 `--jitless` 是进程级开关，所以每种引擎在自己的子进程里跑。
-- 计时只算编译 + 执行；每次换一个新的执行环境，取最短一次。
-- 每个脚本的完成值是校验和，三种引擎要一致（表里 check 列）。
-- benchv8 自成一个 workspace（根 workspace 排除了它），平时 `cargo build --workspace` 不会拉 V8 的预编译库。
+- V8's `--jitless` is a process-wide flag, so each engine runs in its own child process.
+- Timing covers compile + execute only; each run uses a fresh execution environment, and the shortest run is kept.
+- Each script's completion value is a checksum that must match across the three engines (the check column in the table).
+- benchv8 is a workspace of its own (excluded from the root workspace), so a normal `cargo build --workspace` doesn't pull V8's prebuilt library.
 
-## 结果
+## Results
 
-`--runs 5`，16 核机器，测时负载约 6（有别的进程在跑），数字有噪声，只看量级。11 个基准的校验和三种引擎全部一致。
+`--runs 5`, 16-core machine, load average about 6 while measuring (other processes running); the numbers are noisy, only the order of magnitude matters. All 11 benchmarks produce matching checksums on all three engines.
 
-| 基准 | r8 ms | V8 jitless ms | V8 ms | r8 / jitless | r8 / V8 |
+| Benchmark | r8 ms | V8 jitless ms | V8 ms | r8 / jitless | r8 / V8 |
 |---|---:|---:|---:|---:|---:|
 | fib | 41.6 | 9.5 | 2.1 | 4.4× | 19.5× |
 | loop | 316.8 | 182.9 | 81.1 | 1.7× | 3.9× |
@@ -33,13 +33,16 @@ cargo run --release -- --runs 10        # 每个基准跑几次取最短（缺�
 | collections | 69.4 | 31.0 | 25.4 | 2.2× | 2.7× |
 | json | 37.7 | 12.9 | 13.0 | 2.9× | 2.9× |
 | regexp | 19.3 | 3.1 | 2.0 | 6.1× | 9.7× |
-| **几何平均** | | | | **3.7×** | **9.4×** |
+| **Geometric mean** | | | | **3.7×** | **9.4×** |
 
-## 解读（callgrind 逐行指令数）
+## Analysis (callgrind per-line instruction counts)
 
-- **解释器分派**：一条简单字节码约 14 条机器指令（取指 + 跳转表）；`run` 是一个大 `match`，寄存器分配对改动很敏感——
-  在里面加一个分支或换个调用参数，状态指针就可能被挤到栈上、每次分派多一两条 load，fib / closures / loop 跟着退 3–5 %。改它要量全部基准
-- **调用**：每次调用 + 返回约 400 条（查函数表、开帧填寄存器、帧入栈出栈）；JIT 只收数值循环，调用密集的（fib、closures、classes）对带 JIT 的 V8 差 20–40×
-- **分配**：对象的属性槽、超过 23 字节的字符串、绳索节点都走 glibc malloc（回收时成批 free，每次约 250 条）；objects / classes / string 里占 15–25 %
-- **loop**：与 jitless 只差 1.7×，剩下主要是取余的 64 位整数除法本身
-- **regexp**：纯字面量模式已按子串找；`\d+` 这类仍走 regress 回溯引擎
+- **Interpreter dispatch**: a simple bytecode costs about 14 machine instructions (fetch + jump table); `run` is one big `match`, and its
+  register allocation is very sensitive to changes: adding a branch or changing a call's arguments inside it can push the state pointer onto
+  the stack, adding one or two loads per dispatch, and fib / closures / loop regress 3–5 % with it. Measure all benchmarks when changing it
+- **Calls**: each call + return costs about 400 instructions (function table lookup, opening a frame and filling registers, pushing and
+  popping the frame); the JIT only takes numeric loops, so call-heavy benchmarks (fib, closures, classes) are 20–40× behind V8 with JIT
+- **Allocation**: object property slots, strings longer than 23 bytes and rope nodes all go through glibc malloc (freed in batches on
+  collection, about 250 instructions each); 15–25 % of objects / classes / string
+- **loop**: only 1.7× behind jitless; what remains is mostly the 64-bit integer division of the remainder operation itself
+- **regexp**: pure literal patterns already use substring search; patterns like `\d+` still go through the regress backtracking engine

@@ -1,11 +1,11 @@
 [package]
 name = "workerd"
-description = "workerd：用 r8 加载 Cloudflare Worker（ES 模块 + Durable Object）的最小宿主"
+description = "workerd: a minimal host that loads Cloudflare Workers (ES modules + Durable Objects) with r8"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-# crates.io 上同名包已被别人占
+# the name is taken on crates.io
 publish = false
 
 [[bin]]

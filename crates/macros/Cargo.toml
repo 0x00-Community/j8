@@ -1,6 +1,6 @@
 [package]
 name = "r8macros"
-description = "r8 过程宏：从 JSON 定义生成枚举"
+description = "r8 procedural macros: generate enums from JSON definitions"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

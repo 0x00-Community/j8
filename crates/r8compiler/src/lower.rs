@@ -8,17 +8,18 @@ use r8framework::{BinaryOp, CompareOp, ValueTag};
 
 use crate::Helper;
 
-/// 机器码入口函数的符号名
+/// Symbol name of the machine-code entry function
 pub(crate) const ENTRY: &str = "r8_jit_entry";
 
-/// 第一档不收的指令（机器码停在它之前，交给解释器执行）：第几条、是什么。
+/// An instruction the first tier does not accept (machine code stops before it and hands it to the interpreter): its
+/// index and what it is.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Unsupported {
     pub pc: u32,
     pub insn: Insn,
 }
 
-/// `llvm.fcmp` 的谓词（自定义写法里的名字）
+/// Predicates of `llvm.fcmp` (names in the custom syntax)
 struct FCmp;
 
 impl FCmp {
@@ -27,9 +28,9 @@ impl FCmp {
     const OGE: &str = "oge";
     const OLT: &str = "olt";
     const OLE: &str = "ole";
-    /// 有序且不等（`NaN` 给假）
+    /// Ordered and not equal (`NaN` gives false)
     const ONE: &str = "one";
-    /// 无序或不等（`NaN` 给真，`!=` 的语义）
+    /// Unordered or not equal (`NaN` gives true; the semantics of `!=`)
     const UNE: &str = "une";
 
     fn of(op: CompareOp) -> &'static str {
@@ -44,46 +45,47 @@ impl FCmp {
     }
 }
 
-/// `llvm.icmp` 的谓词
+/// Predicates of `llvm.icmp`
 const ICMP_EQ: &str = "eq";
 const ICMP_NE: &str = "ne";
 
-/// 一个字节码函数 ⇒ MLIR 文本（`llvm` 方言）。
+/// One bytecode function ⇒ MLIR text (`llvm` dialect).
 ///
-/// 每条指令一个块 `^iN`；要退回解释器的指令另有 `^dN`（返回 `N + 1`）。累加器与每个寄存器是一对局部变量
-/// （`llvm.alloca`：标签、载荷）：入口从帧（`%acc` / `%regs` 指向的 [`Value`](r8framework::Value)）读进来，
-/// 所有出口都跳到写回块 `^x` 写回帧再返回；局部变量之后由 mem2reg 提成 SSA。
+/// One block `^iN` per instruction; instructions that may bail out to the interpreter also get a `^dN` (returns `N +
+/// 1`). The accumulator and each register are a pair of locals (`llvm.alloca`: tag, payload): the entry reads them from
+/// the frame (the [`Value`](r8framework::Value)s pointed to by `%acc` / `%regs`), and every exit jumps to the
+/// write-back block `^x`, which writes them back to the frame and returns; mem2reg later promotes the locals to SSA.
 pub(crate) struct Lower<'f> {
     func: &'f Function,
     out: String,
     next: u32,
-    /// 用到退出块的指令
+    /// Instructions that use the exit block
     deopts: BTreeSet<u32>,
-    /// 用到的运行时函数
+    /// Runtime functions used
     helpers: BTreeSet<&'static str>,
-    /// 第一档不收、停下交给解释器的指令
+    /// Instructions the first tier does not accept, where execution stops and hands off to the interpreter
     exits: Vec<Unsupported>,
 }
 
-/// 翻好的模块与它的概况。
+/// The lowered module and its summary.
 pub(crate) struct Lowered {
     pub(crate) text: String,
     pub(crate) exits: Vec<Unsupported>,
     pub(crate) headers: Vec<u32>,
 }
 
-/// 一个 SSA 值的名字
+/// Name of an SSA value
 type V = String;
 
 impl<'f> Lower<'f> {
-    /// 整个模块：运行时函数的声明 + 入口函数。
+    /// The whole module: runtime function declarations + the entry function.
     pub(crate) fn module(func: &'f Function) -> Lowered {
         let mut l = Lower { func, out: String::new(), next: 0, deopts: BTreeSet::new(), helpers: BTreeSet::new(), exits: Vec::new() };
         let loops = Self::loops(func);
         for (pc, &insn) in (0u32..).zip(&func.insns) {
             l.label(&alloc::format!("i{pc}"));
             if let Err(u) = l.insn(pc, insn) {
-                // 第一档不收的指令：停在它之前，交给解释器执行
+                // An instruction the first tier does not accept: stop before it and hand it to the interpreter
                 l.exits.push(u);
                 l.deopts.insert(pc);
                 l.line(&alloc::format!("llvm.br ^d{pc}"));
@@ -99,7 +101,7 @@ impl<'f> Lower<'f> {
             let c = l.int(u64::from(pc) + 1, 64);
             l.line(&alloc::format!("llvm.br ^x({c} : i64)"));
         }
-        // 收尾块：局部变量一次写回帧里，带着出口码返回
+        // Tail block: write all locals back to the frame at once and return with the exit code
         l.label("x(%code: i64)");
         for (local, base, at) in l.locals() {
             let w = l.def(&alloc::format!("llvm.load {local} : !llvm.ptr -> i64"));
@@ -112,13 +114,14 @@ impl<'f> Lower<'f> {
             let _ = writeln!(m, "  llvm.func @{h}(f64, f64) -> f64");
         }
         let _ = writeln!(m, "  llvm.func @{ENTRY}(%regs: !llvm.ptr, %acc: !llvm.ptr, %start: i64) -> i64 {{");
-        // 能从中途进的循环：循环体里没有停下交给解释器的指令（否则每圈都要进出一次，不划算）
+        // Loops that can be entered midway: the loop body has no instruction that stops and hands off to the
+        // interpreter (otherwise every iteration would enter and leave once, which doesn't pay off)
         let mut headers: Vec<u32> = loops.iter().filter(|&&(h, back)| !l.exits.iter().any(|u| (h..=back).contains(&u.pc))).map(|&(h, _)| h).collect();
         headers.sort_unstable();
         headers.dedup();
-        // 入口分派：`%start` 是 0 从头进，`h + 1` 从循环头 `h` 进（OSR）
+        // Entry dispatch: `%start` 0 enters at the start, `h + 1` enters at loop header `h` (OSR)
         let mut dispatch = Lower { func, out: String::new(), next: l.next, deopts: BTreeSet::new(), helpers: BTreeSet::new(), exits: Vec::new() };
-        // 局部变量（mem2reg 提成 SSA），从帧里读一次
+        // Locals (promoted to SSA by mem2reg), read from the frame once
         dispatch.line("%one = llvm.mlir.constant(1 : i64) : i64");
         for (local, base, at) in dispatch.locals() {
             dispatch.line(&alloc::format!("{local} = llvm.alloca %one x i64 : (i64) -> !llvm.ptr"));
@@ -141,7 +144,7 @@ impl<'f> Lower<'f> {
         Lowered { text: m, exits: l.exits, headers }
     }
 
-    /// 循环：（循环头, 往回跳的那条），循环头是往回跳的目标（OSR 从这里进）。
+    /// Loops: (loop header, the backward jump); the loop header is the target of the backward jump (OSR enters here).
     fn loops(func: &Function) -> Vec<(u32, u32)> {
         (0u32..)
             .zip(&func.insns)
@@ -179,21 +182,22 @@ impl<'f> Lower<'f> {
     }
 
     fn float(&mut self, x: f64) -> V {
-        // 位模式写，`NaN` / 无穷 / `-0` 都原样
+        // Written as a bit pattern, so `NaN` / infinities / `-0` are all preserved
         self.def(&alloc::format!("llvm.mlir.constant(0x{:016X} : f64) : f64", x.to_bits()))
     }
 
-    /// 寄存器 `r` 的标签字（`off` 0）或载荷字（`off` = 载荷偏移）所在的局部变量
+    /// The local holding register `r`'s tag word (`off` 0) or payload word (`off` = payload offset)
     fn reg_addr(r: Reg, off: usize) -> V {
         if off == 0 { alloc::format!("%rt{}", r.0) } else { alloc::format!("%rp{}", r.0) }
     }
 
-    /// 累加器的标签字 / 载荷字所在的局部变量
+    /// The locals holding the accumulator's tag word / payload word
     fn acc_addr(off: usize) -> V {
         String::from(if off == 0 { "%at" } else { "%ap" })
     }
 
-    /// 读局部变量（都按 i64 存）成 `ty`：`i8` 取低字节（标签、布尔），`f64` 按位换（数）
+    /// Reads a local (all stored as i64) as `ty`: `i8` takes the low byte (tags, booleans), `f64` is a bitcast
+    /// (numbers)
     fn load(&mut self, p: &str, ty: &str) -> V {
         let w = self.def(&alloc::format!("llvm.load {p} : !llvm.ptr -> i64"));
         match ty {
@@ -203,7 +207,7 @@ impl<'f> Lower<'f> {
         }
     }
 
-    /// 写局部变量：`ty` 的值按 i64 存
+    /// Writes a local: the `ty` value is stored as i64
     fn store(&mut self, v: &str, p: &str, ty: &str) {
         let w = match ty {
             "i8" => self.def(&alloc::format!("llvm.zext {v} : i8 to i64")),
@@ -213,12 +217,12 @@ impl<'f> Lower<'f> {
         self.line(&alloc::format!("llvm.store {w}, {p} : i64, !llvm.ptr"));
     }
 
-    /// 帧里（`%regs` / `%acc`）第 `at` 字节的地址
+    /// Address of byte `at` in the frame (`%regs` / `%acc`)
     fn frame_addr(&mut self, base: &str, at: usize) -> V {
         self.def(&alloc::format!("llvm.getelementptr {base}[{at}] : (!llvm.ptr) -> !llvm.ptr, i8"))
     }
 
-    /// 全部局部变量：（局部变量, 帧里的基址, 字节偏移）
+    /// All locals: (local, base address in the frame, byte offset)
     fn locals(&self) -> Vec<(String, &'static str, usize)> {
         let mut out = Vec::new();
         for r in 0..usize::from(self.func.regs) {
@@ -230,7 +234,7 @@ impl<'f> Lower<'f> {
         out
     }
 
-    /// 地址 `p` 处的值是不是标签 `tag`（i1）
+    /// Whether the value at address `p` has tag `tag` (i1)
     fn tag_is(&mut self, p: &str, tag: u8) -> V {
         let t = self.load(p, "i8");
         let c = self.int(u64::from(tag), 8);
@@ -245,7 +249,8 @@ impl<'f> Lower<'f> {
         self.def(&alloc::format!("llvm.fcmp \"{pred}\" {a}, {b} : f64"))
     }
 
-    /// 条件不成立就退回解释器（停在 `pc`），成立接着往下（新开一个块）。
+    /// If the condition does not hold, bails out to the interpreter (stopping at `pc`); if it holds, continues on (in a
+    /// new block).
     fn guard(&mut self, pc: u32, ok: &str) {
         self.deopts.insert(pc);
         let k = self.fresh();
@@ -254,7 +259,7 @@ impl<'f> Lower<'f> {
         self.label(&alloc::format!("k{name}"));
     }
 
-    /// 累加器写成数 `x`
+    /// Writes number `x` to the accumulator
     fn put_number(&mut self, x: &str) {
         let (tp, pp) = (Self::acc_addr(0), Self::acc_addr(ValueTag::PAYLOAD));
         let tag = self.int(u64::from(ValueTag::NUMBER), 64);
@@ -262,7 +267,7 @@ impl<'f> Lower<'f> {
         self.store(x, &pp, "f64");
     }
 
-    /// 累加器写成布尔 `b`（i1）
+    /// Writes boolean `b` (i1) to the accumulator
     fn put_bool(&mut self, b: &str) {
         let (tp, pp) = (Self::acc_addr(0), Self::acc_addr(ValueTag::PAYLOAD));
         let tag = self.int(u64::from(ValueTag::BOOL), 64);
@@ -271,21 +276,22 @@ impl<'f> Lower<'f> {
         self.store(&byte, &pp, "i8");
     }
 
-    /// 累加器写成只有标签的值（undefined / null / 未初始化）
+    /// Writes a tag-only value (undefined / null / uninitialized) to the accumulator
     fn put_tag(&mut self, tag: u8) {
         let tp = Self::acc_addr(0);
         let t = self.int(u64::from(tag), 64);
         self.store(&t, &tp, "i64");
     }
 
-    /// 两个 16 字节的值之间搬（标签字与载荷字）
+    /// Moves between two 16-byte values (tag word and payload word)
     fn copy(&mut self, from: &(V, V), to: &(V, V)) {
         let (a, b) = (self.load(&from.0, "i64"), self.load(&from.1, "i64"));
         self.store(&a, &to.0, "i64");
         self.store(&b, &to.1, "i64");
     }
 
-    /// 寄存器 `r` 与累加器都是数：给出（r 的数, 累加器的数），不是就退回解释器。
+    /// Register `r` and the accumulator are both numbers: gives (r's number, the accumulator's number); otherwise bails
+    /// out to the interpreter.
     fn numbers(&mut self, pc: u32, r: Reg) -> (V, V) {
         let (rt, at) = (Self::reg_addr(r, 0), Self::acc_addr(0));
         let (a, b) = (self.tag_is(&rt, ValueTag::NUMBER), self.tag_is(&at, ValueTag::NUMBER));
@@ -295,7 +301,7 @@ impl<'f> Lower<'f> {
         (self.load(&rp, "f64"), self.load(&ap, "f64"))
     }
 
-    /// 累加器是数：给出它，不是就退回解释器。
+    /// The accumulator is a number: gives it; otherwise bails out to the interpreter.
     fn acc_number(&mut self, pc: u32) -> V {
         let at = Self::acc_addr(0);
         let ok = self.tag_is(&at, ValueTag::NUMBER);
@@ -308,7 +314,7 @@ impl<'f> Lower<'f> {
         self.line(&alloc::format!("llvm.br ^i{}", pc + 1));
     }
 
-    /// ToBoolean(acc)，只认布尔 / 数 / undefined / null，别的退回解释器。
+    /// ToBoolean(acc), only for booleans / numbers / undefined / null; anything else bails out to the interpreter.
     fn truthy(&mut self, pc: u32) -> V {
         let at = Self::acc_addr(0);
         let is_bool = self.tag_is(&at, ValueTag::BOOL);
@@ -325,14 +331,15 @@ impl<'f> Lower<'f> {
         let b = self.icmp(ICMP_NE, &byte, &zero8, "i8");
         let x = self.load(&pp, "f64");
         let zero = self.float(0.0);
-        // 非零且不是 NaN
+        // Non-zero and not NaN
         let n = self.fcmp(FCmp::ONE, &x, &zero);
         let v = self.def(&alloc::format!("llvm.select {is_num}, {n}, {b} : i1, i1"));
         let f = self.int(0, 1);
         self.def(&alloc::format!("llvm.select {k1}, {v}, {f} : i1, i1"))
     }
 
-    /// `return`：从头进的函数返回（出口码 0）；从循环中途进的（OSR）帧要解释器收尾，停在这条 `return` 之前。
+    /// `return`: a function entered at the start returns (exit code 0); one entered midway through a loop (OSR) needs
+    /// the interpreter to finish the frame, so it stops before this `return`.
     fn ret(&mut self, pc: u32) {
         self.deopts.insert(pc);
         let z = self.int(0, 64);
@@ -344,7 +351,8 @@ impl<'f> Lower<'f> {
         self.line(&alloc::format!("llvm.br ^x({z} : i64)"));
     }
 
-    /// 一条指令；融合指令按拆回的原指令依次下降（同一个 `pc`：中途退回解释器就整条重做，前几条只写 acc）。
+    /// One instruction; a fused instruction is lowered as the original instructions it splits back into, in order (same
+    /// `pc`: bailing out midway redoes the whole thing, so the earlier parts only write acc).
     fn insn(&mut self, pc: u32, insn: Insn) -> Result<(), Unsupported> {
         let Some(parts) = insn.unfused() else { return self.step(pc, insn, true) };
         let (last, init) = parts.split_last().expect("a fused instruction has parts");
@@ -354,7 +362,8 @@ impl<'f> Lower<'f> {
         self.step(pc, *last, true)
     }
 
-    /// 下降一条原指令；`last` 为假时不接到下一块（融合指令的中间部分）。
+    /// Lowers one original instruction; when `last` is false it does not link to the next block (the middle parts of a
+    /// fused instruction).
     fn step(&mut self, pc: u32, insn: Insn, last: bool) -> Result<(), Unsupported> {
         let unsupported = Unsupported { pc, insn };
         match insn {
@@ -451,7 +460,8 @@ impl<'f> Lower<'f> {
             return Ok(());
         }
         if pc as usize + 1 >= self.func.insns.len() {
-            // 最后一条指令落到函数末尾：按返回 undefined 处理之前不该发生，退回解释器
+            // The last instruction falls off the end of the function: shouldn't happen until that is handled as
+            // returning undefined; bail out to the interpreter
             self.deopts.insert(pc + 1);
             self.line(&alloc::format!("llvm.br ^d{}", pc + 1));
             return Ok(());

@@ -1,6 +1,6 @@
 [package]
 name = "r8builtins"
-description = "r8 内建对象：实现 Intrinsics，往 Realm 里装 Object / Function / Array / String / Number / Math / Error / console"
+description = "r8 built-in objects: implements Intrinsics and installs Object / Function / Array / String / Number / Math / Error / console into a Realm"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

@@ -1,38 +1,41 @@
-//! JSON 定义的形状。未知字段直接报错（`deny_unknown_fields`），JSON 写错不会被悄悄忽略。
+//! The shape of the JSON definitions. Unknown fields are rejected (`deny_unknown_fields`), so mistakes in the
+//! JSON are never silently ignored.
 use serde::Deserialize;
 
-/// 一个 JSON 文件：若干枚举。
+/// One JSON file: a number of enums.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Spec {
     pub enums: Vec<EnumSpec>,
 }
 
-/// 一个枚举。
+/// One enum.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EnumSpec {
     pub name: String,
     pub doc: String,
-    /// 原样进 `#[derive(...)]`
+    /// Passed as-is into `#[derive(...)]`
     #[serde(default)]
     pub derive: Vec<String>,
-    /// 判别式的整数类型（`#[repr(..)]`）：不给就由编译器挑（可能借字段的空位编码，取判别式要多几条指令）
+    /// Integer type of the discriminant (`#[repr(..)]`): if omitted, the compiler chooses (it may use a niche in a
+    /// field for the encoding, which costs a few extra instructions to read the discriminant)
     #[serde(default)]
     pub repr: Option<String>,
-    /// 生成 `Display`：助记符 + 操作数
+    /// Generate `Display`: mnemonic + operands
     #[serde(default)]
     pub display: bool,
-    /// 生成汇编（`Display` 的逆）：`display` 开 ⇒ `FromStr`；全是单元变体 ⇒ 按变体名的 `Operand`
+    /// Generate assembly (the inverse of `Display`): `display` on ⇒ `FromStr`; all unit variants ⇒ `Operand` by
+    /// variant name
     #[serde(default)]
     pub asm: bool,
-    /// 生成按字段类型取 `&mut` 的方法
+    /// Generate methods that return `&mut` to a field by its type
     #[serde(default)]
     pub accessors: Vec<Accessor>,
     pub variants: Vec<VariantSpec>,
 }
 
-/// `pub fn name(&mut self) -> Option<&mut ty>`：变体里第一个类型为 `ty` 的字段。
+/// `pub fn name(&mut self) -> Option<&mut ty>`: the first field of type `ty` in the variant.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Accessor {
@@ -41,17 +44,18 @@ pub struct Accessor {
     pub doc: String,
 }
 
-/// 一个变体。字段要么全有名字（结构体变体），要么全没有（元组变体）。
+/// One variant. Either all fields are named (struct variant) or none are (tuple variant).
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct VariantSpec {
     pub name: String,
     #[serde(default)]
     pub doc: Option<String>,
-    /// `Display` 的助记符；有 `show: name` 的字段时由它代替
+    /// Mnemonic for `Display`; replaced by the `show: name` field if there is one
     #[serde(default)]
     pub mnemonic: Option<String>,
-    /// 配 `show: name` 字段：助记符是 `名字.后缀`（同一组名字的另一种操作数形式，如 `add.smi`）
+    /// Used with a `show: name` field: the mnemonic is `name.suffix` (another operand form of the same group of
+    /// names, e.g. `add.smi`)
     #[serde(default)]
     pub suffix: Option<String>,
     /// `#[default]`
@@ -61,21 +65,21 @@ pub struct VariantSpec {
     pub fields: Vec<FieldSpec>,
 }
 
-/// 一个字段。
+/// One field.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FieldSpec {
     #[serde(default)]
     pub name: Option<String>,
     pub ty: String,
-    /// `Display` 时写在值前面（如 `fn#`、`extends `）
+    /// Written before the value in `Display` (e.g. `fn#`, `extends `)
     #[serde(default)]
     pub prefix: String,
     #[serde(default)]
     pub show: Show,
 }
 
-/// 字段在 `Display` 里怎么出现。`Option<_>` 字段为 `None` 时整个不出现。
+/// How a field appears in `Display`. An `Option<_>` field that is `None` is omitted entirely.
 #[derive(Deserialize, Default, Clone, Copy)]
 #[serde(rename_all = "snake_case")]
 pub enum Show {
@@ -84,6 +88,6 @@ pub enum Show {
     Display,
     /// `{:?}`
     Debug,
-    /// 代替助记符：`x.name()`
+    /// Replaces the mnemonic: `x.name()`
     Name,
 }

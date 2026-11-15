@@ -6,10 +6,11 @@ use r8framework::{Agent, Error, ErrorKind, JsObject, JsString, ObjectData, Objec
 
 use crate::{Args, Installer};
 
-/// `JSON.stringify` 缩进最多这么多个字符
+/// Maximum number of indentation characters for `JSON.stringify`
 const MAX_GAP: usize = 10;
 
-/// `JSON.parse` 的解析器：按规范的 JSON 文法（只认四种空白、不收尾逗号、数不带前导零）。
+/// Parser for `JSON.parse`, following the spec's JSON grammar (only the four whitespace characters, no trailing commas,
+/// no leading zeros in numbers).
 struct Parser<'s, 'a, 'gc, 'x> {
     a: &'a mut Agent<'gc, 'x>,
     text: &'s str,
@@ -86,7 +87,8 @@ impl<'s, 'gc> Parser<'s, '_, 'gc, '_> {
             self.skip_ws();
             self.expect(b':', "expected ':'")?;
             let v = self.value()?;
-            // CreateDataProperty：新建的普通对象一定成；`__proto__` 也只是普通键，重复的键整个换掉
+            // CreateDataProperty: always succeeds on a fresh ordinary object; `__proto__` is just an ordinary key, and
+            // a duplicate key replaces the previous one entirely
             o.borrow_mut(self.a.mc).define(&k, Property::data(v));
             match self.peek() {
                 Some(b',') => self.pos += 1,
@@ -120,16 +122,17 @@ impl<'s, 'gc> Parser<'s, '_, 'gc, '_> {
         }
     }
 
-    /// 四位十六进制。
+    /// Four hex digits.
     fn hex4(&mut self) -> Result<u16, Error> {
         let digits = self.text.get(self.pos..self.pos + 4).filter(|d| d.bytes().all(|c| c.is_ascii_hexdigit())).ok_or_else(|| self.error("bad \\u escape"))?;
         self.pos += 4;
         u16::from_str_radix(digits, 16).map_err(|_| self.error("bad \\u escape"))
     }
 
-    /// 字符串（当前在开头的引号上）。`\u` 代理对拼起来，落单的代理换成 U+FFFD。
+    /// A string (currently at the opening quote). `\u` surrogate pairs are combined; lone surrogates become U+FFFD.
     fn string(&mut self) -> Result<alloc::borrow::Cow<'s, str>, Error> {
-        // 没有转义（最常见）：直接借原文；UTF-8 多字节序列里不会出现 `"` `\\` 与控制字符，可以按字节扫
+        // No escapes (the common case): borrow the source directly; `"`, `\\` and control characters never occur inside
+        // UTF-8 multi-byte sequences, so scanning by byte is fine
         let start = self.pos + 1;
         let text: &'s str = self.text;
         let end = text.as_bytes()[start..].iter().position(|&b| b == b'"' || b == b'\\' || b < 0x20).map(|i| start + i);
@@ -142,7 +145,7 @@ impl<'s, 'gc> Parser<'s, '_, 'gc, '_> {
         self.escaped().map(alloc::borrow::Cow::Owned)
     }
 
-    /// 带转义的字符串（当前在开头的引号上）。
+    /// A string with escapes (currently at the opening quote).
     fn escaped(&mut self) -> Result<String, Error> {
         self.pos += 1;
         let mut out = String::new();
@@ -197,7 +200,7 @@ impl<'s, 'gc> Parser<'s, '_, 'gc, '_> {
         }
     }
 
-    /// 数：`-? (0 | [1-9][0-9]*) (. [0-9]+)? ([eE] [+-]? [0-9]+)?`。
+    /// A number: `-? (0 | [1-9][0-9]*) (. [0-9]+)? ([eE] [+-]? [0-9]+)?`.
     fn number(&mut self) -> Result<Value<'gc>, Error> {
         let start = self.pos;
         let digits = |p: &mut Self| {
@@ -237,7 +240,8 @@ impl<'s, 'gc> Parser<'s, '_, 'gc, '_> {
     }
 }
 
-/// `JSON.stringify` 的状态：缩进、键白名单、替换函数、正在序列化的对象（查环）。
+/// State of `JSON.stringify`: indentation, key allowlist, replacer function, objects being serialized (cycle
+/// detection).
 struct Writer<'gc> {
     gap: String,
     indent: String,
@@ -247,11 +251,12 @@ struct Writer<'gc> {
 }
 
 impl<'gc> Writer<'gc> {
-    /// 带引号与转义的字符串。
+    /// A quoted and escaped string.
     fn quote(out: &mut String, s: &str) {
         out.reserve(s.len() + 2);
         out.push('"');
-        // 不用转义的整段照抄（要转义的只有 ASCII：UTF-8 多字节序列里不会出现）
+        // Copy runs that need no escaping verbatim (only ASCII needs escaping, and it never occurs inside UTF-8
+        // multi-byte sequences)
         let mut from = 0;
         for (i, &b) in s.as_bytes().iter().enumerate() {
             let esc = match b {
@@ -267,7 +272,7 @@ impl<'gc> Writer<'gc> {
             };
             out.push_str(&s[from..i]);
             if esc.is_empty() {
-                // 写进 String 不会失败
+                // Writing into a String can't fail
                 let _ = write!(out, "\\u{:04x}", b);
             } else {
                 out.push_str(esc);
@@ -278,7 +283,8 @@ impl<'gc> Writer<'gc> {
         out.push('"');
     }
 
-    /// 自有可枚举字符串键（数组下标在前）。键不建成 JS 字符串（短的内联），要传给 `toJSON` / 替换函数时才建。
+    /// Own enumerable string keys (array indices first). Keys aren't created as JS strings (short ones are inline);
+    /// they're created only when passed to `toJSON` / the replacer.
     fn keys(o: JsObject<'gc>) -> Vec<SmallStr> {
         let d = o.borrow();
         let mut keys = Vec::new();
@@ -289,7 +295,8 @@ impl<'gc> Writer<'gc> {
         keys
     }
 
-    /// SerializeJSONProperty：`toJSON`、替换函数、按类型输出；`undefined` / 函数 / Symbol 给 `None`（省掉）。
+    /// SerializeJSONProperty: `toJSON`, the replacer, output by type; `undefined` / functions / Symbols give `None`
+    /// (omitted).
     fn property(&mut self, a: &mut Agent<'gc, '_>, holder: Value<'gc>, key: &SmallStr, out: &mut String) -> Result<bool, Error> {
         let mut v = a.get_named(holder, key)?;
         if matches!(v, Value::Object(_) | Value::BigInt(_)) {
@@ -324,7 +331,7 @@ impl<'gc> Writer<'gc> {
         Ok(true)
     }
 
-    /// 一层开头 / 每一项之前的换行与缩进（没有 gap 就什么都不加）。
+    /// Newline and indentation at the start of a level / before each item (nothing if there is no gap).
     fn newline(&self, out: &mut String) {
         if !self.gap.is_empty() {
             out.push('\n');
@@ -366,10 +373,11 @@ impl<'gc> Writer<'gc> {
         Ok(())
     }
 
-    /// 不带替换函数、不缩进、稠密且元素都是原始值的数组：原始值不查 `toJSON`，逐个取元素观察不到，
-    /// 各块在线程池上并行写成 JSON 再连起来。不满足给 `false`（什么都没写）。
+    /// Array with no replacer, no indentation, dense, all elements primitive: primitives don't look up `toJSON` and
+    /// reading each element is unobservable, so chunks are written as JSON in parallel on the thread pool, then
+    /// concatenated. Returns `false` otherwise (nothing written).
     fn plain_array(&self, a: &Agent<'gc, '_>, o: JsObject<'gc>, out: &mut String) -> bool {
-        /// 一个元素的样子（不带 GC 指针，能交给别的线程）
+        /// Shape of one element (no GC pointers, so it can be handed to other threads)
         #[derive(Clone, Copy)]
         enum Part<'s> {
             Number(f64),
@@ -447,11 +455,11 @@ impl<'gc> Writer<'gc> {
     }
 }
 
-/// `JSON`。
+/// `JSON`.
 struct Json;
 
 impl Json {
-    /// `JSON.parse(text, reviver)`。
+    /// `JSON.parse(text, reviver)`.
     fn parse<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let text = a.to_string(args.at(0))?;
         let mut p = Parser { a, text: &text, pos: 0 };
@@ -469,7 +477,8 @@ impl Json {
         Self::revive(a, root.into(), key, reviver)
     }
 
-    /// InternalizeJSONProperty：先自底向上处理子项，再调 `reviver.call(holder, key, value)`；给 `undefined` 就删掉。
+    /// InternalizeJSONProperty: process children bottom-up first, then call `reviver.call(holder, key, value)`;
+    /// `undefined` deletes the property.
     fn revive<'gc>(a: &mut Agent<'gc, '_>, holder: Value<'gc>, key: JsString<'gc>, reviver: Value<'gc>) -> Result<Value<'gc>, Error> {
         let v = a.get_named(holder, &key)?;
         if let Value::Object(o) = v {
@@ -487,7 +496,7 @@ impl Json {
         a.call(reviver, holder, &[key.into(), v])
     }
 
-    /// `JSON.stringify(value, replacer, space)`。
+    /// `JSON.stringify(value, replacer, space)`.
     fn stringify<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let (replacer, allow) = match args.at(1) {
             f if a.is_callable(f) => (Some(f), None),
@@ -512,7 +521,7 @@ impl Json {
         };
         let gap = match args.at(2) {
             Value::Number(n) => {
-                #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "已夹到 [0, MAX_GAP]")]
+                #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "clamped to [0, MAX_GAP]")]
                 let n = libm::trunc(n.clamp(0.0, 10.0)) as usize;
                 " ".repeat(n.min(MAX_GAP))
             }

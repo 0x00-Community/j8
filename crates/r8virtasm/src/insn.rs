@@ -4,18 +4,19 @@ use core::fmt;
 
 use r8framework::{BinaryOp, CompareOp, UnaryOp};
 
-/// 寄存器：函数帧里的槽位。调用约定：`r0` 是 `this`，`r1` 是被调的函数本身，形参从 `r2` 起。
+/// Register: a slot in the function frame. Calling convention: `r0` is `this`, `r1` is the callee itself,
+/// parameters start at `r2`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Reg(pub u16);
 
 impl Reg {
     pub const THIS: Reg = Reg(0);
     pub const CALLEE: Reg = Reg(1);
-    /// 第一个形参
+    /// The first parameter
     pub const PARAMS: u16 = 2;
 }
 
-/// 跳转目标：指令下标。
+/// Jump target: an instruction index.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Label(pub u32);
 
@@ -33,11 +34,11 @@ impl PartialEq for Constant {
     }
 }
 
-/// 常量池下标。
+/// Constant pool index.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Const(pub u32);
 
-/// 代码的模式：非严格 / 严格。
+/// Code mode: sloppy / strict.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Mode {
     #[default]
@@ -57,48 +58,52 @@ impl From<Mode> for bool {
     }
 }
 
-/// 直接 eval 处看得见的一个绑定：名字、在那层环境里的槽位、是不是 `const`、要不要查死区。
+/// A binding visible at a direct eval: name, slot in its environment, whether it is `const`, whether it needs a
+/// TDZ check.
 #[derive(Clone, Debug)]
 pub struct EvalName {
     pub name: Box<str>,
     pub slot: u16,
     pub constant: bool,
     pub tdz: bool,
-    /// 具名函数表达式自己的名字：赋值非严格悄悄丢掉、严格抛 TypeError
+    /// The own name of a named function expression: assignment is silently ignored in sloppy mode, throws TypeError
+    /// in strict mode
     pub self_name: bool,
 }
 
-/// 直接 eval 处的作用域表：由内向外，一层对应环境链上的一个环境。
+/// The scope table at a direct eval: innermost first, one level per environment on the environment chain.
 #[derive(Clone, Debug, Default)]
 pub struct EvalScope(pub Vec<Vec<EvalName>>);
 
-/// 一个函数：名字、形参数、寄存器数、指令、常量池。
+/// A function: name, parameter count, register count, instructions, constant pool.
 #[derive(Clone, Debug, Default)]
 pub struct Function {
     pub name: Box<str>,
     pub kind: FunctionKind,
-    /// 进帧时把全部实参留在帧里（缺省派生构造器、剩余参数用）
+    /// Keep all arguments in the frame on entry (for default derived constructors and rest parameters)
     pub keeps_args: bool,
-    /// 生成器函数：调用时不跑，返回生成器
+    /// Generator function: a call does not run it, it returns a generator
     pub generator: bool,
-    /// async 函数：调用时跑到第一个 `await`，返回 Promise
+    /// async function: a call runs it up to the first `await` and returns a Promise
     pub asynchronous: bool,
-    /// 严格模式：`this` 不换成全局对象、失败的赋值 / 删除抛错
+    /// Strict mode: `this` is not replaced by the global object, failed assignments / deletes throw
     pub mode: Mode,
     pub params: u16,
-    /// 函数的 `length`：第一个带默认值的形参（或剩余参数）之前的形参个数
+    /// The function's `length`: the number of parameters before the first one with a default value (or the rest
+    /// parameter)
     pub length: u16,
     pub regs: u16,
     pub insns: Vec<Insn>,
     pub consts: Vec<Constant>,
-    /// 函数里各处直接 eval 的作用域表（`CallEval` 的 `scope` 是下标）
+    /// Scope tables of every direct eval in the function (the `scope` of `CallEval` indexes this)
     pub scopes: Vec<EvalScope>,
-    /// 映射的 arguments：第 i 个实参对应的形参环境槽位（非严格、简单形参才有）
+    /// Mapped arguments: the parameter environment slot for the i-th argument (only for sloppy mode with simple
+    /// parameters)
     pub mapped_params: Vec<Option<u16>>,
 }
 
 impl Function {
-    /// 常量池里的字符串（属性名 / 全局名）。
+    /// A string in the constant pool (a property name / global name).
     pub fn name_at(&self, k: Const) -> &str {
         match &self.consts[k.0 as usize] {
             Constant::String(s) => s,
@@ -107,14 +112,14 @@ impl Function {
     }
 }
 
-/// 一个脚本编出的全部函数；第 0 个是脚本本身。
+/// All functions compiled from one script; function 0 is the script itself.
 #[derive(Clone, Debug, Default)]
 pub struct Module {
     pub functions: Vec<Function>,
 }
 
 impl Module {
-    /// 脚本本身在模块里的下标
+    /// Index of the script itself in the module
     pub const MAIN: u32 = 0;
 }
 

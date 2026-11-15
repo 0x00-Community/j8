@@ -1,4 +1,4 @@
-// 类与方法调用
+// Classes and method calls
 class Vec {
   constructor(x, y) { this.x = x; this.y = y; }
   add(o) { return new Vec(this.x + o.x, this.y + o.y); }

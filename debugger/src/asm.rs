@@ -5,22 +5,22 @@ use clap::Args;
 use r8framework::Source;
 use r8virtasm::Module;
 
-/// 输入（文件 / 标准输入 / 命令行）与输出（文件 / 标准输出）。
+/// Input (file / stdin / command line) and output (file / stdout).
 #[derive(Args)]
 pub struct Io {
-    /// 输入文件；`-` 读标准输入
+    /// Input file; `-` reads stdin
     #[arg(required_unless_present = "eval", conflicts_with = "eval")]
     file: Option<PathBuf>,
-    /// 直接给输入文本
+    /// Input text given directly
     #[arg(short, long)]
     eval: Option<String>,
-    /// 写到文件，缺省标准输出
+    /// Write to a file; defaults to stdout
     #[arg(short, long)]
     output: Option<PathBuf>,
 }
 
 impl Io {
-    /// 输入文本与报错用的文件名
+    /// Input text and the file name used in errors
     fn input(&self) -> Result<(String, String), String> {
         match (&self.eval, &self.file) {
             (Some(code), _) => Ok((code.clone(), "<eval>".into())),
@@ -45,7 +45,7 @@ impl Io {
     }
 }
 
-/// `r8dbg disasm`：JS 编成字节码，打印反汇编清单。
+/// `r8dbg disasm`: compile JS to bytecode and print the disassembly listing.
 #[derive(Args)]
 pub struct Disasm {
     #[command(flatten)]
@@ -60,7 +60,7 @@ impl Disasm {
     }
 }
 
-/// `r8dbg asm`：汇编反汇编清单（`r8dbg disasm` 的输出），打印规范化后的清单。
+/// `r8dbg asm`: assemble a disassembly listing (the output of `r8dbg disasm`) and print the normalized listing.
 #[derive(Args)]
 pub struct Asm {
     #[command(flatten)]

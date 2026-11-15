@@ -4,17 +4,17 @@ use r8builtins::Builtins;
 use r8executor::Executor;
 use r8framework::{ContextRoot, Error, Global, Isolate, Source};
 
-/// 一段源码跑完的结果，都已按 ToString 转成文本。
+/// The result of running a piece of source, already converted to text via ToString.
 pub enum Outcome {
     Value(String),
-    /// 没接住的异常
+    /// Uncaught exception
     Thrown(String),
-    /// 编不了（语法错 / 不支持的写法）
+    /// Can't compile (syntax error / unsupported construct)
     Failed(String),
 }
 
 impl Outcome {
-    /// 失败的结果打到标准错误，给出退出码。
+    /// Print a failed result to stderr and return the exit code.
     pub fn report(&self) -> ExitCode {
         match self {
             Outcome::Value(_) => return ExitCode::SUCCESS,
@@ -25,7 +25,8 @@ impl Outcome {
     }
 }
 
-/// 一个执行环境：多段源码共用同一个全局对象（REPL 一行一段），执行器与环境都活过多次进入。
+/// An execution environment: multiple pieces of source share one global object (one per REPL line); the executor
+/// and the environment both outlive multiple entries.
 pub struct Session<'s, 'p> {
     isolate: &'s mut Isolate<'p>,
     executor: Executor,
@@ -33,7 +34,7 @@ pub struct Session<'s, 'p> {
 }
 
 impl<'s, 'p> Session<'s, 'p> {
-    /// 新环境：内建对象、node 式全局（`process` / `__dune`）、序言（`require`）。
+    /// New environment: built-in objects, node-style globals (`process` / `__dune`), prelude (`require`).
     pub fn new(isolate: &'s mut Isolate<'p>, script: &str, args: &[String], jit: bool) -> Self {
         let executor = if jit { Executor::default().with_tier(std::rc::Rc::new(r8jit::Jit::default())) } else { Executor::default() };
         let cx = isolate.enter(|scope| scope.persist(scope.context(&Builtins)));
@@ -49,7 +50,7 @@ impl<'s, 'p> Session<'s, 'p> {
         s
     }
 
-    /// 字符串字面量（JSON 写法）。
+    /// String literal (JSON syntax).
     pub fn quote(s: &str) -> String {
         let mut out = String::from("\"");
         for c in s.chars() {
@@ -64,7 +65,7 @@ impl<'s, 'p> Session<'s, 'p> {
         out
     }
 
-    /// 持久句柄里的值 ⇒ 文本（ToString；它自己再抛就给个占位）
+    /// Value in a persistent handle ⇒ text (ToString; a placeholder if that throws in turn)
     fn text(&mut self, g: &Global) -> String {
         let (executor, cx) = (&self.executor, &self.cx);
         self.isolate.enter(|scope| {

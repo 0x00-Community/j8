@@ -5,11 +5,12 @@ use r8framework::{Agent, CodeKind, Error, Native, ObjectKind, Property, Slot, Va
 
 use crate::{Args, Installer};
 
-/// `Function` 一族构造器与全局 `eval`（动态代码经 [`Agent::eval_code`]）。
+/// The `Function` family of constructors and global `eval` (dynamic code goes through [`Agent::eval_code`]).
 struct Functions;
 
 impl Functions {
-    /// CreateDynamicFunction：形参与函数体拼成 `(前缀 anonymous(形参\n) {\n函数体\n})` 编译求值。
+    /// CreateDynamicFunction: join parameters and body into `(prefix anonymous(params\n) {\nbody\n})`, then compile and
+    /// evaluate it.
     fn dynamic<'gc>(a: &mut Agent<'gc, '_>, args: &[Value<'gc>], prefix: &str) -> Result<Value<'gc>, Error> {
         let (params, body) = match args.split_last() {
             Some((&body, params)) => (params, body),
@@ -23,7 +24,7 @@ impl Functions {
         let src = alloc::format!("({prefix} anonymous({}\n) {{\n{body}\n}})", params.join(","));
         let new_target = a.new_target;
         let f = a.eval_code(&src, CodeKind::Eval)?;
-        // 子类（`class F extends Function`）构造时原型取 new.target.prototype
+        // When constructing a subclass (`class F extends Function`), the prototype comes from new.target.prototype
         if let Value::Object(fo) = f
             && new_target != Value::Undefined
         {
@@ -50,7 +51,7 @@ impl Functions {
         Self::dynamic(a, args, "async function*")
     }
 
-    /// 全局 `eval`（间接）：不是字符串原样返回，是就当全局代码跑。
+    /// Global `eval` (indirect): non-strings are returned as is; strings run as global code.
     fn eval<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         match args.at(0) {
             Value::String(s) => {
@@ -66,7 +67,8 @@ impl<'gc> Installer<'_, 'gc> {
     pub(crate) fn functions(&mut self) {
         let r = self.realm;
         let ctor = self.constructor("Function", Functions::function, r.function_proto, 1);
-        // 生成器 / async 函数构造器不是全局的：经各自原型的 `constructor` 取到
+        // Generator / async function constructors aren't globals: they're reached via the `constructor` of their
+        // prototypes
         let kinds: [(&str, r8framework::NativeFn, r8framework::JsObject<'gc>, Option<r8framework::JsObject<'gc>>); 3] = [
             ("GeneratorFunction", Functions::generator_function, r.generator_function_proto, Some(r.generator_proto)),
             ("AsyncFunction", Functions::async_function, r.async_function_proto, None),
@@ -86,7 +88,7 @@ impl<'gc> Installer<'_, 'gc> {
                 i.borrow_mut(self.mc).define("constructor", Property { writable: false, ..Property::hidden(proto.into()) });
             }
         }
-        // %eval% 是 Realm 里预留的那个对象（执行器靠它认出直接 eval）
+        // %eval% is the reserved object in the Realm (the executor uses it to recognize direct eval)
         r.eval.borrow_mut(self.mc).kind = ObjectKind::Native(Native::function(Functions::eval));
         r.name_function(self.mc, r.eval, "eval", Some(1));
         r.global.borrow_mut(self.mc).define("eval", Property::hidden(r.eval.into()));

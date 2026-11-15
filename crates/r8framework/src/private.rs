@@ -1,4 +1,5 @@
-//! 类的私有成员（`#x`）：只在对象自己身上找，不走原型链；没有就抛 TypeError。
+//! Private class members (`#x`): looked up only on the object itself, not along the prototype chain; a TypeError is
+//! thrown if absent.
 use alloc::boxed::Box;
 
 use r8gc::Gc;
@@ -6,7 +7,7 @@ use r8gc::Gc;
 use crate::{Agent, Error, ErrorKind, JsObject, JsSymbol, Property, Slot, SymbolData, Value};
 
 impl<'gc> Agent<'gc, '_> {
-    /// 一个新的私有名（描述是 `#x`）。
+    /// A new private name (its description is `#x`).
     pub fn private_name(&self, description: &str) -> JsSymbol<'gc> {
         Gc::new(self.mc, SymbolData { description: Some(Box::from(description)) })
     }
@@ -26,7 +27,7 @@ impl<'gc> Agent<'gc, '_> {
         o.borrow().privates.iter().find_map(|&(k, p)| Gc::ptr_eq(k, key).then_some(p))
     }
 
-    /// `obj.#x`。
+    /// `obj.#x`.
     pub fn private_get(&mut self, obj: Value<'gc>, key: JsSymbol<'gc>) -> Result<Value<'gc>, Error> {
         let o = self.private_holder(obj, key, "read")?;
         match Self::private_lookup(o, key).map(|p| p.slot) {
@@ -37,7 +38,7 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    /// `obj.#x = v`：私有方法不能赋值，访问器没有 setter 抛错。
+    /// `obj.#x = v`: private methods can't be assigned, and an accessor without a setter throws.
     pub fn private_set(&mut self, obj: Value<'gc>, key: JsSymbol<'gc>, value: Value<'gc>) -> Result<(), Error> {
         let o = self.private_holder(obj, key, "write")?;
         match Self::private_lookup(o, key) {
@@ -55,7 +56,8 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    /// 字段初始化 / 装方法：已经有了抛 TypeError；访问器的另一半已在就合并。
+    /// Field initialization / method installation: throws a TypeError if already present; merges with the other half of
+    /// an existing accessor.
     pub fn private_define(&mut self, obj: Value<'gc>, key: JsSymbol<'gc>, prop: Property<'gc>) -> Result<(), Error> {
         let o = self.private_holder(obj, key, "define")?;
         let existing = Self::private_lookup(o, key);
@@ -77,7 +79,7 @@ impl<'gc> Agent<'gc, '_> {
         Ok(())
     }
 
-    /// `#x in obj`：`obj` 不是对象抛 TypeError。
+    /// `#x in obj`: throws a TypeError if `obj` is not an object.
     pub fn private_has(&mut self, obj: Value<'gc>, key: JsSymbol<'gc>) -> Result<bool, Error> {
         match obj {
             Value::Object(o) => Ok(Self::private_lookup(o, key).is_some()),

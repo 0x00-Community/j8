@@ -1,4 +1,5 @@
-//! `#[r8::class]`：写在 `impl` 块上，方法导出成 JS 类的成员（构造器、原型方法、访问器、静态方法），生成 `r8::Class` 实现。
+//! `#[r8::class]`: placed on an `impl` block; methods are exported as members of a JS class (constructor,
+//! prototype methods, accessors, static methods). Generates an `r8::Class` implementation.
 use proc_macro2::TokenStream;
 use quote::quote;
 use syn::ItemImpl;

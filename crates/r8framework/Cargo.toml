@@ -1,6 +1,6 @@
 [package]
 name = "r8framework"
-description = "r8 核心框架层：trait 与通用结构体 / 枚举"
+description = "r8 core framework layer: traits and common structs / enums"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

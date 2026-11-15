@@ -2,19 +2,19 @@ use alloc::collections::BTreeMap;
 
 use r8gc::Collect;
 
-/// 一个 JS 函数在 isolate 里的编号（各执行层共用）。
+/// The id of a JS function within an isolate (shared by all execution layers).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Collect)]
 #[collect(require_static)]
 pub struct FuncId(pub u32);
 
-/// 一个函数的热度。
+/// How hot a function is.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Counter {
     pub calls: u32,
     pub backedges: u32,
 }
 
-/// 调用 / 回边计数；关着时什么都不记。
+/// Call / back-edge counters; records nothing when off.
 #[derive(Debug, Default)]
 pub struct Profiler {
     enabled: bool,
@@ -26,7 +26,7 @@ impl Profiler {
         self.enabled = on;
     }
 
-    /// 进帧计数（没开就只是一次判断：解释器每次调用都走这里）
+    /// Count a frame entry (when off it is just one check: the interpreter goes through here on every call)
     #[inline]
     pub fn enter(&mut self, f: FuncId) {
         if self.enabled {
@@ -50,7 +50,7 @@ impl Profiler {
         self.counters.get(&f).copied().unwrap_or_default()
     }
 
-    /// 清掉一个函数的计数（升层后重新计）。
+    /// Clear a function's counters (counting restarts after tier-up).
     pub fn reset(&mut self, f: FuncId) {
         self.counters.remove(&f);
     }

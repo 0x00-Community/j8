@@ -3,7 +3,7 @@ use alloc::string::String;
 
 use crate::{ContextRoot, Error, Global, Isolate};
 
-/// 一段脚本：源码与文件名（只用于报错）。
+/// A script: source and file name (used only for error reporting).
 #[derive(Clone, Copy, Debug)]
 pub struct Source<'s> {
     pub text: &'s str,
@@ -11,7 +11,7 @@ pub struct Source<'s> {
 }
 
 impl Source<'_> {
-    /// 字节偏移 ⇒ `文件:行:列`。
+    /// Byte offset ⇒ `file:line:column`.
     pub fn at(&self, offset: u32) -> String {
         let before = &self.text[..(offset as usize).min(self.text.len())];
         let line = before.matches('\n').count() + 1;
@@ -19,19 +19,19 @@ impl Source<'_> {
         format!("{}:{line}:{col}", self.file)
     }
 
-    /// 不支持 `offset` 处的写法。
+    /// The syntax at `offset` is not supported.
     pub fn unsupported(&self, offset: u32, what: &str) -> Error {
         Error::Unsupported(format!("{}: {what}", self.at(offset)))
     }
 }
 
-/// 执行引擎的统一入口。
+/// The unified entry point of an execution engine.
 pub trait Engine {
-    /// 在执行环境 `cx` 里跑完 `src`（含排空微任务），返回最后一条表达式语句的值。
-    /// 引擎自己分片进入 isolate，片与片之间回收。
+    /// Run `src` to completion in execution context `cx` (including draining microtasks), returning the value of the
+    /// last expression statement. The engine enters the isolate in slices itself, collecting between slices.
     fn eval(&mut self, isolate: &mut Isolate<'_>, cx: &ContextRoot, src: &Source<'_>) -> Result<Global, Error>;
 
-    /// 把 `src` 当模块加载、链接、求值（含它导入的模块，排空微任务）。
+    /// Load, link, and evaluate `src` as a module (including the modules it imports, and draining microtasks).
     fn eval_module(&mut self, isolate: &mut Isolate<'_>, cx: &ContextRoot, src: &Source<'_>) -> Result<Global, Error> {
         let _ = (isolate, cx);
         Err(src.unsupported(0, "modules"))

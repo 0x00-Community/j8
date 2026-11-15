@@ -2,13 +2,13 @@ use r8framework::{Agent, Error, Value};
 
 use crate::{Args, Installer};
 
-/// `Math`。
+/// `Math`.
 struct Math;
 
-/// 一元数学函数。
+/// Unary math functions.
 type Unary = fn(f64) -> f64;
 
-/// 一元数学函数表：名字 ⇒ 实现。
+/// Table of unary math functions: name ⇒ implementation.
 const UNARY: [(&str, Unary); 19] = [
     ("abs", libm::fabs),
     ("floor", libm::floor),
@@ -36,12 +36,13 @@ impl Math {
         if x.is_nan() || x == 0.0 { x } else { x.signum() }
     }
 
-    /// 取第一个实参的数，按表里的名字找实现（宿主函数是函数指针，带不了状态，只好每个名字一个入口）。
+    /// Take the first argument as a number and look up the implementation by name in the table (host functions are
+    /// function pointers that can't carry state, so each name needs its own entry point).
     fn unary<'gc, const N: usize>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         Ok((UNARY[N].1)(a.to_number(args.at(0))?).into())
     }
 
-    /// `Math.round`：就近，正好一半往 +∞。
+    /// `Math.round`: round to nearest, exact halves toward +∞.
     fn round<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let x = a.to_number(args.at(0))?;
         let f = libm::floor(x);
@@ -57,7 +58,7 @@ impl Math {
         Ok(libm::atan2(a.to_number(args.at(0))?, a.to_number(args.at(1))?).into())
     }
 
-    /// `max` / `min`：有 NaN 就是 NaN，`+0` 比 `-0` 大。
+    /// `max` / `min`: NaN if any argument is NaN; `+0` is greater than `-0`.
     fn extreme<'gc>(a: &mut Agent<'gc, '_>, args: &[Value<'gc>], max: bool) -> Result<Value<'gc>, Error> {
         let mut acc = if max { f64::NEG_INFINITY } else { f64::INFINITY };
         for &v in args {

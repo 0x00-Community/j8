@@ -1,6 +1,6 @@
 [package]
 name = "r8platform"
-description = "r8 平台层：Platform trait 的标准库实现"
+description = "r8 platform layer: the standard-library implementation of the Platform trait"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

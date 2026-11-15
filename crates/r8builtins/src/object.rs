@@ -5,16 +5,17 @@ use r8framework::{Agent, Bound, Descriptor, Error, ErrorKind, Integrity, IterKin
 
 use crate::{Args, Installer};
 
-/// `Object` / `Function` / `Boolean` 与它们的原型方法。
+/// `Object` / `Function` / `Boolean` and their prototype methods.
 pub(crate) struct Objects;
 
 impl Objects {
-    /// `new.target` 是不是 `Object` 自己。
+    /// Whether `new.target` is `Object` itself.
     fn is_object_ctor(v: Value<'_>) -> bool {
         matches!(v, Value::Object(f) if matches!(f.borrow().kind, ObjectKind::Native(n) if core::ptr::fn_addr_eq(n.f, Self::object as r8framework::NativeFn)))
     }
 
-    /// `Object(v)`：子类构造时按 `new.target` 建；否则对象原样返回、`undefined` / `null` 给新空对象、原始值包装。
+    /// `Object(v)`: when constructing a subclass, create from `new.target`; otherwise objects are returned as is,
+    /// `undefined` / `null` give a new empty object, and primitives are wrapped.
     fn object<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         if a.new_target != Value::Undefined && !Self::is_object_ctor(a.new_target) {
             return Ok(a.create_from_ctor(a.realm.object_proto, ObjectKind::Ordinary)?.into());
@@ -25,7 +26,7 @@ impl Objects {
         })
     }
 
-    /// 要求是对象（`Object.defineProperty` 等）。
+    /// Require an object (`Object.defineProperty` etc.).
     fn require_object<'gc>(a: &mut Agent<'gc, '_>, v: Value<'gc>, method: &str) -> Result<JsObject<'gc>, Error> {
         match v {
             Value::Object(o) => Ok(o),
@@ -33,7 +34,7 @@ impl Objects {
         }
     }
 
-    /// EnumerableOwnProperties 的三种。
+    /// The three kinds of EnumerableOwnProperties.
     fn enumerable_own<'gc>(a: &mut Agent<'gc, '_>, v: Value<'gc>, kind: IterKind) -> Result<Value<'gc>, Error> {
         let o = a.to_object(v)?;
         let mut out = Vec::new();
@@ -66,7 +67,7 @@ impl Objects {
         Self::enumerable_own(a, args.at(0), IterKind::Entries)
     }
 
-    /// `Object.assign(target, ...sources)`。
+    /// `Object.assign(target, ...sources)`.
     fn assign<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let to = a.to_object(args.at(0))?;
         for &src in args.iter().skip(1).filter(|v| !v.is_nullish()) {
@@ -90,7 +91,7 @@ impl Objects {
         Ok(a.get_prototype_of(o)?.map_or(Value::Null, Value::Object))
     }
 
-    /// 原型实参：对象或 `null`。
+    /// Prototype argument: an object or `null`.
     fn proto_arg<'gc>(a: &mut Agent<'gc, '_>, v: Value<'gc>) -> Result<Option<JsObject<'gc>>, Error> {
         match v {
             Value::Object(o) => Ok(Some(o)),
@@ -115,7 +116,7 @@ impl Objects {
         Ok(target)
     }
 
-    /// ObjectDefineProperties。
+    /// ObjectDefineProperties.
     fn define_properties_on<'gc>(a: &mut Agent<'gc, '_>, o: JsObject<'gc>, props: Value<'gc>) -> Result<(), Error> {
         let props = a.to_object(props)?;
         let mut descs = Vec::new();
@@ -174,7 +175,7 @@ impl Objects {
         Ok(out.into())
     }
 
-    /// GetOwnPropertyKeys：只要字符串键 / 只要 Symbol 键。
+    /// GetOwnPropertyKeys: string keys only / Symbol keys only.
     fn own_keys_of<'gc>(a: &mut Agent<'gc, '_>, v: Value<'gc>, symbols: bool) -> Result<Value<'gc>, Error> {
         let o = a.to_object(v)?;
         let keys = a.own_property_keys(o)?.into_iter().filter(|k| matches!(k, PropertyKey::Symbol(_)) == symbols).map(Value::from).collect();
@@ -249,7 +250,7 @@ impl Objects {
         Ok(a.has_own_property(o, key.key())?.into())
     }
 
-    /// `Object.fromEntries(iterable)`。
+    /// `Object.fromEntries(iterable)`.
     fn from_entries<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let iterable = args.at(0);
         if iterable.is_nullish() {
@@ -276,7 +277,7 @@ impl Objects {
         Ok(o.into())
     }
 
-    /// `Object.groupBy(items, callback)`。
+    /// `Object.groupBy(items, callback)`.
     fn group_by<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let groups = Self::group(a, args.at(0), args.at(1), true)?;
         let o = ObjectData::default().alloc(a.mc);
@@ -288,7 +289,8 @@ impl Objects {
         Ok(o.into())
     }
 
-    /// GroupBy：键按出现顺序分组（`property` 时键先 ToPropertyKey，否则 `-0` 规整成 `+0`）。
+    /// GroupBy: group by key in order of appearance (with `property`, keys go through ToPropertyKey first; otherwise
+    /// `-0` is normalized to `+0`).
     pub(crate) fn group<'gc>(a: &mut Agent<'gc, '_>, items: Value<'gc>, callback: Value<'gc>, property: bool) -> Result<Vec<(Value<'gc>, Vec<Value<'gc>>)>, Error> {
         if items.is_nullish() {
             return Err(a.throw(ErrorKind::Type, "groupBy called on null or undefined"));
@@ -406,7 +408,7 @@ impl Objects {
         Ok(Value::Undefined)
     }
 
-    /// `__defineGetter__` / `__defineSetter__`（annexB）。
+    /// `__defineGetter__` / `__defineSetter__` (annexB).
     fn define_half<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>], setter: bool) -> Result<Value<'gc>, Error> {
         let o = a.to_object(this)?;
         let f = match args.at(1) {
@@ -428,7 +430,7 @@ impl Objects {
         Self::define_half(a, this, args, true)
     }
 
-    /// `__lookupGetter__` / `__lookupSetter__`（annexB）。
+    /// `__lookupGetter__` / `__lookupSetter__` (annexB).
     fn lookup_half<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>], setter: bool) -> Result<Value<'gc>, Error> {
         let o = a.to_object(this)?;
         let key = a.to_property_key(args.at(0))?;
@@ -457,7 +459,7 @@ impl Objects {
         Ok(a.to_object(this)?.into())
     }
 
-    /// `f.call(this, ...args)`。
+    /// `f.call(this, ...args)`.
     fn call<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         if !a.is_callable(this) {
             return Err(a.throw(ErrorKind::Type, "Function.prototype.call called on a non-function"));
@@ -465,7 +467,7 @@ impl Objects {
         a.call(this, args.at(0), args.get(1..).unwrap_or(&[]))
     }
 
-    /// `f.apply(this, arrayLike)`。
+    /// `f.apply(this, arrayLike)`.
     fn apply<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         if !a.is_callable(this) {
             return Err(a.throw(ErrorKind::Type, "Function.prototype.apply was called on a non-function"));
@@ -477,7 +479,8 @@ impl Objects {
         a.call(this, args.at(0), &list)
     }
 
-    /// `f.bind(this, ...args)`：`length` = max(0, 目标的 length − 预先绑定的个数)，`name` = "bound " + 目标的 name。
+    /// `f.bind(this, ...args)`: `length` = max(0, target's length − number of bound arguments), `name` = "bound " +
+    /// target's name.
     fn bind<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let Value::Object(target) = this else {
             return Err(a.throw(ErrorKind::Type, "Bind must be called on a function"));
@@ -495,7 +498,7 @@ impl Objects {
         {
             {
                 let n = if n == f64::INFINITY { n } else if n == f64::NEG_INFINITY { 0.0 } else { a.to_integer_or_infinity(n.into())? };
-                #[expect(clippy::cast_precision_loss, reason = "实参个数远小于 2^53")]
+                #[expect(clippy::cast_precision_loss, reason = "argument count is far below 2^53")]
                 let k = pre.len() as f64;
                 length = (n - k).max(0.0);
             }
@@ -517,7 +520,8 @@ impl Objects {
         if !a.is_callable(this) {
             return Err(a.throw(ErrorKind::Type, "Function.prototype.toString requires that 'this' be a Function"));
         }
-        // NativeFunction 语法里名字只能是属性名（可带 get / set）：私有名、`bound f` 这类就不写
+        // In NativeFunction syntax the name can only be a property name (optionally with get / set): private names,
+        // `bound f` and the like are left out
         let name = match this {
             Value::Object(o) => match o.borrow().get_own("name").and_then(|p| p.value()) {
                 Some(Value::String(s)) if Self::native_name(&s) => alloc::string::String::from(&**s),
@@ -528,19 +532,19 @@ impl Objects {
         Ok(a.string(&alloc::format!("function {name}() {{ [native code] }}")).into())
     }
 
-    /// 能原样写进 `function 名字() { [native code] }` 的名字。
+    /// Names that can be written verbatim into `function name() { [native code] }`.
     fn native_name(s: &str) -> bool {
         let bare = s.strip_prefix("get ").or_else(|| s.strip_prefix("set ")).unwrap_or(s);
         let ident = bare.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_' || c == '$') && bare.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '$');
         ident || (bare.starts_with('[') && bare.ends_with(']'))
     }
 
-    /// `Function.prototype` 本身：调用给 `undefined`。
+    /// `Function.prototype` itself: calling it gives `undefined`.
     fn noop<'gc>(_: &mut Agent<'gc, '_>, _: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         Ok(Value::Undefined)
     }
 
-    /// `Function.prototype[Symbol.hasInstance](v)`：OrdinaryHasInstance。
+    /// `Function.prototype[Symbol.hasInstance](v)`: OrdinaryHasInstance.
     fn has_instance<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         Ok(a.ordinary_has_instance(this, args.at(0))?.into())
     }
@@ -550,7 +554,7 @@ impl Objects {
         a.wrap_primitive(b.into(), a.realm.boolean_proto)
     }
 
-    /// thisBooleanValue：布尔或 Boolean 包装对象，别的抛 TypeError。
+    /// thisBooleanValue: a boolean or Boolean wrapper object; anything else throws TypeError.
     fn this_boolean<'gc>(a: &Agent<'gc, '_>, this: Value<'gc>, method: &str) -> Result<bool, Error> {
         match this.unwrapped() {
             Value::Bool(b) => Ok(b),
@@ -615,7 +619,7 @@ impl Installer<'_, '_> {
         for (name, f, n) in methods {
             self.method(proto, name, f, n);
         }
-        // `__proto__` 是访问器
+        // `__proto__` is an accessor
         let get = self.realm.named_native(self.mc, Objects::proto_getter, "get __proto__", 0);
         let set = self.realm.named_native(self.mc, Objects::proto_setter, "set __proto__", 1);
         proto.borrow_mut(self.mc).define("__proto__", Property { slot: Slot::Accessor { get: Some(get), set: Some(set) }, enumerable: false, writable: false, configurable: true });
@@ -627,7 +631,8 @@ impl Installer<'_, '_> {
         self.realm.name_function(self.mc, proto, "", Some(0));
         self.method(proto, "call", Objects::call, 1);
         self.method(proto, "apply", Objects::apply, 2);
-        // 执行层直接展开 call / apply（宿主实现留着，目标不可调等情形还走它）
+        // The execution layer expands call / apply inline (the host implementation stays for cases like a non-callable
+        // target)
         for (name, forward) in [("call", r8framework::Forward::Call), ("apply", r8framework::Forward::Apply)] {
             let f = proto.borrow().own(name);
             if let Some(Value::Object(f)) = f
@@ -641,7 +646,7 @@ impl Installer<'_, '_> {
         let has_instance = self.realm.named_native(self.mc, Objects::has_instance, "[Symbol.hasInstance]", 1);
         proto.borrow_mut(self.mc).define_symbol(self.realm.symbols.has_instance, Property { slot: Slot::Data(has_instance.into()), enumerable: false, writable: false, configurable: false });
         let b = self.realm.boolean_proto;
-        // Boolean.prototype 本身是包着 false 的 Boolean 对象
+        // Boolean.prototype itself is a Boolean object wrapping false
         b.borrow_mut(self.mc).kind = ObjectKind::Primitive(false.into());
         self.constructor("Boolean", Objects::boolean, b, 1);
         self.method(b, "toString", Objects::boolean_to_string, 0);

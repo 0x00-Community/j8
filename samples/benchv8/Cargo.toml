@@ -1,12 +1,12 @@
 [package]
 name = "benchv8"
-description = "同一组 JS 基准在 r8 与 V8（rusty_v8，带 JIT / --jitless）上的耗时对比"
+description = "Timing comparison of the same JS benchmarks on r8 and V8 (rusty_v8, with JIT / --jitless)"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
 publish = false
 
-# 依赖 rusty_v8（预编译静态库很大），不进根 workspace
+# Depends on rusty_v8 (the prebuilt static library is large), so it stays out of the root workspace
 [workspace]
 
 [dependencies]

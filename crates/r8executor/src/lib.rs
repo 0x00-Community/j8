@@ -1,8 +1,11 @@
-//! r8executor：r8virtasm 字节码执行器（`no_std`）。
+//! r8executor: the r8virtasm bytecode executor (`no_std`).
 //!
-//! 显式帧栈（不靠宿主递归），所有帧共用一个寄存器文件；被捕获的绑定在堆上的 [`Env`] 链里。
-//! 异常：每帧一个动态处理器栈（`PushHandler` / `PopHandler`），抛出时弹本帧处理器，没有就展开到调用者。
-//! 一个 `Executor` 只配一个 isolate：它装着已加载的函数，堆里的闭包按 [`FuncId`] 指回来。
+//! Explicit frame stack (no host recursion); all frames share one register file; captured bindings live in the
+//! heap-allocated [`Env`] chain.
+//! Exceptions: each frame has a dynamic handler stack (`PushHandler` / `PopHandler`); a throw pops this frame's
+//! handler, and if there is none, unwinds to the caller.
+//! An `Executor` serves only one isolate: it holds the loaded functions, and closures on the heap point back to them by
+//! [`FuncId`].
 #![no_std]
 extern crate alloc;
 
@@ -18,30 +21,34 @@ mod module;
 
 use r8framework::{Agent, Few, Closure, Coroutine, CoroutineState, Env, Error, ErrorKind, FuncId, Invoke, IterRecord, JsEnv, JsObject, ObjectData, ObjectKind, Property, Resume, Slot, Step, Suspended, Value};
 
-/// 调用深度上限（含宿主函数里重入的 JS），过了抛 RangeError
+/// Call depth limit (including JS re-entered from host functions); exceeding it throws RangeError
 const STACK_LIMIT: usize = 10_000;
 
-/// 一片最多走这么多步（进一个帧、往回跳一次各算一步：别的指令只往前走，步数之间的指令有限），片与片之间回收
+/// A slice runs at most this many steps (entering a frame and each backward jump count as one step: other instructions
+/// only move forward, so the instructions between steps are bounded); GC runs between slices
 #[cfg(feature = "compile")]
 const SLICE: usize = 10_000;
 
-/// 一个已加载的函数：本体加它所在模块的第一个函数编号（`CreateClosure` 的下标相对它）。
+/// A loaded function: the function itself plus the id of the first function of its module (`CreateClosure` indices are
+/// relative to it).
 struct Loaded {
     base: u32,
     func: Function,
-    /// 按常量下标：全局名上次在哪找到（读写全局名的内联缓存）
+    /// By constant index: where the global name was last found (inline cache for global name reads/writes)
     globals: Box<[Cell<GlobalSlot>]>,
-    /// JIT 层说过进帧时不用再问它
+    /// The JIT tier has said there is no need to ask it on frame entry
     no_tier_enter: Cell<bool>,
-    /// JIT 层说过循环往回跳时不用再问它
+    /// The JIT tier has said there is no need to ask it on loop back-jumps
     no_tier_loops: Cell<bool>,
-    /// 按指令下标：属性读写的内联缓存（只有 `get.named` / `set.named` / `define.named` 用）
+    /// By instruction index: inline caches for property reads/writes (used only by `get.named` / `set.named` /
+    /// `define.named`)
     ics: Box<[ic::Ic]>,
-    /// 普通函数（不是类构造器 / 生成器 / async）：调用时直接开帧
+    /// Ordinary function (not a class constructor / generator / async): opens a frame directly when called
     plain: bool,
-    /// 上次构造出的实例有几个属性：下次建 `this` 按它预留槽
+    /// How many properties the instance constructed last time had: reserve that many slots when building `this` next
+    /// time
     instance_size: Cell<u8>,
-    /// 构造时读 `new.target.prototype` 的内联缓存
+    /// Inline cache for reading `new.target.prototype` during construction
     prototype: ic::Ic,
 }
 
@@ -54,17 +61,19 @@ impl From<(u32, Function)> for Loaded {
     }
 }
 
-/// 全局名的位置缓存。只存属性表下标、不存 GC 指针：用之前核对那一项的键，对不上就走慢路重查。
+/// Position cache for global names. Stores only property-table indices, not GC pointers: checks that entry's key before
+/// use and looks it up again on the slow path on a mismatch.
 #[derive(Clone, Copy, Debug)]
 enum GlobalSlot {
     Unknown,
-    /// 脚本作用域（顶层 `let` / `const` / `class`）属性表的第几项
+    /// Index into the property table of the script scope (top-level `let` / `const` / `class`)
     Scope(u32),
-    /// 全局对象属性表的第几项；当时脚本作用域有几项（多了就可能被新的顶层 `let` 遮住，要重查）
+    /// Index into the global object's property table; how many entries the script scope had then (if there are more, a
+    /// new top-level `let` may shadow it, so look it up again)
     Global { at: u32, scope_len: u32 },
 }
 
-/// 一个异常处理器：落点（指令下标）与装的时候的环境。
+/// An exception handler: landing point (instruction index) and the environment when it was installed.
 #[derive(Collect)]
 #[collect(no_drop)]
 struct Handler<'gc> {
@@ -72,25 +81,26 @@ struct Handler<'gc> {
     env: Option<JsEnv<'gc>>,
 }
 
-/// 一个调用帧。
+/// A call frame.
 #[derive(Collect)]
 #[collect(no_drop)]
 struct Frame<'gc> {
     func: FuncId,
     pc: usize,
-    /// 寄存器文件里本帧的起点
+    /// Start of this frame in the register file
     base: usize,
     env: Option<JsEnv<'gc>>,
     handlers: Few<Handler<'gc>>,
-    /// `new.target`（普通调用是 `undefined`）
+    /// `new.target` (`undefined` for ordinary calls)
     new_target: Value<'gc>,
-    /// 构造调用的 `this`：基类构造时一进帧就有，派生类等 `super(...)` 返回
+    /// `this` of a construct call: present on frame entry for base class construction; for derived classes, set when
+    /// `super(...)` returns
     new_this: Option<Value<'gc>>,
-    /// 全部实参（只有 `keeps_args` 的函数留）
+    /// All arguments (kept only by functions with `keeps_args`)
     args: Few<Value<'gc>>,
 }
 
-/// 一次执行的全部状态（片与片之间挂在根上）。
+/// All the state of one execution (attached to the roots between slices).
 #[derive(Collect)]
 #[collect(no_drop)]
 struct State<'gc> {
@@ -101,7 +111,8 @@ struct State<'gc> {
 }
 
 impl<'gc> State<'gc> {
-    /// 找处理器接住异常 `v`：本帧没有就弹帧往外找；全弹完了返回 `false`。
+    /// Finds a handler to catch exception `v`: if this frame has none, pops frames looking outward; returns `false`
+    /// once all are popped.
     fn unwind(&mut self, v: Value<'gc>) -> bool {
         loop {
             if let Some(h) = self.f.handlers.pop() {
@@ -121,17 +132,18 @@ impl<'gc> State<'gc> {
     }
 }
 
-/// 一次执行停下来的方式：返回，或协程在 `yield` / `await` 处挂起（带着存下的帧）。
+/// How an execution stops: returning, or a coroutine suspending at `yield` / `await` (carrying the saved frames).
 enum Outcome<'gc> {
     Return(Value<'gc>),
     Suspend { value: Value<'gc>, awaiting: bool, saved: Suspended<'gc> },
-    /// 指令配额用完：状态原样交回，下一片接着跑（只有分片执行的 `Engine::eval` 会用）
-    #[cfg_attr(not(feature = "compile"), expect(dead_code, reason = "只有 compile feature 的 Engine::eval 分片执行"))]
+    /// Instruction budget exhausted: the state is handed back as is, and the next slice continues (used only by the
+    /// sliced execution of `Engine::eval`)
+    #[cfg_attr(not(feature = "compile"), expect(dead_code, reason = "only the compile feature's Engine::eval runs in slices"))]
     Paused(alloc::boxed::Box<State<'gc>>),
 }
 
 impl<'gc> Outcome<'gc> {
-    /// 普通函数只会返回（`yield` / `await` 只在协程自己的那一帧里出现）。
+    /// Ordinary functions only return (`yield` / `await` appear only in the coroutine's own frame).
     fn returned(self) -> Value<'gc> {
         match self {
             Outcome::Return(v) => v,
@@ -140,60 +152,65 @@ impl<'gc> Outcome<'gc> {
     }
 }
 
-/// 调一个对象时要做的事（先从对象里取出来，放掉借用再做）。
+/// What to do when calling an object (taken out of the object first, then done after releasing the borrow).
 enum CallStep<'gc> {
     Closure(Closure<'gc>),
     Resolver,
     Proxy,
     NativeClosure(r8framework::ClosureFn),
     Native(r8framework::Native),
-    /// `call` / `apply`：目标可调就展开成对它的调用
+    /// `call` / `apply`: if the target is callable, expands into a call to it
     Forward(r8framework::Native),
     Bound(Value<'gc>, Value<'gc>, Vec<Value<'gc>>),
 }
 
-/// 调用解析的结果：要进一帧的闭包，或宿主函数已经算完的值。
+/// Result of call resolution: a closure to enter a frame for, or the value a host function already computed.
 enum Callee<'gc> {
     Closure { closure: Closure<'gc>, callee: Value<'gc>, this: Value<'gc>, args: Vec<Value<'gc>> },
     Done(Value<'gc>),
 }
 
-/// 构造调用的准备结果：要进一帧，或宿主构造器已经给出对象。
+/// Result of preparing a construct call: a frame to enter, or the object a host constructor already produced.
 enum Prepared<'gc> {
     Frame(Frame<'gc>),
     Done(Value<'gc>),
 }
 
-/// 比解释更快的一层（JIT）：执行器进一个普通 JS 函数（不是构造器 / 生成器 / async）的帧之前先问它。
+/// A tier faster than interpretation (the JIT): the executor asks it before entering the frame of an ordinary JS
+/// function (not a constructor / generator / async).
 pub trait Tier {
-    /// 函数 `id`（字节码 `func`）要进帧了，本帧的寄存器是 `regs`（实参已放好）、累加器是 `acc`：
-    /// 有机器码就在它们上面跑（[`Tiered::Ran`]）；还不热给 [`Tiered::NotYet`]；编不了或不能整体跑给 [`Tiered::Never`]。
-    /// 要编的时候可以用平台的线程池 `pool`（几个函数一起编）。
+    /// Function `id` (bytecode `func`) is about to enter its frame, with this frame's registers in `regs` (arguments
+    /// already in place) and the accumulator in `acc`: if there is machine code, runs it on them ([`Tiered::Ran`]); if
+    /// not hot yet, gives [`Tiered::NotYet`]; if it cannot be compiled or cannot run as a whole, gives
+    /// [`Tiered::Never`]. When compiling, the platform's thread pool `pool` may be used (compiling several functions
+    /// together).
     fn enter(&self, pool: &dyn r8framework::Pool, id: FuncId, func: &Function, regs: &mut [Value<'_>], acc: &mut Value<'_>) -> Tiered;
 
-    /// 本帧往回跳到第 `header` 条指令（循环又转了一圈），寄存器与累加器是此刻的：循环热了、有机器码就从循环头
-    /// 接着在机器码里跑（OSR），给出它停在哪（总是 [`Exit::Resume`]：遇到 `return` 也停下交给解释器收尾）；
-    /// 不切进去给 [`Tiered::NotYet`]（以后都不会切给 [`Tiered::Never`]）。
+    /// This frame jumps back to instruction `header` (the loop went around again), with the registers and accumulator
+    /// as they are now: if the loop is hot and has machine code, continues in machine code from the loop header (OSR)
+    /// and gives where it stopped (always [`Exit::Resume`]: even a `return` stops and hands off to the interpreter to
+    /// finish); if not switching in, gives [`Tiered::NotYet`] ([`Tiered::Never`] if it never will).
     fn backedge(&self, pool: &dyn r8framework::Pool, id: FuncId, func: &Function, header: u32, regs: &mut [Value<'_>], acc: &mut Value<'_>) -> Tiered;
 }
 
-/// JIT 层的回答。
+/// The JIT tier's answer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tiered {
-    /// 在机器码里跑了，这样出来的
+    /// Ran in machine code, and exited like this
     Ran(Exit),
-    /// 这次不跑（还不热等），以后还问
+    /// Not running this time (not hot yet, etc.); ask again later
     NotYet,
-    /// 这个函数（进帧 / 循环）以后都不用问了：执行器记下，不再调
+    /// No need to ask about this function (frame entry / loop) again: the executor records it and stops calling
     Never,
 }
 
-/// 机器码怎么出来的。机器码的返回值：0 是 [`Return`](Exit::Return)，`pc + 1` 是 [`Resume(pc)`](Exit::Resume)。
+/// How machine code exited. Machine code's return value: 0 is [`Return`](Exit::Return), `pc + 1` is
+/// [`Resume(pc)`](Exit::Resume).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Exit {
-    /// 函数返回了，结果在累加器里
+    /// The function returned; the result is in the accumulator
     Return,
-    /// 停在第 `pc` 条指令之前（还没执行它），解释器从这里接着跑
+    /// Stopped before instruction `pc` (not yet executed); the interpreter continues from here
     Resume(u32),
 }
 
@@ -206,29 +223,31 @@ impl From<u64> for Exit {
     }
 }
 
-/// 字节码执行器。
+/// Bytecode executor.
 #[derive(Default)]
 pub struct Executor {
-    /// 比解释更快的一层（没有就只解释）
+    /// A tier faster than interpretation (without it, interpret only)
     tier: Option<Rc<dyn Tier>>,
-    /// 已加载的函数：只追加（`eval` / `Function` 构造器在执行中途也会加），帧里持有 `Rc`
+    /// Loaded functions: append-only (`eval` / the `Function` constructor also add some mid-execution); frames hold an
+    /// `Rc`
     code: RefCell<Vec<Rc<Loaded>>>,
-    /// 当前调用深度（各层重入的 `execute` 加起来）
+    /// Current call depth (summed over all re-entrant levels of `execute`)
     depth: Cell<usize>,
-    /// 模块的代码：函数编号起点 ⇒ 模块编号（导入绑定、import.meta 用）
+    /// Module code: first function id ⇒ module id (for import bindings and import.meta)
     module_of: RefCell<alloc::collections::BTreeMap<u32, u32>>,
 }
 
 impl Executor {
-    /// 带上一层 JIT：普通 JS 函数进帧前先问它。
+    /// Adds a JIT tier: ordinary JS functions ask it before entering a frame.
     #[must_use]
     pub fn with_tier(mut self, tier: Rc<dyn Tier>) -> Self {
         self.tier = Some(tier);
         self
     }
 
-    /// 进帧前先问 JIT 层。函数已经在机器码里跑完（结果在 `acc`，帧的寄存器已退掉）给 `true`；
-    /// 机器码中途退回就把帧的 `pc` 改到它停下的地方，照常解释。
+    /// Asks the JIT tier before entering a frame. Gives `true` if the function already ran to completion in machine
+    /// code (result in `acc`, the frame's registers already released); if machine code bailed out midway, sets the
+    /// frame's `pc` to where it stopped and interprets as usual.
     #[inline]
     fn tiered<'gc>(&self, pool: &dyn r8framework::Pool, loaded: &Loaded, regs: &mut Vec<Value<'gc>>, f: &mut Frame<'gc>, acc: &mut Value<'gc>) -> bool {
         match &self.tier {
@@ -260,7 +279,8 @@ impl Executor {
         }
     }
 
-    /// 往回跳到 `header` 时问 JIT 层要不要切进机器码（OSR）；切进去了就把帧的 `pc` 改到机器码停下的地方。
+    /// On a jump back to `header`, asks the JIT tier whether to switch into machine code (OSR); if it did, sets the
+    /// frame's `pc` to where machine code stopped.
     #[inline(never)]
     fn osr<'gc>(&self, pool: &dyn r8framework::Pool, loaded: &Loaded, regs: &mut [Value<'gc>], f: &mut Frame<'gc>, acc: &mut Value<'gc>, header: usize) {
         let Some(tier) = &self.tier else { return };
@@ -276,7 +296,7 @@ impl Executor {
         }
     }
 
-    /// 装进一个模块，返回脚本本身的函数编号。
+    /// Loads a module, returning the function id of the script itself.
     pub fn load(&self, module: Module) -> FuncId {
         let mut code = self.code.borrow_mut();
         let base = u32::try_from(code.len()).expect("fewer than 2^32 functions");
@@ -289,7 +309,7 @@ impl Executor {
         Rc::clone(&self.code.borrow()[f.0 as usize])
     }
 
-    /// 跑脚本 `main`（`this` 是全局对象）。
+    /// Runs script `main` (`this` is the global object).
     pub fn run_script<'gc>(&self, a: &mut Agent<'gc, '_>, main: FuncId) -> Result<Value<'gc>, Error> {
         let this = Value::Object(a.realm.global);
         let mut regs = Vec::new();
@@ -297,8 +317,8 @@ impl Executor {
         self.execute(a, State { regs, frames: Vec::new(), f, acc: Value::Undefined }, None).map(Outcome::returned)
     }
 
-    /// 直接 eval：按调用处的作用域表编译，跑在调用处的环境链上。
-    #[cfg_attr(not(feature = "compile"), expect(unused_variables, reason = "没有编译器就只能报错"))]
+    /// Direct eval: compiles against the scope table of the call site and runs on the call site's environment chain.
+    #[cfg_attr(not(feature = "compile"), expect(unused_variables, reason = "without a compiler it can only report an error"))]
     fn direct_eval<'gc>(&self, a: &mut Agent<'gc, '_>, src: &str, table: &r8virtasm::EvalScope, env: Option<r8framework::JsEnv<'gc>>, strict: bool, level: usize) -> Result<Value<'gc>, Error> {
         #[cfg(feature = "compile")]
         {
@@ -322,7 +342,7 @@ impl Executor {
         Err(a.throw(ErrorKind::Syntax, "dynamic code needs the compile feature"))
     }
 
-    /// 脚本 `main` 的初始执行状态（`this` 是全局对象）。
+    /// Initial execution state for script `main` (`this` is the global object).
     #[cfg(feature = "compile")]
     fn script_state<'gc>(&self, a: &mut Agent<'gc, '_>, main: FuncId) -> State<'gc> {
         let this = Value::Object(a.realm.global);
@@ -331,7 +351,8 @@ impl Executor {
         State { regs, frames: Vec::new(), f, acc: Value::Undefined }
     }
 
-    /// 协程函数被调：生成器给出还没跑的生成器对象；async 函数跑到第一个 `await`，给出它的 Promise。
+    /// A coroutine function is called: a generator gives a not-yet-started generator object; an async function runs to
+    /// its first `await` and gives its Promise.
     fn start<'gc>(&self, a: &mut Agent<'gc, '_>, closure: Closure<'gc>, callee: Value<'gc>, this: Value<'gc>, args: &[Value<'gc>], depth: usize) -> Result<Value<'gc>, Error> {
         let mut regs = Vec::new();
         let f = self.enter(a, &mut regs, closure, callee, this, args);
@@ -351,7 +372,7 @@ impl Executor {
         let promise = (!generator).then(|| a.new_promise());
         let co = ObjectData { kind: ObjectKind::Coroutine(Box::new(Coroutine::new(saved, promise, generator && asynchronous))), proto: Some(proto), ..ObjectData::default() }.alloc(a.mc);
         let Some(p) = promise else {
-            // 先跑形参初始化，停在编译器放的初始挂起点
+            // First run the parameter initialization, stopping at the initial suspension point the compiler placed
             let outer = self.depth.replace(depth);
             let r = a.resume(co, Resume::Next, Value::Undefined);
             self.depth.set(outer);
@@ -365,10 +386,12 @@ impl Executor {
         Ok(p.into())
     }
 
-    /// 解开绑定函数、直接调宿主函数；剩下 JS 闭包交给调用者进帧。
+    /// Unwraps bound functions and calls host functions directly; the remaining JS closures are left to the caller to
+    /// enter a frame.
     fn resolve<'gc>(&self, a: &mut Agent<'gc, '_>, mut callee: Value<'gc>, mut this: Value<'gc>, mut args: Vec<Value<'gc>>, depth: usize) -> Result<Callee<'gc>, Error> {
         while let Value::Object(o) = callee {
-            // 先把要做的事取出来，借用放掉之后再调（被调的代码可能改这个函数对象）
+            // Take out what to do first and call after releasing the borrow (the called code may modify this function
+            // object)
             let step = match &o.borrow().kind {
                 ObjectKind::Function(c) => CallStep::Closure(*c),
                 ObjectKind::Resolver { .. } => CallStep::Resolver,
@@ -437,7 +460,8 @@ impl Executor {
         Err(a.throw(ErrorKind::Type, &alloc::format!("{what} is not a function")))
     }
 
-    /// 被调的是普通 JS 函数（不是类构造器 / 生成器 / async）就给出它的闭包：可以直接开帧。
+    /// If the callee is an ordinary JS function (not a class constructor / generator / async), gives its closure: a
+    /// frame can be opened directly.
     #[inline]
     fn plain_closure<'gc>(&self, callee: Value<'gc>) -> Option<(Closure<'gc>, Rc<Loaded>)> {
         let Value::Object(o) = callee else { return None };
@@ -446,12 +470,13 @@ impl Executor {
         loaded.plain.then_some((c, loaded))
     }
 
-    /// 建一帧：在寄存器文件末尾开出本函数的寄存器，按调用约定放 `this`、自身、实参。
+    /// Builds a frame: opens this function's registers at the end of the register file and places `this`, the function
+    /// itself and the arguments per the calling convention.
     fn enter<'gc>(&self, a: &mut Agent<'gc, '_>, regs: &mut Vec<Value<'gc>>, closure: Closure<'gc>, callee: Value<'gc>, this: Value<'gc>, args: &[Value<'gc>]) -> Frame<'gc> {
         Self::enter_func(a, regs, &self.function(closure.func).func, closure, callee, this, args)
     }
 
-    /// 同 [`enter`](Self::enter)，函数已经取到了。
+    /// Same as [`enter`](Self::enter), with the function already fetched.
     fn enter_func<'gc>(a: &mut Agent<'gc, '_>, regs: &mut Vec<Value<'gc>>, f: &Function, closure: Closure<'gc>, callee: Value<'gc>, this: Value<'gc>, args: &[Value<'gc>]) -> Frame<'gc> {
         let (base, first) = Self::open_frame(a, regs, f, closure, callee, this);
         let params = usize::from(f.params).min(args.len());
@@ -460,8 +485,9 @@ impl Executor {
         Frame { func: closure.func, pc: 0, base, env: closure.env, handlers: Few::default(), new_target: Value::Undefined, new_this: None, args }
     }
 
-    /// 同 [`enter`](Self::enter)，实参就在寄存器文件里（`Call` 的快路：不先拷成 `Vec`）。
-    #[expect(clippy::too_many_arguments, reason = "调用约定的各部分")]
+    /// Same as [`enter`](Self::enter), with the arguments already in the register file (the fast path of `Call`: no
+    /// copy into a `Vec` first).
+    #[expect(clippy::too_many_arguments, reason = "the parts of the calling convention")]
     #[inline]
     fn enter_regs<'gc>(a: &mut Agent<'gc, '_>, regs: &mut Vec<Value<'gc>>, f: &Function, closure: Closure<'gc>, callee: Value<'gc>, this: Value<'gc>, args: usize, argc: usize) -> Frame<'gc> {
         let (base, first) = Self::open_frame(a, regs, f, closure, callee, this);
@@ -471,13 +497,15 @@ impl Executor {
         Frame { func: closure.func, pc: 0, base, env: closure.env, handlers: Few::default(), new_target: Value::Undefined, new_this: None, args }
     }
 
-    /// 在寄存器文件末尾开出 `f` 的寄存器，放好 `this` 与自身；给出帧基址与第一个形参的位置。
+    /// Opens `f`'s registers at the end of the register file and places `this` and the function itself; gives the frame
+    /// base and the position of the first parameter.
     #[inline]
     fn open_frame<'gc>(a: &mut Agent<'gc, '_>, regs: &mut Vec<Value<'gc>>, f: &Function, closure: Closure<'gc>, callee: Value<'gc>, this: Value<'gc>) -> (usize, usize) {
         a.profiler.enter(closure.func);
         let base = regs.len();
         regs.resize(base + usize::from(f.regs), Value::Undefined);
-        // 非严格函数：`this` 是 null / undefined 换成全局对象，原始值包成对象（箭头函数不用自己的 `this`）
+        // Non-strict functions: a null / undefined `this` becomes the global object and primitives are wrapped into
+        // objects (arrow functions don't use their own `this`)
         let this = match this {
             _ if f.mode == Mode::Strict || f.kind == FunctionKind::Arrow => this,
             Value::Undefined | Value::Null => Value::Object(a.realm.global),
@@ -489,7 +517,7 @@ impl Executor {
         (base, base + usize::from(Reg::PARAMS))
     }
 
-    /// 本帧正在跑的闭包（`r1` 里的被调函数）。
+    /// The closure running in this frame (the callee in `r1`).
     fn current<'gc>(regs: &[Value<'gc>], f: &Frame<'gc>) -> Option<Closure<'gc>> {
         match regs[f.base + usize::from(Reg::CALLEE.0)] {
             Value::Object(o) => match o.borrow().kind {
@@ -500,7 +528,8 @@ impl Executor {
         }
     }
 
-    /// 准备构造调用：解开绑定函数；宿主构造器直接算；JS 构造器建好 `this`（派生类不建）并跑实例字段。
+    /// Prepares a construct call: unwraps bound functions; host constructors compute directly; JS constructors build
+    /// `this` (not for derived classes) and run instance fields.
     fn prepare<'gc>(&self, a: &mut Agent<'gc, '_>, regs: &mut Vec<Value<'gc>>, mut callee: Value<'gc>, mut args: Vec<Value<'gc>>, mut new_target: Value<'gc>, depth: usize) -> Result<Prepared<'gc>, Error> {
         while let Value::Object(o) = callee {
             let kind = match &o.borrow().kind {
@@ -528,7 +557,7 @@ impl Executor {
                             Some(Value::Object(this))
                         }
                     };
-                    // 派生类构造器的 `this` 在 `super()` 之前是未初始化标记
+                    // A derived class constructor's `this` is the uninitialized marker before `super()`
                     let mut f = self.enter(a, regs, closure, callee, this.unwrap_or(Value::Uninit), &args);
                     f.new_target = new_target;
                     f.new_this = this;
@@ -538,7 +567,7 @@ impl Executor {
                     if !native.constructor {
                         break;
                     }
-                    // 宿主构造器自己按 `new.target` 定原型（`class X extends Map` 等）
+                    // Host constructors pick the prototype from `new.target` themselves (`class X extends Map` etc.)
                     let saved = self.depth.replace(depth);
                     let outer = core::mem::replace(&mut a.new_target, new_target);
                     let r = (native.f)(a, Value::Undefined, &args);
@@ -566,8 +595,9 @@ impl Executor {
         Err(a.throw(ErrorKind::Type, &alloc::format!("{what} is not a constructor")))
     }
 
-    /// 构造时建 `this`：原型取 `new.target.prototype`。`new.target` 就是构造器本身（直接 `new`）时读它走构造器的内联缓存，
-    /// 槽按这个构造器上次的实例预留。
+    /// Builds `this` during construction: the prototype is `new.target.prototype`. When `new.target` is the constructor
+    /// itself (a direct `new`), it is read through the constructor's inline cache, and slots are reserved per this
+    /// constructor's previous instance.
     fn create_this<'gc>(a: &mut Agent<'gc, '_>, ctor: &Loaded, new_target: Value<'gc>) -> Result<JsObject<'gc>, Error> {
         let proto = match new_target {
             Value::Object(o) => match ctor.prototype.get(o) {
@@ -585,7 +615,8 @@ impl Executor {
         Ok(ObjectData { proto: Some(proto), props, ..ObjectData::default() }.alloc(a.mc))
     }
 
-    /// 派生构造器里的 `super(args)`：构造父类（`new.target` 不变），初始化 `this`，跑实例字段。
+    /// `super(args)` in a derived constructor: constructs the parent class (`new.target` unchanged), initializes
+    /// `this`, and runs instance fields.
     fn super_call<'gc>(a: &mut Agent<'gc, '_>, regs: &[Value<'gc>], f: &mut Frame<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         if f.new_this.is_some() {
             return Err(a.throw(ErrorKind::Reference, "Super constructor may only be called once"));
@@ -602,8 +633,10 @@ impl Executor {
         Ok(this)
     }
 
-    /// 构造调用返回时定结果：返回对象就用它，否则用 `this`（派生类没调 `super` 抛 ReferenceError）。
-    /// 构造调用返回：返回值是对象就用它，否则用 `this`；顺带记下实例有几个属性（下次建 `this` 按它预留槽）。
+    /// Determines the result when a construct call returns: if it returns an object use it, otherwise use `this` (a
+    /// derived class that didn't call `super` throws ReferenceError).
+    /// Construct call returns: if the return value is an object use it, otherwise use `this`; also records how many
+    /// properties the instance has (reserve that many slots when building `this` next time).
     fn construct_result<'gc>(&self, a: &Agent<'gc, '_>, f: &Frame<'gc>, v: Value<'gc>) -> Result<Value<'gc>, Error> {
         let loaded = self.function(f.func);
         let r = self.construct_value(a, &loaded, f, v);
@@ -625,17 +658,18 @@ impl Executor {
         }
     }
 
-    /// `super` 的查找起点：当前方法主对象的原型。
+    /// Starting point for `super` lookups: the prototype of the current method's home object.
     fn super_base<'gc>(a: &Agent<'gc, '_>, regs: &[Value<'gc>], f: &Frame<'gc>) -> Result<Value<'gc>, Error> {
         let home = Self::current(regs, f).and_then(|c| c.home).ok_or_else(|| a.throw(ErrorKind::Syntax, "'super' keyword unexpected here"))?;
         Ok(home.borrow().proto.map_or(Value::Null, Value::Object))
     }
 
-    /// 建一个函数对象；普通函数带 `prototype`（`constructor` 指回来）。
+    /// Creates a function object; ordinary functions get a `prototype` (whose `constructor` points back).
     fn function_object<'gc>(&self, a: &Agent<'gc, '_>, closure: Closure<'gc>, proto: JsObject<'gc>) -> JsObject<'gc> {
         let func_loaded = self.function(closure.func);
         let func = &func_loaded.func;
-        // 缺省原型按函数种类：生成器 / async / async 生成器各有自己的 %XFunction.prototype%
+        // Default prototype by function kind: generator / async / async generator each have their own
+        // %XFunction.prototype%
         let proto = match (Gc::ptr_eq(proto, a.realm.function_proto), func.generator, func.asynchronous) {
             (true, true, true) => a.realm.async_generator_function_proto,
             (true, true, false) => a.realm.generator_function_proto,
@@ -645,7 +679,7 @@ impl Executor {
         let fo = ObjectData { kind: ObjectKind::Function(closure), proto: Some(proto), ..ObjectData::default() }.alloc(a.mc);
         a.realm.name_function(a.mc, fo, &func.name, Some(u32::from(func.length)));
         if func.generator {
-            // 生成器函数的 `prototype` 是它产出的生成器的原型（没有 `constructor`）
+            // A generator function's `prototype` is the prototype of the generators it produces (no `constructor`)
             let base = if func.asynchronous { a.realm.async_generator_proto } else { a.realm.generator_proto };
             let p = ObjectData { proto: Some(base), ..ObjectData::default() }.alloc(a.mc);
             fo.borrow_mut(a.mc).define("prototype", Property { slot: Slot::Data(p.into()), enumerable: false, writable: true, configurable: false });
@@ -657,7 +691,7 @@ impl Executor {
         fo
     }
 
-    /// `class … extends parent`：原型对象的原型与构造器的原型。
+    /// `class … extends parent`: the prototype of the prototype object and of the constructor.
     fn class_parents<'gc>(a: &mut Agent<'gc, '_>, parent: Option<Value<'gc>>) -> Result<(Option<JsObject<'gc>>, JsObject<'gc>), Error> {
         match parent {
             None => Ok((Some(a.realm.object_proto), a.realm.function_proto)),
@@ -674,7 +708,7 @@ impl Executor {
         }
     }
 
-    /// 往外第 `depth` 层环境。
+    /// The environment `depth` levels out.
     fn env_at(env: Option<JsEnv<'_>>, depth: u16) -> JsEnv<'_> {
         let mut e = env.expect("a scope with an environment");
         for _ in 0..depth {
@@ -683,12 +717,12 @@ impl Executor {
         e
     }
 
-    /// %ThrowTypeError%：严格模式 `arguments.callee` 的访问器。
+    /// %ThrowTypeError%: the accessor for strict-mode `arguments.callee`.
     fn throw_type_error<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         Err(a.throw(ErrorKind::Type, "'caller', 'callee', and 'arguments' properties may not be accessed on strict mode functions or the arguments objects for calls to them"))
     }
 
-    /// 严格模式下删不掉（不可配置）抛 TypeError。
+    /// In strict mode, a failed delete (non-configurable) throws TypeError.
     fn check_delete(a: &Agent<'_, '_>, ok: bool, strict: bool) -> Result<(), Error> {
         if strict && !ok {
             return Err(a.throw(ErrorKind::Type, "Cannot delete a non-configurable property"));
@@ -696,7 +730,7 @@ impl Executor {
         Ok(())
     }
 
-    /// 未初始化就抛 ReferenceError（暂时性死区）。
+    /// Throws ReferenceError if uninitialized (temporal dead zone).
     #[inline]
     fn check<'gc>(a: &Agent<'gc, '_>, v: Value<'gc>, name: &str) -> Result<(), Error> {
         if matches!(v, Value::Uninit) {
@@ -705,7 +739,7 @@ impl Executor {
         Ok(())
     }
 
-    /// 死区指令的检查：名字只在真要抛错时才从常量池取。
+    /// Check for TDZ instructions: the name is fetched from the constant pool only when actually throwing.
     #[inline]
     fn check_const<'gc>(a: &Agent<'gc, '_>, v: Value<'gc>, func: &Function, name: r8virtasm::Const) -> Result<(), Error> {
         if matches!(v, Value::Uninit) {
@@ -719,7 +753,8 @@ impl Executor {
         a.throw(ErrorKind::Reference, &alloc::format!("Cannot access '{name}' before initialization"))
     }
 
-    /// 按缓存读全局名：命中给出值（脚本作用域的还要查死区），没命中给 `None`。
+    /// Reads a global name via the cache: on a hit gives the value (script scope entries also check the TDZ); on a miss
+    /// gives `None`.
     fn global_cached<'gc>(a: &Agent<'gc, '_>, slot: GlobalSlot, name: &str) -> Option<Value<'gc>> {
         let scope = a.realm.script_scope.borrow();
         match slot {
@@ -729,7 +764,7 @@ impl Executor {
         }
     }
 
-    /// 全局名现在在哪（自有数据属性才缓存）。
+    /// Where the global name is now (only own data properties are cached).
     fn global_locate(a: &Agent<'_, '_>, name: &str) -> GlobalSlot {
         let scope = a.realm.script_scope.borrow();
         let own = |d: &r8framework::ObjectData<'_>| d.position(name).filter(|&i| matches!(d.props.slot(i), Slot::Data(_))).and_then(|i| u32::try_from(i).ok());
@@ -745,7 +780,7 @@ impl Executor {
         }
     }
 
-    /// `lda.global`：先按缓存，没命中走慢路再记下位置。
+    /// `lda.global`: tries the cache first; on a miss takes the slow path and records the position.
     fn global_load<'gc>(a: &mut Agent<'gc, '_>, cache: &Cell<GlobalSlot>, name: &str) -> Result<Value<'gc>, Error> {
         if let Some(v) = Self::global_cached(a, cache.get(), name) {
             Self::check(a, v, name)?;
@@ -756,7 +791,8 @@ impl Executor {
         Ok(v)
     }
 
-    /// `sta.global`：缓存命中且是可写数据属性就原地改（脚本作用域的还要查死区），否则走慢路再记下位置。
+    /// `sta.global`: if the cache hits and it is a writable data property, modifies it in place (script scope entries
+    /// also check the TDZ); otherwise takes the slow path and records the position.
     fn global_store<'gc>(a: &mut Agent<'gc, '_>, cache: &Cell<GlobalSlot>, name: &str, v: Value<'gc>, strict: bool) -> Result<(), Error> {
         let (target, at) = match cache.get() {
             GlobalSlot::Scope(at) => (a.realm.script_scope, at),
@@ -774,7 +810,8 @@ impl Executor {
         Ok(())
     }
 
-    /// 读全局名字：先脚本作用域（死区里抛错），再全局对象（含原型链）；都没有给 `None`。
+    /// Reads a global name: script scope first (throws inside the TDZ), then the global object (including its prototype
+    /// chain); gives `None` if neither has it.
     fn global_get<'gc>(a: &mut Agent<'gc, '_>, name: &str) -> Result<Option<Value<'gc>>, Error> {
         if let Some(v) = a.realm.script_scope.borrow().own(name) {
             Self::check(a, v, name)?;
@@ -784,7 +821,8 @@ impl Executor {
         if a.has_property(g, name)? { Ok(Some(a.get_named(g, name)?)) } else { Ok(None) }
     }
 
-    /// 顶层 `var` / 函数声明之前查能不能声明（CanDeclareGlobalVar / CanDeclareGlobalFunction）。
+    /// Before a top-level `var` / function declaration, checks whether it can be declared (CanDeclareGlobalVar /
+    /// CanDeclareGlobalFunction).
     fn check_declare(a: &mut Agent<'_, '_>, name: &str, function: bool) -> Result<(), Error> {
         if a.realm.script_scope.borrow().get_own(name).is_some() {
             return Err(a.throw(ErrorKind::Syntax, &alloc::format!("Identifier '{name}' has already been declared")));
@@ -800,7 +838,8 @@ impl Executor {
         }
     }
 
-    /// 顶层 `var`（`value` 为空）/ 函数声明落到全局对象上（已经查过能声明）。
+    /// Puts a top-level `var` (`value` empty) / function declaration on the global object (declarability already
+    /// checked).
     fn declare_global<'gc>(a: &Agent<'gc, '_>, name: &str, value: Option<Value<'gc>>, deletable: bool) {
         let global = a.realm.global;
         let existing = global.borrow().get_own(name);
@@ -814,8 +853,8 @@ impl Executor {
         global.borrow_mut(a.mc).define(name, prop);
     }
 
-    /// 写全局名字：脚本作用域里的查死区与 `const`，否则写全局对象。
-    /// 严格模式下给没声明过的名字赋值抛 ReferenceError。
+    /// Writes a global name: in the script scope, checks the TDZ and `const`; otherwise writes the global object.
+    /// In strict mode, assigning to an undeclared name throws ReferenceError.
     fn global_set<'gc>(a: &mut Agent<'gc, '_>, name: &str, v: Value<'gc>, strict: bool) -> Result<(), Error> {
         let scope = a.realm.script_scope;
         let prop = scope.borrow().get_own(name);
@@ -838,7 +877,7 @@ impl Executor {
         }
     }
 
-    /// 编译器放进寄存器的私有名。
+    /// A private name the compiler placed in a register.
     fn private_key(v: Value<'_>) -> r8framework::JsSymbol<'_> {
         match v {
             Value::Symbol(s) => s,
@@ -846,9 +885,10 @@ impl Executor {
         }
     }
 
-    /// 本帧的 arguments 对象：全部实参作可枚举下标属性，`length` / `callee` / `[Symbol.iterator]` 不可枚举。
+    /// This frame's arguments object: all arguments as enumerable index properties; `length` / `callee` /
+    /// `[Symbol.iterator]` non-enumerable.
     fn arguments<'gc>(a: &mut Agent<'gc, '_>, regs: &[Value<'gc>], f: &Frame<'gc>, self_strict: bool, mapped: &[Option<u16>]) -> Result<Value<'gc>, Error> {
-        // 映射：只到实参个数为止
+        // Mapped: only up to the number of arguments
         let map = match (self_strict, f.env) {
             (false, Some(env)) if !mapped.is_empty() => Some(r8framework::ArgumentsMap { env, slots: mapped.iter().take(f.args.len()).copied().collect() }),
             _ => None,
@@ -864,7 +904,7 @@ impl Executor {
         let mut d = o.borrow_mut(a.mc);
         d.define("length", hidden(len.into()));
         if self_strict {
-            // 严格模式：读写 callee 都抛 TypeError
+            // Strict mode: reading or writing callee throws TypeError
             let thrower = a.realm.named_native(a.mc, Self::throw_type_error, "", 0);
             d.define("callee", Property { slot: Slot::Accessor { get: Some(thrower), set: Some(thrower) }, enumerable: false, writable: false, configurable: false });
         } else {
@@ -875,7 +915,7 @@ impl Executor {
         Ok(o.into())
     }
 
-    /// 寄存器里的恢复方式。
+    /// The resume mode stored in a register.
     fn mode(v: Value<'_>) -> Resume {
         match v {
             Value::Number(x) => Resume::ALL.into_iter().find(|&m| f64::from(m) == x).unwrap_or(Resume::Next),
@@ -883,7 +923,7 @@ impl Executor {
         }
     }
 
-    /// 数组的元素（快照）；不是数组给空。
+    /// Elements of an array (a snapshot); empty if not an array.
     fn items(v: Value<'_>) -> Vec<Value<'_>> {
         match v {
             Value::Object(o) => match &o.borrow().kind {
@@ -894,7 +934,7 @@ impl Executor {
         }
     }
 
-    /// 往编译器建的数组末尾追加。
+    /// Appends to the end of an array built by the compiler.
     fn push<'gc>(a: &Agent<'gc, '_>, arr: Value<'gc>, items: impl IntoIterator<Item = Value<'gc>>) {
         let Value::Object(o) = arr else { return };
         let mut d = o.borrow_mut(a.mc);
@@ -907,7 +947,7 @@ impl Executor {
         }
     }
 
-    /// 对象字面量 / 类里定义一个属性（值或访问器函数是 `v`）。
+    /// Defines a property in an object literal / class (the value or accessor function is `v`).
     fn define<'gc>(a: &mut Agent<'gc, '_>, obj: Value<'gc>, key: &str, kind: PropertyKind, enumerable: bool, v: Value<'gc>) -> Result<(), Error> {
         let Value::Object(o) = obj else { return Ok(()) };
         match (kind, v) {
@@ -918,8 +958,8 @@ impl Executor {
         Ok(())
     }
 
-    /// 跑到最外层帧返回；异常先找处理器，接不住才往外抛。
-    /// `budget` 只给最外层：用完就带着状态停下。
+    /// Runs until the outermost frame returns; an exception first looks for a handler and propagates outward only if
+    /// not caught. `budget` applies only to the outermost level: when it runs out, stops with the state.
     fn execute<'gc>(&self, a: &mut Agent<'gc, '_>, mut st: State<'gc>, mut budget: Option<usize>) -> Result<Outcome<'gc>, Error> {
         let base = self.depth.get();
         let r = loop {
@@ -939,7 +979,8 @@ impl Executor {
         r
     }
 
-    /// 不限配额跑到最外层帧返回（宿主函数里回调 JS 用：执行状态不会停下，跑完寄存器文件还给调用方复用）。
+    /// Runs until the outermost frame returns, with no budget (for calling back into JS from host functions: the
+    /// execution state never stops, and when done the register file is returned to the caller for reuse).
     fn execute_to_end<'gc>(&self, a: &mut Agent<'gc, '_>, st: &mut State<'gc>) -> Result<Value<'gc>, Error> {
         let base = self.depth.get();
         let r = loop {
@@ -959,7 +1000,7 @@ impl Executor {
         r
     }
 
-    /// 配额扣一步；用完了返回 `true`（调用方停下，状态完整）
+    /// Consumes one step of budget; returns `true` when exhausted (the caller stops, with the state intact)
     #[inline]
     fn spent(budget: &mut Option<usize>) -> bool {
         match budget {
@@ -972,15 +1013,16 @@ impl Executor {
         }
     }
 
-    /// 主循环：外层每进一个帧（开始、调用、返回）取一次函数，内层逐条取指令分派；
-    /// 换帧的指令 `continue 'frame`。出错直接返回，由 [`execute`](Self::execute) 展开。
-    #[expect(clippy::too_many_lines, reason = "一条指令一个分支，拆开反而难读")]
+    /// Main loop: the outer loop fetches the function once per frame entered (start, call, return), the inner loop
+    /// fetches and dispatches instructions one by one; instructions that switch frames `continue 'frame`. Errors return
+    /// directly and are unwound by [`execute`](Self::execute).
+    #[expect(clippy::too_many_lines, reason = "one branch per instruction; splitting it up would make it harder to read")]
     fn run<'gc>(&self, a: &mut Agent<'gc, '_>, st: &mut State<'gc>, depth: usize, budget: &mut Option<usize>) -> Result<Option<Outcome<'gc>>, Error> {
         let State { regs, frames, f, acc } = st;
-        // 调用的快路已经取到被调函数时交给下一帧用，省一次查表
+        // When the call fast path has already fetched the callee, hands it to the next frame, saving a lookup
         let mut entering: Option<Rc<Loaded>> = None;
         'frame: loop {
-            // 配额用完：停在这一帧的下一条指令之前，状态完整
+            // Budget exhausted: stop before this frame's next instruction, with the state intact
             if Self::spent(budget) {
                 return Ok(None);
             }
@@ -991,7 +1033,7 @@ impl Executor {
                 let insn = &func.insns[f.pc];
                 f.pc += 1;
                 let r = |r: Reg| f.base + usize::from(r.0);
-                // 两边都是数的快路就地算，别的交给 Agent
+                // Fast path when both sides are numbers computes in place; everything else goes to the Agent
                 macro_rules! binary {
                     ($op:expr, $lhs:expr, $rhs:expr) => {
                         *acc = match ($lhs, $rhs) {
@@ -1007,7 +1049,8 @@ impl Executor {
                             (lhs, rhs) => a.compare($op, lhs, rhs)?,
                         };
                         *acc = c.into();
-                        // 紧跟条件跳转（循环条件、`if`）：比较的结果就是布尔，直接跳，省一次分派
+                        // Immediately followed by a conditional jump (loop condition, `if`): the comparison result is
+                        // the boolean, so jump directly, saving a dispatch
                         let taken = match func.insns.get(f.pc) {
                             Some(&Insn::JumpIfFalse(l)) => (!c).then_some(l),
                             Some(&Insn::JumpIfTrue(l)) => c.then_some(l),
@@ -1069,7 +1112,8 @@ impl Executor {
                     Insn::DeclareLexical { name, constant } => {
                         let name = func.name_at(name);
                         let scope = a.realm.script_scope;
-                        // 和脚本作用域里的名字、不可配置的全局属性（以前的 `var`、`undefined` 等）都冲突
+                        // Conflicts with names in the script scope and with non-configurable global properties (earlier
+                        // `var`s, `undefined`, etc.)
                         if scope.borrow().get_own(name).is_some() || a.realm.global.borrow().get_own(name).is_some_and(|p| !p.configurable) {
                             return Err(a.throw(ErrorKind::Syntax, &alloc::format!("Identifier '{name}' has already been declared")));
                         }
@@ -1171,7 +1215,8 @@ impl Executor {
                         let ctor = a.realm.regexp_ctor;
                         *acc = a.call(ctor.into(), Value::Undefined, &[p.into(), fl.into()])?;
                     }
-                    // 往回跳（目标不在这条之后）是循环又转一圈：有 JIT 层就问它要不要从循环头切进机器码
+                    // A backward jump (target not after this instruction) means the loop went around again: if there is
+                    // a JIT tier, ask it whether to switch into machine code at the loop header
                     Insn::Jump(l) => {
                         let back = (l.0 as usize) < f.pc;
                         f.pc = l.0 as usize;
@@ -1441,7 +1486,8 @@ impl Executor {
                             return Err(a.throw(ErrorKind::Range, "Maximum call stack size exceeded"));
                         }
                         let first = r(args);
-                        // 快路：被调的是普通 JS 函数（不是类构造器 / 生成器 / async），直接从寄存器开帧
+                        // Fast path: the callee is an ordinary JS function (not a class constructor / generator /
+                        // async), so open a frame directly from the registers
                         let target = regs[r(callee)];
                         if matches!(*insn, Insn::Call { .. })
                             && let Some((c, loaded)) = self.plain_closure(target)
@@ -1454,7 +1500,8 @@ impl Executor {
                             }
                             continue;
                         }
-                        // 快路：被调的是宿主函数，实参直接从寄存器文件切片传，不拷成 Vec、不过调用解析
+                        // Fast path: the callee is a host function; pass the arguments directly as a slice of the
+                        // register file, without copying into a Vec or going through call resolution
                         let native = match target {
                             Value::Object(o) => match &o.borrow().kind {
                                 ObjectKind::Native(n) if matches!(*insn, Insn::Call { .. }) && n.forward == r8framework::Forward::No => Some(*n),
@@ -1521,7 +1568,7 @@ impl Executor {
                         let d = r(iter);
                         *acc = Value::Undefined;
                         if !a.to_boolean(regs[d + 2]) {
-                            // 走一步出错也算走完（不再调 `return`）
+                            // An error while stepping also counts as done (`return` is not called again)
                             regs[d + 2] = true.into();
                             if let Some(v) = a.iterator_step(IterRecord { iterator: regs[d], next: regs[d + 1] })? {
                                 regs[d + 2] = false.into();
@@ -1552,7 +1599,8 @@ impl Executor {
                         let d = r(iter);
                         if !a.to_boolean(regs[d + 2]) {
                             regs[d + 2] = true.into();
-                            // 原来的异常优先：`return` 不可调或自己抛错都不管
+                            // The original exception takes precedence: `return` being non-callable or throwing itself
+                            // is ignored
                             match a.iterator_close(regs[d]) {
                                 Ok(()) | Err(Error::Exception(_)) => {}
                                 Err(e) => return Err(e),
@@ -1685,7 +1733,8 @@ impl<'gc> Invoke<'gc> for Executor {
         if level >= STACK_LIMIT {
             return Err(a.throw(ErrorKind::Range, "Maximum call stack size exceeded"));
         }
-        // 快路：普通 JS 函数（不是类构造器 / 生成器 / async）直接开帧，实参不先拷成 Vec 过调用解析
+        // Fast path: ordinary JS functions (not class constructors / generators / async) open a frame directly, without
+        // first copying the arguments into a Vec for call resolution
         if let Some((c, loaded)) = self.plain_closure(callee) {
             let mut regs = a.take_regs();
             let mut f = Self::enter_func(a, &mut regs, &loaded.func, c, callee, this, args);
@@ -1761,7 +1810,7 @@ impl<'gc> Invoke<'gc> for Executor {
         let (saved, fresh) = match taken {
             Ok(t) => t,
             Err(true) => return Err(a.throw(ErrorKind::Type, "Generator is already running")),
-            // 已经跑完
+            // Already finished
             Err(false) => {
                 return match mode {
                     Resume::Next => Ok(Step::Done(Value::Undefined)),
@@ -1811,7 +1860,7 @@ impl<'gc> Invoke<'gc> for Executor {
 }
 
 impl Executor {
-    /// 在新的执行状态里跑一帧到返回。
+    /// Runs one frame to return in a fresh execution state.
     fn run_frame<'gc>(&self, a: &mut Agent<'gc, '_>, regs: Vec<Value<'gc>>, f: Frame<'gc>, level: usize) -> Result<Value<'gc>, Error> {
         self.run_state(a, State { regs, frames: Vec::new(), f, acc: Value::Undefined }, level).map(Outcome::returned)
     }
@@ -1823,7 +1872,7 @@ impl Executor {
         r
     }
 
-    /// 把协程的状态换成 `state`。
+    /// Replaces the coroutine's state with `state`.
     fn set_state<'gc>(a: &Agent<'gc, '_>, co: JsObject<'gc>, state: CoroutineState<'gc>) {
         if let ObjectKind::Coroutine(c) = &mut co.borrow_mut(a.mc).kind {
             c.state = state;
@@ -1831,11 +1880,11 @@ impl Executor {
     }
 }
 
-/// 片与片之间挂在根上的执行状态。
+/// Execution state attached to the roots between slices.
 #[cfg(feature = "compile")]
 type Parked = r8gc::DynamicRoot<r8gc::Rootable![r8gc::RefLock<Option<State<'_>>>]>;
 
-/// 一片跑完的结果。
+/// Result of running one slice.
 #[cfg(feature = "compile")]
 enum Slice {
     Done(r8framework::Global),
@@ -1844,7 +1893,8 @@ enum Slice {
 
 #[cfg(feature = "compile")]
 impl r8framework::Engine for Executor {
-    /// 分片跑：每片最多 [`SLICE`] 条指令，停下时执行状态挂到根上，`enter` 返回时回收一段，再进来接着跑。
+    /// Sliced execution: each slice runs at most [`SLICE`] instructions; when it stops, the execution state is attached
+    /// to the roots, some garbage is collected as `enter` returns, and then it re-enters and continues.
     fn eval(&mut self, isolate: &mut r8framework::Isolate<'_>, cx: &r8framework::ContextRoot, src: &r8framework::Source<'_>) -> Result<r8framework::Global, Error> {
         let main = self.load(Module::try_from(src)?);
         let this: &Executor = self;
@@ -1874,7 +1924,7 @@ impl r8framework::Engine for Executor {
         }
     }
 
-    /// 模块不分片：一次进入跑完加载、链接、求值与微任务。
+    /// Modules are not sliced: one entry runs loading, linking, evaluation and microtasks to completion.
     fn eval_module(&mut self, isolate: &mut r8framework::Isolate<'_>, cx: &r8framework::ContextRoot, src: &r8framework::Source<'_>) -> Result<r8framework::Global, Error> {
         let this: &Executor = self;
         isolate.enter(|scope| {
@@ -1904,7 +1954,7 @@ mod tests {
 
     use crate::Executor;
 
-    /// 截下 `console.log` 的平台。
+    /// A platform that captures `console.log`.
     #[derive(Default)]
     struct Capture(Mutex<Vec<String>>);
 
@@ -1930,7 +1980,7 @@ mod tests {
         }
     }
 
-    /// 跑一段脚本：结果（或抛出的值）按 ToString 给出，外加 `console.log` 的输出。
+    /// Runs a script: gives the result (or the thrown value) via ToString, plus the `console.log` output.
     fn eval(src: &str) -> (Result<String, String>, Vec<String>) {
         let platform = Capture::default();
         let mut isolate = Isolate::new(&platform, CreateParams::default());
@@ -1948,12 +1998,13 @@ mod tests {
             let text = agent.to_string(v).map_or_else(|_| String::from("<ToString threw>"), |s| String::from(&**s));
             if ok { Ok(text) } else { Err(text) }
         });
-        // 堆借着平台：先拆 isolate 再取日志
+        // The heap borrows the platform: take the isolate apart first, then fetch the log
         drop(isolate);
         (r, platform.0.into_inner().expect("an unpoisoned log"))
     }
 
-    /// 长循环不停分配临时对象：一次 `eval` 跑完，期间已经完成了回收（分片之间回收）。
+    /// A long loop that keeps allocating temporary objects: one `eval` runs to completion, and GC has already happened
+    /// along the way (between slices).
     #[test]
     fn collects_while_running() {
         let platform = Capture::default();
@@ -1970,7 +2021,7 @@ mod tests {
     }
 
     #[test]
-    #[expect(clippy::too_many_lines, reason = "一张用例表")]
+    #[expect(clippy::too_many_lines, reason = "a table of test cases")]
     fn javascript_semantics() {
         let ok = [
             ("1 + 2 * 3", "7"),
@@ -1994,7 +2045,7 @@ mod tests {
             ("function a() { let x = 1; function b() { function c() { return x + 1; } return c(); } return b(); } a()", "2"),
             ("[1, [2, 3], null] + ''", "1,2,3,"),
             ("'10' == 10 && '10' !== 10 && 2 ** 10 === 1024 && 'b' > 'a'", "true"),
-            // 阶段 1：异常
+            // Stage 1: exceptions
             ("try { throw 1 } catch (e) { e + 1 }", "2"),
             ("let r = ''; try { r += 'a'; throw Error('x') } catch (e) { r += e.message } finally { r += 'f' } r", "axf"),
             ("const log = []; function f() { try { return 'try' } finally { log.push('fin') } } f() + log.join()", "tryfin"),
@@ -2007,7 +2058,7 @@ mod tests {
             ("const fs = []; try { throw 5 } catch (e) { fs.push(() => e) } fs[0]()", "5"),
             ("try { [1].map(() => { throw 'cb' }) } catch (e) { e }", "cb"),
             ("String(TypeError('bad'))", "TypeError: bad"),
-            // 阶段 1：内建对象
+            // Stage 1: built-in objects
             ("[3, 1, 2].sort().join('-')", "1-2-3"),
             ("[1, 2, 3].map(x => x * 2).filter(x => x > 2).reduce((a, b) => a + b, 0)", "10"),
             ("'Hello'.toUpperCase().split('L')", "HE,,O"),
@@ -2022,7 +2073,7 @@ mod tests {
             ("`${{ toString() { return 'obj' } }}`", "obj"),
             ("({}) + ''", "[object Object]"),
             ("'abc'.padStart(5, '-') + 'x'.repeat(3) + '  t '.trim()", "--abcxxxt"),
-            // 阶段 2：new、类、访问器、instanceof / in / delete
+            // Stage 2: new, classes, accessors, instanceof / in / delete
             ("function P(x) { this.x = x } P.prototype.get = function () { return this.x }; new P(5).get()", "5"),
             ("function F() { return { y: 1 } } new F().y", "1"),
             ("class A { constructor(v) { this.v = v } get double() { return this.v * 2 } static make() { return new A(3) } } A.make().double", "6"),
@@ -2041,7 +2092,7 @@ mod tests {
             ("const o = {}; Object.defineProperty(o, 'x', { get() { return 7 } }); o.x + Object.keys(o).length", "7"),
             ("class A { m() {} } Object.keys(new A()).length + Object.keys({ p: 1 }).length", "1"),
             ("const o = Object.freeze({ a: 1 }); o.a = 2; o.a", "1"),
-            // 阶段 3：剩余 / 默认参数、展开、解构、可选链
+            // Stage 3: rest / default parameters, spread, destructuring, optional chaining
             ("function f(a, b = a + 1, ...rest) { return a + b + rest.length } f(1) + f(1, 5, 9, 9)", "11"),
             ("const [x, , y = 3, ...z] = [1, 2, undefined, 4, 5]; x + y + z.join('')", "445"),
             ("const { a, b: { c }, d = 4, ...rest } = { a: 1, b: { c: 2 }, e: 5, f: 6 }; a + c + d + Object.keys(rest).join()", "7e,f"),
@@ -2062,7 +2113,7 @@ mod tests {
             ("var it = {}; let closed = 0; it[Symbol.iterator] = function () { return { next() { return { done: false } }, return() { closed++; return {} } } }; function t() { throw 'lhs' } let r; try { 0, [...{}[t()]] = it } catch (e) { r = e } r + closed", "lhs1"),
             ("const log = []; const it = { [Symbol.iterator]() { return { next() { log.push('next'); return { done: false, value: 1 } }, return() { log.push('ret'); return {} } } } }; const o = { get p() { log.push('ref'); return {} } }; [o.p.x] = it; log.join()", "ref,next,ret"),
             ("let c = 0; const it = { [Symbol.iterator]() { return { next: () => ({ done: false, value: undefined }), return() { c++; return {} } } } }; try { const [a = (() => { throw 1 })()] = it } catch {} c", "1"),
-            // 阶段 4：Symbol、迭代、for-of / for-in、生成器
+            // Stage 4: Symbol, iteration, for-of / for-in, generators
             ("const s = Symbol('d'); const o = { [s]: 1 }; o[s] + typeof s + s.description + String(s)", "1symboldSymbol(d)"),
             ("const o = { [Symbol.toPrimitive](h) { return h === 'number' ? 42 : 'str' } }; +o + ',' + `${o}`", "42,str"),
             ("const it = { [Symbol.iterator]() { let i = 0; return { next: () => ({ value: i, done: i++ >= 3 }) } } }; [...it].join()", "0,1,2"),
@@ -2084,7 +2135,7 @@ mod tests {
             ("const o = { *[Symbol.iterator]() { yield 'a'; yield 'b' } }; [...o].join('')", "ab"),
             ("class C { *gen() { yield this.v } } const c = new C(); c.v = 5; c.gen().next().value", "5"),
             ("[...[1, 2].entries()].join(';') + [...[7].keys()]", "0,1;1,20"),
-            // 阶段 5：正则、BigInt
+            // Stage 5: RegExp, BigInt
             ("const m = /a(b)c/.exec('xabcx'); m.index + m[1] + m", "1babc,b"),
             ("/^\\d+$/.test('123') && !/^\\d+$/.test('12a')", "true"),
             ("'a1b22c333'.match(/\\d+/g).join()", "1,22,333"),
@@ -2094,7 +2145,8 @@ mod tests {
             ("const { groups: { y, m } } = /(?<y>\\d{4})-(?<m>\\d{2})/.exec('2024-11'); y + m", "202411"),
             ("const re = /o/g; let n = 0; while (re.exec('foo boo')) n++; n", "4"),
             ("/x/gi.flags + /x/gi + new RegExp('a+', 'y').sticky", "gi/x/gitrue"),
-            // 不是正则对象（空对象）调内建正则方法：抛 TypeError（快路先核对是不是原样的正则）
+            // Calling a built-in RegExp method on a non-RegExp object (an empty object): throws TypeError (the fast
+            // path first checks that it is an unmodified RegExp)
             ("let e; try { RegExp.prototype.test.call({}) } catch (x) { e = x.name } e", "TypeError"),
             ("'hello'.search(/l+/) + [...'a1b2'.matchAll(/[a-z](\\d)/g)].map(m => m[1]).join()", "21,2"),
             ("'a.b.c'.replaceAll('.', '-') + 'x'.replace('x', '[$&]')", "a-b-c[x]"),
@@ -2108,14 +2160,14 @@ mod tests {
             ("(255n).toString(16) + String(-1n)", "ff-1"),
             ("Number(2n ** 53n) === 2 ** 53", "true"),
             ("-(2n) + ~5n", "-8"),
-            // 阶段 6：暂时性死区、脚本作用域
+            // Stage 6: temporal dead zone, script scope
             ("let s = 0; for (let i = 0; i < 3; i++) { let t = i; s += t } s", "3"),
             ("function f() { let x = 1; { const y = x + 1; return y } } f()", "2"),
             ("let lx = 1; var vx = 2; (globalThis.lx === undefined) + ',' + globalThis.vx + ',' + lx", "true,2,1"),
             ("class A {} class B extends A { constructor() { super(); this.x = 1 } } new B().x", "1"),
             ("'a'", "a"),
             ("'use strict'; 'b'", "b"),
-            // 类的私有名、静态块、计算字段名
+            // Class private names, static blocks, computed field names
             ("class C { #x = 1; #m() { return this.#x + 1 } get #g() { return this.#x * 10 } set #g(v) { this.#x = v } run() { this.#g = 5; return [this.#m(), this.#g, #x in this, #x in {}].join() } } new C().run()", "6,50,true,false"),
             ("class A { static #count = 0; static inc() { return ++A.#count } static { A.inc(); A.inc() } static get n() { return A.#count } } A.n", "2"),
             ("let k = 'dyn'; class C { [k + 1] = 5; static [k] = 6 } [new C().dyn1, C.dyn].join()", "5,6"),
@@ -2124,7 +2176,7 @@ mod tests {
             ("class C { #a = 1; inc() { this.#a += 2; this.#a++; return this.#a } } new C().inc()", "4"),
             ("class C { static { var v = 1; this.v = v } } C.v + typeof v", "1undefined"),
             ("let i = 0; class C { [i++] = 'a'; [i++] = 'b' } const c1 = new C(), c2 = new C(); c1[0] + c1[1] + c2[0] + i", "aba2"),
-            // 函数的 name / length、new.target、标签模板、arguments
+            // Function name / length, new.target, tagged templates, arguments
             ("function f(a, b = 1, c) {} const g = () => 0; let h = function () {}; const o = { m() {}, get x() { return 1 }, k: () => 0 }; class C { static s() {} } [f.name, f.length, g.name, h.name, o.m.name, Object.getOwnPropertyDescriptor(o, 'x').get.name, o.k.name, C.name, C.s.name, (class {}).name, [].map.name, f.bind(null, 1).name, f.bind(null, 1).length].join()", "f,1,g,h,m,get x,k,C,s,,map,bound f,0"),
             ("let x; x = function () {}; const { y = () => 0 } = {}; [x.name, y.name, (function (z = class {}) { return z.name })()].join()", "x,y,z"),
             ("function F() { this.t = new.target === F } function G() { return new.target } [new F().t, G() === undefined, (() => { function H() { this.t = (() => new.target)() === H } return new H().t })()].join()", "true,true,true"),
@@ -2156,7 +2208,7 @@ mod tests {
             (r"JSON.stringify({ toJSON() { return 'x' } })", r#""x""#),
             (r#"const o = JSON.parse('{"a": [1, 2.5e1, "s\\u0041"], "b": null}'); o.a[1] + o.a[2] + o.b"#, "25sAnull"),
             (r"JSON.parse('[1, 2, 3]', (k, v) => typeof v === 'number' ? v * 2 : v).join()", "2,4,6"),
-            (r#"JSON.stringify(JSON.parse('{"x":{"y":[1,{"z":"w"}]}}'))"#, r#"{"x":{"y":[1,{"z":"w"}]}}"#),            // 动态代码与严格模式
+            (r#"JSON.stringify(JSON.parse('{"x":{"y":[1,{"z":"w"}]}}'))"#, r#"{"x":{"y":[1,{"z":"w"}]}}"#),            // Dynamic code and strict mode
             ("new Function('a', 'b', 'return a + b')(2, 3)", "5"),
             ("Function('return typeof this')()", "object"),
             ("var gv = 1; eval('gv + 1')", "2"),
@@ -2167,7 +2219,7 @@ mod tests {
             ("(function () { return typeof this }).call(1)", "object"),
             ("const o = Object.freeze({ a: 1 }); o.a = 2; o.a", "1"),
             ("class C { m() { return typeof this } } const m = new C().m; m()", "undefined"),
-            // 属性模型与 Object / Array
+            // Property model and Object / Array
             ("Object.keys({ b: 1, 2: 1, a: 1, 1: 1 }).join()", "1,2,b,a"),
             ("Object.getOwnPropertyNames([1, 2]).join()", "0,1,length"),
             ("const a = [1, 2, 3]; delete a[1]; (1 in a) + ',' + a.length", "false,3"),
@@ -2179,7 +2231,7 @@ mod tests {
             ("class M extends Map {} const m = new M(); (m instanceof M) + ',' + m.size", "true,0"),
             ("Math.max.length + [].push.length + Object.defineProperty.length + typeof new Number(1)", "6object"),
             ("const a = [1, 2, 3]; a.length = 1; a.splice(0, 0, 'x', 'y'); a.join() + Array.from({ length: 2 }, (_, i) => i * 2).join()", "x,y,10,2"),
-            // Proxy / Reflect / Iterator 助手 / Set 方法
+            // Proxy / Reflect / Iterator helpers / Set methods
             ("const log = []; const p = new Proxy({ a: 1 }, { get(t, k, r) { log.push(k); return Reflect.get(t, k, r) } }); p.a + log.join()", "1a"),
             ("const f = new Proxy(function (x) { return x * 2 }, { apply(t, th, args) { return t(...args) + 1 } }); f(5) + typeof f", "11function"),
             ("const { proxy, revoke } = Proxy.revocable({}, {}); revoke(); let e; try { proxy.x } catch (x) { e = x.name } e", "TypeError"),
@@ -2243,7 +2295,7 @@ mod tests {
         }
         let (r, out) = eval("console.log('a', 1, [2, 3]); console.log(); 0");
         assert_eq!((r, out), (Ok(String::from("0")), alloc::vec![String::from("a 1 2,3"), String::new()]));
-        // 阶段 4：Promise 与 async（结果看微任务跑完后的输出顺序）
+        // Stage 4: Promise and async (results are the output order after microtasks have run)
         let printed = [
             ("Promise.resolve(1).then(v => console.log('then', v)); console.log('sync')", "sync|then 1"),
             ("async function f() { const x = await Promise.resolve(2); return x * 3 } f().then(v => console.log(v)); console.log('first')", "first|6"),
@@ -2256,7 +2308,7 @@ mod tests {
             ("Promise.reject(1).finally(() => console.log('fin')).catch(e => console.log('e', e))", "fin|e 1"),
             ("async function a() { console.log('a1'); await 0; console.log('a2') } a(); console.log('main')", "a1|main|a2"),
             ("class K { async m() { return this.v } } const k = new K(); k.v = 'mv'; k.m().then(console.log)", "mv"),
-            // async 生成器、for await
+            // Async generators, for await
             ("async function* g() { yield 1; const x = yield 2; yield x * 10; return 'end' } (async () => { const it = g(); const r = []; r.push((await it.next()).value); r.push((await it.next()).value); r.push((await it.next(4)).value); const last = await it.next(); r.push(last.value, last.done); console.log(r.join()) })()", "1,2,40,end,true"),
             ("async function* nums() { for (let i = 0; i < 3; i++) { await null; yield i } } (async () => { let s = ''; for await (const n of nums()) s += n; for await (const v of [Promise.resolve('a'), 'b']) s += v; console.log(s) })()", "012ab"),
             ("async function* g() { try { yield 1; yield 2 } finally { console.log('cleanup') } } (async () => { for await (const x of g()) { console.log(x); break } console.log('after') })()", "1|cleanup|after"),

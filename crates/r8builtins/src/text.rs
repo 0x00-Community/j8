@@ -9,27 +9,27 @@ use unicode_normalization::UnicodeNormalization;
 
 use crate::{Args, Installer};
 
-/// String / Number / Math / Symbol / URI 函数的补全。
+/// The remaining String / Number / Math / Symbol / URI functions.
 struct Texts;
 
-/// 小数位数 / 有效位数的上限
+/// Upper bound on fraction digits / significant digits
 const MAX_DIGITS: f64 = 100.0;
-/// toFixed 超过这个数就按 ToString
+/// Beyond this, toFixed falls back to ToString
 const FIXED_LIMIT: f64 = 1e21;
-/// f64 最小非规格数的指数（2^-1074）
+/// Exponent of the smallest f64 subnormal (2^-1074)
 const MIN_EXP: i64 = 1074;
-/// f64 尾数位数（含隐含位）
+/// Number of f64 mantissa bits (including the implicit bit)
 const MANTISSA_BITS: u64 = 53;
-/// 码点上限
+/// Largest code point
 const MAX_CODE_POINT: f64 = 1_114_111.0;
-/// URI 里不转义的保留字符
+/// Reserved characters left unescaped in URIs
 const URI_RESERVED: &str = ";/?:@&=+$,";
-/// URI 里不转义的非保留标点
+/// Unreserved punctuation left unescaped in URIs
 const URI_MARK: &str = "-_.!~*'()";
-/// `escape` 不转义的标点
+/// Punctuation that `escape` leaves unescaped
 const ESCAPE_KEEP: &str = "@*_+-./";
 
-/// 规范化形式。
+/// Normalization form.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Form {
     Nfc,
@@ -42,9 +42,9 @@ impl Texts {
     // ---- String ----
 
     fn from_char_code<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        // 一个码元、不是代理：直接编进栈上缓冲（ToUint16 = ToUint32 的低 16 位）
+        // A single non-surrogate code unit: encode it directly into a stack buffer (ToUint16 = low 16 bits of ToUint32)
         if let [v] = args {
-            #[expect(clippy::cast_possible_truncation, reason = "ToUint16 就是取低 16 位")]
+            #[expect(clippy::cast_possible_truncation, reason = "ToUint16 just takes the low 16 bits")]
             let u = a.to_uint32(*v)? as u16;
             if let Some(c) = char::from_u32(u32::from(u)) {
                 return Ok(a.string(c.encode_utf8(&mut [0; 4])).into());
@@ -68,14 +68,14 @@ impl Texts {
                 let t = a.describe(v);
                 return Err(a.throw(ErrorKind::Range, &alloc::format!("Invalid code point {t}")));
             }
-            #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "已检查在码点范围里")]
+            #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "checked to be within the code point range")]
             let cp = n as u32;
             out.push(char::from_u32(cp).unwrap_or('\u{fffd}'));
         }
         Ok(a.string(&out).into())
     }
 
-    /// `String.raw(template, ...substitutions)`。
+    /// `String.raw(template, ...substitutions)`.
     fn raw<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let cooked = a.to_object(args.at(0))?;
         let literals = a.get_named(cooked.into(), "raw")?;
@@ -89,7 +89,7 @@ impl Texts {
             if i + 1.0 >= len {
                 break;
             }
-            #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "下标非负")]
+            #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "index is non-negative")]
             let k = i as usize + 1;
             if let Some(&sub) = args.get(k) {
                 out.push_str(&a.to_string(sub)?);
@@ -110,11 +110,11 @@ impl Texts {
         let s = Self::this_string(a, this)?;
         let units: Vec<u16> = s.encode_utf16().collect();
         let pos = a.to_integer_or_infinity(args.at(0))?;
-        #[expect(clippy::cast_precision_loss, reason = "字符串长度远小于 2^53")]
+        #[expect(clippy::cast_precision_loss, reason = "string length is far below 2^53")]
         if pos < 0.0 || pos >= units.len() as f64 {
             return Ok(Value::Undefined);
         }
-        #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "已检查在界内")]
+        #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "checked to be in bounds")]
         let i = pos as usize;
         let first = units[i];
         let cp = match units.get(i + 1) {
@@ -166,11 +166,11 @@ impl Texts {
         Ok(a.string(&out).into())
     }
 
-    /// `substr(start, length)`（annexB）。
+    /// `substr(start, length)` (annexB).
     fn substr<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let s = Self::this_string(a, this)?;
         let units: Vec<u16> = s.encode_utf16().collect();
-        #[expect(clippy::cast_precision_loss, reason = "字符串长度远小于 2^53")]
+        #[expect(clippy::cast_precision_loss, reason = "string length is far below 2^53")]
         let size = units.len() as f64;
         let start = a.to_integer_or_infinity(args.at(0))?;
         let start = if start == f64::NEG_INFINITY { 0.0 } else if start < 0.0 { (size + start).max(0.0) } else { start.min(size) };
@@ -179,12 +179,12 @@ impl Texts {
             v => a.to_integer_or_infinity(v)?,
         };
         let end = (start + len).clamp(start, size);
-        #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "已夹到 [0, size]")]
+        #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "clamped to [0, size]")]
         let (s0, e0) = (start as usize, end as usize);
         Ok(a.string(&String::from_utf16_lossy(&units[s0..e0])).into())
     }
 
-    /// annexB 的 HTML 方法：`<tag attr="值">s</tag>`。
+    /// Annex B HTML methods: `<tag attr="value">s</tag>`.
     fn html<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>], tag: &str, attr: Option<&str>) -> Result<Value<'gc>, Error> {
         let s = Self::this_string(a, this)?;
         let mut open = alloc::format!("<{tag}");
@@ -204,7 +204,7 @@ impl Texts {
         }
     }
 
-    /// round_half_up(x · 10^k)，`x` 非负有限，精确算。
+    /// round_half_up(x · 10^k), computed exactly; `x` is non-negative and finite.
     fn scaled(x: f64, k: i64) -> BigInt {
         let bits = x.to_bits();
         let exp = i64::try_from((bits >> 52) & 0x7ff).unwrap_or(0);
@@ -226,9 +226,10 @@ impl Texts {
         (num * 2 + &den) / (den * 2)
     }
 
-    /// 十进制有效数字 `n`（恰好 `digits` 位）与指数 `e`：n · 10^(e − digits + 1) 最接近 x。
+    /// Decimal significand `n` (exactly `digits` digits) and exponent `e` such that n · 10^(e − digits + 1) is closest
+    /// to x.
     fn significant(x: f64, digits: i64) -> (String, i64) {
-        #[expect(clippy::cast_possible_truncation, reason = "指数在 ±400 里")]
+        #[expect(clippy::cast_possible_truncation, reason = "exponent is within ±400")]
         let mut ei = libm::floor(libm::log10(x)) as i64;
         loop {
             let n = Self::scaled(x, digits - 1 - ei);
@@ -254,7 +255,7 @@ impl Texts {
         if x.abs() >= FIXED_LIMIT {
             return Ok(a.to_string(x.into())?.into());
         }
-        #[expect(clippy::cast_possible_truncation, reason = "已检查在 [0, 100]")]
+        #[expect(clippy::cast_possible_truncation, reason = "checked to be in [0, 100]")]
         let fd = f as i64;
         let n = Self::scaled(x.abs(), fd).to_str_radix(10);
         let fdu = usize::try_from(fd).unwrap_or(0);
@@ -284,11 +285,11 @@ impl Texts {
         let sign = if x < 0.0 { "-" } else { "" };
         let ax = x.abs();
         let s = if ax == 0.0 {
-            #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "已检查在 [0, 100]")]
+            #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "checked to be in [0, 100]")]
             let fd = if args.at(0) == Value::Undefined { 0 } else { f as usize };
             Self::exponential(&"0".repeat(fd + 1), 0)
         } else if args.at(0) == Value::Undefined {
-            // 最短的能还原的位数
+            // Shortest digit count that round-trips
             let shortest = String::from(ryu_js::Buffer::new().format(ax));
             let digits: String = shortest.split('e').next().unwrap_or("").chars().filter(char::is_ascii_digit).collect::<String>().trim_start_matches('0').trim_end_matches('0').into();
             let digits = if digits.is_empty() { String::from("0") } else { digits };
@@ -296,7 +297,7 @@ impl Texts {
             let (d, e) = Self::significant(ax, n);
             Self::exponential(&d, e)
         } else {
-            #[expect(clippy::cast_possible_truncation, reason = "已检查在 [0, 100]")]
+            #[expect(clippy::cast_possible_truncation, reason = "checked to be in [0, 100]")]
             let (d, e) = Self::significant(ax, f as i64 + 1);
             Self::exponential(&d, e)
         };
@@ -315,7 +316,7 @@ impl Texts {
         if !(1.0..=MAX_DIGITS).contains(&p) {
             return Err(a.throw(ErrorKind::Range, "toPrecision() argument must be between 1 and 100"));
         }
-        #[expect(clippy::cast_possible_truncation, reason = "已检查在 [1, 100]")]
+        #[expect(clippy::cast_possible_truncation, reason = "checked to be in [1, 100]")]
         let p = p as i64;
         let sign = if x < 0.0 { "-" } else { "" };
         let ax = x.abs();
@@ -349,7 +350,7 @@ impl Texts {
     }
 
     fn fround<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        #[expect(clippy::cast_possible_truncation, reason = "fround 就是舍入到 f32")]
+        #[expect(clippy::cast_possible_truncation, reason = "fround is exactly rounding to f32")]
         Self::unary(a, args, |x| f64::from(x as f32))
     }
 
@@ -367,7 +368,7 @@ impl Texts {
         Ok(f64::from(x.wrapping_mul(y)).into())
     }
 
-    /// `Math.random`：xorshift64*，第一次用墙上时钟播种。
+    /// `Math.random`: xorshift64*, seeded from the wall clock on first use.
     fn random<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let mut s = a.realm.random_state.get();
         if s == 0 {
@@ -378,12 +379,12 @@ impl Texts {
         s ^= s >> 27;
         a.realm.random_state.set(a.mc, s);
         let r = s.wrapping_mul(0x2545_f491_4f6c_dd1d) >> 11;
-        #[expect(clippy::cast_precision_loss, reason = "取 53 位")]
+        #[expect(clippy::cast_precision_loss, reason = "takes 53 bits")]
         let x = r as f64 / 9_007_199_254_740_992.0;
         Ok(x.into())
     }
 
-    /// `Math.sumPrecise(items)`：精确求和后一次舍入。
+    /// `Math.sumPrecise(items)`: exact sum, rounded once.
     fn sum_precise<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let items = args.at(0);
         if items.is_nullish() {
@@ -419,7 +420,7 @@ impl Texts {
         Ok(Self::to_f64(&sum).into())
     }
 
-    /// 有限 f64 ⇒ 整数（以 2^-1074 为单位）。
+    /// Finite f64 ⇒ integer (in units of 2^-1074).
     fn exact(x: f64) -> BigInt {
         let bits = x.to_bits();
         let exp = i64::try_from((bits >> 52) & 0x7ff).unwrap_or(0);
@@ -429,7 +430,7 @@ impl Texts {
         if x < 0.0 { -v } else { v }
     }
 
-    /// 以 2^-1074 为单位的整数 ⇒ 最近的 f64（一半取偶）。
+    /// Integer in units of 2^-1074 ⇒ nearest f64 (ties to even).
     fn to_f64(n: &BigInt) -> f64 {
         if n.is_zero() {
             return 0.0;
@@ -450,7 +451,7 @@ impl Texts {
             }
             (m, shift)
         };
-        #[expect(clippy::cast_precision_loss, reason = "尾数不超过 2^54")]
+        #[expect(clippy::cast_precision_loss, reason = "mantissa is at most 2^54")]
         let v = libm::ldexp(mantissa as f64, i32::try_from(i64::try_from(shift).unwrap_or(0) - MIN_EXP).unwrap_or(0));
         if neg { -v } else { v }
     }
@@ -595,7 +596,7 @@ impl Texts {
         Self::decode(a, args.at(0), "")
     }
 
-    /// `escape`（annexB）。
+    /// `escape` (annexB).
     fn escape<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let s = a.to_string(args.at(0))?;
         let mut out = String::new();
@@ -609,7 +610,7 @@ impl Texts {
         Ok(a.string(&out).into())
     }
 
-    /// `unescape`（annexB）。
+    /// `unescape` (annexB).
     fn unescape<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let s = a.to_string(args.at(0))?;
         let units: Vec<u16> = s.encode_utf16().collect();
@@ -645,7 +646,7 @@ impl Texts {
     }
 }
 
-/// 一组宿主函数：名字对应一个闭包体（`$body` 拿到 `a` / `this` / `args`）。
+/// A group of host functions: each name maps to a closure body (`$body` gets `a` / `this` / `args`).
 macro_rules! natives {
     ($($name:ident($a:ident, $this:ident, $args:ident) $body:block)*) => {
         impl Texts {
@@ -714,7 +715,7 @@ impl<'gc> Installer<'_, 'gc> {
         for (name, f, n) in methods {
             self.method(sp, name, f, n);
         }
-        // trimLeft / trimRight 与 trimStart / trimEnd 是同一个函数
+        // trimLeft / trimRight are the same functions as trimStart / trimEnd
         for (alias, original) in [("trimLeft", "trimStart"), ("trimRight", "trimEnd")] {
             let f = sp.borrow().own(original).unwrap_or_default();
             self.set(sp, alias, f);

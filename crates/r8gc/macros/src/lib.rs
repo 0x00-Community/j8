@@ -1,6 +1,6 @@
-//! r8gc 的过程宏：`#[derive(Collect)]`、`Rootable!` 用的 `__unelide_lifetimes!`。
+//! Procedural macros for r8gc: `#[derive(Collect)]` and `__unelide_lifetimes!` (used by `Rootable!`).
 //!
-//! 派生宏的模式与属性沿用 gc-arena-derive（MIT），多生成一个 `relocate`。
+//! The derive macro's modes and attributes follow gc-arena-derive (MIT), and it additionally generates `relocate`.
 use proc_macro2::{Span, TokenStream};
 use quote::{ToTokens, quote, quote_spanned};
 use syn::parse::{Parse, ParseStream};
@@ -8,18 +8,18 @@ use syn::spanned::Spanned;
 use syn::visit_mut::VisitMut;
 use synstructure::{AddBounds, BindStyle, Structure, decl_derive};
 
-/// `Drop` 怎么处理。
+/// How `Drop` is handled.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Mode {
-    /// 类型是 `'static`：里面没有 `Gc`，什么都不用做
+    /// The type is `'static`: it contains no `Gc`, so nothing needs to be done
     RequireStatic,
-    /// 禁止实现 `Drop`（析构时 `Gc` 可能已经没了）
+    /// Implementing `Drop` is forbidden (a `Gc` may already be gone when the destructor runs)
     NoDrop,
-    /// 允许 `Drop`，由实现者保证不碰 `Gc`
+    /// `Drop` is allowed; the implementer guarantees it does not touch any `Gc`
     UnsafeDrop,
 }
 
-/// 类型上的 `#[collect(...)]`。
+/// `#[collect(...)]` on the type.
 #[derive(Default)]
 struct Options {
     mode: Option<Mode>,
@@ -54,7 +54,7 @@ impl Options {
     }
 }
 
-/// 一次 `#[derive(Collect)]`。
+/// One `#[derive(Collect)]` invocation.
 struct Derive<'a> {
     s: Structure<'a>,
     options: Options,
@@ -62,7 +62,7 @@ struct Derive<'a> {
 }
 
 impl Derive<'_> {
-    /// 至多一个 `#[collect]`
+    /// At most one `#[collect]`
     fn attr(attrs: &[syn::Attribute]) -> syn::Result<Option<&syn::Attribute>> {
         let mut found = attrs.iter().filter(|a| a.path().is_ident("collect"));
         let first = found.next();
@@ -72,7 +72,8 @@ impl Derive<'_> {
         }
     }
 
-    /// 不标 `require_static` 的字段才要遍历；标了的字段加 `'static` 约束。返回有没有这样的字段
+    /// Only fields not marked `require_static` are traced; marked fields get a `'static` bound. Returns whether any
+    /// such field exists
     fn filter_static_fields(&mut self) -> bool {
         let mut statics = Vec::new();
         let errors = &mut self.errors;
@@ -104,7 +105,7 @@ impl Derive<'_> {
         any
     }
 
-    /// 类型只有一个生命周期参数时就是 `'gc`
+    /// If the type has exactly one lifetime parameter, it is `'gc`
     fn gc_lifetime(&self) -> syn::Result<Option<syn::Lifetime>> {
         if let Some(lt) = &self.options.gc_lifetime {
             return Ok(Some(lt.clone()));
@@ -136,7 +137,7 @@ impl Derive<'_> {
             }
         }
         let mut needs_trace = quote!(false);
-        // 能并行析构：没有自定义 Drop（no_drop），也没有不知底细的 'static 字段，且各字段都能
+        // Can drop in parallel: no custom Drop (no_drop), no opaque 'static fields, and every field can
         let mut parallel_drop = if self.options.mode == Some(Mode::NoDrop) && !has_static { quote!(true) } else { quote!(false) };
         for b in self.s.variants().iter().flat_map(synstructure::VariantInfo::bindings) {
             let ty = &b.ast().ty;
@@ -204,23 +205,26 @@ fn collect_derive(s: Structure<'_>) -> TokenStream {
 
 decl_derive! {
     [Collect, attributes(collect)] =>
-    /// 派生 `r8gc::Collect`（`trace` + `relocate`）。
+    /// Derives `r8gc::Collect` (`trace` + `relocate`).
     ///
-    /// 类型上必须标一种模式：
-    /// - `#[collect(no_drop)]`：常用；禁止类型实现 `Drop`
-    /// - `#[collect(require_static)]`：类型是 `'static`，什么都不遍历
-    /// - `#[collect(unsafe_drop)]`：允许 `Drop`，实现者保证析构时不碰 `Gc`
+    /// The type must be marked with one mode:
+    /// - `#[collect(no_drop)]`: the common case; the type may not implement `Drop`
+    /// - `#[collect(require_static)]`: the type is `'static`; nothing is traced
+    /// - `#[collect(unsafe_drop)]`: `Drop` is allowed; the implementer guarantees the destructor does not touch
+    ///   any `Gc`
     ///
-    /// 可选：`bound = "where …"` 换掉自动加的约束；`gc_lifetime = 'gc` 指定哪个生命周期是品牌。
-    /// 字段上可标 `#[collect(require_static)]`：加 `'static` 约束、不遍历它。
+    /// Optional: `bound = "where …"` replaces the automatically added bounds; `gc_lifetime = 'gc` specifies which
+    /// lifetime is the brand. Fields may be marked `#[collect(require_static)]`: adds a `'static` bound and does
+    /// not trace the field.
     collect_derive
 }
 
-/// `Rootable!` 用：把类型里的 `'_` 都换成给定的生命周期。写法 `__unelide_lifetimes!('lt; Type)`。
+/// Used by `Rootable!`: replaces every `'_` in a type with the given lifetime. Syntax:
+/// `__unelide_lifetimes!('lt; Type)`.
 #[doc(hidden)]
 #[proc_macro]
 pub fn __unelide_lifetimes(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
-    /// 输入：生命周期; 类型
+    /// Input: lifetime; type
     struct Input {
         lt: syn::Lifetime,
         ty: syn::Type,
@@ -234,7 +238,7 @@ pub fn __unelide_lifetimes(input: proc_macro::TokenStream) -> proc_macro::TokenS
         }
     }
 
-    /// 把 `'_` 换成 `self.0`
+    /// Replaces `'_` with `self.0`
     struct Unelide(syn::Lifetime);
 
     impl VisitMut for Unelide {

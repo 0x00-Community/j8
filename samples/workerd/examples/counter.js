@@ -1,4 +1,4 @@
-// 最简单的 Durable Object：每个名字一个计数器，状态放在 storage 里。
+// The simplest Durable Object: one counter per name, with state kept in storage.
 export class Counter {
   constructor(state, env) {
     this.state = state;

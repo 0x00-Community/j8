@@ -1,4 +1,4 @@
-//! `Collect`：回收器怎么遍历一个值里的 `Gc`。
+//! `Collect`: how the collector traverses the `Gc`s inside a value.
 use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
 use alloc::rc::Rc;
@@ -9,49 +9,53 @@ use core::marker::PhantomData;
 
 use crate::header::Ptr;
 
-/// 能放进 `Gc` 的类型。
+/// A type that can be placed in a `Gc`.
 ///
 /// # Safety
-/// - `trace` 必须访问值里的每一个 `Gc`，`relocate` 必须改写每一个 `Gc`（对象会被搬走）
-/// - `trace` / `relocate` 只碰这个值自己：回收是并行的，不同对象在不同线程上同时遍历
-/// - `Drop` 里不得碰 `Gc`（析构时它们可能已经没了）；派生宏用 `no_drop` 保证
-/// - 借内部可变性收进新的 `Gc` 必须经写屏障（`Lock` / `RefLock` 已做好）
+/// - `trace` must visit every `Gc` in the value, and `relocate` must rewrite every `Gc` (objects get moved)
+/// - `trace` / `relocate` touch only this value itself: collection is parallel, and different objects are
+///   traversed concurrently on different threads
+/// - `Drop` must not touch any `Gc` (they may already be gone when it runs); the derive macro ensures this with
+///   `no_drop`
+/// - Storing a new `Gc` through interior mutability must go through the write barrier (`Lock` / `RefLock` already
+///   do this)
 ///
-/// 一般用 `#[derive(Collect)]`，不手写。
+/// Usually derived with `#[derive(Collect)]` rather than written by hand.
 pub unsafe trait Collect<'gc> {
-    /// 值里不可能有 `Gc` 时设 `false`，回收器整个跳过它
+    /// Set to `false` when the value can never contain a `Gc`; the collector then skips it entirely
     const NEEDS_TRACE: bool = true;
 
-    /// 死了以后能在线程池的别的线程上析构（与别的死对象同时）：没有自定义 `Drop`，
-    /// 各字段的析构也都不碰线程相关或跨对象共享的非原子状态（如 `Rc`）。
-    /// 缺省 `false`：在调用线程上析构。派生宏按字段推出来。
+    /// Once dead, the value can be dropped on another thread of the pool (concurrently with other dead objects):
+    /// there is no custom `Drop`, and no field's destructor touches thread-affine state or non-atomic state shared
+    /// across objects (such as `Rc`).
+    /// Defaults to `false`: dropped on the calling thread. The derive macro infers it from the fields.
     const PARALLEL_DROP: bool = false;
 
-    /// 对每个 `Gc` 调 [`Trace::trace`]
+    /// Calls [`Trace::trace`] on every `Gc`
     #[inline]
     fn trace(&self, _t: &mut Trace<'_>) {}
 
-    /// 对每个 `Gc` 调 [`Relocate::relocate`]（字段原地改成搬后的地址）
+    /// Calls [`Relocate::relocate`] on every `Gc` (fields are updated in place to the moved addresses)
     #[inline]
     fn relocate(&mut self, _r: &mut Relocate<'_>) {}
 }
 
-/// 标记时看到一条边的工人（标记 / 调试校验）。
+/// A worker that sees an edge during marking (marking / debug verification).
 pub(crate) trait Visit {
     fn visit(&mut self, p: Ptr);
 }
 
-/// 搬对象时改一个字段的工人（晋升 / 压缩）。
+/// A worker that updates a field while moving objects (promotion / compaction).
 pub(crate) trait Mover {
     fn forward(&mut self, p: Ptr) -> Ptr;
 
-    /// 只有指向新生代的指针会变
+    /// Only pointers into the young generation change
     fn young_only(&self) -> bool {
         false
     }
 }
 
-/// 标记时的访问器（每个回收线程各一个）。
+/// The visitor used during marking (one per collector thread).
 pub struct Trace<'a> {
     visit: &'a mut (dyn Visit + 'a),
 }
@@ -74,7 +78,7 @@ impl<'a> Trace<'a> {
     }
 }
 
-/// 搬对象时的访问器：把字段改成新地址（每个回收线程各一个）。
+/// The visitor used while moving objects: updates fields to the new addresses (one per collector thread).
 pub struct Relocate<'a> {
     mover: &'a mut (dyn Mover + 'a),
     moves: usize,
@@ -92,13 +96,15 @@ impl<'a> Relocate<'a> {
         }
     }
 
-    /// 到目前为止改过几个指针。按地址做哈希的容器拿它判断要不要重建索引。
+    /// Number of pointers updated so far. Containers that hash by address use it to decide whether to rebuild their
+    /// index.
     pub fn moves(&self) -> usize {
         self.moves
     }
 
-    /// 这一趟只有指向新生代的指针会变（次回收）：容器可以跳过自上次次回收以来没写过新指针的部分。
-    /// 否则（压缩）任何指针都可能变，得全改一遍。
+    /// In this pass only pointers into the young generation change (minor collection): containers may skip the parts
+    /// where no new pointer has been written since the last minor collection.
+    /// Otherwise (compaction) any pointer may change, and everything must be updated.
     pub fn young_only(&self) -> bool {
         self.mover.young_only()
     }
@@ -113,7 +119,7 @@ impl<'a> Relocate<'a> {
     }
 }
 
-/// 不含 `Gc` 的类型：什么都不用做；析构只是还内存，哪个线程都行
+/// Types without a `Gc`: nothing to do; dropping just frees memory, so any thread will do
 macro_rules! leaf {
     ($($ty:ty),* $(,)?) => {$(
         unsafe impl<'gc> Collect<'gc> for $ty {
@@ -124,7 +130,7 @@ macro_rules! leaf {
 }
 leaf!((), bool, char, u8, u16, u32, u64, u128, usize, i8, i16, i32, i64, i128, isize, f32, f64, str, String);
 
-/// `'static` 的包装：里面不可能有 `Gc`
+/// `'static` wrappers: cannot contain a `Gc`
 macro_rules! leaf_static {
     ($($ty:ident),*) => {$(
         unsafe impl<'gc, T: ?Sized + 'static> Collect<'gc> for $ty<T> {
@@ -144,7 +150,7 @@ unsafe impl<T: ?Sized + 'static> Collect<'_> for &'static T {
     const PARALLEL_DROP: bool = true;
 }
 
-/// 逐个元素遍历的容器
+/// Containers traversed element by element
 macro_rules! sequence {
     ($($ty:ty),*) => {$(
         unsafe impl<'gc, T: Collect<'gc>> Collect<'gc> for $ty {
@@ -214,7 +220,8 @@ unsafe impl<'gc, T: Collect<'gc>, E: Collect<'gc>> Collect<'gc> for Result<T, E>
     }
 }
 
-/// 键不能含 `Gc`（键改了要重排，原地改不了），只遍历值
+/// Keys cannot contain a `Gc` (a changed key requires reordering, which can't be done in place); only values are
+/// traversed
 unsafe impl<'gc, K: Ord + 'static, V: Collect<'gc>> Collect<'gc> for BTreeMap<K, V> {
     const NEEDS_TRACE: bool = V::NEEDS_TRACE;
 
@@ -235,7 +242,7 @@ unsafe impl<T: Ord + 'static> Collect<'_> for BTreeSet<T> {
     const NEEDS_TRACE: bool = false;
 }
 
-/// 元组
+/// Tuples
 macro_rules! tuple {
     ($(($($n:tt $t:ident),+)),*) => {$(
         unsafe impl<'gc, $($t: Collect<'gc>),+> Collect<'gc> for ($($t,)+) {
@@ -254,7 +261,7 @@ macro_rules! tuple {
 }
 tuple!((0 A), (0 A, 1 B), (0 A, 1 B, 2 C), (0 A, 1 B, 2 C, 3 D), (0 A, 1 B, 2 C, 3 D, 4 E), (0 A, 1 B, 2 C, 3 D, 4 E, 5 F));
 
-/// 派生宏用：实现了 `Drop` 的类型会和它冲突（`#[collect(no_drop)]`）
+/// Used by the derive macro: types that implement `Drop` conflict with it (`#[collect(no_drop)]`)
 #[doc(hidden)]
 pub trait __MustNotImplDrop {}
 

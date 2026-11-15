@@ -1,11 +1,11 @@
 [package]
-# crates.io 上 r8 已被占，包名 r8js、库名仍是 r8
+# r8 is taken on crates.io: the package is r8js, the library is still r8
 name = "r8js"
-description = "r8：Rust 重写的 V8。根包聚合导出：绑定宏 #[r8::class] / #[r8::object] / #[r8::function] 与它们要用的 trait、类型"
+description = "r8: V8 rewritten in Rust. The root package re-exports the binding macros #[r8::class] / #[r8::object] / #[r8::function] and the traits and types they need"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-# tests/ 下的 test262.rs 挂在 dune 包下，这里只认 binding
+# tests/test262.rs belongs to the dune package; only binding is registered here
 autotests = false
 repository.workspace = true
 readme = "README.md"
@@ -34,7 +34,7 @@ workspace = true
 [workspace]
 resolver = "3"
 members = ["crates/*", "samples/*", "debugger"]
-# 对比 V8 的基准要下载 rusty_v8 的预编译库，自成一个 workspace
+# The V8 comparison benchmark downloads rusty_v8's prebuilt library, so it is a workspace of its own
 exclude = ["samples/benchv8"]
 
 [workspace.package]
@@ -60,6 +60,7 @@ clap = { version = "4.6", features = ["derive"] }
 moremath = { version = "=0.2.3", default-features = false }
 libm = "0.2"
 r8gc = { version = "0.1.2", path = "crates/r8gc", default-features = false }
+r8lockfree = { version = "0.1.2", path = "crates/r8lockfree" }
 smol_str = { version = "0.3", default-features = false }
 hashbrown = { version = "0.17", default-features = false }
 rustc-hash = { version = "2", default-features = false }
@@ -82,13 +83,13 @@ doc_markdown = "allow"
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"
 must_use_candidate = "allow"
-# JS 数值语义本来就是精确比较
+# JS numeric semantics are exact comparisons by definition
 float_cmp = "allow"
-# 内建函数里 a / f / x / y 这类短名是惯例
+# Short names like a / f / x / y are conventional in built-in functions
 many_single_char_names = "allow"
-# args / argc 这类成对的名字是惯例
+# Paired names like args / argc are conventional
 similar_names = "allow"
-# 两个分支都有内容时 match 比 if let ... else 好读
+# When both branches have bodies, match reads better than if let ... else
 single_match_else = "allow"
 
 [profile.dev]

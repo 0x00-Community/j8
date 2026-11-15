@@ -1,4 +1,4 @@
-// Map / Set 插入与查找
+// Map / Set insertion and lookup
 const m = new Map();
 const s = new Set();
 for (let i = 0; i < 100000; i++) { m.set('k' + i, i); s.add(i * 3); }

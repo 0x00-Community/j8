@@ -1,11 +1,11 @@
-//! 由 JSON 定义生成代码。
+//! Generates code from the JSON definitions.
 use proc_macro2::{Span, TokenStream};
 use quote::{format_ident, quote};
 use syn::{Error, Ident, Path, Result, Type};
 
 use crate::spec::{Accessor, EnumSpec, FieldSpec, Show, Spec, VariantSpec};
 
-/// 生成时出错都指向宏调用处
+/// Generation errors all point at the macro call site
 fn err(msg: impl core::fmt::Display) -> Error {
     Error::new(Span::call_site(), msg)
 }
@@ -75,7 +75,8 @@ impl EnumSpec {
 }
 
 impl EnumSpec {
-    /// `FromStr`：`Display` 的逆。助记符先认，认不出再按 `show: name` 字段的类型试；操作数交给调用处的 `Operands`
+    /// `FromStr`: the inverse of `Display`. Matches the mnemonic first; if that fails, tries the type of the
+    /// `show: name` field. Operands are handed to the caller's `Operands`
     fn parse_impl(&self) -> Result<TokenStream> {
         let ident = self.ident();
         let mut arms = Vec::new();
@@ -117,7 +118,7 @@ impl EnumSpec {
         })
     }
 
-    /// `Operand`：按变体名（即 `Debug`）认，只收单元变体
+    /// `Operand`: matched by variant name (i.e. `Debug`); unit variants only
     fn operand_impl(&self) -> Result<TokenStream> {
         let ident = self.ident();
         let arms = self
@@ -142,7 +143,8 @@ impl EnumSpec {
 }
 
 impl VariantSpec {
-    /// 按字段次序从 `ops` 取操作数建变体；`head` 是已从助记符位置认出来的 `show: name` 字段
+    /// Builds the variant by taking operands from `ops` in field order; `head` is the `show: name` field already
+    /// recognized from the mnemonic position
     fn assemble(&self, owner: &EnumSpec, head: Option<&Ident>) -> Result<TokenStream> {
         let ident = self.ident();
         let values = self
@@ -177,7 +179,7 @@ impl VariantSpec {
         format_ident!("{}", self.name)
     }
 
-    /// 字段全有名字 ⇒ `Some(true)`，全没有 ⇒ `Some(false)`，没有字段 ⇒ `None`
+    /// All fields named ⇒ `Some(true)`, none named ⇒ `Some(false)`, no fields ⇒ `None`
     fn named(&self, owner: &EnumSpec) -> Result<Option<bool>> {
         let mut named = self.fields.iter().map(|f| f.name.is_some());
         match named.next() {
@@ -187,7 +189,7 @@ impl VariantSpec {
         }
     }
 
-    /// 字段在模式里绑定的名字：有名字用名字，没名字用 `_0`、`_1`……
+    /// Names that fields bind to in patterns: the field name if named, otherwise `_0`, `_1`, ...
     fn bindings(&self) -> Vec<Ident> {
         self.fields
             .iter()
@@ -253,7 +255,7 @@ impl FieldSpec {
         syn::parse_str(&self.ty).map_err(|e| err(format_args!("{}::{}: type `{}`: {e}", owner.name, v.name, self.ty)))
     }
 
-    /// `Option<T>` 的 `T`
+    /// The `T` of `Option<T>`
     fn option_inner(ty: &Type) -> Option<&Type> {
         let Type::Path(p) = ty else { return None };
         let last = p.path.segments.last()?;
