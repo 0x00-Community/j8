@@ -418,18 +418,18 @@ dependencies = [
 
 [[package]]
 name = "moremath"
-version = "0.2.2"
+version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1bffe1cb9b0b2e53d64b54d16cfb42efad166dbe5c26c93e08c17c3ce72ca1e0"
+checksum = "222dac42f563bfc4a31cd3b66903973f70d3864c760db64c1e512dcbe31111f0"
 dependencies = [
  "moremath-macros",
 ]
 
 [[package]]
 name = "moremath-macros"
-version = "0.2.2"
+version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2b101f277740b24dde0c3d1294f8b2982317a473875464f9c9196e3fdb27adec"
+checksum = "b2b348c5959e73e3edf51d9a6e54fa7a1dd7fa2cfc357b7e79eb9104e8ce4caf"
 dependencies = [
  "proc-macro2",
  "quote",

@@ -6,10 +6,10 @@ license.workspace = true
 
 [dependencies]
 r8gc-macros = { path = "macros" }
-moremath = { version = "=0.2.2", default-features = false, features = ["alloc"] }
+moremath = { workspace = true, features = ["alloc"] }
 
 [dev-dependencies]
-moremath = { version = "=0.2.2", features = ["std"] }
+moremath = { workspace = true, features = ["std"] }
 
 [features]
 default = ["std"]

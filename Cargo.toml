@@ -49,7 +49,7 @@ r8macros = { path = "crates/macros" }
 r8binding = { path = "crates/r8binding" }
 r8 = { path = "." }
 clap = { version = "4.6", features = ["derive"] }
-moremath = { version = "=0.2.2", default-features = false }
+moremath = { version = "=0.2.3", default-features = false }
 libm = "0.2"
 r8gc = { path = "crates/r8gc", default-features = false }
 smol_str = { version = "0.3", default-features = false }
