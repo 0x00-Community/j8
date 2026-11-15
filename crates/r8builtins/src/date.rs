@@ -1,3 +1,4 @@
+use r8framework::ValueKind;
 use alloc::format;
 use alloc::string::String;
 
@@ -169,8 +170,8 @@ impl Dates {
     }
 
     fn this_time<'gc>(a: &Agent<'gc, '_>, this: Value<'gc>) -> Result<(JsObject<'gc>, f64), Error> {
-        match this {
-            Value::Object(o) => match o.borrow().kind {
+        match this.kind() {
+            ValueKind::Object(o) => match o.borrow().kind {
                 ObjectKind::Date(t) => Ok((o, t)),
                 _ => Err(a.throw(ErrorKind::Type, "this is not a Date object.")),
             },
@@ -411,8 +412,8 @@ impl Dates {
         let tv = match args {
             [] => Self::now(a),
             [v] => {
-                let existing = match v {
-                    Value::Object(o) => match o.borrow().kind {
+                let existing = match v.kind() {
+                    ValueKind::Object(o) => match o.borrow().kind {
                         ObjectKind::Date(t) => Some(t),
                         _ => None,
                     },
@@ -420,9 +421,9 @@ impl Dates {
                 };
                 match existing {
                     Some(t) => t,
-                    None => match a.to_primitive(*v, Hint::Default)? {
-                        Value::String(s) => Self::parse(&s),
-                        p => Self::time_clip(a.to_number(p)?),
+                    None => match (a.to_primitive(*v, Hint::Default)?).kind() {
+                        ValueKind::String(s) => Self::parse(&s),
+                        p => Self::time_clip(a.to_number(Value::from(p))?),
                     },
                 }
             }
@@ -586,7 +587,7 @@ impl Dates {
     fn to_json<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let o = a.to_object(this)?;
         let tv = a.to_primitive(o.into(), Hint::Number)?;
-        if let Value::Number(x) = tv
+        if let ValueKind::Number(x) = tv.kind()
             && !x.is_finite()
         {
             return Ok(Value::Null);
@@ -604,19 +605,19 @@ impl Dates {
 
     /// `Date.prototype[Symbol.toPrimitive](hint)`.
     fn to_primitive<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        if !matches!(this, Value::Object(_)) {
+        if !matches!(this.kind(), ValueKind::Object(_)) {
             return Err(a.throw(ErrorKind::Type, "Date.prototype[Symbol.toPrimitive] called on a non-object"));
         }
-        let order = match args.at(0) {
-            Value::String(s) if &**s == "string" || &**s == "default" => ["toString", "valueOf"],
-            Value::String(s) if &**s == "number" => ["valueOf", "toString"],
+        let order = match args.at(0).kind() {
+            ValueKind::String(s) if &**s == "string" || &**s == "default" => ["toString", "valueOf"],
+            ValueKind::String(s) if &**s == "number" => ["valueOf", "toString"],
             _ => return Err(a.throw(ErrorKind::Type, "Invalid hint")),
         };
         for name in order {
             let f = a.get_named(this, name)?;
             if a.is_callable(f) {
                 let r = a.call(f, this, &[])?;
-                if !matches!(r, Value::Object(_)) {
+                if !matches!(r.kind(), ValueKind::Object(_)) {
                     return Ok(r);
                 }
             }

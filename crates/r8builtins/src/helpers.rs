@@ -1,3 +1,4 @@
+use r8framework::ValueKind;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
@@ -18,7 +19,7 @@ enum Probe {
 
 impl Helpers {
     fn is_iterator_ctor(v: Value<'_>) -> bool {
-        matches!(v, Value::Object(f) if matches!(f.borrow().kind, ObjectKind::Native(n) if core::ptr::fn_addr_eq(n.f, Self::iterator as r8framework::NativeFn)))
+        matches!(v.kind(), ValueKind::Object(f) if matches!(f.borrow().kind, ObjectKind::Native(n) if core::ptr::fn_addr_eq(n.f, Self::iterator as r8framework::NativeFn)))
     }
 
     /// `Iterator` is abstract: it can only be constructed through a subclass.
@@ -37,8 +38,8 @@ impl Helpers {
 
     /// `this` must be an object.
     fn this_object<'gc>(a: &Agent<'gc, '_>, this: Value<'gc>) -> Result<Value<'gc>, Error> {
-        match this {
-            Value::Object(_) => Ok(this),
+        match this.kind() {
+            ValueKind::Object(_) => Ok(this),
             _ => Err(a.throw(ErrorKind::Type, "Iterator.prototype method called on a non-object")),
         }
     }
@@ -116,9 +117,9 @@ impl Helpers {
 
     /// GetIteratorFlattenable: with `strings`, strings are accepted too; other primitives throw TypeError.
     fn flattenable<'gc>(a: &mut Agent<'gc, '_>, v: Value<'gc>, strings: bool) -> Result<IterRecord<'gc>, Error> {
-        match v {
-            Value::Object(_) => {}
-            Value::String(_) if strings => {}
+        match v.kind() {
+            ValueKind::Object(_) => {}
+            ValueKind::String(_) if strings => {}
             _ => {
                 let t = a.describe(v);
                 return Err(a.throw(ErrorKind::Type, &alloc::format!("{t} is not an object")));
@@ -126,7 +127,7 @@ impl Helpers {
         }
         let method = a.get_symbol(v, a.realm.symbols.iterator, v)?;
         let iterator = if method.is_nullish() { v } else { a.call(method, v, &[])? };
-        if !matches!(iterator, Value::Object(_)) {
+        if !matches!(iterator.kind(), ValueKind::Object(_)) {
             return Err(a.throw(ErrorKind::Type, "the iterator is not an object"));
         }
         Self::direct(a, iterator)
@@ -196,8 +197,8 @@ impl Helpers {
     }
 
     fn helper<'gc>(a: &Agent<'gc, '_>, this: Value<'gc>) -> Result<(JsObject<'gc>, IteratorHelper<'gc>), Error> {
-        match this {
-            Value::Object(o) => match &o.borrow().kind {
+        match this.kind() {
+            ValueKind::Object(o) => match &o.borrow().kind {
                 ObjectKind::IteratorHelper(h) => Ok((o, **h)),
                 _ => Err(a.throw(ErrorKind::Type, "Iterator Helper method called on an incompatible receiver")),
             },
@@ -334,8 +335,8 @@ impl Helpers {
     /// `Iterator.from(o)`: returned as is if it already inherits from Iterator.prototype, otherwise wrapped.
     fn from<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let rec = Self::flattenable(a, args.at(0), true)?;
-        let inherits = match rec.iterator {
-            Value::Object(it) => {
+        let inherits = match rec.iterator.kind() {
+            ValueKind::Object(it) => {
                 let mut cur = a.get_prototype_of(it)?;
                 let mut found = false;
                 while let Some(p) = cur {
@@ -356,8 +357,8 @@ impl Helpers {
     }
 
     fn wrapped<'gc>(a: &Agent<'gc, '_>, this: Value<'gc>) -> Result<IterRecord<'gc>, Error> {
-        match this {
-            Value::Object(o) => match o.borrow().kind {
+        match this.kind() {
+            ValueKind::Object(o) => match o.borrow().kind {
                 ObjectKind::WrappedIterator(r) => Ok(r),
                 _ => Err(a.throw(ErrorKind::Type, "method called on an incompatible receiver")),
             },
@@ -392,7 +393,7 @@ impl Helpers {
     /// SetterThatIgnoresPrototypeProperties: writing on Iterator.prototype itself throws TypeError; on other objects it
     /// creates / changes an own property.
     fn ignoring_setter<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, key: Key<'_, 'gc>, v: Value<'gc>) -> Result<Value<'gc>, Error> {
-        let Value::Object(o) = this else {
+        let ValueKind::Object(o) = this.kind() else {
             return Err(a.throw(ErrorKind::Type, "setter called on a non-object"));
         };
         if r8gc::Gc::ptr_eq(o, a.realm.iterator_proto) {

@@ -1,3 +1,4 @@
+use r8framework::ValueKind;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
@@ -34,8 +35,8 @@ impl Buffers {
 
     /// `this` is a (shared / non-shared) buffer.
     fn this_buffer<'gc>(a: &Agent<'gc, '_>, this: Value<'gc>, shared: bool) -> Result<JsObject<'gc>, Error> {
-        match this {
-            Value::Object(o) if matches!(&o.borrow().kind, ObjectKind::ArrayBuffer(b) if b.shared == shared) => Ok(o),
+        match this.kind() {
+            ValueKind::Object(o) if matches!(&o.borrow().kind, ObjectKind::ArrayBuffer(b) if b.shared == shared) => Ok(o),
             _ => Err(a.throw(ErrorKind::Type, if shared { "Method called on a non-SharedArrayBuffer" } else { "Method called on a non-ArrayBuffer" })),
         }
     }
@@ -52,10 +53,10 @@ impl Buffers {
             return Err(a.throw(ErrorKind::Type, if shared { "Constructor SharedArrayBuffer requires 'new'" } else { "Constructor ArrayBuffer requires 'new'" }));
         }
         let len = a.to_index(args.at(0))?;
-        let max = match args.at(1) {
-            o @ Value::Object(_) => match a.get_named(o, "maxByteLength")? {
-                Value::Undefined => None,
-                m => Some(a.to_index(m)?),
+        let max = match args.at(1).kind() {
+            o @ ValueKind::Object(_) => match (a.get_named(Value::from(o), "maxByteLength")?).kind() {
+                ValueKind::Undefined => None,
+                m => Some(a.to_index(Value::from(m))?),
             },
             _ => None,
         };
@@ -76,7 +77,7 @@ impl Buffers {
     }
 
     fn is_view<'gc>(_: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        Ok(matches!(args.at(0), Value::Object(o) if matches!(o.borrow().kind, ObjectKind::TypedArray(..) | ObjectKind::DataView(_))).into())
+        Ok(matches!(args.at(0).kind(), ValueKind::Object(o) if matches!(o.borrow().kind, ObjectKind::TypedArray(..) | ObjectKind::DataView(_))).into())
     }
 
     fn species<'gc>(_: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
@@ -158,7 +159,7 @@ impl Buffers {
         if c == Value::Undefined {
             return Ok(fallback);
         }
-        if !matches!(c, Value::Object(_)) {
+        if !matches!(c.kind(), ValueKind::Object(_)) {
             return Err(a.throw(ErrorKind::Type, "object.constructor is not an object"));
         }
         let s = a.get_symbol(c, a.realm.symbols.species, c)?;
@@ -195,7 +196,7 @@ impl Buffers {
         let fallback = Self::global_ctor(a, if shared { "SharedArrayBuffer" } else { "ArrayBuffer" });
         let ctor = Self::species_constructor(a, o.into(), fallback)?;
         let made = a.construct(ctor, &[new_len.into()], ctor)?;
-        let Value::Object(n) = made else { return Err(a.throw(ErrorKind::Type, "species constructor returned a non-object")) };
+        let ValueKind::Object(n) = made.kind() else { return Err(a.throw(ErrorKind::Type, "species constructor returned a non-object")) };
         let ok = matches!(&n.borrow().kind, ObjectKind::ArrayBuffer(b) if b.shared == shared && b.bytes.is_some());
         if !ok {
             return Err(a.throw(ErrorKind::Type, "species constructor did not return a usable buffer"));
@@ -232,9 +233,9 @@ impl Buffers {
     /// `transfer` / `transferToFixedLength`: a new buffer takes over the bytes and the original is detached.
     fn transfer_with<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>], keep_resizable: bool) -> Result<Value<'gc>, Error> {
         let o = Self::this_buffer(a, this, false)?;
-        let new_len = match args.at(0) {
-            Value::Undefined => Self::info(o).0.unwrap_or(0),
-            v => a.to_index(v)?,
+        let new_len = match args.at(0).kind() {
+            ValueKind::Undefined => Self::info(o).0.unwrap_or(0),
+            v => a.to_index(Value::from(v))?,
         };
         let (len, max) = Self::info(o);
         let Some(_) = len else {
@@ -266,7 +267,7 @@ impl Buffers {
         if a.new_target == Value::Undefined {
             return Err(a.throw(ErrorKind::Type, "Constructor DataView requires 'new'"));
         }
-        let Value::Object(buffer) = args.at(0) else { return Err(a.throw(ErrorKind::Type, "First argument to DataView constructor must be an ArrayBuffer")) };
+        let ValueKind::Object(buffer) = args.at(0).kind() else { return Err(a.throw(ErrorKind::Type, "First argument to DataView constructor must be an ArrayBuffer")) };
         if !matches!(buffer.borrow().kind, ObjectKind::ArrayBuffer(_)) {
             return Err(a.throw(ErrorKind::Type, "First argument to DataView constructor must be an ArrayBuffer"));
         }
@@ -275,11 +276,11 @@ impl Buffers {
         if offset > len {
             return Err(a.throw(ErrorKind::Range, "Start offset is outside the bounds of the buffer"));
         }
-        let length = match args.at(2) {
-            Value::Undefined if max.is_some() => None,
-            Value::Undefined => Some(len - offset),
+        let length = match args.at(2).kind() {
+            ValueKind::Undefined if max.is_some() => None,
+            ValueKind::Undefined => Some(len - offset),
             v => {
-                let n = a.to_index(v)?;
+                let n = a.to_index(Value::from(v))?;
                 if offset + n > len {
                     return Err(a.throw(ErrorKind::Range, "Invalid DataView length"));
                 }
@@ -297,8 +298,8 @@ impl Buffers {
     }
 
     fn this_view<'gc>(a: &Agent<'gc, '_>, this: Value<'gc>) -> Result<ViewData<'gc>, Error> {
-        match this {
-            Value::Object(o) => match o.borrow().kind {
+        match this.kind() {
+            ValueKind::Object(o) => match o.borrow().kind {
                 ObjectKind::DataView(v) => Ok(v),
                 _ => Err(a.throw(ErrorKind::Type, "Method called on a non-DataView")),
             },
@@ -382,8 +383,8 @@ impl Buffers {
 
     /// ValidateIntegerTypedArray: returns (element type, view, length).
     fn integer_array<'gc>(a: &mut Agent<'gc, '_>, ta: Value<'gc>, waitable: bool) -> Result<(ElementKind, ViewData<'gc>, usize), Error> {
-        let Some((kind, view)) = (match ta {
-            Value::Object(o) => Agent::typed_array(o),
+        let Some((kind, view)) = (match ta.kind() {
+            ValueKind::Object(o) => Agent::typed_array(o),
             _ => None,
         }) else {
             return Err(a.throw(ErrorKind::Type, "Atomics operation on a non-TypedArray"));
@@ -535,9 +536,9 @@ impl Buffers {
     }
 
     fn pause<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        match args.at(0) {
-            Value::Undefined => Ok(Value::Undefined),
-            Value::Number(x) if x.is_finite() && libm::trunc(x) == x => Ok(Value::Undefined),
+        match args.at(0).kind() {
+            ValueKind::Undefined => Ok(Value::Undefined),
+            ValueKind::Number(x) if x.is_finite() && libm::trunc(x) == x => Ok(Value::Undefined),
             _ => Err(a.throw(ErrorKind::Type, "Atomics.pause requires an integral number")),
         }
     }

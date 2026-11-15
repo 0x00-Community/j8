@@ -1,3 +1,4 @@
+use r8framework::ValueKind;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::Write;
@@ -299,7 +300,7 @@ impl<'gc> Writer<'gc> {
     /// (omitted).
     fn property(&mut self, a: &mut Agent<'gc, '_>, holder: Value<'gc>, key: &SmallStr, out: &mut String) -> Result<bool, Error> {
         let mut v = a.get_named(holder, key)?;
-        if matches!(v, Value::Object(_) | Value::BigInt(_)) {
+        if matches!(v.kind(), ValueKind::Object(_) | ValueKind::BigInt(_)) {
             let to_json = a.get_named(v, "toJSON")?;
             if a.is_callable(to_json) {
                 let k = a.string(key);
@@ -310,14 +311,14 @@ impl<'gc> Writer<'gc> {
             let k = a.string(key);
             v = a.call(r, holder, &[k.into(), v])?;
         }
-        match v {
-            Value::Null | Value::Number(_) if !matches!(v, Value::Number(x) if x.is_finite()) => out.push_str("null"),
-            Value::Bool(true) => out.push_str("true"),
-            Value::Bool(false) => out.push_str("false"),
-            Value::String(s) => Self::quote(out, &s),
-            Value::Number(x) => out.push_str(&r8framework::number_text(x)),
-            Value::BigInt(_) => return Err(a.throw(ErrorKind::Type, "Do not know how to serialize a BigInt")),
-            Value::Object(o) if !o.borrow().kind.is_callable() => {
+        match v.kind() {
+            ValueKind::Null | ValueKind::Number(_) if !matches!(v.kind(), ValueKind::Number(x) if x.is_finite()) => out.push_str("null"),
+            ValueKind::Bool(true) => out.push_str("true"),
+            ValueKind::Bool(false) => out.push_str("false"),
+            ValueKind::String(s) => Self::quote(out, &s),
+            ValueKind::Number(x) => out.push_str(&r8framework::number_text(x)),
+            ValueKind::BigInt(_) => return Err(a.throw(ErrorKind::Type, "Do not know how to serialize a BigInt")),
+            ValueKind::Object(o) if !o.borrow().kind.is_callable() => {
                 if self.stack.iter().any(|&s| r8gc::Gc::ptr_eq(s, o)) {
                     return Err(a.throw(ErrorKind::Type, "Converting circular structure to JSON"));
                 }
@@ -389,16 +390,16 @@ impl<'gc> Writer<'gc> {
         }
         let d = o.borrow();
         let ObjectKind::Array(items) = &d.kind else { return false };
-        if d.sparse_length as usize > items.len() || !items.iter().all(|v| matches!(v, Value::Number(_) | Value::String(_) | Value::Bool(_) | Value::Null | Value::Undefined)) {
+        if d.sparse_length as usize > items.len() || !items.iter().all(|v| matches!(v.kind(), ValueKind::Number(_) | ValueKind::String(_) | ValueKind::Bool(_) | ValueKind::Null | ValueKind::Undefined)) {
             return false;
         }
         let parts: Vec<Part<'_>> = items
             .iter()
-            .map(|v| match v {
-                Value::Number(x) if x.is_finite() => Part::Number(*x),
-                Value::String(s) => Part::Text(s),
-                Value::Bool(true) => Part::Raw("true"),
-                Value::Bool(false) => Part::Raw("false"),
+            .map(|v| match v.kind() {
+                ValueKind::Number(x) if x.is_finite() => Part::Number(x),
+                ValueKind::String(s) => Part::Text(r8gc::Gc::as_ref(s)),
+                ValueKind::Bool(true) => Part::Raw("true"),
+                ValueKind::Bool(false) => Part::Raw("false"),
                 _ => Part::Raw("null"),
             })
             .collect();
@@ -481,7 +482,7 @@ impl Json {
     /// `undefined` deletes the property.
     fn revive<'gc>(a: &mut Agent<'gc, '_>, holder: Value<'gc>, key: JsString<'gc>, reviver: Value<'gc>) -> Result<Value<'gc>, Error> {
         let v = a.get_named(holder, &key)?;
-        if let Value::Object(o) = v {
+        if let ValueKind::Object(o) = v.kind() {
             let keys = Writer::keys(o);
             for k in keys {
                 let k = a.string(&k);
@@ -498,15 +499,15 @@ impl Json {
 
     /// `JSON.stringify(value, replacer, space)`.
     fn stringify<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        let (replacer, allow) = match args.at(1) {
-            f if a.is_callable(f) => (Some(f), None),
-            Value::Object(o) if matches!(o.borrow().kind, ObjectKind::Array(_)) => {
+        let (replacer, allow) = match args.at(1).kind() {
+            f if a.is_callable(Value::from(f)) => (Some(Value::from(f)), None),
+            ValueKind::Object(o) if matches!(o.borrow().kind, ObjectKind::Array(_)) => {
                 let items = a.to_list(Value::Object(o))?;
                 let mut keys: Vec<JsString<'gc>> = Vec::new();
                 for item in items {
-                    let k = match item {
-                        Value::String(s) => Some(s),
-                        Value::Number(_) => Some(a.to_string(item)?),
+                    let k = match item.kind() {
+                        ValueKind::String(s) => Some(s),
+                        ValueKind::Number(_) => Some(a.to_string(item)?),
                         _ => None,
                     };
                     if let Some(k) = k
@@ -519,13 +520,13 @@ impl Json {
             }
             _ => (None, None),
         };
-        let gap = match args.at(2) {
-            Value::Number(n) => {
+        let gap = match args.at(2).kind() {
+            ValueKind::Number(n) => {
                 #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "clamped to [0, MAX_GAP]")]
                 let n = libm::trunc(n.clamp(0.0, 10.0)) as usize;
                 " ".repeat(n.min(MAX_GAP))
             }
-            Value::String(s) => s.chars().take(MAX_GAP).collect(),
+            ValueKind::String(s) => s.chars().take(MAX_GAP).collect(),
             _ => String::new(),
         };
         let mut w = Writer { gap, indent: String::new(), allow, replacer, stack: Vec::new() };

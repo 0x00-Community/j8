@@ -1,3 +1,4 @@
+use crate::ValueKind;
 use alloc::vec::Vec;
 
 use r8gc::{Collect, DynamicRootSet, Mutation};
@@ -123,7 +124,7 @@ impl<'gc> Agent<'gc, '_> {
 
     /// IsConstructor.
     pub fn is_constructor(&self, v: Value<'gc>) -> bool {
-        let Value::Object(o) = v else { return false };
+        let ValueKind::Object(o) = v.kind() else { return false };
         match &o.borrow().kind {
             crate::ObjectKind::Function(c) => self.invoke.constructs(c),
             crate::ObjectKind::Native(n) => n.constructor,
@@ -138,8 +139,8 @@ impl<'gc> Agent<'gc, '_> {
         if new_target == Value::Undefined {
             return Ok(fallback);
         }
-        match self.get_named(new_target, "prototype")? {
-            Value::Object(p) => Ok(p),
+        match (self.get_named(new_target, "prototype")?).kind() {
+            ValueKind::Object(p) => Ok(p),
             _ => Ok(fallback),
         }
     }

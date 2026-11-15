@@ -1,3 +1,4 @@
+use r8framework::ValueKind;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::cmp::Ordering;
@@ -60,7 +61,7 @@ impl Arrays {
             return Self::create(a, len, None);
         }
         let mut c = a.get_named(original.into(), "constructor")?;
-        if matches!(c, Value::Object(_)) {
+        if matches!(c.kind(), ValueKind::Object(_)) {
             c = a.get_symbol(c, a.realm.symbols.species, c)?;
             if c == Value::Null {
                 c = Value::Undefined;
@@ -72,8 +73,8 @@ impl Arrays {
         if !a.is_constructor(c) {
             return Err(a.throw(ErrorKind::Type, "object.constructor[Symbol.species] is not a constructor"));
         }
-        match a.construct(c, &[len.into()], c)? {
-            Value::Object(o) => Ok(o),
+        match (a.construct(c, &[len.into()], c)?).kind() {
+            ValueKind::Object(o) => Ok(o),
             _ => Err(a.throw(ErrorKind::Type, "species constructor returned a non-object")),
         }
     }
@@ -104,16 +105,16 @@ impl Arrays {
     /// `new Array(...)` / `Array(...)`.
     fn array<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let proto = a.proto_from_ctor(a.new_target, a.realm.array_proto)?;
-        match args {
+        match *args {
             [] => Ok(Self::create(a, 0.0, Some(proto))?.into()),
-            [Value::Number(n)] => {
-                let len = a.to_uint32(Value::Number(*n))?;
-                if f64::from(len) != *n {
+            [v] if let ValueKind::Number(n) = v.kind() => {
+                let len = a.to_uint32(Value::Number(n))?;
+                if f64::from(len) != n {
                     return Err(a.throw(ErrorKind::Range, "Invalid array length"));
                 }
                 Ok(Self::create(a, f64::from(len), Some(proto))?.into())
             }
-            items => {
+            ref items => {
                 let arr = a.array(items.to_vec());
                 arr.borrow_mut(a.mc).proto = Some(proto);
                 Ok(arr.into())
@@ -129,8 +130,8 @@ impl Arrays {
     fn construct_this<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, len: Option<f64>) -> Result<JsObject<'gc>, Error> {
         if a.is_constructor(this) {
             let args: Vec<Value<'gc>> = len.map(Value::from).into_iter().collect();
-            match a.construct(this, &args, this)? {
-                Value::Object(o) => Ok(o),
+            match (a.construct(this, &args, this)?).kind() {
+                ValueKind::Object(o) => Ok(o),
                 _ => Err(a.throw(ErrorKind::Type, "constructor returned a non-object")),
             }
         } else {
@@ -164,7 +165,7 @@ impl Arrays {
             }
             let arr = Self::construct_this(a, this, None)?;
             let iterator = a.call(using, items, &[])?;
-            if !matches!(iterator, Value::Object(_)) {
+            if !matches!(iterator.kind(), ValueKind::Object(_)) {
                 return Err(a.throw(ErrorKind::Type, "Result of the Symbol.iterator method is not an object"));
             }
             let next = a.get_named(iterator, "next")?;
@@ -408,7 +409,7 @@ impl Arrays {
 
     /// IsConcatSpreadable.
     fn spreadable<'gc>(a: &mut Agent<'gc, '_>, v: Value<'gc>) -> Result<bool, Error> {
-        if !matches!(v, Value::Object(_)) {
+        if !matches!(v.kind(), ValueKind::Object(_)) {
             return Ok(false);
         }
         let s = a.get_symbol(v, a.realm.symbols.is_concat_spreadable, v)?;
@@ -424,7 +425,7 @@ impl Arrays {
         let mut n = 0.0;
         for e in core::iter::once(Value::Object(o)).chain(args.iter().copied()) {
             if Self::spreadable(a, e)? {
-                let Value::Object(eo) = e else { unreachable!("spreadable values are objects") };
+                let ValueKind::Object(eo) = e.kind() else { unreachable!("spreadable values are objects") };
                 let len = a.length_of_array_like(e)?;
                 if n + len > MAX_LENGTH {
                     return Err(a.throw(ErrorKind::Type, "Concatenation exceeds 2^53 - 1 length"));
@@ -452,9 +453,9 @@ impl Arrays {
 
     fn join<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let (o, len) = Self::target(a, this)?;
-        let sep = match args.at(0) {
-            Value::Undefined => a.string(","),
-            v => a.to_string(v)?,
+        let sep = match args.at(0).kind() {
+            ValueKind::Undefined => a.string(","),
+            v => a.to_string(Value::from(v))?,
         };
         if let Some(s) = Self::join_plain(a, o, len, &sep) {
             return Ok(a.string(&s).into());
@@ -488,16 +489,16 @@ impl Arrays {
         let ObjectKind::Array(items) = &d.kind else { return None };
         #[expect(clippy::cast_precision_loss, reason = "element count is far below 2^53")]
         let dense = items.len() as f64 == len && d.sparse_length == 0;
-        if !dense || !items.iter().all(|v| matches!(v, Value::Number(_) | Value::String(_) | Value::Bool(_) | Value::Null | Value::Undefined)) {
+        if !dense || !items.iter().all(|v| matches!(v.kind(), ValueKind::Number(_) | ValueKind::String(_) | ValueKind::Bool(_) | ValueKind::Null | ValueKind::Undefined)) {
             return None;
         }
         let parts: Vec<Part<'_>> = items
             .iter()
-            .map(|v| match v {
-                Value::Number(x) => Part::Number(*x),
-                Value::String(s) => Part::Text(s),
-                Value::Bool(true) => Part::Text("true"),
-                Value::Bool(false) => Part::Text("false"),
+            .map(|v| match v.kind() {
+                ValueKind::Number(x) => Part::Number(x),
+                ValueKind::String(s) => Part::Text(r8gc::Gc::as_ref(s)),
+                ValueKind::Bool(true) => Part::Text("true"),
+                ValueKind::Bool(false) => Part::Text("false"),
                 _ => Part::Text(""),
             })
             .collect();
@@ -628,7 +629,7 @@ impl Arrays {
 
     /// SameValueZero: `NaN` equals itself.
     fn same_value_zero<'gc>(x: Value<'gc>, y: Value<'gc>) -> bool {
-        x == y || matches!((x, y), (Value::Number(p), Value::Number(q)) if p.is_nan() && q.is_nan())
+        x == y || matches!((x.kind(), y.kind()), (ValueKind::Number(p), ValueKind::Number(q)) if p.is_nan() && q.is_nan())
     }
 
     fn includes<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
@@ -815,7 +816,7 @@ impl Arrays {
                     v = a.call(mapper, this_arg, &[v, k.into(), source.into()])?;
                 }
                 if depth > 0.0 && a.is_array(v)? {
-                    let Value::Object(inner) = v else { unreachable!("arrays are objects") };
+                    let ValueKind::Object(inner) = v.kind() else { unreachable!("arrays are objects") };
                     let inner_len = a.length_of_array_like(v)?;
                     to = Self::flatten(a, target, inner, inner_len, to, depth - 1.0, Value::Undefined, Value::Undefined)?;
                 } else {
@@ -833,9 +834,9 @@ impl Arrays {
 
     fn flat<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let (o, len) = Self::target(a, this)?;
-        let depth = match args.at(0) {
-            Value::Undefined => 1.0,
-            d => a.to_integer_or_infinity(d)?.max(0.0),
+        let depth = match args.at(0).kind() {
+            ValueKind::Undefined => 1.0,
+            d => a.to_integer_or_infinity(Value::from(d))?.max(0.0),
         };
         let arr = Self::species_create(a, o, 0.0)?;
         Self::flatten(a, arr, o, len, 0.0, depth, Value::Undefined, Value::Undefined)?;
@@ -853,10 +854,10 @@ impl Arrays {
     /// SortCompare: `undefined` sorts last; with a comparator, order by its sign (NaN counts as 0), otherwise by the
     /// UTF-16 order of ToString.
     fn order<'gc>(a: &mut Agent<'gc, '_>, f: Value<'gc>, x: Value<'gc>, y: Value<'gc>) -> Result<Ordering, Error> {
-        Ok(match (x, y) {
-            (Value::Undefined, Value::Undefined) => Ordering::Equal,
-            (Value::Undefined, _) => Ordering::Greater,
-            (_, Value::Undefined) => Ordering::Less,
+        Ok(match (x.kind(), y.kind()) {
+            (ValueKind::Undefined, ValueKind::Undefined) => Ordering::Equal,
+            (ValueKind::Undefined, _) => Ordering::Greater,
+            (_, ValueKind::Undefined) => Ordering::Less,
             _ if f != Value::Undefined => {
                 let r = a.call(f, Value::Undefined, &[x, y])?;
                 a.to_number(r)?.partial_cmp(&0.0).unwrap_or(Ordering::Equal)
@@ -873,20 +874,20 @@ impl Arrays {
     /// stable-sorted in parallel on the thread pool; undefined sorts last. Any other element gives `None` (compare one
     /// by one).
     fn sort_plain<'gc>(a: &Agent<'gc, '_>, items: &[Value<'gc>]) -> Option<Vec<Value<'gc>>> {
-        if !items.iter().all(|v| matches!(v, Value::Number(_) | Value::String(_) | Value::Bool(_) | Value::Null | Value::Undefined)) {
+        if !items.iter().all(|v| matches!(v.kind(), ValueKind::Number(_) | ValueKind::String(_) | ValueKind::Bool(_) | ValueKind::Null | ValueKind::Undefined)) {
             return None;
         }
         let (undef, rest): (Vec<Value<'gc>>, Vec<Value<'gc>>) = items.iter().copied().partition(|v| *v == Value::Undefined);
-        let numbers: Vec<f64> = rest.iter().filter_map(|v| if let Value::Number(x) = v { Some(*x) } else { None }).collect();
+        let numbers: Vec<f64> = rest.iter().filter_map(|v| if let ValueKind::Number(x) = v.kind() { Some(x) } else { None }).collect();
         let texts: Vec<String> = a.par().map(&numbers, &|&x| String::from(&*r8framework::number_text(x)));
         let mut next = texts.iter();
         let keys: Vec<&str> = rest
             .iter()
-            .map(|v| match v {
-                Value::Number(_) => next.next().map_or("", String::as_str),
-                Value::String(s) => &***s,
-                Value::Bool(true) => "true",
-                Value::Bool(false) => "false",
+            .map(|v| match v.kind() {
+                ValueKind::Number(_) => next.next().map_or("", String::as_str),
+                ValueKind::String(s) => &**r8gc::Gc::as_ref(s),
+                ValueKind::Bool(true) => "true",
+                ValueKind::Bool(false) => "false",
                 _ => "null",
             })
             .collect();

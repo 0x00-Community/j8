@@ -1,3 +1,4 @@
+use r8framework::ValueKind;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -17,15 +18,15 @@ impl Functions {
             None => (&[][..], Value::Undefined),
         };
         let params = params.iter().map(|&p| a.to_string(p).map(|s| String::from(&**s))).collect::<Result<Vec<_>, _>>()?;
-        let body = match body {
-            Value::Undefined => String::new(),
-            b => String::from(&**a.to_string(b)?),
+        let body = match body.kind() {
+            ValueKind::Undefined => String::new(),
+            b => String::from(&**a.to_string(Value::from(b))?),
         };
         let src = alloc::format!("({prefix} anonymous({}\n) {{\n{body}\n}})", params.join(","));
         let new_target = a.new_target;
         let f = a.eval_code(&src, CodeKind::Eval)?;
         // When constructing a subclass (`class F extends Function`), the prototype comes from new.target.prototype
-        if let Value::Object(fo) = f
+        if let ValueKind::Object(fo) = f.kind()
             && new_target != Value::Undefined
         {
             let fallback = fo.borrow().proto.unwrap_or(a.realm.function_proto);
@@ -53,12 +54,12 @@ impl Functions {
 
     /// Global `eval` (indirect): non-strings are returned as is; strings run as global code.
     fn eval<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        match args.at(0) {
-            Value::String(s) => {
+        match args.at(0).kind() {
+            ValueKind::String(s) => {
                 let src = String::from(&**s);
                 a.eval_code(&src, CodeKind::Eval)
             }
-            v => Ok(v),
+            v => Ok(Value::from(v)),
         }
     }
 }

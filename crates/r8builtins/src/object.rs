@@ -1,3 +1,4 @@
+use r8framework::ValueKind;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
@@ -11,7 +12,7 @@ pub(crate) struct Objects;
 impl Objects {
     /// Whether `new.target` is `Object` itself.
     fn is_object_ctor(v: Value<'_>) -> bool {
-        matches!(v, Value::Object(f) if matches!(f.borrow().kind, ObjectKind::Native(n) if core::ptr::fn_addr_eq(n.f, Self::object as r8framework::NativeFn)))
+        matches!(v.kind(), ValueKind::Object(f) if matches!(f.borrow().kind, ObjectKind::Native(n) if core::ptr::fn_addr_eq(n.f, Self::object as r8framework::NativeFn)))
     }
 
     /// `Object(v)`: when constructing a subclass, create from `new.target`; otherwise objects are returned as is,
@@ -20,16 +21,16 @@ impl Objects {
         if a.new_target != Value::Undefined && !Self::is_object_ctor(a.new_target) {
             return Ok(a.create_from_ctor(a.realm.object_proto, ObjectKind::Ordinary)?.into());
         }
-        Ok(match args.at(0) {
-            Value::Undefined | Value::Null | Value::Uninit => a.object().into(),
-            v => a.to_object(v)?.into(),
+        Ok(match args.at(0).kind() {
+            ValueKind::Undefined | ValueKind::Null | ValueKind::Uninit => a.object().into(),
+            v => a.to_object(Value::from(v))?.into(),
         })
     }
 
     /// Require an object (`Object.defineProperty` etc.).
     fn require_object<'gc>(a: &mut Agent<'gc, '_>, v: Value<'gc>, method: &str) -> Result<JsObject<'gc>, Error> {
-        match v {
-            Value::Object(o) => Ok(o),
+        match v.kind() {
+            ValueKind::Object(o) => Ok(o),
             _ => Err(a.throw(ErrorKind::Type, &alloc::format!("Object.{method} called on non-object"))),
         }
     }
@@ -93,11 +94,11 @@ impl Objects {
 
     /// Prototype argument: an object or `null`.
     fn proto_arg<'gc>(a: &mut Agent<'gc, '_>, v: Value<'gc>) -> Result<Option<JsObject<'gc>>, Error> {
-        match v {
-            Value::Object(o) => Ok(Some(o)),
-            Value::Null => Ok(None),
+        match v.kind() {
+            ValueKind::Object(o) => Ok(Some(o)),
+            ValueKind::Null => Ok(None),
             other => {
-                let t = a.describe(other);
+                let t = a.describe(Value::from(other));
                 Err(a.throw(ErrorKind::Type, &alloc::format!("Object prototype may only be an Object or null: {t}")))
             }
         }
@@ -109,7 +110,7 @@ impl Objects {
             return Err(a.throw(ErrorKind::Type, "Object.setPrototypeOf called on null or undefined"));
         }
         let proto = Self::proto_arg(a, args.at(1))?;
-        let Value::Object(o) = target else { return Ok(target) };
+        let ValueKind::Object(o) = target.kind() else { return Ok(target) };
         if !a.set_prototype_of(o, proto)? {
             return Err(a.throw(ErrorKind::Type, "Cannot set prototype: object is not extensible or the chain would be cyclic"));
         }
@@ -199,7 +200,7 @@ impl Objects {
     }
 
     fn integrity<'gc>(a: &mut Agent<'gc, '_>, v: Value<'gc>, level: Integrity) -> Result<Value<'gc>, Error> {
-        if let Value::Object(o) = v
+        if let ValueKind::Object(o) = v.kind()
             && !a.set_integrity_level(o, level)?
         {
             return Err(a.throw(ErrorKind::Type, "Cannot freeze or seal the object"));
@@ -208,7 +209,7 @@ impl Objects {
     }
 
     fn prevent_extensions<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        if let Value::Object(o) = args.at(0)
+        if let ValueKind::Object(o) = args.at(0).kind()
             && !a.prevent_extensions(o)?
         {
             return Err(a.throw(ErrorKind::Type, "Cannot prevent extensions"));
@@ -217,24 +218,24 @@ impl Objects {
     }
 
     fn is_extensible<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        Ok(match args.at(0) {
-            Value::Object(o) => a.is_extensible(o)?,
+        Ok(match args.at(0).kind() {
+            ValueKind::Object(o) => a.is_extensible(o)?,
             _ => false,
         }
         .into())
     }
 
     fn is_frozen<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        Ok(match args.at(0) {
-            Value::Object(o) => a.test_integrity_level(o, Integrity::Frozen)?,
+        Ok(match args.at(0).kind() {
+            ValueKind::Object(o) => a.test_integrity_level(o, Integrity::Frozen)?,
             _ => true,
         }
         .into())
     }
 
     fn is_sealed<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        Ok(match args.at(0) {
-            Value::Object(o) => a.test_integrity_level(o, Integrity::Sealed)?,
+        Ok(match args.at(0).kind() {
+            ValueKind::Object(o) => a.test_integrity_level(o, Integrity::Sealed)?,
             _ => true,
         }
         .into())
@@ -260,7 +261,7 @@ impl Objects {
         let it = a.get_iterator(iterable)?;
         while let Some(item) = a.iterator_step(it)? {
             let r = (|| {
-                if !matches!(item, Value::Object(_)) {
+                if !matches!(item.kind(), ValueKind::Object(_)) {
                     let t = a.describe(item);
                     return Err(a.throw(ErrorKind::Type, &alloc::format!("Iterator value {t} is not an entry object")));
                 }
@@ -306,9 +307,9 @@ impl Objects {
                 if property {
                     a.to_property_key(key).map(Value::from)
                 } else {
-                    Ok(match key {
-                        Value::Number(0.0) => Value::Number(0.0),
-                        other => other,
+                    Ok(match key.kind() {
+                        ValueKind::Number(0.0) => Value::Number(0.0),
+                        other => Value::from(other),
                     })
                 }
             });
@@ -329,9 +330,9 @@ impl Objects {
     }
 
     fn to_string<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        let builtin = match this {
-            Value::Undefined | Value::Uninit => return Ok(a.string("[object Undefined]").into()),
-            Value::Null => return Ok(a.string("[object Null]").into()),
+        let builtin = match this.kind() {
+            ValueKind::Undefined | ValueKind::Uninit => return Ok(a.string("[object Undefined]").into()),
+            ValueKind::Null => return Ok(a.string("[object Null]").into()),
             _ => {
                 let o = a.to_object(this)?;
                 let is_array = a.is_array(o.into())?;
@@ -340,15 +341,15 @@ impl Objects {
                     ObjectKind::Arguments(_) => "Arguments",
                     k if k.is_callable() => "Function",
                     ObjectKind::Error => "Error",
-                    ObjectKind::Primitive(Value::Bool(_)) => "Boolean",
-                    ObjectKind::Primitive(Value::Number(_)) => "Number",
-                    ObjectKind::Primitive(Value::String(_)) => "String",
+                    ObjectKind::Primitive(v) if matches!(v.kind(), ValueKind::Bool(_)) => "Boolean",
+                    ObjectKind::Primitive(v) if matches!(v.kind(), ValueKind::Number(_)) => "Number",
+                    ObjectKind::Primitive(v) if matches!(v.kind(), ValueKind::String(_)) => "String",
                     ObjectKind::RegExp(_) => "RegExp",
                     ObjectKind::Date(_) => "Date",
                     _ => "Object",
                 };
                 let t = a.get_symbol(o.into(), a.realm.symbols.to_string_tag, o.into())?;
-                if let Value::String(s) = t {
+                if let ValueKind::String(s) = t.kind() {
                     return Ok(a.string(&alloc::format!("[object {}]", &**s)).into());
                 }
                 tag
@@ -369,7 +370,7 @@ impl Objects {
     }
 
     fn is_prototype_of<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        let Value::Object(v) = args.at(0) else { return Ok(false.into()) };
+        let ValueKind::Object(v) = args.at(0).kind() else { return Ok(false.into()) };
         let o = a.to_object(this)?;
         let mut cur = a.get_prototype_of(v)?;
         while let Some(c) = cur {
@@ -396,12 +397,12 @@ impl Objects {
         if this.is_nullish() {
             return Err(a.throw(ErrorKind::Type, "Object.prototype.__proto__ called on null or undefined"));
         }
-        let proto = match args.at(0) {
-            Value::Object(p) => Some(p),
-            Value::Null => None,
+        let proto = match args.at(0).kind() {
+            ValueKind::Object(p) => Some(p),
+            ValueKind::Null => None,
             _ => return Ok(Value::Undefined),
         };
-        let Value::Object(o) = this else { return Ok(Value::Undefined) };
+        let ValueKind::Object(o) = this.kind() else { return Ok(Value::Undefined) };
         if !a.set_prototype_of(o, proto)? {
             return Err(a.throw(ErrorKind::Type, "Cyclic __proto__ value or object is not extensible"));
         }
@@ -411,8 +412,8 @@ impl Objects {
     /// `__defineGetter__` / `__defineSetter__` (annexB).
     fn define_half<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>], setter: bool) -> Result<Value<'gc>, Error> {
         let o = a.to_object(this)?;
-        let f = match args.at(1) {
-            Value::Object(f) if f.borrow().kind.is_callable() => f,
+        let f = match args.at(1).kind() {
+            ValueKind::Object(f) if f.borrow().kind.is_callable() => f,
             _ => return Err(a.throw(ErrorKind::Type, "Object.prototype.__defineGetter__: Expecting function")),
         };
         let desc = if setter { Descriptor { set: Some(Some(f)), ..Descriptor::default() } } else { Descriptor { get: Some(Some(f)), ..Descriptor::default() } };
@@ -472,9 +473,9 @@ impl Objects {
         if !a.is_callable(this) {
             return Err(a.throw(ErrorKind::Type, "Function.prototype.apply was called on a non-function"));
         }
-        let list = match args.at(1) {
-            Value::Undefined | Value::Null => Vec::new(),
-            v => a.list_from_array_like(v)?,
+        let list = match args.at(1).kind() {
+            ValueKind::Undefined | ValueKind::Null => Vec::new(),
+            v => a.list_from_array_like(Value::from(v))?,
         };
         a.call(this, args.at(0), &list)
     }
@@ -482,7 +483,7 @@ impl Objects {
     /// `f.bind(this, ...args)`: `length` = max(0, target's length − number of bound arguments), `name` = "bound " +
     /// target's name.
     fn bind<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        let Value::Object(target) = this else {
+        let ValueKind::Object(target) = this.kind() else {
             return Err(a.throw(ErrorKind::Type, "Bind must be called on a function"));
         };
         if !a.is_callable(this) {
@@ -494,7 +495,7 @@ impl Objects {
         let f = ObjectData { kind: ObjectKind::Bound(Box::new(bound)), proto, ..ObjectData::default() }.alloc(a.mc);
         let mut length = 0.0;
         if a.has_own_property(target, Key::Str("length"))?
-            && let Value::Number(n) = a.get_named(this, "length")?
+            && let ValueKind::Number(n) = (a.get_named(this, "length")?).kind()
         {
             {
                 let n = if n == f64::INFINITY { n } else if n == f64::NEG_INFINITY { 0.0 } else { a.to_integer_or_infinity(n.into())? };
@@ -503,8 +504,8 @@ impl Objects {
                 length = (n - k).max(0.0);
             }
         }
-        let name = match a.get_named(this, "name")? {
-            Value::String(s) => alloc::format!("bound {}", &**s),
+        let name = match (a.get_named(this, "name")?).kind() {
+            ValueKind::String(s) => alloc::format!("bound {}", &**s),
             _ => alloc::string::String::from("bound "),
         };
         let prop = |v: Value<'gc>| Property { slot: Slot::Data(v), enumerable: false, writable: false, configurable: true };
@@ -522,9 +523,9 @@ impl Objects {
         }
         // In NativeFunction syntax the name can only be a property name (optionally with get / set): private names,
         // `bound f` and the like are left out
-        let name = match this {
-            Value::Object(o) => match o.borrow().get_own("name").and_then(|p| p.value()) {
-                Some(Value::String(s)) if Self::native_name(&s) => alloc::string::String::from(&**s),
+        let name = match this.kind() {
+            ValueKind::Object(o) => match o.borrow().get_own("name").and_then(|p| p.value()).map(Value::kind) {
+                Some(ValueKind::String(s)) if Self::native_name(&s) => alloc::string::String::from(&**s),
                 _ => alloc::string::String::new(),
             },
             _ => alloc::string::String::new(),
@@ -556,8 +557,8 @@ impl Objects {
 
     /// thisBooleanValue: a boolean or Boolean wrapper object; anything else throws TypeError.
     fn this_boolean<'gc>(a: &Agent<'gc, '_>, this: Value<'gc>, method: &str) -> Result<bool, Error> {
-        match this.unwrapped() {
-            Value::Bool(b) => Ok(b),
+        match this.unwrapped().kind() {
+            ValueKind::Bool(b) => Ok(b),
             _ => Err(a.throw(ErrorKind::Type, &alloc::format!("Boolean.prototype.{method} requires that 'this' be a Boolean"))),
         }
     }
@@ -635,7 +636,7 @@ impl Installer<'_, '_> {
         // target)
         for (name, forward) in [("call", r8framework::Forward::Call), ("apply", r8framework::Forward::Apply)] {
             let f = proto.borrow().own(name);
-            if let Some(Value::Object(f)) = f
+            if let Some(ValueKind::Object(f)) = f.map(Value::kind)
                 && let ObjectKind::Native(n) = &mut f.borrow_mut(self.mc).kind
             {
                 n.forward = forward;

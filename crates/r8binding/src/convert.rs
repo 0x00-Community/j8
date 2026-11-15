@@ -1,4 +1,5 @@
 //! JS values ⇄ Rust values.
+use r8framework::ValueKind;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -73,10 +74,10 @@ impl<'gc> FromJs<'gc> for JsString<'gc> {
 
 impl<'gc> FromJs<'gc> for JsObject<'gc> {
     fn from_js(a: &mut Agent<'gc, '_>, v: Value<'gc>) -> Result<Self, Error> {
-        match v {
-            Value::Object(o) => Ok(o),
+        match v.kind() {
+            ValueKind::Object(o) => Ok(o),
             other => {
-                let t = a.describe(other);
+                let t = a.describe(Value::from(other));
                 Err(a.throw(ErrorKind::Type, &alloc::format!("{t} is not an object")))
             }
         }

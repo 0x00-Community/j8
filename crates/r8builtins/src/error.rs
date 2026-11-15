@@ -1,3 +1,4 @@
+use r8framework::ValueKind;
 use r8framework::{Agent, Error, ErrorKind, Value};
 
 use crate::{Args, Installer};
@@ -22,7 +23,7 @@ impl Errors {
         }
         // InstallErrorCause
         let options = args.at(1);
-        if let Value::Object(opts) = options
+        if let ValueKind::Object(opts) = options.kind()
             && a.has_key(opts, r8framework::Key::Str("cause"))?
         {
             let cause = a.get_named(options, "cause")?;
@@ -38,16 +39,16 @@ impl Errors {
 
     /// `name: message`; if either side is empty, just the other.
     fn to_string<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        if !matches!(this, Value::Object(_)) {
+        if !matches!(this.kind(), ValueKind::Object(_)) {
             return Err(a.throw(ErrorKind::Type, "Error.prototype.toString called on non-object"));
         }
-        let name = match a.get_named(this, "name")? {
-            Value::Undefined => a.string("Error"),
-            v => a.to_string(v)?,
+        let name = match (a.get_named(this, "name")?).kind() {
+            ValueKind::Undefined => a.string("Error"),
+            v => a.to_string(Value::from(v))?,
         };
-        let msg = match a.get_named(this, "message")? {
-            Value::Undefined => a.string(""),
-            v => a.to_string(v)?,
+        let msg = match (a.get_named(this, "message")?).kind() {
+            ValueKind::Undefined => a.string(""),
+            v => a.to_string(Value::from(v))?,
         };
         Ok(match (name.is_empty(), msg.is_empty()) {
             (_, true) => name.into(),

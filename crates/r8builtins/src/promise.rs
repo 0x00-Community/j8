@@ -1,3 +1,4 @@
+use r8framework::ValueKind;
 use alloc::vec::Vec;
 
 use r8framework::{Agent, Capability, Error, ErrorKind, JsObject, Key, NativeClosure, ObjectData, ObjectKind, Property, Reaction, Slot, Value};
@@ -32,7 +33,7 @@ mod slot {
 
 impl Promises {
     fn is_intrinsic<'gc>(a: &Agent<'gc, '_>, c: Value<'gc>) -> bool {
-        matches!(c, Value::Object(o) if r8gc::Gc::ptr_eq(o, a.realm.promise_ctor))
+        matches!(c.kind(), ValueKind::Object(o) if r8gc::Gc::ptr_eq(o, a.realm.promise_ctor))
     }
 
     fn closure<'gc>(a: &Agent<'gc, '_>, f: r8framework::ClosureFn, slots: Vec<Value<'gc>>, length: u32) -> JsObject<'gc> {
@@ -122,8 +123,8 @@ impl Promises {
     }
 
     fn this_object<'gc>(a: &Agent<'gc, '_>, this: Value<'gc>) -> Result<Value<'gc>, Error> {
-        match this {
-            Value::Object(_) => Ok(this),
+        match this.kind() {
+            ValueKind::Object(_) => Ok(this),
             _ => Err(a.throw(ErrorKind::Type, "Promise method called on a non-object")),
         }
     }
@@ -164,8 +165,8 @@ impl Promises {
     }
 
     fn this_promise<'gc>(a: &Agent<'gc, '_>, this: Value<'gc>) -> Result<JsObject<'gc>, Error> {
-        match this {
-            Value::Object(o) if Agent::is_promise(this) => Ok(o),
+        match this.kind() {
+            ValueKind::Object(o) if Agent::is_promise(this) => Ok(o),
             _ => Err(a.throw(ErrorKind::Type, "Promise.prototype method called on a non-promise")),
         }
     }
@@ -286,7 +287,7 @@ impl Promises {
 
     fn remaining_add<'gc>(a: &mut Agent<'gc, '_>, remaining: Value<'gc>, d: f64) -> Result<f64, Error> {
         let n = a.get_index(remaining, 0.0)?;
-        let Value::Number(n) = n else { return Ok(0.0) };
+        let ValueKind::Number(n) = n.kind() else { return Ok(0.0) };
         a.set_index(remaining, 0.0, (n + d).into())?;
         Ok(n + d)
     }
@@ -363,10 +364,10 @@ impl Promises {
             return Ok(Value::Undefined);
         }
         a.set_index(s[slot::CALLED], 0.0, true.into())?;
-        let (Value::Number(index), Value::Object(values)) = (s[slot::INDEX], s[slot::VALUES]) else { return Ok(Value::Undefined) };
+        let (ValueKind::Number(index), ValueKind::Object(values)) = (s[slot::INDEX].kind(), s[slot::VALUES].kind()) else { return Ok(Value::Undefined) };
         a.create_index(values, index, v)?;
         if Self::remaining_add(a, s[slot::REMAINING], -1.0)? == 0.0 {
-            let Value::Object(values) = s[slot::VALUES] else { return Ok(Value::Undefined) };
+            let ValueKind::Object(values) = s[slot::VALUES].kind() else { return Ok(Value::Undefined) };
             let list = a.list_from_array_like(values.into())?;
             let arr = a.array(list);
             if how == Combinator::Any {

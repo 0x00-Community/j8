@@ -9,6 +9,7 @@
 #![no_std]
 extern crate alloc;
 
+use r8framework::ValueKind;
 use alloc::vec::Vec;
 use alloc::boxed::Box;
 use alloc::rc::Rc;
@@ -361,8 +362,8 @@ impl Executor {
         let func = &func_loaded.func;
         let (generator, asynchronous) = (func.generator, func.asynchronous);
         let proto = if generator {
-            match a.get_named(callee, "prototype")? {
-                Value::Object(p) => p,
+            match (a.get_named(callee, "prototype")?).kind() {
+                ValueKind::Object(p) => p,
                 _ if asynchronous => a.realm.async_generator_proto,
                 _ => a.realm.generator_proto,
             }
@@ -389,7 +390,7 @@ impl Executor {
     /// Unwraps bound functions and calls host functions directly; the remaining JS closures are left to the caller to
     /// enter a frame.
     fn resolve<'gc>(&self, a: &mut Agent<'gc, '_>, mut callee: Value<'gc>, mut this: Value<'gc>, mut args: Vec<Value<'gc>>, depth: usize) -> Result<Callee<'gc>, Error> {
-        while let Value::Object(o) = callee {
+        while let ValueKind::Object(o) = callee.kind() {
             // Take out what to do first and call after releasing the borrow (the called code may modify this function
             // object)
             let step = match &o.borrow().kind {
@@ -409,9 +410,9 @@ impl Executor {
                 let mut rest = args.into_iter();
                 this = rest.next().unwrap_or_default();
                 args = match n.forward {
-                    r8framework::Forward::Apply => match rest.next().unwrap_or_default() {
-                        Value::Undefined | Value::Null => Vec::new(),
-                        list => a.list_from_array_like(list)?,
+                    r8framework::Forward::Apply => match rest.next().unwrap_or_default().kind() {
+                        ValueKind::Undefined | ValueKind::Null => Vec::new(),
+                        list => a.list_from_array_like(Value::from(list))?,
                     },
                     _ => rest.collect(),
                 };
@@ -464,7 +465,7 @@ impl Executor {
     /// frame can be opened directly.
     #[inline]
     fn plain_closure<'gc>(&self, callee: Value<'gc>) -> Option<(Closure<'gc>, Rc<Loaded>)> {
-        let Value::Object(o) = callee else { return None };
+        let ValueKind::Object(o) = callee.kind() else { return None };
         let ObjectKind::Function(c) = o.borrow().kind else { return None };
         let loaded = self.function(c.func);
         loaded.plain.then_some((c, loaded))
@@ -506,11 +507,11 @@ impl Executor {
         regs.resize(base + usize::from(f.regs), Value::Undefined);
         // Non-strict functions: a null / undefined `this` becomes the global object and primitives are wrapped into
         // objects (arrow functions don't use their own `this`)
-        let this = match this {
+        let this = match this.kind() {
             _ if f.mode == Mode::Strict || f.kind == FunctionKind::Arrow => this,
-            Value::Undefined | Value::Null => Value::Object(a.realm.global),
-            Value::Object(_) | Value::Uninit => this,
-            prim => a.to_object(prim).map_or(prim, Value::Object),
+            ValueKind::Undefined | ValueKind::Null => Value::Object(a.realm.global),
+            ValueKind::Object(_) | ValueKind::Uninit => this,
+            prim => a.to_object(Value::from(prim)).map_or(Value::from(prim), Value::Object),
         };
         regs[base + usize::from(Reg::THIS.0)] = this;
         regs[base + usize::from(Reg::CALLEE.0)] = callee;
@@ -519,8 +520,8 @@ impl Executor {
 
     /// The closure running in this frame (the callee in `r1`).
     fn current<'gc>(regs: &[Value<'gc>], f: &Frame<'gc>) -> Option<Closure<'gc>> {
-        match regs[f.base + usize::from(Reg::CALLEE.0)] {
-            Value::Object(o) => match o.borrow().kind {
+        match regs[f.base + usize::from(Reg::CALLEE.0)].kind() {
+            ValueKind::Object(o) => match o.borrow().kind {
                 ObjectKind::Function(c) => Some(c),
                 _ => None,
             },
@@ -531,7 +532,7 @@ impl Executor {
     /// Prepares a construct call: unwraps bound functions; host constructors compute directly; JS constructors build
     /// `this` (not for derived classes) and run instance fields.
     fn prepare<'gc>(&self, a: &mut Agent<'gc, '_>, regs: &mut Vec<Value<'gc>>, mut callee: Value<'gc>, mut args: Vec<Value<'gc>>, mut new_target: Value<'gc>, depth: usize) -> Result<Prepared<'gc>, Error> {
-        while let Value::Object(o) = callee {
+        while let ValueKind::Object(o) = callee.kind() {
             let kind = match &o.borrow().kind {
                 ObjectKind::Function(c) => Ok(Ok(*c)),
                 ObjectKind::Native(n) => Ok(Err(*n)),
@@ -573,7 +574,7 @@ impl Executor {
                     let r = (native.f)(a, Value::Undefined, &args);
                     a.new_target = outer;
                     self.depth.set(saved);
-                    let Value::Object(obj) = r? else { unreachable!("built-in constructors return objects") };
+                    let ValueKind::Object(obj) = (r?).kind() else { unreachable!("built-in constructors return objects") };
                     return Ok(Prepared::Done(obj.into()));
                 }
                 Err(None) => {
@@ -583,7 +584,7 @@ impl Executor {
                     return r.map(Prepared::Done);
                 }
                 Err(Some((target, mut bound_args))) => {
-                    if matches!(new_target, Value::Object(t) if Gc::ptr_eq(t, o)) {
+                    if matches!(new_target.kind(), ValueKind::Object(t) if Gc::ptr_eq(t, o)) {
                         new_target = target;
                     }
                     bound_args.extend(args);
@@ -599,8 +600,8 @@ impl Executor {
     /// itself (a direct `new`), it is read through the constructor's inline cache, and slots are reserved per this
     /// constructor's previous instance.
     fn create_this<'gc>(a: &mut Agent<'gc, '_>, ctor: &Loaded, new_target: Value<'gc>) -> Result<JsObject<'gc>, Error> {
-        let proto = match new_target {
-            Value::Object(o) => match ctor.prototype.get(o) {
+        let proto = match new_target.kind() {
+            ValueKind::Object(o) => match ctor.prototype.get(o) {
                 Some(v) => v,
                 None => {
                     let v = a.get_named(new_target, "prototype")?;
@@ -610,7 +611,7 @@ impl Executor {
             },
             _ => a.get_named(new_target, "prototype")?,
         };
-        let proto = if let Value::Object(p) = proto { p } else { a.realm.object_proto };
+        let proto = if let ValueKind::Object(p) = proto.kind() { p } else { a.realm.object_proto };
         let props = r8framework::Props::with_capacity(usize::from(ctor.instance_size.get()));
         Ok(ObjectData { proto: Some(proto), props, ..ObjectData::default() }.alloc(a.mc))
     }
@@ -621,8 +622,8 @@ impl Executor {
         if f.new_this.is_some() {
             return Err(a.throw(ErrorKind::Reference, "Super constructor may only be called once"));
         }
-        let parent = match regs[f.base + usize::from(Reg::CALLEE.0)] {
-            Value::Object(o) => o.borrow().proto.map_or(Value::Null, Value::Object),
+        let parent = match regs[f.base + usize::from(Reg::CALLEE.0)].kind() {
+            ValueKind::Object(o) => o.borrow().proto.map_or(Value::Null, Value::Object),
             _ => Value::Undefined,
         };
         let this = a.construct(parent, args, f.new_target)?;
@@ -640,14 +641,16 @@ impl Executor {
     fn construct_result<'gc>(&self, a: &Agent<'gc, '_>, f: &Frame<'gc>, v: Value<'gc>) -> Result<Value<'gc>, Error> {
         let loaded = self.function(f.func);
         let r = self.construct_value(a, &loaded, f, v);
-        if let Ok(Value::Object(o)) = r {
+        if let Ok(v) = &r
+            && let ValueKind::Object(o) = v.kind()
+        {
             loaded.instance_size.set(u8::try_from(o.borrow().props.len()).unwrap_or(u8::MAX));
         }
         r
     }
 
     fn construct_value<'gc>(&self, a: &Agent<'gc, '_>, loaded: &Loaded, f: &Frame<'gc>, v: Value<'gc>) -> Result<Value<'gc>, Error> {
-        if matches!(v, Value::Object(_)) {
+        if matches!(v.kind(), ValueKind::Object(_)) {
             return Ok(v);
         }
         match (loaded.func.kind, f.new_this) {
@@ -693,16 +696,16 @@ impl Executor {
 
     /// `class … extends parent`: the prototype of the prototype object and of the constructor.
     fn class_parents<'gc>(a: &mut Agent<'gc, '_>, parent: Option<Value<'gc>>) -> Result<(Option<JsObject<'gc>>, JsObject<'gc>), Error> {
-        match parent {
+        match parent.map(Value::kind) {
             None => Ok((Some(a.realm.object_proto), a.realm.function_proto)),
-            Some(Value::Null) => Ok((None, a.realm.function_proto)),
-            Some(p @ Value::Object(o)) if o.borrow().kind.is_callable() => match a.get_named(p, "prototype")? {
-                Value::Object(pp) => Ok((Some(pp), o)),
-                Value::Null => Ok((None, o)),
+            Some(ValueKind::Null) => Ok((None, a.realm.function_proto)),
+            Some(p @ ValueKind::Object(o)) if o.borrow().kind.is_callable() => match (a.get_named(Value::from(p), "prototype")?).kind() {
+                ValueKind::Object(pp) => Ok((Some(pp), o)),
+                ValueKind::Null => Ok((None, o)),
                 _ => Err(a.throw(ErrorKind::Type, "Class extends value does not have valid prototype property")),
             },
             Some(p) => {
-                let what = a.to_string(p)?;
+                let what = a.to_string(Value::from(p))?;
                 Err(a.throw(ErrorKind::Type, &alloc::format!("Class extends value {} is not a constructor or null", &**what)))
             }
         }
@@ -733,7 +736,7 @@ impl Executor {
     /// Throws ReferenceError if uninitialized (temporal dead zone).
     #[inline]
     fn check<'gc>(a: &Agent<'gc, '_>, v: Value<'gc>, name: &str) -> Result<(), Error> {
-        if matches!(v, Value::Uninit) {
+        if matches!(v.kind(), ValueKind::Uninit) {
             return Err(Self::uninitialized(a, name));
         }
         Ok(())
@@ -742,7 +745,7 @@ impl Executor {
     /// Check for TDZ instructions: the name is fetched from the constant pool only when actually throwing.
     #[inline]
     fn check_const<'gc>(a: &Agent<'gc, '_>, v: Value<'gc>, func: &Function, name: r8virtasm::Const) -> Result<(), Error> {
-        if matches!(v, Value::Uninit) {
+        if matches!(v.kind(), ValueKind::Uninit) {
             return Err(Self::uninitialized(a, func.name_at(name)));
         }
         Ok(())
@@ -879,8 +882,8 @@ impl Executor {
 
     /// A private name the compiler placed in a register.
     fn private_key(v: Value<'_>) -> r8framework::JsSymbol<'_> {
-        match v {
-            Value::Symbol(s) => s,
+        match v.kind() {
+            ValueKind::Symbol(s) => s,
             _ => unreachable!("the compiler loads a private name here"),
         }
     }
@@ -917,16 +920,16 @@ impl Executor {
 
     /// The resume mode stored in a register.
     fn mode(v: Value<'_>) -> Resume {
-        match v {
-            Value::Number(x) => Resume::ALL.into_iter().find(|&m| f64::from(m) == x).unwrap_or(Resume::Next),
+        match v.kind() {
+            ValueKind::Number(x) => Resume::ALL.into_iter().find(|&m| f64::from(m) == x).unwrap_or(Resume::Next),
             _ => Resume::Next,
         }
     }
 
     /// Elements of an array (a snapshot); empty if not an array.
     fn items(v: Value<'_>) -> Vec<Value<'_>> {
-        match v {
-            Value::Object(o) => match &o.borrow().kind {
+        match v.kind() {
+            ValueKind::Object(o) => match &o.borrow().kind {
                 ObjectKind::Array(items) => items.clone(),
                 _ => Vec::new(),
             },
@@ -936,7 +939,7 @@ impl Executor {
 
     /// Appends to the end of an array built by the compiler.
     fn push<'gc>(a: &Agent<'gc, '_>, arr: Value<'gc>, items: impl IntoIterator<Item = Value<'gc>>) {
-        let Value::Object(o) = arr else { return };
+        let ValueKind::Object(o) = arr.kind() else { return };
         let mut d = o.borrow_mut(a.mc);
         for v in items {
             let len = d.array_length().unwrap_or(0);
@@ -949,10 +952,10 @@ impl Executor {
 
     /// Defines a property in an object literal / class (the value or accessor function is `v`).
     fn define<'gc>(a: &mut Agent<'gc, '_>, obj: Value<'gc>, key: &str, kind: PropertyKind, enumerable: bool, v: Value<'gc>) -> Result<(), Error> {
-        let Value::Object(o) = obj else { return Ok(()) };
-        match (kind, v) {
+        let ValueKind::Object(o) = obj.kind() else { return Ok(()) };
+        match (kind, v.kind()) {
             (PropertyKind::Data, _) => a.define(o, key, Property { slot: Slot::Data(v), enumerable, writable: true, configurable: true })?,
-            (PropertyKind::Getter | PropertyKind::Setter, Value::Object(func)) => a.define_accessor(o, key, func, kind == PropertyKind::Setter, enumerable),
+            (PropertyKind::Getter | PropertyKind::Setter, ValueKind::Object(func)) => a.define_accessor(o, key, func, kind == PropertyKind::Setter, enumerable),
             _ => {}
         }
         Ok(())
@@ -1036,17 +1039,17 @@ impl Executor {
                 // Fast path when both sides are numbers computes in place; everything else goes to the Agent
                 macro_rules! binary {
                     ($op:expr, $lhs:expr, $rhs:expr) => {
-                        *acc = match ($lhs, $rhs) {
-                            (Value::Number(lhs), Value::Number(rhs)) => $op.numbers(lhs, rhs).into(),
-                            (lhs, rhs) => a.binary($op, lhs, rhs)?,
+                        *acc = match ($lhs.kind(), $rhs.kind()) {
+                            (ValueKind::Number(lhs), ValueKind::Number(rhs)) => $op.numbers(lhs, rhs).into(),
+                            (lhs, rhs) => a.binary($op, Value::from(lhs), Value::from(rhs))?,
                         }
                     };
                 }
                 macro_rules! compare {
                     ($op:expr, $lhs:expr, $rhs:expr) => {{
-                        let c = match ($lhs, $rhs) {
-                            (Value::Number(lhs), Value::Number(rhs)) => $op.numbers(lhs, rhs),
-                            (lhs, rhs) => a.compare($op, lhs, rhs)?,
+                        let c = match ($lhs.kind(), $rhs.kind()) {
+                            (ValueKind::Number(lhs), ValueKind::Number(rhs)) => $op.numbers(lhs, rhs),
+                            (lhs, rhs) => a.compare($op, Value::from(lhs), Value::from(rhs))?,
                         };
                         *acc = c.into();
                         // Immediately followed by a conditional jump (loop condition, `if`): the comparison result is
@@ -1105,7 +1108,7 @@ impl Executor {
                         Self::check_const(a, v, func, name)?;
                     }
                     Insn::CheckThis => {
-                        if matches!(*acc, Value::Uninit) {
+                        if matches!((*acc).kind(), ValueKind::Uninit) {
                             return Err(a.throw(ErrorKind::Reference, "Must call super constructor in derived class before accessing 'this' or returning from derived constructor"));
                         }
                     }
@@ -1123,10 +1126,10 @@ impl Executor {
                     Insn::DeclareVar { name, deletable } => Self::declare_global(a, func.name_at(name), None, deletable),
                     Insn::DeclareFunction { name, deletable } => Self::declare_global(a, func.name_at(name), Some(*acc), deletable),
                     Insn::SetProtoLiteral { obj } => {
-                        if let Value::Object(o) = regs[r(obj)] {
-                            match *acc {
-                                Value::Object(p) => o.borrow_mut(a.mc).proto = Some(p),
-                                Value::Null => o.borrow_mut(a.mc).proto = None,
+                        if let ValueKind::Object(o) = regs[r(obj)].kind() {
+                            match (*acc).kind() {
+                                ValueKind::Object(p) => o.borrow_mut(a.mc).proto = Some(p),
+                                ValueKind::Null => o.borrow_mut(a.mc).proto = None,
                                 _ => {}
                             }
                         }
@@ -1140,7 +1143,7 @@ impl Executor {
                     }
                     Insn::CreateNullObject => *acc = ObjectData::default().alloc(a.mc).into(),
                     Insn::DeclareEvalVar { obj, name } => {
-                        if let Value::Object(o) = regs[r(obj)] {
+                        if let ValueKind::Object(o) = regs[r(obj)].kind() {
                             let key = r8framework::Key::Str(func.name_at(name));
                             if !a.has_own_property(o, key)? {
                                 a.create_data_property(o, key, Value::Undefined)?;
@@ -1150,10 +1153,10 @@ impl Executor {
                     Insn::WithHas { obj, name } => {
                         let o = regs[r(obj)];
                         let key = func.name_at(name);
-                        let mut found = matches!(o, Value::Object(x) if a.has_key(x, r8framework::Key::Str(key))?);
+                        let mut found = matches!(o.kind(), ValueKind::Object(x) if a.has_key(x, r8framework::Key::Str(key))?);
                         if found {
                             let u = a.get_symbol(o, a.realm.symbols.unscopables, o)?;
-                            if matches!(u, Value::Object(_)) {
+                            if matches!(u.kind(), ValueKind::Object(_)) {
                                 let blocked = a.get_named(u, key)?;
                                 found = !a.to_boolean(blocked);
                             }
@@ -1192,12 +1195,12 @@ impl Executor {
                     }
                     Insn::IncReg(x) | Insn::DecReg(x) => {
                         let d = if matches!(*insn, Insn::IncReg(_)) { 1 } else { -1 };
-                        *acc = if let Value::Number(v) = regs[r(x)] { (v + f64::from(d)).into() } else { a.increment(regs[r(x)], d)? };
+                        *acc = if let ValueKind::Number(v) = regs[r(x)].kind() { (v + f64::from(d)).into() } else { a.increment(regs[r(x)], d)? };
                         regs[r(x)] = *acc;
                     }
                     Insn::Unary(op) => *acc = a.unary(op, *acc)?,
                     Insn::ToNumeric => {
-                        if !matches!(*acc, Value::Number(_)) {
+                        if !matches!((*acc).kind(), ValueKind::Number(_)) {
                             *acc = match a.to_numeric(*acc)? {
                                 r8framework::Numeric::Number(x) => x.into(),
                                 r8framework::Numeric::BigInt(b) => Value::BigInt(b),
@@ -1205,10 +1208,10 @@ impl Executor {
                         }
                     }
                     Insn::Inc => {
-                        *acc = if let Value::Number(x) = *acc { (x + 1.0).into() } else { a.increment(*acc, 1)? };
+                        *acc = if let ValueKind::Number(x) = (*acc).kind() { (x + 1.0).into() } else { a.increment(*acc, 1)? };
                     }
                     Insn::Dec => {
-                        *acc = if let Value::Number(x) = *acc { (x - 1.0).into() } else { a.increment(*acc, -1)? };
+                        *acc = if let ValueKind::Number(x) = (*acc).kind() { (x - 1.0).into() } else { a.increment(*acc, -1)? };
                     }
                     Insn::CreateRegExp { pattern, flags } => {
                         let (p, fl) = (a.string(func.name_at(pattern)), a.string(func.name_at(flags)));
@@ -1268,19 +1271,19 @@ impl Executor {
                         }
                     }
                     Insn::JumpIfUndefined(l) => {
-                        if matches!(*acc, Value::Undefined) {
+                        if matches!((*acc).kind(), ValueKind::Undefined) {
                             f.pc = l.0 as usize;
                         }
                     }
                     Insn::JumpIfNotUndefined(l) => {
-                        if !matches!(*acc, Value::Undefined) {
+                        if !matches!((*acc).kind(), ValueKind::Undefined) {
                             f.pc = l.0 as usize;
                         }
                     }
                     Insn::CreateRest(from) => *acc = a.array(f.args.get(usize::from(from)..).unwrap_or(&[]).to_vec()).into(),
                     Insn::ArrayPush { arr } => Self::push(a, regs[r(arr)], [*acc]),
                     Insn::ArrayHole { arr } => {
-                        if let Value::Object(o) = regs[r(arr)] {
+                        if let ValueKind::Object(o) = regs[r(arr)].kind() {
                             let mut d = o.borrow_mut(a.mc);
                             let len = d.array_length().unwrap_or(0);
                             d.set_array_length(len + 1);
@@ -1325,13 +1328,13 @@ impl Executor {
                         *acc = Self::super_call(a, regs, f, &list)?;
                     }
                     Insn::CopyData { obj } => {
-                        if let Value::Object(o) = regs[r(obj)] {
+                        if let ValueKind::Object(o) = regs[r(obj)].kind() {
                             a.copy_data(o, *acc, &[])?;
                         }
                     }
                     Insn::ObjectRest { src, keys, count } => {
                         let first = r(keys);
-                        let exclude = regs[first..first + usize::from(count)].iter().filter(|k| !matches!(k, Value::Symbol(_))).map(|&k| a.property_key(k)).collect::<Result<Vec<_>, _>>()?;
+                        let exclude = regs[first..first + usize::from(count)].iter().filter(|k| !matches!(k.kind(), ValueKind::Symbol(_))).map(|&k| a.property_key(k)).collect::<Result<Vec<_>, _>>()?;
                         let o = a.object();
                         a.copy_data(o, regs[r(src)], &exclude)?;
                         *acc = o.into();
@@ -1345,7 +1348,7 @@ impl Executor {
                     }
                     Insn::CreateMethod { func: n, home } => {
                         let mut closure = Closure::new(FuncId(loaded.base + n), f.env);
-                        if let Value::Object(h) = regs[r(home)] {
+                        if let ValueKind::Object(h) = regs[r(home)].kind() {
                             closure.home = Some(h);
                         }
                         *acc = self.function_object(a, closure, a.realm.function_proto).into();
@@ -1362,7 +1365,7 @@ impl Executor {
                         *acc = ctor.into();
                     }
                     Insn::SetClassFields { ctor } => {
-                        if let (Value::Object(c), Value::Object(init)) = (regs[r(ctor)], *acc)
+                        if let (ValueKind::Object(c), ValueKind::Object(init)) = (regs[r(ctor)].kind(), (*acc).kind())
                             && let ObjectKind::Function(closure) = &mut c.borrow_mut(a.mc).kind
                         {
                             closure.fields = Some(init);
@@ -1370,23 +1373,23 @@ impl Executor {
                     }
                     Insn::DefineNamed { obj, name, kind, enumerable } => {
                         let ic = &loaded.ics[f.pc - 1];
-                        match regs[r(obj)] {
-                            Value::Object(o) if kind == PropertyKind::Data => {
+                        match regs[r(obj)].kind() {
+                            ValueKind::Object(o) if kind == PropertyKind::Data => {
                                 if !ic.set(a.mc, o, *acc, false) {
                                     let before = ic::Before::from(o);
                                     Self::define(a, regs[r(obj)], func.name_at(name), kind, enumerable, *acc)?;
                                     ic.fill_set(o, func.name_at(name), before, false);
                                 }
                             }
-                            target => Self::define(a, target, func.name_at(name), kind, enumerable, *acc)?,
+                            target => Self::define(a, Value::from(target), func.name_at(name), kind, enumerable, *acc)?,
                         }
                     }
                     Insn::DefineKeyed { obj, key, kind, enumerable } => {
-                        if let Value::Object(o) = regs[r(obj)] {
+                        if let ValueKind::Object(o) = regs[r(obj)].kind() {
                             let k = regs[r(key)];
-                            match (kind, *acc) {
-                                (PropertyKind::Data, v) => a.define_keyed(o, k, Property { slot: Slot::Data(v), enumerable, writable: true, configurable: true })?,
-                                (PropertyKind::Getter | PropertyKind::Setter, Value::Object(func)) => a.define_accessor_keyed(o, k, func, kind == PropertyKind::Setter, enumerable)?,
+                            match (kind, (*acc).kind()) {
+                                (PropertyKind::Data, v) => a.define_keyed(o, k, Property { slot: Slot::Data(Value::from(v)), enumerable, writable: true, configurable: true })?,
+                                (PropertyKind::Getter | PropertyKind::Setter, ValueKind::Object(func)) => a.define_accessor_keyed(o, k, func, kind == PropertyKind::Setter, enumerable)?,
                                 _ => {}
                             }
                         }
@@ -1441,8 +1444,8 @@ impl Executor {
                     Insn::CreateArray { first, count } => *acc = a.array(regs[r(first)..r(first) + usize::from(count)].to_vec()).into(),
                     Insn::GetNamed { obj, name } => {
                         let ic = &loaded.ics[f.pc - 1];
-                        *acc = match regs[r(obj)] {
-                            Value::Object(o) => match ic.get(o) {
+                        *acc = match regs[r(obj)].kind() {
+                            ValueKind::Object(o) => match ic.get(o) {
                                 Some(v) => v,
                                 None => {
                                     let v = a.get_named(Value::Object(o), func.name_at(name))?;
@@ -1450,34 +1453,34 @@ impl Executor {
                                     v
                                 }
                             },
-                            target => a.get_named(target, func.name_at(name))?,
+                            target => a.get_named(Value::from(target), func.name_at(name))?,
                         };
                     }
                     Insn::SetNamed { obj, name, strict } => {
                         let ic = &loaded.ics[f.pc - 1];
-                        match regs[r(obj)] {
-                            Value::Object(o) => {
+                        match regs[r(obj)].kind() {
+                            ValueKind::Object(o) => {
                                 if !ic.set(a.mc, o, *acc, true) {
                                     let before = ic::Before::from(o);
                                     a.put_named(Value::Object(o), func.name_at(name), *acc, strict)?;
                                     ic.fill_set(o, func.name_at(name), before, true);
                                 }
                             }
-                            target => a.put_named(target, func.name_at(name), *acc, strict)?,
+                            target => a.put_named(Value::from(target), func.name_at(name), *acc, strict)?,
                         }
                     }
                     Insn::GetKeyed { obj } => *acc = a.get_keyed(regs[r(obj)], *acc)?,
                     Insn::SetKeyed { obj, key, strict } => a.put_keyed(regs[r(obj)], regs[r(key)], *acc, strict)?,
-                    Insn::CallEval { callee, args, argc, scope, .. } if matches!(regs[r(callee)], Value::Object(o) if Gc::ptr_eq(o, a.realm.eval)) => {
+                    Insn::CallEval { callee, args, argc, scope, .. } if matches!(regs[r(callee)].kind(), ValueKind::Object(o) if Gc::ptr_eq(o, a.realm.eval)) => {
                         let first = if argc == 0 { None } else { Some(regs[r(args)]) };
-                        *acc = match first {
+                        *acc = match first.map(Value::kind) {
                             None => Value::Undefined,
-                            Some(Value::String(s)) => {
+                            Some(ValueKind::String(s)) => {
                                 let src = alloc::string::String::from(&**s);
                                 let table = &func.scopes[usize::from(scope)];
                                 self.direct_eval(a, &src, table, f.env, func.mode == Mode::Strict, depth + frames.len() + 1)?
                             }
-                            Some(v) => v,
+                            Some(v) => Value::from(v),
                         };
                     }
                     Insn::Call { callee, this, args, argc } | Insn::CallEval { callee, this, args, argc, .. } => {
@@ -1502,8 +1505,8 @@ impl Executor {
                         }
                         // Fast path: the callee is a host function; pass the arguments directly as a slice of the
                         // register file, without copying into a Vec or going through call resolution
-                        let native = match target {
-                            Value::Object(o) => match &o.borrow().kind {
+                        let native = match target.kind() {
+                            ValueKind::Object(o) => match &o.borrow().kind {
                                 ObjectKind::Native(n) if matches!(*insn, Insn::Call { .. }) && n.forward == r8framework::Forward::No => Some(*n),
                                 _ => None,
                             },
@@ -1532,7 +1535,7 @@ impl Executor {
                     Insn::PopHandler => _ = f.handlers.pop(),
                     Insn::Throw => return Err(a.throw_value(*acc)),
                     Insn::Return => {
-                        if !matches!(f.new_target, Value::Undefined) {
+                        if !matches!(f.new_target.kind(), ValueKind::Undefined) {
                             *acc = self.construct_result(a, f, *acc)?;
                         }
                         match frames.pop() {
@@ -1611,17 +1614,17 @@ impl Executor {
                     Insn::GetPrivate { obj } => *acc = a.private_get(regs[r(obj)], Self::private_key(*acc))?,
                     Insn::SetPrivate { obj, key } => a.private_set(regs[r(obj)], Self::private_key(regs[r(key)]), *acc)?,
                     Insn::DefinePrivate { obj, key, kind, writable } => {
-                        let slot = match (kind, *acc) {
-                            (PropertyKind::Getter, Value::Object(f)) => Slot::Accessor { get: Some(f), set: None },
-                            (PropertyKind::Setter, Value::Object(f)) => Slot::Accessor { get: None, set: Some(f) },
-                            (_, v) => Slot::Data(v),
+                        let slot = match (kind, (*acc).kind()) {
+                            (PropertyKind::Getter, ValueKind::Object(f)) => Slot::Accessor { get: Some(f), set: None },
+                            (PropertyKind::Setter, ValueKind::Object(f)) => Slot::Accessor { get: None, set: Some(f) },
+                            (_, v) => Slot::Data(Value::from(v)),
                         };
                         let prop = Property { slot, enumerable: false, writable, configurable: false };
                         a.private_define(regs[r(obj)], Self::private_key(regs[r(key)]), prop)?;
                     }
                     Insn::HasPrivate { obj } => *acc = a.private_has(regs[r(obj)], Self::private_key(*acc))?.into(),
                     Insn::ToPropertyKey => {
-                        if !matches!(*acc, Value::Symbol(_)) {
+                        if !matches!((*acc).kind(), ValueKind::Symbol(_)) {
                             *acc = a.property_key(*acc)?.into();
                         }
                     }
@@ -1634,7 +1637,7 @@ impl Executor {
                             (rec.iterator, rec.next, true)
                         } else {
                             let it = a.call(method, v, &[])?;
-                            if !matches!(it, Value::Object(_)) {
+                            if !matches!(it.kind(), ValueKind::Object(_)) {
                                 return Err(a.throw(ErrorKind::Type, "Result of the Symbol.asyncIterator method is not an object"));
                             }
                             let next = a.get_named(it, "next")?;
@@ -1652,7 +1655,7 @@ impl Executor {
                     Insn::IteratorResult { iter } => {
                         let d = r(iter);
                         let result = *acc;
-                        if !matches!(result, Value::Object(_)) {
+                        if !matches!(result.kind(), ValueKind::Object(_)) {
                             regs[d + 2] = true.into();
                             let what = a.to_string(result)?;
                             return Err(a.throw(ErrorKind::Type, &alloc::format!("Iterator result {} is not an object", &**what)));
@@ -1723,7 +1726,7 @@ impl Executor {
                                 if ret.is_nullish() { a.iter_result(*acc, true).into() } else { a.call(ret, it, &[*acc])? }
                             }
                         };
-                        if !matches!(result, Value::Object(_)) {
+                        if !matches!(result.kind(), ValueKind::Object(_)) {
                             return Err(a.throw(ErrorKind::Type, "Iterator result is not an object"));
                         }
                         *acc = result;

@@ -1,3 +1,4 @@
+use r8framework::ValueKind;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::cmp::Ordering;
@@ -35,7 +36,7 @@ impl Typed {
     /// ValidateTypedArray: returns (object, element type, view, length); throws TypeError if not a TypedArray or out of
     /// bounds.
     fn validate<'gc>(a: &Agent<'gc, '_>, v: Value<'gc>) -> Result<(JsObject<'gc>, ElementKind, ViewData<'gc>, usize), Error> {
-        let Value::Object(o) = v else { return Err(a.throw(ErrorKind::Type, "this is not a typed array")) };
+        let ValueKind::Object(o) = v.kind() else { return Err(a.throw(ErrorKind::Type, "this is not a typed array")) };
         let Some((k, view)) = Agent::typed_array(o) else { return Err(a.throw(ErrorKind::Type, "this is not a typed array")) };
         match Agent::view_length(&view, k.size()) {
             Some(len) => Ok((o, k, view, len)),
@@ -62,7 +63,7 @@ impl Typed {
             return Err(a.throw(ErrorKind::Type, &alloc::format!("Constructor {} requires 'new'", kind.name())));
         }
         let first = args.at(0);
-        let Value::Object(src) = first else {
+        let ValueKind::Object(src) = first.kind() else {
             let len = a.to_index(first)?;
             let proto = a.proto_from_ctor(a.new_target, a.realm.typed_protos[K])?;
             return Ok(Self::create(a, kind, proto, len)?.into());
@@ -75,9 +76,9 @@ impl Typed {
             if offset % size != 0 {
                 return Err(a.throw(ErrorKind::Range, &alloc::format!("start offset of {} should be a multiple of {size}", kind.name())));
             }
-            let new_len = match args.at(2) {
-                Value::Undefined => None,
-                v => Some(a.to_index(v)?),
+            let new_len = match args.at(2).kind() {
+                ValueKind::Undefined => None,
+                v => Some(a.to_index(Value::from(v))?),
             };
             let (len, max) = match &src.borrow().kind {
                 ObjectKind::ArrayBuffer(b) => (b.bytes.as_ref().map(Vec::len), b.max),
@@ -138,7 +139,7 @@ impl Typed {
                 return Err(a.throw(ErrorKind::Type, "Symbol.iterator is not a function"));
             }
             let iterator = a.call(using, first, &[])?;
-            if !matches!(iterator, Value::Object(_)) {
+            if !matches!(iterator.kind(), ValueKind::Object(_)) {
                 return Err(a.throw(ErrorKind::Type, "Result of the Symbol.iterator method is not an object"));
             }
             let next = a.get_named(iterator, "next")?;
@@ -183,8 +184,9 @@ impl Typed {
     fn create_from_ctor<'gc>(a: &mut Agent<'gc, '_>, ctor: Value<'gc>, args: &[Value<'gc>]) -> Result<(JsObject<'gc>, ElementKind, usize), Error> {
         let made = a.construct(ctor, args, ctor)?;
         let (o, k, _, len) = Self::validate(a, made)?;
-        if let [Value::Number(n)] = args
-            && Self::f(len) < *n
+        if let [v] = *args
+            && let ValueKind::Number(n) = v.kind()
+            && Self::f(len) < n
         {
             return Err(a.throw(ErrorKind::Type, "TypedArray species constructor returned a too short array"));
         }
@@ -236,7 +238,7 @@ impl Typed {
                 return Err(a.throw(ErrorKind::Type, "Symbol.iterator is not a function"));
             }
             let iterator = a.call(using, source, &[])?;
-            if !matches!(iterator, Value::Object(_)) {
+            if !matches!(iterator.kind(), ValueKind::Object(_)) {
                 return Err(a.throw(ErrorKind::Type, "Result of the Symbol.iterator method is not an object"));
             }
             let next = a.get_named(iterator, "next")?;
@@ -268,8 +270,8 @@ impl Typed {
     }
 
     fn this_typed<'gc>(a: &Agent<'gc, '_>, this: Value<'gc>) -> Result<(ElementKind, ViewData<'gc>), Error> {
-        match this {
-            Value::Object(o) => Agent::typed_array(o).ok_or_else(|| a.throw(ErrorKind::Type, "this is not a typed array")),
+        match this.kind() {
+            ValueKind::Object(o) => Agent::typed_array(o).ok_or_else(|| a.throw(ErrorKind::Type, "this is not a typed array")),
             _ => Err(a.throw(ErrorKind::Type, "this is not a typed array")),
         }
     }
@@ -294,8 +296,8 @@ impl Typed {
     }
 
     fn to_string_tag<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        Ok(match this {
-            Value::Object(o) => Agent::typed_array(o).map_or(Value::Undefined, |(k, _)| a.string(k.name()).into()),
+        Ok(match this.kind() {
+            ValueKind::Object(o) => Agent::typed_array(o).map_or(Value::Undefined, |(k, _)| a.string(k.name()).into()),
             _ => Value::Undefined,
         })
     }
@@ -489,7 +491,7 @@ impl Typed {
         // Searching for a Number and elements aren't BigInt: borrow the buffer once and decode and compare chunks in
         // parallel on the thread pool (only scan what is still in bounds now: out-of-bounds reads give undefined, which
         // can't equal a Number)
-        if let Value::Number(w) = want
+        if let ValueKind::Number(w) = want.kind()
             && let Some((kind, view)) = Agent::typed_array(o)
             && !kind.is_bigint()
         {
@@ -516,7 +518,7 @@ impl Typed {
         while k < lenf {
             let v = a.typed_get(o, k);
             let hit = match v {
-                Some(v) if zero => v == want || matches!((v, want), (Value::Number(x), Value::Number(y)) if x.is_nan() && y.is_nan()),
+                Some(v) if zero => v == want || matches!((v.kind(), want.kind()), (ValueKind::Number(x), ValueKind::Number(y)) if x.is_nan() && y.is_nan()),
                 Some(v) => v == want,
                 None => zero && want == Value::Undefined,
             };
@@ -542,9 +544,9 @@ impl Typed {
 
     fn join<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let (o, _, _, len) = Self::validate(a, this)?;
-        let sep = match args.at(0) {
-            Value::Undefined => a.string(","),
-            v => a.to_string(v)?,
+        let sep = match args.at(0).kind() {
+            ValueKind::Undefined => a.string(","),
+            v => a.to_string(Value::from(v))?,
         };
         let mut out = String::new();
         for k in 0..len {
@@ -583,9 +585,9 @@ impl Typed {
 
     fn write_all<'gc>(a: &Agent<'gc, '_>, kind: ElementKind, view: &ViewData<'gc>, values: &[Value<'gc>]) {
         for (i, v) in values.iter().enumerate() {
-            let e = match *v {
-                Value::Number(x) => Element::Number(x),
-                Value::BigInt(b) => Element::BigInt(b.0.clone()),
+            let e = match (*v).kind() {
+                ValueKind::Number(x) => Element::Number(x),
+                ValueKind::BigInt(b) => Element::BigInt(b.0.clone()),
                 _ => continue,
             };
             a.write_raw(view.buffer, view.offset + i * kind.size(), kind, &e);
@@ -616,15 +618,15 @@ impl Typed {
             let r = a.call(f, Value::Undefined, &[x, y])?;
             return Ok(a.to_number(r)?.partial_cmp(&0.0).unwrap_or(Ordering::Equal));
         }
-        Ok(match (x, y) {
-            (Value::Number(p), Value::Number(q)) => match (p.is_nan(), q.is_nan()) {
+        Ok(match (x.kind(), y.kind()) {
+            (ValueKind::Number(p), ValueKind::Number(q)) => match (p.is_nan(), q.is_nan()) {
                 (true, true) => Ordering::Equal,
                 (true, false) => Ordering::Greater,
                 (false, true) => Ordering::Less,
                 _ if p == 0.0 && q == 0.0 => p.is_sign_positive().cmp(&q.is_sign_positive()),
                 _ => p.partial_cmp(&q).unwrap_or(Ordering::Equal),
             },
-            (Value::BigInt(p), Value::BigInt(q)) => p.0.cmp(&q.0),
+            (ValueKind::BigInt(p), ValueKind::BigInt(q)) => p.0.cmp(&q.0),
             _ => Ordering::Equal,
         })
     }
@@ -644,8 +646,8 @@ impl Typed {
             return Ok(v);
         }
         // No comparator and all elements are Numbers: sort numerically in parallel (no user code is called)
-        if f == Value::Undefined && v.iter().all(|x| matches!(x, Value::Number(_))) {
-            let mut xs: Vec<f64> = v.iter().map(|x| if let Value::Number(n) = x { *n } else { 0.0 }).collect();
+        if f == Value::Undefined && v.iter().all(|x| matches!(x.kind(), ValueKind::Number(_))) {
+            let mut xs: Vec<f64> = v.iter().map(|x| if let ValueKind::Number(n) = x.kind() { n } else { 0.0 }).collect();
             a.par().sort_by(&mut xs, &|x, y| Self::numeric_order(*x, *y));
             return Ok(xs.into_iter().map(Value::Number).collect());
         }
@@ -743,7 +745,7 @@ impl Typed {
 
     fn subarray<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let (kind, view) = Self::this_typed(a, this)?;
-        let Value::Object(o) = this else { unreachable!("checked above") };
+        let ValueKind::Object(o) = this.kind() else { unreachable!("checked above") };
         let len = Self::f(Agent::view_length(&view, kind.size()).unwrap_or(0));
         let start = Self::relative(a, args.at(0), len, 0.0)?;
         let tracking = view.length.is_none() && args.at(1) == Value::Undefined;
@@ -759,14 +761,14 @@ impl Typed {
     /// `set(source, offset)`.
     fn set<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let (kind, _) = Self::this_typed(a, this)?;
-        let Value::Object(target) = this else { unreachable!("checked above") };
+        let ValueKind::Object(target) = this.kind() else { unreachable!("checked above") };
         let offset = a.to_integer_or_infinity(args.at(1))?;
         if offset < 0.0 {
             return Err(a.throw(ErrorKind::Range, "offset is out of bounds"));
         }
         let (_, _, tview, tlen) = Self::validate(a, this)?;
         let source = args.at(0);
-        if let Value::Object(s) = source
+        if let ValueKind::Object(s) = source.kind()
             && let Some((sk, sview)) = Agent::typed_array(s)
         {
             let Some(slen) = Agent::view_length(&sview, sk.size()) else {

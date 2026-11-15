@@ -1,3 +1,4 @@
+use r8framework::ValueKind;
 use num_bigint::BigInt;
 use r8framework::{Agent, Error, ErrorKind, Hint, Value};
 
@@ -10,15 +11,15 @@ impl BigInts {
     /// `BigInt(v)`: Numbers with integer values, booleans, strings (via StringToBigInt), BigInts.
     fn construct<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let prim = a.to_primitive(args.at(0), Hint::Number)?;
-        let b = match prim {
-            Value::Number(x) => Agent::number_to_bigint(x).ok_or_else(|| a.throw(ErrorKind::Range, &alloc::format!("The number {} cannot be converted to a BigInt because it is not an integer", ryu_js::Buffer::new().format(x))))?,
-            Value::Bool(t) => BigInt::from(u8::from(t)),
-            Value::BigInt(b) => return Ok(Value::BigInt(b)),
-            Value::String(s) => Agent::parse_bigint(&s).ok_or_else(|| a.throw(ErrorKind::Syntax, &alloc::format!("Cannot convert {} to a BigInt", &**s)))?,
+        let b = match prim.kind() {
+            ValueKind::Number(x) => Agent::number_to_bigint(x).ok_or_else(|| a.throw(ErrorKind::Range, &alloc::format!("The number {} cannot be converted to a BigInt because it is not an integer", ryu_js::Buffer::new().format(x))))?,
+            ValueKind::Bool(t) => BigInt::from(u8::from(t)),
+            ValueKind::BigInt(b) => return Ok(Value::BigInt(b)),
+            ValueKind::String(s) => Agent::parse_bigint(&s).ok_or_else(|| a.throw(ErrorKind::Syntax, &alloc::format!("Cannot convert {} to a BigInt", &**s)))?,
             other => {
                 let what = match other {
-                    Value::Symbol(s) => a.symbol_descriptive(s),
-                    v => a.to_string(v)?,
+                    ValueKind::Symbol(s) => a.symbol_descriptive(s),
+                    v => a.to_string(Value::from(v))?,
                 };
                 return Err(a.throw(ErrorKind::Type, &alloc::format!("Cannot convert {} to a BigInt", &**what)));
             }
@@ -27,8 +28,8 @@ impl BigInts {
     }
 
     fn this<'gc>(a: &Agent<'gc, '_>, this: Value<'gc>) -> Result<r8framework::JsBigInt<'gc>, Error> {
-        match this.unwrapped() {
-            Value::BigInt(b) => Ok(b),
+        match this.unwrapped().kind() {
+            ValueKind::BigInt(b) => Ok(b),
             _ => Err(a.throw(ErrorKind::Type, "BigInt.prototype method called on a non-BigInt")),
         }
     }
@@ -36,9 +37,9 @@ impl BigInts {
     /// `n.toString(radix)`.
     fn to_string<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let b = Self::this(a, this)?;
-        let radix = match args.at(0) {
-            Value::Undefined => 10,
-            r => a.to_int32(r)?,
+        let radix = match args.at(0).kind() {
+            ValueKind::Undefined => 10,
+            r => a.to_int32(Value::from(r))?,
         };
         let radix = u32::try_from(radix).ok().filter(|r| (2..=36).contains(r)).ok_or_else(|| a.throw(ErrorKind::Range, "toString() radix must be between 2 and 36"))?;
         Ok(a.string(&b.0.to_str_radix(radix)).into())

@@ -1,3 +1,4 @@
+use r8framework::ValueKind;
 use alloc::boxed::Box;
 use core::fmt::Write;
 use alloc::string::String;
@@ -75,7 +76,7 @@ impl Regexps {
 
     /// IsRegExp: check `Symbol.match`; if absent, check whether it is a RegExp object.
     pub(crate) fn is_regexp<'gc>(a: &mut Agent<'gc, '_>, v: Value<'gc>) -> Result<bool, Error> {
-        if !matches!(v, Value::Object(_)) {
+        if !matches!(v.kind(), ValueKind::Object(_)) {
             return Ok(false);
         }
         let m = a.get_symbol(v, a.realm.symbols.match_, v)?;
@@ -86,7 +87,7 @@ impl Regexps {
     }
 
     fn is_regexp_ctor(v: Value<'_>) -> bool {
-        matches!(v, Value::Object(f) if matches!(f.borrow().kind, ObjectKind::Native(n) if core::ptr::fn_addr_eq(n.f, Self::construct as r8framework::NativeFn)))
+        matches!(v.kind(), ValueKind::Object(f) if matches!(f.borrow().kind, ObjectKind::Native(n) if core::ptr::fn_addr_eq(n.f, Self::construct as r8framework::NativeFn)))
     }
 
     /// RegExpInitialize: compile and install into `o`, setting `lastIndex` to 0.
@@ -127,7 +128,7 @@ impl Regexps {
         // RegExpInitialize merged into one step: the prototype is this realm's `RegExp.prototype`; compile first, then
         // create the object, and define `lastIndex` directly as 0 (a Set on a fresh object is indistinguishable)
         if a.new_target == Value::Undefined
-            && let (Value::String(source), Value::String(flags)) = (pattern, flags)
+            && let (ValueKind::String(source), ValueKind::String(flags)) = (pattern.kind(), flags.kind())
         {
             let compiled = Self::compiled(a, &source, &flags)?;
             let kind = ObjectKind::RegExp(RegExpData { source, flags, compiled, legacy: true });
@@ -183,8 +184,8 @@ impl Regexps {
 
     /// Returns it if it is a RegExp object.
     fn regexp(v: Value<'_>) -> Option<JsObject<'_>> {
-        match v {
-            Value::Object(o) if matches!(o.borrow().kind, ObjectKind::RegExp(_)) => Some(o),
+        match v.kind() {
+            ValueKind::Object(o) if matches!(o.borrow().kind, ObjectKind::RegExp(_)) => Some(o),
             _ => None,
         }
     }
@@ -194,8 +195,8 @@ impl Regexps {
     }
 
     fn this_object<'gc>(a: &Agent<'gc, '_>, this: Value<'gc>) -> Result<Value<'gc>, Error> {
-        match this {
-            Value::Object(_) => Ok(this),
+        match this.kind() {
+            ValueKind::Object(_) => Ok(this),
             _ => Err(a.throw(ErrorKind::Type, "RegExp.prototype method called on a non-object")),
         }
     }
@@ -293,7 +294,7 @@ impl Regexps {
             pairs.extend(m.groups.iter().map(|g| Self::pair(a, g.as_ref())));
             let ind = a.array(pairs);
             let ig = if m.named.is_empty() { Value::Undefined } else { ObjectData::default().alloc(a.mc).into() };
-            if let Value::Object(igo) = ig {
+            if let ValueKind::Object(igo) = ig.kind() {
                 for (n, r) in &m.named {
                     let v = Self::pair(a, r.as_ref());
                     a.create_data_property_or_throw(igo, Key::Str(n), v)?;
@@ -311,7 +312,7 @@ impl Regexps {
     /// lastIndex, calling exec, reading the result array) is unobservable, so we can match directly. Returns the object
     /// and the value of `lastIndex`.
     fn pristine<'gc>(a: &Agent<'gc, '_>, r: Value<'gc>) -> Option<(JsObject<'gc>, f64)> {
-        let Value::Object(o) = r else { return None };
+        let ValueKind::Object(o) = r.kind() else { return None };
         let d = o.borrow();
         let own_ok = matches!(d.kind, ObjectKind::RegExp(_))
             && d.proto.is_some_and(|p| Gc::ptr_eq(p, a.realm.regexp_proto))
@@ -322,12 +323,14 @@ impl Regexps {
         if !own_ok {
             return None;
         }
-        let Slot::Data(Value::Number(last)) = d.props.slot(0) else { return None };
+        let Slot::Data(v) = d.props.slot(0) else { return None };
+        let ValueKind::Number(last) = v.kind() else { return None };
         drop(d);
         let p = a.realm.regexp_pristine.get().as_ref()?;
         let proto = a.realm.regexp_proto.borrow();
         let same = |x: Slot<'gc>, y: Slot<'gc>| match (x, y) {
-            (Slot::Data(Value::Object(x)), Slot::Data(Value::Object(y))) | (Slot::Accessor { get: Some(x), .. }, Slot::Accessor { get: Some(y), .. }) => Gc::ptr_eq(x, y),
+            (Slot::Data(x), Slot::Data(y)) => matches!((x.kind(), y.kind()), (ValueKind::Object(x), ValueKind::Object(y)) if Gc::ptr_eq(x, y)),
+            (Slot::Accessor { get: Some(x), .. }, Slot::Accessor { get: Some(y), .. }) => Gc::ptr_eq(x, y),
             _ => false,
         };
         let intact = proto.props.shape().is_some_and(|s| alloc::rc::Rc::ptr_eq(s, &p.shape)) && p.slots.iter().all(|&(i, orig)| same(proto.props.slot(i), orig));
@@ -431,7 +434,7 @@ impl Regexps {
         let exec = a.get_named(r, "exec")?;
         if a.is_callable(exec) {
             let result = a.call(exec, r, &[s.into()])?;
-            if !matches!(result, Value::Object(_) | Value::Null) {
+            if !matches!(result.kind(), ValueKind::Object(_) | ValueKind::Null) {
                 return Err(a.throw(ErrorKind::Type, "exec result must be an object or null"));
             }
             return Ok(result);
@@ -494,7 +497,7 @@ impl Regexps {
     }
 
     fn source<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        if let Value::Object(o) = this
+        if let ValueKind::Object(o) = this.kind()
             && Gc::ptr_eq(o, a.realm.regexp_proto)
         {
             return Ok(a.string("(?:)").into());
@@ -519,7 +522,7 @@ impl Regexps {
 
     /// RegExpHasFlag: `RegExp.prototype` itself gives `undefined`.
     fn flag<'gc, const C: char>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        let Value::Object(o) = this else { return Err(a.throw(ErrorKind::Type, "RegExp flag getter called on a non-object")) };
+        let ValueKind::Object(o) = this.kind() else { return Err(a.throw(ErrorKind::Type, "RegExp flag getter called on a non-object")) };
         match Self::regexp(this) {
             Some(r) => Ok(Self::data(r).1.contains(C).into()),
             None if Gc::ptr_eq(o, a.realm.regexp_proto) => Ok(Value::Undefined),
@@ -592,14 +595,14 @@ impl Regexps {
         let li = a.get_named(r, "lastIndex")?;
         let last = a.to_length(li)?;
         a.set_named(matcher, "lastIndex", last.into())?;
-        let Value::Object(matcher) = matcher else { return Err(a.throw(ErrorKind::Type, "species constructor returned a non-object")) };
+        let ValueKind::Object(matcher) = matcher.kind() else { return Err(a.throw(ErrorKind::Type, "species constructor returned a non-object")) };
         let kind = ObjectKind::RegExpStringIterator { matcher, string: s, global: flags.contains('g'), unicode: flags.contains('u') || flags.contains('v'), done: false };
         Ok(ObjectData { kind, proto: Some(a.realm.regexp_string_iterator_proto), ..ObjectData::default() }.alloc(a.mc).into())
     }
 
     fn string_iterator_next<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        let state = match this {
-            Value::Object(o) => match o.borrow().kind {
+        let state = match this.kind() {
+            ValueKind::Object(o) => match o.borrow().kind {
                 ObjectKind::RegExpStringIterator { matcher, string, global, unicode, done } => Some((o, matcher, string, global, unicode, done)),
                 _ => None,
             },
@@ -818,9 +821,9 @@ impl Regexps {
         let nf = a.string(&new_flags);
         let splitter = a.construct(ctor, &[r, nf.into()], ctor)?;
         let arr = a.array(Vec::new());
-        let lim = match args.at(1) {
-            Value::Undefined => MAX_SPLIT,
-            v => f64::from(a.to_uint32(v)?),
+        let lim = match args.at(1).kind() {
+            ValueKind::Undefined => MAX_SPLIT,
+            v => f64::from(a.to_uint32(Value::from(v))?),
         };
         if lim == 0.0 {
             return Ok(arr.into());
@@ -885,7 +888,7 @@ impl Regexps {
 
     /// `RegExp.escape(s)`.
     fn escape<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        let Value::String(s) = args.at(0) else { return Err(a.throw(ErrorKind::Type, "RegExp.escape requires a string")) };
+        let ValueKind::String(s) = args.at(0).kind() else { return Err(a.throw(ErrorKind::Type, "RegExp.escape requires a string")) };
         let mut out = String::new();
         for (i, c) in s.chars().enumerate() {
             match c {
@@ -938,7 +941,7 @@ impl Regexps {
     /// it.
     fn dispatch<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, arg: Value<'gc>, sym: r8framework::JsSymbol<'gc>, flags: Value<'gc>) -> Result<Value<'gc>, Error> {
         let o = Self::subject(a, this)?;
-        if matches!(arg, Value::Object(_))
+        if matches!(arg.kind(), ValueKind::Object(_))
             && let Some(f) = Self::method_of(a, arg, sym)?
         {
             return a.call(f, arg, &[o]);
@@ -974,7 +977,7 @@ impl Regexps {
     fn match_all<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let arg = args.at(0);
         Self::subject(a, this)?;
-        if matches!(arg, Value::Object(_)) {
+        if matches!(arg.kind(), ValueKind::Object(_)) {
             Self::require_global(a, arg, "matchAll")?;
         }
         let g = a.string("g");
@@ -984,7 +987,7 @@ impl Regexps {
     fn replace_impl<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>], all: bool) -> Result<Value<'gc>, Error> {
         let o = Self::subject(a, this)?;
         let (search, with) = (args.at(0), args.at(1));
-        if matches!(search, Value::Object(_)) {
+        if matches!(search.kind(), ValueKind::Object(_)) {
             if all {
                 Self::require_global(a, search, "replaceAll")?;
             }
@@ -1035,7 +1038,7 @@ impl Regexps {
     fn split<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let o = Self::subject(a, this)?;
         let sep = args.at(0);
-        if matches!(sep, Value::Object(_))
+        if matches!(sep.kind(), ValueKind::Object(_))
             && let Some(f) = Self::method_of(a, sep, a.realm.symbols.split)?
         {
             return a.call(f, sep, &[o, args.at(1)]);

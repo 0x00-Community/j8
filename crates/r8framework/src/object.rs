@@ -1,3 +1,4 @@
+use crate::ValueKind;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::fmt;
@@ -330,16 +331,16 @@ pub enum MapKey {
 
 impl From<Value<'_>> for MapKey {
     fn from(v: Value<'_>) -> Self {
-        match v {
-            Value::Undefined | Value::Uninit => MapKey::Undefined,
-            Value::Null => MapKey::Null,
-            Value::Bool(b) => MapKey::Bool(b),
-            Value::Number(x) if x.is_nan() => MapKey::Number(f64::NAN.to_bits()),
-            Value::Number(x) => MapKey::Number((x + 0.0).to_bits()),
-            Value::String(s) => MapKey::String(s.text().clone()),
-            Value::BigInt(b) => MapKey::BigInt(alloc::format!("{}", b.0).into()),
-            Value::Symbol(s) => MapKey::Ref(Gc::as_ptr(s) as usize),
-            Value::Object(o) => MapKey::Ref(Gc::as_ptr(o).cast::<u8>() as usize),
+        match v.kind() {
+            ValueKind::Undefined | ValueKind::Uninit => MapKey::Undefined,
+            ValueKind::Null => MapKey::Null,
+            ValueKind::Bool(b) => MapKey::Bool(b),
+            ValueKind::Number(x) if x.is_nan() => MapKey::Number(f64::NAN.to_bits()),
+            ValueKind::Number(x) => MapKey::Number((x + 0.0).to_bits()),
+            ValueKind::String(s) => MapKey::String(s.text().clone()),
+            ValueKind::BigInt(b) => MapKey::BigInt(alloc::format!("{}", b.0).into()),
+            ValueKind::Symbol(s) => MapKey::Ref(Gc::as_ptr(s) as usize),
+            ValueKind::Object(o) => MapKey::Ref(Gc::as_ptr(o).cast::<u8>() as usize),
         }
     }
 }
@@ -372,7 +373,7 @@ unsafe impl<'gc> Collect<'gc> for Collection<'gc> {
         self.young_from = self.entries.len();
         for (i, entry) in self.entries.iter_mut().enumerate().skip(from) {
             let Some((k, v)) = entry else { continue };
-            let old = matches!(k, Value::Object(_) | Value::Symbol(_)).then(|| MapKey::from(*k));
+            let old = matches!(k.kind(), ValueKind::Object(_) | ValueKind::Symbol(_)).then(|| MapKey::from(*k));
             r.relocate(k);
             r.relocate(v);
             if let Some(old) = old {
@@ -408,9 +409,9 @@ impl<'gc> Collection<'gc> {
     /// Set a value: update it if present, otherwise append at the end. A `-0` key is stored as `+0`.
     pub fn set(&mut self, key: Value<'gc>, value: Value<'gc>) {
         // `-0 + 0` is `+0`
-        let key = match key {
-            Value::Number(x) => Value::Number(x + 0.0),
-            k => k,
+        let key = match key.kind() {
+            ValueKind::Number(x) => Value::Number(x + 0.0),
+            k => k.into(),
         };
         // Hash only once
         match self.index.0.entry(MapKey::from(key)) {
@@ -686,10 +687,8 @@ impl ObjectKind<'_> {
     /// ordinary (not a Proxy / array / typed array / module namespace / string wrapper / arguments), so property lookup
     /// can take the fast path.
     pub fn has_ordinary_properties(&self) -> bool {
-        !matches!(
-            self,
-            ObjectKind::Proxy(_) | ObjectKind::Array(_) | ObjectKind::TypedArray(..) | ObjectKind::ModuleNamespace(_) | ObjectKind::Primitive(Value::String(_)) | ObjectKind::Arguments(_)
-        )
+        !(matches!(self, ObjectKind::Proxy(_) | ObjectKind::Array(_) | ObjectKind::TypedArray(..) | ObjectKind::ModuleNamespace(_) | ObjectKind::Arguments(_))
+            || matches!(self, ObjectKind::Primitive(v) if matches!(v.kind(), ValueKind::String(_))))
     }
 
     pub fn is_callable(&self) -> bool {

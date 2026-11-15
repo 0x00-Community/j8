@@ -25,6 +25,7 @@ mod text;
 mod typed;
 mod weak;
 
+use r8framework::ValueKind;
 use r8gc::Mutation;
 use r8framework::{Intrinsics, JsObject, Realm, Value};
 
@@ -96,7 +97,7 @@ impl<'gc> Installer<'_, 'gc> {
     /// `[Symbol.toStringTag]` of each prototype (non-writable, non-enumerable, configurable).
     fn tags(&self) {
         let r = self.realm;
-        let global = |name: &str| r.global.borrow().own(name).and_then(|v| if let Value::Object(o) = v { Some(o) } else { None });
+        let global = |name: &str| r.global.borrow().own(name).and_then(|v| if let ValueKind::Object(o) = v.kind() { Some(o) } else { None });
         let mut tagged = alloc::vec![
             (r.symbol_proto, "Symbol"),
             (r.bigint_proto, "BigInt"),

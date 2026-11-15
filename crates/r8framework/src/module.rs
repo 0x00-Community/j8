@@ -1,5 +1,6 @@
 //! ES modules: static information produced by the compiler, runtime module records, export resolution, and the property
 //! behavior of namespace objects (spec 10.4.6).
+use crate::ValueKind;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
@@ -186,9 +187,9 @@ impl<'gc> Agent<'gc, '_> {
     /// The binding's current value (throws a ReferenceError if not yet initialized).
     pub fn binding_value(&mut self, b: ResolvedBinding<'gc>, name: &str) -> Result<Value<'gc>, Error> {
         match b {
-            ResolvedBinding::Slot(env, slot) => match env.get(usize::from(slot)) {
-                Value::Uninit => Err(self.throw(ErrorKind::Reference, &alloc::format!("Cannot access '{name}' before initialization"))),
-                v => Ok(v),
+            ResolvedBinding::Slot(env, slot) => match env.get(usize::from(slot)).kind() {
+                ValueKind::Uninit => Err(self.throw(ErrorKind::Reference, &alloc::format!("Cannot access '{name}' before initialization"))),
+                v => Ok(v.into()),
             },
             ResolvedBinding::Namespace(m) => Ok(self.module_namespace(m).into()),
         }

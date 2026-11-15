@@ -1,4 +1,5 @@
 //! Promises and microtasks: resolve / reject, `then` reactions, driving async coroutines, draining the queue.
+use crate::ValueKind;
 use alloc::vec::Vec;
 
 use r8gc::{Gc, Lock};
@@ -12,7 +13,7 @@ impl<'gc> Agent<'gc, '_> {
     }
 
     pub fn is_promise(v: Value<'gc>) -> bool {
-        matches!(v, Value::Object(o) if matches!(o.borrow().kind, ObjectKind::Promise { .. }))
+        matches!(v.kind(), ValueKind::Object(o) if matches!(o.borrow().kind, ObjectKind::Promise { .. }))
     }
 
     /// A Promise's pair of resolve / reject functions (sharing an "already resolved" flag).
@@ -67,7 +68,7 @@ impl<'gc> Agent<'gc, '_> {
     /// Resolve with a value: resolving with itself throws a TypeError; a thenable enqueues a job to call its `then`;
     /// otherwise fulfill directly.
     pub fn resolve_promise(&mut self, promise: JsObject<'gc>, value: Value<'gc>) -> Result<(), Error> {
-        if let Value::Object(o) = value {
+        if let ValueKind::Object(o) = value.kind() {
             if Gc::ptr_eq(o, promise) {
                 let e = self.error(ErrorKind::Type, "Chaining cycle detected for promise");
                 self.reject_promise(promise, e.into());
@@ -113,9 +114,9 @@ impl<'gc> Agent<'gc, '_> {
     /// PromiseResolve(%Promise%, v): a Promise whose `constructor` is %Promise% is returned as is; anything else is
     /// wrapped.
     pub fn promise_resolve(&mut self, v: Value<'gc>) -> Result<JsObject<'gc>, Error> {
-        if let Value::Object(o) = v
+        if let ValueKind::Object(o) = v.kind()
             && Self::is_promise(v)
-            && matches!(self.get_named(v, "constructor")?, Value::Object(c) if Gc::ptr_eq(c, self.realm.promise_ctor))
+            && matches!((self.get_named(v, "constructor")?).kind(), ValueKind::Object(c) if Gc::ptr_eq(c, self.realm.promise_ctor))
         {
             return Ok(o);
         }

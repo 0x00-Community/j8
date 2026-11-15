@@ -1,4 +1,5 @@
 //! Operation semantics from the JS spec (shared by all execution layers): type conversion, operators, property access.
+use crate::ValueKind;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -365,25 +366,25 @@ impl<'gc> Agent<'gc, '_> {
     }
 
     pub fn is_callable(&self, v: Value<'gc>) -> bool {
-        matches!(v, Value::Object(o) if o.borrow().kind.is_callable())
+        matches!(v.kind(), ValueKind::Object(o) if o.borrow().kind.is_callable())
     }
 
     #[inline]
     pub fn to_boolean(&self, v: Value<'gc>) -> bool {
-        match v {
-            Value::Undefined | Value::Null | Value::Uninit => false,
-            Value::Bool(b) => b,
-            Value::Number(x) => !(x == 0.0 || x.is_nan()),
+        match v.kind() {
+            ValueKind::Undefined | ValueKind::Null | ValueKind::Uninit => false,
+            ValueKind::Bool(b) => b,
+            ValueKind::Number(x) => !(x == 0.0 || x.is_nan()),
             // Judge by byte count, without flattening the rope
-            Value::String(s) => s.text().byte_len() != 0,
-            Value::BigInt(b) => !b.0.is_zero(),
-            Value::Symbol(_) | Value::Object(_) => true,
+            ValueKind::String(s) => s.text().byte_len() != 0,
+            ValueKind::BigInt(b) => !b.0.is_zero(),
+            ValueKind::Symbol(_) | ValueKind::Object(_) => true,
         }
     }
 
     /// ToPrimitive: for objects, try `valueOf` / `toString` in preference order and use the first primitive result.
     pub fn to_primitive(&mut self, v: Value<'gc>, hint: Hint) -> Result<Value<'gc>, Error> {
-        if !matches!(v, Value::Object(_)) {
+        if !matches!(v.kind(), ValueKind::Object(_)) {
             return Ok(v);
         }
         let exotic = self.get_symbol(v, self.realm.symbols.to_primitive, v)?;
@@ -394,7 +395,7 @@ impl<'gc> Agent<'gc, '_> {
                 Hint::String => "string",
             });
             let r = self.call(exotic, v, &[h.into()])?;
-            if matches!(r, Value::Object(_)) {
+            if matches!(r.kind(), ValueKind::Object(_)) {
                 return Err(self.throw(ErrorKind::Type, "Cannot convert object to primitive value"));
             }
             return Ok(r);
@@ -404,7 +405,7 @@ impl<'gc> Agent<'gc, '_> {
             let f = self.get_named(v, name)?;
             if self.is_callable(f) {
                 let r = self.call(f, v, &[])?;
-                if !matches!(r, Value::Object(_)) {
+                if !matches!(r.kind(), ValueKind::Object(_)) {
                     return Ok(r);
                 }
             }
@@ -414,15 +415,15 @@ impl<'gc> Agent<'gc, '_> {
 
     /// ToNumber.
     pub fn to_number(&mut self, v: Value<'gc>) -> Result<f64, Error> {
-        Ok(match v {
-            Value::Undefined | Value::Uninit => f64::NAN,
-            Value::Null => 0.0,
-            Value::Bool(b) => f64::from(u8::from(b)),
-            Value::Number(x) => x,
-            Value::String(s) => parse_number(&s),
-            Value::Symbol(_) => return Err(self.throw(ErrorKind::Type, "Cannot convert a Symbol value to a number")),
-            Value::BigInt(_) => return Err(self.throw(ErrorKind::Type, "Cannot convert a BigInt value to a number")),
-            Value::Object(_) => {
+        Ok(match v.kind() {
+            ValueKind::Undefined | ValueKind::Uninit => f64::NAN,
+            ValueKind::Null => 0.0,
+            ValueKind::Bool(b) => f64::from(u8::from(b)),
+            ValueKind::Number(x) => x,
+            ValueKind::String(s) => parse_number(&s),
+            ValueKind::Symbol(_) => return Err(self.throw(ErrorKind::Type, "Cannot convert a Symbol value to a number")),
+            ValueKind::BigInt(_) => return Err(self.throw(ErrorKind::Type, "Cannot convert a BigInt value to a number")),
+            ValueKind::Object(_) => {
                 let p = self.to_primitive(v, Hint::Number)?;
                 return self.to_number(p);
             }
@@ -439,16 +440,16 @@ impl<'gc> Agent<'gc, '_> {
 
     /// ToString.
     pub fn to_string(&mut self, v: Value<'gc>) -> Result<JsString<'gc>, Error> {
-        Ok(match v {
-            Value::String(s) => s,
-            Value::Undefined | Value::Uninit => self.string("undefined"),
-            Value::Null => self.string("null"),
-            Value::Bool(true) => self.string("true"),
-            Value::Bool(false) => self.string("false"),
-            Value::Number(x) => Gc::new(self.mc, crate::JsStr::from(number_text(x))),
-            Value::Symbol(_) => return Err(self.throw(ErrorKind::Type, "Cannot convert a Symbol value to a string")),
-            Value::BigInt(b) => self.string(&format!("{}", b.0)),
-            Value::Object(_) => {
+        Ok(match v.kind() {
+            ValueKind::String(s) => s,
+            ValueKind::Undefined | ValueKind::Uninit => self.string("undefined"),
+            ValueKind::Null => self.string("null"),
+            ValueKind::Bool(true) => self.string("true"),
+            ValueKind::Bool(false) => self.string("false"),
+            ValueKind::Number(x) => Gc::new(self.mc, crate::JsStr::from(number_text(x))),
+            ValueKind::Symbol(_) => return Err(self.throw(ErrorKind::Type, "Cannot convert a Symbol value to a string")),
+            ValueKind::BigInt(b) => self.string(&format!("{}", b.0)),
+            ValueKind::Object(_) => {
                 let p = self.to_primitive(v, Hint::String)?;
                 return self.to_string(p);
             }
@@ -461,27 +462,27 @@ impl<'gc> Agent<'gc, '_> {
     }
 
     pub fn type_of(&self, v: Value<'gc>) -> &'static str {
-        match v {
-            Value::Undefined | Value::Uninit => "undefined",
-            Value::Bool(_) => "boolean",
-            Value::Number(_) => "number",
-            Value::String(_) => "string",
-            Value::Symbol(_) => "symbol",
-            Value::BigInt(_) => "bigint",
-            Value::Object(o) if o.borrow().kind.is_callable() => "function",
-            Value::Null | Value::Object(_) => "object",
+        match v.kind() {
+            ValueKind::Undefined | ValueKind::Uninit => "undefined",
+            ValueKind::Bool(_) => "boolean",
+            ValueKind::Number(_) => "number",
+            ValueKind::String(_) => "string",
+            ValueKind::Symbol(_) => "symbol",
+            ValueKind::BigInt(_) => "bigint",
+            ValueKind::Object(o) if o.borrow().kind.is_callable() => "function",
+            ValueKind::Null | ValueKind::Object(_) => "object",
         }
     }
 
     pub fn binary(&mut self, op: BinaryOp, lhs: Value<'gc>, rhs: Value<'gc>) -> Result<Value<'gc>, Error> {
-        if let (Value::Number(a), Value::Number(b)) = (lhs, rhs) {
+        if let (ValueKind::Number(a), ValueKind::Number(b)) = (lhs.kind(), rhs.kind()) {
             return Ok(op.numbers(a, b).into());
         }
         // Addition: ToPrimitive both sides first to see whether either is a string; other operations finish ToNumeric
         // on the whole left side before the right (the evaluation order is observable)
         let (l, r) = if op == BinaryOp::Add {
             let (l, r) = (self.to_primitive(lhs, Hint::Default)?, self.to_primitive(rhs, Hint::Default)?);
-            if matches!(l, Value::String(_)) || matches!(r, Value::String(_)) {
+            if matches!(l.kind(), ValueKind::String(_)) || matches!(r.kind(), ValueKind::String(_)) {
                 let (a, b) = (self.to_string(l)?, self.to_string(r)?);
                 return Ok(Value::String(Gc::new(self.mc, crate::JsStr::from(crate::SmallStr::concat(a.text(), b.text())))));
             }
@@ -501,33 +502,33 @@ impl<'gc> Agent<'gc, '_> {
 
     /// Loose equality (`==`).
     pub fn loose_equals(&mut self, a: Value<'gc>, b: Value<'gc>) -> Result<bool, Error> {
-        Ok(match (a, b) {
+        Ok(match (a.kind(), b.kind()) {
             _ if a.is_nullish() && b.is_nullish() => true,
-            (Value::Undefined | Value::Null, _) | (_, Value::Undefined | Value::Null) => false,
-            (Value::Object(_), Value::Object(_)) | (Value::Symbol(_), Value::Symbol(_)) => a == b,
-            (Value::Object(_), _) => {
+            (ValueKind::Undefined | ValueKind::Null, _) | (_, ValueKind::Undefined | ValueKind::Null) => false,
+            (ValueKind::Object(_), ValueKind::Object(_)) | (ValueKind::Symbol(_), ValueKind::Symbol(_)) => a == b,
+            (ValueKind::Object(_), _) => {
                 let p = self.to_primitive(a, Hint::Default)?;
                 return self.loose_equals(p, b);
             }
-            (_, Value::Object(_)) => {
+            (_, ValueKind::Object(_)) => {
                 let p = self.to_primitive(b, Hint::Default)?;
                 return self.loose_equals(a, p);
             }
-            (Value::Symbol(_), _) | (_, Value::Symbol(_)) => false,
-            (Value::BigInt(x), Value::BigInt(y)) => x.0 == y.0,
-            (Value::BigInt(x), Value::String(s)) | (Value::String(s), Value::BigInt(x)) => Self::parse_bigint(&s).is_some_and(|y| x.0 == y),
-            (Value::BigInt(x), _) | (_, Value::BigInt(x)) => {
-                let other = if matches!(a, Value::BigInt(_)) { b } else { a };
+            (ValueKind::Symbol(_), _) | (_, ValueKind::Symbol(_)) => false,
+            (ValueKind::BigInt(x), ValueKind::BigInt(y)) => x.0 == y.0,
+            (ValueKind::BigInt(x), ValueKind::String(s)) | (ValueKind::String(s), ValueKind::BigInt(x)) => Self::parse_bigint(&s).is_some_and(|y| x.0 == y),
+            (ValueKind::BigInt(x), _) | (_, ValueKind::BigInt(x)) => {
+                let other = if matches!(a.kind(), ValueKind::BigInt(_)) { b } else { a };
                 let n = self.to_number(other)?;
                 Self::cmp_bigint_number(&x.0, n) == Some(core::cmp::Ordering::Equal)
             }
-            (Value::Number(_), Value::String(_)) | (Value::String(_), Value::Number(_)) | (Value::Bool(_), _) | (_, Value::Bool(_)) => self.to_number(a)? == self.to_number(b)?,
+            (ValueKind::Number(_), ValueKind::String(_)) | (ValueKind::String(_), ValueKind::Number(_)) | (ValueKind::Bool(_), _) | (_, ValueKind::Bool(_)) => self.to_number(a)? == self.to_number(b)?,
             _ => a == b,
         })
     }
 
     pub fn compare(&mut self, op: CompareOp, lhs: Value<'gc>, rhs: Value<'gc>) -> Result<bool, Error> {
-        if let (Value::Number(a), Value::Number(b)) = (lhs, rhs) {
+        if let (ValueKind::Number(a), ValueKind::Number(b)) = (lhs.kind(), rhs.kind()) {
             return Ok(op.numbers(a, b));
         }
         Ok(match op {
@@ -537,7 +538,7 @@ impl<'gc> Agent<'gc, '_> {
             CompareOp::StrictNe => lhs != rhs,
             CompareOp::Lt | CompareOp::Gt | CompareOp::Le | CompareOp::Ge => {
                 let (l, r) = (self.to_primitive(lhs, Hint::Number)?, self.to_primitive(rhs, Hint::Number)?);
-                if let (Value::String(a), Value::String(b)) = (l, r) {
+                if let (ValueKind::String(a), ValueKind::String(b)) = (l.kind(), r.kind()) {
                     // Compare by UTF-16 code unit
                     let ord = a.encode_utf16().cmp(b.encode_utf16());
                     return Ok(match op {
@@ -578,8 +579,8 @@ impl<'gc> Agent<'gc, '_> {
     /// ToObject: objects as is, primitives wrapped in wrapper objects (whose prototype is that kind's prototype);
     /// `undefined` / `null` throw a TypeError.
     pub fn to_object(&self, v: Value<'gc>) -> Result<JsObject<'gc>, Error> {
-        match (v, self.proto_of(v)) {
-            (Value::Object(o), _) => Ok(o),
+        match (v.kind(), self.proto_of(v)) {
+            (ValueKind::Object(o), _) => Ok(o),
             (_, Some(proto)) => Ok(ObjectData { kind: ObjectKind::Primitive(v), proto: Some(proto), ..ObjectData::default() }.alloc(self.mc)),
             (_, None) => Err(self.throw(ErrorKind::Type, "Cannot convert undefined or null to object")),
         }
@@ -587,14 +588,14 @@ impl<'gc> Agent<'gc, '_> {
 
     /// The prototype used when reading a property of a primitive.
     fn proto_of(&self, v: Value<'gc>) -> Option<JsObject<'gc>> {
-        match v {
-            Value::String(_) => Some(self.realm.string_proto),
-            Value::Number(_) => Some(self.realm.number_proto),
-            Value::Bool(_) => Some(self.realm.boolean_proto),
-            Value::Symbol(_) => Some(self.realm.symbol_proto),
-            Value::BigInt(_) => Some(self.realm.bigint_proto),
-            Value::Object(o) => Some(o),
-            Value::Undefined | Value::Null | Value::Uninit => None,
+        match v.kind() {
+            ValueKind::String(_) => Some(self.realm.string_proto),
+            ValueKind::Number(_) => Some(self.realm.number_proto),
+            ValueKind::Bool(_) => Some(self.realm.boolean_proto),
+            ValueKind::Symbol(_) => Some(self.realm.symbol_proto),
+            ValueKind::BigInt(_) => Some(self.realm.bigint_proto),
+            ValueKind::Object(o) => Some(o),
+            ValueKind::Undefined | ValueKind::Null | ValueKind::Uninit => None,
         }
     }
 
@@ -610,7 +611,7 @@ impl<'gc> Agent<'gc, '_> {
             return Err(self.nullish_error(holder, "read", &k));
         }
         // String indices and `length` don't need a wrapper
-        if let (Value::String(s), Key::Str(k)) = (holder, key) {
+        if let (ValueKind::String(s), Key::Str(k)) = (holder.kind(), key) {
             if k == "length" {
                 return Ok(f64::from(u32::try_from(s.utf16_len()).unwrap_or(u32::MAX)).into());
             }
@@ -739,7 +740,7 @@ impl<'gc> Agent<'gc, '_> {
                 return Ok(false);
             }
             if let Some(i) = Self::typed_numeric(cur, key) {
-                if matches!(receiver, Value::Object(r) if Gc::ptr_eq(r, cur)) {
+                if matches!(receiver.kind(), ValueKind::Object(r) if Gc::ptr_eq(r, cur)) {
                     self.typed_set(cur, i, value)?;
                     return Ok(true);
                 }
@@ -763,7 +764,7 @@ impl<'gc> Agent<'gc, '_> {
             Some(Property { slot: Slot::Accessor { set: None, .. }, .. } | Property { writable: false, .. }) => return Ok(false),
             _ => {}
         }
-        let Value::Object(r) = receiver else { return Ok(false) };
+        let ValueKind::Object(r) = receiver.kind() else { return Ok(false) };
         if let Some(done) = r.borrow_mut(self.mc).ordinary_put(key, value) {
             return Ok(done);
         }
@@ -792,7 +793,7 @@ impl<'gc> Agent<'gc, '_> {
     /// The TypeError for a failed write: adding a new property to a non-extensible object, or writing a read-only
     /// property.
     fn set_failure(&self, target: Value<'gc>, key: &str) -> Error {
-        if let Value::Object(o) = target {
+        if let ValueKind::Object(o) = target.kind() {
             let d = o.borrow();
             if d.non_extensible && d.own_slot(Key::Str(key)).is_none() {
                 return self.throw(ErrorKind::Type, &format!("Cannot add property {key}, object is not extensible"));
@@ -807,10 +808,10 @@ impl<'gc> Agent<'gc, '_> {
 
     /// `key in target`, with an arbitrary value as the key.
     pub fn has_keyed(&mut self, target: Value<'gc>, key: Value<'gc>) -> Result<bool, Error> {
-        let Value::Object(o) = target else {
-            let what = match key {
-                Value::Symbol(_) => String::from("a symbol"),
-                k => format!("'{}'", &**self.to_string(k)?),
+        let ValueKind::Object(o) = target.kind() else {
+            let what = match key.kind() {
+                ValueKind::Symbol(_) => String::from("a symbol"),
+                k => format!("'{}'", &**self.to_string(k.into())?),
             };
             let t = self.to_string(target)?;
             return Err(self.throw(ErrorKind::Type, &format!("Cannot use 'in' operator to search for {what} in {}", &**t)));
@@ -886,10 +887,10 @@ impl<'gc> Agent<'gc, '_> {
 
     /// `target[key]`.
     pub fn get_keyed(&mut self, target: Value<'gc>, key: Value<'gc>) -> Result<Value<'gc>, Error> {
-        if let Value::Symbol(k) = key {
+        if let ValueKind::Symbol(k) = key.kind() {
             return self.get_symbol(target, k, target);
         }
-        if let (Value::Object(o), Value::Number(x)) = (target, key)
+        if let (ValueKind::Object(o), ValueKind::Number(x)) = (target.kind(), key.kind())
             && let (ObjectKind::Array(items), Some(i)) = (&o.borrow().kind, index_of_number(x))
             && let Some(&v) = items.get(i as usize)
         {
@@ -897,13 +898,13 @@ impl<'gc> Agent<'gc, '_> {
         }
         // Numeric keys of typed arrays: take the element directly, without looking at the prototype chain (key -0
         // converts to the string "0")
-        if let (Value::Object(o), Value::Number(x)) = (target, key)
+        if let (ValueKind::Object(o), ValueKind::Number(x)) = (target.kind(), key.kind())
             && matches!(o.borrow().kind, ObjectKind::TypedArray(..))
         {
             return Ok(self.typed_get(o, x + 0.0).unwrap_or_default());
         }
         // String indices: UTF-16 code units, O(1)
-        if let (Value::String(s), Value::Number(x)) = (target, key)
+        if let (ValueKind::String(s), ValueKind::Number(x)) = (target.kind(), key.kind())
             && let Some(u) = index_of_number(x).and_then(|i| s.code_unit(i as usize))
         {
             return Ok(self.unit_string(u).into());
@@ -920,7 +921,7 @@ impl<'gc> Agent<'gc, '_> {
 
     /// `target.key = value`: returns whether the write succeeded.
     pub fn try_set_named(&mut self, target: Value<'gc>, key: &str, value: Value<'gc>) -> Result<bool, Error> {
-        if let (Value::Object(o), Some(i)) = (target, index_of_str(key))
+        if let (ValueKind::Object(o), Some(i)) = (target.kind(), index_of_str(key))
             && o.borrow_mut(self.mc).write_index(i, value)
         {
             return Ok(true);
@@ -935,10 +936,10 @@ impl<'gc> Agent<'gc, '_> {
 
     /// `target[key] = value`; returns whether the write succeeded.
     pub fn try_set_keyed(&mut self, target: Value<'gc>, key: Value<'gc>, value: Value<'gc>) -> Result<bool, Error> {
-        if let Value::Symbol(k) = key {
+        if let ValueKind::Symbol(k) = key.kind() {
             return self.try_set_symbol(target, k, value);
         }
-        if let (Value::Object(o), Value::Number(x)) = (target, key)
+        if let (ValueKind::Object(o), ValueKind::Number(x)) = (target.kind(), key.kind())
             && let Some(i) = index_of_number(x)
             && o.borrow_mut(self.mc).write_index(i, value)
         {
@@ -946,7 +947,7 @@ impl<'gc> Agent<'gc, '_> {
         }
         // Numeric keys of typed arrays: the receiver is the array itself; write the element (out of bounds also counts
         // as success)
-        if let (Value::Object(o), Value::Number(x)) = (target, key)
+        if let (ValueKind::Object(o), ValueKind::Number(x)) = (target.kind(), key.kind())
             && matches!(o.borrow().kind, ObjectKind::TypedArray(..))
         {
             self.typed_set(o, x + 0.0, value)?;
@@ -967,9 +968,9 @@ impl<'gc> Agent<'gc, '_> {
         if self.try_set_keyed(target, key, value)? {
             Ok(())
         } else {
-            let k = match key {
-                Value::Symbol(s) => self.symbol_descriptive(s),
-                k => self.to_string(k)?,
+            let k = match key.kind() {
+                ValueKind::Symbol(s) => self.symbol_descriptive(s),
+                k => self.to_string(k.into())?,
             };
             Err(self.read_only(&k))
         }
@@ -1015,7 +1016,7 @@ impl<'gc> Agent<'gc, '_> {
 
     /// `key in target` (including the prototype chain and array indices).
     pub fn has_property(&mut self, target: Value<'gc>, key: &str) -> Result<bool, Error> {
-        let Value::Object(o) = target else {
+        let ValueKind::Object(o) = target.kind() else {
             let what = self.to_string(target)?;
             return Err(self.throw(ErrorKind::Type, &format!("Cannot use 'in' operator to search for '{key}' in {}", &**what)));
         };
@@ -1029,28 +1030,28 @@ impl<'gc> Agent<'gc, '_> {
 
     /// CanBeHeldWeakly: an object, or a Symbol not registered with `Symbol.for`.
     pub fn can_be_held_weakly(&self, v: Value<'gc>) -> bool {
-        match v {
-            Value::Object(_) => true,
-            Value::Symbol(s) => !self.realm.symbol_registry.get().iter().any(|(_, x)| Gc::ptr_eq(*x, s)),
+        match v.kind() {
+            ValueKind::Object(_) => true,
+            ValueKind::Symbol(s) => !self.realm.symbol_registry.get().iter().any(|(_, x)| Gc::ptr_eq(*x, s)),
             _ => false,
         }
     }
 
     /// A value in error messages: calls no user code (ToString is observable, so error reporting can't use it).
     pub fn describe(&self, v: Value<'gc>) -> String {
-        match v {
-            Value::Undefined | Value::Uninit => String::from("undefined"),
-            Value::Null => String::from("null"),
-            Value::Bool(b) => String::from(if b { "true" } else { "false" }),
-            Value::Number(x) => String::from(&*number_text(x)),
-            Value::String(s) => format!("\"{}\"", &**s),
-            Value::Symbol(s) => String::from(&**self.symbol_descriptive(s)),
-            Value::BigInt(b) => format!("{}n", b.0),
-            Value::Object(o) => {
+        match v.kind() {
+            ValueKind::Undefined | ValueKind::Uninit => String::from("undefined"),
+            ValueKind::Null => String::from("null"),
+            ValueKind::Bool(b) => String::from(if b { "true" } else { "false" }),
+            ValueKind::Number(x) => String::from(&*number_text(x)),
+            ValueKind::String(s) => format!("\"{}\"", &**s),
+            ValueKind::Symbol(s) => String::from(&**self.symbol_descriptive(s)),
+            ValueKind::BigInt(b) => format!("{}n", b.0),
+            ValueKind::Object(o) => {
                 let d = o.borrow();
                 if d.kind.is_callable() {
-                    match d.get_own("name").and_then(|p| p.value()) {
-                        Some(Value::String(n)) if !n.is_empty() => String::from(&**n),
+                    match d.get_own("name").and_then(|p| p.value()).map(Value::kind) {
+                        Some(ValueKind::String(n)) if !n.is_empty() => String::from(&**n),
                         _ => String::from("function"),
                     }
                 } else if matches!(d.kind, ObjectKind::Array(_)) {
@@ -1064,7 +1065,7 @@ impl<'gc> Agent<'gc, '_> {
 
     /// `v instanceof f`: check `f[Symbol.hasInstance]` first, then OrdinaryHasInstance.
     pub fn instance_of(&mut self, v: Value<'gc>, f: Value<'gc>) -> Result<bool, Error> {
-        if !matches!(f, Value::Object(_)) {
+        if !matches!(f.kind(), ValueKind::Object(_)) {
             let what = self.describe(f);
             return Err(self.throw(ErrorKind::Type, &format!("Right-hand side of 'instanceof' is not an object: {what}")));
         }
@@ -1085,14 +1086,14 @@ impl<'gc> Agent<'gc, '_> {
         if !self.is_callable(f) {
             return Ok(false);
         }
-        if let Value::Object(o) = f
+        if let ValueKind::Object(o) = f.kind()
             && let ObjectKind::Bound(b) = &o.borrow().kind
         {
             let target = b.target;
             return self.instance_of(v, target);
         }
-        let Value::Object(o) = v else { return Ok(false) };
-        let Value::Object(proto) = self.get_named(f, "prototype")? else {
+        let ValueKind::Object(o) = v.kind() else { return Ok(false) };
+        let ValueKind::Object(proto) = (self.get_named(f, "prototype")?).kind() else {
             return Err(self.throw(ErrorKind::Type, "Function has non-object prototype in instanceof check"));
         };
         let mut cur = self.get_prototype_of(o)?;
@@ -1130,7 +1131,7 @@ impl<'gc> Agent<'gc, '_> {
     /// LengthOfArrayLike.
     pub fn length_of_array_like(&mut self, o: Value<'gc>) -> Result<f64, Error> {
         // A real array's `length` is the stored length (it can't be an accessor)
-        if let Value::Object(x) = o
+        if let ValueKind::Object(x) = o.kind()
             && let Some(n) = x.borrow().array_length()
         {
             return Ok(f64::from(n));
@@ -1146,12 +1147,12 @@ impl<'gc> Agent<'gc, '_> {
 
     /// `o[i]` (fast path for the array dense part).
     pub fn get_index(&mut self, o: Value<'gc>, i: f64) -> Result<Value<'gc>, Error> {
-        if let Value::Object(x) = o
+        if let ValueKind::Object(x) = o.kind()
             && matches!(x.borrow().kind, ObjectKind::TypedArray(..))
         {
             return Ok(self.typed_get(x, i).unwrap_or_default());
         }
-        if let Value::Object(x) = o
+        if let ValueKind::Object(x) = o.kind()
             && let (ObjectKind::Array(items), Some(n)) = (&x.borrow().kind, index_of_number(i))
             && let Some(&v) = items.get(n as usize)
         {
@@ -1162,7 +1163,7 @@ impl<'gc> Agent<'gc, '_> {
 
     /// `o[i] = v`; throws a TypeError if the write fails (Set(O, P, V, true)).
     pub fn set_index(&mut self, o: Value<'gc>, i: f64, v: Value<'gc>) -> Result<(), Error> {
-        if let (Value::Object(x), Some(n)) = (o, index_of_number(i))
+        if let (ValueKind::Object(x), Some(n)) = (o.kind(), index_of_number(i))
             && x.borrow_mut(self.mc).write_index(n, v)
         {
             return Ok(());
@@ -1227,7 +1228,7 @@ impl<'gc> Agent<'gc, '_> {
 
     /// IsArray.
     pub fn is_array(&mut self, v: Value<'gc>) -> Result<bool, Error> {
-        let Value::Object(o) = v else { return Ok(false) };
+        let ValueKind::Object(o) = v.kind() else { return Ok(false) };
         if let Some(parts) = self.proxy_parts(o) {
             let (t, _) = parts?;
             return self.is_array(t.into());
@@ -1237,7 +1238,7 @@ impl<'gc> Agent<'gc, '_> {
 
     /// CreateListFromArrayLike.
     pub fn list_from_array_like(&mut self, v: Value<'gc>) -> Result<Vec<Value<'gc>>, Error> {
-        if !matches!(v, Value::Object(_)) {
+        if !matches!(v.kind(), ValueKind::Object(_)) {
             return Err(self.throw(ErrorKind::Type, "CreateListFromArrayLike called on non-object"));
         }
         let len = self.length_of_array_like(v)?;
@@ -1254,14 +1255,14 @@ impl<'gc> Agent<'gc, '_> {
     pub fn get_iterator(&mut self, v: Value<'gc>) -> Result<IterRecord<'gc>, Error> {
         let method = if v.is_nullish() { Value::Undefined } else { self.get_symbol(v, self.realm.symbols.iterator, v)? };
         if !self.is_callable(method) {
-            let what = match v {
-                Value::Symbol(s) => self.symbol_descriptive(s),
+            let what = match v.kind() {
+                ValueKind::Symbol(s) => self.symbol_descriptive(s),
                 _ => self.to_string(v)?,
             };
             return Err(self.throw(ErrorKind::Type, &format!("{} is not iterable", &**what)));
         }
         let iterator = self.call(method, v, &[])?;
-        if !matches!(iterator, Value::Object(_)) {
+        if !matches!(iterator.kind(), ValueKind::Object(_)) {
             return Err(self.throw(ErrorKind::Type, "Result of the Symbol.iterator method is not an object"));
         }
         let next = self.get_named(iterator, "next")?;
@@ -1276,8 +1277,8 @@ impl<'gc> Agent<'gc, '_> {
         };
         let Some(target) = target else { return Ok(None) };
         // Take a dense array's length directly (same as reading `length`, with no observable steps)
-        let len = match target {
-            Value::Object(t) => match &t.borrow().kind {
+        let len = match target.kind() {
+            ValueKind::Object(t) => match &t.borrow().kind {
                 ObjectKind::Array(items) if t.borrow().sparse_length == 0 => Some(items.len()),
                 _ => None,
             },
@@ -1330,7 +1331,7 @@ impl<'gc> Agent<'gc, '_> {
     pub fn iterator_step(&mut self, it: IterRecord<'gc>) -> Result<Option<Value<'gc>>, Error> {
         // `next` is the built-in array / string iterator `next`: the result object it builds can't be observed
         // otherwise, so step directly
-        if let (Value::Object(n), Value::Object(o)) = (it.next, it.iterator) {
+        if let (ValueKind::Object(n), ValueKind::Object(o)) = (it.next.kind(), it.iterator.kind()) {
             let [array, string] = *self.realm.builtin_nexts.get();
             let (is_array, is_string) = match &o.borrow().kind {
                 ObjectKind::Iterator(IteratorState::Array { .. }) => (true, false),
@@ -1343,7 +1344,7 @@ impl<'gc> Agent<'gc, '_> {
             }
         }
         let r = self.call(it.next, it.iterator, &[])?;
-        if !matches!(r, Value::Object(_)) {
+        if !matches!(r.kind(), ValueKind::Object(_)) {
             let what = self.to_string(r)?;
             return Err(self.throw(ErrorKind::Type, &format!("Iterator result {} is not an object", &**what)));
         }
@@ -1358,7 +1359,7 @@ impl<'gc> Agent<'gc, '_> {
             return Ok(());
         }
         let r = self.call(ret, iterator, &[])?;
-        if !matches!(r, Value::Object(_)) {
+        if !matches!(r.kind(), ValueKind::Object(_)) {
             return Err(self.throw(ErrorKind::Type, "Iterator result is not an object"));
         }
         Ok(())
@@ -1448,8 +1449,8 @@ impl<'gc> Agent<'gc, '_> {
     /// The `this` a construct call creates: prototype taken from `new_target.prototype`, or `Object.prototype` if that
     /// isn't an object.
     pub fn create_this(&mut self, new_target: Value<'gc>) -> Result<JsObject<'gc>, Error> {
-        let proto = match self.get_named(new_target, "prototype")? {
-            Value::Object(p) => p,
+        let proto = match (self.get_named(new_target, "prototype")?).kind() {
+            ValueKind::Object(p) => p,
             _ => self.realm.object_proto,
         };
         Ok(ObjectData { proto: Some(proto), ..ObjectData::default() }.alloc(self.mc))

@@ -1,3 +1,4 @@
+use r8framework::ValueKind;
 use r8framework::{Agent, Error, ErrorKind, JsObject, NativeClosure, ObjectData, ObjectKind, Property, ProxyData, Value};
 
 use crate::{Args, Installer};
@@ -8,7 +9,7 @@ struct Reflects;
 impl Reflects {
     /// ProxyCreate: target and handler must both be objects.
     fn create<'gc>(a: &mut Agent<'gc, '_>, target: Value<'gc>, handler: Value<'gc>) -> Result<JsObject<'gc>, Error> {
-        let (Value::Object(t), Value::Object(h)) = (target, handler) else {
+        let (ValueKind::Object(t), ValueKind::Object(h)) = (target.kind(), handler.kind()) else {
             return Err(a.throw(ErrorKind::Type, "Cannot create proxy with a non-object as target or handler"));
         };
         let data = ProxyData { target: Some(t), handler: Some(h), callable: a.is_callable(target), constructor: a.is_constructor(target) };
@@ -39,7 +40,7 @@ impl Reflects {
             ObjectKind::NativeClosure(c) => core::mem::take(&mut c.slots[0]),
             _ => Value::Undefined,
         };
-        if let Value::Object(p) = target
+        if let ValueKind::Object(p) = target.kind()
             && let ObjectKind::Proxy(d) = &mut p.borrow_mut(a.mc).kind
         {
             d.target = None;
@@ -49,8 +50,8 @@ impl Reflects {
     }
 
     fn target<'gc>(a: &Agent<'gc, '_>, v: Value<'gc>, method: &str) -> Result<JsObject<'gc>, Error> {
-        match v {
-            Value::Object(o) => Ok(o),
+        match v.kind() {
+            ValueKind::Object(o) => Ok(o),
             _ => Err(a.throw(ErrorKind::Type, &alloc::format!("Reflect.{method} called on non-object"))),
         }
     }
@@ -143,9 +144,9 @@ impl Reflects {
 
     fn set_prototype_of<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let o = Self::target(a, args.at(0), "setPrototypeOf")?;
-        let proto = match args.at(1) {
-            Value::Object(p) => Some(p),
-            Value::Null => None,
+        let proto = match args.at(1).kind() {
+            ValueKind::Object(p) => Some(p),
+            ValueKind::Null => None,
             _ => return Err(a.throw(ErrorKind::Type, "Object prototype may only be an Object or null")),
         };
         Ok(a.set_prototype_of(o, proto)?.into())

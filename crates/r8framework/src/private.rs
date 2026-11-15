@@ -1,5 +1,6 @@
 //! Private class members (`#x`): looked up only on the object itself, not along the prototype chain; a TypeError is
 //! thrown if absent.
+use crate::ValueKind;
 use alloc::boxed::Box;
 
 use r8gc::Gc;
@@ -17,8 +18,8 @@ impl<'gc> Agent<'gc, '_> {
     }
 
     fn private_holder(&self, obj: Value<'gc>, key: JsSymbol<'gc>, verb: &str) -> Result<JsObject<'gc>, Error> {
-        match obj {
-            Value::Object(o) => Ok(o),
+        match obj.kind() {
+            ValueKind::Object(o) => Ok(o),
             _ => Err(self.throw(ErrorKind::Type, &alloc::format!("Cannot {verb} private member {} from a non-object", Self::private_label(key)))),
         }
     }
@@ -81,8 +82,8 @@ impl<'gc> Agent<'gc, '_> {
 
     /// `#x in obj`: throws a TypeError if `obj` is not an object.
     pub fn private_has(&mut self, obj: Value<'gc>, key: JsSymbol<'gc>) -> Result<bool, Error> {
-        match obj {
-            Value::Object(o) => Ok(Self::private_lookup(o, key).is_some()),
+        match obj.kind() {
+            ValueKind::Object(o) => Ok(Self::private_lookup(o, key).is_some()),
             _ => {
                 let what = self.describe(obj);
                 Err(self.throw(ErrorKind::Type, &alloc::format!("Cannot use 'in' operator to search for '{}' in {what}", Self::private_label(key))))

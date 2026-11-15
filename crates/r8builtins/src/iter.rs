@@ -1,3 +1,4 @@
+use r8framework::ValueKind;
 use r8framework::{Agent, Error, ErrorKind, IterKind, IteratorState, ObjectKind, Resume, Step, SymbolData, Value};
 
 use crate::{Args, Installer};
@@ -8,16 +9,16 @@ struct Iters;
 impl Iters {
     /// `Symbol(description)`.
     fn symbol<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        let description = match args.at(0) {
-            Value::Undefined => None,
-            d => Some((&**a.to_string(d)?).into()),
+        let description = match args.at(0).kind() {
+            ValueKind::Undefined => None,
+            d => Some((&**a.to_string(Value::from(d))?).into()),
         };
         Ok(Value::Symbol(r8gc::Gc::new(a.mc, SymbolData { description })))
     }
 
     fn this_symbol<'gc>(a: &Agent<'gc, '_>, this: Value<'gc>) -> Result<r8framework::JsSymbol<'gc>, Error> {
-        match this.unwrapped() {
-            Value::Symbol(s) => Ok(s),
+        match this.unwrapped().kind() {
+            ValueKind::Symbol(s) => Ok(s),
             _ => Err(a.throw(ErrorKind::Type, "Symbol.prototype method called on a non-symbol")),
         }
     }
@@ -65,8 +66,8 @@ impl Iters {
     }
 
     fn state<'gc>(a: &Agent<'gc, '_>, this: Value<'gc>) -> Result<r8framework::JsObject<'gc>, Error> {
-        match this {
-            Value::Object(o) if matches!(o.borrow().kind, ObjectKind::Iterator(_)) => Ok(o),
+        match this.kind() {
+            ValueKind::Object(o) if matches!(o.borrow().kind, ObjectKind::Iterator(_)) => Ok(o),
             _ => Err(a.throw(ErrorKind::Type, "next method called on an incompatible receiver")),
         }
     }
@@ -87,8 +88,8 @@ impl Iters {
 
     /// Generator `next` / `return` / `throw`: resume one step, wrap the result in `{ value, done }`.
     fn resume<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, mode: Resume, v: Value<'gc>) -> Result<Value<'gc>, Error> {
-        let co = match this {
-            Value::Object(o) if matches!(&o.borrow().kind, ObjectKind::Coroutine(c) if c.promise.is_none() && c.requests.is_none()) => o,
+        let co = match this.kind() {
+            ValueKind::Object(o) if matches!(&o.borrow().kind, ObjectKind::Coroutine(c) if c.promise.is_none() && c.requests.is_none()) => o,
             _ => return Err(a.throw(ErrorKind::Type, "Generator method called on an incompatible receiver")),
         };
         Ok(match a.resume(co, mode, v)? {
@@ -137,8 +138,8 @@ impl Installer<'_, '_> {
         self.method(r.string_iterator_proto, "next", Iters::string_next, 0);
         // Record the built-in `next`s: when an iterator record's `next` is one of them, the execution layer steps
         // directly without creating a result object
-        let nexts = [r.array_iterator_proto, r.string_iterator_proto].map(|o| match o.borrow().own("next") {
-            Some(Value::Object(f)) => Some(f),
+        let nexts = [r.array_iterator_proto, r.string_iterator_proto].map(|o| match o.borrow().own("next").map(Value::kind) {
+            Some(ValueKind::Object(f)) => Some(f),
             _ => None,
         });
         r.builtin_nexts.set(self.mc, nexts);

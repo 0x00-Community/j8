@@ -1,4 +1,5 @@
 //! BigInt semantics: ToNumeric, parsing, arithmetic, comparison with Number.
+use crate::ValueKind;
 use core::cmp::Ordering;
 
 use r8gc::Gc;
@@ -25,24 +26,24 @@ impl<'gc> Agent<'gc, '_> {
 
     /// ToNumeric: BigInts as is, everything else ToNumber.
     pub fn to_numeric(&mut self, v: Value<'gc>) -> Result<Numeric<'gc>, Error> {
-        if let Value::Number(x) = v {
+        if let ValueKind::Number(x) = v.kind() {
             return Ok(Numeric::Number(x));
         }
-        match self.to_primitive(v, Hint::Number)? {
-            Value::BigInt(b) => Ok(Numeric::BigInt(b)),
-            p => Ok(Numeric::Number(self.to_number(p)?)),
+        match (self.to_primitive(v, Hint::Number)?).kind() {
+            ValueKind::BigInt(b) => Ok(Numeric::BigInt(b)),
+            p => Ok(Numeric::Number(self.to_number(p.into())?)),
         }
     }
 
     /// ToBigInt: numbers can't be converted directly (throws a TypeError); strings go through StringToBigInt (throws a
     /// SyntaxError if invalid).
     pub fn to_bigint(&mut self, v: Value<'gc>) -> Result<BigInt, Error> {
-        match self.to_primitive(v, Hint::Number)? {
-            Value::BigInt(b) => Ok(b.0.clone()),
-            Value::Bool(t) => Ok(BigInt::from(u8::from(t))),
-            Value::String(s) => Self::parse_bigint(&s).ok_or_else(|| self.throw(ErrorKind::Syntax, &alloc::format!("Cannot convert {} to a BigInt", &**s))),
+        match (self.to_primitive(v, Hint::Number)?).kind() {
+            ValueKind::BigInt(b) => Ok(b.0.clone()),
+            ValueKind::Bool(t) => Ok(BigInt::from(u8::from(t))),
+            ValueKind::String(s) => Self::parse_bigint(&s).ok_or_else(|| self.throw(ErrorKind::Syntax, &alloc::format!("Cannot convert {} to a BigInt", &**s))),
             other => {
-                let what = self.describe(other);
+                let what = self.describe(other.into());
                 Err(self.throw(ErrorKind::Type, &alloc::format!("Cannot convert {what} to a BigInt")))
             }
         }
@@ -77,7 +78,7 @@ impl<'gc> Agent<'gc, '_> {
 
     /// `++` / `--` (`delta` is ±1).
     pub fn increment(&mut self, v: Value<'gc>, delta: i8) -> Result<Value<'gc>, Error> {
-        if let Value::Number(x) = v {
+        if let ValueKind::Number(x) = v.kind() {
             return Ok((x + f64::from(delta)).into());
         }
         Ok(match self.to_numeric(v)? {
@@ -144,9 +145,9 @@ impl<'gc> Agent<'gc, '_> {
     /// The numeric part of relational comparison (both sides already primitives, not both strings): `None` means
     /// incomparable.
     pub(crate) fn numeric_order(&mut self, l: Value<'gc>, r: Value<'gc>) -> Result<Option<Ordering>, Error> {
-        Ok(match (l, r) {
-            (Value::BigInt(a), Value::String(s)) => Self::parse_bigint(&s).map(|b| a.0.cmp(&b)),
-            (Value::String(s), Value::BigInt(b)) => Self::parse_bigint(&s).map(|a| a.cmp(&b.0)),
+        Ok(match (l.kind(), r.kind()) {
+            (ValueKind::BigInt(a), ValueKind::String(s)) => Self::parse_bigint(&s).map(|b| a.0.cmp(&b)),
+            (ValueKind::String(s), ValueKind::BigInt(b)) => Self::parse_bigint(&s).map(|a| a.cmp(&b.0)),
             _ => match (self.to_numeric(l)?, self.to_numeric(r)?) {
                 (Numeric::Number(a), Numeric::Number(b)) => a.partial_cmp(&b),
                 (Numeric::BigInt(a), Numeric::BigInt(b)) => Some(a.0.cmp(&b.0)),

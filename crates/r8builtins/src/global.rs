@@ -1,3 +1,4 @@
+use r8framework::ValueKind;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -36,9 +37,9 @@ impl Global {
         if t.starts_with(['-', '+']) {
             t = &t[1..];
         }
-        let mut radix = match args.at(1) {
-            Value::Undefined => 0,
-            r => a.to_int32(r)?.cast_unsigned(),
+        let mut radix = match args.at(1).kind() {
+            ValueKind::Undefined => 0,
+            r => a.to_int32(Value::from(r))?.cast_unsigned(),
         };
         if (radix == 0 || radix == HEX) && (t.starts_with("0x") || t.starts_with("0X")) {
             t = &t[2..];

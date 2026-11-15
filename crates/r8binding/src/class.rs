@@ -1,5 +1,6 @@
 //! Exports Rust types as JS classes: constructor, prototype methods, accessors, static methods; instances are host
 //! objects holding a Rust value.
+use r8framework::ValueKind;
 use alloc::boxed::Box;
 use core::any::Any;
 use core::cell::{Ref, RefCell, RefMut};
@@ -135,8 +136,8 @@ impl Glue {
 
     /// The host data in `this` (throws a TypeError if it is not a host object).
     pub fn host<'gc, T: Class>(a: &Agent<'gc, '_>, this: Value<'gc>) -> Result<HostData<'gc>, Error> {
-        let data = match this {
-            Value::Object(o) => match o.borrow().kind {
+        let data = match this.kind() {
+            ValueKind::Object(o) => match o.borrow().kind {
                 ObjectKind::Host(h) => Some(h),
                 _ => None,
             },

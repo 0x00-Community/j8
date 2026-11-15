@@ -1,3 +1,4 @@
+use r8framework::ValueKind;
 use r8framework::{Agent, Error, ErrorKind, JsObject, ObjectKind, Value};
 
 use crate::{Args, Installer};
@@ -19,8 +20,8 @@ impl Weaks {
     }
 
     fn deref<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        match this {
-            Value::Object(o) => match o.borrow().kind {
+        match this.kind() {
+            ValueKind::Object(o) => match o.borrow().kind {
                 ObjectKind::WeakRef(t) => Ok(t),
                 _ => Err(a.throw(ErrorKind::Type, "WeakRef.prototype.deref called on an incompatible receiver")),
             },
@@ -40,8 +41,8 @@ impl Weaks {
     }
 
     fn this_registry<'gc>(a: &Agent<'gc, '_>, this: Value<'gc>) -> Result<JsObject<'gc>, Error> {
-        match this {
-            Value::Object(o) if matches!(o.borrow().kind, ObjectKind::FinalizationRegistry { .. }) => Ok(o),
+        match this.kind() {
+            ValueKind::Object(o) if matches!(o.borrow().kind, ObjectKind::FinalizationRegistry { .. }) => Ok(o),
             _ => Err(a.throw(ErrorKind::Type, "FinalizationRegistry method called on an incompatible receiver")),
         }
     }

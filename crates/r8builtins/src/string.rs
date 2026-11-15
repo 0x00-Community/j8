@@ -1,3 +1,4 @@
+use r8framework::ValueKind;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -69,9 +70,9 @@ impl Strings {
     }
 
     fn string<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        let s: Value<'gc> = match (args.first(), a.new_target) {
+        let s: Value<'gc> = match (args.first(), a.new_target.kind()) {
             (None, _) => a.string("").into(),
-            (Some(&Value::Symbol(s)), Value::Undefined) => a.symbol_descriptive(s).into(),
+            (Some(&v), ValueKind::Undefined) if let ValueKind::Symbol(s) = v.kind() => a.symbol_descriptive(s).into(),
             (Some(&v), _) => a.to_string(v)?.into(),
         };
         a.wrap_primitive(s, a.realm.string_proto)
@@ -79,8 +80,8 @@ impl Strings {
 
     /// thisStringValue (`toString` / `valueOf`): a string or String wrapper object; anything else throws TypeError.
     fn to_string<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        match this.unwrapped() {
-            v @ Value::String(_) => Ok(v),
+        match this.unwrapped().kind() {
+            v @ ValueKind::String(_) => Ok(Value::from(v)),
             _ => Err(a.throw(ErrorKind::Type, "String.prototype.toString requires that 'this' be a String")),
         }
     }
@@ -221,15 +222,15 @@ impl Strings {
     /// `split(sep, limit)`: `sep` is a string (regexes are left to phase 5); an empty string splits by code unit.
     pub(crate) fn split<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let s = Self::this(a, this)?;
-        let limit = match args.at(1) {
-            Value::Undefined => usize::MAX,
-            v => a.to_uint32(v)? as usize,
+        let limit = match args.at(1).kind() {
+            ValueKind::Undefined => usize::MAX,
+            v => a.to_uint32(Value::from(v))? as usize,
         };
-        let items: Vec<Value<'gc>> = match args.at(0) {
-            Value::Undefined if limit == 0 => Vec::new(),
-            Value::Undefined => alloc::vec![s.into()],
+        let items: Vec<Value<'gc>> = match args.at(0).kind() {
+            ValueKind::Undefined if limit == 0 => Vec::new(),
+            ValueKind::Undefined => alloc::vec![s.into()],
             sep => {
-                let sep = a.to_string(sep)?;
+                let sep = a.to_string(Value::from(sep))?;
                 if sep.is_empty() {
                     // Empty separator: split one UTF-16 code unit at a time (byte by byte when all ASCII)
                     if s.is_ascii() {
@@ -270,9 +271,9 @@ impl Strings {
         let u = Self::units(a, this)?;
         // ToLength: negatives and NaN become 0
         let target = libm::trunc(a.to_number(args.at(0))?);
-        let fill: Vec<u16> = match args.at(1) {
-            Value::Undefined => alloc::vec![u16::from(b' ')],
-            v => a.to_string(v)?.encode_utf16().collect(),
+        let fill: Vec<u16> = match args.at(1).kind() {
+            ValueKind::Undefined => alloc::vec![u16::from(b' ')],
+            v => a.to_string(Value::from(v))?.encode_utf16().collect(),
         };
         #[expect(clippy::cast_precision_loss, reason = "length comparison; precision is sufficient")]
         let len = u.len() as f64;
@@ -318,15 +319,15 @@ impl Strings {
     }
 
     fn is_integer<'gc>(_: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        Ok(matches!(args.at(0), Value::Number(x) if x.is_finite() && libm::trunc(x) == x).into())
+        Ok(matches!(args.at(0).kind(), ValueKind::Number(x) if x.is_finite() && libm::trunc(x) == x).into())
     }
 
     fn is_safe_integer<'gc>(_: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        Ok(matches!(args.at(0), Value::Number(x) if x.is_finite() && libm::trunc(x) == x && libm::fabs(x) <= MAX_SAFE_INTEGER).into())
+        Ok(matches!(args.at(0).kind(), ValueKind::Number(x) if x.is_finite() && libm::trunc(x) == x && libm::fabs(x) <= MAX_SAFE_INTEGER).into())
     }
 
     fn number_is_nan<'gc>(_: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        Ok(matches!(args.at(0), Value::Number(x) if x.is_nan()).into())
+        Ok(matches!(args.at(0).kind(), ValueKind::Number(x) if x.is_nan()).into())
     }
 
     /// `n.toString(radix)`: divide out the integer part digit by digit, multiply out the fraction digit by digit (up to
@@ -335,12 +336,12 @@ impl Strings {
         /// Maximum number of fraction digits produced
         const MAX_FRACTION_DIGITS: usize = 52;
         const DIGITS: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
-        let Value::Number(x) = this.unwrapped() else {
+        let ValueKind::Number(x) = this.unwrapped().kind() else {
             return Err(a.throw(ErrorKind::Type, "Number.prototype.toString requires that 'this' be a Number"));
         };
-        let radix = match args.at(0) {
-            Value::Undefined => 10,
-            r => a.to_int32(r)?,
+        let radix = match args.at(0).kind() {
+            ValueKind::Undefined => 10,
+            r => a.to_int32(Value::from(r))?,
         };
         if !(2..=36).contains(&radix) {
             return Err(a.throw(ErrorKind::Range, "toString() radix must be between 2 and 36"));
@@ -381,8 +382,8 @@ impl Strings {
 
     /// thisNumberValue (`Number.prototype.valueOf`): a Number or Number wrapper object; anything else throws TypeError.
     fn number_value_of<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        match this.unwrapped() {
-            v @ Value::Number(_) => Ok(v),
+        match this.unwrapped().kind() {
+            v @ ValueKind::Number(_) => Ok(Value::from(v)),
             _ => Err(a.throw(ErrorKind::Type, "Number.prototype.valueOf requires that 'this' be a Number")),
         }
     }

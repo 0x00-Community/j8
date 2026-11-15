@@ -1,3 +1,4 @@
+use r8framework::ValueKind;
 use alloc::string::String;
 use core::fmt::Write;
 use alloc::vec::Vec;
@@ -147,9 +148,9 @@ impl Texts {
 
     fn normalize<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let s = Self::this_string(a, this)?;
-        let form = match args.at(0) {
-            Value::Undefined => Form::Nfc,
-            f => match &**a.to_string(f)? {
+        let form = match args.at(0).kind() {
+            ValueKind::Undefined => Form::Nfc,
+            f => match &**a.to_string(Value::from(f))? {
                 "NFC" => Form::Nfc,
                 "NFD" => Form::Nfd,
                 "NFKC" => Form::Nfkc,
@@ -174,9 +175,9 @@ impl Texts {
         let size = units.len() as f64;
         let start = a.to_integer_or_infinity(args.at(0))?;
         let start = if start == f64::NEG_INFINITY { 0.0 } else if start < 0.0 { (size + start).max(0.0) } else { start.min(size) };
-        let len = match args.at(1) {
-            Value::Undefined => size,
-            v => a.to_integer_or_infinity(v)?,
+        let len = match args.at(1).kind() {
+            ValueKind::Undefined => size,
+            v => a.to_integer_or_infinity(Value::from(v))?,
         };
         let end = (start + len).clamp(start, size);
         #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "clamped to [0, size]")]
@@ -198,8 +199,8 @@ impl Texts {
     // ---- Number ----
 
     fn this_number<'gc>(a: &Agent<'gc, '_>, this: Value<'gc>, method: &str) -> Result<f64, Error> {
-        match this.unwrapped() {
-            Value::Number(x) => Ok(x),
+        match this.unwrapped().kind() {
+            ValueKind::Number(x) => Ok(x),
             _ => Err(a.throw(ErrorKind::Type, &alloc::format!("Number.prototype.{method} requires that 'this' be a Number"))),
         }
     }
@@ -340,7 +341,7 @@ impl Texts {
     }
 
     fn is_finite<'gc>(_: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        Ok(matches!(args.at(0), Value::Number(x) if x.is_finite()).into())
+        Ok(matches!(args.at(0).kind(), ValueKind::Number(x) if x.is_finite()).into())
     }
 
     // ---- Math ----
@@ -393,7 +394,7 @@ impl Texts {
         let it = a.get_iterator(items)?;
         let (mut sum, mut pos_inf, mut neg_inf, mut nan, mut all_neg_zero) = (BigInt::zero(), false, false, false, true);
         while let Some(v) = a.iterator_step(it)? {
-            let Value::Number(x) = v else {
+            let ValueKind::Number(x) = v.kind() else {
                 let _ = a.iterator_close(it.iterator);
                 return Err(a.throw(ErrorKind::Type, "Math.sumPrecise items must be numbers"));
             };
@@ -479,7 +480,7 @@ impl Texts {
     }
 
     fn key_for<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        let Value::Symbol(s) = args.at(0) else {
+        let ValueKind::Symbol(s) = args.at(0).kind() else {
             let t = a.describe(args.at(0));
             return Err(a.throw(ErrorKind::Type, &alloc::format!("{t} is not a symbol")));
         };
@@ -487,8 +488,8 @@ impl Texts {
     }
 
     fn symbol_to_primitive<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        match this.unwrapped() {
-            v @ Value::Symbol(_) => Ok(v),
+        match this.unwrapped().kind() {
+            v @ ValueKind::Symbol(_) => Ok(Value::from(v)),
             _ => Err(a.throw(ErrorKind::Type, "Symbol.prototype[Symbol.toPrimitive] requires that 'this' be a Symbol")),
         }
     }
@@ -510,8 +511,8 @@ impl Texts {
     }
 
     fn bigint_to_locale_string<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        match this.unwrapped() {
-            Value::BigInt(b) => Ok(a.string(&b.0.to_str_radix(10)).into()),
+        match this.unwrapped().kind() {
+            ValueKind::BigInt(b) => Ok(a.string(&b.0.to_str_radix(10)).into()),
             _ => Err(a.throw(ErrorKind::Type, "BigInt.prototype.toLocaleString requires that 'this' be a BigInt")),
         }
     }
@@ -695,7 +696,7 @@ impl<'gc> Installer<'_, 'gc> {
     pub(crate) fn texts(&mut self) {
         let r = self.realm;
         let string = self.global_fn("String");
-        if let Value::Object(ctor) = string {
+        if let ValueKind::Object(ctor) = string.kind() {
             self.method(ctor, "fromCharCode", Texts::from_char_code, 1);
             self.method(ctor, "fromCodePoint", Texts::from_code_point, 1);
             self.method(ctor, "raw", Texts::raw, 1);
@@ -731,7 +732,7 @@ impl<'gc> Installer<'_, 'gc> {
             self.set(sp, alias, f);
         }
         // Number
-        if let Value::Object(ctor) = self.global_fn("Number") {
+        if let ValueKind::Object(ctor) = self.global_fn("Number").kind() {
             self.method(ctor, "isFinite", Texts::is_finite, 1);
             for name in ["parseFloat", "parseInt"] {
                 let f = self.global_fn(name);
@@ -744,7 +745,7 @@ impl<'gc> Installer<'_, 'gc> {
         self.method(np, "toPrecision", Texts::to_precision, 1);
         self.method(np, "toLocaleString", Texts::to_locale_string, 0);
         // Math
-        if let Value::Object(m) = self.global_fn("Math") {
+        if let ValueKind::Object(m) = self.global_fn("Math").kind() {
             let math: [(&str, r8framework::NativeFn, u32); 12] = [
                 ("sinh", Texts::sinh, 1),
                 ("cosh", Texts::cosh, 1),
@@ -764,14 +765,14 @@ impl<'gc> Installer<'_, 'gc> {
             }
         }
         // Symbol
-        if let Value::Object(ctor) = self.global_fn("Symbol") {
+        if let ValueKind::Object(ctor) = self.global_fn("Symbol").kind() {
             self.method(ctor, "for", Texts::symbol_for, 1);
             self.method(ctor, "keyFor", Texts::key_for, 1);
         }
         let tp = r.named_native(self.mc, Texts::symbol_to_primitive, "[Symbol.toPrimitive]", 1);
         r.symbol_proto.borrow_mut(self.mc).define_symbol(r.symbols.to_primitive, r8framework::Property { slot: r8framework::Slot::Data(tp.into()), enumerable: false, writable: false, configurable: true });
         // BigInt
-        if let Value::Object(ctor) = self.global_fn("BigInt") {
+        if let ValueKind::Object(ctor) = self.global_fn("BigInt").kind() {
             self.method(ctor, "asIntN", Texts::as_int_n, 2);
             self.method(ctor, "asUintN", Texts::as_uint_n, 2);
         }

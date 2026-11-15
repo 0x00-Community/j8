@@ -1,3 +1,4 @@
+use r8framework::ValueKind;
 use alloc::boxed::Box;
 use r8framework::{Agent, Collection, Error, ErrorKind, IterKind, JsObject, ObjectData, ObjectKind, Value};
 
@@ -38,16 +39,16 @@ impl Collections {
 
     /// Whether `this` is this kind of collection (weak / non-weak must match too).
     fn this<'gc>(a: &Agent<'gc, '_>, this: Value<'gc>, shape: Shape, weak: bool) -> Result<JsObject<'gc>, Error> {
-        let ok = match this {
-            Value::Object(o) => match &o.borrow().kind {
+        let ok = match this.kind() {
+            ValueKind::Object(o) => match &o.borrow().kind {
                 ObjectKind::Map(c) => shape == Shape::Map && c.weak == weak,
                 ObjectKind::Set(c) => shape == Shape::Set && c.weak == weak,
                 _ => false,
             },
             _ => false,
         };
-        match (ok, this) {
-            (true, Value::Object(o)) => Ok(o),
+        match (ok, this.kind()) {
+            (true, ValueKind::Object(o)) => Ok(o),
             _ => Err(a.throw(ErrorKind::Type, "Method called on an incompatible receiver")),
         }
     }
@@ -87,7 +88,7 @@ impl Collections {
                 let entry = match shape {
                     Shape::Set => alloc::vec![item],
                     Shape::Map => {
-                        if !matches!(item, Value::Object(_)) {
+                        if !matches!(item.kind(), ValueKind::Object(_)) {
                             let what = a.describe(item);
                             return Err(a.throw(ErrorKind::Type, &alloc::format!("Iterator value {what} is not an entry object")));
                         }
@@ -220,8 +221,8 @@ impl Collections {
 
     /// The iterator's `next`: search forward from the recorded index for the next live entry.
     fn next<'gc, const SET: bool>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        let state = match this {
-            Value::Object(it) => match it.borrow().kind {
+        let state = match this.kind() {
+            ValueKind::Object(it) => match it.borrow().kind {
                 ObjectKind::CollectionIterator { target, index, kind, set } if set == SET => Some((it, target, index, kind)),
                 _ => None,
             },
@@ -259,7 +260,7 @@ impl Collections {
 
     /// GetSetRecord: `size` is a number (not NaN, not negative); `has` / `keys` are callable.
     fn set_record<'gc>(a: &mut Agent<'gc, '_>, other: Value<'gc>) -> Result<SetRecord<'gc>, Error> {
-        if !matches!(other, Value::Object(_)) {
+        if !matches!(other.kind(), ValueKind::Object(_)) {
             return Err(a.throw(ErrorKind::Type, "The argument must be a set-like object"));
         }
         let raw = a.get_named(other, "size")?;
@@ -285,7 +286,7 @@ impl Collections {
     /// The `keys()` iterator of the other collection.
     fn keys_iterator<'gc>(a: &mut Agent<'gc, '_>, r: &SetRecord<'gc>) -> Result<r8framework::IterRecord<'gc>, Error> {
         let iterator = a.call(r.keys, r.set, &[])?;
-        if !matches!(iterator, Value::Object(_)) {
+        if !matches!(iterator.kind(), ValueKind::Object(_)) {
             return Err(a.throw(ErrorKind::Type, "keys() of a set-like object must return an object"));
         }
         let next = a.get_named(iterator, "next")?;
@@ -294,9 +295,9 @@ impl Collections {
 
     /// Normalize `-0` to `+0`.
     fn canonical(v: Value<'_>) -> Value<'_> {
-        match v {
-            Value::Number(0.0) => Value::Number(0.0),
-            v => v,
+        match v.kind() {
+            ValueKind::Number(0.0) => Value::Number(0.0),
+            v => Value::from(v),
         }
     }
 
@@ -328,7 +329,7 @@ impl Collections {
     }
 
     fn same<'gc>(x: Value<'gc>, y: Value<'gc>) -> bool {
-        x == y || matches!((x, y), (Value::Number(p), Value::Number(q)) if p.is_nan() && q.is_nan())
+        x == y || matches!((x.kind(), y.kind()), (ValueKind::Number(p), ValueKind::Number(q)) if p.is_nan() && q.is_nan())
     }
 
     fn intersection<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {

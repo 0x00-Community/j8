@@ -1,5 +1,6 @@
 //! Internal methods of Proxy (spec 10.5): each entry point first looks up the trap on the handler; if absent it
 //! forwards to the target, otherwise it calls the trap and then checks the invariants.
+use crate::ValueKind;
 use alloc::vec::Vec;
 
 use crate::property::validate;
@@ -57,9 +58,9 @@ impl<'gc> Agent<'gc, '_> {
 
     /// A trap on the handler: `None` for `undefined` / `null`; throws a TypeError if not callable.
     fn trap(&mut self, handler: JsObject<'gc>, trap: Trap) -> Result<Option<Value<'gc>>, Error> {
-        match self.get_named(handler.into(), trap.name())? {
-            Value::Undefined | Value::Null => Ok(None),
-            f if self.is_callable(f) => Ok(Some(f)),
+        match (self.get_named(handler.into(), trap.name())?).kind() {
+            ValueKind::Undefined | ValueKind::Null => Ok(None),
+            f if self.is_callable(f.into()) => Ok(Some(f.into())),
             _ => Err(self.throw(ErrorKind::Type, &alloc::format!("proxy trap '{}' is not a function", trap.name()))),
         }
     }
@@ -78,9 +79,9 @@ impl<'gc> Agent<'gc, '_> {
 
     pub(crate) fn proxy_get_prototype_of(&mut self, target: JsObject<'gc>, handler: JsObject<'gc>) -> Result<Option<JsObject<'gc>>, Error> {
         let Some(trap) = self.trap(handler, Trap::GetPrototypeOf)? else { return self.get_prototype_of(target) };
-        let proto = match self.call(trap, handler.into(), &[target.into()])? {
-            Value::Object(p) => Some(p),
-            Value::Null => None,
+        let proto = match (self.call(trap, handler.into(), &[target.into()])?).kind() {
+            ValueKind::Object(p) => Some(p),
+            ValueKind::Null => None,
             _ => return Err(self.throw(ErrorKind::Type, "getPrototypeOf trap returned neither an object nor null")),
         };
         if self.is_extensible(target)? {
@@ -133,7 +134,7 @@ impl<'gc> Agent<'gc, '_> {
         let Some(trap) = self.trap(handler, Trap::GetOwnPropertyDescriptor)? else { return self.get_own_property(target, key) };
         let k = self.key_value(key);
         let result = self.call(trap, handler.into(), &[target.into(), k])?;
-        if !matches!(result, Value::Object(_) | Value::Undefined) {
+        if !matches!(result.kind(), ValueKind::Object(_) | ValueKind::Undefined) {
             return Err(self.throw(ErrorKind::Type, "getOwnPropertyDescriptor trap returned neither an object nor undefined"));
         }
         let target_desc = self.get_own_property(target, key)?;
@@ -297,14 +298,14 @@ impl<'gc> Agent<'gc, '_> {
     pub(crate) fn proxy_own_keys(&mut self, target: JsObject<'gc>, handler: JsObject<'gc>) -> Result<Vec<PropertyKey<'gc>>, Error> {
         let Some(trap) = self.trap(handler, Trap::OwnKeys)? else { return self.own_property_keys(target) };
         let arr = self.call(trap, handler.into(), &[target.into()])?;
-        if !matches!(arr, Value::Object(_)) {
+        if !matches!(arr.kind(), ValueKind::Object(_)) {
             return Err(self.throw(ErrorKind::Type, "ownKeys trap result must be an object"));
         }
         let mut keys: Vec<PropertyKey<'gc>> = Vec::new();
         for v in self.list_from_array_like(arr)? {
-            let k = match v {
-                Value::String(s) => PropertyKey::String(s),
-                Value::Symbol(s) => PropertyKey::Symbol(s),
+            let k = match v.kind() {
+                ValueKind::String(s) => PropertyKey::String(s),
+                ValueKind::Symbol(s) => PropertyKey::Symbol(s),
                 _ => return Err(self.throw(ErrorKind::Type, "ownKeys trap result must contain only strings and symbols")),
             };
             if keys.iter().any(|x| Self::same_key(x, &k)) {
@@ -367,8 +368,8 @@ impl<'gc> Agent<'gc, '_> {
         let (target, handler) = self.proxy_parts(o).expect("a proxy")?;
         let Some(trap) = self.trap(handler, Trap::Construct)? else { return self.construct(target.into(), args, new_target) };
         let list = self.array(args.to_vec());
-        match self.call(trap, handler.into(), &[target.into(), list.into(), new_target])? {
-            v @ Value::Object(_) => Ok(v),
+        match (self.call(trap, handler.into(), &[target.into(), list.into(), new_target])?).kind() {
+            v @ ValueKind::Object(_) => Ok(v.into()),
             _ => Err(self.throw(ErrorKind::Type, "proxy [[Construct]] must return an object")),
         }
     }

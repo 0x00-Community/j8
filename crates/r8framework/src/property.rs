@@ -1,6 +1,7 @@
 //! Internal methods of objects (spec 10.1 ordinary objects, 10.4 arrays and string wrapper objects): get / define /
 //! delete own properties, own keys, extensibility, prototype. Property access (ops.rs) goes through them along the
 //! prototype chain.
+use crate::ValueKind;
 use alloc::format;
 use alloc::vec::Vec;
 
@@ -195,7 +196,7 @@ impl<'gc> Agent<'gc, '_> {
                 let len = f64::from(d.array_length().unwrap_or(0));
                 Some(Property { slot: Slot::Data(len.into()), enumerable: false, writable: !d.length_readonly, configurable: false })
             }
-            (ObjectKind::Primitive(Value::String(s)), Key::Str(k)) => self.string_own(*s, k).or_else(|| d.own_slot(key)),
+            (ObjectKind::Primitive(v), Key::Str(k)) if let ValueKind::String(s) = v.kind() => self.string_own(s, k).or_else(|| d.own_slot(key)),
             (ObjectKind::Arguments(Some(map)), Key::Str(k)) => {
                 let slot = index_of_str(k).and_then(|i| map.slots.get(i as usize).copied().flatten());
                 match (d.own_slot(key), slot) {
@@ -235,7 +236,7 @@ impl<'gc> Agent<'gc, '_> {
         }
         let (array, string) = match &o.borrow().kind {
             ObjectKind::Array(_) => (true, None),
-            ObjectKind::Primitive(Value::String(s)) => (false, Some(*s)),
+            ObjectKind::Primitive(v) if let ValueKind::String(s) = v.kind() => (false, Some(s)),
             _ => (false, None),
         };
         match (key, array, string) {
@@ -434,7 +435,7 @@ impl<'gc> Agent<'gc, '_> {
                 indices.extend((0..u32::try_from(items.len()).unwrap_or(u32::MAX)).map(|i| (i, None)));
                 strings.push(PropertyKey::String(self.string("length")));
             }
-            ObjectKind::Primitive(Value::String(s)) => {
+            ObjectKind::Primitive(v) if let ValueKind::String(s) = v.kind() => {
                 indices.extend((0..u32::try_from(s.utf16_len()).unwrap_or(u32::MAX)).map(|i| (i, None)));
                 strings.push(PropertyKey::String(self.string("length")));
             }
@@ -550,7 +551,7 @@ impl<'gc> Agent<'gc, '_> {
 
     /// ToPropertyDescriptor.
     pub fn to_property_descriptor(&mut self, v: Value<'gc>) -> Result<Descriptor<'gc>, Error> {
-        if !matches!(v, Value::Object(_)) {
+        if !matches!(v.kind(), ValueKind::Object(_)) {
             let t = self.describe(v);
             return Err(self.throw(ErrorKind::Type, &format!("Property description must be an object: {t}")));
         }
@@ -572,11 +573,11 @@ impl<'gc> Agent<'gc, '_> {
         }
         for (name, field) in [("get", &mut d.get), ("set", &mut d.set)] {
             if self.has_property(v, name)? {
-                *field = Some(match self.get_named(v, name)? {
-                    Value::Undefined => None,
-                    Value::Object(f) if f.borrow().kind.is_callable() => Some(f),
+                *field = Some(match (self.get_named(v, name)?).kind() {
+                    ValueKind::Undefined => None,
+                    ValueKind::Object(f) if f.borrow().kind.is_callable() => Some(f),
                     other => {
-                        let t = self.describe(other);
+                        let t = self.describe(other.into());
                         return Err(self.throw(ErrorKind::Type, &format!("{} must be a function: {t}", if name == "get" { "Getter" } else { "Setter" })));
                     }
                 });
@@ -611,9 +612,9 @@ impl<'gc> Agent<'gc, '_> {
 
     /// Use a value as a property key (ToPropertyKey): Symbols as is, everything else ToString.
     pub fn to_property_key(&mut self, v: Value<'gc>) -> Result<PropertyKey<'gc>, Error> {
-        match self.to_primitive(v, crate::Hint::String)? {
-            Value::Symbol(s) => Ok(PropertyKey::Symbol(s)),
-            p => Ok(PropertyKey::String(self.to_string(p)?)),
+        match (self.to_primitive(v, crate::Hint::String)?).kind() {
+            ValueKind::Symbol(s) => Ok(PropertyKey::Symbol(s)),
+            p => Ok(PropertyKey::String(self.to_string(p.into())?)),
         }
     }
 }
