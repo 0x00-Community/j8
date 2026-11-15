@@ -917,6 +917,9 @@ dependencies = [
 [[package]]
 name = "r8taskqueue"
 version = "0.1.0"
+dependencies = [
+ "moremath",
+]
 
 [[package]]
 name = "r8virtasm"

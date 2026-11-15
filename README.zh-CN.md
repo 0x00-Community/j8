@@ -85,7 +85,7 @@ cd samples/benchv8 && cargo run --release
 | `r8platform` | std | 实现 `Platform`（`DefaultPlatform`）：后台任务与 GC 跑在 moremath `ThreadMulti` 线程池上（起一次复用、任务可借用调用方数据，经 `r8gc::Pool`），时钟用 `Instant` |
 | `r8virtasm` | `no_std`（`compile` 要 std） | 虚拟指令集：累加器式寄存器字节码（`Insn` / `Function` / `Module`）；反汇编 `module.to_string()`、汇编 `text.parse::<Module>()`，互为逆；`compile` feature（缺省开）带 JS ⇒ 字节码编译器 `Module::try_from(&Source)`，用 oxc 解析 |
 | `r8gc` | `no_std`（`std` feature 缺省开） | 堆：分代、可移动、并行的 GC，`'gc` 品牌生命周期，回收跑在平台线程池上（见下「堆与句柄」）；`#[derive(Collect)]` 由 `r8gc::Collect` 暴露（过程宏实现在 `crates/r8gc/macros`，只被 r8gc 依赖） |
-| `r8taskqueue` | `no_std` | 任务队列：`ITask`（`recursable` / `exec`）与 `ITaskPoll`（`add` / `run`），单线程按轮推进；循环里只有可递归的任务能塞新任务，这一轮新塞的进下一轮 |
+| `r8taskqueue` | `no_std` | 任务队列：`ITask`（`recursable` / `exec`）与 `ITaskPoll`（`add` / `run`），按轮推进、每轮整批交给 moremath `Executor`（宿主给 `ThreadMulti`）并行跑，新塞的任务按原次序并进下一轮；循环里只有可递归的任务能塞新任务 |
 | `r8macros` | proc-macro | 过程宏：`enums!("x.json")` 从 JSON 生成枚举（定义、`Display`、按字段类型取 `&mut`），用法见 `crates/macros/USAGE.md` |
 | `samples/dune` | std | 基于 r8 的 node 式二进制（`require` / `module` / `fs` / `path` / `process`，原生部分用 `#[r8::object]` 绑定）：`dune a.js` / `dune run a.js`（`-` 读标准输入）、`dune -e '<js>'`、`dune -p '<js>'` 打印结果、不带参数进 REPL（`.help` / `.exit`）；没接住的异常打 `Uncaught …` 退出码 1 |
 | `samples/workerd` | std | 用 r8 加载 Cloudflare Worker（ES 模块 `export default { fetch }`）与 Durable Object：`workerd examples/counter.js --bind COUNTER=Counter --request "GET /c/inc?name=a"` 或 `--port 8787` 起 HTTP 服务；Fetch API 子集与 DO 在 JS 序言里，存储是 `#[r8::class]` 绑定的 Rust KV |
