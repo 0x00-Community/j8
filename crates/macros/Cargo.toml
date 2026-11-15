@@ -4,6 +4,7 @@ description = "r8 procedural macros: generate enums from JSON definitions"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 
 [lib]
 proc-macro = true

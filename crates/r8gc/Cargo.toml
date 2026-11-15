@@ -1,15 +1,17 @@
 [package]
 name = "r8gc"
 description = "Generational, moving (compacting), parallel GC for Rust with a 'gc brand lifetime; collection runs on the moremath thread pool"
+version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 
 [dependencies]
-r8gc-macros = { path = "macros" }
-moremath = { version = "=0.2.2", default-features = false, features = ["alloc"] }
+r8gc-macros = { version = "0.1.2", path = "macros" }
+moremath = { workspace = true, features = ["alloc"] }
 
 [dev-dependencies]
-moremath = { version = "=0.2.2", features = ["std"] }
+moremath = { workspace = true, features = ["std"] }
 
 [features]
 default = ["std"]

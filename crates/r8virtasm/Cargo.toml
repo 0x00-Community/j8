@@ -4,6 +4,7 @@ description = "r8 virtual instruction set: bytecode definitions, JavaScript ⇒ 
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 
 [dependencies]
 r8framework.workspace = true

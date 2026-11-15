@@ -4,6 +4,7 @@ description = "r8 compiler: bytecode ⇒ MLIR (llvm dialect) ⇒ mlirpass ⇒ ra
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 
 [dependencies]
 r8framework.workspace = true

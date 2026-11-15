@@ -4,6 +4,7 @@ description = "r8 JIT: picks hot functions for r8compiler, loads the machine cod
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 
 [dependencies]
 r8framework.workspace = true

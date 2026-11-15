@@ -4,6 +4,9 @@ description = "dune: the r8 JavaScript runtime CLI (comparable to node / deno)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+# the name is taken on crates.io
+publish = false
 
 [[bin]]
 name = "dune"

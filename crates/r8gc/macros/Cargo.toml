@@ -1,8 +1,10 @@
 [package]
 name = "r8gc-macros"
 description = "Procedural macros for r8gc: #[derive(Collect)] and others"
+version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 
 [lib]
 proc-macro = true

@@ -4,6 +4,7 @@ description = "r8 platform layer: the standard-library implementation of the Pla
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 
 [dependencies]
 r8gc = { workspace = true, features = ["std"] }

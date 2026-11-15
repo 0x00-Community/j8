@@ -4,6 +4,7 @@ description = "r8 built-in objects: implements Intrinsics and installs Object / 
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 
 [dependencies]
 r8framework.workspace = true

@@ -4,6 +4,7 @@ description = "r8 core framework layer: traits and common structs / enums"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 
 [dependencies]
 r8gc.workspace = true
