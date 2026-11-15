@@ -41,7 +41,7 @@ impl<'gc> Agent<'gc, '_> {
     }
 
     fn enqueue(&self, job: Job<'gc>) {
-        self.realm.jobs.borrow_mut(self.mc).push_back(job);
+        self.realm.jobs.push(self.mc, job);
     }
 
     /// Settle: record the result and enqueue all pending reactions.
@@ -259,7 +259,7 @@ impl<'gc> Agent<'gc, '_> {
     /// Drain the microtask queue (new jobs enqueued by jobs are also run to completion).
     pub fn run_jobs(&mut self) -> Result<(), Error> {
         loop {
-            let job = self.realm.jobs.borrow_mut(self.mc).pop_front();
+            let job = self.realm.jobs.pop(self.mc);
             match job {
                 Some(j) => self.run_job(j)?,
                 None => return Ok(()),

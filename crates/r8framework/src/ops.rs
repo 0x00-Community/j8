@@ -1031,7 +1031,7 @@ impl<'gc> Agent<'gc, '_> {
     pub fn can_be_held_weakly(&self, v: Value<'gc>) -> bool {
         match v {
             Value::Object(_) => true,
-            Value::Symbol(s) => !self.realm.symbol_registry.borrow().iter().any(|(_, x)| Gc::ptr_eq(*x, s)),
+            Value::Symbol(s) => !self.realm.symbol_registry.get().iter().any(|(_, x)| Gc::ptr_eq(*x, s)),
             _ => false,
         }
     }
@@ -1331,7 +1331,7 @@ impl<'gc> Agent<'gc, '_> {
         // `next` is the built-in array / string iterator `next`: the result object it builds can't be observed
         // otherwise, so step directly
         if let (Value::Object(n), Value::Object(o)) = (it.next, it.iterator) {
-            let [array, string] = *self.realm.builtin_nexts.borrow();
+            let [array, string] = *self.realm.builtin_nexts.get();
             let (is_array, is_string) = match &o.borrow().kind {
                 ObjectKind::Iterator(IteratorState::Array { .. }) => (true, false),
                 ObjectKind::Iterator(IteratorState::String { .. }) => (false, true),

@@ -63,24 +63,13 @@ impl Regexps {
     /// Compiled regex: look up the realm's cache first (identical source and flags share one copy); otherwise compile
     /// it and record it.
     fn compiled<'gc>(a: &Agent<'gc, '_>, source: &str, flags: &str) -> Result<Gc<'gc, Static<Box<dyn core::any::Any>>>, Error> {
-        /// Maximum number of entries in the cache
-        const CACHE_SIZE: usize = 64;
-        let cache = a.realm.regexp_cache;
-        let hit = cache.borrow().iter().position(|c| *c.source == *source && *c.flags == *flags);
-        if let Some(i) = hit {
-            let mut c = cache.borrow_mut(a.mc);
-            let entry = c.remove(i).expect("just found");
-            let compiled = entry.compiled;
-            c.push_back(entry);
-            return Ok(compiled);
+        let slot = a.realm.regexp_cache[r8framework::RegExpCompiled::bucket(source, flags)];
+        if let Some(c) = slot.get().filter(|c| *c.source == *source && *c.flags == *flags) {
+            return Ok(c.compiled);
         }
         let regex = Compiled::new(Self::compile(a, source, flags)?, source, flags);
         let compiled = Gc::new(a.mc, Static(Box::new(regex) as Box<dyn core::any::Any>));
-        let mut c = cache.borrow_mut(a.mc);
-        if c.len() >= CACHE_SIZE {
-            c.pop_front();
-        }
-        c.push_back(r8framework::RegExpCompiled { source: source.into(), flags: flags.into(), compiled });
+        slot.set(a.mc, Some(Gc::new(a.mc, r8framework::RegExpCompiled { source: source.into(), flags: flags.into(), compiled })));
         Ok(compiled)
     }
 
@@ -335,8 +324,7 @@ impl Regexps {
         }
         let Slot::Data(Value::Number(last)) = d.props.slot(0) else { return None };
         drop(d);
-        let pristine = a.realm.regexp_pristine.borrow();
-        let p = pristine.as_ref()?;
+        let p = a.realm.regexp_pristine.get().as_ref()?;
         let proto = a.realm.regexp_proto.borrow();
         let same = |x: Slot<'gc>, y: Slot<'gc>| match (x, y) {
             (Slot::Data(Value::Object(x)), Slot::Data(Value::Object(y))) | (Slot::Accessor { get: Some(x), .. }, Slot::Accessor { get: Some(y), .. }) => Gc::ptr_eq(x, y),
@@ -1091,7 +1079,7 @@ impl<'gc> Installer<'_, 'gc> {
             let slots = ["exec", "flags"].into_iter().chain(FLAG_PROPERTIES.map(|(_, n)| n)).filter_map(|n| d.props.position(n).map(|i| (i, d.props.slot(i)))).collect();
             d.props.shape().map(|shape| r8framework::RegExpPristine { shape: alloc::rc::Rc::clone(shape), slots })
         };
-        *r.regexp_pristine.borrow_mut(self.mc) = pristine;
+        r.regexp_pristine.set(self.mc, pristine);
         let symbols: [(r8framework::JsSymbol<'gc>, r8framework::NativeFn, u32); 5] = [
             (r.symbols.match_, Regexps::match_symbol, 1),
             (r.symbols.match_all, Regexps::match_all_symbol, 1),

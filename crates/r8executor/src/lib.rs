@@ -1680,7 +1680,7 @@ impl Executor {
                     Insn::CreateArguments => *acc = Self::arguments(a, regs, f, func.mode.into(), &func.mapped_params)?,
                     Insn::GetTemplateObject { site, first, count } => {
                         let key = (f.func.0, site);
-                        let cached = a.realm.templates.borrow().get(&key).copied();
+                        let cached = a.realm.templates.get().get(&key).copied();
                         *acc = match cached {
                             Some(o) => o.into(),
                             None => {
@@ -1689,8 +1689,15 @@ impl Executor {
                                 let raw = a.array(regs[start + n..start + 2 * n].to_vec());
                                 let frozen = |v: Value<'gc>| Property { slot: Slot::Data(v), enumerable: false, writable: false, configurable: false };
                                 cooked.borrow_mut(a.mc).define("raw", frozen(raw.into()));
-                                a.realm.templates.borrow_mut(a.mc).insert(key, cooked);
-                                cooked.into()
+                                // Another thread may have cached this site meanwhile: then its object wins
+                                a.realm
+                                    .templates
+                                    .update_with(a.mc, |m| {
+                                        let mut m = m.clone();
+                                        let o = *m.entry(key).or_insert(cooked);
+                                        (m, o)
+                                    })
+                                    .into()
                             }
                         };
                     }

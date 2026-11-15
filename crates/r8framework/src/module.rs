@@ -56,7 +56,7 @@ pub enum ResolvedBinding<'gc> {
 }
 
 /// A runtime module record (kept in the Realm, numbered in load order).
-#[derive(Collect)]
+#[derive(Clone, Collect)]
 #[collect(no_drop)]
 pub struct ModuleRecord<'gc> {
     pub path: JsString<'gc>,
@@ -101,9 +101,32 @@ impl ResolvedBinding<'_> {
 }
 
 impl<'gc> Agent<'gc, '_> {
+    /// The loaded modules (an immutable snapshot; the index is the module id)
+    pub fn modules(&self) -> &'gc [ModuleRecord<'gc>] {
+        self.realm.modules.get()
+    }
+
+    /// Changes module `m` (copy-on-write: `f` may run more than once, so it should only assign fields)
+    pub fn update_module(&self, m: u32, mut f: impl FnMut(&mut ModuleRecord<'gc>)) {
+        self.realm.modules.update(self.mc, |mods| {
+            let mut mods = mods.clone();
+            f(&mut mods[m as usize]);
+            mods
+        });
+    }
+
+    /// Adds a module, returning its id
+    pub fn push_module(&self, record: &ModuleRecord<'gc>) -> u32 {
+        self.realm.modules.update_with(self.mc, |mods| {
+            let mut mods = mods.clone();
+            mods.push(record.clone());
+            let id = u32::try_from(mods.len() - 1).unwrap_or(u32::MAX);
+            (mods, id)
+        })
+    }
+
     fn module_info(&self, m: u32) -> (alloc::rc::Rc<ModuleInfo>, JsEnv<'gc>, Vec<u32>) {
-        let mods = self.realm.modules.borrow();
-        let r = &mods[m as usize];
+        let r = &self.modules()[m as usize];
         (r.info.clone(), r.env, r.requested.clone())
     }
 
@@ -174,7 +197,7 @@ impl<'gc> Agent<'gc, '_> {
     /// The module's namespace object (created on first request, recording export names in sorted order with their
     /// resolutions).
     pub fn module_namespace(&mut self, m: u32) -> JsObject<'gc> {
-        if let Some(ns) = self.realm.modules.borrow()[m as usize].namespace {
+        if let Some(ns) = self.modules()[m as usize].namespace {
             return ns;
         }
         let mut names = self.exported_names(m, &mut Vec::new());
@@ -188,7 +211,7 @@ impl<'gc> Agent<'gc, '_> {
         let ns = crate::ObjectData { kind: ObjectKind::ModuleNamespace(exports), proto: None, non_extensible: true, ..crate::ObjectData::default() }.alloc(self.mc);
         let tag = self.string("Module");
         ns.borrow_mut(self.mc).define_symbol(self.realm.symbols.to_string_tag, Property { slot: Slot::Data(tag.into()), enumerable: false, writable: false, configurable: false });
-        self.realm.modules.borrow_mut(self.mc)[m as usize].namespace = Some(ns);
+        self.update_module(m, |r| r.namespace = Some(ns));
         ns
     }
 

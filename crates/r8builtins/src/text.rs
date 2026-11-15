@@ -460,11 +460,21 @@ impl Texts {
 
     fn symbol_for<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let key = a.to_string(args.at(0))?;
-        if let Some(&(_, s)) = a.realm.symbol_registry.borrow().iter().find(|(k, _)| ***k == **key) {
+        let registry = a.realm.symbol_registry;
+        if let Some(&(_, s)) = registry.get().iter().find(|(k, _)| ***k == **key) {
             return Ok(s.into());
         }
-        let s: JsSymbol<'gc> = r8gc::Gc::new(a.mc, SymbolData { description: Some((&**key).into()) });
-        a.realm.symbol_registry.borrow_mut(a.mc).push((key, s));
+        let fresh: JsSymbol<'gc> = r8gc::Gc::new(a.mc, SymbolData { description: Some((&**key).into()) });
+        // Another thread may have registered the key meanwhile: then its symbol wins
+        let s = registry.update_with(a.mc, |entries| {
+            let mut entries = entries.clone();
+            let found = entries.iter().find(|(k, _)| ***k == **key).map(|&(_, s)| s);
+            let s = found.unwrap_or(fresh);
+            if found.is_none() {
+                entries.push((key, fresh));
+            }
+            (entries, s)
+        });
         Ok(s.into())
     }
 
@@ -473,7 +483,7 @@ impl Texts {
             let t = a.describe(args.at(0));
             return Err(a.throw(ErrorKind::Type, &alloc::format!("{t} is not a symbol")));
         };
-        Ok(a.realm.symbol_registry.borrow().iter().find(|(_, x)| r8gc::Gc::ptr_eq(*x, s)).map_or(Value::Undefined, |&(k, _)| k.into()))
+        Ok(a.realm.symbol_registry.get().iter().find(|(_, x)| r8gc::Gc::ptr_eq(*x, s)).map_or(Value::Undefined, |&(k, _)| k.into()))
     }
 
     fn symbol_to_primitive<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {

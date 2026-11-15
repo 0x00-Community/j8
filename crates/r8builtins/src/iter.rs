@@ -141,7 +141,7 @@ impl Installer<'_, '_> {
             Some(Value::Object(f)) => Some(f),
             _ => None,
         });
-        *r.builtin_nexts.borrow_mut(self.mc) = nexts;
+        r.builtin_nexts.set(self.mc, nexts);
         self.method(r.generator_proto, "next", Iters::generator_next, 1);
         self.method(r.generator_proto, "return", Iters::generator_return, 1);
         self.method(r.generator_proto, "throw", Iters::generator_throw, 1);

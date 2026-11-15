@@ -1,9 +1,7 @@
 use core::fmt;
 use core::ops::Deref;
 
-use alloc::collections::VecDeque;
-
-use r8gc::{Collect, Gc, Mutation, RefLock};
+use r8gc::{Collect, CowLock, Gc, GcQueue, Lock, Mutation};
 
 use crate::{ErrorKind, Job, JsObject, JsString, JsSymbol, Native, NativeFn, ObjectData, ObjectKind, Property, Scope, SymbolData, Value};
 
@@ -122,30 +120,30 @@ pub struct Realm<'gc> {
     pub script_scope: JsObject<'gc>,
     pub symbols: WellKnown<'gc>,
     /// Loaded modules (the index is the module id)
-    pub modules: Gc<'gc, RefLock<alloc::vec::Vec<crate::ModuleRecord<'gc>>>>,
+    pub modules: Gc<'gc, CowLock<'gc, alloc::vec::Vec<crate::ModuleRecord<'gc>>>>,
     /// The global registry of `Symbol.for`
-    pub symbol_registry: Gc<'gc, RefLock<alloc::vec::Vec<(JsString<'gc>, JsSymbol<'gc>)>>>,
+    pub symbol_registry: Gc<'gc, CowLock<'gc, alloc::vec::Vec<(JsString<'gc>, JsSymbol<'gc>)>>>,
     /// The state of `Math.random` (xorshift; 0 means not yet seeded)
     pub random_state: Gc<'gc, r8gc::Lock<u64>>,
-    /// The microtask queue
-    pub jobs: Gc<'gc, RefLock<VecDeque<Job<'gc>>>>,
+    /// The microtask queue (lock-free)
+    pub jobs: Gc<'gc, GcQueue<'gc, Job<'gc>>>,
     /// Template objects of tagged templates: cached by (function index, call site), so the same site always gets the
     /// same one
-    pub templates: Gc<'gc, RefLock<alloc::collections::BTreeMap<(u32, u32), JsObject<'gc>>>>,
-    /// Compiled regexes shared by (source, flags) (compiled ones are immutable); most recently used at the back, the
-    /// front one dropped when full
-    pub regexp_cache: Gc<'gc, RefLock<VecDeque<RegExpCompiled<'gc>>>>,
+    pub templates: Gc<'gc, CowLock<'gc, alloc::collections::BTreeMap<(u32, u32), JsObject<'gc>>>>,
+    /// Compiled regexes shared by (source, flags) (compiled ones are immutable): a direct-mapped cache, one atomic slot
+    /// per bucket ([`RegExpCompiled::bucket`]); a miss overwrites the bucket
+    pub regexp_cache: [Gc<'gc, Lock<Option<Gc<'gc, RegExpCompiled<'gc>>>>>; RegExpCompiled::BUCKETS],
     /// What `RegExp.prototype` looked like when installed (built-in regex methods use it to decide whether they can
     /// skip the protocol and match directly)
-    pub regexp_pristine: Gc<'gc, RefLock<Option<RegExpPristine<'gc>>>>,
+    pub regexp_pristine: Gc<'gc, CowLock<'gc, Option<RegExpPristine<'gc>>>>,
     /// The built-in array iterator / string iterator `next` (when an iterator record's `next` is one of them, no result
     /// object is created; it steps directly)
-    pub builtin_nexts: Gc<'gc, RefLock<[Option<JsObject<'gc>>; 2]>>,
+    pub builtin_nexts: Gc<'gc, CowLock<'gc, [Option<JsObject<'gc>>; 2]>>,
 }
 
 /// The shape of `RegExp.prototype` when installed, plus the slots holding `exec` / `flags` / each flag getter and their
 /// original contents.
-#[derive(Collect)]
+#[derive(Clone, Collect)]
 #[collect(no_drop)]
 pub struct RegExpPristine<'gc> {
     #[collect(require_static)]
@@ -160,6 +158,20 @@ pub struct RegExpCompiled<'gc> {
     pub source: crate::SmallStr,
     pub flags: crate::SmallStr,
     pub compiled: Gc<'gc, r8gc::Static<alloc::boxed::Box<dyn core::any::Any>>>,
+}
+
+impl RegExpCompiled<'_> {
+    /// Buckets of the realm's regex cache
+    pub const BUCKETS: usize = 64;
+    /// FNV-1a offset basis and prime (64-bit)
+    const FNV: (u64, u64) = (0xcbf2_9ce4_8422_2325, 0x0100_0000_01b3);
+
+    /// The cache bucket of (source, flags)
+    pub fn bucket(source: &str, flags: &str) -> usize {
+        let h = source.bytes().chain([0]).chain(flags.bytes()).fold(Self::FNV.0, |h, b| (h ^ u64::from(b)).wrapping_mul(Self::FNV.1));
+        // The modulus is below BUCKETS, so it fits
+        usize::try_from(h % Self::BUCKETS as u64).unwrap_or(0)
+    }
 }
 
 impl fmt::Debug for Realm<'_> {
@@ -233,14 +245,14 @@ impl<'gc> Realm<'gc> {
                 search: symbol("search"),
                 split: symbol("split"),
             },
-            jobs: Gc::new(mc, RefLock::new(VecDeque::new())),
-            regexp_cache: Gc::new(mc, RefLock::new(VecDeque::new())),
-            regexp_pristine: Gc::new(mc, RefLock::new(None)),
-            builtin_nexts: Gc::new(mc, RefLock::new([None, None])),
-            symbol_registry: Gc::new(mc, RefLock::new(alloc::vec::Vec::new())),
-            modules: Gc::new(mc, RefLock::new(alloc::vec::Vec::new())),
+            jobs: Gc::new(mc, GcQueue::new(mc)),
+            regexp_cache: core::array::from_fn(|_| Gc::new(mc, Lock::new(None))),
+            regexp_pristine: Gc::new(mc, CowLock::new(mc, None)),
+            builtin_nexts: Gc::new(mc, CowLock::new(mc, [None, None])),
+            symbol_registry: Gc::new(mc, CowLock::new(mc, alloc::vec::Vec::new())),
+            modules: Gc::new(mc, CowLock::new(mc, alloc::vec::Vec::new())),
             random_state: Gc::new(mc, r8gc::Lock::new(0)),
-            templates: Gc::new(mc, RefLock::new(alloc::collections::BTreeMap::new())),
+            templates: Gc::new(mc, CowLock::new(mc, alloc::collections::BTreeMap::new())),
             global: derived(object_proto),
             object_proto,
             function_proto,

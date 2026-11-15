@@ -14,7 +14,7 @@ impl Executor {
     /// or a missing dependency gives `Error::Syntax`.
     #[cfg(feature = "compile")]
     pub(crate) fn load_module(&self, a: &mut Agent<'_, '_>, path: &str, text: &str) -> Result<u32, Error> {
-        if let Some(i) = a.realm.modules.borrow().iter().position(|m| **m.path == *path) {
+        if let Some(i) = a.modules().iter().position(|m| **m.path == *path) {
             return Ok(u32::try_from(i).unwrap_or(u32::MAX));
         }
         let (module, info) = r8virtasm::Module::compile_module(&r8framework::Source { text, file: path })?;
@@ -24,10 +24,9 @@ impl Executor {
             slots[usize::from(s)] = Value::Uninit;
         }
         let env = r8framework::Env { slots, parent: None }.alloc(a.mc);
-        let index = u32::try_from(a.realm.modules.borrow().len()).unwrap_or(u32::MAX);
         let info = alloc::rc::Rc::new(info);
         let record = r8framework::ModuleRecord { path: a.string(path), env, info: alloc::rc::Rc::clone(&info), main, status: ModuleStatus::Linked, error: None, requested: Vec::new(), imports: Vec::new(), namespace: None, meta: None };
-        a.realm.modules.borrow_mut(a.mc).push(record);
+        let index = a.push_module(&record);
         self.module_of.borrow_mut().insert(main.0 - r8virtasm::Module::MAIN, index);
         let mut requested = Vec::with_capacity(info.requests.len());
         for spec in &info.requests {
@@ -36,7 +35,7 @@ impl Executor {
             };
             requested.push(self.load_module(a, &p, &t)?);
         }
-        a.realm.modules.borrow_mut(a.mc)[index as usize].requested = requested;
+        a.update_module(index, |r| r.requested.clone_from(&requested));
         Ok(index)
     }
 
@@ -48,8 +47,7 @@ impl Executor {
         }
         seen.push(m);
         let (info, requested, path, done) = {
-            let mods = a.realm.modules.borrow();
-            let r = &mods[m as usize];
+            let r = &a.modules()[m as usize];
             (alloc::rc::Rc::clone(&r.info), r.requested.clone(), String::from(&**r.path), r.imports.len() == r.info.imports.len() && !r.info.imports.is_empty())
         };
         for &r in &requested {
@@ -76,7 +74,7 @@ impl Executor {
                 return Err(Error::Syntax(alloc::format!("{path}: cannot resolve export '{name}'")));
             }
         }
-        a.realm.modules.borrow_mut(a.mc)[m as usize].imports = imports;
+        a.update_module(m, |r| r.imports.clone_from(&imports));
         Ok(())
     }
 
@@ -85,8 +83,7 @@ impl Executor {
     #[cfg(feature = "compile")]
     pub(crate) fn evaluate(&self, a: &mut Agent<'_, '_>, m: u32, depth: usize) -> Result<(), Error> {
         let (status, error, requested, main, env) = {
-            let mods = a.realm.modules.borrow();
-            let r = &mods[m as usize];
+            let r = &a.modules()[m as usize];
             (r.status, r.error, r.requested.clone(), r.main, r.env)
         };
         match status {
@@ -94,7 +91,7 @@ impl Executor {
             ModuleStatus::Evaluating => return Ok(()),
             ModuleStatus::Linked => {}
         }
-        a.realm.modules.borrow_mut(a.mc)[m as usize].status = ModuleStatus::Evaluating;
+        a.update_module(m, |r| r.status = ModuleStatus::Evaluating);
         let mut r = Ok(());
         for &dep in &requested {
             r = self.evaluate(a, dep, depth);
@@ -113,9 +110,10 @@ impl Executor {
             Err(Error::Exception(g)) => Some(a.local(g)),
             _ => None,
         };
-        let mut mods = a.realm.modules.borrow_mut(a.mc);
-        mods[m as usize].status = ModuleStatus::Evaluated;
-        mods[m as usize].error = error;
+        a.update_module(m, |r| {
+            r.status = ModuleStatus::Evaluated;
+            r.error = error;
+        });
         r
     }
 
@@ -127,20 +125,20 @@ impl Executor {
     /// `LdaImport`: the value of this module's `index`-th import binding.
     pub(crate) fn import_value<'gc>(&self, a: &mut Agent<'gc, '_>, base: u32, index: u16) -> Result<Value<'gc>, Error> {
         let Some(m) = self.module_index(base) else { return Err(a.throw(ErrorKind::Reference, "import binding outside a module")) };
-        let b = a.realm.modules.borrow()[m as usize].imports[usize::from(index)];
+        let b = a.modules()[m as usize].imports[usize::from(index)];
         a.binding_value(b, "import")
     }
 
     /// `import.meta`: one per module (no prototype).
     pub(crate) fn import_meta<'gc>(&self, a: &mut Agent<'gc, '_>, base: u32) -> Result<Value<'gc>, Error> {
         let Some(m) = self.module_index(base) else { return Err(a.throw(ErrorKind::Syntax, "Cannot use 'import.meta' outside a module")) };
-        if let Some(meta) = a.realm.modules.borrow()[m as usize].meta {
+        if let Some(meta) = a.modules()[m as usize].meta {
             return Ok(meta.into());
         }
         let meta = ObjectData::default().alloc(a.mc);
-        let url = a.realm.modules.borrow()[m as usize].path;
+        let url = a.modules()[m as usize].path;
         meta.borrow_mut(a.mc).set("url", url.into());
-        a.realm.modules.borrow_mut(a.mc)[m as usize].meta = Some(meta);
+        a.update_module(m, |r| r.meta = Some(meta));
         Ok(meta.into())
     }
 
