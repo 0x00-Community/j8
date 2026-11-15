@@ -85,3 +85,33 @@ r8gc 和 r8taskqueue 共用，各自不再复制：
    不想等的唯一办法是并发搬对象，每次读指针都要经读屏障（Brooks 转发指针那一类），每次属性访问都要多付代价。**建议用安全点。**
 2. **`RefLock` 的替代**：字段级原子加 `AtomicValue`（建议），还是整对象读-拷贝-CAS（RCU：实现简单，但每次写都要拷贝整个 `ObjectData`）。
 3. **基础件放哪**：新开 crate `r8lockfree`（建议），还是放进 r8gc、由 r8taskqueue 依赖 r8gc。
+
+## 现状（2026-11-15）
+
+| 期 | 状态 | 提交 |
+|---|---|---|
+| P0 `r8lockfree` | 完成：`Fifo` / `SegVec` / `PushList`（可封口）/ `Deque`（Chase–Lev）/ `Stock`；多线程压力测试 + Miri 两种别名模型干净；r8taskqueue 已改用 | 19adef7、c15f6e0 |
+| P1 回收器去锁 | 完成：老年代页表 `SegVec`、空闲槽 / 空页 `Stock`、大对象 `SegVec`、工作窃取每工人一个 `Deque`（按批交接，一次原子操作搬 64 个指针）；r8gc 里没有锁了 | da2e6ac、3feb6ad |
+| P2 多 mutator | 完成：每线程 `Mutation`、`Tlab`、安全点闸门、`collect_*_shared(&self)`、动态根无锁、`Gc` / `R8Heap` 的 `Send` / `Sync`；`tests/threads.rs` | 805465a |
+| P3a 原子单元 | 完成：`Lock<T: Word>` 是一个字的原子单元（含 `compare_exchange`），`Lock<Option<Gc>>` 即原子指针槽 | 468b8d9 |
+| P3 `AtomicValue` | 完成：`Value: Word`（8 字节 NaN-boxing），`Lock<Value>` 即原子值槽 | 31b437d |
+| P3b 对象模型 | 未开始：要改 r8framework / r8builtins / r8executor 约 360 处 `borrow` / `borrow_mut` | — |
+| P4 执行器 | 未开始 | — |
+
+性能（`examples/bench` 首次 `collect_all`，去锁前 → 现在）：1 线程约 245 → 255 ms、4 线程 185 → 200 ms、8 线程 150 → 180 ms；
+后几次回收持平。差距在批缓冲的分配与回收器状态的整理上，留待专门优化。
+
+## P3b 分步（每步编译通过、test262 零回归）
+
+关键点：有了 GC，「写时复制 + CAS 换根」就是现成的无锁做法——旧版本没人引用了由回收器收走，节点不会在被引用时复用，没有 ABA。
+
+1. **Realm 里的容器**（`modules`、`symbol_registry`、`templates`、正则缓存、`jobs`）：换成 `PushList` / `SegVec` 或
+   `Lock<Option<Gc<不可变结构>>>` + CAS；`jobs` 接 r8taskqueue
+2. **环境**（`JsEnv = Gc<RefLock<Env>>`）：槽数在创建时就定了 ⇒ `Box<[Lock<Value>]>`，读写都是一次原子操作
+3. **对象的属性表**：形状指针、槽数组、原型都换成 `Lock` 槽；槽数组长大时整块换新（CAS）；特性位放进一个原子字；
+   Symbol 键 / 私有成员同样写时复制
+4. **`ObjectKind` 里会变的部分**：数组稠密元素（原子槽数组 + 原子长度，长大时整块换新）、Map / Set（持久化哈希
+   + CAS 换根）、Promise / 生成器 / Proxy 等的状态（原子状态字 + `Lock` 槽）
+5. **`Shape`**：`Rc` + `RefCell` 的迁移表 → `Arc` + 只追加的无锁迁移表
+6. **调用点**：r8builtins / r8executor 的访问改成 r8framework 上的方法（取属性、写属性、取原型……），
+   去掉直接借用 `ObjectData` 的写法；全部改完、`RefLock` 从 JS 对象里消失之后，堆才是 `Sync`，同一 realm 的 JS 才能并行

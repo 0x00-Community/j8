@@ -10,6 +10,8 @@ A generational, moving (compacting), parallel GC for Rust with a `'gc` brand lif
   work directly, and several `R8Heap`s can share one
 - Collection happens only outside `R8Heap::mutate`, when every `Gc` is reachable from the roots, so objects can move:
   besides `trace`, `Collect` has `relocate`
+- Lock-free throughout (no locks, not even spin locks): any number of threads may `mutate` one heap at once, and
+  collection waits at a safepoint gate until none is inside (see "Threads" below)
 
 The API follows the shape of [gc-arena](https://github.com/kyren/gc-arena) (`Gc` / `Lock` / `RefLock` / `Rootable!` /
 `DynamicRootSet`).
@@ -58,6 +60,21 @@ actually dropped in parallel with `R8Heap::set_parallel_drop(true)`. With glibc'
 contends for the original thread's arena lock, so parallel is actually slower; turn it on with an allocator like
 jemalloc / mimalloc.
 
+## Threads
+
+- The heap is plain memory, not tied to any thread: its state changes and growth are atomic and lock-free (the
+  lock-free building blocks are hand-written in the repository's `r8lockfree` crate)
+- `R8Heap` is `Sync` when its root is; a `Gc` is `Send` / `Sync` when its target is `Sync`. `Lock<T>` is an atomic
+  one-word cell (`T: Word`; `Lock<Option<Gc<_>>>` is an atomic pointer slot with `compare_exchange`), so it may be
+  shared; `RefLock<T>` is a single-threaded `RefCell` and keeps a heap single-threaded
+- Each mutating thread gets its own `Mutation`: it bump-allocates in its own buffer and records write-barrier hits
+  locally, handing them to the collector when it leaves `mutate`. `mutate_in(&mut tlab, …)` keeps a thread's
+  allocation buffer (`Tlab`) across calls; plain `mutate` borrows the heap's own buffer when it is free
+- Collection: `collect_debt` / `collect_all` through `&mut self` (exclusive by borrowing), or `collect_debt_shared` /
+  `collect_all_shared` through `&self`: the gate (an atomic word: a request bit plus the number of threads inside
+  `mutate`) makes new mutators wait and waits for the current ones to leave. Never call the shared ones from inside
+  `mutate`
+
 ## Features
 
 - `std` (on by default): yield the CPU while waiting. For `no_std` use `default-features = false` (it can only spin,
@@ -66,8 +83,9 @@ jemalloc / mimalloc.
 
 ## Tests
 
-Run `tests/gc.rs` one test at a time (`cargo test --test gc -- --exact <name>`); add `--features verify` to include
-heap verification.
+Run `tests/gc.rs` and `tests/threads.rs` one test at a time (`cargo test --test gc -- --exact <name>`); add
+`--features verify` to include heap verification. `tests/threads.rs` (several mutators while others collect) also runs
+under Miri at a reduced size.
 
 ## License
 
