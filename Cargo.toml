@@ -1,11 +1,18 @@
 [package]
-name = "r8"
+# crates.io 上 r8 已被占，包名 r8js、库名仍是 r8
+name = "r8js"
 description = "r8：Rust 重写的 V8。根包聚合导出：绑定宏 #[r8::class] / #[r8::object] / #[r8::function] 与它们要用的 trait、类型"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 # tests/ 下的 test262.rs 挂在 dune 包下，这里只认 binding
 autotests = false
+repository.workspace = true
+readme = "README.md"
+
+[lib]
+name = "r8"
+path = "src/lib.rs"
 
 [dependencies]
 r8framework.workspace = true
@@ -31,27 +38,28 @@ members = ["crates/*", "samples/*", "debugger"]
 exclude = ["samples/benchv8"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.2"
 edition = "2024"
 license = "MIT"
+repository = "https://github.com/0x00-Community/r8"
 
 [workspace.dependencies]
-r8framework = { path = "crates/r8framework" }
-r8platform = { path = "crates/r8platform" }
-r8builtins = { path = "crates/r8builtins" }
-r8virtasm = { path = "crates/r8virtasm", default-features = false }
-r8executor = { path = "crates/r8executor" }
-r8compiler = { path = "crates/r8compiler" }
-r8jit = { path = "crates/r8jit" }
+r8framework = { version = "0.1.2", path = "crates/r8framework" }
+r8platform = { version = "0.1.2", path = "crates/r8platform" }
+r8builtins = { version = "0.1.2", path = "crates/r8builtins" }
+r8virtasm = { version = "0.1.2", path = "crates/r8virtasm", default-features = false }
+r8executor = { version = "0.1.2", path = "crates/r8executor" }
+r8compiler = { version = "0.1.2", path = "crates/r8compiler" }
+r8jit = { version = "0.1.2", path = "crates/r8jit" }
 mlirpass = { version = "=0.10.4", default-features = false, features = ["target.x86_64"] }
 libc = "0.2"
-r8macros = { path = "crates/macros" }
-r8binding = { path = "crates/r8binding" }
-r8 = { path = "." }
+r8macros = { version = "0.1.2", path = "crates/macros" }
+r8binding = { version = "0.1.2", path = "crates/r8binding" }
+r8 = { version = "0.1.2", path = ".", package = "r8js" }
 clap = { version = "4.6", features = ["derive"] }
 moremath = { version = "=0.2.3", default-features = false }
 libm = "0.2"
-r8gc = { path = "crates/r8gc", default-features = false }
+r8gc = { version = "0.1.2", path = "crates/r8gc", default-features = false }
 smol_str = { version = "0.3", default-features = false }
 hashbrown = { version = "0.17", default-features = false }
 rustc-hash = { version = "2", default-features = false }

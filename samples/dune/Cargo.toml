@@ -4,6 +4,9 @@ description = "dune：r8 的 JavaScript 运行时命令行（对标 node / deno�
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+# crates.io 上同名包已被别人占
+publish = false
 
 [[bin]]
 name = "dune"

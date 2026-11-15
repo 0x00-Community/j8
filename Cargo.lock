@@ -169,14 +169,14 @@ dependencies = [
 
 [[package]]
 name = "dune"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "clap",
- "r8",
  "r8builtins",
  "r8executor",
  "r8framework",
  "r8jit",
+ "r8js",
  "r8platform",
  "serde",
  "serde_yaml",
@@ -788,20 +788,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "r8"
-version = "0.1.0"
-dependencies = [
- "r8binding",
- "r8builtins",
- "r8executor",
- "r8framework",
- "r8macros",
- "r8platform",
-]
-
-[[package]]
 name = "r8binding"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "r8framework",
  "r8gc",
@@ -809,7 +797,7 @@ dependencies = [
 
 [[package]]
 name = "r8builtins"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "libm",
  "num-bigint 0.4.8",
@@ -823,7 +811,7 @@ dependencies = [
 
 [[package]]
 name = "r8compiler"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "mlirpass",
  "r8framework",
@@ -832,7 +820,7 @@ dependencies = [
 
 [[package]]
 name = "r8debugger"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "clap",
  "r8framework",
@@ -841,7 +829,7 @@ dependencies = [
 
 [[package]]
 name = "r8executor"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "r8builtins",
  "r8framework",
@@ -853,7 +841,7 @@ dependencies = [
 
 [[package]]
 name = "r8framework"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "hashbrown",
  "libm",
@@ -867,7 +855,7 @@ dependencies = [
 
 [[package]]
 name = "r8gc"
-version = "0.0.0"
+version = "0.1.2"
 dependencies = [
  "moremath",
  "r8gc-macros",
@@ -875,7 +863,7 @@ dependencies = [
 
 [[package]]
 name = "r8gc-macros"
-version = "0.0.0"
+version = "0.1.2"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -885,7 +873,7 @@ dependencies = [
 
 [[package]]
 name = "r8jit"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "libc",
  "r8compiler",
@@ -895,8 +883,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "r8js"
+version = "0.1.2"
+dependencies = [
+ "r8binding",
+ "r8builtins",
+ "r8executor",
+ "r8framework",
+ "r8macros",
+ "r8platform",
+]
+
+[[package]]
 name = "r8macros"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -907,7 +907,7 @@ dependencies = [
 
 [[package]]
 name = "r8platform"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "moremath",
  "r8framework",
@@ -916,14 +916,14 @@ dependencies = [
 
 [[package]]
 name = "r8taskqueue"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "moremath",
 ]
 
 [[package]]
 name = "r8virtasm"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "oxc_allocator",
  "oxc_ast",
@@ -1252,13 +1252,13 @@ dependencies = [
 
 [[package]]
 name = "workerd"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "clap",
- "r8",
  "r8builtins",
  "r8executor",
  "r8framework",
+ "r8js",
  "r8platform",
 ]
 

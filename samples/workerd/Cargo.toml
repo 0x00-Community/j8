@@ -4,6 +4,9 @@ description = "workerd：用 r8 加载 Cloudflare Worker（ES 模块 + Durable O
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+# crates.io 上同名包已被别人占
+publish = false
 
 [[bin]]
 name = "workerd"

@@ -4,6 +4,7 @@ description = "r8 的 Rust ⇄ JS 绑定：类型转换、宿主对象、把 Rus
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 
 [dependencies]
 r8framework.workspace = true

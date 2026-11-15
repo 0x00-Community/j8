@@ -4,6 +4,7 @@ description = "r8 调试工具：r8dbg 命令行"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 
 [[bin]]
 name = "r8dbg"

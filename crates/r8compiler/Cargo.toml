@@ -4,6 +4,7 @@ description = "r8 编译器：字节码 ⇒ MLIR（llvm 方言）⇒ mlirpass �
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 
 [dependencies]
 r8framework.workspace = true

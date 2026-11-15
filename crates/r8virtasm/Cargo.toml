@@ -4,6 +4,7 @@ description = "r8 虚拟指令集：字节码定义、JavaScript ⇒ 字节码"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 
 [dependencies]
 r8framework.workspace = true

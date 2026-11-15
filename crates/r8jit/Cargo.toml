@@ -4,6 +4,7 @@ description = "r8 JIT：挑热点函数交给 r8compiler、装载机器码、替
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 
 [dependencies]
 r8framework.workspace = true
