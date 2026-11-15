@@ -82,11 +82,70 @@ pub(crate) trait Worker: Send {
     fn process(&mut self, p: Ptr) -> usize;
 }
 
-/// Work stealing: each worker has a private stack; when it grows large, half is moved into the worker's own
-/// Chase–Lev deque, which idle workers steal from. Finishes when every started worker is idle. Lock-free.
+/// A batch of objects moved between workers as one deque element: a `Box<Vec<Ptr>>` held as its address.
+/// Whoever pushes it gives up the box; whoever pops or steals it takes the box back.
+#[derive(Clone, Copy)]
+struct Batch(usize);
+
+impl From<usize> for Batch {
+    fn from(addr: usize) -> Self {
+        Self(addr)
+    }
+}
+
+impl From<Batch> for usize {
+    fn from(b: Batch) -> Self {
+        b.0
+    }
+}
+
+impl From<Box<Vec<Ptr>>> for Batch {
+    fn from(v: Box<Vec<Ptr>>) -> Self {
+        Self(Box::into_raw(v) as usize)
+    }
+}
+
+impl From<Batch> for Box<Vec<Ptr>> {
+    fn from(b: Batch) -> Self {
+        // SAFETY: the address came from `Batch::from(Box)`, and each batch is popped or stolen exactly once
+        unsafe { Box::from_raw(b.0 as *mut Vec<Ptr>) }
+    }
+}
+
+/// A worker's emptied batch buffers, reused for its next shares (they migrate between workers with the batches;
+/// each worker keeps whatever it emptied, so no shared pool is needed).
+#[derive(Default)]
+// The boxes are the batch handles that travel through the deques; unboxing them would cost an allocation per batch
+#[allow(clippy::vec_box)]
+struct Spares(Vec<Box<Vec<Ptr>>>);
+
+impl Spares {
+    /// Most buffers a worker keeps
+    const KEEP: usize = 8;
+
+    /// A batch holding `items` (reusing a spare buffer when there is one)
+    fn fill(&mut self, items: impl Iterator<Item = Ptr>) -> Batch {
+        let mut b = self.0.pop().unwrap_or_default();
+        b.extend(items);
+        Batch::from(b)
+    }
+
+    /// Empties `batch` onto `stack` and keeps its buffer
+    fn drain(&mut self, batch: Batch, stack: &mut Vec<Ptr>) {
+        let mut b = Box::<Vec<Ptr>>::from(batch);
+        stack.append(&mut b);
+        if self.0.len() < Self::KEEP {
+            self.0.push(b);
+        }
+    }
+}
+
+/// Work stealing: each worker has a private stack; when it grows large, a batch of it is pushed into the worker's
+/// own Chase–Lev deque, which idle workers steal batches from. Finishes when every started worker is idle.
+/// Lock-free; one atomic hand-off moves a whole batch.
 pub(crate) struct Work {
-    deques: Vec<Deque<Ptr>>,
-    /// Objects in the deques, counted before they go in and after they come out (never undercounts)
+    deques: Vec<Deque<Batch>>,
+    /// Batches in the deques, counted before they go in and after they come out (never undercounts)
     pending: AtomicUsize,
     /// Workers that started (when the pool is busy some start late, even after the others have finished)
     started: AtomicUsize,
@@ -94,7 +153,7 @@ pub(crate) struct Work {
 }
 
 impl Work {
-    /// Only share once the private stack exceeds this; also how many a refill takes at most
+    /// Objects per batch; the private stack shares once it holds more than two batches
     const SHARE: usize = 64;
     /// The calling thread works alone on this many objects first: little work doesn't wake the pool
     const SOLO: usize = 4096;
@@ -120,17 +179,19 @@ impl Work {
         if initial.is_empty() {
             return initial;
         }
-        let work = Self { deques: workers.iter().map(|_| Deque::default()).collect(), pending: AtomicUsize::new(initial.len()), started: AtomicUsize::new(0), idle: AtomicUsize::new(0) };
-        // Everything left goes into the first deque: not pre-assigned to workers that may start late
+        let work = Self { deques: workers.iter().map(|_| Deque::default()).collect(), pending: AtomicUsize::new(0), started: AtomicUsize::new(0), idle: AtomicUsize::new(0) };
+        // Everything left goes into the first deque in batches: not pre-assigned to workers that may start late
         let owner = work.deques[0].owner().expect("fresh deque");
-        for p in initial {
-            owner.push(p);
+        let mut spares = Spares::default();
+        for chunk in initial.chunks(Self::SHARE) {
+            work.pending.fetch_add(1, Ordering::SeqCst);
+            owner.push(spares.fill(chunk.iter().copied()));
         }
         drop(owner);
         let work = &work;
         let jobs: Vec<Job<'_>> = workers.iter_mut().enumerate().map(|(me, w)| Box::new(move || work.drive(me, w, budget)) as Job<'_>).collect();
         pool.run(jobs);
-        let mut left: Vec<Ptr> = work.deques.iter().flat_map(|d| core::iter::from_fn(|| d.steal())).collect();
+        let mut left: Vec<Ptr> = work.deques.iter().flat_map(|d| core::iter::from_fn(|| d.steal())).flat_map(|b| *Box::<Vec<Ptr>>::from(b)).collect();
         for w in workers.iter_mut() {
             left.append(w.stack());
         }
@@ -139,6 +200,7 @@ impl Work {
 
     fn drive<W: Worker>(&self, me: usize, w: &mut W, mut budget: Option<usize>) {
         let owner = self.deques[me].owner().expect("one owner per deque");
+        let mut spares = Spares::default();
         self.started.fetch_add(1, Ordering::SeqCst);
         loop {
             while let Some(p) = w.stack().pop() {
@@ -151,9 +213,9 @@ impl Work {
                         return;
                     }
                 }
-                self.share(&owner, w.stack());
+                self.share(&owner, &mut spares, w.stack());
             }
-            if self.refill(me, &owner, w.stack()) {
+            if self.refill(me, &owner, &mut spares, w.stack()) {
                 continue;
             }
             self.idle.fetch_add(1, Ordering::SeqCst);
@@ -163,7 +225,9 @@ impl Work {
                     // Retire: stays counted as idle; its deque is empty (it found nothing), others carry on
                     return;
                 }
-                if self.pending.load(Ordering::SeqCst) > 0 {
+                // Steal while still counted idle and leave idle only with work in hand: a failed steal (several
+                // thieves on one victim) backs off instead of churning the shared counters
+                if self.pending.load(Ordering::SeqCst) > 0 && self.refill(me, &owner, &mut spares, w.stack()) {
                     self.idle.fetch_sub(1, Ordering::SeqCst);
                     break;
                 }
@@ -176,32 +240,23 @@ impl Work {
         }
     }
 
-    /// The private stack grew large while little is shared: move half into our deque
-    fn share(&self, owner: &Owner<'_, Ptr>, stack: &mut Vec<Ptr>) {
-        if stack.len() > 2 * Self::SHARE && self.pending.load(Ordering::Relaxed) < self.deques.len() * Self::SHARE {
-            let n = stack.len() / 2;
-            self.pending.fetch_add(n, Ordering::SeqCst);
-            stack.drain(..n).for_each(|p| owner.push(p));
+    /// The private stack holds more than two batches while little is shared: push the oldest batch to our deque
+    fn share(&self, owner: &Owner<'_, Batch>, spares: &mut Spares, stack: &mut Vec<Ptr>) {
+        if stack.len() > 2 * Self::SHARE && self.pending.load(Ordering::Relaxed) < self.deques.len() {
+            self.pending.fetch_add(1, Ordering::SeqCst);
+            owner.push(spares.fill(stack.drain(..Self::SHARE)));
         }
     }
 
-    /// Takes up to `SHARE` objects: from our own deque first, then stealing from the others
-    fn refill(&self, me: usize, owner: &Owner<'_, Ptr>, stack: &mut Vec<Ptr>) -> bool {
+    /// Takes one batch: from our own deque first, then stealing from the others
+    fn refill(&self, me: usize, owner: &Owner<'_, Batch>, spares: &mut Spares, stack: &mut Vec<Ptr>) -> bool {
         if self.pending.load(Ordering::SeqCst) == 0 {
             return false;
         }
-        let before = stack.len();
-        stack.extend(core::iter::from_fn(|| owner.pop()).take(Self::SHARE));
         let n = self.deques.len();
-        for k in 1..n {
-            if stack.len() > before {
-                break;
-            }
-            let d = &self.deques[(me + k) % n];
-            stack.extend(core::iter::from_fn(|| d.steal()).take(Self::SHARE));
-        }
-        let got = stack.len() - before;
-        self.pending.fetch_sub(got, Ordering::SeqCst);
-        got > 0
+        let Some(batch) = owner.pop().or_else(|| (1..n).find_map(|k| self.deques[(me + k) % n].steal())) else { return false };
+        self.pending.fetch_sub(1, Ordering::SeqCst);
+        spares.drain(batch, stack);
+        true
     }
 }
