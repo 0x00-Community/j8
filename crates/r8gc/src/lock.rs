@@ -111,6 +111,11 @@ impl<T: Word> Lock<T> {
     pub fn set_mut(&mut self, t: T) {
         *self.word.get_mut() = t.into_word();
     }
+
+    /// Compare-and-swap without the barrier: the caller has run the barrier on the object that owns this cell
+    pub(crate) fn cas_raw(&self, current: T, new: T) -> Result<T, T> {
+        self.word.compare_exchange(current.into_word(), new.into_word(), Ordering::AcqRel, Ordering::Acquire).map(T::from_word).map_err(T::from_word)
+    }
 }
 
 impl<T: Word + Default> Default for Lock<T> {

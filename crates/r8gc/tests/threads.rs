@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread;
 
 use moremath::ThreadMulti;
-use r8gc::{Collect, DynamicRoot, DynamicRootSet, Gc, Lock, R8Heap, Rootable, Tlab};
+use r8gc::{Collect, CowLock, DynamicRoot, DynamicRootSet, Gc, GcQueue, Lock, R8Heap, Rootable, Tlab};
 
 /// Mutating threads
 const THREADS: usize = if cfg!(miri) { 2 } else { 4 };
@@ -219,4 +219,61 @@ fn atomic_cells_shared_across_threads() {
     let n = THREADS * EACH;
     let (count, total) = heap.mutate(|_, root| root.top.get().map_or((0, 0), walk));
     assert_eq!((count, total), (n, n * (n - 1) / 2));
+}
+
+#[derive(Collect)]
+#[collect(no_drop)]
+struct Containers<'gc> {
+    queue: Gc<'gc, GcQueue<'gc, usize>>,
+    counter: Gc<'gc, CowLock<'gc, usize>>,
+}
+
+/// Threads push to and pop from one in-heap queue and bump one copy-on-write counter while others collect: every
+/// pushed value is popped exactly once, no update is lost.
+#[test]
+fn gc_queue_and_cow_lock_across_threads() {
+    /// Values each thread pushes
+    const EACH: usize = if cfg!(miri) { 4 } else { 4_000 };
+    let pool = ThreadMulti::from(POOL);
+    let heap: R8Heap<'_, Rootable![Containers<'_>]> = R8Heap::new(&pool, |mc| Containers { queue: Gc::new(mc, GcQueue::new(mc)), counter: Gc::new(mc, CowLock::new(mc, 0)) });
+    let heap = &heap;
+    let seen: Vec<AtomicUsize> = (0..THREADS * EACH).map(|_| AtomicUsize::new(0)).collect();
+    let popped = AtomicUsize::new(0);
+    thread::scope(|s| {
+        for t in 0..THREADS {
+            s.spawn(move || {
+                let mut tlab = Tlab::default();
+                for i in 0..EACH {
+                    heap.mutate_in(&mut tlab, |mc, root| {
+                        root.queue.push(mc, t * EACH + i);
+                        root.counter.update(mc, |n| n + 1);
+                    });
+                    if i % COLLECT_EVERY == 0 {
+                        heap.collect_debt_shared();
+                    }
+                }
+            });
+        }
+        for _ in 0..THREADS {
+            s.spawn(|| {
+                let mut tlab = Tlab::default();
+                while popped.load(Ordering::Acquire) < THREADS * EACH {
+                    if let Some(v) = heap.mutate_in(&mut tlab, |mc, root| root.queue.pop(mc)) {
+                        seen[v].fetch_add(1, Ordering::Relaxed);
+                        popped.fetch_add(1, Ordering::AcqRel);
+                    } else {
+                        thread::yield_now();
+                    }
+                }
+            });
+        }
+        s.spawn(|| {
+            for _ in 0..if cfg!(miri) { 0 } else { 10 } {
+                heap.collect_all_shared();
+                thread::yield_now();
+            }
+        });
+    });
+    assert!(seen.iter().all(|c| c.load(Ordering::Relaxed) == 1));
+    assert_eq!(heap.mutate(|_, root| (root.queue.is_empty(), *root.counter.get())), (true, THREADS * EACH));
 }
