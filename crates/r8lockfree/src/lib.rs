@@ -3,6 +3,7 @@
 //! - [`Fifo`]：多生产者多消费者先进先出队列（位置单调递增、分段槽表）
 //! - [`SegVec`]：只追加的分段向量，下标稳定、可并发读；整理与取出要独占
 //! - [`PushList`]：只压入的 Treiber 栈，整表取走或封口（封口后压入被退回）
+//! - [`Stock`]：库存，独占时整理成只读数组、并发时原子游标成批领取，还回来的下次独占时并回
 //! - [`Deque`]：Chase–Lev 工作窃取双端队列，主人凭据 [`Owner`] 压 / 弹，别人偷
 //!
 //! 共同的做法：并发期间只增加内存、不释放（段、旧缓冲），释放推迟到独占（`&mut` / 析构）时，
@@ -15,8 +16,10 @@ mod fifo;
 mod pushlist;
 mod segments;
 mod segvec;
+mod stock;
 
 pub use deque::{Deque, Owner};
 pub use fifo::Fifo;
 pub use pushlist::{Drain, PushList};
 pub use segvec::SegVec;
+pub use stock::Stock;

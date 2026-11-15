@@ -3,9 +3,12 @@
 use alloc::alloc::{Layout, alloc, dealloc, handle_alloc_error};
 use alloc::vec::Vec;
 use core::ptr::NonNull;
+use core::sync::atomic::{AtomicUsize, Ordering};
+
+use r8lockfree::{SegVec, Stock};
 
 use crate::header::{Flags, HEADER, Ptr, SizeClass, VTable};
-use crate::parallel::{Pool, Spin, split};
+use crate::parallel::{Pool, split};
 
 /// Size of one young-generation block
 pub(crate) const CHUNK: usize = 256 << 10;
@@ -98,8 +101,11 @@ struct Page {
     evacuate: bool,
 }
 
-// SAFETY: the page is the sole owner of this memory
+// SAFETY: the page is the sole owner of this memory; it is only read concurrently (pushed into the page table),
+// changed only while the old generation is held exclusively
 unsafe impl Send for Page {}
+// SAFETY: see above
+unsafe impl Sync for Page {}
 
 impl Page {
     const LAYOUT: Layout = match Layout::from_size_align(PAGE, PAGE) {
@@ -157,82 +163,93 @@ struct Large {
     ptr: Ptr,
 }
 
-/// The old generation.
-pub(crate) struct OldSpace {
-    pages: Vec<Page>,
-    /// Emptied pages kept for reuse
-    spare: Vec<NonNull<u8>>,
-    /// Free slots per size class
-    free: [Vec<Ptr>; SizeClass::LARGE],
-    large: Vec<Large>,
-    /// Bytes occupied (live slots + large objects)
-    pub(crate) bytes: usize,
-}
+// SAFETY: the record is the sole owner of this allocation; changed only while the old generation is held exclusively
+unsafe impl Send for Large {}
+// SAFETY: see above
+unsafe impl Sync for Large {}
 
-// SAFETY: it owns the memory of the pages and large objects; protected by a spin lock during collection
-unsafe impl Send for OldSpace {}
+/// The base address of an empty page kept for reuse.
+#[derive(Clone, Copy)]
+struct Base(NonNull<u8>);
+
+// SAFETY: just an address; the page behind it belongs to whoever claims it from the stock
+unsafe impl Send for Base {}
+// SAFETY: see above
+unsafe impl Sync for Base {}
+
+/// The old generation. Lock-free: during collection several workers open pages, claim free slots, hand back
+/// unused ones and allocate large objects at once (all atomic); sweeping, compaction and settling happen while it
+/// is held exclusively.
+pub(crate) struct OldSpace {
+    pages: SegVec<Page>,
+    /// Emptied pages kept for reuse
+    spare: Stock<Base>,
+    /// Free slots per size class
+    free: [Stock<Ptr>; SizeClass::LARGE],
+    large: SegVec<Large>,
+    /// Bytes occupied (live slots + large objects)
+    bytes: AtomicUsize,
+}
 
 impl Default for OldSpace {
     fn default() -> Self {
-        Self { pages: Vec::new(), spare: Vec::new(), free: core::array::from_fn(|_| Vec::new()), large: Vec::new(), bytes: 0 }
+        Self { pages: SegVec::default(), spare: Stock::default(), free: core::array::from_fn(|_| Stock::default()), large: SegVec::default(), bytes: AtomicUsize::new(0) }
     }
 }
 
 impl OldSpace {
-    /// Takes up to `n` free slots of class `class` into `out` (opens a page if there are none, preferring kept empty
-    /// pages)
-    pub(crate) fn take(&mut self, class: usize, n: usize, out: &mut Vec<Ptr>) {
-        if self.free[class].is_empty() {
-            let base = self.new_page(class);
-            let free = &mut self.free[class];
-            free.extend(Page { base, class, live: 0, evacuate: false }.slots().inspect(|p| p.header().free()));
-        }
-        let free = &mut self.free[class];
-        out.extend(free.drain(free.len().saturating_sub(n)..));
+    /// Bytes occupied (live slots + large objects)
+    pub(crate) fn bytes(&self) -> usize {
+        self.bytes.load(Ordering::Acquire)
+    }
+
+    /// Exclusively: slots and pages handed back during the last parallel phase become claimable again
+    pub(crate) fn settle(&mut self) {
+        self.free.iter_mut().for_each(Stock::settle);
+        self.spare.settle();
     }
 
     /// Opens a page (preferring kept empty pages) and registers it; slot headers are written by whoever takes them
-    fn new_page(&mut self, class: usize) -> NonNull<u8> {
-        let base = self.spare.pop().unwrap_or_else(|| raw(Page::LAYOUT));
+    fn new_page(&self, class: usize) -> NonNull<u8> {
+        let base = self.spare.claim_one().map_or_else(|| raw(Page::LAYOUT), |b| b.0);
         self.pages.push(Page { base, class, live: 0, evacuate: false });
         base
     }
 
-    /// For a promotion buffer: takes a batch from the free list if available, otherwise hands it a whole page
+    /// For a promotion buffer: claims a batch of free slots if any are left, otherwise hands it a whole page
     /// (returning the page's `[start, end)`)
-    fn refill(&mut self, class: usize, out: &mut Vec<Ptr>) -> Option<(usize, usize)> {
-        if self.free[class].is_empty() {
-            let start = self.new_page(class).as_ptr() as usize;
-            let slot = SizeClass::SLOTS[class];
-            return Some((start, start + PAGE / slot * slot));
+    fn refill(&self, class: usize, out: &mut Vec<Ptr>) -> Option<(usize, usize)> {
+        if self.free[class].claim(LAB_SLOTS, out) > 0 {
+            return None;
         }
-        self.take(class, LAB_SLOTS, out);
-        None
+        let start = self.new_page(class).as_ptr() as usize;
+        let slot = SizeClass::SLOTS[class];
+        Some((start, start + PAGE / slot * slot))
     }
 
     /// Empty pages are kept for reuse and returned to the system only when there are too many
     fn retire(&mut self, base: NonNull<u8>) {
         if self.spare.len() < SPARE_MIN.max(self.pages.len() / SPARE_RATIO) {
-            self.spare.push(base);
+            self.spare.push(Base(base));
         } else {
             // SAFETY: allocated with Page::LAYOUT, and no live objects remain in it
             unsafe { dealloc(base.as_ptr(), Page::LAYOUT) }
         }
     }
 
-    /// Returns unused free slots
-    pub(crate) fn give(&mut self, class: usize, slots: &mut Vec<Ptr>) {
-        self.free[class].append(slots);
+    /// Hands back unused free slots (claimable again after the next settle)
+    fn give(&self, class: usize, slots: Vec<Ptr>) {
+        self.free[class].give(slots);
     }
 
     /// Allocates a large object (header not written)
-    pub(crate) fn alloc_large(&mut self, vt: &VTable) -> Ptr {
+    pub(crate) fn alloc_large(&self, vt: &VTable) -> Ptr {
         let offset = vt.align.max(HEADER);
         let layout = Layout::from_size_align(offset + vt.size, offset).expect("large object layout");
         let base = raw(layout);
         // SAFETY: offset < layout.size()
         let ptr = Ptr::from(unsafe { base.add(offset) });
-        self.bytes += layout.size();
+        self.bytes.fetch_add(layout.size(), Ordering::AcqRel);
         self.large.push(Large { base, layout, ptr });
         ptr
     }
@@ -241,11 +258,12 @@ impl OldSpace {
     /// thread; empty pages go back to the allocator. Returns the live bytes
     pub(crate) fn sweep(&mut self, pool: &dyn Pool, epoch: bool, parallel_drop: bool) -> usize {
         let marked = move |f: u32| (f & Flags::MARK != 0) == epoch;
-        let swept = split(pool, &mut self.pages, &|pages: &mut [Page]| pages.iter_mut().map(|p| p.sweep(marked, parallel_drop)).collect::<Vec<_>>());
-        self.free.iter_mut().for_each(Vec::clear);
+        let mut pages = self.pages.take();
+        let swept = split(pool, &mut pages, &|pages: &mut [Page]| pages.iter_mut().map(|p| p.sweep(marked, parallel_drop)).collect::<Vec<_>>());
+        self.free.iter_mut().for_each(Stock::clear);
+        self.spare.settle();
         let mut bytes = 0;
-        let mut kept = Vec::with_capacity(self.pages.len());
-        let pages = core::mem::take(&mut self.pages);
+        let mut kept = Vec::with_capacity(pages.len());
         for (page, (mut free, dead)) in pages.into_iter().zip(swept.into_iter().flatten()) {
             for p in dead {
                 // SAFETY: unmarked ⇒ unreachable, dropped only this once; the value's type may not be droppable
@@ -259,37 +277,38 @@ impl OldSpace {
                 continue;
             }
             bytes += page.live * page.slot();
-            self.free[page.class].append(&mut free);
+            self.free[page.class].extend(free);
             kept.push(page);
         }
-        self.pages = kept;
-        self.large.retain(|l| {
+        self.pages.extend(kept);
+        let large = self.large.take();
+        for l in large {
             if marked(l.ptr.header().flags()) {
                 bytes += l.layout.size();
-                return true;
+                self.large.push(l);
+                continue;
             }
-            // SAFETY: unreachable; dropped once, then freed
+            // SAFETY: unreachable; dropped once and then deallocated
             unsafe {
                 l.ptr.drop_value();
                 dealloc(l.base.as_ptr(), l.layout);
             }
-            false
-        });
-        self.bytes = bytes;
+        }
+        *self.bytes.get_mut() = bytes;
         bytes
     }
 
-    /// Selects the sparse pages to evacuate (only when worthwhile) and removes their free slots from the free lists.
-    /// Returns the objects to move and their size classes
+    /// Picks the sparse pages to evacuate (only if worthwhile) and removes their free slots from the free lists.
+    /// Returns the objects to move along with their size classes
     pub(crate) fn select_evacuation(&mut self) -> Vec<(Ptr, usize)> {
         let mut reclaim = 0;
-        for p in &mut self.pages {
+        for p in self.pages.iter_mut() {
             if p.live * p.slot() * SPARSE < PAGE {
                 p.evacuate = true;
                 reclaim += PAGE - p.live * p.slot();
             }
         }
-        if reclaim < COMPACT_MIN.max(self.bytes / COMPACT_FRACTION) {
+        if reclaim < COMPACT_MIN.max(*self.bytes.get_mut() / COMPACT_FRACTION) {
             self.pages.iter_mut().for_each(|p| p.evacuate = false);
             return Vec::new();
         }
@@ -298,19 +317,18 @@ impl OldSpace {
         for free in &mut self.free {
             free.retain(|s| evacuating.binary_search(&(s.addr() & !(PAGE - 1))).is_err());
         }
-        let pages = &self.pages;
-        pages.iter().filter(|p| p.evacuate).flat_map(|p| p.slots().map(move |s| (s, p.class))).filter(|(s, _)| s.header().flags() & Flags::FREE == 0).collect()
+        self.pages.iter().filter(|p| p.evacuate).flat_map(|p| p.slots().map(move |s| (s, p.class))).filter(|(s, _)| s.header().flags() & Flags::FREE == 0).collect()
     }
 
-    /// Frees the evacuated pages
+    /// Returns the evacuated pages
     pub(crate) fn release_evacuated(&mut self, moved_bytes: usize) {
-        let (gone, kept): (Vec<Page>, Vec<Page>) = core::mem::take(&mut self.pages).into_iter().partition(|p| p.evacuate);
-        self.pages = kept;
+        let (gone, kept): (Vec<Page>, Vec<Page>) = self.pages.take().into_iter().partition(|p| p.evacuate);
+        self.pages.extend(kept);
         for p in gone {
             self.retire(p.base);
         }
-        // The new slots moved into were already counted once through the promotion buffer
-        self.bytes -= moved_bytes;
+        // The new slots moved into were already counted once by the promotion buffer
+        *self.bytes.get_mut() -= moved_bytes;
     }
 
     /// Every live object in the old generation (excluding pages being evacuated)
@@ -340,31 +358,31 @@ impl Drop for OldSpace {
             // SAFETY: the whole heap is being torn down; each object is dropped once
             unsafe { p.drop_value() }
         }
-        for base in self.pages.drain(..).map(|p| p.base).chain(self.spare.drain(..)) {
+        for base in self.pages.take().into_iter().map(|p| p.base).chain(self.spare.take().into_iter().map(|b| b.0)) {
             // SAFETY: allocated with Page::LAYOUT
             unsafe { dealloc(base.as_ptr(), Page::LAYOUT) }
         }
-        for l in self.large.drain(..) {
+        for l in self.large.take() {
             // SAFETY: allocated with l.layout
             unsafe { dealloc(l.base.as_ptr(), l.layout) }
         }
     }
 }
 
-/// Promotion buffer: free slots a worker uses when placing objects into the old generation, taken from the old
-/// generation in batches so that not every slot requires the lock.
+/// Promotion buffer: free slots a worker uses when placing objects into the old generation, claimed from the old
+/// generation in batches (or a whole page to bump through), so most slots cost no atomic operation at all.
 pub(crate) struct Lab<'a> {
-    old: &'a Spin<OldSpace>,
-    /// Slots taken from the free lists, per size class
+    old: &'a OldSpace,
+    /// Slots claimed from the free lists, per class
     slots: [Vec<Ptr>; SizeClass::LARGE],
-    /// Unused `[cursor, end)` of the whole page owned exclusively, per size class
+    /// Unused `[cursor, end)` of the page each class owns exclusively
     bump: [(usize, usize); SizeClass::LARGE],
     /// Bytes of the slots used
     pub(crate) bytes: usize,
 }
 
 impl<'a> Lab<'a> {
-    pub(crate) fn new(old: &'a Spin<OldSpace>) -> Self {
+    pub(crate) fn new(old: &'a OldSpace) -> Self {
         Self { old, slots: core::array::from_fn(|_| Vec::new()), bump: [(0, 0); SizeClass::LARGE], bytes: 0 }
     }
 
@@ -381,7 +399,7 @@ impl<'a> Lab<'a> {
                 self.bump[class].0 = at + size;
                 return Ptr::at_slot(NonNull::new(at as *mut u8).expect("page slot"));
             }
-            if let Some(page) = self.old.lock().refill(class, &mut self.slots[class]) {
+            if let Some(page) = self.old.refill(class, &mut self.slots[class]) {
                 self.bump[class] = page;
             }
         }
@@ -389,18 +407,17 @@ impl<'a> Lab<'a> {
 }
 
 impl Drop for Lab<'_> {
-    /// Marks unused slots in the owned pages as free and returns them along with other unused slots; used ones are
-    /// accounted to the old generation
+    /// Unused slots in owned pages are marked free and handed back together with the unused claimed ones; the
+    /// used bytes are added to the old generation
     fn drop(&mut self) {
         for (class, &(at, end)) in self.bump.iter().enumerate() {
             let size = SizeClass::SLOTS[class];
             self.slots[class]
                 .extend((at..end).step_by(size).map(|a| Ptr::at_slot(NonNull::new(a as *mut u8).expect("page slot"))).inspect(|p| p.header().free()));
         }
-        let mut old = self.old.lock();
         for (class, slots) in self.slots.iter_mut().enumerate() {
-            old.give(class, slots);
+            self.old.give(class, core::mem::take(slots));
         }
-        old.bytes += self.bytes;
+        self.old.bytes.fetch_add(self.bytes, Ordering::AcqRel);
     }
 }

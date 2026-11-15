@@ -1,13 +1,12 @@
-//! Parallelism: the thread pool interface (any moremath `Executor` qualifies), a spin lock, and the work-stealing
-//! driver.
+//! Parallelism: the thread pool interface (any moremath `Executor` qualifies), backoff, and the lock-free
+//! work-stealing driver.
 use alloc::boxed::Box;
 use alloc::vec::Vec;
-use core::cell::UnsafeCell;
 use core::hint::spin_loop;
-use core::ops::{Deref, DerefMut};
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use moremath::Executor;
+use r8lockfree::{Deque, Owner};
 
 use crate::header::Ptr;
 
@@ -56,64 +55,6 @@ impl Backoff {
     }
 }
 
-/// A spin lock for very short critical sections (`no_std`).
-pub(crate) struct Spin<T> {
-    locked: AtomicBool,
-    value: UnsafeCell<T>,
-}
-
-// SAFETY: only the thread holding the lock touches value at any time
-unsafe impl<T: Send> Sync for Spin<T> {}
-unsafe impl<T: Send> Send for Spin<T> {}
-
-impl<T: Default> Default for Spin<T> {
-    fn default() -> Self {
-        Self::new(T::default())
-    }
-}
-
-impl<T> Spin<T> {
-    pub(crate) fn new(value: T) -> Self {
-        Self { locked: AtomicBool::new(false), value: UnsafeCell::new(value) }
-    }
-
-    pub(crate) fn lock(&self) -> SpinGuard<'_, T> {
-        let mut backoff = Backoff::default();
-        while self.locked.compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
-            backoff.wait();
-        }
-        SpinGuard(self)
-    }
-
-    pub(crate) fn get_mut(&mut self) -> &mut T {
-        self.value.get_mut()
-    }
-}
-
-pub(crate) struct SpinGuard<'a, T>(&'a Spin<T>);
-
-impl<T> Deref for SpinGuard<'_, T> {
-    type Target = T;
-
-    fn deref(&self) -> &T {
-        // SAFETY: the lock is held
-        unsafe { &*self.0.value.get() }
-    }
-}
-
-impl<T> DerefMut for SpinGuard<'_, T> {
-    fn deref_mut(&mut self) -> &mut T {
-        // SAFETY: the lock is held
-        unsafe { &mut *self.0.value.get() }
-    }
-}
-
-impl<T> Drop for SpinGuard<'_, T> {
-    fn drop(&mut self) {
-        self.0.locked.store(false, Ordering::Release);
-    }
-}
-
 /// Splits `items` into chunks processed in parallel; results are returned in chunk order.
 pub(crate) fn split<T: Send, R: Send>(pool: &dyn Pool, items: &mut [T], f: &(dyn Fn(&mut [T]) -> R + Sync)) -> Vec<R> {
     /// Chunks per thread (smaller chunks let threads that finish early take more, balancing the load)
@@ -141,29 +82,27 @@ pub(crate) trait Worker: Send {
     fn process(&mut self, p: Ptr) -> usize;
 }
 
-/// Work stealing: each worker has a local stack; when it grows large, half is moved to the shared stack, and an
-/// empty worker takes from the shared stack. Finishes when every worker is idle.
+/// Work stealing: each worker has a private stack; when it grows large, half is moved into the worker's own
+/// Chase–Lev deque, which idle workers steal from. Finishes when every started worker is idle. Lock-free.
 pub(crate) struct Work {
-    shared: Spin<Vec<Ptr>>,
-    /// Number of items in the shared stack (readable without taking the lock)
+    deques: Vec<Deque<Ptr>>,
+    /// Objects in the deques, counted before they go in and after they come out (never undercounts)
     pending: AtomicUsize,
-    /// Number of workers that have started (when the pool is busy, some workers start late, possibly after everyone
-    /// else has finished)
+    /// Workers that started (when the pool is busy some start late, even after the others have finished)
     started: AtomicUsize,
     idle: AtomicUsize,
-    workers: usize,
 }
 
 impl Work {
-    /// Only share out when the local stack exceeds this
+    /// Only share once the private stack exceeds this; also how many a refill takes at most
     const SHARE: usize = 64;
-    /// The calling thread first processes this many objects alone: with little work, the pool is not involved
+    /// The calling thread works alone on this many objects first: little work doesn't wake the pool
     const SOLO: usize = 4096;
-    /// An idle worker retires after waiting this many rounds without work (instead of spinning until the end)
+    /// An idle worker retires after this many rounds without work (instead of spinning to the end)
     const RETIRE: usize = 1 << 10;
 
-    /// Uses `pool` to have `workers` process `initial` (and anything discovered along the way) together.
-    /// With a `budget`, each worker stops after that many bytes; unfinished work is returned.
+    /// Lets `workers` finish `initial` (and whatever turns up along the way) on `pool`.
+    /// With a `budget`, each worker stops after that many bytes; what's left is returned.
     pub(crate) fn run<W: Worker>(pool: &dyn Pool, mut initial: Vec<Ptr>, workers: &mut [W], mut budget: Option<usize>) -> Vec<Ptr> {
         let first = &mut workers[0];
         first.stack().append(&mut initial);
@@ -181,19 +120,25 @@ impl Work {
         if initial.is_empty() {
             return initial;
         }
-        // Put the rest on the shared stack: don't pre-assign it to workers that may start late
-        let pending = AtomicUsize::new(initial.len());
-        let work = Self { shared: Spin::new(initial), pending, started: AtomicUsize::new(0), idle: AtomicUsize::new(0), workers: workers.len() };
-        let jobs: Vec<Job<'_>> = workers.iter_mut().map(|w| Box::new(|| work.drive(w, budget)) as Job<'_>).collect();
+        let work = Self { deques: workers.iter().map(|_| Deque::default()).collect(), pending: AtomicUsize::new(initial.len()), started: AtomicUsize::new(0), idle: AtomicUsize::new(0) };
+        // Everything left goes into the first deque: not pre-assigned to workers that may start late
+        let owner = work.deques[0].owner().expect("fresh deque");
+        for p in initial {
+            owner.push(p);
+        }
+        drop(owner);
+        let work = &work;
+        let jobs: Vec<Job<'_>> = workers.iter_mut().enumerate().map(|(me, w)| Box::new(move || work.drive(me, w, budget)) as Job<'_>).collect();
         pool.run(jobs);
-        let mut left = work.shared.into_inner();
+        let mut left: Vec<Ptr> = work.deques.iter().flat_map(|d| core::iter::from_fn(|| d.steal())).collect();
         for w in workers.iter_mut() {
             left.append(w.stack());
         }
         left
     }
 
-    fn drive<W: Worker>(&self, w: &mut W, mut budget: Option<usize>) {
+    fn drive<W: Worker>(&self, me: usize, w: &mut W, mut budget: Option<usize>) {
+        let owner = self.deques[me].owner().expect("one owner per deque");
         self.started.fetch_add(1, Ordering::SeqCst);
         loop {
             while let Some(p) = w.stack().pop() {
@@ -201,29 +146,28 @@ impl Work {
                 if let Some(b) = &mut budget {
                     *b = b.saturating_sub(done);
                     if *b == 0 {
-                        // Budget used up: count as permanently idle, leave the rest on the stack
+                        // Done enough: counts as permanently idle; the rest stays in the stack and deque
                         self.idle.fetch_add(1, Ordering::SeqCst);
                         return;
                     }
                 }
-                self.share(w.stack());
+                self.share(&owner, w.stack());
             }
-            if self.steal(w.stack()) {
+            if self.refill(me, &owner, w.stack()) {
                 continue;
             }
             self.idle.fetch_add(1, Ordering::SeqCst);
             let mut backoff = Backoff::default();
             for spins in 0.. {
                 if spins == Self::RETIRE {
-                    // Retire: stay counted as idle; work shared out by others is taken back by those still working
+                    // Retire: stays counted as idle; its deque is empty (it found nothing), others carry on
                     return;
                 }
                 if self.pending.load(Ordering::SeqCst) > 0 {
                     self.idle.fetch_sub(1, Ordering::SeqCst);
                     break;
                 }
-                // All started workers are idle and the shared stack is empty: done (workers that haven't started
-                // yet will leave empty-handed)
+                // Every started worker is idle and the deques are empty: done (latecomers leave empty-handed)
                 if self.idle.load(Ordering::SeqCst) == self.started.load(Ordering::SeqCst) {
                     return;
                 }
@@ -232,31 +176,32 @@ impl Work {
         }
     }
 
-    /// The local stack is large and the shared stack is not: share half of it
-    fn share(&self, stack: &mut Vec<Ptr>) {
-        if stack.len() > 2 * Self::SHARE && self.pending.load(Ordering::Relaxed) < self.workers * Self::SHARE {
-            let mut shared = self.shared.lock();
-            shared.extend(stack.drain(..stack.len() / 2));
-            self.pending.store(shared.len(), Ordering::SeqCst);
+    /// The private stack grew large while little is shared: move half into our deque
+    fn share(&self, owner: &Owner<'_, Ptr>, stack: &mut Vec<Ptr>) {
+        if stack.len() > 2 * Self::SHARE && self.pending.load(Ordering::Relaxed) < self.deques.len() * Self::SHARE {
+            let n = stack.len() / 2;
+            self.pending.fetch_add(n, Ordering::SeqCst);
+            stack.drain(..n).for_each(|p| owner.push(p));
         }
     }
 
-    /// Takes a batch from the shared stack
-    fn steal(&self, stack: &mut Vec<Ptr>) -> bool {
+    /// Takes up to `SHARE` objects: from our own deque first, then stealing from the others
+    fn refill(&self, me: usize, owner: &Owner<'_, Ptr>, stack: &mut Vec<Ptr>) -> bool {
         if self.pending.load(Ordering::SeqCst) == 0 {
             return false;
         }
-        let mut shared = self.shared.lock();
-        let take = shared.len().min(Self::SHARE);
-        let from = shared.len() - take;
-        stack.extend(shared.drain(from..));
-        self.pending.store(shared.len(), Ordering::SeqCst);
-        take > 0
-    }
-}
-
-impl<T> Spin<T> {
-    pub(crate) fn into_inner(self) -> T {
-        self.value.into_inner()
+        let before = stack.len();
+        stack.extend(core::iter::from_fn(|| owner.pop()).take(Self::SHARE));
+        let n = self.deques.len();
+        for k in 1..n {
+            if stack.len() > before {
+                break;
+            }
+            let d = &self.deques[(me + k) % n];
+            stack.extend(core::iter::from_fn(|| d.steal()).take(Self::SHARE));
+        }
+        let got = stack.len() - before;
+        self.pending.fetch_sub(got, Ordering::SeqCst);
+        got > 0
     }
 }

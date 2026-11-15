@@ -196,6 +196,12 @@ impl From<usize> for Ptr {
     }
 }
 
+impl From<Ptr> for usize {
+    fn from(p: Ptr) -> Self {
+        p.addr()
+    }
+}
+
 impl<T> From<NonNull<T>> for Ptr {
     fn from(p: NonNull<T>) -> Self {
         Self(p.cast())

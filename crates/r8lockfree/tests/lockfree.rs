@@ -189,3 +189,35 @@ fn deque_owner_and_thieves() {
     exactly_once(&seen);
     assert!(d.owner().is_some(), "凭据析构后可以再领");
 }
+
+/// 库存：并发领取不重不漏；还回来的在整理后能再领到。
+#[test]
+fn stock_claim_give_settle() {
+    let mut stock = r8lockfree::Stock::default();
+    stock.extend(0..THREADS * N);
+    let seen = counters(THREADS * N);
+    let batch = 7;
+    thread::scope(|s| {
+        for _ in 0..THREADS {
+            let (stock, seen) = (&stock, &seen);
+            s.spawn(move || {
+                let mut out = Vec::new();
+                while stock.claim(batch, &mut out) > 0 {}
+                // 一半还回去
+                let back = out.split_off(out.len() / 2);
+                for &v in &out {
+                    seen[v].fetch_add(1, Ordering::Relaxed);
+                }
+                stock.give(back);
+            });
+        }
+    });
+    assert!(stock.is_empty());
+    stock.settle();
+    let mut out = Vec::new();
+    while stock.claim(batch, &mut out) > 0 {}
+    for &v in &out {
+        seen[v].fetch_add(1, Ordering::Relaxed);
+    }
+    exactly_once(&seen);
+}

@@ -8,7 +8,7 @@ use core::ptr::NonNull;
 use crate::collect::{Mover, Visit};
 use crate::header::{Claim, Flags, Ptr, SizeClass, Typed, VTable};
 use crate::heap::{Lab, NURSERY_LIMIT, Nursery, OldSpace};
-use crate::parallel::{Pool, Spin, Work, Worker, split};
+use crate::parallel::{Pool, Work, Worker, split};
 use crate::{Collect, Metrics, Relocate, Trace};
 
 /// The old generation must grow at least this large before the first major collection starts
@@ -95,7 +95,7 @@ struct Promoter<'a> {
 }
 
 impl<'a> Promoter<'a> {
-    fn new(old: &'a Spin<OldSpace>, epoch: bool, marking: bool) -> Self {
+    fn new(old: &'a OldSpace, epoch: bool, marking: bool) -> Self {
         Self { lab: Lab::new(old), epoch, marking, stack: Vec::new(), gray: Vec::new(), promoted: 0 }
     }
 }
@@ -163,7 +163,7 @@ pub(crate) struct Context {
     cursor: Cell<usize>,
     end: Cell<usize>,
     nursery: RefCell<Nursery>,
-    old: Spin<OldSpace>,
+    old: OldSpace,
     gray: RefCell<Vec<Ptr>>,
     /// Old objects that may point into the young generation
     remembered: RefCell<Vec<Ptr>>,
@@ -185,7 +185,7 @@ impl Context {
             cursor: Cell::new(0),
             end: Cell::new(0),
             nursery: RefCell::default(),
-            old: Spin::default(),
+            old: OldSpace::default(),
             gray: RefCell::default(),
             remembered: RefCell::default(),
             threshold: Cell::new(MIN_HEAP),
@@ -204,7 +204,7 @@ impl Context {
     }
 
     pub(crate) fn old_bytes(&self) -> usize {
-        self.old.lock().bytes
+        self.old.bytes()
     }
 
     #[inline]
@@ -260,7 +260,7 @@ impl Context {
     /// start in the remembered set
     #[cold]
     fn alloc_large(&self, vt: &VTable) -> Ptr {
-        let p = self.old.lock().alloc_large(vt);
+        let p = self.old.alloc_large(vt);
         // SAFETY: a large object's header precedes the value and belongs to this allocation
         unsafe { p.init(vt, Flags::OLD | Flags::LARGE | Flags::REMEMBERED | self.fresh()) };
         self.remembered.borrow_mut().push(p);
@@ -333,6 +333,8 @@ impl Context {
     /// generation in parallel, drops the rest, and empties the young generation
     pub(crate) fn minor<'gc, R: Collect<'gc> + ?Sized>(&mut self, pool: &dyn Pool, root: &mut R) {
         let (epoch, marking) = (self.epoch.get(), self.phase.get() == Phase::Mark);
+        // Slots handed back by the last parallel phase become claimable again
+        self.old.settle();
         let remembered = take(self.remembered.get_mut());
         let (gray, promoted) = {
             let mut workers: Vec<Promoter<'_>> = (0..pool.threads()).map(|_| Promoter::new(&self.old, epoch, marking)).collect();
@@ -394,7 +396,7 @@ impl Context {
         initial.append(&mut m.stack);
         let left = self.mark(pool, initial, None);
         debug_assert!(left.is_empty());
-        let live = self.old.get_mut().sweep(pool, self.epoch.get(), self.parallel_drop);
+        let live = self.old.sweep(pool, self.epoch.get(), self.parallel_drop);
         self.verify("after sweep");
         self.phase.set(Phase::Sleep);
         self.compact(pool, root);
@@ -405,7 +407,7 @@ impl Context {
 
     /// Evacuates sparse pages (parallel copy), then updates every field pointing into them (parallel)
     fn compact<'gc, R: Collect<'gc> + ?Sized>(&mut self, pool: &dyn Pool, root: &mut R) {
-        let mut moving = self.old.get_mut().select_evacuation();
+        let mut moving = self.old.select_evacuation();
         if moving.is_empty() {
             return;
         }
@@ -423,14 +425,14 @@ impl Context {
             }
         });
         Relocate::new(&mut Compactor).relocate(root);
-        let mut live = self.old.get_mut().live();
+        let mut live = self.old.live();
         split(pool, &mut live, &|chunk: &mut [Ptr]| {
             for &p in chunk.iter().filter(|p| p.vtable().needs_trace) {
                 // SAFETY: live old objects, each owned by one task
                 unsafe { p.relocate(&mut Relocate::new(&mut Compactor)) };
             }
         });
-        self.old.get_mut().release_evacuated(moved);
+        self.old.release_evacuated(moved);
         self.metrics.compactions.set(self.metrics.compactions.get() + 1);
     }
 
@@ -479,7 +481,7 @@ impl Context {
                     assert!(f & (Flags::FORWARDED | Flags::FREE) == 0 && f & Flags::OLD != 0, "{}: edge to {p:?} ({place}) flags {f:#x}", self.stage);
                 }
             }
-            let old = self.old.get_mut();
+            let old = &self.old;
             for p in old.live().into_iter().filter(|p| p.vtable().needs_trace) {
                 let mut v = Verifier { old, stage, owner: p };
                 // SAFETY: a live old object

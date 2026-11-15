@@ -9,6 +9,7 @@ repository.workspace = true
 [dependencies]
 r8gc-macros = { version = "0.1.2", path = "macros" }
 moremath = { workspace = true, features = ["alloc"] }
+r8lockfree.workspace = true
 
 [dev-dependencies]
 moremath = { workspace = true, features = ["std"] }
