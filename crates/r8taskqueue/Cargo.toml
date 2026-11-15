@@ -1,0 +1,11 @@
+[package]
+name = "r8taskqueue"
+description = "r8 任务队列：单线程、按轮推进的事件循环，只有可递归的任务能往里塞新任务"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

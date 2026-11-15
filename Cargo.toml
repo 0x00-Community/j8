@@ -38,6 +38,7 @@ license = "MIT"
 [workspace.dependencies]
 r8framework = { path = "crates/r8framework" }
 r8platform = { path = "crates/r8platform" }
+r8taskqueue = { path = "crates/r8taskqueue" }
 r8builtins = { path = "crates/r8builtins" }
 r8virtasm = { path = "crates/r8virtasm", default-features = false }
 r8executor = { path = "crates/r8executor" }
