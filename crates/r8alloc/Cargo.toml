@@ -1,0 +1,17 @@
+[package]
+name = "r8alloc"
+description = "r8 的堆内存分配器（C11）：预留一段地址区，页与按尺寸分档的块都从全局无锁空闲表分配，不绑定任何线程、没有锁；r8gc 的页来源，也能作全局分配器"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+build = "build.rs"
+links = "r8alloc"
+
+[dependencies]
+
+[build-dependencies]
+cc = "1"
+
+[lints]
+workspace = true
