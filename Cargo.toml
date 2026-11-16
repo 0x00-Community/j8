@@ -8,6 +8,8 @@ license.workspace = true
 autotests = false
 repository.workspace = true
 readme = "README.md"
+# 只发库本身：tests/test262 子模块有五万多个文件，crates.io 收不下
+include = ["/src", "/tests/binding.rs", "/README.md", "/README.zh-CN.md", "/LICENSE"]
 
 [lib]
 name = "j8"
