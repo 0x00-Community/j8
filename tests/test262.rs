@@ -3,11 +3,11 @@
 //! - No arguments: run only the cases in the baseline `tests/test262.passing`; fail if any regress (regression check)
 //! - With arguments: run these directories / files under `tests/test262/test/`,
 //!   e.g. `-- language/expressions/addition built-ins/Math`
-//! - `R8_TEST262_UPDATE=1`: write the results of the cases run this time back to the baseline
+//! - `J8_TEST262_UPDATE=1`: write the results of the cases run this time back to the baseline
 //!   (entries not run are kept)
-//! - `R8_TEST262_VERBOSE=1`: print the reason for each failure
+//! - `J8_TEST262_VERBOSE=1`: print the reason for each failure
 //!
-//! Each case runs in a child process (this test binary started again with `R8_TEST262_CASE`): infinite loops are killed
+//! Each case runs in a child process (this test binary started again with `J8_TEST262_CASE`): infinite loops are killed
 //! by a timeout, and crashes don't take other cases down.
 //! Modes: only non-strict mode is run, `onlyStrict` cases run in strict mode; `module` is skipped.
 use std::collections::BTreeSet;
@@ -18,21 +18,22 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-use r8builtins::Builtins;
-use r8executor::Executor;
-use r8framework::{CreateParams, Error, Isolate, Platform, Source, Task};
+use j8builtins::Builtins;
+use j8executor::Executor;
+use j8framework::{CreateParams, Error, Isolate, Platform, Source, Task};
 use serde::Deserialize;
+
 
 /// test262 checkout (submodule)
 const ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/test262");
 /// Baseline: passing cases, one per line (relative to `test/`)
 const BASELINE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/test262.passing");
 /// The case a child process runs
-const CASE_ENV: &str = "R8_TEST262_CASE";
-const UPDATE_ENV: &str = "R8_TEST262_UPDATE";
-const VERBOSE_ENV: &str = "R8_TEST262_VERBOSE";
+const CASE_ENV: &str = "J8_TEST262_CASE";
+const UPDATE_ENV: &str = "J8_TEST262_UPDATE";
+const VERBOSE_ENV: &str = "J8_TEST262_VERBOSE";
 /// Enable the JIT (threshold 0: every function is compiled on its first call) to cross-check machine code on all cases
-const JIT_ENV: &str = "R8_TEST262_JIT";
+const JIT_ENV: &str = "J8_TEST262_JIT";
 /// Time limit for a single case
 const TIMEOUT: Duration = Duration::from_secs(10);
 /// Polling interval while waiting for a child process
@@ -128,7 +129,7 @@ impl ErrorType {
 enum Outcome {
     Pass = 0,
     Fail = 1,
-    /// r8 reported `Error::Unsupported`
+    /// j8 reported `Error::Unsupported`
     Unsupported = 2,
     /// Not run (`module`)
     Skip = 3,
@@ -172,7 +173,7 @@ struct Capture {
     lines: Mutex<Vec<String>>,
 }
 
-impl r8framework::Pool for Capture {
+impl j8framework::Pool for Capture {
     fn threads(&self) -> usize {
         1
     }
@@ -264,7 +265,7 @@ impl Case {
         };
         let platform = Capture { start: Instant::now(), lines: Mutex::default() };
         let mut isolate = Isolate::new(&platform, CreateParams::default());
-        let mut executor = if std::env::var_os(JIT_ENV).is_some() { Executor::default().with_tier(std::rc::Rc::new(r8jit::Jit::from(0))) } else { Executor::default() };
+        let mut executor = if std::env::var_os(JIT_ENV).is_some() { Executor::default().with_tier(std::rc::Rc::new(j8jit::Jit::from(0))) } else { Executor::default() };
         let file = self.path.strip_prefix(Suite::test_dir()).unwrap_or(&self.path).display().to_string();
         let expected = self.meta.negative.as_ref();
         let cx = isolate.enter(|scope| scope.persist(scope.context(&Builtins)));

@@ -1,7 +1,6 @@
 [package]
-# r8 is taken on crates.io: the package is r8js, the library is still r8
-name = "r8js"
-description = "r8: V8 rewritten in Rust. The root package re-exports the binding macros #[r8::class] / #[r8::object] / #[r8::function] and the traits and types they need"
+name = "j8"
+description = "j8: V8 rewritten in Rust. The root package re-exports the binding macros #[j8::class] / #[j8::object] / #[j8::function] and the traits and types they need"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -11,18 +10,18 @@ repository.workspace = true
 readme = "README.md"
 
 [lib]
-name = "r8"
+name = "j8"
 path = "src/lib.rs"
 
 [dependencies]
-r8framework.workspace = true
-r8binding.workspace = true
-r8macros.workspace = true
+j8framework.workspace = true
+j8binding.workspace = true
+j8macros.workspace = true
 
 [dev-dependencies]
-r8executor.workspace = true
-r8builtins.workspace = true
-r8platform.workspace = true
+j8executor.workspace = true
+j8builtins.workspace = true
+j8platform.workspace = true
 
 [[test]]
 name = "binding"
@@ -41,26 +40,26 @@ exclude = ["samples/benchv8"]
 version = "0.1.2"
 edition = "2024"
 license = "MIT"
-repository = "https://github.com/0x00-Community/r8"
+repository = "https://github.com/0x00-Community/j8"
 
 [workspace.dependencies]
-r8framework = { version = "0.1.2", path = "crates/r8framework" }
-r8platform = { version = "0.1.2", path = "crates/r8platform" }
-r8builtins = { version = "0.1.2", path = "crates/r8builtins" }
-r8virtasm = { version = "0.1.2", path = "crates/r8virtasm", default-features = false }
-r8executor = { version = "0.1.2", path = "crates/r8executor" }
-r8compiler = { version = "0.1.2", path = "crates/r8compiler" }
-r8jit = { version = "0.1.2", path = "crates/r8jit" }
+j8framework = { version = "0.1.2", path = "crates/j8framework" }
+j8platform = { version = "0.1.2", path = "crates/j8platform" }
+j8builtins = { version = "0.1.2", path = "crates/j8builtins" }
+j8virtasm = { version = "0.1.2", path = "crates/j8virtasm", default-features = false }
+j8executor = { version = "0.1.2", path = "crates/j8executor" }
+j8compiler = { version = "0.1.2", path = "crates/j8compiler" }
+j8jit = { version = "0.1.2", path = "crates/j8jit" }
 mlirpass = { version = "=0.10.4", default-features = false, features = ["target.x86_64"] }
 libc = "0.2"
-r8macros = { version = "0.1.2", path = "crates/macros" }
-r8binding = { version = "0.1.2", path = "crates/r8binding" }
-r8 = { version = "0.1.2", path = ".", package = "r8js" }
+j8macros = { version = "0.1.2", path = "crates/macros" }
+j8binding = { version = "0.1.2", path = "crates/j8binding" }
+j8 = { version = "0.1.2", path = "." }
 clap = { version = "4.6", features = ["derive"] }
 moremath = { version = "=0.2.3", default-features = false }
 libm = "0.2"
-r8gc = { version = "0.1.2", path = "crates/r8gc", default-features = false }
-r8lockfree = { version = "0.1.2", path = "crates/r8lockfree" }
+j8gc = { version = "0.1.2", path = "crates/j8gc", default-features = false }
+j8lockfree = { version = "0.1.2", path = "crates/j8lockfree" }
 smol_str = { version = "0.3", default-features = false }
 hashbrown = { version = "0.17", default-features = false }
 rustc-hash = { version = "2", default-features = false }

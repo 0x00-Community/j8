@@ -1,18 +1,18 @@
 [package]
-name = "r8debugger"
-description = "r8 debugging tool: the r8dbg CLI"
+name = "j8debugger"
+description = "j8 debugging tool: the j8dbg CLI"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
 [[bin]]
-name = "r8dbg"
+name = "j8dbg"
 path = "src/main.rs"
 
 [dependencies]
-r8framework.workspace = true
-r8virtasm = { workspace = true, features = ["compile"] }
+j8framework.workspace = true
+j8virtasm = { workspace = true, features = ["compile"] }
 clap.workspace = true
 
 [lints]

@@ -1,8 +1,8 @@
-//! benchv8: timing comparison of the same JS benchmarks on r8 and V8 (rusty_v8).
+//! benchv8: timing comparison of the same JS benchmarks on j8 and V8 (rusty_v8).
 //!
 //! ```text
 //! cargo run --release                    # run all three engines once each and print the comparison table
-//! cargo run --release -- --engine r8     # run only one: r8 / v8 / v8-jitless
+//! cargo run --release -- --engine j8     # run only one: j8 / v8 / v8-jitless
 //! cargo run --release -- --runs 10       # runs per benchmark, the shortest is kept (default 5)
 //! ```
 //! V8's `--jitless` is a process-wide flag, so each engine runs in its own child process; timing covers compile +
@@ -32,17 +32,17 @@ const DEFAULT_RUNS: usize = 5;
 /// Engines in the comparison.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Engine {
-    R8,
+    J8,
     V8,
     V8Jitless,
 }
 
 impl Engine {
-    const ALL: [Engine; 3] = [Engine::R8, Engine::V8Jitless, Engine::V8];
+    const ALL: [Engine; 3] = [Engine::J8, Engine::V8Jitless, Engine::V8];
 
     fn name(self) -> &'static str {
         match self {
-            Engine::R8 => "r8",
+            Engine::J8 => "j8",
             Engine::V8 => "v8",
             Engine::V8Jitless => "v8-jitless",
         }
@@ -56,22 +56,22 @@ impl TryFrom<&str> for Engine {
         Engine::ALL
             .into_iter()
             .find(|e| e.name() == s)
-            .ok_or_else(|| format!("unknown engine {s} (r8 / v8 / v8-jitless)"))
+            .ok_or_else(|| format!("unknown engine {s} (j8 / v8 / v8-jitless)"))
     }
 }
 
 /// Result of one benchmark: shortest time (milliseconds) and checksum; error text on failure.
 type Outcome = Result<(f64, String), String>;
 
-/// Run on r8.
-struct R8Runner;
+/// Run on j8.
+struct J8Runner;
 
-impl R8Runner {
+impl J8Runner {
     fn run(src: &str, runs: usize) -> Outcome {
-        use r8builtins::Builtins;
-        use r8executor::Executor;
-        use r8framework::{CreateParams, Error, Isolate, Source};
-        let platform = r8platform::DefaultPlatform::default();
+        use j8builtins::Builtins;
+        use j8executor::Executor;
+        use j8framework::{CreateParams, Error, Isolate, Source};
+        let platform = j8platform::DefaultPlatform::default();
         let mut isolate = Isolate::new(&platform, CreateParams::default());
         let mut executor = Executor::default();
         let mut best = f64::INFINITY;
@@ -158,12 +158,12 @@ impl Engine {
     /// Child process: run all benchmarks on this engine, one line each: `name\tms\tchecksum` or `name\tERR\terror`.
     fn run_all(self, runs: usize) {
         let engine = self;
-        if engine != Engine::R8 {
+        if engine != Engine::J8 {
             V8Runner::init(engine == Engine::V8Jitless);
         }
         for (name, src) in BENCHES {
             let r = match engine {
-                Engine::R8 => R8Runner::run(src, runs),
+                Engine::J8 => J8Runner::run(src, runs),
                 Engine::V8 | Engine::V8Jitless => V8Runner::run(src, runs),
             };
             match r {
@@ -218,23 +218,23 @@ impl Comparison {
         };
         println!(
             "{:<12} {:>10} {:>14} {:>10} {:>14} {:>10}  check",
-            "bench", "r8 ms", "v8-jitless ms", "v8 ms", "r8/jitless", "r8/v8"
+            "bench", "j8 ms", "v8-jitless ms", "v8 ms", "j8/jitless", "j8/v8"
         );
         for (i, (name, _)) in BENCHES.iter().enumerate() {
-            let (r8, jl, v8) = (&table[0][i], &table[1][i], &table[2][i]);
-            let check = if r8.sum == v8.sum && jl.sum == v8.sum {
+            let (j8, jl, v8) = (&table[0][i], &table[1][i], &table[2][i]);
+            let check = if j8.sum == v8.sum && jl.sum == v8.sum {
                 String::from("ok")
             } else {
-                format!("r8={} v8={}", r8.sum, v8.sum)
+                format!("j8={} v8={}", j8.sum, v8.sum)
             };
             println!(
                 "{:<12} {:>10} {:>14} {:>10} {:>14} {:>10}  {}",
                 name,
-                ms(r8),
+                ms(j8),
                 ms(jl),
                 ms(v8),
-                ratio(r8, jl),
-                ratio(r8, v8),
+                ratio(j8, jl),
+                ratio(j8, v8),
                 check
             );
         }
@@ -245,7 +245,7 @@ impl Comparison {
             (logs.iter().sum::<f64>() / logs.len().max(1) as f64).exp()
         };
         println!(
-            "geomean      r8/jitless {:.1}×   r8/v8 {:.1}×",
+            "geomean      j8/jitless {:.1}×   j8/v8 {:.1}×",
             geo(0, 1),
             geo(0, 2)
         );

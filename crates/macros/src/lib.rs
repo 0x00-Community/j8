@@ -1,11 +1,11 @@
-//! r8macros: procedural macros for r8.
+//! j8macros: procedural macros for j8.
 //!
 //! `enums!("x.json")`: generates enums (definitions, `Display`, field access by type) from a JSON file under the
 //! calling crate's root directory. The JSON is the single source of truth; ⛔ do not hand-write these enums.
 //! See `USAGE.md` for the format.
 //!
-//! `#[class]` / `#[object]` / `#[function]`: Rust ⇄ JS bindings (used through the facade crate `r8`:
-//! `#[r8::class]` etc.); see `USAGE.md`.
+//! `#[class]` / `#[object]` / `#[function]`: Rust ⇄ JS bindings (used through the facade crate `j8`:
+//! `#[j8::class]` etc.); see `USAGE.md`.
 mod class;
 mod expand;
 mod function;
@@ -16,7 +16,7 @@ mod spec;
 use proc_macro::TokenStream;
 use syn::{LitStr, parse_macro_input};
 
-/// `#[r8::class]` / `#[r8::class("name")]`: placed on an `impl` block; exports the methods as members of a JS
+/// `#[j8::class]` / `#[j8::class("name")]`: placed on an `impl` block; exports the methods as members of a JS
 /// class. Mark methods with `#[js(constructor)]` / `#[js(getter)]` / `#[js(setter)]` / `#[js(static)]` /
 /// `#[js(skip)]` / `#[js(name = "…")]`; methods without `self` default to static methods. See `USAGE.md`.
 #[proc_macro_attribute]
@@ -25,7 +25,7 @@ pub fn class(attr: TokenStream, item: TokenStream) -> TokenStream {
     class::expand(attr.into(), item).unwrap_or_else(syn::Error::into_compile_error).into()
 }
 
-/// `#[r8::object]` / `#[r8::object("name")]`: exports an `impl` block containing only associated functions as a
+/// `#[j8::object]` / `#[j8::object("name")]`: exports an `impl` block containing only associated functions as a
 /// plain object.
 #[proc_macro_attribute]
 pub fn object(attr: TokenStream, item: TokenStream) -> TokenStream {
@@ -33,7 +33,7 @@ pub fn object(attr: TokenStream, item: TokenStream) -> TokenStream {
     object::expand(attr.into(), item).unwrap_or_else(syn::Error::into_compile_error).into()
 }
 
-/// `#[r8::function]` / `#[r8::function("name")]`: exports a function as a JS function (`name::install`).
+/// `#[j8::function]` / `#[j8::function("name")]`: exports a function as a JS function (`name::install`).
 #[proc_macro_attribute]
 pub fn function(attr: TokenStream, item: TokenStream) -> TokenStream {
     let item = parse_macro_input!(item as syn::ItemFn);

@@ -2,8 +2,8 @@ use std::io::{Read, Write};
 use std::path::PathBuf;
 
 use clap::Args;
-use r8framework::Source;
-use r8virtasm::Module;
+use j8framework::Source;
+use j8virtasm::Module;
 
 /// Input (file / stdin / command line) and output (file / stdout).
 #[derive(Args)]
@@ -45,7 +45,7 @@ impl Io {
     }
 }
 
-/// `r8dbg disasm`: compile JS to bytecode and print the disassembly listing.
+/// `j8dbg disasm`: compile JS to bytecode and print the disassembly listing.
 #[derive(Args)]
 pub struct Disasm {
     #[command(flatten)]
@@ -60,7 +60,7 @@ impl Disasm {
     }
 }
 
-/// `r8dbg asm`: assemble a disassembly listing (the output of `r8dbg disasm`) and print the normalized listing.
+/// `j8dbg asm`: assemble a disassembly listing (the output of `j8dbg disasm`) and print the normalized listing.
 #[derive(Args)]
 pub struct Asm {
     #[command(flatten)]

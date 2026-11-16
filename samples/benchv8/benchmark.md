@@ -1,13 +1,13 @@
-# r8 vs. V8 performance
+# j8 vs. V8 performance
 
-The same set of JS benchmarks (`bench/*.js`) runs on r8, V8 `--jitless` (interpreter only) and V8 (with JIT). V8 is embedded via rusty_v8 `=152.2.0`.
+The same set of JS benchmarks (`bench/*.js`) runs on j8, V8 `--jitless` (interpreter only) and V8 (with JIT). V8 is embedded via rusty_v8 `=152.2.0`.
 
 ## Running
 
 ```text
 cd samples/benchv8
 cargo run --release                     # run all three engines once each and print the comparison table
-cargo run --release -- --engine r8      # run only one: r8 / v8 / v8-jitless
+cargo run --release -- --engine j8      # run only one: j8 / v8 / v8-jitless
 cargo run --release -- --runs 10        # runs per benchmark, the shortest is kept (default 5)
 ```
 
@@ -20,7 +20,7 @@ cargo run --release -- --runs 10        # runs per benchmark, the shortest is ke
 
 `--runs 5`, 16-core machine, load average about 6 while measuring (other processes running); the numbers are noisy, only the order of magnitude matters. All 11 benchmarks produce matching checksums on all three engines.
 
-| Benchmark | r8 ms | V8 jitless ms | V8 ms | r8 / jitless | r8 / V8 |
+| Benchmark | j8 ms | V8 jitless ms | V8 ms | j8 / jitless | j8 / V8 |
 |---|---:|---:|---:|---:|---:|
 | fib | 41.6 | 9.5 | 2.1 | 4.4× | 19.5× |
 | loop | 316.8 | 182.9 | 81.1 | 1.7× | 3.9× |

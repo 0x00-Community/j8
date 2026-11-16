@@ -1,4 +1,4 @@
-//! r8dbg: the r8 debugging CLI.
+//! j8dbg: the j8 debugging CLI.
 mod asm;
 
 use std::process::ExitCode;
@@ -7,9 +7,9 @@ use clap::{Parser, Subcommand};
 
 use asm::{Asm, Disasm};
 
-/// r8 debugging tool
+/// j8 debugging tool
 #[derive(Parser)]
-#[command(name = "r8dbg", version)]
+#[command(name = "j8dbg", version)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -36,7 +36,7 @@ fn main() -> ExitCode {
     match Cli::parse().command.run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("r8dbg: {e}");
+            eprintln!("j8dbg: {e}");
             ExitCode::FAILURE
         }
     }

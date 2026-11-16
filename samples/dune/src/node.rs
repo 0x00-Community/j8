@@ -1,10 +1,10 @@
-//! Node-style host interface: the native parts of `fs` / `path` / `process` are bound with `#[r8::object]`; `require`
+//! Node-style host interface: the native parts of `fs` / `path` / `process` are bound with `#[j8::object]`; `require`
 //! and the CommonJS wrapper are written in JS in [`PRELUDE`]. The native parts hang off the non-enumerable global
 //! `__dune`, and the prelude wraps them as modules.
 use std::path::{Component, Path, PathBuf};
 
-use r8::{Object, Rest};
-use r8framework::{Agent, Error, ErrorKind, JsObject, Property, Value};
+use j8::{Object, Rest};
+use j8framework::{Agent, Error, ErrorKind, JsObject, Property, Value};
 
 /// Prelude: `require` (CommonJS, module cache, relative paths, `.js` / `.json` / directory `index.js`), `module`,
 /// `process`.
@@ -13,7 +13,7 @@ pub const PRELUDE: &str = include_str!("prelude.js");
 /// The synchronous `fs` interface.
 pub struct Fs;
 
-#[r8::object("fs")]
+#[j8::object("fs")]
 impl Fs {
     fn read_file_sync<'gc>(a: &mut Agent<'gc, '_>, path: &str, encoding: Option<Value<'gc>>) -> Result<String, Error> {
         let _ = encoding;
@@ -63,7 +63,7 @@ impl Fs {
 /// `path` (POSIX).
 pub struct Paths;
 
-#[r8::object("path")]
+#[j8::object("path")]
 impl Paths {
     fn join<'gc>(parts: Rest<'gc>, a: &mut Agent<'gc, '_>) -> Result<String, Error> {
         let mut p = PathBuf::new();
@@ -128,7 +128,7 @@ impl Paths {
 /// Methods of `process` (properties are set in [`Node::install`]).
 pub struct Process;
 
-#[r8::object("process")]
+#[j8::object("process")]
 impl Process {
     fn exit(code: Option<i32>) {
         std::process::exit(code.unwrap_or(0));

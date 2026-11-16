@@ -23,7 +23,7 @@ export default {
     const url = new URL(request.url);
     const name = url.searchParams.get('name') || 'default';
     if (url.pathname === '/') {
-      return new Response('hello from r8 workerd\n');
+      return new Response('hello from j8 workerd\n');
     }
     const stub = env.COUNTER.get(env.COUNTER.idFromName(name));
     return stub.fetch(request);

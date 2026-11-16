@@ -1,0 +1,15 @@
+[package]
+name = "j8compiler"
+description = "j8 compiler: bytecode ⇒ MLIR (llvm dialect) ⇒ mlirpass ⇒ raw machine code"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+j8framework.workspace = true
+j8virtasm.workspace = true
+mlirpass.workspace = true
+
+[lints]
+workspace = true

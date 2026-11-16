@@ -1,7 +1,7 @@
 <a id="top"></a>
 <div align="center">
 
-# r8
+# j8
 
 ### V8, rewritten in Rust.
 **A bytecode interpreter, a JIT built on MLIR and a generational parallel GC of our own, `no_std` wherever possible.**
@@ -22,16 +22,16 @@
 
 ---
 
-## ⚡ What is r8
+## ⚡ What is j8
 
-r8 is **a JavaScript engine written from scratch in Rust**, layered the way V8 is: every piece of JS is first compiled to
+j8 is **a JavaScript engine written from scratch in Rust**, layered the way V8 is: every piece of JS is first compiled to
 accumulator-style bytecode (like V8's Ignition) and run by the executor, while hot functions and hot loops go to a JIT that
-emits x86-64 machine code. The heap is the repository's own GC (`crates/r8gc`).
+emits x86-64 machine code. The heap is the repository's own GC (`crates/j8gc`).
 
 🎯 **The main line:** the test262 pass rate. Core ECMAScript is filled in stage by stage following [PLAN.md](PLAN.md), with
 zero regressions against the baseline at every step.
 
-🧩 **Embeddable:** `#[r8::class]` / `#[r8::object]` / `#[r8::function]` bind Rust types to JS in one line. Two sample hosts
+🧩 **Embeddable:** `#[j8::class]` / `#[j8::object]` / `#[j8::function]` bind Rust types to JS in one line. Two sample hosts
 come with it: `dune`, a node-style runtime, and `workerd`, a Cloudflare Worker-style runtime.
 
 ## 🔥 Why it's different
@@ -50,7 +50,7 @@ come with it: `dune`, a node-style runtime, and `workerd`, a Cloudflare Worker-s
 | ✔️ Check | Result |
 | --- | --- |
 | 📜 test262 baseline | **42,443** tests passing (sloppy mode plus `onlyStrict`; Temporal, intl402 and the like are out of scope, see PLAN.md), zero regressions on every commit |
-| 🧮 JIT | `R8_TEST262_JIT=1` runs the same baseline with the JIT on (every function compiled on its first call) |
+| 🧮 JIT | `J8_TEST262_JIT=1` runs the same baseline with the JIT on (every function compiled on its first call) |
 | ⏱️ vs V8 jitless | **3.7×** slower, geometric mean over 11 benchmarks; checksums identical on all three engines |
 | 🚄 vs V8 (with JIT) | **9.4×** slower, geometric mean; the gap is mostly calls and allocation, see [benchmark.md](samples/benchv8/benchmark.md) |
 
@@ -67,7 +67,7 @@ cargo run --release -p dune -- --jit a.js       # with the JIT
 cargo run -p workerd -- samples/workerd/examples/counter.js --bind COUNTER=Counter --request "GET /c/inc?name=a"
 
 # 🔬 look at the bytecode
-cargo run -p r8debugger -- disasm -e 'let s = 0; for (let i = 0; i < 10; i++) s += i; s'
+cargo run -p j8debugger -- disasm -e 'let s = 0; for (let i = 0; i < 10; i++) s += i; s'
 
 # 📜 the test262 regression run (git submodule update --init first)
 cargo test --release -p dune --test test262
@@ -82,31 +82,31 @@ A Cargo workspace of several crates.
 
 | crate | std | What it does |
 |---|---|---|
-| `r8framework` | `no_std` | The core framework: defines the traits (`Platform`, `Engine`, `Invoke`, `Intrinsics`) and the shared structs / enums (`Isolate`, `Scope`, `Agent`, `Context` / `Realm`, `Global`, `Value`, `JsString` / `JsObject`, `Profiler`, `BinaryOp`, `Error` …). JS operation semantics hang off `Agent`; the implementations belong to the other crates |
-| `r8` (repository root `src/`) | `no_std` | Re-exports: `#[r8::class]` / `#[r8::object]` / `#[r8::function]` (the macros live in r8macros, see `crates/macros/USAGE.md`) and the r8binding traits |
-| `r8binding` | `no_std` | The Rust ⇄ JS binding runtime: `FromJs` / `IntoJs`, host objects, `Class` / `Object` |
-| `r8builtins` | `no_std` | Implements `Intrinsics`: installs Object / Function / Array / String / Number / Boolean / Math / the Error family / `console` / `parseInt` and so on into a `Realm` |
-| `r8platform` | std | Implements `Platform` (`DefaultPlatform`): background tasks and the GC run on a moremath `ThreadMulti` pool (started once and reused; tasks may borrow the caller's data, through `r8gc::Pool`), the clock is `Instant` |
-| `r8gc` | `no_std` (`std` feature on by default) | The heap: a generational, moving, parallel GC with `'gc` brand lifetimes, collecting on the platform's thread pool (see "Heap and handles" below); `#[derive(Collect)]` is exposed as `r8gc::Collect` (the proc macro lives in `crates/r8gc/macros`, which only r8gc depends on) |
-| `r8virtasm` | `no_std` (`compile` needs std) | The virtual instruction set: accumulator-style register bytecode (`Insn` / `Function` / `Module`); disassemble with `module.to_string()`, assemble with `text.parse::<Module>()`, each the inverse of the other. The `compile` feature (on by default) brings the JS ⇒ bytecode compiler `Module::try_from(&Source)`, parsing with oxc |
-| `r8taskqueue` | `no_std` | Task queue: `ITask` (`recursable` / `depend` / `exec`) and `ITaskPoll` (`add` / `run`); lock-free dataflow scheduling (hand-written MPMC ready queue, atomic dependency counts): a task whose dependencies are done runs at once in parallel on a moremath `Executor` (the host passes `ThreadMulti`), with no round barrier; `TaskId::family` finds the union-find root, `cancel` cancels a whole family; quotas count bytecodes (`Quota` / `Flow::Yield`, a per-run budget) |
-| `r8macros` | proc-macro | Procedural macros: `enums!("x.json")` generates enums from JSON (definitions, `Display`, `&mut` accessors by field type); see `crates/macros/USAGE.md` |
-| `samples/dune` | std | A node-style binary on top of r8 (`require` / `module` / `fs` / `path` / `process`, native parts bound with `#[r8::object]`): `dune a.js` / `dune run a.js` (`-` reads standard input), `dune -e '<js>'`, `dune -p '<js>'` to print the result, no arguments for a REPL (`.help` / `.exit`); an uncaught exception prints `Uncaught …` and exits with 1 |
-| `samples/workerd` | std | Loads Cloudflare Workers (ES modules with `export default { fetch }`) and Durable Objects with r8: `workerd examples/counter.js --bind COUNTER=Counter --request "GET /c/inc?name=a"`, or `--port 8787` for an HTTP server; the Fetch API subset and DOs live in a JS prelude, storage is a Rust KV bound with `#[r8::class]` |
-| `samples/benchv8` | std | The same JS benchmarks timed on r8 and V8 (rusty_v8 152, with JIT / `--jitless`): `cd samples/benchv8 && cargo run --release`; depends on V8's prebuilt library, so it is its own workspace (excluded from the root one) |
-| `r8debugger` | std | The `r8dbg` command line (clap): `r8dbg disasm <file.js \| ->` / `r8dbg disasm -e '<js>'` prints the disassembly; `r8dbg asm <file.r8s \| ->` assembles a listing and prints it normalized (`-o` writes a file) |
-| `r8executor` | `no_std` (`compile` needs std) | The bytecode `Executor`, **currently the last layer**; implements `Engine` under the `compile` feature |
+| `j8framework` | `no_std` | The core framework: defines the traits (`Platform`, `Engine`, `Invoke`, `Intrinsics`) and the shared structs / enums (`Isolate`, `Scope`, `Agent`, `Context` / `Realm`, `Global`, `Value`, `JsString` / `JsObject`, `Profiler`, `BinaryOp`, `Error` …). JS operation semantics hang off `Agent`; the implementations belong to the other crates |
+| `j8` (repository root `src/`) | `no_std` | Re-exports: `#[j8::class]` / `#[j8::object]` / `#[j8::function]` (the macros live in j8macros, see `crates/macros/USAGE.md`) and the j8binding traits |
+| `j8binding` | `no_std` | The Rust ⇄ JS binding runtime: `FromJs` / `IntoJs`, host objects, `Class` / `Object` |
+| `j8builtins` | `no_std` | Implements `Intrinsics`: installs Object / Function / Array / String / Number / Boolean / Math / the Error family / `console` / `parseInt` and so on into a `Realm` |
+| `j8platform` | std | Implements `Platform` (`DefaultPlatform`): background tasks and the GC run on a moremath `ThreadMulti` pool (started once and reused; tasks may borrow the caller's data, through `j8gc::Pool`), the clock is `Instant` |
+| `j8gc` | `no_std` (`std` feature on by default) | The heap: a generational, moving, parallel GC with `'gc` brand lifetimes, collecting on the platform's thread pool (see "Heap and handles" below); `#[derive(Collect)]` is exposed as `j8gc::Collect` (the proc macro lives in `crates/j8gc/macros`, which only j8gc depends on) |
+| `j8virtasm` | `no_std` (`compile` needs std) | The virtual instruction set: accumulator-style register bytecode (`Insn` / `Function` / `Module`); disassemble with `module.to_string()`, assemble with `text.parse::<Module>()`, each the inverse of the other. The `compile` feature (on by default) brings the JS ⇒ bytecode compiler `Module::try_from(&Source)`, parsing with oxc |
+| `j8taskqueue` | `no_std` | Task queue: `ITask` (`recursable` / `depend` / `exec`) and `ITaskPoll` (`add` / `run`); lock-free dataflow scheduling (hand-written MPMC ready queue, atomic dependency counts): a task whose dependencies are done runs at once in parallel on a moremath `Executor` (the host passes `ThreadMulti`), with no round barrier; `TaskId::family` finds the union-find root, `cancel` cancels a whole family; quotas count bytecodes (`Quota` / `Flow::Yield`, a per-run budget) |
+| `j8macros` | proc-macro | Procedural macros: `enums!("x.json")` generates enums from JSON (definitions, `Display`, `&mut` accessors by field type); see `crates/macros/USAGE.md` |
+| `samples/dune` | std | A node-style binary on top of j8 (`require` / `module` / `fs` / `path` / `process`, native parts bound with `#[j8::object]`): `dune a.js` / `dune run a.js` (`-` reads standard input), `dune -e '<js>'`, `dune -p '<js>'` to print the result, no arguments for a REPL (`.help` / `.exit`); an uncaught exception prints `Uncaught …` and exits with 1 |
+| `samples/workerd` | std | Loads Cloudflare Workers (ES modules with `export default { fetch }`) and Durable Objects with j8: `workerd examples/counter.js --bind COUNTER=Counter --request "GET /c/inc?name=a"`, or `--port 8787` for an HTTP server; the Fetch API subset and DOs live in a JS prelude, storage is a Rust KV bound with `#[j8::class]` |
+| `samples/benchv8` | std | The same JS benchmarks timed on j8 and V8 (rusty_v8 152, with JIT / `--jitless`): `cd samples/benchv8 && cargo run --release`; depends on V8's prebuilt library, so it is its own workspace (excluded from the root one) |
+| `j8debugger` | std | The `j8dbg` command line (clap): `j8dbg disasm <file.js \| ->` / `j8dbg disasm -e '<js>'` prints the disassembly; `j8dbg asm <file.j8s \| ->` assembles a listing and prints it normalized (`-o` writes a file) |
+| `j8executor` | `no_std` (`compile` needs std) | The bytecode `Executor`, **currently the last layer**; implements `Engine` under the `compile` feature |
 
 All JS is compiled to bytecode before it runs; there is no AST interpreter.
-Dependency direction: every layer depends only on `r8framework` (`r8executor` also on `r8virtasm`), and `r8framework` depends on no layer.
+Dependency direction: every layer depends only on `j8framework` (`j8executor` also on `j8virtasm`), and `j8framework` depends on no layer.
 
 ### 🧹 Heap and handles
 
-The heap is the in-repository `crates/r8gc` (its proc macros are exported through `r8gc` itself): generational (bump allocation
+The heap is the in-repository `crates/j8gc` (its proc macros are exported through `j8gc` itself): generational (bump allocation
 in the young generation, minor collections copy and promote), moving (sparse pages are evacuated and compacted), with incremental
 marking; marking, minor collections, sweeping and compaction run in parallel on the platform's thread pool. Brand lifetimes, no `'static`.
 
-- `Platform`'s supertrait is `r8gc::Pool` (`threads` / `run`): background tasks and the GC share one pool (`DefaultPlatform`'s moremath `ThreadMulti`)
+- `Platform`'s supertrait is `j8gc::Pool` (`threads` / `run`): background tasks and the GC share one pool (`DefaultPlatform`'s moremath `ThreadMulti`)
 - Collection only happens outside `enter`, when every `Gc` is under a root, so objects can move: ⛔ storing a `Gc` or an object address anywhere that
   is not traversed by `Collect` (`Static`, side caches); anything hashed by address (the indexes of Map / Set) is updated in `relocate` (see `Collection`)
 - Large containers would be rescanned whole on every minor collection: `Collection` remembers "where the entries written since last time start", and a
@@ -115,13 +115,13 @@ marking; marking, minor collections, sweeping and compaction run in parallel on 
 - `Isolate::enter(|scope| …)` enters once, and `'gc` is the brand of that entry; nothing is collected during the closure, and after it returns collection proceeds incrementally according to the debt
 - `Engine::eval` takes `&mut Isolate` and enters in slices itself: at most ten thousand instructions per slice; when it stops, the execution state is put under a root, and when `enter` returns a step of collection runs before execution continues. The execution context survives across slices as a `ContextRoot` (JS re-entered from a host function runs to completion within the current slice)
 - `Value<'gc>` is V8's Local: it cannot leave the closure, guaranteed at compile time
-- `Global` is a persistent handle (an r8gc `DynamicRoot`) that lives across many `enter`s and is released on drop
+- `Global` is a persistent handle (an j8gc `DynamicRoot`) that lives across many `enter`s and is released on drop
 
 ```rust
-use r8builtins::Builtins;
-use r8executor::Executor;
-use r8framework::{CreateParams, Isolate, Source};
-use r8platform::DefaultPlatform;
+use j8builtins::Builtins;
+use j8executor::Executor;
+use j8framework::{CreateParams, Isolate, Source};
+use j8platform::DefaultPlatform;
 
 let platform = DefaultPlatform::default();
 let mut isolate = Isolate::new(&platform, CreateParams::default());
@@ -136,21 +136,21 @@ isolate.enter(|scope| {
 Checking `no_std`:
 
 ```sh
-cargo build --target riscv64gc-unknown-none-elf -p r8framework -p r8virtasm -p r8executor --no-default-features
+cargo build --target riscv64gc-unknown-none-elf -p j8framework -p j8virtasm -p j8executor --no-default-features
 ```
 
 ## 🧬 JIT (tier one)
 
-`dune --jit a.js` turns the JIT on; `R8_TEST262_JIT=1 cargo test -p dune --test test262` runs the baseline with the JIT on (every function is compiled on its first call, every loop on its first back edge).
+`dune --jit a.js` turns the JIT on; `J8_TEST262_JIT=1 cargo test -p dune --test test262` runs the baseline with the JIT on (every function is compiled on its first call, every loop on its first back edge).
 
-- `r8compiler` (`no_std`): bytecode function ⇒ MLIR (`llvm` dialect) ⇒ mlirpass `target.x86_64` ⇒ x86-64 machine code (one `Compiler` is built and reused, loading only the builtin and `llvm` dialects).
-  The machine code is `extern "C" fn(regs, acc, start) -> u64` and reads and writes the frame's register file and accumulator `Value`s directly (layout in `r8framework::ValueTag`: 16 bytes, tag in the first byte, payload from byte 8);
-  `start` 0 enters at the top of the function, `h + 1` enters at loop header `h` (OSR); returning 0 means the function returned, `pc + 1` means it stopped before instruction pc (`r8executor::Exit`) and the interpreter carries on from there
+- `j8compiler` (`no_std`): bytecode function ⇒ MLIR (`llvm` dialect) ⇒ mlirpass `target.x86_64` ⇒ x86-64 machine code (one `Compiler` is built and reused, loading only the builtin and `llvm` dialects).
+  The machine code is `extern "C" fn(regs, acc, start) -> u64` and reads and writes the frame's register file and accumulator `Value`s directly (layout in `j8framework::ValueTag`: 16 bytes, tag in the first byte, payload from byte 8);
+  `start` 0 enters at the top of the function, `h + 1` enters at loop header `h` (OSR); returning 0 means the function returned, `pc + 1` means it stopped before instruction pc (`j8executor::Exit`) and the interpreter carries on from there
 - Instructions in tier one: register reads and writes, number / boolean constants, arithmetic (remainder, exponentiation and bitwise operations call runtime functions) and comparisons, `++` / `--`, jumps, TDZ checks, returns;
   when a fast-path precondition fails (an operand is not a number, say) it falls back to the interpreter; for any other instruction (calls, properties, closures …) the machine code stops before it and hands over to the interpreter
 - A function that can run entirely in machine code runs it on frame entry; any other function is only entered at loop headers whose loop body hands nothing to the interpreter (OSR; entered midway, a `return` is also handed back to the interpreter to finish);
   functions with neither are not compiled
-- `r8jit` (std, x86-64 Unix): implements the executor's `Tier` (`Executor::with_tier`): compiles once the call count passes a threshold (100 by default) or the loop iterations pass 10× the threshold,
+- `j8jit` (std, x86-64 Unix): implements the executor's `Tier` (`Executor::with_tier`): compiles once the call count passes a threshold (100 by default) or the loop iterations pass 10× the threshold,
   `mmap`s executable memory and fills in runtime function addresses; the executor remembers functions answered with `Tiered::Never` and never asks again
 - The register file and accumulator are local variables inside the machine code (a pair of `llvm.alloca` per register: tag and payload): read from the frame once on entry, written back to the frame through one shared write-back block on every exit;
   before leaving MLIR it runs mlirpass `llvm.func(mem2reg, canonicalize, cse)`, so the locals become SSA values passed between blocks as block arguments
@@ -161,7 +161,7 @@ cargo build --target riscv64gc-unknown-none-elf -p r8framework -p r8virtasm -p r
 
 An accumulator register machine (like V8's Ignition): results go into the implicit `acc`, and binary operations are `acc = reg op acc`.
 
-The instructions and every r8virtasm enum (`Insn` / `Constant` / `FunctionKind` / `PropertyKind`) are defined in `crates/r8virtasm/insn.json` and generated by `r8macros::enums!`; ⛔ hand-written enums. Adding an instruction only touches the JSON (fields of type `Label` get jump targets computed automatically and go into `target_mut`).
+The instructions and every j8virtasm enum (`Insn` / `Constant` / `FunctionKind` / `PropertyKind`) are defined in `crates/j8virtasm/insn.json` and generated by `j8macros::enums!`; ⛔ hand-written enums. Adding an instruction only touches the JSON (fields of type `Label` get jump targets computed automatically and go into `target_mut`).
 
 ### Assembling / disassembling
 
@@ -176,7 +176,7 @@ fn#0 "main" normal sloppy params 0 length 0 regs 3
   @1    return
 ```
 
-An instruction is written the same way `Display` prints it: `Insn` has `asm` turned on in insn.json, so `r8macros::enums!` also generates `FromStr for Insn`, and adding an instruction does not touch the assembler.
+An instruction is written the same way `Display` prints it: `Insn` has `asm` turned on in insn.json, so `j8macros::enums!` also generates `FromStr for Insn`, and adding an instruction does not touch the assembler.
 
 - Calling convention: `r0` is `this`, `r1` is the callee itself (named function expressions recurse through it), parameters start at `r2`; a `Call`'s callee, `this` and arguments sit in consecutive registers
 - Scopes: a pre-pass before compiling (`Resolver` in `scope.rs`) finds bindings captured by inner functions and puts them on the heap `Env` chain (`PushEnv` / `PopEnv` / `LdaEnv depth.slot`), the rest go in registers; `for (let …)` does a `CloneEnv` every iteration so each closure gets its own iteration
@@ -186,7 +186,7 @@ An instruction is written the same way `Display` prints it: `Insn` has `asm` tur
 - The executor uses an explicit frame stack (no host recursion), with a call depth limit of 10000 (including JS re-entered from host functions); going over throws a RangeError
 - Exceptions: one dynamic handler stack per frame (`PushHandler` / `PopHandler`); a throw pops this frame's handler, or unwinds to the caller if there is none; `finally` uses a (completion type, value) register pair, and a `return` / `break` / `continue` passing through it detours into it first and then carries on
 
-The `javascript_semantics` test in `r8executor` is a table of JS semantics, each entry certain.
+The `javascript_semantics` test in `j8executor` is a table of JS semantics, each entry certain.
 
 ## 📋 Status
 
@@ -200,7 +200,7 @@ Supported:
 - Function declarations / expressions / arrow functions (lexical `this`), closures, `this` in method calls
 - Property reads and writes (array indexes and `length`, string indexes and `length`, prototype chain reads)
 - `try` / `catch` / `finally` (`return` / `break` / `continue` inside `finally` and jumps through `finally` all follow the spec), Error objects (`Error` / `TypeError` / `ReferenceError` / `RangeError` / `SyntaxError`)
-- Builtins (r8builtins) and host functions, `console.log` (through `Platform::print`), ToPrimitive (`valueOf` / `toString`)
+- Builtins (j8builtins) and host functions, `console.log` (through `Platform::print`), ToPrimitive (`valueOf` / `toString`)
 - `new`, classes (constructors, methods, static methods, getters / setters, `extends` / `super(...)` / `super.m()`, instance and static fields, inheriting from host constructors such as `Error`), methods and getters / setters in object literals
 - Property attributes (enumerable / writable / configurable), `Object.defineProperty` / `freeze`, `instanceof` / `in` / `delete`
 - Rest / default parameters, spread (array / call / `new` / `super` / object), destructuring (declarations / assignment / parameters / `catch`, with defaults and rest), optional chaining `?.`
@@ -230,13 +230,13 @@ Known deviation: JS re-entered from a host function (the callback of `map`, say)
 
 ```sh
 cargo test -p dune --test test262 -- language/expressions/addition built-ins/Math   # run these directories
-R8_TEST262_JIT=1 cargo test -p dune --test test262                                   # with the JIT on (every function compiled on its first call)
-R8_TEST262_VERBOSE=1 cargo test -p dune --test test262 -- <path>                    # list why each failing test failed
-R8_TEST262_UPDATE=1 cargo test -p dune --test test262 -- <path>                     # write the results back to the baseline
+J8_TEST262_JIT=1 cargo test -p dune --test test262                                   # with the JIT on (every function compiled on its first call)
+J8_TEST262_VERBOSE=1 cargo test -p dune --test test262 -- <path>                    # list why each failing test failed
+J8_TEST262_UPDATE=1 cargo test -p dune --test test262 -- <path>                     # write the results back to the baseline
 cargo test -p dune --test test262                                                   # run only the baseline tests, fail if any drops
 ```
 
-- One subprocess per test with a 10 s timeout; results are pass / fail / unsupported (r8 reported `Error::Unsupported`) / skip / timeout / crash, summarized by directory
+- One subprocess per test with a 10 s timeout; results are pass / fail / unsupported (j8 reported `Error::Unsupported`) / skip / timeout / crash, summarized by directory
 - The baseline `tests/test262.passing`: one passing test per line; with no arguments only these run, as a regression check
 - Only sloppy mode runs (`onlyStrict` runs strict); `module` is skipped; there is no `$262` host object; line numbers in errors for unsupported syntax include the prepended harness
 
@@ -252,7 +252,7 @@ cargo test -p dune --test test262                                               
 
 ## 📄 License
 
-MIT. The API shape of `crates/r8gc` comes from [gc-arena](https://github.com/kyren/gc-arena) (see `crates/r8gc/LICENSE-gc-arena`).
+MIT. The API shape of `crates/j8gc` comes from [gc-arena](https://github.com/kyren/gc-arena) (see `crates/j8gc/LICENSE-gc-arena`).
 
 <div align="center">
 

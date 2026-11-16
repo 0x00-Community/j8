@@ -1,7 +1,7 @@
 use std::io::{BufRead, Write};
 use std::process::ExitCode;
 
-use r8framework::Source;
+use j8framework::Source;
 
 use crate::session::{Outcome, Session};
 
@@ -27,7 +27,7 @@ impl TryFrom<&str> for Command {
 impl Session<'_, '_> {
     /// One piece of source per line, all sharing one global object; ends at EOF (Ctrl-D) or `.exit`.
     pub fn repl(&mut self) -> ExitCode {
-        println!("dune {} (r8). .help lists commands, Ctrl-D exits", env!("CARGO_PKG_VERSION"));
+        println!("dune {} (j8). .help lists commands, Ctrl-D exits", env!("CARGO_PKG_VERSION"));
         let mut lines = std::io::stdin().lock().lines();
         loop {
             print!("> ");

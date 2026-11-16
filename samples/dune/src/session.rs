@@ -1,8 +1,8 @@
 use std::process::ExitCode;
 
-use r8builtins::Builtins;
-use r8executor::Executor;
-use r8framework::{ContextRoot, Error, Global, Isolate, Source};
+use j8builtins::Builtins;
+use j8executor::Executor;
+use j8framework::{ContextRoot, Error, Global, Isolate, Source};
 
 /// The result of running a piece of source, already converted to text via ToString.
 pub enum Outcome {
@@ -36,7 +36,7 @@ pub struct Session<'s, 'p> {
 impl<'s, 'p> Session<'s, 'p> {
     /// New environment: built-in objects, node-style globals (`process` / `__dune`), prelude (`require`).
     pub fn new(isolate: &'s mut Isolate<'p>, script: &str, args: &[String], jit: bool) -> Self {
-        let executor = if jit { Executor::default().with_tier(std::rc::Rc::new(r8jit::Jit::default())) } else { Executor::default() };
+        let executor = if jit { Executor::default().with_tier(std::rc::Rc::new(j8jit::Jit::default())) } else { Executor::default() };
         let cx = isolate.enter(|scope| scope.persist(scope.context(&Builtins)));
         isolate.enter(|scope| {
             let realm = scope.context_of(&cx);

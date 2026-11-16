@@ -1,0 +1,19 @@
+[package]
+name = "j8gc-macros"
+description = "Procedural macros for j8gc: #[derive(Collect)] and others"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full", "visit-mut"] }
+synstructure = "0.13"
+
+[lints]
+workspace = true

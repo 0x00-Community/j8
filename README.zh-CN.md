@@ -1,7 +1,7 @@
 <a id="top"></a>
 <div align="center">
 
-# r8
+# j8
 
 ### 用 Rust 重写 V8.
 **字节码解释器 + 经 MLIR 的 JIT + 自研的分代并行 GC, 尽可能 `no_std`.**
@@ -22,14 +22,14 @@
 
 ---
 
-## ⚡ r8 是什么
+## ⚡ j8 是什么
 
-r8 是**用 Rust 从头写的 JavaScript 引擎**, 照着 V8 的分层来: 所有 JS 先编成累加器式字节码 (同 V8 Ignition),
-由执行器解释, 热函数和热循环交给 JIT 出 x86-64 机器码. 堆是仓库里自己的 GC (`crates/r8gc`).
+j8 是**用 Rust 从头写的 JavaScript 引擎**, 照着 V8 的分层来: 所有 JS 先编成累加器式字节码 (同 V8 Ignition),
+由执行器解释, 热函数和热循环交给 JIT 出 x86-64 机器码. 堆是仓库里自己的 GC (`crates/j8gc`).
 
 🎯 **主线:** test262 通过率. 核心 ECMAScript 按 [PLAN.md](PLAN.md) 逐阶段补齐, 每一步跑基线零回归.
 
-🧩 **可嵌入:** `#[r8::class]` / `#[r8::object]` / `#[r8::function]` 一行把 Rust 类型绑成 JS; 自带 node 式运行时 `dune`
+🧩 **可嵌入:** `#[j8::class]` / `#[j8::object]` / `#[j8::function]` 一行把 Rust 类型绑成 JS; 自带 node 式运行时 `dune`
 和 Cloudflare Worker 式运行时 `workerd` 两个样例.
 
 ## 🔥 凭什么不一样
@@ -48,7 +48,7 @@ r8 是**用 Rust 从头写的 JavaScript 引擎**, 照着 V8 的分层来: 所�
 | ✔️ 项目 | 结果 |
 | --- | --- |
 | 📜 test262 基线 | **42,443** 条通过 (非严格 + `onlyStrict`; 不含 Temporal / intl402 等, 见 PLAN.md), 每次提交零回归 |
-| 🧮 JIT | `R8_TEST262_JIT=1` 开着 JIT (每个函数第一次调用就编) 跑同一份基线 |
+| 🧮 JIT | `J8_TEST262_JIT=1` 开着 JIT (每个函数第一次调用就编) 跑同一份基线 |
 | ⏱️ 对 V8 jitless | 11 个基准几何平均慢 **3.7×**, 校验和三种引擎全一致 |
 | 🚄 对 V8 (带 JIT) | 几何平均慢 **9.4×**; 差距主要在调用和分配, 详见 [benchmark.md](samples/benchv8/benchmark.md) |
 
@@ -65,7 +65,7 @@ cargo run --release -p dune -- --jit a.js       # 开 JIT
 cargo run -p workerd -- samples/workerd/examples/counter.js --bind COUNTER=Counter --request "GET /c/inc?name=a"
 
 # 🔬 看字节码
-cargo run -p r8debugger -- disasm -e 'let s = 0; for (let i = 0; i < 10; i++) s += i; s'
+cargo run -p j8debugger -- disasm -e 'let s = 0; for (let i = 0; i < 10; i++) s += i; s'
 
 # 📜 test262 回归 (先 git submodule update --init)
 cargo test --release -p dune --test test262
@@ -78,30 +78,30 @@ cd samples/benchv8 && cargo run --release
 
 | crate | std | 职责 |
 |---|---|---|
-| `r8framework` | `no_std` | 核心框架层：定义 trait（`Platform`、`Engine`、`Invoke`、`Intrinsics`）与通用结构体 / 枚举（`Isolate`、`Scope`、`Agent`、`Context`·`Realm`、`Global`、`Value`、`JsString`·`JsObject`、`Profiler`、`BinaryOp`、`Error`……），JS 运算语义挂在 `Agent` 上，实现归各层 crate |
-| `r8`（仓库根 `src/`） | `no_std` | 聚合导出：`#[r8::class]` / `#[r8::object]` / `#[r8::function]`（宏在 r8macros，见 `crates/macros/USAGE.md`）与 r8binding 的 trait |
-| `r8binding` | `no_std` | Rust ⇄ JS 绑定的运行时：`FromJs` / `IntoJs`、宿主对象、`Class` / `Object` |
-| `r8builtins` | `no_std` | 实现 `Intrinsics`：往 `Realm` 装 Object / Function / Array / String / Number / Boolean / Math / Error 系列 / `console` / `parseInt` 等 |
-| `r8platform` | std | 实现 `Platform`（`DefaultPlatform`）：后台任务与 GC 跑在 moremath `ThreadMulti` 线程池上（起一次复用、任务可借用调用方数据，经 `r8gc::Pool`），时钟用 `Instant` |
-| `r8virtasm` | `no_std`（`compile` 要 std） | 虚拟指令集：累加器式寄存器字节码（`Insn` / `Function` / `Module`）；反汇编 `module.to_string()`、汇编 `text.parse::<Module>()`，互为逆；`compile` feature（缺省开）带 JS ⇒ 字节码编译器 `Module::try_from(&Source)`，用 oxc 解析 |
-| `r8gc` | `no_std`（`std` feature 缺省开） | 堆：分代、可移动、并行的 GC，`'gc` 品牌生命周期，回收跑在平台线程池上（见下「堆与句柄」）；`#[derive(Collect)]` 由 `r8gc::Collect` 暴露（过程宏实现在 `crates/r8gc/macros`，只被 r8gc 依赖） |
-| `r8taskqueue` | `no_std` | 任务队列：`ITask`（`recursable` / `depend` / `exec`）与 `ITaskPoll`（`add` / `run`）；无锁数据流调度（手写 MPMC 就绪队列、原子依赖计数），依赖做完的任务立刻在 moremath `Executor`（宿主给 `ThreadMulti`）上并行跑、没有轮次屏障；`TaskId::family` 并查集找爹、`cancel` 整家取消；配额按字节码条数（`Quota` / `Flow::Yield`、每次 run 的预算） |
-| `r8macros` | proc-macro | 过程宏：`enums!("x.json")` 从 JSON 生成枚举（定义、`Display`、按字段类型取 `&mut`），用法见 `crates/macros/USAGE.md` |
-| `samples/dune` | std | 基于 r8 的 node 式二进制（`require` / `module` / `fs` / `path` / `process`，原生部分用 `#[r8::object]` 绑定）：`dune a.js` / `dune run a.js`（`-` 读标准输入）、`dune -e '<js>'`、`dune -p '<js>'` 打印结果、不带参数进 REPL（`.help` / `.exit`）；没接住的异常打 `Uncaught …` 退出码 1 |
-| `samples/workerd` | std | 用 r8 加载 Cloudflare Worker（ES 模块 `export default { fetch }`）与 Durable Object：`workerd examples/counter.js --bind COUNTER=Counter --request "GET /c/inc?name=a"` 或 `--port 8787` 起 HTTP 服务；Fetch API 子集与 DO 在 JS 序言里，存储是 `#[r8::class]` 绑定的 Rust KV |
-| `samples/benchv8` | std | 同一组 JS 基准在 r8 与 V8（rusty_v8 152，带 JIT / `--jitless`）上的耗时对比：`cd samples/benchv8 && cargo run --release`；依赖 V8 预编译库，自成 workspace（根 workspace 已 exclude） |
-| `r8debugger` | std | 调试命令行 `r8dbg`（clap）：`r8dbg disasm <file.js \| ->` / `r8dbg disasm -e '<js>'` 打印反汇编清单；`r8dbg asm <file.r8s \| ->` 汇编清单、打印规范化后的清单（`-o` 写文件） |
-| `r8executor` | `no_std`（`compile` 要 std） | 字节码执行器 `Executor`，**目前是最后一层**；`compile` feature 下实现 `Engine` |
+| `j8framework` | `no_std` | 核心框架层：定义 trait（`Platform`、`Engine`、`Invoke`、`Intrinsics`）与通用结构体 / 枚举（`Isolate`、`Scope`、`Agent`、`Context`·`Realm`、`Global`、`Value`、`JsString`·`JsObject`、`Profiler`、`BinaryOp`、`Error`……），JS 运算语义挂在 `Agent` 上，实现归各层 crate |
+| `j8`（仓库根 `src/`） | `no_std` | 聚合导出：`#[j8::class]` / `#[j8::object]` / `#[j8::function]`（宏在 j8macros，见 `crates/macros/USAGE.md`）与 j8binding 的 trait |
+| `j8binding` | `no_std` | Rust ⇄ JS 绑定的运行时：`FromJs` / `IntoJs`、宿主对象、`Class` / `Object` |
+| `j8builtins` | `no_std` | 实现 `Intrinsics`：往 `Realm` 装 Object / Function / Array / String / Number / Boolean / Math / Error 系列 / `console` / `parseInt` 等 |
+| `j8platform` | std | 实现 `Platform`（`DefaultPlatform`）：后台任务与 GC 跑在 moremath `ThreadMulti` 线程池上（起一次复用、任务可借用调用方数据，经 `j8gc::Pool`），时钟用 `Instant` |
+| `j8virtasm` | `no_std`（`compile` 要 std） | 虚拟指令集：累加器式寄存器字节码（`Insn` / `Function` / `Module`）；反汇编 `module.to_string()`、汇编 `text.parse::<Module>()`，互为逆；`compile` feature（缺省开）带 JS ⇒ 字节码编译器 `Module::try_from(&Source)`，用 oxc 解析 |
+| `j8gc` | `no_std`（`std` feature 缺省开） | 堆：分代、可移动、并行的 GC，`'gc` 品牌生命周期，回收跑在平台线程池上（见下「堆与句柄」）；`#[derive(Collect)]` 由 `j8gc::Collect` 暴露（过程宏实现在 `crates/j8gc/macros`，只被 j8gc 依赖） |
+| `j8taskqueue` | `no_std` | 任务队列：`ITask`（`recursable` / `depend` / `exec`）与 `ITaskPoll`（`add` / `run`）；无锁数据流调度（手写 MPMC 就绪队列、原子依赖计数），依赖做完的任务立刻在 moremath `Executor`（宿主给 `ThreadMulti`）上并行跑、没有轮次屏障；`TaskId::family` 并查集找爹、`cancel` 整家取消；配额按字节码条数（`Quota` / `Flow::Yield`、每次 run 的预算） |
+| `j8macros` | proc-macro | 过程宏：`enums!("x.json")` 从 JSON 生成枚举（定义、`Display`、按字段类型取 `&mut`），用法见 `crates/macros/USAGE.md` |
+| `samples/dune` | std | 基于 j8 的 node 式二进制（`require` / `module` / `fs` / `path` / `process`，原生部分用 `#[j8::object]` 绑定）：`dune a.js` / `dune run a.js`（`-` 读标准输入）、`dune -e '<js>'`、`dune -p '<js>'` 打印结果、不带参数进 REPL（`.help` / `.exit`）；没接住的异常打 `Uncaught …` 退出码 1 |
+| `samples/workerd` | std | 用 j8 加载 Cloudflare Worker（ES 模块 `export default { fetch }`）与 Durable Object：`workerd examples/counter.js --bind COUNTER=Counter --request "GET /c/inc?name=a"` 或 `--port 8787` 起 HTTP 服务；Fetch API 子集与 DO 在 JS 序言里，存储是 `#[j8::class]` 绑定的 Rust KV |
+| `samples/benchv8` | std | 同一组 JS 基准在 j8 与 V8（rusty_v8 152，带 JIT / `--jitless`）上的耗时对比：`cd samples/benchv8 && cargo run --release`；依赖 V8 预编译库，自成 workspace（根 workspace 已 exclude） |
+| `j8debugger` | std | 调试命令行 `j8dbg`（clap）：`j8dbg disasm <file.js \| ->` / `j8dbg disasm -e '<js>'` 打印反汇编清单；`j8dbg asm <file.j8s \| ->` 汇编清单、打印规范化后的清单（`-o` 写文件） |
+| `j8executor` | `no_std`（`compile` 要 std） | 字节码执行器 `Executor`，**目前是最后一层**；`compile` feature 下实现 `Engine` |
 
 所有 JS 都先编成字节码再执行，不设 AST 解释层。
-依赖方向：各层只依赖 `r8framework`（`r8executor` 另依赖 `r8virtasm`），`r8framework` 不依赖任何层。
+依赖方向：各层只依赖 `j8framework`（`j8executor` 另依赖 `j8virtasm`），`j8framework` 不依赖任何层。
 
 ### 🧹 堆与句柄
 
-堆用仓库内的 `crates/r8gc`（过程宏经 `r8gc` 本身导出）：分代（新生代碰撞分配、次回收复制提升）、
+堆用仓库内的 `crates/j8gc`（过程宏经 `j8gc` 本身导出）：分代（新生代碰撞分配、次回收复制提升）、
 可移动（稀疏页搬空压缩）、增量标记，标记 / 次回收 / 清扫 / 压缩在平台的线程池上并行；品牌生命周期，无 `'static`。
 
-- `Platform` 的父 trait 是 `r8gc::Pool`（`threads` / `run`）：后台任务与 GC 共用一个池（`DefaultPlatform` 的 moremath `ThreadMulti`）
+- `Platform` 的父 trait 是 `j8gc::Pool`（`threads` / `run`）：后台任务与 GC 共用一个池（`DefaultPlatform` 的 moremath `ThreadMulti`）
 - 回收只在 `enter` 之外发生，那时所有 `Gc` 都在根下面，所以对象能搬：⛔ 在不经 `Collect` 遍历的地方（`Static`、旁路缓存）存 `Gc` 或对象地址；
   按地址哈希的（Map / Set 的索引）在 `relocate` 里跟着改（见 `Collection`）
 - 大容器在次回收里会整个重扫：`Collection` 记着「上次以来写过的条目从哪开始」，次回收只看那以后的（`Relocate::young_only`）
@@ -109,13 +109,13 @@ cd samples/benchv8 && cargo run --release
 - `Isolate::enter(|scope| …)` 进入一次，`'gc` 是这次进入的品牌；闭包期间不回收，返回后按欠账增量回收
 - `Engine::eval` 拿 `&mut Isolate` 自己分片进入：每片最多一万条指令，停下时执行状态挂到根上、`enter` 返回时回收一段再接着跑；执行环境用 `ContextRoot` 跨片保留（宿主函数里重入的 JS 在当前片里跑完）
 - `Value<'gc>` 就是 V8 的 Local：出不了闭包，编译期保证
-- `Global` 是持久句柄（r8gc `DynamicRoot`），跨多次 `enter` 存活，drop 即放掉
+- `Global` 是持久句柄（j8gc `DynamicRoot`），跨多次 `enter` 存活，drop 即放掉
 
 ```rust
-use r8builtins::Builtins;
-use r8executor::Executor;
-use r8framework::{CreateParams, Isolate, Source};
-use r8platform::DefaultPlatform;
+use j8builtins::Builtins;
+use j8executor::Executor;
+use j8framework::{CreateParams, Isolate, Source};
+use j8platform::DefaultPlatform;
 
 let platform = DefaultPlatform::default();
 let mut isolate = Isolate::new(&platform, CreateParams::default());
@@ -130,21 +130,21 @@ isolate.enter(|scope| {
 验证 `no_std`：
 
 ```sh
-cargo build --target riscv64gc-unknown-none-elf -p r8framework -p r8virtasm -p r8executor --no-default-features
+cargo build --target riscv64gc-unknown-none-elf -p j8framework -p j8virtasm -p j8executor --no-default-features
 ```
 
 ## 🧬 JIT（第一档）
 
-`dune --jit a.js` 开 JIT；`R8_TEST262_JIT=1 cargo test -p dune --test test262` 开着 JIT（每个函数第一次调用、每个循环第一次往回跳就编）跑基线。
+`dune --jit a.js` 开 JIT；`J8_TEST262_JIT=1 cargo test -p dune --test test262` 开着 JIT（每个函数第一次调用、每个循环第一次往回跳就编）跑基线。
 
-- `r8compiler`（`no_std`）：字节码函数 ⇒ MLIR（`llvm` 方言）⇒ mlirpass `target.x86_64` ⇒ x86-64 机器码（`Compiler` 建一次反复用，只装 builtin 与 `llvm` 方言）。
-  机器码是 `extern "C" fn(regs, acc, start) -> u64`，直接读写本帧寄存器文件与累加器里的 `Value`（布局见 `r8framework::ValueTag`：16 字节、首字节标签、第 8 字节起载荷）；
-  `start` 是 0 从函数开头进、`h + 1` 从循环头 `h` 进（OSR）；返回 0 是函数返回了，`pc + 1` 是停在第 pc 条指令之前（`r8executor::Exit`），解释器从那里接着跑
+- `j8compiler`（`no_std`）：字节码函数 ⇒ MLIR（`llvm` 方言）⇒ mlirpass `target.x86_64` ⇒ x86-64 机器码（`Compiler` 建一次反复用，只装 builtin 与 `llvm` 方言）。
+  机器码是 `extern "C" fn(regs, acc, start) -> u64`，直接读写本帧寄存器文件与累加器里的 `Value`（布局见 `j8framework::ValueTag`：16 字节、首字节标签、第 8 字节起载荷）；
+  `start` 是 0 从函数开头进、`h + 1` 从循环头 `h` 进（OSR）；返回 0 是函数返回了，`pc + 1` 是停在第 pc 条指令之前（`j8executor::Exit`），解释器从那里接着跑
 - 第一档收的指令：寄存器读写、数 / 布尔常量、四则（取余、乘方、位运算调运行时函数）与比较、`++` / `--`、跳转、死区检查、返回；
   操作数不是数等快路前提不成立就退回解释器；别的指令（调用、属性、闭包……）机器码停在它之前交给解释器
 - 能整体在机器码里跑的函数进帧时就跑；别的函数只从「循环体里没有交给解释器的指令」的循环头切进去（OSR，从中途进的遇到 `return` 也交回解释器收尾）；
   两样都没有的函数不编
-- `r8jit`（std，x86-64 Unix）：实现执行器的 `Tier`（`Executor::with_tier`）：调用次数过阈值（缺省 100）或循环圈数过 10 倍阈值就编、
+- `j8jit`（std，x86-64 Unix）：实现执行器的 `Tier`（`Executor::with_tier`）：调用次数过阈值（缺省 100）或循环圈数过 10 倍阈值就编、
   `mmap` 成可执行内存、填运行时函数地址；回答 `Tiered::Never` 的函数执行器记下、以后不再问
 - 寄存器文件与累加器在机器码里是局部变量（每个寄存器一对 `llvm.alloca`：标签、载荷）：进来时从帧读一次、所有出口经同一个写回块写回帧；
   出机器码前跑 mlirpass `llvm.func(mem2reg, canonicalize, cse)`，局部变量提成 SSA，块之间按块参数传值
@@ -155,7 +155,7 @@ cargo build --target riscv64gc-unknown-none-elf -p r8framework -p r8virtasm -p r
 
 累加器式寄存器机（同 V8 Ignition）：结果都进隐式的 `acc`，二元运算 `acc = reg op acc`。
 
-指令与 r8virtasm 的全部枚举（`Insn` / `Constant` / `FunctionKind` / `PropertyKind`）定义在 `crates/r8virtasm/insn.json`，由 `r8macros::enums!` 生成，⛔ 手写枚举；加指令只改 JSON（带 `Label` 字段的自动算跳转，进 `target_mut`）。
+指令与 j8virtasm 的全部枚举（`Insn` / `Constant` / `FunctionKind` / `PropertyKind`）定义在 `crates/j8virtasm/insn.json`，由 `j8macros::enums!` 生成，⛔ 手写枚举；加指令只改 JSON（带 `Label` 字段的自动算跳转，进 `target_mut`）。
 
 ### 汇编 / 反汇编
 
@@ -170,7 +170,7 @@ fn#0 "main" normal sloppy params 0 length 0 regs 3
   @1    return
 ```
 
-一条指令的写法与 `Display` 同源：insn.json 里 `Insn` 开了 `asm`，`r8macros::enums!` 一并生成 `FromStr for Insn`，加指令不用改汇编器。
+一条指令的写法与 `Display` 同源：insn.json 里 `Insn` 开了 `asm`，`j8macros::enums!` 一并生成 `FromStr for Insn`，加指令不用改汇编器。
 
 - 调用约定：`r0` 是 `this`，`r1` 是被调函数本身（具名函数表达式靠它递归），形参从 `r2` 起；`Call` 的被调者、`this`、实参排在连续寄存器
 - 作用域：编译前预扫一遍（`scope.rs` 的 `Resolver`），找出被内层函数捕获的绑定放进堆上的 `Env` 链（`PushEnv` / `PopEnv` / `LdaEnv depth.slot`），其余放寄存器；`for (let …)` 每轮 `CloneEnv`，闭包各拿各的那一轮
@@ -180,7 +180,7 @@ fn#0 "main" normal sloppy params 0 length 0 regs 3
 - 执行器用显式帧栈（不靠宿主递归），调用深度上限 10000（含宿主函数里重入的 JS），超了抛 RangeError
 - 异常：每帧一个动态处理器栈（`PushHandler` / `PopHandler`），抛出时弹本帧处理器、没有就展开到调用者；`finally` 用（完成类型, 值）寄存器对，穿过它的 `return` / `break` / `continue` 先绕进去再接着走
 
-`r8executor` 里的 `javascript_semantics` 测试是一张逐条确定的 JS 语义表。
+`j8executor` 里的 `javascript_semantics` 测试是一张逐条确定的 JS 语义表。
 
 ## 📋 现状
 
@@ -194,7 +194,7 @@ fn#0 "main" normal sloppy params 0 length 0 regs 3
 - 函数声明 / 表达式 / 箭头函数（词法 `this`）、闭包、方法调用的 `this`
 - 属性读写（数组下标与 `length`、字符串下标与 `length`、原型链读）
 - `try` / `catch` / `finally`（`finally` 里的 `return` / `break` / `continue` 与穿过 `finally` 的跳转都按规范）、Error 对象（`Error` / `TypeError` / `ReferenceError` / `RangeError` / `SyntaxError`）
-- 内建对象（r8builtins）与宿主函数、`console.log`（经 `Platform::print`）、ToPrimitive（`valueOf` / `toString`）
+- 内建对象（j8builtins）与宿主函数、`console.log`（经 `Platform::print`）、ToPrimitive（`valueOf` / `toString`）
 - `new`、类（构造器、方法、静态方法、getter / setter、`extends` / `super(...)` / `super.m()`、实例与静态字段，可继承宿主构造器如 `Error`）、对象字面量的方法与 getter / setter
 - 属性特性（可枚举 / 可写 / 可配置）、`Object.defineProperty` / `freeze`、`instanceof` / `in` / `delete`
 - 剩余 / 默认参数、展开（数组 / 调用 / `new` / `super` / 对象）、解构（声明 / 赋值 / 形参 / `catch`，含默认值与剩余）、可选链 `?.`
@@ -224,13 +224,13 @@ fn#0 "main" normal sloppy params 0 length 0 regs 3
 
 ```sh
 cargo test -p dune --test test262 -- language/expressions/addition built-ins/Math   # 跑这些目录
-R8_TEST262_JIT=1 cargo test -p dune --test test262                                   # 开 JIT（每个函数第一次调用就编）对拍
-R8_TEST262_VERBOSE=1 cargo test -p dune --test test262 -- <路径>                    # 逐条列出没过的原因
-R8_TEST262_UPDATE=1 cargo test -p dune --test test262 -- <路径>                     # 结果写回基线
+J8_TEST262_JIT=1 cargo test -p dune --test test262                                   # 开 JIT（每个函数第一次调用就编）对拍
+J8_TEST262_VERBOSE=1 cargo test -p dune --test test262 -- <路径>                    # 逐条列出没过的原因
+J8_TEST262_UPDATE=1 cargo test -p dune --test test262 -- <路径>                     # 结果写回基线
 cargo test -p dune --test test262                                                   # 只跑基线里的用例，掉了就失败
 ```
 
-- 每个用例一个子进程、10 s 超时；结果分 pass / fail / unsupported（r8 报 `Error::Unsupported`）/ skip / timeout / crash，按目录汇总
+- 每个用例一个子进程、10 s 超时；结果分 pass / fail / unsupported（j8 报 `Error::Unsupported`）/ skip / timeout / crash，按目录汇总
 - 基线 `tests/test262.passing`：过了的用例一行一个；不带参数时只跑它做回归检查
 - 只跑非严格模式（`onlyStrict` 跑严格）；`module` 跳过；没有 `$262` 宿主对象；不支持写法的报错行号含拼进去的 harness
 
@@ -246,7 +246,7 @@ cargo test -p dune --test test262                                               
 
 ## 📄 许可证
 
-MIT. `crates/r8gc` 的 API 形状来自 [gc-arena](https://github.com/kyren/gc-arena) (见 `crates/r8gc/LICENSE-gc-arena`).
+MIT. `crates/j8gc` 的 API 形状来自 [gc-arena](https://github.com/kyren/gc-arena) (见 `crates/j8gc/LICENSE-gc-arena`).
 
 <div align="center">
 

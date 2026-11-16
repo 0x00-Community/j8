@@ -1,4 +1,4 @@
-# r8macros usage
+# j8macros usage
 
 ## `enums!("x.json")`
 
@@ -8,7 +8,7 @@ The caller is rebuilt automatically whenever the JSON changes (the generated cod
 are errors.
 
 ```rust
-r8macros::enums!("insn.json");
+j8macros::enums!("insn.json");
 ```
 
 Types used by the generated code (`Reg`, `Label`, `BinaryOp`, ...) must be in scope at the call site.
@@ -58,23 +58,23 @@ Types used by the generated code (`Reg`, `Label`, `BinaryOp`, ...) must be in sc
 
 An `Option<_>` field that is `None` is omitted entirely from `Display`.
 
-## Binding macros: `#[r8::class]` / `#[r8::object]` / `#[r8::function]`
+## Binding macros: `#[j8::class]` / `#[j8::object]` / `#[j8::function]`
 
 Each of the three macros has its own file (`class.rs` / `object.rs` / `function.rs`); the shared code that reads
 `#[js(…)]`, analyzes signatures and generates the conversion wrapper is in `method.rs`.
-Use them through the `r8` package at the repository root (`r8/src/lib.rs` re-exports the macros together with
-r8binding's traits); the generated code uses `::r8::` paths.
+Use them through the `j8` package at the repository root (`j8/src/lib.rs` re-exports the macros together with
+j8binding's traits); the generated code uses `::j8::` paths.
 
-### `#[r8::class]`: export a Rust type as a JS class
+### `#[j8::class]`: export a Rust type as a JS class
 
 Placed on an `impl` block: generates a conversion wrapper (`fn(agent, this, args) -> Result<Value>`) for each method
-and implements `r8::Class`. The type itself needs no changes; instances are host objects (`ObjectKind::Host`) holding a
+and implements `j8::Class`. The type itself needs no changes; instances are host objects (`ObjectKind::Host`) holding a
 Rust value.
 
 ```rust
 struct Counter { n: f64 }
 
-#[r8::class]                      // or #[r8::class("name")]; defaults to the type name
+#[j8::class]                      // or #[j8::class("name")]; defaults to the type name
 impl Counter {
     #[js(constructor)]            // `new Counter(…)`; a plain call throws a TypeError
     fn new(start: Option<f64>) -> Self { Self { n: start.unwrap_or(0.0) } }
@@ -94,12 +94,12 @@ let handle = Counter::install(&mut agent, global);     // global `Counter`; retu
 let obj = handle.instance(&agent, Counter { n: 1.0 });  // create an instance from Rust
 ```
 
-### `#[r8::object]`: export an `impl` block containing only associated functions as a plain object
+### `#[j8::object]`: export an `impl` block containing only associated functions as a plain object
 
 ```rust
 struct Fs;
 
-#[r8::object("fs")]
+#[j8::object("fs")]
 impl Fs {
     fn exists_sync(path: &str) -> bool { … }        // fs.existsSync
     #[js(getter)]
@@ -109,10 +109,10 @@ impl Fs {
 Fs::install(&mut agent, global);                    // global `fs`
 ```
 
-### `#[r8::function]`: export a function as a JS function
+### `#[j8::function]`: export a function as a JS function
 
 ```rust
-#[r8::function]                    // or #[r8::function("name")]
+#[j8::function]                    // or #[j8::function("name")]
 fn greet(name: &str) -> String { format!("hi {name}") }
 
 // The original function is kept; a module of the same name is generated next to it,
