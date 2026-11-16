@@ -10,7 +10,7 @@ use r8lockfree::PushList;
 
 use crate::collect::{Mover, Visit};
 use crate::header::{Claim, Flags, Ptr, SizeClass, VTable};
-use crate::heap::{Lab, NURSERY_LIMIT, Nursery, OldSpace};
+use crate::heap::{Lab, Memory, NURSERY_LIMIT, Nursery, OldSpace};
 use crate::parallel::{Pool, Work, Worker, split};
 use crate::{Collect, Metrics, Relocate, Trace};
 
@@ -366,6 +366,8 @@ impl Context {
         self.compact(pool, root);
         self.verify("after compact");
         self.threshold = MIN_HEAP.max(live * GROWTH);
+        // Pages emptied by this cycle have been handed back: give their memory to the OS
+        Memory::trim();
         self.metrics.major.fetch_add(1, Ordering::Relaxed);
     }
 

@@ -1,6 +1,6 @@
 //! The heap: young generation (per-block bump allocation), old generation (paged by size class, each page cut into
 //! slots at once + free lists), large objects (allocated separately).
-use alloc::alloc::{Layout, alloc, dealloc, handle_alloc_error};
+use alloc::alloc::{Layout, handle_alloc_error};
 use alloc::vec::Vec;
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicUsize, Ordering};
@@ -31,11 +31,83 @@ const SPARE_MIN: usize = 64;
 /// Keep at most this fraction (denominator) of the live page count as empty pages
 const SPARE_RATIO: usize = 4;
 
-/// Requests a block of `layout` from the global allocator; reports an allocation error on failure
-fn raw(layout: Layout) -> NonNull<u8> {
-    // SAFETY: sizes are never zero
-    NonNull::new(unsafe { alloc(layout) }).unwrap_or_else(|| handle_alloc_error(layout))
+/// Where the heap's memory comes from: with `std`, r8alloc (one reserved address range, lock-free, tied to no
+/// thread); without it, the global allocator. Young-generation chunks and old-generation pages are both one block.
+pub(crate) struct Memory;
+
+impl Memory {
+    /// The layout of a block: young-generation chunks and old-generation pages share it
+    const BLOCK: Layout = match Layout::from_size_align(PAGE, PAGE) {
+        Ok(l) => l,
+        Err(_) => panic!("block layout"),
+    };
+
+    /// A fresh block ([`Memory::BLOCK`]); reports an allocation error on failure
+    fn block() -> NonNull<u8> {
+        #[cfg(feature = "std")]
+        let p = r8alloc::R8Alloc::pages(1);
+        #[cfg(not(feature = "std"))]
+        // SAFETY: the size is not zero
+        let p = NonNull::new(unsafe { alloc::alloc::alloc(Self::BLOCK) });
+        p.unwrap_or_else(|| handle_alloc_error(Self::BLOCK))
+    }
+
+    /// Returns a block.
+    ///
+    /// # Safety
+    /// `p` came from [`Memory::block`] and nothing lives in it any more.
+    unsafe fn free_block(p: NonNull<u8>) {
+        #[cfg(feature = "std")]
+        // SAFETY: the caller vouches it is one block from `pages(1)`
+        unsafe {
+            r8alloc::R8Alloc::free_pages(p, 1);
+        }
+        #[cfg(not(feature = "std"))]
+        // SAFETY: allocated with BLOCK
+        unsafe {
+            alloc::alloc::dealloc(p.as_ptr(), Self::BLOCK);
+        }
+    }
+
+    /// Memory for `layout` (large objects); reports an allocation error on failure
+    fn alloc(layout: Layout) -> NonNull<u8> {
+        #[cfg(feature = "std")]
+        // SAFETY: the size is not zero
+        let p = unsafe { core::alloc::GlobalAlloc::alloc(&r8alloc::R8Alloc, layout) };
+        #[cfg(not(feature = "std"))]
+        // SAFETY: the size is not zero
+        let p = unsafe { alloc::alloc::alloc(layout) };
+        NonNull::new(p).unwrap_or_else(|| handle_alloc_error(layout))
+    }
+
+    /// Returns memory from [`Memory::alloc`].
+    ///
+    /// # Safety
+    /// `p` came from `Memory::alloc(layout)` and is no longer used.
+    unsafe fn free(p: NonNull<u8>, layout: Layout) {
+        #[cfg(feature = "std")]
+        // SAFETY: the caller vouches
+        unsafe {
+            core::alloc::GlobalAlloc::dealloc(&r8alloc::R8Alloc, p.as_ptr(), layout);
+        }
+        #[cfg(not(feature = "std"))]
+        // SAFETY: the caller vouches
+        unsafe {
+            alloc::alloc::dealloc(p.as_ptr(), layout);
+        }
+    }
 }
+
+impl Memory {
+    /// Gives the memory of every freed block back to the OS (after a major collection)
+    pub(crate) fn trim() {
+        #[cfg(feature = "std")]
+        r8alloc::R8Alloc::trim();
+    }
+}
+
+#[cfg(feature = "std")]
+const _: () = assert!(PAGE == r8alloc::R8Alloc::PAGE && CHUNK == PAGE, "chunks and pages are one r8alloc page");
 
 /// The young generation: blocks handed out to the mutators' allocation buffers (lock-free: any number of mutators
 /// refill at once); a minor collection empties it all, while it is held exclusively.
@@ -50,14 +122,9 @@ pub(crate) struct Nursery {
 }
 
 impl Nursery {
-    const LAYOUT: Layout = match Layout::from_size_align(CHUNK, HEADER) {
-        Ok(l) => l,
-        Err(_) => panic!("chunk layout"),
-    };
-
     /// Hands out a fresh block as `[start, end)`
     pub(crate) fn refill(&self) -> (usize, usize) {
-        let c = self.spare.claim_one().map_or_else(|| raw(Self::LAYOUT), |b| b.0);
+        let c = self.spare.claim_one().map_or_else(Memory::block, |b| b.0);
         self.chunks.push(Block(c));
         self.used.fetch_add(CHUNK, Ordering::AcqRel);
         let start = c.as_ptr() as usize;
@@ -75,8 +142,8 @@ impl Nursery {
             if self.spare.len() < NURSERY_LIMIT / CHUNK {
                 self.spare.push(b);
             } else {
-                // SAFETY: allocated with LAYOUT, nothing lives in it any more
-                unsafe { dealloc(b.0.as_ptr(), Self::LAYOUT) }
+                // SAFETY: a block, nothing lives in it any more
+                unsafe { Memory::free_block(b.0) }
             }
         }
         *self.used.get_mut() = 0;
@@ -86,8 +153,8 @@ impl Nursery {
 impl Drop for Nursery {
     fn drop(&mut self) {
         for b in self.chunks.take().into_iter().chain(self.spare.take()) {
-            // SAFETY: allocated with LAYOUT
-            unsafe { dealloc(b.0.as_ptr(), Self::LAYOUT) }
+            // SAFETY: a block
+            unsafe { Memory::free_block(b.0) }
         }
     }
 }
@@ -118,11 +185,6 @@ unsafe impl Send for Page {}
 unsafe impl Sync for Page {}
 
 impl Page {
-    const LAYOUT: Layout = match Layout::from_size_align(PAGE, PAGE) {
-        Ok(l) => l,
-        Err(_) => panic!("page layout"),
-    };
-
     fn slot(&self) -> usize {
         SizeClass::SLOTS[self.class]
     }
@@ -212,7 +274,7 @@ impl OldSpace {
 
     /// Opens a page (preferring kept empty pages) and registers it; slot headers are written by whoever takes them
     fn new_page(&self, class: usize) -> NonNull<u8> {
-        let base = self.spare.claim_one().map_or_else(|| raw(Page::LAYOUT), |b| b.0);
+        let base = self.spare.claim_one().map_or_else(Memory::block, |b| b.0);
         self.pages.push(Page { base, class, live: 0, evacuate: false });
         base
     }
@@ -233,8 +295,8 @@ impl OldSpace {
         if self.spare.len() < SPARE_MIN.max(self.pages.len() / SPARE_RATIO) {
             self.spare.push(Block(base));
         } else {
-            // SAFETY: allocated with Page::LAYOUT, and no live objects remain in it
-            unsafe { dealloc(base.as_ptr(), Page::LAYOUT) }
+            // SAFETY: a block, and no live objects remain in it
+            unsafe { Memory::free_block(base) }
         }
     }
 
@@ -247,7 +309,7 @@ impl OldSpace {
     pub(crate) fn alloc_large(&self, vt: &VTable) -> Ptr {
         let offset = vt.align.max(HEADER);
         let layout = Layout::from_size_align(offset + vt.size, offset).expect("large object layout");
-        let base = raw(layout);
+        let base = Memory::alloc(layout);
         // SAFETY: offset < layout.size()
         let ptr = Ptr::from(unsafe { base.add(offset) });
         self.bytes.fetch_add(layout.size(), Ordering::AcqRel);
@@ -292,7 +354,7 @@ impl OldSpace {
             // SAFETY: unreachable; dropped once and then deallocated
             unsafe {
                 l.ptr.drop_value();
-                dealloc(l.base.as_ptr(), l.layout);
+                Memory::free(l.base, l.layout);
             }
         }
         *self.bytes.get_mut() = bytes;
@@ -360,12 +422,12 @@ impl Drop for OldSpace {
             unsafe { p.drop_value() }
         }
         for base in self.pages.take().into_iter().map(|p| p.base).chain(self.spare.take().into_iter().map(|b| b.0)) {
-            // SAFETY: allocated with Page::LAYOUT
-            unsafe { dealloc(base.as_ptr(), Page::LAYOUT) }
+            // SAFETY: a block
+            unsafe { Memory::free_block(base) }
         }
         for l in self.large.take() {
             // SAFETY: allocated with l.layout
-            unsafe { dealloc(l.base.as_ptr(), l.layout) }
+            unsafe { Memory::free(l.base, l.layout) }
         }
     }
 }

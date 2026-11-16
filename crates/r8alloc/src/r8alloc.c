@@ -1,9 +1,10 @@
 // r8alloc: a lock-free allocator over one reserved address range, tied to no thread.
 //
 // - The range (REGION_BYTES) is reserved once with mmap (MAP_NORESERVE: pages are committed by the first touch).
-// - Pages (PAGE bytes, PAGE-aligned) come from an atomic bump cursor; freed runs of n pages go to the list for n
-//   (their memory is returned with madvise, the addresses are kept). Runs longer than MAX_RUN pages, and anything
-//   once the range is full, are mapped from the OS directly.
+// - Pages (PAGE bytes, PAGE-aligned) come from an atomic bump cursor; freed runs of n pages go to the list for n and
+//   stay committed, so reuse does not fault again; r8a_trim gives the memory of every free run back to the OS (the
+//   addresses are kept). Runs longer than MAX_RUN pages, and anything once the range is full, are mapped from the OS
+//   directly.
 // - Small blocks (up to the largest class) come from one global lock-free free list per size class; an empty list
 //   takes a page, cuts it into blocks and splices them in with one CAS.
 // - There are no per-thread arenas and no locks: any thread may free what any other thread allocated.
@@ -146,8 +147,6 @@ void r8a_free_pages(void *p, size_t n) {
         munmap(p, n << PAGE_SHIFT);
         return;
     }
-    // Give the memory back, keep the addresses
-    madvise(p, n << PAGE_SHIFT, MADV_DONTNEED);
     uint32_t page = (uint32_t)(((uint8_t *)p - region()) >> PAGE_SHIFT);
     list_t *list = &page_free[n];
     uint64_t head = atomic_load_explicit(list, memory_order_acquire);
@@ -155,6 +154,39 @@ void r8a_free_pages(void *p, size_t n) {
         atomic_store_explicit(&page_next[page], (uint32_t)(head & LINK_MASK), memory_order_relaxed);
         if (atomic_compare_exchange_weak_explicit(list, &head, next_head(head, page + 1), memory_order_release, memory_order_acquire)) {
             return;
+        }
+    }
+}
+
+// Gives the memory of every free run back to the OS (the runs stay on their lists, the addresses are kept). Each list
+// is taken whole, released, and spliced back: runs freed meanwhile just stay committed until the next trim.
+void r8a_trim(void) {
+    uint8_t *base = (uint8_t *)atomic_load_explicit(&region_base, memory_order_acquire);
+    if (base == NULL) {
+        return;
+    }
+    for (size_t n = 1; n <= MAX_RUN; n++) {
+        list_t *list = &page_free[n];
+        uint64_t head = atomic_load_explicit(list, memory_order_acquire);
+        // Take the whole list: a CAS to empty
+        while ((head & LINK_MASK) != 0 && !atomic_compare_exchange_weak_explicit(list, &head, next_head(head, 0), memory_order_acquire, memory_order_acquire)) {
+        }
+        uint32_t first = (uint32_t)(head & LINK_MASK);
+        if (first == 0) {
+            continue;
+        }
+        uint32_t last = first;
+        for (uint32_t link = first; link != 0; link = atomic_load_explicit(&page_next[link - 1], memory_order_relaxed)) {
+            madvise(base + ((size_t)(link - 1) << PAGE_SHIFT), n << PAGE_SHIFT, MADV_DONTNEED);
+            last = link;
+        }
+        // Splice the released chain back in front of whatever was freed meanwhile
+        uint64_t now = atomic_load_explicit(list, memory_order_acquire);
+        for (;;) {
+            atomic_store_explicit(&page_next[last - 1], (uint32_t)(now & LINK_MASK), memory_order_relaxed);
+            if (atomic_compare_exchange_weak_explicit(list, &now, next_head(now, first), memory_order_release, memory_order_acquire)) {
+                break;
+            }
         }
     }
 }

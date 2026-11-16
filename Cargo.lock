@@ -182,6 +182,7 @@ name = "dune"
 version = "0.1.2"
 dependencies = [
  "clap",
+ "r8alloc",
  "r8builtins",
  "r8executor",
  "r8framework",
@@ -881,6 +882,7 @@ name = "r8gc"
 version = "0.1.2"
 dependencies = [
  "moremath",
+ "r8alloc",
  "r8gc-macros",
  "r8lockfree",
 ]
@@ -1290,6 +1292,7 @@ name = "workerd"
 version = "0.1.2"
 dependencies = [
  "clap",
+ "r8alloc",
  "r8builtins",
  "r8executor",
  "r8framework",

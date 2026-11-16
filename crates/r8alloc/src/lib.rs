@@ -1,8 +1,9 @@
 //! r8alloc：r8 的堆内存分配器，C11 写成（`src/r8alloc.c`），经 C ABI 接入。
 //!
 //! - 第一次使用时预留一段地址区（`mmap`，`MAP_NORESERVE`：首次触碰才提交物理内存）
-//! - [`R8Alloc::pages`]：按页（[`R8Alloc::PAGE`] 字节、按页对齐）分配，释放的连续页按页数进各自的无锁空闲表，
-//!   内存用 `madvise` 还给系统、地址留着复用；过长的连续页与地址区用完之后直接向系统要
+//! - [`R8Alloc::pages`]：按页（[`R8Alloc::PAGE`] 字节、按页对齐）分配，释放的连续页按页数进各自的无锁空闲表、
+//!   内存留着（复用不再缺页）；[`R8Alloc::trim`] 把空闲页的内存统一还给系统、地址留着；过长的连续页与地址区用完之后
+//!   直接向系统要
 //! - [`R8Alloc`] 实现 [`GlobalAlloc`]：小块按尺寸分档，每档一个全局无锁空闲表；更大的按页
 //! - 没有按线程划分的 arena，也没有锁：任何线程都能释放别的线程分配的内存
 //!
@@ -17,6 +18,7 @@ unsafe extern "C" {
     fn r8a_free(p: *mut u8, size: usize, align: usize);
     fn r8a_pages(n: usize) -> *mut u8;
     fn r8a_free_pages(p: *mut u8, n: usize);
+    fn r8a_trim();
 }
 
 /// 分配器（零大小）：全局分配器用 `#[global_allocator] static A: R8Alloc = R8Alloc;`。
@@ -40,6 +42,12 @@ impl R8Alloc {
     pub unsafe fn free_pages(p: NonNull<u8>, n: usize) {
         // SAFETY: 调用者保证
         unsafe { r8a_free_pages(p.as_ptr(), n) }
+    }
+
+    /// 把所有空闲页的内存还给系统（地址留着复用；这期间还回来的页留到下一次）。
+    pub fn trim() {
+        // SAFETY: 只动空闲表里的页
+        unsafe { r8a_trim() }
     }
 }
 

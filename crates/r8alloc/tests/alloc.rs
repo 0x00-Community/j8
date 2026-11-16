@@ -75,7 +75,7 @@ fn cross_thread_alloc_and_free() {
     });
 }
 
-/// 还回的页立刻被同样页数的请求复用，内容已经归还系统（全是 0）
+/// 还回的页立刻被同样页数的请求复用；trim 之后内存已经归还系统（再拿到时全是 0）
 #[test]
 fn pages_are_reused_and_returned() {
     let n = 3;
@@ -85,11 +85,12 @@ fn pages_are_reused_and_returned() {
     unsafe { p.as_ptr().write_bytes(0xAB, n * R8Alloc::PAGE) };
     // SAFETY: 还回刚才那 n 页
     unsafe { R8Alloc::free_pages(p, n) };
+    R8Alloc::trim();
     let q = R8Alloc::pages(n).unwrap();
     assert_eq!(q, p, "同样页数的请求复用刚还回的页");
     // SAFETY: 刚分到的 n 页
     let bytes = unsafe { std::slice::from_raw_parts(q.as_ptr(), n * R8Alloc::PAGE) };
-    assert!(bytes.iter().all(|&b| b == 0), "还回时内存已归还系统");
+    assert!(bytes.iter().all(|&b| b == 0), "trim 之后内存已归还系统");
     // SAFETY: 还回
     unsafe { R8Alloc::free_pages(q, n) };
 }
