@@ -1,0 +1,15 @@
+[package]
+name = "j8platform"
+description = "j8 platform layer: the standard-library implementation of the Platform trait"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+j8gc = { workspace = true, features = ["std"] }
+j8framework.workspace = true
+moremath = { workspace = true, features = ["std"] }
+
+[lints]
+workspace = true

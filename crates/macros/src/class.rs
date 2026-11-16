@@ -1,5 +1,5 @@
-//! `#[r8::class]`: placed on an `impl` block; methods are exported as members of a JS class (constructor,
-//! prototype methods, accessors, static methods). Generates an `r8::Class` implementation.
+//! `#[j8::class]`: placed on an `impl` block; methods are exported as members of a JS class (constructor,
+//! prototype methods, accessors, static methods). Generates an `j8::Class` implementation.
 use proc_macro2::TokenStream;
 use quote::quote;
 use syn::ItemImpl;
@@ -8,7 +8,7 @@ use crate::method::{Bound, Role};
 
 pub fn expand(attr: TokenStream, mut item: ItemImpl) -> syn::Result<TokenStream> {
     let b = Bound::of_impl(attr, &mut item)?;
-    let native = quote!(::r8::frame::NativeFn);
+    let native = quote!(::j8::frame::NativeFn);
     let ctor = match b.methods.iter().find(|m| m.role == Role::Constructor) {
         Some(m) => {
             let w = m.wrapper_name();
@@ -26,10 +26,10 @@ pub fn expand(attr: TokenStream, mut item: ItemImpl) -> syn::Result<TokenStream>
             #(#wrappers)*
         }
 
-        impl #impl_generics ::r8::Class for #self_ty #where_clause {
+        impl #impl_generics ::j8::Class for #self_ty #where_clause {
             const NAME: &'static str = #name;
             const CONSTRUCTOR: ::core::option::Option<(#native, u32)> = #ctor;
-            const MEMBERS: &'static [::r8::Member] = &[#(#members),*];
+            const MEMBERS: &'static [::j8::Member] = &[#(#members),*];
         }
     })
 }

@@ -172,12 +172,12 @@ name = "dune"
 version = "0.1.2"
 dependencies = [
  "clap",
- "r8builtins",
- "r8executor",
- "r8framework",
- "r8jit",
- "r8js",
- "r8platform",
+ "j8",
+ "j8builtins",
+ "j8executor",
+ "j8framework",
+ "j8jit",
+ "j8platform",
  "serde",
  "serde_yaml",
 ]
@@ -341,6 +341,162 @@ name = "itoa"
 version = "1.0.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3bd1574e617a9a6c1f8f8181bd7e841e1f20e4277607ef28945765188d6284d4"
+
+[[package]]
+name = "j8"
+version = "0.1.2"
+dependencies = [
+ "j8binding",
+ "j8builtins",
+ "j8executor",
+ "j8framework",
+ "j8macros",
+ "j8platform",
+]
+
+[[package]]
+name = "j8binding"
+version = "0.1.2"
+dependencies = [
+ "j8framework",
+ "j8gc",
+]
+
+[[package]]
+name = "j8builtins"
+version = "0.1.2"
+dependencies = [
+ "j8framework",
+ "j8gc",
+ "libm",
+ "num-bigint 0.4.8",
+ "num-traits",
+ "regress",
+ "ryu-js",
+ "unicode-normalization",
+]
+
+[[package]]
+name = "j8compiler"
+version = "0.1.2"
+dependencies = [
+ "j8framework",
+ "j8virtasm",
+ "mlirpass",
+]
+
+[[package]]
+name = "j8debugger"
+version = "0.1.2"
+dependencies = [
+ "clap",
+ "j8framework",
+ "j8virtasm",
+]
+
+[[package]]
+name = "j8executor"
+version = "0.1.2"
+dependencies = [
+ "j8builtins",
+ "j8framework",
+ "j8gc",
+ "j8platform",
+ "j8virtasm",
+ "ryu-js",
+]
+
+[[package]]
+name = "j8framework"
+version = "0.1.2"
+dependencies = [
+ "hashbrown",
+ "j8gc",
+ "libm",
+ "num-bigint 0.4.8",
+ "num-traits",
+ "rustc-hash",
+ "ryu-js",
+ "smol_str",
+]
+
+[[package]]
+name = "j8gc"
+version = "0.1.2"
+dependencies = [
+ "j8gc-macros",
+ "j8lockfree",
+ "libc",
+ "moremath",
+]
+
+[[package]]
+name = "j8gc-macros"
+version = "0.1.2"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+ "synstructure 0.13.2",
+]
+
+[[package]]
+name = "j8jit"
+version = "0.1.2"
+dependencies = [
+ "j8compiler",
+ "j8executor",
+ "j8framework",
+ "j8virtasm",
+ "libc",
+]
+
+[[package]]
+name = "j8lockfree"
+version = "0.1.2"
+
+[[package]]
+name = "j8macros"
+version = "0.1.2"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "serde",
+ "serde_json",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "j8platform"
+version = "0.1.2"
+dependencies = [
+ "j8framework",
+ "j8gc",
+ "moremath",
+]
+
+[[package]]
+name = "j8taskqueue"
+version = "0.1.2"
+dependencies = [
+ "j8lockfree",
+ "moremath",
+]
+
+[[package]]
+name = "j8virtasm"
+version = "0.1.2"
+dependencies = [
+ "j8framework",
+ "j8macros",
+ "oxc_allocator",
+ "oxc_ast",
+ "oxc_parser",
+ "oxc_semantic",
+ "oxc_span",
+ "oxc_syntax",
+ "ryu-js",
+]
 
 [[package]]
 name = "libc"
@@ -788,162 +944,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "r8binding"
-version = "0.1.2"
-dependencies = [
- "r8framework",
- "r8gc",
-]
-
-[[package]]
-name = "r8builtins"
-version = "0.1.2"
-dependencies = [
- "libm",
- "num-bigint 0.4.8",
- "num-traits",
- "r8framework",
- "r8gc",
- "regress",
- "ryu-js",
- "unicode-normalization",
-]
-
-[[package]]
-name = "r8compiler"
-version = "0.1.2"
-dependencies = [
- "mlirpass",
- "r8framework",
- "r8virtasm",
-]
-
-[[package]]
-name = "r8debugger"
-version = "0.1.2"
-dependencies = [
- "clap",
- "r8framework",
- "r8virtasm",
-]
-
-[[package]]
-name = "r8executor"
-version = "0.1.2"
-dependencies = [
- "r8builtins",
- "r8framework",
- "r8gc",
- "r8platform",
- "r8virtasm",
- "ryu-js",
-]
-
-[[package]]
-name = "r8framework"
-version = "0.1.2"
-dependencies = [
- "hashbrown",
- "libm",
- "num-bigint 0.4.8",
- "num-traits",
- "r8gc",
- "rustc-hash",
- "ryu-js",
- "smol_str",
-]
-
-[[package]]
-name = "r8gc"
-version = "0.1.2"
-dependencies = [
- "libc",
- "moremath",
- "r8gc-macros",
- "r8lockfree",
-]
-
-[[package]]
-name = "r8gc-macros"
-version = "0.1.2"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
- "synstructure 0.13.2",
-]
-
-[[package]]
-name = "r8jit"
-version = "0.1.2"
-dependencies = [
- "libc",
- "r8compiler",
- "r8executor",
- "r8framework",
- "r8virtasm",
-]
-
-[[package]]
-name = "r8js"
-version = "0.1.2"
-dependencies = [
- "r8binding",
- "r8builtins",
- "r8executor",
- "r8framework",
- "r8macros",
- "r8platform",
-]
-
-[[package]]
-name = "r8lockfree"
-version = "0.1.2"
-
-[[package]]
-name = "r8macros"
-version = "0.1.2"
-dependencies = [
- "proc-macro2",
- "quote",
- "serde",
- "serde_json",
- "syn 2.0.119",
-]
-
-[[package]]
-name = "r8platform"
-version = "0.1.2"
-dependencies = [
- "moremath",
- "r8framework",
- "r8gc",
-]
-
-[[package]]
-name = "r8taskqueue"
-version = "0.1.2"
-dependencies = [
- "moremath",
- "r8lockfree",
-]
-
-[[package]]
-name = "r8virtasm"
-version = "0.1.2"
-dependencies = [
- "oxc_allocator",
- "oxc_ast",
- "oxc_parser",
- "oxc_semantic",
- "oxc_span",
- "oxc_syntax",
- "r8framework",
- "r8macros",
- "ryu-js",
-]
-
-[[package]]
 name = "regress"
 version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1262,11 +1262,11 @@ name = "workerd"
 version = "0.1.2"
 dependencies = [
  "clap",
- "r8builtins",
- "r8executor",
- "r8framework",
- "r8js",
- "r8platform",
+ "j8",
+ "j8builtins",
+ "j8executor",
+ "j8framework",
+ "j8platform",
 ]
 
 [[package]]

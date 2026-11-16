@@ -1,0 +1,25 @@
+[package]
+name = "j8executor"
+description = "j8 bytecode executor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+j8framework.workspace = true
+j8virtasm.workspace = true
+j8gc.workspace = true
+ryu-js.workspace = true
+
+[features]
+default = ["compile"]
+# Brings in JS ⇒ bytecode compilation and implements Engine (needs std); without it only the no_std executor remains
+compile = ["j8virtasm/compile"]
+
+[dev-dependencies]
+j8platform.workspace = true
+j8builtins.workspace = true
+
+[lints]
+workspace = true

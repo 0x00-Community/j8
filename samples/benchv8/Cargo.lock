@@ -33,10 +33,10 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 name = "benchv8"
 version = "0.1.0"
 dependencies = [
- "r8builtins",
- "r8executor",
- "r8framework",
- "r8platform",
+ "j8builtins",
+ "j8executor",
+ "j8framework",
+ "j8platform",
  "v8",
 ]
 
@@ -869,55 +869,55 @@ dependencies = [
 ]
 
 [[package]]
-name = "r8builtins"
+name = "j8builtins"
 version = "0.1.0"
 dependencies = [
  "libm",
  "num-bigint 0.4.8",
  "num-traits",
- "r8framework",
- "r8gc",
+ "j8framework",
+ "j8gc",
  "regress",
  "ryu-js",
  "unicode-normalization",
 ]
 
 [[package]]
-name = "r8executor"
+name = "j8executor"
 version = "0.1.0"
 dependencies = [
- "r8framework",
- "r8gc",
- "r8virtasm",
+ "j8framework",
+ "j8gc",
+ "j8virtasm",
  "ryu-js",
 ]
 
 [[package]]
-name = "r8framework"
+name = "j8framework"
 version = "0.1.0"
 dependencies = [
  "hashbrown",
  "libm",
  "num-bigint 0.4.8",
  "num-traits",
- "r8gc",
+ "j8gc",
  "rustc-hash",
  "ryu-js",
  "smol_str",
 ]
 
 [[package]]
-name = "r8gc"
+name = "j8gc"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "26a0bf76e595dc4220472daf0e279929866f178354758fb1fab8c78af0b7e78c"
 dependencies = [
  "moremath",
- "r8gc-macros",
+ "j8gc-macros",
 ]
 
 [[package]]
-name = "r8gc-macros"
+name = "j8gc-macros"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0463a1e8654c844dbc3a7aee9db0972519e30ed96641dd8eec7f60988c93e077"
@@ -929,7 +929,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "r8macros"
+name = "j8macros"
 version = "0.1.0"
 dependencies = [
  "proc-macro2",
@@ -940,16 +940,16 @@ dependencies = [
 ]
 
 [[package]]
-name = "r8platform"
+name = "j8platform"
 version = "0.1.0"
 dependencies = [
  "moremath",
- "r8framework",
- "r8gc",
+ "j8framework",
+ "j8gc",
 ]
 
 [[package]]
-name = "r8virtasm"
+name = "j8virtasm"
 version = "0.1.0"
 dependencies = [
  "oxc_allocator",
@@ -958,8 +958,8 @@ dependencies = [
  "oxc_semantic",
  "oxc_span",
  "oxc_syntax",
- "r8framework",
- "r8macros",
+ "j8framework",
+ "j8macros",
  "ryu-js",
 ]
 

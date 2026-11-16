@@ -1,6 +1,6 @@
 [package]
 name = "dune"
-description = "dune: the r8 JavaScript runtime CLI (comparable to node / deno)"
+description = "dune: the j8 JavaScript runtime CLI (comparable to node / deno)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -13,13 +13,13 @@ name = "dune"
 path = "src/main.rs"
 
 [dependencies]
-r8framework.workspace = true
-r8platform.workspace = true
-r8builtins.workspace = true
-r8executor.workspace = true
-r8jit.workspace = true
+j8framework.workspace = true
+j8platform.workspace = true
+j8builtins.workspace = true
+j8executor.workspace = true
+j8jit.workspace = true
 clap.workspace = true
-r8.workspace = true
+j8.workspace = true
 
 # test262 conformance tests; the source lives in tests/ at the repo root (no separate crate)
 [[test]]

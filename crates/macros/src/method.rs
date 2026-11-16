@@ -153,7 +153,7 @@ impl Method {
     }
 
     pub(crate) fn wrapper_name(&self) -> Ident {
-        format_ident!("__r8_js_{}", self.rust)
+        format_ident!("__j8_js_{}", self.rust)
     }
 
     /// Conversion wrapper: `fn(agent, this, args) -> Result<Value>`.
@@ -167,14 +167,14 @@ impl Method {
             let var = format_ident!("__p{}", i);
             match p {
                 Param::Agent => call_args.push(quote!(a)),
-                Param::This => call_args.push(quote!(::r8::This(this))),
-                Param::Rest(from) => call_args.push(quote!(::r8::Rest(args.get(#from..).unwrap_or(&[]).to_vec()))),
+                Param::This => call_args.push(quote!(::j8::This(this))),
+                Param::Rest(from) => call_args.push(quote!(::j8::Rest(args.get(#from..).unwrap_or(&[]).to_vec()))),
                 Param::Arg(at, ty) => {
-                    prepare.push(quote!(let #var = <#ty as ::r8::FromJs<'gc>>::from_js(a, ::r8::Glue::arg(args, #at))?;));
+                    prepare.push(quote!(let #var = <#ty as ::j8::FromJs<'gc>>::from_js(a, ::j8::Glue::arg(args, #at))?;));
                     call_args.push(quote!(#var));
                 }
                 Param::Str(at) => {
-                    prepare.push(quote!(let #var = <::r8::frame::JsString<'gc> as ::r8::FromJs<'gc>>::from_js(a, ::r8::Glue::arg(args, #at))?;));
+                    prepare.push(quote!(let #var = <::j8::frame::JsString<'gc> as ::j8::FromJs<'gc>>::from_js(a, ::j8::Glue::arg(args, #at))?;));
                     call_args.push(quote!(&**#var));
                 }
             }
@@ -182,36 +182,36 @@ impl Method {
         let call = match self.receiver {
             Receiver::None => quote!(#owner::#rust(#(#call_args),*)),
             Receiver::Shared => quote! {{
-                let __data = ::r8::Glue::host::<Self>(a, this)?;
-                let __cell = ::r8::Glue::borrow(a, &__data, #class)?;
-                let __self = ::r8::Glue::cast::<Self>(a, &__cell)?;
+                let __data = ::j8::Glue::host::<Self>(a, this)?;
+                let __cell = ::j8::Glue::borrow(a, &__data, #class)?;
+                let __self = ::j8::Glue::cast::<Self>(a, &__cell)?;
                 __self.#rust(#(#call_args),*)
             }},
             Receiver::Mutable => quote! {{
-                let __data = ::r8::Glue::host::<Self>(a, this)?;
-                let mut __cell = ::r8::Glue::borrow_mut(a, &__data, #class)?;
-                let __self = ::r8::Glue::cast_mut::<Self>(a, &mut __cell)?;
+                let __data = ::j8::Glue::host::<Self>(a, this)?;
+                let mut __cell = ::j8::Glue::borrow_mut(a, &__data, #class)?;
+                let __self = ::j8::Glue::cast_mut::<Self>(a, &mut __cell)?;
                 __self.#rust(#(#call_args),*)
             }},
         };
         let body = if self.role == Role::Constructor {
             let made = if self.returns_result { call } else { quote!(::core::result::Result::Ok(#call)) };
             quote! {
-                ::r8::Glue::require_new(a, #class)?;
+                ::j8::Glue::require_new(a, #class)?;
                 #(#prepare)*
-                ::r8::Glue::construct::<Self>(a, #made)
+                ::j8::Glue::construct::<Self>(a, #made)
             }
         } else {
             quote! {
                 #(#prepare)*
                 let __r = #call;
-                ::r8::IntoJs::into_js(__r, a)
+                ::j8::IntoJs::into_js(__r, a)
             }
         };
         quote! {
             #[doc(hidden)]
             #[allow(clippy::needless_question_mark, unused_variables, clippy::unnecessary_wraps)]
-            fn #name<'gc>(a: &mut ::r8::frame::Agent<'gc, '_>, this: ::r8::frame::Value<'gc>, args: &[::r8::frame::Value<'gc>]) -> ::core::result::Result<::r8::frame::Value<'gc>, ::r8::frame::Error> {
+            fn #name<'gc>(a: &mut ::j8::frame::Agent<'gc, '_>, this: ::j8::frame::Value<'gc>, args: &[::j8::frame::Value<'gc>]) -> ::core::result::Result<::j8::frame::Value<'gc>, ::j8::frame::Error> {
                 #body
             }
         }
@@ -252,18 +252,18 @@ impl Bound {
         self.methods.iter().map(|m| m.wrapper(&self.name.value(), &owner)).collect()
     }
 
-    /// The `r8::Member` table: methods, static methods, and getter / setter pairs with the same name combined into
+    /// The `j8::Member` table: methods, static methods, and getter / setter pairs with the same name combined into
     /// one accessor.
     pub(crate) fn members(&self) -> Vec<TokenStream> {
-        let native = quote!(::r8::frame::NativeFn);
+        let native = quote!(::j8::frame::NativeFn);
         let mut members = Vec::new();
         let mut accessors: Vec<(String, Option<Ident>, Option<Ident>)> = Vec::new();
         for m in &self.methods {
             let w = m.wrapper_name();
             let (js, len) = (&m.js, m.length);
             match m.role {
-                Role::Method => members.push(quote!(::r8::Member::Method { name: #js, f: Self::#w as #native, length: #len })),
-                Role::Static => members.push(quote!(::r8::Member::Static { name: #js, f: Self::#w as #native, length: #len })),
+                Role::Method => members.push(quote!(::j8::Member::Method { name: #js, f: Self::#w as #native, length: #len })),
+                Role::Static => members.push(quote!(::j8::Member::Static { name: #js, f: Self::#w as #native, length: #len })),
                 Role::Getter | Role::Setter => {
                     let at = match accessors.iter().position(|(n, _, _)| n == js) {
                         Some(i) => i,
@@ -280,7 +280,7 @@ impl Bound {
         for (name, get, set) in accessors {
             let get = get.map_or(quote!(::core::option::Option::None), |g| quote!(::core::option::Option::Some(Self::#g as #native)));
             let set = set.map_or(quote!(::core::option::Option::None), |s| quote!(::core::option::Option::Some(Self::#s as #native)));
-            members.push(quote!(::r8::Member::Accessor { name: #name, get: #get, set: #set }));
+            members.push(quote!(::j8::Member::Accessor { name: #name, get: #get, set: #set }));
         }
         members
     }

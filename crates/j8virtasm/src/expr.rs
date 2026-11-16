@@ -1,0 +1,1181 @@
+//! JS ⇒ bytecode: expressions. Results are always left in acc.
+use oxc_ast::ast::{
+    Argument, ArrayAssignmentTarget, ArrayExpressionElement, ArrowFunctionBody, AssignmentTarget, AssignmentTargetMaybeDefault, AssignmentTargetProperty, ChainElement, ComputedMemberExpression, PrivateFieldExpression, StaticMemberExpression, TaggedTemplateExpression, ArrowFunctionExpression, AssignmentExpression, AssignmentOperator, BinaryExpression, BinaryOperator, CallExpression, Expression, LogicalOperator, MemberExpression, MethodDefinitionKind, ObjectExpression, ObjectPropertyKind, PropertyKind as PropertyKind_, SimpleAssignmentTarget, TemplateElement, UnaryOperator, UpdateExpression,
+    UpdateOperator,
+};
+use oxc_span::{GetSpan, Span};
+use j8framework::{BinaryOp, CompareOp, Error, Resume, UnaryOp};
+
+use crate::compiler::{Body, Compiler, Flavor, Place};
+use crate::scope::Hidden;
+use crate::{Const, Constant, FunctionKind, Insn, PropertyKind, Reg};
+
+/// Binary operator ⇒ bytecode operation.
+#[derive(Clone, Copy)]
+enum Operator {
+    Binary(BinaryOp),
+    Compare(CompareOp),
+    InstanceOf,
+    In,
+}
+
+/// The three kinds of assignment operator.
+enum Assign {
+    Plain,
+    Binary(BinaryOp),
+    /// `||=` / `&&=` / `??=`: the right side is not evaluated if the left side already satisfies the condition
+    Logical(fn(crate::Label) -> Insn),
+}
+
+/// An element of an array literal / argument list.
+enum Element<'a> {
+    Value(&'a Expression<'a>),
+    Spread(&'a Expression<'a>),
+    Hole,
+}
+
+impl<'a> From<&'a ArrayExpressionElement<'a>> for Element<'a> {
+    fn from(e: &'a ArrayExpressionElement<'a>) -> Self {
+        match e {
+            ArrayExpressionElement::SpreadElement(s) => Element::Spread(&s.argument),
+            ArrayExpressionElement::Elision(_) => Element::Hole,
+            e => Element::Value(e.as_expression().expect("the rest are expressions")),
+        }
+    }
+}
+
+impl<'a> From<&'a Argument<'a>> for Element<'a> {
+    fn from(a: &'a Argument<'a>) -> Self {
+        match a {
+            Argument::SpreadElement(s) => Element::Spread(&s.argument),
+            a => Element::Value(a.as_expression().expect("the rest are expressions")),
+        }
+    }
+}
+
+/// Assignment target: a name, or a property whose object (and key) are already evaluated.
+enum Target<'a> {
+    /// The name and its position in the source (to decide whether a TDZ check is needed)
+    Name(&'a str, u32),
+    Named { obj: Reg, name: Const },
+    Keyed { obj: Reg, key: Reg },
+    /// `obj.#x`: the private name is in `key`
+    Private { obj: Reg, key: Reg },
+}
+
+impl<'a> Compiler<'a, '_> {
+    fn operator(op: BinaryOperator) -> Operator {
+        match op {
+            BinaryOperator::Addition => Operator::Binary(BinaryOp::Add),
+            BinaryOperator::Subtraction => Operator::Binary(BinaryOp::Sub),
+            BinaryOperator::Multiplication => Operator::Binary(BinaryOp::Mul),
+            BinaryOperator::Division => Operator::Binary(BinaryOp::Div),
+            BinaryOperator::Remainder => Operator::Binary(BinaryOp::Rem),
+            BinaryOperator::Exponential => Operator::Binary(BinaryOp::Exp),
+            BinaryOperator::BitwiseAnd => Operator::Binary(BinaryOp::BitAnd),
+            BinaryOperator::BitwiseOR => Operator::Binary(BinaryOp::BitOr),
+            BinaryOperator::BitwiseXOR => Operator::Binary(BinaryOp::BitXor),
+            BinaryOperator::ShiftLeft => Operator::Binary(BinaryOp::Shl),
+            BinaryOperator::ShiftRight => Operator::Binary(BinaryOp::Shr),
+            BinaryOperator::ShiftRightZeroFill => Operator::Binary(BinaryOp::UShr),
+            BinaryOperator::Equality => Operator::Compare(CompareOp::Eq),
+            BinaryOperator::Inequality => Operator::Compare(CompareOp::Ne),
+            BinaryOperator::StrictEquality => Operator::Compare(CompareOp::StrictEq),
+            BinaryOperator::StrictInequality => Operator::Compare(CompareOp::StrictNe),
+            BinaryOperator::LessThan => Operator::Compare(CompareOp::Lt),
+            BinaryOperator::GreaterThan => Operator::Compare(CompareOp::Gt),
+            BinaryOperator::LessEqualThan => Operator::Compare(CompareOp::Le),
+            BinaryOperator::GreaterEqualThan => Operator::Compare(CompareOp::Ge),
+            BinaryOperator::In => Operator::In,
+            BinaryOperator::Instanceof => Operator::InstanceOf,
+        }
+    }
+
+    fn assign_kind(op: AssignmentOperator) -> Assign {
+        match op {
+            AssignmentOperator::Assign => Assign::Plain,
+            AssignmentOperator::Addition => Assign::Binary(BinaryOp::Add),
+            AssignmentOperator::Subtraction => Assign::Binary(BinaryOp::Sub),
+            AssignmentOperator::Multiplication => Assign::Binary(BinaryOp::Mul),
+            AssignmentOperator::Division => Assign::Binary(BinaryOp::Div),
+            AssignmentOperator::Remainder => Assign::Binary(BinaryOp::Rem),
+            AssignmentOperator::Exponential => Assign::Binary(BinaryOp::Exp),
+            AssignmentOperator::ShiftLeft => Assign::Binary(BinaryOp::Shl),
+            AssignmentOperator::ShiftRight => Assign::Binary(BinaryOp::Shr),
+            AssignmentOperator::ShiftRightZeroFill => Assign::Binary(BinaryOp::UShr),
+            AssignmentOperator::BitwiseOR => Assign::Binary(BinaryOp::BitOr),
+            AssignmentOperator::BitwiseXOR => Assign::Binary(BinaryOp::BitXor),
+            AssignmentOperator::BitwiseAnd => Assign::Binary(BinaryOp::BitAnd),
+            AssignmentOperator::LogicalOr => Assign::Logical(Insn::JumpIfTrue),
+            AssignmentOperator::LogicalAnd => Assign::Logical(Insn::JumpIfFalse),
+            AssignmentOperator::LogicalNullish => Assign::Logical(Insn::JumpIfNotNullish),
+        }
+    }
+
+    pub(crate) fn string_const(&mut self, s: Option<&str>, span: Span) -> Result<Const, Error> {
+        let s = s.ok_or_else(|| self.unsupported(span, "lone surrogates"))?;
+        Ok(self.constant(Constant::String(s.into())))
+    }
+
+    /// A segment of a template literal (text after escape processing).
+    fn quasi(&mut self, q: &TemplateElement<'a>) -> Result<Const, Error> {
+        let cooked = match q.value.cooked {
+            Some(c) => c.as_str(),
+            None => None,
+        };
+        self.string_const(cooked, q.span)
+    }
+
+    #[expect(clippy::too_many_lines, reason = "one arm per expression kind; splitting it would hurt readability")]
+    pub(crate) fn expr(&mut self, e: &'a Expression<'a>) -> Result<(), Error> {
+        match e {
+            Expression::NumericLiteral(n) => {
+                let k = self.constant(Constant::Number(n.value));
+                self.emit(Insn::LdaConst(k));
+            }
+            Expression::StringLiteral(s) => {
+                let k = self.string_const(s.value.as_str(), s.span)?;
+                self.emit(Insn::LdaConst(k));
+            }
+            Expression::BooleanLiteral(b) => _ = self.emit(Insn::LdaBool(b.value)),
+            Expression::BigIntLiteral(b) => {
+                let k = self.constant(Constant::BigInt((&*b.value).into()));
+                self.emit(Insn::LdaConst(k));
+            }
+            Expression::RegExpLiteral(r) => {
+                let pattern = self.name(&r.regex.pattern.text);
+                let flags = self.name(&r.regex.flags.to_string());
+                self.emit(Insn::CreateRegExp { pattern, flags });
+            }
+            Expression::NullLiteral(_) => _ = self.emit(Insn::LdaNull),
+            Expression::TemplateLiteral(t) => {
+                // q0 + e0 + q1 + …: the left side is a string, so `+` is ToString followed by concatenation
+                let first = t.quasis.first().expect("a template has a first quasi");
+                let k = self.quasi(first)?;
+                self.emit(Insn::LdaConst(k));
+                let acc = self.temp();
+                for (e, q) in t.expressions.iter().zip(t.quasis.iter().skip(1)) {
+                    self.emit(Insn::Star(acc));
+                    self.expr(e)?;
+                    self.emit(Insn::Binary(BinaryOp::Add, acc));
+                    self.emit(Insn::Star(acc));
+                    let k = self.quasi(q)?;
+                    self.emit(Insn::LdaConst(k));
+                    self.emit(Insn::Binary(BinaryOp::Add, acc));
+                }
+                self.release(acc);
+            }
+            Expression::Identifier(id) => self.load_at(id.name.as_str(), id.span.start),
+            Expression::ThisExpression(t) => self.load_at(crate::scope::THIS, t.span.start),
+            Expression::ParenthesizedExpression(p) => self.expr(&p.expression)?,
+            Expression::FunctionExpression(f) => {
+                let n = self.plain_function(f, true, "")?;
+                self.emit(Insn::CreateClosure(n));
+            }
+            Expression::ArrowFunctionExpression(a) => self.arrow(a, "")?,
+            Expression::ClassExpression(c) => self.class(c, "")?,
+            Expression::NewTarget(t) => self.load_at(crate::scope::NEW_TARGET, t.span.start),
+            Expression::ImportMeta(_) => _ = self.emit(Insn::ImportMeta),
+            Expression::ImportExpression(i) => {
+                self.expr(&i.source)?;
+                if let Some(o) = &i.options {
+                    let spec = self.temp();
+                    self.emit(Insn::Star(spec));
+                    self.expr(o)?;
+                    self.emit(Insn::Ldar(spec));
+                    self.release(spec);
+                }
+                let referrer = self.name(self.file());
+                self.emit(Insn::DynamicImport { referrer });
+            }
+            Expression::TaggedTemplateExpression(t) => self.tagged_template(t)?,
+            Expression::YieldExpression(y) => {
+                let mode = self.resume_reg(y.span, "yield outside a generator")?;
+                let async_generator = self.is_async_generator();
+                match (&y.argument, y.delegate) {
+                    (Some(a), true) if async_generator => self.yield_star_async(a, mode)?,
+                    (Some(a), true) => self.yield_star(a, mode)?,
+                    (a, _) => {
+                        match a {
+                            Some(a) => self.expr(a)?,
+                            None => _ = self.emit(Insn::LdaUndefined),
+                        }
+                        if async_generator {
+                            // In an async generator `yield v` awaits v first
+                            self.emit(Insn::Await { mode });
+                            self.resume_dispatch(mode, false)?;
+                        }
+                        self.emit(Insn::Yield { mode });
+                        self.resume_dispatch(mode, true)?;
+                    }
+                }
+            }
+            Expression::AwaitExpression(e) => {
+                let mode = self.resume_reg(e.span, "await outside an async function")?;
+                self.expr(&e.argument)?;
+                self.emit(Insn::Await { mode });
+                self.resume_dispatch(mode, false)?;
+            }
+            Expression::NewExpression(n) => {
+                if Self::has_spread(&n.arguments) {
+                    let callee = self.temp();
+                    self.expr(&n.callee)?;
+                    self.emit(Insn::Star(callee));
+                    let args = self.spread_array(n.arguments.iter().map(Element::from))?;
+                    self.emit(Insn::ConstructSpread { callee, args });
+                    self.release(callee);
+                } else {
+                    let argc = u16::try_from(n.arguments.len()).map_err(|_| self.unsupported(n.span, "more than 65535 arguments"))?;
+                    let callee = self.temps(1 + argc);
+                    self.expr(&n.callee)?;
+                    self.emit(Insn::Star(callee));
+                    let args = Reg(callee.0 + 1);
+                    self.arguments(&n.arguments, args)?;
+                    self.emit(Insn::Construct { callee, args, argc });
+                    self.release(callee);
+                }
+            }
+            Expression::UnaryExpression(u) => {
+                let op = match u.operator {
+                    UnaryOperator::UnaryNegation => UnaryOp::Neg,
+                    UnaryOperator::UnaryPlus => UnaryOp::Plus,
+                    UnaryOperator::LogicalNot => UnaryOp::Not,
+                    UnaryOperator::BitwiseNot => UnaryOp::BitNot,
+                    UnaryOperator::Typeof => UnaryOp::Typeof,
+                    UnaryOperator::Void => UnaryOp::Void,
+                    UnaryOperator::Delete => return self.delete(&u.argument),
+                };
+                match (&u.argument, op) {
+                    // `typeof` of an undeclared name does not throw
+                    (Expression::Identifier(id), UnaryOp::Typeof) if !self.with_chain(id.name.as_str()).is_empty() => self.load_dynamic(id.name.as_str(), true, None),
+                    (Expression::Identifier(id), UnaryOp::Typeof) if matches!(self.lookup(id.name.as_str()).0, Place::Global(g) if !matches!(g, "undefined" | "NaN" | "Infinity")) => {
+                        let k = self.name(id.name.as_str());
+                        self.emit(Insn::LdaGlobalOrUndefined(k));
+                    }
+                    (a, _) => self.expr(a)?,
+                }
+                self.emit(Insn::Unary(op));
+            }
+            Expression::BinaryExpression(b) => self.binary(b)?,
+            Expression::LogicalExpression(l) => {
+                self.expr(&l.left)?;
+                let skip = self.jump(match l.operator {
+                    LogicalOperator::Or => Insn::JumpIfTrue,
+                    LogicalOperator::And => Insn::JumpIfFalse,
+                    LogicalOperator::Coalesce => Insn::JumpIfNotNullish,
+                });
+                self.expr(&l.right)?;
+                self.land(skip);
+            }
+            Expression::ConditionalExpression(c) => {
+                self.expr(&c.test)?;
+                let other = self.jump(Insn::JumpIfFalse);
+                self.expr(&c.consequent)?;
+                let end = self.jump(Insn::Jump);
+                self.land(other);
+                self.expr(&c.alternate)?;
+                self.land(end);
+            }
+            Expression::SequenceExpression(s) => s.expressions.iter().try_for_each(|e| self.expr(e))?,
+            Expression::AssignmentExpression(a) => self.assignment(a)?,
+            Expression::UpdateExpression(u) => self.update(u)?,
+            Expression::CallExpression(c) => self.call(c)?,
+            Expression::StaticMemberExpression(m) if matches!(m.object, Expression::Super(_)) => {
+                let this = self.this_temp();
+                let name = self.name(m.property.name.as_str());
+                self.emit(Insn::GetSuper { this, name });
+                self.release(this);
+            }
+            Expression::ComputedMemberExpression(m) if matches!(m.object, Expression::Super(_)) => {
+                let this = self.this_temp();
+                self.expr(&m.expression)?;
+                self.emit(Insn::GetSuperKeyed { this });
+                self.release(this);
+            }
+            Expression::StaticMemberExpression(m) => self.static_member(m)?,
+            Expression::PrivateFieldExpression(m) => self.private_member(m)?,
+            Expression::PrivateInExpression(p) => {
+                self.expr(&p.right)?;
+                let obj = self.temp();
+                self.emit(Insn::Star(obj));
+                self.load(Hidden::private(self.alloc, &p.left));
+                self.emit(Insn::HasPrivate { obj });
+                self.release(obj);
+            }
+            Expression::ComputedMemberExpression(m) => self.computed_member(m)?,
+            Expression::ChainExpression(c) => {
+                self.chains.push(Vec::new());
+                match &c.expression {
+                    ChainElement::CallExpression(call) => self.call(call)?,
+                    ChainElement::StaticMemberExpression(m) => self.static_member(m)?,
+                    ChainElement::ComputedMemberExpression(m) => self.computed_member(m)?,
+                    ChainElement::PrivateFieldExpression(m) => self.private_member(m)?,
+                    ChainElement::TSNonNullExpression(e) => return Err(self.unsupported(e.span, "TypeScript non-null assertions")),
+                }
+                let jumps = self.chains.pop().expect("this chain");
+                if !jumps.is_empty() {
+                    let end = self.jump(Insn::Jump);
+                    for j in jumps {
+                        self.land(j);
+                    }
+                    self.emit(Insn::LdaUndefined);
+                    self.land(end);
+                }
+            }
+            Expression::ObjectExpression(o) => self.object(o)?,
+            Expression::ArrayExpression(a) => {
+                if a.elements.iter().all(|e| e.as_expression().is_some()) {
+                    let count = u16::try_from(a.elements.len()).map_err(|_| self.unsupported(a.span, "more than 65535 elements"))?;
+                    let first = self.temps(count);
+                    for (i, el) in (0..).zip(&a.elements) {
+                        self.expr(el.as_expression().expect("checked above"))?;
+                        self.emit(Insn::Star(Reg(first.0 + i)));
+                    }
+                    self.emit(Insn::CreateArray { first, count });
+                    self.release(first);
+                } else {
+                    let arr = self.spread_array(a.elements.iter().map(Element::from))?;
+                    self.emit(Insn::Ldar(arr));
+                    self.release(arr);
+                }
+            }
+            e => return Err(self.unsupported(e.span(), "expression")),
+        }
+        Ok(())
+    }
+
+    /// Anonymous functions / arrow functions / anonymous classes get an inferred name per the spec (NamedEvaluation);
+    /// everything else is evaluated as usual.
+    pub(crate) fn expr_named(&mut self, e: &'a Expression<'a>, name: &'a str) -> Result<(), Error> {
+        match e {
+            Expression::FunctionExpression(f) if f.id.is_none() => {
+                let n = self.plain_function(f, true, name)?;
+                self.emit(Insn::CreateClosure(n));
+                Ok(())
+            }
+            Expression::ArrowFunctionExpression(a) => self.arrow(a, name),
+            Expression::ClassExpression(c) if c.id.is_none() => self.class(c, name),
+            Expression::ParenthesizedExpression(p) => self.expr_named(&p.expression, name),
+            e => self.expr(e),
+        }
+    }
+
+    /// Tagged template: `tag(templateObject, ...substitutions)`; the template object is cached per call site (a cooked
+    /// string is undefined when it has an invalid escape).
+    fn tagged_template(&mut self, t: &'a TaggedTemplateExpression<'a>) -> Result<(), Error> {
+        let subs = &t.quasi.expressions;
+        let argc = u16::try_from(subs.len() + 1).map_err(|_| self.unsupported(t.span, "more than 65535 substitutions"))?;
+        let callee = self.temps(2 + argc);
+        let this = Reg(callee.0 + 1);
+        let args = Reg(callee.0 + 2);
+        match &t.tag {
+            Expression::StaticMemberExpression(m) => {
+                self.expr(&m.object)?;
+                self.emit(Insn::Star(this));
+                let name = self.name(m.property.name.as_str());
+                self.emit(Insn::GetNamed { obj: this, name });
+            }
+            Expression::ComputedMemberExpression(m) => {
+                self.expr(&m.object)?;
+                self.emit(Insn::Star(this));
+                self.expr(&m.expression)?;
+                self.emit(Insn::GetKeyed { obj: this });
+            }
+            tag => {
+                self.emit(Insn::LdaUndefined);
+                self.emit(Insn::Star(this));
+                self.expr(tag)?;
+            }
+        }
+        self.emit(Insn::Star(callee));
+        let count = u16::try_from(t.quasi.quasis.len()).map_err(|_| self.unsupported(t.span, "too many template parts"))?;
+        let strings = self.temps(count * 2);
+        for (i, q) in (0u16..).zip(&t.quasi.quasis) {
+            match q.value.cooked.and_then(|c| c.as_str().map(str::to_owned)) {
+                Some(c) => {
+                    let k = self.constant(Constant::String(c.into()));
+                    self.emit(Insn::LdaConst(k));
+                }
+                None => _ = self.emit(Insn::LdaUndefined),
+            }
+            self.emit(Insn::Star(Reg(strings.0 + i)));
+            let raw = self.constant(Constant::String((&*q.value.raw).into()));
+            self.emit(Insn::LdaConst(raw));
+            self.emit(Insn::Star(Reg(strings.0 + count + i)));
+        }
+        let site = self.sites;
+        self.sites += 1;
+        self.emit(Insn::GetTemplateObject { site, first: strings, count });
+        self.release(strings);
+        self.emit(Insn::Star(args));
+        for (i, e) in (1u16..).zip(subs) {
+            self.expr(e)?;
+            self.emit(Insn::Star(Reg(args.0 + i)));
+        }
+        self.emit(Insn::Call { callee, this, args, argc });
+        self.release(callee);
+        Ok(())
+    }
+
+    fn arrow(&mut self, a: &'a ArrowFunctionExpression<'a>, name: &str) -> Result<(), Error> {
+        let body = match &a.body {
+            ArrowFunctionBody::FunctionBody(b) => Body::Statements(&b.statements),
+            e => Body::Expression(e.as_expression().expect("an arrow's body is a block or an expression")),
+        };
+        let strict = match &a.body {
+            ArrowFunctionBody::FunctionBody(b) => Flavor::use_strict(&b.directives),
+            _ => false,
+        };
+        let n = self.function(name, Flavor { kind: FunctionKind::Arrow, generator: false, asynchronous: a.r#async, strict }, None, None, Some(&a.params), body)?;
+        self.emit(Insn::CreateClosure(n));
+        Ok(())
+    }
+
+    fn binary(&mut self, b: &'a BinaryExpression<'a>) -> Result<(), Error> {
+        let op = Self::operator(b.operator);
+        // The left side is a variable in a register and the right side cannot change it: use its register directly as
+        // the left operand instead of copying it into a temporary register first
+        if let Expression::Identifier(id) = &b.left
+            && Self::cannot_assign(&b.right)
+            && let Some(l) = self.register_of(id.name.as_str(), id.span.start)
+        {
+            self.expr(&b.right)?;
+            self.emit(Self::binary_insn(op, l));
+            return Ok(());
+        }
+        self.expr(&b.left)?;
+        let l = self.temp();
+        self.emit(Insn::Star(l));
+        self.expr(&b.right)?;
+        self.emit(Self::binary_insn(op, l));
+        self.release(l);
+        Ok(())
+    }
+
+    /// acc = `l` op acc
+    fn binary_insn(op: Operator, l: Reg) -> Insn {
+        match op {
+            Operator::Binary(op) => Insn::Binary(op, l),
+            Operator::Compare(op) => Insn::Compare(op, l),
+            Operator::InstanceOf => Insn::InstanceOf(l),
+            Operator::In => Insn::In(l),
+        }
+    }
+
+    /// Evaluating `e` cannot assign to this function's register variables: it consists only of literals, names, `this`,
+    /// static member reads, and unary / binary / logical / conditional operations (user code called by these operations
+    /// lives in other functions and cannot touch the variables in this function's registers).
+    fn cannot_assign(e: &Expression<'_>) -> bool {
+        match e {
+            Expression::NumericLiteral(_) | Expression::StringLiteral(_) | Expression::BooleanLiteral(_) | Expression::NullLiteral(_) | Expression::BigIntLiteral(_) | Expression::Identifier(_) | Expression::ThisExpression(_) => true,
+            Expression::ParenthesizedExpression(p) => Self::cannot_assign(&p.expression),
+            Expression::UnaryExpression(u) => u.operator != UnaryOperator::Delete && Self::cannot_assign(&u.argument),
+            Expression::BinaryExpression(b) => Self::cannot_assign(&b.left) && Self::cannot_assign(&b.right),
+            Expression::LogicalExpression(l) => Self::cannot_assign(&l.left) && Self::cannot_assign(&l.right),
+            Expression::ConditionalExpression(c) => Self::cannot_assign(&c.test) && Self::cannot_assign(&c.consequent) && Self::cannot_assign(&c.alternate),
+            Expression::StaticMemberExpression(m) => Self::cannot_assign(&m.object),
+            _ => false,
+        }
+    }
+
+    /// Evaluates the object (and key) of an assignment target into temporary registers.
+    fn target(&mut self, t: &'a SimpleAssignmentTarget<'a>) -> Result<Target<'a>, Error> {
+        if let SimpleAssignmentTarget::AssignmentTargetIdentifier(id) = t {
+            return Ok(Target::Name(id.name.as_str(), id.span.start));
+        }
+        match t.as_member_expression() {
+            Some(MemberExpression::StaticMemberExpression(m)) => {
+                self.expr(&m.object)?;
+                let obj = self.temp();
+                self.emit(Insn::Star(obj));
+                Ok(Target::Named { obj, name: self.name(m.property.name.as_str()) })
+            }
+            Some(MemberExpression::ComputedMemberExpression(m)) => {
+                self.expr(&m.object)?;
+                let obj = self.temp();
+                self.emit(Insn::Star(obj));
+                self.expr(&m.expression)?;
+                let key = self.temp();
+                self.emit(Insn::Star(key));
+                Ok(Target::Keyed { obj, key })
+            }
+            Some(MemberExpression::PrivateFieldExpression(m)) => {
+                self.expr(&m.object)?;
+                let obj = self.temp();
+                self.emit(Insn::Star(obj));
+                self.load(Hidden::private(self.alloc, &m.field));
+                let key = self.temp();
+                self.emit(Insn::Star(key));
+                Ok(Target::Private { obj, key })
+            }
+            _ => Err(self.unsupported(t.span(), "assignment target")),
+        }
+    }
+
+    fn target_load(&mut self, t: &Target<'a>) {
+        match *t {
+            Target::Name(n, pos) => self.load_at(n, pos),
+            Target::Named { obj, name } => _ = self.emit(Insn::GetNamed { obj, name }),
+            Target::Keyed { obj, key } => {
+                self.emit(Insn::Ldar(key));
+                self.emit(Insn::GetKeyed { obj });
+            }
+            Target::Private { obj, key } => {
+                self.emit(Insn::Ldar(key));
+                self.emit(Insn::GetPrivate { obj });
+            }
+        }
+    }
+
+    fn target_store(&mut self, t: &Target<'a>) {
+        match *t {
+            Target::Name(n, pos) => self.store_at(n, false, pos),
+            Target::Named { obj, name } => _ = self.emit(Insn::SetNamed { obj, name, strict: self.strict_here() }),
+            Target::Keyed { obj, key } => _ = self.emit(Insn::SetKeyed { obj, key, strict: self.strict_here() }),
+            Target::Private { obj, key } => _ = self.emit(Insn::SetPrivate { obj, key }),
+        }
+    }
+
+    fn target_release(&mut self, t: &Target<'a>) {
+        match *t {
+            Target::Name(..) => {}
+            Target::Named { obj, .. } | Target::Keyed { obj, .. } | Target::Private { obj, .. } => self.release(obj),
+        }
+    }
+
+    fn assignment(&mut self, a: &'a AssignmentExpression<'a>) -> Result<(), Error> {
+        let Some(t) = a.left.as_simple_assignment_target() else {
+            self.expr(&a.right)?;
+            let v = self.temp();
+            self.emit(Insn::Star(v));
+            self.assign_target(&a.left, v)?;
+            self.emit(Insn::Ldar(v));
+            self.release(v);
+            return Ok(());
+        };
+        // `o.x = v` / `o[k] = v`: the object is in a register and the right side (and the key) cannot change it, so
+        // write directly without copying the object first
+        if a.operator == AssignmentOperator::Assign
+            && Self::cannot_assign(&a.right)
+            && let Some(m) = t.as_member_expression()
+        {
+            match m {
+                MemberExpression::StaticMemberExpression(m) if let Some(obj) = self.in_register(&m.object) => {
+                    let name = self.name(m.property.name.as_str());
+                    self.expr(&a.right)?;
+                    self.emit(Insn::SetNamed { obj, name, strict: self.strict_here() });
+                    return Ok(());
+                }
+                MemberExpression::ComputedMemberExpression(m) if Self::cannot_assign(&m.expression) && let Some(obj) = self.in_register(&m.object) => {
+                    self.expr(&m.expression)?;
+                    let key = self.temp();
+                    self.emit(Insn::Star(key));
+                    self.expr(&a.right)?;
+                    self.emit(Insn::SetKeyed { obj, key, strict: self.strict_here() });
+                    self.release(key);
+                    return Ok(());
+                }
+                _ => {}
+            }
+        }
+        let t = self.target(t)?;
+        match Self::assign_kind(a.operator) {
+            Assign::Plain => {
+                match &t {
+                    Target::Name(n, _) => self.expr_named(&a.right, n)?,
+                    _ => self.expr(&a.right)?,
+                }
+                self.target_store(&t);
+            }
+            Assign::Binary(op) => {
+                self.target_load(&t);
+                let old = self.temp();
+                self.emit(Insn::Star(old));
+                self.expr(&a.right)?;
+                self.emit(Insn::Binary(op, old));
+                self.release(old);
+                self.target_store(&t);
+            }
+            Assign::Logical(skip) => {
+                self.target_load(&t);
+                let at = self.jump(skip);
+                match &t {
+                    Target::Name(n, _) => self.expr_named(&a.right, n)?,
+                    _ => self.expr(&a.right)?,
+                }
+                self.target_store(&t);
+                self.land(at);
+            }
+        }
+        self.target_release(&t);
+        Ok(())
+    }
+
+    /// Evaluates `e` with the result unused (expression statements in functions, the update part of `for`): postfix
+    /// `++` / `--` does not keep the old value.
+    pub(crate) fn effect(&mut self, e: &'a Expression<'a>) -> Result<(), Error> {
+        match e {
+            Expression::UpdateExpression(u) => self.update_as(u, true),
+            Expression::ParenthesizedExpression(p) => self.effect(&p.expression),
+            _ => self.expr(e),
+        }
+    }
+
+    fn update(&mut self, u: &'a UpdateExpression<'a>) -> Result<(), Error> {
+        self.update_as(u, false)
+    }
+
+    /// `++` / `--`; with `discard` the result is unused, so postfix does not keep the old value either.
+    fn update_as(&mut self, u: &'a UpdateExpression<'a>, discard: bool) -> Result<(), Error> {
+        let t = self.target(&u.argument)?;
+        self.target_load(&t);
+        // `Inc` / `Dec` do ToNumeric themselves; convert separately and keep the result only for postfix when the old
+        // value is needed
+        let old = (!u.prefix && !discard).then(|| self.temp());
+        if let Some(r) = old {
+            self.emit(Insn::ToNumeric);
+            self.emit(Insn::Star(r));
+        }
+        self.emit(match u.operator {
+            UpdateOperator::Increment => Insn::Inc,
+            UpdateOperator::Decrement => Insn::Dec,
+        });
+        self.target_store(&t);
+        if let Some(r) = old {
+            self.emit(Insn::Ldar(r));
+            self.release(r);
+        }
+        self.target_release(&t);
+        Ok(())
+    }
+
+    /// Call: `callee`, `this` and the arguments are laid out in consecutive registers.
+    fn call(&mut self, c: &'a CallExpression<'a>) -> Result<(), Error> {
+        let spread = Self::has_spread(&c.arguments);
+        let argc = if spread { 0 } else { u16::try_from(c.arguments.len()).map_err(|_| self.unsupported(c.span, "more than 65535 arguments"))? };
+        if let (Expression::Super(_), true) = (&c.callee, spread) {
+            let args = self.spread_array(c.arguments.iter().map(Element::from))?;
+            self.emit(Insn::SuperCallSpread { args });
+            self.release(args);
+            self.store(crate::scope::THIS, true);
+            return Ok(());
+        }
+        if let Expression::Super(_) = &c.callee {
+            let args = self.temps(argc);
+            self.arguments(&c.arguments, args)?;
+            self.emit(Insn::SuperCall { args, argc });
+            self.release(args);
+            self.store(crate::scope::THIS, true);
+            return Ok(());
+        }
+        let callee = self.temps(2 + argc);
+        let this = Reg(callee.0 + 1);
+        match &c.callee {
+            Expression::StaticMemberExpression(m) if matches!(m.object, Expression::Super(_)) => {
+                self.load(crate::scope::THIS);
+                self.emit(Insn::Star(this));
+                let name = self.name(m.property.name.as_str());
+                self.emit(Insn::GetSuper { this, name });
+            }
+            Expression::ComputedMemberExpression(m) if matches!(m.object, Expression::Super(_)) => {
+                self.load(crate::scope::THIS);
+                self.emit(Insn::Star(this));
+                self.expr(&m.expression)?;
+                self.emit(Insn::GetSuperKeyed { this });
+            }
+            Expression::StaticMemberExpression(m) => {
+                self.expr(&m.object)?;
+                self.emit(Insn::Star(this));
+                self.optional(m.optional, m.span)?;
+                let name = self.name(m.property.name.as_str());
+                self.emit(Insn::GetNamed { obj: this, name });
+            }
+            Expression::ComputedMemberExpression(m) => {
+                self.expr(&m.object)?;
+                self.emit(Insn::Star(this));
+                self.optional(m.optional, m.span)?;
+                self.expr(&m.expression)?;
+                self.emit(Insn::GetKeyed { obj: this });
+            }
+            Expression::PrivateFieldExpression(m) => {
+                self.expr(&m.object)?;
+                self.emit(Insn::Star(this));
+                self.optional(m.optional, m.span)?;
+                self.load(Hidden::private(self.alloc, &m.field));
+                self.emit(Insn::GetPrivate { obj: this });
+            }
+            Expression::Identifier(id) if !self.with_chain(id.name.as_str()).is_empty() => {
+                self.emit(Insn::LdaUndefined);
+                self.emit(Insn::Star(this));
+                self.load_dynamic(id.name.as_str(), false, Some(this));
+            }
+            f => {
+                self.emit(Insn::LdaUndefined);
+                self.emit(Insn::Star(this));
+                self.expr(f)?;
+            }
+        }
+        self.optional(c.optional, c.span)?;
+        self.emit(Insn::Star(callee));
+        if spread {
+            let args = self.spread_array(c.arguments.iter().map(Element::from))?;
+            self.emit(Insn::CallSpread { callee, this, args });
+            self.release(args);
+        } else {
+            let first = Reg(callee.0 + 2);
+            self.arguments(&c.arguments, first)?;
+            if matches!(&c.callee, Expression::Identifier(id) if id.name == "eval") {
+                let scope = self.eval_scope();
+                self.emit(Insn::CallEval { callee, this, args: first, argc, scope });
+            } else {
+                self.emit(Insn::Call { callee, this, args: first, argc });
+            }
+        }
+        self.release(callee);
+        Ok(())
+    }
+
+    /// If `e` is a variable in this function's registers or `this` (no TDZ check needed here, not inside `with`), gives
+    /// that register, so reading it needs no copy into a temporary register.
+    fn in_register(&self, e: &'a Expression<'a>) -> Option<Reg> {
+        match e {
+            Expression::Identifier(id) => self.register_of(id.name.as_str(), id.span.start),
+            Expression::ThisExpression(t) => self.register_of(crate::scope::THIS, t.span.start),
+            Expression::ParenthesizedExpression(p) => self.in_register(&p.expression),
+            _ => None,
+        }
+    }
+
+    fn static_member(&mut self, m: &'a StaticMemberExpression<'a>) -> Result<(), Error> {
+        if !m.optional
+            && let Some(obj) = self.in_register(&m.object)
+        {
+            let name = self.name(m.property.name.as_str());
+            self.emit(Insn::GetNamed { obj, name });
+            return Ok(());
+        }
+        self.expr(&m.object)?;
+        self.optional(m.optional, m.span)?;
+        let obj = self.temp();
+        self.emit(Insn::Star(obj));
+        let name = self.name(m.property.name.as_str());
+        self.emit(Insn::GetNamed { obj, name });
+        self.release(obj);
+        Ok(())
+    }
+
+    /// `obj.#x`.
+    fn private_member(&mut self, m: &'a PrivateFieldExpression<'a>) -> Result<(), Error> {
+        self.expr(&m.object)?;
+        self.optional(m.optional, m.span)?;
+        let obj = self.temp();
+        self.emit(Insn::Star(obj));
+        self.load(Hidden::private(self.alloc, &m.field));
+        self.emit(Insn::GetPrivate { obj });
+        self.release(obj);
+        Ok(())
+    }
+
+    fn computed_member(&mut self, m: &'a ComputedMemberExpression<'a>) -> Result<(), Error> {
+        // The object is in a register and the key cannot change it: evaluate the key first and use the object's
+        // register directly
+        if !m.optional
+            && Self::cannot_assign(&m.expression)
+            && let Some(obj) = self.in_register(&m.object)
+        {
+            self.expr(&m.expression)?;
+            self.emit(Insn::GetKeyed { obj });
+            return Ok(());
+        }
+        self.expr(&m.object)?;
+        self.optional(m.optional, m.span)?;
+        let obj = self.temp();
+        self.emit(Insn::Star(obj));
+        self.expr(&m.expression)?;
+        self.emit(Insn::GetKeyed { obj });
+        self.release(obj);
+        Ok(())
+    }
+
+    /// `?.`: if acc is null / undefined, jump to the end of the current chain.
+    fn optional(&mut self, optional: bool, span: Span) -> Result<(), Error> {
+        if optional {
+            let j = self.jump(Insn::JumpIfNullish);
+            if self.chains.is_empty() {
+                return Err(self.unsupported(span, "`?.` outside an optional chain"));
+            }
+            self.chains.last_mut().expect("checked above").push(j);
+        }
+        Ok(())
+    }
+
+    fn has_spread(args: &[Argument<'a>]) -> bool {
+        args.iter().any(|a| matches!(a, Argument::SpreadElement(_)))
+    }
+
+    /// Builds a sequence of elements with spreads / holes into an array in a new temporary register (the caller frees
+    /// it).
+    fn spread_array(&mut self, elements: impl Iterator<Item = Element<'a>>) -> Result<Reg, Error> {
+        let arr = self.temp();
+        self.emit(Insn::CreateArray { first: arr, count: 0 });
+        self.emit(Insn::Star(arr));
+        for e in elements {
+            match e {
+                Element::Value(v) => {
+                    self.expr(v)?;
+                    self.emit(Insn::ArrayPush { arr });
+                }
+                Element::Spread(v) => {
+                    self.expr(v)?;
+                    self.emit(Insn::ArraySpread { arr });
+                }
+                Element::Hole => _ = self.emit(Insn::ArrayHole { arr }),
+            }
+        }
+        Ok(arr)
+    }
+
+    /// Destructuring assignment: stores the value in register `value` according to the assignment target pattern.
+    pub(crate) fn assign_target(&mut self, t: &'a AssignmentTarget<'a>, value: Reg) -> Result<(), Error> {
+        match t {
+            AssignmentTarget::ArrayAssignmentTarget(a) => self.assign_array(a, value)?,
+            AssignmentTarget::ObjectAssignmentTarget(o) => {
+                let n = u16::try_from(o.properties.len()).map_err(|_| self.unsupported(o.span, "more than 65535 properties"))?;
+                let keys = self.temps(n);
+                for (i, p) in (0u16..).zip(&o.properties) {
+                    let k = Reg(keys.0 + i);
+                    match p {
+                        AssignmentTargetProperty::AssignmentTargetPropertyIdentifier(id) => {
+                            let name = id.binding.name.as_str();
+                            let c = self.name(name);
+                            self.emit(Insn::LdaConst(c));
+                            self.emit(Insn::Star(k));
+                            self.emit(Insn::GetKeyed { obj: value });
+                            let v = self.temp();
+                            self.emit(Insn::Star(v));
+                            let v2 = match &id.init {
+                                Some(d) => self.with_default(v, d, Some(name))?,
+                                None => v,
+                            };
+                            self.emit(Insn::Ldar(v2));
+                            self.store(name, false);
+                            self.release(v);
+                        }
+                        AssignmentTargetProperty::AssignmentTargetPropertyProperty(pp) => {
+                            self.property_key_into(&pp.name, pp.computed, k)?;
+                            self.emit(Insn::Ldar(k));
+                            self.emit(Insn::GetKeyed { obj: value });
+                            let v = self.temp();
+                            self.emit(Insn::Star(v));
+                            self.assign_maybe_default(&pp.binding, v)?;
+                            self.release(v);
+                        }
+                    }
+                }
+                if let Some(r) = &o.rest {
+                    self.emit(Insn::ObjectRest { src: value, keys, count: n });
+                    let v = self.temp();
+                    self.emit(Insn::Star(v));
+                    self.assign_target(&r.target, v)?;
+                    self.release(v);
+                } else if o.properties.is_empty() {
+                    self.require_object(value);
+                }
+                self.release(keys);
+            }
+            t => {
+                let s = t.as_simple_assignment_target().ok_or_else(|| self.unsupported(t.span(), "assignment target"))?;
+                let target = self.target(s)?;
+                self.emit(Insn::Ldar(value));
+                self.target_store(&target);
+                self.target_release(&target);
+            }
+        }
+        Ok(())
+    }
+
+    /// Array destructuring assignment, in spec order: for each element, evaluate the target reference first, then step
+    /// the iterator; on a throw midway, close the iterator first.
+    fn assign_array(&mut self, a: &'a ArrayAssignmentTarget<'a>, value: Reg) -> Result<(), Error> {
+        let iter = self.iterate(value);
+        // Spec order: for each element, evaluate the target reference first, then step the iterator; on a throw midway,
+        // close the iterator first
+        self.closing_on_throw(iter, |c| {
+            for e in &a.elements {
+                let Some(e) = e else {
+                    c.emit(Insn::IteratorNext { iter });
+                    continue;
+                };
+                let (binding, default) = match e {
+                    AssignmentTargetMaybeDefault::AssignmentTargetWithDefault(d) => (&d.binding, Some(&d.init)),
+                    t => (t.as_assignment_target().ok_or_else(|| c.unsupported(t.span(), "assignment target"))?, None),
+                };
+                let pre = c.pre_target(binding)?;
+                c.emit(Insn::IteratorNext { iter });
+                let v = c.temp();
+                c.emit(Insn::Star(v));
+                let name = match binding {
+                    AssignmentTarget::AssignmentTargetIdentifier(id) => Some(id.name.as_str()),
+                    _ => None,
+                };
+                let v2 = match default {
+                    Some(d) => c.with_default(v, d, name)?,
+                    None => v,
+                };
+                c.put_target(pre.as_ref(), binding, v2)?;
+                c.release(v);
+                if let Some(t) = &pre {
+                    c.target_release(t);
+                }
+            }
+            match &a.rest {
+                Some(r) => {
+                    let pre = c.pre_target(&r.target)?;
+                    c.emit(Insn::IteratorRest { iter });
+                    let v = c.temp();
+                    c.emit(Insn::Star(v));
+                    c.put_target(pre.as_ref(), &r.target, v)?;
+                    c.release(v);
+                    if let Some(t) = &pre {
+                        c.target_release(t);
+                    }
+                }
+                None => _ = c.emit(Insn::IteratorClose { iter }),
+            }
+            Ok(())
+        })?;
+        self.release(iter);
+        Ok(())
+    }
+
+    /// An element of array destructuring: if the target is not a pattern, evaluate its reference first (object and key
+    /// go into temporary registers); for a pattern gives `None`, expanded once the value is available.
+    fn pre_target(&mut self, t: &'a AssignmentTarget<'a>) -> Result<Option<Target<'a>>, Error> {
+        match t.as_simple_assignment_target() {
+            Some(s) => Ok(Some(self.target(s)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Writes `v` into the previously evaluated target, or expands it per the nested pattern.
+    fn put_target(&mut self, pre: Option<&Target<'a>>, t: &'a AssignmentTarget<'a>, v: Reg) -> Result<(), Error> {
+        match pre {
+            Some(target) => {
+                self.emit(Insn::Ldar(v));
+                self.target_store(target);
+                Ok(())
+            }
+            None => self.assign_target(t, v),
+        }
+    }
+
+    fn assign_maybe_default(&mut self, e: &'a AssignmentTargetMaybeDefault<'a>, value: Reg) -> Result<(), Error> {
+        match e {
+            AssignmentTargetMaybeDefault::AssignmentTargetWithDefault(d) => {
+                let name = match &d.binding {
+                    AssignmentTarget::AssignmentTargetIdentifier(id) => Some(id.name.as_str()),
+                    _ => None,
+                };
+                let v = self.with_default(value, &d.init, name)?;
+                self.assign_target(&d.binding, v)?;
+                self.release(v);
+                Ok(())
+            }
+            t => self.assign_target(t.as_assignment_target().ok_or_else(|| self.unsupported(t.span(), "assignment target"))?, value),
+        }
+    }
+
+    /// `yield* a`: forwards the resume mode and the value sent in to the inner iterator unchanged; its completion value
+    /// is the value of the expression.
+    fn yield_star(&mut self, a: &'a Expression<'a>, mode: Reg) -> Result<(), Error> {
+        self.expr(a)?;
+        let src = self.temp();
+        self.emit(Insn::Star(src));
+        let iter = self.iterate(src);
+        let next = self.constant(Constant::Number(f64::from(Resume::Next)));
+        self.emit(Insn::LdaConst(next));
+        self.emit(Insn::Star(mode));
+        self.emit(Insn::LdaUndefined);
+        let result = self.temp();
+        let top = self.here();
+        self.emit(Insn::DelegateStep { iter, mode });
+        self.emit(Insn::Star(result));
+        let done = self.name("done");
+        self.emit(Insn::GetNamed { obj: result, name: done });
+        let finished = self.jump(Insn::JumpIfTrue);
+        let value = self.name("value");
+        self.emit(Insn::GetNamed { obj: result, name: value });
+        self.emit(Insn::Yield { mode });
+        self.emit(Insn::Jump(top));
+        self.land(finished);
+        self.emit(Insn::GetNamed { obj: result, name: value });
+        self.emit(Insn::Star(result));
+        self.on_completion(mode, f64::from(Resume::Return), |s| {
+            s.emit(Insn::Ldar(result));
+            s.ret();
+            Ok(())
+        })?;
+        self.emit(Insn::Ldar(result));
+        self.release(src);
+        Ok(())
+    }
+
+    /// `yield* a` in an async generator: async iterator protocol; each step's result from the inner iterator is awaited
+    /// first, and when falling back to a sync iterator the value is awaited too. Resuming from `await` overwrites
+    /// `mode`, so the resume mode used for delegation is saved separately.
+    fn yield_star_async(&mut self, a: &'a Expression<'a>, mode: Reg) -> Result<(), Error> {
+        self.expr(a)?;
+        let iter = self.temps(4);
+        self.emit(Insn::GetAsyncIterator { dst: iter });
+        let next = self.constant(Constant::Number(f64::from(Resume::Next)));
+        self.emit(Insn::LdaConst(next));
+        self.emit(Insn::Star(mode));
+        self.emit(Insn::LdaUndefined);
+        let delegated = self.temp();
+        let result = self.temp();
+        let top = self.here();
+        self.emit(Insn::DelegateStep { iter, mode });
+        self.emit(Insn::Star(result));
+        self.emit(Insn::Ldar(mode));
+        self.emit(Insn::Star(delegated));
+        self.emit(Insn::Ldar(result));
+        self.emit(Insn::Await { mode });
+        self.resume_dispatch(mode, false)?;
+        self.emit(Insn::Star(result));
+        let done = self.name("done");
+        self.emit(Insn::GetNamed { obj: result, name: done });
+        let finished = self.jump(Insn::JumpIfTrue);
+        let value = self.name("value");
+        self.emit(Insn::GetNamed { obj: result, name: value });
+        self.emit(Insn::Star(result));
+        self.emit(Insn::Ldar(Reg(iter.0 + 3)));
+        let not_sync = self.jump(Insn::JumpIfFalse);
+        self.emit(Insn::Ldar(result));
+        self.emit(Insn::Await { mode });
+        self.resume_dispatch(mode, false)?;
+        self.emit(Insn::Star(result));
+        self.land(not_sync);
+        self.emit(Insn::Ldar(result));
+        self.emit(Insn::Yield { mode });
+        self.emit(Insn::Jump(top));
+        self.land(finished);
+        self.emit(Insn::GetNamed { obj: result, name: value });
+        self.emit(Insn::Star(result));
+        self.on_completion(delegated, f64::from(Resume::Return), |s| {
+            s.emit(Insn::Ldar(result));
+            s.ret();
+            Ok(())
+        })?;
+        self.emit(Insn::Ldar(result));
+        self.release(iter);
+        Ok(())
+    }
+
+    /// Evaluates the arguments one by one into consecutive registers starting at `first`.
+    fn arguments(&mut self, args: &'a [Argument<'a>], first: Reg) -> Result<(), Error> {
+        for (i, a) in (0..).zip(args) {
+            let e = a.as_expression().ok_or_else(|| self.unsupported(a.span(), "spread arguments"))?;
+            self.expr(e)?;
+            self.emit(Insn::Star(Reg(first.0 + i)));
+        }
+        Ok(())
+    }
+
+    /// Reads `this` into a temporary register (the receiver of `super.x`).
+    fn this_temp(&mut self) -> Reg {
+        self.load(crate::scope::THIS);
+        let t = self.temp();
+        self.emit(Insn::Star(t));
+        t
+    }
+
+    /// `delete x`: a property delete gives the result; deleting a name (sloppy mode) gives `false`; any other
+    /// expression is evaluated and gives `true`.
+    fn delete(&mut self, e: &'a Expression<'a>) -> Result<(), Error> {
+        match e {
+            Expression::StaticMemberExpression(m) => {
+                self.expr(&m.object)?;
+                let obj = self.temp();
+                self.emit(Insn::Star(obj));
+                let name = self.name(m.property.name.as_str());
+                self.emit(Insn::DeleteNamed { obj, name, strict: self.strict_here() });
+                self.release(obj);
+            }
+            Expression::ComputedMemberExpression(m) => {
+                self.expr(&m.object)?;
+                let obj = self.temp();
+                self.emit(Insn::Star(obj));
+                self.expr(&m.expression)?;
+                self.emit(Insn::DeleteKeyed { obj, strict: self.strict_here() });
+                self.release(obj);
+            }
+            Expression::Identifier(_) => _ = self.emit(Insn::LdaBool(false)),
+            e => {
+                self.expr(e)?;
+                self.emit(Insn::LdaBool(true));
+            }
+        }
+        Ok(())
+    }
+
+    fn object(&mut self, o: &'a ObjectExpression<'a>) -> Result<(), Error> {
+        let capacity = u16::try_from(o.properties.len()).unwrap_or(u16::MAX);
+        self.emit(Insn::CreateObject { capacity });
+        let obj = self.temp();
+        self.emit(Insn::Star(obj));
+        for p in &o.properties {
+            let p = match p {
+                ObjectPropertyKind::ObjectProperty(p) => p,
+                ObjectPropertyKind::SpreadProperty(sp) => {
+                    self.expr(&sp.argument)?;
+                    self.emit(Insn::CopyData { obj });
+                    continue;
+                }
+            };
+            let kind = match p.kind {
+                PropertyKind_::Init => PropertyKind::Data,
+                PropertyKind_::Get => PropertyKind::Getter,
+                PropertyKind_::Set => PropertyKind::Setter,
+            };
+            let key = match self.static_key(&p.key, p.computed) {
+                Some(k) => Ok(k?),
+                None => {
+                    let k = p.key.as_expression().ok_or_else(|| self.unsupported(p.span, "property key"))?;
+                    self.expr(k)?;
+                    let key = self.temp();
+                    self.emit(Insn::Star(key));
+                    Err(key)
+                }
+            };
+            match (&p.value, p.method || kind != PropertyKind::Data) {
+                (Expression::FunctionExpression(f), true) => {
+                    let mkind = match p.kind {
+                        PropertyKind_::Get => MethodDefinitionKind::Get,
+                        PropertyKind_::Set => MethodDefinitionKind::Set,
+                        PropertyKind_::Init => MethodDefinitionKind::Method,
+                    };
+                    let fname = self.method_name(&p.key, p.computed, mkind);
+                    let n = self.method(fname, f, FunctionKind::Method)?;
+                    self.emit(Insn::CreateMethod { func: n, home: obj });
+                }
+                (v, _) => match self.static_name(&p.key, p.computed) {
+                    // `__proto__: function () {}` does not infer a name
+                    Some(n) if n != "__proto__" || p.shorthand => self.expr_named(v, n)?,
+                    _ => self.expr(v)?,
+                },
+            }
+            let proto_setter = !p.computed && !p.shorthand && !p.method && kind == PropertyKind::Data && self.static_name(&p.key, false).is_some_and(|n| n == "__proto__");
+            match key {
+                Ok(_) if proto_setter => _ = self.emit(Insn::SetProtoLiteral { obj }),
+                Ok(name) => _ = self.emit(Insn::DefineNamed { obj, name, kind, enumerable: true }),
+                Err(key) => {
+                    self.emit(Insn::DefineKeyed { obj, key, kind, enumerable: true });
+                    self.release(key);
+                }
+            }
+        }
+        self.emit(Insn::Ldar(obj));
+        self.release(obj);
+        Ok(())
+    }
+}

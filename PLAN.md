@@ -1,6 +1,6 @@
-# r8 plan: complete core ECMAScript for test262
+# j8 plan: complete core ECMAScript for test262
 
-The main line is raising the test262 pass rate. Each phase: add cases to the semantics table → clippy clean → riscv `no_std` builds → run the test262 baseline in a snapshot with zero regressions → record newly passing cases in the relevant directories with `R8_TEST262_UPDATE=1` → commit and push.
+The main line is raising the test262 pass rate. Each phase: add cases to the semantics table → clippy clean → riscv `no_std` builds → run the test262 baseline in a snapshot with zero regressions → record newly passing cases in the relevant directories with `J8_TEST262_UPDATE=1` → commit and push.
 
 Out of scope: Temporal, intl402, ShadowRealm, explicit resource management (using / DisposableStack), import defer, decorators, source phase imports.
 
@@ -14,7 +14,7 @@ Out of scope: Temporal, intl402, ShadowRealm, explicit resource management (usin
 
 ## Phase 2: Object / Array / property model
 
-- [x] Object internal methods (r8framework property.rs): [[GetOwnProperty]] / [[DefineOwnProperty]] (ValidateAndApplyPropertyDescriptor, ArraySetLength, String wrapper objects) / [[OwnPropertyKeys]] / extensibility / prototype; dense array part + ordinary properties stored by index (holes, elements with different attributes)
+- [x] Object internal methods (j8framework property.rs): [[GetOwnProperty]] / [[DefineOwnProperty]] (ValidateAndApplyPropertyDescriptor, ArraySetLength, String wrapper objects) / [[OwnPropertyKeys]] / extensibility / prototype; dense array part + ordinary properties stored by index (holes, elements with different attributes)
 - [x] `extensible`: preventExtensions / isExtensible / seal / isSealed / isFrozen
 - [x] Object completion: defineProperties, getOwnPropertySymbols / Descriptors, setPrototypeOf, fromEntries, is, hasOwn, groupBy, propertyIsEnumerable, isPrototypeOf, `__proto__`, `__defineGetter__` etc.; literal `__proto__: v`
 - [x] Array methods generic over array-likes; add from / splice / copyWithin / flat / flatMap / findLast(Index) / reduceRight / toReversed / toSorted / toSpliced / with / unscopables / species
@@ -23,7 +23,7 @@ Out of scope: Temporal, intl402, ShadowRealm, explicit resource management (usin
 ## Phase 3: reflection and iterators
 
 - [x] Reflect
-- [x] Proxy (including revocable): r8framework proxy.rs, internal-method entry points and call / construct dispatch to traps with invariant checks
+- [x] Proxy (including revocable): j8framework proxy.rs, internal-method entry points and call / construct dispatch to traps with invariant checks
 - [x] Iterator helpers (global Iterator, Iterator.from, map / filter / take / drop / flatMap / reduce / toArray / forEach / some / every / find)
 - [x] Set methods, Map.groupBy
 

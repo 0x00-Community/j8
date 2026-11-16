@@ -1,6 +1,6 @@
 [package]
 name = "benchv8"
-description = "Timing comparison of the same JS benchmarks on r8 and V8 (rusty_v8, with JIT / --jitless)"
+description = "Timing comparison of the same JS benchmarks on j8 and V8 (rusty_v8, with JIT / --jitless)"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
@@ -11,10 +11,10 @@ publish = false
 
 [dependencies]
 v8 = "=152.2.0"
-r8framework = { path = "../../crates/r8framework" }
-r8platform = { path = "../../crates/r8platform" }
-r8builtins = { path = "../../crates/r8builtins" }
-r8executor = { path = "../../crates/r8executor" }
+j8framework = { path = "../../crates/j8framework" }
+j8platform = { path = "../../crates/j8platform" }
+j8builtins = { path = "../../crates/j8builtins" }
+j8executor = { path = "../../crates/j8executor" }
 
 [profile.release]
 debug = false

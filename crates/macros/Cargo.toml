@@ -1,6 +1,6 @@
 [package]
-name = "r8macros"
-description = "r8 procedural macros: generate enums from JSON definitions"
+name = "j8macros"
+description = "j8 procedural macros: generate enums from JSON definitions"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

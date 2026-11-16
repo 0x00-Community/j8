@@ -1,4 +1,4 @@
-//! dune: the r8 JavaScript runtime, comparable to node / deno.
+//! dune: the j8 JavaScript runtime, comparable to node / deno.
 //!
 //! `dune a.js` / `dune run a.js` runs a file, `dune -e '<js>'` runs source (`-p` also prints the result), no arguments
 //! starts the REPL.
@@ -10,13 +10,13 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use r8framework::{CreateParams, Isolate, Source};
-use r8platform::DefaultPlatform;
+use j8framework::{CreateParams, Isolate, Source};
+use j8platform::DefaultPlatform;
 
 use session::{Outcome, Session};
 
 
-/// The r8 JavaScript runtime
+/// The j8 JavaScript runtime
 #[derive(Parser)]
 #[command(name = "dune", version, args_conflicts_with_subcommands = true)]
 struct Cli {
@@ -30,7 +30,7 @@ struct Cli {
     /// Run this source and print the result
     #[arg(short, long, conflicts_with = "file")]
     print: Option<String>,
-    /// Enable the JIT: hot functions are compiled to x86-64 machine code (r8jit)
+    /// Enable the JIT: hot functions are compiled to x86-64 machine code (j8jit)
     #[arg(long)]
     jit: bool,
     /// Arguments passed to the script (after the script path in `process.argv`)

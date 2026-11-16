@@ -1,11 +1,11 @@
-//! workerd: a minimal host that loads Cloudflare Workers (ES modules) and Durable Objects with r8.
+//! workerd: a minimal host that loads Cloudflare Workers (ES modules) and Durable Objects with j8.
 //!
 //! ```text
 //! workerd examples/counter.js --bind COUNTER=Counter --request "GET /counter/inc?name=a"
 //! workerd examples/counter.js --bind COUNTER=Counter --port 8787
 //! ```
 //! The Fetch API subset and Durable Objects are written in JS in `prelude.js`; each object's storage is the Rust
-//! [`KvStore`], bound as `__native.KvStore` via `#[r8::class]`.
+//! [`KvStore`], bound as `__native.KvStore` via `#[j8::class]`.
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -14,11 +14,11 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::Parser;
-use r8::Class;
-use r8builtins::Builtins;
-use r8executor::Executor;
-use r8framework::{ContextRoot, CreateParams, Error, Isolate, Property, Source};
-use r8platform::DefaultPlatform;
+use j8::Class;
+use j8builtins::Builtins;
+use j8executor::Executor;
+use j8framework::{ContextRoot, CreateParams, Error, Isolate, Property, Source};
+use j8platform::DefaultPlatform;
 
 
 /// The JS part of the Fetch API and Durable Objects.
@@ -49,7 +49,7 @@ struct KvStore {
     map: BTreeMap<String, String>,
 }
 
-#[r8::class]
+#[j8::class]
 impl KvStore {
     #[js(constructor)]
     fn new() -> Self {
@@ -73,7 +73,7 @@ impl KvStore {
     }
 
     /// For `newUniqueId()`: timestamp plus counter, in hex.
-    fn unique_id(a: &mut r8framework::Agent<'_, '_>) -> String {
+    fn unique_id(a: &mut j8framework::Agent<'_, '_>) -> String {
         format!("{:032x}", a.platform.wall_clock().as_nanos())
     }
 }
@@ -136,7 +136,7 @@ impl<'p> Runtime<'p> {
         self.isolate.enter(|scope| {
             let realm = scope.context_of(cx);
             let mut a = scope.agent(realm, executor);
-            let text = |a: &mut r8framework::Agent<'_, '_>, g: &r8framework::Global| {
+            let text = |a: &mut j8framework::Agent<'_, '_>, g: &j8framework::Global| {
                 let v = a.local(g);
                 a.to_string(v).map_or_else(|_| String::from("<ToString threw>"), |s| String::from(&**s))
             };
