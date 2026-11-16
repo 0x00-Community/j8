@@ -24,6 +24,7 @@ mod gc;
 mod header;
 mod heap;
 mod lock;
+mod memory;
 mod metrics;
 mod parallel;
 mod roots;

@@ -61,7 +61,6 @@ moremath = { version = "=0.2.3", default-features = false }
 libm = "0.2"
 r8gc = { version = "0.1.2", path = "crates/r8gc", default-features = false }
 r8lockfree = { version = "0.1.2", path = "crates/r8lockfree" }
-r8alloc = { version = "0.1.2", path = "crates/r8alloc" }
 smol_str = { version = "0.3", default-features = false }
 hashbrown = { version = "0.17", default-features = false }
 rustc-hash = { version = "2", default-features = false }

@@ -1,6 +1,6 @@
 //! The heap: young generation (per-block bump allocation), old generation (paged by size class, each page cut into
 //! slots at once + free lists), large objects (allocated separately).
-use alloc::alloc::{Layout, handle_alloc_error};
+use alloc::alloc::Layout;
 use alloc::vec::Vec;
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicUsize, Ordering};
@@ -8,14 +8,15 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use r8lockfree::{SegVec, Stock};
 
 use crate::header::{Flags, HEADER, Ptr, SizeClass, VTable};
+use crate::memory::{BLOCK, Block, Memory};
 use crate::parallel::{Pool, split};
 
 /// Size of one young-generation block
-pub(crate) const CHUNK: usize = 256 << 10;
+pub(crate) const CHUNK: usize = BLOCK;
 /// A minor collection runs once the young generation uses this much
 pub(crate) const NURSERY_LIMIT: usize = 4 << 20;
 /// Size of one old-generation page (pages are aligned to it)
-const PAGE: usize = 256 << 10;
+const PAGE: usize = BLOCK;
 /// A page is evacuated when its live fraction falls below this (denominator)
 const SPARSE: usize = 4;
 /// Don't compact if less than this much space would be freed
@@ -31,100 +32,24 @@ const SPARE_MIN: usize = 64;
 /// Keep at most this fraction (denominator) of the live page count as empty pages
 const SPARE_RATIO: usize = 4;
 
-/// Where the heap's memory comes from: with `std`, r8alloc (one reserved address range, lock-free, tied to no
-/// thread); without it, the global allocator. Young-generation chunks and old-generation pages are both one block.
-pub(crate) struct Memory;
-
-impl Memory {
-    /// The layout of a block: young-generation chunks and old-generation pages share it
-    const BLOCK: Layout = match Layout::from_size_align(PAGE, PAGE) {
-        Ok(l) => l,
-        Err(_) => panic!("block layout"),
-    };
-
-    /// A fresh block ([`Memory::BLOCK`]); reports an allocation error on failure
-    fn block() -> NonNull<u8> {
-        #[cfg(feature = "std")]
-        let p = r8alloc::R8Alloc::pages(1);
-        #[cfg(not(feature = "std"))]
-        // SAFETY: the size is not zero
-        let p = NonNull::new(unsafe { alloc::alloc::alloc(Self::BLOCK) });
-        p.unwrap_or_else(|| handle_alloc_error(Self::BLOCK))
-    }
-
-    /// Returns a block.
-    ///
-    /// # Safety
-    /// `p` came from [`Memory::block`] and nothing lives in it any more.
-    unsafe fn free_block(p: NonNull<u8>) {
-        #[cfg(feature = "std")]
-        // SAFETY: the caller vouches it is one block from `pages(1)`
-        unsafe {
-            r8alloc::R8Alloc::free_pages(p, 1);
-        }
-        #[cfg(not(feature = "std"))]
-        // SAFETY: allocated with BLOCK
-        unsafe {
-            alloc::alloc::dealloc(p.as_ptr(), Self::BLOCK);
-        }
-    }
-
-    /// Memory for `layout` (large objects); reports an allocation error on failure
-    fn alloc(layout: Layout) -> NonNull<u8> {
-        #[cfg(feature = "std")]
-        // SAFETY: the size is not zero
-        let p = unsafe { core::alloc::GlobalAlloc::alloc(&r8alloc::R8Alloc, layout) };
-        #[cfg(not(feature = "std"))]
-        // SAFETY: the size is not zero
-        let p = unsafe { alloc::alloc::alloc(layout) };
-        NonNull::new(p).unwrap_or_else(|| handle_alloc_error(layout))
-    }
-
-    /// Returns memory from [`Memory::alloc`].
-    ///
-    /// # Safety
-    /// `p` came from `Memory::alloc(layout)` and is no longer used.
-    unsafe fn free(p: NonNull<u8>, layout: Layout) {
-        #[cfg(feature = "std")]
-        // SAFETY: the caller vouches
-        unsafe {
-            core::alloc::GlobalAlloc::dealloc(&r8alloc::R8Alloc, p.as_ptr(), layout);
-        }
-        #[cfg(not(feature = "std"))]
-        // SAFETY: the caller vouches
-        unsafe {
-            alloc::alloc::dealloc(p.as_ptr(), layout);
-        }
-    }
-}
-
-impl Memory {
-    /// Gives the memory of every freed block back to the OS (after a major collection)
-    pub(crate) fn trim() {
-        #[cfg(feature = "std")]
-        r8alloc::R8Alloc::trim();
-    }
-}
-
-#[cfg(feature = "std")]
-const _: () = assert!(PAGE == r8alloc::R8Alloc::PAGE && CHUNK == PAGE, "chunks and pages are one r8alloc page");
-
 /// The young generation: blocks handed out to the mutators' allocation buffers (lock-free: any number of mutators
 /// refill at once); a minor collection empties it all, while it is held exclusively.
 #[derive(Default)]
 pub(crate) struct Nursery {
     /// Blocks handed out since the last minor collection
     chunks: SegVec<Block>,
-    /// Blocks kept for reuse
+    /// Blocks kept for reuse (still committed)
     spare: Stock<Block>,
     /// Bytes handed out (whole blocks)
     used: AtomicUsize,
+    /// Where the blocks come from
+    memory: Memory,
 }
 
 impl Nursery {
     /// Hands out a fresh block as `[start, end)`
     pub(crate) fn refill(&self) -> (usize, usize) {
-        let c = self.spare.claim_one().map_or_else(Memory::block, |b| b.0);
+        let c = self.spare.claim_one().map_or_else(|| self.memory.block(), |b| b.0);
         self.chunks.push(Block(c));
         self.used.fetch_add(CHUNK, Ordering::AcqRel);
         let start = c.as_ptr() as usize;
@@ -138,12 +63,13 @@ impl Nursery {
 
     /// Empties everything (exclusively): some blocks are kept for reuse
     pub(crate) fn reset(&mut self) {
+        self.memory.settle();
         for b in self.chunks.take() {
             if self.spare.len() < NURSERY_LIMIT / CHUNK {
                 self.spare.push(b);
             } else {
                 // SAFETY: a block, nothing lives in it any more
-                unsafe { Memory::free_block(b.0) }
+                unsafe { self.memory.free_block(b.0) }
             }
         }
         *self.used.get_mut() = 0;
@@ -154,19 +80,10 @@ impl Drop for Nursery {
     fn drop(&mut self) {
         for b in self.chunks.take().into_iter().chain(self.spare.take()) {
             // SAFETY: a block
-            unsafe { Memory::free_block(b.0) }
+            unsafe { self.memory.free_block(b.0) }
         }
     }
 }
-
-/// The base address of a block of heap memory (a young-generation chunk or an old-generation page).
-#[derive(Clone, Copy)]
-pub(crate) struct Block(NonNull<u8>);
-
-// SAFETY: just an address; the memory behind it belongs to whoever claims it
-unsafe impl Send for Block {}
-// SAFETY: see above
-unsafe impl Sync for Block {}
 
 /// An old-generation page: filled with slots of one size class; free slots are marked `FREE` in their header.
 struct Page {
@@ -252,11 +169,20 @@ pub(crate) struct OldSpace {
     large: SegVec<Large>,
     /// Bytes occupied (live slots + large objects)
     bytes: AtomicUsize,
+    /// Where the pages come from
+    memory: Memory,
 }
 
 impl Default for OldSpace {
     fn default() -> Self {
-        Self { pages: SegVec::default(), spare: Stock::default(), free: core::array::from_fn(|_| Stock::default()), large: SegVec::default(), bytes: AtomicUsize::new(0) }
+        Self {
+            pages: SegVec::default(),
+            spare: Stock::default(),
+            free: core::array::from_fn(|_| Stock::default()),
+            large: SegVec::default(),
+            bytes: AtomicUsize::new(0),
+            memory: Memory::default(),
+        }
     }
 }
 
@@ -268,13 +194,14 @@ impl OldSpace {
 
     /// Exclusively: slots and pages handed back during the last parallel phase become claimable again
     pub(crate) fn settle(&mut self) {
+        self.memory.settle();
         self.free.iter_mut().for_each(Stock::settle);
         self.spare.settle();
     }
 
     /// Opens a page (preferring kept empty pages) and registers it; slot headers are written by whoever takes them
     fn new_page(&self, class: usize) -> NonNull<u8> {
-        let base = self.spare.claim_one().map_or_else(Memory::block, |b| b.0);
+        let base = self.spare.claim_one().map_or_else(|| self.memory.block(), |b| b.0);
         self.pages.push(Page { base, class, live: 0, evacuate: false });
         base
     }
@@ -296,7 +223,7 @@ impl OldSpace {
             self.spare.push(Block(base));
         } else {
             // SAFETY: a block, and no live objects remain in it
-            unsafe { Memory::free_block(base) }
+            unsafe { self.memory.free_block(base) }
         }
     }
 
@@ -423,7 +350,7 @@ impl Drop for OldSpace {
         }
         for base in self.pages.take().into_iter().map(|p| p.base).chain(self.spare.take().into_iter().map(|b| b.0)) {
             // SAFETY: a block
-            unsafe { Memory::free_block(base) }
+            unsafe { self.memory.free_block(base) }
         }
         for l in self.large.take() {
             // SAFETY: allocated with l.layout
