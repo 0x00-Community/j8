@@ -182,7 +182,6 @@ name = "dune"
 version = "0.1.2"
 dependencies = [
  "clap",
- "r8alloc",
  "r8builtins",
  "r8executor",
  "r8framework",
@@ -1292,7 +1291,6 @@ name = "workerd"
 version = "0.1.2"
 dependencies = [
  "clap",
- "r8alloc",
  "r8builtins",
  "r8executor",
  "r8framework",

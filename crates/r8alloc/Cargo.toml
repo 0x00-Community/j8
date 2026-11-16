@@ -1,6 +1,6 @@
 [package]
 name = "r8alloc"
-description = "r8 的堆内存分配器（C11）：预留一段地址区，页与按尺寸分档的块都从全局无锁空闲表分配，不绑定任何线程、没有锁；r8gc 的页来源，也能作全局分配器"
+description = "r8 的 GC 堆内存来源（C11）：一段按需增长的地址窗口，页与按尺寸分档的块都从全局无锁空闲表分配，不绑定任何线程、没有锁；只给 GC 堆用，Rust 自己的内存照常走系统分配器"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

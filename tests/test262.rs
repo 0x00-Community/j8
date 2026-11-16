@@ -23,11 +23,6 @@ use r8executor::Executor;
 use r8framework::{CreateParams, Error, Isolate, Platform, Source, Task};
 use serde::Deserialize;
 
-/// All of the process's memory (the JS heap's pages and every Rust allocation) comes from r8alloc: one reserved
-/// address range, lock-free, tied to no thread. (`#[global_allocator]` only accepts a `static`; it is a zero-sized
-/// handle.)
-#[global_allocator]
-static ALLOC: r8alloc::R8Alloc = r8alloc::R8Alloc;
 
 /// test262 checkout (submodule)
 const ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/test262");

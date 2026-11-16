@@ -20,11 +20,6 @@ use r8executor::Executor;
 use r8framework::{ContextRoot, CreateParams, Error, Isolate, Property, Source};
 use r8platform::DefaultPlatform;
 
-/// All of the process's memory (the JS heap's pages and every Rust allocation) comes from r8alloc: one reserved
-/// address range, lock-free, tied to no thread. (`#[global_allocator]` only accepts a `static`; it is a zero-sized
-/// handle.)
-#[global_allocator]
-static ALLOC: r8alloc::R8Alloc = r8alloc::R8Alloc;
 
 /// The JS part of the Fetch API and Durable Objects.
 const PRELUDE: &str = include_str!("prelude.js");

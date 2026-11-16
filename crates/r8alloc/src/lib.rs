@@ -8,6 +8,10 @@
 //! - 没有按线程划分的 arena，也没有锁：任何线程都能释放别的线程分配的内存
 //!
 //! 空闲表是 Treiber 栈，表头一个 64 位字：32 位版本号 + 32 位链接，CAS 不会遇到 ABA。
+//!
+//! 用途：只作 GC 堆的内存来源（r8gc 的新生代块、老年代页、大对象），与 Rust 自己的内存（栈与系统分配器）分开，
+//! 生命周期也分开：GC 堆按可达性回收，Rust 内存按所有权释放。⛔ 拿它当 `#[global_allocator]`：每个尺寸档一个全局
+//! 空闲表，多线程同时分配时争用同一个表头，8 线程各自分配释放比 glibc 慢约 100 倍。
 #![no_std]
 
 use core::alloc::{GlobalAlloc, Layout};
@@ -21,7 +25,7 @@ unsafe extern "C" {
     fn r8a_trim();
 }
 
-/// 分配器（零大小）：全局分配器用 `#[global_allocator] static A: R8Alloc = R8Alloc;`。
+/// 分配器（零大小）。
 #[derive(Clone, Copy, Debug, Default)]
 pub struct R8Alloc;
 

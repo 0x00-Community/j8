@@ -15,11 +15,6 @@ use r8platform::DefaultPlatform;
 
 use session::{Outcome, Session};
 
-/// All of the process's memory (the JS heap's pages and every Rust allocation) comes from r8alloc: one reserved
-/// address range, lock-free, tied to no thread. (`#[global_allocator]` only accepts a `static`; it is a zero-sized
-/// handle.)
-#[global_allocator]
-static ALLOC: r8alloc::R8Alloc = r8alloc::R8Alloc;
 
 /// The r8 JavaScript runtime
 #[derive(Parser)]
