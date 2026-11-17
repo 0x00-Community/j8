@@ -633,10 +633,7 @@ impl<'gc> Agent<'gc, '_> {
         loop {
             // Fast path: an ordinary object checks its own properties in one borrow, and goes straight to the prototype
             // if not found
-            let fast = {
-                let d = cur.borrow();
-                d.kind.has_ordinary_properties().then(|| (d.own_slot(key), d.proto()))
-            };
+            let fast = cur.has_ordinary_properties().then(|| (cur.own_slot(key), cur.proto()));
             match fast {
                 Some((Some(p), _)) => {
                     return match p.slot {
@@ -719,10 +716,7 @@ impl<'gc> Agent<'gc, '_> {
         let found = loop {
             // Fast path: an ordinary object checks its own properties in one borrow, and goes straight to the prototype
             // if not found
-            let fast = {
-                let d = cur.borrow();
-                d.kind.has_ordinary_properties().then(|| (d.own_slot(key), d.proto()))
-            };
+            let fast = cur.has_ordinary_properties().then(|| (cur.own_slot(key), cur.proto()));
             match fast {
                 Some((Some(p), _)) => break Some(p),
                 Some((None, Some(proto))) => {

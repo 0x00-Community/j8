@@ -220,6 +220,9 @@ impl<'gc> Agent<'gc, '_> {
     #[expect(clippy::option_option, reason = "outer: whether it is a string key on a namespace object; inner: whether that export exists")]
     pub(crate) fn namespace_export(o: JsObject<'gc>, key: Key<'_, 'gc>) -> Option<Option<ResolvedBinding<'gc>>> {
         let Key::Str(k) = key else { return None };
+        if o.is_plain() {
+            return None;
+        }
         match &o.borrow().kind {
             ObjectKind::ModuleNamespace(exports) => Some(exports.iter().find(|(n, _)| ***n == *k).map(|&(_, b)| b)),
             _ => None,

@@ -286,7 +286,7 @@ impl<'gc> Agent<'gc, '_> {
     /// A numeric key on a TypedArray: returns the canonicalized index.
     pub(crate) fn typed_numeric(o: JsObject<'gc>, key: Key<'_, 'gc>) -> Option<f64> {
         let Key::Str(k) = key else { return None };
-        if !matches!(o.borrow().kind, ObjectKind::TypedArray(..)) {
+        if o.is_plain() || !matches!(o.borrow().kind, ObjectKind::TypedArray(..)) {
             return None;
         }
         canonical_numeric(k)

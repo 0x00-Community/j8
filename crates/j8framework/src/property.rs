@@ -190,6 +190,10 @@ impl<'gc> Agent<'gc, '_> {
         if let Some(i) = Self::typed_numeric(o, key) {
             return Ok(self.typed_get(o, i).map(Property::data));
         }
+        // Own properties are exactly the stored ones: no borrowing
+        if o.has_ordinary_properties() {
+            return Ok(o.own_slot(key));
+        }
         let d = o.borrow();
         Ok(match (&d.kind, key) {
             (ObjectKind::Array, Key::Str("length")) => {

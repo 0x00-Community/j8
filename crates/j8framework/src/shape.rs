@@ -98,23 +98,33 @@ impl Shape {
     }
 
     /// Whether `to` is this shape's child by a transition (so this shape's tree holds it)
-    fn has_child(&self, to: &Arc<Shape>) -> bool {
-        self.transitions.iter().any(|(_, _, c)| Arc::ptr_eq(c, to))
+    fn has_child(&self, to: &Shape) -> bool {
+        self.transitions.iter().any(|(_, _, c)| core::ptr::eq(Arc::as_ptr(c), to))
     }
 
-    /// The shape after adding a key (shared: look up the transition table; create and register one if absent)
-    fn child(self: &Arc<Self>, key: &str, attrs: Attrs) -> Arc<Self> {
-        let t = &self.transitions;
-        if let Some((_, _, c)) = t.iter().find(|(k, a, _)| **k == *key && *a == attrs) {
-            return Arc::clone(c);
+    /// The child shape by adding a key, borrowed: it lives as long as this shape (the transition table owns it)
+    fn child_ref(&self, key: &str, attrs: Attrs) -> &Shape {
+        if let Some((_, _, c)) = self.transitions.iter().find(|(k, a, _)| **k == *key && *a == attrs) {
+            return c;
         }
         let mut keys = Vec::with_capacity(self.keys.len() + 1);
         keys.extend(self.keys.iter().cloned());
         keys.push((SmallStr::from(key), attrs));
         let child = Arc::new(Self::new(keys));
-        // Append-only (other threads may be reading it; a racing thread may add a twin, which is harmless)
-        t.push((SmallStr::from(key), attrs, Arc::clone(&child)));
-        child
+        let p = Arc::as_ptr(&child);
+        self.transitions.push((SmallStr::from(key), attrs, child));
+        // SAFETY: the transition table now owns it and never drops entries while this shape lives
+        unsafe { &*p }
+    }
+
+    /// The shape after adding a key (shared: look up the transition table; create and register one if absent)
+    fn child(&self, key: &str, attrs: Attrs) -> Arc<Self> {
+        let c = self.child_ref(key, attrs);
+        // SAFETY: tree shapes are `Arc` allocations owned by their parent's transition table
+        unsafe {
+            Arc::increment_strong_count(c);
+            Arc::from_raw(c)
+        }
     }
 }
 
@@ -321,7 +331,7 @@ impl<'gc> Props<'gc> {
 
     /// Moves from shape `from` (`None`: empty) to its child `to`, storing `slot` in the new last cell; false when the
     /// shape changed meanwhile (the caller retries)
-    fn advance(&self, mc: &Mutation<'gc>, from: Option<&Shape>, to: &Arc<Shape>, slot: Slot<'gc>) -> bool {
+    fn advance(&self, mc: &Mutation<'gc>, from: Option<&Shape>, to: &Shape, slot: Slot<'gc>) -> bool {
         let n = to.len() - 1;
         let cur = self.store();
         let grown = Store::put(cur, mc, n, n, slot.encode(mc));
@@ -329,7 +339,7 @@ impl<'gc> Props<'gc> {
             self.store.set(mc.mutator(), Some(grown.gc()));
         }
         let from = from.map_or(core::ptr::null_mut(), |f| core::ptr::from_ref(f).cast_mut());
-        self.shape.compare_exchange(from, Arc::as_ptr(to).cast_mut(), Ordering::AcqRel, Ordering::Acquire).is_ok()
+        self.shape.compare_exchange(from, core::ptr::from_ref(to).cast_mut(), Ordering::AcqRel, Ordering::Acquire).is_ok()
     }
 
     /// Keep `tree` alive from here (no prototype root holds it)
@@ -339,24 +349,28 @@ impl<'gc> Props<'gc> {
 
     /// Append a new key (the caller guarantees it isn't present); an empty object starts from `root` (the prototype's
     /// root shape; without one it anchors a tree of its own)
-    pub fn push(&self, mc: &Mutation<'gc>, key: &str, prop: Property<'gc>, root: impl Fn() -> Option<Arc<Shape>>) {
+    pub fn push<'r>(&self, mc: &Mutation<'gc>, key: &str, prop: Property<'gc>, root: impl Fn() -> Option<&'r Shape>)
+    where
+        'gc: 'r,
+    {
         let attrs = Attrs::from(&prop);
         while !self.is_dict() {
             let from = self.shape_ref();
-            let to = match from {
+            let anchored;
+            let to: &Shape = match from {
                 Some(f) if f.len() >= MAX_FAST => break,
-                // `f` is in a tree held elsewhere, so a temporary count is enough to walk to the child
-                Some(_) => self.shape().expect("a fast shape").child(key, attrs),
+                // The child lives in `f`'s tree, which is held elsewhere
+                Some(f) => f.child_ref(key, attrs),
                 None => match root() {
-                    Some(r) => r.child(key, attrs),
+                    Some(r) => r.child_ref(key, attrs),
                     None => {
-                        let s = Arc::new(Shape::new(alloc::vec![(SmallStr::from(key), attrs)]));
-                        self.anchor(mc, Arc::clone(&s));
-                        s
+                        anchored = Arc::new(Shape::new(alloc::vec![(SmallStr::from(key), attrs)]));
+                        self.anchor(mc, Arc::clone(&anchored));
+                        &anchored
                     }
                 },
             };
-            if self.advance(mc, from, &to, prop.slot) {
+            if self.advance(mc, from, to, prop.slot) {
                 return;
             }
         }
@@ -374,7 +388,10 @@ impl<'gc> Props<'gc> {
 
     /// Append a new key, switching the shape directly to `to` (cached by the execution layer: adding this key to the
     /// current shape gives `to`, a child in the current shape's tree)
-    pub fn push_to(&self, mc: &Mutation<'gc>, to: &Arc<Shape>, slot: Slot<'gc>, root: impl Fn() -> Option<Arc<Shape>>) {
+    pub fn push_to<'r>(&self, mc: &Mutation<'gc>, to: &Arc<Shape>, slot: Slot<'gc>, root: impl Fn() -> Option<&'r Shape>)
+    where
+        'gc: 'r,
+    {
         loop {
             let from = self.shape_ref();
             debug_assert_eq!(to.len(), from.map_or(0, Shape::len) + 1);

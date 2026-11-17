@@ -392,7 +392,11 @@ impl Executor {
         while let ValueKind::Object(o) = callee.kind() {
             // Take out what to do first and call after releasing the borrow (the called code may modify this function
             // object)
-            let step = match &o.borrow().kind {
+            let step = if let Some(c) = o.closure() {
+                CallStep::Closure(c)
+            } else if let Some(n) = o.native() {
+                if n.forward == j8framework::Forward::No { CallStep::Native(n) } else { CallStep::Forward(n) }
+            } else { match &o.borrow().kind {
                 ObjectKind::Function(c) => CallStep::Closure(*c),
                 ObjectKind::Resolver { .. } => CallStep::Resolver,
                 ObjectKind::Proxy(p) if p.callable => CallStep::Proxy,
@@ -401,7 +405,7 @@ impl Executor {
                 ObjectKind::Native(n) => CallStep::Native(*n),
                 ObjectKind::Bound(b) => CallStep::Bound(b.target, b.this, b.args.clone()),
                 _ => break,
-            };
+            } };
             if let CallStep::Forward(n) = step
                 && a.is_callable(this)
             {
@@ -1502,13 +1506,7 @@ impl Executor {
                         }
                         // Fast path: the callee is a host function; pass the arguments directly as a slice of the
                         // register file, without copying into a Vec or going through call resolution
-                        let native = match target.kind() {
-                            ValueKind::Object(o) => match &o.borrow().kind {
-                                ObjectKind::Native(n) if matches!(*insn, Insn::Call { .. }) && n.forward == j8framework::Forward::No => Some(*n),
-                                _ => None,
-                            },
-                            _ => None,
-                        };
+                        let native = target.as_object().and_then(|o| o.native()).filter(|n| matches!(*insn, Insn::Call { .. }) && n.forward == j8framework::Forward::No);
                         if let Some(n) = native {
                             let saved = self.depth.replace(level);
                             let outer = core::mem::replace(&mut a.new_target, Value::Undefined);
