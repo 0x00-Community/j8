@@ -222,3 +222,27 @@ arguments; `&str` is converted with ToString and then borrowed; anything else is
 (`f64` / `i32` / `u32` / `usize` / `bool` / `String` / `JsString` / `JsObject` / `Value` / `Option<T>` / `Vec<T>`).
 Return values are converted with `IntoJs`; `Result<T, Error>` throws on error. Write lifetimes in parameters as `'gc`.
 `&self` / `&mut self` methods that re-enter the same object throw a TypeError (no panic).
+
+## Heap structs inside j8: `#[j8framework::heap]`
+
+For j8's own heap types (not for embedders). Fields marked `#[mutable]` change in place: a field `x: T` is kept in
+the cell `j8framework::Mutable` picks for `T` — `Value` ⇒ `ValueCell`, `Gc` / `Option<Gc>` (and aliases such as
+`JsObject`) ⇒ a paragc `Slot`, `bool` / integers ⇒ atomics, `f64` ⇒ an `AtomicU64` of its bits — and gets
+`x(&self) -> T` plus `set_x(&self, mc, v)` (through the write barrier where it matters). `#[mutable(set = name)]` renames
+the setter (to wrap it in one of your own); `#[derive(Collect)]` is added when missing; `#[j8framework::heap(new)]`
+also generates `new` taking every field in order.
+
+```rust
+#[j8framework::heap]
+pub struct Object<'gc> {
+    #[mutable(set = write_proto)]
+    proto: Option<JsObject<'gc>>,      // proto() / write_proto(mc, p)
+    #[mutable]
+    non_extensible: bool,              // non_extensible() / set_non_extensible(mc, b)
+    data: GcCell<'gc, ObjectState<'gc>>,
+}
+```
+
+Write a cell only once its object is on the heap (the barrier records the cell's address); `new` fills cells before
+that, without the barrier.
+

@@ -9,6 +9,7 @@
 mod class;
 mod expand;
 mod function;
+mod heap;
 mod method;
 mod object;
 mod spec;
@@ -55,6 +56,15 @@ pub fn function(attr: TokenStream, item: TokenStream) -> TokenStream {
 pub fn derive_trace(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     trace::expand(&input).unwrap_or_else(syn::Error::into_compile_error).into()
+}
+
+/// `#[j8::heap]` / `#[j8::heap(new)]`: a heap struct whose `#[mutable]` fields change in place through cells chosen by
+/// `j8framework::Mutable` (accessors `x()` / `set_x(mc, v)`; `#[mutable(set = name)]` renames the setter). Adds
+/// `#[derive(Collect)]` when missing; `new` generates a constructor taking every field.
+#[proc_macro_attribute]
+pub fn heap(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let item = parse_macro_input!(item as syn::ItemStruct);
+    heap::expand(&attr.into(), item).unwrap_or_else(syn::Error::into_compile_error).into()
 }
 
 /// Reads the JSON at `$CARGO_MANIFEST_DIR/<path>` and generates all the enums in it.

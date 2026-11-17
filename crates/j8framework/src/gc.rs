@@ -578,3 +578,120 @@ impl<'gc, T: Trace + 'gc> CellExt<'gc, T> for Gc<'gc, GcCell<'gc, T>> {
         self.get().try_borrow_mut(mc)
     }
 }
+
+/// How a plain field type is kept when it must change in place in a heap object (`#[j8::heap]` with `#[mutable]`):
+/// the cell type, and loading / storing through it (stores take the [`Mutation`] for the write barrier).
+pub trait Mutable<'gc>: Sized {
+    type Cell: Trace + 'gc;
+    /// The cell holding `v` (before the object is on the heap: no barrier)
+    fn cell(v: Self) -> Self::Cell;
+    fn load(cell: &Self::Cell) -> Self;
+    fn store(cell: &Self::Cell, mc: &Mutation<'gc>, v: Self);
+}
+
+impl<'gc> Mutable<'gc> for Value<'gc> {
+    type Cell = ValueCell<'gc>;
+
+    fn cell(v: Self) -> Self::Cell {
+        ValueCell::new(v)
+    }
+
+    #[inline]
+    fn load(cell: &Self::Cell) -> Self {
+        cell.get()
+    }
+
+    #[inline]
+    fn store(cell: &Self::Cell, mc: &Mutation<'gc>, v: Self) {
+        cell.set(mc, v);
+    }
+}
+
+impl<'gc, T: Trace + 'gc> Mutable<'gc> for Option<Gc<'gc, T>> {
+    type Cell = Slot<'gc, T>;
+
+    fn cell(v: Self) -> Self::Cell {
+        Slot::from(v)
+    }
+
+    #[inline]
+    fn load(cell: &Self::Cell) -> Self {
+        cell.get()
+    }
+
+    #[inline]
+    fn store(cell: &Self::Cell, mc: &Mutation<'gc>, v: Self) {
+        cell.set(mc.mutator(), v);
+    }
+}
+
+impl<'gc, T: Trace + 'gc> Mutable<'gc> for Gc<'gc, T> {
+    type Cell = Slot<'gc, T>;
+
+    fn cell(v: Self) -> Self::Cell {
+        Slot::from(v)
+    }
+
+    #[inline]
+    fn load(cell: &Self::Cell) -> Self {
+        cell.get().expect("a non-optional Gc field is always set")
+    }
+
+    #[inline]
+    fn store(cell: &Self::Cell, mc: &Mutation<'gc>, v: Self) {
+        cell.set(mc.mutator(), Some(v));
+    }
+}
+
+/// Scalars: an atomic of the same width (no barrier; `Release` stores, `Acquire` loads)
+macro_rules! mutable_atomic {
+    ($($t:ty => $a:ty),* $(,)?) => {$(
+        impl<'gc> Mutable<'gc> for $t {
+            type Cell = $a;
+
+            fn cell(v: Self) -> Self::Cell {
+                <$a>::new(v)
+            }
+
+            #[inline]
+            fn load(cell: &Self::Cell) -> Self {
+                cell.load(Ordering::Acquire)
+            }
+
+            #[inline]
+            fn store(cell: &Self::Cell, _: &Mutation<'gc>, v: Self) {
+                cell.store(v, Ordering::Release);
+            }
+        }
+    )*};
+}
+
+mutable_atomic!(
+    bool => AtomicBool,
+    u8 => core::sync::atomic::AtomicU8,
+    u16 => core::sync::atomic::AtomicU16,
+    u32 => core::sync::atomic::AtomicU32,
+    u64 => AtomicU64,
+    usize => AtomicUsize,
+    i32 => core::sync::atomic::AtomicI32,
+    i64 => core::sync::atomic::AtomicI64,
+);
+
+/// `f64`: its bits in an `AtomicU64`
+impl<'gc> Mutable<'gc> for f64 {
+    type Cell = AtomicU64;
+
+    fn cell(v: Self) -> Self::Cell {
+        AtomicU64::new(v.to_bits())
+    }
+
+    #[inline]
+    fn load(cell: &Self::Cell) -> Self {
+        f64::from_bits(cell.load(Ordering::Acquire))
+    }
+
+    #[inline]
+    fn store(cell: &Self::Cell, _: &Mutation<'gc>, v: Self) {
+        cell.store(v.to_bits(), Ordering::Release);
+    }
+}
