@@ -123,7 +123,7 @@ impl<'p> Worker<'p> {
 
     /// Run a script and return ToString of the result.
     fn eval(&mut self, text: &str, file: &str) -> Result<String, String> {
-        match self.rt.eval(text, file) {
+        match self.rt.eval(text, file).and_then(|g| self.rt.run_until_idle().map(|()| g)) {
             Ok(g) => Ok(self.rt.text(&g)),
             Err(Error::Exception(g)) => Err(format!("Uncaught {}", self.rt.text(&g))),
             Err(e) => Err(e.to_string()),

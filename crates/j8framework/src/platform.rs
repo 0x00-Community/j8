@@ -30,6 +30,18 @@ impl<X: Executor + Sync> Pool for X {
     }
 }
 
+/// What async host work settles to: run on the runtime's thread, it turns the result into a JS value (or an
+/// exception) for the promise.
+pub type Settle = Box<dyn for<'gc, 'x> FnOnce(&mut crate::Agent<'gc, 'x>) -> Result<crate::Value<'gc>, crate::Error> + Send>;
+
+/// Async host work (an `async fn` bound with the binding macros): a future, and the promise's resolve / reject it
+/// settles when done.
+pub struct AsyncJob {
+    pub resolve: crate::Global,
+    pub reject: crate::Global,
+    pub future: core::pin::Pin<Box<dyn core::future::Future<Output = Settle> + Send>>,
+}
+
 /// Threads and clocks provided by the embedder. The thread pool is the supertrait [`Pool`] (parallel built-ins run on
 /// it; the GC heap has its own collector threads).
 pub trait Platform: Sync + Pool {
@@ -49,4 +61,14 @@ pub trait Platform: Sync + Pool {
 
     /// Output one line (`console.log`).
     fn print(&self, line: &str);
+
+    /// Hands async host work to the embedder's event loop; `Err` gives it back when there is none (the default).
+    fn spawn(&self, job: AsyncJob) -> Result<(), AsyncJob> {
+        Err(job)
+    }
+
+    /// The async work handed over since the last call (the event loop drains it).
+    fn take_spawned(&self) -> Vec<AsyncJob> {
+        Vec::new()
+    }
 }

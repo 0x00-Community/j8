@@ -51,7 +51,7 @@ pub use isolate::{CreateParams, Isolate, Scope};
 pub use object::{Accessor, ObjMut, ObjRef, Object, ObjectState, Few, ArgumentsMap, HostData, BigIntData, Bound, BufferData, Capability, Closure, ClosureFn, ElementKind, ViewData, HelperKind, HelperState, IteratorHelper, NativeClosure, ProxyData, Collection, MapKey, Request, JsBigInt, RegExpData, Coroutine, CoroutineState, Env, IterKind, IteratorState, Job, JsEnv, JsObject, JsString, JsSymbol, Forward, Native, NativeFn, ObjectData, ObjectKind, JsStr, SmallStr, Units, Property, Reaction, Settled, Slot, Suspended, SymbolData};
 pub use bigint::Numeric;
 pub use ops::{number_text, BinaryOp, CompareOp, ErrorKind, Hint, IterRecord, UnaryOp};
-pub use platform::{Platform, Task};
+pub use platform::{AsyncJob, Platform, Settle, Task};
 pub use shape::{Attrs, Dict, Props, Shape};
 pub use store::{Store, ValueArray};
 pub use parallel::Par;

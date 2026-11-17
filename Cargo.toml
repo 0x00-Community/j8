@@ -24,7 +24,8 @@ j8executor = { workspace = true, optional = true }
 j8builtins = { workspace = true, optional = true }
 j8platform = { workspace = true, optional = true }
 j8taskqueue = { workspace = true, optional = true }
-j8lockfree = { workspace = true, optional = true }
+# Always used (the runtime's async queue); the `lockfree` feature only re-exports it
+j8lockfree.workspace = true
 j8compiler = { workspace = true, optional = true }
 j8jit = { workspace = true, optional = true }
 
@@ -44,7 +45,7 @@ platform = ["dep:j8platform"]
 # j8::taskqueue：无锁数据流任务队列
 taskqueue = ["dep:j8taskqueue"]
 # j8::lockfree：无锁基础件
-lockfree = ["dep:j8lockfree"]
+lockfree = []
 # j8::compiler（字节码 ⇒ MLIR ⇒ x86-64 机器码）与 j8::jit（x86-64 Unix）
 jit = ["executor", "dep:j8compiler", "dep:j8jit"]
 full = ["runtime", "taskqueue", "lockfree", "jit"]

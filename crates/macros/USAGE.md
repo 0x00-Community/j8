@@ -203,6 +203,17 @@ Besides plain values, three handle types:
 | `j8::Function` | a callable `Persistent` (`TypeError` if not callable); `.call(a, this, args)` | `&Function` |
 | `j8::Bytes` | the bytes of an `ArrayBuffer` / typed array / `DataView` | a new `Uint8Array` |
 
+`async fn` bindings (associated functions with owned parameters) return a promise at once; the future runs on the
+runtime's event loop, `j8::Runtime::run_until_idle`, which settles the promise with the result converted by `IntoJs`
+and runs the microtasks. On a platform without an event loop (not a `j8::HostPlatform`) the call throws a `TypeError`.
+
+```rust
+#[j8::object("later")]
+impl Later {
+    async fn fetch_text(url: String) -> String { … }
+}
+```
+
 A `Persistent` is a GC root: a host object that stores a value reaching back to the host object keeps both alive until
 the host object is dropped from Rust.
 

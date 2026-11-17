@@ -46,6 +46,8 @@ pub(crate) struct Method {
     params: Vec<Param>,
     pub(crate) length: u32,
     returns_result: bool,
+    /// `async fn`: returns a promise, settled by the runtime's event loop
+    is_async: bool,
 }
 
 /// Name utilities.
@@ -149,7 +151,12 @@ impl Method {
         let returns_result = matches!(&sig.output, ReturnType::Type(_, ty) if Names::last_segment(ty).as_deref() == Some("Result"));
         let rust = sig.ident.clone();
         let js = name.unwrap_or_else(|| Names::camel(&rust.to_string()));
-        Ok(Self { rust, js, role, receiver, params, length: u32::try_from(index).unwrap_or(u32::MAX), returns_result })
+        let is_async = sig.asyncness.is_some();
+        // The future outlives this call (it runs on the event loop), so it may own only plain data
+        if is_async && (receiver != Receiver::None || params.iter().any(|p| !matches!(p, Param::Arg(..)))) {
+            return Err(syn::Error::new_spanned(&sig.ident, "an async binding takes owned parameters only (no self, &str, Agent, This or Rest): its future runs later on the event loop"));
+        }
+        Ok(Self { rust, js, role, receiver, params, length: u32::try_from(index).unwrap_or(u32::MAX), returns_result, is_async })
     }
 
     pub(crate) fn wrapper_name(&self) -> Ident {
@@ -194,7 +201,13 @@ impl Method {
                 __self.#rust(#(#call_args),*)
             }},
         };
-        let body = if self.role == Role::Constructor {
+        let body = if self.is_async {
+            quote! {
+                #(#prepare)*
+                let __future = #call;
+                ::j8::Glue::spawn(a, async move { ::j8::Glue::settle(__future.await) })
+            }
+        } else if self.role == Role::Constructor {
             let made = if self.returns_result { call } else { quote!(::core::result::Result::Ok(#call)) };
             quote! {
                 ::j8::Glue::require_new(a, #class)?;

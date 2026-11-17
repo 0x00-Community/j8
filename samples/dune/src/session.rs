@@ -64,7 +64,8 @@ impl<'p> Session<'p> {
     }
 
     pub fn eval(&mut self, src: &Source<'_>) -> Outcome {
-        match self.rt.eval(src.text, src.file) {
+        // Then the event loop: async host work settles its promises before the result is read
+        match self.rt.eval(src.text, src.file).and_then(|g| self.rt.run_until_idle().map(|()| g)) {
             Ok(g) => Outcome::Value(self.rt.text(&g)),
             Err(Error::Exception(g)) => Outcome::Thrown(self.rt.text(&g)),
             Err(e) => Outcome::Failed(e.to_string()),

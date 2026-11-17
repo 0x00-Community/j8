@@ -115,3 +115,68 @@ fn extends_functions_bytes_persistent() {
     let r = rt.eval(src, "t.js").expect("runs");
     assert_eq!(rt.text(&r), "true,true,true,max the animal,1,2|true|41|3,2,1");
 }
+
+/// A future that is ready after a thread sleeps `ms` and wakes it
+struct Sleep {
+    started: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    ms: u64,
+}
+
+impl std::future::Future for Sleep {
+    type Output = ();
+
+    fn poll(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<()> {
+        match &self.started {
+            Some(done) if done.load(std::sync::atomic::Ordering::Acquire) => std::task::Poll::Ready(()),
+            Some(_) => std::task::Poll::Pending,
+            None => {
+                let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let (flag, waker, ms) = (done.clone(), cx.waker().clone(), self.ms);
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(ms));
+                    flag.store(true, std::sync::atomic::Ordering::Release);
+                    waker.wake();
+                });
+                self.started = Some(done);
+                std::task::Poll::Pending
+            }
+        }
+    }
+}
+
+struct Later;
+
+#[j8::object("later")]
+impl Later {
+    #[expect(clippy::unused_async_trait_impl, reason = "an async binding that is ready at once is part of what is tested")]
+    async fn double(x: f64) -> f64 {
+        x * 2.0
+    }
+
+    async fn after(ms: f64, text: String) -> String {
+        #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "a small test delay")]
+        Sleep { started: None, ms: ms as u64 }.await;
+        format!("{text} after {ms}ms")
+    }
+}
+
+j8::runtime! {
+    Loop {
+        globals: [Later],
+    }
+}
+
+#[test]
+fn async_bindings_settle_on_the_event_loop() {
+    let platform = Loop::platform(DefaultPlatform::default());
+    let mut rt = Loop::runtime(&platform, Executor::default()).expect("runtime");
+    rt.eval("globalThis.log = []; later.after(20, 'b').then(v => log.push(v)); later.double(21).then(v => log.push(v)); log.push(later.double(1) instanceof Promise);", "t.js").expect("runs");
+    rt.run_until_idle().expect("settles");
+    let r = rt.eval("log.join()", "check.js").expect("runs");
+    assert_eq!(rt.text(&r), "true,42,b after 20ms");
+    // Without an event loop (a plain platform), the call throws a TypeError
+    let plain = DefaultPlatform::default();
+    let mut bare = j8::Runtime::new::<Loop>(&plain, Executor::default()).expect("runtime");
+    let r = bare.eval("try { later.double(1); 'no' } catch (e) { e instanceof TypeError }", "t.js").expect("runs");
+    assert_eq!(bare.text(&r), "true");
+}

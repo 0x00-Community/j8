@@ -26,6 +26,23 @@ pub trait Module: Object {
 }
 
 impl Glue {
+    /// `async fn` bindings: a pending promise whose settlement `future` produces, handed to the platform's event loop
+    /// (a `TypeError` when the platform has none)
+    pub fn spawn<'gc>(a: &mut Agent<'gc, '_>, future: impl core::future::Future<Output = j8framework::Settle> + Send + 'static) -> Result<j8framework::Value<'gc>, j8framework::Error> {
+        let promise = a.new_promise();
+        let (resolve, reject) = a.promise_resolvers(promise);
+        let job = j8framework::AsyncJob { resolve: a.global(resolve.into()), reject: a.global(reject.into()), future: alloc::boxed::Box::pin(future) };
+        match a.platform.spawn(job) {
+            Ok(()) => Ok(promise.into()),
+            Err(_) => Err(a.throw(j8framework::ErrorKind::Type, "async host functions need a runtime with an event loop (j8::Runtime::run_until_idle)")),
+        }
+    }
+
+    /// What an `async fn`'s result settles to: converted on the runtime thread with `IntoJs`
+    pub fn settle<T: for<'g> crate::IntoJs<'g> + Send + 'static>(out: T) -> j8framework::Settle {
+        alloc::boxed::Box::new(move |a: &mut Agent<'_, '_>| out.into_js(a))
+    }
+
     /// The hidden native registry of this realm (created on first use)
     pub fn natives<'gc>(a: &mut Agent<'gc, '_>) -> JsObject<'gc> {
         let global = a.realm.global;
