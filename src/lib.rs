@@ -24,7 +24,7 @@
 //! | `jit` | [`compiler`], [`jit`] | bytecode ⇒ MLIR ⇒ x86-64 JIT (x86-64 Unix) |
 //! | `full` | all of the above | |
 
-pub use j8binding::{Class, ClassHandle, FromJs, Install, IntoJs, Member, Module, Object, Rest, This, NATIVE};
+pub use j8binding::{Bytes, Class, ClassHandle, FromJs, Function, Install, IntoJs, Member, Module, Object, Persistent, Rest, This, NATIVE};
 pub use j8macros::{class, function, module, object};
 
 #[cfg(all(feature = "executor", feature = "builtins"))]

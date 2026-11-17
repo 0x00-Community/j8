@@ -94,6 +94,22 @@ let handle = Counter::install(&mut agent, global);     // global `Counter`; retu
 let obj = handle.instance(&agent, Counter { n: 1.0 });  // create an instance from Rust
 ```
 
+#### Inheritance: `#[j8::class(extends = Base)]`
+
+```rust
+struct Dog { base: Animal, tricks: u32 }
+
+impl AsRef<Animal> for Dog { fn as_ref(&self) -> &Animal { &self.base } }
+impl AsMut<Animal> for Dog { fn as_mut(&mut self) -> &mut Animal { &mut self.base } }
+
+#[j8::class(extends = Animal)]       // or #[j8::class("Hound", extends = Animal)]
+impl Dog { … }
+```
+
+`Dog.prototype`'s prototype is `Animal.prototype` and `Dog`'s is `Animal` (installed on the same target first if it
+isn't there yet), so `instanceof` works and `Animal`'s methods run on a `Dog` through `AsRef` / `AsMut`. Chains of any
+length work.
+
 ### `#[j8::object]`: export an `impl` block containing only associated functions as a plain object
 
 ```rust
@@ -178,6 +194,17 @@ Every section is optional; they come in this order, each followed by a comma. `j
 | `#[js(static)]` | Static method (the default for methods without `self`) |
 | `#[js(name = "…")]` | The name in JS |
 | `#[js(skip)]` | Not exported |
+
+Besides plain values, three handle types:
+
+| Type | As a parameter | As a return value |
+|---|---|---|
+| `j8::Persistent` | keeps any JS value across `enter` calls (store it in the host struct; `.get(a)` reads it) | `&Persistent` gives the value back |
+| `j8::Function` | a callable `Persistent` (`TypeError` if not callable); `.call(a, this, args)` | `&Function` |
+| `j8::Bytes` | the bytes of an `ArrayBuffer` / typed array / `DataView` | a new `Uint8Array` |
+
+A `Persistent` is a GC root: a host object that stores a value reaching back to the host object keeps both alive until
+the host object is dropped from Rust.
 
 Parameters are taken by type: `&mut Agent` receives the current agent; `This` is the raw `this`; `Rest` is all remaining
 arguments; `&str` is converted with ToString and then borrowed; anything else is converted in order with `FromJs`

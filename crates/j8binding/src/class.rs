@@ -2,7 +2,7 @@
 //! objects holding a Rust value.
 use j8framework::ValueKind;
 use alloc::boxed::Box;
-use core::any::Any;
+use core::any::{Any, TypeId};
 use j8lockfree::{AtomicRef as Ref, AtomicRefCell, AtomicRefMut as RefMut};
 
 use j8framework::Static;
@@ -28,6 +28,25 @@ pub trait Class: Any + Send + Sync + Sized {
     const CONSTRUCTOR: Option<(NativeFn, u32)>;
     const MEMBERS: &'static [Member];
 
+    /// The base class (`#[j8::class(extends = Base)]`), installed on `target` if it isn't there yet
+    fn parent<'gc>(a: &mut Agent<'gc, '_>, target: JsObject<'gc>) -> Option<ClassHandle<'gc>> {
+        let _ = (a, target);
+        None
+    }
+
+    /// `this` (a `Self`) seen as the data of class `ty`: itself, or (with `extends`) its base class's part, reached
+    /// through `AsRef`
+    fn upcast(this: &dyn Any, ty: TypeId) -> Option<&dyn Any> {
+        let me = this.downcast_ref::<Self>()?;
+        (ty == TypeId::of::<Self>()).then_some(me as &dyn Any)
+    }
+
+    /// Mutable [`Class::upcast`] (through `AsMut`)
+    fn upcast_mut(this: &mut dyn Any, ty: TypeId) -> Option<&mut dyn Any> {
+        let me = this.downcast_mut::<Self>()?;
+        (ty == TypeId::of::<Self>()).then_some(me as &mut dyn Any)
+    }
+
     /// Installs this class (constructor, prototype) on `target` and returns both.
     fn install<'gc>(a: &mut Agent<'gc, '_>, target: JsObject<'gc>) -> ClassHandle<'gc> {
         let (f, length) = Self::CONSTRUCTOR.unwrap_or((Glue::illegal_constructor, 0));
@@ -40,6 +59,10 @@ pub trait Class: Any + Send + Sync + Sized {
         proto.borrow_mut(a.mc).define("constructor", Property::hidden(ctor.into()));
         for m in Self::MEMBERS {
             Glue::member(a, ctor, proto, m);
+        }
+        if let Some(base) = Self::parent(a, target) {
+            proto.set_proto(a.mc, Some(base.proto));
+            ctor.set_proto(a.mc, Some(base.ctor));
         }
         let tag = a.string(Self::NAME);
         proto.borrow_mut(a.mc).define_symbol(a.realm.symbols.to_string_tag, Property { slot: Slot::Data(tag.into()), enumerable: false, writable: false, configurable: true });
@@ -79,6 +102,13 @@ impl<'gc> ClassHandle<'gc> {
     }
 }
 
+/// What a host object holds: the Rust value plus how to see it as a base class's data.
+struct Hosted {
+    value: Box<dyn Any + Send + Sync>,
+    upcast: fn(&dyn Any, TypeId) -> Option<&dyn Any>,
+    upcast_mut: fn(&mut dyn Any, TypeId) -> Option<&mut dyn Any>,
+}
+
 /// Glue used by macro-generated code.
 #[doc(hidden)]
 pub struct Glue;
@@ -114,8 +144,9 @@ impl Glue {
     }
 
     /// A host object with prototype `proto`, holding `value`.
-    pub fn wrap<'gc, T: Any + Send + Sync>(a: &Agent<'gc, '_>, value: T, proto: JsObject<'gc>) -> JsObject<'gc> {
-        let data = a.mc.alloc(Static(AtomicRefCell::new(Box::new(value) as Box<dyn Any + Send + Sync>)));
+    pub fn wrap<'gc, T: Class>(a: &Agent<'gc, '_>, value: T, proto: JsObject<'gc>) -> JsObject<'gc> {
+        let host = Hosted { value: Box::new(value), upcast: T::upcast, upcast_mut: T::upcast_mut };
+        let data = a.mc.alloc(Static(AtomicRefCell::new(Box::new(host) as Box<dyn Any + Send + Sync>)));
         ObjectData { kind: ObjectKind::Host(data), proto: Some(proto), ..ObjectData::default() }.alloc(a.mc)
     }
 
@@ -160,12 +191,25 @@ impl Glue {
         data.0.try_borrow_mut().ok_or_else(|| Self::busy(a, class))
     }
 
+    /// The host data as a `T`: the object's own class, or a subclass whose base chain reaches `T`
     pub fn cast<'d, T: Class>(a: &Agent<'_, '_>, cell: &'d Ref<'_, Box<dyn Any + Send + Sync>>) -> Result<&'d T, Error> {
-        cell.downcast_ref::<T>().ok_or_else(|| Self::illegal(a, T::NAME))
+        let found = cell.downcast_ref::<Hosted>().and_then(|h| (h.upcast)(&*h.value, TypeId::of::<T>())).and_then(|v| v.downcast_ref::<T>());
+        found.ok_or_else(|| Self::illegal(a, T::NAME))
     }
 
     pub fn cast_mut<'d, T: Class>(a: &Agent<'_, '_>, cell: &'d mut RefMut<'_, Box<dyn Any + Send + Sync>>) -> Result<&'d mut T, Error> {
-        cell.downcast_mut::<T>().ok_or_else(|| Self::illegal(a, T::NAME))
+        let found = cell.downcast_mut::<Hosted>().and_then(|h| (h.upcast_mut)(&mut *h.value, TypeId::of::<T>())).and_then(|v| v.downcast_mut::<T>());
+        found.ok_or_else(|| Self::illegal(a, T::NAME))
+    }
+
+    /// The base class `P` installed on `target` (installed now if it isn't there yet)
+    pub fn parent<'gc, P: Class>(a: &mut Agent<'gc, '_>, target: JsObject<'gc>) -> ClassHandle<'gc> {
+        let ctor = target.borrow().own(P::NAME).and_then(Value::as_object);
+        let proto = ctor.and_then(|c| c.borrow().own("prototype")).and_then(Value::as_object);
+        match (ctor, proto) {
+            (Some(ctor), Some(proto)) => ClassHandle { ctor, proto },
+            _ => P::install(a, target),
+        }
     }
 
     fn busy(a: &Agent<'_, '_>, class: &str) -> Error {

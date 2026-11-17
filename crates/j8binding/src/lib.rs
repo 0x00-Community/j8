@@ -26,10 +26,12 @@ extern crate alloc;
 
 mod class;
 mod convert;
+mod handles;
 mod module;
 
 pub use class::{Class, ClassHandle, Member, Object};
 pub use convert::{FromJs, IntoJs, Rest, This};
+pub use handles::{Bytes, Function, Persistent};
 pub use module::{Install, Module, NATIVE};
 
 #[doc(hidden)]
