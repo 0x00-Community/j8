@@ -3,7 +3,9 @@ use std::sync::Barrier;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread;
 
-use j8lockfree::{Deque, Fifo, PushList, SegVec};
+use std::sync::Arc;
+
+use j8lockfree::{Chain, Deque, Fifo, Prefix, PushList, SegVec};
 
 /// 每个线程的元素数
 #[cfg(not(miri))]
@@ -220,4 +222,65 @@ fn stock_claim_give_settle() {
         seen[v].fetch_add(1, Ordering::Relaxed);
     }
     exactly_once(&seen);
+}
+
+/// 并发压入：每个元素恰好在表里一次；push 给的引用就是自己压的值
+#[test]
+fn chain_concurrent_push() {
+    let c = Chain::default();
+    thread::scope(|s| {
+        for p in 0..THREADS {
+            let c = &c;
+            s.spawn(move || {
+                for i in 0..N {
+                    assert_eq!(*c.push(tag(p, i)), tag(p, i));
+                }
+            });
+        }
+    });
+    let seen = counters(THREADS * N);
+    for &v in c.iter() {
+        seen[v].fetch_add(1, Ordering::Relaxed);
+    }
+    exactly_once(&seen);
+}
+
+/// 好几个持有者同时站在同一个末尾追加：恰好一个原地写（拿到同一块），其余各自复制；每个人的前缀都对
+#[test]
+fn prefix_one_extends_in_place() {
+    let base = Prefix::new((0..3).collect::<Vec<usize>>());
+    let start = Barrier::new(THREADS);
+    let grown: Vec<Arc<Prefix<usize>>> = thread::scope(|s| {
+        let handles: Vec<_> = (0..THREADS)
+            .map(|p| {
+                let (base, start) = (&base, &start);
+                s.spawn(move || {
+                    start.wait();
+                    base.extend(3, 100 + p)
+                })
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().expect("thread")).collect()
+    });
+    assert_eq!(grown.iter().filter(|g| Arc::ptr_eq(g, &base)).count(), 1, "exactly one extends in place");
+    for (p, g) in grown.iter().enumerate() {
+        assert_eq!(g.prefix(4), [0, 1, 2, 100 + p], "holder {p} sees its own item");
+    }
+}
+
+/// 一条链一直接着追加：前缀始终对，缓冲区只在写满时换（换的次数是对数级）
+#[test]
+fn prefix_chain_grows() {
+    let mut cur = Prefix::new(Vec::new());
+    let mut blocks = 1;
+    for i in 0..N {
+        let next = cur.extend(i, i);
+        if !Arc::ptr_eq(&next, &cur) {
+            blocks += 1;
+        }
+        cur = next;
+        assert_eq!(cur.prefix(i + 1)[i], i);
+    }
+    assert_eq!(cur.prefix(N), (0..N).collect::<Vec<_>>());
+    assert!(blocks <= usize::BITS as usize, "{blocks} buffers for {N} items");
 }

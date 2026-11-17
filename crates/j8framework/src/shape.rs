@@ -7,11 +7,11 @@
 //! are freed naturally. Deleting a property, changing attributes, or having too many keys turns the object's properties
 //! into a dictionary ([`Dict`], modified in place); inline caches don't accept it.
 use alloc::sync::Arc;
-use core::sync::atomic::{AtomicPtr, Ordering};
+use core::sync::atomic::{AtomicPtr, AtomicU32, Ordering};
 use alloc::vec::Vec;
 use core::hash::BuildHasherDefault;
 
-use j8lockfree::SegVec;
+use j8lockfree::{Chain, OnceBox, Prefix};
 
 use crate::Collect;
 use rustc_hash::FxHasher;
@@ -19,8 +19,11 @@ use rustc_hash::FxHasher;
 use crate::store::Store;
 use crate::{Erased, Gc, GcCell, GcSlot, Mutation, Property, SmallStr, Slot, Value, ValueCell};
 
-/// Up to this many keys, search linearly; beyond that, build an index
+/// Up to this many keys, search linearly; beyond that, build an index once the shape is searched often
 const LINEAR: usize = 8;
+/// Linear searches of a large shape before it gets an index: a shape an object only passes through on its way to more
+/// keys (a prototype being set up) is searched once or twice and never indexed
+const INDEX_AFTER: u32 = 4;
 /// A shared shape has at most this many keys; adding more converts to a dictionary shape (overly long transition chains
 /// aren't worth it)
 const MAX_FAST: usize = 64;
@@ -55,49 +58,57 @@ impl From<&Property<'_>> for Attrs {
 
 /// A shape.
 pub struct Shape {
-    keys: Vec<(SmallStr, Attrs)>,
-    index: Option<hashbrown::HashMap<SmallStr, u32, BuildHasherDefault<FxHasher>>>,
+    /// Keys and attributes, shared along a transition chain: this shape's are the first `len`
+    keys: Arc<Prefix<(SmallStr, Attrs)>>,
+    len: usize,
+    /// Built on demand (see [`INDEX_AFTER`]), once
+    index: OnceBox<hashbrown::HashMap<SmallStr, u32, BuildHasherDefault<FxHasher>>>,
+    /// Linear searches so far (for a shape beyond [`LINEAR`] keys without an index)
+    searches: AtomicU32,
     /// Child shapes reached by adding a key (with attributes), held strongly: a whole tree lives as long as its root
     /// (the root a prototype object hands out, or the anchor of an object that has none), so objects can point at
     /// their shape without counting references
-    transitions: SegVec<(SmallStr, Attrs, Arc<Shape>)>,
+    transitions: Chain<(SmallStr, Attrs, Arc<Shape>)>,
     /// The root of this shape's tree (children inherit it): telling whether a shape belongs to a given tree is one
     /// compare. Set right after the root is allocated ([`Shape::rooted`])
     tree: AtomicPtr<Shape>,
 }
 
 impl Shape {
-    fn new(keys: Vec<(SmallStr, Attrs)>) -> Self {
-        let mut s = Self { keys, index: None, transitions: SegVec::default(), tree: AtomicPtr::new(core::ptr::null_mut()) };
-        s.reindex();
-        s
+    fn new(keys: Arc<Prefix<(SmallStr, Attrs)>>, len: usize) -> Self {
+        Self { keys, len, index: OnceBox::default(), searches: AtomicU32::new(0), transitions: Chain::default(), tree: AtomicPtr::new(core::ptr::null_mut()) }
     }
 
-    fn reindex(&mut self) {
-        self.index = (self.keys.len() > LINEAR).then(|| self.keys.iter().zip(0u32..).map(|((k, _), i)| (k.clone(), i)).collect());
+    /// Its keys and attributes, in order
+    fn keys(&self) -> &[(SmallStr, Attrs)] {
+        self.keys.prefix(self.len)
     }
 
     pub fn len(&self) -> usize {
-        self.keys.len()
+        self.len
     }
 
     pub fn is_empty(&self) -> bool {
-        self.keys.is_empty()
+        self.len == 0
     }
 
     pub fn find(&self, key: &str) -> Option<usize> {
-        match &self.index {
-            Some(m) => m.get(key).map(|&i| i as usize),
-            None => self.keys.iter().position(|(k, _)| **k == *key),
+        if let Some(m) = self.index.get() {
+            return m.get(key).map(|&i| i as usize);
         }
+        if self.len > LINEAR && self.searches.fetch_add(1, Ordering::Relaxed) >= INDEX_AFTER {
+            let m = self.index.get_or_init(|| self.keys().iter().zip(0u32..).map(|((k, _), i)| (k.clone(), i)).collect());
+            return m.get(key).map(|&i| i as usize);
+        }
+        self.keys().iter().position(|(k, _)| **k == *key)
     }
 
     pub fn key(&self, i: usize) -> &SmallStr {
-        &self.keys[i].0
+        &self.keys()[i].0
     }
 
     pub fn attrs(&self, i: usize) -> Attrs {
-        self.keys[i].1
+        self.keys()[i].1
     }
 
     /// Whether `to` is this shape's child by a transition (so this shape's tree holds it)
@@ -107,7 +118,8 @@ impl Shape {
 
     /// A new tree root (it is its own tree)
     fn rooted(keys: Vec<(SmallStr, Attrs)>) -> Arc<Self> {
-        let s = Arc::new(Self::new(keys));
+        let len = keys.len();
+        let s = Arc::new(Self::new(Prefix::new(keys), len));
         s.tree.store(Arc::as_ptr(&s).cast_mut(), Ordering::Relaxed);
         s
     }
@@ -117,14 +129,10 @@ impl Shape {
         if let Some((_, _, c)) = self.transitions.iter().find(|(k, a, _)| **k == *key && *a == attrs) {
             return c;
         }
-        let mut keys = Vec::with_capacity(self.keys.len() + 1);
-        keys.extend(self.keys.iter().cloned());
-        keys.push((SmallStr::from(key), attrs));
-        let child = Arc::new(Self { tree: AtomicPtr::new(self.tree.load(Ordering::Relaxed)), ..Self::new(keys) });
-        let p = Arc::as_ptr(&child);
-        self.transitions.push((SmallStr::from(key), attrs, child));
-        // SAFETY: the transition table now owns it and never drops entries while this shape lives
-        unsafe { &*p }
+        // The key goes at the end of the shared key table when this shape is its tip, or into a copy of this shape's keys
+        let keys = self.keys.extend(self.len, (SmallStr::from(key), attrs));
+        let child = Arc::new(Self { tree: AtomicPtr::new(self.tree.load(Ordering::Relaxed)), ..Self::new(keys, self.len + 1) });
+        &self.transitions.push((SmallStr::from(key), attrs, child)).2
     }
 
     /// The shape after adding a key (shared: look up the transition table; create and register one if absent)
