@@ -46,15 +46,21 @@ impl From<ValueRef<'_>> for Column {
 
 #[j8::class]
 impl SqlStorage {
-    /// Opens (creating it if needed) the database at `path`; an empty path is an in-memory database
+    /// Opens (creating it if needed) the database at `path`; an empty path is an in-memory database. Cheap once
+    /// [`prepare`](Self::prepare) has made the file.
     #[js(constructor)]
     fn open(a: &mut Agent<'_, '_>, path: &str) -> Result<Self, Error> {
-        let db = if path.is_empty() { Connection::open_in_memory() } else { Connection::open(path) };
-        let db = db.map_err(|e| a.throw(ErrorKind::Error, &format!("SQLite: open {path}: {e}")))?;
-        // Write-ahead log, synced at checkpoints rather than every commit (as Durable Objects' SQLite does): a commit
-        // survives the process crashing; a power cut may lose the last few, never the database
-        db.execute_batch("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;").map_err(|e| a.throw(ErrorKind::Error, &format!("SQLite: {e}")))?;
+        let db = Self::configure(path).map_err(|e| a.throw(ErrorKind::Error, &e))?;
         Ok(Self { db: Mutex::new(db) })
+    }
+
+    /// Creates the database at `path` and switches it to the write-ahead log, on a thread of its own: making a new
+    /// database syncs the disk several times, which must not hold up the event loop thread (and the other event
+    /// loops on it). Gives an error message, or nothing.
+    async fn prepare(path: String) -> Option<String> {
+        let (tx, rx) = j8::lockfree::Oneshot::new();
+        std::thread::spawn(move || tx.send(Self::configure(&path).err()));
+        rx.await
     }
 
     /// Runs `query` (one or more statements; `params`, a JSON array, binds the last one):
@@ -75,6 +81,16 @@ impl SqlStorage {
 }
 
 impl SqlStorage {
+    /// Opens the database at `path` (in memory when empty) in write-ahead-log mode, synced at checkpoints rather than
+    /// every commit (as Durable Objects' SQLite does): a commit survives the process crashing; a power cut may lose
+    /// the last few, never the database
+    fn configure(path: &str) -> Result<Connection, String> {
+        let db = if path.is_empty() { Connection::open_in_memory() } else { Connection::open(path) };
+        let db = db.map_err(|e| format!("SQLite: open {path}: {e}"))?;
+        db.execute_batch("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;").map_err(|e| format!("SQLite: {e}"))?;
+        Ok(db)
+    }
+
     fn run(db: &Connection, query: &str, params: Vec<Json>) -> rusqlite::Result<String> {
         let mut statements = Vec::new();
         let mut batch = Batch::new(db, query);

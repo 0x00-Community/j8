@@ -39,6 +39,21 @@ message), every client seeing the same order, and a restart on the same storage 
 cargo test --test chat
 ```
 
+## Many Workers in one process
+
+`--instances N` serves N copies of the Worker from one process: each its own runtime (isolate, context, Durable
+Objects, `<storage>/<i>`), on its own port (`--port 0`: a free one each, printed by index), all on one event loop set
+with `--threads` loop threads (default: one per CPU). `tests/workerds.rs` runs a thousand chat rooms that way, two
+clients each, two rounds in every room at once with five silent seconds between them (the whole process must use no
+CPU), then a restart replaying every room's history:
+
+```sh
+cargo test --release --test workerds -- --nocapture
+```
+
+A Durable Object's SQLite file is created off the event loop's thread before the object is constructed (creating
+one syncs the disk), so a thousand rooms opening at once do not hold up the loop threads.
+
 ## License
 
 MIT, as part of [j8](https://github.com/0x00-Community/j8).

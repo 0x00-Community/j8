@@ -383,20 +383,30 @@
     idFromName(name) { return new DurableObjectId(String(name)); }
     idFromString(s) { return new DurableObjectId(String(s)); }
     newUniqueId() { return new DurableObjectId(native.KvStore.uniqueId()); }
+    /** The object for `key`, made on first use. Its SQL database is created off the event loop's thread first
+     * (that syncs the disk), so `ctx.storage.sql` in the constructor is quick; requests meanwhile wait for the same
+     * promise. */
+    _instance(key, id) {
+      let live = this._live.get(key);
+      if (!live) {
+        const sqlPath = this._dir ? this._dir + '/' + encodeURIComponent(this._name + '-' + key) + '.sqlite' : '';
+        live = (sqlPath ? native.SqlStorage.prepare(sqlPath) : Promise.resolve(null)).then((err) => {
+          if (err) throw new Error(err);
+          const state = new DurableObjectState(id, new DurableObjectStorage(new native.KvStore(), sqlPath));
+          const inst = new this._cls(state, this._env);
+          state._object = inst;
+          return inst;
+        });
+        this._live.set(key, live);
+      }
+      return live;
+    }
     get(id) {
       const key = id.toString();
-      let inst = this._live.get(key);
-      if (!inst) {
-        const sqlPath = this._dir ? this._dir + '/' + encodeURIComponent(this._name + '-' + key) + '.sqlite' : '';
-        const state = new DurableObjectState(id, new DurableObjectStorage(new native.KvStore(), sqlPath));
-        inst = new this._cls(state, this._env);
-        state._object = inst;
-        this._live.set(key, inst);
-      }
       return {
         id,
         name: id.name,
-        fetch: (input, init) => Promise.resolve(inst.fetch(input instanceof Request ? input : new Request(input, init))),
+        fetch: (input, init) => this._instance(key, id).then((inst) => inst.fetch(input instanceof Request ? input : new Request(input, init))),
       };
     }
   }
@@ -427,7 +437,8 @@
         .catch((e) => { this.result = { status: 500, headers: [['content-type', 'text/plain']], body: String((e && e.stack) || e) + '\n' }; });
     },
     // The server: every request goes to the Worker's fetch; a 101 response with a webSocket upgrades the connection
-    // and couples it to that end. Requests are handled concurrently: the loop asks for the next one at once.
+    // and couples it to that end. Requests are handled concurrently: the loop asks for the next one at once. Gives the
+    // port it listens on.
     serve(port) {
       const server = new native.Server(port);
       const loop = async () => {
@@ -438,6 +449,7 @@
         }
       };
       loop().catch(report);
+      return server.port;
     },
     handle(server, r) {
       const req = new Request('http://localhost' + r.path, { method: r.method, headers: r.headers, body: r.body === '' ? null : r.body });

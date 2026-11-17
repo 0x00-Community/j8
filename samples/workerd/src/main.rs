@@ -12,6 +12,7 @@ mod ws;
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -41,9 +42,17 @@ struct Cli {
     /// Port for the HTTP / WebSocket server (`0` picks a free one, printed on stderr)
     #[arg(long, default_value_t = 8787)]
     port: u16,
-    /// Directory for Durable Objects' SQL storage (one SQLite file per object); in memory when not given
+    /// Directory for Durable Objects' SQL storage (one SQLite file per object); in memory when not given. With several
+    /// instances, instance `i` keeps its storage in `<storage>/<i>`
     #[arg(long)]
     storage: Option<PathBuf>,
+    /// How many copies of the Worker to serve, each its own runtime on its own port (`--port` + its index, or a free
+    /// one each with `--port 0`), all in one event loop set
+    #[arg(long, default_value_t = NonZeroUsize::MIN)]
+    instances: NonZeroUsize,
+    /// Loop threads the instances run on (default: one per instance, at most one per CPU)
+    #[arg(long)]
+    threads: Option<NonZeroUsize>,
 }
 
 /// Storage of one Durable Object (key ⇒ JSON text).
@@ -174,9 +183,69 @@ impl<'p> Worker<'p> {
         }
     }
 
-    /// The HTTP / WebSocket server: everything runs on the event loop, which never empties while the server listens
-    fn serve(&mut self, port: u16) -> Result<(), String> {
-        self.eval(&format!("__workerd.serve({port})"), "[serve]").map(drop)
+    /// Starts the HTTP / WebSocket server (it runs on the event loop from now on); gives the port it listens on
+    fn listen(&mut self, port: u16) -> Result<u16, String> {
+        let g = match self.rt.eval(&format!("__workerd.serve({port})"), "[serve]") {
+            Ok(g) => g,
+            Err(Error::Exception(g)) => return Err(format!("Uncaught {}", self.rt.text(&g))),
+            Err(e) => return Err(e.to_string()),
+        };
+        let port = self.rt.text(&g);
+        port.parse().map_err(|_| format!("the server gave port {port}"))
+    }
+
+    /// Serves until the process ends (the event loop never empties while the server listens)
+    fn wait(&self) -> Result<(), String> {
+        self.rt.run_until_idle().map_err(|e| e.to_string())
+    }
+}
+
+/// Copies of one Worker to start
+struct Fleet<'a> {
+    script: &'a str,
+    bindings: &'a [(String, String)],
+    storage: &'a str,
+    port: u16,
+    instances: usize,
+}
+
+impl Fleet<'_> {
+    /// Where instance `i` keeps its storage
+    fn storage(&self, i: usize) -> Result<String, String> {
+        if self.storage.is_empty() || self.instances == 1 {
+            return Ok(self.storage.to_owned());
+        }
+        let dir = format!("{}/{i}", self.storage);
+        std::fs::create_dir_all(&dir).map_err(|e| format!("{dir}: {e}"))?;
+        Ok(dir)
+    }
+
+    /// The port instance `i` asks for
+    fn port(&self, i: usize) -> Result<u16, String> {
+        if self.port == 0 {
+            return Ok(0);
+        }
+        u16::try_from(i).ok().and_then(|i| self.port.checked_add(i)).ok_or_else(|| format!("no port for instance {i}"))
+    }
+
+    fn one<'p>(&self, set: &j8::EventLoopSet<'_, 'p, Executor>, i: usize) -> Result<(Worker<'p>, u16), String> {
+        let mut w = Worker::new(set)?;
+        w.load(self.script, self.bindings, &self.storage(i)?)?;
+        let port = w.listen(self.port(i)?)?;
+        Ok((w, port))
+    }
+
+    /// Starts every instance, `hosts` at a time; gives them with their ports, by index
+    fn start<'p>(&self, set: &j8::EventLoopSet<'_, 'p, Executor>, hosts: usize) -> Result<Vec<(Worker<'p>, u16)>, String> {
+        let mut started: Vec<(usize, (Worker<'p>, u16))> = std::thread::scope(|s| {
+            let handles: Vec<_> = (0..hosts).map(|h| s.spawn(move || (h..self.instances).step_by(hosts).map(|i| self.one(set, i).map(|w| (i, w))).collect::<Result<Vec<_>, String>>())).collect();
+            handles.into_iter().map(|h| h.join().unwrap_or_else(|_| Err("a starting thread panicked".to_owned()))).collect::<Result<Vec<_>, String>>()
+        })?
+        .into_iter()
+        .flatten()
+        .collect();
+        started.sort_by_key(|(i, _)| *i);
+        Ok(started.into_iter().map(|(_, w)| w).collect())
     }
 }
 
@@ -210,24 +279,34 @@ fn main() -> ExitCode {
         }
     };
     let platform = Workerd::platform(DefaultPlatform::default());
+    let instances = cli.instances.get();
+    let threads = cli.threads.unwrap_or_else(|| std::thread::available_parallelism().unwrap_or(NonZeroUsize::MIN).min(cli.instances));
     let run = |set: &j8::EventLoopSet<'_, '_, Executor>| -> Result<(), String> {
-        let mut rt = Worker::new(set)?;
-        rt.load(&script, &bindings, &storage)?;
-        if cli.requests.is_empty() {
-            return rt.serve(cli.port);
-        }
-        for r in &cli.requests {
-            let (method, path) = r.split_once(' ').unwrap_or(("GET", r.as_str()));
-            let reply = rt.dispatch(method, path, &[], "");
-            println!("{} {method} {path}", reply.status);
-            for (k, v) in &reply.headers {
-                println!("{k}: {v}");
+        if !cli.requests.is_empty() {
+            let mut rt = Worker::new(set)?;
+            rt.load(&script, &bindings, &storage)?;
+            for r in &cli.requests {
+                let (method, path) = r.split_once(' ').unwrap_or(("GET", r.as_str()));
+                let reply = rt.dispatch(method, path, &[], "");
+                println!("{} {method} {path}", reply.status);
+                for (k, v) in &reply.headers {
+                    println!("{k}: {v}");
+                }
+                println!("\n{}", reply.body.trim_end());
             }
-            println!("\n{}", reply.body.trim_end());
+            return Ok(());
         }
-        Ok(())
+        let workers = Fleet { script: &script, bindings: &bindings, storage: &storage, port: cli.port, instances }.start(set, threads.get())?;
+        if let [(_, port)] = workers.as_slice() {
+            eprintln!("workerd: listening on http://127.0.0.1:{port}");
+        } else {
+            for (i, (_, port)) in workers.iter().enumerate() {
+                eprintln!("workerd: worker {i} listening on http://127.0.0.1:{port}");
+            }
+            eprintln!("workerd: {instances} workers ready on {threads} loop threads");
+        }
+        workers[0].0.wait()
     };
-    // One Worker, on one loop thread
     match j8::EventLoopSet::scope(&platform, std::num::NonZeroUsize::MIN, run) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {

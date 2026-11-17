@@ -499,7 +499,6 @@ impl Server {
         let port = u16::try_from(port).map_err(|_| a.throw(ErrorKind::Range, "port out of range"))?;
         let listener = TcpListener::bind(("127.0.0.1", port)).map_err(|e| a.throw(ErrorKind::Error, &format!("bind 127.0.0.1:{port}: {e}")))?;
         let port = listener.local_addr().map_or(port, |s| s.port());
-        eprintln!("workerd: listening on http://127.0.0.1:{port}");
         let arrivals = Arc::new(Fifo::default());
         let (mailbox, feed) = Mailbox::new();
         let (requests, incoming) = mpsc::channel::<Incoming>();
