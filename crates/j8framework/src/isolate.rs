@@ -12,6 +12,9 @@ pub struct CreateParams {
     /// Whether the embedder runs an event loop for async host work ([`Isolate::take_spawned`]); without one,
     /// [`Agent::spawn`](crate::Agent::spawn) refuses the work
     pub event_loop: bool,
+    /// Threads the heap collects with (its own collector threads plus the caller); the platform's pool size when
+    /// not given. Isolates that run side by side on an event loop's threads want 1 each.
+    pub collector_threads: Option<NonZeroUsize>,
 }
 
 /// An independent JS world: a GC heap (paragc; collected in parallel on its own collector threads, as many as the
@@ -39,7 +42,7 @@ impl<'p> Isolate<'p> {
     pub fn new(platform: &'p dyn Platform, params: CreateParams) -> Self {
         let mut profiler = Profiler::default();
         profiler.enable(params.profile);
-        let heap = Heap::new(NonZeroUsize::new(platform.threads()).unwrap_or(NonZeroUsize::MIN));
+        let heap = Heap::new(params.collector_threads.unwrap_or_else(|| NonZeroUsize::new(platform.threads()).unwrap_or(NonZeroUsize::MIN)));
         // Dead objects free memory the mutator allocated (string buffers, vectors): freeing it from the collector
         // threads makes them fight the allocator (glibc's arena lock), so destructors run on the collecting thread only
         heap.set_parallel_drop(false);

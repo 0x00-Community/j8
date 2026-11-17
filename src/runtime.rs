@@ -4,7 +4,7 @@
 use std::marker::PhantomData;
 use std::time::Duration;
 
-use j8framework::{Agent, CreateParams, Error, ErrorKind, EventLoop, Global, Isolate, IsolateId, Platform, Pool, ScriptKind, Source, Task, Value};
+use j8framework::{Agent, Error, ErrorKind, EventLoop, EventLoopSet, Global, Platform, Pool, ScriptKind, Source, Task, Value};
 
 /// A runtime's contents (implemented by [`runtime!`](crate::runtime); a parent host's contents come first).
 pub trait Host {
@@ -68,23 +68,27 @@ impl<H: Host, P: Platform> Platform for HostPlatform<H, P> {
     }
 }
 
-/// A ready execution environment: an isolate with one context, a host installed and its preludes run, driven by a
-/// [`j8framework::EventLoop`] (scripts, the settlements of async host work, sleeping while only host work is
-/// outstanding).
+/// A ready execution environment: one JS event loop ([`EventLoop`]: an isolate with one context, a host installed
+/// and its preludes run). [`Runtime::new`] runs on the calling thread (the fast path); [`Runtime::on`] puts it in an
+/// [`EventLoopSet`], on its least loaded loop thread, so many runtimes run side by side.
 pub struct Runtime<'p> {
-    lp: EventLoop<'p, j8executor::Executor>,
-    id: IsolateId,
+    js: EventLoop<'p, j8executor::Executor>,
 }
 
 impl<'p> Runtime<'p> {
-    /// Builds the context, installs `H` and runs its preludes (the platform should be a [`HostPlatform`] for `H`, so
-    /// `import` finds the native modules)
+    /// Builds the context, installs `H` and runs its preludes, on the calling thread (the platform should be a
+    /// [`HostPlatform`] for `H`, so `import` finds the native modules)
     pub fn new<H: Host>(platform: &'p dyn Platform, executor: j8executor::Executor) -> Result<Self, Error> {
-        let mut isolate = Isolate::new(platform, CreateParams { event_loop: true, ..CreateParams::default() });
-        let cx = isolate.enter(|scope| scope.persist(scope.context(&j8builtins::Builtins)));
-        let mut lp = EventLoop::new(platform);
-        let id = lp.add(isolate, executor, cx);
-        let mut rt = Self { lp, id };
+        Self::ready::<H>(EventLoop::new(platform, executor, &j8builtins::Builtins))
+    }
+
+    /// The same, as a JS event loop of `set` (on the least loaded of its loop threads)
+    pub fn on<H: Host>(set: &EventLoopSet<'_, 'p, j8executor::Executor>, executor: j8executor::Executor) -> Result<Self, Error> {
+        Self::ready::<H>(set.spawn(executor, &j8builtins::Builtins))
+    }
+
+    fn ready<H: Host>(js: EventLoop<'p, j8executor::Executor>) -> Result<Self, Error> {
+        let mut rt = Self { js };
         rt.enter(|a| H::install(a));
         let mut preludes = Vec::new();
         H::preludes(&mut preludes);
@@ -94,19 +98,19 @@ impl<'p> Runtime<'p> {
         Ok(rt)
     }
 
-    /// Runs a script in the context (the loop runs until it has finished, settling host work that is ready meanwhile)
+    /// Runs a script in the context (the event loop goes on with its host work meanwhile)
     pub fn eval(&mut self, text: &str, file: &str) -> Result<Global, Error> {
-        self.lp.eval(self.id, &Source { text, file }, ScriptKind::Classic)
+        self.js.eval(&Source { text, file }, ScriptKind::Classic)
     }
 
     /// Runs an ES module in the context
     pub fn eval_module(&mut self, text: &str, file: &str) -> Result<Global, Error> {
-        self.lp.eval(self.id, &Source { text, file }, ScriptKind::Module)
+        self.js.eval(&Source { text, file }, ScriptKind::Module)
     }
 
-    /// Works with the context directly (installing more, reading results)
-    pub fn enter<R>(&mut self, f: impl for<'gc> FnOnce(&mut Agent<'gc, '_>) -> R) -> R {
-        self.lp.enter(self.id, f)
+    /// Works with the context directly (installing more, reading results), on the event loop's thread
+    pub fn enter<R: Send>(&mut self, f: impl for<'gc> FnOnce(&mut Agent<'gc, '_>) -> R + Send) -> R {
+        self.js.enter(f)
     }
 
     /// ToString of a handle's value (a placeholder when that throws in turn)
@@ -119,7 +123,7 @@ impl<'p> Runtime<'p> {
 
     /// Defines `value` (converted with `IntoJs`) as a data property at a dotted path from the global object:
     /// `rt.set("process.argv", args)` sets `argv` on the existing global `process`
-    pub fn set<V: for<'g> crate::IntoJs<'g>>(&mut self, path: &str, value: V) -> Result<(), Error> {
+    pub fn set<V: for<'g> crate::IntoJs<'g> + Send>(&mut self, path: &str, value: V) -> Result<(), Error> {
         self.enter(|a| {
             let (holder, key) = path.rsplit_once('.').unwrap_or(("", path));
             let mut target: Value<'_> = a.realm.global.into();
@@ -133,15 +137,10 @@ impl<'p> Runtime<'p> {
         })
     }
 
-    /// The isolate underneath (collecting, the profiler)
-    pub fn isolate(&mut self) -> &mut Isolate<'p> {
-        self.lp.isolate(self.id)
-    }
-
-    /// The event loop: runs until all async host work has settled its promises (running the microtasks each
-    /// settlement queues), sleeping while nothing can make progress. Work spawned meanwhile joins in.
+    /// The event loop: runs until all scripts and async host work have finished (settlements run the microtasks
+    /// they queue), sleeping while nothing can make progress. Work spawned meanwhile joins in.
     pub fn run_until_idle(&mut self) -> Result<(), Error> {
-        self.lp.run()
+        self.js.run()
     }
 }
 

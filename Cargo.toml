@@ -8,7 +8,7 @@ autotests = false
 repository.workspace = true
 readme = "README.md"
 # 只发库本身：tests/test262 子模块有五万多个文件，crates.io 收不下
-include = ["/src", "/tests/binding.rs", "/tests/runtime.rs", "/tests/bindings_more.rs", "/README.md", "/README.zh-CN.md", "/EMBEDDING.md", "/LICENSE"]
+include = ["/src", "/tests/binding.rs", "/tests/runtime.rs", "/tests/bindings_more.rs", "/tests/event_loop.rs", "/README.md", "/README.zh-CN.md", "/EMBEDDING.md", "/LICENSE"]
 
 [lib]
 name = "j8"
@@ -76,6 +76,10 @@ path = "tests/runtime.rs"
 [[test]]
 name = "bindings_more"
 path = "tests/bindings_more.rs"
+
+[[test]]
+name = "event_loop"
+path = "tests/event_loop.rs"
 
 [lints]
 workspace = true

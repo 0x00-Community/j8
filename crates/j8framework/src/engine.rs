@@ -36,7 +36,7 @@ pub enum ScriptKind {
 
 /// The unified entry point of an execution engine. Running is resumable: [`start`](Self::start) readies a piece of
 /// source, [`resume`](Self::resume) runs it for a quota of steps at a time, so the event loop
-/// ([`crate::EventLoop`]) can interleave isolates and host work; [`eval`](Self::eval) runs one to the end.
+/// ([`crate::EventLoop`]) can interleave event loops and host work; [`eval`](Self::eval) runs one to the end.
 pub trait Engine {
     /// A started piece of source, paused between turns. Its execution state lives on the isolate's roots, so the
     /// job (like the isolate and the engine) may move to another thread between turns.

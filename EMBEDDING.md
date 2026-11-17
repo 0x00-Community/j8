@@ -235,26 +235,47 @@ runtime thread, this also works for the results of `async fn`s.
 
 ## 5. Async work and the event loop
 
-j8 does not include an async runtime (no tokio). One loop, `j8framework::EventLoop`, drives both the bytecode and
-the host's async work; `j8::Runtime` is one isolate on such a loop (`eval` and `run_until_idle` run it). Each round,
-every isolate with something to do gets a *turn* on the platform's thread pool (through j8taskqueue; isolates run in
-parallel, each on one thread at a time). A turn:
+j8 does not include an async runtime (no tokio). A `j8framework::EventLoop` is one JS event loop: an isolate, its
+engine and one context, with its scripts and the async host work they start; `j8::Runtime` is one event loop (`eval`
+and `run_until_idle` drive it). Each time the event loop gets a *turn*, it:
 
-1. polls that isolate's futures that were woken (no JS runs here; a ready one becomes a settlement);
-2. resumes the running script for a quota of steps, then yields to the other turns (V8's interrupt check, at frame
-   entries and backward jumps);
+1. polls its futures that were woken (no JS runs here; a ready one becomes a settlement);
+2. resumes its running script for a quota of steps, then lets the next event loop on the thread have its turn (V8's
+   interrupt check, at frame entries and backward jumps); a script that finishes ends the turn;
 3. between scripts, takes the next macrotask: a script, or a settlement, which resolves its promise and drains the
    microtasks. JS stays run-to-completion.
 
-When nothing can run, the loop **parks its thread** until a waker fires; it returns once no future is pending.
+When nothing can run, the thread **parks** until a waker fires. `run_until_idle` returns once no script and no
+future of the event loop is outstanding.
 
 So **a future must wake its waker when it can make progress**, or the loop sleeps forever. Futures from crates that
 need their own reactor (tokio's sockets and timers) do not work as they are. Run that work on a thread or on your own
 reactor, and wake the waker from there.
 
-Several isolates can share one loop: make each with `CreateParams { event_loop: true, .. }`, `add` it with its
-engine and context, then `submit` scripts (or `eval` one and wait for it) and `run`. A long script in one isolate
-does not hold up the others, even on a single thread: turns take the pool in quota-sized slices.
+**One event loop, the fast path.** `j8::Runtime::new` makes an event loop with no thread of its own: it runs on
+whichever thread calls `eval` / `run_until_idle`, directly.
+
+**Many event loops on a few threads.** `j8framework::EventLoopSet::scope(&platform, threads, |set| …)` starts
+`threads` loop threads for the duration of the closure; `j8::Runtime::on::<Host>(set, executor)` (or `set.spawn`)
+puts an event loop there. Each event loop lives on one thread and is not shared, so a thread runs its event loops
+with no locks: 8 threads and 1000 event loops make 125 on each. Host threads reach them by messages (submitting a
+script, `enter`), and wait for the answer.
+
+- **Load balancing.** A new event loop goes to the least loaded thread (event loops there plus those waiting for a
+  turn). A thread with nothing to run asks the busiest one for half of the event loops waiting in its queue (work
+  stealing), or for half the difference when none waits. `set.rebalance()` evens the threads out on demand;
+  `set.split(thread)` starts a new thread and gives it half of `thread`'s event loops. An event loop moves only
+  between turns, with its isolate, engine, paused script and pending futures; wakes and messages follow it.
+- **One quota.** Every turn runs the set's slice of steps (`set.set_slice`) times the event loop's weight
+  (`EventLoop::set_weight`). `set.loads()`, `set.spent()` and `EventLoop::spent()` show where the work went.
+
+```rust,ignore
+let platform = Host::platform(DefaultPlatform::default());
+EventLoopSet::scope(&platform, NonZeroUsize::new(8).unwrap(), |set| {
+    let mut runtimes: Vec<j8::Runtime<'_>> = (0..1000).map(|_| j8::Runtime::on::<Host>(set, Executor::default()).unwrap()).collect();
+    // drive them from as many host threads as you like: each call waits for its event loop's thread
+});
+```
 
 ### 5.1 `async fn` bindings
 

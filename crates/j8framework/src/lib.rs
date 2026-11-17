@@ -16,8 +16,8 @@
 //! - [`Profiler`]: call / back-edge counters
 //! - [`Engine`]: the unified entry point implemented by the execution engine (j8executor); resumable
 //!   ([`Engine::start`] / [`Engine::resume`])
-//! - [`EventLoop`]: one loop driving every isolate's bytecode and the host's async work, on the platform's pool
-//!   through j8taskqueue
+//! - [`EventLoop`] / [`EventLoopSet`]: JS event loops (an isolate, its engine and a context each) and the loop threads
+//!   they are pinned to, placed on the least loaded thread
 extern crate alloc;
 // `#[derive(Collect)]` 生成的代码写 `::j8framework::…`，本 crate 里也要能这样引用自己
 extern crate self as j8framework;
@@ -49,7 +49,7 @@ mod value;
 
 pub use agent::{Agent, CodeKind, Invoke, Resume, Step};
 pub use engine::{Engine, ScriptKind, Source};
-pub use event_loop::{EventLoop, IsolateId, Ticket};
+pub use event_loop::{EventLoop, EventLoopSet, Ticket, SLICE};
 pub use j8taskqueue::Quota;
 pub use error::Error;
 pub use handle::{ContextRoot, Global, RealmBrand, ValueBrand};
