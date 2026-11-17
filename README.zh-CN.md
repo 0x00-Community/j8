@@ -28,7 +28,8 @@ j8 是**用 Rust 从头写的 JavaScript 引擎**, 照着 V8 的分层来: 所�
 🎯 **主线:** test262 通过率. 核心 ECMAScript 按 [PLAN.md](PLAN.md) 逐阶段补齐, 每一步跑基线零回归.
 
 🧩 **可嵌入:** `#[j8::class]` / `#[j8::object]` / `#[j8::function]` 一行把 Rust 类型绑成 JS; 自带两个样例: 分 Web 标准层
-与 Node 兼容层的运行时 `dune`, 以及 Cloudflare Worker 式运行时 `workerd`.
+与 Node 兼容层的运行时 `dune`, 以及 Cloudflare Worker 式运行时 `workerd`. 照样搭自己的宿主: 先看 [EMBEDDING.md](EMBEDDING.md)（各部分怎么拼, 英文）,
+宏的逐项说明在 [crates/macros/USAGE.md](crates/macros/USAGE.md).
 
 ## 🔥 凭什么不一样
 

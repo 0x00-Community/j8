@@ -31,7 +31,8 @@ zero regressions against the baseline at every step.
 
 🧩 **Embeddable:** `#[j8::class]` / `#[j8::object]` / `#[j8::function]` bind Rust types to JS in one line. Two sample hosts
 come with it: `dune`, a runtime with a Web-standard layer and a Node-compatible layer, and `workerd`, a Cloudflare
-Worker-style runtime.
+Worker-style runtime. To build your own host the same way, read [EMBEDDING.md](EMBEDDING.md) (how the pieces fit)
+and [crates/macros/USAGE.md](crates/macros/USAGE.md) (the macro reference).
 
 ## 🔥 Why it's different
 

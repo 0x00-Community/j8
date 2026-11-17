@@ -26,8 +26,17 @@ pub trait Module: Object {
 }
 
 impl Glue {
-    /// `async fn` bindings: a pending promise whose settlement `future` produces, handed to the platform's event loop
-    /// (a `TypeError` when the platform has none)
+    /// A pending promise whose settlement `future` produces, handed to the platform's event loop: what `async fn`
+    /// bindings compile to, and how a method that needs `&self` or the agent returns a promise by hand. `future`
+    /// must wake its waker when it can make progress (the loop parks otherwise). Throws a `TypeError` when the
+    /// platform has no event loop (it is not a `j8::HostPlatform`).
+    ///
+    /// ```ignore
+    /// fn wait<'gc>(&self, a: &mut Agent<'gc, '_>, ms: f64) -> Result<Value<'gc>, Error> {
+    ///     let sleep = self.sleep(ms);                         // Send + 'static: clone what it needs out of self
+    ///     Glue::spawn(a, async move { Glue::settle(sleep.await) })
+    /// }
+    /// ```
     pub fn spawn<'gc>(a: &mut Agent<'gc, '_>, future: impl core::future::Future<Output = j8framework::Settle> + Send + 'static) -> Result<j8framework::Value<'gc>, j8framework::Error> {
         let promise = a.new_promise();
         let (resolve, reject) = a.promise_resolvers(promise);
@@ -38,12 +47,14 @@ impl Glue {
         }
     }
 
-    /// What an `async fn`'s result settles to: converted on the runtime thread with `IntoJs`
+    /// What the future given to [`Glue::spawn`] produces: `out` is converted with `IntoJs` on the runtime thread when
+    /// the promise settles (an `IntoJs` that throws rejects it)
     pub fn settle<T: for<'g> crate::IntoJs<'g> + Send + 'static>(out: T) -> j8framework::Settle {
         alloc::boxed::Box::new(move |a: &mut Agent<'_, '_>| out.into_js(a))
     }
 
     /// The hidden native registry of this realm (created on first use)
+    #[doc(hidden)]
     pub fn natives<'gc>(a: &mut Agent<'gc, '_>) -> JsObject<'gc> {
         let global = a.realm.global;
         if let Some(j8framework::Slot::Data(v)) = global.borrow().get_own(NATIVE).map(|p| p.slot)
@@ -57,6 +68,7 @@ impl Glue {
     }
 
     /// Installs module `M` into the native registry under each of its specifiers
+    #[doc(hidden)]
     pub fn register_module<M: Module>(a: &mut Agent<'_, '_>) {
         let registry = Self::natives(a);
         let m = <M as Object>::install(a, registry);
@@ -67,6 +79,7 @@ impl Glue {
 
     /// The ES module source standing for module `M` when `spec` is one of its specifiers: a default export (the
     /// object) and one named export per member
+    #[doc(hidden)]
     pub fn module_source<M: Module>(spec: &str) -> Option<String> {
         let canonical = M::SPECIFIERS.first()?;
         if !M::SPECIFIERS.contains(&spec) {

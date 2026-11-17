@@ -8,7 +8,8 @@
 //! - `j8::runtime!`: declares a runtime (globals, native modules, prelude, optionally on top of another runtime);
 //!   [`Runtime`] is a ready execution environment
 //!
-//! See `crates/macros/USAGE.md` for usage.
+//! The macro reference is [USAGE.md](https://github.com/0x00-Community/j8/blob/main/crates/macros/USAGE.md); how to
+//! put a whole host together is the guide below.
 //!
 //! The other j8 crates are re-exported by feature (each is also published on its own):
 //!
@@ -24,6 +25,7 @@
 //! | `jit` | [`compiler`], [`jit`] | bytecode ⇒ MLIR ⇒ x86-64 JIT (x86-64 Unix) |
 //! | `json` | [`Json`] | Rust values crossing as JSON-shaped data through serde |
 //! | `full` | all of the above | |
+#![doc = include_str!("../EMBEDDING.md")]
 
 #[cfg(feature = "json")]
 pub use j8binding::Json;
@@ -35,7 +37,6 @@ mod runtime;
 #[cfg(all(feature = "executor", feature = "builtins"))]
 pub use runtime::{Host, HostPlatform, Runtime};
 
-#[doc(hidden)]
 pub use j8binding::Glue;
 pub use j8framework as frame;
 
