@@ -11,8 +11,9 @@ extern crate alloc;
 use j8framework::ValueKind;
 use alloc::vec::Vec;
 use alloc::boxed::Box;
-use alloc::rc::Rc;
 use core::cell::{Cell, RefCell};
+
+use j8lockfree::SegVec;
 
 use j8virtasm::{Constant, Function, FunctionKind, Insn, Mode, Module, PropertyKind, Reg};
 use j8framework::{Collect, Gc};
@@ -227,21 +228,28 @@ impl From<u64> for Exit {
 #[derive(Default)]
 pub struct Executor {
     /// A tier faster than interpretation (without it, interpret only)
-    tier: Option<Rc<dyn Tier>>,
-    /// Loaded functions: append-only (`eval` / the `Function` constructor also add some mid-execution); frames hold an
-    /// `Rc`
-    code: RefCell<Vec<Rc<Loaded>>>,
+    tier: Option<Box<dyn Tier + Send>>,
+    /// Loaded functions, by function id: append-only (`eval` / the `Function` constructor also add some mid-execution),
+    /// so a `&Loaded` stays valid while more are loaded; frames refer to them by id
+    code: SegVec<Loaded>,
     /// Current call depth (summed over all re-entrant levels of `execute`)
     depth: Cell<usize>,
     /// Module code: first function id ⇒ module id (for import bindings and import.meta)
     module_of: RefCell<alloc::collections::BTreeMap<u32, u32>>,
 }
 
+// An executor moves between the threads of the event loop's pool together with its isolate (one thread at a time:
+// `Send`, not `Sync`)
+const _: () = {
+    const fn send<T: Send>() {}
+    send::<Executor>();
+};
+
 impl Executor {
     /// Adds a JIT tier: ordinary JS functions ask it before entering a frame.
     #[must_use]
-    pub fn with_tier(mut self, tier: Rc<dyn Tier>) -> Self {
-        self.tier = Some(tier);
+    pub fn with_tier(mut self, tier: impl Tier + Send + 'static) -> Self {
+        self.tier = Some(Box::new(tier));
         self
     }
 
@@ -298,15 +306,16 @@ impl Executor {
 
     /// Loads a module, returning the function id of the script itself.
     pub fn load(&self, module: Module) -> FuncId {
-        let mut code = self.code.borrow_mut();
-        let base = u32::try_from(code.len()).expect("fewer than 2^32 functions");
-        code.extend(module.functions.into_iter().map(|func| Rc::new(Loaded::from((base, func)))));
+        let base = u32::try_from(self.code.len()).expect("fewer than 2^32 functions");
+        for func in module.functions {
+            self.code.push(Loaded::from((base, func)));
+        }
         FuncId(base + Module::MAIN)
     }
 
     #[inline]
-    fn function(&self, f: FuncId) -> Rc<Loaded> {
-        Rc::clone(&self.code.borrow()[f.0 as usize])
+    fn function(&self, f: FuncId) -> &Loaded {
+        self.code.get(f.0 as usize).expect("function ids come from load")
     }
 
     /// Runs script `main` (`this` is the global object).
@@ -467,7 +476,7 @@ impl Executor {
     /// If the callee is an ordinary JS function (not a class constructor / generator / async), gives its closure: a
     /// frame can be opened directly.
     #[inline]
-    fn plain_closure<'gc>(&self, callee: Value<'gc>) -> Option<(Closure<'gc>, Rc<Loaded>)> {
+    fn plain_closure<'gc>(&self, callee: Value<'gc>) -> Option<(Closure<'gc>, &Loaded)> {
         let c = callee.as_object()?.closure()?;
         let loaded = self.function(c.func);
         loaded.plain.then_some((c, loaded))
@@ -553,7 +562,7 @@ impl Executor {
                         FunctionKind::Arrow | FunctionKind::Method => break,
                         FunctionKind::Constructor { derived: true } => None,
                         FunctionKind::Normal | FunctionKind::Constructor { derived: false } => {
-                            let this = Self::create_this(a, &func_loaded, new_target)?;
+                            let this = Self::create_this(a, func_loaded, new_target)?;
                             if let Some(init) = closure.fields {
                                 a.call(init.into(), this.into(), &[])?;
                             }
@@ -641,7 +650,7 @@ impl Executor {
     /// properties the instance has (reserve that many slots when building `this` next time).
     fn construct_result<'gc>(&self, a: &Agent<'gc, '_>, f: &Frame<'gc>, v: Value<'gc>) -> Result<Value<'gc>, Error> {
         let loaded = self.function(f.func);
-        let r = self.construct_value(a, &loaded, f, v);
+        let r = self.construct_value(a, loaded, f, v);
         if let Ok(v) = &r
             && let ValueKind::Object(o) = v.kind()
         {
@@ -1022,14 +1031,13 @@ impl Executor {
     fn run<'gc>(&self, a: &mut Agent<'gc, '_>, st: &mut State<'gc>, depth: usize, budget: &mut Option<usize>) -> Result<Option<Outcome<'gc>>, Error> {
         let State { regs, frames, f, acc } = st;
         // When the call fast path has already fetched the callee, hands it to the next frame, saving a lookup
-        let mut entering: Option<Rc<Loaded>> = None;
+        let mut entering: Option<&Loaded> = None;
         'frame: loop {
             // Budget exhausted: stop before this frame's next instruction, with the state intact
             if Self::spent(budget) {
                 return Ok(None);
             }
-            let cur = entering.take().unwrap_or_else(|| self.function(f.func));
-            let loaded = &*cur;
+            let loaded = entering.take().unwrap_or_else(|| self.function(f.func));
             let func = &loaded.func;
             loop {
                 let insn = &func.insns[f.pc];
@@ -1497,7 +1505,7 @@ impl Executor {
                             && let Some((c, loaded)) = self.plain_closure(target)
                         {
                             let mut next = Self::enter_regs(a, regs, &loaded.func, c, target, regs[r(this)], first, usize::from(argc));
-                            if !self.tiered(a.platform, &loaded, regs, &mut next, acc) {
+                            if !self.tiered(a.platform, loaded, regs, &mut next, acc) {
                                 frames.push(core::mem::replace(f, next));
                                 entering = Some(loaded);
                                 continue 'frame;
@@ -1744,7 +1752,7 @@ impl<'gc> Invoke<'gc> for Executor {
             let mut regs = a.take_regs();
             let mut f = Self::enter_func(a, &mut regs, &loaded.func, c, callee, this, args);
             let mut acc = Value::Undefined;
-            if self.tiered(a.platform, &loaded, &mut regs, &mut f, &mut acc) {
+            if self.tiered(a.platform, loaded, &mut regs, &mut f, &mut acc) {
                 a.give_regs(regs);
                 return Ok(acc);
             }

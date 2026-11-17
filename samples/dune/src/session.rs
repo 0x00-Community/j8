@@ -36,7 +36,7 @@ pub struct Session<'p> {
 impl<'p> Session<'p> {
     /// A runtime of host `H` (its platform should be `H::platform(…)`, so `import` finds its modules)
     pub fn new<H: Host>(platform: &'p dyn Platform, jit: bool) -> Self {
-        let executor = if jit { Executor::default().with_tier(std::rc::Rc::new(j8::jit::Jit::default())) } else { Executor::default() };
+        let executor = if jit { Executor::default().with_tier(j8::jit::Jit::default()) } else { Executor::default() };
         match Runtime::new::<H>(platform, executor) {
             Ok(rt) => Self { rt },
             Err(e) => {

@@ -418,6 +418,7 @@ version = "0.3.0"
 dependencies = [
  "j8builtins",
  "j8framework",
+ "j8lockfree",
  "j8platform",
  "j8virtasm",
  "ryu-js",
