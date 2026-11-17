@@ -460,6 +460,8 @@ impl Native {
     /// A new connection's thread: reads the request, offers it to JS, waits for the verdict, then reads frames if
     /// the connection was upgraded
     fn serve(id: u32, stream: TcpStream, arrivals: &Fifo<(u32, Native)>, requests: &Sender<Incoming>) {
+        // Small frames go out at once: no waiting for the peer's delayed ACK (Nagle)
+        let _ = stream.set_nodelay(true);
         let Ok(write_half) = stream.try_clone() else { return };
         let mut reader = BufReader::new(stream);
         let Some(request) = Incoming::read(id, &mut reader) else { return };
