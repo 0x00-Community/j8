@@ -3,7 +3,10 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::fmt;
 
-use crate::{Collect, Gc, GcCell, Mutation, ValueCell};
+use core::ops::{Deref, DerefMut};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
+
+use crate::{CellMut, CellRef, Collect, Gc, GcCell, GcSlot, Mutation, ValueCell};
 
 use crate::{Agent, Error, FuncId, Key, Value};
 
@@ -42,7 +45,7 @@ pub struct RegExpData<'gc> {
 }
 
 /// An object on the heap (interior mutability through [`GcCell`]; writes go through paragc's write barrier).
-pub type JsObject<'gc> = Gc<'gc, GcCell<'gc, ObjectData<'gc>>>;
+pub type JsObject<'gc> = Gc<'gc, Object<'gc>>;
 
 /// A scope environment on the heap: bindings captured by inner functions live here, stored by slot.
 pub type JsEnv<'gc> = Gc<'gc, Env<'gc>>;
@@ -115,6 +118,32 @@ impl<'gc> Closure<'gc> {
 pub enum Slot<'gc> {
     Data(Value<'gc>),
     Accessor { get: Option<JsObject<'gc>>, set: Option<JsObject<'gc>> },
+}
+
+/// An accessor pair on the heap: how a property slot stores [`Slot::Accessor`] in one word (immutable; changing it
+/// stores a new pair).
+#[derive(Clone, Copy, Debug, Collect)]
+pub struct Accessor<'gc> {
+    pub get: Option<JsObject<'gc>>,
+    pub set: Option<JsObject<'gc>>,
+}
+
+impl<'gc> Slot<'gc> {
+    /// One word for a property slot (an accessor pair goes onto the heap)
+    pub fn encode(self, mc: &Mutation<'gc>) -> Value<'gc> {
+        match self {
+            Slot::Data(v) => v,
+            Slot::Accessor { get, set } => Value::accessor(mc.alloc(Accessor { get, set })),
+        }
+    }
+
+    /// Back from the word
+    pub fn decode(v: Value<'gc>) -> Self {
+        match v.as_accessor() {
+            Some(a) => Slot::Accessor { get: a.get().get, set: a.get().set },
+            None => Slot::Data(v),
+        }
+    }
 }
 
 /// A property: contents plus attributes.
@@ -630,8 +659,8 @@ pub enum ObjectKind<'gc> {
     Arguments(Option<ArgumentsMap<'gc>>),
     /// An Error instance (has [[ErrorData]])
     Error,
-    /// Array elements (index properties live here; `length` is its length)
-    Array(Vec<Value<'gc>>),
+    /// An array (its dense elements are in [`Object::elements`])
+    Array,
     Function(Closure<'gc>),
     Native(Native),
     Bound(Box<Bound<'gc>>),
@@ -680,7 +709,7 @@ impl ObjectKind<'_> {
     /// ordinary (not a Proxy / array / typed array / module namespace / string wrapper / arguments), so property lookup
     /// can take the fast path.
     pub fn has_ordinary_properties(&self) -> bool {
-        !(matches!(self, ObjectKind::Proxy(_) | ObjectKind::Array(_) | ObjectKind::TypedArray(..) | ObjectKind::ModuleNamespace(_) | ObjectKind::Arguments(_))
+        !(matches!(self, ObjectKind::Proxy(_) | ObjectKind::Array | ObjectKind::TypedArray(..) | ObjectKind::ModuleNamespace(_) | ObjectKind::Arguments(_))
             || matches!(self, ObjectKind::Primitive(v) if matches!(v.kind(), ValueKind::String(_))))
     }
 
@@ -749,298 +778,62 @@ impl<T> From<Vec<T>> for Few<T> {
     }
 }
 
-/// An object: kind, property table in insertion order, prototype.
-#[derive(Default, Collect)]
-#[collect(no_drop)]
+/// What a new object starts with ([`ObjectData::alloc`] puts it on the heap as an [`Object`]).
+#[derive(Default)]
 pub struct ObjectData<'gc> {
     pub kind: ObjectKind<'gc>,
-    /// String-keyed properties: shape (hidden class) plus slots, in insertion order
-    pub props: crate::Props<'gc>,
-    /// The empty shape that objects with this object as prototype start from (so objects with the same prototype that
-    /// add properties the same way share shapes). Not a `Gc`, so changing it needs no write barrier
-    #[collect(require_static)]
-    pub shape_root: j8lockfree::OnceBox<alloc::sync::Arc<crate::Shape>>,
+    /// Room for this many string-keyed properties up front (object literals)
+    pub capacity: usize,
+    /// Array elements (the dense part; only for [`ObjectKind::Array`])
+    pub elements: Vec<Value<'gc>>,
     /// Symbol-keyed properties
     pub symbols: Few<(JsSymbol<'gc>, Property<'gc>)>,
-    /// Private members (`#x`): keys are private names generated when the class is evaluated; kept apart from ordinary
-    /// properties and invisible to reflection
+    /// Private members (`#x`)
     pub privates: Few<(JsSymbol<'gc>, Property<'gc>)>,
     pub proto: Option<JsObject<'gc>>,
-    /// Array: the length extended by the sparse part. Indices outside the dense part (in `ObjectKind::Array`: all
-    /// writable, enumerable, configurable data properties with no holes) are stored as ordinary properties; the actual
-    /// length is the larger of this and the dense part's length
     pub sparse_length: u32,
-    /// Not extensible (`Object.preventExtensions` / `seal` / `freeze`)
     pub non_extensible: bool,
-    /// The array's `length` is not writable
     pub length_readonly: bool,
-    /// The property table has had a key starting with a digit (set only, never cleared; array method fast paths rely on
-    /// it to confirm at a glance that the prototype has no index properties)
-    pub digit_keys: bool,
-}
-
-/// Prints only kind and keys: the object graph has cycles (`F.prototype.constructor`), so it cannot be expanded.
-impl fmt::Debug for ObjectData<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let kind = match self.kind {
-            ObjectKind::Ordinary | ObjectKind::Arguments(_) => "Object",
-            ObjectKind::Error => "Error",
-            ObjectKind::Array(_) => "Array",
-            ObjectKind::Function(_) | ObjectKind::Native(_) | ObjectKind::Bound(_) | ObjectKind::Resolver { .. } | ObjectKind::NativeClosure(_) => "Function",
-            ObjectKind::Proxy(_) => "Proxy",
-            ObjectKind::ArrayBuffer(_) => "ArrayBuffer",
-            ObjectKind::Date(_) => "Date",
-            ObjectKind::Host(_) => "Host",
-            ObjectKind::ModuleNamespace(_) => "Module",
-            ObjectKind::WeakRef(_) => "WeakRef",
-            ObjectKind::FinalizationRegistry { .. } => "FinalizationRegistry",
-            ObjectKind::RegExpStringIterator { .. } => "RegExp String Iterator",
-            ObjectKind::TypedArray(..) => "TypedArray",
-            ObjectKind::DataView(_) => "DataView",
-            ObjectKind::Iterator(_) | ObjectKind::CollectionIterator { .. } | ObjectKind::IteratorHelper(_) | ObjectKind::WrappedIterator(_) => "Iterator",
-            ObjectKind::Coroutine(_) => "Generator",
-            ObjectKind::Promise { .. } => "Promise",
-            ObjectKind::RegExp(_) => "RegExp",
-            ObjectKind::Primitive(_) => "Primitive",
-            ObjectKind::Map(_) => "Map",
-            ObjectKind::Set(_) => "Set",
-        };
-        f.debug_list().entries(self.props.iter().map(|(k, _)| &**k)).finish()?;
-        f.write_str(kind)
-    }
 }
 
 impl<'gc> ObjectData<'gc> {
-    /// Array length; `None` if not an array.
-    pub fn array_length(&self) -> Option<u32> {
-        match &self.kind {
-            ObjectKind::Array(items) => Some(u32::try_from(items.len()).unwrap_or(u32::MAX).max(self.sparse_length)),
-            _ => None,
+    pub fn alloc(self, mc: &Mutation<'gc>) -> JsObject<'gc> {
+        let Self { kind, capacity, elements, symbols, privates, proto, sparse_length, non_extensible, length_readonly } = self;
+        let state = ObjectState { kind, symbols, privates };
+        let unit = Class::unit(&state);
+        let class = Class::of(&state.kind) | unit.unwrap_or(0);
+        let call = Object::call_of(mc, &state.kind);
+        let o = mc.alloc(Object {
+            proto: GcSlot::from(proto),
+            call: GcSlot::from(call),
+            props: crate::Props::with_capacity(mc, capacity),
+            elements: crate::ValueArray::default(),
+            class: AtomicU8::new(class),
+            non_extensible: AtomicBool::new(non_extensible),
+            length_readonly: AtomicBool::new(length_readonly),
+            digit_keys: AtomicBool::new(false),
+            sparse_length: AtomicU32::new(sparse_length),
+            shape_root: j8lockfree::OnceBox::default(),
+            data: if unit.is_some() { GcCell::empty() } else { GcCell::new(mc, state) },
+        });
+        // Filled once on the heap: the write barrier records slot addresses
+        if !elements.is_empty() {
+            o.elements.replace(mc, &elements);
         }
+        o
     }
+}
 
-    /// Fast path: update the existing `i`-th element of the dense part; returns `true` if updated (other cases take the
-    /// full property write).
-    pub fn write_index(&mut self, i: u32, value: Value<'gc>) -> bool {
-        match &mut self.kind {
-            ObjectKind::Array(items) if (i as usize) < items.len() => {
-                items[i as usize] = value;
-                true
-            }
-            _ => false,
-        }
-    }
+/// The part of an object kept behind its [`GcCell`]: kind, Symbol-keyed properties, private members (read through
+/// [`Object::borrow`] / changed through [`Object::borrow_mut`]).
+#[derive(Default, Collect)]
+pub struct ObjectState<'gc> {
+    pub kind: ObjectKind<'gc>,
+    pub symbols: Few<(JsSymbol<'gc>, Property<'gc>)>,
+    pub privates: Few<(JsSymbol<'gc>, Property<'gc>)>,
+}
 
-    /// Move the dense part from element `from` onward into ordinary index-keyed properties (when those elements need
-    /// different attributes, or one of them is deleted).
-    pub fn spill(&mut self, from: usize) {
-        let ObjectKind::Array(items) = &mut self.kind else { return };
-        if from >= items.len() {
-            return;
-        }
-        let len = u32::try_from(items.len()).unwrap_or(u32::MAX);
-        let moved: Vec<Value<'gc>> = items.drain(from..).collect();
-        for (i, v) in (from..).zip(moved) {
-            self.push_prop(&alloc::format!("{i}"), Property::data(v));
-        }
-        self.sparse_length = self.sparse_length.max(len);
-    }
-
-    /// Elements of the array's sparse part (indices after the dense part, stored as ordinary properties), sorted by
-    /// index.
-    pub fn sparse_elements(&self) -> Vec<(u32, Value<'gc>)> {
-        let ObjectKind::Array(items) = &self.kind else { return Vec::new() };
-        if self.sparse_length as usize <= items.len() {
-            return Vec::new();
-        }
-        let mut out: Vec<(u32, Value<'gc>)> = self
-            .props
-            .iter()
-            .filter_map(|(k, p)| match (crate::ops::index_of_str(k), p.slot) {
-                (Some(i), Slot::Data(v)) if i as usize >= items.len() => Some((i, v)),
-                _ => None,
-            })
-            .collect();
-        out.sort_unstable_by_key(|&(i, _)| i);
-        out
-    }
-
-    /// Set an array's length: truncate elements at `n` and beyond (including index-keyed ones); growing only records
-    /// the length (new positions are holes).
-    pub fn set_array_length(&mut self, n: u32) {
-        let ObjectKind::Array(items) = &mut self.kind else { return };
-        let len = n as usize;
-        if len <= items.len() {
-            items.truncate(len);
-        }
-        let dense = items.len();
-        if self.sparse_length > 0 {
-            self.props.retain(|k| crate::ops::index_of_str(k).is_none_or(|i| i < n));
-        }
-        self.sparse_length = if len > dense { n } else { 0 };
-    }
-
-    /// Own property (only what is stored: the array dense part, ordinary properties, Symbol keys; array `length` and
-    /// string indices are supplied by Agent).
-    pub fn own_slot(&self, key: Key<'_, 'gc>) -> Option<Property<'gc>> {
-        match key {
-            Key::Str(k) => {
-                // Check for an array before parsing the index: ordinary objects don't need to parse to look up a
-                // property
-                if let ObjectKind::Array(items) = &self.kind
-                    && let Some(i) = crate::ops::index_of_str(k)
-                    && let Some(&v) = items.get(i as usize)
-                {
-                    return Some(Property::data(v));
-                }
-                self.get_own(k)
-            }
-            Key::Sym(s) => self.get_own_symbol(s),
-        }
-    }
-
-    /// Store an own property (already validated as storable): an array index goes into the dense part if it can,
-    /// otherwise it is stored as an ordinary property and extends the length. Fast path for ordinary-object property
-    /// writes (the OrdinarySet step on the receiver itself): an own writable data property gets its value updated; if
-    /// absent and extensible, a new ordinary data property is created. Returns `Some(succeeded)`; returns `None` when
-    /// the slow path is needed (accessor / not an ordinary object).
-    pub fn ordinary_put(&mut self, key: Key<'_, 'gc>, value: Value<'gc>) -> Option<bool> {
-        if !self.kind.has_ordinary_properties() {
-            return None;
-        }
-        let found = match key {
-            Key::Str(k) => self.props.position(k).map(|i| (self.props.attrs(i).writable(), self.props.slot_mut(i))),
-            Key::Sym(s) => self.symbols.iter_mut().find(|(k, _)| Gc::ptr_eq(*k, s)).map(|(_, p)| (p.writable, &mut p.slot)),
-        };
-        match found {
-            Some((true, Slot::Data(v))) => {
-                *v = value;
-                Some(true)
-            }
-            Some((false, Slot::Data(_))) => Some(false),
-            Some(_) => None,
-            None if self.non_extensible => Some(false),
-            None => {
-                self.store(key, Property::data(value));
-                Some(true)
-            }
-        }
-    }
-
-    pub fn store(&mut self, key: Key<'_, 'gc>, prop: Property<'gc>) {
-        let k = match key {
-            Key::Sym(s) => return self.define_symbol(s, prop),
-            Key::Str(k) => k,
-        };
-        let plain = prop.enumerable && prop.writable && prop.configurable;
-        let stored = matches!(self.kind, ObjectKind::Array(_)) && self.get_own(k).is_some();
-        if let (ObjectKind::Array(items), Some(i)) = (&mut self.kind, crate::ops::index_of_str(k)) {
-            let at = i as usize;
-            match (prop.slot, plain) {
-                (Slot::Data(v), true) if at < items.len() => {
-                    items[at] = v;
-                    return;
-                }
-                (Slot::Data(v), true) if at == items.len() && !stored => {
-                    items.push(v);
-                    return;
-                }
-                _ if at < items.len() => self.spill(at),
-                _ => {}
-            }
-        }
-        self.define(k, prop);
-        if let (ObjectKind::Array(_), Some(i)) = (&self.kind, crate::ops::index_of_str(k)) {
-            self.sparse_length = self.sparse_length.max(i.saturating_add(1));
-        }
-    }
-
-    /// Delete an own property (configurability not checked).
-    pub fn unstore(&mut self, key: Key<'_, 'gc>) {
-        match key {
-            Key::Sym(s) => self.symbols.retain(|(k, _)| !Gc::ptr_eq(*k, s)),
-            Key::Str(k) => {
-                if let (ObjectKind::Array(items), Some(i)) = (&self.kind, crate::ops::index_of_str(k))
-                    && (i as usize) < items.len()
-                {
-                    self.spill(i as usize);
-                }
-                if let Some(i) = self.position(k) {
-                    self.props.remove(i);
-                }
-            }
-        }
-    }
-
-    /// The index of a property in the table.
-    /// Returns it if entry `at` of the property table is exactly `key` (the execution layer caches the index and checks
-    /// it before use).
-    pub fn prop_at(&self, at: usize, key: &str) -> Option<Property<'gc>> {
-        (at < self.props.len() && **self.props.key(at) == *key).then(|| self.props.get(at))
-    }
-
-    /// Update the value of entry `at` of the property table (the caller has already checked with
-    /// [`prop_at`](Self::prop_at) that it is a writable data property).
-    pub fn set_at(&mut self, at: usize, value: Value<'gc>) {
-        if at < self.props.len() {
-            *self.props.slot_mut(at) = Slot::Data(value);
-        }
-    }
-
-    pub fn position(&self, key: &str) -> Option<usize> {
-        self.props.position(key)
-    }
-
-    /// Append an entry (the shape follows the transition table).
-    fn push_prop(&mut self, key: &str, prop: Property<'gc>) {
-        self.digit_keys |= key.as_bytes().first().is_some_and(u8::is_ascii_digit);
-        let proto = self.proto;
-        self.props.push(key, prop, || proto.and_then(|p| p.try_borrow().map(|d| d.root_shape())));
-    }
-
-    /// The empty shape that objects with this object as prototype start from (created if absent)
-    pub fn root_shape(&self) -> alloc::sync::Arc<crate::Shape> {
-        self.shape_root.get_or_init(crate::Props::empty).clone()
-    }
-
-    /// Append an entry, switching the shape directly to `to` (given by the execution layer's inline cache: adding one
-    /// key to the current shape yields it, and the new key is its last one).
-    pub fn push_to(&mut self, to: alloc::sync::Arc<crate::Shape>, slot: Slot<'gc>) {
-        self.digit_keys |= to.key(to.len() - 1).as_bytes().first().is_some_and(u8::is_ascii_digit);
-        self.props.push_to(to, slot);
-    }
-
-    /// Own property.
-    pub fn get_own(&self, key: &str) -> Option<Property<'gc>> {
-        self.position(key).map(|i| self.props.get(i))
-    }
-
-    /// The value of an own data property (`None` for accessors).
-    pub fn own(&self, key: &str) -> Option<Value<'gc>> {
-        self.get_own(key).and_then(|p| p.value())
-    }
-
-    /// Assignment: update the value of an existing data property (no-op if not writable), otherwise create an ordinary
-    /// property. Accessors are handled by the caller first.
-    pub fn set(&mut self, key: &str, value: Value<'gc>) {
-        match self.position(key) {
-            Some(i) => {
-                if self.props.attrs(i).writable() {
-                    *self.props.slot_mut(i) = Slot::Data(value);
-                }
-            }
-            None => self.push_prop(key, Property::data(value)),
-        }
-    }
-
-    /// Define: replace (or create) this property as a whole.
-    pub fn define(&mut self, key: &str, prop: Property<'gc>) {
-        match self.position(key) {
-            Some(i) => self.props.replace(i, prop),
-            None => self.push_prop(key, prop),
-        }
-    }
-
+impl<'gc> ObjectState<'gc> {
     pub fn get_own_symbol(&self, key: JsSymbol<'gc>) -> Option<Property<'gc>> {
         self.symbols.iter().find_map(|&(k, p)| Gc::ptr_eq(k, key).then_some(p))
     }
@@ -1062,22 +855,669 @@ impl<'gc> ObjectData<'gc> {
             None => true,
         }
     }
+}
 
-    /// Delete an own property: non-configurable ones can't be deleted; returns whether it was deleted (nonexistent
-    /// counts as deleted).
-    pub fn remove(&mut self, key: &str) -> bool {
+/// Prints only the kind: the object graph has cycles (`F.prototype.constructor`), so it cannot be expanded.
+impl fmt::Debug for ObjectState<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let kind = match self.kind {
+            ObjectKind::Ordinary | ObjectKind::Arguments(_) => "Object",
+            ObjectKind::Error => "Error",
+            ObjectKind::Array => "Array",
+            ObjectKind::Function(_) | ObjectKind::Native(_) | ObjectKind::Bound(_) | ObjectKind::Resolver { .. } | ObjectKind::NativeClosure(_) => "Function",
+            ObjectKind::Proxy(_) => "Proxy",
+            ObjectKind::ArrayBuffer(_) => "ArrayBuffer",
+            ObjectKind::Date(_) => "Date",
+            ObjectKind::Host(_) => "Host",
+            ObjectKind::ModuleNamespace(_) => "Module",
+            ObjectKind::WeakRef(_) => "WeakRef",
+            ObjectKind::FinalizationRegistry { .. } => "FinalizationRegistry",
+            ObjectKind::RegExpStringIterator { .. } => "RegExp String Iterator",
+            ObjectKind::TypedArray(..) => "TypedArray",
+            ObjectKind::DataView(_) => "DataView",
+            ObjectKind::Iterator(_) | ObjectKind::CollectionIterator { .. } | ObjectKind::IteratorHelper(_) | ObjectKind::WrappedIterator(_) => "Iterator",
+            ObjectKind::Coroutine(_) => "Generator",
+            ObjectKind::Promise { .. } => "Promise",
+            ObjectKind::RegExp(_) => "RegExp",
+            ObjectKind::Primitive(_) => "Primitive",
+            ObjectKind::Map(_) => "Map",
+            ObjectKind::Set(_) => "Set",
+        };
+        f.write_str(kind)
+    }
+}
+
+/// Facts about an object's kind cached outside the cell (refreshed whenever the kind may have changed), so hot paths
+/// read them without borrowing.
+struct Class;
+
+impl Class {
+    /// [`ObjectKind::Array`]
+    const ARRAY: u8 = 1;
+    /// [`ObjectKind::has_ordinary_properties`]
+    const ORDINARY: u8 = 1 << 1;
+    /// Inline caches may use it (not a Proxy / typed array / module namespace)
+    const PLAIN: u8 = 1 << 2;
+    /// [`ObjectKind::is_callable`]
+    const CALLABLE: u8 = 1 << 3;
+    /// The state cell is empty and the state is the default with this unit kind (no snapshot allocated): two bits
+    const UNIT_SHIFT: u32 = 4;
+    const UNIT_MASK: u8 = 0b11 << Self::UNIT_SHIFT;
+    const UNIT_ORDINARY: u8 = 1 << Self::UNIT_SHIFT;
+    const UNIT_ERROR: u8 = 2 << Self::UNIT_SHIFT;
+    const UNIT_ARRAY: u8 = 3 << Self::UNIT_SHIFT;
+
+    /// The unit bits for a state that needs no snapshot
+    fn unit(state: &ObjectState<'_>) -> Option<u8> {
+        if !state.symbols.is_empty() || !state.privates.is_empty() {
+            return None;
+        }
+        match state.kind {
+            ObjectKind::Ordinary => Some(Self::UNIT_ORDINARY),
+            ObjectKind::Error => Some(Self::UNIT_ERROR),
+            ObjectKind::Array => Some(Self::UNIT_ARRAY),
+            _ => None,
+        }
+    }
+
+    /// The default state an empty cell stands for
+    fn unit_state<'gc>(class: u8) -> ObjectState<'gc> {
+        let kind = match class & Self::UNIT_MASK {
+            Self::UNIT_ERROR => ObjectKind::Error,
+            Self::UNIT_ARRAY => ObjectKind::Array,
+            _ => ObjectKind::Ordinary,
+        };
+        ObjectState { kind, ..ObjectState::default() }
+    }
+
+    fn of(kind: &ObjectKind<'_>) -> u8 {
+        let bit = |b: bool, v: u8| if b { v } else { 0 };
+        bit(matches!(kind, ObjectKind::Array), Self::ARRAY)
+            | bit(kind.has_ordinary_properties(), Self::ORDINARY)
+            | bit(!matches!(kind, ObjectKind::Proxy(_) | ObjectKind::TypedArray(..) | ObjectKind::ModuleNamespace(_)), Self::PLAIN)
+            | bit(kind.is_callable(), Self::CALLABLE)
+    }
+}
+
+/// A JS object on the heap. What hot paths touch lives outside the cell and is read without borrowing: prototype,
+/// string-keyed properties, array elements, flags, an ordinary function's closure; the rest ([`ObjectState`]) is in
+/// `data`.
+#[derive(Collect)]
+pub struct Object<'gc> {
+    proto: GcSlot<'gc, Object<'gc>>,
+    /// An ordinary function's closure (read on every call)
+    call: GcSlot<'gc, Closure<'gc>>,
+    props: crate::Props<'gc>,
+    elements: crate::ValueArray<'gc>,
+    /// [`Class`] bits
+    class: AtomicU8,
+    /// Not extensible (`Object.preventExtensions` / `seal` / `freeze`)
+    non_extensible: AtomicBool,
+    /// The array's `length` is not writable
+    length_readonly: AtomicBool,
+    /// The property table has had a key starting with a digit (set only, never cleared; array method fast paths rely on
+    /// it to confirm at a glance that the prototype has no index properties)
+    digit_keys: AtomicBool,
+    /// Array: the length extended by the sparse part. Indices outside the dense part (all writable, enumerable,
+    /// configurable data properties with no holes) are stored as ordinary properties; the actual length is the larger
+    /// of this and the dense part's length
+    sparse_length: AtomicU32,
+    /// The empty shape that objects with this object as prototype start from (so objects with the same prototype that
+    /// add properties the same way share shapes)
+    #[collect(require_static)]
+    shape_root: j8lockfree::OnceBox<alloc::sync::Arc<crate::Shape>>,
+    data: GcCell<'gc, ObjectState<'gc>>,
+}
+
+impl fmt::Debug for Object<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_list().entries(self.props.entries().into_iter().map(|(k, _)| k)).finish()?;
+        fmt::Debug::fmt(&self.data, f)
+    }
+}
+
+/// Reads an object (`o.borrow()`): what lives outside the cell is read directly; dereferencing to [`ObjectState`]
+/// borrows the cell the first time.
+pub struct ObjRef<'a, 'gc> {
+    obj: &'a Object<'gc>,
+    data: core::cell::OnceCell<StateRef<'a, 'gc>>,
+}
+
+/// The state an [`ObjRef`] reads: borrowed from the cell, or the default an empty cell stands for
+enum StateRef<'a, 'gc> {
+    Cell(CellRef<'a, ObjectState<'gc>>),
+    Unit(ObjectState<'gc>),
+}
+
+impl<'gc> Deref for ObjRef<'_, 'gc> {
+    type Target = ObjectState<'gc>;
+
+    fn deref(&self) -> &ObjectState<'gc> {
+        match self.data.get_or_init(|| self.obj.state_ref()) {
+            StateRef::Cell(c) => c,
+            StateRef::Unit(u) => u,
+        }
+    }
+}
+
+/// Changes an object (`o.borrow_mut(mc)`): like [`ObjRef`], dereferencing mutably borrows the cell; when it drops after
+/// that, the cached kind facts are refreshed.
+pub struct ObjMut<'a, 'gc> {
+    obj: &'a Object<'gc>,
+    mc: &'a Mutation<'gc>,
+    data: core::cell::OnceCell<CellMut<'a, ObjectState<'gc>>>,
+}
+
+impl<'gc> ObjMut<'_, 'gc> {
+    fn cell(&self) -> &CellMut<'_, ObjectState<'gc>> {
+        self.data.get_or_init(|| {
+            let class = self.obj.class();
+            self.obj.data.try_borrow_mut_or(self.mc, || Class::unit_state(class)).expect("object state already borrowed")
+        })
+    }
+}
+
+impl<'gc> Deref for ObjMut<'_, 'gc> {
+    type Target = ObjectState<'gc>;
+
+    fn deref(&self) -> &ObjectState<'gc> {
+        self.cell()
+    }
+}
+
+impl<'gc> DerefMut for ObjMut<'_, 'gc> {
+    fn deref_mut(&mut self) -> &mut ObjectState<'gc> {
+        self.cell();
+        self.data.get_mut().expect("just borrowed")
+    }
+}
+
+impl Drop for ObjMut<'_, '_> {
+    fn drop(&mut self) {
+        if let Some(d) = self.data.take() {
+            // The state now has a snapshot: no unit bits
+            self.obj.class.store(Class::of(&d.kind), Ordering::Release);
+            let call = Object::call_of(self.mc, &d.kind);
+            drop(d);
+            if call.is_some() || self.obj.call.get().is_some() {
+                self.obj.call.set(self.mc.mutator(), call);
+            }
+        }
+    }
+}
+
+/// Methods shared by [`ObjRef`] and [`ObjMut`]: forwarded to the [`Object`] (they don't touch the cell).
+macro_rules! forward_reads {
+    ($($guard:ident)*) => {$(
+        impl<'a, 'gc> $guard<'a, 'gc> {
+            pub fn object(&self) -> &'a Object<'gc> {
+                self.obj
+            }
+            pub fn proto(&self) -> Option<JsObject<'gc>> {
+                self.obj.proto()
+            }
+            pub fn props(&self) -> &'a crate::Props<'gc> {
+                &self.obj.props
+            }
+            pub fn elements(&self) -> &'a crate::ValueArray<'gc> {
+                &self.obj.elements
+            }
+            pub fn non_extensible(&self) -> bool {
+                self.obj.non_extensible()
+            }
+            pub fn length_readonly(&self) -> bool {
+                self.obj.length_readonly()
+            }
+            pub fn digit_keys(&self) -> bool {
+                self.obj.digit_keys()
+            }
+            pub fn sparse_length(&self) -> u32 {
+                self.obj.sparse_length()
+            }
+            pub fn array_length(&self) -> Option<u32> {
+                self.obj.array_length()
+            }
+            pub fn sparse_elements(&self) -> Vec<(u32, Value<'gc>)> {
+                self.obj.sparse_elements()
+            }
+            pub fn prop_at(&self, at: usize, key: &str) -> Option<Property<'gc>> {
+                self.obj.prop_at(at, key)
+            }
+            pub fn position(&self, key: &str) -> Option<usize> {
+                self.obj.position(key)
+            }
+            pub fn get_own(&self, key: &str) -> Option<Property<'gc>> {
+                self.obj.get_own(key)
+            }
+            pub fn own(&self, key: &str) -> Option<Value<'gc>> {
+                self.obj.own(key)
+            }
+            pub fn root_shape(&self) -> alloc::sync::Arc<crate::Shape> {
+                self.obj.root_shape()
+            }
+        }
+    )*};
+}
+forward_reads!(ObjRef ObjMut);
+
+impl<'gc> ObjRef<'_, 'gc> {
+    /// Own property (only what is stored: the array dense part, ordinary properties, Symbol keys)
+    pub fn own_slot(&self, key: Key<'_, 'gc>) -> Option<Property<'gc>> {
+        match key {
+            Key::Str(k) => self.obj.own_str(k),
+            Key::Sym(s) => self.get_own_symbol(s),
+        }
+    }
+}
+
+impl<'gc> ObjMut<'_, 'gc> {
+    pub fn own_slot(&mut self, key: Key<'_, 'gc>) -> Option<Property<'gc>> {
+        match key {
+            Key::Str(k) => self.obj.own_str(k),
+            Key::Sym(s) => self.deref_mut().get_own_symbol(s),
+        }
+    }
+
+    pub fn set_proto(&self, proto: Option<JsObject<'gc>>) {
+        self.obj.set_proto(self.mc, proto);
+    }
+
+    pub fn set_non_extensible(&self, v: bool) {
+        self.obj.non_extensible.store(v, Ordering::Release);
+    }
+
+    pub fn set_length_readonly(&self, v: bool) {
+        self.obj.length_readonly.store(v, Ordering::Release);
+    }
+
+    pub fn set_sparse_length(&self, v: u32) {
+        self.obj.sparse_length.store(v, Ordering::Release);
+    }
+
+    pub fn write_index(&self, i: u32, value: Value<'gc>) -> bool {
+        self.obj.write_index(self.mc, i, value)
+    }
+
+    pub fn spill(&self, from: usize) {
+        self.obj.spill(self.mc, from);
+    }
+
+    pub fn set_array_length(&self, n: u32) {
+        self.obj.set_array_length(self.mc, n);
+    }
+
+    pub fn set_at(&self, at: usize, value: Value<'gc>) {
+        self.obj.set_at(self.mc, at, value);
+    }
+
+    pub fn push_to(&self, to: &alloc::sync::Arc<crate::Shape>, slot: Slot<'gc>) {
+        self.obj.push_to(self.mc, to, slot);
+    }
+
+    pub fn set(&self, key: &str, value: Value<'gc>) {
+        self.obj.set(self.mc, key, value);
+    }
+
+    pub fn define(&self, key: &str, prop: Property<'gc>) {
+        self.obj.define(self.mc, key, prop);
+    }
+
+    pub fn remove(&self, key: &str) -> bool {
+        self.obj.remove(self.mc, key)
+    }
+
+    /// Store an own property (already validated as storable)
+    pub fn store(&mut self, key: Key<'_, 'gc>, prop: Property<'gc>) {
+        match key {
+            Key::Sym(s) => self.deref_mut().define_symbol(s, prop),
+            Key::Str(k) => self.obj.store_str(self.mc, k, prop),
+        }
+    }
+
+    /// Delete an own property (configurability not checked)
+    pub fn unstore(&mut self, key: Key<'_, 'gc>) {
+        match key {
+            Key::Sym(s) => self.deref_mut().symbols.retain(|(k, _)| !Gc::ptr_eq(*k, s)),
+            Key::Str(k) => self.obj.unstore_str(self.mc, k),
+        }
+    }
+
+    /// Fast path for ordinary-object property writes: `Some(succeeded)`, or `None` when the slow path is needed
+    pub fn ordinary_put(&mut self, key: Key<'_, 'gc>, value: Value<'gc>) -> Option<bool> {
+        if !self.obj.has_ordinary_properties() {
+            return None;
+        }
+        match key {
+            Key::Str(k) => self.obj.put_str(self.mc, k, value),
+            Key::Sym(s) => {
+                let non_extensible = self.obj.non_extensible();
+                let d: &mut ObjectState<'gc> = self;
+                match d.symbols.iter_mut().find(|(k, _)| Gc::ptr_eq(*k, s)).map(|(_, p)| (p.writable, &mut p.slot)) {
+                    Some((true, Slot::Data(v))) => {
+                        *v = value;
+                        Some(true)
+                    }
+                    Some((false, Slot::Data(_))) => Some(false),
+                    Some(_) => None,
+                    None if non_extensible => Some(false),
+                    None => {
+                        d.define_symbol(s, Property::data(value));
+                        Some(true)
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl<'gc> Object<'gc> {
+    pub fn borrow(&self) -> ObjRef<'_, 'gc> {
+        ObjRef { obj: self, data: core::cell::OnceCell::new() }
+    }
+
+    pub fn try_borrow(&self) -> Option<ObjRef<'_, 'gc>> {
+        let r = self.borrow();
+        let d = if self.data.has_value() { StateRef::Cell(self.data.try_borrow()?) } else { StateRef::Unit(Class::unit_state(self.class())) };
+        let _ = r.data.set(d);
+        Some(r)
+    }
+
+    /// Reads the state: borrows the cell, or makes the default an empty cell stands for (no atomic writes)
+    fn state_ref(&self) -> StateRef<'_, 'gc> {
+        if self.data.has_value() { StateRef::Cell(self.data.borrow()) } else { StateRef::Unit(Class::unit_state(self.class())) }
+    }
+
+    pub fn borrow_mut<'a>(&'a self, mc: &'a Mutation<'gc>) -> ObjMut<'a, 'gc> {
+        ObjMut { obj: self, mc, data: core::cell::OnceCell::new() }
+    }
+
+    /// The closure to cache for `kind` (ordinary functions only)
+    fn call_of(mc: &Mutation<'gc>, kind: &ObjectKind<'gc>) -> Option<Gc<'gc, Closure<'gc>>> {
+        match kind {
+            ObjectKind::Function(c) => Some(mc.alloc(*c)),
+            _ => None,
+        }
+    }
+
+    /// An ordinary function's closure (no borrowing)
+    #[inline]
+    pub fn closure(&self) -> Option<Closure<'gc>> {
+        self.call.get().map(|c| *c.get())
+    }
+
+    #[inline]
+    pub fn proto(&self) -> Option<JsObject<'gc>> {
+        self.proto.get()
+    }
+
+    pub fn set_proto(&self, mc: &Mutation<'gc>, proto: Option<JsObject<'gc>>) {
+        // The shape tree may belong to the old prototype's root
+        self.props.reanchor(mc);
+        self.proto.set(mc.mutator(), proto);
+    }
+
+    #[inline]
+    pub fn props(&self) -> &crate::Props<'gc> {
+        &self.props
+    }
+
+    #[inline]
+    pub fn elements(&self) -> &crate::ValueArray<'gc> {
+        &self.elements
+    }
+
+    fn class(&self) -> u8 {
+        self.class.load(Ordering::Acquire)
+    }
+
+    #[inline]
+    pub fn is_array(&self) -> bool {
+        self.class() & Class::ARRAY != 0
+    }
+
+    /// [`ObjectKind::has_ordinary_properties`], without borrowing
+    #[inline]
+    pub fn has_ordinary_properties(&self) -> bool {
+        self.class() & Class::ORDINARY != 0
+    }
+
+    /// Inline caches may use it (not a Proxy / typed array / module namespace), without borrowing
+    #[inline]
+    pub fn is_plain(&self) -> bool {
+        self.class() & Class::PLAIN != 0
+    }
+
+    /// [`ObjectKind::is_callable`], without borrowing
+    #[inline]
+    pub fn is_callable(&self) -> bool {
+        self.class() & Class::CALLABLE != 0
+    }
+
+    pub fn non_extensible(&self) -> bool {
+        self.non_extensible.load(Ordering::Acquire)
+    }
+
+    pub fn length_readonly(&self) -> bool {
+        self.length_readonly.load(Ordering::Acquire)
+    }
+
+    pub fn digit_keys(&self) -> bool {
+        self.digit_keys.load(Ordering::Acquire)
+    }
+
+    pub fn sparse_length(&self) -> u32 {
+        self.sparse_length.load(Ordering::Acquire)
+    }
+
+    fn raise_sparse_length(&self, n: u32) {
+        self.sparse_length.fetch_max(n, Ordering::AcqRel);
+    }
+
+    /// Array length; `None` if not an array.
+    pub fn array_length(&self) -> Option<u32> {
+        self.is_array().then(|| u32::try_from(self.elements.len()).unwrap_or(u32::MAX).max(self.sparse_length()))
+    }
+
+    /// Fast path: update the existing `i`-th element of the dense part; returns `true` if updated
+    pub fn write_index(&self, mc: &Mutation<'gc>, i: u32, value: Value<'gc>) -> bool {
+        if self.is_array() && (i as usize) < self.elements.len() {
+            self.elements.set(mc, i as usize, value);
+            return true;
+        }
+        false
+    }
+
+    /// Move the dense part from element `from` onward into ordinary index-keyed properties
+    pub fn spill(&self, mc: &Mutation<'gc>, from: usize) {
+        let n = self.elements.len();
+        if !self.is_array() || from >= n {
+            return;
+        }
+        let moved: Vec<Value<'gc>> = (from..n).map(|i| self.elements.get(i).unwrap_or_default()).collect();
+        self.elements.truncate(mc, from);
+        for (i, v) in (from..).zip(moved) {
+            self.push_prop(mc, &alloc::format!("{i}"), Property::data(v));
+        }
+        self.raise_sparse_length(u32::try_from(n).unwrap_or(u32::MAX));
+    }
+
+    /// Elements of the array's sparse part (stored as ordinary properties), sorted by index.
+    pub fn sparse_elements(&self) -> Vec<(u32, Value<'gc>)> {
+        let dense = self.elements.len();
+        if !self.is_array() || self.sparse_length() as usize <= dense {
+            return Vec::new();
+        }
+        let mut out: Vec<(u32, Value<'gc>)> = self
+            .props
+            .entries()
+            .into_iter()
+            .filter_map(|(k, p)| match (crate::ops::index_of_str(&k), p.slot) {
+                (Some(i), Slot::Data(v)) if i as usize >= dense => Some((i, v)),
+                _ => None,
+            })
+            .collect();
+        out.sort_unstable_by_key(|&(i, _)| i);
+        out
+    }
+
+    /// Set an array's length: truncate elements at `n` and beyond (including index-keyed ones); growing only records
+    /// the length (new positions are holes).
+    pub fn set_array_length(&self, mc: &Mutation<'gc>, n: u32) {
+        if !self.is_array() {
+            return;
+        }
+        let len = n as usize;
+        self.elements.truncate(mc, len);
+        let dense = self.elements.len();
+        if self.sparse_length() > 0 {
+            self.props.retain(mc, |k| crate::ops::index_of_str(k).is_none_or(|i| i < n));
+        }
+        self.sparse_length.store(if len > dense { n } else { 0 }, Ordering::Release);
+    }
+
+    /// Own string-keyed property (the array dense part or an ordinary property)
+    pub fn own_str(&self, k: &str) -> Option<Property<'gc>> {
+        if self.is_array()
+            && let Some(i) = crate::ops::index_of_str(k)
+            && let Some(v) = self.elements.get(i as usize)
+        {
+            return Some(Property::data(v));
+        }
+        self.get_own(k)
+    }
+
+    /// Ordinary write of a string key: an own writable data property gets its value; absent and extensible, a new one
+    /// is created; `None` for accessors
+    fn put_str(&self, mc: &Mutation<'gc>, k: &str, value: Value<'gc>) -> Option<bool> {
+        match self.props.position(k) {
+            Some(i) => match (self.props.attrs(i).writable(), self.props.slot(i)) {
+                (true, Slot::Data(_)) => {
+                    self.props.set_slot(mc, i, Slot::Data(value));
+                    Some(true)
+                }
+                (false, Slot::Data(_)) => Some(false),
+                _ => None,
+            },
+            None if self.non_extensible() => Some(false),
+            None => {
+                self.store_str(mc, k, Property::data(value));
+                Some(true)
+            }
+        }
+    }
+
+    /// Store a string-keyed own property: an array index goes into the dense part if it can
+    pub fn store_str(&self, mc: &Mutation<'gc>, k: &str, prop: Property<'gc>) {
+        let plain = prop.enumerable && prop.writable && prop.configurable;
+        let index = if self.is_array() { crate::ops::index_of_str(k) } else { None };
+        if let Some(i) = index {
+            let (at, n) = (i as usize, self.elements.len());
+            let stored = self.get_own(k).is_some();
+            match (prop.slot, plain) {
+                (Slot::Data(v), true) if at < n => return self.elements.set(mc, at, v),
+                (Slot::Data(v), true) if at == n && !stored => return self.elements.push(mc, v),
+                _ if at < n => self.spill(mc, at),
+                _ => {}
+            }
+        }
+        self.define(mc, k, prop);
+        if let Some(i) = index {
+            self.raise_sparse_length(i.saturating_add(1));
+        }
+    }
+
+    /// Delete a string-keyed own property (configurability not checked)
+    pub fn unstore_str(&self, mc: &Mutation<'gc>, k: &str) {
+        if self.is_array()
+            && let Some(i) = crate::ops::index_of_str(k)
+            && (i as usize) < self.elements.len()
+        {
+            self.spill(mc, i as usize);
+        }
+        if let Some(i) = self.position(k) {
+            self.props.remove(mc, i);
+        }
+    }
+
+    /// Entry `at` of the property table if it is exactly `key` (the execution layer caches the index)
+    pub fn prop_at(&self, at: usize, key: &str) -> Option<Property<'gc>> {
+        (at < self.props.len() && *self.props.key(at) == *key).then(|| self.props.get(at))
+    }
+
+    /// Update the value of entry `at` (already checked to be a writable data property)
+    pub fn set_at(&self, mc: &Mutation<'gc>, at: usize, value: Value<'gc>) {
+        if at < self.props.len() {
+            self.props.set_slot(mc, at, Slot::Data(value));
+        }
+    }
+
+    pub fn position(&self, key: &str) -> Option<usize> {
+        self.props.position(key)
+    }
+
+    /// Append an entry (the shape follows the transition table).
+    fn push_prop(&self, mc: &Mutation<'gc>, key: &str, prop: Property<'gc>) {
+        if key.as_bytes().first().is_some_and(u8::is_ascii_digit) {
+            self.digit_keys.store(true, Ordering::Release);
+        }
+        let proto = self.proto();
+        self.props.push(mc, key, prop, || proto.map(|p| p.root_shape()));
+    }
+
+    /// The empty shape that objects with this object as prototype start from (created if absent)
+    pub fn root_shape(&self) -> alloc::sync::Arc<crate::Shape> {
+        self.shape_root.get_or_init(crate::Props::empty).clone()
+    }
+
+    /// Append an entry, switching the shape directly to `to` (from the execution layer's inline cache)
+    pub fn push_to(&self, mc: &Mutation<'gc>, to: &alloc::sync::Arc<crate::Shape>, slot: Slot<'gc>) {
+        if to.key(to.len() - 1).as_bytes().first().is_some_and(u8::is_ascii_digit) {
+            self.digit_keys.store(true, Ordering::Release);
+        }
+        let proto = self.proto();
+        self.props.push_to(mc, to, slot, || proto.map(|p| p.root_shape()));
+    }
+
+    /// Own property.
+    pub fn get_own(&self, key: &str) -> Option<Property<'gc>> {
+        self.position(key).map(|i| self.props.get(i))
+    }
+
+    /// The value of an own data property (`None` for accessors).
+    pub fn own(&self, key: &str) -> Option<Value<'gc>> {
+        self.get_own(key).and_then(|p| p.value())
+    }
+
+    /// Assignment: update the value of an existing data property (no-op if not writable), otherwise create one.
+    pub fn set(&self, mc: &Mutation<'gc>, key: &str, value: Value<'gc>) {
+        match self.position(key) {
+            Some(i) => {
+                if self.props.attrs(i).writable() {
+                    self.props.set_slot(mc, i, Slot::Data(value));
+                }
+            }
+            None => self.push_prop(mc, key, Property::data(value)),
+        }
+    }
+
+    /// Define: replace (or create) this property as a whole.
+    pub fn define(&self, mc: &Mutation<'gc>, key: &str, prop: Property<'gc>) {
+        match self.position(key) {
+            Some(i) => self.props.replace(mc, i, prop),
+            None => self.push_prop(mc, key, prop),
+        }
+    }
+
+    /// Delete an own property: non-configurable ones can't be deleted; returns whether it was deleted.
+    pub fn remove(&self, mc: &Mutation<'gc>, key: &str) -> bool {
         match self.position(key) {
             Some(i) if self.props.attrs(i).configurable() => {
-                self.props.remove(i);
+                self.props.remove(mc, i);
                 true
             }
             Some(_) => false,
             None => true,
         }
-    }
-
-    pub fn alloc(self, mc: &Mutation<'gc>) -> JsObject<'gc> {
-        mc.alloc(GcCell::new(mc, self))
     }
 }
 

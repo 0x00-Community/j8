@@ -62,7 +62,7 @@ impl<'gc> Agent<'gc, '_> {
     pub fn private_define(&mut self, obj: Value<'gc>, key: JsSymbol<'gc>, prop: Property<'gc>) -> Result<(), Error> {
         let o = self.private_holder(obj, key, "define")?;
         let existing = Self::private_lookup(o, key);
-        if existing.is_none() && o.borrow().non_extensible {
+        if existing.is_none() && o.borrow().non_extensible() {
             return Err(self.throw(ErrorKind::Type, &alloc::format!("Cannot define private field {} on a non-extensible object", Self::private_label(key))));
         }
         let merged = match (existing, prop.slot) {

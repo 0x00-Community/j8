@@ -13,7 +13,7 @@ use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
 
-use j8framework::{JsObject, ObjectData, ObjectKind, Shape, Slot, Value};
+use j8framework::{JsObject, Object, Shape, Slot, Value};
 use j8framework::{Mutation};
 
 /// Address in the cache of an empty object that has no shape yet (real shape addresses are 8-aligned, so never this)
@@ -22,27 +22,29 @@ const EMPTY: usize = 1;
 const DEPTH: usize = 4;
 
 /// Address of the object's current shape
-fn addr(d: &ObjectData<'_>) -> usize {
-    d.props.shape().map_or(EMPTY, |s| Arc::as_ptr(s) as usize)
+fn addr(d: &Object<'_>) -> usize {
+    d.props().shape_ptr().map_or(EMPTY, |s| s as usize)
 }
 
 /// All own properties are in the shape (and their names pass [`Ic::name_ok`]), and the shape does not mutate in place
-fn plain(d: &ObjectData<'_>) -> bool {
-    !matches!(d.kind, ObjectKind::Proxy(_) | ObjectKind::TypedArray(..) | ObjectKind::ModuleNamespace(_)) && d.props.shape().is_none_or(|s| !s.is_dict())
+fn plain(d: &Object<'_>) -> bool {
+    d.is_plain() && !d.props().is_dict()
 }
 
 /// What it looked like before the change (compared against by the add-property cache).
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(crate) struct Before {
     shape: usize,
+    /// Keeps the starting shape's allocation (so its address isn't reused while the cache holds it)
+    from: Option<Weak<Shape>>,
     len: usize,
     plain: bool,
 }
 
 impl From<JsObject<'_>> for Before {
     fn from(o: JsObject<'_>) -> Self {
-        let d = o.borrow();
-        Self { shape: addr(&d), len: d.props.len(), plain: plain(&d) }
+        let d = o.get();
+        Self { shape: addr(d), from: d.props().shape().map(|s| Arc::downgrade(&s)), len: d.props().len(), plain: plain(d) }
     }
 }
 
@@ -76,9 +78,9 @@ impl Ic {
         *self.to.borrow_mut() = None;
     }
 
-    fn keep(&self, d: &ObjectData<'_>) -> usize {
-        if let Some(s) = d.props.shape() {
-            self.keep.borrow_mut().push(Arc::downgrade(s));
+    fn keep(&self, d: &Object<'_>) -> usize {
+        if let Some(s) = d.props().shape() {
+            self.keep.borrow_mut().push(Arc::downgrade(&s));
         }
         addr(d)
     }
@@ -88,11 +90,11 @@ impl Ic {
         let mut last = None;
         for c in &self.chain[..depth] {
             let p = proto?;
-            let d = p.borrow();
-            if addr(&d) != c.get() || !plain(&d) {
+            let d = p.get();
+            if addr(d) != c.get() || !plain(d) {
                 return None;
             }
-            proto = d.proto;
+            proto = d.proto();
             last = Some(p);
         }
         last
@@ -102,11 +104,11 @@ impl Ic {
     fn chain_intact(&self, mut proto: Option<JsObject<'_>>, depth: usize) -> bool {
         for c in &self.chain[..depth] {
             let Some(p) = proto else { return false };
-            let d = p.borrow();
-            if addr(&d) != c.get() || !plain(&d) {
+            let d = p.get();
+            if addr(d) != c.get() || !plain(d) {
                 return false;
             }
-            proto = d.proto;
+            proto = d.proto();
         }
         proto.is_none()
     }
@@ -116,17 +118,16 @@ impl Ic {
     #[inline]
     pub(crate) fn get<'gc>(&self, o: JsObject<'gc>) -> Option<Value<'gc>> {
         let want = self.shape.get();
-        let d = o.borrow();
-        if addr(&d) != want || !plain(&d) {
+        let d = o.get();
+        if addr(d) != want || !plain(d) {
             return None;
         }
         let slot = self.slot.get() as usize;
         let holder = match self.depth.get() {
-            0 => return Self::data(d.props.slot(slot)),
-            n => self.holder(d.proto, usize::from(n))?,
+            0 => return Self::data(d.props().slot(slot)),
+            n => self.holder(d.proto(), usize::from(n))?,
         };
-        drop(d);
-        Self::data(holder.borrow().props.slot(slot))
+        Self::data(holder.props().slot(slot))
     }
 
     fn data(s: Slot<'_>) -> Option<Value<'_>> {
@@ -142,33 +143,32 @@ impl Ic {
         if !Self::name_ok(name) {
             return;
         }
-        let d = o.borrow();
-        if !plain(&d) {
+        let d = o.get();
+        if !plain(d) {
             return;
         }
-        let recv = self.keep(&d);
-        if let Some(i) = d.props.position(name) {
-            if matches!(d.props.slot(i), Slot::Data(_)) {
+        let recv = self.keep(d);
+        if let Some(i) = d.props().position(name) {
+            if matches!(d.props().slot(i), Slot::Data(_)) {
                 self.set_slot(recv, i, 0);
             }
             return;
         }
-        let mut proto = d.proto;
-        drop(d);
+        let mut proto = d.proto();
         for (level, c) in self.chain.iter().enumerate() {
             let Some(p) = proto else { return };
-            let d = p.borrow();
-            if !plain(&d) {
+            let d = p.get();
+            if !plain(d) {
                 return;
             }
-            c.set(self.keep(&d));
-            if let Some(i) = d.props.position(name) {
-                if matches!(d.props.slot(i), Slot::Data(_)) {
+            c.set(self.keep(d));
+            if let Some(i) = d.props().position(name) {
+                if matches!(d.props().slot(i), Slot::Data(_)) {
                     self.set_slot(recv, i, level + 1);
                 }
                 return;
             }
-            proto = d.proto;
+            proto = d.proto();
         }
     }
 
@@ -186,8 +186,8 @@ impl Ic {
     #[inline]
     pub(crate) fn set<'gc>(&self, mc: &Mutation<'gc>, o: JsObject<'gc>, v: Value<'gc>, assign: bool) -> bool {
         let want = self.shape.get();
-        let d = o.borrow();
-        if addr(&d) != want || !plain(&d) {
+        let d = o.get();
+        if addr(d) != want || !plain(d) {
             return false;
         }
         let to = self.to.borrow();
@@ -195,20 +195,18 @@ impl Ic {
             // Modify an own writable data property
             None => {
                 let slot = self.slot.get() as usize;
-                if !matches!(d.props.slot(slot), Slot::Data(_)) {
+                if !matches!(d.props().slot(slot), Slot::Data(_)) {
                     return false;
                 }
-                drop(d);
-                o.borrow_mut(mc).set_at(slot, v);
+                o.set_at(mc, slot, v);
                 true
             }
             // Add property: extensible; assignments also require the whole prototype chain to be unchanged
             Some(to) => {
-                if d.non_extensible || (assign && !self.chain_intact(d.proto, usize::from(self.depth.get()))) {
+                if d.non_extensible() || (assign && !self.chain_intact(d.proto(), usize::from(self.depth.get()))) {
                     return false;
                 }
-                drop(d);
-                o.borrow_mut(mc).push_to(Arc::clone(to), Slot::Data(v));
+                o.push_to(mc, to, Slot::Data(v));
                 true
             }
         }
@@ -221,40 +219,41 @@ impl Ic {
         if !Self::name_ok(name) || !before.plain {
             return;
         }
-        let d = o.borrow();
-        let Some(i) = d.props.position(name) else { return };
-        if !plain(&d) || !matches!(d.props.slot(i), Slot::Data(_)) {
+        let d = o.get();
+        let Some(i) = d.props().position(name) else { return };
+        if !plain(d) || !matches!(d.props().slot(i), Slot::Data(_)) {
             return;
         }
-        let now = self.keep(&d);
+        let now = self.keep(d);
         if now == before.shape {
-            if d.props.attrs(i).writable() {
+            if d.props().attrs(i).writable() {
                 self.set_slot(now, i, 0);
             }
             return;
         }
-        if d.props.len() != before.len + 1 || i != before.len {
+        if d.props().len() != before.len + 1 || i != before.len {
             return;
         }
-        let Some(to) = d.props.shape().cloned() else { return };
+        let Some(to) = d.props().shape() else { return };
         if assign {
-            let mut proto = d.proto;
+            let mut proto = d.proto();
             let mut depth = 0;
             while let Some(p) = proto {
                 let Some(c) = self.chain.get(depth) else { return };
-                let pd = p.borrow();
-                if !plain(&pd) || pd.props.position(name).is_some() {
+                let pd = p.get();
+                if !plain(pd) || pd.props().position(name).is_some() {
                     return;
                 }
-                c.set(self.keep(&pd));
-                proto = pd.proto;
+                c.set(self.keep(pd));
+                proto = pd.proto();
                 depth += 1;
             }
             self.depth.set(u8::try_from(depth).unwrap_or(u8::MAX));
         }
-        // The starting shape is the parent of `to` (child shapes hold their parent strongly), so while `to` is alive
-        // its address cannot be reused
+        // `to` is held strongly and the starting shape through a weak link in `keep`: neither address can be reused
+        // while cached
         *self.to.borrow_mut() = Some(to);
+        self.keep.borrow_mut().extend(before.from);
         self.shape.set(before.shape);
     }
 }

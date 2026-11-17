@@ -290,7 +290,7 @@ impl<'gc> Realm<'gc> {
     /// `length` first.
     pub fn name_function(&self, mc: &Mutation<'gc>, f: JsObject<'gc>, name: &str, length: Option<u32>) {
         let prop = |v: Value<'gc>| Property { slot: crate::Slot::Data(v), enumerable: false, writable: false, configurable: true };
-        let mut d = f.borrow_mut(mc);
+        let d = f.borrow_mut(mc);
         if let Some(n) = length {
             d.define("length", prop(f64::from(n).into()));
         }

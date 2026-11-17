@@ -133,9 +133,20 @@ impl<'gc, T: Trace + 'gc> GcCell<'gc, T> {
         Self { state: AtomicUsize::new(0), snap: Slot::from(snap) }
     }
 
+    /// 还没有值（[`GcCell::empty`]）：读者自己造缺省值，第一次可变借用时才分配快照
+    pub fn empty() -> Self {
+        Self { state: AtomicUsize::new(0), snap: Slot::default() }
+    }
+
+    /// 有没有值（空的单元由持有者解释成某个缺省值）
+    #[inline]
+    pub fn has_value(&self) -> bool {
+        self.snap.get().is_some()
+    }
+
     /// 当前快照
     fn current(&self) -> Gc<'gc, Snap<T>> {
-        self.snap.get().expect("GcCell 总有快照")
+        self.snap.get().expect("borrowed an empty GcCell (check has_value first)")
     }
 
     pub fn try_borrow(&self) -> Option<CellRef<'_, T>> {
@@ -159,8 +170,18 @@ impl<'gc, T: Trace + 'gc> GcCell<'gc, T> {
 
     /// 可变借用：快照是本轮新分配的就原地改，否则挪进新快照（槽换过去，写屏障记下）
     pub fn try_borrow_mut<'c>(&'c self, mc: &Mutation<'gc>) -> Option<CellMut<'c, T>> {
+        self.try_borrow_mut_or(mc, || unreachable!("borrowed an empty GcCell mutably without an initial value"))
+    }
+
+    /// 同 [`GcCell::try_borrow_mut`]；空的单元先放进 `init()`
+    pub fn try_borrow_mut_or<'c>(&'c self, mc: &Mutation<'gc>, init: impl FnOnce() -> T) -> Option<CellMut<'c, T>> {
         self.state.compare_exchange(0, WRITING, Ordering::Acquire, Ordering::Relaxed).ok()?;
-        let mut snap = self.current();
+        let Some(mut snap) = self.snap.get() else {
+            let snap = mc.alloc(Snap { generation: mc.generation, moved: AtomicBool::new(false), data: UnsafeCell::new(ManuallyDrop::new(init())) });
+            self.snap.set(mc.mutator(), Some(snap));
+            // SAFETY: 独占（WRITING）
+            return Some(CellMut { state: &self.state, data: unsafe { &mut *snap.get().data.get() } });
+        };
         if snap.generation != mc.generation {
             // SAFETY: 独占（WRITING）；旧快照标成已挪走，之后不再析构 / 追踪它的数据
             let data = unsafe { ManuallyDrop::take(&mut *snap.data.get()) };
@@ -197,6 +218,9 @@ unsafe impl<'gc, T: Trace + 'gc> Trace for GcCell<'gc, T> {
 
 impl<'gc, T: Trace + fmt::Debug + 'gc> fmt::Debug for GcCell<'gc, T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if !self.has_value() {
+            return f.write_str("GcCell(<empty>)");
+        }
         match self.try_borrow() {
             Some(r) => fmt::Debug::fmt(&*r, f),
             None => f.write_str("GcCell(<borrowed>)"),
@@ -272,9 +296,28 @@ impl<'gc> ValueCell<'gc> {
         unsafe { Value::from_bits(self.bits.load(Ordering::Acquire)) }
     }
 
+    #[inline]
     pub fn set(&self, mc: &Mutation<'gc>, v: Value<'gc>) {
-        let mut want = v.bits();
+        let want = v.bits();
+        // The slot already says the same (no pointer, or this very object): only the word changes. A racing writer
+        // that changes the slot re-checks the word afterwards (see the type's docs), so the slot still ends up right
+        let same = match (v.erased(), self.ptr.get()) {
+            (None, None) => true,
+            (Some(a), Some(b)) => Gc::ptr_eq(a, b),
+            _ => false,
+        };
         self.bits.store(want, Ordering::Release);
+        // A pointer written under a slot that already held it: make sure nobody cleared the slot meanwhile (a writer
+        // that clears it afterwards re-reads this word and puts it back)
+        let still = same && v.erased().is_none_or(|a| self.ptr.get().is_some_and(|b| Gc::ptr_eq(a, b)));
+        if !still {
+            self.sync(mc, want);
+        }
+    }
+
+    /// Make the slot match the word (looping while other writers change the word)
+    #[cold]
+    fn sync(&self, mc: &Mutation<'gc>, mut want: u64) {
         loop {
             // SAFETY: 同 get
             let now = unsafe { Value::from_bits(want) };
@@ -301,9 +344,11 @@ unsafe impl Trace for ValueCell<'_> {
 
     fn relocate(&mut self, t: &mut Tracer<'_>) {
         self.ptr.relocate(t);
-        if let Some(p) = self.ptr.get() {
-            // SAFETY: 回收时没有 mutator，字与槽一致；只换地址
-            let v = unsafe { Value::from_bits(*self.bits.get_mut()) };
+        // SAFETY: 回收时没有 mutator；字里是指针时槽里就是它（槽里多出来的指针只是多保活）
+        let v = unsafe { Value::from_bits(*self.bits.get_mut()) };
+        if v.erased().is_some()
+            && let Some(p) = self.ptr.get()
+        {
             *self.bits.get_mut() = v.with_address(p.as_ptr().cast()).bits();
         }
     }

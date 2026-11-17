@@ -510,7 +510,7 @@ impl Objects {
         };
         let prop = |v: Value<'gc>| Property { slot: Slot::Data(v), enumerable: false, writable: false, configurable: true };
         let n = a.string(&name);
-        let mut d = f.borrow_mut(a.mc);
+        let d = f.borrow_mut(a.mc);
         d.define("length", prop(length.into()));
         d.define("name", prop(n.into()));
         drop(d);

@@ -201,6 +201,9 @@ impl core::fmt::Debug for Value<'_> {
 unsafe impl Trace for Value<'_> {
     #[inline]
     fn trace(&self, t: &mut Tracer<'_>) {
+        if let Some(a) = self.as_accessor() {
+            return t.edge(a);
+        }
         match self.kind() {
             ValueKind::String(s) => t.edge(s),
             ValueKind::Symbol(s) => t.edge(s),
@@ -212,6 +215,11 @@ unsafe impl Trace for Value<'_> {
 
     #[inline]
     fn relocate(&mut self, t: &mut Tracer<'_>) {
+        if let Some(mut a) = self.as_accessor() {
+            t.relocate(&mut a);
+            *self = Value::accessor(a);
+            return;
+        }
         *self = match self.kind() {
             ValueKind::String(mut s) => {
                 t.relocate(&mut s);
@@ -253,6 +261,9 @@ impl<'gc> Value<'gc> {
     /// The object it points to, type erased (for [`crate::gc::ValueCell`])
     #[inline]
     pub fn erased(self) -> Option<Gc<'gc, Erased>> {
+        if let Some(a) = self.as_accessor() {
+            return Some(erase(a));
+        }
         match self.kind() {
             ValueKind::String(s) => Some(erase(s)),
             ValueKind::Symbol(s) => Some(erase(s)),
@@ -260,6 +271,20 @@ impl<'gc> Value<'gc> {
             ValueKind::Object(o) => Some(erase(o)),
             _ => None,
         }
+    }
+
+    /// An accessor pair as a word (only property slots hold these)
+    #[inline]
+    pub fn accessor(a: Gc<'gc, crate::Accessor<'gc>>) -> Self {
+        Self::pointer(ValueTag::ACCESSOR, a.as_ptr().expose_provenance() as u64)
+    }
+
+    /// The accessor pair, if this word holds one
+    #[inline]
+    pub fn as_accessor(self) -> Option<Gc<'gc, crate::Accessor<'gc>>> {
+        (self.bits >> ValueBits::TAG_SHIFT == ValueBits::boxed(ValueTag::ACCESSOR, 0) >> ValueBits::TAG_SHIFT)
+            // SAFETY: an accessor word was built from a live accessor pair's address
+            .then(|| unsafe { gc_from_raw(Self::address(self.bits & ValueBits::PAYLOAD)) })
     }
 
     /// The same pointer kind at another address (the collector moved the object)
@@ -284,6 +309,8 @@ impl ValueTag {
     pub const BIGINT: u8 = 6;
     pub const OBJECT: u8 = 7;
     pub const UNINIT: u8 = 8;
+    /// Internal: an accessor pair stored in a property slot ([`crate::Accessor`]); never seen as a JS value
+    pub const ACCESSOR: u8 = 9;
     /// The number of bytes a value takes
     pub const SIZE: usize = 8;
 }

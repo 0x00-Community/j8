@@ -169,7 +169,7 @@ impl<'gc> Agent<'gc, '_> {
     /// Partial descriptor ⇒ object (containing only the given fields).
     pub fn from_partial_descriptor(&mut self, d: &Descriptor<'gc>) -> Value<'gc> {
         let o = self.object();
-        let mut data = o.borrow_mut(self.mc);
+        let data = o.borrow_mut(self.mc);
         if let Some(v) = d.value {
             data.set("value", v);
         }

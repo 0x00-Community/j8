@@ -339,12 +339,12 @@ impl<'gc> Agent<'gc, '_> {
 
     /// Same as [`object`](Self::object), reserving slots for `capacity` properties (literals)
     pub fn object_with(&self, capacity: usize) -> JsObject<'gc> {
-        ObjectData { proto: Some(self.realm.object_proto), props: crate::Props::with_capacity(capacity), ..ObjectData::default() }.alloc(self.mc)
+        ObjectData { proto: Some(self.realm.object_proto), capacity, ..ObjectData::default() }.alloc(self.mc)
     }
 
     /// An array with `Array.prototype` as its prototype.
     pub fn array(&self, items: Vec<Value<'gc>>) -> JsObject<'gc> {
-        ObjectData { kind: ObjectKind::Array(items), proto: Some(self.realm.array_proto), ..ObjectData::default() }.alloc(self.mc)
+        ObjectData { kind: ObjectKind::Array, elements: items, proto: Some(self.realm.array_proto), ..ObjectData::default() }.alloc(self.mc)
     }
 
     /// An Error object (prototype chosen by kind, with an own `message`).
@@ -635,7 +635,7 @@ impl<'gc> Agent<'gc, '_> {
             // if not found
             let fast = {
                 let d = cur.borrow();
-                d.kind.has_ordinary_properties().then(|| (d.own_slot(key), d.proto))
+                d.kind.has_ordinary_properties().then(|| (d.own_slot(key), d.proto()))
             };
             match fast {
                 Some((Some(p), _)) => {
@@ -721,7 +721,7 @@ impl<'gc> Agent<'gc, '_> {
             // if not found
             let fast = {
                 let d = cur.borrow();
-                d.kind.has_ordinary_properties().then(|| (d.own_slot(key), d.proto))
+                d.kind.has_ordinary_properties().then(|| (d.own_slot(key), d.proto()))
             };
             match fast {
                 Some((Some(p), _)) => break Some(p),
@@ -795,7 +795,7 @@ impl<'gc> Agent<'gc, '_> {
     fn set_failure(&self, target: Value<'gc>, key: &str) -> Error {
         if let Some(o) = target.as_object() {
             let d = o.borrow();
-            if d.non_extensible && d.own_slot(Key::Str(key)).is_none() {
+            if d.non_extensible() && d.own_slot(Key::Str(key)).is_none() {
                 return self.throw(ErrorKind::Type, &format!("Cannot add property {key}, object is not extensible"));
             }
         }
@@ -891,8 +891,9 @@ impl<'gc> Agent<'gc, '_> {
             return self.get_symbol(target, k, target);
         }
         if let (ValueKind::Object(o), ValueKind::Number(x)) = (target.kind(), key.kind())
-            && let (ObjectKind::Array(items), Some(i)) = (&o.borrow().kind, index_of_number(x))
-            && let Some(&v) = items.get(i as usize)
+            && o.is_array()
+            && let Some(i) = index_of_number(x)
+            && let Some(v) = o.elements().get(i as usize)
         {
             return Ok(v);
         }
@@ -1054,7 +1055,7 @@ impl<'gc> Agent<'gc, '_> {
                         Some(ValueKind::String(n)) if !n.is_empty() => String::from(&**n),
                         _ => String::from("function"),
                     }
-                } else if matches!(d.kind, ObjectKind::Array(_)) {
+                } else if matches!(d.kind, ObjectKind::Array) {
                     String::from("[object Array]")
                 } else {
                     String::from("#<Object>")
@@ -1153,8 +1154,9 @@ impl<'gc> Agent<'gc, '_> {
             return Ok(self.typed_get(x, i).unwrap_or_default());
         }
         if let Some(x) = o.as_object()
-            && let (ObjectKind::Array(items), Some(n)) = (&x.borrow().kind, index_of_number(i))
-            && let Some(&v) = items.get(n as usize)
+            && x.is_array()
+            && let Some(n) = index_of_number(i)
+            && let Some(v) = x.elements().get(n as usize)
         {
             return Ok(v);
         }
@@ -1173,8 +1175,9 @@ impl<'gc> Agent<'gc, '_> {
 
     /// HasProperty(O, i).
     pub fn has_index(&mut self, o: JsObject<'gc>, i: f64) -> Result<bool, Error> {
-        if let (ObjectKind::Array(items), Some(n)) = (&o.borrow().kind, index_of_number(i))
-            && (n as usize) < items.len()
+        if o.is_array()
+            && let Some(n) = index_of_number(i)
+            && (n as usize) < o.elements().len()
         {
             return Ok(true);
         }
@@ -1184,8 +1187,9 @@ impl<'gc> Agent<'gc, '_> {
     /// If HasProperty(O, i) is true, Get(O, i), otherwise `None` (array methods accessing element by element). The
     /// dense part of a real array is read directly in one borrow.
     pub fn present_index(&mut self, o: JsObject<'gc>, i: f64) -> Result<Option<Value<'gc>>, Error> {
-        if let (ObjectKind::Array(items), Some(n)) = (&o.borrow().kind, index_of_number(i))
-            && let Some(&v) = items.get(n as usize)
+        if o.is_array()
+            && let Some(n) = index_of_number(i)
+            && let Some(v) = o.elements().get(n as usize)
         {
             return Ok(Some(v));
         }
@@ -1207,18 +1211,17 @@ impl<'gc> Agent<'gc, '_> {
         // Fast path: update a value in a real array's dense part, or append right at the dense end (extensible, length
         // writable, no sparse elements after it)
         if let Some(n) = index_of_number(i) {
-            let mut d = o.borrow_mut(self.mc);
             // The sparse part either ends before n or has no elements at all (never had a numeric key: just an extended
             // length, as in `new Array(len)`)
-            let append = !d.non_extensible && !d.length_readonly && (d.sparse_length <= n || !d.digit_keys);
-            if let ObjectKind::Array(items) = &mut d.kind {
-                let at = n as usize;
+            let append = !o.non_extensible() && !o.length_readonly() && (o.sparse_length() <= n || !o.digit_keys());
+            if o.is_array() {
+                let (at, items) = (n as usize, o.elements());
                 if at < items.len() {
-                    items[at] = v;
+                    items.set(self.mc, at, v);
                     return Ok(());
                 }
                 if at == items.len() && append {
-                    items.push(v);
+                    items.push(self.mc, v);
                     return Ok(());
                 }
             }
@@ -1233,7 +1236,7 @@ impl<'gc> Agent<'gc, '_> {
             let (t, _) = parts?;
             return self.is_array(t.into());
         }
-        Ok(matches!(o.borrow().kind, ObjectKind::Array(_)))
+        Ok(o.is_array())
     }
 
     /// CreateListFromArrayLike.
@@ -1278,10 +1281,7 @@ impl<'gc> Agent<'gc, '_> {
         let Some(target) = target else { return Ok(None) };
         // Take a dense array's length directly (same as reading `length`, with no observable steps)
         let len = match target.kind() {
-            ValueKind::Object(t) => match &t.borrow().kind {
-                ObjectKind::Array(items) if t.borrow().sparse_length == 0 => Some(items.len()),
-                _ => None,
-            },
+            ValueKind::Object(t) => (t.is_array() && t.sparse_length() == 0).then(|| t.elements().len()),
             _ => None,
         };
         let len = match len {
@@ -1368,7 +1368,7 @@ impl<'gc> Agent<'gc, '_> {
     /// An iterator result object `{ value, done }`.
     pub fn iter_result(&self, value: Value<'gc>, done: bool) -> JsObject<'gc> {
         let o = self.object();
-        let mut d = o.borrow_mut(self.mc);
+        let d = o.borrow_mut(self.mc);
         d.set("value", value);
         d.set("done", done.into());
         drop(d);

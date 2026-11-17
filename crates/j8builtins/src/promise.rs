@@ -109,7 +109,7 @@ impl Promises {
         }
         let proto = a.proto_from_ctor(a.new_target, a.realm.promise_proto)?;
         let p = a.new_promise();
-        p.borrow_mut(a.mc).proto = Some(proto);
+        p.borrow_mut(a.mc).set_proto(Some(proto));
         let (resolve, reject) = a.promise_resolvers(p);
         match a.call(executor, Value::Undefined, &[resolve.into(), reject.into()]) {
             Ok(_) => {}

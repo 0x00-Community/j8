@@ -192,9 +192,9 @@ impl<'gc> Agent<'gc, '_> {
         }
         let d = o.borrow();
         Ok(match (&d.kind, key) {
-            (ObjectKind::Array(_), Key::Str("length")) => {
+            (ObjectKind::Array, Key::Str("length")) => {
                 let len = f64::from(d.array_length().unwrap_or(0));
-                Some(Property { slot: Slot::Data(len.into()), enumerable: false, writable: !d.length_readonly, configurable: false })
+                Some(Property { slot: Slot::Data(len.into()), enumerable: false, writable: !d.length_readonly(), configurable: false })
             }
             (ObjectKind::Primitive(v), Key::Str(k)) if let ValueKind::String(s) = v.kind() => self.string_own(s, k).or_else(|| d.own_slot(key)),
             (ObjectKind::Arguments(Some(map)), Key::Str(k)) => {
@@ -235,7 +235,7 @@ impl<'gc> Agent<'gc, '_> {
             return Ok(true);
         }
         let (array, string) = match &o.borrow().kind {
-            ObjectKind::Array(_) => (true, None),
+            ObjectKind::Array => (true, None),
             ObjectKind::Primitive(v) if let ValueKind::String(s) = v.kind() => (false, Some(s)),
             _ => (false, None),
         };
@@ -244,7 +244,7 @@ impl<'gc> Agent<'gc, '_> {
             (Key::Str(k), true, _) if index_of_str(k).is_some() => {
                 let d = o.borrow();
                 let i = index_of_str(k).unwrap_or(0);
-                if d.length_readonly && i >= d.array_length().unwrap_or(0) {
+                if d.length_readonly() && i >= d.array_length().unwrap_or(0) {
                     return Ok(false);
                 }
             }
@@ -308,7 +308,7 @@ impl<'gc> Agent<'gc, '_> {
     fn ordinary_define(&self, o: JsObject<'gc>, key: Key<'_, 'gc>, desc: &Descriptor<'gc>) -> bool {
         let (current, extensible) = {
             let d = o.borrow();
-            (d.own_slot(key), !d.non_extensible)
+            (d.own_slot(key), !d.non_extensible())
         };
         match validate(extensible, desc, current) {
             Some(p) => {
@@ -326,7 +326,7 @@ impl<'gc> Agent<'gc, '_> {
             let cur = length_prop(self)?;
             return Ok(match validate(true, &desc, Some(cur)) {
                 Some(p) => {
-                    o.borrow_mut(self.mc).length_readonly = !p.writable;
+                    o.borrow_mut(self.mc).set_length_readonly(!p.writable);
                     true
                 }
                 None => false,
@@ -347,17 +347,17 @@ impl<'gc> Agent<'gc, '_> {
             nd.writable = Some(true);
         }
         let Some(p) = validate(true, &nd, Some(cur)) else { return Ok(false) };
-        let mut d = o.borrow_mut(self.mc);
+        let d = o.borrow_mut(self.mc);
         if new_len >= old_len {
             d.set_array_length(new_len);
-            d.length_readonly = !p.writable;
+            d.set_length_readonly(!p.writable);
             return Ok(true);
         }
         // Delete from the back; on hitting a non-configurable element, stop just after it
-        let blocker = d.props.iter().filter(|(_, p)| !p.configurable).filter_map(|(k, _)| index_of_str(k)).filter(|&i| i >= new_len).max();
+        let blocker = d.props().entries().into_iter().filter(|(_, p)| !p.configurable).filter_map(|(k, _)| index_of_str(&k)).filter(|&i| i >= new_len).max();
         let ok = blocker.is_none();
         d.set_array_length(blocker.map_or(new_len, |i| i + 1));
-        d.length_readonly = !new_writable;
+        d.set_length_readonly(!new_writable);
         Ok(ok)
     }
 
@@ -431,8 +431,8 @@ impl<'gc> Agent<'gc, '_> {
         let mut indices: Vec<(u32, Option<JsString<'gc>>)> = Vec::new();
         let mut strings = Vec::new();
         match &d.kind {
-            ObjectKind::Array(items) => {
-                indices.extend((0..u32::try_from(items.len()).unwrap_or(u32::MAX)).map(|i| (i, None)));
+            ObjectKind::Array => {
+                indices.extend((0..u32::try_from(d.elements().len()).unwrap_or(u32::MAX)).map(|i| (i, None)));
                 strings.push(PropertyKey::String(self.string("length")));
             }
             ObjectKind::Primitive(v) if let ValueKind::String(s) = v.kind() => {
@@ -445,10 +445,10 @@ impl<'gc> Agent<'gc, '_> {
             }
             _ => {}
         }
-        for (k, _) in d.props.iter() {
-            match index_of_str(k) {
+        for (k, _) in d.props().entries() {
+            match index_of_str(&k) {
                 Some(i) => indices.push((i, None)),
-                None => strings.push(PropertyKey::String(self.string(k))),
+                None => strings.push(PropertyKey::String(self.string(&k))),
             }
         }
         indices.sort_unstable_by_key(|&(i, _)| i);
@@ -463,7 +463,7 @@ impl<'gc> Agent<'gc, '_> {
             let (t, h) = parts?;
             return self.proxy_is_extensible(t, h);
         }
-        Ok(!o.borrow().non_extensible)
+        Ok(!o.borrow().non_extensible())
     }
 
     pub fn prevent_extensions(&mut self, o: JsObject<'gc>) -> Result<bool, Error> {
@@ -471,7 +471,7 @@ impl<'gc> Agent<'gc, '_> {
             let (t, h) = parts?;
             return self.proxy_prevent_extensions(t, h);
         }
-        o.borrow_mut(self.mc).non_extensible = true;
+        o.borrow_mut(self.mc).set_non_extensible(true);
         Ok(true)
     }
 
@@ -480,7 +480,7 @@ impl<'gc> Agent<'gc, '_> {
             let (t, h) = parts?;
             return self.proxy_get_prototype_of(t, h);
         }
-        Ok(o.borrow().proto)
+        Ok(o.borrow().proto())
     }
 
     /// [[SetPrototypeOf]]: a non-extensible object can only be set to its current prototype; cycles are not allowed;
@@ -495,7 +495,7 @@ impl<'gc> Agent<'gc, '_> {
         }
         let (current, extensible) = {
             let d = o.borrow();
-            (d.proto, !d.non_extensible)
+            (d.proto(), !d.non_extensible())
         };
         if same_object(current, proto) {
             return Ok(true);
@@ -511,9 +511,9 @@ impl<'gc> Agent<'gc, '_> {
             if matches!(x.borrow().kind, ObjectKind::Proxy(_)) {
                 break;
             }
-            p = x.borrow().proto;
+            p = x.borrow().proto();
         }
-        o.borrow_mut(self.mc).proto = proto;
+        o.borrow_mut(self.mc).set_proto(proto);
         Ok(true)
     }
 
@@ -593,7 +593,7 @@ impl<'gc> Agent<'gc, '_> {
     pub fn from_property_descriptor(&mut self, p: Option<Property<'gc>>) -> Value<'gc> {
         let Some(p) = p else { return Value::Undefined };
         let o = self.object();
-        let mut d = o.borrow_mut(self.mc);
+        let d = o.borrow_mut(self.mc);
         match p.slot {
             Slot::Data(v) => {
                 d.set("value", v);

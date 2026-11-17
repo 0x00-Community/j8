@@ -315,15 +315,15 @@ impl Regexps {
         let o = r.as_object()?;
         let d = o.borrow();
         let own_ok = matches!(d.kind, ObjectKind::RegExp(_))
-            && d.proto.is_some_and(|p| Gc::ptr_eq(p, a.realm.regexp_proto))
+            && d.proto().is_some_and(|p| Gc::ptr_eq(p, a.realm.regexp_proto))
             && d.symbols.is_empty()
-            && d.props.len() == 1
-            && &**d.props.key(0) == "lastIndex"
-            && d.props.attrs(0).writable();
+            && d.props().len() == 1
+            && *d.props().key(0) == *"lastIndex"
+            && d.props().attrs(0).writable();
         if !own_ok {
             return None;
         }
-        let Slot::Data(v) = d.props.slot(0) else { return None };
+        let Slot::Data(v) = d.props().slot(0) else { return None };
         let last = v.as_number()?;
         drop(d);
         let p = a.realm.regexp_pristine.get().as_ref()?;
@@ -333,7 +333,7 @@ impl Regexps {
             (Slot::Accessor { get: Some(x), .. }, Slot::Accessor { get: Some(y), .. }) => Gc::ptr_eq(x, y),
             _ => false,
         };
-        let intact = proto.props.shape().is_some_and(|s| alloc::sync::Arc::ptr_eq(s, &p.shape)) && p.slots.iter().all(|&(i, orig)| same(proto.props.slot(i), orig));
+        let intact = proto.props().shape_ptr().is_some_and(|s| core::ptr::eq(s, alloc::sync::Arc::as_ptr(&p.shape))) && p.slots.iter().all(|&(i, orig)| same(proto.props().slot(i), orig));
         intact.then_some((o, last))
     }
 
@@ -1079,8 +1079,8 @@ impl<'gc> Installer<'_, 'gc> {
         // Record the state at setup: slots for exec / flags / the flag getters
         let pristine = {
             let d = proto.borrow();
-            let slots = ["exec", "flags"].into_iter().chain(FLAG_PROPERTIES.map(|(_, n)| n)).filter_map(|n| d.props.position(n).map(|i| (i, d.props.slot(i)))).collect();
-            d.props.shape().map(|shape| j8framework::RegExpPristine { shape: alloc::sync::Arc::clone(shape), slots })
+            let slots = ["exec", "flags"].into_iter().chain(FLAG_PROPERTIES.map(|(_, n)| n)).filter_map(|n| d.props().position(n).map(|i| (i, d.props().slot(i)))).collect();
+            d.props().shape().map(|shape| j8framework::RegExpPristine { shape, slots })
         };
         r.regexp_pristine.set(self.mc, pristine);
         let symbols: [(j8framework::JsSymbol<'gc>, j8framework::NativeFn, u32); 5] = [

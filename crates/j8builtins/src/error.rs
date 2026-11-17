@@ -15,7 +15,7 @@ impl Errors {
         let args = if kind == ErrorKind::Aggregate { all.get(1..).unwrap_or(&[]) } else { all };
         let proto = a.proto_from_ctor(a.new_target, a.realm.error_proto(kind))?;
         let e = a.error(kind, "");
-        e.borrow_mut(a.mc).proto = Some(proto);
+        e.borrow_mut(a.mc).set_proto(Some(proto));
         e.borrow_mut(a.mc).remove("message");
         if args.at(0) != Value::Undefined {
             let m = a.to_string(args.at(0))?;
@@ -77,7 +77,7 @@ impl Installer<'_, '_> {
             // The prototype of a NativeError constructor is the Error constructor
             match base {
                 None => base = Some(ctor),
-                Some(b) => ctor.borrow_mut(self.mc).proto = Some(b),
+                Some(b) => ctor.set_proto(self.mc, Some(b)),
             }
             self.set(proto, "name", self.text(kind.name()));
             self.set(proto, "message", self.text(""));
