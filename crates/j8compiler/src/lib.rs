@@ -1,7 +1,7 @@
 //! j8compiler: bytecode function ⇒ raw machine code (`no_std`).
 //!
 //! ```text
-//! j8virtasm::Function ─ Lower ─▶ MLIR (llvm dialect) ─ mlirpass X86_64Emit ─▶ x86-64 machine code + addresses to patch
+//! j8virtasm::Function ─ Lower ─▶ MLIR (llvm dialect) ─ a `Backend` (j8jit's x86-64) ─▶ machine code + addresses to patch
 //! ```
 //!
 //! The resulting machine code is a System V function `extern "C" fn(regs: *mut Value, acc: *mut Value, start: u64) ->
@@ -29,11 +29,24 @@ pub use lower::Unsupported;
 use alloc::vec::Vec;
 
 use mlirpass::mlirformat::MlirOpt;
-use mlirpass::{Body, Ctx, Emit, Interfaces, PassManager, Passes, X86_64Emit};
+use mlirpass::{Body, Ctx, Interfaces, PassManager, Passes};
 use j8virtasm::Function;
 
 /// A function's machine code: bytes and the absolute addresses (runtime functions) to patch.
 #[derive(Clone, Debug)]
+/// One function's machine code: its bytes, and where an absolute address of a symbol goes
+pub struct MachineCode {
+    pub name: alloc::string::String,
+    pub bytes: Vec<u8>,
+    /// (offset, symbol): eight bytes at `offset` take the symbol's address
+    pub relocs: Vec<(usize, alloc::string::String)>,
+}
+
+/// What turns the lowered module (`llvm` dialect) into machine code, one per `llvm.func` (j8jit's x86-64)
+pub trait Backend: Sync {
+    fn emit(&self, body: &Body<'_>, root: mlirpass::OpId) -> Result<Vec<MachineCode>, mlirpass::mlirformat::Error>;
+}
+
 pub struct Native {
     pub bytes: Vec<u8>,
     /// (byte offset, whose address to patch): each is an 8-byte little-endian absolute address
@@ -92,22 +105,22 @@ impl Compiler {
     /// Passes run before emitting machine code
     const PIPELINE: &str = "builtin.module(llvm.func(mem2reg, canonicalize, cse))";
 
-    /// Bytecode function ⇒ machine code.
-    pub fn compile(&self, func: &Function) -> Result<Native, CompileError> {
+    /// Bytecode function ⇒ machine code, by `backend`.
+    pub fn compile(&self, func: &Function, backend: &dyn Backend) -> Result<Native, CompileError> {
         let lowered = lower::Lower::module(func);
         if !lowered.exits.is_empty() && lowered.headers.is_empty() {
             return Err(CompileError::Useless);
         }
-        let backend = |e: mlirpass::mlirformat::Error| CompileError::Backend(e.0);
-        let mut body = Body::parse(Ctx::new(&self.opt, &self.interfaces), &lowered.text).map_err(backend)?;
+        let failed = |e: mlirpass::mlirformat::Error| CompileError::Backend(e.0);
+        let mut body = Body::parse(Ctx::new(&self.opt, &self.interfaces), &lowered.text).map_err(failed)?;
         let root = body.root;
-        self.pipeline.run(&mut body, root).map_err(backend)?;
-        let codes = X86_64Emit.emit(&body, body.root).map_err(backend)?;
+        self.pipeline.run(&mut body, root).map_err(failed)?;
+        let codes = backend.emit(&body, body.root).map_err(failed)?;
         let code = codes.into_iter().find(|c| c.name == lower::ENTRY).ok_or_else(|| CompileError::Backend("no entry function".into()))?;
         let relocs = code
             .relocs
             .iter()
-            .map(|r| Helper::try_from(r.symbol.as_str()).map(|h| (r.offset, h)).map_err(|()| CompileError::Backend(alloc::format!("unknown symbol {}", r.symbol))))
+            .map(|(offset, symbol)| Helper::try_from(symbol.as_str()).map(|h| (*offset, h)).map_err(|()| CompileError::Backend(alloc::format!("unknown symbol {symbol}"))))
             .collect::<Result<_, _>>()?;
         Ok(Native { bytes: code.bytes, relocs, exits: lowered.exits, entries: lowered.headers })
     }

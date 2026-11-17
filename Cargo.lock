@@ -455,6 +455,7 @@ dependencies = [
  "j8framework",
  "j8virtasm",
  "libc",
+ "mlirpass",
 ]
 
 [[package]]
