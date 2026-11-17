@@ -194,6 +194,16 @@ impl<'gc> Agent<'gc, '_> {
         if o.has_ordinary_properties() {
             return Ok(o.own_slot(key));
         }
+        // An array: `length` plus what is stored, also without borrowing
+        if o.is_array() {
+            return Ok(match key {
+                Key::Str("length") => {
+                    let len = f64::from(o.array_length().unwrap_or(0));
+                    Some(Property { slot: Slot::Data(len.into()), enumerable: false, writable: !o.length_readonly(), configurable: false })
+                }
+                _ => o.own_slot(key),
+            });
+        }
         let d = o.borrow();
         Ok(match (&d.kind, key) {
             (ObjectKind::Array, Key::Str("length")) => {

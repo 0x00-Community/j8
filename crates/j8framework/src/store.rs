@@ -1,7 +1,7 @@
-//! GC 堆里的值存储：属性值与数组元素放在固定容量的叶子里，大了就是 32 叉树。paragc 只分配定长对象，所以按容量分档。
+//! GC 堆里的值存储：属性值与数组元素放在固定容量的叶子里，大了就是 128 叉树（30 万个元素三层）。paragc 只分配定长对象，所以按容量分档。
 //!
-//! - 叶子 [`Leaf<N>`]：`N` 个 [`ValueCell`]（`N` = 2 / 4 / 8 / 16 / 32），头一个字是容量
-//! - 内部节点 [`Node`]：32 个子槽（叶子都是 32 格），头一个字是 [`NODE`] + 层数
+//! - 叶子 [`Leaf<N>`]：`N` 个 [`ValueCell`]（`N` = 2 / 4 / … / 128），头一个字是容量
+//! - 内部节点 [`Node`]：128 个子槽（树里的叶子都是 128 格），头一个字是 [`NODE`] + 层数
 //!
 //! 全部 `#[repr(C)]`：不管 `N` 多大，格子都从头字之后开始，抹掉类型后也能按下标找到。读是一串原子读，不借用、不加锁；
 //! 写经 [`ValueCell::set`] 走写屏障。根换新（扩容）用比较交换，并发扩容输的一方重来。
@@ -10,7 +10,7 @@ use core::sync::atomic::{AtomicU32, Ordering};
 use crate::{Collect, Erased, Gc, GcSlot, Mutation, Value, ValueCell, erase};
 
 /// 每个内部节点的子节点数 / 树里每片叶子的格数
-const FAN: usize = 32;
+const FAN: usize = 128;
 /// 一层占的下标位数
 const FAN_BITS: u32 = FAN.trailing_zeros();
 /// 头字 ≥ 它的是内部节点（头字 − NODE = 层数，≥ 1）；小于它的是叶子（头字 = 容量）
@@ -48,6 +48,8 @@ impl<'gc> Store<'gc> {
             8 => make::<8>(mc, init),
             16 => make::<16>(mc, init),
             32 => make::<32>(mc, init),
+            64 => make::<64>(mc, init),
+            128 => make::<128>(mc, init),
             n => unreachable!("leaves hold at most {FAN} cells, asked for {n}"),
         })
     }
@@ -88,11 +90,13 @@ impl<'gc> Store<'gc> {
 
     /// 第 `i` 格（路径上缺节点就是 `None`）
     pub fn cell(self, i: usize) -> Option<&'gc ValueCell<'gc>> {
-        if i >= self.capacity() {
-            return None;
+        let h = self.head();
+        if h < NODE {
+            return (i < h).then(|| self.leaf_cell(i));
         }
-        if self.is_leaf() {
-            return Some(self.leaf_cell(i));
+        // Past this tree's capacity: shifting out every level leaves something
+        if (i >> (FAN_BITS * u32::try_from(h - NODE + 1).ok()?)) != 0 {
+            return None;
         }
         let mut s = self;
         loop {

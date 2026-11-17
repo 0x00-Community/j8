@@ -61,11 +61,14 @@ pub struct Shape {
     /// (the root a prototype object hands out, or the anchor of an object that has none), so objects can point at
     /// their shape without counting references
     transitions: SegVec<(SmallStr, Attrs, Arc<Shape>)>,
+    /// The root of this shape's tree (children inherit it): telling whether a shape belongs to a given tree is one
+    /// compare. Set right after the root is allocated ([`Shape::rooted`])
+    tree: AtomicPtr<Shape>,
 }
 
 impl Shape {
     fn new(keys: Vec<(SmallStr, Attrs)>) -> Self {
-        let mut s = Self { keys, index: None, transitions: SegVec::default() };
+        let mut s = Self { keys, index: None, transitions: SegVec::default(), tree: AtomicPtr::new(core::ptr::null_mut()) };
         s.reindex();
         s
     }
@@ -99,7 +102,14 @@ impl Shape {
 
     /// Whether `to` is this shape's child by a transition (so this shape's tree holds it)
     fn has_child(&self, to: &Shape) -> bool {
-        self.transitions.iter().any(|(_, _, c)| core::ptr::eq(Arc::as_ptr(c), to))
+        to.len() == self.len() + 1 && to.tree.load(Ordering::Relaxed) == self.tree.load(Ordering::Relaxed)
+    }
+
+    /// A new tree root (it is its own tree)
+    fn rooted(keys: Vec<(SmallStr, Attrs)>) -> Arc<Self> {
+        let s = Arc::new(Self::new(keys));
+        s.tree.store(Arc::as_ptr(&s).cast_mut(), Ordering::Relaxed);
+        s
     }
 
     /// The child shape by adding a key, borrowed: it lives as long as this shape (the transition table owns it)
@@ -110,7 +120,7 @@ impl Shape {
         let mut keys = Vec::with_capacity(self.keys.len() + 1);
         keys.extend(self.keys.iter().cloned());
         keys.push((SmallStr::from(key), attrs));
-        let child = Arc::new(Self::new(keys));
+        let child = Arc::new(Self { tree: AtomicPtr::new(self.tree.load(Ordering::Relaxed)), ..Self::new(keys) });
         let p = Arc::as_ptr(&child);
         self.transitions.push((SmallStr::from(key), attrs, child));
         // SAFETY: the transition table now owns it and never drops entries while this shape lives
@@ -302,7 +312,7 @@ impl<'gc> Props<'gc> {
 
     /// An empty shared shape (all objects with a given object as prototype start from it; see `Object::root_shape`)
     pub fn empty() -> Arc<Shape> {
-        Arc::new(Shape::new(Vec::new()))
+        Shape::rooted(Vec::new())
     }
 
     /// A dictionary holding everything in fast mode now
@@ -364,7 +374,7 @@ impl<'gc> Props<'gc> {
                 None => match root() {
                     Some(r) => r.child_ref(key, attrs),
                     None => {
-                        anchored = Arc::new(Shape::new(alloc::vec![(SmallStr::from(key), attrs)]));
+                        anchored = Shape::rooted(alloc::vec![(SmallStr::from(key), attrs)]);
                         self.anchor(mc, Arc::clone(&anchored));
                         &anchored
                     }
