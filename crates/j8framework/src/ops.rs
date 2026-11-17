@@ -93,8 +93,10 @@ impl BinaryOp {
     }
 
     /// The result when both sides are already numbers (the fast path of each execution layer, and the last step of
-    /// [`Agent::binary`]).
-    #[inline]
+    /// [`Agent::binary`]). Always inlined: the interpreter's loop calls it for every arithmetic instruction, and a call
+    /// plus a jump table on `self` cost more than `+` itself; the rare slow parts stay out of line.
+    #[expect(clippy::inline_always, reason = "measured: left to LLVM it stays a call with a jump table in the interpreter loop")]
+    #[inline(always)]
     pub fn numbers(self, a: f64, b: f64) -> f64 {
         match self {
             BinaryOp::Add => a + b,
@@ -220,6 +222,7 @@ pub(crate) fn parse_number(s: &str) -> f64 {
 /// 2^53 − 1
 pub const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
 
+#[inline]
 fn modulo_u32(x: f64) -> u32 {
     // Fast path: already an integer in the i32 / u32 range (the operand of most bitwise operations); truncate directly
     #[expect(clippy::cast_possible_truncation, reason = "the comparison below confirms nothing was truncated")]
@@ -232,6 +235,12 @@ fn modulo_u32(x: f64) -> u32 {
     if f64::from(u) == x {
         return u;
     }
+    modulo_u32_slow(x)
+}
+
+#[cold]
+#[inline(never)]
+fn modulo_u32_slow(x: f64) -> u32 {
     if !x.is_finite() {
         return 0;
     }
@@ -273,12 +282,14 @@ pub fn number_text(x: f64) -> crate::SmallStr {
 }
 
 /// ToInt32
+#[inline]
 fn to_int32(x: f64) -> i32 {
     modulo_u32(x).cast_signed()
 }
 
 /// `%`: when both sides are safe integers use integer remainder (a zero result takes the dividend's sign), otherwise
 /// use floating-point `fmod`.
+#[inline]
 fn remainder(a: f64, b: f64) -> f64 {
     if a.abs() <= MAX_SAFE_INTEGER && b.abs() <= MAX_SAFE_INTEGER && b != 0.0 {
         #[expect(clippy::cast_possible_truncation, reason = "checked to be in the safe integer range; the comparison below confirms it is an integer")]
@@ -290,10 +301,18 @@ fn remainder(a: f64, b: f64) -> f64 {
             return if r == 0.0 { 0.0f64.copysign(a) } else { r };
         }
     }
+    fmod(a, b)
+}
+
+/// `%` outside the safe integers: floating-point `fmod`.
+#[cold]
+#[inline(never)]
+fn fmod(a: f64, b: f64) -> f64 {
     a % b
 }
 
 /// `**`: where JS differs from C `pow` is that `±1 ** ±∞` and `x ** NaN` are both NaN.
+#[inline(never)]
 fn pow(a: f64, b: f64) -> f64 {
     if b.is_nan() || ((a == 1.0 || a == -1.0) && b.is_infinite()) { f64::NAN } else { libm::pow(a, b) }
 }
