@@ -1,0 +1,38 @@
+[package]
+name = "jumpheap"
+description = "jumpheap: j8 workers in separate processes whose isolate heaps hold references into each other's public heaps (paragc, /dev/shm)"
+readme = "README.md"
+version = "0.3.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/0x00-Community/j8"
+publish = false
+
+# A sample is a package of its own, built against the published j8 (not part of the j8 workspace)
+[workspace]
+
+[[bin]]
+name = "jumpheap"
+path = "src/main.rs"
+
+[dependencies]
+j8 = { version = "0.3.0", features = ["lockfree"] }
+# The HTTP server, the Fetch API and the Worker runtime this host builds on
+workerd = { path = "../workerd" }
+# Public heaps: memory files in /dev/shm that every process can map
+paragc = "0.5.0"
+clap = { version = "4.6", features = ["derive"] }
+
+[dev-dependencies]
+serde_json = "1"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+doc_markdown = "allow"
+missing_errors_doc = "allow"
+must_use_candidate = "allow"
+single_match_else = "allow"
+# Bound functions receive their converted arguments by value
+needless_pass_by_value = "allow"
