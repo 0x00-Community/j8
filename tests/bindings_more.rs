@@ -148,7 +148,7 @@ struct Later;
 
 #[j8::object("later")]
 impl Later {
-    #[expect(clippy::unused_async_trait_impl, reason = "an async binding that is ready at once is part of what is tested")]
+    #[allow(clippy::unused_async, clippy::unused_async_trait_impl, reason = "an async binding that is ready at once is part of what is tested")]
     async fn double(x: f64) -> f64 {
         x * 2.0
     }
