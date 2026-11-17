@@ -1,7 +1,7 @@
 use std::io::{BufRead, Write};
 use std::process::ExitCode;
 
-use j8framework::Source;
+use j8::frame::Source;
 
 use crate::session::{Outcome, Session};
 

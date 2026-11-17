@@ -7,15 +7,12 @@ license = "MIT"
 publish = false
 readme = "README.md"
 
-# Depends on rusty_v8 (the prebuilt static library is large), so it stays out of the root workspace
+# A sample is a package of its own, built against the published j8 (not part of the j8 workspace)
 [workspace]
 
 [dependencies]
 v8 = "=152.2.0"
-j8framework = { path = "../../crates/j8framework" }
-j8platform = { path = "../../crates/j8platform" }
-j8builtins = { path = "../../crates/j8builtins" }
-j8executor = { path = "../../crates/j8executor" }
+j8 = "0.3.0"
 
 [profile.release]
 debug = false

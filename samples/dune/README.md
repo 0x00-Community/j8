@@ -2,22 +2,48 @@
 
 **English** · [简体中文](README.zh-CN.md)
 
-A node-style JavaScript runtime built on [j8](https://github.com/0x00-Community/j8) (a sample host; comparable to
-node / deno).
+A JavaScript runtime on [j8](https://github.com/0x00-Community/j8) with two compatibility layers, each in its own
+directory:
+
+| Layer | Directory | What it provides |
+|---|---|---|
+| **Web** | `src/web/` | The Web-standard APIs servers share (WinterTC's minimum common API): `console`, `setTimeout` / `setInterval` / `queueMicrotask`, `structuredClone`, `EventTarget` / `Event` / `CustomEvent`, `AbortController` / `AbortSignal`, `DOMException`, `TextEncoder` / `TextDecoder`, `atob` / `btoa`, `URL` / `URLSearchParams`, `Blob` / `File`, `Headers` / `Request` / `Response` / `fetch` (plain `http:` and `data:`), `performance`, `crypto.getRandomValues` / `randomUUID`, `navigator`, `reportError` |
+| **Node** | `src/node/` | Node compatibility on top of the Web layer: `process` (an `EventEmitter`; `argv`, `env`, `exit`, `exitCode`, `nextTick`, `hrtime`, `stdout` / `stderr`, `'exit'` / `'uncaughtException'`), `require` / `module` with Node's resolution (`node_modules`, package.json `main` / `exports`, `.json`), ES modules (`.mjs`, `"type": "module"`), `Buffer`, `global`, `setImmediate`, and the modules `fs` (+ `fs/promises`, callbacks), `path`, `os`, `events`, `util`, `buffer`, `assert` (+ `assert/strict`), `url`, `timers` (+ `timers/promises`), `child_process` (synchronous), `crypto`, `module`, `string_decoder`, `perf_hooks` |
 
 ```sh
-cargo run --release -p dune -- a.js               # run a file (`dune run a.js`, `-` reads standard input)
-cargo run --release -p dune -- -e '<js>'          # run source
-cargo run --release -p dune -- -p '[1, 2].map(x => x * 2)'   # run and print the result
-cargo run --release -p dune                       # REPL (.help / .exit)
-cargo run --release -p dune -- --jit a.js         # with the JIT
+cargo run --release -- examples/node.js              # Node layer (the default): CommonJS or ES module by Node's rules
+cargo run --release -- --web examples/web.mjs        # Web layer only: files run as ES modules
+cargo run --release -- -p '[1, 2].map(x => x * 2)'   # run source and print the result (-e runs without printing)
+cargo run --release                                  # REPL (.help / .exit)
+cargo run --release -- --jit a.js                    # with the JIT
 ```
 
-- `require` / `module` and the native parts of `fs` / `path` / `process` are bound in Rust with `#[j8::object]`
-  (`src/node.rs`); the rest is JavaScript in `src/prelude.js`
-- An uncaught exception prints `Uncaught …` and exits with code 1
-- The test262 runner (`tests/test262.rs` at the repository root) is this package's test:
-  `cargo test --release -p dune --test test262`
+This is a package of its own (not part of the j8 workspace) and depends on the published `j8` crate.
+
+## How it is built
+
+Each layer is one `j8::runtime!` declaration, and the Node one stands on the Web one:
+
+```rust
+j8::runtime! { pub Web { natives: [Stdio, Clock, Codec, Random, Timer, Http], prelude: PRELUDE, } }
+j8::runtime! { pub Dune: Web { globals: [Process], natives: [Fs, Os, Child], prelude: PRELUDE, } }
+```
+
+- What needs the machine is Rust, bound with `#[j8::object]` / `#[j8::class]` (`web/mod.rs`, `web/timer.rs`,
+  `web/http.rs`, `node/mod.rs`, `node/fs.rs`). Blocking work (files, sockets, sleeping) is an `async fn` that runs on
+  a thread of its own and settles its promise on the event loop (`host.rs`); nothing touches the GC directly.
+- The APIs themselves are JavaScript, one file per family (`web/*.js`, `node/*.js`), run as the preludes.
+- Built-in modules are registered with `__j8_native.define(name, factory)` for `require`, and `NodePlatform` serves
+  them to `import` (`node:fs` or `fs`, with their named exports).
+- The event loop is `j8::Runtime::run_until_idle`: the process ends when no timer or host work is left; the exit
+  code is `process.exitCode`. An error nobody caught (in a timer, a callback) prints `Uncaught …` and exits with 1,
+  unless `process.on('uncaughtException')` takes it.
+
+## Not there yet
+
+Top-level `await` (j8 does not support it yet), unhandled promise rejections (not reported), `https:` in `fetch`,
+`http` / `net` servers, streams, asynchronous `child_process.spawn`, `worker_threads`, `zlib`, `crypto` hashes and
+ciphers, `Error.stack` (j8 has no stack traces yet).
 
 ## License
 

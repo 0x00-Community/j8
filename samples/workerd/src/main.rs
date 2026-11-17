@@ -14,9 +14,9 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::Parser;
-use j8executor::Executor;
-use j8framework::{Error, Platform};
-use j8platform::DefaultPlatform;
+use j8::executor::Executor;
+use j8::frame::{Error, Platform};
+use j8::platform::DefaultPlatform;
 
 
 /// The JS part of the Fetch API and Durable Objects.
@@ -71,7 +71,7 @@ impl KvStore {
     }
 
     /// For `newUniqueId()`: timestamp plus counter, in hex.
-    fn unique_id(a: &mut j8framework::Agent<'_, '_>) -> String {
+    fn unique_id(a: &mut j8::frame::Agent<'_, '_>) -> String {
         format!("{:032x}", a.platform.wall_clock().as_nanos())
     }
 }

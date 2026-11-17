@@ -30,7 +30,8 @@ emits x86-64 machine code. The heap is [paragc](https://crates.io/crates/paragc)
 zero regressions against the baseline at every step.
 
 🧩 **Embeddable:** `#[j8::class]` / `#[j8::object]` / `#[j8::function]` bind Rust types to JS in one line. Two sample hosts
-come with it: `dune`, a node-style runtime, and `workerd`, a Cloudflare Worker-style runtime.
+come with it: `dune`, a runtime with a Web-standard layer and a Node-compatible layer, and `workerd`, a Cloudflare
+Worker-style runtime.
 
 ## 🔥 Why it's different
 
@@ -54,20 +55,22 @@ come with it: `dune`, a node-style runtime, and `workerd`, a Cloudflare Worker-s
 ## 🚀 Quick start
 
 ```sh
-# 🟢 the node-style runtime: run a script / evaluate / REPL
-cargo run --release -p dune -- a.js
-cargo run --release -p dune -- -p '[1, 2, 3].map(x => x * 2)'
-cargo run --release -p dune                     # REPL (.help / .exit)
-cargo run --release -p dune -- --jit a.js       # with the JIT
+# 🟢 dune, Node-compatible (or --web for the Web-standard APIs only): run a script / evaluate / REPL
+cd samples/dune
+cargo run --release -- examples/node.js
+cargo run --release -- --web examples/web.mjs
+cargo run --release -- -p '[1, 2, 3].map(x => x * 2)'
+cargo run --release                             # REPL (.help / .exit)
+cargo run --release -- --jit a.js               # with the JIT
 
 # ☁️ Cloudflare Worker style: ES modules + Durable Objects
-cargo run -p workerd -- samples/workerd/examples/counter.js --bind COUNTER=Counter --request "GET /c/inc?name=a"
+cd samples/workerd && cargo run -- examples/counter.js --bind COUNTER=Counter --request "GET /c/inc?name=a"
 
 # 🔬 look at the bytecode
 cargo run -p j8debugger -- disasm -e 'let s = 0; for (let i = 0; i < 10; i++) s += i; s'
 
 # 📜 the test262 regression run (git submodule update --init first)
-cargo test --release -p dune --test test262
+cargo test --release --test test262
 
 # 🥊 benchmarks against V8 (downloads rusty_v8's prebuilt library)
 cd samples/benchv8 && cargo run --release
@@ -75,7 +78,8 @@ cd samples/benchv8 && cargo run --release
 
 ## 🧱 Crates
 
-A Cargo workspace of several crates.
+A Cargo workspace of several crates. The samples under `samples/` are packages of their own, outside the workspace,
+and depend on the published `j8` by version, the way an embedder would.
 
 | crate | std | What it does |
 |---|---|---|
@@ -87,9 +91,9 @@ A Cargo workspace of several crates.
 | `j8virtasm` | std | The virtual instruction set: accumulator-style register bytecode (`Insn` / `Function` / `Module`); disassemble with `module.to_string()`, assemble with `text.parse::<Module>()`, each the inverse of the other. The `compile` feature (on by default) brings the JS ⇒ bytecode compiler `Module::try_from(&Source)`, parsing with oxc |
 | `j8taskqueue` | `no_std` | Task queue: `ITask` (`recursable` / `depend` / `exec`) and `ITaskPoll` (`add` / `run`); lock-free dataflow scheduling (hand-written MPMC ready queue, atomic dependency counts): a task whose dependencies are done runs at once in parallel on a moremath `Executor` (the host passes `ThreadMulti`), with no round barrier; `TaskId::family` finds the union-find root, `cancel` cancels a whole family; quotas count bytecodes (`Quota` / `Flow::Yield`, a per-run budget) |
 | `j8macros` | proc-macro | Procedural macros: `enums!("x.json")` generates enums from JSON (definitions, `Display`, `&mut` accessors by field type), `#[derive(Collect)]` for heap types (paragc `Trace`), and the binding macros; see `crates/macros/USAGE.md` |
-| `samples/dune` | std | A node-style binary on top of j8 (`require` / `module` / `fs` / `path` / `process`, native parts bound with `#[j8::object]`): `dune a.js` / `dune run a.js` (`-` reads standard input), `dune -e '<js>'`, `dune -p '<js>'` to print the result, no arguments for a REPL (`.help` / `.exit`); an uncaught exception prints `Uncaught …` and exits with 1 |
+| `samples/dune` | std | A runtime with two layers: `src/web/` (the Web-standard APIs: `console`, timers, `URL`, `TextEncoder`, `EventTarget` / `AbortController`, `fetch`, `structuredClone`, `crypto` …) and `src/node/` on top of it (`process`, `require` / ES modules, `Buffer`, `fs`, `path`, `os`, `events`, `util`, `assert`, `child_process` …); machine access is Rust bound with `#[j8::object]` / `#[j8::class]`, the APIs are JS preludes; `dune a.js`, `dune --web a.mjs`, `dune -e` / `-p`, a REPL; see its README |
 | `samples/workerd` | std | Loads Cloudflare Workers (ES modules with `export default { fetch }`) and Durable Objects with j8: `workerd examples/counter.js --bind COUNTER=Counter --request "GET /c/inc?name=a"`, or `--port 8787` for an HTTP server; the Fetch API subset and DOs live in a JS prelude, storage is a Rust KV bound with `#[j8::class]` |
-| `samples/benchv8` | std | The same JS benchmarks timed on j8 and V8 (rusty_v8 152, with JIT / `--jitless`): `cd samples/benchv8 && cargo run --release`; depends on V8's prebuilt library, so it is its own workspace (excluded from the root one) |
+| `samples/benchv8` | std | The same JS benchmarks timed on j8 and V8 (rusty_v8 152, with JIT / `--jitless`): `cd samples/benchv8 && cargo run --release` (downloads V8's prebuilt library) |
 | `j8debugger` | std | The `j8dbg` command line (clap): `j8dbg disasm <file.js \| ->` / `j8dbg disasm -e '<js>'` prints the disassembly; `j8dbg asm <file.j8s \| ->` assembles a listing and prints it normalized (`-o` writes a file) |
 | `j8executor` | std | The bytecode `Executor`, **currently the last layer**; implements `Engine` under the `compile` feature |
 
@@ -138,7 +142,7 @@ isolate.enter(|scope| {
 
 ## 🧬 JIT (tier one)
 
-`dune --jit a.js` turns the JIT on; `J8_TEST262_JIT=1 cargo test -p dune --test test262` runs the baseline with the JIT on (every function is compiled on its first call, every loop on its first back edge).
+`dune --jit a.js` turns the JIT on; `J8_TEST262_JIT=1 cargo test --release --test test262` runs the baseline with the JIT on (every function is compiled on its first call, every loop on its first back edge).
 
 - `j8compiler`: bytecode function ⇒ MLIR (`llvm` dialect) ⇒ mlirpass `target.x86_64` ⇒ x86-64 machine code (one `Compiler` is built and reused, loading only the builtin and `llvm` dialects).
   The machine code is `extern "C" fn(regs, acc, start) -> u64` and reads and writes the frame's register file and accumulator `Value`s directly (layout in `j8framework::ValueTag`: 16 bytes, tag in the first byte, payload from byte 8);
@@ -223,14 +227,14 @@ Known deviation: JS re-entered from a host function (the callback of `map`, say)
 
 ## 📜 test262
 
-`tests/test262` is the tc39/test262 submodule (a shallow clone, fetched with `git submodule update --init`); the runner `tests/test262.rs` hangs off the dune package (`harness = false`, no separate crate):
+`tests/test262` is the tc39/test262 submodule (a shallow clone, fetched with `git submodule update --init`); the runner `tests/test262.rs` is a test of the root package (`harness = false`, not published):
 
 ```sh
-cargo test -p dune --test test262 -- language/expressions/addition built-ins/Math   # run these directories
-J8_TEST262_JIT=1 cargo test -p dune --test test262                                   # with the JIT on (every function compiled on its first call)
-J8_TEST262_VERBOSE=1 cargo test -p dune --test test262 -- <path>                    # list why each failing test failed
-J8_TEST262_UPDATE=1 cargo test -p dune --test test262 -- <path>                     # write the results back to the baseline
-cargo test -p dune --test test262                                                   # run only the baseline tests, fail if any drops
+cargo test --release --test test262 -- language/expressions/addition built-ins/Math   # run these directories
+J8_TEST262_JIT=1 cargo test --release --test test262                                   # with the JIT on (every function compiled on its first call)
+J8_TEST262_VERBOSE=1 cargo test --release --test test262 -- <path>                    # list why each failing test failed
+J8_TEST262_UPDATE=1 cargo test --release --test test262 -- <path>                     # write the results back to the baseline
+cargo test --release --test test262                                                   # run only the baseline tests, fail if any drops
 ```
 
 - One subprocess per test with a 10 s timeout; results are pass / fail / unsupported (j8 reported `Error::Unsupported`) / skip / timeout / crash, summarized by directory

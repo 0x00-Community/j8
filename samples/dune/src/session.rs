@@ -1,10 +1,10 @@
 use std::process::ExitCode;
 
-use j8::Runtime;
-use j8executor::Executor;
-use j8framework::{Error, Platform, Source};
+use j8::executor::Executor;
+use j8::frame::{Error, Platform, Source};
+use j8::{Host, Runtime};
 
-use crate::node::{Dune, Node};
+use crate::node::Dune;
 
 /// The result of running a piece of source, already converted to text via ToString.
 pub enum Outcome {
@@ -34,21 +34,24 @@ pub struct Session<'p> {
 }
 
 impl<'p> Session<'p> {
-    /// New environment: the [`Dune`] runtime (built-ins, `process`, `fs` / `path`, prelude) plus this run's `argv`.
-    pub fn new(platform: &'p dyn Platform, script: &str, args: &[String], jit: bool) -> Self {
-        let executor = if jit { Executor::default().with_tier(std::rc::Rc::new(j8jit::Jit::default())) } else { Executor::default() };
-        let mut rt = match Dune::runtime(platform, executor) {
-            Ok(rt) => rt,
+    /// A runtime of host `H` (its platform should be `H::platform(…)`, so `import` finds its modules)
+    pub fn new<H: Host>(platform: &'p dyn Platform, jit: bool) -> Self {
+        let executor = if jit { Executor::default().with_tier(std::rc::Rc::new(j8::jit::Jit::default())) } else { Executor::default() };
+        match Runtime::new::<H>(platform, executor) {
+            Ok(rt) => Self { rt },
             Err(e) => {
                 eprintln!("dune: prelude failed: {e}");
                 std::process::exit(1);
             }
-        };
-        if let Err(e) = Node::argv(&mut rt, script, args) {
+        }
+    }
+
+    /// This run's `process.argv` and the rest of what depends on it (Node layer only)
+    pub fn node(&mut self, script: Option<&str>, args: &[String]) {
+        if let Err(e) = Dune::argv(&mut self.rt, script, args) {
             eprintln!("dune: setting up process failed: {e}");
             std::process::exit(1);
         }
-        Self { rt }
     }
 
     /// String literal (JSON syntax).
@@ -66,12 +69,20 @@ impl<'p> Session<'p> {
         out
     }
 
+    /// Runs `src`, then the event loop until no timer, I/O or other host work is left
     pub fn eval(&mut self, src: &Source<'_>) -> Outcome {
-        // Then the event loop: async host work settles its promises before the result is read
         match self.rt.eval(src.text, src.file).and_then(|g| self.rt.run_until_idle().map(|()| g)) {
             Ok(g) => Outcome::Value(self.rt.text(&g)),
             Err(Error::Exception(g)) => Outcome::Thrown(self.rt.text(&g)),
             Err(e) => Outcome::Failed(e.to_string()),
+        }
+    }
+
+    /// The end of a run: `process` emits 'exit'; the exit code is `process.exitCode`
+    pub fn finish(&mut self) -> ExitCode {
+        match self.eval(&Source { text: "__j8_native.finish()", file: "[exit]" }) {
+            Outcome::Value(code) => code.parse::<u8>().map_or(ExitCode::FAILURE, ExitCode::from),
+            failed => failed.report(),
         }
     }
 }

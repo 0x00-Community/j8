@@ -182,7 +182,7 @@ impl<'p> Runtime<'p> {
             while i < self.pending.len() {
                 match self.pending[i].future.as_mut().poll(&mut cx) {
                     Poll::Ready(settle) => {
-                        let job = self.pending.swap_remove(i);
+                        let job = self.pending.remove(i);
                         self.enter(|a| Self::settle(a, &job, settle))?;
                         progressed = true;
                     }
