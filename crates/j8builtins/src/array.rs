@@ -250,16 +250,18 @@ impl Arrays {
     fn no_indexed_protos(o: JsObject<'_>) -> bool {
         let mut cur = o.borrow().proto();
         while let Some(p) = cur {
-            let d = p.borrow();
-            let indexed = match &d.kind {
-                ObjectKind::Array => !p.elements().is_empty(),
-                ObjectKind::Ordinary | ObjectKind::Error | ObjectKind::Arguments(_) => false,
-                _ => true,
+            // Class bits first (no borrowing); only other exotic kinds look at the state
+            let indexed = if p.is_array() {
+                !p.elements().is_empty()
+            } else if p.has_ordinary_properties() {
+                false
+            } else {
+                !matches!(p.borrow().kind, ObjectKind::Arguments(_))
             };
-            if indexed || d.sparse_length() > 0 || d.digit_keys() {
+            if indexed || p.sparse_length() > 0 || p.digit_keys() {
                 return false;
             }
-            cur = d.proto();
+            cur = p.proto();
         }
         true
     }
