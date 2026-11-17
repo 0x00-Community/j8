@@ -21,10 +21,11 @@ What you use from it:
 | `#[j8::object]` / `#[j8::class]` / `#[j8::function]` / `#[j8::module]` | Bind Rust to JS |
 | `j8::runtime!` | Declare a runtime: which bound types go where, plus a JS prelude |
 | `j8::Runtime` | A ready execution environment: `eval`, `eval_module`, `run_until_idle`, `set`, `text`, `enter` |
-| `j8::Host` / `j8::HostPlatform` | The trait `runtime!` implements / the platform that serves its modules and queues its async work |
+| `j8::Host` / `j8::HostPlatform` | The trait `runtime!` implements / the platform that serves its native modules (stateless: runtimes may share one) |
 | `j8::frame` | `j8framework`: `Agent`, `Error`, `ErrorKind`, `Value`, `Platform`, `Source` … |
 | `j8::platform::DefaultPlatform` | The standard-library platform: clock, `console.log` to stdout, ES modules from files |
 | `j8::executor::Executor` | The bytecode executor; `with_tier` adds the JIT |
+| `j8::Promise<T>` | A JS promise awaited from Rust (see [5.4](#54-awaiting-a-js-promise-from-rust)) |
 | `j8::Glue` | `Glue::spawn` / `Glue::settle`: hand-made promises (see [5.3](#53-a-method-that-returns-a-promise)) |
 | `j8::NATIVE` | `"__j8_native"`, the name of the hidden registry object |
 
@@ -312,14 +313,53 @@ The future must be `Send + 'static`: clone what it needs out of `self` (here an 
 A future that becomes ready because of JS (like `cancel` above) needs no wake-up: the loop polls everything again after
 every settlement, before it parks.
 
-Both `async fn` and `Glue::spawn` need a `HostPlatform` (what `X::platform(…)` returns). On another platform the call
-throws a TypeError.
+Async work belongs to the isolate that started it: each `Runtime` has its own queue, and only its own
+`run_until_idle` settles it, so several runtimes can share one platform. An isolate made without an event loop (by
+hand, without `CreateParams { event_loop: true, .. }`) refuses the work, and the call throws a TypeError.
 
-### 5.4 Keeping the process alive
+### 5.4 Awaiting a JS promise from Rust
+
+`j8::Promise<T>` goes the other way: a parameter of this type takes a JS promise, and the Rust side `.await`s it. It
+is an owned parameter, so `async fn` bindings can take it:
+
+```rust,ignore
+#[j8::object("math")]
+impl Math {
+    async fn double(p: j8::Promise<f64>) -> Result<f64, Error> {
+        Ok(p.await? * 2.0)          // a rejection passes on to this function's own promise
+    }
+}
+```
+
+- It takes its argument the way `await` does: a promise is watched directly (a `then` patched onto it is not called),
+  a thenable is adopted, any other value counts as already fulfilled.
+- The fulfilled value is converted with `FromJs` into `T` on the runtime thread when the promise settles. A
+  rejection, or a value that does not convert, comes out as `Err(Error::Exception(reason))`, so `?` rejects the
+  binding's own promise with the same reason.
+- Settling wakes the future, so it works with `run_until_idle`, and also when the future is polled somewhere else.
+- A promise that never settles keeps the future pending, like `await` in JS. The event loop then keeps waiting.
+
+For a JS callback that should run more than once (an event handler), keep a `j8::Function` instead and call it inside
+`rt.enter` or another binding.
+
+### 5.5 Keeping the process alive
 
 `run_until_idle` returns once nothing is pending. Repeating timers, servers and the like stay alive by always keeping
 a future pending, and stop by settling it. A cleared timer should settle its promise (dune's `Timer::cancel`), or the
 loop waits for it.
+
+### 5.6 What the event loop does not do yet
+
+- **No reactor.** Futures that need tokio's (or another runtime's) reactor never wake. Run such work on a thread
+  or a reactor of your own.
+- **Every wake polls every pending job.** The loop does not know which job was woken, and ready jobs settle in
+  queue order, not in the order they finished. JS that cares about order (timers) has to sort it out itself.
+- **No cancellation from JS.** A future cannot be dropped from the JS side. Watch a flag of your own (dune's
+  `Timer::cancel`).
+- **`async fn` cannot take `&self`.** Use `Glue::spawn` (5.3).
+- **A panic in a future propagates out of `run_until_idle`.** An error while settling stops the loop with the
+  remaining jobs still queued.
+- **Not supported yet:** reporting unhandled rejections, top-level `await`.
 
 ## 6. Modules
 
@@ -373,14 +413,11 @@ The first element of the returned pair is the module's normalized name. Modules 
 that resolves to the same name gets the same module. A specifier that resolves to `None` fails the import with
 `Error::Syntax("… Cannot find module '…'")`.
 
-**Order matters when stacking platforms.** The `HostPlatform` must be the outermost one:
+Platforms stack in any order, since none of them holds the async work (that lives in each runtime's isolate):
 
 ```rust,ignore
-let platform = Dune::platform(NodePlatform::from(DefaultPlatform::default()));   // ✔
+let platform = Dune::platform(NodePlatform::from(DefaultPlatform::default()));
 ```
-
-`HostPlatform` is what queues async work (`spawn` / `take_spawned`). A wrapper that does not forward those two
-methods hides it, and every `async fn` then throws "async host functions need a runtime with an event loop".
 
 Other `Platform` methods you may override: `print` (where `console.log` goes), `now` / `wall_clock` (a fake clock for
 tests).

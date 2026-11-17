@@ -4,7 +4,7 @@ use alloc::vec::Vec;
 
 use crate::Gc;
 
-use crate::{Agent, Error, ErrorKind, Job, JsObject, ObjectData, ObjectKind, Reaction, Request, Resume, Settled, Step, Value};
+use crate::{Agent, Error, ErrorKind, HostReaction, Job, JsObject, ObjectData, ObjectKind, Reaction, Request, Resume, Settled, Static, Step, Value};
 
 impl<'gc> Agent<'gc, '_> {
     /// A pending Promise.
@@ -108,6 +108,16 @@ impl<'gc> Agent<'gc, '_> {
         if let Some((value, rejected)) = settled {
             self.enqueue(Job::Reaction { reaction, value, rejected });
         }
+    }
+
+    /// Runs `reaction` once `v` settles, waiting the way `await v` does: a Promise is watched directly (a `then`
+    /// patched onto it is not called), a thenable is adopted, anything else counts as already fulfilled. The reaction
+    /// runs as a microtask.
+    pub fn on_settled(&mut self, v: Value<'gc>, reaction: HostReaction) -> Result<(), Error> {
+        let p = self.promise_resolve(v)?;
+        let hook = self.mc.alloc(Static(j8lockfree::AtomicRefCell::new(Some(reaction))));
+        self.perform_then(p, Reaction::Host { hook });
+        Ok(())
     }
 
     /// PromiseResolve(%Promise%, v): a Promise whose `constructor` is %Promise% is returned as is; anything else is
@@ -216,6 +226,12 @@ impl<'gc> Agent<'gc, '_> {
     fn run_job(&mut self, job: Job<'gc>) -> Result<(), Error> {
         match job {
             Job::Reaction { reaction: Reaction::Await { coroutine }, value, rejected } => self.drive(coroutine, if rejected { Resume::Throw } else { Resume::Next }, value),
+            Job::Reaction { reaction: Reaction::Host { hook }, value, rejected } => {
+                if let Some(reaction) = hook.0.try_borrow_mut().and_then(|mut h| h.take()) {
+                    (reaction.0)(self, value, rejected);
+                }
+                Ok(())
+            }
             Job::Reaction { reaction: Reaction::Then { on_fulfilled, on_rejected, capability }, value, rejected } => {
                 let handler = if rejected { on_rejected } else { on_fulfilled };
                 let outcome = if self.is_callable(handler) {

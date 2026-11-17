@@ -8,7 +8,6 @@ use std::thread::Thread;
 use std::time::Duration;
 
 use j8framework::{Agent, AsyncJob, ContextRoot, CreateParams, Error, ErrorKind, Global, Isolate, Platform, Pool, Source, Task, Value};
-use j8lockfree::Fifo;
 
 /// A runtime's contents (implemented by [`runtime!`](crate::runtime); a parent host's contents come first).
 pub trait Host {
@@ -22,19 +21,20 @@ pub trait Host {
     fn preludes(out: &mut Vec<(&'static str, &'static str)>);
 }
 
-/// A platform that answers a [`Host`]'s native module specifiers itself and passes everything else to `P`.
-/// It also queues the async host work (`async fn`s bound with the binding macros) for [`Runtime::run_until_idle`].
+/// A platform that answers a [`Host`]'s native module specifiers itself and passes everything else to `P`. It holds
+/// no per-runtime state: several runtimes may share one (async host work is queued on each runtime's own isolate).
 pub struct HostPlatform<H, P> {
     inner: P,
-    spawned: Fifo<AsyncJob>,
     _host: PhantomData<fn() -> H>,
 }
 
 impl<H: Host, P: Platform> HostPlatform<H, P> {
+    /// Serves `H`'s native modules on top of `inner`
     pub fn new(inner: P) -> Self {
-        Self { inner, spawned: Fifo::default(), _host: PhantomData }
+        Self { inner, _host: PhantomData }
     }
 
+    /// The wrapped platform
     pub fn inner(&self) -> &P {
         &self.inner
     }
@@ -69,15 +69,6 @@ impl<H: Host, P: Platform> Platform for HostPlatform<H, P> {
     fn print(&self, line: &str) {
         self.inner.print(line);
     }
-
-    fn spawn(&self, job: AsyncJob) -> Result<(), AsyncJob> {
-        self.spawned.push(job);
-        Ok(())
-    }
-
-    fn take_spawned(&self) -> Vec<AsyncJob> {
-        core::iter::from_fn(|| self.spawned.pop()).collect()
-    }
 }
 
 /// Wakes the runtime's thread when a future it polls can make progress.
@@ -93,9 +84,9 @@ impl Wake for Unpark {
     }
 }
 
-/// A ready execution environment: an isolate, an executor and one context with a host installed and its preludes run.
+/// A ready execution environment: an isolate (with an event loop for async host work), an executor and one context
+/// with a host installed and its preludes run.
 pub struct Runtime<'p> {
-    platform: &'p dyn Platform,
     isolate: Isolate<'p>,
     executor: j8executor::Executor,
     cx: ContextRoot,
@@ -107,9 +98,9 @@ impl<'p> Runtime<'p> {
     /// Builds the context, installs `H` and runs its preludes (the platform should be a [`HostPlatform`] for `H`, so
     /// `import` finds the native modules)
     pub fn new<H: Host>(platform: &'p dyn Platform, executor: j8executor::Executor) -> Result<Self, Error> {
-        let mut isolate = Isolate::new(platform, CreateParams::default());
+        let mut isolate = Isolate::new(platform, CreateParams { event_loop: true, ..CreateParams::default() });
         let cx = isolate.enter(|scope| scope.persist(scope.context(&j8builtins::Builtins)));
-        let mut rt = Self { platform, isolate, executor, cx, pending: Vec::new() };
+        let mut rt = Self { isolate, executor, cx, pending: Vec::new() };
         rt.enter(|a| H::install(a));
         let mut preludes = Vec::new();
         H::preludes(&mut preludes);
@@ -163,6 +154,7 @@ impl<'p> Runtime<'p> {
         })
     }
 
+    /// The isolate underneath (collecting, the profiler)
     pub fn isolate(&mut self) -> &mut Isolate<'p> {
         &mut self.isolate
     }
@@ -173,7 +165,7 @@ impl<'p> Runtime<'p> {
         let waker = Waker::from(Arc::new(Unpark(std::thread::current())));
         let mut cx = Context::from_waker(&waker);
         loop {
-            self.pending.extend(self.platform.take_spawned());
+            self.pending.extend(self.isolate.take_spawned());
             if self.pending.is_empty() {
                 return Ok(());
             }

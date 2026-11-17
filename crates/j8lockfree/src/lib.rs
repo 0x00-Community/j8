@@ -7,6 +7,7 @@
 //! - [`Deque`]：Chase–Lev 工作窃取双端队列，主人凭据 [`Owner`] 压 / 弹，别人偷
 //! - [`OnceBox`]：只发布一次的惰性值（并发初始化各算各的，赢的留下）
 //! - [`AtomicRefCell`]：可跨线程的 `RefCell`，借用冲突时报错而不等待
+//! - [`Oneshot`]：一次性通道，发送方送一个值，接收方当 future 等（[`Sender`] / [`Receiver`]）
 //!
 //! 共同的做法：并发期间只增加内存、不释放（段、旧缓冲），释放推迟到独占（`&mut` / 析构）时，
 //! 因此不需要危险指针或纪元回收，也没有 ABA。
@@ -16,6 +17,7 @@ extern crate alloc;
 mod deque;
 mod fifo;
 mod once;
+mod oneshot;
 mod pushlist;
 mod refcell;
 mod segments;
@@ -25,6 +27,7 @@ mod stock;
 pub use deque::{Deque, Owner};
 pub use fifo::Fifo;
 pub use once::OnceBox;
+pub use oneshot::{Oneshot, Receiver, Sender};
 pub use pushlist::{Drain, PushList};
 pub use refcell::{AtomicRef, AtomicRefCell, AtomicRefMut};
 pub use segvec::SegVec;

@@ -28,8 +28,9 @@ pub trait Module: Object {
 impl Glue {
     /// A pending promise whose settlement `future` produces, handed to the platform's event loop: what `async fn`
     /// bindings compile to, and how a method that needs `&self` or the agent returns a promise by hand. `future`
-    /// must wake its waker when it can make progress (the loop parks otherwise). Throws a `TypeError` when the
-    /// platform has no event loop (it is not a `j8::HostPlatform`).
+    /// must wake its waker when it can make progress (the loop parks otherwise). The work belongs to this isolate:
+    /// only its own event loop settles it. Throws a `TypeError` when the isolate runs no event loop (it was not made
+    /// by `j8::Runtime`, or not with `CreateParams::event_loop`).
     ///
     /// ```ignore
     /// fn wait<'gc>(&self, a: &mut Agent<'gc, '_>, ms: f64) -> Result<Value<'gc>, Error> {
@@ -41,7 +42,7 @@ impl Glue {
         let promise = a.new_promise();
         let (resolve, reject) = a.promise_resolvers(promise);
         let job = j8framework::AsyncJob { resolve: a.global(resolve.into()), reject: a.global(reject.into()), future: alloc::boxed::Box::pin(future) };
-        match a.platform.spawn(job) {
+        match a.spawn(job) {
             Ok(()) => Ok(promise.into()),
             Err(_) => Err(a.throw(j8framework::ErrorKind::Type, "async host functions need a runtime with an event loop (j8::Runtime::run_until_idle)")),
         }

@@ -35,7 +35,8 @@ impl<X: Executor + Sync> Pool for X {
 pub type Settle = Box<dyn for<'gc, 'x> FnOnce(&mut crate::Agent<'gc, 'x>) -> Result<crate::Value<'gc>, crate::Error> + Send>;
 
 /// Async host work (an `async fn` bound with the binding macros): a future, and the promise's resolve / reject it
-/// settles when done.
+/// settles when done. It belongs to the isolate that made it (its handles are that isolate's): [`crate::Agent::spawn`]
+/// queues it on the isolate, [`crate::Isolate::take_spawned`] hands it to that isolate's event loop.
 pub struct AsyncJob {
     pub resolve: crate::Global,
     pub reject: crate::Global,
@@ -61,14 +62,4 @@ pub trait Platform: Sync + Pool {
 
     /// Output one line (`console.log`).
     fn print(&self, line: &str);
-
-    /// Hands async host work to the embedder's event loop; `Err` gives it back when there is none (the default).
-    fn spawn(&self, job: AsyncJob) -> Result<(), AsyncJob> {
-        Err(job)
-    }
-
-    /// The async work handed over since the last call (the event loop drains it).
-    fn take_spawned(&self) -> Vec<AsyncJob> {
-        Vec::new()
-    }
 }
