@@ -1154,6 +1154,10 @@ impl<'gc> ObjMut<'_, 'gc> {
         self.obj.write_index(self.mc, i, value)
     }
 
+    pub fn fill_index(&self, from: u32, to: u32, value: Value<'gc>) -> bool {
+        self.obj.fill_index(self.mc, from, to, value)
+    }
+
     pub fn spill(&self, from: usize) {
         self.obj.spill(self.mc, from);
     }
@@ -1384,6 +1388,22 @@ impl<'gc> Object<'gc> {
             return true;
         }
         false
+    }
+
+    /// Fast path of `a[i] = value` for every `i` in `from..to` (Array.prototype.fill): `from` within the dense part,
+    /// whatever lies past its end appended as [`Self::write_index`] would; returns `false`, writing nothing, if any
+    /// write needs the general path
+    pub fn fill_index(&self, mc: &Mutation<'gc>, from: u32, to: u32, value: Value<'gc>) -> bool {
+        let n = self.elements.len();
+        if !self.is_array() || from as usize > n || to == u32::MAX {
+            return false;
+        }
+        // Appending at n is the strictest step: past it the sparse part only ends earlier
+        if to as usize > n && !self.can_append(u32::try_from(n).unwrap_or(u32::MAX)) {
+            return false;
+        }
+        self.elements.fill(mc, from as usize, to as usize, value);
+        true
     }
 
     /// Whether `a[i] = v` with `i` right at the end of the dense part only creates a plain data property there:

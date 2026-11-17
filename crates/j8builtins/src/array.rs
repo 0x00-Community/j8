@@ -768,6 +768,11 @@ impl Arrays {
         let (o, len) = Self::target(a, this)?;
         let mut k = Self::relative(a, args.at(1), len, 0.0)?;
         let end = Self::relative(a, args.at(2), len, len)?;
+        // A real array filled from within its dense part: write the cells directly, leaf by leaf
+        #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "integers in [0, len], checked against u32 first")]
+        if k < end && end < f64::from(u32::MAX) && o.borrow_mut(a.mc).fill_index(k as u32, end as u32, args.at(0)) {
+            return Ok(o.into());
+        }
         while k < end {
             a.set_index(o.into(), k, args.at(0))?;
             k += 1.0;

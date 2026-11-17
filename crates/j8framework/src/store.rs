@@ -137,6 +137,14 @@ impl<'gc> Store<'gc> {
         }
     }
 
+    /// 第 `i` 格起到它所在叶子末尾的那几格（路径上缺的节点同 [`Self::cell_mut`] 补上；`i` < 容量）
+    fn run_mut(self, mc: &Mutation<'gc>, i: usize) -> &'gc [ValueCell<'gc>] {
+        let first = self.cell_mut(mc, i);
+        let left = if self.is_leaf() { self.head() - i } else { FAN - (i & (FAN - 1)) };
+        // SAFETY: 叶子的格子在 repr(C) 里连续排着，first 是其中第 i（树里是 i mod FAN）格，到叶子末尾还有 left 格
+        unsafe { core::slice::from_raw_parts(first, left) }
+    }
+
     /// 能放下 `need` 格的存储：够了就是自己，否则换一棵更大的（前 `len` 格搬过去 / 挂到新根底下）
     fn grown(self, mc: &Mutation<'gc>, need: usize, len: usize) -> Self {
         if need <= self.capacity() {
@@ -272,6 +280,35 @@ impl<'gc> ValueArray<'gc> {
         let i = self.len();
         self.reserve(mc, i + 1).cell_mut(mc, i).set(mc, v);
         self.len.store(u32::try_from(i + 1).expect("array length fits u32"), Ordering::Release);
+    }
+
+    /// 第 `from` 到 `to` 个（不含）都设成 `v`，长度不够就接长到 `to`（`from` ≤ 长度）：一片叶子走一次树
+    pub fn fill(&self, mc: &Mutation<'gc>, from: usize, to: usize, v: Value<'gc>) {
+        let n = self.len();
+        if from > n || from >= to {
+            return;
+        }
+        // 还没有存储时一次建好能放 `to` 格的（reserve 只建一片叶子）
+        let s = match self.root.get() {
+            None => {
+                let s = Store::reserve(mc, to);
+                self.root.set(mc.mutator(), Some(s.0));
+                s
+            }
+            Some(_) => self.reserve(mc, to),
+        };
+        let mut i = from;
+        while i < to {
+            let run = s.run_mut(mc, i);
+            let k = run.len().min(to - i);
+            for c in &run[..k] {
+                c.set(mc, v);
+            }
+            i += k;
+        }
+        if to > n {
+            self.len.store(u32::try_from(to).expect("array length fits u32"), Ordering::Release);
+        }
     }
 
     pub fn pop(&self, mc: &Mutation<'gc>) -> Option<Value<'gc>> {
