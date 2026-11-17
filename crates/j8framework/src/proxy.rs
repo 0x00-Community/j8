@@ -350,7 +350,7 @@ impl<'gc> Agent<'gc, '_> {
     fn same_key(a: &PropertyKey<'gc>, b: &PropertyKey<'gc>) -> bool {
         match (a, b) {
             (PropertyKey::String(x), PropertyKey::String(y)) => ***x == ***y,
-            (PropertyKey::Symbol(x), PropertyKey::Symbol(y)) => j8gc::Gc::ptr_eq(*x, *y),
+            (PropertyKey::Symbol(x), PropertyKey::Symbol(y)) => crate::Gc::ptr_eq(*x, *y),
             _ => false,
         }
     }

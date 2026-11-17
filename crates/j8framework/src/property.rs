@@ -5,7 +5,7 @@ use crate::ValueKind;
 use alloc::format;
 use alloc::vec::Vec;
 
-use j8gc::Gc;
+use crate::{Gc};
 
 use crate::ops::index_of_str;
 use crate::{Agent, Error, ErrorKind, JsObject, JsString, JsSymbol, ObjectKind, Property, Slot, Value};
@@ -200,7 +200,7 @@ impl<'gc> Agent<'gc, '_> {
             (ObjectKind::Arguments(Some(map)), Key::Str(k)) => {
                 let slot = index_of_str(k).and_then(|i| map.slots.get(i as usize).copied().flatten());
                 match (d.own_slot(key), slot) {
-                    (Some(p), Some(s)) => Some(Property { slot: Slot::Data(map.env.get(usize::from(s))), ..p }),
+                    (Some(p), Some(s)) => Some(Property { slot: Slot::Data(map.env.load(usize::from(s))), ..p }),
                     (p, _) => p,
                 }
             }
@@ -286,7 +286,7 @@ impl<'gc> Agent<'gc, '_> {
         };
         let mut d = desc;
         if d.is_data() && d.value.is_none() && d.writable == Some(false) {
-            d.value = Some(env.get(usize::from(slot)));
+            d.value = Some(env.load(usize::from(slot)));
         }
         if !self.ordinary_define(o, key, &d) {
             return false;

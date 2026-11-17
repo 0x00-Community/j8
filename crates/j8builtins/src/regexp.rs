@@ -4,7 +4,7 @@ use core::fmt::Write;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use j8gc::{Gc, Static};
+use j8framework::{Gc, Static};
 use j8framework::{Agent, Error, ErrorKind, JsObject, JsString, Key, ObjectData, ObjectKind, Property, RegExpData, Slot, Units, Value};
 
 use crate::buffer::Buffers;
@@ -63,14 +63,14 @@ impl Regexps {
 
     /// Compiled regex: look up the realm's cache first (identical source and flags share one copy); otherwise compile
     /// it and record it.
-    fn compiled<'gc>(a: &Agent<'gc, '_>, source: &str, flags: &str) -> Result<Gc<'gc, Static<Box<dyn core::any::Any>>>, Error> {
-        let slot = a.realm.regexp_cache[j8framework::RegExpCompiled::bucket(source, flags)];
+    fn compiled<'gc>(a: &Agent<'gc, '_>, source: &str, flags: &str) -> Result<Gc<'gc, Static<Box<dyn core::any::Any + Send + Sync>>>, Error> {
+        let slot = &a.realm.realm().get().regexp_cache[j8framework::RegExpCompiled::bucket(source, flags)];
         if let Some(c) = slot.get().filter(|c| *c.source == *source && *c.flags == *flags) {
             return Ok(c.compiled);
         }
         let regex = Compiled::new(Self::compile(a, source, flags)?, source, flags);
-        let compiled = Gc::new(a.mc, Static(Box::new(regex) as Box<dyn core::any::Any>));
-        slot.set(a.mc, Some(Gc::new(a.mc, j8framework::RegExpCompiled { source: source.into(), flags: flags.into(), compiled })));
+        let compiled = a.mc.alloc(Static(Box::new(regex) as Box<dyn core::any::Any + Send + Sync>));
+        slot.set(a.mc.mutator(), Some(a.mc.alloc(j8framework::RegExpCompiled { source: source.into(), flags: flags.into(), compiled })));
         Ok(compiled)
     }
 
@@ -201,7 +201,7 @@ impl Regexps {
         }
     }
 
-    fn data(o: JsObject<'_>) -> (JsString<'_>, JsString<'_>, Gc<'_, Static<Box<dyn core::any::Any>>>) {
+    fn data(o: JsObject<'_>) -> (JsString<'_>, JsString<'_>, Gc<'_, Static<Box<dyn core::any::Any + Send + Sync>>>) {
         let ObjectKind::RegExp(d) = &o.borrow().kind else { unreachable!("checked to be a regexp") };
         (d.source, d.flags, d.compiled)
     }
@@ -333,7 +333,7 @@ impl Regexps {
             (Slot::Accessor { get: Some(x), .. }, Slot::Accessor { get: Some(y), .. }) => Gc::ptr_eq(x, y),
             _ => false,
         };
-        let intact = proto.props.shape().is_some_and(|s| alloc::rc::Rc::ptr_eq(s, &p.shape)) && p.slots.iter().all(|&(i, orig)| same(proto.props.slot(i), orig));
+        let intact = proto.props.shape().is_some_and(|s| alloc::sync::Arc::ptr_eq(s, &p.shape)) && p.slots.iter().all(|&(i, orig)| same(proto.props.slot(i), orig));
         intact.then_some((o, last))
     }
 
@@ -1080,7 +1080,7 @@ impl<'gc> Installer<'_, 'gc> {
         let pristine = {
             let d = proto.borrow();
             let slots = ["exec", "flags"].into_iter().chain(FLAG_PROPERTIES.map(|(_, n)| n)).filter_map(|n| d.props.position(n).map(|i| (i, d.props.slot(i)))).collect();
-            d.props.shape().map(|shape| j8framework::RegExpPristine { shape: alloc::rc::Rc::clone(shape), slots })
+            d.props.shape().map(|shape| j8framework::RegExpPristine { shape: alloc::sync::Arc::clone(shape), slots })
         };
         r.regexp_pristine.set(self.mc, pristine);
         let symbols: [(j8framework::JsSymbol<'gc>, j8framework::NativeFn, u32); 5] = [

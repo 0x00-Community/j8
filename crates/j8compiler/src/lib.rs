@@ -18,7 +18,6 @@
 //! The third argument is where to enter: 0 at the function start, `h + 1` at loop header `h` ([`Native::entries`]:
 //! switching in halfway through a running loop, i.e. OSR). Code entered midway through a loop also stops at `return`,
 //! and the interpreter finishes the frame.
-#![no_std]
 extern crate alloc;
 
 mod helper;

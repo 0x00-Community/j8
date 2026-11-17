@@ -1,4 +1,4 @@
-use j8gc::{Collect, Gc};
+use crate::gc::{Collect, Erased, Gc, Trace, Tracer, erase, gc_from_raw};
 
 use crate::{JsBigInt, JsObject, JsString, JsSymbol};
 
@@ -27,7 +27,7 @@ pub enum ValueKind<'gc> {
 /// `Value::Undefined`, `Value::Object(o)` … (or `From`); look inside with [`Value::kind`].
 ///
 /// The registers, the accumulator, environment and property slots all hold this same word, so JIT-generated machine
-/// code reads and writes it directly and an atomic slot stores it as is (`j8gc::Lock<Value>`).
+/// code reads and writes it directly and a [`crate::gc::ValueCell`] stores it as is.
 #[derive(Clone, Copy)]
 #[repr(transparent)]
 pub struct Value<'gc> {
@@ -95,22 +95,22 @@ impl<'gc> Value<'gc> {
 
     #[inline]
     pub fn String(s: JsString<'gc>) -> Self {
-        Self::pointer(ValueTag::STRING, j8gc::Word::into_word(s))
+        Self::pointer(ValueTag::STRING, s.as_ptr().expose_provenance() as u64)
     }
 
     #[inline]
     pub fn Symbol(s: JsSymbol<'gc>) -> Self {
-        Self::pointer(ValueTag::SYMBOL, j8gc::Word::into_word(s))
+        Self::pointer(ValueTag::SYMBOL, s.as_ptr().expose_provenance() as u64)
     }
 
     #[inline]
     pub fn BigInt(b: JsBigInt<'gc>) -> Self {
-        Self::pointer(ValueTag::BIGINT, j8gc::Word::into_word(b))
+        Self::pointer(ValueTag::BIGINT, b.as_ptr().expose_provenance() as u64)
     }
 
     #[inline]
     pub fn Object(o: JsObject<'gc>) -> Self {
-        Self::pointer(ValueTag::OBJECT, j8gc::Word::into_word(o))
+        Self::pointer(ValueTag::OBJECT, o.as_ptr().expose_provenance() as u64)
     }
 
     /// The number, if it is one (one compare: no full decode)
@@ -130,14 +130,14 @@ impl<'gc> Value<'gc> {
     pub fn as_object(self) -> Option<JsObject<'gc>> {
         (self.bits >> ValueBits::TAG_SHIFT == ValueBits::boxed(ValueTag::OBJECT, 0) >> ValueBits::TAG_SHIFT)
             // SAFETY: an object word was built from a live object's address
-            .then(|| unsafe { Gc::from_addr_unchecked(Self::address(self.bits & ValueBits::PAYLOAD)) })
+            .then(|| unsafe { gc_from_raw(Self::address(self.bits & ValueBits::PAYLOAD)) })
     }
 
     /// A payload as an address (48 bits always fit a `usize` on the 64-bit targets the word layout is for)
     #[inline]
     #[allow(clippy::cast_possible_truncation)]
-    const fn address(payload: u64) -> usize {
-        payload as usize
+    fn address<T>(payload: u64) -> *const T {
+        core::ptr::with_exposed_provenance(payload as usize)
     }
 
     /// What the value is
@@ -158,10 +158,10 @@ impl<'gc> Value<'gc> {
             ValueTag::BOOL => ValueKind::Bool(payload != 0),
             // SAFETY (all four): a pointer word was built from a live object's address (never 0), and while the value
             // is reachable the collector keeps that address current
-            ValueTag::STRING => ValueKind::String(unsafe { Gc::from_addr_unchecked(Self::address(payload)) }),
-            ValueTag::SYMBOL => ValueKind::Symbol(unsafe { Gc::from_addr_unchecked(Self::address(payload)) }),
-            ValueTag::BIGINT => ValueKind::BigInt(unsafe { Gc::from_addr_unchecked(Self::address(payload)) }),
-            ValueTag::OBJECT => ValueKind::Object(unsafe { Gc::from_addr_unchecked(Self::address(payload)) }),
+            ValueTag::STRING => ValueKind::String(unsafe { gc_from_raw(Self::address(payload)) }),
+            ValueTag::SYMBOL => ValueKind::Symbol(unsafe { gc_from_raw(Self::address(payload)) }),
+            ValueTag::BIGINT => ValueKind::BigInt(unsafe { gc_from_raw(Self::address(payload)) }),
+            ValueTag::OBJECT => ValueKind::Object(unsafe { gc_from_raw(Self::address(payload)) }),
             tag => unreachable!("boxed value with tag {tag}"),
         }
     }
@@ -197,38 +197,36 @@ impl core::fmt::Debug for Value<'_> {
 }
 
 /// The GC pointers inside are traced / moved through their kinds
-unsafe impl<'gc> Collect<'gc> for Value<'gc> {
-    /// Just a word
-    const PARALLEL_DROP: bool = true;
-
+// SAFETY: every pointer kind is one edge
+unsafe impl Trace for Value<'_> {
     #[inline]
-    fn trace(&self, t: &mut j8gc::Trace<'_>) {
+    fn trace(&self, t: &mut Tracer<'_>) {
         match self.kind() {
-            ValueKind::String(s) => t.trace(&s),
-            ValueKind::Symbol(s) => t.trace(&s),
-            ValueKind::BigInt(b) => t.trace(&b),
-            ValueKind::Object(o) => t.trace(&o),
+            ValueKind::String(s) => t.edge(s),
+            ValueKind::Symbol(s) => t.edge(s),
+            ValueKind::BigInt(b) => t.edge(b),
+            ValueKind::Object(o) => t.edge(o),
             _ => {}
         }
     }
 
     #[inline]
-    fn relocate(&mut self, r: &mut j8gc::Relocate<'_>) {
+    fn relocate(&mut self, t: &mut Tracer<'_>) {
         *self = match self.kind() {
             ValueKind::String(mut s) => {
-                r.relocate(&mut s);
+                t.relocate(&mut s);
                 Value::String(s)
             }
             ValueKind::Symbol(mut s) => {
-                r.relocate(&mut s);
+                t.relocate(&mut s);
                 Value::Symbol(s)
             }
             ValueKind::BigInt(mut b) => {
-                r.relocate(&mut b);
+                t.relocate(&mut b);
                 Value::BigInt(b)
             }
             ValueKind::Object(mut o) => {
-                r.relocate(&mut o);
+                t.relocate(&mut o);
                 Value::Object(o)
             }
             _ => return,
@@ -236,16 +234,40 @@ unsafe impl<'gc> Collect<'gc> for Value<'gc> {
     }
 }
 
-/// The word itself: an atomic slot stores a value as is
-impl j8gc::Word for Value<'_> {
+impl<'gc> Value<'gc> {
+    /// The word itself
     #[inline]
-    fn into_word(self) -> u64 {
+    pub fn bits(self) -> u64 {
         self.bits
     }
 
+    /// A value from its word.
+    ///
+    /// # Safety
+    /// `bits` came from [`Value::bits`] of a value whose object (if any) is still alive in this `mutate`.
     #[inline]
-    fn from_word(w: u64) -> Self {
-        Self::word(w)
+    pub unsafe fn from_bits(bits: u64) -> Self {
+        Self::word(bits)
+    }
+
+    /// The object it points to, type erased (for [`crate::gc::ValueCell`])
+    #[inline]
+    pub fn erased(self) -> Option<Gc<'gc, Erased>> {
+        match self.kind() {
+            ValueKind::String(s) => Some(erase(s)),
+            ValueKind::Symbol(s) => Some(erase(s)),
+            ValueKind::BigInt(b) => Some(erase(b)),
+            ValueKind::Object(o) => Some(erase(o)),
+            _ => None,
+        }
+    }
+
+    /// The same pointer kind at another address (the collector moved the object)
+    #[inline]
+    #[must_use]
+    pub fn with_address(self, p: *const u8) -> Self {
+        debug_assert!(self.erased().is_some(), "only pointer values move");
+        Self::word((self.bits & !ValueBits::PAYLOAD) | p.expose_provenance() as u64)
     }
 }
 
@@ -351,18 +373,18 @@ impl<'gc> From<JsObject<'gc>> for Value<'gc> {
 
 #[cfg(test)]
 mod tests {
-    use j8gc::Word;
-
     use super::Value;
 
     /// Scalars survive the one-word form; every NaN comes back as a NaN; ±0 and ±∞ keep their sign
     #[test]
     fn word_round_trip() {
         for v in [Value::Undefined, Value::Null, Value::Uninit, Value::Bool(true), Value::Bool(false)] {
-            assert!(Value::from_word(v.into_word()).same_value(v));
+            // SAFETY: scalars carry no pointer
+            assert!(unsafe { Value::from_bits(v.bits()) }.same_value(v));
         }
         for n in [0.0, -0.0, 1.5, -2.0, f64::INFINITY, f64::NEG_INFINITY, f64::MAX, f64::MIN_POSITIVE, f64::NAN, -f64::NAN] {
-            assert!(Value::from_word(Value::Number(n).into_word()).same_value(Value::Number(n)), "{n}");
+            // SAFETY: as above
+            assert!(unsafe { Value::from_bits(Value::Number(n).bits()) }.same_value(Value::Number(n)), "{n}");
         }
     }
 }

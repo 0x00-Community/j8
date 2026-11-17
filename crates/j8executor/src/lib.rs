@@ -6,7 +6,6 @@
 //! handler, and if there is none, unwinds to the caller.
 //! An `Executor` serves only one isolate: it holds the loaded functions, and closures on the heap point back to them by
 //! [`FuncId`].
-#![no_std]
 extern crate alloc;
 
 use j8framework::ValueKind;
@@ -16,7 +15,7 @@ use alloc::rc::Rc;
 use core::cell::{Cell, RefCell};
 
 use j8virtasm::{Constant, Function, FunctionKind, Insn, Mode, Module, PropertyKind, Reg};
-use j8gc::{Collect, Gc};
+use j8framework::{Collect, Gc};
 mod ic;
 mod module;
 
@@ -1106,7 +1105,7 @@ impl Executor {
                     Insn::CheckInit { name } => Self::check_const(a, *acc, func, name)?,
                     Insn::CheckReg { reg, name } => Self::check_const(a, regs[r(reg)], func, name)?,
                     Insn::CheckEnv { depth, slot, name } => {
-                        let v = Self::env_at(f.env, depth).get(usize::from(slot));
+                        let v = Self::env_at(f.env, depth).load(usize::from(slot));
                         Self::check_const(a, v, func, name)?;
                     }
                     Insn::CheckThis => {
@@ -1175,7 +1174,7 @@ impl Executor {
                         }
                     }
                     Insn::LdaEnv { depth, slot } => {
-                        *acc = Self::env_at(f.env, depth).get(usize::from(slot));
+                        *acc = Self::env_at(f.env, depth).load(usize::from(slot));
                     }
                     Insn::StaEnv { depth, slot } => Env::set(Self::env_at(f.env, depth), a.mc, usize::from(slot), *acc),
                     Insn::PushEnv(n) => f.env = Some(Env::with_len(usize::from(n), f.env).alloc(a.mc)),
@@ -1892,9 +1891,15 @@ impl Executor {
     }
 }
 
+#[cfg(feature = "compile")]
+j8framework::paragc::brand!(
+    /// The brand of a parked execution state.
+    ParkedBrand = for<'gc> j8framework::GcCell<'gc, Option<State<'gc>>>
+);
+
 /// Execution state attached to the roots between slices.
 #[cfg(feature = "compile")]
-type Parked = j8gc::DynamicRoot<j8gc::Rootable![j8gc::RefLock<Option<State<'_>>>]>;
+type Parked = j8framework::Root<ParkedBrand>;
 
 /// Result of running one slice.
 #[cfg(feature = "compile")]
@@ -1917,11 +1922,11 @@ impl j8framework::Engine for Executor {
                 let realm = scope.context_of(cx);
                 let mut a = scope.agent(realm, this);
                 let st = match previous {
-                    Some(root) => a.fetch(&root).borrow_mut(a.mc).take().expect("a parked state"),
+                    Some(root) => j8framework::CellExt::borrow_mut(a.fetch(&root), a.mc).take().expect("a parked state"),
                     None => this.script_state(&mut a, main),
                 };
                 match this.execute(&mut a, st, Some(SLICE))? {
-                    Outcome::Paused(st) => Ok(Slice::Paused(a.stash(Gc::new(a.mc, j8gc::RefLock::new(Some(*st)))))),
+                    Outcome::Paused(st) => Ok(Slice::Paused(a.stash::<ParkedBrand>(a.mc.alloc(j8framework::GcCell::new(a.mc, Some(*st)))))),
                     Outcome::Return(v) => {
                         a.run_jobs()?;
                         Ok(Slice::Done(a.global(v)))

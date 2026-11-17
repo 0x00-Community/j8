@@ -1,7 +1,10 @@
 use core::fmt;
 use core::ops::Deref;
 
-use j8gc::{Collect, CowLock, Gc, GcQueue, Lock, Mutation};
+use core::sync::atomic::AtomicU64;
+
+use crate::{Collect, Cow, Gc, GcQueue, Mutation};
+use paragc::Slot;
 
 use crate::{ErrorKind, Job, JsObject, JsString, JsSymbol, Native, NativeFn, ObjectData, ObjectKind, Property, Scope, SymbolData, Value};
 
@@ -120,25 +123,25 @@ pub struct Realm<'gc> {
     pub script_scope: JsObject<'gc>,
     pub symbols: WellKnown<'gc>,
     /// Loaded modules (the index is the module id)
-    pub modules: Gc<'gc, CowLock<'gc, alloc::vec::Vec<crate::ModuleRecord<'gc>>>>,
+    pub modules: Cow<'gc, alloc::vec::Vec<crate::ModuleRecord<'gc>>>,
     /// The global registry of `Symbol.for`
-    pub symbol_registry: Gc<'gc, CowLock<'gc, alloc::vec::Vec<(JsString<'gc>, JsSymbol<'gc>)>>>,
+    pub symbol_registry: Cow<'gc, alloc::vec::Vec<(JsString<'gc>, JsSymbol<'gc>)>>,
     /// The state of `Math.random` (xorshift; 0 means not yet seeded)
-    pub random_state: Gc<'gc, j8gc::Lock<u64>>,
+    pub random_state: AtomicU64,
     /// The microtask queue (lock-free)
-    pub jobs: Gc<'gc, GcQueue<'gc, Job<'gc>>>,
+    pub jobs: GcQueue<'gc, Job<'gc>>,
     /// Template objects of tagged templates: cached by (function index, call site), so the same site always gets the
     /// same one
-    pub templates: Gc<'gc, CowLock<'gc, alloc::collections::BTreeMap<(u32, u32), JsObject<'gc>>>>,
+    pub templates: Cow<'gc, alloc::collections::BTreeMap<(u32, u32), JsObject<'gc>>>,
     /// Compiled regexes shared by (source, flags) (compiled ones are immutable): a direct-mapped cache, one atomic slot
     /// per bucket ([`RegExpCompiled::bucket`]); a miss overwrites the bucket
-    pub regexp_cache: [Gc<'gc, Lock<Option<Gc<'gc, RegExpCompiled<'gc>>>>>; RegExpCompiled::BUCKETS],
+    pub regexp_cache: [Slot<'gc, RegExpCompiled<'gc>>; RegExpCompiled::BUCKETS],
     /// What `RegExp.prototype` looked like when installed (built-in regex methods use it to decide whether they can
     /// skip the protocol and match directly)
-    pub regexp_pristine: Gc<'gc, CowLock<'gc, Option<RegExpPristine<'gc>>>>,
+    pub regexp_pristine: Cow<'gc, Option<RegExpPristine<'gc>>>,
     /// The built-in array iterator / string iterator `next` (when an iterator record's `next` is one of them, no result
     /// object is created; it steps directly)
-    pub builtin_nexts: Gc<'gc, CowLock<'gc, [Option<JsObject<'gc>>; 2]>>,
+    pub builtin_nexts: Cow<'gc, [Option<JsObject<'gc>>; 2]>,
 }
 
 /// The shape of `RegExp.prototype` when installed, plus the slots holding `exec` / `flags` / each flag getter and their
@@ -147,7 +150,7 @@ pub struct Realm<'gc> {
 #[collect(no_drop)]
 pub struct RegExpPristine<'gc> {
     #[collect(require_static)]
-    pub shape: alloc::rc::Rc<crate::Shape>,
+    pub shape: alloc::sync::Arc<crate::Shape>,
     pub slots: alloc::vec::Vec<(usize, crate::Slot<'gc>)>,
 }
 
@@ -157,7 +160,7 @@ pub struct RegExpPristine<'gc> {
 pub struct RegExpCompiled<'gc> {
     pub source: crate::SmallStr,
     pub flags: crate::SmallStr,
-    pub compiled: Gc<'gc, j8gc::Static<alloc::boxed::Box<dyn core::any::Any>>>,
+    pub compiled: Gc<'gc, crate::Static<alloc::boxed::Box<dyn core::any::Any + Send + Sync>>>,
 }
 
 impl RegExpCompiled<'_> {
@@ -186,7 +189,7 @@ impl<'gc> Realm<'gc> {
         let derived = |proto: JsObject<'gc>| ObjectData { proto: Some(proto), ..ObjectData::default() }.alloc(mc);
         let error = derived(object_proto);
         let error_protos = ErrorKind::ALL.map(|k| if k == ErrorKind::Error { error } else { derived(error) });
-        let symbol = |d: &str| Gc::new(mc, SymbolData { description: Some(alloc::format!("Symbol.{d}").into()) });
+        let symbol = |d: &str| mc.alloc(SymbolData { description: Some(alloc::format!("Symbol.{d}").into()) });
         let iterator_proto = derived(object_proto);
         let async_iterator_proto = derived(object_proto);
         let function_proto = derived(object_proto);
@@ -245,20 +248,20 @@ impl<'gc> Realm<'gc> {
                 search: symbol("search"),
                 split: symbol("split"),
             },
-            jobs: Gc::new(mc, GcQueue::new(mc)),
-            regexp_cache: core::array::from_fn(|_| Gc::new(mc, Lock::new(None))),
-            regexp_pristine: Gc::new(mc, CowLock::new(mc, None)),
-            builtin_nexts: Gc::new(mc, CowLock::new(mc, [None, None])),
-            symbol_registry: Gc::new(mc, CowLock::new(mc, alloc::vec::Vec::new())),
-            modules: Gc::new(mc, CowLock::new(mc, alloc::vec::Vec::new())),
-            random_state: Gc::new(mc, j8gc::Lock::new(0)),
-            templates: Gc::new(mc, CowLock::new(mc, alloc::collections::BTreeMap::new())),
+            jobs: GcQueue::new(mc),
+            regexp_cache: core::array::from_fn(|_| Slot::default()),
+            regexp_pristine: Cow::new(mc, None),
+            builtin_nexts: Cow::new(mc, [None, None]),
+            symbol_registry: Cow::new(mc, alloc::vec::Vec::new()),
+            modules: Cow::new(mc, alloc::vec::Vec::new()),
+            random_state: AtomicU64::new(0),
+            templates: Cow::new(mc, alloc::collections::BTreeMap::new()),
             global: derived(object_proto),
             object_proto,
             function_proto,
             array_proto: derived(object_proto),
             string_proto: derived(object_proto),
-            chars: (0u8..128).map(|c| Gc::new(mc, crate::JsStr::from(alloc::string::String::from(char::from(c)).as_str()))).collect(),
+            chars: (0u8..128).map(|c| mc.alloc(crate::JsStr::from(alloc::string::String::from(char::from(c)).as_str()))).collect(),
             number_proto: derived(object_proto),
             boolean_proto: derived(object_proto),
             error_protos,
@@ -291,7 +294,7 @@ impl<'gc> Realm<'gc> {
         if let Some(n) = length {
             d.define("length", prop(f64::from(n).into()));
         }
-        d.define("name", prop(Value::String(Gc::new(mc, crate::JsStr::from(name)))));
+        d.define("name", prop(Value::String(mc.alloc(crate::JsStr::from(name)))));
     }
 
     /// A host function object with a `name`.
@@ -320,6 +323,19 @@ impl<'gc> Realm<'gc> {
 #[collect(no_drop)]
 pub struct Context<'gc>(Gc<'gc, Realm<'gc>>);
 
+impl<'gc> Context<'gc> {
+    /// The realm on the heap
+    pub fn realm(self) -> Gc<'gc, Realm<'gc>> {
+        self.0
+    }
+}
+
+impl<'gc> From<Gc<'gc, Realm<'gc>>> for Context<'gc> {
+    fn from(r: Gc<'gc, Realm<'gc>>) -> Self {
+        Self(r)
+    }
+}
+
 impl<'gc> Deref for Context<'gc> {
     type Target = Realm<'gc>;
 
@@ -336,9 +352,10 @@ pub trait Intrinsics {
 impl<'gc> Scope<'gc, '_> {
     /// Create a new execution context and install its built-in objects.
     pub fn context(&self, intrinsics: &dyn Intrinsics) -> Context<'gc> {
-        let realm = Realm::new(self.mc);
-        intrinsics.install(self.mc, &realm);
-        Context(Gc::new(self.mc, realm))
+        // Into the heap first: installing writes the realm's slots, and the write barrier records their addresses
+        let realm = self.mc.alloc(Realm::new(self.mc));
+        intrinsics.install(self.mc, realm.get());
+        Context(realm)
     }
 
 }

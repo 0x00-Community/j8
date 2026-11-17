@@ -6,7 +6,6 @@
 //! - `#[j8::function]`: exports a function as a JS function
 //!
 //! See `crates/macros/USAGE.md` for usage.
-#![no_std]
 
 pub use j8binding::{Class, ClassHandle, FromJs, IntoJs, Member, Object, Rest, This};
 pub use j8macros::{class, function, object};

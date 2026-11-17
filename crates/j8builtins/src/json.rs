@@ -319,7 +319,7 @@ impl<'gc> Writer<'gc> {
             ValueKind::Number(x) => out.push_str(&j8framework::number_text(x)),
             ValueKind::BigInt(_) => return Err(a.throw(ErrorKind::Type, "Do not know how to serialize a BigInt")),
             ValueKind::Object(o) if !o.borrow().kind.is_callable() => {
-                if self.stack.iter().any(|&s| j8gc::Gc::ptr_eq(s, o)) {
+                if self.stack.iter().any(|&s| j8framework::Gc::ptr_eq(s, o)) {
                     return Err(a.throw(ErrorKind::Type, "Converting circular structure to JSON"));
                 }
                 self.stack.push(o);
@@ -397,7 +397,7 @@ impl<'gc> Writer<'gc> {
             .iter()
             .map(|v| match v.kind() {
                 ValueKind::Number(x) if x.is_finite() => Part::Number(x),
-                ValueKind::String(s) => Part::Text(j8gc::Gc::as_ref(s)),
+                ValueKind::String(s) => Part::Text(j8framework::Gc::get(s)),
                 ValueKind::Bool(true) => Part::Raw("true"),
                 ValueKind::Bool(false) => Part::Raw("false"),
                 _ => Part::Raw("null"),

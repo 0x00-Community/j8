@@ -2,7 +2,6 @@
 use crate::ValueKind;
 use core::cmp::Ordering;
 
-use j8gc::Gc;
 use num_bigint::BigInt;
 use num_traits::{FromPrimitive, One, Signed, ToPrimitive, Zero};
 
@@ -21,7 +20,7 @@ pub enum Numeric<'gc> {
 impl<'gc> Agent<'gc, '_> {
     /// A BigInt value on the heap.
     pub fn bigint(&self, b: BigInt) -> Value<'gc> {
-        Value::BigInt(Gc::new(self.mc, BigIntData(b)))
+        Value::BigInt(self.mc.alloc(BigIntData(b)))
     }
 
     /// ToNumeric: BigInts as is, everything else ToNumber.

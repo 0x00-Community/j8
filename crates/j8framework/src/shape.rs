@@ -3,15 +3,16 @@
 //!
 //! Objects built the same way share shapes: adding a property follows the transition table to (or creates) a child
 //! shape, and the execution layer keeps an inline cache keyed by "shape ⇒ slot index". Shapes contain no `Gc` pointers
-//! (collection moves objects) and are managed with `Rc`; the transition table stores `Weak`, so shapes no object uses
+//! (collection moves objects) and are managed with `Arc`; the transition table stores `Weak`, so shapes no object uses
 //! are freed naturally. Deleting a property, changing attributes, or having too many keys copies out a dictionary
 //! shape, owned exclusively by one object and modified in place; inline caches don't accept it.
-use alloc::rc::{Rc, Weak};
+use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
-use core::cell::RefCell;
 use core::hash::BuildHasherDefault;
 
-use j8gc::Collect;
+use j8lockfree::SegVec;
+
+use crate::Collect;
 use rustc_hash::FxHasher;
 
 use crate::{Property, SmallStr, Slot};
@@ -55,17 +56,17 @@ pub struct Shape {
     keys: Vec<(SmallStr, Attrs)>,
     index: Option<hashbrown::HashMap<SmallStr, u32, BuildHasherDefault<FxHasher>>>,
     /// Child shapes reached by adding a key (with attributes)
-    transitions: RefCell<Vec<(SmallStr, Attrs, Weak<Shape>)>>,
+    transitions: SegVec<(SmallStr, Attrs, Weak<Shape>)>,
     /// The shape this one came from by adding a key: a child shape keeps the whole chain alive (objects only hold the
     /// final shape, and the intermediate ones must not be freed)
-    _parent: Option<Rc<Shape>>,
+    _parent: Option<Arc<Shape>>,
     /// Dictionary shape: owned exclusively by one object, modified in place
     dict: bool,
 }
 
 impl Shape {
     fn new(keys: Vec<(SmallStr, Attrs)>, dict: bool) -> Self {
-        let mut s = Self { keys, index: None, transitions: RefCell::default(), _parent: None, dict };
+        let mut s = Self { keys, index: None, transitions: SegVec::default(), _parent: None, dict };
         s.reindex();
         s
     }
@@ -103,27 +104,27 @@ impl Shape {
     }
 
     /// The shape after adding a key (shared: look up the transition table; create and register one if absent)
-    fn child(self: &Rc<Self>, key: &str, attrs: Attrs) -> Rc<Self> {
-        let mut t = self.transitions.borrow_mut();
+    fn child(self: &Arc<Self>, key: &str, attrs: Attrs) -> Arc<Self> {
+        let t = &self.transitions;
         if let Some(c) = t.iter().find(|(k, a, _)| **k == *key && *a == attrs).and_then(|(_, _, w)| w.upgrade()) {
             return c;
         }
         let mut keys = Vec::with_capacity(self.keys.len() + 1);
         keys.extend(self.keys.iter().cloned());
         keys.push((SmallStr::from(key), attrs));
-        let child = Rc::new(Self { _parent: Some(Rc::clone(self)), ..Self::new(keys, false) });
-        t.retain(|(_, _, w)| w.strong_count() > 0);
-        t.push((SmallStr::from(key), attrs, Rc::downgrade(&child)));
+        let child = Arc::new(Self { _parent: Some(Arc::clone(self)), ..Self::new(keys, false) });
+        // Append-only (other threads may be reading it); entries whose shape died stay as dead weak links
+        t.push((SmallStr::from(key), attrs, Arc::downgrade(&child)));
         child
     }
 
     /// An exclusively owned, modifiable dictionary shape (used in place if already a dictionary and exclusively owned,
     /// otherwise copied)
-    fn dict_mut(this: &mut Rc<Self>) -> &mut Self {
-        if !this.dict || Rc::get_mut(this).is_none() {
-            *this = Rc::new(Self::new(this.keys.clone(), true));
+    fn dict_mut(this: &mut Arc<Self>) -> &mut Self {
+        if !this.dict || Arc::get_mut(this).is_none() {
+            *this = Arc::new(Self::new(this.keys.clone(), true));
         }
-        Rc::get_mut(this).expect("a fresh dictionary shape is unique")
+        Arc::get_mut(this).expect("a fresh dictionary shape is unique")
     }
 }
 
@@ -132,7 +133,7 @@ impl Shape {
 #[collect(no_drop)]
 pub struct Props<'gc> {
     #[collect(require_static)]
-    shape: Option<Rc<Shape>>,
+    shape: Option<Arc<Shape>>,
     slots: Vec<Slot<'gc>>,
 }
 
@@ -151,7 +152,7 @@ impl<'gc> Props<'gc> {
     }
 
     /// The current shape (inline caches identify it by address)
-    pub fn shape(&self) -> Option<&Rc<Shape>> {
+    pub fn shape(&self) -> Option<&Arc<Shape>> {
         self.shape.as_ref()
     }
 
@@ -186,19 +187,19 @@ impl<'gc> Props<'gc> {
     }
 
     /// An empty shared shape (all objects with a given object as prototype start from it; see `ObjectData::shape_root`)
-    pub fn empty() -> Rc<Shape> {
-        Rc::new(Shape::new(Vec::new(), false))
+    pub fn empty() -> Arc<Shape> {
+        Arc::new(Shape::new(Vec::new(), false))
     }
 
     /// Append a new key (the caller guarantees it isn't present); an empty object starts from `root` (if absent, it
     /// builds an unshared chain of its own)
-    pub fn push(&mut self, key: &str, prop: Property<'gc>, root: impl FnOnce() -> Option<Rc<Shape>>) {
+    pub fn push(&mut self, key: &str, prop: Property<'gc>, root: impl FnOnce() -> Option<Arc<Shape>>) {
         let attrs = Attrs::from(&prop);
         if self.shape.is_none() {
             self.shape = root();
         }
         match &mut self.shape {
-            None => self.shape = Some(Rc::new(Shape::new(alloc::vec![(SmallStr::from(key), attrs)], false))),
+            None => self.shape = Some(Arc::new(Shape::new(alloc::vec![(SmallStr::from(key), attrs)], false))),
             Some(s) if s.dict || s.len() >= MAX_FAST => {
                 let d = Shape::dict_mut(s);
                 d.keys.push((SmallStr::from(key), attrs));
@@ -215,7 +216,7 @@ impl<'gc> Props<'gc> {
 
     /// Append a new key, switching the shape directly to `to` (cached by the execution layer: adding this key to the
     /// current shape gives `to`)
-    pub fn push_to(&mut self, to: Rc<Shape>, slot: Slot<'gc>) {
+    pub fn push_to(&mut self, to: Arc<Shape>, slot: Slot<'gc>) {
         debug_assert_eq!(to.len(), self.len() + 1);
         self.shape = Some(to);
         self.slots.push(slot);
@@ -223,7 +224,7 @@ impl<'gc> Props<'gc> {
 
     /// The shared shape that adding a key would reach (the execution layer uses it to fill inline caches; `None` for
     /// dictionary shapes)
-    pub fn transition(&self, key: &str, prop: &Property<'gc>) -> Option<Rc<Shape>> {
+    pub fn transition(&self, key: &str, prop: &Property<'gc>) -> Option<Arc<Shape>> {
         let attrs = Attrs::from(prop);
         match &self.shape {
             None => None,

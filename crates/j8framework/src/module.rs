@@ -4,7 +4,7 @@ use crate::ValueKind;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
-use j8gc::{Collect, Gc};
+use crate::{Collect, Gc};
 
 use crate::{Agent, Error, ErrorKind, FuncId, JsEnv, JsObject, JsString, Key, ObjectKind, Property, PropertyKey, Slot, Value};
 
@@ -63,7 +63,7 @@ pub struct ModuleRecord<'gc> {
     pub path: JsString<'gc>,
     pub env: JsEnv<'gc>,
     #[collect(require_static)]
-    pub info: alloc::rc::Rc<ModuleInfo>,
+    pub info: alloc::sync::Arc<ModuleInfo>,
     pub main: FuncId,
     pub status: ModuleStatus,
     /// The exception thrown during evaluation (importing the same module again throws it again)
@@ -126,7 +126,7 @@ impl<'gc> Agent<'gc, '_> {
         })
     }
 
-    fn module_info(&self, m: u32) -> (alloc::rc::Rc<ModuleInfo>, JsEnv<'gc>, Vec<u32>) {
+    fn module_info(&self, m: u32) -> (alloc::sync::Arc<ModuleInfo>, JsEnv<'gc>, Vec<u32>) {
         let r = &self.modules()[m as usize];
         (r.info.clone(), r.env, r.requested.clone())
     }
@@ -187,7 +187,7 @@ impl<'gc> Agent<'gc, '_> {
     /// The binding's current value (throws a ReferenceError if not yet initialized).
     pub fn binding_value(&mut self, b: ResolvedBinding<'gc>, name: &str) -> Result<Value<'gc>, Error> {
         match b {
-            ResolvedBinding::Slot(env, slot) => match env.get(usize::from(slot)).kind() {
+            ResolvedBinding::Slot(env, slot) => match env.load(usize::from(slot)).kind() {
                 ValueKind::Uninit => Err(self.throw(ErrorKind::Reference, &alloc::format!("Cannot access '{name}' before initialization"))),
                 v => Ok(v.into()),
             },

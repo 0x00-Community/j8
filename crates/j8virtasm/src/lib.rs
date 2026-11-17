@@ -4,7 +4,6 @@
 //!
 //! The bytecode types are `no_std`; the `compile` feature adds the JS ⇒ bytecode compiler
 //! (`Module::try_from(&Source)`).
-#![cfg_attr(not(feature = "compile"), no_std)]
 extern crate alloc;
 
 #[cfg(feature = "compile")]

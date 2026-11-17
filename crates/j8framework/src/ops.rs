@@ -4,7 +4,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use j8gc::Gc;
+use crate::{Gc};
 
 use num_traits::Zero;
 
@@ -176,7 +176,7 @@ impl ErrorKind {
 }
 
 /// An iterator record: the iterator object and its `next` method.
-#[derive(Clone, Copy, Debug, j8gc::Collect)]
+#[derive(Clone, Copy, Debug, crate::Collect)]
 #[collect(no_drop)]
 pub struct IterRecord<'gc> {
     pub iterator: Value<'gc>,
@@ -329,7 +329,7 @@ impl<'gc> Agent<'gc, '_> {
     }
 
     pub fn string(&self, s: &str) -> JsString<'gc> {
-        Gc::new(self.mc, crate::JsStr::from(s))
+        self.mc.alloc(crate::JsStr::from(s))
     }
 
     /// An empty object with `Object.prototype` as its prototype.
@@ -446,7 +446,7 @@ impl<'gc> Agent<'gc, '_> {
             ValueKind::Null => self.string("null"),
             ValueKind::Bool(true) => self.string("true"),
             ValueKind::Bool(false) => self.string("false"),
-            ValueKind::Number(x) => Gc::new(self.mc, crate::JsStr::from(number_text(x))),
+            ValueKind::Number(x) => self.mc.alloc(crate::JsStr::from(number_text(x))),
             ValueKind::Symbol(_) => return Err(self.throw(ErrorKind::Type, "Cannot convert a Symbol value to a string")),
             ValueKind::BigInt(b) => self.string(&format!("{}", b.0)),
             ValueKind::Object(_) => {
@@ -484,7 +484,7 @@ impl<'gc> Agent<'gc, '_> {
             let (l, r) = (self.to_primitive(lhs, Hint::Default)?, self.to_primitive(rhs, Hint::Default)?);
             if matches!(l.kind(), ValueKind::String(_)) || matches!(r.kind(), ValueKind::String(_)) {
                 let (a, b) = (self.to_string(l)?, self.to_string(r)?);
-                return Ok(Value::String(Gc::new(self.mc, crate::JsStr::from(crate::SmallStr::concat(a.text(), b.text())))));
+                return Ok(Value::String(self.mc.alloc(crate::JsStr::from(crate::SmallStr::concat(a.text(), b.text())))));
             }
             (l, r)
         } else {

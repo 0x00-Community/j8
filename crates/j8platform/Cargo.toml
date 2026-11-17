@@ -7,7 +7,6 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-j8gc = { workspace = true, features = ["std"] }
 j8framework.workspace = true
 moremath = { workspace = true, features = ["std"] }
 

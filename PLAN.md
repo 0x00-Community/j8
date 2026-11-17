@@ -1,6 +1,6 @@
 # j8 plan: complete core ECMAScript for test262
 
-The main line is raising the test262 pass rate. Each phase: add cases to the semantics table → clippy clean → riscv `no_std` builds → run the test262 baseline in a snapshot with zero regressions → record newly passing cases in the relevant directories with `J8_TEST262_UPDATE=1` → commit and push.
+The main line is raising the test262 pass rate. Each phase: add cases to the semantics table → clippy clean → run the test262 baseline in a snapshot with zero regressions → record newly passing cases in the relevant directories with `J8_TEST262_UPDATE=1` → commit and push.
 
 Out of scope: Temporal, intl402, ShadowRealm, explicit resource management (using / DisposableStack), import defer, decorators, source phase imports.
 

@@ -12,9 +12,10 @@ mod function;
 mod method;
 mod object;
 mod spec;
+mod trace;
 
 use proc_macro::TokenStream;
-use syn::{LitStr, parse_macro_input};
+use syn::{DeriveInput, LitStr, parse_macro_input};
 
 /// `#[j8::class]` / `#[j8::class("name")]`: placed on an `impl` block; exports the methods as members of a JS
 /// class. Mark methods with `#[js(constructor)]` / `#[js(getter)]` / `#[js(setter)]` / `#[js(static)]` /
@@ -38,6 +39,14 @@ pub fn object(attr: TokenStream, item: TokenStream) -> TokenStream {
 pub fn function(attr: TokenStream, item: TokenStream) -> TokenStream {
     let item = parse_macro_input!(item as syn::ItemFn);
     function::expand(attr.into(), item).unwrap_or_else(syn::Error::into_compile_error).into()
+}
+
+/// `#[derive(Collect)]`: j8 堆类型的追踪 / 重定位（paragc 的 `Trace`）；`#[collect(require_static)]` 放在字段上不追踪它、
+/// 放在类型上整个没有边。
+#[proc_macro_derive(Collect, attributes(collect))]
+pub fn derive_trace(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    trace::expand(&input).unwrap_or_else(syn::Error::into_compile_error).into()
 }
 
 /// Reads the JSON at `$CARGO_MANIFEST_DIR/<path>` and generates all the enums in it.

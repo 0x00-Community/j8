@@ -9,12 +9,12 @@
 //! - Write: a writable data property owned by the receiver
 //! - Add property: old shape ⇒ new shape; assignments also check the shape of every level of the prototype chain (no
 //! one on the chain has since added a setter / read-only property of the same name)
-use alloc::rc::{Rc, Weak};
+use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
 
 use j8framework::{JsObject, ObjectData, ObjectKind, Shape, Slot, Value};
-use j8gc::Mutation;
+use j8framework::{Mutation};
 
 /// Address in the cache of an empty object that has no shape yet (real shape addresses are 8-aligned, so never this)
 const EMPTY: usize = 1;
@@ -23,7 +23,7 @@ const DEPTH: usize = 4;
 
 /// Address of the object's current shape
 fn addr(d: &ObjectData<'_>) -> usize {
-    d.props.shape().map_or(EMPTY, |s| Rc::as_ptr(s) as usize)
+    d.props.shape().map_or(EMPTY, |s| Arc::as_ptr(s) as usize)
 }
 
 /// All own properties are in the shape (and their names pass [`Ic::name_ok`]), and the shape does not mutate in place
@@ -59,7 +59,7 @@ pub(crate) struct Ic {
     /// Shape addresses of each prototype level
     chain: [Cell<usize>; DEPTH],
     /// Add property: the shape transitioned to
-    to: RefCell<Option<Rc<Shape>>>,
+    to: RefCell<Option<Arc<Shape>>>,
     /// Keeps the recognized shape addresses alive
     keep: RefCell<Vec<Weak<Shape>>>,
 }
@@ -78,7 +78,7 @@ impl Ic {
 
     fn keep(&self, d: &ObjectData<'_>) -> usize {
         if let Some(s) = d.props.shape() {
-            self.keep.borrow_mut().push(Rc::downgrade(s));
+            self.keep.borrow_mut().push(Arc::downgrade(s));
         }
         addr(d)
     }
@@ -208,7 +208,7 @@ impl Ic {
                     return false;
                 }
                 drop(d);
-                o.borrow_mut(mc).push_to(Rc::clone(to), Slot::Data(v));
+                o.borrow_mut(mc).push_to(Arc::clone(to), Slot::Data(v));
                 true
             }
         }

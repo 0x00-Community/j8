@@ -5,15 +5,16 @@
 //! flattened and cached only when the content is first needed (so a `s += c` loop no longer copies the whole string
 //! each time). Flattening and dropping are both iterative, so ropes hundreds of thousands of levels deep don't overflow
 //! the stack. No `Gc`: the GC doesn't need to manage it.
-use alloc::rc::Rc;
+use alloc::sync::Arc;
 use alloc::string::String;
 use alloc::vec::Vec;
-use core::cell::{Cell, OnceCell};
 use core::cmp::Ordering;
 use core::fmt;
 use core::hash::{Hash, Hasher};
 
-use j8gc::Collect;
+use j8lockfree::OnceBox;
+
+use crate::{Collect};
 use smol_str::SmolStr;
 
 /// Below this many bytes, concatenation flattens directly (copying a short string is cheaper than building a rope node)
@@ -27,14 +28,15 @@ pub struct SmallStr(Repr);
 #[derive(Clone)]
 enum Repr {
     Flat(SmolStr),
-    Rope(Rc<Rope>),
+    Rope(Arc<Rope>),
 }
 
-/// A rope node: holds two halves before flattening; after flattening the halves are released and only the result kept.
+/// A rope node: two halves plus the flattened text once someone needed it. The halves stay until the node is dropped
+/// (other threads may be reading them while one flattens; freeing them early would need hazard pointers).
 struct Rope {
     len: usize,
-    flat: OnceCell<SmolStr>,
-    halves: Cell<Option<(SmallStr, SmallStr)>>,
+    flat: OnceBox<SmolStr>,
+    halves: Option<(SmallStr, SmallStr)>,
 }
 
 impl SmallStr {
@@ -53,7 +55,7 @@ impl SmallStr {
             s.push_str(b);
             return Self::from(s.as_str());
         }
-        Self(Repr::Rope(Rc::new(Rope { len: la + lb, flat: OnceCell::new(), halves: Cell::new(Some((a.clone(), b.clone()))) })))
+        Self(Repr::Rope(Arc::new(Rope { len: la + lb, flat: OnceBox::default(), halves: Some((a.clone(), b.clone())) })))
     }
 
     /// Byte count (without flattening)
@@ -73,11 +75,10 @@ impl SmallStr {
 }
 
 impl Rope {
-    /// Concatenate the leaves in order: take our own two halves (not needed after flattening); nested nodes may be
-    /// shared by other strings, so borrow them and put them back
+    /// Concatenate the leaves in order (nested nodes that are already flat contribute their text)
     fn flatten(&self) -> SmolStr {
         let mut out = String::with_capacity(self.len);
-        let (l, r) = self.halves.take().expect("an unflattened rope keeps its halves");
+        let (l, r) = self.halves.clone().expect("a rope keeps its halves");
         let mut stack = alloc::vec![r, l];
         while let Some(s) = stack.pop() {
             match &s.0 {
@@ -85,9 +86,7 @@ impl Rope {
                 Repr::Rope(n) => match n.flat.get() {
                     Some(f) => out.push_str(f),
                     None => {
-                        let halves = n.halves.take();
-                        let (a, b) = halves.clone().expect("an unflattened rope keeps its halves");
-                        n.halves.set(halves);
+                        let (a, b) = n.halves.clone().expect("a rope keeps its halves");
                         stack.push(b);
                         stack.push(a);
                     }
@@ -108,7 +107,7 @@ impl Drop for Rope {
         }
         while let Some(s) = stack.pop() {
             if let Repr::Rope(rc) = s.0
-                && let Ok(node) = Rc::try_unwrap(rc)
+                && let Ok(mut node) = Arc::try_unwrap(rc)
                 && let Some((l, r)) = node.halves.take()
             {
                 stack.push(l);
@@ -180,7 +179,7 @@ impl Hash for SmallStr {
 #[collect(require_static)]
 pub struct JsStr {
     text: SmallStr,
-    utf16: OnceCell<Utf16>,
+    utf16: OnceBox<Utf16>,
 }
 
 /// The UTF-16 view.
@@ -226,7 +225,7 @@ impl JsStr {
 
 impl From<SmallStr> for JsStr {
     fn from(text: SmallStr) -> Self {
-        Self { text, utf16: OnceCell::new() }
+        Self { text, utf16: OnceBox::default() }
     }
 }
 

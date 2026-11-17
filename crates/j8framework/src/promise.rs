@@ -2,7 +2,7 @@
 use crate::ValueKind;
 use alloc::vec::Vec;
 
-use j8gc::{Gc, Lock};
+use crate::Gc;
 
 use crate::{Agent, Error, ErrorKind, Job, JsObject, ObjectData, ObjectKind, Reaction, Request, Resume, Settled, Step, Value};
 
@@ -18,7 +18,7 @@ impl<'gc> Agent<'gc, '_> {
 
     /// A Promise's pair of resolve / reject functions (sharing an "already resolved" flag).
     pub fn promise_resolvers(&self, promise: JsObject<'gc>) -> (JsObject<'gc>, JsObject<'gc>) {
-        let done = Gc::new(self.mc, Lock::new(false));
+        let done = self.mc.alloc(core::sync::atomic::AtomicBool::new(false));
         let make = |reject| {
             let f = ObjectData { kind: ObjectKind::Resolver { promise, reject, done }, proto: Some(self.realm.function_proto), ..ObjectData::default() }.alloc(self.mc);
             self.realm.name_function(self.mc, f, "", Some(1));
@@ -30,8 +30,7 @@ impl<'gc> Agent<'gc, '_> {
     /// Call a resolve / reject function.
     pub fn run_resolver(&mut self, f: JsObject<'gc>, value: Value<'gc>) -> Result<Value<'gc>, Error> {
         let ObjectKind::Resolver { promise, reject, done } = f.borrow().kind else { unreachable!("a resolver function") };
-        if !done.get() {
-            done.set(self.mc, true);
+        if !done.swap(true, core::sync::atomic::Ordering::AcqRel) {
             if reject {
                 self.reject_promise(promise, value);
             } else {

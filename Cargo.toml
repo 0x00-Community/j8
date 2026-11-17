@@ -60,7 +60,7 @@ j8 = { version = "0.1.2", path = "." }
 clap = { version = "4.6", features = ["derive"] }
 moremath = { version = "=0.2.3", default-features = false }
 libm = "0.2"
-j8gc = { version = "0.1.2", path = "crates/j8gc", default-features = false }
+paragc = "0.4.0"
 j8lockfree = { version = "0.1.2", path = "crates/j8lockfree" }
 smol_str = { version = "0.3", default-features = false }
 hashbrown = { version = "0.17", default-features = false }

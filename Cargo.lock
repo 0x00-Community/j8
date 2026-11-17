@@ -157,6 +157,31 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "417bef24afe1460300965a25ff4a24b8b45ad011948302ec221e8a0a81eb2c79"
 
 [[package]]
+name = "crossbeam-deque"
+version = "0.8.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "622f3fc73690be383c7214310406f28a90e6edeadc3cea882f9d71e495b9711a"
+dependencies = [
+ "crossbeam-epoch",
+ "crossbeam-utils",
+]
+
+[[package]]
+name = "crossbeam-epoch"
+version = "0.9.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dc74980687109a3b14c72fd458107bf0baa1da1a1a805e178d15501ba9b86d9d"
+dependencies = [
+ "crossbeam-utils",
+]
+
+[[package]]
+name = "crossbeam-utils"
+version = "0.8.23"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a31eee39dddec8330830986fcd7625edb5a24ec90ea038215273bbc3adb08ac6"
+
+[[package]]
 name = "displaydoc"
 version = "0.2.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -359,7 +384,7 @@ name = "j8binding"
 version = "0.1.2"
 dependencies = [
  "j8framework",
- "j8gc",
+ "j8lockfree",
 ]
 
 [[package]]
@@ -367,7 +392,6 @@ name = "j8builtins"
 version = "0.1.2"
 dependencies = [
  "j8framework",
- "j8gc",
  "libm",
  "num-bigint 0.4.8",
  "num-traits",
@@ -400,7 +424,6 @@ version = "0.1.2"
 dependencies = [
  "j8builtins",
  "j8framework",
- "j8gc",
  "j8platform",
  "j8virtasm",
  "ryu-js",
@@ -411,33 +434,16 @@ name = "j8framework"
 version = "0.1.2"
 dependencies = [
  "hashbrown",
- "j8gc",
+ "j8lockfree",
+ "j8macros",
  "libm",
+ "moremath",
  "num-bigint 0.4.8",
  "num-traits",
+ "paragc",
  "rustc-hash",
  "ryu-js",
  "smol_str",
-]
-
-[[package]]
-name = "j8gc"
-version = "0.1.2"
-dependencies = [
- "j8gc-macros",
- "j8lockfree",
- "libc",
- "moremath",
-]
-
-[[package]]
-name = "j8gc-macros"
-version = "0.1.2"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
- "synstructure 0.13.2",
 ]
 
 [[package]]
@@ -471,7 +477,6 @@ name = "j8platform"
 version = "0.1.2"
 dependencies = [
  "j8framework",
- "j8gc",
  "moremath",
 ]
 
@@ -866,6 +871,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "paragc"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fdff3d00e20b21dc79f47b4ea680b06f59569361957110e4f3c8e0db0a7c8323"
+dependencies = [
+ "crossbeam-deque",
+ "crossbeam-utils",
+ "libc",
+ "paragc-macros",
+]
+
+[[package]]
+name = "paragc-macros"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dcf536ffd9b948aa2f9bec292eca480e1e409225e060b30e5c2497fce1128377"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "percent-encoding"
 version = "2.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1114,17 +1142,6 @@ dependencies = [
 
 [[package]]
 name = "synstructure"
-version = "0.13.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "728a70f3dbaf5bab7f0c4b1ac8d7ae5ea60a4b5549c8a5914361c99147a709d2"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
-]
-
-[[package]]
-name = "synstructure"
 version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "901704edd0dfe137f1987838ee4f259e4e063c31371bdb423f7ae38ec6f77f02"
@@ -1295,7 +1312,7 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.10",
- "synstructure 0.14.0",
+ "synstructure",
 ]
 
 [[package]]
@@ -1316,7 +1333,7 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.10",
- "synstructure 0.14.0",
+ "synstructure",
 ]
 
 [[package]]

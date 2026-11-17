@@ -340,7 +340,7 @@ impl Helpers {
                 let mut cur = a.get_prototype_of(it)?;
                 let mut found = false;
                 while let Some(p) = cur {
-                    if j8gc::Gc::ptr_eq(p, a.realm.iterator_proto) {
+                    if j8framework::Gc::ptr_eq(p, a.realm.iterator_proto) {
                         found = true;
                         break;
                     }
@@ -396,7 +396,7 @@ impl Helpers {
         let Some(o) = this.as_object() else {
             return Err(a.throw(ErrorKind::Type, "setter called on a non-object"));
         };
-        if j8gc::Gc::ptr_eq(o, a.realm.iterator_proto) {
+        if j8framework::Gc::ptr_eq(o, a.realm.iterator_proto) {
             return Err(a.throw(ErrorKind::Type, "Cannot assign to this property of Iterator.prototype"));
         }
         if a.get_own_property(o, key)?.is_none() {

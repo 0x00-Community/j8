@@ -1,6 +1,6 @@
 use alloc::collections::BTreeMap;
 
-use j8gc::Collect;
+use crate::{Collect};
 
 /// The id of a JS function within an isolate (shared by all execution layers).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Collect)]

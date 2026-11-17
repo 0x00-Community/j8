@@ -1,5 +1,4 @@
 //! j8builtins: implementation of [`Intrinsics`]; installs the built-in objects into a new [`Realm`] (`no_std`).
-#![no_std]
 #![expect(clippy::unnecessary_wraps, reason = "host functions all share the NativeFn signature; Result can't be dropped just because one cannot fail")]
 extern crate alloc;
 
@@ -25,7 +24,7 @@ mod text;
 mod typed;
 mod weak;
 
-use j8gc::Mutation;
+use j8framework::{Mutation};
 use j8framework::{Intrinsics, JsObject, Realm, Value};
 
 /// The default set of built-in objects.
@@ -143,7 +142,7 @@ impl<'gc> Installer<'_, 'gc> {
 
     /// A string value on the heap.
     fn text(&self, s: &str) -> Value<'gc> {
-        Value::String(j8gc::Gc::new(self.mc, j8framework::JsStr::from(s)))
+        Value::String(self.mc.alloc(j8framework::JsStr::from(s)))
     }
 
     /// A plain object (prototype `Object.prototype`).

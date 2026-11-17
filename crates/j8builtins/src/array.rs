@@ -496,7 +496,7 @@ impl Arrays {
             .iter()
             .map(|v| match v.kind() {
                 ValueKind::Number(x) => Part::Number(x),
-                ValueKind::String(s) => Part::Text(j8gc::Gc::as_ref(s)),
+                ValueKind::String(s) => Part::Text(j8framework::Gc::get(s)),
                 ValueKind::Bool(true) => Part::Text("true"),
                 ValueKind::Bool(false) => Part::Text("false"),
                 _ => Part::Text(""),
@@ -885,7 +885,7 @@ impl Arrays {
             .iter()
             .map(|v| match v.kind() {
                 ValueKind::Number(_) => next.next().map_or("", String::as_str),
-                ValueKind::String(s) => &**j8gc::Gc::as_ref(s),
+                ValueKind::String(s) => &**j8framework::Gc::get(s),
                 ValueKind::Bool(true) => "true",
                 ValueKind::Bool(false) => "false",
                 _ => "null",

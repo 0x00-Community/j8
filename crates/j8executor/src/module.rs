@@ -24,8 +24,8 @@ impl Executor {
             slots[usize::from(s)] = Value::Uninit;
         }
         let env = j8framework::Env::new(slots, None).alloc(a.mc);
-        let info = alloc::rc::Rc::new(info);
-        let record = j8framework::ModuleRecord { path: a.string(path), env, info: alloc::rc::Rc::clone(&info), main, status: ModuleStatus::Linked, error: None, requested: Vec::new(), imports: Vec::new(), namespace: None, meta: None };
+        let info = alloc::sync::Arc::new(info);
+        let record = j8framework::ModuleRecord { path: a.string(path), env, info: alloc::sync::Arc::clone(&info), main, status: ModuleStatus::Linked, error: None, requested: Vec::new(), imports: Vec::new(), namespace: None, meta: None };
         let index = a.push_module(&record);
         self.module_of.borrow_mut().insert(main.0 - j8virtasm::Module::MAIN, index);
         let mut requested = Vec::with_capacity(info.requests.len());
@@ -48,7 +48,7 @@ impl Executor {
         seen.push(m);
         let (info, requested, path, done) = {
             let r = &a.modules()[m as usize];
-            (alloc::rc::Rc::clone(&r.info), r.requested.clone(), String::from(&**r.path), r.imports.len() == r.info.imports.len() && !r.info.imports.is_empty())
+            (alloc::sync::Arc::clone(&r.info), r.requested.clone(), String::from(&**r.path), r.imports.len() == r.info.imports.len() && !r.info.imports.is_empty())
         };
         for &r in &requested {
             Self::link(a, r, seen)?;

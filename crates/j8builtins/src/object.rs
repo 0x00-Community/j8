@@ -374,7 +374,7 @@ impl Objects {
         let o = a.to_object(this)?;
         let mut cur = a.get_prototype_of(v)?;
         while let Some(c) = cur {
-            if j8gc::Gc::ptr_eq(c, o) {
+            if j8framework::Gc::ptr_eq(c, o) {
                 return Ok(true.into());
             }
             cur = a.get_prototype_of(c)?;

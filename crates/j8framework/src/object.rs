@@ -3,7 +3,7 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::fmt;
 
-use j8gc::{Collect, Gc, Lock, Mutation, RefLock};
+use crate::{Collect, Gc, GcCell, Mutation, ValueCell};
 
 use crate::{Agent, Error, FuncId, Key, Value};
 
@@ -35,14 +35,14 @@ pub type JsBigInt<'gc> = Gc<'gc, BigIntData>;
 pub struct RegExpData<'gc> {
     pub source: JsString<'gc>,
     pub flags: JsString<'gc>,
-    pub compiled: Gc<'gc, j8gc::Static<Box<dyn core::any::Any>>>,
+    pub compiled: Gc<'gc, crate::Static<Box<dyn core::any::Any + Send + Sync>>>,
     /// The Annex B legacy feature (`compile`) is usable: only for objects created by %RegExp% itself (not subclass
     /// instances)
     pub legacy: bool,
 }
 
-/// An object on the heap (interior mutability; writes go through gc-arena's write barrier).
-pub type JsObject<'gc> = Gc<'gc, RefLock<ObjectData<'gc>>>;
+/// An object on the heap (interior mutability through [`GcCell`]; writes go through paragc's write barrier).
+pub type JsObject<'gc> = Gc<'gc, GcCell<'gc, ObjectData<'gc>>>;
 
 /// A scope environment on the heap: bindings captured by inner functions live here, stored by slot.
 pub type JsEnv<'gc> = Gc<'gc, Env<'gc>>;
@@ -55,41 +55,40 @@ pub type NativeFn = for<'gc, 'x> fn(&mut Agent<'gc, 'x>, Value<'gc>, &[Value<'gc
 #[derive(Debug, Collect)]
 #[collect(no_drop)]
 pub struct Env<'gc> {
-    slots: Box<[Lock<Value<'gc>>]>,
+    slots: Box<[ValueCell<'gc>]>,
     pub parent: Option<JsEnv<'gc>>,
 }
 
 impl<'gc> Env<'gc> {
     /// An environment holding `slots`
     pub fn new(slots: Vec<Value<'gc>>, parent: Option<JsEnv<'gc>>) -> Self {
-        Self { slots: slots.into_iter().map(Lock::new).collect(), parent }
+        Self { slots: slots.into_iter().map(ValueCell::new).collect(), parent }
     }
 
     /// An environment of `n` slots, all `undefined`
     pub fn with_len(n: usize, parent: Option<JsEnv<'gc>>) -> Self {
-        Self { slots: (0..n).map(|_| Lock::new(Value::Undefined)).collect(), parent }
+        Self { slots: (0..n).map(|_| ValueCell::new(Value::Undefined)).collect(), parent }
     }
 
     pub fn alloc(self, mc: &Mutation<'gc>) -> JsEnv<'gc> {
-        Gc::new(mc, self)
+        mc.alloc(self)
     }
 
     /// Slot `i`
     #[inline]
-    pub fn get(&self, i: usize) -> Value<'gc> {
+    pub fn load(&self, i: usize) -> Value<'gc> {
         self.slots[i].get()
     }
 
     /// The current values of every slot (a copy, e.g. for a per-iteration binding environment)
     pub fn values(&self) -> Vec<Value<'gc>> {
-        self.slots.iter().map(Lock::get).collect()
+        self.slots.iter().map(ValueCell::get).collect()
     }
 
     /// Writes slot `i` of `env`
     #[inline]
     pub fn set(env: JsEnv<'gc>, mc: &Mutation<'gc>, i: usize, v: Value<'gc>) {
-        // SAFETY: the slot is part of `env` itself (its own boxed slice, traced by its `Collect`)
-        unsafe { env.slots[i].set_in(mc, env, v) };
+        env.get().slots[i].set(mc, v);
     }
 }
 
@@ -351,31 +350,25 @@ impl From<Value<'_>> for MapKey {
 #[derive(Debug)]
 pub struct Collection<'gc> {
     entries: Vec<Option<(Value<'gc>, Value<'gc>)>>,
-    /// Entries that may have had young-generation pointers written into them since the last minor collection start here
-    /// (appended ones naturally come after it)
-    young_from: usize,
-    index: j8gc::Static<hashbrown::HashMap<MapKey, usize, core::hash::BuildHasherDefault<rustc_hash::FxHasher>>>,
+    index: crate::Static<hashbrown::HashMap<MapKey, usize, core::hash::BuildHasherDefault<rustc_hash::FxHasher>>>,
     pub size: usize,
     pub weak: bool,
 }
 
-unsafe impl<'gc> Collect<'gc> for Collection<'gc> {
-    fn trace(&self, t: &mut j8gc::Trace<'_>) {
-        t.trace(&self.entries);
+// SAFETY: every entry is traced; moved keys get their new address in the index
+unsafe impl crate::Trace for Collection<'_> {
+    fn trace(&self, t: &mut crate::Tracer<'_>) {
+        self.entries.trace(t);
     }
 
     /// Only moved keys (objects / Symbols, indexed by address) get their new address in the index. Pre-move addresses
-    /// (young generation / pages being evacuated) never overlap post-move ones, so delete-then-insert never hits
-    /// another key. A minor collection only looks at entries written since the last one (older ones only point into the
-    /// old generation and do not change).
-    fn relocate(&mut self, r: &mut j8gc::Relocate<'_>) {
-        let from = if r.young_only() { self.young_from } else { 0 };
-        self.young_from = self.entries.len();
-        for (i, entry) in self.entries.iter_mut().enumerate().skip(from) {
+    /// (blocks being evacuated) never overlap post-move ones, so delete-then-insert never hits another key.
+    fn relocate(&mut self, t: &mut crate::Tracer<'_>) {
+        for (i, entry) in self.entries.iter_mut().enumerate() {
             let Some((k, v)) = entry else { continue };
             let old = matches!(k.kind(), ValueKind::Object(_) | ValueKind::Symbol(_)).then(|| MapKey::from(*k));
-            r.relocate(k);
-            r.relocate(v);
+            crate::Trace::relocate(k, t);
+            crate::Trace::relocate(v, t);
             if let Some(old) = old {
                 let new = MapKey::from(*k);
                 if new != old {
@@ -389,7 +382,7 @@ unsafe impl<'gc> Collect<'gc> for Collection<'gc> {
 
 impl<'gc> Collection<'gc> {
     pub fn new(weak: bool) -> Self {
-        Self { entries: Vec::new(), young_from: 0, index: j8gc::Static(hashbrown::HashMap::default()), size: 0, weak }
+        Self { entries: Vec::new(), index: crate::Static(hashbrown::HashMap::default()), size: 0, weak }
     }
 
     /// Entries in insertion order (deleted ones are holes)
@@ -418,7 +411,7 @@ impl<'gc> Collection<'gc> {
             hashbrown::hash_map::Entry::Occupied(e) => {
                 let i = *e.get();
                 self.entries[i] = Some((key, value));
-                self.young_from = self.young_from.min(i);
+                
             }
             hashbrown::hash_map::Entry::Vacant(e) => {
                 e.insert(self.entries.len());
@@ -624,7 +617,7 @@ pub struct ArgumentsMap<'gc> {
 }
 
 /// Rust data inside a host object (retrieved by type; mutable borrows via `RefCell`).
-pub type HostData<'gc> = Gc<'gc, j8gc::Static<core::cell::RefCell<Box<dyn core::any::Any>>>>;
+pub type HostData<'gc> = Gc<'gc, crate::Static<j8lockfree::AtomicRefCell<Box<dyn core::any::Any + Send + Sync>>>>;
 
 /// The kind of an object: internal slots carried beyond those of an ordinary object.
 #[derive(Debug, Default, Collect)]
@@ -646,7 +639,7 @@ pub enum ObjectKind<'gc> {
     Coroutine(Box<Coroutine<'gc>>),
     Promise { state: Settled<'gc>, reactions: Vec<Reaction<'gc>> },
     /// Promise resolve / reject functions: share one "already resolved" flag
-    Resolver { promise: JsObject<'gc>, reject: bool, done: Gc<'gc, Lock<bool>> },
+    Resolver { promise: JsObject<'gc>, reject: bool, done: Gc<'gc, core::sync::atomic::AtomicBool> },
     RegExp(RegExpData<'gc>),
     /// Primitive wrapper object (`new Boolean(…)` / `new Number(…)` / `new String(…)` / `Object(sym)` …): holds the
     /// wrapped primitive
@@ -766,7 +759,7 @@ pub struct ObjectData<'gc> {
     /// The empty shape that objects with this object as prototype start from (so objects with the same prototype that
     /// add properties the same way share shapes). Not a `Gc`, so changing it needs no write barrier
     #[collect(require_static)]
-    pub shape_root: core::cell::RefCell<Option<alloc::rc::Rc<crate::Shape>>>,
+    pub shape_root: j8lockfree::OnceBox<alloc::sync::Arc<crate::Shape>>,
     /// Symbol-keyed properties
     pub symbols: Few<(JsSymbol<'gc>, Property<'gc>)>,
     /// Private members (`#x`): keys are private names generated when the class is evaluated; kept apart from ordinary
@@ -1002,17 +995,17 @@ impl<'gc> ObjectData<'gc> {
     fn push_prop(&mut self, key: &str, prop: Property<'gc>) {
         self.digit_keys |= key.as_bytes().first().is_some_and(u8::is_ascii_digit);
         let proto = self.proto;
-        self.props.push(key, prop, || proto.and_then(|p| p.try_borrow().ok().map(|d| d.root_shape())));
+        self.props.push(key, prop, || proto.and_then(|p| p.try_borrow().map(|d| d.root_shape())));
     }
 
     /// The empty shape that objects with this object as prototype start from (created if absent)
-    pub fn root_shape(&self) -> alloc::rc::Rc<crate::Shape> {
-        self.shape_root.borrow_mut().get_or_insert_with(crate::Props::empty).clone()
+    pub fn root_shape(&self) -> alloc::sync::Arc<crate::Shape> {
+        self.shape_root.get_or_init(crate::Props::empty).clone()
     }
 
     /// Append an entry, switching the shape directly to `to` (given by the execution layer's inline cache: adding one
     /// key to the current shape yields it, and the new key is its last one).
-    pub fn push_to(&mut self, to: alloc::rc::Rc<crate::Shape>, slot: Slot<'gc>) {
+    pub fn push_to(&mut self, to: alloc::sync::Arc<crate::Shape>, slot: Slot<'gc>) {
         self.digit_keys |= to.key(to.len() - 1).as_bytes().first().is_some_and(u8::is_ascii_digit);
         self.props.push_to(to, slot);
     }
@@ -1084,7 +1077,7 @@ impl<'gc> ObjectData<'gc> {
     }
 
     pub fn alloc(self, mc: &Mutation<'gc>) -> JsObject<'gc> {
-        Gc::new(mc, RefLock::new(self))
+        mc.alloc(GcCell::new(mc, self))
     }
 }
 

@@ -3,18 +3,18 @@
 use crate::ValueKind;
 use alloc::boxed::Box;
 
-use j8gc::Gc;
+use crate::{Gc};
 
 use crate::{Agent, Error, ErrorKind, JsObject, JsSymbol, Property, Slot, SymbolData, Value};
 
 impl<'gc> Agent<'gc, '_> {
     /// A new private name (its description is `#x`).
     pub fn private_name(&self, description: &str) -> JsSymbol<'gc> {
-        Gc::new(self.mc, SymbolData { description: Some(Box::from(description)) })
+        self.mc.alloc(SymbolData { description: Some(Box::from(description)) })
     }
 
     fn private_label(key: JsSymbol<'gc>) -> &'gc str {
-        key.as_ref().description.as_deref().unwrap_or("#")
+        Gc::get(key).description.as_deref().unwrap_or("#")
     }
 
     fn private_holder(&self, obj: Value<'gc>, key: JsSymbol<'gc>, verb: &str) -> Result<JsObject<'gc>, Error> {
