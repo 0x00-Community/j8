@@ -321,7 +321,32 @@ pub enum Reaction<'gc> {
     Then { on_fulfilled: Value<'gc>, on_rejected: Value<'gc>, capability: Option<Capability<'gc>> },
     /// `await`: resume this coroutine
     Await { coroutine: JsObject<'gc> },
+    /// Host code waiting on the Promise ([`Agent::on_settled`](crate::Agent::on_settled))
+    Host { hook: HostHook<'gc> },
 }
+
+/// Rust code to run once a Promise settles, on the runtime thread: it gets the settled value and whether it was a
+/// rejection. Registered with [`Agent::on_settled`](crate::Agent::on_settled).
+pub struct HostReaction(pub Box<HostReactionFn>);
+
+/// The function inside a [`HostReaction`]: the agent, the settled value, whether it was a rejection
+pub type HostReactionFn = dyn for<'g, 'x> FnOnce(&mut crate::Agent<'g, 'x>, Value<'g>, bool) + Send + Sync;
+
+impl HostReaction {
+    /// Wraps `f` (a constructor, so the closure gets the right higher-ranked signature)
+    pub fn new(f: impl for<'g, 'x> FnOnce(&mut crate::Agent<'g, 'x>, Value<'g>, bool) + Send + Sync + 'static) -> Self {
+        Self(Box::new(f))
+    }
+}
+
+impl core::fmt::Debug for HostReaction {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("HostReaction")
+    }
+}
+
+/// A [`HostReaction`] on the heap, taken out when it runs (a Promise runs each reaction at most once).
+pub type HostHook<'gc> = Gc<'gc, crate::Static<j8lockfree::AtomicRefCell<Option<HostReaction>>>>;
 
 /// PromiseCapability: the result Promise and its resolve / reject functions.
 #[derive(Clone, Copy, Debug, Collect)]

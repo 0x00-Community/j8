@@ -21,16 +21,18 @@ What you use from it:
 | `#[j8::object]` / `#[j8::class]` / `#[j8::function]` / `#[j8::module]` | Bind Rust to JS |
 | `j8::runtime!` | Declare a runtime: which bound types go where, plus a JS prelude |
 | `j8::Runtime` | A ready execution environment: `eval`, `eval_module`, `run_until_idle`, `set`, `text`, `enter` |
-| `j8::Host` / `j8::HostPlatform` | The trait `runtime!` implements / the platform that serves its modules and queues its async work |
+| `j8::Host` / `j8::HostPlatform` | The trait `runtime!` implements / the platform that serves its native modules (stateless: runtimes may share one) |
 | `j8::frame` | `j8framework`: `Agent`, `Error`, `ErrorKind`, `Value`, `Platform`, `Source` … |
 | `j8::platform::DefaultPlatform` | The standard-library platform: clock, `console.log` to stdout, ES modules from files |
 | `j8::executor::Executor` | The bytecode executor; `with_tier` adds the JIT |
+| `j8::Promise<T>` | A JS promise awaited from Rust (see [5.4](#54-awaiting-a-js-promise-from-rust)) |
 | `j8::Glue` | `Glue::spawn` / `Glue::settle`: hand-made promises (see [5.3](#53-a-method-that-returns-a-promise)) |
 | `j8::NATIVE` | `"__j8_native"`, the name of the hidden registry object |
 
 ## 2. The smallest host
 
 ```rust,ignore
+use std::num::NonZeroUsize;
 use std::process::ExitCode;
 
 use j8::executor::Executor;
@@ -69,27 +71,30 @@ j8::runtime! {
 
 fn main() -> ExitCode {
     let platform = Hello::platform(DefaultPlatform::default());
-    let mut rt = match Hello::runtime(&platform, Executor::default()) {
-        Ok(rt) => rt,
-        Err(e) => {
-            eprintln!("prelude failed: {e}");
-            return ExitCode::FAILURE;
+    // One loop thread is enough for one runtime; give more for many
+    j8::EventLoopSet::scope(&platform, NonZeroUsize::MIN, |set| {
+        let rt = match Hello::runtime(set, Executor::default()) {
+            Ok(rt) => rt,
+            Err(e) => {
+                eprintln!("prelude failed: {e}");
+                return ExitCode::FAILURE;
+            }
+        };
+        match rt.eval("home()", "main.js").and_then(|g| rt.run_until_idle().map(|()| g)) {
+            Ok(g) => {
+                println!("{}", rt.text(&g));
+                ExitCode::SUCCESS
+            }
+            Err(Error::Exception(g)) => {
+                eprintln!("Uncaught {}", rt.text(&g));
+                ExitCode::FAILURE
+            }
+            Err(e) => {
+                eprintln!("{e}");
+                ExitCode::FAILURE
+            }
         }
-    };
-    match rt.eval("home()", "main.js").and_then(|g| rt.run_until_idle().map(|()| g)) {
-        Ok(g) => {
-            println!("{}", rt.text(&g));
-            ExitCode::SUCCESS
-        }
-        Err(Error::Exception(g)) => {
-            eprintln!("Uncaught {}", rt.text(&g));
-            ExitCode::FAILURE
-        }
-        Err(e) => {
-            eprintln!("{e}");
-            ExitCode::FAILURE
-        }
-    }
+    })
 }
 ```
 
@@ -97,11 +102,14 @@ The steps are always the same:
 
 1. `X::platform(inner)` wraps a platform in a `HostPlatform` for runtime `X`. Keep it alive for as long as the
    runtime: `Runtime<'p>` borrows it.
-2. `X::runtime(&platform, executor)` creates the isolate and the context, installs everything and runs the preludes. A
-   prelude that throws comes back as `Err` here.
-3. `rt.eval(text, file)` runs a script. It returns a `Global` (a handle that outlives the call), which `rt.text(&g)`
+2. `j8::EventLoopSet::scope(&platform, threads, |set| …)` starts the loop threads the runtimes run on, for the length
+   of the closure.
+3. `X::runtime(set, executor)` creates the isolate and the context on the least loaded loop thread, installs
+   everything and runs the preludes. A prelude that throws comes back as `Err` here. Every later call (`eval`,
+   `enter`, `run_until_idle`) is a message to that thread, and waits for its answer; any host thread may make it.
+4. `rt.eval(text, file)` runs a script. It returns a `Global` (a handle that outlives the call), which `rt.text(&g)`
    turns into a string with ToString.
-4. `rt.run_until_idle()` runs the event loop until no async host work is left. Call it after every `eval` if your
+5. `rt.run_until_idle()` waits until no async host work is left. Call it after every `eval` if your
    bindings have `async fn`s or return promises; otherwise those promises never settle.
 
 ### What an `Error` means
@@ -234,16 +242,52 @@ runtime thread, this also works for the results of `async fn`s.
 
 ## 5. Async work and the event loop
 
-j8 does not include an async runtime (no tokio). `Runtime::run_until_idle` is a minimal loop:
+j8 does not include an async runtime (no tokio). A `j8framework::EventLoop` is one JS event loop: an isolate, its
+engine and one context, and a j8taskqueue queue; `j8::Runtime` is one event loop (`eval` and `run_until_idle` drive
+it). The queue holds three kinds of tasks:
 
-1. take the work spawned since last time;
-2. poll every pending future;
-3. for each one that is ready, settle its promise and run the microtasks;
-4. if nothing made progress, **park the thread** until a waker fires.
+1. **scripts**, which run a check interval of steps at a time (1000 by default; V8's interrupt check, at frame
+   entries and backward jumps) and then yield back to the queue;
+2. **settlements**, which resolve a promise with what its host work produced and drain the microtasks;
+3. **polls** of host futures that were woken (no JS runs in them; a ready future queues its settlement).
+
+Scripts and settlements are chained: each waits for the one before, so JS runs one task at a time, to completion.
+Polls wait for nothing. So every time the bytecode advances, the queue is checked: host work that became ready
+meanwhile, from any thread, is polled before the script goes on, and its JS runs right after the script.
+
+When nothing can run, the thread **parks** until a waker fires. `run_until_idle` returns once no script and no
+future of the event loop is outstanding.
 
 So **a future must wake its waker when it can make progress**, or the loop sleeps forever. Futures from crates that
 need their own reactor (tokio's sockets and timers) do not work as they are. Run that work on a thread or on your own
 reactor, and wake the waker from there.
+
+**Event loops live on loop threads.** `j8::EventLoopSet::scope(&platform, threads, |set| …)` starts
+`threads` loop threads for the duration of the closure; `j8::Runtime::on::<Host>(set, executor)` (or `set.spawn`)
+puts an event loop there. Each event loop lives on one thread and is not shared, so a thread runs its event loops
+with no locks: 8 threads and 1000 event loops make 125 on each. Host threads reach them by messages (submitting a
+script, `enter`), and wait for the answer.
+
+- **Load balancing.** A new event loop goes to the least loaded thread (event loops there plus those waiting for a
+  turn). A thread with nothing to run asks the busiest one for half of the event loops waiting in its queue (work
+  stealing), or for half the difference when none waits. `set.rebalance()` evens the threads out on demand;
+  `set.split(thread)` starts a new thread and gives it half of `thread`'s event loops. An event loop moves only
+  between turns, with its isolate, engine, paused script and pending futures; wakes and messages follow it.
+- **One quota.** Every turn runs the set's slice of steps (`set.set_slice`) times the event loop's weight
+  (`EventLoop::set_weight`), checking the queue every `set.set_check` steps. `set.loads()`, `set.spent()` and
+  `EventLoop::spent()` show where the work went.
+
+Many runtimes run the same preludes and import the same modules: give their executors one `CodeCache`, and each such
+source is parsed and compiled once (preludes run as `ScriptKind::Shared`; one-off scripts are not kept).
+
+```rust,ignore
+let platform = Host::platform(DefaultPlatform::default());
+let code = CodeCache::shared();
+EventLoopSet::scope(&platform, NonZeroUsize::new(8).unwrap(), |set| {
+    let mut runtimes: Vec<j8::Runtime<'_>> = (0..1000).map(|_| j8::Runtime::on::<Host>(set, Executor::default().with_cache(Arc::clone(&code))).unwrap()).collect();
+    // drive them from as many host threads as you like: each call waits for its event loop's thread
+});
+```
 
 ### 5.1 `async fn` bindings
 
@@ -312,14 +356,55 @@ The future must be `Send + 'static`: clone what it needs out of `self` (here an 
 A future that becomes ready because of JS (like `cancel` above) needs no wake-up: the loop polls everything again after
 every settlement, before it parks.
 
-Both `async fn` and `Glue::spawn` need a `HostPlatform` (what `X::platform(…)` returns). On another platform the call
-throws a TypeError.
+Async work belongs to the isolate that started it: each `Runtime` has its own queue, and only its own
+`run_until_idle` settles it, so several runtimes can share one platform. An isolate made without an event loop (by
+hand, without `CreateParams { event_loop: true, .. }`) refuses the work, and the call throws a TypeError.
 
-### 5.4 Keeping the process alive
+### 5.4 Awaiting a JS promise from Rust
+
+`j8::Promise<T>` goes the other way: a parameter of this type takes a JS promise, and the Rust side `.await`s it. It
+is an owned parameter, so `async fn` bindings can take it:
+
+```rust,ignore
+#[j8::object("math")]
+impl Math {
+    async fn double(p: j8::Promise<f64>) -> Result<f64, Error> {
+        Ok(p.await? * 2.0)          // a rejection passes on to this function's own promise
+    }
+}
+```
+
+- It takes its argument the way `await` does: a promise is watched directly (a `then` patched onto it is not called),
+  a thenable is adopted, any other value counts as already fulfilled.
+- The fulfilled value is converted with `FromJs` into `T` on the runtime thread when the promise settles. A
+  rejection, or a value that does not convert, comes out as `Err(Error::Exception(reason))`, so `?` rejects the
+  binding's own promise with the same reason.
+- Settling wakes the future, so it works with `run_until_idle`, and also when the future is polled somewhere else.
+- A promise that never settles keeps the future pending, like `await` in JS. The event loop then keeps waiting.
+
+For a JS callback that should run more than once (an event handler), keep a `j8::Function` instead and call it inside
+`rt.enter` or another binding.
+
+### 5.5 Keeping the process alive
 
 `run_until_idle` returns once nothing is pending. Repeating timers, servers and the like stay alive by always keeping
 a future pending, and stop by settling it. A cleared timer should settle its promise (dune's `Timer::cancel`), or the
 loop waits for it.
+
+### 5.6 What the event loop does not do yet
+
+- **No reactor.** Futures that need tokio's (or another runtime's) reactor never wake. Run such work on a thread
+  or a reactor of your own.
+- **Settlements follow the polling order.** Futures that become ready in the same turn settle in the order they
+  were polled, not the order they finished. JS that cares about order (timers) has to sort it out itself.
+- **No timers in the loop.** A timer is host work like any other (a thread that sleeps, then wakes its future).
+- **No cancellation from JS.** A future cannot be dropped from the JS side. Watch a flag of your own (dune's
+  `Timer::cancel`).
+- **`async fn` cannot take `&self`.** Use `Glue::spawn` (5.3).
+- **A panic in a future propagates out of the loop** (out of `eval` / `run_until_idle`). An error while settling
+  stops the loop with the remaining work still queued.
+- **Microtasks are not sliced.** A settlement drains its microtasks to the end in one turn.
+- **Not supported yet:** reporting unhandled rejections, top-level `await`.
 
 ## 6. Modules
 
@@ -373,14 +458,11 @@ The first element of the returned pair is the module's normalized name. Modules 
 that resolves to the same name gets the same module. A specifier that resolves to `None` fails the import with
 `Error::Syntax("… Cannot find module '…'")`.
 
-**Order matters when stacking platforms.** The `HostPlatform` must be the outermost one:
+Platforms stack in any order, since none of them holds the async work (that lives in each runtime's isolate):
 
 ```rust,ignore
-let platform = Dune::platform(NodePlatform::from(DefaultPlatform::default()));   // ✔
+let platform = Dune::platform(NodePlatform::from(DefaultPlatform::default()));
 ```
-
-`HostPlatform` is what queues async work (`spawn` / `take_spawned`). A wrapper that does not forward those two
-methods hides it, and every `async fn` then throws "async host functions need a runtime with an event loop".
 
 Other `Platform` methods you may override: `print` (where `console.log` goes), `now` / `wall_clock` (a fake clock for
 tests).
@@ -401,8 +483,8 @@ lookups try the child's modules first, then the parent's. The parent does not ch
 With feature `jit` (x86-64 Unix):
 
 ```rust,ignore
-let executor = Executor::default().with_tier(std::rc::Rc::new(j8::jit::Jit::default()));
-let mut rt = MyHost::runtime(&platform, executor)?;
+let executor = Executor::default().with_tier(j8::jit::Jit::default());
+let rt = MyHost::runtime(set, executor)?;
 ```
 
 Hot functions and loops are compiled to machine code. The test262 baseline also passes with the JIT on

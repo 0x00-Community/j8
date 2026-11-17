@@ -2,13 +2,9 @@
 //! hidden bindings, a JavaScript prelude, optionally on top of another host), [`HostPlatform`] serves its native
 //! modules to `import`, and [`Runtime`] is a ready execution environment.
 use std::marker::PhantomData;
-use std::sync::Arc;
-use std::task::{Context, Poll, Wake, Waker};
-use std::thread::Thread;
 use std::time::Duration;
 
-use j8framework::{Agent, AsyncJob, ContextRoot, CreateParams, Error, ErrorKind, Global, Isolate, Platform, Pool, Source, Task, Value};
-use j8lockfree::Fifo;
+use j8framework::{Agent, Error, ErrorKind, EventLoop, EventLoopSet, Global, Platform, Pool, ScriptKind, Source, Task, Value};
 
 /// A runtime's contents (implemented by [`runtime!`](crate::runtime); a parent host's contents come first).
 pub trait Host {
@@ -22,19 +18,20 @@ pub trait Host {
     fn preludes(out: &mut Vec<(&'static str, &'static str)>);
 }
 
-/// A platform that answers a [`Host`]'s native module specifiers itself and passes everything else to `P`.
-/// It also queues the async host work (`async fn`s bound with the binding macros) for [`Runtime::run_until_idle`].
+/// A platform that answers a [`Host`]'s native module specifiers itself and passes everything else to `P`. It holds
+/// no per-runtime state: several runtimes may share one (async host work is queued on each runtime's own isolate).
 pub struct HostPlatform<H, P> {
     inner: P,
-    spawned: Fifo<AsyncJob>,
     _host: PhantomData<fn() -> H>,
 }
 
 impl<H: Host, P: Platform> HostPlatform<H, P> {
+    /// Serves `H`'s native modules on top of `inner`
     pub fn new(inner: P) -> Self {
-        Self { inner, spawned: Fifo::default(), _host: PhantomData }
+        Self { inner, _host: PhantomData }
     }
 
+    /// The wrapped platform
     pub fn inner(&self) -> &P {
         &self.inner
     }
@@ -69,78 +66,47 @@ impl<H: Host, P: Platform> Platform for HostPlatform<H, P> {
     fn print(&self, line: &str) {
         self.inner.print(line);
     }
-
-    fn spawn(&self, job: AsyncJob) -> Result<(), AsyncJob> {
-        self.spawned.push(job);
-        Ok(())
-    }
-
-    fn take_spawned(&self) -> Vec<AsyncJob> {
-        core::iter::from_fn(|| self.spawned.pop()).collect()
-    }
 }
 
-/// Wakes the runtime's thread when a future it polls can make progress.
-struct Unpark(Thread);
-
-impl Wake for Unpark {
-    fn wake(self: Arc<Self>) {
-        self.0.unpark();
-    }
-
-    fn wake_by_ref(self: &Arc<Self>) {
-        self.0.unpark();
-    }
-}
-
-/// A ready execution environment: an isolate, an executor and one context with a host installed and its preludes run.
+/// A ready execution environment: one JS event loop ([`EventLoop`]: an isolate with one context, a host installed
+/// and its preludes run) in an [`EventLoopSet`], on its least loaded loop thread. Any host thread may use it; each
+/// call waits for the loop thread's answer.
 pub struct Runtime<'p> {
-    platform: &'p dyn Platform,
-    isolate: Isolate<'p>,
-    executor: j8executor::Executor,
-    cx: ContextRoot,
-    /// Async host work not settled yet
-    pending: Vec<AsyncJob>,
+    js: EventLoop<'p, j8executor::Executor>,
 }
 
 impl<'p> Runtime<'p> {
-    /// Builds the context, installs `H` and runs its preludes (the platform should be a [`HostPlatform`] for `H`, so
-    /// `import` finds the native modules)
-    pub fn new<H: Host>(platform: &'p dyn Platform, executor: j8executor::Executor) -> Result<Self, Error> {
-        let mut isolate = Isolate::new(platform, CreateParams::default());
-        let cx = isolate.enter(|scope| scope.persist(scope.context(&j8builtins::Builtins)));
-        let mut rt = Self { platform, isolate, executor, cx, pending: Vec::new() };
+    /// A new event loop of `set` (on the least loaded of its loop threads): builds the context, installs `H` and runs
+    /// its preludes (the set's platform should be a [`HostPlatform`] for `H`, so `import` finds the native modules)
+    pub fn on<H: Host>(set: &EventLoopSet<'_, 'p, j8executor::Executor>, executor: j8executor::Executor) -> Result<Self, Error> {
+        let rt = Self { js: set.spawn(executor, &j8builtins::Builtins) };
         rt.enter(|a| H::install(a));
         let mut preludes = Vec::new();
         H::preludes(&mut preludes);
+        // The same preludes in every runtime: compiled once when the executor shares a code cache
         for (name, text) in preludes {
-            rt.eval(text, name)?;
+            rt.js.eval(&Source { text, file: name }, ScriptKind::Shared)?;
         }
         Ok(rt)
     }
 
-    /// Runs a script in the context
-    pub fn eval(&mut self, text: &str, file: &str) -> Result<Global, Error> {
-        self.isolate.run(&mut self.executor, &self.cx, &Source { text, file })
+    /// Runs a script in the context (the event loop goes on with its host work meanwhile)
+    pub fn eval(&self, text: &str, file: &str) -> Result<Global, Error> {
+        self.js.eval(&Source { text, file }, ScriptKind::Classic)
     }
 
     /// Runs an ES module in the context
-    pub fn eval_module(&mut self, text: &str, file: &str) -> Result<Global, Error> {
-        self.isolate.run_module(&mut self.executor, &self.cx, &Source { text, file })
+    pub fn eval_module(&self, text: &str, file: &str) -> Result<Global, Error> {
+        self.js.eval(&Source { text, file }, ScriptKind::Module)
     }
 
-    /// Works with the context directly (installing more, reading results)
-    pub fn enter<R>(&mut self, f: impl for<'gc> FnOnce(&mut Agent<'gc, '_>) -> R) -> R {
-        let (executor, cx) = (&self.executor, &self.cx);
-        self.isolate.enter(|scope| {
-            let realm = scope.context_of(cx);
-            let mut a = scope.agent(realm, executor);
-            f(&mut a)
-        })
+    /// Works with the context directly (installing more, reading results), on the event loop's thread
+    pub fn enter<R: Send>(&self, f: impl for<'gc> FnOnce(&mut Agent<'gc, '_>) -> R + Send) -> R {
+        self.js.enter(f)
     }
 
     /// ToString of a handle's value (a placeholder when that throws in turn)
-    pub fn text(&mut self, g: &Global) -> String {
+    pub fn text(&self, g: &Global) -> String {
         self.enter(|a| {
             let v = a.local(g);
             a.to_string(v).map_or_else(|_| String::from("<ToString threw>"), |s| String::from(&**s))
@@ -149,7 +115,7 @@ impl<'p> Runtime<'p> {
 
     /// Defines `value` (converted with `IntoJs`) as a data property at a dotted path from the global object:
     /// `rt.set("process.argv", args)` sets `argv` on the existing global `process`
-    pub fn set<V: for<'g> crate::IntoJs<'g>>(&mut self, path: &str, value: V) -> Result<(), Error> {
+    pub fn set<V: for<'g> crate::IntoJs<'g> + Send>(&self, path: &str, value: V) -> Result<(), Error> {
         self.enter(|a| {
             let (holder, key) = path.rsplit_once('.').unwrap_or(("", path));
             let mut target: Value<'_> = a.realm.global.into();
@@ -163,52 +129,10 @@ impl<'p> Runtime<'p> {
         })
     }
 
-    pub fn isolate(&mut self) -> &mut Isolate<'p> {
-        &mut self.isolate
-    }
-
-    /// The event loop: polls the async host work until all of it has settled its promises (running the microtasks
-    /// each settlement queues), parking the thread while nothing can make progress. Work spawned meanwhile joins in.
-    pub fn run_until_idle(&mut self) -> Result<(), Error> {
-        let waker = Waker::from(Arc::new(Unpark(std::thread::current())));
-        let mut cx = Context::from_waker(&waker);
-        loop {
-            self.pending.extend(self.platform.take_spawned());
-            if self.pending.is_empty() {
-                return Ok(());
-            }
-            let mut progressed = false;
-            let mut i = 0;
-            while i < self.pending.len() {
-                match self.pending[i].future.as_mut().poll(&mut cx) {
-                    Poll::Ready(settle) => {
-                        let job = self.pending.remove(i);
-                        self.enter(|a| Self::settle(a, &job, settle))?;
-                        progressed = true;
-                    }
-                    Poll::Pending => i += 1,
-                }
-            }
-            if !progressed {
-                std::thread::park();
-            }
-        }
-    }
-
-    /// Resolves (or rejects) a job's promise with what it settled to, then runs the microtasks
-    fn settle(a: &mut Agent<'_, '_>, job: &AsyncJob, settle: j8framework::Settle) -> Result<(), Error> {
-        let (target, value) = match settle(a) {
-            Ok(v) => (&job.resolve, v),
-            Err(Error::Exception(g)) => (&job.reject, a.local(&g)),
-            Err(e) => {
-                let message = e.to_string();
-                let Error::Exception(g) = a.throw(ErrorKind::Error, &message) else { unreachable!("throw makes an exception") };
-                (&job.reject, a.local(&g))
-            }
-        };
-        let f = a.local(target);
-        a.call(f, Value::Undefined, &[value])?;
-        a.run_jobs()
+    /// The event loop: runs until all scripts and async host work have finished (settlements run the microtasks
+    /// they queue), sleeping while nothing can make progress. Work spawned meanwhile joins in.
+    pub fn run_until_idle(&self) -> Result<(), Error> {
+        self.js.run()
     }
 }
 
@@ -274,9 +198,9 @@ macro_rules! runtime {
                 $crate::HostPlatform::new(inner)
             }
 
-            /// A ready runtime on `platform` (see [`Runtime::new`]($crate::Runtime::new))
-            pub fn runtime<'p>(platform: &'p dyn $crate::frame::Platform, executor: $crate::executor::Executor) -> ::core::result::Result<$crate::Runtime<'p>, $crate::frame::Error> {
-                $crate::Runtime::new::<$name>(platform, executor)
+            /// A ready runtime in `set` (see [`Runtime::on`]($crate::Runtime::on))
+            pub fn runtime<'p>(set: &$crate::EventLoopSet<'_, 'p, $crate::executor::Executor>, executor: $crate::executor::Executor) -> ::core::result::Result<$crate::Runtime<'p>, $crate::frame::Error> {
+                $crate::Runtime::on::<$name>(set, executor)
             }
         }
     };

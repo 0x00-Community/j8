@@ -84,6 +84,8 @@ pub struct Agent<'gc, 'x> {
     /// executor before calling the host function)
     pub new_target: Value<'gc>,
     invoke: &'x dyn Invoke<'gc>,
+    /// The isolate's queue of async host work (`None` without an event loop)
+    spawned: Option<&'x j8lockfree::Fifo<crate::AsyncJob>>,
     /// Empty register files returned after use (each host function callback into JS needs one; reuse saves the
     /// allocation)
     spare_regs: Vec<Vec<Value<'gc>>>,
@@ -92,13 +94,25 @@ pub struct Agent<'gc, 'x> {
 impl<'gc> Scope<'gc, '_> {
     /// Lend out an agent in context `realm`, calling back into JS via `invoke`.
     pub fn agent<'x>(&'x mut self, realm: Context<'gc>, invoke: &'x dyn Invoke<'gc>) -> Agent<'gc, 'x> {
-        Agent { mc: self.mc, platform: self.platform, profiler: &mut *self.profiler, realm, new_target: Value::Undefined, invoke, spare_regs: Vec::new() }
+        Agent { mc: self.mc, platform: self.platform, profiler: &mut *self.profiler, realm, new_target: Value::Undefined, invoke, spawned: self.spawned, spare_regs: Vec::new() }
     }
 }
 
 impl<'gc> Agent<'gc, '_> {
     /// At most how many register files to keep for reuse
     const SPARE_REGS: usize = 8;
+
+    /// Hands async host work to this isolate's event loop (`Err` gives it back when the isolate runs none, see
+    /// [`CreateParams::event_loop`](crate::CreateParams::event_loop)).
+    pub fn spawn(&self, job: crate::AsyncJob) -> Result<(), crate::AsyncJob> {
+        match self.spawned {
+            Some(q) => {
+                q.push(job);
+                Ok(())
+            }
+            None => Err(job),
+        }
+    }
 
     /// Borrow an empty register file (used by the executor to start a new execution state)
     pub fn take_regs(&mut self) -> Vec<Value<'gc>> {

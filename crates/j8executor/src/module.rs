@@ -17,7 +17,11 @@ impl Executor {
         if let Some(i) = a.modules().iter().position(|m| **m.path == *path) {
             return Ok(u32::try_from(i).unwrap_or(u32::MAX));
         }
-        let (module, info) = j8virtasm::Module::compile_module(&j8framework::Source { text, file: path })?;
+        let src = j8framework::Source { text, file: path };
+        let (module, info) = match &self.cache {
+            Some(cache) => cache.module(&src)?,
+            None => j8virtasm::Module::compile_module(&src)?,
+        };
         let main = self.load(module);
         let mut slots = alloc::vec![Value::Undefined; usize::from(info.slots)];
         for &s in &info.lexical {
@@ -103,7 +107,7 @@ impl Executor {
             let saved = self.depth.replace(depth + 1);
             let mut regs = Vec::new();
             let f = self.enter(a, &mut regs, Closure::new(main, Some(env)), Value::Undefined, Value::Undefined, &[]);
-            r = self.execute(a, State { regs, frames: Vec::new(), f, acc: Value::Undefined }, None).map(Outcome::returned).map(drop);
+            r = self.execute(a, State { regs, frames: Vec::new(), f, acc: Value::Undefined }, &mut None).map(Outcome::returned).map(drop);
             self.depth.set(saved);
         }
         let error = match &r {

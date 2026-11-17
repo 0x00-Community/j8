@@ -4,8 +4,24 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::time::Duration;
 
-use moremath::{ThreadMulti, ThreadSingle};
-use j8taskqueue::{Fault, Flow, ITask, ITaskPoll, Quota, Stop, Task, TaskId, TaskQueue};
+use j8taskqueue::{Fault, Flow, ITask, ITaskPoll, Pool, Quota, Stop, Task, TaskId, TaskQueue};
+
+/// 测试用线程池：每批每个闭包一个作用域线程
+struct Threads(usize);
+
+impl Pool for Threads {
+    fn threads(&self) -> usize {
+        self.0
+    }
+
+    fn run(&self, jobs: Vec<j8taskqueue::Job<'_>>) {
+        std::thread::scope(|s| {
+            for job in jobs {
+                s.spawn(job);
+            }
+        });
+    }
+}
 
 /// 等别的线程的最长时间：串行执行会在这里超时失败
 const RENDEZVOUS: Duration = Duration::from_secs(5);
@@ -48,7 +64,7 @@ impl<'a> ITask<'a> for Job<'a> {
 /// a、b 都被 c 依赖、彼此独立：a、b 必须同时在跑（互相等对方的消息），c 在两者之后。
 #[test]
 fn independent_tasks_run_in_parallel() {
-    let pool = ThreadMulti::from(THREADS);
+    let pool = Threads(THREADS.get());
     let (to_a, from_b) = mpsc::channel();
     let (to_b, from_a) = mpsc::channel();
     let (done, seen) = (AtomicUsize::new(0), AtomicUsize::new(usize::MAX));
@@ -82,7 +98,7 @@ fn independent_tasks_run_in_parallel() {
 /// 没有轮次屏障：慢任务 s 还在跑时，a ⇒ c 就能做完（s 等 c 的消息才结束）。
 #[test]
 fn no_barrier_between_unrelated_tasks() {
-    let pool = ThreadMulti::from(THREADS);
+    let pool = Threads(THREADS.get());
     let (signal, wait) = mpsc::channel();
     let mut q = TaskQueue::from(&pool);
     q.add(Job::leaf(vec![], move |_, _| {
@@ -103,7 +119,7 @@ fn no_barrier_between_unrelated_tasks() {
 #[test]
 fn chain_runs_in_order() {
     const LEN: usize = 200;
-    let pool = ThreadMulti::from(THREADS);
+    let pool = Threads(THREADS.get());
     let next = AtomicUsize::new(0);
     let mut q = TaskQueue::from(&pool);
     let mut prev = vec![];
@@ -127,7 +143,7 @@ fn random_dag_respects_dependencies() {
     const TASKS: usize = 2000;
     /// 线性同余的乘数与增量
     const LCG: (u64, u64) = (6_364_136_223_846_793_005, 1_442_695_040_888_963_407);
-    let pool = ThreadMulti::from(THREADS);
+    let pool = Threads(THREADS.get());
     let done: Vec<AtomicBool> = (0..TASKS).map(|_| AtomicBool::new(false)).collect();
     let mut q = TaskQueue::from(&pool);
     let mut ids: Vec<TaskId<'_>> = Vec::new();
@@ -159,7 +175,7 @@ fn random_dag_respects_dependencies() {
 #[test]
 fn spawned_tasks_join_family_and_dataflow() {
     const CHILDREN: usize = 20;
-    let pool = ThreadMulti::from(THREADS);
+    let pool = Threads(THREADS.get());
     let count = AtomicUsize::new(0);
     let seen = AtomicUsize::new(0);
     let family = std::sync::OnceLock::new();
@@ -204,13 +220,13 @@ fn quota_and_budget() {
     let slice = NonZeroUsize::new(10).unwrap();
 
     let left = AtomicUsize::new(25);
-    let mut q = TaskQueue::from(&ThreadSingle).with_slice(slice);
+    let mut q = TaskQueue::from(&Threads(1)).with_slice(slice);
     q.add(Job::leaf(vec![], work(&left))).unwrap();
     let ran = q.run().unwrap();
     assert_eq!((ran.execs, ran.spent, ran.stop), (3, 25, Stop::Empty));
 
     let left = AtomicUsize::new(25);
-    let mut q = TaskQueue::from(&ThreadSingle).with_slice(slice).with_budget(NonZeroUsize::new(15).unwrap());
+    let mut q = TaskQueue::from(&Threads(1)).with_slice(slice).with_budget(NonZeroUsize::new(15).unwrap());
     q.add(Job::leaf(vec![], work(&left))).unwrap();
     let ran = q.run().unwrap();
     assert_eq!((ran.execs, ran.spent, ran.stop), (2, 15, Stop::Budget));
@@ -224,7 +240,7 @@ fn quota_and_budget() {
 fn faults() {
     let refused = AtomicBool::new(false);
     let reentrant = AtomicBool::new(false);
-    let mut q = TaskQueue::from(&ThreadSingle);
+    let mut q = TaskQueue::from(&Threads(1));
     q.add(Job::leaf(vec![], |poll, _| {
         refused.store(poll.add(Job::leaf(vec![], |_, _| Flow::Done)).is_err(), Ordering::Release);
         Flow::Again
@@ -233,11 +249,11 @@ fn faults() {
     assert_eq!(q.run(), Err(Fault::NotRecursable));
     assert!(refused.load(Ordering::Acquire));
 
-    let mut q = TaskQueue::from(&ThreadSingle);
+    let mut q = TaskQueue::from(&Threads(1));
     q.add(Job::leaf(vec![], |_, _| Flow::Yield)).unwrap();
     assert_eq!(q.run(), Err(Fault::Unspent));
 
-    let mut q = TaskQueue::from(&ThreadSingle);
+    let mut q = TaskQueue::from(&Threads(1));
     q.add(Job::leaf(vec![], |poll, _| {
         reentrant.store(poll.run() == Err(Fault::Reentrant), Ordering::Release);
         Flow::Done
@@ -250,7 +266,7 @@ fn faults() {
 /// 家族：依赖把任务并成一家、爹是最早的；取消一家只影响这一家。
 #[test]
 fn family_find_and_cancel() {
-    let pool = ThreadMulti::from(THREADS);
+    let pool = Threads(THREADS.get());
     let ran = AtomicUsize::new(0);
     let tick = || {
         |_: &mut dyn ITaskPoll<'_>, _: &mut Quota| {

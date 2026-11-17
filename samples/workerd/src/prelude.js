@@ -1,6 +1,8 @@
-// workerd's prelude: a minimal subset of the Fetch API (Headers / Request / Response / URL / URLSearchParams)
-// and Durable Objects.
-// The native part of storage (one KV per object) is `__j8_native.KvStore`, bound from Rust with j8binding.
+// workerd's prelude: a minimal subset of the Fetch API (Headers / Request / Response / URL / URLSearchParams),
+// WebSockets (WebSocketPair, after workerd's api::WebSocket) and Durable Objects (KV + SQL storage, WebSocket
+// hibernation API).
+// The native parts are bound from Rust: `__j8_native.KvStore` (one KV per object), `__j8_native.SqlStorage` (one
+// SQLite database per object) and `__j8_native.Server` (the HTTP / WebSocket server on the event loop).
 (function (native) {
   'use strict';
 
@@ -52,6 +54,8 @@
       this.status = init.status === undefined ? 200 : init.status;
       this.statusText = init.statusText || '';
       this.headers = new Headers(init.headers);
+      this.webSocket = init.webSocket || null;
+      if (this.status === 101 && !this.webSocket) throw new RangeError('a 101 response needs a webSocket');
     }
     get ok() { return this.status >= 200 && this.status < 300; }
     clone() { return new Response(this._body, this); }
@@ -108,6 +112,163 @@
     toJSON() { return this.href; }
   }
 
+  // ---- WebSocket ----
+  //
+  // A WebSocketPair is two linked ends: what one end sends, the other end receives. The end a Worker returns in
+  // `new Response(null, { status: 101, webSocket: client })` is coupled to the network connection, so what the
+  // accepted end sends goes to the client and what the client sends arrives at the accepted end. Before accept(),
+  // received messages wait in a queue (as in workerd).
+
+  const INTERNAL = Symbol('internal');
+  const CONNECTING = 0, OPEN = 1, CLOSING = 2, CLOSED = 3;
+
+  class WebSocket {
+    constructor(token) {
+      if (token !== INTERNAL) throw new TypeError('outbound WebSocket connections are not supported; use WebSocketPair');
+      this._peer = null;
+      this._native = null;       // { server, id } once coupled to a network connection
+      this._accepted = false;
+      this._queue = [];          // events received before accept()
+      this._listeners = new Map();
+      this._closedOutgoing = false;
+      this._closedIncoming = false;
+      this._attachment = undefined;
+      this.readyState = CONNECTING;
+      this.url = null;
+      this.protocol = '';
+      this.extensions = '';
+      this.binaryType = 'arraybuffer';
+      this.onmessage = this.onclose = this.onerror = this.onopen = null;
+    }
+
+    accept() {
+      if (this._native) throw new TypeError("Can't accept() a WebSocket that was already used in a response");
+      if (this._accepted) return;
+      this._accepted = true;
+      if (this.readyState === CONNECTING) this.readyState = OPEN;
+      const queued = this._queue;
+      this._queue = [];
+      if (queued.length) Promise.resolve().then(() => queued.forEach((e) => this._dispatch(e)));
+    }
+
+    send(message) {
+      if (!this._accepted) throw new TypeError('You must call accept() on this WebSocket before sending messages.');
+      if (this._closedOutgoing) throw new TypeError("Can't call WebSocket send() after close().");
+      if (typeof message !== 'string' && !(message instanceof ArrayBuffer) && !ArrayBuffer.isView(message)) message = String(message);
+      this._peer._receive({ type: 'message', data: message });
+    }
+
+    close(code = 1000, reason = '') {
+      if (!this._accepted) throw new TypeError('You must call accept() on this WebSocket before closing it.');
+      if (this._closedOutgoing) return;
+      this._closedOutgoing = true;
+      this.readyState = this._closedIncoming ? CLOSED : CLOSING;
+      this._peer._receive({ type: 'close', code, reason: String(reason), wasClean: true });
+    }
+
+    get bufferedAmount() {
+      const n = this._peer && this._peer._native;
+      return n ? n.server.bufferedAmount(n.id) : 0;
+    }
+
+    serializeAttachment(v) { this._attachment = v === undefined ? undefined : JSON.stringify(v); }
+    deserializeAttachment() { return this._attachment === undefined ? null : JSON.parse(this._attachment); }
+
+    addEventListener(type, f) {
+      if (typeof f !== 'function' && !(f && typeof f.handleEvent === 'function')) return;
+      const list = this._listeners.get(type) || [];
+      if (!list.includes(f)) list.push(f);
+      this._listeners.set(type, list);
+    }
+
+    removeEventListener(type, f) {
+      const list = this._listeners.get(type);
+      if (list) this._listeners.set(type, list.filter((g) => g !== f));
+    }
+
+    // An event arriving at this end: to the network when coupled, to listeners once accepted, queued before that
+    _receive(e) {
+      if (this._native) return this._toNetwork(e);
+      if (!this._accepted) return void this._queue.push(e);
+      this._dispatch(e);
+    }
+
+    _toNetwork(e) {
+      const { server, id } = this._native;
+      if (e.type === 'close') return server.close(id, e.code, e.reason);
+      if (typeof e.data === 'string') return server.sendText(id, e.data);
+      server.sendBinary(id, e.data instanceof ArrayBuffer ? new Uint8Array(e.data) : e.data);
+    }
+
+    _dispatch(e) {
+      if (e.type === 'close') {
+        this._closedIncoming = true;
+        this.readyState = this._closedOutgoing ? CLOSED : CLOSING;
+      }
+      const event = Object.assign({ target: this, currentTarget: this }, e);
+      const handlers = [...(this._listeners.get(e.type) || [])];
+      const prop = this['on' + e.type];
+      if (typeof prop === 'function') handlers.push(prop);
+      for (const h of handlers) {
+        try {
+          const r = typeof h === 'function' ? h.call(this, event) : h.handleEvent(event);
+          if (r && typeof r.then === 'function') r.then(undefined, report);
+        } catch (err) {
+          report(err);
+        }
+      }
+    }
+  }
+  for (const [k, v] of Object.entries({ CONNECTING, OPEN, CLOSING, CLOSED })) {
+    WebSocket[k] = v;
+    WebSocket['READY_STATE_' + k] = v;
+  }
+
+  class WebSocketPair {
+    constructor() {
+      const a = new WebSocket(INTERNAL), b = new WebSocket(INTERNAL);
+      a._peer = b;
+      b._peer = a;
+      Object.defineProperty(this, 0, { value: a, enumerable: true });
+      Object.defineProperty(this, 1, { value: b, enumerable: true });
+    }
+    *[Symbol.iterator]() { yield this[0]; yield this[1]; }
+  }
+
+  function report(err) {
+    console.log('Uncaught ' + ((err && err.stack) || err));
+  }
+
+  /** Couples `end` (returned in a 101 response) to network connection `id`: what the client sends arrives at the
+   * other end; a Close or a dropped connection ends it */
+  async function couple(end, server, id) {
+    end._native = { server, id };
+    end.readyState = OPEN;
+    // What the accepted end sent before the response went out (a history, a greeting) goes first
+    const queued = end._queue;
+    end._queue = [];
+    queued.forEach((e) => end._toNetwork(e));
+    const peer = end._peer;
+    try {
+      for (;;) {
+        const m = await server.recv(id);
+        if (m == null) {
+          if (!peer._closedIncoming) peer._receive({ type: 'close', code: 1006, reason: '', wasClean: false });
+          break;
+        }
+        if (typeof m === 'string') peer._receive({ type: 'message', data: m });
+        else if (m instanceof Uint8Array) peer._receive({ type: 'message', data: m.buffer });
+        else {
+          peer._receive({ type: 'close', code: m.close, reason: m.reason, wasClean: true });
+          break;
+        }
+      }
+    } finally {
+      end.readyState = CLOSED;
+      server.release(id);
+    }
+  }
+
   // ---- Durable Object ----
 
   class DurableObjectId {
@@ -118,7 +279,11 @@
 
   /** `state.storage`: values are stored as JSON in the native KV; the whole interface is Promise-based. */
   class DurableObjectStorage {
-    constructor(kv) { this._kv = kv; }
+    constructor(kv, sqlPath) { this._kv = kv; this._sqlPath = sqlPath; this._sql = null; }
+    get sql() {
+      if (!this._sql) this._sql = new SqlStorage(new native.SqlStorage(this._sqlPath));
+      return this._sql;
+    }
     get(key) {
       if (Array.isArray(key)) return Promise.all(key.map((k) => this.get(k))).then((vs) => new Map(key.map((k, i) => [k, vs[i]])));
       const v = this._kv.get(String(key));
@@ -147,34 +312,106 @@
     }
   }
 
+  /** The rows of one `sql.exec()`: iterate for row objects, or `toArray()` / `one()` / `raw()` */
+  class SqlStorageCursor {
+    constructor(r) {
+      this.columnNames = r.columns;
+      this.rowsRead = r.rowsRead;
+      this.rowsWritten = r.rowsWritten;
+      this._rows = r.rows;
+      this._next = 0;
+    }
+    _object(row) {
+      const o = {};
+      this.columnNames.forEach((c, i) => { o[c] = row[i]; });
+      return o;
+    }
+    next() {
+      if (this._next >= this._rows.length) return { done: true, value: undefined };
+      return { done: false, value: this._object(this._rows[this._next++]) };
+    }
+    [Symbol.iterator]() { return this; }
+    toArray() { return [...this]; }
+    one() {
+      const rest = this._rows.length - this._next;
+      if (rest !== 1) throw new Error('Expected exactly one result from SQL query, but got ' + (rest ? 'more than one' : 'no') + ' results.');
+      return this.next().value;
+    }
+    *raw() { while (this._next < this._rows.length) yield this._rows[this._next++]; }
+  }
+
+  /** `ctx.storage.sql`: synchronous SQLite, one database per object */
+  class SqlStorage {
+    constructor(db) { this._db = db; }
+    exec(query, ...bindings) { return new SqlStorageCursor(JSON.parse(this._db.exec(String(query), JSON.stringify(bindings)))); }
+    get databaseSize() { return this._db.databaseSize; }
+  }
+
   class DurableObjectState {
-    constructor(id, storage) { this.id = id; this.storage = storage; }
+    constructor(id, storage) { this.id = id; this.storage = storage; this._sockets = new Set(); this._object = null; }
     blockConcurrencyWhile(f) { return Promise.resolve().then(f); }
     waitUntil() {}
+
+    /** The hibernation API: accepts `ws` and delivers its events to the object's `webSocketMessage` /
+     * `webSocketClose` / `webSocketError` */
+    acceptWebSocket(ws, tags = []) {
+      ws.accept();
+      ws._tags = tags.map(String);
+      this._sockets.add(ws);
+      const call = (name, ...args) => {
+        const f = this._object && this._object[name];
+        if (typeof f === 'function') return f.apply(this._object, args);
+      };
+      ws.addEventListener('message', (e) => call('webSocketMessage', ws, e.data));
+      ws.addEventListener('close', (e) => {
+        this._sockets.delete(ws);
+        return call('webSocketClose', ws, e.code, e.reason, e.wasClean);
+      });
+      ws.addEventListener('error', (e) => call('webSocketError', ws, e.error));
+    }
+
+    getWebSockets(tag) {
+      return [...this._sockets].filter((ws) => tag === undefined || ws._tags.includes(String(tag)));
+    }
+
+    getTags(ws) { return ws._tags || []; }
   }
 
   /** `env.X`: get an object by id (same id, same instance; each has its own storage). */
   class DurableObjectNamespace {
-    constructor(cls, env) { this._cls = cls; this._env = env; this._live = new Map(); }
+    constructor(name, cls, env, storageDir) { this._name = name; this._cls = cls; this._env = env; this._dir = storageDir; this._live = new Map(); }
     idFromName(name) { return new DurableObjectId(String(name)); }
     idFromString(s) { return new DurableObjectId(String(s)); }
     newUniqueId() { return new DurableObjectId(native.KvStore.uniqueId()); }
+    /** The object for `key`, made on first use. Its SQL database is created off the event loop's thread first
+     * (that syncs the disk), so `ctx.storage.sql` in the constructor is quick; requests meanwhile wait for the same
+     * promise. */
+    _instance(key, id) {
+      let live = this._live.get(key);
+      if (!live) {
+        const sqlPath = this._dir ? this._dir + '/' + encodeURIComponent(this._name + '-' + key) + '.sqlite' : '';
+        live = (sqlPath ? native.SqlStorage.prepare(sqlPath) : Promise.resolve(null)).then((err) => {
+          if (err) throw new Error(err);
+          const state = new DurableObjectState(id, new DurableObjectStorage(new native.KvStore(), sqlPath));
+          const inst = new this._cls(state, this._env);
+          state._object = inst;
+          return inst;
+        });
+        this._live.set(key, live);
+      }
+      return live;
+    }
     get(id) {
       const key = id.toString();
-      let inst = this._live.get(key);
-      if (!inst) {
-        inst = new this._cls(new DurableObjectState(id, new DurableObjectStorage(new native.KvStore())), this._env);
-        this._live.set(key, inst);
-      }
       return {
         id,
         name: id.name,
-        fetch: (input, init) => Promise.resolve(inst.fetch(input instanceof Request ? input : new Request(input, init))),
+        fetch: (input, init) => this._instance(key, id).then((inst) => inst.fetch(input instanceof Request ? input : new Request(input, init))),
       };
     }
   }
 
-  Object.assign(globalThis, { Headers, Request, Response, URL, URLSearchParams });
+  Object.assign(globalThis, { Headers, Request, Response, URL, URLSearchParams, WebSocket, WebSocketPair });
 
   // Entry points called from the host (Rust) side
   globalThis.__workerd = {
@@ -182,11 +419,11 @@
     env: {},
     error: null,
     result: null,
-    setup(ns, bindings) {
+    setup(ns, bindings, storageDir) {
       this.worker = ns;
       for (const [name, cls] of bindings) {
         if (typeof ns[cls] !== 'function') throw new TypeError('the worker does not export a class named ' + cls);
-        this.env[name] = new DurableObjectNamespace(ns[cls], this.env);
+        this.env[name] = new DurableObjectNamespace(name, ns[cls], this.env, storageDir);
       }
       if (!ns.default || typeof ns.default.fetch !== 'function') throw new TypeError('the worker has no default export with fetch()');
     },
@@ -198,6 +435,40 @@
         .then(() => this.worker.default.fetch(req, this.env, ctx))
         .then((r) => r.text().then((b) => { this.result = { status: r.status, headers: [...r.headers], body: b }; }))
         .catch((e) => { this.result = { status: 500, headers: [['content-type', 'text/plain']], body: String((e && e.stack) || e) + '\n' }; });
+    },
+    // The server: every request goes to the Worker's fetch; a 101 response with a webSocket upgrades the connection
+    // and couples it to that end. Requests are handled concurrently: the loop asks for the next one at once. Gives the
+    // port it listens on.
+    serve(port) {
+      const net = native.net;
+      const server = net.listen(port);
+      const loop = async () => {
+        for (;;) {
+          const r = await net.accept(server);
+          if (r == null) return;
+          this.handle(net, r);
+        }
+      };
+      loop().catch(report);
+      return net.port(server);
+    },
+    handle(server, r) {
+      const req = new Request('http://localhost' + r.path, { method: r.method, headers: r.headers, body: r.body === '' ? null : r.body });
+      const ctx = { waitUntil() {}, passThroughOnException() {} };
+      const fail = (e) => server.respond(r.id, 500, [['content-type', 'text/plain']], String((e && e.stack) || e) + '\n');
+      Promise.resolve()
+        .then(() => this.worker.default.fetch(req, this.env, ctx))
+        .then((res) => {
+          if (res.status === 101) {
+            server.upgrade(r.id);
+            couple(res.webSocket, server, r.id).catch(report);
+            return;
+          }
+          return res.text().then((body) => server.respond(r.id, res.status, [...res.headers], body));
+        })
+        .catch((e) => {
+          try { fail(e); } catch (e2) { report(e); }
+        });
     },
     // The result goes to Rust as "status line, one header per line, blank line, body"
     take() {

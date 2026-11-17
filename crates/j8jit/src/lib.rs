@@ -67,6 +67,12 @@ pub struct Jit {
     compiler: core::cell::OnceCell<Compiler>,
 }
 
+// Handed to an executor, which moves between the event loop's threads with its isolate
+const _: () = {
+    const fn send<T: Send>() {}
+    send::<Jit>();
+};
+
 impl Default for Jit {
     fn default() -> Self {
         Self::from(Jit::THRESHOLD)

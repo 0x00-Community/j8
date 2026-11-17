@@ -11,23 +11,24 @@ extern crate alloc;
 use j8framework::ValueKind;
 use alloc::vec::Vec;
 use alloc::boxed::Box;
-use alloc::rc::Rc;
 use core::cell::{Cell, RefCell};
+
+use j8lockfree::SegVec;
 
 use j8virtasm::{Constant, Function, FunctionKind, Insn, Mode, Module, PropertyKind, Reg};
 use j8framework::{Collect, Gc};
+#[cfg(feature = "compile")]
+mod cache;
 mod ic;
 mod module;
+
+#[cfg(feature = "compile")]
+pub use cache::CodeCache;
 
 use j8framework::{Agent, Few, Closure, Coroutine, CoroutineState, Env, Error, ErrorKind, FuncId, Invoke, IterRecord, JsEnv, JsObject, ObjectData, ObjectKind, Property, Resume, Slot, Step, Suspended, Value};
 
 /// Call depth limit (including JS re-entered from host functions); exceeding it throws RangeError
 const STACK_LIMIT: usize = 10_000;
-
-/// A slice runs at most this many steps (entering a frame and each backward jump count as one step: other instructions
-/// only move forward, so the instructions between steps are bounded); GC runs between slices
-#[cfg(feature = "compile")]
-const SLICE: usize = 10_000;
 
 /// A loaded function: the function itself plus the id of the first function of its module (`CreateClosure` indices are
 /// relative to it).
@@ -227,21 +228,39 @@ impl From<u64> for Exit {
 #[derive(Default)]
 pub struct Executor {
     /// A tier faster than interpretation (without it, interpret only)
-    tier: Option<Rc<dyn Tier>>,
-    /// Loaded functions: append-only (`eval` / the `Function` constructor also add some mid-execution); frames hold an
-    /// `Rc`
-    code: RefCell<Vec<Rc<Loaded>>>,
+    tier: Option<Box<dyn Tier + Send>>,
+    /// Loaded functions, by function id: append-only (`eval` / the `Function` constructor also add some mid-execution),
+    /// so a `&Loaded` stays valid while more are loaded; frames refer to them by id
+    code: SegVec<Loaded>,
     /// Current call depth (summed over all re-entrant levels of `execute`)
     depth: Cell<usize>,
     /// Module code: first function id ⇒ module id (for import bindings and import.meta)
     module_of: RefCell<alloc::collections::BTreeMap<u32, u32>>,
+    /// Bytecode shared with other executors (shared scripts and ES modules compile once)
+    #[cfg(feature = "compile")]
+    cache: Option<alloc::sync::Arc<CodeCache>>,
 }
+
+// An executor moves between the threads of the event loop's pool together with its isolate (one thread at a time:
+// `Send`, not `Sync`)
+const _: () = {
+    const fn send<T: Send>() {}
+    send::<Executor>();
+};
 
 impl Executor {
     /// Adds a JIT tier: ordinary JS functions ask it before entering a frame.
     #[must_use]
-    pub fn with_tier(mut self, tier: Rc<dyn Tier>) -> Self {
-        self.tier = Some(tier);
+    pub fn with_tier(mut self, tier: impl Tier + Send + 'static) -> Self {
+        self.tier = Some(Box::new(tier));
+        self
+    }
+
+    /// Shares compiled code through `cache` (see [`CodeCache`])
+    #[cfg(feature = "compile")]
+    #[must_use]
+    pub fn with_cache(mut self, cache: alloc::sync::Arc<CodeCache>) -> Self {
+        self.cache = Some(cache);
         self
     }
 
@@ -298,15 +317,16 @@ impl Executor {
 
     /// Loads a module, returning the function id of the script itself.
     pub fn load(&self, module: Module) -> FuncId {
-        let mut code = self.code.borrow_mut();
-        let base = u32::try_from(code.len()).expect("fewer than 2^32 functions");
-        code.extend(module.functions.into_iter().map(|func| Rc::new(Loaded::from((base, func)))));
+        let base = u32::try_from(self.code.len()).expect("fewer than 2^32 functions");
+        for func in module.functions {
+            self.code.push(Loaded::from((base, func)));
+        }
         FuncId(base + Module::MAIN)
     }
 
     #[inline]
-    fn function(&self, f: FuncId) -> Rc<Loaded> {
-        Rc::clone(&self.code.borrow()[f.0 as usize])
+    fn function(&self, f: FuncId) -> &Loaded {
+        self.code.get(f.0 as usize).expect("function ids come from load")
     }
 
     /// Runs script `main` (`this` is the global object).
@@ -314,7 +334,7 @@ impl Executor {
         let this = Value::Object(a.realm.global);
         let mut regs = Vec::new();
         let f = self.enter(a, &mut regs, Closure::new(main, None), Value::Undefined, this, &[]);
-        self.execute(a, State { regs, frames: Vec::new(), f, acc: Value::Undefined }, None).map(Outcome::returned)
+        self.execute(a, State { regs, frames: Vec::new(), f, acc: Value::Undefined }, &mut None).map(Outcome::returned)
     }
 
     /// Direct eval: compiles against the scope table of the call site and runs on the call site's environment chain.
@@ -334,7 +354,7 @@ impl Executor {
             let saved = self.depth.replace(level);
             let mut regs = Vec::new();
             let f = self.enter(a, &mut regs, Closure::new(main, env), Value::Undefined, Value::Undefined, &[]);
-            let r = self.execute(a, State { regs, frames: Vec::new(), f, acc: Value::Undefined }, None).map(Outcome::returned);
+            let r = self.execute(a, State { regs, frames: Vec::new(), f, acc: Value::Undefined }, &mut None).map(Outcome::returned);
             self.depth.set(saved);
             r
         }
@@ -467,7 +487,7 @@ impl Executor {
     /// If the callee is an ordinary JS function (not a class constructor / generator / async), gives its closure: a
     /// frame can be opened directly.
     #[inline]
-    fn plain_closure<'gc>(&self, callee: Value<'gc>) -> Option<(Closure<'gc>, Rc<Loaded>)> {
+    fn plain_closure<'gc>(&self, callee: Value<'gc>) -> Option<(Closure<'gc>, &Loaded)> {
         let c = callee.as_object()?.closure()?;
         let loaded = self.function(c.func);
         loaded.plain.then_some((c, loaded))
@@ -553,7 +573,7 @@ impl Executor {
                         FunctionKind::Arrow | FunctionKind::Method => break,
                         FunctionKind::Constructor { derived: true } => None,
                         FunctionKind::Normal | FunctionKind::Constructor { derived: false } => {
-                            let this = Self::create_this(a, &func_loaded, new_target)?;
+                            let this = Self::create_this(a, func_loaded, new_target)?;
                             if let Some(init) = closure.fields {
                                 a.call(init.into(), this.into(), &[])?;
                             }
@@ -641,7 +661,7 @@ impl Executor {
     /// properties the instance has (reserve that many slots when building `this` next time).
     fn construct_result<'gc>(&self, a: &Agent<'gc, '_>, f: &Frame<'gc>, v: Value<'gc>) -> Result<Value<'gc>, Error> {
         let loaded = self.function(f.func);
-        let r = self.construct_value(a, &loaded, f, v);
+        let r = self.construct_value(a, loaded, f, v);
         if let Ok(v) = &r
             && let ValueKind::Object(o) = v.kind()
         {
@@ -962,10 +982,10 @@ impl Executor {
 
     /// Runs until the outermost frame returns; an exception first looks for a handler and propagates outward only if
     /// not caught. `budget` applies only to the outermost level: when it runs out, stops with the state.
-    fn execute<'gc>(&self, a: &mut Agent<'gc, '_>, mut st: State<'gc>, mut budget: Option<usize>) -> Result<Outcome<'gc>, Error> {
+    fn execute<'gc>(&self, a: &mut Agent<'gc, '_>, mut st: State<'gc>, budget: &mut Option<usize>) -> Result<Outcome<'gc>, Error> {
         let base = self.depth.get();
         let r = loop {
-            match self.run(a, &mut st, base, &mut budget) {
+            match self.run(a, &mut st, base, budget) {
                 Ok(Some(v)) => break Ok(v),
                 Ok(None) => break Ok(Outcome::Paused(alloc::boxed::Box::new(st))),
                 Err(Error::Exception(g)) => {
@@ -1022,14 +1042,13 @@ impl Executor {
     fn run<'gc>(&self, a: &mut Agent<'gc, '_>, st: &mut State<'gc>, depth: usize, budget: &mut Option<usize>) -> Result<Option<Outcome<'gc>>, Error> {
         let State { regs, frames, f, acc } = st;
         // When the call fast path has already fetched the callee, hands it to the next frame, saving a lookup
-        let mut entering: Option<Rc<Loaded>> = None;
+        let mut entering: Option<&Loaded> = None;
         'frame: loop {
             // Budget exhausted: stop before this frame's next instruction, with the state intact
             if Self::spent(budget) {
                 return Ok(None);
             }
-            let cur = entering.take().unwrap_or_else(|| self.function(f.func));
-            let loaded = &*cur;
+            let loaded = entering.take().unwrap_or_else(|| self.function(f.func));
             let func = &loaded.func;
             loop {
                 let insn = &func.insns[f.pc];
@@ -1497,7 +1516,7 @@ impl Executor {
                             && let Some((c, loaded)) = self.plain_closure(target)
                         {
                             let mut next = Self::enter_regs(a, regs, &loaded.func, c, target, regs[r(this)], first, usize::from(argc));
-                            if !self.tiered(a.platform, &loaded, regs, &mut next, acc) {
+                            if !self.tiered(a.platform, loaded, regs, &mut next, acc) {
                                 frames.push(core::mem::replace(f, next));
                                 entering = Some(loaded);
                                 continue 'frame;
@@ -1744,7 +1763,7 @@ impl<'gc> Invoke<'gc> for Executor {
             let mut regs = a.take_regs();
             let mut f = Self::enter_func(a, &mut regs, &loaded.func, c, callee, this, args);
             let mut acc = Value::Undefined;
-            if self.tiered(a.platform, &loaded, &mut regs, &mut f, &mut acc) {
+            if self.tiered(a.platform, loaded, &mut regs, &mut f, &mut acc) {
                 a.give_regs(regs);
                 return Ok(acc);
             }
@@ -1872,7 +1891,7 @@ impl Executor {
 
     fn run_state<'gc>(&self, a: &mut Agent<'gc, '_>, st: State<'gc>, level: usize) -> Result<Outcome<'gc>, Error> {
         let saved = self.depth.replace(level);
-        let r = self.execute(a, st, None);
+        let r = self.execute(a, st, &mut None);
         self.depth.set(saved);
         r
     }
@@ -1902,52 +1921,74 @@ enum Slice {
     Paused(Parked),
 }
 
+/// A started piece of source (the engine's [`Job`](j8framework::Engine::Job))
+#[cfg(feature = "compile")]
+pub struct Job(Started);
+
+#[cfg(feature = "compile")]
+enum Started {
+    /// A script, loaded, not entered yet
+    Script(FuncId),
+    /// A script paused between turns, its execution state on the roots
+    Paused(Parked),
+    /// A module: loading, linking and evaluation run in one turn
+    Module { text: alloc::string::String, file: alloc::string::String },
+    /// Running, finished or failed
+    Spent,
+}
+
 #[cfg(feature = "compile")]
 impl j8framework::Engine for Executor {
-    /// Sliced execution: each slice runs at most [`SLICE`] instructions; when it stops, the execution state is attached
-    /// to the roots, some garbage is collected as `enter` returns, and then it re-enters and continues.
-    fn eval(&mut self, isolate: &mut j8framework::Isolate<'_>, cx: &j8framework::ContextRoot, src: &j8framework::Source<'_>) -> Result<j8framework::Global, Error> {
-        let main = self.load(Module::try_from(src)?);
-        let this: &Executor = self;
-        let mut parked: Option<Parked> = None;
-        loop {
-            let previous = parked.take();
-            let slice = isolate.enter(|scope| -> Result<Slice, Error> {
-                let realm = scope.context_of(cx);
-                let mut a = scope.agent(realm, this);
-                let st = match previous {
-                    Some(root) => j8framework::CellExt::borrow_mut(a.fetch(&root), a.mc).take().expect("a parked state"),
-                    None => this.script_state(&mut a, main),
-                };
-                match this.execute(&mut a, st, Some(SLICE))? {
-                    Outcome::Paused(st) => Ok(Slice::Paused(a.stash::<ParkedBrand>(a.mc.alloc(j8framework::GcCell::new(a.mc, Some(*st)))))),
-                    Outcome::Return(v) => {
-                        a.run_jobs()?;
-                        Ok(Slice::Done(a.global(v)))
-                    }
-                    Outcome::Suspend { .. } => unreachable!("scripts do not suspend"),
-                }
-            })?;
-            match slice {
-                Slice::Done(g) => return Ok(g),
-                Slice::Paused(root) => parked = Some(root),
-            }
-        }
+    type Job = Job;
+
+    fn start(&mut self, _: &mut j8framework::Isolate<'_>, _: &j8framework::ContextRoot, src: &j8framework::Source<'_>, kind: j8framework::ScriptKind) -> Result<Job, Error> {
+        Ok(Job(match kind {
+            j8framework::ScriptKind::Classic => Started::Script(self.load(Module::try_from(src)?)),
+            j8framework::ScriptKind::Shared => Started::Script(self.load(match &self.cache {
+                Some(cache) => cache.script(src)?,
+                None => Module::try_from(src)?,
+            })),
+            j8framework::ScriptKind::Module => Started::Module { text: src.text.into(), file: src.file.into() },
+        }))
     }
 
-    /// Modules are not sliced: one entry runs loading, linking, evaluation and microtasks to completion.
-    fn eval_module(&mut self, isolate: &mut j8framework::Isolate<'_>, cx: &j8framework::ContextRoot, src: &j8framework::Source<'_>) -> Result<j8framework::Global, Error> {
+    /// A script runs until it returns or the quota is spent; then its execution state parks on the roots, and some
+    /// garbage is collected as `enter` returns. A module (not sliced) runs loading, linking, evaluation and microtasks
+    /// to the end in one turn.
+    fn resume(&mut self, isolate: &mut j8framework::Isolate<'_>, cx: &j8framework::ContextRoot, job: &mut Job, quota: &mut j8framework::Quota) -> Result<Option<j8framework::Global>, Error> {
         let this: &Executor = self;
-        isolate.enter(|scope| {
+        let started = core::mem::replace(&mut job.0, Started::Spent);
+        let mut budget = Some(quota.left());
+        let slice = isolate.enter(|scope| -> Result<Slice, Error> {
             let realm = scope.context_of(cx);
             let mut a = scope.agent(realm, this);
-            #[cfg(feature = "compile")]
-            this.run_module(&mut a, src.file, src.text, 0)?;
-            #[cfg(not(feature = "compile"))]
-            return Err(src.unsupported(0, "modules"));
-            a.run_jobs()?;
-            Ok(a.global(Value::Undefined))
-        })
+            let st = match started {
+                Started::Script(main) => this.script_state(&mut a, main),
+                Started::Paused(root) => j8framework::CellExt::borrow_mut(a.fetch(&root), a.mc).take().expect("a parked state"),
+                Started::Module { text, file } => {
+                    this.run_module(&mut a, &file, &text, 0)?;
+                    a.run_jobs()?;
+                    return Ok(Slice::Done(a.global(Value::Undefined)));
+                }
+                Started::Spent => unreachable!("a finished job is not resumed"),
+            };
+            match this.execute(&mut a, st, &mut budget)? {
+                Outcome::Paused(st) => Ok(Slice::Paused(a.stash::<ParkedBrand>(a.mc.alloc(j8framework::GcCell::new(a.mc, Some(*st)))))),
+                Outcome::Return(v) => {
+                    a.run_jobs()?;
+                    Ok(Slice::Done(a.global(v)))
+                }
+                Outcome::Suspend { .. } => unreachable!("scripts do not suspend"),
+            }
+        });
+        quota.spend(quota.left() - budget.unwrap_or(0));
+        match slice? {
+            Slice::Done(g) => Ok(Some(g)),
+            Slice::Paused(root) => {
+                job.0 = Started::Paused(root);
+                Ok(None)
+            }
+        }
     }
 }
 

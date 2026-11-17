@@ -14,6 +14,11 @@ pub(crate) struct Code {
     len: usize,
 }
 
+// SAFETY: `Code` owns its mapping alone (nothing else holds `at`), the mapping is read-only executable once `load`
+// returns, and it is unmapped exactly once, on drop: moving it to another thread (with the executor that runs it) is
+// fine
+unsafe impl Send for Code {}
+
 impl Code {
     /// Fills in the runtime function addresses and maps it as executable memory.
     pub(crate) fn load(native: &Native) -> Option<Code> {

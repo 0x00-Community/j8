@@ -1,15 +1,16 @@
 //! 数据流调度：线程池里每个线程跑一个取活循环（取任务 ⇒ 执行 ⇒ 放行下游），没有轮次屏障。
+//! 取不到活的线程直接离开、不自旋：之后才就绪的任务（放行的下游、让出的、塞的）由让它就绪的线程接着取，
+//! 那个线程还在循环里；离开的线程回到线程池，可以帮任务里嵌套的并行（内建函数、JIT 编译）。
+use alloc::boxed::Box;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::hint;
 use core::num::NonZeroUsize;
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 
-use moremath::{Execute, Executor};
 use j8lockfree::Fifo;
 
 use crate::node::{Node, TaskId};
-use crate::{Fault, Flow, ITaskPoll, Quota, Ran, Refused, Stop, Task};
+use crate::{Fault, Flow, ITaskPoll, Job, Pool, Quota, Ran, Refused, Stop, Task};
 
 /// 没有故障时 `fault` 的值
 const NO_FAULT: u8 = 0;
@@ -20,8 +21,6 @@ struct Shared<'a> {
     ready: Fifo<TaskId<'a>>,
     /// 下一个序号
     seq: AtomicUsize,
-    /// 正在取活 / 执行的工作线程数
-    active: AtomicUsize,
     /// 这次 run 花掉的字节码条数
     spent: AtomicUsize,
     /// 这次 run 执行了几次
@@ -116,27 +115,14 @@ impl<'a> Shared<'a> {
 /// 一个工作线程的取活循环。
 struct Worker<'s, 'a>(&'s Shared<'a>);
 
-impl<'t, 's: 't, 'a: 't> Execute<'t> for Worker<'s, 'a> {
-    type Output = ();
-
-    fn execute(self) {
+impl Worker<'_, '_> {
+    fn work(self) {
         let s = self.0;
-        // 先登记「我在取活」再弹：别的线程看到 active 为 0 且队列空，才能断定不会再有新任务
         while !s.halt.load(Ordering::Acquire) {
             let Some(quota) = s.quota() else { return };
-            s.active.fetch_add(1, Ordering::SeqCst);
-            match s.ready.pop() {
-                Some(id) => {
-                    s.step(id, quota);
-                    s.active.fetch_sub(1, Ordering::SeqCst);
-                }
-                None => {
-                    if s.active.fetch_sub(1, Ordering::SeqCst) == 1 && s.ready.is_empty() {
-                        return;
-                    }
-                    hint::spin_loop();
-                }
-            }
+            // 取不到就离开：别的线程手上的任务之后放出来的活，由那个线程自己接着取
+            let Some(id) = s.ready.pop() else { return };
+            s.step(id, quota);
         }
     }
 }
@@ -162,19 +148,18 @@ impl<'a> ITaskPoll<'a> for Spawn<'_, '_, 'a> {
     }
 }
 
-/// [`ITaskPoll`] 的实现：就绪队列与调度状态，加上跑它们的 [`Executor`]。
-pub struct TaskQueue<'x, 'a, E: Executor> {
-    executor: &'x E,
+/// 不带线程的队列：就绪队列与调度状态。宿主可以长期持有、随宿主搬动；[`Queue::run`] 在调用线程上跑，
+/// [`Queue::run_on`] 铺到线程池上并行跑。
+pub struct Queue<'a> {
     shared: Shared<'a>,
 }
 
-impl<'x, E: Executor> From<&'x E> for TaskQueue<'x, '_, E> {
+impl Default for Queue<'_> {
     /// 配额与预算都不限。
-    fn from(executor: &'x E) -> Self {
+    fn default() -> Self {
         let shared = Shared {
             ready: Fifo::default(),
             seq: AtomicUsize::new(0),
-            active: AtomicUsize::new(0),
             spent: AtomicUsize::new(0),
             execs: AtomicUsize::new(0),
             fault: AtomicU8::new(NO_FAULT),
@@ -182,45 +167,56 @@ impl<'x, E: Executor> From<&'x E> for TaskQueue<'x, '_, E> {
             slice: Quota::UNLIMITED,
             budget: Quota::UNLIMITED,
         };
-        Self { executor, shared }
+        Self { shared }
     }
 }
 
-impl<E: Executor> TaskQueue<'_, '_, E> {
-    /// 每次 exec 最多花多少条字节码（用完返回 [`Flow::Yield`]，之后接着跑）。
-    #[must_use]
-    pub fn with_slice(mut self, slice: NonZeroUsize) -> Self {
+impl<'a> Queue<'a> {
+    /// 每次 exec 最多花多少条字节码（用完返回 [`Flow::Yield`]，回就绪队列排队，先轮到别的就绪任务）。
+    pub fn set_slice(&mut self, slice: NonZeroUsize) {
         self.shared.slice = slice.get();
-        self
     }
 
-    /// 每次 [`ITaskPoll::run`] 总共最多花多少条字节码，花完返回 [`Stop::Budget`]；并行执行时最多超出每个线程一份配额。
-    #[must_use]
-    pub fn with_budget(mut self, budget: NonZeroUsize) -> Self {
+    /// 每次 run 总共最多花多少条字节码，花完返回 [`Stop::Budget`]；并行执行时最多超出每个线程一份配额。
+    pub fn set_budget(&mut self, budget: NonZeroUsize) {
         self.shared.budget = budget.get();
-        self
+    }
+
+    /// 宿主在循环外塞，总是收下。
+    pub fn add(&mut self, task: Task<'a>) -> TaskId<'a> {
+        self.shared.register(task, None)
     }
 
     /// 没有待跑的任务（循环外：还在等依赖的任务，其依赖链终会落到一个就绪的任务上）。
     pub fn is_empty(&self) -> bool {
         self.shared.ready.is_empty()
     }
-}
 
-impl<'a, E: Executor> ITaskPoll<'a> for TaskQueue<'_, 'a, E> {
-    /// 宿主在循环外塞，总是收下。
-    fn add(&mut self, task: Task<'a>) -> Result<TaskId<'a>, Refused<'a>> {
-        Ok(self.shared.register(task, None))
+    /// 在调用线程上跑到没有任务、或预算花完、或出故障（同 [`ITaskPoll::run`]）。
+    pub fn run(&mut self) -> Result<Ran, Fault> {
+        self.begin();
+        Worker(&self.shared).work();
+        self.end()
     }
 
-    fn run(&mut self) -> Result<Ran, Fault> {
+    /// 在 `pool` 的每个线程上各跑一个取活循环，跑到没有任务、或预算花完、或出故障（同 [`ITaskPoll::run`]）。
+    pub fn run_on(&mut self, pool: &dyn Pool) -> Result<Ran, Fault> {
+        self.begin();
+        let shared = &self.shared;
+        let jobs: Vec<Job<'_>> = (0..pool.threads().max(1)).map(|_| Box::new(move || Worker(shared).work()) as Job<'_>).collect();
+        pool.run(jobs);
+        self.end()
+    }
+
+    fn begin(&mut self) {
         let s = &mut self.shared;
         *s.spent.get_mut() = 0;
         *s.execs.get_mut() = 0;
         *s.fault.get_mut() = NO_FAULT;
         *s.halt.get_mut() = false;
-        let workers: Vec<Worker<'_, 'a>> = (0..self.executor.threads()).map(|_| Worker(&self.shared)).collect();
-        self.executor.execute(workers);
+    }
+
+    fn end(&mut self) -> Result<Ran, Fault> {
         let s = &mut self.shared;
         s.ready.compact();
         if let Ok(fault) = Fault::try_from(*s.fault.get_mut()) {
@@ -231,12 +227,57 @@ impl<'a, E: Executor> ITaskPoll<'a> for TaskQueue<'_, 'a, E> {
     }
 }
 
-impl<E: Executor> Drop for TaskQueue<'_, '_, E> {
+impl Drop for Queue<'_> {
     /// 剩下的任务都做完（不执行）：依赖链互相持有句柄，逐个封口放行才能都释放。
     fn drop(&mut self) {
         while let Some(id) = self.shared.ready.pop() {
             // SAFETY: 独占；弹出的节点执行权在这里，只做完一次
             unsafe { id.0.complete(&self.shared.ready) };
         }
+    }
+}
+
+/// [`ITaskPoll`] 的实现：一个 [`Queue`]，加上跑它的线程池。
+pub struct TaskQueue<'x, 'a> {
+    pool: &'x dyn Pool,
+    queue: Queue<'a>,
+}
+
+impl<'x, P: Pool + 'x> From<&'x P> for TaskQueue<'x, '_> {
+    /// 配额与预算都不限。
+    fn from(pool: &'x P) -> Self {
+        Self { pool, queue: Queue::default() }
+    }
+}
+
+impl TaskQueue<'_, '_> {
+    /// 每次 exec 最多花多少条字节码（用完返回 [`Flow::Yield`]，之后接着跑）。
+    #[must_use]
+    pub fn with_slice(mut self, slice: NonZeroUsize) -> Self {
+        self.queue.set_slice(slice);
+        self
+    }
+
+    /// 每次 [`ITaskPoll::run`] 总共最多花多少条字节码，花完返回 [`Stop::Budget`]；并行执行时最多超出每个线程一份配额。
+    #[must_use]
+    pub fn with_budget(mut self, budget: NonZeroUsize) -> Self {
+        self.queue.set_budget(budget);
+        self
+    }
+
+    /// 没有待跑的任务（循环外：还在等依赖的任务，其依赖链终会落到一个就绪的任务上）。
+    pub fn is_empty(&self) -> bool {
+        self.queue.is_empty()
+    }
+}
+
+impl<'a> ITaskPoll<'a> for TaskQueue<'_, 'a> {
+    /// 宿主在循环外塞，总是收下。
+    fn add(&mut self, task: Task<'a>) -> Result<TaskId<'a>, Refused<'a>> {
+        Ok(self.queue.add(task))
+    }
+
+    fn run(&mut self) -> Result<Ran, Fault> {
+        self.queue.run_on(self.pool)
     }
 }

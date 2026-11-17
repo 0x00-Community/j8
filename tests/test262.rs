@@ -265,7 +265,7 @@ impl Case {
         };
         let platform = Capture { start: Instant::now(), lines: Mutex::default() };
         let mut isolate = Isolate::new(&platform, CreateParams::default());
-        let mut executor = if std::env::var_os(JIT_ENV).is_some() { Executor::default().with_tier(std::rc::Rc::new(j8jit::Jit::from(0))) } else { Executor::default() };
+        let mut executor = if std::env::var_os(JIT_ENV).is_some() { Executor::default().with_tier(j8jit::Jit::from(0)) } else { Executor::default() };
         let file = self.path.strip_prefix(Suite::test_dir()).unwrap_or(&self.path).display().to_string();
         let expected = self.meta.negative.as_ref();
         let cx = isolate.enter(|scope| scope.persist(scope.context(&Builtins)));

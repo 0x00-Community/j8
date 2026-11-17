@@ -1,12 +1,12 @@
 //! Conversion types for host functions beyond plain values: [`Persistent`] keeps a JS value across `enter` calls (a
 //! host struct can store it), [`Function`] is a callable one, [`Bytes`] is binary data (`ArrayBuffer` / typed arrays /
-//! `DataView` ⇄ `Vec<u8>`).
+//! `DataView` ⇄ `Vec<u8>`), [`Promise`] is a JS promise awaited from Rust.
 use alloc::boxed::Box;
 #[cfg(feature = "json")]
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use j8framework::{Agent, BufferData, ElementKind, Error, ErrorKind, Global, ObjectData, ObjectKind, Value, ViewData};
+use j8framework::{Agent, BufferData, ElementKind, Error, ErrorKind, Global, HostReaction, ObjectData, ObjectKind, Value, ViewData};
 
 use crate::{FromJs, IntoJs};
 
@@ -139,5 +139,45 @@ impl<'gc, T: serde::Serialize> IntoJs<'gc> for Json<T> {
         let text = serde_json::to_string(&self.0).map_err(|e| a.throw(ErrorKind::Type, &alloc::format!("cannot write this value: {e}")))?;
         let s = a.string(&text);
         Self::json(a, "parse", s.into())
+    }
+}
+
+/// A JS promise awaited from Rust. Taken as a parameter the way `await` takes its operand (a promise is watched
+/// directly, a thenable is adopted, any other value counts as already fulfilled), then `.await`ed in an `async fn`
+/// binding or a future given to `Glue::spawn`:
+///
+/// ```ignore
+/// #[j8::object("math")]
+/// impl Math {
+///     async fn double(p: j8::Promise<f64>) -> Result<f64, Error> {
+///         Ok(p.await? * 2.0)          // a rejection passes on to this function's own promise
+///     }
+/// }
+/// ```
+///
+/// The output is the fulfilled value converted with `FromJs` into `T` (on the runtime thread, when the promise
+/// settles), or `Err(Error::Exception(reason))` for a rejection or a value that does not convert. A promise that never
+/// settles keeps the future pending, like `await` in JS.
+pub struct Promise<T>(j8lockfree::Receiver<Result<T, Error>>);
+
+impl<'gc, T: for<'g> FromJs<'g> + Send + 'static> FromJs<'gc> for Promise<T> {
+    fn from_js(a: &mut Agent<'gc, '_>, v: Value<'gc>) -> Result<Self, Error> {
+        let (tx, rx) = j8lockfree::Oneshot::new();
+        a.on_settled(
+            v,
+            HostReaction::new(move |a, value, rejected| {
+                let out = if rejected { Err(Error::Exception(a.global(value))) } else { T::from_js(a, value) };
+                tx.send(out);
+            }),
+        )?;
+        Ok(Self(rx))
+    }
+}
+
+impl<T> core::future::Future for Promise<T> {
+    type Output = Result<T, Error>;
+
+    fn poll(mut self: core::pin::Pin<&mut Self>, cx: &mut core::task::Context<'_>) -> core::task::Poll<Self::Output> {
+        core::pin::Pin::new(&mut self.0).poll(cx)
     }
 }

@@ -176,9 +176,12 @@ j8::runtime! {
 }
 
 let platform = MyNode::platform(DefaultPlatform::default());   // serves the native modules to `import`
-let mut rt = MyNode::runtime(&platform, Executor::default())?;  // context built, everything installed, preludes run
-let result = rt.eval("require('fs').existsSync('/')", "main.js")?;
-println!("{}", rt.text(&result));
+j8::EventLoopSet::scope(&platform, NonZeroUsize::MIN, |set| {   // the loop threads runtimes live on
+    let rt = MyNode::runtime(set, Executor::default())?;        // context built, everything installed, preludes run
+    let result = rt.eval("require('fs').existsSync('/')", "main.js")?;
+    println!("{}", rt.text(&result));
+    Ok(())
+})
 ```
 
 Every section is optional; they come in this order, each followed by a comma. `j8::Runtime` also has
@@ -197,18 +200,20 @@ and `isolate`. `samples/dune` and
 | `#[js(name = "…")]` | The name in JS |
 | `#[js(skip)]` | Not exported |
 
-Besides plain values, three handle types:
+Besides plain values, these handle types:
 
 | Type | As a parameter | As a return value |
 |---|---|---|
 | `j8::Persistent` | keeps any JS value across `enter` calls (store it in the host struct; `.get(a)` reads it) | `&Persistent` gives the value back |
 | `j8::Function` | a callable `Persistent` (`TypeError` if not callable); `.call(a, this, args)` | `&Function` |
 | `j8::Bytes` | the bytes of an `ArrayBuffer` / typed array / `DataView` | a new `Uint8Array` |
+| `j8::Promise<T>` | a JS promise (taken like `await` takes it) to `.await` in Rust: `Result<T, Error>`, the rejection as `Error::Exception` | — |
 | `j8::Json<T>` (feature `json`) | any `serde::Deserialize` type, read through `JSON.stringify` (`TypeError` if it doesn't fit) | any `serde::Serialize` type, made through `JSON.parse` |
 
 `async fn` bindings (associated functions with owned parameters) return a promise at once; the future runs on the
 runtime's event loop, `j8::Runtime::run_until_idle`, which settles the promise with the result converted by `IntoJs`
-and runs the microtasks. On a platform without an event loop (not a `j8::HostPlatform`) the call throws a `TypeError`.
+and runs the microtasks. The work belongs to the runtime that started it (runtimes may share a platform); in an isolate
+made without an event loop (not by `j8::Runtime`) the call throws a `TypeError`.
 
 ```rust
 #[j8::object("later")]

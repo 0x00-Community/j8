@@ -209,10 +209,12 @@ impl Method {
             }
         } else if self.role == Role::Constructor {
             let made = if self.returns_result { call } else { quote!(::core::result::Result::Ok(#call)) };
+            // The value is made before `construct` borrows the agent: the constructor may take `&mut Agent` itself
             quote! {
                 ::j8::Glue::require_new(a, #class)?;
                 #(#prepare)*
-                ::j8::Glue::construct::<Self>(a, #made)
+                let __made = #made;
+                ::j8::Glue::construct::<Self>(a, __made)
             }
         } else {
             quote! {
