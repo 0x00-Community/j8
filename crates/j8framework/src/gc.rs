@@ -8,6 +8,10 @@
 //! 原地改年轻快照不经过写屏障，所以 j8 的堆只用停顿式回收（`collect_if_needed` / `collect`），⛔ `mark_concurrently`。
 //!
 //! 写屏障记下的是槽的地址：⛔ 给还没放进堆的值写槽（先分配进堆再填）。
+//!
+//! 年轻回收会搬存活的年轻对象（paragc 缺省的 `YoungEvacuation::SkipRemembered`：老对象直接指着的不动，被搬的对象的
+//! 字段都走 `relocate`），`ValueCell` 字里的地址随之改写。⛔ `YoungEvacuation::Full`：它会改老对象槽里的地址，
+//! 但不知道 `ValueCell` 字里另存的那一份。
 use core::cell::UnsafeCell;
 use core::fmt;
 use core::mem::ManuallyDrop;
