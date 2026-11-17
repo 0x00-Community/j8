@@ -14,7 +14,10 @@
 //! - [`Agent`]: the context of one run; JS operation semantics hang off it, and calls back into JS go through
 //!   [`Invoke`] (implemented by the execution engine)
 //! - [`Profiler`]: call / back-edge counters
-//! - [`Engine`]: the unified entry point implemented by the execution engine (j8executor)
+//! - [`Engine`]: the unified entry point implemented by the execution engine (j8executor); resumable
+//!   ([`Engine::start`] / [`Engine::resume`])
+//! - [`EventLoop`]: one loop driving every isolate's bytecode and the host's async work, on the platform's pool
+//!   through j8taskqueue
 extern crate alloc;
 // `#[derive(Collect)]` 生成的代码写 `::j8framework::…`，本 crate 里也要能这样引用自己
 extern crate self as j8framework;
@@ -22,6 +25,7 @@ extern crate self as j8framework;
 mod agent;
 mod bigint;
 mod engine;
+mod event_loop;
 mod error;
 mod gc;
 mod handle;
@@ -44,7 +48,9 @@ mod text;
 mod value;
 
 pub use agent::{Agent, CodeKind, Invoke, Resume, Step};
-pub use engine::{Engine, Source};
+pub use engine::{Engine, ScriptKind, Source};
+pub use event_loop::{EventLoop, IsolateId, Ticket};
+pub use j8taskqueue::Quota;
 pub use error::Error;
 pub use handle::{ContextRoot, Global, RealmBrand, ValueBrand};
 pub use isolate::{CreateParams, Isolate, Scope};

@@ -235,16 +235,26 @@ runtime thread, this also works for the results of `async fn`s.
 
 ## 5. Async work and the event loop
 
-j8 does not include an async runtime (no tokio). `Runtime::run_until_idle` is a minimal loop:
+j8 does not include an async runtime (no tokio). One loop, `j8framework::EventLoop`, drives both the bytecode and
+the host's async work; `j8::Runtime` is one isolate on such a loop (`eval` and `run_until_idle` run it). Each round,
+every isolate with something to do gets a *turn* on the platform's thread pool (through j8taskqueue; isolates run in
+parallel, each on one thread at a time). A turn:
 
-1. take the work spawned since last time;
-2. poll every pending future;
-3. for each one that is ready, settle its promise and run the microtasks;
-4. if nothing made progress, **park the thread** until a waker fires.
+1. polls that isolate's futures that were woken (no JS runs here; a ready one becomes a settlement);
+2. resumes the running script for a quota of steps, then yields to the other turns (V8's interrupt check, at frame
+   entries and backward jumps);
+3. between scripts, takes the next macrotask: a script, or a settlement, which resolves its promise and drains the
+   microtasks. JS stays run-to-completion.
+
+When nothing can run, the loop **parks its thread** until a waker fires; it returns once no future is pending.
 
 So **a future must wake its waker when it can make progress**, or the loop sleeps forever. Futures from crates that
 need their own reactor (tokio's sockets and timers) do not work as they are. Run that work on a thread or on your own
 reactor, and wake the waker from there.
+
+Several isolates can share one loop: make each with `CreateParams { event_loop: true, .. }`, `add` it with its
+engine and context, then `submit` scripts (or `eval` one and wait for it) and `run`. A long script in one isolate
+does not hold up the others, even on a single thread: turns take the pool in quota-sized slices.
 
 ### 5.1 `async fn` bindings
 
@@ -352,13 +362,15 @@ loop waits for it.
 
 - **No reactor.** Futures that need tokio's (or another runtime's) reactor never wake. Run such work on a thread
   or a reactor of your own.
-- **Every wake polls every pending job.** The loop does not know which job was woken, and ready jobs settle in
-  queue order, not in the order they finished. JS that cares about order (timers) has to sort it out itself.
+- **Settlements follow the polling order.** Futures that become ready in the same turn settle in the order they
+  were polled, not the order they finished. JS that cares about order (timers) has to sort it out itself.
+- **No timers in the loop.** A timer is host work like any other (a thread that sleeps, then wakes its future).
 - **No cancellation from JS.** A future cannot be dropped from the JS side. Watch a flag of your own (dune's
   `Timer::cancel`).
 - **`async fn` cannot take `&self`.** Use `Glue::spawn` (5.3).
-- **A panic in a future propagates out of `run_until_idle`.** An error while settling stops the loop with the
-  remaining jobs still queued.
+- **A panic in a future propagates out of the loop** (out of `eval` / `run_until_idle`). An error while settling
+  stops the loop with the remaining work still queued.
+- **Microtasks are not sliced.** A settlement drains its microtasks to the end in one turn.
 - **Not supported yet:** reporting unhandled rejections, top-level `await`.
 
 ## 6. Modules

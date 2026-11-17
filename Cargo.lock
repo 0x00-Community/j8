@@ -431,6 +431,7 @@ dependencies = [
  "hashbrown",
  "j8lockfree",
  "j8macros",
+ "j8taskqueue",
  "libm",
  "moremath",
  "num-bigint 0.4.8",

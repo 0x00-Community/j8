@@ -49,6 +49,7 @@ struct Later;
 
 #[j8::object("later")]
 impl Later {
+    #[allow(clippy::unused_async, clippy::unused_async_trait_impl, reason = "an async binding that is ready at once is part of what is tested")]
     async fn echo(x: f64) -> f64 {
         x
     }
@@ -98,4 +99,28 @@ fn promise_handles_await_js_promises() {
     rt.run_until_idle().expect("loop runs");
     let r = rt.eval("out.sort().join('|')", "check.js").expect("script runs");
     assert_eq!(rt.text(&r), "late 8|plain 10|rejected no|resolved 42|thenable 16");
+}
+
+/// One isolate of an event loop: its own heap, executor and context with the built-ins
+fn isolate<'p>(lp: &mut j8framework::EventLoop<'p, Executor>, platform: &'p DefaultPlatform) -> j8framework::IsolateId {
+    let mut isolate = j8framework::Isolate::new(platform, j8framework::CreateParams { event_loop: true, ..j8framework::CreateParams::default() });
+    let cx = isolate.enter(|scope| scope.persist(scope.context(&j8builtins::Builtins)));
+    lp.add(isolate, Executor::default(), cx)
+}
+
+#[test]
+fn event_loop_interleaves_isolates() {
+    use j8framework::{ScriptKind, Source};
+    // One thread: isolates take turns by quota, so a long script does not starve a short one
+    let platform = DefaultPlatform::from(core::num::NonZeroUsize::MIN);
+    let mut lp = j8framework::EventLoop::new(&platform);
+    let (long, short) = (isolate(&mut lp, &platform), isolate(&mut lp, &platform));
+    let busy = lp.submit(long, &Source { text: "let n = 0; for (let i = 0; i < 3e6; i++) n += i % 7; n", file: "long.js" }, ScriptKind::Classic);
+    let quick = lp.eval(short, &Source { text: "[1, 2, 3].map(x => x * x).join()", file: "short.js" }, ScriptKind::Classic).expect("short runs");
+    assert!(lp.result(long, busy).is_none(), "the short script finished while the long one was still running");
+    lp.run().expect("loop runs dry");
+    let n = lp.result(long, busy).expect("long finished").expect("long runs");
+    let text = |lp: &mut j8framework::EventLoop<'_, Executor>, id, g: &j8framework::Global| lp.enter(id, |a| { let v = a.local(g); String::from(&**a.to_string(v).expect("ToString")) });
+    assert_eq!(text(&mut lp, short, &quick), "1,4,9");
+    assert_eq!(text(&mut lp, long, &n), "8999994");
 }

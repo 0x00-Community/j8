@@ -2,12 +2,9 @@
 //! hidden bindings, a JavaScript prelude, optionally on top of another host), [`HostPlatform`] serves its native
 //! modules to `import`, and [`Runtime`] is a ready execution environment.
 use std::marker::PhantomData;
-use std::sync::Arc;
-use std::task::{Context, Poll, Wake, Waker};
-use std::thread::Thread;
 use std::time::Duration;
 
-use j8framework::{Agent, AsyncJob, ContextRoot, CreateParams, Error, ErrorKind, Global, Isolate, Platform, Pool, Source, Task, Value};
+use j8framework::{Agent, CreateParams, Error, ErrorKind, EventLoop, Global, Isolate, IsolateId, Platform, Pool, ScriptKind, Source, Task, Value};
 
 /// A runtime's contents (implemented by [`runtime!`](crate::runtime); a parent host's contents come first).
 pub trait Host {
@@ -71,27 +68,12 @@ impl<H: Host, P: Platform> Platform for HostPlatform<H, P> {
     }
 }
 
-/// Wakes the runtime's thread when a future it polls can make progress.
-struct Unpark(Thread);
-
-impl Wake for Unpark {
-    fn wake(self: Arc<Self>) {
-        self.0.unpark();
-    }
-
-    fn wake_by_ref(self: &Arc<Self>) {
-        self.0.unpark();
-    }
-}
-
-/// A ready execution environment: an isolate (with an event loop for async host work), an executor and one context
-/// with a host installed and its preludes run.
+/// A ready execution environment: an isolate with one context, a host installed and its preludes run, driven by a
+/// [`j8framework::EventLoop`] (scripts, the settlements of async host work, sleeping while only host work is
+/// outstanding).
 pub struct Runtime<'p> {
-    isolate: Isolate<'p>,
-    executor: j8executor::Executor,
-    cx: ContextRoot,
-    /// Async host work not settled yet
-    pending: Vec<AsyncJob>,
+    lp: EventLoop<'p, j8executor::Executor>,
+    id: IsolateId,
 }
 
 impl<'p> Runtime<'p> {
@@ -100,7 +82,9 @@ impl<'p> Runtime<'p> {
     pub fn new<H: Host>(platform: &'p dyn Platform, executor: j8executor::Executor) -> Result<Self, Error> {
         let mut isolate = Isolate::new(platform, CreateParams { event_loop: true, ..CreateParams::default() });
         let cx = isolate.enter(|scope| scope.persist(scope.context(&j8builtins::Builtins)));
-        let mut rt = Self { isolate, executor, cx, pending: Vec::new() };
+        let mut lp = EventLoop::new(platform);
+        let id = lp.add(isolate, executor, cx);
+        let mut rt = Self { lp, id };
         rt.enter(|a| H::install(a));
         let mut preludes = Vec::new();
         H::preludes(&mut preludes);
@@ -110,24 +94,19 @@ impl<'p> Runtime<'p> {
         Ok(rt)
     }
 
-    /// Runs a script in the context
+    /// Runs a script in the context (the loop runs until it has finished, settling host work that is ready meanwhile)
     pub fn eval(&mut self, text: &str, file: &str) -> Result<Global, Error> {
-        self.isolate.run(&mut self.executor, &self.cx, &Source { text, file })
+        self.lp.eval(self.id, &Source { text, file }, ScriptKind::Classic)
     }
 
     /// Runs an ES module in the context
     pub fn eval_module(&mut self, text: &str, file: &str) -> Result<Global, Error> {
-        self.isolate.run_module(&mut self.executor, &self.cx, &Source { text, file })
+        self.lp.eval(self.id, &Source { text, file }, ScriptKind::Module)
     }
 
     /// Works with the context directly (installing more, reading results)
     pub fn enter<R>(&mut self, f: impl for<'gc> FnOnce(&mut Agent<'gc, '_>) -> R) -> R {
-        let (executor, cx) = (&self.executor, &self.cx);
-        self.isolate.enter(|scope| {
-            let realm = scope.context_of(cx);
-            let mut a = scope.agent(realm, executor);
-            f(&mut a)
-        })
+        self.lp.enter(self.id, f)
     }
 
     /// ToString of a handle's value (a placeholder when that throws in turn)
@@ -156,51 +135,13 @@ impl<'p> Runtime<'p> {
 
     /// The isolate underneath (collecting, the profiler)
     pub fn isolate(&mut self) -> &mut Isolate<'p> {
-        &mut self.isolate
+        self.lp.isolate(self.id)
     }
 
-    /// The event loop: polls the async host work until all of it has settled its promises (running the microtasks
-    /// each settlement queues), parking the thread while nothing can make progress. Work spawned meanwhile joins in.
+    /// The event loop: runs until all async host work has settled its promises (running the microtasks each
+    /// settlement queues), sleeping while nothing can make progress. Work spawned meanwhile joins in.
     pub fn run_until_idle(&mut self) -> Result<(), Error> {
-        let waker = Waker::from(Arc::new(Unpark(std::thread::current())));
-        let mut cx = Context::from_waker(&waker);
-        loop {
-            self.pending.extend(self.isolate.take_spawned());
-            if self.pending.is_empty() {
-                return Ok(());
-            }
-            let mut progressed = false;
-            let mut i = 0;
-            while i < self.pending.len() {
-                match self.pending[i].future.as_mut().poll(&mut cx) {
-                    Poll::Ready(settle) => {
-                        let job = self.pending.remove(i);
-                        self.enter(|a| Self::settle(a, &job, settle))?;
-                        progressed = true;
-                    }
-                    Poll::Pending => i += 1,
-                }
-            }
-            if !progressed {
-                std::thread::park();
-            }
-        }
-    }
-
-    /// Resolves (or rejects) a job's promise with what it settled to, then runs the microtasks
-    fn settle(a: &mut Agent<'_, '_>, job: &AsyncJob, settle: j8framework::Settle) -> Result<(), Error> {
-        let (target, value) = match settle(a) {
-            Ok(v) => (&job.resolve, v),
-            Err(Error::Exception(g)) => (&job.reject, a.local(&g)),
-            Err(e) => {
-                let message = e.to_string();
-                let Error::Exception(g) = a.throw(ErrorKind::Error, &message) else { unreachable!("throw makes an exception") };
-                (&job.reject, a.local(&g))
-            }
-        };
-        let f = a.local(target);
-        a.call(f, Value::Undefined, &[value])?;
-        a.run_jobs()
+        self.lp.run()
     }
 }
 

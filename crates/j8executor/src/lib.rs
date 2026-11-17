@@ -25,11 +25,6 @@ use j8framework::{Agent, Few, Closure, Coroutine, CoroutineState, Env, Error, Er
 /// Call depth limit (including JS re-entered from host functions); exceeding it throws RangeError
 const STACK_LIMIT: usize = 10_000;
 
-/// A slice runs at most this many steps (entering a frame and each backward jump count as one step: other instructions
-/// only move forward, so the instructions between steps are bounded); GC runs between slices
-#[cfg(feature = "compile")]
-const SLICE: usize = 10_000;
-
 /// A loaded function: the function itself plus the id of the first function of its module (`CreateClosure` indices are
 /// relative to it).
 struct Loaded {
@@ -323,7 +318,7 @@ impl Executor {
         let this = Value::Object(a.realm.global);
         let mut regs = Vec::new();
         let f = self.enter(a, &mut regs, Closure::new(main, None), Value::Undefined, this, &[]);
-        self.execute(a, State { regs, frames: Vec::new(), f, acc: Value::Undefined }, None).map(Outcome::returned)
+        self.execute(a, State { regs, frames: Vec::new(), f, acc: Value::Undefined }, &mut None).map(Outcome::returned)
     }
 
     /// Direct eval: compiles against the scope table of the call site and runs on the call site's environment chain.
@@ -343,7 +338,7 @@ impl Executor {
             let saved = self.depth.replace(level);
             let mut regs = Vec::new();
             let f = self.enter(a, &mut regs, Closure::new(main, env), Value::Undefined, Value::Undefined, &[]);
-            let r = self.execute(a, State { regs, frames: Vec::new(), f, acc: Value::Undefined }, None).map(Outcome::returned);
+            let r = self.execute(a, State { regs, frames: Vec::new(), f, acc: Value::Undefined }, &mut None).map(Outcome::returned);
             self.depth.set(saved);
             r
         }
@@ -971,10 +966,10 @@ impl Executor {
 
     /// Runs until the outermost frame returns; an exception first looks for a handler and propagates outward only if
     /// not caught. `budget` applies only to the outermost level: when it runs out, stops with the state.
-    fn execute<'gc>(&self, a: &mut Agent<'gc, '_>, mut st: State<'gc>, mut budget: Option<usize>) -> Result<Outcome<'gc>, Error> {
+    fn execute<'gc>(&self, a: &mut Agent<'gc, '_>, mut st: State<'gc>, budget: &mut Option<usize>) -> Result<Outcome<'gc>, Error> {
         let base = self.depth.get();
         let r = loop {
-            match self.run(a, &mut st, base, &mut budget) {
+            match self.run(a, &mut st, base, budget) {
                 Ok(Some(v)) => break Ok(v),
                 Ok(None) => break Ok(Outcome::Paused(alloc::boxed::Box::new(st))),
                 Err(Error::Exception(g)) => {
@@ -1880,7 +1875,7 @@ impl Executor {
 
     fn run_state<'gc>(&self, a: &mut Agent<'gc, '_>, st: State<'gc>, level: usize) -> Result<Outcome<'gc>, Error> {
         let saved = self.depth.replace(level);
-        let r = self.execute(a, st, None);
+        let r = self.execute(a, st, &mut None);
         self.depth.set(saved);
         r
     }
@@ -1910,52 +1905,70 @@ enum Slice {
     Paused(Parked),
 }
 
+/// A started piece of source (the engine's [`Job`](j8framework::Engine::Job))
+#[cfg(feature = "compile")]
+pub struct Job(Started);
+
+#[cfg(feature = "compile")]
+enum Started {
+    /// A script, loaded, not entered yet
+    Script(FuncId),
+    /// A script paused between turns, its execution state on the roots
+    Paused(Parked),
+    /// A module: loading, linking and evaluation run in one turn
+    Module { text: alloc::string::String, file: alloc::string::String },
+    /// Running, finished or failed
+    Spent,
+}
+
 #[cfg(feature = "compile")]
 impl j8framework::Engine for Executor {
-    /// Sliced execution: each slice runs at most [`SLICE`] instructions; when it stops, the execution state is attached
-    /// to the roots, some garbage is collected as `enter` returns, and then it re-enters and continues.
-    fn eval(&mut self, isolate: &mut j8framework::Isolate<'_>, cx: &j8framework::ContextRoot, src: &j8framework::Source<'_>) -> Result<j8framework::Global, Error> {
-        let main = self.load(Module::try_from(src)?);
-        let this: &Executor = self;
-        let mut parked: Option<Parked> = None;
-        loop {
-            let previous = parked.take();
-            let slice = isolate.enter(|scope| -> Result<Slice, Error> {
-                let realm = scope.context_of(cx);
-                let mut a = scope.agent(realm, this);
-                let st = match previous {
-                    Some(root) => j8framework::CellExt::borrow_mut(a.fetch(&root), a.mc).take().expect("a parked state"),
-                    None => this.script_state(&mut a, main),
-                };
-                match this.execute(&mut a, st, Some(SLICE))? {
-                    Outcome::Paused(st) => Ok(Slice::Paused(a.stash::<ParkedBrand>(a.mc.alloc(j8framework::GcCell::new(a.mc, Some(*st)))))),
-                    Outcome::Return(v) => {
-                        a.run_jobs()?;
-                        Ok(Slice::Done(a.global(v)))
-                    }
-                    Outcome::Suspend { .. } => unreachable!("scripts do not suspend"),
-                }
-            })?;
-            match slice {
-                Slice::Done(g) => return Ok(g),
-                Slice::Paused(root) => parked = Some(root),
-            }
-        }
+    type Job = Job;
+
+    fn start(&mut self, _: &mut j8framework::Isolate<'_>, _: &j8framework::ContextRoot, src: &j8framework::Source<'_>, kind: j8framework::ScriptKind) -> Result<Job, Error> {
+        Ok(Job(match kind {
+            j8framework::ScriptKind::Classic => Started::Script(self.load(Module::try_from(src)?)),
+            j8framework::ScriptKind::Module => Started::Module { text: src.text.into(), file: src.file.into() },
+        }))
     }
 
-    /// Modules are not sliced: one entry runs loading, linking, evaluation and microtasks to completion.
-    fn eval_module(&mut self, isolate: &mut j8framework::Isolate<'_>, cx: &j8framework::ContextRoot, src: &j8framework::Source<'_>) -> Result<j8framework::Global, Error> {
+    /// A script runs until it returns or the quota is spent; then its execution state parks on the roots, and some
+    /// garbage is collected as `enter` returns. A module (not sliced) runs loading, linking, evaluation and microtasks
+    /// to the end in one turn.
+    fn resume(&mut self, isolate: &mut j8framework::Isolate<'_>, cx: &j8framework::ContextRoot, job: &mut Job, quota: &mut j8framework::Quota) -> Result<Option<j8framework::Global>, Error> {
         let this: &Executor = self;
-        isolate.enter(|scope| {
+        let started = core::mem::replace(&mut job.0, Started::Spent);
+        let mut budget = Some(quota.left());
+        let slice = isolate.enter(|scope| -> Result<Slice, Error> {
             let realm = scope.context_of(cx);
             let mut a = scope.agent(realm, this);
-            #[cfg(feature = "compile")]
-            this.run_module(&mut a, src.file, src.text, 0)?;
-            #[cfg(not(feature = "compile"))]
-            return Err(src.unsupported(0, "modules"));
-            a.run_jobs()?;
-            Ok(a.global(Value::Undefined))
-        })
+            let st = match started {
+                Started::Script(main) => this.script_state(&mut a, main),
+                Started::Paused(root) => j8framework::CellExt::borrow_mut(a.fetch(&root), a.mc).take().expect("a parked state"),
+                Started::Module { text, file } => {
+                    this.run_module(&mut a, &file, &text, 0)?;
+                    a.run_jobs()?;
+                    return Ok(Slice::Done(a.global(Value::Undefined)));
+                }
+                Started::Spent => unreachable!("a finished job is not resumed"),
+            };
+            match this.execute(&mut a, st, &mut budget)? {
+                Outcome::Paused(st) => Ok(Slice::Paused(a.stash::<ParkedBrand>(a.mc.alloc(j8framework::GcCell::new(a.mc, Some(*st)))))),
+                Outcome::Return(v) => {
+                    a.run_jobs()?;
+                    Ok(Slice::Done(a.global(v)))
+                }
+                Outcome::Suspend { .. } => unreachable!("scripts do not suspend"),
+            }
+        });
+        quota.spend(quota.left() - budget.unwrap_or(0));
+        match slice? {
+            Slice::Done(g) => Ok(Some(g)),
+            Slice::Paused(root) => {
+                job.0 = Started::Paused(root);
+                Ok(None)
+            }
+        }
     }
 }
 

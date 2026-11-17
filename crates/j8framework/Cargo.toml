@@ -11,6 +11,7 @@ repository.workspace = true
 paragc.workspace = true
 j8macros.workspace = true
 j8lockfree.workspace = true
+j8taskqueue.workspace = true
 moremath = { workspace = true, features = ["std"] }
 smol_str.workspace = true
 hashbrown.workspace = true
