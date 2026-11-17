@@ -1,4 +1,4 @@
-//! j8executor: the j8virtasm bytecode executor (`no_std`).
+//! j8executor: the j8virtasm bytecode executor.
 //!
 //! Explicit frame stack (no host recursion); all frames share one register file; captured bindings live in the
 //! heap-allocated [`Env`] chain.

@@ -2,7 +2,7 @@
 //!
 //! Assembly / disassembly: `text.parse::<Module>()` / `module.to_string()`, inverses of each other.
 //!
-//! The bytecode types are `no_std`; the `compile` feature adds the JS ⇒ bytecode compiler
+//! The `compile` feature (on by default) adds the JS ⇒ bytecode compiler
 //! (`Module::try_from(&Source)`).
 extern crate alloc;
 

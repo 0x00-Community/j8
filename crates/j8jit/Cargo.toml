@@ -1,6 +1,7 @@
 [package]
 name = "j8jit"
 description = "j8 JIT: picks hot functions for j8compiler, loads the machine code and replaces interpretation (falls back to the interpreter when a fast path doesn't hold)"
+readme = "README.md"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

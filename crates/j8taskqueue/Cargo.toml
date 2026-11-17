@@ -1,6 +1,7 @@
 [package]
 name = "j8taskqueue"
 description = "j8 任务队列：无锁数据流调度，依赖做完的任务立刻在 moremath 线程池上并行跑；并查集归家族，配额按字节码条数"
+readme = "README.md"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

@@ -1,6 +1,7 @@
 [package]
 name = "j8debugger"
 description = "j8 debugging tool: the j8dbg CLI"
+readme = "README.md"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

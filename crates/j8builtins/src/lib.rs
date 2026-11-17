@@ -1,4 +1,4 @@
-//! j8builtins: implementation of [`Intrinsics`]; installs the built-in objects into a new [`Realm`] (`no_std`).
+//! j8builtins: implementation of [`Intrinsics`]; installs the built-in objects into a new [`Realm`].
 #![expect(clippy::unnecessary_wraps, reason = "host functions all share the NativeFn signature; Result can't be dropped just because one cannot fail")]
 extern crate alloc;
 

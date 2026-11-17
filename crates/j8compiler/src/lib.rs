@@ -1,4 +1,4 @@
-//! j8compiler: bytecode function ⇒ raw machine code (`no_std`).
+//! j8compiler: bytecode function ⇒ raw machine code.
 //!
 //! ```text
 //! j8virtasm::Function ─ Lower ─▶ MLIR (llvm dialect) ─ a `Backend` (j8jit's x86-64) ─▶ machine code + addresses to patch
