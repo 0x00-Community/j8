@@ -14,6 +14,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::process::ExitCode;
 
 use clap::Parser;
@@ -111,7 +112,7 @@ impl From<&str> for Reply {
 j8::runtime! {
     /// The Worker runtime: built-ins, the storage binding the prelude uses, and the Fetch API / Durable Object prelude
     Workerd {
-        natives: [KvStore, sql::SqlStorage, ws::Server],
+        natives: [KvStore, sql::SqlStorage],
         prelude: PRELUDE,
     }
 }
@@ -122,8 +123,10 @@ struct Worker<'p> {
 }
 
 impl<'p> Worker<'p> {
-    fn new(set: &j8::EventLoopSet<'_, 'p, Executor>) -> Result<Self, String> {
+    fn new(set: &j8::EventLoopSet<'_, 'p, Executor>, reactor: &Arc<ws::Reactor>) -> Result<Self, String> {
         let rt = Workerd::runtime(set, Executor::default()).map_err(|e| format!("prelude failed: {e}"))?;
+        let reactor = Arc::clone(reactor);
+        rt.enter(move |a| ws::Net::attach(a, reactor));
         Ok(Self { rt })
     }
 
@@ -207,6 +210,7 @@ struct Fleet<'a> {
     storage: &'a str,
     port: u16,
     instances: usize,
+    reactor: &'a Arc<ws::Reactor>,
 }
 
 impl Fleet<'_> {
@@ -229,7 +233,7 @@ impl Fleet<'_> {
     }
 
     fn one<'p>(&self, set: &j8::EventLoopSet<'_, 'p, Executor>, i: usize) -> Result<(Worker<'p>, u16), String> {
-        let mut w = Worker::new(set)?;
+        let mut w = Worker::new(set, self.reactor)?;
         w.load(self.script, self.bindings, &self.storage(i)?)?;
         let port = w.listen(self.port(i)?)?;
         Ok((w, port))
@@ -279,11 +283,20 @@ fn main() -> ExitCode {
         }
     };
     let platform = Workerd::platform(DefaultPlatform::default());
+    // One epoll thread for every socket of every instance
+    let reactor_thread = match ws::ReactorThread::start() {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("workerd: reactor: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let reactor = reactor_thread.reactor();
     let instances = cli.instances.get();
     let threads = cli.threads.unwrap_or_else(|| std::thread::available_parallelism().unwrap_or(NonZeroUsize::MIN).min(cli.instances));
     let run = |set: &j8::EventLoopSet<'_, '_, Executor>| -> Result<(), String> {
         if !cli.requests.is_empty() {
-            let mut rt = Worker::new(set)?;
+            let mut rt = Worker::new(set, &reactor)?;
             rt.load(&script, &bindings, &storage)?;
             for r in &cli.requests {
                 let (method, path) = r.split_once(' ').unwrap_or(("GET", r.as_str()));
@@ -296,7 +309,7 @@ fn main() -> ExitCode {
             }
             return Ok(());
         }
-        let workers = Fleet { script: &script, bindings: &bindings, storage: &storage, port: cli.port, instances }.start(set, threads.get())?;
+        let workers = Fleet { script: &script, bindings: &bindings, storage: &storage, port: cli.port, instances, reactor: &reactor }.start(set, threads.get())?;
         if let [(_, port)] = workers.as_slice() {
             eprintln!("workerd: listening on http://127.0.0.1:{port}");
         } else {

@@ -24,9 +24,9 @@ cargo run -- examples/chat.js --bind ROOM=ChatRoom --port 8787 --storage .chat  
 `addEventListener`，以及 `new Response(null, { status: 101, webSocket: client })`。被接受的一端在响应发出之前 send 的
 消息先排队，耦合时最先发出。
 
-服务器（`src/ws.rs`）跑在 j8 的事件循环上。每条连接的网络侧照 workerd 的 `api::WebSocket::Native` 布局：一个状态（等答复或
-升级 ⇒ 已接受）、几个关闭标志、一条出站队列由 pump 线程写出。每条连接一个线程读帧，读到的消息只交给 JS 正在等的那个
-promise（`server.recv(id)`），所以脚本没要就不往下读；没有消息时事件循环睡着。
+网络层（`src/ws.rs`）是整个进程一个 epoll 反应堆线程（mio）：非阻塞地 accept、读请求、解析帧、写出，从不跑 JS。请求和消息
+经单消费者的流交给事件循环，JS 去 await（`net.accept(server)`、`net.recv(id)`）；答复、升级、帧作为命令回到反应堆。每条连接
+照 workerd 的 `api::WebSocket::Native`：等答复或升级的请求，然后是带关闭标志与出站缓冲的 WebSocket。没有消息时事件循环睡着。
 
 `examples/chat.js` 是聊天室：消息先写进对象的 SQLite 表，再发给房间里所有人，新来的人先收到存下的历史。`tests/chat.rs`
 加压跑它：八个客户端连同一个端口，两轮并发发言，中间全场沉默五秒（服务器不能占 CPU，之后要被下一条消息叫醒），每个

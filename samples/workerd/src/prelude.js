@@ -440,16 +440,17 @@
     // and couples it to that end. Requests are handled concurrently: the loop asks for the next one at once. Gives the
     // port it listens on.
     serve(port) {
-      const server = new native.Server(port);
+      const net = native.net;
+      const server = net.listen(port);
       const loop = async () => {
         for (;;) {
-          const r = await server.accept();
+          const r = await net.accept(server);
           if (r == null) return;
-          this.handle(server, r);
+          this.handle(net, r);
         }
       };
       loop().catch(report);
-      return server.port;
+      return net.port(server);
     },
     handle(server, r) {
       const req = new Request('http://localhost' + r.path, { method: r.method, headers: r.headers, body: r.body === '' ? null : r.body });

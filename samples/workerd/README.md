@@ -24,11 +24,12 @@ The API follows workerd's: `new WebSocketPair()`, `server.accept()` (or the hibe
 `serializeAttachment`), `send`, `close`, `addEventListener`, and `new Response(null, { status: 101, webSocket: client })`.
 Messages the accepted end sends before the response goes out are queued and go first.
 
-The server (`src/ws.rs`) runs on j8's event loop. Each connection's network side is laid out like workerd's
-`api::WebSocket::Native`: a state (awaiting the response or the upgrade, then accepted), the close flags, and an
-outgoing queue a pump thread writes. A thread per connection reads frames, and hands each message only to a promise JS
-is waiting on (`server.recv(id)`), so a connection is read no further than the script has asked; the event loop
-sleeps while nothing arrives.
+The network (`src/ws.rs`) is one epoll reactor thread (mio) for every socket of the process: it accepts, reads
+requests, parses frames and writes, non-blocking, and never runs JS. Requests and messages reach the event loops
+through single-consumer streams that JS awaits (`net.accept(server)`, `net.recv(id)`); answers, upgrades and frames go
+back to the reactor as commands. Each connection follows workerd's `api::WebSocket::Native`: a request waiting for its
+answer or upgrade, then a WebSocket with its close flags and an outgoing buffer. The event loops sleep while nothing
+arrives.
 
 `examples/chat.js` is a chat room: messages go into the object's SQLite table, then to everyone in the room, and a
 newcomer first gets the stored history. `tests/chat.rs` runs it under load: eight clients on one port, two rounds of

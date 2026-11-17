@@ -25,6 +25,8 @@ rusqlite = { version = "0.37", features = ["bundled"] }
 serde_json = "1"
 # The WebSocket handshake's Sec-WebSocket-Accept
 sha1_smol = "1"
+# The network reactor (epoll on Linux): one thread for every socket of the process
+mio = { version = "1", features = ["os-poll", "net"] }
 
 [dev-dependencies]
 # An independent WebSocket client for the chat test
