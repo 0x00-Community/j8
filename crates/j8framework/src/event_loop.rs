@@ -1,12 +1,16 @@
-//! Event loops. An [`EventLoop`] is one JS event loop: its own isolate, engine and context, its macrotasks (scripts
-//! and the settlements of async host work) and its host futures. Many of them run on a few threads: an
-//! [`EventLoopSet`] has loop threads, and every event loop lives on one of them at a time.
+//! Event loops. An [`EventLoop`] is one JS event loop: its own isolate, engine and context, and its j8taskqueue
+//! queue. Many of them run on a few threads: an [`EventLoopSet`] has loop threads, and every event loop lives on one
+//! of them at a time.
 //!
+//! - **The queue is the event loop.** Its tasks are scripts and settlements (resolve a promise, drain microtasks),
+//!   chained so that each waits for the one before (JS runs one task at a time, to completion), and polls of host
+//!   futures, which wait for nothing. A script runs a check interval of steps at a time ([`EventLoopSet::set_check`],
+//!   V8's interrupt check at frame entries and backward jumps), then yields back to the queue: every time the
+//!   bytecode advances, the queue is checked, so host work that became ready meanwhile (also from other threads) is
+//!   polled before the script goes on; a ready future queues its settlement at the end of the JS chain.
 //! - **Pinned, no claiming.** A thread keeps a local queue of its event loops that have work and gives each a turn
-//!   of the set's quota in turn (V8's interrupt check, at frame entries and backward jumps: a long script does not
-//!   hold up the others). A turn polls the event loop's woken futures (a ready one becomes a settlement), resumes
-//!   its running script, and between scripts takes the next macrotask (a script, or a settlement: resolve the
-//!   promise, drain microtasks). JS stays run-to-completion.
+//!   in turn: one run of its task queue on the thread, for the set's slice of steps times the event loop's weight (a
+//!   long script does not hold up the other event loops).
 //! - **Messages only.** Other threads reach a loop thread by a *wake* (an event loop has something new; deduplicated
 //!   by a flag) or a *message* (create an event loop, work in one's context, move one in or out). A message for an
 //!   event loop that has moved on is forwarded to where it lives now.
@@ -16,8 +20,8 @@
 //!   thread and gives it half of another's. An event loop moves only between turns: its isolate, engine, paused
 //!   script and pending futures go with it.
 //! - **One quota.** Every turn gets the set's slice of steps times the event loop's weight
-//!   ([`EventLoopSet::set_slice`], [`EventLoop::set_weight`]); the steps spent are counted per event loop and per
-//!   thread.
+//!   ([`EventLoopSet::set_slice`], [`EventLoop::set_weight`]), checking the queue every check interval; the steps
+//!   spent are counted per event loop and per thread.
 //!
 //! The fast path: an event loop made with [`EventLoop::new`] has no loop thread. It runs on whichever thread drives it
 //! (`eval`, `run`), directly, the way a single runtime always has.
@@ -29,17 +33,22 @@ use alloc::task::Wake;
 use alloc::vec::Vec;
 use core::future::Future;
 use core::num::NonZeroUsize;
+use core::cell::UnsafeCell;
 use core::pin::Pin;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use core::task::{Context, Poll, Waker};
 use std::thread::{Scope, Thread};
 
 use j8lockfree::{AtomicRefCell, Fifo, Oneshot, Receiver, SegVec, Sender};
+use j8taskqueue::{Flow, ITask, ITaskPoll, Queue, Task, TaskId};
 
 use crate::{Agent, AsyncJob, ContextRoot, CreateParams, Engine, Error, ErrorKind, Global, Intrinsics, Invoke, Isolate, Platform, Quota, ScriptKind, Settle, Source, Value};
 
 /// Steps per turn unless the set says otherwise ([`EventLoopSet::set_slice`])
 pub const SLICE: usize = 10_000;
+/// Steps a script runs before its event loop's task queue is checked again, unless the set says otherwise
+/// ([`EventLoopSet::set_check`])
+pub const CHECK: usize = 1_000;
 /// A thread with nothing to run pulls from the busiest one when that has at least this many event loops waiting, or
 /// this many more event loops
 const PULL_GAP: usize = 2;
@@ -126,7 +135,7 @@ struct Bell {
     /// Indexes of futures woken since they were last polled
     woken: Fifo<usize>,
     /// Scripts submitted from other threads, in order
-    submitted: Fifo<Macrotask>,
+    submitted: Fifo<Submitted>,
     /// Scripts not finished plus futures not settled
     outstanding: AtomicUsize,
     /// Errors raised while settling promises
@@ -244,10 +253,12 @@ impl<R> Drop for Reply<R> {
 /// Where a script's result goes
 type Answer = Sender<Result<Global, Error>>;
 
-/// Work an event loop takes between scripts, in order
-enum Macrotask {
-    Script { text: String, file: String, kind: ScriptKind, reply: Answer },
-    Settle { resolve: Global, reject: Global, settle: Settle },
+/// A script submitted from any thread
+struct Submitted {
+    text: String,
+    file: String,
+    kind: ScriptKind,
+    reply: Answer,
 }
 
 /// A host future not settled yet
@@ -258,48 +269,56 @@ struct Pending {
     waker: Waker,
 }
 
-// ---- One event loop ----
+// ---- One event loop: a task queue over its JS ----
 
-struct Lane<'p, E: Engine> {
+/// What an event loop's tasks work on: its isolate, engine and context, its host futures, and the tail of its JS
+/// chain. Only the event loop's own queue (one task at a time, on the thread the event loop lives on) and the host
+/// between two runs of it touch this.
+struct JsState<'p, E: Engine> {
     bell: Arc<Bell>,
     isolate: Isolate<'p>,
     engine: E,
     cx: ContextRoot,
-    macrotasks: VecDeque<Macrotask>,
-    running: Option<(Answer, E::Job)>,
     /// Host futures by index (a settled one leaves a hole for the next)
     pending: Vec<Option<Pending>>,
     holes: Vec<usize>,
+    /// The last JS task queued (a script or a settlement): the next one waits for it, so JS runs one task at a time
+    /// and to completion
+    last: Option<TaskId<'p>>,
 }
 
-impl<'p, E: Engine + for<'gc> Invoke<'gc>> Lane<'p, E> {
-    /// A new event loop for thread `home`: an isolate on `platform`, `engine`, a context with `intrinsics`
-    fn new(platform: &'p dyn Platform, collector_threads: Option<NonZeroUsize>, engine: E, intrinsics: &dyn Intrinsics, doors: &Arc<Doors>, home: usize) -> Box<Self> {
-        let mut isolate = Isolate::new(platform, CreateParams { event_loop: true, collector_threads, ..CreateParams::default() });
-        let cx = isolate.enter(|scope| scope.persist(scope.context(intrinsics)));
-        let bell = Arc::new(Bell {
-            doors: Arc::clone(doors),
-            home: AtomicUsize::new(home),
-            slot: AtomicUsize::new(0),
-            scheduled: AtomicBool::new(false),
-            woken: Fifo::default(),
-            submitted: Fifo::default(),
-            outstanding: AtomicUsize::new(0),
-            faults: Fifo::default(),
-            idle: Fifo::default(),
-            weight: AtomicUsize::new(1),
-            spent: AtomicU64::new(0),
-        });
-        Box::new(Self { bell, isolate, engine, cx, macrotasks: VecDeque::new(), running: None, pending: Vec::new(), holes: Vec::new() })
+/// [`JsState`] shared by the tasks of one queue
+struct Js<'p, E: Engine> {
+    state: UnsafeCell<JsState<'p, E>>,
+}
+
+// SAFETY: the state is reached only through `Js::state`, whose callers are the tasks of the event loop's own queue
+// (run by a single-thread executor, one task at a time) and the event loop's thread between two runs of that queue;
+// the state itself moves between threads only with its event loop (`Send`).
+unsafe impl<E: Engine> Sync for Js<'_, E> where for<'p> JsState<'p, E>: Send {}
+
+impl<'p, E: Engine + Send + for<'gc> Invoke<'gc> + 'p> Js<'p, E> {
+    /// # Safety
+    /// The caller is the running task of this event loop's queue, or its thread between two runs of the queue
+    #[expect(clippy::mut_from_ref, reason = "exclusive by the queue's protocol, see the type")]
+    unsafe fn state(&self) -> &mut JsState<'p, E> {
+        // SAFETY: the caller's contract
+        unsafe { &mut *self.state.get() }
+    }
+}
+
+impl<'p, E: Engine + Send + for<'gc> Invoke<'gc> + 'p> JsState<'p, E> {
+    /// Queues a JS task after the last one; `add` puts it in the queue
+    fn chain(&mut self, add: impl FnOnce(Task<'p>) -> TaskId<'p>, make: impl FnOnce(Vec<TaskId<'p>>) -> Task<'p>) {
+        let after = self.last.take().into_iter().collect();
+        self.last = Some(add(make(after)));
     }
 
-    /// Something to run now
-    fn has_work(&self) -> bool {
-        self.running.is_some() || !self.macrotasks.is_empty() || !self.bell.submitted.is_empty() || !self.bell.woken.is_empty()
-    }
-
-    /// Takes the async host work the isolate queued while this event loop's JS ran
-    fn adopt(&mut self) {
+    /// Takes the async host work the isolate queued while the JS ran; each future gets a first poll
+    fn adopt(&mut self, js: &Arc<Js<'p, E>>, mut add: impl FnMut(Task<'p>))
+    where
+        E: Send + 'p,
+    {
         for AsyncJob { resolve, reject, future } in self.isolate.take_spawned() {
             let job = self.holes.pop().unwrap_or(self.pending.len());
             let waker = Waker::from(Arc::new(JobWaker { job, bell: Arc::clone(&self.bell) }));
@@ -309,70 +328,20 @@ impl<'p, E: Engine + for<'gc> Invoke<'gc>> Lane<'p, E> {
                 None => self.pending.push(p),
             }
             self.bell.begin();
-            self.bell.woken.push(job);
+            add(Box::new(PollTask { js: Arc::clone(js), job }));
         }
     }
 
-    /// Polls the woken futures; each ready one becomes a settlement
-    fn poll_woken(&mut self) {
+    /// A poll task for each future woken since (from any thread)
+    fn take_woken(&mut self, js: &Arc<Js<'p, E>>, mut add: impl FnMut(Task<'p>))
+    where
+        E: Send + 'p,
+    {
         let mut woken: Vec<usize> = core::iter::from_fn(|| self.bell.woken.pop()).collect();
         woken.sort_unstable();
         woken.dedup();
         for job in woken {
-            let Some(Some(p)) = self.pending.get_mut(job) else { continue };
-            let ready = p.future.as_mut().poll(&mut Context::from_waker(&p.waker));
-            if let Poll::Ready(settle) = ready
-                && let Some(Pending { resolve, reject, .. }) = self.pending[job].take()
-            {
-                self.holes.push(job);
-                self.macrotasks.push_back(Macrotask::Settle { resolve, reject, settle });
-            }
-        }
-    }
-
-    /// Runs until nothing is left to run now, a script finishes, or `quota` is spent
-    fn advance(&mut self, quota: &mut Quota) {
-        loop {
-            while let Some(m) = self.bell.submitted.pop() {
-                self.macrotasks.push_back(m);
-            }
-            self.poll_woken();
-            if let Some((_, job)) = &mut self.running {
-                let r = Engine::resume(&mut self.engine, &mut self.isolate, &self.cx, job, quota);
-                self.adopt();
-                let done = match r {
-                    Ok(None) => return,
-                    Ok(Some(g)) => Ok(g),
-                    Err(e) => Err(e),
-                };
-                if let Some((reply, _)) = self.running.take() {
-                    reply.send(done);
-                }
-                self.bell.end();
-                // A script's end ends the turn: whoever waits for it goes on before the next macrotask
-                return;
-            }
-            if quota.exhausted() {
-                return;
-            }
-            match self.macrotasks.pop_front() {
-                Some(Macrotask::Script { text, file, kind, reply }) => match Engine::start(&mut self.engine, &mut self.isolate, &self.cx, &Source { text: &text, file: &file }, kind) {
-                    Ok(job) => self.running = Some((reply, job)),
-                    Err(e) => {
-                        reply.send(Err(e));
-                        self.bell.end();
-                    }
-                },
-                Some(Macrotask::Settle { resolve, reject, settle }) => {
-                    quota.spend(1);
-                    if let Err(e) = self.settle(&resolve, &reject, settle) {
-                        self.bell.fault(e);
-                    }
-                    self.adopt();
-                    self.bell.end();
-                }
-                None => return,
-            }
+            add(Box::new(PollTask { js: Arc::clone(js), job }));
         }
     }
 
@@ -401,6 +370,198 @@ impl<'p, E: Engine + for<'gc> Invoke<'gc>> Lane<'p, E> {
             let mut a = scope.agent(realm, engine);
             f(&mut a)
         })
+    }
+}
+
+/// Adds to the running queue (the tasks that add are recursable, so the queue always takes them)
+fn add_to<'p>(poll: &mut dyn ITaskPoll<'p>) -> impl FnMut(Task<'p>) -> TaskId<'p> {
+    move |t| match poll.add(t) {
+        Ok(id) => id,
+        Err(_) => unreachable!("event loop tasks that add are recursable"),
+    }
+}
+
+/// A script: started, then run a check interval at a time. Each time its quota is spent it yields, and the queue
+/// first runs what is ready (polls of host futures) before the script goes on.
+struct ScriptTask<'p, E: Engine> {
+    js: Arc<Js<'p, E>>,
+    after: Vec<TaskId<'p>>,
+    script: Option<(String, String, ScriptKind)>,
+    job: Option<E::Job>,
+    reply: Option<Answer>,
+}
+
+impl<'p, E: Engine + Send + for<'gc> Invoke<'gc> + 'p> ITask<'p> for ScriptTask<'p, E> {
+    fn recursable(&self) -> bool {
+        true
+    }
+
+    fn depend(&self) -> &[TaskId<'p>] {
+        &self.after
+    }
+
+    fn exec(&mut self, poll: &mut dyn ITaskPoll<'p>, quota: &mut Quota) -> Flow {
+        let js = Arc::clone(&self.js);
+        // SAFETY: the running task of the event loop's queue
+        let st = unsafe { js.state() };
+        if let Some((text, file, kind)) = self.script.take() {
+            match Engine::start(&mut st.engine, &mut st.isolate, &st.cx, &Source { text: &text, file: &file }, kind) {
+                Ok(job) => self.job = Some(job),
+                Err(e) => return self.finish(st, Err(e)),
+            }
+        }
+        let Some(job) = &mut self.job else { return Flow::Done };
+        let r = Engine::resume(&mut st.engine, &mut st.isolate, &st.cx, job, quota);
+        let mut add = add_to(poll);
+        st.adopt(&self.js, |t| drop(add(t)));
+        // The check: futures woken from other threads meanwhile get their polls before the script goes on
+        st.take_woken(&self.js, |t| drop(add(t)));
+        match r {
+            Ok(None) => Flow::Yield,
+            Ok(Some(g)) => self.finish(st, Ok(g)),
+            Err(e) => self.finish(st, Err(e)),
+        }
+    }
+}
+
+impl<E: Engine> ScriptTask<'_, E> {
+    fn finish(&mut self, st: &mut JsState<'_, E>, done: Result<Global, Error>) -> Flow {
+        if let Some(reply) = self.reply.take() {
+            reply.send(done);
+        }
+        st.bell.end();
+        Flow::Done
+    }
+}
+
+/// A settlement: resolves its promise and drains the microtasks
+struct SettleTask<'p, E: Engine> {
+    js: Arc<Js<'p, E>>,
+    after: Vec<TaskId<'p>>,
+    resolve: Global,
+    reject: Global,
+    settle: Option<Settle>,
+}
+
+impl<'p, E: Engine + Send + for<'gc> Invoke<'gc> + 'p> ITask<'p> for SettleTask<'p, E> {
+    fn recursable(&self) -> bool {
+        true
+    }
+
+    fn depend(&self) -> &[TaskId<'p>] {
+        &self.after
+    }
+
+    fn exec(&mut self, poll: &mut dyn ITaskPoll<'p>, quota: &mut Quota) -> Flow {
+        // SAFETY: the running task of the event loop's queue
+        let st = unsafe { self.js.state() };
+        quota.spend(1);
+        if let Some(settle) = self.settle.take()
+            && let Err(e) = st.settle(&self.resolve, &self.reject, settle)
+        {
+            st.bell.fault(e);
+        }
+        let mut add = add_to(poll);
+        st.adopt(&self.js, |t| drop(add(t)));
+        st.bell.end();
+        Flow::Done
+    }
+}
+
+/// One poll of a host future (no JS runs); a ready one queues its settlement at the end of the JS chain
+struct PollTask<'p, E: Engine> {
+    js: Arc<Js<'p, E>>,
+    job: usize,
+}
+
+impl<'p, E: Engine + Send + for<'gc> Invoke<'gc> + 'p> ITask<'p> for PollTask<'p, E> {
+    fn recursable(&self) -> bool {
+        true
+    }
+
+    fn exec(&mut self, poll: &mut dyn ITaskPoll<'p>, _: &mut Quota) -> Flow {
+        // SAFETY: the running task of the event loop's queue
+        let st = unsafe { self.js.state() };
+        let Some(Some(p)) = st.pending.get_mut(self.job) else { return Flow::Done };
+        let ready = p.future.as_mut().poll(&mut Context::from_waker(&p.waker));
+        if let Poll::Ready(settle) = ready
+            && let Some(Pending { resolve, reject, .. }) = st.pending[self.job].take()
+        {
+            st.holes.push(self.job);
+            let js = Arc::clone(&self.js);
+            st.chain(add_to(poll), |after| Box::new(SettleTask { js, after, resolve, reject, settle: Some(settle) }));
+        }
+        Flow::Done
+    }
+}
+
+/// One event loop: its task queue and the JS state the tasks share
+struct Lane<'p, E: Engine> {
+    /// Dropped first: the tasks hold the JS state
+    tasks: Queue<'p>,
+    js: Arc<Js<'p, E>>,
+    bell: Arc<Bell>,
+}
+
+impl<'p, E: Engine + Send + for<'gc> Invoke<'gc> + 'p> Lane<'p, E> {
+    /// A new event loop for thread `home`: an isolate on `platform`, `engine`, a context with `intrinsics`
+    fn new(platform: &'p dyn Platform, collector_threads: Option<NonZeroUsize>, engine: E, intrinsics: &dyn Intrinsics, doors: &Arc<Doors>, home: usize) -> Box<Self> {
+        let mut isolate = Isolate::new(platform, CreateParams { event_loop: true, collector_threads, ..CreateParams::default() });
+        let cx = isolate.enter(|scope| scope.persist(scope.context(intrinsics)));
+        let bell = Arc::new(Bell {
+            doors: Arc::clone(doors),
+            home: AtomicUsize::new(home),
+            slot: AtomicUsize::new(0),
+            scheduled: AtomicBool::new(false),
+            woken: Fifo::default(),
+            submitted: Fifo::default(),
+            outstanding: AtomicUsize::new(0),
+            faults: Fifo::default(),
+            idle: Fifo::default(),
+            weight: AtomicUsize::new(1),
+            spent: AtomicU64::new(0),
+        });
+        let state = JsState { bell: Arc::clone(&bell), isolate, engine, cx, pending: Vec::new(), holes: Vec::new(), last: None };
+        Box::new(Self { tasks: Queue::default(), js: Arc::new(Js { state: UnsafeCell::new(state) }), bell })
+    }
+
+    /// Something to run now
+    fn has_work(&self) -> bool {
+        !self.tasks.is_empty() || !self.bell.submitted.is_empty() || !self.bell.woken.is_empty()
+    }
+
+    /// Takes in what other threads sent: submitted scripts (on the JS chain) and woken futures (a poll each)
+    fn take_in(&mut self) {
+        // SAFETY: the event loop's thread, between two runs of its queue
+        let st = unsafe { self.js.state() };
+        let tasks = &mut self.tasks;
+        while let Some(Submitted { text, file, kind, reply }) = self.bell.submitted.pop() {
+            let js = Arc::clone(&self.js);
+            st.chain(|t| tasks.add(t), |after| Box::new(ScriptTask { js, after, script: Some((text, file, kind)), job: None, reply: Some(reply) }));
+        }
+        st.take_woken(&self.js, |t| drop(tasks.add(t)));
+    }
+
+    /// One turn: runs the queue for `budget` steps, each JS task `check` steps at a time (then the queue is checked
+    /// again); gives the steps run
+    fn turn(&mut self, budget: NonZeroUsize, check: NonZeroUsize) -> u64 {
+        self.take_in();
+        self.tasks.set_slice(check);
+        self.tasks.set_budget(budget);
+        match self.tasks.run() {
+            Ok(ran) => ran.spent as u64,
+            Err(fault) => panic!("an event loop task broke the task queue's contract: {fault:?}"),
+        }
+    }
+
+    /// Works in the context directly; async host work started here joins the queue
+    fn enter<R>(&mut self, f: impl for<'gc> FnOnce(&mut Agent<'gc, '_>) -> R) -> R {
+        // SAFETY: the event loop's thread, between two runs of its queue
+        let st = unsafe { self.js.state() };
+        let r = st.enter(f);
+        let tasks = &mut self.tasks;
+        st.adopt(&self.js, |t| drop(tasks.add(t)));
+        r
     }
 }
 
@@ -461,11 +622,13 @@ struct Set<'p, E: Engine> {
     next: AtomicUsize,
     /// Steps per turn, times each event loop's weight
     slice: AtomicUsize,
+    /// Steps a JS task runs before the queue is checked again
+    check: AtomicUsize,
 }
 
-impl<'p, E: Engine + for<'gc> Invoke<'gc>> Set<'p, E> {
+impl<'p, E: Engine + Send + for<'gc> Invoke<'gc> + 'p> Set<'p, E> {
     fn new(platform: &'p dyn Platform) -> Self {
-        Self { platform, doors: Arc::default(), ports: SegVec::default(), growing: AtomicBool::new(false), next: AtomicUsize::new(0), slice: AtomicUsize::new(SLICE) }
+        Self { platform, doors: Arc::default(), ports: SegVec::default(), growing: AtomicBool::new(false), next: AtomicUsize::new(0), slice: AtomicUsize::new(SLICE), check: AtomicUsize::new(CHECK) }
     }
 
     fn port(&self, i: usize) -> &Arc<Port<'p, E>> {
@@ -528,7 +691,7 @@ struct LoopState<'p, E: Engine> {
     early: Vec<Msg<'p, E>>,
 }
 
-impl<'p, E: Engine + for<'gc> Invoke<'gc>> LoopState<'p, E> {
+impl<'p, E: Engine + Send + for<'gc> Invoke<'gc> + 'p> LoopState<'p, E> {
     fn new(me: usize, set: Arc<Set<'p, E>>) -> Self {
         Self { me, set, lanes: Vec::new(), holes: Vec::new(), ready: VecDeque::new(), early: Vec::new() }
     }
@@ -637,7 +800,6 @@ impl<'p, E: Engine + for<'gc> Invoke<'gc>> LoopState<'p, E> {
             Msg::With(bell, f) => {
                 if let Some(l) = self.lane(&bell) {
                     f(l);
-                    l.adopt();
                     if l.has_work() {
                         self.schedule(&bell);
                     }
@@ -678,13 +840,11 @@ impl<'p, E: Engine + for<'gc> Invoke<'gc>> LoopState<'p, E> {
     /// Gives the next event loop with work one turn; `false` when none has work
     fn turn(&mut self) -> bool {
         let Some(bell) = self.ready.pop_front() else { return false };
-        let slice = self.set.slice.load(Ordering::Relaxed);
+        let (slice, check) = (self.set.slice.load(Ordering::Relaxed), self.set.check.load(Ordering::Relaxed));
         let Some(l) = self.lane(&bell) else { return true };
         l.bell.scheduled.store(false, Ordering::Release);
-        let given = slice.saturating_mul(l.bell.weight.load(Ordering::Relaxed).max(1));
-        let mut quota = Quota::from(given);
-        l.advance(&mut quota);
-        let spent = (given - quota.left()) as u64;
+        let budget = slice.saturating_mul(l.bell.weight.load(Ordering::Relaxed)).max(1);
+        let spent = l.turn(NonZeroUsize::new(budget).unwrap_or(NonZeroUsize::MIN), NonZeroUsize::new(check).unwrap_or(NonZeroUsize::MIN));
         l.bell.spent.fetch_add(spent, Ordering::Relaxed);
         let work = l.has_work();
         self.door().spent.fetch_add(spent, Ordering::Relaxed);
@@ -748,14 +908,14 @@ impl Ticket {
 }
 
 /// ⭐ One JS event loop: an isolate, its engine and one context, with its scripts and async host work
-pub struct EventLoop<'p, E: Engine + Send + for<'gc> Invoke<'gc>> {
+pub struct EventLoop<'p, E: Engine + Send + for<'gc> Invoke<'gc> + 'p> {
     bell: Arc<Bell>,
     set: Arc<Set<'p, E>>,
     /// The fast path: no loop thread, driven by whoever waits on it
     here: Option<Box<LoopState<'p, E>>>,
 }
 
-impl<'p, E: Engine + Send + for<'gc> Invoke<'gc>> EventLoop<'p, E> {
+impl<'p, E: Engine + Send + for<'gc> Invoke<'gc> + 'p> EventLoop<'p, E> {
     /// An event loop with no thread of its own (the fast path): it runs while the calling thread drives it. Its
     /// isolate collects with the platform's pool.
     pub fn new(platform: &'p dyn Platform, engine: E, intrinsics: &dyn Intrinsics) -> Self {
@@ -770,7 +930,7 @@ impl<'p, E: Engine + Send + for<'gc> Invoke<'gc>> EventLoop<'p, E> {
     pub fn submit(&mut self, src: &Source<'_>, kind: ScriptKind) -> Ticket {
         let (reply, rx) = Oneshot::new();
         self.bell.begin();
-        self.bell.submitted.push(Macrotask::Script { text: src.text.into(), file: src.file.into(), kind, reply });
+        self.bell.submitted.push(Submitted { text: src.text.into(), file: src.file.into(), kind, reply });
         self.bell.ring();
         Ticket(rx)
     }
@@ -829,7 +989,6 @@ impl<'p, E: Engine + Send + for<'gc> Invoke<'gc>> EventLoop<'p, E> {
                 let bell = Arc::clone(&self.bell);
                 let l = state.lane(&bell).expect("an inline event loop stays home");
                 let r = l.enter(f);
-                l.adopt();
                 if l.has_work() {
                     state.schedule(&bell);
                 }
@@ -855,7 +1014,7 @@ impl<'p, E: Engine + Send + for<'gc> Invoke<'gc>> EventLoop<'p, E> {
     }
 }
 
-impl<E: Engine + Send + for<'gc> Invoke<'gc>> Drop for EventLoop<'_, E> {
+impl<'p, E: Engine + Send + for<'gc> Invoke<'gc> + 'p> Drop for EventLoop<'p, E> {
     /// An event loop in a set is dropped on its thread (its isolate never leaves the set's threads)
     fn drop(&mut self) {
         if self.here.is_none() {
@@ -865,7 +1024,7 @@ impl<E: Engine + Send + for<'gc> Invoke<'gc>> Drop for EventLoop<'_, E> {
 }
 
 /// ⭐ Loop threads for many event loops, balanced automatically (see the module documentation)
-pub struct EventLoopSet<'s, 'p, E: Engine + Send + for<'gc> Invoke<'gc>> {
+pub struct EventLoopSet<'s, 'p, E: Engine + Send + for<'gc> Invoke<'gc> + 'p> {
     set: Arc<Set<'p, E>>,
     scope: &'s Scope<'s, 'p>,
 }
@@ -926,6 +1085,11 @@ impl<'p, E: Engine + Send + for<'gc> Invoke<'gc> + 'p> EventLoopSet<'_, 'p, E> {
     /// Steps per turn for every event loop of the set (times its weight)
     pub fn set_slice(&self, steps: NonZeroUsize) {
         self.set.slice.store(steps.get(), Ordering::Relaxed);
+    }
+
+    /// Steps a script runs before its event loop's task queue is checked again (host work that is ready runs then)
+    pub fn set_check(&self, steps: NonZeroUsize) {
+        self.set.check.store(steps.get(), Ordering::Relaxed);
     }
 
     /// A new event loop with `engine` and a context with `intrinsics`, on the least loaded thread. Its isolate is

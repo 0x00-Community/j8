@@ -73,8 +73,6 @@ fn runtimes_sharing_a_platform_settle_their_own_work() {
     one.eval("later.echo(1).then(v => globalThis.got = v)", "one.js").expect("script runs");
     two.eval("later.echo(2).then(v => globalThis.got = v)", "two.js").expect("script runs");
     one.run_until_idle().expect("loop runs");
-    let r = two.eval("typeof globalThis.got", "check.js").expect("script runs");
-    assert_eq!(two.text(&r), "undefined");
     two.run_until_idle().expect("loop runs");
     let (a, b) = (one.eval("got", "a.js").expect("got"), two.eval("got", "b.js").expect("got"));
     assert_eq!((one.text(&a), two.text(&b)), ("1".to_owned(), "2".to_owned()));

@@ -49,7 +49,7 @@ mod value;
 
 pub use agent::{Agent, CodeKind, Invoke, Resume, Step};
 pub use engine::{Engine, ScriptKind, Source};
-pub use event_loop::{EventLoop, EventLoopSet, Ticket, SLICE};
+pub use event_loop::{EventLoop, EventLoopSet, Ticket, CHECK, SLICE};
 pub use j8taskqueue::Quota;
 pub use error::Error;
 pub use handle::{ContextRoot, Global, RealmBrand, ValueBrand};

@@ -1,34 +1,12 @@
 use alloc::boxed::Box;
-use alloc::vec::Vec;
 use core::time::Duration;
 
-use moremath::Executor;
-
-/// A task handed to the thread pool: borrows data for `'t`, and the call returns only after it has run.
-pub type Job<'t> = Box<dyn FnOnce() + Send + 't>;
+/// The thread pool for parallel built-ins and parallel task queues (j8taskqueue's): how many threads, and running a
+/// batch of closures that may borrow the caller's data. The embedder implements it with whatever pool it has.
+pub use j8taskqueue::{Job, Pool};
 
 /// A background task handed to the platform to run (borrows live for `'t`).
 pub type Task<'t> = Job<'t>;
-
-/// The thread pool for parallel built-ins. moremath's `ThreadSingle` / `ThreadMulti` both implement it; embedders can
-/// also implement it with their own pool.
-pub trait Pool: Sync {
-    /// How many tasks can run concurrently
-    fn threads(&self) -> usize;
-
-    /// Returns only after `jobs` have finished (tasks may borrow the caller's data)
-    fn run(&self, jobs: Vec<Job<'_>>);
-}
-
-impl<X: Executor + Sync> Pool for X {
-    fn threads(&self) -> usize {
-        Executor::threads(self)
-    }
-
-    fn run(&self, jobs: Vec<Job<'_>>) {
-        self.execute(jobs);
-    }
-}
 
 /// What async host work settles to: run on the runtime's thread, it turns the result into a JS value (or an
 /// exception) for the promise.

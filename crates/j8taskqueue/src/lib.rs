@@ -1,9 +1,12 @@
-//! j8taskqueue：无锁的数据流任务队列（`no_std` + `alloc`），任务在 moremath 的 [`moremath::Executor`] 上并行跑。
+//! j8taskqueue：无锁的数据流任务队列（`no_std` + `alloc`），任务在宿主给的线程池（[`Pool`]）上并行跑，或就在调用线程上跑。
 //!
 //! - [`ITask`]：一个任务。[`ITask::recursable`] 说它能不能在执行时塞新任务、能不能要求再跑，
 //!   [`ITask::depend`] 说它要等哪些任务先做完，[`ITask::exec`] 执行它（带字节码配额 [`Quota`]）
 //! - [`ITaskPoll`]：队列。[`ITaskPoll::add`] 塞一个任务、拿到它的 [`TaskId`]，[`ITaskPoll::run`] 启动事件循环
-//! - [`TaskQueue`]：[`ITaskPoll`] 的实现，借用一个 Executor（宿主给 `ThreadMulti` 线程池；`no_std` 下可用 `ThreadSingle`）
+//! - [`Pool`]：线程池（几个线程、跑完一批闭包才返回），宿主实现；j8framework 的 `Pool` 就是它
+//! - [`TaskQueue`]：[`ITaskPoll`] 的实现，借用一个 [`Pool`]
+//! - [`Queue`]：不带线程的队列本体，宿主长期持有（j8framework 的每个事件循环一个）：[`Queue::run`] 在调用线程上跑，
+//!   [`Queue::run_on`] 铺到线程池上
 //! - [`TaskId`]：任务句柄；[`TaskId::family`] 找爹（并查集的根），[`TaskId::cancel`] 取消整个家族
 //!
 //! 设计：
@@ -20,8 +23,15 @@
 //!
 //! ```
 //! use std::sync::atomic::{AtomicUsize, Ordering};
-//! use moremath::ThreadMulti;
-//! use j8taskqueue::{Flow, ITask, ITaskPoll, Quota, TaskId, TaskQueue};
+//! use j8taskqueue::{Flow, ITask, ITaskPoll, Job, Pool, Quota, TaskId, TaskQueue};
+//!
+//! /// 最简单的线程池：每批每个闭包一个作用域线程
+//! struct Threads(usize);
+//!
+//! impl Pool for Threads {
+//!     fn threads(&self) -> usize { self.0 }
+//!     fn run(&self, jobs: Vec<Job<'_>>) { std::thread::scope(|s| jobs.into_iter().for_each(|j| { s.spawn(j); })) }
+//! }
 //!
 //! /// 等 `after` 都做完再跑：`done` 加一，并记下跑时已经做完了几个
 //! struct Step<'a> { done: &'a AtomicUsize, seen: &'a AtomicUsize, after: Vec<TaskId<'a>> }
@@ -37,7 +47,7 @@
 //! }
 //!
 //! let (done, seen_a, seen_b, seen_c) = (AtomicUsize::new(0), AtomicUsize::new(9), AtomicUsize::new(9), AtomicUsize::new(9));
-//! let pool = ThreadMulti::default();
+//! let pool = Threads(4);
 //! let mut queue = TaskQueue::from(&pool);
 //! let a = queue.add(Box::new(Step { done: &done, seen: &seen_a, after: vec![] })).unwrap();
 //! let b = queue.add(Box::new(Step { done: &done, seen: &seen_b, after: vec![] })).unwrap();
@@ -54,10 +64,23 @@ mod node;
 mod queue;
 
 use alloc::boxed::Box;
+use alloc::vec::Vec;
 use core::fmt;
 
 pub use node::TaskId;
-pub use queue::TaskQueue;
+pub use queue::{Queue, TaskQueue};
+
+/// 交给线程池的一个闭包：借用 `'t` 的数据，[`Pool::run`] 返回前跑完。
+pub type Job<'t> = Box<dyn FnOnce() + Send + 't>;
+
+/// 线程池：宿主实现（标准库线程、自己的池子都行）。
+pub trait Pool: Sync {
+    /// 能同时跑几个
+    fn threads(&self) -> usize;
+
+    /// `jobs` 全跑完才返回（闭包可以借用调用方的数据）
+    fn run(&self, jobs: Vec<Job<'_>>);
+}
 
 /// 队列里存的任务：借用调用方数据，活不过 `'a`。
 pub type Task<'a> = Box<dyn ITask<'a> + 'a>;

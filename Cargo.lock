@@ -433,7 +433,6 @@ dependencies = [
  "j8macros",
  "j8taskqueue",
  "libm",
- "moremath",
  "num-bigint 0.4.8",
  "num-traits",
  "paragc",
@@ -482,7 +481,6 @@ name = "j8taskqueue"
 version = "0.3.0"
 dependencies = [
  "j8lockfree",
- "moremath",
 ]
 
 [[package]]

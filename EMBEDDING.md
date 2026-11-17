@@ -236,14 +236,17 @@ runtime thread, this also works for the results of `async fn`s.
 ## 5. Async work and the event loop
 
 j8 does not include an async runtime (no tokio). A `j8framework::EventLoop` is one JS event loop: an isolate, its
-engine and one context, with its scripts and the async host work they start; `j8::Runtime` is one event loop (`eval`
-and `run_until_idle` drive it). Each time the event loop gets a *turn*, it:
+engine and one context, and a j8taskqueue queue; `j8::Runtime` is one event loop (`eval` and `run_until_idle` drive
+it). The queue holds three kinds of tasks:
 
-1. polls its futures that were woken (no JS runs here; a ready one becomes a settlement);
-2. resumes its running script for a quota of steps, then lets the next event loop on the thread have its turn (V8's
-   interrupt check, at frame entries and backward jumps); a script that finishes ends the turn;
-3. between scripts, takes the next macrotask: a script, or a settlement, which resolves its promise and drains the
-   microtasks. JS stays run-to-completion.
+1. **scripts**, which run a check interval of steps at a time (1000 by default; V8's interrupt check, at frame
+   entries and backward jumps) and then yield back to the queue;
+2. **settlements**, which resolve a promise with what its host work produced and drain the microtasks;
+3. **polls** of host futures that were woken (no JS runs in them; a ready future queues its settlement).
+
+Scripts and settlements are chained: each waits for the one before, so JS runs one task at a time, to completion.
+Polls wait for nothing. So every time the bytecode advances, the queue is checked: host work that became ready
+meanwhile, from any thread, is polled before the script goes on, and its JS runs right after the script.
 
 When nothing can run, the thread **parks** until a waker fires. `run_until_idle` returns once no script and no
 future of the event loop is outstanding.
@@ -267,7 +270,8 @@ script, `enter`), and wait for the answer.
   `set.split(thread)` starts a new thread and gives it half of `thread`'s event loops. An event loop moves only
   between turns, with its isolate, engine, paused script and pending futures; wakes and messages follow it.
 - **One quota.** Every turn runs the set's slice of steps (`set.set_slice`) times the event loop's weight
-  (`EventLoop::set_weight`). `set.loads()`, `set.spent()` and `EventLoop::spent()` show where the work went.
+  (`EventLoop::set_weight`), checking the queue every `set.set_check` steps. `set.loads()`, `set.spent()` and
+  `EventLoop::spent()` show where the work went.
 
 ```rust,ignore
 let platform = Host::platform(DefaultPlatform::default());

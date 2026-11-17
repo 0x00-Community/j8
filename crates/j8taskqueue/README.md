@@ -2,13 +2,14 @@
 
 **English** · [简体中文](README.zh-CN.md)
 
-A lock-free dataflow task queue for [j8](https://github.com/0x00-Community/j8) (`no_std` + `alloc`). Tasks run in
-parallel on a [moremath](https://crates.io/crates/moremath) `Executor` (the host passes a `ThreadMulti`; `ThreadSingle`
-works without std).
+A lock-free dataflow task queue for [j8](https://github.com/0x00-Community/j8) (`no_std` + `alloc`, no other
+dependencies than j8lockfree). Tasks run in parallel on the host's thread pool (`Pool`: how many threads, and running a
+batch of closures), or on the calling thread. Every j8 event loop is one `Queue`.
 
 - `ITask`: a task — `recursable` (may it add tasks / ask to run again), `depend` (what must finish first), `exec` (run
   it with a bytecode `Quota`)
-- `ITaskPoll` / `TaskQueue`: `add` a task to get its `TaskId`, `run` the event loop
+- `ITaskPoll` / `TaskQueue`: `add` a task to get its `TaskId`, `run` the event loop on a `Pool`
+- `Queue`: the queue without threads, kept by the host; `run` on the calling thread or `run_on` a `Pool`
 - `TaskId::family` finds the family root (union-find), `TaskId::cancel` cancels a whole family
 
 Design: dataflow with no round barrier (a task whose dependencies are done is ready at once, on any idle thread); fully

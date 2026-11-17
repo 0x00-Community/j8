@@ -1,6 +1,11 @@
 //! Event loop sets: many event loops on a few pinned threads, load balancing (placement, pulling, `rebalance`,
 //! `split`, moving a paused script), one quota.
+use std::future::Future;
 use std::num::NonZeroUsize;
+use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
+use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use j8builtins::Builtins;
@@ -134,4 +139,67 @@ fn one_quota_by_weight() {
         light.wait(tl).expect("runs");
         assert_eq!(set.spent().iter().sum::<u64>(), heavy.spent() + light.spent(), "steps add up");
     });
+}
+
+/// A host future that becomes ready on another thread after `after`, and records when it was first polled ready
+struct Delayed {
+    after: Duration,
+    started: Option<Arc<AtomicBool>>,
+    ready_at: Arc<OnceLock<Instant>>,
+}
+
+impl Future for Delayed {
+    type Output = j8framework::Settle;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        match &self.started {
+            Some(done) if done.load(Ordering::Acquire) => {
+                let _ = self.ready_at.set(Instant::now());
+                Poll::Ready(Box::new(|_| Ok(j8framework::Value::from(7.0))))
+            }
+            Some(_) => Poll::Pending,
+            None => {
+                let (done, waker, after) = (Arc::new(AtomicBool::new(false)), cx.waker().clone(), self.after);
+                let flag = Arc::clone(&done);
+                std::thread::spawn(move || {
+                    std::thread::sleep(after);
+                    flag.store(true, Ordering::Release);
+                    waker.wake();
+                });
+                self.started = Some(done);
+                Poll::Pending
+            }
+        }
+    }
+}
+
+#[test]
+fn the_queue_is_checked_between_slices_of_a_script() {
+    let platform = DefaultPlatform::default();
+    let mut lp = EventLoop::new(&platform, Executor::default(), &Builtins);
+    let ready_at = Arc::new(OnceLock::new());
+    let delayed = Delayed { after: Duration::from_millis(20), started: None, ready_at: Arc::clone(&ready_at) };
+    // A promise settled by the host future; its reaction records whether the long script had finished
+    lp.enter(move |a| {
+        let promise = a.new_promise();
+        let (resolve, reject) = a.promise_resolvers(promise);
+        let job = j8framework::AsyncJob { resolve: a.global(resolve.into()), reject: a.global(reject.into()), future: Box::pin(delayed) };
+        assert!(a.spawn(job).is_ok(), "the event loop takes host work");
+        let p = a.global(promise.into());
+        let v = a.local(&p);
+        a.realm.global.borrow_mut(a.mc).define("p", j8framework::Property::data(v));
+    });
+    lp.eval(&Source { text: "globalThis.log = []; p.then(v => log.push('settled ' + v + ' after ' + log.join()));", file: "a.js" }, ScriptKind::Classic).expect("runs");
+    let started = Instant::now();
+    let t = lp.submit(&Source { text: &format!("{}; log.push('long done'); n", long(0)), file: "long.js" }, ScriptKind::Classic);
+    let g = lp.wait(t).expect("runs");
+    let finished = Instant::now();
+    assert_eq!(text(&mut lp, &g), long_value(0));
+    // Polled while the script was still running: the queue is checked between its slices
+    let ready = *ready_at.get().expect("the future was polled ready");
+    assert!(ready < finished && finished - ready > (finished - started) / 4, "polled at {:?} of a {:?} script", ready - started, finished - started);
+    // ...but its JS waited for the script (run-to-completion)
+    lp.run().expect("settles");
+    let log = lp.eval(&Source { text: "log.join(' | ')", file: "b.js" }, ScriptKind::Classic).expect("runs");
+    assert_eq!(text(&mut lp, &log), "long done | settled 7 after long done");
 }
