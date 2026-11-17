@@ -1,7 +1,8 @@
 //! 数据流调度：线程池里每个线程跑一个取活循环（取任务 ⇒ 执行 ⇒ 放行下游），没有轮次屏障。
+//! 取不到活的线程直接离开、不自旋：之后才就绪的任务（放行的下游、让出的、塞的）由让它就绪的线程接着取，
+//! 那个线程还在循环里；离开的线程回到线程池，可以帮任务里嵌套的并行（内建函数、JIT 编译）。
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::hint;
 use core::num::NonZeroUsize;
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 
@@ -20,8 +21,6 @@ struct Shared<'a> {
     ready: Fifo<TaskId<'a>>,
     /// 下一个序号
     seq: AtomicUsize,
-    /// 正在取活 / 执行的工作线程数
-    active: AtomicUsize,
     /// 这次 run 花掉的字节码条数
     spent: AtomicUsize,
     /// 这次 run 执行了几次
@@ -121,22 +120,11 @@ impl<'t, 's: 't, 'a: 't> Execute<'t> for Worker<'s, 'a> {
 
     fn execute(self) {
         let s = self.0;
-        // 先登记「我在取活」再弹：别的线程看到 active 为 0 且队列空，才能断定不会再有新任务
         while !s.halt.load(Ordering::Acquire) {
             let Some(quota) = s.quota() else { return };
-            s.active.fetch_add(1, Ordering::SeqCst);
-            match s.ready.pop() {
-                Some(id) => {
-                    s.step(id, quota);
-                    s.active.fetch_sub(1, Ordering::SeqCst);
-                }
-                None => {
-                    if s.active.fetch_sub(1, Ordering::SeqCst) == 1 && s.ready.is_empty() {
-                        return;
-                    }
-                    hint::spin_loop();
-                }
-            }
+            // 取不到就离开：别的线程手上的任务之后放出来的活，由那个线程自己接着取
+            let Some(id) = s.ready.pop() else { return };
+            s.step(id, quota);
         }
     }
 }
@@ -174,7 +162,6 @@ impl<'x, E: Executor> From<&'x E> for TaskQueue<'x, '_, E> {
         let shared = Shared {
             ready: Fifo::default(),
             seq: AtomicUsize::new(0),
-            active: AtomicUsize::new(0),
             spent: AtomicUsize::new(0),
             execs: AtomicUsize::new(0),
             fault: AtomicU8::new(NO_FAULT),
