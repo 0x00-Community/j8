@@ -83,8 +83,9 @@ impl<'p> Runtime<'p> {
         rt.enter(|a| H::install(a));
         let mut preludes = Vec::new();
         H::preludes(&mut preludes);
+        // The same preludes in every runtime: compiled once when the executor shares a code cache
         for (name, text) in preludes {
-            rt.eval(text, name)?;
+            rt.js.eval(&Source { text, file: name }, ScriptKind::Shared)?;
         }
         Ok(rt)
     }

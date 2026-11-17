@@ -52,7 +52,8 @@ CPU), then a restart replaying every room's history:
 cargo test --release --test workerds -- --nocapture
 ```
 
-A Durable Object's SQLite file is created off the event loop's thread before the object is constructed (creating
+All instances share one code cache (the prelude and the Worker's modules compile once) and one epoll reactor thread
+for their sockets. A Durable Object's SQLite file is created off the event loop's thread before the object is constructed (creating
 one syncs the disk), so a thousand rooms opening at once do not hold up the loop threads.
 
 ## License

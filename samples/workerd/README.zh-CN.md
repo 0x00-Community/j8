@@ -47,7 +47,7 @@ CPU），最后重启、每间重放历史：
 cargo test --release --test workerds -- --nocapture
 ```
 
-Durable Object 的 SQLite 文件在构造对象之前、在事件循环线程之外建好（建库要同步磁盘），一千个房间同时开库也不卡
+所有实例共用一份代码缓存（prelude 与 Worker 的模块只编译一次）和一个 epoll 反应堆线程。Durable Object 的 SQLite 文件在构造对象之前、在事件循环线程之外建好（建库要同步磁盘），一千个房间同时开库也不卡
 loop 线程。
 
 ## 许可

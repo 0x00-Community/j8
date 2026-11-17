@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::process::ExitCode;
 
 use clap::Parser;
-use j8::executor::Executor;
+use j8::executor::{CodeCache, Executor};
 use j8::frame::Error;
 use j8::platform::DefaultPlatform;
 
@@ -123,8 +123,8 @@ struct Worker<'p> {
 }
 
 impl<'p> Worker<'p> {
-    fn new(set: &j8::EventLoopSet<'_, 'p, Executor>, reactor: &Arc<ws::Reactor>) -> Result<Self, String> {
-        let rt = Workerd::runtime(set, Executor::default()).map_err(|e| format!("prelude failed: {e}"))?;
+    fn new(set: &j8::EventLoopSet<'_, 'p, Executor>, reactor: &Arc<ws::Reactor>, code: &Arc<CodeCache>) -> Result<Self, String> {
+        let rt = Workerd::runtime(set, Executor::default().with_cache(Arc::clone(code))).map_err(|e| format!("prelude failed: {e}"))?;
         let reactor = Arc::clone(reactor);
         rt.enter(move |a| ws::Net::attach(a, reactor));
         Ok(Self { rt })
@@ -211,6 +211,7 @@ struct Fleet<'a> {
     port: u16,
     instances: usize,
     reactor: &'a Arc<ws::Reactor>,
+    code: &'a Arc<CodeCache>,
 }
 
 impl Fleet<'_> {
@@ -233,7 +234,7 @@ impl Fleet<'_> {
     }
 
     fn one<'p>(&self, set: &j8::EventLoopSet<'_, 'p, Executor>, i: usize) -> Result<(Worker<'p>, u16), String> {
-        let mut w = Worker::new(set, self.reactor)?;
+        let mut w = Worker::new(set, self.reactor, self.code)?;
         w.load(self.script, self.bindings, &self.storage(i)?)?;
         let port = w.listen(self.port(i)?)?;
         Ok((w, port))
@@ -292,11 +293,13 @@ fn main() -> ExitCode {
         }
     };
     let reactor = reactor_thread.reactor();
+    // The prelude and the Worker's modules compile once for every instance
+    let code = CodeCache::shared();
     let instances = cli.instances.get();
     let threads = cli.threads.unwrap_or_else(|| std::thread::available_parallelism().unwrap_or(NonZeroUsize::MIN).min(cli.instances));
     let run = |set: &j8::EventLoopSet<'_, '_, Executor>| -> Result<(), String> {
         if !cli.requests.is_empty() {
-            let mut rt = Worker::new(set, &reactor)?;
+            let mut rt = Worker::new(set, &reactor, &code)?;
             rt.load(&script, &bindings, &storage)?;
             for r in &cli.requests {
                 let (method, path) = r.split_once(' ').unwrap_or(("GET", r.as_str()));
@@ -309,7 +312,7 @@ fn main() -> ExitCode {
             }
             return Ok(());
         }
-        let workers = Fleet { script: &script, bindings: &bindings, storage: &storage, port: cli.port, instances, reactor: &reactor }.start(set, threads.get())?;
+        let workers = Fleet { script: &script, bindings: &bindings, storage: &storage, port: cli.port, instances, reactor: &reactor, code: &code }.start(set, threads.get())?;
         if let [(_, port)] = workers.as_slice() {
             eprintln!("workerd: listening on http://127.0.0.1:{port}");
         } else {

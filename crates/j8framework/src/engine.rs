@@ -30,6 +30,9 @@ impl Source<'_> {
 pub enum ScriptKind {
     /// A classic script: its completion value is the result
     Classic,
+    /// A classic script many isolates run (a runtime's prelude): an engine with a code cache compiles it once and
+    /// shares the result
+    Shared,
     /// An ES module (loading, linking and evaluating what it imports); the result is `undefined`
     Module,
 }

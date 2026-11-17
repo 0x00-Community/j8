@@ -277,10 +277,14 @@ script, `enter`), and wait for the answer.
   (`EventLoop::set_weight`), checking the queue every `set.set_check` steps. `set.loads()`, `set.spent()` and
   `EventLoop::spent()` show where the work went.
 
+Many runtimes run the same preludes and import the same modules: give their executors one `CodeCache`, and each such
+source is parsed and compiled once (preludes run as `ScriptKind::Shared`; one-off scripts are not kept).
+
 ```rust,ignore
 let platform = Host::platform(DefaultPlatform::default());
+let code = CodeCache::shared();
 EventLoopSet::scope(&platform, NonZeroUsize::new(8).unwrap(), |set| {
-    let mut runtimes: Vec<j8::Runtime<'_>> = (0..1000).map(|_| j8::Runtime::on::<Host>(set, Executor::default()).unwrap()).collect();
+    let mut runtimes: Vec<j8::Runtime<'_>> = (0..1000).map(|_| j8::Runtime::on::<Host>(set, Executor::default().with_cache(Arc::clone(&code))).unwrap()).collect();
     // drive them from as many host threads as you like: each call waits for its event loop's thread
 });
 ```

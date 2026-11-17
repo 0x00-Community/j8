@@ -17,8 +17,13 @@ use j8lockfree::SegVec;
 
 use j8virtasm::{Constant, Function, FunctionKind, Insn, Mode, Module, PropertyKind, Reg};
 use j8framework::{Collect, Gc};
+#[cfg(feature = "compile")]
+mod cache;
 mod ic;
 mod module;
+
+#[cfg(feature = "compile")]
+pub use cache::CodeCache;
 
 use j8framework::{Agent, Few, Closure, Coroutine, CoroutineState, Env, Error, ErrorKind, FuncId, Invoke, IterRecord, JsEnv, JsObject, ObjectData, ObjectKind, Property, Resume, Slot, Step, Suspended, Value};
 
@@ -231,6 +236,9 @@ pub struct Executor {
     depth: Cell<usize>,
     /// Module code: first function id ⇒ module id (for import bindings and import.meta)
     module_of: RefCell<alloc::collections::BTreeMap<u32, u32>>,
+    /// Bytecode shared with other executors (shared scripts and ES modules compile once)
+    #[cfg(feature = "compile")]
+    cache: Option<alloc::sync::Arc<CodeCache>>,
 }
 
 // An executor moves between the threads of the event loop's pool together with its isolate (one thread at a time:
@@ -245,6 +253,14 @@ impl Executor {
     #[must_use]
     pub fn with_tier(mut self, tier: impl Tier + Send + 'static) -> Self {
         self.tier = Some(Box::new(tier));
+        self
+    }
+
+    /// Shares compiled code through `cache` (see [`CodeCache`])
+    #[cfg(feature = "compile")]
+    #[must_use]
+    pub fn with_cache(mut self, cache: alloc::sync::Arc<CodeCache>) -> Self {
+        self.cache = Some(cache);
         self
     }
 
@@ -1928,6 +1944,10 @@ impl j8framework::Engine for Executor {
     fn start(&mut self, _: &mut j8framework::Isolate<'_>, _: &j8framework::ContextRoot, src: &j8framework::Source<'_>, kind: j8framework::ScriptKind) -> Result<Job, Error> {
         Ok(Job(match kind {
             j8framework::ScriptKind::Classic => Started::Script(self.load(Module::try_from(src)?)),
+            j8framework::ScriptKind::Shared => Started::Script(self.load(match &self.cache {
+                Some(cache) => cache.script(src)?,
+                None => Module::try_from(src)?,
+            })),
             j8framework::ScriptKind::Module => Started::Module { text: src.text.into(), file: src.file.into() },
         }))
     }
