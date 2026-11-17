@@ -174,11 +174,31 @@ fn async_bindings_settle_on_the_event_loop() {
     rt.run_until_idle().expect("settles");
     let r = rt.eval("log.join()", "check.js").expect("runs");
     assert_eq!(rt.text(&r), "true,42,b after 20ms");
-    // Without an event loop (a plain platform), the call throws a TypeError
+    // The event loop belongs to the runtime's isolate, so a plain platform works as well
     let plain = DefaultPlatform::default();
-    let mut bare = j8::Runtime::new::<Loop>(&plain, Executor::default()).expect("runtime");
-    let r = bare.eval("try { later.double(1); 'no' } catch (e) { e instanceof TypeError }", "t.js").expect("runs");
-    assert_eq!(bare.text(&r), "true");
+    let mut rt = j8::Runtime::new::<Loop>(&plain, Executor::default()).expect("runtime");
+    rt.eval("globalThis.got = 0; later.double(4).then(v => got = v);", "t.js").expect("runs");
+    rt.run_until_idle().expect("settles");
+    let r = rt.eval("got", "check.js").expect("runs");
+    assert_eq!(rt.text(&r), "8");
+    // An isolate made without an event loop refuses async work: the call throws a TypeError
+    let mut isolate = j8framework::Isolate::new(&plain, j8framework::CreateParams::default());
+    let mut executor = Executor::default();
+    let cx = isolate.enter(|scope| scope.persist(scope.context(&j8builtins::Builtins)));
+    isolate.enter(|scope| {
+        let realm = scope.context_of(&cx);
+        let mut a = scope.agent(realm, &executor);
+        <Loop as j8::Host>::install(&mut a);
+    });
+    let src = j8framework::Source { text: "try { later.double(1); 'no' } catch (e) { e instanceof TypeError }", file: "t.js" };
+    let r = isolate.run(&mut executor, &cx, &src).expect("runs");
+    let text = isolate.enter(|scope| {
+        let realm = scope.context_of(&cx);
+        let mut a = scope.agent(realm, &executor);
+        let v = a.local(&r);
+        a.to_string(v).map(|s| String::from(&**s)).expect("ToString")
+    });
+    assert_eq!(text, "true");
 }
 
 #[cfg(feature = "json")]
