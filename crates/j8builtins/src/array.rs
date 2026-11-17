@@ -219,7 +219,7 @@ impl Arrays {
     fn push<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let (o, len) = Self::target(a, this)?;
         // Fast path: dense, extensible true array; append directly
-        if Self::no_indexed_protos(o) {
+        if o.no_indexed_protos() {
             let fast = !o.non_extensible() && !o.length_readonly() && o.sparse_length() == 0;
             if fast && o.is_array() {
                 let items = o.elements();
@@ -245,27 +245,6 @@ impl Arrays {
         Ok(n.into())
     }
 
-    /// No index properties or accessors on the prototype chain (other than on the array itself): appending / shifting
-    /// never hits a setter.
-    fn no_indexed_protos(o: JsObject<'_>) -> bool {
-        let mut cur = o.borrow().proto();
-        while let Some(p) = cur {
-            // Class bits first (no borrowing); only other exotic kinds look at the state
-            let indexed = if p.is_array() {
-                !p.elements().is_empty()
-            } else if p.has_ordinary_properties() {
-                false
-            } else {
-                !matches!(p.borrow().kind, ObjectKind::Arguments(_))
-            };
-            if indexed || p.sparse_length() > 0 || p.digit_keys() {
-                return false;
-            }
-            cur = p.proto();
-        }
-        true
-    }
-
     fn pop<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let (o, len) = Self::target(a, this)?;
         if len == 0.0 {
@@ -287,7 +266,7 @@ impl Arrays {
         }
         let first = a.get_index(o.into(), 0.0)?;
         // Fast path: shift a dense true array as a whole
-        if Self::no_indexed_protos(o) {
+        if o.no_indexed_protos() {
             let fast = !o.non_extensible() && !o.length_readonly() && o.sparse_length() == 0;
             if fast && o.is_array() && !o.elements().is_empty() {
                 o.elements().remove(a.mc, 0);
