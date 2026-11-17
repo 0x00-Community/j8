@@ -51,6 +51,9 @@ impl SqlStorage {
     fn open(a: &mut Agent<'_, '_>, path: &str) -> Result<Self, Error> {
         let db = if path.is_empty() { Connection::open_in_memory() } else { Connection::open(path) };
         let db = db.map_err(|e| a.throw(ErrorKind::Error, &format!("SQLite: open {path}: {e}")))?;
+        // Write-ahead log, synced at checkpoints rather than every commit (as Durable Objects' SQLite does): a commit
+        // survives the process crashing; a power cut may lose the last few, never the database
+        db.execute_batch("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;").map_err(|e| a.throw(ErrorKind::Error, &format!("SQLite: {e}")))?;
         Ok(Self { db: Mutex::new(db) })
     }
 
