@@ -1367,13 +1367,53 @@ impl<'gc> Object<'gc> {
         self.is_array().then(|| u32::try_from(self.elements.len()).unwrap_or(u32::MAX).max(self.sparse_length()))
     }
 
-    /// Fast path: update the existing `i`-th element of the dense part; returns `true` if updated
+    /// Fast path of `a[i] = value` on an array (the receiver is the array itself): update the existing `i`-th element
+    /// of the dense part, or append right at its end when that is what [[Set]] would do (see [`Self::can_append`]);
+    /// returns `true` if written
     pub fn write_index(&self, mc: &Mutation<'gc>, i: u32, value: Value<'gc>) -> bool {
-        if self.is_array() && (i as usize) < self.elements.len() {
-            self.elements.set(mc, i as usize, value);
+        if !self.is_array() {
+            return false;
+        }
+        let (at, n) = (i as usize, self.elements.len());
+        if at < n {
+            self.elements.set(mc, at, value);
+            return true;
+        }
+        if at == n && self.can_append(i) {
+            self.elements.push(mc, value);
             return true;
         }
         false
+    }
+
+    /// Whether `a[i] = v` with `i` right at the end of the dense part only creates a plain data property there:
+    /// extensible, `length` writable, no own property at `i` (the sparse part ends before it or never had an index
+    /// key, as in `new Array(len)`), and nothing on the prototype chain that could take the write (see
+    /// [`Self::no_indexed_protos`])
+    fn can_append(&self, i: u32) -> bool {
+        !self.non_extensible() && !self.length_readonly() && (self.sparse_length() <= i || !self.digit_keys()) && self.no_indexed_protos()
+    }
+
+    /// No index properties or accessors on the prototype chain (other than on the object itself): appending /
+    /// shifting never hits a setter. Every prototype has ordinary own properties (an array with an empty dense part, an
+    /// arguments object count) and never had a key starting with a digit.
+    pub fn no_indexed_protos(&self) -> bool {
+        let mut cur = self.proto();
+        while let Some(p) = cur {
+            // Class bits first (no borrowing); only other exotic kinds look at the state
+            let indexed = if p.is_array() {
+                !p.elements.is_empty()
+            } else if p.has_ordinary_properties() {
+                false
+            } else {
+                !matches!(p.borrow().kind, ObjectKind::Arguments(_))
+            };
+            if indexed || p.sparse_length() > 0 || p.digit_keys() {
+                return false;
+            }
+            cur = p.proto();
+        }
+        true
     }
 
     /// Move the dense part from element `from` onward into ordinary index-keyed properties
