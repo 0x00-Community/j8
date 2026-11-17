@@ -1,8 +1,8 @@
 //! j8framework: the core framework layer. It defines traits and common structs / enums; concrete implementations live
 //! in the per-layer crates (e.g. j8platform implements [`Platform`]).
 //!
-//! The heap uses [gc-arena](https://docs.rs/gc-arena): every JS value carries the branded lifetime `'gc` and can only
-//! live within one [`Isolate::enter`].
+//! The heap is [paragc](https://crates.io/crates/paragc) (wrapped in `gc.rs`): every JS value carries the branded lifetime
+//! `'gc` and can only live within one [`Isolate::enter`].
 //!
 //! - [`Platform`]: threads and clocks (j8platform provides a standard library implementation)
 //! - [`Isolate`]: an independent JS world, holding the GC heap and the profiler
@@ -15,13 +15,15 @@
 //!   [`Invoke`] (implemented by the execution engine)
 //! - [`Profiler`]: call / back-edge counters
 //! - [`Engine`]: the unified entry point implemented by the execution engine (j8executor)
-#![no_std]
 extern crate alloc;
+// `#[derive(Collect)]` 生成的代码写 `::j8framework::…`，本 crate 里也要能这样引用自己
+extern crate self as j8framework;
 
 mod agent;
 mod bigint;
 mod engine;
 mod error;
+mod gc;
 mod handle;
 mod isolate;
 mod module;
@@ -37,21 +39,25 @@ mod property;
 mod promise;
 mod realm;
 mod shape;
+mod store;
 mod text;
 mod value;
 
 pub use agent::{Agent, CodeKind, Invoke, Resume, Step};
 pub use engine::{Engine, Source};
 pub use error::Error;
-pub use handle::{ContextRoot, Global};
+pub use handle::{ContextRoot, Global, RealmBrand, ValueBrand};
 pub use isolate::{CreateParams, Isolate, Scope};
-pub use object::{Few, ArgumentsMap, HostData, BigIntData, Bound, BufferData, Capability, Closure, ClosureFn, ElementKind, ViewData, HelperKind, HelperState, IteratorHelper, NativeClosure, ProxyData, Collection, MapKey, Request, JsBigInt, RegExpData, Coroutine, CoroutineState, Env, IterKind, IteratorState, Job, JsEnv, JsObject, JsString, JsSymbol, Forward, Native, NativeFn, ObjectData, ObjectKind, JsStr, SmallStr, Units, Property, Reaction, Settled, Slot, Suspended, SymbolData};
+pub use object::{Accessor, ObjMut, ObjRef, Object, ObjectState, Few, ArgumentsMap, HostData, BigIntData, Bound, BufferData, Capability, Closure, ClosureFn, ElementKind, ViewData, HelperKind, HelperState, IteratorHelper, NativeClosure, ProxyData, Collection, MapKey, Request, JsBigInt, RegExpData, Coroutine, CoroutineState, Env, IterKind, IteratorState, Job, JsEnv, JsObject, JsString, JsSymbol, Forward, Native, NativeFn, ObjectData, ObjectKind, JsStr, SmallStr, Units, Property, Reaction, Settled, Slot, Suspended, SymbolData};
 pub use bigint::Numeric;
 pub use ops::{number_text, BinaryOp, CompareOp, ErrorKind, Hint, IterRecord, UnaryOp};
 pub use platform::{Platform, Task};
-pub use shape::{Attrs, Props, Shape};
+pub use shape::{Attrs, Dict, Props, Shape};
+pub use store::{Store, ValueArray};
 pub use parallel::Par;
-pub use j8gc::Pool;
+pub use platform::Pool;
+pub use gc::{CellExt, CellMut, CellRef, Collect, Cow, Erased, Gc, GcCell, GcQueue, Heap, Mutation, Mutator, Root, Slot as GcSlot, Brand, Static, Tlab, Trace, Tracer, ValueCell, erase, gc_from_raw};
+pub use paragc;
 pub use module::{ImportEntry, ImportName, ModuleInfo, ModuleRecord, ModuleStatus, Resolution, ResolvedBinding};
 pub use profiler::{Counter, FuncId, Profiler};
 pub use typed::{Element, canonical_numeric, f16_to_f64, f64_to_f16};

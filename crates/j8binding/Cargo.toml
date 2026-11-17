@@ -8,7 +8,7 @@ repository.workspace = true
 
 [dependencies]
 j8framework.workspace = true
-j8gc.workspace = true
+j8lockfree.workspace = true
 
 [lints]
 workspace = true

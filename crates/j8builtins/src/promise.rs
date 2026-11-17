@@ -33,7 +33,7 @@ mod slot {
 
 impl Promises {
     fn is_intrinsic<'gc>(a: &Agent<'gc, '_>, c: Value<'gc>) -> bool {
-        matches!(c.kind(), ValueKind::Object(o) if j8gc::Gc::ptr_eq(o, a.realm.promise_ctor))
+        matches!(c.kind(), ValueKind::Object(o) if j8framework::Gc::ptr_eq(o, a.realm.promise_ctor))
     }
 
     fn closure<'gc>(a: &Agent<'gc, '_>, f: j8framework::ClosureFn, slots: Vec<Value<'gc>>, length: u32) -> JsObject<'gc> {
@@ -109,7 +109,7 @@ impl Promises {
         }
         let proto = a.proto_from_ctor(a.new_target, a.realm.promise_proto)?;
         let p = a.new_promise();
-        p.borrow_mut(a.mc).proto = Some(proto);
+        p.borrow_mut(a.mc).set_proto(Some(proto));
         let (resolve, reject) = a.promise_resolvers(p);
         match a.call(executor, Value::Undefined, &[resolve.into(), reject.into()]) {
             Ok(_) => {}

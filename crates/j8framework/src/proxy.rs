@@ -169,7 +169,7 @@ impl<'gc> Agent<'gc, '_> {
     /// Partial descriptor ⇒ object (containing only the given fields).
     pub fn from_partial_descriptor(&mut self, d: &Descriptor<'gc>) -> Value<'gc> {
         let o = self.object();
-        let mut data = o.borrow_mut(self.mc);
+        let data = o.borrow_mut(self.mc);
         if let Some(v) = d.value {
             data.set("value", v);
         }
@@ -350,7 +350,7 @@ impl<'gc> Agent<'gc, '_> {
     fn same_key(a: &PropertyKey<'gc>, b: &PropertyKey<'gc>) -> bool {
         match (a, b) {
             (PropertyKey::String(x), PropertyKey::String(y)) => ***x == ***y,
-            (PropertyKey::Symbol(x), PropertyKey::Symbol(y)) => j8gc::Gc::ptr_eq(*x, *y),
+            (PropertyKey::Symbol(x), PropertyKey::Symbol(y)) => crate::Gc::ptr_eq(*x, *y),
             _ => false,
         }
     }

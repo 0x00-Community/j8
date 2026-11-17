@@ -374,7 +374,7 @@ impl Objects {
         let o = a.to_object(this)?;
         let mut cur = a.get_prototype_of(v)?;
         while let Some(c) = cur {
-            if j8gc::Gc::ptr_eq(c, o) {
+            if j8framework::Gc::ptr_eq(c, o) {
                 return Ok(true.into());
             }
             cur = a.get_prototype_of(c)?;
@@ -510,7 +510,7 @@ impl Objects {
         };
         let prop = |v: Value<'gc>| Property { slot: Slot::Data(v), enumerable: false, writable: false, configurable: true };
         let n = a.string(&name);
-        let mut d = f.borrow_mut(a.mc);
+        let d = f.borrow_mut(a.mc);
         d.define("length", prop(length.into()));
         d.define("name", prop(n.into()));
         drop(d);

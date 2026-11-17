@@ -1,6 +1,6 @@
 [package]
 name = "j8lockfree"
-description = "j8 的无锁基础件（手写，no_std）：分段 MPMC 队列、只追加的分段向量、只压入可封口的 Treiber 栈、Chase–Lev 工作窃取双端队列"
+description = "j8 的无锁基础件（手写，no_std）：只发布一次的惰性值、可跨线程的 RefCell、分段 MPMC 队列、只追加的分段向量、只压入可封口的 Treiber 栈、Chase–Lev 工作窃取双端队列"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

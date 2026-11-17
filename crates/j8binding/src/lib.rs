@@ -22,7 +22,6 @@
 //!
 //! let handle = Counter::install(&mut agent, global)?;   // global `Counter`
 //! ```
-#![no_std]
 extern crate alloc;
 
 mod class;

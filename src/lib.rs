@@ -6,7 +6,20 @@
 //! - `#[j8::function]`: exports a function as a JS function
 //!
 //! See `crates/macros/USAGE.md` for usage.
-#![no_std]
+//!
+//! The other j8 crates are re-exported by feature (each is also published on its own):
+//!
+//! | feature | module | |
+//! |---|---|---|
+//! | `runtime` (default) | `executor` + `builtins` + `platform` | everything needed to run JS |
+//! | `virtasm` | [`virtasm`] | bytecode types, assembler / disassembler |
+//! | `executor` | [`executor`] | bytecode executor with the JS ⇒ bytecode compiler, implements `Engine` |
+//! | `builtins` | [`builtins`] | built-in objects |
+//! | `platform` | [`platform`] | the standard-library `Platform` |
+//! | `taskqueue` | [`taskqueue`] | lock-free dataflow task queue |
+//! | `lockfree` | [`lockfree`] | lock-free building blocks |
+//! | `jit` | [`compiler`], [`jit`] | bytecode ⇒ MLIR ⇒ x86-64 JIT (x86-64 Unix) |
+//! | `full` | all of the above | |
 
 pub use j8binding::{Class, ClassHandle, FromJs, IntoJs, Member, Object, Rest, This};
 pub use j8macros::{class, function, object};
@@ -14,3 +27,20 @@ pub use j8macros::{class, function, object};
 #[doc(hidden)]
 pub use j8binding::Glue;
 pub use j8framework as frame;
+
+#[cfg(feature = "builtins")]
+pub use j8builtins as builtins;
+#[cfg(feature = "jit")]
+pub use j8compiler as compiler;
+#[cfg(feature = "executor")]
+pub use j8executor as executor;
+#[cfg(feature = "jit")]
+pub use j8jit as jit;
+#[cfg(feature = "lockfree")]
+pub use j8lockfree as lockfree;
+#[cfg(feature = "platform")]
+pub use j8platform as platform;
+#[cfg(feature = "taskqueue")]
+pub use j8taskqueue as taskqueue;
+#[cfg(feature = "virtasm")]
+pub use j8virtasm as virtasm;

@@ -1,7 +1,7 @@
 use crate::ValueKind;
 use alloc::vec::Vec;
 
-use j8gc::{Collect, DynamicRootSet, Mutation};
+use crate::{Collect, Mutation};
 
 use crate::{Context, Error, JsObject, Platform, Profiler, Scope, Value};
 
@@ -76,8 +76,7 @@ pub trait Invoke<'gc> {
 /// The whole context of one run: GC heap, platform, profiler, context, callbacks. All JS operation semantics hang off
 /// it.
 pub struct Agent<'gc, 'x> {
-    pub mc: &'gc Mutation<'gc>,
-    pub(crate) roots: &'gc DynamicRootSet<'gc>,
+    pub mc: &'x Mutation<'gc>,
     pub platform: &'x dyn Platform,
     pub profiler: &'x mut Profiler,
     pub realm: Context<'gc>,
@@ -93,7 +92,7 @@ pub struct Agent<'gc, 'x> {
 impl<'gc> Scope<'gc, '_> {
     /// Lend out an agent in context `realm`, calling back into JS via `invoke`.
     pub fn agent<'x>(&'x mut self, realm: Context<'gc>, invoke: &'x dyn Invoke<'gc>) -> Agent<'gc, 'x> {
-        Agent { mc: self.mc, roots: self.roots, platform: self.platform, profiler: &mut *self.profiler, realm, new_target: Value::Undefined, invoke, spare_regs: Vec::new() }
+        Agent { mc: self.mc, platform: self.platform, profiler: &mut *self.profiler, realm, new_target: Value::Undefined, invoke, spare_regs: Vec::new() }
     }
 }
 

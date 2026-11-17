@@ -50,7 +50,7 @@ impl Arrays {
         }
         #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "checked to be in [0, 2^32 − 1]")]
         let n = len as u32;
-        let arr = ObjectData { kind: ObjectKind::Array(Vec::new()), proto: Some(proto.unwrap_or(a.realm.array_proto)), ..ObjectData::default() }.alloc(a.mc);
+        let arr = ObjectData { kind: ObjectKind::Array, proto: Some(proto.unwrap_or(a.realm.array_proto)), ..ObjectData::default() }.alloc(a.mc);
         arr.borrow_mut(a.mc).set_array_length(n);
         Ok(arr)
     }
@@ -116,7 +116,7 @@ impl Arrays {
             }
             ref items => {
                 let arr = a.array(items.to_vec());
-                arr.borrow_mut(a.mc).proto = Some(proto);
+                arr.borrow_mut(a.mc).set_proto(Some(proto));
                 Ok(arr.into())
             }
         }
@@ -220,10 +220,12 @@ impl Arrays {
         let (o, len) = Self::target(a, this)?;
         // Fast path: dense, extensible true array; append directly
         if Self::no_indexed_protos(o) {
-            let mut d = o.borrow_mut(a.mc);
-            let fast = !d.non_extensible && !d.length_readonly && d.sparse_length == 0;
-            if let (true, ObjectKind::Array(items)) = (fast, &mut d.kind) {
-                items.extend_from_slice(args);
+            let fast = !o.non_extensible() && !o.length_readonly() && o.sparse_length() == 0;
+            if fast && o.is_array() {
+                let items = o.elements();
+                for &v in args {
+                    items.push(a.mc, v);
+                }
                 #[expect(clippy::cast_precision_loss, reason = "array length is at most 2^32")]
                 let n = items.len() as f64;
                 return Ok(n.into());
@@ -246,18 +248,18 @@ impl Arrays {
     /// No index properties or accessors on the prototype chain (other than on the array itself): appending / shifting
     /// never hits a setter.
     fn no_indexed_protos(o: JsObject<'_>) -> bool {
-        let mut cur = o.borrow().proto;
+        let mut cur = o.borrow().proto();
         while let Some(p) = cur {
             let d = p.borrow();
             let indexed = match &d.kind {
-                ObjectKind::Array(items) => !items.is_empty(),
+                ObjectKind::Array => !p.elements().is_empty(),
                 ObjectKind::Ordinary | ObjectKind::Error | ObjectKind::Arguments(_) => false,
                 _ => true,
             };
-            if indexed || d.sparse_length > 0 || d.digit_keys {
+            if indexed || d.sparse_length() > 0 || d.digit_keys() {
                 return false;
             }
-            cur = d.proto;
+            cur = d.proto();
         }
         true
     }
@@ -284,12 +286,9 @@ impl Arrays {
         let first = a.get_index(o.into(), 0.0)?;
         // Fast path: shift a dense true array as a whole
         if Self::no_indexed_protos(o) {
-            let mut d = o.borrow_mut(a.mc);
-            let fast = !d.non_extensible && !d.length_readonly && d.sparse_length == 0;
-            if let (true, ObjectKind::Array(items)) = (fast, &mut d.kind)
-                && !items.is_empty()
-            {
-                items.remove(0);
+            let fast = !o.non_extensible() && !o.length_readonly() && o.sparse_length() == 0;
+            if fast && o.is_array() && !o.elements().is_empty() {
+                o.elements().remove(a.mc, 0);
                 return Ok(first);
             }
         }
@@ -485,10 +484,13 @@ impl Arrays {
             Number(f64),
             Text(&'s str),
         }
+        if !o.is_array() {
+            return None;
+        }
         let d = o.borrow();
-        let ObjectKind::Array(items) = &d.kind else { return None };
+        let items = o.elements().to_vec();
         #[expect(clippy::cast_precision_loss, reason = "element count is far below 2^53")]
-        let dense = items.len() as f64 == len && d.sparse_length == 0;
+        let dense = items.len() as f64 == len && d.sparse_length() == 0;
         if !dense || !items.iter().all(|v| matches!(v.kind(), ValueKind::Number(_) | ValueKind::String(_) | ValueKind::Bool(_) | ValueKind::Null | ValueKind::Undefined)) {
             return None;
         }
@@ -496,7 +498,7 @@ impl Arrays {
             .iter()
             .map(|v| match v.kind() {
                 ValueKind::Number(x) => Part::Number(x),
-                ValueKind::String(s) => Part::Text(j8gc::Gc::as_ref(s)),
+                ValueKind::String(s) => Part::Text(j8framework::Gc::get(s)),
                 ValueKind::Bool(true) => Part::Text("true"),
                 ValueKind::Bool(false) => Part::Text("false"),
                 _ => Part::Text(""),
@@ -885,7 +887,7 @@ impl Arrays {
             .iter()
             .map(|v| match v.kind() {
                 ValueKind::Number(_) => next.next().map_or("", String::as_str),
-                ValueKind::String(s) => &**j8gc::Gc::as_ref(s),
+                ValueKind::String(s) => &**j8framework::Gc::get(s),
                 ValueKind::Bool(true) => "true",
                 ValueKind::Bool(false) => "false",
                 _ => "null",
@@ -1055,7 +1057,7 @@ impl Installer<'_, '_> {
     pub(crate) fn array(&mut self) {
         let proto = self.realm.array_proto;
         // Array.prototype itself is an empty array
-        proto.borrow_mut(self.mc).kind = ObjectKind::Array(Vec::new());
+        proto.borrow_mut(self.mc).kind = ObjectKind::Array;
         let ctor = self.constructor("Array", Arrays::array, proto, 1);
         self.method(ctor, "isArray", Arrays::is_array, 1);
         self.method(ctor, "of", Arrays::of, 0);

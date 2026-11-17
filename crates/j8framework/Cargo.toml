@@ -7,7 +7,10 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-j8gc.workspace = true
+paragc.workspace = true
+j8macros.workspace = true
+j8lockfree.workspace = true
+moremath = { workspace = true, features = ["std"] }
 smol_str.workspace = true
 hashbrown.workspace = true
 rustc-hash.workspace = true

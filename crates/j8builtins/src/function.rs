@@ -29,9 +29,9 @@ impl Functions {
         if let Some(fo) = f.as_object()
             && new_target != Value::Undefined
         {
-            let fallback = fo.borrow().proto.unwrap_or(a.realm.function_proto);
+            let fallback = fo.borrow().proto().unwrap_or(a.realm.function_proto);
             let proto = a.proto_from_ctor(new_target, fallback)?;
-            fo.borrow_mut(a.mc).proto = Some(proto);
+            fo.borrow_mut(a.mc).set_proto(Some(proto));
         }
         Ok(f)
     }
@@ -82,7 +82,7 @@ impl<'gc> Installer<'_, 'gc> {
             }
             let fixed = |v: Value<'gc>| Property { slot: Slot::Data(v), enumerable: false, writable: false, configurable: false };
             c.borrow_mut(self.mc).define("prototype", fixed(proto.into()));
-            c.borrow_mut(self.mc).proto = Some(ctor);
+            c.borrow_mut(self.mc).set_proto(Some(ctor));
             proto.borrow_mut(self.mc).define("constructor", Property { writable: false, ..Property::hidden(c.into()) });
             if let Some(i) = instances {
                 proto.borrow_mut(self.mc).define("prototype", Property { writable: false, ..Property::hidden(i.into()) });

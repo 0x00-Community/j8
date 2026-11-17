@@ -371,14 +371,14 @@ impl Texts {
 
     /// `Math.random`: xorshift64*, seeded from the wall clock on first use.
     fn random<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        let mut s = a.realm.random_state.get();
+        let mut s = a.realm.random_state.load(core::sync::atomic::Ordering::Relaxed);
         if s == 0 {
             s = u64::try_from(a.platform.wall_clock().as_nanos() & u128::from(u64::MAX)).unwrap_or(1) | 1;
         }
         s ^= s >> 12;
         s ^= s << 25;
         s ^= s >> 27;
-        a.realm.random_state.set(a.mc, s);
+        a.realm.random_state.store(s, core::sync::atomic::Ordering::Relaxed);
         let r = s.wrapping_mul(0x2545_f491_4f6c_dd1d) >> 11;
         #[expect(clippy::cast_precision_loss, reason = "takes 53 bits")]
         let x = r as f64 / 9_007_199_254_740_992.0;
@@ -461,11 +461,11 @@ impl Texts {
 
     fn symbol_for<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let key = a.to_string(args.at(0))?;
-        let registry = a.realm.symbol_registry;
+        let registry = &a.realm.realm().get().symbol_registry;
         if let Some(&(_, s)) = registry.get().iter().find(|(k, _)| ***k == **key) {
             return Ok(s.into());
         }
-        let fresh: JsSymbol<'gc> = j8gc::Gc::new(a.mc, SymbolData { description: Some((&**key).into()) });
+        let fresh: JsSymbol<'gc> = a.mc.alloc(SymbolData { description: Some((&**key).into()) });
         // Another thread may have registered the key meanwhile: then its symbol wins
         let s = registry.update_with(a.mc, |entries| {
             let mut entries = entries.clone();
@@ -484,7 +484,7 @@ impl Texts {
             let t = a.describe(args.at(0));
             return Err(a.throw(ErrorKind::Type, &alloc::format!("{t} is not a symbol")));
         };
-        Ok(a.realm.symbol_registry.get().iter().find(|(_, x)| j8gc::Gc::ptr_eq(*x, s)).map_or(Value::Undefined, |&(k, _)| k.into()))
+        Ok(a.realm.symbol_registry.get().iter().find(|(_, x)| j8framework::Gc::ptr_eq(*x, s)).map_or(Value::Undefined, |&(k, _)| k.into()))
     }
 
     fn symbol_to_primitive<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {

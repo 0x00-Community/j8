@@ -4,7 +4,7 @@
 //!
 //! ```text
 //! calls / loop iterations below threshold        ⇒ count once, interpret as usual
-//! threshold reached                              ⇒ j8compiler compiles it to machine code (on failure, remember it
+//! threshold reached                              ⇒ j8compiler lowers it, x86_64 emits machine code (on failure, remember it
 //!                                                  and never retry)
 //! on frame entry: whole function in machine code ⇒ run directly on this frame's registers and accumulator
 //! on a loop back-jump: this loop header exists   ⇒ switch into machine code at the loop header (OSR)
@@ -15,6 +15,9 @@
 //! ```
 mod code;
 mod helpers;
+mod x86_64;
+
+pub use x86_64::{X86_64Code, X86_64Emit, X86_64Reloc};
 
 use core::cell::RefCell;
 
@@ -130,7 +133,7 @@ impl Jit {
         let compiler = self.compiler.get_or_init(Compiler::default);
         let funcs: Vec<&Function> = core::iter::once(func).chain(others.iter().map(|(_, f)| f)).collect();
         let mut out: Vec<Option<Result<j8compiler::Native, j8compiler::CompileError>>> = funcs.iter().map(|_| None).collect();
-        let jobs: Vec<Task<'_>> = out.iter_mut().zip(&funcs).map(|(o, f)| Box::new(move || *o = Some(compiler.compile(f))) as Task<'_>).collect();
+        let jobs: Vec<Task<'_>> = out.iter_mut().zip(&funcs).map(|(o, f)| Box::new(move || *o = Some(compiler.compile(f, &X86_64Emit))) as Task<'_>).collect();
         pool.run(jobs);
         let targets = core::iter::once(at).chain(others.iter().map(|&(i, _)| i));
         for (i, native) in targets.zip(out) {

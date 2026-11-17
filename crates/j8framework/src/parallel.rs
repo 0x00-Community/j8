@@ -8,7 +8,7 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::cmp::Ordering;
 
-use j8gc::{Job, Pool};
+use crate::{Pool, Task as Job};
 
 /// Below this many elements, do the work on the calling thread (the cost of splitting and joining isn't worth it)
 const PAR_MIN: usize = 1 << 14;

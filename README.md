@@ -4,17 +4,15 @@
 # j8
 
 ### V8, rewritten in Rust.
-**A bytecode interpreter, a JIT built on MLIR and a generational parallel GC of our own, `no_std` wherever possible.**
+**A bytecode interpreter, a JIT built on MLIR and a parallel garbage-collected heap ([paragc](https://crates.io/crates/paragc)).**
 
 [![Rust](https://img.shields.io/badge/Rust-100%25-orange?style=for-the-badge&logo=rust)](https://www.rust-lang.org)
 [![test262](https://img.shields.io/badge/test262-42%2C443%20passing-success?style=for-the-badge)](#-test262)
-[![no_std](https://img.shields.io/badge/no__std-core%20layers-blue?style=for-the-badge)](#-crates)
 [![License](https://img.shields.io/badge/License-MIT-brightgreen?style=for-the-badge)](#-license)
 
 [![ECMAScript](https://img.shields.io/badge/ECMAScript-core%20language-F7DF1E?style=flat-square&logo=javascript&logoColor=black)](#-status)
 [![JIT](https://img.shields.io/badge/JIT-x86--64%20via%20MLIR-262D3A?style=flat-square&logo=llvm)](#-jit-tier-one)
-[![GC](https://img.shields.io/badge/GC-generational%20%C2%B7%20moving%20%C2%B7%20parallel-8A2BE2?style=flat-square)](#-heap-and-handles)
-[![riscv64](https://img.shields.io/badge/riscv64-none--elf-283272?style=flat-square&logo=riscv)](#-crates)
+[![GC](https://img.shields.io/badge/GC-paragc%20%C2%B7%20parallel%20%C2%B7%20lock--free-8A2BE2?style=flat-square)](#-heap-and-handles)
 
 **🇺🇸 English** · [🇨🇳 简体中文](README.zh-CN.md)
 
@@ -26,7 +24,7 @@
 
 j8 is **a JavaScript engine written from scratch in Rust**, layered the way V8 is: every piece of JS is first compiled to
 accumulator-style bytecode (like V8's Ignition) and run by the executor, while hot functions and hot loops go to a JIT that
-emits x86-64 machine code. The heap is the repository's own GC (`crates/j8gc`).
+emits x86-64 machine code. The heap is [paragc](https://crates.io/crates/paragc), wrapped by `j8framework`'s GC layer.
 
 🎯 **The main line:** the test262 pass rate. Core ECMAScript is filled in stage by stage following [PLAN.md](PLAN.md), with
 zero regressions against the baseline at every step.
@@ -41,8 +39,7 @@ come with it: `dune`, a node-style runtime, and `workerd`, a Cloudflare Worker-s
 | 🦀 **All Rust** | Parsing is oxc; everything else, from bytecode to GC, is ours. No C++ engine underneath. |
 | 🧱 **Bytecode first** | There is no AST interpreter: all JS (including `eval` and `Function`) is compiled to bytecode. The instruction set is generated from `insn.json`, and assembling / disassembling are exact inverses. |
 | 🧬 **A JIT on MLIR** | Bytecode ⇒ the MLIR `llvm` dialect ⇒ the x86-64 backend of [mlirpass](https://crates.io/crates/mlirpass) (linear-scan register allocation), with OSR. |
-| ♻️ **Our own GC** | Generational, moving (compacting), incremental marking; marking, minor collections, sweeping and compaction run in parallel on a thread pool. `'gc` brand lifetimes guarantee at compile time that handles never escape. |
-| 📦 **`no_std` wherever possible** | The framework, bytecode, executor and builtins are `core` + `alloc` and build for `riscv64gc-unknown-none-elf`. |
+| ♻️ **paragc heap** | Immix-style mark-region heap: young collections plus reference counting for old objects, evacuation of sparse blocks, marking and sweeping in parallel, no locks. `'gc` brand lifetimes guarantee at compile time that handles never escape. |
 | 🚫 **No `'static`** | No global state. Background tasks borrow the caller's data, and several isolates share one thread pool. |
 
 ## 🏆 Numbers
@@ -82,40 +79,46 @@ A Cargo workspace of several crates.
 
 | crate | std | What it does |
 |---|---|---|
-| `j8framework` | `no_std` | The core framework: defines the traits (`Platform`, `Engine`, `Invoke`, `Intrinsics`) and the shared structs / enums (`Isolate`, `Scope`, `Agent`, `Context` / `Realm`, `Global`, `Value`, `JsString` / `JsObject`, `Profiler`, `BinaryOp`, `Error` …). JS operation semantics hang off `Agent`; the implementations belong to the other crates |
-| `j8` (repository root `src/`) | `no_std` | Re-exports: `#[j8::class]` / `#[j8::object]` / `#[j8::function]` (the macros live in j8macros, see `crates/macros/USAGE.md`) and the j8binding traits |
-| `j8binding` | `no_std` | The Rust ⇄ JS binding runtime: `FromJs` / `IntoJs`, host objects, `Class` / `Object` |
-| `j8builtins` | `no_std` | Implements `Intrinsics`: installs Object / Function / Array / String / Number / Boolean / Math / the Error family / `console` / `parseInt` and so on into a `Realm` |
-| `j8platform` | std | Implements `Platform` (`DefaultPlatform`): background tasks and the GC run on a moremath `ThreadMulti` pool (started once and reused; tasks may borrow the caller's data, through `j8gc::Pool`), the clock is `Instant` |
-| `j8gc` | `no_std` (`std` feature on by default) | The heap: a generational, moving, parallel GC with `'gc` brand lifetimes, collecting on the platform's thread pool (see "Heap and handles" below); `#[derive(Collect)]` is exposed as `j8gc::Collect` (the proc macro lives in `crates/j8gc/macros`, which only j8gc depends on) |
-| `j8virtasm` | `no_std` (`compile` needs std) | The virtual instruction set: accumulator-style register bytecode (`Insn` / `Function` / `Module`); disassemble with `module.to_string()`, assemble with `text.parse::<Module>()`, each the inverse of the other. The `compile` feature (on by default) brings the JS ⇒ bytecode compiler `Module::try_from(&Source)`, parsing with oxc |
+| `j8framework` | std | The core framework: defines the traits (`Platform`, `Engine`, `Invoke`, `Intrinsics`) and the shared structs / enums (`Isolate`, `Scope`, `Agent`, `Context` / `Realm`, `Global`, `Value`, `JsString` / `JsObject`, `Profiler`, `BinaryOp`, `Error` …). JS operation semantics hang off `Agent`; the implementations belong to the other crates |
+| `j8` (repository root `src/`) | std | Re-exports: `#[j8::class]` / `#[j8::object]` / `#[j8::function]` (the macros live in j8macros, see `crates/macros/USAGE.md`) and the j8binding traits; the other crates by feature (default `runtime` = `j8::executor` + `j8::builtins` + `j8::platform`, plus `virtasm` / `taskqueue` / `lockfree` / `jit` / `full`); every crate is also published on its own on crates.io |
+| `j8binding` | std | The Rust ⇄ JS binding runtime: `FromJs` / `IntoJs`, host objects, `Class` / `Object` |
+| `j8builtins` | std | Implements `Intrinsics`: installs Object / Function / Array / String / Number / Boolean / Math / the Error family / `console` / `parseInt` and so on into a `Realm` |
+| `j8platform` | std | Implements `Platform` (`DefaultPlatform`): background tasks run on a moremath `ThreadMulti` pool (started once and reused; tasks may borrow the caller's data, through `j8framework::Pool`), the clock is `Instant` |
+| `j8virtasm` | std | The virtual instruction set: accumulator-style register bytecode (`Insn` / `Function` / `Module`); disassemble with `module.to_string()`, assemble with `text.parse::<Module>()`, each the inverse of the other. The `compile` feature (on by default) brings the JS ⇒ bytecode compiler `Module::try_from(&Source)`, parsing with oxc |
 | `j8taskqueue` | `no_std` | Task queue: `ITask` (`recursable` / `depend` / `exec`) and `ITaskPoll` (`add` / `run`); lock-free dataflow scheduling (hand-written MPMC ready queue, atomic dependency counts): a task whose dependencies are done runs at once in parallel on a moremath `Executor` (the host passes `ThreadMulti`), with no round barrier; `TaskId::family` finds the union-find root, `cancel` cancels a whole family; quotas count bytecodes (`Quota` / `Flow::Yield`, a per-run budget) |
-| `j8macros` | proc-macro | Procedural macros: `enums!("x.json")` generates enums from JSON (definitions, `Display`, `&mut` accessors by field type); see `crates/macros/USAGE.md` |
+| `j8macros` | proc-macro | Procedural macros: `enums!("x.json")` generates enums from JSON (definitions, `Display`, `&mut` accessors by field type), `#[derive(Collect)]` for heap types (paragc `Trace`), and the binding macros; see `crates/macros/USAGE.md` |
 | `samples/dune` | std | A node-style binary on top of j8 (`require` / `module` / `fs` / `path` / `process`, native parts bound with `#[j8::object]`): `dune a.js` / `dune run a.js` (`-` reads standard input), `dune -e '<js>'`, `dune -p '<js>'` to print the result, no arguments for a REPL (`.help` / `.exit`); an uncaught exception prints `Uncaught …` and exits with 1 |
 | `samples/workerd` | std | Loads Cloudflare Workers (ES modules with `export default { fetch }`) and Durable Objects with j8: `workerd examples/counter.js --bind COUNTER=Counter --request "GET /c/inc?name=a"`, or `--port 8787` for an HTTP server; the Fetch API subset and DOs live in a JS prelude, storage is a Rust KV bound with `#[j8::class]` |
 | `samples/benchv8` | std | The same JS benchmarks timed on j8 and V8 (rusty_v8 152, with JIT / `--jitless`): `cd samples/benchv8 && cargo run --release`; depends on V8's prebuilt library, so it is its own workspace (excluded from the root one) |
 | `j8debugger` | std | The `j8dbg` command line (clap): `j8dbg disasm <file.js \| ->` / `j8dbg disasm -e '<js>'` prints the disassembly; `j8dbg asm <file.j8s \| ->` assembles a listing and prints it normalized (`-o` writes a file) |
-| `j8executor` | `no_std` (`compile` needs std) | The bytecode `Executor`, **currently the last layer**; implements `Engine` under the `compile` feature |
+| `j8executor` | std | The bytecode `Executor`, **currently the last layer**; implements `Engine` under the `compile` feature |
 
 All JS is compiled to bytecode before it runs; there is no AST interpreter.
 Dependency direction: every layer depends only on `j8framework` (`j8executor` also on `j8virtasm`), and `j8framework` depends on no layer.
 
 ### 🧹 Heap and handles
 
-The heap is the in-repository `crates/j8gc` (its proc macros are exported through `j8gc` itself): generational (bump allocation
-in the young generation, minor collections copy and promote), moving (sparse pages are evacuated and compacted), with incremental
-marking; marking, minor collections, sweeping and compaction run in parallel on the platform's thread pool. Brand lifetimes, no `'static`.
+The heap is [paragc](https://crates.io/crates/paragc), used only through its public API; `j8framework`'s GC layer adds what a
+JS engine needs on top: `GcCell` (a lock-free `RefCell` whose data lives in a snapshot behind a paragc `Slot`: a snapshot
+allocated since the last collection is changed in place, an older one is moved into a fresh snapshot first, so the write
+barrier sees it), `ValueCell` (one NaN-boxed `Value`, an atomic word plus a `Slot`), `Cow`, `GcQueue`, `Static`, and
+`#[derive(Collect)]` (from j8macros; `#[collect(require_static)]` skips a field or a whole type). Brand lifetimes, no `'static`.
 
-- `Platform`'s supertrait is `j8gc::Pool` (`threads` / `run`): background tasks and the GC share one pool (`DefaultPlatform`'s moremath `ThreadMulti`)
-- Collection only happens outside `enter`, when every `Gc` is under a root, so objects can move: ⛔ storing a `Gc` or an object address anywhere that
-  is not traversed by `Collect` (`Static`, side caches); anything hashed by address (the indexes of Map / Set) is updated in `relocate` (see `Collection`)
-- Large containers would be rescanned whole on every minor collection: `Collection` remembers "where the entries written since last time start", and a
-  minor collection only looks at those (`Relocate::young_only`)
+- Collection only happens outside `enter`, when every `Gc` is under a root, so objects can move: ⛔ storing a `Gc` or an object
+  address anywhere that is not traversed by `Trace` (`Static`, side caches); anything hashed by address (the indexes of Map / Set) is
+  updated in `relocate` (see `Collection`)
+- ⛔ writing a `Slot` / `ValueCell` / `Cow` of a value that is not on the heap yet (the barrier records the slot's address): allocate first,
+  then fill in (see `Scope::context`)
+- The heap only collects stop-the-world (`collect_if_needed` / `collect`, parallel inside); `GcCell` changes young snapshots without a
+  barrier, so ⛔ `mark_concurrently`
+- Every heap type is `Send + Sync` (paragc's rule): host data is `Box<dyn Any + Send + Sync>` behind j8lockfree's `AtomicRefCell`,
+  shapes and ropes are `Arc`
+- The heap has its own collector threads (as many as the platform's pool); `Platform`'s supertrait `Pool` is for parallel built-ins
 
-- `Isolate::enter(|scope| …)` enters once, and `'gc` is the brand of that entry; nothing is collected during the closure, and after it returns collection proceeds incrementally according to the debt
+- `Isolate::enter(|scope| …)` enters once, and `'gc` is the brand of that entry; nothing is collected during the closure, and after it returns the heap collects if enough was allocated (a young collection usually, a full one every few rounds)
 - `Engine::eval` takes `&mut Isolate` and enters in slices itself: at most ten thousand instructions per slice; when it stops, the execution state is put under a root, and when `enter` returns a step of collection runs before execution continues. The execution context survives across slices as a `ContextRoot` (JS re-entered from a host function runs to completion within the current slice)
 - `Value<'gc>` is V8's Local: it cannot leave the closure, guaranteed at compile time
-- `Global` is a persistent handle (an j8gc `DynamicRoot`) that lives across many `enter`s and is released on drop
+- `Global` is a persistent handle (a paragc `Root`) that lives across many `enter`s and is released on drop
 
 ```rust
 use j8builtins::Builtins;
@@ -133,17 +136,11 @@ isolate.enter(|scope| {
 });
 ```
 
-Checking `no_std`:
-
-```sh
-cargo build --target riscv64gc-unknown-none-elf -p j8framework -p j8virtasm -p j8executor --no-default-features
-```
-
 ## 🧬 JIT (tier one)
 
 `dune --jit a.js` turns the JIT on; `J8_TEST262_JIT=1 cargo test -p dune --test test262` runs the baseline with the JIT on (every function is compiled on its first call, every loop on its first back edge).
 
-- `j8compiler` (`no_std`): bytecode function ⇒ MLIR (`llvm` dialect) ⇒ mlirpass `target.x86_64` ⇒ x86-64 machine code (one `Compiler` is built and reused, loading only the builtin and `llvm` dialects).
+- `j8compiler`: bytecode function ⇒ MLIR (`llvm` dialect) ⇒ mlirpass `target.x86_64` ⇒ x86-64 machine code (one `Compiler` is built and reused, loading only the builtin and `llvm` dialects).
   The machine code is `extern "C" fn(regs, acc, start) -> u64` and reads and writes the frame's register file and accumulator `Value`s directly (layout in `j8framework::ValueTag`: 16 bytes, tag in the first byte, payload from byte 8);
   `start` 0 enters at the top of the function, `h + 1` enters at loop header `h` (OSR); returning 0 means the function returned, `pc + 1` means it stopped before instruction pc (`j8executor::Exit`) and the interpreter carries on from there
 - Instructions in tier one: register reads and writes, number / boolean constants, arithmetic (remainder, exponentiation and bitwise operations call runtime functions) and comparisons, `++` / `--`, jumps, TDZ checks, returns;
@@ -242,7 +239,6 @@ cargo test -p dune --test test262                                               
 
 ## ✍️ Conventions
 
-- `no_std` (`core` + `alloc`) wherever possible; parts that need std go behind a feature
 
 - Submodules are private `mod`s, the crate root flattens exports with `pub use`; ⛔ `pub mod`
 - ⛔ `static` and the `'static` lifetime (except `&'static str` names inside enums); background tasks borrow the caller's data with `Task<'t>`
@@ -252,7 +248,7 @@ cargo test -p dune --test test262                                               
 
 ## 📄 License
 
-MIT. The API shape of `crates/j8gc` comes from [gc-arena](https://github.com/kyren/gc-arena) (see `crates/j8gc/LICENSE-gc-arena`).
+MIT.
 
 <div align="center">
 

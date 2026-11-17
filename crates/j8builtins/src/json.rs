@@ -3,7 +3,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::Write;
 
-use j8framework::{Agent, Error, ErrorKind, JsObject, JsString, ObjectData, ObjectKind, Property, SmallStr, Value};
+use j8framework::{Agent, Error, ErrorKind, JsObject, JsString, ObjectData, Property, SmallStr, Value};
 
 use crate::{Args, Installer};
 
@@ -289,10 +289,10 @@ impl<'gc> Writer<'gc> {
     fn keys(o: JsObject<'gc>) -> Vec<SmallStr> {
         let d = o.borrow();
         let mut keys = Vec::new();
-        if let ObjectKind::Array(items) = &d.kind {
-            keys.extend((0..items.len()).map(|i| j8framework::number_text(f64::from(u32::try_from(i).unwrap_or(u32::MAX)))));
+        if o.is_array() {
+            keys.extend((0..o.elements().len()).map(|i| j8framework::number_text(f64::from(u32::try_from(i).unwrap_or(u32::MAX)))));
         }
-        keys.extend(d.props.iter().filter(|(_, p)| p.enumerable).map(|(k, _)| k.clone()));
+        keys.extend(d.props().entries().into_iter().filter(|(_, p)| p.enumerable).map(|(k, _)| k));
         keys
     }
 
@@ -319,11 +319,11 @@ impl<'gc> Writer<'gc> {
             ValueKind::Number(x) => out.push_str(&j8framework::number_text(x)),
             ValueKind::BigInt(_) => return Err(a.throw(ErrorKind::Type, "Do not know how to serialize a BigInt")),
             ValueKind::Object(o) if !o.borrow().kind.is_callable() => {
-                if self.stack.iter().any(|&s| j8gc::Gc::ptr_eq(s, o)) {
+                if self.stack.iter().any(|&s| j8framework::Gc::ptr_eq(s, o)) {
                     return Err(a.throw(ErrorKind::Type, "Converting circular structure to JSON"));
                 }
                 self.stack.push(o);
-                let array = matches!(o.borrow().kind, ObjectKind::Array(_));
+                let array = o.is_array();
                 if array { self.array(a, o, out)? } else { self.object(a, o, out)? }
                 self.stack.pop();
             }
@@ -388,16 +388,19 @@ impl<'gc> Writer<'gc> {
         if self.replacer.is_some() || !self.gap.is_empty() {
             return false;
         }
+        if !o.is_array() {
+            return false;
+        }
         let d = o.borrow();
-        let ObjectKind::Array(items) = &d.kind else { return false };
-        if d.sparse_length as usize > items.len() || !items.iter().all(|v| matches!(v.kind(), ValueKind::Number(_) | ValueKind::String(_) | ValueKind::Bool(_) | ValueKind::Null | ValueKind::Undefined)) {
+        let items = o.elements().to_vec();
+        if d.sparse_length() as usize > items.len() || !items.iter().all(|v| matches!(v.kind(), ValueKind::Number(_) | ValueKind::String(_) | ValueKind::Bool(_) | ValueKind::Null | ValueKind::Undefined)) {
             return false;
         }
         let parts: Vec<Part<'_>> = items
             .iter()
             .map(|v| match v.kind() {
                 ValueKind::Number(x) if x.is_finite() => Part::Number(x),
-                ValueKind::String(s) => Part::Text(j8gc::Gc::as_ref(s)),
+                ValueKind::String(s) => Part::Text(j8framework::Gc::get(s)),
                 ValueKind::Bool(true) => Part::Raw("true"),
                 ValueKind::Bool(false) => Part::Raw("false"),
                 _ => Part::Raw("null"),
@@ -501,7 +504,7 @@ impl Json {
     fn stringify<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let (replacer, allow) = match args.at(1).kind() {
             f if a.is_callable(Value::from(f)) => (Some(Value::from(f)), None),
-            ValueKind::Object(o) if matches!(o.borrow().kind, ObjectKind::Array(_)) => {
+            ValueKind::Object(o) if o.is_array() => {
                 let items = a.to_list(Value::Object(o))?;
                 let mut keys: Vec<JsString<'gc>> = Vec::new();
                 for item in items {

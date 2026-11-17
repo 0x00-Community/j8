@@ -19,7 +19,7 @@ ryu-js = { workspace = true, optional = true }
 
 [features]
 default = ["compile"]
-# JS ⇒ bytecode compiler (oxc parser, needs std); without it only the no_std bytecode types remain
+# JS ⇒ bytecode compiler (oxc parser); without it only the bytecode types remain
 compile = ["dep:oxc_allocator", "dep:oxc_ast", "dep:oxc_parser", "dep:oxc_span", "dep:oxc_semantic", "dep:oxc_syntax", "dep:ryu-js"]
 
 [lints]
