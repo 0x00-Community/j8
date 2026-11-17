@@ -1,6 +1,6 @@
 [package]
 name = "j8"
-description = "j8: V8 rewritten in Rust. The root package re-exports the binding macros #[j8::class] / #[j8::object] / #[j8::function] and the traits and types they need"
+description = "j8: V8 rewritten in Rust. The root package re-exports the binding macros #[j8::class] / #[j8::object] / #[j8::function] and, by feature, the executor, built-ins, platform, JIT and the other j8 crates"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -19,6 +19,35 @@ path = "src/lib.rs"
 j8framework.workspace = true
 j8binding.workspace = true
 j8macros.workspace = true
+j8virtasm = { workspace = true, optional = true }
+j8executor = { workspace = true, optional = true }
+j8builtins = { workspace = true, optional = true }
+j8platform = { workspace = true, optional = true }
+j8taskqueue = { workspace = true, optional = true }
+j8lockfree = { workspace = true, optional = true }
+j8compiler = { workspace = true, optional = true }
+j8jit = { workspace = true, optional = true }
+
+# 根包按 feature 分发；每个子 crate 也单独发在 crates.io，可以直接依赖
+[features]
+default = ["runtime"]
+# 跑 JS 的一套：执行器 + 内建对象 + 标准平台
+runtime = ["executor", "builtins", "platform"]
+# j8::virtasm：字节码类型、汇编 / 反汇编（不带编译器）
+virtasm = ["dep:j8virtasm"]
+# j8::executor：字节码执行器，带 JS ⇒ 字节码编译（oxc），实现 Engine
+executor = ["dep:j8executor", "virtasm", "j8virtasm/compile"]
+# j8::builtins：内建对象（Intrinsics 的实现）
+builtins = ["dep:j8builtins"]
+# j8::platform：Platform 的标准库实现
+platform = ["dep:j8platform"]
+# j8::taskqueue：无锁数据流任务队列
+taskqueue = ["dep:j8taskqueue"]
+# j8::lockfree：无锁基础件
+lockfree = ["dep:j8lockfree"]
+# j8::compiler（字节码 ⇒ MLIR ⇒ x86-64 机器码）与 j8::jit（x86-64 Unix）
+jit = ["executor", "dep:j8compiler", "dep:j8jit"]
+full = ["runtime", "taskqueue", "lockfree", "jit"]
 
 [dev-dependencies]
 j8executor.workspace = true
@@ -39,29 +68,30 @@ members = ["crates/*", "samples/*", "debugger"]
 exclude = ["samples/benchv8"]
 
 [workspace.package]
-version = "0.1.2"
+version = "0.2.0"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/0x00-Community/j8"
 
 [workspace.dependencies]
-j8framework = { version = "0.1.2", path = "crates/j8framework" }
-j8platform = { version = "0.1.2", path = "crates/j8platform" }
-j8builtins = { version = "0.1.2", path = "crates/j8builtins" }
-j8virtasm = { version = "0.1.2", path = "crates/j8virtasm", default-features = false }
-j8executor = { version = "0.1.2", path = "crates/j8executor" }
-j8compiler = { version = "0.1.2", path = "crates/j8compiler" }
-j8jit = { version = "0.1.2", path = "crates/j8jit" }
+j8framework = { version = "0.2.0", path = "crates/j8framework" }
+j8platform = { version = "0.2.0", path = "crates/j8platform" }
+j8builtins = { version = "0.2.0", path = "crates/j8builtins" }
+j8virtasm = { version = "0.2.0", path = "crates/j8virtasm", default-features = false }
+j8executor = { version = "0.2.0", path = "crates/j8executor" }
+j8compiler = { version = "0.2.0", path = "crates/j8compiler" }
+j8jit = { version = "0.2.0", path = "crates/j8jit" }
 mlirpass = { version = "=0.10.4", default-features = false, features = ["target.x86_64"] }
 libc = "0.2"
-j8macros = { version = "0.1.2", path = "crates/macros" }
-j8binding = { version = "0.1.2", path = "crates/j8binding" }
-j8 = { version = "0.1.2", path = "." }
+j8macros = { version = "0.2.0", path = "crates/macros" }
+j8binding = { version = "0.2.0", path = "crates/j8binding" }
+j8 = { version = "0.2.0", path = "." }
 clap = { version = "4.6", features = ["derive"] }
 moremath = { version = "=0.2.3", default-features = false }
 libm = "0.2"
-paragc = "0.4.0"
-j8lockfree = { version = "0.1.2", path = "crates/j8lockfree" }
+paragc = "0.4.1"
+j8lockfree = { version = "0.2.0", path = "crates/j8lockfree" }
+j8taskqueue = { version = "0.2.0", path = "crates/j8taskqueue" }
 smol_str = { version = "0.3", default-features = false }
 hashbrown = { version = "0.17", default-features = false }
 rustc-hash = { version = "2", default-features = false }

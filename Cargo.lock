@@ -194,7 +194,7 @@ dependencies = [
 
 [[package]]
 name = "dune"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "clap",
  "j8",
@@ -369,19 +369,24 @@ checksum = "3bd1574e617a9a6c1f8f8181bd7e841e1f20e4277607ef28945765188d6284d4"
 
 [[package]]
 name = "j8"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "j8binding",
  "j8builtins",
+ "j8compiler",
  "j8executor",
  "j8framework",
+ "j8jit",
+ "j8lockfree",
  "j8macros",
  "j8platform",
+ "j8taskqueue",
+ "j8virtasm",
 ]
 
 [[package]]
 name = "j8binding"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "j8framework",
  "j8lockfree",
@@ -389,7 +394,7 @@ dependencies = [
 
 [[package]]
 name = "j8builtins"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "j8framework",
  "libm",
@@ -402,7 +407,7 @@ dependencies = [
 
 [[package]]
 name = "j8compiler"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "j8framework",
  "j8virtasm",
@@ -411,7 +416,7 @@ dependencies = [
 
 [[package]]
 name = "j8debugger"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "clap",
  "j8framework",
@@ -420,7 +425,7 @@ dependencies = [
 
 [[package]]
 name = "j8executor"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "j8builtins",
  "j8framework",
@@ -431,7 +436,7 @@ dependencies = [
 
 [[package]]
 name = "j8framework"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "hashbrown",
  "j8lockfree",
@@ -448,7 +453,7 @@ dependencies = [
 
 [[package]]
 name = "j8jit"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "j8compiler",
  "j8executor",
@@ -460,11 +465,11 @@ dependencies = [
 
 [[package]]
 name = "j8lockfree"
-version = "0.1.2"
+version = "0.2.0"
 
 [[package]]
 name = "j8macros"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -475,7 +480,7 @@ dependencies = [
 
 [[package]]
 name = "j8platform"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "j8framework",
  "moremath",
@@ -483,7 +488,7 @@ dependencies = [
 
 [[package]]
 name = "j8taskqueue"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "j8lockfree",
  "moremath",
@@ -491,7 +496,7 @@ dependencies = [
 
 [[package]]
 name = "j8virtasm"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "j8framework",
  "j8macros",
@@ -873,9 +878,9 @@ dependencies = [
 
 [[package]]
 name = "paragc"
-version = "0.4.0"
+version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fdff3d00e20b21dc79f47b4ea680b06f59569361957110e4f3c8e0db0a7c8323"
+checksum = "f543be080c423f0102dc0270b9d8856ebd896c7ff4141eae38837dd40e82fe52"
 dependencies = [
  "crossbeam-deque",
  "crossbeam-utils",
@@ -885,9 +890,9 @@ dependencies = [
 
 [[package]]
 name = "paragc-macros"
-version = "0.4.0"
+version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dcf536ffd9b948aa2f9bec292eca480e1e409225e060b30e5c2497fce1128377"
+checksum = "739ea12d117b8512248e48f481058fa2370329b53c4592ba07073ae4c4c9bcf6"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1277,7 +1282,7 @@ dependencies = [
 
 [[package]]
 name = "workerd"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "clap",
  "j8",

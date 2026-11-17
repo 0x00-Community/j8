@@ -80,7 +80,7 @@ A Cargo workspace of several crates.
 | crate | std | What it does |
 |---|---|---|
 | `j8framework` | std | The core framework: defines the traits (`Platform`, `Engine`, `Invoke`, `Intrinsics`) and the shared structs / enums (`Isolate`, `Scope`, `Agent`, `Context` / `Realm`, `Global`, `Value`, `JsString` / `JsObject`, `Profiler`, `BinaryOp`, `Error` …). JS operation semantics hang off `Agent`; the implementations belong to the other crates |
-| `j8` (repository root `src/`) | std | Re-exports: `#[j8::class]` / `#[j8::object]` / `#[j8::function]` (the macros live in j8macros, see `crates/macros/USAGE.md`) and the j8binding traits |
+| `j8` (repository root `src/`) | std | Re-exports: `#[j8::class]` / `#[j8::object]` / `#[j8::function]` (the macros live in j8macros, see `crates/macros/USAGE.md`) and the j8binding traits; the other crates by feature (default `runtime` = `j8::executor` + `j8::builtins` + `j8::platform`, plus `virtasm` / `taskqueue` / `lockfree` / `jit` / `full`); every crate is also published on its own on crates.io |
 | `j8binding` | std | The Rust ⇄ JS binding runtime: `FromJs` / `IntoJs`, host objects, `Class` / `Object` |
 | `j8builtins` | std | Implements `Intrinsics`: installs Object / Function / Array / String / Number / Boolean / Math / the Error family / `console` / `parseInt` and so on into a `Realm` |
 | `j8platform` | std | Implements `Platform` (`DefaultPlatform`): background tasks run on a moremath `ThreadMulti` pool (started once and reused; tasks may borrow the caller's data, through `j8framework::Pool`), the clock is `Instant` |
