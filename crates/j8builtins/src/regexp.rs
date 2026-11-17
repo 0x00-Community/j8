@@ -202,7 +202,7 @@ impl Regexps {
     }
 
     fn data(o: JsObject<'_>) -> (JsString<'_>, JsString<'_>, Gc<'_, Static<Box<dyn core::any::Any + Send + Sync>>>) {
-        let ObjectKind::RegExp(d) = &o.borrow().kind else { unreachable!("checked to be a regexp") };
+        let d = o.regexp().expect("checked to be a regexp");
         (d.source, d.flags, d.compiled)
     }
 
@@ -312,22 +312,20 @@ impl Regexps {
     /// lastIndex, calling exec, reading the result array) is unobservable, so we can match directly. Returns the object
     /// and the value of `lastIndex`.
     fn pristine<'gc>(a: &Agent<'gc, '_>, r: Value<'gc>) -> Option<(JsObject<'gc>, f64)> {
-        let o = r.as_object()?;
-        let d = o.borrow();
-        let own_ok = matches!(d.kind, ObjectKind::RegExp(_))
+        let d = r.as_object()?;
+        let own_ok = d.regexp().is_some()
             && d.proto().is_some_and(|p| Gc::ptr_eq(p, a.realm.regexp_proto))
-            && d.symbols.is_empty()
+            && !d.has_symbols()
             && d.props().len() == 1
-            && *d.props().key(0) == *"lastIndex"
-            && d.props().attrs(0).writable();
+            && d.props().shape_ref().is_some_and(|s| &**s.key(0) == "lastIndex" && s.attrs(0).writable());
         if !own_ok {
             return None;
         }
         let Slot::Data(v) = d.props().slot(0) else { return None };
         let last = v.as_number()?;
-        drop(d);
+        let o = d;
         let p = a.realm.regexp_pristine.get().as_ref()?;
-        let proto = a.realm.regexp_proto.borrow();
+        let proto = a.realm.regexp_proto.get();
         let same = |x: Slot<'gc>, y: Slot<'gc>| match (x, y) {
             (Slot::Data(x), Slot::Data(y)) => matches!((x.kind(), y.kind()), (ValueKind::Object(x), ValueKind::Object(y)) if Gc::ptr_eq(x, y)),
             (Slot::Accessor { get: Some(x), .. }, Slot::Accessor { get: Some(y), .. }) => Gc::ptr_eq(x, y),

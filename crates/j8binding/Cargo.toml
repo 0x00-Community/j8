@@ -1,6 +1,7 @@
 [package]
 name = "j8binding"
 description = "Rust ⇄ JS bindings for j8: type conversion, host objects, exporting Rust types as JS classes (procedural macros live in j8macros)"
+readme = "README.md"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

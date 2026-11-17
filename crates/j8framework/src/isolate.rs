@@ -31,6 +31,9 @@ impl<'p> Isolate<'p> {
         let mut profiler = Profiler::default();
         profiler.enable(params.profile);
         let heap = Heap::new(NonZeroUsize::new(platform.threads()).unwrap_or(NonZeroUsize::MIN));
+        // Dead objects free memory the mutator allocated (string buffers, vectors): freeing it from the collector
+        // threads makes them fight the allocator (glibc's arena lock), so destructors run on the collecting thread only
+        heap.set_parallel_drop(false);
         Self { platform, heap, generation: 0, profiler }
     }
 

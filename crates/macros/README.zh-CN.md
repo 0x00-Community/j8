@@ -1,0 +1,17 @@
+# j8macros
+
+[English](README.md) · **简体中文**
+
+[j8](https://github.com/0x00-Community/j8) 的过程宏。
+
+| 宏 | 生成什么 |
+| --- | --- |
+| `enums!("x.json")` | 从调用方 crate 下的 JSON 生成枚举（定义、`Display`、汇编、按字段类型取值）；JSON 是唯一来源（`j8virtasm` 的指令集就是这样来的） |
+| `#[derive(Collect)]` | 堆类型的 paragc `Trace`；`#[collect(require_static)]` 跳过一个字段（放在类型上表示整个类型没有 GC 边）；有边的类型不许实现 `Drop` |
+| `#[class]` / `#[object]` / `#[function]` | Rust ⇄ JS 绑定，经门面 crate 写成 `#[j8::class]` 等 |
+
+JSON 格式与全部绑定属性见 [USAGE.md](USAGE.md)。
+
+## 许可
+
+MIT，随 [j8](https://github.com/0x00-Community/j8) 一起。

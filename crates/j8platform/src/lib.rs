@@ -26,7 +26,7 @@ impl From<NonZeroUsize> for DefaultPlatform {
     }
 }
 
-/// Background tasks and the GC run on the same thread pool.
+/// Background tasks and parallel built-ins run on this pool (the GC heap has its own collector threads).
 impl j8framework::Pool for DefaultPlatform {
     fn threads(&self) -> usize {
         Executor::threads(&self.pool)

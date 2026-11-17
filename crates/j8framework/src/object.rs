@@ -33,7 +33,7 @@ pub type JsBigInt<'gc> = Gc<'gc, BigIntData>;
 
 /// The body of a RegExp object: source, flags, and what the regex engine compiled (type-erased, interpreted by
 /// j8builtins).
-#[derive(Debug, Collect)]
+#[derive(Clone, Copy, Debug, Collect)]
 #[collect(no_drop)]
 pub struct RegExpData<'gc> {
     pub source: JsString<'gc>,
@@ -801,7 +801,7 @@ impl<'gc> ObjectData<'gc> {
         let Self { kind, capacity, elements, symbols, privates, proto, sparse_length, non_extensible, length_readonly } = self;
         let state = ObjectState { kind, symbols, privates };
         let unit = Class::unit(&state);
-        let class = Class::of(&state.kind) | unit.unwrap_or(0);
+        let class = Class::of(&state.kind) | unit.unwrap_or(0) | if state.symbols.is_empty() { 0 } else { Class::SYMBOLS };
         let call = Object::call_of(mc, &state.kind);
         let o = mc.alloc(Object {
             proto: GcSlot::from(proto),
@@ -887,6 +887,15 @@ impl fmt::Debug for ObjectState<'_> {
     }
 }
 
+/// Immutable data of a few kinds, cached outside the cell so hot paths (calls, regex fast paths) read it without
+/// borrowing; refreshed whenever the kind may have changed.
+#[derive(Collect)]
+enum Fast<'gc> {
+    Closure(Closure<'gc>),
+    Native(Native),
+    RegExp(RegExpData<'gc>),
+}
+
 /// Facts about an object's kind cached outside the cell (refreshed whenever the kind may have changed), so hot paths
 /// read them without borrowing.
 struct Class;
@@ -900,12 +909,15 @@ impl Class {
     const PLAIN: u8 = 1 << 2;
     /// [`ObjectKind::is_callable`]
     const CALLABLE: u8 = 1 << 3;
+    /// Has Symbol-keyed properties
+    const SYMBOLS: u8 = 1 << 6;
     /// The state cell is empty and the state is the default with this unit kind (no snapshot allocated): two bits
     const UNIT_SHIFT: u32 = 4;
     const UNIT_MASK: u8 = 0b11 << Self::UNIT_SHIFT;
     const UNIT_ORDINARY: u8 = 1 << Self::UNIT_SHIFT;
     const UNIT_ERROR: u8 = 2 << Self::UNIT_SHIFT;
-    const UNIT_ARRAY: u8 = 3 << Self::UNIT_SHIFT;
+    /// An array, or (when the object has [`Fast`] data) the kind that data stands for
+    const UNIT_DERIVED: u8 = 3 << Self::UNIT_SHIFT;
 
     /// The unit bits for a state that needs no snapshot
     fn unit(state: &ObjectState<'_>) -> Option<u8> {
@@ -915,16 +927,19 @@ impl Class {
         match state.kind {
             ObjectKind::Ordinary => Some(Self::UNIT_ORDINARY),
             ObjectKind::Error => Some(Self::UNIT_ERROR),
-            ObjectKind::Array => Some(Self::UNIT_ARRAY),
+            ObjectKind::Array | ObjectKind::Function(_) | ObjectKind::Native(_) | ObjectKind::RegExp(_) => Some(Self::UNIT_DERIVED),
             _ => None,
         }
     }
 
-    /// The default state an empty cell stands for
-    fn unit_state<'gc>(class: u8) -> ObjectState<'gc> {
-        let kind = match class & Self::UNIT_MASK {
-            Self::UNIT_ERROR => ObjectKind::Error,
-            Self::UNIT_ARRAY => ObjectKind::Array,
+    /// The state an empty cell stands for: rebuilt from the unit bits and the object's [`Fast`] data
+    fn unit_state<'gc>(class: u8, fast: Option<&Fast<'gc>>) -> ObjectState<'gc> {
+        let kind = match (class & Self::UNIT_MASK, fast) {
+            (Self::UNIT_ERROR, _) => ObjectKind::Error,
+            (Self::UNIT_DERIVED, Some(Fast::Closure(c))) => ObjectKind::Function(*c),
+            (Self::UNIT_DERIVED, Some(Fast::Native(n))) => ObjectKind::Native(*n),
+            (Self::UNIT_DERIVED, Some(Fast::RegExp(r))) => ObjectKind::RegExp(*r),
+            (Self::UNIT_DERIVED, None) => ObjectKind::Array,
             _ => ObjectKind::Ordinary,
         };
         ObjectState { kind, ..ObjectState::default() }
@@ -945,8 +960,8 @@ impl Class {
 #[derive(Collect)]
 pub struct Object<'gc> {
     proto: GcSlot<'gc, Object<'gc>>,
-    /// An ordinary function's closure (read on every call)
-    call: GcSlot<'gc, Closure<'gc>>,
+    /// Immutable kind data hot paths read without borrowing (see [`Fast`])
+    call: GcSlot<'gc, Fast<'gc>>,
     props: crate::Props<'gc>,
     elements: crate::ValueArray<'gc>,
     /// [`Class`] bits
@@ -986,7 +1001,8 @@ pub struct ObjRef<'a, 'gc> {
 /// The state an [`ObjRef`] reads: borrowed from the cell, or the default an empty cell stands for
 enum StateRef<'a, 'gc> {
     Cell(CellRef<'a, ObjectState<'gc>>),
-    Unit(ObjectState<'gc>),
+    /// A unit kind with no Symbol keys owns nothing on the heap: no destructor needed
+    Unit(core::mem::ManuallyDrop<ObjectState<'gc>>),
 }
 
 impl<'gc> Deref for ObjRef<'_, 'gc> {
@@ -1011,8 +1027,8 @@ pub struct ObjMut<'a, 'gc> {
 impl<'gc> ObjMut<'_, 'gc> {
     fn cell(&self) -> &CellMut<'_, ObjectState<'gc>> {
         self.data.get_or_init(|| {
-            let class = self.obj.class();
-            self.obj.data.try_borrow_mut_or(self.mc, || Class::unit_state(class)).expect("object state already borrowed")
+            let (class, fast) = (self.obj.class(), self.obj.fast());
+            self.obj.data.try_borrow_mut_or(self.mc, || Class::unit_state(class, fast)).expect("object state already borrowed")
         })
     }
 }
@@ -1036,7 +1052,7 @@ impl Drop for ObjMut<'_, '_> {
     fn drop(&mut self) {
         if let Some(d) = self.data.take() {
             // The state now has a snapshot: no unit bits
-            self.obj.class.store(Class::of(&d.kind), Ordering::Release);
+            self.obj.class.store(Class::of(&d.kind) | if d.symbols.is_empty() { 0 } else { Class::SYMBOLS }, Ordering::Release);
             let call = Object::call_of(self.mc, &d.kind);
             drop(d);
             if call.is_some() || self.obj.call.get().is_some() {
@@ -1217,14 +1233,14 @@ impl<'gc> Object<'gc> {
 
     pub fn try_borrow(&self) -> Option<ObjRef<'_, 'gc>> {
         let r = self.borrow();
-        let d = if self.data.has_value() { StateRef::Cell(self.data.try_borrow()?) } else { StateRef::Unit(Class::unit_state(self.class())) };
+        let d = if self.data.has_value() { StateRef::Cell(self.data.try_borrow()?) } else { StateRef::Unit(core::mem::ManuallyDrop::new(Class::unit_state(self.class(), self.fast()))) };
         let _ = r.data.set(d);
         Some(r)
     }
 
     /// Reads the state: borrows the cell, or makes the default an empty cell stands for (no atomic writes)
     fn state_ref(&self) -> StateRef<'_, 'gc> {
-        if self.data.has_value() { StateRef::Cell(self.data.borrow()) } else { StateRef::Unit(Class::unit_state(self.class())) }
+        if self.data.has_value() { StateRef::Cell(self.data.borrow()) } else { StateRef::Unit(core::mem::ManuallyDrop::new(Class::unit_state(self.class(), self.fast()))) }
     }
 
     pub fn borrow_mut<'a>(&'a self, mc: &'a Mutation<'gc>) -> ObjMut<'a, 'gc> {
@@ -1232,17 +1248,50 @@ impl<'gc> Object<'gc> {
     }
 
     /// The closure to cache for `kind` (ordinary functions only)
-    fn call_of(mc: &Mutation<'gc>, kind: &ObjectKind<'gc>) -> Option<Gc<'gc, Closure<'gc>>> {
+    fn call_of(mc: &Mutation<'gc>, kind: &ObjectKind<'gc>) -> Option<Gc<'gc, Fast<'gc>>> {
         match kind {
-            ObjectKind::Function(c) => Some(mc.alloc(*c)),
+            ObjectKind::Function(c) => Some(mc.alloc(Fast::Closure(*c))),
+            ObjectKind::Native(n) => Some(mc.alloc(Fast::Native(*n))),
+            ObjectKind::RegExp(r) => Some(mc.alloc(Fast::RegExp(*r))),
             _ => None,
         }
+    }
+
+    fn fast(&self) -> Option<&'gc Fast<'gc>> {
+        self.call.get().map(Gc::get)
+    }
+
+    /// A host function's body (no borrowing)
+    #[inline]
+    pub fn native(&self) -> Option<Native> {
+        match self.fast()? {
+            Fast::Native(n) => Some(*n),
+            _ => None,
+        }
+    }
+
+    /// A RegExp's data (no borrowing)
+    #[inline]
+    pub fn regexp(&self) -> Option<RegExpData<'gc>> {
+        match self.fast()? {
+            Fast::RegExp(r) => Some(*r),
+            _ => None,
+        }
+    }
+
+    /// Has Symbol-keyed properties (no borrowing)
+    #[inline]
+    pub fn has_symbols(&self) -> bool {
+        self.class() & Class::SYMBOLS != 0
     }
 
     /// An ordinary function's closure (no borrowing)
     #[inline]
     pub fn closure(&self) -> Option<Closure<'gc>> {
-        self.call.get().map(|c| *c.get())
+        match self.fast()? {
+            Fast::Closure(c) => Some(*c),
+            _ => None,
+        }
     }
 
     #[inline]
@@ -1386,6 +1435,16 @@ impl<'gc> Object<'gc> {
         self.get_own(k)
     }
 
+    /// Own property as stored (array dense part, ordinary properties, Symbol keys); borrows only for Symbol keys of an
+    /// object that has some
+    pub fn own_slot(&self, key: Key<'_, 'gc>) -> Option<Property<'gc>> {
+        match key {
+            Key::Str(k) => self.own_str(k),
+            Key::Sym(_) if !self.has_symbols() => None,
+            Key::Sym(s) => self.borrow().get_own_symbol(s),
+        }
+    }
+
     /// Ordinary write of a string key: an own writable data property gets its value; absent and extensible, a new one
     /// is created; `None` for accessors
     fn put_str(&self, mc: &Mutation<'gc>, k: &str, value: Value<'gc>) -> Option<bool> {
@@ -1461,12 +1520,21 @@ impl<'gc> Object<'gc> {
             self.digit_keys.store(true, Ordering::Release);
         }
         let proto = self.proto();
-        self.props.push(mc, key, prop, || proto.map(|p| p.root_shape()));
+        self.props.push(mc, key, prop, || proto.map(|p| p.get().root_shape_ref()));
     }
 
     /// The empty shape that objects with this object as prototype start from (created if absent)
     pub fn root_shape(&self) -> alloc::sync::Arc<crate::Shape> {
-        self.shape_root.get_or_init(crate::Props::empty).clone()
+        self.root_shape_ref_arc().clone()
+    }
+
+    fn root_shape_ref_arc(&self) -> &alloc::sync::Arc<crate::Shape> {
+        self.shape_root.get_or_init(crate::Props::empty)
+    }
+
+    /// [`Object::root_shape`], borrowed for as long as this object
+    pub fn root_shape_ref(&self) -> &crate::Shape {
+        self.root_shape_ref_arc()
     }
 
     /// Append an entry, switching the shape directly to `to` (from the execution layer's inline cache)
@@ -1475,7 +1543,7 @@ impl<'gc> Object<'gc> {
             self.digit_keys.store(true, Ordering::Release);
         }
         let proto = self.proto();
-        self.props.push_to(mc, to, slot, || proto.map(|p| p.root_shape()));
+        self.props.push_to(mc, to, slot, || proto.map(|p| p.get().root_shape_ref()));
     }
 
     /// Own property.

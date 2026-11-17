@@ -47,6 +47,10 @@ impl Trap {
 impl<'gc> Agent<'gc, '_> {
     /// If it is a Proxy, returns (target, handler); throws a TypeError if revoked.
     pub fn proxy_parts(&self, o: JsObject<'gc>) -> Option<Result<(JsObject<'gc>, JsObject<'gc>), Error>> {
+        // Plain objects are never proxies (no borrowing)
+        if o.is_plain() {
+            return None;
+        }
         match o.borrow().kind {
             ObjectKind::Proxy(p) => Some(match (p.target, p.handler) {
                 (Some(t), Some(h)) => Ok((t, h)),

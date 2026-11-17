@@ -1,6 +1,7 @@
 [package]
 name = "j8builtins"
 description = "j8 built-in objects: implements Intrinsics and installs Object / Function / Array / String / Number / Math / Error / console into a Realm"
+readme = "README.md"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

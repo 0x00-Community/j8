@@ -1,6 +1,7 @@
 [package]
 name = "j8platform"
 description = "j8 platform layer: the standard-library implementation of the Platform trait"
+readme = "README.md"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
