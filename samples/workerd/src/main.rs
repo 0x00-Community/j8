@@ -4,12 +4,14 @@
 //! workerd examples/counter.js --bind COUNTER=Counter --request "GET /counter/inc?name=a"
 //! workerd examples/counter.js --bind COUNTER=Counter --port 8787
 //! ```
-//! The Fetch API subset and Durable Objects are written in JS in `prelude.js`; each object's storage is the Rust
-//! [`KvStore`], bound as `__j8_native.KvStore` via `#[j8::class]` (the `natives` of [`Workerd`]).
+//! The Fetch API subset, WebSockets and Durable Objects are written in JS in `prelude.js`. The machine parts are Rust,
+//! bound in the `natives` of [`Workerd`]: each object's key-value storage ([`KvStore`]) and SQL storage
+//! ([`sql::SqlStorage`]), and the HTTP / WebSocket server ([`ws::Server`]), which runs on the event loop.
+mod sql;
+mod ws;
+
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
-use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -36,9 +38,12 @@ struct Cli {
     /// One-shot request: `"METHOD path"`, may be repeated; if given, no server is started
     #[arg(long = "request", value_name = "METHOD PATH")]
     requests: Vec<String>,
-    /// Port for the HTTP server
+    /// Port for the HTTP / WebSocket server (`0` picks a free one, printed on stderr)
     #[arg(long, default_value_t = 8787)]
     port: u16,
+    /// Directory for Durable Objects' SQL storage (one SQLite file per object); in memory when not given
+    #[arg(long)]
+    storage: Option<PathBuf>,
 }
 
 /// Storage of one Durable Object (key ⇒ JSON text).
@@ -76,14 +81,6 @@ impl KvStore {
     }
 }
 
-/// A received HTTP request.
-struct HttpRequest {
-    method: String,
-    path: String,
-    headers: Vec<(String, String)>,
-    body: String,
-}
-
 /// A response from the Worker.
 struct Reply {
     status: u16,
@@ -105,7 +102,7 @@ impl From<&str> for Reply {
 j8::runtime! {
     /// The Worker runtime: built-ins, the storage binding the prelude uses, and the Fetch API / Durable Object prelude
     Workerd {
-        natives: [KvStore],
+        natives: [KvStore, sql::SqlStorage, ws::Server],
         prelude: PRELUDE,
     }
 }
@@ -147,13 +144,14 @@ impl<'p> Worker<'p> {
         out
     }
 
-    /// Dynamically import the Worker module and install the Durable Object bindings.
-    fn load(&mut self, script: &str, bindings: &[(String, String)]) -> Result<(), String> {
+    /// Dynamically import the Worker module and install the Durable Object bindings (SQL files under `storage`).
+    fn load(&mut self, script: &str, bindings: &[(String, String)], storage: &str) -> Result<(), String> {
         let pairs: Vec<String> = bindings.iter().map(|(n, c)| format!("[{}, {}]", Self::quote(n), Self::quote(c))).collect();
         let src = format!(
-            "import({}).then(ns => __workerd.setup(ns, [{}])).catch(e => {{ __workerd.error = String(e && e.stack || e); }})",
+            "import({}).then(ns => __workerd.setup(ns, [{}], {})).catch(e => {{ __workerd.error = String(e && e.stack || e); }})",
             Self::quote(script),
-            pairs.join(", ")
+            pairs.join(", "),
+            Self::quote(storage)
         );
         self.eval(&src, "[load]")?;
         match self.eval("String(__workerd.error)", "[load]")?.as_str() {
@@ -176,53 +174,9 @@ impl<'p> Worker<'p> {
         }
     }
 
-    /// Read an HTTP/1.1 request (request line, headers, body by Content-Length).
-    fn read_request(stream: &mut TcpStream) -> Option<HttpRequest> {
-        let mut reader = BufReader::new(stream);
-        let mut line = String::new();
-        reader.read_line(&mut line).ok()?;
-        let mut parts = line.split_whitespace();
-        let (method, path) = (parts.next()?.to_owned(), parts.next()?.to_owned());
-        let mut headers = Vec::new();
-        let mut length = 0;
-        loop {
-            line.clear();
-            reader.read_line(&mut line).ok()?;
-            let l = line.trim_end();
-            if l.is_empty() {
-                break;
-            }
-            if let Some((k, v)) = l.split_once(':') {
-                let (k, v) = (k.trim().to_owned(), v.trim().to_owned());
-                if k.eq_ignore_ascii_case("content-length") {
-                    length = v.parse().unwrap_or(0);
-                }
-                headers.push((k, v));
-            }
-        }
-        let mut body = vec![0; length];
-        reader.read_exact(&mut body).ok()?;
-        Some(HttpRequest { method, path, headers, body: String::from_utf8_lossy(&body).into_owned() })
-    }
-
-    /// HTTP server: one request per connection (`Connection: close`).
+    /// The HTTP / WebSocket server: everything runs on the event loop, which never empties while the server listens
     fn serve(&mut self, port: u16) -> Result<(), String> {
-        let listener = TcpListener::bind(("127.0.0.1", port)).map_err(|e| format!("bind 127.0.0.1:{port}: {e}"))?;
-        eprintln!("workerd: listening on http://127.0.0.1:{port}");
-        for stream in listener.incoming() {
-            let Ok(mut stream) = stream else { continue };
-            let Some(HttpRequest { method, path, headers, body }) = Self::read_request(&mut stream) else { continue };
-            let reply = self.dispatch(&method, &path, &headers, &body);
-            eprintln!("{method} {path} -> {}", reply.status);
-            let mut out = format!("HTTP/1.1 {} {}\r\n", reply.status, if reply.status < 400 { "OK" } else { "Error" });
-            for (k, v) in &reply.headers {
-                let _ = write!(out, "{k}: {v}\r\n");
-            }
-            let _ = write!(out, "content-length: {}\r\nconnection: close\r\n\r\n", reply.body.len());
-            out.push_str(&reply.body);
-            let _ = stream.write_all(out.as_bytes());
-        }
-        Ok(())
+        self.eval(&format!("__workerd.serve({port})"), "[serve]").map(drop)
     }
 }
 
@@ -238,6 +192,16 @@ fn main() -> ExitCode {
             }
         }
     }
+    let storage = match &cli.storage {
+        Some(dir) => match std::fs::create_dir_all(dir).and_then(|()| std::fs::canonicalize(dir)) {
+            Ok(p) => p.display().to_string(),
+            Err(e) => {
+                eprintln!("workerd: {}: {e}", dir.display());
+                return ExitCode::FAILURE;
+            }
+        },
+        None => String::new(),
+    };
     let script = match std::fs::canonicalize(&cli.script) {
         Ok(p) => p.display().to_string(),
         Err(e) => {
@@ -248,7 +212,7 @@ fn main() -> ExitCode {
     let platform = Workerd::platform(DefaultPlatform::default());
     let run = || -> Result<(), String> {
         let mut rt = Worker::new(&platform)?;
-        rt.load(&script, &bindings)?;
+        rt.load(&script, &bindings, &storage)?;
         if cli.requests.is_empty() {
             return rt.serve(cli.port);
         }
