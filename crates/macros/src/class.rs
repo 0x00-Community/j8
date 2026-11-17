@@ -31,5 +31,11 @@ pub fn expand(attr: TokenStream, mut item: ItemImpl) -> syn::Result<TokenStream>
             const CONSTRUCTOR: ::core::option::Option<(#native, u32)> = #ctor;
             const MEMBERS: &'static [::j8::Member] = &[#(#members),*];
         }
+
+        impl #impl_generics ::j8::Install for #self_ty #where_clause {
+            fn install_into<'gc>(a: &mut ::j8::frame::Agent<'gc, '_>, target: ::j8::frame::JsObject<'gc>) {
+                let _ = <Self as ::j8::Class>::install(a, target);
+            }
+        }
     })
 }

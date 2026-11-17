@@ -120,6 +120,55 @@ fn greet(name: &str) -> String { format!("hi {name}") }
 greet::install(&mut agent, global);
 ```
 
+### `#[j8::module("node:fs", "fs")]`: export an object of functions as a native module
+
+Like `#[j8::object]`, but answers to one or more module specifiers (the first is canonical). In a runtime declared
+with `j8::runtime!` it is served to `import` (a default export plus one named export per member) and kept in the
+hidden registry `globalThis.__j8_native["node:fs"]`, so a prelude's `require` can hand it out.
+
+```rust
+struct Fs;
+
+#[j8::module("node:fs", "fs")]
+impl Fs {
+    fn exists_sync(path: &str) -> bool { … }
+}
+```
+
+```js
+import fs, { existsSync } from "node:fs";
+```
+
+### `j8::runtime!`: declare a runtime
+
+```rust
+j8::runtime! {
+    /// The node-style runtime
+    pub Dune {
+        globals: [Process],          // #[j8::class] / #[j8::object] types, installed on the global object
+        modules: [Fs, Paths],        // #[j8::module] types: import / require
+        natives: [KvStore],          // bound types the prelude uses: globalThis.__j8_native.KvStore
+        prelude: PRELUDE,            // JavaScript run after installing
+    }
+}
+
+// Extending a runtime without touching it: the parent's contents and prelude come first
+j8::runtime! {
+    pub MyNode: Dune {
+        modules: [Sqlite],
+    }
+}
+
+let platform = MyNode::platform(DefaultPlatform::default());   // serves the native modules to `import`
+let mut rt = MyNode::runtime(&platform, Executor::default())?;  // context built, everything installed, preludes run
+let result = rt.eval("require('fs').existsSync('/')", "main.js")?;
+println!("{}", rt.text(&result));
+```
+
+Every section is optional; they come in this order, each followed by a comma. `j8::Runtime` also has
+`eval_module`, `enter` (work with the context directly, e.g. to set `process.argv`) and `isolate`. `samples/dune` and
+`samples/workerd` are built this way.
+
 ### Attributes and parameters
 
 | Attribute | Meaning |

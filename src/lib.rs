@@ -4,6 +4,9 @@
 //! - `#[j8::object]`: exports an `impl` block of associated functions only as a plain object
 //!   (like `console` / `process`)
 //! - `#[j8::function]`: exports a function as a JS function
+//! - `#[j8::module("node:fs", "fs")]`: exports an object of functions as a native module (`import` / `require`)
+//! - `j8::runtime!`: declares a runtime (globals, native modules, prelude, optionally on top of another runtime);
+//!   [`Runtime`] is a ready execution environment
 //!
 //! See `crates/macros/USAGE.md` for usage.
 //!
@@ -21,8 +24,13 @@
 //! | `jit` | [`compiler`], [`jit`] | bytecode ⇒ MLIR ⇒ x86-64 JIT (x86-64 Unix) |
 //! | `full` | all of the above | |
 
-pub use j8binding::{Class, ClassHandle, FromJs, IntoJs, Member, Object, Rest, This};
-pub use j8macros::{class, function, object};
+pub use j8binding::{Class, ClassHandle, FromJs, Install, IntoJs, Member, Module, Object, Rest, This, NATIVE};
+pub use j8macros::{class, function, module, object};
+
+#[cfg(all(feature = "executor", feature = "builtins"))]
+mod runtime;
+#[cfg(all(feature = "executor", feature = "builtins"))]
+pub use runtime::{Host, HostPlatform, Runtime};
 
 #[doc(hidden)]
 pub use j8binding::Glue;

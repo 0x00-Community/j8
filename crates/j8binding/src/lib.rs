@@ -26,9 +26,11 @@ extern crate alloc;
 
 mod class;
 mod convert;
+mod module;
 
 pub use class::{Class, ClassHandle, Member, Object};
 pub use convert::{FromJs, IntoJs, Rest, This};
+pub use module::{Install, Module, NATIVE};
 
 #[doc(hidden)]
 pub use j8framework as frame;

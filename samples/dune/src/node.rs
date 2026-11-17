@@ -1,9 +1,9 @@
-//! Node-style host interface: the native parts of `fs` / `path` / `process` are bound with `#[j8::object]`; `require`
-//! and the CommonJS wrapper are written in JS in [`PRELUDE`]. The native parts hang off the non-enumerable global
-//! `__dune`, and the prelude wraps them as modules.
+//! Node-style host: [`Dune`] is declared with `j8::runtime!`. `fs` / `path` are native modules (`#[j8::module]`,
+//! importable as `node:fs` / `fs` …), `process` is a global (`#[j8::object]`); `require` and the CommonJS wrapper are
+//! written in JS in [`PRELUDE`].
 use std::path::{Component, Path, PathBuf};
 
-use j8::{Object, Rest};
+use j8::Rest;
 use j8framework::{Agent, Error, ErrorKind, JsObject, Property, Value};
 
 /// Prelude: `require` (CommonJS, module cache, relative paths, `.js` / `.json` / directory `index.js`), `module`,
@@ -13,7 +13,7 @@ pub const PRELUDE: &str = include_str!("prelude.js");
 /// The synchronous `fs` interface.
 pub struct Fs;
 
-#[j8::object("fs")]
+#[j8::module("node:fs", "fs")]
 impl Fs {
     fn read_file_sync<'gc>(a: &mut Agent<'gc, '_>, path: &str, encoding: Option<Value<'gc>>) -> Result<String, Error> {
         let _ = encoding;
@@ -63,7 +63,7 @@ impl Fs {
 /// `path` (POSIX).
 pub struct Paths;
 
-#[j8::object("path")]
+#[j8::module("node:path", "path")]
 impl Paths {
     fn join<'gc>(parts: Rest<'gc>, a: &mut Agent<'gc, '_>) -> Result<String, Error> {
         let mut p = PathBuf::new();
@@ -143,18 +143,23 @@ impl Process {
     }
 }
 
-/// Install node-style globals: `__dune` (the native part) and `process`.
+j8::runtime! {
+    /// The node-style runtime: `process`, the native modules `fs` / `path`, and the prelude (`require`, `module`)
+    pub Dune {
+        globals: [Process],
+        modules: [Fs, Paths],
+        prelude: PRELUDE,
+    }
+}
+
+/// What depends on this run: `process.argv` / `env` / `platform` / `version` / `pid`.
 pub struct Node;
 
 impl Node {
     /// `argv` is the arguments after the script path (`dune` and the script path are prepended).
-    pub fn install<'gc>(a: &mut Agent<'gc, '_>, script: &str, args: &[String]) {
+    pub fn argv<'gc>(a: &mut Agent<'gc, '_>, script: &str, args: &[String]) {
         let global = a.realm.global;
-        let native = a.object();
-        global.borrow_mut(a.mc).define("__dune", Property::hidden(native.into()));
-        Fs::install(a, native);
-        Paths::install(a, native);
-        let process = Process::install(a, global);
+        let Some(process) = global.borrow().own("process").and_then(Value::as_object) else { return };
         let mut argv: Vec<Value<'gc>> = vec![a.string("dune").into(), a.string(script).into()];
         argv.extend(args.iter().map(|s| Value::from(a.string(s))));
         let argv = a.array(argv);

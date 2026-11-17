@@ -34,6 +34,14 @@ pub fn object(attr: TokenStream, item: TokenStream) -> TokenStream {
     object::expand(attr.into(), item).unwrap_or_else(syn::Error::into_compile_error).into()
 }
 
+/// `#[j8::module("node:fs", "fs")]`: like `#[j8::object]`, exported as a native module under these specifiers (the
+/// first is canonical); a runtime built with `j8::runtime!` serves it to `import` and `require`.
+#[proc_macro_attribute]
+pub fn module(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let item = parse_macro_input!(item as syn::ItemImpl);
+    object::expand_module(attr.into(), item).unwrap_or_else(syn::Error::into_compile_error).into()
+}
+
 /// `#[j8::function]` / `#[j8::function("name")]`: exports a function as a JS function (`name::install`).
 #[proc_macro_attribute]
 pub fn function(attr: TokenStream, item: TokenStream) -> TokenStream {

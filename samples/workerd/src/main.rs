@@ -5,7 +5,7 @@
 //! workerd examples/counter.js --bind COUNTER=Counter --port 8787
 //! ```
 //! The Fetch API subset and Durable Objects are written in JS in `prelude.js`; each object's storage is the Rust
-//! [`KvStore`], bound as `__native.KvStore` via `#[j8::class]`.
+//! [`KvStore`], bound as `__j8_native.KvStore` via `#[j8::class]` (the `natives` of [`Workerd`]).
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -14,10 +14,8 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::Parser;
-use j8::Class;
-use j8builtins::Builtins;
 use j8executor::Executor;
-use j8framework::{ContextRoot, CreateParams, Error, Isolate, Property, Source};
+use j8framework::{Error, Platform};
 use j8platform::DefaultPlatform;
 
 
@@ -104,48 +102,32 @@ impl From<&str> for Reply {
     }
 }
 
-/// A running Worker: one isolate, one execution environment.
-struct Runtime<'p> {
-    isolate: Isolate<'p>,
-    executor: Executor,
-    cx: ContextRoot,
+j8::runtime! {
+    /// The Worker runtime: built-ins, the storage binding the prelude uses, and the Fetch API / Durable Object prelude
+    Workerd {
+        natives: [KvStore],
+        prelude: PRELUDE,
+    }
 }
 
-impl<'p> Runtime<'p> {
-    fn new(platform: &'p DefaultPlatform) -> Result<Self, String> {
-        let mut isolate = Isolate::new(platform, CreateParams::default());
-        let executor = Executor::default();
-        let cx = isolate.enter(|scope| scope.persist(scope.context(&Builtins)));
-        isolate.enter(|scope| {
-            let realm = scope.context_of(&cx);
-            let mut a = scope.agent(realm, &executor);
-            let native = a.object();
-            let global = a.realm.global;
-            global.borrow_mut(a.mc).define("__native", Property::hidden(native.into()));
-            KvStore::install(&mut a, native);
-        });
-        let mut rt = Self { isolate, executor, cx };
-        rt.eval(PRELUDE, "[prelude]")?;
-        Ok(rt)
+/// A running Worker: one isolate, one execution environment.
+struct Worker<'p> {
+    rt: j8::Runtime<'p>,
+}
+
+impl<'p> Worker<'p> {
+    fn new(platform: &'p dyn Platform) -> Result<Self, String> {
+        let rt = Workerd::runtime(platform, Executor::default()).map_err(|e| format!("prelude failed: {e}"))?;
+        Ok(Self { rt })
     }
 
     /// Run a script and return ToString of the result.
     fn eval(&mut self, text: &str, file: &str) -> Result<String, String> {
-        let r = self.isolate.run(&mut self.executor, &self.cx, &Source { text, file });
-        let (executor, cx) = (&self.executor, &self.cx);
-        self.isolate.enter(|scope| {
-            let realm = scope.context_of(cx);
-            let mut a = scope.agent(realm, executor);
-            let text = |a: &mut j8framework::Agent<'_, '_>, g: &j8framework::Global| {
-                let v = a.local(g);
-                a.to_string(v).map_or_else(|_| String::from("<ToString threw>"), |s| String::from(&**s))
-            };
-            match r {
-                Ok(g) => Ok(text(&mut a, &g)),
-                Err(Error::Exception(g)) => Err(format!("Uncaught {}", text(&mut a, &g))),
-                Err(e) => Err(e.to_string()),
-            }
-        })
+        match self.rt.eval(text, file) {
+            Ok(g) => Ok(self.rt.text(&g)),
+            Err(Error::Exception(g)) => Err(format!("Uncaught {}", self.rt.text(&g))),
+            Err(e) => Err(e.to_string()),
+        }
     }
 
     /// String literal (JSON syntax).
@@ -263,9 +245,9 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let platform = DefaultPlatform::default();
+    let platform = Workerd::platform(DefaultPlatform::default());
     let run = || -> Result<(), String> {
-        let mut rt = Runtime::new(&platform)?;
+        let mut rt = Worker::new(&platform)?;
         rt.load(&script, &bindings)?;
         if cli.requests.is_empty() {
             return rt.serve(cli.port);

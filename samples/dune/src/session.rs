@@ -1,8 +1,10 @@
 use std::process::ExitCode;
 
-use j8builtins::Builtins;
+use j8::Runtime;
 use j8executor::Executor;
-use j8framework::{ContextRoot, Error, Global, Isolate, Source};
+use j8framework::{Error, Platform, Source};
+
+use crate::node::{Dune, Node};
 
 /// The result of running a piece of source, already converted to text via ToString.
 pub enum Outcome {
@@ -25,29 +27,25 @@ impl Outcome {
     }
 }
 
-/// An execution environment: multiple pieces of source share one global object (one per REPL line); the executor
-/// and the environment both outlive multiple entries.
-pub struct Session<'s, 'p> {
-    isolate: &'s mut Isolate<'p>,
-    executor: Executor,
-    cx: ContextRoot,
+/// An execution environment: multiple pieces of source share one global object (one per REPL line); the runtime
+/// outlives multiple entries.
+pub struct Session<'p> {
+    rt: Runtime<'p>,
 }
 
-impl<'s, 'p> Session<'s, 'p> {
-    /// New environment: built-in objects, node-style globals (`process` / `__dune`), prelude (`require`).
-    pub fn new(isolate: &'s mut Isolate<'p>, script: &str, args: &[String], jit: bool) -> Self {
+impl<'p> Session<'p> {
+    /// New environment: the [`Dune`] runtime (built-ins, `process`, `fs` / `path`, prelude) plus this run's `argv`.
+    pub fn new(platform: &'p dyn Platform, script: &str, args: &[String], jit: bool) -> Self {
         let executor = if jit { Executor::default().with_tier(std::rc::Rc::new(j8jit::Jit::default())) } else { Executor::default() };
-        let cx = isolate.enter(|scope| scope.persist(scope.context(&Builtins)));
-        isolate.enter(|scope| {
-            let realm = scope.context_of(&cx);
-            let mut a = scope.agent(realm, &executor);
-            crate::node::Node::install(&mut a, script, args);
-        });
-        let mut s = Self { isolate, executor, cx };
-        if let Outcome::Thrown(e) | Outcome::Failed(e) = s.eval(&Source { text: crate::node::PRELUDE, file: "[prelude]" }) {
-            eprintln!("dune: prelude failed: {e}");
-        }
-        s
+        let mut rt = match Dune::runtime(platform, executor) {
+            Ok(rt) => rt,
+            Err(e) => {
+                eprintln!("dune: prelude failed: {e}");
+                std::process::exit(1);
+            }
+        };
+        rt.enter(|a| Node::argv(a, script, args));
+        Self { rt }
     }
 
     /// String literal (JSON syntax).
@@ -65,21 +63,10 @@ impl<'s, 'p> Session<'s, 'p> {
         out
     }
 
-    /// Value in a persistent handle ⇒ text (ToString; a placeholder if that throws in turn)
-    fn text(&mut self, g: &Global) -> String {
-        let (executor, cx) = (&self.executor, &self.cx);
-        self.isolate.enter(|scope| {
-            let realm = scope.context_of(cx);
-            let mut agent = scope.agent(realm, executor);
-            let v = agent.local(g);
-            agent.to_string(v).map_or_else(|_| String::from("<ToString threw>"), |s| String::from(&**s))
-        })
-    }
-
     pub fn eval(&mut self, src: &Source<'_>) -> Outcome {
-        match self.isolate.run(&mut self.executor, &self.cx, src) {
-            Ok(g) => Outcome::Value(self.text(&g)),
-            Err(Error::Exception(g)) => Outcome::Thrown(self.text(&g)),
+        match self.rt.eval(src.text, src.file) {
+            Ok(g) => Outcome::Value(self.rt.text(&g)),
+            Err(Error::Exception(g)) => Outcome::Thrown(self.rt.text(&g)),
             Err(e) => Outcome::Failed(e.to_string()),
         }
     }

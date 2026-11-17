@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use j8framework::{CreateParams, Isolate, Source};
+use j8framework::Source;
 use j8platform::DefaultPlatform;
 
 use session::{Outcome, Session};
@@ -86,17 +86,16 @@ impl TryFrom<Cli> for Job {
 impl Job {
     /// Run; with `jit`, ordinary JS functions are compiled to machine code once hot.
     fn run(&self, jit: bool) -> ExitCode {
-        let platform = DefaultPlatform::default();
-        let mut isolate = Isolate::new(&platform, CreateParams::default());
+        let platform = node::Dune::platform(DefaultPlatform::default());
         let (script, args) = match self {
             Job::Main { file, args } => (file.as_str(), args.as_slice()),
             _ => ("[eval]", &[][..]),
         };
-        let mut session = Session::new(&mut isolate, script, args, jit);
+        let mut session = Session::new(&platform, script, args, jit);
         match self {
             Job::Repl => session.repl(),
             Job::Main { file, .. } => {
-                let call = format!("__dune.runMain({})", Session::quote(file));
+                let call = format!("__j8_native.runMain({})", Session::quote(file));
                 match session.eval(&Source { text: &call, file }) {
                     Outcome::Value(_) => ExitCode::SUCCESS,
                     failed => failed.report(),

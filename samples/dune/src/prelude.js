@@ -1,8 +1,8 @@
 // dune's prelude: runs once before user code. CommonJS require / module, built-in modules fs / path / process.
 (function (native) {
   'use strict';
-  const fs = native.fs;
-  const path = native.path;
+  const fs = native['node:fs'];
+  const path = native['node:path'];
   const builtins = { fs: fs, path: path, process: globalThis.process };
   const cache = Object.create(null);
 
@@ -74,4 +74,4 @@
   Object.defineProperty(globalThis, 'global', { value: globalThis, writable: true, configurable: true });
   // Run the entry script, wrapped as a CommonJS module
   native.runMain = function (file) { return load(path.resolve(process.cwd(), file)); };
-})(globalThis.__dune);
+})(globalThis.__j8_native);
