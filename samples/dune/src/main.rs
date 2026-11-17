@@ -9,11 +9,13 @@ mod repl;
 mod session;
 mod web;
 
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 use j8::Host;
+use j8::executor::Executor;
 use j8::frame::Source;
 use j8::platform::DefaultPlatform;
 
@@ -120,12 +122,17 @@ impl Job {
         }
     }
 
+    /// On one loop thread: a command line runs one runtime
     fn run_on<H: Host>(&self, platform: &dyn j8::frame::Platform, layer: Layer, jit: bool) -> ExitCode {
+        j8::EventLoopSet::scope(platform, NonZeroUsize::MIN, |set| self.run_in::<H>(set, layer, jit))
+    }
+
+    fn run_in<H: Host>(&self, set: &j8::EventLoopSet<'_, '_, Executor>, layer: Layer, jit: bool) -> ExitCode {
         let (script, args) = match self {
             Job::Main { file, args } => (Some(file.as_str()), args.as_slice()),
             _ => (None, &[][..]),
         };
-        let mut session = Session::new::<H>(platform, jit);
+        let mut session = Session::new::<H>(set, jit);
         if let Layer::Node = layer {
             session.node(script, args);
         }

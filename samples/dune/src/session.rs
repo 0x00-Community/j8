@@ -1,7 +1,7 @@
 use std::process::ExitCode;
 
 use j8::executor::Executor;
-use j8::frame::{Error, Platform, Source};
+use j8::frame::{Error, Source};
 use j8::{Host, Runtime};
 
 use crate::node::Dune;
@@ -34,10 +34,10 @@ pub struct Session<'p> {
 }
 
 impl<'p> Session<'p> {
-    /// A runtime of host `H` (its platform should be `H::platform(…)`, so `import` finds its modules)
-    pub fn new<H: Host>(platform: &'p dyn Platform, jit: bool) -> Self {
+    /// A runtime of host `H` in `set` (whose platform should be `H::platform(…)`, so `import` finds its modules)
+    pub fn new<H: Host>(set: &j8::EventLoopSet<'_, 'p, Executor>, jit: bool) -> Self {
         let executor = if jit { Executor::default().with_tier(j8::jit::Jit::default()) } else { Executor::default() };
-        match Runtime::new::<H>(platform, executor) {
+        match Runtime::on::<H>(set, executor) {
             Ok(rt) => Self { rt },
             Err(e) => {
                 eprintln!("dune: prelude failed: {e}");

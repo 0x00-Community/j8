@@ -69,26 +69,17 @@ impl<H: Host, P: Platform> Platform for HostPlatform<H, P> {
 }
 
 /// A ready execution environment: one JS event loop ([`EventLoop`]: an isolate with one context, a host installed
-/// and its preludes run). [`Runtime::new`] runs on the calling thread (the fast path); [`Runtime::on`] puts it in an
-/// [`EventLoopSet`], on its least loaded loop thread, so many runtimes run side by side.
+/// and its preludes run) in an [`EventLoopSet`], on its least loaded loop thread. Any host thread may use it; each
+/// call waits for the loop thread's answer.
 pub struct Runtime<'p> {
     js: EventLoop<'p, j8executor::Executor>,
 }
 
 impl<'p> Runtime<'p> {
-    /// Builds the context, installs `H` and runs its preludes, on the calling thread (the platform should be a
-    /// [`HostPlatform`] for `H`, so `import` finds the native modules)
-    pub fn new<H: Host>(platform: &'p dyn Platform, executor: j8executor::Executor) -> Result<Self, Error> {
-        Self::ready::<H>(EventLoop::new(platform, executor, &j8builtins::Builtins))
-    }
-
-    /// The same, as a JS event loop of `set` (on the least loaded of its loop threads)
+    /// A new event loop of `set` (on the least loaded of its loop threads): builds the context, installs `H` and runs
+    /// its preludes (the set's platform should be a [`HostPlatform`] for `H`, so `import` finds the native modules)
     pub fn on<H: Host>(set: &EventLoopSet<'_, 'p, j8executor::Executor>, executor: j8executor::Executor) -> Result<Self, Error> {
-        Self::ready::<H>(set.spawn(executor, &j8builtins::Builtins))
-    }
-
-    fn ready<H: Host>(js: EventLoop<'p, j8executor::Executor>) -> Result<Self, Error> {
-        let mut rt = Self { js };
+        let rt = Self { js: set.spawn(executor, &j8builtins::Builtins) };
         rt.enter(|a| H::install(a));
         let mut preludes = Vec::new();
         H::preludes(&mut preludes);
@@ -99,22 +90,22 @@ impl<'p> Runtime<'p> {
     }
 
     /// Runs a script in the context (the event loop goes on with its host work meanwhile)
-    pub fn eval(&mut self, text: &str, file: &str) -> Result<Global, Error> {
+    pub fn eval(&self, text: &str, file: &str) -> Result<Global, Error> {
         self.js.eval(&Source { text, file }, ScriptKind::Classic)
     }
 
     /// Runs an ES module in the context
-    pub fn eval_module(&mut self, text: &str, file: &str) -> Result<Global, Error> {
+    pub fn eval_module(&self, text: &str, file: &str) -> Result<Global, Error> {
         self.js.eval(&Source { text, file }, ScriptKind::Module)
     }
 
     /// Works with the context directly (installing more, reading results), on the event loop's thread
-    pub fn enter<R: Send>(&mut self, f: impl for<'gc> FnOnce(&mut Agent<'gc, '_>) -> R + Send) -> R {
+    pub fn enter<R: Send>(&self, f: impl for<'gc> FnOnce(&mut Agent<'gc, '_>) -> R + Send) -> R {
         self.js.enter(f)
     }
 
     /// ToString of a handle's value (a placeholder when that throws in turn)
-    pub fn text(&mut self, g: &Global) -> String {
+    pub fn text(&self, g: &Global) -> String {
         self.enter(|a| {
             let v = a.local(g);
             a.to_string(v).map_or_else(|_| String::from("<ToString threw>"), |s| String::from(&**s))
@@ -123,7 +114,7 @@ impl<'p> Runtime<'p> {
 
     /// Defines `value` (converted with `IntoJs`) as a data property at a dotted path from the global object:
     /// `rt.set("process.argv", args)` sets `argv` on the existing global `process`
-    pub fn set<V: for<'g> crate::IntoJs<'g> + Send>(&mut self, path: &str, value: V) -> Result<(), Error> {
+    pub fn set<V: for<'g> crate::IntoJs<'g> + Send>(&self, path: &str, value: V) -> Result<(), Error> {
         self.enter(|a| {
             let (holder, key) = path.rsplit_once('.').unwrap_or(("", path));
             let mut target: Value<'_> = a.realm.global.into();
@@ -139,7 +130,7 @@ impl<'p> Runtime<'p> {
 
     /// The event loop: runs until all scripts and async host work have finished (settlements run the microtasks
     /// they queue), sleeping while nothing can make progress. Work spawned meanwhile joins in.
-    pub fn run_until_idle(&mut self) -> Result<(), Error> {
+    pub fn run_until_idle(&self) -> Result<(), Error> {
         self.js.run()
     }
 }
@@ -206,9 +197,9 @@ macro_rules! runtime {
                 $crate::HostPlatform::new(inner)
             }
 
-            /// A ready runtime on `platform` (see [`Runtime::new`]($crate::Runtime::new))
-            pub fn runtime<'p>(platform: &'p dyn $crate::frame::Platform, executor: $crate::executor::Executor) -> ::core::result::Result<$crate::Runtime<'p>, $crate::frame::Error> {
-                $crate::Runtime::new::<$name>(platform, executor)
+            /// A ready runtime in `set` (see [`Runtime::on`]($crate::Runtime::on))
+            pub fn runtime<'p>(set: &$crate::EventLoopSet<'_, 'p, $crate::executor::Executor>, executor: $crate::executor::Executor) -> ::core::result::Result<$crate::Runtime<'p>, $crate::frame::Error> {
+                $crate::Runtime::on::<$name>(set, executor)
             }
         }
     };

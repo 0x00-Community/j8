@@ -22,9 +22,6 @@
 //! - **One quota.** Every turn gets the set's slice of steps times the event loop's weight
 //!   ([`EventLoopSet::set_slice`], [`EventLoop::set_weight`]), checking the queue every check interval; the steps
 //!   spent are counted per event loop and per thread.
-//!
-//! The fast path: an event loop made with [`EventLoop::new`] has no loop thread. It runs on whichever thread drives it
-//! (`eval`, `run`), directly, the way a single runtime always has.
 use alloc::boxed::Box;
 use alloc::collections::VecDeque;
 use alloc::string::String;
@@ -58,7 +55,7 @@ const PULL_GAP: usize = 2;
 /// One loop thread's doorbell: event loops with something new, the thread to wake, the shutdown flag, its load
 struct Door {
     wakes: Fifo<Arc<Bell>>,
-    /// The thread that runs the loop (an inline event loop's is whichever drives it last)
+    /// The thread that runs the loop
     thread: AtomicRefCell<Thread>,
     closing: AtomicBool,
     /// Event loops living on the thread
@@ -504,9 +501,10 @@ struct Lane<'p, E: Engine> {
 }
 
 impl<'p, E: Engine + Send + for<'gc> Invoke<'gc> + 'p> Lane<'p, E> {
-    /// A new event loop for thread `home`: an isolate on `platform`, `engine`, a context with `intrinsics`
-    fn new(platform: &'p dyn Platform, collector_threads: Option<NonZeroUsize>, engine: E, intrinsics: &dyn Intrinsics, doors: &Arc<Doors>, home: usize) -> Box<Self> {
-        let mut isolate = Isolate::new(platform, CreateParams { event_loop: true, collector_threads, ..CreateParams::default() });
+    /// A new event loop for thread `home`: an isolate on `platform` (collecting on the thread it lives on), `engine`,
+    /// a context with `intrinsics`
+    fn new(platform: &'p dyn Platform, engine: E, intrinsics: &dyn Intrinsics, doors: &Arc<Doors>, home: usize) -> Box<Self> {
+        let mut isolate = Isolate::new(platform, CreateParams { event_loop: true, collector_threads: Some(NonZeroUsize::MIN), ..CreateParams::default() });
         let cx = isolate.enter(|scope| scope.persist(scope.context(intrinsics)));
         let bell = Arc::new(Bell {
             doors: Arc::clone(doors),
@@ -907,27 +905,17 @@ impl Ticket {
     }
 }
 
-/// ⭐ One JS event loop: an isolate, its engine and one context, with its scripts and async host work
+/// ⭐ One JS event loop: an isolate, its engine and one context, with its scripts and async host work. Made by
+/// [`EventLoopSet::spawn`]; it lives on the set's loop threads, and any host thread may use it (each call waits for
+/// its answer).
 pub struct EventLoop<'p, E: Engine + Send + for<'gc> Invoke<'gc> + 'p> {
     bell: Arc<Bell>,
     set: Arc<Set<'p, E>>,
-    /// The fast path: no loop thread, driven by whoever waits on it
-    here: Option<Box<LoopState<'p, E>>>,
 }
 
 impl<'p, E: Engine + Send + for<'gc> Invoke<'gc> + 'p> EventLoop<'p, E> {
-    /// An event loop with no thread of its own (the fast path): it runs while the calling thread drives it. Its
-    /// isolate collects with the platform's pool.
-    pub fn new(platform: &'p dyn Platform, engine: E, intrinsics: &dyn Intrinsics) -> Self {
-        let set = Arc::new(Set::new(platform));
-        let me = set.grow();
-        let mut state = Box::new(LoopState::new(me, Arc::clone(&set)));
-        let bell = state.insert(Lane::new(platform, None, engine, intrinsics, &set.doors, me));
-        Self { bell, set, here: Some(state) }
-    }
-
     /// Queues a script after what is queued already
-    pub fn submit(&mut self, src: &Source<'_>, kind: ScriptKind) -> Ticket {
+    pub fn submit(&self, src: &Source<'_>, kind: ScriptKind) -> Ticket {
         let (reply, rx) = Oneshot::new();
         self.bell.begin();
         self.bell.submitted.push(Submitted { text: src.text.into(), file: src.file.into(), kind, reply });
@@ -935,67 +923,35 @@ impl<'p, E: Engine + Send + for<'gc> Invoke<'gc> + 'p> EventLoop<'p, E> {
         Ticket(rx)
     }
 
-    /// Waits for a submitted script (an inline event loop runs meanwhile; one in a set runs on its thread)
-    pub fn wait(&mut self, ticket: Ticket) -> Result<Global, Error> {
-        let mut rx = ticket.0;
-        match &mut self.here {
-            Some(state) => {
-                let waker = Waker::from(Arc::new(ThreadWaker(std::thread::current())));
-                let mut out = None;
-                state.serve(|_| match Pin::new(&mut rx).poll(&mut Context::from_waker(&waker)) {
-                    Poll::Ready(r) => {
-                        out = Some(r);
-                        true
-                    }
-                    Poll::Pending => false,
-                });
-                out.expect("served until the script finished")
-            }
-            None => block_on(rx),
-        }
+    /// Waits for a submitted script
+    pub fn wait(&self, ticket: Ticket) -> Result<Global, Error> {
+        block_on(ticket.0)
     }
 
     /// Runs `src` to the end (the event loop goes on with its other work meanwhile)
-    pub fn eval(&mut self, src: &Source<'_>, kind: ScriptKind) -> Result<Global, Error> {
+    pub fn eval(&self, src: &Source<'_>, kind: ScriptKind) -> Result<Global, Error> {
         let ticket = self.submit(src, kind);
         self.wait(ticket)
     }
 
-    /// Runs until no script and no host future of this event loop is outstanding; gives the first error raised
+    /// Waits until no script and no host future of this event loop is outstanding; gives the first error raised
     /// while settling a promise
-    pub fn run(&mut self) -> Result<(), Error> {
-        let bell = Arc::clone(&self.bell);
-        match &mut self.here {
-            Some(state) => state.serve(|_| bell.quiet()),
-            None => loop {
-                if bell.quiet() {
-                    break;
-                }
-                bell.idle.push(std::thread::current());
-                if bell.quiet() {
-                    break;
-                }
-                std::thread::park();
-            },
+    pub fn run(&self) -> Result<(), Error> {
+        let bell = &self.bell;
+        while !bell.quiet() {
+            bell.idle.push(std::thread::current());
+            if bell.quiet() {
+                break;
+            }
+            std::thread::park();
         }
         bell.faults.pop().map_or(Ok(()), Err)
     }
 
     /// Works in the event loop's context directly (on its thread; the caller waits). Async host work started here
     /// joins the event loop.
-    pub fn enter<R: Send>(&mut self, f: impl for<'gc> FnOnce(&mut Agent<'gc, '_>) -> R + Send) -> R {
-        match &mut self.here {
-            Some(state) => {
-                let bell = Arc::clone(&self.bell);
-                let l = state.lane(&bell).expect("an inline event loop stays home");
-                let r = l.enter(f);
-                if l.has_work() {
-                    state.schedule(&bell);
-                }
-                r
-            }
-            None => self.set.call(&self.bell, move |l| l.enter(f)),
-        }
+    pub fn enter<R: Send>(&self, f: impl for<'gc> FnOnce(&mut Agent<'gc, '_>) -> R + Send) -> R {
+        self.set.call(&self.bell, move |l| l.enter(f))
     }
 
     /// Its share of the set's quota: each turn runs the set's slice times `weight` steps
@@ -1015,11 +971,9 @@ impl<'p, E: Engine + Send + for<'gc> Invoke<'gc> + 'p> EventLoop<'p, E> {
 }
 
 impl<'p, E: Engine + Send + for<'gc> Invoke<'gc> + 'p> Drop for EventLoop<'p, E> {
-    /// An event loop in a set is dropped on its thread (its isolate never leaves the set's threads)
+    /// Dropped on its thread (its isolate never leaves the set's threads)
     fn drop(&mut self) {
-        if self.here.is_none() {
-            self.set.port(self.bell.home.load(Ordering::Acquire)).send(Msg::Remove(Arc::clone(&self.bell)));
-        }
+        self.set.port(self.bell.home.load(Ordering::Acquire)).send(Msg::Remove(Arc::clone(&self.bell)));
     }
 }
 
@@ -1100,7 +1054,7 @@ impl<'p, E: Engine + Send + for<'gc> Invoke<'gc> + 'p> EventLoopSet<'_, 'p, E> {
         let reply = Reply(Some(tx));
         let platform = self.set.platform;
         let make: OnThread<'_, 'p, E> = Box::new(move |s| {
-            let lane = Lane::new(platform, Some(NonZeroUsize::MIN), engine, intrinsics, &s.set.doors, s.me);
+            let lane = Lane::new(platform, engine, intrinsics, &s.set.doors, s.me);
             reply.send(s.insert(lane));
         });
         // SAFETY: only the lifetime changes. This thread blocks below until the closure has run or been dropped (its
@@ -1108,7 +1062,7 @@ impl<'p, E: Engine + Send + for<'gc> Invoke<'gc> + 'p> EventLoopSet<'_, 'p, E> {
         let make = unsafe { core::mem::transmute::<OnThread<'_, 'p, E>, OnThread<'p, 'p, E>>(make) };
         self.set.port(home).send(Msg::Spawn(make));
         let bell = block_on(rx).expect("the loop thread has shut down");
-        EventLoop { bell, set: Arc::clone(&self.set), here: None }
+        EventLoop { bell, set: Arc::clone(&self.set) }
     }
 
     /// Evens the threads out now: each thread above the average gives its excess to the threads below it. Gives how

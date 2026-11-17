@@ -100,20 +100,22 @@ j8::runtime! {
 #[test]
 fn extends_functions_bytes_persistent() {
     let platform = Zoo::platform(DefaultPlatform::default());
-    let mut rt = Zoo::runtime(&platform, Executor::default()).expect("runtime");
-    let src = "
-        const d = new Dog('rex');
-        d.rename('max');
-        const inherit = [d instanceof Dog, d instanceof Animal, Object.getPrototypeOf(Dog) === Animal, d.describe(), d.learn(), d.learn()].join();
-        let wrong;
-        try { Dog.prototype.learn.call(new Animal('cat')); } catch (e) { wrong = e instanceof TypeError; }
-        const h = new Hooks();
-        h.set((x, k) => x * 2 + k.n, { n: 1 });
-        const bytes = Array.from(bin.reverse(new Uint8Array([1, 2, 3]).buffer)).join();
-        [inherit, wrong, h.fire(20), bytes].join('|');
-    ";
-    let r = rt.eval(src, "t.js").expect("runs");
-    assert_eq!(rt.text(&r), "true,true,true,max the animal,1,2|true|41|3,2,1");
+    j8::EventLoopSet::scope(&platform, std::num::NonZeroUsize::MIN, |set| {
+        let rt = Zoo::runtime(set, Executor::default()).expect("runtime");
+        let src = "
+            const d = new Dog('rex');
+            d.rename('max');
+            const inherit = [d instanceof Dog, d instanceof Animal, Object.getPrototypeOf(Dog) === Animal, d.describe(), d.learn(), d.learn()].join();
+            let wrong;
+            try { Dog.prototype.learn.call(new Animal('cat')); } catch (e) { wrong = e instanceof TypeError; }
+            const h = new Hooks();
+            h.set((x, k) => x * 2 + k.n, { n: 1 });
+            const bytes = Array.from(bin.reverse(new Uint8Array([1, 2, 3]).buffer)).join();
+            [inherit, wrong, h.fire(20), bytes].join('|');
+        ";
+        let r = rt.eval(src, "t.js").expect("runs");
+        assert_eq!(rt.text(&r), "true,true,true,max the animal,1,2|true|41|3,2,1");
+    });
 }
 
 /// A future that is ready after a thread sleeps `ms` and wakes it
@@ -169,36 +171,40 @@ j8::runtime! {
 #[test]
 fn async_bindings_settle_on_the_event_loop() {
     let platform = Loop::platform(DefaultPlatform::default());
-    let mut rt = Loop::runtime(&platform, Executor::default()).expect("runtime");
-    rt.eval("globalThis.log = []; later.after(20, 'b').then(v => log.push(v)); later.double(21).then(v => log.push(v)); log.push(later.double(1) instanceof Promise);", "t.js").expect("runs");
-    rt.run_until_idle().expect("settles");
-    let r = rt.eval("log.join()", "check.js").expect("runs");
-    assert_eq!(rt.text(&r), "true,42,b after 20ms");
+    j8::EventLoopSet::scope(&platform, std::num::NonZeroUsize::MIN, |set| {
+        let rt = Loop::runtime(set, Executor::default()).expect("runtime");
+        rt.eval("globalThis.log = []; later.after(20, 'b').then(v => log.push(v)); later.double(21).then(v => log.push(v)); log.push(later.double(1) instanceof Promise);", "t.js").expect("runs");
+        rt.run_until_idle().expect("settles");
+        let r = rt.eval("log.join()", "check.js").expect("runs");
+        assert_eq!(rt.text(&r), "true,42,b after 20ms");
+    });
     // The event loop belongs to the runtime's isolate, so a plain platform works as well
     let plain = DefaultPlatform::default();
-    let mut rt = j8::Runtime::new::<Loop>(&plain, Executor::default()).expect("runtime");
-    rt.eval("globalThis.got = 0; later.double(4).then(v => got = v);", "t.js").expect("runs");
-    rt.run_until_idle().expect("settles");
-    let r = rt.eval("got", "check.js").expect("runs");
-    assert_eq!(rt.text(&r), "8");
-    // An isolate made without an event loop refuses async work: the call throws a TypeError
-    let mut isolate = j8framework::Isolate::new(&plain, j8framework::CreateParams::default());
-    let mut executor = Executor::default();
-    let cx = isolate.enter(|scope| scope.persist(scope.context(&j8builtins::Builtins)));
-    isolate.enter(|scope| {
-        let realm = scope.context_of(&cx);
-        let mut a = scope.agent(realm, &executor);
-        <Loop as j8::Host>::install(&mut a);
+    j8::EventLoopSet::scope(&plain, std::num::NonZeroUsize::MIN, |set| {
+        let rt = j8::Runtime::on::<Loop>(set, Executor::default()).expect("runtime");
+        rt.eval("globalThis.got = 0; later.double(4).then(v => got = v);", "t.js").expect("runs");
+        rt.run_until_idle().expect("settles");
+        let r = rt.eval("got", "check.js").expect("runs");
+        assert_eq!(rt.text(&r), "8");
+        // An isolate made without an event loop refuses async work: the call throws a TypeError
+        let mut isolate = j8framework::Isolate::new(&plain, j8framework::CreateParams::default());
+        let mut executor = Executor::default();
+        let cx = isolate.enter(|scope| scope.persist(scope.context(&j8builtins::Builtins)));
+        isolate.enter(|scope| {
+            let realm = scope.context_of(&cx);
+            let mut a = scope.agent(realm, &executor);
+            <Loop as j8::Host>::install(&mut a);
+        });
+        let src = j8framework::Source { text: "try { later.double(1); 'no' } catch (e) { e instanceof TypeError }", file: "t.js" };
+        let r = isolate.run(&mut executor, &cx, &src).expect("runs");
+        let text = isolate.enter(|scope| {
+            let realm = scope.context_of(&cx);
+            let mut a = scope.agent(realm, &executor);
+            let v = a.local(&r);
+            a.to_string(v).map(|s| String::from(&**s)).expect("ToString")
+        });
+        assert_eq!(text, "true");
     });
-    let src = j8framework::Source { text: "try { later.double(1); 'no' } catch (e) { e instanceof TypeError }", file: "t.js" };
-    let r = isolate.run(&mut executor, &cx, &src).expect("runs");
-    let text = isolate.enter(|scope| {
-        let realm = scope.context_of(&cx);
-        let mut a = scope.agent(realm, &executor);
-        let v = a.local(&r);
-        a.to_string(v).map(|s| String::from(&**s)).expect("ToString")
-    });
-    assert_eq!(text, "true");
 }
 
 #[cfg(feature = "json")]
@@ -234,8 +240,10 @@ mod json {
     #[test]
     fn json_values_cross_through_serde() {
         let platform = Maps::platform(DefaultPlatform::default());
-        let mut rt = Maps::runtime(&platform, Executor::default()).expect("runtime");
-        let r = rt.eval("const m = geo.mirror({ x: 1, y: -2, tags: ['a'] }); let bad; try { geo.mirror({ x: 'no' }); } catch (e) { bad = e instanceof TypeError; } [m.x, m.y, m.tags.join('+'), bad].join()", "t.js").expect("runs");
-        assert_eq!(rt.text(&r), "-1,2,a+mirrored,true");
+        j8::EventLoopSet::scope(&platform, std::num::NonZeroUsize::MIN, |set| {
+            let rt = Maps::runtime(set, Executor::default()).expect("runtime");
+            let r = rt.eval("const m = geo.mirror({ x: 1, y: -2, tags: ['a'] }); let bad; try { geo.mirror({ x: 'no' }); } catch (e) { bad = e instanceof TypeError; } [m.x, m.y, m.tags.join('+'), bad].join()", "t.js").expect("runs");
+            assert_eq!(rt.text(&r), "-1,2,a+mirrored,true");
+        });
     }
 }

@@ -17,7 +17,7 @@ use std::process::ExitCode;
 
 use clap::Parser;
 use j8::executor::Executor;
-use j8::frame::{Error, Platform};
+use j8::frame::Error;
 use j8::platform::DefaultPlatform;
 
 
@@ -113,8 +113,8 @@ struct Worker<'p> {
 }
 
 impl<'p> Worker<'p> {
-    fn new(platform: &'p dyn Platform) -> Result<Self, String> {
-        let rt = Workerd::runtime(platform, Executor::default()).map_err(|e| format!("prelude failed: {e}"))?;
+    fn new(set: &j8::EventLoopSet<'_, 'p, Executor>) -> Result<Self, String> {
+        let rt = Workerd::runtime(set, Executor::default()).map_err(|e| format!("prelude failed: {e}"))?;
         Ok(Self { rt })
     }
 
@@ -210,8 +210,8 @@ fn main() -> ExitCode {
         }
     };
     let platform = Workerd::platform(DefaultPlatform::default());
-    let run = || -> Result<(), String> {
-        let mut rt = Worker::new(&platform)?;
+    let run = |set: &j8::EventLoopSet<'_, '_, Executor>| -> Result<(), String> {
+        let mut rt = Worker::new(set)?;
         rt.load(&script, &bindings, &storage)?;
         if cli.requests.is_empty() {
             return rt.serve(cli.port);
@@ -227,7 +227,8 @@ fn main() -> ExitCode {
         }
         Ok(())
     };
-    match run() {
+    // One Worker, on one loop thread
+    match j8::EventLoopSet::scope(&platform, std::num::NonZeroUsize::MIN, run) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("workerd: {e}");

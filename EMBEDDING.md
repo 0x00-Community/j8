@@ -32,6 +32,7 @@ What you use from it:
 ## 2. The smallest host
 
 ```rust,ignore
+use std::num::NonZeroUsize;
 use std::process::ExitCode;
 
 use j8::executor::Executor;
@@ -70,27 +71,30 @@ j8::runtime! {
 
 fn main() -> ExitCode {
     let platform = Hello::platform(DefaultPlatform::default());
-    let mut rt = match Hello::runtime(&platform, Executor::default()) {
-        Ok(rt) => rt,
-        Err(e) => {
-            eprintln!("prelude failed: {e}");
-            return ExitCode::FAILURE;
+    // One loop thread is enough for one runtime; give more for many
+    j8::EventLoopSet::scope(&platform, NonZeroUsize::MIN, |set| {
+        let rt = match Hello::runtime(set, Executor::default()) {
+            Ok(rt) => rt,
+            Err(e) => {
+                eprintln!("prelude failed: {e}");
+                return ExitCode::FAILURE;
+            }
+        };
+        match rt.eval("home()", "main.js").and_then(|g| rt.run_until_idle().map(|()| g)) {
+            Ok(g) => {
+                println!("{}", rt.text(&g));
+                ExitCode::SUCCESS
+            }
+            Err(Error::Exception(g)) => {
+                eprintln!("Uncaught {}", rt.text(&g));
+                ExitCode::FAILURE
+            }
+            Err(e) => {
+                eprintln!("{e}");
+                ExitCode::FAILURE
+            }
         }
-    };
-    match rt.eval("home()", "main.js").and_then(|g| rt.run_until_idle().map(|()| g)) {
-        Ok(g) => {
-            println!("{}", rt.text(&g));
-            ExitCode::SUCCESS
-        }
-        Err(Error::Exception(g)) => {
-            eprintln!("Uncaught {}", rt.text(&g));
-            ExitCode::FAILURE
-        }
-        Err(e) => {
-            eprintln!("{e}");
-            ExitCode::FAILURE
-        }
-    }
+    })
 }
 ```
 
@@ -98,11 +102,14 @@ The steps are always the same:
 
 1. `X::platform(inner)` wraps a platform in a `HostPlatform` for runtime `X`. Keep it alive for as long as the
    runtime: `Runtime<'p>` borrows it.
-2. `X::runtime(&platform, executor)` creates the isolate and the context, installs everything and runs the preludes. A
-   prelude that throws comes back as `Err` here.
-3. `rt.eval(text, file)` runs a script. It returns a `Global` (a handle that outlives the call), which `rt.text(&g)`
+2. `j8::EventLoopSet::scope(&platform, threads, |set| …)` starts the loop threads the runtimes run on, for the length
+   of the closure.
+3. `X::runtime(set, executor)` creates the isolate and the context on the least loaded loop thread, installs
+   everything and runs the preludes. A prelude that throws comes back as `Err` here. Every later call (`eval`,
+   `enter`, `run_until_idle`) is a message to that thread, and waits for its answer; any host thread may make it.
+4. `rt.eval(text, file)` runs a script. It returns a `Global` (a handle that outlives the call), which `rt.text(&g)`
    turns into a string with ToString.
-4. `rt.run_until_idle()` runs the event loop until no async host work is left. Call it after every `eval` if your
+5. `rt.run_until_idle()` waits until no async host work is left. Call it after every `eval` if your
    bindings have `async fn`s or return promises; otherwise those promises never settle.
 
 ### What an `Error` means
@@ -255,10 +262,7 @@ So **a future must wake its waker when it can make progress**, or the loop sleep
 need their own reactor (tokio's sockets and timers) do not work as they are. Run that work on a thread or on your own
 reactor, and wake the waker from there.
 
-**One event loop, the fast path.** `j8::Runtime::new` makes an event loop with no thread of its own: it runs on
-whichever thread calls `eval` / `run_until_idle`, directly.
-
-**Many event loops on a few threads.** `j8framework::EventLoopSet::scope(&platform, threads, |set| …)` starts
+**Event loops live on loop threads.** `j8::EventLoopSet::scope(&platform, threads, |set| …)` starts
 `threads` loop threads for the duration of the closure; `j8::Runtime::on::<Host>(set, executor)` (or `set.spawn`)
 puts an event loop there. Each event loop lives on one thread and is not shared, so a thread runs its event loops
 with no locks: 8 threads and 1000 event loops make 125 on each. Host threads reach them by messages (submitting a
@@ -475,8 +479,8 @@ lookups try the child's modules first, then the parent's. The parent does not ch
 With feature `jit` (x86-64 Unix):
 
 ```rust,ignore
-let executor = Executor::default().with_tier(std::rc::Rc::new(j8::jit::Jit::default()));
-let mut rt = MyHost::runtime(&platform, executor)?;
+let executor = Executor::default().with_tier(j8::jit::Jit::default());
+let rt = MyHost::runtime(set, executor)?;
 ```
 
 Hot functions and loops are compiled to machine code. The test262 baseline also passes with the JIT on

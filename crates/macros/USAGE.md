@@ -176,9 +176,12 @@ j8::runtime! {
 }
 
 let platform = MyNode::platform(DefaultPlatform::default());   // serves the native modules to `import`
-let mut rt = MyNode::runtime(&platform, Executor::default())?;  // context built, everything installed, preludes run
-let result = rt.eval("require('fs').existsSync('/')", "main.js")?;
-println!("{}", rt.text(&result));
+j8::EventLoopSet::scope(&platform, NonZeroUsize::MIN, |set| {   // the loop threads runtimes live on
+    let rt = MyNode::runtime(set, Executor::default())?;        // context built, everything installed, preludes run
+    let result = rt.eval("require('fs').existsSync('/')", "main.js")?;
+    println!("{}", rt.text(&result));
+    Ok(())
+})
 ```
 
 Every section is optional; they come in this order, each followed by a comma. `j8::Runtime` also has

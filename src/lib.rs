@@ -36,6 +36,8 @@ pub use j8macros::{class, function, module, object};
 mod runtime;
 #[cfg(all(feature = "executor", feature = "builtins"))]
 pub use runtime::{Host, HostPlatform, Runtime};
+#[cfg(all(feature = "executor", feature = "builtins"))]
+pub use j8framework::{EventLoop, EventLoopSet};
 
 pub use j8binding::Glue;
 pub use j8framework as frame;
