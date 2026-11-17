@@ -33,10 +33,7 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 name = "benchv8"
 version = "0.1.0"
 dependencies = [
- "j8builtins",
- "j8executor",
- "j8framework",
- "j8platform",
+ "j8",
  "v8",
 ]
 
@@ -442,8 +439,36 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4754a1731458af0443709c9667302793d3f63cc90ec4ba4c8259f2b9515478e5"
 
 [[package]]
+name = "j8"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bfb788e8c0fbbf1bbd548d2e0e9deac509765586346745959e820c1d8a052de1"
+dependencies = [
+ "j8binding",
+ "j8builtins",
+ "j8executor",
+ "j8framework",
+ "j8lockfree",
+ "j8macros",
+ "j8platform",
+ "j8virtasm",
+]
+
+[[package]]
+name = "j8binding"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "02230f39664ea047ff18f7ded1c4d7dad8383ffd48bda5b563ae4788309994d1"
+dependencies = [
+ "j8framework",
+ "j8lockfree",
+]
+
+[[package]]
 name = "j8builtins"
-version = "0.2.0"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6d0840ab28912ca059ebabd9147577197746fc095c2c6bfa97696abadf1cecd2"
 dependencies = [
  "j8framework",
  "libm",
@@ -456,7 +481,9 @@ dependencies = [
 
 [[package]]
 name = "j8executor"
-version = "0.2.0"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "df246ce68a17946ecb46fb3dbac682e736dc53cab2fd9f6e289c31d5671e36cd"
 dependencies = [
  "j8framework",
  "j8virtasm",
@@ -465,7 +492,9 @@ dependencies = [
 
 [[package]]
 name = "j8framework"
-version = "0.2.0"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "63ffe442808c9524f2e16261da340b8e52f78debfa930ea855234ccc416c7688"
 dependencies = [
  "hashbrown",
  "j8lockfree",
@@ -482,11 +511,15 @@ dependencies = [
 
 [[package]]
 name = "j8lockfree"
-version = "0.2.0"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "db9dd7d3573352c325c32fa9d9b965702a29addac02167e45abb26ab3adeaecc"
 
 [[package]]
 name = "j8macros"
-version = "0.2.0"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4320c649e32354ea39a3ba5937002384c44e8abfb7f81431d6596a3195f1b973"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -497,7 +530,9 @@ dependencies = [
 
 [[package]]
 name = "j8platform"
-version = "0.2.0"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1aec22c3c263015062873613d63a963c2c038a6914df8766e4f0afa1f7dffee1"
 dependencies = [
  "j8framework",
  "moremath",
@@ -505,7 +540,9 @@ dependencies = [
 
 [[package]]
 name = "j8virtasm"
-version = "0.2.0"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9ac21f865d3aa1fb2af7ac88b1cc7f7858e05db9f06ce5c2c9ea984773cec2b0"
 dependencies = [
  "j8framework",
  "j8macros",
