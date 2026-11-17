@@ -4,8 +4,12 @@
 //! - `#[j8::object]`: exports an `impl` block of associated functions only as a plain object
 //!   (like `console` / `process`)
 //! - `#[j8::function]`: exports a function as a JS function
+//! - `#[j8::module("node:fs", "fs")]`: exports an object of functions as a native module (`import` / `require`)
+//! - `j8::runtime!`: declares a runtime (globals, native modules, prelude, optionally on top of another runtime);
+//!   [`Runtime`] is a ready execution environment
 //!
-//! See `crates/macros/USAGE.md` for usage.
+//! The macro reference is [USAGE.md](https://github.com/0x00-Community/j8/blob/main/crates/macros/USAGE.md); how to
+//! put a whole host together is the guide below.
 //!
 //! The other j8 crates are re-exported by feature (each is also published on its own):
 //!
@@ -19,12 +23,20 @@
 //! | `taskqueue` | [`taskqueue`] | lock-free dataflow task queue |
 //! | `lockfree` | [`lockfree`] | lock-free building blocks |
 //! | `jit` | [`compiler`], [`jit`] | bytecode ⇒ MLIR ⇒ x86-64 JIT (x86-64 Unix) |
+//! | `json` | [`Json`] | Rust values crossing as JSON-shaped data through serde |
 //! | `full` | all of the above | |
+#![doc = include_str!("../EMBEDDING.md")]
 
-pub use j8binding::{Class, ClassHandle, FromJs, IntoJs, Member, Object, Rest, This};
-pub use j8macros::{class, function, object};
+#[cfg(feature = "json")]
+pub use j8binding::Json;
+pub use j8binding::{Bytes, Class, ClassHandle, FromJs, Function, Install, IntoJs, Member, Module, Object, Persistent, Rest, This, NATIVE};
+pub use j8macros::{class, function, module, object};
 
-#[doc(hidden)]
+#[cfg(all(feature = "executor", feature = "builtins"))]
+mod runtime;
+#[cfg(all(feature = "executor", feature = "builtins"))]
+pub use runtime::{Host, HostPlatform, Runtime};
+
 pub use j8binding::Glue;
 pub use j8framework as frame;
 

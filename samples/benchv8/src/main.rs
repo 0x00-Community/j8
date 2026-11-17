@@ -68,10 +68,10 @@ struct J8Runner;
 
 impl J8Runner {
     fn run(src: &str, runs: usize) -> Outcome {
-        use j8builtins::Builtins;
-        use j8executor::Executor;
-        use j8framework::{CreateParams, Error, Isolate, Source};
-        let platform = j8platform::DefaultPlatform::default();
+        use j8::builtins::Builtins;
+        use j8::executor::Executor;
+        use j8::frame::{CreateParams, Error, Isolate, Source};
+        let platform = j8::platform::DefaultPlatform::default();
         let mut isolate = Isolate::new(&platform, CreateParams::default());
         let mut executor = Executor::default();
         let mut best = f64::INFINITY;

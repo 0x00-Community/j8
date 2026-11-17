@@ -1,0 +1,424 @@
+# Embedding j8: building a host like dune / workerd
+
+This guide shows how to build your own JavaScript runtime on the `j8` crate, the way
+[`samples/dune`](https://github.com/0x00-Community/j8/blob/main/samples/dune) and [`samples/workerd`](https://github.com/0x00-Community/j8/blob/main/samples/workerd) are built. It covers how the pieces fit
+together. The attribute-by-attribute reference for the binding macros is
+[`crates/macros/USAGE.md`](https://github.com/0x00-Community/j8/blob/main/crates/macros/USAGE.md).
+
+## 1. Setup
+
+```toml
+[dependencies]
+j8 = "0.3"                                          # default feature `runtime`: executor + built-ins + platform
+# j8 = { version = "0.3", features = ["jit"] }      # + the x86-64 JIT (x86-64 Unix)
+# j8 = { version = "0.3", features = ["json"] }     # + j8::Json<T> (serde)
+```
+
+What you use from it:
+
+| Path | What it is |
+|---|---|
+| `#[j8::object]` / `#[j8::class]` / `#[j8::function]` / `#[j8::module]` | Bind Rust to JS |
+| `j8::runtime!` | Declare a runtime: which bound types go where, plus a JS prelude |
+| `j8::Runtime` | A ready execution environment: `eval`, `eval_module`, `run_until_idle`, `set`, `text`, `enter` |
+| `j8::Host` / `j8::HostPlatform` | The trait `runtime!` implements / the platform that serves its modules and queues its async work |
+| `j8::frame` | `j8framework`: `Agent`, `Error`, `ErrorKind`, `Value`, `Platform`, `Source` … |
+| `j8::platform::DefaultPlatform` | The standard-library platform: clock, `console.log` to stdout, ES modules from files |
+| `j8::executor::Executor` | The bytecode executor; `with_tier` adds the JIT |
+| `j8::Glue` | `Glue::spawn` / `Glue::settle`: hand-made promises (see [5.3](#53-a-method-that-returns-a-promise)) |
+| `j8::NATIVE` | `"__j8_native"`, the name of the hidden registry object |
+
+## 2. The smallest host
+
+```rust,ignore
+use std::process::ExitCode;
+
+use j8::executor::Executor;
+use j8::frame::{Agent, Error, ErrorKind};
+use j8::platform::DefaultPlatform;
+
+/// Machine access, kept in `__j8_native.env`
+struct Env;
+
+#[j8::object("env")]
+impl Env {
+    fn var(name: &str) -> Option<String> {
+        std::env::var(name).ok()
+    }
+
+    /// Throws a TypeError when the variable is missing
+    fn must(a: &mut Agent<'_, '_>, name: &str) -> Result<String, Error> {
+        std::env::var(name).map_err(|_| a.throw(ErrorKind::Type, &format!("{name} is not set")))
+    }
+}
+
+/// The public API is JavaScript, built on the natives
+const PRELUDE: &str = r#"
+(function (native) {
+  'use strict';
+  globalThis.home = () => native.env.var('HOME');
+})(globalThis.__j8_native);
+"#;
+
+j8::runtime! {
+    pub Hello {
+        natives: [Env],
+        prelude: PRELUDE,
+    }
+}
+
+fn main() -> ExitCode {
+    let platform = Hello::platform(DefaultPlatform::default());
+    let mut rt = match Hello::runtime(&platform, Executor::default()) {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("prelude failed: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    match rt.eval("home()", "main.js").and_then(|g| rt.run_until_idle().map(|()| g)) {
+        Ok(g) => {
+            println!("{}", rt.text(&g));
+            ExitCode::SUCCESS
+        }
+        Err(Error::Exception(g)) => {
+            eprintln!("Uncaught {}", rt.text(&g));
+            ExitCode::FAILURE
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+```
+
+The steps are always the same:
+
+1. `X::platform(inner)` wraps a platform in a `HostPlatform` for runtime `X`. Keep it alive for as long as the
+   runtime: `Runtime<'p>` borrows it.
+2. `X::runtime(&platform, executor)` creates the isolate and the context, installs everything and runs the preludes. A
+   prelude that throws comes back as `Err` here.
+3. `rt.eval(text, file)` runs a script. It returns a `Global` (a handle that outlives the call), which `rt.text(&g)`
+   turns into a string with ToString.
+4. `rt.run_until_idle()` runs the event loop until no async host work is left. Call it after every `eval` if your
+   bindings have `async fn`s or return promises; otherwise those promises never settle.
+
+### What an `Error` means
+
+| Variant | Meaning | What hosts do |
+|---|---|---|
+| `Error::Exception(g)` | JS threw; `g` is the thrown value | `rt.text(&g)` ⇒ `Uncaught …` |
+| `Error::Syntax(msg)` | the source does not parse | print `msg` |
+| `Error::Unsupported(msg)` | syntax j8 does not support yet | print `msg` |
+
+## 3. Rust bindings + a JS prelude
+
+Both samples split the work the same way:
+
+- **Rust** does only what needs the machine (files, sockets, clocks, processes) and keeps it small and flat.
+- **JavaScript** (the prelude) builds the real API on top: classes, argument checking, Node/Web semantics. It is
+  much less code than doing the same through bindings.
+
+`runtime!` has four sections. Every one is optional, and they must come in this order, each followed by a comma:
+
+| Section | Takes | Ends up at |
+|---|---|---|
+| `globals: [..]` | `#[j8::class]` / `#[j8::object]` types | the global object: `globalThis.Process` |
+| `modules: [..]` | `#[j8::module("node:x", "x")]` types | `import … from "node:x"` and `__j8_native["node:x"]` |
+| `natives: [..]` | `#[j8::class]` / `#[j8::object]` types | the hidden registry: `__j8_native.env`, `__j8_native.KvStore` |
+| `prelude: EXPR` | a `&'static str` of JavaScript | run once, as a script, after everything is installed |
+
+The JS name is the macro argument (`#[j8::object("env")]` ⇒ `env`). Without one, it is the Rust type name
+(`#[j8::class] impl KvStore` ⇒ `KvStore`). Methods are renamed to camelCase (`exists_sync` ⇒ `existsSync`) unless
+`#[js(name = "…")]` says otherwise.
+
+`__j8_native` is a non-enumerable property of the global object. User code can still reach it, so treat it as hidden
+from casual use, not as a security boundary. The conventional prelude shape is an IIFE that takes it:
+
+```js
+(function (native) {
+  'use strict';
+  const { clock, Timer } = native;      // natives bound in Rust
+  globalThis.setTimeout = (f, ms) => { /* … */ };
+  native.runMain = (file) => { /* … */ }; // entry points the host calls (see 3.2)
+})(globalThis.__j8_native);
+```
+
+A long prelude can be split into several files and joined with `concat!(include_str!("a.js"), include_str!("b.js"))`,
+as `dune/src/node/mod.rs` does.
+
+### 3.1 Passing data into a run: `Runtime::set`
+
+`rt.set("a.b.c", value)` defines `c` on the object found at `globalThis.a.b`, converting `value` with `IntoJs`.
+Anything that implements `IntoJs` works: numbers, strings, `Vec<T>`, `BTreeMap<String, T>`, `Option<T>`…
+
+```rust,ignore
+rt.set("process.argv", args)?;                                        // Vec<String> ⇒ array
+rt.set("process.env", std::env::vars().collect::<BTreeMap<_, _>>())?; // map ⇒ object
+```
+
+The parent object must already exist (the prelude creates it). This is how `dune` sets `process.argv` and friends
+without the prelude knowing about Rust.
+
+### 3.2 Calling into the prelude
+
+To start something the prelude defines, put a function on `__j8_native` and `eval` a call to it. Quote the
+arguments as JS string literals (see `Session::quote` in dune):
+
+```rust,ignore
+let call = format!("__j8_native.runMain({})", quote(file));
+rt.eval(&call, file)?;
+rt.run_until_idle()?;
+```
+
+For lower-level work use `rt.enter(|a| …)`, which gives you the `Agent` of the context (`a.get_named`, `a.call`,
+`a.local`, `a.to_string` …). `Value`s cannot leave the closure. Keep them as a `Global` (`a.global(v)`) if you need
+them afterwards.
+
+## 4. Writing bindings
+
+### 4.1 Parameters and return values
+
+A quick summary (USAGE.md has the full table):
+
+- Plain parameters are converted with `FromJs`: `f64`, `i32`, `u32`, `usize`, `bool`, `String`, `Option<T>`,
+  `Vec<T>`, `Value`, `JsObject`, `JsString`. `&str` is ToString, borrowed.
+- `&mut Agent<'_, '_>` anywhere in the list receives the current agent (it does not count as a JS argument).
+- `j8::Bytes` takes an `ArrayBuffer` / typed array / `DataView`; returning `j8::Bytes` creates a `Uint8Array`.
+- `j8::Persistent` / `j8::Function` keep a JS value or callback past the call (store them in your struct).
+- Return values are converted with `IntoJs`. `Result<T, Error>` throws on `Err`.
+
+### 4.2 Throwing
+
+Take `&mut Agent` and return `Result<T, Error>`. Build the error with `a.throw(kind, message)`:
+
+```rust,ignore
+fn must(a: &mut Agent<'_, '_>, name: &str) -> Result<String, Error> {
+    std::env::var(name).map_err(|_| a.throw(ErrorKind::Type, &format!("{name} is not set")))
+}
+```
+
+When the error is only known later, or you want structured errors (Node's `err.code`), return a type of your own whose
+`IntoJs` throws. dune's `host.rs` does this with `Io<T>`:
+
+```rust,ignore
+pub struct Io<T>(pub Result<T, Failure>);
+
+impl<'gc, T: IntoJs<'gc>> IntoJs<'gc> for Io<T> {
+    fn into_js(self, a: &mut Agent<'gc, '_>) -> Result<Value<'gc>, Error> {
+        match self.0 {
+            Ok(v) => v.into_js(a),
+            Err(f) => Err(a.throw(f.kind, &f.message)),   // "ENOENT: no such file or directory, open 'a.txt'"
+        }
+    }
+}
+
+#[j8::object("fs")]
+impl Fs {
+    fn read(path: &str) -> Io<j8::Bytes> { /* … */ }
+}
+```
+
+The prelude then reads the code off the front of the message and sets `err.code`. Because `IntoJs` runs on the
+runtime thread, this also works for the results of `async fn`s.
+
+### 4.3 What a bound type must be
+
+- A `#[j8::class]` type is stored inside the JS object, so it must be `Send + Sync + 'static`. Use `Arc` / atomics
+  for state shared with threads (see `Timer` in `dune/src/web/timer.rs`).
+- A method that calls back into JS that reaches the same object again (`&mut self` while already borrowed) throws a
+  TypeError instead of panicking.
+- Never keep a `Value` / `JsObject` in a struct: it would outlive its `enter`. Keep a `j8::Persistent` (or
+  `j8::Function`) instead. Each is a GC root: a cycle through a host object is only freed when that object is dropped.
+
+## 5. Async work and the event loop
+
+j8 does not include an async runtime (no tokio). `Runtime::run_until_idle` is a minimal loop:
+
+1. take the work spawned since last time;
+2. poll every pending future;
+3. for each one that is ready, settle its promise and run the microtasks;
+4. if nothing made progress, **park the thread** until a waker fires.
+
+So **a future must wake its waker when it can make progress**, or the loop sleeps forever. Futures from crates that
+need their own reactor (tokio's sockets and timers) do not work as they are. Run that work on a thread or on your own
+reactor, and wake the waker from there.
+
+### 5.1 `async fn` bindings
+
+An `async fn` takes owned parameters only: no `self`, `&str`, `&mut Agent`, `This` or `Rest`. Its future runs later,
+after the call has returned. The call returns a promise at once, and the result is converted with `IntoJs` when the
+promise settles (so `Io<T>`-style errors reject it).
+
+### 5.2 Blocking work: offload to a thread
+
+dune runs every blocking call (files, sockets, `sleep`) on a thread of its own with `host::Offload`. Copy it from
+[`samples/dune/src/host.rs`](https://github.com/0x00-Community/j8/blob/main/samples/dune/src/host.rs); the core is:
+
+```rust,ignore
+fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<T> {
+    let this = self.get_mut();
+    if let Some(work) = this.work.take() {                 // first poll: start the thread
+        let (tx, rx) = mpsc::channel();
+        let waker = cx.waker().clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(work());
+            waker.wake();                                  // ⇐ without this, run_until_idle never returns
+        });
+        this.done = Some(rx);
+    }
+    match this.done.as_ref().map(Receiver::try_recv) {
+        Some(Ok(v)) => Poll::Ready(v),
+        Some(Err(TryRecvError::Empty)) => Poll::Pending,
+        _ => panic!("offloaded work panicked"),
+    }
+}
+```
+
+```rust,ignore
+#[j8::object("fs")]
+impl Fs {
+    async fn read_file(path: String) -> Io<j8::Bytes> {
+        Offload::new(move || Io::new(std::fs::read(&path).map(j8::Bytes), "open", &path)).await
+    }
+}
+```
+
+### 5.3 A method that returns a promise
+
+When the async work needs `&self`, the `Agent`, or should be cancellable, write a normal method and make the promise
+yourself with `j8::Glue`:
+
+- `Glue::spawn(a, future)` creates a pending promise, hands `future` to the event loop and returns the promise.
+- `Glue::settle(value)` is what the future must produce: `value` is converted with `IntoJs` when the promise settles.
+
+```rust,ignore
+#[j8::class]
+impl Timer {
+    fn wait<'gc>(&self, a: &mut Agent<'gc, '_>, ms: f64) -> Result<Value<'gc>, Error> {
+        let sleep = Sleep { cancelled: self.cancelled.clone(), /* … */ };
+        Glue::spawn(a, async move { Glue::settle(sleep.await) })
+    }
+
+    fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Release);
+    }
+}
+```
+
+The future must be `Send + 'static`: clone what it needs out of `self` (here an `Arc<AtomicBool>`).
+
+A future that becomes ready because of JS (like `cancel` above) needs no wake-up: the loop polls everything again after
+every settlement, before it parks.
+
+Both `async fn` and `Glue::spawn` need a `HostPlatform` (what `X::platform(…)` returns). On another platform the call
+throws a TypeError.
+
+### 5.4 Keeping the process alive
+
+`run_until_idle` returns once nothing is pending. Repeating timers, servers and the like stay alive by always keeping
+a future pending, and stop by settling it. A cleared timer should settle its promise (dune's `Timer::cancel`), or the
+loop waits for it.
+
+## 6. Modules
+
+### 6.1 ES modules from files
+
+`rt.eval_module(text, file)` runs `text` as an ES module. `DefaultPlatform` resolves `import` relative to the
+importing file (canonicalized paths, no `node_modules`). For other rules (packages, URLs, a virtual file system),
+write your own `Platform::load_module` (6.3).
+
+### 6.2 Native modules in Rust: `#[j8::module]`
+
+```rust,ignore
+#[j8::module("myhost:kv", "kv")]
+impl Kv {
+    fn get(key: &str) -> Option<String> { /* … */ }
+}
+
+j8::runtime! { pub MyHost { modules: [Kv], } }
+```
+
+`import kv, { get } from "myhost:kv"` works through `HostPlatform`. A prelude can reach the same object as
+`__j8_native["myhost:kv"]`, for example to implement `require`.
+
+### 6.3 Built-in modules written in JavaScript: a custom `Platform`
+
+dune's `node:` modules are JavaScript objects built by the prelude, not Rust types. It serves them to `import` with a
+platform of its own, `NodePlatform` in `dune/src/node/mod.rs`. Its `load_module` returns a small generated ES module
+that re-exports an object from `__j8_native`, and passes every other specifier on to the inner platform:
+
+```rust,ignore
+impl<P: Platform> Platform for NodePlatform<P> {
+    fn load_module(&self, referrer: &str, specifier: &str) -> Option<(String, String)> {
+        match Builtin::try_from(specifier) {
+            // "const m = globalThis.__j8_native.builtin(\"fs\"); export default m; export const readFileSync = m.readFileSync; …"
+            Ok(b) => Some((format!("node:{}", b.spec().0), b.source())),
+            Err(()) => self.inner.load_module(referrer, specifier),
+        }
+    }
+    fn now(&self) -> Duration { self.inner.now() }
+    fn wall_clock(&self) -> Duration { self.inner.wall_clock() }
+    fn print(&self, line: &str) { self.inner.print(line); }
+}
+
+impl<P: Pool> Pool for NodePlatform<P> {               // Platform requires Pool: forward it too
+    fn threads(&self) -> usize { self.inner.threads() }
+    fn run(&self, jobs: Vec<Task<'_>>) { self.inner.run(jobs); }
+}
+```
+
+The first element of the returned pair is the module's normalized name. Modules are cached by it: a second `import`
+that resolves to the same name gets the same module. A specifier that resolves to `None` fails the import with
+`Error::Syntax("… Cannot find module '…'")`.
+
+**Order matters when stacking platforms.** The `HostPlatform` must be the outermost one:
+
+```rust,ignore
+let platform = Dune::platform(NodePlatform::from(DefaultPlatform::default()));   // ✔
+```
+
+`HostPlatform` is what queues async work (`spawn` / `take_spawned`). A wrapper that does not forward those two
+methods hides it, and every `async fn` then throws "async host functions need a runtime with an event loop".
+
+Other `Platform` methods you may override: `print` (where `console.log` goes), `now` / `wall_clock` (a fake clock for
+tests).
+
+## 7. Building on another runtime
+
+```rust,ignore
+j8::runtime! { pub Web  { natives: [Stdio, Clock, Codec, Random, Timer, Http], prelude: WEB_PRELUDE, } }
+j8::runtime! { pub Dune: Web { globals: [Process], natives: [Fs, Os, Child], prelude: NODE_PRELUDE, } }
+```
+
+`Dune` installs everything `Web` does first, then its own types, and runs `Web`'s prelude before its own. Module
+lookups try the child's modules first, then the parent's. The parent does not change, so a third party can extend
+`Dune` without forking it.
+
+## 8. The JIT
+
+With feature `jit` (x86-64 Unix):
+
+```rust,ignore
+let executor = Executor::default().with_tier(std::rc::Rc::new(j8::jit::Jit::default()));
+let mut rt = MyHost::runtime(&platform, executor)?;
+```
+
+Hot functions and loops are compiled to machine code. The test262 baseline also passes with the JIT on
+(`J8_TEST262_JIT=1`).
+
+## 9. Where to look in the samples
+
+| You want to … | Look at |
+|---|---|
+| set up a runtime, run a file, report errors, exit codes | `dune/src/main.rs`, `dune/src/session.rs` |
+| a REPL (several `eval`s sharing one global object) | `dune/src/repl.rs` |
+| throw Node-style errors with codes; run blocking work off-thread | `dune/src/host.rs` |
+| bind plain objects (`stdio`, `clock`, `codec`, `random`) | `dune/src/web/mod.rs` |
+| a cancellable promise (`Glue::spawn`) | `dune/src/web/timer.rs` |
+| async file system | `dune/src/node/fs.rs` + `fs.js` |
+| a custom `Platform` for JS-written modules; `Runtime::set` | `dune/src/node/mod.rs` |
+| a module loader (`require`, `node_modules`, `package.json`) in JS | `dune/src/node/loader.js` |
+| a class with Rust state, used only by the prelude | `workerd/src/main.rs` (`KvStore`) + `prelude.js` |
+| call into a JS-defined entry point per request | `workerd/src/main.rs` (`Worker`) |

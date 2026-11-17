@@ -4,12 +4,11 @@ description = "j8: V8 rewritten in Rust. The root package re-exports the binding
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-# tests/test262.rs belongs to the dune package; only binding is registered here
 autotests = false
 repository.workspace = true
 readme = "README.md"
 # 只发库本身：tests/test262 子模块有五万多个文件，crates.io 收不下
-include = ["/src", "/tests/binding.rs", "/README.md", "/README.zh-CN.md", "/LICENSE"]
+include = ["/src", "/tests/binding.rs", "/tests/runtime.rs", "/tests/bindings_more.rs", "/README.md", "/README.zh-CN.md", "/EMBEDDING.md", "/LICENSE"]
 
 [lib]
 name = "j8"
@@ -24,7 +23,8 @@ j8executor = { workspace = true, optional = true }
 j8builtins = { workspace = true, optional = true }
 j8platform = { workspace = true, optional = true }
 j8taskqueue = { workspace = true, optional = true }
-j8lockfree = { workspace = true, optional = true }
+# Always used (the runtime's async queue); the `lockfree` feature only re-exports it
+j8lockfree.workspace = true
 j8compiler = { workspace = true, optional = true }
 j8jit = { workspace = true, optional = true }
 
@@ -44,54 +44,71 @@ platform = ["dep:j8platform"]
 # j8::taskqueue：无锁数据流任务队列
 taskqueue = ["dep:j8taskqueue"]
 # j8::lockfree：无锁基础件
-lockfree = ["dep:j8lockfree"]
+lockfree = []
 # j8::compiler（字节码 ⇒ MLIR ⇒ x86-64 机器码）与 j8::jit（x86-64 Unix）
 jit = ["executor", "dep:j8compiler", "dep:j8jit"]
-full = ["runtime", "taskqueue", "lockfree", "jit"]
+# j8::Json<T>: Rust values crossing as JSON-shaped data through serde
+json = ["j8binding/json"]
+full = ["runtime", "taskqueue", "lockfree", "jit", "json"]
 
 [dev-dependencies]
 j8executor.workspace = true
 j8builtins.workspace = true
 j8platform.workspace = true
+j8jit.workspace = true
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
+
+# test262 conformance (`harness = false`): `cargo test --release --test test262`
+[[test]]
+name = "test262"
+path = "tests/test262.rs"
+harness = false
 
 [[test]]
 name = "binding"
 path = "tests/binding.rs"
+
+[[test]]
+name = "runtime"
+path = "tests/runtime.rs"
+
+[[test]]
+name = "bindings_more"
+path = "tests/bindings_more.rs"
 
 [lints]
 workspace = true
 
 [workspace]
 resolver = "3"
-members = ["crates/*", "samples/*", "debugger"]
-# The V8 comparison benchmark downloads rusty_v8's prebuilt library, so it is a workspace of its own
-exclude = ["samples/benchv8"]
+members = ["crates/*", "debugger"]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/0x00-Community/j8"
 
 [workspace.dependencies]
-j8framework = { version = "0.2.0", path = "crates/j8framework" }
-j8platform = { version = "0.2.0", path = "crates/j8platform" }
-j8builtins = { version = "0.2.0", path = "crates/j8builtins" }
-j8virtasm = { version = "0.2.0", path = "crates/j8virtasm", default-features = false }
-j8executor = { version = "0.2.0", path = "crates/j8executor" }
-j8compiler = { version = "0.2.0", path = "crates/j8compiler" }
-j8jit = { version = "0.2.0", path = "crates/j8jit" }
+j8framework = { version = "0.3.0", path = "crates/j8framework" }
+j8platform = { version = "0.3.0", path = "crates/j8platform" }
+j8builtins = { version = "0.3.0", path = "crates/j8builtins" }
+j8virtasm = { version = "0.3.0", path = "crates/j8virtasm", default-features = false }
+j8executor = { version = "0.3.0", path = "crates/j8executor" }
+j8compiler = { version = "0.3.0", path = "crates/j8compiler" }
+j8jit = { version = "0.3.0", path = "crates/j8jit" }
 mlirpass = { version = "=0.10.4", default-features = false, features = ["target.x86_64"] }
 libc = "0.2"
-j8macros = { version = "0.2.0", path = "crates/macros" }
-j8binding = { version = "0.2.0", path = "crates/j8binding" }
-j8 = { version = "0.2.0", path = "." }
+j8macros = { version = "0.3.0", path = "crates/macros" }
+j8binding = { version = "0.3.0", path = "crates/j8binding" }
+j8 = { version = "0.3.0", path = "." }
 clap = { version = "4.6", features = ["derive"] }
 moremath = { version = "=0.2.3", default-features = false }
 libm = "0.2"
 paragc = "0.5.0"
-j8lockfree = { version = "0.2.0", path = "crates/j8lockfree" }
-j8taskqueue = { version = "0.2.0", path = "crates/j8taskqueue" }
+j8lockfree = { version = "0.3.0", path = "crates/j8lockfree" }
+j8taskqueue = { version = "0.3.0", path = "crates/j8taskqueue" }
 smol_str = { version = "0.3", default-features = false }
 hashbrown = { version = "0.17", default-features = false }
 rustc-hash = { version = "2", default-features = false }

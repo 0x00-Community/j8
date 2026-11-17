@@ -27,8 +27,9 @@ j8 是**用 Rust 从头写的 JavaScript 引擎**, 照着 V8 的分层来: 所�
 
 🎯 **主线:** test262 通过率. 核心 ECMAScript 按 [PLAN.md](PLAN.md) 逐阶段补齐, 每一步跑基线零回归.
 
-🧩 **可嵌入:** `#[j8::class]` / `#[j8::object]` / `#[j8::function]` 一行把 Rust 类型绑成 JS; 自带 node 式运行时 `dune`
-和 Cloudflare Worker 式运行时 `workerd` 两个样例.
+🧩 **可嵌入:** `#[j8::class]` / `#[j8::object]` / `#[j8::function]` 一行把 Rust 类型绑成 JS; 自带两个样例: 分 Web 标准层
+与 Node 兼容层的运行时 `dune`, 以及 Cloudflare Worker 式运行时 `workerd`. 照样搭自己的宿主: 先看 [EMBEDDING.md](EMBEDDING.md)（各部分怎么拼, 英文）,
+宏的逐项说明在 [crates/macros/USAGE.md](crates/macros/USAGE.md).
 
 ## 🔥 凭什么不一样
 
@@ -52,26 +53,30 @@ j8 是**用 Rust 从头写的 JavaScript 引擎**, 照着 V8 的分层来: 所�
 ## 🚀 快速开始
 
 ```sh
-# 🟢 node 式运行时: 跑脚本 / 求值 / REPL
-cargo run --release -p dune -- a.js
-cargo run --release -p dune -- -p '[1, 2, 3].map(x => x * 2)'
-cargo run --release -p dune                     # REPL (.help / .exit)
-cargo run --release -p dune -- --jit a.js       # 开 JIT
+# 🟢 dune, 兼容 Node (加 --web 只要 Web 标准接口): 跑脚本 / 求值 / REPL
+cd samples/dune
+cargo run --release -- examples/node.js
+cargo run --release -- --web examples/web.mjs
+cargo run --release -- -p '[1, 2, 3].map(x => x * 2)'
+cargo run --release                             # REPL (.help / .exit)
+cargo run --release -- --jit a.js               # 开 JIT
 
 # ☁️ Cloudflare Worker 式: ES 模块 + Durable Object
-cargo run -p workerd -- samples/workerd/examples/counter.js --bind COUNTER=Counter --request "GET /c/inc?name=a"
+cd samples/workerd && cargo run -- examples/counter.js --bind COUNTER=Counter --request "GET /c/inc?name=a"
 
 # 🔬 看字节码
 cargo run -p j8debugger -- disasm -e 'let s = 0; for (let i = 0; i < 10; i++) s += i; s'
 
 # 📜 test262 回归 (先 git submodule update --init)
-cargo test --release -p dune --test test262
+cargo test --release --test test262
 
 # 🥊 对 V8 的基准 (下载 rusty_v8 预编译库)
 cd samples/benchv8 && cargo run --release
 ```
 
 ## 🧱 结构
+
+`samples/` 下的样例各自成包, 不在 workspace 里, 像嵌入方一样按版本依赖发布的 `j8`.
 
 | crate | std | 职责 |
 |---|---|---|
@@ -83,9 +88,9 @@ cd samples/benchv8 && cargo run --release
 | `j8virtasm` | std | 虚拟指令集：累加器式寄存器字节码（`Insn` / `Function` / `Module`）；反汇编 `module.to_string()`、汇编 `text.parse::<Module>()`，互为逆；`compile` feature（缺省开）带 JS ⇒ 字节码编译器 `Module::try_from(&Source)`，用 oxc 解析 |
 | `j8taskqueue` | `no_std` | 任务队列：`ITask`（`recursable` / `depend` / `exec`）与 `ITaskPoll`（`add` / `run`）；无锁数据流调度（手写 MPMC 就绪队列、原子依赖计数），依赖做完的任务立刻在 moremath `Executor`（宿主给 `ThreadMulti`）上并行跑、没有轮次屏障；`TaskId::family` 并查集找爹、`cancel` 整家取消；配额按字节码条数（`Quota` / `Flow::Yield`、每次 run 的预算） |
 | `j8macros` | proc-macro | 过程宏：`enums!("x.json")` 从 JSON 生成枚举（定义、`Display`、按字段类型取 `&mut`）、堆类型的 `#[derive(Collect)]`（paragc `Trace`）、绑定宏，用法见 `crates/macros/USAGE.md` |
-| `samples/dune` | std | 基于 j8 的 node 式二进制（`require` / `module` / `fs` / `path` / `process`，原生部分用 `#[j8::object]` 绑定）：`dune a.js` / `dune run a.js`（`-` 读标准输入）、`dune -e '<js>'`、`dune -p '<js>'` 打印结果、不带参数进 REPL（`.help` / `.exit`）；没接住的异常打 `Uncaught …` 退出码 1 |
+| `samples/dune` | std | 分两层的运行时：`src/web/`（Web 标准接口：`console`、定时器、`URL`、`TextEncoder`、`EventTarget` / `AbortController`、`fetch`、`structuredClone`、`crypto`……）和叠在上面的 `src/node/`（`process`、`require` / ES 模块、`Buffer`、`fs`、`path`、`os`、`events`、`util`、`assert`、`child_process`……）；碰机器的部分是 `#[j8::object]` / `#[j8::class]` 绑定的 Rust，接口本身是 JS prelude；`dune a.js`、`dune --web a.mjs`、`dune -e` / `-p`、REPL，详见其 README |
 | `samples/workerd` | std | 用 j8 加载 Cloudflare Worker（ES 模块 `export default { fetch }`）与 Durable Object：`workerd examples/counter.js --bind COUNTER=Counter --request "GET /c/inc?name=a"` 或 `--port 8787` 起 HTTP 服务；Fetch API 子集与 DO 在 JS 序言里，存储是 `#[j8::class]` 绑定的 Rust KV |
-| `samples/benchv8` | std | 同一组 JS 基准在 j8 与 V8（rusty_v8 152，带 JIT / `--jitless`）上的耗时对比：`cd samples/benchv8 && cargo run --release`；依赖 V8 预编译库，自成 workspace（根 workspace 已 exclude） |
+| `samples/benchv8` | std | 同一组 JS 基准在 j8 与 V8（rusty_v8 152，带 JIT / `--jitless`）上的耗时对比：`cd samples/benchv8 && cargo run --release`（会下载 V8 预编译库） |
 | `j8debugger` | std | 调试命令行 `j8dbg`（clap）：`j8dbg disasm <file.js \| ->` / `j8dbg disasm -e '<js>'` 打印反汇编清单；`j8dbg asm <file.j8s \| ->` 汇编清单、打印规范化后的清单（`-o` 写文件） |
 | `j8executor` | std | 字节码执行器 `Executor`，**目前是最后一层**；`compile` feature 下实现 `Engine` |
 
@@ -130,7 +135,7 @@ isolate.enter(|scope| {
 
 ## 🧬 JIT（第一档）
 
-`dune --jit a.js` 开 JIT；`J8_TEST262_JIT=1 cargo test -p dune --test test262` 开着 JIT（每个函数第一次调用、每个循环第一次往回跳就编）跑基线。
+`dune --jit a.js` 开 JIT；`J8_TEST262_JIT=1 cargo test --release --test test262` 开着 JIT（每个函数第一次调用、每个循环第一次往回跳就编）跑基线。
 
 - `j8compiler`：字节码函数 ⇒ MLIR（`llvm` 方言）⇒ mlirpass `target.x86_64` ⇒ x86-64 机器码（`Compiler` 建一次反复用，只装 builtin 与 `llvm` 方言）。
   机器码是 `extern "C" fn(regs, acc, start) -> u64`，直接读写本帧寄存器文件与累加器里的 `Value`（布局见 `j8framework::ValueTag`：16 字节、首字节标签、第 8 字节起载荷）；
@@ -215,14 +220,14 @@ fn#0 "main" normal sloppy params 0 length 0 regs 3
 
 ## 📜 test262
 
-`tests/test262` 是 tc39/test262 子模块（浅克隆，`git submodule update --init` 拉取），运行器 `tests/test262.rs` 挂在 dune 包下（`harness = false`，不另开 crate）：
+`tests/test262` 是 tc39/test262 子模块（浅克隆，`git submodule update --init` 拉取），运行器 `tests/test262.rs` 是根包的测试（`harness = false`，不发布）：
 
 ```sh
-cargo test -p dune --test test262 -- language/expressions/addition built-ins/Math   # 跑这些目录
-J8_TEST262_JIT=1 cargo test -p dune --test test262                                   # 开 JIT（每个函数第一次调用就编）对拍
-J8_TEST262_VERBOSE=1 cargo test -p dune --test test262 -- <路径>                    # 逐条列出没过的原因
-J8_TEST262_UPDATE=1 cargo test -p dune --test test262 -- <路径>                     # 结果写回基线
-cargo test -p dune --test test262                                                   # 只跑基线里的用例，掉了就失败
+cargo test --release --test test262 -- language/expressions/addition built-ins/Math   # 跑这些目录
+J8_TEST262_JIT=1 cargo test --release --test test262                                   # 开 JIT（每个函数第一次调用就编）对拍
+J8_TEST262_VERBOSE=1 cargo test --release --test test262 -- <路径>                    # 逐条列出没过的原因
+J8_TEST262_UPDATE=1 cargo test --release --test test262 -- <路径>                     # 结果写回基线
+cargo test --release --test test262                                                   # 只跑基线里的用例，掉了就失败
 ```
 
 - 每个用例一个子进程、10 s 超时；结果分 pass / fail / unsupported（j8 报 `Error::Unsupported`）/ skip / timeout / crash，按目录汇总

@@ -1,36 +1,35 @@
 [package]
 name = "dune"
-description = "dune: the j8 JavaScript runtime CLI (comparable to node / deno)"
+description = "dune: a JavaScript runtime on j8 with a Node-compatible layer and a Web-standard layer"
 readme = "README.md"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
-repository.workspace = true
+version = "0.3.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/0x00-Community/j8"
 # the name is taken on crates.io
 publish = false
+
+# A sample is a package of its own, built against the published j8 (not part of the j8 workspace)
+[workspace]
 
 [[bin]]
 name = "dune"
 path = "src/main.rs"
 
 [dependencies]
-j8framework.workspace = true
-j8platform.workspace = true
-j8builtins.workspace = true
-j8executor.workspace = true
-j8jit.workspace = true
-clap.workspace = true
-j8.workspace = true
-
-# test262 conformance tests; the source lives in tests/ at the repo root (no separate crate)
-[[test]]
-name = "test262"
-path = "../../tests/test262.rs"
-harness = false
-
-[dev-dependencies]
+j8 = { version = "0.3.0", features = ["runtime", "jit"] }
+clap = { version = "4.6", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
-serde_yaml = "0.9"
+serde_json = "1"
 
-[lints]
-workspace = true
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+doc_markdown = "allow"
+missing_errors_doc = "allow"
+must_use_candidate = "allow"
+# When both branches have bodies, match reads better than if let ... else
+single_match_else = "allow"
+# Bound functions receive their converted arguments by value
+needless_pass_by_value = "allow"

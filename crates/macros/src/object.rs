@@ -25,5 +25,34 @@ pub fn expand(attr: TokenStream, mut item: ItemImpl) -> syn::Result<TokenStream>
             const NAME: &'static str = #name;
             const MEMBERS: &'static [::j8::Member] = &[#(#members),*];
         }
+
+        impl #impl_generics ::j8::Install for #self_ty #where_clause {
+            fn install_into<'gc>(a: &mut ::j8::frame::Agent<'gc, '_>, target: ::j8::frame::JsObject<'gc>) {
+                let _ = <Self as ::j8::Object>::install(a, target);
+            }
+        }
+    })
+}
+
+/// `#[j8::module("node:fs", "fs")]`: an object of functions exported as a native module under these specifiers (the
+/// first is canonical): `import fs from "node:fs"` / `import { readFileSync } from "fs"` / `require("fs")` in a runtime
+/// built with `j8::runtime!`.
+pub fn expand_module(attr: TokenStream, item: ItemImpl) -> syn::Result<TokenStream> {
+    let specs = syn::parse::Parser::parse2(syn::punctuated::Punctuated::<syn::LitStr, syn::Token![,]>::parse_terminated, attr)?;
+    let Some(first) = specs.first() else {
+        return Err(syn::Error::new(proc_macro2::Span::call_site(), "#[j8::module] needs at least one specifier, e.g. #[j8::module(\"node:fs\", \"fs\")]"));
+    };
+    let first = first.clone();
+    let self_ty = item.self_ty.clone();
+    let (impl_generics, _, where_clause) = item.generics.split_for_impl();
+    let (impl_generics, where_clause) = (quote!(#impl_generics), quote!(#where_clause));
+    let specs = specs.iter();
+    let object = expand(quote!(#first), item)?;
+    Ok(quote! {
+        #object
+
+        impl #impl_generics ::j8::Module for #self_ty #where_clause {
+            const SPECIFIERS: &'static [&'static str] = &[#(#specs),*];
+        }
     })
 }

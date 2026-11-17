@@ -193,21 +193,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "dune"
-version = "0.2.0"
-dependencies = [
- "clap",
- "j8",
- "j8builtins",
- "j8executor",
- "j8framework",
- "j8jit",
- "j8platform",
- "serde",
- "serde_yaml",
-]
-
-[[package]]
 name = "either"
 version = "1.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -369,7 +354,7 @@ checksum = "3bd1574e617a9a6c1f8f8181bd7e841e1f20e4277607ef28945765188d6284d4"
 
 [[package]]
 name = "j8"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "j8binding",
  "j8builtins",
@@ -382,19 +367,23 @@ dependencies = [
  "j8platform",
  "j8taskqueue",
  "j8virtasm",
+ "serde",
+ "serde_yaml",
 ]
 
 [[package]]
 name = "j8binding"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "j8framework",
  "j8lockfree",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
 name = "j8builtins"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "j8framework",
  "libm",
@@ -407,7 +396,7 @@ dependencies = [
 
 [[package]]
 name = "j8compiler"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "j8framework",
  "j8virtasm",
@@ -416,7 +405,7 @@ dependencies = [
 
 [[package]]
 name = "j8debugger"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "clap",
  "j8framework",
@@ -425,7 +414,7 @@ dependencies = [
 
 [[package]]
 name = "j8executor"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "j8builtins",
  "j8framework",
@@ -436,7 +425,7 @@ dependencies = [
 
 [[package]]
 name = "j8framework"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "hashbrown",
  "j8lockfree",
@@ -453,7 +442,7 @@ dependencies = [
 
 [[package]]
 name = "j8jit"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "j8compiler",
  "j8executor",
@@ -465,11 +454,11 @@ dependencies = [
 
 [[package]]
 name = "j8lockfree"
-version = "0.2.0"
+version = "0.3.0"
 
 [[package]]
 name = "j8macros"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -480,7 +469,7 @@ dependencies = [
 
 [[package]]
 name = "j8platform"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "j8framework",
  "moremath",
@@ -488,7 +477,7 @@ dependencies = [
 
 [[package]]
 name = "j8taskqueue"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "j8lockfree",
  "moremath",
@@ -496,7 +485,7 @@ dependencies = [
 
 [[package]]
 name = "j8virtasm"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "j8framework",
  "j8macros",
@@ -1278,18 +1267,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ae137229bcbd6cdf0f7b80a31df61766145077ddf49416a728b02cb3921ff3fc"
 dependencies = [
  "windows-link",
-]
-
-[[package]]
-name = "workerd"
-version = "0.2.0"
-dependencies = [
- "clap",
- "j8",
- "j8builtins",
- "j8executor",
- "j8framework",
- "j8platform",
 ]
 
 [[package]]

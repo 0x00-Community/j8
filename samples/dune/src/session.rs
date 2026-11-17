@@ -1,8 +1,10 @@
 use std::process::ExitCode;
 
-use j8builtins::Builtins;
-use j8executor::Executor;
-use j8framework::{ContextRoot, Error, Global, Isolate, Source};
+use j8::executor::Executor;
+use j8::frame::{Error, Platform, Source};
+use j8::{Host, Runtime};
+
+use crate::node::Dune;
 
 /// The result of running a piece of source, already converted to text via ToString.
 pub enum Outcome {
@@ -25,29 +27,31 @@ impl Outcome {
     }
 }
 
-/// An execution environment: multiple pieces of source share one global object (one per REPL line); the executor
-/// and the environment both outlive multiple entries.
-pub struct Session<'s, 'p> {
-    isolate: &'s mut Isolate<'p>,
-    executor: Executor,
-    cx: ContextRoot,
+/// An execution environment: multiple pieces of source share one global object (one per REPL line); the runtime
+/// outlives multiple entries.
+pub struct Session<'p> {
+    rt: Runtime<'p>,
 }
 
-impl<'s, 'p> Session<'s, 'p> {
-    /// New environment: built-in objects, node-style globals (`process` / `__dune`), prelude (`require`).
-    pub fn new(isolate: &'s mut Isolate<'p>, script: &str, args: &[String], jit: bool) -> Self {
-        let executor = if jit { Executor::default().with_tier(std::rc::Rc::new(j8jit::Jit::default())) } else { Executor::default() };
-        let cx = isolate.enter(|scope| scope.persist(scope.context(&Builtins)));
-        isolate.enter(|scope| {
-            let realm = scope.context_of(&cx);
-            let mut a = scope.agent(realm, &executor);
-            crate::node::Node::install(&mut a, script, args);
-        });
-        let mut s = Self { isolate, executor, cx };
-        if let Outcome::Thrown(e) | Outcome::Failed(e) = s.eval(&Source { text: crate::node::PRELUDE, file: "[prelude]" }) {
-            eprintln!("dune: prelude failed: {e}");
+impl<'p> Session<'p> {
+    /// A runtime of host `H` (its platform should be `H::platform(…)`, so `import` finds its modules)
+    pub fn new<H: Host>(platform: &'p dyn Platform, jit: bool) -> Self {
+        let executor = if jit { Executor::default().with_tier(std::rc::Rc::new(j8::jit::Jit::default())) } else { Executor::default() };
+        match Runtime::new::<H>(platform, executor) {
+            Ok(rt) => Self { rt },
+            Err(e) => {
+                eprintln!("dune: prelude failed: {e}");
+                std::process::exit(1);
+            }
         }
-        s
+    }
+
+    /// This run's `process.argv` and the rest of what depends on it (Node layer only)
+    pub fn node(&mut self, script: Option<&str>, args: &[String]) {
+        if let Err(e) = Dune::argv(&mut self.rt, script, args) {
+            eprintln!("dune: setting up process failed: {e}");
+            std::process::exit(1);
+        }
     }
 
     /// String literal (JSON syntax).
@@ -65,22 +69,20 @@ impl<'s, 'p> Session<'s, 'p> {
         out
     }
 
-    /// Value in a persistent handle ⇒ text (ToString; a placeholder if that throws in turn)
-    fn text(&mut self, g: &Global) -> String {
-        let (executor, cx) = (&self.executor, &self.cx);
-        self.isolate.enter(|scope| {
-            let realm = scope.context_of(cx);
-            let mut agent = scope.agent(realm, executor);
-            let v = agent.local(g);
-            agent.to_string(v).map_or_else(|_| String::from("<ToString threw>"), |s| String::from(&**s))
-        })
+    /// Runs `src`, then the event loop until no timer, I/O or other host work is left
+    pub fn eval(&mut self, src: &Source<'_>) -> Outcome {
+        match self.rt.eval(src.text, src.file).and_then(|g| self.rt.run_until_idle().map(|()| g)) {
+            Ok(g) => Outcome::Value(self.rt.text(&g)),
+            Err(Error::Exception(g)) => Outcome::Thrown(self.rt.text(&g)),
+            Err(e) => Outcome::Failed(e.to_string()),
+        }
     }
 
-    pub fn eval(&mut self, src: &Source<'_>) -> Outcome {
-        match self.isolate.run(&mut self.executor, &self.cx, src) {
-            Ok(g) => Outcome::Value(self.text(&g)),
-            Err(Error::Exception(g)) => Outcome::Thrown(self.text(&g)),
-            Err(e) => Outcome::Failed(e.to_string()),
+    /// The end of a run: `process` emits 'exit'; the exit code is `process.exitCode`
+    pub fn finish(&mut self) -> ExitCode {
+        match self.eval(&Source { text: "__j8_native.finish()", file: "[exit]" }) {
+            Outcome::Value(code) => code.parse::<u8>().map_or(ExitCode::FAILURE, ExitCode::from),
+            failed => failed.report(),
         }
     }
 }

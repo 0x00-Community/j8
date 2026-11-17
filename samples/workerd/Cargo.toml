@@ -2,24 +2,30 @@
 name = "workerd"
 description = "workerd: a minimal host that loads Cloudflare Workers (ES modules + Durable Objects) with j8"
 readme = "README.md"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
-repository.workspace = true
+version = "0.3.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/0x00-Community/j8"
 # the name is taken on crates.io
 publish = false
+
+# A sample is a package of its own, built against the published j8 (not part of the j8 workspace)
+[workspace]
 
 [[bin]]
 name = "workerd"
 path = "src/main.rs"
 
 [dependencies]
-j8framework.workspace = true
-j8platform.workspace = true
-j8builtins.workspace = true
-j8executor.workspace = true
-j8.workspace = true
-clap.workspace = true
+j8 = "0.3.0"
+clap = { version = "4.6", features = ["derive"] }
 
-[lints]
-workspace = true
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+doc_markdown = "allow"
+missing_errors_doc = "allow"
+must_use_candidate = "allow"
+# When both branches have bodies, match reads better than if let ... else
+single_match_else = "allow"

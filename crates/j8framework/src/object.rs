@@ -957,9 +957,10 @@ impl Class {
 /// A JS object on the heap. What hot paths touch lives outside the cell and is read without borrowing: prototype,
 /// string-keyed properties, array elements, flags, an ordinary function's closure; the rest ([`ObjectState`]) is in
 /// `data`.
-#[derive(Collect)]
+#[crate::heap]
 pub struct Object<'gc> {
-    proto: GcSlot<'gc, Object<'gc>>,
+    #[mutable(set = write_proto)]
+    proto: Option<JsObject<'gc>>,
     /// Immutable kind data hot paths read without borrowing (see [`Fast`])
     call: GcSlot<'gc, Fast<'gc>>,
     props: crate::Props<'gc>,
@@ -967,16 +968,20 @@ pub struct Object<'gc> {
     /// [`Class`] bits
     class: AtomicU8,
     /// Not extensible (`Object.preventExtensions` / `seal` / `freeze`)
-    non_extensible: AtomicBool,
+    #[mutable]
+    non_extensible: bool,
     /// The array's `length` is not writable
-    length_readonly: AtomicBool,
+    #[mutable]
+    length_readonly: bool,
     /// The property table has had a key starting with a digit (set only, never cleared; array method fast paths rely on
     /// it to confirm at a glance that the prototype has no index properties)
-    digit_keys: AtomicBool,
+    #[mutable]
+    digit_keys: bool,
     /// Array: the length extended by the sparse part. Indices outside the dense part (all writable, enumerable,
     /// configurable data properties with no holes) are stored as ordinary properties; the actual length is the larger
     /// of this and the dense part's length
-    sparse_length: AtomicU32,
+    #[mutable]
+    sparse_length: u32,
     /// The empty shape that objects with this object as prototype start from (so objects with the same prototype that
     /// add properties the same way share shapes)
     #[collect(require_static)]
@@ -1298,15 +1303,10 @@ impl<'gc> Object<'gc> {
         }
     }
 
-    #[inline]
-    pub fn proto(&self) -> Option<JsObject<'gc>> {
-        self.proto.get()
-    }
-
     pub fn set_proto(&self, mc: &Mutation<'gc>, proto: Option<JsObject<'gc>>) {
         // The shape tree may belong to the old prototype's root
         self.props.reanchor(mc);
-        self.proto.set(mc.mutator(), proto);
+        self.write_proto(mc, proto);
     }
 
     #[inline]
@@ -1344,22 +1344,6 @@ impl<'gc> Object<'gc> {
     #[inline]
     pub fn is_callable(&self) -> bool {
         self.class() & Class::CALLABLE != 0
-    }
-
-    pub fn non_extensible(&self) -> bool {
-        self.non_extensible.load(Ordering::Acquire)
-    }
-
-    pub fn length_readonly(&self) -> bool {
-        self.length_readonly.load(Ordering::Acquire)
-    }
-
-    pub fn digit_keys(&self) -> bool {
-        self.digit_keys.load(Ordering::Acquire)
-    }
-
-    pub fn sparse_length(&self) -> u32 {
-        self.sparse_length.load(Ordering::Acquire)
     }
 
     fn raise_sparse_length(&self, n: u32) {

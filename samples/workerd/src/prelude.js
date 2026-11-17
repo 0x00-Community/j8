@@ -1,6 +1,6 @@
 // workerd's prelude: a minimal subset of the Fetch API (Headers / Request / Response / URL / URLSearchParams)
 // and Durable Objects.
-// The native part of storage (one KV per object) is `__native.KvStore`, bound from Rust with j8binding.
+// The native part of storage (one KV per object) is `__j8_native.KvStore`, bound from Rust with j8binding.
 (function (native) {
   'use strict';
 
@@ -206,4 +206,4 @@
       return r.status + '\n' + head + '\n' + r.body;
     },
   };
-})(globalThis.__native);
+})(globalThis.__j8_native);

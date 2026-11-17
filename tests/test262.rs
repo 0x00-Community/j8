@@ -1,4 +1,4 @@
-//! test262 conformance tests (`harness = false`, part of the dune package: `cargo test -p dune --test test262`).
+//! test262 conformance tests (`harness = false`, part of the root package: `cargo test --release --test test262`).
 //!
 //! - No arguments: run only the cases in the baseline `tests/test262.passing`; fail if any regress (regression check)
 //! - With arguments: run these directories / files under `tests/test262/test/`,
@@ -25,9 +25,9 @@ use serde::Deserialize;
 
 
 /// test262 checkout (submodule)
-const ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/test262");
+const ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/test262");
 /// Baseline: passing cases, one per line (relative to `test/`)
-const BASELINE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/test262.passing");
+const BASELINE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/test262.passing");
 /// The case a child process runs
 const CASE_ENV: &str = "J8_TEST262_CASE";
 const UPDATE_ENV: &str = "J8_TEST262_UPDATE";
