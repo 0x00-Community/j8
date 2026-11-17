@@ -4,7 +4,7 @@
 use std::path::{Component, Path, PathBuf};
 
 use j8::Rest;
-use j8framework::{Agent, Error, ErrorKind, JsObject, Property, Value};
+use j8framework::{Agent, Error, ErrorKind, Value};
 
 /// Prelude: `require` (CommonJS, module cache, relative paths, `.js` / `.json` / directory `index.js`), `module`,
 /// `process`.
@@ -157,30 +157,12 @@ pub struct Node;
 
 impl Node {
     /// `argv` is the arguments after the script path (`dune` and the script path are prepended).
-    pub fn argv<'gc>(a: &mut Agent<'gc, '_>, script: &str, args: &[String]) {
-        let global = a.realm.global;
-        let Some(process) = global.borrow().own("process").and_then(Value::as_object) else { return };
-        let mut argv: Vec<Value<'gc>> = vec![a.string("dune").into(), a.string(script).into()];
-        argv.extend(args.iter().map(|s| Value::from(a.string(s))));
-        let argv = a.array(argv);
-        let env = a.object();
-        for (k, v) in std::env::vars() {
-            let v = a.string(&v);
-            env.borrow_mut(a.mc).set(&k, v.into());
-        }
-        let props: [(&str, Value<'gc>); 5] = [
-            ("argv", argv.into()),
-            ("env", env.into()),
-            ("platform", a.string(std::env::consts::OS).into()),
-            ("version", a.string(concat!("v", env!("CARGO_PKG_VERSION"))).into()),
-            ("pid", f64::from(std::process::id()).into()),
-        ];
-        for (k, v) in props {
-            Self::set(a, process, k, v);
-        }
-    }
-
-    fn set<'gc>(a: &Agent<'gc, '_>, o: JsObject<'gc>, k: &str, v: Value<'gc>) {
-        o.borrow_mut(a.mc).define(k, Property::data(v));
+    pub fn argv(rt: &mut j8::Runtime<'_>, script: &str, args: &[String]) -> Result<(), Error> {
+        let argv: Vec<String> = ["dune", script].into_iter().map(String::from).chain(args.iter().cloned()).collect();
+        rt.set("process.argv", argv)?;
+        rt.set("process.env", std::env::vars().collect::<std::collections::BTreeMap<String, String>>())?;
+        rt.set("process.platform", std::env::consts::OS)?;
+        rt.set("process.version", concat!("v", env!("CARGO_PKG_VERSION")))?;
+        rt.set("process.pid", f64::from(std::process::id()))
     }
 }

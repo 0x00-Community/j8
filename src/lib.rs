@@ -22,8 +22,11 @@
 //! | `taskqueue` | [`taskqueue`] | lock-free dataflow task queue |
 //! | `lockfree` | [`lockfree`] | lock-free building blocks |
 //! | `jit` | [`compiler`], [`jit`] | bytecode ⇒ MLIR ⇒ x86-64 JIT (x86-64 Unix) |
+//! | `json` | [`Json`] | Rust values crossing as JSON-shaped data through serde |
 //! | `full` | all of the above | |
 
+#[cfg(feature = "json")]
+pub use j8binding::Json;
 pub use j8binding::{Bytes, Class, ClassHandle, FromJs, Function, Install, IntoJs, Member, Module, Object, Persistent, Rest, This, NATIVE};
 pub use j8macros::{class, function, module, object};
 

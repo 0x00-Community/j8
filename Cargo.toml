@@ -48,12 +48,15 @@ taskqueue = ["dep:j8taskqueue"]
 lockfree = []
 # j8::compiler（字节码 ⇒ MLIR ⇒ x86-64 机器码）与 j8::jit（x86-64 Unix）
 jit = ["executor", "dep:j8compiler", "dep:j8jit"]
-full = ["runtime", "taskqueue", "lockfree", "jit"]
+# j8::Json<T>: Rust values crossing as JSON-shaped data through serde
+json = ["j8binding/json"]
+full = ["runtime", "taskqueue", "lockfree", "jit", "json"]
 
 [dev-dependencies]
 j8executor.workspace = true
 j8builtins.workspace = true
 j8platform.workspace = true
+serde = { version = "1", features = ["derive"] }
 
 [[test]]
 name = "binding"

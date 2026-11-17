@@ -2,6 +2,8 @@
 //! host struct can store it), [`Function`] is a callable one, [`Bytes`] is binary data (`ArrayBuffer` / typed arrays /
 //! `DataView` ⇄ `Vec<u8>`).
 use alloc::boxed::Box;
+#[cfg(feature = "json")]
+use alloc::string::String;
 use alloc::vec::Vec;
 
 use j8framework::{Agent, BufferData, ElementKind, Error, ErrorKind, Global, ObjectData, ObjectKind, Value, ViewData};
@@ -103,5 +105,39 @@ impl<'gc> IntoJs<'gc> for Bytes {
         let view = ViewData { buffer, offset: 0, length: Some(len) };
         let o = ObjectData { kind: ObjectKind::TypedArray(ElementKind::Uint8, view), proto: Some(a.realm.typed_protos[at]), ..ObjectData::default() }.alloc(a.mc);
         Ok(o.into())
+    }
+}
+
+/// A Rust value that crosses as JSON-shaped data (`serde`, feature `json`): taken through `JSON.stringify`, given
+/// back through `JSON.parse`, so it follows JSON's rules (no functions, `undefined` fields dropped, …).
+#[cfg(feature = "json")]
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Json<T>(pub T);
+
+#[cfg(feature = "json")]
+impl<T> Json<T> {
+    /// Calls `JSON.<name>(arg)`
+    fn json<'gc>(a: &mut Agent<'gc, '_>, name: &str, arg: Value<'gc>) -> Result<Value<'gc>, Error> {
+        let json = a.get_named(a.realm.global.into(), "JSON")?;
+        let f = a.get_named(json, name)?;
+        a.call(f, json, &[arg])
+    }
+}
+
+#[cfg(feature = "json")]
+impl<'gc, T: serde::de::DeserializeOwned> FromJs<'gc> for Json<T> {
+    fn from_js(a: &mut Agent<'gc, '_>, v: Value<'gc>) -> Result<Self, Error> {
+        let text = Self::json(a, "stringify", v)?;
+        let text = String::from(&**a.to_string(text)?);
+        serde_json::from_str(&text).map(Self).map_err(|e| a.throw(ErrorKind::Type, &alloc::format!("cannot read this value: {e}")))
+    }
+}
+
+#[cfg(feature = "json")]
+impl<'gc, T: serde::Serialize> IntoJs<'gc> for Json<T> {
+    fn into_js(self, a: &mut Agent<'gc, '_>) -> Result<Value<'gc>, Error> {
+        let text = serde_json::to_string(&self.0).map_err(|e| a.throw(ErrorKind::Type, &alloc::format!("cannot write this value: {e}")))?;
+        let s = a.string(&text);
+        Self::json(a, "parse", s.into())
     }
 }

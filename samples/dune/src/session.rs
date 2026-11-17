@@ -44,7 +44,10 @@ impl<'p> Session<'p> {
                 std::process::exit(1);
             }
         };
-        rt.enter(|a| Node::argv(a, script, args));
+        if let Err(e) = Node::argv(&mut rt, script, args) {
+            eprintln!("dune: setting up process failed: {e}");
+            std::process::exit(1);
+        }
         Self { rt }
     }
 

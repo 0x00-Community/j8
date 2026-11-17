@@ -180,3 +180,42 @@ fn async_bindings_settle_on_the_event_loop() {
     let r = bare.eval("try { later.double(1); 'no' } catch (e) { e instanceof TypeError }", "t.js").expect("runs");
     assert_eq!(bare.text(&r), "true");
 }
+
+#[cfg(feature = "json")]
+mod json {
+    use j8::Json;
+    use j8executor::Executor;
+    use j8platform::DefaultPlatform;
+
+    #[derive(serde::Serialize, serde::Deserialize)]
+    struct Point {
+        x: f64,
+        y: f64,
+        tags: Vec<String>,
+    }
+
+    struct Geo;
+
+    #[j8::object("geo")]
+    impl Geo {
+        fn mirror(p: Json<Point>) -> Json<Point> {
+            let Point { x, y, mut tags } = p.0;
+            tags.push(String::from("mirrored"));
+            Json(Point { x: -x, y: -y, tags })
+        }
+    }
+
+    j8::runtime! {
+        Maps {
+            globals: [Geo],
+        }
+    }
+
+    #[test]
+    fn json_values_cross_through_serde() {
+        let platform = Maps::platform(DefaultPlatform::default());
+        let mut rt = Maps::runtime(&platform, Executor::default()).expect("runtime");
+        let r = rt.eval("const m = geo.mirror({ x: 1, y: -2, tags: ['a'] }); let bad; try { geo.mirror({ x: 'no' }); } catch (e) { bad = e instanceof TypeError; } [m.x, m.y, m.tags.join('+'), bad].join()", "t.js").expect("runs");
+        assert_eq!(rt.text(&r), "-1,2,a+mirrored,true");
+    }
+}

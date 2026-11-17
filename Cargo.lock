@@ -382,6 +382,7 @@ dependencies = [
  "j8platform",
  "j8taskqueue",
  "j8virtasm",
+ "serde",
 ]
 
 [[package]]
@@ -390,6 +391,8 @@ version = "0.2.0"
 dependencies = [
  "j8framework",
  "j8lockfree",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

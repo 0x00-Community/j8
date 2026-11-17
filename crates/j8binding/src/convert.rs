@@ -190,3 +190,25 @@ impl<'gc, T: IntoJs<'gc>> IntoJs<'gc> for Result<T, Error> {
         self?.into_js(a)
     }
 }
+
+/// A string-keyed map ⇒ a plain object (data properties in the map's iteration order)
+fn object_of<'gc, T: IntoJs<'gc>>(a: &mut Agent<'gc, '_>, entries: impl IntoIterator<Item = (String, T)>) -> Result<Value<'gc>, Error> {
+    let o = a.object();
+    for (k, v) in entries {
+        let v = v.into_js(a)?;
+        o.borrow_mut(a.mc).define(&k, j8framework::Property::data(v));
+    }
+    Ok(o.into())
+}
+
+impl<'gc, T: IntoJs<'gc>> IntoJs<'gc> for alloc::collections::BTreeMap<String, T> {
+    fn into_js(self, a: &mut Agent<'gc, '_>) -> Result<Value<'gc>, Error> {
+        object_of(a, self)
+    }
+}
+
+impl<'gc, T: IntoJs<'gc>, S> IntoJs<'gc> for std::collections::HashMap<String, T, S> {
+    fn into_js(self, a: &mut Agent<'gc, '_>) -> Result<Value<'gc>, Error> {
+        object_of(a, self)
+    }
+}

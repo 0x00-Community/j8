@@ -147,6 +147,22 @@ impl<'p> Runtime<'p> {
         })
     }
 
+    /// Defines `value` (converted with `IntoJs`) as a data property at a dotted path from the global object:
+    /// `rt.set("process.argv", args)` sets `argv` on the existing global `process`
+    pub fn set<V: for<'g> crate::IntoJs<'g>>(&mut self, path: &str, value: V) -> Result<(), Error> {
+        self.enter(|a| {
+            let (holder, key) = path.rsplit_once('.').unwrap_or(("", path));
+            let mut target: Value<'_> = a.realm.global.into();
+            for part in holder.split('.').filter(|p| !p.is_empty()) {
+                target = a.get_named(target, part)?;
+            }
+            let Some(o) = target.as_object() else { return Err(a.throw(ErrorKind::Type, &format!("{holder} is not an object"))) };
+            let v = value.into_js(a)?;
+            o.borrow_mut(a.mc).define(key, j8framework::Property::data(v));
+            Ok(())
+        })
+    }
+
     pub fn isolate(&mut self) -> &mut Isolate<'p> {
         &mut self.isolate
     }
