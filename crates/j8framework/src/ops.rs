@@ -358,7 +358,7 @@ impl<'gc> Agent<'gc, '_> {
 
     /// Same as [`object`](Self::object), reserving slots for `capacity` properties (literals)
     pub fn object_with(&self, capacity: usize) -> JsObject<'gc> {
-        ObjectData { proto: Some(self.realm.object_proto), capacity, ..ObjectData::default() }.alloc(self.mc)
+        ObjectData::ordinary(self.mc, Some(self.realm.object_proto), capacity)
     }
 
     /// An array with `Array.prototype` as its prototype.

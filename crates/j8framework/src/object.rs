@@ -822,6 +822,24 @@ pub struct ObjectData<'gc> {
 }
 
 impl<'gc> ObjectData<'gc> {
+    /// An ordinary object with nothing but a prototype and room for `capacity` properties (`this` of a construct
+    /// call, object literals): what [`ObjectData::alloc`] would build, without working out the kind
+    pub fn ordinary(mc: &Mutation<'gc>, proto: Option<JsObject<'gc>>, capacity: usize) -> JsObject<'gc> {
+        mc.alloc(Object {
+            proto: GcSlot::from(proto),
+            call: GcSlot::default(),
+            props: crate::Props::with_capacity(mc, capacity),
+            elements: crate::ValueArray::default(),
+            class: AtomicU8::new(Class::ORDINARY | Class::PLAIN | Class::UNIT_ORDINARY),
+            non_extensible: AtomicBool::new(false),
+            length_readonly: AtomicBool::new(false),
+            digit_keys: AtomicBool::new(false),
+            sparse_length: AtomicU32::new(0),
+            shape_root: j8lockfree::OnceBox::default(),
+            data: GcCell::empty(),
+        })
+    }
+
     pub fn alloc(self, mc: &Mutation<'gc>) -> JsObject<'gc> {
         let Self { kind, capacity, elements, symbols, privates, proto, sparse_length, non_extensible, length_readonly } = self;
         let state = ObjectState { kind, symbols, privates };

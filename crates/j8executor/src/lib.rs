@@ -659,7 +659,7 @@ impl Executor {
             _ => a.get_named(new_target, "prototype")?,
         };
         let proto = if let Some(p) = proto.as_object() { p } else { a.realm.object_proto };
-        Ok(ObjectData { proto: Some(proto), capacity: usize::from(ctor.instance_size.get()), ..ObjectData::default() }.alloc(a.mc))
+        Ok(ObjectData::ordinary(a.mc, Some(proto), usize::from(ctor.instance_size.get())))
     }
 
     /// `super(args)` in a derived constructor: constructs the parent class (`new.target` unchanged), initializes
