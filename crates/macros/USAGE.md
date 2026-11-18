@@ -1,100 +1,11 @@
 # j8macros usage
 
-## `enums!("x.json")`
+## `bytecodes!("v8.json")`
 
-Generates enums and structs from a JSON file under the calling crate's root directory (`CARGO_MANIFEST_DIR`). The JSON is the
-single source of truth: ⛔ do not hand-write these types; to change instructions, change only the JSON.
-The caller is rebuilt automatically whenever the JSON changes (the generated code `include_bytes!`s it); unknown fields
-are errors.
-
-```rust
-j8macros::enums!("insn.json");
-```
-
-Types used by the generated code (`Reg`, `Label`, `BinaryOp`, ...) must be in scope at the call site.
-
-### JSON format
-
-Only definitions: there is no text form (no `Display` / assembly is generated); the serialized form is `binary` below.
-
-```json
-{
-  "enums": [
-    {
-      "name": "Insn",
-      "doc": "An instruction.",
-      "derive": ["Clone", "Copy", "Debug", "PartialEq"],
-      "repr": "u16",
-      "accessors": [{"name": "target_mut", "ty": "Label", "doc": "Jump target"}],
-      "variants": [
-        {"name": "Ldar", "doc": "acc = reg", "fields": [{"ty": "Reg"}]},
-        {"name": "Jump", "fields": [{"ty": "Label"}]},
-        {"name": "Call", "fields": [{"name": "callee", "ty": "Reg"}, {"name": "argc", "ty": "u16"}]},
-        {"name": "CreateClass", "fields": [{"name": "func", "ty": "u32"}, {"name": "parent", "ty": "Option<Reg>"}]}
-      ]
-    }
-  ]
-}
-```
-
-| Key | Level | Meaning |
-|---|---|---|
-| `name` / `doc` | enum | Enum name and docs (required) |
-| `derive` | enum | Passed as-is into `#[derive(...)]`; leave out traits that are written by hand (e.g. a bitwise `PartialEq`) |
-| `repr` | enum | Integer type of the discriminant, passed as-is into `#[repr(..)]` (e.g. `"u16"`); if omitted, the compiler chooses and may use a niche in a field for the encoding (reading the discriminant then costs a few extra instructions) |
-| `accessors` | enum | Generate `pub fn name(&mut self) -> Option<&mut ty>`: the first field of type `ty` in each variant, `None` if there is none. This is how `target_mut` (`ty: Label`) is produced, so adding an instruction with a `Label` field automatically makes it count as a jump |
-| `name` / `doc` | variant | Variant name and docs |
-| `default` | variant | `#[default]` |
-| `fields` | variant | Field list (`name`, `ty`); all with `name` ⇒ struct variant, none with `name` ⇒ tuple variant; mixing is an error |
-
-Structs go under `"structs"` (all fields `pub`):
-
-```json
-"structs": [
-  {"name": "Reg", "doc": "Register.", "derive": ["Clone", "Copy"],
-   "consts": [{"name": "THIS", "ty": "Reg", "value": "Reg(0)"}], "fields": [{"ty": "u16"}]},
-  {"name": "Module", "doc": "A module.", "derive": ["Clone", "Debug", "Default"],
-   "fields": [{"name": "functions", "ty": "Vec<Function>", "doc": "Function 0 is the script"}]}
-]
-```
-
-| Key | Level | Meaning |
-|---|---|---|
-| `name` / `doc` / `derive` | struct | As for enums |
-| `consts` | struct | `pub const name: ty = value;` (`value` is a Rust expression), with optional `doc` |
-| `fields` | struct | `name` (all or none: named or tuple struct), `ty`, optional `doc` |
-
-### Binary form: `"binary": true`
-
-At the top level of the JSON, `"binary": true` generates `impl Binary` for every enum and struct, plus
-`pub const SCHEMA: u64` (FNV-1a 64 of the JSON text: a binary records it and only reads back under the same
-definitions).
-
-- Enum: one byte tag = the variant's position in the JSON (at most 256 variants), then the fields in order; decoding
-  is `match r.byte()? { 0 => …, 1 => …, tag => Err(BinError::Tag(..)) }`, an integer dispatch
-- Struct: the fields in order
-
-The call site provides `Binary` (`encode(&self, &mut Vec<u8>)` / `decode(&mut Reader) -> Result<Self, BinError>`),
-`Reader` (with `byte()`) and `BinError` (with `Tag(&'static str, u8)`), and implements `Binary` for every field type
-not defined in the JSON (j8bytecode: `src/bin.rs`).
-
-Also generated with `binary`:
-
-- `Fixed` (`const SIZE` / `read(&[u8])`, reading at a constant offset) for every type whose encoding has a fixed
-  size: all-unit enums, structs of fixed fields (the caller implements it for the primitives)
-- On an enum with `"opcodes": "Opcode"`: a field-less `#[repr(u8)]` enum `Opcode` (discriminant = tag) with
-  `Opcode::at(code, pc)`, and on the enum `WINDOW` (the largest fixed-size encoding), `PAD` (`WINDOW - 1`, the zero
-  bytes code carries after its last instruction) and `decode_at(code, pc) -> (Self, next)`: one bounds check for the
-  window, then fixed-size variants read every field at a constant offset; the others go through `Binary`
-
-## `dispatch!(Opcode::at(code, pc), { prelude }, match insn { arms })`
-
-An interpreter's instruction `match`, dispatched once on the opcode. The arms are written against the decoded
-instruction as usual (`Insn::Ldar(x) => …`; or-patterns and guards allowed, ⛔ `_` / bindings: every arm names its
-variants). The expansion matches on the opcode; each case runs `prelude` (which decodes, e.g.
-`let insn; (insn, f.pc) = func.insn_at(f.pc);`) and then only the arms that can match that opcode, in their original
-order. With the opcode known, the inlined `decode_at` folds down to reading that instruction's fields, so there is
-one indirect jump per instruction instead of two. Opcodes with the same arms share a case.
+Generates j8bytecode's bytecode tables from `crates/j8bytecode/v8.json`, which `tools/v8bytecodes.py <v8 checkout>`
+writes from V8's `src/interpreter/bytecodes.h` and `bytecode-operands.h`: `Bytecode` (`repr(u8)`, V8's numbering),
+`OperandType`, `OperandTypeInfo`, `ImplicitRegisterUse`, and per bytecode `operand_types()` /
+`implicit_register_use()`. ⛔ edit the JSON or the generated tables by hand: regenerate from a V8 checkout.
 
 ## Binding macros: `#[j8::class]` / `#[j8::object]` / `#[j8::function]`
 

@@ -1,6 +1,6 @@
 [package]
 name = "j8bytecode"
-description = "j8 virtual instruction set: bytecode definitions (generated from JSON), assembler / disassembler; the dependency root of j8"
+description = "j8 bytecode: V8's Ignition bytecode byte for byte (tables generated from V8's headers), encoder / decoder; the dependency root of j8"
 readme = "README.md"
 version.workspace = true
 edition.workspace = true

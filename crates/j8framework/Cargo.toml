@@ -9,7 +9,6 @@ repository.workspace = true
 
 [dependencies]
 paragc.workspace = true
-j8bytecode.workspace = true
 j8macros.workspace = true
 j8lockfree.workspace = true
 j8taskqueue.workspace = true

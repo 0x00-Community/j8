@@ -1,20 +1,16 @@
 //! j8macros: procedural macros for j8.
 //!
-//! `enums!("x.json")`: generates enums (definitions, field access by type), structs and their binary encoding from a JSON file
-//! under the calling crate's root directory. The JSON is the single source of truth; ⛔ do not hand-write these types.
-//! See `USAGE.md` for the format.
+//! `bytecodes!("v8.json")`: V8's bytecode tables (written by tools/v8bytecodes.py from V8's interpreter headers) as
+//! Rust, for j8bytecode. The JSON is the single source of truth; ⛔ hand-written bytecode tables.
 //!
 //! `#[class]` / `#[object]` / `#[function]`: Rust ⇄ JS bindings (used through the facade crate `j8`:
 //! `#[j8::class]` etc.); see `USAGE.md`.
+mod bytecodes;
 mod class;
-mod dispatch;
-mod expand;
 mod function;
 mod heap;
 mod method;
 mod object;
-mod spec;
-mod threaded;
 mod trace;
 
 use proc_macro::TokenStream;
@@ -69,39 +65,9 @@ pub fn heap(attr: TokenStream, item: TokenStream) -> TokenStream {
     heap::expand(&attr.into(), item).unwrap_or_else(syn::Error::into_compile_error).into()
 }
 
-/// `threaded!(TABLE: Handler, Opcode, invalid, fn template(..) { .. __arms!() .. } match insn { arms })`: one handler
-/// function per opcode plus a table indexed by the opcode byte (threaded code; see `threaded.rs`).
+/// `bytecodes!("v8.json")`: V8's bytecode tables (from tools/v8bytecodes.py) as Rust (see `bytecodes.rs`).
 #[proc_macro]
-pub fn threaded(input: TokenStream) -> TokenStream {
-    let t = parse_macro_input!(input as threaded::Threaded);
-    t.expand().unwrap_or_else(syn::Error::into_compile_error).into()
-}
-
-/// `dispatch!(Opcode::at(code, pc), { prelude }, match insn { arms })`: an interpreter's instruction `match`
-/// dispatched once on the opcode (see `dispatch.rs` and USAGE.md).
-#[proc_macro]
-pub fn dispatch(input: TokenStream) -> TokenStream {
-    let d = parse_macro_input!(input as dispatch::Dispatch);
-    d.expand().unwrap_or_else(syn::Error::into_compile_error).into()
-}
-
-/// Reads the JSON at `$CARGO_MANIFEST_DIR/<path>` and generates all the enums in it.
-/// The generated code `include_bytes!`s the file, so the caller is rebuilt whenever the JSON changes.
-#[proc_macro]
-pub fn enums(input: TokenStream) -> TokenStream {
+pub fn bytecodes(input: TokenStream) -> TokenStream {
     let rel = parse_macro_input!(input as LitStr);
-    expand(&rel).unwrap_or_else(syn::Error::into_compile_error).into()
-}
-
-fn expand(rel: &LitStr) -> syn::Result<proc_macro2::TokenStream> {
-    let dir = std::env::var("CARGO_MANIFEST_DIR").map_err(|e| syn::Error::new(rel.span(), e))?;
-    let path = std::path::Path::new(&dir).join(rel.value());
-    let text = std::fs::read_to_string(&path).map_err(|e| syn::Error::new(rel.span(), format_args!("{}: {e}", path.display())))?;
-    let spec: spec::Spec = serde_json::from_str(&text).map_err(|e| syn::Error::new(rel.span(), format_args!("{}: {e}", path.display())))?;
-    let body = spec.expand(&text)?;
-    let path = path.to_string_lossy();
-    Ok(quote::quote! {
-        const _: &[u8] = include_bytes!(#path);
-        #body
-    })
+    bytecodes::Tables::read(&rel).and_then(|t| t.expand(&rel)).unwrap_or_else(syn::Error::into_compile_error).into()
 }

@@ -5,7 +5,6 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::{Gc};
-use j8bytecode::{BinaryOp, CompareOp, UnaryOp};
 
 use num_traits::Zero;
 
@@ -32,8 +31,48 @@ pub enum Hint {
     String,
 }
 
-/// Spec semantics of binary operations and comparisons on two numbers (the operation enums are defined in
-/// [`j8bytecode`]).
+/// Binary operations (the result is a value).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum BinaryOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Rem,
+    Exp,
+    BitAnd,
+    BitOr,
+    BitXor,
+    Shl,
+    Shr,
+    UShr,
+}
+
+/// Comparisons (the result is a boolean).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum CompareOp {
+    Eq,
+    Ne,
+    StrictEq,
+    StrictNe,
+    Lt,
+    Gt,
+    Le,
+    Ge,
+}
+
+/// Unary operations.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum UnaryOp {
+    Neg,
+    Plus,
+    Not,
+    BitNot,
+    Typeof,
+    Void,
+}
+
+/// Spec semantics of binary operations and comparisons on two numbers.
 pub trait Numbers {
     type Output;
     fn numbers(self, a: f64, b: f64) -> Self::Output;
