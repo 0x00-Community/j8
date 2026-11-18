@@ -80,7 +80,7 @@ fn expand(rel: &LitStr) -> syn::Result<proc_macro2::TokenStream> {
     let path = std::path::Path::new(&dir).join(rel.value());
     let text = std::fs::read_to_string(&path).map_err(|e| syn::Error::new(rel.span(), format_args!("{}: {e}", path.display())))?;
     let spec: spec::Spec = serde_json::from_str(&text).map_err(|e| syn::Error::new(rel.span(), format_args!("{}: {e}", path.display())))?;
-    let body = spec.expand()?;
+    let body = spec.expand(&text)?;
     let path = path.to_string_lossy();
     Ok(quote::quote! {
         const _: &[u8] = include_bytes!(#path);

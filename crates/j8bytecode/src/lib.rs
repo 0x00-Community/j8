@@ -5,13 +5,16 @@
 //! `j8macros::enums!`.
 //!
 //! Assembly / disassembly: `text.parse::<Module>()` / `module.to_string()`, inverses of each other.
+//! Binary form: `Vec::<u8>::from(&module)` / `Module::try_from(bytes)`; `Module::is_binary` tells it apart by the magic.
 extern crate alloc;
 
 mod asm;
+mod bin;
 mod disasm;
 mod fuse;
 mod insn;
 
 pub use asm::AsmError;
+pub use bin::{BinError, Binary, Reader};
 pub use fuse::Unfused;
 pub use insn::{BinaryOp, CompareOp, Const, Constant, EvalName, EvalScope, Function, FunctionKind, Insn, Label, Mode, Module, PropertyKind, Reg, UnaryOp};

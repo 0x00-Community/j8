@@ -10,6 +10,10 @@ dependency root of j8: it depends on no other j8 crate (only the `j8macros` proc
   instructions `Insn`, operators `BinaryOp` / `CompareOp` / `UnaryOp`, `Constant`, `FunctionKind`, `PropertyKind`,
   `Mode`, and the structs `Reg` / `Label` / `Const` / `EvalName` / `EvalScope` / `Function` / `Module`
 - Assembling and disassembling are exact inverses: `text.parse::<Module>()` / `module.to_string()`
+- Binary form, lossless and much faster to load than the listing: `Vec::<u8>::from(&module)` /
+  `Module::try_from(bytes)`. It starts with `Module::MAGIC` (`\0j8b`; `Module::is_binary` checks it) and the
+  instruction-set fingerprint `SCHEMA`, so bytecode from another `insn.json` is rejected. Instructions are a
+  one-byte opcode then fixed-width little-endian operands, all generated from `insn.json`
 - Peephole fusion of instruction pairs: `Function::fuse`
 
 ## Usage
@@ -19,9 +23,12 @@ use j8compiler::Compile;
 let module = j8bytecode::Module::compile(&source, j8framework::CodeKind::Script)?; // JS ⇒ bytecode is j8compiler
 println!("{module}");                       // the disassembly listing
 let again: j8bytecode::Module = module.to_string().parse()?;
+let bytes = Vec::<u8>::from(&module);       // binary form
+let again = j8bytecode::Module::try_from(bytes.as_slice())?;
 ```
 
-The `j8dbg` tool (`debugger/`) prints and assembles listings from the command line.
+The `j8dbg` tool (`debugger/`) prints and assembles listings from the command line; `j8dbg asm` also reads the binary
+form (told apart by the magic), and `--binary` writes it.
 
 ## License
 

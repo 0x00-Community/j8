@@ -77,6 +77,20 @@ Structs go under `"structs"` (all fields `pub`):
 | `consts` | struct | `pub const name: ty = value;` (`value` is a Rust expression), with optional `doc` |
 | `fields` | struct | `name` (all or none: named or tuple struct), `ty`, optional `doc` |
 
+### Binary form: `"binary": true`
+
+At the top level of the JSON, `"binary": true` generates `impl Binary` for every enum and struct, plus
+`pub const SCHEMA: u64` (FNV-1a 64 of the JSON text: a binary records it and only reads back under the same
+definitions).
+
+- Enum: one byte tag = the variant's position in the JSON (at most 256 variants), then the fields in order; decoding
+  is `match r.byte()? { 0 => …, 1 => …, tag => Err(BinError::Tag(..)) }`, an integer dispatch
+- Struct: the fields in order
+
+The call site provides `Binary` (`encode(&self, &mut Vec<u8>)` / `decode(&mut Reader) -> Result<Self, BinError>`),
+`Reader` (with `byte()`) and `BinError` (with `Tag(&'static str, u8)`), and implements `Binary` for every field type
+not defined in the JSON (j8bytecode: `src/bin.rs`).
+
 ## Binding macros: `#[j8::class]` / `#[j8::object]` / `#[j8::function]`
 
 Each of the three macros has its own file (`class.rs` / `object.rs` / `function.rs`); the shared code that reads

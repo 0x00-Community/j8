@@ -9,6 +9,9 @@ JavaScript（那是 `j8compiler`）。它是 j8 的依赖根：不依赖任何�
   `BinaryOp` / `CompareOp` / `UnaryOp`、`Constant`、`FunctionKind`、`PropertyKind`、`Mode`，以及结构体
   `Reg` / `Label` / `Const` / `EvalName` / `EvalScope` / `Function` / `Module`
 - 汇编与反汇编互为逆：`text.parse::<Module>()` / `module.to_string()`
+- 二进制形式，无损、加载比清单快得多：`Vec::<u8>::from(&module)` / `Module::try_from(bytes)`。开头是
+  `Module::MAGIC`（`\0j8b`，`Module::is_binary` 只看它）和指令集指纹 `SCHEMA`，别的 `insn.json` 出的字节码直接拒。
+  指令是一字节操作码加定宽小端操作数，全部由 `insn.json` 生成
 - 相邻指令窥孔融合：`Function::fuse`
 
 ## 用法
@@ -18,9 +21,11 @@ use j8compiler::Compile;
 let module = j8bytecode::Module::compile(&source, j8framework::CodeKind::Script)?; // JS ⇒ 字节码归 j8compiler
 println!("{module}");                       // 反汇编清单
 let again: j8bytecode::Module = module.to_string().parse()?;
+let bytes = Vec::<u8>::from(&module);       // 二进制形式
+let again = j8bytecode::Module::try_from(bytes.as_slice())?;
 ```
 
-命令行工具 `j8dbg`（`debugger/`）可以打印、汇编清单。
+命令行工具 `j8dbg`（`debugger/`）可以打印、汇编清单；`j8dbg asm` 也读二进制形式（按魔数区分），`--binary` 输出二进制。
 
 ## 许可
 

@@ -17,9 +17,9 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// JS ⇒ bytecode, print the disassembly listing
+    /// JS ⇒ bytecode, print the disassembly listing (or `--binary` the binary form)
     Disasm(Disasm),
-    /// Assemble a disassembly listing, print the normalized listing
+    /// Read a listing or the binary form, print the normalized listing (or `--binary` the binary form)
     Asm(Asm),
 }
 

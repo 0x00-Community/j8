@@ -10,9 +10,26 @@ fn err(msg: impl core::fmt::Display) -> Error {
     Error::new(Span::call_site(), msg)
 }
 
+/// FNV-1a 64 offset basis / prime
+const FNV_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+
 impl Spec {
-    pub fn expand(&self) -> Result<TokenStream> {
-        self.enums.iter().map(EnumSpec::expand).chain(self.structs.iter().map(StructSpec::expand)).collect()
+    /// `json` is the file's text (fingerprinted into `SCHEMA` when `binary` is on)
+    pub fn expand(&self, json: &str) -> Result<TokenStream> {
+        let types: TokenStream = self.enums.iter().map(EnumSpec::expand).chain(self.structs.iter().map(StructSpec::expand)).collect::<Result<_>>()?;
+        if !self.binary {
+            return Ok(types);
+        }
+        let schema = json.bytes().fold(FNV_BASIS, |h, b| (h ^ u64::from(b)).wrapping_mul(FNV_PRIME));
+        let binary: TokenStream = self.enums.iter().map(EnumSpec::binary_impl).chain(self.structs.iter().map(StructSpec::binary_impl)).collect::<Result<_>>()?;
+        Ok(quote! {
+            #types
+            /// Fingerprint of the JSON definitions (FNV-1a 64 of the file): written into every binary, which only reads
+            /// back under the same definitions
+            pub const SCHEMA: u64 = #schema;
+            #binary
+        })
     }
 }
 
@@ -193,6 +210,43 @@ impl EnumSpec {
             impl Operand for #ident {
                 fn operand(text: &str) -> ::core::result::Result<Self, AsmError> {
                     match text { #(#arms)* _ => Err(AsmError::Operand(text.into())) }
+                }
+            }
+        })
+    }
+}
+
+impl EnumSpec {
+    /// `Binary`: a one-byte tag (the variant's position in the JSON), then the fields in order. Decoding dispatches on
+    /// the tag as an integer
+    fn binary_impl(&self) -> Result<TokenStream> {
+        let ident = self.ident();
+        let name = &self.name;
+        let mut encode = Vec::new();
+        let mut decode = Vec::new();
+        for (tag, v) in self.variants.iter().enumerate() {
+            let tag = u8::try_from(tag).map_err(|_| err(format_args!("{}: `binary` takes at most 256 variants", self.name)))?;
+            let pattern = v.pattern(self)?;
+            let b = v.bindings();
+            encode.push(quote! { #pattern => { out.push(#tag); #(Binary::encode(#b, out);)* } });
+            let vi = v.ident();
+            let values = b.iter().map(|_| quote! { Binary::decode(r)? });
+            decode.push(match v.named(self)? {
+                None => quote! { #tag => Self::#vi, },
+                Some(true) => quote! { #tag => Self::#vi { #(#b: #values),* }, },
+                Some(false) => quote! { #tag => Self::#vi ( #(#values),* ), },
+            });
+        }
+        Ok(quote! {
+            impl Binary for #ident {
+                fn encode(&self, out: &mut ::alloc::vec::Vec<u8>) {
+                    match self { #(#encode)* }
+                }
+                fn decode(r: &mut Reader<'_>) -> ::core::result::Result<Self, BinError> {
+                    Ok(match r.byte()? {
+                        #(#decode)*
+                        tag => return Err(BinError::Tag(#name, tag)),
+                    })
                 }
             }
         })
@@ -393,6 +447,29 @@ impl StructSpec {
             pub struct #ident #body
             #consts
             #prefixed
+        })
+    }
+
+    /// `Binary`: the fields in order
+    fn binary_impl(&self) -> Result<TokenStream> {
+        let ident = format_ident!("{}", self.name);
+        let (encode, decode) = match self.named()? {
+            None => (vec![quote! { let _ = out; }], quote! { { let _ = r; Self } }),
+            Some(true) => {
+                let names: Vec<Ident> = self.fields.iter().filter_map(|f| f.name.as_deref()).map(|n| format_ident!("{n}")).collect();
+                (names.iter().map(|n| quote! { Binary::encode(&self.#n, out); }).collect(), quote! { Self { #(#names: Binary::decode(r)?),* } })
+            }
+            Some(false) => {
+                let index: Vec<syn::Index> = (0..self.fields.len()).map(syn::Index::from).collect();
+                let values = index.iter().map(|_| quote! { Binary::decode(r)? });
+                (index.iter().map(|i| quote! { Binary::encode(&self.#i, out); }).collect(), quote! { Self ( #(#values),* ) })
+            }
+        };
+        Ok(quote! {
+            impl Binary for #ident {
+                fn encode(&self, out: &mut ::alloc::vec::Vec<u8>) { #(#encode)* }
+                fn decode(r: &mut Reader<'_>) -> ::core::result::Result<Self, BinError> { Ok(#decode) }
+            }
         })
     }
 

@@ -6,6 +6,11 @@ use serde::Deserialize;
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Spec {
+    /// Generate `Binary` (binary encoding) for every enum and struct, plus `pub const SCHEMA: u64` (a fingerprint of
+    /// the JSON: binaries written under another definition are rejected). The caller provides `Binary`, `Reader` and
+    /// `BinError`, and `Binary` for the field types not defined in the JSON
+    #[serde(default)]
+    pub binary: bool,
     #[serde(default)]
     pub enums: Vec<EnumSpec>,
     #[serde(default)]

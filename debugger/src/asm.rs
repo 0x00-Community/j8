@@ -20,28 +20,39 @@ pub struct Io {
 }
 
 impl Io {
-    /// Input text and the file name used in errors
-    fn input(&self) -> Result<(String, String), String> {
+    /// Input bytes and the file name used in errors
+    fn bytes(&self) -> Result<(Vec<u8>, String), String> {
         match (&self.eval, &self.file) {
-            (Some(code), _) => Ok((code.clone(), "<eval>".into())),
+            (Some(code), _) => Ok((code.clone().into_bytes(), "<eval>".into())),
             (None, Some(p)) if p.as_os_str() == "-" => {
-                let mut text = String::new();
-                std::io::stdin().read_to_string(&mut text).map_err(|e| format!("<stdin>: {e}"))?;
-                Ok((text, "<stdin>".into()))
+                let mut bytes = Vec::new();
+                std::io::stdin().read_to_end(&mut bytes).map_err(|e| format!("<stdin>: {e}"))?;
+                Ok((bytes, "<stdin>".into()))
             }
             (None, Some(p)) => {
-                let text = std::fs::read_to_string(p).map_err(|e| format!("{}: {e}", p.display()))?;
-                Ok((text, p.display().to_string()))
+                let bytes = std::fs::read(p).map_err(|e| format!("{}: {e}", p.display()))?;
+                Ok((bytes, p.display().to_string()))
             }
             (None, None) => unreachable!("clap requires file or --eval"),
         }
     }
 
-    fn write(&self, listing: &str) -> Result<(), String> {
+    /// Input text and the file name used in errors
+    fn input(&self) -> Result<(String, String), String> {
+        let (bytes, file) = self.bytes()?;
+        String::from_utf8(bytes).map(|t| (t, file.clone())).map_err(|e| format!("{file}: {e}"))
+    }
+
+    fn write(&self, out: &[u8]) -> Result<(), String> {
         match &self.output {
-            Some(p) => std::fs::write(p, listing).map_err(|e| format!("{}: {e}", p.display())),
-            None => std::io::stdout().lock().write_all(listing.as_bytes()).map_err(|e| e.to_string()),
+            Some(p) => std::fs::write(p, out).map_err(|e| format!("{}: {e}", p.display())),
+            None => std::io::stdout().lock().write_all(out).map_err(|e| e.to_string()),
         }
+    }
+
+    /// The listing, or with `binary` the binary form
+    fn module(&self, module: &Module, binary: bool) -> Result<(), String> {
+        if binary { self.write(&Vec::from(module)) } else { self.write(module.to_string().as_bytes()) }
     }
 }
 
@@ -50,27 +61,39 @@ impl Io {
 pub struct Disasm {
     #[command(flatten)]
     io: Io,
+    /// Write the binary form instead of the listing
+    #[arg(short, long)]
+    binary: bool,
 }
 
 impl Disasm {
     pub fn run(&self) -> Result<(), String> {
         let (text, file) = self.io.input()?;
         let module = <Module as j8compiler::Compile>::compile(&Source { text: &text, file: &file }, j8framework::CodeKind::Script).map_err(|e| e.to_string())?;
-        self.io.write(&module.to_string())
+        self.io.module(&module, self.binary)
     }
 }
 
-/// `j8dbg asm`: assemble a disassembly listing (the output of `j8dbg disasm`) and print the normalized listing.
+/// `j8dbg asm`: read bytecode, a listing (the output of `j8dbg disasm`) or the binary form (told apart by
+/// `Module::MAGIC`), and print the normalized listing.
 #[derive(Args)]
 pub struct Asm {
     #[command(flatten)]
     io: Io,
+    /// Write the binary form instead of the listing
+    #[arg(short, long)]
+    binary: bool,
 }
 
 impl Asm {
     pub fn run(&self) -> Result<(), String> {
-        let (text, file) = self.io.input()?;
-        let module = text.parse::<Module>().map_err(|e| format!("{file}: {e}"))?;
-        self.io.write(&module.to_string())
+        let (bytes, file) = self.io.bytes()?;
+        let module = if Module::is_binary(&bytes) {
+            Module::try_from(bytes.as_slice()).map_err(|e| format!("{file}: {e}"))?
+        } else {
+            let text = std::str::from_utf8(&bytes).map_err(|e| format!("{file}: {e}"))?;
+            text.parse::<Module>().map_err(|e| format!("{file}: {e}"))?
+        };
+        self.io.module(&module, self.binary)
     }
 }
