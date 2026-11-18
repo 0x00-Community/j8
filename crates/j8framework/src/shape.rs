@@ -27,6 +27,9 @@ const INDEX_AFTER: u32 = 4;
 /// A shared shape has at most this many keys; adding more converts to a dictionary shape (overly long transition chains
 /// aren't worth it)
 const MAX_FAST: usize = 64;
+/// How many property values live inside the object itself (the rest go to the store): small objects need no second
+/// allocation and no indirection
+const INLINE: usize = 4;
 
 /// Property attributes (whether it is data or an accessor depends on what the slot holds).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -192,33 +195,43 @@ pub struct Props<'gc> {
     store: GcSlot<'gc, Erased>,
     dict: GcSlot<'gc, GcCell<'gc, Dict<'gc>>>,
     anchor: GcSlot<'gc, Anchor>,
+    /// Values of entries `0..INLINE` (entry `i` ≥ `INLINE` is cell `i − INLINE` of the store)
+    inline: [ValueCell<'gc>; INLINE],
 }
 
 impl Default for Props<'_> {
     fn default() -> Self {
-        Self { shape: AtomicPtr::new(core::ptr::null_mut()), store: GcSlot::default(), dict: GcSlot::default(), anchor: GcSlot::default() }
+        Self {
+            shape: AtomicPtr::new(core::ptr::null_mut()),
+            store: GcSlot::default(),
+            dict: GcSlot::default(),
+            anchor: GcSlot::default(),
+            inline: core::array::from_fn(|_| ValueCell::new(Value::Undefined)),
+        }
     }
 }
 
-// SAFETY: the three slots are the edges (the shape is not on the heap)
+// SAFETY: the three slots and the inline cells are the edges (the shape is not on the heap)
 unsafe impl crate::Trace for Props<'_> {
     fn trace(&self, t: &mut crate::Tracer<'_>) {
         self.store.trace(t);
         self.dict.trace(t);
         self.anchor.trace(t);
+        self.inline.iter().for_each(|c| c.trace(t));
     }
 
     fn relocate(&mut self, t: &mut crate::Tracer<'_>) {
         self.store.relocate(t);
         self.dict.relocate(t);
         self.anchor.relocate(t);
+        self.inline.iter_mut().for_each(|c| c.relocate(t));
     }
 }
 
 impl<'gc> Props<'gc> {
     /// Empty, with room for `n` values already (an object literal knows how many it gets)
     pub fn with_capacity(mc: &Mutation<'gc>, n: usize) -> Self {
-        let store = (n > 0).then(|| Store::reserve(mc, n).gc());
+        let store = (n > INLINE).then(|| Store::reserve(mc, n - INLINE).gc());
         Self { store: GcSlot::from(store), ..Self::default() }
     }
 
@@ -229,6 +242,15 @@ impl<'gc> Props<'gc> {
     fn store(&self) -> Option<Store<'gc>> {
         // SAFETY: only ever set from `Store::gc`
         self.store.get().map(|g| unsafe { Store::from_gc(g) })
+    }
+
+    /// The value cell of fast-mode entry `i` (inside the object, or in the store)
+    #[inline]
+    fn cell(&self, i: usize) -> Option<&ValueCell<'gc>> {
+        match i.checked_sub(INLINE) {
+            None => Some(&self.inline[i]),
+            Some(k) => self.store()?.cell(k),
+        }
     }
 
     /// The current shared shape; `None` when empty or a dictionary
@@ -297,7 +319,7 @@ impl<'gc> Props<'gc> {
     pub fn slot(&self, i: usize) -> Slot<'gc> {
         match self.dict_cell() {
             Some(d) => d.borrow().slots[i],
-            None => Slot::decode(self.store().and_then(|s| s.cell(i)).map_or(Value::Undefined, ValueCell::get)),
+            None => Slot::decode(self.cell(i).map_or(Value::Undefined, ValueCell::get)),
         }
     }
 
@@ -328,7 +350,7 @@ impl<'gc> Props<'gc> {
         match self.dict_cell() {
             Some(d) => d.borrow_mut(mc).slots[i] = slot,
             None => {
-                if let Some(c) = self.store().and_then(|s| s.cell(i)) {
+                if let Some(c) = self.cell(i) {
                     c.set(mc, slot.encode(mc));
                 }
             }
@@ -347,12 +369,12 @@ impl<'gc> Props<'gc> {
 
     /// A dictionary holding everything in fast mode now
     fn to_dict(&self) -> Dict<'gc> {
-        let (shape, store) = (self.shape_ref(), self.store());
+        let shape = self.shape_ref();
         let n = shape.map_or(0, Shape::len);
         let mut d = Dict {
             keys: (0..n).map(|i| (shape.expect("a fast shape").key(i).clone(), shape.expect("a fast shape").attrs(i))).collect(),
             index: None,
-            slots: (0..n).map(|i| Slot::decode(store.and_then(|s| s.cell(i)).map_or(Value::Undefined, ValueCell::get))).collect(),
+            slots: (0..n).map(|i| Slot::decode(self.cell(i).map_or(Value::Undefined, ValueCell::get))).collect(),
         };
         d.reindex();
         d
@@ -373,10 +395,16 @@ impl<'gc> Props<'gc> {
     /// shape changed meanwhile (the caller retries)
     fn advance(&self, mc: &Mutation<'gc>, from: Option<&Shape>, to: &Shape, slot: Slot<'gc>) -> bool {
         let n = to.len() - 1;
-        let cur = self.store();
-        let grown = Store::put(cur, mc, n, n, slot.encode(mc));
-        if cur.is_none_or(|s| !Gc::ptr_eq(s.gc(), grown.gc())) {
-            self.store.set(mc.mutator(), Some(grown.gc()));
+        let v = slot.encode(mc);
+        match n.checked_sub(INLINE) {
+            None => self.inline[n].set(mc, v),
+            Some(k) => {
+                let cur = self.store();
+                let grown = Store::put(cur, mc, k, k, v);
+                if cur.is_none_or(|s| !Gc::ptr_eq(s.gc(), grown.gc())) {
+                    self.store.set(mc.mutator(), Some(grown.gc()));
+                }
+            }
         }
         let from = from.map_or(core::ptr::null_mut(), |f| core::ptr::from_ref(f).cast_mut());
         self.shape.compare_exchange(from, core::ptr::from_ref(to).cast_mut(), Ordering::AcqRel, Ordering::Acquire).is_ok()
