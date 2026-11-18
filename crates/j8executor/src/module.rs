@@ -19,7 +19,7 @@ impl Executor {
         let src = j8framework::Source { text, file: path };
         let (module, info) = match &self.cache {
             Some(cache) => cache.module(&src)?,
-            None => <j8bytecode::Module as Compile>::compile_module(&src)?,
+            None => <j8bytecode::Module as Compile>::compile_module(&src).map(|(m, info)| (m, alloc::sync::Arc::new(info)))?,
         };
         let main = self.load(module);
         let mut slots = alloc::vec![Value::Undefined; usize::from(info.slots)];
@@ -27,7 +27,6 @@ impl Executor {
             slots[usize::from(s)] = Value::Uninit;
         }
         let env = j8framework::Env::new(slots, None).alloc(a.mc);
-        let info = alloc::sync::Arc::new(info);
         let record = j8framework::ModuleRecord { path: a.string(path), env, info: alloc::sync::Arc::clone(&info), main, status: ModuleStatus::Linked, error: None, requested: Vec::new(), imports: Vec::new(), namespace: None, meta: None };
         let index = a.push_module(&record);
         self.module_of.borrow_mut().insert(main.0 - j8bytecode::Module::MAIN, index);
