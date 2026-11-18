@@ -28,6 +28,9 @@ pub enum Constant {
     Template(TemplateObject),
     /// A class's methods and accessors (`CallRuntime [DefineClass]`)
     Class(ClassBoilerplate),
+    /// A script's or eval code's global declarations (`CallRuntime [DeclareGlobals]`): names, with the function index
+    /// for function declarations
+    Declarations(Vec<GlobalDeclaration>),
     /// Jump tables (`SwitchOnSmiNoFeedback`, `SwitchOnGeneratorState`) and far jumps (`Jump*Constant`): a bytecode
     /// offset
     Offset(u32),
@@ -45,6 +48,13 @@ impl PartialEq for Constant {
             _ => false,
         }
     }
+}
+
+/// One global declaration: a `var` (no function) or a function declaration (its [`Module`] index).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GlobalDeclaration {
+    pub name: Box<str>,
+    pub function: Option<u32>,
 }
 
 /// A context's layout (V8's `ScopeInfo`, the part j8 uses): its kind and the variables in its slots. Slot `i` of the

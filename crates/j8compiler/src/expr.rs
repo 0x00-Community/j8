@@ -1,14 +1,17 @@
-//! JS ⇒ bytecode: expressions. Results are always left in acc.
+//! JS ⇒ V8 bytecode: expressions, after V8's `BytecodeGenerator`. Results are always left in acc.
 use oxc_ast::ast::{
-    Argument, ArrayAssignmentTarget, ArrayExpressionElement, ArrowFunctionBody, AssignmentTarget, AssignmentTargetMaybeDefault, AssignmentTargetProperty, ChainElement, ComputedMemberExpression, PrivateFieldExpression, StaticMemberExpression, TaggedTemplateExpression, ArrowFunctionExpression, AssignmentExpression, AssignmentOperator, BinaryExpression, BinaryOperator, CallExpression, Expression, LogicalOperator, MemberExpression, MethodDefinitionKind, ObjectExpression, ObjectPropertyKind, PropertyKind as PropertyKind_, SimpleAssignmentTarget, TemplateElement, UnaryOperator, UpdateExpression,
+    Argument, ArrayAssignmentTarget, ArrayExpressionElement, ArrowFunctionBody, AssignmentTarget, AssignmentTargetMaybeDefault, AssignmentTargetProperty, ChainElement, ComputedMemberExpression, StaticMemberExpression, TaggedTemplateExpression, ArrowFunctionExpression, AssignmentExpression, AssignmentOperator, BinaryExpression, BinaryOperator, CallExpression, Expression, LogicalOperator, MemberExpression, MethodDefinitionKind, ObjectExpression, ObjectPropertyKind, PropertyKind as PropertyKind_, SimpleAssignmentTarget, TemplateElement, UnaryOperator, UpdateExpression,
     UpdateOperator,
 };
 use oxc_span::{GetSpan, Span};
-use j8framework::{BinaryOp, CompareOp, Error, Resume, UnaryOp};
+use j8framework::{BinaryOp, CompareOp, Error};
 
-use crate::compiler::{Body, Compiler, Flavor, Place};
-use crate::scope::Hidden;
-use j8bytecode::{Const, Constant, FunctionKind, IcSlot, Insn, PropertyKind, Reg};
+use crate::builder::{Label, RegisterList};
+use crate::compiler::{Body, Compiler, Flavor, Kind, Place};
+use j8bytecode::{ArrayBoilerplate, Bytecode, Constant, CreateArrayLiteralFlags, CreateObjectLiteralFlags, LiteralFlags, LiteralValue, ObjectBoilerplate, Register, Runtime, TemplateObject, TypeOfLiteral};
+
+/// V8's `JSRegExp::Flags` bits (`CreateRegExpLiteral`'s flags operand)
+const REGEXP_FLAGS: [(char, u16); 9] = [('g', 1), ('i', 1 << 1), ('m', 1 << 2), ('y', 1 << 3), ('u', 1 << 4), ('s', 1 << 5), ('l', 1 << 6), ('d', 1 << 7), ('v', 1 << 8)];
 
 /// Binary operator ⇒ bytecode operation.
 #[derive(Clone, Copy)]
@@ -24,7 +27,7 @@ enum Assign {
     Plain,
     Binary(BinaryOp),
     /// `||=` / `&&=` / `??=`: the right side is not evaluated if the left side already satisfies the condition
-    Logical(fn(j8bytecode::Label) -> Insn),
+    Logical(LogicalOperator),
 }
 
 /// An element of an array literal / argument list.
@@ -57,10 +60,8 @@ impl<'a> From<&'a Argument<'a>> for Element<'a> {
 enum Target<'a> {
     /// The name and its position in the source (to decide whether a TDZ check is needed)
     Name(&'a str, u32),
-    Named { obj: Reg, name: Const },
-    Keyed { obj: Reg, key: Reg },
-    /// `obj.#x`: the private name is in `key`
-    Private { obj: Reg, key: Reg },
+    Named { obj: Register, name: &'a str },
+    Keyed { obj: Register, key: Register },
 }
 
 impl<'a> Compiler<'a, '_> {
@@ -106,19 +107,19 @@ impl<'a> Compiler<'a, '_> {
             AssignmentOperator::BitwiseOR => Assign::Binary(BinaryOp::BitOr),
             AssignmentOperator::BitwiseXOR => Assign::Binary(BinaryOp::BitXor),
             AssignmentOperator::BitwiseAnd => Assign::Binary(BinaryOp::BitAnd),
-            AssignmentOperator::LogicalOr => Assign::Logical(Insn::JumpIfTrue),
-            AssignmentOperator::LogicalAnd => Assign::Logical(Insn::JumpIfFalse),
-            AssignmentOperator::LogicalNullish => Assign::Logical(Insn::JumpIfNotNullish),
+            AssignmentOperator::LogicalOr => Assign::Logical(LogicalOperator::Or),
+            AssignmentOperator::LogicalAnd => Assign::Logical(LogicalOperator::And),
+            AssignmentOperator::LogicalNullish => Assign::Logical(LogicalOperator::Coalesce),
         }
     }
 
-    pub(crate) fn string_const(&mut self, s: Option<&str>, span: Span) -> Result<Const, Error> {
+    pub fn string_const(&mut self, s: Option<&str>, span: Span) -> Result<usize, Error> {
         let s = s.ok_or_else(|| self.unsupported(span, "lone surrogates"))?;
         Ok(self.constant(Constant::String(s.into())))
     }
 
     /// A segment of a template literal (text after escape processing).
-    fn quasi(&mut self, q: &TemplateElement<'a>) -> Result<Const, Error> {
+    fn quasi(&mut self, q: &TemplateElement<'a>) -> Result<usize, Error> {
         let cooked = match q.value.cooked {
             Some(c) => c.as_str(),
             None => None,
@@ -126,42 +127,67 @@ impl<'a> Compiler<'a, '_> {
         self.string_const(cooked, q.span)
     }
 
-    #[expect(clippy::too_many_lines, reason = "one arm per expression kind; splitting it would hurt readability")]
-    pub(crate) fn expr(&mut self, e: &'a Expression<'a>) -> Result<(), Error> {
+    /// A literal a boilerplate can hold (`None`: computed at run time)
+    fn literal_value(e: &Expression<'_>) -> Option<LiteralValue> {
         match e {
-            Expression::NumericLiteral(n) => {
-                let k = self.constant(Constant::Number(n.value));
-                self.emit(Insn::LdaConst(k));
+            Expression::NumericLiteral(n) => Some(LiteralValue::Number(n.value)),
+            Expression::StringLiteral(s) => s.value.as_str().map(|v| LiteralValue::String(v.into())),
+            Expression::BooleanLiteral(b) => Some(LiteralValue::Bool(b.value)),
+            Expression::NullLiteral(_) => Some(LiteralValue::Null),
+            _ => None,
+        }
+    }
+
+    /// Jumps by the left side of a logical operator: `||` / `&&` skip the right side on a truthy / falsy left side,
+    /// `??` on a left side that isn't nullish. The label is bound by the caller after the right side.
+    fn logical_skip(&mut self, op: LogicalOperator, end: &mut Label) {
+        match op {
+            LogicalOperator::Or => self.b().jump(Bytecode::JumpIfToBooleanTrue, end),
+            LogicalOperator::And => self.b().jump(Bytecode::JumpIfToBooleanFalse, end),
+            LogicalOperator::Coalesce => {
+                let mut right = Label::default();
+                self.b().jump(Bytecode::JumpIfUndefinedOrNull, &mut right);
+                self.b().jump(Bytecode::Jump, end);
+                self.b().bind(&mut right);
             }
+        }
+    }
+
+    #[expect(clippy::too_many_lines, reason = "one arm per expression kind; splitting it would hurt readability")]
+    pub fn expr(&mut self, e: &'a Expression<'a>) -> Result<(), Error> {
+        match e {
+            Expression::NumericLiteral(n) => self.b().load_number(n.value),
             Expression::StringLiteral(s) => {
                 let k = self.string_const(s.value.as_str(), s.span)?;
-                self.emit(Insn::LdaConst(k));
+                self.b().load_constant(k);
             }
-            Expression::BooleanLiteral(b) => _ = self.emit(Insn::LdaBool(b.value)),
+            Expression::BooleanLiteral(b) => self.b().load_bool(b.value),
             Expression::BigIntLiteral(b) => {
                 let k = self.constant(Constant::BigInt((&*b.value).into()));
-                self.emit(Insn::LdaConst(k));
+                self.b().load_constant(k);
             }
             Expression::RegExpLiteral(r) => {
                 let pattern = self.name(&r.regex.pattern.text);
-                let flags = self.name(&r.regex.flags.to_string());
-                self.emit(Insn::CreateRegExp { pattern, flags });
+                let text = r.regex.flags.to_string();
+                let flags = REGEXP_FLAGS.iter().filter(|(c, _)| text.contains(*c)).fold(0, |a, (_, b)| a | b);
+                self.b().create_reg_exp_literal(pattern, flags);
             }
-            Expression::NullLiteral(_) => _ = self.emit(Insn::LdaNull),
+            Expression::NullLiteral(_) => self.b().load_null(),
             Expression::TemplateLiteral(t) => {
-                // q0 + e0 + q1 + …: the left side is a string, so `+` is ToString followed by concatenation
+                // q0 + e0 + q1 + …: each substitution is converted with ToString, then concatenated
                 let first = t.quasis.first().expect("a template has a first quasi");
                 let k = self.quasi(first)?;
-                self.emit(Insn::LdaConst(k));
+                self.b().load_constant(k);
                 let acc = self.temp();
                 for (e, q) in t.expressions.iter().zip(t.quasis.iter().skip(1)) {
-                    self.emit(Insn::Star(acc));
+                    self.b().star(acc);
                     self.expr(e)?;
-                    self.emit(Insn::Binary(BinaryOp::Add, acc));
-                    self.emit(Insn::Star(acc));
+                    self.b().plain(Bytecode::ToString);
+                    self.b().binary(BinaryOp::Add, acc);
+                    self.b().star(acc);
                     let k = self.quasi(q)?;
-                    self.emit(Insn::LdaConst(k));
-                    self.emit(Insn::Binary(BinaryOp::Add, acc));
+                    self.b().load_constant(k);
+                    self.b().binary(BinaryOp::Add, acc);
                 }
                 self.release(acc);
             }
@@ -170,175 +196,107 @@ impl<'a> Compiler<'a, '_> {
             Expression::ParenthesizedExpression(p) => self.expr(&p.expression)?,
             Expression::FunctionExpression(f) => {
                 let n = self.plain_function(f, true, "")?;
-                self.emit(Insn::CreateClosure(n));
+                self.closure(n);
             }
             Expression::ArrowFunctionExpression(a) => self.arrow(a, "")?,
             Expression::ClassExpression(c) => self.class(c, "")?,
             Expression::NewTarget(t) => self.load_at(crate::scope::NEW_TARGET, t.span.start),
-            Expression::ImportMeta(_) => _ = self.emit(Insn::ImportMeta),
-            Expression::ImportExpression(i) => {
-                self.expr(&i.source)?;
-                if let Some(o) = &i.options {
-                    let spec = self.temp();
-                    self.emit(Insn::Star(spec));
-                    self.expr(o)?;
-                    self.emit(Insn::Ldar(spec));
-                    self.release(spec);
-                }
-                let referrer = self.name(self.file());
-                self.emit(Insn::DynamicImport { referrer });
-            }
             Expression::TaggedTemplateExpression(t) => self.tagged_template(t)?,
-            Expression::YieldExpression(y) => {
-                let mode = self.resume_reg(y.span, "yield outside a generator")?;
-                let async_generator = self.is_async_generator();
-                match (&y.argument, y.delegate) {
-                    (Some(a), true) if async_generator => self.yield_star_async(a, mode)?,
-                    (Some(a), true) => self.yield_star(a, mode)?,
-                    (a, _) => {
-                        match a {
-                            Some(a) => self.expr(a)?,
-                            None => _ = self.emit(Insn::LdaUndefined),
-                        }
-                        if async_generator {
-                            // In an async generator `yield v` awaits v first
-                            self.emit(Insn::Await { mode });
-                            self.resume_dispatch(mode, false)?;
-                        }
-                        self.emit(Insn::Yield { mode });
-                        self.resume_dispatch(mode, true)?;
-                    }
-                }
-            }
-            Expression::AwaitExpression(e) => {
-                let mode = self.resume_reg(e.span, "await outside an async function")?;
-                self.expr(&e.argument)?;
-                self.emit(Insn::Await { mode });
-                self.resume_dispatch(mode, false)?;
-            }
             Expression::NewExpression(n) => {
-                if Self::has_spread(&n.arguments) {
-                    let callee = self.temp();
-                    self.expr(&n.callee)?;
-                    self.emit(Insn::Star(callee));
-                    let args = self.spread_array(n.arguments.iter().map(Element::from))?;
-                    self.emit(Insn::ConstructSpread { callee, args });
-                    self.release(callee);
+                let callee = self.temp();
+                self.expr(&n.callee)?;
+                self.b().star(callee);
+                let (args, spread) = self.argument_list(&n.arguments, None)?;
+                self.b().ldar(callee);
+                if spread {
+                    self.b().construct_with_spread(callee, args);
                 } else {
-                    let argc = u16::try_from(n.arguments.len()).map_err(|_| self.unsupported(n.span, "more than 65535 arguments"))?;
-                    let callee = self.temps(1 + argc);
-                    self.expr(&n.callee)?;
-                    self.emit(Insn::Star(callee));
-                    let args = Reg(callee.0 + 1);
-                    self.arguments(&n.arguments, args)?;
-                    self.emit(Insn::Construct { callee, args, argc });
-                    self.release(callee);
+                    self.b().construct(callee, args);
                 }
+                self.release(callee);
             }
             Expression::UnaryExpression(u) => {
-                let op = match u.operator {
-                    UnaryOperator::UnaryNegation => UnaryOp::Neg,
-                    UnaryOperator::UnaryPlus => UnaryOp::Plus,
-                    UnaryOperator::LogicalNot => UnaryOp::Not,
-                    UnaryOperator::BitwiseNot => UnaryOp::BitNot,
-                    UnaryOperator::Typeof => UnaryOp::Typeof,
-                    UnaryOperator::Void => UnaryOp::Void,
+                match u.operator {
                     UnaryOperator::Delete => return self.delete(&u.argument),
-                };
-                match (&u.argument, op) {
-                    // `typeof` of an undeclared name does not throw
-                    (Expression::Identifier(id), UnaryOp::Typeof) if !self.with_chain(id.name.as_str()).is_empty() => self.load_dynamic(id.name.as_str(), true, None),
-                    (Expression::Identifier(id), UnaryOp::Typeof) if matches!(self.lookup(id.name.as_str()).0, Place::Global(g) if !matches!(g, "undefined" | "NaN" | "Infinity")) => {
-                        let k = self.name(id.name.as_str());
-                        self.emit(Insn::LdaGlobalOrUndefined(k));
+                    UnaryOperator::Typeof => {
+                        match &u.argument {
+                            // `typeof` of an undeclared name does not throw
+                            Expression::Identifier(id) => self.load_typeof(id.name.as_str()),
+                            a => self.expr(a)?,
+                        }
+                        self.b().unary(Bytecode::TypeOf);
                     }
-                    (a, _) => self.expr(a)?,
+                    UnaryOperator::Void => {
+                        self.effect(&u.argument)?;
+                        self.b().load_undefined();
+                    }
+                    UnaryOperator::UnaryNegation => {
+                        self.expr(&u.argument)?;
+                        self.b().unary(Bytecode::Negate);
+                    }
+                    UnaryOperator::UnaryPlus => {
+                        self.expr(&u.argument)?;
+                        self.b().to_number();
+                    }
+                    UnaryOperator::BitwiseNot => {
+                        self.expr(&u.argument)?;
+                        self.b().unary(Bytecode::BitwiseNot);
+                    }
+                    UnaryOperator::LogicalNot => {
+                        self.expr(&u.argument)?;
+                        self.b().plain(Bytecode::ToBooleanLogicalNot);
+                    }
                 }
-                self.emit(Insn::Unary(op));
             }
             Expression::BinaryExpression(b) => self.binary(b)?,
             Expression::LogicalExpression(l) => {
                 self.expr(&l.left)?;
-                let skip = self.jump(match l.operator {
-                    LogicalOperator::Or => Insn::JumpIfTrue,
-                    LogicalOperator::And => Insn::JumpIfFalse,
-                    LogicalOperator::Coalesce => Insn::JumpIfNotNullish,
-                });
+                let mut end = Label::default();
+                self.logical_skip(l.operator, &mut end);
                 self.expr(&l.right)?;
-                self.land(skip);
+                self.b().bind(&mut end);
             }
             Expression::ConditionalExpression(c) => {
                 self.expr(&c.test)?;
-                let other = self.jump(Insn::JumpIfFalse);
+                let mut other = Label::default();
+                self.b().jump(Bytecode::JumpIfToBooleanFalse, &mut other);
                 self.expr(&c.consequent)?;
-                let end = self.jump(Insn::Jump);
-                self.land(other);
+                let mut end = Label::default();
+                self.b().jump(Bytecode::Jump, &mut end);
+                self.b().bind(&mut other);
                 self.expr(&c.alternate)?;
-                self.land(end);
+                self.b().bind(&mut end);
             }
-            Expression::SequenceExpression(s) => s.expressions.iter().try_for_each(|e| self.expr(e))?,
+            Expression::SequenceExpression(s) => {
+                let last = s.expressions.len().saturating_sub(1);
+                for (i, e) in s.expressions.iter().enumerate() {
+                    if i == last { self.expr(e)? } else { self.effect(e)? }
+                }
+            }
             Expression::AssignmentExpression(a) => self.assignment(a)?,
             Expression::UpdateExpression(u) => self.update(u)?,
             Expression::CallExpression(c) => self.call(c)?,
-            Expression::StaticMemberExpression(m) if matches!(m.object, Expression::Super(_)) => {
-                let this = self.this_temp();
-                let name = self.name(m.property.name.as_str());
-                self.emit(Insn::GetSuper { this, name });
-                self.release(this);
-            }
-            Expression::ComputedMemberExpression(m) if matches!(m.object, Expression::Super(_)) => {
-                let this = self.this_temp();
-                self.expr(&m.expression)?;
-                self.emit(Insn::GetSuperKeyed { this });
-                self.release(this);
-            }
+            Expression::StaticMemberExpression(m) if matches!(m.object, Expression::Super(_)) => return Err(self.unsupported(m.span, "super")),
+            Expression::ComputedMemberExpression(m) if matches!(m.object, Expression::Super(_)) => return Err(self.unsupported(m.span, "super")),
             Expression::StaticMemberExpression(m) => self.static_member(m)?,
-            Expression::PrivateFieldExpression(m) => self.private_member(m)?,
-            Expression::PrivateInExpression(p) => {
-                self.expr(&p.right)?;
-                let obj = self.temp();
-                self.emit(Insn::Star(obj));
-                self.load(Hidden::private(self.alloc, &p.left));
-                self.emit(Insn::HasPrivate { obj });
-                self.release(obj);
-            }
             Expression::ComputedMemberExpression(m) => self.computed_member(m)?,
             Expression::ChainExpression(c) => {
-                self.chains.push(Vec::new());
+                self.chains.push(Label::default());
                 match &c.expression {
                     ChainElement::CallExpression(call) => self.call(call)?,
                     ChainElement::StaticMemberExpression(m) => self.static_member(m)?,
                     ChainElement::ComputedMemberExpression(m) => self.computed_member(m)?,
-                    ChainElement::PrivateFieldExpression(m) => self.private_member(m)?,
-                    ChainElement::TSNonNullExpression(e) => return Err(self.unsupported(e.span, "TypeScript non-null assertions")),
+                    e => return Err(self.unsupported(e.span(), "optional chain element")),
                 }
-                let jumps = self.chains.pop().expect("this chain");
-                if !jumps.is_empty() {
-                    let end = self.jump(Insn::Jump);
-                    for j in jumps {
-                        self.land(j);
-                    }
-                    self.emit(Insn::LdaUndefined);
-                    self.land(end);
-                }
+                let mut nullish = self.chains.pop().expect("this chain");
+                let mut end = Label::default();
+                self.b().jump(Bytecode::Jump, &mut end);
+                self.b().bind(&mut nullish);
+                self.b().load_undefined();
+                self.b().bind(&mut end);
             }
             Expression::ObjectExpression(o) => self.object(o)?,
-            Expression::ArrayExpression(a) => {
-                if a.elements.iter().all(|e| e.as_expression().is_some()) {
-                    let count = u16::try_from(a.elements.len()).map_err(|_| self.unsupported(a.span, "more than 65535 elements"))?;
-                    let first = self.temps(count);
-                    for (i, el) in (0..).zip(&a.elements) {
-                        self.expr(el.as_expression().expect("checked above"))?;
-                        self.emit(Insn::Star(Reg(first.0 + i)));
-                    }
-                    self.emit(Insn::CreateArray { first, count });
-                    self.release(first);
-                } else {
-                    let arr = self.spread_array(a.elements.iter().map(Element::from))?;
-                    self.emit(Insn::Ldar(arr));
-                    self.release(arr);
-                }
-            }
+            Expression::ArrayExpression(a) => self.array(&a.elements, a.span)?,
             e => return Err(self.unsupported(e.span(), "expression")),
         }
         Ok(())
@@ -346,11 +304,11 @@ impl<'a> Compiler<'a, '_> {
 
     /// Anonymous functions / arrow functions / anonymous classes get an inferred name per the spec (NamedEvaluation);
     /// everything else is evaluated as usual.
-    pub(crate) fn expr_named(&mut self, e: &'a Expression<'a>, name: &'a str) -> Result<(), Error> {
+    pub fn expr_named(&mut self, e: &'a Expression<'a>, name: &'a str) -> Result<(), Error> {
         match e {
             Expression::FunctionExpression(f) if f.id.is_none() => {
                 let n = self.plain_function(f, true, name)?;
-                self.emit(Insn::CreateClosure(n));
+                self.closure(n);
                 Ok(())
             }
             Expression::ArrowFunctionExpression(a) => self.arrow(a, name),
@@ -360,59 +318,55 @@ impl<'a> Compiler<'a, '_> {
         }
     }
 
-    /// Tagged template: `tag(templateObject, ...substitutions)`; the template object is cached per call site (a cooked
-    /// string is undefined when it has an invalid escape).
+    /// Tagged template: `tag(templateObject, ...substitutions)`; the template object is cached per call site
+    /// (`GetTemplateObject` with a template description constant).
     fn tagged_template(&mut self, t: &'a TaggedTemplateExpression<'a>) -> Result<(), Error> {
         let subs = &t.quasi.expressions;
-        let argc = u16::try_from(subs.len() + 1).map_err(|_| self.unsupported(t.span, "more than 65535 substitutions"))?;
-        let callee = self.temps(2 + argc);
-        let this = Reg(callee.0 + 1);
-        let args = Reg(callee.0 + 2);
-        match &t.tag {
+        let argc = u32::try_from(subs.len() + 1).map_err(|_| self.unsupported(t.span, "too many substitutions"))?;
+        let callee = self.temp();
+        let receiver = match &t.tag {
             Expression::StaticMemberExpression(m) => {
+                let list = self.b().new_register_list(1 + argc);
                 self.expr(&m.object)?;
-                self.emit(Insn::Star(this));
-                let name = self.name(m.property.name.as_str());
-                self.emit(Insn::GetNamed { obj: this, name, ic: IcSlot::default() });
+                self.b().star(list.first);
+                self.b().get_named(list.first, m.property.name.as_str());
+                Some(list)
             }
             Expression::ComputedMemberExpression(m) => {
+                let list = self.b().new_register_list(1 + argc);
                 self.expr(&m.object)?;
-                self.emit(Insn::Star(this));
+                self.b().star(list.first);
                 self.expr(&m.expression)?;
-                self.emit(Insn::GetKeyed { obj: this });
+                self.b().get_keyed(list.first);
+                Some(list)
             }
             tag => {
-                self.emit(Insn::LdaUndefined);
-                self.emit(Insn::Star(this));
                 self.expr(tag)?;
+                None
             }
+        };
+        self.b().star(callee);
+        let args = match receiver {
+            Some(l) => RegisterList { first: l.at(1), count: argc },
+            None => self.b().new_register_list(argc),
+        };
+        let mut cooked = Vec::new();
+        let mut raw = Vec::new();
+        for q in &t.quasi.quasis {
+            cooked.push(q.value.cooked.and_then(|c| c.as_str().map(Into::into)));
+            raw.push((&*q.value.raw).into());
         }
-        self.emit(Insn::Star(callee));
-        let count = u16::try_from(t.quasi.quasis.len()).map_err(|_| self.unsupported(t.span, "too many template parts"))?;
-        let strings = self.temps(count * 2);
-        for (i, q) in (0u16..).zip(&t.quasi.quasis) {
-            match q.value.cooked.and_then(|c| c.as_str().map(str::to_owned)) {
-                Some(c) => {
-                    let k = self.constant(Constant::String(c.into()));
-                    self.emit(Insn::LdaConst(k));
-                }
-                None => _ = self.emit(Insn::LdaUndefined),
-            }
-            self.emit(Insn::Star(Reg(strings.0 + i)));
-            let raw = self.constant(Constant::String((&*q.value.raw).into()));
-            self.emit(Insn::LdaConst(raw));
-            self.emit(Insn::Star(Reg(strings.0 + count + i)));
-        }
-        let site = self.sites;
-        self.sites += 1;
-        self.emit(Insn::GetTemplateObject { site, first: strings, count });
-        self.release(strings);
-        self.emit(Insn::Star(args));
-        for (i, e) in (1u16..).zip(subs) {
+        let k = self.constant(Constant::Template(TemplateObject { cooked, raw }));
+        self.b().get_template_object(k);
+        self.b().star(args.first);
+        for (i, e) in (1u32..).zip(subs) {
             self.expr(e)?;
-            self.emit(Insn::Star(Reg(args.0 + i)));
+            self.b().star(args.at(i));
         }
-        self.emit(Insn::Call { callee, this, args, argc });
+        match receiver {
+            Some(l) => self.b().call_property(callee, RegisterList { first: l.first, count: argc + 1 }),
+            None => self.b().call_undefined_receiver(callee, args),
+        }
         self.release(callee);
         Ok(())
     }
@@ -426,13 +380,26 @@ impl<'a> Compiler<'a, '_> {
             ArrowFunctionBody::FunctionBody(b) => Flavor::use_strict(&b.directives),
             _ => false,
         };
-        let n = self.function(name, Flavor { kind: FunctionKind::Arrow, generator: false, asynchronous: a.r#async, strict }, None, None, Some(&a.params), body)?;
-        self.emit(Insn::CreateClosure(n));
+        let n = self.function(name, Flavor { kind: Kind::Arrow, generator: false, asynchronous: a.r#async, strict, statik: false }, None, None, Some(&a.params), body)?;
+        self.closure(n);
         Ok(())
+    }
+
+    /// A Smi literal operand for the `*Smi` bytecodes (V8 uses them when the right side is a small integer literal)
+    fn smi_literal(e: &Expression<'_>) -> Option<i32> {
+        let Expression::NumericLiteral(n) = e else { return None };
+        #[expect(clippy::cast_possible_truncation, reason = "checked to round-trip exactly")]
+        let i = n.value as i32;
+        (f64::from(i).to_bits() == n.value.to_bits() && i8::try_from(i).is_ok()).then_some(i)
     }
 
     fn binary(&mut self, b: &'a BinaryExpression<'a>) -> Result<(), Error> {
         let op = Self::operator(b.operator);
+        if let (Operator::Binary(op), Some(n)) = (op, Self::smi_literal(&b.right)) {
+            self.expr(&b.left)?;
+            self.b().binary_smi(op, n);
+            return Ok(());
+        }
         // The left side is a variable in a register and the right side cannot change it: use its register directly as
         // the left operand instead of copying it into a temporary register first
         if let Expression::Identifier(id) = &b.left
@@ -440,25 +407,25 @@ impl<'a> Compiler<'a, '_> {
             && let Some(l) = self.register_of(id.name.as_str(), id.span.start)
         {
             self.expr(&b.right)?;
-            self.emit(Self::binary_insn(op, l));
+            self.binary_op(op, l);
             return Ok(());
         }
         self.expr(&b.left)?;
         let l = self.temp();
-        self.emit(Insn::Star(l));
+        self.b().star(l);
         self.expr(&b.right)?;
-        self.emit(Self::binary_insn(op, l));
+        self.binary_op(op, l);
         self.release(l);
         Ok(())
     }
 
     /// acc = `l` op acc
-    fn binary_insn(op: Operator, l: Reg) -> Insn {
+    fn binary_op(&mut self, op: Operator, l: Register) {
         match op {
-            Operator::Binary(op) => Insn::Binary(op, l),
-            Operator::Compare(op) => Insn::Compare(op, l),
-            Operator::InstanceOf => Insn::InstanceOf(l),
-            Operator::In => Insn::In(l),
+            Operator::Binary(op) => self.b().binary(op, l),
+            Operator::Compare(op) => self.b().compare(op, l),
+            Operator::InstanceOf => self.b().test_instance_of(l),
+            Operator::In => self.b().test_in(l),
         }
     }
 
@@ -484,29 +451,20 @@ impl<'a> Compiler<'a, '_> {
             return Ok(Target::Name(id.name.as_str(), id.span.start));
         }
         match t.as_member_expression() {
-            Some(MemberExpression::StaticMemberExpression(m)) => {
+            Some(MemberExpression::StaticMemberExpression(m)) if !matches!(m.object, Expression::Super(_)) => {
                 self.expr(&m.object)?;
                 let obj = self.temp();
-                self.emit(Insn::Star(obj));
-                Ok(Target::Named { obj, name: self.name(m.property.name.as_str()) })
+                self.b().star(obj);
+                Ok(Target::Named { obj, name: m.property.name.as_str() })
             }
-            Some(MemberExpression::ComputedMemberExpression(m)) => {
+            Some(MemberExpression::ComputedMemberExpression(m)) if !matches!(m.object, Expression::Super(_)) => {
                 self.expr(&m.object)?;
                 let obj = self.temp();
-                self.emit(Insn::Star(obj));
+                self.b().star(obj);
                 self.expr(&m.expression)?;
                 let key = self.temp();
-                self.emit(Insn::Star(key));
+                self.b().star(key);
                 Ok(Target::Keyed { obj, key })
-            }
-            Some(MemberExpression::PrivateFieldExpression(m)) => {
-                self.expr(&m.object)?;
-                let obj = self.temp();
-                self.emit(Insn::Star(obj));
-                self.load(Hidden::private(self.alloc, &m.field));
-                let key = self.temp();
-                self.emit(Insn::Star(key));
-                Ok(Target::Private { obj, key })
             }
             _ => Err(self.unsupported(t.span(), "assignment target")),
         }
@@ -515,31 +473,27 @@ impl<'a> Compiler<'a, '_> {
     fn target_load(&mut self, t: &Target<'a>) {
         match *t {
             Target::Name(n, pos) => self.load_at(n, pos),
-            Target::Named { obj, name } => _ = self.emit(Insn::GetNamed { obj, name, ic: IcSlot::default() }),
+            Target::Named { obj, name } => self.b().get_named(obj, name),
             Target::Keyed { obj, key } => {
-                self.emit(Insn::Ldar(key));
-                self.emit(Insn::GetKeyed { obj });
-            }
-            Target::Private { obj, key } => {
-                self.emit(Insn::Ldar(key));
-                self.emit(Insn::GetPrivate { obj });
+                self.b().ldar(key);
+                self.b().get_keyed(obj);
             }
         }
     }
 
     fn target_store(&mut self, t: &Target<'a>) {
+        let strict = self.strict_here();
         match *t {
             Target::Name(n, pos) => self.store_at(n, false, pos),
-            Target::Named { obj, name } => _ = self.emit(Insn::SetNamed { obj, name, strict: self.strict_here(), ic: IcSlot::default() }),
-            Target::Keyed { obj, key } => _ = self.emit(Insn::SetKeyed { obj, key, strict: self.strict_here() }),
-            Target::Private { obj, key } => _ = self.emit(Insn::SetPrivate { obj, key }),
+            Target::Named { obj, name } => self.b().set_named(obj, name, strict),
+            Target::Keyed { obj, key } => self.b().set_keyed(obj, key, strict),
         }
     }
 
     fn target_release(&mut self, t: &Target<'a>) {
         match *t {
             Target::Name(..) => {}
-            Target::Named { obj, .. } | Target::Keyed { obj, .. } | Target::Private { obj, .. } => self.release(obj),
+            Target::Named { obj, .. } | Target::Keyed { obj, .. } => self.release(obj),
         }
     }
 
@@ -547,9 +501,9 @@ impl<'a> Compiler<'a, '_> {
         let Some(t) = a.left.as_simple_assignment_target() else {
             self.expr(&a.right)?;
             let v = self.temp();
-            self.emit(Insn::Star(v));
+            self.b().star(v);
             self.assign_target(&a.left, v)?;
-            self.emit(Insn::Ldar(v));
+            self.b().ldar(v);
             self.release(v);
             return Ok(());
         };
@@ -559,19 +513,19 @@ impl<'a> Compiler<'a, '_> {
             && Self::cannot_assign(&a.right)
             && let Some(m) = t.as_member_expression()
         {
+            let strict = self.strict_here();
             match m {
                 MemberExpression::StaticMemberExpression(m) if let Some(obj) = self.in_register(&m.object) => {
-                    let name = self.name(m.property.name.as_str());
                     self.expr(&a.right)?;
-                    self.emit(Insn::SetNamed { obj, name, strict: self.strict_here(), ic: IcSlot::default() });
+                    self.b().set_named(obj, m.property.name.as_str(), strict);
                     return Ok(());
                 }
                 MemberExpression::ComputedMemberExpression(m) if Self::cannot_assign(&m.expression) && let Some(obj) = self.in_register(&m.object) => {
                     self.expr(&m.expression)?;
                     let key = self.temp();
-                    self.emit(Insn::Star(key));
+                    self.b().star(key);
                     self.expr(&a.right)?;
-                    self.emit(Insn::SetKeyed { obj, key, strict: self.strict_here() });
+                    self.b().set_keyed(obj, key, strict);
                     self.release(key);
                     return Ok(());
                 }
@@ -589,22 +543,27 @@ impl<'a> Compiler<'a, '_> {
             }
             Assign::Binary(op) => {
                 self.target_load(&t);
-                let old = self.temp();
-                self.emit(Insn::Star(old));
-                self.expr(&a.right)?;
-                self.emit(Insn::Binary(op, old));
-                self.release(old);
+                if let Some(n) = Self::smi_literal(&a.right) {
+                    self.b().binary_smi(op, n);
+                } else {
+                    let old = self.temp();
+                    self.b().star(old);
+                    self.expr(&a.right)?;
+                    self.b().binary(op, old);
+                    self.release(old);
+                }
                 self.target_store(&t);
             }
-            Assign::Logical(skip) => {
+            Assign::Logical(op) => {
                 self.target_load(&t);
-                let at = self.jump(skip);
+                let mut end = Label::default();
+                self.logical_skip(op, &mut end);
                 match &t {
                     Target::Name(n, _) => self.expr_named(&a.right, n)?,
                     _ => self.expr(&a.right)?,
                 }
                 self.target_store(&t);
-                self.land(at);
+                self.b().bind(&mut end);
             }
         }
         self.target_release(&t);
@@ -613,7 +572,7 @@ impl<'a> Compiler<'a, '_> {
 
     /// Evaluates `e` with the result unused (expression statements in functions, the update part of `for`): postfix
     /// `++` / `--` does not keep the old value.
-    pub(crate) fn effect(&mut self, e: &'a Expression<'a>) -> Result<(), Error> {
+    pub fn effect(&mut self, e: &'a Expression<'a>) -> Result<(), Error> {
         match e {
             Expression::UpdateExpression(u) => self.update_as(u, true),
             Expression::ParenthesizedExpression(p) => self.effect(&p.expression),
@@ -625,119 +584,139 @@ impl<'a> Compiler<'a, '_> {
         self.update_as(u, false)
     }
 
-    /// `++` / `--`; with `discard` the result is unused, so postfix does not keep the old value either.
+    /// `++` / `--` (V8's `VisitCountOperation`: postfix with a used value converts with `ToNumeric` and keeps the old
+    /// value); with `discard` the result is unused.
     fn update_as(&mut self, u: &'a UpdateExpression<'a>, discard: bool) -> Result<(), Error> {
         let t = self.target(&u.argument)?;
         self.target_load(&t);
-        // `Inc` / `Dec` do ToNumeric themselves; convert separately and keep the result only for postfix when the old
-        // value is needed
         let old = (!u.prefix && !discard).then(|| self.temp());
         if let Some(r) = old {
-            self.emit(Insn::ToNumeric);
-            self.emit(Insn::Star(r));
+            self.b().to_numeric();
+            self.b().star(r);
         }
-        self.emit(match u.operator {
-            UpdateOperator::Increment => Insn::Inc,
-            UpdateOperator::Decrement => Insn::Dec,
+        self.b().unary(match u.operator {
+            UpdateOperator::Increment => Bytecode::Inc,
+            UpdateOperator::Decrement => Bytecode::Dec,
         });
         self.target_store(&t);
         if let Some(r) = old {
-            self.emit(Insn::Ldar(r));
+            self.b().ldar(r);
             self.release(r);
         }
         self.target_release(&t);
         Ok(())
     }
 
-    /// Call: `callee`, `this` and the arguments are laid out in consecutive registers.
+    /// The arguments into a new register list (after `receiver`'s register when given, which then heads the list); the
+    /// flag tells whether the last argument is a spread (`CallWithSpread` / `ConstructWithSpread`)
+    fn argument_list(&mut self, args: &'a [Argument<'a>], receiver: Option<Register>) -> Result<(RegisterList, bool), Error> {
+        let spread_at = args.iter().position(|a| matches!(a, Argument::SpreadElement(_)));
+        if spread_at.is_some_and(|i| i + 1 != args.len()) {
+            return Err(self.unsupported(args[spread_at.unwrap_or(0)].span(), "a spread argument before the last"));
+        }
+        let n = u32::try_from(args.len()).map_err(|_| self.unsupported(Span::default(), "too many arguments"))?;
+        let list = self.b().new_register_list(n);
+        for (i, a) in (0u32..).zip(args) {
+            let e = match a {
+                Argument::SpreadElement(s) => &s.argument,
+                a => a.as_expression().expect("the rest are expressions"),
+            };
+            self.expr(e)?;
+            self.b().star(list.at(i));
+        }
+        let out = match receiver {
+            Some(r) => RegisterList { first: r, count: n + 1 },
+            None => list,
+        };
+        Ok((out, spread_at.is_some()))
+    }
+
+    /// Call (V8's `VisitCall`): the callee in a register; a property call's receiver heads the argument list
+    /// (`CallProperty*`), a plain call has an undefined receiver (`CallUndefinedReceiver*`); a possible direct eval
+    /// first resolves its callee with `ResolvePossiblyDirectEval`.
     fn call(&mut self, c: &'a CallExpression<'a>) -> Result<(), Error> {
-        let spread = Self::has_spread(&c.arguments);
-        let argc = if spread { 0 } else { u16::try_from(c.arguments.len()).map_err(|_| self.unsupported(c.span, "more than 65535 arguments"))? };
-        if let (Expression::Super(_), true) = (&c.callee, spread) {
-            let args = self.spread_array(c.arguments.iter().map(Element::from))?;
-            self.emit(Insn::SuperCallSpread { args });
-            self.release(args);
-            self.store(crate::scope::THIS, true);
-            return Ok(());
-        }
         if let Expression::Super(_) = &c.callee {
-            let args = self.temps(argc);
-            self.arguments(&c.arguments, args)?;
-            self.emit(Insn::SuperCall { args, argc });
-            self.release(args);
-            self.store(crate::scope::THIS, true);
-            return Ok(());
+            return Err(self.unsupported(c.span, "super()"));
         }
-        let callee = self.temps(2 + argc);
-        let this = Reg(callee.0 + 1);
-        match &c.callee {
-            Expression::StaticMemberExpression(m) if matches!(m.object, Expression::Super(_)) => {
-                self.load(crate::scope::THIS);
-                self.emit(Insn::Star(this));
-                let name = self.name(m.property.name.as_str());
-                self.emit(Insn::GetSuper { this, name });
-            }
-            Expression::ComputedMemberExpression(m) if matches!(m.object, Expression::Super(_)) => {
-                self.load(crate::scope::THIS);
-                self.emit(Insn::Star(this));
-                self.expr(&m.expression)?;
-                self.emit(Insn::GetSuperKeyed { this });
-            }
-            Expression::StaticMemberExpression(m) => {
+        let callee = self.temp();
+        let receiver = match &c.callee {
+            Expression::StaticMemberExpression(m) if !matches!(m.object, Expression::Super(_)) => {
+                let r = self.temp();
                 self.expr(&m.object)?;
-                self.emit(Insn::Star(this));
+                self.b().star(r);
                 self.optional(m.optional, m.span)?;
-                let name = self.name(m.property.name.as_str());
-                self.emit(Insn::GetNamed { obj: this, name, ic: IcSlot::default() });
+                self.b().get_named(r, m.property.name.as_str());
+                Some(r)
             }
-            Expression::ComputedMemberExpression(m) => {
+            Expression::ComputedMemberExpression(m) if !matches!(m.object, Expression::Super(_)) => {
+                let r = self.temp();
                 self.expr(&m.object)?;
-                self.emit(Insn::Star(this));
+                self.b().star(r);
                 self.optional(m.optional, m.span)?;
                 self.expr(&m.expression)?;
-                self.emit(Insn::GetKeyed { obj: this });
+                self.b().get_keyed(r);
+                Some(r)
             }
-            Expression::PrivateFieldExpression(m) => {
-                self.expr(&m.object)?;
-                self.emit(Insn::Star(this));
-                self.optional(m.optional, m.span)?;
-                self.load(Hidden::private(self.alloc, &m.field));
-                self.emit(Insn::GetPrivate { obj: this });
-            }
-            Expression::Identifier(id) if !self.with_chain(id.name.as_str()).is_empty() => {
-                self.emit(Insn::LdaUndefined);
-                self.emit(Insn::Star(this));
-                self.load_dynamic(id.name.as_str(), false, Some(this));
-            }
+            Expression::StaticMemberExpression(m) => return Err(self.unsupported(m.span, "super")),
+            Expression::ComputedMemberExpression(m) => return Err(self.unsupported(m.span, "super")),
+            Expression::PrivateFieldExpression(m) => return Err(self.unsupported(m.span, "private names")),
             f => {
-                self.emit(Insn::LdaUndefined);
-                self.emit(Insn::Star(this));
                 self.expr(f)?;
+                None
             }
-        }
+        };
         self.optional(c.optional, c.span)?;
-        self.emit(Insn::Star(callee));
-        if spread {
-            let args = self.spread_array(c.arguments.iter().map(Element::from))?;
-            self.emit(Insn::CallSpread { callee, this, args });
-            self.release(args);
-        } else {
-            let first = Reg(callee.0 + 2);
-            self.arguments(&c.arguments, first)?;
-            if matches!(&c.callee, Expression::Identifier(id) if id.name == "eval") {
-                let scope = self.eval_scope();
-                self.emit(Insn::CallEval { callee, this, args: first, argc, scope });
-            } else {
-                self.emit(Insn::Call { callee, this, args: first, argc });
+        self.b().star(callee);
+        let (args, spread) = self.argument_list(&c.arguments, receiver)?;
+        let eval = receiver.is_none() && matches!(&c.callee, Expression::Identifier(id) if id.name == "eval") && !spread;
+        if eval {
+            self.resolve_possibly_direct_eval(callee, args, c.span);
+        }
+        match (receiver, spread) {
+            (_, true) => {
+                let list = match receiver {
+                    Some(r) => RegisterList { first: r, count: args.count },
+                    None => {
+                        // CallWithSpread takes a receiver first: undefined
+                        args
+                    }
+                };
+                self.b().call_with_spread(callee, list);
             }
+            (Some(_), false) => self.b().call_property(callee, args),
+            (None, false) => self.b().call_undefined_receiver(callee, args),
         }
         self.release(callee);
         Ok(())
     }
 
-    /// If `e` is a variable in this function's registers or `this` (no TDZ check needed here, not inside `with`), gives
-    /// that register, so reading it needs no copy into a temporary register.
-    fn in_register(&self, e: &'a Expression<'a>) -> Option<Reg> {
+    /// `ResolvePossiblyDirectEval(callee, source, function, language mode, scope position, eval position)`: the callee
+    /// stays as is unless it is the real `eval`, which becomes the compiled eval code
+    fn resolve_possibly_direct_eval(&mut self, callee: Register, args: RegisterList, span: Span) {
+        let list = self.b().new_register_list(6);
+        self.b().mov(callee, list.first);
+        if args.count > 0 {
+            self.b().mov(args.first, list.at(1));
+        } else {
+            self.b().load_undefined();
+            self.b().star(list.at(1));
+        }
+        self.b().mov(Register::function_closure(), list.at(2));
+        let strict = self.strict_here();
+        self.b().load_smi(i32::from(strict));
+        self.b().star(list.at(3));
+        self.b().load_smi(0);
+        self.b().star(list.at(4));
+        self.b().load_smi(i32::try_from(span.start).unwrap_or(i32::MAX));
+        self.b().star(list.at(5));
+        self.b().call_runtime(Runtime::ResolvePossiblyDirectEval, list);
+        self.b().star(callee);
+        self.release(list.first);
+    }
+
+    /// If `e` is a variable in this function's registers or `this` (no TDZ check needed here), gives that register, so
+    /// reading it needs no copy into a temporary register.
+    fn in_register(&self, e: &'a Expression<'a>) -> Option<Register> {
         match e {
             Expression::Identifier(id) => self.register_of(id.name.as_str(), id.span.start),
             Expression::ThisExpression(t) => self.register_of(crate::scope::THIS, t.span.start),
@@ -750,28 +729,14 @@ impl<'a> Compiler<'a, '_> {
         if !m.optional
             && let Some(obj) = self.in_register(&m.object)
         {
-            let name = self.name(m.property.name.as_str());
-            self.emit(Insn::GetNamed { obj, name, ic: IcSlot::default() });
+            self.b().get_named(obj, m.property.name.as_str());
             return Ok(());
         }
         self.expr(&m.object)?;
         self.optional(m.optional, m.span)?;
         let obj = self.temp();
-        self.emit(Insn::Star(obj));
-        let name = self.name(m.property.name.as_str());
-        self.emit(Insn::GetNamed { obj, name, ic: IcSlot::default() });
-        self.release(obj);
-        Ok(())
-    }
-
-    /// `obj.#x`.
-    fn private_member(&mut self, m: &'a PrivateFieldExpression<'a>) -> Result<(), Error> {
-        self.expr(&m.object)?;
-        self.optional(m.optional, m.span)?;
-        let obj = self.temp();
-        self.emit(Insn::Star(obj));
-        self.load(Hidden::private(self.alloc, &m.field));
-        self.emit(Insn::GetPrivate { obj });
+        self.b().star(obj);
+        self.b().get_named(obj, m.property.name.as_str());
         self.release(obj);
         Ok(())
     }
@@ -784,15 +749,15 @@ impl<'a> Compiler<'a, '_> {
             && let Some(obj) = self.in_register(&m.object)
         {
             self.expr(&m.expression)?;
-            self.emit(Insn::GetKeyed { obj });
+            self.b().get_keyed(obj);
             return Ok(());
         }
         self.expr(&m.object)?;
         self.optional(m.optional, m.span)?;
         let obj = self.temp();
-        self.emit(Insn::Star(obj));
+        self.b().star(obj);
         self.expr(&m.expression)?;
-        self.emit(Insn::GetKeyed { obj });
+        self.b().get_keyed(obj);
         self.release(obj);
         Ok(())
     }
@@ -800,93 +765,159 @@ impl<'a> Compiler<'a, '_> {
     /// `?.`: if acc is null / undefined, jump to the end of the current chain.
     fn optional(&mut self, optional: bool, span: Span) -> Result<(), Error> {
         if optional {
-            let j = self.jump(Insn::JumpIfNullish);
-            if self.chains.is_empty() {
-                return Err(self.unsupported(span, "`?.` outside an optional chain"));
-            }
-            self.chains.last_mut().expect("checked above").push(j);
+            let Some(mut l) = self.chains.pop() else { return Err(self.unsupported(span, "`?.` outside an optional chain")) };
+            self.b().jump(Bytecode::JumpIfUndefinedOrNull, &mut l);
+            self.chains.push(l);
         }
         Ok(())
     }
 
-    fn has_spread(args: &[Argument<'a>]) -> bool {
-        args.iter().any(|a| matches!(a, Argument::SpreadElement(_)))
+    /// An array literal (V8's `BuildCreateArrayLiteral`): a boilerplate with the constant elements, then the computed
+    /// ones stored by index; with spreads / holes after a spread, built element by element from an empty array.
+    fn array(&mut self, elements: &'a [ArrayExpressionElement<'a>], span: Span) -> Result<(), Error> {
+        if elements.iter().any(|e| matches!(e, ArrayExpressionElement::SpreadElement(_))) {
+            let arr = self.spread_array(elements.iter().map(Element::from))?;
+            self.b().ldar(arr);
+            self.release(arr);
+            return Ok(());
+        }
+        if elements.is_empty() {
+            self.b().create_empty_array_literal();
+            return Ok(());
+        }
+        let boilerplate: Vec<Option<LiteralValue>> = elements
+            .iter()
+            .map(|e| match e {
+                ArrayExpressionElement::Elision(_) => Some(LiteralValue::Hole),
+                e => e.as_expression().and_then(Self::literal_value),
+            })
+            .collect();
+        let shallow = boilerplate.iter().all(Option::is_some);
+        let k = self.constant(Constant::Array(ArrayBoilerplate { elements: boilerplate.clone() }));
+        let flags = CreateArrayLiteralFlags::encode(shallow, if shallow { LiteralFlags::IS_SHALLOW } else { LiteralFlags::NO_FLAGS });
+        self.b().create_array_literal(k, flags);
+        if shallow {
+            return Ok(());
+        }
+        let arr = self.temp();
+        let index = self.temp();
+        self.b().star(arr);
+        for (i, (e, b)) in elements.iter().zip(&boilerplate).enumerate() {
+            if b.is_some() {
+                continue;
+            }
+            let e = e.as_expression().ok_or_else(|| self.unsupported(span, "array element"))?;
+            self.b().load_smi(i32::try_from(i).unwrap_or(i32::MAX));
+            self.b().star(index);
+            self.expr(e)?;
+            self.b().store_in_array_literal(arr, index);
+        }
+        self.b().ldar(arr);
+        self.release(arr);
+        Ok(())
     }
 
     /// Builds a sequence of elements with spreads / holes into an array in a new temporary register (the caller frees
-    /// it).
-    fn spread_array(&mut self, elements: impl Iterator<Item = Element<'a>>) -> Result<Reg, Error> {
+    /// it): elements are stored by index (`StaInArrayLiteral`), spreads iterated, the length set at the end.
+    fn spread_array(&mut self, elements: impl Iterator<Item = Element<'a>>) -> Result<Register, Error> {
         let arr = self.temp();
-        self.emit(Insn::CreateArray { first: arr, count: 0 });
-        self.emit(Insn::Star(arr));
+        let index = self.temp();
+        self.b().create_empty_array_literal();
+        self.b().star(arr);
+        self.b().load_smi(0);
+        self.b().star(index);
+        let mut hole_last = false;
         for e in elements {
+            hole_last = false;
             match e {
                 Element::Value(v) => {
                     self.expr(v)?;
-                    self.emit(Insn::ArrayPush { arr });
+                    self.b().store_in_array_literal(arr, index);
+                    self.b().ldar(index);
+                    self.b().unary(Bytecode::Inc);
+                    self.b().star(index);
                 }
                 Element::Spread(v) => {
                     self.expr(v)?;
-                    self.emit(Insn::ArraySpread { arr });
+                    let src = self.temp();
+                    self.b().star(src);
+                    let iter = self.iterate(src);
+                    let header = self.b().loop_header();
+                    let mut done = Label::default();
+                    self.iterator_next(iter);
+                    let v = self.temp();
+                    self.b().star(v);
+                    self.b().ldar(Register(iter.0 + 2));
+                    self.b().jump(Bytecode::JumpIfTrue, &mut done);
+                    self.b().ldar(v);
+                    self.b().store_in_array_literal(arr, index);
+                    self.b().ldar(index);
+                    self.b().unary(Bytecode::Inc);
+                    self.b().star(index);
+                    self.b().jump_loop(header, 1);
+                    self.b().bind(&mut done);
+                    self.release(src);
                 }
-                Element::Hole => _ = self.emit(Insn::ArrayHole { arr }),
+                Element::Hole => {
+                    hole_last = true;
+                    self.b().ldar(index);
+                    self.b().unary(Bytecode::Inc);
+                    self.b().star(index);
+                }
             }
         }
+        if hole_last {
+            let strict = self.strict_here();
+            self.b().ldar(index);
+            self.b().set_named(arr, "length", strict);
+        }
+        self.release(index);
         Ok(arr)
     }
 
     /// Destructuring assignment: stores the value in register `value` according to the assignment target pattern.
-    pub(crate) fn assign_target(&mut self, t: &'a AssignmentTarget<'a>, value: Reg) -> Result<(), Error> {
+    pub fn assign_target(&mut self, t: &'a AssignmentTarget<'a>, value: Register) -> Result<(), Error> {
         match t {
             AssignmentTarget::ArrayAssignmentTarget(a) => self.assign_array(a, value)?,
             AssignmentTarget::ObjectAssignmentTarget(o) => {
-                let n = u16::try_from(o.properties.len()).map_err(|_| self.unsupported(o.span, "more than 65535 properties"))?;
-                let keys = self.temps(n);
-                for (i, p) in (0u16..).zip(&o.properties) {
-                    let k = Reg(keys.0 + i);
+                if o.properties.is_empty() {
+                    self.require_object(value);
+                }
+                if o.rest.is_some() {
+                    return Err(self.unsupported(o.span, "a rest element in an object assignment pattern"));
+                }
+                for p in &o.properties {
                     match p {
                         AssignmentTargetProperty::AssignmentTargetPropertyIdentifier(id) => {
                             let name = id.binding.name.as_str();
-                            let c = self.name(name);
-                            self.emit(Insn::LdaConst(c));
-                            self.emit(Insn::Star(k));
-                            self.emit(Insn::GetKeyed { obj: value });
+                            self.b().get_named(value, name);
                             let v = self.temp();
-                            self.emit(Insn::Star(v));
+                            self.b().star(v);
                             let v2 = match &id.init {
                                 Some(d) => self.with_default(v, d, Some(name))?,
                                 None => v,
                             };
-                            self.emit(Insn::Ldar(v2));
+                            self.b().ldar(v2);
                             self.store(name, false);
                             self.release(v);
                         }
                         AssignmentTargetProperty::AssignmentTargetPropertyProperty(pp) => {
+                            let k = self.temp();
                             self.property_key_into(&pp.name, pp.computed, k)?;
-                            self.emit(Insn::Ldar(k));
-                            self.emit(Insn::GetKeyed { obj: value });
+                            self.b().ldar(k);
+                            self.b().get_keyed(value);
                             let v = self.temp();
-                            self.emit(Insn::Star(v));
+                            self.b().star(v);
                             self.assign_maybe_default(&pp.binding, v)?;
-                            self.release(v);
+                            self.release(k);
                         }
                     }
                 }
-                if let Some(r) = &o.rest {
-                    self.emit(Insn::ObjectRest { src: value, keys, count: n });
-                    let v = self.temp();
-                    self.emit(Insn::Star(v));
-                    self.assign_target(&r.target, v)?;
-                    self.release(v);
-                } else if o.properties.is_empty() {
-                    self.require_object(value);
-                }
-                self.release(keys);
             }
             t => {
                 let s = t.as_simple_assignment_target().ok_or_else(|| self.unsupported(t.span(), "assignment target"))?;
                 let target = self.target(s)?;
-                self.emit(Insn::Ldar(value));
+                self.b().ldar(value);
                 self.target_store(&target);
                 self.target_release(&target);
             }
@@ -896,14 +927,12 @@ impl<'a> Compiler<'a, '_> {
 
     /// Array destructuring assignment, in spec order: for each element, evaluate the target reference first, then step
     /// the iterator; on a throw midway, close the iterator first.
-    fn assign_array(&mut self, a: &'a ArrayAssignmentTarget<'a>, value: Reg) -> Result<(), Error> {
+    fn assign_array(&mut self, a: &'a ArrayAssignmentTarget<'a>, value: Register) -> Result<(), Error> {
         let iter = self.iterate(value);
-        // Spec order: for each element, evaluate the target reference first, then step the iterator; on a throw midway,
-        // close the iterator first
         self.closing_on_throw(iter, |c| {
             for e in &a.elements {
                 let Some(e) = e else {
-                    c.emit(Insn::IteratorNext { iter });
+                    c.iterator_next(iter);
                     continue;
                 };
                 let (binding, default) = match e {
@@ -911,9 +940,9 @@ impl<'a> Compiler<'a, '_> {
                     t => (t.as_assignment_target().ok_or_else(|| c.unsupported(t.span(), "assignment target"))?, None),
                 };
                 let pre = c.pre_target(binding)?;
-                c.emit(Insn::IteratorNext { iter });
+                c.iterator_next(iter);
                 let v = c.temp();
-                c.emit(Insn::Star(v));
+                c.b().star(v);
                 let name = match binding {
                     AssignmentTarget::AssignmentTargetIdentifier(id) => Some(id.name.as_str()),
                     _ => None,
@@ -931,16 +960,16 @@ impl<'a> Compiler<'a, '_> {
             match &a.rest {
                 Some(r) => {
                     let pre = c.pre_target(&r.target)?;
-                    c.emit(Insn::IteratorRest { iter });
+                    c.iterator_rest(iter);
                     let v = c.temp();
-                    c.emit(Insn::Star(v));
+                    c.b().star(v);
                     c.put_target(pre.as_ref(), &r.target, v)?;
                     c.release(v);
                     if let Some(t) = &pre {
                         c.target_release(t);
                     }
                 }
-                None => _ = c.emit(Insn::IteratorClose { iter }),
+                None => c.iterator_close(iter),
             }
             Ok(())
         })?;
@@ -958,10 +987,10 @@ impl<'a> Compiler<'a, '_> {
     }
 
     /// Writes `v` into the previously evaluated target, or expands it per the nested pattern.
-    fn put_target(&mut self, pre: Option<&Target<'a>>, t: &'a AssignmentTarget<'a>, v: Reg) -> Result<(), Error> {
+    fn put_target(&mut self, pre: Option<&Target<'a>>, t: &'a AssignmentTarget<'a>, v: Register) -> Result<(), Error> {
         match pre {
             Some(target) => {
-                self.emit(Insn::Ldar(v));
+                self.b().ldar(v);
                 self.target_store(target);
                 Ok(())
             }
@@ -969,7 +998,7 @@ impl<'a> Compiler<'a, '_> {
         }
     }
 
-    fn assign_maybe_default(&mut self, e: &'a AssignmentTargetMaybeDefault<'a>, value: Reg) -> Result<(), Error> {
+    fn assign_maybe_default(&mut self, e: &'a AssignmentTargetMaybeDefault<'a>, value: Register) -> Result<(), Error> {
         match e {
             AssignmentTargetMaybeDefault::AssignmentTargetWithDefault(d) => {
                 let name = match &d.binding {
@@ -985,197 +1014,170 @@ impl<'a> Compiler<'a, '_> {
         }
     }
 
-    /// `yield* a`: forwards the resume mode and the value sent in to the inner iterator unchanged; its completion value
-    /// is the value of the expression.
-    fn yield_star(&mut self, a: &'a Expression<'a>, mode: Reg) -> Result<(), Error> {
-        self.expr(a)?;
-        let src = self.temp();
-        self.emit(Insn::Star(src));
-        let iter = self.iterate(src);
-        let next = self.constant(Constant::Number(f64::from(Resume::Next)));
-        self.emit(Insn::LdaConst(next));
-        self.emit(Insn::Star(mode));
-        self.emit(Insn::LdaUndefined);
-        let result = self.temp();
-        let top = self.here();
-        self.emit(Insn::DelegateStep { iter, mode });
-        self.emit(Insn::Star(result));
-        let done = self.name("done");
-        self.emit(Insn::GetNamed { obj: result, name: done, ic: IcSlot::default() });
-        let finished = self.jump(Insn::JumpIfTrue);
-        let value = self.name("value");
-        self.emit(Insn::GetNamed { obj: result, name: value, ic: IcSlot::default() });
-        self.emit(Insn::Yield { mode });
-        self.emit(Insn::Jump(top));
-        self.land(finished);
-        self.emit(Insn::GetNamed { obj: result, name: value, ic: IcSlot::default() });
-        self.emit(Insn::Star(result));
-        self.on_completion(mode, f64::from(Resume::Return), |s| {
-            s.emit(Insn::Ldar(result));
-            s.ret();
-            Ok(())
-        })?;
-        self.emit(Insn::Ldar(result));
-        self.release(src);
-        Ok(())
-    }
-
-    /// `yield* a` in an async generator: async iterator protocol; each step's result from the inner iterator is awaited
-    /// first, and when falling back to a sync iterator the value is awaited too. Resuming from `await` overwrites
-    /// `mode`, so the resume mode used for delegation is saved separately.
-    fn yield_star_async(&mut self, a: &'a Expression<'a>, mode: Reg) -> Result<(), Error> {
-        self.expr(a)?;
-        let iter = self.temps(4);
-        self.emit(Insn::GetAsyncIterator { dst: iter });
-        let next = self.constant(Constant::Number(f64::from(Resume::Next)));
-        self.emit(Insn::LdaConst(next));
-        self.emit(Insn::Star(mode));
-        self.emit(Insn::LdaUndefined);
-        let delegated = self.temp();
-        let result = self.temp();
-        let top = self.here();
-        self.emit(Insn::DelegateStep { iter, mode });
-        self.emit(Insn::Star(result));
-        self.emit(Insn::Ldar(mode));
-        self.emit(Insn::Star(delegated));
-        self.emit(Insn::Ldar(result));
-        self.emit(Insn::Await { mode });
-        self.resume_dispatch(mode, false)?;
-        self.emit(Insn::Star(result));
-        let done = self.name("done");
-        self.emit(Insn::GetNamed { obj: result, name: done, ic: IcSlot::default() });
-        let finished = self.jump(Insn::JumpIfTrue);
-        let value = self.name("value");
-        self.emit(Insn::GetNamed { obj: result, name: value, ic: IcSlot::default() });
-        self.emit(Insn::Star(result));
-        self.emit(Insn::Ldar(Reg(iter.0 + 3)));
-        let not_sync = self.jump(Insn::JumpIfFalse);
-        self.emit(Insn::Ldar(result));
-        self.emit(Insn::Await { mode });
-        self.resume_dispatch(mode, false)?;
-        self.emit(Insn::Star(result));
-        self.land(not_sync);
-        self.emit(Insn::Ldar(result));
-        self.emit(Insn::Yield { mode });
-        self.emit(Insn::Jump(top));
-        self.land(finished);
-        self.emit(Insn::GetNamed { obj: result, name: value, ic: IcSlot::default() });
-        self.emit(Insn::Star(result));
-        self.on_completion(delegated, f64::from(Resume::Return), |s| {
-            s.emit(Insn::Ldar(result));
-            s.ret();
-            Ok(())
-        })?;
-        self.emit(Insn::Ldar(result));
-        self.release(iter);
-        Ok(())
-    }
-
-    /// Evaluates the arguments one by one into consecutive registers starting at `first`.
-    fn arguments(&mut self, args: &'a [Argument<'a>], first: Reg) -> Result<(), Error> {
-        for (i, a) in (0..).zip(args) {
-            let e = a.as_expression().ok_or_else(|| self.unsupported(a.span(), "spread arguments"))?;
-            self.expr(e)?;
-            self.emit(Insn::Star(Reg(first.0 + i)));
-        }
-        Ok(())
-    }
-
-    /// Reads `this` into a temporary register (the receiver of `super.x`).
-    fn this_temp(&mut self) -> Reg {
-        self.load(crate::scope::THIS);
-        let t = self.temp();
-        self.emit(Insn::Star(t));
-        t
-    }
-
-    /// `delete x`: a property delete gives the result; deleting a name (sloppy mode) gives `false`; any other
-    /// expression is evaluated and gives `true`.
+    /// `delete x` (V8's `VisitDelete`): a property delete gives the result (key in acc); deleting an unresolved name
+    /// (sloppy mode) goes through `DeleteLookupSlot`, a declared variable gives `false`; any other expression is
+    /// evaluated and gives `true`.
     fn delete(&mut self, e: &'a Expression<'a>) -> Result<(), Error> {
+        let strict = self.strict_here();
         match e {
-            Expression::StaticMemberExpression(m) => {
+            Expression::StaticMemberExpression(m) if !matches!(m.object, Expression::Super(_)) => {
                 self.expr(&m.object)?;
                 let obj = self.temp();
-                self.emit(Insn::Star(obj));
-                let name = self.name(m.property.name.as_str());
-                self.emit(Insn::DeleteNamed { obj, name, strict: self.strict_here() });
+                self.b().star(obj);
+                self.b().load_string(m.property.name.as_str());
+                self.b().delete_property(obj, strict);
                 self.release(obj);
             }
-            Expression::ComputedMemberExpression(m) => {
+            Expression::ComputedMemberExpression(m) if !matches!(m.object, Expression::Super(_)) => {
                 self.expr(&m.object)?;
                 let obj = self.temp();
-                self.emit(Insn::Star(obj));
+                self.b().star(obj);
                 self.expr(&m.expression)?;
-                self.emit(Insn::DeleteKeyed { obj, strict: self.strict_here() });
+                self.b().delete_property(obj, strict);
                 self.release(obj);
             }
-            Expression::Identifier(_) => _ = self.emit(Insn::LdaBool(false)),
+            Expression::Identifier(id) => match self.lookup(id.name.as_str()).0 {
+                Place::Global(_) | Place::Lookup(_) => {
+                    let r = self.temp();
+                    self.b().load_string(id.name.as_str());
+                    self.b().star(r);
+                    self.b().call_runtime(Runtime::DeleteLookupSlot, RegisterList { first: r, count: 1 });
+                    self.release(r);
+                }
+                _ => self.b().load_bool(false),
+            },
             e => {
-                self.expr(e)?;
-                self.emit(Insn::LdaBool(true));
+                self.effect(e)?;
+                self.b().load_bool(true);
             }
         }
         Ok(())
     }
 
+    /// An object literal (V8's `VisitObjectLiteral`): the boilerplate holds the constant-named data properties before
+    /// the first computed key or spread (values known at compile time filled in); the rest are defined in order after
+    /// creating it.
     fn object(&mut self, o: &'a ObjectExpression<'a>) -> Result<(), Error> {
-        let capacity = u16::try_from(o.properties.len()).unwrap_or(u16::MAX);
-        self.emit(Insn::CreateObject { capacity });
-        let obj = self.temp();
-        self.emit(Insn::Star(obj));
+        if o.properties.is_empty() {
+            self.b().plain(Bytecode::CreateEmptyObjectLiteral);
+            return Ok(());
+        }
+        let mut properties = Vec::new();
+        let mut in_boilerplate = 0;
         for p in &o.properties {
+            let ObjectPropertyKind::ObjectProperty(p) = p else { break };
+            if p.computed || p.kind != PropertyKind_::Init || p.method {
+                break;
+            }
+            let Some(name) = self.static_name(&p.key, false) else { break };
+            if name == "__proto__" && !p.shorthand {
+                break;
+            }
+            properties.push((name.into(), Self::literal_value(&p.value)));
+            in_boilerplate += 1;
+        }
+        let shallow = properties.iter().all(|(_, v): &(Box<str>, Option<LiteralValue>)| v.is_some());
+        let obj = self.temp();
+        if properties.is_empty() {
+            self.b().plain(Bytecode::CreateEmptyObjectLiteral);
+        } else {
+            let k = self.constant(Constant::Object(ObjectBoilerplate { properties }));
+            let flags = CreateObjectLiteralFlags::encode(if shallow { LiteralFlags::IS_SHALLOW } else { LiteralFlags::NO_FLAGS }, shallow);
+            self.b().create_object_literal(k, flags);
+        }
+        self.b().star(obj);
+        for (i, p) in o.properties.iter().enumerate() {
             let p = match p {
                 ObjectPropertyKind::ObjectProperty(p) => p,
                 ObjectPropertyKind::SpreadProperty(sp) => {
+                    let args = self.b().new_register_list(2);
+                    self.b().mov(obj, args.first);
                     self.expr(&sp.argument)?;
-                    self.emit(Insn::CopyData { obj });
+                    self.b().star(args.at(1));
+                    self.b().call_runtime(Runtime::InlineCopyDataProperties, args);
+                    self.release(args.first);
                     continue;
                 }
             };
-            let kind = match p.kind {
-                PropertyKind_::Init => PropertyKind::Data,
-                PropertyKind_::Get => PropertyKind::Getter,
-                PropertyKind_::Set => PropertyKind::Setter,
-            };
-            let key = match self.static_key(&p.key, p.computed) {
-                Some(k) => Ok(k?),
-                None => {
-                    let k = p.key.as_expression().ok_or_else(|| self.unsupported(p.span, "property key"))?;
-                    self.expr(k)?;
-                    let key = self.temp();
-                    self.emit(Insn::Star(key));
-                    Err(key)
+            if i < in_boilerplate {
+                // Already in the boilerplate unless its value is computed
+                if Self::literal_value(&p.value).is_none() {
+                    let name = self.static_name(&p.key, false).unwrap_or_default();
+                    self.expr_named(&p.value, name)?;
+                    self.b().define_named_own(obj, name);
                 }
-            };
-            match (&p.value, p.method || kind != PropertyKind::Data) {
-                (Expression::FunctionExpression(f), true) => {
-                    let mkind = match p.kind {
-                        PropertyKind_::Get => MethodDefinitionKind::Get,
-                        PropertyKind_::Set => MethodDefinitionKind::Set,
-                        PropertyKind_::Init => MethodDefinitionKind::Method,
-                    };
-                    let fname = self.method_name(&p.key, p.computed, mkind);
-                    let n = self.method(fname, f, FunctionKind::Method)?;
-                    self.emit(Insn::CreateMethod { func: n, home: obj });
-                }
-                (v, _) => match self.static_name(&p.key, p.computed) {
-                    // `__proto__: function () {}` does not infer a name
-                    Some(n) if n != "__proto__" || p.shorthand => self.expr_named(v, n)?,
-                    _ => self.expr(v)?,
-                },
+                continue;
             }
-            let proto_setter = !p.computed && !p.shorthand && !p.method && kind == PropertyKind::Data && self.static_name(&p.key, false).is_some_and(|n| n == "__proto__");
-            match key {
-                Ok(_) if proto_setter => _ = self.emit(Insn::SetProtoLiteral { obj }),
-                Ok(name) => _ = self.emit(Insn::DefineNamed { obj, name, kind, enumerable: true, ic: IcSlot::default() }),
-                Err(key) => {
-                    self.emit(Insn::DefineKeyed { obj, key, kind, enumerable: true });
-                    self.release(key);
+            let accessor = p.kind != PropertyKind_::Init;
+            if accessor || p.method {
+                let mkind = match p.kind {
+                    PropertyKind_::Get => MethodDefinitionKind::Get,
+                    PropertyKind_::Set => MethodDefinitionKind::Set,
+                    PropertyKind_::Init => MethodDefinitionKind::Method,
+                };
+                let Expression::FunctionExpression(f) = &p.value else { return Err(self.unsupported(p.span, "method")) };
+                let fname = self.method_name(&p.key, p.computed, mkind);
+                let kind = match mkind {
+                    MethodDefinitionKind::Get => Kind::Getter,
+                    MethodDefinitionKind::Set => Kind::Setter,
+                    _ => Kind::Method,
+                };
+                let n = self.method(fname, f, kind)?;
+                if accessor {
+                    // DefineAccessorPropertyUnchecked(object, name, getter, setter, attributes)
+                    let args = self.b().new_register_list(5);
+                    self.b().mov(obj, args.first);
+                    self.property_key_into(&p.key, p.computed, args.at(1))?;
+                    let (get, set) = if mkind == MethodDefinitionKind::Get { (args.at(2), args.at(3)) } else { (args.at(3), args.at(2)) };
+                    self.closure(n);
+                    self.b().star(get);
+                    self.b().load_null();
+                    self.b().star(set);
+                    self.b().load_smi(0);
+                    self.b().star(args.at(4));
+                    self.b().call_runtime(Runtime::DefineAccessorPropertyUnchecked, args);
+                    self.release(args.first);
+                    continue;
+                }
+                self.closure(n);
+            } else {
+                match self.static_name(&p.key, p.computed) {
+                    // `__proto__: v` sets the prototype (V8's `InternalSetPrototype`)
+                    Some("__proto__") if !p.shorthand && !p.computed => {
+                        let args = self.b().new_register_list(2);
+                        self.b().mov(obj, args.first);
+                        self.expr(&p.value)?;
+                        self.b().star(args.at(1));
+                        self.b().call_runtime(Runtime::InternalSetPrototype, args);
+                        self.release(args.first);
+                        continue;
+                    }
+                    Some(n) => self.expr_named(&p.value, n)?,
+                    None => {}
+                }
+            }
+            match (self.static_name(&p.key, p.computed), p.computed) {
+                (Some(name), false) if !p.method => self.b().define_named_own(obj, name),
+                _ => {
+                    // DefineKeyedOwnPropertyInLiteral: the value waits in a register while the key is computed
+                    let v = self.temp();
+                    if p.method || self.static_name(&p.key, p.computed).is_some() {
+                        self.b().star(v);
+                    } else {
+                        self.expr(&p.value)?;
+                        self.b().star(v);
+                    }
+                    let key = self.temp();
+                    self.property_key_into(&p.key, p.computed, key)?;
+                    self.b().ldar(v);
+                    self.b().define_keyed_own_in_literal(obj, key, 0);
+                    self.release(v);
                 }
             }
         }
-        self.emit(Insn::Ldar(obj));
+        self.b().ldar(obj);
         self.release(obj);
+        let _ = TypeOfLiteral::Other;
         Ok(())
     }
 }
