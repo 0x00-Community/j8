@@ -359,6 +359,11 @@ impl<'gc> Props<'gc> {
     }
 
     pub fn get(&self, i: usize) -> Property<'gc> {
+        if let Some(d) = self.dict_cell() {
+            // One borrow of a dictionary for attributes and slot
+            let d = d.borrow();
+            return Property::from((d.slots[i], d.keys[i].1));
+        }
         Property::from((self.slot(i), self.attrs(i)))
     }
 
@@ -376,6 +381,17 @@ impl<'gc> Props<'gc> {
                 let (k, a) = self.shape_ref()?.keys().get(i)?;
                 (**k == *key).then(|| Property::from((self.slot(i), *a)))
             }
+        }
+    }
+
+    /// The entry with key `key` and its index (with one borrow of a dictionary)
+    pub fn lookup(&self, key: &str) -> Option<(usize, Property<'gc>)> {
+        match self.dict_cell() {
+            Some(d) => {
+                let d = d.borrow();
+                d.find(key).map(|i| (i, Property::from((d.slots[i], d.keys[i].1))))
+            }
+            None => self.shape_ref()?.find(key).map(|i| (i, self.get(i))),
         }
     }
 
