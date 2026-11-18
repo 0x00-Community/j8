@@ -6,6 +6,8 @@
 //! handler, and if there is none, unwinds to the caller.
 //! An `Executor` serves only one isolate: it holds the loaded functions, and closures on the heap point back to them by
 //! [`FuncId`].
+#![cfg_attr(tail_calls, feature(explicit_tail_calls))]
+#![cfg_attr(tail_calls, allow(incomplete_features))]
 extern crate alloc;
 
 use j8framework::ValueKind;
@@ -199,6 +201,66 @@ pub enum Tiered {
 
 /// 两次看中止请求之间最多走多少步
 const CHECK_STEPS: usize = 1024;
+
+/// What a handler hands to the [`Executor::run`] loop (with tail calls only `Done` gets back there)
+enum Tick<'x, 'gc> {
+    /// Run the instruction at `pc` of `code` with this accumulator
+    #[cfg_attr(tail_calls, expect(dead_code, reason = "with tail calls handlers jump straight on"))]
+    Next(&'x [u8], usize, Value<'gc>),
+    /// Frames changed: enter the current frame
+    #[cfg_attr(tail_calls, expect(dead_code, reason = "with tail calls handlers jump straight on"))]
+    Enter,
+    Done(Option<Outcome<'gc>>),
+}
+
+/// What every instruction handler returns
+type Ret<'x, 'gc> = Result<Tick<'x, 'gc>, Error>;
+
+/// An instruction handler (one per opcode, see `j8macros::threaded!`)
+type InsnFn = for<'x, 'a, 'b, 'gc> fn(&mut Cx<'x, 'a, 'b, 'gc>, &'x [u8], usize, Value<'gc>) -> Ret<'x, 'gc>;
+
+/// What handlers share besides the hot state in their arguments
+struct Cx<'x, 'a, 'b, 'gc> {
+    exec: &'x Executor,
+    a: &'x mut Agent<'gc, 'a>,
+    st: &'x mut State<'gc>,
+    budget: &'x mut Budget<'b>,
+    depth: usize,
+    /// The callee the call fast path already fetched, for the frame entered next
+    entering: Option<&'x Loaded>,
+    /// The function of the current frame
+    loaded: &'x Loaded,
+}
+
+/// Goes on to the instruction at `pc`: a tail call to its handler (nightly), or back to the `run` loop
+#[cfg(tail_calls)]
+macro_rules! next {
+    ($cx:expr, $code:expr, $pc:expr, $acc:expr) => {{
+        let (code, pc, acc): (&[u8], usize, Value<'_>) = ($code, $pc, $acc);
+        // SAFETY: `code` is checked code and `pc` starts an instruction in it
+        become (Executor::HANDLERS[usize::from(unsafe { *code.get_unchecked(pc) })])($cx, code, pc, acc)
+    }};
+}
+#[cfg(not(tail_calls))]
+macro_rules! next {
+    ($cx:expr, $code:expr, $pc:expr, $acc:expr) => {
+        return Ok(Tick::Next($code, $pc, $acc))
+    };
+}
+
+/// Re-enters the current frame after frames changed
+#[cfg(tail_calls)]
+macro_rules! enter {
+    ($cx:expr, $code:expr, $pc:expr, $acc:expr) => {
+        become Executor::step_enter($cx, $code, $pc, $acc)
+    };
+}
+#[cfg(not(tail_calls))]
+macro_rules! enter {
+    ($cx:expr, $code:expr, $pc:expr, $acc:expr) => {
+        return Ok(Tick::Enter)
+    };
+}
 
 /// 一次执行的步数预算加中止检查：热路径只数 `tick`，数完才看配额和中止请求。
 struct Budget<'s> {
@@ -1078,23 +1140,70 @@ impl Executor {
         false
     }
 
-    /// Main loop: the outer loop fetches the function once per frame entered (start, call, return), the inner loop
-    /// fetches and dispatches instructions one by one; instructions that switch frames `continue 'frame`. Errors return
-    /// directly and are unwound by [`execute`](Self::execute).
-    #[expect(clippy::too_many_lines, reason = "one branch per instruction; splitting it up would make it harder to read")]
+    /// Main loop: threaded code. Each opcode has its own handler (see `j8macros::threaded!`); a handler runs one
+    /// instruction and goes straight on to the next one's handler, with the hot state (code, pc, accumulator) in its
+    /// arguments. Built with a nightly compiler (`cfg(tail_calls)`, see build.rs) the jump is a guaranteed tail call
+    /// (`become`): one indirect jump per instruction; otherwise each handler returns and this loop calls the next.
+    /// Errors return directly and are unwound by [`execute`](Self::execute).
     fn run<'gc>(&self, a: &mut Agent<'gc, '_>, st: &mut State<'gc>, depth: usize, budget: &mut Budget<'_>) -> Result<Option<Outcome<'gc>>, Error> {
-        let State { regs, frames, f, acc } = st;
+        let loaded = self.function(st.f.func);
+        // The first frame's function, handed to `step_enter` so it isn't fetched twice
+        let mut cx = Cx { exec: self, a, st, budget, depth, entering: Some(loaded), loaded };
+        let mut t = Self::step_enter(&mut cx, &[], 0, Value::Undefined)?;
+        loop {
+            t = match t {
+                Tick::Done(o) => return Ok(o),
+                Tick::Enter => Self::step_enter(&mut cx, &[], 0, Value::Undefined)?,
+                // SAFETY: `code` is checked code and `pc` starts an instruction in it
+                Tick::Next(code, pc, acc) => (Self::HANDLERS[usize::from(unsafe { *code.get_unchecked(pc) })])(&mut cx, code, pc, acc)?,
+            };
+        }
+    }
+
+    /// Entering a frame (start, call, return): budget check, fetch the function, then its next instruction
+    fn step_enter<'x, 'gc>(cx: &mut Cx<'x, '_, '_, 'gc>, _code: &'x [u8], _pc: usize, _acc: Value<'gc>) -> Ret<'x, 'gc> {
+        // Budget exhausted: stop before this frame's next instruction, with the state intact
+        if Self::spent(cx.budget) {
+            return Ok(Tick::Done(None));
+        }
+        let loaded = cx.entering.take().unwrap_or_else(|| cx.exec.function(cx.st.f.func));
+        cx.loaded = loaded;
+        let (pc, acc) = (cx.st.f.pc, cx.st.acc);
+        next!(cx, &loaded.func.code, pc, acc)
+    }
+
+    /// The handler for opcode bytes no instruction has (checked code never has them)
+    fn step_invalid<'x, 'gc>(_: &mut Cx<'x, '_, '_, 'gc>, code: &'x [u8], pc: usize, _: Value<'gc>) -> Ret<'x, 'gc> {
+        unreachable!("checked code has no opcode {}", code[pc])
+    }
+
+    j8macros::threaded!(HANDLERS: InsnFn, Opcode, Self::step_invalid,
+    /// One instruction: decode it, run its arm, go on to the next instruction (or re-enter the frame, or return)
+    #[allow(clippy::too_many_lines, reason = "the arms of one opcode are pasted in here")]
+    fn step<'x, 'a, 'b, 'gc>(cx: &mut Cx<'x, 'a, 'b, 'gc>, code: &'x [u8], pc: usize, acc: Value<'gc>) -> Ret<'x, 'gc> {
+        let exe: &'x Executor = cx.exec;
+        let loaded: &'x Loaded = cx.loaded;
+        let func = &loaded.func;
+        let depth = cx.depth;
         // When the call fast path has already fetched the callee, hands it to the next frame, saving a lookup
-        let mut entering: Option<&Loaded> = None;
-        'frame: loop {
-            // Budget exhausted: stop before this frame's next instruction, with the state intact
-            if Self::spent(budget) {
-                return Ok(None);
-            }
-            let loaded = entering.take().unwrap_or_else(|| self.function(f.func));
-            let func = &loaded.func;
-            loop {
-                let r = |r: Reg| f.base + usize::from(r.0);
+        let mut entering: Option<&'x Loaded> = None;
+        let mut frame = false;
+        let mut acc_v = acc;
+        let ret = {
+            let a = &mut *cx.a;
+            let budget = &mut *cx.budget;
+            let State { regs, frames, f, acc: st_acc } = &mut *cx.st;
+            let acc = &mut acc_v;
+            let insn;
+            // SAFETY: `code` is checked code and `pc` starts an instruction in it; this handler is only reached through
+            // the table entries of its own opcodes, which lets the decoder fold down to reading this instruction's fields
+            (insn, f.pc) = unsafe {
+                core::hint::assert_unchecked(matches!(Opcode::at_unchecked(code, pc), __ops!()));
+                Insn::decode_unchecked(code, pc)
+            };
+            let r = |r: Reg| f.base + usize::from(r.0);
+            let ret: Option<Result<Option<Outcome<'gc>>, Error>> = 'h: {
+                'next: {
                 // Fast path when both sides are numbers computes in place; everything else goes to the Agent
                 macro_rules! binary {
                     ($op:expr, $lhs:expr, $rhs:expr) => {{
@@ -1116,34 +1225,55 @@ impl Executor {
                         // Immediately followed by a conditional jump (loop condition, `if`): the comparison result is
                         // the boolean, so jump directly, saving a dispatch
                         // Opcode first: only the two jumps are decoded (with the opcode known, to one field read)
-                        let (taken, next) = match Opcode::at(&func.code, f.pc) {
+                        let (taken, next) = match unsafe { Opcode::at_unchecked(code, f.pc) } {  // SAFETY: f.pc is the next instruction (or the padding) of checked code
                             Opcode::JumpIfFalse | Opcode::JumpIfTrue => match func.insn_at(f.pc) {
                                 (Insn::JumpIfFalse(l), next) => ((!c).then_some(l), next),
                                 (Insn::JumpIfTrue(l), next) => (c.then_some(l), next),
                                 _ => unreachable!("the opcode decides the instruction"),
                             },
-                            _ => continue,
+                            _ => break 'next,
                         };
                         f.pc = next;
                         if let Some(l) = taken {
                             let back = (l.0 as usize) < f.pc;
                             f.pc = l.0 as usize;
                             if back {
-                                if self.tier.is_some() {
-                                    self.osr(a, loaded, regs, f, acc, f.pc);
+                                if exe.tier.is_some() {
+                                    exe.osr(a, loaded, regs, f, acc, f.pc);
                                 }
                                 if Self::spent(budget) {
-                                    return Ok(None);
+                                    break 'h Some(Ok(None));
                                 }
                             }
                         }
                     }};
                 }
                 // One dispatch on the opcode; each case decodes its own instruction (see `j8macros::dispatch!`)
-                j8macros::dispatch!(Opcode::at(&func.code, f.pc), {
-                    let insn;
-                    (insn, f.pc) = func.insn_at(f.pc);
-                }, match insn {
+                                    'arm: {
+                        __arms!();
+                        break 'next;
+                    }
+                    // `continue 'frame`: frames changed
+                    frame = true;
+                }
+                None
+            };
+            if ret.is_some() || frame {
+                *st_acc = *acc;
+            }
+            ret
+        };
+        if let Some(r) = ret {
+            return r.map(Tick::Done);
+        }
+        if frame {
+            cx.entering = entering;
+            enter!(cx, code, pc, acc_v)
+        }
+        let pc = cx.st.f.pc;
+        next!(cx, code, pc, acc_v)
+    }
+    match insn {
                     Insn::LdaUndefined => {
                         *acc = Value::Undefined;
                     }
@@ -1792,10 +1922,7 @@ impl Executor {
                         }
                         *acc = result;
                     }
-                });
-            }
-        }
-    }
+    });
 }
 
 impl<'gc> Invoke<'gc> for Executor {

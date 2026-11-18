@@ -167,6 +167,16 @@ impl EnumSpec {
                     let b = #owner::window(code, pc);
                     match b[0] { #(#arms)* #unused => panic!("checked code has no {} tag {}", #of, b[0]) }
                 }
+
+                /// [`Self::at`] without any check (one byte load): for the interpreter's dispatch.
+                ///
+                /// # Safety
+                /// `code` is padded, checked code and `pc` the start of an instruction in it.
+                #[inline(always)]
+                pub unsafe fn at_unchecked(code: &[u8], pc: usize) -> Self {
+                    // SAFETY: checked code starts every instruction with a valid tag (= discriminant), and `pc` is in it
+                    unsafe { core::mem::transmute::<u8, Self>(*code.get_unchecked(pc)) }
+                }
             }
         })
     }
@@ -238,6 +248,32 @@ impl EnumSpec {
                     match b[0] {
                         #(#arms)*
                         #unused => panic!("checked code has no {} tag {}", #name, b[0]),
+                    }
+                }
+
+                /// The `WINDOW` bytes from `pc`, without a bounds check.
+                ///
+                /// # Safety
+                /// `code` is padded, checked code and `pc` the start of an instruction in it (so `pc + WINDOW` ≤ its
+                /// length).
+                #[inline(always)]
+                pub unsafe fn window_unchecked(code: &[u8], pc: usize) -> &[u8; Self::WINDOW] {
+                    // SAFETY: caller: the padding keeps the whole window inside `code`
+                    unsafe { &*code.as_ptr().add(pc).cast::<[u8; Self::WINDOW]>() }
+                }
+
+                /// [`Self::decode_at`] without checks for fixed-size instructions (variable-size ones still slice).
+                ///
+                /// # Safety
+                /// As [`Self::window_unchecked`].
+                #[inline(always)]
+                pub unsafe fn decode_unchecked(code: &[u8], pc: usize) -> (Self, usize) {
+                    // SAFETY: caller
+                    let b = unsafe { Self::window_unchecked(code, pc) };
+                    match b[0] {
+                        #(#arms)*
+                        // SAFETY: checked code only has tags of its variants
+                        _ => unsafe { core::hint::unreachable_unchecked() },
                     }
                 }
             }

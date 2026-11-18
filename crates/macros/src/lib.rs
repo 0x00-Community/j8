@@ -14,6 +14,7 @@ mod heap;
 mod method;
 mod object;
 mod spec;
+mod threaded;
 mod trace;
 
 use proc_macro::TokenStream;
@@ -66,6 +67,14 @@ pub fn derive_trace(input: TokenStream) -> TokenStream {
 pub fn heap(attr: TokenStream, item: TokenStream) -> TokenStream {
     let item = parse_macro_input!(item as syn::ItemStruct);
     heap::expand(&attr.into(), item).unwrap_or_else(syn::Error::into_compile_error).into()
+}
+
+/// `threaded!(TABLE: Handler, Opcode, invalid, fn template(..) { .. __arms!() .. } match insn { arms })`: one handler
+/// function per opcode plus a table indexed by the opcode byte (threaded code; see `threaded.rs`).
+#[proc_macro]
+pub fn threaded(input: TokenStream) -> TokenStream {
+    let t = parse_macro_input!(input as threaded::Threaded);
+    t.expand().unwrap_or_else(syn::Error::into_compile_error).into()
 }
 
 /// `dispatch!(Opcode::at(code, pc), { prelude }, match insn { arms })`: an interpreter's instruction `match`

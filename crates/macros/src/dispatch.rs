@@ -31,7 +31,7 @@ impl Parse for Dispatch {
 }
 
 /// Which variants an arm's pattern can match: `None` for any (a wildcard / binding)
-fn variants(pat: &Pat) -> Option<Vec<(Path, Ident)>> {
+pub fn variants(pat: &Pat) -> Option<Vec<(Path, Ident)>> {
     let path = match pat {
         Pat::Or(or) => return or.cases.iter().map(variants).try_fold(Vec::new(), |mut all, v| v.map(|v| {
             all.extend(v);
