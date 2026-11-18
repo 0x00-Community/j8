@@ -16,7 +16,7 @@ name = "jumpheap"
 path = "src/main.rs"
 
 [dependencies]
-j8 = { version = "0.3.0", features = ["lockfree"] }
+j8 = { version = "0.4.0", features = ["lockfree"] }
 # The HTTP server, the Fetch API and the Worker runtime this host builds on
 workerd = { path = "../workerd" }
 # Public heaps: memory files in /dev/shm that every process can map

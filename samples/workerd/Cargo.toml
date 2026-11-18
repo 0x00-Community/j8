@@ -22,7 +22,7 @@ path = "src/main.rs"
 
 [dependencies]
 # lockfree: Fifo / Oneshot for handing connections and messages to the event loop
-j8 = { version = "0.3.0", features = ["lockfree"] }
+j8 = { version = "0.4.0", features = ["lockfree"] }
 clap = { version = "4.6", features = ["derive"] }
 # Durable Object SQL storage (`ctx.storage.sql`)
 rusqlite = { version = "0.37", features = ["bundled"] }

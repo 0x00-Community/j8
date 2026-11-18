@@ -440,25 +440,26 @@ checksum = "4754a1731458af0443709c9667302793d3f63cc90ec4ba4c8259f2b9515478e5"
 
 [[package]]
 name = "j8"
-version = "0.3.0"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bfb788e8c0fbbf1bbd548d2e0e9deac509765586346745959e820c1d8a052de1"
+checksum = "56c20709c494f92103b3b7c2fa2e2fadac3d78b871d94179f16b0d819a0132bc"
 dependencies = [
  "j8binding",
  "j8builtins",
+ "j8bytecode",
+ "j8compiler",
  "j8executor",
  "j8framework",
  "j8lockfree",
  "j8macros",
  "j8platform",
- "j8bytecode",
 ]
 
 [[package]]
 name = "j8binding"
-version = "0.3.0"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "02230f39664ea047ff18f7ded1c4d7dad8383ffd48bda5b563ae4788309994d1"
+checksum = "6c3df70c63a24714404f3b0a6e4d73ecca4c37c9a54a0986a51046cddf9a59b2"
 dependencies = [
  "j8framework",
  "j8lockfree",
@@ -466,9 +467,9 @@ dependencies = [
 
 [[package]]
 name = "j8builtins"
-version = "0.3.0"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6d0840ab28912ca059ebabd9147577197746fc095c2c6bfa97696abadf1cecd2"
+checksum = "361fcf228d8ebdf31cbda42b1b4dfc41de0fe76f09f24f04b3fca94711a217e4"
 dependencies = [
  "j8framework",
  "libm",
@@ -480,27 +481,56 @@ dependencies = [
 ]
 
 [[package]]
-name = "j8executor"
-version = "0.3.0"
+name = "j8bytecode"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "df246ce68a17946ecb46fb3dbac682e736dc53cab2fd9f6e289c31d5671e36cd"
+checksum = "a5e416819ff4b863625a5db21e5037ff55cc2b6f78da8e04bf2e786bffcacad4"
 dependencies = [
- "j8framework",
+ "j8macros",
+]
+
+[[package]]
+name = "j8compiler"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "637ad286f83315e4988af62f3af11694d55f612508744b7c57b4cd5a2e7bed05"
+dependencies = [
  "j8bytecode",
+ "j8framework",
+ "oxc_allocator",
+ "oxc_ast",
+ "oxc_parser",
+ "oxc_semantic",
+ "oxc_span",
+ "oxc_syntax",
+ "ryu-js",
+]
+
+[[package]]
+name = "j8executor"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1c8f260419f756f7f05e983005058b90b175156acdd0dbc64df8974b7623ae13"
+dependencies = [
+ "j8bytecode",
+ "j8compiler",
+ "j8framework",
+ "j8lockfree",
  "ryu-js",
 ]
 
 [[package]]
 name = "j8framework"
-version = "0.3.0"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "63ffe442808c9524f2e16261da340b8e52f78debfa930ea855234ccc416c7688"
+checksum = "467418e184e09182129c064b32472549db334922f3bf8985b54dfc908c472e2a"
 dependencies = [
  "hashbrown",
+ "j8bytecode",
  "j8lockfree",
  "j8macros",
+ "j8taskqueue",
  "libm",
- "moremath",
  "num-bigint 0.4.8",
  "num-traits",
  "paragc",
@@ -511,15 +541,15 @@ dependencies = [
 
 [[package]]
 name = "j8lockfree"
-version = "0.3.0"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "db9dd7d3573352c325c32fa9d9b965702a29addac02167e45abb26ab3adeaecc"
+checksum = "35498a2711ef5e325caa613de737bc1b924f23b1c8db2ccdbe656e6a7a1c833d"
 
 [[package]]
 name = "j8macros"
-version = "0.3.0"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4320c649e32354ea39a3ba5937002384c44e8abfb7f81431d6596a3195f1b973"
+checksum = "bd82cf3ea59c45d4cd4bc6cac53b324e23a5c86951f713df398528f4178f9279"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -530,29 +560,21 @@ dependencies = [
 
 [[package]]
 name = "j8platform"
-version = "0.3.0"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1aec22c3c263015062873613d63a963c2c038a6914df8766e4f0afa1f7dffee1"
+checksum = "70368c164e694a89d49932110b5c687034a9c4eda975b23a6017ebb8a880021f"
 dependencies = [
  "j8framework",
  "moremath",
 ]
 
 [[package]]
-name = "j8bytecode"
-version = "0.3.0"
+name = "j8taskqueue"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9ac21f865d3aa1fb2af7ac88b1cc7f7858e05db9f06ce5c2c9ea984773cec2b0"
+checksum = "8415df21c4b79cd8b51b9cb3ff835f4b91b80b19168740c235a60bc43325ed85"
 dependencies = [
- "j8framework",
- "j8macros",
- "oxc_allocator",
- "oxc_ast",
- "oxc_parser",
- "oxc_semantic",
- "oxc_span",
- "oxc_syntax",
- "ryu-js",
+ "j8lockfree",
 ]
 
 [[package]]
