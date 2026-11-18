@@ -59,12 +59,24 @@ pub struct Builder {
     max: i32,
     /// Jumps whose label isn't bound yet (they keep their constant pool reservation)
     unbound: usize,
+    /// Constant pool entries reserved for unbound jumps (V8's `ConstantArrayBuilder` reservations: counted, an index is
+    /// only taken when a jump needs it)
+    reserved: usize,
+    /// Feedback slots shared between uses (V8's `FeedbackSlotCache`): (kind, key) ⇒ slot
+    slot_cache: Vec<(FeedbackSlotKind, alloc::string::String, usize)>,
+    /// The accumulator holds a boolean (the last bytecode was a test): conditional jumps need no ToBoolean
+    boolean: bool,
+    /// The register the last bytecode stored the accumulator in (an `Ldar` of it right after is elided)
+    stored: Option<Register>,
+    /// The code here is unreachable (after a return / throw / unconditional jump, until a label is bound): nothing is
+    /// emitted (V8's `exit_seen_in_block_`)
+    dead: bool,
     pub new_target_or_generator: Option<i32>,
 }
 
 impl Builder {
     pub fn new(parameter_count: u16, locals: i32) -> Self {
-        Self { enc: Encoder::default(), constants: Vec::new(), handlers: Vec::new(), feedback: Vec::new(), parameter_count, locals, next: locals, max: locals, unbound: 0, new_target_or_generator: None }
+        Self { enc: Encoder::default(), constants: Vec::new(), handlers: Vec::new(), feedback: Vec::new(), parameter_count, locals, next: locals, max: locals, unbound: 0, reserved: 0, slot_cache: Vec::new(), boolean: false, stored: None, dead: false, new_target_or_generator: None }
     }
 
     /// The finished bytecode
@@ -87,7 +99,29 @@ impl Builder {
     }
 
     fn out(&mut self, b: Bytecode, ops: &[OperandValue]) -> usize {
-        self.enc.emit(b, ops).expect("operands match the bytecode")
+        if self.dead {
+            return self.offset();
+        }
+        let at = self.enc.emit(b, ops).expect("operands match the bytecode");
+        self.boolean = matches!(b, Bytecode::TestEqual | Bytecode::TestEqualStrict | Bytecode::TestLessThan | Bytecode::TestGreaterThan | Bytecode::TestLessThanOrEqual | Bytecode::TestGreaterThanOrEqual | Bytecode::TestReferenceEqual | Bytecode::TestInstanceOf | Bytecode::TestIn | Bytecode::TestUndetectable | Bytecode::TestNull | Bytecode::TestUndefined | Bytecode::TestTypeOf | Bytecode::LogicalNot | Bytecode::ToBooleanLogicalNot | Bytecode::LdaTrue | Bytecode::LdaFalse);
+        self.stored = None;
+        self.dead = matches!(b, Bytecode::Return | Bytecode::Throw | Bytecode::ReThrow | Bytecode::Jump | Bytecode::JumpConstant | Bytecode::JumpLoop | Bytecode::Abort);
+        at
+    }
+
+    /// Whether code emitted now is reachable
+    pub fn reachable(&self) -> bool {
+        !self.dead
+    }
+
+    /// A feedback slot of `kind` shared by every use with the same `key` (V8's `FeedbackSlotCache`)
+    pub fn cached_slot(&mut self, kind: FeedbackSlotKind, key: &str) -> usize {
+        if let Some(&(_, _, s)) = self.slot_cache.iter().find(|(k, n, _)| *k == kind && n == key) {
+            return s;
+        }
+        let s = self.slot(kind);
+        self.slot_cache.push((kind, key.into(), s));
+        s
     }
 
     // ---- registers (V8's BytecodeRegisterAllocator: stack discipline) ----
@@ -161,9 +195,7 @@ impl Builder {
 
     /// A number: a Smi when it is one (V8's `DoubleToSmiInteger`: an int32 that isn't -0), else a constant
     pub fn load_number(&mut self, v: f64) {
-        #[expect(clippy::cast_possible_truncation, reason = "checked to round-trip exactly")]
-        let i = v as i32;
-        if f64::from(i).to_bits() == v.to_bits() {
+        if let Some(i) = Self::is_smi(v) {
             self.load_smi(i);
         } else {
             let k = self.constant(Constant::Number(v));
@@ -197,15 +229,25 @@ impl Builder {
     }
 
     pub fn ldar(&mut self, r: Register) {
+        // The accumulator still holds what was just stored there (a simple case of V8's register optimizer)
+        if self.stored == Some(r) {
+            return;
+        }
         self.out(Bytecode::Ldar, &[i32::from(r).into()]);
     }
 
     /// `Star`, or the short `Star0` … `Star15`
     pub fn star(&mut self, r: Register) {
+        let boolean = self.boolean;
         match Bytecode::short_star(r) {
             Some(b) => self.out(b, &[]),
             None => self.out(Bytecode::Star, &[i32::from(r).into()]),
         };
+        // A store leaves the accumulator as it was
+        self.boolean = boolean;
+        if !self.dead {
+            self.stored = Some(r);
+        }
     }
 
     pub fn mov(&mut self, from: Register, to: Register) {
@@ -218,34 +260,51 @@ impl Builder {
 
     pub fn load_global(&mut self, name: &str, inside_typeof: bool) {
         let k = self.name(name);
-        let s = self.slot(if inside_typeof { FeedbackSlotKind::LoadGlobalInsideTypeof } else { FeedbackSlotKind::LoadGlobalNotInsideTypeof });
+        let s = self.cached_slot(if inside_typeof { FeedbackSlotKind::LoadGlobalInsideTypeof } else { FeedbackSlotKind::LoadGlobalNotInsideTypeof }, name);
         self.out(if inside_typeof { Bytecode::LdaGlobalInsideTypeof } else { Bytecode::LdaGlobal }, &[k as OperandValue, s as OperandValue]);
     }
 
     pub fn store_global(&mut self, name: &str, strict: bool) {
         let k = self.name(name);
-        let s = self.slot(if strict { FeedbackSlotKind::StoreGlobalStrict } else { FeedbackSlotKind::StoreGlobalSloppy });
+        let s = self.cached_slot(if strict { FeedbackSlotKind::StoreGlobalStrict } else { FeedbackSlotKind::StoreGlobalSloppy }, name);
         self.out(Bytecode::StaGlobal, &[k as OperandValue, s as OperandValue]);
     }
 
     /// Context slot `slot` of the context `depth` levels out from `context` (V8's `LoadContextSlot`: the
     /// current-context form for depth 0 of the current context; immutable forms for never-assigned variables)
-    pub fn load_context_slot(&mut self, context: Register, slot: u32, depth: u32, immutable: bool) {
+    /// `cells`: the context has context cells (V8's script context), accessed with the plain forms instead of `NoCell`
+    pub fn load_context_slot(&mut self, context: Register, slot: u32, depth: u32, immutable: bool, cells: bool) {
         let current = context == Register::current_context() && depth == 0;
-        match (immutable, current) {
-            (true, true) => self.out(Bytecode::LdaImmutableCurrentContextSlot, &[slot.into()]),
-            (true, false) => self.out(Bytecode::LdaImmutableContextSlot, &[i32::from(context).into(), slot.into(), depth.into()]),
-            (false, true) => self.out(Bytecode::LdaCurrentContextSlotNoCell, &[slot.into()]),
-            (false, false) => self.out(Bytecode::LdaContextSlotNoCell, &[i32::from(context).into(), slot.into(), depth.into()]),
+        let c = i32::from(context).into();
+        match (immutable, current, cells) {
+            (true, true, _) => self.out(Bytecode::LdaImmutableCurrentContextSlot, &[slot.into()]),
+            (true, false, _) => self.out(Bytecode::LdaImmutableContextSlot, &[c, slot.into(), depth.into()]),
+            (false, true, true) => self.out(Bytecode::LdaCurrentContextSlot, &[slot.into()]),
+            (false, false, true) => self.out(Bytecode::LdaContextSlot, &[c, slot.into(), depth.into()]),
+            (false, true, false) => self.out(Bytecode::LdaCurrentContextSlotNoCell, &[slot.into()]),
+            (false, false, false) => self.out(Bytecode::LdaContextSlotNoCell, &[c, slot.into(), depth.into()]),
         };
     }
 
     pub fn store_context_slot(&mut self, context: Register, slot: u32, depth: u32) {
-        if context == Register::current_context() && depth == 0 {
-            self.out(Bytecode::StaCurrentContextSlotNoCell, &[slot.into()]);
-        } else {
-            self.out(Bytecode::StaContextSlotNoCell, &[i32::from(context).into(), slot.into(), depth.into()]);
-        }
+        self.store_context_slot_cells(context, slot, depth, false);
+    }
+
+    pub fn store_context_slot_cells(&mut self, context: Register, slot: u32, depth: u32, cells: bool) {
+        let current = context == Register::current_context() && depth == 0;
+        match (current, cells) {
+            (true, true) => self.out(Bytecode::StaCurrentContextSlot, &[slot.into()]),
+            (false, true) => self.out(Bytecode::StaContextSlot, &[i32::from(context).into(), slot.into(), depth.into()]),
+            (true, false) => self.out(Bytecode::StaCurrentContextSlotNoCell, &[slot.into()]),
+            (false, false) => self.out(Bytecode::StaContextSlotNoCell, &[i32::from(context).into(), slot.into(), depth.into()]),
+        };
+    }
+
+    /// Whether `v` is a Smi (V8 with pointer compression: 31 bits)
+    pub fn is_smi(v: f64) -> Option<i32> {
+        #[expect(clippy::cast_possible_truncation, reason = "checked to round-trip exactly")]
+        let i = v as i32;
+        (f64::from(i).to_bits() == v.to_bits() && (-(1 << 30)..(1 << 30)).contains(&i)).then_some(i)
     }
 
     pub fn push_context(&mut self, save: Register) {
@@ -291,8 +350,17 @@ impl Builder {
     // ---- properties ----
 
     pub fn get_named(&mut self, object: Register, name: &str) {
+        self.get_named_shared(object, name, None);
+    }
+
+    /// `GetNamedProperty`; `variable` names the variable the object came from: then the feedback slot is shared with
+    /// other reads of the same property of the same variable (V8's `GetCachedLoadICSlot`)
+    pub fn get_named_shared(&mut self, object: Register, name: &str, variable: Option<&str>) {
         let k = self.name(name);
-        let s = self.slot(FeedbackSlotKind::LoadProperty);
+        let s = match variable {
+            Some(v) => self.cached_slot(FeedbackSlotKind::LoadProperty, &alloc::format!("{v}.{name}")),
+            None => self.slot(FeedbackSlotKind::LoadProperty),
+        };
         self.out(Bytecode::GetNamedProperty, &[i32::from(object).into(), k as OperandValue, s as OperandValue]);
     }
 
@@ -303,8 +371,17 @@ impl Builder {
     }
 
     pub fn set_named(&mut self, object: Register, name: &str, strict: bool) {
+        self.set_named_shared(object, name, strict, None);
+    }
+
+    /// `SetNamedProperty`, sharing the feedback slot per variable like [`Self::get_named_shared`]
+    pub fn set_named_shared(&mut self, object: Register, name: &str, strict: bool, variable: Option<&str>) {
         let k = self.name(name);
-        let s = self.slot(if strict { FeedbackSlotKind::SetNamedStrict } else { FeedbackSlotKind::SetNamedSloppy });
+        let kind = if strict { FeedbackSlotKind::SetNamedStrict } else { FeedbackSlotKind::SetNamedSloppy };
+        let s = match variable {
+            Some(v) => self.cached_slot(kind, &alloc::format!("{v}.{name}")),
+            None => self.slot(kind),
+        };
         self.out(Bytecode::SetNamedProperty, &[i32::from(object).into(), k as OperandValue, s as OperandValue]);
     }
 
@@ -473,9 +550,18 @@ impl Builder {
     /// A forward jump whose target is its first operand, followed by `rest`
     fn jump_with(&mut self, b: Bytecode, label: &mut Label, rest: &[OperandValue]) {
         debug_assert!(label.bound.is_none(), "backward jumps are JumpLoop");
-        let entry = self.constants.len();
-        self.constants.push(Constant::Reserved);
-        // A placeholder that needs the reservation's scale (patched when the label is bound)
+        if self.dead {
+            return;
+        }
+        // A boolean accumulator needs no ToBoolean (V8 picks the plain form after a test)
+        let b = match (b, self.boolean) {
+            (Bytecode::JumpIfToBooleanTrue, true) => Bytecode::JumpIfTrue,
+            (Bytecode::JumpIfToBooleanFalse, true) => Bytecode::JumpIfFalse,
+            (b, _) => b,
+        };
+        // The reservation guarantees an entry of the operand's size will be free if the offset doesn't fit
+        let entry = self.constants.len() + self.reserved;
+        self.reserved += 1;
         let placeholder: OperandValue = match OperandScale::for_unsigned(u32::try_from(entry).unwrap_or(u32::MAX)) {
             OperandScale::Single => 0,
             OperandScale::Double => 0x100,
@@ -483,7 +569,9 @@ impl Builder {
         };
         let mut ops = alloc::vec![placeholder];
         ops.extend_from_slice(rest);
+        let boolean = self.boolean;
         let at = self.out(b, &ops);
+        self.boolean = boolean;
         label.refs.push((at, entry));
         self.unbound += 1;
     }
@@ -492,12 +580,18 @@ impl Builder {
     pub fn bind(&mut self, label: &mut Label) {
         let target = self.offset();
         label.bound = Some(target);
+        // Control flow merges here: nothing is known about the accumulator; code is reachable if anything jumps here
+        if !label.refs.is_empty() {
+            self.dead = false;
+        }
+        self.boolean = false;
+        self.stored = None;
         for (at, entry) in core::mem::take(&mut label.refs) {
             self.patch(at, entry, target);
         }
     }
 
-    fn patch(&mut self, at: usize, entry: usize, target: usize) {
+    fn patch(&mut self, at: usize, _entry: usize, target: usize) {
         let code = &mut self.enc.code;
         let (scale, start) = match Bytecode::from_u8(code[at]).and_then(Bytecode::prefix_scale) {
             Some(s) => (s, at + 1),
@@ -505,28 +599,20 @@ impl Builder {
         };
         let delta = u32::try_from(target - start).unwrap_or(u32::MAX);
         let width = usize::from(j8bytecode::OperandSize::from(scale));
-        let fits = OperandScale::for_unsigned(delta) <= scale;
-        let value = if fits {
-            // Fits: drop the reservation (the entry stays as a hole V8 would also leave, reused by the next constant)
+        self.reserved -= 1;
+        let value = if OperandScale::for_unsigned(delta) <= scale {
+            // Fits: the reservation is just dropped
             delta
         } else {
+            // Doesn't fit: the offset goes into the constant pool and the jump takes its constant form
             let b = Bytecode::from_u8(code[start]).expect("a jump");
             code[start] = Self::with_constant_operand(b) as u8;
-            self.constants[entry] = Constant::Offset(delta);
-            u32::try_from(entry).unwrap_or(u32::MAX)
+            self.constants.push(Constant::Offset(delta));
+            u32::try_from(self.constants.len() - 1).unwrap_or(u32::MAX)
         };
+        let code = &mut self.enc.code;
         code[start + 1..start + 1 + width].copy_from_slice(&value.to_le_bytes()[..width]);
-        if fits {
-            self.discard(entry);
-        }
         self.unbound -= 1;
-    }
-
-    /// Drops a reservation: the last entry is popped, an inner one left `Reserved` (unused)
-    fn discard(&mut self, entry: usize) {
-        if entry + 1 == self.constants.len() {
-            self.constants.pop();
-        }
     }
 
     /// The `*Constant` form of a forward jump (V8's `GetJumpWithConstantOperand`)
@@ -548,7 +634,11 @@ impl Builder {
         }
     }
 
-    pub fn loop_header(&self) -> LoopHeader {
+    pub fn loop_header(&mut self) -> LoopHeader {
+        // Reached by the back edge
+        self.dead = false;
+        self.boolean = false;
+        self.stored = None;
         LoopHeader(self.offset())
     }
 
@@ -751,6 +841,10 @@ impl Builder {
     }
 
     pub fn handler_target(&mut self, handler: usize) {
+        // Reached by the exception edge
+        self.dead = false;
+        self.boolean = false;
+        self.stored = None;
         self.handlers[handler].handler = u32::try_from(self.offset()).unwrap_or(u32::MAX);
     }
 

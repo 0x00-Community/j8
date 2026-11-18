@@ -58,6 +58,8 @@ struct Level<'a> {
     context: Option<Register>,
     /// The constant pool entry of its context's scope info
     scope: Option<usize>,
+    /// Its context slots are accessed with context cells (V8's `has_context_cells`: the script context)
+    cells: bool,
     /// Names not bound here may still be found at run time (a `with` object, `var`s a sloppy direct eval adds): they
     /// are looked up by name
     dynamic: bool,
@@ -91,7 +93,7 @@ impl Resolved<'_> {
 #[derive(Clone, Copy)]
 pub enum Place<'a> {
     Reg(Register),
-    Context { depth: u32, slot: u32 },
+    Context { depth: u32, slot: u32, cells: bool },
     Global(&'a str),
     Import(i32),
     /// Looked up by name at run time (inside `with`, under a sloppy direct eval, from eval code)
@@ -315,6 +317,111 @@ pub struct Compiler<'a, 's> {
     pub chains: Vec<Label>,
     /// Functions containing a direct eval (by start position of the parameter list)
     eval_fns: HashSet<u32>,
+    /// Completion value (V8's `Rewriter`): expression statements that assign it, and statements before which it is
+    /// reset to `undefined` (by start position)
+    completion_assign: HashSet<u32>,
+    completion_reset: HashSet<u32>,
+    /// While entering a `for` head's scope: the source text of its initializers
+    for_init_text: Option<&'a str>,
+}
+
+/// V8's `Rewriter` (`Processor`): which statements of a script / eval code produce its completion value. Statements
+/// are walked backwards; only the last value-producing statement assigns it, except inside breakable statements, where
+/// a `break` / `continue` makes the one before it assign too.
+#[derive(Default)]
+struct Rewriter {
+    is_set: bool,
+    breakable: bool,
+    assign: HashSet<u32>,
+    reset: HashSet<u32>,
+}
+
+impl Rewriter {
+    fn process<'a>(&mut self, stmts: impl DoubleEndedIterator<Item = &'a Statement<'a>>) {
+        for s in stmts.rev() {
+            if !(self.breakable || !self.is_set) {
+                break;
+            }
+            self.visit(s);
+        }
+    }
+
+    fn breakable(&mut self, f: impl FnOnce(&mut Self)) {
+        let saved = core::mem::replace(&mut self.breakable, true);
+        f(self);
+        self.breakable = saved;
+    }
+
+    fn visit(&mut self, s: &Statement<'_>) {
+        let start = s.span().start;
+        match s {
+            Statement::ExpressionStatement(_) => {
+                if !self.is_set {
+                    self.assign.insert(start);
+                    self.is_set = true;
+                }
+            }
+            Statement::BlockStatement(b) => self.process(b.body.iter()),
+            Statement::IfStatement(i) => {
+                let after = self.is_set;
+                self.visit(&i.consequent);
+                let in_then = self.is_set;
+                self.is_set = after;
+                if let Some(a) = &i.alternate {
+                    self.visit(a);
+                }
+                if !(in_then && self.is_set) {
+                    self.reset.insert(start);
+                }
+                self.is_set = true;
+            }
+            Statement::WhileStatement(_) | Statement::DoWhileStatement(_) | Statement::ForStatement(_) | Statement::ForInStatement(_) | Statement::ForOfStatement(_) => {
+                let body = match s {
+                    Statement::WhileStatement(w) => &w.body,
+                    Statement::DoWhileStatement(w) => &w.body,
+                    Statement::ForStatement(f) => &f.body,
+                    Statement::ForInStatement(f) => &f.body,
+                    Statement::ForOfStatement(f) => &f.body,
+                    _ => unreachable!("a loop"),
+                };
+                self.breakable(|r| r.visit(body));
+                self.reset.insert(start);
+                self.is_set = true;
+            }
+            Statement::SwitchStatement(sw) => {
+                self.breakable(|r| {
+                    for c in sw.cases.iter().rev() {
+                        r.process(c.consequent.iter());
+                    }
+                });
+                self.reset.insert(start);
+                self.is_set = true;
+            }
+            Statement::TryStatement(t) => {
+                let after = self.is_set;
+                self.process(t.block.body.iter());
+                let in_try = self.is_set;
+                if let Some(h) = &t.handler {
+                    self.is_set = after;
+                    self.process(h.body.body.iter());
+                }
+                if !(in_try && self.is_set) {
+                    self.reset.insert(start);
+                }
+                self.is_set = true;
+            }
+            Statement::WithStatement(w) => {
+                self.visit(&w.body);
+                if !self.is_set {
+                    self.reset.insert(start);
+                }
+                self.is_set = true;
+            }
+            Statement::LabeledStatement(l) => self.breakable(|r| r.visit(&l.body)),
+            Statement::BreakStatement(_) | Statement::ContinueStatement(_) => self.is_set = false,
+            _ => {}
+        }
+    }
 }
 
 /// JS ⇒ bytecode: every piece of JS (scripts, modules, `eval` / `Function` code) becomes a [`Module`] before it runs.
@@ -367,7 +474,7 @@ impl Compiler<'_, '_> {
         let strict = kind == CodeKind::StrictEval || Flavor::use_strict(&program.directives);
         let local = (kind != CodeKind::Script).then(|| Decls::eval_local(&program.body, strict));
         let (captured, used, eval_fns) = Resolver::script(&program.body, Decls::this_key(program.span), &allocator, local.as_ref(), strict, eval_scopes, None);
-        let mut c = Compiler { src, alloc: &allocator, captured, used, class_depth: 0, module: Vec::new(), frames: Vec::new(), levels: Vec::new(), chains: Vec::new(), eval_fns };
+        let mut c = Compiler { src, alloc: &allocator, captured, used, class_depth: 0, module: Vec::new(), frames: Vec::new(), levels: Vec::new(), chains: Vec::new(), eval_fns, completion_assign: HashSet::new(), completion_reset: HashSet::new(), for_init_text: None };
         c.script(program, local.as_ref(), strict, direct)?;
         Ok(Module { functions: c.module })
     }
@@ -483,7 +590,7 @@ impl Compiler<'_, '_> {
         let (names, info) = Compiler::module_layout(program);
         let order: Vec<&str> = names.iter().map(|&(n, _)| n).collect();
         let (captured, used, eval_fns) = Resolver::script(&program.body, Decls::this_key(program.span), &allocator, None, true, eval_scopes, Some(&[order]));
-        let mut c = Compiler { src, alloc: &allocator, captured, used, class_depth: 0, module: Vec::new(), frames: Vec::new(), levels: Vec::new(), chains: Vec::new(), eval_fns };
+        let mut c = Compiler { src, alloc: &allocator, captured, used, class_depth: 0, module: Vec::new(), frames: Vec::new(), levels: Vec::new(), chains: Vec::new(), eval_fns, completion_assign: HashSet::new(), completion_reset: HashSet::new(), for_init_text: None };
         let bound = names
             .iter()
             .map(|&(name, n)| match n {
@@ -491,7 +598,7 @@ impl Compiler<'_, '_> {
                 ModuleName::Import(i) => Bound { name, binding: Binding::Import(-1 - i32::from(i)), constant: true, ready: None, self_name: false },
             })
             .collect();
-        c.levels.push(Level { func: usize::MAX, names: bound, context: Some(Register::current_context()), scope: None, dynamic: false, mark: 0, switch: false });
+        c.levels.push(Level { func: usize::MAX, names: bound, context: Some(Register::current_context()), scope: None, dynamic: false, mark: 0, switch: false, cells: false });
         c.module_body(program)?;
         Ok((Module { functions: c.module }, info))
     }
@@ -701,6 +808,10 @@ impl<'a> Compiler<'a, '_> {
         let mut names = Vec::with_capacity(decls.0.len());
         let mut variables = Vec::new();
         for d in &decls.0 {
+            // Pseudo-bindings nobody reads take no register
+            if matches!(d.kind, DeclKind::NewTarget | DeclKind::Arguments) && !self.used.contains(&d.key) {
+                continue;
+            }
             let binding = if self.captured.contains(&d.key) {
                 slots += 1;
                 let mode = match d.kind {
@@ -740,15 +851,18 @@ impl<'a> Compiler<'a, '_> {
             None
         };
         let bindings: Vec<Binding> = names.iter().map(|n| n.binding).collect();
-        self.levels.push(Level { func, names, context, scope, dynamic: false, mark, switch: false });
-        // Temporal dead zone: slots are first filled with the hole
-        for (d, &b) in decls.0.iter().zip(&bindings) {
-            if d.ready.is_some() {
+        self.levels.push(Level { func, names, context, scope, dynamic: false, mark, switch: false, cells: false });
+        let decls: Vec<&Decl<'a>> = decls.0.iter().filter(|d| !(matches!(d.kind, DeclKind::NewTarget | DeclKind::Arguments) && !self.used.contains(&d.key))).collect();
+        // Temporal dead zone: slots are first filled with the hole (not for a `for` head's register variable its own
+        // initializer doesn't mention: nothing can read it before it is initialized)
+        for (d, &b) in decls.iter().zip(&bindings) {
+            let skip = self.for_init_text.is_some_and(|t| !t.contains(d.name)) && matches!(b, Binding::Reg(_));
+            if d.ready.is_some() && !skip {
                 self.b().load_the_hole();
                 self.bind(b);
             }
         }
-        for (d, b) in decls.0.iter().zip(bindings) {
+        for (d, b) in decls.iter().zip(bindings) {
             let fixed = match d.kind {
                 DeclKind::This => Some(Register::receiver()),
                 DeclKind::SelfName => Some(Register::function_closure()),
@@ -823,10 +937,12 @@ impl<'a> Compiler<'a, '_> {
                         assert_eq!(l.func, cur, "an outer function's binding `{name}` used from inside must be captured");
                         (Place::Reg(r), false)
                     }
-                    Binding::Context(slot) => (Place::Context { depth, slot }, true),
+                    Binding::Context(slot) => (Place::Context { depth, slot, cells: l.cells }, true),
                     Binding::Import(i) => (Place::Import(i), false),
                 };
-                return Resolved { place, constant: n.constant, tdz: n.ready.map(|r| (r, in_context || l.switch)) };
+                // Inside the declaring function the position decides; from an inner function (which may run any time)
+                // or a `switch` (whose cases may skip the declaration) always check (V8's hole check elimination)
+                return Resolved { place, constant: n.constant, tdz: n.ready.map(|r| (r, (in_context && l.func != cur) || l.switch)) };
             }
             if l.dynamic {
                 return Resolved { place: Place::Lookup(name), constant: false, tdz: None };
@@ -875,9 +991,9 @@ impl<'a> Compiler<'a, '_> {
         let r = self.resolve(name);
         match r.place {
             Place::Reg(reg) => self.b().ldar(reg),
-            Place::Context { depth, slot } => {
+            Place::Context { depth, slot, cells } => {
                 let immutable = r.constant && !r.needs_check(pos);
-                self.b().load_context_slot(Register::current_context(), slot, depth, immutable);
+                self.b().load_context_slot(Register::current_context(), slot, depth, immutable, cells);
             }
             Place::Global("undefined") => self.b().load_undefined(),
             Place::Global("NaN") => self.b().load_number(f64::NAN),
@@ -930,7 +1046,7 @@ impl<'a> Compiler<'a, '_> {
         }
         match r.place {
             Place::Reg(reg) => self.b().star(reg),
-            Place::Context { depth, slot } => self.b().store_context_slot(Register::current_context(), slot, depth),
+            Place::Context { depth, slot, cells } => self.b().store_context_slot_cells(Register::current_context(), slot, depth, cells),
             Place::Global(g) => {
                 let strict = self.strict_here();
                 self.b().store_global(g, strict);
@@ -1291,7 +1407,7 @@ impl<'a> Compiler<'a, '_> {
         self.b().ldar(index);
         self.b().unary(Bytecode::Inc);
         self.b().star(index);
-        let depth = self.frame().loop_depth;
+        let depth = self.frame().loop_depth - 1;
         self.b().jump_loop(header, depth);
         self.frame().loop_depth -= 1;
         self.b().bind(&mut end);
@@ -1378,7 +1494,7 @@ impl<'a> Compiler<'a, '_> {
             })
         })?;
         self.bind_continues();
-        let depth = self.frame().loop_depth;
+        let depth = self.frame().loop_depth - 1;
         self.b().jump_loop(header, depth);
         self.frame().loop_depth -= 1;
         // break lands here: close the iterator
@@ -1426,7 +1542,7 @@ impl<'a> Compiler<'a, '_> {
         self.b().bind(&mut skip);
         self.bind_continues();
         self.b().for_in_step(index);
-        let depth = self.frame().loop_depth;
+        let depth = self.frame().loop_depth - 1;
         self.b().jump_loop(header, depth);
         self.frame().loop_depth -= 1;
         self.pop_jump();
@@ -1438,6 +1554,12 @@ impl<'a> Compiler<'a, '_> {
     /// The generator's first suspension (after the prologue): not yet on V8 bytecode
     fn initial_yield(&mut self) -> Result<(), Error> {
         Err(self.unsupported(Span::default(), "generators"))
+    }
+
+    /// How many loops enclose the current position (the depth operand of a `JumpLoop` emitted here for a loop of its
+    /// own)
+    pub fn frame_loop_depth(&mut self) -> u32 {
+        self.frame().loop_depth
     }
 
     pub fn is_async_generator(&mut self) -> bool {
@@ -1606,6 +1728,10 @@ impl<'a> Compiler<'a, '_> {
         });
         let completion = self.temp();
         self.frame().completion = Some(completion);
+        let mut rw = Rewriter::default();
+        rw.process(program.body.iter());
+        self.completion_assign = rw.assign;
+        self.completion_reset = rw.reset;
         // `this` is the receiver (the global object) for a script and indirect eval code; direct eval code looks it up
         // by name (functions with a direct eval keep `this` in their context, as V8 does)
         if !(eval && direct) {
@@ -1678,7 +1804,7 @@ impl<'a> Compiler<'a, '_> {
             }
             // The script context is already current: this level doesn't push or pop it
             let mark = self.b().mark();
-            self.levels.push(Level { func: 0, names: lexical, context: None, scope: None, dynamic: false, mark, switch: false });
+            self.levels.push(Level { func: 0, names: lexical, context: None, scope: None, dynamic: false, mark, switch: false, cells: true });
             if !declarations.is_empty() {
                 let k = self.constant(Constant::Declarations(declarations));
                 let args = self.b().new_register_list(2);
@@ -1900,7 +2026,7 @@ impl<'a> Compiler<'a, '_> {
         let n = u32::try_from(slots.len()).unwrap_or(0);
         let tmp = self.b().new_register_list(n);
         for (i, &s) in (0u32..).zip(&slots) {
-            self.b().load_context_slot(Register::current_context(), s, 0, false);
+            self.b().load_context_slot(Register::current_context(), s, 0, false, false);
             self.b().star(tmp.at(i));
         }
         self.b().pop_context(saved);
@@ -1981,14 +2107,21 @@ impl<'a> Compiler<'a, '_> {
     /// A loop's back edge: `continue`s land here, then `JumpLoop` to `header`
     fn loop_back(&mut self, header: crate::builder::LoopHeader) {
         self.bind_continues();
-        let depth = self.frame().loop_depth;
+        let depth = self.frame().loop_depth - 1;
         self.b().jump_loop(header, depth);
     }
 
     #[expect(clippy::too_many_lines, reason = "one arm per statement kind; splitting it would hurt readability")]
     fn statement(&mut self, s: &'a Statement<'a>) -> Result<(), Error> {
+        // The completion value resets to `undefined` before a statement that may not produce one (V8's Rewriter)
+        if let Some(c) = self.frame().completion
+            && self.completion_reset.contains(&s.span().start)
+        {
+            self.b().load_undefined();
+            self.b().star(c);
+        }
         match s {
-            Statement::ExpressionStatement(e) => match self.frame().completion {
+            Statement::ExpressionStatement(e) => match self.frame().completion.filter(|_| self.completion_assign.contains(&e.span.start)) {
                 Some(c) => {
                     self.expr(&e.expression)?;
                     self.b().star(c);
@@ -2056,7 +2189,7 @@ impl<'a> Compiler<'a, '_> {
                 self.expr(&w.test)?;
                 let mut exit = Label::default();
                 self.b().jump(Bytecode::JumpIfToBooleanFalse, &mut exit);
-                let depth = self.frame().loop_depth;
+                let depth = self.frame().loop_depth - 1;
                 self.b().jump_loop(header, depth);
                 self.frame().loop_depth -= 1;
                 self.b().bind(&mut exit);
@@ -2064,7 +2197,18 @@ impl<'a> Compiler<'a, '_> {
             }
             Statement::ForStatement(f) => {
                 let label = self.take_label();
-                self.scoped(&Decls::for_init(f.init.as_ref()), |c| {
+                let init_text = match &f.init {
+                    Some(ForStatementInit::VariableDeclaration(d)) => {
+                        let inits: Vec<&str> = d.declarations.iter().filter_map(|v| v.init.as_ref()).map(|e| &self.src.text[e.span().start as usize..e.span().end as usize]).collect();
+                        Some(self.alloc.alloc_str(&inits.join(" ")))
+                    }
+                    _ => None,
+                };
+                self.for_init_text = init_text.map(|t| &*t);
+                let decls = Decls::for_init(f.init.as_ref());
+                self.enter(&decls, ScopeType::BlockScope)?;
+                self.for_init_text = None;
+                let r = (|c: &mut Self| -> Result<(), Error> {
                     match &f.init {
                         Some(ForStatementInit::VariableDeclaration(d)) => c.declaration(d)?,
                         Some(init) => c.effect(init.as_expression().expect("a for-init is a declaration or an expression"))?,
@@ -2085,13 +2229,15 @@ impl<'a> Compiler<'a, '_> {
                     if let Some(u) = &f.update {
                         c.effect(u)?;
                     }
-                    let depth = c.frame().loop_depth;
+                    let depth = c.frame().loop_depth - 1;
                     c.b().jump_loop(header, depth);
                     c.frame().loop_depth -= 1;
                     c.b().bind(&mut exit);
                     c.pop_jump();
                     Ok(())
-                })?;
+                })(self);
+                r?;
+                self.leave();
             }
             Statement::WithStatement(w) => {
                 self.expr(&w.object)?;
@@ -2104,7 +2250,7 @@ impl<'a> Compiler<'a, '_> {
                 self.frame().contexts.push(saved);
                 let mark = self.b().mark();
                 let func = self.frames.len() - 1;
-                self.levels.push(Level { func, names: Vec::new(), context: Some(saved), scope: None, dynamic: true, mark, switch: false });
+                self.levels.push(Level { func, names: Vec::new(), context: Some(saved), scope: None, dynamic: true, mark, switch: false, cells: false });
                 self.statement(&w.body)?;
                 self.leave();
                 self.release(object);

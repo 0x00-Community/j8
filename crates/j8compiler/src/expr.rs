@@ -388,9 +388,7 @@ impl<'a> Compiler<'a, '_> {
     /// A Smi literal operand for the `*Smi` bytecodes (V8 uses them when the right side is a small integer literal)
     fn smi_literal(e: &Expression<'_>) -> Option<i32> {
         let Expression::NumericLiteral(n) = e else { return None };
-        #[expect(clippy::cast_possible_truncation, reason = "checked to round-trip exactly")]
-        let i = n.value as i32;
-        (f64::from(i).to_bits() == n.value.to_bits() && i8::try_from(i).is_ok()).then_some(i)
+        crate::builder::Builder::is_smi(n.value)
     }
 
     fn binary(&mut self, b: &'a BinaryExpression<'a>) -> Result<(), Error> {
@@ -854,7 +852,8 @@ impl<'a> Compiler<'a, '_> {
                     self.b().ldar(index);
                     self.b().unary(Bytecode::Inc);
                     self.b().star(index);
-                    self.b().jump_loop(header, 1);
+                    let depth = self.frame_loop_depth();
+                    self.b().jump_loop(header, depth);
                     self.b().bind(&mut done);
                     self.release(src);
                 }
