@@ -8,9 +8,17 @@ use crate::{Gc};
 use crate::{Agent, Error, ErrorKind, JsObject, JsSymbol, Property, Slot, SymbolData, Value};
 
 impl<'gc> Agent<'gc, '_> {
+    /// The private name a keyed operation's key is, if it is one
+    pub fn private_key(key: Value<'gc>) -> Option<JsSymbol<'gc>> {
+        match key.kind() {
+            ValueKind::Symbol(s) if s.private => Some(s),
+            _ => None,
+        }
+    }
+
     /// A new private name (its description is `#x`).
     pub fn private_name(&self, description: &str) -> JsSymbol<'gc> {
-        self.mc.alloc(SymbolData { description: Some(Box::from(description)) })
+        self.mc.alloc(SymbolData { description: Some(Box::from(description)), private: true })
     }
 
     fn private_label(key: JsSymbol<'gc>) -> &'gc str {

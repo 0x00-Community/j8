@@ -194,7 +194,7 @@ impl<'gc> Realm<'gc> {
         let derived = |proto: JsObject<'gc>| ObjectData { proto: Some(proto), ..ObjectData::default() }.alloc(mc);
         let error = derived(object_proto);
         let error_protos = ErrorKind::ALL.map(|k| if k == ErrorKind::Error { error } else { derived(error) });
-        let symbol = |d: &str| mc.alloc(SymbolData { description: Some(alloc::format!("Symbol.{d}").into()) });
+        let symbol = |d: &str| mc.alloc(SymbolData { description: Some(alloc::format!("Symbol.{d}").into()), private: false });
         let iterator_proto = derived(object_proto);
         let async_iterator_proto = derived(object_proto);
         let function_proto = derived(object_proto);

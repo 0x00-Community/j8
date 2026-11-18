@@ -7,15 +7,15 @@
 use std::collections::HashSet;
 
 use oxc_allocator::Allocator;
-use oxc_ast::ast::{Directive, BindingIdentifier, BindingPattern, CatchClause, BlockStatement, Class, Expression, MethodDefinitionKind, PropertyKey, ForStatementInit, FormalParameters, Function as AstFunction, ForInStatement, ForOfStatement, ForStatementLeft, Program, Statement, SwitchStatement, TryStatement, VariableDeclaration, VariableDeclarationKind};
+use oxc_ast::ast::{Directive, BindingIdentifier, BindingPattern, CatchClause, BlockStatement, Class, ClassElement, Expression, MethodDefinitionKind, PropertyKey, ForStatementInit, FormalParameters, Function as AstFunction, ForInStatement, ForOfStatement, ForStatementLeft, Program, Statement, SwitchStatement, TryStatement, VariableDeclaration, VariableDeclarationKind};
 use oxc_parser::{ParseOptions, Parser};
 use oxc_semantic::SemanticBuilder;
 use oxc_span::{GetSpan, SourceType, Span};
 use j8framework::{CodeKind, CompareOp, Error, ImportEntry, ImportName, ModuleInfo, Source};
 
 use crate::builder::{Builder, JumpTable, Label, RegisterList};
-use crate::scope::{Decl, DeclKind, Decls, Hidden, Key, Resolver, THIS};
-use j8bytecode::{Bytecode, Constant, Context, ContextVariable, CreateClosureFlags, FunctionKind, GlobalDeclaration, Module, Register, Runtime, ScopeInfo, ScopeType, SharedFunction, VariableMode};
+use crate::scope::{Decl, DeclKind, Decls, Hidden, Key, Resolver, NEW_TARGET, THIS};
+use j8bytecode::{Bytecode, ClassBoilerplate, ClassMember, Constant, Context, ContextVariable, MemberKind, CreateClosureFlags, FunctionKind, GlobalDeclaration, Module, Register, Runtime, ScopeInfo, ScopeType, SharedFunction, VariableMode};
 
 /// finally continuation token: entered with an exception, rethrows on exit (V8's `kRethrowToken`)
 const COMPLETION_THROW: i32 = j8bytecode::ContinuationToken::RETHROW;
@@ -258,6 +258,8 @@ struct Frame<'a> {
     generator: Option<Register>,
     /// Suspend points so far (`SuspendGenerator` ids)
     suspends: u32,
+    /// The binding of the home object `super.x` reads (methods and arrow functions in them)
+    home: Option<&'static str>,
     /// The resume points' jump table (`SwitchOnGeneratorState` at the top dispatches on the suspend id)
     resume_table: Option<JumpTable>,
     /// Async generator: `yield` / `return` await the value first
@@ -332,6 +334,30 @@ pub struct Compiler<'a, 's> {
     completion_reset: HashSet<u32>,
     /// While entering a `for` head's scope: the source text of its initializers
     for_init_text: Option<&'a str>,
+    /// The classes whose bodies are being compiled (innermost last): what their private names are
+    pub classes: Vec<ClassInfo<'a>>,
+    /// The home object binding of the next method compiled (`super.x` reads it)
+    pub next_home: Option<&'static str>,
+}
+
+/// What a private name of a class is: its binding holds a private symbol (field), the method itself, or the accessor
+/// pair; methods and accessors check the class's brand first.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Private {
+    Field,
+    Method { statik: bool },
+    Accessor { statik: bool, get: bool, set: bool },
+}
+
+/// A class being compiled.
+pub struct ClassInfo<'a> {
+    pub privates: Vec<(&'a str, Private)>,
+    /// The bindings of its instance / static brand
+    pub brands: [&'a str; 2],
+    /// The constructor brands its instances (it has private instance methods or accessors)
+    pub brand: bool,
+    /// The constructor runs the instance members initializer (there are instance fields)
+    pub fields: bool,
 }
 
 /// V8's `Rewriter` (`Processor`): which statements of a script / eval code produce its completion value. Statements
@@ -483,7 +509,7 @@ impl Compiler<'_, '_> {
         let strict = kind == CodeKind::StrictEval || Flavor::use_strict(&program.directives);
         let local = (kind != CodeKind::Script).then(|| Decls::eval_local(&program.body, strict));
         let Resolver { captured, used, eval_fns, suspends, .. } = Resolver::script(&program.body, Decls::this_key(program.span), &allocator, local.as_ref(), strict, eval_scopes, None);
-        let mut c = Compiler { src, alloc: &allocator, captured, used, class_depth: 0, module: Vec::new(), frames: Vec::new(), levels: Vec::new(), chains: Vec::new(), eval_fns, suspends, completion_assign: HashSet::new(), completion_reset: HashSet::new(), for_init_text: None };
+        let mut c = Compiler { src, alloc: &allocator, captured, used, class_depth: 0, module: Vec::new(), frames: Vec::new(), levels: Vec::new(), chains: Vec::new(), eval_fns, suspends, completion_assign: HashSet::new(), completion_reset: HashSet::new(), for_init_text: None, classes: Vec::new(), next_home: None };
         c.script(program, local.as_ref(), strict, direct)?;
         Ok(Module { functions: c.module })
     }
@@ -599,7 +625,7 @@ impl Compiler<'_, '_> {
         let (names, info) = Compiler::module_layout(program);
         let order: Vec<&str> = names.iter().map(|&(n, _)| n).collect();
         let Resolver { captured, used, eval_fns, suspends, .. } = Resolver::script(&program.body, Decls::this_key(program.span), &allocator, None, true, eval_scopes, Some(&[order]));
-        let mut c = Compiler { src, alloc: &allocator, captured, used, class_depth: 0, module: Vec::new(), frames: Vec::new(), levels: Vec::new(), chains: Vec::new(), eval_fns, suspends, completion_assign: HashSet::new(), completion_reset: HashSet::new(), for_init_text: None };
+        let mut c = Compiler { src, alloc: &allocator, captured, used, class_depth: 0, module: Vec::new(), frames: Vec::new(), levels: Vec::new(), chains: Vec::new(), eval_fns, suspends, completion_assign: HashSet::new(), completion_reset: HashSet::new(), for_init_text: None, classes: Vec::new(), next_home: None };
         let bound = names
             .iter()
             .map(|&(name, n)| match n {
@@ -945,6 +971,8 @@ impl<'a> Compiler<'a, '_> {
         for l in self.levels.iter().rev() {
             if let Some(n) = l.names.iter().find(|n| n.name == name) {
                 let (place, in_context) = match n.binding {
+                    // The script's `this` is the global `this` (V8 reads it with `LdaGlobal`)
+                    Binding::Reg(_) if l.func != cur && name == THIS && l.func == 0 && self.frames.first().is_some_and(|f| !f.eval) => (Place::Global(THIS), false),
                     Binding::Reg(r) => {
                         assert_eq!(l.func, cur, "an outer function's binding `{name}` used from inside must be captured");
                         (Place::Reg(r), false)
@@ -1088,6 +1116,9 @@ impl<'a> Compiler<'a, '_> {
         let strict = flavor.strict || self.class_depth > 0 || self.frames.last().is_some_and(|f| f.strict);
         let default_constructor = matches!(body, Body::DefaultConstructor { .. });
         let simple_params = params.is_some_and(|p| p.rest.is_none() && p.items.iter().all(|i| i.initializer.is_none() && matches!(i.pattern, BindingPattern::BindingIdentifier(_))));
+        // An arrow function sees its enclosing method's home object; any other function only its own
+        let next_home = self.next_home.take();
+        let home = if flavor.kind == Kind::Arrow { self.frames.last().and_then(|f| f.home) } else { next_home };
         self.frames.push(Frame {
             index,
             b: Builder::new(n + 1, 0),
@@ -1105,6 +1136,7 @@ impl<'a> Compiler<'a, '_> {
             generator: None,
             suspends: 0,
             resume_table: None,
+            home,
             async_generator: flavor.generator && flavor.asynchronous,
             strict,
             annexb: Vec::new(),
@@ -1132,7 +1164,7 @@ impl<'a> Compiler<'a, '_> {
         };
         let sloppy_eval = params.is_some_and(|p| !strict && self.eval_fns.contains(&p.span.start));
         // A mapped arguments object aliases the parameters: they live in the context (V8 forces them there)
-        let decls = Decls::function(this, self_name, params, stmts, !strict, None);
+        let mut decls = Decls::function(this, self_name, params, stmts, !strict, None);
         if simple_params && !strict && decls.0.iter().any(|d| matches!(d.kind, DeclKind::Arguments) && self.used.contains(&d.key)) {
             for d in &decls.0 {
                 if let DeclKind::Param(_) = d.kind {
@@ -1140,7 +1172,33 @@ impl<'a> Compiler<'a, '_> {
                 }
             }
         }
+        // An arrow function calling `super(…)` reaches the constructor, new.target and `this` through the context
+        let super_in_arrow = flavor.kind == (Kind::Constructor { derived: true })
+            && params.is_some_and(|p| {
+                let text = &self.src.text[p.span.start as usize..];
+                let body = stmts.last().map_or(0, |st| st.span().end as usize).saturating_sub(p.span.start as usize);
+                let text = &text[..body.min(text.len())];
+                text.contains("=>") && text.contains("super")
+            });
+        if flavor.kind == (Kind::Constructor { derived: true }) {
+            // `super(…)` passes new.target on
+            for d in decls.0.iter().filter(|d| matches!(d.kind, DeclKind::NewTarget | DeclKind::This)) {
+                self.used.insert(d.key);
+                if super_in_arrow {
+                    self.captured.insert(d.key);
+                }
+            }
+            if super_in_arrow && let Some(p) = params {
+                let key = Decls::key(p.span);
+                self.captured.insert(key);
+                decls.0.push(Decl { name: Hidden::THIS_FUNCTION, key, kind: DeclKind::Const, ready: None });
+            }
+        }
         self.enter(&decls, ScopeType::FunctionScope)?;
+        if super_in_arrow {
+            self.b().ldar(Register::function_closure());
+            self.store(Hidden::THIS_FUNCTION, true);
+        }
         if sloppy_eval && let Some(l) = self.levels.last_mut() {
             // `var`s a sloppy direct eval declares land in this function's context extension: names not bound here
             // are looked up by name
@@ -1158,6 +1216,14 @@ impl<'a> Compiler<'a, '_> {
         {
             // In a derived class constructor `this` is the hole before `super()`
             t.ready = Some(u32::MAX);
+        }
+        if flavor.kind == (Kind::Constructor { derived: false }) {
+            // A base class constructor initializes the instance before the parameters (a derived one after `super`)
+            self.load(THIS);
+            let this = self.temp();
+            self.b().star(this);
+            self.instance_init(this);
+            self.release(this);
         }
         if let Some(p) = params {
             self.frame().prologue = true;
@@ -1231,7 +1297,7 @@ impl<'a> Compiler<'a, '_> {
             Body::Fields { class, statik } => self.fields(class, statik)?,
             Body::DefaultConstructor { derived } => {
                 if derived {
-                    self.super_call_forward()?;
+                    self.super_call_forward();
                 }
             }
         }
@@ -2028,11 +2094,6 @@ impl<'a> Compiler<'a, '_> {
         self.function(name, flavor, Some(Decls::this_key(f.span)), None, Some(&f.params), Body::Statements(&body.statements))
     }
 
-    /// The body of a field initializer function (not yet on V8 bytecode)
-    fn fields(&mut self, class: &'a Class<'a>, _statik: bool) -> Result<(), Error> {
-        Err(self.unsupported(class.span, "class fields"))
-    }
-
     /// The text of a non-computed property key (for function name inference; private names include `#`); `None` for
     /// computed keys.
     pub fn static_name(&self, key: &'a PropertyKey<'a>, computed: bool) -> Option<&'a str> {
@@ -2076,14 +2137,466 @@ impl<'a> Compiler<'a, '_> {
         })
     }
 
-    /// Class: not yet on V8 bytecode (`DefineClass` with a class boilerplate). The result (the constructor) goes in acc.
-    pub fn class(&mut self, c: &'a Class<'a>, _inferred: &'a str) -> Result<(), Error> {
-        Err(self.unsupported(c.span, "classes"))
+    /// A class (V8's `BuildClassLiteral`); the constructor ends in acc. `inferred` names an anonymous class. The class
+    /// body is strict code.
+    pub fn class(&mut self, c: &'a Class<'a>, inferred: &'a str) -> Result<(), Error> {
+        let info = self.class_info(c)?;
+        let decls = Decls::class_scope(c, self.alloc);
+        // The hidden bindings and private names are read by the class's functions: they live in the class context
+        for d in &decls.0 {
+            if d.name.starts_with(['.', '#', '%']) {
+                self.captured.insert(d.key);
+            }
+        }
+        self.class_depth += 1;
+        self.enter(&decls, ScopeType::ClassScope)?;
+        self.classes.push(info);
+        let r = self.class_members(c, inferred);
+        self.classes.pop();
+        self.leave();
+        self.class_depth -= 1;
+        r
     }
 
-    /// `super(...arguments)` of a default derived constructor (with classes)
-    fn super_call_forward(&mut self) -> Result<(), Error> {
-        Err(self.unsupported(Span::default(), "classes"))
+    /// What a class's private names are
+    fn class_info(&self, c: &'a Class<'a>) -> Result<ClassInfo<'a>, Error> {
+        let mut info = ClassInfo { privates: Vec::new(), brands: [Hidden::brand(self.alloc, c.span, false), Hidden::brand(self.alloc, c.span, true)], brand: false, fields: false };
+        for e in &c.body.body {
+            match e {
+                ClassElement::MethodDefinition(m) => {
+                    let PropertyKey::PrivateIdentifier(id) = &m.key else { continue };
+                    let name = Hidden::private(self.alloc, id);
+                    let statik = m.r#static;
+                    info.brand |= !statik;
+                    let (get, set) = (m.kind == MethodDefinitionKind::Get, m.kind == MethodDefinitionKind::Set);
+                    match info.privates.iter_mut().find(|(n, _)| *n == name) {
+                        Some((_, Private::Accessor { get: g, set: s, .. })) => {
+                            *g |= get;
+                            *s |= set;
+                        }
+                        Some(_) => {}
+                        None => info.privates.push((name, if get || set { Private::Accessor { statik, get, set } } else { Private::Method { statik } })),
+                    }
+                }
+                ClassElement::PropertyDefinition(p) => {
+                    info.fields |= !p.r#static;
+                    if let PropertyKey::PrivateIdentifier(id) = &p.key {
+                        info.privates.push((Hidden::private(self.alloc, id), Private::Field));
+                    }
+                }
+                ClassElement::StaticBlock(_) => {}
+                e => return Err(self.unsupported(e.span(), "class element")),
+            }
+        }
+        Ok(info)
+    }
+
+    /// A method of a class (static ones are `static` V8 function kinds) with its home object
+    fn class_method(&mut self, name: &str, f: &'a AstFunction<'a>, kind: Kind, statik: bool) -> Result<u32, Error> {
+        let flavor = Flavor { statik, ..Flavor::from((f, kind)) };
+        let body = f.body.as_ref().ok_or_else(|| self.unsupported(f.span, "a method without a body"))?;
+        self.next_home = Some(if statik { Hidden::STATIC_HOME } else { Hidden::HOME });
+        self.function(name, flavor, Some(Decls::this_key(f.span)), None, Some(&f.params), Body::Statements(&body.statements))
+    }
+
+    /// `CallRuntime [name](text)` into binding `binding` (a new private name / brand symbol)
+    fn private_symbol(&mut self, create: Runtime, text: &str, binding: &'a str) {
+        let k = self.name(text);
+        let arg = self.temp();
+        self.b().load_constant(k);
+        self.b().star(arg);
+        self.b().call_runtime(create, RegisterList { first: arg, count: 1 });
+        self.release(arg);
+        self.store(binding, true);
+    }
+
+    /// Throws a static member's computed key `prototype` (V8: `ThrowStaticPrototypeError`)
+    fn static_prototype_check(&mut self, key: Register) {
+        let mut done = Label::default();
+        self.b().load_string("prototype");
+        self.b().compare(CompareOp::StrictEq, key);
+        self.b().jump(Bytecode::JumpIfFalse, &mut done);
+        self.b().call_runtime(Runtime::ThrowStaticPrototypeError, RegisterList::EMPTY);
+        self.b().bind(&mut done);
+    }
+
+    #[expect(clippy::too_many_lines, reason = "follows V8's BuildClassLiteral step by step")]
+    fn class_members(&mut self, c: &'a Class<'a>, inferred: &'a str) -> Result<(), Error> {
+        let name = c.id.as_ref().map_or(inferred, |id| id.name.as_str());
+        let derived = c.heritage.is_some();
+        let info = self.classes.last().expect("this class");
+        let privates = info.privates.clone();
+        let [brand_binding, static_brand_binding] = info.brands;
+        let brand = info.brand;
+        let static_brand = privates.iter().any(|(_, p)| matches!(p, Private::Method { statik: true } | Private::Accessor { statik: true, .. }));
+        // Brands and private names first, so computed keys can't reach private members early
+        if brand {
+            self.private_symbol(Runtime::CreatePrivateBrandSymbol, name, brand_binding);
+        }
+        if static_brand {
+            self.private_symbol(Runtime::CreatePrivateBrandSymbol, name, static_brand_binding);
+        }
+        for e in &c.body.body {
+            match e {
+                ClassElement::PropertyDefinition(p) => {
+                    if let PropertyKey::PrivateIdentifier(id) = &p.key {
+                        let n = Hidden::private(self.alloc, id);
+                        self.private_symbol(Runtime::CreatePrivateNameSymbol, n, n);
+                    }
+                }
+                ClassElement::MethodDefinition(m) if matches!(m.kind, MethodDefinitionKind::Method) => {
+                    if let PropertyKey::PrivateIdentifier(id) = &m.key {
+                        let n = Hidden::private(self.alloc, id);
+                        let f = self.class_method(n, &m.value, Kind::Method, m.r#static)?;
+                        self.closure(f);
+                        self.store(n, true);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let ctor = self.temp();
+        let boilerplate = self.temp();
+        let ctor_in_args = self.temp();
+        let superclass = self.temp();
+        match &c.heritage {
+            Some(h) => self.expr(&h.expression)?,
+            None => self.b().load_the_hole(),
+        }
+        self.b().star(superclass);
+        let kind = Kind::Constructor { derived };
+        let f = match c.body.body.iter().find_map(|e| match e {
+            ClassElement::MethodDefinition(m) if m.kind == MethodDefinitionKind::Constructor => Some(m),
+            _ => None,
+        }) {
+            Some(m) => {
+                self.next_home = Some(Hidden::HOME);
+                self.method(name, &m.value, kind)?
+            }
+            None => {
+                self.next_home = Some(Hidden::HOME);
+                let this = Decls::this_key(Span::new(c.body.span.end.saturating_sub(1), c.body.span.end));
+                self.function(name, kind.into(), Some(this), None, None, Body::DefaultConstructor { derived })?
+            }
+        };
+        self.closure(f);
+        self.b().star(ctor);
+        self.b().mov(ctor, ctor_in_args);
+        // The public members: computed keys and functions go to `DefineClass` as arguments
+        let mut members = Vec::new();
+        let mut statics = false;
+        for e in &c.body.body {
+            match e {
+                ClassElement::MethodDefinition(m) if m.kind != MethodDefinitionKind::Constructor && !matches!(m.key, PropertyKey::PrivateIdentifier(_)) => {
+                    let key = match self.static_name(&m.key, m.computed) {
+                        Some(n) => Some(n),
+                        None => {
+                            let k = self.temp();
+                            self.property_key_into(&m.key, true, k)?;
+                            if m.r#static {
+                                self.static_prototype_check(k);
+                            }
+                            None
+                        }
+                    };
+                    let (mkind, fkind) = match m.kind {
+                        MethodDefinitionKind::Get => (MemberKind::Getter, Kind::Getter),
+                        MethodDefinitionKind::Set => (MemberKind::Setter, Kind::Setter),
+                        _ => (MemberKind::Method, Kind::Method),
+                    };
+                    let fname = self.method_name(&m.key, m.computed, m.kind);
+                    let v = self.temp();
+                    let n = self.class_method(fname, &m.value, fkind, m.r#static)?;
+                    self.closure(n);
+                    self.b().star(v);
+                    members.push(ClassMember { name: key.map(Into::into), kind: mkind, statik: m.r#static });
+                }
+                ClassElement::PropertyDefinition(p) => {
+                    statics |= p.r#static;
+                    if p.computed && !matches!(p.key, PropertyKey::PrivateIdentifier(_)) {
+                        // Computed field keys are evaluated once, here; the initializer reads them back
+                        let k = self.temp();
+                        self.property_key_into(&p.key, true, k)?;
+                        if p.r#static {
+                            self.static_prototype_check(k);
+                        }
+                        self.b().ldar(k);
+                        self.store(Hidden::field_key(self.alloc, p.span), true);
+                        members.push(ClassMember { name: None, kind: MemberKind::Field, statik: p.r#static });
+                    }
+                }
+                ClassElement::StaticBlock(_) => statics = true,
+                _ => {}
+            }
+        }
+        let k = self.constant(Constant::Class(ClassBoilerplate { members }));
+        self.b().load_constant(k);
+        self.b().star(boilerplate);
+        let count = u32::try_from(self.b().mark() - boilerplate.0).unwrap_or(0);
+        self.b().call_runtime(Runtime::DefineClass, RegisterList { first: boilerplate, count });
+        self.release(boilerplate);
+        // acc: the prototype
+        self.store(Hidden::HOME, true);
+        self.b().ldar(ctor);
+        self.store(Hidden::STATIC_HOME, true);
+        if c.id.is_some() {
+            self.b().ldar(ctor);
+            self.store(name, true);
+        }
+        // Private accessors: one getter / setter pair per name
+        for (n, p) in &privates {
+            let Private::Accessor { statik, .. } = *p else { continue };
+            let pair = self.b().new_register_list(2);
+            for (slot, want) in [(pair.first, MethodDefinitionKind::Get), (pair.at(1), MethodDefinitionKind::Set)] {
+                let found = c.body.body.iter().find_map(|e| match e {
+                    ClassElement::MethodDefinition(m) if m.kind == want && matches!(&m.key, PropertyKey::PrivateIdentifier(id) if Hidden::private(self.alloc, id) == *n) => Some(m),
+                    _ => None,
+                });
+                match found {
+                    Some(m) => {
+                        let fname = self.method_name(&m.key, false, m.kind);
+                        let kind = if want == MethodDefinitionKind::Get { Kind::Getter } else { Kind::Setter };
+                        let f = self.class_method(fname, &m.value, kind, statik)?;
+                        self.closure(f);
+                    }
+                    None => self.b().load_null(),
+                }
+                self.b().star(slot);
+            }
+            self.b().call_runtime(Runtime::CreatePrivateAccessors, pair);
+            self.release(pair.first);
+            self.store(n, true);
+        }
+        if static_brand {
+            let key = self.temp();
+            self.load(static_brand_binding);
+            self.b().star(key);
+            self.b().ldar(ctor);
+            self.b().define_keyed_own(ctor, key, 0);
+            self.release(key);
+        }
+        if self.classes.last().is_some_and(|i| i.fields) {
+            self.next_home = Some(Hidden::HOME);
+            let f = self.function("", Kind::Initializer { statik: false }.into(), Some(Decls::this_key(c.body.span)), None, None, Body::Fields { class: c, statik: false })?;
+            self.closure(f);
+            self.store(Hidden::FIELDS, true);
+        }
+        if statics {
+            // Static fields and blocks run now, in order, with the constructor as `this`
+            self.next_home = Some(Hidden::STATIC_HOME);
+            let f = self.function("", Kind::Initializer { statik: true }.into(), Some(Decls::this_key(c.span)), None, None, Body::Fields { class: c, statik: true })?;
+            let init = self.temp();
+            self.closure(f);
+            self.b().star(init);
+            self.b().call_property(init, RegisterList { first: ctor, count: 1 });
+            self.release(init);
+        }
+        self.b().ldar(ctor);
+        self.release(ctor);
+        Ok(())
+    }
+
+    /// The body of a class's members initializer (V8's `<instance_members_initializer>` / static initializer): defines
+    /// the fields in order on `this` (private ones as private members); the static one also runs the static blocks.
+    fn fields(&mut self, class: &'a Class<'a>, statik: bool) -> Result<(), Error> {
+        self.load(THIS);
+        let this = self.temp();
+        self.b().star(this);
+        for e in &class.body.body {
+            match e {
+                ClassElement::PropertyDefinition(p) if p.r#static == statik => {
+                    let fname = self.static_name(&p.key, p.computed);
+                    let key = match &p.key {
+                        PropertyKey::PrivateIdentifier(id) => Some(Hidden::private(self.alloc, id)),
+                        _ if p.computed => Some(Hidden::field_key(self.alloc, p.span)),
+                        _ => None,
+                    };
+                    let k = key.map(|binding| {
+                        let k = self.temp();
+                        self.load(binding);
+                        self.b().star(k);
+                        k
+                    });
+                    let anonymous = match &p.value {
+                        Some(v) => {
+                            match fname {
+                                Some(n) => self.expr_named(v, n)?,
+                                None => self.expr(v)?,
+                            }
+                            Self::anonymous_function(v)
+                        }
+                        None => {
+                            self.b().load_undefined();
+                            false
+                        }
+                    };
+                    match k {
+                        Some(k) => {
+                            // A computed key names an anonymous function value at run time
+                            let flags = u8::from(anonymous && fname.is_none());
+                            self.b().define_keyed_own(this, k, flags);
+                            self.release(k);
+                        }
+                        None => self.b().define_named_own(this, fname.unwrap_or_default()),
+                    }
+                }
+                ClassElement::StaticBlock(b) if statik => self.scoped(&Decls::static_block(&b.body), |c| c.statements(&b.body))?,
+                _ => {}
+            }
+        }
+        self.release(this);
+        Ok(())
+    }
+
+    /// A function / class expression without its own name (it takes the name of what it is assigned to)
+    pub fn anonymous_function(e: &Expression<'_>) -> bool {
+        match e {
+            Expression::FunctionExpression(f) => f.id.is_none(),
+            Expression::ArrowFunctionExpression(_) => true,
+            Expression::ClassExpression(c) => c.id.is_none(),
+            Expression::ParenthesizedExpression(p) => Self::anonymous_function(&p.expression),
+            _ => false,
+        }
+    }
+
+    /// The source text being compiled
+    pub fn source_text(&self) -> &str {
+        self.src.text
+    }
+
+    /// Makes a binding live in a context
+    pub fn captured_insert(&mut self, key: Key) {
+        self.captured.insert(key);
+    }
+
+    /// A block scope declaring `decls` around `f`
+    pub fn scoped_block(&mut self, decls: &Decls<'a>, f: impl FnOnce(&mut Self) -> Result<(), Error>) -> Result<(), Error> {
+        self.scoped(decls, f)
+    }
+
+    /// What private name `name` (`#x`) is in the innermost class declaring it
+    pub fn private_kind(&self, name: &str) -> Option<Private> {
+        self.classes.iter().rev().find_map(|c| c.privates.iter().find(|(n, _)| *n == name).map(|&(_, p)| p))
+    }
+
+    /// The brand binding the methods / accessors of private name `name` check (of the class declaring it)
+    pub fn brand_of(&self, name: &str, statik: bool) -> &'a str {
+        let class = self.classes.iter().rev().find(|c| c.privates.iter().any(|(n, _)| *n == name));
+        class.map_or("", |c| c.brands[usize::from(statik)])
+    }
+
+    /// The object must carry the brand of the class declaring `name` (instances) / be that class (static): reading
+    /// the brand throws otherwise
+    pub fn brand_check(&mut self, obj: Register, name: &str, statik: bool) {
+        let brand = self.brand_of(name, statik);
+        self.load(brand);
+        self.b().get_keyed(obj);
+    }
+
+    /// Throws a TypeError with `message`
+    pub fn throw_type_error(&mut self, message: &str) {
+        let k = self.name(message);
+        let arg = self.temp();
+        self.b().load_constant(k);
+        self.b().star(arg);
+        self.b().call_runtime(Runtime::ThrowTypeError, RegisterList { first: arg, count: 1 });
+        self.release(arg);
+    }
+
+    /// The home object of the method being compiled into acc (`super.x` looks up from its prototype)
+    pub fn load_home(&mut self) {
+        let home = self.frame().home.unwrap_or(Hidden::HOME);
+        self.load(home);
+    }
+
+    /// `super(…)` may be called here: in a derived class constructor, or an arrow function inside one
+    pub fn in_derived_constructor(&self) -> bool {
+        self.frames.iter().rev().find(|f| f.flavor.kind != Kind::Arrow).is_some_and(|f| f.flavor.kind == (Kind::Constructor { derived: true }))
+    }
+
+    /// The kind of the function being compiled
+    pub fn frame_kind(&mut self) -> Kind {
+        self.frame().flavor.kind
+    }
+
+    /// Reads a binding without its TDZ check
+    fn load_raw(&mut self, name: &'a str) {
+        match self.resolve(name).place {
+            Place::Reg(reg) => self.b().ldar(reg),
+            Place::Context { depth, slot, cells } => self.b().load_context_slot(Register::current_context(), slot, depth, false, cells),
+            _ => self.load(name),
+        }
+    }
+
+    /// After `super(…)` returned `instance`: it becomes `this` (once only), then it is branded and its fields defined
+    pub fn bind_this(&mut self, instance: Register) {
+        self.load_raw(THIS);
+        self.b().plain(Bytecode::ThrowSuperAlreadyCalledIfNotHole);
+        self.b().ldar(instance);
+        self.store(THIS, true);
+        self.instance_init(instance);
+        self.b().ldar(instance);
+    }
+
+    /// The instance's private brand, then the instance fields (V8's `BuildPrivateBrandInitialization` /
+    /// `BuildInstanceMemberInitialization`)
+    fn instance_init(&mut self, this: Register) {
+        let Some(info) = self.classes.last() else { return };
+        let (brand, fields) = (info.brand, info.fields);
+        if brand {
+            let key = self.temp();
+            let binding = self.classes.last().map_or("", |c| c.brands[0]);
+            self.load(binding);
+            self.b().star(key);
+            self.b().ldar(this);
+            self.b().define_keyed_own(this, key, 0);
+            self.release(key);
+        }
+        if fields {
+            let mut skip = Label::default();
+            self.load(Hidden::FIELDS);
+            self.b().jump(Bytecode::JumpIfUndefined, &mut skip);
+            let init = self.temp();
+            self.b().star(init);
+            self.b().call_property(init, RegisterList { first: this, count: 1 });
+            self.release(init);
+            self.b().bind(&mut skip);
+        }
+    }
+
+    /// The parent constructor of a derived class constructor (V8's `FindNonDefaultConstructorOrConstruct`), not
+    /// done yet: `(done, constructor)` in a new register pair (the caller frees it)
+    pub fn super_constructor(&mut self) -> (RegisterList, Register) {
+        let this_function = self.temp();
+        if self.frame_kind() == Kind::Arrow {
+            self.load(Hidden::THIS_FUNCTION);
+            self.b().star(this_function);
+        } else {
+            self.b().mov(Register::function_closure(), this_function);
+        }
+        let new_target = self.temp();
+        self.load(NEW_TARGET);
+        self.b().star(new_target);
+        let pair = self.b().new_register_list(2);
+        self.b().raw(Bytecode::FindNonDefaultConstructorOrConstruct, &[i32::from(this_function).into(), i32::from(new_target).into(), i32::from(pair.first).into()]);
+        (pair, new_target)
+    }
+
+    /// `super(...arguments)` of a default derived constructor (V8's `ConstructForwardAllArgs`)
+    fn super_call_forward(&mut self) {
+        let first = self.b().mark();
+        let (pair, new_target) = self.super_constructor();
+        let mut done = Label::default();
+        self.b().ldar(pair.first);
+        self.b().jump(Bytecode::JumpIfTrue, &mut done);
+        self.b().raw(Bytecode::ThrowIfNotSuperConstructor, &[i32::from(pair.at(1)).into()]);
+        self.b().ldar(new_target);
+        let slot = j8bytecode::OperandValue::try_from(self.b().slot(j8bytecode::FeedbackSlotKind::Call)).unwrap_or(0);
+        self.b().raw(Bytecode::ConstructForwardAllArgs, &[i32::from(pair.at(1)).into(), slot]);
+        self.b().star(pair.at(1));
+        self.b().bind(&mut done);
+        self.bind_this(pair.at(1));
+        self.b().release_to(first);
     }
 
     fn function_declaration(&mut self, f: &'a AstFunction<'a>) -> Result<u32, Error> {
@@ -2100,6 +2613,7 @@ impl<'a> Compiler<'a, '_> {
     /// are slots of the script context the interpreter creates before running it (recorded as the function's scope).
     /// Sloppy eval code declares its `var`s / functions with `DeclareEvalVar` / `DeclareEvalFunction` in the calling
     /// variable environment; strict eval code keeps everything to itself. `local` is the eval code's own level.
+    #[expect(clippy::too_many_lines, reason = "follows V8's GenerateBytecodeBody for a script / eval scope step by step")]
     fn script(&mut self, program: &'a Program<'a>, local: Option<&Decls<'a>>, strict: bool, direct: bool) -> Result<(), Error> {
         self.module.push(SharedFunction { name: "".into(), kind: FunctionKind::NormalFunction, strict, length: 0, formal_parameters: 0, scope: None, bytecode: j8bytecode::BytecodeArray::default() });
         let eval = local.is_some();
@@ -2120,6 +2634,7 @@ impl<'a> Compiler<'a, '_> {
             generator: None,
             suspends: 0,
             resume_table: None,
+            home: None,
             async_generator: false,
             strict,
             annexb: Vec::new(),
@@ -2137,6 +2652,10 @@ impl<'a> Compiler<'a, '_> {
         // `this` is the receiver (the global object) for a script and indirect eval code; direct eval code looks it up
         // by name (functions with a direct eval keep `this` in their context, as V8 does)
         if !(eval && direct) {
+            // Never in a context: inner functions read it as the global `this`
+            if !eval {
+                self.captured.remove(&Decls::this_key(program.span));
+            }
             self.enter(&Decls(vec![Decl { name: THIS, key: Decls::this_key(program.span), kind: DeclKind::This, ready: None }]), ScopeType::ScriptScope)?;
         }
         let mut globals = Decls::default();
@@ -2401,6 +2920,15 @@ impl<'a> Compiler<'a, '_> {
                         self.b().call_runtime(Runtime::InlineAsyncFunctionResolve, args);
                     }
                     self.release(args.first);
+                }
+                if flavor.kind == (Kind::Constructor { derived: true }) {
+                    // V8's `GenerateDerivedConstructorBody`: returning `undefined` returns `this` (which `super()` must
+                    // have initialized)
+                    let mut this = Label::default();
+                    self.b().jump(Bytecode::JumpIfUndefined, &mut this);
+                    self.b().plain(Bytecode::Return);
+                    self.b().bind(&mut this);
+                    self.load(THIS);
                 }
                 self.b().plain(Bytecode::Return);
             }

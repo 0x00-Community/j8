@@ -30,6 +30,12 @@ pub use cache::CodeCache;
 /// Call depth limit (including JS re-entered from host functions); exceeding it throws RangeError
 const STACK_LIMIT: usize = 10_000;
 
+/// The name a script's `this` is read by from the functions inside it (`LdaGlobal`)
+const SCRIPT_THIS: &str = "this";
+
+/// V8's `DefineKeyedOwnPropertyFlag::kSetFunctionName` (also `DefineKeyedOwnPropertyInLiteralFlag`)
+const SET_FUNCTION_NAME: OperandValue = 1;
+
 /// V8's `JSGeneratorObject::kRethrow`: an async generator's yielded value was rejected
 const RESUME_RETHROW: f64 = 3.0;
 
@@ -112,7 +118,7 @@ impl Loaded {
         let derived = matches!(k, F::DerivedConstructor | F::DefaultDerivedConstructor);
         let normal = matches!(k, F::NormalFunction);
         let insns = Self::decode(bc);
-        let keeps_args = insns.iter().any(|d| matches!(d.bytecode, Bytecode::CreateRestParameter | Bytecode::CreateMappedArguments | Bytecode::CreateUnmappedArguments));
+        let keeps_args = insns.iter().any(|d| matches!(d.bytecode, Bytecode::CreateRestParameter | Bytecode::CreateMappedArguments | Bytecode::CreateUnmappedArguments | Bytecode::ConstructForwardAllArgs));
         Self {
             base,
             insns,
@@ -780,6 +786,10 @@ impl Executor {
     /// `LdaGlobal`: script contexts first, then the global object (through the cache); `typeof` gives `undefined` for
     /// a name that isn't there
     fn global_load<'gc>(a: &mut Agent<'gc, '_>, cache: &ic::GlobalIc, name: &str, inside_typeof: bool) -> Result<Value<'gc>, Error> {
+        // A script's `this`, read from a function inside it (V8 keeps it in the script context table)
+        if name == SCRIPT_THIS {
+            return Ok(Value::Object(a.realm.global));
+        }
         // A hit means the name is still a global property: a script declaring it lexically changes the script scope's
         // shape
         let (scope, global) = (a.realm.script_scope, a.realm.global);
@@ -1222,7 +1232,14 @@ impl Executor {
             B::LdaTheHole => *acc = Value::Uninit,
             B::LdaTrue => *acc = Value::Bool(true),
             B::LdaFalse => *acc = Value::Bool(false),
-            B::LdaConstant => *acc = Self::constant(a, &loaded.func.bytecode.constants[usize::try_from(o[0]).unwrap_or(0)]),
+            B::LdaConstant => {
+                let k = usize::try_from(o[0]).unwrap_or(0);
+                *acc = match &loaded.func.bytecode.constants[k] {
+                    // A class boilerplate goes to `DefineClass` as its index in the constant pool
+                    Constant::Class(_) => Value::Number(k as f64),
+                    c => Self::constant(a, c),
+                };
+            }
             B::Ldar => *acc = r!(0),
             B::Star => Self::set_reg(regs, f, o[0], *acc),
             B::Mov => {
@@ -1343,6 +1360,13 @@ impl Executor {
                 a.put_keyed(r!(0), r!(1), *acc, s)?;
             }
             B::DefineKeyedOwnProperty | B::DefineKeyedOwnPropertyInLiteral | B::StaInArrayLiteral => {
+                // V8's `kSetFunctionName`: an anonymous function value is named after the (computed) key
+                if d.bytecode != B::StaInArrayLiteral
+                    && o[2] & SET_FUNCTION_NAME != 0
+                    && let Some(fo) = acc.as_object()
+                {
+                    a.set_function_name(fo, r!(1), None)?;
+                }
                 if let Some(ob) = r!(0).as_object() {
                     a.define_keyed(ob, r!(1), Property::data(*acc))?;
                 }
@@ -1623,6 +1647,46 @@ impl Executor {
                     return Err(Self::uninitialized(a, Self::name_at(loaded, o[0])));
                 }
             }
+            B::ThrowSuperAlreadyCalledIfNotHole => {
+                if !matches!(acc.kind(), ValueKind::Uninit) {
+                    return Err(a.throw(ErrorKind::Reference, "Super constructor may only be called once"));
+                }
+            }
+            B::ThrowIfNotSuperConstructor => {
+                let c = r!(0);
+                if !a.is_constructor(c) {
+                    let what = a.describe(c);
+                    return Err(a.throw(ErrorKind::Type, &alloc::format!("Super constructor {what} of anonymous class is not a constructor")));
+                }
+            }
+            // The parent class constructor of the active function (in acc)
+            B::GetSuperConstructor => {
+                let parent = match acc.as_object() {
+                    Some(fo) => a.get_prototype_of(fo)?.map_or(Value::Null, Value::Object),
+                    None => Value::Null,
+                };
+                Self::set_reg(regs, f, o[0], parent);
+            }
+            // Default constructors are not skipped: the answer is always "not done", with the parent constructor
+            B::FindNonDefaultConstructorOrConstruct => {
+                let parent = match r!(0).as_object() {
+                    Some(fo) => a.get_prototype_of(fo)?.map_or(Value::Null, Value::Object),
+                    None => Value::Null,
+                };
+                Self::set_reg(regs, f, o[2], Value::Bool(false));
+                Self::set_reg(regs, f, o[2] + 1, parent);
+            }
+            B::ConstructForwardAllArgs => {
+                let callee = r!(0);
+                let args = f.args.to_vec();
+                let nt = *acc;
+                return self.construct_from(a, st, callee, args, nt, level + 1);
+            }
+            B::GetNamedPropertyFromSuper => {
+                let receiver = r!(0);
+                let name = a.string(Self::name_at(loaded, o[1])).into();
+                *acc = a.super_get(*acc, name, receiver)?;
+            }
             B::ThrowSuperNotCalledIfHole => {
                 if matches!(acc.kind(), ValueKind::Uninit) {
                     return Err(a.throw(ErrorKind::Reference, "Must call super constructor in derived class before accessing 'this' or returning from derived constructor"));
@@ -1748,6 +1812,49 @@ impl Executor {
         Err(a.throw(ErrorKind::Type, "'caller', 'callee', and 'arguments' properties may not be accessed on strict mode functions or the arguments objects for calls to them"))
     }
 
+    /// `DefineClass(boilerplate, constructor, superclass, …keys and functions)`: links the constructor and a new
+    /// prototype to the heritage, then defines the public methods and accessors (computed keys come in the arguments,
+    /// and name their function); gives the prototype
+    fn define_class<'gc>(a: &mut Agent<'gc, '_>, b: &j8bytecode::ClassBoilerplate, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+        use j8bytecode::MemberKind as M;
+        let arg = |n: usize| args.get(n).copied().unwrap_or_default();
+        let Some(ctor) = arg(1).as_object() else { unreachable!("a class constructor") };
+        let (proto_parent, ctor_parent) = a.class_heritage(arg(2))?;
+        ctor.borrow_mut(a.mc).set_proto(Some(ctor_parent));
+        let proto = ObjectData { proto: proto_parent, ..ObjectData::default() }.alloc(a.mc);
+        ctor.borrow_mut(a.mc).define("prototype", Property { slot: Slot::Data(proto.into()), enumerable: false, writable: false, configurable: false });
+        proto.borrow_mut(a.mc).define("constructor", Property::hidden(ctor.into()));
+        let mut next = 3;
+        for m in &b.members {
+            let key = match &m.name {
+                Some(n) => Value::from(a.string(n)),
+                None => {
+                    next += 1;
+                    arg(next - 1)
+                }
+            };
+            if m.kind == M::Field {
+                continue;
+            }
+            let Some(fo) = arg(next).as_object() else { unreachable!("a member function") };
+            next += 1;
+            let target = if m.statik { ctor } else { proto };
+            let prefix = match m.kind {
+                M::Getter => Some("get"),
+                M::Setter => Some("set"),
+                M::Method | M::Field => None,
+            };
+            if m.name.is_none() {
+                a.set_function_name(fo, key, prefix)?;
+            }
+            match m.kind {
+                M::Getter | M::Setter => a.define_accessor_keyed(target, key, fo, m.kind == M::Setter, false)?,
+                M::Method | M::Field => a.define_keyed(target, key, Property::hidden(fo.into()))?,
+            }
+        }
+        Ok(proto.into())
+    }
+
     /// Reads a coroutine (generator / async function object)
     fn coroutine<'gc, T>(co: JsObject<'gc>, read: impl FnOnce(&j8framework::Coroutine<'gc>) -> T) -> T {
         match &co.borrow().kind {
@@ -1863,6 +1970,7 @@ impl Executor {
     }
 
     /// `CallRuntime`
+    #[expect(clippy::too_many_lines, reason = "one arm per runtime function")]
     fn runtime<'gc>(&self, a: &mut Agent<'gc, '_>, st: &mut State<'gc>, loaded: &Loaded, rt: Runtime, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let arg = |n: usize| args.get(n).copied().unwrap_or_default();
         let text = |a: &mut Agent<'gc, '_>, v: Value<'gc>| -> Result<alloc::string::String, Error> { Ok(alloc::string::String::from(&**a.to_string(v)?)) };
@@ -1888,6 +1996,36 @@ impl Executor {
                 Ok(Value::Undefined)
             }
             Runtime::ThrowConstAssignError => Err(a.throw(ErrorKind::Type, "Assignment to constant variable.")),
+            Runtime::DefineClass => {
+                // The boilerplate's index in the constant pool (see `LdaConstant`)
+                #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "a constant pool index")]
+                let k = arg(0).as_number().map_or(usize::MAX, |k| k as usize);
+                let Some(Constant::Class(b)) = loaded.func.bytecode.constants.get(k) else { unreachable!("a class boilerplate") };
+                Self::define_class(a, b, args)
+            }
+            Runtime::CreatePrivateNameSymbol | Runtime::CreatePrivateBrandSymbol => {
+                let desc = text(a, arg(0))?;
+                Ok(Value::Symbol(a.private_name(&desc)))
+            }
+            Runtime::CreatePrivateAccessors => Ok(ObjectData { kind: ObjectKind::AccessorPair { get: arg(0).as_object(), set: arg(1).as_object() }, ..ObjectData::default() }.alloc(a.mc).into()),
+            Runtime::LoadPrivateGetter | Runtime::LoadPrivateSetter => Ok(match arg(0).as_object().map(|o| match o.borrow().kind {
+                ObjectKind::AccessorPair { get, set } => if rt == Runtime::LoadPrivateGetter { get } else { set },
+                _ => None,
+            }) {
+                Some(Some(fo)) => fo.into(),
+                _ => Value::Undefined,
+            }),
+            Runtime::LoadFromSuper | Runtime::LoadKeyedFromSuper => a.super_get(arg(1), arg(2), arg(0)),
+            Runtime::StoreToSuper | Runtime::StoreKeyedToSuper => {
+                a.super_set(arg(1), arg(2), arg(3), arg(0))?;
+                Ok(arg(3))
+            }
+            Runtime::ThrowUnsupportedSuperError => Err(a.throw(ErrorKind::Reference, "Unsupported reference to 'super'")),
+            Runtime::ThrowStaticPrototypeError => Err(a.throw(ErrorKind::Type, "Classes may not have a static property named 'prototype'")),
+            Runtime::ThrowTypeError => {
+                let m = text(a, arg(0))?;
+                Err(a.throw(ErrorKind::Type, &m))
+            }
             Runtime::ThrowSymbolAsyncIteratorInvalid => Err(a.throw(ErrorKind::Type, "Result of the Symbol.asyncIterator method is not an object")),
             Runtime::ThrowThrowMethodMissing => Err(a.throw(ErrorKind::Type, "The iterator does not provide a 'throw' method")),
             Runtime::ThrowIteratorResultNotAnObject => {

@@ -17,6 +17,8 @@ pub type JsString<'gc> = Gc<'gc, crate::text::JsStr>;
 #[collect(require_static)]
 pub struct SymbolData {
     pub description: Option<Box<str>>,
+    /// A private name (`#x`): the keyed operations reach the object's private members with it (V8's private symbols)
+    pub private: bool,
 }
 
 /// A Symbol on the heap.
@@ -812,6 +814,8 @@ pub enum ObjectKind<'gc> {
     IteratorHelper(Box<IteratorHelper<'gc>>),
     /// An iterator wrapped by `Iterator.from`
     WrappedIterator(crate::IterRecord<'gc>),
+    /// The getter / setter pair of a private accessor (`CreatePrivateAccessors`)
+    AccessorPair { get: Option<JsObject<'gc>>, set: Option<JsObject<'gc>> },
     /// An async iterator over a sync one (`for await` / `yield*` in an async generator over a sync iterable)
     AsyncFromSyncIterator(crate::IterRecord<'gc>),
     ArrayBuffer(Box<BufferData>),
@@ -1009,7 +1013,7 @@ impl<'gc> ObjectState<'gc> {
 impl fmt::Debug for ObjectState<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let kind = match self.kind {
-            ObjectKind::Ordinary | ObjectKind::Arguments(_) => "Object",
+            ObjectKind::Ordinary | ObjectKind::Arguments(_) | ObjectKind::AccessorPair { .. } => "Object",
             ObjectKind::Error => "Error",
             ObjectKind::Array => "Array",
             ObjectKind::Function(_) | ObjectKind::Native(_) | ObjectKind::Bound(_) | ObjectKind::Resolver { .. } | ObjectKind::NativeClosure(_) => "Function",

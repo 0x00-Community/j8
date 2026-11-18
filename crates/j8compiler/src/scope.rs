@@ -6,7 +6,7 @@
 use std::collections::{HashMap, HashSet};
 
 use oxc_ast::ast::{
-    Argument, ArrayExpressionElement, ArrowFunctionBody, AssignmentTargetMaybeDefault, AssignmentTargetProperty, CatchClause, ChainElement, Class, ClassElement, ArrowFunctionExpression, AssignmentTarget, BindingIdentifier, BindingPattern, Expression, ForStatementInit, ForStatementLeft, FormalParameters, Function, MemberExpression, MethodDefinitionKind, ObjectPropertyKind, PrivateIdentifier, PropertyKey, SimpleAssignmentTarget, Statement, VariableDeclaration, VariableDeclarationKind,
+    Argument, ArrayExpressionElement, ArrowFunctionBody, AssignmentTargetMaybeDefault, AssignmentTargetProperty, CatchClause, ChainElement, Class, ClassElement, ArrowFunctionExpression, AssignmentTarget, BindingIdentifier, BindingPattern, Expression, ForStatementInit, ForStatementLeft, FormalParameters, Function, MemberExpression, ObjectPropertyKind, PrivateIdentifier, PropertyKey, SimpleAssignmentTarget, Statement, VariableDeclaration, VariableDeclarationKind,
 };
 use oxc_allocator::Allocator;
 use oxc_span::Span;
@@ -403,12 +403,18 @@ impl<'a> Decls<'a> {
             d.add(Self::lexical_ident(id, DeclKind::Const, c.span.end));
         }
         let hidden = |name, span: Span| Decl { name, key: Self::key(span), kind: DeclKind::Const, ready: None };
+        // The home objects, the private brands and the instance members initializer: keyed by positions inside the
+        // `class` keyword, where no other binding starts
+        let brands = [Hidden::brand(alloc, c.span, false), Hidden::brand(alloc, c.span, true)];
+        for (i, name) in (1..).zip(Hidden::CLASS.into_iter().chain(brands)) {
+            d.add(hidden(name, Span::new(c.span.start + i, c.span.start + i)));
+        }
         for e in &c.body.body {
             match e {
+                // A private method's binding holds the method itself, an accessor's its getter / setter pair
                 ClassElement::MethodDefinition(m) => {
                     if let PropertyKey::PrivateIdentifier(id) = &m.key {
                         d.add(hidden(Hidden::private(alloc, id), id.span));
-                        d.add(hidden(Hidden::method(alloc, id, m.kind), m.value.span));
                     }
                 }
                 ClassElement::PropertyDefinition(p) => match &p.key {
@@ -419,6 +425,13 @@ impl<'a> Decls<'a> {
                 _ => {}
             }
         }
+        d
+    }
+
+    /// The scope of an object literal whose methods use `super`: its home object
+    pub fn home_object(span: Span) -> Self {
+        let mut d = Self::default();
+        d.add(Decl { name: Hidden::HOME, key: Self::key(span), kind: DeclKind::Const, ready: None });
         d
     }
 
@@ -487,6 +500,23 @@ impl<'a> Decls<'a> {
 pub(crate) struct Hidden;
 
 impl Hidden {
+    /// The home object of a class's instance members / of an object literal's methods (`super.x` looks up from it)
+    pub const HOME: &str = ".home_object";
+    /// The home object of a class's static members (the constructor)
+    pub const STATIC_HOME: &str = ".static_home_object";
+    /// A derived class constructor itself, for `super(…)` in its arrow functions
+    pub const THIS_FUNCTION: &str = ".this_function";
+    /// The function defining a class's instance fields (run by the constructor)
+    pub const FIELDS: &str = ".instance_members_initializer";
+    /// Every hidden binding of a class scope (besides its brands)
+    pub const CLASS: [&str; 3] = [Self::HOME, Self::STATIC_HOME, Self::FIELDS];
+
+    /// The private brand of a class's instances (they have it once constructed: private methods check it) / of the
+    /// class itself (static private methods); one per class, so an inner class never shadows an outer one's
+    pub fn brand(alloc: &Allocator, class: Span, statik: bool) -> &str {
+        alloc.alloc_str(&format!("{}@{}", if statik { ".static_brand" } else { ".brand" }, class.start))
+    }
+
     /// The catch variable of a `catch` clause with a pattern (V8's `.catch`)
     pub const CATCH: &str = ".catch";
 
@@ -513,15 +543,6 @@ impl Hidden {
 
     pub fn private<'a>(alloc: &'a Allocator, id: &PrivateIdentifier<'_>) -> &'a str {
         alloc.alloc_str(&format!("#{}", id.name.as_str()))
-    }
-
-    pub fn method<'a>(alloc: &'a Allocator, id: &PrivateIdentifier<'_>, kind: MethodDefinitionKind) -> &'a str {
-        let suffix = match kind {
-            MethodDefinitionKind::Get => "get",
-            MethodDefinitionKind::Set => "set",
-            MethodDefinitionKind::Method | MethodDefinitionKind::Constructor => "method",
-        };
-        alloc.alloc_str(&format!("#{}@{suffix}", id.name.as_str()))
     }
 
     pub fn field_key(alloc: &Allocator, span: Span) -> &str {
@@ -752,13 +773,6 @@ impl<'a> Resolver<'a> {
             let outer = self.enter_function(&Decls::function(Some(key), None, None, &[], false, None));
             for e in &c.body.body {
                 match e {
-                    // The instance initializer installs private methods: read the private names and method functions
-                    ClassElement::MethodDefinition(m) if !statik && !m.r#static => {
-                        if let PropertyKey::PrivateIdentifier(id) = &m.key {
-                            self.reference(Hidden::private(self.alloc, id));
-                            self.reference(Hidden::method(self.alloc, id, m.kind));
-                        }
-                    }
                     ClassElement::PropertyDefinition(p) if p.r#static == statik => {
                         match &p.key {
                             PropertyKey::PrivateIdentifier(id) => self.reference(Hidden::private(self.alloc, id)),

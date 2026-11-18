@@ -7,7 +7,8 @@ use oxc_span::{GetSpan, Span};
 use j8framework::{BinaryOp, CompareOp, Error};
 
 use crate::builder::{Label, RegisterList};
-use crate::compiler::{Body, Compiler, Flavor, Kind, Place};
+use crate::compiler::{Body, Compiler, Flavor, Kind, Place, Private};
+use crate::scope::{Hidden, THIS};
 use j8bytecode::{ArrayBoilerplate, Bytecode, Constant, CreateArrayLiteralFlags, CreateObjectLiteralFlags, LiteralFlags, LiteralValue, ObjectBoilerplate, Register, Runtime, TemplateObject, TypeOfLiteral};
 
 /// V8's `JSRegExp::Flags` bits (`CreateRegExpLiteral`'s flags operand)
@@ -62,6 +63,11 @@ enum Target<'a> {
     Name(&'a str, u32),
     Named { obj: Register, name: &'a str },
     Keyed { obj: Register, key: Register },
+    /// `obj.#x` (the private name's binding)
+    Private { obj: Register, name: &'a str },
+    /// `super.name` / `super[key]` with `this` in `receiver`
+    SuperNamed { receiver: Register, name: &'a str },
+    SuperKeyed { receiver: Register, key: Register },
 }
 
 impl<'a> Compiler<'a, '_> {
@@ -276,8 +282,48 @@ impl<'a> Compiler<'a, '_> {
             Expression::AssignmentExpression(a) => self.assignment(a)?,
             Expression::UpdateExpression(u) => self.update(u)?,
             Expression::CallExpression(c) => self.call(c)?,
-            Expression::StaticMemberExpression(m) if matches!(m.object, Expression::Super(_)) => return Err(self.unsupported(m.span, "super")),
-            Expression::ComputedMemberExpression(m) if matches!(m.object, Expression::Super(_)) => return Err(self.unsupported(m.span, "super")),
+            Expression::StaticMemberExpression(m) if matches!(m.object, Expression::Super(_)) => {
+                let receiver = self.temp();
+                self.load(THIS);
+                self.b().star(receiver);
+                self.load_home();
+                self.b().get_named_from_super(receiver, m.property.name.as_str());
+                self.release(receiver);
+            }
+            Expression::ComputedMemberExpression(m) if matches!(m.object, Expression::Super(_)) => {
+                let receiver = self.temp();
+                self.load(THIS);
+                self.b().star(receiver);
+                self.expr(&m.expression)?;
+                let key = self.temp();
+                self.b().star(key);
+                self.super_keyed_get(receiver, key);
+                self.release(receiver);
+            }
+            Expression::PrivateFieldExpression(p) => {
+                self.expr(&p.object)?;
+                self.optional(p.optional, p.span)?;
+                let obj = self.temp();
+                self.b().star(obj);
+                self.private_get(obj, Hidden::private(self.alloc, &p.field));
+                self.release(obj);
+            }
+            Expression::PrivateInExpression(p) => {
+                // A field is looked for by its private name, a method / accessor by the class brand
+                let name = Hidden::private(self.alloc, &p.left);
+                let key = self.temp();
+                match self.private_kind(name) {
+                    Some(Private::Field) | None => self.load(name),
+                    Some(Private::Method { statik } | Private::Accessor { statik, .. }) => {
+                        let brand = self.brand_of(name, statik);
+                        self.load(brand);
+                    }
+                }
+                self.b().star(key);
+                self.expr(&p.right)?;
+                self.b().test_in(key);
+                self.release(key);
+            }
             Expression::StaticMemberExpression(m) => self.static_member(m)?,
             Expression::ComputedMemberExpression(m) => self.computed_member(m)?,
             Expression::ChainExpression(c) => {
@@ -286,7 +332,15 @@ impl<'a> Compiler<'a, '_> {
                     ChainElement::CallExpression(call) => self.call(call)?,
                     ChainElement::StaticMemberExpression(m) => self.static_member(m)?,
                     ChainElement::ComputedMemberExpression(m) => self.computed_member(m)?,
-                    e => return Err(self.unsupported(e.span(), "optional chain element")),
+                    ChainElement::PrivateFieldExpression(p) => {
+                        self.expr(&p.object)?;
+                        self.optional(p.optional, p.span)?;
+                        let obj = self.temp();
+                        self.b().star(obj);
+                        self.private_get(obj, Hidden::private(self.alloc, &p.field));
+                        self.release(obj);
+                    }
+                    ChainElement::TSNonNullExpression(e) => return Err(self.unsupported(e.span, "optional chain element")),
                 }
                 let mut nullish = self.chains.pop().expect("this chain");
                 let mut end = Label::default();
@@ -479,6 +533,27 @@ impl<'a> Compiler<'a, '_> {
                 self.b().star(key);
                 Ok(Target::Keyed { obj, key })
             }
+            Some(MemberExpression::StaticMemberExpression(m)) => {
+                let receiver = self.temp();
+                self.load(THIS);
+                self.b().star(receiver);
+                Ok(Target::SuperNamed { receiver, name: m.property.name.as_str() })
+            }
+            Some(MemberExpression::ComputedMemberExpression(m)) => {
+                let receiver = self.temp();
+                self.load(THIS);
+                self.b().star(receiver);
+                self.expr(&m.expression)?;
+                let key = self.temp();
+                self.b().star(key);
+                Ok(Target::SuperKeyed { receiver, key })
+            }
+            Some(MemberExpression::PrivateFieldExpression(p)) => {
+                self.expr(&p.object)?;
+                let obj = self.temp();
+                self.b().star(obj);
+                Ok(Target::Private { obj, name: Hidden::private(self.alloc, &p.field) })
+            }
             _ => Err(self.unsupported(t.span(), "assignment target")),
         }
     }
@@ -491,6 +566,12 @@ impl<'a> Compiler<'a, '_> {
                 self.b().ldar(key);
                 self.b().get_keyed(obj);
             }
+            Target::Private { obj, name } => self.private_get(obj, name),
+            Target::SuperNamed { receiver, name } => {
+                self.load_home();
+                self.b().get_named_from_super(receiver, name);
+            }
+            Target::SuperKeyed { receiver, key } => self.super_keyed_get(receiver, key),
         }
     }
 
@@ -500,13 +581,42 @@ impl<'a> Compiler<'a, '_> {
             Target::Name(n, pos) => self.store_at(n, false, pos),
             Target::Named { obj, name } => self.b().set_named(obj, name, strict),
             Target::Keyed { obj, key } => self.b().set_keyed(obj, key, strict),
+            Target::Private { obj, name } => {
+                let v = self.temp();
+                self.b().star(v);
+                self.private_set(obj, name, v);
+                self.b().ldar(v);
+                self.release(v);
+            }
+            Target::SuperNamed { receiver, name } => {
+                let args = self.b().new_register_list(4);
+                self.b().star(args.at(3));
+                self.b().mov(receiver, args.first);
+                self.load_home();
+                self.b().star(args.at(1));
+                self.b().load_string(name);
+                self.b().star(args.at(2));
+                self.b().call_runtime(Runtime::StoreToSuper, args);
+                self.release(args.first);
+            }
+            Target::SuperKeyed { receiver, key } => {
+                let args = self.b().new_register_list(4);
+                self.b().star(args.at(3));
+                self.b().mov(receiver, args.first);
+                self.load_home();
+                self.b().star(args.at(1));
+                self.b().mov(key, args.at(2));
+                self.b().call_runtime(Runtime::StoreKeyedToSuper, args);
+                self.release(args.first);
+            }
         }
     }
 
     fn target_release(&mut self, t: &Target<'a>) {
         match *t {
             Target::Name(..) => {}
-            Target::Named { obj, .. } | Target::Keyed { obj, .. } => self.release(obj),
+            Target::Named { obj, .. } | Target::Keyed { obj, .. } | Target::Private { obj, .. } => self.release(obj),
+            Target::SuperNamed { receiver, .. } | Target::SuperKeyed { receiver, .. } => self.release(receiver),
         }
     }
 
@@ -593,6 +703,106 @@ impl<'a> Compiler<'a, '_> {
         }
     }
 
+    /// `super(…)` in a derived class constructor (V8's `VisitCallSuper`): constructs the parent with this
+    /// constructor's new.target, binds `this`, then brands and initializes the instance; `this` is the result
+    fn super_call(&mut self, c: &'a CallExpression<'a>) -> Result<(), Error> {
+        if !self.in_derived_constructor() {
+            return Err(self.unsupported(c.span, "super() outside a derived class constructor"));
+        }
+        let first = self.b().mark();
+        let (pair, new_target) = self.super_constructor();
+        let mut done = Label::default();
+        self.b().ldar(pair.first);
+        self.b().jump(Bytecode::JumpIfTrue, &mut done);
+        self.b().raw(Bytecode::ThrowIfNotSuperConstructor, &[i32::from(pair.at(1)).into()]);
+        let (args, spread) = self.argument_list(&c.arguments, None)?;
+        self.b().ldar(new_target);
+        if spread {
+            self.b().construct_with_spread(pair.at(1), args);
+        } else {
+            self.b().construct(pair.at(1), args);
+        }
+        self.b().star(pair.at(1));
+        self.b().bind(&mut done);
+        self.bind_this(pair.at(1));
+        self.b().release_to(first);
+        Ok(())
+    }
+
+    /// `super[key]` with `this` in `receiver` (V8's `LoadKeyedFromSuper`)
+    fn super_keyed_get(&mut self, receiver: Register, key: Register) {
+        let args = self.b().new_register_list(3);
+        self.b().mov(receiver, args.first);
+        self.load_home();
+        self.b().star(args.at(1));
+        self.b().mov(key, args.at(2));
+        self.b().call_runtime(Runtime::LoadKeyedFromSuper, args);
+        self.release(args.first);
+    }
+
+    /// `obj.#x` into acc: a field by its private symbol; a method / accessor after the class brand check
+    pub fn private_get(&mut self, obj: Register, name: &'a str) {
+        match self.private_kind(name) {
+            Some(Private::Field) | None => {
+                self.load(name);
+                self.b().get_keyed(obj);
+            }
+            Some(Private::Method { statik }) => {
+                self.brand_check(obj, name, statik);
+                self.load(name);
+            }
+            Some(Private::Accessor { statik, get, .. }) => {
+                self.brand_check(obj, name, statik);
+                if !get {
+                    self.throw_type_error(&alloc::format!("'{name}' was defined without a getter"));
+                    return;
+                }
+                let getter = self.temp();
+                self.load(name);
+                self.b().star(getter);
+                self.b().call_runtime(Runtime::LoadPrivateGetter, RegisterList { first: getter, count: 1 });
+                self.b().star(getter);
+                self.b().call_property(getter, RegisterList { first: obj, count: 1 });
+                self.release(getter);
+            }
+        }
+    }
+
+    /// `obj.#x = value` (acc clobbered)
+    fn private_set(&mut self, obj: Register, name: &'a str, value: Register) {
+        match self.private_kind(name) {
+            Some(Private::Field) | None => {
+                let key = self.temp();
+                self.load(name);
+                self.b().star(key);
+                self.b().ldar(value);
+                self.b().set_keyed(obj, key, true);
+                self.release(key);
+            }
+            Some(Private::Method { statik }) => {
+                self.brand_check(obj, name, statik);
+                self.throw_type_error(&alloc::format!("Private method '{name}' is not writable"));
+            }
+            Some(Private::Accessor { statik, set, .. }) => {
+                self.brand_check(obj, name, statik);
+                if !set {
+                    self.throw_type_error(&alloc::format!("'{name}' was defined without a setter"));
+                    return;
+                }
+                let setter = self.temp();
+                self.load(name);
+                self.b().star(setter);
+                self.b().call_runtime(Runtime::LoadPrivateSetter, RegisterList { first: setter, count: 1 });
+                self.b().star(setter);
+                let args = self.b().new_register_list(2);
+                self.b().mov(obj, args.first);
+                self.b().mov(value, args.at(1));
+                self.b().call_property(setter, args);
+                self.release(setter);
+            }
+        }
+    }
+
     fn update(&mut self, u: &'a UpdateExpression<'a>) -> Result<(), Error> {
         self.update_as(u, false)
     }
@@ -649,7 +859,7 @@ impl<'a> Compiler<'a, '_> {
     /// first resolves its callee with `ResolvePossiblyDirectEval`.
     fn call(&mut self, c: &'a CallExpression<'a>) -> Result<(), Error> {
         if let Expression::Super(_) = &c.callee {
-            return Err(self.unsupported(c.span, "super()"));
+            return self.super_call(c);
         }
         let callee = self.temp();
         let receiver = match &c.callee {
@@ -670,9 +880,34 @@ impl<'a> Compiler<'a, '_> {
                 self.b().get_keyed(r);
                 Some(r)
             }
-            Expression::StaticMemberExpression(m) => return Err(self.unsupported(m.span, "super")),
-            Expression::ComputedMemberExpression(m) => return Err(self.unsupported(m.span, "super")),
-            Expression::PrivateFieldExpression(m) => return Err(self.unsupported(m.span, "private names")),
+            // `super.m(…)`: the method found from the home object, called with `this`
+            Expression::StaticMemberExpression(m) => {
+                let r = self.temp();
+                self.load(THIS);
+                self.b().star(r);
+                self.load_home();
+                self.b().get_named_from_super(r, m.property.name.as_str());
+                Some(r)
+            }
+            Expression::ComputedMemberExpression(m) => {
+                let r = self.temp();
+                self.load(THIS);
+                self.b().star(r);
+                self.expr(&m.expression)?;
+                let key = self.temp();
+                self.b().star(key);
+                self.super_keyed_get(r, key);
+                self.release(key);
+                Some(r)
+            }
+            Expression::PrivateFieldExpression(p) => {
+                let r = self.temp();
+                self.expr(&p.object)?;
+                self.b().star(r);
+                self.optional(p.optional, p.span)?;
+                self.private_get(r, Hidden::private(self.alloc, &p.field));
+                Some(r)
+            }
             f => {
                 self.expr(f)?;
                 None
@@ -897,13 +1132,22 @@ impl<'a> Compiler<'a, '_> {
                 if o.properties.is_empty() {
                     self.require_object(value);
                 }
-                if o.rest.is_some() {
-                    return Err(self.unsupported(o.span, "a rest element in an object assignment pattern"));
-                }
-                for p in &o.properties {
+                // With a rest element the keys go after a copy of the source, ready for
+                // `CopyDataPropertiesWithExcludedPropertiesOnStack(source, ...keys)`
+                let n = u32::try_from(o.properties.len()).map_err(|_| self.unsupported(o.span, "too many properties"))?;
+                let list = o.rest.as_ref().map(|_| {
+                    let l = self.b().new_register_list(n + 1);
+                    self.b().mov(value, l.first);
+                    l
+                });
+                for (i, p) in (0u32..).zip(&o.properties) {
                     match p {
                         AssignmentTargetProperty::AssignmentTargetPropertyIdentifier(id) => {
                             let name = id.binding.name.as_str();
+                            if let Some(l) = list {
+                                self.b().load_string(name);
+                                self.b().star(l.at(i + 1));
+                            }
                             self.b().get_named(value, name);
                             let v = self.temp();
                             self.b().star(v);
@@ -916,16 +1160,27 @@ impl<'a> Compiler<'a, '_> {
                             self.release(v);
                         }
                         AssignmentTargetProperty::AssignmentTargetPropertyProperty(pp) => {
-                            let k = self.temp();
+                            let k = list.map_or_else(|| self.temp(), |l| l.at(i + 1));
                             self.property_key_into(&pp.name, pp.computed, k)?;
                             self.b().ldar(k);
                             self.b().get_keyed(value);
                             let v = self.temp();
                             self.b().star(v);
                             self.assign_maybe_default(&pp.binding, v)?;
-                            self.release(k);
+                            if list.is_none() {
+                                self.release(k);
+                            } else {
+                                self.release(v);
+                            }
                         }
                     }
+                }
+                if let (Some(r), Some(l)) = (&o.rest, list) {
+                    self.b().call_runtime(Runtime::InlineCopyDataPropertiesWithExcludedPropertiesOnStack, l);
+                    let t = self.temp();
+                    self.b().star(t);
+                    self.assign_target(&r.target, t)?;
+                    self.release(l.first);
                 }
             }
             t => {
@@ -1034,6 +1289,16 @@ impl<'a> Compiler<'a, '_> {
     fn delete(&mut self, e: &'a Expression<'a>) -> Result<(), Error> {
         let strict = self.strict_here();
         match e {
+            // `delete super.x` is a ReferenceError (after `this` is checked and the key evaluated)
+            Expression::StaticMemberExpression(m) if matches!(m.object, Expression::Super(_)) => {
+                self.load(THIS);
+                self.b().call_runtime(Runtime::ThrowUnsupportedSuperError, RegisterList::EMPTY);
+            }
+            Expression::ComputedMemberExpression(m) if matches!(m.object, Expression::Super(_)) => {
+                self.load(THIS);
+                self.expr(&m.expression)?;
+                self.b().call_runtime(Runtime::ThrowUnsupportedSuperError, RegisterList::EMPTY);
+            }
             Expression::StaticMemberExpression(m) if !matches!(m.object, Expression::Super(_)) => {
                 self.expr(&m.object)?;
                 let obj = self.temp();
@@ -1072,6 +1337,21 @@ impl<'a> Compiler<'a, '_> {
     /// the first computed key or spread (values known at compile time filled in); the rest are defined in order after
     /// creating it.
     fn object(&mut self, o: &'a ObjectExpression<'a>) -> Result<(), Error> {
+        // Methods using `super` need the literal as their home object: it goes into a scope of its own
+        let text = self.source_text();
+        let uses_super = o.properties.iter().any(|p| matches!(p, ObjectPropertyKind::ObjectProperty(p) if (p.method || p.kind != PropertyKind_::Init) && text[p.span.start as usize..p.span.end as usize].contains("super")));
+        if !uses_super {
+            return self.object_literal(o, false);
+        }
+        let decls = crate::scope::Decls::home_object(o.span);
+        for d in &decls.0 {
+            self.captured_insert(d.key);
+        }
+        self.scoped_block(&decls, |c| c.object_literal(o, true))
+    }
+
+    #[expect(clippy::too_many_lines, reason = "one case per kind of property, as V8's VisitObjectLiteral")]
+    fn object_literal(&mut self, o: &'a ObjectExpression<'a>, home: bool) -> Result<(), Error> {
         if o.properties.is_empty() {
             self.b().plain(Bytecode::CreateEmptyObjectLiteral);
             return Ok(());
@@ -1100,6 +1380,9 @@ impl<'a> Compiler<'a, '_> {
             self.b().create_object_literal(k, flags);
         }
         self.b().star(obj);
+        if home {
+            self.store(Hidden::HOME, true);
+        }
         for (i, p) in o.properties.iter().enumerate() {
             let p = match p {
                 ObjectPropertyKind::ObjectProperty(p) => p,
@@ -1136,6 +1419,9 @@ impl<'a> Compiler<'a, '_> {
                     MethodDefinitionKind::Set => Kind::Setter,
                     _ => Kind::Method,
                 };
+                if home {
+                    self.next_home = Some(Hidden::HOME);
+                }
                 let n = self.method(fname, f, kind)?;
                 if accessor {
                     // DefineAccessorPropertyUnchecked(object, name, getter, setter, attributes)

@@ -369,7 +369,7 @@ napi! {
             return Err(Status::InvalidArg);
         }
         // 每个终结器一个私有名：一个对象可以挂好几个
-        let key = a.mc.alloc(SymbolData { description: Some(Box::from("napi finalizer")) });
+        let key = a.mc.alloc(SymbolData { description: Some(Box::from("napi finalizer")), private: false });
         Env::set_private(a, o, key, Env::host(a, Attached(env.finalizer(finalize_cb, finalize_data, finalize_hint))).into());
         Ffi::put_opt(result, Box::into_raw(Box::new(Reference { value: a.global(o.into()), count: 0 })));
         Ok(())

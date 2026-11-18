@@ -120,21 +120,22 @@ pub struct TemplateObject {
     pub raw: Vec<Box<str>>,
 }
 
-/// A class's members known at compile time (V8's `ClassBoilerplate`): constant-named methods and accessors on the
-/// prototype and on the constructor; computed ones are defined at run time.
+/// A class's public members (V8's `ClassBoilerplate`), in order. `CallRuntime [DefineClass]` gets the boilerplate, the
+/// constructor and the superclass (the hole without `extends`), then for each member its computed key (when it has
+/// one) and its function (methods and accessors).
 #[derive(Clone, Debug, Default)]
 pub struct ClassBoilerplate {
-    pub instance: Vec<ClassMember>,
-    pub statics: Vec<ClassMember>,
+    pub members: Vec<ClassMember>,
 }
 
-/// A method (`Function` constant index) or accessor of a class.
+/// One public member of a class.
 #[derive(Clone, Debug)]
 pub struct ClassMember {
-    pub name: Box<str>,
+    /// The key; `None` when it is computed (its value is the next argument)
+    pub name: Option<Box<str>>,
     pub kind: MemberKind,
-    /// Constant pool index of the function
-    pub function: u32,
+    /// On the constructor rather than the prototype
+    pub statik: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -142,6 +143,8 @@ pub enum MemberKind {
     Method,
     Getter,
     Setter,
+    /// A field: only a computed key is passed (fields are defined by the initializer functions)
+    Field,
 }
 
 /// A handler table entry (V8's `HandlerTable` for bytecode): a `try` range, where to go, the register the context

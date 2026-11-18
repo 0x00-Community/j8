@@ -782,6 +782,9 @@ impl<'gc> Agent<'gc, '_> {
 
     /// `key in target`, with an arbitrary value as the key.
     pub fn has_keyed(&mut self, target: Value<'gc>, key: Value<'gc>) -> Result<bool, Error> {
+        if let Some(k) = Self::private_key(key) {
+            return self.private_has(target, k);
+        }
         let Some(o) = target.as_object() else {
             let what = match key.kind() {
                 ValueKind::Symbol(_) => String::from("a symbol"),
@@ -844,6 +847,9 @@ impl<'gc> Agent<'gc, '_> {
 
     /// Define a property, with an arbitrary value as the key (computed key).
     pub fn define_keyed(&mut self, o: JsObject<'gc>, key: Value<'gc>, prop: Property<'gc>) -> Result<(), Error> {
+        if let Some(k) = Self::private_key(key) {
+            return self.private_define(o.into(), k, prop);
+        }
         match self.to_property_key(key)? {
             PropertyKey::Symbol(k) => self.define_key(o, Key::Sym(k), prop),
             PropertyKey::String(k) => self.define_key(o, Key::Str(&k), prop),
@@ -862,6 +868,9 @@ impl<'gc> Agent<'gc, '_> {
     /// `target[key]`.
     pub fn get_keyed(&mut self, target: Value<'gc>, key: Value<'gc>) -> Result<Value<'gc>, Error> {
         if let ValueKind::Symbol(k) = key.kind() {
+            if k.private {
+                return self.private_get(target, k);
+            }
             return self.get_symbol(target, k, target);
         }
         if let (ValueKind::Object(o), ValueKind::Number(x)) = (target.kind(), key.kind())
@@ -957,6 +966,9 @@ impl<'gc> Agent<'gc, '_> {
     }
 
     pub fn put_keyed(&mut self, target: Value<'gc>, key: Value<'gc>, value: Value<'gc>, strict: bool) -> Result<(), Error> {
+        if let Some(k) = Self::private_key(key) {
+            return self.private_set(target, k, value);
+        }
         if strict { self.set_keyed(target, key, value) } else { self.try_set_keyed(target, key, value).map(drop) }
     }
 

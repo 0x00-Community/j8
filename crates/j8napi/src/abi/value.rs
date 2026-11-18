@@ -254,7 +254,7 @@ napi! {
     fn napi_create_symbol(env, description: Handle, result: *mut Handle) {
         let a = env.agent()?;
         let description = if description.0.is_none() { None } else { Some(Box::<str>::from(&**env.string(description)?)) };
-        env.out(result, Value::Symbol(a.mc.alloc(SymbolData { description })))
+        env.out(result, Value::Symbol(a.mc.alloc(SymbolData { description, private: false })))
     }
 
     fn node_api_symbol_for(env, utf8description: *const c_char, length: usize, result: *mut Handle) {

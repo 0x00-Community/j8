@@ -13,7 +13,7 @@ impl Iters {
             ValueKind::Undefined => None,
             d => Some((&**a.to_string(Value::from(d))?).into()),
         };
-        Ok(Value::Symbol(a.mc.alloc(SymbolData { description })))
+        Ok(Value::Symbol(a.mc.alloc(SymbolData { description, private: false })))
     }
 
     fn this_symbol<'gc>(a: &Agent<'gc, '_>, this: Value<'gc>) -> Result<j8framework::JsSymbol<'gc>, Error> {

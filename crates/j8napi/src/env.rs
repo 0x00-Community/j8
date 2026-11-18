@@ -348,7 +348,7 @@ impl Env {
     /// # Errors
     /// 注册函数抛的异常
     pub fn open<'gc>(a: &mut Agent<'gc, '_>, register: crate::RegisterFn) -> Result<Value<'gc>, Error> {
-        let key = |a: &Agent<'gc, '_>, d: &str| -> Global { a.global(Value::Symbol(a.mc.alloc(SymbolData { description: Some(Box::from(d)) }))) };
+        let key = |a: &Agent<'gc, '_>, d: &str| -> Global { a.global(Value::Symbol(a.mc.alloc(SymbolData { description: Some(Box::from(d)), private: false }))) };
         let env = Box::new(Self {
             agent: Cell::new(None),
             handles: RefCell::default(),
@@ -366,7 +366,7 @@ impl Env {
         let ptr = NonNull::from(&*env);
         let holder = Self::host(a, Holder(env));
         let global = a.realm.global;
-        let holder_key = a.mc.alloc(SymbolData { description: Some(Box::from("napi env")) });
+        let holder_key = a.mc.alloc(SymbolData { description: Some(Box::from("napi env")), private: false });
         Self::set_private(a, global, holder_key, holder.into());
         // SAFETY: 刚放进宿主对象的 Box，随 global 对象一起活
         let env = unsafe { ptr.as_ref() };

@@ -465,7 +465,7 @@ impl Texts {
         if let Some(&(_, s)) = registry.get().iter().find(|(k, _)| ***k == **key) {
             return Ok(s.into());
         }
-        let fresh: JsSymbol<'gc> = a.mc.alloc(SymbolData { description: Some((&**key).into()) });
+        let fresh: JsSymbol<'gc> = a.mc.alloc(SymbolData { description: Some((&**key).into()), private: false });
         // Another thread may have registered the key meanwhile: then its symbol wins
         let s = registry.update_with(a.mc, |entries| {
             let mut entries = entries.clone();

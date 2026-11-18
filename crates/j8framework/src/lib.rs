@@ -25,6 +25,7 @@ extern crate self as j8framework;
 mod agent;
 mod backing;
 mod bigint;
+mod class;
 mod engine;
 mod event_loop;
 mod error;
