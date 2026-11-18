@@ -6,6 +6,8 @@
 //! accumulator carry them as [`Value::context`] words between `Create*Context` / `PushContext` / `PopContext`.
 //! Exceptions look up the bytecode's handler table. An `Executor` serves only one isolate: it holds the loaded
 //! functions, and closures on the heap point back to them by [`FuncId`].
+#![cfg_attr(tail_calls, feature(explicit_tail_calls))]
+#![cfg_attr(tail_calls, expect(incomplete_features, reason = "explicit tail calls are what threaded dispatch needs"))]
 extern crate alloc;
 
 use alloc::boxed::Box;
@@ -21,17 +23,23 @@ use j8lockfree::SegVec;
 mod cache;
 mod ic;
 mod module;
+mod threaded;
 
 pub use cache::CodeCache;
 
 /// Call depth limit (including JS re-entered from host functions); exceeding it throws RangeError
 const STACK_LIMIT: usize = 10_000;
 
+/// V8's `JSGeneratorObject::kRethrow`: an async generator's yielded value was rejected
+const RESUME_RETHROW: f64 = 3.0;
+
 /// Instructions between checks of the budget / termination request
 const CHECK_STEPS: usize = 1024;
 
 /// One instruction of a loaded function, decoded once at load time; jump targets are instruction indices.
 struct Insn {
+    /// Runs it (threaded code)
+    handler: threaded::Handler,
     bytecode: Bytecode,
     operands: Operands,
     /// Byte offset of the bytecode byte (after any prefix): jump tables count from here, and it lies inside the handler
@@ -52,6 +60,8 @@ struct Loaded {
     ics: Box<[ic::Ic]>,
     /// By feedback slot: where a global name was last found
     globals: Box<[ic::GlobalIc]>,
+    /// By constant index: for object boilerplates, one cache per property (the shape transitions building the literal)
+    literals: Box<[Box<[ic::Ic]>]>,
     /// By constant index: the context shapes of `Scope` constants
     shapes: Box<[Option<Arc<ContextShape>>]>,
     /// The function context's shape (when the function has one) / the script context's
@@ -88,6 +98,10 @@ impl Loaded {
             Constant::Scope(s) => Some(Arc::new(Self::shape(s))),
             _ => None,
         }).collect();
+        let literals = bc.constants.iter().map(|c| match c {
+            Constant::Object(b) => b.properties.iter().map(|_| ic::Ic::default()).collect(),
+            _ => Box::default(),
+        }).collect();
         let scope = func.scope.as_ref().map(|s| Arc::new(Self::shape(s)));
         let extension = func.scope.as_ref().is_some_and(|s| s.has_extension);
         let k = func.kind;
@@ -104,6 +118,7 @@ impl Loaded {
             insns,
             ics,
             globals,
+            literals,
             shapes,
             scope,
             extension,
@@ -150,8 +165,10 @@ impl Loaded {
                 } else {
                     d.bytecode
                 };
-                Insn { bytecode, operands, start: u32::try_from(d.start()).unwrap_or(u32::MAX), target }
+                Insn { handler: Insn::handler(bytecode), bytecode, operands, start: u32::try_from(d.start()).unwrap_or(u32::MAX), target }
             })
+            // A sentinel: code never runs past its end
+            .chain(core::iter::once(Insn { handler: Insn::handler(Bytecode::Illegal), bytecode: Bytecode::Illegal, operands: Operands::default(), start: u32::try_from(bc.code.len()).unwrap_or(u32::MAX), target: 0 }))
             .collect()
     }
 
@@ -1057,22 +1074,21 @@ impl Executor {
         r
     }
 
-    /// Main loop: fetch, run, repeat. `None` when the budget runs out (the state is intact).
+    /// Main loop: runs each frame's threaded code until the frame changes. `None` when the budget runs out (the state
+    /// is intact).
     fn run<'gc>(&self, a: &mut Agent<'gc, '_>, st: &mut State<'gc>, depth: usize, budget: &mut Budget<'_>) -> Result<Option<Outcome<'gc>>, Error> {
-        'frame: loop {
+        loop {
             if budget.spent() {
                 return Ok(None);
             }
             let loaded = self.function(st.f.func);
-            loop {
-                let d = &loaded.insns[st.f.pc];
-                st.f.insn = st.f.pc;
-                st.f.pc += 1;
-                match self.step(a, st, loaded, d, depth + st.frames.len(), budget)? {
-                    Flow::Next => {}
-                    Flow::Frame => continue 'frame,
-                    Flow::Done(o) => return Ok(Some(o)),
-                }
+            let mut cx = threaded::Cx { exe: self, a, st, loaded, budget, depth };
+            match Self::threaded(&mut cx) {
+                threaded::Exit::Frame => {}
+                threaded::Exit::Done(o) => return Ok(Some(o)),
+                threaded::Exit::Throw(e) => return Err(e),
+                #[cfg(not(tail_calls))]
+                threaded::Exit::Next(..) => unreachable!("the loop in `threaded` takes these"),
             }
         }
     }
@@ -1159,7 +1175,6 @@ impl Executor {
     }
 
     #[expect(clippy::too_many_lines, reason = "one arm per bytecode")]
-    #[inline(always)]
     fn step<'gc>(&self, a: &mut Agent<'gc, '_>, st: &mut State<'gc>, loaded: &Loaded, d: &Insn, level: usize, budget: &mut Budget<'_>) -> Result<Flow<'gc>, Error> {
         let o = &d.operands;
         let State { regs, f, acc, message, .. } = st;
@@ -1315,7 +1330,12 @@ impl Executor {
             B::DefineNamedOwnProperty => {
                 let name = Self::name_at(loaded, o[1]);
                 if let Some(ob) = r!(0).as_object() {
-                    a.define(ob, name, Property::data(*acc))?;
+                    let ic = &loaded.ics[usize::try_from(o[2]).unwrap_or(0)];
+                    if !ic.set(a.mc, ob, *acc, false) {
+                        let before = ic::Before::from(ob);
+                        a.define(ob, name, Property::data(*acc))?;
+                        ic.fill_set(ob, name, before, false);
+                    }
                 }
             }
             B::GetKeyedProperty => *acc = a.get_keyed(r!(0), *acc)?,
@@ -1496,9 +1516,14 @@ impl Executor {
             B::CreateObjectLiteral => {
                 let Some(Constant::Object(b)) = loaded.func.bytecode.constants.get(usize::try_from(o[0]).unwrap_or(0)) else { unreachable!("an object boilerplate") };
                 let ob = a.object_with(b.properties.len());
-                for (k, v) in &b.properties {
+                let ics = &loaded.literals[usize::try_from(o[0]).unwrap_or(0)];
+                for ((k, v), ic) in b.properties.iter().zip(ics) {
                     let v = v.as_ref().map_or(Value::Undefined, |v| Self::literal(a, v));
-                    ob.borrow_mut(a.mc).define(k, Property::data(v));
+                    if !ic.set(a.mc, ob, v, false) {
+                        let before = ic::Before::from(ob);
+                        ob.borrow_mut(a.mc).define(k, Property::data(v));
+                        ic.fill_set(ob, k, before, false);
+                    }
                 }
                 *acc = ob.into();
             }
