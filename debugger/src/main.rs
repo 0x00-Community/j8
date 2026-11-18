@@ -5,7 +5,7 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
-use code::{Check, Compiled};
+use code::Compiled;
 
 /// j8 debugging tool
 #[derive(Parser)]
@@ -17,17 +17,14 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// JS ⇒ bytecode in the binary form
+    /// JS ⇒ bytecode, listed like V8's --print-bytecode
     Compile(Compiled),
-    /// Read the binary form back and write it re-encoded (fails on a wrong magic / instruction set / field)
-    Check(Check),
 }
 
 impl Command {
     fn run(&self) -> Result<(), String> {
         match self {
             Command::Compile(c) => c.run(),
-            Command::Check(c) => c.run(),
         }
     }
 }

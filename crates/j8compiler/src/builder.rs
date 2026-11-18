@@ -828,7 +828,7 @@ impl Builder {
 
     /// A new handler table entry (V8's `HandlerTableBuilder::NewHandlerEntry`)
     pub fn new_handler(&mut self, context: Register, prediction: CatchPrediction) -> usize {
-        self.handlers.push(HandlerEntry { start: 0, end: 0, handler: 0, context: i32::from(context), prediction });
+        self.handlers.push(HandlerEntry { start: 0, end: 0, handler: 0, context: context.0, prediction });
         self.handlers.len() - 1
     }
 

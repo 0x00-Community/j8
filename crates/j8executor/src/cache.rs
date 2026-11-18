@@ -1,13 +1,12 @@
 //! [`CodeCache`]: bytecode shared by executors. Many isolates run the same preludes and import the same module files;
-//! with a cache, each such source is parsed and compiled once, and every executor decodes its own copy. Only what is
+//! with a cache, each such source is parsed and compiled once, and every executor loads its own copy. Only what is
 //! meant to be shared goes in (scripts run as [`ScriptKind::Shared`](j8framework::ScriptKind::Shared), and ES
 //! modules), so one-off scripts don't pile up.
 //!
 //! No source text is kept: an entry is found by file name, length and a 128-bit hash of the text (two randomly keyed
-//! SipHash, so collisions can't be crafted), and holds the bytecode in its binary form (`j8bytecode::Binary`).
+//! SipHash, so collisions can't be crafted), and holds the compiled module, cloned out for each executor.
 use alloc::boxed::Box;
 use alloc::sync::Arc;
-use alloc::vec::Vec;
 use core::hash::BuildHasher;
 use std::hash::RandomState;
 
@@ -24,17 +23,17 @@ struct Key {
     hash: [u64; 2],
 }
 
-/// One compiled source: the bytecode's binary form, plus `T` (the module info for an ES module)
+/// One compiled source: the module, plus `T` (the module info for an ES module)
 struct Entry<T> {
     key: Key,
-    code: Box<[u8]>,
+    code: Module,
     info: T,
 }
 
 impl<T> Entry<T> {
     /// A copy of the bytecode
     fn module(&self) -> Module {
-        Module::try_from(&*self.code).expect("the cache only holds bytecode it encoded itself")
+        self.code.clone()
     }
 }
 
@@ -60,7 +59,7 @@ impl CodeCache {
             return Ok(e.module());
         }
         let module = Module::compile(src, j8framework::CodeKind::Script)?;
-        self.scripts.push(Entry { key, code: Vec::from(&module).into(), info: () });
+        self.scripts.push(Entry { key, code: module.clone(), info: () });
         Ok(module)
     }
 
@@ -72,7 +71,7 @@ impl CodeCache {
         }
         let (module, info) = Module::compile_module(src)?;
         let info = Arc::new(info);
-        self.modules.push(Entry { key, code: Vec::from(&module).into(), info: Arc::clone(&info) });
+        self.modules.push(Entry { key, code: module.clone(), info: Arc::clone(&info) });
         Ok((module, info))
     }
 

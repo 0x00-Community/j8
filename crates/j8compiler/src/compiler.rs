@@ -7,7 +7,7 @@
 use std::collections::HashSet;
 
 use oxc_allocator::Allocator;
-use oxc_ast::ast::{Directive, BindingIdentifier, BindingPattern, BlockStatement, Class, Expression, MethodDefinitionKind, PropertyKey, ForStatementInit, FormalParameters, Function as AstFunction, ForInStatement, ForOfStatement, ForStatementLeft, Program, Statement, SwitchStatement, TryStatement, VariableDeclaration, VariableDeclarationKind};
+use oxc_ast::ast::{Directive, BindingIdentifier, BindingPattern, CatchClause, BlockStatement, Class, Expression, MethodDefinitionKind, PropertyKey, ForStatementInit, FormalParameters, Function as AstFunction, ForInStatement, ForOfStatement, ForStatementLeft, Program, Statement, SwitchStatement, TryStatement, VariableDeclaration, VariableDeclarationKind};
 use oxc_parser::{ParseOptions, Parser};
 use oxc_semantic::SemanticBuilder;
 use oxc_span::{GetSpan, SourceType, Span};
@@ -1297,7 +1297,7 @@ impl<'a> Compiler<'a, '_> {
 
     /// `body` in a `try` region whose handler runs `catch` with the exception in acc (V8's `TryCatchBuilder`: the
     /// context is saved in a register first; the handler table restores it)
-    pub fn try_catch(&mut self, prediction: j8bytecode::CatchPrediction, body: impl FnOnce(&mut Self) -> Result<(), Error>, catch: impl FnOnce(&mut Self) -> Result<(), Error>) -> Result<(), Error> {
+    pub fn try_catch(&mut self, prediction: j8bytecode::CatchPrediction, body: impl FnOnce(&mut Self) -> Result<(), Error>, catch: impl FnOnce(&mut Self, Register) -> Result<(), Error>) -> Result<(), Error> {
         let ctx = self.temp();
         self.b().mov(Register::current_context(), ctx);
         let h = self.b().new_handler(ctx, prediction);
@@ -1309,7 +1309,7 @@ impl<'a> Compiler<'a, '_> {
         let mut done = Label::default();
         self.b().jump(Bytecode::Jump, &mut done);
         self.b().handler_target(h);
-        catch(self)?;
+        catch(self, ctx)?;
         self.b().bind(&mut done);
         self.release(ctx);
         Ok(())
@@ -1318,7 +1318,7 @@ impl<'a> Compiler<'a, '_> {
     /// Runs `f`; if it throws, closes iterator `iter` first (calling `return` only if not done, ignoring what it does)
     /// and then rethrows.
     pub fn closing_on_throw(&mut self, iter: Register, f: impl FnOnce(&mut Self) -> Result<(), Error>) -> Result<(), Error> {
-        self.try_catch(j8bytecode::CatchPrediction::Uncaught, f, |c| {
+        self.try_catch(j8bytecode::CatchPrediction::Uncaught, f, |c, _| {
             let e = c.temp();
             c.b().star(e);
             c.iterator_close_quiet(iter);
@@ -1448,7 +1448,7 @@ impl<'a> Compiler<'a, '_> {
             c.release(m);
             c.b().bind(&mut skip);
             Ok(())
-        }, |_| Ok(()));
+        }, |_, _| Ok(()));
         self.b().bind(&mut end);
     }
 
@@ -2055,20 +2055,7 @@ impl<'a> Compiler<'a, '_> {
             (token, value, h)
         });
         match &t.handler {
-            Some(c) => self.try_catch(j8bytecode::CatchPrediction::Caught, |s| s.block(&t.block), |s| {
-                s.scoped(&Decls::catch_param(c), |s| {
-                    match &c.param {
-                        Some(p) => {
-                            let e = s.temp();
-                            s.b().star(e);
-                            s.bind_pattern(&p.pattern, e, true)?;
-                            s.release(e);
-                        }
-                        None => {}
-                    }
-                    s.block(&c.body)
-                })
-            })?,
+            Some(c) => self.try_catch(j8bytecode::CatchPrediction::Caught, |s| s.block(&t.block), |s, ctx| s.catch_clause(c, ctx))?,
             None => self.block(&t.block)?,
         }
         let Some((token, value, h)) = fin else { return Ok(()) };
@@ -2101,6 +2088,53 @@ impl<'a> Compiler<'a, '_> {
             self.on_completion(token, COMPLETION_ROUTE + n, |s| s.exit(r.span, r.label, r.cont))?;
         }
         self.release(token);
+        Ok(())
+    }
+
+    /// A `catch` clause, entered with the exception in acc and the context saved in `ctx` (V8's
+    /// `VisitTryCatchStatement`): the catch variable always lives in a catch context (a pattern binds `.catch` there and
+    /// is destructured in a block scope), and the pending message is cleared
+    fn catch_clause(&mut self, c: &'a CatchClause<'a>, ctx: Register) -> Result<(), Error> {
+        let Some(p) = &c.param else {
+            self.b().load_the_hole();
+            self.b().plain(Bytecode::SetPendingMessage);
+            self.b().ldar(ctx);
+            return self.block(&c.body);
+        };
+        let name = match &p.pattern {
+            BindingPattern::BindingIdentifier(id) => id.name.as_str(),
+            _ => Hidden::CATCH,
+        };
+        let func = self.frames.len() - 1;
+        let mark = self.b().mark();
+        let info = ScopeInfo { scope_type: Some(ScopeType::CatchScope), variables: alloc::vec![ContextVariable { name: name.into(), mode: VariableMode::Var }], has_extension: false };
+        let k = self.constant(Constant::Scope(info));
+        let e = self.temp();
+        self.b().star(e);
+        self.b().create_catch_context(e, k);
+        self.release(e);
+        self.b().star(ctx);
+        self.b().load_the_hole();
+        self.b().plain(Bytecode::SetPendingMessage);
+        self.b().ldar(ctx);
+        let saved = self.temp();
+        self.b().push_context(saved);
+        self.frame().contexts.push(saved);
+        let names = alloc::vec![Bound { name, binding: Binding::Context(Context::MIN_SLOTS), constant: false, ready: None, self_name: false }];
+        self.levels.push(Level { func, names, context: Some(saved), scope: Some(k), dynamic: false, mark, switch: false, cells: false });
+        if matches!(p.pattern, BindingPattern::BindingIdentifier(_)) {
+            self.block(&c.body)?;
+        } else {
+            self.scoped(&Decls::catch_param(c), |s| {
+                s.load_at(Hidden::CATCH, c.span.start);
+                let v = s.temp();
+                s.b().star(v);
+                s.bind_pattern(&p.pattern, v, true)?;
+                s.release(v);
+                s.block(&c.body)
+            })?;
+        }
+        self.leave();
         Ok(())
     }
 

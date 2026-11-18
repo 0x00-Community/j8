@@ -487,6 +487,9 @@ impl<'a> Decls<'a> {
 pub(crate) struct Hidden;
 
 impl Hidden {
+    /// The catch variable of a `catch` clause with a pattern (V8's `.catch`)
+    pub const CATCH: &str = ".catch";
+
     /// The object where a sloppy function containing a direct eval keeps eval-declared `var`s (treated as a `with`
     /// object).
     pub fn eval_vars<'a>(alloc: &'a Allocator, params: &FormalParameters<'_>) -> &'a str {

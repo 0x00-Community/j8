@@ -133,6 +133,9 @@ pub struct Realm<'gc> {
     /// Template objects of tagged templates: cached by (function index, call site), so the same site always gets the
     /// same one
     pub templates: Cow<'gc, alloc::collections::BTreeMap<(u32, u32), JsObject<'gc>>>,
+    /// The script contexts of the scripts run so far (V8's `ScriptContextTable`): their top-level `let` / `const` /
+    /// `class`, which other scripts reach by name through `LdaGlobal` / `StaGlobal`
+    pub script_contexts: Cow<'gc, Vec<crate::JsEnv<'gc>>>,
     /// Compiled regexes shared by (source, flags) (compiled ones are immutable): a direct-mapped cache, one atomic slot
     /// per bucket ([`RegExpCompiled::bucket`]); a miss overwrites the bucket
     pub regexp_cache: [Slot<'gc, RegExpCompiled<'gc>>; RegExpCompiled::BUCKETS],
@@ -256,6 +259,7 @@ impl<'gc> Realm<'gc> {
             modules: Cow::new(mc, alloc::vec::Vec::new()),
             random_state: AtomicU64::new(0),
             templates: Cow::new(mc, alloc::collections::BTreeMap::new()),
+            script_contexts: Cow::new(mc, Vec::new()),
             global: Self::wide(derived(object_proto)),
             object_proto,
             function_proto,

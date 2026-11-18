@@ -59,17 +59,73 @@ pub type NativeFn = for<'gc, 'x> fn(&mut Agent<'gc, 'x>, Value<'gc>, &[Value<'gc
 pub struct Env<'gc> {
     slots: Box<[ValueCell<'gc>]>,
     pub parent: Option<JsEnv<'gc>>,
+    /// What its slots are called and what kind of context it is (V8's `ScopeInfo`): lookups by name (`with`, eval)
+    /// and the script context table read it
+    #[collect(require_static)]
+    pub shape: Option<alloc::sync::Arc<ContextShape>>,
+    /// A `with` context's object, or the object a sloppy direct eval declares its `var`s in (V8's context extension)
+    pub extension: Option<JsObject<'gc>>,
+}
+
+/// A context's kind and slot names (the part of V8's `ScopeInfo` lookups by name need).
+#[derive(Debug, Default)]
+pub struct ContextShape {
+    pub kind: ContextKind,
+    /// Slot `i` of the context (after its fixed slots) is called `names[i]`
+    pub names: Box<[ContextName]>,
+}
+
+/// One context slot's name and binding kind.
+#[derive(Debug)]
+pub struct ContextName {
+    pub name: SmallStr,
+    pub constant: bool,
+    pub lexical: bool,
+}
+
+/// V8's `ScopeType`, as far as contexts go.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ContextKind {
+    #[default]
+    Function,
+    Block,
+    Catch,
+    With,
+    Script,
+    Eval,
+    Module,
+}
+
+impl ContextShape {
+    /// The slot named `name`, if any
+    pub fn slot(&self, name: &str) -> Option<(usize, &ContextName)> {
+        self.names.iter().enumerate().find(|(_, n)| *n.name == *name)
+    }
 }
 
 impl<'gc> Env<'gc> {
     /// An environment holding `slots`
     pub fn new(slots: Vec<Value<'gc>>, parent: Option<JsEnv<'gc>>) -> Self {
-        Self { slots: slots.into_iter().map(ValueCell::new).collect(), parent }
+        Self { slots: slots.into_iter().map(ValueCell::new).collect(), parent, shape: None, extension: None }
     }
 
     /// An environment of `n` slots, all `undefined`
     pub fn with_len(n: usize, parent: Option<JsEnv<'gc>>) -> Self {
-        Self { slots: (0..n).map(|_| ValueCell::new(Value::Undefined)).collect(), parent }
+        Self { slots: (0..n).map(|_| ValueCell::new(Value::Undefined)).collect(), parent, shape: None, extension: None }
+    }
+
+    /// A context of `n` slots holding `init`, with its shape and extension
+    pub fn context(n: usize, init: Value<'gc>, parent: Option<JsEnv<'gc>>, shape: Option<alloc::sync::Arc<ContextShape>>, extension: Option<JsObject<'gc>>) -> Self {
+        Self { slots: (0..n).map(|_| ValueCell::new(init)).collect(), parent, shape, extension }
+    }
+
+    /// How many slots it has
+    pub fn len(&self) -> usize {
+        self.slots.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.slots.is_empty()
     }
 
     pub fn alloc(self, mc: &Mutation<'gc>) -> JsEnv<'gc> {

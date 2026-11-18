@@ -204,6 +204,9 @@ unsafe impl Trace for Value<'_> {
         if let Some(a) = self.as_accessor() {
             return t.edge(a);
         }
+        if let Some(c) = self.as_context() {
+            return t.edge(c);
+        }
         match self.kind() {
             ValueKind::String(s) => t.edge(s),
             ValueKind::Symbol(s) => t.edge(s),
@@ -218,6 +221,11 @@ unsafe impl Trace for Value<'_> {
         if let Some(mut a) = self.as_accessor() {
             t.relocate(&mut a);
             *self = Value::accessor(a);
+            return;
+        }
+        if let Some(mut c) = self.as_context() {
+            t.relocate(&mut c);
+            *self = Value::context(c);
             return;
         }
         *self = match self.kind() {
@@ -264,6 +272,9 @@ impl<'gc> Value<'gc> {
         if let Some(a) = self.as_accessor() {
             return Some(erase(a));
         }
+        if let Some(c) = self.as_context() {
+            return Some(erase(c));
+        }
         match self.kind() {
             ValueKind::String(s) => Some(erase(s)),
             ValueKind::Symbol(s) => Some(erase(s)),
@@ -284,6 +295,21 @@ impl<'gc> Value<'gc> {
     pub fn as_accessor(self) -> Option<Gc<'gc, crate::Accessor<'gc>>> {
         (self.bits >> ValueBits::TAG_SHIFT == ValueBits::boxed(ValueTag::ACCESSOR, 0) >> ValueBits::TAG_SHIFT)
             // SAFETY: an accessor word was built from a live accessor pair's address
+            .then(|| unsafe { gc_from_raw(Self::address(self.bits & ValueBits::PAYLOAD)) })
+    }
+
+    /// A context (V8's `Context`: an [`Env`](crate::Env)) as a word: registers and the accumulator hold contexts
+    /// between `Create*Context` / `PushContext` / `PopContext`; never seen as a JS value
+    #[inline]
+    pub fn context(e: crate::JsEnv<'gc>) -> Self {
+        Self::pointer(ValueTag::CONTEXT, e.as_ptr().expose_provenance() as u64)
+    }
+
+    /// The context, if this word holds one
+    #[inline]
+    pub fn as_context(self) -> Option<crate::JsEnv<'gc>> {
+        (self.bits >> ValueBits::TAG_SHIFT == ValueBits::boxed(ValueTag::CONTEXT, 0) >> ValueBits::TAG_SHIFT)
+            // SAFETY: a context word was built from a live context's address
             .then(|| unsafe { gc_from_raw(Self::address(self.bits & ValueBits::PAYLOAD)) })
     }
 
@@ -311,6 +337,8 @@ impl ValueTag {
     pub const UNINIT: u8 = 8;
     /// Internal: an accessor pair stored in a property slot ([`crate::Accessor`]); never seen as a JS value
     pub const ACCESSOR: u8 = 9;
+    /// Internal: a context in a register or the accumulator ([`Value::context`]); never seen as a JS value
+    pub const CONTEXT: u8 = 10;
     /// The number of bytes a value takes
     pub const SIZE: usize = 8;
 }

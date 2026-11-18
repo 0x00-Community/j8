@@ -1,8 +1,9 @@
+use core::fmt::Write as _;
 use std::io::{Read, Write};
 use std::path::PathBuf;
 
 use clap::Args;
-use j8bytecode::Module;
+use j8bytecode::{Decoder, Module, OperandScale, OperandType, Register, SharedFunction};
 use j8compiler::Compile;
 use j8framework::{CodeKind, Source};
 
@@ -46,7 +47,8 @@ impl Io {
     }
 }
 
-/// `j8dbg compile`: JS ⇒ bytecode, written in the binary form.
+/// `j8dbg compile`: JS ⇒ bytecode, listed per function the way V8's `--print-bytecode` lists instructions (to compare
+/// with V8 line by line).
 #[derive(Args)]
 pub struct Compiled {
     #[command(flatten)]
@@ -58,22 +60,52 @@ impl Compiled {
         let (bytes, file) = self.io.bytes()?;
         let text = String::from_utf8(bytes).map_err(|e| format!("{file}: {e}"))?;
         let module = Module::compile(&Source { text: &text, file: &file }, CodeKind::Script).map_err(|e| e.to_string())?;
-        self.io.write(&Vec::from(&module))
+        let mut out = String::new();
+        for (i, f) in module.functions.iter().enumerate() {
+            Listing(f).write(&mut out, i).map_err(|e| e.to_string())?;
+        }
+        self.io.write(out.as_bytes())
     }
 }
 
-/// `j8dbg check`: read the binary form back (magic, instruction-set fingerprint, every field) and write it out again
-/// re-encoded.
-#[derive(Args)]
-pub struct Check {
-    #[command(flatten)]
-    io: Io,
-}
+/// One function's listing.
+struct Listing<'a>(&'a SharedFunction);
 
-impl Check {
-    pub fn run(&self) -> Result<(), String> {
-        let (bytes, file) = self.io.bytes()?;
-        let module = Module::try_from(bytes.as_slice()).map_err(|e| format!("{file}: {e}"))?;
-        self.io.write(&Vec::from(&module))
+impl Listing<'_> {
+    fn write(&self, out: &mut String, index: usize) -> core::fmt::Result {
+        let f = self.0;
+        let name = if f.name.is_empty() { format!("#{index}") } else { f.name.to_string() };
+        writeln!(out, "== {name} {:?} params {} regs {}", f.kind, f.bytecode.parameter_count, f.bytecode.register_count)?;
+        for d in Decoder::from(&f.bytecode.code[..]) {
+            let d = d.map_err(|_| core::fmt::Error)?;
+            let ops: Vec<String> = d.bytecode.operand_types().iter().zip(&d.operands).map(|(t, &v)| Self::operand(*t, v)).collect();
+            let wide = match d.scale {
+                OperandScale::Single => "",
+                OperandScale::Double => ".Wide",
+                OperandScale::Quadruple => ".ExtraWide",
+            };
+            writeln!(out, "  @{:4} {:?}{wide} {}", d.offset, d.bytecode, ops.join(", "))?;
+        }
+        Ok(())
+    }
+
+    fn operand(t: OperandType, v: i64) -> String {
+        match t {
+            _ if t.is_register() => {
+                let r = Register::from(i32::try_from(v).unwrap_or(0));
+                if r == Register::receiver() {
+                    "<this>".into()
+                } else if r == Register::current_context() {
+                    "<context>".into()
+                } else if r == Register::function_closure() {
+                    "<closure>".into()
+                } else {
+                    r.parameter_index().map_or_else(|| format!("r{}", r.0), |i| format!("a{}", i - 1))
+                }
+            }
+            OperandType::FeedbackSlot => format!("FBV[{v}]"),
+            OperandType::ConstantPoolIndex | OperandType::Imm | OperandType::UImm => format!("[{v}]"),
+            _ => format!("#{v}"),
+        }
     }
 }
