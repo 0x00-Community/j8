@@ -954,6 +954,9 @@ impl Class {
     const CALLABLE: u8 = 1 << 3;
     /// Has Symbol-keyed properties
     const SYMBOLS: u8 = 1 << 6;
+    /// Its string-keyed properties stay in fast mode however many there are (see [`Object::widen`]); kept when the
+    /// other bits are recomputed
+    const WIDE: u8 = 1 << 7;
     /// The state cell is empty and the state is the default with this unit kind (no snapshot allocated): two bits
     const UNIT_SHIFT: u32 = 4;
     const UNIT_MASK: u8 = 0b11 << Self::UNIT_SHIFT;
@@ -1100,7 +1103,8 @@ impl Drop for ObjMut<'_, '_> {
     fn drop(&mut self) {
         if let Some(d) = self.data.take() {
             // The state now has a snapshot: no unit bits
-            self.obj.class.store(Class::of(&d.kind) | if d.symbols.is_empty() { 0 } else { Class::SYMBOLS }, Ordering::Release);
+            let wide = self.obj.class() & Class::WIDE;
+            self.obj.class.store(Class::of(&d.kind) | wide | if d.symbols.is_empty() { 0 } else { Class::SYMBOLS }, Ordering::Release);
             let call = Object::call_of(self.mc, &d.kind);
             drop(d);
             if call.is_some() || self.obj.call.get().is_some() {
@@ -1607,7 +1611,13 @@ impl<'gc> Object<'gc> {
             self.digit_keys.store(true, Ordering::Release);
         }
         let proto = self.proto();
-        self.props.push(mc, key, prop, || proto.map(|p| p.get().root_shape_ref()));
+        self.props.push(mc, key, prop, self.class() & Class::WIDE != 0, || proto.map(|p| p.get().root_shape_ref()));
+    }
+
+    /// Keeps the string-keyed properties in fast mode however many get added (the global object, the script scope:
+    /// global name caches key on their shapes)
+    pub fn widen(&self) {
+        self.class.fetch_or(Class::WIDE, Ordering::AcqRel);
     }
 
     /// The empty shape that objects with this object as prototype start from (created if absent)

@@ -232,7 +232,7 @@ impl<'gc> Realm<'gc> {
             set_iterator_proto: derived(iterator_proto),
             iterator_helper_proto: derived(iterator_proto),
             wrap_iterator_proto: derived(iterator_proto),
-            script_scope: ObjectData::default().alloc(mc),
+            script_scope: Self::wide(ObjectData::default().alloc(mc)),
             symbols: WellKnown {
                 iterator: symbol("iterator"),
                 async_iterator: symbol("asyncIterator"),
@@ -256,7 +256,7 @@ impl<'gc> Realm<'gc> {
             modules: Cow::new(mc, alloc::vec::Vec::new()),
             random_state: AtomicU64::new(0),
             templates: Cow::new(mc, alloc::collections::BTreeMap::new()),
-            global: derived(object_proto),
+            global: Self::wide(derived(object_proto)),
             object_proto,
             function_proto,
             array_proto: derived(object_proto),
@@ -266,6 +266,12 @@ impl<'gc> Realm<'gc> {
             boolean_proto: derived(object_proto),
             error_protos,
         }
+    }
+
+    /// `o`, kept in fast mode however many properties it gets (global name caches key on its shape)
+    fn wide(o: JsObject<'gc>) -> JsObject<'gc> {
+        o.get().widen();
+        o
     }
 
     /// Without a regex engine, regex literals throw a SyntaxError.

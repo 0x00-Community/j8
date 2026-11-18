@@ -416,8 +416,9 @@ impl<'gc> Props<'gc> {
     }
 
     /// Append a new key (the caller guarantees it isn't present); an empty object starts from `root` (the prototype's
-    /// root shape; without one it anchors a tree of its own)
-    pub fn push<'r>(&self, mc: &Mutation<'gc>, key: &str, prop: Property<'gc>, root: impl Fn() -> Option<&'r Shape>)
+    /// root shape; without one it anchors a tree of its own). `wide`: stay in fast mode past [`MAX_FAST`] keys (the
+    /// global object and the script scope, whose entries the execution layer caches by shape)
+    pub fn push<'r>(&self, mc: &Mutation<'gc>, key: &str, prop: Property<'gc>, wide: bool, root: impl Fn() -> Option<&'r Shape>)
     where
         'gc: 'r,
     {
@@ -426,7 +427,7 @@ impl<'gc> Props<'gc> {
             let from = self.shape_ref();
             let anchored;
             let to: &Shape = match from {
-                Some(f) if f.len() >= MAX_FAST => break,
+                Some(f) if !wide && f.len() >= MAX_FAST => break,
                 // The child lives in `f`'s tree, which is held elsewhere
                 Some(f) => f.child_ref(key, attrs),
                 None => match root() {

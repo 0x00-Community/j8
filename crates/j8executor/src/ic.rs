@@ -257,3 +257,87 @@ impl Ic {
         self.shape.set(before.shape);
     }
 }
+
+/// Address standing for a dictionary-mode object (never cached: real shape addresses are 8-aligned and `EMPTY` is 1)
+const DICT: usize = 2;
+
+/// The shape address of a fast-mode object (`EMPTY` with no keys yet), [`DICT`] in dictionary mode
+fn fast(d: &Object<'_>) -> usize {
+    if d.props().is_dict() { DICT } else { addr(d) }
+}
+
+/// Where a global name lives, for one `lda.global` / `sta.global` constant: an entry of the script scope or of the
+/// global object, recognized by shape (the global object and the script scope stay in fast mode, see
+/// `Object::widen`). A shape fixes the key at every index, so a hit reads the slot without comparing names; `keep`
+/// stops the shapes' addresses from being reused while cached.
+#[derive(Default)]
+pub struct GlobalIc {
+    /// Shape address of the script scope (0: nothing cached). Also checked for global object entries: a new top-level
+    /// `let` changes it, and may shadow the name
+    scope: Cell<usize>,
+    /// Shape address of the global object; 0 when the name is a script scope entry
+    global: Cell<usize>,
+    slot: Cell<u32>,
+    /// A writable data property (`sta.global` may write it in place)
+    writable: Cell<bool>,
+    keep: RefCell<Vec<Weak<Shape>>>,
+}
+
+impl GlobalIc {
+    /// The object and slot holding the name, if the shapes are the cached ones
+    #[inline]
+    pub fn locate<'gc>(&self, scope: JsObject<'gc>, global: JsObject<'gc>) -> Option<(JsObject<'gc>, usize)> {
+        let want = self.scope.get();
+        if want == 0 || fast(scope.get()) != want {
+            return None;
+        }
+        let holder = match self.global.get() {
+            0 => scope,
+            g if fast(global.get()) == g => global,
+            _ => return None,
+        };
+        Some((holder, self.slot.get() as usize))
+    }
+
+    /// The value, if cached and a data property
+    #[inline]
+    pub fn get<'gc>(&self, scope: JsObject<'gc>, global: JsObject<'gc>) -> Option<Value<'gc>> {
+        let (o, at) = self.locate(scope, global)?;
+        Ic::data(o.get().props().slot(at))
+    }
+
+    /// The holder and slot, if cached as a writable data property
+    #[inline]
+    pub fn writable<'gc>(&self, scope: JsObject<'gc>, global: JsObject<'gc>) -> Option<(JsObject<'gc>, usize)> {
+        self.locate(scope, global).filter(|_| self.writable.get())
+    }
+
+    /// After a slow-path access, records where `name` is now (own data properties only)
+    pub fn fill<'gc>(&self, scope: JsObject<'gc>, global: JsObject<'gc>, name: &str) {
+        self.scope.set(0);
+        let mut keep = self.keep.borrow_mut();
+        keep.clear();
+        let own = |d: &Object<'_>| d.position(name).filter(|&i| matches!(d.props().slot(i), Slot::Data(_)));
+        let (sd, gd) = (scope.get(), global.get());
+        if sd.props().is_dict() {
+            return;
+        }
+        let (holder, at) = match own(sd) {
+            Some(at) => (None, at),
+            None if sd.position(name).is_some() || gd.props().is_dict() => return,
+            None => match own(gd) {
+                Some(at) => (Some(gd), at),
+                None => return,
+            },
+        };
+        let Ok(slot) = u32::try_from(at) else { return };
+        keep.extend(sd.props().shape().map(|s| Arc::downgrade(&s)));
+        self.global.set(holder.map_or(0, |g| {
+            keep.extend(g.props().shape().map(|s| Arc::downgrade(&s)));
+            fast(g)
+        }));
+        self.slot.set(slot);
+        self.writable.set(holder.unwrap_or(sd).props().attrs(at).writable());
+        self.scope.set(fast(sd));
+    }
+}

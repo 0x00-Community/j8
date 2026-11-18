@@ -36,7 +36,7 @@ struct Loaded {
     base: u32,
     func: Function,
     /// By constant index: where the global name was last found (inline cache for global name reads/writes)
-    globals: Box<[Cell<GlobalSlot>]>,
+    globals: Box<[ic::GlobalIc]>,
     /// The JIT tier has said there is no need to ask it on frame entry
     no_tier_enter: Cell<bool>,
     /// The JIT tier has said there is no need to ask it on loop back-jumps
@@ -58,24 +58,12 @@ struct Loaded {
 
 impl From<(u32, Function)> for Loaded {
     fn from((base, func): (u32, Function)) -> Self {
-        let globals = func.consts.iter().map(|_| Cell::new(GlobalSlot::Unknown)).collect();
+        let globals = func.consts.iter().map(|_| ic::GlobalIc::default()).collect();
         let ics = func.insns.iter().map(|_| ic::Ic::default()).collect();
         let plain = !func.generator && !func.asynchronous && !matches!(func.kind, FunctionKind::Constructor { .. });
         let constructs = !func.generator && !func.asynchronous && matches!(func.kind, FunctionKind::Normal | FunctionKind::Constructor { derived: false });
         Self { base, func, globals, no_tier_enter: Cell::new(false), no_tier_loops: Cell::new(false), ics, plain, instance_size: Cell::new(0), prototype: ic::Ic::default(), constructs }
     }
-}
-
-/// Position cache for global names. Stores only property-table indices, not GC pointers: checks that entry's key before
-/// use and looks it up again on the slow path on a mismatch.
-#[derive(Clone, Copy, Debug)]
-enum GlobalSlot {
-    Unknown,
-    /// Index into the property table of the script scope (top-level `let` / `const` / `class`)
-    Scope(u32),
-    /// Index into the global object's property table; how many entries the script scope had then (if there are more, a
-    /// new top-level `let` may shadow it, so look it up again)
-    Global { at: u32, scope_len: u32 },
 }
 
 /// An exception handler: landing point (instruction index) and the environment when it was installed.
@@ -804,58 +792,31 @@ impl Executor {
 
     /// Reads a global name via the cache: on a hit gives the value (script scope entries also check the TDZ); on a miss
     /// gives `None`.
-    fn global_cached<'gc>(a: &Agent<'gc, '_>, slot: GlobalSlot, name: &str) -> Option<Value<'gc>> {
-        let scope = a.realm.script_scope.borrow();
-        match slot {
-            GlobalSlot::Scope(at) => scope.prop_at(at as usize, name).and_then(|p| p.value()),
-            GlobalSlot::Global { at, scope_len } if scope.props().len() == scope_len as usize => a.realm.global.borrow().prop_at(at as usize, name).and_then(|p| p.value()),
-            _ => None,
-        }
-    }
-
-    /// Where the global name is now (only own data properties are cached).
-    fn global_locate(a: &Agent<'_, '_>, name: &str) -> GlobalSlot {
-        let scope = a.realm.script_scope.get();
-        let own = |d: &j8framework::Object<'_>| d.position(name).filter(|&i| matches!(d.props().slot(i), Slot::Data(_))).and_then(|i| u32::try_from(i).ok());
-        if let Some(at) = own(scope) {
-            return GlobalSlot::Scope(at);
-        }
-        if scope.position(name).is_some() {
-            return GlobalSlot::Unknown;
-        }
-        match (own(a.realm.global.get()), u32::try_from(scope.props().len())) {
-            (Some(at), Ok(scope_len)) => GlobalSlot::Global { at, scope_len },
-            _ => GlobalSlot::Unknown,
-        }
-    }
-
     /// `lda.global`: tries the cache first; on a miss takes the slow path and records the position.
-    fn global_load<'gc>(a: &mut Agent<'gc, '_>, cache: &Cell<GlobalSlot>, name: &str) -> Result<Value<'gc>, Error> {
-        if let Some(v) = Self::global_cached(a, cache.get(), name) {
+    fn global_load<'gc>(a: &mut Agent<'gc, '_>, cache: &ic::GlobalIc, name: &str) -> Result<Value<'gc>, Error> {
+        let (scope, global) = (a.realm.script_scope, a.realm.global);
+        if let Some(v) = cache.get(scope, global) {
             Self::check(a, v, name)?;
             return Ok(v);
         }
         let v = Self::global_get(a, name)?.ok_or_else(|| a.throw(ErrorKind::Reference, &alloc::format!("{name} is not defined")))?;
-        cache.set(Self::global_locate(a, name));
+        cache.fill(scope, global, name);
         Ok(v)
     }
 
     /// `sta.global`: if the cache hits and it is a writable data property, modifies it in place (script scope entries
     /// also check the TDZ); otherwise takes the slow path and records the position.
-    fn global_store<'gc>(a: &mut Agent<'gc, '_>, cache: &Cell<GlobalSlot>, name: &str, v: Value<'gc>, strict: bool) -> Result<(), Error> {
-        let (target, at) = match cache.get() {
-            GlobalSlot::Scope(at) => (a.realm.script_scope, at),
-            GlobalSlot::Global { at, scope_len } if a.realm.script_scope.borrow().props().len() == scope_len as usize => (a.realm.global, at),
-            _ => (a.realm.global, u32::MAX),
-        };
-        let hit = target.borrow().prop_at(at as usize, name);
-        if let Some(Property { slot: Slot::Data(old), writable: true, .. }) = hit {
+    fn global_store<'gc>(a: &mut Agent<'gc, '_>, cache: &ic::GlobalIc, name: &str, v: Value<'gc>, strict: bool) -> Result<(), Error> {
+        let (scope, global) = (a.realm.script_scope, a.realm.global);
+        if let Some((o, at)) = cache.writable(scope, global)
+            && let Slot::Data(old) = o.get().props().slot(at)
+        {
             Self::check(a, old, name)?;
-            target.borrow_mut(a.mc).set_at(at as usize, v);
+            o.get().set_at(a.mc, at, v);
             return Ok(());
         }
         Self::global_set(a, name, v, strict)?;
-        cache.set(Self::global_locate(a, name));
+        cache.fill(a.realm.script_scope, a.realm.global, name);
         Ok(())
     }
 
