@@ -69,6 +69,8 @@ pub(crate) struct Lower<'f> {
     helpers: BTreeSet<&'static str>,
     /// Instructions the first tier does not accept, where execution stops and hands off to the interpreter
     exits: Vec<Unsupported>,
+    /// 回跳（从哪条、跳到哪条）：各走一个 `^b{from}` 块先看中止请求
+    backs: Vec<(u32, u32)>,
 }
 
 /// The lowered module and its summary.
@@ -84,7 +86,7 @@ type V = String;
 impl<'f> Lower<'f> {
     /// The whole module: runtime function declarations + the entry function.
     pub(crate) fn module(func: &'f Function) -> Lowered {
-        let mut l = Lower { func, out: String::new(), next: 0, deopts: BTreeSet::new(), helpers: BTreeSet::new(), exits: Vec::new() };
+        let mut l = Lower { func, out: String::new(), next: 0, deopts: BTreeSet::new(), helpers: BTreeSet::new(), exits: Vec::new(), backs: Vec::new() };
         let loops = Self::loops(func);
         for (pc, &insn) in (0u32..).zip(&func.insns) {
             l.label(&alloc::format!("i{pc}"));
@@ -99,6 +101,15 @@ impl<'f> Lower<'f> {
             l.label("i0");
             let z = l.int(0, 64);
             l.line(&alloc::format!("llvm.br ^x({z} : i64)"));
+        }
+        // 回跳先看中止请求（`%stop` 那个字节非零）：有就在循环头退回解释器，由解释器抛出中止
+        for (from, to) in core::mem::take(&mut l.backs) {
+            l.label(&alloc::format!("b{from}"));
+            let s = l.def("llvm.load %stop atomic monotonic {alignment = 1 : i64} : !llvm.ptr -> i8");
+            let zero = l.int(0, 8);
+            let set = l.icmp(ICMP_NE, &s, &zero, "i8");
+            l.deopts.insert(to);
+            l.line(&alloc::format!("llvm.cond_br {set}, ^d{to}, ^i{to}"));
         }
         for pc in core::mem::take(&mut l.deopts) {
             l.label(&alloc::format!("d{pc}"));
@@ -117,14 +128,14 @@ impl<'f> Lower<'f> {
         for h in &l.helpers {
             let _ = writeln!(m, "  llvm.func @{h}(f64, f64) -> f64");
         }
-        let _ = writeln!(m, "  llvm.func @{ENTRY}(%regs: !llvm.ptr, %acc: !llvm.ptr, %start: i64) -> i64 {{");
+        let _ = writeln!(m, "  llvm.func @{ENTRY}(%regs: !llvm.ptr, %acc: !llvm.ptr, %start: i64, %stop: !llvm.ptr) -> i64 {{");
         // Loops that can be entered midway: the loop body has no instruction that stops and hands off to the
         // interpreter (otherwise every iteration would enter and leave once, which doesn't pay off)
         let mut headers: Vec<u32> = loops.iter().filter(|&&(h, back)| !l.exits.iter().any(|u| (h..=back).contains(&u.pc))).map(|&(h, _)| h).collect();
         headers.sort_unstable();
         headers.dedup();
         // Entry dispatch: `%start` 0 enters at the start, `h + 1` enters at loop header `h` (OSR)
-        let mut dispatch = Lower { func, out: String::new(), next: l.next, deopts: BTreeSet::new(), helpers: BTreeSet::new(), exits: Vec::new() };
+        let mut dispatch = Lower { func, out: String::new(), next: l.next, deopts: BTreeSet::new(), helpers: BTreeSet::new(), exits: Vec::new(), backs: Vec::new() };
         // Locals (promoted to SSA by mem2reg), read from the frame once
         dispatch.line("%one = llvm.mlir.constant(1 : i64) : i64");
         for (local, base, at) in dispatch.locals() {
@@ -323,6 +334,15 @@ impl<'f> Lower<'f> {
         self.guard(pc, &ok);
     }
 
+    /// 从 `pc` 跳到 `to` 的目标块：往前跳直接去，回跳先经 `^b{pc}` 看中止请求
+    fn jump_to(&mut self, pc: u32, to: u32) -> String {
+        if to > pc {
+            return alloc::format!("^i{to}");
+        }
+        self.backs.push((pc, to));
+        alloc::format!("^b{pc}")
+    }
+
     fn next_block(&mut self, pc: u32) {
         self.line(&alloc::format!("llvm.br ^i{}", pc + 1));
     }
@@ -432,12 +452,13 @@ impl<'f> Lower<'f> {
             Insn::CheckInit { .. } => self.initialized(pc, &Self::acc_addr()),
             Insn::CheckReg { reg, .. } => self.initialized(pc, &Self::reg_addr(reg)),
             Insn::Jump(l) => {
-                self.line(&alloc::format!("llvm.br ^i{}", l.0));
+                let to = self.jump_to(pc, l.0);
+                self.line(&alloc::format!("llvm.br {to}"));
                 return Ok(());
             }
             Insn::JumpIfTrue(l) | Insn::JumpIfFalse(l) => {
                 let v = self.truthy(pc);
-                let (yes, no) = (alloc::format!("^i{}", l.0), alloc::format!("^i{}", pc + 1));
+                let (yes, no) = (self.jump_to(pc, l.0), alloc::format!("^i{}", pc + 1));
                 let (t, f) = if matches!(insn, Insn::JumpIfTrue(_)) { (yes, no) } else { (no, yes) };
                 self.line(&alloc::format!("llvm.cond_br {v}, {t}, {f}"));
                 return Ok(());

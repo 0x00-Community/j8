@@ -4,7 +4,7 @@
 //!
 //! ```text
 //! calls / loop iterations below threshold        ⇒ count once, interpret as usual
-//! threshold reached                              ⇒ j8compiler lowers it, x86_64 emits machine code (on failure, remember it
+//! threshold reached                              ⇒ lowered to MLIR, x86_64 emits machine code (on failure, remember it
 //!                                                  and never retry)
 //! on frame entry: whole function in machine code ⇒ run directly on this frame's registers and accumulator
 //! on a loop back-jump: this loop header exists   ⇒ switch into machine code at the loop header (OSR)
@@ -13,18 +13,25 @@
 //!   stopped before some instruction              ⇒ a fast-path precondition failed or machine code doesn't accept the
 //!                                                  instruction; the interpreter continues from there
 //! ```
+extern crate alloc;
+
 mod code;
+mod compile;
+mod helper;
 mod helpers;
+mod lower;
 mod x86_64;
 
+pub use compile::{Backend, CompileError, Compiler, MachineCode, Native};
+pub use helper::Helper;
+pub use lower::Unsupported;
 pub use x86_64::{X86_64Code, X86_64Emit, X86_64Reloc};
 
 use core::cell::RefCell;
 
 use j8bytecode::Function;
-use j8compiler::Compiler;
 use j8executor::{Tier, Tiered};
-use j8framework::{FuncId, Pool, Task, Value};
+use j8framework::{Agent, FuncId, Pool, Task, Value};
 
 use code::Code;
 
@@ -105,7 +112,7 @@ impl Jit {
 
     /// Installs compiled machine code in executable memory: on success it is `Ready`, otherwise recorded as
     /// uncompilable.
-    fn install(native: Result<j8compiler::Native, j8compiler::CompileError>) -> Slot {
+    fn install(native: Result<crate::Native, crate::CompileError>) -> Slot {
         match native.ok().and_then(|n| Code::load(&n).map(|code| (code, n))) {
             Some((code, native)) => Slot::Ready(Ready { code, pure: native.pure(), entries: native.entries }),
             None => Slot::Failed,
@@ -138,7 +145,7 @@ impl Jit {
             .collect();
         let compiler = self.compiler.get_or_init(Compiler::default);
         let funcs: Vec<&Function> = core::iter::once(func).chain(others.iter().map(|(_, f)| f)).collect();
-        let mut out: Vec<Option<Result<j8compiler::Native, j8compiler::CompileError>>> = funcs.iter().map(|_| None).collect();
+        let mut out: Vec<Option<Result<crate::Native, crate::CompileError>>> = funcs.iter().map(|_| None).collect();
         let jobs: Vec<Task<'_>> = out.iter_mut().zip(&funcs).map(|(o, f)| Box::new(move || *o = Some(compiler.compile(f, &X86_64Emit))) as Task<'_>).collect();
         pool.run(jobs);
         let targets = core::iter::once(at).chain(others.iter().map(|&(i, _)| i));
@@ -176,10 +183,10 @@ impl Jit {
 }
 
 impl Tier for Jit {
-    fn enter(&self, pool: &dyn Pool, id: FuncId, func: &Function, regs: &mut [Value<'_>], acc: &mut Value<'_>) -> Tiered {
+    fn enter(&self, a: &Agent<'_, '_>, id: FuncId, func: &Function, regs: &mut [Value<'_>], acc: &mut Value<'_>) -> Tiered {
         let mut slots = self.slots.borrow_mut();
-        match self.heat(pool, &mut slots, id, func, false) {
-            Heat::Ready(r) if r.pure => Tiered::Ran(r.code.run(regs, acc, 0)),
+        match self.heat(a.platform, &mut slots, id, func, false) {
+            Heat::Ready(r) if r.pure => Tiered::Ran(r.code.run(regs, acc, 0, a.stop)),
             // Compiled but cannot run as a whole (only switched into at loop headers), or cannot be compiled: no need
             // to ask again on frame entry
             Heat::Ready(_) | Heat::Never => Tiered::Never,
@@ -187,10 +194,10 @@ impl Tier for Jit {
         }
     }
 
-    fn backedge(&self, pool: &dyn Pool, id: FuncId, func: &Function, header: u32, regs: &mut [Value<'_>], acc: &mut Value<'_>) -> Tiered {
+    fn backedge(&self, a: &Agent<'_, '_>, id: FuncId, func: &Function, header: u32, regs: &mut [Value<'_>], acc: &mut Value<'_>) -> Tiered {
         let mut slots = self.slots.borrow_mut();
-        match self.heat(pool, &mut slots, id, func, true) {
-            Heat::Ready(r) if r.entries.contains(&header) => Tiered::Ran(r.code.run(regs, acc, u64::from(header) + 1)),
+        match self.heat(a.platform, &mut slots, id, func, true) {
+            Heat::Ready(r) if r.entries.contains(&header) => Tiered::Ran(r.code.run(regs, acc, u64::from(header) + 1, a.stop)),
             Heat::Ready(r) if r.entries.is_empty() => Tiered::Never,
             Heat::Ready(_) | Heat::Cold => Tiered::NotYet,
             Heat::Never => Tiered::Never,

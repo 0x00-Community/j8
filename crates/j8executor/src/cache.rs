@@ -8,6 +8,7 @@ use alloc::sync::Arc;
 use j8framework::{Error, ModuleInfo, Source};
 use j8lockfree::Chain;
 use j8bytecode::Module;
+use j8compiler::Compile;
 
 /// One compiled source
 struct Entry<T> {
@@ -35,7 +36,7 @@ impl CodeCache {
         if let Some(e) = Self::find(&self.scripts, src) {
             return Ok(e.code.clone());
         }
-        let code = Module::try_from(src)?;
+        let code = Module::compile(src, j8framework::CodeKind::Script)?;
         Ok(self.scripts.push(Entry { file: src.file.into(), text: src.text.into(), code }).code.clone())
     }
 

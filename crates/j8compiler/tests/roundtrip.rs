@@ -1,6 +1,7 @@
 //! Assembly is the inverse of disassembly: a disassembly listing reads back identical field by field.
-use j8framework::Source;
 use j8bytecode::Module;
+use j8compiler::Compile;
+use j8framework::{CodeKind, Source};
 
 #[test]
 fn disassembly_assembles_back() {
@@ -12,7 +13,7 @@ fn disassembly_assembles_back() {
         async function f() { for await (const z of []) {} }
         [..."é\n\"x́"]; -0; NaN; 1e300; x => x; ({ a: 1, ...{} });
     "#;
-    let module = Module::try_from(&Source { text, file: "a.js" }).unwrap();
+    let module = Module::compile(&Source { text, file: "a.js" }, CodeKind::Script).unwrap();
     let listing = module.to_string();
     let back: Module = listing.parse().unwrap();
     assert_eq!(format!("{back:?}"), format!("{module:?}"));

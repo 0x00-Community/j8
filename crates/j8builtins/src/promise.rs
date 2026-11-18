@@ -37,7 +37,7 @@ impl Promises {
     }
 
     fn closure<'gc>(a: &Agent<'gc, '_>, f: j8framework::ClosureFn, slots: Vec<Value<'gc>>, length: u32) -> JsObject<'gc> {
-        let o = ObjectData { kind: ObjectKind::NativeClosure(NativeClosure { f, slots }), proto: Some(a.realm.function_proto), ..ObjectData::default() }.alloc(a.mc);
+        let o = ObjectData { kind: ObjectKind::NativeClosure(NativeClosure { f, slots, constructor: false }), proto: Some(a.realm.function_proto), ..ObjectData::default() }.alloc(a.mc);
         a.realm.name_function(a.mc, o, "", Some(length));
         o
     }

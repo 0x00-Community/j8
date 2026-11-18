@@ -1,6 +1,6 @@
 [package]
 name = "j8jit"
-description = "j8 JIT: picks hot functions for j8compiler, loads the machine code and replaces interpretation (falls back to the interpreter when a fast path doesn't hold)"
+description = "j8 JIT: bytecode ⇒ MLIR (llvm dialect) ⇒ mlirpass ⇒ x86-64 machine code, plus the scheduling (picks hot functions, loads the machine code and replaces interpretation; falls back to the interpreter when a fast path doesn't hold)"
 readme = "README.md"
 version.workspace = true
 edition.workspace = true
@@ -11,7 +11,6 @@ repository.workspace = true
 j8framework.workspace = true
 j8bytecode.workspace = true
 j8executor.workspace = true
-j8compiler.workspace = true
 mlirpass.workspace = true
 libc.workspace = true
 

@@ -1,12 +1,12 @@
-use j8compiler::Native;
+use crate::Native;
 use j8executor::Exit;
 use j8framework::Value;
 
 use crate::helpers::Helpers;
 
 /// Signature of the machine-code entry: this frame's registers, accumulator, where to enter (0 the start / `h + 1` a
-/// loop header) ⇒ exit code (see [`Exit`])
-type Entry = unsafe extern "C" fn(*mut Value<'static>, *mut Value<'static>, u64) -> u64;
+/// loop header), 中止请求的字节 ⇒ exit code (see [`Exit`])
+type Entry = unsafe extern "C" fn(*mut Value<'static>, *mut Value<'static>, u64, *const u8) -> u64;
 
 /// One function's machine code installed in executable memory (read-only executable, released on drop).
 pub(crate) struct Code {
@@ -45,14 +45,14 @@ impl Code {
     }
 
     /// Runs on this frame's registers and accumulator, entering at `start` (0 the start / `h + 1` loop header `h`).
-    pub(crate) fn run(&self, regs: &mut [Value<'_>], acc: &mut Value<'_>, start: u64) -> Exit {
-        // SAFETY: the machine code was compiled by j8compiler for this function; it only reads and writes `regs` (no
+    pub(crate) fn run(&self, regs: &mut [Value<'_>], acc: &mut Value<'_>, start: u64, stop: &j8framework::Termination) -> Exit {
+        // SAFETY: the machine code was compiled by this crate for this function; it only reads and writes `regs` (no
         // more than the function's register count; the executor guarantees the slice is long enough) and `acc` per the
         // `ValueBits` layout, only writes numbers / booleans / constant words (creates no GC pointers), does not
-        // allocate, and touches no other memory
+        // allocate, and touches no other memory except reading the byte of `stop` (atomically)
         let code = unsafe {
             let entry: Entry = core::mem::transmute::<*mut libc::c_void, Entry>(self.at);
-            entry(regs.as_mut_ptr().cast(), core::ptr::from_mut(acc).cast(), start)
+            entry(regs.as_mut_ptr().cast(), core::ptr::from_mut(acc).cast(), start, stop.as_ptr())
         };
         Exit::from(code)
     }

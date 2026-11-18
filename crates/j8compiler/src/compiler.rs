@@ -9,7 +9,7 @@ use oxc_span::{GetSpan, SourceType, Span};
 use j8framework::{CodeKind, CompareOp, Error, ImportEntry, ImportName, ModuleInfo, Resume, Source};
 
 use crate::scope::{Decl, DeclKind, Decls, Hidden, Key, Resolver, THIS};
-use crate::{Const, Constant, EvalName, EvalScope, Function, FunctionKind, Insn, Label, Module, PropertyKind, Reg};
+use j8bytecode::{Const, Constant, EvalName, EvalScope, Function, FunctionKind, Insn, Label, Module, PropertyKind, Reg};
 
 /// Jump target before backpatching
 const UNPATCHED: Label = Label(u32::MAX);
@@ -251,29 +251,36 @@ pub(crate) struct Compiler<'a, 's> {
     eval_fns: HashSet<u32>,
 }
 
-impl TryFrom<&Source<'_>> for Module {
-    type Error = Error;
+/// JS ⇒ bytecode: every piece of JS (scripts, modules, `eval` / `Function` code) becomes a [`Module`] before it runs.
+pub trait Compile: Sized {
+    /// Compiles by kind: a script's top-level lexical declarations go into the script scope; eval code's stay within
+    /// itself. For a script the value of the last expression statement is the return value.
+    fn compile(src: &Source<'_>, kind: CodeKind) -> Result<Self, Error>;
 
-    /// Compiles a script: the value of the last expression statement is the return value.
-    fn try_from(src: &Source<'_>) -> Result<Self, Error> {
-        Self::compile(src, CodeKind::Script)
+    /// Direct eval code: `outer` is the bindings visible at the call site (at runtime the eval code's environment
+    /// hangs off the call site's environment chain).
+    fn compile_direct(src: &Source<'_>, strict: bool, outer: &EvalScope) -> Result<Self, Error>;
+
+    /// Compiles a module: gives the bytecode and the module info (requests, imports, exports, environment layout).
+    fn compile_module(src: &Source<'_>) -> Result<(Self, ModuleInfo), Error>;
+}
+
+impl Compile for Module {
+    fn compile(src: &Source<'_>, kind: CodeKind) -> Result<Self, Error> {
+        Compiler::compile_in(src, kind, None)
+    }
+
+    fn compile_direct(src: &Source<'_>, strict: bool, outer: &EvalScope) -> Result<Self, Error> {
+        Compiler::compile_in(src, if strict { CodeKind::StrictEval } else { CodeKind::Eval }, Some(outer))
+    }
+
+    fn compile_module(src: &Source<'_>) -> Result<(Self, ModuleInfo), Error> {
+        Compiler::compile_module(src)
     }
 }
 
-impl Module {
-    /// Compiles by kind: a script's top-level lexical declarations go into the script scope; eval code's stay within
-    /// itself.
-    pub fn compile(src: &Source<'_>, kind: CodeKind) -> Result<Self, Error> {
-        Self::compile_in(src, kind, None)
-    }
-
-    /// Direct eval code: `outer` is the bindings visible at the call site (at runtime the eval code's environment hangs
-    /// off the call site's environment chain).
-    pub fn compile_direct(src: &Source<'_>, strict: bool, outer: &EvalScope) -> Result<Self, Error> {
-        Self::compile_in(src, if strict { CodeKind::StrictEval } else { CodeKind::Eval }, Some(outer))
-    }
-
-    fn compile_in(src: &Source<'_>, kind: CodeKind, outer: Option<&EvalScope>) -> Result<Self, Error> {
+impl Compiler<'_, '_> {
+    fn compile_in(src: &Source<'_>, kind: CodeKind, outer: Option<&EvalScope>) -> Result<Module, Error> {
         let allocator = Allocator::default();
         // Script (not module); regular expression literals are validated during parsing
         let options = ParseOptions { parse_regular_expression: true, ..ParseOptions::default() };
@@ -403,9 +410,8 @@ impl<'a> Layout<'a> {
     }
 }
 
-impl Module {
-    /// Compiles a module: gives the bytecode and the module info (requests, imports, exports, environment layout).
-    pub fn compile_module(src: &Source<'_>) -> Result<(Self, ModuleInfo), Error> {
+impl Compiler<'_, '_> {
+    fn compile_module(src: &Source<'_>) -> Result<(Module, ModuleInfo), Error> {
         let allocator = Allocator::default();
         let options = ParseOptions { parse_regular_expression: true, ..ParseOptions::default() };
         let ret = Parser::new(&allocator, src.text, SourceType::mjs()).with_options(options).parse();
@@ -419,7 +425,7 @@ impl Module {
         }
         let scoping = checked.semantic.scoping();
         let eval_scopes: HashSet<oxc_syntax::scope::ScopeId> = scoping.scope_descendants_from_root().filter(|&id| scoping.scope_flags(id).contains_direct_eval()).collect();
-        let (names, info) = Self::module_layout(program);
+        let (names, info) = Compiler::module_layout(program);
         let order: Vec<&str> = names.iter().map(|&(n, _)| n).collect();
         let (captured, used, eval_fns) = Resolver::script(&program.body, Decls::this_key(program.span), &allocator, None, true, eval_scopes, Some(&[order]));
         let mut c = Compiler { src, alloc: &allocator, captured, used, sites: 0, class_depth: 0, module: Vec::new(), frames: Vec::new(), levels: Vec::new(), script_lexicals: HashSet::new(), chains: Vec::new(), eval_fns };

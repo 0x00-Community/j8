@@ -2,6 +2,7 @@
 //! top-level await is not supported yet).
 
 use alloc::string::String;
+use j8compiler::Compile;
 use alloc::vec::Vec;
 
 use j8framework::{Agent, Closure, Error, ErrorKind, ImportName, ModuleStatus, ObjectData, Resolution, ResolvedBinding, Value};
@@ -18,7 +19,7 @@ impl Executor {
         let src = j8framework::Source { text, file: path };
         let (module, info) = match &self.cache {
             Some(cache) => cache.module(&src)?,
-            None => j8bytecode::Module::compile_module(&src)?,
+            None => <j8bytecode::Module as Compile>::compile_module(&src)?,
         };
         let main = self.load(module);
         let mut slots = alloc::vec![Value::Undefined; usize::from(info.slots)];

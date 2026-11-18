@@ -13,6 +13,8 @@ pub enum Error {
     /// An exception thrown by JS (the value is stored as a persistent handle, so the error can be carried out of
     /// `enter`)
     Exception(Global),
+    /// 被 [`IsolateHandle::terminate`](crate::IsolateHandle::terminate) 中止：JS 接不住，传到最外层
+    Terminated,
 }
 
 impl fmt::Display for Error {
@@ -21,6 +23,7 @@ impl fmt::Display for Error {
             Error::Syntax(m) => write!(f, "syntax error: {m}"),
             Error::Unsupported(m) => write!(f, "unsupported: {m}"),
             Error::Exception(_) => f.write_str("uncaught exception"),
+            Error::Terminated => f.write_str("execution terminated"),
         }
     }
 }

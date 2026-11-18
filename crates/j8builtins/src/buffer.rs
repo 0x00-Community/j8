@@ -1,8 +1,7 @@
 use j8framework::ValueKind;
 use alloc::boxed::Box;
-use alloc::vec::Vec;
 
-use j8framework::{Agent, BufferData, ElementKind, Error, ErrorKind, JsObject, ObjectKind, Property, Slot, Value, ViewData};
+use j8framework::{Agent, Backing, BufferData, ElementKind, Error, ErrorKind, JsObject, ObjectKind, Property, Slot, Value, ViewData};
 
 use crate::{Args, Installer};
 
@@ -23,13 +22,32 @@ enum Rmw {
     Exchange,
 }
 
+impl Rmw {
+    /// 由旧值 `x` 和操作数 `y` 得新值
+    fn apply(self, x: u64, y: u64) -> u64 {
+        match self {
+            Self::Add => x.wrapping_add(y),
+            Self::Sub => x.wrapping_sub(y),
+            Self::And => x & y,
+            Self::Or => x | y,
+            Self::Xor => x ^ y,
+            Self::Exchange => y,
+        }
+    }
+}
+
 impl Buffers {
     /// A new buffer (all bytes zero).
     pub(crate) fn allocate<'gc>(a: &mut Agent<'gc, '_>, proto: JsObject<'gc>, len: usize, max: Option<usize>, shared: bool) -> Result<JsObject<'gc>, Error> {
         if len > MAX_BYTES || max.is_some_and(|m| m > MAX_BYTES) {
             return Err(a.throw(ErrorKind::Range, "Array buffer allocation failed"));
         }
-        let data = BufferData { bytes: Some(alloc::vec![0; len]), max, shared };
+        let bytes = if shared {
+            j8framework::SharedMemory::new(len, max).ok_or_else(|| a.throw(ErrorKind::Range, "Array buffer allocation failed"))?.into()
+        } else {
+            Backing::from(alloc::vec![0; len])
+        };
+        let data = BufferData { bytes: Some(bytes), max, shared };
         Ok(j8framework::ObjectData { kind: ObjectKind::ArrayBuffer(Box::new(data)), proto: Some(proto), ..j8framework::ObjectData::default() }.alloc(a.mc))
     }
 
@@ -43,7 +61,7 @@ impl Buffers {
 
     fn info(o: JsObject<'_>) -> (Option<usize>, Option<usize>) {
         match &o.borrow().kind {
-            ObjectKind::ArrayBuffer(b) => (b.bytes.as_ref().map(Vec::len), b.max),
+            ObjectKind::ArrayBuffer(b) => (b.bytes.as_deref().map(<[u8]>::len), b.max),
             _ => (None, None),
         }
     }
@@ -114,16 +132,36 @@ impl Buffers {
         Ok(Self::info(o).0.is_none().into())
     }
 
-    fn set_bytes<'gc>(a: &Agent<'gc, '_>, o: JsObject<'gc>, bytes: Option<Vec<u8>>) {
+    fn set_bytes<'gc>(a: &Agent<'gc, '_>, o: JsObject<'gc>, bytes: Option<Backing>) {
         if let ObjectKind::ArrayBuffer(b) = &mut o.borrow_mut(a.mc).kind {
             b.bytes = bytes;
         }
     }
 
-    fn bytes_of(o: JsObject<'_>) -> Option<Vec<u8>> {
-        match &o.borrow().kind {
-            ObjectKind::ArrayBuffer(b) => b.bytes.clone(),
+    /// detach 这个 buffer，交出它的字节
+    fn take_bytes<'gc>(a: &Agent<'gc, '_>, o: JsObject<'gc>) -> Option<Backing> {
+        match &mut o.borrow_mut(a.mc).kind {
+            ObjectKind::ArrayBuffer(b) => b.bytes.take(),
             _ => None,
+        }
+    }
+
+    /// `at` 处的 `size` 字节（detach 或越界时为零）
+    fn read(o: JsObject<'_>, at: usize, size: usize) -> [u8; 8] {
+        let mut x = [0u8; 8];
+        if let ObjectKind::ArrayBuffer(b) = &o.borrow().kind
+            && let Some(src) = b.bytes.as_deref().and_then(|bytes| bytes.get(at..at + size))
+        {
+            x[..size].copy_from_slice(src);
+        }
+        x
+    }
+
+    /// 对 buffer 的字节做 [`Backing::update`]（detach 时为 0）
+    fn update<'gc>(a: &Agent<'gc, '_>, o: JsObject<'gc>, at: usize, size: usize, f: impl Fn(u64) -> Option<u64>) -> u64 {
+        match &mut o.borrow_mut(a.mc).kind {
+            ObjectKind::ArrayBuffer(b) => b.bytes.as_mut().map_or(0, |bytes| bytes.update(at, size, f)),
+            _ => 0,
         }
     }
 
@@ -134,15 +172,15 @@ impl Buffers {
             return Err(a.throw(ErrorKind::Type, "Method called on a fixed-length buffer"));
         };
         let n = a.to_index(args.at(0))?;
-        let Some(mut bytes) = Self::bytes_of(o) else {
-            return Err(a.throw(ErrorKind::Type, "Cannot resize a detached ArrayBuffer"));
+        let resized = match &mut o.borrow_mut(a.mc).kind {
+            ObjectKind::ArrayBuffer(b) => b.bytes.as_mut().map(|bytes| n <= max && !(shared && n < bytes.len()) && bytes.resize(n)),
+            _ => None,
         };
-        if n > max || (shared && n < bytes.len()) {
-            return Err(a.throw(ErrorKind::Range, "Invalid length for resize"));
+        match resized {
+            None => Err(a.throw(ErrorKind::Type, "Cannot resize a detached ArrayBuffer")),
+            Some(false) => Err(a.throw(ErrorKind::Range, "Invalid length for resize")),
+            Some(true) => Ok(Value::Undefined),
         }
-        bytes.resize(n, 0);
-        Self::set_bytes(a, o, Some(bytes));
-        Ok(Value::Undefined)
     }
 
     fn resize<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
@@ -209,11 +247,13 @@ impl Buffers {
         if Self::info(n).0.unwrap_or(0) < new_len {
             return Err(a.throw(ErrorKind::Type, "species constructor returned a too small buffer"));
         }
-        let Some(src) = Self::bytes_of(o) else {
+        let Some(len) = Self::info(o).0 else {
             return Err(a.throw(ErrorKind::Type, "ArrayBuffer was detached"));
         };
-        let end = (first + new_len).min(src.len());
+        let end = (first + new_len).min(len);
         if first < end
+            && let ObjectKind::ArrayBuffer(sb) = &o.borrow().kind
+            && let Some(src) = sb.bytes.as_deref()
             && let ObjectKind::ArrayBuffer(b) = &mut n.borrow_mut(a.mc).kind
             && let Some(dst) = b.bytes.as_mut()
         {
@@ -245,11 +285,15 @@ impl Buffers {
         if max.is_some_and(|m| new_len > m) {
             return Err(a.throw(ErrorKind::Range, "new length exceeds maxByteLength"));
         }
-        let n = Self::allocate(a, a.realm.array_buffer_proto, new_len, max, false)?;
-        let mut bytes = Self::bytes_of(o).unwrap_or_default();
-        bytes.resize(new_len, 0);
+        let n = Self::allocate(a, a.realm.array_buffer_proto, 0, max, false)?;
+        // 字节直接移过去；只有改不了长度的（外部内存）才拷贝
+        let mut bytes = Self::take_bytes(a, o).unwrap_or_else(|| Backing::from(alloc::vec::Vec::new()));
+        if !bytes.resize(new_len) {
+            let mut v = bytes.into_vec();
+            v.resize(new_len, 0);
+            bytes = v.into();
+        }
         Self::set_bytes(a, n, Some(bytes));
-        Self::set_bytes(a, o, None);
         Ok(n.into())
     }
 
@@ -334,11 +378,12 @@ impl Buffers {
         let index = a.to_index(args.at(0))?;
         let little = a.to_boolean(args.at(1));
         let at = Self::view_access(a, &v, index, kind)?;
-        let mut bytes = Self::bytes_of(v.buffer).unwrap_or_default()[at..at + kind.size()].to_vec();
+        let mut x = Self::read(v.buffer, at, kind.size());
+        let bytes = &mut x[..kind.size()];
         if !little {
             bytes.reverse();
         }
-        Ok(a.element_value(kind.decode(&bytes)))
+        Ok(a.element_value(kind.decode(bytes)))
     }
 
     /// An element fits starting at byte `index` of the view: returns its position in the buffer.
@@ -425,23 +470,9 @@ impl Buffers {
         let (kind, buffer, at) = Self::atomic_target(a, args.at(0), args.at(1), false)?;
         let v = Self::atomic_value(a, kind, args.at(2))?;
         Self::revalidate(a, buffer, at, kind)?;
-        let size = kind.size();
-        let old = Self::bytes_of(buffer).unwrap_or_default()[at..at + size].to_vec();
-        let (x, y) = (Self::raw(&old), Self::raw(&kind.encode(&v)));
-        let r = match op {
-            Rmw::Add => x.wrapping_add(y),
-            Rmw::Sub => x.wrapping_sub(y),
-            Rmw::And => x & y,
-            Rmw::Or => x | y,
-            Rmw::Xor => x ^ y,
-            Rmw::Exchange => y,
-        };
-        if let ObjectKind::ArrayBuffer(b) = &mut buffer.borrow_mut(a.mc).kind
-            && let Some(dst) = b.bytes.as_mut()
-        {
-            dst[at..at + size].copy_from_slice(&r.to_le_bytes()[..size]);
-        }
-        Ok(a.element_value(kind.decode(&old)))
+        let y = Self::raw(&kind.encode(&v));
+        let old = Self::update(a, buffer, at, kind.size(), |x| Some(op.apply(x, y)));
+        Ok(a.element_value(kind.decode(&old.to_le_bytes()[..kind.size()])))
     }
 
     fn add<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
@@ -473,29 +504,24 @@ impl Buffers {
         let expected = Self::atomic_value(a, kind, args.at(2))?;
         let replacement = Self::atomic_value(a, kind, args.at(3))?;
         Self::revalidate(a, buffer, at, kind)?;
-        let size = kind.size();
-        let old = Self::bytes_of(buffer).unwrap_or_default()[at..at + size].to_vec();
-        if old == kind.encode(&expected)
-            && let ObjectKind::ArrayBuffer(b) = &mut buffer.borrow_mut(a.mc).kind
-            && let Some(dst) = b.bytes.as_mut()
-        {
-            dst[at..at + size].copy_from_slice(&kind.encode(&replacement));
-        }
-        Ok(a.element_value(kind.decode(&old)))
+        let (e, r) = (Self::raw(&kind.encode(&expected)), Self::raw(&kind.encode(&replacement)));
+        let old = Self::update(a, buffer, at, kind.size(), |x| (x == e).then_some(r));
+        Ok(a.element_value(kind.decode(&old.to_le_bytes()[..kind.size()])))
     }
 
     fn load<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let (kind, buffer, at) = Self::atomic_target(a, args.at(0), args.at(1), false)?;
         Self::revalidate(a, buffer, at, kind)?;
-        let e = Agent::read_raw(buffer, at, kind).ok_or_else(|| a.throw(ErrorKind::Type, "TypedArray is detached"))?;
-        Ok(a.element_value(e))
+        let x = Self::update(a, buffer, at, kind.size(), |_| None);
+        Ok(a.element_value(kind.decode(&x.to_le_bytes()[..kind.size()])))
     }
 
     fn store<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let (kind, buffer, at) = Self::atomic_target(a, args.at(0), args.at(1), false)?;
         let v = Self::atomic_value(a, kind, args.at(2))?;
         Self::revalidate(a, buffer, at, kind)?;
-        a.write_raw(buffer, at, kind, &v);
+        let y = Self::raw(&kind.encode(&v));
+        Self::update(a, buffer, at, kind.size(), |_| Some(y));
         Ok(match v {
             j8framework::Element::Number(x) => (x + 0.0).into(),
             j8framework::Element::BigInt(b) => a.bigint(b),
@@ -522,8 +548,8 @@ impl Buffers {
         let v = if kind.is_bigint() { j8framework::Element::BigInt(Agent::wrap_bigint(&a.to_bigint(args.at(2))?, 64, true)) } else { j8framework::Element::Number(f64::from(a.to_int32(args.at(2))?)) };
         let t = a.to_number(args.at(3))?;
         let _ = if t.is_nan() { f64::INFINITY } else { t.max(0.0) };
-        let cur = Self::bytes_of(buffer).unwrap_or_default()[at..at + kind.size()].to_vec();
-        let result = if cur == kind.encode(&v) { "timed-out" } else { "not-equal" };
+        let cur = Self::update(a, buffer, at, kind.size(), |_| None);
+        let result = if cur == Self::raw(&kind.encode(&v)) { "timed-out" } else { "not-equal" };
         Ok(a.string(result).into())
     }
 

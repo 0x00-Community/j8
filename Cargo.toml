@@ -8,7 +8,7 @@ autotests = false
 repository.workspace = true
 readme = "README.md"
 # 只发库本身：tests/test262 子模块有五万多个文件，crates.io 收不下
-include = ["/src", "/tests/binding.rs", "/tests/runtime.rs", "/tests/bindings_more.rs", "/tests/event_loop.rs", "/README.md", "/README.zh-CN.md", "/EMBEDDING.md", "/LICENSE"]
+include = ["/src", "/tests/binding.rs", "/tests/runtime.rs", "/tests/bindings_more.rs", "/tests/event_loop.rs", "/tests/terminate.rs", "/README.md", "/README.zh-CN.md", "/EMBEDDING.md", "/LICENSE"]
 
 [lib]
 name = "j8"
@@ -27,16 +27,19 @@ j8taskqueue = { workspace = true, optional = true }
 j8lockfree.workspace = true
 j8compiler = { workspace = true, optional = true }
 j8jit = { workspace = true, optional = true }
+j8napi = { workspace = true, optional = true }
 
 # 根包按 feature 分发；每个子 crate 也单独发在 crates.io，可以直接依赖
 [features]
 default = ["runtime"]
 # 跑 JS 的一套：执行器 + 内建对象 + 标准平台
 runtime = ["executor", "builtins", "platform"]
-# j8::bytecode：字节码类型、汇编 / 反汇编（不带编译器）
+# j8::bytecode：字节码定义（JSON 生成）、汇编 / 反汇编
 bytecode = ["dep:j8bytecode"]
-# j8::executor：字节码执行器，带 JS ⇒ 字节码编译（oxc），实现 Engine
-executor = ["dep:j8executor", "bytecode"]
+# j8::compiler：JS ⇒ 字节码（oxc 解析）
+compiler = ["dep:j8compiler", "bytecode"]
+# j8::executor：字节码执行器，实现 Engine
+executor = ["dep:j8executor", "compiler"]
 # j8::builtins：内建对象（Intrinsics 的实现）
 builtins = ["dep:j8builtins"]
 # j8::platform：Platform 的标准库实现
@@ -45,11 +48,13 @@ platform = ["dep:j8platform"]
 taskqueue = ["dep:j8taskqueue"]
 # j8::lockfree：无锁基础件
 lockfree = []
-# j8::compiler（字节码 ⇒ MLIR ⇒ x86-64 机器码）与 j8::jit（x86-64 Unix）
-jit = ["executor", "dep:j8compiler", "dep:j8jit"]
+# j8::jit：字节码 ⇒ MLIR ⇒ x86-64 机器码 + JIT 调度（x86-64 Unix）
+jit = ["executor", "dep:j8jit"]
 # j8::Json<T>: Rust values crossing as JSON-shaped data through serde
 json = ["j8binding/json"]
-full = ["runtime", "taskqueue", "lockfree", "jit", "json"]
+# j8::napi：Node-API（原生插件链接的 C 接口）
+napi = ["dep:j8napi"]
+full = ["runtime", "taskqueue", "lockfree", "jit", "json", "napi"]
 
 [dev-dependencies]
 j8executor.workspace = true
@@ -81,6 +86,10 @@ path = "tests/bindings_more.rs"
 name = "event_loop"
 path = "tests/event_loop.rs"
 
+[[test]]
+name = "terminate"
+path = "tests/terminate.rs"
+
 [lints]
 workspace = true
 
@@ -89,30 +98,31 @@ resolver = "3"
 members = ["crates/*", "debugger"]
 
 [workspace.package]
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/0x00-Community/j8"
 
 [workspace.dependencies]
-j8framework = { version = "0.3.0", path = "crates/j8framework" }
-j8platform = { version = "0.3.0", path = "crates/j8platform" }
-j8builtins = { version = "0.3.0", path = "crates/j8builtins" }
-j8bytecode = { version = "0.3.0", path = "crates/j8bytecode", default-features = false }
-j8executor = { version = "0.3.0", path = "crates/j8executor" }
-j8compiler = { version = "0.3.0", path = "crates/j8compiler" }
-j8jit = { version = "0.3.0", path = "crates/j8jit" }
+j8framework = { version = "0.4.0", path = "crates/j8framework" }
+j8platform = { version = "0.4.0", path = "crates/j8platform" }
+j8builtins = { version = "0.4.0", path = "crates/j8builtins" }
+j8bytecode = { version = "0.4.0", path = "crates/j8bytecode" }
+j8executor = { version = "0.4.0", path = "crates/j8executor" }
+j8compiler = { version = "0.4.0", path = "crates/j8compiler" }
+j8jit = { version = "0.4.0", path = "crates/j8jit" }
 mlirpass = { version = "=0.10.4", default-features = false, features = ["target.x86_64"] }
 libc = "0.2"
-j8macros = { version = "0.3.0", path = "crates/macros" }
-j8binding = { version = "0.3.0", path = "crates/j8binding" }
-j8 = { version = "0.3.0", path = "." }
+j8macros = { version = "0.4.0", path = "crates/macros" }
+j8binding = { version = "0.4.0", path = "crates/j8binding" }
+j8napi = { version = "0.4.0", path = "crates/j8napi" }
+j8 = { version = "0.4.0", path = "." }
 clap = { version = "4.6", features = ["derive"] }
 moremath = { version = "=0.2.3", default-features = false }
 libm = "0.2"
 paragc = "0.5.0"
-j8lockfree = { version = "0.3.0", path = "crates/j8lockfree" }
-j8taskqueue = { version = "0.3.0", path = "crates/j8taskqueue" }
+j8lockfree = { version = "0.4.0", path = "crates/j8lockfree" }
+j8taskqueue = { version = "0.4.0", path = "crates/j8taskqueue" }
 smol_str = { version = "0.3", default-features = false }
 hashbrown = { version = "0.17", default-features = false }
 rustc-hash = { version = "2", default-features = false }

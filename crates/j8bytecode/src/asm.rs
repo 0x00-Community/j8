@@ -9,10 +9,9 @@ use alloc::vec::Vec;
 use core::fmt;
 use core::str::FromStr;
 
-use j8framework::{BinaryOp, CompareOp, UnaryOp};
 
-use crate::disasm::{KINDS, MODES};
-use crate::{Const, Constant, EvalName, EvalScope, Function, FunctionKind, Label, Mode, Module, Reg};
+use crate::disasm::KINDS;
+use crate::{Constant, EvalName, EvalScope, Function, FunctionKind, Module};
 
 /// An assembly error.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -54,18 +53,6 @@ pub(crate) trait Operand: Sized {
     fn operand(text: &str) -> Result<Self, AsmError>;
 }
 
-/// An index with a fixed prefix: `r3` / `#3` / `@3`
-macro_rules! prefixed {
-    ($($ty:ident $prefix:literal),*) => {$(
-        impl Operand for $ty {
-            fn operand(text: &str) -> Result<Self, AsmError> {
-                text.strip_prefix($prefix).and_then(|n| n.parse().ok()).map($ty).ok_or_else(|| AsmError::Operand(text.into()))
-            }
-        }
-    )*};
-}
-prefixed!(Reg "r", Const "#", Label "@");
-
 /// Read via `FromStr`
 macro_rules! parsed {
     ($($ty:ty),*) => {$(
@@ -78,18 +65,6 @@ macro_rules! parsed {
 }
 parsed!(bool, i32, u16, u32, usize);
 
-/// Reverse lookup in `ALL` by `name()`
-macro_rules! by_name {
-    ($($ty:ty),*) => {$(
-        impl Operand for $ty {
-            fn operand(text: &str) -> Result<Self, AsmError> {
-                <$ty>::ALL.into_iter().find(|op| op.name() == text).ok_or_else(|| AsmError::Operand(text.into()))
-            }
-        }
-    )*};
-}
-by_name!(BinaryOp, CompareOp, UnaryOp);
-
 /// Reverse lookup in a (value, name) table
 macro_rules! by_table {
     ($($ty:ty = $table:expr),*) => {$(
@@ -100,7 +75,7 @@ macro_rules! by_table {
         }
     )*};
 }
-by_table!(FunctionKind = KINDS, Mode = MODES);
+by_table!(FunctionKind = KINDS);
 
 impl Operand for f64 {
     /// As written by `{:?}` (`NaN` / `inf` / `-0.0` all accepted); a non-canonical NaN is `nan:0x…` (bitwise)

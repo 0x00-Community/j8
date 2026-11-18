@@ -85,7 +85,8 @@ cd samples/benchv8 && cargo run --release
 | `j8binding` | std | Rust ⇄ JS 绑定的运行时：`FromJs` / `IntoJs`、宿主对象、`Class` / `Object` |
 | `j8builtins` | std | 实现 `Intrinsics`：往 `Realm` 装 Object / Function / Array / String / Number / Boolean / Math / Error 系列 / `console` / `parseInt` 等 |
 | `j8platform` | std | 实现 `Platform`（`DefaultPlatform`）：后台任务跑在 moremath `ThreadMulti` 线程池上（起一次复用、任务可借用调用方数据，经 `j8framework::Pool`），时钟用 `Instant` |
-| `j8bytecode` | std | 虚拟指令集：累加器式寄存器字节码（`Insn` / `Function` / `Module`）；反汇编 `module.to_string()`、汇编 `text.parse::<Module>()`，互为逆；`compile` feature（缺省开）带 JS ⇒ 字节码编译器 `Module::try_from(&Source)`，用 oxc 解析 |
+| `j8bytecode` | std | 虚拟指令集，依赖根（不依赖其他 j8 crate）：累加器式寄存器字节码（`Insn` / `Function` / `Module` …），全部类型由 `insn.json` 生成；反汇编 `module.to_string()`、汇编 `text.parse::<Module>()`，互为逆 |
+| `j8compiler` | std | JS ⇒ 字节码（`Module` 实现 `j8compiler::Compile`：脚本、模块、`eval` / `Function`），用 oxc 解析 |
 | `j8taskqueue` | `no_std` | 任务队列：`ITask`（`recursable` / `depend` / `exec`）与 `ITaskPoll`（`add` / `run`）；无锁数据流调度（手写 MPMC 就绪队列、原子依赖计数），依赖做完的任务立刻在宿主给的 `Pool` 上并行跑（或就在调用线程上跑）、没有轮次屏障；`TaskId::family` 并查集找爹、`cancel` 整家取消；配额按字节码条数（`Quota` / `Flow::Yield`、每次 run 的预算）；取不到活的线程直接离开、不自旋。每个 `j8framework::EventLoop` 就是一个 `Queue`：脚本、兑现、宿主 future 的 poll，脚本每让出一次就检查一次队列 |
 | `j8macros` | proc-macro | 过程宏：`enums!("x.json")` 从 JSON 生成枚举（定义、`Display`、按字段类型取 `&mut`）、堆类型的 `#[derive(Collect)]`（paragc `Trace`）、绑定宏，用法见 `crates/macros/USAGE.md` |
 | `samples/dune` | std | 分两层的运行时：`src/web/`（Web 标准接口：`console`、定时器、`URL`、`TextEncoder`、`EventTarget` / `AbortController`、`fetch`、`structuredClone`、`crypto`……）和叠在上面的 `src/node/`（`process`、`require` / ES 模块、`Buffer`、`fs`、`path`、`os`、`events`、`util`、`assert`、`child_process`……）；碰机器的部分是 `#[j8::object]` / `#[j8::class]` 绑定的 Rust，接口本身是 JS prelude；`dune a.js`、`dune --web a.mjs`、`dune -e` / `-p`、REPL，详见其 README |
@@ -95,7 +96,7 @@ cd samples/benchv8 && cargo run --release
 | `j8executor` | std | 字节码执行器 `Executor`，**目前是最后一层**；实现 `Engine`，固定带 JS ⇒ 字节码编译器（脚本、模块、`eval` / `Function` 都先编成字节码） |
 
 所有 JS 都先编成字节码再执行，不设 AST 解释层。
-依赖方向：各层只依赖 `j8framework`（`j8executor` 另依赖 `j8bytecode`），`j8framework` 不依赖任何层，只依赖基础件 `j8lockfree` 与 `j8taskqueue`。
+依赖方向：各层只依赖 `j8framework`（`j8executor` 另依赖 `j8compiler`；`j8bytecode` 是根，`j8framework` 与 `j8compiler` 依赖它），`j8framework` 不依赖任何层，只依赖基础件 `j8lockfree` 与 `j8taskqueue`。
 
 ### 🧹 堆与句柄
 
@@ -137,7 +138,7 @@ isolate.enter(|scope| {
 
 `dune --jit a.js` 开 JIT；`J8_TEST262_JIT=1 cargo test --release --test test262` 开着 JIT（每个函数第一次调用、每个循环第一次往回跳就编）跑基线。
 
-- `j8compiler`：字节码函数 ⇒ MLIR（`llvm` 方言）⇒ mlirpass `target.x86_64` ⇒ x86-64 机器码（`Compiler` 建一次反复用，只装 builtin 与 `llvm` 方言）。
+- `j8jit` 编译部分：字节码函数 ⇒ MLIR（`llvm` 方言）⇒ mlirpass `target.x86_64` ⇒ x86-64 机器码（`Compiler` 建一次反复用，只装 builtin 与 `llvm` 方言）。
   机器码是 `extern "C" fn(regs, acc, start) -> u64`，直接读写本帧寄存器文件与累加器里的 `Value`（布局见 `j8framework::ValueTag`：16 字节、首字节标签、第 8 字节起载荷）；
   `start` 是 0 从函数开头进、`h + 1` 从循环头 `h` 进（OSR）；返回 0 是函数返回了，`pc + 1` 是停在第 pc 条指令之前（`j8executor::Exit`），解释器从那里接着跑
 - 第一档收的指令：寄存器读写、数 / 布尔常量、四则（取余、乘方、位运算调运行时函数）与比较、`++` / `--`、跳转、死区检查、返回；
@@ -155,7 +156,7 @@ isolate.enter(|scope| {
 
 累加器式寄存器机（同 V8 Ignition）：结果都进隐式的 `acc`，二元运算 `acc = reg op acc`。
 
-指令与 j8bytecode 的全部枚举（`Insn` / `Constant` / `FunctionKind` / `PropertyKind`）定义在 `crates/j8bytecode/insn.json`，由 `j8macros::enums!` 生成，⛔ 手写枚举；加指令只改 JSON（带 `Label` 字段的自动算跳转，进 `target_mut`）。
+j8bytecode 的全部类型（指令、操作符、常量、`Function` / `Module` 等结构体）定义在 `crates/j8bytecode/insn.json`，由 `j8macros::enums!` 生成，⛔ 手写类型定义；加指令只改 JSON（带 `Label` 字段的自动算跳转，进 `target_mut`）。
 
 ### 汇编 / 反汇编
 

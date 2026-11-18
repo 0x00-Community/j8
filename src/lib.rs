@@ -16,19 +16,21 @@
 //! | feature | module | |
 //! |---|---|---|
 //! | `runtime` (default) | `executor` + `builtins` + `platform` | everything needed to run JS |
-//! | `bytecode` | [`bytecode`] | bytecode types, assembler / disassembler |
-//! | `executor` | [`executor`] | bytecode executor with the JS ⇒ bytecode compiler, implements `Engine` |
+//! | `bytecode` | [`bytecode`] | bytecode definitions (generated from JSON), assembler / disassembler |
+//! | `compiler` | [`compiler`] | JS ⇒ bytecode |
+//! | `executor` | [`executor`] | bytecode executor, implements `Engine` |
 //! | `builtins` | [`builtins`] | built-in objects |
 //! | `platform` | [`platform`] | the standard-library `Platform` |
 //! | `taskqueue` | [`taskqueue`] | lock-free dataflow task queue |
 //! | `lockfree` | [`lockfree`] | lock-free building blocks |
-//! | `jit` | [`compiler`], [`jit`] | bytecode ⇒ MLIR ⇒ x86-64 JIT (x86-64 Unix) |
+//! | `jit` | [`jit`] | bytecode ⇒ MLIR ⇒ x86-64 machine code + JIT scheduling (x86-64 Unix) |
 //! | `json` | [`Json`] | Rust values crossing as JSON-shaped data through serde |
 //! | `full` | all of the above | |
 #![doc = include_str!("../EMBEDDING.md")]
 
 #[cfg(feature = "json")]
 pub use j8binding::Json;
+pub use j8binding::{ArrayBuffer, Backing, BufferRef, External, Shared, SharedMemory, Transfer};
 pub use j8binding::{Bytes, Class, ClassHandle, FromJs, Function, Install, IntoJs, Member, Module, Object, Persistent, Promise, Rest, This, NATIVE};
 pub use j8macros::{class, function, module, object};
 
@@ -44,7 +46,7 @@ pub use j8framework as frame;
 
 #[cfg(feature = "builtins")]
 pub use j8builtins as builtins;
-#[cfg(feature = "jit")]
+#[cfg(feature = "compiler")]
 pub use j8compiler as compiler;
 #[cfg(feature = "executor")]
 pub use j8executor as executor;
@@ -52,6 +54,8 @@ pub use j8executor as executor;
 pub use j8jit as jit;
 #[cfg(feature = "lockfree")]
 pub use j8lockfree as lockfree;
+#[cfg(feature = "napi")]
+pub use j8napi as napi;
 #[cfg(feature = "platform")]
 pub use j8platform as platform;
 #[cfg(feature = "taskqueue")]

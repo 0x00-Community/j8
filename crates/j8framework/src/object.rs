@@ -8,7 +8,7 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 
 use crate::{CellMut, CellRef, Collect, Gc, GcCell, GcSlot, Mutation, ValueCell};
 
-use crate::{Agent, Error, FuncId, Key, Value};
+use crate::{Agent, Backing, Error, FuncId, Key, Value};
 
 /// A string on the heap.
 pub type JsString<'gc> = Gc<'gc, crate::text::JsStr>;
@@ -504,6 +504,10 @@ pub struct NativeClosure<'gc> {
     #[collect(require_static)]
     pub f: ClosureFn,
     pub slots: Vec<Value<'gc>>,
+    /// 能被 `new`：执行层先按 `new.target.prototype` 造好 `this` 交给 `f`（[`Agent::new_target`] 是 `new.target`），`f`
+    /// 返回对象就用它，否则用 `this`（Node-API 构造函数的约定）
+    #[collect(require_static)]
+    pub constructor: bool,
 }
 
 impl fmt::Debug for NativeClosure<'_> {
@@ -642,12 +646,11 @@ impl ElementKind {
     }
 }
 
-/// The body of an ArrayBuffer / SharedArrayBuffer: bytes (absent once detached), the resizable maximum, and whether it
-/// is shared.
+/// ArrayBuffer / SharedArrayBuffer 的本体：字节（detach 后没有；自有、外部或共享内存，见 [`Backing`]）、可变长的上限、是否共享。
 #[derive(Debug, Collect)]
 #[collect(require_static)]
 pub struct BufferData {
-    pub bytes: Option<Vec<u8>>,
+    pub bytes: Option<Backing>,
     pub max: Option<usize>,
     pub shared: bool,
 }

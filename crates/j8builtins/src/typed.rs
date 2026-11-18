@@ -81,7 +81,7 @@ impl Typed {
                 v => Some(a.to_index(Value::from(v))?),
             };
             let (len, max) = match &src.borrow().kind {
-                ObjectKind::ArrayBuffer(b) => (b.bytes.as_ref().map(Vec::len), b.max),
+                ObjectKind::ArrayBuffer(b) => (b.bytes.as_deref().map(<[u8]>::len), b.max),
                 _ => (None, None),
             };
             let Some(buf_len) = len else { return Err(a.throw(ErrorKind::Type, "Cannot construct a TypedArray on a detached ArrayBuffer")) };

@@ -24,12 +24,6 @@ let mut executor = j8executor::Executor::default();
 let result = isolate.run(&mut executor, &cx, &j8framework::Source { text: "1 + 2", file: "a.js" })?;
 ```
 
-## Features
-
-| Feature | Default | Meaning |
-| --- | --- | --- |
-| `compile` | on | Brings in the JS ⇒ bytecode compiler (`j8bytecode/compile`) and implements `Engine`; without it only the executor remains |
-
 ## License
 
 MIT, as part of [j8](https://github.com/0x00-Community/j8).

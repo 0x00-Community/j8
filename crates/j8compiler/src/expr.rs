@@ -8,7 +8,7 @@ use j8framework::{BinaryOp, CompareOp, Error, Resume, UnaryOp};
 
 use crate::compiler::{Body, Compiler, Flavor, Place};
 use crate::scope::Hidden;
-use crate::{Const, Constant, FunctionKind, Insn, PropertyKind, Reg};
+use j8bytecode::{Const, Constant, FunctionKind, Insn, PropertyKind, Reg};
 
 /// Binary operator ⇒ bytecode operation.
 #[derive(Clone, Copy)]
@@ -24,7 +24,7 @@ enum Assign {
     Plain,
     Binary(BinaryOp),
     /// `||=` / `&&=` / `??=`: the right side is not evaluated if the left side already satisfies the condition
-    Logical(fn(crate::Label) -> Insn),
+    Logical(fn(j8bytecode::Label) -> Insn),
 }
 
 /// An element of an array literal / argument list.

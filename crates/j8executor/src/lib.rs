@@ -16,6 +16,8 @@ use core::cell::{Cell, RefCell};
 use j8lockfree::SegVec;
 
 use j8bytecode::{Constant, Function, FunctionKind, Insn, Mode, Module, PropertyKind, Reg};
+use j8compiler::Compile;
+use j8framework::Numbers;
 use j8framework::{Collect, Gc};
 mod cache;
 mod ic;
@@ -174,13 +176,15 @@ pub trait Tier {
     /// not hot yet, gives [`Tiered::NotYet`]; if it cannot be compiled or cannot run as a whole, gives
     /// [`Tiered::Never`]. When compiling, the platform's thread pool `pool` may be used (compiling several functions
     /// together).
-    fn enter(&self, pool: &dyn j8framework::Pool, id: FuncId, func: &Function, regs: &mut [Value<'_>], acc: &mut Value<'_>) -> Tiered;
+    /// `a` 给出编译用的线程池（`a.platform`）和中止请求（`a.stop`：机器码在回跳读它，有请求就退回解释器
+    /// （[`Exit::Resume`]），由解释器抛出中止）。
+    fn enter(&self, a: &Agent<'_, '_>, id: FuncId, func: &Function, regs: &mut [Value<'_>], acc: &mut Value<'_>) -> Tiered;
 
     /// This frame jumps back to instruction `header` (the loop went around again), with the registers and accumulator
     /// as they are now: if the loop is hot and has machine code, continues in machine code from the loop header (OSR)
     /// and gives where it stopped (always [`Exit::Resume`]: even a `return` stops and hands off to the interpreter to
     /// finish); if not switching in, gives [`Tiered::NotYet`] ([`Tiered::Never`] if it never will).
-    fn backedge(&self, pool: &dyn j8framework::Pool, id: FuncId, func: &Function, header: u32, regs: &mut [Value<'_>], acc: &mut Value<'_>) -> Tiered;
+    fn backedge(&self, a: &Agent<'_, '_>, id: FuncId, func: &Function, header: u32, regs: &mut [Value<'_>], acc: &mut Value<'_>) -> Tiered;
 }
 
 /// The JIT tier's answer.
@@ -192,6 +196,52 @@ pub enum Tiered {
     NotYet,
     /// No need to ask about this function (frame entry / loop) again: the executor records it and stops calling
     Never,
+}
+
+/// 两次看中止请求之间最多走多少步
+const CHECK_STEPS: usize = 1024;
+
+/// 一次执行的步数预算加中止检查：热路径只数 `tick`，数完才看配额和中止请求。
+struct Budget<'s> {
+    /// 这一段还能走的步数
+    tick: usize,
+    /// 这一段之外剩下的配额；`None` 不限
+    left: Option<usize>,
+    stop: &'s j8framework::Termination,
+    /// 是因为中止停下的
+    terminated: bool,
+}
+
+impl<'s> Budget<'s> {
+    fn new(stop: &'s j8framework::Termination, left: Option<usize>) -> Self {
+        Self { tick: 0, left, stop, terminated: false }
+    }
+
+    /// 还剩的配额（`None` 不限）
+    fn remaining(&self) -> Option<usize> {
+        self.left.map(|l| l + self.tick)
+    }
+
+    /// 这一段走完了：先看中止请求，再从配额里取下一段（这一步也算在里面）；停下返回 `true`
+    #[cold]
+    #[inline(never)]
+    fn refill(&mut self) -> bool {
+        if self.stop.observe() {
+            self.terminated = true;
+            return true;
+        }
+        let take = match self.left {
+            Some(0) => return true,
+            Some(l) => {
+                let t = l.min(CHECK_STEPS);
+                self.left = Some(l - t);
+                t
+            }
+            None => CHECK_STEPS,
+        };
+        self.tick = take - 1;
+        false
+    }
 }
 
 /// How machine code exited. Machine code's return value: 0 is [`Return`](Exit::Return), `pc + 1` is
@@ -255,20 +305,20 @@ impl Executor {
     /// code (result in `acc`, the frame's registers already released); if machine code bailed out midway, sets the
     /// frame's `pc` to where it stopped and interprets as usual.
     #[inline]
-    fn tiered<'gc>(&self, pool: &dyn j8framework::Pool, loaded: &Loaded, regs: &mut Vec<Value<'gc>>, f: &mut Frame<'gc>, acc: &mut Value<'gc>) -> bool {
+    fn tiered<'gc>(&self, a: &Agent<'gc, '_>, loaded: &Loaded, regs: &mut Vec<Value<'gc>>, f: &mut Frame<'gc>, acc: &mut Value<'gc>) -> bool {
         match &self.tier {
-            Some(tier) => Self::tier_enter(&**tier, pool, loaded, regs, f, acc),
+            Some(tier) => Self::tier_enter(&**tier, a, loaded, regs, f, acc),
             None => false,
         }
     }
 
     #[inline(never)]
-    fn tier_enter<'gc>(tier: &dyn Tier, pool: &dyn j8framework::Pool, loaded: &Loaded, regs: &mut Vec<Value<'gc>>, f: &mut Frame<'gc>, acc: &mut Value<'gc>) -> bool {
+    fn tier_enter<'gc>(tier: &dyn Tier, a: &Agent<'gc, '_>, loaded: &Loaded, regs: &mut Vec<Value<'gc>>, f: &mut Frame<'gc>, acc: &mut Value<'gc>) -> bool {
         if loaded.no_tier_enter.get() {
             return false;
         }
         let end = f.base + usize::from(loaded.func.regs);
-        match tier.enter(pool, f.func, &loaded.func, &mut regs[f.base..end], acc) {
+        match tier.enter(a, f.func, &loaded.func, &mut regs[f.base..end], acc) {
             Tiered::Ran(Exit::Return) => {
                 regs.truncate(f.base);
                 true
@@ -288,14 +338,14 @@ impl Executor {
     /// On a jump back to `header`, asks the JIT tier whether to switch into machine code (OSR); if it did, sets the
     /// frame's `pc` to where machine code stopped.
     #[inline(never)]
-    fn osr<'gc>(&self, pool: &dyn j8framework::Pool, loaded: &Loaded, regs: &mut [Value<'gc>], f: &mut Frame<'gc>, acc: &mut Value<'gc>, header: usize) {
+    fn osr<'gc>(&self, a: &Agent<'gc, '_>, loaded: &Loaded, regs: &mut [Value<'gc>], f: &mut Frame<'gc>, acc: &mut Value<'gc>, header: usize) {
         let Some(tier) = &self.tier else { return };
         if loaded.no_tier_loops.get() {
             return;
         }
         let end = f.base + usize::from(loaded.func.regs);
         let Ok(header) = u32::try_from(header) else { return };
-        match tier.backedge(pool, f.func, &loaded.func, header, &mut regs[f.base..end], acc) {
+        match tier.backedge(a, f.func, &loaded.func, header, &mut regs[f.base..end], acc) {
             Tiered::Ran(Exit::Resume(pc)) => f.pc = pc as usize,
             Tiered::Never => loaded.no_tier_loops.set(true),
             Tiered::Ran(Exit::Return) | Tiered::NotYet => {}
@@ -531,6 +581,17 @@ impl Executor {
         }
     }
 
+    /// 构造一个能 `new` 的 [`j8framework::NativeClosure`]：`this` 是原型取自 `new_target` 的新对象，`f` 返回对象就用它。
+    fn construct_closure<'gc>(a: &mut Agent<'gc, '_>, o: JsObject<'gc>, f: j8framework::ClosureFn, args: &[Value<'gc>], new_target: Value<'gc>) -> Result<Value<'gc>, Error> {
+        let proto = a.proto_from_ctor(new_target, a.realm.object_proto)?;
+        let this: Value<'gc> = ObjectData { proto: Some(proto), ..ObjectData::default() }.alloc(a.mc).into();
+        let outer = core::mem::replace(&mut a.new_target, new_target);
+        let r = f(a, o, this, args);
+        a.new_target = outer;
+        let v = r?;
+        Ok(if v.as_object().is_some() { v } else { this })
+    }
+
     /// `construct`: the callee is an ordinary function / base class constructor (`new.target` is itself), so builds
     /// `this` and opens the frame straight from the registers; anything else copies the arguments out and goes through
     /// [`prepare`](Self::prepare).
@@ -559,6 +620,13 @@ impl Executor {
             let kind = match &o.borrow().kind {
                 ObjectKind::Function(c) => Ok(Ok(*c)),
                 ObjectKind::Native(n) => Ok(Err(*n)),
+                ObjectKind::NativeClosure(c) if c.constructor => {
+                    let f = c.f;
+                    let saved = self.depth.replace(depth);
+                    let r = Self::construct_closure(a, o, f, &args, new_target);
+                    self.depth.set(saved);
+                    return r.map(Prepared::Done);
+                }
                 ObjectKind::Bound(b) => Err(Some((b.target, b.args.clone()))),
                 ObjectKind::Proxy(p) if p.constructor => Err(None),
                 _ => break,
@@ -958,9 +1026,11 @@ impl Executor {
     /// not caught. `budget` applies only to the outermost level: when it runs out, stops with the state.
     fn execute<'gc>(&self, a: &mut Agent<'gc, '_>, mut st: State<'gc>, budget: &mut Option<usize>) -> Result<Outcome<'gc>, Error> {
         let base = self.depth.get();
+        let mut b = Budget::new(a.stop, *budget);
         let r = loop {
-            match self.run(a, &mut st, base, budget) {
+            match self.run(a, &mut st, base, &mut b) {
                 Ok(Some(v)) => break Ok(v),
+                Ok(None) if b.terminated => break Err(Error::Terminated),
                 Ok(None) => break Ok(Outcome::Paused(alloc::boxed::Box::new(st))),
                 Err(Error::Exception(g)) => {
                     let v = a.local(&g);
@@ -971,6 +1041,7 @@ impl Executor {
                 Err(e) => break Err(e),
             }
         };
+        *budget = b.remaining();
         self.depth.set(base);
         r
     }
@@ -980,9 +1051,10 @@ impl Executor {
     fn execute_to_end<'gc>(&self, a: &mut Agent<'gc, '_>, st: &mut State<'gc>) -> Result<Value<'gc>, Error> {
         let base = self.depth.get();
         let r = loop {
-            match self.run(a, st, base, &mut None) {
+            match self.run(a, st, base, &mut Budget::new(a.stop, None)) {
                 Ok(Some(v)) => break Ok(v.returned()),
-                Ok(None) => unreachable!("no budget, no pause"),
+                // 不限步数，停下只能是中止
+                Ok(None) => break Err(Error::Terminated),
                 Err(Error::Exception(g)) => {
                     let v = a.local(&g);
                     if !st.unwind(v) {
@@ -996,24 +1068,22 @@ impl Executor {
         r
     }
 
-    /// Consumes one step of budget; returns `true` when exhausted (the caller stops, with the state intact)
+    /// Consumes one step of budget; returns `true` when exhausted (the caller stops, with the state intact) or
+    /// terminated ([`Budget::terminated`])
     #[inline]
-    fn spent(budget: &mut Option<usize>) -> bool {
-        match budget {
-            Some(0) => true,
-            Some(b) => {
-                *b -= 1;
-                false
-            }
-            None => false,
+    fn spent(budget: &mut Budget<'_>) -> bool {
+        if budget.tick == 0 {
+            return budget.refill();
         }
+        budget.tick -= 1;
+        false
     }
 
     /// Main loop: the outer loop fetches the function once per frame entered (start, call, return), the inner loop
     /// fetches and dispatches instructions one by one; instructions that switch frames `continue 'frame`. Errors return
     /// directly and are unwound by [`execute`](Self::execute).
     #[expect(clippy::too_many_lines, reason = "one branch per instruction; splitting it up would make it harder to read")]
-    fn run<'gc>(&self, a: &mut Agent<'gc, '_>, st: &mut State<'gc>, depth: usize, budget: &mut Option<usize>) -> Result<Option<Outcome<'gc>>, Error> {
+    fn run<'gc>(&self, a: &mut Agent<'gc, '_>, st: &mut State<'gc>, depth: usize, budget: &mut Budget<'_>) -> Result<Option<Outcome<'gc>>, Error> {
         let State { regs, frames, f, acc } = st;
         // When the call fast path has already fetched the callee, hands it to the next frame, saving a lookup
         let mut entering: Option<&Loaded> = None;
@@ -1059,7 +1129,7 @@ impl Executor {
                             f.pc = l.0 as usize;
                             if back {
                                 if self.tier.is_some() {
-                                    self.osr(a.platform, loaded, regs, f, acc, f.pc);
+                                    self.osr(a, loaded, regs, f, acc, f.pc);
                                 }
                                 if Self::spent(budget) {
                                     return Ok(None);
@@ -1219,7 +1289,7 @@ impl Executor {
                         f.pc = l.0 as usize;
                         if back {
                             if self.tier.is_some() {
-                                self.osr(a.platform, loaded, regs, f, acc, f.pc);
+                                self.osr(a, loaded, regs, f, acc, f.pc);
                             }
                             if Self::spent(budget) {
                                 return Ok(None);
@@ -1232,7 +1302,7 @@ impl Executor {
                             f.pc = l.0 as usize;
                             if back {
                                 if self.tier.is_some() {
-                                    self.osr(a.platform, loaded, regs, f, acc, f.pc);
+                                    self.osr(a, loaded, regs, f, acc, f.pc);
                                 }
                                 if Self::spent(budget) {
                                     return Ok(None);
@@ -1246,7 +1316,7 @@ impl Executor {
                             f.pc = l.0 as usize;
                             if back {
                                 if self.tier.is_some() {
-                                    self.osr(a.platform, loaded, regs, f, acc, f.pc);
+                                    self.osr(a, loaded, regs, f, acc, f.pc);
                                 }
                                 if Self::spent(budget) {
                                     return Ok(None);
@@ -1488,7 +1558,7 @@ impl Executor {
                             && let Some((c, loaded)) = self.plain_closure(target)
                         {
                             let mut next = Self::enter_regs(a, regs, &loaded.func, c, target, regs[r(this)], first, usize::from(argc));
-                            if !self.tiered(a.platform, loaded, regs, &mut next, acc) {
+                            if !self.tiered(a, loaded, regs, &mut next, acc) {
                                 frames.push(core::mem::replace(f, next));
                                 entering = Some(loaded);
                                 continue 'frame;
@@ -1735,7 +1805,7 @@ impl<'gc> Invoke<'gc> for Executor {
             let mut regs = a.take_regs();
             let mut f = Self::enter_func(a, &mut regs, &loaded.func, c, callee, this, args);
             let mut acc = Value::Undefined;
-            if self.tiered(a.platform, loaded, &mut regs, &mut f, &mut acc) {
+            if self.tiered(a, loaded, &mut regs, &mut f, &mut acc) {
                 a.give_regs(regs);
                 return Ok(acc);
             }
@@ -1901,10 +1971,10 @@ impl j8framework::Engine for Executor {
 
     fn start(&mut self, _: &mut j8framework::Isolate<'_>, _: &j8framework::ContextRoot, src: &j8framework::Source<'_>, kind: j8framework::ScriptKind) -> Result<Job, Error> {
         Ok(Job(match kind {
-            j8framework::ScriptKind::Classic => Started::Script(self.load(Module::try_from(src)?)),
+            j8framework::ScriptKind::Classic => Started::Script(self.load(Module::compile(src, j8framework::CodeKind::Script)?)),
             j8framework::ScriptKind::Shared => Started::Script(self.load(match &self.cache {
                 Some(cache) => cache.script(src)?,
-                None => Module::try_from(src)?,
+                None => Module::compile(src, j8framework::CodeKind::Script)?,
             })),
             j8framework::ScriptKind::Module => Started::Module { text: src.text.into(), file: src.file.into() },
         }))

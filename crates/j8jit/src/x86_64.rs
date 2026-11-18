@@ -1069,15 +1069,15 @@ impl<'b, 'a> Lower<'b, 'a> {
     }
 }
 
-impl From<X86_64Code> for j8compiler::MachineCode {
+impl From<X86_64Code> for crate::MachineCode {
     fn from(c: X86_64Code) -> Self {
-        j8compiler::MachineCode { name: c.name, bytes: c.bytes, relocs: c.relocs.into_iter().map(|r| (r.offset, r.symbol)).collect() }
+        crate::MachineCode { name: c.name, bytes: c.bytes, relocs: c.relocs.into_iter().map(|r| (r.offset, r.symbol)).collect() }
     }
 }
 
-/// j8compiler's backend: the lowered module's functions as x86-64 machine code
-impl j8compiler::Backend for X86_64Emit {
-    fn emit(&self, body: &Body<'_>, root: OpId) -> Result<Vec<j8compiler::MachineCode>, Error> {
+/// The backend: the lowered module's functions as x86-64 machine code
+impl crate::Backend for X86_64Emit {
+    fn emit(&self, body: &Body<'_>, root: OpId) -> Result<Vec<crate::MachineCode>, Error> {
         Emit::emit(self, body, root).map(|codes| codes.into_iter().map(Into::into).collect())
     }
 }

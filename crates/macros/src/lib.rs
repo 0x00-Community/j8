@@ -1,7 +1,7 @@
 //! j8macros: procedural macros for j8.
 //!
-//! `enums!("x.json")`: generates enums (definitions, `Display`, field access by type) from a JSON file under the
-//! calling crate's root directory. The JSON is the single source of truth; ⛔ do not hand-write these enums.
+//! `enums!("x.json")`: generates enums (definitions, `Display`, field access by type) and structs from a JSON file
+//! under the calling crate's root directory. The JSON is the single source of truth; ⛔ do not hand-write these types.
 //! See `USAGE.md` for the format.
 //!
 //! `#[class]` / `#[object]` / `#[function]`: Rust ⇄ JS bindings (used through the facade crate `j8`:

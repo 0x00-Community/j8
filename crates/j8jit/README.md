@@ -2,9 +2,14 @@
 
 **English** · [简体中文](README.zh-CN.md)
 
-The JIT of [j8](https://github.com/0x00-Community/j8) (x86-64 Unix). It implements the executor's `Tier`: hot
-functions and hot loops are compiled by `j8compiler`, emitted by this crate's x86-64 backend (`x86_64.rs`), loaded into
-executable memory and run in place of interpretation.
+The JIT of [j8](https://github.com/0x00-Community/j8) (x86-64 Unix). It owns bytecode ⇒ machine code and the JIT
+scheduling itself: it implements the executor's `Tier`; hot functions and hot loops are lowered to MLIR (`llvm` dialect,
+via [mlirpass](https://crates.io/crates/mlirpass)), emitted by the x86-64 backend (`x86_64.rs`), loaded into executable
+memory and run in place of interpretation.
+
+```text
+j8bytecode::Function ─ Lower ─▶ MLIR (llvm dialect) ─ Backend (x86-64) ─▶ machine code + addresses to patch
+```
 
 ```text
 calls / iterations below the threshold  ⇒ count, interpret as usual

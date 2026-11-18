@@ -1,6 +1,67 @@
 {
   "enums": [
     {
+      "name": "BinaryOp",
+      "doc": "Binary operations (the result is a value).",
+      "derive": ["Clone", "Copy", "Debug", "PartialEq", "Eq", "Hash"],
+      "asm": true,
+      "variants": [
+        {"name": "Add", "text": "add"},
+        {"name": "Sub", "text": "sub"},
+        {"name": "Mul", "text": "mul"},
+        {"name": "Div", "text": "div"},
+        {"name": "Rem", "text": "rem"},
+        {"name": "Exp", "text": "exp"},
+        {"name": "BitAnd", "text": "bitand"},
+        {"name": "BitOr", "text": "bitor"},
+        {"name": "BitXor", "text": "bitxor"},
+        {"name": "Shl", "text": "shl"},
+        {"name": "Shr", "text": "shr"},
+        {"name": "UShr", "text": "ushr"}
+      ]
+    },
+    {
+      "name": "CompareOp",
+      "doc": "Comparisons (the result is a boolean).",
+      "derive": ["Clone", "Copy", "Debug", "PartialEq", "Eq", "Hash"],
+      "asm": true,
+      "variants": [
+        {"name": "Eq", "text": "eq"},
+        {"name": "Ne", "text": "ne"},
+        {"name": "StrictEq", "text": "stricteq"},
+        {"name": "StrictNe", "text": "strictne"},
+        {"name": "Lt", "text": "lt"},
+        {"name": "Gt", "text": "gt"},
+        {"name": "Le", "text": "le"},
+        {"name": "Ge", "text": "ge"}
+      ]
+    },
+    {
+      "name": "UnaryOp",
+      "doc": "Unary operations.",
+      "derive": ["Clone", "Copy", "Debug", "PartialEq", "Eq", "Hash"],
+      "asm": true,
+      "variants": [
+        {"name": "Neg", "text": "neg"},
+        {"name": "Plus", "text": "plus"},
+        {"name": "Not", "text": "not"},
+        {"name": "BitNot", "text": "bitnot"},
+        {"name": "Typeof", "text": "typeof"},
+        {"name": "Void", "text": "void"}
+      ]
+    },
+    {
+      "name": "Mode",
+      "doc": "Code mode: sloppy / strict.",
+      "derive": ["Clone", "Copy", "Debug", "Default", "PartialEq", "Eq"],
+      "display": true,
+      "asm": true,
+      "variants": [
+        {"name": "Sloppy", "text": "sloppy", "default": true},
+        {"name": "Strict", "text": "strict"}
+      ]
+    },
+    {
       "name": "Constant",
       "doc": "An entry in the constant pool. Numbers compare bitwise (`0` and `-0` are not merged, `NaN`s can be), so `PartialEq` is hand-written in insn.rs.",
       "derive": ["Clone", "Debug"],
@@ -155,6 +216,79 @@
         {"name": "Throw", "doc": "Throw acc", "mnemonic": "throw"},
         {"name": "Return", "doc": "Return acc", "mnemonic": "return"}
       ]
+    }
+  ],
+  "structs": [
+    {
+      "name": "Reg",
+      "doc": "Register: a slot in the function frame. Calling convention: `r0` is `this`, `r1` is the callee itself, parameters start at `r2`.",
+      "derive": ["Clone", "Copy", "Debug", "PartialEq", "Eq", "Hash", "PartialOrd", "Ord"],
+      "prefix": "r",
+      "consts": [
+        {"name": "THIS", "ty": "Reg", "value": "Reg(0)"},
+        {"name": "CALLEE", "ty": "Reg", "value": "Reg(1)"},
+        {"name": "PARAMS", "ty": "u16", "value": "2", "doc": "The first parameter"}
+      ],
+      "fields": [{"ty": "u16"}]
+    },
+    {
+      "name": "Label",
+      "doc": "Jump target: an instruction index.",
+      "derive": ["Clone", "Copy", "Debug", "PartialEq", "Eq", "Hash"],
+      "prefix": "@",
+      "fields": [{"ty": "u32"}]
+    },
+    {
+      "name": "Const",
+      "doc": "Constant pool index.",
+      "derive": ["Clone", "Copy", "Debug", "PartialEq", "Eq", "Hash"],
+      "prefix": "#",
+      "fields": [{"ty": "u32"}]
+    },
+    {
+      "name": "EvalName",
+      "doc": "A binding visible at a direct eval: name, slot in its environment, whether it is `const`, whether it needs a TDZ check.",
+      "derive": ["Clone", "Debug"],
+      "fields": [
+        {"name": "name", "ty": "Box<str>"},
+        {"name": "slot", "ty": "u16"},
+        {"name": "constant", "ty": "bool"},
+        {"name": "tdz", "ty": "bool"},
+        {"name": "self_name", "ty": "bool", "doc": "The own name of a named function expression: assignment is silently ignored in sloppy mode, throws TypeError in strict mode"}
+      ]
+    },
+    {
+      "name": "EvalScope",
+      "doc": "The scope table at a direct eval: innermost first, one level per environment on the environment chain.",
+      "derive": ["Clone", "Debug", "Default"],
+      "fields": [{"ty": "Vec<Vec<EvalName>>"}]
+    },
+    {
+      "name": "Function",
+      "doc": "A function: name, parameter count, register count, instructions, constant pool.",
+      "derive": ["Clone", "Debug", "Default"],
+      "fields": [
+        {"name": "name", "ty": "Box<str>"},
+        {"name": "kind", "ty": "FunctionKind"},
+        {"name": "keeps_args", "ty": "bool", "doc": "Keep all arguments in the frame on entry (for default derived constructors and rest parameters)"},
+        {"name": "generator", "ty": "bool", "doc": "Generator function: a call does not run it, it returns a generator"},
+        {"name": "asynchronous", "ty": "bool", "doc": "async function: a call runs it up to the first `await` and returns a Promise"},
+        {"name": "mode", "ty": "Mode", "doc": "Strict mode: `this` is not replaced by the global object, failed assignments / deletes throw"},
+        {"name": "params", "ty": "u16"},
+        {"name": "length", "ty": "u16", "doc": "The function's `length`: the number of parameters before the first one with a default value (or the rest parameter)"},
+        {"name": "regs", "ty": "u16"},
+        {"name": "insns", "ty": "Vec<Insn>"},
+        {"name": "consts", "ty": "Vec<Constant>"},
+        {"name": "scopes", "ty": "Vec<EvalScope>", "doc": "Scope tables of every direct eval in the function (the `scope` of `CallEval` indexes this)"},
+        {"name": "mapped_params", "ty": "Vec<Option<u16>>", "doc": "Mapped arguments: the parameter environment slot for the i-th argument (only for sloppy mode with simple parameters)"}
+      ]
+    },
+    {
+      "name": "Module",
+      "doc": "All functions compiled from one script; function 0 is the script itself.",
+      "derive": ["Clone", "Debug", "Default"],
+      "consts": [{"name": "MAIN", "ty": "u32", "value": "0", "doc": "Index of the script itself in the module"}],
+      "fields": [{"name": "functions", "ty": "Vec<Function>"}]
     }
   ]
 }

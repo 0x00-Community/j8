@@ -5,51 +5,11 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::{Gc};
+use j8bytecode::{BinaryOp, CompareOp, UnaryOp};
 
 use num_traits::Zero;
 
 use crate::{Agent, Descriptor, Error, Key, Numeric, IterKind, IteratorState, JsObject, JsString, JsSymbol, ObjectData, ObjectKind, Property, PropertyKey, Slot, Value};
-
-/// Binary operations (the result is a value).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum BinaryOp {
-    Add,
-    Sub,
-    Mul,
-    Div,
-    Rem,
-    Exp,
-    BitAnd,
-    BitOr,
-    BitXor,
-    Shl,
-    Shr,
-    UShr,
-}
-
-/// Comparisons (the result is a boolean).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum CompareOp {
-    Eq,
-    Ne,
-    StrictEq,
-    StrictNe,
-    Lt,
-    Gt,
-    Le,
-    Ge,
-}
-
-/// Unary operations.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum UnaryOp {
-    Neg,
-    Plus,
-    Not,
-    BitNot,
-    Typeof,
-    Void,
-}
 
 /// Built-in error kinds (`Error` itself comes first).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -72,32 +32,22 @@ pub enum Hint {
     String,
 }
 
-impl BinaryOp {
-    pub const ALL: [BinaryOp; 12] = [BinaryOp::Add, BinaryOp::Sub, BinaryOp::Mul, BinaryOp::Div, BinaryOp::Rem, BinaryOp::Exp, BinaryOp::BitAnd, BinaryOp::BitOr, BinaryOp::BitXor, BinaryOp::Shl, BinaryOp::Shr, BinaryOp::UShr];
+/// Spec semantics of binary operations and comparisons on two numbers (the operation enums are defined in
+/// [`j8bytecode`]).
+pub trait Numbers {
+    type Output;
+    fn numbers(self, a: f64, b: f64) -> Self::Output;
+}
 
-    pub fn name(self) -> &'static str {
-        match self {
-            BinaryOp::Add => "add",
-            BinaryOp::Sub => "sub",
-            BinaryOp::Mul => "mul",
-            BinaryOp::Div => "div",
-            BinaryOp::Rem => "rem",
-            BinaryOp::Exp => "exp",
-            BinaryOp::BitAnd => "bitand",
-            BinaryOp::BitOr => "bitor",
-            BinaryOp::BitXor => "bitxor",
-            BinaryOp::Shl => "shl",
-            BinaryOp::Shr => "shr",
-            BinaryOp::UShr => "ushr",
-        }
-    }
+impl Numbers for BinaryOp {
+    type Output = f64;
 
     /// The result when both sides are already numbers (the fast path of each execution layer, and the last step of
     /// [`Agent::binary`]). Always inlined: the interpreter's loop calls it for every arithmetic instruction, and a call
     /// plus a jump table on `self` cost more than `+` itself; the rare slow parts stay out of line.
     #[expect(clippy::inline_always, reason = "measured: left to LLVM it stays a call with a jump table in the interpreter loop")]
     #[inline(always)]
-    pub fn numbers(self, a: f64, b: f64) -> f64 {
+    fn numbers(self, a: f64, b: f64) -> f64 {
         match self {
             BinaryOp::Add => a + b,
             BinaryOp::Sub => a - b,
@@ -115,25 +65,12 @@ impl BinaryOp {
     }
 }
 
-impl CompareOp {
-    pub const ALL: [CompareOp; 8] = [CompareOp::Eq, CompareOp::Ne, CompareOp::StrictEq, CompareOp::StrictNe, CompareOp::Lt, CompareOp::Gt, CompareOp::Le, CompareOp::Ge];
-
-    pub fn name(self) -> &'static str {
-        match self {
-            CompareOp::Eq => "eq",
-            CompareOp::Ne => "ne",
-            CompareOp::StrictEq => "stricteq",
-            CompareOp::StrictNe => "strictne",
-            CompareOp::Lt => "lt",
-            CompareOp::Gt => "gt",
-            CompareOp::Le => "le",
-            CompareOp::Ge => "ge",
-        }
-    }
+impl Numbers for CompareOp {
+    type Output = bool;
 
     /// The result when both sides are numbers (`NaN` compares false with anything; `==` and `===` agree on numbers).
     #[inline]
-    pub fn numbers(self, a: f64, b: f64) -> bool {
+    fn numbers(self, a: f64, b: f64) -> bool {
         match self {
             CompareOp::Eq | CompareOp::StrictEq => a == b,
             CompareOp::Ne | CompareOp::StrictNe => a != b,
@@ -141,21 +78,6 @@ impl CompareOp {
             CompareOp::Gt => a > b,
             CompareOp::Le => a <= b,
             CompareOp::Ge => a >= b,
-        }
-    }
-}
-
-impl UnaryOp {
-    pub const ALL: [UnaryOp; 6] = [UnaryOp::Neg, UnaryOp::Plus, UnaryOp::Not, UnaryOp::BitNot, UnaryOp::Typeof, UnaryOp::Void];
-
-    pub fn name(self) -> &'static str {
-        match self {
-            UnaryOp::Neg => "neg",
-            UnaryOp::Plus => "plus",
-            UnaryOp::Not => "not",
-            UnaryOp::BitNot => "bitnot",
-            UnaryOp::Typeof => "typeof",
-            UnaryOp::Void => "void",
         }
     }
 }

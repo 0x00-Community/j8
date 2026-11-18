@@ -21,12 +21,6 @@ let mut executor = j8executor::Executor::default();
 let result = isolate.run(&mut executor, &cx, &j8framework::Source { text: "1 + 2", file: "a.js" })?;
 ```
 
-## Feature
-
-| Feature | 缺省 | 含义 |
-| --- | --- | --- |
-| `compile` | 开 | 带 JS ⇒ 字节码编译器（`j8bytecode/compile`）并实现 `Engine`；关掉只剩执行器 |
-
 ## 许可
 
 MIT，随 [j8](https://github.com/0x00-Community/j8) 一起。

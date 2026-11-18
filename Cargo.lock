@@ -354,26 +354,27 @@ checksum = "3bd1574e617a9a6c1f8f8181bd7e841e1f20e4277607ef28945765188d6284d4"
 
 [[package]]
 name = "j8"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "j8binding",
  "j8builtins",
+ "j8bytecode",
  "j8compiler",
  "j8executor",
  "j8framework",
  "j8jit",
  "j8lockfree",
  "j8macros",
+ "j8napi",
  "j8platform",
  "j8taskqueue",
- "j8bytecode",
  "serde",
  "serde_yaml",
 ]
 
 [[package]]
 name = "j8binding"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "j8framework",
  "j8lockfree",
@@ -383,7 +384,7 @@ dependencies = [
 
 [[package]]
 name = "j8builtins"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "j8framework",
  "libm",
@@ -395,40 +396,56 @@ dependencies = [
 ]
 
 [[package]]
-name = "j8compiler"
-version = "0.3.0"
+name = "j8bytecode"
+version = "0.4.0"
 dependencies = [
- "j8framework",
+ "j8macros",
+]
+
+[[package]]
+name = "j8compiler"
+version = "0.4.0"
+dependencies = [
  "j8bytecode",
- "mlirpass",
+ "j8framework",
+ "oxc_allocator",
+ "oxc_ast",
+ "oxc_parser",
+ "oxc_semantic",
+ "oxc_span",
+ "oxc_syntax",
+ "ryu-js",
 ]
 
 [[package]]
 name = "j8debugger"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "clap",
- "j8framework",
  "j8bytecode",
+ "j8compiler",
+ "j8framework",
 ]
 
 [[package]]
 name = "j8executor"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "j8builtins",
+ "j8bytecode",
+ "j8compiler",
  "j8framework",
  "j8lockfree",
  "j8platform",
- "j8bytecode",
  "ryu-js",
 ]
 
 [[package]]
 name = "j8framework"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "hashbrown",
+ "j8bytecode",
  "j8lockfree",
  "j8macros",
  "j8taskqueue",
@@ -443,23 +460,22 @@ dependencies = [
 
 [[package]]
 name = "j8jit"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
- "j8compiler",
+ "j8bytecode",
  "j8executor",
  "j8framework",
- "j8bytecode",
  "libc",
  "mlirpass",
 ]
 
 [[package]]
 name = "j8lockfree"
-version = "0.3.0"
+version = "0.4.0"
 
 [[package]]
 name = "j8macros"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -469,8 +485,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "j8napi"
+version = "0.4.0"
+dependencies = [
+ "j8builtins",
+ "j8executor",
+ "j8framework",
+ "j8lockfree",
+ "j8platform",
+ "num-bigint 0.4.8",
+]
+
+[[package]]
 name = "j8platform"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "j8framework",
  "moremath",
@@ -478,24 +506,9 @@ dependencies = [
 
 [[package]]
 name = "j8taskqueue"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "j8lockfree",
-]
-
-[[package]]
-name = "j8bytecode"
-version = "0.3.0"
-dependencies = [
- "j8framework",
- "j8macros",
- "oxc_allocator",
- "oxc_ast",
- "oxc_parser",
- "oxc_semantic",
- "oxc_span",
- "oxc_syntax",
- "ryu-js",
 ]
 
 [[package]]

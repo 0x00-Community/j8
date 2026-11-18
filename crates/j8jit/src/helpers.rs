@@ -1,4 +1,5 @@
-use j8compiler::Helper;
+use j8framework::Numbers;
+use crate::Helper;
 use j8framework::BinaryOp;
 
 /// Runtime functions called from machine code (`extern "C"`, addresses patched into the machine code).

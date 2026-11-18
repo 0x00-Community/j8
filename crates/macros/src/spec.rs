@@ -2,11 +2,56 @@
 //! JSON are never silently ignored.
 use serde::Deserialize;
 
-/// One JSON file: a number of enums.
+/// One JSON file: a number of enums and structs.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Spec {
+    #[serde(default)]
     pub enums: Vec<EnumSpec>,
+    #[serde(default)]
+    pub structs: Vec<StructSpec>,
+}
+
+/// One struct. Either all fields are named or none are (tuple struct).
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StructSpec {
+    pub name: String,
+    pub doc: String,
+    /// Passed as-is into `#[derive(...)]`
+    #[serde(default)]
+    pub derive: Vec<String>,
+    /// Single-field tuple struct only: `Display` is `prefix` + the field, and `Operand` (assembly) strips `prefix`
+    /// and parses the rest (`r3` / `#3` / `@3`)
+    #[serde(default)]
+    pub prefix: Option<String>,
+    /// Associated constants
+    #[serde(default)]
+    pub consts: Vec<ConstSpec>,
+    #[serde(default)]
+    pub fields: Vec<StructField>,
+}
+
+/// One struct field (always `pub`).
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StructField {
+    #[serde(default)]
+    pub name: Option<String>,
+    pub ty: String,
+    #[serde(default)]
+    pub doc: Option<String>,
+}
+
+/// `pub const name: ty = value;` (`value` is a Rust expression).
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConstSpec {
+    pub name: String,
+    pub ty: String,
+    pub value: String,
+    #[serde(default)]
+    pub doc: Option<String>,
 }
 
 /// One enum.
@@ -22,11 +67,11 @@ pub struct EnumSpec {
     /// field for the encoding, which costs a few extra instructions to read the discriminant)
     #[serde(default)]
     pub repr: Option<String>,
-    /// Generate `Display`: mnemonic + operands
+    /// Generate `Display`: mnemonic + operands; for a text enum (every variant has `text`), the text
     #[serde(default)]
     pub display: bool,
-    /// Generate assembly (the inverse of `Display`): `display` on ⇒ `FromStr`; all unit variants ⇒ `Operand` by
-    /// variant name
+    /// Generate assembly (the inverse of `Display`): text enum ⇒ `Operand` by text; otherwise `display` on ⇒
+    /// `FromStr`; all unit variants ⇒ `Operand` by variant name
     #[serde(default)]
     pub asm: bool,
     /// Generate methods that return `&mut` to a field by its type
@@ -58,6 +103,9 @@ pub struct VariantSpec {
     /// names, e.g. `add.smi`)
     #[serde(default)]
     pub suffix: Option<String>,
+    /// The variant's text: when every variant (all unit) has one, the enum gets `ALL` and `name()`
+    #[serde(default)]
+    pub text: Option<String>,
     /// `#[default]`
     #[serde(default)]
     pub default: bool,

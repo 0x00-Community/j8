@@ -9,7 +9,7 @@
 //! ```
 use core::fmt;
 
-use crate::{Constant, EvalName, EvalScope, Function, FunctionKind, Mode, Module};
+use crate::{Constant, EvalName, EvalScope, Function, FunctionKind, Module};
 
 /// How a function kind is written
 pub(crate) const KINDS: [(FunctionKind, &str); 5] = [
@@ -19,9 +19,6 @@ pub(crate) const KINDS: [(FunctionKind, &str); 5] = [
     (FunctionKind::Constructor { derived: false }, "constructor"),
     (FunctionKind::Constructor { derived: true }, "constructor.derived"),
 ];
-
-/// How a mode is written
-pub(crate) const MODES: [(Mode, &str); 2] = [(Mode::Sloppy, "sloppy"), (Mode::Strict, "strict")];
 
 /// Writes via a (value, name) table
 macro_rules! by_table {
@@ -33,7 +30,7 @@ macro_rules! by_table {
         }
     )*};
 }
-by_table!(FunctionKind = KINDS, Mode = MODES);
+by_table!(FunctionKind = KINDS);
 
 impl fmt::Display for Constant {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

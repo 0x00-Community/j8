@@ -50,6 +50,7 @@ Types used by the generated code (`Reg`, `Label`, `BinaryOp`, ...) must be in sc
 | `name` / `doc` | variant | Variant name and docs |
 | `mnemonic` | variant | Mnemonic for `Display`; with `display` on, use either this or a `show: name` field |
 | `suffix` | variant | Used with a `show: name` field: the mnemonic becomes `name.suffix` (another operand form of the same group of names, e.g. `add.smi r2, 1` alongside `add r2`) |
+| `text` | variant | The variant's text; on every variant of a unit enum ⇒ `pub const ALL: [T; N]` and `pub fn name(self) -> &'static str`, `display` writes the text and `asm` implements `Operand` by text (operators `BinaryOp`, `Mode`) |
 | `default` | variant | `#[default]` |
 | `fields` | variant | Field list; all with `name` ⇒ struct variant, none with `name` ⇒ tuple variant; mixing is an error |
 | `ty` | field | Rust type |
@@ -57,6 +58,24 @@ Types used by the generated code (`Reg`, `Label`, `BinaryOp`, ...) must be in sc
 | `show` | field | `display` (default, `{}`) / `debug` (`{:?}`) / `name` (`x.name()` replaces the mnemonic) |
 
 An `Option<_>` field that is `None` is omitted entirely from `Display`.
+
+Structs go under `"structs"` (all fields `pub`):
+
+```json
+"structs": [
+  {"name": "Reg", "doc": "Register.", "derive": ["Clone", "Copy"], "prefix": "r",
+   "consts": [{"name": "THIS", "ty": "Reg", "value": "Reg(0)"}], "fields": [{"ty": "u16"}]},
+  {"name": "Module", "doc": "A module.", "derive": ["Clone", "Debug", "Default"],
+   "fields": [{"name": "functions", "ty": "Vec<Function>", "doc": "Function 0 is the script"}]}
+]
+```
+
+| Key | Level | Meaning |
+|---|---|---|
+| `name` / `doc` / `derive` | struct | As for enums |
+| `prefix` | struct | Single-field tuple struct only: `Display` is prefix + field, `Operand` strips the prefix and parses (`r3` / `#3` / `@3`) |
+| `consts` | struct | `pub const name: ty = value;` (`value` is a Rust expression), with optional `doc` |
+| `fields` | struct | `name` (all or none: named or tuple struct), `ty`, optional `doc` |
 
 ## Binding macros: `#[j8::class]` / `#[j8::object]` / `#[j8::function]`
 

@@ -55,7 +55,7 @@ pub struct Disasm {
 impl Disasm {
     pub fn run(&self) -> Result<(), String> {
         let (text, file) = self.io.input()?;
-        let module = Module::try_from(&Source { text: &text, file: &file }).map_err(|e| e.to_string())?;
+        let module = <Module as j8compiler::Compile>::compile(&Source { text: &text, file: &file }, j8framework::CodeKind::Script).map_err(|e| e.to_string())?;
         self.io.write(&module.to_string())
     }
 }

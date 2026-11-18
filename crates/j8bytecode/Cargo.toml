@@ -1,6 +1,6 @@
 [package]
 name = "j8bytecode"
-description = "j8 virtual instruction set: bytecode definitions, JavaScript ⇒ bytecode"
+description = "j8 virtual instruction set: bytecode definitions (generated from JSON), assembler / disassembler; the dependency root of j8"
 readme = "README.md"
 version.workspace = true
 edition.workspace = true
@@ -8,20 +8,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-j8framework.workspace = true
 j8macros.workspace = true
-oxc_allocator = { workspace = true, optional = true }
-oxc_ast = { workspace = true, optional = true }
-oxc_parser = { workspace = true, optional = true }
-oxc_span = { workspace = true, optional = true }
-oxc_semantic = { workspace = true, optional = true }
-oxc_syntax = { workspace = true, optional = true }
-ryu-js = { workspace = true, optional = true }
-
-[features]
-default = ["compile"]
-# JS ⇒ bytecode compiler (oxc parser); without it only the bytecode types remain
-compile = ["dep:oxc_allocator", "dep:oxc_ast", "dep:oxc_parser", "dep:oxc_span", "dep:oxc_semantic", "dep:oxc_syntax", "dep:ryu-js"]
 
 [lints]
 workspace = true

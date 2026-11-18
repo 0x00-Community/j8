@@ -86,6 +86,8 @@ pub struct Agent<'gc, 'x> {
     invoke: &'x dyn Invoke<'gc>,
     /// The isolate's queue of async host work (`None` without an event loop)
     spawned: Option<&'x j8lockfree::Fifo<crate::AsyncJob>>,
+    /// 中止请求：执行层在检查点读它
+    pub stop: &'x crate::Termination,
     /// Empty register files returned after use (each host function callback into JS needs one; reuse saves the
     /// allocation)
     spare_regs: Vec<Vec<Value<'gc>>>,
@@ -94,7 +96,7 @@ pub struct Agent<'gc, 'x> {
 impl<'gc> Scope<'gc, '_> {
     /// Lend out an agent in context `realm`, calling back into JS via `invoke`.
     pub fn agent<'x>(&'x mut self, realm: Context<'gc>, invoke: &'x dyn Invoke<'gc>) -> Agent<'gc, 'x> {
-        Agent { mc: self.mc, platform: self.platform, profiler: &mut *self.profiler, realm, new_target: Value::Undefined, invoke, spawned: self.spawned, spare_regs: Vec::new() }
+        Agent { mc: self.mc, platform: self.platform, profiler: &mut *self.profiler, realm, new_target: Value::Undefined, invoke, spawned: self.spawned, stop: self.stop, spare_regs: Vec::new() }
     }
 }
 
@@ -141,6 +143,7 @@ impl<'gc> Agent<'gc, '_> {
         match &o.borrow().kind {
             crate::ObjectKind::Function(c) => self.invoke.constructs(c),
             crate::ObjectKind::Native(n) => n.constructor,
+            crate::ObjectKind::NativeClosure(c) => c.constructor,
             crate::ObjectKind::Bound(b) => self.is_constructor(b.target),
             crate::ObjectKind::Proxy(p) => p.constructor,
             _ => false,
