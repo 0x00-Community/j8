@@ -4,6 +4,8 @@
 //! depends on no other j8 crate.
 extern crate alloc;
 
+mod function;
 mod v8;
 
-pub use v8::{Bytecode, BytecodeError, Decoded, Decoder, Encoder, ImplicitRegisterUse, Intrinsic, OperandScale, OperandSize, OperandType, OperandTypeInfo, OperandValue, Register, Runtime};
+pub use v8::{Bytecode, BytecodeError, Decoded, Decoder, Encoder, FeedbackSlotKind, FunctionKind, ImplicitRegisterUse, Intrinsic, OperandScale, OperandSize, OperandType, OperandTypeInfo, OperandValue, Register, Runtime, ScopeType, VariableMode};
+pub use function::{ArrayBoilerplate, BytecodeArray, CatchPrediction, ClassBoilerplate, ClassMember, Constant, Context, ContextVariable, ContinuationToken, CreateArrayLiteralFlags, CreateClosureFlags, CreateObjectLiteralFlags, HandlerEntry, LiteralFlags, LiteralValue, MemberKind, Module, ObjectBoilerplate, ScopeInfo, SharedFunction, StoreLookupSlotFlags, TemplateObject, TypeOfLiteral};

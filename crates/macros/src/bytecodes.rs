@@ -15,6 +15,48 @@ pub struct Tables {
     bytecodes: Vec<Code>,
     runtime: Vec<RuntimeFn>,
     intrinsics: Vec<IntrinsicFn>,
+    function_kinds: Vec<String>,
+    feedback_slot_kinds: Vec<SlotKind>,
+    scope_types: Vec<String>,
+    variable_modes: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SlotKind {
+    name: String,
+    size: u8,
+}
+
+/// `SCRIPT_SCOPE` ⇒ `ScriptScope`; CamelCase names stay
+fn camel(name: &str) -> String {
+    if !name.contains('_') && name.chars().any(char::is_lowercase) {
+        return name.to_owned();
+    }
+    name.split('_').map(|w| {
+        let mut c = w.chars();
+        c.next().map_or_else(String::new, |f| f.to_uppercase().chain(c.flat_map(char::to_lowercase)).collect())
+    }).collect()
+}
+
+/// A field-less `repr(u8)` enum numbered in order, with `ALL` / `from_u8`
+fn simple_enum(name: &str, doc: &str, variants: &[String]) -> TokenStream {
+    let ident = format_ident!("{name}");
+    let vs: Vec<_> = variants.iter().map(|v| format_ident!("{}", camel(v))).collect();
+    let tags = (0..vs.len()).map(|i| u8::try_from(i).unwrap_or(u8::MAX));
+    let n = vs.len();
+    quote! {
+        #[doc = #doc]
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+        #[repr(u8)]
+        pub enum #ident { #(#vs = #tags),* }
+        impl #ident {
+            pub const ALL: [#ident; #n] = [#(#ident::#vs),*];
+            pub const fn from_u8(v: u8) -> Option<Self> {
+                if (v as usize) < #n { Some(Self::ALL[v as usize]) } else { None }
+            }
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -89,6 +131,13 @@ impl Tables {
             .collect::<Vec<_>>();
         let implicit = self.bytecodes.iter().map(|c| format_ident!("{}", c.implicit)).collect::<Vec<_>>();
         let runtime = self.runtime_tables(rel)?;
+        let kinds = simple_enum("FunctionKind", "V8's `FunctionKind`.", &self.function_kinds);
+        let scopes = simple_enum("ScopeType", "V8's `ScopeType`.", &self.scope_types);
+        let modes = simple_enum("VariableMode", "V8's `VariableMode`.", &self.variable_modes);
+        let slot_names: Vec<String> = self.feedback_slot_kinds.iter().map(|k| k.name.clone()).collect();
+        let slots = simple_enum("FeedbackSlotKind", "V8's `FeedbackSlotKind`.", &slot_names);
+        let slot_vs: Vec<_> = slot_names.iter().map(|n| format_ident!("{n}")).collect();
+        let slot_sizes: Vec<_> = self.feedback_slot_kinds.iter().map(|k| k.size).collect();
         let path = std::path::Path::new(&std::env::var("CARGO_MANIFEST_DIR").unwrap_or_default()).join(rel.value()).to_string_lossy().into_owned();
         Ok(quote! {
             const _: &[u8] = include_bytes!(#path);
@@ -141,6 +190,17 @@ impl Tables {
             }
 
             #runtime
+            #kinds
+            #scopes
+            #modes
+            #slots
+
+            impl FeedbackSlotKind {
+                /// Entries the slot takes in the feedback vector (V8's `FeedbackMetadata::GetSlotSize`)
+                pub const fn slot_size(self) -> u8 {
+                    match self { #(FeedbackSlotKind::#slot_vs => #slot_sizes,)* }
+                }
+            }
 
             impl OperandType {
                 /// What it is made of
