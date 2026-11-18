@@ -96,7 +96,7 @@ and depend on the published `j8` by version, the way an embedder would.
 | `samples/workerd` | std | Loads Cloudflare Workers (ES modules with `export default { fetch }`) and Durable Objects with j8: `workerd examples/counter.js --bind COUNTER=Counter --request "GET /c/inc?name=a"`, or `--port 8787` for an HTTP server; the Fetch API subset and DOs live in a JS prelude, storage is a Rust KV bound with `#[j8::class]` |
 | `samples/benchv8` | std | The same JS benchmarks timed on j8 and V8 (rusty_v8 152, with JIT / `--jitless`): `cd samples/benchv8 && cargo run --release` (downloads V8's prebuilt library) |
 | `j8debugger` | std | The `j8dbg` command line (clap): `j8dbg disasm <file.js \| ->` / `j8dbg disasm -e '<js>'` prints the disassembly; `j8dbg asm <file.j8s \| ->` assembles a listing and prints it normalized (`-o` writes a file) |
-| `j8executor` | std | The bytecode `Executor`, **currently the last layer**; implements `Engine` under the `compile` feature |
+| `j8executor` | std | The bytecode `Executor`, **currently the last layer**; implements `Engine` and always carries the JS ⇒ bytecode compiler (scripts, modules, `eval` / `Function` all compile to bytecode first) |
 
 All JS is compiled to bytecode before it runs; there is no AST interpreter.
 Dependency direction: every layer depends only on `j8framework` (`j8executor` also on `j8virtasm`), and `j8framework` depends on no layer, only on the building blocks `j8lockfree` and `j8taskqueue`.

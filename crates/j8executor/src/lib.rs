@@ -17,12 +17,10 @@ use j8lockfree::SegVec;
 
 use j8virtasm::{Constant, Function, FunctionKind, Insn, Mode, Module, PropertyKind, Reg};
 use j8framework::{Collect, Gc};
-#[cfg(feature = "compile")]
 mod cache;
 mod ic;
 mod module;
 
-#[cfg(feature = "compile")]
 pub use cache::CodeCache;
 
 use j8framework::{Agent, Few, Closure, Coroutine, CoroutineState, Env, Error, ErrorKind, FuncId, Invoke, IterRecord, JsEnv, JsObject, ObjectData, ObjectKind, Property, Resume, Slot, Step, Suspended, Value};
@@ -131,7 +129,6 @@ enum Outcome<'gc> {
     Suspend { value: Value<'gc>, awaiting: bool, saved: Suspended<'gc> },
     /// Instruction budget exhausted: the state is handed back as is, and the next slice continues (used only by the
     /// sliced execution of `Engine::eval`)
-    #[cfg_attr(not(feature = "compile"), expect(dead_code, reason = "only the compile feature's Engine::eval runs in slices"))]
     Paused(alloc::boxed::Box<State<'gc>>),
 }
 
@@ -229,7 +226,6 @@ pub struct Executor {
     /// Module code: first function id ⇒ module id (for import bindings and import.meta)
     module_of: RefCell<alloc::collections::BTreeMap<u32, u32>>,
     /// Bytecode shared with other executors (shared scripts and ES modules compile once)
-    #[cfg(feature = "compile")]
     cache: Option<alloc::sync::Arc<CodeCache>>,
 }
 
@@ -249,7 +245,6 @@ impl Executor {
     }
 
     /// Shares compiled code through `cache` (see [`CodeCache`])
-    #[cfg(feature = "compile")]
     #[must_use]
     pub fn with_cache(mut self, cache: alloc::sync::Arc<CodeCache>) -> Self {
         self.cache = Some(cache);
@@ -330,32 +325,25 @@ impl Executor {
     }
 
     /// Direct eval: compiles against the scope table of the call site and runs on the call site's environment chain.
-    #[cfg_attr(not(feature = "compile"), expect(unused_variables, reason = "without a compiler it can only report an error"))]
     fn direct_eval<'gc>(&self, a: &mut Agent<'gc, '_>, src: &str, table: &j8virtasm::EvalScope, env: Option<j8framework::JsEnv<'gc>>, strict: bool, level: usize) -> Result<Value<'gc>, Error> {
-        #[cfg(feature = "compile")]
-        {
-            let module = match Module::compile_direct(&j8framework::Source { text: src, file: "[eval]" }, strict, table) {
-                Ok(m) => m,
-                Err(Error::Syntax(m)) => return Err(a.throw(ErrorKind::Syntax, &m)),
-                Err(e) => return Err(e),
-            };
-            let main = self.load(module);
-            if level >= STACK_LIMIT {
-                return Err(a.throw(ErrorKind::Range, "Maximum call stack size exceeded"));
-            }
-            let saved = self.depth.replace(level);
-            let mut regs = Vec::new();
-            let f = self.enter(a, &mut regs, Closure::new(main, env), Value::Undefined, Value::Undefined, &[]);
-            let r = self.execute(a, State { regs, frames: Vec::new(), f, acc: Value::Undefined }, &mut None).map(Outcome::returned);
-            self.depth.set(saved);
-            r
+        let module = match Module::compile_direct(&j8framework::Source { text: src, file: "[eval]" }, strict, table) {
+            Ok(m) => m,
+            Err(Error::Syntax(m)) => return Err(a.throw(ErrorKind::Syntax, &m)),
+            Err(e) => return Err(e),
+        };
+        let main = self.load(module);
+        if level >= STACK_LIMIT {
+            return Err(a.throw(ErrorKind::Range, "Maximum call stack size exceeded"));
         }
-        #[cfg(not(feature = "compile"))]
-        Err(a.throw(ErrorKind::Syntax, "dynamic code needs the compile feature"))
+        let saved = self.depth.replace(level);
+        let mut regs = Vec::new();
+        let f = self.enter(a, &mut regs, Closure::new(main, env), Value::Undefined, Value::Undefined, &[]);
+        let r = self.execute(a, State { regs, frames: Vec::new(), f, acc: Value::Undefined }, &mut None).map(Outcome::returned);
+        self.depth.set(saved);
+        r
     }
 
     /// Initial execution state for script `main` (`this` is the global object).
-    #[cfg(feature = "compile")]
     fn script_state<'gc>(&self, a: &mut Agent<'gc, '_>, main: FuncId) -> State<'gc> {
         let this = Value::Object(a.realm.global);
         let mut regs = Vec::new();
@@ -1775,28 +1763,20 @@ impl<'gc> Invoke<'gc> for Executor {
     }
 
     fn eval_code(&self, a: &mut Agent<'gc, '_>, src: &str, kind: j8framework::CodeKind) -> Result<Value<'gc>, Error> {
-        #[cfg(feature = "compile")]
-        {
-            let module = match Module::compile(&j8framework::Source { text: src, file: "[eval]" }, kind) {
-                Ok(m) => m,
-                Err(Error::Syntax(m)) => return Err(a.throw(ErrorKind::Syntax, &m)),
-                Err(e) => return Err(e),
-            };
-            let main = self.load(module);
-            let level = self.depth.get() + 1;
-            if level >= STACK_LIMIT {
-                return Err(a.throw(ErrorKind::Range, "Maximum call stack size exceeded"));
-            }
-            let saved = self.depth.replace(level);
-            let r = self.run_script(a, main);
-            self.depth.set(saved);
-            r
+        let module = match Module::compile(&j8framework::Source { text: src, file: "[eval]" }, kind) {
+            Ok(m) => m,
+            Err(Error::Syntax(m)) => return Err(a.throw(ErrorKind::Syntax, &m)),
+            Err(e) => return Err(e),
+        };
+        let main = self.load(module);
+        let level = self.depth.get() + 1;
+        if level >= STACK_LIMIT {
+            return Err(a.throw(ErrorKind::Range, "Maximum call stack size exceeded"));
         }
-        #[cfg(not(feature = "compile"))]
-        {
-            let _ = (src, kind);
-            Err(a.throw(ErrorKind::Syntax, "dynamic code needs the compile feature"))
-        }
+        let saved = self.depth.replace(level);
+        let r = self.run_script(a, main);
+        self.depth.set(saved);
+        r
     }
 
     fn resume(&self, a: &mut Agent<'gc, '_>, co: JsObject<'gc>, mode: Resume, value: Value<'gc>) -> Result<Step<'gc>, Error> {
@@ -1888,28 +1868,23 @@ impl Executor {
     }
 }
 
-#[cfg(feature = "compile")]
 j8framework::paragc::brand!(
     /// The brand of a parked execution state.
     ParkedBrand = for<'gc> j8framework::GcCell<'gc, Option<State<'gc>>>
 );
 
 /// Execution state attached to the roots between slices.
-#[cfg(feature = "compile")]
 type Parked = j8framework::Root<ParkedBrand>;
 
 /// Result of running one slice.
-#[cfg(feature = "compile")]
 enum Slice {
     Done(j8framework::Global),
     Paused(Parked),
 }
 
 /// A started piece of source (the engine's [`Job`](j8framework::Engine::Job))
-#[cfg(feature = "compile")]
 pub struct Job(Started);
 
-#[cfg(feature = "compile")]
 enum Started {
     /// A script, loaded, not entered yet
     Script(FuncId),
@@ -1921,7 +1896,6 @@ enum Started {
     Spent,
 }
 
-#[cfg(feature = "compile")]
 impl j8framework::Engine for Executor {
     type Job = Job;
 

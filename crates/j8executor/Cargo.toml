@@ -10,13 +10,8 @@ repository.workspace = true
 [dependencies]
 j8framework.workspace = true
 j8lockfree.workspace = true
-j8virtasm.workspace = true
+j8virtasm = { workspace = true, features = ["compile"] }
 ryu-js.workspace = true
-
-[features]
-default = ["compile"]
-# Brings in JS ⇒ bytecode compilation and implements Engine; without it only the executor remains
-compile = ["j8virtasm/compile"]
 
 [dev-dependencies]
 j8platform.workspace = true

@@ -1,6 +1,5 @@
 //! Loading, linking and evaluation of ES modules (synchronous: dependencies are read in via `Platform::load_module`;
 //! top-level await is not supported yet).
-#![cfg_attr(not(feature = "compile"), allow(unused_imports, reason = "loading / linking / evaluation all need the compiler; without it only reads of import bindings remain"))]
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -12,7 +11,6 @@ use crate::{Executor, Outcome, State};
 impl Executor {
     /// Loads the module at `path` and its dependencies (an already-loaded module just returns its id). A compile error
     /// or a missing dependency gives `Error::Syntax`.
-    #[cfg(feature = "compile")]
     pub(crate) fn load_module(&self, a: &mut Agent<'_, '_>, path: &str, text: &str) -> Result<u32, Error> {
         if let Some(i) = a.modules().iter().position(|m| **m.path == *path) {
             return Ok(u32::try_from(i).unwrap_or(u32::MAX));
@@ -44,7 +42,6 @@ impl Executor {
     }
 
     /// Linking: resolves each module's imports and re-exports (unresolvable / ambiguous gives `Error::Syntax`).
-    #[cfg(feature = "compile")]
     pub(crate) fn link(a: &mut Agent<'_, '_>, m: u32, seen: &mut Vec<u32>) -> Result<(), Error> {
         if seen.contains(&m) {
             return Ok(());
@@ -84,7 +81,6 @@ impl Executor {
 
     /// Evaluation: dependencies are evaluated first (cycles skipped), each module runs only once; re-evaluating a
     /// module that threw throws the same error again.
-    #[cfg(feature = "compile")]
     pub(crate) fn evaluate(&self, a: &mut Agent<'_, '_>, m: u32, depth: usize) -> Result<(), Error> {
         let (status, error, requested, main, env) = {
             let r = &a.modules()[m as usize];
@@ -147,7 +143,6 @@ impl Executor {
     }
 
     /// Loads, links and evaluates a module, returning its id.
-    #[cfg(feature = "compile")]
     pub(crate) fn run_module(&self, a: &mut Agent<'_, '_>, path: &str, text: &str, depth: usize) -> Result<u32, Error> {
         let m = self.load_module(a, path, text)?;
         Self::link(a, m, &mut Vec::new())?;
@@ -161,19 +156,11 @@ impl Executor {
         let promise = a.new_promise();
         let r = (|| -> Result<Value<'gc>, Error> {
             let spec = a.to_string(specifier)?;
-            #[cfg(feature = "compile")]
-            {
-                let Some((path, text)) = a.platform.load_module(referrer, &spec) else {
-                    return Err(a.throw(ErrorKind::Type, &alloc::format!("Cannot find module '{}'", &**spec)));
-                };
-                let m = self.run_module(a, &path, &text, depth)?;
-                Ok(a.module_namespace(m).into())
-            }
-            #[cfg(not(feature = "compile"))]
-            {
-                let _ = (referrer, depth);
-                Err(a.throw(ErrorKind::Type, &alloc::format!("Cannot load module '{}'", &**spec)))
-            }
+            let Some((path, text)) = a.platform.load_module(referrer, &spec) else {
+                return Err(a.throw(ErrorKind::Type, &alloc::format!("Cannot find module '{}'", &**spec)));
+            };
+            let m = self.run_module(a, &path, &text, depth)?;
+            Ok(a.module_namespace(m).into())
         })();
         match r {
             Ok(ns) => a.resolve_promise(promise, ns)?,

@@ -92,7 +92,7 @@ cd samples/benchv8 && cargo run --release
 | `samples/workerd` | std | 用 j8 加载 Cloudflare Worker（ES 模块 `export default { fetch }`）与 Durable Object：`workerd examples/counter.js --bind COUNTER=Counter --request "GET /c/inc?name=a"` 或 `--port 8787` 起 HTTP 服务；Fetch API 子集与 DO 在 JS 序言里，存储是 `#[j8::class]` 绑定的 Rust KV |
 | `samples/benchv8` | std | 同一组 JS 基准在 j8 与 V8（rusty_v8 152，带 JIT / `--jitless`）上的耗时对比：`cd samples/benchv8 && cargo run --release`（会下载 V8 预编译库） |
 | `j8debugger` | std | 调试命令行 `j8dbg`（clap）：`j8dbg disasm <file.js \| ->` / `j8dbg disasm -e '<js>'` 打印反汇编清单；`j8dbg asm <file.j8s \| ->` 汇编清单、打印规范化后的清单（`-o` 写文件） |
-| `j8executor` | std | 字节码执行器 `Executor`，**目前是最后一层**；`compile` feature 下实现 `Engine` |
+| `j8executor` | std | 字节码执行器 `Executor`，**目前是最后一层**；实现 `Engine`，固定带 JS ⇒ 字节码编译器（脚本、模块、`eval` / `Function` 都先编成字节码） |
 
 所有 JS 都先编成字节码再执行，不设 AST 解释层。
 依赖方向：各层只依赖 `j8framework`（`j8executor` 另依赖 `j8virtasm`），`j8framework` 不依赖任何层，只依赖基础件 `j8lockfree` 与 `j8taskqueue`。

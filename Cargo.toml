@@ -36,7 +36,7 @@ runtime = ["executor", "builtins", "platform"]
 # j8::virtasm：字节码类型、汇编 / 反汇编（不带编译器）
 virtasm = ["dep:j8virtasm"]
 # j8::executor：字节码执行器，带 JS ⇒ 字节码编译（oxc），实现 Engine
-executor = ["dep:j8executor", "virtasm", "j8virtasm/compile"]
+executor = ["dep:j8executor", "virtasm"]
 # j8::builtins：内建对象（Intrinsics 的实现）
 builtins = ["dep:j8builtins"]
 # j8::platform：Platform 的标准库实现
