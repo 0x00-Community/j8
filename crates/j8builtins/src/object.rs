@@ -18,8 +18,9 @@ impl Objects {
     /// `Object(v)`: when constructing a subclass, create from `new.target`; otherwise objects are returned as is,
     /// `undefined` / `null` give a new empty object, and primitives are wrapped.
     fn object<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        if a.new_target != Value::Undefined && !Self::is_object_ctor(a.new_target) {
-            return Ok(a.create_from_ctor(a.realm.object_proto, ObjectKind::Ordinary)?.into());
+        let new_target = a.new_target;
+        if new_target != Value::Undefined && !Self::is_object_ctor(new_target) {
+            return Ok(a.create_from_ctor(new_target, a.realm.object_proto, ObjectKind::Ordinary)?.into());
         }
         Ok(match args.at(0).kind() {
             ValueKind::Undefined | ValueKind::Null | ValueKind::Uninit => a.object().into(),
@@ -551,8 +552,9 @@ impl Objects {
     }
 
     fn boolean<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+        let new_target = a.new_target;
         let b = a.to_boolean(args.at(0));
-        a.wrap_primitive(b.into(), a.realm.boolean_proto)
+        a.wrap_primitive(new_target, b.into(), a.realm.boolean_proto)
     }
 
     /// thisBooleanValue: a boolean or Boolean wrapper object; anything else throws TypeError.

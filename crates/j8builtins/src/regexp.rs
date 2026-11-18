@@ -123,11 +123,12 @@ impl Regexps {
 
     /// `RegExp(pattern, flags)` / `new RegExp(…)`.
     fn construct<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+        let new_target = a.new_target;
         let (pattern, flags) = (args.at(0), args.at(1));
         // Fast path: plain call, source and flags both strings (this is how regex literals are created). RegExpAlloc +
         // RegExpInitialize merged into one step: the prototype is this realm's `RegExp.prototype`; compile first, then
         // create the object, and define `lastIndex` directly as 0 (a Set on a fresh object is indistinguishable)
-        if a.new_target == Value::Undefined
+        if new_target == Value::Undefined
             && let (ValueKind::String(source), ValueKind::String(flags)) = (pattern.kind(), flags.kind())
         {
             let compiled = Self::compiled(a, &source, &flags)?;
@@ -137,7 +138,7 @@ impl Regexps {
             return Ok(o.into());
         }
         let pattern_is_regexp = Self::is_regexp(a, pattern)?;
-        let mut new_target = a.new_target;
+        let mut new_target = new_target;
         if new_target == Value::Undefined {
             if pattern_is_regexp && flags == Value::Undefined {
                 let ctor = a.get_named(pattern, "constructor")?;

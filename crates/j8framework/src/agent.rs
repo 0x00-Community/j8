@@ -161,20 +161,20 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    /// OrdinaryCreateFromConstructor: pick the prototype from the `new.target` of the current host construct call
-    /// (`fallback` for a plain call).
-    pub fn create_from_ctor(&mut self, fallback: JsObject<'gc>, kind: crate::ObjectKind<'gc>) -> Result<JsObject<'gc>, Error> {
-        let proto = self.proto_from_ctor(self.new_target, fallback)?;
+    /// OrdinaryCreateFromConstructor: the prototype comes from `new_target` (`fallback` for a plain call, where it is
+    /// `undefined`).
+    pub fn create_from_ctor(&mut self, new_target: Value<'gc>, fallback: JsObject<'gc>, kind: crate::ObjectKind<'gc>) -> Result<JsObject<'gc>, Error> {
+        let proto = self.proto_from_ctor(new_target, fallback)?;
         Ok(crate::ObjectData { kind, proto: Some(proto), ..crate::ObjectData::default() }.alloc(self.mc))
     }
 
     /// The tail of the Boolean / Number / String constructors: a plain call returns the primitive, a construct call
     /// wraps it in a wrapper object.
-    pub fn wrap_primitive(&mut self, v: Value<'gc>, fallback: JsObject<'gc>) -> Result<Value<'gc>, Error> {
-        if self.new_target == Value::Undefined {
+    pub fn wrap_primitive(&mut self, new_target: Value<'gc>, v: Value<'gc>, fallback: JsObject<'gc>) -> Result<Value<'gc>, Error> {
+        if new_target == Value::Undefined {
             return Ok(v);
         }
-        Ok(self.create_from_ctor(fallback, crate::ObjectKind::Primitive(v))?.into())
+        Ok(self.create_from_ctor(new_target, fallback, crate::ObjectKind::Primitive(v))?.into())
     }
 
     /// Compile and run a piece of dynamic code.

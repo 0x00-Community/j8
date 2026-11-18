@@ -17,7 +17,8 @@ impl Reflects {
     }
 
     fn proxy<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        if a.new_target == Value::Undefined {
+        let new_target = a.new_target;
+        if new_target == Value::Undefined {
             return Err(a.throw(ErrorKind::Type, "Constructor Proxy requires 'new'"));
         }
         Ok(Self::create(a, args.at(0), args.at(1))?.into())

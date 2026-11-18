@@ -405,7 +405,8 @@ impl Dates {
     // ---- Constructor and static methods ----
 
     fn date<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        if a.new_target == Value::Undefined {
+        let new_target = a.new_target;
+        if new_target == Value::Undefined {
             let s = Self::to_date_string_of(Self::now(a));
             return Ok(a.string(&s).into());
         }
@@ -429,7 +430,7 @@ impl Dates {
             }
             _ => Self::time_clip(Self::from_parts(a, args)?),
         };
-        Ok(a.create_from_ctor(a.realm.date_proto, ObjectKind::Date(tv))?.into())
+        Ok(a.create_from_ctor(new_target, a.realm.date_proto, ObjectKind::Date(tv))?.into())
     }
 
     /// Year, month, day, hours, minutes, seconds, milliseconds (trailing ones may be omitted) ⇒ time value.

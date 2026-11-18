@@ -104,7 +104,8 @@ impl Arrays {
 
     /// `new Array(...)` / `Array(...)`.
     fn array<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        let proto = a.proto_from_ctor(a.new_target, a.realm.array_proto)?;
+        let new_target = a.new_target;
+        let proto = a.proto_from_ctor(new_target, a.realm.array_proto)?;
         match *args {
             [] => Ok(Self::create(a, 0.0, Some(proto))?.into()),
             [v] if let Some(n) = v.as_number() => {

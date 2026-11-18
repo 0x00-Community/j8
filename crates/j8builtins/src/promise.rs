@@ -99,15 +99,16 @@ impl Promises {
     }
 
     fn construct<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+        let new_target = a.new_target;
         let executor = args.at(0);
-        if a.new_target == Value::Undefined {
+        if new_target == Value::Undefined {
             return Err(a.throw(ErrorKind::Type, "Promise constructor cannot be invoked without 'new'"));
         }
         if !a.is_callable(executor) {
             let what = a.describe(executor);
             return Err(a.throw(ErrorKind::Type, &alloc::format!("Promise resolver {what} is not a function")));
         }
-        let proto = a.proto_from_ctor(a.new_target, a.realm.promise_proto)?;
+        let proto = a.proto_from_ctor(new_target, a.realm.promise_proto)?;
         let p = a.new_promise();
         p.borrow_mut(a.mc).set_proto(Some(proto));
         let (resolve, reject) = a.promise_resolvers(p);

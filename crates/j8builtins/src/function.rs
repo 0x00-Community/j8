@@ -12,7 +12,7 @@ struct Functions;
 impl Functions {
     /// CreateDynamicFunction: join parameters and body into `(prefix anonymous(params\n) {\nbody\n})`, then compile and
     /// evaluate it.
-    fn dynamic<'gc>(a: &mut Agent<'gc, '_>, args: &[Value<'gc>], prefix: &str) -> Result<Value<'gc>, Error> {
+    fn dynamic<'gc>(a: &mut Agent<'gc, '_>, args: &[Value<'gc>], new_target: Value<'gc>, prefix: &str) -> Result<Value<'gc>, Error> {
         let (params, body) = match args.split_last() {
             Some((&body, params)) => (params, body),
             None => (&[][..], Value::Undefined),
@@ -23,7 +23,6 @@ impl Functions {
             b => String::from(&**a.to_string(Value::from(b))?),
         };
         let src = alloc::format!("({prefix} anonymous({}\n) {{\n{body}\n}})", params.join(","));
-        let new_target = a.new_target;
         let f = a.eval_code(&src, CodeKind::Eval)?;
         // When constructing a subclass (`class F extends Function`), the prototype comes from new.target.prototype
         if let Some(fo) = f.as_object()
@@ -37,19 +36,19 @@ impl Functions {
     }
 
     fn function<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        Self::dynamic(a, args, "function")
+        Self::dynamic(a, args, a.new_target, "function")
     }
 
     fn generator_function<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        Self::dynamic(a, args, "function*")
+        Self::dynamic(a, args, a.new_target, "function*")
     }
 
     fn async_function<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        Self::dynamic(a, args, "async function")
+        Self::dynamic(a, args, a.new_target, "async function")
     }
 
     fn async_generator_function<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        Self::dynamic(a, args, "async function*")
+        Self::dynamic(a, args, a.new_target, "async function*")
     }
 
     /// Global `eval` (indirect): non-strings are returned as is; strings run as global code.

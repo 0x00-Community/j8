@@ -66,8 +66,8 @@ impl Buffers {
         }
     }
 
-    fn construct_with<'gc>(a: &mut Agent<'gc, '_>, args: &[Value<'gc>], shared: bool) -> Result<Value<'gc>, Error> {
-        if a.new_target == Value::Undefined {
+    fn construct_with<'gc>(a: &mut Agent<'gc, '_>, args: &[Value<'gc>], new_target: Value<'gc>, shared: bool) -> Result<Value<'gc>, Error> {
+        if new_target == Value::Undefined {
             return Err(a.throw(ErrorKind::Type, if shared { "Constructor SharedArrayBuffer requires 'new'" } else { "Constructor ArrayBuffer requires 'new'" }));
         }
         let len = a.to_index(args.at(0))?;
@@ -82,16 +82,16 @@ impl Buffers {
             return Err(a.throw(ErrorKind::Range, "byteLength exceeds maxByteLength"));
         }
         let fallback = if shared { a.realm.shared_array_buffer_proto } else { a.realm.array_buffer_proto };
-        let proto = a.proto_from_ctor(a.new_target, fallback)?;
+        let proto = a.proto_from_ctor(new_target, fallback)?;
         Ok(Self::allocate(a, proto, len, max, shared)?.into())
     }
 
     fn array_buffer<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        Self::construct_with(a, args, false)
+        Self::construct_with(a, args, a.new_target, false)
     }
 
     fn shared_array_buffer<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        Self::construct_with(a, args, true)
+        Self::construct_with(a, args, a.new_target, true)
     }
 
     fn is_view<'gc>(_: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
@@ -308,7 +308,8 @@ impl Buffers {
     // ---- DataView ----
 
     fn data_view<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        if a.new_target == Value::Undefined {
+        let new_target = a.new_target;
+        if new_target == Value::Undefined {
             return Err(a.throw(ErrorKind::Type, "Constructor DataView requires 'new'"));
         }
         let Some(buffer) = args.at(0).as_object() else { return Err(a.throw(ErrorKind::Type, "First argument to DataView constructor must be an ArrayBuffer")) };
@@ -331,7 +332,7 @@ impl Buffers {
                 Some(n)
             }
         };
-        let proto = a.proto_from_ctor(a.new_target, a.realm.data_view_proto)?;
+        let proto = a.proto_from_ctor(new_target, a.realm.data_view_proto)?;
         // Getting the prototype may have run user code that changed the buffer: check again
         let Some(len) = Self::info(buffer).0 else { return Err(a.throw(ErrorKind::Type, "Cannot construct a DataView on a detached ArrayBuffer")) };
         if offset > len || length.is_some_and(|n| offset + n > len) {
