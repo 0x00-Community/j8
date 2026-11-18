@@ -1,4 +1,4 @@
-//! j8executor: the j8virtasm bytecode executor.
+//! j8executor: the j8bytecode bytecode executor.
 //!
 //! Explicit frame stack (no host recursion); all frames share one register file; captured bindings live in the
 //! heap-allocated [`Env`] chain.
@@ -15,7 +15,7 @@ use core::cell::{Cell, RefCell};
 
 use j8lockfree::SegVec;
 
-use j8virtasm::{Constant, Function, FunctionKind, Insn, Mode, Module, PropertyKind, Reg};
+use j8bytecode::{Constant, Function, FunctionKind, Insn, Mode, Module, PropertyKind, Reg};
 use j8framework::{Collect, Gc};
 mod cache;
 mod ic;
@@ -325,7 +325,7 @@ impl Executor {
     }
 
     /// Direct eval: compiles against the scope table of the call site and runs on the call site's environment chain.
-    fn direct_eval<'gc>(&self, a: &mut Agent<'gc, '_>, src: &str, table: &j8virtasm::EvalScope, env: Option<j8framework::JsEnv<'gc>>, strict: bool, level: usize) -> Result<Value<'gc>, Error> {
+    fn direct_eval<'gc>(&self, a: &mut Agent<'gc, '_>, src: &str, table: &j8bytecode::EvalScope, env: Option<j8framework::JsEnv<'gc>>, strict: bool, level: usize) -> Result<Value<'gc>, Error> {
         let module = match Module::compile_direct(&j8framework::Source { text: src, file: "[eval]" }, strict, table) {
             Ok(m) => m,
             Err(Error::Syntax(m)) => return Err(a.throw(ErrorKind::Syntax, &m)),
@@ -766,7 +766,7 @@ impl Executor {
 
     /// Check for TDZ instructions: the name is fetched from the constant pool only when actually throwing.
     #[inline]
-    fn check_const<'gc>(a: &Agent<'gc, '_>, v: Value<'gc>, func: &Function, name: j8virtasm::Const) -> Result<(), Error> {
+    fn check_const<'gc>(a: &Agent<'gc, '_>, v: Value<'gc>, func: &Function, name: j8bytecode::Const) -> Result<(), Error> {
         if matches!(v.kind(), ValueKind::Uninit) {
             return Err(Self::uninitialized(a, func.name_at(name)));
         }

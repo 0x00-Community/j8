@@ -10,7 +10,7 @@ cargo run -p j8debugger -- disasm -e 'let s = 0; for (let i = 0; i < 10; i++) s 
 cargo run -p j8debugger -- asm a.j8s                # assemble a listing, print the normalized listing (`-o` writes a file)
 ```
 
-Listings use the text form of `j8virtasm` (assembling and disassembling are exact inverses).
+Listings use the text form of `j8bytecode` (assembling and disassembling are exact inverses).
 
 ## License
 

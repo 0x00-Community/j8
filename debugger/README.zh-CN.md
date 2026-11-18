@@ -10,7 +10,7 @@ cargo run -p j8debugger -- disasm -e 'let s = 0; for (let i = 0; i < 10; i++) s 
 cargo run -p j8debugger -- asm a.j8s                # 汇编清单，打印规范化后的清单（`-o` 写文件）
 ```
 
-清单是 `j8virtasm` 的文本形式（汇编与反汇编互为逆）。
+清单是 `j8bytecode` 的文本形式（汇编与反汇编互为逆）。
 
 ## 许可
 

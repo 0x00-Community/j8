@@ -1,4 +1,4 @@
-# j8virtasm
+# j8bytecode
 
 **English** · [简体中文](README.zh-CN.md)
 
@@ -14,9 +14,9 @@ The virtual instruction set of [j8](https://github.com/0x00-Community/j8): an ac
 ## Usage
 
 ```rust
-let module = j8virtasm::Module::try_from(&source)?;
+let module = j8bytecode::Module::try_from(&source)?;
 println!("{module}");                       // the disassembly listing
-let again: j8virtasm::Module = module.to_string().parse()?;
+let again: j8bytecode::Module = module.to_string().parse()?;
 ```
 
 The `j8dbg` tool (`debugger/`) prints and assembles listings from the command line.

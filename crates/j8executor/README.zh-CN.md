@@ -2,7 +2,7 @@
 
 [English](README.md) · **简体中文**
 
-[j8](https://github.com/0x00-Community/j8) 的字节码执行器：执行 `j8virtasm` 的累加器式寄存器字节码，实现 `j8framework::Engine`。
+[j8](https://github.com/0x00-Community/j8) 的字节码执行器：执行 `j8bytecode` 的累加器式寄存器字节码，实现 `j8framework::Engine`。
 
 ## 怎么跑
 
@@ -25,7 +25,7 @@ let result = isolate.run(&mut executor, &cx, &j8framework::Source { text: "1 + 2
 
 | Feature | 缺省 | 含义 |
 | --- | --- | --- |
-| `compile` | 开 | 带 JS ⇒ 字节码编译器（`j8virtasm/compile`）并实现 `Engine`；关掉只剩执行器 |
+| `compile` | 开 | 带 JS ⇒ 字节码编译器（`j8bytecode/compile`）并实现 `Engine`；关掉只剩执行器 |
 
 ## 许可
 

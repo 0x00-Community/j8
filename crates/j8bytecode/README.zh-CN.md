@@ -1,4 +1,4 @@
-# j8virtasm
+# j8bytecode
 
 [English](README.md) · **简体中文**
 
@@ -11,9 +11,9 @@
 ## 用法
 
 ```rust
-let module = j8virtasm::Module::try_from(&source)?;
+let module = j8bytecode::Module::try_from(&source)?;
 println!("{module}");                       // 反汇编清单
-let again: j8virtasm::Module = module.to_string().parse()?;
+let again: j8bytecode::Module = module.to_string().parse()?;
 ```
 
 命令行工具 `j8dbg`（`debugger/`）可以打印、汇编清单。

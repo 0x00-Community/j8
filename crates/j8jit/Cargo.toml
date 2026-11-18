@@ -9,7 +9,7 @@ repository.workspace = true
 
 [dependencies]
 j8framework.workspace = true
-j8virtasm.workspace = true
+j8bytecode.workspace = true
 j8executor.workspace = true
 j8compiler.workspace = true
 mlirpass.workspace = true

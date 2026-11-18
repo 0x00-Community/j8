@@ -1,7 +1,7 @@
 //! j8compiler: bytecode function ⇒ raw machine code.
 //!
 //! ```text
-//! j8virtasm::Function ─ Lower ─▶ MLIR (llvm dialect) ─ a `Backend` (j8jit's x86-64) ─▶ machine code + addresses to patch
+//! j8bytecode::Function ─ Lower ─▶ MLIR (llvm dialect) ─ a `Backend` (j8jit's x86-64) ─▶ machine code + addresses to patch
 //! ```
 //!
 //! The resulting machine code is a System V function `extern "C" fn(regs: *mut Value, acc: *mut Value, start: u64) ->
@@ -30,7 +30,7 @@ use alloc::vec::Vec;
 
 use mlirpass::mlirformat::MlirOpt;
 use mlirpass::{Body, Ctx, Interfaces, PassManager, Passes};
-use j8virtasm::Function;
+use j8bytecode::Function;
 
 /// A function's machine code: bytes and the absolute addresses (runtime functions) to patch.
 #[derive(Clone, Debug)]

@@ -16,7 +16,7 @@
 //! | feature | module | |
 //! |---|---|---|
 //! | `runtime` (default) | `executor` + `builtins` + `platform` | everything needed to run JS |
-//! | `virtasm` | [`virtasm`] | bytecode types, assembler / disassembler |
+//! | `bytecode` | [`bytecode`] | bytecode types, assembler / disassembler |
 //! | `executor` | [`executor`] | bytecode executor with the JS ⇒ bytecode compiler, implements `Engine` |
 //! | `builtins` | [`builtins`] | built-in objects |
 //! | `platform` | [`platform`] | the standard-library `Platform` |
@@ -56,5 +56,5 @@ pub use j8lockfree as lockfree;
 pub use j8platform as platform;
 #[cfg(feature = "taskqueue")]
 pub use j8taskqueue as taskqueue;
-#[cfg(feature = "virtasm")]
-pub use j8virtasm as virtasm;
+#[cfg(feature = "bytecode")]
+pub use j8bytecode as bytecode;

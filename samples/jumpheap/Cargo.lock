@@ -407,7 +407,7 @@ dependencies = [
  "j8lockfree",
  "j8macros",
  "j8platform",
- "j8virtasm",
+ "j8bytecode",
 ]
 
 [[package]]
@@ -442,7 +442,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "df246ce68a17946ecb46fb3dbac682e736dc53cab2fd9f6e289c31d5671e36cd"
 dependencies = [
  "j8framework",
- "j8virtasm",
+ "j8bytecode",
  "ryu-js",
 ]
 
@@ -495,7 +495,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "j8virtasm"
+name = "j8bytecode"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9ac21f865d3aa1fb2af7ac88b1cc7f7858e05db9f06ce5c2c9ea984773cec2b0"

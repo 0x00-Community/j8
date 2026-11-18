@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use clap::Args;
 use j8framework::Source;
-use j8virtasm::Module;
+use j8bytecode::Module;
 
 /// Input (file / stdin / command line) and output (file / stdout).
 #[derive(Args)]

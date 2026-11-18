@@ -1,4 +1,4 @@
-//! j8virtasm: j8's virtual instruction set, an accumulator-based register bytecode (run by j8executor).
+//! j8bytecode: j8's virtual instruction set, an accumulator-based register bytecode (run by j8executor).
 //!
 //! Assembly / disassembly: `text.parse::<Module>()` / `module.to_string()`, inverses of each other.
 //!

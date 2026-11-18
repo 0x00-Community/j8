@@ -1,6 +1,6 @@
 //! Assembly is the inverse of disassembly: a disassembly listing reads back identical field by field.
 use j8framework::Source;
-use j8virtasm::Module;
+use j8bytecode::Module;
 
 #[test]
 fn disassembly_assembles_back() {

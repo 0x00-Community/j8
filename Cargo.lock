@@ -366,7 +366,7 @@ dependencies = [
  "j8macros",
  "j8platform",
  "j8taskqueue",
- "j8virtasm",
+ "j8bytecode",
  "serde",
  "serde_yaml",
 ]
@@ -399,7 +399,7 @@ name = "j8compiler"
 version = "0.3.0"
 dependencies = [
  "j8framework",
- "j8virtasm",
+ "j8bytecode",
  "mlirpass",
 ]
 
@@ -409,7 +409,7 @@ version = "0.3.0"
 dependencies = [
  "clap",
  "j8framework",
- "j8virtasm",
+ "j8bytecode",
 ]
 
 [[package]]
@@ -420,7 +420,7 @@ dependencies = [
  "j8framework",
  "j8lockfree",
  "j8platform",
- "j8virtasm",
+ "j8bytecode",
  "ryu-js",
 ]
 
@@ -448,7 +448,7 @@ dependencies = [
  "j8compiler",
  "j8executor",
  "j8framework",
- "j8virtasm",
+ "j8bytecode",
  "libc",
  "mlirpass",
 ]
@@ -484,7 +484,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "j8virtasm"
+name = "j8bytecode"
 version = "0.3.0"
 dependencies = [
  "j8framework",

@@ -18,7 +18,7 @@ path = "src/lib.rs"
 j8framework.workspace = true
 j8binding.workspace = true
 j8macros.workspace = true
-j8virtasm = { workspace = true, optional = true }
+j8bytecode = { workspace = true, optional = true }
 j8executor = { workspace = true, optional = true }
 j8builtins = { workspace = true, optional = true }
 j8platform = { workspace = true, optional = true }
@@ -33,10 +33,10 @@ j8jit = { workspace = true, optional = true }
 default = ["runtime"]
 # 跑 JS 的一套：执行器 + 内建对象 + 标准平台
 runtime = ["executor", "builtins", "platform"]
-# j8::virtasm：字节码类型、汇编 / 反汇编（不带编译器）
-virtasm = ["dep:j8virtasm"]
+# j8::bytecode：字节码类型、汇编 / 反汇编（不带编译器）
+bytecode = ["dep:j8bytecode"]
 # j8::executor：字节码执行器，带 JS ⇒ 字节码编译（oxc），实现 Engine
-executor = ["dep:j8executor", "virtasm"]
+executor = ["dep:j8executor", "bytecode"]
 # j8::builtins：内建对象（Intrinsics 的实现）
 builtins = ["dep:j8builtins"]
 # j8::platform：Platform 的标准库实现
@@ -98,7 +98,7 @@ repository = "https://github.com/0x00-Community/j8"
 j8framework = { version = "0.3.0", path = "crates/j8framework" }
 j8platform = { version = "0.3.0", path = "crates/j8platform" }
 j8builtins = { version = "0.3.0", path = "crates/j8builtins" }
-j8virtasm = { version = "0.3.0", path = "crates/j8virtasm", default-features = false }
+j8bytecode = { version = "0.3.0", path = "crates/j8bytecode", default-features = false }
 j8executor = { version = "0.3.0", path = "crates/j8executor" }
 j8compiler = { version = "0.3.0", path = "crates/j8compiler" }
 j8jit = { version = "0.3.0", path = "crates/j8jit" }

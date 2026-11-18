@@ -7,7 +7,7 @@ dialect, via [mlirpass](https://crates.io/crates/mlirpass)) ⇒ machine code thr
 `j8jit`).
 
 ```text
-j8virtasm::Function ─ Lower ─▶ MLIR (llvm dialect) ─ Backend ─▶ machine code + addresses to patch
+j8bytecode::Function ─ Lower ─▶ MLIR (llvm dialect) ─ Backend ─▶ machine code + addresses to patch
 ```
 
 The machine code is a System V function `extern "C" fn(regs: *mut Value, acc: *mut Value, start: u64) -> u64`. It runs

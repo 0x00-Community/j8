@@ -7,7 +7,7 @@ use alloc::sync::Arc;
 
 use j8framework::{Error, ModuleInfo, Source};
 use j8lockfree::Chain;
-use j8virtasm::Module;
+use j8bytecode::Module;
 
 /// One compiled source
 struct Entry<T> {

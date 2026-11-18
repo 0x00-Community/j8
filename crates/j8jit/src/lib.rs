@@ -21,7 +21,7 @@ pub use x86_64::{X86_64Code, X86_64Emit, X86_64Reloc};
 
 use core::cell::RefCell;
 
-use j8virtasm::Function;
+use j8bytecode::Function;
 use j8compiler::Compiler;
 use j8executor::{Tier, Tiered};
 use j8framework::{FuncId, Pool, Task, Value};

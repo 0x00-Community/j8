@@ -85,11 +85,11 @@ and depend on the published `j8` by version, the way an embedder would.
 | crate | std | What it does |
 |---|---|---|
 | `j8framework` | std | The core framework: defines the traits (`Platform`, `Engine`, `Invoke`, `Intrinsics`) and the shared structs / enums (`Isolate`, `Scope`, `Agent`, `Context` / `Realm`, `Global`, `Value`, `JsString` / `JsObject`, `Profiler`, `BinaryOp`, `Error` …). JS operation semantics hang off `Agent`; the implementations belong to the other crates. `EventLoop` is one JS event loop (an isolate, its engine and a context; resumable `Engine::start` / `resume`, host async work); `EventLoopSet` runs many on pinned loop threads with load balancing (placement, work stealing, `rebalance`, `split`) and one quota |
-| `j8` (repository root `src/`) | std | Re-exports: `#[j8::class]` / `#[j8::object]` / `#[j8::function]` (the macros live in j8macros, see `crates/macros/USAGE.md`) and the j8binding traits; the other crates by feature (default `runtime` = `j8::executor` + `j8::builtins` + `j8::platform`, plus `virtasm` / `taskqueue` / `lockfree` / `jit` / `full`); every crate is also published on its own on crates.io |
+| `j8` (repository root `src/`) | std | Re-exports: `#[j8::class]` / `#[j8::object]` / `#[j8::function]` (the macros live in j8macros, see `crates/macros/USAGE.md`) and the j8binding traits; the other crates by feature (default `runtime` = `j8::executor` + `j8::builtins` + `j8::platform`, plus `bytecode` / `taskqueue` / `lockfree` / `jit` / `full`); every crate is also published on its own on crates.io |
 | `j8binding` | std | The Rust ⇄ JS binding runtime: `FromJs` / `IntoJs`, host objects, `Class` / `Object` |
 | `j8builtins` | std | Implements `Intrinsics`: installs Object / Function / Array / String / Number / Boolean / Math / the Error family / `console` / `parseInt` and so on into a `Realm` |
 | `j8platform` | std | Implements `Platform` (`DefaultPlatform`): background tasks run on a moremath `ThreadMulti` pool (started once and reused; tasks may borrow the caller's data, through `j8framework::Pool`), the clock is `Instant` |
-| `j8virtasm` | std | The virtual instruction set: accumulator-style register bytecode (`Insn` / `Function` / `Module`); disassemble with `module.to_string()`, assemble with `text.parse::<Module>()`, each the inverse of the other. The `compile` feature (on by default) brings the JS ⇒ bytecode compiler `Module::try_from(&Source)`, parsing with oxc |
+| `j8bytecode` | std | The virtual instruction set: accumulator-style register bytecode (`Insn` / `Function` / `Module`); disassemble with `module.to_string()`, assemble with `text.parse::<Module>()`, each the inverse of the other. The `compile` feature (on by default) brings the JS ⇒ bytecode compiler `Module::try_from(&Source)`, parsing with oxc |
 | `j8taskqueue` | `no_std` | Task queue: `ITask` (`recursable` / `depend` / `exec`) and `ITaskPoll` (`add` / `run`); lock-free dataflow scheduling (hand-written MPMC ready queue, atomic dependency counts): a task whose dependencies are done runs at once, in parallel on the host's `Pool` or on the calling thread, with no round barrier; `TaskId::family` finds the union-find root, `cancel` cancels a whole family; quotas count bytecodes (`Quota` / `Flow::Yield`, a per-run budget); idle workers leave instead of spinning. Every `j8framework::EventLoop` is one `Queue`: scripts, settlements and polls of host futures, checked each time a script yields |
 | `j8macros` | proc-macro | Procedural macros: `enums!("x.json")` generates enums from JSON (definitions, `Display`, `&mut` accessors by field type), `#[derive(Collect)]` for heap types (paragc `Trace`), and the binding macros; see `crates/macros/USAGE.md` |
 | `samples/dune` | std | A runtime with two layers: `src/web/` (the Web-standard APIs: `console`, timers, `URL`, `TextEncoder`, `EventTarget` / `AbortController`, `fetch`, `structuredClone`, `crypto` …) and `src/node/` on top of it (`process`, `require` / ES modules, `Buffer`, `fs`, `path`, `os`, `events`, `util`, `assert`, `child_process` …); machine access is Rust bound with `#[j8::object]` / `#[j8::class]`, the APIs are JS preludes; `dune a.js`, `dune --web a.mjs`, `dune -e` / `-p`, a REPL; see its README |
@@ -99,7 +99,7 @@ and depend on the published `j8` by version, the way an embedder would.
 | `j8executor` | std | The bytecode `Executor`, **currently the last layer**; implements `Engine` and always carries the JS ⇒ bytecode compiler (scripts, modules, `eval` / `Function` all compile to bytecode first) |
 
 All JS is compiled to bytecode before it runs; there is no AST interpreter.
-Dependency direction: every layer depends only on `j8framework` (`j8executor` also on `j8virtasm`), and `j8framework` depends on no layer, only on the building blocks `j8lockfree` and `j8taskqueue`.
+Dependency direction: every layer depends only on `j8framework` (`j8executor` also on `j8bytecode`), and `j8framework` depends on no layer, only on the building blocks `j8lockfree` and `j8taskqueue`.
 
 ### 🧹 Heap and handles
 
@@ -163,7 +163,7 @@ isolate.enter(|scope| {
 
 An accumulator register machine (like V8's Ignition): results go into the implicit `acc`, and binary operations are `acc = reg op acc`.
 
-The instructions and every j8virtasm enum (`Insn` / `Constant` / `FunctionKind` / `PropertyKind`) are defined in `crates/j8virtasm/insn.json` and generated by `j8macros::enums!`; ⛔ hand-written enums. Adding an instruction only touches the JSON (fields of type `Label` get jump targets computed automatically and go into `target_mut`).
+The instructions and every j8bytecode enum (`Insn` / `Constant` / `FunctionKind` / `PropertyKind`) are defined in `crates/j8bytecode/insn.json` and generated by `j8macros::enums!`; ⛔ hand-written enums. Adding an instruction only touches the JSON (fields of type `Label` get jump targets computed automatically and go into `target_mut`).
 
 ### Assembling / disassembling
 

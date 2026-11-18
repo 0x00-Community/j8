@@ -3,7 +3,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::Write;
 
-use j8virtasm::{Constant, Function, Insn, Reg};
+use j8bytecode::{Constant, Function, Insn, Reg};
 use j8framework::{BinaryOp, CompareOp, ValueBits, ValueTag};
 
 use crate::Helper;

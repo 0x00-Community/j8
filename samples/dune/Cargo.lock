@@ -365,7 +365,7 @@ dependencies = [
  "j8lockfree",
  "j8macros",
  "j8platform",
- "j8virtasm",
+ "j8bytecode",
 ]
 
 [[package]]
@@ -394,7 +394,7 @@ name = "j8compiler"
 version = "0.3.0"
 dependencies = [
  "j8framework",
- "j8virtasm",
+ "j8bytecode",
  "mlirpass",
 ]
 
@@ -403,7 +403,7 @@ name = "j8executor"
 version = "0.3.0"
 dependencies = [
  "j8framework",
- "j8virtasm",
+ "j8bytecode",
  "ryu-js",
 ]
 
@@ -431,7 +431,7 @@ dependencies = [
  "j8compiler",
  "j8executor",
  "j8framework",
- "j8virtasm",
+ "j8bytecode",
  "libc",
  "mlirpass",
 ]
@@ -460,7 +460,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "j8virtasm"
+name = "j8bytecode"
 version = "0.3.0"
 dependencies = [
  "j8framework",

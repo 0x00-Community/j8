@@ -6,7 +6,7 @@
 [mlirpass](https://crates.io/crates/mlirpass)）⇒ 经 `Backend` 出机器码（x86-64 后端在 `j8jit`）。
 
 ```text
-j8virtasm::Function ─ Lower ─▶ MLIR（llvm 方言）─ Backend ─▶ 机器码 + 要回填的地址
+j8bytecode::Function ─ Lower ─▶ MLIR（llvm 方言）─ Backend ─▶ 机器码 + 要回填的地址
 ```
 
 机器码是 System V 函数 `extern "C" fn(regs: *mut Value, acc: *mut Value, start: u64) -> u64`，直接在本帧的寄存器文件与累加器上跑；

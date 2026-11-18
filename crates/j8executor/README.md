@@ -3,7 +3,7 @@
 **English** · [简体中文](README.zh-CN.md)
 
 The bytecode executor of [j8](https://github.com/0x00-Community/j8): it runs the accumulator-style register
-bytecode of `j8virtasm` and implements `j8framework::Engine`.
+bytecode of `j8bytecode` and implements `j8framework::Engine`.
 
 ## How it runs
 
@@ -28,7 +28,7 @@ let result = isolate.run(&mut executor, &cx, &j8framework::Source { text: "1 + 2
 
 | Feature | Default | Meaning |
 | --- | --- | --- |
-| `compile` | on | Brings in the JS ⇒ bytecode compiler (`j8virtasm/compile`) and implements `Engine`; without it only the executor remains |
+| `compile` | on | Brings in the JS ⇒ bytecode compiler (`j8bytecode/compile`) and implements `Engine`; without it only the executor remains |
 
 ## License
 
