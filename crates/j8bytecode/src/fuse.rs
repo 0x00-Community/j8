@@ -7,7 +7,7 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use crate::{Function, Insn};
+use crate::{Draft, Insn};
 
 /// The original instructions a fused instruction splits back into (at most three).
 pub struct Unfused {
@@ -70,12 +70,12 @@ impl Insn {
     }
 }
 
-impl Function {
+impl Draft {
     /// Peephole fusion (see the module docs).
     pub fn fuse(&mut self) {
-        let n = self.insns.len();
+        let n = self.0.len();
         let mut target = vec![false; n + 1];
-        for mut i in self.insns.iter().copied() {
+        for mut i in self.0.iter().copied() {
             if let Some(l) = i.target_mut() {
                 target[l.0 as usize] = true;
             }
@@ -87,7 +87,7 @@ impl Function {
         while at < n {
             moved[at] = u32::try_from(out.len()).expect("fewer than 2^32 instructions");
             let inner = |k: usize| at + k < n && !target[at + k];
-            let (insn, used) = Insn::fuse_at(&self.insns, at, inner).unwrap_or((self.insns[at], 1));
+            let (insn, used) = Insn::fuse_at(&self.0, at, inner).unwrap_or((self.0[at], 1));
             // Copying back between two registers that were just copied changes nothing (acc already has the value):
             // drop it unless it is a jump target
             let undo = matches!((out.last(), insn), (Some(&Insn::Mov { dst, src }), Insn::Mov { dst: d2, src: s2 }) if d2 == src && s2 == dst);
@@ -102,6 +102,6 @@ impl Function {
                 l.0 = moved[l.0 as usize];
             }
         }
-        self.insns = out;
+        self.0 = out;
     }
 }

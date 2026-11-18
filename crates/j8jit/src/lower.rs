@@ -63,6 +63,8 @@ pub(crate) struct Lower<'f> {
     func: &'f Function,
     out: String,
     next: u32,
+    /// Byte offset of the instruction after the one being lowered (`pc` and jump targets are byte offsets)
+    after: u32,
     /// Instructions that use the exit block
     deopts: BTreeSet<u32>,
     /// Runtime functions used
@@ -86,9 +88,14 @@ type V = String;
 impl<'f> Lower<'f> {
     /// The whole module: runtime function declarations + the entry function.
     pub(crate) fn module(func: &'f Function) -> Lowered {
-        let mut l = Lower { func, out: String::new(), next: 0, deopts: BTreeSet::new(), helpers: BTreeSet::new(), exits: Vec::new(), backs: Vec::new() };
+        let mut l = Lower { func, out: String::new(), next: 0, after: 0, deopts: BTreeSet::new(), helpers: BTreeSet::new(), exits: Vec::new(), backs: Vec::new() };
         let loops = Self::loops(func);
-        for (pc, &insn) in (0u32..).zip(&func.insns) {
+        let mut at = 0;
+        while at < func.end() {
+            let (insn, next) = func.insn_at(at);
+            let pc = u32::try_from(at).expect("code under 4 GiB");
+            l.after = u32::try_from(next).expect("code under 4 GiB");
+            at = next;
             l.label(&alloc::format!("i{pc}"));
             if let Err(u) = l.insn(pc, insn) {
                 // An instruction the first tier does not accept: stop before it and hand it to the interpreter
@@ -97,7 +104,7 @@ impl<'f> Lower<'f> {
                 l.line(&alloc::format!("llvm.br ^d{pc}"));
             }
         }
-        if func.insns.is_empty() {
+        if func.end() == 0 {
             l.label("i0");
             let z = l.int(0, 64);
             l.line(&alloc::format!("llvm.br ^x({z} : i64)"));
@@ -135,7 +142,7 @@ impl<'f> Lower<'f> {
         headers.sort_unstable();
         headers.dedup();
         // Entry dispatch: `%start` 0 enters at the start, `h + 1` enters at loop header `h` (OSR)
-        let mut dispatch = Lower { func, out: String::new(), next: l.next, deopts: BTreeSet::new(), helpers: BTreeSet::new(), exits: Vec::new(), backs: Vec::new() };
+        let mut dispatch = Lower { func, out: String::new(), next: l.next, after: 0, deopts: BTreeSet::new(), helpers: BTreeSet::new(), exits: Vec::new(), backs: Vec::new() };
         // Locals (promoted to SSA by mem2reg), read from the frame once
         dispatch.line("%one = llvm.mlir.constant(1 : i64) : i64");
         for (local, base, at) in dispatch.locals() {
@@ -161,8 +168,7 @@ impl<'f> Lower<'f> {
 
     /// Loops: (loop header, the backward jump); the loop header is the target of the backward jump (OSR enters here).
     fn loops(func: &Function) -> Vec<(u32, u32)> {
-        (0u32..)
-            .zip(&func.insns)
+        func.insns()
             .filter_map(|(pc, insn)| match insn {
                 Insn::Jump(l) | Insn::JumpIfTrue(l) | Insn::JumpIfFalse(l) if l.0 <= pc => Some((l.0, pc)),
                 _ => None,
@@ -343,8 +349,8 @@ impl<'f> Lower<'f> {
         alloc::format!("^b{pc}")
     }
 
-    fn next_block(&mut self, pc: u32) {
-        self.line(&alloc::format!("llvm.br ^i{}", pc + 1));
+    fn next_block(&mut self) {
+        self.line(&alloc::format!("llvm.br ^i{}", self.after));
     }
 
     /// ToBoolean(acc), only for booleans / numbers / undefined / null; anything else bails out to the interpreter.
@@ -458,7 +464,7 @@ impl<'f> Lower<'f> {
             }
             Insn::JumpIfTrue(l) | Insn::JumpIfFalse(l) => {
                 let v = self.truthy(pc);
-                let (yes, no) = (self.jump_to(pc, l.0), alloc::format!("^i{}", pc + 1));
+                let (yes, no) = (self.jump_to(pc, l.0), alloc::format!("^i{}", self.after));
                 let (t, f) = if matches!(insn, Insn::JumpIfTrue(_)) { (yes, no) } else { (no, yes) };
                 self.line(&alloc::format!("llvm.cond_br {v}, {t}, {f}"));
                 return Ok(());
@@ -472,14 +478,14 @@ impl<'f> Lower<'f> {
         if !last {
             return Ok(());
         }
-        if pc as usize + 1 >= self.func.insns.len() {
+        if self.after as usize >= self.func.end() {
             // The last instruction falls off the end of the function: shouldn't happen until that is handled as
             // returning undefined; bail out to the interpreter
-            self.deopts.insert(pc + 1);
-            self.line(&alloc::format!("llvm.br ^d{}", pc + 1));
+            self.deopts.insert(self.after);
+            self.line(&alloc::format!("llvm.br ^d{}", self.after));
             return Ok(());
         }
-        self.next_block(pc);
+        self.next_block();
         Ok(())
     }
 }

@@ -7,6 +7,7 @@
 //! `#[class]` / `#[object]` / `#[function]`: Rust ⇄ JS bindings (used through the facade crate `j8`:
 //! `#[j8::class]` etc.); see `USAGE.md`.
 mod class;
+mod dispatch;
 mod expand;
 mod function;
 mod heap;
@@ -65,6 +66,14 @@ pub fn derive_trace(input: TokenStream) -> TokenStream {
 pub fn heap(attr: TokenStream, item: TokenStream) -> TokenStream {
     let item = parse_macro_input!(item as syn::ItemStruct);
     heap::expand(&attr.into(), item).unwrap_or_else(syn::Error::into_compile_error).into()
+}
+
+/// `dispatch!(Opcode::at(code, pc), { prelude }, match insn { arms })`: an interpreter's instruction `match`
+/// dispatched once on the opcode (see `dispatch.rs` and USAGE.md).
+#[proc_macro]
+pub fn dispatch(input: TokenStream) -> TokenStream {
+    let d = parse_macro_input!(input as dispatch::Dispatch);
+    d.expand().unwrap_or_else(syn::Error::into_compile_error).into()
 }
 
 /// Reads the JSON at `$CARGO_MANIFEST_DIR/<path>` and generates all the enums in it.

@@ -9,7 +9,7 @@ use oxc_span::{GetSpan, SourceType, Span};
 use j8framework::{CodeKind, CompareOp, Error, ImportEntry, ImportName, ModuleInfo, Resume, Source};
 
 use crate::scope::{Decl, DeclKind, Decls, Hidden, Key, Resolver, THIS};
-use j8bytecode::{Const, Constant, EvalName, EvalScope, Function, FunctionKind, Insn, Label, Module, PropertyKind, Reg};
+use j8bytecode::{Const, Constant, Draft, EvalName, EvalScope, Function, FunctionKind, IcSlot, Insn, Label, Module, PropertyKind, Reg};
 
 /// Jump target before backpatching
 const UNPATCHED: Label = Label(u32::MAX);
@@ -189,6 +189,8 @@ enum Exit {
 struct Frame<'a> {
     index: usize,
     out: Function,
+    /// The instructions so far (assembled into `out.code` when the function is done)
+    insns: Draft,
     /// The next free register
     top: u16,
     /// How many environment levels of this function are currently active
@@ -216,6 +218,15 @@ struct Frame<'a> {
     prologue: bool,
     /// All parameters are simple names (no default values, destructuring, or rest)
     simple_params: bool,
+}
+
+impl Frame<'_> {
+    /// The finished function: instructions fused and assembled into bytes
+    fn finish(mut self) -> Function {
+        self.insns.fuse();
+        self.out.code = self.insns.into();
+        self.out
+    }
 }
 
 /// A function body: statements, an arrow function's expression, class field initializers, a default constructor.
@@ -313,7 +324,6 @@ impl Compiler<'_, '_> {
             }
         }
         c.script(program, local.as_ref(), strict)?;
-        c.module.iter_mut().for_each(Function::fuse);
         Ok(Module { functions: c.module })
     }
 }
@@ -438,7 +448,6 @@ impl Compiler<'_, '_> {
             .collect();
         c.levels.push(Level { func: usize::MAX, names: bound, env: true, mark: 0, switch: false });
         c.module_body(program)?;
-        c.module.iter_mut().for_each(Function::fuse);
         Ok((Module { functions: c.module }, info))
     }
 
@@ -578,7 +587,7 @@ impl<'a> Compiler<'a, '_> {
                     self.emit(Insn::Star(obj));
                     self.emit(Insn::Ldar(v));
                     let k = self.name(name);
-                    self.emit(Insn::SetNamed { obj, name: k, strict: false });
+                    self.emit(Insn::SetNamed { obj, name: k, strict: false, ic: IcSlot::default() });
                     self.release(obj);
                     self.release(v);
                 }
@@ -680,12 +689,13 @@ impl<'a> Compiler<'a, '_> {
             },
             _ => i,
         };
-        out.insns.push(i);
-        out.insns.len() - 1
+        let insns = &mut self.frame().insns.0;
+        insns.push(i);
+        insns.len() - 1
     }
 
     pub(crate) fn here(&mut self) -> Label {
-        Label(u32::try_from(self.frame().out.insns.len()).expect("fewer than 2^32 instructions"))
+        Label(u32::try_from(self.frame().insns.0.len()).expect("fewer than 2^32 instructions"))
     }
 
     /// Emits a jump whose target is to be backpatched.
@@ -694,7 +704,7 @@ impl<'a> Compiler<'a, '_> {
     }
 
     pub(crate) fn patch(&mut self, at: usize, to: Label) {
-        *self.frame().out.insns[at].target_mut().expect("a jump") = to;
+        *self.frame().insns.0[at].target_mut().expect("a jump") = to;
     }
 
     /// Points the jump at `at` here.
@@ -915,7 +925,7 @@ impl<'a> Compiler<'a, '_> {
                 self.emit(Insn::Ldar(obj));
                 self.emit(Insn::Star(t));
             }
-            self.emit(Insn::GetNamed { obj, name: k });
+            self.emit(Insn::GetNamed { obj, name: k, ic: IcSlot::default() });
             ends.push(self.jump(Insn::Jump));
             self.land(skip);
         }
@@ -992,7 +1002,7 @@ impl<'a> Compiler<'a, '_> {
             self.emit(Insn::WithHas { obj, name: k });
             let skip = self.jump(Insn::JumpIfFalse);
             self.emit(Insn::Ldar(value));
-            self.emit(Insn::SetNamed { obj, name: k, strict });
+            self.emit(Insn::SetNamed { obj, name: k, strict, ic: IcSlot::default() });
             ends.push(self.jump(Insn::Jump));
             self.land(skip);
         }
@@ -1052,7 +1062,7 @@ impl<'a> Compiler<'a, '_> {
         // Functions in a class (methods, constructors, field initializers) are all strict
         let strict = flavor.strict || self.class_depth > 0 || self.frames.last().is_some_and(|f| f.strict);
         let out = Function { name: name.into(), kind: flavor.kind, keeps_args, generator: flavor.generator, asynchronous: flavor.asynchronous, mode: strict.into(), params: n, length, regs: top, ..Function::default() };
-        self.frames.push(Frame { index, out, top, envs: 0, controls: Vec::new(), label: None, completion: None, resume: None, async_generator: false, strict, annexb: Vec::new(), var_level: None, eval_vars: None, prologue: false, simple_params: false });
+        self.frames.push(Frame { index, out, insns: Draft::default(), top, envs: 0, controls: Vec::new(), label: None, completion: None, resume: None, async_generator: false, strict, annexb: Vec::new(), var_level: None, eval_vars: None, prologue: false, simple_params: false });
         if flavor.generator || flavor.asynchronous {
             let mode = self.temp();
             self.frame().resume = Some(mode);
@@ -1110,7 +1120,8 @@ impl<'a> Compiler<'a, '_> {
         self.emit(Insn::Return);
         self.levels.pop();
         let f = self.frames.pop().expect("the function's frame");
-        self.module[f.index] = f.out;
+        let at = f.index;
+        self.module[at] = f.finish();
         Ok(u32::try_from(index).expect("fewer than 2^32 functions"))
     }
 
@@ -1377,7 +1388,7 @@ impl<'a> Compiler<'a, '_> {
         let v = self.temp();
         let top = self.here();
         let length = self.name("length");
-        self.emit(Insn::GetNamed { obj: keys, name: length });
+        self.emit(Insn::GetNamed { obj: keys, name: length, ic: IcSlot::default() });
         self.emit(Insn::Compare(CompareOp::Lt, i));
         let exit = self.jump(Insn::JumpIfFalse);
         self.emit(Insn::Ldar(i));
@@ -1456,7 +1467,7 @@ impl<'a> Compiler<'a, '_> {
     /// Destructuring `null` / `undefined` throws TypeError (added for `{} = v`, where there is no property to read).
     pub(crate) fn require_object(&mut self, value: Reg) {
         let k = self.name("constructor");
-        self.emit(Insn::GetNamed { obj: value, name: k });
+        self.emit(Insn::GetNamed { obj: value, name: k, ic: IcSlot::default() });
     }
 
     /// Evaluates a property key into register `k` (a static key is a string constant).
@@ -1539,7 +1550,7 @@ impl<'a> Compiler<'a, '_> {
                         k => {
                             let name = self.static_key(k, false).ok_or_else(|| self.unsupported(p.span, "field name"))??;
                             value(self)?;
-                            self.emit(Insn::DefineNamed { obj: this, name, kind: PropertyKind::Data, enumerable: true });
+                            self.emit(Insn::DefineNamed { obj: this, name, kind: PropertyKind::Data, enumerable: true, ic: IcSlot::default() });
                         }
                     }
                 }
@@ -1708,7 +1719,7 @@ impl<'a> Compiler<'a, '_> {
                             let fname = self.method_name(&m.key, m.computed, m.kind);
                             let f = self.method(fname, &m.value, FunctionKind::Method)?;
                             self.emit(Insn::CreateMethod { func: f, home: target });
-                            self.emit(Insn::DefineNamed { obj: target, name, kind, enumerable: false });
+                            self.emit(Insn::DefineNamed { obj: target, name, kind, enumerable: false, ic: IcSlot::default() });
                         }
                         None => {
                             let k = m.key.as_expression().ok_or_else(|| self.unsupported(m.span, "method key"))?;
@@ -1770,7 +1781,7 @@ impl<'a> Compiler<'a, '_> {
         use oxc_ast::ast::{Declaration, ExportDefaultDeclarationKind};
         self.module.push(Function::default());
         let out = Function { name: "main".into(), regs: Reg::PARAMS, mode: true.into(), ..Function::default() };
-        self.frames.push(Frame { index: 0, out, top: Reg::PARAMS, envs: 0, controls: Vec::new(), label: None, completion: None, resume: None, async_generator: false, strict: true, annexb: Vec::new(), var_level: None, eval_vars: None, prologue: false, simple_params: false });
+        self.frames.push(Frame { index: 0, out, insns: Draft::default(), top: Reg::PARAMS, envs: 0, controls: Vec::new(), label: None, completion: None, resume: None, async_generator: false, strict: true, annexb: Vec::new(), var_level: None, eval_vars: None, prologue: false, simple_params: false });
         for s in &program.body {
             let (f, name, inferred) = match s {
                 Statement::FunctionDeclaration(f) => (f, f.id.as_ref().map(|i| i.name.as_str()), ""),
@@ -1821,7 +1832,8 @@ impl<'a> Compiler<'a, '_> {
         self.emit(Insn::LdaUndefined);
         self.emit(Insn::Return);
         let f = self.frames.pop().expect("the module's frame");
-        self.module[f.index] = f.out;
+        let at = f.index;
+        self.module[at] = f.finish();
         Ok(())
     }
 
@@ -1834,7 +1846,7 @@ impl<'a> Compiler<'a, '_> {
         self.module.push(Function::default());
         let eval = local.is_some();
         let out = Function { name: "main".into(), regs: Reg::PARAMS, mode: strict.into(), ..Function::default() };
-        self.frames.push(Frame { index: 0, out, top: Reg::PARAMS, envs: 0, controls: Vec::new(), label: None, completion: None, resume: None, async_generator: false, strict, annexb: Vec::new(), var_level: None, eval_vars: None, prologue: false, simple_params: false });
+        self.frames.push(Frame { index: 0, out, insns: Draft::default(), top: Reg::PARAMS, envs: 0, controls: Vec::new(), label: None, completion: None, resume: None, async_generator: false, strict, annexb: Vec::new(), var_level: None, eval_vars: None, prologue: false, simple_params: false });
         let completion = self.temp();
         self.frame().completion = Some(completion);
         // Direct eval code uses the call site's `this` (resolved via the outer scope table)
@@ -1896,7 +1908,7 @@ impl<'a> Compiler<'a, '_> {
                             self.emit(Insn::Star(obj));
                             self.emit(Insn::Ldar(v));
                             let name = self.name(d.name);
-                            self.emit(Insn::DefineNamed { obj, name, kind: PropertyKind::Data, enumerable: true });
+                            self.emit(Insn::DefineNamed { obj, name, kind: PropertyKind::Data, enumerable: true, ic: IcSlot::default() });
                             self.release(obj);
                             self.release(v);
                         }
@@ -1948,7 +1960,7 @@ impl<'a> Compiler<'a, '_> {
         self.emit(Insn::Return);
         self.levels.pop();
         let f = self.frames.pop().expect("the script's frame");
-        self.module[0] = f.out;
+        self.module[0] = f.finish();
         Ok(())
     }
 

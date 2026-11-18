@@ -1,7 +1,7 @@
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
-use crate::bin::{BinError, Binary, Reader};
+use crate::bin::{BinError, Binary, Fixed, Reader};
 
 j8macros::enums!("insn.json");
 

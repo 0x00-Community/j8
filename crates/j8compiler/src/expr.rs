@@ -8,7 +8,7 @@ use j8framework::{BinaryOp, CompareOp, Error, Resume, UnaryOp};
 
 use crate::compiler::{Body, Compiler, Flavor, Place};
 use crate::scope::Hidden;
-use j8bytecode::{Const, Constant, FunctionKind, Insn, PropertyKind, Reg};
+use j8bytecode::{Const, Constant, FunctionKind, IcSlot, Insn, PropertyKind, Reg};
 
 /// Binary operator ⇒ bytecode operation.
 #[derive(Clone, Copy)]
@@ -373,7 +373,7 @@ impl<'a> Compiler<'a, '_> {
                 self.expr(&m.object)?;
                 self.emit(Insn::Star(this));
                 let name = self.name(m.property.name.as_str());
-                self.emit(Insn::GetNamed { obj: this, name });
+                self.emit(Insn::GetNamed { obj: this, name, ic: IcSlot::default() });
             }
             Expression::ComputedMemberExpression(m) => {
                 self.expr(&m.object)?;
@@ -515,7 +515,7 @@ impl<'a> Compiler<'a, '_> {
     fn target_load(&mut self, t: &Target<'a>) {
         match *t {
             Target::Name(n, pos) => self.load_at(n, pos),
-            Target::Named { obj, name } => _ = self.emit(Insn::GetNamed { obj, name }),
+            Target::Named { obj, name } => _ = self.emit(Insn::GetNamed { obj, name, ic: IcSlot::default() }),
             Target::Keyed { obj, key } => {
                 self.emit(Insn::Ldar(key));
                 self.emit(Insn::GetKeyed { obj });
@@ -530,7 +530,7 @@ impl<'a> Compiler<'a, '_> {
     fn target_store(&mut self, t: &Target<'a>) {
         match *t {
             Target::Name(n, pos) => self.store_at(n, false, pos),
-            Target::Named { obj, name } => _ = self.emit(Insn::SetNamed { obj, name, strict: self.strict_here() }),
+            Target::Named { obj, name } => _ = self.emit(Insn::SetNamed { obj, name, strict: self.strict_here(), ic: IcSlot::default() }),
             Target::Keyed { obj, key } => _ = self.emit(Insn::SetKeyed { obj, key, strict: self.strict_here() }),
             Target::Private { obj, key } => _ = self.emit(Insn::SetPrivate { obj, key }),
         }
@@ -563,7 +563,7 @@ impl<'a> Compiler<'a, '_> {
                 MemberExpression::StaticMemberExpression(m) if let Some(obj) = self.in_register(&m.object) => {
                     let name = self.name(m.property.name.as_str());
                     self.expr(&a.right)?;
-                    self.emit(Insn::SetNamed { obj, name, strict: self.strict_here() });
+                    self.emit(Insn::SetNamed { obj, name, strict: self.strict_here(), ic: IcSlot::default() });
                     return Ok(());
                 }
                 MemberExpression::ComputedMemberExpression(m) if Self::cannot_assign(&m.expression) && let Some(obj) = self.in_register(&m.object) => {
@@ -688,7 +688,7 @@ impl<'a> Compiler<'a, '_> {
                 self.emit(Insn::Star(this));
                 self.optional(m.optional, m.span)?;
                 let name = self.name(m.property.name.as_str());
-                self.emit(Insn::GetNamed { obj: this, name });
+                self.emit(Insn::GetNamed { obj: this, name, ic: IcSlot::default() });
             }
             Expression::ComputedMemberExpression(m) => {
                 self.expr(&m.object)?;
@@ -751,7 +751,7 @@ impl<'a> Compiler<'a, '_> {
             && let Some(obj) = self.in_register(&m.object)
         {
             let name = self.name(m.property.name.as_str());
-            self.emit(Insn::GetNamed { obj, name });
+            self.emit(Insn::GetNamed { obj, name, ic: IcSlot::default() });
             return Ok(());
         }
         self.expr(&m.object)?;
@@ -759,7 +759,7 @@ impl<'a> Compiler<'a, '_> {
         let obj = self.temp();
         self.emit(Insn::Star(obj));
         let name = self.name(m.property.name.as_str());
-        self.emit(Insn::GetNamed { obj, name });
+        self.emit(Insn::GetNamed { obj, name, ic: IcSlot::default() });
         self.release(obj);
         Ok(())
     }
@@ -1001,14 +1001,14 @@ impl<'a> Compiler<'a, '_> {
         self.emit(Insn::DelegateStep { iter, mode });
         self.emit(Insn::Star(result));
         let done = self.name("done");
-        self.emit(Insn::GetNamed { obj: result, name: done });
+        self.emit(Insn::GetNamed { obj: result, name: done, ic: IcSlot::default() });
         let finished = self.jump(Insn::JumpIfTrue);
         let value = self.name("value");
-        self.emit(Insn::GetNamed { obj: result, name: value });
+        self.emit(Insn::GetNamed { obj: result, name: value, ic: IcSlot::default() });
         self.emit(Insn::Yield { mode });
         self.emit(Insn::Jump(top));
         self.land(finished);
-        self.emit(Insn::GetNamed { obj: result, name: value });
+        self.emit(Insn::GetNamed { obj: result, name: value, ic: IcSlot::default() });
         self.emit(Insn::Star(result));
         self.on_completion(mode, f64::from(Resume::Return), |s| {
             s.emit(Insn::Ldar(result));
@@ -1043,10 +1043,10 @@ impl<'a> Compiler<'a, '_> {
         self.resume_dispatch(mode, false)?;
         self.emit(Insn::Star(result));
         let done = self.name("done");
-        self.emit(Insn::GetNamed { obj: result, name: done });
+        self.emit(Insn::GetNamed { obj: result, name: done, ic: IcSlot::default() });
         let finished = self.jump(Insn::JumpIfTrue);
         let value = self.name("value");
-        self.emit(Insn::GetNamed { obj: result, name: value });
+        self.emit(Insn::GetNamed { obj: result, name: value, ic: IcSlot::default() });
         self.emit(Insn::Star(result));
         self.emit(Insn::Ldar(Reg(iter.0 + 3)));
         let not_sync = self.jump(Insn::JumpIfFalse);
@@ -1059,7 +1059,7 @@ impl<'a> Compiler<'a, '_> {
         self.emit(Insn::Yield { mode });
         self.emit(Insn::Jump(top));
         self.land(finished);
-        self.emit(Insn::GetNamed { obj: result, name: value });
+        self.emit(Insn::GetNamed { obj: result, name: value, ic: IcSlot::default() });
         self.emit(Insn::Star(result));
         self.on_completion(delegated, f64::from(Resume::Return), |s| {
             s.emit(Insn::Ldar(result));
@@ -1167,7 +1167,7 @@ impl<'a> Compiler<'a, '_> {
             let proto_setter = !p.computed && !p.shorthand && !p.method && kind == PropertyKind::Data && self.static_name(&p.key, false).is_some_and(|n| n == "__proto__");
             match key {
                 Ok(_) if proto_setter => _ = self.emit(Insn::SetProtoLiteral { obj }),
-                Ok(name) => _ = self.emit(Insn::DefineNamed { obj, name, kind, enumerable: true }),
+                Ok(name) => _ = self.emit(Insn::DefineNamed { obj, name, kind, enumerable: true, ic: IcSlot::default() }),
                 Err(key) => {
                     self.emit(Insn::DefineKeyed { obj, key, kind, enumerable: true });
                     self.release(key);

@@ -7,7 +7,7 @@
 //! The resulting machine code is a System V function `extern "C" fn(regs: *mut Value, acc: *mut Value, start: u64, stop:
 //! *const u8) -> u64`: it runs directly on this frame's register file and accumulator (see [`ValueBits`](j8framework::ValueBits) for
 //! the memory layout of [`Value`](j8framework::Value)); returning 0 means the function returned (result in the
-//! accumulator), returning `pc + 1` means it stopped before instruction `pc` (j8executor's `Exit`).
+//! accumulator), returning `pc + 1` means it stopped before the instruction at byte offset `pc` (j8executor's `Exit`).
 //!
 //! Instructions accepted by the first tier: register reads/writes, number and boolean constants, arithmetic and
 //! comparisons, `++` / `--`, jumps, TDZ checks, return. If a runtime operand is not a number (or another fast-path

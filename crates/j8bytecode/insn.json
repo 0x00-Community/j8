@@ -90,10 +90,14 @@
     },
     {
       "name": "Insn",
+      "opcodes": "Opcode",
       "doc": "An instruction. The accumulator `acc` is an implicit input / output.",
       "derive": ["Clone", "Copy", "Debug", "PartialEq"],
       "repr": "u16",
-      "accessors": [{"name": "target_mut", "ty": "Label", "doc": "Target of a jump instruction (for backpatching): every instruction with a `Label` field counts."}],
+      "accessors": [
+        {"name": "target_mut", "ty": "Label", "doc": "Target of a jump instruction (for backpatching): every instruction with a `Label` field counts."},
+        {"name": "ic_mut", "ty": "IcSlot", "doc": "The inline cache slot of a property access (numbered when assembled): every instruction with an `IcSlot` field counts."}
+      ],
       "variants": [
         {"name": "LdaUndefined"},
         {"name": "LdaNull"},
@@ -185,7 +189,7 @@
         {"name": "CreateMethod", "doc": "acc = method closure (`super` looks up the prototype of `home`)", "fields": [{"name": "func", "ty": "u32"}, {"name": "home", "ty": "Reg"}]},
         {"name": "CreateClass", "doc": "acc = class constructor (function `func`); `proto` receives its `prototype` object; `parent` is the value of `extends`", "fields": [{"name": "func", "ty": "u32"}, {"name": "parent", "ty": "Option<Reg>"}, {"name": "proto", "ty": "Reg"}]},
         {"name": "SetClassFields", "doc": "The instance field initializer of class constructor `ctor` = acc", "fields": [{"name": "ctor", "ty": "Reg"}]},
-        {"name": "DefineNamed", "doc": "Define property `name` on `obj`; the value (or accessor function) is acc", "fields": [{"name": "obj", "ty": "Reg"}, {"name": "name", "ty": "Const"}, {"name": "kind", "ty": "PropertyKind"}, {"name": "enumerable", "ty": "bool"}]},
+        {"name": "DefineNamed", "doc": "Define property `name` on `obj`; the value (or accessor function) is acc", "fields": [{"name": "obj", "ty": "Reg"}, {"name": "name", "ty": "Const"}, {"name": "kind", "ty": "PropertyKind"}, {"name": "enumerable", "ty": "bool"}, {"name": "ic", "ty": "IcSlot"}]},
         {"name": "DefineKeyed", "doc": "Same as above, with the key in `key`", "fields": [{"name": "obj", "ty": "Reg"}, {"name": "key", "ty": "Reg"}, {"name": "kind", "ty": "PropertyKind"}, {"name": "enumerable", "ty": "bool"}]},
         {"name": "GetSuper", "doc": "acc = super.name (a getter's `this` is `this`)", "fields": [{"name": "this", "ty": "Reg"}, {"name": "name", "ty": "Const"}]},
         {"name": "GetSuperKeyed", "doc": "acc = super[acc]", "fields": [{"name": "this", "ty": "Reg"}]},
@@ -198,8 +202,8 @@
         {"name": "DeleteKeyed", "doc": "acc = delete obj[acc]", "fields": [{"name": "obj", "ty": "Reg"}, {"name": "strict", "ty": "bool"}]},
         {"name": "CreateObject", "doc": "acc = {}, with slots reserved for `capacity` properties (the number of properties in the literal)", "fields": [{"name": "capacity", "ty": "u16"}]},
         {"name": "CreateArray", "doc": "acc = [first, first+1, …] (`count` of them)", "fields": [{"name": "first", "ty": "Reg"}, {"name": "count", "ty": "u16"}]},
-        {"name": "GetNamed", "doc": "acc = obj.name", "fields": [{"name": "obj", "ty": "Reg"}, {"name": "name", "ty": "Const"}]},
-        {"name": "SetNamed", "doc": "obj.name = acc (`strict`: throws TypeError if the write fails)", "fields": [{"name": "obj", "ty": "Reg"}, {"name": "name", "ty": "Const"}, {"name": "strict", "ty": "bool"}]},
+        {"name": "GetNamed", "doc": "acc = obj.name", "fields": [{"name": "obj", "ty": "Reg"}, {"name": "name", "ty": "Const"}, {"name": "ic", "ty": "IcSlot"}]},
+        {"name": "SetNamed", "doc": "obj.name = acc (`strict`: throws TypeError if the write fails)", "fields": [{"name": "obj", "ty": "Reg"}, {"name": "name", "ty": "Const"}, {"name": "strict", "ty": "bool"}, {"name": "ic", "ty": "IcSlot"}]},
         {"name": "GetKeyed", "doc": "acc = obj[acc]", "fields": [{"name": "obj", "ty": "Reg"}]},
         {"name": "SetKeyed", "doc": "obj[key] = acc (`strict`: throws TypeError if the write fails)", "fields": [{"name": "obj", "ty": "Reg"}, {"name": "key", "ty": "Reg"}, {"name": "strict", "ty": "bool"}]},
         {"name": "CallEval", "doc": "`eval(…)`: if callee is %eval%, run it as a direct eval (the visible bindings are this function's scope table `scope`), otherwise same as Call", "fields": [{"name": "callee", "ty": "Reg"}, {"name": "this", "ty": "Reg"}, {"name": "args", "ty": "Reg"}, {"name": "argc", "ty": "u16"}, {"name": "scope", "ty": "u16"}]},
@@ -225,8 +229,14 @@
     },
     {
       "name": "Label",
-      "doc": "Jump target: an instruction index.",
+      "doc": "Jump target: in a `Draft` an instruction index, in `Function::code` a byte offset (assembling rewrites it).",
       "derive": ["Clone", "Copy", "Debug", "PartialEq", "Eq", "Hash"],
+      "fields": [{"ty": "u32"}]
+    },
+    {
+      "name": "IcSlot",
+      "doc": "Inline cache slot of a property access, numbered from 0 in each function when assembled.",
+      "derive": ["Clone", "Copy", "Debug", "Default", "PartialEq", "Eq", "Hash"],
       "fields": [{"ty": "u32"}]
     },
     {
@@ -254,6 +264,12 @@
       "fields": [{"ty": "Vec<Vec<EvalName>>"}]
     },
     {
+      "name": "Draft",
+      "doc": "Instructions being compiled: jump targets are instruction indices. `Draft::fuse`, then `Box::<[u8]>::from(draft)` assembles them into `Function::code`.",
+      "derive": ["Clone", "Debug", "Default"],
+      "fields": [{"ty": "Vec<Insn>"}]
+    },
+    {
       "name": "Function",
       "doc": "A function: name, parameter count, register count, instructions, constant pool.",
       "derive": ["Clone", "Debug", "Default"],
@@ -267,7 +283,7 @@
         {"name": "params", "ty": "u16"},
         {"name": "length", "ty": "u16", "doc": "The function's `length`: the number of parameters before the first one with a default value (or the rest parameter)"},
         {"name": "regs", "ty": "u16"},
-        {"name": "insns", "ty": "Vec<Insn>"},
+        {"name": "code", "ty": "Box<[u8]>", "doc": "The instructions, assembled from a `Draft`: each is a one-byte opcode then fixed-width little-endian operands; jump targets are byte offsets"},
         {"name": "consts", "ty": "Vec<Constant>"},
         {"name": "scopes", "ty": "Vec<EvalScope>", "doc": "Scope tables of every direct eval in the function (the `scope` of `CallEval` indexes this)"},
         {"name": "mapped_params", "ty": "Vec<Option<u16>>", "doc": "Mapped arguments: the parameter environment slot for the i-th argument (only for sloppy mode with simple parameters)"}

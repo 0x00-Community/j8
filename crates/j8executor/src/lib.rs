@@ -15,7 +15,7 @@ use core::cell::{Cell, RefCell};
 
 use j8lockfree::SegVec;
 
-use j8bytecode::{Constant, Function, FunctionKind, Insn, Mode, Module, PropertyKind, Reg};
+use j8bytecode::{Constant, Function, FunctionKind, Insn, Mode, Module, Opcode, PropertyKind, Reg};
 use j8compiler::Compile;
 use j8framework::Numbers;
 use j8framework::{Collect, Gc};
@@ -41,8 +41,7 @@ struct Loaded {
     no_tier_enter: Cell<bool>,
     /// The JIT tier has said there is no need to ask it on loop back-jumps
     no_tier_loops: Cell<bool>,
-    /// By instruction index: inline caches for property reads/writes (used only by `get.named` / `set.named` /
-    /// `define.named`)
+    /// By `IcSlot`: inline caches for property reads/writes (`get.named` / `set.named` / `define.named`)
     ics: Box<[ic::Ic]>,
     /// Ordinary function (not a class constructor / generator / async): opens a frame directly when called
     plain: bool,
@@ -59,14 +58,14 @@ struct Loaded {
 impl From<(u32, Function)> for Loaded {
     fn from((base, func): (u32, Function)) -> Self {
         let globals = func.consts.iter().map(|_| ic::GlobalIc::default()).collect();
-        let ics = func.insns.iter().map(|_| ic::Ic::default()).collect();
+        let ics = (0..func.ic_slots()).map(|_| ic::Ic::default()).collect();
         let plain = !func.generator && !func.asynchronous && !matches!(func.kind, FunctionKind::Constructor { .. });
         let constructs = !func.generator && !func.asynchronous && matches!(func.kind, FunctionKind::Normal | FunctionKind::Constructor { derived: false });
         Self { base, func, globals, no_tier_enter: Cell::new(false), no_tier_loops: Cell::new(false), ics, plain, instance_size: Cell::new(0), prototype: ic::Ic::default(), constructs }
     }
 }
 
-/// An exception handler: landing point (instruction index) and the environment when it was installed.
+/// An exception handler: landing point (byte offset in the code) and the environment when it was installed.
 #[derive(Collect)]
 #[collect(no_drop)]
 struct Handler<'gc> {
@@ -250,7 +249,7 @@ impl<'s> Budget<'s> {
 pub enum Exit {
     /// The function returned; the result is in the accumulator
     Return,
-    /// Stopped before instruction `pc` (not yet executed); the interpreter continues from here
+    /// Stopped before the instruction at byte offset `pc` (not yet executed); the interpreter continues from here
     Resume(u32),
 }
 
@@ -1095,8 +1094,6 @@ impl Executor {
             let loaded = entering.take().unwrap_or_else(|| self.function(f.func));
             let func = &loaded.func;
             loop {
-                let insn = &func.insns[f.pc];
-                f.pc += 1;
                 let r = |r: Reg| f.base + usize::from(r.0);
                 // Fast path when both sides are numbers computes in place; everything else goes to the Agent
                 macro_rules! binary {
@@ -1118,12 +1115,16 @@ impl Executor {
                         *acc = c.into();
                         // Immediately followed by a conditional jump (loop condition, `if`): the comparison result is
                         // the boolean, so jump directly, saving a dispatch
-                        let taken = match func.insns.get(f.pc) {
-                            Some(&Insn::JumpIfFalse(l)) => (!c).then_some(l),
-                            Some(&Insn::JumpIfTrue(l)) => c.then_some(l),
+                        // Opcode first: only the two jumps are decoded (with the opcode known, to one field read)
+                        let (taken, next) = match Opcode::at(&func.code, f.pc) {
+                            Opcode::JumpIfFalse | Opcode::JumpIfTrue => match func.insn_at(f.pc) {
+                                (Insn::JumpIfFalse(l), next) => ((!c).then_some(l), next),
+                                (Insn::JumpIfTrue(l), next) => (c.then_some(l), next),
+                                _ => unreachable!("the opcode decides the instruction"),
+                            },
                             _ => continue,
                         };
-                        f.pc += 1;
+                        f.pc = next;
                         if let Some(l) = taken {
                             let back = (l.0 as usize) < f.pc;
                             f.pc = l.0 as usize;
@@ -1138,7 +1139,11 @@ impl Executor {
                         }
                     }};
                 }
-                match *insn {
+                // One dispatch on the opcode; each case decodes its own instruction (see `j8macros::dispatch!`)
+                j8macros::dispatch!(Opcode::at(&func.code, f.pc), {
+                    let insn;
+                    (insn, f.pc) = func.insn_at(f.pc);
+                }, match insn {
                     Insn::LdaUndefined => {
                         *acc = Value::Undefined;
                     }
@@ -1258,7 +1263,7 @@ impl Executor {
                         regs[r(dst)] = *acc;
                     }
                     Insn::IncReg(x) | Insn::DecReg(x) => {
-                        let d = if matches!(*insn, Insn::IncReg(_)) { 1 } else { -1 };
+                        let d = if matches!(insn, Insn::IncReg(_)) { 1 } else { -1 };
                         *acc = if let Some(v) = regs[r(x)].as_number() { (v + f64::from(d)).into() } else { a.increment(regs[r(x)], d)? };
                         regs[r(x)] = *acc;
                     }
@@ -1435,8 +1440,8 @@ impl Executor {
                             closure.fields = Some(init);
                         }
                     }
-                    Insn::DefineNamed { obj, name, kind, enumerable } => {
-                        let ic = &loaded.ics[f.pc - 1];
+                    Insn::DefineNamed { obj, name, kind, enumerable, ic } => {
+                        let ic = &loaded.ics[ic.0 as usize];
                         match regs[r(obj)].kind() {
                             ValueKind::Object(o) if kind == PropertyKind::Data => {
                                 if !ic.set(a.mc, o, *acc, false) {
@@ -1504,8 +1509,8 @@ impl Executor {
                     }
                     Insn::CreateObject { capacity } => *acc = a.object_with(usize::from(capacity)).into(),
                     Insn::CreateArray { first, count } => *acc = a.array(regs[r(first)..r(first) + usize::from(count)].to_vec()).into(),
-                    Insn::GetNamed { obj, name } => {
-                        let ic = &loaded.ics[f.pc - 1];
+                    Insn::GetNamed { obj, name, ic } => {
+                        let ic = &loaded.ics[ic.0 as usize];
                         *acc = match regs[r(obj)].kind() {
                             ValueKind::Object(o) => match ic.get(o) {
                                 Some(v) => v,
@@ -1518,8 +1523,8 @@ impl Executor {
                             target => a.get_named(Value::from(target), func.name_at(name))?,
                         };
                     }
-                    Insn::SetNamed { obj, name, strict } => {
-                        let ic = &loaded.ics[f.pc - 1];
+                    Insn::SetNamed { obj, name, strict, ic } => {
+                        let ic = &loaded.ics[ic.0 as usize];
                         match regs[r(obj)].kind() {
                             ValueKind::Object(o) => {
                                 if !ic.set(a.mc, o, *acc, true) {
@@ -1554,7 +1559,7 @@ impl Executor {
                         // Fast path: the callee is an ordinary JS function (not a class constructor / generator /
                         // async), so open a frame directly from the registers
                         let target = regs[r(callee)];
-                        if matches!(*insn, Insn::Call { .. })
+                        if matches!(insn, Insn::Call { .. })
                             && let Some((c, loaded)) = self.plain_closure(target)
                         {
                             let mut next = Self::enter_regs(a, regs, &loaded.func, c, target, regs[r(this)], first, usize::from(argc));
@@ -1567,7 +1572,7 @@ impl Executor {
                         }
                         // Fast path: the callee is a host function; pass the arguments directly as a slice of the
                         // register file, without copying into a Vec or going through call resolution
-                        let native = target.as_object().and_then(|o| o.native()).filter(|n| matches!(*insn, Insn::Call { .. }) && n.forward == j8framework::Forward::No);
+                        let native = target.as_object().and_then(|o| o.native()).filter(|n| matches!(insn, Insn::Call { .. }) && n.forward == j8framework::Forward::No);
                         if let Some(n) = native {
                             let saved = self.depth.replace(level);
                             let outer = core::mem::replace(&mut a.new_target, Value::Undefined);
@@ -1614,7 +1619,7 @@ impl Executor {
                             args: core::mem::take(&mut f.args).into_vec(),
                             mode: Some(mode.0),
                         };
-                        return Ok(Some(Outcome::Suspend { value: *acc, awaiting: matches!(*insn, Insn::Await { .. }), saved }));
+                        return Ok(Some(Outcome::Suspend { value: *acc, awaiting: matches!(insn, Insn::Await { .. }), saved }));
                     }
                     Insn::GetIterator { dst } => {
                         let rec = a.get_iterator(*acc)?;
@@ -1787,7 +1792,7 @@ impl Executor {
                         }
                         *acc = result;
                     }
-                }
+                });
             }
         }
     }

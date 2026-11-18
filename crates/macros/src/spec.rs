@@ -7,8 +7,9 @@ use serde::Deserialize;
 #[serde(deny_unknown_fields)]
 pub struct Spec {
     /// Generate `Binary` (binary encoding) for every enum and struct, plus `pub const SCHEMA: u64` (a fingerprint of
-    /// the JSON: binaries written under another definition are rejected). The caller provides `Binary`, `Reader` and
-    /// `BinError`, and `Binary` for the field types not defined in the JSON
+    /// the JSON: binaries written under another definition are rejected); `Fixed` (read at constant offsets) for the
+    /// types whose encoding has a fixed size; `decode_at(code, pc)` for enums with fields. The caller provides
+    /// `Binary`, `Fixed`, `Reader` and `BinError`, and `Binary` / `Fixed` for the field types not defined in the JSON
     #[serde(default)]
     pub binary: bool,
     #[serde(default)]
@@ -68,6 +69,10 @@ pub struct EnumSpec {
     /// field for the encoding, which costs a few extra instructions to read the discriminant)
     #[serde(default)]
     pub repr: Option<String>,
+    /// With `binary`: also generate a field-less `#[repr(u8)]` enum of this name with one variant per variant here
+    /// (discriminant = tag) and `at(code, pc)`, reading the tag at byte `pc`; for `j8macros::dispatch!`
+    #[serde(default)]
+    pub opcodes: Option<String>,
     /// Generate methods that return `&mut` to a field by its type
     #[serde(default)]
     pub accessors: Vec<Accessor>,

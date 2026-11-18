@@ -23,8 +23,15 @@ impl Spec {
         }
         let schema = json.bytes().fold(FNV_BASIS, |h, b| (h ^ u64::from(b)).wrapping_mul(FNV_PRIME));
         let binary: TokenStream = self.enums.iter().map(EnumSpec::binary_impl).chain(self.structs.iter().map(StructSpec::binary_impl)).collect::<Result<_>>()?;
+        let fixed = self.fixed();
+        let fixed_impls: TokenStream = self.enums.iter().filter(|e| fixed.contains(&e.name)).map(EnumSpec::fixed_impl).chain(self.structs.iter().filter(|s| fixed.contains(&s.name)).map(StructSpec::fixed_impl)).collect::<Result<_>>()?;
+        let decode_at: TokenStream = self.enums.iter().filter(|e| e.opcodes.is_some()).map(|e| e.decode_at(&fixed)).collect::<Result<_>>()?;
+        let opcodes: TokenStream = self.enums.iter().filter_map(|e| e.opcodes.as_deref().map(|o| e.opcodes_impl(o))).collect::<Result<_>>()?;
         Ok(quote! {
             #types
+            #fixed_impls
+            #decode_at
+            #opcodes
             /// Fingerprint of the JSON definitions (FNV-1a 64 of the file): written into every binary, which only reads
             /// back under the same definitions
             pub const SCHEMA: u64 = #schema;
@@ -71,6 +78,172 @@ impl EnumSpec {
 
 }
 
+
+/// Types whose encoding has a fixed size (besides the ones in the JSON)
+const FIXED_PRIMITIVES: [&str; 7] = ["bool", "u8", "u16", "u32", "i32", "u64", "f64"];
+
+impl Spec {
+    /// Names of the types with a fixed-size encoding: primitives, all-unit enums, structs of fixed fields
+    fn fixed(&self) -> Vec<String> {
+        let mut fixed: Vec<String> = FIXED_PRIMITIVES.iter().map(|p| String::from(*p)).collect();
+        fixed.extend(self.enums.iter().filter(|e| e.variants.iter().all(|v| v.fields.is_empty())).map(|e| e.name.clone()));
+        loop {
+            let more: Vec<String> = self.structs.iter().filter(|s| !fixed.contains(&s.name) && s.fields.iter().all(|f| fixed.contains(&f.ty))).map(|s| s.name.clone()).collect();
+            if more.is_empty() {
+                return fixed;
+            }
+            fixed.extend(more);
+        }
+    }
+}
+
+/// `field: Ty::read(&b[offset..])` pieces for fixed-size fields laid out after `start` bytes; gives the reads and the
+/// total size expression
+fn fixed_reads<'t>(tys: impl Iterator<Item = &'t str>, start: TokenStream) -> Result<(Vec<TokenStream>, TokenStream)> {
+    let mut at = start;
+    let mut reads = Vec::new();
+    for ty in tys {
+        let ty: Type = syn::parse_str(ty).map_err(|e| err(format_args!("type `{ty}`: {e}")))?;
+        reads.push(quote! { <#ty as Fixed>::read(&b[#at..]) });
+        at = quote! { #at + <#ty as Fixed>::SIZE };
+    }
+    Ok((reads, at))
+}
+
+impl EnumSpec {
+    /// The byte values no variant uses, as one or-pattern: listed one by one, so with the variants' arms a `match`
+    /// on the byte covers all 256 values and compiles to a jump table without a range check
+    fn unused_tags(&self) -> TokenStream {
+        let unused = (self.variants.len()..=usize::from(u8::MAX)).filter_map(|t| u8::try_from(t).ok());
+        quote! { #(#unused)|* }
+    }
+
+    /// `Fixed` for an all-unit enum: one byte, the variant's position
+    fn fixed_impl(&self) -> Result<TokenStream> {
+        let ident = self.ident();
+        let arms = self.variants.iter().enumerate().map(|(tag, v)| {
+            let tag = u8::try_from(tag).map_err(|_| err(format_args!("{}: `binary` takes at most 256 variants", self.name)))?;
+            let vi = v.ident();
+            Ok(quote! { #tag => Self::#vi, })
+        });
+        let arms = arms.collect::<Result<Vec<_>>>()?;
+        let name = &self.name;
+        Ok(quote! {
+            impl Fixed for #ident {
+                const SIZE: usize = 1;
+                #[inline]
+                fn read(b: &[u8]) -> Self {
+                    match b[0] { #(#arms)* tag => panic!("checked code has no {} tag {}", #name, tag) }
+                }
+            }
+        })
+    }
+
+    /// The opcode enum `name`: one field-less variant per variant, discriminant = tag; `at(code, pc)` reads it
+    fn opcodes_impl(&self, name: &str) -> Result<TokenStream> {
+        let ident = format_ident!("{name}");
+        let of = &self.name;
+        let doc = format!("The opcode of a `{of}`: its tag, one variant per `{of}` variant (`j8macros::dispatch!` matches on it).");
+        let mut decls = Vec::new();
+        let mut arms = Vec::new();
+        for (tag, v) in self.variants.iter().enumerate() {
+            let tag = u8::try_from(tag).map_err(|_| err(format_args!("{}: `binary` takes at most 256 variants", self.name)))?;
+            let vi = v.ident();
+            decls.push(quote! { #vi = #tag });
+            arms.push(quote! { #tag => Self::#vi, });
+        }
+        let owner = self.ident();
+        let unused = self.unused_tags();
+        Ok(quote! {
+            #[doc = #doc]
+            #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+            #[repr(u8)]
+            pub enum #ident { #(#decls),* }
+            impl #ident {
+                /// The opcode at byte `pc` of padded, checked code (the same window check as `decode_at`, so the two
+                /// share it)
+                #[inline(always)]
+                pub fn at(code: &[u8], pc: usize) -> Self {
+                    let b = #owner::window(code, pc);
+                    match b[0] { #(#arms)* #unused => panic!("checked code has no {} tag {}", #of, b[0]) }
+                }
+            }
+        })
+    }
+
+    /// `decode_at(code, pc)`: the value encoded at byte `pc` and the offset after it. A variant whose fields all have a
+    /// fixed size takes one fixed-length chunk (a single bounds check) and reads every field at a constant offset;
+    /// others go through `Binary`. For code already checked (`Binary::decode` succeeded on it): panics otherwise
+    fn decode_at(&self, fixed: &[String]) -> Result<TokenStream> {
+        let ident = self.ident();
+        let name = &self.name;
+        let mut arms = Vec::new();
+        let mut sizes = Vec::new();
+        for (tag, v) in self.variants.iter().enumerate() {
+            let tag = u8::try_from(tag).map_err(|_| err(format_args!("{}: `binary` takes at most 256 variants", self.name)))?;
+            let vi = v.ident();
+            let b = v.bindings();
+            if v.fields.iter().all(|f| fixed.contains(&f.ty)) {
+                let (reads, size) = fixed_reads(v.fields.iter().map(|f| f.ty.as_str()), quote! { 1 })?;
+                let value = match v.named(self)? {
+                    None => quote! { Self::#vi },
+                    Some(true) => quote! { Self::#vi { #(#b: #reads),* } },
+                    Some(false) => quote! { Self::#vi ( #(#reads),* ) },
+                };
+                sizes.push(size.clone());
+                arms.push(quote! { #tag => (#value, pc + (#size)), });
+            } else {
+                let values = b.iter().map(|_| quote! { Binary::decode(&mut r).expect("checked code") });
+                let value = match v.named(self)? {
+                    None => quote! { Self::#vi },
+                    Some(true) => quote! { Self::#vi { #(#b: #values),* } },
+                    Some(false) => quote! { Self::#vi ( #(#values),* ) },
+                };
+                arms.push(quote! {
+                    #tag => {
+                        let mut r = Reader::from(&code[pc + 1..]);
+                        let v = #value;
+                        (v, code.len() - r.left())
+                    }
+                });
+            }
+        }
+        let unused = self.unused_tags();
+        Ok(quote! {
+            impl #ident {
+                /// Bytes read at once when decoding: the largest fixed-size encoding. Code carries `PAD` bytes after its
+                /// last instruction, so the window always fits and a whole instruction costs one bounds check
+                pub const WINDOW: usize = {
+                    let mut m = 1;
+                    #(if #sizes > m { m = #sizes; })*
+                    m
+                };
+                /// Padding after the last instruction of code
+                pub const PAD: usize = Self::WINDOW - 1;
+
+                /// The `WINDOW` bytes from `pc`. Code is under 4 GiB, so `pc` is taken as a `u32`: then `pc + WINDOW`
+                /// cannot overflow and the slice costs a single bounds check
+                #[inline(always)]
+                pub fn window(code: &[u8], pc: usize) -> &[u8; Self::WINDOW] {
+                    let pc = usize::try_from(u32::try_from(pc).unwrap_or(u32::MAX)).unwrap_or(usize::MAX);
+                    code[pc..pc + Self::WINDOW].first_chunk().expect("a window is WINDOW bytes")
+                }
+
+                /// The value encoded at byte `pc` of padded, checked code, and the offset after it (always inlined: the
+                /// caller's `match` on the result then merges with the one on the tag). Fixed-size variants read their
+                /// fields at constant offsets in the window; the others go through `Binary`
+                #[inline(always)]
+                pub fn decode_at(code: &[u8], pc: usize) -> (Self, usize) {
+                    let b = Self::window(code, pc);
+                    match b[0] {
+                        #(#arms)*
+                        #unused => panic!("checked code has no {} tag {}", #name, b[0]),
+                    }
+                }
+            }
+        })
+    }
+}
 
 impl EnumSpec {
     /// `Binary`: a one-byte tag (the variant's position in the JSON), then the fields in order. Decoding dispatches on
@@ -220,6 +393,27 @@ impl StructSpec {
             #[derive(#(#derive),*)]
             pub struct #ident #body
             #consts
+        })
+    }
+
+    /// `Fixed`: the fields at constant offsets
+    fn fixed_impl(&self) -> Result<TokenStream> {
+        let ident = format_ident!("{}", self.name);
+        let (reads, size) = fixed_reads(self.fields.iter().map(|f| f.ty.as_str()), quote! { 0 })?;
+        let value = match self.named()? {
+            None => quote! { Self },
+            Some(true) => {
+                let names: Vec<Ident> = self.fields.iter().filter_map(|f| f.name.as_deref()).map(|n| format_ident!("{n}")).collect();
+                quote! { Self { #(#names: #reads),* } }
+            }
+            Some(false) => quote! { Self ( #(#reads),* ) },
+        };
+        Ok(quote! {
+            impl Fixed for #ident {
+                const SIZE: usize = #size;
+                #[inline]
+                fn read(b: &[u8]) -> Self { let _ = b; #value }
+            }
         })
     }
 

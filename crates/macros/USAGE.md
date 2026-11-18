@@ -78,6 +78,24 @@ The call site provides `Binary` (`encode(&self, &mut Vec<u8>)` / `decode(&mut Re
 `Reader` (with `byte()`) and `BinError` (with `Tag(&'static str, u8)`), and implements `Binary` for every field type
 not defined in the JSON (j8bytecode: `src/bin.rs`).
 
+Also generated with `binary`:
+
+- `Fixed` (`const SIZE` / `read(&[u8])`, reading at a constant offset) for every type whose encoding has a fixed
+  size: all-unit enums, structs of fixed fields (the caller implements it for the primitives)
+- On an enum with `"opcodes": "Opcode"`: a field-less `#[repr(u8)]` enum `Opcode` (discriminant = tag) with
+  `Opcode::at(code, pc)`, and on the enum `WINDOW` (the largest fixed-size encoding), `PAD` (`WINDOW - 1`, the zero
+  bytes code carries after its last instruction) and `decode_at(code, pc) -> (Self, next)`: one bounds check for the
+  window, then fixed-size variants read every field at a constant offset; the others go through `Binary`
+
+## `dispatch!(Opcode::at(code, pc), { prelude }, match insn { arms })`
+
+An interpreter's instruction `match`, dispatched once on the opcode. The arms are written against the decoded
+instruction as usual (`Insn::Ldar(x) => …`; or-patterns and guards allowed, ⛔ `_` / bindings: every arm names its
+variants). The expansion matches on the opcode; each case runs `prelude` (which decodes, e.g.
+`let insn; (insn, f.pc) = func.insn_at(f.pc);`) and then only the arms that can match that opcode, in their original
+order. With the opcode known, the inlined `decode_at` folds down to reading that instruction's fields, so there is
+one indirect jump per instruction instead of two. Opcodes with the same arms share a case.
+
 ## Binding macros: `#[j8::class]` / `#[j8::object]` / `#[j8::function]`
 
 Each of the three macros has its own file (`class.rs` / `object.rs` / `function.rs`); the shared code that reads
