@@ -1,11 +1,11 @@
 //! j8dbg: the j8 debugging CLI.
-mod asm;
+mod code;
 
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
-use asm::{Asm, Disasm};
+use code::{Check, Compiled};
 
 /// j8 debugging tool
 #[derive(Parser)]
@@ -17,17 +17,17 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// JS ⇒ bytecode, print the disassembly listing (or `--binary` the binary form)
-    Disasm(Disasm),
-    /// Read a listing or the binary form, print the normalized listing (or `--binary` the binary form)
-    Asm(Asm),
+    /// JS ⇒ bytecode in the binary form
+    Compile(Compiled),
+    /// Read the binary form back and write it re-encoded (fails on a wrong magic / instruction set / field)
+    Check(Check),
 }
 
 impl Command {
     fn run(&self) -> Result<(), String> {
         match self {
-            Command::Disasm(d) => d.run(),
-            Command::Asm(a) => a.run(),
+            Command::Compile(c) => c.run(),
+            Command::Check(c) => c.run(),
         }
     }
 }

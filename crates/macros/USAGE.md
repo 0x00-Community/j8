@@ -2,8 +2,8 @@
 
 ## `enums!("x.json")`
 
-Generates enums from a JSON file under the calling crate's root directory (`CARGO_MANIFEST_DIR`). The JSON is the
-single source of truth: ⛔ do not hand-write these enums; to change instructions, change only the JSON.
+Generates enums and structs from a JSON file under the calling crate's root directory (`CARGO_MANIFEST_DIR`). The JSON is the
+single source of truth: ⛔ do not hand-write these types; to change instructions, change only the JSON.
 The caller is rebuilt automatically whenever the JSON changes (the generated code `include_bytes!`s it); unknown fields
 are errors.
 
@@ -15,6 +15,8 @@ Types used by the generated code (`Reg`, `Label`, `BinaryOp`, ...) must be in sc
 
 ### JSON format
 
+Only definitions: there is no text form (no `Display` / assembly is generated); the serialized form is `binary` below.
+
 ```json
 {
   "enums": [
@@ -22,17 +24,13 @@ Types used by the generated code (`Reg`, `Label`, `BinaryOp`, ...) must be in sc
       "name": "Insn",
       "doc": "An instruction.",
       "derive": ["Clone", "Copy", "Debug", "PartialEq"],
-      "display": true,
+      "repr": "u16",
       "accessors": [{"name": "target_mut", "ty": "Label", "doc": "Jump target"}],
       "variants": [
-        {"name": "Ldar", "mnemonic": "ldar", "doc": "acc = reg", "fields": [{"ty": "Reg"}]},
-        {"name": "Jump", "mnemonic": "jump", "fields": [{"ty": "Label"}]},
-        {"name": "Call", "mnemonic": "call", "fields": [{"name": "callee", "ty": "Reg"}, {"name": "argc", "ty": "u16"}]},
-        {"name": "Binary", "fields": [{"ty": "BinaryOp", "show": "name"}, {"ty": "Reg"}]},
-        {"name": "CreateClass", "mnemonic": "create.class", "fields": [
-          {"name": "func", "ty": "u32", "prefix": "fn#"},
-          {"name": "parent", "ty": "Option<Reg>", "prefix": "extends "}
-        ]}
+        {"name": "Ldar", "doc": "acc = reg", "fields": [{"ty": "Reg"}]},
+        {"name": "Jump", "fields": [{"ty": "Label"}]},
+        {"name": "Call", "fields": [{"name": "callee", "ty": "Reg"}, {"name": "argc", "ty": "u16"}]},
+        {"name": "CreateClass", "fields": [{"name": "func", "ty": "u32"}, {"name": "parent", "ty": "Option<Reg>"}]}
       ]
     }
   ]
@@ -44,26 +42,16 @@ Types used by the generated code (`Reg`, `Label`, `BinaryOp`, ...) must be in sc
 | `name` / `doc` | enum | Enum name and docs (required) |
 | `derive` | enum | Passed as-is into `#[derive(...)]`; leave out traits that are written by hand (e.g. a bitwise `PartialEq`) |
 | `repr` | enum | Integer type of the discriminant, passed as-is into `#[repr(..)]` (e.g. `"u16"`); if omitted, the compiler chooses and may use a niche in a field for the encoding (reading the discriminant then costs a few extra instructions) |
-| `display` | enum | Generate `Display`: `mnemonic operand, operand` |
-| `asm` | enum | Generate assembly (the inverse of `Display`): with `display` on ⇒ `FromStr` (`Err = AsmError`; operands are taken through `Operands` in field order, and each type implements `Operand`); without it ⇒ unit variants only, implementing `Operand` by variant name. `AsmError` / `Operand` / `Operands` must be in scope at the call site; `Option` fields need a `prefix` |
 | `accessors` | enum | Generate `pub fn name(&mut self) -> Option<&mut ty>`: the first field of type `ty` in each variant, `None` if there is none. This is how `target_mut` (`ty: Label`) is produced, so adding an instruction with a `Label` field automatically makes it count as a jump |
 | `name` / `doc` | variant | Variant name and docs |
-| `mnemonic` | variant | Mnemonic for `Display`; with `display` on, use either this or a `show: name` field |
-| `suffix` | variant | Used with a `show: name` field: the mnemonic becomes `name.suffix` (another operand form of the same group of names, e.g. `add.smi r2, 1` alongside `add r2`) |
-| `text` | variant | The variant's text; on every variant of a unit enum ⇒ `pub const ALL: [T; N]` and `pub fn name(self) -> &'static str`, `display` writes the text and `asm` implements `Operand` by text (operators `BinaryOp`, `Mode`) |
 | `default` | variant | `#[default]` |
-| `fields` | variant | Field list; all with `name` ⇒ struct variant, none with `name` ⇒ tuple variant; mixing is an error |
-| `ty` | field | Rust type |
-| `prefix` | field | Text written before the value in `Display` (`fn#`, `extends `) |
-| `show` | field | `display` (default, `{}`) / `debug` (`{:?}`) / `name` (`x.name()` replaces the mnemonic) |
-
-An `Option<_>` field that is `None` is omitted entirely from `Display`.
+| `fields` | variant | Field list (`name`, `ty`); all with `name` ⇒ struct variant, none with `name` ⇒ tuple variant; mixing is an error |
 
 Structs go under `"structs"` (all fields `pub`):
 
 ```json
 "structs": [
-  {"name": "Reg", "doc": "Register.", "derive": ["Clone", "Copy"], "prefix": "r",
+  {"name": "Reg", "doc": "Register.", "derive": ["Clone", "Copy"],
    "consts": [{"name": "THIS", "ty": "Reg", "value": "Reg(0)"}], "fields": [{"ty": "u16"}]},
   {"name": "Module", "doc": "A module.", "derive": ["Clone", "Debug", "Default"],
    "fields": [{"name": "functions", "ty": "Vec<Function>", "doc": "Function 0 is the script"}]}
@@ -73,7 +61,6 @@ Structs go under `"structs"` (all fields `pub`):
 | Key | Level | Meaning |
 |---|---|---|
 | `name` / `doc` / `derive` | struct | As for enums |
-| `prefix` | struct | Single-field tuple struct only: `Display` is prefix + field, `Operand` strips the prefix and parses (`r3` / `#3` / `@3`) |
 | `consts` | struct | `pub const name: ty = value;` (`value` is a Rust expression), with optional `doc` |
 | `fields` | struct | `name` (all or none: named or tuple struct), `ty`, optional `doc` |
 

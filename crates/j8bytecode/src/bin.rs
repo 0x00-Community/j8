@@ -1,8 +1,8 @@
-//! Binary form: `Vec::<u8>::from(&module)` / `Module::try_from(bytes)`, lossless like the text form, and the way to
-//! store / ship bytecode (no text to parse, no mnemonics to look up).
+//! Binary form: `Vec::<u8>::from(&module)` / `Module::try_from(bytes)`, the only serialized form of bytecode
+//! (there is no text form).
 //!
 //! ```text
-//! magic  "\0j8b"          4 bytes (`Module::MAGIC`; a leading NUL never starts JS or assembly text)
+//! magic  "\0j8b"          4 bytes (`Module::MAGIC`; a leading NUL never starts JS text)
 //! schema u64 LE           fingerprint of insn.json: only reads back under the same instruction set
 //! module                  `Binary` of `Module`
 //! ```

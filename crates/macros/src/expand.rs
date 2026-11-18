@@ -3,7 +3,7 @@ use proc_macro2::{Span, TokenStream};
 use quote::{format_ident, quote};
 use syn::{Error, Ident, Path, Result, Type};
 
-use crate::spec::{Accessor, ConstSpec, EnumSpec, FieldSpec, Show, Spec, StructField, StructSpec, VariantSpec};
+use crate::spec::{Accessor, ConstSpec, EnumSpec, FieldSpec, Spec, StructField, StructSpec, VariantSpec};
 
 /// Generation errors all point at the macro call site
 fn err(msg: impl core::fmt::Display) -> Error {
@@ -47,19 +47,6 @@ impl EnumSpec {
             .map(|d| syn::parse_str::<Path>(d).map_err(|e| err(format_args!("{}: derive `{d}`: {e}", self.name))))
             .collect::<Result<Vec<_>>>()?;
         let variants = self.variants.iter().map(|v| v.decl(self)).collect::<Result<Vec<_>>>()?;
-        let texts = self.texts()?;
-        let display = match (self.display, &texts) {
-            (false, _) => TokenStream::new(),
-            (true, Some(_)) => self.text_display(),
-            (true, None) => self.display_impl()?,
-        };
-        let asm = match (self.asm, &texts, self.display) {
-            (false, ..) => TokenStream::new(),
-            (true, Some(_), _) => self.text_operand(),
-            (true, None, true) => self.parse_impl()?,
-            (true, None, false) => self.operand_impl()?,
-        };
-        let names = texts.as_deref().map(|t| self.names_impl(t)).unwrap_or_default();
         let repr = match &self.repr {
             Some(r) => {
                 let r = format_ident!("{r}");
@@ -78,143 +65,12 @@ impl EnumSpec {
             #[derive(#(#derive),*)]
             #repr
             pub enum #ident { #(#variants,)* }
-            #display
-            #asm
             #accessors
-            #names
         })
     }
 
-    /// `Some(texts)` when every variant has `text` (a text enum, unit variants only); `None` when none has
-    fn texts(&self) -> Result<Option<Vec<&str>>> {
-        let texts: Vec<&str> = self.variants.iter().filter_map(|v| v.text.as_deref()).collect();
-        match texts.len() {
-            0 => Ok(None),
-            n if n == self.variants.len() && self.variants.iter().all(|v| v.fields.is_empty()) => Ok(Some(texts)),
-            _ => Err(err(format_args!("{}: `text` must be on every variant, and the variants must be unit", self.name))),
-        }
-    }
-
-    /// `ALL` (every variant in order) and `name()` (the variant's text)
-    fn names_impl(&self, texts: &[&str]) -> TokenStream {
-        let ident = self.ident();
-        let vs: Vec<Ident> = self.variants.iter().map(VariantSpec::ident).collect();
-        let n = vs.len();
-        quote! {
-            impl #ident {
-                pub const ALL: [#ident; #n] = [#(#ident::#vs),*];
-
-                pub fn name(self) -> &'static str {
-                    match self { #(Self::#vs => #texts,)* }
-                }
-            }
-        }
-    }
-
-    fn text_display(&self) -> TokenStream {
-        let ident = self.ident();
-        quote! {
-            impl ::core::fmt::Display for #ident {
-                fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-                    f.write_str(self.name())
-                }
-            }
-        }
-    }
-
-    /// `Operand`: reverse lookup of the text in `ALL`
-    fn text_operand(&self) -> TokenStream {
-        let ident = self.ident();
-        quote! {
-            impl Operand for #ident {
-                fn operand(text: &str) -> ::core::result::Result<Self, AsmError> {
-                    Self::ALL.into_iter().find(|v| v.name() == text).ok_or_else(|| AsmError::Operand(text.into()))
-                }
-            }
-        }
-    }
-
-    fn display_impl(&self) -> Result<TokenStream> {
-        let ident = self.ident();
-        let arms = self.variants.iter().map(|v| v.display_arm(self)).collect::<Result<Vec<_>>>()?;
-        Ok(quote! {
-            impl ::core::fmt::Display for #ident {
-                fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-                    match self { #(#arms)* }
-                    Ok(())
-                }
-            }
-        })
-    }
 }
 
-impl EnumSpec {
-    /// `FromStr`: the inverse of `Display`. Matches the mnemonic first; if that fails, tries the type of the
-    /// `show: name` field. Operands are handed to the caller's `Operands`
-    fn parse_impl(&self) -> Result<TokenStream> {
-        let ident = self.ident();
-        let mut arms = Vec::new();
-        let mut named = Vec::new();
-        for v in &self.variants {
-            let head = v.fields.iter().zip(v.bindings()).find(|(f, _)| matches!(f.show, Show::Name));
-            match (head, &v.mnemonic) {
-                (None, Some(m)) => {
-                    let build = v.assemble(self, None)?;
-                    arms.push(quote! { #m => #build, });
-                }
-                (Some((f, b)), None) => {
-                    let ty = f.ty(self, v)?;
-                    let build = v.assemble(self, Some(&b))?;
-                    named.push(match &v.suffix {
-                        Some(s) => {
-                            let s = format!(".{s}");
-                            quote! { if let Some(Ok(#b)) = head.strip_suffix(#s).map(<#ty as Operand>::operand) { #build } else }
-                        }
-                        None => quote! { if let Ok(#b) = <#ty as Operand>::operand(head) { #build } else },
-                    });
-                }
-                _ => return Err(err(format_args!("{}::{}: needs exactly one of `mnemonic` or a `show: name` field", self.name, v.name))),
-            }
-        }
-        Ok(quote! {
-            impl ::core::str::FromStr for #ident {
-                type Err = AsmError;
-                fn from_str(text: &str) -> ::core::result::Result<Self, AsmError> {
-                    let (head, mut ops) = Operands::split(text);
-                    let value = match head {
-                        #(#arms)*
-                        _ => #(#named)* { return Err(AsmError::Mnemonic(head.into())) }
-                    };
-                    ops.finish()?;
-                    Ok(value)
-                }
-            }
-        })
-    }
-
-    /// `Operand`: matched by variant name (i.e. `Debug`); unit variants only
-    fn operand_impl(&self) -> Result<TokenStream> {
-        let ident = self.ident();
-        let arms = self
-            .variants
-            .iter()
-            .map(|v| {
-                if !v.fields.is_empty() {
-                    return Err(err(format_args!("{}::{}: `asm` without `display` needs unit variants", self.name, v.name)));
-                }
-                let (name, vi) = (&v.name, v.ident());
-                Ok(quote! { #name => Ok(Self::#vi), })
-            })
-            .collect::<Result<Vec<_>>>()?;
-        Ok(quote! {
-            impl Operand for #ident {
-                fn operand(text: &str) -> ::core::result::Result<Self, AsmError> {
-                    match text { #(#arms)* _ => Err(AsmError::Operand(text.into())) }
-                }
-            }
-        })
-    }
-}
 
 impl EnumSpec {
     /// `Binary`: a one-byte tag (the variant's position in the JSON), then the fields in order. Decoding dispatches on
@@ -254,37 +110,6 @@ impl EnumSpec {
 }
 
 impl VariantSpec {
-    /// Builds the variant by taking operands from `ops` in field order; `head` is the `show: name` field already
-    /// recognized from the mnemonic position
-    fn assemble(&self, owner: &EnumSpec, head: Option<&Ident>) -> Result<TokenStream> {
-        let ident = self.ident();
-        let values = self
-            .fields
-            .iter()
-            .map(|f| {
-                if matches!(f.show, Show::Name) {
-                    return Ok(head.map_or_else(TokenStream::new, |h| quote! { #h }));
-                }
-                let prefix = &f.prefix;
-                Ok(match FieldSpec::option_inner(&f.ty(owner, self)?) {
-                    Some(_) if prefix.is_empty() => {
-                        return Err(err(format_args!("{}::{}: an `Option` field needs a `prefix` to be assembled", owner.name, self.name)));
-                    }
-                    Some(_) => quote! { ops.optional(#prefix)? },
-                    None => quote! { ops.next(#prefix)? },
-                })
-            })
-            .collect::<Result<Vec<_>>>()?;
-        Ok(match self.named(owner)? {
-            None => quote! { Self::#ident },
-            Some(true) => {
-                let names = self.bindings();
-                quote! { Self::#ident { #(#names: #values),* } }
-            }
-            Some(false) => quote! { Self::#ident ( #(#values),* ) },
-        })
-    }
-
 
     fn ident(&self) -> Ident {
         format_ident!("{}", self.name)
@@ -335,30 +160,6 @@ impl VariantSpec {
         Ok(quote! { #doc #default #ident #body })
     }
 
-    fn display_arm(&self, owner: &EnumSpec) -> Result<TokenStream> {
-        let pattern = self.pattern(owner)?;
-        let head = self.fields.iter().zip(self.bindings()).find(|(f, _)| matches!(f.show, Show::Name));
-        let head = match (head, &self.mnemonic) {
-            (Some((_, b)), None) => match &self.suffix {
-                Some(s) => {
-                    let s = format!(".{s}");
-                    quote! { f.write_str(#b.name())?; f.write_str(#s)?; }
-                }
-                None => quote! { f.write_str(#b.name())?; },
-            },
-            (None, Some(m)) => quote! { f.write_str(#m)?; },
-            _ => return Err(err(format_args!("{}::{}: needs exactly one of `mnemonic` or a `show: name` field", owner.name, self.name))),
-        };
-        let operands = self
-            .fields
-            .iter()
-            .zip(self.bindings())
-            .filter(|(f, _)| !matches!(f.show, Show::Name))
-            .map(|(f, b)| f.display(owner, self, &b))
-            .collect::<Result<Vec<_>>>()?;
-        let sep = (!operands.is_empty()).then(|| quote! { let mut sep = " "; });
-        Ok(quote! { #pattern => { #head #sep #(#operands)* } })
-    }
 }
 
 impl FieldSpec {
@@ -366,32 +167,6 @@ impl FieldSpec {
         syn::parse_str(&self.ty).map_err(|e| err(format_args!("{}::{}: type `{}`: {e}", owner.name, v.name, self.ty)))
     }
 
-    /// The `T` of `Option<T>`
-    fn option_inner(ty: &Type) -> Option<&Type> {
-        let Type::Path(p) = ty else { return None };
-        let last = p.path.segments.last()?;
-        if last.ident != "Option" {
-            return None;
-        }
-        let syn::PathArguments::AngleBracketed(a) = &last.arguments else { return None };
-        match a.args.first()? {
-            syn::GenericArgument::Type(t) => Some(t),
-            _ => None,
-        }
-    }
-
-    fn display(&self, owner: &EnumSpec, v: &VariantSpec, b: &Ident) -> Result<TokenStream> {
-        let prefix = &self.prefix;
-        let fmt = match self.show {
-            Show::Debug => "{}{}{:?}",
-            Show::Display | Show::Name => "{}{}{}",
-        };
-        let write = quote! { write!(f, #fmt, sep, #prefix, #b)?; sep = ", "; };
-        Ok(match Self::option_inner(&self.ty(owner, v)?) {
-            Some(_) => quote! { if let Some(#b) = #b { #write } },
-            None => write,
-        })
-    }
 }
 
 impl Accessor {
@@ -440,13 +215,11 @@ impl StructSpec {
         };
         let consts = self.consts.iter().map(|c| c.expand(self)).collect::<Result<Vec<_>>>()?;
         let consts = (!consts.is_empty()).then(|| quote! { impl #ident { #(#consts)* } });
-        let prefixed = self.prefix.as_deref().map(|p| self.prefixed(&ident, p)).transpose()?;
         Ok(quote! {
             #[doc = #doc]
             #[derive(#(#derive),*)]
             pub struct #ident #body
             #consts
-            #prefixed
         })
     }
 
@@ -483,25 +256,6 @@ impl StructSpec {
         }
     }
 
-    /// `Display` = prefix + field, `Operand` = strip the prefix, parse the field
-    fn prefixed(&self, ident: &Ident, prefix: &str) -> Result<TokenStream> {
-        if self.fields.len() != 1 || self.named()? != Some(false) {
-            return Err(err(format_args!("{}: `prefix` needs a single-field tuple struct", self.name)));
-        }
-        let fmt = format!("{prefix}{{}}");
-        Ok(quote! {
-            impl ::core::fmt::Display for #ident {
-                fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-                    write!(f, #fmt, self.0)
-                }
-            }
-            impl Operand for #ident {
-                fn operand(text: &str) -> ::core::result::Result<Self, AsmError> {
-                    text.strip_prefix(#prefix).and_then(|n| n.parse().ok()).map(#ident).ok_or_else(|| AsmError::Operand(text.into()))
-                }
-            }
-        })
-    }
 }
 
 impl StructField {

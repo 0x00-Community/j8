@@ -36,7 +36,7 @@ j8 是**用 Rust 从头写的 JavaScript 引擎**, 照着 V8 的分层来: 所�
 | | |
 | --- | --- |
 | 🦀 **全 Rust** | 解析用 oxc, 其余从字节码到 GC 都是自己写的. 没有 C++ 引擎在下面. |
-| 🧱 **字节码先行** | 不设 AST 解释层: 所有 JS (包括 `eval`、`Function`) 都先编成字节码. 指令集由 `insn.json` 生成, 汇编 / 反汇编互逆. |
+| 🧱 **字节码先行** | 不设 AST 解释层: 所有 JS (包括 `eval`、`Function`) 都先编成字节码. 全部字节码类型由 `insn.json` 生成; 字节码没有文本形式, 只有二进制形式. |
 | 🧬 **JIT 走 MLIR** | 字节码 ⇒ MLIR `llvm` 方言 ⇒ [mlirpass](https://crates.io/crates/mlirpass) 的 x86-64 后端 (线性扫描寄存器分配), 支持 OSR. |
 | ♻️ **paragc 堆** | Immix 式块 / 行堆: 年轻回收 + 老对象引用计数、稀疏块疏散, 标记与清扫并行, 无锁; `'gc` 品牌生命周期, 编译期保证句柄不逃逸. |
 | 🚫 **没有 `'static`** | 不用全局状态; 后台任务借用调用方数据, 多个 Isolate 共用一个线程池. |
@@ -64,8 +64,8 @@ cargo run --release -- --jit a.js               # 开 JIT
 # ☁️ Cloudflare Worker 式: ES 模块 + Durable Object
 cd samples/workerd && cargo run -- examples/counter.js --bind COUNTER=Counter --request "GET /c/inc?name=a"
 
-# 🔬 看字节码
-cargo run -p j8debugger -- disasm -e 'let s = 0; for (let i = 0; i < 10; i++) s += i; s'
+# 🔬 编成字节码 (二进制形式)
+cargo run -p j8debugger -- compile -e 'let s = 0; for (let i = 0; i < 10; i++) s += i; s' -o a.j8b
 
 # 📜 test262 回归 (先 git submodule update --init)
 cargo test --release --test test262
@@ -85,14 +85,14 @@ cd samples/benchv8 && cargo run --release
 | `j8binding` | std | Rust ⇄ JS 绑定的运行时：`FromJs` / `IntoJs`、宿主对象、`Class` / `Object` |
 | `j8builtins` | std | 实现 `Intrinsics`：往 `Realm` 装 Object / Function / Array / String / Number / Boolean / Math / Error 系列 / `console` / `parseInt` 等 |
 | `j8platform` | std | 实现 `Platform`（`DefaultPlatform`）：后台任务跑在 moremath `ThreadMulti` 线程池上（起一次复用、任务可借用调用方数据，经 `j8framework::Pool`），时钟用 `Instant` |
-| `j8bytecode` | std | 虚拟指令集，依赖根（不依赖其他 j8 crate）：累加器式寄存器字节码（`Insn` / `Function` / `Module` …），全部类型由 `insn.json` 生成；反汇编 `module.to_string()`、汇编 `text.parse::<Module>()`，互为逆 |
+| `j8bytecode` | std | 虚拟指令集，依赖根（不依赖其他 j8 crate）：累加器式寄存器字节码（`Insn` / `Function` / `Module` …），全部类型由 `insn.json` 生成；没有文本形式，只有二进制形式 `Vec::<u8>::from(&module)` / `Module::try_from(bytes)` |
 | `j8compiler` | std | JS ⇒ 字节码（`Module` 实现 `j8compiler::Compile`：脚本、模块、`eval` / `Function`），用 oxc 解析 |
 | `j8taskqueue` | `no_std` | 任务队列：`ITask`（`recursable` / `depend` / `exec`）与 `ITaskPoll`（`add` / `run`）；无锁数据流调度（手写 MPMC 就绪队列、原子依赖计数），依赖做完的任务立刻在宿主给的 `Pool` 上并行跑（或就在调用线程上跑）、没有轮次屏障；`TaskId::family` 并查集找爹、`cancel` 整家取消；配额按字节码条数（`Quota` / `Flow::Yield`、每次 run 的预算）；取不到活的线程直接离开、不自旋。每个 `j8framework::EventLoop` 就是一个 `Queue`：脚本、兑现、宿主 future 的 poll，脚本每让出一次就检查一次队列 |
 | `j8macros` | proc-macro | 过程宏：`enums!("x.json")` 从 JSON 生成枚举（定义、`Display`、按字段类型取 `&mut`）、堆类型的 `#[derive(Collect)]`（paragc `Trace`）、绑定宏，用法见 `crates/macros/USAGE.md` |
 | `samples/dune` | std | 分两层的运行时：`src/web/`（Web 标准接口：`console`、定时器、`URL`、`TextEncoder`、`EventTarget` / `AbortController`、`fetch`、`structuredClone`、`crypto`……）和叠在上面的 `src/node/`（`process`、`require` / ES 模块、`Buffer`、`fs`、`path`、`os`、`events`、`util`、`assert`、`child_process`……）；碰机器的部分是 `#[j8::object]` / `#[j8::class]` 绑定的 Rust，接口本身是 JS prelude；`dune a.js`、`dune --web a.mjs`、`dune -e` / `-p`、REPL，详见其 README |
 | `samples/workerd` | std | 用 j8 加载 Cloudflare Worker（ES 模块 `export default { fetch }`）与 Durable Object：`workerd examples/counter.js --bind COUNTER=Counter --request "GET /c/inc?name=a"` 或 `--port 8787` 起 HTTP 服务；Fetch API 子集与 DO 在 JS 序言里，存储是 `#[j8::class]` 绑定的 Rust KV |
 | `samples/benchv8` | std | 同一组 JS 基准在 j8 与 V8（rusty_v8 152，带 JIT / `--jitless`）上的耗时对比：`cd samples/benchv8 && cargo run --release`（会下载 V8 预编译库） |
-| `j8debugger` | std | 调试命令行 `j8dbg`（clap）：`j8dbg disasm <file.js \| ->` / `j8dbg disasm -e '<js>'` 打印反汇编清单；`j8dbg asm <file.j8s \| ->` 汇编清单、打印规范化后的清单（`-o` 写文件） |
+| `j8debugger` | std | 调试命令行 `j8dbg`（clap）：`j8dbg compile <file.js \| ->` / `j8dbg compile -e '<js>'` 把字节码按二进制形式写出；`j8dbg check <file.j8b \| ->` 读回二进制、重新编码写出（`-o` 写文件） |
 | `j8executor` | std | 字节码执行器 `Executor`，**目前是最后一层**；实现 `Engine`，固定带 JS ⇒ 字节码编译器（脚本、模块、`eval` / `Function` 都先编成字节码） |
 
 所有 JS 都先编成字节码再执行，不设 AST 解释层。
@@ -158,26 +158,15 @@ isolate.enter(|scope| {
 
 j8bytecode 的全部类型（指令、操作符、常量、`Function` / `Module` 等结构体）定义在 `crates/j8bytecode/insn.json`，由 `j8macros::enums!` 生成，⛔ 手写类型定义；加指令只改 JSON（带 `Label` 字段的自动算跳转，进 `target_mut`）。
 
-### 汇编 / 反汇编
+### 二进制形式
 
-清单一个函数一段：函数头 `fn#i "名字" 种类 模式 params N length N regs N [generator] [async] [keeps_args]`，下面缩进的行依次是
-`.mapped`（映射的 arguments 槽位，`-` 是不映射）、常量 `#k = number … | string "…" | bigint …`、
-直接 eval 的作用域表 `scope#k = ["x" 3 const tdz] [ … ]`、指令 `@pc 助记符 操作数, …`；`;` 起到行尾是注释。编号必须按顺序写。
-
-```text
-fn#0 "main" normal sloppy params 0 length 0 regs 3
-  #0 = string "x"
-  @0    lda.const #0
-  @1    return
-```
-
-一条指令的写法与 `Display` 同源：insn.json 里 `Insn` 开了 `asm`，`j8macros::enums!` 一并生成 `FromStr for Insn`，加指令不用改汇编器。
+字节码没有文本形式，存储与分发只用 insn.json（开 `binary`）生成的二进制形式：魔数 ` j8b`、insn.json 指纹（只有同一套指令集能读回）、模块本体，枚举是一字节标签加字段。
 
 - 调用约定：`r0` 是 `this`，`r1` 是被调函数本身（具名函数表达式靠它递归），形参从 `r2` 起；`Call` 的被调者、`this`、实参排在连续寄存器
 - 作用域：编译前预扫一遍（`scope.rs` 的 `Resolver`），找出被内层函数捕获的绑定放进堆上的 `Env` 链（`PushEnv` / `PopEnv` / `LdaEnv depth.slot`），其余放寄存器；`for (let …)` 每轮 `CloneEnv`，闭包各拿各的那一轮
 - 脚本顶层的 `var` / 函数 / `let` / `const` 是全局对象的属性（`LdaGlobal` / `StaGlobal`）
 - 编译完每个函数跑一遍窥孔融合（`fuse.rs` 的 `Function::fuse`）：`lda.smi n; add r` ⇒ `add.smi r, n`、`ldar y; add x` ⇒ `add.reg x, y`（比较同理）、`ldar a; star b` ⇒ `mov b, a`、`ldar r; inc; star r` ⇒ `inc.reg r`、`star r; ldar r` ⇒ `star r`、紧接着的 `mov b, a; mov a, b` 丢掉第二条；
-  组里第一条之后有跳转落点就不融合，跳转目标按新下标改写。融合指令的语义就是原来几条依次执行（`Insn::unfused` 拆回），JIT 照拆回的逐条下降；手写的清单不融合
+  组里第一条之后有跳转落点就不融合，跳转目标按新下标改写。融合指令的语义就是原来几条依次执行（`Insn::unfused` 拆回），JIT 照拆回的逐条下降
 - 执行器用显式帧栈（不靠宿主递归），调用深度上限 10000（含宿主函数里重入的 JS），超了抛 RangeError
 - 异常：每帧一个动态处理器栈（`PushHandler` / `PopHandler`），抛出时弹本帧处理器、没有就展开到调用者；`finally` 用（完成类型, 值）寄存器对，穿过它的 `return` / `break` / `continue` 先绕进去再接着走
 

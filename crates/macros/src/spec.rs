@@ -26,10 +26,6 @@ pub struct StructSpec {
     /// Passed as-is into `#[derive(...)]`
     #[serde(default)]
     pub derive: Vec<String>,
-    /// Single-field tuple struct only: `Display` is `prefix` + the field, and `Operand` (assembly) strips `prefix`
-    /// and parses the rest (`r3` / `#3` / `@3`)
-    #[serde(default)]
-    pub prefix: Option<String>,
     /// Associated constants
     #[serde(default)]
     pub consts: Vec<ConstSpec>,
@@ -72,13 +68,6 @@ pub struct EnumSpec {
     /// field for the encoding, which costs a few extra instructions to read the discriminant)
     #[serde(default)]
     pub repr: Option<String>,
-    /// Generate `Display`: mnemonic + operands; for a text enum (every variant has `text`), the text
-    #[serde(default)]
-    pub display: bool,
-    /// Generate assembly (the inverse of `Display`): text enum ⇒ `Operand` by text; otherwise `display` on ⇒
-    /// `FromStr`; all unit variants ⇒ `Operand` by variant name
-    #[serde(default)]
-    pub asm: bool,
     /// Generate methods that return `&mut` to a field by its type
     #[serde(default)]
     pub accessors: Vec<Accessor>,
@@ -101,16 +90,6 @@ pub struct VariantSpec {
     pub name: String,
     #[serde(default)]
     pub doc: Option<String>,
-    /// Mnemonic for `Display`; replaced by the `show: name` field if there is one
-    #[serde(default)]
-    pub mnemonic: Option<String>,
-    /// Used with a `show: name` field: the mnemonic is `name.suffix` (another operand form of the same group of
-    /// names, e.g. `add.smi`)
-    #[serde(default)]
-    pub suffix: Option<String>,
-    /// The variant's text: when every variant (all unit) has one, the enum gets `ALL` and `name()`
-    #[serde(default)]
-    pub text: Option<String>,
     /// `#[default]`
     #[serde(default)]
     pub default: bool,
@@ -125,22 +104,4 @@ pub struct FieldSpec {
     #[serde(default)]
     pub name: Option<String>,
     pub ty: String,
-    /// Written before the value in `Display` (e.g. `fn#`, `extends `)
-    #[serde(default)]
-    pub prefix: String,
-    #[serde(default)]
-    pub show: Show,
-}
-
-/// How a field appears in `Display`. An `Option<_>` field that is `None` is omitted entirely.
-#[derive(Deserialize, Default, Clone, Copy)]
-#[serde(rename_all = "snake_case")]
-pub enum Show {
-    /// `{}`
-    #[default]
-    Display,
-    /// `{:?}`
-    Debug,
-    /// Replaces the mnemonic: `x.name()`
-    Name,
 }
