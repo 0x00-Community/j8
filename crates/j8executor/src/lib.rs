@@ -13,7 +13,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
 
-use j8bytecode::{Bytecode, Constant, Context, Decoded, FunctionKind, Intrinsic, LiteralValue, Module, OperandScale, OperandType, OperandValue, Register, Runtime, ScopeInfo, ScopeType, SharedFunction};
+use j8bytecode::{Bytecode, Constant, Context, Decoded, FunctionKind, Intrinsic, LiteralValue, Module, Operands, OperandValue, Register, Runtime, ScopeInfo, ScopeType, SharedFunction};
 use j8compiler::Compile;
 use j8framework::{Agent, BinaryOp, Closure, Collect, CompareOp, ContextKind, ContextName, ContextShape, Env, Error, ErrorKind, Few, FuncId, Gc, Invoke, JsEnv, JsObject, Numbers, ObjectData, ObjectKind, Property, Resume, Slot, Step, Value, ValueKind};
 use j8lockfree::SegVec;
@@ -30,11 +30,24 @@ const STACK_LIMIT: usize = 10_000;
 /// Instructions between checks of the budget / termination request
 const CHECK_STEPS: usize = 1024;
 
+/// One instruction of a loaded function, decoded once at load time; jump targets are instruction indices.
+struct Insn {
+    bytecode: Bytecode,
+    operands: Operands,
+    /// Byte offset of the bytecode byte (after any prefix): jump tables count from here, and it lies inside the handler
+    /// table ranges covering the instruction
+    start: u32,
+    /// Where a jump goes (its index in the instructions); 0 for other bytecodes
+    target: u32,
+}
+
 /// A loaded function: the function itself plus the id of the first function of its module (`CreateClosure`'s
 /// function constants are indices relative to it), with what running it needs prepared.
 struct Loaded {
     base: u32,
     func: SharedFunction,
+    /// The bytecode, decoded
+    insns: Box<[Insn]>,
     /// By feedback slot: inline caches for property reads / writes
     ics: Box<[ic::Ic]>,
     /// By feedback slot: where a global name was last found
@@ -54,6 +67,9 @@ struct Loaded {
     asynchronous: bool,
     /// Arrow functions and methods: no `prototype`, not constructors
     no_prototype: bool,
+    /// Sloppy, not an arrow function: an `undefined` / `null` receiver becomes the global object, a primitive one its
+    /// wrapper
+    wraps_this: bool,
     /// The code reads all arguments (rest parameter / arguments object): frames keep them
     keeps_args: bool,
     /// How many properties the instance constructed last time had: reserve that many slots when building `this` next
@@ -81,9 +97,11 @@ impl Loaded {
         let class_constructor = matches!(k, F::BaseConstructor | F::DerivedConstructor | F::DefaultBaseConstructor | F::DefaultDerivedConstructor);
         let derived = matches!(k, F::DerivedConstructor | F::DefaultDerivedConstructor);
         let normal = matches!(k, F::NormalFunction);
-        let keeps_args = j8bytecode::Decoder::from(&bc.code[..]).flatten().any(|d| matches!(d.bytecode, Bytecode::CreateRestParameter | Bytecode::CreateMappedArguments | Bytecode::CreateUnmappedArguments));
+        let insns = Self::decode(bc);
+        let keeps_args = insns.iter().any(|d| matches!(d.bytecode, Bytecode::CreateRestParameter | Bytecode::CreateMappedArguments | Bytecode::CreateUnmappedArguments));
         Self {
             base,
+            insns,
             ics,
             globals,
             shapes,
@@ -96,10 +114,67 @@ impl Loaded {
             asynchronous,
             no_prototype: !normal && !generator,
             keeps_args,
+            wraps_this: !func.strict && !matches!(k, F::ArrowFunction | F::AsyncArrowFunction),
             instance_size: Cell::new(0),
             prototype: ic::Ic::default(),
             func,
         }
+    }
+
+    /// Decodes the bytecode, turning jump offsets into instruction indices
+    fn decode(bc: &j8bytecode::BytecodeArray) -> Box<[Insn]> {
+        let decoded: Vec<Decoded> = j8bytecode::Decoder::from(&bc.code[..]).map(|d| d.expect("compiled bytecode decodes")).collect();
+        let index = |byte: usize| u32::try_from(decoded.partition_point(|d| d.offset < byte)).unwrap_or(u32::MAX);
+        decoded
+            .iter()
+            .map(|d| {
+                let target = match d.bytecode {
+                    Bytecode::JumpLoop => index(d.start() - usize::try_from(d.operands[0]).unwrap_or(0)),
+                    b if b.is_jump_constant() => match bc.constants.get(usize::try_from(d.operands[0]).unwrap_or(usize::MAX)) {
+                        Some(Constant::Offset(o)) => index(d.start() + *o as usize),
+                        _ => 0,
+                    },
+                    b if b.is_jump() => index(d.start() + usize::try_from(d.operands[0]).unwrap_or(0)),
+                    _ => 0,
+                };
+                let mut operands = d.operands;
+                for (v, t) in operands.iter_mut().zip(d.bytecode.operand_types()) {
+                    if t.is_register() {
+                        *v = Self::register(*v, bc.parameter_count);
+                    }
+                }
+                // A short `Star` becomes `Star` with its register
+                let bytecode = if d.bytecode.is_short_star() {
+                    operands = Operands::from(&[OperandValue::from(d.bytecode.short_star_register().0)][..]);
+                    Bytecode::Star
+                } else {
+                    d.bytecode
+                };
+                Insn { bytecode, operands, start: u32::try_from(d.start()).unwrap_or(u32::MAX), target }
+            })
+            .collect()
+    }
+
+    /// Register operands below this are the frame's fixed slots (context, closure, argc): `SPECIAL` plus the V8 operand
+    const SPECIAL: OperandValue = OperandValue::MIN / 2;
+    const SPECIAL_LIMIT: OperandValue = Self::SPECIAL / 2;
+
+    /// A register operand as an index relative to r0 in the register file: r`i` is `i`, the receiver and parameters
+    /// (just below r0) negative; the fixed frame slots `SPECIAL` plus their operand
+    fn register(operand: OperandValue, parameter_count: u16) -> OperandValue {
+        let o = i32::try_from(operand).unwrap_or(0);
+        if o <= Register::REGISTER_FILE_FROM_FP {
+            OperandValue::from(Register::from(o).0)
+        } else if o >= Register::FIRST_PARAM_FROM_FP {
+            OperandValue::from(o - Register::FIRST_PARAM_FROM_FP) - OperandValue::from(parameter_count)
+        } else {
+            Self::SPECIAL + operand
+        }
+    }
+
+    /// The instruction at byte offset `byte` (handler targets, jump tables)
+    fn index_of(&self, byte: usize) -> usize {
+        self.insns.partition_point(|d| (d.start as usize) < byte)
     }
 
     /// A scope info's shape for contexts made from it
@@ -127,9 +202,9 @@ impl Loaded {
 #[collect(no_drop)]
 struct Frame<'gc> {
     func: FuncId,
-    /// The next instruction
+    /// The next instruction (an index into the function's instructions)
     pc: usize,
-    /// Where the instruction being executed starts (its prefix included): handler table lookups use it
+    /// The instruction being executed: handler table lookups use it
     insn: usize,
     /// Index of the receiver in the register file (the parameters follow)
     params: usize,
@@ -181,6 +256,38 @@ impl<'gc> Outcome<'gc> {
         match self {
             Outcome::Return(v) => v,
             Outcome::Paused(_) => unreachable!("only the outermost execution pauses"),
+        }
+    }
+}
+
+/// A call's arguments: values at hand, or consecutive registers of the caller's frame (copied straight into the new
+/// frame).
+#[derive(Clone, Copy)]
+enum Args<'a, 'gc> {
+    Values(&'a [Value<'gc>]),
+    Regs { first: usize, count: usize },
+}
+
+impl<'gc> Args<'_, 'gc> {
+    fn len(self) -> usize {
+        match self {
+            Args::Values(v) => v.len(),
+            Args::Regs { count, .. } => count,
+        }
+    }
+
+    fn get(self, regs: &[Value<'gc>], i: usize) -> Value<'gc> {
+        match self {
+            Args::Values(v) => v.get(i).copied().unwrap_or_default(),
+            Args::Regs { first, count } if i < count => regs[first + i],
+            Args::Regs { .. } => Value::Undefined,
+        }
+    }
+
+    fn to_vec(self, regs: &[Value<'gc>]) -> Vec<Value<'gc>> {
+        match self {
+            Args::Values(v) => v.to_vec(),
+            Args::Regs { first, count } => regs[first..first + count].to_vec(),
         }
     }
 }
@@ -335,22 +442,29 @@ impl Executor {
     /// `undefined`), then the registers (all `undefined`). Sloppy non-arrow functions get the global object / a wrapper
     /// for a primitive receiver.
     fn open<'gc>(&self, a: &mut Agent<'gc, '_>, regs: &mut Vec<Value<'gc>>, closure: Closure<'gc>, callee: Value<'gc>, this: Value<'gc>, args: &[Value<'gc>]) -> Frame<'gc> {
-        let loaded = self.function(closure.func);
+        self.open_with(a, regs, self.function(closure.func), closure, callee, this, Args::Values(args))
+    }
+
+    #[expect(clippy::too_many_arguments, reason = "the parts of a call")]
+    fn open_with<'gc>(&self, a: &mut Agent<'gc, '_>, regs: &mut Vec<Value<'gc>>, loaded: &Loaded, closure: Closure<'gc>, callee: Value<'gc>, this: Value<'gc>, args: Args<'_, 'gc>) -> Frame<'gc> {
         let f = &loaded.func;
         a.profiler.enter(closure.func);
         let this = match this.kind() {
-            _ if f.strict || matches!(f.kind, FunctionKind::ArrowFunction | FunctionKind::AsyncArrowFunction) => this,
+            _ if !loaded.wraps_this => this,
             ValueKind::Undefined | ValueKind::Null => Value::Object(a.realm.global),
             ValueKind::Object(_) | ValueKind::Uninit => this,
             prim => a.to_object(Value::from(prim)).map_or(Value::from(prim), Value::Object),
         };
         let params = regs.len();
-        let formals = usize::from(f.formal_parameters);
+        let formals = usize::from(f.bytecode.parameter_count).saturating_sub(1);
         regs.push(this);
-        regs.extend((0..formals).map(|i| args.get(i).copied().unwrap_or_default()));
+        for i in 0..formals {
+            let v = args.get(regs, i);
+            regs.push(v);
+        }
         let base = regs.len();
         regs.resize(base + f.bytecode.register_count as usize, Value::Undefined);
-        let kept = if loaded.keeps_args { args.to_vec().into() } else { Few::default() };
+        let kept = if loaded.keeps_args { args.to_vec(regs).into() } else { Few::default() };
         let mut frame = Frame { func: closure.func, pc: 0, insn: 0, params, base, env: closure.env, closure: callee, new_target: Value::Undefined, new_this: None, args: kept, argc: args.len() };
         // The register V8 puts new.target / the generator object in on entry
         if let Some(r) = f.bytecode.new_target_or_generator {
@@ -369,51 +483,37 @@ impl Executor {
         }
     }
 
-    /// The register file index of a register operand (locals and parameters)
+    /// The register file index of a register operand (locals and parameters: see [`Loaded::register`])
     #[inline]
-    fn slot_of(f: &Frame<'_>, operand: OperandValue) -> Option<usize> {
-        let o = i32::try_from(operand).unwrap_or(0);
-        if o <= Register::REGISTER_FILE_FROM_FP {
-            Some(f.base + usize::try_from(Register::REGISTER_FILE_FROM_FP - o).unwrap_or(0))
-        } else if o >= Register::FIRST_PARAM_FROM_FP {
-            Some(f.params + usize::try_from(o - Register::FIRST_PARAM_FROM_FP).unwrap_or(0))
-        } else {
-            None
+    fn slot_of(f: &Frame<'_>, k: OperandValue) -> Option<usize> {
+        (k > Loaded::SPECIAL_LIMIT).then(|| f.base.wrapping_add_signed(k as isize))
+    }
+
+    #[inline]
+    fn reg<'gc>(regs: &[Value<'gc>], f: &Frame<'gc>, k: OperandValue) -> Value<'gc> {
+        if k > Loaded::SPECIAL_LIMIT {
+            return regs[f.base.wrapping_add_signed(k as isize)];
+        }
+        match i32::try_from(k - Loaded::SPECIAL).unwrap_or(0) {
+            Register::CONTEXT_FROM_FP => f.env.map_or(Value::Undefined, Value::context),
+            Register::FUNCTION_FROM_FP => f.closure,
+            Register::ARGC_FROM_FP => Value::Number(f64::from(u32::try_from(f.argc).unwrap_or(u32::MAX))),
+            _ => Value::Undefined,
         }
     }
 
     #[inline]
-    fn reg<'gc>(regs: &[Value<'gc>], f: &Frame<'gc>, operand: OperandValue) -> Value<'gc> {
-        match Self::slot_of(f, operand) {
-            Some(i) => regs.get(i).copied().unwrap_or_default(),
-            None => match i32::try_from(operand).unwrap_or(0) {
-                Register::CONTEXT_FROM_FP => f.env.map_or(Value::Undefined, Value::context),
-                Register::FUNCTION_FROM_FP => f.closure,
-                Register::ARGC_FROM_FP => Value::Number(f64::from(u32::try_from(f.argc).unwrap_or(u32::MAX))),
-                _ => Value::Undefined,
-            },
-        }
-    }
-
-    #[inline]
-    fn set_reg<'gc>(regs: &mut [Value<'gc>], f: &mut Frame<'gc>, operand: OperandValue, v: Value<'gc>) {
-        match Self::slot_of(f, operand) {
-            Some(i) => {
-                if let Some(r) = regs.get_mut(i) {
-                    *r = v;
-                }
-            }
-            None => {
-                if i32::try_from(operand).unwrap_or(0) == Register::CONTEXT_FROM_FP {
-                    f.env = v.as_context();
-                }
-            }
+    fn set_reg<'gc>(regs: &mut [Value<'gc>], f: &mut Frame<'gc>, k: OperandValue, v: Value<'gc>) {
+        if k > Loaded::SPECIAL_LIMIT {
+            regs[f.base.wrapping_add_signed(k as isize)] = v;
+        } else if i32::try_from(k - Loaded::SPECIAL).unwrap_or(0) == Register::CONTEXT_FROM_FP {
+            f.env = v.as_context();
         }
     }
 
     /// Consecutive registers from `first`
     fn reg_list<'gc>(regs: &[Value<'gc>], f: &Frame<'gc>, first: OperandValue, count: OperandValue) -> Vec<Value<'gc>> {
-        (0..count).map(|i| Self::reg(regs, f, first - i)).collect()
+        (0..count).map(|i| Self::reg(regs, f, first + i)).collect()
     }
 
     /// The context `depth` levels out from `context`
@@ -666,13 +766,15 @@ impl Executor {
     /// `LdaGlobal`: script contexts first, then the global object (through the cache); `typeof` gives `undefined` for
     /// a name that isn't there
     fn global_load<'gc>(a: &mut Agent<'gc, '_>, cache: &ic::GlobalIc, name: &str, inside_typeof: bool) -> Result<Value<'gc>, Error> {
-        if let Some((e, i, _)) = Self::script_slot(a, name) {
-            let v = e.load(i);
-            return if matches!(v.kind(), ValueKind::Uninit) { Err(Self::uninitialized(a, name)) } else { Ok(v) };
-        }
+        // A hit means the name is still a global property: a script declaring it lexically changes the script scope's
+        // shape
         let (scope, global) = (a.realm.script_scope, a.realm.global);
         if let Some(v) = cache.get(scope, global) {
             return Ok(v);
+        }
+        if let Some((e, i, _)) = Self::script_slot(a, name) {
+            let v = e.load(i);
+            return if matches!(v.kind(), ValueKind::Uninit) { Err(Self::uninitialized(a, name)) } else { Ok(v) };
         }
         let g = Value::Object(global);
         if !a.has_property(g, name)? {
@@ -688,6 +790,13 @@ impl Executor {
 
     /// `StaGlobal`: a script context slot (TDZ / `const` checked), else the global object (strict: must exist)
     fn global_store<'gc>(a: &mut Agent<'gc, '_>, cache: &ic::GlobalIc, name: &str, v: Value<'gc>, strict: bool) -> Result<(), Error> {
+        let (scope, global) = (a.realm.script_scope, a.realm.global);
+        if let Some((o, at)) = cache.writable(scope, global)
+            && let Slot::Data(_) = o.get().props().slot(at)
+        {
+            o.get().set_at(a.mc, at, v);
+            return Ok(());
+        }
         if let Some((e, i, constant)) = Self::script_slot(a, name) {
             if matches!(e.load(i).kind(), ValueKind::Uninit) {
                 return Err(Self::uninitialized(a, name));
@@ -696,13 +805,6 @@ impl Executor {
                 return Err(a.throw(ErrorKind::Type, "Assignment to constant variable."));
             }
             Env::set(e, a.mc, i, v);
-            return Ok(());
-        }
-        let (scope, global) = (a.realm.script_scope, a.realm.global);
-        if let Some((o, at)) = cache.writable(scope, global)
-            && let Slot::Data(_) = o.get().props().slot(at)
-        {
-            o.get().set_at(a.mc, at, v);
             return Ok(());
         }
         let g = Value::Object(global);
@@ -912,12 +1014,12 @@ impl Executor {
     fn unwind<'gc>(&self, st: &mut State<'gc>, v: Value<'gc>) -> bool {
         loop {
             let loaded = self.function(st.f.func);
-            let at = u32::try_from(st.f.insn).unwrap_or(u32::MAX);
+            let at = loaded.insns.get(st.f.insn).map_or(u32::MAX, |d| d.start);
             let h = loaded.func.bytecode.handlers.iter().filter(|h| h.start <= at && at < h.end).min_by_key(|h| h.end - h.start).copied();
             if let Some(h) = h {
-                let ctx = Self::reg(&st.regs, &st.f, OperandValue::from(Register(h.context).fp_slot()));
+                let ctx = Self::reg(&st.regs, &st.f, OperandValue::from(h.context));
                 st.f.env = ctx.as_context();
-                st.f.pc = h.handler as usize;
+                st.f.pc = loaded.index_of(h.handler as usize);
                 st.acc = v;
                 return true;
             }
@@ -955,25 +1057,18 @@ impl Executor {
         r
     }
 
-    /// The instruction at `pc`
-    #[inline]
-    fn decode(code: &[u8], pc: usize) -> Decoded {
-        j8bytecode::Decoder::decode(code, pc).expect("checked code")
-    }
-
-    /// Main loop: decode, run, repeat. `None` when the budget runs out (the state is intact).
+    /// Main loop: fetch, run, repeat. `None` when the budget runs out (the state is intact).
     fn run<'gc>(&self, a: &mut Agent<'gc, '_>, st: &mut State<'gc>, depth: usize, budget: &mut Budget<'_>) -> Result<Option<Outcome<'gc>>, Error> {
         'frame: loop {
             if budget.spent() {
                 return Ok(None);
             }
             let loaded = self.function(st.f.func);
-            let code = &loaded.func.bytecode.code;
             loop {
-                let d = Self::decode(code, st.f.pc);
-                st.f.insn = d.offset;
-                st.f.pc = d.next;
-                match self.step(a, st, loaded, &d, depth + st.frames.len(), budget)? {
+                let d = &loaded.insns[st.f.pc];
+                st.f.insn = st.f.pc;
+                st.f.pc += 1;
+                match self.step(a, st, loaded, d, depth + st.frames.len(), budget)? {
                     Flow::Next => {}
                     Flow::Frame => continue 'frame,
                     Flow::Done(o) => return Ok(Some(o)),
@@ -990,10 +1085,22 @@ impl Executor {
 
     /// A call from bytecode: a JS closure gets a frame, host functions run here
     #[expect(clippy::too_many_arguments, reason = "the parts of a call")]
-    fn call_from<'gc>(&self, a: &mut Agent<'gc, '_>, st: &mut State<'gc>, callee: Value<'gc>, this: Value<'gc>, args: Vec<Value<'gc>>, level: usize) -> Result<Flow<'gc>, Error> {
+    fn call_from<'gc>(&self, a: &mut Agent<'gc, '_>, st: &mut State<'gc>, callee: Value<'gc>, this: Value<'gc>, args: Args<'_, 'gc>, level: usize) -> Result<Flow<'gc>, Error> {
         if level >= STACK_LIMIT {
             return Err(a.throw(ErrorKind::Range, "Maximum call stack size exceeded"));
         }
+        // An ordinary JS function: a frame straight from the arguments
+        if let ValueKind::Object(o) = callee.kind()
+            && let Some(c) = o.closure()
+        {
+            let l = self.function(c.func);
+            if !(l.class_constructor || l.generator || l.asynchronous) {
+                let next = self.open_with(a, &mut st.regs, l, c, callee, this, args);
+                Self::push_frame(st, next);
+                return Ok(Flow::Frame);
+            }
+        }
+        let args = args.to_vec(&st.regs);
         match self.resolve(a, callee, this, args, level)? {
             Callee::Closure { closure, callee, this, args } => {
                 let next = self.open(a, &mut st.regs, closure, callee, this, &args);
@@ -1051,22 +1158,9 @@ impl Executor {
         }
     }
 
-    /// The jump target of a jump's first operand (immediate, or a `*Constant` form's constant)
-    fn jump_target(loaded: &Loaded, d: &Decoded, constant: bool) -> usize {
-        let start = d.next - d.bytecode.size(d.scale);
-        let delta = if constant {
-            match loaded.func.bytecode.constants.get(usize::try_from(d.operands[0]).unwrap_or(usize::MAX)) {
-                Some(Constant::Offset(o)) => *o as usize,
-                _ => 0,
-            }
-        } else {
-            usize::try_from(d.operands[0]).unwrap_or(0)
-        };
-        start + delta
-    }
-
     #[expect(clippy::too_many_lines, reason = "one arm per bytecode")]
-    fn step<'gc>(&self, a: &mut Agent<'gc, '_>, st: &mut State<'gc>, loaded: &Loaded, d: &Decoded, level: usize, budget: &mut Budget<'_>) -> Result<Flow<'gc>, Error> {
+    #[inline(always)]
+    fn step<'gc>(&self, a: &mut Agent<'gc, '_>, st: &mut State<'gc>, loaded: &Loaded, d: &Insn, level: usize, budget: &mut Budget<'_>) -> Result<Flow<'gc>, Error> {
         let o = &d.operands;
         let State { regs, f, acc, message, .. } = st;
         macro_rules! r {
@@ -1075,6 +1169,25 @@ impl Executor {
             };
         }
         let strict = loaded.func.strict;
+        // Two numbers inline; anything else through the agent
+        macro_rules! arith {
+            ($l:expr, $r:expr, $op:ident, $sym:tt) => {{
+                let (l, r) = ($l, $r);
+                *acc = match (l.as_number(), r.as_number()) {
+                    (Some(x), Some(y)) => Value::Number(x $sym y),
+                    _ => a.binary(BinaryOp::$op, l, r)?,
+                };
+            }};
+        }
+        macro_rules! relational {
+            ($op:ident, $sym:tt) => {{
+                let l = r!(0);
+                *acc = match (l.as_number(), acc.as_number()) {
+                    (Some(x), Some(y)) => Value::Bool(x $sym y),
+                    _ => Value::Bool(a.compare(CompareOp::$op, l, *acc)?),
+                };
+            }};
+        }
         let binary = |op: BinaryOp, a: &mut Agent<'gc, '_>, l: Value<'gc>, r: Value<'gc>| -> Result<Value<'gc>, Error> {
             match (l.as_number(), r.as_number()) {
                 (Some(x), Some(y)) => Ok(op.numbers(x, y).into()),
@@ -1099,7 +1212,6 @@ impl Executor {
             B::LdaConstant => *acc = Self::constant(a, &loaded.func.bytecode.constants[usize::try_from(o[0]).unwrap_or(0)]),
             B::Ldar => *acc = r!(0),
             B::Star => Self::set_reg(regs, f, o[0], *acc),
-            b if b.is_short_star() => Self::set_reg(regs, f, OperandValue::from(b.short_star_register().fp_slot()), *acc),
             B::Mov => {
                 let v = r!(0);
                 Self::set_reg(regs, f, o[1], v);
@@ -1224,10 +1336,18 @@ impl Executor {
                 }
                 *acc = Value::Bool(ok);
             }
-            B::Add | B::Sub | B::Mul | B::Div | B::Mod | B::Exp | B::BitwiseOr | B::BitwiseXor | B::BitwiseAnd | B::ShiftLeft | B::ShiftRight | B::ShiftRightLogical => {
+            B::Add => arith!(r!(0), *acc, Add, +),
+            B::Sub => arith!(r!(0), *acc, Sub, -),
+            B::Mul => arith!(r!(0), *acc, Mul, *),
+            B::Div => arith!(r!(0), *acc, Div, /),
+            B::AddSmi => arith!(*acc, Value::Number(o[0] as f64), Add, +),
+            B::SubSmi => arith!(*acc, Value::Number(o[0] as f64), Sub, -),
+            B::MulSmi => arith!(*acc, Value::Number(o[0] as f64), Mul, *),
+            B::DivSmi => arith!(*acc, Value::Number(o[0] as f64), Div, /),
+            B::Mod | B::Exp | B::BitwiseOr | B::BitwiseXor | B::BitwiseAnd | B::ShiftLeft | B::ShiftRight | B::ShiftRightLogical => {
                 *acc = binary(Self::binary_op(d.bytecode), a, r!(0), *acc)?;
             }
-            B::AddSmi | B::SubSmi | B::MulSmi | B::DivSmi | B::ModSmi | B::ExpSmi | B::BitwiseOrSmi | B::BitwiseXorSmi | B::BitwiseAndSmi | B::ShiftLeftSmi | B::ShiftRightSmi | B::ShiftRightLogicalSmi => {
+            B::ModSmi | B::ExpSmi | B::BitwiseOrSmi | B::BitwiseXorSmi | B::BitwiseAndSmi | B::ShiftLeftSmi | B::ShiftRightSmi | B::ShiftRightLogicalSmi => {
                 *acc = binary(Self::binary_op(d.bytecode), a, *acc, Value::Number(o[0] as f64))?;
             }
             B::Inc => *acc = if let Some(x) = acc.as_number() { (x + 1.0).into() } else { a.increment(*acc, 1)? },
@@ -1260,15 +1380,12 @@ impl Executor {
                 let ob = a.to_object(*acc)?;
                 Self::set_reg(regs, f, o[0], ob.into());
             }
-            B::TestEqual | B::TestEqualStrict | B::TestLessThan | B::TestGreaterThan | B::TestLessThanOrEqual | B::TestGreaterThanOrEqual => {
-                let op = match d.bytecode {
-                    B::TestEqual => CompareOp::Eq,
-                    B::TestEqualStrict => CompareOp::StrictEq,
-                    B::TestLessThan => CompareOp::Lt,
-                    B::TestGreaterThan => CompareOp::Gt,
-                    B::TestLessThanOrEqual => CompareOp::Le,
-                    _ => CompareOp::Ge,
-                };
+            B::TestLessThan => relational!(Lt, <),
+            B::TestGreaterThan => relational!(Gt, >),
+            B::TestLessThanOrEqual => relational!(Le, <=),
+            B::TestGreaterThanOrEqual => relational!(Ge, >=),
+            B::TestEqual | B::TestEqualStrict => {
+                let op = if d.bytecode == B::TestEqual { CompareOp::Eq } else { CompareOp::StrictEq };
                 *acc = compare(op, a, r!(0), *acc)?;
             }
             B::TestReferenceEqual => *acc = Value::Bool(r!(0).bits() == acc.bits()),
@@ -1282,10 +1399,8 @@ impl Executor {
                 let t = a.type_of(*acc);
                 *acc = Value::Bool(want.get(usize::try_from(o[0]).unwrap_or(99)).is_some_and(|w| *w == t));
             }
-            B::Jump => f.pc = Self::jump_target(loaded, d, false),
-            B::JumpConstant => f.pc = Self::jump_target(loaded, d, true),
+            B::Jump | B::JumpConstant => f.pc = d.target as usize,
             B::JumpIfTrue | B::JumpIfTrueConstant | B::JumpIfFalse | B::JumpIfFalseConstant | B::JumpIfToBooleanTrue | B::JumpIfToBooleanTrueConstant | B::JumpIfToBooleanFalse | B::JumpIfToBooleanFalseConstant | B::JumpIfNull | B::JumpIfNullConstant | B::JumpIfNotNull | B::JumpIfNotNullConstant | B::JumpIfUndefined | B::JumpIfUndefinedConstant | B::JumpIfNotUndefined | B::JumpIfNotUndefinedConstant | B::JumpIfUndefinedOrNull | B::JumpIfUndefinedOrNullConstant | B::JumpIfJSReceiver | B::JumpIfJSReceiverConstant => {
-                let constant = matches!(d.bytecode, B::JumpIfTrueConstant | B::JumpIfFalseConstant | B::JumpIfToBooleanTrueConstant | B::JumpIfToBooleanFalseConstant | B::JumpIfNullConstant | B::JumpIfNotNullConstant | B::JumpIfUndefinedConstant | B::JumpIfNotUndefinedConstant | B::JumpIfUndefinedOrNullConstant | B::JumpIfJSReceiverConstant);
                 let take = match d.bytecode {
                     B::JumpIfTrue | B::JumpIfTrueConstant => matches!(acc.kind(), ValueKind::Bool(true)),
                     B::JumpIfFalse | B::JumpIfFalseConstant => matches!(acc.kind(), ValueKind::Bool(false)),
@@ -1299,12 +1414,11 @@ impl Executor {
                     _ => acc.as_object().is_some(),
                 };
                 if take {
-                    f.pc = Self::jump_target(loaded, d, constant);
+                    f.pc = d.target as usize;
                 }
             }
             B::JumpLoop => {
-                let start = d.next - d.bytecode.size(d.scale);
-                f.pc = start - usize::try_from(o[0]).unwrap_or(0);
+                f.pc = d.target as usize;
                 if budget.spent() {
                     // Stop before the loop header, the state intact
                     return Ok(Flow::Done(Outcome::Paused(Box::new(State { regs: core::mem::take(regs), frames: core::mem::take(&mut st.frames), f: Self::take_frame(f), acc: *acc, message: *message }))));
@@ -1318,33 +1432,32 @@ impl Executor {
                     if x.fract() == 0.0 && (0..size).contains(&i)
                         && let Some(Constant::Offset(off)) = loaded.func.bytecode.constants.get(usize::try_from(table + i).unwrap_or(usize::MAX))
                     {
-                        let start = d.next - d.bytecode.size(d.scale);
-                        f.pc = start + *off as usize;
+                        f.pc = loaded.index_of(d.start as usize + *off as usize);
                     }
                 }
             }
             B::CallProperty0 | B::CallProperty1 | B::CallProperty2 | B::CallUndefinedReceiver0 | B::CallUndefinedReceiver1 | B::CallUndefinedReceiver2 => {
                 let callee = r!(0);
-                let (this, args): (Value<'gc>, Vec<Value<'gc>>) = match d.bytecode {
-                    B::CallProperty0 => (r!(1), Vec::new()),
-                    B::CallProperty1 => (r!(1), alloc::vec![r!(2)]),
-                    B::CallProperty2 => (r!(1), alloc::vec![r!(2), r!(3)]),
-                    B::CallUndefinedReceiver0 => (Value::Undefined, Vec::new()),
-                    B::CallUndefinedReceiver1 => (Value::Undefined, alloc::vec![r!(1)]),
-                    _ => (Value::Undefined, alloc::vec![r!(1), r!(2)]),
+                let (this, buf, n): (Value<'gc>, [Value<'gc>; 2], usize) = match d.bytecode {
+                    B::CallProperty0 => (r!(1), [Value::Undefined; 2], 0),
+                    B::CallProperty1 => (r!(1), [r!(2), Value::Undefined], 1),
+                    B::CallProperty2 => (r!(1), [r!(2), r!(3)], 2),
+                    B::CallUndefinedReceiver0 => (Value::Undefined, [Value::Undefined; 2], 0),
+                    B::CallUndefinedReceiver1 => (Value::Undefined, [r!(1), Value::Undefined], 1),
+                    _ => (Value::Undefined, [r!(1), r!(2)], 2),
+                };
+                return self.call_from(a, st, callee, this, Args::Values(&buf[..n]), level + 1);
+            }
+            B::CallProperty | B::CallAnyReceiver | B::CallUndefinedReceiver => {
+                let callee = r!(0);
+                let first = Self::slot_of(f, o[1]).unwrap_or(regs.len());
+                let count = usize::try_from(o[2]).unwrap_or(0);
+                let (this, args) = match (d.bytecode, count) {
+                    (B::CallUndefinedReceiver, _) => (Value::Undefined, Args::Regs { first, count }),
+                    (_, 0) => (Value::Undefined, Args::Values(&[])),
+                    _ => (regs[first], Args::Regs { first: first + 1, count: count - 1 }),
                 };
                 return self.call_from(a, st, callee, this, args, level + 1);
-            }
-            B::CallProperty | B::CallAnyReceiver => {
-                let callee = r!(0);
-                let list = Self::reg_list(regs, f, o[1], o[2]);
-                let (this, args) = list.split_first().map_or((Value::Undefined, Vec::new()), |(t, rest)| (*t, rest.to_vec()));
-                return self.call_from(a, st, callee, this, args, level + 1);
-            }
-            B::CallUndefinedReceiver => {
-                let callee = r!(0);
-                let args = Self::reg_list(regs, f, o[1], o[2]);
-                return self.call_from(a, st, callee, Value::Undefined, args, level + 1);
             }
             B::CallWithSpread => {
                 let callee = r!(0);
@@ -1352,7 +1465,7 @@ impl Executor {
                 let spread = list.pop().unwrap_or_default();
                 let (this, mut args) = list.split_first().map_or((Value::Undefined, Vec::new()), |(t, rest)| (*t, rest.to_vec()));
                 args.extend(Self::spread(a, spread)?);
-                return self.call_from(a, st, callee, this, args, level + 1);
+                return self.call_from(a, st, callee, this, Args::Values(&args), level + 1);
             }
             B::Construct | B::ConstructWithSpread => {
                 let callee = r!(0);
@@ -1457,20 +1570,20 @@ impl Executor {
                 let len = keys.as_object().map_or(0, |k| k.elements().len());
                 let first = o[0];
                 Self::set_reg(regs, f, first, keys);
-                Self::set_reg(regs, f, first - 1, keys);
-                Self::set_reg(regs, f, first - 2, Value::Number(len as f64));
+                Self::set_reg(regs, f, first + 1, keys);
+                Self::set_reg(regs, f, first + 2, Value::Number(len as f64));
             }
             B::JumpIfForInDone | B::JumpIfForInDoneConstant => {
                 let (i, n) = (r!(1).as_number().unwrap_or(0.0), r!(2).as_number().unwrap_or(0.0));
                 if i >= n {
-                    f.pc = Self::jump_target(loaded, d, d.bytecode == B::JumpIfForInDoneConstant);
+                    f.pc = d.target as usize;
                 }
             }
             B::ForInNext => {
                 let receiver = r!(0);
                 #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "an index")]
                 let i = r!(1).as_number().unwrap_or(0.0) as usize;
-                let keys = Self::reg(regs, f, o[2] - 1);
+                let keys = Self::reg(regs, f, o[2] + 1);
                 let key = keys.as_object().and_then(|k| k.elements().get(i)).unwrap_or_default();
                 // A key deleted since the enumeration started is skipped
                 let still = a.has_keyed(receiver, key)?;
@@ -1509,8 +1622,6 @@ impl Executor {
             }
             b => return Err(a.throw(ErrorKind::Syntax, &alloc::format!("bytecode {b:?} is not supported by the executor yet"))),
         }
-        let _ = OperandType::Reg;
-        let _ = OperandScale::Single;
         Ok(Flow::Next)
     }
 

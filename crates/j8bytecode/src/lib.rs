@@ -7,5 +7,5 @@ extern crate alloc;
 mod function;
 mod v8;
 
-pub use v8::{Bytecode, BytecodeError, Decoded, Decoder, Encoder, FeedbackSlotKind, FunctionKind, ImplicitRegisterUse, Intrinsic, OperandScale, OperandSize, OperandType, OperandTypeInfo, OperandValue, Register, Runtime, ScopeType, VariableMode};
+pub use v8::{Bytecode, BytecodeError, Decoded, Decoder, Encoder, FeedbackSlotKind, FunctionKind, ImplicitRegisterUse, Intrinsic, OperandScale, OperandSize, OperandType, Operands, OperandTypeInfo, OperandValue, Register, Runtime, ScopeType, VariableMode};
 pub use function::{ArrayBoilerplate, BytecodeArray, CatchPrediction, ClassBoilerplate, ClassMember, Constant, Context, ContextVariable, ContinuationToken, CreateArrayLiteralFlags, CreateClosureFlags, CreateObjectLiteralFlags, GlobalDeclaration, HandlerEntry, LiteralFlags, LiteralValue, MemberKind, Module, ObjectBoilerplate, ScopeInfo, SharedFunction, StoreLookupSlotFlags, TemplateObject, TypeOfLiteral};

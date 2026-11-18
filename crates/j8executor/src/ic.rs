@@ -33,7 +33,7 @@ fn plain(d: &Object<'_>) -> bool {
 
 /// What it looked like before the change (compared against by the add-property cache).
 #[derive(Clone)]
-pub(crate) struct Before {
+pub struct Before {
     shape: usize,
     /// Keeps the starting shape's allocation (so its address isn't reused while the cache holds it)
     from: Option<Weak<Shape>>,
@@ -50,7 +50,7 @@ impl From<JsObject<'_>> for Before {
 
 /// The cache for one property read/write site.
 #[derive(Default)]
-pub(crate) struct Ic {
+pub struct Ic {
     /// Receiver shape address (0: nothing cached)
     shape: Cell<usize>,
     /// Slot index
@@ -116,7 +116,7 @@ impl Ic {
     // ---- Read ----
 
     #[inline]
-    pub(crate) fn get<'gc>(&self, o: JsObject<'gc>) -> Option<Value<'gc>> {
+    pub fn get<'gc>(&self, o: JsObject<'gc>) -> Option<Value<'gc>> {
         let want = self.shape.get();
         let d = o.get();
         if addr(d) != want || !plain(d) {
@@ -138,7 +138,7 @@ impl Ic {
     }
 
     /// After a slow-path read, records where it was found
-    pub(crate) fn fill_get(&self, o: JsObject<'_>, name: &str) {
+    pub fn fill_get(&self, o: JsObject<'_>, name: &str) {
         self.reset();
         if !Self::name_ok(name) {
             return;
@@ -184,7 +184,7 @@ impl Ic {
 
     /// On a hit, writes and returns `true`
     #[inline]
-    pub(crate) fn set<'gc>(&self, mc: &Mutation<'gc>, o: JsObject<'gc>, v: Value<'gc>, assign: bool) -> bool {
+    pub fn set<'gc>(&self, mc: &Mutation<'gc>, o: JsObject<'gc>, v: Value<'gc>, assign: bool) -> bool {
         let want = self.shape.get();
         let d = o.get();
         if addr(d) != want || !plain(d) {
@@ -214,7 +214,7 @@ impl Ic {
 
     /// After a slow-path write, records it: an own property was modified, or a property was added (`assign`: an
     /// assignment, so the prototype chain must be checked)
-    pub(crate) fn fill_set(&self, o: JsObject<'_>, name: &str, before: Before, assign: bool) {
+    pub fn fill_set(&self, o: JsObject<'_>, name: &str, before: Before, assign: bool) {
         self.reset();
         if !Self::name_ok(name) || !before.plain {
             return;

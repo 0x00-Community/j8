@@ -137,6 +137,16 @@ impl Bytecode {
         self as u8 >= Self::FIRST_SHORT_STAR as u8 && self as u8 <= Self::LAST_SHORT_STAR as u8
     }
 
+    /// A jump (V8's `Bytecodes::IsJump`: `JumpLoop` through `JumpIfForInDone`); its first operand is the offset
+    pub const fn is_jump(self) -> bool {
+        self as u8 >= Self::JumpLoop as u8 && self as u8 <= Self::JumpIfForInDone as u8
+    }
+
+    /// A jump whose offset is a constant pool entry (V8's `Bytecodes::IsJumpConstant`)
+    pub const fn is_jump_constant(self) -> bool {
+        self as u8 >= Self::JumpConstant as u8 && self as u8 <= Self::JumpIfToBooleanFalseConstant as u8
+    }
+
     /// The short `Star` for register `r` (r0 … r15)
     pub fn short_star(r: Register) -> Option<Self> {
         match u8::try_from(r.0) {
@@ -267,9 +277,55 @@ pub struct Decoded {
     pub offset: usize,
     pub scale: OperandScale,
     pub bytecode: Bytecode,
-    pub operands: Vec<OperandValue>,
+    pub operands: Operands,
     /// Offset of the next instruction
     pub next: usize,
+}
+
+/// A decoded instruction's operands, held inline (no allocation per instruction).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct Operands {
+    values: [OperandValue; Operands::MAX],
+    len: u8,
+}
+
+impl Operands {
+    /// The most operands a bytecode has (V8's `Bytecodes::kMaxOperands`)
+    pub const MAX: usize = 5;
+}
+
+impl core::ops::Deref for Operands {
+    type Target = [OperandValue];
+
+    #[inline]
+    fn deref(&self) -> &[OperandValue] {
+        &self.values[..usize::from(self.len)]
+    }
+}
+
+impl core::ops::DerefMut for Operands {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut [OperandValue] {
+        &mut self.values[..usize::from(self.len)]
+    }
+}
+
+impl From<&[OperandValue]> for Operands {
+    /// At most [`Operands::MAX`] values (the rest are dropped)
+    fn from(v: &[OperandValue]) -> Self {
+        let mut o = Self::default();
+        let n = v.len().min(Self::MAX);
+        o.values[..n].copy_from_slice(&v[..n]);
+        o.len = u8::try_from(n).unwrap_or(0);
+        o
+    }
+}
+
+impl Decoded {
+    /// Where the bytecode byte is (after the prefix): jump offsets count from here
+    pub fn start(&self) -> usize {
+        self.offset + usize::from(self.scale != OperandScale::Single)
+    }
 }
 
 /// Bytecode reading and writing errors.
@@ -319,13 +375,14 @@ impl Decoder<'_> {
             None => (OperandScale::Single, at),
         };
         let bytecode = Bytecode::from_u8(*code.get(start).ok_or(BytecodeError::Truncated(at))?).ok_or(BytecodeError::Bytecode(start))?;
-        let operands = bytecode
-            .operand_types()
-            .iter()
-            .enumerate()
-            .map(|(i, &ty)| Self::operand(code, start + bytecode.operand_offset(i, scale), ty, scale).ok_or(BytecodeError::Truncated(at)))
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(Decoded { offset: at, scale, bytecode, operands, next: start + bytecode.size(scale) })
+        let mut operands = Operands::default();
+        let mut next = start + 1;
+        for (i, &ty) in bytecode.operand_types().iter().enumerate() {
+            operands.values[i] = Self::operand(code, next, ty, scale).ok_or(BytecodeError::Truncated(at))?;
+            next += usize::from(ty.size(scale));
+        }
+        operands.len = u8::try_from(bytecode.operand_types().len()).unwrap_or(0);
+        Ok(Decoded { offset: at, scale, bytecode, operands, next })
     }
 }
 
