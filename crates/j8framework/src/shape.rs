@@ -56,6 +56,12 @@ impl From<&Property<'_>> for Attrs {
     }
 }
 
+impl<'gc> From<(Slot<'gc>, Attrs)> for Property<'gc> {
+    fn from((slot, a): (Slot<'gc>, Attrs)) -> Self {
+        Self { slot, enumerable: a.enumerable(), writable: a.writable(), configurable: a.configurable() }
+    }
+}
+
 /// A shape.
 pub struct Shape {
     /// Keys and attributes, shared along a transition chain: this shape's are the first `len`
@@ -296,8 +302,24 @@ impl<'gc> Props<'gc> {
     }
 
     pub fn get(&self, i: usize) -> Property<'gc> {
-        let a = self.attrs(i);
-        Property { slot: self.slot(i), enumerable: a.enumerable(), writable: a.writable(), configurable: a.configurable() }
+        Property::from((self.slot(i), self.attrs(i)))
+    }
+
+    /// Entry `i` if its key is exactly `key`, in one look: one dictionary borrow, the key compared in place (the
+    /// execution layer caches indexes of global names and checks them with this)
+    #[inline]
+    pub fn get_if(&self, i: usize, key: &str) -> Option<Property<'gc>> {
+        match self.dict_cell() {
+            Some(d) => {
+                let d = d.borrow();
+                let (k, a) = d.keys.get(i)?;
+                (**k == *key).then(|| Property::from((d.slots[i], *a)))
+            }
+            None => {
+                let (k, a) = self.shape_ref()?.keys().get(i)?;
+                (**k == *key).then(|| Property::from((self.slot(i), *a)))
+            }
+        }
     }
 
     /// Store the contents of entry `i` (attributes unchanged)

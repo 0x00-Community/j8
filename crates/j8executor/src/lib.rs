@@ -51,6 +51,9 @@ struct Loaded {
     instance_size: Cell<u8>,
     /// Inline cache for reading `new.target.prototype` during construction
     prototype: ic::Ic,
+    /// `new` builds `this` and opens a frame directly from the registers (an ordinary function or a base class
+    /// constructor; not a generator / async)
+    constructs: bool,
 }
 
 impl From<(u32, Function)> for Loaded {
@@ -58,7 +61,8 @@ impl From<(u32, Function)> for Loaded {
         let globals = func.consts.iter().map(|_| Cell::new(GlobalSlot::Unknown)).collect();
         let ics = func.insns.iter().map(|_| ic::Ic::default()).collect();
         let plain = !func.generator && !func.asynchronous && !matches!(func.kind, FunctionKind::Constructor { .. });
-        Self { base, func, globals, no_tier_enter: Cell::new(false), no_tier_loops: Cell::new(false), ics, plain, instance_size: Cell::new(0), prototype: ic::Ic::default() }
+        let constructs = !func.generator && !func.asynchronous && matches!(func.kind, FunctionKind::Normal | FunctionKind::Constructor { derived: false });
+        Self { base, func, globals, no_tier_enter: Cell::new(false), no_tier_loops: Cell::new(false), ics, plain, instance_size: Cell::new(0), prototype: ic::Ic::default(), constructs }
     }
 }
 
@@ -549,6 +553,27 @@ impl Executor {
             },
             _ => None,
         }
+    }
+
+    /// `construct`: the callee is an ordinary function / base class constructor (`new.target` is itself), so builds
+    /// `this` and opens the frame straight from the registers; anything else copies the arguments out and goes through
+    /// [`prepare`](Self::prepare).
+    fn construct<'gc>(&self, a: &mut Agent<'gc, '_>, regs: &mut Vec<Value<'gc>>, callee: Value<'gc>, first: usize, argc: usize, depth: usize) -> Result<Prepared<'gc>, Error> {
+        if let Some(closure) = callee.as_object().and_then(|o| o.closure()) {
+            let loaded = self.function(closure.func);
+            if loaded.constructs {
+                let this = Self::create_this(a, loaded, callee)?;
+                if let Some(init) = closure.fields {
+                    a.call(init.into(), this.into(), &[])?;
+                }
+                let mut f = Self::enter_regs(a, regs, &loaded.func, closure, callee, Value::Object(this), first, argc);
+                f.new_target = callee;
+                f.new_this = Some(Value::Object(this));
+                return Ok(Prepared::Frame(f));
+            }
+        }
+        let list = regs[first..first + argc].to_vec();
+        self.prepare(a, regs, callee, list, callee, depth)
     }
 
     /// Prepares a construct call: unwraps bound functions; host constructors compute directly; JS constructors build
@@ -1437,10 +1462,8 @@ impl Executor {
                         if level >= STACK_LIMIT {
                             return Err(a.throw(ErrorKind::Range, "Maximum call stack size exceeded"));
                         }
-                        let first = r(args);
                         let c = regs[r(callee)];
-                        let list = regs[first..first + usize::from(argc)].to_vec();
-                        match self.prepare(a, regs, c, list, c, level)? {
+                        match self.construct(a, regs, c, r(args), usize::from(argc), level)? {
                             Prepared::Frame(next) => {
                                 frames.push(core::mem::replace(f, next));
                                 continue 'frame;

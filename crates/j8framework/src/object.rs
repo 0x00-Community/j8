@@ -1569,7 +1569,7 @@ impl<'gc> Object<'gc> {
 
     /// Entry `at` of the property table if it is exactly `key` (the execution layer caches the index)
     pub fn prop_at(&self, at: usize, key: &str) -> Option<Property<'gc>> {
-        (at < self.props.len() && *self.props.key(at) == *key).then(|| self.props.get(at))
+        self.props.get_if(at, key)
     }
 
     /// Update the value of entry `at` (already checked to be a writable data property)
