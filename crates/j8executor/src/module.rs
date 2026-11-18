@@ -7,7 +7,7 @@ use alloc::vec::Vec;
 
 use j8framework::{Agent, Closure, Error, ErrorKind, ImportName, ModuleStatus, ObjectData, Resolution, ResolvedBinding, Value};
 
-use crate::{Executor, Outcome, State};
+use crate::{Executor, Outcome};
 
 impl Executor {
     /// Loads the module at `path` and its dependencies (an already-loaded module just returns its id). A compile error
@@ -103,7 +103,7 @@ impl Executor {
             let saved = self.depth.replace(depth + 1);
             let mut regs = Vec::new();
             let f = self.open(a, &mut regs, Closure::new(main, Some(env)), Value::Undefined, Value::Undefined, &[]);
-            r = self.execute(a, State::new(regs, f), &mut None).map(Outcome::returned).map(drop);
+            r = self.execute(a, self.state(regs, f), &mut None).map(Outcome::returned).map(drop);
             self.depth.set(saved);
         }
         let error = match &r {

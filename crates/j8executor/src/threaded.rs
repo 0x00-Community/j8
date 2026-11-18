@@ -9,7 +9,7 @@
 use j8bytecode::Bytecode;
 use j8framework::{Agent, Env, Error, ErrorKind, Value, ValueKind};
 
-use crate::{Budget, Executor, Flow, Insn, Loaded, Outcome, State};
+use crate::{Args, Budget, Executor, Flow, Frame, Insn, Loaded, Outcome, State, STACK_LIMIT};
 
 /// What the threaded code shares besides the hot state.
 #[expect(private_interfaces, reason = "crate-internal types; the module is private")]
@@ -93,7 +93,7 @@ macro_rules! reg {
             // SAFETY: decoded register operands index the running frame's part of the register file
             unsafe { *$regs.offset(k as isize) }
         } else {
-            Executor::reg(&$cx.st.regs, &$cx.st.f, k)
+            Executor::reg(&$cx.st.regs, $cx.st.f(), k)
         }
     }};
 }
@@ -221,13 +221,15 @@ handlers! {
         fall!(cx, pc, regs, acc)
     }
     lda_current_context_slot(cx, pc, regs, acc, o) {
-        match cx.st.f.env {
+        // SAFETY: the header's context slot is right below r0
+        match unsafe { *regs.sub(Frame::CONTEXT) }.as_context() {
             Some(e) => next!(cx, step!(pc), regs, e.load(Executor::env_index(o[0]))),
             None => fall!(cx, pc, regs, acc),
         }
     }
     sta_current_context_slot(cx, pc, regs, acc, o) {
-        match cx.st.f.env {
+        // SAFETY: as above
+        match unsafe { *regs.sub(Frame::CONTEXT) }.as_context() {
             Some(e) => {
                 Env::set(e, cx.a.mc, Executor::env_index(o[0]), acc);
                 next!(cx, step!(pc), regs, acc)
@@ -258,6 +260,68 @@ handlers! {
     }
 }
 
+/// A call of an ordinary JS function (not a class constructor, generator or async function) from the running frame:
+/// the callee's frame record goes on the frame stack and its code starts right here, without leaving the threaded
+/// code (V8's `InterpreterEntryTrampoline`). `None`: anything else, for the slow path.
+#[inline]
+fn enter<'r, 'gc>(cx: &mut Cx<'r, 'gc, '_, '_>, pc: *const Insn, callee: Value<'gc>, this: Value<'gc>, args: Args<'_, 'gc>) -> Option<(*const Insn, *mut Value<'gc>)> {
+    let ValueKind::Object(o) = callee.kind() else { return None };
+    let c = o.closure()?;
+    let l: &'r Loaded = cx.exe.function(c.func);
+    if l.class_constructor || l.generator || l.asynchronous || cx.depth + cx.st.frames.len() + 1 >= STACK_LIMIT {
+        return None;
+    }
+    // SAFETY: `pc` points into the running function's instructions
+    let at = usize::try_from(unsafe { pc.offset_from(cx.loaded.insns.as_ptr()) }).unwrap_or(0);
+    let f = cx.st.f_mut();
+    f.insn = at;
+    f.pc = at + 1;
+    let next = cx.exe.open_with(cx.a, &mut cx.st.regs, l, c, callee, this, args);
+    let base = next.base;
+    cx.st.frames.push(next);
+    cx.loaded = l;
+    Some((l.insns.as_ptr(), cx.st.regs.as_mut_ptr().wrapping_add(base)))
+}
+
+/// A call with the callee in register `o[0]`, `this` and up to two arguments at hand
+macro_rules! call {
+    ($cx:ident, $pc:ident, $regs:ident, $acc:ident, $o:ident, $this:expr, [$($arg:expr),*]) => {{
+        let callee = reg!($cx, $regs, $o[0]);
+        let args = [$($arg),*];
+        match enter($cx, $pc, callee, $this, Args::Values(&args)) {
+            Some((pc, regs)) => next!($cx, pc, regs, Value::Undefined),
+            None => fall!($cx, $pc, $regs, $acc),
+        }
+    }};
+}
+
+handlers! {
+    call_undefined_receiver0(cx, pc, regs, acc, o) { call!(cx, pc, regs, acc, o, Value::Undefined, []) }
+    call_undefined_receiver1(cx, pc, regs, acc, o) { call!(cx, pc, regs, acc, o, Value::Undefined, [reg!(cx, regs, o[1])]) }
+    call_undefined_receiver2(cx, pc, regs, acc, o) { call!(cx, pc, regs, acc, o, Value::Undefined, [reg!(cx, regs, o[1]), reg!(cx, regs, o[2])]) }
+    call_property0(cx, pc, regs, acc, o) { call!(cx, pc, regs, acc, o, reg!(cx, regs, o[1]), []) }
+    call_property1(cx, pc, regs, acc, o) { call!(cx, pc, regs, acc, o, reg!(cx, regs, o[1]), [reg!(cx, regs, o[2])]) }
+    call_property2(cx, pc, regs, acc, o) { call!(cx, pc, regs, acc, o, reg!(cx, regs, o[1]), [reg!(cx, regs, o[2]), reg!(cx, regs, o[3])]) }
+    // A plain call's frame returns to its caller's next instruction (construct frames, and the outermost frame, take
+    // the slow path)
+    return_(cx, pc, regs, acc, o) {
+        let st = &mut *cx.st;
+        // SAFETY: the header's new.target slot is below r0
+        if st.frames.len() < 2 || unsafe { *regs.sub(Frame::NEW_TARGET) } != Value::Undefined {
+            fall!(cx, pc, regs, acc)
+        }
+        st.pop_frame();
+        let caller = st.f();
+        let (func, at, base) = (caller.func, caller.pc, caller.base);
+        let l = cx.exe.function(func);
+        cx.loaded = l;
+        // SAFETY: the caller's `pc` was synced when it called (an instruction after the call)
+        let pc = unsafe { l.insns.as_ptr().add(at) };
+        let regs = cx.st.regs.as_mut_ptr().wrapping_add(base);
+        next!(cx, pc, regs, acc)
+    }
+}
+
 /// Syncs the state and runs the instruction through [`Executor::step`]
 #[inline(never)]
 fn slow<'r, 'gc, 'x, 'b>(cx: &mut Cx<'r, 'gc, 'x, 'b>, pc: *const Insn, _: *mut Value<'gc>, acc: Value<'gc>) -> Exit<'gc> {
@@ -265,8 +329,9 @@ fn slow<'r, 'gc, 'x, 'b>(cx: &mut Cx<'r, 'gc, 'x, 'b>, pc: *const Insn, _: *mut 
     // SAFETY: `pc` points into the same instructions
     let at = usize::try_from(unsafe { pc.offset_from(base) }).unwrap_or(0);
     let st = &mut *cx.st;
-    st.f.insn = at;
-    st.f.pc = at + 1;
+    let f = st.f_mut();
+    f.insn = at;
+    f.pc = at + 1;
     st.acc = acc;
     let level = cx.depth + st.frames.len();
     // SAFETY: as above
@@ -275,10 +340,10 @@ fn slow<'r, 'gc, 'x, 'b>(cx: &mut Cx<'r, 'gc, 'x, 'b>, pc: *const Insn, _: *mut 
         Ok(Flow::Next) => {
             // Calls to host functions don't touch this frame's registers, but read them back anyway
             #[cfg_attr(not(tail_calls), expect(unused_variables, reason = "the loop reloads the registers"))]
-            let regs = st.regs.as_mut_ptr().wrapping_add(st.f.base);
+            let regs = st.regs.as_mut_ptr().wrapping_add(st.f().base);
             let acc = st.acc;
             // SAFETY: `step` leaves `pc` inside the instructions
-            next!(cx, unsafe { base.add(cx.st.f.pc) }, regs, acc)
+            next!(cx, unsafe { base.add(cx.st.f().pc) }, regs, acc)
         }
         Ok(Flow::Frame) => Exit::Frame,
         Ok(Flow::Done(o)) => Exit::Done(o),
@@ -332,6 +397,13 @@ impl Insn {
             B::ThrowReferenceErrorIfHole => throw_reference_error_if_hole,
             B::GetNamedProperty => get_named_property,
             B::LdaGlobal => lda_global,
+            B::CallUndefinedReceiver0 => call_undefined_receiver0,
+            B::CallUndefinedReceiver1 => call_undefined_receiver1,
+            B::CallUndefinedReceiver2 => call_undefined_receiver2,
+            B::CallProperty0 => call_property0,
+            B::CallProperty1 => call_property1,
+            B::CallProperty2 => call_property2,
+            B::Return => return_,
             B::Illegal => illegal,
             _ => slow,
         }
@@ -342,8 +414,8 @@ impl Executor {
     /// Runs the current frame's instructions until the frame changes or the execution ends.
     pub fn threaded<'gc>(cx: &mut Cx<'_, 'gc, '_, '_>) -> Exit<'gc> {
         let st = &mut *cx.st;
-        let pc = &raw const cx.loaded.insns[st.f.pc];
-        let regs = st.regs.as_mut_ptr().wrapping_add(st.f.base);
+        let pc = &raw const cx.loaded.insns[st.f().pc];
+        let regs = st.regs.as_mut_ptr().wrapping_add(st.f().base);
         let acc = st.acc;
         // SAFETY: `pc` points at an instruction of the running function
         let h = unsafe { (*pc).handler };
@@ -359,7 +431,7 @@ impl Executor {
                     Exit::Next(p, a) => {
                         pc = p;
                         acc = a;
-                        regs = cx.st.regs.as_mut_ptr().wrapping_add(cx.st.f.base);
+                        regs = cx.st.regs.as_mut_ptr().wrapping_add(cx.st.f().base);
                         // SAFETY: as above
                         h = unsafe { (*pc).handler };
                     }

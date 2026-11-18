@@ -17,7 +17,7 @@ use core::cell::{Cell, RefCell};
 
 use j8bytecode::{Bytecode, Constant, Context, Decoded, FunctionKind, Intrinsic, LiteralValue, Module, Operands, OperandValue, Register, Runtime, ScopeInfo, ScopeType, SharedFunction};
 use j8compiler::Compile;
-use j8framework::{Agent, BinaryOp, Closure, Collect, CompareOp, ContextKind, ContextName, ContextShape, Env, Error, ErrorKind, Few, FuncId, Gc, Invoke, JsEnv, JsObject, Numbers, ObjectData, ObjectKind, Property, Resume, Slot, Step, Value, ValueKind};
+use j8framework::{Agent, BinaryOp, Closure, Collect, CompareOp, ContextKind, ContextName, ContextShape, Env, Error, ErrorKind, FuncId, Gc, Invoke, JsEnv, JsObject, Numbers, ObjectData, ObjectKind, Property, Resume, Slot, Step, Value, ValueKind};
 use j8lockfree::SegVec;
 
 mod cache;
@@ -38,6 +38,12 @@ const SET_FUNCTION_NAME: OperandValue = 1;
 
 /// V8's `JSGeneratorObject::kRethrow`: an async generator's yielded value was rejected
 const RESUME_RETHROW: f64 = 3.0;
+
+/// Frame records reserved for a new execution (deeper calls grow the stack)
+const FRAMES_RESERVED: usize = 16;
+
+/// At most how many frame stacks the executor keeps for reuse
+const SPARE_FRAMES: usize = 8;
 
 /// Instructions between checks of the budget / termination request
 const CHECK_STEPS: usize = 1024;
@@ -189,10 +195,19 @@ impl Loaded {
         if o <= Register::REGISTER_FILE_FROM_FP {
             OperandValue::from(Register::from(o).0)
         } else if o >= Register::FIRST_PARAM_FROM_FP {
-            OperandValue::from(o - Register::FIRST_PARAM_FROM_FP) - OperandValue::from(parameter_count)
+            OperandValue::from(o - Register::FIRST_PARAM_FROM_FP) - OperandValue::from(parameter_count) - Self::below(Frame::HEADER)
+        } else if o == Register::CONTEXT_FROM_FP {
+            -Self::below(Frame::CONTEXT)
+        } else if o == Register::FUNCTION_FROM_FP {
+            -Self::below(Frame::CLOSURE)
         } else {
             Self::SPECIAL + operand
         }
+    }
+
+    /// How far below r0 a header slot is, as a register offset
+    fn below(slot: usize) -> OperandValue {
+        OperandValue::try_from(slot).unwrap_or(0)
     }
 
     /// The instruction at byte offset `byte` (handler targets, jump tables)
@@ -220,10 +235,12 @@ impl Loaded {
     }
 }
 
-/// A call frame.
-#[derive(Collect)]
-#[collect(no_drop)]
-struct Frame<'gc> {
+/// A call frame's record on the frame stack: where its code and its part of the register file are. What the GC traces
+/// lives in the register file, in header slots right below r0 (V8 keeps `<context>` / `<closure>` in its stack frame
+/// the same way): see [`Frame::CONTEXT`] etc.
+#[derive(Clone, Copy, Collect)]
+#[collect(require_static)]
+struct Frame {
     func: FuncId,
     /// The next instruction (an index into the function's instructions)
     pc: usize,
@@ -233,28 +250,64 @@ struct Frame<'gc> {
     params: usize,
     /// Index of r0 in the register file
     base: usize,
-    /// The current context (V8's `<context>` register)
-    env: Option<JsEnv<'gc>>,
-    /// The function being run (V8's `<closure>` register)
-    closure: Value<'gc>,
-    /// `new.target` (`undefined` for ordinary calls)
-    new_target: Value<'gc>,
-    /// `this` of a construct call: present on frame entry for base class construction; for derived classes, set when
-    /// `super(...)` returns
-    new_this: Option<Value<'gc>>,
-    /// All arguments (kept only by functions that read them all)
-    args: Few<Value<'gc>>,
     /// The number of arguments passed
     argc: usize,
 }
 
-/// All the state of one execution (attached to the roots between slices).
+impl Frame {
+    /// Header slots, counted down from r0: the current context (V8's `<context>` register)
+    const CONTEXT: usize = 1;
+    /// The function being run (V8's `<closure>` register)
+    const CLOSURE: usize = 2;
+    /// `new.target` (`undefined` for ordinary calls)
+    const NEW_TARGET: usize = 3;
+    /// `this` of a construct call (the hole when absent): present on entry for base class construction
+    const NEW_THIS: usize = 4;
+    /// All arguments as an array (kept only by functions that read them all), else `undefined`
+    const ARGS: usize = 5;
+    /// The header's size: the parameters end this far below r0
+    const HEADER: usize = 5;
+
+    #[inline]
+    fn slot<'gc>(&self, regs: &[Value<'gc>], k: usize) -> Value<'gc> {
+        regs[self.base - k]
+    }
+
+    #[inline]
+    fn set_slot<'gc>(&self, regs: &mut [Value<'gc>], k: usize, v: Value<'gc>) {
+        regs[self.base - k] = v;
+    }
+
+    /// The current context
+    #[inline]
+    fn env<'gc>(&self, regs: &[Value<'gc>]) -> Option<JsEnv<'gc>> {
+        self.slot(regs, Self::CONTEXT).as_context()
+    }
+
+    #[inline]
+    fn set_env<'gc>(&self, regs: &mut [Value<'gc>], e: Option<JsEnv<'gc>>) {
+        self.set_slot(regs, Self::CONTEXT, e.map_or(Value::Undefined, Value::context));
+    }
+
+    /// `this` of a construct call, if built yet
+    fn new_this<'gc>(&self, regs: &[Value<'gc>]) -> Option<Value<'gc>> {
+        Some(self.slot(regs, Self::NEW_THIS)).filter(|v| !matches!(v.kind(), ValueKind::Uninit))
+    }
+
+    /// All the arguments passed (for functions that keep them)
+    fn args<'gc>(&self, regs: &[Value<'gc>]) -> Vec<Value<'gc>> {
+        self.slot(regs, Self::ARGS).as_object().map_or_else(Vec::new, |o| o.elements().to_vec())
+    }
+}
+
+/// All the state of one execution (attached to the roots between slices): the register file, and the frame stack
+/// (V8 keeps its frames on the machine stack): the running frame is on top, a call pushes the callee's record in place
+/// and a return pops it, nothing is copied in or out.
 #[derive(Collect)]
 #[collect(no_drop)]
 struct State<'gc> {
     regs: Vec<Value<'gc>>,
-    frames: Vec<Frame<'gc>>,
-    f: Frame<'gc>,
+    frames: Vec<Frame>,
     acc: Value<'gc>,
     /// V8's pending message (`SetPendingMessage` swaps it with acc)
     message: Value<'gc>,
@@ -262,8 +315,33 @@ struct State<'gc> {
 
 impl<'gc> State<'gc> {
     /// Entering frame `f` (its part of `regs` already set up)
-    fn new(regs: Vec<Value<'gc>>, f: Frame<'gc>) -> Self {
-        Self { regs, frames: Vec::new(), f, acc: Value::Undefined, message: Value::Undefined }
+    /// Entering frame `f` (its part of `regs` already set up), on frame stack `frames` (empty)
+    fn new(regs: Vec<Value<'gc>>, mut frames: Vec<Frame>, f: Frame) -> Self {
+        frames.push(f);
+        Self { regs, frames, acc: Value::Undefined, message: Value::Undefined }
+    }
+
+    /// The running frame
+    #[inline]
+    fn f(&self) -> &Frame {
+        self.frames.last().expect("a running frame")
+    }
+
+    #[inline]
+    fn f_mut(&mut self) -> &mut Frame {
+        self.frames.last_mut().expect("a running frame")
+    }
+
+    /// The running frame returns: its record is popped and its part of the register file dropped; `true` if a caller
+    /// goes on
+    #[inline]
+    fn pop_frame(&mut self) -> bool {
+        let Some(done) = self.frames.pop() else { return false };
+        if self.frames.is_empty() {
+            return false;
+        }
+        self.regs.truncate(done.params);
+        true
     }
 }
 
@@ -335,7 +413,7 @@ enum Callee<'gc> {
 
 /// Result of preparing a construct call: a frame to enter, or the object a host constructor already produced.
 enum Prepared<'gc> {
-    Frame(Frame<'gc>),
+    Frame(Frame),
     Done(Value<'gc>),
 }
 
@@ -413,6 +491,9 @@ pub struct Executor {
     module_of: RefCell<alloc::collections::BTreeMap<u32, u32>>,
     /// Bytecode shared with other executors
     cache: Option<Arc<CodeCache>>,
+    /// Frame stacks of finished executions, kept for the next ones (a host function calling back into JS starts one
+    /// each time)
+    spare_frames: RefCell<Vec<Vec<Frame>>>,
 }
 
 // An executor moves between the threads of the event loop's pool together with its isolate (one thread at a time:
@@ -464,12 +545,12 @@ impl Executor {
     /// Opens a frame for `closure` at the end of the register file: receiver, formal parameters (missing ones
     /// `undefined`), then the registers (all `undefined`). Sloppy non-arrow functions get the global object / a wrapper
     /// for a primitive receiver.
-    fn open<'gc>(&self, a: &mut Agent<'gc, '_>, regs: &mut Vec<Value<'gc>>, closure: Closure<'gc>, callee: Value<'gc>, this: Value<'gc>, args: &[Value<'gc>]) -> Frame<'gc> {
+    fn open<'gc>(&self, a: &mut Agent<'gc, '_>, regs: &mut Vec<Value<'gc>>, closure: Closure<'gc>, callee: Value<'gc>, this: Value<'gc>, args: &[Value<'gc>]) -> Frame {
         self.open_with(a, regs, self.function(closure.func), closure, callee, this, Args::Values(args))
     }
 
     #[expect(clippy::too_many_arguments, reason = "the parts of a call")]
-    fn open_with<'gc>(&self, a: &mut Agent<'gc, '_>, regs: &mut Vec<Value<'gc>>, loaded: &Loaded, closure: Closure<'gc>, callee: Value<'gc>, this: Value<'gc>, args: Args<'_, 'gc>) -> Frame<'gc> {
+    fn open_with<'gc>(&self, a: &mut Agent<'gc, '_>, regs: &mut Vec<Value<'gc>>, loaded: &Loaded, closure: Closure<'gc>, callee: Value<'gc>, this: Value<'gc>, args: Args<'_, 'gc>) -> Frame {
         let f = &loaded.func;
         a.profiler.enter(closure.func);
         let this = match this.kind() {
@@ -478,6 +559,7 @@ impl Executor {
             ValueKind::Object(_) | ValueKind::Uninit => this,
             prim => a.to_object(Value::from(prim)).map_or(Value::from(prim), Value::Object),
         };
+        let kept = if loaded.keeps_args { Value::Object(a.array(args.to_vec(regs))) } else { Value::Undefined };
         let params = regs.len();
         let formals = usize::from(f.bytecode.parameter_count).saturating_sub(1);
         regs.push(this);
@@ -485,22 +567,17 @@ impl Executor {
             let v = args.get(regs, i);
             regs.push(v);
         }
+        // The header, from ARGS up to CONTEXT
+        regs.extend_from_slice(&[kept, Value::Uninit, Value::Undefined, callee, closure.env.map_or(Value::Undefined, Value::context)]);
         let base = regs.len();
+        // The register V8 puts new.target / the generator object in on entry starts `undefined` with the rest
         regs.resize(base + f.bytecode.register_count as usize, Value::Undefined);
-        let kept = if loaded.keeps_args { args.to_vec(regs).into() } else { Few::default() };
-        let mut frame = Frame { func: closure.func, pc: 0, insn: 0, params, base, env: closure.env, closure: callee, new_target: Value::Undefined, new_this: None, args: kept, argc: args.len() };
-        // The register V8 puts new.target / the generator object in on entry
-        if let Some(r) = f.bytecode.new_target_or_generator {
-            frame.new_target = Value::Undefined;
-            let i = base + usize::try_from(r).unwrap_or(0);
-            regs[i] = Value::Undefined;
-        }
-        frame
+        Frame { func: closure.func, pc: 0, insn: 0, params, base, argc: args.len() }
     }
 
     /// Sets the new.target register of a construct frame
-    fn set_new_target<'gc>(&self, regs: &mut [Value<'gc>], f: &mut Frame<'gc>, nt: Value<'gc>) {
-        f.new_target = nt;
+    fn set_new_target<'gc>(&self, regs: &mut [Value<'gc>], f: &mut Frame, nt: Value<'gc>) {
+        f.set_slot(regs, Frame::NEW_TARGET, nt);
         if let Some(r) = self.function(f.func).func.bytecode.new_target_or_generator {
             regs[f.base + usize::try_from(r).unwrap_or(0)] = nt;
         }
@@ -508,34 +585,30 @@ impl Executor {
 
     /// The register file index of a register operand (locals and parameters: see [`Loaded::register`])
     #[inline]
-    fn slot_of(f: &Frame<'_>, k: OperandValue) -> Option<usize> {
+    fn slot_of(f: &Frame, k: OperandValue) -> Option<usize> {
         (k > Loaded::SPECIAL_LIMIT).then(|| f.base.wrapping_add_signed(k as isize))
     }
 
     #[inline]
-    fn reg<'gc>(regs: &[Value<'gc>], f: &Frame<'gc>, k: OperandValue) -> Value<'gc> {
+    fn reg<'gc>(regs: &[Value<'gc>], f: &Frame, k: OperandValue) -> Value<'gc> {
         if k > Loaded::SPECIAL_LIMIT {
             return regs[f.base.wrapping_add_signed(k as isize)];
         }
         match i32::try_from(k - Loaded::SPECIAL).unwrap_or(0) {
-            Register::CONTEXT_FROM_FP => f.env.map_or(Value::Undefined, Value::context),
-            Register::FUNCTION_FROM_FP => f.closure,
             Register::ARGC_FROM_FP => Value::Number(f64::from(u32::try_from(f.argc).unwrap_or(u32::MAX))),
             _ => Value::Undefined,
         }
     }
 
     #[inline]
-    fn set_reg<'gc>(regs: &mut [Value<'gc>], f: &mut Frame<'gc>, k: OperandValue, v: Value<'gc>) {
+    fn set_reg<'gc>(regs: &mut [Value<'gc>], f: &mut Frame, k: OperandValue, v: Value<'gc>) {
         if k > Loaded::SPECIAL_LIMIT {
             regs[f.base.wrapping_add_signed(k as isize)] = v;
-        } else if i32::try_from(k - Loaded::SPECIAL).unwrap_or(0) == Register::CONTEXT_FROM_FP {
-            f.env = v.as_context();
         }
     }
 
     /// Consecutive registers from `first`
-    fn reg_list<'gc>(regs: &[Value<'gc>], f: &Frame<'gc>, first: OperandValue, count: OperandValue) -> Vec<Value<'gc>> {
+    fn reg_list<'gc>(regs: &[Value<'gc>], f: &Frame, first: OperandValue, count: OperandValue) -> Vec<Value<'gc>> {
         (0..count).map(|i| Self::reg(regs, f, first + i)).collect()
     }
 
@@ -675,7 +748,7 @@ impl Executor {
                     };
                     let mut f = self.open(a, regs, closure, callee, this.unwrap_or(Value::Uninit), &args);
                     self.set_new_target(regs, &mut f, new_target);
-                    f.new_this = this;
+                    f.set_slot(regs, Frame::NEW_THIS, this.unwrap_or(Value::Uninit));
                     return Ok(Prepared::Frame(f));
                 }
                 Ok(Err(native)) => {
@@ -727,12 +800,12 @@ impl Executor {
     }
 
     /// A construct call returns: an object result is used, otherwise `this`.
-    fn construct_result<'gc>(&self, a: &Agent<'gc, '_>, f: &Frame<'gc>, v: Value<'gc>) -> Result<Value<'gc>, Error> {
+    fn construct_result<'gc>(&self, a: &Agent<'gc, '_>, regs: &[Value<'gc>], f: &Frame, v: Value<'gc>) -> Result<Value<'gc>, Error> {
         let loaded = self.function(f.func);
         if v.as_object().is_some() {
             return Ok(v);
         }
-        let r = match (loaded.derived, f.new_this) {
+        let r = match (loaded.derived, f.new_this(regs)) {
             (true, _) if v != Value::Undefined => Err(a.throw(ErrorKind::Type, "Derived constructors may only return object or undefined")),
             (true, None) => Err(a.throw(ErrorKind::Reference, "Must call super constructor in derived class before accessing 'this' or returning from derived constructor")),
             (_, Some(t)) => Ok(t),
@@ -952,7 +1025,7 @@ impl Executor {
     }
 
     /// `DeclareGlobals`: a script's `var`s and functions on the global object, after checking all can be declared
-    fn declare_globals<'gc>(&self, a: &mut Agent<'gc, '_>, f: &Frame<'gc>, decls: &[j8bytecode::GlobalDeclaration]) -> Result<(), Error> {
+    fn declare_globals<'gc>(&self, a: &mut Agent<'gc, '_>, f: &Frame, env: Option<JsEnv<'gc>>, decls: &[j8bytecode::GlobalDeclaration]) -> Result<(), Error> {
         for d in decls {
             let name = &*d.name;
             if Self::script_slot(a, name).is_some() {
@@ -974,7 +1047,7 @@ impl Executor {
             let global = a.realm.global;
             let existing = global.borrow().get_own(name);
             let value = d.function.map(|n| {
-                let closure = Closure::new(FuncId(base + n), f.env);
+                let closure = Closure::new(FuncId(base + n), env);
                 Value::Object(self.function_object(a, closure))
             });
             let fresh = Property { slot: Slot::Data(value.unwrap_or_default()), enumerable: true, writable: true, configurable: false };
@@ -1024,7 +1097,7 @@ impl Executor {
         let this = Value::Object(a.realm.global);
         let mut regs = Vec::new();
         let f = self.open(a, &mut regs, Closure::new(main, env), Value::Undefined, this, &[]);
-        Ok(State::new(regs, f))
+        Ok(self.state(regs, f))
     }
 
     /// Runs script `main` (`this` is the global object).
@@ -1037,22 +1110,19 @@ impl Executor {
     /// throwing instruction, the innermost such range); `false` once all frames are popped.
     fn unwind<'gc>(&self, st: &mut State<'gc>, v: Value<'gc>) -> bool {
         loop {
-            let loaded = self.function(st.f.func);
-            let at = loaded.insns.get(st.f.insn).map_or(u32::MAX, |d| d.start);
+            let loaded = self.function(st.f().func);
+            let at = loaded.insns.get(st.f().insn).map_or(u32::MAX, |d| d.start);
             let h = loaded.func.bytecode.handlers.iter().filter(|h| h.start <= at && at < h.end).min_by_key(|h| h.end - h.start).copied();
             if let Some(h) = h {
-                let ctx = Self::reg(&st.regs, &st.f, OperandValue::from(h.context));
-                st.f.env = ctx.as_context();
-                st.f.pc = loaded.index_of(h.handler as usize);
+                let ctx = Self::reg(&st.regs, st.f(), OperandValue::from(h.context));
+                let f = *st.f();
+                f.set_env(&mut st.regs, ctx.as_context());
+                st.f_mut().pc = loaded.index_of(h.handler as usize);
                 st.acc = v;
                 return true;
             }
-            match st.frames.pop() {
-                Some(caller) => {
-                    st.regs.truncate(st.f.params);
-                    st.f = caller;
-                }
-                None => return false,
+            if !st.pop_frame() {
+                return false;
             }
         }
     }
@@ -1064,9 +1134,9 @@ impl Executor {
         let mut b = Budget::new(a.stop, *budget);
         let r = loop {
             match self.run(a, &mut st, base, &mut b) {
-                Ok(Some(v)) => break Ok(v),
+                Ok(Some(v)) => break Ok(Some(v)),
                 Ok(None) if b.terminated => break Err(Error::Terminated),
-                Ok(None) => break Ok(Outcome::Paused(Box::new(st))),
+                Ok(None) => break Ok(None),
                 Err(Error::Exception(g)) => {
                     let v = a.local(&g);
                     if !self.unwind(&mut st, v) {
@@ -1074,6 +1144,14 @@ impl Executor {
                     }
                 }
                 Err(e) => break Err(e),
+            }
+        };
+        let r = match r {
+            // Paused: the state carries on in the next slice
+            Ok(None) => Ok(Outcome::Paused(Box::new(st))),
+            r => {
+                self.recycle(a, st);
+                r.map(|v| v.expect("an outcome"))
             }
         };
         *budget = b.remaining();
@@ -1088,7 +1166,7 @@ impl Executor {
             if budget.spent() {
                 return Ok(None);
             }
-            let loaded = self.function(st.f.func);
+            let loaded = self.function(st.f().func);
             let mut cx = threaded::Cx { exe: self, a, st, loaded, budget, depth };
             match Self::threaded(&mut cx) {
                 threaded::Exit::Frame => {}
@@ -1101,9 +1179,9 @@ impl Executor {
     }
 
     /// Enters a frame for a call from the current one (the caller resumes at its next instruction)
-    fn push_frame<'gc>(st: &mut State<'gc>, next: Frame<'gc>) {
-        let caller = core::mem::replace(&mut st.f, next);
-        st.frames.push(caller);
+    #[inline]
+    fn push_frame<'gc>(st: &mut State<'gc>, next: Frame) {
+        st.frames.push(next);
     }
 
     /// A call from bytecode: a JS closure gets a frame, host functions run here
@@ -1185,7 +1263,8 @@ impl Executor {
     #[expect(clippy::too_many_lines, reason = "one arm per bytecode")]
     fn step<'gc>(&self, a: &mut Agent<'gc, '_>, st: &mut State<'gc>, loaded: &Loaded, d: &Insn, level: usize, budget: &mut Budget<'_>) -> Result<Flow<'gc>, Error> {
         let o = &d.operands;
-        let State { regs, f, acc, message, .. } = st;
+        let State { regs, frames, acc, message } = st;
+        let f = frames.last_mut().expect("a running frame");
         macro_rules! r {
             ($i:expr) => {
                 Self::reg(regs, f, o[$i])
@@ -1257,7 +1336,7 @@ impl Executor {
                 Self::global_store(a, &loaded.globals[slot], name, *acc, strict_slot || strict)?;
             }
             B::LdaCurrentContextSlot | B::LdaCurrentContextSlotNoCell | B::LdaImmutableCurrentContextSlot => {
-                let e = f.env.ok_or_else(|| a.throw(ErrorKind::Reference, "no context"))?;
+                let e = f.env(regs).ok_or_else(|| a.throw(ErrorKind::Reference, "no context"))?;
                 *acc = e.load(Self::env_index(o[0]));
             }
             B::LdaContextSlot | B::LdaContextSlotNoCell | B::LdaImmutableContextSlot => {
@@ -1265,7 +1344,7 @@ impl Executor {
                 *acc = e.load(Self::env_index(o[1]));
             }
             B::StaCurrentContextSlot | B::StaCurrentContextSlotNoCell => {
-                let e = f.env.ok_or_else(|| a.throw(ErrorKind::Reference, "no context"))?;
+                let e = f.env(regs).ok_or_else(|| a.throw(ErrorKind::Reference, "no context"))?;
                 Env::set(e, a.mc, Self::env_index(o[0]), *acc);
             }
             B::StaContextSlot | B::StaContextSlotNoCell => {
@@ -1273,41 +1352,44 @@ impl Executor {
                 Env::set(e, a.mc, Self::env_index(o[1]), *acc);
             }
             B::PushContext => {
-                let cur = f.env.map_or(Value::Undefined, Value::context);
+                let cur = f.env(regs).map_or(Value::Undefined, Value::context);
                 Self::set_reg(regs, f, o[0], cur);
-                f.env = acc.as_context();
+                f.set_env(regs, acc.as_context());
             }
-            B::PopContext => f.env = r!(0).as_context(),
+            B::PopContext => {
+                let e = r!(0).as_context();
+                f.set_env(regs, e);
+            }
             B::CreateFunctionContext | B::CreateEvalContext => {
                 let shape = loaded.shapes[usize::try_from(o[0]).unwrap_or(0)].clone();
                 let n = usize::try_from(o[1]).unwrap_or(0);
                 let extension = loaded.extension.then(|| ObjectData::default().alloc(a.mc));
-                *acc = Value::context(Env::context(n, Value::Undefined, f.env, shape, extension).alloc(a.mc));
+                *acc = Value::context(Env::context(n, Value::Undefined, f.env(regs), shape, extension).alloc(a.mc));
             }
             B::CreateBlockContext => {
                 let shape = loaded.shapes[usize::try_from(o[0]).unwrap_or(0)].clone();
                 let n = shape.as_ref().map_or(0, |s| s.names.len());
-                *acc = Value::context(Env::context(n, Value::Undefined, f.env, shape, None).alloc(a.mc));
+                *acc = Value::context(Env::context(n, Value::Undefined, f.env(regs), shape, None).alloc(a.mc));
             }
             B::CreateCatchContext => {
                 let shape = loaded.shapes[usize::try_from(o[1]).unwrap_or(0)].clone();
-                let e = Env::context(1, r!(0), f.env, shape, None).alloc(a.mc);
+                let e = Env::context(1, r!(0), f.env(regs), shape, None).alloc(a.mc);
                 *acc = Value::context(e);
             }
             B::CreateWithContext => {
                 let obj = r!(0).as_object();
                 let shape = Some(Arc::new(ContextShape { kind: ContextKind::With, names: Box::new([]) }));
-                *acc = Value::context(Env::context(0, Value::Undefined, f.env, shape, obj).alloc(a.mc));
+                *acc = Value::context(Env::context(0, Value::Undefined, f.env(regs), shape, obj).alloc(a.mc));
             }
             B::LdaLookupSlot | B::LdaLookupSlotInsideTypeof | B::LdaLookupGlobalSlot | B::LdaLookupGlobalSlotInsideTypeof | B::LdaLookupContextSlot | B::LdaLookupContextSlotInsideTypeof | B::LdaLookupContextSlotNoCell | B::LdaLookupContextSlotNoCellInsideTypeof => {
                 let name = Self::name_at(loaded, o[0]);
                 let inside = matches!(d.bytecode, B::LdaLookupSlotInsideTypeof | B::LdaLookupGlobalSlotInsideTypeof | B::LdaLookupContextSlotInsideTypeof | B::LdaLookupContextSlotNoCellInsideTypeof);
-                *acc = Self::lookup_load(a, f.env, name, inside)?;
+                *acc = Self::lookup_load(a, f.env(regs), name, inside)?;
             }
             B::StaLookupSlot => {
                 let name = Self::name_at(loaded, o[0]);
                 let s = u8::try_from(o[1]).unwrap_or(0) & j8bytecode::StoreLookupSlotFlags::STRICT != 0;
-                Self::lookup_store(a, f.env, name, *acc, s)?;
+                Self::lookup_store(a, f.env(regs), name, *acc, s)?;
             }
             B::GetNamedProperty => {
                 let obj = r!(0);
@@ -1463,7 +1545,7 @@ impl Executor {
                 f.pc = d.target as usize;
                 if budget.spent() {
                     // Stop before the loop header, the state intact
-                    return Ok(Flow::Done(Outcome::Paused(Box::new(State { regs: core::mem::take(regs), frames: core::mem::take(&mut st.frames), f: Self::take_frame(f), acc: *acc, message: *message }))));
+                    return Ok(Flow::Done(Outcome::Paused(Box::new(State { regs: core::mem::take(regs), frames: core::mem::take(frames), acc: *acc, message: *message }))));
                 }
             }
             B::SwitchOnSmiNoFeedback => {
@@ -1531,7 +1613,7 @@ impl Executor {
             }
             B::CreateClosure => {
                 let Some(Constant::Function(n)) = loaded.func.bytecode.constants.get(usize::try_from(o[0]).unwrap_or(0)) else { unreachable!("a function constant") };
-                let closure = Closure::new(FuncId(loaded.base + n), f.env);
+                let closure = Closure::new(FuncId(loaded.base + n), f.env(regs));
                 *acc = self.function_object(a, closure).into();
             }
             B::CreateEmptyObjectLiteral => *acc = a.object().into(),
@@ -1604,9 +1686,9 @@ impl Executor {
             }
             B::CreateRestParameter => {
                 let formals = usize::from(loaded.func.formal_parameters);
-                *acc = a.array(f.args.get(formals..).unwrap_or(&[]).to_vec()).into();
+                *acc = a.array(f.args(regs).get(formals..).unwrap_or(&[]).to_vec()).into();
             }
-            B::CreateMappedArguments | B::CreateUnmappedArguments => *acc = self.arguments(a, f, loaded.func.strict || d.bytecode == B::CreateUnmappedArguments)?,
+            B::CreateMappedArguments | B::CreateUnmappedArguments => *acc = self.arguments(a, regs, f, loaded.func.strict || d.bytecode == B::CreateUnmappedArguments)?,
             B::GetIterator => *acc = a.iterator_object(r!(0))?,
             B::ForInEnumerate => {
                 let keys = a.for_in_keys(r!(0))?;
@@ -1678,7 +1760,7 @@ impl Executor {
             }
             B::ConstructForwardAllArgs => {
                 let callee = r!(0);
-                let args = f.args.to_vec();
+                let args = f.args(regs);
                 let nt = *acc;
                 return self.construct_from(a, st, callee, args, nt, level + 1);
             }
@@ -1696,7 +1778,7 @@ impl Executor {
                 // A call falls through; a resumption continues at its resume point, in the saved context
                 if let Some(co) = r!(0).as_object() {
                     let (continuation, context) = Self::coroutine(co, |c| (c.frame.continuation, c.frame.context));
-                    f.env = context;
+                    f.set_env(regs, context);
                     if let Some(Constant::Offset(off)) = loaded.func.bytecode.constants.get(usize::try_from(o[1] + i64::from(continuation)).unwrap_or(usize::MAX)) {
                         f.pc = loaded.index_of(d.start as usize + *off as usize);
                     }
@@ -1707,8 +1789,8 @@ impl Executor {
                 let first = Self::slot_of(f, o[1]).unwrap_or(regs.len());
                 let count = usize::try_from(o[2]).unwrap_or(0);
                 let saved = regs[first..first + count].to_vec();
-                let params = regs[f.params..f.base].to_vec();
-                let context = f.env;
+                let params = regs[f.params..f.base - Frame::HEADER].to_vec();
+                let context = f.env(regs);
                 let continuation = u32::try_from(o[3]).unwrap_or(0);
                 Self::coroutine_mut(a, co, |c| {
                     c.frame.params = params;
@@ -1718,14 +1800,11 @@ impl Executor {
                     c.state = j8framework::CoroutineState::Suspended;
                 });
                 let v = *acc;
-                return Ok(match st.frames.pop() {
-                    Some(caller) => {
-                        st.regs.truncate(st.f.params);
-                        st.f = caller;
-                        st.acc = v;
-                        Flow::Frame
-                    }
-                    None => Flow::Done(Outcome::Return(v)),
+                return Ok(if st.pop_frame() {
+                    st.acc = v;
+                    Flow::Frame
+                } else {
+                    Flow::Done(Outcome::Return(v))
                 });
             }
             B::ResumeGenerator => {
@@ -1737,27 +1816,19 @@ impl Executor {
             }
             B::Return => {
                 let mut v = *acc;
-                if f.new_target != Value::Undefined {
-                    v = self.construct_result(a, f, v)?;
+                if f.slot(regs, Frame::NEW_TARGET) != Value::Undefined {
+                    v = self.construct_result(a, regs, f, v)?;
                 }
-                return Ok(match st.frames.pop() {
-                    Some(caller) => {
-                        st.regs.truncate(st.f.params);
-                        st.f = caller;
-                        st.acc = v;
-                        Flow::Frame
-                    }
-                    None => Flow::Done(Outcome::Return(v)),
+                return Ok(if st.pop_frame() {
+                    st.acc = v;
+                    Flow::Frame
+                } else {
+                    Flow::Done(Outcome::Return(v))
                 });
             }
             b => return Err(a.throw(ErrorKind::Syntax, &alloc::format!("bytecode {b:?} is not supported by the executor yet"))),
         }
         Ok(Flow::Next)
-    }
-
-    /// Takes the frame out (for a paused state)
-    fn take_frame<'gc>(f: &mut Frame<'gc>) -> Frame<'gc> {
-        core::mem::replace(f, Frame { func: f.func, pc: f.pc, insn: f.insn, params: f.params, base: f.base, env: f.env, closure: f.closure, new_target: f.new_target, new_this: f.new_this, args: Few::default(), argc: f.argc })
     }
 
     /// The operator of an arithmetic bytecode
@@ -1785,14 +1856,15 @@ impl Executor {
     }
 
     /// The frame's arguments object (unmapped: all arguments as index properties; `length`, `callee`, `@@iterator`)
-    fn arguments<'gc>(&self, a: &mut Agent<'gc, '_>, f: &Frame<'gc>, strict: bool) -> Result<Value<'gc>, Error> {
+    fn arguments<'gc>(&self, a: &mut Agent<'gc, '_>, regs: &[Value<'gc>], f: &Frame, strict: bool) -> Result<Value<'gc>, Error> {
+        let args = f.args(regs);
         let o = ObjectData { kind: ObjectKind::Arguments(None), proto: Some(a.realm.object_proto), ..ObjectData::default() }.alloc(a.mc);
         let hidden = |v: Value<'gc>| Property { slot: Slot::Data(v), enumerable: false, writable: true, configurable: true };
-        for (i, &v) in f.args.iter().enumerate() {
+        for (i, &v) in args.iter().enumerate() {
             let k = alloc::string::String::from(ryu_js::Buffer::new().format(f64::from(u32::try_from(i).unwrap_or(u32::MAX))));
             o.borrow_mut(a.mc).define(&k, Property::data(v));
         }
-        let len = f64::from(u32::try_from(f.args.len()).unwrap_or(u32::MAX));
+        let len = f64::from(u32::try_from(args.len()).unwrap_or(u32::MAX));
         let values = a.get_symbol(Value::Object(a.realm.array_proto), a.realm.symbols.iterator, Value::Undefined)?;
         let mut dd = o.borrow_mut(a.mc);
         dd.define("length", hidden(len.into()));
@@ -1800,7 +1872,7 @@ impl Executor {
             let thrower = a.realm.named_native(a.mc, Self::throw_type_error, "", 0);
             dd.define("callee", Property { slot: Slot::Accessor { get: Some(thrower), set: Some(thrower) }, enumerable: false, writable: false, configurable: false });
         } else {
-            dd.define("callee", hidden(f.closure));
+            dd.define("callee", hidden(f.slot(regs, Frame::CLOSURE)));
         }
         dd.define_symbol(a.realm.symbols.iterator, hidden(values));
         drop(dd);
@@ -1982,17 +2054,17 @@ impl Executor {
                     Constant::Declarations(d) => Some(d.clone()),
                     _ => None,
                 }).unwrap_or_default();
-                self.declare_globals(a, &st.f, &decls)?;
+                self.declare_globals(a, st.f(), st.f().env(&st.regs), &decls)?;
                 Ok(Value::Undefined)
             }
             Runtime::DeclareEvalVar => {
                 let name = text(a, arg(0))?;
-                Self::declare_eval(a, st.f.env, &name, None)?;
+                Self::declare_eval(a, st.f().env(&st.regs), &name, None)?;
                 Ok(Value::Undefined)
             }
             Runtime::DeclareEvalFunction => {
                 let name = text(a, arg(0))?;
-                Self::declare_eval(a, st.f.env, &name, Some(arg(1)))?;
+                Self::declare_eval(a, st.f().env(&st.regs), &name, Some(arg(1)))?;
                 Ok(Value::Undefined)
             }
             Runtime::ThrowConstAssignError => Err(a.throw(ErrorKind::Type, "Assignment to constant variable.")),
@@ -2051,12 +2123,12 @@ impl Executor {
                     Err(e) => return Err(e),
                 };
                 let main = self.load(module);
-                let closure = Closure::new(main, st.f.env);
+                let closure = Closure::new(main, st.f().env(&st.regs));
                 Ok(self.function_object(a, closure).into())
             }
             Runtime::DeleteLookupSlot => {
                 let name = text(a, arg(0))?;
-                Ok(Value::Bool(match Self::lookup(a, st.f.env, &name)? {
+                Ok(Value::Bool(match Self::lookup(a, st.f().env(&st.regs), &name)? {
                     Found::Slot(..) => false,
                     Found::Object(o) => a.delete(Value::Object(o), &name)?,
                     Found::Nothing => true,
@@ -2088,10 +2160,27 @@ impl Executor {
         }
     }
 
+    /// A new execution state entering frame `f`, on a frame stack from the spares
+    fn state<'gc>(&self, regs: Vec<Value<'gc>>, f: Frame) -> State<'gc> {
+        let frames = self.spare_frames.borrow_mut().pop().unwrap_or_else(|| Vec::with_capacity(FRAMES_RESERVED));
+        State::new(regs, frames, f)
+    }
+
+    /// A finished execution's frame stack and register file go back to the spares
+    fn recycle<'gc>(&self, a: &mut Agent<'gc, '_>, st: State<'gc>) {
+        let State { regs, mut frames, .. } = st;
+        a.give_regs(regs);
+        frames.clear();
+        let mut spare = self.spare_frames.borrow_mut();
+        if spare.len() < SPARE_FRAMES {
+            spare.push(frames);
+        }
+    }
+
     /// Runs one frame to return in a fresh execution state.
-    fn run_frame<'gc>(&self, a: &mut Agent<'gc, '_>, regs: Vec<Value<'gc>>, f: Frame<'gc>, level: usize) -> Result<Value<'gc>, Error> {
+    fn run_frame<'gc>(&self, a: &mut Agent<'gc, '_>, regs: Vec<Value<'gc>>, f: Frame, level: usize) -> Result<Value<'gc>, Error> {
         let saved = self.depth.replace(level);
-        let r = self.execute(a, State::new(regs, f), &mut None).map(Outcome::returned);
+        let r = self.execute(a, self.state(regs, f), &mut None).map(Outcome::returned);
         self.depth.set(saved);
         r
     }
