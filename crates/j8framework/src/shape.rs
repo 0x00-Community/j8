@@ -7,7 +7,6 @@
 //! are freed naturally. Deleting a property, changing attributes, or having too many keys turns the object's properties
 //! into a dictionary ([`Dict`], modified in place); inline caches don't accept it.
 use alloc::sync::Arc;
-use core::sync::atomic::{AtomicPtr, AtomicU32, Ordering};
 use alloc::vec::Vec;
 use core::hash::BuildHasherDefault;
 
@@ -17,7 +16,7 @@ use crate::Collect;
 use rustc_hash::FxHasher;
 
 use crate::store::Store;
-use crate::{Erased, Gc, GcCell, GcSlot, Mutation, Property, SmallStr, Slot, Value, ValueCell};
+use crate::{Erased, Gc, GcCell, GcSlot, IsoCell, Mutation, Property, SmallStr, Slot, Value, ValueCell};
 
 /// Up to this many keys, search linearly; beyond that, build an index once the shape is searched often
 const LINEAR: usize = 8;
@@ -73,19 +72,19 @@ pub struct Shape {
     /// Built on demand (see [`INDEX_AFTER`]), once
     index: OnceBox<hashbrown::HashMap<SmallStr, u32, BuildHasherDefault<FxHasher>>>,
     /// Linear searches so far (for a shape beyond [`LINEAR`] keys without an index)
-    searches: AtomicU32,
+    searches: IsoCell<u32>,
     /// Child shapes reached by adding a key (with attributes), held strongly: a whole tree lives as long as its root
     /// (the root a prototype object hands out, or the anchor of an object that has none), so objects can point at
     /// their shape without counting references
     transitions: Chain<(SmallStr, Attrs, Arc<Shape>)>,
     /// The root of this shape's tree (children inherit it): telling whether a shape belongs to a given tree is one
     /// compare. Set right after the root is allocated ([`Shape::rooted`])
-    tree: AtomicPtr<Shape>,
+    tree: IsoCell<*const Shape>,
 }
 
 impl Shape {
     fn new(keys: Arc<Prefix<(SmallStr, Attrs)>>, len: usize) -> Self {
-        Self { keys, len, index: OnceBox::default(), searches: AtomicU32::new(0), transitions: Chain::default(), tree: AtomicPtr::new(core::ptr::null_mut()) }
+        Self { keys, len, index: OnceBox::default(), searches: IsoCell::new(0), transitions: Chain::default(), tree: IsoCell::new(core::ptr::null()) }
     }
 
     /// Its keys and attributes, in order
@@ -105,7 +104,11 @@ impl Shape {
         if let Some(m) = self.index.get() {
             return m.get(key).map(|&i| i as usize);
         }
-        if self.len > LINEAR && self.searches.fetch_add(1, Ordering::Relaxed) >= INDEX_AFTER {
+        if self.len > LINEAR && {
+            let n = self.searches.get();
+            self.searches.set(n.saturating_add(1));
+            n >= INDEX_AFTER
+        } {
             let m = self.index.get_or_init(|| self.keys().iter().zip(0u32..).map(|((k, _), i)| (k.clone(), i)).collect());
             return m.get(key).map(|&i| i as usize);
         }
@@ -122,14 +125,14 @@ impl Shape {
 
     /// Whether `to` is this shape's child by a transition (so this shape's tree holds it)
     fn has_child(&self, to: &Shape) -> bool {
-        to.len() == self.len() + 1 && to.tree.load(Ordering::Relaxed) == self.tree.load(Ordering::Relaxed)
+        to.len() == self.len() + 1 && to.tree.get() == self.tree.get()
     }
 
     /// A new tree root (it is its own tree)
     fn rooted(keys: Vec<(SmallStr, Attrs)>) -> Arc<Self> {
         let len = keys.len();
         let s = Arc::new(Self::new(Prefix::new(keys), len));
-        s.tree.store(Arc::as_ptr(&s).cast_mut(), Ordering::Relaxed);
+        s.tree.set(Arc::as_ptr(&s));
         s
     }
 
@@ -140,7 +143,7 @@ impl Shape {
         }
         // The key goes at the end of the shared key table when this shape is its tip, or into a copy of this shape's keys
         let keys = self.keys.extend(self.len, (SmallStr::from(key), attrs));
-        let child = Arc::new(Self { tree: AtomicPtr::new(self.tree.load(Ordering::Relaxed)), ..Self::new(keys, self.len + 1) });
+        let child = Arc::new(Self { tree: IsoCell::new(self.tree.get()), ..Self::new(keys, self.len + 1) });
         &self.transitions.push((SmallStr::from(key), attrs, child)).2
     }
 
@@ -191,7 +194,7 @@ pub struct Props<'gc> {
     /// The current shape; null when empty or a dictionary. It owns no count: it lives in a tree held by `anchor`, or by
     /// the root shape of the prototype the object had when it got its first key (an object keeps its prototype alive;
     /// changing the prototype anchors the tree here)
-    shape: AtomicPtr<Shape>,
+    shape: IsoCell<*const Shape>,
     store: GcSlot<'gc, Erased>,
     dict: GcSlot<'gc, GcCell<'gc, Dict<'gc>>>,
     anchor: GcSlot<'gc, Anchor>,
@@ -202,7 +205,7 @@ pub struct Props<'gc> {
 impl Default for Props<'_> {
     fn default() -> Self {
         Self {
-            shape: AtomicPtr::new(core::ptr::null_mut()),
+            shape: IsoCell::new(core::ptr::null()),
             store: GcSlot::default(),
             dict: GcSlot::default(),
             anchor: GcSlot::default(),
@@ -258,7 +261,7 @@ impl<'gc> Props<'gc> {
     pub fn shape_ref(&self) -> Option<&'gc Shape> {
         // SAFETY: the shape's tree outlives this object's use of it (see `Props::shape`); `'gc` is bounded by this
         // mutate, during which the object (and so its prototype or anchor) is alive
-        unsafe { self.shape.load(Ordering::Acquire).as_ref() }
+        unsafe { self.shape.get().as_ref() }
     }
 
     /// The current shape's address (inline caches identify shapes by it); `None` when empty or a dictionary
@@ -384,9 +387,8 @@ impl<'gc> Props<'gc> {
     fn with_dict(&self, mc: &Mutation<'gc>, f: impl FnOnce(&mut Dict<'gc>)) {
         if self.dict.get().is_none() {
             let d = mc.alloc(GcCell::new(mc, self.to_dict()));
-            // A racing converter may win; then its dictionary is the one
-            let _ = self.dict.compare_exchange(mc.mutator(), None, Some(d));
-            self.shape.store(core::ptr::null_mut(), Ordering::Release);
+            self.dict.set(mc.mutator(), Some(d));
+            self.shape.set(core::ptr::null());
         }
         f(&mut self.dict_cell().expect("just converted").borrow_mut(mc));
     }
@@ -406,8 +408,12 @@ impl<'gc> Props<'gc> {
                 }
             }
         }
-        let from = from.map_or(core::ptr::null_mut(), |f| core::ptr::from_ref(f).cast_mut());
-        self.shape.compare_exchange(from, core::ptr::from_ref(to).cast_mut(), Ordering::AcqRel, Ordering::Acquire).is_ok()
+        let from = from.map_or(core::ptr::null(), core::ptr::from_ref);
+        if self.shape.get() != from {
+            return false;
+        }
+        self.shape.set(core::ptr::from_ref(to));
+        true
     }
 
     /// Keep `tree` alive from here (no prototype root holds it)

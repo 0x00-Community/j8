@@ -4,7 +4,6 @@ use alloc::vec::Vec;
 use core::fmt;
 
 use core::ops::{Deref, DerefMut};
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 
 use crate::{CellMut, CellRef, Collect, Gc, GcCell, GcSlot, Mutation, ValueCell};
 
@@ -833,11 +832,11 @@ impl<'gc> ObjectData<'gc> {
             call: GcSlot::default(),
             props: crate::Props::with_capacity(mc, capacity),
             elements: crate::ValueArray::default(),
-            class: AtomicU8::new(Class::ORDINARY | Class::PLAIN | Class::UNIT_ORDINARY),
-            non_extensible: AtomicBool::new(false),
-            length_readonly: AtomicBool::new(false),
-            digit_keys: AtomicBool::new(false),
-            sparse_length: AtomicU32::new(0),
+            class: crate::IsoCell::new(Class::ORDINARY | Class::PLAIN | Class::UNIT_ORDINARY),
+            non_extensible: crate::IsoCell::new(false),
+            length_readonly: crate::IsoCell::new(false),
+            digit_keys: crate::IsoCell::new(false),
+            sparse_length: crate::IsoCell::new(0),
             shape_root: j8lockfree::OnceBox::default(),
             data: GcCell::empty(),
         })
@@ -854,11 +853,11 @@ impl<'gc> ObjectData<'gc> {
             call: GcSlot::from(call),
             props: crate::Props::with_capacity(mc, capacity),
             elements: crate::ValueArray::default(),
-            class: AtomicU8::new(class),
-            non_extensible: AtomicBool::new(non_extensible),
-            length_readonly: AtomicBool::new(length_readonly),
-            digit_keys: AtomicBool::new(false),
-            sparse_length: AtomicU32::new(sparse_length),
+            class: crate::IsoCell::new(class),
+            non_extensible: crate::IsoCell::new(non_extensible),
+            length_readonly: crate::IsoCell::new(length_readonly),
+            digit_keys: crate::IsoCell::new(false),
+            sparse_length: crate::IsoCell::new(sparse_length),
             shape_root: j8lockfree::OnceBox::default(),
             data: if unit.is_some() { GcCell::empty() } else { GcCell::new(mc, state) },
         });
@@ -1015,7 +1014,7 @@ pub struct Object<'gc> {
     props: crate::Props<'gc>,
     elements: crate::ValueArray<'gc>,
     /// [`Class`] bits
-    class: AtomicU8,
+    class: crate::IsoCell<u8>,
     /// Not extensible (`Object.preventExtensions` / `seal` / `freeze`)
     #[mutable]
     non_extensible: bool,
@@ -1107,7 +1106,7 @@ impl Drop for ObjMut<'_, '_> {
         if let Some(d) = self.data.take() {
             // The state now has a snapshot: no unit bits
             let wide = self.obj.class() & Class::WIDE;
-            self.obj.class.store(Class::of(&d.kind) | wide | if d.symbols.is_empty() { 0 } else { Class::SYMBOLS }, Ordering::Release);
+            self.obj.class.set(Class::of(&d.kind) | wide | if d.symbols.is_empty() { 0 } else { Class::SYMBOLS });
             let call = Object::call_of(self.mc, &d.kind);
             drop(d);
             if call.is_some() || self.obj.call.get().is_some() {
@@ -1194,15 +1193,15 @@ impl<'gc> ObjMut<'_, 'gc> {
     }
 
     pub fn set_non_extensible(&self, v: bool) {
-        self.obj.non_extensible.store(v, Ordering::Release);
+        self.obj.non_extensible.set(v);
     }
 
     pub fn set_length_readonly(&self, v: bool) {
-        self.obj.length_readonly.store(v, Ordering::Release);
+        self.obj.length_readonly.set(v);
     }
 
     pub fn set_sparse_length(&self, v: u32) {
-        self.obj.sparse_length.store(v, Ordering::Release);
+        self.obj.sparse_length.set(v);
     }
 
     pub fn write_index(&self, i: u32, value: Value<'gc>) -> bool {
@@ -1370,7 +1369,7 @@ impl<'gc> Object<'gc> {
     }
 
     fn class(&self) -> u8 {
-        self.class.load(Ordering::Acquire)
+        self.class.get()
     }
 
     #[inline]
@@ -1397,7 +1396,7 @@ impl<'gc> Object<'gc> {
     }
 
     fn raise_sparse_length(&self, n: u32) {
-        self.sparse_length.fetch_max(n, Ordering::AcqRel);
+        self.sparse_length.set(self.sparse_length.get().max(n));
     }
 
     /// Array length; `None` if not an array.
@@ -1515,7 +1514,7 @@ impl<'gc> Object<'gc> {
         if self.sparse_length() > 0 {
             self.props.retain(mc, |k| crate::ops::index_of_str(k).is_none_or(|i| i < n));
         }
-        self.sparse_length.store(if len > dense { n } else { 0 }, Ordering::Release);
+        self.sparse_length.set(if len > dense { n } else { 0 });
     }
 
     /// Own string-keyed property (the array dense part or an ordinary property)
@@ -1611,7 +1610,7 @@ impl<'gc> Object<'gc> {
     /// Append an entry (the shape follows the transition table).
     fn push_prop(&self, mc: &Mutation<'gc>, key: &str, prop: Property<'gc>) {
         if key.as_bytes().first().is_some_and(u8::is_ascii_digit) {
-            self.digit_keys.store(true, Ordering::Release);
+            self.digit_keys.set(true);
         }
         let proto = self.proto();
         self.props.push(mc, key, prop, self.class() & Class::WIDE != 0, || proto.map(|p| p.get().root_shape_ref()));
@@ -1620,7 +1619,7 @@ impl<'gc> Object<'gc> {
     /// Keeps the string-keyed properties in fast mode however many get added (the global object, the script scope:
     /// global name caches key on their shapes)
     pub fn widen(&self) {
-        self.class.fetch_or(Class::WIDE, Ordering::AcqRel);
+        self.class.set(self.class.get() | Class::WIDE);
     }
 
     /// The empty shape that objects with this object as prototype start from (created if absent)
@@ -1640,7 +1639,7 @@ impl<'gc> Object<'gc> {
     /// Append an entry, switching the shape directly to `to` (from the execution layer's inline cache)
     pub fn push_to(&self, mc: &Mutation<'gc>, to: &alloc::sync::Arc<crate::Shape>, slot: Slot<'gc>) {
         if to.key(to.len() - 1).as_bytes().first().is_some_and(u8::is_ascii_digit) {
-            self.digit_keys.store(true, Ordering::Release);
+            self.digit_keys.set(true);
         }
         let proto = self.proto();
         self.props.push_to(mc, to, slot, || proto.map(|p| p.get().root_shape_ref()));

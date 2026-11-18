@@ -3,11 +3,10 @@
 //! - 叶子 [`Leaf<N>`]：`N` 个 [`ValueCell`]（`N` = 2 / 4 / … / 128），头一个字是容量
 //! - 内部节点 [`Node`]：128 个子槽（树里的叶子都是 128 格），头一个字是 [`NODE`] + 层数
 //!
-//! 全部 `#[repr(C)]`：不管 `N` 多大，格子都从头字之后开始，抹掉类型后也能按下标找到。读是一串原子读，不借用、不加锁；
-//! 写经 [`ValueCell::set`] 走写屏障。根换新（扩容）用比较交换，并发扩容输的一方重来。
-use core::sync::atomic::{AtomicU32, Ordering};
+//! 全部 `#[repr(C)]`：不管 `N` 多大，格子都从头字之后开始，抹掉类型后也能按下标找到。读不借用、不加锁；
+//! 写经 [`ValueCell::set`] 走写屏障。根换新（扩容）直接换（isolate 内单线程，见 [`IsoCell`](crate::IsoCell)）。
 
-use crate::{Collect, Erased, Gc, GcSlot, Mutation, Value, ValueCell, erase};
+use crate::{Collect, Erased, Gc, GcSlot, IsoCell, Mutation, Value, ValueCell, erase};
 
 /// 每个内部节点的子节点数 / 树里每片叶子的格数
 const FAN: usize = 128;
@@ -127,11 +126,8 @@ impl<'gc> Store<'gc> {
                 Some(k) => Self(k),
                 None => {
                     let fresh = if level == 1 { Self::leaf(mc, FAN, &[]) } else { Self::node(mc, level - 1, None) };
-                    match slot.compare_exchange(mc.mutator(), None, Some(fresh.0)) {
-                        Ok(_) => fresh,
-                        Err(Some(won)) => Self(won),
-                        Err(None) => unreachable!("a failed compare-exchange from None sees Some"),
-                    }
+                    slot.set(mc.mutator(), Some(fresh.0));
+                    fresh
                 }
             };
         }
@@ -211,10 +207,10 @@ impl<'gc> Store<'gc> {
     }
 }
 
-/// 可增长的值数组（数组的稠密部分）：长度 + 存储根，都是原子的。
+/// 可增长的值数组（数组的稠密部分）：长度 + 存储根。
 #[derive(Default)]
 pub struct ValueArray<'gc> {
-    len: AtomicU32,
+    len: IsoCell<u32>,
     root: GcSlot<'gc, Erased>,
 }
 
@@ -231,7 +227,7 @@ unsafe impl crate::Trace for ValueArray<'_> {
 
 impl<'gc> ValueArray<'gc> {
     pub fn len(&self) -> usize {
-        self.len.load(Ordering::Acquire) as usize
+        self.len.get() as usize
     }
 
     pub fn is_empty(&self) -> bool {
@@ -260,26 +256,22 @@ impl<'gc> ValueArray<'gc> {
 
     /// 容量至少 `need` 的存储（扩容就换根）
     fn reserve(&self, mc: &Mutation<'gc>, need: usize) -> Store<'gc> {
-        loop {
-            let cur = self.root.get();
-            let s = match cur {
-                Some(g) => Store(g),
-                None => Store::leaf(mc, need, &[]),
-            };
-            let grown = s.grown(mc, need, self.len());
-            if cur.is_some_and(|c| Gc::ptr_eq(c, grown.0)) {
-                return grown;
-            }
-            if self.root.compare_exchange(mc.mutator(), cur, Some(grown.0)).is_ok() {
-                return grown;
-            }
+        let cur = self.root.get();
+        let s = match cur {
+            Some(g) => Store(g),
+            None => Store::leaf(mc, need, &[]),
+        };
+        let grown = s.grown(mc, need, self.len());
+        if cur.is_none_or(|c| !Gc::ptr_eq(c, grown.0)) {
+            self.root.set(mc.mutator(), Some(grown.0));
         }
+        grown
     }
 
     pub fn push(&self, mc: &Mutation<'gc>, v: Value<'gc>) {
         let i = self.len();
         self.reserve(mc, i + 1).cell_mut(mc, i).set(mc, v);
-        self.len.store(u32::try_from(i + 1).expect("array length fits u32"), Ordering::Release);
+        self.len.set(u32::try_from(i + 1).expect("array length fits u32"));
     }
 
     /// 第 `from` 到 `to` 个（不含）都设成 `v`，长度不够就接长到 `to`（`from` ≤ 长度）：一片叶子走一次树
@@ -307,7 +299,7 @@ impl<'gc> ValueArray<'gc> {
             i += k;
         }
         if to > n {
-            self.len.store(u32::try_from(to).expect("array length fits u32"), Ordering::Release);
+            self.len.set(u32::try_from(to).expect("array length fits u32"));
         }
     }
 
@@ -324,7 +316,7 @@ impl<'gc> ValueArray<'gc> {
         if n >= old {
             return;
         }
-        self.len.store(u32::try_from(n).expect("array length fits u32"), Ordering::Release);
+        self.len.set(u32::try_from(n).expect("array length fits u32"));
         if let Some(s) = self.store() {
             for i in n..old {
                 if let Some(c) = s.cell(i) {
@@ -346,7 +338,7 @@ impl<'gc> ValueArray<'gc> {
             s.cell_mut(mc, k + 1).set(mc, s.cell(k).map_or(Value::Undefined, ValueCell::get));
         }
         s.cell_mut(mc, i).set(mc, v);
-        self.len.store(u32::try_from(n + 1).expect("array length fits u32"), Ordering::Release);
+        self.len.set(u32::try_from(n + 1).expect("array length fits u32"));
     }
 
     /// 删掉第 `i` 个（后面的往前挪）
@@ -366,7 +358,7 @@ impl<'gc> ValueArray<'gc> {
     pub fn replace(&self, mc: &Mutation<'gc>, values: &[Value<'gc>]) {
         let fresh = Store::from_values(mc, values);
         self.root.set(mc.mutator(), fresh.map(Store::gc));
-        self.len.store(u32::try_from(values.len()).expect("array length fits u32"), Ordering::Release);
+        self.len.set(u32::try_from(values.len()).expect("array length fits u32"));
     }
 
     pub fn to_vec(&self) -> alloc::vec::Vec<Value<'gc>> {
