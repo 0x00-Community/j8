@@ -6,4 +6,4 @@ extern crate alloc;
 
 mod v8;
 
-pub use v8::{Bytecode, BytecodeError, Decoded, Decoder, Encoder, ImplicitRegisterUse, OperandScale, OperandSize, OperandType, OperandTypeInfo, OperandValue, Register};
+pub use v8::{Bytecode, BytecodeError, Decoded, Decoder, Encoder, ImplicitRegisterUse, Intrinsic, OperandScale, OperandSize, OperandType, OperandTypeInfo, OperandValue, Register, Runtime};

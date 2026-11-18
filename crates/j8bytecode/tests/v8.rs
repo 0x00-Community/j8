@@ -1,7 +1,7 @@
 //! j8bytecode decodes V8's own output the same way: `v8-15.2.124.txt` is `--print-bytecode` from V8 15.2.124 (rusty_v8
 //! 152.2.0) for the benchv8 scripts plus generators / async / classes / `with` / labels (addresses blanked), one
 //! instruction per line: its bytes in hex, then V8's name and operands.
-use j8bytecode::{Decoder, Register};
+use j8bytecode::{Bytecode, Decoder, Intrinsic, Register, Runtime};
 
 /// The register V8 prints (`r3`, `a0`, `<this>`, `<context>`, `<closure>`; a list `r1-r3` by its first)
 fn printed_register(arg: &str) -> Option<Register> {
@@ -30,6 +30,19 @@ fn decodes_v8_output() {
         assert_eq!(format!("{:?}", d.bytecode), name, "{line}");
         assert_eq!(d.next, bytes.len(), "{line}");
         let args = words[n + 1..].join(" ");
+        // `CallRuntime [Name]` / `InvokeIntrinsic [_Name]`: the id names the same function
+        let first = args.split(']').next().unwrap_or("").trim_start_matches('[');
+        match d.bytecode {
+            Bytecode::CallRuntime | Bytecode::CallRuntimeForPair => {
+                let id = Runtime::from_u16(u16::try_from(d.operands[0]).expect("runtime id")).expect("runtime id");
+                assert_eq!(format!("{id:?}"), first, "{line}");
+            }
+            Bytecode::InvokeIntrinsic => {
+                let id = Intrinsic::from_u8(u8::try_from(d.operands[0]).expect("intrinsic id")).expect("intrinsic id");
+                assert_eq!(format!("{id:?}"), first.trim_start_matches('_'), "{line}");
+            }
+            _ => {}
+        }
         let printed = args.split(", ").filter_map(printed_register);
         let ours = d.bytecode.operand_types().iter().zip(&d.operands).filter(|(t, _)| t.is_register()).map(|(_, &v)| Register::from(i32::try_from(v).expect("register operand")));
         for (p, o) in printed.zip(ours) {

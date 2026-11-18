@@ -13,6 +13,23 @@ pub struct Tables {
     implicit_register_use: Vec<Use>,
     operand_types: Vec<Operand>,
     bytecodes: Vec<Code>,
+    runtime: Vec<RuntimeFn>,
+    intrinsics: Vec<IntrinsicFn>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RuntimeFn {
+    name: String,
+    args: i8,
+    results: u8,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct IntrinsicFn {
+    name: String,
+    args: i8,
 }
 
 #[derive(Deserialize)]
@@ -71,6 +88,7 @@ impl Tables {
             })
             .collect::<Vec<_>>();
         let implicit = self.bytecodes.iter().map(|c| format_ident!("{}", c.implicit)).collect::<Vec<_>>();
+        let runtime = self.runtime_tables(rel)?;
         let path = std::path::Path::new(&std::env::var("CARGO_MANIFEST_DIR").unwrap_or_default()).join(rel.value()).to_string_lossy().into_owned();
         Ok(quote! {
             const _: &[u8] = include_bytes!(#path);
@@ -122,12 +140,73 @@ impl Tables {
                 }
             }
 
+            #runtime
+
             impl OperandType {
                 /// What it is made of
                 pub const fn info(self) -> OperandTypeInfo {
                     match self { #(OperandType::#ops => OperandTypeInfo::#infos,)* }
                 }
             }
+        })
+    }
+
+    /// `Runtime` (`CallRuntime` ids) and `Intrinsic` (`InvokeIntrinsic` ids)
+    fn runtime_tables(&self, rel: &LitStr) -> Result<TokenStream> {
+        let rnames: Vec<_> = self.runtime.iter().map(|r| format_ident!("{}", r.name)).collect();
+        let rids = (0..self.runtime.len()).map(|i| u16::try_from(i).map_err(|_| Error::new(rel.span(), "more than 65536 runtime functions"))).collect::<Result<Vec<_>>>()?;
+        let rargs: Vec<_> = self.runtime.iter().map(|r| r.args).collect();
+        let rresults: Vec<_> = self.runtime.iter().map(|r| r.results).collect();
+        let rcount = rnames.len();
+        let inames: Vec<_> = self.intrinsics.iter().map(|r| format_ident!("{}", r.name)).collect();
+        let iids = (0..self.intrinsics.len()).map(|i| u8::try_from(i).map_err(|_| Error::new(rel.span(), "more than 256 intrinsics"))).collect::<Result<Vec<_>>>()?;
+        let iargs: Vec<_> = self.intrinsics.iter().map(|r| r.args).collect();
+        let icount = inames.len();
+        Ok(quote! {
+            /// A runtime function (`CallRuntime`'s `RuntimeId`, V8's `Runtime::FunctionId` numbering).
+            #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+            #[repr(u16)]
+            #[allow(non_camel_case_types)]
+            pub enum Runtime { #(#rnames = #rids),* }
+
+            impl Runtime {
+                pub const COUNT: usize = #rcount;
+                pub const ALL: [Runtime; #rcount] = [#(Runtime::#rnames),*];
+
+                pub const fn from_u16(v: u16) -> Option<Self> {
+                    if (v as usize) < Self::COUNT { Some(Self::ALL[v as usize]) } else { None }
+                }
+
+                /// Argument count (-1: variable)
+                pub const fn args(self) -> i8 {
+                    match self { #(Runtime::#rnames => #rargs,)* }
+                }
+
+                /// Result count (1 or a pair)
+                pub const fn results(self) -> u8 {
+                    match self { #(Runtime::#rnames => #rresults,)* }
+                }
+            }
+
+            /// An interpreter intrinsic (`InvokeIntrinsic`'s `IntrinsicId`, V8's `IntrinsicsHelper::IntrinsicId`).
+            #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+            #[repr(u8)]
+            pub enum Intrinsic { #(#inames = #iids),* }
+
+            impl Intrinsic {
+                pub const COUNT: usize = #icount;
+                pub const ALL: [Intrinsic; #icount] = [#(Intrinsic::#inames),*];
+
+                pub const fn from_u8(v: u8) -> Option<Self> {
+                    if (v as usize) < Self::COUNT { Some(Self::ALL[v as usize]) } else { None }
+                }
+
+                /// Argument count (-1: variable)
+                pub const fn args(self) -> i8 {
+                    match self { #(Intrinsic::#inames => #iargs,)* }
+                }
+            }
+
         })
     }
 }
