@@ -3,7 +3,7 @@
 //!
 //! The pre-scan and code generation use the same [`Decls`] so that name resolution agrees: captured bindings live in
 //! heap environments, the rest in registers.
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use oxc_ast::ast::{
     Argument, ArrayExpressionElement, ArrowFunctionBody, AssignmentTargetMaybeDefault, AssignmentTargetProperty, CatchClause, ChainElement, Class, ClassElement, ArrowFunctionExpression, AssignmentTarget, BindingIdentifier, BindingPattern, Expression, ForStatementInit, ForStatementLeft, FormalParameters, Function, MemberExpression, MethodDefinitionKind, ObjectPropertyKind, PrivateIdentifier, PropertyKey, SimpleAssignmentTarget, Statement, VariableDeclaration, VariableDeclarationKind,
@@ -550,6 +550,14 @@ pub(crate) struct Resolver<'a> {
     eval_scopes: HashSet<oxc_syntax::scope::ScopeId>,
     /// Functions containing a direct eval (by start position of the parameter list), handed to the compiler
     pub eval_fns: HashSet<u32>,
+    /// Suspend points of each generator / async function (V8's `suspend_count`: the initial yield, each `yield` /
+    /// `await`, two per `for await`, one per `yield*` (four in an async generator), one per `return` with an operand
+    /// in an async generator), by start position of the parameter list
+    pub suspends: HashMap<u32, u32>,
+    /// Suspend points counted so far in the current function
+    suspend_count: u32,
+    /// The current function is an async generator
+    async_generator: bool,
 }
 
 impl<'a> Resolver<'a> {
@@ -557,8 +565,8 @@ impl<'a> Resolver<'a> {
     /// Gives (captured bindings, referenced bindings).
     /// `outer` is the outer bindings visible at a direct eval (innermost first, one environment per level); when
     /// present, eval code does not create its own `this`.
-    pub fn script(stmts: &'a [Statement<'a>], this: Key, alloc: &'a Allocator, local: Option<&Decls<'a>>, strict: bool, eval_scopes: HashSet<oxc_syntax::scope::ScopeId>, outer: Option<&[Vec<&'a str>]>) -> (HashSet<Key>, HashSet<Key>, HashSet<u32>) {
-        let mut r = Self { levels: Vec::new(), funcs: 0, func: 0, alloc, captured: HashSet::new(), used: HashSet::new(), strict, eval_scopes, eval_fns: HashSet::new() };
+    pub fn script(stmts: &'a [Statement<'a>], this: Key, alloc: &'a Allocator, local: Option<&Decls<'a>>, strict: bool, eval_scopes: HashSet<oxc_syntax::scope::ScopeId>, outer: Option<&[Vec<&'a str>]>) -> Self {
+        let mut r = Self { levels: Vec::new(), funcs: 0, func: 0, alloc, captured: HashSet::new(), used: HashSet::new(), strict, eval_scopes, eval_fns: HashSet::new(), suspends: HashMap::new(), suspend_count: 0, async_generator: false };
         let mut n = 0;
         for level in outer.unwrap_or(&[]).iter().rev() {
             let names = level.iter().map(|&name| {
@@ -574,7 +582,24 @@ impl<'a> Resolver<'a> {
             r.push(d);
         }
         r.statements(stmts);
-        (r.captured, r.used, r.eval_fns)
+        r
+    }
+
+    /// Enters a function's suspend counting (a generator starts with its initial yield); gives the outer function's
+    /// state back
+    fn enter_suspends(&mut self, generator: bool, asynchronous: bool) -> (u32, bool) {
+        let outer = (self.suspend_count, self.async_generator);
+        self.suspend_count = u32::from(generator);
+        self.async_generator = generator && asynchronous;
+        outer
+    }
+
+    /// Leaves a function's suspend counting, recording the count of a resumable function
+    fn leave_suspends(&mut self, params: &FormalParameters<'_>, resumable: bool, outer: (u32, bool)) {
+        if resumable {
+            self.suspends.insert(params.span.start, self.suspend_count);
+        }
+        (self.suspend_count, self.async_generator) = outer;
     }
 
     fn push(&mut self, d: &Decls<'a>) {
@@ -637,11 +662,13 @@ impl<'a> Resolver<'a> {
         let vars = (eval && !self.strict).then(|| Hidden::eval_vars(self.alloc, &f.params));
         let d = Decls::function(Some(Decls::this_key(f.span)), if self_name { f.id.as_ref() } else { None }, Some(&f.params), &body.statements, !self.strict, vars);
         let outer = self.enter_function(&d);
+        let suspends = self.enter_suspends(f.generator, f.r#async);
         if eval {
             self.capture_all();
         }
         self.params(&f.params);
         self.statements(&body.statements);
+        self.leave_suspends(&f.params, f.generator || f.r#async, suspends);
         // Sloppy, simple parameters, and arguments is used: the parameters go into the environment and arguments
         // indices map onto them
         let simple = f.params.rest.is_none() && f.params.items.iter().all(|i| i.initializer.is_none() && matches!(i.pattern, BindingPattern::BindingIdentifier(_)));
@@ -671,6 +698,7 @@ impl<'a> Resolver<'a> {
         let vars = (eval && !self.strict).then(|| Hidden::eval_vars(self.alloc, &a.params));
         let d = Decls::function(None, None, Some(&a.params), stmts, !self.strict, vars);
         let outer = self.enter_function(&d);
+        let suspends = self.enter_suspends(false, a.r#async);
         if eval {
             self.capture_all();
         }
@@ -683,6 +711,7 @@ impl<'a> Resolver<'a> {
                 }
             }
         }
+        self.leave_suspends(&a.params, a.r#async, suspends);
         self.leave_function(outer);
         self.strict = saved;
     }
@@ -953,7 +982,13 @@ impl<'a> Resolver<'a> {
                 r.statement(&f.body);
             }),
             Statement::ForInStatement(f) => self.for_each(&f.left, &f.right, &f.body),
-            Statement::ForOfStatement(f) => self.for_each(&f.left, &f.right, &f.body),
+            Statement::ForOfStatement(f) => {
+                if f.r#await {
+                    // One suspend for `next()`, one for `return()`
+                    self.suspend_count += 2;
+                }
+                self.for_each(&f.left, &f.right, &f.body);
+            }
             Statement::WithStatement(w) => {
                 self.expr(&w.object);
                 let hidden = Hidden::with(self.alloc, w.span);
@@ -973,6 +1008,8 @@ impl<'a> Resolver<'a> {
             }
             Statement::ReturnStatement(r) => {
                 if let Some(e) = &r.argument {
+                    // An async generator awaits the operand
+                    self.suspend_count += u32::from(self.async_generator);
                     self.expr(e);
                 }
             }
@@ -1040,6 +1077,7 @@ impl<'a> Resolver<'a> {
         }
     }
 
+    #[expect(clippy::too_many_lines, reason = "one arm per expression kind")]
     fn expr(&mut self, e: &'a Expression<'a>) {
         match e {
             Expression::Identifier(id) => self.reference(id.name.as_str()),
@@ -1086,11 +1124,16 @@ impl<'a> Resolver<'a> {
                 t.quasi.expressions.iter().for_each(|e| self.expr(e));
             }
             Expression::YieldExpression(y) => {
+                // `yield*` in an async generator: also the return, iterator close and delegated output suspends
+                self.suspend_count += if y.delegate && self.async_generator { 4 } else { 1 };
                 if let Some(a) = &y.argument {
                     self.expr(a);
                 }
             }
-            Expression::AwaitExpression(a) => self.expr(&a.argument),
+            Expression::AwaitExpression(a) => {
+                self.suspend_count += 1;
+                self.expr(&a.argument);
+            }
             Expression::UpdateExpression(u) => self.simple_target(&u.argument),
             Expression::CallExpression(c) => {
                 if matches!(&c.callee, Expression::Identifier(id) if id.name == "eval") {

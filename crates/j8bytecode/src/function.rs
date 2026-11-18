@@ -34,6 +34,8 @@ pub enum Constant {
     /// Jump tables (`SwitchOnSmiNoFeedback`, `SwitchOnGeneratorState`) and far jumps (`Jump*Constant`): a bytecode
     /// offset
     Offset(u32),
+    /// `Symbol.asyncIterator` (V8's `AsyncIteratorSymbol` constant): `for await` gets the async iterator method by it
+    AsyncIteratorSymbol,
     /// An empty slot reserved for a value filled in later (V8's `InsertEntry` placeholder); never left in finished code
     Reserved,
 }

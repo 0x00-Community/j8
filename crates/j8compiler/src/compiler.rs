@@ -13,7 +13,7 @@ use oxc_semantic::SemanticBuilder;
 use oxc_span::{GetSpan, SourceType, Span};
 use j8framework::{CodeKind, CompareOp, Error, ImportEntry, ImportName, ModuleInfo, Source};
 
-use crate::builder::{Builder, Label, RegisterList};
+use crate::builder::{Builder, JumpTable, Label, RegisterList};
 use crate::scope::{Decl, DeclKind, Decls, Hidden, Key, Resolver, THIS};
 use j8bytecode::{Bytecode, Constant, Context, ContextVariable, CreateClosureFlags, FunctionKind, GlobalDeclaration, Module, Register, Runtime, ScopeInfo, ScopeType, SharedFunction, VariableMode};
 
@@ -258,6 +258,8 @@ struct Frame<'a> {
     generator: Option<Register>,
     /// Suspend points so far (`SuspendGenerator` ids)
     suspends: u32,
+    /// The resume points' jump table (`SwitchOnGeneratorState` at the top dispatches on the suspend id)
+    resume_table: Option<JumpTable>,
     /// Async generator: `yield` / `return` await the value first
     async_generator: bool,
     /// Strict mode
@@ -301,6 +303,11 @@ pub enum Body<'a> {
     DefaultConstructor { derived: bool },
 }
 
+/// V8's `JSGeneratorObject::ResumeMode`: how a generator is resumed (`GeneratorGetResumeMode`)
+const RESUME_NEXT: i32 = 0;
+const RESUME_RETURN: i32 = 1;
+const RESUME_THROW: i32 = 2;
+
 pub struct Compiler<'a, 's> {
     src: &'s Source<'s>,
     /// The AST allocator: hidden binding names in class scopes (`#x` etc.) are allocated here too
@@ -317,6 +324,8 @@ pub struct Compiler<'a, 's> {
     pub chains: Vec<Label>,
     /// Functions containing a direct eval (by start position of the parameter list)
     eval_fns: HashSet<u32>,
+    /// Suspend points of each generator / async function, by start position of the parameter list
+    suspends: std::collections::HashMap<u32, u32>,
     /// Completion value (V8's `Rewriter`): expression statements that assign it, and statements before which it is
     /// reset to `undefined` (by start position)
     completion_assign: HashSet<u32>,
@@ -473,8 +482,8 @@ impl Compiler<'_, '_> {
         let eval_scopes: HashSet<oxc_syntax::scope::ScopeId> = scoping.scope_descendants_from_root().filter(|&id| scoping.scope_flags(id).contains_direct_eval()).collect();
         let strict = kind == CodeKind::StrictEval || Flavor::use_strict(&program.directives);
         let local = (kind != CodeKind::Script).then(|| Decls::eval_local(&program.body, strict));
-        let (captured, used, eval_fns) = Resolver::script(&program.body, Decls::this_key(program.span), &allocator, local.as_ref(), strict, eval_scopes, None);
-        let mut c = Compiler { src, alloc: &allocator, captured, used, class_depth: 0, module: Vec::new(), frames: Vec::new(), levels: Vec::new(), chains: Vec::new(), eval_fns, completion_assign: HashSet::new(), completion_reset: HashSet::new(), for_init_text: None };
+        let Resolver { captured, used, eval_fns, suspends, .. } = Resolver::script(&program.body, Decls::this_key(program.span), &allocator, local.as_ref(), strict, eval_scopes, None);
+        let mut c = Compiler { src, alloc: &allocator, captured, used, class_depth: 0, module: Vec::new(), frames: Vec::new(), levels: Vec::new(), chains: Vec::new(), eval_fns, suspends, completion_assign: HashSet::new(), completion_reset: HashSet::new(), for_init_text: None };
         c.script(program, local.as_ref(), strict, direct)?;
         Ok(Module { functions: c.module })
     }
@@ -589,8 +598,8 @@ impl Compiler<'_, '_> {
         let eval_scopes: HashSet<oxc_syntax::scope::ScopeId> = scoping.scope_descendants_from_root().filter(|&id| scoping.scope_flags(id).contains_direct_eval()).collect();
         let (names, info) = Compiler::module_layout(program);
         let order: Vec<&str> = names.iter().map(|&(n, _)| n).collect();
-        let (captured, used, eval_fns) = Resolver::script(&program.body, Decls::this_key(program.span), &allocator, None, true, eval_scopes, Some(&[order]));
-        let mut c = Compiler { src, alloc: &allocator, captured, used, class_depth: 0, module: Vec::new(), frames: Vec::new(), levels: Vec::new(), chains: Vec::new(), eval_fns, completion_assign: HashSet::new(), completion_reset: HashSet::new(), for_init_text: None };
+        let Resolver { captured, used, eval_fns, suspends, .. } = Resolver::script(&program.body, Decls::this_key(program.span), &allocator, None, true, eval_scopes, Some(&[order]));
+        let mut c = Compiler { src, alloc: &allocator, captured, used, class_depth: 0, module: Vec::new(), frames: Vec::new(), levels: Vec::new(), chains: Vec::new(), eval_fns, suspends, completion_assign: HashSet::new(), completion_reset: HashSet::new(), for_init_text: None };
         let bound = names
             .iter()
             .map(|&(name, n)| match n {
@@ -873,6 +882,9 @@ impl<'a> Compiler<'a, '_> {
                     self.bind(b);
                     None
                 }
+                // A generator / async function is never constructed: its new.target stays `undefined`, and the
+                // register carries the generator object (V8's `VisitNewTargetVariable`)
+                DeclKind::NewTarget if self.frame().generator.is_some() => None,
                 DeclKind::NewTarget if self.used.contains(&d.key) => {
                     // The interpreter puts new.target into this register on entry (V8's
                     // `incoming_new_target_or_generator_register`)
@@ -1092,6 +1104,7 @@ impl<'a> Compiler<'a, '_> {
             completion: None,
             generator: None,
             suspends: 0,
+            resume_table: None,
             async_generator: flavor.generator && flavor.asynchronous,
             strict,
             annexb: Vec::new(),
@@ -1105,6 +1118,13 @@ impl<'a> Compiler<'a, '_> {
             let g = self.temp();
             self.b().new_target_or_generator = Some(g.0);
             self.frame().generator = Some(g);
+            // V8's `BuildGeneratorPrologue`: a resumed generator jumps to its resume point, a call falls through
+            let count = params.and_then(|p| self.suspends.get(&p.span.start)).copied().unwrap_or(0);
+            if count > 0 {
+                let mut table = self.b().jump_table(count, 0);
+                self.b().switch_on_generator_state(g, &mut table);
+                self.frame().resume_table = Some(table);
+            }
         }
         let stmts = match body {
             Body::Statements(s) => s,
@@ -1147,9 +1167,61 @@ impl<'a> Compiler<'a, '_> {
         // Generator: suspend only after parameters and declarations are set up (a call runs up to here, so parameter
         // errors throw synchronously); the first next resumes from here
         if flavor.generator && !flavor.asynchronous {
-            self.b().load_undefined();
-            self.initial_yield()?;
+            self.generator_object(Runtime::InlineCreateJSGeneratorObject);
+            self.yield_value();
         }
+        if flavor.generator && flavor.asynchronous {
+            // V8's `GenerateAsyncGeneratorFunctionBody`: a throw out of the body rejects the request, and the generator
+            // is closed however the body ends
+            self.generator_object(Runtime::InlineCreateJSGeneratorObject);
+            let g = self.frame().generator.expect("a generator register");
+            self.try_finally(j8bytecode::CatchPrediction::AsyncAwait, |c| c.try_catch(j8bytecode::CatchPrediction::AsyncAwait, |c| {
+                c.yield_value();
+                c.function_body(body)
+            }, |c, _| {
+                let args = c.b().new_register_list(2);
+                c.b().mov(g, args.first);
+                c.b().star(args.at(1));
+                c.b().load_the_hole();
+                c.b().plain(Bytecode::SetPendingMessage);
+                c.b().call_runtime(Runtime::InlineAsyncGeneratorReject, args);
+                c.release(args.first);
+                c.ret();
+                Ok(())
+            }), |c, _| {
+                let arg = c.temp();
+                c.b().mov(g, arg);
+                c.b().call_runtime(Runtime::InlineGeneratorClose, RegisterList { first: arg, count: 1 });
+                c.release(arg);
+                Ok(())
+            })?;
+        } else if flavor.asynchronous {
+            // V8's `GenerateAsyncFunctionBody`: a throw out of the body rejects the promise
+            self.generator_object(Runtime::InlineAsyncFunctionEnter);
+            self.try_catch(j8bytecode::CatchPrediction::AsyncAwait, |c| c.function_body(body), |c, _| {
+                let g = c.frame().generator.expect("a generator register");
+                let args = c.b().new_register_list(2);
+                c.b().mov(g, args.first);
+                c.b().star(args.at(1));
+                c.b().load_the_hole();
+                c.b().plain(Bytecode::SetPendingMessage);
+                c.b().call_runtime(Runtime::InlineAsyncFunctionReject, args);
+                c.b().plain(Bytecode::Return);
+                c.release(args.first);
+                Ok(())
+            })?;
+        } else {
+            self.function_body(body)?;
+        }
+        self.levels.pop();
+        let f = self.frames.pop().expect("the function's frame");
+        let at = f.index;
+        self.module[at] = f.finish();
+        Ok(u32::try_from(index).expect("fewer than 2^32 functions"))
+    }
+
+    /// The statements of a function body, then the implicit `return undefined`
+    fn function_body(&mut self, body: Body<'a>) -> Result<(), Error> {
         match body {
             Body::Statements(s) => self.statements(s)?,
             Body::Expression(e) => {
@@ -1165,11 +1237,7 @@ impl<'a> Compiler<'a, '_> {
         }
         self.b().load_undefined();
         self.ret();
-        self.levels.pop();
-        let f = self.frames.pop().expect("the function's frame");
-        let at = f.index;
-        self.module[at] = f.finish();
-        Ok(u32::try_from(index).expect("fewer than 2^32 functions"))
+        Ok(())
     }
 
     /// Parameter prologue: default values, destructured parameters, rest parameter.
@@ -1506,9 +1574,119 @@ impl<'a> Compiler<'a, '_> {
         Ok(())
     }
 
-    /// `for await (left of right) body` (not yet on V8 bytecode)
+    /// `for await (left of right) body` (V8's `VisitForOfStatement` for an async iterator): the loop runs inside a
+    /// try-finally whose finally closes the iterator unless it is done, awaiting `return`'s result
     fn for_await(&mut self, f: &'a ForOfStatement<'a>) -> Result<(), Error> {
-        Err(self.unsupported(f.span, "for await"))
+        let label = self.take_label();
+        self.expr(&f.right)?;
+        let src = self.temp();
+        self.b().star(src);
+        let rec = self.async_iterate(src);
+        let done = Register(rec.0 + 2);
+        let next_result = self.temp();
+        self.b().load_bool(false);
+        self.b().star(done);
+        let prediction = j8bytecode::CatchPrediction::AsyncAwait;
+        self.try_finally(prediction, |c| {
+            let header = c.b().loop_header();
+            c.frame().loop_depth += 1;
+            let mut exit = Label::default();
+            c.b().load_bool(true);
+            c.b().star(done);
+            // V8's `BuildIteratorNext`: the result of `next()` is awaited, and must be an object
+            c.b().call_property(Register(rec.0 + 1), RegisterList { first: rec, count: 1 });
+            c.await_value();
+            let mut ok = Label::default();
+            c.b().jump(Bytecode::JumpIfJSReceiver, &mut ok);
+            c.b().star(next_result);
+            c.b().call_runtime(Runtime::ThrowIteratorResultNotAnObject, RegisterList { first: next_result, count: 1 });
+            c.b().bind(&mut ok);
+            c.b().star(next_result);
+            c.b().get_named(next_result, "done");
+            c.b().jump(Bytecode::JumpIfToBooleanTrue, &mut exit);
+            c.b().get_named(next_result, "value");
+            c.b().star(next_result);
+            // Not done while the value is assigned: a throw there closes the iterator
+            c.b().load_bool(false);
+            c.b().star(done);
+            c.push_jump(label, true, true);
+            c.scoped(&Decls::for_head(&f.left), |c| {
+                c.for_left(&f.left, next_result)?;
+                c.statement(&f.body)
+            })?;
+            c.bind_continues();
+            let depth = c.frame().loop_depth - 1;
+            c.b().jump_loop(header, depth);
+            c.frame().loop_depth -= 1;
+            c.pop_jump();
+            c.b().bind(&mut exit);
+            Ok(())
+        }, |c, token| {
+            c.finalize_iteration(rec, done, token, prediction);
+            Ok(())
+        })?;
+        self.release(src);
+        Ok(())
+    }
+
+    /// V8's `BuildGetIteratorRecord` for an async iterator: `src[Symbol.asyncIterator]()`, or the sync iterator wrapped
+    /// by `CreateAsyncFromSyncIterator`. The record takes three registers (iterator, next, done).
+    fn async_iterate(&mut self, src: Register) -> Register {
+        let rec = self.temps(3);
+        let mut sync = Label::default();
+        let mut got = Label::default();
+        let k = self.constant(Constant::AsyncIteratorSymbol);
+        self.b().load_constant(k);
+        self.b().get_keyed(src);
+        self.b().jump(Bytecode::JumpIfUndefinedOrNull, &mut sync);
+        let method = Register(rec.0 + 1);
+        self.b().star(method);
+        self.b().call_property(method, RegisterList { first: src, count: 1 });
+        self.b().jump(Bytecode::JumpIfJSReceiver, &mut got);
+        self.b().call_runtime(Runtime::ThrowSymbolAsyncIteratorInvalid, RegisterList::EMPTY);
+        self.b().bind(&mut sync);
+        self.b().get_iterator(src);
+        self.b().star(rec);
+        self.b().call_runtime(Runtime::InlineCreateAsyncFromSyncIterator, RegisterList { first: rec, count: 1 });
+        self.b().bind(&mut got);
+        self.b().star(rec);
+        self.b().get_named(rec, "next");
+        self.b().star(Register(rec.0 + 1));
+        rec
+    }
+
+    /// V8's `BuildFinalizeIteration` (async iterator): unless done, calls `return` and awaits its result, which must be
+    /// an object; when the loop is left by a throw, whatever closing throws is dropped
+    fn finalize_iteration(&mut self, rec: Register, done: Register, token: Register, prediction: j8bytecode::CatchPrediction) {
+        let mut is_done = Label::default();
+        self.b().ldar(done);
+        self.b().jump(Bytecode::JumpIfToBooleanTrue, &mut is_done);
+        let mut closed = Label::default();
+        let _ = self.try_catch(prediction, |c| {
+            let method = c.temp();
+            c.b().get_named(rec, "return");
+            c.b().jump(Bytecode::JumpIfUndefinedOrNull, &mut closed);
+            c.b().star(method);
+            c.b().call_property(method, RegisterList { first: rec, count: 1 });
+            c.await_value();
+            c.b().jump(Bytecode::JumpIfJSReceiver, &mut closed);
+            c.b().star(method);
+            c.b().call_runtime(Runtime::ThrowIteratorResultNotAnObject, RegisterList { first: method, count: 1 });
+            c.release(method);
+            Ok(())
+        }, |c, e| {
+            c.b().star(e);
+            let mut suppress = Label::default();
+            c.b().load_smi(COMPLETION_THROW);
+            c.b().test_reference_equal(token);
+            c.b().jump(Bytecode::JumpIfTrue, &mut suppress);
+            c.b().ldar(e);
+            c.b().plain(Bytecode::ReThrow);
+            c.b().bind(&mut suppress);
+            Ok(())
+        });
+        self.b().bind(&mut closed);
+        self.b().bind(&mut is_done);
     }
 
     /// `for (left in right) body` (V8's `VisitForInStatement`: `ForInEnumerate` / `ForInPrepare`, then by index with
@@ -1551,9 +1729,232 @@ impl<'a> Compiler<'a, '_> {
         Ok(())
     }
 
-    /// The generator's first suspension (after the prologue): not yet on V8 bytecode
-    fn initial_yield(&mut self) -> Result<(), Error> {
-        Err(self.unsupported(Span::default(), "generators"))
+    /// V8's `BuildGeneratorObjectVariableInitialization`: `create(<closure>, <this>)` into the generator register, left
+    /// in acc
+    fn generator_object(&mut self, create: Runtime) {
+        let g = self.frame().generator.expect("a generator register");
+        let args = self.b().new_register_list(2);
+        self.b().mov(Register::function_closure(), args.first);
+        self.b().mov(Register::receiver(), args.at(1));
+        self.b().call_runtime(create, args);
+        self.b().star(g);
+        self.release(args.first);
+    }
+
+    /// V8's `BuildSuspendPoint`: saves every live register and suspends with acc; on resumption the registers are back
+    /// and acc holds the value sent in
+    fn suspend_point(&mut self) {
+        if !self.b().reachable() {
+            return;
+        }
+        let g = self.frame().generator.expect("a generator register");
+        let id = self.frame().suspends;
+        self.frame().suspends += 1;
+        let live = self.b().live_registers();
+        self.b().suspend_generator(g, live, id);
+        let table = self.frame().resume_table.take().expect("the resume table");
+        self.b().bind_case(&table, i32::try_from(id).unwrap_or(i32::MAX));
+        self.frame().resume_table = Some(table);
+        self.b().resume_generator(g, live);
+    }
+
+    /// V8's `VisitYieldStar`: delegates to the operand's iterator, forwarding `next` / `return` / `throw` and suspending
+    /// with each of its results unchanged (an async generator awaits each result and answers the request with its
+    /// value), until one is done; its value is the result (or the generator returns it, after a `return`).
+    #[expect(clippy::too_many_lines, reason = "follows V8's VisitYieldStar step by step")]
+    pub fn yield_star(&mut self, operand: &'a Expression<'a>) -> Result<(), Error> {
+        let asynchronous = self.frame().async_generator;
+        let g = self.frame().generator.expect("a generator register");
+        let output = self.temp();
+        let resume_mode = self.temp();
+        let iterator_and_input = self.b().new_register_list(2);
+        let (iterator, input) = (iterator_and_input.first, iterator_and_input.at(1));
+        self.expr(operand)?;
+        let next = self.temp();
+        self.b().star(iterator);
+        if asynchronous {
+            let rec = self.async_iterate(iterator);
+            self.b().mov(rec, iterator);
+            self.b().mov(Register(rec.0 + 1), next);
+            self.release(rec);
+        } else {
+            self.b().get_iterator(iterator);
+            self.b().star(iterator);
+            self.b().get_named(iterator, "next");
+            self.b().star(next);
+        }
+        self.b().load_undefined();
+        self.b().star(input);
+        self.b().load_smi(RESUME_NEXT);
+        self.b().star(resume_mode);
+        let header = self.b().loop_header();
+        self.frame().loop_depth += 1;
+        let mut after_switch = Label::default();
+        let mut table = self.b().jump_table(2, RESUME_RETURN);
+        self.b().ldar(resume_mode);
+        self.b().switch_on_smi(&mut table);
+        // next (the fall-through)
+        self.b().call_property(next, iterator_and_input);
+        self.b().jump(Bytecode::Jump, &mut after_switch);
+        // return: without a `return` method the generator returns the value sent in
+        self.b().bind_case(&table, RESUME_RETURN);
+        let mut no_return = Label::default();
+        self.call_iterator_method(iterator, "return", iterator_and_input, &mut after_switch, &mut no_return);
+        self.b().bind(&mut no_return);
+        self.b().ldar(input);
+        if asynchronous {
+            self.await_value();
+        }
+        self.ret();
+        // throw: without a `throw` method the iterator is closed, then a TypeError
+        self.b().bind_case(&table, RESUME_THROW);
+        let mut no_throw = Label::default();
+        self.call_iterator_method(iterator, "throw", iterator_and_input, &mut after_switch, &mut no_throw);
+        self.b().bind(&mut no_throw);
+        let mut closed = Label::default();
+        let mut called = Label::default();
+        self.call_iterator_method(iterator, "return", RegisterList { first: iterator, count: 1 }, &mut called, &mut closed);
+        self.b().bind(&mut called);
+        if asynchronous {
+            self.await_value();
+        }
+        self.b().jump(Bytecode::JumpIfJSReceiver, &mut closed);
+        let r = self.temp();
+        self.b().star(r);
+        self.b().call_runtime(Runtime::ThrowIteratorResultNotAnObject, RegisterList { first: r, count: 1 });
+        self.release(r);
+        self.b().bind(&mut closed);
+        self.b().call_runtime(Runtime::ThrowThrowMethodMissing, RegisterList::EMPTY);
+        self.b().bind(&mut after_switch);
+        if asynchronous {
+            self.await_value();
+        }
+        let mut check_if_done = Label::default();
+        self.b().star(output);
+        self.b().jump(Bytecode::JumpIfJSReceiver, &mut check_if_done);
+        self.b().call_runtime(Runtime::ThrowIteratorResultNotAnObject, RegisterList { first: output, count: 1 });
+        self.b().bind(&mut check_if_done);
+        self.b().get_named(output, "done");
+        let mut exit = Label::default();
+        self.b().jump(Bytecode::JumpIfToBooleanTrue, &mut exit);
+        if asynchronous {
+            // The request is answered with the inner result's value, not done
+            self.b().get_named(output, "value");
+            let args = self.b().new_register_list(3);
+            self.b().mov(g, args.first);
+            self.b().star(args.at(1));
+            self.b().load_bool(false);
+            self.b().star(args.at(2));
+            self.b().call_runtime(Runtime::InlineAsyncGeneratorResolve, args);
+            self.release(args.first);
+        } else {
+            self.b().ldar(output);
+        }
+        self.suspend_point();
+        self.b().star(input);
+        self.b().call_runtime(Runtime::InlineGeneratorGetResumeMode, RegisterList { first: g, count: 1 });
+        self.b().star(resume_mode);
+        let depth = self.frame().loop_depth - 1;
+        self.b().jump_loop(header, depth);
+        self.frame().loop_depth -= 1;
+        self.b().bind(&mut exit);
+        self.release(iterator);
+        // A `return` delegated to the iterator returns its value; otherwise the value is the result
+        let output_value = self.temp();
+        self.b().get_named(output, "value");
+        self.b().star(output_value);
+        self.b().load_smi(RESUME_RETURN);
+        self.b().test_reference_equal(resume_mode);
+        let mut completion_is_output_value = Label::default();
+        self.b().jump(Bytecode::JumpIfFalse, &mut completion_is_output_value);
+        self.b().ldar(output_value);
+        self.ret();
+        self.b().bind(&mut completion_is_output_value);
+        self.b().ldar(output_value);
+        self.release(output);
+        Ok(())
+    }
+
+    /// V8's `BuildCallIteratorMethod`: calls `iterator[name]` with `receiver_and_args` and jumps to `called`, or to
+    /// `missing` when it is `undefined` / `null`
+    fn call_iterator_method(&mut self, iterator: Register, name: &str, receiver_and_args: RegisterList, called: &mut Label, missing: &mut Label) {
+        let method = self.temp();
+        self.b().get_named(iterator, name);
+        self.b().jump(Bytecode::JumpIfUndefinedOrNull, missing);
+        self.b().star(method);
+        self.b().call_property(method, receiver_and_args);
+        self.b().jump(Bytecode::Jump, called);
+        self.release(method);
+    }
+
+    /// V8's `BuildAwait` with the operand in acc: suspends until the value settles; a rejection throws the reason, a
+    /// fulfillment gives the value
+    pub fn await_value(&mut self) {
+        let g = self.frame().generator.expect("a generator register");
+        let args = self.b().new_register_list(2);
+        self.b().mov(g, args.first);
+        self.b().star(args.at(1));
+        let intrinsic = if self.frame().async_generator { Runtime::InlineAsyncGeneratorAwait } else { Runtime::InlineAsyncFunctionAwait };
+        self.b().call_runtime(intrinsic, args);
+        self.release(args.first);
+        self.suspend_point();
+        let input = self.temp();
+        let resume_mode = self.temp();
+        self.b().star(input);
+        self.b().call_runtime(Runtime::InlineGeneratorGetResumeMode, RegisterList { first: g, count: 1 });
+        self.b().star(resume_mode);
+        self.b().load_smi(RESUME_NEXT);
+        self.b().test_reference_equal(resume_mode);
+        let mut resume_next = Label::default();
+        self.b().jump(Bytecode::JumpIfTrue, &mut resume_next);
+        self.b().ldar(input);
+        self.b().plain(Bytecode::ReThrow);
+        self.b().bind(&mut resume_next);
+        self.b().ldar(input);
+        self.release(input);
+    }
+
+    /// V8's `VisitYield` with the operand in acc (the initial yield suspends with the generator object itself): suspends,
+    /// then dispatches on the resume mode — `throw` throws the value sent in, `return` returns it (through any
+    /// `finally`), `next` gives it as the value of the `yield`.
+    pub fn yield_value(&mut self) {
+        let g = self.frame().generator.expect("a generator register");
+        let asynchronous = self.frame().async_generator;
+        if self.frame().suspends > 0 {
+            let args = self.b().new_register_list(2);
+            if asynchronous {
+                // The value is awaited, then given to the request as a not-done result
+                self.b().mov(g, args.first);
+                self.b().star(args.at(1));
+                self.b().call_runtime(Runtime::InlineAsyncGeneratorYieldWithAwait, args);
+            } else {
+                self.b().star(args.first);
+                self.b().mov(g, args.at(1));
+                self.b().call_runtime(Runtime::InlineGeneratorYieldResult, args);
+            }
+            self.release(args.first);
+        }
+        self.suspend_point();
+        let input = self.temp();
+        self.b().star(input);
+        self.b().call_runtime(Runtime::InlineGeneratorGetResumeMode, RegisterList { first: g, count: 1 });
+        // JSGeneratorObject::kNext / kReturn / kThrow (an async generator also kRethrow: the yielded value was rejected)
+        let mut table = self.b().jump_table(if asynchronous { 3 } else { 2 }, RESUME_NEXT);
+        self.b().switch_on_smi(&mut table);
+        if asynchronous {
+            self.b().ldar(input);
+            self.b().plain(Bytecode::ReThrow);
+            self.b().bind_case(&table, RESUME_THROW);
+        }
+        // Throw (the fall-through of a sync generator)
+        self.b().ldar(input);
+        self.b().plain(Bytecode::Throw);
+        self.b().bind_case(&table, RESUME_RETURN);
+        self.b().ldar(input);
+        self.ret();
+        self.b().bind_case(&table, RESUME_NEXT);
+        self.b().ldar(input);
+        self.release(input);
     }
 
     /// How many loops enclose the current position (the depth operand of a `JumpLoop` emitted here for a loop of its
@@ -1718,6 +2119,7 @@ impl<'a> Compiler<'a, '_> {
             completion: None,
             generator: None,
             suspends: 0,
+            resume_table: None,
             async_generator: false,
             strict,
             annexb: Vec::new(),
@@ -1983,6 +2385,23 @@ impl<'a> Compiler<'a, '_> {
             }
             _ => {
                 let _ = self.leave_controls(0);
+                let flavor = self.frame().flavor;
+                if flavor.asynchronous {
+                    // V8's `BuildAsyncReturn`: the value fulfills the promise (async function) / the request, as a done
+                    // result (async generator)
+                    let g = self.frame().generator.expect("a generator register");
+                    let args = self.b().new_register_list(if flavor.generator { 3 } else { 2 });
+                    self.b().mov(g, args.first);
+                    self.b().star(args.at(1));
+                    if flavor.generator {
+                        self.b().load_bool(true);
+                        self.b().star(args.at(2));
+                        self.b().call_runtime(Runtime::InlineAsyncGeneratorResolve, args);
+                    } else {
+                        self.b().call_runtime(Runtime::InlineAsyncFunctionResolve, args);
+                    }
+                    self.release(args.first);
+                }
                 self.b().plain(Bytecode::Return);
             }
         }
@@ -2042,23 +2461,30 @@ impl<'a> Compiler<'a, '_> {
     /// `try` / `catch` / `finally` (V8's `TryCatchBuilder` / `TryFinallyBuilder`: handler table regions; a finally is
     /// entered with a continuation token and dispatches on it at the end)
     fn try_statement(&mut self, t: &'a TryStatement<'a>) -> Result<(), Error> {
-        let fin = t.finalizer.as_ref().map(|_| {
-            let token = self.temp();
-            let value = self.temp();
-            let contexts = self.frame().contexts.clone();
-            self.frame().controls.push(Control::Finally(Finally { token, value, contexts, entry: Label::default(), routes: Vec::new() }));
-            let ctx = self.temp();
-            self.b().mov(Register::current_context(), ctx);
-            let h = self.b().new_handler(ctx, j8bytecode::CatchPrediction::Uncaught);
-            self.b().try_start(h);
-            self.frame().controls.push(Control::Handler);
-            (token, value, h)
-        });
-        match &t.handler {
-            Some(c) => self.try_catch(j8bytecode::CatchPrediction::Caught, |s| s.block(&t.block), |s, ctx| s.catch_clause(c, ctx))?,
-            None => self.block(&t.block)?,
+        let body = |s: &mut Self| match &t.handler {
+            Some(c) => s.try_catch(j8bytecode::CatchPrediction::Caught, |s| s.block(&t.block), |s, ctx| s.catch_clause(c, ctx)),
+            None => s.block(&t.block),
+        };
+        match &t.finalizer {
+            Some(f) => self.try_finally(j8bytecode::CatchPrediction::Uncaught, body, |s, _| s.block(f)),
+            None => body(self),
         }
-        let Some((token, value, h)) = fin else { return Ok(()) };
+    }
+
+    /// `try { body } finally { finalizer }` (V8's `BuildTryFinally`): every way out of the body — falling through, a
+    /// throw, a `return`, a `break` / `continue` — runs the finalizer first, then carries on.
+    /// The finalizer gets the register holding how the body was left (the continuation token).
+    pub fn try_finally(&mut self, prediction: j8bytecode::CatchPrediction, body: impl FnOnce(&mut Self) -> Result<(), Error>, finalizer: impl FnOnce(&mut Self, Register) -> Result<(), Error>) -> Result<(), Error> {
+        let token = self.temp();
+        let value = self.temp();
+        let contexts = self.frame().contexts.clone();
+        self.frame().controls.push(Control::Finally(Finally { token, value, contexts, entry: Label::default(), routes: Vec::new() }));
+        let ctx = self.temp();
+        self.b().mov(Register::current_context(), ctx);
+        let h = self.b().new_handler(ctx, prediction);
+        self.b().try_start(h);
+        self.frame().controls.push(Control::Handler);
+        body(self)?;
         self.frame().controls.pop();
         self.b().try_end(h);
         let mut fall = Label::default();
@@ -2073,7 +2499,7 @@ impl<'a> Compiler<'a, '_> {
         self.b().bind(&mut fall);
         let Some(Control::Finally(mut f)) = self.frame().controls.pop() else { unreachable!("the innermost control is this finally") };
         self.b().bind(&mut f.entry);
-        self.block(t.finalizer.as_ref().expect("checked above"))?;
+        finalizer(self, token)?;
         self.on_completion(token, COMPLETION_THROW, |s| {
             s.b().ldar(value);
             s.b().plain(Bytecode::ReThrow);
@@ -2174,7 +2600,13 @@ impl<'a> Compiler<'a, '_> {
             Statement::BlockStatement(b) => self.block(b)?,
             Statement::ReturnStatement(r) => {
                 match &r.argument {
-                    Some(e) => self.expr(e)?,
+                    Some(e) => {
+                        self.expr(e)?;
+                        // An async generator awaits the operand (V8's parser wraps it in an `Await`)
+                        if self.frame().async_generator {
+                            self.await_value();
+                        }
+                    }
                     None => self.b().load_undefined(),
                 }
                 self.ret();

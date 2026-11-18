@@ -29,13 +29,13 @@ impl Resume {
     pub const ALL: [Resume; 3] = [Resume::Next, Resume::Throw, Resume::Return];
 }
 
-/// The number written into the register for the resume kind (the compiler dispatches on it after `yield`).
+/// V8's `JSGeneratorObject::ResumeMode` (what `GeneratorGetResumeMode` gives the bytecode).
 impl From<Resume> for f64 {
     fn from(m: Resume) -> f64 {
         match m {
             Resume::Next => 0.0,
-            Resume::Throw => 1.0,
-            Resume::Return => 2.0,
+            Resume::Return => 1.0,
+            Resume::Throw => 2.0,
         }
     }
 }
@@ -43,7 +43,7 @@ impl From<Resume> for f64 {
 /// The result of running a coroutine one step.
 #[derive(Clone, Copy, Debug)]
 pub enum Step<'gc> {
-    /// Stopped at `yield`
+    /// Stopped at `yield`: what the generator gives its caller (for a sync generator, the iterator result itself)
     Yield(Value<'gc>),
     /// Stopped at `await`
     Await(Value<'gc>),

@@ -1230,6 +1230,13 @@ impl<'gc> Agent<'gc, '_> {
 
     /// GetIterator: call `v[Symbol.iterator]()` and take its `next`.
     pub fn get_iterator(&mut self, v: Value<'gc>) -> Result<IterRecord<'gc>, Error> {
+        let iterator = self.iterator_object(v)?;
+        let next = self.get_named(iterator, "next")?;
+        Ok(IterRecord { iterator, next })
+    }
+
+    /// `v[Symbol.iterator]()`, which must be an object (the `GetIterator` bytecode: `next` is not read)
+    pub fn iterator_object(&mut self, v: Value<'gc>) -> Result<Value<'gc>, Error> {
         let method = if v.is_nullish() { Value::Undefined } else { self.get_symbol(v, self.realm.symbols.iterator, v)? };
         if !self.is_callable(method) {
             let what = match v.kind() {
@@ -1242,8 +1249,7 @@ impl<'gc> Agent<'gc, '_> {
         if iterator.as_object().is_none() {
             return Err(self.throw(ErrorKind::Type, "Result of the Symbol.iterator method is not an object"));
         }
-        let next = self.get_named(iterator, "next")?;
-        Ok(IterRecord { iterator, next })
+        Ok(iterator)
     }
 
     /// Advance an array iterator one step (rereads `length` each time, so changes to the array during iteration are

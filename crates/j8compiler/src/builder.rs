@@ -665,17 +665,27 @@ impl Builder {
     }
 
     pub fn switch_on_smi(&mut self, table: &mut JumpTable) {
+        if self.dead {
+            return;
+        }
         let at = self.out(Bytecode::SwitchOnSmiNoFeedback, &[table.constant as OperandValue, table.size.into(), table.case_base.into()]);
         table.switch_at = at + usize::from(self.enc.code[at] != Bytecode::SwitchOnSmiNoFeedback as u8);
     }
 
     pub fn switch_on_generator_state(&mut self, generator: Register, table: &mut JumpTable) {
+        if self.dead {
+            return;
+        }
         let at = self.out(Bytecode::SwitchOnGeneratorState, &[i32::from(generator).into(), table.constant as OperandValue, table.size.into()]);
         table.switch_at = at + usize::from(self.enc.code[at] != Bytecode::SwitchOnGeneratorState as u8);
     }
 
     /// Binds case `case` of `table` here: its constant holds the offset relative to the switch bytecode
     pub fn bind_case(&mut self, table: &JumpTable, case: i32) {
+        // A jump lands here (V8's `Bind(jump_table, index)` starts a basic block)
+        self.dead = false;
+        self.boolean = false;
+        self.stored = None;
         let i = usize::try_from(case - table.case_base).expect("case in range");
         self.constants[table.constant + i] = Constant::Offset(u32::try_from(self.offset() - table.switch_at).unwrap_or(u32::MAX));
     }
@@ -815,6 +825,11 @@ impl Builder {
     }
 
     // ---- generators ----
+
+    /// Every register allocated now (V8's `AllLiveRegisters`: r0 up to the next free one)
+    pub fn live_registers(&self) -> RegisterList {
+        RegisterList { first: Register(0), count: u32::try_from(self.next).unwrap_or(0) }
+    }
 
     pub fn suspend_generator(&mut self, generator: Register, registers: RegisterList, suspend_id: u32) {
         self.out(Bytecode::SuspendGenerator, &[i32::from(generator).into(), i32::from(registers.first).into(), registers.count.into(), suspend_id.into()]);

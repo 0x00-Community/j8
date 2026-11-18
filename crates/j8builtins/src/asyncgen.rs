@@ -1,5 +1,7 @@
+use alloc::vec::Vec;
+
 use j8framework::ValueKind;
-use j8framework::{Agent, Error, ErrorKind, ObjectKind, Resume, Value};
+use j8framework::{Agent, Capability, Error, ErrorKind, IterRecord, JsObject, NativeClosure, ObjectData, ObjectKind, Reaction, Resume, Value};
 
 use crate::{Args, Installer};
 
@@ -38,6 +40,153 @@ impl AsyncGenerators {
     }
 }
 
+/// %AsyncFromSyncIteratorPrototype%: `next` / `return` / `throw` call the sync iterator's method and give a Promise of
+/// its result, the value awaited first (ECMA-262 27.1.6).
+struct AsyncFromSync;
+
+/// Slots of the continuation closures: the result's `done`, and the sync iterator (closed when the value rejects)
+const DONE: usize = 0;
+const ITERATOR: usize = 1;
+
+impl AsyncFromSync {
+    /// The sync iterator record of `this`
+    fn record(this: Value<'_>) -> Option<IterRecord<'_>> {
+        match this.as_object()?.borrow().kind {
+            ObjectKind::AsyncFromSyncIterator(r) => Some(r),
+            _ => None,
+        }
+    }
+
+    /// A new Promise with its capability record
+    fn capability<'gc>(a: &mut Agent<'gc, '_>) -> (JsObject<'gc>, Capability<'gc>) {
+        let p = a.new_promise();
+        let (resolve, reject) = a.promise_resolvers(p);
+        (p, Capability { promise: p.into(), resolve: resolve.into(), reject: reject.into() })
+    }
+
+    /// IfAbruptRejectPromise: a thrown value rejects `p`
+    fn rejected<'gc>(a: &mut Agent<'gc, '_>, p: JsObject<'gc>, e: Error) -> Result<Value<'gc>, Error> {
+        match e {
+            Error::Exception(g) => {
+                let reason = a.local(&g);
+                a.reject_promise(p, reason);
+                Ok(p.into())
+            }
+            e => Err(e),
+        }
+    }
+
+    fn closure<'gc>(a: &Agent<'gc, '_>, f: j8framework::ClosureFn, slots: Vec<Value<'gc>>) -> Value<'gc> {
+        let o = ObjectData { kind: ObjectKind::NativeClosure(NativeClosure { f, slots, constructor: false }), proto: Some(a.realm.function_proto), ..ObjectData::default() }.alloc(a.mc);
+        a.realm.name_function(a.mc, o, "", Some(1));
+        o.into()
+    }
+
+    fn slot(f: JsObject<'_>, i: usize) -> Value<'_> {
+        match &f.borrow().kind {
+            ObjectKind::NativeClosure(c) => c.slots.get(i).copied().unwrap_or_default(),
+            _ => Value::Undefined,
+        }
+    }
+
+    /// The fulfillment of the awaited value: `{ value, done }`
+    fn unwrap<'gc>(a: &mut Agent<'gc, '_>, f: JsObject<'gc>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+        let done = a.to_boolean(Self::slot(f, DONE));
+        Ok(a.iter_result(args.at(0), done).into())
+    }
+
+    /// The rejection of the awaited value: the sync iterator is closed, then the reason rethrown
+    fn close<'gc>(a: &mut Agent<'gc, '_>, f: JsObject<'gc>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+        let reason = args.at(0);
+        let _ = a.iterator_close(Self::slot(f, ITERATOR));
+        Err(a.throw_value(reason))
+    }
+
+    /// AsyncFromSyncIteratorContinuation
+    fn continuation<'gc>(a: &mut Agent<'gc, '_>, result: Value<'gc>, p: JsObject<'gc>, cap: Capability<'gc>, rec: IterRecord<'gc>, close_on_rejection: bool) -> Result<Value<'gc>, Error> {
+        let done = match a.get_named(result, "done") {
+            Ok(d) => a.to_boolean(d),
+            Err(e) => return Self::rejected(a, p, e),
+        };
+        let value = match a.get_named(result, "value") {
+            Ok(v) => v,
+            Err(e) => return Self::rejected(a, p, e),
+        };
+        let wrapper = match a.promise_resolve(value) {
+            Ok(w) => w,
+            Err(e) => {
+                if !done && close_on_rejection {
+                    let _ = a.iterator_close(rec.iterator);
+                }
+                return Self::rejected(a, p, e);
+            }
+        };
+        let on_fulfilled = Self::closure(a, Self::unwrap, alloc::vec![done.into()]);
+        let on_rejected = if done || !close_on_rejection { Value::Undefined } else { Self::closure(a, Self::close, alloc::vec![Value::Undefined, rec.iterator]) };
+        a.perform_then(wrapper, Reaction::Then { on_fulfilled, on_rejected, capability: Some(cap) });
+        Ok(p.into())
+    }
+
+    fn next<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+        let (p, cap) = Self::capability(a);
+        let Some(rec) = Self::record(this) else { unreachable!("only reachable through CreateAsyncFromSyncIterator") };
+        let sent: &[Value<'gc>] = if args.is_empty() { &[] } else { &args[..1] };
+        let result = match a.call(rec.next, rec.iterator, sent) {
+            Ok(r) if r.as_object().is_some() => r,
+            Ok(r) => {
+                let what = a.describe(r);
+                let e = a.throw(ErrorKind::Type, &alloc::format!("Iterator result {what} is not an object"));
+                return Self::rejected(a, p, e);
+            }
+            Err(e) => return Self::rejected(a, p, e),
+        };
+        Self::continuation(a, result, p, cap, rec, true)
+    }
+
+    /// `return` / `throw`: the sync iterator's method of that name; without one, `return` is done with the value and
+    /// `throw` closes the iterator and rejects with a TypeError
+    fn forward<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>], name: &str) -> Result<Value<'gc>, Error> {
+        let (p, cap) = Self::capability(a);
+        let Some(rec) = Self::record(this) else { unreachable!("only reachable through CreateAsyncFromSyncIterator") };
+        let method = match a.get_named(rec.iterator, name) {
+            Ok(m) => m,
+            Err(e) => return Self::rejected(a, p, e),
+        };
+        let throw = name == "throw";
+        if method.is_nullish() {
+            if !throw {
+                let r = a.iter_result(args.at(0), true);
+                a.resolve_promise(p, r.into())?;
+                return Ok(p.into());
+            }
+            if let Err(e) = a.iterator_close(rec.iterator) {
+                return Self::rejected(a, p, e);
+            }
+            let e = a.throw(ErrorKind::Type, "The iterator does not provide a 'throw' method");
+            return Self::rejected(a, p, e);
+        }
+        let sent: &[Value<'gc>] = if args.is_empty() { &[] } else { &args[..1] };
+        let result = match a.call(method, rec.iterator, sent) {
+            Ok(r) if r.as_object().is_some() => r,
+            Ok(r) => {
+                let what = a.describe(r);
+                let e = a.throw(ErrorKind::Type, &alloc::format!("Iterator result {what} is not an object"));
+                return Self::rejected(a, p, e);
+            }
+            Err(e) => return Self::rejected(a, p, e),
+        };
+        Self::continuation(a, result, p, cap, rec, throw)
+    }
+
+    fn return_<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+        Self::forward(a, this, args, "return")
+    }
+
+    fn throw<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+        Self::forward(a, this, args, "throw")
+    }
+}
+
 impl Installer<'_, '_> {
     pub(crate) fn async_generators(&mut self) {
         let r = self.realm;
@@ -46,5 +195,9 @@ impl Installer<'_, '_> {
         self.method(p, "next", AsyncGenerators::next, 1);
         self.method(p, "return", AsyncGenerators::return_, 1);
         self.method(p, "throw", AsyncGenerators::throw, 1);
+        let p = r.async_from_sync_iterator_proto;
+        self.method(p, "next", AsyncFromSync::next, 1);
+        self.method(p, "return", AsyncFromSync::return_, 1);
+        self.method(p, "throw", AsyncFromSync::throw, 1);
     }
 }

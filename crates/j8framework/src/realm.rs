@@ -81,6 +81,8 @@ pub struct Realm<'gc> {
     pub async_iterator_proto: JsObject<'gc>,
     /// %AsyncGeneratorPrototype%: `next` / `return` / `throw` all return Promises
     pub async_generator_proto: JsObject<'gc>,
+    /// %AsyncFromSyncIteratorPrototype%
+    pub async_from_sync_iterator_proto: JsObject<'gc>,
     pub promise_proto: JsObject<'gc>,
     /// %Promise% (j8builtins installs it as a constructor)
     pub promise_ctor: JsObject<'gc>,
@@ -221,6 +223,7 @@ impl<'gc> Realm<'gc> {
             async_function_proto: derived(function_proto),
             async_generator_function_proto: derived(function_proto),
             async_generator_proto: derived(async_iterator_proto),
+            async_from_sync_iterator_proto: derived(async_iterator_proto),
             promise_proto: derived(object_proto),
             promise_ctor: placeholder(function_proto),
             regexp_proto: derived(object_proto),

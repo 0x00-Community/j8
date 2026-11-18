@@ -297,6 +297,21 @@ impl<'a> Compiler<'a, '_> {
             }
             Expression::ObjectExpression(o) => self.object(o)?,
             Expression::ArrayExpression(a) => self.array(&a.elements, a.span)?,
+            Expression::AwaitExpression(w) => {
+                self.expr(&w.argument)?;
+                self.await_value();
+            }
+            Expression::YieldExpression(y) if y.delegate => {
+                let Some(v) = &y.argument else { return Err(self.unsupported(y.span, "yield* without an operand")) };
+                self.yield_star(v)?;
+            }
+            Expression::YieldExpression(y) => {
+                match &y.argument {
+                    Some(v) => self.expr(v)?,
+                    None => self.b().load_undefined(),
+                }
+                self.yield_value();
+            }
             e => return Err(self.unsupported(e.span(), "expression")),
         }
         Ok(())

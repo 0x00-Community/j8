@@ -593,9 +593,6 @@ impl Executor {
                     if loaded.class_constructor {
                         return Err(a.throw(ErrorKind::Type, &alloc::format!("Class constructor {} cannot be invoked without 'new'", loaded.func.name)));
                     }
-                    if loaded.generator || loaded.asynchronous {
-                        return Err(a.throw(ErrorKind::Syntax, "generators and async functions are not on V8 bytecode yet"));
-                    }
                     return Ok(Callee::Closure { closure: c, callee, this, args });
                 }
                 CallStep::Resolver => a.run_resolver(o, args.first().copied().unwrap_or_default()),
@@ -1152,6 +1149,7 @@ impl Executor {
             Constant::Number(x) => Value::Number(*x),
             Constant::String(s) => a.string(s).into(),
             Constant::BigInt(digits) => a.bigint(Agent::parse_bigint(digits).unwrap_or_default()),
+            Constant::AsyncIteratorSymbol => a.realm.symbols.async_iterator.into(),
             _ => Value::Undefined,
         }
     }
@@ -1585,7 +1583,7 @@ impl Executor {
                 *acc = a.array(f.args.get(formals..).unwrap_or(&[]).to_vec()).into();
             }
             B::CreateMappedArguments | B::CreateUnmappedArguments => *acc = self.arguments(a, f, loaded.func.strict || d.bytecode == B::CreateUnmappedArguments)?,
-            B::GetIterator => *acc = a.get_iterator(r!(0))?.iterator,
+            B::GetIterator => *acc = a.iterator_object(r!(0))?,
             B::ForInEnumerate => {
                 let keys = a.for_in_keys(r!(0))?;
                 *acc = a.array(keys).into();
@@ -1629,6 +1627,49 @@ impl Executor {
                 if matches!(acc.kind(), ValueKind::Uninit) {
                     return Err(a.throw(ErrorKind::Reference, "Must call super constructor in derived class before accessing 'this' or returning from derived constructor"));
                 }
+            }
+            B::SwitchOnGeneratorState => {
+                // A call falls through; a resumption continues at its resume point, in the saved context
+                if let Some(co) = r!(0).as_object() {
+                    let (continuation, context) = Self::coroutine(co, |c| (c.frame.continuation, c.frame.context));
+                    f.env = context;
+                    if let Some(Constant::Offset(off)) = loaded.func.bytecode.constants.get(usize::try_from(o[1] + i64::from(continuation)).unwrap_or(usize::MAX)) {
+                        f.pc = loaded.index_of(d.start as usize + *off as usize);
+                    }
+                }
+            }
+            B::SuspendGenerator => {
+                let Some(co) = r!(0).as_object() else { unreachable!("a generator object") };
+                let first = Self::slot_of(f, o[1]).unwrap_or(regs.len());
+                let count = usize::try_from(o[2]).unwrap_or(0);
+                let saved = regs[first..first + count].to_vec();
+                let params = regs[f.params..f.base].to_vec();
+                let context = f.env;
+                let continuation = u32::try_from(o[3]).unwrap_or(0);
+                Self::coroutine_mut(a, co, |c| {
+                    c.frame.params = params;
+                    c.frame.regs = saved;
+                    c.frame.context = context;
+                    c.frame.continuation = continuation;
+                    c.state = j8framework::CoroutineState::Suspended;
+                });
+                let v = *acc;
+                return Ok(match st.frames.pop() {
+                    Some(caller) => {
+                        st.regs.truncate(st.f.params);
+                        st.f = caller;
+                        st.acc = v;
+                        Flow::Frame
+                    }
+                    None => Flow::Done(Outcome::Return(v)),
+                });
+            }
+            B::ResumeGenerator => {
+                let Some(co) = r!(0).as_object() else { unreachable!("a generator object") };
+                let first = Self::slot_of(f, o[1]).unwrap_or(regs.len());
+                let (input, saved) = Self::coroutine(co, |c| (c.input, c.frame.regs.clone()));
+                regs[first..first + saved.len()].copy_from_slice(&saved);
+                *acc = input;
             }
             B::Return => {
                 let mut v = *acc;
@@ -1707,6 +1748,22 @@ impl Executor {
         Err(a.throw(ErrorKind::Type, "'caller', 'callee', and 'arguments' properties may not be accessed on strict mode functions or the arguments objects for calls to them"))
     }
 
+    /// Reads a coroutine (generator / async function object)
+    fn coroutine<'gc, T>(co: JsObject<'gc>, read: impl FnOnce(&j8framework::Coroutine<'gc>) -> T) -> T {
+        match &co.borrow().kind {
+            ObjectKind::Coroutine(c) => read(c),
+            _ => unreachable!("a generator object"),
+        }
+    }
+
+    /// Changes a coroutine
+    fn coroutine_mut<'gc, T>(a: &Agent<'gc, '_>, co: JsObject<'gc>, write: impl FnOnce(&mut j8framework::Coroutine<'gc>) -> T) -> T {
+        match &mut co.borrow_mut(a.mc).kind {
+            ObjectKind::Coroutine(c) => write(c),
+            _ => unreachable!("a generator object"),
+        }
+    }
+
     /// `InvokeIntrinsic`
     fn intrinsic<'gc>(&self, a: &mut Agent<'gc, '_>, i: Intrinsic, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let arg = |n: usize| args.get(n).copied().unwrap_or_default();
@@ -1726,6 +1783,80 @@ impl Executor {
                 let ob = a.object();
                 a.copy_data(ob, src, &exclude)?;
                 Ok(ob.into())
+            }
+            Intrinsic::CreateJSGeneratorObject => {
+                // The generator's prototype is the function's `prototype` (when an object)
+                let closure = arg(0);
+                let asynchronous = closure.as_object().is_some_and(|o| matches!(&o.borrow().kind, ObjectKind::Function(c) if self.function(c.func).asynchronous));
+                let proto = match a.get_named(closure, "prototype")?.as_object() {
+                    Some(p) => p,
+                    None if asynchronous => a.realm.async_generator_proto,
+                    None => a.realm.generator_proto,
+                };
+                let co = j8framework::Coroutine::new(closure, None, asynchronous);
+                Ok(ObjectData { kind: ObjectKind::Coroutine(Box::new(co)), proto: Some(proto), ..ObjectData::default() }.alloc(a.mc).into())
+            }
+            Intrinsic::AsyncFunctionEnter => {
+                let promise = a.new_promise();
+                let co = j8framework::Coroutine::new(arg(0), Some(promise), false);
+                Ok(ObjectData { kind: ObjectKind::Coroutine(Box::new(co)), proto: Some(a.realm.object_proto), ..ObjectData::default() }.alloc(a.mc).into())
+            }
+            // `await`: the coroutine resumes once the value settles; the frame gives back the promise (what the call
+            // returns when this is the first suspension)
+            Intrinsic::AsyncFunctionAwait => {
+                let Some(co) = arg(0).as_object() else { unreachable!("a generator object") };
+                let p = a.promise_resolve(arg(1))?;
+                a.perform_then(p, j8framework::Reaction::Await { coroutine: co });
+                Ok(Self::coroutine(co, |c| c.promise).map_or(Value::Undefined, Value::Object))
+            }
+            Intrinsic::AsyncFunctionResolve | Intrinsic::AsyncFunctionReject => {
+                let Some(co) = arg(0).as_object() else { unreachable!("a generator object") };
+                let Some(promise) = Self::coroutine(co, |c| c.promise) else { unreachable!("an async function's promise") };
+                if i == Intrinsic::AsyncFunctionResolve {
+                    a.resolve_promise(promise, arg(1))?;
+                } else {
+                    a.reject_promise(promise, arg(1));
+                }
+                Ok(promise.into())
+            }
+            Intrinsic::CreateAsyncFromSyncIterator => {
+                let iterator = arg(0);
+                let next = a.get_named(iterator, "next")?;
+                let rec = j8framework::IterRecord { iterator, next };
+                Ok(ObjectData { kind: ObjectKind::AsyncFromSyncIterator(rec), proto: Some(a.realm.async_from_sync_iterator_proto), ..ObjectData::default() }.alloc(a.mc).into())
+            }
+            Intrinsic::GeneratorGetResumeMode => {
+                let Some(co) = arg(0).as_object() else { unreachable!("a generator object") };
+                Ok(Value::Number(Self::coroutine(co, |c| if matches!(c.waiting, j8framework::Waiting::Rethrow) { RESUME_RETHROW } else { f64::from(c.mode) })))
+            }
+            // Async generators: the body suspends after each of these, and `resume` turns what they recorded into the
+            // step the request queue acts on
+            Intrinsic::AsyncGeneratorAwait | Intrinsic::AsyncGeneratorYieldWithAwait => {
+                let Some(co) = arg(0).as_object() else { unreachable!("a generator object") };
+                let v = arg(1);
+                let waiting = if i == Intrinsic::AsyncGeneratorAwait { j8framework::Waiting::Await(v) } else { j8framework::Waiting::Yield(v) };
+                Self::coroutine_mut(a, co, |c| c.waiting = waiting);
+                Ok(Value::Undefined)
+            }
+            Intrinsic::AsyncGeneratorResolve | Intrinsic::AsyncGeneratorReject => {
+                let Some(co) = arg(0).as_object() else { unreachable!("a generator object") };
+                let v = arg(1);
+                let settlement = if i == Intrinsic::AsyncGeneratorResolve { j8framework::Settlement::Resolved(v) } else { j8framework::Settlement::Rejected(v) };
+                // The rejection stands: the return after the body's catch handler passes through `AsyncGeneratorResolve`
+                Self::coroutine_mut(a, co, |c| {
+                    if !matches!(c.settlement, j8framework::Settlement::Rejected(_)) {
+                        c.settlement = settlement;
+                    }
+                });
+                Ok(Value::Undefined)
+            }
+            // What `next` / `return` / `throw` give for a `yield` (`yield*` passes its iterator's results on unchanged)
+            Intrinsic::GeneratorYieldResult => Ok(a.iter_result(arg(0), false).into()),
+            Intrinsic::GeneratorClose => {
+                if let Some(co) = arg(0).as_object() {
+                    Self::coroutine_mut(a, co, |c| c.state = j8framework::CoroutineState::Completed);
+                }
+                Ok(Value::Undefined)
             }
             other => Err(a.throw(ErrorKind::Syntax, &alloc::format!("intrinsic {other:?} is not supported yet"))),
         }
@@ -1757,6 +1888,8 @@ impl Executor {
                 Ok(Value::Undefined)
             }
             Runtime::ThrowConstAssignError => Err(a.throw(ErrorKind::Type, "Assignment to constant variable.")),
+            Runtime::ThrowSymbolAsyncIteratorInvalid => Err(a.throw(ErrorKind::Type, "Result of the Symbol.asyncIterator method is not an object")),
+            Runtime::ThrowThrowMethodMissing => Err(a.throw(ErrorKind::Type, "The iterator does not provide a 'throw' method")),
             Runtime::ThrowIteratorResultNotAnObject => {
                 let what = a.describe(arg(0));
                 Err(a.throw(ErrorKind::Type, &alloc::format!("Iterator result {what} is not an object")))
@@ -1792,13 +1925,13 @@ impl Executor {
                 }))
             }
             Runtime::DefineAccessorPropertyUnchecked => {
+                // The key is a property key already (a computed one may be a symbol)
                 if let Some(o) = arg(0).as_object() {
-                    let key = text(a, arg(1))?;
                     if let Some(g) = arg(2).as_object() {
-                        a.define_accessor(o, &key, g, false, true);
+                        a.define_accessor_keyed(o, arg(1), g, false, true)?;
                     }
                     if let Some(s) = arg(3).as_object() {
-                        a.define_accessor(o, &key, s, true, true);
+                        a.define_accessor_keyed(o, arg(1), s, true, true)?;
                     }
                 }
                 Ok(Value::Undefined)
@@ -1874,8 +2007,89 @@ impl<'gc> Invoke<'gc> for Executor {
         r
     }
 
-    fn resume(&self, a: &mut Agent<'gc, '_>, _co: JsObject<'gc>, _mode: Resume, _value: Value<'gc>) -> Result<Step<'gc>, Error> {
-        Err(a.throw(ErrorKind::Syntax, "generators and async functions are not on V8 bytecode yet"))
+    /// Re-enters the generator's function with its receiver and parameters: `SwitchOnGeneratorState` jumps to the
+    /// resume point, `ResumeGenerator` brings the registers back. Stopping at `SuspendGenerator` gives
+    /// [`Step::Yield`] with what the frame returned, returning finishes the coroutine.
+    fn resume(&self, a: &mut Agent<'gc, '_>, co: JsObject<'gc>, mode: Resume, value: Value<'gc>) -> Result<Step<'gc>, Error> {
+        use j8framework::{CoroutineState as S, Settlement, Waiting as W};
+        let level = self.depth.get() + 1;
+        if level >= STACK_LIMIT {
+            return Err(a.throw(ErrorKind::Range, "Maximum call stack size exceeded"));
+        }
+        let (state, waiting, async_generator) = Self::coroutine_mut(a, co, |c| (c.state, core::mem::replace(&mut c.waiting, W::Nothing), c.requests.is_some()));
+        // What a suspended async generator waited for comes back first
+        let (mut mode, mut rethrow) = (mode, false);
+        match waiting {
+            // The yielded value settled: a fulfillment answers the request, a rejection is thrown at the `yield`
+            W::Yield(_) if mode == Resume::Next => return Ok(Step::Yield(value)),
+            W::Yield(_) => rethrow = true,
+            // The value of a `return` request settled
+            W::Return => mode = if mode == Resume::Next { Resume::Return } else { Resume::Throw },
+            W::Nothing | W::Await(_) | W::Rethrow => {
+                // A `return` request awaits its value before the body sees it
+                if async_generator && mode == Resume::Return && state != S::Running {
+                    Self::coroutine_mut(a, co, |c| c.waiting = W::Return);
+                    return Ok(Step::Await(value));
+                }
+            }
+        }
+        if state == S::Suspended {
+            Self::coroutine_mut(a, co, |c| {
+                c.state = S::Running;
+                c.mode = mode;
+                c.input = value;
+                c.settlement = Settlement::Nothing;
+                if rethrow {
+                    c.waiting = W::Rethrow;
+                }
+            });
+        }
+        match (state, mode) {
+            (S::Suspended, _) => {}
+            (S::Running, _) => return Err(a.throw(ErrorKind::Type, "Generator is already running")),
+            (S::Completed, Resume::Next) => return Ok(Step::Done(Value::Undefined)),
+            (S::Completed, Resume::Return) => return Ok(Step::Done(value)),
+            (S::Completed, Resume::Throw) => return Err(a.throw_value(value)),
+        }
+        let (callee, params) = Self::coroutine(co, |c| (c.frame.closure, c.frame.params.clone()));
+        let Some(closure) = callee.as_object().and_then(|o| match &o.borrow().kind {
+            ObjectKind::Function(c) => Some(*c),
+            _ => None,
+        }) else {
+            unreachable!("a generator's function")
+        };
+        let mut regs = a.take_regs();
+        regs.clear();
+        let (this, args) = params.split_first().map_or((Value::Undefined, &[][..]), |(t, rest)| (*t, rest));
+        let f = self.open(a, &mut regs, closure, callee, this, args);
+        if let Some(r) = self.function(closure.func).func.bytecode.new_target_or_generator {
+            regs[f.base + usize::try_from(r).unwrap_or(0)] = co.into();
+        }
+        let r = self.run_frame(a, regs, f, level);
+        // An async generator's body reports through its intrinsics: an `await` (also of a yielded value), a request
+        // answered (`yield*` / `return`), a rejection
+        let v = match r {
+            Ok(v) => v,
+            Err(e) => {
+                Self::coroutine_mut(a, co, |c| c.state = S::Completed);
+                return Err(e);
+            }
+        };
+        let (suspended, waiting, settlement) = Self::coroutine_mut(a, co, |c| {
+            let suspended = c.state == S::Suspended;
+            if !suspended {
+                c.state = S::Completed;
+            }
+            (suspended, c.waiting, core::mem::replace(&mut c.settlement, Settlement::Nothing))
+        });
+        match (suspended, waiting, settlement) {
+            (true, W::Await(w) | W::Yield(w), _) => Ok(Step::Await(w)),
+            (true, _, Settlement::Resolved(x)) => Ok(Step::Yield(x)),
+            (true, ..) => Ok(Step::Yield(v)),
+            (false, _, Settlement::Rejected(e)) => Err(a.throw_value(e)),
+            (false, _, Settlement::Resolved(x)) => Ok(Step::Done(x)),
+            (false, ..) => Ok(Step::Done(v)),
+        }
     }
 
     fn construct(&self, a: &mut Agent<'gc, '_>, callee: Value<'gc>, args: &[Value<'gc>], new_target: Value<'gc>) -> Result<Value<'gc>, Error> {

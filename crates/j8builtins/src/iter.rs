@@ -86,14 +86,15 @@ impl Iters {
         Ok(a.iter_result(v.unwrap_or_default(), v.is_none()).into())
     }
 
-    /// Generator `next` / `return` / `throw`: resume one step, wrap the result in `{ value, done }`.
+    /// Generator `next` / `return` / `throw`: resume one step. A suspension gives the iterator result the bytecode made;
+    /// finishing gives `{ value, done: true }`.
     fn resume<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, mode: Resume, v: Value<'gc>) -> Result<Value<'gc>, Error> {
         let co = match this.kind() {
             ValueKind::Object(o) if matches!(&o.borrow().kind, ObjectKind::Coroutine(c) if c.promise.is_none() && c.requests.is_none()) => o,
             _ => return Err(a.throw(ErrorKind::Type, "Generator method called on an incompatible receiver")),
         };
         Ok(match a.resume(co, mode, v)? {
-            Step::Yield(x) => a.iter_result(x, false),
+            Step::Yield(x) => return Ok(x),
             Step::Done(x) => a.iter_result(x, true),
             Step::Await(_) => unreachable!("generators do not await"),
         }

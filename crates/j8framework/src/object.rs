@@ -304,27 +304,28 @@ pub enum IteratorState<'gc> {
     String { s: JsString<'gc>, pos: usize },
 }
 
-/// A suspended frame: the full execution state a generator / async function saved at `yield` / `await`.
+/// What a suspended generator / async function keeps of its frame (V8's `JSGeneratorObject` fields): the function, the
+/// receiver and parameters, the registers `SuspendGenerator` saved, the context, and where to resume.
 #[derive(Debug, Collect)]
 #[collect(no_drop)]
 pub struct Suspended<'gc> {
-    pub func: FuncId,
-    pub pc: usize,
+    /// The function (the frame's `<closure>`)
+    pub closure: Value<'gc>,
+    /// The receiver, then the parameters
+    pub params: Vec<Value<'gc>>,
+    /// The registers saved at the last suspension (from r0)
     pub regs: Vec<Value<'gc>>,
-    pub env: Option<JsEnv<'gc>>,
-    /// Installed exception handlers: (landing pad, environment at install time)
-    pub handlers: Vec<(u32, Option<JsEnv<'gc>>)>,
-    pub args: Vec<Value<'gc>>,
-    /// The register that receives the resume kind on resumption (absent before it starts running)
-    pub mode: Option<u16>,
+    pub context: Option<JsEnv<'gc>>,
+    /// Where to resume: the suspend id of the last suspension (V8's `continuation`)
+    pub continuation: u32,
 }
 
 /// The state of a coroutine (generator / async function).
-#[derive(Debug, Collect)]
-#[collect(no_drop)]
-pub enum CoroutineState<'gc> {
-    /// Not started yet, or stopped at `yield` / `await`
-    Suspended(Suspended<'gc>),
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Collect)]
+#[collect(require_static)]
+pub enum CoroutineState {
+    /// Stopped at a `yield` / `await` (or the initial yield)
+    Suspended,
     /// Running (reentering `next` throws a TypeError)
     Running,
     Completed,
@@ -334,20 +335,64 @@ pub enum CoroutineState<'gc> {
 #[derive(Debug, Collect)]
 #[collect(no_drop)]
 pub struct Coroutine<'gc> {
-    pub state: CoroutineState<'gc>,
-    /// Has not run its first step yet (at this point `return` / `throw` finish it directly)
-    pub fresh: bool,
+    pub state: CoroutineState,
+    pub frame: Suspended<'gc>,
+    /// The resumption in progress: how, and the value sent in (`ResumeGenerator` / `GeneratorGetResumeMode` read them)
+    pub mode: crate::Resume,
+    pub input: Value<'gc>,
+    /// Async generator: what the generator waits for while suspended (set by the bytecode's intrinsics / `return`)
+    pub waiting: Waiting<'gc>,
+    /// Async generator: how the last run of the body ended (`AsyncGeneratorResolve` / `AsyncGeneratorReject`)
+    pub settlement: Settlement<'gc>,
     pub promise: Option<JsObject<'gc>>,
     /// Async generator: queued `next` / `throw` / `return` requests; the head is the one being processed
     pub requests: Option<alloc::collections::VecDeque<Request<'gc>>>,
 }
 
 impl<'gc> Coroutine<'gc> {
-    /// A coroutine that has not started: generator (neither `promise` nor `requests`), async function (with a result
-    /// Promise), async generator (with a request queue).
-    pub fn new(saved: Suspended<'gc>, promise: Option<JsObject<'gc>>, async_generator: bool) -> Self {
-        Self { state: CoroutineState::Suspended(saved), fresh: true, promise, requests: async_generator.then(alloc::collections::VecDeque::new) }
+    /// The coroutine of a call of `closure` that is running now: generator (neither `promise` nor `requests`), async
+    /// function (with a result Promise), async generator (with a request queue).
+    pub fn new(closure: Value<'gc>, promise: Option<JsObject<'gc>>, async_generator: bool) -> Self {
+        Self {
+            state: CoroutineState::Running,
+            frame: Suspended { closure, params: Vec::new(), regs: Vec::new(), context: None, continuation: 0 },
+            mode: crate::Resume::Next,
+            input: Value::Undefined,
+            waiting: Waiting::Nothing,
+            settlement: Settlement::Nothing,
+            promise,
+            requests: async_generator.then(alloc::collections::VecDeque::new),
+        }
     }
+}
+
+/// What a suspended async generator waits for: the settlement of an awaited value comes back as its next resumption.
+#[derive(Clone, Copy, Debug, Collect)]
+#[collect(no_drop)]
+pub enum Waiting<'gc> {
+    /// A request resumes it
+    Nothing,
+    /// `await` of this value: the settlement resumes the body
+    Await(Value<'gc>),
+    /// `yield` of this value, awaited first: a fulfillment answers the request with the value, a rejection is rethrown
+    /// in the body
+    Yield(Value<'gc>),
+    /// A `return` request, its value awaited first: a fulfillment resumes the body with that return, a rejection with a
+    /// throw
+    Return,
+    /// Resumed with a rejection of a yielded value (`GeneratorGetResumeMode` gives V8's `kRethrow`)
+    Rethrow,
+}
+
+/// How an async generator's body finished the request it was running.
+#[derive(Clone, Copy, Debug, Collect)]
+#[collect(no_drop)]
+pub enum Settlement<'gc> {
+    Nothing,
+    /// `AsyncGeneratorResolve`: the request's result value (done when the body then returns)
+    Resolved(Value<'gc>),
+    /// `AsyncGeneratorReject`: the request is rejected with this reason
+    Rejected(Value<'gc>),
 }
 
 /// One request to an async generator: how to resume, the value sent in, and the Promise for the caller.
@@ -767,6 +812,8 @@ pub enum ObjectKind<'gc> {
     IteratorHelper(Box<IteratorHelper<'gc>>),
     /// An iterator wrapped by `Iterator.from`
     WrappedIterator(crate::IterRecord<'gc>),
+    /// An async iterator over a sync one (`for await` / `yield*` in an async generator over a sync iterable)
+    AsyncFromSyncIterator(crate::IterRecord<'gc>),
     ArrayBuffer(Box<BufferData>),
     /// Date: the time value (milliseconds; NaN when invalid)
     Date(f64),
@@ -976,7 +1023,7 @@ impl fmt::Debug for ObjectState<'_> {
             ObjectKind::RegExpStringIterator { .. } => "RegExp String Iterator",
             ObjectKind::TypedArray(..) => "TypedArray",
             ObjectKind::DataView(_) => "DataView",
-            ObjectKind::Iterator(_) | ObjectKind::CollectionIterator { .. } | ObjectKind::IteratorHelper(_) | ObjectKind::WrappedIterator(_) => "Iterator",
+            ObjectKind::Iterator(_) | ObjectKind::CollectionIterator { .. } | ObjectKind::IteratorHelper(_) | ObjectKind::WrappedIterator(_) | ObjectKind::AsyncFromSyncIterator(_) => "Iterator",
             ObjectKind::Coroutine(_) => "Generator",
             ObjectKind::Promise { .. } => "Promise",
             ObjectKind::RegExp(_) => "RegExp",
