@@ -254,6 +254,8 @@ impl Loaded {
 #[collect(require_static)]
 struct Frame {
     func: FuncId,
+    /// The function's loaded code (what `func` names), kept so returning to this frame needs no lookup by id
+    loaded: LoadedRef,
     /// The next instruction (an index into the function's instructions)
     pc: usize,
     /// The instruction being executed: handler table lookups use it
@@ -264,6 +266,33 @@ struct Frame {
     base: usize,
     /// The number of arguments passed
     argc: usize,
+}
+
+/// The address of a loaded function: the executor's code is append-only and outlives every frame of its executions
+#[derive(Clone, Copy)]
+struct LoadedRef(core::ptr::NonNull<Loaded>);
+
+// SAFETY: a frame lives in an execution of the executor owning the code, which moves between threads with its
+// isolate, one thread at a time (the executor is `Send`); the code is reached only from that thread
+unsafe impl Send for LoadedRef {}
+// SAFETY: as above
+unsafe impl Sync for LoadedRef {}
+
+impl From<&Loaded> for LoadedRef {
+    fn from(l: &Loaded) -> Self {
+        Self(core::ptr::NonNull::from(l))
+    }
+}
+
+impl LoadedRef {
+    /// The code, for as long as the executor holding it
+    ///
+    /// # Safety
+    /// `'e` must not outlive the executor the frame runs on
+    unsafe fn get<'e>(self) -> &'e Loaded {
+        // SAFETY: the executor keeps every loaded function at a fixed address until it is dropped (see the caller)
+        unsafe { self.0.as_ref() }
+    }
 }
 
 impl Frame {
@@ -592,13 +621,14 @@ impl Executor {
         let base = regs.len();
         // The register V8 puts new.target / the generator object in on entry starts `undefined` with the rest
         regs.resize(base + f.bytecode.register_count as usize, Value::Undefined);
-        Frame { func: closure.func, pc: 0, insn: 0, params, base, argc: args.len() }
+        Frame { func: closure.func, loaded: LoadedRef::from(loaded), pc: 0, insn: 0, params, base, argc: args.len() }
     }
 
     /// Sets the new.target register of a construct frame
     fn set_new_target<'gc>(&self, regs: &mut [Value<'gc>], f: &mut Frame, nt: Value<'gc>) {
         f.set_slot(regs, Frame::NEW_TARGET, nt);
-        if let Some(r) = self.function(f.func).func.bytecode.new_target_or_generator {
+        // SAFETY: the frame runs on this executor
+        if let Some(r) = unsafe { f.loaded.get::<'_>() }.func.bytecode.new_target_or_generator {
             regs[f.base + usize::try_from(r).unwrap_or(0)] = nt;
         }
     }
@@ -1249,7 +1279,8 @@ impl Executor {
             if budget.spent() {
                 return Ok(None);
             }
-            let loaded = self.function(st.f().func);
+            // SAFETY: the frame runs on this executor
+            let loaded: &Loaded = unsafe { st.f().loaded.get() };
             let mut cx = threaded::Cx { exe: self, a, st, loaded, budget, depth };
             match Self::threaded(&mut cx) {
                 threaded::Exit::Frame => {}

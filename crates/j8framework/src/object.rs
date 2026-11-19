@@ -1781,7 +1781,7 @@ impl<'gc> Object<'gc> {
 
     /// Append an entry, switching the shape directly to `to` (from the execution layer's inline cache)
     pub fn push_to(&self, mc: &Mutation<'gc>, to: &alloc::sync::Arc<crate::Shape>, slot: Slot<'gc>) {
-        if to.key(to.len() - 1).as_bytes().first().is_some_and(u8::is_ascii_digit) {
+        if to.digit_keys() {
             self.digit_keys.set(true);
         }
         let proto = self.proto();

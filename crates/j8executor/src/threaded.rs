@@ -460,8 +460,9 @@ handlers! {
         let st = &mut *cx.st;
         st.pop_frame();
         let caller = st.f();
-        let (func, at, base) = (caller.func, caller.pc, caller.base);
-        let l = cx.exe.function(func);
+        let (at, base) = (caller.pc, caller.base);
+        // SAFETY: the caller's frame runs on this executor, which outlives `cx`
+        let l = unsafe { caller.loaded.get() };
         cx.loaded = l;
         // SAFETY: the caller's `pc` was synced when it called (an instruction after the call)
         let pc = unsafe { l.insns.as_ptr().add(at) };
