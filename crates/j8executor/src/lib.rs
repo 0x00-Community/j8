@@ -584,6 +584,16 @@ impl Executor {
         self.context_shapes.get(id.0 as usize).expect("shape ids come from load")
     }
 
+    /// A closure's code: from the address its function object carries, else by id
+    #[inline]
+    fn code(&self, c: &Closure<'_>) -> &Loaded {
+        match c.code {
+            // SAFETY: function objects get it from this executor's code (`function_object`), which outlives them
+            Some(code) => unsafe { code.get() },
+            None => self.function(c.func),
+        }
+    }
+
     #[inline]
     fn function(&self, f: FuncId) -> &Loaded {
         self.code.get(f.0 as usize).expect("function ids come from load")
@@ -600,6 +610,24 @@ impl Executor {
 
     #[expect(clippy::too_many_arguments, reason = "the parts of a call")]
     fn open_with<'gc>(&self, a: &mut Agent<'gc, '_>, regs: &mut Vec<Value<'gc>>, loaded: &Loaded, closure: Closure<'gc>, callee: Value<'gc>, this: Value<'gc>, args: Args<'_, 'gc>) -> Frame {
+        let (params, base) = self.open_regs(a, regs, loaded, closure, callee, this, args);
+        Frame { func: closure.func, loaded: LoadedRef::from(loaded), pc: 0, insn: 0, params, base, argc: args.len() }
+    }
+
+    /// Opens a frame for a call from bytecode: its part of the register file, then its record right on the frame stack
+    /// (built in place: a record handed back by value would cross the stack in pieces first). Gives the new r0's index.
+    #[expect(clippy::too_many_arguments, reason = "the parts of a call")]
+    #[inline]
+    fn push_open<'gc>(&self, a: &mut Agent<'gc, '_>, st: &mut State<'gc>, loaded: &Loaded, closure: Closure<'gc>, callee: Value<'gc>, this: Value<'gc>, args: Args<'_, 'gc>) -> usize {
+        let (params, base) = self.open_regs(a, &mut st.regs, loaded, closure, callee, this, args);
+        st.frames.push(Frame { func: closure.func, loaded: LoadedRef::from(loaded), pc: 0, insn: 0, params, base, argc: args.len() });
+        base
+    }
+
+    /// A new frame's part of the register file: receiver, parameters, header, registers; gives where the receiver
+    /// and r0 are
+    #[expect(clippy::too_many_arguments, reason = "the parts of a call")]
+    fn open_regs<'gc>(&self, a: &mut Agent<'gc, '_>, regs: &mut Vec<Value<'gc>>, loaded: &Loaded, closure: Closure<'gc>, callee: Value<'gc>, this: Value<'gc>, args: Args<'_, 'gc>) -> (usize, usize) {
         let f = &loaded.func;
         a.profiler.enter(closure.func);
         let this = match this.kind() {
@@ -621,7 +649,7 @@ impl Executor {
         let base = regs.len();
         // The register V8 puts new.target / the generator object in on entry starts `undefined` with the rest
         regs.resize(base + f.bytecode.register_count as usize, Value::Undefined);
-        Frame { func: closure.func, loaded: LoadedRef::from(loaded), pc: 0, insn: 0, params, base, argc: args.len() }
+        (params, base)
     }
 
     /// Sets the new.target register of a construct frame
@@ -800,9 +828,6 @@ impl Executor {
                         None
                     } else {
                         let this = Self::create_this(a, loaded, new_target)?;
-                        if let Some(init) = closure.fields {
-                            a.call(init.into(), this.into(), &[])?;
-                        }
                         Some(Value::Object(this))
                     };
                     let mut f = self.open(a, regs, closure, callee, this.unwrap_or(Value::Uninit), &args);
@@ -877,8 +902,9 @@ impl Executor {
     }
 
     /// Creates a function object; ordinary functions get a `prototype` (whose `constructor` points back).
-    fn function_object<'gc>(&self, a: &Agent<'gc, '_>, closure: Closure<'gc>) -> JsObject<'gc> {
+    fn function_object<'gc>(&self, a: &Agent<'gc, '_>, mut closure: Closure<'gc>) -> JsObject<'gc> {
         let loaded = self.function(closure.func);
+        closure.code = Some(j8framework::Code::new(loaded));
         let func = &loaded.func;
         let proto = match (loaded.generator, loaded.asynchronous) {
             (true, true) => a.realm.async_generator_function_proto,

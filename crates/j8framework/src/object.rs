@@ -188,20 +188,46 @@ impl<'gc> Env<'gc> {
     }
 }
 
-/// A closure: function index, the environment at creation, the method's home object (`super` looks up from its
-/// prototype), and the class constructor's instance field initializer.
+/// A closure: function index, the environment at creation, and where the execution engine keeps the function's code.
 #[derive(Clone, Copy, Debug, Collect)]
 #[collect(no_drop)]
 pub struct Closure<'gc> {
     pub func: FuncId,
     pub env: Option<JsEnv<'gc>>,
-    pub home: Option<JsObject<'gc>>,
-    pub fields: Option<JsObject<'gc>>,
+    /// The engine's code for `func` (set by the engine when it makes the function object): a call reaches it without
+    /// a lookup by id
+    #[collect(require_static)]
+    pub code: Option<Code>,
 }
 
 impl<'gc> Closure<'gc> {
     pub fn new(func: FuncId, env: Option<JsEnv<'gc>>) -> Self {
-        Self { func, env, home: None, fields: None }
+        Self { func, env, code: None }
+    }
+}
+
+/// The address of an execution engine's code for a function, opaque here. The engine keeps its code at a fixed
+/// address for as long as it lives, and closures only run on the engine that made them.
+#[derive(Clone, Copy, Debug)]
+pub struct Code(core::ptr::NonNull<()>);
+
+// SAFETY: an address only, dereferenced by the engine that owns what it points at (see `Code::get`)
+unsafe impl Send for Code {}
+// SAFETY: as above
+unsafe impl Sync for Code {}
+
+impl Code {
+    pub fn new<T>(code: &T) -> Self {
+        Self(core::ptr::NonNull::from(code).cast())
+    }
+
+    /// The code
+    ///
+    /// # Safety
+    /// `T` must be the type it was made from, and `'e` must not outlive the engine owning it
+    pub unsafe fn get<'e, T>(self) -> &'e T {
+        // SAFETY: the caller's contract
+        unsafe { self.0.cast::<T>().as_ref() }
     }
 }
 

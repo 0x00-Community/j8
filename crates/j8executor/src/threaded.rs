@@ -267,7 +267,7 @@ handlers! {
 fn enter<'r, 'gc>(cx: &mut Cx<'r, 'gc, '_, '_>, pc: *const Insn, callee: Value<'gc>, this: Value<'gc>, args: Args<'_, 'gc>) -> Option<(*const Insn, *mut Value<'gc>)> {
     let ValueKind::Object(o) = callee.kind() else { return None };
     let c = o.closure()?;
-    let l: &'r Loaded = cx.exe.function(c.func);
+    let l: &'r Loaded = cx.exe.code(&c);
     if l.class_constructor || l.generator || l.asynchronous || cx.depth + cx.st.frames.len() + 1 >= STACK_LIMIT {
         return None;
     }
@@ -276,9 +276,7 @@ fn enter<'r, 'gc>(cx: &mut Cx<'r, 'gc, '_, '_>, pc: *const Insn, callee: Value<'
     let f = cx.st.f_mut();
     f.insn = at;
     f.pc = at + 1;
-    let next = cx.exe.open_with(cx.a, &mut cx.st.regs, l, c, callee, this, args);
-    let base = next.base;
-    cx.st.frames.push(next);
+    let base = cx.exe.push_open(cx.a, cx.st, l, c, callee, this, args);
     cx.loaded = l;
     Some((l.insns.as_ptr(), cx.st.regs.as_mut_ptr().wrapping_add(base)))
 }
@@ -347,8 +345,8 @@ handlers! {
         let callee = reg!(cx, regs, o[0]);
         let ValueKind::Object(ob) = callee.kind() else { fall!(cx, pc, regs, acc) };
         let Some(c) = ob.closure() else { fall!(cx, pc, regs, acc) };
-        let l = cx.exe.function(c.func);
-        if !(l.constructs || l.class_constructor) || l.generator || l.asynchronous || c.fields.is_some() || cx.depth + cx.st.frames.len() + 1 >= STACK_LIMIT {
+        let l = cx.exe.code(&c);
+        if !(l.constructs || l.class_constructor) || l.generator || l.asynchronous || cx.depth + cx.st.frames.len() + 1 >= STACK_LIMIT {
             fall!(cx, pc, regs, acc)
         }
         sync(cx, pc);
@@ -362,11 +360,14 @@ handlers! {
         };
         let first = Executor::slot_of(cx.st.f(), o[1]).unwrap_or(cx.st.regs.len());
         let args = Args::Regs { first, count: o[2] as usize };
-        let mut f = cx.exe.open_with(cx.a, &mut cx.st.regs, l, c, callee, this, args);
-        cx.exe.set_new_target(&mut cx.st.regs, &mut f, acc);
-        f.set_slot(&mut cx.st.regs, Frame::NEW_THIS, this);
-        let base = f.base;
-        cx.st.frames.push(f);
+        let base = cx.exe.push_open(cx.a, cx.st, l, c, callee, this, args);
+        // new.target in the header and in the register V8 gives it, `this` built
+        let regs = &mut cx.st.regs;
+        regs[base - Frame::NEW_TARGET] = acc;
+        regs[base - Frame::NEW_THIS] = this;
+        if let Some(r) = l.func.bytecode.new_target_or_generator {
+            regs[base + r as usize] = acc;
+        }
         cx.loaded = l;
         let regs = cx.st.regs.as_mut_ptr().wrapping_add(base);
         next!(cx, l.insns.as_ptr(), regs, Value::Undefined)
