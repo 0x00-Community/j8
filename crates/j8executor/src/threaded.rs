@@ -243,6 +243,33 @@ handlers! {
         }
         next!(cx, step!(pc), regs, acc)
     }
+    push_context(cx, pc, regs, acc, o) {
+        if o[0] > Loaded::SPECIAL_LIMIT && acc.as_context().is_some() {
+            // SAFETY: as in `reg!`; the header's context slot is right below r0
+            unsafe {
+                *regs.offset(o[0] as isize) = *regs.sub(Frame::CONTEXT);
+                *regs.sub(Frame::CONTEXT) = acc;
+            }
+            next!(cx, step!(pc), regs, acc)
+        }
+        fall!(cx, pc, regs, acc)
+    }
+    pop_context(cx, pc, regs, acc, o) {
+        let e = reg!(cx, regs, o[0]);
+        // SAFETY: as above
+        unsafe { *regs.sub(Frame::CONTEXT) = if e.as_context().is_some() { e } else { Value::Undefined } };
+        next!(cx, step!(pc), regs, acc)
+    }
+    create_block_context(cx, pc, regs, acc, o) {
+        // SAFETY: as above
+        let parent = unsafe { *regs.sub(Frame::CONTEXT) }.as_context();
+        next!(cx, step!(pc), regs, cx.loaded.block_context(cx.a, o[0], parent))
+    }
+    create_closure(cx, pc, regs, acc, o) {
+        // SAFETY: as above
+        let env = unsafe { *regs.sub(Frame::CONTEXT) }.as_context();
+        next!(cx, step!(pc), regs, cx.exe.create_closure(cx.a, cx.loaded, o[0], env).into())
+    }
     get_named_property(cx, pc, regs, acc, o) {
         if let ValueKind::Object(ob) = reg!(cx, regs, o[0]).kind()
             && let Some(v) = cx.loaded.ics[o[2] as usize].get(ob)
@@ -545,6 +572,10 @@ impl Insn {
             B::LdaCurrentContextSlot | B::LdaCurrentContextSlotNoCell | B::LdaImmutableCurrentContextSlot => lda_current_context_slot,
             B::StaCurrentContextSlot | B::StaCurrentContextSlotNoCell => sta_current_context_slot,
             B::ThrowReferenceErrorIfHole => throw_reference_error_if_hole,
+            B::PushContext => push_context,
+            B::PopContext => pop_context,
+            B::CreateBlockContext => create_block_context,
+            B::CreateClosure => create_closure,
             B::GetNamedProperty => get_named_property,
             B::LdaGlobal => lda_global,
             B::CallUndefinedReceiver0 => call_undefined_receiver0,

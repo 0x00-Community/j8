@@ -82,8 +82,8 @@ struct Loaded {
     /// The shape of its function objects (`length`, `name`, maybe `prototype`), and of their `prototype` objects
     function_shape: RefCell<Option<Arc<Shape>>>,
     prototype_shape: RefCell<Option<Arc<Shape>>>,
-    /// By constant index: the context shapes of `Scope` constants
-    shapes: Box<[Option<ShapeId>]>,
+    /// By constant index: the context shapes of `Scope` constants, and how many slots their contexts have
+    shapes: Box<[Option<(ShapeId, u32)>]>,
     /// The function context's shape (when the function has one) / the script context's
     scope: Option<ShapeId>,
     /// Whether its function context gets an extension object (a sloppy direct eval declares `var`s there)
@@ -116,7 +116,7 @@ impl Loaded {
         let ics = bc.feedback.iter().map(|_| ic::Ic::default()).collect();
         let globals = bc.feedback.iter().map(|_| ic::GlobalIc::default()).collect();
         let shapes = bc.constants.iter().map(|c| match c {
-            Constant::Scope(s) => Some(Self::add_shape(table, s)),
+            Constant::Scope(s) => Some((Self::add_shape(table, s), u32::try_from(Self::shape(s).names.len()).expect("fewer than 2^32 slots"))),
             _ => None,
         }).collect();
         let literals = bc.constants.iter().map(|_| RefCell::new(None)).collect();
@@ -226,6 +226,19 @@ impl Loaded {
 
     /// A scope info's shape for contexts made from it
     /// Adds a context shape to the executor's table
+    /// The context shape of `Scope` constant `k`, and its slot count
+    #[inline]
+    fn scope_shape(&self, k: OperandValue) -> Option<(ShapeId, u32)> {
+        self.shapes.get(usize::try_from(k).ok()?).copied().flatten()
+    }
+
+    /// `CreateBlockContext` of `Scope` constant `k` under `parent`
+    #[inline]
+    fn block_context<'gc>(&self, a: &Agent<'gc, '_>, k: OperandValue, parent: Option<JsEnv<'gc>>) -> Value<'gc> {
+        let (shape, n) = self.scope_shape(k).map_or((None, 0), |(s, n)| (Some(s), n as usize));
+        Value::context(Env::context(n, Value::Undefined, parent, shape, None).alloc(a.mc))
+    }
+
     fn add_shape(table: &SegVec<ContextShape>, s: &ScopeInfo) -> ShapeId {
         ShapeId(u32::try_from(table.push(Self::shape(s))).expect("fewer than 2^32 context shapes"))
     }
@@ -903,6 +916,13 @@ impl Executor {
         r
     }
 
+    /// `CreateClosure` of function constant `k` in context `env`
+    #[inline]
+    fn create_closure<'gc>(&self, a: &Agent<'gc, '_>, loaded: &Loaded, k: OperandValue, env: Option<JsEnv<'gc>>) -> JsObject<'gc> {
+        let Some(Constant::Function(n)) = loaded.func.bytecode.constants.get(usize::try_from(k).unwrap_or(0)) else { unreachable!("a function constant") };
+        self.function_object(a, Closure::new(FuncId(loaded.base + n), env))
+    }
+
     /// Creates a function object; ordinary functions get a `prototype` (whose `constructor` points back).
     fn function_object<'gc>(&self, a: &Agent<'gc, '_>, mut closure: Closure<'gc>) -> JsObject<'gc> {
         let loaded = self.function(closure.func);
@@ -1504,18 +1524,14 @@ impl Executor {
                 f.set_env(regs, e);
             }
             B::CreateFunctionContext | B::CreateEvalContext => {
-                let shape = loaded.shapes[usize::try_from(o[0]).unwrap_or(0)];
+                let shape = loaded.scope_shape(o[0]).map(|(s, _)| s);
                 let n = usize::try_from(o[1]).unwrap_or(0);
                 let extension = loaded.extension.then(|| ObjectData::default().alloc(a.mc));
                 *acc = Value::context(Env::context(n, Value::Undefined, f.env(regs), shape, extension).alloc(a.mc));
             }
-            B::CreateBlockContext => {
-                let shape = loaded.shapes[usize::try_from(o[0]).unwrap_or(0)];
-                let n = shape.map_or(0, |s| self.context_shape(s).names.len());
-                *acc = Value::context(Env::context(n, Value::Undefined, f.env(regs), shape, None).alloc(a.mc));
-            }
+            B::CreateBlockContext => *acc = loaded.block_context(a, o[0], f.env(regs)),
             B::CreateCatchContext => {
-                let shape = loaded.shapes[usize::try_from(o[1]).unwrap_or(0)];
+                let shape = loaded.scope_shape(o[1]).map(|(s, _)| s);
                 let e = Env::context(1, r!(0), f.env(regs), shape, None).alloc(a.mc);
                 *acc = Value::context(e);
             }
@@ -1758,11 +1774,7 @@ impl Executor {
                     self.runtime(a, st, loaded, rt, &args)?
                 };
             }
-            B::CreateClosure => {
-                let Some(Constant::Function(n)) = loaded.func.bytecode.constants.get(usize::try_from(o[0]).unwrap_or(0)) else { unreachable!("a function constant") };
-                let closure = Closure::new(FuncId(loaded.base + n), f.env(regs));
-                *acc = self.function_object(a, closure).into();
-            }
+            B::CreateClosure => *acc = self.create_closure(a, loaded, o[0], f.env(regs)).into(),
             B::CreateEmptyObjectLiteral => *acc = a.object().into(),
             B::CreateObjectLiteral => *acc = Self::object_literal(a, loaded, o[0]).into(),
             B::CreateEmptyArrayLiteral => *acc = a.array(Vec::new()).into(),
