@@ -211,7 +211,7 @@ impl Buffers {
     }
 
     fn global_ctor<'gc>(a: &Agent<'gc, '_>, name: &str) -> Value<'gc> {
-        a.realm.global.borrow().own(name).unwrap_or_default()
+        a.realm.global.borrow().own(a.mc, name).unwrap_or_default()
     }
 
     fn slice_with<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>], shared: bool) -> Result<Value<'gc>, Error> {

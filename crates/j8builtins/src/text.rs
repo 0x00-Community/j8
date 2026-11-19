@@ -690,7 +690,7 @@ natives! {
 
 impl<'gc> Installer<'_, 'gc> {
     fn global_fn(&self, name: &str) -> Value<'gc> {
-        self.realm.global.borrow().own(name).unwrap_or_default()
+        self.realm.global.borrow().own(self.mc, name).unwrap_or_default()
     }
 
     pub(crate) fn texts(&mut self) {
@@ -728,7 +728,7 @@ impl<'gc> Installer<'_, 'gc> {
         }
         // trimLeft / trimRight are the same functions as trimStart / trimEnd
         for (alias, original) in [("trimLeft", "trimStart"), ("trimRight", "trimEnd")] {
-            let f = sp.borrow().own(original).unwrap_or_default();
+            let f = sp.borrow().own(self.mc, original).unwrap_or_default();
             self.set(sp, alias, f);
         }
         // Number

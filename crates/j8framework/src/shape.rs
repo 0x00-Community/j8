@@ -332,11 +332,11 @@ impl<'gc> Props<'gc> {
     }
 
     /// Entry `i`'s value when it holds data (an inline cache hit: the caller matched a fast-mode shape, so this is
-    /// no dictionary); `None` for an accessor
+    /// no dictionary); `None` for an accessor, and for a lazy value not computed yet (an object-level read computes it)
     #[inline]
     pub fn read_data(&self, i: usize) -> Option<Value<'gc>> {
         let v = self.cell(i)?.get();
-        v.as_accessor().is_none().then_some(v)
+        v.is_plain_slot().then_some(v)
     }
 
     /// Replaces entry `i`'s value when it holds data (as [`Props::read_data`]); `false` for an accessor

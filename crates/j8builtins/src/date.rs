@@ -704,7 +704,7 @@ impl Installer<'_, '_> {
             self.method(proto, name, f, n);
         }
         // toGMTString is the same function as toUTCString
-        let utc = proto.borrow().own("toUTCString").unwrap_or_default();
+        let utc = proto.borrow().own(self.mc, "toUTCString").unwrap_or_default();
         self.set(proto, "toGMTString", utc);
         let tp = r.named_native(self.mc, Dates::to_primitive, "[Symbol.toPrimitive]", 1);
         proto.borrow_mut(self.mc).define_symbol(r.symbols.to_primitive, Property { slot: Slot::Data(tp.into()), enumerable: false, writable: false, configurable: true });

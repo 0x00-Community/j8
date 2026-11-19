@@ -139,7 +139,7 @@ impl Installer<'_, '_> {
         self.method(r.string_iterator_proto, "next", Iters::string_next, 0);
         // Record the built-in `next`s: when an iterator record's `next` is one of them, the execution layer steps
         // directly without creating a result object
-        let nexts = [r.array_iterator_proto, r.string_iterator_proto].map(|o| match o.borrow().own("next").map(Value::kind) {
+        let nexts = [r.array_iterator_proto, r.string_iterator_proto].map(|o| match o.borrow().own(self.mc, "next").map(Value::kind) {
             Some(ValueKind::Object(f)) => Some(f),
             _ => None,
         });

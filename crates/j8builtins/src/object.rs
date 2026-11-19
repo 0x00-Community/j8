@@ -525,7 +525,7 @@ impl Objects {
         // In NativeFunction syntax the name can only be a property name (optionally with get / set): private names,
         // `bound f` and the like are left out
         let name = match this.kind() {
-            ValueKind::Object(o) => match o.borrow().get_own("name").and_then(|p| p.value()).map(Value::kind) {
+            ValueKind::Object(o) => match o.borrow().get_own(a.mc, "name").and_then(|p| p.value()).map(Value::kind) {
                 Some(ValueKind::String(s)) if Self::native_name(&s) => alloc::string::String::from(&**s),
                 _ => alloc::string::String::new(),
             },
@@ -637,7 +637,7 @@ impl Installer<'_, '_> {
         // The execution layer expands call / apply inline (the host implementation stays for cases like a non-callable
         // target)
         for (name, forward) in [("call", j8framework::Forward::Call), ("apply", j8framework::Forward::Apply)] {
-            let f = proto.borrow().own(name);
+            let f = proto.borrow().own(self.mc, name);
             if let Some(ValueKind::Object(f)) = f.map(Value::kind)
                 && let ObjectKind::Native(n) = &mut f.borrow_mut(self.mc).kind
             {

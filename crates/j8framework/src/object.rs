@@ -206,10 +206,19 @@ impl<'gc> Closure<'gc> {
     }
 }
 
-/// The address of an execution engine's code for a function, opaque here. The engine keeps its code at a fixed
-/// address for as long as it lives, and closures only run on the engine that made them.
+/// What anyone can know about a function without running it (V8's `SharedFunctionInfo`, off the heap): lazy
+/// properties of its function objects are computed from it. An engine's code for a function starts with one.
+#[derive(Debug)]
+pub struct FunctionInfo {
+    pub name: SmallStr,
+    pub length: u16,
+}
+
+/// The address of an execution engine's code for a function: a [`FunctionInfo`] the engine's own code starts with
+/// (`#[repr(C)]`, first field). The engine keeps its code at a fixed address for as long as it lives, and closures
+/// only run on the engine that made them.
 #[derive(Clone, Copy, Debug)]
-pub struct Code(core::ptr::NonNull<()>);
+pub struct Code(core::ptr::NonNull<FunctionInfo>);
 
 // SAFETY: an address only, dereferenced by the engine that owns what it points at (see `Code::get`)
 unsafe impl Send for Code {}
@@ -217,8 +226,19 @@ unsafe impl Send for Code {}
 unsafe impl Sync for Code {}
 
 impl Code {
-    pub fn new<T>(code: &T) -> Self {
-        Self(core::ptr::NonNull::from(code).cast())
+    /// `info`: the first field of the engine's `#[repr(C)]` code
+    pub fn new(info: &FunctionInfo) -> Self {
+        Self(core::ptr::NonNull::from(info))
+    }
+
+    /// The function's info
+    ///
+    /// # Safety
+    /// `'e` must not outlive the engine owning it
+    #[inline]
+    pub unsafe fn info<'e>(self) -> &'e FunctionInfo {
+        // SAFETY: the caller's contract
+        unsafe { self.0.as_ref() }
     }
 
     /// The code
@@ -1319,17 +1339,17 @@ macro_rules! forward_reads {
             pub fn sparse_elements(&self) -> Vec<(u32, Value<'gc>)> {
                 self.obj.sparse_elements()
             }
-            pub fn prop_at(&self, at: usize, key: &str) -> Option<Property<'gc>> {
-                self.obj.prop_at(at, key)
+            pub fn prop_at(&self, mc: &Mutation<'gc>, at: usize, key: &str) -> Option<Property<'gc>> {
+                self.obj.prop_at(mc, at, key)
             }
             pub fn position(&self, key: &str) -> Option<usize> {
                 self.obj.position(key)
             }
-            pub fn get_own(&self, key: &str) -> Option<Property<'gc>> {
-                self.obj.get_own(key)
+            pub fn get_own(&self, mc: &Mutation<'gc>, key: &str) -> Option<Property<'gc>> {
+                self.obj.get_own(mc, key)
             }
-            pub fn own(&self, key: &str) -> Option<Value<'gc>> {
-                self.obj.own(key)
+            pub fn own(&self, mc: &Mutation<'gc>, key: &str) -> Option<Value<'gc>> {
+                self.obj.own(mc, key)
             }
             pub fn root_shape(&self) -> alloc::sync::Arc<crate::Shape> {
                 self.obj.root_shape()
@@ -1341,9 +1361,9 @@ forward_reads!(ObjRef ObjMut);
 
 impl<'gc> ObjRef<'_, 'gc> {
     /// Own property (only what is stored: the array dense part, ordinary properties, Symbol keys)
-    pub fn own_slot(&self, key: Key<'_, 'gc>) -> Option<Property<'gc>> {
+    pub fn own_slot(&self, mc: &Mutation<'gc>, key: Key<'_, 'gc>) -> Option<Property<'gc>> {
         match key {
-            Key::Str(k) => self.obj.own_str(k),
+            Key::Str(k) => self.obj.own_str(mc, k),
             Key::Sym(s) => self.get_own_symbol(s),
         }
     }
@@ -1352,7 +1372,7 @@ impl<'gc> ObjRef<'_, 'gc> {
 impl<'gc> ObjMut<'_, 'gc> {
     pub fn own_slot(&mut self, key: Key<'_, 'gc>) -> Option<Property<'gc>> {
         match key {
-            Key::Str(k) => self.obj.own_str(k),
+            Key::Str(k) => self.obj.own_str(self.mc, k),
             Key::Sym(s) => self.deref_mut().get_own_symbol(s),
         }
     }
@@ -1687,21 +1707,21 @@ impl<'gc> Object<'gc> {
     }
 
     /// Own string-keyed property (the array dense part or an ordinary property)
-    pub fn own_str(&self, k: &str) -> Option<Property<'gc>> {
+    pub fn own_str(&self, mc: &Mutation<'gc>, k: &str) -> Option<Property<'gc>> {
         if self.is_array()
             && let Some(i) = crate::ops::index_of_str(k)
             && let Some(v) = self.elements.get(i as usize)
         {
             return Some(Property::data(v));
         }
-        self.get_own(k)
+        self.get_own(mc, k)
     }
 
     /// Own property as stored (array dense part, ordinary properties, Symbol keys); borrows only for Symbol keys of an
     /// object that has some
-    pub fn own_slot(&self, key: Key<'_, 'gc>) -> Option<Property<'gc>> {
+    pub fn own_slot(&self, mc: &Mutation<'gc>, key: Key<'_, 'gc>) -> Option<Property<'gc>> {
         match key {
-            Key::Str(k) => self.own_str(k),
+            Key::Str(k) => self.own_str(mc, k),
             Key::Sym(_) if !self.has_symbols() => None,
             Key::Sym(s) => self.borrow().get_own_symbol(s),
         }
@@ -1733,7 +1753,7 @@ impl<'gc> Object<'gc> {
         let index = if self.is_array() { crate::ops::index_of_str(k) } else { None };
         if let Some(i) = index {
             let (at, n) = (i as usize, self.elements.len());
-            let stored = self.get_own(k).is_some();
+            let stored = self.get_own(mc, k).is_some();
             match (prop.slot, plain) {
                 (Slot::Data(v), true) if at < n => return self.elements.set(mc, at, v),
                 (Slot::Data(v), true) if at == n && !stored => return self.elements.push(mc, v),
@@ -1761,8 +1781,22 @@ impl<'gc> Object<'gc> {
     }
 
     /// Entry `at` of the property table if it is exactly `key` (the execution layer caches the index)
-    pub fn prop_at(&self, at: usize, key: &str) -> Option<Property<'gc>> {
-        self.props.get_if(at, key)
+    pub fn prop_at(&self, mc: &Mutation<'gc>, at: usize, key: &str) -> Option<Property<'gc>> {
+        let p = self.props.get_if(at, key)?;
+        Some(self.resolved(mc, at, p))
+    }
+
+    /// Entry `i` (read as `p`) with a lazy value computed and stored back in place
+    #[inline]
+    fn resolved(&self, mc: &Mutation<'gc>, i: usize, mut p: Property<'gc>) -> Property<'gc> {
+        if let Slot::Data(v) = p.slot
+            && let Some(l) = v.as_lazy()
+        {
+            let v = l.resolve(self, mc);
+            self.props.set_slot(mc, i, Slot::Data(v));
+            p.slot = Slot::Data(v);
+        }
+        p
     }
 
     /// Update the value of entry `at` (already checked to be a writable data property)
@@ -1824,13 +1858,13 @@ impl<'gc> Object<'gc> {
     }
 
     /// Own property.
-    pub fn get_own(&self, key: &str) -> Option<Property<'gc>> {
-        self.position(key).map(|i| self.props.get(i))
+    pub fn get_own(&self, mc: &Mutation<'gc>, key: &str) -> Option<Property<'gc>> {
+        self.position(key).map(|i| self.resolved(mc, i, self.props.get(i)))
     }
 
     /// The value of an own data property (`None` for accessors).
-    pub fn own(&self, key: &str) -> Option<Value<'gc>> {
-        self.get_own(key).and_then(|p| p.value())
+    pub fn own(&self, mc: &Mutation<'gc>, key: &str) -> Option<Value<'gc>> {
+        self.get_own(mc, key).and_then(|p| p.value())
     }
 
     /// Assignment: update the value of an existing data property (no-op if not writable), otherwise create one.

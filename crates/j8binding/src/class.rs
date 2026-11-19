@@ -216,8 +216,8 @@ impl Glue {
     /// The base class `P` installed on `target` (installed now if it isn't there yet)
     #[doc(hidden)]
     pub fn parent<'gc, P: Class>(a: &mut Agent<'gc, '_>, target: JsObject<'gc>) -> ClassHandle<'gc> {
-        let ctor = target.borrow().own(P::NAME).and_then(Value::as_object);
-        let proto = ctor.and_then(|c| c.borrow().own("prototype")).and_then(Value::as_object);
+        let ctor = target.borrow().own(a.mc, P::NAME).and_then(Value::as_object);
+        let proto = ctor.and_then(|c| c.borrow().own(a.mc, "prototype")).and_then(Value::as_object);
         match (ctor, proto) {
             (Some(ctor), Some(proto)) => ClassHandle { ctor, proto },
             _ => P::install(a, target),

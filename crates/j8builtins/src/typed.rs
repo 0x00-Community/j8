@@ -902,9 +902,9 @@ impl<'gc> Installer<'_, 'gc> {
             self.method(proto, name, f, n);
         }
         // `[Symbol.iterator]` is the same function as `values`, and `toString` the same as Array.prototype.toString
-        let values = proto.borrow().own("values").unwrap_or_default();
+        let values = proto.borrow().own(self.mc, "values").unwrap_or_default();
         proto.borrow_mut(self.mc).define_symbol(r.symbols.iterator, Property::hidden(values));
-        let to_string = r.array_proto.borrow().own("toString").unwrap_or_default();
+        let to_string = r.array_proto.borrow().own(self.mc, "toString").unwrap_or_default();
         self.set(proto, "toString", to_string);
         let ctors: [j8framework::NativeFn; 12] = [
             Typed::construct::<0>,

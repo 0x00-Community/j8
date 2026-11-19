@@ -17,7 +17,7 @@ use core::cell::{Cell, RefCell};
 
 use j8bytecode::{Bytecode, Constant, Context, Decoded, FunctionKind, Intrinsic, LiteralValue, Module, Operands, OperandValue, Register, Runtime, ScopeInfo, ScopeType, SharedFunction};
 use j8compiler::Compile;
-use j8framework::{Agent, BinaryOp, Closure, Shape, SmallStr, Collect, CompareOp, ContextKind, ContextName, ContextShape, ShapeId, Env, Error, ErrorKind, FuncId, Gc, Invoke, JsEnv, JsObject, Numbers, ObjectData, ObjectKind, Property, Resume, Slot, Step, Value, ValueKind};
+use j8framework::{Agent, BinaryOp, Closure, Shape, SmallStr, Collect, CompareOp, ContextKind, ContextName, ContextShape, ShapeId, Env, Error, ErrorKind, FuncId, FunctionInfo, Gc, Lazy, Invoke, JsEnv, JsObject, Numbers, ObjectData, ObjectKind, Property, Resume, Slot, Step, Value, ValueKind};
 use j8lockfree::SegVec;
 
 mod cache;
@@ -62,8 +62,12 @@ struct Insn {
 }
 
 /// A loaded function: the function itself plus the id of the first function of its module (`CreateClosure`'s
-/// function constants are indices relative to it), with what running it needs prepared.
+/// function constants are indices relative to it), with what running it needs prepared. Its function objects'
+/// [`Code`](j8framework::Code) points at `info`, the first field.
+#[repr(C)]
 struct Loaded {
+    /// Name and `length` (lazy properties of function objects read them)
+    info: FunctionInfo,
     base: u32,
     func: SharedFunction,
     /// The bytecode, decoded
@@ -75,8 +79,6 @@ struct Loaded {
     /// By constant index: for object boilerplates, the shape the literal ends up with (then a literal is made in one
     /// step, as V8 copies the boilerplate with its map)
     literals: Box<[RefCell<Option<Arc<Shape>>>]>,
-    /// The function's name, ready to clone into a name string
-    name: SmallStr,
     /// The shape of its function objects (`length`, `name`, maybe `prototype`), and of their `prototype` objects
     function_shape: RefCell<Option<Arc<Shape>>>,
     prototype_shape: RefCell<Option<Arc<Shape>>>,
@@ -135,7 +137,7 @@ impl Loaded {
             ics,
             globals,
             literals,
-            name: SmallStr::from(&*func.name),
+            info: FunctionInfo { name: SmallStr::from(&*func.name), length: func.length },
             function_shape: RefCell::new(None),
             prototype_shape: RefCell::new(None),
             shapes,
@@ -904,7 +906,7 @@ impl Executor {
     /// Creates a function object; ordinary functions get a `prototype` (whose `constructor` points back).
     fn function_object<'gc>(&self, a: &Agent<'gc, '_>, mut closure: Closure<'gc>) -> JsObject<'gc> {
         let loaded = self.function(closure.func);
-        closure.code = Some(j8framework::Code::new(loaded));
+        closure.code = Some(j8framework::Code::new(&loaded.info));
         let func = &loaded.func;
         let proto = match (loaded.generator, loaded.asynchronous) {
             (true, true) => a.realm.async_generator_function_proto,
@@ -914,7 +916,8 @@ impl Executor {
         };
         let fo = ObjectData { kind: ObjectKind::Function(closure), proto: Some(proto), ..ObjectData::default() }.alloc(a.mc);
         let length = Value::Number(f64::from(func.length));
-        let name = Value::String(a.mc.alloc(j8framework::JsStr::from(loaded.name.clone())));
+        // Made on first read (see `Lazy`)
+        let name = Value::lazy(Lazy::FunctionName);
         // `length`, `name`, then `prototype` for generators and ordinary functions / classes
         let prototype = if loaded.generator {
             let base = if loaded.asynchronous { a.realm.async_generator_proto } else { a.realm.generator_proto };
@@ -1059,7 +1062,7 @@ impl Executor {
         while let Some(c) = e {
             if let Some(ext) = c.extension {
                 let with = c.shape.is_some_and(|s| self.context_shape(s).kind == ContextKind::With);
-                let has = if with { a.has_property(Value::Object(ext), name)? } else { ext.borrow().get_own(name).is_some() };
+                let has = if with { a.has_property(Value::Object(ext), name)? } else { ext.borrow().get_own(a.mc, name).is_some() };
                 if has && !(with && Self::unscopable(a, ext, name)?) {
                     return Ok(Found::Object(ext));
                 }
@@ -1153,7 +1156,7 @@ impl Executor {
         if Gc::ptr_eq(target, a.realm.global) && self.script_slot(a, name).is_some() {
             return Err(a.throw(ErrorKind::Syntax, &alloc::format!("Identifier '{name}' has already been declared")));
         }
-        let existing = target.borrow().get_own(name);
+        let existing = target.borrow().get_own(a.mc, name);
         match (existing, value) {
             (Some(_), None) => {}
             (Some(p), Some(v)) if !p.configurable => a.put_named(Value::Object(target), name, v, false)?,
@@ -1171,7 +1174,7 @@ impl Executor {
             }
             let (existing, extensible) = {
                 let g = a.realm.global.borrow();
-                (g.get_own(name), !g.non_extensible())
+                (g.get_own(a.mc, name), !g.non_extensible())
             };
             match existing {
                 Some(p) if d.function.is_some() && !p.configurable && !(p.writable && p.enumerable && matches!(p.slot, Slot::Data(_))) => return Err(a.throw(ErrorKind::Type, &alloc::format!("Cannot redefine property: {name}"))),
@@ -1183,7 +1186,7 @@ impl Executor {
         for d in decls {
             let name = &*d.name;
             let global = a.realm.global;
-            let existing = global.borrow().get_own(name);
+            let existing = global.borrow().get_own(a.mc, name);
             let value = d.function.map(|n| {
                 let closure = Closure::new(FuncId(base + n), env);
                 Value::Object(self.function_object(a, closure))
@@ -1210,7 +1213,7 @@ impl Executor {
         }
         for n in shape.names.iter() {
             let name = &*n.name;
-            let restricted = a.realm.global.borrow().get_own(name).is_some_and(|p| !p.configurable);
+            let restricted = a.realm.global.borrow().get_own(a.mc, name).is_some_and(|p| !p.configurable);
             if self.script_slot(a, name).is_some() || restricted {
                 return Err(a.throw(ErrorKind::Syntax, &alloc::format!("Identifier '{name}' has already been declared")));
             }

@@ -613,7 +613,7 @@ impl<'gc> Agent<'gc, '_> {
         loop {
             // Fast path: an ordinary object checks its own properties in one borrow, and goes straight to the prototype
             // if not found
-            let fast = cur.has_ordinary_properties().then(|| (cur.own_slot(key), cur.proto()));
+            let fast = cur.has_ordinary_properties().then(|| (cur.own_slot(self.mc, key), cur.proto()));
             match fast {
                 Some((Some(p), _)) => {
                     return match p.slot {
@@ -696,7 +696,7 @@ impl<'gc> Agent<'gc, '_> {
         let found = loop {
             // Fast path: an ordinary object checks its own properties in one borrow, and goes straight to the prototype
             // if not found
-            let fast = cur.has_ordinary_properties().then(|| (cur.own_slot(key), cur.proto()));
+            let fast = cur.has_ordinary_properties().then(|| (cur.own_slot(self.mc, key), cur.proto()));
             match fast {
                 Some((Some(p), _)) => break Some(p),
                 Some((None, Some(proto))) => {
@@ -769,7 +769,7 @@ impl<'gc> Agent<'gc, '_> {
     fn set_failure(&self, target: Value<'gc>, key: &str) -> Error {
         if let Some(o) = target.as_object() {
             let d = o.borrow();
-            if d.non_extensible() && d.own_slot(Key::Str(key)).is_none() {
+            if d.non_extensible() && d.own_slot(self.mc, Key::Str(key)).is_none() {
                 return self.throw(ErrorKind::Type, &format!("Cannot add property {key}, object is not extensible"));
             }
         }
@@ -993,7 +993,7 @@ impl<'gc> Agent<'gc, '_> {
     }
 
     fn define_accessor_key(&mut self, o: JsObject<'gc>, key: Key<'_, 'gc>, f: JsObject<'gc>, setter: bool, enumerable: bool) {
-        let (mut get, mut set) = match o.borrow().own_slot(key).map(|p| p.slot) {
+        let (mut get, mut set) = match o.borrow().own_slot(self.mc, key).map(|p| p.slot) {
             Some(Slot::Accessor { get, set }) => (get, set),
             _ => (None, None),
         };
@@ -1037,7 +1037,7 @@ impl<'gc> Agent<'gc, '_> {
             ValueKind::Object(o) => {
                 let d = o.borrow();
                 if d.kind.is_callable() {
-                    match d.get_own("name").and_then(|p| p.value()).map(Value::kind) {
+                    match d.get_own(self.mc, "name").and_then(|p| p.value()).map(Value::kind) {
                         Some(ValueKind::String(n)) if !n.is_empty() => String::from(&**n),
                         _ => String::from("function"),
                     }

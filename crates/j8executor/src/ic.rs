@@ -136,8 +136,8 @@ impl Ic {
 
     fn data(s: Slot<'_>) -> Option<Value<'_>> {
         match s {
-            Slot::Data(v) => Some(v),
-            Slot::Accessor { .. } => None,
+            Slot::Data(v) if v.as_lazy().is_none() => Some(v),
+            _ => None,
         }
     }
 

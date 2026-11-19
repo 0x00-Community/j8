@@ -586,7 +586,7 @@ impl Regexps {
     fn match_all_symbol<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let r = Self::this_object(a, this)?;
         let s = a.to_string(args.at(0))?;
-        let default = a.realm.global.borrow().own("RegExp").unwrap_or_default();
+        let default = a.realm.global.borrow().own(a.mc, "RegExp").unwrap_or_default();
         let ctor = Buffers::species_constructor(a, r, default)?;
         let flags = Self::get_flags(a, r)?;
         let f = a.string(&flags);
@@ -812,7 +812,7 @@ impl Regexps {
     fn split_symbol<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let r = Self::this_object(a, this)?;
         let s = a.to_string(args.at(0))?;
-        let default = a.realm.global.borrow().own("RegExp").unwrap_or_default();
+        let default = a.realm.global.borrow().own(a.mc, "RegExp").unwrap_or_default();
         let ctor = Buffers::species_constructor(a, r, default)?;
         let flags = Self::get_flags(a, r)?;
         let unicode = flags.contains('u') || flags.contains('v');

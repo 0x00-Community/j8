@@ -192,6 +192,12 @@ impl Default for Value<'_> {
 
 impl core::fmt::Debug for Value<'_> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        if let Some(l) = self.as_lazy() {
+            return core::fmt::Debug::fmt(&l, f);
+        }
+        if self.as_accessor().is_some() || self.as_context().is_some() {
+            return f.write_str("<internal>");
+        }
         core::fmt::Debug::fmt(&self.kind(), f)
     }
 }
@@ -201,6 +207,9 @@ impl core::fmt::Debug for Value<'_> {
 unsafe impl Trace for Value<'_> {
     #[inline]
     fn trace(&self, t: &mut Tracer<'_>) {
+        if !self.is_pointer() {
+            return;
+        }
         if let Some(a) = self.as_accessor() {
             return t.edge(a);
         }
@@ -218,6 +227,9 @@ unsafe impl Trace for Value<'_> {
 
     #[inline]
     fn relocate(&mut self, t: &mut Tracer<'_>) {
+        if !self.is_pointer() {
+            return;
+        }
         if let Some(mut a) = self.as_accessor() {
             t.relocate(&mut a);
             *self = Value::accessor(a);
@@ -269,6 +281,9 @@ impl<'gc> Value<'gc> {
     /// The object it points to, type erased (for [`crate::gc::ValueCell`])
     #[inline]
     pub fn erased(self) -> Option<Gc<'gc, Erased>> {
+        if !self.is_pointer() {
+            return None;
+        }
         if let Some(a) = self.as_accessor() {
             return Some(erase(a));
         }
@@ -282,6 +297,32 @@ impl<'gc> Value<'gc> {
             ValueKind::Object(o) => Some(erase(o)),
             _ => None,
         }
+    }
+
+    /// Whether the word holds a GC address (a string, symbol, bigint, object, accessor pair or context)
+    #[inline]
+    pub fn is_pointer(self) -> bool {
+        self.bits >= paragc::WORD_POINTER_MIN
+    }
+
+    /// A lazy property value as a word (only property slots hold these)
+    #[inline]
+    pub fn lazy(l: crate::Lazy) -> Self {
+        Self::word(ValueBits::boxed(ValueTag::LAZY, u64::from(l)))
+    }
+
+    /// The lazy value, if this word holds one
+    #[inline]
+    pub fn as_lazy(self) -> Option<crate::Lazy> {
+        (self.bits >> ValueBits::TAG_SHIFT == ValueBits::boxed(ValueTag::LAZY, 0) >> ValueBits::TAG_SHIFT)
+            .then(|| crate::Lazy::try_from(self.bits & ValueBits::PAYLOAD).ok())
+            .flatten()
+    }
+
+    /// Plain data in a property slot: neither an accessor pair nor a lazy value (one compare each)
+    #[inline]
+    pub fn is_plain_slot(self) -> bool {
+        self.as_accessor().is_none() && self.as_lazy().is_none()
     }
 
     /// An accessor pair as a word (only property slots hold these)
@@ -323,6 +364,9 @@ impl ValueTag {
     pub const BOOL: u8 = 2;
     pub const NUMBER: u8 = 3;
     pub const UNINIT: u8 = 4;
+    /// Internal: a property value computed on first read ([`crate::Lazy`]); only property slots hold it, never seen as
+    /// a JS value
+    pub const LAZY: u8 = 5;
     // Tags from here on hold a GC address: their words fall in paragc's pointer range (top 13 bits set, see
     // `paragc::word_pointer`), so the collector reads, moves and counts them straight from the word
     pub const STRING: u8 = 7;
@@ -347,7 +391,7 @@ const _: () = {
         assert!(w >= paragc::WORD_POINTER_MIN && w < paragc::RAW_TAG);
         i += 1;
     }
-    let others = [ValueTag::UNDEFINED, ValueTag::NULL, ValueTag::BOOL, ValueTag::UNINIT];
+    let others = [ValueTag::UNDEFINED, ValueTag::NULL, ValueTag::BOOL, ValueTag::UNINIT, ValueTag::LAZY];
     let mut i = 0;
     while i < others.len() {
         assert!(ValueBits::boxed(others[i], 1) < paragc::WORD_POINTER_MIN);
