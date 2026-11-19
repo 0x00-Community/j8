@@ -312,14 +312,6 @@ impl<'gc> Value<'gc> {
             // SAFETY: a context word was built from a live context's address
             .then(|| unsafe { gc_from_raw(Self::address(self.bits & ValueBits::PAYLOAD)) })
     }
-
-    /// The same pointer kind at another address (the collector moved the object)
-    #[inline]
-    #[must_use]
-    pub fn with_address(self, p: *const u8) -> Self {
-        debug_assert!(self.erased().is_some(), "only pointer values move");
-        Self::word((self.bits & !ValueBits::PAYLOAD) | p.expose_provenance() as u64)
-    }
 }
 
 /// The tags of [`ValueKind`], and of boxed [`Value`] words (see [`ValueBits`]).
@@ -330,20 +322,38 @@ impl ValueTag {
     pub const NULL: u8 = 1;
     pub const BOOL: u8 = 2;
     pub const NUMBER: u8 = 3;
-    pub const STRING: u8 = 4;
-    pub const SYMBOL: u8 = 5;
-    pub const BIGINT: u8 = 6;
-    pub const OBJECT: u8 = 7;
-    pub const UNINIT: u8 = 8;
+    pub const UNINIT: u8 = 4;
+    // Tags from here on hold a GC address: their words fall in paragc's pointer range (top 13 bits set, see
+    // `paragc::word_pointer`), so the collector reads, moves and counts them straight from the word
+    pub const STRING: u8 = 7;
+    pub const SYMBOL: u8 = 8;
+    pub const BIGINT: u8 = 9;
+    pub const OBJECT: u8 = 10;
     /// Internal: an accessor pair stored in a property slot ([`crate::Accessor`]); never seen as a JS value
-    pub const ACCESSOR: u8 = 9;
+    pub const ACCESSOR: u8 = 11;
     /// Internal: a context in a register or the accumulator ([`Value::context`]); never seen as a JS value
-    pub const CONTEXT: u8 = 10;
+    pub const CONTEXT: u8 = 12;
     /// The number of bytes a value takes
     pub const SIZE: usize = 8;
 }
 
 const _: () = assert!(core::mem::size_of::<Value<'static>>() == ValueTag::SIZE);
+// Pointer words are what paragc takes for pointers, nothing else is (paragc's own `Slot` tag stays unused here)
+const _: () = {
+    let pointers = [ValueTag::STRING, ValueTag::SYMBOL, ValueTag::BIGINT, ValueTag::OBJECT, ValueTag::ACCESSOR, ValueTag::CONTEXT];
+    let mut i = 0;
+    while i < pointers.len() {
+        let w = ValueBits::boxed(pointers[i], 1);
+        assert!(w >= paragc::WORD_POINTER_MIN && w < paragc::RAW_TAG);
+        i += 1;
+    }
+    let others = [ValueTag::UNDEFINED, ValueTag::NULL, ValueTag::BOOL, ValueTag::UNINIT];
+    let mut i = 0;
+    while i < others.len() {
+        assert!(ValueBits::boxed(others[i], 1) < paragc::WORD_POINTER_MIN);
+        i += 1;
+    }
+};
 
 /// Strict equality (`===`): strings compare by content, objects by identity, and `NaN` is not equal to itself.
 impl PartialEq for Value<'_> {

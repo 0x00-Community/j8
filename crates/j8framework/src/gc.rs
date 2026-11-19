@@ -23,7 +23,7 @@ use core::ptr::NonNull;
 
 /// 堆类型要实现的 trait 是 paragc 的 `Trace`，用 `#[derive(Collect)]` 生成
 pub use j8macros::Collect;
-pub use paragc::{Brand, Gc, Heap, Mutator, Root, Slot, Tlab, Trace, Tracer};
+pub use paragc::{Brand, Gc, Heap, Mutator, Root, Slot, Tlab, Trace, Tracer, WordSlot};
 
 use crate::Value;
 
@@ -328,59 +328,40 @@ impl<T> Drop for CellMut<'_, T> {
 
 // ---- ValueCell ----
 
-/// 一个可变的 `Value`：读只看字；指针另外放进槽里让回收器看见（并经它走写屏障）。
-///
-/// 写：先写字，槽里不是同一个指针时再改槽（isolate 内单线程，见 [`IsoCell`]），所以回收时槽一定盖住了字里的指针。
-pub struct ValueCell<'gc> {
-    bits: IsoCell<u64>,
-    ptr: Slot<'gc, Erased>,
-}
+/// 一个可变的 `Value`：就是 paragc 的 [`WordSlot`]，NaN-boxed 的字原样放在槽里（指针字的标签落在 paragc 的指针区间，
+/// 见 [`crate::ValueBits`]）：回收器从字里认出指针，疏散时就地改地址，写经它走写屏障。
+pub struct ValueCell<'gc>(WordSlot<'gc>);
 
 impl<'gc> ValueCell<'gc> {
     pub fn new(v: Value<'gc>) -> Self {
-        Self { bits: IsoCell::new(v.bits()), ptr: Slot::from(v.erased()) }
+        Self(WordSlot::new(v.bits()))
     }
 
     #[inline]
     pub fn get(&self) -> Value<'gc> {
-        // SAFETY: 字里的指针总被槽盖住（见类型说明），对象活着
-        unsafe { Value::from_bits(self.bits.get()) }
+        // SAFETY: 槽里的字都是 `Value::bits`；字里的对象由回收器保活、搬走时就地改了地址
+        unsafe { Value::from_bits(self.0.get()) }
     }
 
     #[inline]
     pub fn set(&self, mc: &Mutation<'gc>, v: Value<'gc>) {
-        self.bits.set(v.bits());
-        let same = match (v.erased(), self.ptr.get()) {
-            (None, None) => true,
-            (Some(a), Some(b)) => Gc::ptr_eq(a, b),
-            _ => false,
-        };
-        if !same {
-            self.ptr.set(mc.mutator(), v.erased());
-        }
+        self.0.set(mc.mutator(), v.bits());
     }
 
     /// 独占时写（还没放进堆）
     pub fn set_mut(&mut self, v: Value<'gc>) {
-        *self = Self::new(v);
+        self.0.set_mut(v.bits());
     }
 }
 
-// SAFETY: 槽是唯一的边；重定位时把搬走后的地址同步回字里
+// SAFETY: 槽是唯一的边（字里的指针）
 unsafe impl Trace for ValueCell<'_> {
     fn trace(&self, t: &mut Tracer<'_>) {
-        self.ptr.trace(t);
+        self.0.trace(t);
     }
 
     fn relocate(&mut self, t: &mut Tracer<'_>) {
-        self.ptr.relocate(t);
-        // SAFETY: 回收时没有 mutator；字里是指针时槽里就是它（槽里多出来的指针只是多保活）
-        let v = unsafe { Value::from_bits(*self.bits.get_mut()) };
-        if v.erased().is_some()
-            && let Some(p) = self.ptr.get()
-        {
-            *self.bits.get_mut() = v.with_address(p.as_ptr().cast()).bits();
-        }
+        self.0.relocate(t);
     }
 }
 
