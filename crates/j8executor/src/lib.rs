@@ -1364,6 +1364,21 @@ impl Executor {
                 return Ok(Flow::Frame);
             }
         }
+        if let ValueKind::Object(o) = callee.kind()
+            && let Some(n) = o.native()
+            && n.forward == j8framework::Forward::No
+        {
+            let saved = self.depth.replace(level);
+            let outer = core::mem::replace(&mut a.new_target, Value::Undefined);
+            let r = match args {
+                Args::Values(v) => (n.f)(a, this, v),
+                Args::Regs { first, count } => (n.f)(a, this, &st.regs[first..first + count]),
+            };
+            a.new_target = outer;
+            self.depth.set(saved);
+            st.acc = r?;
+            return Ok(Flow::Next);
+        }
         let args = args.to_vec(&st.regs);
         match self.resolve(a, callee, this, args, level)? {
             Callee::Closure { closure, callee, this, args } => {
@@ -2346,6 +2361,15 @@ impl<'gc> Invoke<'gc> for Executor {
         let level = self.depth.get() + 1;
         if level >= STACK_LIMIT {
             return Err(a.throw(ErrorKind::Range, "Maximum call stack size exceeded"));
+        }
+        if let ValueKind::Object(o) = callee.kind()
+            && let Some(c) = o.closure()
+            && !self.function(c.func).class_constructor
+        {
+            let mut regs = a.take_regs();
+            regs.clear();
+            let f = self.open(a, &mut regs, c, callee, this, args);
+            return self.run_frame(a, regs, f, level);
         }
         match self.resolve(a, callee, this, args.to_vec(), level)? {
             Callee::Done(v) => Ok(v),
