@@ -17,7 +17,7 @@ use core::cell::{Cell, RefCell};
 
 use j8bytecode::{Bytecode, Constant, Context, Decoded, FunctionKind, Intrinsic, LiteralValue, Module, Operands, OperandValue, Register, Runtime, ScopeInfo, ScopeType, SharedFunction};
 use j8compiler::Compile;
-use j8framework::{Agent, BinaryOp, Closure, Collect, CompareOp, ContextKind, ContextName, ContextShape, Env, Error, ErrorKind, FuncId, Gc, Invoke, JsEnv, JsObject, Numbers, ObjectData, ObjectKind, Property, Resume, Slot, Step, Value, ValueKind};
+use j8framework::{Agent, BinaryOp, Closure, Shape, SmallStr, Collect, CompareOp, ContextKind, ContextName, ContextShape, ShapeId, Env, Error, ErrorKind, FuncId, Gc, Invoke, JsEnv, JsObject, Numbers, ObjectData, ObjectKind, Property, Resume, Slot, Step, Value, ValueKind};
 use j8lockfree::SegVec;
 
 mod cache;
@@ -72,12 +72,18 @@ struct Loaded {
     ics: Box<[ic::Ic]>,
     /// By feedback slot: where a global name was last found
     globals: Box<[ic::GlobalIc]>,
-    /// By constant index: for object boilerplates, one cache per property (the shape transitions building the literal)
-    literals: Box<[Box<[ic::Ic]>]>,
+    /// By constant index: for object boilerplates, the shape the literal ends up with (then a literal is made in one
+    /// step, as V8 copies the boilerplate with its map)
+    literals: Box<[RefCell<Option<Arc<Shape>>>]>,
+    /// The function's name, ready to clone into a name string
+    name: SmallStr,
+    /// The shape of its function objects (`length`, `name`, maybe `prototype`), and of their `prototype` objects
+    function_shape: RefCell<Option<Arc<Shape>>>,
+    prototype_shape: RefCell<Option<Arc<Shape>>>,
     /// By constant index: the context shapes of `Scope` constants
-    shapes: Box<[Option<Arc<ContextShape>>]>,
+    shapes: Box<[Option<ShapeId>]>,
     /// The function context's shape (when the function has one) / the script context's
-    scope: Option<Arc<ContextShape>>,
+    scope: Option<ShapeId>,
     /// Whether its function context gets an extension object (a sloppy direct eval declares `var`s there)
     extension: bool,
     /// `new` builds `this` and opens a frame (an ordinary function or a base class constructor)
@@ -102,19 +108,17 @@ struct Loaded {
 }
 
 impl Loaded {
-    fn new(base: u32, func: SharedFunction) -> Self {
+    /// `shapes`: the executor's table of context shapes, where this function's are added
+    fn new(base: u32, func: SharedFunction, table: &SegVec<ContextShape>) -> Self {
         let bc = &func.bytecode;
         let ics = bc.feedback.iter().map(|_| ic::Ic::default()).collect();
         let globals = bc.feedback.iter().map(|_| ic::GlobalIc::default()).collect();
         let shapes = bc.constants.iter().map(|c| match c {
-            Constant::Scope(s) => Some(Arc::new(Self::shape(s))),
+            Constant::Scope(s) => Some(Self::add_shape(table, s)),
             _ => None,
         }).collect();
-        let literals = bc.constants.iter().map(|c| match c {
-            Constant::Object(b) => b.properties.iter().map(|_| ic::Ic::default()).collect(),
-            _ => Box::default(),
-        }).collect();
-        let scope = func.scope.as_ref().map(|s| Arc::new(Self::shape(s)));
+        let literals = bc.constants.iter().map(|_| RefCell::new(None)).collect();
+        let scope = func.scope.as_ref().map(|s| Self::add_shape(table, s));
         let extension = func.scope.as_ref().is_some_and(|s| s.has_extension);
         let k = func.kind;
         use FunctionKind as F;
@@ -131,6 +135,9 @@ impl Loaded {
             ics,
             globals,
             literals,
+            name: SmallStr::from(&*func.name),
+            function_shape: RefCell::new(None),
+            prototype_shape: RefCell::new(None),
             shapes,
             scope,
             extension,
@@ -216,6 +223,11 @@ impl Loaded {
     }
 
     /// A scope info's shape for contexts made from it
+    /// Adds a context shape to the executor's table
+    fn add_shape(table: &SegVec<ContextShape>, s: &ScopeInfo) -> ShapeId {
+        ShapeId(u32::try_from(table.push(Self::shape(s))).expect("fewer than 2^32 context shapes"))
+    }
+
     fn shape(s: &ScopeInfo) -> ContextShape {
         let kind = match s.scope_type {
             Some(ScopeType::FunctionScope) | None => ContextKind::Function,
@@ -491,6 +503,10 @@ pub struct Executor {
     module_of: RefCell<alloc::collections::BTreeMap<u32, u32>>,
     /// Bytecode shared with other executors
     cache: Option<Arc<CodeCache>>,
+    /// The shapes of the contexts the loaded code makes, by [`ShapeId`] (append-only like `code`)
+    context_shapes: SegVec<ContextShape>,
+    /// The shape of `with` contexts, once made
+    with_shape: Cell<Option<ShapeId>>,
     /// Frame stacks of finished executions, kept for the next ones (a host function calling back into JS starts one
     /// each time)
     spare_frames: RefCell<Vec<Vec<Frame>>>,
@@ -530,9 +546,13 @@ impl Executor {
     pub fn load(&self, module: Module) -> FuncId {
         let base = u32::try_from(self.code.len()).expect("fewer than 2^32 functions");
         for func in module.functions {
-            self.code.push(Loaded::new(base, func));
+            self.code.push(Loaded::new(base, func, &self.context_shapes));
         }
         FuncId(base + Module::MAIN)
+    }
+
+    fn context_shape(&self, id: ShapeId) -> &ContextShape {
+        self.context_shapes.get(id.0 as usize).expect("shape ids come from load")
     }
 
     #[inline]
@@ -581,6 +601,15 @@ impl Executor {
         if let Some(r) = self.function(f.func).func.bytecode.new_target_or_generator {
             regs[f.base + usize::try_from(r).unwrap_or(0)] = nt;
         }
+    }
+
+    /// An array index from a number key
+    #[inline]
+    fn index(key: Value<'_>) -> Option<usize> {
+        let x = key.as_number()?;
+        #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "checked by converting back")]
+        let i = x as u32;
+        (f64::from(i) == x && i != u32::MAX).then_some(i as usize)
     }
 
     /// The register file index of a register operand (locals and parameters: see [`Loaded::register`])
@@ -828,25 +857,78 @@ impl Executor {
             (false, false) => a.realm.function_proto,
         };
         let fo = ObjectData { kind: ObjectKind::Function(closure), proto: Some(proto), ..ObjectData::default() }.alloc(a.mc);
-        a.realm.name_function(a.mc, fo, &func.name, Some(u32::from(func.length)));
-        if loaded.generator {
+        let length = Value::Number(f64::from(func.length));
+        let name = Value::String(a.mc.alloc(j8framework::JsStr::from(loaded.name.clone())));
+        // `length`, `name`, then `prototype` for generators and ordinary functions / classes
+        let prototype = if loaded.generator {
             let base = if loaded.asynchronous { a.realm.async_generator_proto } else { a.realm.generator_proto };
-            let p = ObjectData { proto: Some(base), ..ObjectData::default() }.alloc(a.mc);
-            fo.borrow_mut(a.mc).define("prototype", Property { slot: Slot::Data(p.into()), enumerable: false, writable: true, configurable: false });
+            Some((ObjectData { proto: Some(base), ..ObjectData::default() }.alloc(a.mc), true))
         } else if !loaded.no_prototype && !loaded.asynchronous {
             let p = a.object();
-            p.borrow_mut(a.mc).define("constructor", Property::hidden(fo.into()));
-            fo.borrow_mut(a.mc).define("prototype", Property { slot: Slot::Data(p.into()), enumerable: false, writable: !loaded.class_constructor, configurable: false });
+            match &*loaded.prototype_shape.borrow() {
+                Some(shape) => p.fill(a.mc, shape, [Slot::Data(fo.into())]),
+                None => p.borrow_mut(a.mc).define("constructor", Property::hidden(fo.into())),
+            }
+            Self::remember_shape(&loaded.prototype_shape, p, 1);
+            Some((p, !loaded.class_constructor))
+        } else {
+            None
+        };
+        match &*loaded.function_shape.borrow() {
+            Some(shape) => fo.fill(a.mc, shape, [Slot::Data(length), Slot::Data(name)].into_iter().chain(prototype.map(|(p, _)| Slot::Data(p.into())))),
+            None => {
+                let prop = |v: Value<'gc>| Property { slot: Slot::Data(v), enumerable: false, writable: false, configurable: true };
+                let d = fo.borrow_mut(a.mc);
+                d.define("length", prop(length));
+                d.define("name", prop(name));
+                if let Some((p, writable)) = prototype {
+                    d.define("prototype", Property { slot: Slot::Data(p.into()), enumerable: false, writable, configurable: false });
+                }
+            }
         }
+        Self::remember_shape(&loaded.function_shape, fo, 2 + usize::from(prototype.is_some()));
         fo
+    }
+
+    /// `CreateObjectLiteral` of boilerplate constant `k`: in one step once its shape is known (as V8 copies the
+    /// boilerplate with its map), property by property the first time
+    fn object_literal<'gc>(a: &Agent<'gc, '_>, loaded: &Loaded, k: OperandValue) -> JsObject<'gc> {
+        let k = usize::try_from(k).unwrap_or(0);
+        let Some(Constant::Object(b)) = loaded.func.bytecode.constants.get(k) else { unreachable!("an object boilerplate") };
+        let ob = a.object_with(b.properties.len());
+        let cache = &loaded.literals[k];
+        let value = |v: &Option<LiteralValue>| v.as_ref().map_or(Value::Undefined, |v| Self::literal(a, v));
+        match &*cache.borrow() {
+            Some(shape) => {
+                ob.fill(a.mc, shape, b.properties.iter().map(|(_, v)| Slot::Data(value(v))));
+                return ob;
+            }
+            None => {
+                for (key, v) in &b.properties {
+                    ob.borrow_mut(a.mc).define(key, Property::data(value(v)));
+                }
+            }
+        }
+        Self::remember_shape(cache, ob, b.properties.len());
+        ob
+    }
+
+    /// After making an object the slow way: keeps its shape for next time (when it has exactly the `n` properties
+    /// expected, in fast mode)
+    fn remember_shape(cache: &RefCell<Option<Arc<Shape>>>, o: JsObject<'_>, n: usize) {
+        if cache.borrow().is_some() {
+            return;
+        }
+        let shape = o.get().props().shape().filter(|s| s.len() == n);
+        *cache.borrow_mut() = shape;
     }
 
     // ---- globals and lookups by name ----
 
     /// The script context slot holding `name`, if a script declared it lexically
-    fn script_slot<'gc>(a: &Agent<'gc, '_>, name: &str) -> Option<(JsEnv<'gc>, usize, bool)> {
+    fn script_slot<'gc>(&self, a: &Agent<'gc, '_>, name: &str) -> Option<(JsEnv<'gc>, usize, bool)> {
         a.realm.script_contexts.get().iter().find_map(|e| {
-            let (i, n) = e.shape.as_ref()?.slot(name)?;
+            let (i, n) = self.context_shape(e.shape?).slot(name)?;
             Some((*e, i, n.constant))
         })
     }
@@ -858,7 +940,7 @@ impl Executor {
 
     /// `LdaGlobal`: script contexts first, then the global object (through the cache); `typeof` gives `undefined` for
     /// a name that isn't there
-    fn global_load<'gc>(a: &mut Agent<'gc, '_>, cache: &ic::GlobalIc, name: &str, inside_typeof: bool) -> Result<Value<'gc>, Error> {
+    fn global_load<'gc>(&self, a: &mut Agent<'gc, '_>, cache: &ic::GlobalIc, name: &str, inside_typeof: bool) -> Result<Value<'gc>, Error> {
         // A script's `this`, read from a function inside it (V8 keeps it in the script context table)
         if name == SCRIPT_THIS {
             return Ok(Value::Object(a.realm.global));
@@ -869,7 +951,7 @@ impl Executor {
         if let Some(v) = cache.get(scope, global) {
             return Ok(v);
         }
-        if let Some((e, i, _)) = Self::script_slot(a, name) {
+        if let Some((e, i, _)) = self.script_slot(a, name) {
             let v = e.load(i);
             return if matches!(v.kind(), ValueKind::Uninit) { Err(Self::uninitialized(a, name)) } else { Ok(v) };
         }
@@ -886,7 +968,7 @@ impl Executor {
     }
 
     /// `StaGlobal`: a script context slot (TDZ / `const` checked), else the global object (strict: must exist)
-    fn global_store<'gc>(a: &mut Agent<'gc, '_>, cache: &ic::GlobalIc, name: &str, v: Value<'gc>, strict: bool) -> Result<(), Error> {
+    fn global_store<'gc>(&self, a: &mut Agent<'gc, '_>, cache: &ic::GlobalIc, name: &str, v: Value<'gc>, strict: bool) -> Result<(), Error> {
         let (scope, global) = (a.realm.script_scope, a.realm.global);
         if let Some((o, at)) = cache.writable(scope, global)
             && let Slot::Data(_) = o.get().props().slot(at)
@@ -894,7 +976,7 @@ impl Executor {
             o.get().set_at(a.mc, at, v);
             return Ok(());
         }
-        if let Some((e, i, constant)) = Self::script_slot(a, name) {
+        if let Some((e, i, constant)) = self.script_slot(a, name) {
             if matches!(e.load(i).kind(), ValueKind::Uninit) {
                 return Err(Self::uninitialized(a, name));
             }
@@ -916,22 +998,22 @@ impl Executor {
     /// A lookup by name through the context chain from `env` (V8's `LoadLookupSlot`): `with` objects, sloppy eval
     /// extension objects and named slots, then the script contexts and the global object. Gives the holder found:
     /// a context slot, an object (with its `this` for a call), or nothing.
-    fn lookup<'gc>(a: &mut Agent<'gc, '_>, env: Option<JsEnv<'gc>>, name: &str) -> Result<Found<'gc>, Error> {
+    fn lookup<'gc>(&self, a: &mut Agent<'gc, '_>, env: Option<JsEnv<'gc>>, name: &str) -> Result<Found<'gc>, Error> {
         let mut e = env;
         while let Some(c) = e {
             if let Some(ext) = c.extension {
-                let with = c.shape.as_ref().is_some_and(|s| s.kind == ContextKind::With);
+                let with = c.shape.is_some_and(|s| self.context_shape(s).kind == ContextKind::With);
                 let has = if with { a.has_property(Value::Object(ext), name)? } else { ext.borrow().get_own(name).is_some() };
                 if has && !(with && Self::unscopable(a, ext, name)?) {
                     return Ok(Found::Object(ext));
                 }
             }
-            if let Some((i, n)) = c.shape.as_ref().and_then(|s| s.slot(name)) {
+            if let Some((i, n)) = c.shape.and_then(|s| self.context_shape(s).slot(name)) {
                 return Ok(Found::Slot(c, i, n.constant));
             }
             e = c.parent;
         }
-        if let Some((e, i, constant)) = Self::script_slot(a, name) {
+        if let Some((e, i, constant)) = self.script_slot(a, name) {
             return Ok(Found::Slot(e, i, constant));
         }
         let g = Value::Object(a.realm.global);
@@ -951,8 +1033,8 @@ impl Executor {
         Ok(a.to_boolean(blocked))
     }
 
-    fn lookup_load<'gc>(a: &mut Agent<'gc, '_>, env: Option<JsEnv<'gc>>, name: &str, inside_typeof: bool) -> Result<Value<'gc>, Error> {
-        match Self::lookup(a, env, name)? {
+    fn lookup_load<'gc>(&self, a: &mut Agent<'gc, '_>, env: Option<JsEnv<'gc>>, name: &str, inside_typeof: bool) -> Result<Value<'gc>, Error> {
+        match self.lookup(a, env, name)? {
             Found::Slot(c, i, _) => {
                 let v = c.load(i);
                 if matches!(v.kind(), ValueKind::Uninit) { Err(Self::uninitialized(a, name)) } else { Ok(v) }
@@ -965,8 +1047,8 @@ impl Executor {
         }
     }
 
-    fn lookup_store<'gc>(a: &mut Agent<'gc, '_>, env: Option<JsEnv<'gc>>, name: &str, v: Value<'gc>, strict: bool) -> Result<(), Error> {
-        match Self::lookup(a, env, name)? {
+    fn lookup_store<'gc>(&self, a: &mut Agent<'gc, '_>, env: Option<JsEnv<'gc>>, name: &str, v: Value<'gc>, strict: bool) -> Result<(), Error> {
+        match self.lookup(a, env, name)? {
             Found::Slot(c, i, constant) => {
                 if matches!(c.load(i).kind(), ValueKind::Uninit) {
                     return Err(Self::uninitialized(a, name));
@@ -985,10 +1067,10 @@ impl Executor {
 
     /// The variable environment for eval declarations from `env`: the nearest function context with an extension
     /// object, or the global object
-    fn var_scope<'gc>(a: &Agent<'gc, '_>, env: Option<JsEnv<'gc>>) -> JsObject<'gc> {
+    fn var_scope<'gc>(&self, a: &Agent<'gc, '_>, env: Option<JsEnv<'gc>>) -> JsObject<'gc> {
         let mut e = env;
         while let Some(c) = e {
-            if let (Some(ext), Some(ContextKind::Function)) = (c.extension, c.shape.as_ref().map(|s| s.kind)) {
+            if let (Some(ext), Some(ContextKind::Function)) = (c.extension, c.shape.map(|s| self.context_shape(s).kind)) {
                 return ext;
             }
             e = c.parent;
@@ -998,10 +1080,10 @@ impl Executor {
 
     /// `DeclareEvalVar` / `DeclareEvalFunction`: a lexical declaration with the same name between here and the variable
     /// environment is a SyntaxError
-    fn declare_eval<'gc>(a: &mut Agent<'gc, '_>, env: Option<JsEnv<'gc>>, name: &str, value: Option<Value<'gc>>) -> Result<(), Error> {
+    fn declare_eval<'gc>(&self, a: &mut Agent<'gc, '_>, env: Option<JsEnv<'gc>>, name: &str, value: Option<Value<'gc>>) -> Result<(), Error> {
         let mut e = env;
         while let Some(c) = e {
-            if let Some(s) = &c.shape {
+            if let Some(s) = c.shape.map(|s| self.context_shape(s)) {
                 if s.kind == ContextKind::Function && c.extension.is_some() {
                     break;
                 }
@@ -1011,8 +1093,8 @@ impl Executor {
             }
             e = c.parent;
         }
-        let target = Self::var_scope(a, env);
-        if Gc::ptr_eq(target, a.realm.global) && Self::script_slot(a, name).is_some() {
+        let target = self.var_scope(a, env);
+        if Gc::ptr_eq(target, a.realm.global) && self.script_slot(a, name).is_some() {
             return Err(a.throw(ErrorKind::Syntax, &alloc::format!("Identifier '{name}' has already been declared")));
         }
         let existing = target.borrow().get_own(name);
@@ -1028,7 +1110,7 @@ impl Executor {
     fn declare_globals<'gc>(&self, a: &mut Agent<'gc, '_>, f: &Frame, env: Option<JsEnv<'gc>>, decls: &[j8bytecode::GlobalDeclaration]) -> Result<(), Error> {
         for d in decls {
             let name = &*d.name;
-            if Self::script_slot(a, name).is_some() {
+            if self.script_slot(a, name).is_some() {
                 return Err(a.throw(ErrorKind::Syntax, &alloc::format!("Identifier '{name}' has already been declared")));
             }
             let (existing, extensible) = {
@@ -1065,18 +1147,19 @@ impl Executor {
     /// Creates the script context of script `main` (its top-level lexical declarations, holes until initialized) and
     /// registers it in the realm's script context table, after checking nothing else declares those names
     fn script_context<'gc>(&self, a: &mut Agent<'gc, '_>, main: FuncId) -> Result<Option<JsEnv<'gc>>, Error> {
-        let Some(shape) = self.function(main).scope.clone() else { return Ok(None) };
+        let Some(id) = self.function(main).scope else { return Ok(None) };
+        let shape = self.context_shape(id);
         if shape.kind != ContextKind::Script {
             return Ok(None);
         }
         for n in shape.names.iter() {
             let name = &*n.name;
             let restricted = a.realm.global.borrow().get_own(name).is_some_and(|p| !p.configurable);
-            if Self::script_slot(a, name).is_some() || restricted {
+            if self.script_slot(a, name).is_some() || restricted {
                 return Err(a.throw(ErrorKind::Syntax, &alloc::format!("Identifier '{name}' has already been declared")));
             }
         }
-        let env = Env::context(shape.names.len(), Value::Uninit, None, Some(shape.clone()), None).alloc(a.mc);
+        let env = Env::context(shape.names.len(), Value::Uninit, None, Some(id), None).alloc(a.mc);
         a.realm.script_contexts.update(a.mc, |v| {
             let mut v = v.clone();
             v.push(env);
@@ -1180,7 +1263,7 @@ impl Executor {
 
     /// Enters a frame for a call from the current one (the caller resumes at its next instruction)
     #[inline]
-    fn push_frame<'gc>(st: &mut State<'gc>, next: Frame) {
+    fn push_frame(st: &mut State<'_>, next: Frame) {
         st.frames.push(next);
     }
 
@@ -1327,13 +1410,13 @@ impl Executor {
             }
             B::LdaGlobal | B::LdaGlobalInsideTypeof => {
                 let name = Self::name_at(loaded, o[0]);
-                *acc = Self::global_load(a, &loaded.globals[usize::try_from(o[1]).unwrap_or(0)], name, d.bytecode == B::LdaGlobalInsideTypeof)?;
+                *acc = self.global_load(a, &loaded.globals[usize::try_from(o[1]).unwrap_or(0)], name, d.bytecode == B::LdaGlobalInsideTypeof)?;
             }
             B::StaGlobal => {
                 let name = Self::name_at(loaded, o[0]);
                 let slot = usize::try_from(o[1]).unwrap_or(0);
                 let strict_slot = loaded.func.bytecode.feedback.get(slot) == Some(&j8bytecode::FeedbackSlotKind::StoreGlobalStrict);
-                Self::global_store(a, &loaded.globals[slot], name, *acc, strict_slot || strict)?;
+                self.global_store(a, &loaded.globals[slot], name, *acc, strict_slot || strict)?;
             }
             B::LdaCurrentContextSlot | B::LdaCurrentContextSlotNoCell | B::LdaImmutableCurrentContextSlot => {
                 let e = f.env(regs).ok_or_else(|| a.throw(ErrorKind::Reference, "no context"))?;
@@ -1361,35 +1444,39 @@ impl Executor {
                 f.set_env(regs, e);
             }
             B::CreateFunctionContext | B::CreateEvalContext => {
-                let shape = loaded.shapes[usize::try_from(o[0]).unwrap_or(0)].clone();
+                let shape = loaded.shapes[usize::try_from(o[0]).unwrap_or(0)];
                 let n = usize::try_from(o[1]).unwrap_or(0);
                 let extension = loaded.extension.then(|| ObjectData::default().alloc(a.mc));
                 *acc = Value::context(Env::context(n, Value::Undefined, f.env(regs), shape, extension).alloc(a.mc));
             }
             B::CreateBlockContext => {
-                let shape = loaded.shapes[usize::try_from(o[0]).unwrap_or(0)].clone();
-                let n = shape.as_ref().map_or(0, |s| s.names.len());
+                let shape = loaded.shapes[usize::try_from(o[0]).unwrap_or(0)];
+                let n = shape.map_or(0, |s| self.context_shape(s).names.len());
                 *acc = Value::context(Env::context(n, Value::Undefined, f.env(regs), shape, None).alloc(a.mc));
             }
             B::CreateCatchContext => {
-                let shape = loaded.shapes[usize::try_from(o[1]).unwrap_or(0)].clone();
+                let shape = loaded.shapes[usize::try_from(o[1]).unwrap_or(0)];
                 let e = Env::context(1, r!(0), f.env(regs), shape, None).alloc(a.mc);
                 *acc = Value::context(e);
             }
             B::CreateWithContext => {
                 let obj = r!(0).as_object();
-                let shape = Some(Arc::new(ContextShape { kind: ContextKind::With, names: Box::new([]) }));
+                let shape = Some(self.with_shape.get().unwrap_or_else(|| {
+                    let id = ShapeId(u32::try_from(self.context_shapes.push(ContextShape { kind: ContextKind::With, names: Box::new([]) })).expect("fewer than 2^32 context shapes"));
+                    self.with_shape.set(Some(id));
+                    id
+                }));
                 *acc = Value::context(Env::context(0, Value::Undefined, f.env(regs), shape, obj).alloc(a.mc));
             }
             B::LdaLookupSlot | B::LdaLookupSlotInsideTypeof | B::LdaLookupGlobalSlot | B::LdaLookupGlobalSlotInsideTypeof | B::LdaLookupContextSlot | B::LdaLookupContextSlotInsideTypeof | B::LdaLookupContextSlotNoCell | B::LdaLookupContextSlotNoCellInsideTypeof => {
                 let name = Self::name_at(loaded, o[0]);
                 let inside = matches!(d.bytecode, B::LdaLookupSlotInsideTypeof | B::LdaLookupGlobalSlotInsideTypeof | B::LdaLookupContextSlotInsideTypeof | B::LdaLookupContextSlotNoCellInsideTypeof);
-                *acc = Self::lookup_load(a, f.env(regs), name, inside)?;
+                *acc = self.lookup_load(a, f.env(regs), name, inside)?;
             }
             B::StaLookupSlot => {
                 let name = Self::name_at(loaded, o[0]);
                 let s = u8::try_from(o[1]).unwrap_or(0) & j8bytecode::StoreLookupSlotFlags::STRICT != 0;
-                Self::lookup_store(a, f.env(regs), name, *acc, s)?;
+                self.lookup_store(a, f.env(regs), name, *acc, s)?;
             }
             B::GetNamedProperty => {
                 let obj = r!(0);
@@ -1617,20 +1704,7 @@ impl Executor {
                 *acc = self.function_object(a, closure).into();
             }
             B::CreateEmptyObjectLiteral => *acc = a.object().into(),
-            B::CreateObjectLiteral => {
-                let Some(Constant::Object(b)) = loaded.func.bytecode.constants.get(usize::try_from(o[0]).unwrap_or(0)) else { unreachable!("an object boilerplate") };
-                let ob = a.object_with(b.properties.len());
-                let ics = &loaded.literals[usize::try_from(o[0]).unwrap_or(0)];
-                for ((k, v), ic) in b.properties.iter().zip(ics) {
-                    let v = v.as_ref().map_or(Value::Undefined, |v| Self::literal(a, v));
-                    if !ic.set(a.mc, ob, v, false) {
-                        let before = ic::Before::from(ob);
-                        ob.borrow_mut(a.mc).define(k, Property::data(v));
-                        ic.fill_set(ob, k, before, false);
-                    }
-                }
-                *acc = ob.into();
-            }
+            B::CreateObjectLiteral => *acc = Self::object_literal(a, loaded, o[0]).into(),
             B::CreateEmptyArrayLiteral => *acc = a.array(Vec::new()).into(),
             B::CreateArrayLiteral => {
                 let Some(Constant::Array(b)) = loaded.func.bytecode.constants.get(usize::try_from(o[0]).unwrap_or(0)) else { unreachable!("an array boilerplate") };
@@ -2059,12 +2133,12 @@ impl Executor {
             }
             Runtime::DeclareEvalVar => {
                 let name = text(a, arg(0))?;
-                Self::declare_eval(a, st.f().env(&st.regs), &name, None)?;
+                self.declare_eval(a, st.f().env(&st.regs), &name, None)?;
                 Ok(Value::Undefined)
             }
             Runtime::DeclareEvalFunction => {
                 let name = text(a, arg(0))?;
-                Self::declare_eval(a, st.f().env(&st.regs), &name, Some(arg(1)))?;
+                self.declare_eval(a, st.f().env(&st.regs), &name, Some(arg(1)))?;
                 Ok(Value::Undefined)
             }
             Runtime::ThrowConstAssignError => Err(a.throw(ErrorKind::Type, "Assignment to constant variable.")),
@@ -2128,7 +2202,7 @@ impl Executor {
             }
             Runtime::DeleteLookupSlot => {
                 let name = text(a, arg(0))?;
-                Ok(Value::Bool(match Self::lookup(a, st.f().env(&st.regs), &name)? {
+                Ok(Value::Bool(match self.lookup(a, st.f().env(&st.regs), &name)? {
                     Found::Slot(..) => false,
                     Found::Object(o) => a.delete(Value::Object(o), &name)?,
                     Found::Nothing => true,

@@ -59,14 +59,48 @@ pub type NativeFn = for<'gc, 'x> fn(&mut Agent<'gc, 'x>, Value<'gc>, &[Value<'gc
 #[derive(Debug, Collect)]
 #[collect(no_drop)]
 pub struct Env<'gc> {
-    slots: Box<[ValueCell<'gc>]>,
+    slots: EnvSlots<'gc>,
     pub parent: Option<JsEnv<'gc>>,
     /// What its slots are called and what kind of context it is (V8's `ScopeInfo`): lookups by name (`with`, eval)
     /// and the script context table read it
     #[collect(require_static)]
-    pub shape: Option<alloc::sync::Arc<ContextShape>>,
+    pub shape: Option<ShapeId>,
     /// A `with` context's object, or the object a sloppy direct eval declares its `var`s in (V8's context extension)
     pub extension: Option<JsObject<'gc>>,
+}
+
+/// Names a context's shape: the execution engine keeps the shapes (as long as the code they come from), contexts only
+/// carry the id, so making and collecting one counts no references.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ShapeId(pub u32);
+
+/// How many slots a context holds inline (more go to a separate box)
+const INLINE_SLOTS: usize = 4;
+
+/// A context's slots: inline when few (most contexts: no allocation besides the context itself, nothing to free when
+/// it is collected), boxed otherwise.
+#[derive(Debug, Collect)]
+#[collect(no_drop)]
+enum EnvSlots<'gc> {
+    Inline { len: u8, cells: [ValueCell<'gc>; INLINE_SLOTS] },
+    Boxed(Box<[ValueCell<'gc>]>),
+}
+
+impl<'gc> EnvSlots<'gc> {
+    fn new(n: usize, mut init: impl FnMut(usize) -> Value<'gc>) -> Self {
+        match u8::try_from(n) {
+            Ok(len) if n <= INLINE_SLOTS => Self::Inline { len, cells: core::array::from_fn(|i| ValueCell::new(if i < n { init(i) } else { Value::Undefined })) },
+            _ => Self::Boxed((0..n).map(|i| ValueCell::new(init(i))).collect()),
+        }
+    }
+
+    #[inline]
+    fn cells(&self) -> &[ValueCell<'gc>] {
+        match self {
+            Self::Inline { len, cells } => &cells[..usize::from(*len)],
+            Self::Boxed(b) => b,
+        }
+    }
 }
 
 /// A context's kind and slot names (the part of V8's `ScopeInfo` lookups by name need).
@@ -108,26 +142,28 @@ impl ContextShape {
 impl<'gc> Env<'gc> {
     /// An environment holding `slots`
     pub fn new(slots: Vec<Value<'gc>>, parent: Option<JsEnv<'gc>>) -> Self {
-        Self { slots: slots.into_iter().map(ValueCell::new).collect(), parent, shape: None, extension: None }
+        let n = slots.len();
+        let mut values = slots.into_iter();
+        Self { slots: EnvSlots::new(n, |_| values.next().unwrap_or_default()), parent, shape: None, extension: None }
     }
 
     /// An environment of `n` slots, all `undefined`
     pub fn with_len(n: usize, parent: Option<JsEnv<'gc>>) -> Self {
-        Self { slots: (0..n).map(|_| ValueCell::new(Value::Undefined)).collect(), parent, shape: None, extension: None }
+        Self { slots: EnvSlots::new(n, |_| Value::Undefined), parent, shape: None, extension: None }
     }
 
     /// A context of `n` slots holding `init`, with its shape and extension
-    pub fn context(n: usize, init: Value<'gc>, parent: Option<JsEnv<'gc>>, shape: Option<alloc::sync::Arc<ContextShape>>, extension: Option<JsObject<'gc>>) -> Self {
-        Self { slots: (0..n).map(|_| ValueCell::new(init)).collect(), parent, shape, extension }
+    pub fn context(n: usize, init: Value<'gc>, parent: Option<JsEnv<'gc>>, shape: Option<ShapeId>, extension: Option<JsObject<'gc>>) -> Self {
+        Self { slots: EnvSlots::new(n, |_| init), parent, shape, extension }
     }
 
     /// How many slots it has
     pub fn len(&self) -> usize {
-        self.slots.len()
+        self.slots.cells().len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.slots.is_empty()
+        self.slots.cells().is_empty()
     }
 
     pub fn alloc(self, mc: &Mutation<'gc>) -> JsEnv<'gc> {
@@ -137,18 +173,18 @@ impl<'gc> Env<'gc> {
     /// Slot `i`
     #[inline]
     pub fn load(&self, i: usize) -> Value<'gc> {
-        self.slots[i].get()
+        self.slots.cells()[i].get()
     }
 
     /// The current values of every slot (a copy, e.g. for a per-iteration binding environment)
     pub fn values(&self) -> Vec<Value<'gc>> {
-        self.slots.iter().map(ValueCell::get).collect()
+        self.slots.cells().iter().map(ValueCell::get).collect()
     }
 
     /// Writes slot `i` of `env`
     #[inline]
     pub fn set(env: JsEnv<'gc>, mc: &Mutation<'gc>, i: usize, v: Value<'gc>) {
-        env.get().slots[i].set(mc, v);
+        env.get().slots.cells()[i].set(mc, v);
     }
 }
 
@@ -1750,6 +1786,15 @@ impl<'gc> Object<'gc> {
         }
         let proto = self.proto();
         self.props.push_to(mc, to, slot, || proto.map(|p| p.get().root_shape_ref()));
+    }
+
+    /// An object without properties takes shape `to` with values `slots` at once (see [`Props::fill`])
+    pub fn fill(&self, mc: &Mutation<'gc>, to: &alloc::sync::Arc<crate::Shape>, slots: impl IntoIterator<Item = Slot<'gc>>) {
+        if to.digit_keys() {
+            self.digit_keys.set(true);
+        }
+        let proto = self.proto();
+        self.props.fill(mc, to, slots, || proto.map(|p| p.get().root_shape_ref()));
     }
 
     /// Own property.

@@ -60,7 +60,7 @@ macro_rules! next {
 /// Defines handlers: `name(cx, pc, regs, acc, operands) { body }`; the body ends by a `next!` / `fall!` / return.
 macro_rules! handlers {
     ($($name:ident($cx:ident, $pc:ident, $regs:ident, $acc:ident, $o:ident) $body:block)*) => {$(
-        #[allow(unused_mut, unused_variables, clippy::cast_precision_loss, clippy::cast_possible_truncation, reason = "operands are in range")]
+        #[allow(unused_mut, unused_variables, clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "operands are in range")]
         fn $name<'r, 'gc, 'x, 'b>($cx: &mut Cx<'r, 'gc, 'x, 'b>, $pc: *const Insn, $regs: *mut Value<'gc>, mut $acc: Value<'gc>) -> Exit<'gc> {
             // SAFETY: `pc` points at a decoded instruction of the running function
             let $o = unsafe { &(*$pc).operands };
@@ -283,6 +283,46 @@ fn enter<'r, 'gc>(cx: &mut Cx<'r, 'gc, '_, '_>, pc: *const Insn, callee: Value<'
     Some((l.insns.as_ptr(), cx.st.regs.as_mut_ptr().wrapping_add(base)))
 }
 
+/// Records where the running frame is (before something that may throw: the handler table lookup needs it)
+#[inline]
+fn sync(cx: &mut Cx<'_, '_, '_, '_>, pc: *const Insn) {
+    // SAFETY: `pc` points into the running function's instructions
+    let at = usize::try_from(unsafe { pc.offset_from(cx.loaded.insns.as_ptr()) }).unwrap_or(0);
+    let f = cx.st.f_mut();
+    f.insn = at;
+    f.pc = at + 1;
+}
+
+/// `x % y` of two integers (the sign is the dividend's, `-0` included); `None` otherwise
+#[inline]
+fn int_rem(x: f64, y: f64) -> Option<f64> {
+    const EXACT: f64 = 9_007_199_254_740_992.0;
+    if x.fract() != 0.0 || y.fract() != 0.0 || y == 0.0 || x.abs() >= EXACT || y.abs() >= EXACT {
+        return None;
+    }
+    #[expect(clippy::cast_possible_truncation, reason = "integers below 2^53")]
+    let r = (x as i64) % (y as i64);
+    #[expect(clippy::cast_precision_loss, reason = "below 2^53")]
+    Some(if r == 0 && x.is_sign_negative() { -0.0 } else { r as f64 })
+}
+
+/// ToInt32 of a number that already is an int32 (`-0` too); `None` otherwise
+#[inline]
+fn int32(v: Value<'_>) -> Option<i32> {
+    let x = v.as_number()?;
+    #[expect(clippy::cast_possible_truncation, reason = "checked by converting back")]
+    let i = x as i32;
+    (f64::from(i) == x).then_some(i)
+}
+
+/// An int32 operation inline, anything else on the slow path
+macro_rules! bitwise {
+    ($cx:ident, $pc:ident, $regs:ident, $acc:ident, $l:expr, $r:expr, |$x:ident, $y:ident| $e:expr) => {{
+        let (Some($x), Some($y)) = (int32($l), int32($r)) else { fall!($cx, $pc, $regs, $acc) };
+        next!($cx, step!($pc), $regs, Value::Number(f64::from($e)))
+    }};
+}
+
 /// A call with the callee in register `o[0]`, `this` and up to two arguments at hand
 macro_rules! call {
     ($cx:ident, $pc:ident, $regs:ident, $acc:ident, $o:ident, $this:expr, [$($arg:expr),*]) => {{
@@ -302,14 +342,122 @@ handlers! {
     call_property0(cx, pc, regs, acc, o) { call!(cx, pc, regs, acc, o, reg!(cx, regs, o[1]), []) }
     call_property1(cx, pc, regs, acc, o) { call!(cx, pc, regs, acc, o, reg!(cx, regs, o[1]), [reg!(cx, regs, o[2])]) }
     call_property2(cx, pc, regs, acc, o) { call!(cx, pc, regs, acc, o, reg!(cx, regs, o[1]), [reg!(cx, regs, o[2]), reg!(cx, regs, o[3])]) }
+    // `new` of an ordinary function or class constructor: builds `this` (a base constructor) and opens the frame
+    construct(cx, pc, regs, acc, o) {
+        let callee = reg!(cx, regs, o[0]);
+        let ValueKind::Object(ob) = callee.kind() else { fall!(cx, pc, regs, acc) };
+        let Some(c) = ob.closure() else { fall!(cx, pc, regs, acc) };
+        let l = cx.exe.function(c.func);
+        if !(l.constructs || l.class_constructor) || l.generator || l.asynchronous || c.fields.is_some() || cx.depth + cx.st.frames.len() + 1 >= STACK_LIMIT {
+            fall!(cx, pc, regs, acc)
+        }
+        sync(cx, pc);
+        let this = if l.derived {
+            Value::Uninit
+        } else {
+            match Executor::create_this(cx.a, l, acc) {
+                Ok(t) => Value::Object(t),
+                Err(e) => return Exit::Throw(e),
+            }
+        };
+        let first = Executor::slot_of(cx.st.f(), o[1]).unwrap_or(cx.st.regs.len());
+        let args = Args::Regs { first, count: o[2] as usize };
+        let mut f = cx.exe.open_with(cx.a, &mut cx.st.regs, l, c, callee, this, args);
+        cx.exe.set_new_target(&mut cx.st.regs, &mut f, acc);
+        f.set_slot(&mut cx.st.regs, Frame::NEW_THIS, this);
+        let base = f.base;
+        cx.st.frames.push(f);
+        cx.loaded = l;
+        let regs = cx.st.regs.as_mut_ptr().wrapping_add(base);
+        next!(cx, l.insns.as_ptr(), regs, Value::Undefined)
+    }
+    create_object_literal(cx, pc, regs, acc, o) {
+        let ob = Executor::object_literal(cx.a, cx.loaded, o[0]);
+        next!(cx, step!(pc), regs, ob.into())
+    }
+    set_named_property(cx, pc, regs, acc, o) {
+        if let ValueKind::Object(ob) = reg!(cx, regs, o[0]).kind()
+            && cx.loaded.ics[o[2] as usize].set(cx.a.mc, ob, acc, true)
+        {
+            next!(cx, step!(pc), regs, acc)
+        }
+        fall!(cx, pc, regs, acc)
+    }
+    define_named_own_property(cx, pc, regs, acc, o) {
+        if let ValueKind::Object(ob) = reg!(cx, regs, o[0]).kind()
+            && cx.loaded.ics[o[2] as usize].set(cx.a.mc, ob, acc, false)
+        {
+            next!(cx, step!(pc), regs, acc)
+        }
+        fall!(cx, pc, regs, acc)
+    }
+    // An array element that is there
+    get_keyed_property(cx, pc, regs, acc, o) {
+        if let (ValueKind::Object(ob), Some(i)) = (reg!(cx, regs, o[0]).kind(), Executor::index(acc))
+            && ob.is_array()
+            && let Some(v) = ob.elements().get(i)
+        {
+            next!(cx, step!(pc), regs, v)
+        }
+        fall!(cx, pc, regs, acc)
+    }
+    set_keyed_property(cx, pc, regs, acc, o) {
+        if let (ValueKind::Object(ob), Some(i)) = (reg!(cx, regs, o[0]).kind(), Executor::index(reg!(cx, regs, o[1])))
+            && ob.write_index(cx.a.mc, u32::try_from(i).unwrap_or(u32::MAX), acc)
+        {
+            next!(cx, step!(pc), regs, acc)
+        }
+        fall!(cx, pc, regs, acc)
+    }
+    mod_(cx, pc, regs, acc, o) {
+        let (Some(x), Some(y)) = (reg!(cx, regs, o[0]).as_number(), acc.as_number()) else { fall!(cx, pc, regs, acc) };
+        match int_rem(x, y) {
+            Some(r) => next!(cx, step!(pc), regs, Value::Number(r)),
+            None => fall!(cx, pc, regs, acc),
+        }
+    }
+    mod_smi(cx, pc, regs, acc, o) {
+        let Some(x) = acc.as_number() else { fall!(cx, pc, regs, acc) };
+        match int_rem(x, o[0] as f64) {
+            Some(r) => next!(cx, step!(pc), regs, Value::Number(r)),
+            None => fall!(cx, pc, regs, acc),
+        }
+    }
+    bitwise_and(cx, pc, regs, acc, o) { bitwise!(cx, pc, regs, acc, reg!(cx, regs, o[0]), acc, |x, y| x & y) }
+    bitwise_or(cx, pc, regs, acc, o) { bitwise!(cx, pc, regs, acc, reg!(cx, regs, o[0]), acc, |x, y| x | y) }
+    bitwise_xor(cx, pc, regs, acc, o) { bitwise!(cx, pc, regs, acc, reg!(cx, regs, o[0]), acc, |x, y| x ^ y) }
+    shift_left(cx, pc, regs, acc, o) { bitwise!(cx, pc, regs, acc, reg!(cx, regs, o[0]), acc, |x, y| x.wrapping_shl(y as u32 & 31)) }
+    shift_right(cx, pc, regs, acc, o) { bitwise!(cx, pc, regs, acc, reg!(cx, regs, o[0]), acc, |x, y| x >> (y as u32 & 31)) }
+    shift_right_logical(cx, pc, regs, acc, o) { bitwise!(cx, pc, regs, acc, reg!(cx, regs, o[0]), acc, |x, y| (x as u32) >> (y as u32 & 31)) }
+    bitwise_and_smi(cx, pc, regs, acc, o) { bitwise!(cx, pc, regs, acc, acc, Value::Number(o[0] as f64), |x, y| x & y) }
+    bitwise_or_smi(cx, pc, regs, acc, o) { bitwise!(cx, pc, regs, acc, acc, Value::Number(o[0] as f64), |x, y| x | y) }
+    bitwise_xor_smi(cx, pc, regs, acc, o) { bitwise!(cx, pc, regs, acc, acc, Value::Number(o[0] as f64), |x, y| x ^ y) }
+    shift_left_smi(cx, pc, regs, acc, o) { bitwise!(cx, pc, regs, acc, acc, Value::Number(o[0] as f64), |x, y| x.wrapping_shl(y as u32 & 31)) }
+    shift_right_smi(cx, pc, regs, acc, o) { bitwise!(cx, pc, regs, acc, acc, Value::Number(o[0] as f64), |x, y| x >> (y as u32 & 31)) }
+    shift_right_logical_smi(cx, pc, regs, acc, o) { bitwise!(cx, pc, regs, acc, acc, Value::Number(o[0] as f64), |x, y| (x as u32) >> (y as u32 & 31)) }
     // A plain call's frame returns to its caller's next instruction (construct frames, and the outermost frame, take
     // the slow path)
     return_(cx, pc, regs, acc, o) {
         let st = &mut *cx.st;
-        // SAFETY: the header's new.target slot is below r0
-        if st.frames.len() < 2 || unsafe { *regs.sub(Frame::NEW_TARGET) } != Value::Undefined {
+        if st.frames.len() < 2 {
             fall!(cx, pc, regs, acc)
         }
+        // A construct frame gives an object it returns, else the `this` it built (a derived constructor's code
+        // returns `this` itself; anything else there is an error, for the slow path)
+        // SAFETY: the header's slots are below r0
+        let v = if unsafe { *regs.sub(Frame::NEW_TARGET) } == Value::Undefined || acc.as_object().is_some() {
+            acc
+        } else {
+            match unsafe { *regs.sub(Frame::NEW_THIS) } {
+                t if t.as_object().is_some() => t,
+                _ => fall!(cx, pc, regs, acc),
+            }
+        };
+        if let Some(ob) = v.as_object().filter(|_| unsafe { *regs.sub(Frame::NEW_TARGET) } != Value::Undefined) {
+            cx.loaded.instance_size.set(u8::try_from(ob.get().props().len()).unwrap_or(u8::MAX));
+        }
+        let acc = v;
+        let st = &mut *cx.st;
         st.pop_frame();
         let caller = st.f();
         let (func, at, base) = (caller.func, caller.pc, caller.base);
@@ -404,6 +552,26 @@ impl Insn {
             B::CallProperty1 => call_property1,
             B::CallProperty2 => call_property2,
             B::Return => return_,
+            B::Construct => construct,
+            B::CreateObjectLiteral => create_object_literal,
+            B::SetNamedProperty => set_named_property,
+            B::DefineNamedOwnProperty => define_named_own_property,
+            B::GetKeyedProperty => get_keyed_property,
+            B::SetKeyedProperty => set_keyed_property,
+            B::Mod => mod_,
+            B::ModSmi => mod_smi,
+            B::BitwiseAnd => bitwise_and,
+            B::BitwiseOr => bitwise_or,
+            B::BitwiseXor => bitwise_xor,
+            B::ShiftLeft => shift_left,
+            B::ShiftRight => shift_right,
+            B::ShiftRightLogical => shift_right_logical,
+            B::BitwiseAndSmi => bitwise_and_smi,
+            B::BitwiseOrSmi => bitwise_or_smi,
+            B::BitwiseXorSmi => bitwise_xor_smi,
+            B::ShiftLeftSmi => shift_left_smi,
+            B::ShiftRightSmi => shift_right_smi,
+            B::ShiftRightLogicalSmi => shift_right_logical_smi,
             B::Illegal => illegal,
             _ => slow,
         }

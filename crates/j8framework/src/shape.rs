@@ -80,11 +80,19 @@ pub struct Shape {
     /// The root of this shape's tree (children inherit it): telling whether a shape belongs to a given tree is one
     /// compare. Set right after the root is allocated ([`Shape::rooted`])
     tree: IsoCell<*const Shape>,
+    /// Some key starts with a digit (an array index maybe: key order puts those first)
+    digit_keys: bool,
 }
 
 impl Shape {
     fn new(keys: Arc<Prefix<(SmallStr, Attrs)>>, len: usize) -> Self {
-        Self { keys, len, index: OnceBox::default(), searches: IsoCell::new(0), transitions: Chain::default(), tree: IsoCell::new(core::ptr::null()) }
+        let digit_keys = keys.prefix(len).iter().any(|(k, _)| k.as_bytes().first().is_some_and(u8::is_ascii_digit));
+        Self { keys, len, index: OnceBox::default(), searches: IsoCell::new(0), transitions: Chain::default(), tree: IsoCell::new(core::ptr::null()), digit_keys }
+    }
+
+    /// Some key starts with a digit
+    pub fn digit_keys(&self) -> bool {
+        self.digit_keys
     }
 
     /// Its keys and attributes, in order
@@ -94,6 +102,11 @@ impl Shape {
 
     pub fn len(&self) -> usize {
         self.len
+    }
+
+    /// Whether this shape belongs to `root`'s tree (which then keeps it alive)
+    pub fn in_tree(&self, root: &Shape) -> bool {
+        core::ptr::eq(self.tree.get(), root)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -318,6 +331,25 @@ impl<'gc> Props<'gc> {
         }
     }
 
+    /// Entry `i`'s value when it holds data (an inline cache hit: the caller matched a fast-mode shape, so this is
+    /// no dictionary); `None` for an accessor
+    #[inline]
+    pub fn read_data(&self, i: usize) -> Option<Value<'gc>> {
+        let v = self.cell(i)?.get();
+        v.as_accessor().is_none().then_some(v)
+    }
+
+    /// Replaces entry `i`'s value when it holds data (as [`Props::read_data`]); `false` for an accessor
+    #[inline]
+    pub fn write_data(&self, mc: &Mutation<'gc>, i: usize, v: Value<'gc>) -> bool {
+        let Some(c) = self.cell(i) else { return false };
+        if c.get().as_accessor().is_some() {
+            return false;
+        }
+        c.set(mc, v);
+        true
+    }
+
     #[inline]
     pub fn slot(&self, i: usize) -> Slot<'gc> {
         match self.dict_cell() {
@@ -478,6 +510,33 @@ impl<'gc> Props<'gc> {
                 return;
             }
         }
+    }
+
+    /// An empty object takes shape `to` at once, with values `slots` in order (`to` has exactly that many keys; the
+    /// execution layer caches the final shape of an object literal / a function object): what V8 does by copying a
+    /// boilerplate with its map. Anchors `to` unless the prototype's root `root` holds its tree.
+    pub fn fill<'r>(&self, mc: &Mutation<'gc>, to: &Arc<Shape>, slots: impl IntoIterator<Item = Slot<'gc>>, root: impl Fn() -> Option<&'r Shape>)
+    where
+        'gc: 'r,
+    {
+        debug_assert!(self.shape_ref().is_none() && !self.is_dict());
+        for (i, slot) in slots.into_iter().enumerate().take(to.len()) {
+            let v = slot.encode(mc);
+            match i.checked_sub(INLINE) {
+                None => self.inline[i].set(mc, v),
+                Some(k) => {
+                    let cur = self.store();
+                    let grown = Store::put(cur, mc, k, k, v);
+                    if cur.is_none_or(|s| !Gc::ptr_eq(s.gc(), grown.gc())) {
+                        self.store.set(mc.mutator(), Some(grown.gc()));
+                    }
+                }
+            }
+        }
+        if !root().is_some_and(|r| to.in_tree(r)) {
+            self.anchor(mc, Arc::clone(to));
+        }
+        self.shape.set(Arc::as_ptr(to));
     }
 
     /// The prototype changed: anchor the current shape's tree here (the new prototype's root may not hold it)

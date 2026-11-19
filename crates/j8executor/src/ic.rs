@@ -62,6 +62,8 @@ pub struct Ic {
     chain: [Cell<usize>; DEPTH],
     /// Add property: the shape transitioned to
     to: RefCell<Option<Arc<Shape>>>,
+    /// `to` is set (a write adds the property rather than modifies it)
+    adds: Cell<bool>,
     /// Keeps the recognized shape addresses alive
     keep: RefCell<Vec<Weak<Shape>>>,
 }
@@ -76,6 +78,7 @@ impl Ic {
         self.shape.set(0);
         self.keep.borrow_mut().clear();
         *self.to.borrow_mut() = None;
+        self.adds.set(false);
     }
 
     fn keep(&self, d: &Object<'_>) -> usize {
@@ -117,17 +120,18 @@ impl Ic {
 
     #[inline]
     pub fn get<'gc>(&self, o: JsObject<'gc>) -> Option<Value<'gc>> {
+        // A cached shape is a fast-mode one: matching it rules out a dictionary
         let want = self.shape.get();
         let d = o.get();
-        if addr(d) != want || !plain(d) {
+        if addr(d) != want || !d.is_plain() {
             return None;
         }
         let slot = self.slot.get() as usize;
         let holder = match self.depth.get() {
-            0 => return Self::data(d.props().slot(slot)),
+            0 => return d.props().read_data(slot),
             n => self.holder(d.proto(), usize::from(n))?,
         };
-        Self::data(holder.props().slot(slot))
+        holder.props().read_data(slot)
     }
 
     fn data(s: Slot<'_>) -> Option<Value<'_>> {
@@ -187,29 +191,22 @@ impl Ic {
     pub fn set<'gc>(&self, mc: &Mutation<'gc>, o: JsObject<'gc>, v: Value<'gc>, assign: bool) -> bool {
         let want = self.shape.get();
         let d = o.get();
-        if addr(d) != want || !plain(d) {
+        if addr(d) != want || !d.is_plain() {
+            return false;
+        }
+        // Modify an own writable data property (the cached shape is a fast-mode one)
+        if !self.adds.get() {
+            return d.props().write_data(mc, self.slot.get() as usize, v);
+        }
+        // Add property: extensible; assignments also require the whole prototype chain to be unchanged (an empty
+        // object's address also matches a dictionary's)
+        if d.props().is_dict() || d.non_extensible() || (assign && !self.chain_intact(d.proto(), usize::from(self.depth.get()))) {
             return false;
         }
         let to = self.to.borrow();
-        match &*to {
-            // Modify an own writable data property
-            None => {
-                let slot = self.slot.get() as usize;
-                if !matches!(d.props().slot(slot), Slot::Data(_)) {
-                    return false;
-                }
-                o.set_at(mc, slot, v);
-                true
-            }
-            // Add property: extensible; assignments also require the whole prototype chain to be unchanged
-            Some(to) => {
-                if d.non_extensible() || (assign && !self.chain_intact(d.proto(), usize::from(self.depth.get()))) {
-                    return false;
-                }
-                o.push_to(mc, to, Slot::Data(v));
-                true
-            }
-        }
+        let Some(to) = &*to else { return false };
+        o.push_to(mc, to, Slot::Data(v));
+        true
     }
 
     /// After a slow-path write, records it: an own property was modified, or a property was added (`assign`: an
@@ -253,6 +250,7 @@ impl Ic {
         // `to` is held strongly and the starting shape through a weak link in `keep`: neither address can be reused
         // while cached
         *self.to.borrow_mut() = Some(to);
+        self.adds.set(true);
         self.keep.borrow_mut().extend(before.from);
         self.shape.set(before.shape);
     }
