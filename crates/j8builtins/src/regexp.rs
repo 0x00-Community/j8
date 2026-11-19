@@ -35,6 +35,8 @@ struct Found {
 struct Compiled {
     regex: regress::Regex,
     atom: Option<Box<str>>,
+    /// The same pattern on finite automata, when it means the same there (all-ASCII subjects)
+    dfa: Option<crate::dfa::Dfa>,
 }
 
 impl Compiled {
@@ -43,7 +45,8 @@ impl Compiled {
 
     fn new(regex: regress::Regex, source: &str, flags: &str) -> Self {
         let atom = (!source.is_empty() && !flags.contains('i') && !source.contains(|c| Self::SYNTAX.contains(c))).then(|| source.into());
-        Self { regex, atom }
+        let dfa = if atom.is_none() { crate::dfa::Dfa::new(source, flags) } else { None };
+        Self { regex, atom, dfa }
     }
 }
 
@@ -224,6 +227,10 @@ impl Regexps {
         if let Some(atom) = &c.atom {
             let at = start + s[start..].find(&**atom)?;
             return Some(Found { range: at..at + atom.len(), groups: Vec::new(), named: Vec::new() });
+        }
+        if let Some(d) = &c.dfa {
+            let (range, groups) = d.find(s, start)?;
+            return Some(Found { range, groups, named: Vec::new() });
         }
         let m = c.regex.find_from(s, start).next()?;
         let named = m.named_groups().map(|(n, r)| (String::from(n), r)).collect();

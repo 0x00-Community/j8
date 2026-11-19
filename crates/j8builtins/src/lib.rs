@@ -8,6 +8,7 @@ mod bigint;
 mod buffer;
 mod collections;
 mod date;
+mod dfa;
 mod error;
 mod function;
 mod global;
