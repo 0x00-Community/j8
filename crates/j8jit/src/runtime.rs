@@ -469,40 +469,67 @@ fn interp(ctx: *mut Ctx, callee: u64, this: u64, a0: u64, a1: u64, a2: u64) -> u
     }
 }
 
-/// Executable memory: one mapping per piece of code, kept for as long as the JIT lives.
+/// Executable memory: big shared-memory chunks mapped twice, writable at one address and executable at another, that
+/// pieces of code are cut from (no permission changes per piece), kept for as long as the JIT lives.
+#[derive(Default)]
+pub struct Arena {
+    /// (writable view, executable view)
+    chunks: Vec<(Mapped, Mapped)>,
+    /// Bytes used in the last chunk
+    used: usize,
+}
+
+impl Arena {
+    /// Bytes per chunk
+    const CHUNK: usize = 1 << 20;
+    /// Code starts at multiples of this
+    const ALIGN: usize = 16;
+
+    /// A chunk of `len` bytes: its two views
+    fn chunk(len: usize) -> Option<(Mapped, Mapped)> {
+        // SAFETY: a fresh anonymous file, sized, mapped shared twice
+        unsafe {
+            let fd = libc::memfd_create(c"j8jit".as_ptr(), libc::MFD_CLOEXEC);
+            if fd < 0 {
+                return None;
+            }
+            let ok = libc::ftruncate(fd, libc::off_t::try_from(len).ok()?) == 0;
+            let map = |prot| libc::mmap(core::ptr::null_mut(), len, prot, libc::MAP_SHARED, fd, 0);
+            let (w, x) = if ok { (map(libc::PROT_READ | libc::PROT_WRITE), map(libc::PROT_READ | libc::PROT_EXEC)) } else { (libc::MAP_FAILED, libc::MAP_FAILED) };
+            libc::close(fd);
+            if w == libc::MAP_FAILED || x == libc::MAP_FAILED {
+                return None;
+            }
+            Some((Mapped { at: w.cast(), len }, Mapped { at: x.cast(), len }))
+        }
+    }
+
+    /// `bytes` placed executable (`patch` fixes it up, given its executable address): that address
+    pub fn place(&mut self, bytes: &[u8], patch: impl FnOnce(&mut [u8], usize)) -> Option<usize> {
+        let len = bytes.len().max(1);
+        let at = self.used.next_multiple_of(Self::ALIGN);
+        if self.chunks.last().is_none_or(|(w, _)| at + len > w.len) {
+            self.chunks.push(Self::chunk(len.next_multiple_of(Self::CHUNK))?);
+            self.used = 0;
+            return self.place(bytes, patch);
+        }
+        let (w, x) = self.chunks.last()?;
+        // SAFETY: [at, at + len) of the writable view, not used by any other piece
+        let buf = unsafe { core::slice::from_raw_parts_mut(w.at.add(at), len) };
+        buf[..bytes.len()].copy_from_slice(bytes);
+        let addr = x.at as usize + at;
+        patch(buf, addr);
+        self.used = at + len;
+        Some(addr)
+    }
+}
+
+/// Executable memory: one mapping.
 pub struct Mapped {
     pub at: *mut u8,
     pub len: usize,
 }
 
-impl Mapped {
-    /// `bytes` mapped read-execute (`patch` fixes it up while writable)
-    pub fn new(bytes: &[u8], patch: impl FnOnce(&mut [u8], usize)) -> Option<Mapped> {
-        let len = bytes.len().max(1);
-        // SAFETY: a fresh private anonymous mapping, written while writable, then made read-execute
-        unsafe {
-            let at = libc::mmap(core::ptr::null_mut(), len, libc::PROT_READ | libc::PROT_WRITE, libc::MAP_PRIVATE | libc::MAP_ANONYMOUS, -1, 0);
-            if at == libc::MAP_FAILED {
-                return None;
-            }
-            let buf = core::slice::from_raw_parts_mut(at.cast::<u8>(), len);
-            buf[..bytes.len()].copy_from_slice(bytes);
-            patch(buf, at as usize);
-            if libc::mprotect(at, len, libc::PROT_READ | libc::PROT_EXEC) != 0 {
-                libc::munmap(at, len);
-                return None;
-            }
-            Some(Mapped { at: at.cast(), len })
-        }
-    }
-}
-
-impl Drop for Mapped {
-    fn drop(&mut self) {
-        // SAFETY: the mapping made in `new`
-        unsafe { libc::munmap(self.at.cast(), self.len) };
-    }
-}
 
 /// Trampolines: `jmp [rip + d]` to a cell in a writable page next to them. One page of stubs, one of cells.
 pub struct Trampolines {

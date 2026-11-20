@@ -267,20 +267,21 @@ pub struct Builder<'e> {
     root: FuncId,
     /// How to reach entry `i` of the global object (`true`) / the script scope in their stores, now
     paths: &'e dyn Fn(bool, usize) -> Option<j8framework::StorePath>,
+    /// Debugging output (`J8_JIT_LOG`)
+    log: bool,
 }
 
 type R<T> = Result<T, Reject>;
 
 impl<'e> Builder<'e> {
     /// Compiles `root` entered as `kind`.
-    pub fn build(exe: &'e Executor, hints: &'e Hints, root: FuncId, kind: Kind, paths: &'e dyn Fn(bool, usize) -> Option<j8framework::StorePath>) -> R<Built> {
+    pub fn build(exe: &'e Executor, hints: &'e Hints, root: FuncId, kind: Kind, paths: &'e dyn Fn(bool, usize) -> Option<j8framework::StorePath>, log: bool) -> R<Built> {
         let mut widen = Widen::default();
-        let log = std::env::var_os("J8_JIT_LOG").is_some();
         for round in 0..RESTARTS {
             if log && round > 0 {
                 std::eprintln!("j8jit: restart {round}");
             }
-            let mut b = Builder { exe, hints, g: Graph::default(), targets: Vec::new(), shapes: Vec::new(), keep: Vec::new(), cfgs: BTreeMap::new(), widen: widen.clone(), instances: 0, cur: None, undef: 0, restart: false, kind, root, paths };
+            let mut b = Builder { exe, hints, g: Graph::default(), targets: Vec::new(), shapes: Vec::new(), keep: Vec::new(), cfgs: BTreeMap::new(), widen: widen.clone(), instances: 0, cur: None, undef: 0, restart: false, kind, root, paths, log };
             if let Err(e) = b.run() {
                 if log {
                     std::eprintln!("j8jit: rejected {e:?}");
@@ -1071,7 +1072,7 @@ impl<'e> Builder<'e> {
     fn back_edge(&mut self, act: &mut Act<'e>, ri: usize, tb: u32, b: B, mut st: St) {
         let Some(h) = act.headers.get(&(ri, tb)) else {
             // A loop whose header wasn't reached by a forward edge: not compiled
-            if std::env::var_os("J8_JIT_LOG").is_some() { std::eprintln!("j8jit: restart: no header"); }
+            if self.log { std::eprintln!("j8jit: restart: no header"); }
             self.restart = true;
             return;
         };
@@ -1175,7 +1176,7 @@ impl<'e> Builder<'e> {
             for f in broken {
                 self.widen.bad.push(((act.inst, ri, tb as usize), f));
             }
-            if std::env::var_os("J8_JIT_LOG").is_some() {
+            if self.log {
                 for f in &h.known {
                     if !st.heap.known.contains(&f.map(back)) {
                         let d = |f: &Fact| match f {
@@ -1203,7 +1204,7 @@ impl<'e> Builder<'e> {
             }
         }
         if fail {
-            if std::env::var_os("J8_JIT_LOG").is_some() { std::eprintln!("j8jit: restart: virtual/mem mismatch"); }
+            if self.log { std::eprintln!("j8jit: restart: virtual/mem mismatch"); }
             self.restart = true;
             return;
         }
@@ -1271,13 +1272,13 @@ impl<'e> Builder<'e> {
                 continue;
             }
             if Self::join(want, have) != want {
-                if std::env::var_os("J8_JIT_LOG").is_some() {
+                if self.log {
                     std::eprintln!("j8jit: phi {phi} wants {want:?} has {have:?}");
                 }
                 let k = slots.iter().find(|(_, p)| p == phi).map(|(k, _)| *k).or_else(|| hm.iter().position(|(_, _, p)| p == phi).map(Key::Mem));
                 if let Some(k) = k {
                     self.widen.word.insert(key(k), Self::join(want, have));
-                    if std::env::var_os("J8_JIT_LOG").is_some() { std::eprintln!("j8jit: restart: rep widen"); }
+                    if self.log { std::eprintln!("j8jit: restart: rep widen"); }
                     self.restart = true;
                     return;
                 }
@@ -1287,7 +1288,7 @@ impl<'e> Builder<'e> {
                         self.widen.real.insert(key(k), ());
                     }
                 }
-                if std::env::var_os("J8_JIT_LOG").is_some() { std::eprintln!("j8jit: restart: field rep"); }
+                if self.log { std::eprintln!("j8jit: restart: field rep"); }
                 self.restart = true;
                 return;
             }
@@ -1629,7 +1630,7 @@ impl<'e> Builder<'e> {
         }
         // Another context's entry at the same index could be this one: they differ (guarded; when that failed
         // here before, the other's value is written back instead)
-        let alias = self.hint(act.id, pc) & HINT_GENERIC != 0 || std::env::var_os("J8_NODISTINCT").is_some();
+        let alias = self.hint(act.id, pc) & HINT_GENERIC != 0;
         for m in st.heap.mem.clone() {
             if m.idx == idx && m.ctx != ctx {
                 if alias {
@@ -1775,7 +1776,7 @@ impl<'e> Builder<'e> {
     }
 
     fn generic_get(&mut self, act: &Act<'e>, st: &mut St, w: V, name: OperandValue, pc: usize) -> R<V> {
-        if std::env::var_os("J8_JIT_LOG").is_some() {
+        if self.log {
             std::eprintln!("j8jit: generic get {} at {:?}@{pc}", act.f.name(name), act.id);
         }
         self.flush(st);
@@ -1849,7 +1850,7 @@ impl<'e> Builder<'e> {
 
     #[expect(clippy::too_many_arguments, reason = "a store's parts")]
     fn generic_set(&mut self, act: &Act<'e>, st: &mut St, obj: V, name: OperandValue, v: V, assign: bool, pc: usize) -> R<()> {
-        if std::env::var_os("J8_JIT_LOG").is_some() {
+        if self.log {
             std::eprintln!("j8jit: generic set {} at {:?}@{pc} (virtual {})", act.f.name(name), act.id, Self::is_virtual(st, obj));
             if let Some(fb) = act.f.property(act.f.insn(pc).operands[2]) {
                 let vo = Self::vobj(st, obj);
@@ -2006,7 +2007,7 @@ impl<'e> Builder<'e> {
         let start = self.jump(u32::MAX);
         a.edges.entry((0, 0)).or_default().push((start, inner));
         if self.walk(&mut a).is_err() {
-            if std::env::var_os("J8_JIT_LOG").is_some() { std::eprintln!("j8jit: restart: inline restart"); }
+            if self.log { std::eprintln!("j8jit: restart: inline restart"); }
             self.restart = true;
             return Err(Reject::Unsupported);
         }
@@ -2379,6 +2380,8 @@ impl<'e> Builder<'e> {
                 let v = Self::reg(act, st, o[0])?;
                 st.r.ctx = v;
             }
+            // The interpreter makes a context with an extension object (sloppy direct eval)
+            Bc::CreateFunctionContext if act.f.extension() => return Err(Reject::Unsupported),
             Bc::CreateFunctionContext | Bc::CreateBlockContext => {
                 let (shape, n) = match d.bytecode {
                     Bc::CreateFunctionContext => (act.f.scope(o[0]).map(|s| s.shape).or(act.f.function_scope()), u32::try_from(o[1]).unwrap_or(0)),
@@ -2519,7 +2522,7 @@ impl<'e> Builder<'e> {
             && self.hint(act.id, pc) & HINT_GENERIC == 0
         {
             let path = if fb.slot < Layout::INLINE_PROPS { None } else { (self.paths)(fb.global.is_some(), fb.slot) };
-            if std::env::var_os("J8_JIT_DUMP").is_some() {
+            if self.log {
                 std::eprintln!("global {} slot {} in global {} path {:?}", act.f.name(name), fb.slot, fb.global.is_some(), path);
             }
             if fb.slot < Layout::INLINE_PROPS || path.is_some() {
@@ -2555,7 +2558,7 @@ impl<'e> Builder<'e> {
                 return Ok(self.emit(Op::LoadWord(p, Self::off(path.cell)), Rep::Word));
             }
         }
-        if std::env::var_os("J8_JIT_DUMP").is_some() {
+        if self.log {
             std::eprintln!("global {} slow (feedback {})", act.f.name(name), act.f.global(slot).is_some());
         }
         self.flush(st);

@@ -8,9 +8,7 @@ use crate::ir::{Graph, Helper, Op, Slot, B, V};
 pub fn simplify(g: &mut Graph) {
     trivial_phis(g);
     dead(g);
-    if std::env::var_os("J8_NOLICM").is_none() {
-        hoist(g);
-    }
+    hoist(g);
 }
 
 /// Reachable blocks in reverse postorder, and each block's predecessors

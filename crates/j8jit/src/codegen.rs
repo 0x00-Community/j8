@@ -689,7 +689,7 @@ impl<'g> Gen<'g> {
                     self.skip = None;
                     continue;
                 }
-                if std::env::var_os("J8_NOFUSE").is_none() && let (Op::CallJit(..), Some(&nx)) = (self.g.op(v), insts.get(k + 1))
+                if let (Op::CallJit(..), Some(&nx)) = (self.g.op(v), insts.get(k + 1))
                     && let Op::UnboxInt(x, ufs) = *self.g.op(nx)
                     && x == v
                 {

@@ -39,7 +39,7 @@ use j8framework::{FuncId, Shape, Value};
 use build::{Builder, Hints, HINT_FLOAT, HINT_GENERIC, HINT_NO_INLINE};
 use ir::{FrameState, Helper, Op, Rep, V};
 use codegen::{Reason, RESUMED, RETURNED, THREW};
-use runtime::{Ctx, Mapped, Trampolines};
+use runtime::{Arena, Ctx, Trampolines};
 
 /// Where a deopt slot's bits are.
 #[derive(Clone, Copy, Debug)]
@@ -118,12 +118,13 @@ struct Site {
 #[derive(Default)]
 struct State {
     sites: Vec<Site>,
-    funcs: Vec<(FuncId, Func)>,
+    /// By function id
+    funcs: Vec<Func>,
     deopts: Vec<Rc<Deopt>>,
     calls: Vec<(Helper, usize)>,
     shapes: Vec<Option<Arc<Shape>>>,
     keep: Vec<Arc<Shape>>,
-    code: Vec<Mapped>,
+    code: Arena,
     tramps: Vec<Trampolines>,
     hints: Hints,
 }
@@ -131,6 +132,8 @@ struct State {
 /// ⭐ The JIT: handed to the executor (`Executor::with_tier`).
 pub struct Jit {
     threshold: u32,
+    /// Debugging switches, read once
+    debug: Debug,
     /// Contexts of finished runs, for the next ones (a host function calling back into JS starts one each time)
     ctxs: RefCell<Vec<Box<Ctx>>>,
     /// The lowest stack address native code runs at (set the first time it runs)
@@ -148,7 +151,20 @@ impl Default for Jit {
 impl From<u32> for Jit {
     /// Native code after `threshold` calls through a trampoline
     fn from(threshold: u32) -> Self {
-        Self { threshold, ctxs: RefCell::new(Vec::new()), floor: core::cell::Cell::new(0), epoch: core::cell::Cell::new(1), st: RefCell::new(State::default()) }
+        Self { threshold, debug: Debug::from_env(), ctxs: RefCell::new(Vec::new()), floor: core::cell::Cell::new(0), epoch: core::cell::Cell::new(1), st: RefCell::new(State::default()) }
+    }
+}
+
+/// Debugging output: `J8_JIT_LOG` (compilations, hand-overs), `J8_JIT_IR` (graphs), `J8_JIT_BIN=dir` (machine code)
+struct Debug {
+    log: bool,
+    ir: bool,
+    bin: Option<std::ffi::OsString>,
+}
+
+impl Debug {
+    fn from_env() -> Self {
+        Debug { log: std::env::var_os("J8_JIT_LOG").is_some(), ir: std::env::var_os("J8_JIT_IR").is_some(), bin: std::env::var_os("J8_JIT_BIN") }
     }
 }
 
@@ -223,29 +239,46 @@ impl Jit {
     }
 
     fn func<'s>(st: &'s mut State, f: FuncId) -> &'s mut Func {
-        let i = match st.funcs.iter().position(|(x, _)| *x == f) {
-            Some(i) => i,
-            None => {
-                st.funcs.push((f, Func::default()));
-                st.funcs.len() - 1
-            }
-        };
-        &mut st.funcs[i].1
+        let i = f.0 as usize;
+        if st.funcs.len() <= i {
+            st.funcs.resize_with(i + 1, Func::default);
+        }
+        &mut st.funcs[i]
     }
 
     /// A failed speculation: a hint for next time, and the code that made it goes
     fn learn(&self, d: &Deopt) {
         let Some(fr) = d.state().frames.last() else { return };
-        if std::env::var_os("J8_JIT_LOG").is_some() {
+        if self.debug.log {
             std::eprintln!("j8jit: deopt {:?} {:?} at {:?}@{} ({:?}, v{})", d.root, d.kind, fr.func, fr.pc, d.reason, d.op);
         }
-        let key = d.hint_at.map_or((fr.func.0, fr.pc), |(f, pc)| (f.0, pc));
+        let mut key = d.hint_at.map_or((fr.func.0, fr.pc), |(f, pc)| (f.0, pc));
         let bits = match d.reason {
             Reason::Int => HINT_FLOAT,
             Reason::Number | Reason::Shape => HINT_GENERIC,
             Reason::Func => HINT_NO_INLINE | HINT_GENERIC,
-            Reason::Always => 0,
             Reason::Poll | Reason::Throw | Reason::Hole | Reason::Depth => return,
+            // Bytecode the JIT doesn't compile: compiling again changes nothing. A loop's code stays (that was after
+            // the loop); in an inlined callee, that call isn't inlined next time; a function's own code goes for good
+            Reason::Always => {
+                if let Kind::Osr(_) = d.kind {
+                    return;
+                }
+                let frames = &d.state().frames;
+                match frames.len().checked_sub(2).and_then(|i| frames.get(i)) {
+                    Some(caller) => {
+                        key = (caller.func.0, caller.pc.saturating_sub(1));
+                        HINT_NO_INLINE
+                    }
+                    None => {
+                        let mut st = self.st.borrow_mut();
+                        let f = Self::func(&mut st, d.root);
+                        f.never = true;
+                        f.native_never = true;
+                        0
+                    }
+                }
+            }
         };
         let mut st = self.st.borrow_mut();
         *st.hints.entry(key).or_default() |= bits;
@@ -326,20 +359,23 @@ impl Jit {
 
     /// Compiles `f` entered as `kind`: the machine code's address
     fn compile(&self, exe: &j8executor::Executor, a: &mut j8framework::Agent<'_, '_>, f: FuncId, kind: Kind) -> Option<usize> {
-        if std::env::var_os("J8_JIT_LOG").is_some() {
+        if self.debug.log {
             std::eprintln!("j8jit: compile {f:?} {kind:?}");
         }
         let t0 = std::time::Instant::now();
-        let hints = self.st.borrow().hints.clone();
+        let st = self.st.borrow();
+        let hints = &st.hints;
         let (global, scope) = (a.realm.global, a.realm.script_scope);
         let paths = move |g: bool, i: usize| if g { global.get().props().store_path(i) } else { scope.get().props().store_path(i) };
-        let built = Builder::build(exe, &hints, f, kind, &paths).ok()?;
+        let built = Builder::build(exe, hints, f, kind, &paths, self.debug.log).ok();
+        drop(st);
+        let built = built?;
         let (deopt_base, helper_base) = {
             let st = self.st.borrow();
             (u32::try_from(st.deopts.len()).ok()?, u32::try_from(st.calls.len()).ok()?)
         };
         let t_build = t0.elapsed();
-        if std::env::var_os("J8_JIT_IR").is_some() {
+        if self.debug.ir {
             std::eprintln!("== {f:?} {kind:?}\n{}", built.graph.dump());
         }
         // Global cache sites: their caches first (the code embeds their addresses), numbered globally
@@ -366,10 +402,10 @@ impl Jit {
         all_addrs.extend(addrs);
         let mut built = build::Built { graph, ..built };
         let generated = codegen::Gen::generate(&built.graph, kind, deopt_base, helper_base, &all_addrs);
-        if std::env::var_os("J8_JIT_LOG").is_some() {
+        if self.debug.log {
             std::eprintln!("j8jit: {f:?} {kind:?}: {} insts, {} bytes, build {t_build:?} total {:?}", built.graph.insts.len(), generated.bytes.len(), t0.elapsed());
         }
-        if let Some(dir) = std::env::var_os("J8_JIT_BIN") {
+        if let Some(dir) = &self.debug.bin {
             let mut path = std::path::PathBuf::from(dir);
             path.push(alloc::format!("f{}-{kind:?}.bin", f.0));
             let _ = std::fs::write(path, &generated.bytes);
@@ -387,14 +423,12 @@ impl Jit {
                 codegen::Sym::Target(k) => targets[k as usize],
             }
         };
-        let mapped = Mapped::new(&generated.bytes, |buf, _| {
+        let addr = st.code.place(&generated.bytes, |buf, _| {
             for (off, s) in &generated.relocs {
                 buf[*off..*off + 8].copy_from_slice(&(sym(*s) as u64).to_le_bytes());
             }
         })?;
         let lowered = generated;
-        let addr = mapped.at as usize;
-        st.code.push(mapped);
         // Runtime calls: shapes get global indices
         let shape_base = u32::try_from(st.shapes.len()).ok()?;
         st.shapes.extend(built.shapes.iter().cloned());
@@ -426,7 +460,7 @@ impl Jit {
         for ((exit, slots), hint_at) in lowered.exits.into_iter().zip(values).zip(hints) {
             st.deopts.push(Rc::new(Deopt { meta: meta.clone(), fs: exit.fs, slots, reason: exit.reason, op: exit.op, hint_at, native, root: f, kind }));
         }
-        if std::env::var_os("J8_JIT_LOG").is_some() {
+        if self.debug.log {
             std::eprintln!("j8jit: installed {f:?} {kind:?} at {:?}", t0.elapsed());
         }
         Some(addr)
@@ -536,7 +570,8 @@ impl Tier for Jit {
         let f = e.function();
         let id = f.id();
         f.tier_word().set(1);
-        if !self.stack_room() {
+        // Script / eval top-level code runs once: not compiled on entry (its loops are, on-stack)
+        if !self.stack_room() || e.callee().as_object().and_then(|o| o.closure()).is_none() {
             return Tiered::Interpret;
         }
         // An ordinary call of a plain function: its native code (one compilation serves both kinds of callers)

@@ -206,6 +206,11 @@ impl<'e> Function<'e> {
         !(l.class_constructor || l.generator || l.asynchronous || l.keeps_args || l.extension)
     }
 
+    /// Its function context gets an extension object (a sloppy direct eval declares `var`s there)
+    pub fn extension(self) -> bool {
+        self.0.extension
+    }
+
     pub fn constructs(self) -> bool {
         self.0.constructs
     }

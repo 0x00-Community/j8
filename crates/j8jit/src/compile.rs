@@ -62,16 +62,9 @@ impl Compiler {
     /// A lowered module ⇒ one machine code per `llvm.func`, by `backend` (after the optimization pipeline).
     pub fn emit(&self, mlir: &str, backend: &dyn Backend) -> Result<Vec<MachineCode>, CompileError> {
         let failed = |e: mlirpass::mlirformat::Error| CompileError::Backend(e.0);
-        let t = std::time::Instant::now();
         let mut body = Body::parse(Ctx::new(&self.opt, &self.interfaces), mlir).map_err(failed)?;
-        let t_parse = t.elapsed();
         let root = body.root;
         self.pipeline.run(&mut body, root).map_err(failed)?;
-        let t_pass = t.elapsed();
-        let r = backend.emit(&body, body.root).map_err(failed);
-        if std::env::var_os("J8_JIT_LOG").is_some() {
-            std::eprintln!("j8jit: parse {t_parse:?} passes {t_pass:?} emit {:?}", t.elapsed());
-        }
-        r
+        backend.emit(&body, body.root).map_err(failed)
     }
 }
