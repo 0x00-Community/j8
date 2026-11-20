@@ -191,10 +191,10 @@
     return require;
   }
 
-  /** Whether `file` is an ES module: `.mjs`, or `.js` under a package.json with `"type": "module"` */
+  /** Whether `file` is an ES module: `.mjs`, or `.js` / no extension under a package.json with `"type": "module"` */
   function isEsm(file) {
     if (file.endsWith('.mjs')) return true;
-    if (!file.endsWith('.js')) return false;
+    if (!file.endsWith('.js') && path().extname(file) !== '') return false;
     for (let d = path().dirname(file); ; d = path().dirname(d)) {
       const pkg = readJson(path().join(d, 'package.json'));
       if (pkg) return pkg.type === 'module';

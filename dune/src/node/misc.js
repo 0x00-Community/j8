@@ -89,12 +89,24 @@
     const e = new Error('Command failed: ' + cmd + (r.stderr && r.stderr.length ? '\n' + r.stderr.toString() : ''));
     return Object.assign(e, { status: r.status, signal: r.signal, stdout: r.stdout, stderr: r.stderr, output: [null, r.stdout, r.stderr], pid: 0 });
   }
+  /** `stdio` as three of 'pipe' / 'inherit' / 'ignore': a stream object or its fd is 'inherit', null is 'pipe' */
+  function streams(stdio) {
+    const one = (s, fd) => {
+      if (s === 'inherit' || s === 'ignore') return s;
+      if (s === fd || (fd === 0 && s === process.stdin) || (fd === 1 && s === process.stdout) || (fd === 2 && s === process.stderr)) return 'inherit';
+      return 'pipe';
+    };
+    const all = typeof stdio === 'string' ? [stdio, stdio, stdio] : Array.isArray(stdio) ? stdio : [];
+    return [0, 1, 2].map((fd) => one(all[fd], fd));
+  }
   function spawnSync(file, args = [], o = {}) {
     if (!Array.isArray(args)) { o = args || {}; args = []; }
     const input = o.input === undefined ? null : typeof o.input === 'string' ? Buffer.from(o.input) : o.input;
+    const env = o.env ? Object.fromEntries(Object.entries(o.env).filter(([, v]) => v !== undefined).map(([k, v]) => [k, String(v)])) : null;
+    const options = { shell: !!o.shell, cwd: o.cwd === undefined ? null : String(o.cwd), env, stdio: streams(o.stdio) };
     let r;
     try {
-      const [status, stdout, stderr] = child.spawnSync(String(file), args.map(String), !!o.shell, o.cwd === undefined ? null : String(o.cwd), input);
+      const [status, stdout, stderr] = child.spawnSync(String(file), args.map(String), options, input);
       const out = (b) => (o.encoding && o.encoding !== 'buffer' ? Buffer.wrap(b).toString(o.encoding) : Buffer.wrap(b));
       r = { pid: 0, status, signal: status === null ? 'SIGTERM' : null, stdout: out(stdout), stderr: out(stderr) };
     } catch (e) {

@@ -8,7 +8,7 @@ directory:
 | Layer | Directory | What it provides |
 |---|---|---|
 | **Web** | `src/web/` | The Web-standard APIs servers share (WinterTC's minimum common API): `console`, `setTimeout` / `setInterval` / `queueMicrotask`, `structuredClone`, `EventTarget` / `Event` / `CustomEvent`, `AbortController` / `AbortSignal`, `DOMException`, `TextEncoder` / `TextDecoder`, `atob` / `btoa`, `URL` / `URLSearchParams`, `Blob` / `File`, `Headers` / `Request` / `Response` / `fetch` (plain `http:` and `data:`), `performance`, `crypto.getRandomValues` / `randomUUID`, `navigator`, `reportError` |
-| **Node** | `src/node/` | Node compatibility on top of the Web layer: `process` (an `EventEmitter`; `argv`, `env`, `exit`, `exitCode`, `nextTick`, `hrtime`, `stdout` / `stderr`, `'exit'` / `'uncaughtException'`), `require` / `module` with Node's resolution (`node_modules`, package.json `main` / `exports`, `.json`), ES modules (`.mjs`, `"type": "module"`), `Buffer`, `global`, `setImmediate`, and the modules `fs` (+ `fs/promises`, callbacks), `path`, `os`, `events`, `util`, `buffer`, `assert` (+ `assert/strict`), `url`, `timers` (+ `timers/promises`), `child_process` (synchronous), `crypto`, `module`, `string_decoder`, `perf_hooks` |
+| **Node** | `src/node/` | Node compatibility on top of the Web layer: `process` (an `EventEmitter`; `argv`, `env`, `exit`, `exitCode`, `nextTick`, `hrtime`, `stdout` / `stderr`, `'exit'` / `'uncaughtException'`), `require` / `module` with Node's resolution (`node_modules`, package.json `main` / `exports`, `.json`), ES modules (`.mjs`, `"type": "module"`; bare imports through `node_modules` and package.json `exports` / `imports`), `Buffer`, `global`, `setImmediate`, and the modules `fs` (+ `fs/promises`, callbacks), `path`, `os`, `events`, `util`, `buffer`, `assert` (+ `assert/strict`), `url`, `timers` (+ `timers/promises`), `child_process` (synchronous), `crypto`, `module`, `string_decoder`, `perf_hooks` |
 
 ```sh
 cargo run --release -- examples/node.js              # Node layer (the default): CommonJS or ES module by Node's rules
@@ -19,6 +19,23 @@ cargo run --release -- --jit a.js                    # with the JIT
 ```
 
 This is a package of its own (not part of the j8 workspace) and depends on the published `j8` crate.
+
+## dunx
+
+The package also builds `dunx` (the same as `dune x`), which runs a package's executable:
+
+```sh
+dunx cowsay hello                 # the package's own executable
+dunx semver@^7 1.2.3 -r '>1'      # a version or range; options after the command are the executable's
+dunx -p typescript tsc --version  # an executable whose name differs from its package
+dunx --no-install json5 --version # never touch the registry
+```
+
+The package comes from the nearest `node_modules` up from the current directory, else from the cache
+(`$DUNE_CACHE`, default `~/.cache/dune/x`), else it is installed there from the registry (`$DUNE_REGISTRY` /
+`$npm_config_registry`, default registry.npmjs.org): dependencies, optional dependencies for this platform and peers
+in a hoisted `node_modules`, every tarball checked against its integrity. Lifecycle scripts do not run. JavaScript
+executables run in the same process on the Node layer; others (native programs, shell scripts) run as child processes.
 
 ## How it is built
 
@@ -41,7 +58,7 @@ j8::runtime! { pub Dune: Web { globals: [Process], natives: [Fs, Os, Child], pre
 
 ## Not there yet
 
-Top-level `await` (j8 does not support it yet), unhandled promise rejections (not reported), `https:` in `fetch`,
+Top-level `await` (j8 does not support it yet), named exports when an ES module imports CommonJS (only `default`), unhandled promise rejections (not reported), `https:` in `fetch`,
 `http` / `net` servers, streams, asynchronous `child_process.spawn`, `worker_threads`, `zlib`, `crypto` hashes and
 ciphers, `Error.stack` (j8 has no stack traces yet).
 

@@ -74,6 +74,7 @@ cargo run --release -- --web examples/web.mjs
 cargo run --release -- -p '[1, 2, 3].map(x => x * 2)'
 cargo run --release                             # REPL (.help / .exit)
 cargo run --release -- --jit a.js               # with the JIT
+cargo run --release --bin dunx -- cowsay hi     # dunx (same as dune x): run a package's executable, installed from npm into a cache when missing
 
 # ☁️ Cloudflare Worker style: ES modules + Durable Objects
 cd samples/workerd && cargo run -- examples/counter.js --bind COUNTER=Counter --request "GET /c/inc?name=a"

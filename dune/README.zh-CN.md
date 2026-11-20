@@ -7,7 +7,7 @@
 | 层 | 目录 | 提供什么 |
 |---|---|---|
 | **Web** | `src/web/` | 服务端共有的 Web 标准接口（WinterTC 最小公共 API）：`console`、`setTimeout` / `setInterval` / `queueMicrotask`、`structuredClone`、`EventTarget` / `Event` / `CustomEvent`、`AbortController` / `AbortSignal`、`DOMException`、`TextEncoder` / `TextDecoder`、`atob` / `btoa`、`URL` / `URLSearchParams`、`Blob` / `File`、`Headers` / `Request` / `Response` / `fetch`（明文 `http:` 与 `data:`）、`performance`、`crypto.getRandomValues` / `randomUUID`、`navigator`、`reportError` |
-| **Node** | `src/node/` | 叠在 Web 层上的 Node 兼容：`process`（是 `EventEmitter`；`argv`、`env`、`exit`、`exitCode`、`nextTick`、`hrtime`、`stdout` / `stderr`、`'exit'` / `'uncaughtException'`）、按 Node 规则解析的 `require` / `module`（`node_modules`、package.json 的 `main` / `exports`、`.json`）、ES 模块（`.mjs`、`"type": "module"`）、`Buffer`、`global`、`setImmediate`，以及模块 `fs`（含 `fs/promises`、回调式）、`path`、`os`、`events`、`util`、`buffer`、`assert`（含 `assert/strict`）、`url`、`timers`（含 `timers/promises`）、`child_process`（同步）、`crypto`、`module`、`string_decoder`、`perf_hooks` |
+| **Node** | `src/node/` | 叠在 Web 层上的 Node 兼容：`process`（是 `EventEmitter`；`argv`、`env`、`exit`、`exitCode`、`nextTick`、`hrtime`、`stdout` / `stderr`、`'exit'` / `'uncaughtException'`）、按 Node 规则解析的 `require` / `module`（`node_modules`、package.json 的 `main` / `exports`、`.json`）、ES 模块（`.mjs`、`"type": "module"`；裸说明符按 `node_modules` 与 package.json 的 `exports` / `imports` 解析）、`Buffer`、`global`、`setImmediate`，以及模块 `fs`（含 `fs/promises`、回调式）、`path`、`os`、`events`、`util`、`buffer`、`assert`（含 `assert/strict`）、`url`、`timers`（含 `timers/promises`）、`child_process`（同步）、`crypto`、`module`、`string_decoder`、`perf_hooks` |
 
 ```sh
 cargo run --release -- examples/node.js              # Node 层（缺省）：按 Node 规则当 CommonJS 或 ES 模块跑
@@ -18,6 +18,22 @@ cargo run --release -- --jit a.js                    # 打开 JIT
 ```
 
 本包自成一体（不在 j8 的 workspace 里），依赖 crates.io 上发布的 `j8`。
+
+## dunx
+
+本包同时出 `dunx`（等同 `dune x`），用来跑包里的可执行文件：
+
+```sh
+dunx cowsay hello                 # 包自己的可执行文件
+dunx semver@^7 1.2.3 -r '>1'      # 指定版本或范围；命令之后的选项都给可执行文件
+dunx -p typescript tsc --version  # 可执行文件名和包名不同
+dunx --no-install json5 --version # 不访问 registry
+```
+
+先从当前目录往上找最近的 `node_modules`，再找缓存（`$DUNE_CACHE`，缺省 `~/.cache/dune/x`），都没有就从 registry
+（`$DUNE_REGISTRY` / `$npm_config_registry`，缺省 registry.npmjs.org）装进缓存：依赖、适合本平台的可选依赖和 peer
+依赖装成提升式的 `node_modules`，每个 tarball 都校验 integrity，不跑生命周期脚本。JavaScript 可执行文件在本进程的
+Node 层里跑，其余（原生程序、shell 脚本）作为子进程跑。
 
 ## 怎么搭的
 
@@ -39,7 +55,7 @@ j8::runtime! { pub Dune: Web { globals: [Process], natives: [Fs, Os, Child], pre
 
 ## 还没有的
 
-顶层 `await`（j8 还不支持）、未处理的 promise 拒绝（不报）、`fetch` 的 `https:`、`http` / `net` 服务端、流、异步的
+顶层 `await`（j8 还不支持）、ES 模块 import CommonJS 时的具名导出（只有 `default`）、未处理的 promise 拒绝（不报）、`fetch` 的 `https:`、`http` / `net` 服务端、流、异步的
 `child_process.spawn`、`worker_threads`、`zlib`、`crypto` 的哈希与加解密、`Error.stack`（j8 还没有调用栈）。
 
 ## 许可
