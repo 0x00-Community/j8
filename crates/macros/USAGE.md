@@ -1,62 +1,11 @@
 # j8macros usage
 
-## `enums!("x.json")`
+## `bytecodes!("v8.json")`
 
-Generates enums from a JSON file under the calling crate's root directory (`CARGO_MANIFEST_DIR`). The JSON is the
-single source of truth: ⛔ do not hand-write these enums; to change instructions, change only the JSON.
-The caller is rebuilt automatically whenever the JSON changes (the generated code `include_bytes!`s it); unknown fields
-are errors.
-
-```rust
-j8macros::enums!("insn.json");
-```
-
-Types used by the generated code (`Reg`, `Label`, `BinaryOp`, ...) must be in scope at the call site.
-
-### JSON format
-
-```json
-{
-  "enums": [
-    {
-      "name": "Insn",
-      "doc": "An instruction.",
-      "derive": ["Clone", "Copy", "Debug", "PartialEq"],
-      "display": true,
-      "accessors": [{"name": "target_mut", "ty": "Label", "doc": "Jump target"}],
-      "variants": [
-        {"name": "Ldar", "mnemonic": "ldar", "doc": "acc = reg", "fields": [{"ty": "Reg"}]},
-        {"name": "Jump", "mnemonic": "jump", "fields": [{"ty": "Label"}]},
-        {"name": "Call", "mnemonic": "call", "fields": [{"name": "callee", "ty": "Reg"}, {"name": "argc", "ty": "u16"}]},
-        {"name": "Binary", "fields": [{"ty": "BinaryOp", "show": "name"}, {"ty": "Reg"}]},
-        {"name": "CreateClass", "mnemonic": "create.class", "fields": [
-          {"name": "func", "ty": "u32", "prefix": "fn#"},
-          {"name": "parent", "ty": "Option<Reg>", "prefix": "extends "}
-        ]}
-      ]
-    }
-  ]
-}
-```
-
-| Key | Level | Meaning |
-|---|---|---|
-| `name` / `doc` | enum | Enum name and docs (required) |
-| `derive` | enum | Passed as-is into `#[derive(...)]`; leave out traits that are written by hand (e.g. a bitwise `PartialEq`) |
-| `repr` | enum | Integer type of the discriminant, passed as-is into `#[repr(..)]` (e.g. `"u16"`); if omitted, the compiler chooses and may use a niche in a field for the encoding (reading the discriminant then costs a few extra instructions) |
-| `display` | enum | Generate `Display`: `mnemonic operand, operand` |
-| `asm` | enum | Generate assembly (the inverse of `Display`): with `display` on ⇒ `FromStr` (`Err = AsmError`; operands are taken through `Operands` in field order, and each type implements `Operand`); without it ⇒ unit variants only, implementing `Operand` by variant name. `AsmError` / `Operand` / `Operands` must be in scope at the call site; `Option` fields need a `prefix` |
-| `accessors` | enum | Generate `pub fn name(&mut self) -> Option<&mut ty>`: the first field of type `ty` in each variant, `None` if there is none. This is how `target_mut` (`ty: Label`) is produced, so adding an instruction with a `Label` field automatically makes it count as a jump |
-| `name` / `doc` | variant | Variant name and docs |
-| `mnemonic` | variant | Mnemonic for `Display`; with `display` on, use either this or a `show: name` field |
-| `suffix` | variant | Used with a `show: name` field: the mnemonic becomes `name.suffix` (another operand form of the same group of names, e.g. `add.smi r2, 1` alongside `add r2`) |
-| `default` | variant | `#[default]` |
-| `fields` | variant | Field list; all with `name` ⇒ struct variant, none with `name` ⇒ tuple variant; mixing is an error |
-| `ty` | field | Rust type |
-| `prefix` | field | Text written before the value in `Display` (`fn#`, `extends `) |
-| `show` | field | `display` (default, `{}`) / `debug` (`{:?}`) / `name` (`x.name()` replaces the mnemonic) |
-
-An `Option<_>` field that is `None` is omitted entirely from `Display`.
+Generates j8bytecode's bytecode tables from `crates/j8bytecode/v8.json`, which `tools/v8bytecodes.py <v8 checkout>`
+writes from V8's `src/interpreter/bytecodes.h` and `bytecode-operands.h`: `Bytecode` (`repr(u8)`, V8's numbering),
+`OperandType`, `OperandTypeInfo`, `ImplicitRegisterUse`, and per bytecode `operand_types()` /
+`implicit_register_use()`. ⛔ edit the JSON or the generated tables by hand: regenerate from a V8 checkout.
 
 ## Binding macros: `#[j8::class]` / `#[j8::object]` / `#[j8::function]`
 

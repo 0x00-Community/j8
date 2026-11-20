@@ -134,9 +134,9 @@ impl<'gc> Agent<'gc, '_> {
         Ok(p)
     }
 
-    /// Run an async coroutine one step: when stopped at `await`, attach to the awaited Promise; on completion fulfill,
-    /// and on a throw reject, its result Promise. Async generators go through
-    /// [`drive_async_generator`](Self::drive_async_generator) instead.
+    /// Run an async coroutine one step (an `await` reaction resumes it). The bytecode does the rest: an `await` attaches
+    /// the next reaction itself, and the body settles the result Promise (a throw out of it rejects the Promise).
+    /// Async generators go through [`drive_async_generator`](Self::drive_async_generator) instead.
     pub fn drive(&mut self, coroutine: JsObject<'gc>, mode: Resume, value: Value<'gc>) -> Result<(), Error> {
         let (promise, async_generator) = match &coroutine.borrow().kind {
             ObjectKind::Coroutine(c) => (c.promise, c.requests.is_some()),
@@ -145,21 +145,17 @@ impl<'gc> Agent<'gc, '_> {
         if async_generator {
             return self.drive_async_generator(coroutine, mode, value);
         }
-        let Some(promise) = promise else { unreachable!("an async coroutine carries its promise") };
         match self.resume(coroutine, mode, value) {
-            Ok(Step::Await(v)) => {
-                let p = self.promise_resolve(v)?;
-                self.perform_then(p, Reaction::Await { coroutine });
-            }
-            Ok(Step::Done(v)) => self.resolve_promise(promise, v)?,
-            Ok(Step::Yield(_)) => unreachable!("async functions do not yield"),
+            Ok(_) => Ok(()),
             Err(Error::Exception(g)) => {
                 let reason = self.local(&g);
-                self.reject_promise(promise, reason);
+                if let Some(p) = promise {
+                    self.reject_promise(p, reason);
+                }
+                Ok(())
             }
-            Err(e) => return Err(e),
+            Err(e) => Err(e),
         }
-        Ok(())
     }
 
     /// An async generator receives a request (`next` / `throw` / `return`) and returns that request's Promise; if idle,
@@ -207,11 +203,18 @@ impl<'gc> Agent<'gc, '_> {
     /// request.
     fn drive_async_generator(&mut self, coroutine: JsObject<'gc>, mode: Resume, value: Value<'gc>) -> Result<(), Error> {
         match self.resume(coroutine, mode, value) {
-            Ok(Step::Await(v)) => {
-                let p = self.promise_resolve(v)?;
-                self.perform_then(p, Reaction::Await { coroutine });
-                Ok(())
-            }
+            // A value that can't be made a Promise throws where it was awaited
+            Ok(Step::Await(v)) => match self.promise_resolve(v) {
+                Ok(p) => {
+                    self.perform_then(p, Reaction::Await { coroutine });
+                    Ok(())
+                }
+                Err(Error::Exception(g)) => {
+                    let reason = self.local(&g);
+                    self.drive_async_generator(coroutine, Resume::Throw, reason)
+                }
+                Err(e) => Err(e),
+            },
             Ok(Step::Yield(v)) => self.settle_request(coroutine, Ok((v, false))),
             Ok(Step::Done(v)) => self.settle_request(coroutine, Ok((v, true))),
             Err(Error::Exception(g)) => {

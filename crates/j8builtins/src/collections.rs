@@ -24,17 +24,17 @@ enum Shape {
 }
 
 impl Collections {
-    fn make<'gc>(a: &mut Agent<'gc, '_>, shape: Shape, weak: bool) -> Result<JsObject<'gc>, Error> {
+    fn make<'gc>(a: &mut Agent<'gc, '_>, new_target: Value<'gc>, shape: Shape, weak: bool) -> Result<JsObject<'gc>, Error> {
         let (kind, proto, name) = match (shape, weak) {
             (Shape::Map, false) => (ObjectKind::Map(Box::new(Collection::new(false))), a.realm.map_proto, "Map"),
             (Shape::Map, true) => (ObjectKind::Map(Box::new(Collection::new(true))), a.realm.weakmap_proto, "WeakMap"),
             (Shape::Set, false) => (ObjectKind::Set(Box::new(Collection::new(false))), a.realm.set_proto, "Set"),
             (Shape::Set, true) => (ObjectKind::Set(Box::new(Collection::new(true))), a.realm.weakset_proto, "WeakSet"),
         };
-        if a.new_target == Value::Undefined {
+        if new_target == Value::Undefined {
             return Err(a.throw(ErrorKind::Type, &alloc::format!("Constructor {name} requires 'new'")));
         }
-        a.create_from_ctor(proto, kind)
+        a.create_from_ctor(new_target, proto, kind)
     }
 
     /// Whether `this` is this kind of collection (weak / non-weak must match too).
@@ -73,7 +73,7 @@ impl Collections {
     /// Construct: add each item of the optional iterable (each Map item must be a `[key, value]` object). Construct: if
     /// an initial iterable is given, call the new object's `set` / `add` for each item (even if it has been replaced).
     fn construct<'gc>(a: &mut Agent<'gc, '_>, args: &[Value<'gc>], shape: Shape, weak: bool) -> Result<Value<'gc>, Error> {
-        let o = Self::make(a, shape, weak)?;
+        let o = Self::make(a, a.new_target, shape, weak)?;
         let source = args.at(0);
         if source.is_nullish() {
             return Ok(o.into());

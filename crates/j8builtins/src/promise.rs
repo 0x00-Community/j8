@@ -37,7 +37,7 @@ impl Promises {
     }
 
     fn closure<'gc>(a: &Agent<'gc, '_>, f: j8framework::ClosureFn, slots: Vec<Value<'gc>>, length: u32) -> JsObject<'gc> {
-        let o = ObjectData { kind: ObjectKind::NativeClosure(NativeClosure { f, slots }), proto: Some(a.realm.function_proto), ..ObjectData::default() }.alloc(a.mc);
+        let o = ObjectData { kind: ObjectKind::NativeClosure(NativeClosure { f, slots, constructor: false }), proto: Some(a.realm.function_proto), ..ObjectData::default() }.alloc(a.mc);
         a.realm.name_function(a.mc, o, "", Some(length));
         o
     }
@@ -99,15 +99,16 @@ impl Promises {
     }
 
     fn construct<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+        let new_target = a.new_target;
         let executor = args.at(0);
-        if a.new_target == Value::Undefined {
+        if new_target == Value::Undefined {
             return Err(a.throw(ErrorKind::Type, "Promise constructor cannot be invoked without 'new'"));
         }
         if !a.is_callable(executor) {
             let what = a.describe(executor);
             return Err(a.throw(ErrorKind::Type, &alloc::format!("Promise resolver {what} is not a function")));
         }
-        let proto = a.proto_from_ctor(a.new_target, a.realm.promise_proto)?;
+        let proto = a.proto_from_ctor(new_target, a.realm.promise_proto)?;
         let p = a.new_promise();
         p.borrow_mut(a.mc).set_proto(Some(proto));
         let (resolve, reject) = a.promise_resolvers(p);

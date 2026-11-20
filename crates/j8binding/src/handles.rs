@@ -72,7 +72,7 @@ impl<'gc> FromJs<'gc> for Bytes {
         let bytes = v.as_object().and_then(|o| {
             let d = o.borrow();
             match &d.kind {
-                ObjectKind::ArrayBuffer(b) => b.bytes.clone(),
+                ObjectKind::ArrayBuffer(b) => b.bytes.as_deref().map(<[u8]>::to_vec),
                 ObjectKind::TypedArray(k, view) => Self::view(view, k.size()),
                 ObjectKind::DataView(view) => Self::view(view, 1),
                 _ => None,
@@ -99,7 +99,7 @@ impl Bytes {
 impl<'gc> IntoJs<'gc> for Bytes {
     fn into_js(self, a: &mut Agent<'gc, '_>) -> Result<Value<'gc>, Error> {
         let len = self.0.len();
-        let data = BufferData { bytes: Some(self.0), max: None, shared: false };
+        let data = BufferData { bytes: Some(self.0.into()), max: None, shared: false };
         let buffer = ObjectData { kind: ObjectKind::ArrayBuffer(Box::new(data)), proto: Some(a.realm.array_buffer_proto), ..ObjectData::default() }.alloc(a.mc);
         let at = ElementKind::ALL.iter().position(|&k| k == ElementKind::Uint8).expect("Uint8 is a typed array kind");
         let view = ViewData { buffer, offset: 0, length: Some(len) };

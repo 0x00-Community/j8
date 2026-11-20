@@ -1,51 +1,107 @@
-//! j8executor: the j8virtasm bytecode executor.
+//! j8executor: runs j8 bytecode, which is V8's Ignition bytecode (see j8bytecode).
 //!
-//! Explicit frame stack (no host recursion); all frames share one register file; captured bindings live in the
-//! heap-allocated [`Env`] chain.
-//! Exceptions: each frame has a dynamic handler stack (`PushHandler` / `PopHandler`); a throw pops this frame's
-//! handler, and if there is none, unwinds to the caller.
-//! An `Executor` serves only one isolate: it holds the loaded functions, and closures on the heap point back to them by
-//! [`FuncId`].
+//! Explicit frame stack (no host recursion); all frames share one register file. A frame's part of it holds the
+//! receiver, the formal parameters and the registers r0 …; register operands are V8's frame slots (r0 is -7, the
+//! receiver +2, the context -1, the closure -2) and are mapped onto that. Contexts are [`Env`]s: registers and the
+//! accumulator carry them as [`Value::context`] words between `Create*Context` / `PushContext` / `PopContext`.
+//! Exceptions look up the bytecode's handler table. An `Executor` serves only one isolate: it holds the loaded
+//! functions, and closures on the heap point back to them by [`FuncId`].
+#![cfg_attr(tail_calls, feature(explicit_tail_calls))]
+#![cfg_attr(tail_calls, expect(incomplete_features, reason = "explicit tail calls are what threaded dispatch needs"))]
 extern crate alloc;
 
-use j8framework::ValueKind;
-use alloc::vec::Vec;
 use alloc::boxed::Box;
+use alloc::sync::Arc;
+use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
 
+use j8bytecode::{Bytecode, Constant, Context, Decoded, FunctionKind, Intrinsic, LiteralValue, Module, Operands, OperandValue, Register, Runtime, ScopeInfo, ScopeType, SharedFunction};
+use j8compiler::Compile;
+use j8framework::{Agent, BinaryOp, Closure, Shape, SmallStr, Collect, CompareOp, ContextKind, ContextName, ContextShape, ShapeId, Env, Error, ErrorKind, FuncId, FunctionInfo, Gc, Lazy, Invoke, JsEnv, JsObject, Numbers, ObjectData, ObjectKind, Property, Resume, Slot, Step, Value, ValueKind};
 use j8lockfree::SegVec;
 
-use j8virtasm::{Constant, Function, FunctionKind, Insn, Mode, Module, PropertyKind, Reg};
-use j8framework::{Collect, Gc};
-#[cfg(feature = "compile")]
 mod cache;
 mod ic;
 mod module;
+mod threaded;
 
-#[cfg(feature = "compile")]
 pub use cache::CodeCache;
-
-use j8framework::{Agent, Few, Closure, Coroutine, CoroutineState, Env, Error, ErrorKind, FuncId, Invoke, IterRecord, JsEnv, JsObject, ObjectData, ObjectKind, Property, Resume, Slot, Step, Suspended, Value};
 
 /// Call depth limit (including JS re-entered from host functions); exceeding it throws RangeError
 const STACK_LIMIT: usize = 10_000;
 
-/// A loaded function: the function itself plus the id of the first function of its module (`CreateClosure` indices are
-/// relative to it).
+/// The name a script's `this` is read by from the functions inside it (`LdaGlobal`)
+const SCRIPT_THIS: &str = "this";
+
+/// V8's `DefineKeyedOwnPropertyFlag::kSetFunctionName` (also `DefineKeyedOwnPropertyInLiteralFlag`)
+const SET_FUNCTION_NAME: OperandValue = 1;
+
+/// V8's `JSGeneratorObject::kRethrow`: an async generator's yielded value was rejected
+const RESUME_RETHROW: f64 = 3.0;
+
+/// Frame records reserved for a new execution (deeper calls grow the stack)
+const FRAMES_RESERVED: usize = 16;
+
+/// At most how many frame stacks the executor keeps for reuse
+const SPARE_FRAMES: usize = 8;
+
+/// Instructions between checks of the budget / termination request
+const CHECK_STEPS: usize = 1024;
+
+/// One instruction of a loaded function, decoded once at load time; jump targets are instruction indices.
+struct Insn {
+    /// Runs it (threaded code)
+    handler: threaded::Handler,
+    bytecode: Bytecode,
+    operands: Operands,
+    /// Byte offset of the bytecode byte (after any prefix): jump tables count from here, and it lies inside the handler
+    /// table ranges covering the instruction
+    start: u32,
+    /// Where a jump goes (its index in the instructions); 0 for other bytecodes
+    target: u32,
+}
+
+/// A loaded function: the function itself plus the id of the first function of its module (`CreateClosure`'s
+/// function constants are indices relative to it), with what running it needs prepared. Its function objects'
+/// [`Code`](j8framework::Code) points at `info`, the first field.
+#[repr(C)]
 struct Loaded {
+    /// Name and `length` (lazy properties of function objects read them)
+    info: FunctionInfo,
     base: u32,
-    func: Function,
-    /// By constant index: where the global name was last found (inline cache for global name reads/writes)
-    globals: Box<[Cell<GlobalSlot>]>,
-    /// The JIT tier has said there is no need to ask it on frame entry
-    no_tier_enter: Cell<bool>,
-    /// The JIT tier has said there is no need to ask it on loop back-jumps
-    no_tier_loops: Cell<bool>,
-    /// By instruction index: inline caches for property reads/writes (used only by `get.named` / `set.named` /
-    /// `define.named`)
+    func: SharedFunction,
+    /// The bytecode, decoded
+    insns: Box<[Insn]>,
+    /// By feedback slot: inline caches for property reads / writes
     ics: Box<[ic::Ic]>,
-    /// Ordinary function (not a class constructor / generator / async): opens a frame directly when called
-    plain: bool,
+    /// By feedback slot: where a global name was last found
+    globals: Box<[ic::GlobalIc]>,
+    /// By constant index: for object boilerplates, the shape the literal ends up with (then a literal is made in one
+    /// step, as V8 copies the boilerplate with its map)
+    literals: Box<[RefCell<Option<Arc<Shape>>>]>,
+    /// The shape of its function objects (`length`, `name`, maybe `prototype`), and of their `prototype` objects
+    function_shape: RefCell<Option<Arc<Shape>>>,
+    prototype_shape: RefCell<Option<Arc<Shape>>>,
+    /// By constant index: the context shapes of `Scope` constants, and how many slots their contexts have
+    shapes: Box<[Option<(ShapeId, u32)>]>,
+    /// The function context's shape (when the function has one) / the script context's
+    scope: Option<ShapeId>,
+    /// Whether its function context gets an extension object (a sloppy direct eval declares `var`s there)
+    extension: bool,
+    /// `new` builds `this` and opens a frame (an ordinary function or a base class constructor)
+    constructs: bool,
+    /// A class constructor (cannot be called without `new`)
+    class_constructor: bool,
+    derived: bool,
+    generator: bool,
+    asynchronous: bool,
+    /// Arrow functions and methods: no `prototype`, not constructors
+    no_prototype: bool,
+    /// Sloppy, not an arrow function: an `undefined` / `null` receiver becomes the global object, a primitive one its
+    /// wrapper
+    wraps_this: bool,
+    /// The code reads all arguments (rest parameter / arguments object): frames keep them
+    keeps_args: bool,
     /// How many properties the instance constructed last time had: reserve that many slots when building `this` next
     /// time
     instance_size: Cell<u8>,
@@ -53,102 +109,342 @@ struct Loaded {
     prototype: ic::Ic,
 }
 
-impl From<(u32, Function)> for Loaded {
-    fn from((base, func): (u32, Function)) -> Self {
-        let globals = func.consts.iter().map(|_| Cell::new(GlobalSlot::Unknown)).collect();
-        let ics = func.insns.iter().map(|_| ic::Ic::default()).collect();
-        let plain = !func.generator && !func.asynchronous && !matches!(func.kind, FunctionKind::Constructor { .. });
-        Self { base, func, globals, no_tier_enter: Cell::new(false), no_tier_loops: Cell::new(false), ics, plain, instance_size: Cell::new(0), prototype: ic::Ic::default() }
+impl Loaded {
+    /// `shapes`: the executor's table of context shapes, where this function's are added
+    fn new(base: u32, func: SharedFunction, table: &SegVec<ContextShape>) -> Self {
+        let bc = &func.bytecode;
+        let ics = bc.feedback.iter().map(|_| ic::Ic::default()).collect();
+        let globals = bc.feedback.iter().map(|_| ic::GlobalIc::default()).collect();
+        let shapes = bc.constants.iter().map(|c| match c {
+            Constant::Scope(s) => Some((Self::add_shape(table, s), u32::try_from(Self::shape(s).names.len()).expect("fewer than 2^32 slots"))),
+            _ => None,
+        }).collect();
+        let literals = bc.constants.iter().map(|_| RefCell::new(None)).collect();
+        let scope = func.scope.as_ref().map(|s| Self::add_shape(table, s));
+        let extension = func.scope.as_ref().is_some_and(|s| s.has_extension);
+        let k = func.kind;
+        use FunctionKind as F;
+        let generator = matches!(k, F::GeneratorFunction | F::AsyncGeneratorFunction | F::ConciseGeneratorMethod | F::StaticConciseGeneratorMethod | F::AsyncConciseGeneratorMethod | F::StaticAsyncConciseGeneratorMethod);
+        let asynchronous = matches!(k, F::AsyncFunction | F::AsyncArrowFunction | F::AsyncConciseMethod | F::StaticAsyncConciseMethod | F::AsyncGeneratorFunction | F::AsyncConciseGeneratorMethod | F::StaticAsyncConciseGeneratorMethod);
+        let class_constructor = matches!(k, F::BaseConstructor | F::DerivedConstructor | F::DefaultBaseConstructor | F::DefaultDerivedConstructor);
+        let derived = matches!(k, F::DerivedConstructor | F::DefaultDerivedConstructor);
+        let normal = matches!(k, F::NormalFunction);
+        let insns = Self::decode(bc);
+        let keeps_args = insns.iter().any(|d| matches!(d.bytecode, Bytecode::CreateRestParameter | Bytecode::CreateMappedArguments | Bytecode::CreateUnmappedArguments | Bytecode::ConstructForwardAllArgs));
+        Self {
+            base,
+            insns,
+            ics,
+            globals,
+            literals,
+            info: FunctionInfo { name: SmallStr::from(&*func.name), length: func.length },
+            function_shape: RefCell::new(None),
+            prototype_shape: RefCell::new(None),
+            shapes,
+            scope,
+            extension,
+            constructs: !generator && !asynchronous && (normal || matches!(k, F::BaseConstructor | F::DefaultBaseConstructor)),
+            class_constructor,
+            derived,
+            generator,
+            asynchronous,
+            no_prototype: !normal && !generator,
+            keeps_args,
+            wraps_this: !func.strict && !matches!(k, F::ArrowFunction | F::AsyncArrowFunction),
+            instance_size: Cell::new(0),
+            prototype: ic::Ic::default(),
+            func,
+        }
+    }
+
+    /// Decodes the bytecode, turning jump offsets into instruction indices
+    fn decode(bc: &j8bytecode::BytecodeArray) -> Box<[Insn]> {
+        let decoded: Vec<Decoded> = j8bytecode::Decoder::from(&bc.code[..]).map(|d| d.expect("compiled bytecode decodes")).collect();
+        let index = |byte: usize| u32::try_from(decoded.partition_point(|d| d.offset < byte)).unwrap_or(u32::MAX);
+        decoded
+            .iter()
+            .map(|d| {
+                let target = match d.bytecode {
+                    Bytecode::JumpLoop => index(d.start() - usize::try_from(d.operands[0]).unwrap_or(0)),
+                    b if b.is_jump_constant() => match bc.constants.get(usize::try_from(d.operands[0]).unwrap_or(usize::MAX)) {
+                        Some(Constant::Offset(o)) => index(d.start() + *o as usize),
+                        _ => 0,
+                    },
+                    b if b.is_jump() => index(d.start() + usize::try_from(d.operands[0]).unwrap_or(0)),
+                    _ => 0,
+                };
+                let mut operands = d.operands;
+                for (v, t) in operands.iter_mut().zip(d.bytecode.operand_types()) {
+                    if t.is_register() {
+                        *v = Self::register(*v, bc.parameter_count);
+                    }
+                }
+                // A short `Star` becomes `Star` with its register
+                let bytecode = if d.bytecode.is_short_star() {
+                    operands = Operands::from(&[OperandValue::from(d.bytecode.short_star_register().0)][..]);
+                    Bytecode::Star
+                } else {
+                    d.bytecode
+                };
+                Insn { handler: Insn::handler(bytecode), bytecode, operands, start: u32::try_from(d.start()).unwrap_or(u32::MAX), target }
+            })
+            // A sentinel: code never runs past its end
+            .chain(core::iter::once(Insn { handler: Insn::handler(Bytecode::Illegal), bytecode: Bytecode::Illegal, operands: Operands::default(), start: u32::try_from(bc.code.len()).unwrap_or(u32::MAX), target: 0 }))
+            .collect()
+    }
+
+    /// Register operands below this are the frame's fixed slots (context, closure, argc): `SPECIAL` plus the V8 operand
+    const SPECIAL: OperandValue = OperandValue::MIN / 2;
+    const SPECIAL_LIMIT: OperandValue = Self::SPECIAL / 2;
+
+    /// A register operand as an index relative to r0 in the register file: r`i` is `i`, the receiver and parameters
+    /// (just below r0) negative; the fixed frame slots `SPECIAL` plus their operand
+    fn register(operand: OperandValue, parameter_count: u16) -> OperandValue {
+        let o = i32::try_from(operand).unwrap_or(0);
+        if o <= Register::REGISTER_FILE_FROM_FP {
+            OperandValue::from(Register::from(o).0)
+        } else if o >= Register::FIRST_PARAM_FROM_FP {
+            OperandValue::from(o - Register::FIRST_PARAM_FROM_FP) - OperandValue::from(parameter_count) - Self::below(Frame::HEADER)
+        } else if o == Register::CONTEXT_FROM_FP {
+            -Self::below(Frame::CONTEXT)
+        } else if o == Register::FUNCTION_FROM_FP {
+            -Self::below(Frame::CLOSURE)
+        } else {
+            Self::SPECIAL + operand
+        }
+    }
+
+    /// How far below r0 a header slot is, as a register offset
+    fn below(slot: usize) -> OperandValue {
+        OperandValue::try_from(slot).unwrap_or(0)
+    }
+
+    /// The instruction at byte offset `byte` (handler targets, jump tables)
+    fn index_of(&self, byte: usize) -> usize {
+        self.insns.partition_point(|d| (d.start as usize) < byte)
+    }
+
+    /// A scope info's shape for contexts made from it
+    /// Adds a context shape to the executor's table
+    /// The context shape of `Scope` constant `k`, and its slot count
+    #[inline]
+    fn scope_shape(&self, k: OperandValue) -> Option<(ShapeId, u32)> {
+        self.shapes.get(usize::try_from(k).ok()?).copied().flatten()
+    }
+
+    /// `CreateBlockContext` of `Scope` constant `k` under `parent`
+    #[inline]
+    fn block_context<'gc>(&self, a: &Agent<'gc, '_>, k: OperandValue, parent: Option<JsEnv<'gc>>) -> Value<'gc> {
+        let (shape, n) = self.scope_shape(k).map_or((None, 0), |(s, n)| (Some(s), n as usize));
+        Value::context(Env::context(n, Value::Undefined, parent, shape, None).alloc(a.mc))
+    }
+
+    fn add_shape(table: &SegVec<ContextShape>, s: &ScopeInfo) -> ShapeId {
+        ShapeId(u32::try_from(table.push(Self::shape(s))).expect("fewer than 2^32 context shapes"))
+    }
+
+    fn shape(s: &ScopeInfo) -> ContextShape {
+        let kind = match s.scope_type {
+            Some(ScopeType::FunctionScope) | None => ContextKind::Function,
+            Some(ScopeType::CatchScope) => ContextKind::Catch,
+            Some(ScopeType::WithScope) => ContextKind::With,
+            Some(ScopeType::ScriptScope) => ContextKind::Script,
+            Some(ScopeType::EvalScope) => ContextKind::Eval,
+            Some(ScopeType::ModuleScope) => ContextKind::Module,
+            Some(_) => ContextKind::Block,
+        };
+        let names = s.variables.iter().map(|v| ContextName {
+            name: (&*v.name).into(),
+            constant: v.mode == j8bytecode::VariableMode::Const,
+            lexical: matches!(v.mode, j8bytecode::VariableMode::Let | j8bytecode::VariableMode::Const),
+        }).collect();
+        ContextShape { kind, names }
     }
 }
 
-/// Position cache for global names. Stores only property-table indices, not GC pointers: checks that entry's key before
-/// use and looks it up again on the slow path on a mismatch.
-#[derive(Clone, Copy, Debug)]
-enum GlobalSlot {
-    Unknown,
-    /// Index into the property table of the script scope (top-level `let` / `const` / `class`)
-    Scope(u32),
-    /// Index into the global object's property table; how many entries the script scope had then (if there are more, a
-    /// new top-level `let` may shadow it, so look it up again)
-    Global { at: u32, scope_len: u32 },
-}
-
-/// An exception handler: landing point (instruction index) and the environment when it was installed.
-#[derive(Collect)]
-#[collect(no_drop)]
-struct Handler<'gc> {
-    target: u32,
-    env: Option<JsEnv<'gc>>,
-}
-
-/// A call frame.
-#[derive(Collect)]
-#[collect(no_drop)]
-struct Frame<'gc> {
+/// A call frame's record on the frame stack: where its code and its part of the register file are. What the GC traces
+/// lives in the register file, in header slots right below r0 (V8 keeps `<context>` / `<closure>` in its stack frame
+/// the same way): see [`Frame::CONTEXT`] etc.
+#[derive(Clone, Copy, Collect)]
+#[collect(require_static)]
+struct Frame {
     func: FuncId,
+    /// The function's loaded code (what `func` names), kept so returning to this frame needs no lookup by id
+    loaded: LoadedRef,
+    /// The next instruction (an index into the function's instructions)
     pc: usize,
-    /// Start of this frame in the register file
+    /// The instruction being executed: handler table lookups use it
+    insn: usize,
+    /// Index of the receiver in the register file (the parameters follow)
+    params: usize,
+    /// Index of r0 in the register file
     base: usize,
-    env: Option<JsEnv<'gc>>,
-    handlers: Few<Handler<'gc>>,
-    /// `new.target` (`undefined` for ordinary calls)
-    new_target: Value<'gc>,
-    /// `this` of a construct call: present on frame entry for base class construction; for derived classes, set when
-    /// `super(...)` returns
-    new_this: Option<Value<'gc>>,
-    /// All arguments (kept only by functions with `keeps_args`)
-    args: Few<Value<'gc>>,
+    /// The number of arguments passed
+    argc: usize,
 }
 
-/// All the state of one execution (attached to the roots between slices).
+/// The address of a loaded function: the executor's code is append-only and outlives every frame of its executions
+#[derive(Clone, Copy)]
+struct LoadedRef(core::ptr::NonNull<Loaded>);
+
+// SAFETY: a frame lives in an execution of the executor owning the code, which moves between threads with its
+// isolate, one thread at a time (the executor is `Send`); the code is reached only from that thread
+unsafe impl Send for LoadedRef {}
+// SAFETY: as above
+unsafe impl Sync for LoadedRef {}
+
+impl From<&Loaded> for LoadedRef {
+    fn from(l: &Loaded) -> Self {
+        Self(core::ptr::NonNull::from(l))
+    }
+}
+
+impl LoadedRef {
+    /// The code, for as long as the executor holding it
+    ///
+    /// # Safety
+    /// `'e` must not outlive the executor the frame runs on
+    unsafe fn get<'e>(self) -> &'e Loaded {
+        // SAFETY: the executor keeps every loaded function at a fixed address until it is dropped (see the caller)
+        unsafe { self.0.as_ref() }
+    }
+}
+
+impl Frame {
+    /// Header slots, counted down from r0: the current context (V8's `<context>` register)
+    const CONTEXT: usize = 1;
+    /// The function being run (V8's `<closure>` register)
+    const CLOSURE: usize = 2;
+    /// `new.target` (`undefined` for ordinary calls)
+    const NEW_TARGET: usize = 3;
+    /// `this` of a construct call (the hole when absent): present on entry for base class construction
+    const NEW_THIS: usize = 4;
+    /// All arguments as an array (kept only by functions that read them all), else `undefined`
+    const ARGS: usize = 5;
+    /// The header's size: the parameters end this far below r0
+    const HEADER: usize = 5;
+
+    #[inline]
+    fn slot<'gc>(&self, regs: &[Value<'gc>], k: usize) -> Value<'gc> {
+        regs[self.base - k]
+    }
+
+    #[inline]
+    fn set_slot<'gc>(&self, regs: &mut [Value<'gc>], k: usize, v: Value<'gc>) {
+        regs[self.base - k] = v;
+    }
+
+    /// The current context
+    #[inline]
+    fn env<'gc>(&self, regs: &[Value<'gc>]) -> Option<JsEnv<'gc>> {
+        self.slot(regs, Self::CONTEXT).as_context()
+    }
+
+    #[inline]
+    fn set_env<'gc>(&self, regs: &mut [Value<'gc>], e: Option<JsEnv<'gc>>) {
+        self.set_slot(regs, Self::CONTEXT, e.map_or(Value::Undefined, Value::context));
+    }
+
+    /// `this` of a construct call, if built yet
+    fn new_this<'gc>(&self, regs: &[Value<'gc>]) -> Option<Value<'gc>> {
+        Some(self.slot(regs, Self::NEW_THIS)).filter(|v| !matches!(v.kind(), ValueKind::Uninit))
+    }
+
+    /// All the arguments passed (for functions that keep them)
+    fn args<'gc>(&self, regs: &[Value<'gc>]) -> Vec<Value<'gc>> {
+        self.slot(regs, Self::ARGS).as_object().map_or_else(Vec::new, |o| o.elements().to_vec())
+    }
+}
+
+/// All the state of one execution (attached to the roots between slices): the register file, and the frame stack
+/// (V8 keeps its frames on the machine stack): the running frame is on top, a call pushes the callee's record in place
+/// and a return pops it, nothing is copied in or out.
 #[derive(Collect)]
 #[collect(no_drop)]
 struct State<'gc> {
     regs: Vec<Value<'gc>>,
-    frames: Vec<Frame<'gc>>,
-    f: Frame<'gc>,
+    frames: Vec<Frame>,
     acc: Value<'gc>,
+    /// V8's pending message (`SetPendingMessage` swaps it with acc)
+    message: Value<'gc>,
 }
 
 impl<'gc> State<'gc> {
-    /// Finds a handler to catch exception `v`: if this frame has none, pops frames looking outward; returns `false`
-    /// once all are popped.
-    fn unwind(&mut self, v: Value<'gc>) -> bool {
-        loop {
-            if let Some(h) = self.f.handlers.pop() {
-                self.f.pc = h.target as usize;
-                self.f.env = h.env;
-                self.acc = v;
-                return true;
-            }
-            match self.frames.pop() {
-                Some(caller) => {
-                    self.regs.truncate(self.f.base);
-                    self.f = caller;
-                }
-                None => return false,
-            }
+    /// Entering frame `f` (its part of `regs` already set up)
+    /// Entering frame `f` (its part of `regs` already set up), on frame stack `frames` (empty)
+    fn new(regs: Vec<Value<'gc>>, mut frames: Vec<Frame>, f: Frame) -> Self {
+        frames.push(f);
+        Self { regs, frames, acc: Value::Undefined, message: Value::Undefined }
+    }
+
+    /// The running frame
+    #[inline]
+    fn f(&self) -> &Frame {
+        self.frames.last().expect("a running frame")
+    }
+
+    #[inline]
+    fn f_mut(&mut self) -> &mut Frame {
+        self.frames.last_mut().expect("a running frame")
+    }
+
+    /// The running frame returns: its record is popped and its part of the register file dropped; `true` if a caller
+    /// goes on
+    #[inline]
+    fn pop_frame(&mut self) -> bool {
+        let Some(done) = self.frames.pop() else { return false };
+        if self.frames.is_empty() {
+            return false;
+        }
+        self.regs.truncate(done.params);
+        true
+    }
+}
+
+/// How an execution stops: returning, or pausing when the instruction budget runs out.
+enum Outcome<'gc> {
+    Return(Value<'gc>),
+    /// Instruction budget exhausted: the state is handed back as is, and the next slice continues
+    Paused(Box<State<'gc>>),
+}
+
+impl<'gc> Outcome<'gc> {
+    fn returned(self) -> Value<'gc> {
+        match self {
+            Outcome::Return(v) => v,
+            Outcome::Paused(_) => unreachable!("only the outermost execution pauses"),
         }
     }
 }
 
-/// How an execution stops: returning, or a coroutine suspending at `yield` / `await` (carrying the saved frames).
-enum Outcome<'gc> {
-    Return(Value<'gc>),
-    Suspend { value: Value<'gc>, awaiting: bool, saved: Suspended<'gc> },
-    /// Instruction budget exhausted: the state is handed back as is, and the next slice continues (used only by the
-    /// sliced execution of `Engine::eval`)
-    #[cfg_attr(not(feature = "compile"), expect(dead_code, reason = "only the compile feature's Engine::eval runs in slices"))]
-    Paused(alloc::boxed::Box<State<'gc>>),
+/// A call's arguments: values at hand, or consecutive registers of the caller's frame (copied straight into the new
+/// frame).
+#[derive(Clone, Copy)]
+enum Args<'a, 'gc> {
+    Values(&'a [Value<'gc>]),
+    Regs { first: usize, count: usize },
 }
 
-impl<'gc> Outcome<'gc> {
-    /// Ordinary functions only return (`yield` / `await` appear only in the coroutine's own frame).
-    fn returned(self) -> Value<'gc> {
+impl<'gc> Args<'_, 'gc> {
+    fn len(self) -> usize {
         match self {
-            Outcome::Return(v) => v,
-            Outcome::Suspend { .. } | Outcome::Paused(_) => unreachable!("only coroutines suspend, only the outermost execution pauses"),
+            Args::Values(v) => v.len(),
+            Args::Regs { count, .. } => count,
+        }
+    }
+
+    fn get(self, regs: &[Value<'gc>], i: usize) -> Value<'gc> {
+        match self {
+            Args::Values(v) => v.get(i).copied().unwrap_or_default(),
+            Args::Regs { first, count } if i < count => regs[first + i],
+            Args::Regs { .. } => Value::Undefined,
+        }
+    }
+
+    fn to_vec(self, regs: &[Value<'gc>]) -> Vec<Value<'gc>> {
+        match self {
+            Args::Values(v) => v.to_vec(),
+            Args::Regs { first, count } => regs[first..first + count].to_vec(),
         }
     }
 }
@@ -173,72 +469,91 @@ enum Callee<'gc> {
 
 /// Result of preparing a construct call: a frame to enter, or the object a host constructor already produced.
 enum Prepared<'gc> {
-    Frame(Frame<'gc>),
+    Frame(Frame),
     Done(Value<'gc>),
 }
 
-/// A tier faster than interpretation (the JIT): the executor asks it before entering the frame of an ordinary JS
-/// function (not a constructor / generator / async).
+/// A tier faster than interpretation (the JIT). Not wired to V8 bytecode yet: the executor keeps the hook so
+/// embedders can still pass one.
 pub trait Tier {
-    /// Function `id` (bytecode `func`) is about to enter its frame, with this frame's registers in `regs` (arguments
-    /// already in place) and the accumulator in `acc`: if there is machine code, runs it on them ([`Tiered::Ran`]); if
-    /// not hot yet, gives [`Tiered::NotYet`]; if it cannot be compiled or cannot run as a whole, gives
-    /// [`Tiered::Never`]. When compiling, the platform's thread pool `pool` may be used (compiling several functions
-    /// together).
-    fn enter(&self, pool: &dyn j8framework::Pool, id: FuncId, func: &Function, regs: &mut [Value<'_>], acc: &mut Value<'_>) -> Tiered;
-
-    /// This frame jumps back to instruction `header` (the loop went around again), with the registers and accumulator
-    /// as they are now: if the loop is hot and has machine code, continues in machine code from the loop header (OSR)
-    /// and gives where it stopped (always [`Exit::Resume`]: even a `return` stops and hands off to the interpreter to
-    /// finish); if not switching in, gives [`Tiered::NotYet`] ([`Tiered::Never`] if it never will).
-    fn backedge(&self, pool: &dyn j8framework::Pool, id: FuncId, func: &Function, header: u32, regs: &mut [Value<'_>], acc: &mut Value<'_>) -> Tiered;
+    /// Function `id` is about to enter its frame
+    fn enter(&self, a: &Agent<'_, '_>, id: FuncId, func: &SharedFunction, regs: &mut [Value<'_>], acc: &mut Value<'_>) -> Tiered;
 }
 
 /// The JIT tier's answer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tiered {
-    /// Ran in machine code, and exited like this
-    Ran(Exit),
-    /// Not running this time (not hot yet, etc.); ask again later
+    Ran,
     NotYet,
-    /// No need to ask about this function (frame entry / loop) again: the executor records it and stops calling
     Never,
 }
 
-/// How machine code exited. Machine code's return value: 0 is [`Return`](Exit::Return), `pc + 1` is
-/// [`Resume(pc)`](Exit::Resume).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Exit {
-    /// The function returned; the result is in the accumulator
-    Return,
-    /// Stopped before instruction `pc` (not yet executed); the interpreter continues from here
-    Resume(u32),
+/// The instruction budget of one slice, and the termination request.
+struct Budget<'s> {
+    tick: usize,
+    left: Option<usize>,
+    stop: &'s j8framework::Termination,
+    terminated: bool,
 }
 
-impl From<u64> for Exit {
-    fn from(code: u64) -> Self {
-        match code {
-            0 => Exit::Return,
-            n => Exit::Resume(u32::try_from(n - 1).unwrap_or(u32::MAX)),
+impl<'s> Budget<'s> {
+    fn new(stop: &'s j8framework::Termination, left: Option<usize>) -> Self {
+        Self { tick: 0, left, stop, terminated: false }
+    }
+
+    fn remaining(&self) -> Option<usize> {
+        self.left.map(|l| l + self.tick)
+    }
+
+    /// Takes the next run of steps; `true` when exhausted or terminated
+    fn refill(&mut self) -> bool {
+        if self.stop.observe() {
+            self.terminated = true;
+            return true;
         }
+        let take = match &mut self.left {
+            Some(0) => return true,
+            Some(l) => {
+                let t = (*l).min(CHECK_STEPS);
+                *l -= t;
+                t
+            }
+            None => CHECK_STEPS,
+        };
+        self.tick = take - 1;
+        false
+    }
+
+    #[inline]
+    fn spent(&mut self) -> bool {
+        if self.tick == 0 {
+            return self.refill();
+        }
+        self.tick -= 1;
+        false
     }
 }
 
 /// Bytecode executor.
 #[derive(Default)]
 pub struct Executor {
-    /// A tier faster than interpretation (without it, interpret only)
     tier: Option<Box<dyn Tier + Send>>,
     /// Loaded functions, by function id: append-only (`eval` / the `Function` constructor also add some mid-execution),
     /// so a `&Loaded` stays valid while more are loaded; frames refer to them by id
     code: SegVec<Loaded>,
     /// Current call depth (summed over all re-entrant levels of `execute`)
     depth: Cell<usize>,
-    /// Module code: first function id ⇒ module id (for import bindings and import.meta)
+    /// Module code: first function id ⇒ module id
     module_of: RefCell<alloc::collections::BTreeMap<u32, u32>>,
-    /// Bytecode shared with other executors (shared scripts and ES modules compile once)
-    #[cfg(feature = "compile")]
-    cache: Option<alloc::sync::Arc<CodeCache>>,
+    /// Bytecode shared with other executors
+    cache: Option<Arc<CodeCache>>,
+    /// The shapes of the contexts the loaded code makes, by [`ShapeId`] (append-only like `code`)
+    context_shapes: SegVec<ContextShape>,
+    /// The shape of `with` contexts, once made
+    with_shape: Cell<Option<ShapeId>>,
+    /// Frame stacks of finished executions, kept for the next ones (a host function calling back into JS starts one
+    /// each time)
+    spare_frames: RefCell<Vec<Vec<Frame>>>,
 }
 
 // An executor moves between the threads of the event loop's pool together with its isolate (one thread at a time:
@@ -248,8 +563,16 @@ const _: () = {
     send::<Executor>();
 };
 
+/// What an instruction asks of the run loop besides going on to the next one
+enum Flow<'gc> {
+    Next,
+    /// A new frame was pushed / the frame changed: re-fetch the function
+    Frame,
+    Done(Outcome<'gc>),
+}
+
 impl Executor {
-    /// Adds a JIT tier: ordinary JS functions ask it before entering a frame.
+    /// Adds a JIT tier (kept for embedders; not used with V8 bytecode yet).
     #[must_use]
     pub fn with_tier(mut self, tier: impl Tier + Send + 'static) -> Self {
         self.tier = Some(Box::new(tier));
@@ -257,71 +580,33 @@ impl Executor {
     }
 
     /// Shares compiled code through `cache` (see [`CodeCache`])
-    #[cfg(feature = "compile")]
     #[must_use]
-    pub fn with_cache(mut self, cache: alloc::sync::Arc<CodeCache>) -> Self {
+    pub fn with_cache(mut self, cache: Arc<CodeCache>) -> Self {
         self.cache = Some(cache);
         self
     }
 
-    /// Asks the JIT tier before entering a frame. Gives `true` if the function already ran to completion in machine
-    /// code (result in `acc`, the frame's registers already released); if machine code bailed out midway, sets the
-    /// frame's `pc` to where it stopped and interprets as usual.
-    #[inline]
-    fn tiered<'gc>(&self, pool: &dyn j8framework::Pool, loaded: &Loaded, regs: &mut Vec<Value<'gc>>, f: &mut Frame<'gc>, acc: &mut Value<'gc>) -> bool {
-        match &self.tier {
-            Some(tier) => Self::tier_enter(&**tier, pool, loaded, regs, f, acc),
-            None => false,
-        }
-    }
-
-    #[inline(never)]
-    fn tier_enter<'gc>(tier: &dyn Tier, pool: &dyn j8framework::Pool, loaded: &Loaded, regs: &mut Vec<Value<'gc>>, f: &mut Frame<'gc>, acc: &mut Value<'gc>) -> bool {
-        if loaded.no_tier_enter.get() {
-            return false;
-        }
-        let end = f.base + usize::from(loaded.func.regs);
-        match tier.enter(pool, f.func, &loaded.func, &mut regs[f.base..end], acc) {
-            Tiered::Ran(Exit::Return) => {
-                regs.truncate(f.base);
-                true
-            }
-            Tiered::Ran(Exit::Resume(pc)) => {
-                f.pc = pc as usize;
-                false
-            }
-            Tiered::NotYet => false,
-            Tiered::Never => {
-                loaded.no_tier_enter.set(true);
-                false
-            }
-        }
-    }
-
-    /// On a jump back to `header`, asks the JIT tier whether to switch into machine code (OSR); if it did, sets the
-    /// frame's `pc` to where machine code stopped.
-    #[inline(never)]
-    fn osr<'gc>(&self, pool: &dyn j8framework::Pool, loaded: &Loaded, regs: &mut [Value<'gc>], f: &mut Frame<'gc>, acc: &mut Value<'gc>, header: usize) {
-        let Some(tier) = &self.tier else { return };
-        if loaded.no_tier_loops.get() {
-            return;
-        }
-        let end = f.base + usize::from(loaded.func.regs);
-        let Ok(header) = u32::try_from(header) else { return };
-        match tier.backedge(pool, f.func, &loaded.func, header, &mut regs[f.base..end], acc) {
-            Tiered::Ran(Exit::Resume(pc)) => f.pc = pc as usize,
-            Tiered::Never => loaded.no_tier_loops.set(true),
-            Tiered::Ran(Exit::Return) | Tiered::NotYet => {}
-        }
-    }
-
-    /// Loads a module, returning the function id of the script itself.
+    /// Loads a module, returning the function id of its top level.
     pub fn load(&self, module: Module) -> FuncId {
         let base = u32::try_from(self.code.len()).expect("fewer than 2^32 functions");
         for func in module.functions {
-            self.code.push(Loaded::from((base, func)));
+            self.code.push(Loaded::new(base, func, &self.context_shapes));
         }
         FuncId(base + Module::MAIN)
+    }
+
+    fn context_shape(&self, id: ShapeId) -> &ContextShape {
+        self.context_shapes.get(id.0 as usize).expect("shape ids come from load")
+    }
+
+    /// A closure's code: from the address its function object carries, else by id
+    #[inline]
+    fn code(&self, c: &Closure<'_>) -> &Loaded {
+        match c.code {
+            // SAFETY: function objects get it from this executor's code (`function_object`), which outlives them
+            Some(code) => unsafe { code.get() },
+            None => self.function(c.func),
+        }
     }
 
     #[inline]
@@ -329,103 +614,142 @@ impl Executor {
         self.code.get(f.0 as usize).expect("function ids come from load")
     }
 
-    /// Runs script `main` (`this` is the global object).
-    pub fn run_script<'gc>(&self, a: &mut Agent<'gc, '_>, main: FuncId) -> Result<Value<'gc>, Error> {
-        let this = Value::Object(a.realm.global);
-        let mut regs = Vec::new();
-        let f = self.enter(a, &mut regs, Closure::new(main, None), Value::Undefined, this, &[]);
-        self.execute(a, State { regs, frames: Vec::new(), f, acc: Value::Undefined }, &mut None).map(Outcome::returned)
+    // ---- frames ----
+
+    /// Opens a frame for `closure` at the end of the register file: receiver, formal parameters (missing ones
+    /// `undefined`), then the registers (all `undefined`). Sloppy non-arrow functions get the global object / a wrapper
+    /// for a primitive receiver.
+    fn open<'gc>(&self, a: &mut Agent<'gc, '_>, regs: &mut Vec<Value<'gc>>, closure: Closure<'gc>, callee: Value<'gc>, this: Value<'gc>, args: &[Value<'gc>]) -> Frame {
+        self.open_with(a, regs, self.function(closure.func), closure, callee, this, Args::Values(args))
     }
 
-    /// Direct eval: compiles against the scope table of the call site and runs on the call site's environment chain.
-    #[cfg_attr(not(feature = "compile"), expect(unused_variables, reason = "without a compiler it can only report an error"))]
-    fn direct_eval<'gc>(&self, a: &mut Agent<'gc, '_>, src: &str, table: &j8virtasm::EvalScope, env: Option<j8framework::JsEnv<'gc>>, strict: bool, level: usize) -> Result<Value<'gc>, Error> {
-        #[cfg(feature = "compile")]
-        {
-            let module = match Module::compile_direct(&j8framework::Source { text: src, file: "[eval]" }, strict, table) {
-                Ok(m) => m,
-                Err(Error::Syntax(m)) => return Err(a.throw(ErrorKind::Syntax, &m)),
-                Err(e) => return Err(e),
-            };
-            let main = self.load(module);
-            if level >= STACK_LIMIT {
-                return Err(a.throw(ErrorKind::Range, "Maximum call stack size exceeded"));
-            }
-            let saved = self.depth.replace(level);
-            let mut regs = Vec::new();
-            let f = self.enter(a, &mut regs, Closure::new(main, env), Value::Undefined, Value::Undefined, &[]);
-            let r = self.execute(a, State { regs, frames: Vec::new(), f, acc: Value::Undefined }, &mut None).map(Outcome::returned);
-            self.depth.set(saved);
-            r
+    #[expect(clippy::too_many_arguments, reason = "the parts of a call")]
+    fn open_with<'gc>(&self, a: &mut Agent<'gc, '_>, regs: &mut Vec<Value<'gc>>, loaded: &Loaded, closure: Closure<'gc>, callee: Value<'gc>, this: Value<'gc>, args: Args<'_, 'gc>) -> Frame {
+        let (params, base) = self.open_regs(a, regs, loaded, closure, callee, this, args);
+        Frame { func: closure.func, loaded: LoadedRef::from(loaded), pc: 0, insn: 0, params, base, argc: args.len() }
+    }
+
+    /// Opens a frame for a call from bytecode: its part of the register file, then its record right on the frame stack
+    /// (built in place: a record handed back by value would cross the stack in pieces first). Gives the new r0's index.
+    #[expect(clippy::too_many_arguments, reason = "the parts of a call")]
+    #[inline]
+    fn push_open<'gc>(&self, a: &mut Agent<'gc, '_>, st: &mut State<'gc>, loaded: &Loaded, closure: Closure<'gc>, callee: Value<'gc>, this: Value<'gc>, args: Args<'_, 'gc>) -> usize {
+        let (params, base) = self.open_regs(a, &mut st.regs, loaded, closure, callee, this, args);
+        st.frames.push(Frame { func: closure.func, loaded: LoadedRef::from(loaded), pc: 0, insn: 0, params, base, argc: args.len() });
+        base
+    }
+
+    /// A new frame's part of the register file: receiver, parameters, header, registers; gives where the receiver
+    /// and r0 are
+    #[expect(clippy::too_many_arguments, reason = "the parts of a call")]
+    fn open_regs<'gc>(&self, a: &mut Agent<'gc, '_>, regs: &mut Vec<Value<'gc>>, loaded: &Loaded, closure: Closure<'gc>, callee: Value<'gc>, this: Value<'gc>, args: Args<'_, 'gc>) -> (usize, usize) {
+        let f = &loaded.func;
+        a.profiler.enter(closure.func);
+        let this = match this.kind() {
+            _ if !loaded.wraps_this => this,
+            ValueKind::Undefined | ValueKind::Null => Value::Object(a.realm.global),
+            ValueKind::Object(_) | ValueKind::Uninit => this,
+            prim => a.to_object(Value::from(prim)).map_or(Value::from(prim), Value::Object),
+        };
+        let kept = if loaded.keeps_args { Value::Object(a.array(args.to_vec(regs))) } else { Value::Undefined };
+        let params = regs.len();
+        let formals = usize::from(f.bytecode.parameter_count).saturating_sub(1);
+        regs.push(this);
+        for i in 0..formals {
+            let v = args.get(regs, i);
+            regs.push(v);
         }
-        #[cfg(not(feature = "compile"))]
-        Err(a.throw(ErrorKind::Syntax, "dynamic code needs the compile feature"))
+        // The header, from ARGS up to CONTEXT
+        regs.extend_from_slice(&[kept, Value::Uninit, Value::Undefined, callee, closure.env.map_or(Value::Undefined, Value::context)]);
+        let base = regs.len();
+        // The register V8 puts new.target / the generator object in on entry starts `undefined` with the rest
+        regs.resize(base + f.bytecode.register_count as usize, Value::Undefined);
+        (params, base)
     }
 
-    /// Initial execution state for script `main` (`this` is the global object).
-    #[cfg(feature = "compile")]
-    fn script_state<'gc>(&self, a: &mut Agent<'gc, '_>, main: FuncId) -> State<'gc> {
-        let this = Value::Object(a.realm.global);
-        let mut regs = Vec::new();
-        let f = self.enter(a, &mut regs, Closure::new(main, None), Value::Undefined, this, &[]);
-        State { regs, frames: Vec::new(), f, acc: Value::Undefined }
+    /// Sets the new.target register of a construct frame
+    fn set_new_target<'gc>(&self, regs: &mut [Value<'gc>], f: &mut Frame, nt: Value<'gc>) {
+        f.set_slot(regs, Frame::NEW_TARGET, nt);
+        // SAFETY: the frame runs on this executor
+        if let Some(r) = unsafe { f.loaded.get::<'_>() }.func.bytecode.new_target_or_generator {
+            regs[f.base + usize::try_from(r).unwrap_or(0)] = nt;
+        }
     }
 
-    /// A coroutine function is called: a generator gives a not-yet-started generator object; an async function runs to
-    /// its first `await` and gives its Promise.
-    fn start<'gc>(&self, a: &mut Agent<'gc, '_>, closure: Closure<'gc>, callee: Value<'gc>, this: Value<'gc>, args: &[Value<'gc>], depth: usize) -> Result<Value<'gc>, Error> {
-        let mut regs = Vec::new();
-        let f = self.enter(a, &mut regs, closure, callee, this, args);
-        let saved = Suspended { func: f.func, pc: 0, regs, env: f.env, handlers: Vec::new(), args: f.args.into_vec(), mode: None };
-        let func_loaded = self.function(closure.func);
-        let func = &func_loaded.func;
-        let (generator, asynchronous) = (func.generator, func.asynchronous);
-        let proto = if generator {
-            match (a.get_named(callee, "prototype")?).kind() {
-                ValueKind::Object(p) => p,
-                _ if asynchronous => a.realm.async_generator_proto,
-                _ => a.realm.generator_proto,
-            }
-        } else {
-            a.realm.object_proto
-        };
-        let promise = (!generator).then(|| a.new_promise());
-        let co = ObjectData { kind: ObjectKind::Coroutine(Box::new(Coroutine::new(saved, promise, generator && asynchronous))), proto: Some(proto), ..ObjectData::default() }.alloc(a.mc);
-        let Some(p) = promise else {
-            // First run the parameter initialization, stopping at the initial suspension point the compiler placed
-            let outer = self.depth.replace(depth);
-            let r = a.resume(co, Resume::Next, Value::Undefined);
-            self.depth.set(outer);
-            r?;
-            return Ok(co.into());
-        };
-        let outer = self.depth.replace(depth);
-        let r = a.drive(co, Resume::Next, Value::Undefined);
-        self.depth.set(outer);
-        r?;
-        Ok(p.into())
+    /// An array index from a number key
+    #[inline]
+    fn index(key: Value<'_>) -> Option<usize> {
+        let x = key.as_number()?;
+        #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "checked by converting back")]
+        let i = x as u32;
+        (f64::from(i) == x && i != u32::MAX).then_some(i as usize)
     }
+
+    /// The register file index of a register operand (locals and parameters: see [`Loaded::register`])
+    #[inline]
+    fn slot_of(f: &Frame, k: OperandValue) -> Option<usize> {
+        (k > Loaded::SPECIAL_LIMIT).then(|| f.base.wrapping_add_signed(k as isize))
+    }
+
+    #[inline]
+    fn reg<'gc>(regs: &[Value<'gc>], f: &Frame, k: OperandValue) -> Value<'gc> {
+        if k > Loaded::SPECIAL_LIMIT {
+            return regs[f.base.wrapping_add_signed(k as isize)];
+        }
+        match i32::try_from(k - Loaded::SPECIAL).unwrap_or(0) {
+            Register::ARGC_FROM_FP => Value::Number(f64::from(u32::try_from(f.argc).unwrap_or(u32::MAX))),
+            _ => Value::Undefined,
+        }
+    }
+
+    #[inline]
+    fn set_reg<'gc>(regs: &mut [Value<'gc>], f: &mut Frame, k: OperandValue, v: Value<'gc>) {
+        if k > Loaded::SPECIAL_LIMIT {
+            regs[f.base.wrapping_add_signed(k as isize)] = v;
+        }
+    }
+
+    /// Consecutive registers from `first`
+    fn reg_list<'gc>(regs: &[Value<'gc>], f: &Frame, first: OperandValue, count: OperandValue) -> Vec<Value<'gc>> {
+        (0..count).map(|i| Self::reg(regs, f, first + i)).collect()
+    }
+
+    /// The context `depth` levels out from `context`
+    fn context_at<'gc>(a: &Agent<'gc, '_>, context: Value<'gc>, depth: OperandValue) -> Result<JsEnv<'gc>, Error> {
+        let mut e = context.as_context().ok_or_else(|| a.throw(ErrorKind::Reference, "no context"))?;
+        for _ in 0..depth {
+            e = e.parent.ok_or_else(|| a.throw(ErrorKind::Reference, "no outer context"))?;
+        }
+        Ok(e)
+    }
+
+    /// The index in an `Env` of context slot `slot` (V8 counts the fixed slots)
+    fn env_index(slot: OperandValue) -> usize {
+        usize::try_from(slot).unwrap_or(0).saturating_sub(Context::MIN_SLOTS as usize)
+    }
+
+    // ---- calls ----
 
     /// Unwraps bound functions and calls host functions directly; the remaining JS closures are left to the caller to
     /// enter a frame.
     fn resolve<'gc>(&self, a: &mut Agent<'gc, '_>, mut callee: Value<'gc>, mut this: Value<'gc>, mut args: Vec<Value<'gc>>, depth: usize) -> Result<Callee<'gc>, Error> {
         while let ValueKind::Object(o) = callee.kind() {
-            // Take out what to do first and call after releasing the borrow (the called code may modify this function
-            // object)
             let step = if let Some(c) = o.closure() {
                 CallStep::Closure(c)
             } else if let Some(n) = o.native() {
                 if n.forward == j8framework::Forward::No { CallStep::Native(n) } else { CallStep::Forward(n) }
-            } else { match &o.borrow().kind {
-                ObjectKind::Function(c) => CallStep::Closure(*c),
-                ObjectKind::Resolver { .. } => CallStep::Resolver,
-                ObjectKind::Proxy(p) if p.callable => CallStep::Proxy,
-                ObjectKind::NativeClosure(c) => CallStep::NativeClosure(c.f),
-                ObjectKind::Native(n) if n.forward != j8framework::Forward::No => CallStep::Forward(*n),
-                ObjectKind::Native(n) => CallStep::Native(*n),
-                ObjectKind::Bound(b) => CallStep::Bound(b.target, b.this, b.args.clone()),
-                _ => break,
-            } };
+            } else {
+                match &o.borrow().kind {
+                    ObjectKind::Function(c) => CallStep::Closure(*c),
+                    ObjectKind::Resolver { .. } => CallStep::Resolver,
+                    ObjectKind::Proxy(p) if p.callable => CallStep::Proxy,
+                    ObjectKind::NativeClosure(c) => CallStep::NativeClosure(c.f),
+                    ObjectKind::Native(n) if n.forward != j8framework::Forward::No => CallStep::Forward(*n),
+                    ObjectKind::Native(n) => CallStep::Native(*n),
+                    ObjectKind::Bound(b) => CallStep::Bound(b.target, b.this, b.args.clone()),
+                    _ => break,
+                }
+            };
             if let CallStep::Forward(n) = step
                 && a.is_callable(this)
             {
@@ -447,12 +771,8 @@ impl Executor {
                 CallStep::Closure(c) => {
                     self.depth.set(saved);
                     let loaded = self.function(c.func);
-                    let f = &loaded.func;
-                    if matches!(f.kind, FunctionKind::Constructor { .. }) {
-                        return Err(a.throw(ErrorKind::Type, &alloc::format!("Class constructor {} cannot be invoked without 'new'", f.name)));
-                    }
-                    if f.generator || f.asynchronous {
-                        return self.start(a, c, callee, this, &args, depth).map(Callee::Done);
+                    if loaded.class_constructor {
+                        return Err(a.throw(ErrorKind::Type, &alloc::format!("Class constructor {} cannot be invoked without 'new'", loaded.func.name)));
                     }
                     return Ok(Callee::Closure { closure: c, callee, this, args });
                 }
@@ -484,71 +804,15 @@ impl Executor {
         Err(a.throw(ErrorKind::Type, &alloc::format!("{what} is not a function")))
     }
 
-    /// If the callee is an ordinary JS function (not a class constructor / generator / async), gives its closure: a
-    /// frame can be opened directly.
-    #[inline]
-    fn plain_closure<'gc>(&self, callee: Value<'gc>) -> Option<(Closure<'gc>, &Loaded)> {
-        let c = callee.as_object()?.closure()?;
-        let loaded = self.function(c.func);
-        loaded.plain.then_some((c, loaded))
-    }
-
-    /// Builds a frame: opens this function's registers at the end of the register file and places `this`, the function
-    /// itself and the arguments per the calling convention.
-    fn enter<'gc>(&self, a: &mut Agent<'gc, '_>, regs: &mut Vec<Value<'gc>>, closure: Closure<'gc>, callee: Value<'gc>, this: Value<'gc>, args: &[Value<'gc>]) -> Frame<'gc> {
-        Self::enter_func(a, regs, &self.function(closure.func).func, closure, callee, this, args)
-    }
-
-    /// Same as [`enter`](Self::enter), with the function already fetched.
-    fn enter_func<'gc>(a: &mut Agent<'gc, '_>, regs: &mut Vec<Value<'gc>>, f: &Function, closure: Closure<'gc>, callee: Value<'gc>, this: Value<'gc>, args: &[Value<'gc>]) -> Frame<'gc> {
-        let (base, first) = Self::open_frame(a, regs, f, closure, callee, this);
-        let params = usize::from(f.params).min(args.len());
-        regs[first..first + params].copy_from_slice(&args[..params]);
-        let args = if f.keeps_args { args.to_vec().into() } else { Few::default() };
-        Frame { func: closure.func, pc: 0, base, env: closure.env, handlers: Few::default(), new_target: Value::Undefined, new_this: None, args }
-    }
-
-    /// Same as [`enter`](Self::enter), with the arguments already in the register file (the fast path of `Call`: no
-    /// copy into a `Vec` first).
-    #[expect(clippy::too_many_arguments, reason = "the parts of the calling convention")]
-    #[inline]
-    fn enter_regs<'gc>(a: &mut Agent<'gc, '_>, regs: &mut Vec<Value<'gc>>, f: &Function, closure: Closure<'gc>, callee: Value<'gc>, this: Value<'gc>, args: usize, argc: usize) -> Frame<'gc> {
-        let (base, first) = Self::open_frame(a, regs, f, closure, callee, this);
-        let params = usize::from(f.params).min(argc);
-        regs.copy_within(args..args + params, first);
-        let args = if f.keeps_args { regs[args..args + argc].to_vec().into() } else { Few::default() };
-        Frame { func: closure.func, pc: 0, base, env: closure.env, handlers: Few::default(), new_target: Value::Undefined, new_this: None, args }
-    }
-
-    /// Opens `f`'s registers at the end of the register file and places `this` and the function itself; gives the frame
-    /// base and the position of the first parameter.
-    #[inline]
-    fn open_frame<'gc>(a: &mut Agent<'gc, '_>, regs: &mut Vec<Value<'gc>>, f: &Function, closure: Closure<'gc>, callee: Value<'gc>, this: Value<'gc>) -> (usize, usize) {
-        a.profiler.enter(closure.func);
-        let base = regs.len();
-        regs.resize(base + usize::from(f.regs), Value::Undefined);
-        // Non-strict functions: a null / undefined `this` becomes the global object and primitives are wrapped into
-        // objects (arrow functions don't use their own `this`)
-        let this = match this.kind() {
-            _ if f.mode == Mode::Strict || f.kind == FunctionKind::Arrow => this,
-            ValueKind::Undefined | ValueKind::Null => Value::Object(a.realm.global),
-            ValueKind::Object(_) | ValueKind::Uninit => this,
-            prim => a.to_object(Value::from(prim)).map_or(Value::from(prim), Value::Object),
-        };
-        regs[base + usize::from(Reg::THIS.0)] = this;
-        regs[base + usize::from(Reg::CALLEE.0)] = callee;
-        (base, base + usize::from(Reg::PARAMS))
-    }
-
-    /// The closure running in this frame (the callee in `r1`).
-    fn current<'gc>(regs: &[Value<'gc>], f: &Frame<'gc>) -> Option<Closure<'gc>> {
-        match regs[f.base + usize::from(Reg::CALLEE.0)].kind() {
-            ValueKind::Object(o) => match o.borrow().kind {
-                ObjectKind::Function(c) => Some(c),
-                _ => None,
-            },
-            _ => None,
-        }
+    /// 构造一个能 `new` 的 [`j8framework::NativeClosure`]：`this` 是原型取自 `new_target` 的新对象，`f` 返回对象就用它。
+    fn construct_closure<'gc>(a: &mut Agent<'gc, '_>, o: JsObject<'gc>, f: j8framework::ClosureFn, args: &[Value<'gc>], new_target: Value<'gc>) -> Result<Value<'gc>, Error> {
+        let proto = a.proto_from_ctor(new_target, a.realm.object_proto)?;
+        let this: Value<'gc> = ObjectData { proto: Some(proto), ..ObjectData::default() }.alloc(a.mc).into();
+        let outer = core::mem::replace(&mut a.new_target, new_target);
+        let r = f(a, o, this, args);
+        a.new_target = outer;
+        let v = r?;
+        Ok(if v.as_object().is_some() { v } else { this })
     }
 
     /// Prepares a construct call: unwraps bound functions; host constructors compute directly; JS constructors build
@@ -558,39 +822,38 @@ impl Executor {
             let kind = match &o.borrow().kind {
                 ObjectKind::Function(c) => Ok(Ok(*c)),
                 ObjectKind::Native(n) => Ok(Err(*n)),
+                ObjectKind::NativeClosure(c) if c.constructor => {
+                    let f = c.f;
+                    let saved = self.depth.replace(depth);
+                    let r = Self::construct_closure(a, o, f, &args, new_target);
+                    self.depth.set(saved);
+                    return r.map(Prepared::Done);
+                }
                 ObjectKind::Bound(b) => Err(Some((b.target, b.args.clone()))),
                 ObjectKind::Proxy(p) if p.constructor => Err(None),
                 _ => break,
             };
             match kind {
                 Ok(Ok(closure)) => {
-                    let func_loaded = self.function(closure.func);
-                    let func = &func_loaded.func;
-                    if func.generator || func.asynchronous {
+                    let loaded = self.function(closure.func);
+                    if !(loaded.constructs || loaded.class_constructor) {
                         break;
                     }
-                    let this = match func.kind {
-                        FunctionKind::Arrow | FunctionKind::Method => break,
-                        FunctionKind::Constructor { derived: true } => None,
-                        FunctionKind::Normal | FunctionKind::Constructor { derived: false } => {
-                            let this = Self::create_this(a, func_loaded, new_target)?;
-                            if let Some(init) = closure.fields {
-                                a.call(init.into(), this.into(), &[])?;
-                            }
-                            Some(Value::Object(this))
-                        }
+                    let this = if loaded.derived {
+                        None
+                    } else {
+                        let this = Self::create_this(a, loaded, new_target)?;
+                        Some(Value::Object(this))
                     };
-                    // A derived class constructor's `this` is the uninitialized marker before `super()`
-                    let mut f = self.enter(a, regs, closure, callee, this.unwrap_or(Value::Uninit), &args);
-                    f.new_target = new_target;
-                    f.new_this = this;
+                    let mut f = self.open(a, regs, closure, callee, this.unwrap_or(Value::Uninit), &args);
+                    self.set_new_target(regs, &mut f, new_target);
+                    f.set_slot(regs, Frame::NEW_THIS, this.unwrap_or(Value::Uninit));
                     return Ok(Prepared::Frame(f));
                 }
                 Ok(Err(native)) => {
                     if !native.constructor {
                         break;
                     }
-                    // Host constructors pick the prototype from `new.target` themselves (`class X extends Map` etc.)
                     let saved = self.depth.replace(depth);
                     let outer = core::mem::replace(&mut a.new_target, new_target);
                     let r = (native.f)(a, Value::Undefined, &args);
@@ -618,9 +881,7 @@ impl Executor {
         Err(a.throw(ErrorKind::Type, &alloc::format!("{what} is not a constructor")))
     }
 
-    /// Builds `this` during construction: the prototype is `new.target.prototype`. When `new.target` is the constructor
-    /// itself (a direct `new`), it is read through the constructor's inline cache, and slots are reserved per this
-    /// constructor's previous instance.
+    /// Builds `this` during construction: the prototype is `new.target.prototype`.
     fn create_this<'gc>(a: &mut Agent<'gc, '_>, ctor: &Loaded, new_target: Value<'gc>) -> Result<JsObject<'gc>, Error> {
         let proto = match new_target.kind() {
             ValueKind::Object(o) => match ctor.prototype.get(o) {
@@ -633,143 +894,122 @@ impl Executor {
             },
             _ => a.get_named(new_target, "prototype")?,
         };
-        let proto = if let Some(p) = proto.as_object() { p } else { a.realm.object_proto };
-        Ok(ObjectData { proto: Some(proto), capacity: usize::from(ctor.instance_size.get()), ..ObjectData::default() }.alloc(a.mc))
+        let proto = proto.as_object().unwrap_or(a.realm.object_proto);
+        Ok(ObjectData::ordinary(a.mc, Some(proto), usize::from(ctor.instance_size.get())))
     }
 
-    /// `super(args)` in a derived constructor: constructs the parent class (`new.target` unchanged), initializes
-    /// `this`, and runs instance fields.
-    fn super_call<'gc>(a: &mut Agent<'gc, '_>, regs: &[Value<'gc>], f: &mut Frame<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        if f.new_this.is_some() {
-            return Err(a.throw(ErrorKind::Reference, "Super constructor may only be called once"));
-        }
-        let parent = match regs[f.base + usize::from(Reg::CALLEE.0)].kind() {
-            ValueKind::Object(o) => o.borrow().proto().map_or(Value::Null, Value::Object),
-            _ => Value::Undefined,
-        };
-        let this = a.construct(parent, args, f.new_target)?;
-        f.new_this = Some(this);
-        if let Some(init) = Self::current(regs, f).and_then(|c| c.fields) {
-            a.call(init.into(), this, &[])?;
-        }
-        Ok(this)
-    }
-
-    /// Determines the result when a construct call returns: if it returns an object use it, otherwise use `this` (a
-    /// derived class that didn't call `super` throws ReferenceError).
-    /// Construct call returns: if the return value is an object use it, otherwise use `this`; also records how many
-    /// properties the instance has (reserve that many slots when building `this` next time).
-    fn construct_result<'gc>(&self, a: &Agent<'gc, '_>, f: &Frame<'gc>, v: Value<'gc>) -> Result<Value<'gc>, Error> {
+    /// A construct call returns: an object result is used, otherwise `this`.
+    fn construct_result<'gc>(&self, a: &Agent<'gc, '_>, regs: &[Value<'gc>], f: &Frame, v: Value<'gc>) -> Result<Value<'gc>, Error> {
         let loaded = self.function(f.func);
-        let r = self.construct_value(a, loaded, f, v);
-        if let Ok(v) = &r
-            && let ValueKind::Object(o) = v.kind()
-        {
+        if v.as_object().is_some() {
+            return Ok(v);
+        }
+        let r = match (loaded.derived, f.new_this(regs)) {
+            (true, _) if v != Value::Undefined => Err(a.throw(ErrorKind::Type, "Derived constructors may only return object or undefined")),
+            (true, None) => Err(a.throw(ErrorKind::Reference, "Must call super constructor in derived class before accessing 'this' or returning from derived constructor")),
+            (_, Some(t)) => Ok(t),
+            (_, None) => Ok(v),
+        };
+        if let Ok(ValueKind::Object(o)) = r.as_ref().map(|v| v.kind()) {
             loaded.instance_size.set(u8::try_from(o.borrow().props().len()).unwrap_or(u8::MAX));
         }
         r
     }
 
-    fn construct_value<'gc>(&self, a: &Agent<'gc, '_>, loaded: &Loaded, f: &Frame<'gc>, v: Value<'gc>) -> Result<Value<'gc>, Error> {
-        if v.as_object().is_some() {
-            return Ok(v);
-        }
-        match (loaded.func.kind, f.new_this) {
-            (FunctionKind::Constructor { derived: true }, _) if v != Value::Undefined => Err(a.throw(ErrorKind::Type, "Derived constructors may only return object or undefined")),
-            (FunctionKind::Constructor { derived: true }, None) => Err(a.throw(ErrorKind::Reference, "Must call super constructor in derived class before accessing 'this' or returning from derived constructor")),
-            (_, Some(t)) => Ok(t),
-            (_, None) => Ok(v),
-        }
-    }
-
-    /// Starting point for `super` lookups: the prototype of the current method's home object.
-    fn super_base<'gc>(a: &Agent<'gc, '_>, regs: &[Value<'gc>], f: &Frame<'gc>) -> Result<Value<'gc>, Error> {
-        let home = Self::current(regs, f).and_then(|c| c.home).ok_or_else(|| a.throw(ErrorKind::Syntax, "'super' keyword unexpected here"))?;
-        Ok(home.borrow().proto().map_or(Value::Null, Value::Object))
+    /// `CreateClosure` of function constant `k` in context `env`
+    #[inline]
+    fn create_closure<'gc>(&self, a: &Agent<'gc, '_>, loaded: &Loaded, k: OperandValue, env: Option<JsEnv<'gc>>) -> JsObject<'gc> {
+        let Some(Constant::Function(n)) = loaded.func.bytecode.constants.get(usize::try_from(k).unwrap_or(0)) else { unreachable!("a function constant") };
+        self.function_object(a, Closure::new(FuncId(loaded.base + n), env))
     }
 
     /// Creates a function object; ordinary functions get a `prototype` (whose `constructor` points back).
-    fn function_object<'gc>(&self, a: &Agent<'gc, '_>, closure: Closure<'gc>, proto: JsObject<'gc>) -> JsObject<'gc> {
-        let func_loaded = self.function(closure.func);
-        let func = &func_loaded.func;
-        // Default prototype by function kind: generator / async / async generator each have their own
-        // %XFunction.prototype%
-        let proto = match (Gc::ptr_eq(proto, a.realm.function_proto), func.generator, func.asynchronous) {
-            (true, true, true) => a.realm.async_generator_function_proto,
-            (true, true, false) => a.realm.generator_function_proto,
-            (true, false, true) => a.realm.async_function_proto,
-            _ => proto,
+    fn function_object<'gc>(&self, a: &Agent<'gc, '_>, mut closure: Closure<'gc>) -> JsObject<'gc> {
+        let loaded = self.function(closure.func);
+        closure.code = Some(j8framework::Code::new(&loaded.info));
+        let func = &loaded.func;
+        let proto = match (loaded.generator, loaded.asynchronous) {
+            (true, true) => a.realm.async_generator_function_proto,
+            (true, false) => a.realm.generator_function_proto,
+            (false, true) => a.realm.async_function_proto,
+            (false, false) => a.realm.function_proto,
         };
         let fo = ObjectData { kind: ObjectKind::Function(closure), proto: Some(proto), ..ObjectData::default() }.alloc(a.mc);
-        a.realm.name_function(a.mc, fo, &func.name, Some(u32::from(func.length)));
-        if func.generator {
-            // A generator function's `prototype` is the prototype of the generators it produces (no `constructor`)
-            let base = if func.asynchronous { a.realm.async_generator_proto } else { a.realm.generator_proto };
-            let p = ObjectData { proto: Some(base), ..ObjectData::default() }.alloc(a.mc);
-            fo.borrow_mut(a.mc).define("prototype", Property { slot: Slot::Data(p.into()), enumerable: false, writable: true, configurable: false });
-        } else if func.kind == FunctionKind::Normal && !func.asynchronous {
+        let length = Value::Number(f64::from(func.length));
+        // Made on first read (see `Lazy`)
+        let name = Value::lazy(Lazy::FunctionName);
+        // `length`, `name`, then `prototype` for generators and ordinary functions / classes
+        let prototype = if loaded.generator {
+            let base = if loaded.asynchronous { a.realm.async_generator_proto } else { a.realm.generator_proto };
+            Some((ObjectData { proto: Some(base), ..ObjectData::default() }.alloc(a.mc), true))
+        } else if !loaded.no_prototype && !loaded.asynchronous {
             let p = a.object();
-            p.borrow_mut(a.mc).define("constructor", Property::hidden(fo.into()));
-            fo.borrow_mut(a.mc).define("prototype", Property { slot: Slot::Data(p.into()), enumerable: false, writable: true, configurable: false });
+            match &*loaded.prototype_shape.borrow() {
+                Some(shape) => p.fill(a.mc, shape, [Slot::Data(fo.into())]),
+                None => p.borrow_mut(a.mc).define("constructor", Property::hidden(fo.into())),
+            }
+            Self::remember_shape(&loaded.prototype_shape, p, 1);
+            Some((p, !loaded.class_constructor))
+        } else {
+            None
+        };
+        match &*loaded.function_shape.borrow() {
+            Some(shape) => fo.fill(a.mc, shape, [Slot::Data(length), Slot::Data(name)].into_iter().chain(prototype.map(|(p, _)| Slot::Data(p.into())))),
+            None => {
+                let prop = |v: Value<'gc>| Property { slot: Slot::Data(v), enumerable: false, writable: false, configurable: true };
+                let d = fo.borrow_mut(a.mc);
+                d.define("length", prop(length));
+                d.define("name", prop(name));
+                if let Some((p, writable)) = prototype {
+                    d.define("prototype", Property { slot: Slot::Data(p.into()), enumerable: false, writable, configurable: false });
+                }
+            }
         }
+        Self::remember_shape(&loaded.function_shape, fo, 2 + usize::from(prototype.is_some()));
         fo
     }
 
-    /// `class … extends parent`: the prototype of the prototype object and of the constructor.
-    fn class_parents<'gc>(a: &mut Agent<'gc, '_>, parent: Option<Value<'gc>>) -> Result<(Option<JsObject<'gc>>, JsObject<'gc>), Error> {
-        match parent.map(Value::kind) {
-            None => Ok((Some(a.realm.object_proto), a.realm.function_proto)),
-            Some(ValueKind::Null) => Ok((None, a.realm.function_proto)),
-            Some(p @ ValueKind::Object(o)) if o.borrow().kind.is_callable() => match (a.get_named(Value::from(p), "prototype")?).kind() {
-                ValueKind::Object(pp) => Ok((Some(pp), o)),
-                ValueKind::Null => Ok((None, o)),
-                _ => Err(a.throw(ErrorKind::Type, "Class extends value does not have valid prototype property")),
-            },
-            Some(p) => {
-                let what = a.to_string(Value::from(p))?;
-                Err(a.throw(ErrorKind::Type, &alloc::format!("Class extends value {} is not a constructor or null", &**what)))
+    /// `CreateObjectLiteral` of boilerplate constant `k`: in one step once its shape is known (as V8 copies the
+    /// boilerplate with its map), property by property the first time
+    fn object_literal<'gc>(a: &Agent<'gc, '_>, loaded: &Loaded, k: OperandValue) -> JsObject<'gc> {
+        let k = usize::try_from(k).unwrap_or(0);
+        let Some(Constant::Object(b)) = loaded.func.bytecode.constants.get(k) else { unreachable!("an object boilerplate") };
+        let ob = a.object_with(b.properties.len());
+        let cache = &loaded.literals[k];
+        let value = |v: &Option<LiteralValue>| v.as_ref().map_or(Value::Undefined, |v| Self::literal(a, v));
+        match &*cache.borrow() {
+            Some(shape) => {
+                ob.fill(a.mc, shape, b.properties.iter().map(|(_, v)| Slot::Data(value(v))));
+                return ob;
+            }
+            None => {
+                for (key, v) in &b.properties {
+                    ob.borrow_mut(a.mc).define(key, Property::data(value(v)));
+                }
             }
         }
+        Self::remember_shape(cache, ob, b.properties.len());
+        ob
     }
 
-    /// The environment `depth` levels out.
-    fn env_at(env: Option<JsEnv<'_>>, depth: u16) -> JsEnv<'_> {
-        let mut e = env.expect("a scope with an environment");
-        for _ in 0..depth {
-            e = e.parent.expect("an enclosing environment");
+    /// After making an object the slow way: keeps its shape for next time (when it has exactly the `n` properties
+    /// expected, in fast mode)
+    fn remember_shape(cache: &RefCell<Option<Arc<Shape>>>, o: JsObject<'_>, n: usize) {
+        if cache.borrow().is_some() {
+            return;
         }
-        e
+        let shape = o.get().props().shape().filter(|s| s.len() == n);
+        *cache.borrow_mut() = shape;
     }
 
-    /// %ThrowTypeError%: the accessor for strict-mode `arguments.callee`.
-    fn throw_type_error<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        Err(a.throw(ErrorKind::Type, "'caller', 'callee', and 'arguments' properties may not be accessed on strict mode functions or the arguments objects for calls to them"))
-    }
+    // ---- globals and lookups by name ----
 
-    /// In strict mode, a failed delete (non-configurable) throws TypeError.
-    fn check_delete(a: &Agent<'_, '_>, ok: bool, strict: bool) -> Result<(), Error> {
-        if strict && !ok {
-            return Err(a.throw(ErrorKind::Type, "Cannot delete a non-configurable property"));
-        }
-        Ok(())
-    }
-
-    /// Throws ReferenceError if uninitialized (temporal dead zone).
-    #[inline]
-    fn check<'gc>(a: &Agent<'gc, '_>, v: Value<'gc>, name: &str) -> Result<(), Error> {
-        if matches!(v.kind(), ValueKind::Uninit) {
-            return Err(Self::uninitialized(a, name));
-        }
-        Ok(())
-    }
-
-    /// Check for TDZ instructions: the name is fetched from the constant pool only when actually throwing.
-    #[inline]
-    fn check_const<'gc>(a: &Agent<'gc, '_>, v: Value<'gc>, func: &Function, name: j8virtasm::Const) -> Result<(), Error> {
-        if matches!(v.kind(), ValueKind::Uninit) {
-            return Err(Self::uninitialized(a, func.name_at(name)));
-        }
-        Ok(())
+    /// The script context slot holding `name`, if a script declared it lexically
+    fn script_slot<'gc>(&self, a: &Agent<'gc, '_>, name: &str) -> Option<(JsEnv<'gc>, usize, bool)> {
+        a.realm.script_contexts.get().iter().find_map(|e| {
+            let (i, n) = self.context_shape(e.shape?).slot(name)?;
+            Some((*e, i, n.constant))
+        })
     }
 
     #[cold]
@@ -777,978 +1017,1328 @@ impl Executor {
         a.throw(ErrorKind::Reference, &alloc::format!("Cannot access '{name}' before initialization"))
     }
 
-    /// Reads a global name via the cache: on a hit gives the value (script scope entries also check the TDZ); on a miss
-    /// gives `None`.
-    fn global_cached<'gc>(a: &Agent<'gc, '_>, slot: GlobalSlot, name: &str) -> Option<Value<'gc>> {
-        let scope = a.realm.script_scope.borrow();
-        match slot {
-            GlobalSlot::Scope(at) => scope.prop_at(at as usize, name).and_then(|p| p.value()),
-            GlobalSlot::Global { at, scope_len } if scope.props().len() == scope_len as usize => a.realm.global.borrow().prop_at(at as usize, name).and_then(|p| p.value()),
-            _ => None,
+    /// `LdaGlobal`: script contexts first, then the global object (through the cache); `typeof` gives `undefined` for
+    /// a name that isn't there
+    fn global_load<'gc>(&self, a: &mut Agent<'gc, '_>, cache: &ic::GlobalIc, name: &str, inside_typeof: bool) -> Result<Value<'gc>, Error> {
+        // A script's `this`, read from a function inside it (V8 keeps it in the script context table)
+        if name == SCRIPT_THIS {
+            return Ok(Value::Object(a.realm.global));
         }
-    }
-
-    /// Where the global name is now (only own data properties are cached).
-    fn global_locate(a: &Agent<'_, '_>, name: &str) -> GlobalSlot {
-        let scope = a.realm.script_scope.get();
-        let own = |d: &j8framework::Object<'_>| d.position(name).filter(|&i| matches!(d.props().slot(i), Slot::Data(_))).and_then(|i| u32::try_from(i).ok());
-        if let Some(at) = own(scope) {
-            return GlobalSlot::Scope(at);
-        }
-        if scope.position(name).is_some() {
-            return GlobalSlot::Unknown;
-        }
-        match (own(a.realm.global.get()), u32::try_from(scope.props().len())) {
-            (Some(at), Ok(scope_len)) => GlobalSlot::Global { at, scope_len },
-            _ => GlobalSlot::Unknown,
-        }
-    }
-
-    /// `lda.global`: tries the cache first; on a miss takes the slow path and records the position.
-    fn global_load<'gc>(a: &mut Agent<'gc, '_>, cache: &Cell<GlobalSlot>, name: &str) -> Result<Value<'gc>, Error> {
-        if let Some(v) = Self::global_cached(a, cache.get(), name) {
-            Self::check(a, v, name)?;
+        // A hit means the name is still a global property: a script declaring it lexically changes the script scope's
+        // shape
+        let (scope, global) = (a.realm.script_scope, a.realm.global);
+        if let Some(v) = cache.get(scope, global) {
             return Ok(v);
         }
-        let v = Self::global_get(a, name)?.ok_or_else(|| a.throw(ErrorKind::Reference, &alloc::format!("{name} is not defined")))?;
-        cache.set(Self::global_locate(a, name));
+        if let Some((e, i, _)) = self.script_slot(a, name) {
+            let v = e.load(i);
+            return if matches!(v.kind(), ValueKind::Uninit) { Err(Self::uninitialized(a, name)) } else { Ok(v) };
+        }
+        let g = Value::Object(global);
+        if !a.has_property(g, name)? {
+            if inside_typeof {
+                return Ok(Value::Undefined);
+            }
+            return Err(a.throw(ErrorKind::Reference, &alloc::format!("{name} is not defined")));
+        }
+        let v = a.get_named(g, name)?;
+        cache.fill(scope, global, name);
         Ok(v)
     }
 
-    /// `sta.global`: if the cache hits and it is a writable data property, modifies it in place (script scope entries
-    /// also check the TDZ); otherwise takes the slow path and records the position.
-    fn global_store<'gc>(a: &mut Agent<'gc, '_>, cache: &Cell<GlobalSlot>, name: &str, v: Value<'gc>, strict: bool) -> Result<(), Error> {
-        let (target, at) = match cache.get() {
-            GlobalSlot::Scope(at) => (a.realm.script_scope, at),
-            GlobalSlot::Global { at, scope_len } if a.realm.script_scope.borrow().props().len() == scope_len as usize => (a.realm.global, at),
-            _ => (a.realm.global, u32::MAX),
-        };
-        let hit = target.borrow().prop_at(at as usize, name);
-        if let Some(Property { slot: Slot::Data(old), writable: true, .. }) = hit {
-            Self::check(a, old, name)?;
-            target.borrow_mut(a.mc).set_at(at as usize, v);
+    /// `StaGlobal`: a script context slot (TDZ / `const` checked), else the global object (strict: must exist)
+    fn global_store<'gc>(&self, a: &mut Agent<'gc, '_>, cache: &ic::GlobalIc, name: &str, v: Value<'gc>, strict: bool) -> Result<(), Error> {
+        let (scope, global) = (a.realm.script_scope, a.realm.global);
+        if let Some((o, at)) = cache.writable(scope, global)
+            && let Slot::Data(_) = o.get().props().slot(at)
+        {
+            o.get().set_at(a.mc, at, v);
             return Ok(());
         }
-        Self::global_set(a, name, v, strict)?;
-        cache.set(Self::global_locate(a, name));
+        if let Some((e, i, constant)) = self.script_slot(a, name) {
+            if matches!(e.load(i).kind(), ValueKind::Uninit) {
+                return Err(Self::uninitialized(a, name));
+            }
+            if constant {
+                return Err(a.throw(ErrorKind::Type, "Assignment to constant variable."));
+            }
+            Env::set(e, a.mc, i, v);
+            return Ok(());
+        }
+        let g = Value::Object(global);
+        if strict && !a.has_property(g, name)? {
+            return Err(a.throw(ErrorKind::Reference, &alloc::format!("{name} is not defined")));
+        }
+        a.put_named(g, name, v, strict)?;
+        cache.fill(scope, global, name);
         Ok(())
     }
 
-    /// Reads a global name: script scope first (throws inside the TDZ), then the global object (including its prototype
-    /// chain); gives `None` if neither has it.
-    fn global_get<'gc>(a: &mut Agent<'gc, '_>, name: &str) -> Result<Option<Value<'gc>>, Error> {
-        if let Some(v) = a.realm.script_scope.borrow().own(name) {
-            Self::check(a, v, name)?;
-            return Ok(Some(v));
+    /// A lookup by name through the context chain from `env` (V8's `LoadLookupSlot`): `with` objects, sloppy eval
+    /// extension objects and named slots, then the script contexts and the global object. Gives the holder found:
+    /// a context slot, an object (with its `this` for a call), or nothing.
+    fn lookup<'gc>(&self, a: &mut Agent<'gc, '_>, env: Option<JsEnv<'gc>>, name: &str) -> Result<Found<'gc>, Error> {
+        let mut e = env;
+        while let Some(c) = e {
+            if let Some(ext) = c.extension {
+                let with = c.shape.is_some_and(|s| self.context_shape(s).kind == ContextKind::With);
+                let has = if with { a.has_property(Value::Object(ext), name)? } else { ext.borrow().get_own(a.mc, name).is_some() };
+                if has && !(with && Self::unscopable(a, ext, name)?) {
+                    return Ok(Found::Object(ext));
+                }
+            }
+            if let Some((i, n)) = c.shape.and_then(|s| self.context_shape(s).slot(name)) {
+                return Ok(Found::Slot(c, i, n.constant));
+            }
+            e = c.parent;
+        }
+        if let Some((e, i, constant)) = self.script_slot(a, name) {
+            return Ok(Found::Slot(e, i, constant));
         }
         let g = Value::Object(a.realm.global);
-        if a.has_property(g, name)? { Ok(Some(a.get_named(g, name)?)) } else { Ok(None) }
-    }
-
-    /// Before a top-level `var` / function declaration, checks whether it can be declared (CanDeclareGlobalVar /
-    /// CanDeclareGlobalFunction).
-    fn check_declare(a: &mut Agent<'_, '_>, name: &str, function: bool) -> Result<(), Error> {
-        if a.realm.script_scope.borrow().get_own(name).is_some() {
-            return Err(a.throw(ErrorKind::Syntax, &alloc::format!("Identifier '{name}' has already been declared")));
+        if a.has_property(g, name)? {
+            return Ok(Found::Object(a.realm.global));
         }
-        let (existing, extensible) = {
-            let g = a.realm.global.borrow();
-            (g.get_own(name), !g.non_extensible())
-        };
-        match existing {
-            Some(p) if function && !p.configurable && !(p.writable && p.enumerable && matches!(p.slot, Slot::Data(_))) => Err(a.throw(ErrorKind::Type, &alloc::format!("Cannot redefine property: {name}"))),
-            None if !extensible => Err(a.throw(ErrorKind::Type, &alloc::format!("Cannot declare global {name}: the global object is not extensible"))),
-            _ => Ok(()),
+        Ok(Found::Nothing)
+    }
+
+    /// `name` is blocked by the `with` object's `@@unscopables`
+    fn unscopable<'gc>(a: &mut Agent<'gc, '_>, o: JsObject<'gc>, name: &str) -> Result<bool, Error> {
+        let u = a.get_symbol(Value::Object(o), a.realm.symbols.unscopables, Value::Object(o))?;
+        if u.as_object().is_none() {
+            return Ok(false);
+        }
+        let blocked = a.get_named(u, name)?;
+        Ok(a.to_boolean(blocked))
+    }
+
+    fn lookup_load<'gc>(&self, a: &mut Agent<'gc, '_>, env: Option<JsEnv<'gc>>, name: &str, inside_typeof: bool) -> Result<Value<'gc>, Error> {
+        match self.lookup(a, env, name)? {
+            Found::Slot(c, i, _) => {
+                let v = c.load(i);
+                if matches!(v.kind(), ValueKind::Uninit) { Err(Self::uninitialized(a, name)) } else { Ok(v) }
+            }
+            Found::Object(o) => a.get_named(Value::Object(o), name),
+            // `this` of direct eval code at the top level of a script
+            Found::Nothing if name == "this" => Ok(Value::Object(a.realm.global)),
+            Found::Nothing if inside_typeof => Ok(Value::Undefined),
+            Found::Nothing => Err(a.throw(ErrorKind::Reference, &alloc::format!("{name} is not defined"))),
         }
     }
 
-    /// Puts a top-level `var` (`value` empty) / function declaration on the global object (declarability already
-    /// checked).
-    fn declare_global<'gc>(a: &Agent<'gc, '_>, name: &str, value: Option<Value<'gc>>, deletable: bool) {
-        let global = a.realm.global;
-        let existing = global.borrow().get_own(name);
-        let fresh = Property { slot: Slot::Data(value.unwrap_or_default()), enumerable: true, writable: true, configurable: deletable };
-        let prop = match (existing, value) {
-            (None, _) => fresh,
-            (Some(_), None) => return,
-            (Some(p), Some(_)) if p.configurable => fresh,
-            (Some(p), Some(v)) => Property { slot: Slot::Data(v), ..p },
-        };
-        global.borrow_mut(a.mc).define(name, prop);
-    }
-
-    /// Writes a global name: in the script scope, checks the TDZ and `const`; otherwise writes the global object.
-    /// In strict mode, assigning to an undeclared name throws ReferenceError.
-    fn global_set<'gc>(a: &mut Agent<'gc, '_>, name: &str, v: Value<'gc>, strict: bool) -> Result<(), Error> {
-        let scope = a.realm.script_scope;
-        let prop = scope.borrow().get_own(name);
-        match prop {
-            Some(p) => {
-                Self::check(a, p.value().unwrap_or_default(), name)?;
-                if !p.writable {
+    fn lookup_store<'gc>(&self, a: &mut Agent<'gc, '_>, env: Option<JsEnv<'gc>>, name: &str, v: Value<'gc>, strict: bool) -> Result<(), Error> {
+        match self.lookup(a, env, name)? {
+            Found::Slot(c, i, constant) => {
+                if matches!(c.load(i).kind(), ValueKind::Uninit) {
+                    return Err(Self::uninitialized(a, name));
+                }
+                if constant {
                     return Err(a.throw(ErrorKind::Type, "Assignment to constant variable."));
                 }
-                scope.borrow_mut(a.mc).set(name, v);
+                Env::set(c, a.mc, i, v);
                 Ok(())
             }
-            None => {
-                let g = Value::Object(a.realm.global);
-                if strict && !a.has_property(g, name)? {
-                    return Err(a.throw(ErrorKind::Reference, &alloc::format!("{name} is not defined")));
+            Found::Object(o) => a.put_named(Value::Object(o), name, v, strict),
+            Found::Nothing if strict => Err(a.throw(ErrorKind::Reference, &alloc::format!("{name} is not defined"))),
+            Found::Nothing => a.put_named(Value::Object(a.realm.global), name, v, false),
+        }
+    }
+
+    /// The variable environment for eval declarations from `env`: the nearest function context with an extension
+    /// object, or the global object
+    fn var_scope<'gc>(&self, a: &Agent<'gc, '_>, env: Option<JsEnv<'gc>>) -> JsObject<'gc> {
+        let mut e = env;
+        while let Some(c) = e {
+            if let (Some(ext), Some(ContextKind::Function)) = (c.extension, c.shape.map(|s| self.context_shape(s).kind)) {
+                return ext;
+            }
+            e = c.parent;
+        }
+        a.realm.global
+    }
+
+    /// `DeclareEvalVar` / `DeclareEvalFunction`: a lexical declaration with the same name between here and the variable
+    /// environment is a SyntaxError
+    fn declare_eval<'gc>(&self, a: &mut Agent<'gc, '_>, env: Option<JsEnv<'gc>>, name: &str, value: Option<Value<'gc>>) -> Result<(), Error> {
+        let mut e = env;
+        while let Some(c) = e {
+            if let Some(s) = c.shape.map(|s| self.context_shape(s)) {
+                if s.kind == ContextKind::Function && c.extension.is_some() {
+                    break;
                 }
-                a.put_named(g, name, v, strict)
+                if s.slot(name).is_some_and(|(_, n)| n.lexical) {
+                    return Err(a.throw(ErrorKind::Syntax, &alloc::format!("Identifier '{name}' has already been declared")));
+                }
             }
+            e = c.parent;
         }
-    }
-
-    /// A private name the compiler placed in a register.
-    fn private_key(v: Value<'_>) -> j8framework::JsSymbol<'_> {
-        match v.kind() {
-            ValueKind::Symbol(s) => s,
-            _ => unreachable!("the compiler loads a private name here"),
+        let target = self.var_scope(a, env);
+        if Gc::ptr_eq(target, a.realm.global) && self.script_slot(a, name).is_some() {
+            return Err(a.throw(ErrorKind::Syntax, &alloc::format!("Identifier '{name}' has already been declared")));
         }
-    }
-
-    /// This frame's arguments object: all arguments as enumerable index properties; `length` / `callee` /
-    /// `[Symbol.iterator]` non-enumerable.
-    fn arguments<'gc>(a: &mut Agent<'gc, '_>, regs: &[Value<'gc>], f: &Frame<'gc>, self_strict: bool, mapped: &[Option<u16>]) -> Result<Value<'gc>, Error> {
-        // Mapped: only up to the number of arguments
-        let map = match (self_strict, f.env) {
-            (false, Some(env)) if !mapped.is_empty() => Some(j8framework::ArgumentsMap { env, slots: mapped.iter().take(f.args.len()).copied().collect() }),
-            _ => None,
-        };
-        let o = ObjectData { kind: ObjectKind::Arguments(map), proto: Some(a.realm.object_proto), ..ObjectData::default() }.alloc(a.mc);
-        let hidden = |v: Value<'gc>| Property { slot: Slot::Data(v), enumerable: false, writable: true, configurable: true };
-        for (i, &v) in f.args.iter().enumerate() {
-            let k = alloc::string::String::from(ryu_js::Buffer::new().format(f64::from(u32::try_from(i).unwrap_or(u32::MAX))));
-            o.borrow_mut(a.mc).define(&k, Property::data(v));
-        }
-        let len = f64::from(u32::try_from(f.args.len()).unwrap_or(u32::MAX));
-        let values = a.get_symbol(Value::Object(a.realm.array_proto), a.realm.symbols.iterator, Value::Undefined)?;
-        let mut d = o.borrow_mut(a.mc);
-        d.define("length", hidden(len.into()));
-        if self_strict {
-            // Strict mode: reading or writing callee throws TypeError
-            let thrower = a.realm.named_native(a.mc, Self::throw_type_error, "", 0);
-            d.define("callee", Property { slot: Slot::Accessor { get: Some(thrower), set: Some(thrower) }, enumerable: false, writable: false, configurable: false });
-        } else {
-            d.define("callee", hidden(regs[f.base + usize::from(Reg::CALLEE.0)]));
-        }
-        d.define_symbol(a.realm.symbols.iterator, hidden(values));
-        drop(d);
-        Ok(o.into())
-    }
-
-    /// The resume mode stored in a register.
-    fn mode(v: Value<'_>) -> Resume {
-        match v.kind() {
-            ValueKind::Number(x) => Resume::ALL.into_iter().find(|&m| f64::from(m) == x).unwrap_or(Resume::Next),
-            _ => Resume::Next,
-        }
-    }
-
-    /// Elements of an array (a snapshot); empty if not an array.
-    fn items(v: Value<'_>) -> Vec<Value<'_>> {
-        match v.kind() {
-            ValueKind::Object(o) if o.is_array() => o.elements().to_vec(),
-            _ => Vec::new(),
-        }
-    }
-
-    /// Appends to the end of an array built by the compiler.
-    fn push<'gc>(a: &Agent<'gc, '_>, arr: Value<'gc>, items: impl IntoIterator<Item = Value<'gc>>) {
-        let Some(o) = arr.as_object() else { return };
-        let mut d = o.borrow_mut(a.mc);
-        for v in items {
-            let len = d.array_length().unwrap_or(0);
-            if o.is_array() && o.elements().len() == len as usize {
-                o.elements().push(a.mc, v);
-            } else {
-                d.store(j8framework::Key::Str(&alloc::format!("{len}")), Property::data(v));
-            }
-        }
-    }
-
-    /// Defines a property in an object literal / class (the value or accessor function is `v`).
-    fn define<'gc>(a: &mut Agent<'gc, '_>, obj: Value<'gc>, key: &str, kind: PropertyKind, enumerable: bool, v: Value<'gc>) -> Result<(), Error> {
-        let Some(o) = obj.as_object() else { return Ok(()) };
-        match (kind, v.kind()) {
-            (PropertyKind::Data, _) => a.define(o, key, Property { slot: Slot::Data(v), enumerable, writable: true, configurable: true })?,
-            (PropertyKind::Getter | PropertyKind::Setter, ValueKind::Object(func)) => a.define_accessor(o, key, func, kind == PropertyKind::Setter, enumerable),
-            _ => {}
+        let existing = target.borrow().get_own(a.mc, name);
+        match (existing, value) {
+            (Some(_), None) => {}
+            (Some(p), Some(v)) if !p.configurable => a.put_named(Value::Object(target), name, v, false)?,
+            (_, v) => target.borrow_mut(a.mc).define(name, Property { slot: Slot::Data(v.unwrap_or_default()), enumerable: true, writable: true, configurable: true }),
         }
         Ok(())
+    }
+
+    /// `DeclareGlobals`: a script's `var`s and functions on the global object, after checking all can be declared
+    fn declare_globals<'gc>(&self, a: &mut Agent<'gc, '_>, f: &Frame, env: Option<JsEnv<'gc>>, decls: &[j8bytecode::GlobalDeclaration]) -> Result<(), Error> {
+        for d in decls {
+            let name = &*d.name;
+            if self.script_slot(a, name).is_some() {
+                return Err(a.throw(ErrorKind::Syntax, &alloc::format!("Identifier '{name}' has already been declared")));
+            }
+            let (existing, extensible) = {
+                let g = a.realm.global.borrow();
+                (g.get_own(a.mc, name), !g.non_extensible())
+            };
+            match existing {
+                Some(p) if d.function.is_some() && !p.configurable && !(p.writable && p.enumerable && matches!(p.slot, Slot::Data(_))) => return Err(a.throw(ErrorKind::Type, &alloc::format!("Cannot redefine property: {name}"))),
+                None if !extensible => return Err(a.throw(ErrorKind::Type, &alloc::format!("Cannot declare global {name}: the global object is not extensible"))),
+                _ => {}
+            }
+        }
+        let base = self.function(f.func).base;
+        for d in decls {
+            let name = &*d.name;
+            let global = a.realm.global;
+            let existing = global.borrow().get_own(a.mc, name);
+            let value = d.function.map(|n| {
+                let closure = Closure::new(FuncId(base + n), env);
+                Value::Object(self.function_object(a, closure))
+            });
+            let fresh = Property { slot: Slot::Data(value.unwrap_or_default()), enumerable: true, writable: true, configurable: false };
+            let prop = match (existing, value) {
+                (None, _) => fresh,
+                (Some(_), None) => continue,
+                (Some(p), Some(_)) if p.configurable => fresh,
+                (Some(p), Some(v)) => Property { slot: Slot::Data(v), ..p },
+            };
+            global.borrow_mut(a.mc).define(name, prop);
+        }
+        Ok(())
+    }
+
+    /// Creates the script context of script `main` (its top-level lexical declarations, holes until initialized) and
+    /// registers it in the realm's script context table, after checking nothing else declares those names
+    fn script_context<'gc>(&self, a: &mut Agent<'gc, '_>, main: FuncId) -> Result<Option<JsEnv<'gc>>, Error> {
+        let Some(id) = self.function(main).scope else { return Ok(None) };
+        let shape = self.context_shape(id);
+        if shape.kind != ContextKind::Script {
+            return Ok(None);
+        }
+        for n in shape.names.iter() {
+            let name = &*n.name;
+            let restricted = a.realm.global.borrow().get_own(a.mc, name).is_some_and(|p| !p.configurable);
+            if self.script_slot(a, name).is_some() || restricted {
+                return Err(a.throw(ErrorKind::Syntax, &alloc::format!("Identifier '{name}' has already been declared")));
+            }
+        }
+        let env = Env::context(shape.names.len(), Value::Uninit, None, Some(id), None).alloc(a.mc);
+        a.realm.script_contexts.update(a.mc, |v| {
+            let mut v = v.clone();
+            v.push(env);
+            v
+        });
+        // Global name caches key on the script scope's shape: a new lexical name may shadow a global property
+        for n in shape.names.iter() {
+            a.realm.script_scope.borrow_mut(a.mc).define(&n.name, Property::data(Value::Undefined));
+        }
+        Ok(Some(env))
+    }
+
+    // ---- running ----
+
+    /// Initial execution state for script `main`: its script context made, `this` the global object.
+    fn script_state<'gc>(&self, a: &mut Agent<'gc, '_>, main: FuncId) -> Result<State<'gc>, Error> {
+        let env = self.script_context(a, main)?;
+        let this = Value::Object(a.realm.global);
+        let mut regs = Vec::new();
+        let f = self.open(a, &mut regs, Closure::new(main, env), Value::Undefined, this, &[]);
+        Ok(self.state(regs, f))
+    }
+
+    /// Runs script `main` (`this` is the global object).
+    pub fn run_script<'gc>(&self, a: &mut Agent<'gc, '_>, main: FuncId) -> Result<Value<'gc>, Error> {
+        let st = self.script_state(a, main)?;
+        self.execute(a, st, &mut None).map(Outcome::returned)
+    }
+
+    /// Finds a handler for exception `v` in the frames, innermost first (the handler table entry whose range holds the
+    /// throwing instruction, the innermost such range); `false` once all frames are popped.
+    fn unwind<'gc>(&self, st: &mut State<'gc>, v: Value<'gc>) -> bool {
+        loop {
+            let loaded = self.function(st.f().func);
+            let at = loaded.insns.get(st.f().insn).map_or(u32::MAX, |d| d.start);
+            let h = loaded.func.bytecode.handlers.iter().filter(|h| h.start <= at && at < h.end).min_by_key(|h| h.end - h.start).copied();
+            if let Some(h) = h {
+                let ctx = Self::reg(&st.regs, st.f(), OperandValue::from(h.context));
+                let f = *st.f();
+                f.set_env(&mut st.regs, ctx.as_context());
+                st.f_mut().pc = loaded.index_of(h.handler as usize);
+                st.acc = v;
+                return true;
+            }
+            if !st.pop_frame() {
+                return false;
+            }
+        }
     }
 
     /// Runs until the outermost frame returns; an exception first looks for a handler and propagates outward only if
     /// not caught. `budget` applies only to the outermost level: when it runs out, stops with the state.
     fn execute<'gc>(&self, a: &mut Agent<'gc, '_>, mut st: State<'gc>, budget: &mut Option<usize>) -> Result<Outcome<'gc>, Error> {
         let base = self.depth.get();
+        let mut b = Budget::new(a.stop, *budget);
         let r = loop {
-            match self.run(a, &mut st, base, budget) {
-                Ok(Some(v)) => break Ok(v),
-                Ok(None) => break Ok(Outcome::Paused(alloc::boxed::Box::new(st))),
+            match self.run(a, &mut st, base, &mut b) {
+                Ok(Some(v)) => break Ok(Some(v)),
+                Ok(None) if b.terminated => break Err(Error::Terminated),
+                Ok(None) => break Ok(None),
                 Err(Error::Exception(g)) => {
                     let v = a.local(&g);
-                    if !st.unwind(v) {
+                    if !self.unwind(&mut st, v) {
                         break Err(Error::Exception(g));
                     }
                 }
                 Err(e) => break Err(e),
             }
         };
-        self.depth.set(base);
-        r
-    }
-
-    /// Runs until the outermost frame returns, with no budget (for calling back into JS from host functions: the
-    /// execution state never stops, and when done the register file is returned to the caller for reuse).
-    fn execute_to_end<'gc>(&self, a: &mut Agent<'gc, '_>, st: &mut State<'gc>) -> Result<Value<'gc>, Error> {
-        let base = self.depth.get();
-        let r = loop {
-            match self.run(a, st, base, &mut None) {
-                Ok(Some(v)) => break Ok(v.returned()),
-                Ok(None) => unreachable!("no budget, no pause"),
-                Err(Error::Exception(g)) => {
-                    let v = a.local(&g);
-                    if !st.unwind(v) {
-                        break Err(Error::Exception(g));
-                    }
-                }
-                Err(e) => break Err(e),
+        let r = match r {
+            // Paused: the state carries on in the next slice
+            Ok(None) => Ok(Outcome::Paused(Box::new(st))),
+            r => {
+                self.recycle(a, st);
+                r.map(|v| v.expect("an outcome"))
             }
         };
+        *budget = b.remaining();
         self.depth.set(base);
         r
     }
 
-    /// Consumes one step of budget; returns `true` when exhausted (the caller stops, with the state intact)
-    #[inline]
-    fn spent(budget: &mut Option<usize>) -> bool {
-        match budget {
-            Some(0) => true,
-            Some(b) => {
-                *b -= 1;
-                false
-            }
-            None => false,
-        }
-    }
-
-    /// Main loop: the outer loop fetches the function once per frame entered (start, call, return), the inner loop
-    /// fetches and dispatches instructions one by one; instructions that switch frames `continue 'frame`. Errors return
-    /// directly and are unwound by [`execute`](Self::execute).
-    #[expect(clippy::too_many_lines, reason = "one branch per instruction; splitting it up would make it harder to read")]
-    fn run<'gc>(&self, a: &mut Agent<'gc, '_>, st: &mut State<'gc>, depth: usize, budget: &mut Option<usize>) -> Result<Option<Outcome<'gc>>, Error> {
-        let State { regs, frames, f, acc } = st;
-        // When the call fast path has already fetched the callee, hands it to the next frame, saving a lookup
-        let mut entering: Option<&Loaded> = None;
-        'frame: loop {
-            // Budget exhausted: stop before this frame's next instruction, with the state intact
-            if Self::spent(budget) {
+    /// Main loop: runs each frame's threaded code until the frame changes. `None` when the budget runs out (the state
+    /// is intact).
+    fn run<'gc>(&self, a: &mut Agent<'gc, '_>, st: &mut State<'gc>, depth: usize, budget: &mut Budget<'_>) -> Result<Option<Outcome<'gc>>, Error> {
+        loop {
+            if budget.spent() {
                 return Ok(None);
             }
-            let loaded = entering.take().unwrap_or_else(|| self.function(f.func));
-            let func = &loaded.func;
-            loop {
-                let insn = &func.insns[f.pc];
-                f.pc += 1;
-                let r = |r: Reg| f.base + usize::from(r.0);
-                // Fast path when both sides are numbers computes in place; everything else goes to the Agent
-                macro_rules! binary {
-                    ($op:expr, $lhs:expr, $rhs:expr) => {{
-                        let (lhs, rhs) = ($lhs, $rhs);
-                        *acc = match (lhs.as_number(), rhs.as_number()) {
-                            (Some(x), Some(y)) => $op.numbers(x, y).into(),
-                            _ => a.binary($op, lhs, rhs)?,
-                        }
-                    }};
-                }
-                macro_rules! compare {
-                    ($op:expr, $lhs:expr, $rhs:expr) => {{
-                        let (lhs, rhs) = ($lhs, $rhs);
-                        let c = match (lhs.as_number(), rhs.as_number()) {
-                            (Some(x), Some(y)) => $op.numbers(x, y),
-                            _ => a.compare($op, lhs, rhs)?,
-                        };
-                        *acc = c.into();
-                        // Immediately followed by a conditional jump (loop condition, `if`): the comparison result is
-                        // the boolean, so jump directly, saving a dispatch
-                        let taken = match func.insns.get(f.pc) {
-                            Some(&Insn::JumpIfFalse(l)) => (!c).then_some(l),
-                            Some(&Insn::JumpIfTrue(l)) => c.then_some(l),
-                            _ => continue,
-                        };
-                        f.pc += 1;
-                        if let Some(l) = taken {
-                            let back = (l.0 as usize) < f.pc;
-                            f.pc = l.0 as usize;
-                            if back {
-                                if self.tier.is_some() {
-                                    self.osr(a.platform, loaded, regs, f, acc, f.pc);
-                                }
-                                if Self::spent(budget) {
-                                    return Ok(None);
-                                }
-                            }
-                        }
-                    }};
-                }
-                match *insn {
-                    Insn::LdaUndefined => {
-                        *acc = Value::Undefined;
-                    }
-                    Insn::LdaNull => *acc = Value::Null,
-                    Insn::LdaBool(b) => *acc = b.into(),
-                    Insn::LdaSmi(n) => {
-                        *acc = f64::from(n).into();
-                    }
-                    Insn::LdaConst(k) => {
-                        *acc = match &func.consts[k.0 as usize] {
-                            Constant::Number(x) => (*x).into(),
-                            Constant::String(s) => a.string(s).into(),
-                            Constant::BigInt(digits) => a.bigint(Agent::parse_bigint(digits).unwrap_or_default()),
-                        };
-                    }
-                    Insn::Ldar(x) => {
-                        *acc = regs[r(x)];
-                    }
-                    Insn::Star(x) => regs[r(x)] = *acc,
-                    Insn::LdaGlobal(k) => {
-                        *acc = Self::global_load(a, &loaded.globals[k.0 as usize], func.name_at(k))?;
-                    }
-                    Insn::LdaGlobalOrUndefined(k) => *acc = Self::global_get(a, func.name_at(k))?.unwrap_or_default(),
-                    Insn::StaGlobal { name, strict } => Self::global_store(a, &loaded.globals[name.0 as usize], func.name_at(name), *acc, strict)?,
-                    Insn::LdaHole => *acc = Value::Uninit,
-                    Insn::ThrowConstAssign => return Err(a.throw(ErrorKind::Type, "Assignment to constant variable.")),
-                    Insn::CheckInit { name } => Self::check_const(a, *acc, func, name)?,
-                    Insn::CheckReg { reg, name } => Self::check_const(a, regs[r(reg)], func, name)?,
-                    Insn::CheckEnv { depth, slot, name } => {
-                        let v = Self::env_at(f.env, depth).load(usize::from(slot));
-                        Self::check_const(a, v, func, name)?;
-                    }
-                    Insn::CheckThis => {
-                        if matches!((*acc).kind(), ValueKind::Uninit) {
-                            return Err(a.throw(ErrorKind::Reference, "Must call super constructor in derived class before accessing 'this' or returning from derived constructor"));
-                        }
-                    }
-                    Insn::DeclareLexical { name, constant } => {
-                        let name = func.name_at(name);
-                        let scope = a.realm.script_scope;
-                        // Conflicts with names in the script scope and with non-configurable global properties (earlier
-                        // `var`s, `undefined`, etc.)
-                        if scope.borrow().get_own(name).is_some() || a.realm.global.borrow().get_own(name).is_some_and(|p| !p.configurable) {
-                            return Err(a.throw(ErrorKind::Syntax, &alloc::format!("Identifier '{name}' has already been declared")));
-                        }
-                        scope.borrow_mut(a.mc).define(name, Property { slot: Slot::Data(Value::Uninit), enumerable: false, writable: !constant, configurable: false });
-                    }
-                    Insn::CheckDeclare { name, function } => Self::check_declare(a, func.name_at(name), function)?,
-                    Insn::DeclareVar { name, deletable } => Self::declare_global(a, func.name_at(name), None, deletable),
-                    Insn::DeclareFunction { name, deletable } => Self::declare_global(a, func.name_at(name), Some(*acc), deletable),
-                    Insn::SetProtoLiteral { obj } => {
-                        if let Some(o) = regs[r(obj)].as_object() {
-                            match (*acc).kind() {
-                                ValueKind::Object(p) => o.set_proto(a.mc, Some(p)),
-                                ValueKind::Null => o.set_proto(a.mc, None),
-                                _ => {}
-                            }
-                        }
-                    }
-                    Insn::ToObject => *acc = a.to_object(*acc)?.into(),
-                    Insn::LdaImport { index } => *acc = self.import_value(a, loaded.base, index)?,
-                    Insn::ImportMeta => *acc = self.import_meta(a, loaded.base)?,
-                    Insn::DynamicImport { referrer } => {
-                        let level = depth + frames.len() + 1;
-                        *acc = self.dynamic_import(a, func.name_at(referrer), *acc, level)?;
-                    }
-                    Insn::CreateNullObject => *acc = ObjectData::default().alloc(a.mc).into(),
-                    Insn::DeclareEvalVar { obj, name } => {
-                        if let Some(o) = regs[r(obj)].as_object() {
-                            let key = j8framework::Key::Str(func.name_at(name));
-                            if !a.has_own_property(o, key)? {
-                                a.create_data_property(o, key, Value::Undefined)?;
-                            }
-                        }
-                    }
-                    Insn::WithHas { obj, name } => {
-                        let o = regs[r(obj)];
-                        let key = func.name_at(name);
-                        let mut found = matches!(o.kind(), ValueKind::Object(x) if a.has_key(x, j8framework::Key::Str(key))?);
-                        if found {
-                            let u = a.get_symbol(o, a.realm.symbols.unscopables, o)?;
-                            if u.as_object().is_some() {
-                                let blocked = a.get_named(u, key)?;
-                                found = !a.to_boolean(blocked);
-                            }
-                        }
-                        *acc = found.into();
-                    }
-                    Insn::InitLexical { name } => {
-                        let name = func.name_at(name);
-                        let scope = a.realm.script_scope;
-                        let d = scope.borrow_mut(a.mc);
-                        let prop = d.get_own(name).map(|p| Property { slot: Slot::Data(*acc), ..p });
-                        if let Some(p) = prop {
-                            d.define(name, p);
-                        }
-                    }
-                    Insn::LdaEnv { depth, slot } => {
-                        *acc = Self::env_at(f.env, depth).load(usize::from(slot));
-                    }
-                    Insn::StaEnv { depth, slot } => Env::set(Self::env_at(f.env, depth), a.mc, usize::from(slot), *acc),
-                    Insn::PushEnv(n) => f.env = Some(Env::with_len(usize::from(n), f.env).alloc(a.mc)),
-                    Insn::PopEnv => f.env = Self::env_at(f.env, 0).parent,
-                    Insn::CloneEnv => {
-                        let e = Self::env_at(f.env, 0);
-                        let copy = Env::new(e.values(), e.parent);
-                        f.env = Some(copy.alloc(a.mc));
-                    }
-                    Insn::Binary(op, x) => binary!(op, regs[r(x)], *acc),
-                    Insn::BinarySmi(op, x, n) => binary!(op, regs[r(x)], Value::Number(f64::from(n))),
-                    Insn::BinaryReg(op, x, y) => binary!(op, regs[r(x)], regs[r(y)]),
-                    Insn::Compare(op, x) => compare!(op, regs[r(x)], *acc),
-                    Insn::CompareSmi(op, x, n) => compare!(op, regs[r(x)], Value::Number(f64::from(n))),
-                    Insn::CompareReg(op, x, y) => compare!(op, regs[r(x)], regs[r(y)]),
-                    Insn::Mov { dst, src } => {
-                        *acc = regs[r(src)];
-                        regs[r(dst)] = *acc;
-                    }
-                    Insn::IncReg(x) | Insn::DecReg(x) => {
-                        let d = if matches!(*insn, Insn::IncReg(_)) { 1 } else { -1 };
-                        *acc = if let Some(v) = regs[r(x)].as_number() { (v + f64::from(d)).into() } else { a.increment(regs[r(x)], d)? };
-                        regs[r(x)] = *acc;
-                    }
-                    Insn::Unary(op) => *acc = a.unary(op, *acc)?,
-                    Insn::ToNumeric => {
-                        if !acc.is_number() {
-                            *acc = match a.to_numeric(*acc)? {
-                                j8framework::Numeric::Number(x) => x.into(),
-                                j8framework::Numeric::BigInt(b) => Value::BigInt(b),
-                            }
-                        }
-                    }
-                    Insn::Inc => {
-                        *acc = if let Some(x) = acc.as_number() { (x + 1.0).into() } else { a.increment(*acc, 1)? };
-                    }
-                    Insn::Dec => {
-                        *acc = if let Some(x) = acc.as_number() { (x - 1.0).into() } else { a.increment(*acc, -1)? };
-                    }
-                    Insn::CreateRegExp { pattern, flags } => {
-                        let (p, fl) = (a.string(func.name_at(pattern)), a.string(func.name_at(flags)));
-                        let ctor = a.realm.regexp_ctor;
-                        *acc = a.call(ctor.into(), Value::Undefined, &[p.into(), fl.into()])?;
-                    }
-                    // A backward jump (target not after this instruction) means the loop went around again: if there is
-                    // a JIT tier, ask it whether to switch into machine code at the loop header
-                    Insn::Jump(l) => {
-                        let back = (l.0 as usize) < f.pc;
-                        f.pc = l.0 as usize;
-                        if back {
-                            if self.tier.is_some() {
-                                self.osr(a.platform, loaded, regs, f, acc, f.pc);
-                            }
-                            if Self::spent(budget) {
-                                return Ok(None);
-                            }
-                        }
-                    }
-                    Insn::JumpIfTrue(l) => {
-                        if a.to_boolean(*acc) {
-                            let back = (l.0 as usize) < f.pc;
-                            f.pc = l.0 as usize;
-                            if back {
-                                if self.tier.is_some() {
-                                    self.osr(a.platform, loaded, regs, f, acc, f.pc);
-                                }
-                                if Self::spent(budget) {
-                                    return Ok(None);
-                                }
-                            }
-                        }
-                    }
-                    Insn::JumpIfFalse(l) => {
-                        if !a.to_boolean(*acc) {
-                            let back = (l.0 as usize) < f.pc;
-                            f.pc = l.0 as usize;
-                            if back {
-                                if self.tier.is_some() {
-                                    self.osr(a.platform, loaded, regs, f, acc, f.pc);
-                                }
-                                if Self::spent(budget) {
-                                    return Ok(None);
-                                }
-                            }
-                        }
-                    }
-                    Insn::JumpIfNotNullish(l) => {
-                        if !acc.is_nullish() {
-                            f.pc = l.0 as usize;
-                        }
-                    }
-                    Insn::JumpIfNullish(l) => {
-                        if acc.is_nullish() {
-                            f.pc = l.0 as usize;
-                        }
-                    }
-                    Insn::JumpIfUndefined(l) => {
-                        if matches!((*acc).kind(), ValueKind::Undefined) {
-                            f.pc = l.0 as usize;
-                        }
-                    }
-                    Insn::JumpIfNotUndefined(l) => {
-                        if !matches!((*acc).kind(), ValueKind::Undefined) {
-                            f.pc = l.0 as usize;
-                        }
-                    }
-                    Insn::CreateRest(from) => *acc = a.array(f.args.get(usize::from(from)..).unwrap_or(&[]).to_vec()).into(),
-                    Insn::ArrayPush { arr } => Self::push(a, regs[r(arr)], [*acc]),
-                    Insn::ArrayHole { arr } => {
-                        if let Some(o) = regs[r(arr)].as_object() {
-                            let d = o.borrow_mut(a.mc);
-                            let len = d.array_length().unwrap_or(0);
-                            d.set_array_length(len + 1);
-                        }
-                    }
-                    Insn::ArraySpread { arr } => {
-                        let items = a.to_list(*acc)?;
-                        Self::push(a, regs[r(arr)], items);
-                    }
-                    Insn::CallSpread { callee, this, args } => {
-                        let level = depth + frames.len() + 1;
-                        if level >= STACK_LIMIT {
-                            return Err(a.throw(ErrorKind::Range, "Maximum call stack size exceeded"));
-                        }
-                        let list = Self::items(regs[r(args)]);
-                        match self.resolve(a, regs[r(callee)], regs[r(this)], list, level)? {
-                            Callee::Closure { closure, callee, this, args } => {
-                                let next = self.enter(a, regs, closure, callee, this, &args);
-                                frames.push(core::mem::replace(f, next));
-                                continue 'frame;
-                            }
-                            Callee::Done(v) => *acc = v,
-                        }
-                    }
-                    Insn::ConstructSpread { callee, args } => {
-                        let level = depth + frames.len() + 1;
-                        if level >= STACK_LIMIT {
-                            return Err(a.throw(ErrorKind::Range, "Maximum call stack size exceeded"));
-                        }
-                        let list = Self::items(regs[r(args)]);
-                        let c = regs[r(callee)];
-                        match self.prepare(a, regs, c, list, c, level)? {
-                            Prepared::Frame(next) => {
-                                frames.push(core::mem::replace(f, next));
-                                continue 'frame;
-                            }
-                            Prepared::Done(v) => *acc = v,
-                        }
-                    }
-                    Insn::SuperCallSpread { args } => {
-                        let list = Self::items(regs[r(args)]);
-                        *acc = Self::super_call(a, regs, f, &list)?;
-                    }
-                    Insn::CopyData { obj } => {
-                        if let Some(o) = regs[r(obj)].as_object() {
-                            a.copy_data(o, *acc, &[])?;
-                        }
-                    }
-                    Insn::ObjectRest { src, keys, count } => {
-                        let first = r(keys);
-                        let exclude = regs[first..first + usize::from(count)].iter().filter(|k| !matches!(k.kind(), ValueKind::Symbol(_))).map(|&k| a.property_key(k)).collect::<Result<Vec<_>, _>>()?;
-                        let o = a.object();
-                        a.copy_data(o, regs[r(src)], &exclude)?;
-                        *acc = o.into();
-                    }
-                    Insn::CreateClosure(n) => {
-                        let mut closure = Closure::new(FuncId(loaded.base + n), f.env);
-                        if self.function(closure.func).func.kind == FunctionKind::Arrow {
-                            closure.home = Self::current(regs, f).and_then(|c| c.home);
-                        }
-                        *acc = self.function_object(a, closure, a.realm.function_proto).into();
-                    }
-                    Insn::CreateMethod { func: n, home } => {
-                        let mut closure = Closure::new(FuncId(loaded.base + n), f.env);
-                        if let Some(h) = regs[r(home)].as_object() {
-                            closure.home = Some(h);
-                        }
-                        *acc = self.function_object(a, closure, a.realm.function_proto).into();
-                    }
-                    Insn::CreateClass { func: n, parent, proto } => {
-                        let (proto_parent, ctor_parent) = Self::class_parents(a, parent.map(|p| regs[r(p)]))?;
-                        let p = ObjectData { proto: proto_parent, ..ObjectData::default() }.alloc(a.mc);
-                        let mut closure = Closure::new(FuncId(loaded.base + n), f.env);
-                        closure.home = Some(p);
-                        let ctor = self.function_object(a, closure, ctor_parent);
-                        ctor.borrow_mut(a.mc).define("prototype", Property { slot: Slot::Data(p.into()), enumerable: false, writable: false, configurable: false });
-                        p.borrow_mut(a.mc).define("constructor", Property::hidden(ctor.into()));
-                        regs[r(proto)] = p.into();
-                        *acc = ctor.into();
-                    }
-                    Insn::SetClassFields { ctor } => {
-                        if let (ValueKind::Object(c), ValueKind::Object(init)) = (regs[r(ctor)].kind(), (*acc).kind())
-                            && let ObjectKind::Function(closure) = &mut c.borrow_mut(a.mc).kind
-                        {
-                            closure.fields = Some(init);
-                        }
-                    }
-                    Insn::DefineNamed { obj, name, kind, enumerable } => {
-                        let ic = &loaded.ics[f.pc - 1];
-                        match regs[r(obj)].kind() {
-                            ValueKind::Object(o) if kind == PropertyKind::Data => {
-                                if !ic.set(a.mc, o, *acc, false) {
-                                    let before = ic::Before::from(o);
-                                    Self::define(a, regs[r(obj)], func.name_at(name), kind, enumerable, *acc)?;
-                                    ic.fill_set(o, func.name_at(name), before, false);
-                                }
-                            }
-                            target => Self::define(a, Value::from(target), func.name_at(name), kind, enumerable, *acc)?,
-                        }
-                    }
-                    Insn::DefineKeyed { obj, key, kind, enumerable } => {
-                        if let Some(o) = regs[r(obj)].as_object() {
-                            let k = regs[r(key)];
-                            match (kind, (*acc).kind()) {
-                                (PropertyKind::Data, v) => a.define_keyed(o, k, Property { slot: Slot::Data(Value::from(v)), enumerable, writable: true, configurable: true })?,
-                                (PropertyKind::Getter | PropertyKind::Setter, ValueKind::Object(func)) => a.define_accessor_keyed(o, k, func, kind == PropertyKind::Setter, enumerable)?,
-                                _ => {}
-                            }
-                        }
-                    }
-                    Insn::GetSuper { this, name } => {
-                        let base = Self::super_base(a, regs, f)?;
-                        *acc = a.get(base, func.name_at(name), regs[r(this)])?;
-                    }
-                    Insn::GetSuperKeyed { this } => {
-                        let base = Self::super_base(a, regs, f)?;
-                        let k = a.property_key(*acc)?;
-                        *acc = a.get(base, &k, regs[r(this)])?;
-                    }
-                    Insn::SuperCall { args, argc } => {
-                        let first = r(args);
-                        let list = regs[first..first + usize::from(argc)].to_vec();
-                        *acc = Self::super_call(a, regs, f, &list)?;
-                    }
-                    Insn::SuperCallForward => {
-                        let list = core::mem::take(&mut f.args).into_vec();
-                        *acc = Self::super_call(a, regs, f, &list)?;
-                    }
-                    Insn::Construct { callee, args, argc } => {
-                        let level = depth + frames.len() + 1;
-                        if level >= STACK_LIMIT {
-                            return Err(a.throw(ErrorKind::Range, "Maximum call stack size exceeded"));
-                        }
-                        let first = r(args);
-                        let c = regs[r(callee)];
-                        let list = regs[first..first + usize::from(argc)].to_vec();
-                        match self.prepare(a, regs, c, list, c, level)? {
-                            Prepared::Frame(next) => {
-                                frames.push(core::mem::replace(f, next));
-                                continue 'frame;
-                            }
-                            Prepared::Done(v) => *acc = v,
-                        }
-                    }
-                    Insn::InstanceOf(x) => *acc = a.instance_of(regs[r(x)], *acc)?.into(),
-                    Insn::In(x) => *acc = a.has_keyed(*acc, regs[r(x)])?.into(),
-                    Insn::DeleteNamed { obj, name, strict } => {
-                        let ok = a.delete(regs[r(obj)], func.name_at(name))?;
-                        Self::check_delete(a, ok, strict)?;
-                        *acc = ok.into();
-                    }
-                    Insn::DeleteKeyed { obj, strict } => {
-                        let ok = a.delete_keyed(regs[r(obj)], *acc)?;
-                        Self::check_delete(a, ok, strict)?;
-                        *acc = ok.into();
-                    }
-                    Insn::CreateObject { capacity } => *acc = a.object_with(usize::from(capacity)).into(),
-                    Insn::CreateArray { first, count } => *acc = a.array(regs[r(first)..r(first) + usize::from(count)].to_vec()).into(),
-                    Insn::GetNamed { obj, name } => {
-                        let ic = &loaded.ics[f.pc - 1];
-                        *acc = match regs[r(obj)].kind() {
-                            ValueKind::Object(o) => match ic.get(o) {
-                                Some(v) => v,
-                                None => {
-                                    let v = a.get_named(Value::Object(o), func.name_at(name))?;
-                                    ic.fill_get(o, func.name_at(name));
-                                    v
-                                }
-                            },
-                            target => a.get_named(Value::from(target), func.name_at(name))?,
-                        };
-                    }
-                    Insn::SetNamed { obj, name, strict } => {
-                        let ic = &loaded.ics[f.pc - 1];
-                        match regs[r(obj)].kind() {
-                            ValueKind::Object(o) => {
-                                if !ic.set(a.mc, o, *acc, true) {
-                                    let before = ic::Before::from(o);
-                                    a.put_named(Value::Object(o), func.name_at(name), *acc, strict)?;
-                                    ic.fill_set(o, func.name_at(name), before, true);
-                                }
-                            }
-                            target => a.put_named(Value::from(target), func.name_at(name), *acc, strict)?,
-                        }
-                    }
-                    Insn::GetKeyed { obj } => *acc = a.get_keyed(regs[r(obj)], *acc)?,
-                    Insn::SetKeyed { obj, key, strict } => a.put_keyed(regs[r(obj)], regs[r(key)], *acc, strict)?,
-                    Insn::CallEval { callee, args, argc, scope, .. } if matches!(regs[r(callee)].kind(), ValueKind::Object(o) if Gc::ptr_eq(o, a.realm.eval)) => {
-                        let first = if argc == 0 { None } else { Some(regs[r(args)]) };
-                        *acc = match first.map(Value::kind) {
-                            None => Value::Undefined,
-                            Some(ValueKind::String(s)) => {
-                                let src = alloc::string::String::from(&**s);
-                                let table = &func.scopes[usize::from(scope)];
-                                self.direct_eval(a, &src, table, f.env, func.mode == Mode::Strict, depth + frames.len() + 1)?
-                            }
-                            Some(v) => Value::from(v),
-                        };
-                    }
-                    Insn::Call { callee, this, args, argc } | Insn::CallEval { callee, this, args, argc, .. } => {
-                        let level = depth + frames.len() + 1;
-                        if level >= STACK_LIMIT {
-                            return Err(a.throw(ErrorKind::Range, "Maximum call stack size exceeded"));
-                        }
-                        let first = r(args);
-                        // Fast path: the callee is an ordinary JS function (not a class constructor / generator /
-                        // async), so open a frame directly from the registers
-                        let target = regs[r(callee)];
-                        if matches!(*insn, Insn::Call { .. })
-                            && let Some((c, loaded)) = self.plain_closure(target)
-                        {
-                            let mut next = Self::enter_regs(a, regs, &loaded.func, c, target, regs[r(this)], first, usize::from(argc));
-                            if !self.tiered(a.platform, loaded, regs, &mut next, acc) {
-                                frames.push(core::mem::replace(f, next));
-                                entering = Some(loaded);
-                                continue 'frame;
-                            }
-                            continue;
-                        }
-                        // Fast path: the callee is a host function; pass the arguments directly as a slice of the
-                        // register file, without copying into a Vec or going through call resolution
-                        let native = target.as_object().and_then(|o| o.native()).filter(|n| matches!(*insn, Insn::Call { .. }) && n.forward == j8framework::Forward::No);
-                        if let Some(n) = native {
-                            let saved = self.depth.replace(level);
-                            let outer = core::mem::replace(&mut a.new_target, Value::Undefined);
-                            let v = (n.f)(a, regs[r(this)], &regs[first..first + usize::from(argc)]);
-                            a.new_target = outer;
-                            self.depth.set(saved);
-                            *acc = v?;
-                            continue;
-                        }
-                        let list = regs[first..first + usize::from(argc)].to_vec();
-                        match self.resolve(a, regs[r(callee)], regs[r(this)], list, level)? {
-                            Callee::Closure { closure, callee, this, args } => {
-                                let next = self.enter(a, regs, closure, callee, this, &args);
-                                frames.push(core::mem::replace(f, next));
-                                continue 'frame;
-                            }
-                            Callee::Done(v) => *acc = v,
-                        }
-                    }
-                    Insn::PushHandler(target) => f.handlers.push(Handler { target: target.0, env: f.env }),
-                    Insn::PopHandler => _ = f.handlers.pop(),
-                    Insn::Throw => return Err(a.throw_value(*acc)),
-                    Insn::Return => {
-                        if !matches!(f.new_target.kind(), ValueKind::Undefined) {
-                            *acc = self.construct_result(a, f, *acc)?;
-                        }
-                        match frames.pop() {
-                            Some(caller) => {
-                                regs.truncate(f.base);
-                                *f = caller;
-                                continue 'frame;
-                            }
-                            None => return Ok(Some(Outcome::Return(*acc))),
-                        }
-                    }
-                    Insn::Yield { mode } | Insn::Await { mode } => {
-                        debug_assert!(frames.is_empty() && f.base == 0, "a coroutine suspends from its own bottom frame");
-                        let saved = Suspended {
-                            func: f.func,
-                            pc: f.pc,
-                            regs: core::mem::take(regs),
-                            env: f.env,
-                            handlers: core::mem::take(&mut f.handlers).into_vec().into_iter().map(|h| (h.target, h.env)).collect(),
-                            args: core::mem::take(&mut f.args).into_vec(),
-                            mode: Some(mode.0),
-                        };
-                        return Ok(Some(Outcome::Suspend { value: *acc, awaiting: matches!(*insn, Insn::Await { .. }), saved }));
-                    }
-                    Insn::GetIterator { dst } => {
-                        let rec = a.get_iterator(*acc)?;
-                        let d = r(dst);
-                        regs[d] = rec.iterator;
-                        regs[d + 1] = rec.next;
-                        regs[d + 2] = false.into();
-                    }
-                    Insn::IteratorNext { iter } => {
-                        let d = r(iter);
-                        *acc = Value::Undefined;
-                        if !a.to_boolean(regs[d + 2]) {
-                            // An error while stepping also counts as done (`return` is not called again)
-                            regs[d + 2] = true.into();
-                            if let Some(v) = a.iterator_step(IterRecord { iterator: regs[d], next: regs[d + 1] })? {
-                                regs[d + 2] = false.into();
-                                *acc = v;
-                            }
-                        }
-                    }
-                    Insn::IteratorRest { iter } => {
-                        let d = r(iter);
-                        let mut rest = Vec::new();
-                        if !a.to_boolean(regs[d + 2]) {
-                            regs[d + 2] = true.into();
-                            let rec = IterRecord { iterator: regs[d], next: regs[d + 1] };
-                            while let Some(v) = a.iterator_step(rec)? {
-                                rest.push(v);
-                            }
-                        }
-                        *acc = a.array(rest).into();
-                    }
-                    Insn::IteratorClose { iter } => {
-                        let d = r(iter);
-                        if !a.to_boolean(regs[d + 2]) {
-                            regs[d + 2] = true.into();
-                            a.iterator_close(regs[d])?;
-                        }
-                    }
-                    Insn::IteratorCloseQuiet { iter } => {
-                        let d = r(iter);
-                        if !a.to_boolean(regs[d + 2]) {
-                            regs[d + 2] = true.into();
-                            // The original exception takes precedence: `return` being non-callable or throwing itself
-                            // is ignored
-                            match a.iterator_close(regs[d]) {
-                                Ok(()) | Err(Error::Exception(_)) => {}
-                                Err(e) => return Err(e),
-                            }
-                        }
-                    }
-                    Insn::CreatePrivateName { desc } => *acc = Value::Symbol(a.private_name(func.name_at(desc))),
-                    Insn::GetPrivate { obj } => *acc = a.private_get(regs[r(obj)], Self::private_key(*acc))?,
-                    Insn::SetPrivate { obj, key } => a.private_set(regs[r(obj)], Self::private_key(regs[r(key)]), *acc)?,
-                    Insn::DefinePrivate { obj, key, kind, writable } => {
-                        let slot = match (kind, (*acc).kind()) {
-                            (PropertyKind::Getter, ValueKind::Object(f)) => Slot::Accessor { get: Some(f), set: None },
-                            (PropertyKind::Setter, ValueKind::Object(f)) => Slot::Accessor { get: None, set: Some(f) },
-                            (_, v) => Slot::Data(Value::from(v)),
-                        };
-                        let prop = Property { slot, enumerable: false, writable, configurable: false };
-                        a.private_define(regs[r(obj)], Self::private_key(regs[r(key)]), prop)?;
-                    }
-                    Insn::HasPrivate { obj } => *acc = a.private_has(regs[r(obj)], Self::private_key(*acc))?.into(),
-                    Insn::ToPropertyKey => {
-                        if !matches!((*acc).kind(), ValueKind::Symbol(_)) {
-                            *acc = a.property_key(*acc)?.into();
-                        }
-                    }
-                    Insn::GetAsyncIterator { dst } => {
-                        let d = r(dst);
-                        let v = *acc;
-                        let method = if v.is_nullish() { Value::Undefined } else { a.get_symbol(v, a.realm.symbols.async_iterator, v)? };
-                        let (iterator, next, sync) = if method.is_nullish() {
-                            let rec = a.get_iterator(v)?;
-                            (rec.iterator, rec.next, true)
-                        } else {
-                            let it = a.call(method, v, &[])?;
-                            if it.as_object().is_none() {
-                                return Err(a.throw(ErrorKind::Type, "Result of the Symbol.asyncIterator method is not an object"));
-                            }
-                            let next = a.get_named(it, "next")?;
-                            (it, next, false)
-                        };
-                        regs[d] = iterator;
-                        regs[d + 1] = next;
-                        regs[d + 2] = false.into();
-                        regs[d + 3] = sync.into();
-                    }
-                    Insn::IteratorCall { iter } => {
-                        let d = r(iter);
-                        *acc = a.call(regs[d + 1], regs[d], &[])?;
-                    }
-                    Insn::IteratorResult { iter } => {
-                        let d = r(iter);
-                        let result = *acc;
-                        if result.as_object().is_none() {
-                            regs[d + 2] = true.into();
-                            let what = a.to_string(result)?;
-                            return Err(a.throw(ErrorKind::Type, &alloc::format!("Iterator result {} is not an object", &**what)));
-                        }
-                        let done = a.get_named(result, "done")?;
-                        if a.to_boolean(done) {
-                            regs[d + 2] = true.into();
-                            *acc = Value::Undefined;
-                        } else {
-                            *acc = a.get_named(result, "value")?;
-                        }
-                    }
-                    Insn::AsyncIteratorReturn { iter } => {
-                        let d = r(iter);
-                        *acc = Value::Undefined;
-                        if !a.to_boolean(regs[d + 2]) {
-                            regs[d + 2] = true.into();
-                            let ret = a.get_named(regs[d], "return")?;
-                            if !ret.is_nullish() {
-                                *acc = a.call(ret, regs[d], &[])?;
-                            }
-                        }
-                    }
-                    Insn::LdaNewTarget => *acc = f.new_target,
-                    Insn::CreateArguments => *acc = Self::arguments(a, regs, f, func.mode.into(), &func.mapped_params)?,
-                    Insn::GetTemplateObject { site, first, count } => {
-                        let key = (f.func.0, site);
-                        let cached = a.realm.templates.get().get(&key).copied();
-                        *acc = match cached {
-                            Some(o) => o.into(),
-                            None => {
-                                let (start, n) = (r(first), usize::from(count));
-                                let cooked = a.array(regs[start..start + n].to_vec());
-                                let raw = a.array(regs[start + n..start + 2 * n].to_vec());
-                                let frozen = |v: Value<'gc>| Property { slot: Slot::Data(v), enumerable: false, writable: false, configurable: false };
-                                cooked.borrow_mut(a.mc).define("raw", frozen(raw.into()));
-                                // Another thread may have cached this site meanwhile: then its object wins
-                                a.realm
-                                    .templates
-                                    .update_with(a.mc, |m| {
-                                        let mut m = m.clone();
-                                        let o = *m.entry(key).or_insert(cooked);
-                                        (m, o)
-                                    })
-                                    .into()
-                            }
-                        };
-                    }
-                    Insn::ForInKeys => {
-                        let keys = a.for_in_keys(*acc)?;
-                        *acc = a.array(keys).into();
-                    }
-                    Insn::DelegateStep { iter, mode } => {
-                        let d = r(iter);
-                        let it = regs[d];
-                        let result = match Self::mode(regs[r(mode)]) {
-                            Resume::Next => a.call(regs[d + 1], it, &[*acc])?,
-                            Resume::Throw => {
-                                let th = a.get_named(it, "throw")?;
-                                if th.is_nullish() {
-                                    a.iterator_close(it)?;
-                                    return Err(a.throw(ErrorKind::Type, "The iterator does not provide a 'throw' method"));
-                                }
-                                a.call(th, it, &[*acc])?
-                            }
-                            Resume::Return => {
-                                let ret = a.get_named(it, "return")?;
-                                if ret.is_nullish() { a.iter_result(*acc, true).into() } else { a.call(ret, it, &[*acc])? }
-                            }
-                        };
-                        if result.as_object().is_none() {
-                            return Err(a.throw(ErrorKind::Type, "Iterator result is not an object"));
-                        }
-                        *acc = result;
-                    }
-                }
+            // SAFETY: the frame runs on this executor
+            let loaded: &Loaded = unsafe { st.f().loaded.get() };
+            let mut cx = threaded::Cx { exe: self, a, st, loaded, budget, depth };
+            match Self::threaded(&mut cx) {
+                threaded::Exit::Frame => {}
+                threaded::Exit::Done(o) => return Ok(Some(o)),
+                threaded::Exit::Throw(e) => return Err(e),
+                #[cfg(not(tail_calls))]
+                threaded::Exit::Next(..) => unreachable!("the loop in `threaded` takes these"),
             }
         }
     }
+
+    /// Enters a frame for a call from the current one (the caller resumes at its next instruction)
+    #[inline]
+    fn push_frame(st: &mut State<'_>, next: Frame) {
+        st.frames.push(next);
+    }
+
+    /// A call from bytecode: a JS closure gets a frame, host functions run here
+    #[expect(clippy::too_many_arguments, reason = "the parts of a call")]
+    fn call_from<'gc>(&self, a: &mut Agent<'gc, '_>, st: &mut State<'gc>, callee: Value<'gc>, this: Value<'gc>, args: Args<'_, 'gc>, level: usize) -> Result<Flow<'gc>, Error> {
+        if level >= STACK_LIMIT {
+            return Err(a.throw(ErrorKind::Range, "Maximum call stack size exceeded"));
+        }
+        // An ordinary JS function: a frame straight from the arguments
+        if let ValueKind::Object(o) = callee.kind()
+            && let Some(c) = o.closure()
+        {
+            let l = self.function(c.func);
+            if !(l.class_constructor || l.generator || l.asynchronous) {
+                let next = self.open_with(a, &mut st.regs, l, c, callee, this, args);
+                Self::push_frame(st, next);
+                return Ok(Flow::Frame);
+            }
+        }
+        let args = args.to_vec(&st.regs);
+        match self.resolve(a, callee, this, args, level)? {
+            Callee::Closure { closure, callee, this, args } => {
+                let next = self.open(a, &mut st.regs, closure, callee, this, &args);
+                Self::push_frame(st, next);
+                Ok(Flow::Frame)
+            }
+            Callee::Done(v) => {
+                st.acc = v;
+                Ok(Flow::Next)
+            }
+        }
+    }
+
+    fn construct_from<'gc>(&self, a: &mut Agent<'gc, '_>, st: &mut State<'gc>, callee: Value<'gc>, args: Vec<Value<'gc>>, new_target: Value<'gc>, level: usize) -> Result<Flow<'gc>, Error> {
+        if level >= STACK_LIMIT {
+            return Err(a.throw(ErrorKind::Range, "Maximum call stack size exceeded"));
+        }
+        match self.prepare(a, &mut st.regs, callee, args, new_target, level)? {
+            Prepared::Frame(next) => {
+                Self::push_frame(st, next);
+                Ok(Flow::Frame)
+            }
+            Prepared::Done(v) => {
+                st.acc = v;
+                Ok(Flow::Next)
+            }
+        }
+    }
+
+    /// The value a constant pool entry loads as (`LdaConstant`)
+    fn constant<'gc>(a: &Agent<'gc, '_>, c: &Constant) -> Value<'gc> {
+        match c {
+            Constant::Number(x) => Value::Number(*x),
+            Constant::String(s) => a.string(s).into(),
+            Constant::BigInt(digits) => a.bigint(Agent::parse_bigint(digits).unwrap_or_default()),
+            Constant::AsyncIteratorSymbol => a.realm.symbols.async_iterator.into(),
+            _ => Value::Undefined,
+        }
+    }
+
+    fn literal<'gc>(a: &Agent<'gc, '_>, v: &LiteralValue) -> Value<'gc> {
+        match v {
+            LiteralValue::Number(x) => Value::Number(*x),
+            LiteralValue::String(s) => a.string(s).into(),
+            LiteralValue::Bool(b) => Value::Bool(*b),
+            LiteralValue::Null => Value::Null,
+            LiteralValue::Undefined | LiteralValue::Hole => Value::Undefined,
+        }
+    }
+
+    /// A string constant's text
+    fn name_at(loaded: &Loaded, k: OperandValue) -> &str {
+        match loaded.func.bytecode.constants.get(usize::try_from(k).unwrap_or(usize::MAX)) {
+            Some(Constant::String(s)) => s,
+            _ => "",
+        }
+    }
+
+    #[expect(clippy::too_many_lines, reason = "one arm per bytecode")]
+    fn step<'gc>(&self, a: &mut Agent<'gc, '_>, st: &mut State<'gc>, loaded: &Loaded, d: &Insn, level: usize, budget: &mut Budget<'_>) -> Result<Flow<'gc>, Error> {
+        let o = &d.operands;
+        let State { regs, frames, acc, message } = st;
+        let f = frames.last_mut().expect("a running frame");
+        macro_rules! r {
+            ($i:expr) => {
+                Self::reg(regs, f, o[$i])
+            };
+        }
+        let strict = loaded.func.strict;
+        // Two numbers inline; anything else through the agent
+        macro_rules! arith {
+            ($l:expr, $r:expr, $op:ident, $sym:tt) => {{
+                let (l, r) = ($l, $r);
+                *acc = match (l.as_number(), r.as_number()) {
+                    (Some(x), Some(y)) => Value::Number(x $sym y),
+                    _ => a.binary(BinaryOp::$op, l, r)?,
+                };
+            }};
+        }
+        macro_rules! relational {
+            ($op:ident, $sym:tt) => {{
+                let l = r!(0);
+                *acc = match (l.as_number(), acc.as_number()) {
+                    (Some(x), Some(y)) => Value::Bool(x $sym y),
+                    _ => Value::Bool(a.compare(CompareOp::$op, l, *acc)?),
+                };
+            }};
+        }
+        let binary = |op: BinaryOp, a: &mut Agent<'gc, '_>, l: Value<'gc>, r: Value<'gc>| -> Result<Value<'gc>, Error> {
+            match (l.as_number(), r.as_number()) {
+                (Some(x), Some(y)) => Ok(op.numbers(x, y).into()),
+                _ => a.binary(op, l, r),
+            }
+        };
+        let compare = |op: CompareOp, a: &mut Agent<'gc, '_>, l: Value<'gc>, r: Value<'gc>| -> Result<Value<'gc>, Error> {
+            match (l.as_number(), r.as_number()) {
+                (Some(x), Some(y)) => Ok(op.numbers(x, y).into()),
+                _ => a.compare(op, l, r).map(Value::Bool),
+            }
+        };
+        use Bytecode as B;
+        match d.bytecode {
+            B::LdaZero => *acc = Value::Number(0.0),
+            B::LdaSmi => *acc = Value::Number(o[0] as f64),
+            B::LdaUndefined => *acc = Value::Undefined,
+            B::LdaNull => *acc = Value::Null,
+            B::LdaTheHole => *acc = Value::Uninit,
+            B::LdaTrue => *acc = Value::Bool(true),
+            B::LdaFalse => *acc = Value::Bool(false),
+            B::LdaConstant => {
+                let k = usize::try_from(o[0]).unwrap_or(0);
+                *acc = match &loaded.func.bytecode.constants[k] {
+                    // A class boilerplate goes to `DefineClass` as its index in the constant pool
+                    Constant::Class(_) => Value::Number(k as f64),
+                    c => Self::constant(a, c),
+                };
+            }
+            B::Ldar => *acc = r!(0),
+            B::Star => Self::set_reg(regs, f, o[0], *acc),
+            B::Mov => {
+                let v = r!(0);
+                Self::set_reg(regs, f, o[1], v);
+            }
+            B::LdaGlobal | B::LdaGlobalInsideTypeof => {
+                let name = Self::name_at(loaded, o[0]);
+                *acc = self.global_load(a, &loaded.globals[usize::try_from(o[1]).unwrap_or(0)], name, d.bytecode == B::LdaGlobalInsideTypeof)?;
+            }
+            B::StaGlobal => {
+                let name = Self::name_at(loaded, o[0]);
+                let slot = usize::try_from(o[1]).unwrap_or(0);
+                let strict_slot = loaded.func.bytecode.feedback.get(slot) == Some(&j8bytecode::FeedbackSlotKind::StoreGlobalStrict);
+                self.global_store(a, &loaded.globals[slot], name, *acc, strict_slot || strict)?;
+            }
+            B::LdaCurrentContextSlot | B::LdaCurrentContextSlotNoCell | B::LdaImmutableCurrentContextSlot => {
+                let e = f.env(regs).ok_or_else(|| a.throw(ErrorKind::Reference, "no context"))?;
+                *acc = e.load(Self::env_index(o[0]));
+            }
+            B::LdaContextSlot | B::LdaContextSlotNoCell | B::LdaImmutableContextSlot => {
+                let e = Self::context_at(a, r!(0), o[2])?;
+                *acc = e.load(Self::env_index(o[1]));
+            }
+            B::StaCurrentContextSlot | B::StaCurrentContextSlotNoCell => {
+                let e = f.env(regs).ok_or_else(|| a.throw(ErrorKind::Reference, "no context"))?;
+                Env::set(e, a.mc, Self::env_index(o[0]), *acc);
+            }
+            B::StaContextSlot | B::StaContextSlotNoCell => {
+                let e = Self::context_at(a, r!(0), o[2])?;
+                Env::set(e, a.mc, Self::env_index(o[1]), *acc);
+            }
+            B::PushContext => {
+                let cur = f.env(regs).map_or(Value::Undefined, Value::context);
+                Self::set_reg(regs, f, o[0], cur);
+                f.set_env(regs, acc.as_context());
+            }
+            B::PopContext => {
+                let e = r!(0).as_context();
+                f.set_env(regs, e);
+            }
+            B::CreateFunctionContext | B::CreateEvalContext => {
+                let shape = loaded.scope_shape(o[0]).map(|(s, _)| s);
+                let n = usize::try_from(o[1]).unwrap_or(0);
+                let extension = loaded.extension.then(|| ObjectData::default().alloc(a.mc));
+                *acc = Value::context(Env::context(n, Value::Undefined, f.env(regs), shape, extension).alloc(a.mc));
+            }
+            B::CreateBlockContext => *acc = loaded.block_context(a, o[0], f.env(regs)),
+            B::CreateCatchContext => {
+                let shape = loaded.scope_shape(o[1]).map(|(s, _)| s);
+                let e = Env::context(1, r!(0), f.env(regs), shape, None).alloc(a.mc);
+                *acc = Value::context(e);
+            }
+            B::CreateWithContext => {
+                let obj = r!(0).as_object();
+                let shape = Some(self.with_shape.get().unwrap_or_else(|| {
+                    let id = ShapeId(u32::try_from(self.context_shapes.push(ContextShape { kind: ContextKind::With, names: Box::new([]) })).expect("fewer than 2^32 context shapes"));
+                    self.with_shape.set(Some(id));
+                    id
+                }));
+                *acc = Value::context(Env::context(0, Value::Undefined, f.env(regs), shape, obj).alloc(a.mc));
+            }
+            B::LdaLookupSlot | B::LdaLookupSlotInsideTypeof | B::LdaLookupGlobalSlot | B::LdaLookupGlobalSlotInsideTypeof | B::LdaLookupContextSlot | B::LdaLookupContextSlotInsideTypeof | B::LdaLookupContextSlotNoCell | B::LdaLookupContextSlotNoCellInsideTypeof => {
+                let name = Self::name_at(loaded, o[0]);
+                let inside = matches!(d.bytecode, B::LdaLookupSlotInsideTypeof | B::LdaLookupGlobalSlotInsideTypeof | B::LdaLookupContextSlotInsideTypeof | B::LdaLookupContextSlotNoCellInsideTypeof);
+                *acc = self.lookup_load(a, f.env(regs), name, inside)?;
+            }
+            B::StaLookupSlot => {
+                let name = Self::name_at(loaded, o[0]);
+                let s = u8::try_from(o[1]).unwrap_or(0) & j8bytecode::StoreLookupSlotFlags::STRICT != 0;
+                self.lookup_store(a, f.env(regs), name, *acc, s)?;
+            }
+            B::GetNamedProperty => {
+                let obj = r!(0);
+                let name = Self::name_at(loaded, o[1]);
+                let ic = &loaded.ics[usize::try_from(o[2]).unwrap_or(0)];
+                *acc = match obj.kind() {
+                    ValueKind::Object(ob) => match ic.get(ob) {
+                        Some(v) => v,
+                        None => {
+                            let v = a.get_named(obj, name)?;
+                            ic.fill_get(ob, name);
+                            v
+                        }
+                    },
+                    _ => a.get_named(obj, name)?,
+                };
+            }
+            B::SetNamedProperty => {
+                let obj = r!(0);
+                let name = Self::name_at(loaded, o[1]);
+                let slot = usize::try_from(o[2]).unwrap_or(0);
+                let s = loaded.func.bytecode.feedback.get(slot) == Some(&j8bytecode::FeedbackSlotKind::SetNamedStrict);
+                let ic = &loaded.ics[slot];
+                match obj.kind() {
+                    ValueKind::Object(ob) => {
+                        if !ic.set(a.mc, ob, *acc, true) {
+                            let before = ic::Before::from(ob);
+                            a.put_named(obj, name, *acc, s)?;
+                            ic.fill_set(ob, name, before, true);
+                        }
+                    }
+                    _ => a.put_named(obj, name, *acc, s)?,
+                }
+            }
+            B::DefineNamedOwnProperty => {
+                let name = Self::name_at(loaded, o[1]);
+                if let Some(ob) = r!(0).as_object() {
+                    let ic = &loaded.ics[usize::try_from(o[2]).unwrap_or(0)];
+                    if !ic.set(a.mc, ob, *acc, false) {
+                        let before = ic::Before::from(ob);
+                        a.define(ob, name, Property::data(*acc))?;
+                        ic.fill_set(ob, name, before, false);
+                    }
+                }
+            }
+            B::GetKeyedProperty => *acc = a.get_keyed(r!(0), *acc)?,
+            B::SetKeyedProperty => {
+                let slot = usize::try_from(o[2]).unwrap_or(0);
+                let s = loaded.func.bytecode.feedback.get(slot) == Some(&j8bytecode::FeedbackSlotKind::SetKeyedStrict);
+                a.put_keyed(r!(0), r!(1), *acc, s)?;
+            }
+            B::DefineKeyedOwnProperty | B::DefineKeyedOwnPropertyInLiteral | B::StaInArrayLiteral => {
+                // V8's `kSetFunctionName`: an anonymous function value is named after the (computed) key
+                if d.bytecode != B::StaInArrayLiteral
+                    && o[2] & SET_FUNCTION_NAME != 0
+                    && let Some(fo) = acc.as_object()
+                {
+                    a.set_function_name(fo, r!(1), None)?;
+                }
+                if let Some(ob) = r!(0).as_object() {
+                    a.define_keyed(ob, r!(1), Property::data(*acc))?;
+                }
+            }
+            B::DeletePropertyStrict | B::DeletePropertySloppy => {
+                let ok = a.delete_keyed(r!(0), *acc)?;
+                if d.bytecode == B::DeletePropertyStrict && !ok {
+                    return Err(a.throw(ErrorKind::Type, "Cannot delete a non-configurable property"));
+                }
+                *acc = Value::Bool(ok);
+            }
+            B::Add => arith!(r!(0), *acc, Add, +),
+            B::Sub => arith!(r!(0), *acc, Sub, -),
+            B::Mul => arith!(r!(0), *acc, Mul, *),
+            B::Div => arith!(r!(0), *acc, Div, /),
+            B::AddSmi => arith!(*acc, Value::Number(o[0] as f64), Add, +),
+            B::SubSmi => arith!(*acc, Value::Number(o[0] as f64), Sub, -),
+            B::MulSmi => arith!(*acc, Value::Number(o[0] as f64), Mul, *),
+            B::DivSmi => arith!(*acc, Value::Number(o[0] as f64), Div, /),
+            B::Mod | B::Exp | B::BitwiseOr | B::BitwiseXor | B::BitwiseAnd | B::ShiftLeft | B::ShiftRight | B::ShiftRightLogical => {
+                *acc = binary(Self::binary_op(d.bytecode), a, r!(0), *acc)?;
+            }
+            B::ModSmi | B::ExpSmi | B::BitwiseOrSmi | B::BitwiseXorSmi | B::BitwiseAndSmi | B::ShiftLeftSmi | B::ShiftRightSmi | B::ShiftRightLogicalSmi => {
+                *acc = binary(Self::binary_op(d.bytecode), a, *acc, Value::Number(o[0] as f64))?;
+            }
+            B::Inc => *acc = if let Some(x) = acc.as_number() { (x + 1.0).into() } else { a.increment(*acc, 1)? },
+            B::Dec => *acc = if let Some(x) = acc.as_number() { (x - 1.0).into() } else { a.increment(*acc, -1)? },
+            B::Negate => *acc = a.unary(j8framework::UnaryOp::Neg, *acc)?,
+            B::BitwiseNot => *acc = a.unary(j8framework::UnaryOp::BitNot, *acc)?,
+            B::TypeOf => *acc = a.unary(j8framework::UnaryOp::Typeof, *acc)?,
+            B::LogicalNot | B::ToBooleanLogicalNot => *acc = Value::Bool(!a.to_boolean(*acc)),
+            B::ToBoolean => *acc = Value::Bool(a.to_boolean(*acc)),
+            B::ToNumber => {
+                if !acc.is_number() {
+                    *acc = a.to_number(*acc)?.into();
+                }
+            }
+            B::ToNumeric => {
+                if !acc.is_number() {
+                    *acc = match a.to_numeric(*acc)? {
+                        j8framework::Numeric::Number(x) => x.into(),
+                        j8framework::Numeric::BigInt(b) => Value::BigInt(b),
+                    }
+                }
+            }
+            B::ToName => {
+                if !matches!(acc.kind(), ValueKind::Symbol(_)) {
+                    *acc = a.property_key(*acc)?.into();
+                }
+            }
+            B::ToString => *acc = a.to_string(*acc)?.into(),
+            B::ToObject => {
+                let ob = a.to_object(*acc)?;
+                Self::set_reg(regs, f, o[0], ob.into());
+            }
+            B::TestLessThan => relational!(Lt, <),
+            B::TestGreaterThan => relational!(Gt, >),
+            B::TestLessThanOrEqual => relational!(Le, <=),
+            B::TestGreaterThanOrEqual => relational!(Ge, >=),
+            B::TestEqual | B::TestEqualStrict => {
+                let op = if d.bytecode == B::TestEqual { CompareOp::Eq } else { CompareOp::StrictEq };
+                *acc = compare(op, a, r!(0), *acc)?;
+            }
+            B::TestReferenceEqual => *acc = Value::Bool(r!(0).bits() == acc.bits()),
+            B::TestInstanceOf => *acc = Value::Bool(a.instance_of(r!(0), *acc)?),
+            B::TestIn => *acc = Value::Bool(a.has_keyed(*acc, r!(0))?),
+            B::TestUndetectable => *acc = Value::Bool(acc.is_nullish()),
+            B::TestNull => *acc = Value::Bool(matches!(acc.kind(), ValueKind::Null)),
+            B::TestUndefined => *acc = Value::Bool(matches!(acc.kind(), ValueKind::Undefined)),
+            B::TestTypeOf => {
+                let want = ["number", "string", "symbol", "boolean", "bigint", "undefined", "function", "object"];
+                let t = a.type_of(*acc);
+                *acc = Value::Bool(want.get(usize::try_from(o[0]).unwrap_or(99)).is_some_and(|w| *w == t));
+            }
+            B::Jump | B::JumpConstant => f.pc = d.target as usize,
+            B::JumpIfTrue | B::JumpIfTrueConstant | B::JumpIfFalse | B::JumpIfFalseConstant | B::JumpIfToBooleanTrue | B::JumpIfToBooleanTrueConstant | B::JumpIfToBooleanFalse | B::JumpIfToBooleanFalseConstant | B::JumpIfNull | B::JumpIfNullConstant | B::JumpIfNotNull | B::JumpIfNotNullConstant | B::JumpIfUndefined | B::JumpIfUndefinedConstant | B::JumpIfNotUndefined | B::JumpIfNotUndefinedConstant | B::JumpIfUndefinedOrNull | B::JumpIfUndefinedOrNullConstant | B::JumpIfJSReceiver | B::JumpIfJSReceiverConstant => {
+                let take = match d.bytecode {
+                    B::JumpIfTrue | B::JumpIfTrueConstant => matches!(acc.kind(), ValueKind::Bool(true)),
+                    B::JumpIfFalse | B::JumpIfFalseConstant => matches!(acc.kind(), ValueKind::Bool(false)),
+                    B::JumpIfToBooleanTrue | B::JumpIfToBooleanTrueConstant => a.to_boolean(*acc),
+                    B::JumpIfToBooleanFalse | B::JumpIfToBooleanFalseConstant => !a.to_boolean(*acc),
+                    B::JumpIfNull | B::JumpIfNullConstant => matches!(acc.kind(), ValueKind::Null),
+                    B::JumpIfNotNull | B::JumpIfNotNullConstant => !matches!(acc.kind(), ValueKind::Null),
+                    B::JumpIfUndefined | B::JumpIfUndefinedConstant => matches!(acc.kind(), ValueKind::Undefined),
+                    B::JumpIfNotUndefined | B::JumpIfNotUndefinedConstant => !matches!(acc.kind(), ValueKind::Undefined),
+                    B::JumpIfUndefinedOrNull | B::JumpIfUndefinedOrNullConstant => acc.is_nullish(),
+                    _ => acc.as_object().is_some(),
+                };
+                if take {
+                    f.pc = d.target as usize;
+                }
+            }
+            B::JumpLoop => {
+                f.pc = d.target as usize;
+                if budget.spent() {
+                    // Stop before the loop header, the state intact
+                    return Ok(Flow::Done(Outcome::Paused(Box::new(State { regs: core::mem::take(regs), frames: core::mem::take(frames), acc: *acc, message: *message }))));
+                }
+            }
+            B::SwitchOnSmiNoFeedback => {
+                if let Some(x) = acc.as_number() {
+                    let (table, size, base) = (o[0], o[1], o[2]);
+                    #[expect(clippy::cast_possible_truncation, reason = "a case index")]
+                    let i = x as i64 - base;
+                    if x.fract() == 0.0 && (0..size).contains(&i)
+                        && let Some(Constant::Offset(off)) = loaded.func.bytecode.constants.get(usize::try_from(table + i).unwrap_or(usize::MAX))
+                    {
+                        f.pc = loaded.index_of(d.start as usize + *off as usize);
+                    }
+                }
+            }
+            B::CallProperty0 | B::CallProperty1 | B::CallProperty2 | B::CallUndefinedReceiver0 | B::CallUndefinedReceiver1 | B::CallUndefinedReceiver2 => {
+                let callee = r!(0);
+                let (this, buf, n): (Value<'gc>, [Value<'gc>; 2], usize) = match d.bytecode {
+                    B::CallProperty0 => (r!(1), [Value::Undefined; 2], 0),
+                    B::CallProperty1 => (r!(1), [r!(2), Value::Undefined], 1),
+                    B::CallProperty2 => (r!(1), [r!(2), r!(3)], 2),
+                    B::CallUndefinedReceiver0 => (Value::Undefined, [Value::Undefined; 2], 0),
+                    B::CallUndefinedReceiver1 => (Value::Undefined, [r!(1), Value::Undefined], 1),
+                    _ => (Value::Undefined, [r!(1), r!(2)], 2),
+                };
+                return self.call_from(a, st, callee, this, Args::Values(&buf[..n]), level + 1);
+            }
+            B::CallProperty | B::CallAnyReceiver | B::CallUndefinedReceiver => {
+                let callee = r!(0);
+                let first = Self::slot_of(f, o[1]).unwrap_or(regs.len());
+                let count = usize::try_from(o[2]).unwrap_or(0);
+                let (this, args) = match (d.bytecode, count) {
+                    (B::CallUndefinedReceiver, _) => (Value::Undefined, Args::Regs { first, count }),
+                    (_, 0) => (Value::Undefined, Args::Values(&[])),
+                    _ => (regs[first], Args::Regs { first: first + 1, count: count - 1 }),
+                };
+                return self.call_from(a, st, callee, this, args, level + 1);
+            }
+            B::CallWithSpread => {
+                let callee = r!(0);
+                let mut list = Self::reg_list(regs, f, o[1], o[2]);
+                let spread = list.pop().unwrap_or_default();
+                let (this, mut args) = list.split_first().map_or((Value::Undefined, Vec::new()), |(t, rest)| (*t, rest.to_vec()));
+                args.extend(Self::spread(a, spread)?);
+                return self.call_from(a, st, callee, this, Args::Values(&args), level + 1);
+            }
+            B::Construct | B::ConstructWithSpread => {
+                let callee = r!(0);
+                let mut args = Self::reg_list(regs, f, o[1], o[2]);
+                if d.bytecode == B::ConstructWithSpread {
+                    let spread = args.pop().unwrap_or_default();
+                    args.extend(Self::spread(a, spread)?);
+                }
+                let nt = *acc;
+                return self.construct_from(a, st, callee, args, nt, level + 1);
+            }
+            B::CallRuntime | B::InvokeIntrinsic => {
+                let args = Self::reg_list(regs, f, o[1], o[2]);
+                st.acc = if d.bytecode == B::InvokeIntrinsic {
+                    let i = Intrinsic::from_u8(u8::try_from(o[0]).unwrap_or(u8::MAX)).ok_or_else(|| a.throw(ErrorKind::Type, "unknown intrinsic"))?;
+                    self.intrinsic(a, i, &args)?
+                } else {
+                    let rt = Runtime::from_u16(u16::try_from(o[0]).unwrap_or(u16::MAX)).ok_or_else(|| a.throw(ErrorKind::Type, "unknown runtime function"))?;
+                    self.runtime(a, st, loaded, rt, &args)?
+                };
+            }
+            B::CreateClosure => *acc = self.create_closure(a, loaded, o[0], f.env(regs)).into(),
+            B::CreateEmptyObjectLiteral => *acc = a.object().into(),
+            B::CreateObjectLiteral => *acc = Self::object_literal(a, loaded, o[0]).into(),
+            B::CreateEmptyArrayLiteral => *acc = a.array(Vec::new()).into(),
+            B::CreateArrayLiteral => {
+                let Some(Constant::Array(b)) = loaded.func.bytecode.constants.get(usize::try_from(o[0]).unwrap_or(0)) else { unreachable!("an array boilerplate") };
+                if b.elements.iter().any(|e| matches!(e, Some(LiteralValue::Hole))) {
+                    let arr = a.array(Vec::new());
+                    for (i, e) in b.elements.iter().enumerate() {
+                        if let Some(v) = e.as_ref().filter(|e| **e != LiteralValue::Hole) {
+                            let v = Self::literal(a, v);
+                            a.define_keyed(arr, Value::Number(i as f64), Property::data(v))?;
+                        }
+                    }
+                    a.put_named(arr.into(), "length", Value::Number(b.elements.len() as f64), true)?;
+                    *acc = arr.into();
+                } else {
+                    let items = b.elements.iter().map(|e| e.as_ref().map_or(Value::Undefined, |v| Self::literal(a, v))).collect();
+                    *acc = a.array(items).into();
+                }
+            }
+            B::CreateRegExpLiteral => {
+                let pattern = Self::name_at(loaded, o[0]);
+                let bits = u16::try_from(o[2]).unwrap_or(0);
+                let flags: alloc::string::String = [('d', 1 << 7), ('g', 1), ('i', 1 << 1), ('m', 1 << 2), ('s', 1 << 5), ('u', 1 << 4), ('v', 1 << 8), ('y', 1 << 3)].iter().filter(|(_, b)| bits & b != 0).map(|(c, _)| *c).collect();
+                let (p, fl) = (a.string(pattern), a.string(&flags));
+                let ctor = a.realm.regexp_ctor;
+                *acc = a.call(ctor.into(), Value::Undefined, &[p.into(), fl.into()])?;
+            }
+            B::GetTemplateObject => {
+                let key = (f.func.0, u32::try_from(o[0]).unwrap_or(0));
+                let cached = a.realm.templates.get().get(&key).copied();
+                *acc = match cached {
+                    Some(t) => t.into(),
+                    None => {
+                        let Some(Constant::Template(t)) = loaded.func.bytecode.constants.get(usize::try_from(o[0]).unwrap_or(0)) else { unreachable!("a template description") };
+                        let cooked: Vec<Value<'gc>> = t.cooked.iter().map(|c| c.as_ref().map_or(Value::Undefined, |s| a.string(s).into())).collect();
+                        let raw: Vec<Value<'gc>> = t.raw.iter().map(|s| a.string(s).into()).collect();
+                        let cooked = a.array(cooked);
+                        let raw = a.array(raw);
+                        let frozen = |v: Value<'gc>| Property { slot: Slot::Data(v), enumerable: false, writable: false, configurable: false };
+                        cooked.borrow_mut(a.mc).define("raw", frozen(raw.into()));
+                        a.realm.templates.update(a.mc, |m| {
+                            let mut m = m.clone();
+                            m.insert(key, cooked);
+                            m
+                        });
+                        cooked.into()
+                    }
+                };
+            }
+            B::CloneObject => {
+                let ob = a.object();
+                a.copy_data(ob, r!(0), &[])?;
+                *acc = ob.into();
+            }
+            B::CreateRestParameter => {
+                let formals = usize::from(loaded.func.formal_parameters);
+                *acc = a.array(f.args(regs).get(formals..).unwrap_or(&[]).to_vec()).into();
+            }
+            B::CreateMappedArguments | B::CreateUnmappedArguments => *acc = self.arguments(a, regs, f, loaded.func.strict || d.bytecode == B::CreateUnmappedArguments)?,
+            B::GetIterator => *acc = a.iterator_object(r!(0))?,
+            B::ForInEnumerate => {
+                let keys = a.for_in_keys(r!(0))?;
+                *acc = a.array(keys).into();
+            }
+            B::ForInPrepare => {
+                let keys = *acc;
+                let len = keys.as_object().map_or(0, |k| k.elements().len());
+                let first = o[0];
+                Self::set_reg(regs, f, first, keys);
+                Self::set_reg(regs, f, first + 1, keys);
+                Self::set_reg(regs, f, first + 2, Value::Number(len as f64));
+            }
+            B::JumpIfForInDone | B::JumpIfForInDoneConstant => {
+                let (i, n) = (r!(1).as_number().unwrap_or(0.0), r!(2).as_number().unwrap_or(0.0));
+                if i >= n {
+                    f.pc = d.target as usize;
+                }
+            }
+            B::ForInNext => {
+                let receiver = r!(0);
+                #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "an index")]
+                let i = r!(1).as_number().unwrap_or(0.0) as usize;
+                let keys = Self::reg(regs, f, o[2] + 1);
+                let key = keys.as_object().and_then(|k| k.elements().get(i)).unwrap_or_default();
+                // A key deleted since the enumeration started is skipped
+                let still = a.has_keyed(receiver, key)?;
+                *acc = if still { key } else { Value::Undefined };
+            }
+            B::ForInStep => {
+                let i = r!(0).as_number().unwrap_or(0.0);
+                Self::set_reg(regs, f, o[0], Value::Number(i + 1.0));
+            }
+            B::SetPendingMessage => core::mem::swap(acc, message),
+            B::Throw | B::ReThrow => return Err(a.throw_value(*acc)),
+            B::ThrowReferenceErrorIfHole => {
+                if matches!(acc.kind(), ValueKind::Uninit) {
+                    return Err(Self::uninitialized(a, Self::name_at(loaded, o[0])));
+                }
+            }
+            B::ThrowSuperAlreadyCalledIfNotHole => {
+                if !matches!(acc.kind(), ValueKind::Uninit) {
+                    return Err(a.throw(ErrorKind::Reference, "Super constructor may only be called once"));
+                }
+            }
+            B::ThrowIfNotSuperConstructor => {
+                let c = r!(0);
+                if !a.is_constructor(c) {
+                    let what = a.describe(c);
+                    return Err(a.throw(ErrorKind::Type, &alloc::format!("Super constructor {what} of anonymous class is not a constructor")));
+                }
+            }
+            // The parent class constructor of the active function (in acc)
+            B::GetSuperConstructor => {
+                let parent = match acc.as_object() {
+                    Some(fo) => a.get_prototype_of(fo)?.map_or(Value::Null, Value::Object),
+                    None => Value::Null,
+                };
+                Self::set_reg(regs, f, o[0], parent);
+            }
+            // Default constructors are not skipped: the answer is always "not done", with the parent constructor
+            B::FindNonDefaultConstructorOrConstruct => {
+                let parent = match r!(0).as_object() {
+                    Some(fo) => a.get_prototype_of(fo)?.map_or(Value::Null, Value::Object),
+                    None => Value::Null,
+                };
+                Self::set_reg(regs, f, o[2], Value::Bool(false));
+                Self::set_reg(regs, f, o[2] + 1, parent);
+            }
+            B::ConstructForwardAllArgs => {
+                let callee = r!(0);
+                let args = f.args(regs);
+                let nt = *acc;
+                return self.construct_from(a, st, callee, args, nt, level + 1);
+            }
+            B::GetNamedPropertyFromSuper => {
+                let receiver = r!(0);
+                let name = a.string(Self::name_at(loaded, o[1])).into();
+                *acc = a.super_get(*acc, name, receiver)?;
+            }
+            B::ThrowSuperNotCalledIfHole => {
+                if matches!(acc.kind(), ValueKind::Uninit) {
+                    return Err(a.throw(ErrorKind::Reference, "Must call super constructor in derived class before accessing 'this' or returning from derived constructor"));
+                }
+            }
+            B::SwitchOnGeneratorState => {
+                // A call falls through; a resumption continues at its resume point, in the saved context
+                if let Some(co) = r!(0).as_object() {
+                    let (continuation, context) = Self::coroutine(co, |c| (c.frame.continuation, c.frame.context));
+                    f.set_env(regs, context);
+                    if let Some(Constant::Offset(off)) = loaded.func.bytecode.constants.get(usize::try_from(o[1] + i64::from(continuation)).unwrap_or(usize::MAX)) {
+                        f.pc = loaded.index_of(d.start as usize + *off as usize);
+                    }
+                }
+            }
+            B::SuspendGenerator => {
+                let Some(co) = r!(0).as_object() else { unreachable!("a generator object") };
+                let first = Self::slot_of(f, o[1]).unwrap_or(regs.len());
+                let count = usize::try_from(o[2]).unwrap_or(0);
+                let saved = regs[first..first + count].to_vec();
+                let params = regs[f.params..f.base - Frame::HEADER].to_vec();
+                let context = f.env(regs);
+                let continuation = u32::try_from(o[3]).unwrap_or(0);
+                Self::coroutine_mut(a, co, |c| {
+                    c.frame.params = params;
+                    c.frame.regs = saved;
+                    c.frame.context = context;
+                    c.frame.continuation = continuation;
+                    c.state = j8framework::CoroutineState::Suspended;
+                });
+                let v = *acc;
+                return Ok(if st.pop_frame() {
+                    st.acc = v;
+                    Flow::Frame
+                } else {
+                    Flow::Done(Outcome::Return(v))
+                });
+            }
+            B::ResumeGenerator => {
+                let Some(co) = r!(0).as_object() else { unreachable!("a generator object") };
+                let first = Self::slot_of(f, o[1]).unwrap_or(regs.len());
+                let (input, saved) = Self::coroutine(co, |c| (c.input, c.frame.regs.clone()));
+                regs[first..first + saved.len()].copy_from_slice(&saved);
+                *acc = input;
+            }
+            B::Return => {
+                let mut v = *acc;
+                if f.slot(regs, Frame::NEW_TARGET) != Value::Undefined {
+                    v = self.construct_result(a, regs, f, v)?;
+                }
+                return Ok(if st.pop_frame() {
+                    st.acc = v;
+                    Flow::Frame
+                } else {
+                    Flow::Done(Outcome::Return(v))
+                });
+            }
+            b => return Err(a.throw(ErrorKind::Syntax, &alloc::format!("bytecode {b:?} is not supported by the executor yet"))),
+        }
+        Ok(Flow::Next)
+    }
+
+    /// The operator of an arithmetic bytecode
+    fn binary_op(b: Bytecode) -> BinaryOp {
+        use Bytecode as B;
+        match b {
+            B::Add | B::AddSmi => BinaryOp::Add,
+            B::Sub | B::SubSmi => BinaryOp::Sub,
+            B::Mul | B::MulSmi => BinaryOp::Mul,
+            B::Div | B::DivSmi => BinaryOp::Div,
+            B::Mod | B::ModSmi => BinaryOp::Rem,
+            B::Exp | B::ExpSmi => BinaryOp::Exp,
+            B::BitwiseOr | B::BitwiseOrSmi => BinaryOp::BitOr,
+            B::BitwiseXor | B::BitwiseXorSmi => BinaryOp::BitXor,
+            B::BitwiseAnd | B::BitwiseAndSmi => BinaryOp::BitAnd,
+            B::ShiftLeft | B::ShiftLeftSmi => BinaryOp::Shl,
+            B::ShiftRight | B::ShiftRightSmi => BinaryOp::Shr,
+            _ => BinaryOp::UShr,
+        }
+    }
+
+    /// The values a spread argument / element expands to (iteration)
+    fn spread<'gc>(a: &mut Agent<'gc, '_>, v: Value<'gc>) -> Result<Vec<Value<'gc>>, Error> {
+        a.to_list(v)
+    }
+
+    /// The frame's arguments object (unmapped: all arguments as index properties; `length`, `callee`, `@@iterator`)
+    fn arguments<'gc>(&self, a: &mut Agent<'gc, '_>, regs: &[Value<'gc>], f: &Frame, strict: bool) -> Result<Value<'gc>, Error> {
+        let args = f.args(regs);
+        let o = ObjectData { kind: ObjectKind::Arguments(None), proto: Some(a.realm.object_proto), ..ObjectData::default() }.alloc(a.mc);
+        let hidden = |v: Value<'gc>| Property { slot: Slot::Data(v), enumerable: false, writable: true, configurable: true };
+        for (i, &v) in args.iter().enumerate() {
+            let k = alloc::string::String::from(ryu_js::Buffer::new().format(f64::from(u32::try_from(i).unwrap_or(u32::MAX))));
+            o.borrow_mut(a.mc).define(&k, Property::data(v));
+        }
+        let len = f64::from(u32::try_from(args.len()).unwrap_or(u32::MAX));
+        let values = a.get_symbol(Value::Object(a.realm.array_proto), a.realm.symbols.iterator, Value::Undefined)?;
+        let mut dd = o.borrow_mut(a.mc);
+        dd.define("length", hidden(len.into()));
+        if strict {
+            let thrower = a.realm.named_native(a.mc, Self::throw_type_error, "", 0);
+            dd.define("callee", Property { slot: Slot::Accessor { get: Some(thrower), set: Some(thrower) }, enumerable: false, writable: false, configurable: false });
+        } else {
+            dd.define("callee", hidden(f.slot(regs, Frame::CLOSURE)));
+        }
+        dd.define_symbol(a.realm.symbols.iterator, hidden(values));
+        drop(dd);
+        Ok(o.into())
+    }
+
+    /// %ThrowTypeError%: the accessor for strict-mode `arguments.callee`.
+    fn throw_type_error<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+        Err(a.throw(ErrorKind::Type, "'caller', 'callee', and 'arguments' properties may not be accessed on strict mode functions or the arguments objects for calls to them"))
+    }
+
+    /// `DefineClass(boilerplate, constructor, superclass, …keys and functions)`: links the constructor and a new
+    /// prototype to the heritage, then defines the public methods and accessors (computed keys come in the arguments,
+    /// and name their function); gives the prototype
+    fn define_class<'gc>(a: &mut Agent<'gc, '_>, b: &j8bytecode::ClassBoilerplate, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+        use j8bytecode::MemberKind as M;
+        let arg = |n: usize| args.get(n).copied().unwrap_or_default();
+        let Some(ctor) = arg(1).as_object() else { unreachable!("a class constructor") };
+        let (proto_parent, ctor_parent) = a.class_heritage(arg(2))?;
+        ctor.borrow_mut(a.mc).set_proto(Some(ctor_parent));
+        let proto = ObjectData { proto: proto_parent, ..ObjectData::default() }.alloc(a.mc);
+        ctor.borrow_mut(a.mc).define("prototype", Property { slot: Slot::Data(proto.into()), enumerable: false, writable: false, configurable: false });
+        proto.borrow_mut(a.mc).define("constructor", Property::hidden(ctor.into()));
+        let mut next = 3;
+        for m in &b.members {
+            let key = match &m.name {
+                Some(n) => Value::from(a.string(n)),
+                None => {
+                    next += 1;
+                    arg(next - 1)
+                }
+            };
+            if m.kind == M::Field {
+                continue;
+            }
+            let Some(fo) = arg(next).as_object() else { unreachable!("a member function") };
+            next += 1;
+            let target = if m.statik { ctor } else { proto };
+            let prefix = match m.kind {
+                M::Getter => Some("get"),
+                M::Setter => Some("set"),
+                M::Method | M::Field => None,
+            };
+            if m.name.is_none() {
+                a.set_function_name(fo, key, prefix)?;
+            }
+            match m.kind {
+                M::Getter | M::Setter => a.define_accessor_keyed(target, key, fo, m.kind == M::Setter, false)?,
+                M::Method | M::Field => a.define_keyed(target, key, Property::hidden(fo.into()))?,
+            }
+        }
+        Ok(proto.into())
+    }
+
+    /// Reads a coroutine (generator / async function object)
+    fn coroutine<'gc, T>(co: JsObject<'gc>, read: impl FnOnce(&j8framework::Coroutine<'gc>) -> T) -> T {
+        match &co.borrow().kind {
+            ObjectKind::Coroutine(c) => read(c),
+            _ => unreachable!("a generator object"),
+        }
+    }
+
+    /// Changes a coroutine
+    fn coroutine_mut<'gc, T>(a: &Agent<'gc, '_>, co: JsObject<'gc>, write: impl FnOnce(&mut j8framework::Coroutine<'gc>) -> T) -> T {
+        match &mut co.borrow_mut(a.mc).kind {
+            ObjectKind::Coroutine(c) => write(c),
+            _ => unreachable!("a generator object"),
+        }
+    }
+
+    /// `InvokeIntrinsic`
+    fn intrinsic<'gc>(&self, a: &mut Agent<'gc, '_>, i: Intrinsic, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+        let arg = |n: usize| args.get(n).copied().unwrap_or_default();
+        match i {
+            Intrinsic::CopyDataProperties => {
+                if let Some(t) = arg(0).as_object() {
+                    a.copy_data(t, arg(1), &[])?;
+                }
+                Ok(arg(0))
+            }
+            Intrinsic::CopyDataPropertiesWithExcludedPropertiesOnStack => {
+                let src = arg(0);
+                if src.is_nullish() {
+                    return Err(a.throw(ErrorKind::Type, "Cannot destructure 'undefined' or 'null'"));
+                }
+                let exclude = args.iter().skip(1).filter(|k| !matches!(k.kind(), ValueKind::Symbol(_))).map(|&k| a.property_key(k)).collect::<Result<Vec<_>, _>>()?;
+                let ob = a.object();
+                a.copy_data(ob, src, &exclude)?;
+                Ok(ob.into())
+            }
+            Intrinsic::CreateJSGeneratorObject => {
+                // The generator's prototype is the function's `prototype` (when an object)
+                let closure = arg(0);
+                let asynchronous = closure.as_object().is_some_and(|o| matches!(&o.borrow().kind, ObjectKind::Function(c) if self.function(c.func).asynchronous));
+                let proto = match a.get_named(closure, "prototype")?.as_object() {
+                    Some(p) => p,
+                    None if asynchronous => a.realm.async_generator_proto,
+                    None => a.realm.generator_proto,
+                };
+                let co = j8framework::Coroutine::new(closure, None, asynchronous);
+                Ok(ObjectData { kind: ObjectKind::Coroutine(Box::new(co)), proto: Some(proto), ..ObjectData::default() }.alloc(a.mc).into())
+            }
+            Intrinsic::AsyncFunctionEnter => {
+                let promise = a.new_promise();
+                let co = j8framework::Coroutine::new(arg(0), Some(promise), false);
+                Ok(ObjectData { kind: ObjectKind::Coroutine(Box::new(co)), proto: Some(a.realm.object_proto), ..ObjectData::default() }.alloc(a.mc).into())
+            }
+            // `await`: the coroutine resumes once the value settles; the frame gives back the promise (what the call
+            // returns when this is the first suspension)
+            Intrinsic::AsyncFunctionAwait => {
+                let Some(co) = arg(0).as_object() else { unreachable!("a generator object") };
+                let p = a.promise_resolve(arg(1))?;
+                a.perform_then(p, j8framework::Reaction::Await { coroutine: co });
+                Ok(Self::coroutine(co, |c| c.promise).map_or(Value::Undefined, Value::Object))
+            }
+            Intrinsic::AsyncFunctionResolve | Intrinsic::AsyncFunctionReject => {
+                let Some(co) = arg(0).as_object() else { unreachable!("a generator object") };
+                let Some(promise) = Self::coroutine(co, |c| c.promise) else { unreachable!("an async function's promise") };
+                if i == Intrinsic::AsyncFunctionResolve {
+                    a.resolve_promise(promise, arg(1))?;
+                } else {
+                    a.reject_promise(promise, arg(1));
+                }
+                Ok(promise.into())
+            }
+            Intrinsic::CreateAsyncFromSyncIterator => {
+                let iterator = arg(0);
+                let next = a.get_named(iterator, "next")?;
+                let rec = j8framework::IterRecord { iterator, next };
+                Ok(ObjectData { kind: ObjectKind::AsyncFromSyncIterator(rec), proto: Some(a.realm.async_from_sync_iterator_proto), ..ObjectData::default() }.alloc(a.mc).into())
+            }
+            Intrinsic::GeneratorGetResumeMode => {
+                let Some(co) = arg(0).as_object() else { unreachable!("a generator object") };
+                Ok(Value::Number(Self::coroutine(co, |c| if matches!(c.waiting, j8framework::Waiting::Rethrow) { RESUME_RETHROW } else { f64::from(c.mode) })))
+            }
+            // Async generators: the body suspends after each of these, and `resume` turns what they recorded into the
+            // step the request queue acts on
+            Intrinsic::AsyncGeneratorAwait | Intrinsic::AsyncGeneratorYieldWithAwait => {
+                let Some(co) = arg(0).as_object() else { unreachable!("a generator object") };
+                let v = arg(1);
+                let waiting = if i == Intrinsic::AsyncGeneratorAwait { j8framework::Waiting::Await(v) } else { j8framework::Waiting::Yield(v) };
+                Self::coroutine_mut(a, co, |c| c.waiting = waiting);
+                Ok(Value::Undefined)
+            }
+            Intrinsic::AsyncGeneratorResolve | Intrinsic::AsyncGeneratorReject => {
+                let Some(co) = arg(0).as_object() else { unreachable!("a generator object") };
+                let v = arg(1);
+                let settlement = if i == Intrinsic::AsyncGeneratorResolve { j8framework::Settlement::Resolved(v) } else { j8framework::Settlement::Rejected(v) };
+                // The rejection stands: the return after the body's catch handler passes through `AsyncGeneratorResolve`
+                Self::coroutine_mut(a, co, |c| {
+                    if !matches!(c.settlement, j8framework::Settlement::Rejected(_)) {
+                        c.settlement = settlement;
+                    }
+                });
+                Ok(Value::Undefined)
+            }
+            // What `next` / `return` / `throw` give for a `yield` (`yield*` passes its iterator's results on unchanged)
+            Intrinsic::GeneratorYieldResult => Ok(a.iter_result(arg(0), false).into()),
+            Intrinsic::GeneratorClose => {
+                if let Some(co) = arg(0).as_object() {
+                    Self::coroutine_mut(a, co, |c| c.state = j8framework::CoroutineState::Completed);
+                }
+                Ok(Value::Undefined)
+            }
+            other => Err(a.throw(ErrorKind::Syntax, &alloc::format!("intrinsic {other:?} is not supported yet"))),
+        }
+    }
+
+    /// `CallRuntime`
+    #[expect(clippy::too_many_lines, reason = "one arm per runtime function")]
+    fn runtime<'gc>(&self, a: &mut Agent<'gc, '_>, st: &mut State<'gc>, loaded: &Loaded, rt: Runtime, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+        let arg = |n: usize| args.get(n).copied().unwrap_or_default();
+        let text = |a: &mut Agent<'gc, '_>, v: Value<'gc>| -> Result<alloc::string::String, Error> { Ok(alloc::string::String::from(&**a.to_string(v)?)) };
+        match rt {
+            Runtime::DeclareGlobals => {
+                // The declarations constant is passed as the constant's index loaded by `LdaConstant` (an undefined value
+                // here): find it in the constant pool
+                let decls = loaded.func.bytecode.constants.iter().find_map(|c| match c {
+                    Constant::Declarations(d) => Some(d.clone()),
+                    _ => None,
+                }).unwrap_or_default();
+                self.declare_globals(a, st.f(), st.f().env(&st.regs), &decls)?;
+                Ok(Value::Undefined)
+            }
+            Runtime::DeclareEvalVar => {
+                let name = text(a, arg(0))?;
+                self.declare_eval(a, st.f().env(&st.regs), &name, None)?;
+                Ok(Value::Undefined)
+            }
+            Runtime::DeclareEvalFunction => {
+                let name = text(a, arg(0))?;
+                self.declare_eval(a, st.f().env(&st.regs), &name, Some(arg(1)))?;
+                Ok(Value::Undefined)
+            }
+            Runtime::ThrowConstAssignError => Err(a.throw(ErrorKind::Type, "Assignment to constant variable.")),
+            Runtime::DefineClass => {
+                // The boilerplate's index in the constant pool (see `LdaConstant`)
+                #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "a constant pool index")]
+                let k = arg(0).as_number().map_or(usize::MAX, |k| k as usize);
+                let Some(Constant::Class(b)) = loaded.func.bytecode.constants.get(k) else { unreachable!("a class boilerplate") };
+                Self::define_class(a, b, args)
+            }
+            Runtime::CreatePrivateNameSymbol | Runtime::CreatePrivateBrandSymbol => {
+                let desc = text(a, arg(0))?;
+                Ok(Value::Symbol(a.private_name(&desc)))
+            }
+            Runtime::CreatePrivateAccessors => Ok(ObjectData { kind: ObjectKind::AccessorPair { get: arg(0).as_object(), set: arg(1).as_object() }, ..ObjectData::default() }.alloc(a.mc).into()),
+            Runtime::LoadPrivateGetter | Runtime::LoadPrivateSetter => Ok(match arg(0).as_object().map(|o| match o.borrow().kind {
+                ObjectKind::AccessorPair { get, set } => if rt == Runtime::LoadPrivateGetter { get } else { set },
+                _ => None,
+            }) {
+                Some(Some(fo)) => fo.into(),
+                _ => Value::Undefined,
+            }),
+            Runtime::LoadFromSuper | Runtime::LoadKeyedFromSuper => a.super_get(arg(1), arg(2), arg(0)),
+            Runtime::StoreToSuper | Runtime::StoreKeyedToSuper => {
+                a.super_set(arg(1), arg(2), arg(3), arg(0))?;
+                Ok(arg(3))
+            }
+            Runtime::ThrowUnsupportedSuperError => Err(a.throw(ErrorKind::Reference, "Unsupported reference to 'super'")),
+            Runtime::ThrowStaticPrototypeError => Err(a.throw(ErrorKind::Type, "Classes may not have a static property named 'prototype'")),
+            Runtime::ThrowTypeError => {
+                let m = text(a, arg(0))?;
+                Err(a.throw(ErrorKind::Type, &m))
+            }
+            Runtime::ThrowSymbolAsyncIteratorInvalid => Err(a.throw(ErrorKind::Type, "Result of the Symbol.asyncIterator method is not an object")),
+            Runtime::ThrowThrowMethodMissing => Err(a.throw(ErrorKind::Type, "The iterator does not provide a 'throw' method")),
+            Runtime::ThrowIteratorResultNotAnObject => {
+                let what = a.describe(arg(0));
+                Err(a.throw(ErrorKind::Type, &alloc::format!("Iterator result {what} is not an object")))
+            }
+            Runtime::ThrowPatternAssignmentNonCoercible => {
+                let what = a.describe(arg(0));
+                Err(a.throw(ErrorKind::Type, &alloc::format!("Cannot destructure '{what}' as it is undefined or null.")))
+            }
+            Runtime::ResolvePossiblyDirectEval => {
+                let (callee, source) = (arg(0), arg(1));
+                let real = matches!(callee.kind(), ValueKind::Object(o) if Gc::ptr_eq(o, a.realm.eval));
+                let ValueKind::String(s) = source.kind() else { return Ok(callee) };
+                if !real {
+                    return Ok(callee);
+                }
+                let strict = arg(3).as_number().is_some_and(|x| x != 0.0);
+                let src = alloc::string::String::from(&**s);
+                let module = match Module::compile_direct(&j8framework::Source { text: &src, file: "[eval]" }, strict) {
+                    Ok(m) => m,
+                    Err(Error::Syntax(m)) => return Err(a.throw(ErrorKind::Syntax, &m)),
+                    Err(e) => return Err(e),
+                };
+                let main = self.load(module);
+                let closure = Closure::new(main, st.f().env(&st.regs));
+                Ok(self.function_object(a, closure).into())
+            }
+            Runtime::DeleteLookupSlot => {
+                let name = text(a, arg(0))?;
+                Ok(Value::Bool(match self.lookup(a, st.f().env(&st.regs), &name)? {
+                    Found::Slot(..) => false,
+                    Found::Object(o) => a.delete(Value::Object(o), &name)?,
+                    Found::Nothing => true,
+                }))
+            }
+            Runtime::DefineAccessorPropertyUnchecked => {
+                // The key is a property key already (a computed one may be a symbol)
+                if let Some(o) = arg(0).as_object() {
+                    if let Some(g) = arg(2).as_object() {
+                        a.define_accessor_keyed(o, arg(1), g, false, true)?;
+                    }
+                    if let Some(s) = arg(3).as_object() {
+                        a.define_accessor_keyed(o, arg(1), s, true, true)?;
+                    }
+                }
+                Ok(Value::Undefined)
+            }
+            Runtime::InternalSetPrototype => {
+                if let Some(o) = arg(0).as_object() {
+                    match arg(1).kind() {
+                        ValueKind::Object(p) => o.set_proto(a.mc, Some(p)),
+                        ValueKind::Null => o.set_proto(a.mc, None),
+                        _ => {}
+                    }
+                }
+                Ok(arg(0))
+            }
+            other => Err(a.throw(ErrorKind::Syntax, &alloc::format!("runtime function {other:?} is not supported yet"))),
+        }
+    }
+
+    /// A new execution state entering frame `f`, on a frame stack from the spares
+    fn state<'gc>(&self, regs: Vec<Value<'gc>>, f: Frame) -> State<'gc> {
+        let frames = self.spare_frames.borrow_mut().pop().unwrap_or_else(|| Vec::with_capacity(FRAMES_RESERVED));
+        State::new(regs, frames, f)
+    }
+
+    /// A finished execution's frame stack and register file go back to the spares
+    fn recycle<'gc>(&self, a: &mut Agent<'gc, '_>, st: State<'gc>) {
+        let State { regs, mut frames, .. } = st;
+        a.give_regs(regs);
+        frames.clear();
+        let mut spare = self.spare_frames.borrow_mut();
+        if spare.len() < SPARE_FRAMES {
+            spare.push(frames);
+        }
+    }
+
+    /// Runs one frame to return in a fresh execution state.
+    fn run_frame<'gc>(&self, a: &mut Agent<'gc, '_>, regs: Vec<Value<'gc>>, f: Frame, level: usize) -> Result<Value<'gc>, Error> {
+        let saved = self.depth.replace(level);
+        let r = self.execute(a, self.state(regs, f), &mut None).map(Outcome::returned);
+        self.depth.set(saved);
+        r
+    }
+}
+
+/// Where a lookup by name found the name.
+enum Found<'gc> {
+    /// A context slot (its index in the `Env`, whether it is `const`)
+    Slot(JsEnv<'gc>, usize, bool),
+    /// An object's property
+    Object(JsObject<'gc>),
+    Nothing,
 }
 
 impl<'gc> Invoke<'gc> for Executor {
@@ -1757,28 +2347,12 @@ impl<'gc> Invoke<'gc> for Executor {
         if level >= STACK_LIMIT {
             return Err(a.throw(ErrorKind::Range, "Maximum call stack size exceeded"));
         }
-        // Fast path: ordinary JS functions (not class constructors / generators / async) open a frame directly, without
-        // first copying the arguments into a Vec for call resolution
-        if let Some((c, loaded)) = self.plain_closure(callee) {
-            let mut regs = a.take_regs();
-            let mut f = Self::enter_func(a, &mut regs, &loaded.func, c, callee, this, args);
-            let mut acc = Value::Undefined;
-            if self.tiered(a.platform, loaded, &mut regs, &mut f, &mut acc) {
-                a.give_regs(regs);
-                return Ok(acc);
-            }
-            let mut st = State { regs, frames: Vec::new(), f, acc };
-            let saved = self.depth.replace(level);
-            let r = self.execute_to_end(a, &mut st);
-            self.depth.set(saved);
-            a.give_regs(st.regs);
-            return r;
-        }
         match self.resolve(a, callee, this, args.to_vec(), level)? {
             Callee::Done(v) => Ok(v),
             Callee::Closure { closure, callee, this, args } => {
-                let mut regs = Vec::new();
-                let f = self.enter(a, &mut regs, closure, callee, this, &args);
+                let mut regs = a.take_regs();
+                regs.clear();
+                let f = self.open(a, &mut regs, closure, callee, this, &args);
                 self.run_frame(a, regs, f, level)
             }
         }
@@ -1786,87 +2360,108 @@ impl<'gc> Invoke<'gc> for Executor {
 
     fn constructs(&self, closure: &Closure<'gc>) -> bool {
         let loaded = self.function(closure.func);
-        let f = &loaded.func;
-        !f.generator && !f.asynchronous && matches!(f.kind, FunctionKind::Normal | FunctionKind::Constructor { .. })
+        loaded.constructs || loaded.class_constructor
     }
 
     fn eval_code(&self, a: &mut Agent<'gc, '_>, src: &str, kind: j8framework::CodeKind) -> Result<Value<'gc>, Error> {
-        #[cfg(feature = "compile")]
-        {
-            let module = match Module::compile(&j8framework::Source { text: src, file: "[eval]" }, kind) {
-                Ok(m) => m,
-                Err(Error::Syntax(m)) => return Err(a.throw(ErrorKind::Syntax, &m)),
-                Err(e) => return Err(e),
-            };
-            let main = self.load(module);
-            let level = self.depth.get() + 1;
-            if level >= STACK_LIMIT {
-                return Err(a.throw(ErrorKind::Range, "Maximum call stack size exceeded"));
-            }
-            let saved = self.depth.replace(level);
-            let r = self.run_script(a, main);
-            self.depth.set(saved);
-            r
-        }
-        #[cfg(not(feature = "compile"))]
-        {
-            let _ = (src, kind);
-            Err(a.throw(ErrorKind::Syntax, "dynamic code needs the compile feature"))
-        }
-    }
-
-    fn resume(&self, a: &mut Agent<'gc, '_>, co: JsObject<'gc>, mode: Resume, value: Value<'gc>) -> Result<Step<'gc>, Error> {
+        let module = match Module::compile(&j8framework::Source { text: src, file: "[eval]" }, kind) {
+            Ok(m) => m,
+            Err(Error::Syntax(m)) => return Err(a.throw(ErrorKind::Syntax, &m)),
+            Err(e) => return Err(e),
+        };
+        let main = self.load(module);
         let level = self.depth.get() + 1;
         if level >= STACK_LIMIT {
             return Err(a.throw(ErrorKind::Range, "Maximum call stack size exceeded"));
         }
-        let taken = {
-            let mut d = co.borrow_mut(a.mc);
-            let ObjectKind::Coroutine(c) = &mut d.kind else { unreachable!("resume is only called on coroutines") };
-            match core::mem::replace(&mut c.state, CoroutineState::Running) {
-                CoroutineState::Suspended(s) => Ok((s, core::mem::replace(&mut c.fresh, false))),
-                other => {
-                    c.state = other;
-                    Err(matches!(c.state, CoroutineState::Running))
+        let saved = self.depth.replace(level);
+        let r = self.run_script(a, main);
+        self.depth.set(saved);
+        r
+    }
+
+    /// Re-enters the generator's function with its receiver and parameters: `SwitchOnGeneratorState` jumps to the
+    /// resume point, `ResumeGenerator` brings the registers back. Stopping at `SuspendGenerator` gives
+    /// [`Step::Yield`] with what the frame returned, returning finishes the coroutine.
+    fn resume(&self, a: &mut Agent<'gc, '_>, co: JsObject<'gc>, mode: Resume, value: Value<'gc>) -> Result<Step<'gc>, Error> {
+        use j8framework::{CoroutineState as S, Settlement, Waiting as W};
+        let level = self.depth.get() + 1;
+        if level >= STACK_LIMIT {
+            return Err(a.throw(ErrorKind::Range, "Maximum call stack size exceeded"));
+        }
+        let (state, waiting, async_generator) = Self::coroutine_mut(a, co, |c| (c.state, core::mem::replace(&mut c.waiting, W::Nothing), c.requests.is_some()));
+        // What a suspended async generator waited for comes back first
+        let (mut mode, mut rethrow) = (mode, false);
+        match waiting {
+            // The yielded value settled: a fulfillment answers the request, a rejection is thrown at the `yield`
+            W::Yield(_) if mode == Resume::Next => return Ok(Step::Yield(value)),
+            W::Yield(_) => rethrow = true,
+            // The value of a `return` request settled
+            W::Return => mode = if mode == Resume::Next { Resume::Return } else { Resume::Throw },
+            W::Nothing | W::Await(_) | W::Rethrow => {
+                // A `return` request awaits its value before the body sees it
+                if async_generator && mode == Resume::Return && state != S::Running {
+                    Self::coroutine_mut(a, co, |c| c.waiting = W::Return);
+                    return Ok(Step::Await(value));
                 }
             }
-        };
-        let (saved, fresh) = match taken {
-            Ok(t) => t,
-            Err(true) => return Err(a.throw(ErrorKind::Type, "Generator is already running")),
-            // Already finished
-            Err(false) => {
-                return match mode {
-                    Resume::Next => Ok(Step::Done(Value::Undefined)),
-                    Resume::Return => Ok(Step::Done(value)),
-                    Resume::Throw => Err(a.throw_value(value)),
-                };
-            }
-        };
-        if fresh && mode != Resume::Next {
-            Self::set_state(a, co, CoroutineState::Completed);
-            return if mode == Resume::Return { Ok(Step::Done(value)) } else { Err(a.throw_value(value)) };
         }
-        let mut regs = saved.regs;
-        if let Some(m) = saved.mode {
-            regs[usize::from(m)] = f64::from(mode).into();
+        if state == S::Suspended {
+            Self::coroutine_mut(a, co, |c| {
+                c.state = S::Running;
+                c.mode = mode;
+                c.input = value;
+                c.settlement = Settlement::Nothing;
+                if rethrow {
+                    c.waiting = W::Rethrow;
+                }
+            });
         }
-        let handlers = saved.handlers.into_iter().map(|(target, env)| Handler { target, env }).collect::<Vec<_>>().into();
-        let f = Frame { func: saved.func, pc: saved.pc, base: 0, env: saved.env, handlers, new_target: Value::Undefined, new_this: None, args: saved.args.into() };
-        match self.run_state(a, State { regs, frames: Vec::new(), f, acc: value }, level) {
-            Ok(Outcome::Return(v)) => {
-                Self::set_state(a, co, CoroutineState::Completed);
-                Ok(Step::Done(v))
-            }
-            Ok(Outcome::Suspend { value, awaiting, saved }) => {
-                Self::set_state(a, co, CoroutineState::Suspended(saved));
-                Ok(if awaiting { Step::Await(value) } else { Step::Yield(value) })
-            }
-            Ok(Outcome::Paused(_)) => unreachable!("coroutine steps run without a budget"),
+        match (state, mode) {
+            (S::Suspended, _) => {}
+            (S::Running, _) => return Err(a.throw(ErrorKind::Type, "Generator is already running")),
+            (S::Completed, Resume::Next) => return Ok(Step::Done(Value::Undefined)),
+            (S::Completed, Resume::Return) => return Ok(Step::Done(value)),
+            (S::Completed, Resume::Throw) => return Err(a.throw_value(value)),
+        }
+        let (callee, params) = Self::coroutine(co, |c| (c.frame.closure, c.frame.params.clone()));
+        let Some(closure) = callee.as_object().and_then(|o| match &o.borrow().kind {
+            ObjectKind::Function(c) => Some(*c),
+            _ => None,
+        }) else {
+            unreachable!("a generator's function")
+        };
+        let mut regs = a.take_regs();
+        regs.clear();
+        let (this, args) = params.split_first().map_or((Value::Undefined, &[][..]), |(t, rest)| (*t, rest));
+        let f = self.open(a, &mut regs, closure, callee, this, args);
+        if let Some(r) = self.function(closure.func).func.bytecode.new_target_or_generator {
+            regs[f.base + usize::try_from(r).unwrap_or(0)] = co.into();
+        }
+        let r = self.run_frame(a, regs, f, level);
+        // An async generator's body reports through its intrinsics: an `await` (also of a yielded value), a request
+        // answered (`yield*` / `return`), a rejection
+        let v = match r {
+            Ok(v) => v,
             Err(e) => {
-                Self::set_state(a, co, CoroutineState::Completed);
-                Err(e)
+                Self::coroutine_mut(a, co, |c| c.state = S::Completed);
+                return Err(e);
             }
+        };
+        let (suspended, waiting, settlement) = Self::coroutine_mut(a, co, |c| {
+            let suspended = c.state == S::Suspended;
+            if !suspended {
+                c.state = S::Completed;
+            }
+            (suspended, c.waiting, core::mem::replace(&mut c.settlement, Settlement::Nothing))
+        });
+        match (suspended, waiting, settlement) {
+            (true, W::Await(w) | W::Yield(w), _) => Ok(Step::Await(w)),
+            (true, _, Settlement::Resolved(x)) => Ok(Step::Yield(x)),
+            (true, ..) => Ok(Step::Yield(v)),
+            (false, _, Settlement::Rejected(e)) => Err(a.throw_value(e)),
+            (false, _, Settlement::Resolved(x)) => Ok(Step::Done(x)),
+            (false, ..) => Ok(Step::Done(v)),
         }
     }
 
@@ -1883,49 +2478,23 @@ impl<'gc> Invoke<'gc> for Executor {
     }
 }
 
-impl Executor {
-    /// Runs one frame to return in a fresh execution state.
-    fn run_frame<'gc>(&self, a: &mut Agent<'gc, '_>, regs: Vec<Value<'gc>>, f: Frame<'gc>, level: usize) -> Result<Value<'gc>, Error> {
-        self.run_state(a, State { regs, frames: Vec::new(), f, acc: Value::Undefined }, level).map(Outcome::returned)
-    }
-
-    fn run_state<'gc>(&self, a: &mut Agent<'gc, '_>, st: State<'gc>, level: usize) -> Result<Outcome<'gc>, Error> {
-        let saved = self.depth.replace(level);
-        let r = self.execute(a, st, &mut None);
-        self.depth.set(saved);
-        r
-    }
-
-    /// Replaces the coroutine's state with `state`.
-    fn set_state<'gc>(a: &Agent<'gc, '_>, co: JsObject<'gc>, state: CoroutineState<'gc>) {
-        if let ObjectKind::Coroutine(c) = &mut co.borrow_mut(a.mc).kind {
-            c.state = state;
-        }
-    }
-}
-
-#[cfg(feature = "compile")]
 j8framework::paragc::brand!(
     /// The brand of a parked execution state.
     ParkedBrand = for<'gc> j8framework::GcCell<'gc, Option<State<'gc>>>
 );
 
 /// Execution state attached to the roots between slices.
-#[cfg(feature = "compile")]
 type Parked = j8framework::Root<ParkedBrand>;
 
 /// Result of running one slice.
-#[cfg(feature = "compile")]
 enum Slice {
     Done(j8framework::Global),
     Paused(Parked),
 }
 
 /// A started piece of source (the engine's [`Job`](j8framework::Engine::Job))
-#[cfg(feature = "compile")]
 pub struct Job(Started);
 
-#[cfg(feature = "compile")]
 enum Started {
     /// A script, loaded, not entered yet
     Script(FuncId),
@@ -1937,24 +2506,22 @@ enum Started {
     Spent,
 }
 
-#[cfg(feature = "compile")]
 impl j8framework::Engine for Executor {
     type Job = Job;
 
     fn start(&mut self, _: &mut j8framework::Isolate<'_>, _: &j8framework::ContextRoot, src: &j8framework::Source<'_>, kind: j8framework::ScriptKind) -> Result<Job, Error> {
         Ok(Job(match kind {
-            j8framework::ScriptKind::Classic => Started::Script(self.load(Module::try_from(src)?)),
+            j8framework::ScriptKind::Classic => Started::Script(self.load(Module::compile(src, j8framework::CodeKind::Script)?)),
             j8framework::ScriptKind::Shared => Started::Script(self.load(match &self.cache {
                 Some(cache) => cache.script(src)?,
-                None => Module::try_from(src)?,
+                None => Module::compile(src, j8framework::CodeKind::Script)?,
             })),
             j8framework::ScriptKind::Module => Started::Module { text: src.text.into(), file: src.file.into() },
         }))
     }
 
-    /// A script runs until it returns or the quota is spent; then its execution state parks on the roots, and some
-    /// garbage is collected as `enter` returns. A module (not sliced) runs loading, linking, evaluation and microtasks
-    /// to the end in one turn.
+    /// A script runs until it returns or the quota is spent; then its execution state parks on the roots. A module
+    /// runs loading, linking, evaluation and microtasks to the end in one turn.
     fn resume(&mut self, isolate: &mut j8framework::Isolate<'_>, cx: &j8framework::ContextRoot, job: &mut Job, quota: &mut j8framework::Quota) -> Result<Option<j8framework::Global>, Error> {
         let this: &Executor = self;
         let started = core::mem::replace(&mut job.0, Started::Spent);
@@ -1963,7 +2530,7 @@ impl j8framework::Engine for Executor {
             let realm = scope.context_of(cx);
             let mut a = scope.agent(realm, this);
             let st = match started {
-                Started::Script(main) => this.script_state(&mut a, main),
+                Started::Script(main) => this.script_state(&mut a, main)?,
                 Started::Paused(root) => j8framework::CellExt::borrow_mut(a.fetch(&root), a.mc).take().expect("a parked state"),
                 Started::Module { text, file } => {
                     this.run_module(&mut a, &file, &text, 0)?;
@@ -1978,7 +2545,6 @@ impl j8framework::Engine for Executor {
                     a.run_jobs()?;
                     Ok(Slice::Done(a.global(v)))
                 }
-                Outcome::Suspend { .. } => unreachable!("scripts do not suspend"),
             }
         });
         quota.spend(quota.left() - budget.unwrap_or(0));
@@ -1988,391 +2554,6 @@ impl j8framework::Engine for Executor {
                 job.0 = Started::Paused(root);
                 Ok(None)
             }
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    extern crate std;
-
-    use alloc::string::String;
-    use alloc::vec::Vec;
-    use core::time::Duration;
-    use std::sync::Mutex;
-
-    use j8builtins::Builtins;
-    use j8framework::{CreateParams, Error, Isolate, Platform, Source, Task};
-
-    use crate::Executor;
-
-    /// A platform that captures `console.log`.
-    #[derive(Default)]
-    struct Capture(Mutex<Vec<String>>);
-
-    impl j8framework::Pool for Capture {
-        fn threads(&self) -> usize {
-            1
-        }
-
-        fn run(&self, tasks: Vec<Task<'_>>) {
-            for t in tasks {
-                t();
-            }
-        }
-    }
-
-    impl Platform for Capture {
-        fn now(&self) -> Duration {
-            Duration::ZERO
-        }
-
-        fn print(&self, line: &str) {
-            self.0.lock().expect("an unpoisoned log").push(String::from(line));
-        }
-    }
-
-    /// Runs a script: gives the result (or the thrown value) via ToString, plus the `console.log` output.
-    fn eval(src: &str) -> (Result<String, String>, Vec<String>) {
-        let platform = Capture::default();
-        let mut isolate = Isolate::new(&platform, CreateParams::default());
-        let mut executor = Executor::default();
-        let cx = isolate.enter(|scope| scope.persist(scope.context(&Builtins)));
-        let r = isolate.run(&mut executor, &cx, &Source { text: src, file: "t.js" });
-        let r = isolate.enter(|scope| {
-            let realm = scope.context_of(&cx);
-            let mut agent = scope.agent(realm, &executor);
-            let (ok, v) = match r {
-                Ok(g) => (true, agent.local(&g)),
-                Err(Error::Exception(g)) => (false, agent.local(&g)),
-                Err(e) => return Err(alloc::format!("{e}")),
-            };
-            let text = agent.to_string(v).map_or_else(|_| String::from("<ToString threw>"), |s| String::from(&**s));
-            if ok { Ok(text) } else { Err(text) }
-        });
-        // The heap borrows the platform: take the isolate apart first, then fetch the log
-        drop(isolate);
-        (r, platform.0.into_inner().expect("an unpoisoned log"))
-    }
-
-    /// A long loop that keeps allocating temporary objects: one `eval` runs to completion, and GC has already happened
-    /// along the way (between slices).
-    #[test]
-    fn collects_while_running() {
-        let platform = Capture::default();
-        let mut isolate = Isolate::new(&platform, CreateParams::default());
-        let mut executor = Executor::default();
-        let cx = isolate.enter(|scope| scope.persist(scope.context(&Builtins)));
-        let before = isolate.gc_cycles();
-        let src = "let s = 0; for (let i = 0; i < 300000; i++) { const o = { v: [i, i] }; s += o.v[0] % 2 } s";
-        let r = isolate.run(&mut executor, &cx, &Source { text: src, file: "t.js" });
-        assert!(r.is_ok());
-        let cycles = isolate.gc_cycles() - before;
-        std::println!("gc cycles during one eval: {cycles}");
-        assert!(cycles > 0, "no collection finished while the script ran");
-    }
-
-    #[test]
-    #[expect(clippy::too_many_lines, reason = "a table of test cases")]
-    fn javascript_semantics() {
-        let ok = [
-            ("1 + 2 * 3", "7"),
-            ("'a' + 1", "a1"),
-            ("var x = 10; x += 5; x", "15"),
-            ("let s = 0; for (let i = 0; i < 10; i++) s += i; s", "45"),
-            ("function fib(n) { return n < 2 ? n : fib(n - 1) + fib(n - 2); } fib(20)", "6765"),
-            ("function mk() { let c = 0; return () => ++c; } const f = mk(); f(); f(); f()", "3"),
-            ("const fs = []; for (let i = 0; i < 3; i++) fs[i] = () => i; fs[0]() + fs[1]() + fs[2]()", "3"),
-            ("const o = { n: 2, get() { return this.n * 21; } }; o.get()", "42"),
-            ("const a = [1, 2, 3]; a[3] = 4; a.length + a[3]", "8"),
-            ("`x=${1 + 1}!`", "x=2!"),
-            ("function g(x) { switch (x) { case 1: return 'one'; case 2: return 'two'; default: return 'many'; } } g(1) + g(2) + g(5)", "onetwomany"),
-            ("let n = 0; outer: for (let i = 0; i < 5; i++) { for (let j = 0; j < 5; j++) { if (j == 3) continue outer; if (i == 3) break outer; n++; } } n", "9"),
-            ("typeof undeclared + typeof null + (5 & 3) + (-1 >>> 28)", "undefinedobject115"),
-            ("(null ?? 'd') + (0 || 'x') + (1 && 'y')", "dxy"),
-            ("let i = 0; do { i++ } while (i < 5); while (i < 8) i++; i", "8"),
-            ("const f = function fact(n) { return n <= 1 ? 1 : n * fact(n - 1); }; f(10)", "3628800"),
-            ("const o = { v: 7, m() { return (() => this.v)(); } }; o.m()", "7"),
-            ("let x = 1; { let x = 2; } x", "1"),
-            ("function a() { let x = 1; function b() { function c() { return x + 1; } return c(); } return b(); } a()", "2"),
-            ("[1, [2, 3], null] + ''", "1,2,3,"),
-            ("'10' == 10 && '10' !== 10 && 2 ** 10 === 1024 && 'b' > 'a'", "true"),
-            // Stage 1: exceptions
-            ("try { throw 1 } catch (e) { e + 1 }", "2"),
-            ("let r = ''; try { r += 'a'; throw Error('x') } catch (e) { r += e.message } finally { r += 'f' } r", "axf"),
-            ("const log = []; function f() { try { return 'try' } finally { log.push('fin') } } f() + log.join()", "tryfin"),
-            ("function f() { try { return 1 } finally { return 2 } } f()", "2"),
-            ("let s = ''; for (let i = 0; i < 3; i++) { try { if (i == 1) break; s += i } finally { s += 'f' } } s", "0ff"),
-            ("let s = ''; for (let i = 0; i < 3; i++) { try { if (i == 1) continue; s += i } finally { s += 'f' } } s", "0ff2f"),
-            ("let s = ''; try { try { throw 'in' } finally { s += 'f' } } catch (e) { s += e } s", "fin"),
-            ("try { null.x } catch (e) { e.name }", "TypeError"),
-            ("function thrower() { undefinedThing } let m; try { thrower() } catch (e) { m = e.message } m", "undefinedThing is not defined"),
-            ("const fs = []; try { throw 5 } catch (e) { fs.push(() => e) } fs[0]()", "5"),
-            ("try { [1].map(() => { throw 'cb' }) } catch (e) { e }", "cb"),
-            ("String(TypeError('bad'))", "TypeError: bad"),
-            // Stage 1: built-in objects
-            ("[3, 1, 2].sort().join('-')", "1-2-3"),
-            ("[1, 2, 3].map(x => x * 2).filter(x => x > 2).reduce((a, b) => a + b, 0)", "10"),
-            ("'Hello'.toUpperCase().split('L')", "HE,,O"),
-            ("Math.max(1, 5, 3) + Math.floor(2.7)", "7"),
-            ("parseInt('0x1f') + parseFloat('1.5e1abc')", "46"),
-            ("Object.keys({ a: 1, b: 2 }).join()", "a,b"),
-            ("function f(a, b) { return this.x + a + b } f.bind({ x: 1 }, 2)(3)", "6"),
-            ("Math.max.apply(null, [1, 9, 3]) + f2.call({ k: 1 }); function f2() { return this.k }", "10"),
-            ("(255).toString(16) + (0.5).toString(2)", "ff0.1"),
-            ("[1, 2, 3].includes(2) && 'abc'.includes('b') && [NaN].includes(NaN)", "true"),
-            ("({ valueOf() { return 41 } }) + 1", "42"),
-            ("`${{ toString() { return 'obj' } }}`", "obj"),
-            ("({}) + ''", "[object Object]"),
-            ("'abc'.padStart(5, '-') + 'x'.repeat(3) + '  t '.trim()", "--abcxxxt"),
-            // Stage 2: new, classes, accessors, instanceof / in / delete
-            ("function P(x) { this.x = x } P.prototype.get = function () { return this.x }; new P(5).get()", "5"),
-            ("function F() { return { y: 1 } } new F().y", "1"),
-            ("class A { constructor(v) { this.v = v } get double() { return this.v * 2 } static make() { return new A(3) } } A.make().double", "6"),
-            ("class A { hi() { return 'A' } } class B extends A { hi() { return super.hi() + 'B' } } new B().hi()", "AB"),
-            ("class A { constructor(x) { this.x = x } } class B extends A { constructor(x) { super(x * 2); this.y = 1 } } const b = new B(2); b.x + b.y", "5"),
-            ("class A { constructor(a, b) { this.s = a + b } } class B extends A {} new B(1, 2).s", "3"),
-            ("class C { a = 1; b = this.a + 1; static s = 'st' } const c = new C(); c.a + c.b + C.s", "3st"),
-            ("class A { constructor() { this.base = 1 } } class B extends A { f = this.base + 1 } new B().f", "2"),
-            ("class A {} class B extends A {} const b = new B(); (b instanceof B) + ',' + (b instanceof A) + ',' + ({} instanceof A)", "true,true,false"),
-            ("const o = { a: 1 }; ('a' in o) + ',' + delete o.a + ',' + ('a' in o)", "true,true,false"),
-            ("const o = { _v: 1, get v() { return this._v }, set v(x) { this._v = x * 10 } }; o.v = 2; o.v", "20"),
-            ("class MyErr extends Error { constructor(m) { super(m); this.name = 'MyErr' } } try { throw new MyErr('boom') } catch (e) { (e instanceof MyErr) + ' ' + (e instanceof Error) + ' ' + e }", "true true MyErr: boom"),
-            ("new TypeError('x').message + (new Error() instanceof Error)", "xtrue"),
-            ("const K = class Inner { who() { return Inner.tag } }; K.tag = 'k'; new K().who()", "k"),
-            ("class A { v() { return 1 } } class B extends A { v() { return (() => super.v() + 1)() } } new B().v()", "2"),
-            ("const o = {}; Object.defineProperty(o, 'x', { get() { return 7 } }); o.x + Object.keys(o).length", "7"),
-            ("class A { m() {} } Object.keys(new A()).length + Object.keys({ p: 1 }).length", "1"),
-            ("const o = Object.freeze({ a: 1 }); o.a = 2; o.a", "1"),
-            // Stage 3: rest / default parameters, spread, destructuring, optional chaining
-            ("function f(a, b = a + 1, ...rest) { return a + b + rest.length } f(1) + f(1, 5, 9, 9)", "11"),
-            ("const [x, , y = 3, ...z] = [1, 2, undefined, 4, 5]; x + y + z.join('')", "445"),
-            ("const { a, b: { c }, d = 4, ...rest } = { a: 1, b: { c: 2 }, e: 5, f: 6 }; a + c + d + Object.keys(rest).join()", "7e,f"),
-            ("let p = 1, q = 2; [p, q] = [q, p]; p * 10 + q", "21"),
-            ("let m, n; ({ m, n = 7 } = { m: 3 }); m + n", "10"),
-            ("function g({ x, y } = {}, [z] = [9]) { return (x ?? 0) + (y ?? 0) + z } g() + g({ x: 1, y: 2 }, [3])", "15"),
-            ("Math.max(...[1, 5, 3], 2)", "5"),
-            ("[0, ...[1, 2], ...'ab', , 3].join()", "0,1,2,a,b,,3"),
-            ("const o = { a: 1, ...{ b: 2, a: 3 }, c: 4 }; o.a + o.b + o.c", "9"),
-            ("class P { constructor(a, b) { this.s = a + b } } new P(...[2, 3]).s", "5"),
-            ("class A { constructor(...xs) { this.n = xs.length } } class B extends A { constructor(...xs) { super(...xs, 0) } } new B(1, 2).n", "3"),
-            ("const o = { a: { b: 1 }, f() { return this.a.b } }; [o?.a?.b, o.x?.y, o.f?.(), o.g?.(), o?.['a']?.b].join()", "1,,1,,1"),
-            ("null?.x.y.z", "undefined"),
-            ("function h({ k }) { return () => k } h({ k: 'c' })()", "c"),
-            ("try { throw { code: 7 } } catch ({ code }) { code }", "7"),
-            ("function d(a, b = () => a) { a = 2; return b() } d(1)", "2"),
-            ("const { length } = 'abc'; const [first] = 'xyz'; length + first", "3x"),
-            ("var it = {}; let closed = 0; it[Symbol.iterator] = function () { return { next() { return { done: false } }, return() { closed++; return {} } } }; function t() { throw 'lhs' } let r; try { 0, [...{}[t()]] = it } catch (e) { r = e } r + closed", "lhs1"),
-            ("const log = []; const it = { [Symbol.iterator]() { return { next() { log.push('next'); return { done: false, value: 1 } }, return() { log.push('ret'); return {} } } } }; const o = { get p() { log.push('ref'); return {} } }; [o.p.x] = it; log.join()", "ref,next,ret"),
-            ("let c = 0; const it = { [Symbol.iterator]() { return { next: () => ({ done: false, value: undefined }), return() { c++; return {} } } } }; try { const [a = (() => { throw 1 })()] = it } catch {} c", "1"),
-            // Stage 4: Symbol, iteration, for-of / for-in, generators
-            ("const s = Symbol('d'); const o = { [s]: 1 }; o[s] + typeof s + s.description + String(s)", "1symboldSymbol(d)"),
-            ("const o = { [Symbol.toPrimitive](h) { return h === 'number' ? 42 : 'str' } }; +o + ',' + `${o}`", "42,str"),
-            ("const it = { [Symbol.iterator]() { let i = 0; return { next: () => ({ value: i, done: i++ >= 3 }) } } }; [...it].join()", "0,1,2"),
-            ("let s = 0; for (const x of [1, 2, 3]) s += x; s", "6"),
-            ("let r = ''; for (const c of 'héllo') r = c + r; r", "olléh"),
-            ("const fs = []; for (const x of [1, 2]) fs.push(() => x); fs[0]() + fs[1]()", "3"),
-            ("let closed = 0; const it = { [Symbol.iterator]() { return { next: () => ({ value: 1, done: false }), return() { closed++; return {} } } } }; for (const x of it) break; for (const x of it) { try { throw 0 } catch {} break } function f() { for (const x of it) return 1 } f(); closed", "3"),
-            ("let s = ''; for (const [k, v] of Object.entries({ a: 1, b: 2 })) s += k + v; s", "a1b2"),
-            ("const o = { a: 1, b: 2 }; let s = ''; for (const k in o) s += k; for (const i in ['x', 'y']) s += i; s", "ab01"),
-            ("function P() { this.own = 1 } P.prototype.inh = 2; let s = ''; for (const k in new P()) s += k; s", "owninh"),
-            ("let s = ''; outer: for (const a of [1, 2]) { for (const b of [1, 2]) { if (b == 2) continue outer; s += a + '' + b } } s", "1121"),
-            ("function* g() { yield 1; yield 2; return 3 } const it = g(); [it.next().value, it.next().value, it.next().value, it.next().done].join()", "1,2,3,true"),
-            ("function* g() { let i = 0; while (i < 3) yield i++ } [...g()].join()", "0,1,2"),
-            ("function* g() { const x = yield 1; yield x * 2 } const it = g(); it.next(); it.next(21).value", "42"),
-            ("const log = []; function* g() { try { yield 1; yield 2 } finally { log.push('f') } } const it = g(); it.next(); [it.return(9).value, it.next().done, log.join()].join()", "9,true,f"),
-            ("function* g() { try { yield 1 } catch (e) { yield 'caught ' + e } } const it = g(); it.next(); it.throw('x').value", "caught x"),
-            ("function* inner() { yield 1; yield 2; return 'r' } function* outer() { const v = yield* inner(); yield v } [...outer()].join()", "1,2,r"),
-            ("function* nat() { let n = 0; while (true) yield n++ } const [a, b, c] = nat(); a + b + c", "3"),
-            ("const o = { *[Symbol.iterator]() { yield 'a'; yield 'b' } }; [...o].join('')", "ab"),
-            ("class C { *gen() { yield this.v } } const c = new C(); c.v = 5; c.gen().next().value", "5"),
-            ("[...[1, 2].entries()].join(';') + [...[7].keys()]", "0,1;1,20"),
-            // Stage 5: RegExp, BigInt
-            ("const m = /a(b)c/.exec('xabcx'); m.index + m[1] + m", "1babc,b"),
-            ("/^\\d+$/.test('123') && !/^\\d+$/.test('12a')", "true"),
-            ("'a1b22c333'.match(/\\d+/g).join()", "1,22,333"),
-            ("'2024-11-11'.replace(/(\\d+)-(\\d+)-(\\d+)/, '$3/$2/$1')", "11/11/2024"),
-            ("'aaa'.replace(/a/g, (m, i) => i)", "012"),
-            ("'a,b;c'.split(/[,;]/).join('|') + ' ' + 'abc'.split(/(b)/).join('|')", "a|b|c a|b|c"),
-            ("const { groups: { y, m } } = /(?<y>\\d{4})-(?<m>\\d{2})/.exec('2024-11'); y + m", "202411"),
-            ("const re = /o/g; let n = 0; while (re.exec('foo boo')) n++; n", "4"),
-            ("/x/gi.flags + /x/gi + new RegExp('a+', 'y').sticky", "gi/x/gitrue"),
-            // Calling a built-in RegExp method on a non-RegExp object (an empty object): throws TypeError (the fast
-            // path first checks that it is an unmodified RegExp)
-            ("let e; try { RegExp.prototype.test.call({}) } catch (x) { e = x.name } e", "TypeError"),
-            ("'hello'.search(/l+/) + [...'a1b2'.matchAll(/[a-z](\\d)/g)].map(m => m[1]).join()", "21,2"),
-            ("'a.b.c'.replaceAll('.', '-') + 'x'.replace('x', '[$&]')", "a-b-c[x]"),
-            ("/É/i.test('é')", "true"),
-            ("2n ** 64n", "18446744073709551616"),
-            ("typeof 1n + (10n / 3n) + (-7n % 2n)", "bigint3-1"),
-            ("(1n << 100n) >> 99n", "2"),
-            ("10n > 9 && 10n == 10 && 10n !== 10 && 1n < 1.5 && 2n > '1'", "true"),
-            ("let x = 5n; x++; x * 2n", "12"),
-            ("BigInt('0x10') + BigInt(3) + BigInt(true)", "20"),
-            ("(255n).toString(16) + String(-1n)", "ff-1"),
-            ("Number(2n ** 53n) === 2 ** 53", "true"),
-            ("-(2n) + ~5n", "-8"),
-            // Stage 6: temporal dead zone, script scope
-            ("let s = 0; for (let i = 0; i < 3; i++) { let t = i; s += t } s", "3"),
-            ("function f() { let x = 1; { const y = x + 1; return y } } f()", "2"),
-            ("let lx = 1; var vx = 2; (globalThis.lx === undefined) + ',' + globalThis.vx + ',' + lx", "true,2,1"),
-            ("class A {} class B extends A { constructor() { super(); this.x = 1 } } new B().x", "1"),
-            ("'a'", "a"),
-            ("'use strict'; 'b'", "b"),
-            // Class private names, static blocks, computed field names
-            ("class C { #x = 1; #m() { return this.#x + 1 } get #g() { return this.#x * 10 } set #g(v) { this.#x = v } run() { this.#g = 5; return [this.#m(), this.#g, #x in this, #x in {}].join() } } new C().run()", "6,50,true,false"),
-            ("class A { static #count = 0; static inc() { return ++A.#count } static { A.inc(); A.inc() } static get n() { return A.#count } } A.n", "2"),
-            ("let k = 'dyn'; class C { [k + 1] = 5; static [k] = 6 } [new C().dyn1, C.dyn].join()", "5,6"),
-            ("class C { #m() { return 1 } same(o) { return this.#m === o.#m } } new C().same(new C())", "true"),
-            ("class B { #p = 2; static has(o) { return #p in o } } class D extends B { #q = 3; q() { return this.#q } } const o = new D(); [B.has(o), o.q()].join()", "true,3"),
-            ("class C { #a = 1; inc() { this.#a += 2; this.#a++; return this.#a } } new C().inc()", "4"),
-            ("class C { static { var v = 1; this.v = v } } C.v + typeof v", "1undefined"),
-            ("let i = 0; class C { [i++] = 'a'; [i++] = 'b' } const c1 = new C(), c2 = new C(); c1[0] + c1[1] + c2[0] + i", "aba2"),
-            // Function name / length, new.target, tagged templates, arguments
-            ("function f(a, b = 1, c) {} const g = () => 0; let h = function () {}; const o = { m() {}, get x() { return 1 }, k: () => 0 }; class C { static s() {} } [f.name, f.length, g.name, h.name, o.m.name, Object.getOwnPropertyDescriptor(o, 'x').get.name, o.k.name, C.name, C.s.name, (class {}).name, [].map.name, f.bind(null, 1).name, f.bind(null, 1).length].join()", "f,1,g,h,m,get x,k,C,s,,map,bound f,0"),
-            ("let x; x = function () {}; const { y = () => 0 } = {}; [x.name, y.name, (function (z = class {}) { return z.name })()].join()", "x,y,z"),
-            ("function F() { this.t = new.target === F } function G() { return new.target } [new F().t, G() === undefined, (() => { function H() { this.t = (() => new.target)() === H } return new H().t })()].join()", "true,true,true"),
-            ("function tag(s, ...v) { return s.raw.join('|') + ':' + s.join('|') + ':' + v.join() } tag`a${1}b${2}c`", "a|b|c:a|b|c:1,2"),
-            ("function t(s) { return s } const sites = []; for (let i = 0; i < 2; i++) sites.push(t`x`); sites[0] === sites[1] && t`x` !== sites[0]", "true"),
-            (r"function t(s) { return s.raw[0] + (s[0] === undefined) } t`\unicode`", r"\unicodetrue"),
-            ("const o = { f(s) { return this.k + s[0] }, k: 'k' }; o.f`!`", "k!"),
-            ("function f() { return arguments.length + ':' + [...arguments].join() + ':' + arguments[1] } f(1, 2, 3)", "3:1,2,3:2"),
-            ("function f() { const g = () => arguments[0]; return g() } f('lex')", "lex"),
-            ("function f(arguments) { return arguments } f(5)", "5"),
-            ("function f() { return Object.keys(arguments).join() + (arguments.callee === f) } f('a', 'b')", "0,1true"),
-            // Map / Set / WeakMap / WeakSet
-            ("const m = new Map([[1, 'a'], ['1', 'b']]); m.set(NaN, 'n'); [m.get(1), m.get('1'), m.get(NaN), m.size, m.has(2)].join()", "a,b,n,3,false"),
-            ("1 / [...new Map([[-0, 1]]).keys()][0]", "Infinity"),
-            ("const s = new Set([1, 2, 3]); const out = []; for (const x of s) { out.push(x); if (x == 1) { s.delete(2); s.add(4) } } out.join()", "1,3,4"),
-            ("const m = new Map([['a', 1], ['b', 2]]); let r = ''; m.forEach((v, k) => r += k + v); r + [...m].join(';')", "a1b2a,1;b,2"),
-            ("[...new Set('hello')].join('')", "helo"),
-            ("const k = {}; const m = new Map([[k, 1]]); m.get(k) + ',' + m.get({})", "1,undefined"),
-            ("const s = new Set([1, 2]); s.clear(); s.size + ',' + s.has(1)", "0,false"),
-            ("const wm = new WeakMap(); const o = {}; wm.set(o, 5); `${wm.get(o)},${wm.has({})},${new WeakSet([o]).has(o)}`", "5,false,true"),
-            ("class M extends Map { constructor() { super([[1, 2]]) } } const x = new M(); x.get(1) + ',' + (x instanceof Map) + ',' + (x instanceof M)", "2,true,true"),
-            // JSON
-            (r"JSON.stringify({ a: 1, b: [true, null, 'x'], c: undefined, d: () => 1 })", r#"{"a":1,"b":[true,null,"x"]}"#),
-            (r"JSON.stringify([undefined, NaN, function () {}])", r"[null,null,null]"),
-            (r#"JSON.stringify('a"b\n')"#, r#""a\"b\n""#),
-            (r"JSON.stringify({ a: [1, 2], b: {} }, null, 2)", "{\n  \"a\": [\n    1,\n    2\n  ],\n  \"b\": {}\n}"),
-            (r"JSON.stringify({ a: 1, b: 2 }, (k, v) => k === 'b' ? undefined : v)", r#"{"a":1}"#),
-            (r"JSON.stringify({ a: 1, b: 2, c: 3 }, ['c', 'a'])", r#"{"c":3,"a":1}"#),
-            (r"JSON.stringify({ toJSON() { return 'x' } })", r#""x""#),
-            (r#"const o = JSON.parse('{"a": [1, 2.5e1, "s\\u0041"], "b": null}'); o.a[1] + o.a[2] + o.b"#, "25sAnull"),
-            (r"JSON.parse('[1, 2, 3]', (k, v) => typeof v === 'number' ? v * 2 : v).join()", "2,4,6"),
-            (r#"JSON.stringify(JSON.parse('{"x":{"y":[1,{"z":"w"}]}}'))"#, r#"{"x":{"y":[1,{"z":"w"}]}}"#),            // Dynamic code and strict mode
-            ("new Function('a', 'b', 'return a + b')(2, 3)", "5"),
-            ("Function('return typeof this')()", "object"),
-            ("var gv = 1; eval('gv + 1')", "2"),
-            ("eval('var ev = 4'); ev", "4"),
-            ("const GF = Object.getPrototypeOf(function* () {}).constructor; GF('yield 1; yield 2')().next().value", "1"),
-            ("(function () { return this === globalThis })()", "true"),
-            ("(function () { 'use strict'; return typeof this })()", "undefined"),
-            ("(function () { return typeof this }).call(1)", "object"),
-            ("const o = Object.freeze({ a: 1 }); o.a = 2; o.a", "1"),
-            ("class C { m() { return typeof this } } const m = new C().m; m()", "undefined"),
-            // Property model and Object / Array
-            ("Object.keys({ b: 1, 2: 1, a: 1, 1: 1 }).join()", "1,2,b,a"),
-            ("Object.getOwnPropertyNames([1, 2]).join()", "0,1,length"),
-            ("const a = [1, 2, 3]; delete a[1]; (1 in a) + ',' + a.length", "false,3"),
-            ("const f = Object.freeze([1]); let e; try { f.push(2) } catch (x) { e = x.name } Object.isFrozen(f) + e + f.length", "trueTypeError1"),
-            ("Array.prototype.map.call({ length: 2, 0: 'a', 1: 'b' }, x => x + x).join()", "aa,bb"),
-            ("[1, [2, [3, [4]]]].flat(Infinity).join() + '|' + [3, 1, 2].toSorted().join() + '|' + [1, 2, 3].with(1, 9).join()", "1,2,3,4|1,2,3|1,9,3"),
-            ("({ __proto__: Array.prototype }) instanceof Array", "true"),
-            ("Object.fromEntries([['a', 1], ['b', 2]]).b + Object.entries({ x: 3 })[0][1]", "5"),
-            ("class M extends Map {} const m = new M(); (m instanceof M) + ',' + m.size", "true,0"),
-            ("Math.max.length + [].push.length + Object.defineProperty.length + typeof new Number(1)", "6object"),
-            ("const a = [1, 2, 3]; a.length = 1; a.splice(0, 0, 'x', 'y'); a.join() + Array.from({ length: 2 }, (_, i) => i * 2).join()", "x,y,10,2"),
-            // Proxy / Reflect / Iterator helpers / Set methods
-            ("const log = []; const p = new Proxy({ a: 1 }, { get(t, k, r) { log.push(k); return Reflect.get(t, k, r) } }); p.a + log.join()", "1a"),
-            ("const f = new Proxy(function (x) { return x * 2 }, { apply(t, th, args) { return t(...args) + 1 } }); f(5) + typeof f", "11function"),
-            ("const { proxy, revoke } = Proxy.revocable({}, {}); revoke(); let e; try { proxy.x } catch (x) { e = x.name } e", "TypeError"),
-            ("function* g() { yield 1; yield 2; yield 3; yield 4 } g().map(x => x * 10).filter(x => x > 10).take(2).toArray().join() + '|' + g().drop(2).reduce((a, b) => a + b)", "20,30|7"),
-            ("new Set([1, 2, 3]).union(new Set([3, 4])).size + [...new Set([1, 2, 3]).difference(new Set([2]))].join()", "41,3"),
-            ("Map.groupBy([1, 2, 3], x => x % 2).get(1).join() + Reflect.ownKeys({ b: 1, 1: 0 }).join()", "1,31,b"),
-            ("const o = Object.preventExtensions({ a: 1 }); o.b = 2; Object.isExtensible(o) + ',' + ('b' in o) + ',' + Object.isSealed(Object.seal({}))", "false,false,true"),
-        ];
-        for (src, want) in ok {
-            assert_eq!(eval(src).0, Ok(String::from(want)), "{src}");
-        }
-        let thrown = [
-            ("undefinedVar", "ReferenceError: undefinedVar is not defined"),
-            ("function r() { return r(); } r()", "RangeError: Maximum call stack size exceeded"),
-            ("const c = 1; c = 2", "TypeError: Assignment to constant variable."),
-            ("throw 'boom'", "boom"),
-            ("let u; u.x", "TypeError: Cannot read properties of undefined (reading 'x')"),
-            ("try { throw 1 } finally { }", "1"),
-            ("(1)()", "TypeError: 1 is not a function"),
-            ("class A {} A()", "TypeError: Class constructor A cannot be invoked without 'new'"),
-            ("class A {} class B extends A { constructor() {} } new B()", "ReferenceError: Must call super constructor in derived class before accessing 'this' or returning from derived constructor"),
-            ("class A extends 3 {}", "TypeError: Class extends value 3 is not a constructor or null"),
-            ("1 in 2", "TypeError: Cannot use 'in' operator to search for '1' in 2"),
-            ("const { x } = null", "TypeError: Cannot read properties of null (reading 'x')"),
-            ("[...1]", "TypeError: 1 is not iterable"),
-            ("for (const x of 5) {}", "TypeError: 5 is not iterable"),
-            ("const it = (function* () { yield it.next() })(); it.next()", "TypeError: Generator is already running"),
-            ("1n + 1", "TypeError: Cannot mix BigInt and other types, use explicit conversions"),
-            ("1n / 0n", "RangeError: Division by zero"),
-            ("BigInt(1.5)", "RangeError: The number 1.5 cannot be converted to a BigInt because it is not an integer"),
-            ("+1n", "TypeError: Cannot convert a BigInt value to a number"),
-            ("1n >>> 1n", "TypeError: BigInts have no unsigned right shift, use >> instead"),
-            ("new RegExp('a', 'gg')", "SyntaxError: Invalid flags supplied to RegExp constructor 'gg'"),
-            ("{ x; let x = 1 }", "ReferenceError: Cannot access 'x' before initialization"),
-            ("let y = y", "ReferenceError: Cannot access 'y' before initialization"),
-            ("function f() { return g() } const v = f(); function g() { return w } let w = 1", "ReferenceError: Cannot access 'w' before initialization"),
-            ("typeof z; let z", "ReferenceError: Cannot access 'z' before initialization"),
-            ("class A {} class B extends A { constructor() { this.x = 1; super() } } new B()", "ReferenceError: Must call super constructor in derived class before accessing 'this' or returning from derived constructor"),
-            ("function f() { const g = () => q; g(); let q = 1 } f()", "ReferenceError: Cannot access 'q' before initialization"),
-            ("switch (1) { case 0: let a = 1; case 1: a }", "ReferenceError: Cannot access 'a' before initialization"),
-            ("function f() { const k = 1; k = 2 } f()", "TypeError: Assignment to constant variable."),
-            ("function f() { m = 1; let m } f()", "ReferenceError: Cannot access 'm' before initialization"),
-            (r"JSON.parse('{a: 1}')", "SyntaxError: Unexpected token 'a' in JSON at position 1 (expected a property name)"),
-            (r"JSON.parse('[1,]')", "SyntaxError: Unexpected token ']' in JSON at position 3 (expected a value)"),
-            ("const o = {}; o.self = o; JSON.stringify(o)", "TypeError: Converting circular structure to JSON"),
-            ("JSON.stringify(1n)", "TypeError: Do not know how to serialize a BigInt"),
-            ("new WeakMap().set(1, 1)", "TypeError: Invalid value used as weak map key"),
-            ("class C { #x = 1; static read(o) { return o.#x } } C.read({})", "TypeError: Cannot read private member #x from an object whose class did not declare it"),
-            ("class C { #m() {} f() { this.#m = 1 } } new C().f()", "TypeError: Private method #m is not writable"),
-            ("class C { get #g() { return 1 } f() { this.#g = 2 } } new C().f()", "TypeError: '#g' was defined without a setter"),
-            ("class C { #x; static f(o) { return #x in o } } C.f(1)", "TypeError: Cannot use 'in' operator to search for '#x' in 1"),            ("'use strict'; undeclaredStrict = 1", "ReferenceError: undeclaredStrict is not defined"),
-            ("'use strict'; const o = Object.freeze({ a: 1 }); o.a = 2", "TypeError: Cannot assign to read only property 'a'"),
-            ("(function () { 'use strict'; return arguments.callee })()", "TypeError: 'caller', 'callee', and 'arguments' properties may not be accessed on strict mode functions or the arguments objects for calls to them"),
-            ("new Math.max()", "TypeError: max is not a constructor"),
-            ("Map()", "TypeError: Constructor Map requires 'new'"),
-            ("'use strict'; Object.preventExtensions([]).push(1)", "TypeError: Cannot add property 0, object is not extensible"),
-            ("eval('let let = 1')", "SyntaxError: [eval]: `let` cannot be declared as a variable name inside of a `let` declaration"),
-        ];
-        for (src, want) in thrown {
-            assert_eq!(eval(src).0, Err(String::from(want)), "{src}");
-        }
-        let (r, out) = eval("console.log('a', 1, [2, 3]); console.log(); 0");
-        assert_eq!((r, out), (Ok(String::from("0")), alloc::vec![String::from("a 1 2,3"), String::new()]));
-        // Stage 4: Promise and async (results are the output order after microtasks have run)
-        let printed = [
-            ("Promise.resolve(1).then(v => console.log('then', v)); console.log('sync')", "sync|then 1"),
-            ("async function f() { const x = await Promise.resolve(2); return x * 3 } f().then(v => console.log(v)); console.log('first')", "first|6"),
-            ("async function f() { throw new Error('bad') } f().catch(e => console.log(e.message))", "bad"),
-            ("async function f() { try { await Promise.reject('no') } catch (e) { return 'caught ' + e } } f().then(console.log)", "caught no"),
-            ("Promise.all([1, Promise.resolve(2), new Promise(r => r(3))]).then(v => console.log(v.join()))", "1,2,3"),
-            ("Promise.resolve().then(() => console.log('a')).then(() => console.log('c')); Promise.resolve().then(() => console.log('b'))", "a|b|c"),
-            ("const f = async x => x + 1; f(1).then(console.log)", "2"),
-            ("Promise.resolve({ then(r) { r(7) } }).then(console.log)", "7"),
-            ("Promise.reject(1).finally(() => console.log('fin')).catch(e => console.log('e', e))", "fin|e 1"),
-            ("async function a() { console.log('a1'); await 0; console.log('a2') } a(); console.log('main')", "a1|main|a2"),
-            ("class K { async m() { return this.v } } const k = new K(); k.v = 'mv'; k.m().then(console.log)", "mv"),
-            // Async generators, for await
-            ("async function* g() { yield 1; const x = yield 2; yield x * 10; return 'end' } (async () => { const it = g(); const r = []; r.push((await it.next()).value); r.push((await it.next()).value); r.push((await it.next(4)).value); const last = await it.next(); r.push(last.value, last.done); console.log(r.join()) })()", "1,2,40,end,true"),
-            ("async function* nums() { for (let i = 0; i < 3; i++) { await null; yield i } } (async () => { let s = ''; for await (const n of nums()) s += n; for await (const v of [Promise.resolve('a'), 'b']) s += v; console.log(s) })()", "012ab"),
-            ("async function* g() { try { yield 1; yield 2 } finally { console.log('cleanup') } } (async () => { for await (const x of g()) { console.log(x); break } console.log('after') })()", "1|cleanup|after"),
-            ("const it = (async function* () { yield 1 })(); Promise.all([it.next(), it.next(), it.next()]).then(rs => console.log(rs.map(r => r.value + ':' + r.done).join()))", "1:false,undefined:true,undefined:true"),
-            ("async function* inner() { yield 1; await null; yield 2; return 'r' } async function* outer() { const v = yield* inner(); yield v; yield* [Promise.resolve(3), 4] } (async () => { const out = []; for await (const x of outer()) out.push(x); console.log(out.join()) })()", "1,2,r,3,4"),
-            ("async function* inner() { try { yield 1; yield 2 } finally { console.log('inner fin') } } async function* outer() { yield* inner() } (async () => { const it = outer(); await it.next(); const r = await it.return(7); console.log(r.value, r.done) })()", "inner fin|7 true"),
-            ("async function* g() { throw new Error('boom') } g().next().catch(e => console.log(e.message))", "boom"),
-        ];
-        for (src, want) in printed {
-            let (r, out) = eval(src);
-            assert!(r.is_ok(), "{src}: {r:?}");
-            assert_eq!(out.join("|"), want, "{src}");
         }
     }
 }

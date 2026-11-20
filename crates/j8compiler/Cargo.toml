@@ -1,6 +1,6 @@
 [package]
 name = "j8compiler"
-description = "j8 compiler: bytecode ⇒ MLIR (llvm dialect) ⇒ mlirpass ⇒ raw machine code"
+description = "j8 compiler: JavaScript ⇒ j8 bytecode (parsing with oxc)"
 readme = "README.md"
 version.workspace = true
 edition.workspace = true
@@ -9,8 +9,14 @@ repository.workspace = true
 
 [dependencies]
 j8framework.workspace = true
-j8virtasm.workspace = true
-mlirpass.workspace = true
+j8bytecode.workspace = true
+oxc_allocator.workspace = true
+oxc_ast.workspace = true
+oxc_parser.workspace = true
+oxc_span.workspace = true
+oxc_semantic.workspace = true
+oxc_syntax.workspace = true
+ryu-js.workspace = true
 
 [lints]
 workspace = true

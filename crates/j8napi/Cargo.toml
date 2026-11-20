@@ -1,0 +1,21 @@
+[package]
+name = "j8napi"
+description = "Node-API (napi) for j8: the C ABI that native addons (and napi-rs modules) link against, implemented on j8's engine"
+readme = "README.md"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+j8framework.workspace = true
+j8lockfree.workspace = true
+num-bigint.workspace = true
+
+[dev-dependencies]
+j8executor.workspace = true
+j8builtins.workspace = true
+j8platform.workspace = true
+
+[lints]
+workspace = true

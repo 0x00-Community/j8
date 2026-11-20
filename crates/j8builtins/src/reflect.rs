@@ -17,7 +17,8 @@ impl Reflects {
     }
 
     fn proxy<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        if a.new_target == Value::Undefined {
+        let new_target = a.new_target;
+        if new_target == Value::Undefined {
             return Err(a.throw(ErrorKind::Type, "Constructor Proxy requires 'new'"));
         }
         Ok(Self::create(a, args.at(0), args.at(1))?.into())
@@ -26,7 +27,7 @@ impl Reflects {
     /// `Proxy.revocable(target, handler)`: `{ proxy, revoke }`.
     fn revocable<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let p = Self::create(a, args.at(0), args.at(1))?;
-        let revoke = ObjectData { kind: ObjectKind::NativeClosure(NativeClosure { f: Self::revoke, slots: alloc::vec![p.into()] }), proto: Some(a.realm.function_proto), ..ObjectData::default() }.alloc(a.mc);
+        let revoke = ObjectData { kind: ObjectKind::NativeClosure(NativeClosure { f: Self::revoke, slots: alloc::vec![p.into()], constructor: false }), proto: Some(a.realm.function_proto), ..ObjectData::default() }.alloc(a.mc);
         a.realm.name_function(a.mc, revoke, "", Some(0));
         let out = a.object();
         a.create_data_property_or_throw(out, j8framework::Key::Str("proxy"), p.into())?;

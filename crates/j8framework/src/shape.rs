@@ -7,7 +7,6 @@
 //! are freed naturally. Deleting a property, changing attributes, or having too many keys turns the object's properties
 //! into a dictionary ([`Dict`], modified in place); inline caches don't accept it.
 use alloc::sync::Arc;
-use core::sync::atomic::{AtomicPtr, AtomicU32, Ordering};
 use alloc::vec::Vec;
 use core::hash::BuildHasherDefault;
 
@@ -17,7 +16,7 @@ use crate::Collect;
 use rustc_hash::FxHasher;
 
 use crate::store::Store;
-use crate::{Erased, Gc, GcCell, GcSlot, Mutation, Property, SmallStr, Slot, Value, ValueCell};
+use crate::{Erased, Gc, GcCell, GcSlot, IsoCell, Mutation, Property, SmallStr, Slot, Value, ValueCell};
 
 /// Up to this many keys, search linearly; beyond that, build an index once the shape is searched often
 const LINEAR: usize = 8;
@@ -27,6 +26,9 @@ const INDEX_AFTER: u32 = 4;
 /// A shared shape has at most this many keys; adding more converts to a dictionary shape (overly long transition chains
 /// aren't worth it)
 const MAX_FAST: usize = 64;
+/// How many property values live inside the object itself (the rest go to the store): small objects need no second
+/// allocation and no indirection
+const INLINE: usize = 4;
 
 /// Property attributes (whether it is data or an accessor depends on what the slot holds).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -56,6 +58,12 @@ impl From<&Property<'_>> for Attrs {
     }
 }
 
+impl<'gc> From<(Slot<'gc>, Attrs)> for Property<'gc> {
+    fn from((slot, a): (Slot<'gc>, Attrs)) -> Self {
+        Self { slot, enumerable: a.enumerable(), writable: a.writable(), configurable: a.configurable() }
+    }
+}
+
 /// A shape.
 pub struct Shape {
     /// Keys and attributes, shared along a transition chain: this shape's are the first `len`
@@ -64,19 +72,27 @@ pub struct Shape {
     /// Built on demand (see [`INDEX_AFTER`]), once
     index: OnceBox<hashbrown::HashMap<SmallStr, u32, BuildHasherDefault<FxHasher>>>,
     /// Linear searches so far (for a shape beyond [`LINEAR`] keys without an index)
-    searches: AtomicU32,
+    searches: IsoCell<u32>,
     /// Child shapes reached by adding a key (with attributes), held strongly: a whole tree lives as long as its root
     /// (the root a prototype object hands out, or the anchor of an object that has none), so objects can point at
     /// their shape without counting references
     transitions: Chain<(SmallStr, Attrs, Arc<Shape>)>,
     /// The root of this shape's tree (children inherit it): telling whether a shape belongs to a given tree is one
     /// compare. Set right after the root is allocated ([`Shape::rooted`])
-    tree: AtomicPtr<Shape>,
+    tree: IsoCell<*const Shape>,
+    /// Some key starts with a digit (an array index maybe: key order puts those first)
+    digit_keys: bool,
 }
 
 impl Shape {
     fn new(keys: Arc<Prefix<(SmallStr, Attrs)>>, len: usize) -> Self {
-        Self { keys, len, index: OnceBox::default(), searches: AtomicU32::new(0), transitions: Chain::default(), tree: AtomicPtr::new(core::ptr::null_mut()) }
+        let digit_keys = keys.prefix(len).iter().any(|(k, _)| k.as_bytes().first().is_some_and(u8::is_ascii_digit));
+        Self { keys, len, index: OnceBox::default(), searches: IsoCell::new(0), transitions: Chain::default(), tree: IsoCell::new(core::ptr::null()), digit_keys }
+    }
+
+    /// Some key starts with a digit
+    pub fn digit_keys(&self) -> bool {
+        self.digit_keys
     }
 
     /// Its keys and attributes, in order
@@ -88,6 +104,11 @@ impl Shape {
         self.len
     }
 
+    /// Whether this shape belongs to `root`'s tree (which then keeps it alive)
+    pub fn in_tree(&self, root: &Shape) -> bool {
+        core::ptr::eq(self.tree.get(), root)
+    }
+
     pub fn is_empty(&self) -> bool {
         self.len == 0
     }
@@ -96,7 +117,11 @@ impl Shape {
         if let Some(m) = self.index.get() {
             return m.get(key).map(|&i| i as usize);
         }
-        if self.len > LINEAR && self.searches.fetch_add(1, Ordering::Relaxed) >= INDEX_AFTER {
+        if self.len > LINEAR && {
+            let n = self.searches.get();
+            self.searches.set(n.saturating_add(1));
+            n >= INDEX_AFTER
+        } {
             let m = self.index.get_or_init(|| self.keys().iter().zip(0u32..).map(|((k, _), i)| (k.clone(), i)).collect());
             return m.get(key).map(|&i| i as usize);
         }
@@ -113,14 +138,14 @@ impl Shape {
 
     /// Whether `to` is this shape's child by a transition (so this shape's tree holds it)
     fn has_child(&self, to: &Shape) -> bool {
-        to.len() == self.len() + 1 && to.tree.load(Ordering::Relaxed) == self.tree.load(Ordering::Relaxed)
+        to.len() == self.len() + 1 && to.tree.get() == self.tree.get()
     }
 
     /// A new tree root (it is its own tree)
     fn rooted(keys: Vec<(SmallStr, Attrs)>) -> Arc<Self> {
         let len = keys.len();
         let s = Arc::new(Self::new(Prefix::new(keys), len));
-        s.tree.store(Arc::as_ptr(&s).cast_mut(), Ordering::Relaxed);
+        s.tree.set(Arc::as_ptr(&s));
         s
     }
 
@@ -131,7 +156,7 @@ impl Shape {
         }
         // The key goes at the end of the shared key table when this shape is its tip, or into a copy of this shape's keys
         let keys = self.keys.extend(self.len, (SmallStr::from(key), attrs));
-        let child = Arc::new(Self { tree: AtomicPtr::new(self.tree.load(Ordering::Relaxed)), ..Self::new(keys, self.len + 1) });
+        let child = Arc::new(Self { tree: IsoCell::new(self.tree.get()), ..Self::new(keys, self.len + 1) });
         &self.transitions.push((SmallStr::from(key), attrs, child)).2
     }
 
@@ -182,37 +207,47 @@ pub struct Props<'gc> {
     /// The current shape; null when empty or a dictionary. It owns no count: it lives in a tree held by `anchor`, or by
     /// the root shape of the prototype the object had when it got its first key (an object keeps its prototype alive;
     /// changing the prototype anchors the tree here)
-    shape: AtomicPtr<Shape>,
+    shape: IsoCell<*const Shape>,
     store: GcSlot<'gc, Erased>,
     dict: GcSlot<'gc, GcCell<'gc, Dict<'gc>>>,
     anchor: GcSlot<'gc, Anchor>,
+    /// Values of entries `0..INLINE` (entry `i` ≥ `INLINE` is cell `i − INLINE` of the store)
+    inline: [ValueCell<'gc>; INLINE],
 }
 
 impl Default for Props<'_> {
     fn default() -> Self {
-        Self { shape: AtomicPtr::new(core::ptr::null_mut()), store: GcSlot::default(), dict: GcSlot::default(), anchor: GcSlot::default() }
+        Self {
+            shape: IsoCell::new(core::ptr::null()),
+            store: GcSlot::default(),
+            dict: GcSlot::default(),
+            anchor: GcSlot::default(),
+            inline: core::array::from_fn(|_| ValueCell::new(Value::Undefined)),
+        }
     }
 }
 
-// SAFETY: the three slots are the edges (the shape is not on the heap)
+// SAFETY: the three slots and the inline cells are the edges (the shape is not on the heap)
 unsafe impl crate::Trace for Props<'_> {
     fn trace(&self, t: &mut crate::Tracer<'_>) {
         self.store.trace(t);
         self.dict.trace(t);
         self.anchor.trace(t);
+        self.inline.iter().for_each(|c| c.trace(t));
     }
 
     fn relocate(&mut self, t: &mut crate::Tracer<'_>) {
         self.store.relocate(t);
         self.dict.relocate(t);
         self.anchor.relocate(t);
+        self.inline.iter_mut().for_each(|c| c.relocate(t));
     }
 }
 
 impl<'gc> Props<'gc> {
     /// Empty, with room for `n` values already (an object literal knows how many it gets)
     pub fn with_capacity(mc: &Mutation<'gc>, n: usize) -> Self {
-        let store = (n > 0).then(|| Store::reserve(mc, n).gc());
+        let store = (n > INLINE).then(|| Store::reserve(mc, n - INLINE).gc());
         Self { store: GcSlot::from(store), ..Self::default() }
     }
 
@@ -225,12 +260,21 @@ impl<'gc> Props<'gc> {
         self.store.get().map(|g| unsafe { Store::from_gc(g) })
     }
 
+    /// The value cell of fast-mode entry `i` (inside the object, or in the store)
+    #[inline]
+    fn cell(&self, i: usize) -> Option<&ValueCell<'gc>> {
+        match i.checked_sub(INLINE) {
+            None => Some(&self.inline[i]),
+            Some(k) => self.store()?.cell(k),
+        }
+    }
+
     /// The current shared shape; `None` when empty or a dictionary
     #[inline]
     pub fn shape_ref(&self) -> Option<&'gc Shape> {
         // SAFETY: the shape's tree outlives this object's use of it (see `Props::shape`); `'gc` is bounded by this
         // mutate, during which the object (and so its prototype or anchor) is alive
-        unsafe { self.shape.load(Ordering::Acquire).as_ref() }
+        unsafe { self.shape.get().as_ref() }
     }
 
     /// The current shape's address (inline caches identify shapes by it); `None` when empty or a dictionary
@@ -287,17 +331,52 @@ impl<'gc> Props<'gc> {
         }
     }
 
+    /// Entry `i`'s value when it holds data (an inline cache hit: the caller matched a fast-mode shape, so this is
+    /// no dictionary); `None` for an accessor, and for a lazy value not computed yet (an object-level read computes it)
+    #[inline]
+    pub fn read_data(&self, i: usize) -> Option<Value<'gc>> {
+        let v = self.cell(i)?.get();
+        v.is_plain_slot().then_some(v)
+    }
+
+    /// Replaces entry `i`'s value when it holds data (as [`Props::read_data`]); `false` for an accessor
+    #[inline]
+    pub fn write_data(&self, mc: &Mutation<'gc>, i: usize, v: Value<'gc>) -> bool {
+        let Some(c) = self.cell(i) else { return false };
+        if c.get().as_accessor().is_some() {
+            return false;
+        }
+        c.set(mc, v);
+        true
+    }
+
     #[inline]
     pub fn slot(&self, i: usize) -> Slot<'gc> {
         match self.dict_cell() {
             Some(d) => d.borrow().slots[i],
-            None => Slot::decode(self.store().and_then(|s| s.cell(i)).map_or(Value::Undefined, ValueCell::get)),
+            None => Slot::decode(self.cell(i).map_or(Value::Undefined, ValueCell::get)),
         }
     }
 
     pub fn get(&self, i: usize) -> Property<'gc> {
-        let a = self.attrs(i);
-        Property { slot: self.slot(i), enumerable: a.enumerable(), writable: a.writable(), configurable: a.configurable() }
+        Property::from((self.slot(i), self.attrs(i)))
+    }
+
+    /// Entry `i` if its key is exactly `key`, in one look: one dictionary borrow, the key compared in place (the
+    /// execution layer caches indexes of global names and checks them with this)
+    #[inline]
+    pub fn get_if(&self, i: usize, key: &str) -> Option<Property<'gc>> {
+        match self.dict_cell() {
+            Some(d) => {
+                let d = d.borrow();
+                let (k, a) = d.keys.get(i)?;
+                (**k == *key).then(|| Property::from((d.slots[i], *a)))
+            }
+            None => {
+                let (k, a) = self.shape_ref()?.keys().get(i)?;
+                (**k == *key).then(|| Property::from((self.slot(i), *a)))
+            }
+        }
     }
 
     /// Store the contents of entry `i` (attributes unchanged)
@@ -306,7 +385,7 @@ impl<'gc> Props<'gc> {
         match self.dict_cell() {
             Some(d) => d.borrow_mut(mc).slots[i] = slot,
             None => {
-                if let Some(c) = self.store().and_then(|s| s.cell(i)) {
+                if let Some(c) = self.cell(i) {
                     c.set(mc, slot.encode(mc));
                 }
             }
@@ -325,12 +404,12 @@ impl<'gc> Props<'gc> {
 
     /// A dictionary holding everything in fast mode now
     fn to_dict(&self) -> Dict<'gc> {
-        let (shape, store) = (self.shape_ref(), self.store());
+        let shape = self.shape_ref();
         let n = shape.map_or(0, Shape::len);
         let mut d = Dict {
             keys: (0..n).map(|i| (shape.expect("a fast shape").key(i).clone(), shape.expect("a fast shape").attrs(i))).collect(),
             index: None,
-            slots: (0..n).map(|i| Slot::decode(store.and_then(|s| s.cell(i)).map_or(Value::Undefined, ValueCell::get))).collect(),
+            slots: (0..n).map(|i| Slot::decode(self.cell(i).map_or(Value::Undefined, ValueCell::get))).collect(),
         };
         d.reindex();
         d
@@ -340,9 +419,8 @@ impl<'gc> Props<'gc> {
     fn with_dict(&self, mc: &Mutation<'gc>, f: impl FnOnce(&mut Dict<'gc>)) {
         if self.dict.get().is_none() {
             let d = mc.alloc(GcCell::new(mc, self.to_dict()));
-            // A racing converter may win; then its dictionary is the one
-            let _ = self.dict.compare_exchange(mc.mutator(), None, Some(d));
-            self.shape.store(core::ptr::null_mut(), Ordering::Release);
+            self.dict.set(mc.mutator(), Some(d));
+            self.shape.set(core::ptr::null());
         }
         f(&mut self.dict_cell().expect("just converted").borrow_mut(mc));
     }
@@ -351,13 +429,23 @@ impl<'gc> Props<'gc> {
     /// shape changed meanwhile (the caller retries)
     fn advance(&self, mc: &Mutation<'gc>, from: Option<&Shape>, to: &Shape, slot: Slot<'gc>) -> bool {
         let n = to.len() - 1;
-        let cur = self.store();
-        let grown = Store::put(cur, mc, n, n, slot.encode(mc));
-        if cur.is_none_or(|s| !Gc::ptr_eq(s.gc(), grown.gc())) {
-            self.store.set(mc.mutator(), Some(grown.gc()));
+        let v = slot.encode(mc);
+        match n.checked_sub(INLINE) {
+            None => self.inline[n].set(mc, v),
+            Some(k) => {
+                let cur = self.store();
+                let grown = Store::put(cur, mc, k, k, v);
+                if cur.is_none_or(|s| !Gc::ptr_eq(s.gc(), grown.gc())) {
+                    self.store.set(mc.mutator(), Some(grown.gc()));
+                }
+            }
         }
-        let from = from.map_or(core::ptr::null_mut(), |f| core::ptr::from_ref(f).cast_mut());
-        self.shape.compare_exchange(from, core::ptr::from_ref(to).cast_mut(), Ordering::AcqRel, Ordering::Acquire).is_ok()
+        let from = from.map_or(core::ptr::null(), core::ptr::from_ref);
+        if self.shape.get() != from {
+            return false;
+        }
+        self.shape.set(core::ptr::from_ref(to));
+        true
     }
 
     /// Keep `tree` alive from here (no prototype root holds it)
@@ -366,8 +454,9 @@ impl<'gc> Props<'gc> {
     }
 
     /// Append a new key (the caller guarantees it isn't present); an empty object starts from `root` (the prototype's
-    /// root shape; without one it anchors a tree of its own)
-    pub fn push<'r>(&self, mc: &Mutation<'gc>, key: &str, prop: Property<'gc>, root: impl Fn() -> Option<&'r Shape>)
+    /// root shape; without one it anchors a tree of its own). `wide`: stay in fast mode past [`MAX_FAST`] keys (the
+    /// global object and the script scope, whose entries the execution layer caches by shape)
+    pub fn push<'r>(&self, mc: &Mutation<'gc>, key: &str, prop: Property<'gc>, wide: bool, root: impl Fn() -> Option<&'r Shape>)
     where
         'gc: 'r,
     {
@@ -376,7 +465,7 @@ impl<'gc> Props<'gc> {
             let from = self.shape_ref();
             let anchored;
             let to: &Shape = match from {
-                Some(f) if f.len() >= MAX_FAST => break,
+                Some(f) if !wide && f.len() >= MAX_FAST => break,
                 // The child lives in `f`'s tree, which is held elsewhere
                 Some(f) => f.child_ref(key, attrs),
                 None => match root() {
@@ -421,6 +510,33 @@ impl<'gc> Props<'gc> {
                 return;
             }
         }
+    }
+
+    /// An empty object takes shape `to` at once, with values `slots` in order (`to` has exactly that many keys; the
+    /// execution layer caches the final shape of an object literal / a function object): what V8 does by copying a
+    /// boilerplate with its map. Anchors `to` unless the prototype's root `root` holds its tree.
+    pub fn fill<'r>(&self, mc: &Mutation<'gc>, to: &Arc<Shape>, slots: impl IntoIterator<Item = Slot<'gc>>, root: impl Fn() -> Option<&'r Shape>)
+    where
+        'gc: 'r,
+    {
+        debug_assert!(self.shape_ref().is_none() && !self.is_dict());
+        for (i, slot) in slots.into_iter().enumerate().take(to.len()) {
+            let v = slot.encode(mc);
+            match i.checked_sub(INLINE) {
+                None => self.inline[i].set(mc, v),
+                Some(k) => {
+                    let cur = self.store();
+                    let grown = Store::put(cur, mc, k, k, v);
+                    if cur.is_none_or(|s| !Gc::ptr_eq(s.gc(), grown.gc())) {
+                        self.store.set(mc.mutator(), Some(grown.gc()));
+                    }
+                }
+            }
+        }
+        if !root().is_some_and(|r| to.in_tree(r)) {
+            self.anchor(mc, Arc::clone(to));
+        }
+        self.shape.set(Arc::as_ptr(to));
     }
 
     /// The prototype changed: anchor the current shape's tree here (the new prototype's root may not hold it)

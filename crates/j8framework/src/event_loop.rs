@@ -143,6 +143,8 @@ struct Bell {
     weight: AtomicUsize,
     /// Steps it has run
     spent: AtomicU64,
+    /// 它的 isolate 的句柄：别的线程不用等循环线程就能中止它的 JS
+    handle: crate::IsolateHandle,
 }
 
 impl Bell {
@@ -453,8 +455,10 @@ impl<'p, E: Engine + Send + for<'gc> Invoke<'gc> + 'p> ITask<'p> for SettleTask<
         // SAFETY: the running task of the event loop's queue
         let st = unsafe { self.js.state() };
         quota.spend(1);
+        // 被中止的结算只是这一个任务没做完，不算事件循环出错
         if let Some(settle) = self.settle.take()
             && let Err(e) = st.settle(&self.resolve, &self.reject, settle)
+            && !matches!(e, Error::Terminated)
         {
             st.bell.fault(e);
         }
@@ -518,6 +522,7 @@ impl<'p, E: Engine + Send + for<'gc> Invoke<'gc> + 'p> Lane<'p, E> {
             idle: Fifo::default(),
             weight: AtomicUsize::new(1),
             spent: AtomicU64::new(0),
+            handle: isolate.handle(),
         });
         let state = JsState { bell: Arc::clone(&bell), isolate, engine, cx, pending: Vec::new(), holes: Vec::new(), last: None };
         Box::new(Self { tasks: Queue::default(), js: Arc::new(Js { state: UnsafeCell::new(state) }), bell })
@@ -967,6 +972,12 @@ impl<'p, E: Engine + Send + for<'gc> Invoke<'gc> + 'p> EventLoop<'p, E> {
     /// The loop thread it lives on now
     pub fn thread(&self) -> usize {
         self.bell.home.load(Ordering::Acquire)
+    }
+
+    /// 它的 isolate 的句柄（[`IsolateHandle::terminate`](crate::IsolateHandle::terminate) 中止正在跑的脚本：那个脚本得
+    /// [`Error::Terminated`]，事件循环接着跑别的）
+    pub fn handle(&self) -> crate::IsolateHandle {
+        self.bell.handle.clone()
     }
 }
 

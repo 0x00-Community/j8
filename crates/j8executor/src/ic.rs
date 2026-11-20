@@ -33,7 +33,7 @@ fn plain(d: &Object<'_>) -> bool {
 
 /// What it looked like before the change (compared against by the add-property cache).
 #[derive(Clone)]
-pub(crate) struct Before {
+pub struct Before {
     shape: usize,
     /// Keeps the starting shape's allocation (so its address isn't reused while the cache holds it)
     from: Option<Weak<Shape>>,
@@ -50,7 +50,7 @@ impl From<JsObject<'_>> for Before {
 
 /// The cache for one property read/write site.
 #[derive(Default)]
-pub(crate) struct Ic {
+pub struct Ic {
     /// Receiver shape address (0: nothing cached)
     shape: Cell<usize>,
     /// Slot index
@@ -62,6 +62,8 @@ pub(crate) struct Ic {
     chain: [Cell<usize>; DEPTH],
     /// Add property: the shape transitioned to
     to: RefCell<Option<Arc<Shape>>>,
+    /// `to` is set (a write adds the property rather than modifies it)
+    adds: Cell<bool>,
     /// Keeps the recognized shape addresses alive
     keep: RefCell<Vec<Weak<Shape>>>,
 }
@@ -76,6 +78,7 @@ impl Ic {
         self.shape.set(0);
         self.keep.borrow_mut().clear();
         *self.to.borrow_mut() = None;
+        self.adds.set(false);
     }
 
     fn keep(&self, d: &Object<'_>) -> usize {
@@ -116,29 +119,30 @@ impl Ic {
     // ---- Read ----
 
     #[inline]
-    pub(crate) fn get<'gc>(&self, o: JsObject<'gc>) -> Option<Value<'gc>> {
+    pub fn get<'gc>(&self, o: JsObject<'gc>) -> Option<Value<'gc>> {
+        // A cached shape is a fast-mode one: matching it rules out a dictionary
         let want = self.shape.get();
         let d = o.get();
-        if addr(d) != want || !plain(d) {
+        if addr(d) != want || !d.is_plain() {
             return None;
         }
         let slot = self.slot.get() as usize;
         let holder = match self.depth.get() {
-            0 => return Self::data(d.props().slot(slot)),
+            0 => return d.props().read_data(slot),
             n => self.holder(d.proto(), usize::from(n))?,
         };
-        Self::data(holder.props().slot(slot))
+        holder.props().read_data(slot)
     }
 
     fn data(s: Slot<'_>) -> Option<Value<'_>> {
         match s {
-            Slot::Data(v) => Some(v),
-            Slot::Accessor { .. } => None,
+            Slot::Data(v) if v.as_lazy().is_none() => Some(v),
+            _ => None,
         }
     }
 
     /// After a slow-path read, records where it was found
-    pub(crate) fn fill_get(&self, o: JsObject<'_>, name: &str) {
+    pub fn fill_get(&self, o: JsObject<'_>, name: &str) {
         self.reset();
         if !Self::name_ok(name) {
             return;
@@ -184,37 +188,30 @@ impl Ic {
 
     /// On a hit, writes and returns `true`
     #[inline]
-    pub(crate) fn set<'gc>(&self, mc: &Mutation<'gc>, o: JsObject<'gc>, v: Value<'gc>, assign: bool) -> bool {
+    pub fn set<'gc>(&self, mc: &Mutation<'gc>, o: JsObject<'gc>, v: Value<'gc>, assign: bool) -> bool {
         let want = self.shape.get();
         let d = o.get();
-        if addr(d) != want || !plain(d) {
+        if addr(d) != want || !d.is_plain() {
+            return false;
+        }
+        // Modify an own writable data property (the cached shape is a fast-mode one)
+        if !self.adds.get() {
+            return d.props().write_data(mc, self.slot.get() as usize, v);
+        }
+        // Add property: extensible; assignments also require the whole prototype chain to be unchanged (an empty
+        // object's address also matches a dictionary's)
+        if d.props().is_dict() || d.non_extensible() || (assign && !self.chain_intact(d.proto(), usize::from(self.depth.get()))) {
             return false;
         }
         let to = self.to.borrow();
-        match &*to {
-            // Modify an own writable data property
-            None => {
-                let slot = self.slot.get() as usize;
-                if !matches!(d.props().slot(slot), Slot::Data(_)) {
-                    return false;
-                }
-                o.set_at(mc, slot, v);
-                true
-            }
-            // Add property: extensible; assignments also require the whole prototype chain to be unchanged
-            Some(to) => {
-                if d.non_extensible() || (assign && !self.chain_intact(d.proto(), usize::from(self.depth.get()))) {
-                    return false;
-                }
-                o.push_to(mc, to, Slot::Data(v));
-                true
-            }
-        }
+        let Some(to) = &*to else { return false };
+        o.push_to(mc, to, Slot::Data(v));
+        true
     }
 
     /// After a slow-path write, records it: an own property was modified, or a property was added (`assign`: an
     /// assignment, so the prototype chain must be checked)
-    pub(crate) fn fill_set(&self, o: JsObject<'_>, name: &str, before: Before, assign: bool) {
+    pub fn fill_set(&self, o: JsObject<'_>, name: &str, before: Before, assign: bool) {
         self.reset();
         if !Self::name_ok(name) || !before.plain {
             return;
@@ -253,7 +250,92 @@ impl Ic {
         // `to` is held strongly and the starting shape through a weak link in `keep`: neither address can be reused
         // while cached
         *self.to.borrow_mut() = Some(to);
+        self.adds.set(true);
         self.keep.borrow_mut().extend(before.from);
         self.shape.set(before.shape);
+    }
+}
+
+/// Address standing for a dictionary-mode object (never cached: real shape addresses are 8-aligned and `EMPTY` is 1)
+const DICT: usize = 2;
+
+/// The shape address of a fast-mode object (`EMPTY` with no keys yet), [`DICT`] in dictionary mode
+fn fast(d: &Object<'_>) -> usize {
+    if d.props().is_dict() { DICT } else { addr(d) }
+}
+
+/// Where a global name lives, for one `lda.global` / `sta.global` constant: an entry of the script scope or of the
+/// global object, recognized by shape (the global object and the script scope stay in fast mode, see
+/// `Object::widen`). A shape fixes the key at every index, so a hit reads the slot without comparing names; `keep`
+/// stops the shapes' addresses from being reused while cached.
+#[derive(Default)]
+pub struct GlobalIc {
+    /// Shape address of the script scope (0: nothing cached). Also checked for global object entries: a new top-level
+    /// `let` changes it, and may shadow the name
+    scope: Cell<usize>,
+    /// Shape address of the global object; 0 when the name is a script scope entry
+    global: Cell<usize>,
+    slot: Cell<u32>,
+    /// A writable data property (`sta.global` may write it in place)
+    writable: Cell<bool>,
+    keep: RefCell<Vec<Weak<Shape>>>,
+}
+
+impl GlobalIc {
+    /// The object and slot holding the name, if the shapes are the cached ones
+    #[inline]
+    pub fn locate<'gc>(&self, scope: JsObject<'gc>, global: JsObject<'gc>) -> Option<(JsObject<'gc>, usize)> {
+        let want = self.scope.get();
+        if want == 0 || fast(scope.get()) != want {
+            return None;
+        }
+        let holder = match self.global.get() {
+            0 => scope,
+            g if fast(global.get()) == g => global,
+            _ => return None,
+        };
+        Some((holder, self.slot.get() as usize))
+    }
+
+    /// The value, if cached and a data property
+    #[inline]
+    pub fn get<'gc>(&self, scope: JsObject<'gc>, global: JsObject<'gc>) -> Option<Value<'gc>> {
+        let (o, at) = self.locate(scope, global)?;
+        Ic::data(o.get().props().slot(at))
+    }
+
+    /// The holder and slot, if cached as a writable data property
+    #[inline]
+    pub fn writable<'gc>(&self, scope: JsObject<'gc>, global: JsObject<'gc>) -> Option<(JsObject<'gc>, usize)> {
+        self.locate(scope, global).filter(|_| self.writable.get())
+    }
+
+    /// After a slow-path access, records where `name` is now (own data properties only)
+    pub fn fill<'gc>(&self, scope: JsObject<'gc>, global: JsObject<'gc>, name: &str) {
+        self.scope.set(0);
+        let mut keep = self.keep.borrow_mut();
+        keep.clear();
+        let own = |d: &Object<'_>| d.position(name).filter(|&i| matches!(d.props().slot(i), Slot::Data(_)));
+        let (sd, gd) = (scope.get(), global.get());
+        if sd.props().is_dict() {
+            return;
+        }
+        let (holder, at) = match own(sd) {
+            Some(at) => (None, at),
+            None if sd.position(name).is_some() || gd.props().is_dict() => return,
+            None => match own(gd) {
+                Some(at) => (Some(gd), at),
+                None => return,
+            },
+        };
+        let Ok(slot) = u32::try_from(at) else { return };
+        keep.extend(sd.props().shape().map(|s| Arc::downgrade(&s)));
+        self.global.set(holder.map_or(0, |g| {
+            keep.extend(g.props().shape().map(|s| Arc::downgrade(&s)));
+            fast(g)
+        }));
+        self.slot.set(slot);
+        self.writable.set(holder.unwrap_or(sd).props().attrs(at).writable());
+        self.scope.set(fast(sd));
     }
 }

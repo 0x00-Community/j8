@@ -1,0 +1,3342 @@
+//! JS ⇒ V8 bytecode: scopes, functions, statements, after V8's `BytecodeGenerator`. Expressions are in `expr.rs`.
+//!
+//! Variables live where V8 puts them: a function's own variables in registers (parameters are `a0` …, `this` the
+//! receiver), variables inner functions capture in context slots (a context per scope level that has any), top-level
+//! script `var`s / functions on the global object (`DeclareGlobals`), top-level script `let` / `const` / `class` in the
+//! script context, names inside `with` or reachable by a sloppy direct eval looked up by name (`LdaLookupSlot`).
+use std::collections::HashSet;
+
+use oxc_allocator::Allocator;
+use oxc_ast::ast::{Directive, BindingIdentifier, BindingPattern, CatchClause, BlockStatement, Class, ClassElement, Expression, MethodDefinitionKind, PropertyKey, ForStatementInit, FormalParameters, Function as AstFunction, ForInStatement, ForOfStatement, ForStatementLeft, Program, Statement, SwitchStatement, TryStatement, VariableDeclaration, VariableDeclarationKind};
+use oxc_parser::{ParseOptions, Parser};
+use oxc_semantic::SemanticBuilder;
+use oxc_span::{GetSpan, SourceType, Span};
+use j8framework::{CodeKind, CompareOp, Error, ImportEntry, ImportName, ModuleInfo, Source};
+
+use crate::builder::{Builder, JumpTable, Label, RegisterList};
+use crate::scope::{Decl, DeclKind, Decls, Hidden, Key, Resolver, NEW_TARGET, THIS};
+use j8bytecode::{Bytecode, ClassBoilerplate, ClassMember, Constant, Context, ContextVariable, MemberKind, CreateClosureFlags, FunctionKind, GlobalDeclaration, Module, Register, Runtime, ScopeInfo, ScopeType, SharedFunction, VariableMode};
+
+/// finally continuation token: entered with an exception, rethrows on exit (V8's `kRethrowToken`)
+const COMPLETION_THROW: i32 = j8bytecode::ContinuationToken::RETHROW;
+/// finally continuation token: entered with a return value, keeps returning on exit
+const COMPLETION_RETURN: i32 = 1;
+/// finally continuation token: the n-th detoured break / continue is this number plus n
+const COMPLETION_ROUTE: i32 = 2;
+/// finally continuation token: normal fall-through (V8's `kFallthroughToken`)
+const COMPLETION_NORMAL: i32 = j8bytecode::ContinuationToken::FALLTHROUGH;
+
+/// Where a name is bound.
+#[derive(Clone, Copy)]
+enum Binding {
+    Reg(Register),
+    /// A slot of this level's context (the slot index includes the context's fixed slots)
+    Context(u32),
+    /// A module import cell (V8's `LdaModuleVariable`: imports are negative cell indices)
+    Import(i32),
+}
+
+struct Bound<'a> {
+    name: &'a str,
+    binding: Binding,
+    constant: bool,
+    /// The temporal dead zone ends at this position (`u32::MAX`: always check)
+    ready: Option<u32>,
+    /// The own name of a named function expression (immutable)
+    self_name: bool,
+}
+
+/// Binding name for `export default expression` / an anonymous default export
+const DEFAULT_BINDING: &str = "*default*";
+
+/// One scope level during code generation.
+struct Level<'a> {
+    /// Which function level it belongs to (index into `frames`; `usize::MAX`: the module scope)
+    func: usize,
+    names: Vec<Bound<'a>>,
+    /// This level has a context: the register holding the outer context while it is current
+    context: Option<Register>,
+    /// The constant pool entry of its context's scope info
+    scope: Option<usize>,
+    /// Its context slots are accessed with context cells (V8's `has_context_cells`: the script context)
+    cells: bool,
+    /// Names not bound here may still be found at run time (a `with` object, `var`s a sloppy direct eval adds): they
+    /// are looked up by name
+    dynamic: bool,
+    /// The register stack top before entering, restored on exit
+    mark: i32,
+    /// The level of a `switch`: cases may skip over declarations, so TDZ checks cannot be elided
+    switch: bool,
+}
+
+/// Result of name resolution: where it is, whether it is constant, and whether reads / writes need a TDZ check (giving
+/// the position where the declaration ends).
+#[derive(Clone, Copy)]
+pub struct Resolved<'a> {
+    pub place: Place<'a>,
+    pub constant: bool,
+    /// `Some(ready)`: a check is needed if the use is before `ready`, or the binding is in a context / in a `switch`
+    pub tdz: Option<(u32, bool)>,
+}
+
+impl Resolved<'_> {
+    /// Whether a use at `pos` needs a TDZ check.
+    pub fn needs_check(&self, pos: u32) -> bool {
+        match self.tdz {
+            Some((ready, always)) => always || pos < ready,
+            None => false,
+        }
+    }
+}
+
+/// Where a name lives.
+#[derive(Clone, Copy)]
+pub enum Place<'a> {
+    Reg(Register),
+    Context { depth: u32, slot: u32, cells: bool },
+    Global(&'a str),
+    Import(i32),
+    /// Looked up by name at run time (inside `with`, under a sloppy direct eval, from eval code)
+    Lookup(&'a str),
+}
+
+/// Where a `break` / `continue` goes.
+struct Jump<'a> {
+    label: Option<&'a str>,
+    /// Whether an unlabeled `break` can exit it (loops and `switch` can, labeled blocks cannot)
+    breakable: bool,
+    continuable: bool,
+    breaks: Label,
+    continues: Label,
+    /// How many contexts this function had pushed on entering it: jumping out must pop the extra ones
+    contexts: Vec<Register>,
+}
+
+/// A `break` / `continue` passing through a finally: the jump continues after the finally runs.
+#[derive(Clone, Copy)]
+struct Route<'a> {
+    span: Span,
+    label: Option<&'a str>,
+    cont: bool,
+}
+
+/// A finally (V8's `TryFinallyBuilder` + `ControlScopeForTryFinally`): registers for the continuation token and
+/// value, where it is entered, and the detoured jumps.
+struct Finally<'a> {
+    token: Register,
+    value: Register,
+    contexts: Vec<Register>,
+    entry: Label,
+    routes: Vec<Route<'a>>,
+}
+
+/// One level of the control stack: jump targets, a `try` region, a finally.
+enum Control<'a> {
+    Jump(Jump<'a>),
+    /// Inside a `try` block (handled by the handler table: nothing to undo when jumping out)
+    Handler,
+    Finally(Finally<'a>),
+    /// The iterator of a `for-of` (its record is in these three registers: iterator, next, done): must be closed before
+    /// jumping out
+    Iterator(Register),
+    /// The iterator of a `for await` (iterator, next, done, sync): jumping out must call `return` and await it
+    AsyncIterator(Register),
+}
+
+/// What kind of function, before V8's `FunctionKind` is picked (with generator / async from the flavor).
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub enum Kind {
+    #[default]
+    Normal,
+    Arrow,
+    Method,
+    Getter,
+    Setter,
+    Constructor { derived: bool },
+    /// Class field / static block initializers
+    Initializer { statik: bool },
+}
+
+/// Function kind and flavor (generator, async).
+#[derive(Clone, Copy, Default)]
+pub struct Flavor {
+    pub kind: Kind,
+    pub generator: bool,
+    pub asynchronous: bool,
+    /// Strict on its own (`'use strict'` at the start of the body, inside a class body); strictness of an enclosing
+    /// scope is inherited regardless
+    pub strict: bool,
+    /// A static class member
+    pub statik: bool,
+}
+
+/// Flavor of a function node: generator / async from the node, kind given by the caller.
+impl From<(&AstFunction<'_>, Kind)> for Flavor {
+    fn from((f, kind): (&AstFunction<'_>, Kind)) -> Self {
+        let strict = f.body.as_ref().is_some_and(|b| Self::use_strict(&b.directives));
+        Self { kind, generator: f.generator, asynchronous: f.r#async, strict, statik: false }
+    }
+}
+
+impl From<Kind> for Flavor {
+    fn from(kind: Kind) -> Self {
+        Self { kind, ..Self::default() }
+    }
+}
+
+impl Flavor {
+    /// Whether the directive prologue contains `'use strict'` (written exactly so, without escapes).
+    pub fn use_strict(directives: &[Directive<'_>]) -> bool {
+        directives.iter().any(|d| d.directive.as_str() == "use strict")
+    }
+
+    /// V8's `FunctionKind` for this flavor (`default`: a class without a `constructor`)
+    pub fn v8_kind(self, default: bool) -> FunctionKind {
+        let (g, a, s) = (self.generator, self.asynchronous, self.statik);
+        match self.kind {
+            Kind::Arrow if a => FunctionKind::AsyncArrowFunction,
+            Kind::Arrow => FunctionKind::ArrowFunction,
+            Kind::Getter if s => FunctionKind::StaticGetterFunction,
+            Kind::Getter => FunctionKind::GetterFunction,
+            Kind::Setter if s => FunctionKind::StaticSetterFunction,
+            Kind::Setter => FunctionKind::SetterFunction,
+            Kind::Constructor { derived: false } if default => FunctionKind::DefaultBaseConstructor,
+            Kind::Constructor { derived: true } if default => FunctionKind::DefaultDerivedConstructor,
+            Kind::Constructor { derived: false } => FunctionKind::BaseConstructor,
+            Kind::Constructor { derived: true } => FunctionKind::DerivedConstructor,
+            Kind::Initializer { statik: false } => FunctionKind::ClassMembersInitializerFunction,
+            Kind::Initializer { statik: true } => FunctionKind::ClassStaticInitializerFunction,
+            Kind::Method => match (g, a, s) {
+                (true, true, false) => FunctionKind::AsyncConciseGeneratorMethod,
+                (true, true, true) => FunctionKind::StaticAsyncConciseGeneratorMethod,
+                (true, false, false) => FunctionKind::ConciseGeneratorMethod,
+                (true, false, true) => FunctionKind::StaticConciseGeneratorMethod,
+                (false, true, false) => FunctionKind::AsyncConciseMethod,
+                (false, true, true) => FunctionKind::StaticAsyncConciseMethod,
+                (false, false, false) => FunctionKind::ConciseMethod,
+                (false, false, true) => FunctionKind::StaticConciseMethod,
+            },
+            Kind::Normal => match (g, a) {
+                (true, true) => FunctionKind::AsyncGeneratorFunction,
+                (true, false) => FunctionKind::GeneratorFunction,
+                (false, true) => FunctionKind::AsyncFunction,
+                (false, false) => FunctionKind::NormalFunction,
+            },
+        }
+    }
+}
+
+/// Where a jump out lands: the jump target / finally of a control stack level, or leaving the function directly.
+enum Exit {
+    Jump(usize),
+    Finally(usize),
+    Function,
+}
+
+/// A function being compiled.
+#[expect(clippy::struct_excessive_bools, reason = "state of a function being compiled: several unrelated flags")]
+struct Frame<'a> {
+    index: usize,
+    b: Builder,
+    name: Box<str>,
+    flavor: Flavor,
+    default_constructor: bool,
+    length: u16,
+    formals: u16,
+    /// The function context's layout, when the function level has a context
+    scope: Option<ScopeInfo>,
+    /// The registers saving the outer contexts of the contexts this function has pushed so far (innermost last)
+    contexts: Vec<Register>,
+    /// How many loops enclose the current position (`JumpLoop`'s depth operand)
+    loop_depth: u32,
+    controls: Vec<Control<'a>>,
+    /// The label for the next loop / `switch`
+    label: Option<&'a str>,
+    /// The script's completion value goes here (only the script itself has one)
+    completion: Option<Register>,
+    /// The generator object of a generator / async function (V8's generator register)
+    generator: Option<Register>,
+    /// Suspend points so far (`SuspendGenerator` ids)
+    suspends: u32,
+    /// The binding of the home object `super.x` reads (methods and arrow functions in them)
+    home: Option<&'static str>,
+    /// The resume points' jump table (`SwitchOnGeneratorState` at the top dispatches on the suspend id)
+    resume_table: Option<JumpTable>,
+    /// Async generator: `yield` / `return` await the value first
+    async_generator: bool,
+    /// Strict mode
+    strict: bool,
+    /// annexB: block-level functions whose value must be written to the outer `var` when execution reaches the
+    /// declaration (by start position of the function node)
+    annexb: Vec<u32>,
+    /// Index of the function-level scope (where `var`s live); global for a script
+    var_level: Option<usize>,
+    /// Eval code: names not bound in it are looked up by name
+    eval: bool,
+    /// Compiling the parameter prologue (an eval here cannot see the body's lexical declarations)
+    prologue: bool,
+    /// All parameters are simple names (no default values, destructuring, or rest)
+    simple_params: bool,
+}
+
+impl Frame<'_> {
+    /// The finished function
+    fn finish(self) -> SharedFunction {
+        SharedFunction {
+            name: self.name,
+            kind: self.flavor.v8_kind(self.default_constructor),
+            strict: self.strict,
+            length: self.length,
+            formal_parameters: self.formals,
+            scope: self.scope,
+            bytecode: self.b.finish(),
+        }
+    }
+}
+
+/// A function body: statements, an arrow function's expression, class field initializers, a default constructor.
+#[derive(Clone, Copy)]
+pub enum Body<'a> {
+    Statements(&'a [Statement<'a>]),
+    Expression(&'a Expression<'a>),
+    /// Instance (`statik` false) or static fields of a class: defined one by one on `this`
+    Fields { class: &'a Class<'a>, statik: bool },
+    /// A class without a `constructor`: a derived class forwards `super(...arguments)`
+    DefaultConstructor { derived: bool },
+}
+
+/// V8's `JSGeneratorObject::ResumeMode`: how a generator is resumed (`GeneratorGetResumeMode`)
+const RESUME_NEXT: i32 = 0;
+const RESUME_RETURN: i32 = 1;
+const RESUME_THROW: i32 = 2;
+
+pub struct Compiler<'a, 's> {
+    src: &'s Source<'s>,
+    /// The AST allocator: hidden binding names in class scopes (`#x` etc.) are allocated here too
+    pub alloc: &'a Allocator,
+    /// Referenced bindings (`new.target` / `arguments` are prepared only if used)
+    used: HashSet<Key>,
+    /// How many class bodies are being compiled (a class body is entirely strict code)
+    class_depth: u32,
+    captured: HashSet<Key>,
+    module: Vec<SharedFunction>,
+    frames: Vec<Frame<'a>>,
+    levels: Vec<Level<'a>>,
+    /// Optional chains being compiled: in each chain, `?.` jumps to the end of the chain on null / undefined
+    pub chains: Vec<Label>,
+    /// Functions containing a direct eval (by start position of the parameter list)
+    eval_fns: HashSet<u32>,
+    /// Suspend points of each generator / async function, by start position of the parameter list
+    suspends: std::collections::HashMap<u32, u32>,
+    /// Completion value (V8's `Rewriter`): expression statements that assign it, and statements before which it is
+    /// reset to `undefined` (by start position)
+    completion_assign: HashSet<u32>,
+    completion_reset: HashSet<u32>,
+    /// While entering a `for` head's scope: the source text of its initializers
+    for_init_text: Option<&'a str>,
+    /// The classes whose bodies are being compiled (innermost last): what their private names are
+    pub classes: Vec<ClassInfo<'a>>,
+    /// The home object binding of the next method compiled (`super.x` reads it)
+    pub next_home: Option<&'static str>,
+}
+
+/// What a private name of a class is: its binding holds a private symbol (field), the method itself, or the accessor
+/// pair; methods and accessors check the class's brand first.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Private {
+    Field,
+    Method { statik: bool },
+    Accessor { statik: bool, get: bool, set: bool },
+}
+
+/// A class being compiled.
+pub struct ClassInfo<'a> {
+    pub privates: Vec<(&'a str, Private)>,
+    /// The bindings of its instance / static brand
+    pub brands: [&'a str; 2],
+    /// The constructor brands its instances (it has private instance methods or accessors)
+    pub brand: bool,
+    /// The constructor runs the instance members initializer (there are instance fields)
+    pub fields: bool,
+}
+
+/// V8's `Rewriter` (`Processor`): which statements of a script / eval code produce its completion value. Statements
+/// are walked backwards; only the last value-producing statement assigns it, except inside breakable statements, where
+/// a `break` / `continue` makes the one before it assign too.
+#[derive(Default)]
+struct Rewriter {
+    is_set: bool,
+    breakable: bool,
+    assign: HashSet<u32>,
+    reset: HashSet<u32>,
+}
+
+impl Rewriter {
+    fn process<'a>(&mut self, stmts: impl DoubleEndedIterator<Item = &'a Statement<'a>>) {
+        for s in stmts.rev() {
+            if !(self.breakable || !self.is_set) {
+                break;
+            }
+            self.visit(s);
+        }
+    }
+
+    fn breakable(&mut self, f: impl FnOnce(&mut Self)) {
+        let saved = core::mem::replace(&mut self.breakable, true);
+        f(self);
+        self.breakable = saved;
+    }
+
+    fn visit(&mut self, s: &Statement<'_>) {
+        let start = s.span().start;
+        match s {
+            Statement::ExpressionStatement(_) => {
+                if !self.is_set {
+                    self.assign.insert(start);
+                    self.is_set = true;
+                }
+            }
+            Statement::BlockStatement(b) => self.process(b.body.iter()),
+            Statement::IfStatement(i) => {
+                let after = self.is_set;
+                self.visit(&i.consequent);
+                let in_then = self.is_set;
+                self.is_set = after;
+                if let Some(a) = &i.alternate {
+                    self.visit(a);
+                }
+                if !(in_then && self.is_set) {
+                    self.reset.insert(start);
+                }
+                self.is_set = true;
+            }
+            Statement::WhileStatement(_) | Statement::DoWhileStatement(_) | Statement::ForStatement(_) | Statement::ForInStatement(_) | Statement::ForOfStatement(_) => {
+                let body = match s {
+                    Statement::WhileStatement(w) => &w.body,
+                    Statement::DoWhileStatement(w) => &w.body,
+                    Statement::ForStatement(f) => &f.body,
+                    Statement::ForInStatement(f) => &f.body,
+                    Statement::ForOfStatement(f) => &f.body,
+                    _ => unreachable!("a loop"),
+                };
+                self.breakable(|r| r.visit(body));
+                self.reset.insert(start);
+                self.is_set = true;
+            }
+            Statement::SwitchStatement(sw) => {
+                self.breakable(|r| {
+                    for c in sw.cases.iter().rev() {
+                        r.process(c.consequent.iter());
+                    }
+                });
+                self.reset.insert(start);
+                self.is_set = true;
+            }
+            Statement::TryStatement(t) => {
+                let after = self.is_set;
+                self.process(t.block.body.iter());
+                let in_try = self.is_set;
+                if let Some(h) = &t.handler {
+                    self.is_set = after;
+                    self.process(h.body.body.iter());
+                }
+                if !(in_try && self.is_set) {
+                    self.reset.insert(start);
+                }
+                self.is_set = true;
+            }
+            Statement::WithStatement(w) => {
+                self.visit(&w.body);
+                if !self.is_set {
+                    self.reset.insert(start);
+                }
+                self.is_set = true;
+            }
+            Statement::LabeledStatement(l) => self.breakable(|r| r.visit(&l.body)),
+            Statement::BreakStatement(_) | Statement::ContinueStatement(_) => self.is_set = false,
+            _ => {}
+        }
+    }
+}
+
+/// JS ⇒ bytecode: every piece of JS (scripts, modules, `eval` / `Function` code) becomes a [`Module`] before it runs.
+pub trait Compile: Sized {
+    /// Compiles by kind: a script's top-level declarations go to the global object / script context; eval code's are
+    /// declared at run time (`DeclareEvalVar` / `DeclareEvalFunction`) or stay within itself (strict). For a script the
+    /// value of the last expression statement is the return value.
+    fn compile(src: &Source<'_>, kind: CodeKind) -> Result<Self, Error>;
+
+    /// Direct eval code: names it doesn't bind are looked up by name in the calling scope chain at run time.
+    fn compile_direct(src: &Source<'_>, strict: bool) -> Result<Self, Error>;
+
+    /// Compiles a module: gives the bytecode and the module info (requests, imports, exports, environment layout).
+    fn compile_module(src: &Source<'_>) -> Result<(Self, ModuleInfo), Error>;
+}
+
+impl Compile for Module {
+    fn compile(src: &Source<'_>, kind: CodeKind) -> Result<Self, Error> {
+        Compiler::compile_in(src, kind, false)
+    }
+
+    fn compile_direct(src: &Source<'_>, strict: bool) -> Result<Self, Error> {
+        Compiler::compile_in(src, if strict { CodeKind::StrictEval } else { CodeKind::Eval }, true)
+    }
+
+    fn compile_module(src: &Source<'_>) -> Result<(Self, ModuleInfo), Error> {
+        Compiler::compile_module(src)
+    }
+}
+
+impl Compiler<'_, '_> {
+    fn compile_in(src: &Source<'_>, kind: CodeKind, direct: bool) -> Result<Module, Error> {
+        let allocator = Allocator::default();
+        // Script (not module); regular expression literals are validated during parsing
+        let options = ParseOptions { parse_regular_expression: true, ..ParseOptions::default() };
+        let ret = Parser::new(&allocator, src.text, SourceType::script()).with_options(options).parse();
+        if let Some(d) = ret.diagnostics.first() {
+            return Err(Error::Syntax(format!("{}: {d}", src.file)));
+        }
+        let program = &ret.program;
+        // Early errors (duplicate declarations, illegal break / super / new.target, …): oxc's parser does not check
+        // them, the semantic check is needed
+        let checked = SemanticBuilder::new().with_check_syntax_error(true).build(program);
+        if let Some(d) = checked.diagnostics.errors().next() {
+            return Err(Error::Syntax(format!("{}: {d}", src.file)));
+        }
+        // Functions containing a direct eval: all their bindings go into contexts (an eval may read any of them)
+        let scoping = checked.semantic.scoping();
+        let eval_scopes: HashSet<oxc_syntax::scope::ScopeId> = scoping.scope_descendants_from_root().filter(|&id| scoping.scope_flags(id).contains_direct_eval()).collect();
+        let strict = kind == CodeKind::StrictEval || Flavor::use_strict(&program.directives);
+        let local = (kind != CodeKind::Script).then(|| Decls::eval_local(&program.body, strict));
+        let Resolver { captured, used, eval_fns, suspends, .. } = Resolver::script(&program.body, Decls::this_key(program.span), &allocator, local.as_ref(), strict, eval_scopes, None);
+        let mut c = Compiler { src, alloc: &allocator, captured, used, class_depth: 0, module: Vec::new(), frames: Vec::new(), levels: Vec::new(), chains: Vec::new(), eval_fns, suspends, completion_assign: HashSet::new(), completion_reset: HashSet::new(), for_init_text: None, classes: Vec::new(), next_home: None };
+        c.script(program, local.as_ref(), strict, direct)?;
+        Ok(Module { functions: c.module })
+    }
+}
+
+/// A top-level module name: a context slot (with whether it is a lexical declaration and whether it is const), or
+/// an import binding.
+#[derive(Clone, Copy)]
+enum ModuleName {
+    Slot { slot: u16, lexical: bool, constant: bool },
+    Import(u16),
+}
+
+/// State while collecting top-level module names and module info.
+struct Layout<'a> {
+    names: Vec<(&'a str, ModuleName)>,
+    info: ModuleInfo,
+    slots: u16,
+    /// (export name, local name): split into local exports and re-exports at the end
+    local_exports: Vec<(&'a str, &'a str)>,
+    /// Import binding name ⇒ import number
+    imports: Vec<(&'a str, usize)>,
+}
+
+impl<'a> Layout<'a> {
+    fn export_name(n: &oxc_ast::ast::ModuleExportName<'a>) -> &'a str {
+        use oxc_ast::ast::ModuleExportName;
+        match n {
+            ModuleExportName::IdentifierName(i) => i.name.as_str(),
+            ModuleExportName::IdentifierReference(i) => i.name.as_str(),
+            ModuleExportName::StringLiteral(s) => s.value.as_str().unwrap_or_default(),
+        }
+    }
+
+    fn request(&mut self, spec: &str) -> usize {
+        match self.info.requests.iter().position(|r| **r == *spec) {
+            Some(i) => i,
+            None => {
+                self.info.requests.push(spec.into());
+                self.info.requests.len() - 1
+            }
+        }
+    }
+
+    fn declare(&mut self, name: &'a str, lexical: bool, constant: bool) {
+        if self.names.iter().any(|(n, _)| *n == name) {
+            return;
+        }
+        self.names.push((name, ModuleName::Slot { slot: self.slots, lexical, constant }));
+        if lexical {
+            self.info.lexical.push(self.slots);
+        }
+        self.slots += 1;
+    }
+
+    fn variables(&mut self, v: &'a VariableDeclaration<'a>) -> Vec<&'a str> {
+        let mut ds = Decls::default();
+        ds.declarators(v, DeclKind::Var);
+        let lexical = v.kind != VariableDeclarationKind::Var;
+        let names: Vec<&'a str> = ds.0.iter().map(|x| x.name).collect();
+        for &n in &names {
+            self.declare(n, lexical, v.kind == VariableDeclarationKind::Const);
+        }
+        names
+    }
+
+    fn declaration(&mut self, d: &'a oxc_ast::ast::Declaration<'a>) -> Vec<&'a str> {
+        use oxc_ast::ast::Declaration;
+        match d {
+            Declaration::VariableDeclaration(v) => self.variables(v),
+            Declaration::FunctionDeclaration(f) => f.id.iter().map(|id| {
+                self.declare(id.name.as_str(), false, false);
+                id.name.as_str()
+            }).collect(),
+            Declaration::ClassDeclaration(c) => c.id.iter().map(|id| {
+                self.declare(id.name.as_str(), true, false);
+                id.name.as_str()
+            }).collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Exports: local bindings get slots; exports that are actually import bindings become indirect exports.
+    fn finish(mut self) -> (Vec<(&'a str, ModuleName)>, ModuleInfo) {
+        for (exported, local) in core::mem::take(&mut self.local_exports) {
+            if let Some(&(_, idx)) = self.imports.iter().find(|(n, _)| *n == local) {
+                let e = self.info.imports[idx].clone();
+                self.info.indirect_exports.push((exported.into(), e.request, e.name));
+            } else if let Some(&(_, ModuleName::Slot { slot, .. })) = self.names.iter().find(|(n, _)| *n == local) {
+                self.info.local_exports.push((exported.into(), slot));
+            }
+        }
+        self.info.slots = self.slots;
+        (self.names, self.info)
+    }
+}
+
+impl Compiler<'_, '_> {
+    fn compile_module(src: &Source<'_>) -> Result<(Module, ModuleInfo), Error> {
+        let allocator = Allocator::default();
+        let options = ParseOptions { parse_regular_expression: true, ..ParseOptions::default() };
+        let ret = Parser::new(&allocator, src.text, SourceType::mjs()).with_options(options).parse();
+        if let Some(d) = ret.diagnostics.first() {
+            return Err(Error::Syntax(format!("{}: {d}", src.file)));
+        }
+        let program = &ret.program;
+        let checked = SemanticBuilder::new().with_check_syntax_error(true).build(program);
+        if let Some(d) = checked.diagnostics.errors().next() {
+            return Err(Error::Syntax(format!("{}: {d}", src.file)));
+        }
+        let scoping = checked.semantic.scoping();
+        let eval_scopes: HashSet<oxc_syntax::scope::ScopeId> = scoping.scope_descendants_from_root().filter(|&id| scoping.scope_flags(id).contains_direct_eval()).collect();
+        let (names, info) = Compiler::module_layout(program);
+        let order: Vec<&str> = names.iter().map(|&(n, _)| n).collect();
+        let Resolver { captured, used, eval_fns, suspends, .. } = Resolver::script(&program.body, Decls::this_key(program.span), &allocator, None, true, eval_scopes, Some(&[order]));
+        let mut c = Compiler { src, alloc: &allocator, captured, used, class_depth: 0, module: Vec::new(), frames: Vec::new(), levels: Vec::new(), chains: Vec::new(), eval_fns, suspends, completion_assign: HashSet::new(), completion_reset: HashSet::new(), for_init_text: None, classes: Vec::new(), next_home: None };
+        let bound = names
+            .iter()
+            .map(|&(name, n)| match n {
+                ModuleName::Slot { slot, lexical, constant } => Bound { name, binding: Binding::Context(Context::MIN_SLOTS + u32::from(slot)), constant, ready: lexical.then_some(u32::MAX), self_name: false },
+                ModuleName::Import(i) => Bound { name, binding: Binding::Import(-1 - i32::from(i)), constant: true, ready: None, self_name: false },
+            })
+            .collect();
+        c.levels.push(Level { func: usize::MAX, names: bound, context: Some(Register::current_context()), scope: None, dynamic: false, mark: 0, switch: false, cells: false });
+        c.module_body(program)?;
+        Ok((Module { functions: c.module }, info))
+    }
+
+    /// Top-level module names and module info: slot 0 is `this` (undefined), then in declaration order.
+    fn module_layout<'a>(program: &'a Program<'a>) -> (Vec<(&'a str, ModuleName)>, ModuleInfo) {
+        use oxc_ast::ast::{ExportDefaultDeclarationKind, ImportDeclarationSpecifier};
+        let mut l = Layout { names: alloc::vec![(THIS, ModuleName::Slot { slot: 0, lexical: false, constant: true })], info: ModuleInfo::default(), slots: 1, local_exports: Vec::new(), imports: Vec::new() };
+        for s in &program.body {
+            match s {
+                Statement::ImportDeclaration(i) => {
+                    let req = l.request(i.source.value.as_str().unwrap_or_default());
+                    for sp in i.specifiers.iter().flatten() {
+                        let (local, name) = match sp {
+                            ImportDeclarationSpecifier::ImportSpecifier(x) => (x.local.name.as_str(), ImportName::Named(Layout::export_name(&x.imported).into())),
+                            ImportDeclarationSpecifier::ImportDefaultSpecifier(x) => (x.local.name.as_str(), ImportName::Named("default".into())),
+                            ImportDeclarationSpecifier::ImportNamespaceSpecifier(x) => (x.local.name.as_str(), ImportName::Namespace),
+                        };
+                        let idx = u16::try_from(l.info.imports.len()).unwrap_or(u16::MAX);
+                        l.info.imports.push(ImportEntry { request: req, name });
+                        l.names.push((local, ModuleName::Import(idx)));
+                        l.imports.push((local, usize::from(idx)));
+                    }
+                }
+                Statement::ExportDeclaration(e) => {
+                    for n in l.declaration(&e.declaration) {
+                        l.local_exports.push((n, n));
+                    }
+                }
+                Statement::ExportFromDeclaration(e) => {
+                    let req = l.request(e.source.value.as_str().unwrap_or_default());
+                    for sp in &e.specifiers {
+                        l.info.indirect_exports.push((Layout::export_name(&sp.exported).into(), req, ImportName::Named(Layout::export_name(&sp.local).into())));
+                    }
+                }
+                Statement::ExportNamedDeclaration(e) => {
+                    for sp in &e.specifiers {
+                        l.local_exports.push((Layout::export_name(&sp.exported), Layout::export_name(&sp.local)));
+                    }
+                }
+                Statement::ExportDefaultDeclaration(e) => {
+                    let local = match &e.declaration {
+                        ExportDefaultDeclarationKind::FunctionDeclaration(f) => {
+                            let n = f.id.as_ref().map_or(DEFAULT_BINDING, |id| id.name.as_str());
+                            l.declare(n, false, false);
+                            n
+                        }
+                        ExportDefaultDeclarationKind::ClassDeclaration(c) => {
+                            let n = c.id.as_ref().map_or(DEFAULT_BINDING, |id| id.name.as_str());
+                            l.declare(n, true, false);
+                            n
+                        }
+                        _ => {
+                            l.declare(DEFAULT_BINDING, true, false);
+                            DEFAULT_BINDING
+                        }
+                    };
+                    l.local_exports.push(("default", local));
+                }
+                Statement::ExportAllDeclaration(e) => {
+                    let req = l.request(e.source.value.as_str().unwrap_or_default());
+                    match &e.exported {
+                        Some(n) => l.info.indirect_exports.push((Layout::export_name(n).into(), req, ImportName::Namespace)),
+                        None => l.info.star_exports.push(req),
+                    }
+                }
+                Statement::VariableDeclaration(v) => _ = l.variables(v),
+                Statement::FunctionDeclaration(f) => {
+                    if let Some(id) = &f.id {
+                        l.declare(id.name.as_str(), false, false);
+                    }
+                }
+                Statement::ClassDeclaration(c) => {
+                    if let Some(id) = &c.id {
+                        l.declare(id.name.as_str(), true, false);
+                    }
+                }
+                _ => {}
+            }
+        }
+        // `var`s in blocks are also at the module top level
+        let mut vars = Decls::default();
+        vars.vars(&program.body);
+        for d in &vars.0 {
+            l.declare(d.name, false, false);
+        }
+        l.finish()
+    }
+}
+
+impl<'a> Compiler<'a, '_> {
+    // ---- Basics ------------------------------------------------------------------------
+
+    /// The file name being compiled (base for relative paths in dynamic import).
+    pub fn file(&self) -> &'a str {
+        self.alloc.alloc_str(self.src.file)
+    }
+
+    pub fn unsupported(&self, span: Span, what: &str) -> Error {
+        self.src.unsupported(span.start, what)
+    }
+
+    /// annexB: when execution reaches a block-level function declaration, writes the function value from the block to
+    /// the outer `var` (a function-level binding or a global).
+    fn annexb_copy(&mut self, f: &'a oxc_ast::ast::Function<'a>) {
+        let Some(id) = &f.id else { return };
+        if !self.frame().annexb.contains(&f.span.start) {
+            return;
+        }
+        let name = id.name.as_str();
+        self.load(name);
+        let (var_level, eval) = (self.frame().var_level, self.frame().eval);
+        match var_level {
+            Some(level) => {
+                let mut depth = 0;
+                for (i, l) in self.levels.iter().enumerate().rev() {
+                    if i <= level
+                        && let Some(n) = l.names.iter().find(|n| n.name == name)
+                    {
+                        match n.binding {
+                            Binding::Reg(r) => self.b().star(r),
+                            Binding::Context(slot) => self.b().store_context_slot(Register::current_context(), slot, depth),
+                            Binding::Import(_) => self.throw_const_assign(),
+                        }
+                        return;
+                    }
+                    if l.context.is_some() {
+                        depth += 1;
+                    }
+                }
+            }
+            None if eval => {
+                let flags = j8bytecode::StoreLookupSlotFlags::LOOKUP_HOISTING;
+                self.b().store_lookup_slot(name, flags);
+            }
+            None => self.b().store_global(name, false),
+        }
+    }
+
+    /// `CallRuntime [ThrowConstAssignError]`
+    pub fn throw_const_assign(&mut self) {
+        self.b().call_runtime(Runtime::ThrowConstAssignError, RegisterList::EMPTY);
+    }
+
+    /// Whether the name resolves to the own name of a named function expression.
+    fn is_self_name(&self, name: &str) -> bool {
+        self.levels.iter().rev().find_map(|l| l.names.iter().find(|n| n.name == name)).is_some_and(|n| n.self_name)
+    }
+
+    /// Whether the code here is strict: the function itself is strict, or it is inside a class body (`extends` and
+    /// computed keys are evaluated in the outer function, also as strict code).
+    pub fn strict_here(&self) -> bool {
+        self.strict() || self.class_depth > 0
+    }
+
+    /// Whether the current function is in strict mode.
+    pub fn strict(&self) -> bool {
+        self.frames.last().is_some_and(|f| f.strict)
+    }
+
+    fn frame(&mut self) -> &mut Frame<'a> {
+        self.frames.last_mut().expect("inside a function")
+    }
+
+    /// The current function's bytecode builder
+    pub fn b(&mut self) -> &mut Builder {
+        &mut self.frame().b
+    }
+
+    pub fn constant(&mut self, c: Constant) -> usize {
+        self.b().constant(c)
+    }
+
+    pub fn name(&mut self, s: &str) -> usize {
+        self.b().name(s)
+    }
+
+    /// `n` consecutive temporary registers, [`release`](Self::release)d in stack order.
+    pub fn temps(&mut self, n: u32) -> Register {
+        self.b().new_register_list(n).first
+    }
+
+    pub fn temp(&mut self) -> Register {
+        self.temps(1)
+    }
+
+    pub fn release(&mut self, r: Register) {
+        self.b().release_to(r.0);
+    }
+
+    /// `CreateClosure` of function `index` of the module (V8's flags: fast new closure inside a function scope)
+    pub fn closure(&mut self, index: u32) {
+        let k = self.constant(Constant::Function(index));
+        let in_function = self.frames.len() > 1 || self.levels.first().is_some_and(|l| l.func == usize::MAX);
+        self.b().create_closure(k, CreateClosureFlags::encode(false, in_function));
+    }
+
+    // ---- Scopes ------------------------------------------------------------------------
+
+    /// Enters a scope level: allocates bindings (captured ones go into a new context of `scope_type`), copies in the
+    /// captured `this` / parameters, creates closures for function declarations. A function level's context is a
+    /// function context, recorded as the function's scope.
+    fn enter(&mut self, decls: &Decls<'a>, scope_type: ScopeType) -> Result<(), Error> {
+        let func = self.frames.len() - 1;
+        let mark = self.b().mark();
+        let mut slots = 0u32;
+        let mut names = Vec::with_capacity(decls.0.len());
+        let mut variables = Vec::new();
+        for d in &decls.0 {
+            // Pseudo-bindings nobody reads take no register
+            if matches!(d.kind, DeclKind::NewTarget | DeclKind::Arguments) && !self.used.contains(&d.key) {
+                continue;
+            }
+            let binding = if self.captured.contains(&d.key) {
+                slots += 1;
+                let mode = match d.kind {
+                    DeclKind::Let => VariableMode::Let,
+                    DeclKind::Const => VariableMode::Const,
+                    _ => VariableMode::Var,
+                };
+                variables.push(ContextVariable { name: d.name.into(), mode });
+                Binding::Context(Context::MIN_SLOTS + slots - 1)
+            } else {
+                match d.kind {
+                    DeclKind::This => Binding::Reg(Register::receiver()),
+                    DeclKind::SelfName => Binding::Reg(Register::function_closure()),
+                    DeclKind::Param(i) => Binding::Reg(Register::parameter(i32::from(i) + 1)),
+                    _ => Binding::Reg(self.temp()),
+                }
+            };
+            names.push(Bound { name: d.name, binding, constant: matches!(d.kind, DeclKind::Const), ready: d.ready, self_name: matches!(d.kind, DeclKind::SelfName) });
+        }
+        let mut scope = None;
+        let context = if slots > 0 {
+            let info = ScopeInfo { scope_type: Some(scope_type), variables, has_extension: false };
+            let k = self.constant(Constant::Scope(info.clone()));
+            scope = Some(k);
+            match scope_type {
+                ScopeType::FunctionScope => {
+                    self.frame().scope = Some(info);
+                    self.b().create_function_context(k, slots);
+                }
+                _ => self.b().create_block_context(k),
+            }
+            let saved = self.temp();
+            self.b().push_context(saved);
+            self.frame().contexts.push(saved);
+            Some(saved)
+        } else {
+            None
+        };
+        let bindings: Vec<Binding> = names.iter().map(|n| n.binding).collect();
+        self.levels.push(Level { func, names, context, scope, dynamic: false, mark, switch: false, cells: false });
+        let decls: Vec<&Decl<'a>> = decls.0.iter().filter(|d| !(matches!(d.kind, DeclKind::NewTarget | DeclKind::Arguments) && !self.used.contains(&d.key))).collect();
+        // Temporal dead zone: slots are first filled with the hole (not for a `for` head's register variable its own
+        // initializer doesn't mention: nothing can read it before it is initialized)
+        for (d, &b) in decls.iter().zip(&bindings) {
+            let skip = self.for_init_text.is_some_and(|t| !t.contains(d.name)) && matches!(b, Binding::Reg(_));
+            if d.ready.is_some() && !skip {
+                self.b().load_the_hole();
+                self.bind(b);
+            }
+        }
+        for (d, b) in decls.iter().zip(bindings) {
+            let fixed = match d.kind {
+                DeclKind::This => Some(Register::receiver()),
+                DeclKind::SelfName => Some(Register::function_closure()),
+                DeclKind::Param(i) => Some(Register::parameter(i32::from(i) + 1)),
+                DeclKind::Function(f) => {
+                    let n = self.function_declaration(f)?;
+                    self.closure(n);
+                    self.bind(b);
+                    None
+                }
+                // A generator / async function is never constructed: its new.target stays `undefined`, and the
+                // register carries the generator object (V8's `VisitNewTargetVariable`)
+                DeclKind::NewTarget if self.frame().generator.is_some() => None,
+                DeclKind::NewTarget if self.used.contains(&d.key) => {
+                    // The interpreter puts new.target into this register on entry (V8's
+                    // `incoming_new_target_or_generator_register`)
+                    let r = self.temp();
+                    self.b().new_target_or_generator = Some(r.0);
+                    self.b().ldar(r);
+                    self.bind(b);
+                    None
+                }
+                DeclKind::Arguments if self.used.contains(&d.key) => {
+                    // Sloppy functions with simple parameters get a mapped arguments object (aliasing the parameters)
+                    let mapped = self.frame().simple_params && !self.frame().strict;
+                    self.b().create_arguments(mapped);
+                    self.bind(b);
+                    None
+                }
+                DeclKind::Var | DeclKind::Let | DeclKind::Const | DeclKind::NewTarget | DeclKind::Arguments => None,
+            };
+            if let (Some(r), Binding::Context(_)) = (fixed, b) {
+                self.b().ldar(r);
+                self.bind(b);
+            }
+        }
+        Ok(())
+    }
+
+    /// Stores acc into the binding just allocated at this level.
+    fn bind(&mut self, b: Binding) {
+        match b {
+            Binding::Reg(r) => self.b().star(r),
+            Binding::Context(slot) => self.b().store_context_slot(Register::current_context(), slot, 0),
+            Binding::Import(_) => self.throw_const_assign(),
+        }
+    }
+
+    /// Leaves a block scope level.
+    fn leave(&mut self) {
+        let l = self.levels.pop().expect("a scope to leave");
+        if let Some(saved) = l.context {
+            self.b().pop_context(saved);
+            self.frame().contexts.pop();
+        }
+        self.b().release_to(l.mark);
+    }
+
+    fn scoped(&mut self, decls: &Decls<'a>, f: impl FnOnce(&mut Self) -> Result<(), Error>) -> Result<(), Error> {
+        self.enter(decls, ScopeType::BlockScope)?;
+        f(self)?;
+        self.leave();
+        Ok(())
+    }
+
+    /// Name resolution: innermost first, counting the contexts passed; a dynamic level passed makes it a lookup by name,
+    /// so do names eval code doesn't bind; global otherwise.
+    pub fn resolve(&self, name: &'a str) -> Resolved<'a> {
+        let cur = self.frames.len() - 1;
+        let mut depth = 0;
+        for l in self.levels.iter().rev() {
+            if let Some(n) = l.names.iter().find(|n| n.name == name) {
+                let (place, in_context) = match n.binding {
+                    // The script's `this` is the global `this` (V8 reads it with `LdaGlobal`)
+                    Binding::Reg(_) if l.func != cur && name == THIS && l.func == 0 && self.frames.first().is_some_and(|f| !f.eval) => (Place::Global(THIS), false),
+                    Binding::Reg(r) => {
+                        assert_eq!(l.func, cur, "an outer function's binding `{name}` used from inside must be captured");
+                        (Place::Reg(r), false)
+                    }
+                    Binding::Context(slot) => (Place::Context { depth, slot, cells: l.cells }, true),
+                    Binding::Import(i) => (Place::Import(i), false),
+                };
+                // Inside the declaring function the position decides; from an inner function (which may run any time)
+                // or a `switch` (whose cases may skip the declaration) always check (V8's hole check elimination)
+                return Resolved { place, constant: n.constant, tdz: n.ready.map(|r| (r, (in_context && l.func != cur) || l.switch)) };
+            }
+            if l.dynamic {
+                return Resolved { place: Place::Lookup(name), constant: false, tdz: None };
+            }
+            if l.context.is_some() {
+                depth += 1;
+            }
+        }
+        if self.frames.first().is_some_and(|f| f.eval) {
+            return Resolved { place: Place::Lookup(name), constant: false, tdz: None };
+        }
+        Resolved { place: Place::Global(name), constant: false, tdz: None }
+    }
+
+    /// If the name is in this function's registers and needs no TDZ check at `pos`, gives that register. Only this
+    /// function's own code can change it (bindings captured by inner functions are in contexts, not registers).
+    pub fn register_of(&self, name: &'a str, pos: u32) -> Option<Register> {
+        let r = self.resolve(name);
+        match r.place {
+            Place::Reg(reg) if !r.needs_check(pos) => Some(reg),
+            _ => None,
+        }
+    }
+
+    pub fn lookup(&self, name: &'a str) -> (Place<'a>, bool) {
+        let r = self.resolve(name);
+        (r.place, r.constant)
+    }
+
+    /// Reads a name into acc (use position unknown, so the TDZ is checked).
+    pub fn load(&mut self, name: &'a str) {
+        self.load_at(name, 0);
+    }
+
+    /// Reads a name for `typeof`: an unresolvable name gives `undefined` instead of throwing
+    pub fn load_typeof(&mut self, name: &'a str) {
+        match self.resolve(name).place {
+            Place::Global(g) if !matches!(g, "undefined" | "NaN" | "Infinity") => self.b().load_global(g, true),
+            Place::Lookup(g) => self.b().load_lookup_slot(g, true),
+            _ => self.load_at(name, 0),
+        }
+    }
+
+    /// Reads a name into acc at source position `pos`. `undefined` / `NaN` / `Infinity` are constants unless shadowed.
+    pub fn load_at(&mut self, name: &'a str, pos: u32) {
+        let r = self.resolve(name);
+        match r.place {
+            Place::Reg(reg) => self.b().ldar(reg),
+            Place::Context { depth, slot, cells } => {
+                let immutable = r.constant && !r.needs_check(pos);
+                self.b().load_context_slot(Register::current_context(), slot, depth, immutable, cells);
+            }
+            Place::Global("undefined") => self.b().load_undefined(),
+            Place::Global("NaN") => self.b().load_number(f64::NAN),
+            Place::Global("Infinity") => self.b().load_number(f64::INFINITY),
+            Place::Global(g) => self.b().load_global(g, false),
+            Place::Import(cell) => _ = self.b().raw(Bytecode::LdaModuleVariable, &[cell.into(), 0]),
+            Place::Lookup(g) => self.b().load_lookup_slot(g, false),
+        }
+        if r.needs_check(pos) {
+            if name == THIS {
+                self.b().plain(Bytecode::ThrowSuperNotCalledIfHole);
+            } else {
+                self.b().throw_reference_error_if_hole(name);
+            }
+        }
+    }
+
+    /// Stores acc into a name; `init` is the initialization in a declaration (the only time `const` allows it, with no
+    /// TDZ check).
+    pub fn store(&mut self, name: &'a str, init: bool) {
+        self.store_at(name, init, 0);
+    }
+
+    /// Same as [`store`](Self::store); `pos` is the source position of the assignment: no TDZ check after the
+    /// declaration. acc is kept.
+    pub fn store_at(&mut self, name: &'a str, init: bool, pos: u32) {
+        if !init && self.is_self_name(name) {
+            if self.strict_here() {
+                self.throw_const_assign();
+            }
+            return;
+        }
+        let r = self.resolve(name);
+        let check = !init && r.needs_check(pos);
+        if check || (r.constant && !init) {
+            // V8's `BuildVariableAssignment`: the hole check reads the variable, so the value waits in a register
+            let value = self.temp();
+            self.b().star(value);
+            if check {
+                self.load_at(name, 0);
+            }
+            if r.constant && !init {
+                self.throw_const_assign();
+            }
+            self.b().ldar(value);
+            self.release(value);
+            if r.constant && !init {
+                return;
+            }
+        }
+        match r.place {
+            Place::Reg(reg) => self.b().star(reg),
+            Place::Context { depth, slot, cells } => self.b().store_context_slot_cells(Register::current_context(), slot, depth, cells),
+            Place::Global(g) => {
+                let strict = self.strict_here();
+                self.b().store_global(g, strict);
+            }
+            Place::Import(_) => self.throw_const_assign(),
+            Place::Lookup(g) => {
+                let flags = if self.strict_here() { j8bytecode::StoreLookupSlotFlags::STRICT } else { 0 };
+                self.b().store_lookup_slot(g, flags);
+            }
+        }
+    }
+
+    // ---- Functions ---------------------------------------------------------------------
+
+    /// Compiles a function, returning its index in the module.
+    #[expect(clippy::too_many_lines, reason = "function prologue follows V8's GenerateBytecodeBody step by step")]
+    pub fn function(&mut self, name: &str, flavor: Flavor, this: Option<Key>, self_name: Option<&'a BindingIdentifier<'a>>, params: Option<&'a FormalParameters<'a>>, body: Body<'a>) -> Result<u32, Error> {
+        let count = params.map_or(0, |p| p.items.len());
+        let n = u16::try_from(count).map_err(|_| self.unsupported(params.map_or(Span::default(), |p| p.span), "more than 65535 parameters"))?;
+        let index = self.module.len();
+        // A placeholder until the function is done (inner functions get the next indices)
+        self.module.push(SharedFunction { name: "".into(), kind: FunctionKind::NormalFunction, strict: false, length: 0, formal_parameters: 0, scope: None, bytecode: j8bytecode::BytecodeArray::default() });
+        // length: the number of parameters before the first one with a default value (the rest parameter does not
+        // count)
+        let length = u16::try_from(params.map_or(0, |p| p.items.iter().take_while(|i| i.initializer.is_none()).count())).unwrap_or(u16::MAX);
+        // Functions in a class (methods, constructors, field initializers) are all strict
+        let strict = flavor.strict || self.class_depth > 0 || self.frames.last().is_some_and(|f| f.strict);
+        let default_constructor = matches!(body, Body::DefaultConstructor { .. });
+        let simple_params = params.is_some_and(|p| p.rest.is_none() && p.items.iter().all(|i| i.initializer.is_none() && matches!(i.pattern, BindingPattern::BindingIdentifier(_))));
+        // An arrow function sees its enclosing method's home object; any other function only its own
+        let next_home = self.next_home.take();
+        let home = if flavor.kind == Kind::Arrow { self.frames.last().and_then(|f| f.home) } else { next_home };
+        self.frames.push(Frame {
+            index,
+            b: Builder::new(n + 1, 0),
+            name: name.into(),
+            flavor,
+            default_constructor,
+            length,
+            formals: n,
+            scope: None,
+            contexts: Vec::new(),
+            loop_depth: 0,
+            controls: Vec::new(),
+            label: None,
+            completion: None,
+            generator: None,
+            suspends: 0,
+            resume_table: None,
+            home,
+            async_generator: flavor.generator && flavor.asynchronous,
+            strict,
+            annexb: Vec::new(),
+            var_level: None,
+            eval: false,
+            prologue: false,
+            simple_params,
+        });
+        if flavor.generator || flavor.asynchronous {
+            // The interpreter puts the generator object into this register on entry
+            let g = self.temp();
+            self.b().new_target_or_generator = Some(g.0);
+            self.frame().generator = Some(g);
+            // V8's `BuildGeneratorPrologue`: a resumed generator jumps to its resume point, a call falls through
+            let count = params.and_then(|p| self.suspends.get(&p.span.start)).copied().unwrap_or(0);
+            if count > 0 {
+                let mut table = self.b().jump_table(count, 0);
+                self.b().switch_on_generator_state(g, &mut table);
+                self.frame().resume_table = Some(table);
+            }
+        }
+        let stmts = match body {
+            Body::Statements(s) => s,
+            _ => &[],
+        };
+        let sloppy_eval = params.is_some_and(|p| !strict && self.eval_fns.contains(&p.span.start));
+        // A mapped arguments object aliases the parameters: they live in the context (V8 forces them there)
+        let mut decls = Decls::function(this, self_name, params, stmts, !strict, None);
+        if simple_params && !strict && decls.0.iter().any(|d| matches!(d.kind, DeclKind::Arguments) && self.used.contains(&d.key)) {
+            for d in &decls.0 {
+                if let DeclKind::Param(_) = d.kind {
+                    self.captured.insert(d.key);
+                }
+            }
+        }
+        // An arrow function calling `super(…)` reaches the constructor, new.target and `this` through the context
+        let super_in_arrow = flavor.kind == (Kind::Constructor { derived: true })
+            && params.is_some_and(|p| {
+                let text = &self.src.text[p.span.start as usize..];
+                let body = stmts.last().map_or(0, |st| st.span().end as usize).saturating_sub(p.span.start as usize);
+                let text = &text[..body.min(text.len())];
+                text.contains("=>") && text.contains("super")
+            });
+        if flavor.kind == (Kind::Constructor { derived: true }) {
+            // `super(…)` passes new.target on
+            for d in decls.0.iter().filter(|d| matches!(d.kind, DeclKind::NewTarget | DeclKind::This)) {
+                self.used.insert(d.key);
+                if super_in_arrow {
+                    self.captured.insert(d.key);
+                }
+            }
+            if super_in_arrow && let Some(p) = params {
+                let key = Decls::key(p.span);
+                self.captured.insert(key);
+                decls.0.push(Decl { name: Hidden::THIS_FUNCTION, key, kind: DeclKind::Const, ready: None });
+            }
+        }
+        self.enter(&decls, ScopeType::FunctionScope)?;
+        if super_in_arrow {
+            self.b().ldar(Register::function_closure());
+            self.store(Hidden::THIS_FUNCTION, true);
+        }
+        if sloppy_eval && let Some(l) = self.levels.last_mut() {
+            // `var`s a sloppy direct eval declares land in this function's context extension: names not bound here
+            // are looked up by name
+            l.dynamic = true;
+            if let Some(s) = self.frames.last_mut().and_then(|f| f.scope.as_mut()) {
+                s.has_extension = true;
+            }
+        }
+        if !strict {
+            self.frame().var_level = Some(self.levels.len() - 1);
+            self.frame().annexb = Decls::annexb_functions(stmts, params).iter().map(|f| f.span.start).collect();
+        }
+        if flavor.kind == (Kind::Constructor { derived: true })
+            && let Some(t) = self.levels.last_mut().and_then(|l| l.names.iter_mut().find(|n| n.name == THIS))
+        {
+            // In a derived class constructor `this` is the hole before `super()`
+            t.ready = Some(u32::MAX);
+        }
+        if flavor.kind == (Kind::Constructor { derived: false }) {
+            // A base class constructor initializes the instance before the parameters (a derived one after `super`)
+            self.load(THIS);
+            let this = self.temp();
+            self.b().star(this);
+            self.instance_init(this);
+            self.release(this);
+        }
+        if let Some(p) = params {
+            self.frame().prologue = true;
+            self.prologue(p)?;
+            self.frame().prologue = false;
+        }
+        // Generator: suspend only after parameters and declarations are set up (a call runs up to here, so parameter
+        // errors throw synchronously); the first next resumes from here
+        if flavor.generator && !flavor.asynchronous {
+            self.generator_object(Runtime::InlineCreateJSGeneratorObject);
+            self.yield_value();
+        }
+        if flavor.generator && flavor.asynchronous {
+            // V8's `GenerateAsyncGeneratorFunctionBody`: a throw out of the body rejects the request, and the generator
+            // is closed however the body ends
+            self.generator_object(Runtime::InlineCreateJSGeneratorObject);
+            let g = self.frame().generator.expect("a generator register");
+            self.try_finally(j8bytecode::CatchPrediction::AsyncAwait, |c| c.try_catch(j8bytecode::CatchPrediction::AsyncAwait, |c| {
+                c.yield_value();
+                c.function_body(body)
+            }, |c, _| {
+                let args = c.b().new_register_list(2);
+                c.b().mov(g, args.first);
+                c.b().star(args.at(1));
+                c.b().load_the_hole();
+                c.b().plain(Bytecode::SetPendingMessage);
+                c.b().call_runtime(Runtime::InlineAsyncGeneratorReject, args);
+                c.release(args.first);
+                c.ret();
+                Ok(())
+            }), |c, _| {
+                let arg = c.temp();
+                c.b().mov(g, arg);
+                c.b().call_runtime(Runtime::InlineGeneratorClose, RegisterList { first: arg, count: 1 });
+                c.release(arg);
+                Ok(())
+            })?;
+        } else if flavor.asynchronous {
+            // V8's `GenerateAsyncFunctionBody`: a throw out of the body rejects the promise
+            self.generator_object(Runtime::InlineAsyncFunctionEnter);
+            self.try_catch(j8bytecode::CatchPrediction::AsyncAwait, |c| c.function_body(body), |c, _| {
+                let g = c.frame().generator.expect("a generator register");
+                let args = c.b().new_register_list(2);
+                c.b().mov(g, args.first);
+                c.b().star(args.at(1));
+                c.b().load_the_hole();
+                c.b().plain(Bytecode::SetPendingMessage);
+                c.b().call_runtime(Runtime::InlineAsyncFunctionReject, args);
+                c.b().plain(Bytecode::Return);
+                c.release(args.first);
+                Ok(())
+            })?;
+        } else {
+            self.function_body(body)?;
+        }
+        self.levels.pop();
+        let f = self.frames.pop().expect("the function's frame");
+        let at = f.index;
+        self.module[at] = f.finish();
+        Ok(u32::try_from(index).expect("fewer than 2^32 functions"))
+    }
+
+    /// The statements of a function body, then the implicit `return undefined`
+    fn function_body(&mut self, body: Body<'a>) -> Result<(), Error> {
+        match body {
+            Body::Statements(s) => self.statements(s)?,
+            Body::Expression(e) => {
+                self.expr(e)?;
+                self.ret();
+            }
+            Body::Fields { class, statik } => self.fields(class, statik)?,
+            Body::DefaultConstructor { derived } => {
+                if derived {
+                    self.super_call_forward();
+                }
+            }
+        }
+        self.b().load_undefined();
+        self.ret();
+        Ok(())
+    }
+
+    /// Parameter prologue: default values, destructured parameters, rest parameter.
+    fn prologue(&mut self, params: &'a FormalParameters<'a>) -> Result<(), Error> {
+        for (i, p) in (0u16..).zip(&params.items) {
+            let reg = Register::parameter(i32::from(i) + 1);
+            if let Some(init) = &p.initializer {
+                self.b().ldar(reg);
+                let mut skip = Label::default();
+                self.b().jump(Bytecode::JumpIfNotUndefined, &mut skip);
+                match &p.pattern {
+                    BindingPattern::BindingIdentifier(id) => self.expr_named(init, id.name.as_str())?,
+                    _ => self.expr(init)?,
+                }
+                self.b().star(reg);
+                self.b().bind(&mut skip);
+            }
+            match &p.pattern {
+                BindingPattern::BindingIdentifier(id) => {
+                    // Captured parameters were copied into the context on frame entry; after the default value is
+                    // computed they must be copied again
+                    let name = id.name.as_str();
+                    if p.initializer.is_some() && !matches!(self.lookup(name).0, Place::Reg(r) if r == reg) {
+                        self.b().ldar(reg);
+                        self.store(name, true);
+                    }
+                }
+                pat => self.bind_pattern(pat, reg, true)?,
+            }
+        }
+        if let Some(r) = &params.rest {
+            self.b().create_rest_parameter();
+            let t = self.temp();
+            self.b().star(t);
+            self.bind_pattern(&r.rest.argument, t, true)?;
+            self.release(t);
+        }
+        Ok(())
+    }
+
+    /// Binds the value in register `value` to names according to the pattern (`init`: initialization in a declaration).
+    pub fn bind_pattern(&mut self, p: &'a BindingPattern<'a>, value: Register, init: bool) -> Result<(), Error> {
+        match p {
+            BindingPattern::BindingIdentifier(id) => {
+                self.b().ldar(value);
+                self.store(id.name.as_str(), init);
+            }
+            BindingPattern::AssignmentPattern(a) => {
+                let name = match &a.left {
+                    BindingPattern::BindingIdentifier(id) => Some(id.name.as_str()),
+                    _ => None,
+                };
+                let t = self.with_default(value, &a.right, name)?;
+                self.bind_pattern(&a.left, t, init)?;
+                self.release(t);
+            }
+            BindingPattern::ObjectPattern(o) => {
+                let n = u32::try_from(o.properties.len()).map_err(|_| self.unsupported(o.span, "too many properties"))?;
+                if o.properties.is_empty() {
+                    self.require_object(value);
+                }
+                // With a rest element the keys go after a copy of the source, ready for
+                // `CopyDataPropertiesWithExcludedPropertiesOnStack(source, ...keys)`
+                let list = o.rest.as_ref().map(|_| {
+                    let l = self.b().new_register_list(n + 1);
+                    self.b().mov(value, l.first);
+                    l
+                });
+                for (i, b) in (0u32..).zip(&o.properties) {
+                    let t = self.temp();
+                    match (self.static_name(&b.key, b.computed), list) {
+                        (Some(name), None) => self.b().get_named(value, name),
+                        (_, l) => {
+                            let k = l.map_or_else(|| self.temp(), |l| l.at(i + 1));
+                            self.property_key_into(&b.key, b.computed, k)?;
+                            self.b().ldar(k);
+                            self.b().get_keyed(value);
+                            if l.is_none() {
+                                self.release(k);
+                            }
+                        }
+                    }
+                    self.b().star(t);
+                    self.bind_pattern(&b.value, t, init)?;
+                    self.release(t);
+                }
+                if let (Some(r), Some(l)) = (&o.rest, list) {
+                    self.b().call_runtime(Runtime::InlineCopyDataPropertiesWithExcludedPropertiesOnStack, l);
+                    let t = self.temp();
+                    self.b().star(t);
+                    self.bind_pattern(&r.argument, t, init)?;
+                    self.release(t);
+                    self.release(l.first);
+                }
+            }
+            BindingPattern::ArrayPattern(a) => {
+                let iter = self.iterate(value);
+                // If a default value throws, the iterator must be closed first
+                self.closing_on_throw(iter, |c| {
+                    for e in &a.elements {
+                        c.iterator_next(iter);
+                        let Some(e) = e else { continue };
+                        let t = c.temp();
+                        c.b().star(t);
+                        c.bind_pattern(e, t, init)?;
+                        c.release(t);
+                    }
+                    match &a.rest {
+                        Some(r) => {
+                            c.iterator_rest(iter);
+                            let t = c.temp();
+                            c.b().star(t);
+                            c.bind_pattern(&r.argument, t, init)?;
+                            c.release(t);
+                        }
+                        None => c.iterator_close(iter),
+                    }
+                    Ok(())
+                })?;
+                self.release(iter);
+            }
+        }
+        Ok(())
+    }
+
+    /// `body` in a `try` region whose handler runs `catch` with the exception in acc (V8's `TryCatchBuilder`: the
+    /// context is saved in a register first; the handler table restores it)
+    pub fn try_catch(&mut self, prediction: j8bytecode::CatchPrediction, body: impl FnOnce(&mut Self) -> Result<(), Error>, catch: impl FnOnce(&mut Self, Register) -> Result<(), Error>) -> Result<(), Error> {
+        let ctx = self.temp();
+        self.b().mov(Register::current_context(), ctx);
+        let h = self.b().new_handler(ctx, prediction);
+        self.b().try_start(h);
+        self.frame().controls.push(Control::Handler);
+        body(self)?;
+        self.frame().controls.pop();
+        self.b().try_end(h);
+        let mut done = Label::default();
+        self.b().jump(Bytecode::Jump, &mut done);
+        self.b().handler_target(h);
+        catch(self, ctx)?;
+        self.b().bind(&mut done);
+        self.release(ctx);
+        Ok(())
+    }
+
+    /// Runs `f`; if it throws, closes iterator `iter` first (calling `return` only if not done, ignoring what it does)
+    /// and then rethrows.
+    pub fn closing_on_throw(&mut self, iter: Register, f: impl FnOnce(&mut Self) -> Result<(), Error>) -> Result<(), Error> {
+        self.try_catch(j8bytecode::CatchPrediction::Uncaught, f, |c, _| {
+            let e = c.temp();
+            c.b().star(e);
+            c.iterator_close_quiet(iter);
+            c.b().ldar(e);
+            c.b().plain(Bytecode::ReThrow);
+            c.release(e);
+            Ok(())
+        })
+    }
+
+    /// Gets the iterator of register `value`: the iterator record takes three consecutive registers (iterator, next,
+    /// done; the caller frees them)
+    pub fn iterate(&mut self, value: Register) -> Register {
+        let rec = self.temps(3);
+        self.b().get_iterator(value);
+        self.b().star(rec);
+        self.b().get_named(rec, "next");
+        self.b().star(Register(rec.0 + 1));
+        self.b().load_bool(false);
+        self.b().star(Register(rec.0 + 2));
+        rec
+    }
+
+    /// Calls the record's `next`, checks the result is an object, leaves it in acc
+    fn step_result(&mut self, rec: Register) {
+        let args = RegisterList { first: rec, count: 1 };
+        self.b().call_property(Register(rec.0 + 1), args);
+        let mut ok = Label::default();
+        self.b().jump(Bytecode::JumpIfJSReceiver, &mut ok);
+        let r = self.temp();
+        self.b().star(r);
+        self.b().call_runtime(Runtime::ThrowIteratorResultNotAnObject, RegisterList { first: r, count: 1 });
+        self.release(r);
+        self.b().bind(&mut ok);
+    }
+
+    /// The next value of the iterator record into acc (`undefined` once done); an error while stepping marks it done
+    pub fn iterator_next(&mut self, rec: Register) {
+        let done = Register(rec.0 + 2);
+        let mut finished = Label::default();
+        let mut end = Label::default();
+        self.b().ldar(done);
+        self.b().jump(Bytecode::JumpIfTrue, &mut finished);
+        self.b().load_bool(true);
+        self.b().star(done);
+        self.step_result(rec);
+        let r = self.temp();
+        self.b().star(r);
+        self.b().get_named(r, "done");
+        self.b().jump(Bytecode::JumpIfToBooleanTrue, &mut finished);
+        self.b().get_named(r, "value");
+        self.b().star(r);
+        self.b().load_bool(false);
+        self.b().star(done);
+        self.b().ldar(r);
+        self.release(r);
+        self.b().jump(Bytecode::Jump, &mut end);
+        self.b().bind(&mut finished);
+        self.b().load_undefined();
+        self.b().bind(&mut end);
+    }
+
+    /// The rest of the iterator record's values as a new array in acc
+    pub fn iterator_rest(&mut self, rec: Register) {
+        let done = Register(rec.0 + 2);
+        let arr = self.temp();
+        let index = self.temp();
+        let r = self.temp();
+        self.b().create_empty_array_literal();
+        self.b().star(arr);
+        self.b().load_smi(0);
+        self.b().star(index);
+        let mut end = Label::default();
+        self.b().ldar(done);
+        self.b().jump(Bytecode::JumpIfTrue, &mut end);
+        self.b().load_bool(true);
+        self.b().star(done);
+        let header = self.b().loop_header();
+        self.frame().loop_depth += 1;
+        self.step_result(rec);
+        self.b().star(r);
+        self.b().get_named(r, "done");
+        self.b().jump(Bytecode::JumpIfToBooleanTrue, &mut end);
+        self.b().get_named(r, "value");
+        self.b().store_in_array_literal(arr, index);
+        self.b().ldar(index);
+        self.b().unary(Bytecode::Inc);
+        self.b().star(index);
+        let depth = self.frame().loop_depth - 1;
+        self.b().jump_loop(header, depth);
+        self.frame().loop_depth -= 1;
+        self.b().bind(&mut end);
+        self.b().ldar(arr);
+        self.release(arr);
+    }
+
+    /// Closes the iterator record unless done (V8's `BuildIteratorClose`): calls `return` if there is one and checks its
+    /// result is an object. acc is clobbered.
+    pub fn iterator_close(&mut self, rec: Register) {
+        let mut end = Label::default();
+        self.b().ldar(Register(rec.0 + 2));
+        self.b().jump(Bytecode::JumpIfTrue, &mut end);
+        self.b().get_named(rec, "return");
+        self.b().jump(Bytecode::JumpIfUndefinedOrNull, &mut end);
+        let m = self.temp();
+        self.b().star(m);
+        self.b().call_property(m, RegisterList { first: rec, count: 1 });
+        self.b().jump(Bytecode::JumpIfJSReceiver, &mut end);
+        self.b().star(m);
+        self.b().call_runtime(Runtime::ThrowIteratorResultNotAnObject, RegisterList { first: m, count: 1 });
+        self.release(m);
+        self.b().bind(&mut end);
+    }
+
+    /// Closes the iterator record unless done, on a throw: whatever `return` throws or gives is ignored
+    pub fn iterator_close_quiet(&mut self, rec: Register) {
+        let mut end = Label::default();
+        self.b().ldar(Register(rec.0 + 2));
+        self.b().jump(Bytecode::JumpIfTrue, &mut end);
+        let _ = self.try_catch(j8bytecode::CatchPrediction::Caught, |c| {
+            let mut skip = Label::default();
+            c.b().get_named(rec, "return");
+            c.b().jump(Bytecode::JumpIfUndefinedOrNull, &mut skip);
+            let m = c.temp();
+            c.b().star(m);
+            c.b().call_property(m, RegisterList { first: rec, count: 1 });
+            c.release(m);
+            c.b().bind(&mut skip);
+            Ok(())
+        }, |_, _| Ok(()));
+        self.b().bind(&mut end);
+    }
+
+    /// The left side of `for-of` / `for-in`: a declaration (including destructuring) or an assignment target, with the
+    /// value in `v`.
+    fn for_left(&mut self, left: &'a ForStatementLeft<'a>, v: Register) -> Result<(), Error> {
+        match left {
+            ForStatementLeft::VariableDeclaration(d) => {
+                let decl = d.declarations.first().ok_or_else(|| self.unsupported(d.span, "an empty declaration"))?;
+                self.bind_pattern(&decl.id, v, true)
+            }
+            t => self.assign_target(t.as_assignment_target().ok_or_else(|| self.unsupported(t.span(), "for-in / for-of target"))?, v),
+        }
+    }
+
+    /// `for (left of right) body`: iterator protocol; `break` / `return` / a throw all close the iterator.
+    fn for_of(&mut self, f: &'a ForOfStatement<'a>) -> Result<(), Error> {
+        if f.r#await {
+            return self.for_await(f);
+        }
+        let label = self.take_label();
+        self.expr(&f.right)?;
+        let src = self.temp();
+        self.b().star(src);
+        let iter = self.iterate(src);
+        self.frame().controls.push(Control::Iterator(iter));
+        let v = self.temp();
+        let header = self.b().loop_header();
+        self.frame().loop_depth += 1;
+        let mut exit = Label::default();
+        self.b().ldar(Register(iter.0 + 2));
+        self.b().jump(Bytecode::JumpIfTrue, &mut exit);
+        self.iterator_next(iter);
+        self.b().star(v);
+        self.b().ldar(Register(iter.0 + 2));
+        self.b().jump(Bytecode::JumpIfTrue, &mut exit);
+        self.push_jump(label, true, true);
+        // A throw from the body closes the iterator and rethrows
+        self.closing_on_throw(iter, |c| {
+            c.scoped(&Decls::for_head(&f.left), |c| {
+                c.for_left(&f.left, v)?;
+                c.statement(&f.body)
+            })
+        })?;
+        self.bind_continues();
+        let depth = self.frame().loop_depth - 1;
+        self.b().jump_loop(header, depth);
+        self.frame().loop_depth -= 1;
+        // break lands here: close the iterator
+        self.pop_jump();
+        self.iterator_close(iter);
+        self.b().bind(&mut exit);
+        self.frame().controls.pop();
+        self.release(src);
+        Ok(())
+    }
+
+    /// `for await (left of right) body` (V8's `VisitForOfStatement` for an async iterator): the loop runs inside a
+    /// try-finally whose finally closes the iterator unless it is done, awaiting `return`'s result
+    fn for_await(&mut self, f: &'a ForOfStatement<'a>) -> Result<(), Error> {
+        let label = self.take_label();
+        self.expr(&f.right)?;
+        let src = self.temp();
+        self.b().star(src);
+        let rec = self.async_iterate(src);
+        let done = Register(rec.0 + 2);
+        let next_result = self.temp();
+        self.b().load_bool(false);
+        self.b().star(done);
+        let prediction = j8bytecode::CatchPrediction::AsyncAwait;
+        self.try_finally(prediction, |c| {
+            let header = c.b().loop_header();
+            c.frame().loop_depth += 1;
+            let mut exit = Label::default();
+            c.b().load_bool(true);
+            c.b().star(done);
+            // V8's `BuildIteratorNext`: the result of `next()` is awaited, and must be an object
+            c.b().call_property(Register(rec.0 + 1), RegisterList { first: rec, count: 1 });
+            c.await_value();
+            let mut ok = Label::default();
+            c.b().jump(Bytecode::JumpIfJSReceiver, &mut ok);
+            c.b().star(next_result);
+            c.b().call_runtime(Runtime::ThrowIteratorResultNotAnObject, RegisterList { first: next_result, count: 1 });
+            c.b().bind(&mut ok);
+            c.b().star(next_result);
+            c.b().get_named(next_result, "done");
+            c.b().jump(Bytecode::JumpIfToBooleanTrue, &mut exit);
+            c.b().get_named(next_result, "value");
+            c.b().star(next_result);
+            // Not done while the value is assigned: a throw there closes the iterator
+            c.b().load_bool(false);
+            c.b().star(done);
+            c.push_jump(label, true, true);
+            c.scoped(&Decls::for_head(&f.left), |c| {
+                c.for_left(&f.left, next_result)?;
+                c.statement(&f.body)
+            })?;
+            c.bind_continues();
+            let depth = c.frame().loop_depth - 1;
+            c.b().jump_loop(header, depth);
+            c.frame().loop_depth -= 1;
+            c.pop_jump();
+            c.b().bind(&mut exit);
+            Ok(())
+        }, |c, token| {
+            c.finalize_iteration(rec, done, token, prediction);
+            Ok(())
+        })?;
+        self.release(src);
+        Ok(())
+    }
+
+    /// V8's `BuildGetIteratorRecord` for an async iterator: `src[Symbol.asyncIterator]()`, or the sync iterator wrapped
+    /// by `CreateAsyncFromSyncIterator`. The record takes three registers (iterator, next, done).
+    fn async_iterate(&mut self, src: Register) -> Register {
+        let rec = self.temps(3);
+        let mut sync = Label::default();
+        let mut got = Label::default();
+        let k = self.constant(Constant::AsyncIteratorSymbol);
+        self.b().load_constant(k);
+        self.b().get_keyed(src);
+        self.b().jump(Bytecode::JumpIfUndefinedOrNull, &mut sync);
+        let method = Register(rec.0 + 1);
+        self.b().star(method);
+        self.b().call_property(method, RegisterList { first: src, count: 1 });
+        self.b().jump(Bytecode::JumpIfJSReceiver, &mut got);
+        self.b().call_runtime(Runtime::ThrowSymbolAsyncIteratorInvalid, RegisterList::EMPTY);
+        self.b().bind(&mut sync);
+        self.b().get_iterator(src);
+        self.b().star(rec);
+        self.b().call_runtime(Runtime::InlineCreateAsyncFromSyncIterator, RegisterList { first: rec, count: 1 });
+        self.b().bind(&mut got);
+        self.b().star(rec);
+        self.b().get_named(rec, "next");
+        self.b().star(Register(rec.0 + 1));
+        rec
+    }
+
+    /// V8's `BuildFinalizeIteration` (async iterator): unless done, calls `return` and awaits its result, which must be
+    /// an object; when the loop is left by a throw, whatever closing throws is dropped
+    fn finalize_iteration(&mut self, rec: Register, done: Register, token: Register, prediction: j8bytecode::CatchPrediction) {
+        let mut is_done = Label::default();
+        self.b().ldar(done);
+        self.b().jump(Bytecode::JumpIfToBooleanTrue, &mut is_done);
+        let mut closed = Label::default();
+        let _ = self.try_catch(prediction, |c| {
+            let method = c.temp();
+            c.b().get_named(rec, "return");
+            c.b().jump(Bytecode::JumpIfUndefinedOrNull, &mut closed);
+            c.b().star(method);
+            c.b().call_property(method, RegisterList { first: rec, count: 1 });
+            c.await_value();
+            c.b().jump(Bytecode::JumpIfJSReceiver, &mut closed);
+            c.b().star(method);
+            c.b().call_runtime(Runtime::ThrowIteratorResultNotAnObject, RegisterList { first: method, count: 1 });
+            c.release(method);
+            Ok(())
+        }, |c, e| {
+            c.b().star(e);
+            let mut suppress = Label::default();
+            c.b().load_smi(COMPLETION_THROW);
+            c.b().test_reference_equal(token);
+            c.b().jump(Bytecode::JumpIfTrue, &mut suppress);
+            c.b().ldar(e);
+            c.b().plain(Bytecode::ReThrow);
+            c.b().bind(&mut suppress);
+            Ok(())
+        });
+        self.b().bind(&mut closed);
+        self.b().bind(&mut is_done);
+    }
+
+    /// `for (left in right) body` (V8's `VisitForInStatement`: `ForInEnumerate` / `ForInPrepare`, then by index with
+    /// `ForInNext`, skipping keys deleted meanwhile)
+    fn for_in(&mut self, f: &'a ForInStatement<'a>) -> Result<(), Error> {
+        let label = self.take_label();
+        let mut exit = Label::default();
+        self.expr(&f.right)?;
+        self.b().jump(Bytecode::JumpIfUndefinedOrNull, &mut exit);
+        let receiver = self.temp();
+        self.b().to_object(receiver);
+        self.b().for_in_enumerate(receiver);
+        let cache = self.b().new_register_list(3);
+        let slot = self.b().for_in_prepare(cache);
+        let index = self.temp();
+        self.b().load_smi(0);
+        self.b().star(index);
+        let v = self.temp();
+        let header = self.b().loop_header();
+        self.frame().loop_depth += 1;
+        self.b().jump_if_for_in_done(&mut exit, index, cache.at(2));
+        self.b().for_in_next(receiver, index, RegisterList { first: cache.first, count: 2 }, slot);
+        self.push_jump(label, true, true);
+        let mut skip = Label::default();
+        self.b().jump(Bytecode::JumpIfUndefined, &mut skip);
+        self.b().star(v);
+        self.scoped(&Decls::for_head(&f.left), |c| {
+            c.for_left(&f.left, v)?;
+            c.statement(&f.body)
+        })?;
+        self.b().bind(&mut skip);
+        self.bind_continues();
+        self.b().for_in_step(index);
+        let depth = self.frame().loop_depth - 1;
+        self.b().jump_loop(header, depth);
+        self.frame().loop_depth -= 1;
+        self.pop_jump();
+        self.b().bind(&mut exit);
+        self.release(receiver);
+        Ok(())
+    }
+
+    /// V8's `BuildGeneratorObjectVariableInitialization`: `create(<closure>, <this>)` into the generator register, left
+    /// in acc
+    fn generator_object(&mut self, create: Runtime) {
+        let g = self.frame().generator.expect("a generator register");
+        let args = self.b().new_register_list(2);
+        self.b().mov(Register::function_closure(), args.first);
+        self.b().mov(Register::receiver(), args.at(1));
+        self.b().call_runtime(create, args);
+        self.b().star(g);
+        self.release(args.first);
+    }
+
+    /// V8's `BuildSuspendPoint`: saves every live register and suspends with acc; on resumption the registers are back
+    /// and acc holds the value sent in
+    fn suspend_point(&mut self) {
+        if !self.b().reachable() {
+            return;
+        }
+        let g = self.frame().generator.expect("a generator register");
+        let id = self.frame().suspends;
+        self.frame().suspends += 1;
+        let live = self.b().live_registers();
+        self.b().suspend_generator(g, live, id);
+        let table = self.frame().resume_table.take().expect("the resume table");
+        self.b().bind_case(&table, i32::try_from(id).unwrap_or(i32::MAX));
+        self.frame().resume_table = Some(table);
+        self.b().resume_generator(g, live);
+    }
+
+    /// V8's `VisitYieldStar`: delegates to the operand's iterator, forwarding `next` / `return` / `throw` and suspending
+    /// with each of its results unchanged (an async generator awaits each result and answers the request with its
+    /// value), until one is done; its value is the result (or the generator returns it, after a `return`).
+    #[expect(clippy::too_many_lines, reason = "follows V8's VisitYieldStar step by step")]
+    pub fn yield_star(&mut self, operand: &'a Expression<'a>) -> Result<(), Error> {
+        let asynchronous = self.frame().async_generator;
+        let g = self.frame().generator.expect("a generator register");
+        let output = self.temp();
+        let resume_mode = self.temp();
+        let iterator_and_input = self.b().new_register_list(2);
+        let (iterator, input) = (iterator_and_input.first, iterator_and_input.at(1));
+        self.expr(operand)?;
+        let next = self.temp();
+        self.b().star(iterator);
+        if asynchronous {
+            let rec = self.async_iterate(iterator);
+            self.b().mov(rec, iterator);
+            self.b().mov(Register(rec.0 + 1), next);
+            self.release(rec);
+        } else {
+            self.b().get_iterator(iterator);
+            self.b().star(iterator);
+            self.b().get_named(iterator, "next");
+            self.b().star(next);
+        }
+        self.b().load_undefined();
+        self.b().star(input);
+        self.b().load_smi(RESUME_NEXT);
+        self.b().star(resume_mode);
+        let header = self.b().loop_header();
+        self.frame().loop_depth += 1;
+        let mut after_switch = Label::default();
+        let mut table = self.b().jump_table(2, RESUME_RETURN);
+        self.b().ldar(resume_mode);
+        self.b().switch_on_smi(&mut table);
+        // next (the fall-through)
+        self.b().call_property(next, iterator_and_input);
+        self.b().jump(Bytecode::Jump, &mut after_switch);
+        // return: without a `return` method the generator returns the value sent in
+        self.b().bind_case(&table, RESUME_RETURN);
+        let mut no_return = Label::default();
+        self.call_iterator_method(iterator, "return", iterator_and_input, &mut after_switch, &mut no_return);
+        self.b().bind(&mut no_return);
+        self.b().ldar(input);
+        if asynchronous {
+            self.await_value();
+        }
+        self.ret();
+        // throw: without a `throw` method the iterator is closed, then a TypeError
+        self.b().bind_case(&table, RESUME_THROW);
+        let mut no_throw = Label::default();
+        self.call_iterator_method(iterator, "throw", iterator_and_input, &mut after_switch, &mut no_throw);
+        self.b().bind(&mut no_throw);
+        let mut closed = Label::default();
+        let mut called = Label::default();
+        self.call_iterator_method(iterator, "return", RegisterList { first: iterator, count: 1 }, &mut called, &mut closed);
+        self.b().bind(&mut called);
+        if asynchronous {
+            self.await_value();
+        }
+        self.b().jump(Bytecode::JumpIfJSReceiver, &mut closed);
+        let r = self.temp();
+        self.b().star(r);
+        self.b().call_runtime(Runtime::ThrowIteratorResultNotAnObject, RegisterList { first: r, count: 1 });
+        self.release(r);
+        self.b().bind(&mut closed);
+        self.b().call_runtime(Runtime::ThrowThrowMethodMissing, RegisterList::EMPTY);
+        self.b().bind(&mut after_switch);
+        if asynchronous {
+            self.await_value();
+        }
+        let mut check_if_done = Label::default();
+        self.b().star(output);
+        self.b().jump(Bytecode::JumpIfJSReceiver, &mut check_if_done);
+        self.b().call_runtime(Runtime::ThrowIteratorResultNotAnObject, RegisterList { first: output, count: 1 });
+        self.b().bind(&mut check_if_done);
+        self.b().get_named(output, "done");
+        let mut exit = Label::default();
+        self.b().jump(Bytecode::JumpIfToBooleanTrue, &mut exit);
+        if asynchronous {
+            // The request is answered with the inner result's value, not done
+            self.b().get_named(output, "value");
+            let args = self.b().new_register_list(3);
+            self.b().mov(g, args.first);
+            self.b().star(args.at(1));
+            self.b().load_bool(false);
+            self.b().star(args.at(2));
+            self.b().call_runtime(Runtime::InlineAsyncGeneratorResolve, args);
+            self.release(args.first);
+        } else {
+            self.b().ldar(output);
+        }
+        self.suspend_point();
+        self.b().star(input);
+        self.b().call_runtime(Runtime::InlineGeneratorGetResumeMode, RegisterList { first: g, count: 1 });
+        self.b().star(resume_mode);
+        let depth = self.frame().loop_depth - 1;
+        self.b().jump_loop(header, depth);
+        self.frame().loop_depth -= 1;
+        self.b().bind(&mut exit);
+        self.release(iterator);
+        // A `return` delegated to the iterator returns its value; otherwise the value is the result
+        let output_value = self.temp();
+        self.b().get_named(output, "value");
+        self.b().star(output_value);
+        self.b().load_smi(RESUME_RETURN);
+        self.b().test_reference_equal(resume_mode);
+        let mut completion_is_output_value = Label::default();
+        self.b().jump(Bytecode::JumpIfFalse, &mut completion_is_output_value);
+        self.b().ldar(output_value);
+        self.ret();
+        self.b().bind(&mut completion_is_output_value);
+        self.b().ldar(output_value);
+        self.release(output);
+        Ok(())
+    }
+
+    /// V8's `BuildCallIteratorMethod`: calls `iterator[name]` with `receiver_and_args` and jumps to `called`, or to
+    /// `missing` when it is `undefined` / `null`
+    fn call_iterator_method(&mut self, iterator: Register, name: &str, receiver_and_args: RegisterList, called: &mut Label, missing: &mut Label) {
+        let method = self.temp();
+        self.b().get_named(iterator, name);
+        self.b().jump(Bytecode::JumpIfUndefinedOrNull, missing);
+        self.b().star(method);
+        self.b().call_property(method, receiver_and_args);
+        self.b().jump(Bytecode::Jump, called);
+        self.release(method);
+    }
+
+    /// V8's `BuildAwait` with the operand in acc: suspends until the value settles; a rejection throws the reason, a
+    /// fulfillment gives the value
+    pub fn await_value(&mut self) {
+        let g = self.frame().generator.expect("a generator register");
+        let args = self.b().new_register_list(2);
+        self.b().mov(g, args.first);
+        self.b().star(args.at(1));
+        let intrinsic = if self.frame().async_generator { Runtime::InlineAsyncGeneratorAwait } else { Runtime::InlineAsyncFunctionAwait };
+        self.b().call_runtime(intrinsic, args);
+        self.release(args.first);
+        self.suspend_point();
+        let input = self.temp();
+        let resume_mode = self.temp();
+        self.b().star(input);
+        self.b().call_runtime(Runtime::InlineGeneratorGetResumeMode, RegisterList { first: g, count: 1 });
+        self.b().star(resume_mode);
+        self.b().load_smi(RESUME_NEXT);
+        self.b().test_reference_equal(resume_mode);
+        let mut resume_next = Label::default();
+        self.b().jump(Bytecode::JumpIfTrue, &mut resume_next);
+        self.b().ldar(input);
+        self.b().plain(Bytecode::ReThrow);
+        self.b().bind(&mut resume_next);
+        self.b().ldar(input);
+        self.release(input);
+    }
+
+    /// V8's `VisitYield` with the operand in acc (the initial yield suspends with the generator object itself): suspends,
+    /// then dispatches on the resume mode — `throw` throws the value sent in, `return` returns it (through any
+    /// `finally`), `next` gives it as the value of the `yield`.
+    pub fn yield_value(&mut self) {
+        let g = self.frame().generator.expect("a generator register");
+        let asynchronous = self.frame().async_generator;
+        if self.frame().suspends > 0 {
+            let args = self.b().new_register_list(2);
+            if asynchronous {
+                // The value is awaited, then given to the request as a not-done result
+                self.b().mov(g, args.first);
+                self.b().star(args.at(1));
+                self.b().call_runtime(Runtime::InlineAsyncGeneratorYieldWithAwait, args);
+            } else {
+                self.b().star(args.first);
+                self.b().mov(g, args.at(1));
+                self.b().call_runtime(Runtime::InlineGeneratorYieldResult, args);
+            }
+            self.release(args.first);
+        }
+        self.suspend_point();
+        let input = self.temp();
+        self.b().star(input);
+        self.b().call_runtime(Runtime::InlineGeneratorGetResumeMode, RegisterList { first: g, count: 1 });
+        // JSGeneratorObject::kNext / kReturn / kThrow (an async generator also kRethrow: the yielded value was rejected)
+        let mut table = self.b().jump_table(if asynchronous { 3 } else { 2 }, RESUME_NEXT);
+        self.b().switch_on_smi(&mut table);
+        if asynchronous {
+            self.b().ldar(input);
+            self.b().plain(Bytecode::ReThrow);
+            self.b().bind_case(&table, RESUME_THROW);
+        }
+        // Throw (the fall-through of a sync generator)
+        self.b().ldar(input);
+        self.b().plain(Bytecode::Throw);
+        self.b().bind_case(&table, RESUME_RETURN);
+        self.b().ldar(input);
+        self.ret();
+        self.b().bind_case(&table, RESUME_NEXT);
+        self.b().ldar(input);
+        self.release(input);
+    }
+
+    /// How many loops enclose the current position (the depth operand of a `JumpLoop` emitted here for a loop of its
+    /// own)
+    pub fn frame_loop_depth(&mut self) -> u32 {
+        self.frame().loop_depth
+    }
+
+    pub fn is_async_generator(&mut self) -> bool {
+        self.frame().async_generator
+    }
+
+    /// Replaces `value` with the default value if it is `undefined`: the result goes into a new temporary register (the
+    /// caller frees it). `name` is the name inferred for the default value when it is an anonymous function.
+    pub fn with_default(&mut self, value: Register, default: &'a Expression<'a>, name: Option<&'a str>) -> Result<Register, Error> {
+        let t = self.temp();
+        self.b().ldar(value);
+        self.b().star(t);
+        let mut skip = Label::default();
+        self.b().jump(Bytecode::JumpIfNotUndefined, &mut skip);
+        match name {
+            Some(n) => self.expr_named(default, n)?,
+            None => self.expr(default)?,
+        }
+        self.b().star(t);
+        self.b().bind(&mut skip);
+        Ok(t)
+    }
+
+    /// Destructuring `null` / `undefined` throws TypeError (for `{} = v`, where there is no property to read)
+    pub fn require_object(&mut self, value: Register) {
+        let mut ok = Label::default();
+        self.b().ldar(value);
+        self.b().jump(Bytecode::JumpIfUndefinedOrNull, &mut ok);
+        let mut done = Label::default();
+        self.b().jump(Bytecode::Jump, &mut done);
+        self.b().bind(&mut ok);
+        self.b().call_runtime(Runtime::ThrowPatternAssignmentNonCoercible, RegisterList { first: value, count: 1 });
+        self.b().bind(&mut done);
+    }
+
+    /// Evaluates a property key into register `k` (a static key is a string constant).
+    pub fn property_key_into(&mut self, key: &'a PropertyKey<'a>, computed: bool, k: Register) -> Result<(), Error> {
+        match self.static_key(key, computed) {
+            Some(c) => {
+                let c = c?;
+                self.b().load_constant(c);
+            }
+            None => {
+                self.expr(key.as_expression().ok_or_else(|| self.unsupported(key.span(), "property key"))?)?;
+                self.b().plain(Bytecode::ToName);
+            }
+        }
+        self.b().star(k);
+        Ok(())
+    }
+
+    /// Ordinary function (declaration or expression): rejects unsupported kinds.
+    /// Ordinary function; an anonymous one uses the inferred name `inferred`.
+    pub fn plain_function(&mut self, f: &'a AstFunction<'a>, self_name: bool, inferred: &str) -> Result<u32, Error> {
+        let flavor = Flavor::from((f, Kind::Normal));
+        let body = f.body.as_ref().ok_or_else(|| self.unsupported(f.span, "a function without a body"))?;
+        let name = f.id.as_ref().map_or(inferred, |id| id.name.as_str());
+        self.function(name, flavor, Some(Decls::this_key(f.span)), if self_name { f.id.as_ref() } else { None }, Some(&f.params), Body::Statements(&body.statements))
+    }
+
+    /// Method (class method, object literal method, accessor): not `new`able.
+    pub fn method(&mut self, name: &str, f: &'a AstFunction<'a>, kind: Kind) -> Result<u32, Error> {
+        let flavor = Flavor::from((f, kind));
+        let body = f.body.as_ref().ok_or_else(|| self.unsupported(f.span, "a method without a body"))?;
+        self.function(name, flavor, Some(Decls::this_key(f.span)), None, Some(&f.params), Body::Statements(&body.statements))
+    }
+
+    /// The text of a non-computed property key (for function name inference; private names include `#`); `None` for
+    /// computed keys.
+    pub fn static_name(&self, key: &'a PropertyKey<'a>, computed: bool) -> Option<&'a str> {
+        if computed {
+            return None;
+        }
+        match key {
+            PropertyKey::StaticIdentifier(id) => Some(id.name.as_str()),
+            PropertyKey::StringLiteral(s) => s.value.as_str(),
+            PropertyKey::NumericLiteral(n) => Some(self.alloc.alloc_str(ryu_js::Buffer::new().format(n.value))),
+            PropertyKey::PrivateIdentifier(id) => Some(Hidden::private(self.alloc, id)),
+            _ => None,
+        }
+    }
+
+    /// Function name of a method / accessor: the key name, prefixed with `get ` / `set ` for accessors; empty for
+    /// computed keys (known only at runtime).
+    pub fn method_name(&self, key: &'a PropertyKey<'a>, computed: bool, kind: MethodDefinitionKind) -> &'a str {
+        let Some(n) = self.static_name(key, computed) else { return "" };
+        match kind {
+            MethodDefinitionKind::Get => self.alloc.alloc_str(&format!("get {n}")),
+            MethodDefinitionKind::Set => self.alloc.alloc_str(&format!("set {n}")),
+            MethodDefinitionKind::Method | MethodDefinitionKind::Constructor => n,
+        }
+    }
+
+    /// The constant for a non-computed property key (identifier / string / number); `None` for computed keys.
+    pub fn static_key(&mut self, key: &'a PropertyKey<'a>, computed: bool) -> Option<Result<usize, Error>> {
+        if computed {
+            return None;
+        }
+        Some(match key {
+            PropertyKey::StaticIdentifier(id) => Ok(self.name(id.name.as_str())),
+            PropertyKey::StringLiteral(s) => match s.value.as_str() {
+                Some(t) => Ok(self.name(t)),
+                None => Err(self.unsupported(s.span, "lone surrogates")),
+            },
+            PropertyKey::NumericLiteral(n) => Ok(self.name(ryu_js::Buffer::new().format(n.value))),
+            PropertyKey::PrivateIdentifier(id) => Err(self.unsupported(id.span, "private names")),
+            _ => return None,
+        })
+    }
+
+    /// A class (V8's `BuildClassLiteral`); the constructor ends in acc. `inferred` names an anonymous class. The class
+    /// body is strict code.
+    pub fn class(&mut self, c: &'a Class<'a>, inferred: &'a str) -> Result<(), Error> {
+        let info = self.class_info(c)?;
+        let decls = Decls::class_scope(c, self.alloc);
+        // The hidden bindings and private names are read by the class's functions: they live in the class context
+        for d in &decls.0 {
+            if d.name.starts_with(['.', '#', '%']) {
+                self.captured.insert(d.key);
+            }
+        }
+        self.class_depth += 1;
+        self.enter(&decls, ScopeType::ClassScope)?;
+        self.classes.push(info);
+        let r = self.class_members(c, inferred);
+        self.classes.pop();
+        self.leave();
+        self.class_depth -= 1;
+        r
+    }
+
+    /// What a class's private names are
+    fn class_info(&self, c: &'a Class<'a>) -> Result<ClassInfo<'a>, Error> {
+        let mut info = ClassInfo { privates: Vec::new(), brands: [Hidden::brand(self.alloc, c.span, false), Hidden::brand(self.alloc, c.span, true)], brand: false, fields: false };
+        for e in &c.body.body {
+            match e {
+                ClassElement::MethodDefinition(m) => {
+                    let PropertyKey::PrivateIdentifier(id) = &m.key else { continue };
+                    let name = Hidden::private(self.alloc, id);
+                    let statik = m.r#static;
+                    info.brand |= !statik;
+                    let (get, set) = (m.kind == MethodDefinitionKind::Get, m.kind == MethodDefinitionKind::Set);
+                    match info.privates.iter_mut().find(|(n, _)| *n == name) {
+                        Some((_, Private::Accessor { get: g, set: s, .. })) => {
+                            *g |= get;
+                            *s |= set;
+                        }
+                        Some(_) => {}
+                        None => info.privates.push((name, if get || set { Private::Accessor { statik, get, set } } else { Private::Method { statik } })),
+                    }
+                }
+                ClassElement::PropertyDefinition(p) => {
+                    info.fields |= !p.r#static;
+                    if let PropertyKey::PrivateIdentifier(id) = &p.key {
+                        info.privates.push((Hidden::private(self.alloc, id), Private::Field));
+                    }
+                }
+                ClassElement::StaticBlock(_) => {}
+                e => return Err(self.unsupported(e.span(), "class element")),
+            }
+        }
+        Ok(info)
+    }
+
+    /// A method of a class (static ones are `static` V8 function kinds) with its home object
+    fn class_method(&mut self, name: &str, f: &'a AstFunction<'a>, kind: Kind, statik: bool) -> Result<u32, Error> {
+        let flavor = Flavor { statik, ..Flavor::from((f, kind)) };
+        let body = f.body.as_ref().ok_or_else(|| self.unsupported(f.span, "a method without a body"))?;
+        self.next_home = Some(if statik { Hidden::STATIC_HOME } else { Hidden::HOME });
+        self.function(name, flavor, Some(Decls::this_key(f.span)), None, Some(&f.params), Body::Statements(&body.statements))
+    }
+
+    /// `CallRuntime [name](text)` into binding `binding` (a new private name / brand symbol)
+    fn private_symbol(&mut self, create: Runtime, text: &str, binding: &'a str) {
+        let k = self.name(text);
+        let arg = self.temp();
+        self.b().load_constant(k);
+        self.b().star(arg);
+        self.b().call_runtime(create, RegisterList { first: arg, count: 1 });
+        self.release(arg);
+        self.store(binding, true);
+    }
+
+    /// Throws a static member's computed key `prototype` (V8: `ThrowStaticPrototypeError`)
+    fn static_prototype_check(&mut self, key: Register) {
+        let mut done = Label::default();
+        self.b().load_string("prototype");
+        self.b().compare(CompareOp::StrictEq, key);
+        self.b().jump(Bytecode::JumpIfFalse, &mut done);
+        self.b().call_runtime(Runtime::ThrowStaticPrototypeError, RegisterList::EMPTY);
+        self.b().bind(&mut done);
+    }
+
+    #[expect(clippy::too_many_lines, reason = "follows V8's BuildClassLiteral step by step")]
+    fn class_members(&mut self, c: &'a Class<'a>, inferred: &'a str) -> Result<(), Error> {
+        let name = c.id.as_ref().map_or(inferred, |id| id.name.as_str());
+        let derived = c.heritage.is_some();
+        let info = self.classes.last().expect("this class");
+        let privates = info.privates.clone();
+        let [brand_binding, static_brand_binding] = info.brands;
+        let brand = info.brand;
+        let static_brand = privates.iter().any(|(_, p)| matches!(p, Private::Method { statik: true } | Private::Accessor { statik: true, .. }));
+        // Brands and private names first, so computed keys can't reach private members early
+        if brand {
+            self.private_symbol(Runtime::CreatePrivateBrandSymbol, name, brand_binding);
+        }
+        if static_brand {
+            self.private_symbol(Runtime::CreatePrivateBrandSymbol, name, static_brand_binding);
+        }
+        for e in &c.body.body {
+            match e {
+                ClassElement::PropertyDefinition(p) => {
+                    if let PropertyKey::PrivateIdentifier(id) = &p.key {
+                        let n = Hidden::private(self.alloc, id);
+                        self.private_symbol(Runtime::CreatePrivateNameSymbol, n, n);
+                    }
+                }
+                ClassElement::MethodDefinition(m) if matches!(m.kind, MethodDefinitionKind::Method) => {
+                    if let PropertyKey::PrivateIdentifier(id) = &m.key {
+                        let n = Hidden::private(self.alloc, id);
+                        let f = self.class_method(n, &m.value, Kind::Method, m.r#static)?;
+                        self.closure(f);
+                        self.store(n, true);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let ctor = self.temp();
+        let boilerplate = self.temp();
+        let ctor_in_args = self.temp();
+        let superclass = self.temp();
+        match &c.heritage {
+            Some(h) => self.expr(&h.expression)?,
+            None => self.b().load_the_hole(),
+        }
+        self.b().star(superclass);
+        let kind = Kind::Constructor { derived };
+        let f = match c.body.body.iter().find_map(|e| match e {
+            ClassElement::MethodDefinition(m) if m.kind == MethodDefinitionKind::Constructor => Some(m),
+            _ => None,
+        }) {
+            Some(m) => {
+                self.next_home = Some(Hidden::HOME);
+                self.method(name, &m.value, kind)?
+            }
+            None => {
+                self.next_home = Some(Hidden::HOME);
+                let this = Decls::this_key(Span::new(c.body.span.end.saturating_sub(1), c.body.span.end));
+                self.function(name, kind.into(), Some(this), None, None, Body::DefaultConstructor { derived })?
+            }
+        };
+        self.closure(f);
+        self.b().star(ctor);
+        self.b().mov(ctor, ctor_in_args);
+        // The public members: computed keys and functions go to `DefineClass` as arguments
+        let mut members = Vec::new();
+        let mut statics = false;
+        for e in &c.body.body {
+            match e {
+                ClassElement::MethodDefinition(m) if m.kind != MethodDefinitionKind::Constructor && !matches!(m.key, PropertyKey::PrivateIdentifier(_)) => {
+                    let key = match self.static_name(&m.key, m.computed) {
+                        Some(n) => Some(n),
+                        None => {
+                            let k = self.temp();
+                            self.property_key_into(&m.key, true, k)?;
+                            if m.r#static {
+                                self.static_prototype_check(k);
+                            }
+                            None
+                        }
+                    };
+                    let (mkind, fkind) = match m.kind {
+                        MethodDefinitionKind::Get => (MemberKind::Getter, Kind::Getter),
+                        MethodDefinitionKind::Set => (MemberKind::Setter, Kind::Setter),
+                        _ => (MemberKind::Method, Kind::Method),
+                    };
+                    let fname = self.method_name(&m.key, m.computed, m.kind);
+                    let v = self.temp();
+                    let n = self.class_method(fname, &m.value, fkind, m.r#static)?;
+                    self.closure(n);
+                    self.b().star(v);
+                    members.push(ClassMember { name: key.map(Into::into), kind: mkind, statik: m.r#static });
+                }
+                ClassElement::PropertyDefinition(p) => {
+                    statics |= p.r#static;
+                    if p.computed && !matches!(p.key, PropertyKey::PrivateIdentifier(_)) {
+                        // Computed field keys are evaluated once, here; the initializer reads them back
+                        let k = self.temp();
+                        self.property_key_into(&p.key, true, k)?;
+                        if p.r#static {
+                            self.static_prototype_check(k);
+                        }
+                        self.b().ldar(k);
+                        self.store(Hidden::field_key(self.alloc, p.span), true);
+                        members.push(ClassMember { name: None, kind: MemberKind::Field, statik: p.r#static });
+                    }
+                }
+                ClassElement::StaticBlock(_) => statics = true,
+                _ => {}
+            }
+        }
+        let k = self.constant(Constant::Class(ClassBoilerplate { members }));
+        self.b().load_constant(k);
+        self.b().star(boilerplate);
+        let count = u32::try_from(self.b().mark() - boilerplate.0).unwrap_or(0);
+        self.b().call_runtime(Runtime::DefineClass, RegisterList { first: boilerplate, count });
+        self.release(boilerplate);
+        // acc: the prototype
+        self.store(Hidden::HOME, true);
+        self.b().ldar(ctor);
+        self.store(Hidden::STATIC_HOME, true);
+        if c.id.is_some() {
+            self.b().ldar(ctor);
+            self.store(name, true);
+        }
+        // Private accessors: one getter / setter pair per name
+        for (n, p) in &privates {
+            let Private::Accessor { statik, .. } = *p else { continue };
+            let pair = self.b().new_register_list(2);
+            for (slot, want) in [(pair.first, MethodDefinitionKind::Get), (pair.at(1), MethodDefinitionKind::Set)] {
+                let found = c.body.body.iter().find_map(|e| match e {
+                    ClassElement::MethodDefinition(m) if m.kind == want && matches!(&m.key, PropertyKey::PrivateIdentifier(id) if Hidden::private(self.alloc, id) == *n) => Some(m),
+                    _ => None,
+                });
+                match found {
+                    Some(m) => {
+                        let fname = self.method_name(&m.key, false, m.kind);
+                        let kind = if want == MethodDefinitionKind::Get { Kind::Getter } else { Kind::Setter };
+                        let f = self.class_method(fname, &m.value, kind, statik)?;
+                        self.closure(f);
+                    }
+                    None => self.b().load_null(),
+                }
+                self.b().star(slot);
+            }
+            self.b().call_runtime(Runtime::CreatePrivateAccessors, pair);
+            self.release(pair.first);
+            self.store(n, true);
+        }
+        if static_brand {
+            let key = self.temp();
+            self.load(static_brand_binding);
+            self.b().star(key);
+            self.b().ldar(ctor);
+            self.b().define_keyed_own(ctor, key, 0);
+            self.release(key);
+        }
+        if self.classes.last().is_some_and(|i| i.fields) {
+            self.next_home = Some(Hidden::HOME);
+            let f = self.function("", Kind::Initializer { statik: false }.into(), Some(Decls::this_key(c.body.span)), None, None, Body::Fields { class: c, statik: false })?;
+            self.closure(f);
+            self.store(Hidden::FIELDS, true);
+        }
+        if statics {
+            // Static fields and blocks run now, in order, with the constructor as `this`
+            self.next_home = Some(Hidden::STATIC_HOME);
+            let f = self.function("", Kind::Initializer { statik: true }.into(), Some(Decls::this_key(c.span)), None, None, Body::Fields { class: c, statik: true })?;
+            let init = self.temp();
+            self.closure(f);
+            self.b().star(init);
+            self.b().call_property(init, RegisterList { first: ctor, count: 1 });
+            self.release(init);
+        }
+        self.b().ldar(ctor);
+        self.release(ctor);
+        Ok(())
+    }
+
+    /// The body of a class's members initializer (V8's `<instance_members_initializer>` / static initializer): defines
+    /// the fields in order on `this` (private ones as private members); the static one also runs the static blocks.
+    fn fields(&mut self, class: &'a Class<'a>, statik: bool) -> Result<(), Error> {
+        self.load(THIS);
+        let this = self.temp();
+        self.b().star(this);
+        for e in &class.body.body {
+            match e {
+                ClassElement::PropertyDefinition(p) if p.r#static == statik => {
+                    let fname = self.static_name(&p.key, p.computed);
+                    let key = match &p.key {
+                        PropertyKey::PrivateIdentifier(id) => Some(Hidden::private(self.alloc, id)),
+                        _ if p.computed => Some(Hidden::field_key(self.alloc, p.span)),
+                        _ => None,
+                    };
+                    let k = key.map(|binding| {
+                        let k = self.temp();
+                        self.load(binding);
+                        self.b().star(k);
+                        k
+                    });
+                    let anonymous = match &p.value {
+                        Some(v) => {
+                            match fname {
+                                Some(n) => self.expr_named(v, n)?,
+                                None => self.expr(v)?,
+                            }
+                            Self::anonymous_function(v)
+                        }
+                        None => {
+                            self.b().load_undefined();
+                            false
+                        }
+                    };
+                    match k {
+                        Some(k) => {
+                            // A computed key names an anonymous function value at run time
+                            let flags = u8::from(anonymous && fname.is_none());
+                            self.b().define_keyed_own(this, k, flags);
+                            self.release(k);
+                        }
+                        None => self.b().define_named_own(this, fname.unwrap_or_default()),
+                    }
+                }
+                ClassElement::StaticBlock(b) if statik => self.scoped(&Decls::static_block(&b.body), |c| c.statements(&b.body))?,
+                _ => {}
+            }
+        }
+        self.release(this);
+        Ok(())
+    }
+
+    /// A function / class expression without its own name (it takes the name of what it is assigned to)
+    pub fn anonymous_function(e: &Expression<'_>) -> bool {
+        match e {
+            Expression::FunctionExpression(f) => f.id.is_none(),
+            Expression::ArrowFunctionExpression(_) => true,
+            Expression::ClassExpression(c) => c.id.is_none(),
+            Expression::ParenthesizedExpression(p) => Self::anonymous_function(&p.expression),
+            _ => false,
+        }
+    }
+
+    /// The source text being compiled
+    pub fn source_text(&self) -> &str {
+        self.src.text
+    }
+
+    /// Makes a binding live in a context
+    pub fn captured_insert(&mut self, key: Key) {
+        self.captured.insert(key);
+    }
+
+    /// A block scope declaring `decls` around `f`
+    pub fn scoped_block(&mut self, decls: &Decls<'a>, f: impl FnOnce(&mut Self) -> Result<(), Error>) -> Result<(), Error> {
+        self.scoped(decls, f)
+    }
+
+    /// What private name `name` (`#x`) is in the innermost class declaring it
+    pub fn private_kind(&self, name: &str) -> Option<Private> {
+        self.classes.iter().rev().find_map(|c| c.privates.iter().find(|(n, _)| *n == name).map(|&(_, p)| p))
+    }
+
+    /// The brand binding the methods / accessors of private name `name` check (of the class declaring it)
+    pub fn brand_of(&self, name: &str, statik: bool) -> &'a str {
+        let class = self.classes.iter().rev().find(|c| c.privates.iter().any(|(n, _)| *n == name));
+        class.map_or("", |c| c.brands[usize::from(statik)])
+    }
+
+    /// The object must carry the brand of the class declaring `name` (instances) / be that class (static): reading
+    /// the brand throws otherwise
+    pub fn brand_check(&mut self, obj: Register, name: &str, statik: bool) {
+        let brand = self.brand_of(name, statik);
+        self.load(brand);
+        self.b().get_keyed(obj);
+    }
+
+    /// Throws a TypeError with `message`
+    pub fn throw_type_error(&mut self, message: &str) {
+        let k = self.name(message);
+        let arg = self.temp();
+        self.b().load_constant(k);
+        self.b().star(arg);
+        self.b().call_runtime(Runtime::ThrowTypeError, RegisterList { first: arg, count: 1 });
+        self.release(arg);
+    }
+
+    /// The home object of the method being compiled into acc (`super.x` looks up from its prototype)
+    pub fn load_home(&mut self) {
+        let home = self.frame().home.unwrap_or(Hidden::HOME);
+        self.load(home);
+    }
+
+    /// `super(…)` may be called here: in a derived class constructor, or an arrow function inside one
+    pub fn in_derived_constructor(&self) -> bool {
+        self.frames.iter().rev().find(|f| f.flavor.kind != Kind::Arrow).is_some_and(|f| f.flavor.kind == (Kind::Constructor { derived: true }))
+    }
+
+    /// The kind of the function being compiled
+    pub fn frame_kind(&mut self) -> Kind {
+        self.frame().flavor.kind
+    }
+
+    /// Reads a binding without its TDZ check
+    fn load_raw(&mut self, name: &'a str) {
+        match self.resolve(name).place {
+            Place::Reg(reg) => self.b().ldar(reg),
+            Place::Context { depth, slot, cells } => self.b().load_context_slot(Register::current_context(), slot, depth, false, cells),
+            _ => self.load(name),
+        }
+    }
+
+    /// After `super(…)` returned `instance`: it becomes `this` (once only), then it is branded and its fields defined
+    pub fn bind_this(&mut self, instance: Register) {
+        self.load_raw(THIS);
+        self.b().plain(Bytecode::ThrowSuperAlreadyCalledIfNotHole);
+        self.b().ldar(instance);
+        self.store(THIS, true);
+        self.instance_init(instance);
+        self.b().ldar(instance);
+    }
+
+    /// The instance's private brand, then the instance fields (V8's `BuildPrivateBrandInitialization` /
+    /// `BuildInstanceMemberInitialization`)
+    fn instance_init(&mut self, this: Register) {
+        let Some(info) = self.classes.last() else { return };
+        let (brand, fields) = (info.brand, info.fields);
+        if brand {
+            let key = self.temp();
+            let binding = self.classes.last().map_or("", |c| c.brands[0]);
+            self.load(binding);
+            self.b().star(key);
+            self.b().ldar(this);
+            self.b().define_keyed_own(this, key, 0);
+            self.release(key);
+        }
+        if fields {
+            let mut skip = Label::default();
+            self.load(Hidden::FIELDS);
+            self.b().jump(Bytecode::JumpIfUndefined, &mut skip);
+            let init = self.temp();
+            self.b().star(init);
+            self.b().call_property(init, RegisterList { first: this, count: 1 });
+            self.release(init);
+            self.b().bind(&mut skip);
+        }
+    }
+
+    /// The parent constructor of a derived class constructor (V8's `FindNonDefaultConstructorOrConstruct`), not
+    /// done yet: `(done, constructor)` in a new register pair (the caller frees it)
+    pub fn super_constructor(&mut self) -> (RegisterList, Register) {
+        let this_function = self.temp();
+        if self.frame_kind() == Kind::Arrow {
+            self.load(Hidden::THIS_FUNCTION);
+            self.b().star(this_function);
+        } else {
+            self.b().mov(Register::function_closure(), this_function);
+        }
+        let new_target = self.temp();
+        self.load(NEW_TARGET);
+        self.b().star(new_target);
+        let pair = self.b().new_register_list(2);
+        self.b().raw(Bytecode::FindNonDefaultConstructorOrConstruct, &[i32::from(this_function).into(), i32::from(new_target).into(), i32::from(pair.first).into()]);
+        (pair, new_target)
+    }
+
+    /// `super(...arguments)` of a default derived constructor (V8's `ConstructForwardAllArgs`)
+    fn super_call_forward(&mut self) {
+        let first = self.b().mark();
+        let (pair, new_target) = self.super_constructor();
+        let mut done = Label::default();
+        self.b().ldar(pair.first);
+        self.b().jump(Bytecode::JumpIfTrue, &mut done);
+        self.b().raw(Bytecode::ThrowIfNotSuperConstructor, &[i32::from(pair.at(1)).into()]);
+        self.b().ldar(new_target);
+        let slot = j8bytecode::OperandValue::try_from(self.b().slot(j8bytecode::FeedbackSlotKind::Call)).unwrap_or(0);
+        self.b().raw(Bytecode::ConstructForwardAllArgs, &[i32::from(pair.at(1)).into(), slot]);
+        self.b().star(pair.at(1));
+        self.b().bind(&mut done);
+        self.bind_this(pair.at(1));
+        self.b().release_to(first);
+    }
+
+    fn function_declaration(&mut self, f: &'a AstFunction<'a>) -> Result<u32, Error> {
+        self.plain_function(f, false, "")
+    }
+
+    /// Module body (not yet on V8 bytecode)
+    fn module_body(&mut self, program: &'a Program<'a>) -> Result<(), Error> {
+        Err(self.unsupported(program.span, "modules"))
+    }
+
+    /// The top level of a script or eval code (V8's `GenerateBytecodeBody` for a script / eval scope). A script's `var`s
+    /// and function declarations are declared on the global object by `DeclareGlobals`, its `let` / `const` / `class`
+    /// are slots of the script context the interpreter creates before running it (recorded as the function's scope).
+    /// Sloppy eval code declares its `var`s / functions with `DeclareEvalVar` / `DeclareEvalFunction` in the calling
+    /// variable environment; strict eval code keeps everything to itself. `local` is the eval code's own level.
+    #[expect(clippy::too_many_lines, reason = "follows V8's GenerateBytecodeBody for a script / eval scope step by step")]
+    fn script(&mut self, program: &'a Program<'a>, local: Option<&Decls<'a>>, strict: bool, direct: bool) -> Result<(), Error> {
+        self.module.push(SharedFunction { name: "".into(), kind: FunctionKind::NormalFunction, strict, length: 0, formal_parameters: 0, scope: None, bytecode: j8bytecode::BytecodeArray::default() });
+        let eval = local.is_some();
+        self.frames.push(Frame {
+            index: 0,
+            b: Builder::new(1, 0),
+            name: "".into(),
+            flavor: Flavor { strict, ..Flavor::default() },
+            default_constructor: false,
+            length: 0,
+            formals: 0,
+            scope: None,
+            contexts: Vec::new(),
+            loop_depth: 0,
+            controls: Vec::new(),
+            label: None,
+            completion: None,
+            generator: None,
+            suspends: 0,
+            resume_table: None,
+            home: None,
+            async_generator: false,
+            strict,
+            annexb: Vec::new(),
+            var_level: None,
+            eval: eval && direct,
+            prologue: false,
+            simple_params: false,
+        });
+        let completion = self.temp();
+        self.frame().completion = Some(completion);
+        let mut rw = Rewriter::default();
+        rw.process(program.body.iter());
+        self.completion_assign = rw.assign;
+        self.completion_reset = rw.reset;
+        // `this` is the receiver (the global object) for a script and indirect eval code; direct eval code looks it up
+        // by name (functions with a direct eval keep `this` in their context, as V8 does)
+        if !(eval && direct) {
+            // Never in a context: inner functions read it as the global `this`
+            if !eval {
+                self.captured.remove(&Decls::this_key(program.span));
+            }
+            self.enter(&Decls(vec![Decl { name: THIS, key: Decls::this_key(program.span), kind: DeclKind::This, ready: None }]), ScopeType::ScriptScope)?;
+        }
+        let mut globals = Decls::default();
+        if !(eval && strict) {
+            globals.vars(&program.body);
+            globals.lexical(&program.body);
+        }
+        // annexB: block-level functions in sloppy code also create a `var` in the variable environment
+        if !strict {
+            let hoisted = Decls::annexb_functions(&program.body, None);
+            self.frame().annexb = hoisted.iter().map(|f| f.span.start).collect();
+            globals.annexb_globals(&hoisted);
+        }
+        if eval {
+            if let Some(d) = local {
+                self.enter(d, ScopeType::EvalScope)?;
+            }
+            if !strict {
+                for d in &globals.0 {
+                    match d.kind {
+                        DeclKind::Var => {
+                            let r = self.temp();
+                            self.b().load_string(d.name);
+                            self.b().star(r);
+                            self.b().call_runtime(Runtime::DeclareEvalVar, RegisterList { first: r, count: 1 });
+                            self.release(r);
+                        }
+                        DeclKind::Function(f) => {
+                            let n = self.function_declaration(f)?;
+                            let args = self.b().new_register_list(2);
+                            self.b().load_string(d.name);
+                            self.b().star(args.first);
+                            self.closure(n);
+                            self.b().star(args.at(1));
+                            self.b().call_runtime(Runtime::DeclareEvalFunction, args);
+                            self.release(args.first);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        } else {
+            // Script: `var`s and functions on the global object in one `DeclareGlobals`; lexical declarations in the
+            // script context
+            let mut declarations = Vec::new();
+            let mut variables = Vec::new();
+            let mut lexical = Vec::new();
+            for d in &globals.0 {
+                match d.kind {
+                    DeclKind::Var => declarations.push(GlobalDeclaration { name: d.name.into(), function: None }),
+                    DeclKind::Function(f) => {
+                        let n = self.function_declaration(f)?;
+                        declarations.retain(|g: &GlobalDeclaration| *g.name != *d.name);
+                        declarations.push(GlobalDeclaration { name: d.name.into(), function: Some(n) });
+                    }
+                    DeclKind::Let | DeclKind::Const => {
+                        let slot = Context::MIN_SLOTS + u32::try_from(variables.len()).unwrap_or(u32::MAX);
+                        let mode = if matches!(d.kind, DeclKind::Const) { VariableMode::Const } else { VariableMode::Let };
+                        variables.push(ContextVariable { name: d.name.into(), mode });
+                        lexical.push(Bound { name: d.name, binding: Binding::Context(slot), constant: matches!(d.kind, DeclKind::Const), ready: d.ready.or(Some(u32::MAX)), self_name: false });
+                    }
+                    _ => {}
+                }
+            }
+            if !variables.is_empty() {
+                self.frame().scope = Some(ScopeInfo { scope_type: Some(ScopeType::ScriptScope), variables, has_extension: false });
+            }
+            // The script context is already current: this level doesn't push or pop it
+            let mark = self.b().mark();
+            self.levels.push(Level { func: 0, names: lexical, context: None, scope: None, dynamic: false, mark, switch: false, cells: true });
+            if !declarations.is_empty() {
+                let k = self.constant(Constant::Declarations(declarations));
+                let args = self.b().new_register_list(2);
+                self.b().load_constant(k);
+                self.b().star(args.first);
+                self.b().mov(Register::function_closure(), args.at(1));
+                self.b().call_runtime(Runtime::DeclareGlobals, args);
+                self.release(args.first);
+            }
+        }
+        // The directive prologue (`'use strict'` etc.) is not in body in oxc, but it consists of expression statements
+        // and counts toward the completion value
+        for d in &program.directives {
+            let k = self.string_const(d.expression.value.as_str(), d.expression.span)?;
+            self.b().load_constant(k);
+            self.b().star(completion);
+        }
+        self.statements(&program.body)?;
+        self.b().ldar(completion);
+        self.b().plain(Bytecode::Return);
+        let f = self.frames.pop().expect("the script's frame");
+        self.levels.clear();
+        self.module[0] = f.finish();
+        Ok(())
+    }
+
+    // ---- Statements --------------------------------------------------------------------
+
+    fn statements(&mut self, stmts: &'a [Statement<'a>]) -> Result<(), Error> {
+        stmts.iter().try_for_each(|s| self.statement(s))
+    }
+
+    fn push_jump(&mut self, label: Option<&'a str>, breakable: bool, continuable: bool) {
+        let f = self.frame();
+        let contexts = f.contexts.clone();
+        f.controls.push(Control::Jump(Jump { label, breakable, continuable, breaks: Label::default(), continues: Label::default(), contexts }));
+    }
+
+    /// The innermost jump target's `continue`s land here
+    fn bind_continues(&mut self) {
+        let f = self.frame();
+        let Some(Control::Jump(j)) = f.controls.iter_mut().rev().find(|c| matches!(c, Control::Jump(_))) else { unreachable!("a loop is the innermost jump target") };
+        let mut l = core::mem::take(&mut j.continues);
+        f.b.bind(&mut l);
+    }
+
+    /// Pops the innermost jump target: its `break`s land here
+    fn pop_jump(&mut self) {
+        let Some(Control::Jump(mut j)) = self.frame().controls.pop() else { unreachable!("the innermost control is this jump target") };
+        self.b().bind(&mut j.breaks);
+    }
+
+    /// A loop / `switch` consumes the pending labels.
+    fn take_label(&mut self) -> Option<&'a str> {
+        self.frame().label.take()
+    }
+
+    /// Finds where a jump out lands, innermost first: detours into the first finally encountered; `target` of `None`
+    /// means `return`.
+    fn exit_plan(&self, target: Option<(Option<&'a str>, bool)>) -> Exit {
+        let f = self.frames.last().expect("inside a function");
+        for (i, c) in f.controls.iter().enumerate().rev() {
+            match c {
+                Control::Finally(_) => return Exit::Finally(i),
+                Control::Jump(j) => {
+                    let hit = match target {
+                        Some((Some(l), false)) => j.label == Some(l),
+                        Some((Some(l), true)) => j.label == Some(l) && j.continuable,
+                        Some((None, false)) => j.breakable,
+                        Some((None, true)) => j.continuable,
+                        None => false,
+                    };
+                    if hit {
+                        return Exit::Jump(i);
+                    }
+                }
+                Control::Handler | Control::Iterator(_) | Control::AsyncIterator(_) => {}
+            }
+        }
+        Exit::Function
+    }
+
+    /// Makes the context the one of a landing point that had `contexts` pushed (one `PopContext` to the saved outer
+    /// context of the first extra one)
+    fn restore_contexts(&mut self, contexts: &[Register]) {
+        let cur = self.frame().contexts.clone();
+        if cur.len() > contexts.len() {
+            self.b().pop_context(cur[contexts.len()]);
+        }
+    }
+
+    /// Leaves control stack levels `from` and above, innermost first: closes iterators passed. acc is kept.
+    fn leave_controls(&mut self, from: usize) -> Result<(), Error> {
+        let iters: Vec<Control<'a>> = self.frame().controls[from..]
+            .iter()
+            .rev()
+            .filter_map(|c| match c {
+                Control::Iterator(i) => Some(Control::Iterator(*i)),
+                Control::AsyncIterator(i) => Some(Control::AsyncIterator(*i)),
+                _ => None,
+            })
+            .collect();
+        if iters.is_empty() {
+            return Ok(());
+        }
+        let saved = self.temp();
+        self.b().star(saved);
+        for c in iters {
+            match c {
+                Control::Iterator(iter) => self.iterator_close(iter),
+                _ => return Err(self.unsupported(Span::default(), "for await")),
+            }
+        }
+        self.b().ldar(saved);
+        self.release(saved);
+        Ok(())
+    }
+
+    /// Jumps into the finally of level `i`, carrying continuation token `token`.
+    fn enter_finally(&mut self, i: usize, token: i32) -> Result<(), Error> {
+        let Control::Finally(fin) = &self.frame().controls[i] else { unreachable!("a finally") };
+        let (contexts, token_reg) = (fin.contexts.clone(), fin.token);
+        self.leave_controls(i + 1)?;
+        self.restore_contexts(&contexts);
+        let saved = self.temp();
+        self.b().star(saved);
+        self.b().load_smi(token);
+        self.b().star(token_reg);
+        self.b().ldar(saved);
+        self.release(saved);
+        let f = self.frame();
+        let Control::Finally(fin) = &mut f.controls[i] else { unreachable!("a finally") };
+        let mut l = core::mem::take(&mut fin.entry);
+        f.b.jump(Bytecode::Jump, &mut l);
+        let Control::Finally(fin) = &mut f.controls[i] else { unreachable!("a finally") };
+        fin.entry = l;
+        Ok(())
+    }
+
+    /// `break` / `continue`: restores the context, closes the iterators passed, then jumps; detours into any finally
+    /// in between first.
+    fn exit(&mut self, span: Span, label: Option<&'a str>, cont: bool) -> Result<(), Error> {
+        match self.exit_plan(Some((label, cont))) {
+            Exit::Jump(i) => {
+                let Control::Jump(j) = &self.frame().controls[i] else { unreachable!("a jump target") };
+                let contexts = j.contexts.clone();
+                self.leave_controls(i + 1)?;
+                self.restore_contexts(&contexts);
+                let f = self.frame();
+                let Control::Jump(j) = &mut f.controls[i] else { unreachable!("a jump target") };
+                let mut l = core::mem::take(if cont { &mut j.continues } else { &mut j.breaks });
+                f.b.jump(Bytecode::Jump, &mut l);
+                let Control::Jump(j) = &mut f.controls[i] else { unreachable!("a jump target") };
+                if cont { j.continues = l } else { j.breaks = l }
+                Ok(())
+            }
+            Exit::Finally(i) => {
+                let Control::Finally(fin) = &mut self.frame().controls[i] else { unreachable!("a finally") };
+                let n = fin.routes.len();
+                fin.routes.push(Route { span, label, cont });
+                self.enter_finally(i, COMPLETION_ROUTE + i32::try_from(n).expect("fewer than 2^31 routes"))
+            }
+            Exit::Function => Err(self.unsupported(span, "a jump with no target")),
+        }
+    }
+
+    /// `return` (value in acc): if a finally is in between, stores the value and detours into it first; closes all
+    /// iterators passed.
+    pub fn ret(&mut self) {
+        match self.exit_plan(None) {
+            Exit::Finally(i) => {
+                let Control::Finally(fin) = &self.frame().controls[i] else { unreachable!("a finally") };
+                let value = fin.value;
+                self.b().star(value);
+                let _ = self.enter_finally(i, COMPLETION_RETURN);
+            }
+            _ => {
+                let _ = self.leave_controls(0);
+                let flavor = self.frame().flavor;
+                if flavor.asynchronous {
+                    // V8's `BuildAsyncReturn`: the value fulfills the promise (async function) / the request, as a done
+                    // result (async generator)
+                    let g = self.frame().generator.expect("a generator register");
+                    let args = self.b().new_register_list(if flavor.generator { 3 } else { 2 });
+                    self.b().mov(g, args.first);
+                    self.b().star(args.at(1));
+                    if flavor.generator {
+                        self.b().load_bool(true);
+                        self.b().star(args.at(2));
+                        self.b().call_runtime(Runtime::InlineAsyncGeneratorResolve, args);
+                    } else {
+                        self.b().call_runtime(Runtime::InlineAsyncFunctionResolve, args);
+                    }
+                    self.release(args.first);
+                }
+                if flavor.kind == (Kind::Constructor { derived: true }) {
+                    // V8's `GenerateDerivedConstructorBody`: returning `undefined` returns `this` (which `super()` must
+                    // have initialized)
+                    let mut this = Label::default();
+                    self.b().jump(Bytecode::JumpIfUndefined, &mut this);
+                    self.b().plain(Bytecode::Return);
+                    self.b().bind(&mut this);
+                    self.load(THIS);
+                }
+                self.b().plain(Bytecode::Return);
+            }
+        }
+    }
+
+    /// Branches of `if`: a bare function declaration is treated as a block containing only it (annexB B.3.3).
+    fn clause(&mut self, s: &'a Statement<'a>) -> Result<(), Error> {
+        if matches!(s, Statement::FunctionDeclaration(_)) {
+            let one = core::slice::from_ref(s);
+            self.scoped(&Decls::block([one]), |c| c.statements(one))
+        } else {
+            self.statement(s)
+        }
+    }
+
+    fn block(&mut self, b: &'a BlockStatement<'a>) -> Result<(), Error> {
+        self.scoped(&Decls::block([b.body.as_slice()]), |c| c.statements(&b.body))
+    }
+
+    /// Runs `then` when the continuation token in `reg` is `token`.
+    pub fn on_completion(&mut self, reg: Register, token: i32, then: impl FnOnce(&mut Self) -> Result<(), Error>) -> Result<(), Error> {
+        self.b().load_smi(token);
+        self.b().compare(CompareOp::StrictEq, reg);
+        let mut skip = Label::default();
+        self.b().jump(Bytecode::JumpIfFalse, &mut skip);
+        then(self)?;
+        self.b().bind(&mut skip);
+        Ok(())
+    }
+
+    /// The current level gets a fresh copy of its context (a `for (let …)` iteration: closures from the previous
+    /// iteration keep the old one)
+    fn renew_context(&mut self) {
+        let Some(level) = self.levels.last() else { return };
+        let Some(saved) = level.context else { return };
+        let slots: Vec<u32> = level.names.iter().filter_map(|n| match n.binding {
+            Binding::Context(s) => Some(s),
+            _ => None,
+        }).collect();
+        let Some(scope) = level.scope else { return };
+        let n = u32::try_from(slots.len()).unwrap_or(0);
+        let tmp = self.b().new_register_list(n);
+        for (i, &s) in (0u32..).zip(&slots) {
+            self.b().load_context_slot(Register::current_context(), s, 0, false, false);
+            self.b().star(tmp.at(i));
+        }
+        self.b().pop_context(saved);
+        self.b().create_block_context(scope);
+        self.b().push_context(saved);
+        for (i, &s) in (0u32..).zip(&slots) {
+            self.b().ldar(tmp.at(i));
+            self.b().store_context_slot(Register::current_context(), s, 0);
+        }
+        self.release(tmp.first);
+    }
+
+    /// `try` / `catch` / `finally` (V8's `TryCatchBuilder` / `TryFinallyBuilder`: handler table regions; a finally is
+    /// entered with a continuation token and dispatches on it at the end)
+    fn try_statement(&mut self, t: &'a TryStatement<'a>) -> Result<(), Error> {
+        let body = |s: &mut Self| match &t.handler {
+            Some(c) => s.try_catch(j8bytecode::CatchPrediction::Caught, |s| s.block(&t.block), |s, ctx| s.catch_clause(c, ctx)),
+            None => s.block(&t.block),
+        };
+        match &t.finalizer {
+            Some(f) => self.try_finally(j8bytecode::CatchPrediction::Uncaught, body, |s, _| s.block(f)),
+            None => body(self),
+        }
+    }
+
+    /// `try { body } finally { finalizer }` (V8's `BuildTryFinally`): every way out of the body — falling through, a
+    /// throw, a `return`, a `break` / `continue` — runs the finalizer first, then carries on.
+    /// The finalizer gets the register holding how the body was left (the continuation token).
+    pub fn try_finally(&mut self, prediction: j8bytecode::CatchPrediction, body: impl FnOnce(&mut Self) -> Result<(), Error>, finalizer: impl FnOnce(&mut Self, Register) -> Result<(), Error>) -> Result<(), Error> {
+        let token = self.temp();
+        let value = self.temp();
+        let contexts = self.frame().contexts.clone();
+        self.frame().controls.push(Control::Finally(Finally { token, value, contexts, entry: Label::default(), routes: Vec::new() }));
+        let ctx = self.temp();
+        self.b().mov(Register::current_context(), ctx);
+        let h = self.b().new_handler(ctx, prediction);
+        self.b().try_start(h);
+        self.frame().controls.push(Control::Handler);
+        body(self)?;
+        self.frame().controls.pop();
+        self.b().try_end(h);
+        let mut fall = Label::default();
+        self.b().load_smi(COMPLETION_NORMAL);
+        self.b().star(token);
+        self.b().jump(Bytecode::Jump, &mut fall);
+        // Entered by a throw: keep the exception for the rethrow
+        self.b().handler_target(h);
+        self.b().star(value);
+        self.b().load_smi(COMPLETION_THROW);
+        self.b().star(token);
+        self.b().bind(&mut fall);
+        let Some(Control::Finally(mut f)) = self.frame().controls.pop() else { unreachable!("the innermost control is this finally") };
+        self.b().bind(&mut f.entry);
+        finalizer(self, token)?;
+        self.on_completion(token, COMPLETION_THROW, |s| {
+            s.b().ldar(value);
+            s.b().plain(Bytecode::ReThrow);
+            Ok(())
+        })?;
+        self.on_completion(token, COMPLETION_RETURN, |s| {
+            s.b().ldar(value);
+            s.ret();
+            Ok(())
+        })?;
+        for (n, r) in (0i32..).zip(f.routes) {
+            self.on_completion(token, COMPLETION_ROUTE + n, |s| s.exit(r.span, r.label, r.cont))?;
+        }
+        self.release(token);
+        Ok(())
+    }
+
+    /// A `catch` clause, entered with the exception in acc and the context saved in `ctx` (V8's
+    /// `VisitTryCatchStatement`): the catch variable always lives in a catch context (a pattern binds `.catch` there and
+    /// is destructured in a block scope), and the pending message is cleared
+    fn catch_clause(&mut self, c: &'a CatchClause<'a>, ctx: Register) -> Result<(), Error> {
+        let Some(p) = &c.param else {
+            self.b().load_the_hole();
+            self.b().plain(Bytecode::SetPendingMessage);
+            self.b().ldar(ctx);
+            return self.block(&c.body);
+        };
+        let name = match &p.pattern {
+            BindingPattern::BindingIdentifier(id) => id.name.as_str(),
+            _ => Hidden::CATCH,
+        };
+        let func = self.frames.len() - 1;
+        let mark = self.b().mark();
+        let info = ScopeInfo { scope_type: Some(ScopeType::CatchScope), variables: alloc::vec![ContextVariable { name: name.into(), mode: VariableMode::Var }], has_extension: false };
+        let k = self.constant(Constant::Scope(info));
+        let e = self.temp();
+        self.b().star(e);
+        self.b().create_catch_context(e, k);
+        self.release(e);
+        self.b().star(ctx);
+        self.b().load_the_hole();
+        self.b().plain(Bytecode::SetPendingMessage);
+        self.b().ldar(ctx);
+        let saved = self.temp();
+        self.b().push_context(saved);
+        self.frame().contexts.push(saved);
+        let names = alloc::vec![Bound { name, binding: Binding::Context(Context::MIN_SLOTS), constant: false, ready: None, self_name: false }];
+        self.levels.push(Level { func, names, context: Some(saved), scope: Some(k), dynamic: false, mark, switch: false, cells: false });
+        if matches!(p.pattern, BindingPattern::BindingIdentifier(_)) {
+            self.block(&c.body)?;
+        } else {
+            self.scoped(&Decls::catch_param(c), |s| {
+                s.load_at(Hidden::CATCH, c.span.start);
+                let v = s.temp();
+                s.b().star(v);
+                s.bind_pattern(&p.pattern, v, true)?;
+                s.release(v);
+                s.block(&c.body)
+            })?;
+        }
+        self.leave();
+        Ok(())
+    }
+
+    /// A loop's back edge: `continue`s land here, then `JumpLoop` to `header`
+    fn loop_back(&mut self, header: crate::builder::LoopHeader) {
+        self.bind_continues();
+        let depth = self.frame().loop_depth - 1;
+        self.b().jump_loop(header, depth);
+    }
+
+    #[expect(clippy::too_many_lines, reason = "one arm per statement kind; splitting it would hurt readability")]
+    fn statement(&mut self, s: &'a Statement<'a>) -> Result<(), Error> {
+        // The completion value resets to `undefined` before a statement that may not produce one (V8's Rewriter)
+        if let Some(c) = self.frame().completion
+            && self.completion_reset.contains(&s.span().start)
+        {
+            self.b().load_undefined();
+            self.b().star(c);
+        }
+        match s {
+            Statement::ExpressionStatement(e) => match self.frame().completion.filter(|_| self.completion_assign.contains(&e.span.start)) {
+                Some(c) => {
+                    self.expr(&e.expression)?;
+                    self.b().star(c);
+                }
+                None => self.effect(&e.expression)?,
+            },
+            Statement::VariableDeclaration(d) => self.declaration(d)?,
+            Statement::FunctionDeclaration(f) => self.annexb_copy(f),
+            Statement::EmptyStatement(_) => {}
+            Statement::ClassDeclaration(c) => {
+                self.class(c, "")?;
+                if let Some(id) = &c.id {
+                    self.store(id.name.as_str(), true);
+                }
+            }
+            Statement::BlockStatement(b) => self.block(b)?,
+            Statement::ReturnStatement(r) => {
+                match &r.argument {
+                    Some(e) => {
+                        self.expr(e)?;
+                        // An async generator awaits the operand (V8's parser wraps it in an `Await`)
+                        if self.frame().async_generator {
+                            self.await_value();
+                        }
+                    }
+                    None => self.b().load_undefined(),
+                }
+                self.ret();
+            }
+            Statement::TryStatement(t) => self.try_statement(t)?,
+            Statement::ThrowStatement(t) => {
+                self.expr(&t.argument)?;
+                self.b().plain(Bytecode::Throw);
+            }
+            Statement::IfStatement(i) => {
+                self.expr(&i.test)?;
+                let mut skip = Label::default();
+                self.b().jump(Bytecode::JumpIfToBooleanFalse, &mut skip);
+                self.clause(&i.consequent)?;
+                if let Some(a) = &i.alternate {
+                    let mut end = Label::default();
+                    self.b().jump(Bytecode::Jump, &mut end);
+                    self.b().bind(&mut skip);
+                    self.clause(a)?;
+                    self.b().bind(&mut end);
+                } else {
+                    self.b().bind(&mut skip);
+                }
+            }
+            Statement::WhileStatement(w) => {
+                let label = self.take_label();
+                let header = self.b().loop_header();
+                self.frame().loop_depth += 1;
+                self.push_jump(label, true, true);
+                self.expr(&w.test)?;
+                let mut exit = Label::default();
+                self.b().jump(Bytecode::JumpIfToBooleanFalse, &mut exit);
+                self.statement(&w.body)?;
+                self.loop_back(header);
+                self.frame().loop_depth -= 1;
+                self.b().bind(&mut exit);
+                self.pop_jump();
+            }
+            Statement::DoWhileStatement(w) => {
+                let label = self.take_label();
+                let header = self.b().loop_header();
+                self.frame().loop_depth += 1;
+                self.push_jump(label, true, true);
+                self.statement(&w.body)?;
+                self.bind_continues();
+                self.expr(&w.test)?;
+                let mut exit = Label::default();
+                self.b().jump(Bytecode::JumpIfToBooleanFalse, &mut exit);
+                let depth = self.frame().loop_depth - 1;
+                self.b().jump_loop(header, depth);
+                self.frame().loop_depth -= 1;
+                self.b().bind(&mut exit);
+                self.pop_jump();
+            }
+            Statement::ForStatement(f) => {
+                let label = self.take_label();
+                let init_text = match &f.init {
+                    Some(ForStatementInit::VariableDeclaration(d)) => {
+                        let inits: Vec<&str> = d.declarations.iter().filter_map(|v| v.init.as_ref()).map(|e| &self.src.text[e.span().start as usize..e.span().end as usize]).collect();
+                        Some(self.alloc.alloc_str(&inits.join(" ")))
+                    }
+                    _ => None,
+                };
+                self.for_init_text = init_text.map(|t| &*t);
+                let decls = Decls::for_init(f.init.as_ref());
+                self.enter(&decls, ScopeType::BlockScope)?;
+                self.for_init_text = None;
+                let r = (|c: &mut Self| -> Result<(), Error> {
+                    match &f.init {
+                        Some(ForStatementInit::VariableDeclaration(d)) => c.declaration(d)?,
+                        Some(init) => c.effect(init.as_expression().expect("a for-init is a declaration or an expression"))?,
+                        None => {}
+                    }
+                    let header = c.b().loop_header();
+                    c.frame().loop_depth += 1;
+                    c.push_jump(label, true, true);
+                    let mut exit = Label::default();
+                    if let Some(t) = &f.test {
+                        c.expr(t)?;
+                        c.b().jump(Bytecode::JumpIfToBooleanFalse, &mut exit);
+                    }
+                    c.statement(&f.body)?;
+                    c.bind_continues();
+                    // A fresh `let` context per iteration; closures from the previous iteration keep the old one
+                    c.renew_context();
+                    if let Some(u) = &f.update {
+                        c.effect(u)?;
+                    }
+                    let depth = c.frame().loop_depth - 1;
+                    c.b().jump_loop(header, depth);
+                    c.frame().loop_depth -= 1;
+                    c.b().bind(&mut exit);
+                    c.pop_jump();
+                    Ok(())
+                })(self);
+                r?;
+                self.leave();
+            }
+            Statement::WithStatement(w) => {
+                self.expr(&w.object)?;
+                let object = self.temp();
+                self.b().to_object(object);
+                let k = self.constant(Constant::Scope(ScopeInfo { scope_type: Some(ScopeType::WithScope), variables: Vec::new(), has_extension: false }));
+                self.b().create_with_context(object, k);
+                let saved = self.temp();
+                self.b().push_context(saved);
+                self.frame().contexts.push(saved);
+                let mark = self.b().mark();
+                let func = self.frames.len() - 1;
+                self.levels.push(Level { func, names: Vec::new(), context: Some(saved), scope: None, dynamic: true, mark, switch: false, cells: false });
+                self.statement(&w.body)?;
+                self.leave();
+                self.release(object);
+            }
+            Statement::LabeledStatement(l) => {
+                let name = l.label.name.as_str();
+                if matches!(l.body, Statement::WhileStatement(_) | Statement::DoWhileStatement(_) | Statement::ForStatement(_) | Statement::ForOfStatement(_) | Statement::ForInStatement(_) | Statement::SwitchStatement(_)) {
+                    self.frame().label = Some(name);
+                    self.statement(&l.body)?;
+                } else {
+                    self.push_jump(Some(name), false, false);
+                    self.statement(&l.body)?;
+                    self.pop_jump();
+                }
+            }
+            Statement::BreakStatement(b) => self.exit(b.span, b.label.as_ref().map(|l| l.name.as_str()), false)?,
+            Statement::ContinueStatement(c) => self.exit(c.span, c.label.as_ref().map(|l| l.name.as_str()), true)?,
+            Statement::SwitchStatement(sw) => self.switch(sw)?,
+            Statement::ForOfStatement(f) => self.for_of(f)?,
+            Statement::ForInStatement(f) => self.for_in(f)?,
+            s => return Err(self.unsupported(s.span(), "statement")),
+        }
+        Ok(())
+    }
+
+    fn declaration(&mut self, d: &'a VariableDeclaration<'a>) -> Result<(), Error> {
+        if !matches!(d.kind, VariableDeclarationKind::Var | VariableDeclarationKind::Let | VariableDeclarationKind::Const) {
+            return Err(self.unsupported(d.span, "`using` declarations"));
+        }
+        for v in &d.declarations {
+            let BindingPattern::BindingIdentifier(id) = &v.id else {
+                let init = v.init.as_ref().ok_or_else(|| self.unsupported(v.span, "a destructuring declaration without an initializer"))?;
+                self.expr(init)?;
+                let t = self.temp();
+                self.b().star(t);
+                self.bind_pattern(&v.id, t, true)?;
+                self.release(t);
+                continue;
+            };
+            match (&v.init, d.kind) {
+                (Some(e), _) => self.expr_named(e, id.name.as_str())?,
+                // `let x;` in a loop body must reset to undefined every iteration
+                (None, VariableDeclarationKind::Let) => self.b().load_undefined(),
+                (None, _) => continue,
+            }
+            self.store(id.name.as_str(), true);
+        }
+        Ok(())
+    }
+
+    /// `switch` (V8's `VisitSwitchStatement`): compares each `case` with strict equality to jump into its body; bodies
+    /// fall through in order.
+    fn switch(&mut self, sw: &'a SwitchStatement<'a>) -> Result<(), Error> {
+        let label = self.take_label();
+        self.expr(&sw.discriminant)?;
+        let d = self.temp();
+        self.b().star(d);
+        self.scoped(&Decls::block(sw.cases.iter().map(|c| c.consequent.as_slice())), |c| {
+            c.levels.last_mut().expect("the switch scope").switch = true;
+            let mut entries: Vec<Option<Label>> = Vec::with_capacity(sw.cases.len());
+            for case in &sw.cases {
+                if let Some(t) = &case.test {
+                    c.expr(t)?;
+                    c.b().compare(CompareOp::StrictEq, d);
+                    let mut l = Label::default();
+                    c.b().jump(Bytecode::JumpIfTrue, &mut l);
+                    entries.push(Some(l));
+                } else {
+                    entries.push(None);
+                }
+            }
+            let mut fallback = Label::default();
+            c.b().jump(Bytecode::Jump, &mut fallback);
+            c.push_jump(label, true, false);
+            let mut has_default = false;
+            for (case, entry) in sw.cases.iter().zip(entries) {
+                match entry {
+                    Some(mut l) => c.b().bind(&mut l),
+                    None => {
+                        has_default = true;
+                        c.b().bind(&mut fallback);
+                    }
+                }
+                c.statements(&case.consequent)?;
+            }
+            if !has_default {
+                c.b().bind(&mut fallback);
+            }
+            c.pop_jump();
+            Ok(())
+        })?;
+        self.release(d);
+        Ok(())
+    }
+}

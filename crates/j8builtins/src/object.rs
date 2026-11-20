@@ -18,8 +18,9 @@ impl Objects {
     /// `Object(v)`: when constructing a subclass, create from `new.target`; otherwise objects are returned as is,
     /// `undefined` / `null` give a new empty object, and primitives are wrapped.
     fn object<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        if a.new_target != Value::Undefined && !Self::is_object_ctor(a.new_target) {
-            return Ok(a.create_from_ctor(a.realm.object_proto, ObjectKind::Ordinary)?.into());
+        let new_target = a.new_target;
+        if new_target != Value::Undefined && !Self::is_object_ctor(new_target) {
+            return Ok(a.create_from_ctor(new_target, a.realm.object_proto, ObjectKind::Ordinary)?.into());
         }
         Ok(match args.at(0).kind() {
             ValueKind::Undefined | ValueKind::Null | ValueKind::Uninit => a.object().into(),
@@ -524,7 +525,7 @@ impl Objects {
         // In NativeFunction syntax the name can only be a property name (optionally with get / set): private names,
         // `bound f` and the like are left out
         let name = match this.kind() {
-            ValueKind::Object(o) => match o.borrow().get_own("name").and_then(|p| p.value()).map(Value::kind) {
+            ValueKind::Object(o) => match o.borrow().get_own(a.mc, "name").and_then(|p| p.value()).map(Value::kind) {
                 Some(ValueKind::String(s)) if Self::native_name(&s) => alloc::string::String::from(&**s),
                 _ => alloc::string::String::new(),
             },
@@ -551,8 +552,9 @@ impl Objects {
     }
 
     fn boolean<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+        let new_target = a.new_target;
         let b = a.to_boolean(args.at(0));
-        a.wrap_primitive(b.into(), a.realm.boolean_proto)
+        a.wrap_primitive(new_target, b.into(), a.realm.boolean_proto)
     }
 
     /// thisBooleanValue: a boolean or Boolean wrapper object; anything else throws TypeError.
@@ -635,7 +637,7 @@ impl Installer<'_, '_> {
         // The execution layer expands call / apply inline (the host implementation stays for cases like a non-callable
         // target)
         for (name, forward) in [("call", j8framework::Forward::Call), ("apply", j8framework::Forward::Apply)] {
-            let f = proto.borrow().own(name);
+            let f = proto.borrow().own(self.mc, name);
             if let Some(ValueKind::Object(f)) = f.map(Value::kind)
                 && let ObjectKind::Native(n) = &mut f.borrow_mut(self.mc).kind
             {

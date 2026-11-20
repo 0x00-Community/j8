@@ -58,7 +58,7 @@ impl Glue {
     #[doc(hidden)]
     pub fn natives<'gc>(a: &mut Agent<'gc, '_>) -> JsObject<'gc> {
         let global = a.realm.global;
-        if let Some(j8framework::Slot::Data(v)) = global.borrow().get_own(NATIVE).map(|p| p.slot)
+        if let Some(j8framework::Slot::Data(v)) = global.borrow().get_own(a.mc, NATIVE).map(|p| p.slot)
             && let Some(o) = v.as_object()
         {
             return o;

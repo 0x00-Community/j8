@@ -2,23 +2,26 @@
 
 **English** · [简体中文](README.zh-CN.md)
 
-The bytecode compiler of [j8](https://github.com/0x00-Community/j8)'s JIT: one bytecode function ⇒ MLIR (`llvm`
-dialect, via [mlirpass](https://crates.io/crates/mlirpass)) ⇒ machine code through a `Backend` (the x86-64 one lives in
-`j8jit`).
+The compiler of [j8](https://github.com/0x00-Community/j8): JavaScript ⇒ j8 bytecode (`j8bytecode::Module`), parsed
+with [oxc](https://oxc.rs). Every piece of JS goes through here before it runs — scripts, ES modules, and dynamic code
+(`eval`, `Function`); there is no AST interpreter.
 
 ```text
-j8virtasm::Function ─ Lower ─▶ MLIR (llvm dialect) ─ Backend ─▶ machine code + addresses to patch
+source ─ oxc parser + semantic checks ─▶ AST ─ scope resolution ─ code generation ─ peephole fusion ─▶ Module
 ```
 
-The machine code is a System V function `extern "C" fn(regs: *mut Value, acc: *mut Value, start: u64) -> u64`. It runs
-on the frame's own register file and accumulator; it returns 0 when the function returned, or `pc + 1` when it stopped
-before instruction `pc` and the interpreter continues from there.
+## Usage
 
-- The first tier takes register moves, number and boolean constants, arithmetic, comparisons, `++` / `--`, jumps, TDZ
-  checks and `return`; anything else (calls, properties, closures …) stops before itself
-- `start` picks where to enter: 0 at the start, `h + 1` at loop header `h` (on-stack replacement)
+```rust
+use j8compiler::Compile;
+use j8framework::{CodeKind, Source};
 
-Used by `j8jit`; embedders normally don't call it directly.
+let module = j8bytecode::Module::compile(&Source { text: "1 + 2", file: "a.js" }, CodeKind::Script)?;
+let (module, info) = j8bytecode::Module::compile_module(&source)?;  // an ES module plus its imports / exports
+```
+
+`Compile::compile_direct` compiles direct-eval code against the call site's scope table. `j8executor` calls all of
+these itself; embedders normally don't.
 
 ## License
 

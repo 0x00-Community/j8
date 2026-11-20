@@ -192,6 +192,12 @@ impl Default for Value<'_> {
 
 impl core::fmt::Debug for Value<'_> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        if let Some(l) = self.as_lazy() {
+            return core::fmt::Debug::fmt(&l, f);
+        }
+        if self.as_accessor().is_some() || self.as_context().is_some() {
+            return f.write_str("<internal>");
+        }
         core::fmt::Debug::fmt(&self.kind(), f)
     }
 }
@@ -201,8 +207,14 @@ impl core::fmt::Debug for Value<'_> {
 unsafe impl Trace for Value<'_> {
     #[inline]
     fn trace(&self, t: &mut Tracer<'_>) {
+        if !self.is_pointer() {
+            return;
+        }
         if let Some(a) = self.as_accessor() {
             return t.edge(a);
+        }
+        if let Some(c) = self.as_context() {
+            return t.edge(c);
         }
         match self.kind() {
             ValueKind::String(s) => t.edge(s),
@@ -215,9 +227,17 @@ unsafe impl Trace for Value<'_> {
 
     #[inline]
     fn relocate(&mut self, t: &mut Tracer<'_>) {
+        if !self.is_pointer() {
+            return;
+        }
         if let Some(mut a) = self.as_accessor() {
             t.relocate(&mut a);
             *self = Value::accessor(a);
+            return;
+        }
+        if let Some(mut c) = self.as_context() {
+            t.relocate(&mut c);
+            *self = Value::context(c);
             return;
         }
         *self = match self.kind() {
@@ -261,8 +281,14 @@ impl<'gc> Value<'gc> {
     /// The object it points to, type erased (for [`crate::gc::ValueCell`])
     #[inline]
     pub fn erased(self) -> Option<Gc<'gc, Erased>> {
+        if !self.is_pointer() {
+            return None;
+        }
         if let Some(a) = self.as_accessor() {
             return Some(erase(a));
+        }
+        if let Some(c) = self.as_context() {
+            return Some(erase(c));
         }
         match self.kind() {
             ValueKind::String(s) => Some(erase(s)),
@@ -271,6 +297,32 @@ impl<'gc> Value<'gc> {
             ValueKind::Object(o) => Some(erase(o)),
             _ => None,
         }
+    }
+
+    /// Whether the word holds a GC address (a string, symbol, bigint, object, accessor pair or context)
+    #[inline]
+    pub fn is_pointer(self) -> bool {
+        self.bits >= paragc::WORD_POINTER_MIN
+    }
+
+    /// A lazy property value as a word (only property slots hold these)
+    #[inline]
+    pub fn lazy(l: crate::Lazy) -> Self {
+        Self::word(ValueBits::boxed(ValueTag::LAZY, u64::from(l)))
+    }
+
+    /// The lazy value, if this word holds one
+    #[inline]
+    pub fn as_lazy(self) -> Option<crate::Lazy> {
+        (self.bits >> ValueBits::TAG_SHIFT == ValueBits::boxed(ValueTag::LAZY, 0) >> ValueBits::TAG_SHIFT)
+            .then(|| crate::Lazy::try_from(self.bits & ValueBits::PAYLOAD).ok())
+            .flatten()
+    }
+
+    /// Plain data in a property slot: neither an accessor pair nor a lazy value (one compare each)
+    #[inline]
+    pub fn is_plain_slot(self) -> bool {
+        self.as_accessor().is_none() && self.as_lazy().is_none()
     }
 
     /// An accessor pair as a word (only property slots hold these)
@@ -287,12 +339,19 @@ impl<'gc> Value<'gc> {
             .then(|| unsafe { gc_from_raw(Self::address(self.bits & ValueBits::PAYLOAD)) })
     }
 
-    /// The same pointer kind at another address (the collector moved the object)
+    /// A context (V8's `Context`: an [`Env`](crate::Env)) as a word: registers and the accumulator hold contexts
+    /// between `Create*Context` / `PushContext` / `PopContext`; never seen as a JS value
     #[inline]
-    #[must_use]
-    pub fn with_address(self, p: *const u8) -> Self {
-        debug_assert!(self.erased().is_some(), "only pointer values move");
-        Self::word((self.bits & !ValueBits::PAYLOAD) | p.expose_provenance() as u64)
+    pub fn context(e: crate::JsEnv<'gc>) -> Self {
+        Self::pointer(ValueTag::CONTEXT, e.as_ptr().expose_provenance() as u64)
+    }
+
+    /// The context, if this word holds one
+    #[inline]
+    pub fn as_context(self) -> Option<crate::JsEnv<'gc>> {
+        (self.bits >> ValueBits::TAG_SHIFT == ValueBits::boxed(ValueTag::CONTEXT, 0) >> ValueBits::TAG_SHIFT)
+            // SAFETY: a context word was built from a live context's address
+            .then(|| unsafe { gc_from_raw(Self::address(self.bits & ValueBits::PAYLOAD)) })
     }
 }
 
@@ -304,18 +363,41 @@ impl ValueTag {
     pub const NULL: u8 = 1;
     pub const BOOL: u8 = 2;
     pub const NUMBER: u8 = 3;
-    pub const STRING: u8 = 4;
-    pub const SYMBOL: u8 = 5;
-    pub const BIGINT: u8 = 6;
-    pub const OBJECT: u8 = 7;
-    pub const UNINIT: u8 = 8;
+    pub const UNINIT: u8 = 4;
+    /// Internal: a property value computed on first read ([`crate::Lazy`]); only property slots hold it, never seen as
+    /// a JS value
+    pub const LAZY: u8 = 5;
+    // Tags from here on hold a GC address: their words fall in paragc's pointer range (top 13 bits set, see
+    // `paragc::word_pointer`), so the collector reads, moves and counts them straight from the word
+    pub const STRING: u8 = 7;
+    pub const SYMBOL: u8 = 8;
+    pub const BIGINT: u8 = 9;
+    pub const OBJECT: u8 = 10;
     /// Internal: an accessor pair stored in a property slot ([`crate::Accessor`]); never seen as a JS value
-    pub const ACCESSOR: u8 = 9;
+    pub const ACCESSOR: u8 = 11;
+    /// Internal: a context in a register or the accumulator ([`Value::context`]); never seen as a JS value
+    pub const CONTEXT: u8 = 12;
     /// The number of bytes a value takes
     pub const SIZE: usize = 8;
 }
 
 const _: () = assert!(core::mem::size_of::<Value<'static>>() == ValueTag::SIZE);
+// Pointer words are what paragc takes for pointers, nothing else is (paragc's own `Slot` tag stays unused here)
+const _: () = {
+    let pointers = [ValueTag::STRING, ValueTag::SYMBOL, ValueTag::BIGINT, ValueTag::OBJECT, ValueTag::ACCESSOR, ValueTag::CONTEXT];
+    let mut i = 0;
+    while i < pointers.len() {
+        let w = ValueBits::boxed(pointers[i], 1);
+        assert!(w >= paragc::WORD_POINTER_MIN && w < paragc::RAW_TAG);
+        i += 1;
+    }
+    let others = [ValueTag::UNDEFINED, ValueTag::NULL, ValueTag::BOOL, ValueTag::UNINIT, ValueTag::LAZY];
+    let mut i = 0;
+    while i < others.len() {
+        assert!(ValueBits::boxed(others[i], 1) < paragc::WORD_POINTER_MIN);
+        i += 1;
+    }
+};
 
 /// Strict equality (`===`): strings compare by content, objects by identity, and `NaN` is not equal to itself.
 impl PartialEq for Value<'_> {

@@ -39,7 +39,7 @@ and [crates/macros/USAGE.md](crates/macros/USAGE.md) (the macro reference).
 | | |
 | --- | --- |
 | 🦀 **All Rust** | Parsing is oxc; everything else, from bytecode to GC, is ours. No C++ engine underneath. |
-| 🧱 **Bytecode first** | There is no AST interpreter: all JS (including `eval` and `Function`) is compiled to bytecode. The instruction set is generated from `insn.json`, and assembling / disassembling are exact inverses. |
+| 🧱 **Bytecode first** | There is no AST interpreter: all JS (including `eval` and `Function`) is compiled to bytecode. Every bytecode type is generated from `insn.json`; bytecode has no text form, only a binary one. |
 | 🧬 **A JIT on MLIR** | Bytecode ⇒ the MLIR `llvm` dialect ⇒ the x86-64 backend of [mlirpass](https://crates.io/crates/mlirpass) (linear-scan register allocation), with OSR. |
 | ♻️ **paragc heap** | Immix-style mark-region heap: young collections plus reference counting for old objects, evacuation of sparse blocks, marking and sweeping in parallel, no locks. `'gc` brand lifetimes guarantee at compile time that handles never escape. |
 | 🚫 **No `'static`** | No global state. Background tasks borrow the caller's data, and several isolates share one thread pool. |
@@ -67,8 +67,8 @@ cargo run --release -- --jit a.js               # with the JIT
 # ☁️ Cloudflare Worker style: ES modules + Durable Objects
 cd samples/workerd && cargo run -- examples/counter.js --bind COUNTER=Counter --request "GET /c/inc?name=a"
 
-# 🔬 look at the bytecode
-cargo run -p j8debugger -- disasm -e 'let s = 0; for (let i = 0; i < 10; i++) s += i; s'
+# 🔬 compile to bytecode (binary form)
+cargo run -p j8debugger -- compile -e 'let s = 0; for (let i = 0; i < 10; i++) s += i; s' -o a.j8b
 
 # 📜 the test262 regression run (git submodule update --init first)
 cargo test --release --test test262
@@ -85,21 +85,22 @@ and depend on the published `j8` by version, the way an embedder would.
 | crate | std | What it does |
 |---|---|---|
 | `j8framework` | std | The core framework: defines the traits (`Platform`, `Engine`, `Invoke`, `Intrinsics`) and the shared structs / enums (`Isolate`, `Scope`, `Agent`, `Context` / `Realm`, `Global`, `Value`, `JsString` / `JsObject`, `Profiler`, `BinaryOp`, `Error` …). JS operation semantics hang off `Agent`; the implementations belong to the other crates. `EventLoop` is one JS event loop (an isolate, its engine and a context; resumable `Engine::start` / `resume`, host async work); `EventLoopSet` runs many on pinned loop threads with load balancing (placement, work stealing, `rebalance`, `split`) and one quota |
-| `j8` (repository root `src/`) | std | Re-exports: `#[j8::class]` / `#[j8::object]` / `#[j8::function]` (the macros live in j8macros, see `crates/macros/USAGE.md`) and the j8binding traits; the other crates by feature (default `runtime` = `j8::executor` + `j8::builtins` + `j8::platform`, plus `virtasm` / `taskqueue` / `lockfree` / `jit` / `full`); every crate is also published on its own on crates.io |
+| `j8` (repository root `src/`) | std | Re-exports: `#[j8::class]` / `#[j8::object]` / `#[j8::function]` (the macros live in j8macros, see `crates/macros/USAGE.md`) and the j8binding traits; the other crates by feature (default `runtime` = `j8::executor` + `j8::builtins` + `j8::platform`, plus `bytecode` / `taskqueue` / `lockfree` / `jit` / `full`); every crate is also published on its own on crates.io |
 | `j8binding` | std | The Rust ⇄ JS binding runtime: `FromJs` / `IntoJs`, host objects, `Class` / `Object` |
 | `j8builtins` | std | Implements `Intrinsics`: installs Object / Function / Array / String / Number / Boolean / Math / the Error family / `console` / `parseInt` and so on into a `Realm` |
 | `j8platform` | std | Implements `Platform` (`DefaultPlatform`): background tasks run on a moremath `ThreadMulti` pool (started once and reused; tasks may borrow the caller's data, through `j8framework::Pool`), the clock is `Instant` |
-| `j8virtasm` | std | The virtual instruction set: accumulator-style register bytecode (`Insn` / `Function` / `Module`); disassemble with `module.to_string()`, assemble with `text.parse::<Module>()`, each the inverse of the other. The `compile` feature (on by default) brings the JS ⇒ bytecode compiler `Module::try_from(&Source)`, parsing with oxc |
+| `j8bytecode` | std | The virtual instruction set, the dependency root (no other j8 crate): accumulator-style register bytecode (`Insn` / `Function` / `Module` …), every type generated from `insn.json`; no text form, only the binary form `Vec::<u8>::from(&module)` / `Module::try_from(bytes)` |
+| `j8compiler` | std | JS ⇒ bytecode (`j8compiler::Compile` for `Module`: scripts, modules, `eval` / `Function`), parsing with oxc |
 | `j8taskqueue` | `no_std` | Task queue: `ITask` (`recursable` / `depend` / `exec`) and `ITaskPoll` (`add` / `run`); lock-free dataflow scheduling (hand-written MPMC ready queue, atomic dependency counts): a task whose dependencies are done runs at once, in parallel on the host's `Pool` or on the calling thread, with no round barrier; `TaskId::family` finds the union-find root, `cancel` cancels a whole family; quotas count bytecodes (`Quota` / `Flow::Yield`, a per-run budget); idle workers leave instead of spinning. Every `j8framework::EventLoop` is one `Queue`: scripts, settlements and polls of host futures, checked each time a script yields |
 | `j8macros` | proc-macro | Procedural macros: `enums!("x.json")` generates enums from JSON (definitions, `Display`, `&mut` accessors by field type), `#[derive(Collect)]` for heap types (paragc `Trace`), and the binding macros; see `crates/macros/USAGE.md` |
 | `samples/dune` | std | A runtime with two layers: `src/web/` (the Web-standard APIs: `console`, timers, `URL`, `TextEncoder`, `EventTarget` / `AbortController`, `fetch`, `structuredClone`, `crypto` …) and `src/node/` on top of it (`process`, `require` / ES modules, `Buffer`, `fs`, `path`, `os`, `events`, `util`, `assert`, `child_process` …); machine access is Rust bound with `#[j8::object]` / `#[j8::class]`, the APIs are JS preludes; `dune a.js`, `dune --web a.mjs`, `dune -e` / `-p`, a REPL; see its README |
 | `samples/workerd` | std | Loads Cloudflare Workers (ES modules with `export default { fetch }`) and Durable Objects with j8: `workerd examples/counter.js --bind COUNTER=Counter --request "GET /c/inc?name=a"`, or `--port 8787` for an HTTP server; the Fetch API subset and DOs live in a JS prelude, storage is a Rust KV bound with `#[j8::class]` |
 | `samples/benchv8` | std | The same JS benchmarks timed on j8 and V8 (rusty_v8 152, with JIT / `--jitless`): `cd samples/benchv8 && cargo run --release` (downloads V8's prebuilt library) |
-| `j8debugger` | std | The `j8dbg` command line (clap): `j8dbg disasm <file.js \| ->` / `j8dbg disasm -e '<js>'` prints the disassembly; `j8dbg asm <file.j8s \| ->` assembles a listing and prints it normalized (`-o` writes a file) |
-| `j8executor` | std | The bytecode `Executor`, **currently the last layer**; implements `Engine` under the `compile` feature |
+| `j8debugger` | std | The `j8dbg` command line (clap): `j8dbg compile <file.js \| ->` / `j8dbg compile -e '<js>'` writes the bytecode in binary form; `j8dbg check <file.j8b \| ->` reads a binary back and writes it re-encoded (`-o` writes a file) |
+| `j8executor` | std | The bytecode `Executor`, **currently the last layer**; implements `Engine` and always carries the JS ⇒ bytecode compiler (scripts, modules, `eval` / `Function` all compile to bytecode first) |
 
 All JS is compiled to bytecode before it runs; there is no AST interpreter.
-Dependency direction: every layer depends only on `j8framework` (`j8executor` also on `j8virtasm`), and `j8framework` depends on no layer, only on the building blocks `j8lockfree` and `j8taskqueue`.
+Dependency direction: every layer depends only on `j8framework` (`j8executor` also on `j8compiler`; `j8bytecode` is the root, `j8framework` and `j8compiler` depend on it), and `j8framework` depends on no layer, only on the building blocks `j8lockfree` and `j8taskqueue`.
 
 ### 🧹 Heap and handles
 
@@ -145,14 +146,14 @@ isolate.enter(|scope| {
 
 `dune --jit a.js` turns the JIT on; `J8_TEST262_JIT=1 cargo test --release --test test262` runs the baseline with the JIT on (every function is compiled on its first call, every loop on its first back edge).
 
-- `j8compiler`: bytecode function ⇒ MLIR (`llvm` dialect) ⇒ mlirpass `target.x86_64` ⇒ x86-64 machine code (one `Compiler` is built and reused, loading only the builtin and `llvm` dialects).
+- `j8jit`, compilation: bytecode function ⇒ MLIR (`llvm` dialect) ⇒ mlirpass `target.x86_64` ⇒ x86-64 machine code (one `Compiler` is built and reused, loading only the builtin and `llvm` dialects).
   The machine code is `extern "C" fn(regs, acc, start) -> u64` and reads and writes the frame's register file and accumulator `Value`s directly (layout in `j8framework::ValueTag`: 16 bytes, tag in the first byte, payload from byte 8);
   `start` 0 enters at the top of the function, `h + 1` enters at loop header `h` (OSR); returning 0 means the function returned, `pc + 1` means it stopped before instruction pc (`j8executor::Exit`) and the interpreter carries on from there
 - Instructions in tier one: register reads and writes, number / boolean constants, arithmetic (remainder, exponentiation and bitwise operations call runtime functions) and comparisons, `++` / `--`, jumps, TDZ checks, returns;
   when a fast-path precondition fails (an operand is not a number, say) it falls back to the interpreter; for any other instruction (calls, properties, closures …) the machine code stops before it and hands over to the interpreter
 - A function that can run entirely in machine code runs it on frame entry; any other function is only entered at loop headers whose loop body hands nothing to the interpreter (OSR; entered midway, a `return` is also handed back to the interpreter to finish);
   functions with neither are not compiled
-- `j8jit` (std, x86-64 Unix): implements the executor's `Tier` (`Executor::with_tier`): compiles once the call count passes a threshold (100 by default) or the loop iterations pass 10× the threshold,
+- `j8jit`, scheduling (std, x86-64 Unix): implements the executor's `Tier` (`Executor::with_tier`): compiles once the call count passes a threshold (100 by default) or the loop iterations pass 10× the threshold,
   `mmap`s executable memory and fills in runtime function addresses; the executor remembers functions answered with `Tiered::Never` and never asks again
 - The register file and accumulator are local variables inside the machine code (a pair of `llvm.alloca` per register: tag and payload): read from the frame once on entry, written back to the frame through one shared write-back block on every exit;
   before leaving MLIR it runs mlirpass `llvm.func(mem2reg, canonicalize, cse)`, so the locals become SSA values passed between blocks as block arguments
@@ -163,28 +164,17 @@ isolate.enter(|scope| {
 
 An accumulator register machine (like V8's Ignition): results go into the implicit `acc`, and binary operations are `acc = reg op acc`.
 
-The instructions and every j8virtasm enum (`Insn` / `Constant` / `FunctionKind` / `PropertyKind`) are defined in `crates/j8virtasm/insn.json` and generated by `j8macros::enums!`; ⛔ hand-written enums. Adding an instruction only touches the JSON (fields of type `Label` get jump targets computed automatically and go into `target_mut`).
+Every j8bytecode type (instructions, operators, constants, `Function` / `Module` and the other structs) is defined in `crates/j8bytecode/insn.json` and generated by `j8macros::enums!`; ⛔ hand-written type definitions. Adding an instruction only touches the JSON (fields of type `Label` get jump targets computed automatically and go into `target_mut`).
 
-### Assembling / disassembling
+### Binary form
 
-One section per function in a listing: the function header `fn#i "name" kind mode params N length N regs N [generator] [async] [keeps_args]`, followed by indented lines in order:
-`.mapped` (the mapped arguments slots, `-` for unmapped), constants `#k = number … | string "…" | bigint …`,
-the scope table for direct eval `scope#k = ["x" 3 const tdz] [ … ]`, and instructions `@pc mnemonic operand, …`; `;` starts a comment to the end of the line. Numbers must be written in order.
-
-```text
-fn#0 "main" normal sloppy params 0 length 0 regs 3
-  #0 = string "x"
-  @0    lda.const #0
-  @1    return
-```
-
-An instruction is written the same way `Display` prints it: `Insn` has `asm` turned on in insn.json, so `j8macros::enums!` also generates `FromStr for Insn`, and adding an instruction does not touch the assembler.
+Bytecode has no text form. It is stored and shipped only in the binary form generated from insn.json (`binary` on): the magic ` j8b`, a fingerprint of insn.json (a binary only reads back under the same instruction set), then the module with each enum as a one-byte tag plus its fields.
 
 - Calling convention: `r0` is `this`, `r1` is the callee itself (named function expressions recurse through it), parameters start at `r2`; a `Call`'s callee, `this` and arguments sit in consecutive registers
 - Scopes: a pre-pass before compiling (`Resolver` in `scope.rs`) finds bindings captured by inner functions and puts them on the heap `Env` chain (`PushEnv` / `PopEnv` / `LdaEnv depth.slot`), the rest go in registers; `for (let …)` does a `CloneEnv` every iteration so each closure gets its own iteration
 - Top-level `var` / functions / `let` / `const` in a script are properties of the global object (`LdaGlobal` / `StaGlobal`)
 - After compiling, every function goes through peephole fusion (`Function::fuse` in `fuse.rs`): `lda.smi n; add r` ⇒ `add.smi r, n`, `ldar y; add x` ⇒ `add.reg x, y` (comparisons likewise), `ldar a; star b` ⇒ `mov b, a`, `ldar r; inc; star r` ⇒ `inc.reg r`, `star r; ldar r` ⇒ `star r`, and of `mov b, a; mov a, b` back to back the second is dropped;
-  a group is not fused if a jump lands after its first instruction, and jump targets are rewritten to the new indexes. A fused instruction means exactly the original instructions run in order (`Insn::unfused` splits it back), and the JIT lowers the split-back instructions one by one; hand-written listings are not fused
+  a group is not fused if a jump lands after its first instruction, and jump targets are rewritten to the new indexes. A fused instruction means exactly the original instructions run in order (`Insn::unfused` splits it back), and the JIT lowers the split-back instructions one by one
 - The executor uses an explicit frame stack (no host recursion), with a call depth limit of 10000 (including JS re-entered from host functions); going over throws a RangeError
 - Exceptions: one dynamic handler stack per frame (`PushHandler` / `PopHandler`); a throw pops this frame's handler, or unwinds to the caller if there is none; `finally` uses a (completion type, value) register pair, and a `return` / `break` / `continue` passing through it detours into it first and then carries on
 

@@ -81,6 +81,8 @@ pub struct Realm<'gc> {
     pub async_iterator_proto: JsObject<'gc>,
     /// %AsyncGeneratorPrototype%: `next` / `return` / `throw` all return Promises
     pub async_generator_proto: JsObject<'gc>,
+    /// %AsyncFromSyncIteratorPrototype%
+    pub async_from_sync_iterator_proto: JsObject<'gc>,
     pub promise_proto: JsObject<'gc>,
     /// %Promise% (j8builtins installs it as a constructor)
     pub promise_ctor: JsObject<'gc>,
@@ -133,6 +135,9 @@ pub struct Realm<'gc> {
     /// Template objects of tagged templates: cached by (function index, call site), so the same site always gets the
     /// same one
     pub templates: Cow<'gc, alloc::collections::BTreeMap<(u32, u32), JsObject<'gc>>>,
+    /// The script contexts of the scripts run so far (V8's `ScriptContextTable`): their top-level `let` / `const` /
+    /// `class`, which other scripts reach by name through `LdaGlobal` / `StaGlobal`
+    pub script_contexts: Cow<'gc, Vec<crate::JsEnv<'gc>>>,
     /// Compiled regexes shared by (source, flags) (compiled ones are immutable): a direct-mapped cache, one atomic slot
     /// per bucket ([`RegExpCompiled::bucket`]); a miss overwrites the bucket
     pub regexp_cache: [Slot<'gc, RegExpCompiled<'gc>>; RegExpCompiled::BUCKETS],
@@ -189,7 +194,7 @@ impl<'gc> Realm<'gc> {
         let derived = |proto: JsObject<'gc>| ObjectData { proto: Some(proto), ..ObjectData::default() }.alloc(mc);
         let error = derived(object_proto);
         let error_protos = ErrorKind::ALL.map(|k| if k == ErrorKind::Error { error } else { derived(error) });
-        let symbol = |d: &str| mc.alloc(SymbolData { description: Some(alloc::format!("Symbol.{d}").into()) });
+        let symbol = |d: &str| mc.alloc(SymbolData { description: Some(alloc::format!("Symbol.{d}").into()), private: false });
         let iterator_proto = derived(object_proto);
         let async_iterator_proto = derived(object_proto);
         let function_proto = derived(object_proto);
@@ -218,6 +223,7 @@ impl<'gc> Realm<'gc> {
             async_function_proto: derived(function_proto),
             async_generator_function_proto: derived(function_proto),
             async_generator_proto: derived(async_iterator_proto),
+            async_from_sync_iterator_proto: derived(async_iterator_proto),
             promise_proto: derived(object_proto),
             promise_ctor: placeholder(function_proto),
             regexp_proto: derived(object_proto),
@@ -232,7 +238,7 @@ impl<'gc> Realm<'gc> {
             set_iterator_proto: derived(iterator_proto),
             iterator_helper_proto: derived(iterator_proto),
             wrap_iterator_proto: derived(iterator_proto),
-            script_scope: ObjectData::default().alloc(mc),
+            script_scope: Self::wide(ObjectData::default().alloc(mc)),
             symbols: WellKnown {
                 iterator: symbol("iterator"),
                 async_iterator: symbol("asyncIterator"),
@@ -256,7 +262,8 @@ impl<'gc> Realm<'gc> {
             modules: Cow::new(mc, alloc::vec::Vec::new()),
             random_state: AtomicU64::new(0),
             templates: Cow::new(mc, alloc::collections::BTreeMap::new()),
-            global: derived(object_proto),
+            script_contexts: Cow::new(mc, Vec::new()),
+            global: Self::wide(derived(object_proto)),
             object_proto,
             function_proto,
             array_proto: derived(object_proto),
@@ -266,6 +273,12 @@ impl<'gc> Realm<'gc> {
             boolean_proto: derived(object_proto),
             error_protos,
         }
+    }
+
+    /// `o`, kept in fast mode however many properties it gets (global name caches key on its shape)
+    fn wide(o: JsObject<'gc>) -> JsObject<'gc> {
+        o.get().widen();
+        o
     }
 
     /// Without a regex engine, regex literals throw a SyntaxError.

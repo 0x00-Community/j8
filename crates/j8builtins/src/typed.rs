@@ -58,19 +58,20 @@ impl Typed {
     /// Concrete constructor: `K` is the element type index.
     #[expect(clippy::too_many_lines, reason = "the spec initializes from four kinds of argument in one place")]
     fn construct<'gc, const K: usize>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+        let new_target = a.new_target;
         let kind = ElementKind::ALL[K];
-        if a.new_target == Value::Undefined {
+        if new_target == Value::Undefined {
             return Err(a.throw(ErrorKind::Type, &alloc::format!("Constructor {} requires 'new'", kind.name())));
         }
         let first = args.at(0);
         let Some(src) = first.as_object() else {
             let len = a.to_index(first)?;
-            let proto = a.proto_from_ctor(a.new_target, a.realm.typed_protos[K])?;
+            let proto = a.proto_from_ctor(new_target, a.realm.typed_protos[K])?;
             return Ok(Self::create(a, kind, proto, len)?.into());
         };
         // View over a buffer
         if matches!(src.borrow().kind, ObjectKind::ArrayBuffer(_)) {
-            let proto = a.proto_from_ctor(a.new_target, a.realm.typed_protos[K])?;
+            let proto = a.proto_from_ctor(new_target, a.realm.typed_protos[K])?;
             let size = kind.size();
             let offset = a.to_index(args.at(1))?;
             if offset % size != 0 {
@@ -81,7 +82,7 @@ impl Typed {
                 v => Some(a.to_index(Value::from(v))?),
             };
             let (len, max) = match &src.borrow().kind {
-                ObjectKind::ArrayBuffer(b) => (b.bytes.as_ref().map(Vec::len), b.max),
+                ObjectKind::ArrayBuffer(b) => (b.bytes.as_deref().map(<[u8]>::len), b.max),
                 _ => (None, None),
             };
             let Some(buf_len) = len else { return Err(a.throw(ErrorKind::Type, "Cannot construct a TypedArray on a detached ArrayBuffer")) };
@@ -113,7 +114,7 @@ impl Typed {
         }
         // Copy from another TypedArray
         if let Some((sk, sview)) = Agent::typed_array(src) {
-            let proto = a.proto_from_ctor(a.new_target, a.realm.typed_protos[K])?;
+            let proto = a.proto_from_ctor(new_target, a.realm.typed_protos[K])?;
             let Some(len) = Agent::view_length(&sview, sk.size()) else {
                 return Err(a.throw(ErrorKind::Type, "source TypedArray is detached or out of bounds"));
             };
@@ -130,7 +131,7 @@ impl Typed {
             return Ok(out.into());
         }
         // Iterable or array-like
-        let proto = a.proto_from_ctor(a.new_target, a.realm.typed_protos[K])?;
+        let proto = a.proto_from_ctor(new_target, a.realm.typed_protos[K])?;
         let using = a.get_symbol(first, a.realm.symbols.iterator, first)?;
         let values = if using.is_nullish() {
             None
@@ -901,9 +902,9 @@ impl<'gc> Installer<'_, 'gc> {
             self.method(proto, name, f, n);
         }
         // `[Symbol.iterator]` is the same function as `values`, and `toString` the same as Array.prototype.toString
-        let values = proto.borrow().own("values").unwrap_or_default();
+        let values = proto.borrow().own(self.mc, "values").unwrap_or_default();
         proto.borrow_mut(self.mc).define_symbol(r.symbols.iterator, Property::hidden(values));
-        let to_string = r.array_proto.borrow().own("toString").unwrap_or_default();
+        let to_string = r.array_proto.borrow().own(self.mc, "toString").unwrap_or_default();
         self.set(proto, "toString", to_string);
         let ctors: [j8framework::NativeFn; 12] = [
             Typed::construct::<0>,

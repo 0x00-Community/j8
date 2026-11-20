@@ -1,8 +1,9 @@
+use alloc::sync::Arc;
 use core::num::NonZeroUsize;
 
 use j8lockfree::Fifo;
 
-use crate::{AsyncJob, Heap, Mutation, Platform, Profiler};
+use crate::{AsyncJob, Heap, IsolateHandle, Mutation, Platform, Profiler, Termination};
 
 /// Parameters for creating an isolate.
 #[derive(Clone, Copy, Debug, Default)]
@@ -27,6 +28,8 @@ pub struct Isolate<'p> {
     profiler: Profiler,
     /// Async host work waiting for this isolate's event loop (`None`: the embedder runs none)
     spawned: Option<Fifo<AsyncJob>>,
+    /// 中止请求（[`Isolate::handle`] 给别的线程用）
+    stop: Arc<Termination>,
 }
 
 /// One entry into an isolate: `'gc` is the brand of this entry, and values inside it can't escape the closure.
@@ -36,6 +39,8 @@ pub struct Scope<'gc, 'i> {
     pub profiler: &'i mut Profiler,
     /// This isolate's queue of async host work (`None` without an event loop)
     pub spawned: Option<&'i Fifo<AsyncJob>>,
+    /// 中止请求：执行层在检查点读它
+    pub stop: &'i Termination,
 }
 
 impl<'p> Isolate<'p> {
@@ -46,7 +51,12 @@ impl<'p> Isolate<'p> {
         // Dead objects free memory the mutator allocated (string buffers, vectors): freeing it from the collector
         // threads makes them fight the allocator (glibc's arena lock), so destructors run on the collecting thread only
         heap.set_parallel_drop(false);
-        Self { platform, heap, generation: 0, profiler, spawned: params.event_loop.then(Fifo::default) }
+        Self { platform, heap, generation: 0, profiler, spawned: params.event_loop.then(Fifo::default), stop: Arc::default() }
+    }
+
+    /// 给别的线程的句柄：中止这个 isolate 正在跑的 JS
+    pub fn handle(&self) -> IsolateHandle {
+        IsolateHandle(Arc::clone(&self.stop))
     }
 
     /// How many collection cycles have completed.
@@ -77,12 +87,14 @@ impl<'p> Isolate<'p> {
     /// Enter the isolate and run `f`; no collection happens during `f`, and afterwards the heap collects if enough has
     /// been allocated (a young collection usually, a full one every few rounds).
     pub fn enter<R>(&mut self, f: impl for<'gc> FnOnce(&mut Scope<'gc, '_>) -> R) -> R {
-        let (platform, profiler, generation, spawned) = (self.platform, &mut self.profiler, self.generation, self.spawned.as_ref());
+        let (platform, profiler, generation, spawned, stop) = (self.platform, &mut self.profiler, self.generation, self.spawned.as_ref(), &*self.stop);
         let r = self.heap.mutate(|m| {
             // SAFETY: built inside this mutate from its own mutator; `generation` is this heap's collection count
             let mc = unsafe { Mutation::new(m, generation) };
-            f(&mut Scope { mc: &mc, platform, profiler, spawned })
+            f(&mut Scope { mc: &mc, platform, profiler, spawned, stop })
         });
+        // 中止传出了最外层：复位，isolate 接着能用
+        self.stop.finish();
         if self.heap.collect_if_needed() {
             self.generation += 1;
         }

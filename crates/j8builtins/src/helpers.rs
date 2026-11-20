@@ -24,10 +24,11 @@ impl Helpers {
 
     /// `Iterator` is abstract: it can only be constructed through a subclass.
     fn iterator<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        if a.new_target == Value::Undefined || Self::is_iterator_ctor(a.new_target) {
+        let new_target = a.new_target;
+        if new_target == Value::Undefined || Self::is_iterator_ctor(new_target) {
             return Err(a.throw(ErrorKind::Type, "Abstract class Iterator not directly constructable"));
         }
-        Ok(a.create_from_ctor(a.realm.iterator_proto, ObjectKind::Ordinary)?.into())
+        Ok(a.create_from_ctor(new_target, a.realm.iterator_proto, ObjectKind::Ordinary)?.into())
     }
 
     /// GetIteratorDirect.
@@ -387,7 +388,7 @@ impl Helpers {
 
     /// Getter for `Iterator.prototype.constructor`.
     fn ctor_get<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        Ok(a.realm.global.borrow().own("Iterator").unwrap_or_default())
+        Ok(a.realm.global.borrow().own(a.mc, "Iterator").unwrap_or_default())
     }
 
     /// SetterThatIgnoresPrototypeProperties: writing on Iterator.prototype itself throws TypeError; on other objects it

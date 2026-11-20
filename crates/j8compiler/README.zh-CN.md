@@ -2,20 +2,24 @@
 
 [English](README.md) · **简体中文**
 
-[j8](https://github.com/0x00-Community/j8) JIT 用的字节码编译器：一个字节码函数 ⇒ MLIR（`llvm` 方言，经
-[mlirpass](https://crates.io/crates/mlirpass)）⇒ 经 `Backend` 出机器码（x86-64 后端在 `j8jit`）。
+[j8](https://github.com/0x00-Community/j8) 的编译器：JavaScript ⇒ j8 字节码（`j8bytecode::Module`），用
+[oxc](https://oxc.rs) 解析。所有 JS 运行前都先过这里——脚本、ES 模块、动态代码（`eval`、`Function`）；不设 AST 解释层。
 
 ```text
-j8virtasm::Function ─ Lower ─▶ MLIR（llvm 方言）─ Backend ─▶ 机器码 + 要回填的地址
+源码 ─ oxc 解析 + 语义检查 ─▶ AST ─ 作用域解析 ─ 生成代码 ─ 窥孔融合 ─▶ Module
 ```
 
-机器码是 System V 函数 `extern "C" fn(regs: *mut Value, acc: *mut Value, start: u64) -> u64`，直接在本帧的寄存器文件与累加器上跑；
-返回 0 表示函数返回了，返回 `pc + 1` 表示停在第 `pc` 条之前，由解释器接着跑。
+## 用法
 
-- 第一层接受：寄存器读写、数字与布尔常量、算术、比较、`++` / `--`、跳转、TDZ 检查、`return`；其余（调用、属性、闭包……）停在自己之前
-- `start` 选入口：0 从头，`h + 1` 从循环头 `h` 进（栈上替换，OSR）
+```rust
+use j8compiler::Compile;
+use j8framework::{CodeKind, Source};
 
-由 `j8jit` 使用，宿主一般不直接调用。
+let module = j8bytecode::Module::compile(&Source { text: "1 + 2", file: "a.js" }, CodeKind::Script)?;
+let (module, info) = j8bytecode::Module::compile_module(&source)?;  // ES 模块，连同导入 / 导出信息
+```
+
+`Compile::compile_direct` 按调用点的作用域表编直接 eval 的代码。这些都由 `j8executor` 自己调用，宿主一般不直接用。
 
 ## 许可
 

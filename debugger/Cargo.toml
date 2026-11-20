@@ -13,7 +13,8 @@ path = "src/main.rs"
 
 [dependencies]
 j8framework.workspace = true
-j8virtasm = { workspace = true, features = ["compile"] }
+j8bytecode.workspace = true
+j8compiler.workspace = true
 clap.workspace = true
 
 [lints]

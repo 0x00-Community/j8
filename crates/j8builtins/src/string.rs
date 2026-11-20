@@ -70,12 +70,13 @@ impl Strings {
     }
 
     fn string<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        let s: Value<'gc> = match (args.first(), a.new_target.kind()) {
+        let new_target = a.new_target;
+        let s: Value<'gc> = match (args.first(), new_target.kind()) {
             (None, _) => a.string("").into(),
             (Some(&v), ValueKind::Undefined) if let ValueKind::Symbol(s) = v.kind() => a.symbol_descriptive(s).into(),
             (Some(&v), _) => a.to_string(v)?.into(),
         };
-        a.wrap_primitive(s, a.realm.string_proto)
+        a.wrap_primitive(new_target, s, a.realm.string_proto)
     }
 
     /// thisStringValue (`toString` / `valueOf`): a string or String wrapper object; anything else throws TypeError.
@@ -308,6 +309,7 @@ impl Strings {
 
     /// `Number(v)`: a BigInt becomes the nearest Number.
     fn number<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+        let new_target = a.new_target;
         let n = match args.first() {
             None => 0.0,
             Some(&v) => match a.to_numeric(v)? {
@@ -315,7 +317,7 @@ impl Strings {
                 j8framework::Numeric::BigInt(b) => num_traits::ToPrimitive::to_f64(&b.0).unwrap_or(f64::NAN),
             },
         };
-        a.wrap_primitive(n.into(), a.realm.number_proto)
+        a.wrap_primitive(new_target, n.into(), a.realm.number_proto)
     }
 
     fn is_integer<'gc>(_: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {

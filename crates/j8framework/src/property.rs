@@ -192,7 +192,7 @@ impl<'gc> Agent<'gc, '_> {
         }
         // Own properties are exactly the stored ones: no borrowing
         if o.has_ordinary_properties() {
-            return Ok(o.own_slot(key));
+            return Ok(o.own_slot(self.mc, key));
         }
         // An array: `length` plus what is stored, also without borrowing
         if o.is_array() {
@@ -201,7 +201,7 @@ impl<'gc> Agent<'gc, '_> {
                     let len = f64::from(o.array_length().unwrap_or(0));
                     Some(Property { slot: Slot::Data(len.into()), enumerable: false, writable: !o.length_readonly(), configurable: false })
                 }
-                _ => o.own_slot(key),
+                _ => o.own_slot(self.mc, key),
             });
         }
         let d = o.borrow();
@@ -210,15 +210,15 @@ impl<'gc> Agent<'gc, '_> {
                 let len = f64::from(d.array_length().unwrap_or(0));
                 Some(Property { slot: Slot::Data(len.into()), enumerable: false, writable: !d.length_readonly(), configurable: false })
             }
-            (ObjectKind::Primitive(v), Key::Str(k)) if let ValueKind::String(s) = v.kind() => self.string_own(s, k).or_else(|| d.own_slot(key)),
+            (ObjectKind::Primitive(v), Key::Str(k)) if let ValueKind::String(s) = v.kind() => self.string_own(s, k).or_else(|| d.own_slot(self.mc, key)),
             (ObjectKind::Arguments(Some(map)), Key::Str(k)) => {
                 let slot = index_of_str(k).and_then(|i| map.slots.get(i as usize).copied().flatten());
-                match (d.own_slot(key), slot) {
+                match (d.own_slot(self.mc, key), slot) {
                     (Some(p), Some(s)) => Some(Property { slot: Slot::Data(map.env.load(usize::from(s))), ..p }),
                     (p, _) => p,
                 }
             }
-            _ => d.own_slot(key),
+            _ => d.own_slot(self.mc, key),
         })
     }
 
@@ -322,7 +322,7 @@ impl<'gc> Agent<'gc, '_> {
     fn ordinary_define(&self, o: JsObject<'gc>, key: Key<'_, 'gc>, desc: &Descriptor<'gc>) -> bool {
         let (current, extensible) = {
             let d = o.borrow();
-            (d.own_slot(key), !d.non_extensible())
+            (d.own_slot(self.mc, key), !d.non_extensible())
         };
         match validate(extensible, desc, current) {
             Some(p) => {

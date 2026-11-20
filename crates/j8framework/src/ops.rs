@@ -10,6 +10,27 @@ use num_traits::Zero;
 
 use crate::{Agent, Descriptor, Error, Key, Numeric, IterKind, IteratorState, JsObject, JsString, JsSymbol, ObjectData, ObjectKind, Property, PropertyKey, Slot, Value};
 
+/// Built-in error kinds (`Error` itself comes first).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ErrorKind {
+    Error,
+    Type,
+    Reference,
+    Range,
+    Syntax,
+    Eval,
+    Uri,
+    Aggregate,
+}
+
+/// The preference for ToPrimitive.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Hint {
+    Default,
+    Number,
+    String,
+}
+
 /// Binary operations (the result is a value).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum BinaryOp {
@@ -51,53 +72,21 @@ pub enum UnaryOp {
     Void,
 }
 
-/// Built-in error kinds (`Error` itself comes first).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum ErrorKind {
-    Error,
-    Type,
-    Reference,
-    Range,
-    Syntax,
-    Eval,
-    Uri,
-    Aggregate,
+/// Spec semantics of binary operations and comparisons on two numbers.
+pub trait Numbers {
+    type Output;
+    fn numbers(self, a: f64, b: f64) -> Self::Output;
 }
 
-/// The preference for ToPrimitive.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum Hint {
-    Default,
-    Number,
-    String,
-}
-
-impl BinaryOp {
-    pub const ALL: [BinaryOp; 12] = [BinaryOp::Add, BinaryOp::Sub, BinaryOp::Mul, BinaryOp::Div, BinaryOp::Rem, BinaryOp::Exp, BinaryOp::BitAnd, BinaryOp::BitOr, BinaryOp::BitXor, BinaryOp::Shl, BinaryOp::Shr, BinaryOp::UShr];
-
-    pub fn name(self) -> &'static str {
-        match self {
-            BinaryOp::Add => "add",
-            BinaryOp::Sub => "sub",
-            BinaryOp::Mul => "mul",
-            BinaryOp::Div => "div",
-            BinaryOp::Rem => "rem",
-            BinaryOp::Exp => "exp",
-            BinaryOp::BitAnd => "bitand",
-            BinaryOp::BitOr => "bitor",
-            BinaryOp::BitXor => "bitxor",
-            BinaryOp::Shl => "shl",
-            BinaryOp::Shr => "shr",
-            BinaryOp::UShr => "ushr",
-        }
-    }
+impl Numbers for BinaryOp {
+    type Output = f64;
 
     /// The result when both sides are already numbers (the fast path of each execution layer, and the last step of
     /// [`Agent::binary`]). Always inlined: the interpreter's loop calls it for every arithmetic instruction, and a call
     /// plus a jump table on `self` cost more than `+` itself; the rare slow parts stay out of line.
     #[expect(clippy::inline_always, reason = "measured: left to LLVM it stays a call with a jump table in the interpreter loop")]
     #[inline(always)]
-    pub fn numbers(self, a: f64, b: f64) -> f64 {
+    fn numbers(self, a: f64, b: f64) -> f64 {
         match self {
             BinaryOp::Add => a + b,
             BinaryOp::Sub => a - b,
@@ -115,25 +104,12 @@ impl BinaryOp {
     }
 }
 
-impl CompareOp {
-    pub const ALL: [CompareOp; 8] = [CompareOp::Eq, CompareOp::Ne, CompareOp::StrictEq, CompareOp::StrictNe, CompareOp::Lt, CompareOp::Gt, CompareOp::Le, CompareOp::Ge];
-
-    pub fn name(self) -> &'static str {
-        match self {
-            CompareOp::Eq => "eq",
-            CompareOp::Ne => "ne",
-            CompareOp::StrictEq => "stricteq",
-            CompareOp::StrictNe => "strictne",
-            CompareOp::Lt => "lt",
-            CompareOp::Gt => "gt",
-            CompareOp::Le => "le",
-            CompareOp::Ge => "ge",
-        }
-    }
+impl Numbers for CompareOp {
+    type Output = bool;
 
     /// The result when both sides are numbers (`NaN` compares false with anything; `==` and `===` agree on numbers).
     #[inline]
-    pub fn numbers(self, a: f64, b: f64) -> bool {
+    fn numbers(self, a: f64, b: f64) -> bool {
         match self {
             CompareOp::Eq | CompareOp::StrictEq => a == b,
             CompareOp::Ne | CompareOp::StrictNe => a != b,
@@ -141,21 +117,6 @@ impl CompareOp {
             CompareOp::Gt => a > b,
             CompareOp::Le => a <= b,
             CompareOp::Ge => a >= b,
-        }
-    }
-}
-
-impl UnaryOp {
-    pub const ALL: [UnaryOp; 6] = [UnaryOp::Neg, UnaryOp::Plus, UnaryOp::Not, UnaryOp::BitNot, UnaryOp::Typeof, UnaryOp::Void];
-
-    pub fn name(self) -> &'static str {
-        match self {
-            UnaryOp::Neg => "neg",
-            UnaryOp::Plus => "plus",
-            UnaryOp::Not => "not",
-            UnaryOp::BitNot => "bitnot",
-            UnaryOp::Typeof => "typeof",
-            UnaryOp::Void => "void",
         }
     }
 }
@@ -358,7 +319,7 @@ impl<'gc> Agent<'gc, '_> {
 
     /// Same as [`object`](Self::object), reserving slots for `capacity` properties (literals)
     pub fn object_with(&self, capacity: usize) -> JsObject<'gc> {
-        ObjectData { proto: Some(self.realm.object_proto), capacity, ..ObjectData::default() }.alloc(self.mc)
+        ObjectData::ordinary(self.mc, Some(self.realm.object_proto), capacity)
     }
 
     /// An array with `Array.prototype` as its prototype.
@@ -652,7 +613,7 @@ impl<'gc> Agent<'gc, '_> {
         loop {
             // Fast path: an ordinary object checks its own properties in one borrow, and goes straight to the prototype
             // if not found
-            let fast = cur.has_ordinary_properties().then(|| (cur.own_slot(key), cur.proto()));
+            let fast = cur.has_ordinary_properties().then(|| (cur.own_slot(self.mc, key), cur.proto()));
             match fast {
                 Some((Some(p), _)) => {
                     return match p.slot {
@@ -735,7 +696,7 @@ impl<'gc> Agent<'gc, '_> {
         let found = loop {
             // Fast path: an ordinary object checks its own properties in one borrow, and goes straight to the prototype
             // if not found
-            let fast = cur.has_ordinary_properties().then(|| (cur.own_slot(key), cur.proto()));
+            let fast = cur.has_ordinary_properties().then(|| (cur.own_slot(self.mc, key), cur.proto()));
             match fast {
                 Some((Some(p), _)) => break Some(p),
                 Some((None, Some(proto))) => {
@@ -808,7 +769,7 @@ impl<'gc> Agent<'gc, '_> {
     fn set_failure(&self, target: Value<'gc>, key: &str) -> Error {
         if let Some(o) = target.as_object() {
             let d = o.borrow();
-            if d.non_extensible() && d.own_slot(Key::Str(key)).is_none() {
+            if d.non_extensible() && d.own_slot(self.mc, Key::Str(key)).is_none() {
                 return self.throw(ErrorKind::Type, &format!("Cannot add property {key}, object is not extensible"));
             }
         }
@@ -821,6 +782,9 @@ impl<'gc> Agent<'gc, '_> {
 
     /// `key in target`, with an arbitrary value as the key.
     pub fn has_keyed(&mut self, target: Value<'gc>, key: Value<'gc>) -> Result<bool, Error> {
+        if let Some(k) = Self::private_key(key) {
+            return self.private_has(target, k);
+        }
         let Some(o) = target.as_object() else {
             let what = match key.kind() {
                 ValueKind::Symbol(_) => String::from("a symbol"),
@@ -883,6 +847,9 @@ impl<'gc> Agent<'gc, '_> {
 
     /// Define a property, with an arbitrary value as the key (computed key).
     pub fn define_keyed(&mut self, o: JsObject<'gc>, key: Value<'gc>, prop: Property<'gc>) -> Result<(), Error> {
+        if let Some(k) = Self::private_key(key) {
+            return self.private_define(o.into(), k, prop);
+        }
         match self.to_property_key(key)? {
             PropertyKey::Symbol(k) => self.define_key(o, Key::Sym(k), prop),
             PropertyKey::String(k) => self.define_key(o, Key::Str(&k), prop),
@@ -901,6 +868,9 @@ impl<'gc> Agent<'gc, '_> {
     /// `target[key]`.
     pub fn get_keyed(&mut self, target: Value<'gc>, key: Value<'gc>) -> Result<Value<'gc>, Error> {
         if let ValueKind::Symbol(k) = key.kind() {
+            if k.private {
+                return self.private_get(target, k);
+            }
             return self.get_symbol(target, k, target);
         }
         if let (ValueKind::Object(o), ValueKind::Number(x)) = (target.kind(), key.kind())
@@ -996,6 +966,9 @@ impl<'gc> Agent<'gc, '_> {
     }
 
     pub fn put_keyed(&mut self, target: Value<'gc>, key: Value<'gc>, value: Value<'gc>, strict: bool) -> Result<(), Error> {
+        if let Some(k) = Self::private_key(key) {
+            return self.private_set(target, k, value);
+        }
         if strict { self.set_keyed(target, key, value) } else { self.try_set_keyed(target, key, value).map(drop) }
     }
 
@@ -1020,7 +993,7 @@ impl<'gc> Agent<'gc, '_> {
     }
 
     fn define_accessor_key(&mut self, o: JsObject<'gc>, key: Key<'_, 'gc>, f: JsObject<'gc>, setter: bool, enumerable: bool) {
-        let (mut get, mut set) = match o.borrow().own_slot(key).map(|p| p.slot) {
+        let (mut get, mut set) = match o.borrow().own_slot(self.mc, key).map(|p| p.slot) {
             Some(Slot::Accessor { get, set }) => (get, set),
             _ => (None, None),
         };
@@ -1064,7 +1037,7 @@ impl<'gc> Agent<'gc, '_> {
             ValueKind::Object(o) => {
                 let d = o.borrow();
                 if d.kind.is_callable() {
-                    match d.get_own("name").and_then(|p| p.value()).map(Value::kind) {
+                    match d.get_own(self.mc, "name").and_then(|p| p.value()).map(Value::kind) {
                         Some(ValueKind::String(n)) if !n.is_empty() => String::from(&**n),
                         _ => String::from("function"),
                     }
@@ -1269,6 +1242,13 @@ impl<'gc> Agent<'gc, '_> {
 
     /// GetIterator: call `v[Symbol.iterator]()` and take its `next`.
     pub fn get_iterator(&mut self, v: Value<'gc>) -> Result<IterRecord<'gc>, Error> {
+        let iterator = self.iterator_object(v)?;
+        let next = self.get_named(iterator, "next")?;
+        Ok(IterRecord { iterator, next })
+    }
+
+    /// `v[Symbol.iterator]()`, which must be an object (the `GetIterator` bytecode: `next` is not read)
+    pub fn iterator_object(&mut self, v: Value<'gc>) -> Result<Value<'gc>, Error> {
         let method = if v.is_nullish() { Value::Undefined } else { self.get_symbol(v, self.realm.symbols.iterator, v)? };
         if !self.is_callable(method) {
             let what = match v.kind() {
@@ -1281,8 +1261,7 @@ impl<'gc> Agent<'gc, '_> {
         if iterator.as_object().is_none() {
             return Err(self.throw(ErrorKind::Type, "Result of the Symbol.iterator method is not an object"));
         }
-        let next = self.get_named(iterator, "next")?;
-        Ok(IterRecord { iterator, next })
+        Ok(iterator)
     }
 
     /// Advance an array iterator one step (rereads `length` each time, so changes to the array during iteration are

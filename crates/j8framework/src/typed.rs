@@ -189,7 +189,7 @@ impl<'gc> Agent<'gc, '_> {
     /// The buffer's byte count (`None` if detached).
     pub fn buffer_len(buffer: JsObject<'gc>) -> Option<usize> {
         match &buffer.borrow().kind {
-            ObjectKind::ArrayBuffer(b) => b.bytes.as_ref().map(Vec::len),
+            ObjectKind::ArrayBuffer(b) => b.bytes.as_deref().map(<[u8]>::len),
             _ => None,
         }
     }

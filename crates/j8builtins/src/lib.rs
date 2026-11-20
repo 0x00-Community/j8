@@ -95,7 +95,7 @@ impl<'gc> Installer<'_, 'gc> {
     /// `[Symbol.toStringTag]` of each prototype (non-writable, non-enumerable, configurable).
     fn tags(&self) {
         let r = self.realm;
-        let global = |name: &str| r.global.borrow().own(name).and_then(j8framework::Value::as_object);
+        let global = |name: &str| r.global.borrow().own(self.mc, name).and_then(j8framework::Value::as_object);
         let mut tagged = alloc::vec![
             (r.symbol_proto, "Symbol"),
             (r.bigint_proto, "BigInt"),

@@ -354,10 +354,13 @@ checksum = "3bd1574e617a9a6c1f8f8181bd7e841e1f20e4277607ef28945765188d6284d4"
 
 [[package]]
 name = "j8"
-version = "0.3.0"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "56c20709c494f92103b3b7c2fa2e2fadac3d78b871d94179f16b0d819a0132bc"
 dependencies = [
  "j8binding",
  "j8builtins",
+ "j8bytecode",
  "j8compiler",
  "j8executor",
  "j8framework",
@@ -365,12 +368,13 @@ dependencies = [
  "j8lockfree",
  "j8macros",
  "j8platform",
- "j8virtasm",
 ]
 
 [[package]]
 name = "j8binding"
-version = "0.3.0"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6c3df70c63a24714404f3b0a6e4d73ecca4c37c9a54a0986a51046cddf9a59b2"
 dependencies = [
  "j8framework",
  "j8lockfree",
@@ -378,7 +382,9 @@ dependencies = [
 
 [[package]]
 name = "j8builtins"
-version = "0.3.0"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "361fcf228d8ebdf31cbda42b1b4dfc41de0fe76f09f24f04b3fca94711a217e4"
 dependencies = [
  "j8framework",
  "libm",
@@ -390,32 +396,56 @@ dependencies = [
 ]
 
 [[package]]
-name = "j8compiler"
-version = "0.3.0"
+name = "j8bytecode"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a5e416819ff4b863625a5db21e5037ff55cc2b6f78da8e04bf2e786bffcacad4"
 dependencies = [
+ "j8macros",
+]
+
+[[package]]
+name = "j8compiler"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "637ad286f83315e4988af62f3af11694d55f612508744b7c57b4cd5a2e7bed05"
+dependencies = [
+ "j8bytecode",
  "j8framework",
- "j8virtasm",
- "mlirpass",
+ "oxc_allocator",
+ "oxc_ast",
+ "oxc_parser",
+ "oxc_semantic",
+ "oxc_span",
+ "oxc_syntax",
+ "ryu-js",
 ]
 
 [[package]]
 name = "j8executor"
-version = "0.3.0"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1c8f260419f756f7f05e983005058b90b175156acdd0dbc64df8974b7623ae13"
 dependencies = [
+ "j8bytecode",
+ "j8compiler",
  "j8framework",
- "j8virtasm",
+ "j8lockfree",
  "ryu-js",
 ]
 
 [[package]]
 name = "j8framework"
-version = "0.3.0"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "467418e184e09182129c064b32472549db334922f3bf8985b54dfc908c472e2a"
 dependencies = [
  "hashbrown",
+ "j8bytecode",
  "j8lockfree",
  "j8macros",
+ "j8taskqueue",
  "libm",
- "moremath",
  "num-bigint 0.4.8",
  "num-traits",
  "paragc",
@@ -426,23 +456,28 @@ dependencies = [
 
 [[package]]
 name = "j8jit"
-version = "0.3.0"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e7d89ccd804b331793178f362e5e15e00850d05ac2c9ae9c1af80c12705096a8"
 dependencies = [
- "j8compiler",
+ "j8bytecode",
  "j8executor",
  "j8framework",
- "j8virtasm",
  "libc",
  "mlirpass",
 ]
 
 [[package]]
 name = "j8lockfree"
-version = "0.3.0"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "35498a2711ef5e325caa613de737bc1b924f23b1c8db2ccdbe656e6a7a1c833d"
 
 [[package]]
 name = "j8macros"
-version = "0.3.0"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bd82cf3ea59c45d4cd4bc6cac53b324e23a5c86951f713df398528f4178f9279"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -453,25 +488,21 @@ dependencies = [
 
 [[package]]
 name = "j8platform"
-version = "0.3.0"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "70368c164e694a89d49932110b5c687034a9c4eda975b23a6017ebb8a880021f"
 dependencies = [
  "j8framework",
  "moremath",
 ]
 
 [[package]]
-name = "j8virtasm"
-version = "0.3.0"
+name = "j8taskqueue"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8415df21c4b79cd8b51b9cb3ff835f4b91b80b19168740c235a60bc43325ed85"
 dependencies = [
- "j8framework",
- "j8macros",
- "oxc_allocator",
- "oxc_ast",
- "oxc_parser",
- "oxc_semantic",
- "oxc_span",
- "oxc_syntax",
- "ryu-js",
+ "j8lockfree",
 ]
 
 [[package]]

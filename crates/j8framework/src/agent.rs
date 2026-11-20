@@ -29,13 +29,13 @@ impl Resume {
     pub const ALL: [Resume; 3] = [Resume::Next, Resume::Throw, Resume::Return];
 }
 
-/// The number written into the register for the resume kind (the compiler dispatches on it after `yield`).
+/// V8's `JSGeneratorObject::ResumeMode` (what `GeneratorGetResumeMode` gives the bytecode).
 impl From<Resume> for f64 {
     fn from(m: Resume) -> f64 {
         match m {
             Resume::Next => 0.0,
-            Resume::Throw => 1.0,
-            Resume::Return => 2.0,
+            Resume::Return => 1.0,
+            Resume::Throw => 2.0,
         }
     }
 }
@@ -43,7 +43,7 @@ impl From<Resume> for f64 {
 /// The result of running a coroutine one step.
 #[derive(Clone, Copy, Debug)]
 pub enum Step<'gc> {
-    /// Stopped at `yield`
+    /// Stopped at `yield`: what the generator gives its caller (for a sync generator, the iterator result itself)
     Yield(Value<'gc>),
     /// Stopped at `await`
     Await(Value<'gc>),
@@ -86,6 +86,8 @@ pub struct Agent<'gc, 'x> {
     invoke: &'x dyn Invoke<'gc>,
     /// The isolate's queue of async host work (`None` without an event loop)
     spawned: Option<&'x j8lockfree::Fifo<crate::AsyncJob>>,
+    /// 中止请求：执行层在检查点读它
+    pub stop: &'x crate::Termination,
     /// Empty register files returned after use (each host function callback into JS needs one; reuse saves the
     /// allocation)
     spare_regs: Vec<Vec<Value<'gc>>>,
@@ -94,7 +96,7 @@ pub struct Agent<'gc, 'x> {
 impl<'gc> Scope<'gc, '_> {
     /// Lend out an agent in context `realm`, calling back into JS via `invoke`.
     pub fn agent<'x>(&'x mut self, realm: Context<'gc>, invoke: &'x dyn Invoke<'gc>) -> Agent<'gc, 'x> {
-        Agent { mc: self.mc, platform: self.platform, profiler: &mut *self.profiler, realm, new_target: Value::Undefined, invoke, spawned: self.spawned, spare_regs: Vec::new() }
+        Agent { mc: self.mc, platform: self.platform, profiler: &mut *self.profiler, realm, new_target: Value::Undefined, invoke, spawned: self.spawned, stop: self.stop, spare_regs: Vec::new() }
     }
 }
 
@@ -141,6 +143,7 @@ impl<'gc> Agent<'gc, '_> {
         match &o.borrow().kind {
             crate::ObjectKind::Function(c) => self.invoke.constructs(c),
             crate::ObjectKind::Native(n) => n.constructor,
+            crate::ObjectKind::NativeClosure(c) => c.constructor,
             crate::ObjectKind::Bound(b) => self.is_constructor(b.target),
             crate::ObjectKind::Proxy(p) => p.constructor,
             _ => false,
@@ -158,20 +161,20 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    /// OrdinaryCreateFromConstructor: pick the prototype from the `new.target` of the current host construct call
-    /// (`fallback` for a plain call).
-    pub fn create_from_ctor(&mut self, fallback: JsObject<'gc>, kind: crate::ObjectKind<'gc>) -> Result<JsObject<'gc>, Error> {
-        let proto = self.proto_from_ctor(self.new_target, fallback)?;
+    /// OrdinaryCreateFromConstructor: the prototype comes from `new_target` (`fallback` for a plain call, where it is
+    /// `undefined`).
+    pub fn create_from_ctor(&mut self, new_target: Value<'gc>, fallback: JsObject<'gc>, kind: crate::ObjectKind<'gc>) -> Result<JsObject<'gc>, Error> {
+        let proto = self.proto_from_ctor(new_target, fallback)?;
         Ok(crate::ObjectData { kind, proto: Some(proto), ..crate::ObjectData::default() }.alloc(self.mc))
     }
 
     /// The tail of the Boolean / Number / String constructors: a plain call returns the primitive, a construct call
     /// wraps it in a wrapper object.
-    pub fn wrap_primitive(&mut self, v: Value<'gc>, fallback: JsObject<'gc>) -> Result<Value<'gc>, Error> {
-        if self.new_target == Value::Undefined {
+    pub fn wrap_primitive(&mut self, new_target: Value<'gc>, v: Value<'gc>, fallback: JsObject<'gc>) -> Result<Value<'gc>, Error> {
+        if new_target == Value::Undefined {
             return Ok(v);
         }
-        Ok(self.create_from_ctor(fallback, crate::ObjectKind::Primitive(v))?.into())
+        Ok(self.create_from_ctor(new_target, fallback, crate::ObjectKind::Primitive(v))?.into())
     }
 
     /// Compile and run a piece of dynamic code.

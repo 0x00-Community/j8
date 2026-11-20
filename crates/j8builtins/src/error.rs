@@ -9,11 +9,12 @@ struct Errors;
 impl Errors {
     /// `XxxError(message)`: kind `K` (per [`ErrorKind::ALL`]).
     fn construct<'gc, const K: usize>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+        let new_target = a.new_target;
         let kind = ErrorKind::ALL[K];
         // AggregateError(errors, message, options): arguments are shifted by one
         let all = args;
         let args = if kind == ErrorKind::Aggregate { all.get(1..).unwrap_or(&[]) } else { all };
-        let proto = a.proto_from_ctor(a.new_target, a.realm.error_proto(kind))?;
+        let proto = a.proto_from_ctor(new_target, a.realm.error_proto(kind))?;
         let e = a.error(kind, "");
         e.borrow_mut(a.mc).set_proto(Some(proto));
         e.borrow_mut(a.mc).remove("message");

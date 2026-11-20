@@ -2,15 +2,13 @@
 
 [English](README.md) · **简体中文**
 
-[j8](https://github.com/0x00-Community/j8) 的调试命令行 `j8dbg`。
+[j8](https://github.com/0x00-Community/j8) 的调试命令行 `j8dbg`。字节码没有文本形式，所以只处理二进制形式。
 
 ```sh
-cargo run -p j8debugger -- disasm a.js              # JS ⇒ 字节码，打印反汇编清单（`-` 读标准输入）
-cargo run -p j8debugger -- disasm -e 'let s = 0; for (let i = 0; i < 10; i++) s += i; s'
-cargo run -p j8debugger -- asm a.j8s                # 汇编清单，打印规范化后的清单（`-o` 写文件）
+cargo run -p j8debugger -- compile a.js -o a.j8b    # JS ⇒ 二进制形式的字节码（`-` 读标准输入）
+cargo run -p j8debugger -- compile -e 'let s = 0; for (let i = 0; i < 10; i++) s += i; s' -o a.j8b
+cargo run -p j8debugger -- check a.j8b              # 读回二进制（魔数、指令集、每个字段）
 ```
-
-清单是 `j8virtasm` 的文本形式（汇编与反汇编互为逆）。
 
 ## 许可
 

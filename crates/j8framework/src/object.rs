@@ -4,11 +4,10 @@ use alloc::vec::Vec;
 use core::fmt;
 
 use core::ops::{Deref, DerefMut};
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 
 use crate::{CellMut, CellRef, Collect, Gc, GcCell, GcSlot, Mutation, ValueCell};
 
-use crate::{Agent, Error, FuncId, Key, Value};
+use crate::{Agent, Backing, Error, FuncId, Key, Value};
 
 /// A string on the heap.
 pub type JsString<'gc> = Gc<'gc, crate::text::JsStr>;
@@ -18,6 +17,8 @@ pub type JsString<'gc> = Gc<'gc, crate::text::JsStr>;
 #[collect(require_static)]
 pub struct SymbolData {
     pub description: Option<Box<str>>,
+    /// A private name (`#x`): the keyed operations reach the object's private members with it (V8's private symbols)
+    pub private: bool,
 }
 
 /// A Symbol on the heap.
@@ -58,19 +59,111 @@ pub type NativeFn = for<'gc, 'x> fn(&mut Agent<'gc, 'x>, Value<'gc>, &[Value<'gc
 #[derive(Debug, Collect)]
 #[collect(no_drop)]
 pub struct Env<'gc> {
-    slots: Box<[ValueCell<'gc>]>,
+    slots: EnvSlots<'gc>,
     pub parent: Option<JsEnv<'gc>>,
+    /// What its slots are called and what kind of context it is (V8's `ScopeInfo`): lookups by name (`with`, eval)
+    /// and the script context table read it
+    #[collect(require_static)]
+    pub shape: Option<ShapeId>,
+    /// A `with` context's object, or the object a sloppy direct eval declares its `var`s in (V8's context extension)
+    pub extension: Option<JsObject<'gc>>,
+}
+
+/// Names a context's shape: the execution engine keeps the shapes (as long as the code they come from), contexts only
+/// carry the id, so making and collecting one counts no references.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ShapeId(pub u32);
+
+/// How many slots a context holds inline (more go to a separate box)
+const INLINE_SLOTS: usize = 4;
+
+/// A context's slots: inline when few (most contexts: no allocation besides the context itself, nothing to free when
+/// it is collected), boxed otherwise.
+#[derive(Debug, Collect)]
+#[collect(no_drop)]
+enum EnvSlots<'gc> {
+    Inline { len: u8, cells: [ValueCell<'gc>; INLINE_SLOTS] },
+    Boxed(Box<[ValueCell<'gc>]>),
+}
+
+impl<'gc> EnvSlots<'gc> {
+    fn new(n: usize, mut init: impl FnMut(usize) -> Value<'gc>) -> Self {
+        match u8::try_from(n) {
+            Ok(len) if n <= INLINE_SLOTS => Self::Inline { len, cells: core::array::from_fn(|i| ValueCell::new(if i < n { init(i) } else { Value::Undefined })) },
+            _ => Self::Boxed((0..n).map(|i| ValueCell::new(init(i))).collect()),
+        }
+    }
+
+    #[inline]
+    fn cells(&self) -> &[ValueCell<'gc>] {
+        match self {
+            Self::Inline { len, cells } => &cells[..usize::from(*len)],
+            Self::Boxed(b) => b,
+        }
+    }
+}
+
+/// A context's kind and slot names (the part of V8's `ScopeInfo` lookups by name need).
+#[derive(Debug, Default)]
+pub struct ContextShape {
+    pub kind: ContextKind,
+    /// Slot `i` of the context (after its fixed slots) is called `names[i]`
+    pub names: Box<[ContextName]>,
+}
+
+/// One context slot's name and binding kind.
+#[derive(Debug)]
+pub struct ContextName {
+    pub name: SmallStr,
+    pub constant: bool,
+    pub lexical: bool,
+}
+
+/// V8's `ScopeType`, as far as contexts go.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ContextKind {
+    #[default]
+    Function,
+    Block,
+    Catch,
+    With,
+    Script,
+    Eval,
+    Module,
+}
+
+impl ContextShape {
+    /// The slot named `name`, if any
+    pub fn slot(&self, name: &str) -> Option<(usize, &ContextName)> {
+        self.names.iter().enumerate().find(|(_, n)| *n.name == *name)
+    }
 }
 
 impl<'gc> Env<'gc> {
     /// An environment holding `slots`
     pub fn new(slots: Vec<Value<'gc>>, parent: Option<JsEnv<'gc>>) -> Self {
-        Self { slots: slots.into_iter().map(ValueCell::new).collect(), parent }
+        let n = slots.len();
+        let mut values = slots.into_iter();
+        Self { slots: EnvSlots::new(n, |_| values.next().unwrap_or_default()), parent, shape: None, extension: None }
     }
 
     /// An environment of `n` slots, all `undefined`
     pub fn with_len(n: usize, parent: Option<JsEnv<'gc>>) -> Self {
-        Self { slots: (0..n).map(|_| ValueCell::new(Value::Undefined)).collect(), parent }
+        Self { slots: EnvSlots::new(n, |_| Value::Undefined), parent, shape: None, extension: None }
+    }
+
+    /// A context of `n` slots holding `init`, with its shape and extension
+    pub fn context(n: usize, init: Value<'gc>, parent: Option<JsEnv<'gc>>, shape: Option<ShapeId>, extension: Option<JsObject<'gc>>) -> Self {
+        Self { slots: EnvSlots::new(n, |_| init), parent, shape, extension }
+    }
+
+    /// How many slots it has
+    pub fn len(&self) -> usize {
+        self.slots.cells().len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.slots.cells().is_empty()
     }
 
     pub fn alloc(self, mc: &Mutation<'gc>) -> JsEnv<'gc> {
@@ -80,35 +173,81 @@ impl<'gc> Env<'gc> {
     /// Slot `i`
     #[inline]
     pub fn load(&self, i: usize) -> Value<'gc> {
-        self.slots[i].get()
+        self.slots.cells()[i].get()
     }
 
     /// The current values of every slot (a copy, e.g. for a per-iteration binding environment)
     pub fn values(&self) -> Vec<Value<'gc>> {
-        self.slots.iter().map(ValueCell::get).collect()
+        self.slots.cells().iter().map(ValueCell::get).collect()
     }
 
     /// Writes slot `i` of `env`
     #[inline]
     pub fn set(env: JsEnv<'gc>, mc: &Mutation<'gc>, i: usize, v: Value<'gc>) {
-        env.get().slots[i].set(mc, v);
+        env.get().slots.cells()[i].set(mc, v);
     }
 }
 
-/// A closure: function index, the environment at creation, the method's home object (`super` looks up from its
-/// prototype), and the class constructor's instance field initializer.
+/// A closure: function index, the environment at creation, and where the execution engine keeps the function's code.
 #[derive(Clone, Copy, Debug, Collect)]
 #[collect(no_drop)]
 pub struct Closure<'gc> {
     pub func: FuncId,
     pub env: Option<JsEnv<'gc>>,
-    pub home: Option<JsObject<'gc>>,
-    pub fields: Option<JsObject<'gc>>,
+    /// The engine's code for `func` (set by the engine when it makes the function object): a call reaches it without
+    /// a lookup by id
+    #[collect(require_static)]
+    pub code: Option<Code>,
 }
 
 impl<'gc> Closure<'gc> {
     pub fn new(func: FuncId, env: Option<JsEnv<'gc>>) -> Self {
-        Self { func, env, home: None, fields: None }
+        Self { func, env, code: None }
+    }
+}
+
+/// What anyone can know about a function without running it (V8's `SharedFunctionInfo`, off the heap): lazy
+/// properties of its function objects are computed from it. An engine's code for a function starts with one.
+#[derive(Debug)]
+pub struct FunctionInfo {
+    pub name: SmallStr,
+    pub length: u16,
+}
+
+/// The address of an execution engine's code for a function: a [`FunctionInfo`] the engine's own code starts with
+/// (`#[repr(C)]`, first field). The engine keeps its code at a fixed address for as long as it lives, and closures
+/// only run on the engine that made them.
+#[derive(Clone, Copy, Debug)]
+pub struct Code(core::ptr::NonNull<FunctionInfo>);
+
+// SAFETY: an address only, dereferenced by the engine that owns what it points at (see `Code::get`)
+unsafe impl Send for Code {}
+// SAFETY: as above
+unsafe impl Sync for Code {}
+
+impl Code {
+    /// `info`: the first field of the engine's `#[repr(C)]` code
+    pub fn new(info: &FunctionInfo) -> Self {
+        Self(core::ptr::NonNull::from(info))
+    }
+
+    /// The function's info
+    ///
+    /// # Safety
+    /// `'e` must not outlive the engine owning it
+    #[inline]
+    pub unsafe fn info<'e>(self) -> &'e FunctionInfo {
+        // SAFETY: the caller's contract
+        unsafe { self.0.as_ref() }
+    }
+
+    /// The code
+    ///
+    /// # Safety
+    /// `T` must be the type it was made from, and `'e` must not outlive the engine owning it
+    pub unsafe fn get<'e, T>(self) -> &'e T {
+        // SAFETY: the caller's contract
+        unsafe { self.0.cast::<T>().as_ref() }
     }
 }
 
@@ -249,27 +388,28 @@ pub enum IteratorState<'gc> {
     String { s: JsString<'gc>, pos: usize },
 }
 
-/// A suspended frame: the full execution state a generator / async function saved at `yield` / `await`.
+/// What a suspended generator / async function keeps of its frame (V8's `JSGeneratorObject` fields): the function, the
+/// receiver and parameters, the registers `SuspendGenerator` saved, the context, and where to resume.
 #[derive(Debug, Collect)]
 #[collect(no_drop)]
 pub struct Suspended<'gc> {
-    pub func: FuncId,
-    pub pc: usize,
+    /// The function (the frame's `<closure>`)
+    pub closure: Value<'gc>,
+    /// The receiver, then the parameters
+    pub params: Vec<Value<'gc>>,
+    /// The registers saved at the last suspension (from r0)
     pub regs: Vec<Value<'gc>>,
-    pub env: Option<JsEnv<'gc>>,
-    /// Installed exception handlers: (landing pad, environment at install time)
-    pub handlers: Vec<(u32, Option<JsEnv<'gc>>)>,
-    pub args: Vec<Value<'gc>>,
-    /// The register that receives the resume kind on resumption (absent before it starts running)
-    pub mode: Option<u16>,
+    pub context: Option<JsEnv<'gc>>,
+    /// Where to resume: the suspend id of the last suspension (V8's `continuation`)
+    pub continuation: u32,
 }
 
 /// The state of a coroutine (generator / async function).
-#[derive(Debug, Collect)]
-#[collect(no_drop)]
-pub enum CoroutineState<'gc> {
-    /// Not started yet, or stopped at `yield` / `await`
-    Suspended(Suspended<'gc>),
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Collect)]
+#[collect(require_static)]
+pub enum CoroutineState {
+    /// Stopped at a `yield` / `await` (or the initial yield)
+    Suspended,
     /// Running (reentering `next` throws a TypeError)
     Running,
     Completed,
@@ -279,20 +419,64 @@ pub enum CoroutineState<'gc> {
 #[derive(Debug, Collect)]
 #[collect(no_drop)]
 pub struct Coroutine<'gc> {
-    pub state: CoroutineState<'gc>,
-    /// Has not run its first step yet (at this point `return` / `throw` finish it directly)
-    pub fresh: bool,
+    pub state: CoroutineState,
+    pub frame: Suspended<'gc>,
+    /// The resumption in progress: how, and the value sent in (`ResumeGenerator` / `GeneratorGetResumeMode` read them)
+    pub mode: crate::Resume,
+    pub input: Value<'gc>,
+    /// Async generator: what the generator waits for while suspended (set by the bytecode's intrinsics / `return`)
+    pub waiting: Waiting<'gc>,
+    /// Async generator: how the last run of the body ended (`AsyncGeneratorResolve` / `AsyncGeneratorReject`)
+    pub settlement: Settlement<'gc>,
     pub promise: Option<JsObject<'gc>>,
     /// Async generator: queued `next` / `throw` / `return` requests; the head is the one being processed
     pub requests: Option<alloc::collections::VecDeque<Request<'gc>>>,
 }
 
 impl<'gc> Coroutine<'gc> {
-    /// A coroutine that has not started: generator (neither `promise` nor `requests`), async function (with a result
-    /// Promise), async generator (with a request queue).
-    pub fn new(saved: Suspended<'gc>, promise: Option<JsObject<'gc>>, async_generator: bool) -> Self {
-        Self { state: CoroutineState::Suspended(saved), fresh: true, promise, requests: async_generator.then(alloc::collections::VecDeque::new) }
+    /// The coroutine of a call of `closure` that is running now: generator (neither `promise` nor `requests`), async
+    /// function (with a result Promise), async generator (with a request queue).
+    pub fn new(closure: Value<'gc>, promise: Option<JsObject<'gc>>, async_generator: bool) -> Self {
+        Self {
+            state: CoroutineState::Running,
+            frame: Suspended { closure, params: Vec::new(), regs: Vec::new(), context: None, continuation: 0 },
+            mode: crate::Resume::Next,
+            input: Value::Undefined,
+            waiting: Waiting::Nothing,
+            settlement: Settlement::Nothing,
+            promise,
+            requests: async_generator.then(alloc::collections::VecDeque::new),
+        }
     }
+}
+
+/// What a suspended async generator waits for: the settlement of an awaited value comes back as its next resumption.
+#[derive(Clone, Copy, Debug, Collect)]
+#[collect(no_drop)]
+pub enum Waiting<'gc> {
+    /// A request resumes it
+    Nothing,
+    /// `await` of this value: the settlement resumes the body
+    Await(Value<'gc>),
+    /// `yield` of this value, awaited first: a fulfillment answers the request with the value, a rejection is rethrown
+    /// in the body
+    Yield(Value<'gc>),
+    /// A `return` request, its value awaited first: a fulfillment resumes the body with that return, a rejection with a
+    /// throw
+    Return,
+    /// Resumed with a rejection of a yielded value (`GeneratorGetResumeMode` gives V8's `kRethrow`)
+    Rethrow,
+}
+
+/// How an async generator's body finished the request it was running.
+#[derive(Clone, Copy, Debug, Collect)]
+#[collect(no_drop)]
+pub enum Settlement<'gc> {
+    Nothing,
+    /// `AsyncGeneratorResolve`: the request's result value (done when the body then returns)
+    Resolved(Value<'gc>),
+    /// `AsyncGeneratorReject`: the request is rejected with this reason
+    Rejected(Value<'gc>),
 }
 
 /// One request to an async generator: how to resume, the value sent in, and the Promise for the caller.
@@ -504,6 +688,10 @@ pub struct NativeClosure<'gc> {
     #[collect(require_static)]
     pub f: ClosureFn,
     pub slots: Vec<Value<'gc>>,
+    /// 能被 `new`：执行层先按 `new.target.prototype` 造好 `this` 交给 `f`（[`Agent::new_target`] 是 `new.target`），`f`
+    /// 返回对象就用它，否则用 `this`（Node-API 构造函数的约定）
+    #[collect(require_static)]
+    pub constructor: bool,
 }
 
 impl fmt::Debug for NativeClosure<'_> {
@@ -642,12 +830,11 @@ impl ElementKind {
     }
 }
 
-/// The body of an ArrayBuffer / SharedArrayBuffer: bytes (absent once detached), the resizable maximum, and whether it
-/// is shared.
+/// ArrayBuffer / SharedArrayBuffer 的本体：字节（detach 后没有；自有、外部或共享内存，见 [`Backing`]）、可变长的上限、是否共享。
 #[derive(Debug, Collect)]
 #[collect(require_static)]
 pub struct BufferData {
-    pub bytes: Option<Vec<u8>>,
+    pub bytes: Option<Backing>,
     pub max: Option<usize>,
     pub shared: bool,
 }
@@ -709,6 +896,10 @@ pub enum ObjectKind<'gc> {
     IteratorHelper(Box<IteratorHelper<'gc>>),
     /// An iterator wrapped by `Iterator.from`
     WrappedIterator(crate::IterRecord<'gc>),
+    /// The getter / setter pair of a private accessor (`CreatePrivateAccessors`)
+    AccessorPair { get: Option<JsObject<'gc>>, set: Option<JsObject<'gc>> },
+    /// An async iterator over a sync one (`for await` / `yield*` in an async generator over a sync iterable)
+    AsyncFromSyncIterator(crate::IterRecord<'gc>),
     ArrayBuffer(Box<BufferData>),
     /// Date: the time value (milliseconds; NaN when invalid)
     Date(f64),
@@ -822,6 +1013,24 @@ pub struct ObjectData<'gc> {
 }
 
 impl<'gc> ObjectData<'gc> {
+    /// An ordinary object with nothing but a prototype and room for `capacity` properties (`this` of a construct
+    /// call, object literals): what [`ObjectData::alloc`] would build, without working out the kind
+    pub fn ordinary(mc: &Mutation<'gc>, proto: Option<JsObject<'gc>>, capacity: usize) -> JsObject<'gc> {
+        mc.alloc(Object {
+            proto: GcSlot::from(proto),
+            call: GcSlot::default(),
+            props: crate::Props::with_capacity(mc, capacity),
+            elements: crate::ValueArray::default(),
+            class: crate::IsoCell::new(Class::ORDINARY | Class::PLAIN | Class::UNIT_ORDINARY),
+            non_extensible: crate::IsoCell::new(false),
+            length_readonly: crate::IsoCell::new(false),
+            digit_keys: crate::IsoCell::new(false),
+            sparse_length: crate::IsoCell::new(0),
+            shape_root: j8lockfree::OnceBox::default(),
+            data: GcCell::empty(),
+        })
+    }
+
     pub fn alloc(self, mc: &Mutation<'gc>) -> JsObject<'gc> {
         let Self { kind, capacity, elements, symbols, privates, proto, sparse_length, non_extensible, length_readonly } = self;
         let state = ObjectState { kind, symbols, privates };
@@ -833,11 +1042,11 @@ impl<'gc> ObjectData<'gc> {
             call: GcSlot::from(call),
             props: crate::Props::with_capacity(mc, capacity),
             elements: crate::ValueArray::default(),
-            class: AtomicU8::new(class),
-            non_extensible: AtomicBool::new(non_extensible),
-            length_readonly: AtomicBool::new(length_readonly),
-            digit_keys: AtomicBool::new(false),
-            sparse_length: AtomicU32::new(sparse_length),
+            class: crate::IsoCell::new(class),
+            non_extensible: crate::IsoCell::new(non_extensible),
+            length_readonly: crate::IsoCell::new(length_readonly),
+            digit_keys: crate::IsoCell::new(false),
+            sparse_length: crate::IsoCell::new(sparse_length),
             shape_root: j8lockfree::OnceBox::default(),
             data: if unit.is_some() { GcCell::empty() } else { GcCell::new(mc, state) },
         });
@@ -886,7 +1095,7 @@ impl<'gc> ObjectState<'gc> {
 impl fmt::Debug for ObjectState<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let kind = match self.kind {
-            ObjectKind::Ordinary | ObjectKind::Arguments(_) => "Object",
+            ObjectKind::Ordinary | ObjectKind::Arguments(_) | ObjectKind::AccessorPair { .. } => "Object",
             ObjectKind::Error => "Error",
             ObjectKind::Array => "Array",
             ObjectKind::Function(_) | ObjectKind::Native(_) | ObjectKind::Bound(_) | ObjectKind::Resolver { .. } | ObjectKind::NativeClosure(_) => "Function",
@@ -900,7 +1109,7 @@ impl fmt::Debug for ObjectState<'_> {
             ObjectKind::RegExpStringIterator { .. } => "RegExp String Iterator",
             ObjectKind::TypedArray(..) => "TypedArray",
             ObjectKind::DataView(_) => "DataView",
-            ObjectKind::Iterator(_) | ObjectKind::CollectionIterator { .. } | ObjectKind::IteratorHelper(_) | ObjectKind::WrappedIterator(_) => "Iterator",
+            ObjectKind::Iterator(_) | ObjectKind::CollectionIterator { .. } | ObjectKind::IteratorHelper(_) | ObjectKind::WrappedIterator(_) | ObjectKind::AsyncFromSyncIterator(_) => "Iterator",
             ObjectKind::Coroutine(_) => "Generator",
             ObjectKind::Promise { .. } => "Promise",
             ObjectKind::RegExp(_) => "RegExp",
@@ -936,6 +1145,9 @@ impl Class {
     const CALLABLE: u8 = 1 << 3;
     /// Has Symbol-keyed properties
     const SYMBOLS: u8 = 1 << 6;
+    /// Its string-keyed properties stay in fast mode however many there are (see [`Object::widen`]); kept when the
+    /// other bits are recomputed
+    const WIDE: u8 = 1 << 7;
     /// The state cell is empty and the state is the default with this unit kind (no snapshot allocated): two bits
     const UNIT_SHIFT: u32 = 4;
     const UNIT_MASK: u8 = 0b11 << Self::UNIT_SHIFT;
@@ -991,7 +1203,7 @@ pub struct Object<'gc> {
     props: crate::Props<'gc>,
     elements: crate::ValueArray<'gc>,
     /// [`Class`] bits
-    class: AtomicU8,
+    class: crate::IsoCell<u8>,
     /// Not extensible (`Object.preventExtensions` / `seal` / `freeze`)
     #[mutable]
     non_extensible: bool,
@@ -1082,7 +1294,8 @@ impl Drop for ObjMut<'_, '_> {
     fn drop(&mut self) {
         if let Some(d) = self.data.take() {
             // The state now has a snapshot: no unit bits
-            self.obj.class.store(Class::of(&d.kind) | if d.symbols.is_empty() { 0 } else { Class::SYMBOLS }, Ordering::Release);
+            let wide = self.obj.class() & Class::WIDE;
+            self.obj.class.set(Class::of(&d.kind) | wide | if d.symbols.is_empty() { 0 } else { Class::SYMBOLS });
             let call = Object::call_of(self.mc, &d.kind);
             drop(d);
             if call.is_some() || self.obj.call.get().is_some() {
@@ -1126,17 +1339,17 @@ macro_rules! forward_reads {
             pub fn sparse_elements(&self) -> Vec<(u32, Value<'gc>)> {
                 self.obj.sparse_elements()
             }
-            pub fn prop_at(&self, at: usize, key: &str) -> Option<Property<'gc>> {
-                self.obj.prop_at(at, key)
+            pub fn prop_at(&self, mc: &Mutation<'gc>, at: usize, key: &str) -> Option<Property<'gc>> {
+                self.obj.prop_at(mc, at, key)
             }
             pub fn position(&self, key: &str) -> Option<usize> {
                 self.obj.position(key)
             }
-            pub fn get_own(&self, key: &str) -> Option<Property<'gc>> {
-                self.obj.get_own(key)
+            pub fn get_own(&self, mc: &Mutation<'gc>, key: &str) -> Option<Property<'gc>> {
+                self.obj.get_own(mc, key)
             }
-            pub fn own(&self, key: &str) -> Option<Value<'gc>> {
-                self.obj.own(key)
+            pub fn own(&self, mc: &Mutation<'gc>, key: &str) -> Option<Value<'gc>> {
+                self.obj.own(mc, key)
             }
             pub fn root_shape(&self) -> alloc::sync::Arc<crate::Shape> {
                 self.obj.root_shape()
@@ -1148,9 +1361,9 @@ forward_reads!(ObjRef ObjMut);
 
 impl<'gc> ObjRef<'_, 'gc> {
     /// Own property (only what is stored: the array dense part, ordinary properties, Symbol keys)
-    pub fn own_slot(&self, key: Key<'_, 'gc>) -> Option<Property<'gc>> {
+    pub fn own_slot(&self, mc: &Mutation<'gc>, key: Key<'_, 'gc>) -> Option<Property<'gc>> {
         match key {
-            Key::Str(k) => self.obj.own_str(k),
+            Key::Str(k) => self.obj.own_str(mc, k),
             Key::Sym(s) => self.get_own_symbol(s),
         }
     }
@@ -1159,7 +1372,7 @@ impl<'gc> ObjRef<'_, 'gc> {
 impl<'gc> ObjMut<'_, 'gc> {
     pub fn own_slot(&mut self, key: Key<'_, 'gc>) -> Option<Property<'gc>> {
         match key {
-            Key::Str(k) => self.obj.own_str(k),
+            Key::Str(k) => self.obj.own_str(self.mc, k),
             Key::Sym(s) => self.deref_mut().get_own_symbol(s),
         }
     }
@@ -1169,15 +1382,15 @@ impl<'gc> ObjMut<'_, 'gc> {
     }
 
     pub fn set_non_extensible(&self, v: bool) {
-        self.obj.non_extensible.store(v, Ordering::Release);
+        self.obj.non_extensible.set(v);
     }
 
     pub fn set_length_readonly(&self, v: bool) {
-        self.obj.length_readonly.store(v, Ordering::Release);
+        self.obj.length_readonly.set(v);
     }
 
     pub fn set_sparse_length(&self, v: u32) {
-        self.obj.sparse_length.store(v, Ordering::Release);
+        self.obj.sparse_length.set(v);
     }
 
     pub fn write_index(&self, i: u32, value: Value<'gc>) -> bool {
@@ -1345,7 +1558,7 @@ impl<'gc> Object<'gc> {
     }
 
     fn class(&self) -> u8 {
-        self.class.load(Ordering::Acquire)
+        self.class.get()
     }
 
     #[inline]
@@ -1372,7 +1585,7 @@ impl<'gc> Object<'gc> {
     }
 
     fn raise_sparse_length(&self, n: u32) {
-        self.sparse_length.fetch_max(n, Ordering::AcqRel);
+        self.sparse_length.set(self.sparse_length.get().max(n));
     }
 
     /// Array length; `None` if not an array.
@@ -1490,25 +1703,25 @@ impl<'gc> Object<'gc> {
         if self.sparse_length() > 0 {
             self.props.retain(mc, |k| crate::ops::index_of_str(k).is_none_or(|i| i < n));
         }
-        self.sparse_length.store(if len > dense { n } else { 0 }, Ordering::Release);
+        self.sparse_length.set(if len > dense { n } else { 0 });
     }
 
     /// Own string-keyed property (the array dense part or an ordinary property)
-    pub fn own_str(&self, k: &str) -> Option<Property<'gc>> {
+    pub fn own_str(&self, mc: &Mutation<'gc>, k: &str) -> Option<Property<'gc>> {
         if self.is_array()
             && let Some(i) = crate::ops::index_of_str(k)
             && let Some(v) = self.elements.get(i as usize)
         {
             return Some(Property::data(v));
         }
-        self.get_own(k)
+        self.get_own(mc, k)
     }
 
     /// Own property as stored (array dense part, ordinary properties, Symbol keys); borrows only for Symbol keys of an
     /// object that has some
-    pub fn own_slot(&self, key: Key<'_, 'gc>) -> Option<Property<'gc>> {
+    pub fn own_slot(&self, mc: &Mutation<'gc>, key: Key<'_, 'gc>) -> Option<Property<'gc>> {
         match key {
-            Key::Str(k) => self.own_str(k),
+            Key::Str(k) => self.own_str(mc, k),
             Key::Sym(_) if !self.has_symbols() => None,
             Key::Sym(s) => self.borrow().get_own_symbol(s),
         }
@@ -1540,7 +1753,7 @@ impl<'gc> Object<'gc> {
         let index = if self.is_array() { crate::ops::index_of_str(k) } else { None };
         if let Some(i) = index {
             let (at, n) = (i as usize, self.elements.len());
-            let stored = self.get_own(k).is_some();
+            let stored = self.get_own(mc, k).is_some();
             match (prop.slot, plain) {
                 (Slot::Data(v), true) if at < n => return self.elements.set(mc, at, v),
                 (Slot::Data(v), true) if at == n && !stored => return self.elements.push(mc, v),
@@ -1568,8 +1781,22 @@ impl<'gc> Object<'gc> {
     }
 
     /// Entry `at` of the property table if it is exactly `key` (the execution layer caches the index)
-    pub fn prop_at(&self, at: usize, key: &str) -> Option<Property<'gc>> {
-        (at < self.props.len() && *self.props.key(at) == *key).then(|| self.props.get(at))
+    pub fn prop_at(&self, mc: &Mutation<'gc>, at: usize, key: &str) -> Option<Property<'gc>> {
+        let p = self.props.get_if(at, key)?;
+        Some(self.resolved(mc, at, p))
+    }
+
+    /// Entry `i` (read as `p`) with a lazy value computed and stored back in place
+    #[inline]
+    fn resolved(&self, mc: &Mutation<'gc>, i: usize, mut p: Property<'gc>) -> Property<'gc> {
+        if let Slot::Data(v) = p.slot
+            && let Some(l) = v.as_lazy()
+        {
+            let v = l.resolve(self, mc);
+            self.props.set_slot(mc, i, Slot::Data(v));
+            p.slot = Slot::Data(v);
+        }
+        p
     }
 
     /// Update the value of entry `at` (already checked to be a writable data property)
@@ -1586,10 +1813,16 @@ impl<'gc> Object<'gc> {
     /// Append an entry (the shape follows the transition table).
     fn push_prop(&self, mc: &Mutation<'gc>, key: &str, prop: Property<'gc>) {
         if key.as_bytes().first().is_some_and(u8::is_ascii_digit) {
-            self.digit_keys.store(true, Ordering::Release);
+            self.digit_keys.set(true);
         }
         let proto = self.proto();
-        self.props.push(mc, key, prop, || proto.map(|p| p.get().root_shape_ref()));
+        self.props.push(mc, key, prop, self.class() & Class::WIDE != 0, || proto.map(|p| p.get().root_shape_ref()));
+    }
+
+    /// Keeps the string-keyed properties in fast mode however many get added (the global object, the script scope:
+    /// global name caches key on their shapes)
+    pub fn widen(&self) {
+        self.class.set(self.class.get() | Class::WIDE);
     }
 
     /// The empty shape that objects with this object as prototype start from (created if absent)
@@ -1608,21 +1841,30 @@ impl<'gc> Object<'gc> {
 
     /// Append an entry, switching the shape directly to `to` (from the execution layer's inline cache)
     pub fn push_to(&self, mc: &Mutation<'gc>, to: &alloc::sync::Arc<crate::Shape>, slot: Slot<'gc>) {
-        if to.key(to.len() - 1).as_bytes().first().is_some_and(u8::is_ascii_digit) {
-            self.digit_keys.store(true, Ordering::Release);
+        if to.digit_keys() {
+            self.digit_keys.set(true);
         }
         let proto = self.proto();
         self.props.push_to(mc, to, slot, || proto.map(|p| p.get().root_shape_ref()));
     }
 
+    /// An object without properties takes shape `to` with values `slots` at once (see [`Props::fill`])
+    pub fn fill(&self, mc: &Mutation<'gc>, to: &alloc::sync::Arc<crate::Shape>, slots: impl IntoIterator<Item = Slot<'gc>>) {
+        if to.digit_keys() {
+            self.digit_keys.set(true);
+        }
+        let proto = self.proto();
+        self.props.fill(mc, to, slots, || proto.map(|p| p.get().root_shape_ref()));
+    }
+
     /// Own property.
-    pub fn get_own(&self, key: &str) -> Option<Property<'gc>> {
-        self.position(key).map(|i| self.props.get(i))
+    pub fn get_own(&self, mc: &Mutation<'gc>, key: &str) -> Option<Property<'gc>> {
+        self.position(key).map(|i| self.resolved(mc, i, self.props.get(i)))
     }
 
     /// The value of an own data property (`None` for accessors).
-    pub fn own(&self, key: &str) -> Option<Value<'gc>> {
-        self.get_own(key).and_then(|p| p.value())
+    pub fn own(&self, mc: &Mutation<'gc>, key: &str) -> Option<Value<'gc>> {
+        self.get_own(mc, key).and_then(|p| p.value())
     }
 
     /// Assignment: update the value of an existing data property (no-op if not writable), otherwise create one.

@@ -1,0 +1,738 @@
+8d 00 00 00       CreateClosure [0:X<SharedFunctionInfo>], FBV[0], #0
+d4                Star1
+6c f8 00          CallUndefinedReceiver0 r1, FBV[0]
+8d 01 01 00       CreateClosure [1:X<SharedFunctionInfo>], FBV[1], #0
+d4                Star1
+6c f8 02          CallUndefinedReceiver0 r1, FBV[2]
+8d 02 02 00       CreateClosure [2:X<SharedFunctionInfo>], FBV[2], #0
+d4                Star1
+6c f8 04          CallUndefinedReceiver0 r1, FBV[4]
+8d 03 03 00       CreateClosure [3:X<SharedFunctionInfo>], FBV[3], #0
+d4                Star1
+6c f8 06          CallUndefinedReceiver0 r1, FBV[6]
+8d 04 04 00       CreateClosure [4:X<SharedFunctionInfo>], FBV[4], #0
+d4                Star1
+6c f8 08          CallUndefinedReceiver0 r1, FBV[8]
+8d 05 05 00       CreateClosure [5:X<SharedFunctionInfo>], FBV[5], #0
+d4                Star1
+6c f8 0a          CallUndefinedReceiver0 r1, FBV[10]
+8d 06 06 00       CreateClosure [6:X<SharedFunctionInfo>], FBV[6], #0
+d4                Star1
+6c f8 0c          CallUndefinedReceiver0 r1, FBV[12]
+8d 07 07 00       CreateClosure [7:X<SharedFunctionInfo>], FBV[7], #0
+d4                Star1
+6c f8 0e          CallUndefinedReceiver0 r1, FBV[14]
+8d 08 08 00       CreateClosure [8:X<SharedFunctionInfo>], FBV[8], #0
+d4                Star1
+6c f8 10          CallUndefinedReceiver0 r1, FBV[16]
+8d 09 09 00       CreateClosure [9:X<SharedFunctionInfo>], FBV[9], #0
+d4                Star1
+6c f8 12          CallUndefinedReceiver0 r1, FBV[18]
+8d 0a 0a 00       CreateClosure [10:X<SharedFunctionInfo>], FBV[10], #0
+d4                Star1
+6c f8 14          CallUndefinedReceiver0 r1, FBV[20]
+8d 0b 0b 00       CreateClosure [11:X<SharedFunctionInfo>], FBV[11], #0
+d4                Star1
+6c f8 16          CallUndefinedReceiver0 r1, FBV[22]
+d5                Star0
+b9                Return
+8e 00             CreateBlockContext [0:X<ScopeInfo CLASS_SCOPE>]
+1c f1             PushContext r8
+13 02             LdaConstant [2:"#priv"]
+cb                Star10
+13 02             LdaConstant [2:"#priv"]
+cb                Star10
+70 a4 01 ef 01    CallRuntime [CreatePrivateNameSymbol], r10-r10
+27 02             StaCurrentContextSlotNoCell [2]
+23 03 00          LdaGlobal [3:"Array"], FBV[0]
+c9                Star12
+8d 04 00 02       CreateClosure [4:X<SharedFunctionInfo B>], FBV[0], #2
+cc                Star9
+13 01             LdaConstant [1:X<ClassBoilerplate>]
+cb                Star10
+8d 05 01 02       CreateClosure [5:X<SharedFunctionInfo m>], FBV[1], #2
+c8                Star13
+1b f0 ee          Mov r9, r11
+70 2e 00 ef 04    CallRuntime [DefineClass], r10-r13
+27 03             StaCurrentContextSlotNoCell [3]
+0b ee             Ldar r11
+27 04             StaCurrentContextSlotNoCell [4]
+8d 06 02 02       CreateClosure [6:X<SharedFunctionInfo B>], FBV[2], #2
+3a f0 07 02       SetNamedProperty r9, [7:X<Symbol: (class_fields_symbol)>], FBV[2]
+8d 08 03 02       CreateClosure [8:X<SharedFunctionInfo B>], FBV[3], #2
+ca                Star11
+68 ee f0 04       CallProperty0 r11, r9, FBV[4]
+1d f1             PopContext r8
+1b f0 f9          Mov r9, r0
+89 09 07 29       CreateObjectLiteral [9:X<ObjectBoilerplateDescription[2]>], FBV[7], #29
+ad 26             JumpIfUndefinedOrNull [38] (X@ 112)
+82 f1             ToObject r8
+b1 f1             ForInEnumerate r8
+b2 f0 06          ForInPrepare r9-r11, FBV[6]
+0c                LdaZero
+c9                Star12
+af 1b ed ee       JumpIfForInDone [27], r12, r11 (X@ 112)
+b3 f1 ed f0 06    ForInNext r8, r12, r9-r10, FBV[6]
+ab 0c             JumpIfUndefined [12] (X@ 106)
+d4                Star1
+ce                Star7
+23 0a 08          LdaGlobal [10:"globalThis"], FBV[8]
+c8                Star13
+0b f8             Ldar r1
+63 ec             DeletePropertySloppy r13
+b4 ed             ForInStep r12
+97 17 00 0a       JumpLoop [23], [0], FBV[10] (X@ 85)
+88 0c             CreateEmptyArrayLiteral FBV[12]
+d3                Star2
+0c                LdaZero
+d0                Star5
+00 0d 2c 01       LdaSmi.Wide [300]
+79 f4 00          TestLessThan r5, EmbeddedFeedback[0]
+a8 15             JumpIfFalse [21] (X@ 145)
+33 f7 0b 0d       GetNamedProperty r2, [11:"push"], FBV[13]
+cd                Star8
+69 f1 f7 f4 0f    CallProperty1 r8, r2, r5, FBV[15]
+0b f4             Ldar r5
+5b 11             Inc FBV[17]
+d0                Star5
+97 18 00 12       JumpLoop [24], [0], FBV[18] (X@ 117)
+89 0c 14 29       CreateObjectLiteral [12:X<ObjectBoilerplateDescription[4]>], FBV[20], #29
+d2                Star3
+82 f1             ToObject r8
+93 f1 0d          CreateWithContext r8, [13:X<ScopeInfo WITH_SCOPE>]
+1c f1             PushContext r8
+2a 0e             LdaLookupSlot [14:"b"]
+32 0f 00          StaLookupSlot [15:"a"], #0
+1d f1             PopContext r8
+0c                LdaZero
+d1                Star4
+0d 03             LdaSmi [3]
+79 f5 00          TestLessThan r4, EmbeddedFeedback[0]
+a8 23             JumpIfFalse [35] (X@ 206)
+0c                LdaZero
+78 f5 00          TestEqualStrict r4, EmbeddedFeedback[0]
+1b f5 f1          Mov r4, r8
+a7 0b             JumpIfTrue [11] (X@ 191)
+0d 01             LdaSmi [1]
+78 f1 00          TestEqualStrict r8, EmbeddedFeedback[0]
+a7 06             JumpIfTrue [6] (X@ 193)
+98 06             Jump [6] (X@ 195)
+98 06             Jump [6] (X@ 197)
+98 04             Jump [4] (X@ 197)
+98 0b             Jump [11] (X@ 206)
+0b f5             Ldar r4
+5b 15             Inc FBV[21]
+d1                Star4
+97 24 00 16       JumpLoop [36], [0], FBV[22] (X@ 166)
+0d 01             LdaSmi [1]
+cc                Star9
+0d 02             LdaSmi [2]
+cb                Star10
+0d 03             LdaSmi [3]
+ca                Star11
+0b f9             Ldar r0
+74 f9 f0 03 18    Construct r0, r9-r11, FBV[24]
+24 10 1a          LdaGlobalInsideTypeof [16:"undefinedVar"], FBV[26]
+61 1c             TypeOf FBV[28]
+0e                LdaUndefined
+13 11             LdaConstant [17:X<BigInt 1>]
+cd                Star8
+13 12             LdaConstant [18:X<BigInt 2>]
+42 f1 00          Add r8, EmbeddedFeedback[0]
+13 13             LdaConstant [19:"t"]
+cd                Star8
+0d 01             LdaSmi [1]
+83                ToString
+42 f1 00          Add r8, EmbeddedFeedback[0]
+cd                Star8
+13 14             LdaConstant [20:"x"]
+42 f1 00          Add r8, EmbeddedFeedback[0]
+85 15 1d 01 00    CreateRegExpLiteral [21:"re"], FBV[29], #1
+cc                Star9
+33 f0 16 1e       GetNamedProperty r9, [22:"test"], FBV[30]
+cd                Star8
+13 15             LdaConstant [21:"re"]
+cb                Star10
+69 f1 f0 ef 20    CallProperty1 r8, r9, r10, FBV[32]
+13 17             LdaConstant [23:"ab"]
+87                CreateArrayFromIterable
+8d 18 04 02       CreateClosure [24:X<SharedFunctionInfo>], FBV[4], #2
+cd                Star8
+0d 01             LdaSmi [1]
+cc                Star9
+6d f1 f0 22       CallUndefinedReceiver1 r8, r9, FBV[34]
+0e                LdaUndefined
+b9                Return
+94                CreateMappedArguments
+d5                Star0
+b9                Return
+0d 02             LdaSmi [2]
+3b 02 00 00       DefineNamedOwnProperty <this>, [0:"s"], FBV[0]
+0e                LdaUndefined
+b9                Return
+19 02             LdaImmutableCurrentContextSlot [2]
+d5                Star0
+0d 01             LdaSmi [1]
+3d 02 f9 00 00    DefineKeyedOwnProperty <this>, r0, #0, FBV[0]
+0e                LdaUndefined
+b9                Return
+19 03             LdaImmutableCurrentContextSlot [3]
+34 02 00 00       GetNamedPropertyFromSuper <this>, [0:"m"], FBV[0]
+d5                Star0
+1b 02 f8          Mov <this>, r1
+ad 09             JumpIfUndefinedOrNull [9] (X@ 19)
+66 f9 f8 01 02    CallAnyReceiver r0, r1-r1, FBV[2]
+98 03             Jump [3] (X@ 20)
+0e                LdaUndefined
+ad 04             JumpIfUndefinedOrNull [4] (X@ 24)
+98 07             Jump [7] (X@ 29)
+19 02             LdaImmutableCurrentContextSlot [2]
+35 02 04          GetKeyedProperty <this>, FBV[4]
+b9                Return
+1b fe f8          Mov <closure>, r1
+65 f8 f9 f4       FindNonDefaultConstructorOrConstruct r1, r0, r5-r6
+0b f4             Ldar r5
+1b f8 f7          Mov r1, r2
+1b f9 f6          Mov r0, r3
+1b f3 f5          Mov r6, r4
+a7 0a             JumpIfTrue [10] (X@ 28)
+bd f5             ThrowIfNotSuperConstructor r4
+0b f6             Ldar r3
+76 f5 00          ConstructForwardAllArgs r4, FBV[0]
+d1                Star4
+33 f7 00 02       GetNamedProperty r2, [0:X<Symbol: (class_fields_symbol)>], FBV[2]
+ab 0a             JumpIfUndefined [10] (X@ 42)
+cd                Star8
+68 f1 f5 04       CallProperty0 r8, r4, FBV[4]
+1b f5 f2          Mov r4, r7
+0b f5             Ldar r4
+b9                Return
+13 00             LdaConstant [0:""]
+d5                Star0
+0c                LdaZero
+d2                Star3
+01 0d 50 c3 00 00 LdaSmi.ExtraWide [50000]
+79 f6 00          TestLessThan r3, EmbeddedFeedback[0]
+a8 2c             JumpIfFalse [44] (X@ 58)
+23 01 00          LdaGlobal [1:"String"], FBV[0]
+cf                Star6
+33 f3 02 02       GetNamedProperty r6, [2:"fromCharCode"], FBV[2]
+d0                Star5
+0d 61             LdaSmi [97]
+ce                Star7
+0b f6             Ldar r3
+53 1a 00          ModSmi [26], EmbeddedFeedback[0]
+42 f2 00          Add r7, EmbeddedFeedback[0]
+ce                Star7
+69 f4 f3 f2 04    CallProperty1 r5, r6, r7, FBV[4]
+42 f9 00          Add r0, EmbeddedFeedback[0]
+1b f9 f5          Mov r0, r4
+d5                Star0
+0b f6             Ldar r3
+5b 06             Inc FBV[6]
+d2                Star3
+97 31 00 07       JumpLoop [49], [0], FBV[7] (X@ 5)
+0c                LdaZero
+d4                Star1
+0c                LdaZero
+d3                Star2
+00 0d c8 00       LdaSmi.Wide [200]
+79 f7 00          TestLessThan r2, EmbeddedFeedback[0]
+a8 44             JumpIfFalse [68] (X@ 137)
+33 f9 03 09       GetNamedProperty r0, [3:"split"], FBV[9]
+ce                Star7
+13 04             LdaConstant [4:"a"]
+cc                Star9
+69 f2 f9 f0 0b    CallProperty1 r7, r0, r9, FBV[11]
+ce                Star7
+33 f2 05 0d       GetNamedProperty r7, [5:"join"], FBV[13]
+cf                Star6
+13 06             LdaConstant [6:"-"]
+cd                Star8
+69 f3 f2 f1 0f    CallProperty1 r6, r7, r8, FBV[15]
+cf                Star6
+33 f3 07 11       GetNamedProperty r6, [7:"indexOf"], FBV[17]
+d0                Star5
+13 08             LdaConstant [8:"z"]
+ce                Star7
+0b f7             Ldar r2
+53 03 00          ModSmi [3], EmbeddedFeedback[0]
+42 f2 00          Add r7, EmbeddedFeedback[0]
+ce                Star7
+69 f4 f3 f2 13    CallProperty1 r5, r6, r7, FBV[19]
+42 f8 00          Add r1, EmbeddedFeedback[0]
+1b f8 f5          Mov r1, r4
+d4                Star1
+0b f7             Ldar r2
+5b 15             Inc FBV[21]
+d3                Star2
+97 47 00 16       JumpLoop [71], [0], FBV[22] (X@ 62)
+33 f9 09 18       GetNamedProperty r0, [9:"length"], FBV[24]
+42 f8 00          Add r1, EmbeddedFeedback[0]
+0e                LdaUndefined
+b9                Return
+88 00             CreateEmptyArrayLiteral FBV[0]
+d5                Star0
+0d 07             LdaSmi [7]
+d4                Star1
+0c                LdaZero
+d3                Star2
+0d 05             LdaSmi [5]
+79 f7 00          TestLessThan r2, EmbeddedFeedback[0]
+a8 2a             JumpIfFalse [42] (X@ 55)
+0b f8             Ldar r1
+01 51 6d 4e c6 41 00 MulSmi.ExtraWide [1103515245], EmbeddedFeedback[0]
+00 4f 39 30 00    AddSmi.Wide [12345], EmbeddedFeedback[0]
+d2                Star3
+13 00             LdaConstant [0:X<HeapNumber 2147483648.0>]
+46 f6 00          Mod r3, EmbeddedFeedback[0]
+d4                Star1
+33 f9 01 01       GetNamedProperty r0, [1:"push"], FBV[1]
+d2                Star3
+69 f6 f9 f8 03    CallProperty1 r3, r0, r1, FBV[3]
+0b f7             Ldar r2
+5b 05             Inc FBV[5]
+d3                Star2
+97 2b 00 06       JumpLoop [43], [0], FBV[6] (X@ 8)
+33 f9 02 08       GetNamedProperty r0, [2:"sort"], FBV[8]
+d2                Star3
+8d 03 00 02       CreateClosure [3:X<SharedFunctionInfo>], FBV[0], #2
+d0                Star5
+69 f6 f9 f4 0a    CallProperty1 r3, r0, r5, FBV[10]
+0c                LdaZero
+35 f9 0c          GetKeyedProperty r0, FBV[12]
+d2                Star3
+33 f9 04 0e       GetNamedProperty r0, [4:"length"], FBV[14]
+50 01 00          SubSmi [1], EmbeddedFeedback[0]
+35 f9 10          GetKeyedProperty r0, FBV[16]
+42 f6 00          Add r3, EmbeddedFeedback[0]
+0e                LdaUndefined
+b9                Return
+0b 04             Ldar a1
+43 03 00          Sub a0, EmbeddedFeedback[0]
+b9                Return
+13 00             LdaConstant [0:"The quick brown fox 123 jumps over the lazy dog 4567 "]
+d5                Star0
+0c                LdaZero
+d4                Star1
+0c                LdaZero
+d3                Star2
+00 0d 20 4e       LdaSmi.Wide [20000]
+79 f7 00          TestLessThan r2, EmbeddedFeedback[0]
+a8 42             JumpIfFalse [66] (X@ 80)
+85 01 00 00 00    CreateRegExpLiteral [1:"\d+"], FBV[0], #0
+d1                Star4
+33 f5 02 01       GetNamedProperty r4, [2:"test"], FBV[1]
+d2                Star3
+69 f6 f5 f9 03    CallProperty1 r3, r4, r0, FBV[3]
+a6 07             JumpIfToBooleanFalse [7] (X@ 39)
+0b f8             Ldar r1
+5b 05             Inc FBV[5]
+d4                Star1
+33 f9 03 06       GetNamedProperty r0, [3:"replace"], FBV[6]
+d1                Star4
+85 04 08 01 00    CreateRegExpLiteral [4:"o"], FBV[8], #1
+cf                Star6
+13 05             LdaConstant [5:"0"]
+ce                Star7
+6a f5 f9 f3 f2 09 CallProperty2 r4, r0, r6, r7, FBV[9]
+d1                Star4
+33 f5 06 0b       GetNamedProperty r4, [6:"length"], FBV[11]
+42 f8 00          Add r1, EmbeddedFeedback[0]
+1b f8 f6          Mov r1, r3
+d4                Star1
+0b f7             Ldar r2
+5b 0d             Inc FBV[13]
+d3                Star2
+97 45 00 0e       JumpLoop [69], [0], FBV[14] (X@ 7)
+0e                LdaUndefined
+b9                Return
+0c                LdaZero
+d5                Star0
+0c                LdaZero
+d4                Star1
+0d 05             LdaSmi [5]
+79 f8 00          TestLessThan r1, EmbeddedFeedback[0]
+a8 5e             JumpIfFalse [94] (X@ 103)
+89 00 00 08       CreateObjectLiteral [0:X<ObjectBoilerplateDescription[6]>], FBV[0], #8
+d2                Star3
+0b f8             Ldar r1
+3b f6 01 01       DefineNamedOwnProperty r3, [1:"x"], FBV[1]
+0b f8             Ldar r1
+51 02 00          MulSmi [2], EmbeddedFeedback[0]
+3b f6 02 03       DefineNamedOwnProperty r3, [2:"y"], FBV[3]
+89 03 05 29       CreateObjectLiteral [3:X<ObjectBoilerplateDescription[2]>], FBV[5], #29
+d1                Star4
+0b f8             Ldar r1
+57 07 00          BitwiseAndSmi [7], EmbeddedFeedback[0]
+3b f5 04 06       DefineNamedOwnProperty r4, [4:"w"], FBV[6]
+0b f5             Ldar r4
+3b f6 05 08       DefineNamedOwnProperty r3, [5:"z"], FBV[8]
+1b f6 f7          Mov r3, r2
+33 f6 01 0a       GetNamedProperty r3, [1:"x"], FBV[10]
+d1                Star4
+33 f7 05 0c       GetNamedProperty r2, [5:"z"], FBV[12]
+d0                Star5
+33 f4 04 0e       GetNamedProperty r5, [4:"w"], FBV[14]
+42 f5 00          Add r4, EmbeddedFeedback[0]
+3a f7 01 10       SetNamedProperty r2, [1:"x"], FBV[16]
+33 f7 01 0a       GetNamedProperty r2, [1:"x"], FBV[10]
+d1                Star4
+33 f7 02 12       GetNamedProperty r2, [2:"y"], FBV[18]
+42 f5 00          Add r4, EmbeddedFeedback[0]
+42 f9 00          Add r0, EmbeddedFeedback[0]
+1b f9 f6          Mov r0, r3
+d5                Star0
+0b f8             Ldar r1
+5b 14             Inc FBV[20]
+d4                Star1
+97 5f 00 15       JumpLoop [95], [0], FBV[21] (X@ 4)
+0e                LdaUndefined
+b9                Return
+0c                LdaZero
+d5                Star0
+0c                LdaZero
+d4                Star1
+0d 32             LdaSmi [50]
+79 f8 00          TestLessThan r1, EmbeddedFeedback[0]
+a8 17             JumpIfFalse [23] (X@ 32)
+0b f8             Ldar r1
+44 f8 00          Mul r1, EmbeddedFeedback[0]
+42 f9 00          Add r0, EmbeddedFeedback[0]
+53 35 00          ModSmi [53], EmbeddedFeedback[0]
+d5                Star0
+0b f8             Ldar r1
+5b 00             Inc FBV[0]
+d4                Star1
+97 18 00 01       JumpLoop [24], [0], FBV[1] (X@ 4)
+0e                LdaUndefined
+b9                Return
+88 00             CreateEmptyArrayLiteral FBV[0]
+d5                Star0
+0c                LdaZero
+d2                Star3
+00 0d d0 07       LdaSmi.Wide [2000]
+79 f6 00          TestLessThan r3, EmbeddedFeedback[0]
+a8 40             JumpIfFalse [64] (X@ 76)
+33 f9 00 01       GetNamedProperty r0, [0:"push"], FBV[1]
+d1                Star4
+89 01 03 0c       CreateObjectLiteral [1:X<ObjectBoilerplateDescription[8]>], FBV[3], #c
+cf                Star6
+0b f6             Ldar r3
+3b f3 02 04       DefineNamedOwnProperty r6, [2:"id"], FBV[4]
+13 03             LdaConstant [3:"item"]
+ce                Star7
+0b f6             Ldar r3
+42 f2 00          Add r7, EmbeddedFeedback[0]
+3b f3 04 06       DefineNamedOwnProperty r6, [4:"name"], FBV[6]
+89 05 08 29       CreateObjectLiteral [5:X<ObjectBoilerplateDescription[2]>], FBV[8], #29
+ce                Star7
+0b f6             Ldar r3
+52 03 00          DivSmi [3], EmbeddedFeedback[0]
+3b f2 06 09       DefineNamedOwnProperty r7, [6:"v"], FBV[9]
+0b f2             Ldar r7
+3b f3 07 0b       DefineNamedOwnProperty r6, [7:"nested"], FBV[11]
+69 f5 f9 f3 0d    CallProperty1 r4, r0, r6, FBV[13]
+0b f6             Ldar r3
+5b 0f             Inc FBV[15]
+d2                Star3
+97 43 00 10       JumpLoop [67], [0], FBV[16] (X@ 5)
+0c                LdaZero
+d4                Star1
+0c                LdaZero
+d3                Star2
+0d 14             LdaSmi [20]
+79 f7 00          TestLessThan r2, EmbeddedFeedback[0]
+a8 34             JumpIfFalse [52] (X@ 137)
+23 08 12          LdaGlobal [8:"JSON"], FBV[18]
+cf                Star6
+33 f3 09 14       GetNamedProperty r6, [9:"parse"], FBV[20]
+d0                Star5
+23 08 12          LdaGlobal [8:"JSON"], FBV[18]
+cd                Star8
+33 f1 0a 16       GetNamedProperty r8, [10:"stringify"], FBV[22]
+ce                Star7
+69 f2 f1 f9 18    CallProperty1 r7, r8, r0, FBV[24]
+ce                Star7
+69 f4 f3 f2 1a    CallProperty1 r5, r6, r7, FBV[26]
+d0                Star5
+33 f4 0b 1c       GetNamedProperty r5, [11:"length"], FBV[28]
+42 f8 00          Add r1, EmbeddedFeedback[0]
+1b f8 f5          Mov r1, r4
+d4                Star1
+0b f7             Ldar r2
+5b 1e             Inc FBV[30]
+d3                Star2
+97 35 00 1f       JumpLoop [53], [0], FBV[31] (X@ 80)
+0e                LdaUndefined
+b9                Return
+91 00 01          CreateFunctionContextWithCells [0:X<ScopeInfo FUNCTION_SCOPE>], [1]
+1c f9             PushContext r0
+8d 01 00 02       CreateClosure [1:X<SharedFunctionInfo fib>], FBV[0], #2
+27 02             StaCurrentContextSlotNoCell [2]
+19 02             LdaImmutableCurrentContextSlot [2]
+d4                Star1
+0d 05             LdaSmi [5]
+d3                Star2
+6d f8 f7 00       CallUndefinedReceiver1 r1, r2, FBV[0]
+0e                LdaUndefined
+b9                Return
+0d 02             LdaSmi [2]
+79 03 00          TestLessThan a0, EmbeddedFeedback[0]
+a8 06             JumpIfFalse [6] (X@ 11)
+0b 03             Ldar a0
+98 20             Jump [32] (X@ 41)
+19 02             LdaImmutableCurrentContextSlot [2]
+d5                Star0
+0b 03             Ldar a0
+50 01 00          SubSmi [1], EmbeddedFeedback[0]
+d4                Star1
+6d f9 f8 00       CallUndefinedReceiver1 r0, r1, FBV[0]
+d5                Star0
+19 02             LdaImmutableCurrentContextSlot [2]
+d4                Star1
+0b 03             Ldar a0
+50 02 00          SubSmi [2], EmbeddedFeedback[0]
+d3                Star2
+6d f8 f7 02       CallUndefinedReceiver1 r1, r2, FBV[2]
+42 f9 00          Add r0, EmbeddedFeedback[0]
+b9                Return
+23 00 00          LdaGlobal [0:"Map"], FBV[0]
+d0                Star5
+74 f4 f9 00 02    Construct r5, r0-r0, FBV[2]
+d5                Star0
+23 01 04          LdaGlobal [1:"Set"], FBV[4]
+d0                Star5
+74 f4 f9 00 06    Construct r5, r0-r0, FBV[6]
+d4                Star1
+0c                LdaZero
+d1                Star4
+0d 05             LdaSmi [5]
+79 f5 00          TestLessThan r4, EmbeddedFeedback[0]
+a8 2f             JumpIfFalse [47] (X@ 74)
+33 f9 02 08       GetNamedProperty r0, [2:"set"], FBV[8]
+d0                Star5
+13 03             LdaConstant [3:"k"]
+ce                Star7
+0b f5             Ldar r4
+42 f2 00          Add r7, EmbeddedFeedback[0]
+ce                Star7
+6a f4 f9 f2 f5 0a CallProperty2 r5, r0, r7, r4, FBV[10]
+33 f8 04 0c       GetNamedProperty r1, [4:"add"], FBV[12]
+d0                Star5
+0b f5             Ldar r4
+51 03 00          MulSmi [3], EmbeddedFeedback[0]
+ce                Star7
+69 f4 f8 f2 0e    CallProperty1 r5, r1, r7, FBV[14]
+0b f5             Ldar r4
+5b 10             Inc FBV[16]
+d1                Star4
+97 30 00 11       JumpLoop [48], [0], FBV[17] (X@ 22)
+0c                LdaZero
+d3                Star2
+0c                LdaZero
+d2                Star3
+01 0d 40 0d 03 00 LdaSmi.ExtraWide [200000]
+79 f6 00          TestLessThan r3, EmbeddedFeedback[0]
+a8 34             JumpIfFalse [52] (X@ 139)
+33 f8 05 13       GetNamedProperty r1, [5:"has"], FBV[19]
+d0                Star5
+69 f4 f8 f6 15    CallProperty1 r5, r1, r3, FBV[21]
+a6 1f             JumpIfToBooleanFalse [31] (X@ 130)
+33 f9 06 17       GetNamedProperty r0, [6:"get"], FBV[23]
+cf                Star6
+13 03             LdaConstant [3:"k"]
+cd                Star8
+0b f6             Ldar r3
+53 05 00          ModSmi [5], EmbeddedFeedback[0]
+42 f1 00          Add r8, EmbeddedFeedback[0]
+cd                Star8
+69 f3 f9 f1 19    CallProperty1 r6, r0, r8, FBV[25]
+42 f7 00          Add r2, EmbeddedFeedback[0]
+1b f7 f4          Mov r2, r5
+d3                Star2
+0b f6             Ldar r3
+5b 1b             Inc FBV[27]
+d2                Star3
+97 39 00 1c       JumpLoop [57], [0], FBV[28] (X@ 78)
+0e                LdaUndefined
+b9                Return
+8d 00 00 02       CreateClosure [0:X<SharedFunctionInfo make>], FBV[0], #2
+d5                Star0
+0c                LdaZero
+d4                Star1
+0c                LdaZero
+d3                Star2
+00 0d e8 03       LdaSmi.Wide [1000]
+79 f7 00          TestLessThan r2, EmbeddedFeedback[0]
+a8 32             JumpIfFalse [50] (X@ 66)
+0b f7             Ldar r2
+57 03 00          BitwiseAndSmi [3], EmbeddedFeedback[0]
+cf                Star6
+6d f9 f3 00       CallUndefinedReceiver1 r0, r6, FBV[0]
+d2                Star3
+0c                LdaZero
+d1                Star4
+00 0d e8 03       LdaSmi.Wide [1000]
+79 f5 00          TestLessThan r4, EmbeddedFeedback[0]
+a8 13             JumpIfFalse [19] (X@ 57)
+6d f6 f5 02       CallUndefinedReceiver1 r3, r4, FBV[2]
+53 05 00          ModSmi [5], EmbeddedFeedback[0]
+d4                Star1
+0b f5             Ldar r4
+5b 04             Inc FBV[4]
+d1                Star4
+97 16 01 05       JumpLoop [22], [1], FBV[5] (X@ 31)
+0b f7             Ldar r2
+5b 07             Inc FBV[7]
+d3                Star2
+97 35 00 08       JumpLoop [53], [0], FBV[8] (X@ 9)
+0e                LdaUndefined
+b9                Return
+91 00 02          CreateFunctionContextWithCells [0:X<ScopeInfo FUNCTION_SCOPE>], [2]
+1c f9             PushContext r0
+0b 03             Ldar a0
+27 02             StaCurrentContextSlotNoCell [2]
+10                LdaTheHole
+29 03             StaCurrentContextSlot [3]
+0c                LdaZero
+29 03             StaCurrentContextSlot [3]
+8d 01 00 02       CreateClosure [1:X<SharedFunctionInfo>], FBV[0], #2
+b9                Return
+18 03             LdaCurrentContextSlot [3]
+d5                Star0
+19 02             LdaImmutableCurrentContextSlot [2]
+44 03 00          Mul a0, EmbeddedFeedback[0]
+42 f9 00          Add r0, EmbeddedFeedback[0]
+29 03             StaCurrentContextSlot [3]
+b9                Return
+8e 00             CreateBlockContext [0:X<ScopeInfo CLASS_SCOPE>]
+1c f5             PushContext r4
+10                LdaTheHole
+27 02             StaCurrentContextSlotNoCell [2]
+10                LdaTheHole
+cd                Star8
+8d 02 00 02       CreateClosure [2:X<SharedFunctionInfo Vec>], FBV[0], #2
+d0                Star5
+13 01             LdaConstant [1:X<ClassBoilerplate>]
+cf                Star6
+8d 03 01 02       CreateClosure [3:X<SharedFunctionInfo add>], FBV[1], #2
+cc                Star9
+8d 04 02 02       CreateClosure [4:X<SharedFunctionInfo get len2>], FBV[2], #2
+cb                Star10
+1b f4 f2          Mov r5, r7
+70 2e 00 f3 05    CallRuntime [DefineClass], r6-r10
+0b f2             Ldar r7
+27 02             StaCurrentContextSlotNoCell [2]
+1d f5             PopContext r4
+d5                Star0
+0c                LdaZero
+d0                Star5
+0c                LdaZero
+cf                Star6
+0b f9             Ldar r0
+74 f9 f4 02 00    Construct r0, r5-r6, FBV[0]
+d4                Star1
+0d 01             LdaSmi [1]
+d0                Star5
+0d 02             LdaSmi [2]
+cf                Star6
+0b f9             Ldar r0
+74 f9 f4 02 02    Construct r0, r5-r6, FBV[2]
+d3                Star2
+0c                LdaZero
+d2                Star3
+0d 05             LdaSmi [5]
+79 f6 00          TestLessThan r3, EmbeddedFeedback[0]
+a8 16             JumpIfFalse [22] (X@ 97)
+33 f8 05 04       GetNamedProperty r1, [5:"add"], FBV[4]
+d1                Star4
+69 f5 f8 f7 06    CallProperty1 r4, r1, r2, FBV[6]
+d4                Star1
+0b f6             Ldar r3
+5b 08             Inc FBV[8]
+d2                Star3
+97 17 00 09       JumpLoop [23], [0], FBV[9] (X@ 70)
+33 f8 06 0b       GetNamedProperty r1, [6:"len2"], FBV[11]
+0e                LdaUndefined
+b9                Return
+33 02 00 00       GetNamedProperty <this>, [0:"x"], FBV[0]
+d5                Star0
+33 02 00 02       GetNamedProperty <this>, [0:"x"], FBV[2]
+44 f9 00          Mul r0, EmbeddedFeedback[0]
+d5                Star0
+33 02 01 04       GetNamedProperty <this>, [1:"y"], FBV[4]
+d4                Star1
+33 02 01 06       GetNamedProperty <this>, [1:"y"], FBV[6]
+44 f8 00          Mul r1, EmbeddedFeedback[0]
+42 f9 00          Add r0, EmbeddedFeedback[0]
+b9                Return
+19 02             LdaImmutableCurrentContextSlot [2]
+ba 00             ThrowReferenceErrorIfHole [0:"Vec"]
+d5                Star0
+33 02 01 00       GetNamedProperty <this>, [1:"x"], FBV[0]
+d4                Star1
+33 03 01 02       GetNamedProperty a0, [1:"x"], FBV[2]
+42 f8 00          Add r1, EmbeddedFeedback[0]
+d4                Star1
+33 02 02 04       GetNamedProperty <this>, [2:"y"], FBV[4]
+d3                Star2
+33 03 02 06       GetNamedProperty a0, [2:"y"], FBV[6]
+42 f7 00          Add r2, EmbeddedFeedback[0]
+d3                Star2
+0b f9             Ldar r0
+74 f9 f8 02 08    Construct r0, r1-r2, FBV[8]
+b9                Return
+0b 03             Ldar a0
+3a 02 00 00       SetNamedProperty <this>, [0:"x"], FBV[0]
+0b 04             Ldar a1
+3a 02 01 02       SetNamedProperty <this>, [1:"y"], FBV[2]
+0e                LdaUndefined
+b9                Return
+88 00             CreateEmptyArrayLiteral FBV[0]
+d5                Star0
+0c                LdaZero
+d4                Star1
+0d 05             LdaSmi [5]
+79 f8 00          TestLessThan r1, EmbeddedFeedback[0]
+a8 15             JumpIfFalse [21] (X@ 31)
+33 f9 00 01       GetNamedProperty r0, [0:"push"], FBV[1]
+d3                Star2
+69 f7 f9 f8 03    CallProperty1 r2, r0, r1, FBV[3]
+0b f8             Ldar r1
+5b 05             Inc FBV[5]
+d4                Star1
+97 16 00 06       JumpLoop [22], [0], FBV[6] (X@ 5)
+33 f9 01 08       GetNamedProperty r0, [1:"map"], FBV[8]
+d1                Star4
+8d 02 00 02       CreateClosure [2:X<SharedFunctionInfo>], FBV[0], #2
+cf                Star6
+69 f5 f9 f3 0a    CallProperty1 r4, r0, r6, FBV[10]
+d1                Star4
+33 f5 03 0c       GetNamedProperty r4, [3:"filter"], FBV[12]
+d2                Star3
+8d 04 01 02       CreateClosure [4:X<SharedFunctionInfo>], FBV[1], #2
+d0                Star5
+69 f6 f5 f4 0e    CallProperty1 r3, r4, r5, FBV[14]
+d2                Star3
+33 f6 05 10       GetNamedProperty r3, [5:"reduce"], FBV[16]
+d3                Star2
+8d 06 02 02       CreateClosure [6:X<SharedFunctionInfo>], FBV[2], #2
+d1                Star4
+0c                LdaZero
+d0                Star5
+6a f7 f6 f5 f4 12 CallProperty2 r2, r3, r4, r5, FBV[18]
+0e                LdaUndefined
+b9                Return
+0b 04             Ldar a1
+42 03 00          Add a0, EmbeddedFeedback[0]
+b9                Return
+0b 03             Ldar a0
+53 02 00          ModSmi [2], EmbeddedFeedback[0]
+d5                Star0
+0c                LdaZero
+78 f9 00          TestEqualStrict r0, EmbeddedFeedback[0]
+b9                Return
+0b 03             Ldar a0
+51 03 00          MulSmi [3], EmbeddedFeedback[0]
+b9                Return

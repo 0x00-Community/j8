@@ -9,14 +9,15 @@ struct Weaks;
 
 impl Weaks {
     fn weak_ref<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        if a.new_target == Value::Undefined {
+        let new_target = a.new_target;
+        if new_target == Value::Undefined {
             return Err(a.throw(ErrorKind::Type, "Constructor WeakRef requires 'new'"));
         }
         let target = args.at(0);
         if !a.can_be_held_weakly(target) {
             return Err(a.throw(ErrorKind::Type, "WeakRef: target must be an object or a non-registered symbol"));
         }
-        Ok(a.create_from_ctor(a.realm.weak_ref_proto, ObjectKind::WeakRef(target))?.into())
+        Ok(a.create_from_ctor(new_target, a.realm.weak_ref_proto, ObjectKind::WeakRef(target))?.into())
     }
 
     fn deref<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
@@ -30,14 +31,15 @@ impl Weaks {
     }
 
     fn registry<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        if a.new_target == Value::Undefined {
+        let new_target = a.new_target;
+        if new_target == Value::Undefined {
             return Err(a.throw(ErrorKind::Type, "Constructor FinalizationRegistry requires 'new'"));
         }
         let cleanup = args.at(0);
         if !a.is_callable(cleanup) {
             return Err(a.throw(ErrorKind::Type, "FinalizationRegistry: cleanup must be callable"));
         }
-        Ok(a.create_from_ctor(a.realm.finalization_registry_proto, ObjectKind::FinalizationRegistry { cleanup, cells: alloc::vec::Vec::new() })?.into())
+        Ok(a.create_from_ctor(new_target, a.realm.finalization_registry_proto, ObjectKind::FinalizationRegistry { cleanup, cells: alloc::vec::Vec::new() })?.into())
     }
 
     fn this_registry<'gc>(a: &Agent<'gc, '_>, this: Value<'gc>) -> Result<JsObject<'gc>, Error> {

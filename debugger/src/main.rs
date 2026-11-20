@@ -1,11 +1,11 @@
 //! j8dbg: the j8 debugging CLI.
-mod asm;
+mod code;
 
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
-use asm::{Asm, Disasm};
+use code::Compiled;
 
 /// j8 debugging tool
 #[derive(Parser)]
@@ -17,17 +17,14 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// JS ⇒ bytecode, print the disassembly listing
-    Disasm(Disasm),
-    /// Assemble a disassembly listing, print the normalized listing
-    Asm(Asm),
+    /// JS ⇒ bytecode, listed like V8's --print-bytecode
+    Compile(Compiled),
 }
 
 impl Command {
     fn run(&self) -> Result<(), String> {
         match self {
-            Command::Disasm(d) => d.run(),
-            Command::Asm(a) => a.run(),
+            Command::Compile(c) => c.run(),
         }
     }
 }
