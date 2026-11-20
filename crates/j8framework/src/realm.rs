@@ -156,7 +156,8 @@ pub struct Realm<'gc> {
 pub struct RegExpPristine<'gc> {
     #[collect(require_static)]
     pub shape: alloc::sync::Arc<crate::Shape>,
-    pub slots: alloc::vec::Vec<(usize, crate::Slot<'gc>)>,
+    /// The guarded entries and their words (see `Props::word`)
+    pub slots: alloc::vec::Vec<(usize, Value<'gc>)>,
 }
 
 /// One compiled regex: source, flags, the execution layer's compiled result.

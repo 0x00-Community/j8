@@ -7,7 +7,7 @@
 //! which syncs the state and runs [`Executor::step`]. A handler leaves the chain when the frame changes (calls and
 //! returns), on an exception, or when the execution ends.
 use j8bytecode::Bytecode;
-use j8framework::{Agent, Env, Error, ErrorKind, Value, ValueKind};
+use j8framework::{Agent, Env, Error, ErrorKind, Value, ValueBits};
 
 use crate::{Args, Budget, Executor, Flow, Frame, Insn, Loaded, Outcome, State, STACK_LIMIT};
 
@@ -63,7 +63,7 @@ macro_rules! handlers {
         #[allow(unused_mut, unused_variables, clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "operands are in range")]
         fn $name<'r, 'gc, 'x, 'b>($cx: &mut Cx<'r, 'gc, 'x, 'b>, $pc: *const Insn, $regs: *mut Value<'gc>, mut $acc: Value<'gc>) -> Exit<'gc> {
             // SAFETY: `pc` points at a decoded instruction of the running function
-            let $o = unsafe { &(*$pc).operands };
+            let $o = unsafe { (*$pc).operands.all() };
             $body
         }
     )*};
@@ -189,13 +189,13 @@ handlers! {
     }
     jump(cx, pc, regs, acc, o) { next!(cx, target!(cx, pc), regs, acc) }
     jump_if_true(cx, pc, regs, acc, o) {
-        if matches!(acc.kind(), ValueKind::Bool(true)) {
+        if acc.bits() == ValueBits::TRUE {
             next!(cx, target!(cx, pc), regs, acc)
         }
         next!(cx, step!(pc), regs, acc)
     }
     jump_if_false(cx, pc, regs, acc, o) {
-        if matches!(acc.kind(), ValueKind::Bool(false)) {
+        if acc.bits() == ValueBits::FALSE {
             next!(cx, target!(cx, pc), regs, acc)
         }
         next!(cx, step!(pc), regs, acc)
@@ -238,7 +238,7 @@ handlers! {
         }
     }
     throw_reference_error_if_hole(cx, pc, regs, acc, o) {
-        if matches!(acc.kind(), ValueKind::Uninit) {
+        if acc.bits() == ValueBits::UNINIT {
             fall!(cx, pc, regs, acc)
         }
         next!(cx, step!(pc), regs, acc)
@@ -271,7 +271,7 @@ handlers! {
         next!(cx, step!(pc), regs, cx.exe.create_closure(cx.a, cx.loaded, o[0], env).into())
     }
     get_named_property(cx, pc, regs, acc, o) {
-        if let ValueKind::Object(ob) = reg!(cx, regs, o[0]).kind()
+        if let Some(ob) = reg!(cx, regs, o[0]).as_object()
             && let Some(v) = cx.loaded.ics[o[2] as usize].get(ob)
         {
             next!(cx, step!(pc), regs, v)
@@ -292,7 +292,7 @@ handlers! {
 /// code (V8's `InterpreterEntryTrampoline`). `None`: anything else, for the slow path.
 #[inline]
 fn enter<'r, 'gc>(cx: &mut Cx<'r, 'gc, '_, '_>, pc: *const Insn, callee: Value<'gc>, this: Value<'gc>, args: Args<'_, 'gc>) -> Option<(*const Insn, *mut Value<'gc>)> {
-    let ValueKind::Object(o) = callee.kind() else { return None };
+    let Some(o) = callee.as_object() else { return None };
     let c = o.closure()?;
     let l: &'r Loaded = cx.exe.code(&c);
     if l.class_constructor || l.generator || l.asynchronous || cx.depth + cx.st.frames.len() + 1 >= STACK_LIMIT {
@@ -311,7 +311,7 @@ fn enter<'r, 'gc>(cx: &mut Cx<'r, 'gc, '_, '_>, pc: *const Insn, callee: Value<'
 /// A call to a plain host function, run right here; `None` for anything else
 #[inline]
 fn native<'gc>(cx: &mut Cx<'_, 'gc, '_, '_>, pc: *const Insn, callee: Value<'gc>, this: Value<'gc>, args: &[Value<'gc>]) -> Option<Result<Value<'gc>, Error>> {
-    let ValueKind::Object(o) = callee.kind() else { return None };
+    let Some(o) = callee.as_object() else { return None };
     let n = o.native()?;
     let level = cx.depth + cx.st.frames.len();
     if n.forward != j8framework::Forward::No || level >= STACK_LIMIT {
@@ -340,11 +340,18 @@ fn sync(cx: &mut Cx<'_, '_, '_, '_>, pc: *const Insn) {
 #[inline]
 fn int_rem(x: f64, y: f64) -> Option<f64> {
     const EXACT: f64 = 9_007_199_254_740_992.0;
-    if x.fract() != 0.0 || y.fract() != 0.0 || y == 0.0 || x.abs() >= EXACT || y.abs() >= EXACT {
+    // Both below 2^53 (NaN fails too), then integers if they survive a round trip through i64 (no `fract`: without
+    // SSE4.1 that is a call to `trunc`)
+    if !(x.abs() < EXACT && y.abs() < EXACT) {
         return None;
     }
-    #[expect(clippy::cast_possible_truncation, reason = "integers below 2^53")]
-    let r = (x as i64) % (y as i64);
+    #[expect(clippy::cast_possible_truncation, reason = "below 2^53, checked by converting back")]
+    let (a, b) = (x as i64, y as i64);
+    #[expect(clippy::cast_precision_loss, reason = "below 2^53")]
+    if a as f64 != x || b as f64 != y || b == 0 {
+        return None;
+    }
+    let r = a % b;
     #[expect(clippy::cast_precision_loss, reason = "below 2^53")]
     Some(if r == 0 && x.is_sign_negative() { -0.0 } else { r as f64 })
 }
@@ -395,7 +402,7 @@ handlers! {
     // `new` of an ordinary function or class constructor: builds `this` (a base constructor) and opens the frame
     construct(cx, pc, regs, acc, o) {
         let callee = reg!(cx, regs, o[0]);
-        let ValueKind::Object(ob) = callee.kind() else { fall!(cx, pc, regs, acc) };
+        let Some(ob) = callee.as_object() else { fall!(cx, pc, regs, acc) };
         let Some(c) = ob.closure() else { fall!(cx, pc, regs, acc) };
         let l = cx.exe.code(&c);
         if !(l.constructs || l.class_constructor) || l.generator || l.asynchronous || cx.depth + cx.st.frames.len() + 1 >= STACK_LIMIT {
@@ -429,7 +436,7 @@ handlers! {
         next!(cx, step!(pc), regs, ob.into())
     }
     set_named_property(cx, pc, regs, acc, o) {
-        if let ValueKind::Object(ob) = reg!(cx, regs, o[0]).kind()
+        if let Some(ob) = reg!(cx, regs, o[0]).as_object()
             && cx.loaded.ics[o[2] as usize].set(cx.a.mc, ob, acc, true)
         {
             next!(cx, step!(pc), regs, acc)
@@ -437,7 +444,7 @@ handlers! {
         fall!(cx, pc, regs, acc)
     }
     define_named_own_property(cx, pc, regs, acc, o) {
-        if let ValueKind::Object(ob) = reg!(cx, regs, o[0]).kind()
+        if let Some(ob) = reg!(cx, regs, o[0]).as_object()
             && cx.loaded.ics[o[2] as usize].set(cx.a.mc, ob, acc, false)
         {
             next!(cx, step!(pc), regs, acc)
@@ -446,7 +453,7 @@ handlers! {
     }
     // An array element that is there
     get_keyed_property(cx, pc, regs, acc, o) {
-        if let (ValueKind::Object(ob), Some(i)) = (reg!(cx, regs, o[0]).kind(), Executor::index(acc))
+        if let (Some(ob), Some(i)) = (reg!(cx, regs, o[0]).as_object(), Executor::index(acc))
             && ob.is_array()
             && let Some(v) = ob.elements().get(i)
         {
@@ -455,7 +462,7 @@ handlers! {
         fall!(cx, pc, regs, acc)
     }
     set_keyed_property(cx, pc, regs, acc, o) {
-        if let (ValueKind::Object(ob), Some(i)) = (reg!(cx, regs, o[0]).kind(), Executor::index(reg!(cx, regs, o[1])))
+        if let (Some(ob), Some(i)) = (reg!(cx, regs, o[0]).as_object(), Executor::index(reg!(cx, regs, o[1])))
             && ob.write_index(cx.a.mc, u32::try_from(i).unwrap_or(u32::MAX), acc)
         {
             next!(cx, step!(pc), regs, acc)
@@ -493,6 +500,12 @@ handlers! {
     return_(cx, pc, regs, acc, o) {
         let st = &mut *cx.st;
         if st.frames.len() < 2 {
+            // The outermost frame of a plain call (a host function calling back into JS) ends the execution here
+            // SAFETY: the header's slots are below r0
+            if st.frames.len() == 1 && unsafe { *regs.sub(Frame::NEW_TARGET) } == Value::Undefined {
+                st.frames.pop();
+                return Exit::Done(Outcome::Return(acc));
+            }
             fall!(cx, pc, regs, acc)
         }
         // A construct frame gives an object it returns, else the `this` it built (a derived constructor's code

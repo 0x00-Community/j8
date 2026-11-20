@@ -3,7 +3,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::Write;
 
-use j8framework::{Agent, Error, ErrorKind, JsObject, JsString, ObjectData, Property, SmallStr, Value};
+use j8framework::{Agent, Error, ErrorKind, JsObject, JsString, ObjectData, Property, Shape, Slot, SmallStr, Value};
 
 use crate::{Args, Installer};
 
@@ -16,7 +16,12 @@ struct Parser<'s, 'a, 'gc, 'x> {
     a: &'a mut Agent<'gc, 'x>,
     text: &'s str,
     pos: usize,
+    /// Key sequences seen and the shapes they built: an object with the same keys takes its shape at once
+    shapes: Vec<(Vec<String>, alloc::sync::Arc<Shape>)>,
 }
+
+/// How many key sequences a parse remembers shapes for
+const SHAPES_CACHED: usize = 8;
 
 impl<'s, 'gc> Parser<'s, '_, 'gc, '_> {
     fn error(&self, what: &str) -> Error {
@@ -73,12 +78,12 @@ impl<'s, 'gc> Parser<'s, '_, 'gc, '_> {
 
     fn object(&mut self) -> Result<Value<'gc>, Error> {
         self.pos += 1;
-        let o = self.a.object();
         self.skip_ws();
         if self.peek() == Some(b'}') {
             self.pos += 1;
-            return Ok(o.into());
+            return Ok(self.a.object().into());
         }
+        let mut pairs = Vec::new();
         loop {
             self.skip_ws();
             if self.peek() != Some(b'"') {
@@ -88,18 +93,37 @@ impl<'s, 'gc> Parser<'s, '_, 'gc, '_> {
             self.skip_ws();
             self.expect(b':', "expected ':'")?;
             let v = self.value()?;
-            // CreateDataProperty: always succeeds on a fresh ordinary object; `__proto__` is just an ordinary key, and
-            // a duplicate key replaces the previous one entirely
-            o.borrow_mut(self.a.mc).define(&k, Property::data(v));
+            pairs.push((k, v));
             match self.peek() {
                 Some(b',') => self.pos += 1,
                 Some(b'}') => {
                     self.pos += 1;
-                    return Ok(o.into());
+                    return Ok(self.build(pairs).into());
                 }
                 _ => return Err(self.error("expected ',' or '}'")),
             }
         }
+    }
+
+    /// A fresh ordinary object with these properties in order. CreateDataProperty always succeeds on it; `__proto__`
+    /// is just an ordinary key, and a duplicate key replaces the previous one entirely. Keys seen before in the same
+    /// order (all distinct, none an index) give the shape they built then, filled in one step.
+    fn build(&mut self, pairs: Vec<(alloc::borrow::Cow<'s, str>, Value<'gc>)>) -> JsObject<'gc> {
+        let a = &*self.a;
+        let o = a.object_with(pairs.len());
+        if let Some((_, shape)) = self.shapes.iter().find(|(keys, _)| keys.len() == pairs.len() && keys.iter().zip(&pairs).all(|(k, (p, _))| **k == **p)) {
+            o.fill(a.mc, shape, pairs.iter().map(|&(_, v)| Slot::Data(v)));
+            return o;
+        }
+        for (k, v) in &pairs {
+            o.borrow_mut(a.mc).define(k, Property::data(*v));
+        }
+        if self.shapes.len() < SHAPES_CACHED
+            && let Some(shape) = o.get().props().shape().filter(|s| s.len() == pairs.len())
+        {
+            self.shapes.push((pairs.into_iter().map(|(k, _)| String::from(k)).collect(), shape));
+        }
+        o
     }
 
     fn array(&mut self) -> Result<Value<'gc>, Error> {
@@ -286,22 +310,46 @@ impl<'gc> Writer<'gc> {
 
     /// Own enumerable string keys (array indices first). Keys aren't created as JS strings (short ones are inline);
     /// they're created only when passed to `toJSON` / the replacer.
-    fn keys(o: JsObject<'gc>) -> Vec<SmallStr> {
+    /// The enumerable own keys, each with its entry index when `o` is a plain fast-mode object (read in place while
+    /// its shape stays the same, see [`Writer::object`])
+    fn keys(o: JsObject<'gc>) -> Vec<(SmallStr, Option<usize>)> {
         let d = o.borrow();
         let mut keys = Vec::new();
         if o.is_array() {
-            keys.extend((0..o.elements().len()).map(|i| j8framework::number_text(f64::from(u32::try_from(i).unwrap_or(u32::MAX)))));
+            keys.extend((0..o.elements().len()).map(|i| (j8framework::number_text(f64::from(u32::try_from(i).unwrap_or(u32::MAX))), None)));
         }
-        keys.extend(d.props().entries().into_iter().filter(|(_, p)| p.enumerable).map(|(k, _)| k));
+        let props = d.props();
+        let direct = o.get().is_plain() && !props.is_dict();
+        keys.extend((0..props.len()).filter(|&i| props.attrs(i).enumerable()).map(|i| (props.key(i), direct.then_some(i))));
         keys
     }
 
     /// SerializeJSONProperty: `toJSON`, the replacer, output by type; `undefined` / functions / Symbols give `None`
     /// (omitted).
-    fn property(&mut self, a: &mut Agent<'gc, '_>, holder: Value<'gc>, key: &SmallStr, out: &mut String) -> Result<bool, Error> {
-        let mut v = a.get_named(holder, key)?;
+    /// `v.toJSON`: `undefined` straight away when no object on an object's prototype chain has the key (all plain
+    /// objects: then the lookup is unobservable), otherwise a Get
+    fn to_json(a: &mut Agent<'gc, '_>, v: Value<'gc>) -> Result<Value<'gc>, Error> {
+        const KEY: &str = "toJSON";
+        let mut at = v.as_object();
+        while let Some(o) = at {
+            let d = o.get();
+            if !d.is_plain() || d.props().position(KEY).is_some() {
+                return a.get_named(v, KEY);
+            }
+            at = d.proto();
+        }
+        if v.as_object().is_some() { Ok(Value::Undefined) } else { a.get_named(v, KEY) }
+    }
+
+    /// `read`: the value when the caller read it in place (an unobservable Get of a data property), else it is got
+    /// here
+    fn property(&mut self, a: &mut Agent<'gc, '_>, holder: Value<'gc>, key: &SmallStr, read: Option<Value<'gc>>, out: &mut String) -> Result<bool, Error> {
+        let mut v = match read {
+            Some(v) => v,
+            None => a.get_named(holder, key)?,
+        };
         if matches!(v.kind(), ValueKind::Object(_) | ValueKind::BigInt(_)) {
-            let to_json = a.get_named(v, "toJSON")?;
+            let to_json = Self::to_json(a, v)?;
             if a.is_callable(to_json) {
                 let k = a.string(key);
                 v = a.call(to_json, v, &[k.into()])?;
@@ -344,12 +392,16 @@ impl<'gc> Writer<'gc> {
         let outer = self.indent.clone();
         self.indent.push_str(&self.gap);
         let keys = match &self.allow {
-            Some(k) => k.iter().map(|s| s.text().clone()).collect(),
+            Some(k) => k.iter().map(|s| (s.text().clone(), None)).collect(),
             None => Self::keys(o),
         };
+        // While the shape is the one the keys came from, entry `i` is still that key's data property (serializing a
+        // value may run `toJSON` / the replacer, which can change the object: then the rest are got by name)
+        let shape = o.get().props().shape_ptr();
         out.push('{');
         let mut first = true;
-        for k in keys {
+        for (k, at) in keys {
+            let read = at.filter(|_| shape.is_some() && o.get().props().shape_ptr() == shape).and_then(|i| o.get().props().read_data(i));
             let mark = out.len();
             if !first {
                 out.push(',');
@@ -360,7 +412,7 @@ impl<'gc> Writer<'gc> {
             if !self.gap.is_empty() {
                 out.push(' ');
             }
-            if self.property(a, o.into(), &k, out)? {
+            if self.property(a, o.into(), &k, read, out)? {
                 first = false;
             } else {
                 out.truncate(mark);
@@ -446,7 +498,7 @@ impl<'gc> Writer<'gc> {
             }
             self.newline(out);
             let k = j8framework::number_text(f64::from(i));
-            if !self.property(a, o.into(), &k, out)? {
+            if !self.property(a, o.into(), &k, None, out)? {
                 out.push_str("null");
             }
         }
@@ -466,7 +518,7 @@ impl Json {
     /// `JSON.parse(text, reviver)`.
     fn parse<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let text = a.to_string(args.at(0))?;
-        let mut p = Parser { a, text: &text, pos: 0 };
+        let mut p = Parser { a, text: &text, pos: 0, shapes: Vec::new() };
         let v = p.value()?;
         if p.pos != text.len() {
             return Err(p.error("unexpected trailing input"));
@@ -487,7 +539,7 @@ impl Json {
         let v = a.get_named(holder, &key)?;
         if let Some(o) = v.as_object() {
             let keys = Writer::keys(o);
-            for k in keys {
+            for (k, _) in keys {
                 let k = a.string(&k);
                 let nv = Self::revive(a, v, k, reviver)?;
                 if nv == Value::Undefined {
@@ -537,7 +589,7 @@ impl Json {
         wrapper.borrow_mut(a.mc).set("", args.at(0));
         let key = SmallStr::from("");
         let mut out = String::new();
-        if w.property(a, wrapper.into(), &key, &mut out)? { Ok(a.string(&out).into()) } else { Ok(Value::Undefined) }
+        if w.property(a, wrapper.into(), &key, None, &mut out)? { Ok(a.string(&out).into()) } else { Ok(Value::Undefined) }
     }
 }
 

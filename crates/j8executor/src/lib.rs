@@ -2364,11 +2364,12 @@ impl<'gc> Invoke<'gc> for Executor {
         }
         if let ValueKind::Object(o) = callee.kind()
             && let Some(c) = o.closure()
-            && !self.function(c.func).class_constructor
+            && let l = self.code(&c)
+            && !l.class_constructor
         {
             let mut regs = a.take_regs();
             regs.clear();
-            let f = self.open(a, &mut regs, c, callee, this, args);
+            let f = self.open_with(a, &mut regs, l, c, callee, this, Args::Values(args));
             return self.run_frame(a, regs, f, level);
         }
         match self.resolve(a, callee, this, args.to_vec(), level)? {

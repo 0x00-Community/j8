@@ -334,12 +334,8 @@ impl Regexps {
         let o = d;
         let p = a.realm.regexp_pristine.get().as_ref()?;
         let proto = a.realm.regexp_proto.get();
-        let same = |x: Slot<'gc>, y: Slot<'gc>| match (x, y) {
-            (Slot::Data(x), Slot::Data(y)) => matches!((x.kind(), y.kind()), (ValueKind::Object(x), ValueKind::Object(y)) if Gc::ptr_eq(x, y)),
-            (Slot::Accessor { get: Some(x), .. }, Slot::Accessor { get: Some(y), .. }) => Gc::ptr_eq(x, y),
-            _ => false,
-        };
-        let intact = proto.props().shape_ptr().is_some_and(|s| core::ptr::eq(s, alloc::sync::Arc::as_ptr(&p.shape))) && p.slots.iter().all(|&(i, orig)| same(proto.props().slot(i), orig));
+        let props = proto.props();
+        let intact = props.shape_ptr().is_some_and(|s| core::ptr::eq(s, alloc::sync::Arc::as_ptr(&p.shape))) && p.slots.iter().all(|&(i, orig)| props.word(i).is_some_and(|w| w.bits() == orig.bits()));
         intact.then_some((o, last))
     }
 
@@ -1085,7 +1081,7 @@ impl<'gc> Installer<'_, 'gc> {
         // Record the state at setup: slots for exec / flags / the flag getters
         let pristine = {
             let d = proto.borrow();
-            let slots = ["exec", "flags"].into_iter().chain(FLAG_PROPERTIES.map(|(_, n)| n)).filter_map(|n| d.props().position(n).map(|i| (i, d.props().slot(i)))).collect();
+            let slots = ["exec", "flags"].into_iter().chain(FLAG_PROPERTIES.map(|(_, n)| n)).filter_map(|n| d.props().position(n).and_then(|i| Some((i, d.props().word(i)?)))).collect();
             d.props().shape().map(|shape| j8framework::RegExpPristine { shape, slots })
         };
         r.regexp_pristine.set(self.mc, pristine);

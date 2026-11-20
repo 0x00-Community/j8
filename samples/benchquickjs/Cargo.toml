@@ -1,0 +1,18 @@
+[package]
+name = "benchquickjs"
+description = "Timing comparison of the same JS benchmarks on j8 and QuickJS (quickjs-ng, via rquickjs)"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+readme = "README.md"
+
+# A sample is a package of its own, built against the published j8 (not part of the j8 workspace)
+[workspace]
+
+[dependencies]
+j8 = "0.4.0"
+rquickjs = "0.14.0"
+
+[profile.release]
+debug = false
