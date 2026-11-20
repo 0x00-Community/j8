@@ -1,14 +1,15 @@
 [package]
-name = "dune"
-description = "dune: a JavaScript runtime on j8 with a Node-compatible layer and a Web-standard layer"
+# published as j8dune (the name dune is taken on crates.io); the library and the executables keep the name dune / dunx
+name = "j8dune"
+description = "dune and dunx: a JavaScript runtime on j8 with a Node-compatible layer and a Web-standard layer, and a runner for npm packages' executables"
 readme = "README.md"
 default-run = "dune"
 version = "0.3.0"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/0x00-Community/j8"
-# the name is taken on crates.io
-publish = false
+keywords = ["javascript", "runtime", "node", "npm", "j8"]
+categories = ["command-line-utilities", "development-tools"]
 
 # dune is a package of its own, built against the published j8 (not part of the j8 workspace)
 [workspace]

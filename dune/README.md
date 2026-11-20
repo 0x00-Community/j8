@@ -18,7 +18,8 @@ cargo run --release                                  # REPL (.help / .exit)
 cargo run --release -- --jit a.js                    # with the JIT
 ```
 
-This is a package of its own (not part of the j8 workspace) and depends on the published `j8` crate.
+This is a package of its own (not part of the j8 workspace) and depends on the published `j8` crate. It is published
+as `j8dune` (the name `dune` is taken on crates.io): `cargo install j8dune` installs both `dune` and `dunx`.
 
 ## dunx
 
