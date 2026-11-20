@@ -22,10 +22,12 @@ use j8lockfree::SegVec;
 
 mod cache;
 mod ic;
+mod jit;
 mod module;
 mod threaded;
 
 pub use cache::CodeCache;
+pub use jit::{DeoptFrame, Entry, FrameSlots, Function as JitFunction, GlobalFeedback, Insn as JitInsn, PropertyFeedback, Reg as JitReg, ScopeLayout, Tier, Tiered};
 
 /// Call depth limit (including JS re-entered from host functions); exceeding it throws RangeError
 const STACK_LIMIT: usize = 10_000;
@@ -48,6 +50,9 @@ const SPARE_FRAMES: usize = 8;
 /// Instructions between checks of the budget / termination request
 const CHECK_STEPS: usize = 1024;
 
+/// A function's calls between asking the JIT tier whether to compile it
+const TIER_CALLS: u32 = 64;
+
 /// One instruction of a loaded function, decoded once at load time; jump targets are instruction indices.
 struct Insn {
     /// Runs it (threaded code)
@@ -69,6 +74,14 @@ struct Loaded {
     /// Name and `length` (lazy properties of function objects read them)
     info: FunctionInfo,
     base: u32,
+    /// Its own id
+    id: FuncId,
+    /// Calls so far (the tier is asked every [`TIER_CALLS`])
+    calls: Cell<u32>,
+    /// By feedback slot: the function a call / construct site called (id + 1; 0 none yet, `u32::MAX` several)
+    call_ics: Box<[Cell<u32>]>,
+    /// The tier's word (see [`jit::Function::tier_word`])
+    tier: Cell<usize>,
     func: SharedFunction,
     /// The bytecode, decoded
     insns: Box<[Insn]>,
@@ -111,8 +124,9 @@ struct Loaded {
 
 impl Loaded {
     /// `shapes`: the executor's table of context shapes, where this function's are added
-    fn new(base: u32, func: SharedFunction, table: &SegVec<ContextShape>) -> Self {
+    fn new(base: u32, id: FuncId, func: SharedFunction, table: &SegVec<ContextShape>) -> Self {
         let bc = &func.bytecode;
+        let call_ics = bc.feedback.iter().map(|_| Cell::new(0)).collect();
         let ics = bc.feedback.iter().map(|_| ic::Ic::default()).collect();
         let globals = bc.feedback.iter().map(|_| ic::GlobalIc::default()).collect();
         let shapes = bc.constants.iter().map(|c| match c {
@@ -133,6 +147,10 @@ impl Loaded {
         let keeps_args = insns.iter().any(|d| matches!(d.bytecode, Bytecode::CreateRestParameter | Bytecode::CreateMappedArguments | Bytecode::CreateUnmappedArguments | Bytecode::ConstructForwardAllArgs));
         Self {
             base,
+            id,
+            calls: Cell::new(0),
+            call_ics,
+            tier: Cell::new(0),
             insns,
             ics,
             globals,
@@ -473,21 +491,6 @@ enum Prepared<'gc> {
     Done(Value<'gc>),
 }
 
-/// A tier faster than interpretation (the JIT). Not wired to V8 bytecode yet: the executor keeps the hook so
-/// embedders can still pass one.
-pub trait Tier {
-    /// Function `id` is about to enter its frame
-    fn enter(&self, a: &Agent<'_, '_>, id: FuncId, func: &SharedFunction, regs: &mut [Value<'_>], acc: &mut Value<'_>) -> Tiered;
-}
-
-/// The JIT tier's answer.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Tiered {
-    Ran,
-    NotYet,
-    Never,
-}
-
 /// The instruction budget of one slice, and the termination request.
 struct Budget<'s> {
     tick: usize,
@@ -590,7 +593,8 @@ impl Executor {
     pub fn load(&self, module: Module) -> FuncId {
         let base = u32::try_from(self.code.len()).expect("fewer than 2^32 functions");
         for func in module.functions {
-            self.code.push(Loaded::new(base, func, &self.context_shapes));
+            let id = FuncId(u32::try_from(self.code.len()).expect("fewer than 2^32 functions"));
+            self.code.push(Loaded::new(base, id, func, &self.context_shapes));
         }
         FuncId(base + Module::MAIN)
     }
@@ -1341,6 +1345,19 @@ impl Executor {
         }
     }
 
+    /// Call site `fb` of `loaded` called `f`: one function seen so far, or several
+    #[inline]
+    fn record_call(loaded: &Loaded, fb: OperandValue, f: FuncId) {
+        if let Some(ic) = loaded.call_ics.get(usize::try_from(fb).unwrap_or(usize::MAX)) {
+            let id = f.0.wrapping_add(1);
+            match ic.get() {
+                0 => ic.set(id),
+                x if x != id => ic.set(u32::MAX),
+                _ => {}
+            }
+        }
+    }
+
     /// Enters a frame for a call from the current one (the caller resumes at its next instruction)
     #[inline]
     fn push_frame(st: &mut State<'_>, next: Frame) {
@@ -1721,6 +1738,16 @@ impl Executor {
             }
             B::JumpLoop => {
                 f.pc = d.target as usize;
+                if let Some(t) = &self.tier {
+                    let at = f.insn;
+                    let r = t.osr(&mut Entry { exe: self, a, st, budget, level }, at);
+                    match r {
+                        Tiered::Interpret => {}
+                        Tiered::Resumed => return Ok(Flow::Frame),
+                        Tiered::Threw(e) => return Err(e),
+                    }
+                }
+                let State { regs, frames, acc, message } = st;
                 if budget.spent() {
                     // Stop before the loop header, the state intact
                     return Ok(Flow::Done(Outcome::Paused(Box::new(State { regs: core::mem::take(regs), frames: core::mem::take(frames), acc: *acc, message: *message }))));

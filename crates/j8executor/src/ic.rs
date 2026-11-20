@@ -339,3 +339,81 @@ impl GlobalIc {
         self.scope.set(fast(sd));
     }
 }
+
+/// What a property site's cache knows, for the JIT: the receiver shape, where the property is, and the shapes on the
+/// way (all held strongly, so the addresses stay meaningful while the compiled code keeps them).
+#[derive(Clone)]
+pub struct PropertyFeedback {
+    /// The receiver's shape (`None`: an empty object without a shape yet)
+    pub shape: Option<Arc<Shape>>,
+    /// The property's index in the holder's shape (read / write), or in `to` (add)
+    pub slot: usize,
+    /// Read: the holder is this many prototype levels up (0: the receiver itself); add: the prototype chain's length
+    pub depth: usize,
+    /// The shapes of the prototype levels checked
+    pub chain: Vec<Arc<Shape>>,
+    /// Add property: the shape the receiver transitions to
+    pub to: Option<Arc<Shape>>,
+}
+
+impl Ic {
+    /// The shape at address `addr` among the kept ones
+    fn kept(&self, addr: usize) -> Option<Arc<Shape>> {
+        self.keep.borrow().iter().chain(self.to.borrow().as_ref().map(Arc::downgrade).as_ref()).find(|w| w.as_ptr() as usize == addr).and_then(Weak::upgrade)
+    }
+
+    /// What the cache holds (`None` when empty)
+    pub fn feedback(&self) -> Option<PropertyFeedback> {
+        let shape = match self.shape.get() {
+            0 => return None,
+            EMPTY => None,
+            a => Some(self.kept(a)?),
+        };
+        let depth = usize::from(self.depth.get());
+        let adds = self.adds.get();
+        // An add caches the chain only for assignments (`depth` levels); a read caches `depth` levels when not own
+        let levels = depth.min(DEPTH);
+        let chain = self.chain[..levels].iter().map(|c| self.kept(c.get())).collect::<Option<Vec<_>>>()?;
+        let to = if adds { Some(self.to.borrow().clone()?) } else { None };
+        // An add puts the property last in the new shape
+        let slot = to.as_ref().map_or(self.slot.get() as usize, |t| t.len() - 1);
+        Some(PropertyFeedback { shape, slot, depth, chain, to })
+    }
+
+    /// The cache is for adding a property
+    pub fn adds(&self) -> bool {
+        self.adds.get()
+    }
+}
+
+/// Where a cached global name lives, for the JIT.
+#[derive(Clone)]
+pub struct GlobalFeedback {
+    /// The script scope's shape (`None`: empty)
+    pub scope: Option<Arc<Shape>>,
+    /// The global object's shape, when the name lives there (else in the script scope)
+    pub global: Option<Arc<Shape>>,
+    pub slot: usize,
+    pub writable: bool,
+}
+
+impl GlobalIc {
+    fn kept(&self, addr: usize) -> Option<Arc<Shape>> {
+        self.keep.borrow().iter().find(|w| w.as_ptr() as usize == addr).and_then(Weak::upgrade)
+    }
+
+    /// What the cache holds
+    pub fn feedback(&self) -> Option<GlobalFeedback> {
+        let scope = match self.scope.get() {
+            0 | DICT => return None,
+            EMPTY => None,
+            a => Some(self.kept(a)?),
+        };
+        let global = match self.global.get() {
+            0 => None,
+            EMPTY | DICT => return None,
+            g => Some(self.kept(g)?),
+        };
+        Some(GlobalFeedback { scope, global, slot: self.slot.get() as usize, writable: self.writable.get() })
+    }
+}

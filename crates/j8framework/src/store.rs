@@ -6,6 +6,8 @@
 //! 全部 `#[repr(C)]`：不管 `N` 多大，格子都从头字之后开始，抹掉类型后也能按下标找到。读不借用、不加锁；
 //! 写经 [`ValueCell::set`] 走写屏障。根换新（扩容）直接换（isolate 内单线程，见 [`IsoCell`](crate::IsoCell)）。
 
+use alloc::vec::Vec;
+
 use crate::{Collect, Erased, Gc, GcSlot, IsoCell, Mutation, Value, ValueCell, erase};
 
 /// 每个内部节点的子节点数 / 树里每片叶子的格数
@@ -34,6 +36,14 @@ struct Node<'gc> {
 /// 一棵存储（叶子或树根），抹掉了类型。
 #[derive(Clone, Copy)]
 pub struct Store<'gc>(Gc<'gc, Erased>);
+
+/// See [`Store::path`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StorePath {
+    pub head: usize,
+    pub kids: Vec<usize>,
+    pub cell: usize,
+}
 
 impl<'gc> Store<'gc> {
     /// 容量为 `cap`（向上取到分档）、前几格放 `init` 的叶子
@@ -85,6 +95,33 @@ impl<'gc> Store<'gc> {
         debug_assert!(!self.is_leaf() && i < FAN);
         // SAFETY: repr(C) 的节点里子槽紧跟头字
         unsafe { &*self.0.as_ptr().cast::<usize>().add(1).cast::<GcSlot<'gc, Erased>>().add(i) }
+    }
+
+    /// How machine code reaches cell `i`: the store's head word now (code checks it before walking), the byte offsets
+    /// of the GC slots to follow from the store (each a pointer word), then the cell's byte offset in the leaf
+    pub fn path(self, i: usize) -> Option<StorePath> {
+        let head = self.head();
+        let mut kids = Vec::new();
+        let mut s = self;
+        let mut i_left = i;
+        loop {
+            if s.is_leaf() {
+                let at = if kids.is_empty() { i_left } else { i_left & (FAN - 1) };
+                if at >= s.head() {
+                    return None;
+                }
+                return Some(StorePath { head, kids, cell: core::mem::size_of::<usize>() + at * core::mem::size_of::<ValueCell<'gc>>() });
+            }
+            let level = s.head() - NODE;
+            let shift = FAN_BITS * u32::try_from(level).ok()?;
+            if kids.is_empty() && (i >> (FAN_BITS * u32::try_from(level + 1).ok()?)) != 0 {
+                return None;
+            }
+            let k = (i >> shift) & (FAN - 1);
+            kids.push(core::mem::size_of::<usize>() + k * core::mem::size_of::<GcSlot<'gc, Erased>>());
+            s = Self(s.kid(k).get()?);
+            i_left = i;
+        }
     }
 
     /// 第 `i` 格（路径上缺节点就是 `None`）

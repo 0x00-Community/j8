@@ -6,7 +6,7 @@
 //! Hot bytecodes have handlers of their own here; the rest (and the hot ones off their fast path) go through [`slow`],
 //! which syncs the state and runs [`Executor::step`]. A handler leaves the chain when the frame changes (calls and
 //! returns), on an exception, or when the execution ends.
-use j8bytecode::Bytecode;
+use j8bytecode::{Bytecode, OperandValue};
 use j8framework::{Agent, Env, Error, ErrorKind, Value, ValueBits};
 
 use crate::{Args, Budget, Executor, Flow, Frame, Insn, Loaded, Outcome, State, STACK_LIMIT};
@@ -287,17 +287,28 @@ handlers! {
     }
 }
 
+/// Where a call from threaded code goes on.
+pub enum Entered<'gc> {
+    /// At this instruction, with these registers and accumulator
+    At(*const Insn, *mut Value<'gc>, Value<'gc>),
+    Throw(Error),
+    /// Not an ordinary JS function: the slow path takes it
+    No,
+}
+
 /// A call of an ordinary JS function (not a class constructor, generator or async function) from the running frame:
 /// the callee's frame record goes on the frame stack and its code starts right here, without leaving the threaded
-/// code (V8's `InterpreterEntryTrampoline`). `None`: anything else, for the slow path.
+/// code (V8's `InterpreterEntryTrampoline`). Records the callee in call site `fb`'s feedback; a JIT tier may run the
+/// new frame.
 #[inline]
-fn enter<'r, 'gc>(cx: &mut Cx<'r, 'gc, '_, '_>, pc: *const Insn, callee: Value<'gc>, this: Value<'gc>, args: Args<'_, 'gc>) -> Option<(*const Insn, *mut Value<'gc>)> {
-    let Some(o) = callee.as_object() else { return None };
-    let c = o.closure()?;
+fn enter<'r, 'gc>(cx: &mut Cx<'r, 'gc, '_, '_>, pc: *const Insn, callee: Value<'gc>, this: Value<'gc>, args: Args<'_, 'gc>, fb: OperandValue) -> Entered<'gc> {
+    let Some(o) = callee.as_object() else { return Entered::No };
+    let Some(c) = o.closure() else { return Entered::No };
     let l: &'r Loaded = cx.exe.code(&c);
     if l.class_constructor || l.generator || l.asynchronous || cx.depth + cx.st.frames.len() + 1 >= STACK_LIMIT {
-        return None;
+        return Entered::No;
     }
+    Executor::record_call(cx.loaded, fb, c.func);
     // SAFETY: `pc` points into the running function's instructions
     let at = usize::try_from(unsafe { pc.offset_from(cx.loaded.insns.as_ptr()) }).unwrap_or(0);
     let f = cx.st.f_mut();
@@ -305,7 +316,35 @@ fn enter<'r, 'gc>(cx: &mut Cx<'r, 'gc, '_, '_>, pc: *const Insn, callee: Value<'
     f.pc = at + 1;
     let base = cx.exe.push_open(cx.a, cx.st, l, c, callee, this, args);
     cx.loaded = l;
-    Some((l.insns.as_ptr(), cx.st.regs.as_mut_ptr().wrapping_add(base)))
+    if cx.exe.tier.is_some() {
+        return tier_enter(cx);
+    }
+    Entered::At(l.insns.as_ptr(), cx.st.regs.as_mut_ptr().wrapping_add(base), Value::Undefined)
+}
+
+/// The frame on top was just entered: a JIT tier may run it (when the function is hot or compiled already)
+#[inline(never)]
+fn tier_enter<'gc>(cx: &mut Cx<'_, 'gc, '_, '_>) -> Entered<'gc> {
+    let l = cx.loaded;
+    let n = l.calls.get().wrapping_add(1);
+    l.calls.set(n);
+    if l.tier.get() == 0 && n % crate::TIER_CALLS != 0 {
+        let base = cx.st.f().base;
+        return Entered::At(l.insns.as_ptr(), cx.st.regs.as_mut_ptr().wrapping_add(base), Value::Undefined);
+    }
+    let Some(t) = &cx.exe.tier else { unreachable!("checked by the caller") };
+    let level = cx.depth + cx.st.frames.len();
+    let r = t.enter(&mut crate::Entry { exe: cx.exe, a: cx.a, st: cx.st, budget: cx.budget, level });
+    match r {
+        crate::Tiered::Threw(e) => Entered::Throw(e),
+        _ => {
+            let f = *cx.st.f();
+            // SAFETY: the frame runs on this executor
+            let l: &Loaded = unsafe { f.loaded.get() };
+            cx.loaded = l;
+            Entered::At(l.insns.as_ptr().wrapping_add(f.pc), cx.st.regs.as_mut_ptr().wrapping_add(f.base), cx.st.acc)
+        }
+    }
 }
 
 /// A call to a plain host function, run right here; `None` for anything else
@@ -373,14 +412,15 @@ macro_rules! bitwise {
     }};
 }
 
-/// A call with the callee in register `o[0]`, `this` and up to two arguments at hand
+/// A call with the callee in register `o[0]`, `this` and up to two arguments at hand, feedback slot `o[$fb]`
 macro_rules! call {
-    ($cx:ident, $pc:ident, $regs:ident, $acc:ident, $o:ident, $this:expr, [$($arg:expr),*]) => {{
+    ($cx:ident, $pc:ident, $regs:ident, $acc:ident, $o:ident, $fb:literal, $this:expr, [$($arg:expr),*]) => {{
         let callee = reg!($cx, $regs, $o[0]);
         let args = [$($arg),*];
-        match enter($cx, $pc, callee, $this, Args::Values(&args)) {
-            Some((pc, regs)) => next!($cx, pc, regs, Value::Undefined),
-            None => match native($cx, $pc, callee, $this, &args) {
+        match enter($cx, $pc, callee, $this, Args::Values(&args), $o[$fb]) {
+            Entered::At(pc, regs, acc) => next!($cx, pc, regs, acc),
+            Entered::Throw(e) => return Exit::Throw(e),
+            Entered::No => match native($cx, $pc, callee, $this, &args) {
                 Some(Ok(v)) => {
                     let $regs = $cx.st.regs.as_mut_ptr().wrapping_add($cx.st.f().base);
                     next!($cx, $pc.wrapping_add(1), $regs, v)
@@ -393,12 +433,12 @@ macro_rules! call {
 }
 
 handlers! {
-    call_undefined_receiver0(cx, pc, regs, acc, o) { call!(cx, pc, regs, acc, o, Value::Undefined, []) }
-    call_undefined_receiver1(cx, pc, regs, acc, o) { call!(cx, pc, regs, acc, o, Value::Undefined, [reg!(cx, regs, o[1])]) }
-    call_undefined_receiver2(cx, pc, regs, acc, o) { call!(cx, pc, regs, acc, o, Value::Undefined, [reg!(cx, regs, o[1]), reg!(cx, regs, o[2])]) }
-    call_property0(cx, pc, regs, acc, o) { call!(cx, pc, regs, acc, o, reg!(cx, regs, o[1]), []) }
-    call_property1(cx, pc, regs, acc, o) { call!(cx, pc, regs, acc, o, reg!(cx, regs, o[1]), [reg!(cx, regs, o[2])]) }
-    call_property2(cx, pc, regs, acc, o) { call!(cx, pc, regs, acc, o, reg!(cx, regs, o[1]), [reg!(cx, regs, o[2]), reg!(cx, regs, o[3])]) }
+    call_undefined_receiver0(cx, pc, regs, acc, o) { call!(cx, pc, regs, acc, o, 1, Value::Undefined, []) }
+    call_undefined_receiver1(cx, pc, regs, acc, o) { call!(cx, pc, regs, acc, o, 2, Value::Undefined, [reg!(cx, regs, o[1])]) }
+    call_undefined_receiver2(cx, pc, regs, acc, o) { call!(cx, pc, regs, acc, o, 3, Value::Undefined, [reg!(cx, regs, o[1]), reg!(cx, regs, o[2])]) }
+    call_property0(cx, pc, regs, acc, o) { call!(cx, pc, regs, acc, o, 2, reg!(cx, regs, o[1]), []) }
+    call_property1(cx, pc, regs, acc, o) { call!(cx, pc, regs, acc, o, 3, reg!(cx, regs, o[1]), [reg!(cx, regs, o[2])]) }
+    call_property2(cx, pc, regs, acc, o) { call!(cx, pc, regs, acc, o, 4, reg!(cx, regs, o[1]), [reg!(cx, regs, o[2]), reg!(cx, regs, o[3])]) }
     // `new` of an ordinary function or class constructor: builds `this` (a base constructor) and opens the frame
     construct(cx, pc, regs, acc, o) {
         let callee = reg!(cx, regs, o[0]);
@@ -408,6 +448,7 @@ handlers! {
         if !(l.constructs || l.class_constructor) || l.generator || l.asynchronous || cx.depth + cx.st.frames.len() + 1 >= STACK_LIMIT {
             fall!(cx, pc, regs, acc)
         }
+        Executor::record_call(cx.loaded, o[3], c.func);
         sync(cx, pc);
         let this = if l.derived {
             Value::Uninit
@@ -428,6 +469,13 @@ handlers! {
             regs[base + r as usize] = acc;
         }
         cx.loaded = l;
+        if cx.exe.tier.is_some() {
+            match tier_enter(cx) {
+                Entered::At(pc, regs, acc) => next!(cx, pc, regs, acc),
+                Entered::Throw(e) => return Exit::Throw(e),
+                Entered::No => unreachable!("the tier runs or interprets"),
+            }
+        }
         let regs = cx.st.regs.as_mut_ptr().wrapping_add(base);
         next!(cx, l.insns.as_ptr(), regs, Value::Undefined)
     }
@@ -652,6 +700,28 @@ impl Insn {
 impl Executor {
     /// Runs the current frame's instructions until the frame changes or the execution ends.
     pub fn threaded<'gc>(cx: &mut Cx<'_, 'gc, '_, '_>) -> Exit<'gc> {
+        if cx.exe.tier.is_some() {
+            if cx.st.f().pc == 0 {
+                if let Entered::Throw(e) = tier_enter(cx) {
+                    return Exit::Throw(e);
+                }
+            } else if cx.loaded.tier.get() != 0
+                && let Some(t) = &cx.exe.tier
+            {
+                let level = cx.depth + cx.st.frames.len();
+                let pc = cx.st.f().pc;
+                let r = t.resume(&mut crate::Entry { exe: cx.exe, a: cx.a, st: cx.st, budget: cx.budget, level }, pc);
+                match r {
+                    crate::Tiered::Threw(e) => return Exit::Throw(e),
+                    crate::Tiered::Resumed => {
+                        let f = *cx.st.f();
+                        // SAFETY: the frame runs on this executor
+                        cx.loaded = unsafe { f.loaded.get() };
+                    }
+                    crate::Tiered::Interpret => {}
+                }
+            }
+        }
         let st = &mut *cx.st;
         let pc = &raw const cx.loaded.insns[st.f().pc];
         let regs = st.regs.as_mut_ptr().wrapping_add(st.f().base);

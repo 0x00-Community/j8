@@ -1,0 +1,400 @@
+//! x86-64 encodings, only what the code generator uses.
+use alloc::vec::Vec;
+
+/// A general-purpose register by its encoding.
+pub type R = u8;
+/// An XMM register by its number.
+pub type X = u8;
+
+pub const RAX: R = 0;
+pub const RCX: R = 1;
+pub const RDX: R = 2;
+pub const RBX: R = 3;
+pub const RSP: R = 4;
+pub const RBP: R = 5;
+pub const RSI: R = 6;
+pub const RDI: R = 7;
+pub const R8: R = 8;
+pub const R9: R = 9;
+pub const R10: R = 10;
+pub const R11: R = 11;
+pub const R12: R = 12;
+pub const R13: R = 13;
+pub const R14: R = 14;
+pub const R15: R = 15;
+
+/// Condition codes (the low nibble of `jcc` / `setcc` / `cmovcc`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Cc {
+    O = 0,
+    No = 1,
+    B = 2,
+    Ae = 3,
+    E = 4,
+    Ne = 5,
+    Be = 6,
+    A = 7,
+    P = 0xa,
+    Np = 0xb,
+    L = 0xc,
+    Ge = 0xd,
+    Le = 0xe,
+    G = 0xf,
+}
+
+impl Cc {
+    pub fn negate(self) -> Cc {
+        match self {
+            Cc::O => Cc::No,
+            Cc::No => Cc::O,
+            Cc::B => Cc::Ae,
+            Cc::Ae => Cc::B,
+            Cc::E => Cc::Ne,
+            Cc::Ne => Cc::E,
+            Cc::Be => Cc::A,
+            Cc::A => Cc::Be,
+            Cc::P => Cc::Np,
+            Cc::Np => Cc::P,
+            Cc::L => Cc::Ge,
+            Cc::Ge => Cc::L,
+            Cc::Le => Cc::G,
+            Cc::G => Cc::Le,
+        }
+    }
+}
+
+/// Two-operand ALU operations (`op r/m, r` opcodes; `/n` for immediates).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Alu {
+    Add = 0,
+    Or = 1,
+    And = 4,
+    Sub = 5,
+    Xor = 6,
+    Cmp = 7,
+}
+
+/// A label: an index into the label table.
+pub type Label = u32;
+
+#[derive(Default)]
+pub struct Asm {
+    pub bytes: Vec<u8>,
+    /// Label ⇒ its offset once bound
+    labels: Vec<Option<usize>>,
+    /// (rel32 position, label)
+    fixups: Vec<(usize, Label)>,
+}
+
+impl Asm {
+    pub fn label(&mut self) -> Label {
+        self.labels.push(None);
+        u32::try_from(self.labels.len() - 1).unwrap_or(0)
+    }
+
+    pub fn bind(&mut self, l: Label) {
+        self.labels[l as usize] = Some(self.bytes.len());
+    }
+
+    pub fn here(&self) -> usize {
+        self.bytes.len()
+    }
+
+    /// Patches every jump to its label
+    pub fn finish(&mut self) -> bool {
+        for &(at, l) in &self.fixups {
+            let Some(to) = self.labels[l as usize] else { return false };
+            let rel = i32::try_from(to as isize - (at as isize + 4)).unwrap_or(0);
+            self.bytes[at..at + 4].copy_from_slice(&rel.to_le_bytes());
+        }
+        true
+    }
+
+    fn b(&mut self, x: u8) {
+        self.bytes.push(x);
+    }
+
+    fn rex(&mut self, w: bool, r: u8, x: u8, b: u8, force: bool) {
+        let v = 0x40 | (u8::from(w) << 3) | ((r >> 3 & 1) << 2) | ((x >> 3 & 1) << 1) | (b >> 3 & 1);
+        if v != 0x40 || force {
+            self.b(v);
+        }
+    }
+
+    /// ModRM (+ SIB / displacement) for `[base + disp]` with `reg` in the reg field
+    fn mem(&mut self, reg: u8, base: R, disp: i32) {
+        let rm = base & 7;
+        let (md, small) = if disp == 0 && rm != 5 {
+            (0u8, None)
+        } else if let Ok(d) = i8::try_from(disp) {
+            (1u8, Some(d))
+        } else {
+            (2u8, None)
+        };
+        self.b((md << 6) | ((reg & 7) << 3) | rm);
+        if rm == 4 {
+            self.b(0x24);
+        }
+        match (md, small) {
+            (1, Some(d)) => self.b(d.cast_unsigned()),
+            (2, _) => self.bytes.extend_from_slice(&disp.to_le_bytes()),
+            _ => {}
+        }
+    }
+
+    /// `op reg, [base + disp]` (`w`: 64-bit)
+    fn op_rm(&mut self, prefix: Option<u8>, w: bool, opcode: &[u8], reg: u8, base: R, disp: i32, byte_reg: bool) {
+        if let Some(p) = prefix {
+            self.b(p);
+        }
+        self.rex(w, reg, 0, base, byte_reg && reg >= 4);
+        self.bytes.extend_from_slice(opcode);
+        self.mem(reg, base, disp);
+    }
+
+    /// `op reg, rm` register form
+    fn op_rr(&mut self, prefix: Option<u8>, w: bool, opcode: &[u8], reg: u8, rm: u8) {
+        if let Some(p) = prefix {
+            self.b(p);
+        }
+        self.rex(w, reg, 0, rm, false);
+        self.bytes.extend_from_slice(opcode);
+        self.b(0xc0 | ((reg & 7) << 3) | (rm & 7));
+    }
+
+    // ---- moves ----
+
+    pub fn mov_rr(&mut self, dst: R, src: R) {
+        if dst != src {
+            self.op_rr(None, true, &[0x89], src, dst);
+        }
+    }
+
+    pub fn mov_rr32(&mut self, dst: R, src: R) {
+        self.op_rr(None, false, &[0x89], src, dst);
+    }
+
+    pub fn mov_ri(&mut self, dst: R, imm: u64) {
+        if imm == 0 {
+            self.op_rr(None, false, &[0x31], dst, dst);
+        } else if let Ok(i) = u32::try_from(imm) {
+            self.rex(false, 0, 0, dst, false);
+            self.b(0xb8 + (dst & 7));
+            self.bytes.extend_from_slice(&i.to_le_bytes());
+        } else if let Ok(i) = i32::try_from(imm.cast_signed()) {
+            self.rex(true, 0, 0, dst, false);
+            self.b(0xc7);
+            self.b(0xc0 | (dst & 7));
+            self.bytes.extend_from_slice(&i.to_le_bytes());
+        } else {
+            self.rex(true, 0, 0, dst, false);
+            self.b(0xb8 + (dst & 7));
+            self.bytes.extend_from_slice(&imm.to_le_bytes());
+        }
+    }
+
+    pub fn load(&mut self, dst: R, base: R, disp: i32) {
+        self.op_rm(None, true, &[0x8b], dst, base, disp, false);
+    }
+
+    pub fn load32(&mut self, dst: R, base: R, disp: i32) {
+        self.op_rm(None, false, &[0x8b], dst, base, disp, false);
+    }
+
+    /// `movzx dst, byte [base + disp]`
+    pub fn load8(&mut self, dst: R, base: R, disp: i32) {
+        self.op_rm(None, false, &[0x0f, 0xb6], dst, base, disp, false);
+    }
+
+    pub fn store(&mut self, base: R, disp: i32, src: R) {
+        self.op_rm(None, true, &[0x89], src, base, disp, false);
+    }
+
+    pub fn lea(&mut self, dst: R, base: R, disp: i32) {
+        self.op_rm(None, true, &[0x8d], dst, base, disp, false);
+    }
+
+    // ---- arithmetic ----
+
+    pub fn alu_rr(&mut self, op: Alu, w: bool, dst: R, src: R) {
+        self.op_rr(None, w, &[(op as u8) << 3 | 1], src, dst);
+    }
+
+    pub fn alu_ri(&mut self, op: Alu, w: bool, dst: R, imm: i32) {
+        if let Ok(i) = i8::try_from(imm) {
+            self.op_rr(None, w, &[0x83], op as u8, dst);
+            self.b(i.cast_unsigned());
+        } else {
+            self.op_rr(None, w, &[0x81], op as u8, dst);
+            self.bytes.extend_from_slice(&imm.to_le_bytes());
+        }
+    }
+
+    /// `op dst, [base + disp]`
+    pub fn alu_rm(&mut self, op: Alu, w: bool, dst: R, base: R, disp: i32) {
+        self.op_rm(None, w, &[(op as u8) << 3 | 3], dst, base, disp, false);
+    }
+
+    /// `cmp qword [base + disp], imm32`
+    pub fn cmp_mi(&mut self, w: bool, base: R, disp: i32, imm: i32) {
+        self.op_rm(None, w, &[0x81], 7, base, disp, false);
+        self.bytes.extend_from_slice(&imm.to_le_bytes());
+    }
+
+    /// `cmp byte [base + disp], imm8`
+    pub fn cmp_m8i(&mut self, base: R, disp: i32, imm: u8) {
+        self.op_rm(None, false, &[0x80], 7, base, disp, false);
+        self.b(imm);
+    }
+
+    /// `test byte [base + disp], imm8`
+    pub fn test_m8i(&mut self, base: R, disp: i32, imm: u8) {
+        self.op_rm(None, false, &[0xf6], 0, base, disp, false);
+        self.b(imm);
+    }
+
+    pub fn test_rr(&mut self, w: bool, a: R, b: R) {
+        self.op_rr(None, w, &[0x85], b, a);
+    }
+
+    pub fn imul_rr(&mut self, w: bool, dst: R, src: R) {
+        self.op_rr(None, w, &[0x0f, 0xaf], dst, src);
+    }
+
+    pub fn imul_rri(&mut self, w: bool, dst: R, src: R, imm: i32) {
+        self.op_rr(None, w, &[0x69], dst, src);
+        self.bytes.extend_from_slice(&imm.to_le_bytes());
+    }
+
+    /// `cdq; idiv r32`
+    pub fn cdq_idiv(&mut self, src: R) {
+        self.b(0x99);
+        self.op_rr(None, false, &[0xf7], 7, src);
+    }
+
+    /// Shift by `cl`: 4 shl, 5 shr, 7 sar
+    pub fn shift_cl(&mut self, kind: u8, w: bool, dst: R) {
+        self.op_rr(None, w, &[0xd3], kind, dst);
+    }
+
+    pub fn shift_ri(&mut self, kind: u8, w: bool, dst: R, n: u8) {
+        self.op_rr(None, w, &[0xc1], kind, dst);
+        self.b(n);
+    }
+
+    pub fn movsxd(&mut self, dst: R, src: R) {
+        self.op_rr(None, true, &[0x63], dst, src);
+    }
+
+    pub fn neg(&mut self, w: bool, dst: R) {
+        self.op_rr(None, w, &[0xf7], 3, dst);
+    }
+
+    // ---- flags ----
+
+    pub fn setcc(&mut self, cc: Cc, dst: R) {
+        self.rex(false, 0, 0, dst, dst >= 4);
+        self.b(0x0f);
+        self.b(0x90 | cc as u8);
+        self.b(0xc0 | (dst & 7));
+        // movzx dst, dst8
+        self.rex(false, dst, 0, dst, dst >= 4);
+        self.b(0x0f);
+        self.b(0xb6);
+        self.b(0xc0 | ((dst & 7) << 3) | (dst & 7));
+    }
+
+    pub fn cmov(&mut self, cc: Cc, dst: R, src: R) {
+        self.op_rr(None, true, &[0x0f, 0x40 | cc as u8], dst, src);
+    }
+
+    pub fn jcc(&mut self, cc: Cc, l: Label) {
+        self.b(0x0f);
+        self.b(0x80 | cc as u8);
+        let at = self.here();
+        self.bytes.extend_from_slice(&[0; 4]);
+        self.fixups.push((at, l));
+    }
+
+    pub fn jmp(&mut self, l: Label) {
+        self.b(0xe9);
+        let at = self.here();
+        self.bytes.extend_from_slice(&[0; 4]);
+        self.fixups.push((at, l));
+    }
+
+    /// `mov rax, imm64; call rax`: the immediate's offset (a relocation)
+    pub fn call_abs(&mut self, target: u64) -> usize {
+        self.b(0x48);
+        self.b(0xb8);
+        let at = self.here();
+        self.bytes.extend_from_slice(&target.to_le_bytes());
+        self.b(0xff);
+        self.b(0xd0);
+        at
+    }
+
+    pub fn push(&mut self, r: R) {
+        self.rex(false, 0, 0, r, false);
+        self.b(0x50 + (r & 7));
+    }
+
+    pub fn pop(&mut self, r: R) {
+        self.rex(false, 0, 0, r, false);
+        self.b(0x58 + (r & 7));
+    }
+
+    pub fn ret(&mut self) {
+        self.b(0xc3);
+    }
+
+    // ---- floats ----
+
+    /// `movq xmm, r64`
+    pub fn movq_xr(&mut self, x: X, r: R) {
+        self.op_rr(Some(0x66), true, &[0x0f, 0x6e], x, r);
+    }
+
+    /// `movq r64, xmm`
+    pub fn movq_rx(&mut self, r: R, x: X) {
+        self.op_rr(Some(0x66), true, &[0x0f, 0x7e], x, r);
+    }
+
+    pub fn movsd_xx(&mut self, dst: X, src: X) {
+        if dst != src {
+            self.op_rr(Some(0xf2), false, &[0x0f, 0x10], dst, src);
+        }
+    }
+
+    pub fn movsd_load(&mut self, x: X, base: R, disp: i32) {
+        self.op_rm(Some(0xf2), false, &[0x0f, 0x10], x, base, disp, false);
+    }
+
+    pub fn movsd_store(&mut self, base: R, disp: i32, x: X) {
+        self.op_rm(Some(0xf2), false, &[0x0f, 0x11], x, base, disp, false);
+    }
+
+    /// 0x58 add, 0x59 mul, 0x5c sub, 0x5e div
+    pub fn sse(&mut self, op: u8, dst: X, src: X) {
+        self.op_rr(Some(0xf2), false, &[0x0f, op], dst, src);
+    }
+
+    pub fn ucomisd(&mut self, a: X, b: X) {
+        self.op_rr(Some(0x66), false, &[0x0f, 0x2e], a, b);
+    }
+
+    /// `cvtsi2sd x, r32`
+    pub fn cvtsi2sd(&mut self, x: X, r: R) {
+        self.op_rr(Some(0xf2), false, &[0x0f, 0x2a], x, r);
+    }
+
+    /// `cvttsd2si r32, x`
+    pub fn cvttsd2si(&mut self, r: R, x: X) {
+        self.op_rr(Some(0xf2), false, &[0x0f, 0x2c], r, x);
+    }
+
+    /// `xorpd x, x`
+    pub fn zero_x(&mut self, x: X) {
+        self.op_rr(Some(0x66), false, &[0x0f, 0x57], x, x);
+    }
+}
