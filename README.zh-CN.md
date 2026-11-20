@@ -50,11 +50,21 @@ j8 是**用 Rust 从头写的 JavaScript 引擎**, 照着 V8 的分层来: 所�
 | ⏱️ 对 V8 jitless | 11 个基准几何平均慢 **3.7×**, 校验和三种引擎全一致 |
 | 🚄 对 V8 (带 JIT) | 几何平均慢 **9.4×**; 差距主要在调用和分配, 详见 [benchmark.md](samples/benchv8/benchmark.md) |
 
+## 📦 安装
+
+```sh
+cargo add j8                                    # 缺省 feature `runtime`: 执行器 + 内建对象 + 标准平台
+cargo add j8 --features jit                     # 再加 x86-64 JIT (x86-64 Unix)
+cargo add j8 --no-default-features --features compiler   # 只要 JS ⇒ 字节码
+```
+
+子 crate (`j8bytecode`、`j8compiler`、`j8executor` …) 也单独发了，但一般走根包加 feature。接宿主看 [EMBEDDING.md](EMBEDDING.md)。
+
 ## 🚀 快速开始
 
 ```sh
-# 🟢 dune, 兼容 Node (加 --web 只要 Web 标准接口): 跑脚本 / 求值 / REPL
-cd samples/dune
+# 🟢 dune, 对标 Node, 兼容 Node (加 --web 只要 Web 标准接口): 跑脚本 / 求值 / REPL
+cd dune
 cargo run --release -- examples/node.js
 cargo run --release -- --web examples/web.mjs
 cargo run --release -- -p '[1, 2, 3].map(x => x * 2)'
@@ -64,8 +74,8 @@ cargo run --release -- --jit a.js               # 开 JIT
 # ☁️ Cloudflare Worker 式: ES 模块 + Durable Object
 cd samples/workerd && cargo run -- examples/counter.js --bind COUNTER=Counter --request "GET /c/inc?name=a"
 
-# 🔬 编成字节码 (二进制形式)
-cargo run -p j8debugger -- compile -e 'let s = 0; for (let i = 0; i < 10; i++) s += i; s' -o a.j8b
+# 🔬 列出字节码 (照 V8 的 --print-bytecode)
+cd samples/j8bcdbg && cargo run -- compile -e 'let s = 0; for (let i = 0; i < 10; i++) s += i; s'
 
 # 📜 test262 回归 (先 git submodule update --init)
 cargo test --release --test test262
@@ -76,7 +86,7 @@ cd samples/benchv8 && cargo run --release
 
 ## 🧱 结构
 
-`samples/` 下的样例各自成包, 不在 workspace 里, 像嵌入方一样按版本依赖发布的 `j8`.
+`dune/`（对标 Node 的运行时）和 `samples/` 下的样例各自成包, 不在 workspace 里, 像嵌入方一样按版本依赖发布的 `j8`.
 
 | crate | std | 职责 |
 |---|---|---|
@@ -89,10 +99,10 @@ cd samples/benchv8 && cargo run --release
 | `j8compiler` | std | JS ⇒ 字节码（`Module` 实现 `j8compiler::Compile`：脚本、模块、`eval` / `Function`），用 oxc 解析 |
 | `j8taskqueue` | `no_std` | 任务队列：`ITask`（`recursable` / `depend` / `exec`）与 `ITaskPoll`（`add` / `run`）；无锁数据流调度（手写 MPMC 就绪队列、原子依赖计数），依赖做完的任务立刻在宿主给的 `Pool` 上并行跑（或就在调用线程上跑）、没有轮次屏障；`TaskId::family` 并查集找爹、`cancel` 整家取消；配额按字节码条数（`Quota` / `Flow::Yield`、每次 run 的预算）；取不到活的线程直接离开、不自旋。每个 `j8framework::EventLoop` 就是一个 `Queue`：脚本、兑现、宿主 future 的 poll，脚本每让出一次就检查一次队列 |
 | `j8macros` | proc-macro | 过程宏：`enums!("x.json")` 从 JSON 生成枚举（定义、`Display`、按字段类型取 `&mut`）、堆类型的 `#[derive(Collect)]`（paragc `Trace`）、绑定宏，用法见 `crates/macros/USAGE.md` |
-| `samples/dune` | std | 分两层的运行时：`src/web/`（Web 标准接口：`console`、定时器、`URL`、`TextEncoder`、`EventTarget` / `AbortController`、`fetch`、`structuredClone`、`crypto`……）和叠在上面的 `src/node/`（`process`、`require` / ES 模块、`Buffer`、`fs`、`path`、`os`、`events`、`util`、`assert`、`child_process`……）；碰机器的部分是 `#[j8::object]` / `#[j8::class]` 绑定的 Rust，接口本身是 JS prelude；`dune a.js`、`dune --web a.mjs`、`dune -e` / `-p`、REPL，详见其 README |
+| `dune` | std | 对标 Node 的运行时，分两层：`src/web/`（Web 标准接口：`console`、定时器、`URL`、`TextEncoder`、`EventTarget` / `AbortController`、`fetch`、`structuredClone`、`crypto`……）和叠在上面的 `src/node/`（`process`、`require` / ES 模块、`Buffer`、`fs`、`path`、`os`、`events`、`util`、`assert`、`child_process`……）；碰机器的部分是 `#[j8::object]` / `#[j8::class]` 绑定的 Rust，接口本身是 JS prelude；`dune a.js`、`dune --web a.mjs`、`dune -e` / `-p`、REPL，详见其 README |
 | `samples/workerd` | std | 用 j8 加载 Cloudflare Worker（ES 模块 `export default { fetch }`）与 Durable Object：`workerd examples/counter.js --bind COUNTER=Counter --request "GET /c/inc?name=a"` 或 `--port 8787` 起 HTTP 服务；Fetch API 子集与 DO 在 JS 序言里，存储是 `#[j8::class]` 绑定的 Rust KV |
 | `samples/benchv8` | std | 同一组 JS 基准在 j8 与 V8（rusty_v8 152，带 JIT / `--jitless`）上的耗时对比：`cd samples/benchv8 && cargo run --release`（会下载 V8 预编译库） |
-| `j8debugger` | std | 调试命令行 `j8dbg`（clap）：`j8dbg compile <file.js \| ->` / `j8dbg compile -e '<js>'` 把字节码按二进制形式写出；`j8dbg check <file.j8b \| ->` 读回二进制、重新编码写出（`-o` 写文件） |
+| `samples/j8bcdbg` | std | 字节码调试命令行（clap）：`j8bcdbg compile <file.js \| ->` / `j8bcdbg compile -e '<js>'` 按函数列出字节码，格式照 V8 的 `--print-bytecode`（`-o` 写文件） |
 | `j8executor` | std | 字节码执行器 `Executor`，**目前是最后一层**；实现 `Engine`，固定带 JS ⇒ 字节码编译器（脚本、模块、`eval` / `Function` 都先编成字节码） |
 
 所有 JS 都先编成字节码再执行，不设 AST 解释层。

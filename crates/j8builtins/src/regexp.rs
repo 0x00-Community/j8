@@ -35,6 +35,8 @@ struct Found {
 struct Compiled {
     regex: regress::Regex,
     atom: Option<Box<str>>,
+    /// The same pattern on finite automata, when it means the same there (all-ASCII subjects)
+    dfa: Option<crate::dfa::Dfa>,
 }
 
 impl Compiled {
@@ -43,7 +45,8 @@ impl Compiled {
 
     fn new(regex: regress::Regex, source: &str, flags: &str) -> Self {
         let atom = (!source.is_empty() && !flags.contains('i') && !source.contains(|c| Self::SYNTAX.contains(c))).then(|| source.into());
-        Self { regex, atom }
+        let dfa = if atom.is_none() { crate::dfa::Dfa::new(source, flags) } else { None };
+        Self { regex, atom, dfa }
     }
 }
 
@@ -225,6 +228,10 @@ impl Regexps {
             let at = start + s[start..].find(&**atom)?;
             return Some(Found { range: at..at + atom.len(), groups: Vec::new(), named: Vec::new() });
         }
+        if let Some(d) = &c.dfa {
+            let (range, groups) = d.find(s, start)?;
+            return Some(Found { range, groups, named: Vec::new() });
+        }
         let m = c.regex.find_from(s, start).next()?;
         let named = m.named_groups().map(|(n, r)| (String::from(n), r)).collect();
         Some(Found { range: m.range(), groups: m.captures, named })
@@ -251,7 +258,7 @@ impl Regexps {
         // All ASCII: no UTF-16 conversion; match as UTF-8 and slice by byte
         let ascii = s.is_ascii();
         let units: Vec<u16> = if ascii { Vec::new() } else { s.encode_utf16().collect() };
-        let text = |a: &Agent<'gc, '_>, r: Option<core::ops::Range<usize>>| if ascii { r.map_or(Value::Undefined, |r| a.string(&s[r]).into()) } else { Self::text(a, &units, r) };
+        let text = |a: &Agent<'gc, '_>, r: Option<core::ops::Range<usize>>| if ascii { r.map_or(Value::Undefined, |r| a.piece(s, &s[r]).into()) } else { Self::text(a, &units, r) };
         #[expect(clippy::cast_precision_loss, reason = "string length is far below 2^53")]
         let len = (if ascii { s.len() } else { units.len() }) as f64;
         let last = if global || sticky { last } else { 0.0 };

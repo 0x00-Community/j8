@@ -1,7 +1,7 @@
 # Embedding j8: building a host like dune / workerd
 
 This guide shows how to build your own JavaScript runtime on the `j8` crate, the way
-[`samples/dune`](https://github.com/0x00-Community/j8/blob/main/samples/dune) and [`samples/workerd`](https://github.com/0x00-Community/j8/blob/main/samples/workerd) are built. It covers how the pieces fit
+[`dune`](https://github.com/0x00-Community/j8/blob/main/dune) and [`samples/workerd`](https://github.com/0x00-Community/j8/blob/main/samples/workerd) are built. It covers how the pieces fit
 together. The attribute-by-attribute reference for the binding macros is
 [`crates/macros/USAGE.md`](https://github.com/0x00-Community/j8/blob/main/crates/macros/USAGE.md).
 
@@ -298,7 +298,7 @@ promise settles (so `Io<T>`-style errors reject it).
 ### 5.2 Blocking work: offload to a thread
 
 dune runs every blocking call (files, sockets, `sleep`) on a thread of its own with `host::Offload`. Copy it from
-[`samples/dune/src/host.rs`](https://github.com/0x00-Community/j8/blob/main/samples/dune/src/host.rs); the core is:
+[`dune/src/host.rs`](https://github.com/0x00-Community/j8/blob/main/dune/src/host.rs); the core is:
 
 ```rust,ignore
 fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<T> {

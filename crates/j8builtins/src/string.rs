@@ -2,7 +2,7 @@ use j8framework::ValueKind;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use j8framework::{Agent, Error, ErrorKind, JsString, Value};
+use j8framework::{Agent, Error, ErrorKind, JsString, Units, Value};
 
 use crate::{Args, Installer};
 
@@ -26,6 +26,17 @@ impl Strings {
 
     fn units<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>) -> Result<Vec<u16>, Error> {
         Ok(Self::this(a, this)?.encode_utf16().collect())
+    }
+
+    /// UTF-16 code units `r` of `s` (clamped): an all-ASCII string is cut by byte and shares its copy
+    fn cut<'gc>(a: &Agent<'gc, '_>, s: JsString<'gc>, r: core::ops::Range<usize>) -> JsString<'gc> {
+        match s.units() {
+            Units::Ascii(b) => {
+                let end = r.end.min(b.len());
+                a.piece(s, &s[r.start.min(end)..end])
+            }
+            u => a.string(&u.substring(r)),
+        }
     }
 
     fn from_units<'gc>(a: &Agent<'gc, '_>, u: &[u16]) -> Value<'gc> {
@@ -174,7 +185,7 @@ impl Strings {
         let len = s.utf16_len();
         let start = Self::relative(a, args.at(0), len, 0)?;
         let end = Self::relative(a, args.at(1), len, len)?;
-        Ok(a.string(&s.units().substring(start..end.max(start))).into())
+        Ok(Self::cut(a, s, start..end.max(start)).into())
     }
 
     fn substring<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
@@ -182,7 +193,7 @@ impl Strings {
         let len = st.utf16_len();
         let s = Self::clamp(a, args.at(0), len, 0)?;
         let e = Self::clamp(a, args.at(1), len, len)?;
-        Ok(a.string(&st.units().substring(s.min(e)..s.max(e))).into())
+        Ok(Self::cut(a, st, s.min(e)..s.max(e)).into())
     }
 
     fn at<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
@@ -207,17 +218,17 @@ impl Strings {
 
     fn trim<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let s = Self::this(a, this)?;
-        Ok(a.string(s.trim_matches(Self::is_space)).into())
+        Ok(a.piece(s, s.trim_matches(Self::is_space)).into())
     }
 
     fn trim_start<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let s = Self::this(a, this)?;
-        Ok(a.string(s.trim_start_matches(Self::is_space)).into())
+        Ok(a.piece(s, s.trim_start_matches(Self::is_space)).into())
     }
 
     fn trim_end<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let s = Self::this(a, this)?;
-        Ok(a.string(s.trim_end_matches(Self::is_space)).into())
+        Ok(a.piece(s, s.trim_end_matches(Self::is_space)).into())
     }
 
     /// `split(sep, limit)`: `sep` is a string (regexes are left to phase 5); an empty string splits by code unit.
@@ -242,7 +253,7 @@ impl Strings {
                 } else {
                     // All strings are valid UTF-8: splitting in UTF-8 gives the same result as splitting by UTF-16 code
                     // unit, so no round-trip conversion is needed
-                    s.split(&**sep).take(limit).map(|p| a.string(p).into()).collect()
+                    s.split(&**sep).take(limit).map(|p| a.piece(s, p).into()).collect()
                 }
             }
         };

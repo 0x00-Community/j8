@@ -308,6 +308,24 @@ fn enter<'r, 'gc>(cx: &mut Cx<'r, 'gc, '_, '_>, pc: *const Insn, callee: Value<'
     Some((l.insns.as_ptr(), cx.st.regs.as_mut_ptr().wrapping_add(base)))
 }
 
+/// A call to a plain host function, run right here; `None` for anything else
+#[inline]
+fn native<'gc>(cx: &mut Cx<'_, 'gc, '_, '_>, pc: *const Insn, callee: Value<'gc>, this: Value<'gc>, args: &[Value<'gc>]) -> Option<Result<Value<'gc>, Error>> {
+    let ValueKind::Object(o) = callee.kind() else { return None };
+    let n = o.native()?;
+    let level = cx.depth + cx.st.frames.len();
+    if n.forward != j8framework::Forward::No || level >= STACK_LIMIT {
+        return None;
+    }
+    sync(cx, pc);
+    let saved = cx.exe.depth.replace(level);
+    let outer = core::mem::replace(&mut cx.a.new_target, Value::Undefined);
+    let r = (n.f)(cx.a, this, args);
+    cx.a.new_target = outer;
+    cx.exe.depth.set(saved);
+    Some(r)
+}
+
 /// Records where the running frame is (before something that may throw: the handler table lookup needs it)
 #[inline]
 fn sync(cx: &mut Cx<'_, '_, '_, '_>, pc: *const Insn) {
@@ -355,7 +373,14 @@ macro_rules! call {
         let args = [$($arg),*];
         match enter($cx, $pc, callee, $this, Args::Values(&args)) {
             Some((pc, regs)) => next!($cx, pc, regs, Value::Undefined),
-            None => fall!($cx, $pc, $regs, $acc),
+            None => match native($cx, $pc, callee, $this, &args) {
+                Some(Ok(v)) => {
+                    let $regs = $cx.st.regs.as_mut_ptr().wrapping_add($cx.st.f().base);
+                    next!($cx, $pc.wrapping_add(1), $regs, v)
+                }
+                Some(Err(e)) => return Exit::Throw(e),
+                None => fall!($cx, $pc, $regs, $acc),
+            },
         }
     }};
 }
