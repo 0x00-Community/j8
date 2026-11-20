@@ -1859,7 +1859,7 @@ impl<'gc> Object<'gc> {
 
     /// Own property.
     pub fn get_own(&self, mc: &Mutation<'gc>, key: &str) -> Option<Property<'gc>> {
-        self.position(key).map(|i| self.resolved(mc, i, self.props.get(i)))
+        self.props.lookup(key).map(|(i, p)| self.resolved(mc, i, p))
     }
 
     /// The value of an own data property (`None` for accessors).
