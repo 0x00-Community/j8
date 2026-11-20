@@ -3,9 +3,9 @@ use std::io::{Read, Write};
 use std::path::PathBuf;
 
 use clap::Args;
-use j8bytecode::{Decoder, Module, OperandScale, OperandType, Register, SharedFunction};
-use j8compiler::Compile;
-use j8framework::{CodeKind, Source};
+use j8::bytecode::{Decoder, Module, OperandScale, OperandType, Register, SharedFunction};
+use j8::compiler::Compile;
+use j8::frame::{CodeKind, Source};
 
 /// Input (file / stdin / command line) and output (file / stdout).
 #[derive(Args)]
@@ -47,7 +47,7 @@ impl Io {
     }
 }
 
-/// `j8dbg compile`: JS ⇒ bytecode, listed per function the way V8's `--print-bytecode` lists instructions (to compare
+/// `j8bcdbg compile`: JS ⇒ bytecode, listed per function the way V8's `--print-bytecode` lists instructions (to compare
 /// with V8 line by line).
 #[derive(Args)]
 pub struct Compiled {
@@ -78,7 +78,7 @@ impl Listing<'_> {
         writeln!(out, "== {name} {:?} params {} regs {}", f.kind, f.bytecode.parameter_count, f.bytecode.register_count)?;
         for d in Decoder::from(&f.bytecode.code[..]) {
             let d = d.map_err(|_| core::fmt::Error)?;
-            let ops: Vec<String> = d.bytecode.operand_types().iter().zip(&d.operands).map(|(t, &v)| Self::operand(*t, v)).collect();
+            let ops: Vec<String> = d.bytecode.operand_types().iter().zip(d.operands.iter()).map(|(t, &v)| Self::operand(*t, v)).collect();
             let wide = match d.scale {
                 OperandScale::Single => "",
                 OperandScale::Double => ".Wide",

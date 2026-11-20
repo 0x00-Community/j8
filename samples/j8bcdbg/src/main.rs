@@ -1,4 +1,4 @@
-//! j8dbg: the j8 debugging CLI.
+//! j8bcdbg: the j8 debugging CLI.
 mod code;
 
 use std::process::ExitCode;
@@ -9,7 +9,7 @@ use code::Compiled;
 
 /// j8 debugging tool
 #[derive(Parser)]
-#[command(name = "j8dbg", version)]
+#[command(name = "j8bcdbg", version)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -33,7 +33,7 @@ fn main() -> ExitCode {
     match Cli::parse().command.run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("j8dbg: {e}");
+            eprintln!("j8bcdbg: {e}");
             ExitCode::FAILURE
         }
     }

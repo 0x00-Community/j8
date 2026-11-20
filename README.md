@@ -78,8 +78,8 @@ cargo run --release -- --jit a.js               # with the JIT
 # ☁️ Cloudflare Worker style: ES modules + Durable Objects
 cd samples/workerd && cargo run -- examples/counter.js --bind COUNTER=Counter --request "GET /c/inc?name=a"
 
-# 🔬 compile to bytecode (binary form)
-cargo run -p j8debugger -- compile -e 'let s = 0; for (let i = 0; i < 10; i++) s += i; s' -o a.j8b
+# 🔬 list the bytecode, like V8's --print-bytecode
+cd samples/j8bcdbg && cargo run -- compile -e 'let s = 0; for (let i = 0; i < 10; i++) s += i; s'
 
 # 📜 the test262 regression run (git submodule update --init first)
 cargo test --release --test test262
@@ -107,7 +107,7 @@ workspace, and depend on the published `j8` by version, the way an embedder woul
 | `dune` | std | The runtime that takes on Node, with two layers: `src/web/` (the Web-standard APIs: `console`, timers, `URL`, `TextEncoder`, `EventTarget` / `AbortController`, `fetch`, `structuredClone`, `crypto` …) and `src/node/` on top of it (`process`, `require` / ES modules, `Buffer`, `fs`, `path`, `os`, `events`, `util`, `assert`, `child_process` …); machine access is Rust bound with `#[j8::object]` / `#[j8::class]`, the APIs are JS preludes; `dune a.js`, `dune --web a.mjs`, `dune -e` / `-p`, a REPL; see its README |
 | `samples/workerd` | std | Loads Cloudflare Workers (ES modules with `export default { fetch }`) and Durable Objects with j8: `workerd examples/counter.js --bind COUNTER=Counter --request "GET /c/inc?name=a"`, or `--port 8787` for an HTTP server; the Fetch API subset and DOs live in a JS prelude, storage is a Rust KV bound with `#[j8::class]` |
 | `samples/benchv8` | std | The same JS benchmarks timed on j8 and V8 (rusty_v8 152, with JIT / `--jitless`): `cd samples/benchv8 && cargo run --release` (downloads V8's prebuilt library) |
-| `j8debugger` | std | The `j8dbg` command line (clap): `j8dbg compile <file.js \| ->` / `j8dbg compile -e '<js>'` writes the bytecode in binary form; `j8dbg check <file.j8b \| ->` reads a binary back and writes it re-encoded (`-o` writes a file) |
+| `samples/j8bcdbg` | std | The bytecode debugging command line (clap): `j8bcdbg compile <file.js \| ->` / `j8bcdbg compile -e '<js>'` lists the bytecode per function like V8's `--print-bytecode` (`-o` writes a file) |
 | `j8executor` | std | The bytecode `Executor`, **currently the last layer**; implements `Engine` and always carries the JS ⇒ bytecode compiler (scripts, modules, `eval` / `Function` all compile to bytecode first) |
 
 All JS is compiled to bytecode before it runs; there is no AST interpreter.

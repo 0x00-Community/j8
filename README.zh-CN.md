@@ -74,8 +74,8 @@ cargo run --release -- --jit a.js               # 开 JIT
 # ☁️ Cloudflare Worker 式: ES 模块 + Durable Object
 cd samples/workerd && cargo run -- examples/counter.js --bind COUNTER=Counter --request "GET /c/inc?name=a"
 
-# 🔬 编成字节码 (二进制形式)
-cargo run -p j8debugger -- compile -e 'let s = 0; for (let i = 0; i < 10; i++) s += i; s' -o a.j8b
+# 🔬 列出字节码 (照 V8 的 --print-bytecode)
+cd samples/j8bcdbg && cargo run -- compile -e 'let s = 0; for (let i = 0; i < 10; i++) s += i; s'
 
 # 📜 test262 回归 (先 git submodule update --init)
 cargo test --release --test test262
@@ -102,7 +102,7 @@ cd samples/benchv8 && cargo run --release
 | `dune` | std | 对标 Node 的运行时，分两层：`src/web/`（Web 标准接口：`console`、定时器、`URL`、`TextEncoder`、`EventTarget` / `AbortController`、`fetch`、`structuredClone`、`crypto`……）和叠在上面的 `src/node/`（`process`、`require` / ES 模块、`Buffer`、`fs`、`path`、`os`、`events`、`util`、`assert`、`child_process`……）；碰机器的部分是 `#[j8::object]` / `#[j8::class]` 绑定的 Rust，接口本身是 JS prelude；`dune a.js`、`dune --web a.mjs`、`dune -e` / `-p`、REPL，详见其 README |
 | `samples/workerd` | std | 用 j8 加载 Cloudflare Worker（ES 模块 `export default { fetch }`）与 Durable Object：`workerd examples/counter.js --bind COUNTER=Counter --request "GET /c/inc?name=a"` 或 `--port 8787` 起 HTTP 服务；Fetch API 子集与 DO 在 JS 序言里，存储是 `#[j8::class]` 绑定的 Rust KV |
 | `samples/benchv8` | std | 同一组 JS 基准在 j8 与 V8（rusty_v8 152，带 JIT / `--jitless`）上的耗时对比：`cd samples/benchv8 && cargo run --release`（会下载 V8 预编译库） |
-| `j8debugger` | std | 调试命令行 `j8dbg`（clap）：`j8dbg compile <file.js \| ->` / `j8dbg compile -e '<js>'` 把字节码按二进制形式写出；`j8dbg check <file.j8b \| ->` 读回二进制、重新编码写出（`-o` 写文件） |
+| `samples/j8bcdbg` | std | 字节码调试命令行（clap）：`j8bcdbg compile <file.js \| ->` / `j8bcdbg compile -e '<js>'` 按函数列出字节码，格式照 V8 的 `--print-bytecode`（`-o` 写文件） |
 | `j8executor` | std | 字节码执行器 `Executor`，**目前是最后一层**；实现 `Engine`，固定带 JS ⇒ 字节码编译器（脚本、模块、`eval` / `Function` 都先编成字节码） |
 
 所有 JS 都先编成字节码再执行，不设 AST 解释层。
