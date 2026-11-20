@@ -252,7 +252,8 @@ fn helper<'gc>(jit: &Jit, exe: &Executor, a: &mut Agent<'gc, '_>, h: Helper, ops
             let name = exe.jit_function(f).name(i64::from(k));
             match (assign, v(0).as_object()) {
                 (false, Some(o)) => a.define(o, name, j8framework::Property::data(v(1)))?,
-                _ => a.set_named(v(0), name, v(1))?,
+                // As the interpreter: a failed assignment throws in strict code only
+                _ => a.put_named(v(0), name, v(1), exe.jit_function(f).strict())?,
             }
             0
         }
