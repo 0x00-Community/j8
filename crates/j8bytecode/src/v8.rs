@@ -292,6 +292,13 @@ pub struct Operands {
 impl Operands {
     /// The most operands a bytecode has (V8's `Bytecodes::kMaxOperands`)
     pub const MAX: usize = 5;
+
+    /// All the slots, the unused ones zero: indexing by a constant needs no length check (an interpreter's handler for
+    /// one bytecode reads only the operands that bytecode has)
+    #[inline]
+    pub fn all(&self) -> &[OperandValue; Self::MAX] {
+        &self.values
+    }
 }
 
 impl core::ops::Deref for Operands {

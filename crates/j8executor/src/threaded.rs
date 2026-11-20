@@ -63,7 +63,7 @@ macro_rules! handlers {
         #[allow(unused_mut, unused_variables, clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "operands are in range")]
         fn $name<'r, 'gc, 'x, 'b>($cx: &mut Cx<'r, 'gc, 'x, 'b>, $pc: *const Insn, $regs: *mut Value<'gc>, mut $acc: Value<'gc>) -> Exit<'gc> {
             // SAFETY: `pc` points at a decoded instruction of the running function
-            let $o = unsafe { &(*$pc).operands };
+            let $o = unsafe { (*$pc).operands.all() };
             $body
         }
     )*};
@@ -340,11 +340,18 @@ fn sync(cx: &mut Cx<'_, '_, '_, '_>, pc: *const Insn) {
 #[inline]
 fn int_rem(x: f64, y: f64) -> Option<f64> {
     const EXACT: f64 = 9_007_199_254_740_992.0;
-    if x.fract() != 0.0 || y.fract() != 0.0 || y == 0.0 || x.abs() >= EXACT || y.abs() >= EXACT {
+    // Both below 2^53 (NaN fails too), then integers if they survive a round trip through i64 (no `fract`: without
+    // SSE4.1 that is a call to `trunc`)
+    if !(x.abs() < EXACT && y.abs() < EXACT) {
         return None;
     }
-    #[expect(clippy::cast_possible_truncation, reason = "integers below 2^53")]
-    let r = (x as i64) % (y as i64);
+    #[expect(clippy::cast_possible_truncation, reason = "below 2^53, checked by converting back")]
+    let (a, b) = (x as i64, y as i64);
+    #[expect(clippy::cast_precision_loss, reason = "below 2^53")]
+    if a as f64 != x || b as f64 != y || b == 0 {
+        return None;
+    }
+    let r = a % b;
     #[expect(clippy::cast_precision_loss, reason = "below 2^53")]
     Some(if r == 0 && x.is_sign_negative() { -0.0 } else { r as f64 })
 }
