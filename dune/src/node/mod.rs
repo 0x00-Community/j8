@@ -4,6 +4,7 @@
 //!
 //! The parts that need the machine are bound here in Rust; the modules themselves are JavaScript in this directory
 //! (the prelude), registered for `require`, and served to `import` by [`NodePlatform`].
+mod esm;
 mod fs;
 
 use std::collections::BTreeMap;
@@ -115,16 +116,52 @@ impl<'gc> IntoJs<'gc> for Finished {
     }
 }
 
+/// What a child's standard stream is connected to (`stdio` of `spawnSync`)
+#[derive(serde::Deserialize, Clone, Copy, Default)]
+#[serde(rename_all = "lowercase")]
+enum Stream {
+    /// Read by the parent (stdin: fed `input`)
+    #[default]
+    Pipe,
+    /// The parent's own stream
+    Inherit,
+    /// `/dev/null`
+    Ignore,
+}
+
+impl Stream {
+    /// For a stream the parent reads or writes through `pipe`
+    fn stdio(self, pipe: bool) -> std::process::Stdio {
+        match (self, pipe) {
+            (Self::Pipe, true) => std::process::Stdio::piped(),
+            (Self::Pipe | Self::Inherit, _) => std::process::Stdio::inherit(),
+            (Self::Ignore, _) => std::process::Stdio::null(),
+        }
+    }
+}
+
+/// The options of `spawnSync`, already normalized by `misc.js`
+#[derive(serde::Deserialize, Default)]
+#[serde(default)]
+struct Spawn {
+    shell: bool,
+    cwd: Option<String>,
+    /// The child's whole environment; the parent's when absent
+    env: Option<BTreeMap<String, String>>,
+    /// stdin, stdout, stderr
+    stdio: [Stream; 3],
+}
+
 /// `child_process`, synchronous forms
 pub struct Child;
 
 #[j8::object("child")]
 impl Child {
     /// Runs `file` with `args` (through `/bin/sh -c` when `shell`), feeding it `input`
-    fn spawn_sync(file: String, args: Vec<String>, shell: bool, cwd: Option<String>, input: Option<Bytes>) -> Io<Finished> {
+    fn spawn_sync(file: String, args: Vec<String>, options: j8::Json<Spawn>, input: Option<Bytes>) -> Io<Finished> {
         use std::io::Write;
-        use std::process::Stdio;
-        let mut cmd = if shell {
+        let o = options.0;
+        let mut cmd = if o.shell {
             let mut c = Command::new("/bin/sh");
             c.arg("-c").arg(std::iter::once(file.clone()).chain(args).collect::<Vec<_>>().join(" "));
             c
@@ -133,14 +170,18 @@ impl Child {
             c.args(args);
             c
         };
-        if let Some(dir) = cwd {
+        if let Some(dir) = o.cwd {
             cmd.current_dir(dir);
         }
-        cmd.stdin(if input.is_some() { Stdio::piped() } else { Stdio::inherit() }).stdout(Stdio::piped()).stderr(Stdio::piped());
+        if let Some(env) = o.env {
+            cmd.env_clear().envs(env);
+        }
+        let [stdin, stdout, stderr] = o.stdio;
+        cmd.stdin(stdin.stdio(input.is_some())).stdout(stdout.stdio(true)).stderr(stderr.stdio(true));
         let run = || -> std::io::Result<std::process::Output> {
             let mut child = cmd.spawn()?;
-            if let (Some(mut stdin), Some(input)) = (child.stdin.take(), input) {
-                stdin.write_all(&input.0)?;
+            if let (Some(mut pipe), Some(input)) = (child.stdin.take(), input) {
+                pipe.write_all(&input.0)?;
             }
             child.wait_with_output()
         };
@@ -238,6 +279,21 @@ impl<P: Pool> Pool for NodePlatform<P> {
     }
 }
 
+impl<P: Platform> NodePlatform<P> {
+    /// The module file at `path` (relative to `referrer`), named by its `file:` URL; a CommonJS file is `require`d and
+    /// its `module.exports` is the default export
+    fn file(&self, referrer: &str, path: &str) -> Option<(String, String)> {
+        let (name, text) = self.inner.load_module(referrer, path)?;
+        let text = if esm::Package::commonjs(std::path::Path::new(&name)) {
+            let file = crate::session::Session::quote(&name);
+            format!("const m = globalThis.{}.builtin(\"module\").createRequire({file})({file});\nexport default m;\n", j8::NATIVE)
+        } else {
+            text
+        };
+        Some((format!("{}{name}", esm::FILE_URL), text))
+    }
+}
+
 impl<P: Platform> Platform for NodePlatform<P> {
     fn now(&self) -> Duration {
         self.inner.now()
@@ -248,9 +304,25 @@ impl<P: Platform> Platform for NodePlatform<P> {
     }
 
     fn load_module(&self, referrer: &str, specifier: &str) -> Option<(String, String)> {
-        match Builtin::try_from(specifier) {
-            Ok(b) => Some((format!("node:{}", b.spec().0), b.source())),
-            Err(()) => self.inner.load_module(referrer, specifier),
+        if let Ok(b) = Builtin::try_from(specifier) {
+            return Some((format!("node:{}", b.spec().0), b.source()));
+        }
+        let referrer = referrer.strip_prefix(esm::FILE_URL).unwrap_or(referrer);
+        let from = std::path::Path::new(referrer);
+        match esm::Specifier::from(specifier) {
+            esm::Specifier::Path(path) => self.file(referrer, path),
+            esm::Specifier::Private(name) => {
+                let package = esm::Package::holding(from)?;
+                let target = package.import(name)?;
+                match esm::Specifier::from(target.as_str()) {
+                    esm::Specifier::Path(path) => self.file(referrer, &package.dir().join(path).display().to_string()),
+                    _ => self.load_module(&package.dir().join("package.json").display().to_string(), &target),
+                }
+            }
+            esm::Specifier::Bare { name, subpath } => {
+                let file = esm::Package::find(from, name)?.export(&subpath)?;
+                self.file(referrer, &file.display().to_string())
+            }
         }
     }
 
@@ -271,7 +343,7 @@ j8::runtime! {
 impl Dune {
     /// This run's `process.argv` (`dune`, the script, its arguments), `env`, `platform`, `arch`, `pid`, `execPath`
     pub fn argv(rt: &mut j8::Runtime<'_>, script: Option<&str>, args: &[String]) -> Result<(), Error> {
-        let exe = std::env::current_exe().map_or_else(|_| String::from("dune"), |p| p.display().to_string());
+        let exe = std::env::current_exe().map_or_else(|_| String::from("dune"), |p| Self::exec_path(&p).display().to_string());
         let all: Vec<String> = std::iter::once(exe.clone()).chain(script.map(String::from)).chain(args.iter().cloned()).collect();
         rt.set("process.argv", all)?;
         rt.set("process.execPath", exe)?;
@@ -279,6 +351,16 @@ impl Dune {
         rt.set("process.platform", std::env::consts::OS)?;
         rt.set("process.arch", Self::arch())?;
         rt.set("process.pid", std::process::id())
+    }
+
+    /// The runtime executable: `dune` beside `dunx` when `dunx` runs, so scripts that start `process.execPath` get dune
+    fn exec_path(exe: &std::path::Path) -> std::path::PathBuf {
+        const RUNNER: &str = "dunx";
+        const RUNTIME: &str = "dune";
+        match exe.file_stem().and_then(|s| s.to_str()) {
+            Some(RUNNER) => exe.with_file_name(RUNTIME).with_extension(exe.extension().unwrap_or_default()),
+            _ => exe.to_path_buf(),
+        }
     }
 
     /// Node's name for this CPU architecture

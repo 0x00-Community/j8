@@ -1,27 +1,11 @@
-//! dune: a JavaScript runtime on j8, with two layers: [`web`] (the Web-standard APIs) and [`node`] (Node
-//! compatibility on top of it).
-//!
-//! `dune a.js` / `dune run a.js` runs a file, `dune -e '<js>'` runs source (`-p` also prints the result), no arguments
-//! starts the REPL; `--web` leaves the Node layer out.
-mod host;
-mod node;
-mod repl;
-mod session;
-mod web;
-
-use std::num::NonZeroUsize;
+//! `dune`: run a script file (`dune a.js` / `dune run a.js`), run source (`dune -e '<js>'`; `-p` also prints the
+//! result), start the REPL (no arguments), or run a package's executable (`dune x <package>`, the same as `dunx`).
+//! `--web` leaves the Node layer out.
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use j8::Host;
-use j8::executor::Executor;
-use j8::frame::Source;
-use j8::platform::DefaultPlatform;
-
-use node::{Dune, NodePlatform};
-use session::{Outcome, Session};
-use web::Web;
+use dune::{Job, Layer, X};
 
 /// The j8 JavaScript runtime
 #[derive(Parser)]
@@ -60,108 +44,42 @@ enum Command {
     },
     /// Interactive REPL (the default with no arguments)
     Repl,
+    /// Run a package's executable, installing the package first when needed (the same as `dunx`)
+    X(X),
 }
 
-/// What to do this time.
-enum Job {
-    /// Run source; print the result when `print` is set
-    Script { text: String, file: String, print: bool },
-    /// Run a script file: CommonJS, or an ES module (`.mjs`, `"type": "module"`, always with `--web`)
-    Main { file: String, args: Vec<String> },
-    Repl,
+/// What this command line asks for
+enum Ask {
+    Job(Job),
+    X(X),
 }
 
-impl TryFrom<Cli> for Job {
+impl TryFrom<Cli> for Ask {
     type Error = String;
 
     fn try_from(cli: Cli) -> Result<Self, String> {
         let (file, args) = match (cli.command, cli.file, cli.eval, cli.print) {
+            (Some(Command::X(x)), ..) => return Ok(Ask::X(x)),
             (Some(Command::Run { file, args }), ..) => (file, args),
             (None, Some(file), ..) => (file, cli.args),
-            (Some(Command::Repl), ..) | (None, None, None, None) => return Ok(Job::Repl),
-            (None, None, Some(text), _) => return Ok(Job::Script { text, file: "[eval]".into(), print: false }),
-            (None, None, None, Some(text)) => return Ok(Job::Script { text, file: "[eval]".into(), print: true }),
+            (Some(Command::Repl), ..) | (None, None, None, None) => return Ok(Ask::Job(Job::Repl)),
+            (None, None, Some(text), _) => return Ok(Ask::Job(Job::Script { text, file: "[eval]".into(), print: false })),
+            (None, None, None, Some(text)) => return Ok(Ask::Job(Job::Script { text, file: "[eval]".into(), print: true })),
         };
         if file.as_os_str() == "-" {
             let text = std::io::read_to_string(std::io::stdin()).map_err(|e| format!("[stdin]: {e}"))?;
-            return Ok(Job::Script { text, file: "[stdin]".into(), print: false });
+            return Ok(Ask::Job(Job::Script { text, file: "[stdin]".into(), print: false }));
         }
-        if !file.is_file() {
-            return Err(format!("{}: no such file", file.display()));
-        }
-        let file = std::fs::canonicalize(&file).map_err(|e| format!("{}: {e}", file.display()))?;
-        Ok(Job::Main { file: file.display().to_string(), args })
-    }
-}
-
-/// Which runtime runs the job
-#[derive(Clone, Copy)]
-enum Layer {
-    /// The Web-standard APIs only
-    Web,
-    /// Node compatibility on top of the Web layer
-    Node,
-}
-
-impl Layer {
-    /// The prelude's function that runs an entry file
-    const fn entry(self) -> &'static str {
-        match self {
-            Self::Web => "runModule",
-            Self::Node => "runMain",
-        }
-    }
-}
-
-impl Job {
-    /// Run on `layer`; with `jit`, hot functions are compiled to machine code
-    fn run(&self, layer: Layer, jit: bool) -> ExitCode {
-        match layer {
-            Layer::Web => self.run_on::<Web>(&Web::platform(DefaultPlatform::default()), layer, jit),
-            Layer::Node => self.run_on::<Dune>(&Dune::platform(NodePlatform::from(DefaultPlatform::default())), layer, jit),
-        }
-    }
-
-    /// On one loop thread: a command line runs one runtime
-    fn run_on<H: Host>(&self, platform: &dyn j8::frame::Platform, layer: Layer, jit: bool) -> ExitCode {
-        j8::EventLoopSet::scope(platform, NonZeroUsize::MIN, |set| self.run_in::<H>(set, layer, jit))
-    }
-
-    fn run_in<H: Host>(&self, set: &j8::EventLoopSet<'_, '_, Executor>, layer: Layer, jit: bool) -> ExitCode {
-        let (script, args) = match self {
-            Job::Main { file, args } => (Some(file.as_str()), args.as_slice()),
-            _ => (None, &[][..]),
-        };
-        let mut session = Session::new::<H>(set, jit);
-        if let Layer::Node = layer {
-            session.node(script, args);
-        }
-        let outcome = match self {
-            Job::Repl => return session.repl(),
-            Job::Main { file, .. } => {
-                let call = format!("__j8_native.{}({})", layer.entry(), Session::quote(file));
-                session.eval(&Source { text: &call, file })
-            }
-            Job::Script { text, file, print } => {
-                let outcome = session.eval(&Source { text, file });
-                if let (Outcome::Value(v), true) = (&outcome, *print) {
-                    println!("{v}");
-                }
-                outcome
-            }
-        };
-        match outcome {
-            Outcome::Value(_) => session.finish(),
-            failed => failed.report(),
-        }
+        Job::main(&file, args).map(Ask::Job)
     }
 }
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let (layer, jit) = (if cli.web { Layer::Web } else { Layer::Node }, cli.jit);
-    match Job::try_from(cli) {
-        Ok(job) => job.run(layer, jit),
+    match Ask::try_from(cli) {
+        Ok(Ask::Job(job)) => job.run(layer, jit),
+        Ok(Ask::X(x)) => x.run(jit),
         Err(e) => {
             eprintln!("dune: {e}");
             ExitCode::FAILURE
