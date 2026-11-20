@@ -350,6 +350,16 @@ impl<'gc> Props<'gc> {
         true
     }
 
+    /// Entry `i`'s word as stored (an accessor pair is one immutable object, so equal words mean the same slot);
+    /// `None` in dictionary mode
+    #[inline]
+    pub fn word(&self, i: usize) -> Option<Value<'gc>> {
+        if self.dict.get().is_some() {
+            return None;
+        }
+        Some(self.cell(i).map_or(Value::Undefined, ValueCell::get))
+    }
+
     #[inline]
     pub fn slot(&self, i: usize) -> Slot<'gc> {
         match self.dict_cell() {
