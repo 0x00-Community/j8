@@ -195,10 +195,12 @@ impl Dict<'_> {
     }
 }
 
-/// Keeps a shape tree alive for an object whose tree no prototype root holds (see [`Props::shape`]).
+/// Keeps a shape tree alive from the GC heap: for an object whose tree no prototype root holds (see [`Props::shape`]),
+/// and a prototype's root shape (see `Object::root_shape`). A separate small object, so that objects themselves need
+/// no destructor (sweeping skips them).
 #[derive(Collect)]
 #[collect(require_static)]
-struct Anchor(#[expect(dead_code, reason = "held only to keep the tree alive")] Arc<Shape>);
+pub struct Anchor(pub Arc<Shape>);
 
 /// An object's string-keyed properties, read without borrowing anything. Fast mode: a shared shape plus a value store
 /// (values change in place through their [`ValueCell`]s; adding a key grows the store first, then swaps in the child

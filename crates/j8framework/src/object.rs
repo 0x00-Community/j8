@@ -1026,7 +1026,7 @@ impl<'gc> ObjectData<'gc> {
             length_readonly: crate::IsoCell::new(false),
             digit_keys: crate::IsoCell::new(false),
             sparse_length: crate::IsoCell::new(0),
-            shape_root: j8lockfree::OnceBox::default(),
+            shape_root: GcSlot::default(),
             data: GcCell::empty(),
         })
     }
@@ -1047,7 +1047,7 @@ impl<'gc> ObjectData<'gc> {
             length_readonly: crate::IsoCell::new(length_readonly),
             digit_keys: crate::IsoCell::new(false),
             sparse_length: crate::IsoCell::new(sparse_length),
-            shape_root: j8lockfree::OnceBox::default(),
+            shape_root: GcSlot::default(),
             data: if unit.is_some() { GcCell::empty() } else { GcCell::new(mc, state) },
         });
         // Filled once on the heap: the write barrier records slot addresses
@@ -1221,10 +1221,11 @@ pub struct Object<'gc> {
     sparse_length: u32,
     /// The empty shape that objects with this object as prototype start from (so objects with the same prototype that
     /// add properties the same way share shapes)
-    #[collect(require_static)]
-    shape_root: j8lockfree::OnceBox<alloc::sync::Arc<crate::Shape>>,
+    shape_root: GcSlot<'gc, crate::shape::Anchor>,
     data: GcCell<'gc, ObjectState<'gc>>,
 }
+
+const _: () = assert!(!core::mem::needs_drop::<Object<'static>>(), "objects need no destructor: sweeping skips them");
 
 impl fmt::Debug for Object<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -1351,8 +1352,8 @@ macro_rules! forward_reads {
             pub fn own(&self, mc: &Mutation<'gc>, key: &str) -> Option<Value<'gc>> {
                 self.obj.own(mc, key)
             }
-            pub fn root_shape(&self) -> alloc::sync::Arc<crate::Shape> {
-                self.obj.root_shape()
+            pub fn root_shape(&self, mc: &Mutation<'gc>) -> alloc::sync::Arc<crate::Shape> {
+                self.obj.root_shape(mc)
             }
         }
     )*};
@@ -1816,7 +1817,7 @@ impl<'gc> Object<'gc> {
             self.digit_keys.set(true);
         }
         let proto = self.proto();
-        self.props.push(mc, key, prop, self.class() & Class::WIDE != 0, || proto.map(|p| p.get().root_shape_ref()));
+        self.props.push(mc, key, prop, self.class() & Class::WIDE != 0, || proto.map(|p| p.get().root_shape_ref(mc)));
     }
 
     /// Keeps the string-keyed properties in fast mode however many get added (the global object, the script scope:
@@ -1826,17 +1827,25 @@ impl<'gc> Object<'gc> {
     }
 
     /// The empty shape that objects with this object as prototype start from (created if absent)
-    pub fn root_shape(&self) -> alloc::sync::Arc<crate::Shape> {
-        self.root_shape_ref_arc().clone()
+    pub fn root_shape(&self, mc: &Mutation<'gc>) -> alloc::sync::Arc<crate::Shape> {
+        self.root_shape_ref_arc(mc).clone()
     }
 
-    fn root_shape_ref_arc(&self) -> &alloc::sync::Arc<crate::Shape> {
-        self.shape_root.get_or_init(crate::Props::empty)
+    fn root_shape_ref_arc(&self, mc: &Mutation<'gc>) -> &'gc alloc::sync::Arc<crate::Shape> {
+        let held = match self.shape_root.get() {
+            Some(h) => h,
+            None => {
+                let h = mc.alloc(crate::shape::Anchor(crate::Props::empty()));
+                self.shape_root.set(mc.mutator(), Some(h));
+                h
+            }
+        };
+        &Gc::get(held).0
     }
 
     /// [`Object::root_shape`], borrowed for as long as this object
-    pub fn root_shape_ref(&self) -> &crate::Shape {
-        self.root_shape_ref_arc()
+    pub fn root_shape_ref(&self, mc: &Mutation<'gc>) -> &'gc crate::Shape {
+        self.root_shape_ref_arc(mc)
     }
 
     /// Append an entry, switching the shape directly to `to` (from the execution layer's inline cache)
@@ -1845,7 +1854,7 @@ impl<'gc> Object<'gc> {
             self.digit_keys.set(true);
         }
         let proto = self.proto();
-        self.props.push_to(mc, to, slot, || proto.map(|p| p.get().root_shape_ref()));
+        self.props.push_to(mc, to, slot, || proto.map(|p| p.get().root_shape_ref(mc)));
     }
 
     /// An object without properties takes shape `to` with values `slots` at once (see [`Props::fill`])
@@ -1854,7 +1863,7 @@ impl<'gc> Object<'gc> {
             self.digit_keys.set(true);
         }
         let proto = self.proto();
-        self.props.fill(mc, to, slots, || proto.map(|p| p.get().root_shape_ref()));
+        self.props.fill(mc, to, slots, || proto.map(|p| p.get().root_shape_ref(mc)));
     }
 
     /// Own property.
