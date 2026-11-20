@@ -140,6 +140,10 @@ pub struct Gen<'g> {
     stubs: Vec<(Fs, Reason, Option<Fs>, Label, V)>,
     /// The instruction being emitted
     cur: V,
+    /// A `CallJit` followed by an unbox of its result: (the unbox, its frame state)
+    unbox_next: Option<(V, Fs)>,
+    /// An instruction already emitted with the previous one
+    skip: Option<V>,
     /// Cold code emitted after the body: (label, what)
     cold: Vec<(Label, Cold)>,
     /// Uses of each value (to fuse compares into their only branch)
@@ -163,7 +167,7 @@ enum Cold {
 
 impl<'g> Gen<'g> {
     pub fn generate(g: &'g Graph, kind: Kind, deopt_base: u32, helper_base: u32, globals: &'g [u64]) -> Generated {
-        let mut cg = Gen { g, kind, globals, a: Asm::default(), loc: vec![Loc::None; g.insts.len()], frame: 0, blocks: BTreeMap::new(), relocs: Vec::new(), exits: Vec::new(), values: Vec::new(), calls: Vec::new(), arity: Vec::new(), deopt_base, helper_base, stubs: Vec::new(), cur: 0, cold: Vec::new(), uses: vec![0; g.insts.len()], used_caller: Vec::new(), used_xmm: 0 };
+        let mut cg = Gen { g, kind, globals, a: Asm::default(), loc: vec![Loc::None; g.insts.len()], frame: 0, blocks: BTreeMap::new(), relocs: Vec::new(), exits: Vec::new(), values: Vec::new(), calls: Vec::new(), arity: Vec::new(), deopt_base, helper_base, stubs: Vec::new(), cur: 0, unbox_next: None, skip: None, cold: Vec::new(), uses: vec![0; g.insts.len()], used_caller: Vec::new(), used_xmm: 0 };
         let order = cg.order();
         cg.allocate(&order);
         cg.emit(&order);
@@ -205,6 +209,12 @@ impl<'g> Gen<'g> {
     fn reads(&self, v: V, out: &mut Vec<V>) {
         let op = self.g.op(v);
         op.inputs(out);
+        // A native return of a boxed int32 also hands over the int (in rdx)
+        if let Op::Return(w, _) = op
+            && let Op::BoxInt(i) = self.g.op(*w)
+        {
+            out.push(*i);
+        }
         if let Op::Phi(_) = op {
             out.clear();
         }
@@ -349,7 +359,7 @@ impl<'g> Gen<'g> {
                 hi[v as usize] = hi[v as usize].max(at);
                 if !matches!(g.op(v), Op::Phi(_)) {
                     let op = g.op(v);
-                    op.inputs(&mut ins);
+                    self.reads(v, &mut ins);
                     for &x in &ins {
                         hi[x as usize] = hi[x as usize].max(pos[v as usize]);
                     }
@@ -367,13 +377,19 @@ impl<'g> Gen<'g> {
             for &x in &phi_out[bi] {
                 hi[x as usize] = hi[x as usize].max(end[bi]);
             }
-            for x in 0..n {
-                let xv = u32::try_from(x).unwrap_or(0);
-                if has(&live_in[bi], xv) {
+            // Only the set bits
+            for (wi, (&li, &lo_)) in live_in[bi].iter().zip(&live_out[bi]).enumerate() {
+                let mut w = li;
+                while w != 0 {
+                    let x = wi * 64 + w.trailing_zeros() as usize;
+                    w &= w - 1;
                     lo[x] = lo[x].min(start[bi]);
                     hi[x] = hi[x].max(start[bi]);
                 }
-                if has(&live_out[bi], xv) {
+                let mut w = lo_;
+                while w != 0 {
+                    let x = wi * 64 + w.trailing_zeros() as usize;
+                    w &= w - 1;
                     hi[x] = hi[x].max(end[bi]);
                 }
             }
@@ -389,7 +405,9 @@ impl<'g> Gen<'g> {
                 continue;
             }
             let (l, h) = (lo[v], hi[v].max(lo[v]));
-            let across = calls.iter().any(|&c| l < c && c < h);
+            // A call strictly inside (calls are in position order)
+            let k = calls.partition_point(|&c| c <= l);
+            let across = calls.get(k).is_some_and(|&c| c < h);
             ivs.push(Interval { v: vv, lo: l, hi: h, float: g.insts[v].rep == Rep::F64, across });
         }
         ivs.sort_by_key(|i| (i.lo, i.hi));
@@ -398,13 +416,12 @@ impl<'g> Gen<'g> {
         let mut free_slots: Vec<(u32, i32)> = Vec::new();
         for iv in &ivs {
             active.retain(|&(h, _)| h > iv.lo);
-            free_slots.iter_mut().for_each(|_| {});
             let busy = |l: Loc, active: &Vec<(u32, Loc)>| active.iter().any(|&(_, a)| a == l);
             let pick = if iv.float {
                 if iv.across { None } else { (0..XMMS).map(Loc::Xmm).find(|&l| !busy(l, &active)) }
             } else {
-                let pool: Vec<R> = if iv.across { CALLEE_SAVED.to_vec() } else { CALLER_SAVED.iter().chain(&CALLEE_SAVED).copied().collect() };
-                pool.into_iter().map(Loc::Gpr).find(|&l| !busy(l, &active))
+                let caller: &[R] = if iv.across { &[] } else { &CALLER_SAVED };
+                caller.iter().chain(&CALLEE_SAVED).map(|&r| Loc::Gpr(r)).find(|&l| !busy(l, &active))
             };
             let l = match pick {
                 Some(l) => l,
@@ -668,6 +685,16 @@ impl<'g> Gen<'g> {
                     continue;
                 }
                 let prev = if k > 0 { Some(insts[k - 1]) } else { None };
+                if self.skip == Some(v) {
+                    self.skip = None;
+                    continue;
+                }
+                if std::env::var_os("J8_NOFUSE").is_none() && let (Op::CallJit(..), Some(&nx)) = (self.g.op(v), insts.get(k + 1))
+                    && let Op::UnboxInt(x, ufs) = *self.g.op(nx)
+                    && x == v
+                {
+                    self.unbox_next = Some((nx, ufs));
+                }
                 self.inst(b, v, next, prev);
             }
         }
@@ -1258,6 +1285,27 @@ impl<'g> Gen<'g> {
                 self.a.cmp_mi(true, R15, Ctx::PENDING, 0);
                 self.exit_if(Cc::Ne, fs, Reason::Throw);
                 self.put(v, RAX);
+                // An int32 result straight from rdx when the callee marked it (the unbox right after is then done)
+                if let Some((u, ufs)) = self.unbox_next {
+                    self.unbox_next = None;
+                    let slow = self.a.label();
+                    let done = self.a.label();
+                    self.a.mov_rr(RCX, RDX);
+                    self.a.shift_ri(5, true, RCX, 32);
+                    self.a.alu_ri(Alu::Cmp, false, RCX, 1);
+                    self.a.jcc(Cc::Ne, slow);
+                    self.a.mov_rr32(RCX, RDX);
+                    self.put(u, RCX);
+                    self.a.jmp(done);
+                    self.a.bind(slow);
+                    self.a.mov_ri(RCX, ValueBits::BOXED_MIN);
+                    self.a.alu_rr(Alu::Cmp, true, RAX, RCX);
+                    self.exit_if(Cc::Ae, ufs, Reason::Number);
+                    self.a.movq_xr(XS, RAX);
+                    self.to_int(u, ufs);
+                    self.a.bind(done);
+                    self.skip = Some(u);
+                }
             }
             Op::Jump(t) => {
                 self.phi_moves(b, t);
@@ -1282,7 +1330,17 @@ impl<'g> Gen<'g> {
             }
             Op::Return(w, pc) => {
                 match self.kind {
-                    Kind::Native(_) => self.into_gpr(w, RAX),
+                    Kind::Native(_) => {
+                        if let Op::BoxInt(i) = *self.g.op(w) {
+                            let r = self.gpr(i, RDX);
+                            self.a.mov_rr32(RDX, r);
+                            self.a.mov_ri(RCX, crate::runtime::Ret::INT);
+                            self.a.alu_rr(Alu::Or, true, RDX, RCX);
+                        } else {
+                            self.a.mov_ri(RDX, 0);
+                        }
+                        self.into_gpr(w, RAX);
+                    }
                     _ => {
                         let r = self.gpr(w, RAX);
                         self.a.store(R15, Ctx::RET, r);

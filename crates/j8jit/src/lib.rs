@@ -37,7 +37,7 @@ use j8executor::{Entry, Tier, Tiered};
 use j8framework::{FuncId, Shape, Value};
 
 use build::{Builder, Hints, HINT_FLOAT, HINT_GENERIC, HINT_NO_INLINE};
-use ir::{FrameState, Helper, Op, Rep, Slot, V};
+use ir::{FrameState, Helper, Op, Rep, V};
 use codegen::{Reason, RESUMED, RETURNED, THREW};
 use runtime::{Ctx, Mapped, Trampolines};
 
@@ -48,10 +48,20 @@ pub enum Src {
     Const(u64),
 }
 
+/// What every hand-over of one compiled function shares: its frame states, and each value's representation and
+/// constant bits (for values that are constants)
+pub struct Meta {
+    states: Vec<FrameState>,
+    reps: Vec<Rep>,
+    consts: Vec<Option<u64>>,
+}
+
 /// One hand-over point of some compiled code.
 pub struct Deopt {
-    state: FrameState,
-    values: BTreeMap<V, (Rep, Src)>,
+    meta: Rc<Meta>,
+    fs: u32,
+    /// Values the stub stored in `Ctx::BUF`: (value, buffer index)
+    slots: Vec<(V, u32)>,
     reason: Reason,
     /// The guarding instruction (debugging)
     op: u32,
@@ -62,6 +72,21 @@ pub struct Deopt {
     /// The compiled function and how it was entered (to drop the code when a speculation fails)
     root: FuncId,
     kind: Kind,
+}
+
+impl Deopt {
+    fn state(&self) -> &FrameState {
+        &self.meta.states[self.fs as usize]
+    }
+
+    /// Where value `v`'s bits are, and its representation
+    fn value(&self, v: V) -> (Rep, Src) {
+        let rep = self.meta.reps.get(v as usize).copied().unwrap_or(Rep::Word);
+        match self.slots.iter().find(|(x, _)| *x == v) {
+            Some((_, i)) => (rep, Src::Buf(*i)),
+            None => (rep, Src::Const(self.meta.consts.get(v as usize).copied().flatten().unwrap_or(j8framework::ValueBits::UNDEFINED))),
+        }
+    }
 }
 
 /// What the JIT knows about one function.
@@ -210,7 +235,7 @@ impl Jit {
 
     /// A failed speculation: a hint for next time, and the code that made it goes
     fn learn(&self, d: &Deopt) {
-        let Some(fr) = d.state.frames.last() else { return };
+        let Some(fr) = d.state().frames.last() else { return };
         if std::env::var_os("J8_JIT_LOG").is_some() {
             std::eprintln!("j8jit: deopt {:?} {:?} at {:?}@{} ({:?}, v{})", d.root, d.kind, fr.func, fr.pc, d.reason, d.op);
         }
@@ -339,7 +364,7 @@ impl Jit {
         };
         let mut all_addrs = alloc::vec![0u64; site_base as usize];
         all_addrs.extend(addrs);
-        let built = build::Built { graph, ..built };
+        let mut built = build::Built { graph, ..built };
         let generated = codegen::Gen::generate(&built.graph, kind, deopt_base, helper_base, &all_addrs);
         if std::env::var_os("J8_JIT_LOG").is_some() {
             std::eprintln!("j8jit: {f:?} {kind:?}: {} insts, {} bytes, build {t_build:?} total {:?}", built.graph.insts.len(), generated.bytes.len(), t0.elapsed());
@@ -383,58 +408,28 @@ impl Jit {
             st.calls.push((h, arity[i]));
         }
         let native = matches!(kind, Kind::Native(_));
-        for (i, exit) in lowered.exits.iter().enumerate() {
-            let state = built.graph.states[exit.fs as usize].clone();
-            let mut values = BTreeMap::new();
-            for (v, slot) in &lowered.values[i] {
-                values.insert(*v, (built.graph.rep(*v), Src::Buf(*slot)));
-            }
-            for v in Self::state_values(&state) {
-                if values.contains_key(&v) {
-                    continue;
-                }
-                let rep = built.graph.rep(v);
-                let bits = match built.graph.op(v) {
-                    Op::I32(x) => u64::from(x.cast_unsigned()) | if *x < 0 { 0xFFFF_FFFF_0000_0000 } else { 0 },
-                    Op::F64(x) => x.to_bits(),
-                    Op::Word(w) => *w,
-                    _ => j8framework::ValueBits::UNDEFINED,
-                };
-                values.insert(v, (rep, Src::Const(bits)));
-            }
-            let hint_at = exit.hint.and_then(|h| built.graph.states[h as usize].frames.last().map(|fr| (fr.func, fr.pc)));
-            st.deopts.push(Rc::new(Deopt { state, values, reason: exit.reason, op: exit.op, hint_at, native, root: f, kind }));
+        let consts = built.graph.insts.iter().map(|i| match &i.op {
+            Op::I32(x) if i.rep == Rep::Bool => Some(u64::from(*x != 0)),
+            Op::I32(x) => Some(f64::from(*x).to_bits()),
+            Op::F64(x) => Some(x.to_bits()),
+            Op::Word(w) => Some(*w),
+            _ => None,
+        }).collect();
+        // Constants are stored boxed already: a number word for I32 / F64 constants
+        let reps = built.graph.insts.iter().map(|i| match i.op {
+            Op::I32(_) | Op::F64(_) if i.rep != Rep::Bool => Rep::Word,
+            _ => i.rep,
+        }).collect();
+        let hints: Vec<Option<(FuncId, u32)>> = lowered.exits.iter().map(|e| e.hint.and_then(|h| built.graph.states[h as usize].frames.last().map(|fr| (fr.func, fr.pc)))).collect();
+        let meta = Rc::new(Meta { states: core::mem::take(&mut built.graph.states), reps, consts });
+        let values = lowered.values;
+        for ((exit, slots), hint_at) in lowered.exits.into_iter().zip(values).zip(hints) {
+            st.deopts.push(Rc::new(Deopt { meta: meta.clone(), fs: exit.fs, slots, reason: exit.reason, op: exit.op, hint_at, native, root: f, kind }));
+        }
+        if std::env::var_os("J8_JIT_LOG").is_some() {
+            std::eprintln!("j8jit: installed {f:?} {kind:?} at {:?}", t0.elapsed());
         }
         Some(addr)
-    }
-
-    fn state_values(st: &FrameState) -> Vec<V> {
-        let mut out = Vec::new();
-        let mut add = |s: &Slot| {
-            if let Slot::Value(v) = s {
-                out.push(*v);
-            }
-        };
-        for fr in &st.frames {
-            add(&fr.callee);
-            fr.params.iter().for_each(&mut add);
-            fr.regs.iter().for_each(&mut add);
-            add(&fr.context);
-            add(&fr.acc);
-            if let Some((a, b)) = &fr.construct {
-                add(a);
-                add(b);
-            }
-        }
-        for o in &st.objects {
-            add(&Slot::Value(o.proto));
-            o.fields.iter().for_each(&mut add);
-        }
-        for (c, _, s) in &st.writes {
-            add(&Slot::Value(*c));
-            add(s);
-        }
-        out
     }
 
     /// Runs native code at `addr` for the entry frame's call; the frame then returns by its `Return` at `ret`

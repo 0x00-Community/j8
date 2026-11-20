@@ -15,6 +15,7 @@ cargo run --release -- --runs 10        # runs per benchmark, the shortest is ke
 
 - JavaScriptCore is WebKitGTK's system library, used through its C API: install the runtime package
   (`libjavascriptcoregtk-6.0-1` on Debian / Ubuntu); the -dev package isn't needed, the library is linked by file name
+- j8 runs with its JIT (`J8_NOJIT=1`: the interpreter only)
 - Each engine runs in its own child process (JSC reads its `JSC_*` options once per process); timing covers
   compile + execute, each run in a fresh global context
 - Every script's completion value is a checksum that must match across the engines (and V8, see benchv8)

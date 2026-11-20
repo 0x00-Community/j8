@@ -1891,6 +1891,14 @@ impl<'e> Builder<'e> {
                     let k = self.target(t);
                     let v = self.emit(Op::CallJit(k, cw, tw, aw, fs), Rep::Word);
                     Self::forget(st);
+                    // Speculated to give an int32 (read from the call's second return register); else the
+                    // interpreter goes on after the call with the word
+                    if self.hint(act.id, pc + 1) & HINT_FLOAT == 0 {
+                        let mut after = st.clone();
+                        after.r.acc = v;
+                        let fs = self.state(act, &after, pc + 1);
+                        return Ok(self.emit(Op::UnboxInt(v, fs), Rep::I32));
+                    }
                     return Ok(v);
                 }
             }
@@ -1976,7 +1984,7 @@ impl<'e> Builder<'e> {
             return false;
         }
         // No loops (a loop inside an inlined function is walked as its own region: fine, but keep it simple)
-        Cfg::new(tf).ok
+        self.cfgs.get(&tf.id().0).map_or_else(|| Cfg::new(tf).ok, |c| c.ok)
     }
 
     /// Inlines a call of `tf` (function object address `fp`); `construct`: (new.target, `this`)

@@ -328,7 +328,23 @@ pub extern "C" fn j8_poll(ctx: *mut Ctx) -> u64 {
 
 /// A guard failed (or the code hands over): rebuilds the interpreter frames of deopt `id` and continues there
 #[unsafe(no_mangle)]
-pub extern "C" fn j8_deopt(ctx: *mut Ctx, id: u64) -> u64 {
+pub extern "C" fn j8_deopt(ctx: *mut Ctx, id: u64) -> Ret {
+    Ret { value: deopt(ctx, id), int: 0 }
+}
+
+/// What native code returns: the value's word in rax, and in rdx [`Ret::INT`] | the int32 when it is one (0 else)
+#[repr(C)]
+pub struct Ret {
+    pub value: u64,
+    pub int: u64,
+}
+
+impl Ret {
+    /// rdx's mark: the low 32 bits hold the value as an int32
+    pub const INT: u64 = 1 << 32;
+}
+
+fn deopt(ctx: *mut Ctx, id: u64) -> u64 {
     // SAFETY: machine code passes its context
     let ctx = unsafe { &mut *ctx };
     let jit = ctx.jit();
@@ -368,10 +384,10 @@ pub extern "C" fn j8_deopt(ctx: *mut Ctx, id: u64) -> u64 {
 
 /// The interpreter frames a deopt's state stands for
 fn frames<'gc>(a: &mut Agent<'gc, '_>, ctx: &Ctx, d: &crate::Deopt) -> Vec<DeoptFrame<'gc>> {
-    let st = &d.state;
+    let st = d.state();
     let mut objs: Vec<Option<Value<'gc>>> = alloc::vec![None; st.objects.len()];
     let get = |v: u32| -> Value<'gc> {
-        let (rep, src) = d.values.get(&v).copied().unwrap_or((Rep::Word, crate::Src::Const(ValueBits::UNDEFINED)));
+        let (rep, src) = d.value(v);
         let bits = match src {
             crate::Src::Buf(i) => ctx.buf[i as usize],
             crate::Src::Const(b) => b,
@@ -428,7 +444,11 @@ fn frames<'gc>(a: &mut Agent<'gc, '_>, ctx: &Ctx, d: &crate::Deopt) -> Vec<Deopt
 
 /// A call through a trampoline that has no native code yet: run it in the interpreter (and count it)
 #[unsafe(no_mangle)]
-pub extern "C" fn j8_interp(ctx: *mut Ctx, callee: u64, this: u64, a0: u64, a1: u64, a2: u64) -> u64 {
+pub extern "C" fn j8_interp(ctx: *mut Ctx, callee: u64, this: u64, a0: u64, a1: u64, a2: u64) -> Ret {
+    Ret { value: interp(ctx, callee, this, a0, a1, a2), int: 0 }
+}
+
+fn interp(ctx: *mut Ctx, callee: u64, this: u64, a0: u64, a1: u64, a2: u64) -> u64 {
     // SAFETY: machine code passes its context
     let ctx = unsafe { &mut *ctx };
     let jit = ctx.jit();

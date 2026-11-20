@@ -18,31 +18,31 @@ cargo run --release -- --runs 10        # runs per benchmark, the shortest is ke
 
 ## Results
 
-`--runs 5`, 16-core machine, load average about 6 while measuring (other processes running); the numbers are noisy, only the order of magnitude matters. All 11 benchmarks produce matching checksums on all three engines.
+j8 runs with its JIT (`j8::jit::Jit`; `J8_NOJIT=1` runs the interpreter only). `--runs 10`, pinned to the performance
+cores (`taskset -c 0-3`), load average below 1. All 11 benchmarks produce matching checksums on all three engines.
 
 | Benchmark | j8 ms | V8 jitless ms | V8 ms | j8 / jitless | j8 / V8 |
 |---|---:|---:|---:|---:|---:|
-| fib | 41.6 | 9.5 | 2.1 | 4.4× | 19.5× |
-| loop | 316.8 | 182.9 | 81.1 | 1.7× | 3.9× |
-| objects | 76.1 | 15.2 | 2.6 | 5.0× | 28.9× |
-| array | 74.2 | 14.5 | 7.2 | 5.1× | 10.3× |
-| sort | 121.8 | 38.5 | 18.6 | 3.2× | 6.6× |
-| string | 46.2 | 12.7 | 12.0 | 3.6× | 3.8× |
-| closures | 77.5 | 19.3 | 2.6 | 4.0× | 29.5× |
-| classes | 127.7 | 25.8 | 3.1 | 5.0× | 40.8× |
-| collections | 69.4 | 31.0 | 25.4 | 2.2× | 2.7× |
-| json | 37.7 | 12.9 | 13.0 | 2.9× | 2.9× |
-| regexp | 19.3 | 3.1 | 2.0 | 6.1× | 9.7× |
-| **Geometric mean** | | | | **3.7×** | **9.4×** |
+| fib | 1.2 | 9.0 | 1.3 | 0.1× | 0.9× |
+| loop | 58.3 | 185.0 | 82.8 | 0.3× | 0.7× |
+| objects | 0.9 | 13.6 | 2.5 | 0.1× | 0.4× |
+| array | 40.8 | 13.0 | 6.5 | 3.1× | 6.3× |
+| sort | 65.8 | 32.1 | 16.5 | 2.1× | 4.0× |
+| string | 27.8 | 11.7 | 11.3 | 2.4× | 2.5× |
+| closures | 2.1 | 17.2 | 2.3 | 0.1× | 0.9× |
+| classes | 1.4 | 23.3 | 2.8 | 0.1× | 0.5× |
+| collections | 52.8 | 27.9 | 21.3 | 1.9× | 2.5× |
+| json | 24.9 | 11.6 | 11.5 | 2.2× | 2.2× |
+| regexp | 12.4 | 3.0 | 1.8 | 4.2× | 7.0× |
+| **Geometric mean** | | | | **0.6×** | **1.7×** |
 
-## Analysis (callgrind per-line instruction counts)
+## What the JIT does for them
 
-- **Interpreter dispatch**: a simple bytecode costs about 14 machine instructions (fetch + jump table); `run` is one big `match`, and its
-  register allocation is very sensitive to changes: adding a branch or changing a call's arguments inside it can push the state pointer onto
-  the stack, adding one or two loads per dispatch, and fib / closures / loop regress 3–5 % with it. Measure all benchmarks when changing it
-- **Calls**: each call + return costs about 400 instructions (function table lookup, opening a frame and filling registers, pushing and
-  popping the frame); the JIT only takes numeric loops, so call-heavy benchmarks (fib, closures, classes) are 20–40× behind V8 with JIT
-- **Allocation**: object property slots, strings longer than 23 bytes and rope nodes all go through glibc malloc (freed in batches on
-  collection, about 250 instructions each); 15–25 % of objects / classes / string
-- **loop**: only 1.7× behind jitless; what remains is mostly the 64-bit integer division of the remainder operation itself
-- **regexp**: pure literal patterns already use substring search; patterns like `\d+` still go through the regress backtracking engine
+- **fib**: a native function per JS function, called directly (arguments in registers, results unboxed through a second
+  return register), the recursive call inlined two levels deep; the global `fib` is read through an epoch cache
+- **closures**: the closure is inlined into the loop (checked by function identity), its context slots live in registers,
+  `% 100000` is a multiplication
+- **classes / objects**: constructors and methods inlined, objects that don't escape are never allocated (fields as values,
+  also across loop iterations: the loop entered on-stack is peeled once), shape checks and loads moved out of the loop
+- **loop**: `(s + i * i) % 1000003` with `i * i` past int32 runs as an int64 remainder of doubles
+- array, sort, string, collections, json and regexp spend their time in builtins (and the GC); the JIT doesn't help them yet

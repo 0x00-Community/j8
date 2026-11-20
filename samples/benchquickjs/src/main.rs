@@ -73,7 +73,8 @@ impl J8Runner {
         use j8::frame::{CreateParams, Error, Isolate, Source};
         let platform = j8::platform::DefaultPlatform::default();
         let mut isolate = Isolate::new(&platform, CreateParams::default());
-        let mut executor = Executor::default();
+        // With the JIT unless `J8_NOJIT` is set
+        let mut executor = if std::env::var_os("J8_NOJIT").is_some() { Executor::default() } else { Executor::default().with_tier(j8::jit::Jit::default()) };
         let mut best = f64::INFINITY;
         let mut result = String::new();
         for _ in 0..runs {
