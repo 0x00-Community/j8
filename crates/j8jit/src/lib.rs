@@ -54,6 +54,10 @@ pub struct Deopt {
     state: FrameState,
     values: BTreeMap<V, (Rep, Src)>,
     reason: Reason,
+    /// The guarding instruction (debugging)
+    op: u32,
+    /// Where a failure's hint goes, when not at the state's innermost frame (a guard moved out of a loop)
+    hint_at: Option<(FuncId, u32)>,
     /// The code was entered natively (no interpreter frame below)
     native: bool,
     /// The compiled function and how it was entered (to drop the code when a speculation fails)
@@ -102,6 +106,8 @@ struct State {
 /// ⭐ The JIT: handed to the executor (`Executor::with_tier`).
 pub struct Jit {
     threshold: u32,
+    /// The lowest stack address native code runs at (set the first time it runs)
+    floor: core::cell::Cell<u64>,
     epoch: core::cell::Cell<u64>,
     st: RefCell<State>,
 }
@@ -115,7 +121,7 @@ impl Default for Jit {
 impl From<u32> for Jit {
     /// Native code after `threshold` calls through a trampoline
     fn from(threshold: u32) -> Self {
-        Self { threshold, epoch: core::cell::Cell::new(1), st: RefCell::new(State::default()) }
+        Self { threshold, floor: core::cell::Cell::new(0), epoch: core::cell::Cell::new(1), st: RefCell::new(State::default()) }
     }
 }
 
@@ -145,6 +151,16 @@ impl Jit {
     /// Helper call `id`: what and how many operands
     fn call(&self, id: u64) -> (Helper, usize) {
         self.st.borrow().calls[usize::try_from(id).unwrap_or(0)]
+    }
+
+    /// See `Ctx::stack_floor`
+    fn stack_floor(&self) -> u64 {
+        if self.floor.get() == 0 {
+            let here = 0u8;
+            let at = core::ptr::from_ref(&here) as u64;
+            self.floor.set(at.saturating_sub(runtime::NATIVE_STACK));
+        }
+        self.floor.get()
     }
 
     /// A new epoch (see `Ctx::epoch`)
@@ -184,9 +200,9 @@ impl Jit {
     fn learn(&self, d: &Deopt) {
         let Some(fr) = d.state.frames.last() else { return };
         if std::env::var_os("J8_JIT_LOG").is_some() {
-            std::eprintln!("j8jit: deopt {:?} {:?} at {:?}@{} ({:?})", d.root, d.kind, fr.func, fr.pc, d.reason);
+            std::eprintln!("j8jit: deopt {:?} {:?} at {:?}@{} ({:?}, v{})", d.root, d.kind, fr.func, fr.pc, d.reason, d.op);
         }
-        let key = (fr.func.0, fr.pc);
+        let key = d.hint_at.map_or((fr.func.0, fr.pc), |(f, pc)| (f.0, pc));
         let bits = match d.reason {
             Reason::Int => HINT_FLOAT,
             Reason::Number | Reason::Shape => HINT_GENERIC,
@@ -376,7 +392,8 @@ impl Jit {
                 };
                 values.insert(v, (rep, Src::Const(bits)));
             }
-            st.deopts.push(Rc::new(Deopt { state, values, reason: exit.reason, native, root: f, kind }));
+            let hint_at = exit.hint.and_then(|h| built.graph.states[h as usize].frames.last().map(|fr| (fr.func, fr.pc)));
+            st.deopts.push(Rc::new(Deopt { state, values, reason: exit.reason, op: exit.op, hint_at, native, root: f, kind }));
         }
         Some(addr)
     }
@@ -408,6 +425,31 @@ impl Jit {
             add(s);
         }
         out
+    }
+
+    /// Runs native code at `addr` for the entry frame's call; the frame then returns by its `Return` at `ret`
+    fn run_native(&self, e: &mut Entry<'_, '_, '_, '_>, addr: usize, ret: usize) -> Tiered {
+        let params = e.params();
+        // SAFETY: the receiver and the formal parameters (at most three) are in the frame
+        let words: [u64; 4] = core::array::from_fn(|i| if i <= e.function().shared().formal_parameters as usize { unsafe { (*params.add(i)).bits() } } else { j8framework::ValueBits::UNDEFINED });
+        let callee = e.callee().bits();
+        let level = e.depth();
+        let exe = e.executor();
+        let saved = exe.jit_depth().replace(level);
+        let mut ctx = Ctx::new(e, self);
+        type NativeFn = unsafe extern "C" fn(*mut Ctx, u64, u64, u64, u64, u64) -> u64;
+        // SAFETY: native code takes (context, callee, this, three arguments)
+        let r = unsafe {
+            let f: NativeFn = core::mem::transmute::<usize, NativeFn>(addr);
+            f(&raw mut *ctx, callee, words[0], words[1], words[2], words[3])
+        };
+        exe.jit_depth().set(saved);
+        if ctx.pending != 0 {
+            return Tiered::Threw(ctx.error.take().unwrap_or(j8framework::Error::Terminated));
+        }
+        // SAFETY: a word of this mutate
+        e.resume_at(ret, unsafe { Value::from_bits(r) });
+        Tiered::Resumed
     }
 
     /// Runs interpreter-entry code at `addr` on the entry frame
@@ -444,6 +486,38 @@ impl Tier for Jit {
         let f = e.function();
         let id = f.id();
         f.tier_word().set(1);
+        // An ordinary call of a plain function: its native code (one compilation serves both kinds of callers)
+        let formals = usize::from(f.shared().formal_parameters);
+        if f.plain() && !f.class_constructor() && !e.constructing() && formals <= 3 {
+            let native = {
+                let mut st = self.st.borrow_mut();
+                let fs = Self::func(&mut st, id);
+                if fs.native_never { None } else { Some(fs.native) }
+            };
+            if let Some(native) = native {
+                let addr = match native {
+                    Some(a) => Some(a),
+                    None => match self.compile(e, id, Kind::Native(formals)) {
+                        Some(a) => {
+                            let mut st = self.st.borrow_mut();
+                            Self::func(&mut st, id).native = Some(a);
+                            let stub = Self::stub(&mut st, id);
+                            Self::point(&st, stub, a);
+                            Some(a)
+                        }
+                        None => {
+                            Self::func(&mut self.st.borrow_mut(), id).native_never = true;
+                            None
+                        }
+                    },
+                };
+                if let Some(addr) = addr
+                    && let Some(ret) = (0..f.len()).find(|&i| f.insn(i).bytecode == j8bytecode::Bytecode::Return)
+                {
+                    return self.run_native(e, addr, ret);
+                }
+            }
+        }
         let code = {
             let mut st = self.st.borrow_mut();
             let fs = Self::func(&mut st, id);

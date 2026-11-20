@@ -285,6 +285,18 @@ impl<'r, 'gc, 'x, 'b> Entry<'r, 'gc, 'x, 'b> {
         self.st.regs.as_mut_ptr().wrapping_add(at)
     }
 
+    /// The entry frame is a construct call's
+    pub fn constructing(&self) -> bool {
+        let f = self.st.f();
+        self.st.regs[f.base - Frame::NEW_TARGET].bits() != j8framework::ValueBits::UNDEFINED
+    }
+
+    /// The function object the entry frame runs
+    pub fn callee(&self) -> Value<'gc> {
+        let f = self.st.f();
+        self.st.regs[f.base - Frame::CLOSURE]
+    }
+
     /// Arguments passed to the entry frame
     pub fn argc(&self) -> usize {
         self.st.f().argc

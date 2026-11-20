@@ -46,6 +46,10 @@ pub enum Reason {
 pub struct Exit {
     pub fs: Fs,
     pub reason: Reason,
+    /// The instruction that jumps here (the first one, when shared)
+    pub op: u32,
+    /// A guard moved out of a loop: the frame state it had (a failure's hint goes to its instruction)
+    pub hint: Option<Fs>,
 }
 
 /// A runtime call's fixed part (`j8_helper`'s id indexes these).
@@ -272,7 +276,7 @@ impl<'g> Lower<'g> {
     /// A cold block handing over with frame state `fs`; gives its label. Values go into the buffer first.
     fn exit(&mut self, fs: Fs, reason: Reason) -> String {
         let id = u32::try_from(self.exits.len()).unwrap_or(0);
-        self.exits.push(Exit { fs, reason });
+        self.exits.push(Exit { fs, reason, op: 0, hint: None });
         let label = format!("^d{id}");
         let st = &self.g.states[fs as usize];
         let mut vals: Vec<V> = Vec::new();

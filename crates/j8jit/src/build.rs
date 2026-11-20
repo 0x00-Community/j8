@@ -120,6 +120,12 @@ enum Fact {
     Func(V, FuncId),
     /// The object's prototype is null
     NoProto(V),
+    /// The two contexts are different ones
+    Distinct(V, V),
+    /// The function (its word) was made in this context: its closure's environment
+    Env(V, V),
+    /// Global name constant `.1` of function `.0` read as this value (nothing ran since)
+    Global(u32, u32, V),
 }
 
 impl Fact {
@@ -131,6 +137,9 @@ impl Fact {
             Fact::Object(w, p) => Fact::Object(f(*w), f(*p)),
             Fact::Func(v, id) => Fact::Func(f(*v), *id),
             Fact::NoProto(v) => Fact::NoProto(f(*v)),
+            Fact::Distinct(a, b) => Fact::Distinct(f(*a), f(*b)),
+            Fact::Env(w, c) => Fact::Env(f(*w), f(*c)),
+            Fact::Global(func, k, v) => Fact::Global(*func, *k, f(*v)),
         }
     }
 }
@@ -771,12 +780,18 @@ impl<'e> Builder<'e> {
                     into.push((x, i));
                 }
             }
-            // Facts about one object (not relations between two values) carry over to the phi it went into
-            let extra: Vec<Fact> = known.iter().filter(|f| matches!(f, Fact::Shape(..) | Fact::Func(..) | Fact::NoProto(_))).flat_map(|f| {
-                into.iter().filter_map(|&(x, phi)| {
-                    let g = f.map(|v| if v == x { phi } else { v });
-                    (g != *f).then_some(g)
-                }).collect::<Vec<_>>()
+            // Facts carry over to the phis their values went into (a back edge breaking one drops it next time)
+            let sub = |v: V| into.iter().find(|(x, _)| *x == v).map_or(v, |(_, phi)| *phi);
+            let extra: Vec<Fact> = known.iter().filter_map(|f| {
+                let g = match f {
+                    // A load: only its base moves to the phi (the value loaded stays what it was)
+                    Fact::Load(k, b, o, v) => Fact::Load(*k, sub(*b), *o, *v),
+                    // A check: only the word moves to the phi (the address it gave stays)
+                    Fact::Object(w, p) => Fact::Object(sub(*w), *p),
+                    Fact::Env(w, c) => Fact::Env(sub(*w), *c),
+                    f => f.map(sub),
+                };
+                (g != *f).then_some(g)
             }).collect();
             known.extend(extra);
             known.retain(|f| !self.widen.bad.iter().any(|(k, b)| *k == hk && b == f));
@@ -1147,7 +1162,15 @@ impl<'e> Builder<'e> {
             };
             phi_in(v).unwrap_or(v)
         };
-        let broken: Vec<Fact> = h.known.iter().filter(|f| !st.heap.known.contains(&f.map(back))).cloned().collect();
+        // A word checked into an object: the register holds the address afterwards (then it must be that one)
+        let holds = |f: &Fact| -> bool {
+            let g = f.map(back);
+            match g {
+                Fact::Object(w, p) if w == p => true,
+                g => st.heap.known.contains(&g),
+            }
+        };
+        let broken: Vec<Fact> = h.known.iter().filter(|f| !holds(f)).cloned().collect();
         if !broken.is_empty() {
             for f in broken {
                 self.widen.bad.push(((act.inst, ri, tb as usize), f));
@@ -1161,6 +1184,9 @@ impl<'e> Builder<'e> {
                             Fact::Object(w, p) => alloc::format!("Object(v{w} = v{p})"),
                             Fact::Func(v, _) => alloc::format!("Func(v{v})"),
                             Fact::NoProto(v) => alloc::format!("NoProto(v{v})"),
+                            Fact::Distinct(a, b) => alloc::format!("Distinct(v{a}, v{b})"),
+                            Fact::Env(w, c) => alloc::format!("Env(v{w} = v{c})"),
+                            Fact::Global(_, k, v) => alloc::format!("Global({k} = v{v})"),
                         };
                         std::eprintln!("j8jit: restart: fact {} (back {})", d(f), d(&f.map(back)));
                     }
@@ -1187,6 +1213,16 @@ impl<'e> Builder<'e> {
             let mut v = get(&st, *k);
             if Self::is_virtual(&st, v) && !map.iter().any(|(_, y)| *y == v) {
                 v = self.materialize(&mut st, v, Some(b));
+            }
+            // The phi's own word, checked or untagged on the way: the phi itself goes round (no boxing again)
+            if self.g.rep(*phi) == Rep::Word && v != *phi {
+                let own = match self.g.op(v) {
+                    Op::Untag(w) | Op::CheckObject(w, _) => *w == *phi,
+                    _ => st.heap.known.contains(&Fact::Object(*phi, v)),
+                };
+                if own {
+                    v = *phi;
+                }
             }
             inputs.push((*phi, v));
         }
@@ -1537,6 +1573,14 @@ impl<'e> Builder<'e> {
     /// A function object's context (its closure's environment) as a context address
     /// As [`Builder::closure_env`], reusing loads this path did
     fn closure_env_on(&mut self, st: &mut St, f: V) -> V {
+        // A closure made here: its context is the one it was made in
+        let made = st.heap.known.iter().find_map(|x| match x {
+            Fact::Env(p, c) if *p == f => Some(*c),
+            _ => None,
+        });
+        if let Some(c) = made {
+            return c;
+        }
         let fast = self.load(st, LOAD_PTR, f, Self::off(Layout::OBJECT_CALL));
         self.load(st, LOAD_RAW, fast, Self::off(Layout::FAST_CLOSURE + Layout::CLOSURE_ENV))
     }
@@ -1559,14 +1603,34 @@ impl<'e> Builder<'e> {
     }
 
     /// Context slot `idx` of context `ctx` (a context address); through the path's memory
-    fn load_slot(&mut self, st: &mut St, ctx: V, idx: u32) -> V {
+    /// Guards that two contexts differ (once per path): their slots then don't alias
+    fn distinct(&mut self, act: &Act<'e>, st: &mut St, a: V, b: V, pc: usize) {
+        if st.heap.known.contains(&Fact::Distinct(a, b)) || st.heap.known.contains(&Fact::Distinct(b, a)) {
+            return;
+        }
+        let fs = self.state(act, st, pc);
+        let eq = self.emit(Op::CmpWord(Cond::Eq, a, b), Rep::Bool);
+        self.emit(Op::Check(eq, false, fs), Rep::None);
+        st.heap.known.push(Fact::Distinct(a, b));
+    }
+
+    fn load_slot(&mut self, act: &Act<'e>, st: &mut St, ctx: V, idx: u32, pc: usize) -> V {
         if let Some(m) = st.heap.mem.iter().find(|m| m.ctx == ctx && m.idx == idx) {
             return m.val;
         }
-        // Another context's dirty entry at the same index could be this one: write it back first
+        // Another context's entry at the same index could be this one: they differ (guarded; when that failed
+        // here before, the other's value is written back instead)
+        let alias = self.hint(act.id, pc) & HINT_GENERIC != 0 || std::env::var_os("J8_NODISTINCT").is_some();
         for m in st.heap.mem.clone() {
-            if m.idx == idx && m.dirty {
-                self.write_back(st, &m, None);
+            if m.idx == idx && m.ctx != ctx {
+                if alias {
+                    // Reading doesn't change it: written back so the load sees it, and still known
+                    if m.dirty {
+                        self.write_back(st, &m, None);
+                    }
+                } else {
+                    self.distinct(act, st, m.ctx, ctx, pc);
+                }
             }
         }
         let cell = self.emit(Op::ContextCell(ctx, idx), Rep::Ptr);
@@ -1575,14 +1639,19 @@ impl<'e> Builder<'e> {
         v
     }
 
-    fn store_slot(&mut self, st: &mut St, ctx: V, idx: u32, v: V) {
-        // Entries at the same index of other contexts may be this one: write back dirty ones and forget them
+    fn store_slot(&mut self, act: &Act<'e>, st: &mut St, ctx: V, idx: u32, v: V, pc: usize) {
+        // Entries at the same index of other contexts may be this one: they differ (guarded; see `load_slot`)
+        let alias = self.hint(act.id, pc) & HINT_GENERIC != 0;
         let others: Vec<Mem> = st.heap.mem.iter().filter(|m| m.idx == idx && m.ctx != ctx).cloned().collect();
         for m in others {
-            if m.dirty {
-                self.write_back(st, &m, None);
+            if alias {
+                if m.dirty {
+                    self.write_back(st, &m, None);
+                }
+                st.heap.mem.retain(|x| !(x.idx == idx && x.ctx == m.ctx));
+            } else {
+                self.distinct(act, st, m.ctx, ctx, pc);
             }
-            st.heap.mem.retain(|x| !(x.idx == idx && x.ctx == m.ctx));
         }
         match st.heap.mem.iter_mut().find(|m| m.ctx == ctx && m.idx == idx) {
             Some(m) => {
@@ -1635,6 +1704,12 @@ impl<'e> Builder<'e> {
                 let p = self.emit(Op::CheckObject(v, fs), Rep::Ptr);
                 Self::replace(st, v, p);
                 st.heap.known.push(Fact::Object(v, p));
+                if let Some(c) = st.heap.known.iter().find_map(|f| match f {
+                    Fact::Env(w, c) if *w == v => Some(*c),
+                    _ => None,
+                }) {
+                    st.heap.known.push(Fact::Env(p, c));
+                }
                 p
             }
         }
@@ -1798,8 +1873,8 @@ impl<'e> Builder<'e> {
                 if self.inlinable(act, tf, pc) {
                     return self.inline(act, st, p, tf, this, args, None, pc);
                 }
-                if args.len() <= 4 {
-                    let cw = self.to_word(p);
+                if args.len() <= 3 {
+                    let cw = if self.g.rep(callee) == Rep::Word { callee } else { self.to_word(p) };
                     let tw = self.real(st, this);
                     let aw: Vec<V> = args.iter().map(|a| self.real(st, *a)).collect();
                     self.flush(st);
@@ -2203,26 +2278,26 @@ impl<'e> Builder<'e> {
             Bc::LdaCurrentContextSlot | Bc::LdaCurrentContextSlotNoCell | Bc::LdaImmutableCurrentContextSlot => {
                 let c = self.ctx_ptr(st.r.ctx);
                 Self::replace_ctx(st, c);
-                let v = self.load_slot(st, c, Self::env_index(o[0]));
+                let v = self.load_slot(act, st, c, Self::env_index(o[0]), pc);
                 set_acc!(v);
             }
             Bc::StaCurrentContextSlot | Bc::StaCurrentContextSlotNoCell => {
                 let c = self.ctx_ptr(st.r.ctx);
                 Self::replace_ctx(st, c);
-                self.store_slot(st, c, Self::env_index(o[0]), acc);
+                self.store_slot(act, st, c, Self::env_index(o[0]), acc, pc);
             }
             Bc::LdaContextSlot | Bc::LdaContextSlotNoCell | Bc::LdaImmutableContextSlot => {
                 let r = Self::reg(act, st, o[0])?;
                 let c = self.ctx_ptr(r);
                 let c = self.context_up(c, o[2]);
-                let v = self.load_slot(st, c, Self::env_index(o[1]));
+                let v = self.load_slot(act, st, c, Self::env_index(o[1]), pc);
                 set_acc!(v);
             }
             Bc::StaContextSlot | Bc::StaContextSlotNoCell => {
                 let r = Self::reg(act, st, o[0])?;
                 let c = self.ctx_ptr(r);
                 let c = self.context_up(c, o[2]);
-                self.store_slot(st, c, Self::env_index(o[1]), acc);
+                self.store_slot(act, st, c, Self::env_index(o[1]), acc, pc);
             }
             Bc::PushContext => {
                 let cur = st.r.ctx;
@@ -2246,8 +2321,12 @@ impl<'e> Builder<'e> {
                 set_acc!(self.emit(Op::Call(Helper::CreateContext(shape, n), vec![parent], None), Rep::Word));
             }
             Bc::CreateClosure => {
-                let parent = self.to_word(st.r.ctx);
-                set_acc!(self.emit(Op::Call(Helper::CreateClosure(act.id, u32::try_from(o[0]).unwrap_or(0)), vec![parent], None), Rep::Word));
+                let c = self.ctx_ptr(st.r.ctx);
+                Self::replace_ctx(st, c);
+                let parent = self.to_word(c);
+                let f = self.emit(Op::Call(Helper::CreateClosure(act.id, u32::try_from(o[0]).unwrap_or(0)), vec![parent], None), Rep::Word);
+                st.heap.known.push(Fact::Env(f, c));
+                set_acc!(f);
             }
             Bc::LdaGlobal | Bc::LdaGlobalInsideTypeof => {
                 let v = self.global(act, st, o[0], o[1], pc)?;
@@ -2350,10 +2429,19 @@ impl<'e> Builder<'e> {
     /// A global name through its cache
     fn global(&mut self, act: &Act<'e>, st: &mut St, name: OperandValue, slot: OperandValue, pc: usize) -> R<V> {
         if self.hint(act.id, pc) & HINT_GENERIC == 0 {
+            let nk = u32::try_from(name).unwrap_or(0);
+            if let Some(v) = st.heap.known.iter().find_map(|f| match f {
+                Fact::Global(func, k, v) if *func == act.id.0 && *k == nk => Some(*v),
+                _ => None,
+            }) {
+                return Ok(v);
+            }
             let k = u32::try_from(self.g.globals.len()).unwrap_or(0);
-            self.g.globals.push((act.id, u32::try_from(name).unwrap_or(0), u32::try_from(slot).unwrap_or(0)));
+            self.g.globals.push((act.id, nk, u32::try_from(slot).unwrap_or(0)));
             let fs = self.state(act, st, pc);
-            return Ok(self.emit(Op::Global(k, None, fs), Rep::Word));
+            let v = self.emit(Op::Global(k, None, fs), Rep::Word);
+            st.heap.known.push(Fact::Global(act.id.0, nk, v));
+            return Ok(v);
         }
         let fb = act.f.global(slot);
         if let Some(fb) = fb

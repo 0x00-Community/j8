@@ -27,6 +27,8 @@ pub const ARGS_WORDS: usize = 16;
 pub const BUDGET_CHUNK: i64 = 1024;
 /// Native frames at most (deeper hands over to the interpreter, which throws when it is too deep)
 pub const DEPTH_LIMIT: u64 = 2000;
+/// Stack native code may use below where the JIT first ran (machine code past it hands over)
+pub const NATIVE_STACK: u64 = 1 << 20;
 
 /// The context machine code runs with (see the module docs for the layout).
 #[repr(C)]
@@ -45,7 +47,9 @@ pub struct Ctx {
     pub epoch: u64,
     /// A global cache site's slow path found another function than expected
     pub miss: u64,
-    pad: [u64; 4],
+    /// Native code doesn't go below this stack address (deeper calls hand over to the interpreter)
+    pub stack_floor: u64,
+    pad: [u64; 3],
     pub args: [u64; ARGS_WORDS],
     pub buf: [u64; BUF_WORDS],
     // ---- not read by machine code ----
@@ -68,6 +72,7 @@ impl Ctx {
     pub const LIMIT: i32 = 72;
     pub const EPOCH: i32 = 80;
     pub const MISS: i32 = 88;
+    pub const STACK_FLOOR: i32 = 96;
     pub const ARGS: i32 = 128;
     pub const BUF: i32 = 256;
 
@@ -90,7 +95,8 @@ impl Ctx {
             limit: DEPTH_LIMIT,
             epoch: jit.bump(),
             miss: 0,
-            pad: [0; 4],
+            stack_floor: jit.stack_floor(),
+            pad: [0; 3],
             args: [0; ARGS_WORDS],
             buf: [0; BUF_WORDS],
             entry: core::ptr::from_mut(e).cast(),

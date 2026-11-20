@@ -376,6 +376,8 @@ pub struct FrameState {
 /// A function's graph.
 #[derive(Default)]
 pub struct Graph {
+    /// Guards moved out of loops: (guard, its frame state before the move — where hints go)
+    pub hoisted: Vec<(V, Fs)>,
     /// Loop headers entered from one block: (header, that block, the frame state of entering the loop)
     pub preheaders: Vec<(B, B, Fs)>,
     /// Global cache sites: (function, name constant, feedback slot)

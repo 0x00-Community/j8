@@ -8,7 +8,9 @@ use crate::ir::{Graph, Helper, Op, Slot, B, V};
 pub fn simplify(g: &mut Graph) {
     trivial_phis(g);
     dead(g);
-    hoist(g);
+    if std::env::var_os("J8_NOLICM").is_none() {
+        hoist(g);
+    }
 }
 
 /// Reachable blocks in reverse postorder, and each block's predecessors
@@ -135,7 +137,21 @@ fn hoist(g: &mut Graph) {
             work.extend(preds[b as usize].iter().copied());
         }
         let in_body: Vec<B> = order.iter().copied().filter(|b| body[*b as usize]).collect();
-        if in_body.iter().any(|&b| g.blocks[b as usize].insts.iter().any(|&v| clobbers(&g.insts[v as usize].op))) {
+        // Writes to context slots change only context slots; anything else that writes or calls stops the motion
+        let ctx_store = |op: &Op| matches!(op, Op::StoreCell(base, _, _) if matches!(g.insts[*base as usize].op, Op::ContextCell(..)));
+        let mut ctx_writes = false;
+        let mut other = false;
+        for &b in &in_body {
+            for &v in &g.blocks[b as usize].insts {
+                let op = &g.insts[v as usize].op;
+                if ctx_store(op) {
+                    ctx_writes = true;
+                } else if clobbers(op) {
+                    other = true;
+                }
+            }
+        }
+        if other {
             continue;
         }
         // Blocks run every iteration: dominating every latch
@@ -158,10 +174,15 @@ fn hoist(g: &mut Graph) {
                 if ins.iter().any(|&x| inside[x as usize]) {
                     continue;
                 }
+                // A context slot read stays when the loop writes context slots
+                if ctx_writes && matches!(op, Op::LoadWord(base, _) if matches!(g.insts[*base as usize].op, Op::ContextCell(..))) {
+                    continue;
+                }
                 // Guards hand over at the loop's entry instead
                 let mut op = op.clone();
-                if op.frame_state().is_some() {
+                if let Some(old) = op.frame_state() {
                     set_frame_state(&mut op, fs);
+                    g.hoisted.push((v, old));
                 }
                 g.insts[v as usize].op = op;
                 g.blocks[b as usize].insts.retain(|&x| x != v);

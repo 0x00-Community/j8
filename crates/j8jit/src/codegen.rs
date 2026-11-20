@@ -35,6 +35,18 @@ enum Loc {
     None,
 }
 
+/// A parallel copy's source.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Src {
+    Reg(R),
+    /// An int32 in a register, passed as a number word
+    Int(R),
+    Stack(i32),
+    IntStack(i32),
+    Imm(u64),
+    Xmm(X),
+}
+
 /// What the code calls (patched by the installer).
 #[derive(Clone, Copy, Debug)]
 pub enum Sym {
@@ -88,8 +100,10 @@ pub struct Gen<'g> {
     arity: Vec<usize>,
     deopt_base: u32,
     helper_base: u32,
-    /// (fs, reason) ⇒ its stub's label
-    stubs: Vec<(Fs, Reason, Label)>,
+    /// (fs, reason, hint state) ⇒ its stub's label, and the first instruction using it
+    stubs: Vec<(Fs, Reason, Option<Fs>, Label, V)>,
+    /// The instruction being emitted
+    cur: V,
     /// Cold code emitted after the body: (label, what)
     cold: Vec<(Label, Cold)>,
     /// Uses of each value (to fuse compares into their only branch)
@@ -111,7 +125,7 @@ enum Cold {
 
 impl<'g> Gen<'g> {
     pub fn generate(g: &'g Graph, kind: Kind, deopt_base: u32, helper_base: u32, globals: &'g [u64]) -> Generated {
-        let mut cg = Gen { g, kind, globals, a: Asm::default(), loc: vec![Loc::None; g.insts.len()], frame: 0, blocks: BTreeMap::new(), relocs: Vec::new(), exits: Vec::new(), values: Vec::new(), calls: Vec::new(), arity: Vec::new(), deopt_base, helper_base, stubs: Vec::new(), cold: Vec::new(), uses: vec![0; g.insts.len()], used_caller: Vec::new(), used_xmm: 0 };
+        let mut cg = Gen { g, kind, globals, a: Asm::default(), loc: vec![Loc::None; g.insts.len()], frame: 0, blocks: BTreeMap::new(), relocs: Vec::new(), exits: Vec::new(), values: Vec::new(), calls: Vec::new(), arity: Vec::new(), deopt_base, helper_base, stubs: Vec::new(), cur: 0, cold: Vec::new(), uses: vec![0; g.insts.len()], used_caller: Vec::new(), used_xmm: 0 };
         let order = cg.order();
         cg.allocate(&order);
         cg.emit(&order);
@@ -492,17 +506,18 @@ impl<'g> Gen<'g> {
 
     /// The stub handing over with `fs` (one per frame state and reason)
     fn exit(&mut self, fs: Fs, reason: Reason) -> Label {
-        if let Some(&(_, _, l)) = self.stubs.iter().find(|(f, r, _)| *f == fs && *r == reason) {
+        let hint = self.g.hoisted.iter().find(|(v, _)| *v == self.cur).map(|(_, f)| *f);
+        if let Some(&(_, _, _, l, _)) = self.stubs.iter().find(|(f, r, h, _, _)| *f == fs && *r == reason && *h == hint) {
             return l;
         }
         let l = self.a.label();
-        self.stubs.push((fs, reason, l));
+        self.stubs.push((fs, reason, hint, l, self.cur));
         l
     }
 
-    fn emit_stub(&mut self, fs: Fs, reason: Reason, l: Label) {
+    fn emit_stub(&mut self, fs: Fs, reason: Reason, hint: Option<Fs>, l: Label, op: V) {
         let id = u32::try_from(self.exits.len()).unwrap_or(0);
-        self.exits.push(Exit { fs, reason });
+        self.exits.push(Exit { fs, reason, op, hint });
         self.a.bind(l);
         let mut vals = Vec::new();
         Self::state_values(self.g, fs, &mut vals);
@@ -553,9 +568,23 @@ impl<'g> Gen<'g> {
         self.a.mov_rr(R15, RDI);
         match self.kind {
             Kind::Native(_) => {
-                for (i, r) in [RSI, RDX, RCX, R8, R9].into_iter().enumerate() {
-                    self.a.store(RBP, ENTRY_SLOT - 8 * i32::try_from(i).unwrap_or(0), r);
+                // The callee and the arguments go straight where their values live
+                let incoming = [RSI, RDX, RCX, R8, R9];
+                let mut to_regs: Vec<(R, R)> = Vec::new();
+                for &v in &self.g.blocks[0].insts {
+                    let src = match self.g.op(v) {
+                        Op::Callee => incoming[0],
+                        Op::Param(i) => incoming[1 + (*i as usize).min(3)],
+                        _ => continue,
+                    };
+                    match self.loc(v) {
+                        Loc::Stack(d) => self.a.store(RBP, d, src),
+                        Loc::Gpr(r) => to_regs.push((src, r)),
+                        Loc::Xmm(x) => self.a.movq_xr(x, src),
+                        _ => {}
+                    }
                 }
+                self.fixed_moves(to_regs.into_iter().map(|(s, d)| (Src::Reg(s), d)).collect());
             }
             _ => {
                 self.a.store(RBP, ENTRY_SLOT, RSI);
@@ -566,11 +595,6 @@ impl<'g> Gen<'g> {
 
     /// Returns rax (natives count their depth down first)
     fn epilogue(&mut self) {
-        if let Kind::Native(_) = self.kind {
-            self.a.load(RCX, R15, Ctx::DEPTH);
-            self.a.alu_ri(Alu::Sub, true, RCX, 1);
-            self.a.store(R15, Ctx::DEPTH, RCX);
-        }
         self.a.lea(RSP, RBP, SAVED_END);
         for r in [R15, R14, R13, R12, RBX] {
             self.a.pop(r);
@@ -657,8 +681,8 @@ impl<'g> Gen<'g> {
             }
         }
         let stubs = self.stubs.clone();
-        for (fs, reason, l) in stubs {
-            self.emit_stub(fs, reason, l);
+        for (fs, reason, hint, l, op) in stubs {
+            self.emit_stub(fs, reason, hint, l, op);
         }
     }
 
@@ -801,14 +825,17 @@ impl<'g> Gen<'g> {
     }
 
     fn inst(&mut self, b: B, v: V, next: Option<B>, prev: Option<V>) {
+        self.cur = v;
         let op = self.g.op(v).clone();
         let fused_prev = prev.is_some_and(|p| self.fusable(p, v));
         match op {
             Op::Phi(_) | Op::I32(_) | Op::F64(_) | Op::Word(_) => {}
+            Op::Param(_) if matches!(self.kind, Kind::Native(_)) => {}
+            Op::Callee => {}
             Op::Param(i) => {
                 let d = self.dst(v, RAX);
                 match self.kind {
-                    Kind::Native(_) => self.a.load(d, RBP, ENTRY_SLOT - 8 * (1 + i32::try_from(i.min(3)).unwrap_or(0))),
+                    Kind::Native(_) => {}
                     _ => {
                         let (p, r) = (self.g.entry_params, self.g.entry_regs);
                         let i = i as usize;
@@ -837,11 +864,7 @@ impl<'g> Gen<'g> {
                 }
                 self.put(v, d);
             }
-            Op::Callee => {
-                let d = self.dst(v, RAX);
-                self.a.load(d, RBP, ENTRY_SLOT);
-                self.put(v, d);
-            }
+
             Op::CtxField(off) => {
                 let d = self.dst(v, RAX);
                 self.a.load(d, R15, off);
@@ -1077,11 +1100,9 @@ impl<'g> Gen<'g> {
                 self.cold.push((slow, Cold::Global { cont, id, cache, miss, throw }));
             }
             Op::Enter(fs) => {
-                self.a.load(RAX, R15, Ctx::DEPTH);
-                self.a.alu_ri(Alu::Add, true, RAX, 1);
-                self.a.store(R15, Ctx::DEPTH, RAX);
-                self.a.alu_rm(Alu::Cmp, true, RAX, R15, Ctx::LIMIT);
-                self.exit_if(Cc::Ae, fs, Reason::Depth);
+                // Too deep on the machine stack: the interpreter goes on (and throws when it is too deep too)
+                self.a.alu_rm(Alu::Cmp, true, RSP, R15, Ctx::STACK_FLOOR);
+                self.exit_if(Cc::B, fs, Reason::Depth);
             }
             Op::Call(h, args, fs) => {
                 let id = self.helper_id(h, args.len());
@@ -1114,17 +1135,12 @@ impl<'g> Gen<'g> {
                 }
             }
             Op::CallJit(k, callee, this, args, fs) => {
-                let mut all = vec![callee, this];
-                all.extend_from_slice(&args);
-                self.args_to_ctx(&all);
-                for i in args.len()..3 {
-                    self.a.mov_ri(RAX, ValueBits::UNDEFINED);
-                    self.a.store(R15, Ctx::ARGS + 8 * i32::try_from(2 + i).unwrap_or(0), RAX);
+                // Straight into the argument registers (a parallel copy); missing arguments are undefined
+                let mut srcs: Vec<(Src, R)> = vec![(Src::Reg(R15), RDI), (self.src(callee), RSI), (self.src(this), RDX)];
+                for (i, r) in [RCX, R8, R9].into_iter().enumerate() {
+                    srcs.push((args.get(i).map_or(Src::Imm(ValueBits::UNDEFINED), |a| self.src(*a)), r));
                 }
-                self.a.mov_rr(RDI, R15);
-                for (i, r) in [RSI, RDX, RCX, R8, R9].into_iter().enumerate() {
-                    self.a.load(r, R15, Ctx::ARGS + 8 * i32::try_from(i).unwrap_or(0));
-                }
+                self.fixed_moves(srcs);
                 let at = self.a.call_abs(0);
                 self.relocs.push((at, Sym::Target(k)));
                 self.a.cmp_mi(true, R15, Ctx::PENDING, 0);
@@ -1278,6 +1294,37 @@ impl<'g> Gen<'g> {
                 }
                 self.put(v, RAX);
             }
+            IntOp::Mod if imm.is_some_and(|d| d >= 2) => {
+                // By a constant: |x| − ⌊|x|·m / 2^n⌋·d with the sign of x (m = ⌊2^n / d⌋ + 1, n = 31 + ⌈log2 d⌉:
+                // exact for |x| < 2^31), no division
+                let fs = fs.expect("a modulus has a frame state");
+                let d = imm.unwrap_or(2);
+                let l = 32 - (d - 1).cast_unsigned().leading_zeros();
+                let n = 31 + l;
+                let m = (1u64 << n) / u64::from(d.cast_unsigned()) + 1;
+                let rx = self.gpr(x, RAX);
+                self.a.movsxd(RAX, rx);
+                self.a.mov_rr(R11, RAX);
+                self.a.mov_rr(RDX, RAX);
+                self.a.shift_ri(7, true, RDX, 63);
+                self.a.alu_rr(Alu::Xor, true, RAX, RDX);
+                self.a.alu_rr(Alu::Sub, true, RAX, RDX);
+                self.a.mov_ri(RCX, m);
+                self.a.imul_rr(true, RCX, RAX);
+                self.a.shift_ri(5, true, RCX, u8::try_from(n).unwrap_or(63));
+                self.a.imul_rri(true, RCX, RCX, d);
+                self.a.alu_rr(Alu::Sub, true, RAX, RCX);
+                self.a.alu_rr(Alu::Xor, true, RAX, RDX);
+                self.a.alu_rr(Alu::Sub, true, RAX, RDX);
+                // 0 from a negative dividend is −0
+                let ok = self.a.label();
+                self.a.test_rr(false, RAX, RAX);
+                self.a.jcc(Cc::Ne, ok);
+                self.a.test_rr(true, R11, R11);
+                self.exit_if(Cc::L, fs, Reason::Int);
+                self.a.bind(ok);
+                self.put(v, RAX);
+            }
             IntOp::Mod => {
                 let fs = fs.expect("a modulus has a frame state");
                 let ry = self.gpr(y, RCX);
@@ -1379,6 +1426,68 @@ impl<'g> Gen<'g> {
                         }
                     }
                 }
+            }
+        }
+    }
+
+    /// Where a word operand comes from, for a parallel copy into fixed registers
+    fn src(&self, v: V) -> Src {
+        match (self.loc(v), self.g.rep(v)) {
+            (Loc::Gpr(r), Rep::I32) => Src::Int(r),
+            (Loc::Gpr(r), _) => Src::Reg(r),
+            (Loc::Stack(d), Rep::I32) => Src::IntStack(d),
+            (Loc::Stack(d), _) => Src::Stack(d),
+            (Loc::Xmm(x), _) => Src::Xmm(x),
+            (Loc::Const, Rep::I32) => Src::Imm(f64::from((self.const_bits(v).unwrap_or(0) as u32).cast_signed()).to_bits()),
+            (Loc::Const, Rep::Bool) => Src::Imm(ValueBits::FALSE + self.const_bits(v).unwrap_or(0)),
+            (Loc::Const, _) => Src::Imm(self.const_bits(v).unwrap_or(0)),
+            _ => Src::Imm(ValueBits::UNDEFINED),
+        }
+    }
+
+    /// Moves sources into registers at once (no source is clobbered before it is read)
+    fn fixed_moves(&mut self, mut pending: Vec<(Src, R)>) {
+        pending.retain(|(s, d)| *s != Src::Reg(*d));
+        while !pending.is_empty() {
+            let reads = |p: &[(Src, R)], r: R| p.iter().any(|(s, _)| matches!(s, Src::Reg(x) | Src::Int(x) if *x == r));
+            match (0..pending.len()).find(|&i| !reads(&pending[..i], pending[i].1) && !reads(&pending[i + 1..], pending[i].1)) {
+                Some(i) => {
+                    let (s, d) = pending.remove(i);
+                    self.load_src(s, d);
+                }
+                None => {
+                    // A cycle: the first destination's current value goes to RAX
+                    let d = pending[0].1;
+                    self.a.mov_rr(RAX, d);
+                    for (s, _) in &mut pending {
+                        match s {
+                            Src::Reg(x) if *x == d => *s = Src::Reg(RAX),
+                            Src::Int(x) if *x == d => *s = Src::Int(RAX),
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn load_src(&mut self, s: Src, d: R) {
+        match s {
+            Src::Reg(r) => self.a.mov_rr(d, r),
+            Src::Stack(o) => self.a.load(d, RBP, o),
+            Src::Imm(x) => self.a.mov_ri(d, x),
+            Src::Xmm(x) => self.a.movq_rx(d, x),
+            // An int32 travels as a number word
+            Src::Int(r) => {
+                self.a.zero_x(XS);
+                self.a.cvtsi2sd(XS, r);
+                self.a.movq_rx(d, XS);
+            }
+            Src::IntStack(o) => {
+                self.a.load32(d, RBP, o);
+                self.a.zero_x(XS);
+                self.a.cvtsi2sd(XS, d);
+                self.a.movq_rx(d, XS);
             }
         }
     }
