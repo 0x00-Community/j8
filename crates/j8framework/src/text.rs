@@ -1,10 +1,11 @@
 //! Strings (shared by property keys and JS string values).
 //!
-//! Short ones (at most 23 bytes) are stored inline without a separate allocation; long ones share a single heap copy.
-//! When string `+` produces something long enough it is first stored as a rope (two halves plus the total length) and
-//! flattened and cached only when the content is first needed (so a `s += c` loop no longer copies the whole string
-//! each time). Flattening and dropping are both iterative, so ropes hundreds of thousands of levels deep don't overflow
-//! the stack. No `Gc`: the GC doesn't need to manage it.
+//! Short ones (at most [`INLINE`] bytes) are stored inline without a separate allocation; long ones share a single heap
+//! copy, and a piece cut out of a long one (`split`, `slice`, a regex match) points into that copy instead of copying
+//! (V8's sliced strings). When string `+` produces something long enough it is first stored as a rope (two halves plus
+//! the total length) and flattened and cached only when the content is first needed (so a `s += c` loop no longer
+//! copies the whole string each time). Flattening and dropping are both iterative, so ropes hundreds of thousands of
+//! levels deep don't overflow the stack. No `Gc`: the GC doesn't need to manage it.
 use alloc::sync::Arc;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -15,10 +16,13 @@ use core::hash::{Hash, Hasher};
 use j8lockfree::OnceBox;
 
 use crate::{Collect};
-use smol_str::SmolStr;
 
 /// Below this many bytes, concatenation flattens directly (copying a short string is cheaper than building a rope node)
 const ROPE_MIN: usize = 128;
+/// The longest string stored inline
+const INLINE: usize = 22;
+/// The longest piece kept as a slice of its parent's copy (longer pieces get their own: the length is 16 bits)
+const SLICE_MAX: usize = u16::MAX as usize;
 
 /// A string.
 #[derive(Clone, Collect)]
@@ -27,15 +31,20 @@ pub struct SmallStr(Repr);
 
 #[derive(Clone)]
 enum Repr {
-    Flat(SmolStr),
+    Inline { len: u8, bytes: [u8; INLINE] },
+    Heap(Arc<str>),
+    /// Bytes `start .. start + len` of `buf` (on character boundaries)
+    Slice { len: u16, start: u32, buf: Arc<str> },
     Rope(Arc<Rope>),
 }
+
+const _: () = assert!(core::mem::size_of::<SmallStr>() == 24, "a string is three words");
 
 /// A rope node: two halves plus the flattened text once someone needed it. The halves stay until the node is dropped
 /// (other threads may be reading them while one flattens; freeing them early would need hazard pointers).
 struct Rope {
     len: usize,
-    flat: OnceBox<SmolStr>,
+    flat: OnceBox<SmallStr>,
     halves: Option<(SmallStr, SmallStr)>,
 }
 
@@ -59,30 +68,62 @@ impl SmallStr {
     }
 
     /// Byte count (without flattening)
+    #[inline]
     pub fn byte_len(&self) -> usize {
         match &self.0 {
-            Repr::Flat(s) => s.len(),
+            Repr::Inline { len, .. } => usize::from(*len),
+            Repr::Heap(s) => s.len(),
+            Repr::Slice { len, .. } => usize::from(*len),
             Repr::Rope(r) => r.len,
         }
     }
 
+    #[inline]
     pub fn as_str(&self) -> &str {
         match &self.0 {
-            Repr::Flat(s) => s,
-            Repr::Rope(r) => r.flat.get_or_init(|| r.flatten()),
+            // SAFETY: the inline bytes are a copy of a `str` (cut on a character boundary)
+            Repr::Inline { len, bytes } => unsafe { core::str::from_utf8_unchecked(&bytes[..usize::from(*len)]) },
+            Repr::Heap(s) => s,
+            // SAFETY: `slice` cut the range on character boundaries inside `buf`
+            Repr::Slice { len, start, buf } => unsafe { buf.get_unchecked(*start as usize..*start as usize + usize::from(*len)) },
+            Repr::Rope(r) => r.flat.get_or_init(|| r.flatten()).as_str(),
         }
+    }
+
+    /// `piece`, borrowed from this string's text, as a string of its own: short pieces are copied inline, longer
+    /// ones point into this string's heap copy; `None` for text from anywhere else
+    pub fn piece(&self, piece: &str) -> Option<SmallStr> {
+        let text = self.as_str();
+        let at = (piece.as_ptr() as usize).checked_sub(text.as_ptr() as usize)?;
+        if at + piece.len() > text.len() {
+            return None;
+        }
+        if piece.len() == text.len() {
+            return Some(self.clone());
+        }
+        let (buf, base) = match &self.0 {
+            _ if piece.len() <= INLINE || piece.len() > SLICE_MAX => return Some(Self::from(piece)),
+            Repr::Heap(b) => (b, 0),
+            Repr::Slice { start, buf, .. } => (buf, *start as usize),
+            Repr::Rope(n) => match n.flat.get().map(|f| &f.0) {
+                Some(Repr::Heap(b)) => (b, 0),
+                _ => return Some(Self::from(piece)),
+            },
+            Repr::Inline { .. } => return Some(Self::from(piece)),
+        };
+        let (Ok(len), Ok(start)) = (u16::try_from(piece.len()), u32::try_from(base + at)) else { return Some(Self::from(piece)) };
+        Some(Self(Repr::Slice { len, start, buf: buf.clone() }))
     }
 }
 
 impl Rope {
     /// Concatenate the leaves in order (nested nodes that are already flat contribute their text)
-    fn flatten(&self) -> SmolStr {
+    fn flatten(&self) -> SmallStr {
         let mut out = String::with_capacity(self.len);
         let (l, r) = self.halves.clone().expect("a rope keeps its halves");
         let mut stack = alloc::vec![r, l];
         while let Some(s) = stack.pop() {
             match &s.0 {
-                Repr::Flat(f) => out.push_str(f),
                 Repr::Rope(n) => match n.flat.get() {
                     Some(f) => out.push_str(f),
                     None => {
@@ -91,9 +132,10 @@ impl Rope {
                         stack.push(a);
                     }
                 },
+                _ => out.push_str(s.as_str()),
             }
         }
-        SmolStr::from(out)
+        SmallStr(Repr::Heap(Arc::from(out)))
     }
 }
 
@@ -120,6 +162,7 @@ impl Drop for Rope {
 impl core::ops::Deref for SmallStr {
     type Target = str;
 
+    #[inline]
     fn deref(&self) -> &str {
         self.as_str()
     }
@@ -133,7 +176,14 @@ impl core::borrow::Borrow<str> for SmallStr {
 
 impl From<&str> for SmallStr {
     fn from(s: &str) -> Self {
-        Self(Repr::Flat(SmolStr::new(s)))
+        match u8::try_from(s.len()) {
+            Ok(len) if s.len() <= INLINE => {
+                let mut bytes = [0; INLINE];
+                bytes[..s.len()].copy_from_slice(s.as_bytes());
+                Self(Repr::Inline { len, bytes })
+            }
+            _ => Self(Repr::Heap(Arc::from(s))),
+        }
     }
 }
 
@@ -145,6 +195,7 @@ impl fmt::Debug for SmallStr {
 
 /// Comparison and hashing are by content (consistent with `str`, as `Borrow<str>` lookups require)
 impl PartialEq for SmallStr {
+    #[inline]
     fn eq(&self, o: &Self) -> bool {
         self.byte_len() == o.byte_len() && self.as_str() == o.as_str()
     }

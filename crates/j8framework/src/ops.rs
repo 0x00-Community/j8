@@ -312,6 +312,17 @@ impl<'gc> Agent<'gc, '_> {
         self.mc.alloc(crate::JsStr::from(s))
     }
 
+    /// `piece`, a part of string `of`'s text, as a string: a long one shares `of`'s copy (V8's sliced strings)
+    pub fn piece(&self, of: JsString<'gc>, piece: &str) -> JsString<'gc> {
+        if core::ptr::eq(piece, of.text().as_str()) {
+            return of;
+        }
+        match of.text().piece(piece) {
+            Some(t) => self.mc.alloc(crate::JsStr::from(t)),
+            None => self.string(piece),
+        }
+    }
+
     /// An empty object with `Object.prototype` as its prototype.
     pub fn object(&self) -> JsObject<'gc> {
         ObjectData { proto: Some(self.realm.object_proto), ..ObjectData::default() }.alloc(self.mc)

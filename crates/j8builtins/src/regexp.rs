@@ -258,7 +258,7 @@ impl Regexps {
         // All ASCII: no UTF-16 conversion; match as UTF-8 and slice by byte
         let ascii = s.is_ascii();
         let units: Vec<u16> = if ascii { Vec::new() } else { s.encode_utf16().collect() };
-        let text = |a: &Agent<'gc, '_>, r: Option<core::ops::Range<usize>>| if ascii { r.map_or(Value::Undefined, |r| a.string(&s[r]).into()) } else { Self::text(a, &units, r) };
+        let text = |a: &Agent<'gc, '_>, r: Option<core::ops::Range<usize>>| if ascii { r.map_or(Value::Undefined, |r| a.piece(s, &s[r]).into()) } else { Self::text(a, &units, r) };
         #[expect(clippy::cast_precision_loss, reason = "string length is far below 2^53")]
         let len = (if ascii { s.len() } else { units.len() }) as f64;
         let last = if global || sticky { last } else { 0.0 };
