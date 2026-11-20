@@ -17,7 +17,8 @@ cargo run --release                                  # REPL（.help / .exit）
 cargo run --release -- --jit a.js                    # 打开 JIT
 ```
 
-本包自成一体（不在 j8 的 workspace 里），依赖 crates.io 上发布的 `j8`。
+本包自成一体（不在 j8 的 workspace 里），依赖 crates.io 上发布的 `j8`。crates.io 上的包名是 `j8dune`（`dune` 已被占用），
+`cargo install j8dune` 同时装上 `dune` 和 `dunx`。
 
 ## dunx
 

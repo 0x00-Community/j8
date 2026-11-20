@@ -318,22 +318,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "dune"
-version = "0.3.0"
-dependencies = [
- "base64 0.22.1",
- "clap",
- "flate2",
- "j8",
- "nodejs-semver",
- "serde",
- "serde_json",
- "sha2",
- "tar",
- "ureq",
-]
-
-[[package]]
 name = "either"
 version = "1.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -707,6 +691,22 @@ dependencies = [
  "oxc_span",
  "oxc_syntax",
  "ryu-js",
+]
+
+[[package]]
+name = "j8dune"
+version = "0.3.0"
+dependencies = [
+ "base64 0.22.1",
+ "clap",
+ "flate2",
+ "j8",
+ "nodejs-semver",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tar",
+ "ureq",
 ]
 
 [[package]]
