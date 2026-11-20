@@ -50,6 +50,16 @@ j8 是**用 Rust 从头写的 JavaScript 引擎**, 照着 V8 的分层来: 所�
 | ⏱️ 对 V8 jitless | 11 个基准几何平均慢 **3.7×**, 校验和三种引擎全一致 |
 | 🚄 对 V8 (带 JIT) | 几何平均慢 **9.4×**; 差距主要在调用和分配, 详见 [benchmark.md](samples/benchv8/benchmark.md) |
 
+## 📦 安装
+
+```sh
+cargo add j8                                    # 缺省 feature `runtime`: 执行器 + 内建对象 + 标准平台
+cargo add j8 --features jit                     # 再加 x86-64 JIT (x86-64 Unix)
+cargo add j8 --no-default-features --features compiler   # 只要 JS ⇒ 字节码
+```
+
+子 crate (`j8bytecode`、`j8compiler`、`j8executor` …) 也单独发了，但一般走根包加 feature。接宿主看 [EMBEDDING.md](EMBEDDING.md)。
+
 ## 🚀 快速开始
 
 ```sh

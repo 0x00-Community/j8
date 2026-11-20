@@ -53,6 +53,17 @@ and [crates/macros/USAGE.md](crates/macros/USAGE.md) (the macro reference).
 | ⏱️ vs V8 jitless | **3.7×** slower, geometric mean over 11 benchmarks; checksums identical on all three engines |
 | 🚄 vs V8 (with JIT) | **9.4×** slower, geometric mean; the gap is mostly calls and allocation, see [benchmark.md](samples/benchv8/benchmark.md) |
 
+## 📦 Install
+
+```sh
+cargo add j8                                    # default feature `runtime`: executor + builtins + standard platform
+cargo add j8 --features jit                     # plus the x86-64 JIT (x86-64 Unix)
+cargo add j8 --no-default-features --features compiler   # only JS ⇒ bytecode
+```
+
+The sub-crates (`j8bytecode`, `j8compiler`, `j8executor`, …) are published separately too, but going through the root
+package and its features is the usual way. See [EMBEDDING.md](EMBEDDING.md) for wiring up a host.
+
 ## 🚀 Quick start
 
 ```sh
