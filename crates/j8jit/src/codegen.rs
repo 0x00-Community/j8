@@ -20,7 +20,6 @@ use j8framework::{Layout, ValueBits};
 use crate::asm::{Alu, Asm, Cc, Label, R, RAX, RBP, RBX, RCX, RDI, RDX, RSI, RSP, R10, R11, R12, R13, R14, R15, R8, R9, X};
 use crate::build::{Kind, OBJECT_TAG};
 use crate::ir::{Cond, FloatOp, Graph, Helper, IntOp, Op, Rep, Slot, B, Fs, V};
-use crate::lower::{Exit, Reason, RETURNED};
 use crate::runtime::Ctx;
 
 /// Where a value lives.
@@ -34,6 +33,43 @@ enum Loc {
     Const,
     None,
 }
+
+/// What a guard checks, for the hints a failure leaves.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Reason {
+    /// Not an int32 / overflowed / −0
+    Int,
+    /// Not a number
+    Number,
+    /// Another object / shape / function than expected
+    Shape,
+    Func,
+    /// The hole
+    Hole,
+    /// The budget ran out
+    Poll,
+    /// Something thrown
+    Throw,
+    /// Unconditional (bytecode not compiled)
+    Always,
+    /// Too deep
+    Depth,
+}
+
+/// One guard's hand-over: its frame state, why, and whether it throws.
+pub struct Exit {
+    pub fs: Fs,
+    pub reason: Reason,
+    /// The instruction that jumps here (the first one, when shared)
+    pub op: u32,
+    /// A guard moved out of a loop: the frame state it had (a failure's hint goes to its instruction)
+    pub hint: Option<Fs>,
+}
+
+/// Status codes of an interpreter entry
+pub const RETURNED: i64 = 0;
+pub const RESUMED: i64 = 1;
+pub const THREW: i64 = 2;
 
 /// A parallel copy's source.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -119,6 +155,8 @@ enum Cold {
     Poll { cont: Label, exit: Label },
     /// Write barrier: helper StoreCell(addr in rcx, word in rdx), back to `cont`
     Barrier { cont: Label, id: u32 },
+    /// A float remainder the slow way: helper ModF(x, y), the result into XT, back at `done`
+    ModF { done: Label, id: u32, x: Src, y: Src },
     /// Global cache miss: helper GlobalProbe(cache), the value in rax back at `cont`
     Global { cont: Label, id: u32, cache: u64, miss: Label, throw: Label },
 }
@@ -177,7 +215,7 @@ impl<'g> Gen<'g> {
 
     fn state_values(g: &Graph, fs: Fs, out: &mut Vec<V>) {
         let st = &g.states[fs as usize];
-        let mut add = |s: &Slot, out: &mut Vec<V>| {
+        let add = |s: &Slot, out: &mut Vec<V>| {
             if let Slot::Value(v) = s {
                 out.push(*v);
             }
@@ -204,7 +242,7 @@ impl<'g> Gen<'g> {
     }
 
     fn calls_out(op: &Op) -> bool {
-        matches!(op, Op::Call(..) | Op::CallJit(..))
+        matches!(op, Op::Call(h, ..) if *h != Helper::ModF) || matches!(op, Op::CallJit(..))
     }
 
     // ---- allocation ----
@@ -647,6 +685,34 @@ impl<'g> Gen<'g> {
                     self.a.jcc(Cc::Ne, exit);
                     self.a.jmp(cont);
                 }
+                Cold::ModF { done, id, x, y } => {
+                    self.save_caller();
+                    let xs = match x {
+                        Src::Xmm(r) => {
+                            let d = self.xmm_save(r);
+                            Src::Stack(d)
+                        }
+                        s => s,
+                    };
+                    let ys = match y {
+                        Src::Xmm(r) => {
+                            let d = self.xmm_save(r);
+                            Src::Stack(d)
+                        }
+                        s => s,
+                    };
+                    self.load_src(xs, RDX);
+                    self.load_src(ys, RCX);
+                    self.a.mov_rr(RDI, R15);
+                    self.a.mov_ri(RSI, u64::from(id));
+                    self.a.mov_ri(R8, 0);
+                    self.a.mov_ri(R9, 0);
+                    let at = self.a.call_abs(0);
+                    self.relocs.push((at, Sym::Helper));
+                    self.a.movq_xr(XT, RAX);
+                    self.restore_caller();
+                    self.a.jmp(done);
+                }
                 Cold::Global { cont, id, cache, miss, throw } => {
                     self.save_caller();
                     self.a.mov_rr(RDI, R15);
@@ -1031,12 +1097,6 @@ impl<'g> Gen<'g> {
                 self.untag(d);
                 self.put(v, d);
             }
-            Op::LoadByte(base, off) => {
-                let r = self.gpr(base, RAX);
-                let d = self.dst(v, RAX);
-                self.a.load8(d, r, off);
-                self.put(v, d);
-            }
             Op::StoreCell(base, off, w) => {
                 let r = self.gpr(base, RAX);
                 self.a.lea(RCX, r, off);
@@ -1103,6 +1163,58 @@ impl<'g> Gen<'g> {
                 // Too deep on the machine stack: the interpreter goes on (and throws when it is too deep too)
                 self.a.alu_rm(Alu::Cmp, true, RSP, R15, Ctx::STACK_FLOOR);
                 self.exit_if(Cc::B, fs, Reason::Depth);
+            }
+            Op::Call(Helper::ModF, args, _) => {
+                // Two integers below 2^53 (exact as int64): an integer remainder with the dividend's sign (−0
+                // included); anything else through the runtime (a cold call saving the caller-saved registers)
+                let (x, y) = (args[0], args[1]);
+                let slow = self.a.label();
+                let done = self.a.label();
+                let xa = self.xmm(x, XS);
+                self.a.movsd_xx(XS, xa);
+                let xb = self.xmm(y, XT);
+                self.a.movsd_xx(XT, xb);
+                self.a.cvttsd2si64(RAX, XS);
+                self.a.mov_ri(R11, 1 << 53);
+                self.a.mov_rr(RDX, RAX);
+                self.a.alu_rr(Alu::Add, true, RDX, R11);
+                self.a.alu_rr(Alu::Add, true, R11, R11);
+                self.a.alu_rr(Alu::Cmp, true, RDX, R11);
+                self.a.jcc(Cc::Ae, slow);
+                self.a.cvttsd2si64(RCX, XT);
+                self.a.test_rr(true, RCX, RCX);
+                self.a.jcc(Cc::E, slow);
+                // Exact: both convert back
+                self.a.mov_rr(R11, RAX);
+                self.a.cvtsi2sd64(XT, RCX);
+                let xb = self.xmm(y, XS);
+                self.a.ucomisd(xb, XT);
+                self.a.jcc(Cc::Ne, slow);
+                self.a.jcc(Cc::P, slow);
+                self.a.cvtsi2sd64(XT, RAX);
+                let xa = self.xmm(x, XS);
+                self.a.ucomisd(xa, XT);
+                self.a.jcc(Cc::Ne, slow);
+                self.a.jcc(Cc::P, slow);
+                self.a.cqo_idiv(RCX);
+                self.a.zero_x(XT);
+                self.a.cvtsi2sd64(XT, RDX);
+                // A zero remainder of a negative (or −0) dividend is −0
+                self.a.test_rr(true, RDX, RDX);
+                self.a.jcc(Cc::Ne, done);
+                let xa = self.xmm(x, XS);
+                self.a.movq_rx(RAX, xa);
+                self.a.test_rr(true, RAX, RAX);
+                self.a.jcc(Cc::Ns, done);
+                self.a.mov_ri(RAX, (-0.0f64).to_bits());
+                self.a.movq_xr(XT, RAX);
+                self.a.bind(done);
+                let cont = self.a.label();
+                self.a.bind(cont);
+                self.xput(v, XT);
+                let id = self.helper_id(Helper::ModF, 2);
+                let (xs, ys) = (self.src(x), self.src(y));
+                self.cold.push((slow, Cold::ModF { done, id, x: xs, y: ys }));
             }
             Op::Call(h, args, fs) => {
                 let id = self.helper_id(h, args.len());

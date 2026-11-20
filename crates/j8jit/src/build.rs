@@ -359,7 +359,7 @@ impl<'e> Builder<'e> {
         self.g.entry_regs = r;
         let mut regs = Regs { params: Vec::new(), regs: Vec::new(), acc: self.undef, ctx: self.undef };
         let callee;
-        let mut argc = u32::try_from(p.saturating_sub(1)).unwrap_or(0);
+        let argc;
         let mut construct = None;
         let regions;
         let start_pc;
@@ -1226,7 +1226,6 @@ impl<'e> Builder<'e> {
             }
             inputs.push((*phi, v));
         }
-        let h = act.headers.get(&(ri, tb)).expect("checked above");
         // The back edge's frame state (its poll's: the loop header with this edge's values)
         let poll_fs = self.g.blocks[b as usize].insts.iter().rev().find_map(|&i| match self.g.op(i) {
             Op::Poll(fs) => Some(*fs),
@@ -1478,6 +1477,16 @@ impl<'e> Builder<'e> {
             IntOp::Xor => Some(x ^ y),
             _ => None,
         }
+    }
+
+    /// A runtime call that may run any code (memory written back first, forgotten after)
+    fn helper_call(&mut self, act: &Act<'e>, st: &mut St, h: Helper, args: &[V], pc: usize) -> V {
+        let ws: Vec<V> = args.iter().map(|a| self.real(st, *a)).collect();
+        self.flush(st);
+        let fs = self.state(act, st, pc);
+        let v = self.emit(Op::Call(h, ws, Some(fs)), h.rep());
+        Self::forget(st);
+        v
     }
 
     fn generic_binary(&mut self, act: &Act<'e>, st: &mut St, op: BinaryOp, l: V, r: V, pc: usize) -> R<V> {
@@ -2188,6 +2197,60 @@ impl<'e> Builder<'e> {
                 let l = Self::reg(act, st, o[0])?;
                 let v = self.strict_equals(act, st, l, acc, pc)?;
                 set_acc!(v);
+            }
+            Bc::TestEqual => {
+                let l = Self::reg(act, st, o[0])?;
+                let num = |r: Rep| matches!(r, Rep::I32 | Rep::F64);
+                let v = if num(self.g.rep(l)) && num(self.g.rep(acc)) {
+                    self.strict_equals(act, st, l, acc, pc)?
+                } else {
+                    self.helper_call(act, st, Helper::LooseEquals, &[l, acc], pc)
+                };
+                set_acc!(v);
+            }
+            Bc::TestReferenceEqual => {
+                let l = Self::reg(act, st, o[0])?;
+                let (a, b) = (self.real(st, l), self.real(st, acc));
+                set_acc!(self.emit(Op::CmpWord(Cond::Eq, a, b), Rep::Bool));
+            }
+            Bc::TestInstanceOf => {
+                let l = Self::reg(act, st, o[0])?;
+                set_acc!(self.helper_call(act, st, Helper::InstanceOf, &[l, acc], pc));
+            }
+            Bc::Negate => {
+                let v = match self.as_float(act, st, acc, pc)? {
+                    Some(x) => {
+                        let m = self.emit(Op::F64(-1.0), Rep::F64);
+                        self.emit(Op::Float(FloatOp::Mul, x, m), Rep::F64)
+                    }
+                    None => self.helper_call(act, st, Helper::Unary(j8framework::UnaryOp::Neg), &[acc], pc),
+                };
+                set_acc!(v);
+            }
+            Bc::BitwiseNot => {
+                let v = match self.as_int(act, st, acc, pc)? {
+                    Some(x) => {
+                        let m = self.int(-1);
+                        self.emit(Op::Int(IntOp::Xor, x, m, None), Rep::I32)
+                    }
+                    None => self.helper_call(act, st, Helper::Unary(j8framework::UnaryOp::BitNot), &[acc], pc),
+                };
+                set_acc!(v);
+            }
+            Bc::TypeOf => set_acc!(self.helper_call(act, st, Helper::Unary(j8framework::UnaryOp::Typeof), &[acc], pc)),
+            Bc::ToBoolean => {
+                let f = self.truthy(st, acc);
+                set_acc!(f);
+            }
+            Bc::GetKeyedProperty => {
+                let obj = Self::reg(act, st, o[0])?;
+                set_acc!(self.helper_call(act, st, Helper::GetKeyed, &[obj, acc], pc));
+            }
+            Bc::SetKeyedProperty => {
+                let obj = Self::reg(act, st, o[0])?;
+                let key = Self::reg(act, st, o[1])?;
+                let strict = act.f.strict();
+                self.helper_call(act, st, Helper::SetKeyed(strict), &[obj, key, acc], pc);
             }
             Bc::TestUndetectable | Bc::TestNull | Bc::TestUndefined => {
                 let w = match d.bytecode {

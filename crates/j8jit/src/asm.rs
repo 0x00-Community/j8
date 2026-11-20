@@ -34,6 +34,8 @@ pub enum Cc {
     Ne = 5,
     Be = 6,
     A = 7,
+    S = 8,
+    Ns = 9,
     P = 0xa,
     Np = 0xb,
     L = 0xc,
@@ -53,6 +55,8 @@ impl Cc {
             Cc::Ne => Cc::E,
             Cc::Be => Cc::A,
             Cc::A => Cc::Be,
+            Cc::S => Cc::Ns,
+            Cc::Ns => Cc::S,
             Cc::P => Cc::Np,
             Cc::Np => Cc::P,
             Cc::L => Cc::Ge,
@@ -201,11 +205,6 @@ impl Asm {
         self.op_rm(None, false, &[0x8b], dst, base, disp, false);
     }
 
-    /// `movzx dst, byte [base + disp]`
-    pub fn load8(&mut self, dst: R, base: R, disp: i32) {
-        self.op_rm(None, false, &[0x0f, 0xb6], dst, base, disp, false);
-    }
-
     pub fn store(&mut self, base: R, disp: i32, src: R) {
         self.op_rm(None, true, &[0x89], src, base, disp, false);
     }
@@ -284,10 +283,6 @@ impl Asm {
 
     pub fn movsxd(&mut self, dst: R, src: R) {
         self.op_rr(None, true, &[0x63], dst, src);
-    }
-
-    pub fn neg(&mut self, w: bool, dst: R) {
-        self.op_rr(None, w, &[0xf7], 3, dst);
     }
 
     // ---- flags ----
@@ -391,6 +386,23 @@ impl Asm {
     /// `cvttsd2si r32, x`
     pub fn cvttsd2si(&mut self, r: R, x: X) {
         self.op_rr(Some(0xf2), false, &[0x0f, 0x2c], r, x);
+    }
+
+    /// `cvtsi2sd x, r64`
+    pub fn cvtsi2sd64(&mut self, x: X, r: R) {
+        self.op_rr(Some(0xf2), true, &[0x0f, 0x2a], x, r);
+    }
+
+    /// `cvttsd2si r64, x`
+    pub fn cvttsd2si64(&mut self, r: R, x: X) {
+        self.op_rr(Some(0xf2), true, &[0x0f, 0x2c], r, x);
+    }
+
+    /// `cqo; idiv r64`
+    pub fn cqo_idiv(&mut self, src: R) {
+        self.b(0x48);
+        self.b(0x99);
+        self.op_rr(None, true, &[0xf7], 7, src);
     }
 
     /// `xorpd x, x`

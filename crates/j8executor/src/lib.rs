@@ -2394,6 +2394,17 @@ impl<'gc> Invoke<'gc> for Executor {
             && let l = self.code(&c)
             && !l.class_constructor
         {
+            // Compiled: straight into its machine code
+            if l.tier.get() != 0
+                && let Some(t) = &self.tier
+            {
+                let saved = self.depth.replace(level);
+                let r = t.call(self, a, c.func, callee, this, args);
+                self.depth.set(saved);
+                if let Some(r) = r {
+                    return r;
+                }
+            }
             let mut regs = a.take_regs();
             regs.clear();
             let f = self.open_with(a, &mut regs, l, c, callee, this, Args::Values(args));

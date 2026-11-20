@@ -27,6 +27,14 @@ pub trait Tier {
     /// The entry frame continues at instruction `pc` (after a pause, or a hand-over from machine code) in a
     /// function the tier knows: it may go on in machine code compiled for a loop with that header
     fn resume(&self, e: &mut Entry<'_, '_, '_, '_>, pc: usize) -> Tiered;
+    /// Asked on every call (testing: compile everything at once), not just every few
+    fn eager(&self) -> bool {
+        false
+    }
+
+    /// An ordinary call of `f` (a function the tier knows) without an interpreter frame: `None` to call it the
+    /// usual way
+    fn call<'gc>(&self, exe: &Executor, a: &mut Agent<'gc, '_>, f: FuncId, callee: Value<'gc>, this: Value<'gc>, args: &[Value<'gc>]) -> Option<Result<Value<'gc>, Error>>;
 }
 
 /// The tier's answer.

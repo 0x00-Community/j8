@@ -314,6 +314,26 @@ fn enter<'r, 'gc>(cx: &mut Cx<'r, 'gc, '_, '_>, pc: *const Insn, callee: Value<'
     let f = cx.st.f_mut();
     f.insn = at;
     f.pc = at + 1;
+    // Compiled: its machine code runs without a frame, the result lands in the accumulator
+    if l.tier.get() != 0
+        && let Some(t) = &cx.exe.tier
+        && let Args::Values(vals) = args
+    {
+        let level = cx.depth + cx.st.frames.len();
+        let saved = cx.exe.depth.replace(level);
+        let r = t.call(cx.exe, cx.a, c.func, callee, this, vals);
+        cx.exe.depth.set(saved);
+        if let Some(r) = r {
+            return match r {
+                Ok(v) => {
+                    let base = cx.st.f().base;
+                    // SAFETY: the caller goes on at the next instruction
+                    Entered::At(unsafe { pc.add(1) }, cx.st.regs.as_mut_ptr().wrapping_add(base), v)
+                }
+                Err(e) => Entered::Throw(e),
+            };
+        }
+    }
     let base = cx.exe.push_open(cx.a, cx.st, l, c, callee, this, args);
     cx.loaded = l;
     if cx.exe.tier.is_some() {
@@ -328,7 +348,7 @@ fn tier_enter<'gc>(cx: &mut Cx<'_, 'gc, '_, '_>) -> Entered<'gc> {
     let l = cx.loaded;
     let n = l.calls.get().wrapping_add(1);
     l.calls.set(n);
-    if l.tier.get() == 0 && n % crate::TIER_CALLS != 0 {
+    if l.tier.get() == 0 && n % crate::TIER_CALLS != 0 && !cx.exe.tier.as_ref().is_some_and(|t| t.eager()) {
         let base = cx.st.f().base;
         return Entered::At(l.insns.as_ptr(), cx.st.regs.as_mut_ptr().wrapping_add(base), Value::Undefined);
     }

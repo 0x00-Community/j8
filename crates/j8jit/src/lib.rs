@@ -17,7 +17,6 @@ mod codegen;
 mod compile;
 mod helper;
 mod ir;
-mod lower;
 mod opt;
 mod runtime;
 mod x86_64;
@@ -39,7 +38,7 @@ use j8framework::{FuncId, Shape, Value};
 
 use build::{Builder, Hints, HINT_FLOAT, HINT_GENERIC, HINT_NO_INLINE};
 use ir::{FrameState, Helper, Op, Rep, Slot, V};
-use lower::{Lower, Reason, RESUMED, RETURNED, THREW};
+use codegen::{Reason, RESUMED, RETURNED, THREW};
 use runtime::{Ctx, Mapped, Trampolines};
 
 /// Where a deopt slot's bits are.
@@ -86,13 +85,14 @@ struct Site {
     name: u32,
     slot: u32,
     expect: Option<FuncId>,
+    /// Its cache (the code reads it by address: kept here)
+    #[expect(dead_code, reason = "owned for its address only")]
     cache: Box<[u64; 2]>,
 }
 
 #[derive(Default)]
 struct State {
     sites: Vec<Site>,
-    compiler: Option<Compiler>,
     funcs: Vec<(FuncId, Func)>,
     deopts: Vec<Rc<Deopt>>,
     calls: Vec<(Helper, usize)>,
@@ -106,6 +106,8 @@ struct State {
 /// ⭐ The JIT: handed to the executor (`Executor::with_tier`).
 pub struct Jit {
     threshold: u32,
+    /// Contexts of finished runs, for the next ones (a host function calling back into JS starts one each time)
+    ctxs: RefCell<Vec<Box<Ctx>>>,
     /// The lowest stack address native code runs at (set the first time it runs)
     floor: core::cell::Cell<u64>,
     epoch: core::cell::Cell<u64>,
@@ -121,21 +123,12 @@ impl Default for Jit {
 impl From<u32> for Jit {
     /// Native code after `threshold` calls through a trampoline
     fn from(threshold: u32) -> Self {
-        Self { threshold, floor: core::cell::Cell::new(0), epoch: core::cell::Cell::new(1), st: RefCell::new(State::default()) }
+        Self { threshold, ctxs: RefCell::new(Vec::new()), floor: core::cell::Cell::new(0), epoch: core::cell::Cell::new(1), st: RefCell::new(State::default()) }
     }
 }
 
 /// Deopts of one function before the JIT gives up on it
 const MAX_DEOPTS: u32 = 24;
-
-/// The x86-64 backend as a [`Backend`]
-struct X86;
-
-impl Backend for X86 {
-    fn emit(&self, body: &mlirpass::Body<'_>, root: mlirpass::OpId) -> Result<Vec<MachineCode>, mlirpass::mlirformat::Error> {
-        Ok(mlirpass::Emit::emit(&X86_64Emit, body, root)?.into_iter().map(|c| MachineCode { name: c.name, bytes: c.bytes, relocs: c.relocs.into_iter().map(|r| (r.offset, r.symbol)).collect() }).collect())
-    }
-}
 
 /// An interpreter entry
 type EntryFn = unsafe extern "C" fn(*mut Ctx, *mut Value<'static>, *mut Value<'static>) -> i64;
@@ -153,6 +146,18 @@ impl Jit {
         self.st.borrow().calls[usize::try_from(id).unwrap_or(0)]
     }
 
+    fn spare_ctx(&self) -> Option<Box<Ctx>> {
+        self.ctxs.borrow_mut().pop()
+    }
+
+    /// Keeps a context for reuse
+    fn recycle(&self, ctx: Box<Ctx>) {
+        let mut v = self.ctxs.borrow_mut();
+        if v.len() < 8 {
+            v.push(ctx);
+        }
+    }
+
     /// See `Ctx::stack_floor`
     fn stack_floor(&self) -> u64 {
         if self.floor.get() == 0 {
@@ -161,6 +166,13 @@ impl Jit {
             self.floor.set(at.saturating_sub(runtime::NATIVE_STACK));
         }
         self.floor.get()
+    }
+
+    /// The machine stack has room for native code (else the interpreter goes on with its own frames)
+    fn stack_room(&self) -> bool {
+        let here = 0u8;
+        let at = core::ptr::from_ref(&here) as u64;
+        at > self.stack_floor() + runtime::NATIVE_STACK / 4
     }
 
     /// A new epoch (see `Ctx::epoch`)
@@ -263,7 +275,7 @@ impl Jit {
     }
 
     /// A call through `f`'s trampoline was interpreted: compiles native code when hot
-    fn native_hot(&self, e: &mut Entry<'_, '_, '_, '_>, f: FuncId) {
+    fn native_hot(&self, exe: &j8executor::Executor, a: &mut j8framework::Agent<'_, '_>, f: FuncId) {
         {
             let mut st = self.st.borrow_mut();
             let fs = Self::func(&mut st, f);
@@ -275,8 +287,8 @@ impl Jit {
                 return;
             }
         }
-        let formals = usize::from(e.executor().jit_function(f).shared().formal_parameters).min(3);
-        match self.compile(e, f, Kind::Native(formals)) {
+        let formals = usize::from(exe.jit_function(f).shared().formal_parameters).min(3);
+        match self.compile(exe, a, f, Kind::Native(formals)) {
             Some(addr) => {
                 let mut st = self.st.borrow_mut();
                 Self::func(&mut st, f).native = Some(addr);
@@ -288,14 +300,12 @@ impl Jit {
     }
 
     /// Compiles `f` entered as `kind`: the machine code's address
-    fn compile(&self, e: &mut Entry<'_, '_, '_, '_>, f: FuncId, kind: Kind) -> Option<usize> {
-        let exe = e.executor();
+    fn compile(&self, exe: &j8executor::Executor, a: &mut j8framework::Agent<'_, '_>, f: FuncId, kind: Kind) -> Option<usize> {
         if std::env::var_os("J8_JIT_LOG").is_some() {
             std::eprintln!("j8jit: compile {f:?} {kind:?}");
         }
         let t0 = std::time::Instant::now();
         let hints = self.st.borrow().hints.clone();
-        let a = e.agent();
         let (global, scope) = (a.realm.global, a.realm.script_scope);
         let paths = move |g: bool, i: usize| if g { global.get().props().store_path(i) } else { scope.get().props().store_path(i) };
         let built = Builder::build(exe, &hints, f, kind, &paths).ok()?;
@@ -444,8 +454,10 @@ impl Jit {
             f(&raw mut *ctx, callee, words[0], words[1], words[2], words[3])
         };
         exe.jit_depth().set(saved);
-        if ctx.pending != 0 {
-            return Tiered::Threw(ctx.error.take().unwrap_or(j8framework::Error::Terminated));
+        let threw = (ctx.pending != 0).then(|| ctx.error.take().unwrap_or(j8framework::Error::Terminated));
+        self.recycle(ctx);
+        if let Some(err) = threw {
+            return Tiered::Threw(err);
         }
         // SAFETY: a word of this mutate
         e.resume_at(ret, unsafe { Value::from_bits(r) });
@@ -467,7 +479,7 @@ impl Jit {
             f(&raw mut *ctx, params, r0)
         };
         exe.jit_depth().set(saved);
-        match status {
+        let r = match status {
             RETURNED => {
                 // SAFETY: a word of this mutate
                 let v = unsafe { Value::from_bits(ctx.ret) };
@@ -477,18 +489,64 @@ impl Jit {
             RESUMED => Tiered::Resumed,
             THREW => Tiered::Threw(ctx.error.take().unwrap_or(j8framework::Error::Terminated)),
             _ => Tiered::Resumed,
-        }
+        };
+        self.recycle(ctx);
+        r
     }
 }
 
 impl Tier for Jit {
+    fn eager(&self) -> bool {
+        self.threshold == 0
+    }
+
+    fn call<'gc>(&self, exe: &j8executor::Executor, a: &mut j8framework::Agent<'gc, '_>, f: FuncId, callee: Value<'gc>, this: Value<'gc>, args: &[Value<'gc>]) -> Option<Result<Value<'gc>, j8framework::Error>> {
+        let func = exe.jit_function(f);
+        let formals = usize::from(func.shared().formal_parameters);
+        if formals > 3 || !func.plain() || func.class_constructor() || !self.stack_room() {
+            return None;
+        }
+        let addr = {
+            let mut st = self.st.borrow_mut();
+            Self::func(&mut st, f).native?
+        };
+        // A sloppy function's receiver: the global object for undefined / null; other primitives the usual way
+        let this = if func.wraps_this() {
+            match this.bits() {
+                j8framework::ValueBits::UNDEFINED | j8framework::ValueBits::NULL => Value::Object(a.realm.global),
+                _ if this.as_object().is_some() => this,
+                _ => return None,
+            }
+        } else {
+            this
+        };
+        let arg = |i: usize| if i < formals { args.get(i).copied().unwrap_or_default().bits() } else { j8framework::ValueBits::UNDEFINED };
+        let mut ctx = Ctx::bare(exe, a, self);
+        type NativeFn = unsafe extern "C" fn(*mut Ctx, u64, u64, u64, u64, u64) -> u64;
+        // SAFETY: native code takes (context, callee, this, three arguments)
+        let r = unsafe {
+            let code: NativeFn = core::mem::transmute::<usize, NativeFn>(addr);
+            code(&raw mut *ctx, callee.bits(), this.bits(), arg(0), arg(1), arg(2))
+        };
+        let threw = (ctx.pending != 0).then(|| ctx.error.take().unwrap_or(j8framework::Error::Terminated));
+        self.recycle(ctx);
+        Some(match threw {
+            Some(e) => Err(e),
+            // SAFETY: a word of this mutate
+            None => Ok(unsafe { Value::from_bits(r) }),
+        })
+    }
+
     fn enter(&self, e: &mut Entry<'_, '_, '_, '_>) -> Tiered {
         let f = e.function();
         let id = f.id();
         f.tier_word().set(1);
+        if !self.stack_room() {
+            return Tiered::Interpret;
+        }
         // An ordinary call of a plain function: its native code (one compilation serves both kinds of callers)
         let formals = usize::from(f.shared().formal_parameters);
-        if f.plain() && !f.class_constructor() && !e.constructing() && formals <= 3 {
+        if f.plain() && !f.class_constructor() && !e.constructing() && formals <= 3 && e.callee().as_object().and_then(|o| o.closure()).is_some() {
             let native = {
                 let mut st = self.st.borrow_mut();
                 let fs = Self::func(&mut st, id);
@@ -497,7 +555,7 @@ impl Tier for Jit {
             if let Some(native) = native {
                 let addr = match native {
                     Some(a) => Some(a),
-                    None => match self.compile(e, id, Kind::Native(formals)) {
+                    None => match self.compile(e.executor(), e.agent(), id, Kind::Native(formals)) {
                         Some(a) => {
                             let mut st = self.st.borrow_mut();
                             Self::func(&mut st, id).native = Some(a);
@@ -528,7 +586,7 @@ impl Tier for Jit {
         };
         let addr = match code {
             Some(a) => a,
-            None => match self.compile(e, id, Kind::Enter) {
+            None => match self.compile(e.executor(), e.agent(), id, Kind::Enter) {
                 Some(a) => {
                     Self::func(&mut self.st.borrow_mut(), id).enter = Some(a);
                     a
@@ -545,6 +603,9 @@ impl Tier for Jit {
     fn resume(&self, e: &mut Entry<'_, '_, '_, '_>, pc: usize) -> Tiered {
         let f = e.function();
         let id = f.id();
+        if !self.stack_room() {
+            return Tiered::Interpret;
+        }
         let code = {
             let mut st = self.st.borrow_mut();
             let fs = Self::func(&mut st, id);
@@ -563,6 +624,9 @@ impl Tier for Jit {
         let f = e.function();
         let id = f.id();
         f.tier_word().set(1);
+        if !self.stack_room() {
+            return Tiered::Interpret;
+        }
         let code = {
             let mut st = self.st.borrow_mut();
             let fs = Self::func(&mut st, id);
@@ -573,7 +637,7 @@ impl Tier for Jit {
         };
         let addr = match code {
             Some(a) => a,
-            None => match self.compile(e, id, Kind::Osr(at)) {
+            None => match self.compile(e.executor(), e.agent(), id, Kind::Osr(at)) {
                 Some(a) => {
                     Self::func(&mut self.st.borrow_mut(), id).osr.insert(at, a);
                     a

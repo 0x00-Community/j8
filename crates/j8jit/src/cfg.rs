@@ -212,13 +212,4 @@ impl Cfg {
         v
     }
 
-    /// Analysis register of the accumulator
-    pub fn acc(&self) -> usize {
-        self.params + self.regs
-    }
-
-    /// The instruction is a block's first
-    pub fn is_start(&self, i: usize) -> bool {
-        self.starts.binary_search(&i).is_ok()
-    }
 }

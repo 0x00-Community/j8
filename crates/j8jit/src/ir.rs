@@ -37,13 +37,6 @@ pub enum Rep {
     Bool,
 }
 
-impl Rep {
-    /// Held in an XMM register
-    pub fn float(self) -> bool {
-        self == Rep::F64
-    }
-}
-
 /// Integer / float comparison.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Cond {
@@ -53,19 +46,6 @@ pub enum Cond {
     Ge,
     Eq,
     Ne,
-}
-
-impl Cond {
-    pub fn negate(self) -> Cond {
-        match self {
-            Cond::Lt => Cond::Ge,
-            Cond::Le => Cond::Gt,
-            Cond::Gt => Cond::Le,
-            Cond::Ge => Cond::Lt,
-            Cond::Eq => Cond::Ne,
-            Cond::Ne => Cond::Eq,
-        }
-    }
 }
 
 /// Two-operand int32 operations (guards fail on overflow, on −0 results, on a zero divisor …).
@@ -117,8 +97,6 @@ pub enum Helper {
     CreateContext(j8framework::ShapeId, u32),
     /// () ⇒ object literal word
     ObjectLiteral(FuncId, u32),
-    /// (ctor word, new.target word) ⇒ `this` word
-    CreateThis(FuncId),
     /// (a, b) ⇒ a % b (doubles)
     ModF,
     /// (word) ⇒ ToBoolean as 0 / 1
@@ -137,21 +115,31 @@ pub enum Helper {
     StrictEquals,
     /// (proto ptr, field words…) ⇒ a new ordinary object with `shape` (an index into the compilation's shapes)
     Alloc(u32),
+    /// (object, key) ⇒ object[key]
+    GetKeyed,
+    /// (object, key, value) ⇒ (); strict mode
+    SetKeyed(bool),
+    /// (value) ⇒ op value
+    Unary(j8framework::UnaryOp),
+    /// (a, b) ⇒ a == b as 0 / 1
+    LooseEquals,
+    /// (value, constructor) ⇒ instanceof as 0 / 1
+    InstanceOf,
 }
 
 impl Helper {
     /// May throw: a pending exception makes the code hand over
     pub fn throws(self) -> bool {
-        matches!(self, Helper::Call | Helper::Construct | Helper::GetNamed(..) | Helper::SetNamed(..) | Helper::CreateThis(_) | Helper::LoadGlobal(..) | Helper::GlobalProbe(_) | Helper::Binary(_) | Helper::Compare(_))
+        matches!(self, Helper::Call | Helper::Construct | Helper::GetNamed(..) | Helper::SetNamed(..) | Helper::GetKeyed | Helper::SetKeyed(_) | Helper::Unary(_) | Helper::LooseEquals | Helper::InstanceOf | Helper::LoadGlobal(..) | Helper::GlobalProbe(_) | Helper::Binary(_) | Helper::Compare(_))
     }
 
     /// The representation of its result
     pub fn rep(self) -> Rep {
         match self {
             Helper::ModF => Rep::F64,
-            Helper::ToBoolean | Helper::Compare(_) | Helper::StrictEquals => Rep::Bool,
+            Helper::ToBoolean | Helper::Compare(_) | Helper::StrictEquals | Helper::LooseEquals | Helper::InstanceOf => Rep::Bool,
             Helper::Alloc(_) => Rep::Ptr,
-            Helper::SetNamed(..) | Helper::StoreCell => Rep::None,
+            Helper::SetNamed(..) | Helper::SetKeyed(_) | Helper::StoreCell => Rep::None,
             _ => Rep::Word,
         }
     }
@@ -205,8 +193,6 @@ pub enum Op {
     LoadPtr(V, i32),
     /// A raw 64-bit load (`Option<Gc>` fields: 0 or an address)
     LoadRaw(V, i32),
-    /// The byte at `base + offset`
-    LoadByte(V, i32),
     /// The cell at `base + offset` takes the word (a barrier when an old or the new word is a pointer)
     StoreCell(V, i32, V),
     /// The inline-or-store cell address of property entry `slot` (≥ the inline ones): through the store leaf
@@ -250,7 +236,7 @@ impl Op {
             Op::I32(_) | Op::F64(_) | Op::Word(_) | Op::Param(_) | Op::Callee | Op::CtxField(_) | Op::Poll(_) | Op::Enter(_) | Op::Global(..) | Op::Jump(_) | Op::Deopt(_) => {}
             Op::Phi(v) => out.extend_from_slice(v),
             Op::Int(_, a, b, _) | Op::Float(_, a, b) | Op::CmpInt(_, a, b) | Op::CmpFloat(_, a, b) | Op::CmpWord(_, a, b) | Op::StoreCell(a, _, b) => out.extend([*a, *b]),
-            Op::IntToFloat(a) | Op::BoxInt(a) | Op::BoxFloat(a) | Op::BoxBool(a) | Op::BoxPtr(a, _) | Op::UnboxInt(a, _) | Op::UnboxFloat(a, _) | Op::FloatToInt(a, _) | Op::CheckObject(a, _) | Op::CheckNotHole(a, _) | Op::CheckFunc(a, _, _) | Op::CheckShape(a, _, _) | Op::Check(a, _, _) | Op::LoadWord(a, _) | Op::LoadPtr(a, _) | Op::LoadRaw(a, _) | Op::LoadByte(a, _) | Op::StoreCellAddr(a, _) | Op::ContextCell(a, _) | Op::Untag(a) | Op::Branch(a, _, _) | Op::Return(a, _) => out.push(*a),
+            Op::IntToFloat(a) | Op::BoxInt(a) | Op::BoxFloat(a) | Op::BoxBool(a) | Op::BoxPtr(a, _) | Op::UnboxInt(a, _) | Op::UnboxFloat(a, _) | Op::FloatToInt(a, _) | Op::CheckObject(a, _) | Op::CheckNotHole(a, _) | Op::CheckFunc(a, _, _) | Op::CheckShape(a, _, _) | Op::Check(a, _, _) | Op::LoadWord(a, _) | Op::LoadPtr(a, _) | Op::LoadRaw(a, _) | Op::StoreCellAddr(a, _) | Op::ContextCell(a, _) | Op::Untag(a) | Op::Branch(a, _, _) | Op::Return(a, _) => out.push(*a),
             Op::Call(_, args, _) => out.extend_from_slice(args),
             Op::CallJit(_, c, t, args, _) => {
                 out.extend([*c, *t]);
@@ -269,7 +255,7 @@ impl Op {
                 *a = f(*a);
                 *b = f(*b);
             }
-            Op::IntToFloat(a) | Op::BoxInt(a) | Op::BoxFloat(a) | Op::BoxBool(a) | Op::BoxPtr(a, _) | Op::UnboxInt(a, _) | Op::UnboxFloat(a, _) | Op::FloatToInt(a, _) | Op::CheckObject(a, _) | Op::CheckNotHole(a, _) | Op::CheckFunc(a, _, _) | Op::CheckShape(a, _, _) | Op::Check(a, _, _) | Op::LoadWord(a, _) | Op::LoadPtr(a, _) | Op::LoadRaw(a, _) | Op::LoadByte(a, _) | Op::StoreCellAddr(a, _) | Op::ContextCell(a, _) | Op::Untag(a) | Op::Branch(a, _, _) | Op::Return(a, _) => *a = f(*a),
+            Op::IntToFloat(a) | Op::BoxInt(a) | Op::BoxFloat(a) | Op::BoxBool(a) | Op::BoxPtr(a, _) | Op::UnboxInt(a, _) | Op::UnboxFloat(a, _) | Op::FloatToInt(a, _) | Op::CheckObject(a, _) | Op::CheckNotHole(a, _) | Op::CheckFunc(a, _, _) | Op::CheckShape(a, _, _) | Op::Check(a, _, _) | Op::LoadWord(a, _) | Op::LoadPtr(a, _) | Op::LoadRaw(a, _) | Op::StoreCellAddr(a, _) | Op::ContextCell(a, _) | Op::Untag(a) | Op::Branch(a, _, _) | Op::Return(a, _) => *a = f(*a),
             Op::Call(_, args, _) => args.iter_mut().for_each(|x| *x = f(*x)),
             Op::CallJit(_, c, t, args, _) => {
                 *c = f(*c);
@@ -291,12 +277,10 @@ impl Op {
 
     /// Has an effect beyond its value (kept even when unused)
     pub fn effectful(&self) -> bool {
-        if let Op::Global(..) = self {
-            return false;
-        }
         match self {
             Op::Int(op, _, _, fs) => fs.is_some() && !op.total(),
-            Op::Call(..) | Op::CallJit(..) | Op::StoreCell(..) | Op::Poll(_) | Op::Enter(_) => true,
+            // A global read throws for a name not declared: kept even when unused
+            Op::Call(..) | Op::CallJit(..) | Op::StoreCell(..) | Op::Poll(_) | Op::Enter(_) | Op::Global(..) => true,
             Op::UnboxInt(..) | Op::UnboxFloat(..) | Op::FloatToInt(..) | Op::CheckObject(..) | Op::CheckNotHole(..) | Op::CheckFunc(..) | Op::CheckShape(..) | Op::Check(..) => true,
             o => o.is_terminator(),
         }
@@ -427,11 +411,6 @@ impl Graph {
         u32::try_from(self.states.len() - 1).unwrap_or(u32::MAX)
     }
 
-    /// The block ends (has its terminator)
-    pub fn terminated(&self, b: B) -> bool {
-        self.blocks[b as usize].insts.last().is_some_and(|&v| self.insts[v as usize].op.is_terminator())
-    }
-
     /// Successors of a terminated block
     pub fn succs(&self, b: B) -> Vec<B> {
         match self.blocks[b as usize].insts.last().map(|&v| &self.insts[v as usize].op) {
@@ -514,7 +493,6 @@ impl Graph {
                     Op::Return(..) => "Return",
                     Op::Deopt(_) => "Deopt",
                     Op::Callee => "Callee",
-                    Op::LoadByte(..) => "LoadByte",
                     _ => "?",
                 };
                 full.into()

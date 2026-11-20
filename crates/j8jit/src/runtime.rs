@@ -16,7 +16,7 @@ use j8framework::{Agent, Error, ObjectData, Slot as PropSlot, Value, ValueBits};
 
 use crate::build::{CONTEXT_TAG, OBJECT_TAG};
 use crate::ir::{Helper, Rep, Slot};
-use crate::lower::{Reason, RESUMED, THREW};
+use crate::codegen::{Reason, RESUMED, THREW};
 use crate::Jit;
 
 /// How many values a deopt can hand over through the buffer
@@ -53,8 +53,12 @@ pub struct Ctx {
     pub args: [u64; ARGS_WORDS],
     pub buf: [u64; BUF_WORDS],
     // ---- not read by machine code ----
-    /// The entry (lifetimes erased: only used while the entry is on the stack)
+    /// The entry (lifetimes erased: only used while the entry is on the stack); null for a call from the executor
+    /// without an interpreter frame
     pub entry: *mut core::ffi::c_void,
+    /// The executor and the agent (lifetimes erased likewise)
+    pub exe: *const core::ffi::c_void,
+    pub agent: *mut core::ffi::c_void,
     pub jit: *const Jit,
     pub error: Option<Error>,
 }
@@ -68,20 +72,45 @@ impl Ctx {
     pub const RET: i32 = 40;
     pub const RET_PC: i32 = 48;
     pub const ACC: i32 = 56;
-    pub const DEPTH: i32 = 64;
-    pub const LIMIT: i32 = 72;
     pub const EPOCH: i32 = 80;
     pub const MISS: i32 = 88;
     pub const STACK_FLOOR: i32 = 96;
     pub const ARGS: i32 = 128;
     pub const BUF: i32 = 256;
 
-    /// A context for running machine code on `e`
+    /// A context for running machine code on `e`: a recycled one (see [`Jit::recycle`]) or a new one
     pub fn new(e: &mut Entry<'_, '_, '_, '_>, jit: &Jit) -> Box<Ctx> {
-        let a = e.agent();
+        let acc = e.acc().bits();
+        let entry: *mut core::ffi::c_void = core::ptr::from_mut(e).cast();
+        let exe = e.executor();
+        let mut c = Self::bare(exe, e.agent(), jit);
+        c.acc = acc;
+        c.entry = entry;
+        c
+    }
+
+    /// A context for a call from the executor (no entry frame)
+    pub fn bare(exe: &Executor, a: &mut Agent<'_, '_>, jit: &Jit) -> Box<Ctx> {
         let addr = |v: Value<'_>| v.bits() & ValueBits::PAYLOAD;
         let (global, scope, proto) = (addr(Value::Object(a.realm.global)), addr(Value::Object(a.realm.script_scope)), addr(Value::Object(a.realm.object_proto)));
-        let acc = e.acc().bits();
+        let exe: *const core::ffi::c_void = core::ptr::from_ref(exe).cast();
+        let agent: *mut core::ffi::c_void = core::ptr::from_mut(a).cast();
+        if let Some(mut c) = jit.spare_ctx() {
+            c.budget = BUDGET_CHUNK;
+            c.pending = 0;
+            c.global = global;
+            c.script_scope = scope;
+            c.object_proto = proto;
+            c.acc = ValueBits::UNDEFINED;
+            c.epoch = jit.bump();
+            c.miss = 0;
+            c.stack_floor = jit.stack_floor();
+            c.entry = core::ptr::null_mut();
+            c.exe = exe;
+            c.agent = agent;
+            c.error = None;
+            return c;
+        }
         Box::new(Ctx {
             budget: BUDGET_CHUNK,
             pending: 0,
@@ -90,7 +119,7 @@ impl Ctx {
             object_proto: proto,
             ret: 0,
             ret_pc: 0,
-            acc,
+            acc: ValueBits::UNDEFINED,
             depth: 0,
             limit: DEPTH_LIMIT,
             epoch: jit.bump(),
@@ -99,10 +128,21 @@ impl Ctx {
             pad: [0; 3],
             args: [0; ARGS_WORDS],
             buf: [0; BUF_WORDS],
-            entry: core::ptr::from_mut(e).cast(),
+            entry: core::ptr::null_mut(),
+            exe,
+            agent,
             jit,
             error: None,
         })
+    }
+
+    /// The executor and the agent (erased lifetimes: `'gc` is the running mutate's, for the duration of the call)
+    ///
+    /// # Safety
+    /// Only while the code this context was made for runs.
+    pub unsafe fn parts<'a>(&mut self) -> (&'a Executor, &'a mut Agent<'a, 'a>) {
+        // SAFETY: the caller's contract
+        unsafe { (&*self.exe.cast(), &mut *self.agent.cast()) }
     }
 
     /// The entry and agent (erased lifetimes: `'gc` is the running mutate's, for the duration of the call)
@@ -162,11 +202,16 @@ pub extern "C" fn j8_helper(ctx: *mut Ctx, id: u64, a: u64, b: u64, c: u64, d: u
     let ctx = unsafe { &mut *ctx };
     let jit = ctx.jit();
     let (h, n) = jit.call(id);
-    let ops: Vec<u64> = if n > 4 { ctx.args[..n].to_vec() } else { [a, b, c, d][..n].to_vec() };
-    // SAFETY: the entry is running
-    let e = unsafe { ctx.entry() };
-    let exe = e.executor();
-    let r = helper(jit, exe, e.agent(), h, &ops, ctx.epoch);
+    let mut buf = [0u64; ARGS_WORDS];
+    if n > 4 {
+        buf[..n].copy_from_slice(&ctx.args[..n]);
+    } else {
+        buf[..4].copy_from_slice(&[a, b, c, d]);
+    }
+    let ops = &buf[..n.min(ARGS_WORDS)];
+    // SAFETY: the code is running
+    let (exe, a) = unsafe { ctx.parts() };
+    let r = helper(jit, exe, a, h, ops, ctx.epoch);
     if !matches!(h, Helper::ModF | Helper::ToBoolean | Helper::StoreCell | Helper::Alloc(_) | Helper::CreateClosure(..) | Helper::CreateContext(..) | Helper::ObjectLiteral(..) | Helper::GlobalProbe(_)) {
         ctx.epoch = jit.bump();
     }
@@ -188,8 +233,12 @@ fn helper<'gc>(jit: &Jit, exe: &Executor, a: &mut Agent<'gc, '_>, h: Helper, ops
     let v = |i: usize| unsafe { val::<'gc>(ops.get(i).copied().unwrap_or(ValueBits::UNDEFINED)) };
     Ok(match h {
         Helper::Call => {
-            let args: Vec<Value<'gc>> = (2..ops.len()).map(v).collect();
-            a.call(v(0), v(1), &args)?.bits()
+            let mut args = [Value::Undefined; ARGS_WORDS];
+            let n = ops.len().saturating_sub(2);
+            for (i, x) in args.iter_mut().enumerate().take(n) {
+                *x = v(2 + i);
+            }
+            a.call(v(0), v(1), &args[..n])?.bits()
         }
         Helper::Construct => {
             let args: Vec<Value<'gc>> = (2..ops.len()).map(v).collect();
@@ -210,7 +259,6 @@ fn helper<'gc>(jit: &Jit, exe: &Executor, a: &mut Agent<'gc, '_>, h: Helper, ops
         Helper::CreateClosure(f, k) => Value::Object(exe.jit_create_closure(a, f, i64::from(k), v(0).as_context())).bits(),
         Helper::CreateContext(shape, n) => Value::context(j8framework::Env::context(n as usize, Value::Undefined, v(0).as_context(), Some(shape), None).alloc(a.mc)).bits(),
         Helper::ObjectLiteral(f, k) => Value::Object(exe.jit_object_literal(a, f, i64::from(k))).bits(),
-        Helper::CreateThis(f) => Value::Object(exe.jit_create_this(a, f, v(1))?).bits(),
         Helper::ModF => (f64::from_bits(ops[0]) % f64::from_bits(ops[1])).to_bits(),
         Helper::ToBoolean => u64::from(a.to_boolean(v(0))),
         Helper::StoreCell => {
@@ -237,6 +285,14 @@ fn helper<'gc>(jit: &Jit, exe: &Executor, a: &mut Agent<'gc, '_>, h: Helper, ops
             v.bits()
         }
         Helper::Binary(op) => a.binary(op, v(0), v(1))?.bits(),
+        Helper::GetKeyed => a.get_keyed(v(0), v(1))?.bits(),
+        Helper::SetKeyed(strict) => {
+            a.put_keyed(v(0), v(1), v(2), strict)?;
+            0
+        }
+        Helper::Unary(op) => a.unary(op, v(0))?.bits(),
+        Helper::LooseEquals => u64::from(a.loose_equals(v(0), v(1))?),
+        Helper::InstanceOf => u64::from(a.instance_of(v(0), v(1))?),
         Helper::Compare(op) => u64::from(a.compare(op, v(0), v(1))?),
         Helper::StrictEquals => u64::from(a.compare(j8framework::CompareOp::StrictEq, v(0), v(1))?),
         Helper::Alloc(k) => {
@@ -258,6 +314,12 @@ pub extern "C" fn j8_poll(ctx: *mut Ctx) -> u64 {
     // SAFETY: machine code passes its context
     let ctx = unsafe { &mut *ctx };
     ctx.budget = BUDGET_CHUNK;
+    if ctx.entry.is_null() {
+        // No interpreter frame below to pause: only a termination request stops it
+        // SAFETY: the code is running
+        let (_, a) = unsafe { ctx.parts() };
+        return u64::from(a.stop.observe());
+    }
     // SAFETY: the entry is running
     let e = unsafe { ctx.entry() };
     #[expect(clippy::cast_sign_loss, reason = "positive")]
@@ -272,10 +334,8 @@ pub extern "C" fn j8_deopt(ctx: *mut Ctx, id: u64) -> u64 {
     let jit = ctx.jit();
     let d = jit.deopt(id);
     jit.learn(&d);
-    // SAFETY: the entry is running
-    let e = unsafe { ctx.entry() };
-    let exe = e.executor();
-    let a = e.agent();
+    // SAFETY: the code is running
+    let (exe, a) = unsafe { ctx.parts() };
     let frames = frames(a, ctx, &d);
     ctx.epoch = jit.bump();
     let throw = if d.reason == Reason::Throw { ctx.error.take() } else { None };
@@ -294,6 +354,8 @@ pub extern "C" fn j8_deopt(ctx: *mut Ctx, id: u64) -> u64 {
             Err(err) => ctx.fail(err),
         };
     }
+    // SAFETY: interpreter-entry code runs on an entry
+    let e = unsafe { ctx.entry() };
     e.resume(frames);
     match throw {
         Some(err) => {
@@ -370,15 +432,15 @@ pub extern "C" fn j8_interp(ctx: *mut Ctx, callee: u64, this: u64, a0: u64, a1: 
     // SAFETY: machine code passes its context
     let ctx = unsafe { &mut *ctx };
     let jit = ctx.jit();
-    // SAFETY: the entry is running
-    let e = unsafe { ctx.entry() };
+    // SAFETY: the code is running
+    let (exe, a) = unsafe { ctx.parts() };
     // SAFETY: words of this mutate
     let (f, t, args) = unsafe { (val(callee), val(this), [val(a0), val(a1), val(a2)]) };
     if let Some(c) = f.as_object().and_then(|o| o.closure()) {
-        jit.native_hot(e, c.func);
+        jit.native_hot(exe, a, c.func);
     }
-    let n = f.as_object().and_then(|o| o.closure()).map_or(3, |c| e.executor().jit_function(c.func).shared().formal_parameters as usize).min(3);
-    let r = e.agent().call(f, t, &args[..n]);
+    let n = f.as_object().and_then(|o| o.closure()).map_or(3, |c| exe.jit_function(c.func).shared().formal_parameters as usize).min(3);
+    let r = a.call(f, t, &args[..n]);
     ctx.epoch = jit.bump();
     match r {
         Ok(v) => v.bits(),

@@ -104,7 +104,7 @@ fn clobbers(op: &Op) -> bool {
 
 /// May move to a loop's preheader when its operands are invariant (guards take the preheader's frame state)
 fn hoistable(op: &Op) -> bool {
-    matches!(op, Op::Untag(_) | Op::BoxPtr(..) | Op::BoxInt(_) | Op::BoxBool(_) | Op::IntToFloat(_) | Op::CmpWord(..) | Op::CmpInt(..) | Op::LoadWord(..) | Op::LoadPtr(..) | Op::LoadRaw(..) | Op::LoadByte(..) | Op::ContextCell(..) | Op::StoreCellAddr(..) | Op::CtxField(_) | Op::I32(_) | Op::F64(_) | Op::Word(_) | Op::CheckObject(..) | Op::CheckShape(..) | Op::CheckFunc(..) | Op::CheckNotHole(..) | Op::UnboxInt(..) | Op::UnboxFloat(..) | Op::Check(..))
+    matches!(op, Op::Untag(_) | Op::BoxPtr(..) | Op::BoxInt(_) | Op::BoxBool(_) | Op::IntToFloat(_) | Op::CmpWord(..) | Op::CmpInt(..) | Op::LoadWord(..) | Op::LoadPtr(..) | Op::LoadRaw(..) | Op::ContextCell(..) | Op::StoreCellAddr(..) | Op::CtxField(_) | Op::I32(_) | Op::F64(_) | Op::Word(_) | Op::CheckObject(..) | Op::CheckShape(..) | Op::CheckFunc(..) | Op::CheckNotHole(..) | Op::UnboxInt(..) | Op::UnboxFloat(..) | Op::Check(..))
 }
 
 /// Loop-invariant code motion for loops whose bodies change no memory and call nothing
