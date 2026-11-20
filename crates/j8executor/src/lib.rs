@@ -32,6 +32,9 @@ pub use jit::{DeoptFrame, Entry, FrameSlots, Function as JitFunction, GlobalFeed
 /// Call depth limit (including JS re-entered from host functions); exceeding it throws RangeError
 const STACK_LIMIT: usize = 10_000;
 
+/// Regex flags and their bits in `CreateRegExpLiteral` (V8's `JSRegExp::Flag`), in the order `flags` lists them
+const REGEXP_FLAGS: [(u8, u16); 8] = [(b'd', 1 << 7), (b'g', 1), (b'i', 1 << 1), (b'm', 1 << 2), (b's', 1 << 5), (b'u', 1 << 4), (b'v', 1 << 8), (b'y', 1 << 3)];
+
 /// The name a script's `this` is read by from the functions inside it (`LdaGlobal`)
 const SCRIPT_THIS: &str = "this";
 
@@ -1840,10 +1843,22 @@ impl Executor {
             B::CreateRegExpLiteral => {
                 let pattern = Self::name_at(loaded, o[0]);
                 let bits = u16::try_from(o[2]).unwrap_or(0);
-                let flags: alloc::string::String = [('d', 1 << 7), ('g', 1), ('i', 1 << 1), ('m', 1 << 2), ('s', 1 << 5), ('u', 1 << 4), ('v', 1 << 8), ('y', 1 << 3)].iter().filter(|(_, b)| bits & b != 0).map(|(c, _)| *c).collect();
-                let (p, fl) = (a.string(pattern), a.string(&flags));
-                let ctor = a.realm.regexp_ctor;
-                *acc = a.call(ctor.into(), Value::Undefined, &[p.into(), fl.into()])?;
+                let mut flags = [0u8; REGEXP_FLAGS.len()];
+                let mut n = 0;
+                for (c, b) in REGEXP_FLAGS {
+                    if bits & b != 0 && let Some(f) = flags.get_mut(n) {
+                        *f = c;
+                        n += 1;
+                    }
+                }
+                let flags = core::str::from_utf8(flags.get(..n).unwrap_or_default()).unwrap_or_default();
+                *acc = match a.realm.regexp_literal.get().0 {
+                    Some(literal) => literal(a, pattern, flags)?,
+                    None => {
+                        let (p, fl) = (a.string(pattern), a.string(flags));
+                        a.call(a.realm.regexp_ctor.into(), Value::Undefined, &[p.into(), fl.into()])?
+                    }
+                };
             }
             B::GetTemplateObject => {
                 let key = (f.func.0, u32::try_from(o[0]).unwrap_or(0));

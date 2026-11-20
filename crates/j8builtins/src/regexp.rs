@@ -67,14 +67,33 @@ impl Regexps {
     /// Compiled regex: look up the realm's cache first (identical source and flags share one copy); otherwise compile
     /// it and record it.
     fn compiled<'gc>(a: &Agent<'gc, '_>, source: &str, flags: &str) -> Result<Gc<'gc, Static<Box<dyn core::any::Any + Send + Sync>>>, Error> {
+        Self::cached(a, source, flags).map(|c| c.compiled)
+    }
+
+    /// The realm's cache entry for `source` / `flags` (its strings are shared by the regexes made from it)
+    fn cached<'gc>(a: &Agent<'gc, '_>, source: &str, flags: &str) -> Result<j8framework::RegExpCompiled<'gc>, Error> {
         let slot = &a.realm.realm().get().regexp_cache[j8framework::RegExpCompiled::bucket(source, flags)];
-        if let Some(c) = slot.get().filter(|c| *c.source == *source && *c.flags == *flags) {
-            return Ok(c.compiled);
+        if let Some(c) = slot.get().filter(|c| **c.source == *source && **c.flags == *flags) {
+            return Ok((*c).clone());
         }
         let regex = Compiled::new(Self::compile(a, source, flags)?, source, flags);
         let compiled = a.mc.alloc(Static(Box::new(regex) as Box<dyn core::any::Any + Send + Sync>));
-        slot.set(a.mc.mutator(), Some(a.mc.alloc(j8framework::RegExpCompiled { source: source.into(), flags: flags.into(), compiled })));
-        Ok(compiled)
+        let entry = j8framework::RegExpCompiled { source: a.string(source), flags: a.string(flags), compiled };
+        slot.set(a.mc.mutator(), Some(a.mc.alloc(entry.clone())));
+        Ok(entry)
+    }
+
+    /// A new regex of this realm with `lastIndex` 0 (RegExpAlloc + RegExpInitialize for string source and flags)
+    fn make<'gc>(a: &Agent<'gc, '_>, c: j8framework::RegExpCompiled<'gc>) -> JsObject<'gc> {
+        let kind = ObjectKind::RegExp(RegExpData { source: c.source, flags: c.flags, compiled: c.compiled, legacy: true });
+        let o = ObjectData { kind, proto: Some(a.realm.regexp_proto), ..ObjectData::default() }.alloc(a.mc);
+        o.borrow_mut(a.mc).define("lastIndex", Property { slot: Slot::Data(0.0.into()), enumerable: false, writable: true, configurable: false });
+        o
+    }
+
+    /// Evaluating a regex literal
+    pub(crate) fn literal<'gc>(a: &Agent<'gc, '_>, source: &str, flags: &str) -> Result<Value<'gc>, Error> {
+        Ok(Self::make(a, Self::cached(a, source, flags)?).into())
     }
 
     /// IsRegExp: check `Symbol.match`; if absent, check whether it is a RegExp object.
@@ -135,10 +154,7 @@ impl Regexps {
             && let (ValueKind::String(source), ValueKind::String(flags)) = (pattern.kind(), flags.kind())
         {
             let compiled = Self::compiled(a, &source, &flags)?;
-            let kind = ObjectKind::RegExp(RegExpData { source, flags, compiled, legacy: true });
-            let o = ObjectData { kind, proto: Some(a.realm.regexp_proto), ..ObjectData::default() }.alloc(a.mc);
-            o.borrow_mut(a.mc).define("lastIndex", Property { slot: Slot::Data(0.0.into()), enumerable: false, writable: true, configurable: false });
-            return Ok(o.into());
+            return Ok(Self::make(a, j8framework::RegExpCompiled { source, flags, compiled }).into());
         }
         let pattern_is_regexp = Self::is_regexp(a, pattern)?;
         let mut new_target = new_target;
@@ -225,7 +241,8 @@ impl Regexps {
         let (_, _, compiled) = Self::data(o);
         let c = compiled.0.downcast_ref::<Compiled>().expect("a compiled regex");
         if let Some(atom) = &c.atom {
-            let at = start + s[start..].find(&**atom)?;
+            let rest = &s[start..];
+            let at = start + if let [b] = atom.as_bytes() { rest.find(char::from(*b)) } else { rest.find(&**atom) }?;
             return Some(Found { range: at..at + atom.len(), groups: Vec::new(), named: Vec::new() });
         }
         if let Some(d) = &c.dfa {
@@ -455,9 +472,26 @@ impl Regexps {
         let r = Self::this_object(a, this)?;
         let s = a.to_string(args.at(0))?;
         if let Some((o, last)) = Self::pristine(a, r) {
+            let flags = Self::data(o).1;
+            // Neither `g` nor `y`: `lastIndex` is neither read nor written, only whether there is a match counts
+            if !flags.contains('g') && !flags.contains('y') {
+                return Ok(Self::matches(o, &s, s.units()).into());
+            }
             return Ok(Self::quick_exec(a, o, last, &s, s.units())?.is_some().into());
         }
         Ok((Self::regexp_exec(a, r, s)? != Value::Null).into())
+    }
+
+    /// Whether a regex matches anywhere in `s`
+    fn matches(o: JsObject<'_>, s: &str, units: Units<'_>) -> bool {
+        let Units::Ascii(_) = units else { return Self::find_in(o, s, units, 0).is_some() };
+        let (_, _, compiled) = Self::data(o);
+        let Some(c) = compiled.0.downcast_ref::<Compiled>() else { return false };
+        match (&c.atom, &c.dfa) {
+            (Some(atom), _) => s.contains(&**atom),
+            (None, Some(d)) => d.is_match(s),
+            (None, None) => c.regex.find_from(s, 0).next().is_some(),
+        }
     }
 
     fn to_string<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
@@ -994,6 +1028,10 @@ impl Regexps {
                 Self::require_global(a, search, "replaceAll")?;
             }
             if let Some(f) = Self::method_of(a, search, a.realm.symbols.replace)? {
+                // The installed method: called right here
+                if a.realm.regexp_pristine.get().as_ref().is_some_and(|p| f.as_object().is_some_and(|f| Gc::ptr_eq(f, p.replace))) {
+                    return Self::replace_symbol(a, search, &[o, with]);
+                }
                 return a.call(f, search, &[o, with]);
             }
         }
@@ -1078,13 +1116,6 @@ impl<'gc> Installer<'_, 'gc> {
         for (name, f) in flags {
             self.getter(proto, name, f);
         }
-        // Record the state at setup: slots for exec / flags / the flag getters
-        let pristine = {
-            let d = proto.borrow();
-            let slots = ["exec", "flags"].into_iter().chain(FLAG_PROPERTIES.map(|(_, n)| n)).filter_map(|n| d.props().position(n).and_then(|i| Some((i, d.props().word(i)?)))).collect();
-            d.props().shape().map(|shape| j8framework::RegExpPristine { shape, slots })
-        };
-        r.regexp_pristine.set(self.mc, pristine);
         let symbols: [(j8framework::JsSymbol<'gc>, j8framework::NativeFn, u32); 5] = [
             (r.symbols.match_, Regexps::match_symbol, 1),
             (r.symbols.match_all, Regexps::match_all_symbol, 1),
@@ -1092,9 +1123,15 @@ impl<'gc> Installer<'_, 'gc> {
             (r.symbols.search, Regexps::search_symbol, 1),
             (r.symbols.split, Regexps::split_symbol, 2),
         ];
-        for (sym, f, n) in symbols {
-            r.symbol_method(self.mc, proto, sym, f, n);
-        }
+        let methods = symbols.map(|(sym, f, n)| r.symbol_method(self.mc, proto, sym, f, n));
+        // Record the state at setup: slots for exec / flags / the flag getters, and the `Symbol.replace` method
+        let pristine = {
+            let d = proto.borrow();
+            let slots = ["exec", "flags"].into_iter().chain(FLAG_PROPERTIES.map(|(_, n)| n)).filter_map(|n| d.props().position(n).and_then(|i| Some((i, d.props().word(i)?)))).collect();
+            d.props().shape().map(|shape| j8framework::RegExpPristine { shape, slots, replace: methods[2] })
+        };
+        r.regexp_pristine.set(self.mc, pristine);
+        r.regexp_literal.set(self.mc, j8framework::Static(Some(Regexps::literal)));
         self.method(r.regexp_string_iterator_proto, "next", Regexps::string_iterator_next, 0);
         let s = r.string_proto;
         self.method(s, "match", Regexps::string_match, 1);

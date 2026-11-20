@@ -144,6 +144,8 @@ pub struct Realm<'gc> {
     /// What `RegExp.prototype` looked like when installed (built-in regex methods use it to decide whether they can
     /// skip the protocol and match directly)
     pub regexp_pristine: Cow<'gc, Option<RegExpPristine<'gc>>>,
+    /// Evaluates a regex literal (`CreateRegExpLiteral`), installed with the built-ins
+    pub regexp_literal: Cow<'gc, crate::Static<Option<RegExpLiteral>>>,
     /// The built-in array iterator / string iterator `next` (when an iterator record's `next` is one of them, no result
     /// object is created; it steps directly)
     pub builtin_nexts: Cow<'gc, [Option<JsObject<'gc>>; 2]>,
@@ -158,14 +160,19 @@ pub struct RegExpPristine<'gc> {
     pub shape: alloc::sync::Arc<crate::Shape>,
     /// The guarded entries and their words (see `Props::word`)
     pub slots: alloc::vec::Vec<(usize, Value<'gc>)>,
+    /// The installed `RegExp.prototype[Symbol.replace]`
+    pub replace: JsObject<'gc>,
 }
+
+/// Makes the regex of a literal from its source and flags.
+pub type RegExpLiteral = for<'gc, 'a> fn(&crate::Agent<'gc, 'a>, &str, &str) -> Result<Value<'gc>, crate::Error>;
 
 /// One compiled regex: source, flags, the execution layer's compiled result.
 #[derive(Clone, Collect)]
 #[collect(no_drop)]
 pub struct RegExpCompiled<'gc> {
-    pub source: crate::SmallStr,
-    pub flags: crate::SmallStr,
+    pub source: JsString<'gc>,
+    pub flags: JsString<'gc>,
     pub compiled: Gc<'gc, crate::Static<alloc::boxed::Box<dyn core::any::Any + Send + Sync>>>,
 }
 
@@ -258,6 +265,7 @@ impl<'gc> Realm<'gc> {
             jobs: GcQueue::new(mc),
             regexp_cache: core::array::from_fn(|_| Slot::default()),
             regexp_pristine: Cow::new(mc, None),
+            regexp_literal: Cow::new(mc, crate::Static(None)),
             builtin_nexts: Cow::new(mc, [None, None]),
             symbol_registry: Cow::new(mc, alloc::vec::Vec::new()),
             modules: Cow::new(mc, alloc::vec::Vec::new()),
@@ -319,9 +327,10 @@ impl<'gc> Realm<'gc> {
     }
 
     /// Attach a Symbol-keyed host method on `target` (its name is `[description]`).
-    pub fn symbol_method(&self, mc: &Mutation<'gc>, target: JsObject<'gc>, key: JsSymbol<'gc>, f: NativeFn, length: u32) {
+    pub fn symbol_method(&self, mc: &Mutation<'gc>, target: JsObject<'gc>, key: JsSymbol<'gc>, f: NativeFn, length: u32) -> JsObject<'gc> {
         let func = self.named_native(mc, f, &alloc::format!("[{}]", key.description.as_deref().unwrap_or("")), length);
         target.borrow_mut(mc).define_symbol(key, Property::hidden(Value::Object(func)));
+        func
     }
 
     /// Attach a host method on `target`.

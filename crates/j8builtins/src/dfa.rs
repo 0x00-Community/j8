@@ -94,6 +94,11 @@ impl Dfa {
         (re.captures_len() == t.groups + 1).then_some(Self { re, groups: t.groups })
     }
 
+    /// Whether there is a match anywhere in the ASCII text `s`
+    pub(crate) fn is_match(&self, s: &str) -> bool {
+        self.re.is_match(s.as_bytes())
+    }
+
     /// The first match at or after `start` in the ASCII text `s`: whole match and each group (byte = code unit index).
     pub(crate) fn find(&self, s: &str, start: usize) -> Option<Match> {
         if self.groups == 0 {
