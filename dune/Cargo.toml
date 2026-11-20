@@ -9,7 +9,7 @@ repository = "https://github.com/0x00-Community/j8"
 # the name is taken on crates.io
 publish = false
 
-# A sample is a package of its own, built against the published j8 (not part of the j8 workspace)
+# dune is a package of its own, built against the published j8 (not part of the j8 workspace)
 [workspace]
 
 [[bin]]

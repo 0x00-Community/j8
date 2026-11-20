@@ -67,8 +67,8 @@ package and its features is the usual way. See [EMBEDDING.md](EMBEDDING.md) for 
 ## 🚀 Quick start
 
 ```sh
-# 🟢 dune, Node-compatible (or --web for the Web-standard APIs only): run a script / evaluate / REPL
-cd samples/dune
+# 🟢 dune, the Node challenger (or --web for the Web-standard APIs only): run a script / evaluate / REPL
+cd dune
 cargo run --release -- examples/node.js
 cargo run --release -- --web examples/web.mjs
 cargo run --release -- -p '[1, 2, 3].map(x => x * 2)'
@@ -90,8 +90,8 @@ cd samples/benchv8 && cargo run --release
 
 ## 🧱 Crates
 
-A Cargo workspace of several crates. The samples under `samples/` are packages of their own, outside the workspace,
-and depend on the published `j8` by version, the way an embedder would.
+A Cargo workspace of several crates. `dune/` (the runtime that takes on Node) and the samples under `samples/` are packages of their own, outside the
+workspace, and depend on the published `j8` by version, the way an embedder would.
 
 | crate | std | What it does |
 |---|---|---|
@@ -104,7 +104,7 @@ and depend on the published `j8` by version, the way an embedder would.
 | `j8compiler` | std | JS ⇒ bytecode (`j8compiler::Compile` for `Module`: scripts, modules, `eval` / `Function`), parsing with oxc |
 | `j8taskqueue` | `no_std` | Task queue: `ITask` (`recursable` / `depend` / `exec`) and `ITaskPoll` (`add` / `run`); lock-free dataflow scheduling (hand-written MPMC ready queue, atomic dependency counts): a task whose dependencies are done runs at once, in parallel on the host's `Pool` or on the calling thread, with no round barrier; `TaskId::family` finds the union-find root, `cancel` cancels a whole family; quotas count bytecodes (`Quota` / `Flow::Yield`, a per-run budget); idle workers leave instead of spinning. Every `j8framework::EventLoop` is one `Queue`: scripts, settlements and polls of host futures, checked each time a script yields |
 | `j8macros` | proc-macro | Procedural macros: `enums!("x.json")` generates enums from JSON (definitions, `Display`, `&mut` accessors by field type), `#[derive(Collect)]` for heap types (paragc `Trace`), and the binding macros; see `crates/macros/USAGE.md` |
-| `samples/dune` | std | A runtime with two layers: `src/web/` (the Web-standard APIs: `console`, timers, `URL`, `TextEncoder`, `EventTarget` / `AbortController`, `fetch`, `structuredClone`, `crypto` …) and `src/node/` on top of it (`process`, `require` / ES modules, `Buffer`, `fs`, `path`, `os`, `events`, `util`, `assert`, `child_process` …); machine access is Rust bound with `#[j8::object]` / `#[j8::class]`, the APIs are JS preludes; `dune a.js`, `dune --web a.mjs`, `dune -e` / `-p`, a REPL; see its README |
+| `dune` | std | The runtime that takes on Node, with two layers: `src/web/` (the Web-standard APIs: `console`, timers, `URL`, `TextEncoder`, `EventTarget` / `AbortController`, `fetch`, `structuredClone`, `crypto` …) and `src/node/` on top of it (`process`, `require` / ES modules, `Buffer`, `fs`, `path`, `os`, `events`, `util`, `assert`, `child_process` …); machine access is Rust bound with `#[j8::object]` / `#[j8::class]`, the APIs are JS preludes; `dune a.js`, `dune --web a.mjs`, `dune -e` / `-p`, a REPL; see its README |
 | `samples/workerd` | std | Loads Cloudflare Workers (ES modules with `export default { fetch }`) and Durable Objects with j8: `workerd examples/counter.js --bind COUNTER=Counter --request "GET /c/inc?name=a"`, or `--port 8787` for an HTTP server; the Fetch API subset and DOs live in a JS prelude, storage is a Rust KV bound with `#[j8::class]` |
 | `samples/benchv8` | std | The same JS benchmarks timed on j8 and V8 (rusty_v8 152, with JIT / `--jitless`): `cd samples/benchv8 && cargo run --release` (downloads V8's prebuilt library) |
 | `j8debugger` | std | The `j8dbg` command line (clap): `j8dbg compile <file.js \| ->` / `j8dbg compile -e '<js>'` writes the bytecode in binary form; `j8dbg check <file.j8b \| ->` reads a binary back and writes it re-encoded (`-o` writes a file) |

@@ -136,7 +136,7 @@ j8::EventLoopSet::scope(&platform, NonZeroUsize::MIN, |set| {   // the loop thre
 Every section is optional; they come in this order, each followed by a comma. `j8::Runtime` also has
 `eval_module`, `run_until_idle` (the event loop for `async fn` bindings), `set("process.argv", value)` (a data
 property at a dotted path from the global object, converted with `IntoJs`), `enter` (work with the context directly)
-and `isolate`. `samples/dune` and
+and `isolate`. `dune` and
 `samples/workerd` are built this way.
 
 ### Attributes and parameters
