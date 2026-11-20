@@ -2,7 +2,7 @@
 
 [English](README.md) · **简体中文**
 
-同一组 JavaScript 基准（`bench/*.js`）在 [j8](https://github.com/0x00-Community/j8)、V8 `--jitless` 与带 JIT 的 V8（经 rusty_v8）
+同一组 JavaScript 基准（`bench/*.js`）在带 JIT 的 [j8](https://github.com/0x00-Community/j8)（`J8_NOJIT=1` 只用解释器）、V8 `--jitless` 与带 JIT 的 V8（经 rusty_v8）
 上跑，打印对比。结果与分析见 [benchmark.md](benchmark.md)。
 
 ```sh

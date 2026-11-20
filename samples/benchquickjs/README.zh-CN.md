@@ -13,6 +13,7 @@ cargo run --release -- --engine quickjs     # 只跑一个：j8 / quickjs
 cargo run --release -- --runs 10            # 每个基准跑几次，取最短（缺省 5）
 ```
 
+- j8 带 JIT 跑（`J8_NOJIT=1` 只用解释器）
 - 每个引擎在自己的子进程里跑；计时只算编译 + 执行，每次一个新的上下文
 - 每个脚本的完成值是校验和，各引擎必须一致（与 V8 / JavaScriptCore 也一致，见 benchv8 / benchjsc）
 - 自成 workspace（根 workspace 已排除）；编 QuickJS 需要 C 编译器

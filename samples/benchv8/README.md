@@ -2,8 +2,8 @@
 
 **English** · [简体中文](README.zh-CN.md)
 
-Runs the same JavaScript benchmarks (`bench/*.js`) on [j8](https://github.com/0x00-Community/j8), V8 `--jitless`
-and V8 with its JIT (via rusty_v8), and prints the comparison. Results and analysis: [benchmark.md](benchmark.md).
+Runs the same JavaScript benchmarks (`bench/*.js`) on [j8](https://github.com/0x00-Community/j8) with its JIT
+(`J8_NOJIT=1`: the interpreter only), V8 `--jitless` and V8 with its JIT (via rusty_v8), and prints the comparison. Results and analysis: [benchmark.md](benchmark.md).
 
 ```sh
 cd samples/benchv8

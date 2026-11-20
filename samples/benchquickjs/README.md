@@ -14,6 +14,7 @@ cargo run --release -- --engine quickjs     # only one: j8 / quickjs
 cargo run --release -- --runs 10            # runs per benchmark, the shortest is kept (default 5)
 ```
 
+- j8 runs with its JIT (`J8_NOJIT=1`: the interpreter only)
 - Each engine runs in its own child process; timing covers compile + execute, each run in a fresh context
 - Every script's completion value is a checksum that must match across the engines (and V8 / JavaScriptCore, see
   benchv8 / benchjsc)

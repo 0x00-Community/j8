@@ -247,6 +247,14 @@ unsafe impl crate::Trace for Props<'_> {
 }
 
 impl<'gc> Props<'gc> {
+    /// Byte offsets machine code reads properties by (see [`crate::Layout`])
+    pub const SHAPE_OFFSET: usize = core::mem::offset_of!(Props<'static>, shape);
+    pub const STORE_OFFSET: usize = core::mem::offset_of!(Props<'static>, store);
+    pub const DICT_OFFSET: usize = core::mem::offset_of!(Props<'static>, dict);
+    pub const INLINE_OFFSET: usize = core::mem::offset_of!(Props<'static>, inline);
+    /// Entries kept inside the object
+    pub const INLINE: usize = INLINE;
+
     /// Empty, with room for `n` values already (an object literal knows how many it gets)
     pub fn with_capacity(mc: &Mutation<'gc>, n: usize) -> Self {
         let store = (n > INLINE).then(|| Store::reserve(mc, n - INLINE).gc());
@@ -260,6 +268,11 @@ impl<'gc> Props<'gc> {
     fn store(&self) -> Option<Store<'gc>> {
         // SAFETY: only ever set from `Store::gc`
         self.store.get().map(|g| unsafe { Store::from_gc(g) })
+    }
+
+    /// How machine code reaches fast-mode entry `i` (≥ the inline ones) through the store
+    pub fn store_path(&self, i: usize) -> Option<crate::store::StorePath> {
+        self.store()?.path(i.checked_sub(INLINE)?)
     }
 
     /// The value cell of fast-mode entry `i` (inside the object, or in the store)

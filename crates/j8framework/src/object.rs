@@ -81,6 +81,7 @@ const INLINE_SLOTS: usize = 4;
 /// it is collected), boxed otherwise.
 #[derive(Debug, Collect)]
 #[collect(no_drop)]
+#[repr(C, u8)]
 enum EnvSlots<'gc> {
     Inline { len: u8, cells: [ValueCell<'gc>; INLINE_SLOTS] },
     Boxed(Box<[ValueCell<'gc>]>),
@@ -140,6 +141,10 @@ impl ContextShape {
 }
 
 impl<'gc> Env<'gc> {
+    /// Byte offsets machine code reads a context by (see [`crate::Layout`])
+    pub const SLOTS_OFFSET: usize = core::mem::offset_of!(Env<'static>, slots);
+    pub const PARENT_OFFSET: usize = core::mem::offset_of!(Env<'static>, parent);
+
     /// An environment holding `slots`
     pub fn new(slots: Vec<Value<'gc>>, parent: Option<JsEnv<'gc>>) -> Self {
         let n = slots.len();
@@ -1124,6 +1129,7 @@ impl fmt::Debug for ObjectState<'_> {
 /// Immutable data of a few kinds, cached outside the cell so hot paths (calls, regex fast paths) read it without
 /// borrowing; refreshed whenever the kind may have changed.
 #[derive(Collect)]
+#[repr(C, u8)]
 enum Fast<'gc> {
     Closure(Closure<'gc>),
     Native(Native),
@@ -1475,6 +1481,14 @@ impl<'gc> ObjMut<'_, 'gc> {
 }
 
 impl<'gc> Object<'gc> {
+    /// Byte offsets machine code reads an object by (see [`crate::Layout`])
+    pub const PROTO_OFFSET: usize = core::mem::offset_of!(Object<'static>, proto);
+    pub const CALL_OFFSET: usize = core::mem::offset_of!(Object<'static>, call);
+    pub const PROPS_OFFSET: usize = core::mem::offset_of!(Object<'static>, props);
+    pub const CLASS_OFFSET: usize = core::mem::offset_of!(Object<'static>, class);
+    /// [`Object::is_plain`]'s bit in the byte at [`Object::CLASS_OFFSET`]
+    pub const PLAIN_BIT: u8 = Class::PLAIN;
+
     pub fn borrow(&self) -> ObjRef<'_, 'gc> {
         ObjRef { obj: self, data: core::cell::OnceCell::new() }
     }
