@@ -27,6 +27,11 @@
     });
   }
   if (!('stackTraceLimit' in Error)) Error.stackTraceLimit = 10;
+  for (const name of ['dispose', 'asyncDispose']) {
+    if (typeof Symbol[name] !== 'symbol') {
+      Object.defineProperty(Symbol, name, { value: Symbol('Symbol.' + name), writable: false, enumerable: false, configurable: false });
+    }
+  }
 
   let primordials;
   const getPrimordials = () => {

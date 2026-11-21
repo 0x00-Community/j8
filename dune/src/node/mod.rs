@@ -3,6 +3,8 @@ mod fs;
 mod bytes;
 mod v8;
 mod vendor;
+#[cfg(unix)]
+mod uvfs;
 
 use std::collections::BTreeMap;
 use std::fmt::Write;
@@ -16,6 +18,8 @@ pub use fs::Fs;
 pub use bytes::Raw;
 pub use v8::V8;
 pub use vendor::Lib;
+#[cfg(unix)]
+pub use uvfs::Uvfs;
 
 use crate::host::Io;
 use crate::web::Web;
@@ -370,6 +374,16 @@ impl<P: Platform> Platform for NodePlatform<P> {
     }
 }
 
+#[cfg(unix)]
+j8::runtime! {
+    pub Dune: Web {
+        globals: [Process],
+        natives: [Fs, Os, Child, V8, Lib, Raw, Uvfs],
+        prelude: PRELUDE,
+    }
+}
+
+#[cfg(not(unix))]
 j8::runtime! {
     pub Dune: Web {
         globals: [Process],

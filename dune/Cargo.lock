@@ -701,6 +701,7 @@ dependencies = [
  "clap",
  "flate2",
  "j8",
+ "libc",
  "nodejs-semver",
  "serde",
  "serde_json",
