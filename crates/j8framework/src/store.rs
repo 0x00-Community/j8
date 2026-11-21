@@ -64,9 +64,14 @@ impl<'gc> Store<'gc> {
         self.head() < NODE
     }
 
+    #[inline]
     pub fn capacity(self) -> usize {
         let h = self.head();
-        if h < NODE { h } else { FAN.pow(u32::try_from(h - NODE + 1).unwrap_or(u32::MAX)) }
+        if h < NODE {
+            return h;
+        }
+        let bits = FAN_BITS as usize * (h - NODE + 1);
+        if bits >= usize::BITS as usize { usize::MAX } else { 1 << bits }
     }
 
     fn leaf_cell(self, i: usize) -> &'gc ValueCell<'gc> {
@@ -133,7 +138,7 @@ impl<'gc> Store<'gc> {
                 return s.leaf_cell(i & (FAN - 1));
             }
             let level = s.head() - NODE;
-            let shift = FAN_BITS * u32::try_from(level).expect("tree depth");
+            let shift = FAN_BITS as usize * level;
             let slot = s.kid((i >> shift) & (FAN - 1));
             s = match slot.get() {
                 Some(k) => Self(k),
@@ -254,8 +259,14 @@ impl<'gc> ValueArray<'gc> {
         }
     }
 
+    #[inline]
     fn reserve(&self, mc: &Mutation<'gc>, need: usize) -> Store<'gc> {
         let cur = self.root.get();
+        if let Some(g) = cur
+            && need <= Store(g).capacity()
+        {
+            return Store(g);
+        }
         let s = match cur {
             Some(g) => Store(g),
             None => Store::leaf(mc, need, &[]),

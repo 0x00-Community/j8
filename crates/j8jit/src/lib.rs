@@ -106,6 +106,7 @@ struct State {
 pub struct Jit {
     threshold: u32,
     debug: Debug,
+    ctx: core::cell::Cell<Option<Box<Ctx>>>,
     ctxs: RefCell<Vec<Box<Ctx>>>,
     floor: core::cell::Cell<u64>,
     epoch: core::cell::Cell<u64>,
@@ -120,7 +121,7 @@ impl Default for Jit {
 
 impl From<u32> for Jit {
     fn from(threshold: u32) -> Self {
-        Self { threshold, debug: Debug::from_env(), ctxs: RefCell::new(Vec::new()), floor: core::cell::Cell::new(0), epoch: core::cell::Cell::new(1), st: RefCell::new(State::default()) }
+        Self { threshold, debug: Debug::from_env(), ctx: core::cell::Cell::new(None), ctxs: RefCell::new(Vec::new()), floor: core::cell::Cell::new(0), epoch: core::cell::Cell::new(1), st: RefCell::new(State::default()) }
     }
 }
 
@@ -152,14 +153,39 @@ impl Jit {
     }
 
     fn spare_ctx(&self) -> Option<Box<Ctx>> {
-        self.ctxs.borrow_mut().pop()
+        self.ctx.take().or_else(|| self.ctxs.borrow_mut().pop())
     }
 
     fn recycle(&self, ctx: Box<Ctx>) {
-        let mut v = self.ctxs.borrow_mut();
-        if v.len() < 8 {
-            v.push(ctx);
+        if let Some(prev) = self.ctx.replace(Some(ctx)) {
+            let mut v = self.ctxs.borrow_mut();
+            if v.len() < 8 {
+                v.push(prev);
+            }
         }
+    }
+
+    unsafe fn run_callback<'gc>(a: &mut j8framework::Agent<'gc, '_>, cb: &j8framework::Callback<'gc>, args: &[Value<'gc>]) -> Option<Result<Value<'gc>, j8framework::Error>> {
+        type StubFn = unsafe extern "C" fn(*mut Ctx, u64, u64, u64, u64, u64) -> runtime::Ret;
+        let (jit, exe) = unsafe { (&*(cb.env[0] as *const Jit), &*(cb.env[1] as *const j8executor::Executor)) };
+        if !jit.stack_room() {
+            return None;
+        }
+        let mut w = [j8framework::ValueBits::UNDEFINED; 3];
+        for (d, v) in w.iter_mut().zip(args).take(cb.arity) {
+            *d = v.bits();
+        }
+        let mut ctx = Ctx::bare(exe, a, jit);
+        let r = unsafe {
+            let code: StubFn = core::mem::transmute::<usize, StubFn>(cb.code);
+            code(&raw mut *ctx, cb.callee.bits(), cb.this.bits(), w[0], w[1], w[2]).value
+        };
+        let threw = (ctx.pending != 0).then(|| ctx.error.take().unwrap_or(j8framework::Error::Terminated));
+        jit.recycle(ctx);
+        Some(match threw {
+            Some(e) => Err(e),
+            None => Ok(unsafe { Value::from_bits(r) }),
+        })
     }
 
     fn stack_floor(&self) -> u64 {
@@ -503,6 +529,29 @@ impl Tier for Jit {
             Some(e) => Err(e),
             None => Ok(unsafe { Value::from_bits(r) }),
         })
+    }
+
+    fn callback<'gc>(&self, exe: &j8executor::Executor, a: &mut j8framework::Agent<'gc, '_>, func: j8executor::JitFunction<'_>, callee: Value<'gc>, this: Value<'gc>) -> Option<j8framework::Callback<'gc>> {
+        let arity = usize::from(func.shared().formal_parameters);
+        if arity > 3 || !func.plain() || func.class_constructor() {
+            return None;
+        }
+        let this = if func.wraps_this() {
+            match this.bits() {
+                j8framework::ValueBits::UNDEFINED | j8framework::ValueBits::NULL => Value::Object(a.realm.global),
+                _ if this.as_object().is_some() => this,
+                _ => return None,
+            }
+        } else {
+            this
+        };
+        let mut st = self.st.borrow_mut();
+        if Self::func(&mut st, func.id()).native_never {
+            return None;
+        }
+        let code = Self::stub(&mut st, func.id());
+        let env = [core::ptr::from_ref(self) as usize, core::ptr::from_ref(exe) as usize];
+        (code != 0).then_some(j8framework::Callback { callee, this, run: Some(Self::run_callback), code, arity, env })
     }
 
     fn enter(&self, e: &mut Entry<'_, '_, '_, '_>) -> Tiered {

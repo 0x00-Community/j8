@@ -1569,7 +1569,7 @@ impl<'e> Builder<'e> {
             return self.generic_get(act, st, w, name, pc);
         }
         match fb {
-            Some(fb) if self.hint(act.id, pc) & HINT_GENERIC == 0 && fb.to.is_none() && fb.shape.is_some() => {
+            Some(fb) if self.hint(act.id, pc) & HINT_GENERIC == 0 && fb.to.is_none() && (fb.shape.is_some() || fb.depth >= 1) => {
                 let p = self.object(act, st, obj, pc);
                 self.shape_check(act, st, p, fb.shape.clone(), pc);
                 if fb.depth == 0 {
@@ -1960,6 +1960,10 @@ impl<'e> Builder<'e> {
                     #[expect(clippy::cast_possible_truncation, reason = "checked by converting back")]
                     let i = *x as i32;
                     let v = if f64::from(i) == *x && !(i == 0 && x.is_sign_negative()) { self.int(i) } else { self.emit(Op::F64(*x), Rep::F64) };
+                    set_acc!(v);
+                }
+                Some(Constant::String(_)) => {
+                    let v = self.emit(Op::Call(Helper::Constant(act.id, u32::try_from(o[0]).unwrap_or(0)), Vec::new(), None), Rep::Word);
                     set_acc!(v);
                 }
                 _ => return Err(Reject::Unsupported),

@@ -385,6 +385,14 @@ impl<'gc> Agent<'gc, '_> {
         Ok(modulo_u32(self.to_number(v)?))
     }
 
+    pub fn text_of(&mut self, v: Value<'gc>) -> Result<crate::SmallStr, Error> {
+        Ok(match v.kind() {
+            ValueKind::String(s) => s.text().clone(),
+            ValueKind::Number(x) => number_text(x),
+            _ => self.to_string(v)?.text().clone(),
+        })
+    }
+
     pub fn to_string(&mut self, v: Value<'gc>) -> Result<JsString<'gc>, Error> {
         Ok(match v.kind() {
             ValueKind::String(s) => s,
@@ -426,8 +434,8 @@ impl<'gc> Agent<'gc, '_> {
         let (l, r) = if op == BinaryOp::Add {
             let (l, r) = (self.to_primitive(lhs, Hint::Default)?, self.to_primitive(rhs, Hint::Default)?);
             if matches!(l.kind(), ValueKind::String(_)) || matches!(r.kind(), ValueKind::String(_)) {
-                let (a, b) = (self.to_string(l)?, self.to_string(r)?);
-                return Ok(Value::String(self.mc.alloc(crate::JsStr::from(crate::SmallStr::concat(a.text(), b.text())))));
+                let (a, b) = (self.text_of(l)?, self.text_of(r)?);
+                return Ok(Value::String(self.mc.alloc(crate::JsStr::from(crate::SmallStr::concat(&a, &b)))));
             }
             (l, r)
         } else {

@@ -50,6 +50,41 @@ pub trait Invoke<'gc> {
     fn constructs(&self, closure: &crate::Closure<'gc>) -> bool;
 
     fn resume(&self, agent: &mut Agent<'gc, '_>, coroutine: crate::JsObject<'gc>, mode: Resume, value: Value<'gc>) -> Result<Step<'gc>, Error>;
+
+    fn callback(&self, _agent: &mut Agent<'gc, '_>, callee: Value<'gc>, this: Value<'gc>) -> Callback<'gc> {
+        Callback::from((callee, this))
+    }
+}
+
+pub type CallbackRun = for<'gc, 'x> unsafe fn(&mut Agent<'gc, 'x>, &Callback<'gc>, &[Value<'gc>]) -> Option<Result<Value<'gc>, Error>>;
+
+#[derive(Clone, Copy)]
+pub struct Callback<'gc> {
+    pub callee: Value<'gc>,
+    pub this: Value<'gc>,
+    pub run: Option<CallbackRun>,
+    pub code: usize,
+    pub arity: usize,
+    pub env: [usize; 2],
+}
+
+impl<'gc> From<(Value<'gc>, Value<'gc>)> for Callback<'gc> {
+    fn from((callee, this): (Value<'gc>, Value<'gc>)) -> Self {
+        Self { callee, this, run: None, code: 0, arity: 0, env: [0; 2] }
+    }
+}
+
+impl<'gc> Callback<'gc> {
+    #[inline]
+    pub fn call(&self, a: &mut Agent<'gc, '_>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+        if let Some(run) = self.run
+            && let Some(r) = unsafe { run(a, self, args) }
+        {
+            return r;
+        }
+        let invoke = a.invoke;
+        invoke.call(a, self.callee, self.this, args)
+    }
 }
 
 pub struct Agent<'gc, 'x> {
@@ -99,6 +134,11 @@ impl<'gc> Agent<'gc, '_> {
     pub fn call(&mut self, callee: Value<'gc>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let invoke = self.invoke;
         invoke.call(self, callee, this, args)
+    }
+
+    pub fn callback(&mut self, callee: Value<'gc>, this: Value<'gc>) -> Callback<'gc> {
+        let invoke = self.invoke;
+        invoke.callback(self, callee, this)
     }
 
     pub fn is_constructor(&self, v: Value<'gc>) -> bool {

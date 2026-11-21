@@ -74,6 +74,17 @@ let err = a.throw(ErrorKind::Type, "x is not a function");   // 返回 Error，�
 
 内建函数与宿主函数的签名统一是 `fn(&mut Agent, this, &[Value]) -> Result<Value, Error>`。
 
+反复调用同一个函数的内建（`map`、`filter`、`reduce`、`sort` 的比较函数……）先用 `a.callback(f, this)` 解析一次，
+循环里调用返回的 `Callback`。引擎经 `Invoke::callback` 填好它：开了 JIT 时，不超过三个形参的普通函数直接进编译好的机器码
+（经函数的跳板，之后重编或去优化都能跟上）；其余情况退回 `Agent::call`。
+
+```rust,ignore
+let cb = a.callback(f, this_arg);
+for (k, v) in items {
+    let r = cb.call(a, &[v, k.into(), o.into()])?;
+}
+```
+
 ## Error
 
 | 变体 | 含义 |

@@ -44,6 +44,14 @@ impl SmallStr {
         if la == 0 {
             return b.clone();
         }
+        if la + lb <= INLINE
+            && let Ok(len) = u8::try_from(la + lb)
+        {
+            let mut bytes = [0; INLINE];
+            bytes[..la].copy_from_slice(a.as_str().as_bytes());
+            bytes[la..la + lb].copy_from_slice(b.as_str().as_bytes());
+            return Self(Repr::Inline { len, bytes });
+        }
         if la + lb < ROPE_MIN {
             let mut s = String::with_capacity(la + lb);
             s.push_str(a);
