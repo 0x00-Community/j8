@@ -20,6 +20,6 @@ bun run dev                 # build, then wrangler dev
 bun run deploy              # build, then wrangler deploy
 ```
 
-Needs `mdbook` 0.5 (`cargo install mdbook`). With several Cloudflare accounts, pick one with `CLOUDFLARE_ACCOUNT_ID`.
+Pushes to `main` that touch `mdbook/` deploy automatically (Cloudflare Workers Builds: root `mdbook`, build `sh build.sh`, deploy `npx wrangler deploy`). `build.sh` uses `mdbook` from PATH or downloads the pinned 0.5.4 release. For a manual deploy with several Cloudflare accounts, pick one with `CLOUDFLARE_ACCOUNT_ID`.
 
 English is the source: change a page in `en/src/` and the same page in `zh-CN/src/` together.

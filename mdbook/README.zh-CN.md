@@ -20,6 +20,6 @@ bun run dev                 # 编好后 wrangler dev
 bun run deploy              # 编好后 wrangler deploy
 ```
 
-需要 `mdbook` 0.5（`cargo install mdbook`）。有多个 Cloudflare 账号时用 `CLOUDFLARE_ACCOUNT_ID` 指定。
+`main` 上改到 `mdbook/` 的推送会自动部署（Cloudflare Workers Builds：根目录 `mdbook`、构建 `sh build.sh`、部署 `npx wrangler deploy`）。`build.sh` 用 PATH 里的 `mdbook`，没有就下载钉住的 0.5.4。手动部署且有多个 Cloudflare 账号时，用 `CLOUDFLARE_ACCOUNT_ID` 指定。
 
 英文是原文：改 `en/src/` 里的某页时，同时改 `zh-CN/src/` 里的同一页。
