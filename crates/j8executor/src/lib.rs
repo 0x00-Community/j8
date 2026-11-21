@@ -1,11 +1,3 @@
-//! j8executor: runs j8 bytecode, which is V8's Ignition bytecode (see j8bytecode).
-//!
-//! Explicit frame stack (no host recursion); all frames share one register file. A frame's part of it holds the
-//! receiver, the formal parameters and the registers r0 …; register operands are V8's frame slots (r0 is -7, the
-//! receiver +2, the context -1, the closure -2) and are mapped onto that. Contexts are [`Env`]s: registers and the
-//! accumulator carry them as [`Value::context`] words between `Create*Context` / `PushContext` / `PopContext`.
-//! Exceptions look up the bytecode's handler table. An `Executor` serves only one isolate: it holds the loaded
-//! functions, and closures on the heap point back to them by [`FuncId`].
 #![cfg_attr(tail_calls, feature(explicit_tail_calls))]
 #![cfg_attr(tail_calls, expect(incomplete_features, reason = "explicit tail calls are what threaded dispatch needs"))]
 extern crate alloc;
@@ -29,104 +21,63 @@ mod threaded;
 pub use cache::CodeCache;
 pub use jit::{DeoptFrame, Entry, FrameSlots, Function as JitFunction, GlobalFeedback, Insn as JitInsn, PropertyFeedback, Reg as JitReg, ScopeLayout, Tier, Tiered};
 
-/// Call depth limit (including JS re-entered from host functions); exceeding it throws RangeError
 const STACK_LIMIT: usize = 10_000;
 
-/// Regex flags and their bits in `CreateRegExpLiteral` (V8's `JSRegExp::Flag`), in the order `flags` lists them
 const REGEXP_FLAGS: [(u8, u16); 8] = [(b'd', 1 << 7), (b'g', 1), (b'i', 1 << 1), (b'm', 1 << 2), (b's', 1 << 5), (b'u', 1 << 4), (b'v', 1 << 8), (b'y', 1 << 3)];
 
-/// The name a script's `this` is read by from the functions inside it (`LdaGlobal`)
 const SCRIPT_THIS: &str = "this";
 
-/// V8's `DefineKeyedOwnPropertyFlag::kSetFunctionName` (also `DefineKeyedOwnPropertyInLiteralFlag`)
 const SET_FUNCTION_NAME: OperandValue = 1;
 
-/// V8's `JSGeneratorObject::kRethrow`: an async generator's yielded value was rejected
 const RESUME_RETHROW: f64 = 3.0;
 
-/// Frame records reserved for a new execution (deeper calls grow the stack)
 const FRAMES_RESERVED: usize = 16;
 
-/// At most how many frame stacks the executor keeps for reuse
 const SPARE_FRAMES: usize = 8;
 
-/// Instructions between checks of the budget / termination request
 const CHECK_STEPS: usize = 1024;
 
-/// A function's calls between asking the JIT tier whether to compile it
 const TIER_CALLS: u32 = 64;
 
-/// One instruction of a loaded function, decoded once at load time; jump targets are instruction indices.
 struct Insn {
-    /// Runs it (threaded code)
     handler: threaded::Handler,
     bytecode: Bytecode,
     operands: Operands,
-    /// Byte offset of the bytecode byte (after any prefix): jump tables count from here, and it lies inside the handler
-    /// table ranges covering the instruction
     start: u32,
-    /// Where a jump goes (its index in the instructions); 0 for other bytecodes
     target: u32,
 }
 
-/// A loaded function: the function itself plus the id of the first function of its module (`CreateClosure`'s
-/// function constants are indices relative to it), with what running it needs prepared. Its function objects'
-/// [`Code`](j8framework::Code) points at `info`, the first field.
 #[repr(C)]
 struct Loaded {
-    /// Name and `length` (lazy properties of function objects read them)
     info: FunctionInfo,
     base: u32,
-    /// Its own id
     id: FuncId,
-    /// Calls so far (the tier is asked every [`TIER_CALLS`])
     calls: Cell<u32>,
-    /// By feedback slot: the function a call / construct site called (id + 1; 0 none yet, `u32::MAX` several)
     call_ics: Box<[Cell<u32>]>,
-    /// The tier's word (see [`jit::Function::tier_word`])
     tier: Cell<usize>,
     func: SharedFunction,
-    /// The bytecode, decoded
     insns: Box<[Insn]>,
-    /// By feedback slot: inline caches for property reads / writes
     ics: Box<[ic::Ic]>,
-    /// By feedback slot: where a global name was last found
     globals: Box<[ic::GlobalIc]>,
-    /// By constant index: for object boilerplates, the shape the literal ends up with (then a literal is made in one
-    /// step, as V8 copies the boilerplate with its map)
     literals: Box<[RefCell<Option<Arc<Shape>>>]>,
-    /// The shape of its function objects (`length`, `name`, maybe `prototype`), and of their `prototype` objects
     function_shape: RefCell<Option<Arc<Shape>>>,
     prototype_shape: RefCell<Option<Arc<Shape>>>,
-    /// By constant index: the context shapes of `Scope` constants, and how many slots their contexts have
     shapes: Box<[Option<(ShapeId, u32)>]>,
-    /// The function context's shape (when the function has one) / the script context's
     scope: Option<ShapeId>,
-    /// Whether its function context gets an extension object (a sloppy direct eval declares `var`s there)
     extension: bool,
-    /// `new` builds `this` and opens a frame (an ordinary function or a base class constructor)
     constructs: bool,
-    /// A class constructor (cannot be called without `new`)
     class_constructor: bool,
     derived: bool,
     generator: bool,
     asynchronous: bool,
-    /// Arrow functions and methods: no `prototype`, not constructors
     no_prototype: bool,
-    /// Sloppy, not an arrow function: an `undefined` / `null` receiver becomes the global object, a primitive one its
-    /// wrapper
     wraps_this: bool,
-    /// The code reads all arguments (rest parameter / arguments object): frames keep them
     keeps_args: bool,
-    /// How many properties the instance constructed last time had: reserve that many slots when building `this` next
-    /// time
     instance_size: Cell<u8>,
-    /// Inline cache for reading `new.target.prototype` during construction
     prototype: ic::Ic,
 }
 
 impl Loaded {
-    /// `shapes`: the executor's table of context shapes, where this function's are added
     fn new(base: u32, id: FuncId, func: SharedFunction, table: &SegVec<ContextShape>) -> Self {
         let bc = &func.bytecode;
         let call_ics = bc.feedback.iter().map(|_| Cell::new(0)).collect();
@@ -178,7 +129,6 @@ impl Loaded {
         }
     }
 
-    /// Decodes the bytecode, turning jump offsets into instruction indices
     fn decode(bc: &j8bytecode::BytecodeArray) -> Box<[Insn]> {
         let decoded: Vec<Decoded> = j8bytecode::Decoder::from(&bc.code[..]).map(|d| d.expect("compiled bytecode decodes")).collect();
         let index = |byte: usize| u32::try_from(decoded.partition_point(|d| d.offset < byte)).unwrap_or(u32::MAX);
@@ -200,7 +150,6 @@ impl Loaded {
                         *v = Self::register(*v, bc.parameter_count);
                     }
                 }
-                // A short `Star` becomes `Star` with its register
                 let bytecode = if d.bytecode.is_short_star() {
                     operands = Operands::from(&[OperandValue::from(d.bytecode.short_star_register().0)][..]);
                     Bytecode::Star
@@ -209,17 +158,13 @@ impl Loaded {
                 };
                 Insn { handler: Insn::handler(bytecode), bytecode, operands, start: u32::try_from(d.start()).unwrap_or(u32::MAX), target }
             })
-            // A sentinel: code never runs past its end
             .chain(core::iter::once(Insn { handler: Insn::handler(Bytecode::Illegal), bytecode: Bytecode::Illegal, operands: Operands::default(), start: u32::try_from(bc.code.len()).unwrap_or(u32::MAX), target: 0 }))
             .collect()
     }
 
-    /// Register operands below this are the frame's fixed slots (context, closure, argc): `SPECIAL` plus the V8 operand
     const SPECIAL: OperandValue = OperandValue::MIN / 2;
     const SPECIAL_LIMIT: OperandValue = Self::SPECIAL / 2;
 
-    /// A register operand as an index relative to r0 in the register file: r`i` is `i`, the receiver and parameters
-    /// (just below r0) negative; the fixed frame slots `SPECIAL` plus their operand
     fn register(operand: OperandValue, parameter_count: u16) -> OperandValue {
         let o = i32::try_from(operand).unwrap_or(0);
         if o <= Register::REGISTER_FILE_FROM_FP {
@@ -235,25 +180,19 @@ impl Loaded {
         }
     }
 
-    /// How far below r0 a header slot is, as a register offset
     fn below(slot: usize) -> OperandValue {
         OperandValue::try_from(slot).unwrap_or(0)
     }
 
-    /// The instruction at byte offset `byte` (handler targets, jump tables)
     fn index_of(&self, byte: usize) -> usize {
         self.insns.partition_point(|d| (d.start as usize) < byte)
     }
 
-    /// A scope info's shape for contexts made from it
-    /// Adds a context shape to the executor's table
-    /// The context shape of `Scope` constant `k`, and its slot count
     #[inline]
     fn scope_shape(&self, k: OperandValue) -> Option<(ShapeId, u32)> {
         self.shapes.get(usize::try_from(k).ok()?).copied().flatten()
     }
 
-    /// `CreateBlockContext` of `Scope` constant `k` under `parent`
     #[inline]
     fn block_context<'gc>(&self, a: &Agent<'gc, '_>, k: OperandValue, parent: Option<JsEnv<'gc>>) -> Value<'gc> {
         let (shape, n) = self.scope_shape(k).map_or((None, 0), |(s, n)| (Some(s), n as usize));
@@ -283,35 +222,23 @@ impl Loaded {
     }
 }
 
-/// A call frame's record on the frame stack: where its code and its part of the register file are. What the GC traces
-/// lives in the register file, in header slots right below r0 (V8 keeps `<context>` / `<closure>` in its stack frame
-/// the same way): see [`Frame::CONTEXT`] etc.
 #[derive(Clone, Copy, Collect)]
 #[collect(require_static)]
 struct Frame {
     func: FuncId,
-    /// The function's loaded code (what `func` names), kept so returning to this frame needs no lookup by id
     loaded: LoadedRef,
-    /// The next instruction (an index into the function's instructions)
     pc: usize,
-    /// The instruction being executed: handler table lookups use it
     insn: usize,
-    /// Index of the receiver in the register file (the parameters follow)
     params: usize,
-    /// Index of r0 in the register file
     base: usize,
-    /// The number of arguments passed
     argc: usize,
 }
 
-/// The address of a loaded function: the executor's code is append-only and outlives every frame of its executions
 #[derive(Clone, Copy)]
 struct LoadedRef(core::ptr::NonNull<Loaded>);
 
-// SAFETY: a frame lives in an execution of the executor owning the code, which moves between threads with its
-// isolate, one thread at a time (the executor is `Send`); the code is reached only from that thread
 unsafe impl Send for LoadedRef {}
-// SAFETY: as above
+
 unsafe impl Sync for LoadedRef {}
 
 impl From<&Loaded> for LoadedRef {
@@ -321,28 +248,17 @@ impl From<&Loaded> for LoadedRef {
 }
 
 impl LoadedRef {
-    /// The code, for as long as the executor holding it
-    ///
-    /// # Safety
-    /// `'e` must not outlive the executor the frame runs on
     unsafe fn get<'e>(self) -> &'e Loaded {
-        // SAFETY: the executor keeps every loaded function at a fixed address until it is dropped (see the caller)
         unsafe { self.0.as_ref() }
     }
 }
 
 impl Frame {
-    /// Header slots, counted down from r0: the current context (V8's `<context>` register)
     const CONTEXT: usize = 1;
-    /// The function being run (V8's `<closure>` register)
     const CLOSURE: usize = 2;
-    /// `new.target` (`undefined` for ordinary calls)
     const NEW_TARGET: usize = 3;
-    /// `this` of a construct call (the hole when absent): present on entry for base class construction
     const NEW_THIS: usize = 4;
-    /// All arguments as an array (kept only by functions that read them all), else `undefined`
     const ARGS: usize = 5;
-    /// The header's size: the parameters end this far below r0
     const HEADER: usize = 5;
 
     #[inline]
@@ -355,7 +271,6 @@ impl Frame {
         regs[self.base - k] = v;
     }
 
-    /// The current context
     #[inline]
     fn env<'gc>(&self, regs: &[Value<'gc>]) -> Option<JsEnv<'gc>> {
         self.slot(regs, Self::CONTEXT).as_context()
@@ -366,39 +281,30 @@ impl Frame {
         self.set_slot(regs, Self::CONTEXT, e.map_or(Value::Undefined, Value::context));
     }
 
-    /// `this` of a construct call, if built yet
     fn new_this<'gc>(&self, regs: &[Value<'gc>]) -> Option<Value<'gc>> {
         Some(self.slot(regs, Self::NEW_THIS)).filter(|v| !matches!(v.kind(), ValueKind::Uninit))
     }
 
-    /// All the arguments passed (for functions that keep them)
     fn args<'gc>(&self, regs: &[Value<'gc>]) -> Vec<Value<'gc>> {
         self.slot(regs, Self::ARGS).as_object().map_or_else(Vec::new, |o| o.elements().to_vec())
     }
 }
 
-/// All the state of one execution (attached to the roots between slices): the register file, and the frame stack
-/// (V8 keeps its frames on the machine stack): the running frame is on top, a call pushes the callee's record in place
-/// and a return pops it, nothing is copied in or out.
 #[derive(Collect)]
 #[collect(no_drop)]
 struct State<'gc> {
     regs: Vec<Value<'gc>>,
     frames: Vec<Frame>,
     acc: Value<'gc>,
-    /// V8's pending message (`SetPendingMessage` swaps it with acc)
     message: Value<'gc>,
 }
 
 impl<'gc> State<'gc> {
-    /// Entering frame `f` (its part of `regs` already set up)
-    /// Entering frame `f` (its part of `regs` already set up), on frame stack `frames` (empty)
     fn new(regs: Vec<Value<'gc>>, mut frames: Vec<Frame>, f: Frame) -> Self {
         frames.push(f);
         Self { regs, frames, acc: Value::Undefined, message: Value::Undefined }
     }
 
-    /// The running frame
     #[inline]
     fn f(&self) -> &Frame {
         self.frames.last().expect("a running frame")
@@ -409,8 +315,6 @@ impl<'gc> State<'gc> {
         self.frames.last_mut().expect("a running frame")
     }
 
-    /// The running frame returns: its record is popped and its part of the register file dropped; `true` if a caller
-    /// goes on
     #[inline]
     fn pop_frame(&mut self) -> bool {
         let Some(done) = self.frames.pop() else { return false };
@@ -422,10 +326,8 @@ impl<'gc> State<'gc> {
     }
 }
 
-/// How an execution stops: returning, or pausing when the instruction budget runs out.
 enum Outcome<'gc> {
     Return(Value<'gc>),
-    /// Instruction budget exhausted: the state is handed back as is, and the next slice continues
     Paused(Box<State<'gc>>),
 }
 
@@ -438,8 +340,6 @@ impl<'gc> Outcome<'gc> {
     }
 }
 
-/// A call's arguments: values at hand, or consecutive registers of the caller's frame (copied straight into the new
-/// frame).
 #[derive(Clone, Copy)]
 enum Args<'a, 'gc> {
     Values(&'a [Value<'gc>]),
@@ -470,31 +370,26 @@ impl<'gc> Args<'_, 'gc> {
     }
 }
 
-/// What to do when calling an object (taken out of the object first, then done after releasing the borrow).
 enum CallStep<'gc> {
     Closure(Closure<'gc>),
     Resolver,
     Proxy,
     NativeClosure(j8framework::ClosureFn),
     Native(j8framework::Native),
-    /// `call` / `apply`: if the target is callable, expands into a call to it
     Forward(j8framework::Native),
     Bound(Value<'gc>, Value<'gc>, Vec<Value<'gc>>),
 }
 
-/// Result of call resolution: a closure to enter a frame for, or the value a host function already computed.
 enum Callee<'gc> {
     Closure { closure: Closure<'gc>, callee: Value<'gc>, this: Value<'gc>, args: Vec<Value<'gc>> },
     Done(Value<'gc>),
 }
 
-/// Result of preparing a construct call: a frame to enter, or the object a host constructor already produced.
 enum Prepared<'gc> {
     Frame(Frame),
     Done(Value<'gc>),
 }
 
-/// The instruction budget of one slice, and the termination request.
 struct Budget<'s> {
     tick: usize,
     left: Option<usize>,
@@ -511,7 +406,6 @@ impl<'s> Budget<'s> {
         self.left.map(|l| l + self.tick)
     }
 
-    /// Takes the next run of steps; `true` when exhausted or terminated
     fn refill(&mut self) -> bool {
         if self.stop.observe() {
             self.terminated = true;
@@ -540,59 +434,42 @@ impl<'s> Budget<'s> {
     }
 }
 
-/// Bytecode executor.
 #[derive(Default)]
 pub struct Executor {
     tier: Option<Box<dyn Tier + Send>>,
-    /// Loaded functions, by function id: append-only (`eval` / the `Function` constructor also add some mid-execution),
-    /// so a `&Loaded` stays valid while more are loaded; frames refer to them by id
     code: SegVec<Loaded>,
-    /// Current call depth (summed over all re-entrant levels of `execute`)
     depth: Cell<usize>,
-    /// Module code: first function id ⇒ module id
     module_of: RefCell<alloc::collections::BTreeMap<u32, u32>>,
-    /// Bytecode shared with other executors
     cache: Option<Arc<CodeCache>>,
-    /// The shapes of the contexts the loaded code makes, by [`ShapeId`] (append-only like `code`)
     context_shapes: SegVec<ContextShape>,
-    /// The shape of `with` contexts, once made
     with_shape: Cell<Option<ShapeId>>,
-    /// Frame stacks of finished executions, kept for the next ones (a host function calling back into JS starts one
-    /// each time)
     spare_frames: RefCell<Vec<Vec<Frame>>>,
 }
 
-// An executor moves between the threads of the event loop's pool together with its isolate (one thread at a time:
-// `Send`, not `Sync`)
 const _: () = {
     const fn send<T: Send>() {}
     send::<Executor>();
 };
 
-/// What an instruction asks of the run loop besides going on to the next one
 enum Flow<'gc> {
     Next,
-    /// A new frame was pushed / the frame changed: re-fetch the function
     Frame,
     Done(Outcome<'gc>),
 }
 
 impl Executor {
-    /// Adds a JIT tier (kept for embedders; not used with V8 bytecode yet).
     #[must_use]
     pub fn with_tier(mut self, tier: impl Tier + Send + 'static) -> Self {
         self.tier = Some(Box::new(tier));
         self
     }
 
-    /// Shares compiled code through `cache` (see [`CodeCache`])
     #[must_use]
     pub fn with_cache(mut self, cache: Arc<CodeCache>) -> Self {
         self.cache = Some(cache);
         self
     }
 
-    /// Loads a module, returning the function id of its top level.
     pub fn load(&self, module: Module) -> FuncId {
         let base = u32::try_from(self.code.len()).expect("fewer than 2^32 functions");
         for func in module.functions {
@@ -606,11 +483,9 @@ impl Executor {
         self.context_shapes.get(id.0 as usize).expect("shape ids come from load")
     }
 
-    /// A closure's code: from the address its function object carries, else by id
     #[inline]
     fn code(&self, c: &Closure<'_>) -> &Loaded {
         match c.code {
-            // SAFETY: function objects get it from this executor's code (`function_object`), which outlives them
             Some(code) => unsafe { code.get() },
             None => self.function(c.func),
         }
@@ -621,11 +496,6 @@ impl Executor {
         self.code.get(f.0 as usize).expect("function ids come from load")
     }
 
-    // ---- frames ----
-
-    /// Opens a frame for `closure` at the end of the register file: receiver, formal parameters (missing ones
-    /// `undefined`), then the registers (all `undefined`). Sloppy non-arrow functions get the global object / a wrapper
-    /// for a primitive receiver.
     fn open<'gc>(&self, a: &mut Agent<'gc, '_>, regs: &mut Vec<Value<'gc>>, closure: Closure<'gc>, callee: Value<'gc>, this: Value<'gc>, args: &[Value<'gc>]) -> Frame {
         self.open_with(a, regs, self.function(closure.func), closure, callee, this, Args::Values(args))
     }
@@ -636,8 +506,6 @@ impl Executor {
         Frame { func: closure.func, loaded: LoadedRef::from(loaded), pc: 0, insn: 0, params, base, argc: args.len() }
     }
 
-    /// Opens a frame for a call from bytecode: its part of the register file, then its record right on the frame stack
-    /// (built in place: a record handed back by value would cross the stack in pieces first). Gives the new r0's index.
     #[expect(clippy::too_many_arguments, reason = "the parts of a call")]
     #[inline]
     fn push_open<'gc>(&self, a: &mut Agent<'gc, '_>, st: &mut State<'gc>, loaded: &Loaded, closure: Closure<'gc>, callee: Value<'gc>, this: Value<'gc>, args: Args<'_, 'gc>) -> usize {
@@ -646,8 +514,6 @@ impl Executor {
         base
     }
 
-    /// A new frame's part of the register file: receiver, parameters, header, registers; gives where the receiver
-    /// and r0 are
     #[expect(clippy::too_many_arguments, reason = "the parts of a call")]
     fn open_regs<'gc>(&self, a: &mut Agent<'gc, '_>, regs: &mut Vec<Value<'gc>>, loaded: &Loaded, closure: Closure<'gc>, callee: Value<'gc>, this: Value<'gc>, args: Args<'_, 'gc>) -> (usize, usize) {
         let f = &loaded.func;
@@ -666,24 +532,19 @@ impl Executor {
             let v = args.get(regs, i);
             regs.push(v);
         }
-        // The header, from ARGS up to CONTEXT
         regs.extend_from_slice(&[kept, Value::Uninit, Value::Undefined, callee, closure.env.map_or(Value::Undefined, Value::context)]);
         let base = regs.len();
-        // The register V8 puts new.target / the generator object in on entry starts `undefined` with the rest
         regs.resize(base + f.bytecode.register_count as usize, Value::Undefined);
         (params, base)
     }
 
-    /// Sets the new.target register of a construct frame
     fn set_new_target<'gc>(&self, regs: &mut [Value<'gc>], f: &mut Frame, nt: Value<'gc>) {
         f.set_slot(regs, Frame::NEW_TARGET, nt);
-        // SAFETY: the frame runs on this executor
         if let Some(r) = unsafe { f.loaded.get::<'_>() }.func.bytecode.new_target_or_generator {
             regs[f.base + usize::try_from(r).unwrap_or(0)] = nt;
         }
     }
 
-    /// An array index from a number key
     #[inline]
     fn index(key: Value<'_>) -> Option<usize> {
         let x = key.as_number()?;
@@ -692,7 +553,6 @@ impl Executor {
         (f64::from(i) == x && i != u32::MAX).then_some(i as usize)
     }
 
-    /// The register file index of a register operand (locals and parameters: see [`Loaded::register`])
     #[inline]
     fn slot_of(f: &Frame, k: OperandValue) -> Option<usize> {
         (k > Loaded::SPECIAL_LIMIT).then(|| f.base.wrapping_add_signed(k as isize))
@@ -716,12 +576,10 @@ impl Executor {
         }
     }
 
-    /// Consecutive registers from `first`
     fn reg_list<'gc>(regs: &[Value<'gc>], f: &Frame, first: OperandValue, count: OperandValue) -> Vec<Value<'gc>> {
         (0..count).map(|i| Self::reg(regs, f, first + i)).collect()
     }
 
-    /// The context `depth` levels out from `context`
     fn context_at<'gc>(a: &Agent<'gc, '_>, context: Value<'gc>, depth: OperandValue) -> Result<JsEnv<'gc>, Error> {
         let mut e = context.as_context().ok_or_else(|| a.throw(ErrorKind::Reference, "no context"))?;
         for _ in 0..depth {
@@ -730,15 +588,10 @@ impl Executor {
         Ok(e)
     }
 
-    /// The index in an `Env` of context slot `slot` (V8 counts the fixed slots)
     fn env_index(slot: OperandValue) -> usize {
         usize::try_from(slot).unwrap_or(0).saturating_sub(Context::MIN_SLOTS as usize)
     }
 
-    // ---- calls ----
-
-    /// Unwraps bound functions and calls host functions directly; the remaining JS closures are left to the caller to
-    /// enter a frame.
     fn resolve<'gc>(&self, a: &mut Agent<'gc, '_>, mut callee: Value<'gc>, mut this: Value<'gc>, mut args: Vec<Value<'gc>>, depth: usize) -> Result<Callee<'gc>, Error> {
         while let ValueKind::Object(o) = callee.kind() {
             let step = if let Some(c) = o.closure() {
@@ -811,7 +664,6 @@ impl Executor {
         Err(a.throw(ErrorKind::Type, &alloc::format!("{what} is not a function")))
     }
 
-    /// 构造一个能 `new` 的 [`j8framework::NativeClosure`]：`this` 是原型取自 `new_target` 的新对象，`f` 返回对象就用它。
     fn construct_closure<'gc>(a: &mut Agent<'gc, '_>, o: JsObject<'gc>, f: j8framework::ClosureFn, args: &[Value<'gc>], new_target: Value<'gc>) -> Result<Value<'gc>, Error> {
         let proto = a.proto_from_ctor(new_target, a.realm.object_proto)?;
         let this: Value<'gc> = ObjectData { proto: Some(proto), ..ObjectData::default() }.alloc(a.mc).into();
@@ -822,8 +674,6 @@ impl Executor {
         Ok(if v.as_object().is_some() { v } else { this })
     }
 
-    /// Prepares a construct call: unwraps bound functions; host constructors compute directly; JS constructors build
-    /// `this` (not for derived classes) and run instance fields.
     fn prepare<'gc>(&self, a: &mut Agent<'gc, '_>, regs: &mut Vec<Value<'gc>>, mut callee: Value<'gc>, mut args: Vec<Value<'gc>>, mut new_target: Value<'gc>, depth: usize) -> Result<Prepared<'gc>, Error> {
         while let ValueKind::Object(o) = callee.kind() {
             let kind = match &o.borrow().kind {
@@ -888,7 +738,6 @@ impl Executor {
         Err(a.throw(ErrorKind::Type, &alloc::format!("{what} is not a constructor")))
     }
 
-    /// Builds `this` during construction: the prototype is `new.target.prototype`.
     fn create_this<'gc>(a: &mut Agent<'gc, '_>, ctor: &Loaded, new_target: Value<'gc>) -> Result<JsObject<'gc>, Error> {
         let proto = match new_target.kind() {
             ValueKind::Object(o) => match ctor.prototype.get(o) {
@@ -905,7 +754,6 @@ impl Executor {
         Ok(ObjectData::ordinary(a.mc, Some(proto), usize::from(ctor.instance_size.get())))
     }
 
-    /// A construct call returns: an object result is used, otherwise `this`.
     fn construct_result<'gc>(&self, a: &Agent<'gc, '_>, regs: &[Value<'gc>], f: &Frame, v: Value<'gc>) -> Result<Value<'gc>, Error> {
         let loaded = self.function(f.func);
         if v.as_object().is_some() {
@@ -923,14 +771,12 @@ impl Executor {
         r
     }
 
-    /// `CreateClosure` of function constant `k` in context `env`
     #[inline]
     fn create_closure<'gc>(&self, a: &Agent<'gc, '_>, loaded: &Loaded, k: OperandValue, env: Option<JsEnv<'gc>>) -> JsObject<'gc> {
         let Some(Constant::Function(n)) = loaded.func.bytecode.constants.get(usize::try_from(k).unwrap_or(0)) else { unreachable!("a function constant") };
         self.function_object(a, Closure::new(FuncId(loaded.base + n), env))
     }
 
-    /// Creates a function object; ordinary functions get a `prototype` (whose `constructor` points back).
     fn function_object<'gc>(&self, a: &Agent<'gc, '_>, mut closure: Closure<'gc>) -> JsObject<'gc> {
         let loaded = self.function(closure.func);
         closure.code = Some(j8framework::Code::new(&loaded.info));
@@ -943,9 +789,7 @@ impl Executor {
         };
         let fo = ObjectData { kind: ObjectKind::Function(closure), proto: Some(proto), ..ObjectData::default() }.alloc(a.mc);
         let length = Value::Number(f64::from(func.length));
-        // Made on first read (see `Lazy`)
         let name = Value::lazy(Lazy::FunctionName);
-        // `length`, `name`, then `prototype` for generators and ordinary functions / classes
         let prototype = if loaded.generator {
             let base = if loaded.asynchronous { a.realm.async_generator_proto } else { a.realm.generator_proto };
             Some((ObjectData { proto: Some(base), ..ObjectData::default() }.alloc(a.mc), true))
@@ -976,8 +820,6 @@ impl Executor {
         fo
     }
 
-    /// `CreateObjectLiteral` of boilerplate constant `k`: in one step once its shape is known (as V8 copies the
-    /// boilerplate with its map), property by property the first time
     fn object_literal<'gc>(a: &Agent<'gc, '_>, loaded: &Loaded, k: OperandValue) -> JsObject<'gc> {
         let k = usize::try_from(k).unwrap_or(0);
         let Some(Constant::Object(b)) = loaded.func.bytecode.constants.get(k) else { unreachable!("an object boilerplate") };
@@ -999,8 +841,6 @@ impl Executor {
         ob
     }
 
-    /// After making an object the slow way: keeps its shape for next time (when it has exactly the `n` properties
-    /// expected, in fast mode)
     fn remember_shape(cache: &RefCell<Option<Arc<Shape>>>, o: JsObject<'_>, n: usize) {
         if cache.borrow().is_some() {
             return;
@@ -1009,9 +849,6 @@ impl Executor {
         *cache.borrow_mut() = shape;
     }
 
-    // ---- globals and lookups by name ----
-
-    /// The script context slot holding `name`, if a script declared it lexically
     fn script_slot<'gc>(&self, a: &Agent<'gc, '_>, name: &str) -> Option<(JsEnv<'gc>, usize, bool)> {
         a.realm.script_contexts.get().iter().find_map(|e| {
             let (i, n) = self.context_shape(e.shape?).slot(name)?;
@@ -1024,15 +861,10 @@ impl Executor {
         a.throw(ErrorKind::Reference, &alloc::format!("Cannot access '{name}' before initialization"))
     }
 
-    /// `LdaGlobal`: script contexts first, then the global object (through the cache); `typeof` gives `undefined` for
-    /// a name that isn't there
     fn global_load<'gc>(&self, a: &mut Agent<'gc, '_>, cache: &ic::GlobalIc, name: &str, inside_typeof: bool) -> Result<Value<'gc>, Error> {
-        // A script's `this`, read from a function inside it (V8 keeps it in the script context table)
         if name == SCRIPT_THIS {
             return Ok(Value::Object(a.realm.global));
         }
-        // A hit means the name is still a global property: a script declaring it lexically changes the script scope's
-        // shape
         let (scope, global) = (a.realm.script_scope, a.realm.global);
         if let Some(v) = cache.get(scope, global) {
             return Ok(v);
@@ -1053,7 +885,6 @@ impl Executor {
         Ok(v)
     }
 
-    /// `StaGlobal`: a script context slot (TDZ / `const` checked), else the global object (strict: must exist)
     fn global_store<'gc>(&self, a: &mut Agent<'gc, '_>, cache: &ic::GlobalIc, name: &str, v: Value<'gc>, strict: bool) -> Result<(), Error> {
         let (scope, global) = (a.realm.script_scope, a.realm.global);
         if let Some((o, at)) = cache.writable(scope, global)
@@ -1081,9 +912,6 @@ impl Executor {
         Ok(())
     }
 
-    /// A lookup by name through the context chain from `env` (V8's `LoadLookupSlot`): `with` objects, sloppy eval
-    /// extension objects and named slots, then the script contexts and the global object. Gives the holder found:
-    /// a context slot, an object (with its `this` for a call), or nothing.
     fn lookup<'gc>(&self, a: &mut Agent<'gc, '_>, env: Option<JsEnv<'gc>>, name: &str) -> Result<Found<'gc>, Error> {
         let mut e = env;
         while let Some(c) = e {
@@ -1109,7 +937,6 @@ impl Executor {
         Ok(Found::Nothing)
     }
 
-    /// `name` is blocked by the `with` object's `@@unscopables`
     fn unscopable<'gc>(a: &mut Agent<'gc, '_>, o: JsObject<'gc>, name: &str) -> Result<bool, Error> {
         let u = a.get_symbol(Value::Object(o), a.realm.symbols.unscopables, Value::Object(o))?;
         if u.as_object().is_none() {
@@ -1126,7 +953,6 @@ impl Executor {
                 if matches!(v.kind(), ValueKind::Uninit) { Err(Self::uninitialized(a, name)) } else { Ok(v) }
             }
             Found::Object(o) => a.get_named(Value::Object(o), name),
-            // `this` of direct eval code at the top level of a script
             Found::Nothing if name == "this" => Ok(Value::Object(a.realm.global)),
             Found::Nothing if inside_typeof => Ok(Value::Undefined),
             Found::Nothing => Err(a.throw(ErrorKind::Reference, &alloc::format!("{name} is not defined"))),
@@ -1151,8 +977,6 @@ impl Executor {
         }
     }
 
-    /// The variable environment for eval declarations from `env`: the nearest function context with an extension
-    /// object, or the global object
     fn var_scope<'gc>(&self, a: &Agent<'gc, '_>, env: Option<JsEnv<'gc>>) -> JsObject<'gc> {
         let mut e = env;
         while let Some(c) = e {
@@ -1164,8 +988,6 @@ impl Executor {
         a.realm.global
     }
 
-    /// `DeclareEvalVar` / `DeclareEvalFunction`: a lexical declaration with the same name between here and the variable
-    /// environment is a SyntaxError
     fn declare_eval<'gc>(&self, a: &mut Agent<'gc, '_>, env: Option<JsEnv<'gc>>, name: &str, value: Option<Value<'gc>>) -> Result<(), Error> {
         let mut e = env;
         while let Some(c) = e {
@@ -1192,7 +1014,6 @@ impl Executor {
         Ok(())
     }
 
-    /// `DeclareGlobals`: a script's `var`s and functions on the global object, after checking all can be declared
     fn declare_globals<'gc>(&self, a: &mut Agent<'gc, '_>, f: &Frame, env: Option<JsEnv<'gc>>, decls: &[j8bytecode::GlobalDeclaration]) -> Result<(), Error> {
         for d in decls {
             let name = &*d.name;
@@ -1230,8 +1051,6 @@ impl Executor {
         Ok(())
     }
 
-    /// Creates the script context of script `main` (its top-level lexical declarations, holes until initialized) and
-    /// registers it in the realm's script context table, after checking nothing else declares those names
     fn script_context<'gc>(&self, a: &mut Agent<'gc, '_>, main: FuncId) -> Result<Option<JsEnv<'gc>>, Error> {
         let Some(id) = self.function(main).scope else { return Ok(None) };
         let shape = self.context_shape(id);
@@ -1251,16 +1070,12 @@ impl Executor {
             v.push(env);
             v
         });
-        // Global name caches key on the script scope's shape: a new lexical name may shadow a global property
         for n in shape.names.iter() {
             a.realm.script_scope.borrow_mut(a.mc).define(&n.name, Property::data(Value::Undefined));
         }
         Ok(Some(env))
     }
 
-    // ---- running ----
-
-    /// Initial execution state for script `main`: its script context made, `this` the global object.
     fn script_state<'gc>(&self, a: &mut Agent<'gc, '_>, main: FuncId) -> Result<State<'gc>, Error> {
         let env = self.script_context(a, main)?;
         let this = Value::Object(a.realm.global);
@@ -1269,14 +1084,11 @@ impl Executor {
         Ok(self.state(regs, f))
     }
 
-    /// Runs script `main` (`this` is the global object).
     pub fn run_script<'gc>(&self, a: &mut Agent<'gc, '_>, main: FuncId) -> Result<Value<'gc>, Error> {
         let st = self.script_state(a, main)?;
         self.execute(a, st, &mut None).map(Outcome::returned)
     }
 
-    /// Finds a handler for exception `v` in the frames, innermost first (the handler table entry whose range holds the
-    /// throwing instruction, the innermost such range); `false` once all frames are popped.
     fn unwind<'gc>(&self, st: &mut State<'gc>, v: Value<'gc>) -> bool {
         loop {
             let loaded = self.function(st.f().func);
@@ -1296,8 +1108,6 @@ impl Executor {
         }
     }
 
-    /// Runs until the outermost frame returns; an exception first looks for a handler and propagates outward only if
-    /// not caught. `budget` applies only to the outermost level: when it runs out, stops with the state.
     fn execute<'gc>(&self, a: &mut Agent<'gc, '_>, mut st: State<'gc>, budget: &mut Option<usize>) -> Result<Outcome<'gc>, Error> {
         let base = self.depth.get();
         let mut b = Budget::new(a.stop, *budget);
@@ -1316,7 +1126,6 @@ impl Executor {
             }
         };
         let r = match r {
-            // Paused: the state carries on in the next slice
             Ok(None) => Ok(Outcome::Paused(Box::new(st))),
             r => {
                 self.recycle(a, st);
@@ -1328,14 +1137,11 @@ impl Executor {
         r
     }
 
-    /// Main loop: runs each frame's threaded code until the frame changes. `None` when the budget runs out (the state
-    /// is intact).
     fn run<'gc>(&self, a: &mut Agent<'gc, '_>, st: &mut State<'gc>, depth: usize, budget: &mut Budget<'_>) -> Result<Option<Outcome<'gc>>, Error> {
         loop {
             if budget.spent() {
                 return Ok(None);
             }
-            // SAFETY: the frame runs on this executor
             let loaded: &Loaded = unsafe { st.f().loaded.get() };
             let mut cx = threaded::Cx { exe: self, a, st, loaded, budget, depth };
             match Self::threaded(&mut cx) {
@@ -1348,7 +1154,6 @@ impl Executor {
         }
     }
 
-    /// Call site `fb` of `loaded` called `f`: one function seen so far, or several
     #[inline]
     fn record_call(loaded: &Loaded, fb: OperandValue, f: FuncId) {
         if let Some(ic) = loaded.call_ics.get(usize::try_from(fb).unwrap_or(usize::MAX)) {
@@ -1361,19 +1166,16 @@ impl Executor {
         }
     }
 
-    /// Enters a frame for a call from the current one (the caller resumes at its next instruction)
     #[inline]
     fn push_frame(st: &mut State<'_>, next: Frame) {
         st.frames.push(next);
     }
 
-    /// A call from bytecode: a JS closure gets a frame, host functions run here
     #[expect(clippy::too_many_arguments, reason = "the parts of a call")]
     fn call_from<'gc>(&self, a: &mut Agent<'gc, '_>, st: &mut State<'gc>, callee: Value<'gc>, this: Value<'gc>, args: Args<'_, 'gc>, level: usize) -> Result<Flow<'gc>, Error> {
         if level >= STACK_LIMIT {
             return Err(a.throw(ErrorKind::Range, "Maximum call stack size exceeded"));
         }
-        // An ordinary JS function: a frame straight from the arguments
         if let ValueKind::Object(o) = callee.kind()
             && let Some(c) = o.closure()
         {
@@ -1429,7 +1231,6 @@ impl Executor {
         }
     }
 
-    /// The value a constant pool entry loads as (`LdaConstant`)
     fn constant<'gc>(a: &Agent<'gc, '_>, c: &Constant) -> Value<'gc> {
         match c {
             Constant::Number(x) => Value::Number(*x),
@@ -1450,7 +1251,6 @@ impl Executor {
         }
     }
 
-    /// A string constant's text
     fn name_at(loaded: &Loaded, k: OperandValue) -> &str {
         match loaded.func.bytecode.constants.get(usize::try_from(k).unwrap_or(usize::MAX)) {
             Some(Constant::String(s)) => s,
@@ -1469,7 +1269,6 @@ impl Executor {
             };
         }
         let strict = loaded.func.strict;
-        // Two numbers inline; anything else through the agent
         macro_rules! arith {
             ($l:expr, $r:expr, $op:ident, $sym:tt) => {{
                 let (l, r) = ($l, $r);
@@ -1512,7 +1311,6 @@ impl Executor {
             B::LdaConstant => {
                 let k = usize::try_from(o[0]).unwrap_or(0);
                 *acc = match &loaded.func.bytecode.constants[k] {
-                    // A class boilerplate goes to `DefineClass` as its index in the constant pool
                     Constant::Class(_) => Value::Number(k as f64),
                     c => Self::constant(a, c),
                 };
@@ -1640,7 +1438,6 @@ impl Executor {
                 a.put_keyed(r!(0), r!(1), *acc, s)?;
             }
             B::DefineKeyedOwnProperty | B::DefineKeyedOwnPropertyInLiteral | B::StaInArrayLiteral => {
-                // V8's `kSetFunctionName`: an anonymous function value is named after the (computed) key
                 if d.bytecode != B::StaInArrayLiteral
                     && o[2] & SET_FUNCTION_NAME != 0
                     && let Some(fo) = acc.as_object()
@@ -1752,7 +1549,6 @@ impl Executor {
                 }
                 let State { regs, frames, acc, message } = st;
                 if budget.spent() {
-                    // Stop before the loop header, the state intact
                     return Ok(Flow::Done(Outcome::Paused(Box::new(State { regs: core::mem::take(regs), frames: core::mem::take(frames), acc: *acc, message: *message }))));
                 }
             }
@@ -1917,7 +1713,6 @@ impl Executor {
                 let i = r!(1).as_number().unwrap_or(0.0) as usize;
                 let keys = Self::reg(regs, f, o[2] + 1);
                 let key = keys.as_object().and_then(|k| k.elements().get(i)).unwrap_or_default();
-                // A key deleted since the enumeration started is skipped
                 let still = a.has_keyed(receiver, key)?;
                 *acc = if still { key } else { Value::Undefined };
             }
@@ -1944,7 +1739,6 @@ impl Executor {
                     return Err(a.throw(ErrorKind::Type, &alloc::format!("Super constructor {what} of anonymous class is not a constructor")));
                 }
             }
-            // The parent class constructor of the active function (in acc)
             B::GetSuperConstructor => {
                 let parent = match acc.as_object() {
                     Some(fo) => a.get_prototype_of(fo)?.map_or(Value::Null, Value::Object),
@@ -1952,7 +1746,6 @@ impl Executor {
                 };
                 Self::set_reg(regs, f, o[0], parent);
             }
-            // Default constructors are not skipped: the answer is always "not done", with the parent constructor
             B::FindNonDefaultConstructorOrConstruct => {
                 let parent = match r!(0).as_object() {
                     Some(fo) => a.get_prototype_of(fo)?.map_or(Value::Null, Value::Object),
@@ -1978,7 +1771,6 @@ impl Executor {
                 }
             }
             B::SwitchOnGeneratorState => {
-                // A call falls through; a resumption continues at its resume point, in the saved context
                 if let Some(co) = r!(0).as_object() {
                     let (continuation, context) = Self::coroutine(co, |c| (c.frame.continuation, c.frame.context));
                     f.set_env(regs, context);
@@ -2034,7 +1826,6 @@ impl Executor {
         Ok(Flow::Next)
     }
 
-    /// The operator of an arithmetic bytecode
     fn binary_op(b: Bytecode) -> BinaryOp {
         use Bytecode as B;
         match b {
@@ -2053,12 +1844,10 @@ impl Executor {
         }
     }
 
-    /// The values a spread argument / element expands to (iteration)
     fn spread<'gc>(a: &mut Agent<'gc, '_>, v: Value<'gc>) -> Result<Vec<Value<'gc>>, Error> {
         a.to_list(v)
     }
 
-    /// The frame's arguments object (unmapped: all arguments as index properties; `length`, `callee`, `@@iterator`)
     fn arguments<'gc>(&self, a: &mut Agent<'gc, '_>, regs: &[Value<'gc>], f: &Frame, strict: bool) -> Result<Value<'gc>, Error> {
         let args = f.args(regs);
         let o = ObjectData { kind: ObjectKind::Arguments(None), proto: Some(a.realm.object_proto), ..ObjectData::default() }.alloc(a.mc);
@@ -2082,14 +1871,10 @@ impl Executor {
         Ok(o.into())
     }
 
-    /// %ThrowTypeError%: the accessor for strict-mode `arguments.callee`.
     fn throw_type_error<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         Err(a.throw(ErrorKind::Type, "'caller', 'callee', and 'arguments' properties may not be accessed on strict mode functions or the arguments objects for calls to them"))
     }
 
-    /// `DefineClass(boilerplate, constructor, superclass, …keys and functions)`: links the constructor and a new
-    /// prototype to the heritage, then defines the public methods and accessors (computed keys come in the arguments,
-    /// and name their function); gives the prototype
     fn define_class<'gc>(a: &mut Agent<'gc, '_>, b: &j8bytecode::ClassBoilerplate, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         use j8bytecode::MemberKind as M;
         let arg = |n: usize| args.get(n).copied().unwrap_or_default();
@@ -2130,7 +1915,6 @@ impl Executor {
         Ok(proto.into())
     }
 
-    /// Reads a coroutine (generator / async function object)
     fn coroutine<'gc, T>(co: JsObject<'gc>, read: impl FnOnce(&j8framework::Coroutine<'gc>) -> T) -> T {
         match &co.borrow().kind {
             ObjectKind::Coroutine(c) => read(c),
@@ -2138,7 +1922,6 @@ impl Executor {
         }
     }
 
-    /// Changes a coroutine
     fn coroutine_mut<'gc, T>(a: &Agent<'gc, '_>, co: JsObject<'gc>, write: impl FnOnce(&mut j8framework::Coroutine<'gc>) -> T) -> T {
         match &mut co.borrow_mut(a.mc).kind {
             ObjectKind::Coroutine(c) => write(c),
@@ -2146,7 +1929,6 @@ impl Executor {
         }
     }
 
-    /// `InvokeIntrinsic`
     fn intrinsic<'gc>(&self, a: &mut Agent<'gc, '_>, i: Intrinsic, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let arg = |n: usize| args.get(n).copied().unwrap_or_default();
         match i {
@@ -2167,7 +1949,6 @@ impl Executor {
                 Ok(ob.into())
             }
             Intrinsic::CreateJSGeneratorObject => {
-                // The generator's prototype is the function's `prototype` (when an object)
                 let closure = arg(0);
                 let asynchronous = closure.as_object().is_some_and(|o| matches!(&o.borrow().kind, ObjectKind::Function(c) if self.function(c.func).asynchronous));
                 let proto = match a.get_named(closure, "prototype")?.as_object() {
@@ -2183,8 +1964,6 @@ impl Executor {
                 let co = j8framework::Coroutine::new(arg(0), Some(promise), false);
                 Ok(ObjectData { kind: ObjectKind::Coroutine(Box::new(co)), proto: Some(a.realm.object_proto), ..ObjectData::default() }.alloc(a.mc).into())
             }
-            // `await`: the coroutine resumes once the value settles; the frame gives back the promise (what the call
-            // returns when this is the first suspension)
             Intrinsic::AsyncFunctionAwait => {
                 let Some(co) = arg(0).as_object() else { unreachable!("a generator object") };
                 let p = a.promise_resolve(arg(1))?;
@@ -2211,8 +1990,6 @@ impl Executor {
                 let Some(co) = arg(0).as_object() else { unreachable!("a generator object") };
                 Ok(Value::Number(Self::coroutine(co, |c| if matches!(c.waiting, j8framework::Waiting::Rethrow) { RESUME_RETHROW } else { f64::from(c.mode) })))
             }
-            // Async generators: the body suspends after each of these, and `resume` turns what they recorded into the
-            // step the request queue acts on
             Intrinsic::AsyncGeneratorAwait | Intrinsic::AsyncGeneratorYieldWithAwait => {
                 let Some(co) = arg(0).as_object() else { unreachable!("a generator object") };
                 let v = arg(1);
@@ -2224,7 +2001,6 @@ impl Executor {
                 let Some(co) = arg(0).as_object() else { unreachable!("a generator object") };
                 let v = arg(1);
                 let settlement = if i == Intrinsic::AsyncGeneratorResolve { j8framework::Settlement::Resolved(v) } else { j8framework::Settlement::Rejected(v) };
-                // The rejection stands: the return after the body's catch handler passes through `AsyncGeneratorResolve`
                 Self::coroutine_mut(a, co, |c| {
                     if !matches!(c.settlement, j8framework::Settlement::Rejected(_)) {
                         c.settlement = settlement;
@@ -2232,7 +2008,6 @@ impl Executor {
                 });
                 Ok(Value::Undefined)
             }
-            // What `next` / `return` / `throw` give for a `yield` (`yield*` passes its iterator's results on unchanged)
             Intrinsic::GeneratorYieldResult => Ok(a.iter_result(arg(0), false).into()),
             Intrinsic::GeneratorClose => {
                 if let Some(co) = arg(0).as_object() {
@@ -2244,15 +2019,12 @@ impl Executor {
         }
     }
 
-    /// `CallRuntime`
     #[expect(clippy::too_many_lines, reason = "one arm per runtime function")]
     fn runtime<'gc>(&self, a: &mut Agent<'gc, '_>, st: &mut State<'gc>, loaded: &Loaded, rt: Runtime, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let arg = |n: usize| args.get(n).copied().unwrap_or_default();
         let text = |a: &mut Agent<'gc, '_>, v: Value<'gc>| -> Result<alloc::string::String, Error> { Ok(alloc::string::String::from(&**a.to_string(v)?)) };
         match rt {
             Runtime::DeclareGlobals => {
-                // The declarations constant is passed as the constant's index loaded by `LdaConstant` (an undefined value
-                // here): find it in the constant pool
                 let decls = loaded.func.bytecode.constants.iter().find_map(|c| match c {
                     Constant::Declarations(d) => Some(d.clone()),
                     _ => None,
@@ -2272,7 +2044,6 @@ impl Executor {
             }
             Runtime::ThrowConstAssignError => Err(a.throw(ErrorKind::Type, "Assignment to constant variable.")),
             Runtime::DefineClass => {
-                // The boilerplate's index in the constant pool (see `LdaConstant`)
                 #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "a constant pool index")]
                 let k = arg(0).as_number().map_or(usize::MAX, |k| k as usize);
                 let Some(Constant::Class(b)) = loaded.func.bytecode.constants.get(k) else { unreachable!("a class boilerplate") };
@@ -2338,7 +2109,6 @@ impl Executor {
                 }))
             }
             Runtime::DefineAccessorPropertyUnchecked => {
-                // The key is a property key already (a computed one may be a symbol)
                 if let Some(o) = arg(0).as_object() {
                     if let Some(g) = arg(2).as_object() {
                         a.define_accessor_keyed(o, arg(1), g, false, true)?;
@@ -2363,13 +2133,11 @@ impl Executor {
         }
     }
 
-    /// A new execution state entering frame `f`, on a frame stack from the spares
     fn state<'gc>(&self, regs: Vec<Value<'gc>>, f: Frame) -> State<'gc> {
         let frames = self.spare_frames.borrow_mut().pop().unwrap_or_else(|| Vec::with_capacity(FRAMES_RESERVED));
         State::new(regs, frames, f)
     }
 
-    /// A finished execution's frame stack and register file go back to the spares
     fn recycle<'gc>(&self, a: &mut Agent<'gc, '_>, st: State<'gc>) {
         let State { regs, mut frames, .. } = st;
         a.give_regs(regs);
@@ -2380,7 +2148,6 @@ impl Executor {
         }
     }
 
-    /// Runs one frame to return in a fresh execution state.
     fn run_frame<'gc>(&self, a: &mut Agent<'gc, '_>, regs: Vec<Value<'gc>>, f: Frame, level: usize) -> Result<Value<'gc>, Error> {
         let saved = self.depth.replace(level);
         let r = self.execute(a, self.state(regs, f), &mut None).map(Outcome::returned);
@@ -2389,11 +2156,8 @@ impl Executor {
     }
 }
 
-/// Where a lookup by name found the name.
 enum Found<'gc> {
-    /// A context slot (its index in the `Env`, whether it is `const`)
     Slot(JsEnv<'gc>, usize, bool),
-    /// An object's property
     Object(JsObject<'gc>),
     Nothing,
 }
@@ -2409,7 +2173,6 @@ impl<'gc> Invoke<'gc> for Executor {
             && let l = self.code(&c)
             && !l.class_constructor
         {
-            // Compiled: straight into its machine code
             if l.tier.get() != 0
                 && let Some(t) = &self.tier
             {
@@ -2458,9 +2221,6 @@ impl<'gc> Invoke<'gc> for Executor {
         r
     }
 
-    /// Re-enters the generator's function with its receiver and parameters: `SwitchOnGeneratorState` jumps to the
-    /// resume point, `ResumeGenerator` brings the registers back. Stopping at `SuspendGenerator` gives
-    /// [`Step::Yield`] with what the frame returned, returning finishes the coroutine.
     fn resume(&self, a: &mut Agent<'gc, '_>, co: JsObject<'gc>, mode: Resume, value: Value<'gc>) -> Result<Step<'gc>, Error> {
         use j8framework::{CoroutineState as S, Settlement, Waiting as W};
         let level = self.depth.get() + 1;
@@ -2468,16 +2228,12 @@ impl<'gc> Invoke<'gc> for Executor {
             return Err(a.throw(ErrorKind::Range, "Maximum call stack size exceeded"));
         }
         let (state, waiting, async_generator) = Self::coroutine_mut(a, co, |c| (c.state, core::mem::replace(&mut c.waiting, W::Nothing), c.requests.is_some()));
-        // What a suspended async generator waited for comes back first
         let (mut mode, mut rethrow) = (mode, false);
         match waiting {
-            // The yielded value settled: a fulfillment answers the request, a rejection is thrown at the `yield`
             W::Yield(_) if mode == Resume::Next => return Ok(Step::Yield(value)),
             W::Yield(_) => rethrow = true,
-            // The value of a `return` request settled
             W::Return => mode = if mode == Resume::Next { Resume::Return } else { Resume::Throw },
             W::Nothing | W::Await(_) | W::Rethrow => {
-                // A `return` request awaits its value before the body sees it
                 if async_generator && mode == Resume::Return && state != S::Running {
                     Self::coroutine_mut(a, co, |c| c.waiting = W::Return);
                     return Ok(Step::Await(value));
@@ -2517,8 +2273,6 @@ impl<'gc> Invoke<'gc> for Executor {
             regs[f.base + usize::try_from(r).unwrap_or(0)] = co.into();
         }
         let r = self.run_frame(a, regs, f, level);
-        // An async generator's body reports through its intrinsics: an `await` (also of a yielded value), a request
-        // answered (`yield*` / `return`), a rejection
         let v = match r {
             Ok(v) => v,
             Err(e) => {
@@ -2557,30 +2311,22 @@ impl<'gc> Invoke<'gc> for Executor {
 }
 
 j8framework::paragc::brand!(
-    /// The brand of a parked execution state.
     ParkedBrand = for<'gc> j8framework::GcCell<'gc, Option<State<'gc>>>
 );
 
-/// Execution state attached to the roots between slices.
 type Parked = j8framework::Root<ParkedBrand>;
 
-/// Result of running one slice.
 enum Slice {
     Done(j8framework::Global),
     Paused(Parked),
 }
 
-/// A started piece of source (the engine's [`Job`](j8framework::Engine::Job))
 pub struct Job(Started);
 
 enum Started {
-    /// A script, loaded, not entered yet
     Script(FuncId),
-    /// A script paused between turns, its execution state on the roots
     Paused(Parked),
-    /// A module: loading, linking and evaluation run in one turn
     Module { text: alloc::string::String, file: alloc::string::String },
-    /// Running, finished or failed
     Spent,
 }
 
@@ -2598,8 +2344,6 @@ impl j8framework::Engine for Executor {
         }))
     }
 
-    /// A script runs until it returns or the quota is spent; then its execution state parks on the roots. A module
-    /// runs loading, linking, evaluation and microtasks to the end in one turn.
     fn resume(&mut self, isolate: &mut j8framework::Isolate<'_>, cx: &j8framework::ContextRoot, job: &mut Job, quota: &mut j8framework::Quota) -> Result<Option<j8framework::Global>, Error> {
         let this: &Executor = self;
         let started = core::mem::replace(&mut job.0, Started::Spent);

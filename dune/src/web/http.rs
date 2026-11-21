@@ -1,5 +1,3 @@
-//! The wire under `fetch`: one HTTP/1.1 exchange over a fresh TCP connection. The prelude writes the request head
-//! (with `connection: close`) and parses the raw response, so the Rust side only moves bytes.
 use std::io::{Read, Write};
 use std::net::TcpStream;
 
@@ -11,7 +9,6 @@ pub struct Http;
 
 #[j8::object("http")]
 impl Http {
-    /// Sends `head` and `body` to `host:port` and reads the response until the server closes
     async fn exchange(host: String, port: u32, head: String, body: Bytes) -> Io<Bytes> {
         Offload::new(move || {
             let addr = format!("{host}:{port}");

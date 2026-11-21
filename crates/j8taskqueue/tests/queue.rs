@@ -1,4 +1,3 @@
-//! j8taskqueue 的调度语义：并行、无屏障、依赖次序、派生、配额、故障、家族。
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;
@@ -6,7 +5,6 @@ use std::time::Duration;
 
 use j8taskqueue::{Fault, Flow, ITask, ITaskPoll, Pool, Quota, Stop, Task, TaskId, TaskQueue};
 
-/// 测试用线程池：每批每个闭包一个作用域线程
 struct Threads(usize);
 
 impl Pool for Threads {
@@ -23,14 +21,12 @@ impl Pool for Threads {
     }
 }
 
-/// 等别的线程的最长时间：串行执行会在这里超时失败
 const RENDEZVOUS: Duration = Duration::from_secs(5);
-/// 并行用例的线程数
+
 const THREADS: NonZeroUsize = NonZeroUsize::new(4).unwrap();
 
 type Body<'a> = Box<dyn FnMut(&mut dyn ITaskPoll<'a>, &mut Quota) -> Flow + Send + 'a>;
 
-/// 测试用任务：依赖表 + 闭包。
 struct Job<'a> {
     after: Vec<TaskId<'a>>,
     recursable: bool,
@@ -61,7 +57,6 @@ impl<'a> ITask<'a> for Job<'a> {
     }
 }
 
-/// a、b 都被 c 依赖、彼此独立：a、b 必须同时在跑（互相等对方的消息），c 在两者之后。
 #[test]
 fn independent_tasks_run_in_parallel() {
     let pool = Threads(THREADS.get());
@@ -73,7 +68,7 @@ fn independent_tasks_run_in_parallel() {
     let a = q
         .add(Job::leaf(vec![], move |_, _| {
             to_b.send(()).unwrap();
-            from_b.recv_timeout(RENDEZVOUS).expect("b 没有和 a 并行");
+            from_b.recv_timeout(RENDEZVOUS).expect("b did not run in parallel with a");
             done.fetch_add(1, Ordering::AcqRel);
             Flow::Done
         }))
@@ -81,7 +76,7 @@ fn independent_tasks_run_in_parallel() {
     let b = q
         .add(Job::leaf(vec![], move |_, _| {
             to_a.send(()).unwrap();
-            from_a.recv_timeout(RENDEZVOUS).expect("a 没有和 b 并行");
+            from_a.recv_timeout(RENDEZVOUS).expect("a did not run in parallel with b");
             done.fetch_add(1, Ordering::AcqRel);
             Flow::Done
         }))
@@ -95,14 +90,13 @@ fn independent_tasks_run_in_parallel() {
     assert_eq!(seen.load(Ordering::Acquire), 2);
 }
 
-/// 没有轮次屏障：慢任务 s 还在跑时，a ⇒ c 就能做完（s 等 c 的消息才结束）。
 #[test]
 fn no_barrier_between_unrelated_tasks() {
     let pool = Threads(THREADS.get());
     let (signal, wait) = mpsc::channel();
     let mut q = TaskQueue::from(&pool);
     q.add(Job::leaf(vec![], move |_, _| {
-        wait.recv_timeout(RENDEZVOUS).expect("c 等了不相干的慢任务");
+        wait.recv_timeout(RENDEZVOUS).expect("c waited for an unrelated slow task");
         Flow::Done
     }))
     .unwrap();
@@ -115,7 +109,6 @@ fn no_barrier_between_unrelated_tasks() {
     assert_eq!(q.run().unwrap().execs, 3);
 }
 
-/// 依赖链在线程池上也严格按链上次序跑。
 #[test]
 fn chain_runs_in_order() {
     const LEN: usize = 200;
@@ -137,11 +130,9 @@ fn chain_runs_in_order() {
     assert_eq!(next.load(Ordering::Acquire), LEN);
 }
 
-/// 随机依赖图：每个任务跑时它的依赖都已做完，全部任务都跑到。
 #[test]
 fn random_dag_respects_dependencies() {
     const TASKS: usize = 2000;
-    /// 线性同余的乘数与增量
     const LCG: (u64, u64) = (6_364_136_223_846_793_005, 1_442_695_040_888_963_407);
     let pool = Threads(THREADS.get());
     let done: Vec<AtomicBool> = (0..TASKS).map(|_| AtomicBool::new(false)).collect();
@@ -160,7 +151,7 @@ fn random_dag_respects_dependencies() {
         let done = &done;
         ids.push(
             q.add(Job::leaf(after, move |_, _| {
-                assert!(deps.iter().all(|&d| done[d].load(Ordering::Acquire)), "{i} 跑时依赖没做完");
+                assert!(deps.iter().all(|&d| done[d].load(Ordering::Acquire)), "{i} ran before its dependencies finished");
                 done[i].store(true, Ordering::Release);
                 Flow::Done
             }))
@@ -171,7 +162,6 @@ fn random_dag_respects_dependencies() {
     assert!(done.iter().all(|d| d.load(Ordering::Acquire)));
 }
 
-/// 可递归任务派生：子任务当场登记、并行跑；收尾任务依赖全部子任务，并进同一家族。
 #[test]
 fn spawned_tasks_join_family_and_dataflow() {
     const CHILDREN: usize = 20;
@@ -206,10 +196,8 @@ fn spawned_tasks_join_family_and_dataflow() {
     assert_eq!(family.get(), Some(&format!("{root:?}")));
 }
 
-/// 配额：25 条字节码的活、每次 10 条 ⇒ 三次 exec；预算 15 ⇒ 第一次 run 停在预算上，第二次跑完。
 #[test]
 fn quota_and_budget() {
-    /// 剩 `left` 条字节码的活：每次花掉配额能给的，花完算做完
     fn work<'a>(left: &'a AtomicUsize) -> impl FnMut(&mut dyn ITaskPoll<'a>, &mut Quota) -> Flow + Send + 'a {
         move |_, quota| {
             let want = left.load(Ordering::Acquire);
@@ -235,7 +223,6 @@ fn quota_and_budget() {
     assert!(q.is_empty());
 }
 
-/// 故障：不可递归的任务塞新任务被退回、返回 Again 报 NotRecursable；配额没用完返回 Yield 报 Unspent；循环里再 run 报 Reentrant。
 #[test]
 fn faults() {
     let refused = AtomicBool::new(false);
@@ -263,7 +250,6 @@ fn faults() {
     assert!(reentrant.load(Ordering::Acquire));
 }
 
-/// 家族：依赖把任务并成一家、爹是最早的；取消一家只影响这一家。
 #[test]
 fn family_find_and_cancel() {
     let pool = Threads(THREADS.get());

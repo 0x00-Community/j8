@@ -1,6 +1,3 @@
-//! The file system under `node:fs`: each call has a synchronous form and an `async` one (for `fs.promises` and the
-//! callback API) that runs the same work on a thread. Bytes cross as `Uint8Array`; the JS side makes Buffers and
-//! strings out of them.
 use std::path::Path;
 use std::time::SystemTime;
 
@@ -9,8 +6,6 @@ use j8::{Bytes, IntoJs};
 
 use crate::host::{Io, Offload};
 
-/// What a `stat` found: `[kind, size, mode, mtimeMs, atimeMs, ctimeMs, birthtimeMs, nlink, uid, gid, ino, dev]`,
-/// kind 0 file / 1 directory / 2 symbolic link / 3 other
 pub struct Stat(std::fs::Metadata);
 
 impl Stat {
@@ -31,7 +26,6 @@ impl<'gc> IntoJs<'gc> for Stat {
     }
 }
 
-/// A directory listing: names, and the kind of each (as in [`Stat`])
 pub struct Listing(Vec<(String, f64)>);
 
 impl<'gc> IntoJs<'gc> for Listing {
@@ -78,7 +72,6 @@ impl Fs {
         Io::new(if recursive { std::fs::create_dir_all(path) } else { std::fs::create_dir(path) }, "mkdir", path)
     }
 
-    /// `rm`: a file, or a directory with `recursive`; `force` ignores a missing path
     fn remove(path: &str, recursive: bool, force: bool) -> Io<()> {
         let p = Path::new(path);
         let r = match std::fs::symlink_metadata(p) {
@@ -179,7 +172,6 @@ impl Fs {
         Io::new(std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)), "chmod", path)
     }
 
-    /// A fresh directory `<prefix>XXXXXX`
     fn mkdtemp_sync(prefix: &str) -> Io<String> {
         let nanos = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.subsec_nanos());
         let path = format!("{prefix}{:06x}", (nanos ^ std::process::id()) & 0xff_ffff);

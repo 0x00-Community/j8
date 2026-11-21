@@ -3,8 +3,6 @@ use j8framework::{Agent, Error, ErrorKind, JsObject, ObjectKind, Value};
 
 use crate::{Args, Installer};
 
-/// `WeakRef` and `FinalizationRegistry` (no weak references yet: targets stay alive forever and cleanup callbacks are
-/// never called).
 struct Weaks;
 
 impl Weaks {

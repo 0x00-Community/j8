@@ -1,6 +1,3 @@
-//! `bytecodes!("v8.json")`: V8's bytecode tables (written by tools/v8bytecodes.py from V8's interpreter headers) as
-//! Rust: `Bytecode` (V8's numbering), `OperandType`, `OperandTypeInfo`, `ImplicitRegisterUse`, and per bytecode its
-//! operand types and implicit accumulator use. The JSON is the single source of truth.
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use serde::Deserialize;
@@ -28,7 +25,6 @@ struct SlotKind {
     size: u8,
 }
 
-/// `SCRIPT_SCOPE` ⇒ `ScriptScope`; CamelCase names stay
 fn camel(name: &str) -> String {
     if !name.contains('_') && name.chars().any(char::is_lowercase) {
         return name.to_owned();
@@ -39,7 +35,6 @@ fn camel(name: &str) -> String {
     }).collect()
 }
 
-/// A field-less `repr(u8)` enum numbered in order, with `ALL` / `from_u8`
 fn simple_enum(name: &str, doc: &str, variants: &[String]) -> TokenStream {
     let ident = format_ident!("{name}");
     let vs: Vec<_> = variants.iter().map(|v| format_ident!("{}", camel(v))).collect();
@@ -147,17 +142,13 @@ impl Tables {
             #[repr(u8)]
             pub enum Bytecode { #(#codes = #tags),* }
 
-            /// A bytecode operand's type (V8's `OperandType`).
             #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
             #[repr(u8)]
             pub enum OperandType { #(#ops),* }
 
-            /// What an operand type is made of: scalable or fixed, signed or not, its unscaled size (V8's
-            /// `OperandTypeInfo`).
             #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
             pub enum OperandTypeInfo { #(#info_set),* }
 
-            /// How a bytecode uses the accumulator implicitly (V8's `ImplicitRegisterUse`, bit flags).
             #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
             pub struct ImplicitRegisterUse(pub u8);
 
@@ -167,23 +158,18 @@ impl Tables {
             }
 
             impl Bytecode {
-                /// Number of bytecodes (the last is `Illegal`)
                 pub const COUNT: usize = #count;
-                /// Every bytecode, by its number
                 pub const ALL: [Bytecode; #count] = [#(Bytecode::#codes),*];
 
-                /// The bytecode with number `b`
                 #[inline]
                 pub const fn from_u8(b: u8) -> Option<Self> {
                     if (b as usize) < Self::COUNT { Some(Self::ALL[b as usize]) } else { None }
                 }
 
-                /// Its operand types, in order
                 pub const fn operand_types(self) -> &'static [OperandType] {
                     match self { #(Bytecode::#codes => #operand_lists,)* }
                 }
 
-                /// Its implicit use of the accumulator
                 pub const fn implicit_register_use(self) -> ImplicitRegisterUse {
                     match self { #(Bytecode::#codes => ImplicitRegisterUse::#implicit,)* }
                 }
@@ -196,14 +182,12 @@ impl Tables {
             #slots
 
             impl FeedbackSlotKind {
-                /// Entries the slot takes in the feedback vector (V8's `FeedbackMetadata::GetSlotSize`)
                 pub const fn slot_size(self) -> u8 {
                     match self { #(FeedbackSlotKind::#slot_vs => #slot_sizes,)* }
                 }
             }
 
             impl OperandType {
-                /// What it is made of
                 pub const fn info(self) -> OperandTypeInfo {
                     match self { #(OperandType::#ops => OperandTypeInfo::#infos,)* }
                 }
@@ -211,7 +195,6 @@ impl Tables {
         })
     }
 
-    /// `Runtime` (`CallRuntime` ids) and `Intrinsic` (`InvokeIntrinsic` ids)
     fn runtime_tables(&self, rel: &LitStr) -> Result<TokenStream> {
         let rnames: Vec<_> = self.runtime.iter().map(|r| format_ident!("{}", r.name)).collect();
         let rids = (0..self.runtime.len()).map(|i| u16::try_from(i).map_err(|_| Error::new(rel.span(), "more than 65536 runtime functions"))).collect::<Result<Vec<_>>>()?;
@@ -223,7 +206,6 @@ impl Tables {
         let iargs: Vec<_> = self.intrinsics.iter().map(|r| r.args).collect();
         let icount = inames.len();
         Ok(quote! {
-            /// A runtime function (`CallRuntime`'s `RuntimeId`, V8's `Runtime::FunctionId` numbering).
             #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
             #[repr(u16)]
             #[allow(non_camel_case_types)]
@@ -237,18 +219,15 @@ impl Tables {
                     if (v as usize) < Self::COUNT { Some(Self::ALL[v as usize]) } else { None }
                 }
 
-                /// Argument count (-1: variable)
                 pub const fn args(self) -> i8 {
                     match self { #(Runtime::#rnames => #rargs,)* }
                 }
 
-                /// Result count (1 or a pair)
                 pub const fn results(self) -> u8 {
                     match self { #(Runtime::#rnames => #rresults,)* }
                 }
             }
 
-            /// An interpreter intrinsic (`InvokeIntrinsic`'s `IntrinsicId`, V8's `IntrinsicsHelper::IntrinsicId`).
             #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
             #[repr(u8)]
             pub enum Intrinsic { #(#inames = #iids),* }
@@ -261,12 +240,10 @@ impl Tables {
                     if (v as usize) < Self::COUNT { Some(Self::ALL[v as usize]) } else { None }
                 }
 
-                /// Argument count (-1: variable)
                 pub const fn args(self) -> i8 {
                     match self { #(Intrinsic::#inames => #iargs,)* }
                 }
             }
-
         })
     }
 }

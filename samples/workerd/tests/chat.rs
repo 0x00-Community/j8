@@ -1,6 +1,3 @@
-//! The chat room under load: eight WebSocket clients on one port, a broadcast room persisted in SQLite, five seconds
-//! of silence in the middle (the event loop must sleep, then wake for the next message), and a restart that replays
-//! the stored history.
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
@@ -12,20 +9,18 @@ use serde_json::Value;
 use tungstenite::stream::MaybeTlsStream;
 use tungstenite::{Message, WebSocket};
 
-/// Clients in the room
 const CLIENTS: usize = 8;
-/// Messages each client sends per round
+
 const ROUND: usize = 5;
-/// The quiet stretch between the two rounds
+
 const SILENCE: Duration = Duration::from_secs(5);
-/// Server CPU time allowed during the silence: a sleeping event loop uses next to none
+
 const SILENT_CPU: Duration = Duration::from_millis(100);
-/// Linux clock ticks per second in /proc/<pid>/stat (USER_HZ)
+
 const USER_HZ: u64 = 100;
 
 type Client = WebSocket<MaybeTlsStream<TcpStream>>;
 
-/// One broadcast as a client saw it
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Said {
     id: i64,
@@ -39,7 +34,6 @@ impl From<&Value> for Said {
     }
 }
 
-/// A running `workerd examples/chat.js` on a free port
 struct Server {
     child: Child,
     port: u16,
@@ -61,15 +55,12 @@ impl Server {
             .map_while(Result::ok)
             .find_map(|l| l.rsplit_once("listening on http://127.0.0.1:").and_then(|(_, p)| p.trim().parse().ok()))
             .expect("workerd prints its port");
-        // Keep the pipe drained (and visible with --nocapture)
         thread::spawn(move || lines.map_while(Result::ok).for_each(|l| eprintln!("[workerd] {l}")));
         Self { child, port }
     }
 
-    /// User + system CPU time the server has used so far
     fn cpu(&self) -> Duration {
         let stat = std::fs::read_to_string(format!("/proc/{}/stat", self.child.id())).expect("/proc stat");
-        // Fields after the parenthesised command name; utime and stime are the 14th and 15th of the whole line
         let fields: Vec<u64> = stat.rsplit_once(')').expect("stat format").1.split_whitespace().filter_map(|f| f.parse().ok()).collect();
         Duration::from_millis((fields[10] + fields[11]) * 1000 / USER_HZ)
     }
@@ -79,7 +70,6 @@ impl Server {
         ws
     }
 
-    /// A plain HTTP GET, returning the body
     fn get(&self, path: &str) -> String {
         let mut s = TcpStream::connect(("127.0.0.1", self.port)).expect("connect");
         write!(s, "GET {path} HTTP/1.1\r\nhost: localhost\r\n\r\n").expect("request");
@@ -96,7 +86,6 @@ impl Drop for Server {
     }
 }
 
-/// Reads the next broadcast
 fn next(ws: &mut Client) -> Value {
     loop {
         match ws.read().expect("message") {
@@ -107,8 +96,6 @@ fn next(ws: &mut Client) -> Value {
     }
 }
 
-/// Every client sends `ROUND` messages at once, then reads until it has seen all `CLIENTS * ROUND` of the round.
-/// Returns the clients and what each one saw, in order.
 fn round(clients: Vec<Client>, tag: &str) -> (Vec<Client>, Vec<Vec<Said>>) {
     let workers: Vec<_> = clients
         .into_iter()
@@ -127,7 +114,6 @@ fn round(clients: Vec<Client>, tag: &str) -> (Vec<Client>, Vec<Vec<Said>>) {
     workers.into_iter().map(|w| w.join().expect("client thread")).unzip()
 }
 
-/// All clients saw the same broadcasts in the same order, with rising ids and each sender's messages in send order
 fn check(seen: &[Vec<Said>], tag: &str) -> Vec<Said> {
     let first = &seen[0];
     assert_eq!(first.len(), CLIENTS * ROUND);
@@ -153,7 +139,6 @@ fn eight_clients_silence_then_restart() {
     let (mut clients, seen) = round(clients, "a");
     let mut log = check(&seen, "a");
 
-    // Silence: nobody speaks, nothing arrives, and the server sleeps
     let before = server.cpu();
     thread::sleep(SILENCE);
     let spent = server.cpu().saturating_sub(before);
@@ -183,7 +168,6 @@ fn eight_clients_silence_then_restart() {
     }
     drop(server);
 
-    // A new process on the same storage: a newcomer gets the whole history, then the room works as before
     let server = Server::start(&storage);
     let mut late = server.join("late");
     let history: Vec<Said> = (0..log.len())

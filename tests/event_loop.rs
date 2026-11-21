@@ -1,5 +1,3 @@
-//! Event loop sets: many event loops on a few pinned threads, load balancing (placement, pulling, `rebalance`,
-//! `split`, moving a paused script), one quota.
 use std::future::Future;
 use std::num::NonZeroUsize;
 use std::pin::Pin;
@@ -13,7 +11,6 @@ use j8executor::Executor;
 use j8framework::{EventLoop, EventLoopSet, ScriptKind, Source};
 use j8platform::DefaultPlatform;
 
-/// Iterations of the long script: it needs many turns
 const LONG: u32 = 1_000_000;
 
 struct Later;
@@ -32,7 +29,6 @@ j8::runtime! {
     }
 }
 
-/// A script taking `LONG` loop iterations; its value is `seed` plus the sum of `i % 7`
 fn long(seed: u32) -> String {
     format!("let n = {seed}; for (let i = 0; i < {LONG}; i++) n += i % 7; n")
 }
@@ -48,7 +44,6 @@ fn text(l: &EventLoop<'_, Executor>, g: &j8framework::Global) -> String {
     })
 }
 
-/// Waits (a few seconds at most) until `ok` holds
 fn until(mut ok: impl FnMut() -> bool) -> bool {
     let end = Instant::now() + Duration::from_secs(5);
     while Instant::now() < end {
@@ -68,7 +63,6 @@ fn eight_threads_a_thousand_runtimes() {
     EventLoopSet::scope(&platform, NonZeroUsize::new(THREADS).expect("threads"), |set| {
         let mut runtimes: Vec<j8::Runtime<'_>> = (0..RUNTIMES).map(|_| j8::Runtime::on::<Host>(set, Executor::default()).expect("runtime")).collect();
         assert_eq!(set.loads(), vec![RUNTIMES / THREADS; THREADS], "placed evenly");
-        // One host thread per slice of the runtimes, all at once
         std::thread::scope(|s| {
             for (k, chunk) in runtimes.chunks_mut(RUNTIMES / THREADS).enumerate() {
                 s.spawn(move || {
@@ -91,14 +85,12 @@ fn split_moves_paused_scripts() {
     EventLoopSet::scope(&platform, NonZeroUsize::MIN, |set| {
         let mut loops: Vec<EventLoop<'_, Executor>> = (0..4).map(|_| set.spawn(Executor::default(), &Builtins)).collect();
         let tickets: Vec<_> = loops.iter_mut().zip(0..).map(|(l, seed)| l.submit(&Source { text: &long(seed), file: "long.js" }, ScriptKind::Classic)).collect();
-        // Every script is running (paused between turns) before the split
         assert!(until(|| loops.iter().all(|l| l.spent() > 0)));
         let new = set.split(0);
         for ((l, t), seed) in loops.iter_mut().zip(tickets).zip(0..) {
             let g = l.wait(t).expect("runs");
             assert_eq!(text(l, &g), long_value(seed));
         }
-        // The split gives half; the new thread, idle, may steal more of those waiting
         assert!(loops.iter().filter(|l| l.thread() == new).count() >= 2, "at least half moved to the new thread");
     });
 }
@@ -110,14 +102,12 @@ fn idle_threads_pull_and_rebalance_evens_out() {
         let mut loops: Vec<EventLoop<'_, Executor>> = (0..20).map(|_| set.spawn(Executor::default(), &Builtins)).collect();
         assert_eq!(set.loads(), vec![10, 10]);
         set.split(0);
-        // The split leaves [5, 10, 5]; the idle threads pull from the busy one
         assert!(until(|| set.loads()[1] < 10), "an idle thread pulled: {:?}", set.loads());
         set.rebalance();
         assert!(until(|| {
             let l = set.loads();
             l.iter().max().unwrap_or(&0) - l.iter().min().unwrap_or(&0) <= 1 && l.iter().sum::<usize>() == 20
         }), "evened out: {:?}", set.loads());
-        // Every event loop still works where it ended up
         for (i, l) in loops.iter_mut().enumerate() {
             let g = l.eval(&Source { text: &format!("{i} * 3"), file: "x.js" }, ScriptKind::Classic).expect("runs");
             assert_eq!(text(l, &g), (i * 3).to_string());
@@ -133,7 +123,6 @@ fn one_quota_by_weight() {
         heavy.set_weight(NonZeroUsize::new(4).expect("weight"));
         let th = heavy.submit(&Source { text: &long(0), file: "heavy.js" }, ScriptKind::Classic);
         let mut tl = light.submit(&Source { text: &long(0), file: "light.js" }, ScriptKind::Classic);
-        // Four times the share: the heavy one finishes while the light one is a quarter through
         heavy.wait(th).expect("runs");
         assert!(tl.try_take().is_none(), "the lighter event loop finished first");
         light.wait(tl).expect("runs");
@@ -141,7 +130,6 @@ fn one_quota_by_weight() {
     });
 }
 
-/// A host future that becomes ready on another thread after `after`, and records when it was first polled ready
 struct Delayed {
     after: Duration,
     started: Option<Arc<AtomicBool>>,
@@ -180,7 +168,6 @@ fn the_queue_is_checked_between_slices_of_a_script() {
         let lp = set.spawn(Executor::default(), &Builtins);
         let ready_at = Arc::new(OnceLock::new());
         let delayed = Delayed { after: Duration::from_millis(20), started: None, ready_at: Arc::clone(&ready_at) };
-        // A promise settled by the host future; its reaction records whether the long script had finished
         lp.enter(move |a| {
             let promise = a.new_promise();
             let (resolve, reject) = a.promise_resolvers(promise);
@@ -196,10 +183,8 @@ fn the_queue_is_checked_between_slices_of_a_script() {
         let g = lp.wait(t).expect("runs");
         let finished = Instant::now();
         assert_eq!(text(&lp, &g), long_value(0));
-        // Polled while the script was still running: the queue is checked between its slices
         let ready = *ready_at.get().expect("the future was polled ready");
         assert!(ready < finished && finished - ready > (finished - started) / 4, "polled at {:?} of a {:?} script", ready - started, finished - started);
-        // ...but its JS waited for the script (run-to-completion)
         lp.run().expect("settles");
         let log = lp.eval(&Source { text: "log.join(' | ')", file: "b.js" }, ScriptKind::Classic).expect("runs");
         assert_eq!(text(&lp, &log), "long done | settled 7 after long done");

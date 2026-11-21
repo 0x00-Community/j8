@@ -11,36 +11,27 @@ use crate::buffer::Buffers;
 use crate::string::Strings;
 use crate::{Args, Installer};
 
-/// Valid regex flags
 const FLAGS: &str = "dgimsuvy";
 
-/// Flags passed to the regex engine (the rest are handled at the JS level: `g` / `y` / `d`)
 const ENGINE_FLAGS: &str = "imsuv";
 
-/// Properties read by the `flags` getter, in spec order.
 const FLAG_PROPERTIES: [(char, &str); 8] = [('d', "hasIndices"), ('g', "global"), ('i', "ignoreCase"), ('m', "multiline"), ('s', "dotAll"), ('u', "unicode"), ('v', "unicodeSets"), ('y', "sticky")];
 
-/// 2^32 − 1: default limit of `split`
 const MAX_SPLIT: f64 = 4_294_967_295.0;
 
-/// One match: UTF-16 index ranges of the whole match and of each group, plus named groups.
 struct Found {
     range: core::ops::Range<usize>,
     groups: Vec<Option<core::ops::Range<usize>>>,
     named: Vec<(String, Option<core::ops::Range<usize>>)>,
 }
 
-/// Compiled regex: the engine's regex, plus the literal text when the whole pattern is a single literal (searched as a
-/// plain substring, bypassing the backtracking engine).
 struct Compiled {
     regex: regress::Regex,
     atom: Option<Box<str>>,
-    /// The same pattern on finite automata, when it means the same there (all-ASCII subjects)
     dfa: Option<crate::dfa::Dfa>,
 }
 
 impl Compiled {
-    /// Syntax characters in a pattern: if there are none (and case is not ignored), the pattern is a literal
     const SYNTAX: &'static str = "\\^$.|?*+()[]{}/";
 
     fn new(regex: regress::Regex, source: &str, flags: &str) -> Self {
@@ -50,11 +41,9 @@ impl Compiled {
     }
 }
 
-/// `RegExp` and the regex-related string methods. All indices are in UTF-16 code units.
 pub(crate) struct Regexps;
 
 impl Regexps {
-    /// Compile: validate the flags first, then pick out the ones the engine needs.
     fn compile(a: &Agent<'_, '_>, source: &str, flags: &str) -> Result<regress::Regex, Error> {
         let bad = flags.chars().enumerate().any(|(i, c)| !FLAGS.contains(c) || flags[..i].contains(c)) || (flags.contains('u') && flags.contains('v'));
         if bad {
@@ -64,13 +53,10 @@ impl Regexps {
         regress::Regex::with_flags(source, engine.as_str()).map_err(|e| a.throw(ErrorKind::Syntax, &alloc::format!("Invalid regular expression: /{source}/{flags}: {e}")))
     }
 
-    /// Compiled regex: look up the realm's cache first (identical source and flags share one copy); otherwise compile
-    /// it and record it.
     fn compiled<'gc>(a: &Agent<'gc, '_>, source: &str, flags: &str) -> Result<Gc<'gc, Static<Box<dyn core::any::Any + Send + Sync>>>, Error> {
         Self::cached(a, source, flags).map(|c| c.compiled)
     }
 
-    /// The realm's cache entry for `source` / `flags` (its strings are shared by the regexes made from it)
     fn cached<'gc>(a: &Agent<'gc, '_>, source: &str, flags: &str) -> Result<j8framework::RegExpCompiled<'gc>, Error> {
         let slot = &a.realm.realm().get().regexp_cache[j8framework::RegExpCompiled::bucket(source, flags)];
         if let Some(c) = slot.get().filter(|c| **c.source == *source && **c.flags == *flags) {
@@ -83,7 +69,6 @@ impl Regexps {
         Ok(entry)
     }
 
-    /// A new regex of this realm with `lastIndex` 0 (RegExpAlloc + RegExpInitialize for string source and flags)
     fn make<'gc>(a: &Agent<'gc, '_>, c: j8framework::RegExpCompiled<'gc>) -> JsObject<'gc> {
         let kind = ObjectKind::RegExp(RegExpData { source: c.source, flags: c.flags, compiled: c.compiled, legacy: true });
         let o = ObjectData { kind, proto: Some(a.realm.regexp_proto), ..ObjectData::default() }.alloc(a.mc);
@@ -91,12 +76,10 @@ impl Regexps {
         o
     }
 
-    /// Evaluating a regex literal
     pub(crate) fn literal<'gc>(a: &Agent<'gc, '_>, source: &str, flags: &str) -> Result<Value<'gc>, Error> {
         Ok(Self::make(a, Self::cached(a, source, flags)?).into())
     }
 
-    /// IsRegExp: check `Symbol.match`; if absent, check whether it is a RegExp object.
     pub(crate) fn is_regexp<'gc>(a: &mut Agent<'gc, '_>, v: Value<'gc>) -> Result<bool, Error> {
         if v.as_object().is_none() {
             return Ok(false);
@@ -112,7 +95,6 @@ impl Regexps {
         matches!(v.kind(), ValueKind::Object(f) if matches!(f.borrow().kind, ObjectKind::Native(n) if core::ptr::fn_addr_eq(n.f, Self::construct as j8framework::NativeFn)))
     }
 
-    /// RegExpInitialize: compile and install into `o`, setting `lastIndex` to 0.
     fn initialize<'gc>(a: &mut Agent<'gc, '_>, o: JsObject<'gc>, pattern: Value<'gc>, flags: Value<'gc>) -> Result<(), Error> {
         let source = if pattern == Value::Undefined { a.string("") } else { a.to_string(pattern)? };
         let flags = if flags == Value::Undefined { a.string("") } else { a.to_string(flags)? };
@@ -122,11 +104,8 @@ impl Regexps {
         a.set_named(o.into(), "lastIndex", 0.0.into())
     }
 
-    /// RegExpAlloc: prototype taken from new.target; `lastIndex` is writable, non-enumerable, non-configurable.
     fn alloc<'gc>(a: &mut Agent<'gc, '_>, new_target: Value<'gc>) -> Result<JsObject<'gc>, Error> {
         let proto = a.proto_from_ctor(new_target, a.realm.regexp_proto)?;
-        // Start with an empty regex as a placeholder, and record whether Annex B `compile` may be used (not on subclass
-        // instances)
         let legacy = new_target == Value::Undefined || Self::is_regexp_ctor(new_target);
         let empty = a.string("");
         let compiled = Self::compiled(a, "", "")?;
@@ -136,20 +115,15 @@ impl Regexps {
         Ok(o)
     }
 
-    /// RegExpCreate(P, F).
     fn create<'gc>(a: &mut Agent<'gc, '_>, pattern: Value<'gc>, flags: Value<'gc>) -> Result<JsObject<'gc>, Error> {
         let o = Self::alloc(a, Value::Undefined)?;
         Self::initialize(a, o, pattern, flags)?;
         Ok(o)
     }
 
-    /// `RegExp(pattern, flags)` / `new RegExp(…)`.
     fn construct<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let new_target = a.new_target;
         let (pattern, flags) = (args.at(0), args.at(1));
-        // Fast path: plain call, source and flags both strings (this is how regex literals are created). RegExpAlloc +
-        // RegExpInitialize merged into one step: the prototype is this realm's `RegExp.prototype`; compile first, then
-        // create the object, and define `lastIndex` directly as 0 (a Set on a fresh object is indistinguishable)
         if new_target == Value::Undefined
             && let (ValueKind::String(source), ValueKind::String(flags)) = (pattern.kind(), flags.kind())
         {
@@ -182,7 +156,6 @@ impl Regexps {
         Ok(o.into())
     }
 
-    /// `RegExp.prototype.compile(pattern, flags)` (annexB).
     fn compile_method<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let o = Self::this(a, this)?;
         if !matches!(&o.borrow().kind, ObjectKind::RegExp(d) if d.legacy) {
@@ -202,7 +175,6 @@ impl Regexps {
         Ok(o.into())
     }
 
-    /// Returns it if it is a RegExp object.
     fn regexp(v: Value<'_>) -> Option<JsObject<'_>> {
         match v.kind() {
             ValueKind::Object(o) if matches!(o.borrow().kind, ObjectKind::RegExp(_)) => Some(o),
@@ -226,7 +198,6 @@ impl Regexps {
         (d.source, d.flags, d.compiled)
     }
 
-    /// Find the first match starting at `start` (by code point with `u` / `v`, otherwise by code unit).
     fn find(o: JsObject<'_>, units: &[u16], start: usize) -> Option<Found> {
         let (_, flags, compiled) = Self::data(o);
         let re = &compiled.0.downcast_ref::<Compiled>().expect("a compiled regex").regex;
@@ -235,8 +206,6 @@ impl Regexps {
         Some(Found { range: m.range(), groups: m.captures, named })
     }
 
-    /// All-ASCII strings are matched directly as UTF-8 (byte index = code unit index), skipping the conversion of the
-    /// whole string to UTF-16.
     fn find_ascii(o: JsObject<'_>, s: &str, start: usize) -> Option<Found> {
         let (_, _, compiled) = Self::data(o);
         let c = compiled.0.downcast_ref::<Compiled>().expect("a compiled regex");
@@ -266,13 +235,11 @@ impl Regexps {
         r.map_or(Value::Undefined, |r| a.array(alloc::vec![Self::index(r.start), Self::index(r.end)]).into())
     }
 
-    /// RegExpBuiltinExec.
     fn builtin_exec<'gc>(a: &mut Agent<'gc, '_>, o: JsObject<'gc>, s: JsString<'gc>) -> Result<Value<'gc>, Error> {
         let li = a.get_named(o.into(), "lastIndex")?;
         let last = a.to_length(li)?;
         let flags = Self::data(o).1;
         let (global, sticky, indices) = (flags.contains('g'), flags.contains('y'), flags.contains('d'));
-        // All ASCII: no UTF-16 conversion; match as UTF-8 and slice by byte
         let ascii = s.is_ascii();
         let units: Vec<u16> = if ascii { Vec::new() } else { s.encode_utf16().collect() };
         let text = |a: &Agent<'gc, '_>, r: Option<core::ops::Range<usize>>| if ascii { r.map_or(Value::Undefined, |r| a.piece(s, &s[r]).into()) } else { Self::text(a, &units, r) };
@@ -331,11 +298,6 @@ impl Regexps {
         Ok(arr.into())
     }
 
-    /// The RegExp object and `RegExp.prototype` are both pristine: the object's only own property is a writable numeric
-    /// `lastIndex`, its prototype is `%RegExp.prototype%`, and `exec` / `flags` / the flag getters on the prototype are
-    /// still the ones installed at setup. Then walking through the spec protocol (reading flags, reading/writing
-    /// lastIndex, calling exec, reading the result array) is unobservable, so we can match directly. Returns the object
-    /// and the value of `lastIndex`.
     fn pristine<'gc>(a: &Agent<'gc, '_>, r: Value<'gc>) -> Option<(JsObject<'gc>, f64)> {
         let d = r.as_object()?;
         let own_ok = d.regexp().is_some()
@@ -356,12 +318,10 @@ impl Regexps {
         intact.then_some((o, last))
     }
 
-    /// Set `lastIndex` of a pristine regex ([`pristine`](Self::pristine) checked it: slot 0, writable)
     fn set_last<'gc>(a: &Agent<'gc, '_>, o: JsObject<'gc>, i: usize) {
         o.borrow_mut(a.mc).set_at(0, Self::index(i));
     }
 
-    /// Search a pristine regex from `start` (by byte if all ASCII, otherwise by UTF-16 code unit)
     fn find_in(o: JsObject<'_>, s: &str, units: Units<'_>, start: usize) -> Option<Found> {
         match units {
             Units::Ascii(_) => Self::find_ascii(o, s, start),
@@ -369,8 +329,6 @@ impl Regexps {
         }
     }
 
-    /// RegExpBuiltinExec for a pristine regex without building a result array: reads/writes `lastIndex` according to
-    /// `g` / `y`, returns the match
     fn quick_exec<'gc>(a: &mut Agent<'gc, '_>, o: JsObject<'gc>, last: f64, s: &str, units: Units<'_>) -> Result<Option<Found>, Error> {
         let flags = Self::data(o).1;
         let (global, sticky) = (flags.contains('g'), flags.contains('y'));
@@ -387,8 +345,6 @@ impl Regexps {
         Ok(found)
     }
 
-    /// `[Symbol.replace]` for a pristine regex with a string replacement. Returns `None` when the template contains
-    /// `$<` and the regex may have named groups (take the slow path; no side effects so far)
     fn quick_replace<'gc>(a: &mut Agent<'gc, '_>, o: JsObject<'gc>, last: f64, s: JsString<'gc>, with: JsString<'gc>) -> Result<Option<Value<'gc>>, Error> {
         let (source, flags, _) = Self::data(o);
         if with.contains("$<") && source.contains("(?<") {
@@ -414,7 +370,6 @@ impl Regexps {
         } else {
             found.extend(Self::quick_exec(a, o, last, &s, units)?);
         }
-        // All ASCII and no `$` in the template: join directly as UTF-8 (byte index = code unit index)
         if let Units::Ascii(_) = units
             && !with.contains('$')
         {
@@ -448,7 +403,6 @@ impl Regexps {
         Ok(Some(a.string(&String::from_utf16_lossy(&out)).into()))
     }
 
-    /// RegExpExec: if `exec` has been replaced, call it (the result must be an object or null).
     fn regexp_exec<'gc>(a: &mut Agent<'gc, '_>, r: Value<'gc>, s: JsString<'gc>) -> Result<Value<'gc>, Error> {
         let exec = a.get_named(r, "exec")?;
         if a.is_callable(exec) {
@@ -473,7 +427,6 @@ impl Regexps {
         let s = a.to_string(args.at(0))?;
         if let Some((o, last)) = Self::pristine(a, r) {
             let flags = Self::data(o).1;
-            // Neither `g` nor `y`: `lastIndex` is neither read nor written, only whether there is a match counts
             if !flags.contains('g') && !flags.contains('y') {
                 return Ok(Self::matches(o, &s, s.units()).into());
             }
@@ -482,7 +435,6 @@ impl Regexps {
         Ok((Self::regexp_exec(a, r, s)? != Value::Null).into())
     }
 
-    /// Whether a regex matches anywhere in `s`
     fn matches(o: JsObject<'_>, s: &str, units: Units<'_>) -> bool {
         let Units::Ascii(_) = units else { return Self::find_in(o, s, units, 0).is_some() };
         let (_, _, compiled) = Self::data(o);
@@ -503,7 +455,6 @@ impl Regexps {
         Ok(a.string(&alloc::format!("/{}/{}", &**p, &**f)).into())
     }
 
-    /// EscapeRegExpPattern: escape `/` and line terminators; the empty string becomes `(?:)`.
     fn escape_pattern(source: &str) -> String {
         if source.is_empty() {
             return String::from("(?:)");
@@ -543,7 +494,6 @@ impl Regexps {
         Ok(a.string(&s).into())
     }
 
-    /// `flags`: read each flag property in spec order (generic; does not require a RegExp object).
     fn flags<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let r = Self::this_object(a, this)?;
         let mut out = String::new();
@@ -556,7 +506,6 @@ impl Regexps {
         Ok(a.string(&out).into())
     }
 
-    /// RegExpHasFlag: `RegExp.prototype` itself gives `undefined`.
     fn flag<'gc, const C: char>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let Some(o) = this.as_object() else { return Err(a.throw(ErrorKind::Type, "RegExp flag getter called on a non-object")) };
         match Self::regexp(this) {
@@ -571,7 +520,6 @@ impl Regexps {
         Ok(String::from(&**a.to_string(f)?))
     }
 
-    /// AdvanceStringIndex.
     fn advance(units: &[u16], index: f64, unicode: bool) -> f64 {
         if !unicode {
             return index + 1.0;
@@ -586,7 +534,6 @@ impl Regexps {
         }
     }
 
-    /// Advance `lastIndex` after an empty match.
     fn step_last_index<'gc>(a: &mut Agent<'gc, '_>, r: Value<'gc>, units: &[u16], unicode: bool) -> Result<(), Error> {
         let li = a.get_named(r, "lastIndex")?;
         let this_index = a.to_length(li)?;
@@ -672,7 +619,6 @@ impl Regexps {
         Ok(a.iter_result(m, false).into())
     }
 
-    /// GetSubstitution: `$$` / `$&` / `` $` `` / `$'` / `$n` / `$nn` / `$<name>` in a replacement template.
     fn substitution<'gc>(a: &mut Agent<'gc, '_>, matched: &[u16], units: &[u16], position: usize, captures: &[Value<'gc>], named: Value<'gc>, template: &[u16]) -> Result<Vec<u16>, Error> {
         let dollar = u16::from(b'$');
         let digit = |c: u16| char::from_u32(u32::from(c)).and_then(|c| c.to_digit(10));
@@ -922,7 +868,6 @@ impl Regexps {
         Ok(this)
     }
 
-    /// `RegExp.escape(s)`.
     fn escape<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let ValueKind::String(s) = args.at(0).kind() else { return Err(a.throw(ErrorKind::Type, "RegExp.escape requires a string")) };
         let mut out = String::new();
@@ -951,8 +896,6 @@ impl Regexps {
         Ok(a.string(&out).into())
     }
 
-    // ---- String methods: dispatched through the Symbol protocol ----
-
     fn subject<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>) -> Result<Value<'gc>, Error> {
         if this.is_nullish() {
             return Err(a.throw(ErrorKind::Type, "String.prototype method called on null or undefined"));
@@ -960,7 +903,6 @@ impl Regexps {
         Ok(this)
     }
 
-    /// GetMethod(v, sym): `None` if absent; throws TypeError if not callable.
     fn method_of<'gc>(a: &mut Agent<'gc, '_>, v: Value<'gc>, sym: j8framework::JsSymbol<'gc>) -> Result<Option<Value<'gc>>, Error> {
         let f = a.get_symbol(v, sym, v)?;
         if f.is_nullish() {
@@ -973,8 +915,6 @@ impl Regexps {
         Ok(Some(f))
     }
 
-    /// match / search: delegate to the corresponding Symbol method if there is one, otherwise create a regex and call
-    /// it.
     fn dispatch<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, arg: Value<'gc>, sym: j8framework::JsSymbol<'gc>, flags: Value<'gc>) -> Result<Value<'gc>, Error> {
         let o = Self::subject(a, this)?;
         if arg.as_object().is_some()
@@ -996,7 +936,6 @@ impl Regexps {
         Self::dispatch(a, this, args.at(0), a.realm.symbols.search, Value::Undefined)
     }
 
-    /// The regex passed to matchAll / replaceAll must have `g`.
     fn require_global<'gc>(a: &mut Agent<'gc, '_>, v: Value<'gc>, method: &str) -> Result<(), Error> {
         if Self::is_regexp(a, v)? {
             let flags = a.get_named(v, "flags")?;
@@ -1028,7 +967,6 @@ impl Regexps {
                 Self::require_global(a, search, "replaceAll")?;
             }
             if let Some(f) = Self::method_of(a, search, a.realm.symbols.replace)? {
-                // The installed method: called right here
                 if a.realm.regexp_pristine.get().as_ref().is_some_and(|p| f.as_object().is_some_and(|f| Gc::ptr_eq(f, p.replace))) {
                     return Self::replace_symbol(a, search, &[o, with]);
                 }
@@ -1095,7 +1033,6 @@ impl<'gc> Installer<'_, 'gc> {
         self.method(ctor, "escape", Regexps::escape, 1);
         let species = r.named_native(self.mc, Regexps::species, "get [Symbol.species]", 0);
         ctor.borrow_mut(self.mc).define_symbol(r.symbols.species, Property { slot: Slot::Accessor { get: Some(species), set: None }, enumerable: false, writable: false, configurable: true });
-        // Internal constructor used by regex literals
         r.regexp_ctor.borrow_mut(self.mc).kind = ObjectKind::Native(j8framework::Native::function(Regexps::construct));
         self.method(proto, "exec", Regexps::exec, 1);
         self.method(proto, "test", Regexps::test, 1);
@@ -1124,7 +1061,6 @@ impl<'gc> Installer<'_, 'gc> {
             (r.symbols.split, Regexps::split_symbol, 2),
         ];
         let methods = symbols.map(|(sym, f, n)| r.symbol_method(self.mc, proto, sym, f, n));
-        // Record the state at setup: slots for exec / flags / the flag getters, and the `Symbol.replace` method
         let pristine = {
             let d = proto.borrow();
             let slots = ["exec", "flags"].into_iter().chain(FLAG_PROPERTIES.map(|(_, n)| n)).filter_map(|n| d.props().position(n).and_then(|i| Some((i, d.props().word(i)?)))).collect();

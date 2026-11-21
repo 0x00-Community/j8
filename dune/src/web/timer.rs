@@ -1,5 +1,3 @@
-//! One pending timer: `new Timer().wait(ms)` is a promise for `true` once `ms` have passed, or `false` once the timer
-//! is cancelled (so a cleared timer does not keep the event loop waiting).
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -29,14 +27,11 @@ impl Timer {
         Glue::spawn(a, async move { Glue::settle(sleep.await) })
     }
 
-    /// Cancelling happens on the runtime thread, which polls every pending job again before it parks, so the
-    /// waiting promise settles without a wake-up
     fn cancel(&self) {
         self.cancelled.store(true, Ordering::Release);
     }
 }
 
-/// Sleeps on a thread of its own; `false` as soon as it is cancelled
 struct Sleep<F> {
     cancelled: Arc<AtomicBool>,
     slept: Offload<(), F>,

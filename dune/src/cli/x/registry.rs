@@ -8,18 +8,16 @@ use serde::Deserialize;
 use super::manifest::{Dist, Manifest};
 use super::spec::{LATEST, Want};
 
-/// Environment variables naming the registry, first found wins
 const REGISTRY_VARS: [&str; 2] = ["DUNE_REGISTRY", "npm_config_registry"];
 const DEFAULT_REGISTRY: &str = "https://registry.npmjs.org";
-/// The abbreviated metadata: only what installing needs
+
 const ABBREVIATED: &str = "application/vnd.npm.install-v1+json; q=1.0, application/json; q=0.8";
-/// Largest metadata document read (some packages publish thousands of versions)
+
 const METADATA_LIMIT: u64 = 256 << 20;
-/// Largest tarball read
+
 const TARBALL_LIMIT: u64 = 1 << 30;
 const TIMEOUT: Duration = Duration::from_secs(120);
 
-/// An npm registry
 pub struct Registry {
     base: String,
     agent: ureq::Agent,
@@ -34,7 +32,6 @@ impl Default for Registry {
 }
 
 impl Registry {
-    /// The versions of package `name`
     pub fn package(&self, name: &str) -> Result<Package, String> {
         let url = format!("{}/{}", self.base, name.replace('/', "%2f"));
         let fail = |e: ureq::Error| format!("{name}: {e}");
@@ -43,7 +40,6 @@ impl Registry {
         Ok(Package::from(doc))
     }
 
-    /// The tarball of `dist`, checked against its integrity
     pub fn tarball(&self, name: &str, dist: &Dist) -> Result<Tarball, String> {
         let fail = |e: ureq::Error| format!("{name}: {e}");
         let mut response = self.agent.get(&dist.tarball).call().map_err(fail)?;
@@ -55,8 +51,6 @@ impl Registry {
     }
 }
 
-/// The registry's metadata document; versions stay JSON until one is picked, so one odd old version can't break
-/// the rest
 #[derive(Deserialize)]
 struct Document {
     #[serde(rename = "dist-tags", default)]
@@ -65,7 +59,6 @@ struct Document {
     versions: BTreeMap<String, serde_json::Value>,
 }
 
-/// A package's published versions and dist-tags
 pub struct Package {
     tags: BTreeMap<String, Version>,
     versions: BTreeMap<Version, serde_json::Value>,
@@ -81,7 +74,6 @@ impl From<Document> for Package {
 }
 
 impl Package {
-    /// The version `want` picks: a dist-tag's; for a range, `latest` when it satisfies, else the highest that does
     pub fn pick(&self, want: &Want) -> Option<&Version> {
         match want {
             Want::Latest => self.tags.get(LATEST).filter(|v| self.versions.contains_key(v)).or_else(|| self.versions.keys().rev().find(|v| !v.is_prerelease())),
@@ -93,7 +85,6 @@ impl Package {
         }
     }
 
-    /// Whether `version` is one `want` accepts
     pub fn admits(&self, want: &Want, version: &Version) -> bool {
         match want {
             Want::Latest | Want::Tag(_) => self.pick(want) == Some(version),
@@ -107,12 +98,9 @@ impl Package {
     }
 }
 
-/// A package tarball (gzipped tar, everything under one top directory)
 pub struct Tarball(Vec<u8>);
 
 impl Tarball {
-    /// Unpacks the files and directories into `into`, dropping the top directory; links and paths leaving `into` are
-    /// skipped
     pub fn unpack(&self, into: &Path) -> std::io::Result<()> {
         let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(self.0.as_slice()));
         for entry in archive.entries()? {

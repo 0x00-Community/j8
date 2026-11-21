@@ -1,6 +1,3 @@
-//! `#[j8::function]` / `#[j8::function("name")]`: placed on a function; the original function is kept and a
-//! module of the same name is generated next to it. `name::install(&mut agent, target)` installs it as a JS
-//! function on `target` (`name::NATIVE` is the host function itself).
 use proc_macro2::TokenStream;
 use quote::quote;
 use syn::{ItemFn, LitStr};
@@ -27,10 +24,8 @@ pub fn expand(attr: TokenStream, mut item: ItemFn) -> syn::Result<TokenStream> {
 
             #wrapper
 
-            /// The host function itself
             pub const NATIVE: ::j8::frame::NativeFn = #w;
 
-            /// Installs it as a JS function on `target` and returns the function object.
             pub fn install<'gc>(a: &mut ::j8::frame::Agent<'gc, '_>, target: ::j8::frame::JsObject<'gc>) -> ::j8::frame::JsObject<'gc> {
                 ::j8::Glue::function(a, target, #js, NATIVE, #length)
             }

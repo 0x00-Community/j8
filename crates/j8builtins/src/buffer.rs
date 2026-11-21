@@ -5,13 +5,10 @@ use j8framework::{Agent, Backing, BufferData, ElementKind, Error, ErrorKind, JsO
 
 use crate::{Args, Installer};
 
-/// `ArrayBuffer` / `SharedArrayBuffer` / `DataView` / `Atomics`.
 pub(crate) struct Buffers;
 
-/// Maximum number of bytes allocated at once; more throws RangeError
 const MAX_BYTES: usize = 1 << 31;
 
-/// Atomics read-modify-write operations.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Rmw {
     Add,
@@ -23,7 +20,6 @@ enum Rmw {
 }
 
 impl Rmw {
-    /// 由旧值 `x` 和操作数 `y` 得新值
     fn apply(self, x: u64, y: u64) -> u64 {
         match self {
             Self::Add => x.wrapping_add(y),
@@ -37,7 +33,6 @@ impl Rmw {
 }
 
 impl Buffers {
-    /// A new buffer (all bytes zero).
     pub(crate) fn allocate<'gc>(a: &mut Agent<'gc, '_>, proto: JsObject<'gc>, len: usize, max: Option<usize>, shared: bool) -> Result<JsObject<'gc>, Error> {
         if len > MAX_BYTES || max.is_some_and(|m| m > MAX_BYTES) {
             return Err(a.throw(ErrorKind::Range, "Array buffer allocation failed"));
@@ -51,7 +46,6 @@ impl Buffers {
         Ok(j8framework::ObjectData { kind: ObjectKind::ArrayBuffer(Box::new(data)), proto: Some(proto), ..j8framework::ObjectData::default() }.alloc(a.mc))
     }
 
-    /// `this` is a (shared / non-shared) buffer.
     fn this_buffer<'gc>(a: &Agent<'gc, '_>, this: Value<'gc>, shared: bool) -> Result<JsObject<'gc>, Error> {
         match this.kind() {
             ValueKind::Object(o) if matches!(&o.borrow().kind, ObjectKind::ArrayBuffer(b) if b.shared == shared) => Ok(o),
@@ -138,7 +132,6 @@ impl Buffers {
         }
     }
 
-    /// detach 这个 buffer，交出它的字节
     fn take_bytes<'gc>(a: &Agent<'gc, '_>, o: JsObject<'gc>) -> Option<Backing> {
         match &mut o.borrow_mut(a.mc).kind {
             ObjectKind::ArrayBuffer(b) => b.bytes.take(),
@@ -146,7 +139,6 @@ impl Buffers {
         }
     }
 
-    /// `at` 处的 `size` 字节（detach 或越界时为零）
     fn read(o: JsObject<'_>, at: usize, size: usize) -> [u8; 8] {
         let mut x = [0u8; 8];
         if let ObjectKind::ArrayBuffer(b) = &o.borrow().kind
@@ -157,7 +149,6 @@ impl Buffers {
         x
     }
 
-    /// 对 buffer 的字节做 [`Backing::update`]（detach 时为 0）
     fn update<'gc>(a: &Agent<'gc, '_>, o: JsObject<'gc>, at: usize, size: usize, f: impl Fn(u64) -> Option<u64>) -> u64 {
         match &mut o.borrow_mut(a.mc).kind {
             ObjectKind::ArrayBuffer(b) => b.bytes.as_mut().map_or(0, |bytes| bytes.update(at, size, f)),
@@ -165,7 +156,6 @@ impl Buffers {
         }
     }
 
-    /// `resize` / `grow`: `grow` cannot shrink.
     fn resize_with<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>], shared: bool) -> Result<Value<'gc>, Error> {
         let o = Self::this_buffer(a, this, shared)?;
         let Some(max) = Self::info(o).1 else {
@@ -191,7 +181,6 @@ impl Buffers {
         Self::resize_with(a, this, args, true)
     }
 
-    /// SpeciesConstructor(o, fallback).
     pub(crate) fn species_constructor<'gc>(a: &mut Agent<'gc, '_>, o: Value<'gc>, fallback: Value<'gc>) -> Result<Value<'gc>, Error> {
         let c = a.get_named(o, "constructor")?;
         if c == Value::Undefined {
@@ -270,7 +259,6 @@ impl Buffers {
         Self::slice_with(a, this, args, true)
     }
 
-    /// `transfer` / `transferToFixedLength`: a new buffer takes over the bytes and the original is detached.
     fn transfer_with<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>], keep_resizable: bool) -> Result<Value<'gc>, Error> {
         let o = Self::this_buffer(a, this, false)?;
         let new_len = match args.at(0).kind() {
@@ -286,7 +274,6 @@ impl Buffers {
             return Err(a.throw(ErrorKind::Range, "new length exceeds maxByteLength"));
         }
         let n = Self::allocate(a, a.realm.array_buffer_proto, 0, max, false)?;
-        // 字节直接移过去；只有改不了长度的（外部内存）才拷贝
         let mut bytes = Self::take_bytes(a, o).unwrap_or_else(|| Backing::from(alloc::vec::Vec::new()));
         if !bytes.resize(new_len) {
             let mut v = bytes.into_vec();
@@ -304,8 +291,6 @@ impl Buffers {
     fn transfer_fixed<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         Self::transfer_with(a, this, args, false)
     }
-
-    // ---- DataView ----
 
     fn data_view<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let new_target = a.new_target;
@@ -333,7 +318,6 @@ impl Buffers {
             }
         };
         let proto = a.proto_from_ctor(new_target, a.realm.data_view_proto)?;
-        // Getting the prototype may have run user code that changed the buffer: check again
         let Some(len) = Self::info(buffer).0 else { return Err(a.throw(ErrorKind::Type, "Cannot construct a DataView on a detached ArrayBuffer")) };
         if offset > len || length.is_some_and(|n| offset + n > len) {
             return Err(a.throw(ErrorKind::Range, "Invalid DataView length"));
@@ -372,7 +356,6 @@ impl Buffers {
         }
     }
 
-    /// GetViewValue: `K` is the element type index.
     fn get_value<'gc, const K: usize>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let kind = ElementKind::ALL[K];
         let v = Self::this_view(a, this)?;
@@ -387,7 +370,6 @@ impl Buffers {
         Ok(a.element_value(kind.decode(bytes)))
     }
 
-    /// An element fits starting at byte `index` of the view: returns its position in the buffer.
     fn view_access<'gc>(a: &Agent<'gc, '_>, v: &ViewData<'gc>, index: usize, kind: ElementKind) -> Result<usize, Error> {
         let Some(len) = Agent::view_length(v, 1) else { return Err(a.throw(ErrorKind::Type, "DataView is out of bounds")) };
         if index + kind.size() > len {
@@ -415,9 +397,6 @@ impl Buffers {
         Ok(Value::Undefined)
     }
 
-    // ---- Atomics ----
-
-    /// ValidateIntegerTypedArray + ValidateAtomicAccess: returns (element type, buffer, byte position).
     fn atomic_target<'gc>(a: &mut Agent<'gc, '_>, ta: Value<'gc>, index: Value<'gc>, waitable: bool) -> Result<(ElementKind, JsObject<'gc>, usize), Error> {
         let (kind, view, len) = Self::integer_array(a, ta, waitable)?;
         let i = a.to_index(index)?;
@@ -427,7 +406,6 @@ impl Buffers {
         Ok((kind, view.buffer, view.offset + i * kind.size()))
     }
 
-    /// ValidateIntegerTypedArray: returns (element type, view, length).
     fn integer_array<'gc>(a: &mut Agent<'gc, '_>, ta: Value<'gc>, waitable: bool) -> Result<(ElementKind, ViewData<'gc>, usize), Error> {
         let Some((kind, view)) = (match ta.kind() {
             ValueKind::Object(o) => Agent::typed_array(o),
@@ -447,7 +425,6 @@ impl Buffers {
         Ok((kind, view, len))
     }
 
-    /// Check again after converting the value to write (the conversion may have detached / shrunk the buffer).
     fn revalidate<'gc>(a: &Agent<'gc, '_>, buffer: JsObject<'gc>, at: usize, kind: ElementKind) -> Result<(), Error> {
         match Self::info(buffer).0 {
             None => Err(a.throw(ErrorKind::Type, "TypedArray is detached")),
@@ -456,7 +433,6 @@ impl Buffers {
         }
     }
 
-    /// Numbers for Atomics: ToBigInt for BigInt types, ToIntegerOrInfinity otherwise.
     fn atomic_value<'gc>(a: &mut Agent<'gc, '_>, kind: ElementKind, v: Value<'gc>) -> Result<j8framework::Element, Error> {
         if kind.is_bigint() { Ok(j8framework::Element::BigInt(a.to_bigint(v)?)) } else { Ok(j8framework::Element::Number(a.to_integer_or_infinity(v)?)) }
     }
@@ -538,8 +514,6 @@ impl Buffers {
         matches!(&buffer.borrow().kind, ObjectKind::ArrayBuffer(b) if b.shared)
     }
 
-    /// `Atomics.wait`: nobody can wake us up on a single thread; gives "not-equal" if the value differs, otherwise
-    /// "timed-out" per the timeout.
     fn wait<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let (_, view, _) = Self::integer_array(a, args.at(0), true)?;
         if !Self::shared(view.buffer) {
@@ -582,7 +556,6 @@ impl<'gc> Installer<'_, 'gc> {
             let g = r.named_native(self.mc, Buffers::species, "get [Symbol.species]", 0);
             c.borrow_mut(self.mc).define_symbol(r.symbols.species, Property { slot: Slot::Accessor { get: Some(g), set: None }, enumerable: false, writable: false, configurable: true });
         };
-        // ArrayBuffer
         let ab = r.array_buffer_proto;
         let ctor = self.constructor("ArrayBuffer", Buffers::array_buffer, ab, 1);
         self.method(ctor, "isView", Buffers::is_view, 1);
@@ -596,7 +569,6 @@ impl<'gc> Installer<'_, 'gc> {
         self.method(ab, "transfer", Buffers::transfer, 0);
         self.method(ab, "transferToFixedLength", Buffers::transfer_fixed, 0);
         tag(ab, "ArrayBuffer");
-        // SharedArrayBuffer
         let sab = r.shared_array_buffer_proto;
         let ctor = self.constructor("SharedArrayBuffer", Buffers::shared_array_buffer, sab, 1);
         species(ctor);
@@ -606,7 +578,6 @@ impl<'gc> Installer<'_, 'gc> {
         self.method(sab, "slice", Buffers::shared_slice, 2);
         self.method(sab, "grow", Buffers::grow, 1);
         tag(sab, "SharedArrayBuffer");
-        // DataView
         let dv = r.data_view_proto;
         self.constructor("DataView", Buffers::data_view, dv, 1);
         self.getter(dv, "buffer", Buffers::view_buffer);
@@ -648,7 +619,6 @@ impl<'gc> Installer<'_, 'gc> {
             self.method(dv, &alloc::format!("set{}", kind.view_name()), s, 2);
         }
         tag(dv, "DataView");
-        // Atomics
         let atomics = self.plain();
         let methods: [(&str, j8framework::NativeFn, u32); 13] = [
             ("add", Buffers::add, 3),

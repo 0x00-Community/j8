@@ -1,4 +1,3 @@
-//! Operation semantics from the JS spec (shared by all execution layers): type conversion, operators, property access.
 use crate::ValueKind;
 use alloc::format;
 use alloc::string::String;
@@ -10,7 +9,6 @@ use num_traits::Zero;
 
 use crate::{Agent, Descriptor, Error, Key, Numeric, IterKind, IteratorState, JsObject, JsString, JsSymbol, ObjectData, ObjectKind, Property, PropertyKey, Slot, Value};
 
-/// Built-in error kinds (`Error` itself comes first).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ErrorKind {
     Error,
@@ -23,7 +21,6 @@ pub enum ErrorKind {
     Aggregate,
 }
 
-/// The preference for ToPrimitive.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Hint {
     Default,
@@ -31,7 +28,6 @@ pub enum Hint {
     String,
 }
 
-/// Binary operations (the result is a value).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum BinaryOp {
     Add,
@@ -48,7 +44,6 @@ pub enum BinaryOp {
     UShr,
 }
 
-/// Comparisons (the result is a boolean).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum CompareOp {
     Eq,
@@ -61,7 +56,6 @@ pub enum CompareOp {
     Ge,
 }
 
-/// Unary operations.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum UnaryOp {
     Neg,
@@ -72,7 +66,6 @@ pub enum UnaryOp {
     Void,
 }
 
-/// Spec semantics of binary operations and comparisons on two numbers.
 pub trait Numbers {
     type Output;
     fn numbers(self, a: f64, b: f64) -> Self::Output;
@@ -81,9 +74,6 @@ pub trait Numbers {
 impl Numbers for BinaryOp {
     type Output = f64;
 
-    /// The result when both sides are already numbers (the fast path of each execution layer, and the last step of
-    /// [`Agent::binary`]). Always inlined: the interpreter's loop calls it for every arithmetic instruction, and a call
-    /// plus a jump table on `self` cost more than `+` itself; the rare slow parts stay out of line.
     #[expect(clippy::inline_always, reason = "measured: left to LLVM it stays a call with a jump table in the interpreter loop")]
     #[inline(always)]
     fn numbers(self, a: f64, b: f64) -> f64 {
@@ -107,7 +97,6 @@ impl Numbers for BinaryOp {
 impl Numbers for CompareOp {
     type Output = bool;
 
-    /// The result when both sides are numbers (`NaN` compares false with anything; `==` and `===` agree on numbers).
     #[inline]
     fn numbers(self, a: f64, b: f64) -> bool {
         match self {
@@ -138,7 +127,6 @@ impl ErrorKind {
     }
 }
 
-/// An iterator record: the iterator object and its `next` method.
 #[derive(Clone, Copy, Debug, crate::Collect)]
 #[collect(no_drop)]
 pub struct IterRecord<'gc> {
@@ -146,13 +134,10 @@ pub struct IterRecord<'gc> {
     pub next: Value<'gc>,
 }
 
-/// 2^32: the modulus of ToInt32 / ToUint32.
 const TWO_POW_32: f64 = 4_294_967_296.0;
 
-/// Upper bound of array indices (`length` is at most 2^32 − 1).
 const MAX_INDEX: f64 = 4_294_967_294.0;
 
-/// String ⇒ number (StringToNumber): leading / trailing whitespace, `Infinity`, `0x` / `0o` / `0b` prefixes, decimal.
 pub(crate) fn parse_number(s: &str) -> f64 {
     let t = s.trim_matches(|c: char| (c.is_whitespace() && c != '\u{85}') || c == '\u{feff}');
     match t {
@@ -179,13 +164,10 @@ pub(crate) fn parse_number(s: &str) -> f64 {
     }
 }
 
-/// Number ⇒ the remainder of a 32-bit integer modulo 2^32 (shared by ToInt32 / ToUint32).
-/// 2^53 − 1
 pub const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
 
 #[inline]
 fn modulo_u32(x: f64) -> u32 {
-    // Fast path: already an integer in the i32 / u32 range (the operand of most bitwise operations); truncate directly
     #[expect(clippy::cast_possible_truncation, reason = "the comparison below confirms nothing was truncated")]
     let i = x as i32;
     if f64::from(i) == x {
@@ -207,20 +189,16 @@ fn modulo_u32_slow(x: f64) -> u32 {
     }
     let m = libm::trunc(x) % TWO_POW_32;
     let m = if m < 0.0 { m + TWO_POW_32 } else { m };
-    // m is an integer in [0, 2^32)
     #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "m is already reduced to [0, 2^32)")]
     let u = m as u32;
     u
 }
 
-/// Number::toString(x): safe integers are written in decimal straight into a stack buffer (short, so it becomes a
-/// [`SmallStr`](crate::SmallStr) without allocating); everything else goes to ryu-js.
 pub fn number_text(x: f64) -> crate::SmallStr {
     #[expect(clippy::cast_possible_truncation, reason = "the comparison below confirms it is a safe integer")]
     let i = x as i64;
     #[expect(clippy::cast_precision_loss, reason = "exact within the safe integer range")]
     if x.abs() <= MAX_SAFE_INTEGER && i as f64 == x {
-        // Longest is "-9007199254740991"
         let mut buf = [0u8; 20];
         let mut at = buf.len();
         let mut n = i.unsigned_abs();
@@ -242,14 +220,11 @@ pub fn number_text(x: f64) -> crate::SmallStr {
     crate::SmallStr::from(ryu_js::Buffer::new().format(x))
 }
 
-/// ToInt32
 #[inline]
 fn to_int32(x: f64) -> i32 {
     modulo_u32(x).cast_signed()
 }
 
-/// `%`: when both sides are safe integers use integer remainder (a zero result takes the dividend's sign), otherwise
-/// use floating-point `fmod`.
 #[inline]
 fn remainder(a: f64, b: f64) -> f64 {
     if a.abs() <= MAX_SAFE_INTEGER && b.abs() <= MAX_SAFE_INTEGER && b != 0.0 {
@@ -265,42 +240,33 @@ fn remainder(a: f64, b: f64) -> f64 {
     fmod(a, b)
 }
 
-/// `%` outside the safe integers: floating-point `fmod`.
 #[cold]
 #[inline(never)]
 fn fmod(a: f64, b: f64) -> f64 {
     a % b
 }
 
-/// `**`: where JS differs from C `pow` is that `±1 ** ±∞` and `x ** NaN` are both NaN.
 #[inline(never)]
 fn pow(a: f64, b: f64) -> f64 {
     if b.is_nan() || ((a == 1.0 || a == -1.0) && b.is_infinite()) { f64::NAN } else { libm::pow(a, b) }
 }
 
-/// Canonical index: a non-negative integer less than 2^32 − 1.
 fn index_of_number(x: f64) -> Option<u32> {
-    // Conversion to u32 saturates (negative and NaN give 0, too large gives u32::MAX); equal after converting back
-    // means an integer; -0 counts as 0
     #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "converted back and checked for equality")]
     let n = x as u32;
     (f64::from(n) == x && x <= MAX_INDEX).then_some(n)
 }
 
-/// The string form of a canonical index (`"0"`, `"12"`, no leading zeros).
 pub(crate) fn index_of_str(s: &str) -> Option<u32> {
     let canonical = s == "0" || (!s.starts_with('0') && !s.is_empty() && s.bytes().all(|c| c.is_ascii_digit()));
     canonical.then(|| s.parse().ok()).flatten().filter(|&i| f64::from(i) <= MAX_INDEX)
 }
 
 impl<'gc> Agent<'gc, '_> {
-    /// Put a string on the heap.
-    /// Borrow the platform's thread pool for parallel work (only for plain data that doesn't touch the GC heap)
     pub fn par(&self) -> crate::Par<'_> {
         crate::Par(self.platform)
     }
 
-    /// A string of one UTF-16 code unit (ASCII uses the prebuilt ones)
     pub fn unit_string(&self, u: u16) -> JsString<'gc> {
         match self.realm.chars.get(usize::from(u)) {
             Some(&s) => s,
@@ -312,7 +278,6 @@ impl<'gc> Agent<'gc, '_> {
         self.mc.alloc(crate::JsStr::from(s))
     }
 
-    /// `piece`, a part of string `of`'s text, as a string: a long one shares `of`'s copy (V8's sliced strings)
     pub fn piece(&self, of: JsString<'gc>, piece: &str) -> JsString<'gc> {
         if core::ptr::eq(piece, of.text().as_str()) {
             return of;
@@ -323,22 +288,18 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    /// An empty object with `Object.prototype` as its prototype.
     pub fn object(&self) -> JsObject<'gc> {
         ObjectData { proto: Some(self.realm.object_proto), ..ObjectData::default() }.alloc(self.mc)
     }
 
-    /// Same as [`object`](Self::object), reserving slots for `capacity` properties (literals)
     pub fn object_with(&self, capacity: usize) -> JsObject<'gc> {
         ObjectData::ordinary(self.mc, Some(self.realm.object_proto), capacity)
     }
 
-    /// An array with `Array.prototype` as its prototype.
     pub fn array(&self, items: Vec<Value<'gc>>) -> JsObject<'gc> {
         ObjectData { kind: ObjectKind::Array, elements: items, proto: Some(self.realm.array_proto), ..ObjectData::default() }.alloc(self.mc)
     }
 
-    /// An Error object (prototype chosen by kind, with an own `message`).
     pub fn error(&self, kind: ErrorKind, message: &str) -> JsObject<'gc> {
         let e = ObjectData { kind: ObjectKind::Error, proto: Some(self.realm.error_proto(kind)), ..ObjectData::default() }.alloc(self.mc);
         let m = self.string(message);
@@ -346,12 +307,10 @@ impl<'gc> Agent<'gc, '_> {
         e
     }
 
-    /// Throw a built-in error.
     pub fn throw(&self, kind: ErrorKind, message: &str) -> Error {
         Error::Exception(self.global(self.error(kind, message).into()))
     }
 
-    /// Throw an arbitrary value.
     pub fn throw_value(&self, v: Value<'gc>) -> Error {
         Error::Exception(self.global(v))
     }
@@ -366,14 +325,12 @@ impl<'gc> Agent<'gc, '_> {
             ValueKind::Undefined | ValueKind::Null | ValueKind::Uninit => false,
             ValueKind::Bool(b) => b,
             ValueKind::Number(x) => !(x == 0.0 || x.is_nan()),
-            // Judge by byte count, without flattening the rope
             ValueKind::String(s) => s.text().byte_len() != 0,
             ValueKind::BigInt(b) => !b.0.is_zero(),
             ValueKind::Symbol(_) | ValueKind::Object(_) => true,
         }
     }
 
-    /// ToPrimitive: for objects, try `valueOf` / `toString` in preference order and use the first primitive result.
     pub fn to_primitive(&mut self, v: Value<'gc>, hint: Hint) -> Result<Value<'gc>, Error> {
         if v.as_object().is_none() {
             return Ok(v);
@@ -404,7 +361,6 @@ impl<'gc> Agent<'gc, '_> {
         Err(self.throw(ErrorKind::Type, "Cannot convert object to primitive value"))
     }
 
-    /// ToNumber.
     pub fn to_number(&mut self, v: Value<'gc>) -> Result<f64, Error> {
         Ok(match v.kind() {
             ValueKind::Undefined | ValueKind::Uninit => f64::NAN,
@@ -429,7 +385,6 @@ impl<'gc> Agent<'gc, '_> {
         Ok(modulo_u32(self.to_number(v)?))
     }
 
-    /// ToString.
     pub fn to_string(&mut self, v: Value<'gc>) -> Result<JsString<'gc>, Error> {
         Ok(match v.kind() {
             ValueKind::String(s) => s,
@@ -447,7 +402,6 @@ impl<'gc> Agent<'gc, '_> {
         })
     }
 
-    /// A Symbol in `String(sym)` / error messages: `Symbol(description)`.
     pub fn symbol_descriptive(&self, s: JsSymbol<'gc>) -> JsString<'gc> {
         self.string(&format!("Symbol({})", s.description.as_deref().unwrap_or("")))
     }
@@ -469,8 +423,6 @@ impl<'gc> Agent<'gc, '_> {
         if let (ValueKind::Number(a), ValueKind::Number(b)) = (lhs.kind(), rhs.kind()) {
             return Ok(op.numbers(a, b).into());
         }
-        // Addition: ToPrimitive both sides first to see whether either is a string; other operations finish ToNumeric
-        // on the whole left side before the right (the evaluation order is observable)
         let (l, r) = if op == BinaryOp::Add {
             let (l, r) = (self.to_primitive(lhs, Hint::Default)?, self.to_primitive(rhs, Hint::Default)?);
             if matches!(l.kind(), ValueKind::String(_)) || matches!(r.kind(), ValueKind::String(_)) {
@@ -491,7 +443,6 @@ impl<'gc> Agent<'gc, '_> {
         Ok(op.numbers(a, b).into())
     }
 
-    /// Loose equality (`==`).
     pub fn loose_equals(&mut self, a: Value<'gc>, b: Value<'gc>) -> Result<bool, Error> {
         Ok(match (a.kind(), b.kind()) {
             _ if a.is_nullish() && b.is_nullish() => true,
@@ -530,7 +481,6 @@ impl<'gc> Agent<'gc, '_> {
             CompareOp::Lt | CompareOp::Gt | CompareOp::Le | CompareOp::Ge => {
                 let (l, r) = (self.to_primitive(lhs, Hint::Number)?, self.to_primitive(rhs, Hint::Number)?);
                 if let (ValueKind::String(a), ValueKind::String(b)) = (l.kind(), r.kind()) {
-                    // Compare by UTF-16 code unit
                     let ord = a.encode_utf16().cmp(b.encode_utf16());
                     return Ok(match op {
                         CompareOp::Lt => ord.is_lt(),
@@ -567,8 +517,6 @@ impl<'gc> Agent<'gc, '_> {
         })
     }
 
-    /// ToObject: objects as is, primitives wrapped in wrapper objects (whose prototype is that kind's prototype);
-    /// `undefined` / `null` throw a TypeError.
     pub fn to_object(&self, v: Value<'gc>) -> Result<JsObject<'gc>, Error> {
         match (v.kind(), self.proto_of(v)) {
             (ValueKind::Object(o), _) => Ok(o),
@@ -577,7 +525,6 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    /// The prototype used when reading a property of a primitive.
     fn proto_of(&self, v: Value<'gc>) -> Option<JsObject<'gc>> {
         match v.kind() {
             ValueKind::String(_) => Some(self.realm.string_proto),
@@ -595,13 +542,11 @@ impl<'gc> Agent<'gc, '_> {
         self.throw(ErrorKind::Type, &format!("Cannot {verb} properties of {what} (reading '{key}')"))
     }
 
-    /// [[Get]]: read `key` on `holder` (along the prototype chain); a getter's `this` is `receiver`.
     pub fn get_key(&mut self, holder: Value<'gc>, key: Key<'_, 'gc>, receiver: Value<'gc>) -> Result<Value<'gc>, Error> {
         if holder.is_nullish() {
             let k = self.key_text(key);
             return Err(self.nullish_error(holder, "read", &k));
         }
-        // String indices and `length` don't need a wrapper
         if let (ValueKind::String(s), Key::Str(k)) = (holder.kind(), key) {
             if k == "length" {
                 return Ok(f64::from(u32::try_from(s.utf16_len()).unwrap_or(u32::MAX)).into());
@@ -618,12 +563,9 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    /// [[Get]] of an object: search along the prototype chain (handing off to a Proxy if one is met).
     pub fn object_get(&mut self, o: JsObject<'gc>, key: Key<'_, 'gc>, receiver: Value<'gc>) -> Result<Value<'gc>, Error> {
         let mut cur = o;
         loop {
-            // Fast path: an ordinary object checks its own properties in one borrow, and goes straight to the prototype
-            // if not found
             let fast = cur.has_ordinary_properties().then(|| (cur.own_slot(self.mc, key), cur.proto()));
             match fast {
                 Some((Some(p), _)) => {
@@ -667,28 +609,22 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    /// Read `key` on `holder` (along the prototype chain); a getter's `this` is `receiver`.
     pub fn get(&mut self, holder: Value<'gc>, key: &str, receiver: Value<'gc>) -> Result<Value<'gc>, Error> {
         self.get_key(holder, Key::Str(key), receiver)
     }
 
-    /// `target.key`.
     pub fn get_named(&mut self, target: Value<'gc>, key: &str) -> Result<Value<'gc>, Error> {
         self.get_key(target, Key::Str(key), target)
     }
 
-    /// Property key: ToString (the number fast path for array indices is at the call site).
     pub fn property_key(&mut self, key: Value<'gc>) -> Result<JsString<'gc>, Error> {
         self.to_string(key)
     }
 
-    /// `holder[sym]`; a getter's `this` is `receiver`.
     pub fn get_symbol(&mut self, holder: Value<'gc>, key: JsSymbol<'gc>, receiver: Value<'gc>) -> Result<Value<'gc>, Error> {
         self.get_key(holder, Key::Sym(key), receiver)
     }
 
-    /// [[Set]] (OrdinarySet): call a setter found along the prototype chain, don't write a non-writable data property,
-    /// otherwise update / create on `receiver`. Returns whether the write succeeded.
     pub fn set_key(&mut self, target: Value<'gc>, key: Key<'_, 'gc>, value: Value<'gc>, receiver: Value<'gc>) -> Result<bool, Error> {
         if target.is_nullish() {
             let k = self.key_text(key);
@@ -700,13 +636,9 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    /// [[Set]] of an object (OrdinarySet): call a setter found along the prototype chain, don't write a non-writable
-    /// data property, otherwise update / create on `receiver`; hand off to a Proxy if one is met.
     pub fn object_set(&mut self, o: JsObject<'gc>, key: Key<'_, 'gc>, value: Value<'gc>, receiver: Value<'gc>) -> Result<bool, Error> {
         let mut cur = o;
         let found = loop {
-            // Fast path: an ordinary object checks its own properties in one borrow, and goes straight to the prototype
-            // if not found
             let fast = cur.has_ordinary_properties().then(|| (cur.own_slot(self.mc, key), cur.proto()));
             match fast {
                 Some((Some(p), _)) => break Some(p),
@@ -760,12 +692,10 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    /// `target[sym] = value`; returns whether the write succeeded.
     pub fn try_set_symbol(&mut self, target: Value<'gc>, key: JsSymbol<'gc>, value: Value<'gc>) -> Result<bool, Error> {
         self.set_key(target, Key::Sym(key), value, target)
     }
 
-    /// `target[sym] = value`: throws a TypeError if the write fails (Set(…, true) of built-in functions in the spec).
     pub fn set_symbol(&mut self, target: Value<'gc>, key: JsSymbol<'gc>, value: Value<'gc>) -> Result<(), Error> {
         if self.try_set_symbol(target, key, value)? {
             Ok(())
@@ -775,8 +705,6 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    /// The TypeError for a failed write: adding a new property to a non-extensible object, or writing a read-only
-    /// property.
     fn set_failure(&self, target: Value<'gc>, key: &str) -> Error {
         if let Some(o) = target.as_object() {
             let d = o.borrow();
@@ -791,7 +719,6 @@ impl<'gc> Agent<'gc, '_> {
         self.throw(ErrorKind::Type, &format!("Cannot assign to read only property '{key}'"))
     }
 
-    /// `key in target`, with an arbitrary value as the key.
     pub fn has_keyed(&mut self, target: Value<'gc>, key: Value<'gc>) -> Result<bool, Error> {
         if let Some(k) = Self::private_key(key) {
             return self.private_has(target, k);
@@ -810,7 +737,6 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    /// [[HasProperty]]: present as an own property or on the prototype chain.
     pub fn has_key(&mut self, o: JsObject<'gc>, key: Key<'_, 'gc>) -> Result<bool, Error> {
         let mut cur = o;
         loop {
@@ -834,7 +760,6 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    /// `delete target[key]`, with an arbitrary value as the key.
     pub fn delete_keyed(&mut self, target: Value<'gc>, key: Value<'gc>) -> Result<bool, Error> {
         if target.is_nullish() {
             let k = self.to_string(key)?;
@@ -846,7 +771,6 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    /// `delete target.key`: primitives are wrapped in an object first (string indices and `length` can't be deleted).
     pub fn delete_key(&mut self, target: Value<'gc>, key: Key<'_, 'gc>) -> Result<bool, Error> {
         if target.is_nullish() {
             let k = self.key_text(key);
@@ -856,7 +780,6 @@ impl<'gc> Agent<'gc, '_> {
         self.delete_property(o, key)
     }
 
-    /// Define a property, with an arbitrary value as the key (computed key).
     pub fn define_keyed(&mut self, o: JsObject<'gc>, key: Value<'gc>, prop: Property<'gc>) -> Result<(), Error> {
         if let Some(k) = Self::private_key(key) {
             return self.private_define(o.into(), k, prop);
@@ -867,7 +790,6 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    /// Define half of an accessor, with an arbitrary value as the key.
     pub fn define_accessor_keyed(&mut self, o: JsObject<'gc>, key: Value<'gc>, f: JsObject<'gc>, setter: bool, enumerable: bool) -> Result<(), Error> {
         match self.to_property_key(key)? {
             PropertyKey::Symbol(k) => self.define_accessor_key(o, Key::Sym(k), f, setter, enumerable),
@@ -876,7 +798,6 @@ impl<'gc> Agent<'gc, '_> {
         Ok(())
     }
 
-    /// `target[key]`.
     pub fn get_keyed(&mut self, target: Value<'gc>, key: Value<'gc>) -> Result<Value<'gc>, Error> {
         if let ValueKind::Symbol(k) = key.kind() {
             if k.private {
@@ -891,14 +812,11 @@ impl<'gc> Agent<'gc, '_> {
         {
             return Ok(v);
         }
-        // Numeric keys of typed arrays: take the element directly, without looking at the prototype chain (key -0
-        // converts to the string "0")
         if let (ValueKind::Object(o), ValueKind::Number(x)) = (target.kind(), key.kind())
             && matches!(o.borrow().kind, ObjectKind::TypedArray(..))
         {
             return Ok(self.typed_get(o, x + 0.0).unwrap_or_default());
         }
-        // String indices: UTF-16 code units, O(1)
         if let (ValueKind::String(s), ValueKind::Number(x)) = (target.kind(), key.kind())
             && let Some(u) = index_of_number(x).and_then(|i| s.code_unit(i as usize))
         {
@@ -914,7 +832,6 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    /// `target.key = value`: returns whether the write succeeded.
     pub fn try_set_named(&mut self, target: Value<'gc>, key: &str, value: Value<'gc>) -> Result<bool, Error> {
         if let (ValueKind::Object(o), Some(i)) = (target.kind(), index_of_str(key))
             && o.borrow_mut(self.mc).write_index(i, value)
@@ -924,12 +841,10 @@ impl<'gc> Agent<'gc, '_> {
         self.set_key(target, Key::Str(key), value, target)
     }
 
-    /// `target.key = value`: throws a TypeError if the write fails (Set(…, true) of built-in functions in the spec).
     pub fn set_named(&mut self, target: Value<'gc>, key: &str, value: Value<'gc>) -> Result<(), Error> {
         if self.try_set_named(target, key, value)? { Ok(()) } else { Err(self.set_failure(target, key)) }
     }
 
-    /// `target[key] = value`; returns whether the write succeeded.
     pub fn try_set_keyed(&mut self, target: Value<'gc>, key: Value<'gc>, value: Value<'gc>) -> Result<bool, Error> {
         if let ValueKind::Symbol(k) = key.kind() {
             return self.try_set_symbol(target, k, value);
@@ -940,8 +855,6 @@ impl<'gc> Agent<'gc, '_> {
         {
             return Ok(true);
         }
-        // Numeric keys of typed arrays: the receiver is the array itself; write the element (out of bounds also counts
-        // as success)
         if let (ValueKind::Object(o), ValueKind::Number(x)) = (target.kind(), key.kind())
             && matches!(o.borrow().kind, ObjectKind::TypedArray(..))
         {
@@ -958,7 +871,6 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    /// `target[key] = value`: throws a TypeError if the write fails.
     pub fn set_keyed(&mut self, target: Value<'gc>, key: Value<'gc>, value: Value<'gc>) -> Result<(), Error> {
         if self.try_set_keyed(target, key, value)? {
             Ok(())
@@ -971,7 +883,6 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    /// Assignment in JS code: a failed write throws a TypeError in strict mode and is silently dropped in sloppy mode.
     pub fn put_named(&mut self, target: Value<'gc>, key: &str, value: Value<'gc>, strict: bool) -> Result<(), Error> {
         if strict { self.set_named(target, key, value) } else { self.try_set_named(target, key, value).map(drop) }
     }
@@ -983,8 +894,6 @@ impl<'gc> Agent<'gc, '_> {
         if strict { self.set_keyed(target, key, value) } else { self.try_set_keyed(target, key, value).map(drop) }
     }
 
-    /// Define an own property (object literals, classes, CreateDataPropertyOrThrow): throws a TypeError if the
-    /// definition fails.
     pub fn define(&mut self, o: JsObject<'gc>, key: &str, prop: Property<'gc>) -> Result<(), Error> {
         self.define_key(o, Key::Str(key), prop)
     }
@@ -998,7 +907,6 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    /// Define half of an accessor (the other half is kept if present).
     pub fn define_accessor(&mut self, o: JsObject<'gc>, key: &str, f: JsObject<'gc>, setter: bool, enumerable: bool) {
         self.define_accessor_key(o, Key::Str(key), f, setter, enumerable);
     }
@@ -1012,7 +920,6 @@ impl<'gc> Agent<'gc, '_> {
         o.borrow_mut(self.mc).store(key, Property { slot: Slot::Accessor { get, set }, enumerable, writable: true, configurable: true });
     }
 
-    /// `key in target` (including the prototype chain and array indices).
     pub fn has_property(&mut self, target: Value<'gc>, key: &str) -> Result<bool, Error> {
         let Some(o) = target.as_object() else {
             let what = self.to_string(target)?;
@@ -1021,12 +928,10 @@ impl<'gc> Agent<'gc, '_> {
         self.has_key(o, Key::Str(key))
     }
 
-    /// `delete target.key`: non-configurable ones can't be deleted.
     pub fn delete(&mut self, target: Value<'gc>, key: &str) -> Result<bool, Error> {
         self.delete_key(target, Key::Str(key))
     }
 
-    /// CanBeHeldWeakly: an object, or a Symbol not registered with `Symbol.for`.
     pub fn can_be_held_weakly(&self, v: Value<'gc>) -> bool {
         match v.kind() {
             ValueKind::Object(_) => true,
@@ -1035,7 +940,6 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    /// A value in error messages: calls no user code (ToString is observable, so error reporting can't use it).
     pub fn describe(&self, v: Value<'gc>) -> String {
         match v.kind() {
             ValueKind::Undefined | ValueKind::Uninit => String::from("undefined"),
@@ -1061,7 +965,6 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    /// `v instanceof f`: check `f[Symbol.hasInstance]` first, then OrdinaryHasInstance.
     pub fn instance_of(&mut self, v: Value<'gc>, f: Value<'gc>) -> Result<bool, Error> {
         if f.as_object().is_none() {
             let what = self.describe(f);
@@ -1078,8 +981,6 @@ impl<'gc> Agent<'gc, '_> {
         self.ordinary_has_instance(f, v)
     }
 
-    /// OrdinaryHasInstance: a bound function is replaced by its target, then search `v`'s prototype chain for
-    /// `f.prototype`.
     pub fn ordinary_has_instance(&mut self, f: Value<'gc>, v: Value<'gc>) -> Result<bool, Error> {
         if !self.is_callable(f) {
             return Ok(false);
@@ -1104,11 +1005,8 @@ impl<'gc> Agent<'gc, '_> {
         Ok(false)
     }
 
-    /// ToIntegerOrInfinity.
     pub fn to_integer_or_infinity(&mut self, v: Value<'gc>) -> Result<f64, Error> {
         let x = self.to_number(v)?;
-        /// Numbers with magnitude below this convert to i64 without overflow (converting back drops the fraction; -0
-        /// also becomes +0)
         const I64_SAFE: f64 = 9_223_372_036_854_775_808.0;
         #[expect(clippy::cast_possible_truncation, clippy::cast_precision_loss, reason = "magnitude below 2^63; dropping the fraction is intended")]
         Ok(if x.is_nan() {
@@ -1120,15 +1018,12 @@ impl<'gc> Agent<'gc, '_> {
         })
     }
 
-    /// ToLength: clamp to `[0, 2^53 − 1]`.
     pub fn to_length(&mut self, v: Value<'gc>) -> Result<f64, Error> {
         let n = self.to_integer_or_infinity(v)?;
         Ok(n.clamp(0.0, MAX_SAFE_INTEGER))
     }
 
-    /// LengthOfArrayLike.
     pub fn length_of_array_like(&mut self, o: Value<'gc>) -> Result<f64, Error> {
-        // A real array's `length` is the stored length (it can't be an accessor)
         if let Some(x) = o.as_object()
             && let Some(n) = x.borrow().array_length()
         {
@@ -1138,12 +1033,10 @@ impl<'gc> Agent<'gc, '_> {
         self.to_length(len)
     }
 
-    /// Number index ⇒ property key text.
     pub fn index_key(i: f64) -> String {
         String::from(&*number_text(i))
     }
 
-    /// `o[i]` (fast path for the array dense part).
     pub fn get_index(&mut self, o: Value<'gc>, i: f64) -> Result<Value<'gc>, Error> {
         if let Some(x) = o.as_object()
             && matches!(x.borrow().kind, ObjectKind::TypedArray(..))
@@ -1160,7 +1053,6 @@ impl<'gc> Agent<'gc, '_> {
         self.get_named(o, &Self::index_key(i))
     }
 
-    /// `o[i] = v`; throws a TypeError if the write fails (Set(O, P, V, true)).
     pub fn set_index(&mut self, o: Value<'gc>, i: f64, v: Value<'gc>) -> Result<(), Error> {
         if let (ValueKind::Object(x), Some(n)) = (o.kind(), index_of_number(i))
             && x.borrow_mut(self.mc).write_index(n, v)
@@ -1170,7 +1062,6 @@ impl<'gc> Agent<'gc, '_> {
         self.set_named(o, &Self::index_key(i), v)
     }
 
-    /// HasProperty(O, i).
     pub fn has_index(&mut self, o: JsObject<'gc>, i: f64) -> Result<bool, Error> {
         if o.is_array()
             && let Some(n) = index_of_number(i)
@@ -1181,8 +1072,6 @@ impl<'gc> Agent<'gc, '_> {
         self.has_key(o, Key::Str(&Self::index_key(i)))
     }
 
-    /// If HasProperty(O, i) is true, Get(O, i), otherwise `None` (array methods accessing element by element). The
-    /// dense part of a real array is read directly in one borrow.
     pub fn present_index(&mut self, o: JsObject<'gc>, i: f64) -> Result<Option<Value<'gc>>, Error> {
         if o.is_array()
             && let Some(n) = index_of_number(i)
@@ -1193,7 +1082,6 @@ impl<'gc> Agent<'gc, '_> {
         if self.has_index(o, i)? { self.get_index(o.into(), i).map(Some) } else { Ok(None) }
     }
 
-    /// DeletePropertyOrThrow(O, i).
     pub fn delete_index(&mut self, o: JsObject<'gc>, i: f64) -> Result<(), Error> {
         let k = Self::index_key(i);
         if self.delete_property(o, Key::Str(&k))? {
@@ -1203,13 +1091,8 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    /// CreateDataPropertyOrThrow(O, i, v).
     pub fn create_index(&mut self, o: JsObject<'gc>, i: f64, v: Value<'gc>) -> Result<(), Error> {
-        // Fast path: update a value in a real array's dense part, or append right at the dense end (extensible, length
-        // writable, no sparse elements after it)
         if let Some(n) = index_of_number(i) {
-            // The sparse part either ends before n or has no elements at all (never had a numeric key: just an extended
-            // length, as in `new Array(len)`)
             let append = !o.non_extensible() && !o.length_readonly() && (o.sparse_length() <= n || !o.digit_keys());
             if o.is_array() {
                 let (at, items) = (n as usize, o.elements());
@@ -1226,7 +1109,6 @@ impl<'gc> Agent<'gc, '_> {
         self.create_data_property_or_throw(o, Key::Str(&Self::index_key(i)), v)
     }
 
-    /// IsArray.
     pub fn is_array(&mut self, v: Value<'gc>) -> Result<bool, Error> {
         let Some(o) = v.as_object() else { return Ok(false) };
         if let Some(parts) = self.proxy_parts(o) {
@@ -1236,7 +1118,6 @@ impl<'gc> Agent<'gc, '_> {
         Ok(o.is_array())
     }
 
-    /// CreateListFromArrayLike.
     pub fn list_from_array_like(&mut self, v: Value<'gc>) -> Result<Vec<Value<'gc>>, Error> {
         if v.as_object().is_none() {
             return Err(self.throw(ErrorKind::Type, "CreateListFromArrayLike called on non-object"));
@@ -1251,14 +1132,12 @@ impl<'gc> Agent<'gc, '_> {
         Ok(out)
     }
 
-    /// GetIterator: call `v[Symbol.iterator]()` and take its `next`.
     pub fn get_iterator(&mut self, v: Value<'gc>) -> Result<IterRecord<'gc>, Error> {
         let iterator = self.iterator_object(v)?;
         let next = self.get_named(iterator, "next")?;
         Ok(IterRecord { iterator, next })
     }
 
-    /// `v[Symbol.iterator]()`, which must be an object (the `GetIterator` bytecode: `next` is not read)
     pub fn iterator_object(&mut self, v: Value<'gc>) -> Result<Value<'gc>, Error> {
         let method = if v.is_nullish() { Value::Undefined } else { self.get_symbol(v, self.realm.symbols.iterator, v)? };
         if !self.is_callable(method) {
@@ -1275,14 +1154,11 @@ impl<'gc> Agent<'gc, '_> {
         Ok(iterator)
     }
 
-    /// Advance an array iterator one step (rereads `length` each time, so changes to the array during iteration are
-    /// visible): returns `None` when done and marks it done.
     pub fn array_iter_step(&mut self, o: JsObject<'gc>) -> Result<Option<Value<'gc>>, Error> {
         let ObjectKind::Iterator(IteratorState::Array { target, index, kind }) = o.borrow().kind else {
             return Err(self.throw(ErrorKind::Type, "next method called on an incompatible receiver"));
         };
         let Some(target) = target else { return Ok(None) };
-        // Take a dense array's length directly (same as reading `length`, with no observable steps)
         let len = match target.kind() {
             ValueKind::Object(t) => (t.is_array() && t.sparse_length() == 0).then(|| t.elements().len()),
             _ => None,
@@ -1296,7 +1172,6 @@ impl<'gc> Agent<'gc, '_> {
             }
         };
         let i = f64::from(u32::try_from(index).unwrap_or(u32::MAX));
-        // A NaN len also counts as done
         let finished = i.partial_cmp(&len) != Some(core::cmp::Ordering::Less);
         if let ObjectKind::Iterator(IteratorState::Array { target, index, .. }) = &mut o.borrow_mut(self.mc).kind {
             if finished {
@@ -1318,7 +1193,6 @@ impl<'gc> Agent<'gc, '_> {
         }))
     }
 
-    /// Advance a string iterator one step (one code point): returns `None` when done.
     pub fn string_iter_step(&mut self, o: JsObject<'gc>) -> Result<Option<Value<'gc>>, Error> {
         let ObjectKind::Iterator(IteratorState::String { s, pos }) = o.borrow().kind else {
             return Err(self.throw(ErrorKind::Type, "next method called on an incompatible receiver"));
@@ -1330,10 +1204,7 @@ impl<'gc> Agent<'gc, '_> {
         Ok(Some(if c.is_ascii() { self.unit_string(u16::from(c as u8)) } else { self.string(c.encode_utf8(&mut [0; 4])) }.into()))
     }
 
-    /// Advance one step: returns `None` when done.
     pub fn iterator_step(&mut self, it: IterRecord<'gc>) -> Result<Option<Value<'gc>>, Error> {
-        // `next` is the built-in array / string iterator `next`: the result object it builds can't be observed
-        // otherwise, so step directly
         if let (ValueKind::Object(n), ValueKind::Object(o)) = (it.next.kind(), it.iterator.kind()) {
             let [array, string] = *self.realm.builtin_nexts.get();
             let (is_array, is_string) = match &o.borrow().kind {
@@ -1355,7 +1226,6 @@ impl<'gc> Agent<'gc, '_> {
         if self.to_boolean(done) { Ok(None) } else { Ok(Some(self.get_named(r, "value")?)) }
     }
 
-    /// Close an iterator early: call `return` if there is one.
     pub fn iterator_close(&mut self, iterator: Value<'gc>) -> Result<(), Error> {
         let ret = self.get_named(iterator, "return")?;
         if ret.is_nullish() {
@@ -1368,7 +1238,6 @@ impl<'gc> Agent<'gc, '_> {
         Ok(())
     }
 
-    /// An iterator result object `{ value, done }`.
     pub fn iter_result(&self, value: Value<'gc>, done: bool) -> JsObject<'gc> {
         let o = self.object();
         let d = o.borrow_mut(self.mc);
@@ -1378,7 +1247,6 @@ impl<'gc> Agent<'gc, '_> {
         o
     }
 
-    /// A built-in iterator object (array / string).
     pub fn builtin_iterator(&self, state: IteratorState<'gc>) -> JsObject<'gc> {
         let proto = match state {
             IteratorState::Array { .. } => self.realm.array_iterator_proto,
@@ -1387,12 +1255,10 @@ impl<'gc> Agent<'gc, '_> {
         ObjectData { kind: ObjectKind::Iterator(state), proto: Some(proto), ..ObjectData::default() }.alloc(self.mc)
     }
 
-    /// An array iterator (`values` / `keys` / `entries`).
     pub fn array_iterator(&self, target: Value<'gc>, kind: IterKind) -> JsObject<'gc> {
         self.builtin_iterator(IteratorState::Array { target: Some(target), index: 0, kind })
     }
 
-    /// Spread / rest elements: run the iterable to completion.
     pub fn to_list(&mut self, v: Value<'gc>) -> Result<Vec<Value<'gc>>, Error> {
         let it = self.get_iterator(v)?;
         let mut out = Vec::new();
@@ -1402,8 +1268,6 @@ impl<'gc> Agent<'gc, '_> {
         Ok(out)
     }
 
-    /// Object spread / rest (CopyDataProperties): define `src`'s own enumerable properties on `target`, skipping keys
-    /// in `exclude`.
     pub fn copy_data(&mut self, target: JsObject<'gc>, src: Value<'gc>, exclude: &[JsString<'gc>]) -> Result<(), Error> {
         if src.is_nullish() {
             return Ok(());
@@ -1424,8 +1288,6 @@ impl<'gc> Agent<'gc, '_> {
         Ok(())
     }
 
-    /// The keys `for-in` walks: own first, then along the prototype chain; enumerable string keys, deduplicated (those
-    /// shadowed by non-enumerable properties don't appear either).
     pub fn for_in_keys(&mut self, v: Value<'gc>) -> Result<Vec<Value<'gc>>, Error> {
         let mut seen: Vec<JsString<'gc>> = Vec::new();
         let mut out = Vec::new();
@@ -1449,8 +1311,6 @@ impl<'gc> Agent<'gc, '_> {
         Ok(out)
     }
 
-    /// The `this` a construct call creates: prototype taken from `new_target.prototype`, or `Object.prototype` if that
-    /// isn't an object.
     pub fn create_this(&mut self, new_target: Value<'gc>) -> Result<JsObject<'gc>, Error> {
         let proto = match (self.get_named(new_target, "prototype")?).kind() {
             ValueKind::Object(p) => p,

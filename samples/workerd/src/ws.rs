@@ -1,14 +1,3 @@
-//! The network side: one epoll reactor thread ([`ReactorThread`], mio) for every listening socket and connection of
-//! the process, and per runtime a `__j8_native.net` object ([`Net`]) that the prelude's server and WebSockets use.
-//!
-//! The reactor does all socket I/O, non-blocking: accepting, reading requests, parsing WebSocket frames, writing what
-//! is queued. It never runs JS. It reaches the event loops through single-consumer streams ([`Stream`]): each server's
-//! requests and each connection's messages. JS awaits them (`net.accept(server)`, `net.recv(id)`), and the reactor
-//! wakes the waiting future as it pushes. The other way, the loop threads send commands (answer a request, upgrade it,
-//! write a frame, release a connection) to the reactor's inbox and wake it.
-//!
-//! A connection's network side follows workerd's `api::WebSocket::Native`: a request waiting for its answer or its
-//! upgrade, then an accepted WebSocket with its close flags and an outgoing buffer the reactor flushes.
 use std::cell::UnsafeCell;
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -26,37 +15,29 @@ use j8::{Bytes, Class, Glue, IntoJs};
 use mio::net::{TcpListener, TcpStream};
 use mio::{Events, Interest, Token};
 
-/// Largest message accepted from a client (workerd's `SUGGESTED_MAX_MESSAGE_SIZE`)
 const MAX_MESSAGE: usize = 1 << 20;
-/// Appended to `Sec-WebSocket-Key` before hashing (RFC 6455 §1.3)
+
 const HANDSHAKE_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
-/// Close codes (RFC 6455 §7.4.1)
+
 const CLOSE_NO_STATUS: u16 = 1005;
 const CLOSE_TOO_BIG: u16 = 1009;
 const BASE64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-/// The token of the reactor's own waker
+
 const WAKE: Token = Token(usize::MAX);
-/// Bytes read from a socket at a time
+
 const READ_CHUNK: usize = 64 * 1024;
-/// Events taken from epoll at a time
+
 const EVENTS: usize = 1024;
 
-// ---- Handing items from the reactor to JS ----
-
-/// [`WakeSlot`] states
 const IDLE: u8 = 0;
 const REGISTERING: u8 = 1;
 const WAKING: u8 = 2;
 
-/// One consumer's waker, set and woken from different threads without locks (the usual atomic waker: whichever of
-/// registering and waking comes second finishes the other's work)
 struct WakeSlot {
     state: AtomicU8,
     waker: UnsafeCell<Option<Waker>>,
 }
 
-// SAFETY: the waker cell is touched only by the registrant in REGISTERING, or by the waker in WAKING, which the state
-// hands over with compare-and-swap
 unsafe impl Sync for WakeSlot {}
 
 impl Default for WakeSlot {
@@ -66,15 +47,11 @@ impl Default for WakeSlot {
 }
 
 impl WakeSlot {
-    /// Wake `w` on the next [`wake`](Self::wake) (or now, if one is under way)
     fn register(&self, w: &Waker) {
         match self.state.compare_exchange(IDLE, REGISTERING, Ordering::Acquire, Ordering::Acquire) {
             Ok(_) => {
-                // SAFETY: REGISTERING: only the registrant touches the cell
                 unsafe { *self.waker.get() = Some(w.clone()) };
                 if self.state.compare_exchange(REGISTERING, IDLE, Ordering::AcqRel, Ordering::Acquire).is_err() {
-                    // A wake came meanwhile and left the waker to us
-                    // SAFETY: still REGISTERING (with WAKING set): the waker did not touch the cell
                     let w = unsafe { (*self.waker.get()).take() };
                     self.state.store(IDLE, Ordering::Release);
                     if let Some(w) = w {
@@ -83,14 +60,12 @@ impl WakeSlot {
                 }
             }
             Err(WAKING) => w.wake_by_ref(),
-            // A second registrant at once: a stream has one consumer
             Err(_) => {}
         }
     }
 
     fn wake(&self) {
         if self.state.fetch_or(WAKING, Ordering::AcqRel) == IDLE {
-            // SAFETY: WAKING from IDLE: only the waker touches the cell
             let w = unsafe { (*self.waker.get()).take() };
             self.state.fetch_and(!WAKING, Ordering::Release);
             if let Some(w) = w {
@@ -100,7 +75,6 @@ impl WakeSlot {
     }
 }
 
-/// Items from the reactor to one consumer, in order; closed when no more will come
 struct Stream<T> {
     items: Fifo<T>,
     slot: WakeSlot,
@@ -125,7 +99,6 @@ impl<T> Stream<T> {
     }
 }
 
-/// The next item of a stream (`None` once it is closed and empty)
 struct Next<T>(Arc<Stream<T>>);
 
 impl<T> Future for Next<T> {
@@ -147,9 +120,6 @@ impl<T> Future for Next<T> {
     }
 }
 
-// ---- HTTP ----
-
-/// A request read off a new connection
 pub struct Incoming {
     id: u32,
     method: String,
@@ -158,18 +128,13 @@ pub struct Incoming {
     body: String,
 }
 
-/// What reading a request from the bytes so far gives
 enum Parsed {
-    /// Not all of it yet
     More,
-    /// Not HTTP
     Bad,
-    /// The request, and how many bytes it took
     Request(Incoming, usize),
 }
 
 impl Incoming {
-    /// The request line, the headers and a `Content-Length` body, if `buf` holds them all
     fn parse(id: u32, buf: &[u8]) -> Parsed {
         let Some(end) = buf.windows(4).position(|w| w == b"\r\n\r\n") else { return Parsed::More };
         let head = String::from_utf8_lossy(&buf[..end]);
@@ -196,18 +161,15 @@ impl Incoming {
         Parsed::Request(Self { id, method: method.to_owned(), path: path.to_owned(), headers, body }, total)
     }
 
-    /// The value of header `name`
     fn header(&self, name: &str) -> Option<&str> {
         self.headers.iter().find(|h| h[0].eq_ignore_ascii_case(name)).map(|h| h[1].as_str())
     }
 
-    /// `Sec-WebSocket-Key` when this is a WebSocket upgrade request
     fn websocket_key(&self) -> Option<String> {
         let upgrade = self.header("upgrade").is_some_and(|u| u.eq_ignore_ascii_case("websocket"));
         upgrade.then(|| self.header("sec-websocket-key")).flatten().map(str::to_owned)
     }
 
-    /// `Sec-WebSocket-Accept` for `key`: base64(SHA-1(key + GUID))
     fn accept_key(key: &str) -> String {
         let digest = sha1_smol::Sha1::from(format!("{key}{HANDSHAKE_GUID}")).digest().bytes();
         let mut out = String::with_capacity(28);
@@ -221,7 +183,6 @@ impl Incoming {
     }
 }
 
-/// Defines `fields` as data properties on a fresh object
 fn record<'gc>(a: &mut Agent<'gc, '_>, fields: Vec<(&str, Value<'gc>)>) -> JsObject<'gc> {
     let o = a.object();
     for (k, v) in fields {
@@ -231,7 +192,6 @@ fn record<'gc>(a: &mut Agent<'gc, '_>, fields: Vec<(&str, Value<'gc>)>) -> JsObj
 }
 
 impl<'gc> IntoJs<'gc> for Incoming {
-    /// `{ id, method, path, headers: [[name, value]…], body }`
     fn into_js(self, a: &mut Agent<'gc, '_>) -> Result<Value<'gc>, Error> {
         let fields = vec![
             ("id", self.id.into_js(a)?),
@@ -244,9 +204,6 @@ impl<'gc> IntoJs<'gc> for Incoming {
     }
 }
 
-// ---- WebSocket frames (RFC 6455 §5) ----
-
-/// A frame's opcode
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Opcode {
     Continuation,
@@ -286,7 +243,6 @@ impl From<Opcode> for u8 {
     }
 }
 
-/// One frame on the wire
 struct Frame {
     fin: bool,
     op: Opcode,
@@ -294,7 +250,6 @@ struct Frame {
 }
 
 impl Frame {
-    /// Reads a frame (client frames are masked; the mask is taken off); `UnexpectedEof` when `r` ends first
     fn read(r: &mut impl Read) -> io::Result<Self> {
         let mut head = [0u8; 2];
         r.read_exact(&mut head)?;
@@ -327,7 +282,6 @@ impl Frame {
         Ok(Self { fin, op, payload })
     }
 
-    /// The frame unmasked (server to client), appended to `out`
     fn encode(&self, out: &mut Vec<u8>) {
         out.push(u8::from(self.fin) << 7 | u8::from(self.op));
         match self.payload.len() {
@@ -349,7 +303,6 @@ impl Frame {
     }
 }
 
-/// A complete message received from the client
 pub enum Message {
     Text(String),
     Binary(Vec<u8>),
@@ -357,7 +310,6 @@ pub enum Message {
 }
 
 impl<'gc> IntoJs<'gc> for Message {
-    /// A string, a `Uint8Array`, or `{ close: code, reason }`
     fn into_js(self, a: &mut Agent<'gc, '_>) -> Result<Value<'gc>, Error> {
         match self {
             Self::Text(s) => s.into_js(a),
@@ -370,48 +322,33 @@ impl<'gc> IntoJs<'gc> for Message {
     }
 }
 
-// ---- What the reactor and the event loops share ----
-
-/// A server's side the event loops reach
 #[derive(Default)]
 struct ServerShared {
     requests: Arc<Stream<Incoming>>,
     port: u16,
 }
 
-/// A connection's side the event loops reach (workerd's `Native` flags)
 #[derive(Default)]
 struct ConnShared {
-    /// Its messages, after the upgrade
     incoming: Arc<Stream<Message>>,
-    /// Its request asked for a WebSocket
     upgradable: AtomicBool,
-    /// A Close has been queued for the client
     closed_outgoing: AtomicBool,
-    /// Bytes queued and not written yet
     buffered: AtomicU64,
 }
 
-/// What the event loops ask the reactor to do
 enum Cmd {
     Listen { id: usize, listener: TcpListener },
-    /// Write a plain response, then close
     Respond { conn: usize, bytes: Vec<u8> },
-    /// Complete the WebSocket handshake
     Upgrade { conn: usize },
-    /// Write a frame
     Write { conn: usize, bytes: Vec<u8> },
-    /// Forget the connection (closing the socket if still open)
     Release { conn: usize },
 }
 
-/// The reactor's side the event loops reach
 pub struct Reactor {
     inbox: Fifo<Cmd>,
     waker: mio::Waker,
     stop: AtomicBool,
     servers: SegVec<Arc<ServerShared>>,
-    /// By connection id (ids are never reused); dropped with the connection
     conns: SegVec<Weak<ConnShared>>,
 }
 
@@ -430,7 +367,6 @@ impl Reactor {
     }
 }
 
-/// The reactor thread; stopped and joined on drop
 pub struct ReactorThread {
     reactor: Arc<Reactor>,
     thread: Option<JoinHandle<()>>,
@@ -461,15 +397,9 @@ impl Drop for ReactorThread {
     }
 }
 
-// ---- The reactor thread ----
-
-/// Where a connection is
 enum Phase {
-    /// Reading its request
     Request,
-    /// The request went to JS: waiting for the answer or the upgrade
     Answering { key: Option<String> },
-    /// A WebSocket (a fragmented message in progress, if any)
     Socket { partial: Option<(Opcode, Vec<u8>)> },
 }
 
@@ -481,11 +411,9 @@ struct Conn {
     phase: Phase,
     read: Vec<u8>,
     write: Vec<u8>,
-    /// Close the socket once everything queued is written
     close_when_flushed: bool,
 }
 
-/// What the reactor thread owns
 struct Io {
     poll: mio::Poll,
     listeners: HashMap<Token, (usize, TcpListener)>,
@@ -556,7 +484,6 @@ impl Io {
                     c.write.extend_from_slice(head.as_bytes());
                     c.phase = Phase::Socket { partial: None };
                     self.flush(t);
-                    // Frames that came right behind the request
                     self.process(reactor, t);
                 }
             }
@@ -571,7 +498,6 @@ impl Io {
         }
     }
 
-    /// Takes every waiting connection of listener `t`
     fn accept(&mut self, reactor: &Reactor, t: Token) {
         loop {
             let Some((server, listener)) = self.listeners.get(&t) else { return };
@@ -581,7 +507,6 @@ impl Io {
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => return,
                 Err(_) => continue,
             };
-            // Small frames go out at once: no waiting for the peer's delayed ACK (Nagle)
             let _ = stream.set_nodelay(true);
             let shared = Arc::new(ConnShared::default());
             let id = reactor.conns.push(Arc::downgrade(&shared));
@@ -594,7 +519,6 @@ impl Io {
         }
     }
 
-    /// Reads all that is there, then handles it; a closed or failed socket ends the connection
     fn read(&mut self, reactor: &Reactor, t: Token) {
         let Some(c) = self.conns.get_mut(&t) else { return };
         let mut chunk = vec![0; READ_CHUNK];
@@ -620,7 +544,6 @@ impl Io {
         }
     }
 
-    /// Handles the bytes read so far: a request, or frames
     fn process(&mut self, reactor: &Reactor, t: Token) {
         let Some(c) = self.conns.get_mut(&t) else { return };
         match c.phase {
@@ -642,7 +565,6 @@ impl Io {
         }
     }
 
-    /// Parses the complete frames read so far into messages for JS; answers pings and closes
     fn frames(&mut self, t: Token) {
         let Some(c) = self.conns.get_mut(&t) else { return };
         let Phase::Socket { partial } = &mut c.phase else { return };
@@ -703,7 +625,6 @@ impl Io {
         self.flush(t);
     }
 
-    /// Writes what is queued until the socket would block; closes when asked to and done
     fn flush(&mut self, t: Token) {
         let Some(c) = self.conns.get_mut(&t) else { return };
         let mut written = 0;
@@ -728,7 +649,6 @@ impl Io {
         }
     }
 
-    /// Closes and forgets a connection; its JS side sees the end of its messages
     fn drop_conn(&mut self, t: Token) {
         if let Some(mut c) = self.conns.remove(&t) {
             let _ = self.poll.registry().deregister(&mut c.stream);
@@ -738,16 +658,12 @@ impl Io {
     }
 }
 
-// ---- The JS side ----
-
-/// `__j8_native.net` of one runtime: servers and connections, by id, through the reactor
 pub struct Net {
     reactor: Arc<Reactor>,
 }
 
 #[j8::class]
 impl Net {
-    /// Listens on `127.0.0.1:port` (`0` picks a free port); gives the server's id
     fn listen(&self, a: &mut Agent<'_, '_>, port: u32) -> Result<u32, Error> {
         let port = u16::try_from(port).map_err(|_| a.throw(ErrorKind::Range, "port out of range"))?;
         let std = std::net::TcpListener::bind(("127.0.0.1", port)).map_err(|e| a.throw(ErrorKind::Error, &format!("bind 127.0.0.1:{port}: {e}")))?;
@@ -758,19 +674,16 @@ impl Net {
         u32::try_from(id).map_err(|_| a.throw(ErrorKind::Range, "too many servers"))
     }
 
-    /// The port server `id` listens on
     fn port(&self, id: u32) -> u32 {
         self.reactor.server(id).map_or(0, |s| u32::from(s.port))
     }
 
-    /// A promise for server `id`'s next request (`{ id, method, path, headers, body }`)
     fn accept<'gc>(&self, a: &mut Agent<'gc, '_>, id: u32) -> Result<Value<'gc>, Error> {
         let Some(server) = self.reactor.server(id) else { return Err(a.throw(ErrorKind::Type, &format!("no server {id}"))) };
         let next = Next(Arc::clone(&server.requests));
         Glue::spawn(a, async move { Glue::settle(next.await) })
     }
 
-    /// Answers request `id` with a plain response; the connection closes once it is written
     fn respond(&self, id: u32, status: u32, headers: Vec<Vec<String>>, body: &str) {
         let mut out = format!("HTTP/1.1 {status} {}\r\n", if status < 400 { "OK" } else { "Error" });
         for h in headers.iter().filter(|h| h.len() == 2 && !h[0].eq_ignore_ascii_case("content-length")) {
@@ -780,7 +693,6 @@ impl Net {
         self.reactor.send(Cmd::Respond { conn: id as usize, bytes: out.into_bytes() });
     }
 
-    /// Completes the WebSocket handshake for request `id`; its messages then come through `recv(id)`
     fn upgrade(&self, a: &mut Agent<'_, '_>, id: u32) -> Result<(), Error> {
         if !self.reactor.conn(id).is_some_and(|c| c.upgradable.load(Ordering::Acquire)) {
             return Err(a.throw(ErrorKind::Type, "a 101 response needs a pending WebSocket upgrade request"));
@@ -789,8 +701,6 @@ impl Net {
         Ok(())
     }
 
-    /// A promise for the next message of WebSocket `id`: a string, a `Uint8Array`, `{ close, reason }` for a Close,
-    /// or `undefined` once the connection is gone
     fn recv<'gc>(&self, a: &mut Agent<'gc, '_>, id: u32) -> Result<Value<'gc>, Error> {
         let Some(conn) = self.reactor.conn(id) else { return Err(a.throw(ErrorKind::Type, &format!("no WebSocket {id}"))) };
         let next = Next(Arc::clone(&conn.incoming));
@@ -805,7 +715,6 @@ impl Net {
         self.frame(id, &Frame { fin: true, op: Opcode::Binary, payload: data.0 });
     }
 
-    /// Queues a Close (only the first one goes out)
     fn close(&self, id: u32, code: u32, reason: String) {
         if let Some(c) = self.reactor.conn(id)
             && !c.closed_outgoing.swap(true, Ordering::AcqRel)
@@ -816,27 +725,23 @@ impl Net {
         }
     }
 
-    /// Bytes queued for WebSocket `id` and not yet written
     #[expect(clippy::cast_precision_loss, reason = "a JS number; queues stay far below 2^53 bytes")]
     fn buffered_amount(&self, id: u32) -> f64 {
         self.reactor.conn(id).map_or(0.0, |c| c.buffered.load(Ordering::Acquire) as f64)
     }
 
-    /// Forgets connection `id` (after its close)
     fn release(&self, id: u32) {
         self.reactor.send(Cmd::Release { conn: id as usize });
     }
 }
 
 impl Net {
-    /// Gives this runtime its `__j8_native.net`, working through `reactor`
     pub fn attach(a: &mut Agent<'_, '_>, reactor: Arc<Reactor>) {
         let natives = Glue::natives(a);
         let net = <Self as Class>::install(a, natives).instance(a, Self { reactor });
         natives.borrow_mut(a.mc).define("net", Property::hidden(net.into()));
     }
 
-    /// Queues a data frame (dropped once a Close went out)
     fn frame(&self, id: u32, frame: &Frame) {
         if self.reactor.conn(id).is_some_and(|c| !c.closed_outgoing.load(Ordering::Acquire)) {
             let mut bytes = Vec::new();

@@ -1,4 +1,3 @@
-//! Threaded code with guaranteed tail calls (`become`) when the compiler is a nightly: sets `cfg(tail_calls)`.
 use std::process::Command;
 
 fn main() {

@@ -1,11 +1,8 @@
-//! Classes: the heritage of `class … extends`, `super` property access, the names of computed members.
 use crate::ValueKind;
 
 use crate::{Agent, Error, ErrorKind, JsObject, Key, PropertyKey, Value};
 
 impl<'gc> Agent<'gc, '_> {
-    /// ClassDefinitionEvaluation's heritage: the prototype's parent and the constructor's parent. `superclass` is
-    /// `Uninit` (the hole) without `extends`.
     pub fn class_heritage(&mut self, superclass: Value<'gc>) -> Result<(Option<JsObject<'gc>>, JsObject<'gc>), Error> {
         match superclass.kind() {
             ValueKind::Uninit => Ok((Some(self.realm.object_proto), self.realm.function_proto)),
@@ -25,7 +22,6 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    /// Where `super.x` looks: the home object's prototype
     fn super_base(&mut self, home: Value<'gc>, key: &PropertyKey<'gc>) -> Result<JsObject<'gc>, Error> {
         let base = match home.as_object() {
             Some(h) => self.get_prototype_of(h)?,
@@ -40,7 +36,6 @@ impl<'gc> Agent<'gc, '_> {
         })
     }
 
-    /// `super[key]` with `this` being `receiver`
     pub fn super_get(&mut self, home: Value<'gc>, key: Value<'gc>, receiver: Value<'gc>) -> Result<Value<'gc>, Error> {
         let k = self.to_property_key(key)?;
         let base = self.super_base(home, &k)?;
@@ -50,7 +45,6 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    /// `super[key] = value` (class code is strict: a failed assignment throws)
     pub fn super_set(&mut self, home: Value<'gc>, key: Value<'gc>, value: Value<'gc>, receiver: Value<'gc>) -> Result<(), Error> {
         let k = self.to_property_key(key)?;
         let base = self.super_base(home, &k)?;
@@ -65,7 +59,6 @@ impl<'gc> Agent<'gc, '_> {
         Err(self.throw(ErrorKind::Type, &alloc::format!("Cannot assign to read only property {what} of object")))
     }
 
-    /// SetFunctionName for a computed key: the key's text (a symbol's is `[description]`), after `get ` / `set `
     pub fn set_function_name(&mut self, f: JsObject<'gc>, key: Value<'gc>, prefix: Option<&str>) -> Result<(), Error> {
         let name = match self.to_property_key(key)? {
             PropertyKey::String(s) => alloc::string::String::from(&**s),

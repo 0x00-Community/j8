@@ -1,31 +1,3 @@
-//! j8: the facade for embedders. The binding macros and everything their generated code needs come from here:
-//!
-//! - `#[j8::class]`: exports an `impl` block as a JS class (constructor, prototype methods, accessors, static methods)
-//! - `#[j8::object]`: exports an `impl` block of associated functions only as a plain object
-//!   (like `console` / `process`)
-//! - `#[j8::function]`: exports a function as a JS function
-//! - `#[j8::module("node:fs", "fs")]`: exports an object of functions as a native module (`import` / `require`)
-//! - `j8::runtime!`: declares a runtime (globals, native modules, prelude, optionally on top of another runtime);
-//!   [`Runtime`] is a ready execution environment
-//!
-//! The macro reference is [USAGE.md](https://github.com/0x00-Community/j8/blob/main/crates/macros/USAGE.md); how to
-//! put a whole host together is the guide below.
-//!
-//! The other j8 crates are re-exported by feature (each is also published on its own):
-//!
-//! | feature | module | |
-//! |---|---|---|
-//! | `runtime` (default) | `executor` + `builtins` + `platform` | everything needed to run JS |
-//! | `bytecode` | [`bytecode`] | bytecode definitions (generated from JSON), assembler / disassembler |
-//! | `compiler` | [`compiler`] | JS ⇒ bytecode |
-//! | `executor` | [`executor`] | bytecode executor, implements `Engine` |
-//! | `builtins` | [`builtins`] | built-in objects |
-//! | `platform` | [`platform`] | the standard-library `Platform` |
-//! | `taskqueue` | [`taskqueue`] | lock-free dataflow task queue |
-//! | `lockfree` | [`lockfree`] | lock-free building blocks |
-//! | `jit` | [`jit`] | bytecode ⇒ MLIR ⇒ x86-64 machine code + JIT scheduling (x86-64 Unix) |
-//! | `json` | [`Json`] | Rust values crossing as JSON-shaped data through serde |
-//! | `full` | all of the above | |
 #![doc = include_str!("../EMBEDDING.md")]
 
 #[cfg(feature = "json")]

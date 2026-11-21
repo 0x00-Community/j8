@@ -1,4 +1,3 @@
-//! JS ⇒ V8 bytecode: expressions, after V8's `BytecodeGenerator`. Results are always left in acc.
 use oxc_ast::ast::{
     Argument, ArrayAssignmentTarget, ArrayExpressionElement, ArrowFunctionBody, AssignmentTarget, AssignmentTargetMaybeDefault, AssignmentTargetProperty, ChainElement, ComputedMemberExpression, StaticMemberExpression, TaggedTemplateExpression, ArrowFunctionExpression, AssignmentExpression, AssignmentOperator, BinaryExpression, BinaryOperator, CallExpression, Expression, LogicalOperator, MemberExpression, MethodDefinitionKind, ObjectExpression, ObjectPropertyKind, PropertyKind as PropertyKind_, SimpleAssignmentTarget, TemplateElement, UnaryOperator, UpdateExpression,
     UpdateOperator,
@@ -11,10 +10,8 @@ use crate::compiler::{Body, Compiler, Flavor, Kind, Place, Private};
 use crate::scope::{Hidden, THIS};
 use j8bytecode::{ArrayBoilerplate, Bytecode, Constant, CreateArrayLiteralFlags, CreateObjectLiteralFlags, LiteralFlags, LiteralValue, ObjectBoilerplate, Register, Runtime, TemplateObject, TypeOfLiteral};
 
-/// V8's `JSRegExp::Flags` bits (`CreateRegExpLiteral`'s flags operand)
 const REGEXP_FLAGS: [(char, u16); 9] = [('g', 1), ('i', 1 << 1), ('m', 1 << 2), ('y', 1 << 3), ('u', 1 << 4), ('s', 1 << 5), ('l', 1 << 6), ('d', 1 << 7), ('v', 1 << 8)];
 
-/// Binary operator ⇒ bytecode operation.
 #[derive(Clone, Copy)]
 enum Operator {
     Binary(BinaryOp),
@@ -23,15 +20,12 @@ enum Operator {
     In,
 }
 
-/// The three kinds of assignment operator.
 enum Assign {
     Plain,
     Binary(BinaryOp),
-    /// `||=` / `&&=` / `??=`: the right side is not evaluated if the left side already satisfies the condition
     Logical(LogicalOperator),
 }
 
-/// An element of an array literal / argument list.
 enum Element<'a> {
     Value(&'a Expression<'a>),
     Spread(&'a Expression<'a>),
@@ -57,15 +51,11 @@ impl<'a> From<&'a Argument<'a>> for Element<'a> {
     }
 }
 
-/// Assignment target: a name, or a property whose object (and key) are already evaluated.
 enum Target<'a> {
-    /// The name and its position in the source (to decide whether a TDZ check is needed)
     Name(&'a str, u32),
     Named { obj: Register, name: &'a str },
     Keyed { obj: Register, key: Register },
-    /// `obj.#x` (the private name's binding)
     Private { obj: Register, name: &'a str },
-    /// `super.name` / `super[key]` with `this` in `receiver`
     SuperNamed { receiver: Register, name: &'a str },
     SuperKeyed { receiver: Register, key: Register },
 }
@@ -124,7 +114,6 @@ impl<'a> Compiler<'a, '_> {
         Ok(self.constant(Constant::String(s.into())))
     }
 
-    /// A segment of a template literal (text after escape processing).
     fn quasi(&mut self, q: &TemplateElement<'a>) -> Result<usize, Error> {
         let cooked = match q.value.cooked {
             Some(c) => c.as_str(),
@@ -133,7 +122,6 @@ impl<'a> Compiler<'a, '_> {
         self.string_const(cooked, q.span)
     }
 
-    /// A literal a boilerplate can hold (`None`: computed at run time)
     fn literal_value(e: &Expression<'_>) -> Option<LiteralValue> {
         match e {
             Expression::NumericLiteral(n) => Some(LiteralValue::Number(n.value)),
@@ -144,8 +132,6 @@ impl<'a> Compiler<'a, '_> {
         }
     }
 
-    /// Jumps by the left side of a logical operator: `||` / `&&` skip the right side on a truthy / falsy left side,
-    /// `??` on a left side that isn't nullish. The label is bound by the caller after the right side.
     fn logical_skip(&mut self, op: LogicalOperator, end: &mut Label) {
         match op {
             LogicalOperator::Or => self.b().jump(Bytecode::JumpIfToBooleanTrue, end),
@@ -180,7 +166,6 @@ impl<'a> Compiler<'a, '_> {
             }
             Expression::NullLiteral(_) => self.b().load_null(),
             Expression::TemplateLiteral(t) => {
-                // q0 + e0 + q1 + …: each substitution is converted with ToString, then concatenated
                 let first = t.quasis.first().expect("a template has a first quasi");
                 let k = self.quasi(first)?;
                 self.b().load_constant(k);
@@ -226,7 +211,6 @@ impl<'a> Compiler<'a, '_> {
                     UnaryOperator::Delete => return self.delete(&u.argument),
                     UnaryOperator::Typeof => {
                         match &u.argument {
-                            // `typeof` of an undeclared name does not throw
                             Expression::Identifier(id) => self.load_typeof(id.name.as_str()),
                             a => self.expr(a)?,
                         }
@@ -309,7 +293,6 @@ impl<'a> Compiler<'a, '_> {
                 self.release(obj);
             }
             Expression::PrivateInExpression(p) => {
-                // A field is looked for by its private name, a method / accessor by the class brand
                 let name = Hidden::private(self.alloc, &p.left);
                 let key = self.temp();
                 match self.private_kind(name) {
@@ -371,8 +354,6 @@ impl<'a> Compiler<'a, '_> {
         Ok(())
     }
 
-    /// Anonymous functions / arrow functions / anonymous classes get an inferred name per the spec (NamedEvaluation);
-    /// everything else is evaluated as usual.
     pub fn expr_named(&mut self, e: &'a Expression<'a>, name: &'a str) -> Result<(), Error> {
         match e {
             Expression::FunctionExpression(f) if f.id.is_none() => {
@@ -387,8 +368,6 @@ impl<'a> Compiler<'a, '_> {
         }
     }
 
-    /// Tagged template: `tag(templateObject, ...substitutions)`; the template object is cached per call site
-    /// (`GetTemplateObject` with a template description constant).
     fn tagged_template(&mut self, t: &'a TaggedTemplateExpression<'a>) -> Result<(), Error> {
         let subs = &t.quasi.expressions;
         let argc = u32::try_from(subs.len() + 1).map_err(|_| self.unsupported(t.span, "too many substitutions"))?;
@@ -454,7 +433,6 @@ impl<'a> Compiler<'a, '_> {
         Ok(())
     }
 
-    /// A Smi literal operand for the `*Smi` bytecodes (V8 uses them when the right side is a small integer literal)
     fn smi_literal(e: &Expression<'_>) -> Option<i32> {
         let Expression::NumericLiteral(n) = e else { return None };
         crate::builder::Builder::is_smi(n.value)
@@ -467,8 +445,6 @@ impl<'a> Compiler<'a, '_> {
             self.b().binary_smi(op, n);
             return Ok(());
         }
-        // The left side is a variable in a register and the right side cannot change it: use its register directly as
-        // the left operand instead of copying it into a temporary register first
         if let Expression::Identifier(id) = &b.left
             && Self::cannot_assign(&b.right)
             && let Some(l) = self.register_of(id.name.as_str(), id.span.start)
@@ -486,7 +462,6 @@ impl<'a> Compiler<'a, '_> {
         Ok(())
     }
 
-    /// acc = `l` op acc
     fn binary_op(&mut self, op: Operator, l: Register) {
         match op {
             Operator::Binary(op) => self.b().binary(op, l),
@@ -496,9 +471,6 @@ impl<'a> Compiler<'a, '_> {
         }
     }
 
-    /// Evaluating `e` cannot assign to this function's register variables: it consists only of literals, names, `this`,
-    /// static member reads, and unary / binary / logical / conditional operations (user code called by these operations
-    /// lives in other functions and cannot touch the variables in this function's registers).
     fn cannot_assign(e: &Expression<'_>) -> bool {
         match e {
             Expression::NumericLiteral(_) | Expression::StringLiteral(_) | Expression::BooleanLiteral(_) | Expression::NullLiteral(_) | Expression::BigIntLiteral(_) | Expression::Identifier(_) | Expression::ThisExpression(_) => true,
@@ -512,7 +484,6 @@ impl<'a> Compiler<'a, '_> {
         }
     }
 
-    /// Evaluates the object (and key) of an assignment target into temporary registers.
     fn target(&mut self, t: &'a SimpleAssignmentTarget<'a>) -> Result<Target<'a>, Error> {
         if let SimpleAssignmentTarget::AssignmentTargetIdentifier(id) = t {
             return Ok(Target::Name(id.name.as_str(), id.span.start));
@@ -630,8 +601,6 @@ impl<'a> Compiler<'a, '_> {
             self.release(v);
             return Ok(());
         };
-        // `o.x = v` / `o[k] = v`: the object is in a register and the right side (and the key) cannot change it, so
-        // write directly without copying the object first
         if a.operator == AssignmentOperator::Assign
             && Self::cannot_assign(&a.right)
             && let Some(m) = t.as_member_expression()
@@ -693,8 +662,6 @@ impl<'a> Compiler<'a, '_> {
         Ok(())
     }
 
-    /// Evaluates `e` with the result unused (expression statements in functions, the update part of `for`): postfix
-    /// `++` / `--` does not keep the old value.
     pub fn effect(&mut self, e: &'a Expression<'a>) -> Result<(), Error> {
         match e {
             Expression::UpdateExpression(u) => self.update_as(u, true),
@@ -703,8 +670,6 @@ impl<'a> Compiler<'a, '_> {
         }
     }
 
-    /// `super(…)` in a derived class constructor (V8's `VisitCallSuper`): constructs the parent with this
-    /// constructor's new.target, binds `this`, then brands and initializes the instance; `this` is the result
     fn super_call(&mut self, c: &'a CallExpression<'a>) -> Result<(), Error> {
         if !self.in_derived_constructor() {
             return Err(self.unsupported(c.span, "super() outside a derived class constructor"));
@@ -729,7 +694,6 @@ impl<'a> Compiler<'a, '_> {
         Ok(())
     }
 
-    /// `super[key]` with `this` in `receiver` (V8's `LoadKeyedFromSuper`)
     fn super_keyed_get(&mut self, receiver: Register, key: Register) {
         let args = self.b().new_register_list(3);
         self.b().mov(receiver, args.first);
@@ -740,7 +704,6 @@ impl<'a> Compiler<'a, '_> {
         self.release(args.first);
     }
 
-    /// `obj.#x` into acc: a field by its private symbol; a method / accessor after the class brand check
     pub fn private_get(&mut self, obj: Register, name: &'a str) {
         match self.private_kind(name) {
             Some(Private::Field) | None => {
@@ -768,7 +731,6 @@ impl<'a> Compiler<'a, '_> {
         }
     }
 
-    /// `obj.#x = value` (acc clobbered)
     fn private_set(&mut self, obj: Register, name: &'a str, value: Register) {
         match self.private_kind(name) {
             Some(Private::Field) | None => {
@@ -807,8 +769,6 @@ impl<'a> Compiler<'a, '_> {
         self.update_as(u, false)
     }
 
-    /// `++` / `--` (V8's `VisitCountOperation`: postfix with a used value converts with `ToNumeric` and keeps the old
-    /// value); with `discard` the result is unused.
     fn update_as(&mut self, u: &'a UpdateExpression<'a>, discard: bool) -> Result<(), Error> {
         let t = self.target(&u.argument)?;
         self.target_load(&t);
@@ -830,8 +790,6 @@ impl<'a> Compiler<'a, '_> {
         Ok(())
     }
 
-    /// The arguments into a new register list (after `receiver`'s register when given, which then heads the list); the
-    /// flag tells whether the last argument is a spread (`CallWithSpread` / `ConstructWithSpread`)
     fn argument_list(&mut self, args: &'a [Argument<'a>], receiver: Option<Register>) -> Result<(RegisterList, bool), Error> {
         let spread_at = args.iter().position(|a| matches!(a, Argument::SpreadElement(_)));
         if spread_at.is_some_and(|i| i + 1 != args.len()) {
@@ -854,9 +812,6 @@ impl<'a> Compiler<'a, '_> {
         Ok((out, spread_at.is_some()))
     }
 
-    /// Call (V8's `VisitCall`): the callee in a register; a property call's receiver heads the argument list
-    /// (`CallProperty*`), a plain call has an undefined receiver (`CallUndefinedReceiver*`); a possible direct eval
-    /// first resolves its callee with `ResolvePossiblyDirectEval`.
     fn call(&mut self, c: &'a CallExpression<'a>) -> Result<(), Error> {
         if let Expression::Super(_) = &c.callee {
             return self.super_call(c);
@@ -880,7 +835,6 @@ impl<'a> Compiler<'a, '_> {
                 self.b().get_keyed(r);
                 Some(r)
             }
-            // `super.m(…)`: the method found from the home object, called with `this`
             Expression::StaticMemberExpression(m) => {
                 let r = self.temp();
                 self.load(THIS);
@@ -925,7 +879,6 @@ impl<'a> Compiler<'a, '_> {
                 let list = match receiver {
                     Some(r) => RegisterList { first: r, count: args.count },
                     None => {
-                        // CallWithSpread takes a receiver first: undefined
                         args
                     }
                 };
@@ -938,8 +891,6 @@ impl<'a> Compiler<'a, '_> {
         Ok(())
     }
 
-    /// `ResolvePossiblyDirectEval(callee, source, function, language mode, scope position, eval position)`: the callee
-    /// stays as is unless it is the real `eval`, which becomes the compiled eval code
     fn resolve_possibly_direct_eval(&mut self, callee: Register, args: RegisterList, span: Span) {
         let list = self.b().new_register_list(6);
         self.b().mov(callee, list.first);
@@ -962,8 +913,6 @@ impl<'a> Compiler<'a, '_> {
         self.release(list.first);
     }
 
-    /// If `e` is a variable in this function's registers or `this` (no TDZ check needed here), gives that register, so
-    /// reading it needs no copy into a temporary register.
     fn in_register(&self, e: &'a Expression<'a>) -> Option<Register> {
         match e {
             Expression::Identifier(id) => self.register_of(id.name.as_str(), id.span.start),
@@ -990,8 +939,6 @@ impl<'a> Compiler<'a, '_> {
     }
 
     fn computed_member(&mut self, m: &'a ComputedMemberExpression<'a>) -> Result<(), Error> {
-        // The object is in a register and the key cannot change it: evaluate the key first and use the object's
-        // register directly
         if !m.optional
             && Self::cannot_assign(&m.expression)
             && let Some(obj) = self.in_register(&m.object)
@@ -1010,7 +957,6 @@ impl<'a> Compiler<'a, '_> {
         Ok(())
     }
 
-    /// `?.`: if acc is null / undefined, jump to the end of the current chain.
     fn optional(&mut self, optional: bool, span: Span) -> Result<(), Error> {
         if optional {
             let Some(mut l) = self.chains.pop() else { return Err(self.unsupported(span, "`?.` outside an optional chain")) };
@@ -1020,8 +966,6 @@ impl<'a> Compiler<'a, '_> {
         Ok(())
     }
 
-    /// An array literal (V8's `BuildCreateArrayLiteral`): a boilerplate with the constant elements, then the computed
-    /// ones stored by index; with spreads / holes after a spread, built element by element from an empty array.
     fn array(&mut self, elements: &'a [ArrayExpressionElement<'a>], span: Span) -> Result<(), Error> {
         if elements.iter().any(|e| matches!(e, ArrayExpressionElement::SpreadElement(_))) {
             let arr = self.spread_array(elements.iter().map(Element::from))?;
@@ -1065,8 +1009,6 @@ impl<'a> Compiler<'a, '_> {
         Ok(())
     }
 
-    /// Builds a sequence of elements with spreads / holes into an array in a new temporary register (the caller frees
-    /// it): elements are stored by index (`StaInArrayLiteral`), spreads iterated, the length set at the end.
     fn spread_array(&mut self, elements: impl Iterator<Item = Element<'a>>) -> Result<Register, Error> {
         let arr = self.temp();
         let index = self.temp();
@@ -1124,7 +1066,6 @@ impl<'a> Compiler<'a, '_> {
         Ok(arr)
     }
 
-    /// Destructuring assignment: stores the value in register `value` according to the assignment target pattern.
     pub fn assign_target(&mut self, t: &'a AssignmentTarget<'a>, value: Register) -> Result<(), Error> {
         match t {
             AssignmentTarget::ArrayAssignmentTarget(a) => self.assign_array(a, value)?,
@@ -1132,8 +1073,6 @@ impl<'a> Compiler<'a, '_> {
                 if o.properties.is_empty() {
                     self.require_object(value);
                 }
-                // With a rest element the keys go after a copy of the source, ready for
-                // `CopyDataPropertiesWithExcludedPropertiesOnStack(source, ...keys)`
                 let n = u32::try_from(o.properties.len()).map_err(|_| self.unsupported(o.span, "too many properties"))?;
                 let list = o.rest.as_ref().map(|_| {
                     let l = self.b().new_register_list(n + 1);
@@ -1194,8 +1133,6 @@ impl<'a> Compiler<'a, '_> {
         Ok(())
     }
 
-    /// Array destructuring assignment, in spec order: for each element, evaluate the target reference first, then step
-    /// the iterator; on a throw midway, close the iterator first.
     fn assign_array(&mut self, a: &'a ArrayAssignmentTarget<'a>, value: Register) -> Result<(), Error> {
         let iter = self.iterate(value);
         self.closing_on_throw(iter, |c| {
@@ -1246,8 +1183,6 @@ impl<'a> Compiler<'a, '_> {
         Ok(())
     }
 
-    /// An element of array destructuring: if the target is not a pattern, evaluate its reference first (object and key
-    /// go into temporary registers); for a pattern gives `None`, expanded once the value is available.
     fn pre_target(&mut self, t: &'a AssignmentTarget<'a>) -> Result<Option<Target<'a>>, Error> {
         match t.as_simple_assignment_target() {
             Some(s) => Ok(Some(self.target(s)?)),
@@ -1255,7 +1190,6 @@ impl<'a> Compiler<'a, '_> {
         }
     }
 
-    /// Writes `v` into the previously evaluated target, or expands it per the nested pattern.
     fn put_target(&mut self, pre: Option<&Target<'a>>, t: &'a AssignmentTarget<'a>, v: Register) -> Result<(), Error> {
         match pre {
             Some(target) => {
@@ -1283,13 +1217,9 @@ impl<'a> Compiler<'a, '_> {
         }
     }
 
-    /// `delete x` (V8's `VisitDelete`): a property delete gives the result (key in acc); deleting an unresolved name
-    /// (sloppy mode) goes through `DeleteLookupSlot`, a declared variable gives `false`; any other expression is
-    /// evaluated and gives `true`.
     fn delete(&mut self, e: &'a Expression<'a>) -> Result<(), Error> {
         let strict = self.strict_here();
         match e {
-            // `delete super.x` is a ReferenceError (after `this` is checked and the key evaluated)
             Expression::StaticMemberExpression(m) if matches!(m.object, Expression::Super(_)) => {
                 self.load(THIS);
                 self.b().call_runtime(Runtime::ThrowUnsupportedSuperError, RegisterList::EMPTY);
@@ -1333,11 +1263,7 @@ impl<'a> Compiler<'a, '_> {
         Ok(())
     }
 
-    /// An object literal (V8's `VisitObjectLiteral`): the boilerplate holds the constant-named data properties before
-    /// the first computed key or spread (values known at compile time filled in); the rest are defined in order after
-    /// creating it.
     fn object(&mut self, o: &'a ObjectExpression<'a>) -> Result<(), Error> {
-        // Methods using `super` need the literal as their home object: it goes into a scope of its own
         let text = self.source_text();
         let uses_super = o.properties.iter().any(|p| matches!(p, ObjectPropertyKind::ObjectProperty(p) if (p.method || p.kind != PropertyKind_::Init) && text[p.span.start as usize..p.span.end as usize].contains("super")));
         if !uses_super {
@@ -1397,7 +1323,6 @@ impl<'a> Compiler<'a, '_> {
                 }
             };
             if i < in_boilerplate {
-                // Already in the boilerplate unless its value is computed
                 if Self::literal_value(&p.value).is_none() {
                     let name = self.static_name(&p.key, false).unwrap_or_default();
                     self.expr_named(&p.value, name)?;
@@ -1424,7 +1349,6 @@ impl<'a> Compiler<'a, '_> {
                 }
                 let n = self.method(fname, f, kind)?;
                 if accessor {
-                    // DefineAccessorPropertyUnchecked(object, name, getter, setter, attributes)
                     let args = self.b().new_register_list(5);
                     self.b().mov(obj, args.first);
                     self.property_key_into(&p.key, p.computed, args.at(1))?;
@@ -1442,7 +1366,6 @@ impl<'a> Compiler<'a, '_> {
                 self.closure(n);
             } else {
                 match self.static_name(&p.key, p.computed) {
-                    // `__proto__: v` sets the prototype (V8's `InternalSetPrototype`)
                     Some("__proto__") if !p.shorthand && !p.computed => {
                         let args = self.b().new_register_list(2);
                         self.b().mov(obj, args.first);
@@ -1459,7 +1382,6 @@ impl<'a> Compiler<'a, '_> {
             match (self.static_name(&p.key, p.computed), p.computed) {
                 (Some(name), false) if !p.method => self.b().define_named_own(obj, name),
                 _ => {
-                    // DefineKeyedOwnPropertyInLiteral: the value waits in a register while the key is computed
                     let v = self.temp();
                     if p.method || self.static_name(&p.key, p.computed).is_some() {
                         self.b().star(v);

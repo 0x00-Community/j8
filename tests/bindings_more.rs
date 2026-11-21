@@ -1,4 +1,3 @@
-//! Binding extensions: `#[j8::class(extends = Base)]`, `j8::Function`, `j8::Bytes`, `j8::Persistent`.
 use j8::{Bytes, Function, Persistent};
 use j8executor::Executor;
 use j8framework::{Agent, Error, Value};
@@ -54,7 +53,6 @@ impl Dog {
     }
 }
 
-/// Keeps a callback and a value across calls
 #[derive(Default)]
 struct Hooks {
     on: Option<Function>,
@@ -118,7 +116,6 @@ fn extends_functions_bytes_persistent() {
     });
 }
 
-/// A future that is ready after a thread sleeps `ms` and wakes it
 struct Sleep {
     started: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     ms: u64,
@@ -178,7 +175,6 @@ fn async_bindings_settle_on_the_event_loop() {
         let r = rt.eval("log.join()", "check.js").expect("runs");
         assert_eq!(rt.text(&r), "true,42,b after 20ms");
     });
-    // The event loop belongs to the runtime's isolate, so a plain platform works as well
     let plain = DefaultPlatform::default();
     j8::EventLoopSet::scope(&plain, std::num::NonZeroUsize::MIN, |set| {
         let rt = j8::Runtime::on::<Loop>(set, Executor::default()).expect("runtime");
@@ -186,7 +182,6 @@ fn async_bindings_settle_on_the_event_loop() {
         rt.run_until_idle().expect("settles");
         let r = rt.eval("got", "check.js").expect("runs");
         assert_eq!(rt.text(&r), "8");
-        // An isolate made without an event loop refuses async work: the call throws a TypeError
         let mut isolate = j8framework::Isolate::new(&plain, j8framework::CreateParams::default());
         let mut executor = Executor::default();
         let cx = isolate.enter(|scope| scope.persist(scope.context(&j8builtins::Builtins)));

@@ -1,9 +1,3 @@
-//! The Web-standard layer (WinterTC's minimum common API): `console`, timers, `queueMicrotask`, `structuredClone`,
-//! `EventTarget` / `AbortController`, `TextEncoder` / `TextDecoder`, `atob` / `btoa`, `URL` / `URLSearchParams`,
-//! `Blob`, `Headers` / `Request` / `Response` / `fetch`, `performance`, `crypto`.
-//!
-//! The parts that need the machine are bound here in Rust and kept in `globalThis.__j8_native` (`natives` of
-//! [`Web`]); everything else is JavaScript in this directory, run as the prelude.
 mod http;
 mod timer;
 
@@ -15,7 +9,6 @@ use j8::Bytes;
 pub use http::Http;
 pub use timer::Timer;
 
-/// The prelude: one file per API family, in dependency order
 const PRELUDE: &str = concat!(
     include_str!("console.js"),
     include_str!("events.js"),
@@ -26,14 +19,12 @@ const PRELUDE: &str = concat!(
     include_str!("misc.js"),
 );
 
-/// Standard output and error, unbuffered (a partial line is out before the process exits)
 pub struct Stdio;
 
 #[j8::object("stdio")]
 impl Stdio {
     fn out(text: &str) {
         let mut out = std::io::stdout().lock();
-        // A closed stdout is not the script's business
         let _ = out.write_all(text.as_bytes()).and_then(|()| out.flush());
     }
 
@@ -41,7 +32,6 @@ impl Stdio {
         let _ = std::io::stderr().write_all(text.as_bytes());
     }
 
-    /// Whether the stream (1 / 2) is a terminal
     fn is_tty(fd: u32) -> bool {
         use std::io::IsTerminal;
         match fd {
@@ -51,33 +41,27 @@ impl Stdio {
         }
     }
 
-    /// Ends the process at once (`process.exit`, an uncaught error)
     fn exit(code: Option<i32>) {
         let _ = std::io::stdout().flush();
         std::process::exit(code.unwrap_or(0));
     }
 }
 
-/// Time
 pub struct Clock;
 
 #[j8::object("clock")]
 impl Clock {
-    /// Milliseconds since the runtime started (monotonic, sub-millisecond)
     fn now(a: &mut Agent<'_, '_>) -> f64 {
         a.platform.now().as_secs_f64() * 1e3
     }
 
-    /// Milliseconds since the Unix epoch
     fn wall(a: &mut Agent<'_, '_>) -> f64 {
         a.platform.wall_clock().as_secs_f64() * 1e3
     }
 }
 
-/// Encodings the prelude needs fast: UTF-8 and base64
 pub struct Codec;
 
-/// The base64 alphabet (RFC 4648 §4)
 const BASE64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 #[j8::object("codec")]
@@ -86,7 +70,6 @@ impl Codec {
         Bytes(text.as_bytes().to_vec())
     }
 
-    /// Malformed sequences become U+FFFD, or `null` with `fatal`
     fn utf8_decode(bytes: Bytes, fatal: Option<bool>) -> Option<String> {
         match String::from_utf8(bytes.0) {
             Ok(s) => Some(s),
@@ -110,7 +93,6 @@ impl Codec {
         out
     }
 
-    /// Standard or URL-safe alphabet, padding optional, ASCII whitespace skipped; `null` if malformed
     fn base64_decode(text: &str) -> Option<Bytes> {
         let mut out = Vec::with_capacity(text.len() / 4 * 3);
         let (mut acc, mut bits) = (0u32, 0);
@@ -135,7 +117,6 @@ impl Codec {
     }
 }
 
-/// The operating system's random source
 pub struct Random;
 
 #[j8::object("random")]
@@ -149,7 +130,6 @@ impl Random {
 }
 
 j8::runtime! {
-    /// Web-standard globals only (`dune --web`)
     pub Web {
         natives: [Stdio, Clock, Codec, Random, Timer, Http],
         prelude: PRELUDE,

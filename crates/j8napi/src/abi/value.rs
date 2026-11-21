@@ -1,4 +1,3 @@
-//! 值：基本值、字符串、数、BigInt、Symbol、typeof、强制转换、相等、类型判断。
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::ffi::c_char;
@@ -9,18 +8,15 @@ use num_bigint::{BigInt, BigUint, Sign};
 use crate::convert::Ffi;
 use crate::{Env, Handle, Status, ValueType, napi};
 
-/// 落在 i64 范围外的数取 `INT64_MIN`（同 V8 的 `IntegerValue`）
 const I64_LIMIT: f64 = 9_223_372_036_854_775_808.0;
 
 impl Env {
-    /// 字符串写进 C 缓冲区：`buf` 为空时只给长度；否则最多写 `size - 1` 个单元再补 0，给出写了多少
     fn write_units<T: Copy + Default>(units: &[T], buf: *mut T, size: usize, result: *mut usize) -> Result<(), Status> {
         if buf.is_null() {
             return Ffi::put(result, units.len());
         }
         let n = units.len().min(size.saturating_sub(1));
         if size > 0 {
-            // SAFETY: 调用方给的 `size` 个单元
             let out = unsafe { core::slice::from_raw_parts_mut(buf, size) };
             out[..n].copy_from_slice(&units[..n]);
             out[n] = T::default();
@@ -29,7 +25,6 @@ impl Env {
         Ok(())
     }
 
-    /// 句柄里的 BigInt
     fn bigint<'gc>(&self, h: Handle) -> Result<&'gc BigInt, Status> {
         match self.value(h)?.kind() {
             ValueKind::BigInt(b) => Ok(&j8framework::Gc::get(b).0),
@@ -37,7 +32,6 @@ impl Env {
         }
     }
 
-    /// `napi_typeof`
     fn type_of(v: Value<'_>) -> ValueType {
         match v.kind() {
             ValueKind::Undefined | ValueKind::Uninit => ValueType::Undefined,
@@ -53,7 +47,6 @@ impl Env {
         }
     }
 
-    /// IsStrictlyEqual
     fn strict_equals<'gc>(x: Value<'gc>, y: Value<'gc>) -> bool {
         match (x.as_number(), y.as_number()) {
             (Some(a), Some(b)) => a == b,
@@ -61,7 +54,6 @@ impl Env {
         }
     }
 
-    /// 对象的种类合不合 `test`
     fn kind_is(&self, h: Handle, test: impl FnOnce(&ObjectKind<'_>) -> bool) -> Result<bool, Status> {
         Ok(self.value(h)?.as_object().is_some_and(|o| test(&o.borrow().kind)))
     }
@@ -92,8 +84,6 @@ napi! {
         }
     }
 
-    // ---- 数 ----
-
     fn napi_create_double(env, value: f64, result: *mut Handle) {
         env.out(result, value.into())
     }
@@ -107,7 +97,7 @@ napi! {
     }
 
     fn napi_create_int64(env, value: i64, result: *mut Handle) {
-        #[expect(clippy::cast_precision_loss, reason = "JS 数就是 f64，超出 2^53 照 Node 丢精度")]
+        #[expect(clippy::cast_precision_loss, reason = "JS numbers are f64; past 2^53 precision is lost, as in Node")]
         let x = value as f64;
         env.out(result, x.into())
     }
@@ -130,12 +120,10 @@ napi! {
 
     fn napi_get_value_int64(env, value: Handle, result: *mut i64) {
         let x = env.number(value)?;
-        #[expect(clippy::cast_possible_truncation, reason = "范围已查")]
+        #[expect(clippy::cast_possible_truncation, reason = "range checked")]
         let n = if !x.is_finite() { 0 } else if (-I64_LIMIT..I64_LIMIT).contains(&x) { x as i64 } else { i64::MIN };
         Ffi::put(result, n)
     }
-
-    // ---- BigInt ----
 
     fn napi_create_bigint_int64(env, value: i64, result: *mut Handle) {
         let a = env.agent()?;
@@ -183,16 +171,12 @@ napi! {
         if words.is_null() {
             return Ffi::put(word_count, digits.len());
         }
-        // SAFETY: 输入时是 `words` 的长度
         let cap = unsafe { word_count.read() };
         let n = digits.len().min(cap);
-        // SAFETY: 调用方给的 `cap` 个字
         unsafe { core::ptr::copy_nonoverlapping(digits.as_ptr(), words, n) };
         Ffi::put_opt(sign_bit, i32::from(sign == Sign::Minus));
         Ffi::put(word_count, n)
     }
-
-    // ---- 字符串 ----
 
     fn napi_create_string_utf8(env, str: *const c_char, length: usize, result: *mut Handle) {
         let a = env.agent()?;
@@ -213,7 +197,6 @@ napi! {
                 return Err(Status::InvalidArg);
             }
             let mut n = 0;
-            // SAFETY: 以 0 结尾的 UTF-16
             while unsafe { str.add(n).read() } != 0 {
                 n += 1;
             }
@@ -227,7 +210,6 @@ napi! {
     fn napi_get_value_string_utf8(env, value: Handle, buf: *mut c_char, bufsize: usize, result: *mut usize) {
         let s = env.string(value)?;
         let text: &str = &s;
-        // 不切开一个字符
         let mut n = text.len().min(bufsize.saturating_sub(1));
         while !text.is_char_boundary(n) {
             n -= 1;
@@ -238,7 +220,6 @@ napi! {
 
     fn napi_get_value_string_latin1(env, value: Handle, buf: *mut c_char, bufsize: usize, result: *mut usize) {
         let s = env.string(value)?;
-        // Latin-1 只留低 8 位（同 V8）
         let bytes: Vec<u8> = s.chars().map(|c| c as u8).collect();
         Env::write_units(&bytes, buf.cast::<u8>(), bufsize, result)
     }
@@ -248,8 +229,6 @@ napi! {
         let units: Vec<u16> = s.encode_utf16().collect();
         Env::write_units(&units, buf, bufsize, result)
     }
-
-    // ---- Symbol ----
 
     fn napi_create_symbol(env, description: Handle, result: *mut Handle) {
         let a = env.agent()?;
@@ -266,8 +245,6 @@ napi! {
         let s = env.js(a.call(for_, symbol, &[k]))?;
         env.out(result, s)
     }
-
-    // ---- typeof / 相等 / 强制转换 ----
 
     fn napi_typeof(env, value: Handle, result: *mut ValueType) {
         Ffi::put(result, Env::type_of(env.value(value)?))
@@ -310,8 +287,6 @@ napi! {
         let b = env.js(a.instance_of(env.value(object)?, c))?;
         Ffi::put(result, b)
     }
-
-    // ---- 类型判断 ----
 
     fn napi_is_array(env, value: Handle, result: *mut bool) {
         let a = env.agent()?;

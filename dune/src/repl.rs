@@ -5,7 +5,6 @@ use j8::frame::Source;
 
 use crate::session::{Outcome, Session};
 
-/// REPL commands starting with `.`.
 #[derive(Clone, Copy)]
 enum Command {
     Exit,
@@ -25,13 +24,11 @@ impl TryFrom<&str> for Command {
 }
 
 impl Session<'_> {
-    /// One piece of source per line, all sharing one global object; ends at EOF (Ctrl-D) or `.exit`.
     pub fn repl(&mut self) -> ExitCode {
         println!("dune {} (j8). .help lists commands, Ctrl-D exits", env!("CARGO_PKG_VERSION"));
         let mut lines = std::io::stdin().lock().lines();
         loop {
             print!("> ");
-            // Failing to write the prompt doesn't affect reading input
             let _ = std::io::stdout().flush();
             let Some(Ok(line)) = lines.next() else { break };
             let line = line.trim();

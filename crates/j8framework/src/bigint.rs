@@ -1,4 +1,3 @@
-//! BigInt semantics: ToNumeric, parsing, arithmetic, comparison with Number.
 use crate::ValueKind;
 use core::cmp::Ordering;
 
@@ -7,10 +6,8 @@ use num_traits::{FromPrimitive, One, Signed, ToPrimitive, Zero};
 
 use crate::{Agent, BigIntData, BinaryOp, Error, ErrorKind, Hint, JsBigInt, Value};
 
-/// Upper bound of the shift amount (in bits): any larger result wouldn't fit
 const MAX_SHIFT: i64 = 1 << 30;
 
-/// The result of ToNumeric.
 #[derive(Clone, Copy, Debug)]
 pub enum Numeric<'gc> {
     Number(f64),
@@ -18,12 +15,10 @@ pub enum Numeric<'gc> {
 }
 
 impl<'gc> Agent<'gc, '_> {
-    /// A BigInt value on the heap.
     pub fn bigint(&self, b: BigInt) -> Value<'gc> {
         Value::BigInt(self.mc.alloc(BigIntData(b)))
     }
 
-    /// ToNumeric: BigInts as is, everything else ToNumber.
     pub fn to_numeric(&mut self, v: Value<'gc>) -> Result<Numeric<'gc>, Error> {
         if let Some(x) = v.as_number() {
             return Ok(Numeric::Number(x));
@@ -34,8 +29,6 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    /// ToBigInt: numbers can't be converted directly (throws a TypeError); strings go through StringToBigInt (throws a
-    /// SyntaxError if invalid).
     pub fn to_bigint(&mut self, v: Value<'gc>) -> Result<BigInt, Error> {
         match (self.to_primitive(v, Hint::Number)?).kind() {
             ValueKind::BigInt(b) => Ok(b.0.clone()),
@@ -48,8 +41,6 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    /// A BigInt modulo 2^bits, mapped into the signed range when `signed` (BigInt.asIntN / asUintN, BigInt64Array
-    /// elements).
     pub fn wrap_bigint(b: &BigInt, bits: u64, signed: bool) -> BigInt {
         if bits == 0 {
             return BigInt::zero();
@@ -62,7 +53,6 @@ impl<'gc> Agent<'gc, '_> {
         r
     }
 
-    /// ToIndex: `undefined` is 0; an integer outside `[0, 2^53 − 1]` throws a RangeError.
     pub fn to_index(&mut self, v: Value<'gc>) -> Result<usize, Error> {
         if v == Value::Undefined {
             return Ok(0);
@@ -75,7 +65,6 @@ impl<'gc> Agent<'gc, '_> {
         Ok(n as usize)
     }
 
-    /// `++` / `--` (`delta` is ±1).
     pub fn increment(&mut self, v: Value<'gc>, delta: i8) -> Result<Value<'gc>, Error> {
         if let Some(x) = v.as_number() {
             return Ok((x + f64::from(delta)).into());
@@ -86,8 +75,6 @@ impl<'gc> Agent<'gc, '_> {
         })
     }
 
-    /// StringToBigInt: leading / trailing whitespace, `0x` / `0o` / `0b` prefixes, signed decimal; the empty string is
-    /// 0.
     pub fn parse_bigint(s: &str) -> Option<BigInt> {
         let t = s.trim_matches(|c: char| (c.is_whitespace() && c != '\u{85}') || c == '\u{feff}');
         if t.is_empty() {
@@ -112,19 +99,16 @@ impl<'gc> Agent<'gc, '_> {
             return Some(if neg { -n } else { n });
         }
         let digits = &t.as_bytes()[2..];
-        // num-bigint accepts underscores; the spec doesn't
         if digits.is_empty() || !digits.iter().all(|&c| char::from(c).is_digit(radix)) {
             return None;
         }
         BigInt::parse_bytes(digits, radix)
     }
 
-    /// An integral Number ⇒ BigInt (`None` if not an integer).
     pub fn number_to_bigint(x: f64) -> Option<BigInt> {
         (x.is_finite() && libm::trunc(x) == x).then(|| BigInt::from_f64(x)).flatten()
     }
 
-    /// Compare a BigInt and a Number by mathematical value (NaN is incomparable).
     pub fn cmp_bigint_number(a: &BigInt, x: f64) -> Option<Ordering> {
         if x.is_nan() {
             return None;
@@ -141,8 +125,6 @@ impl<'gc> Agent<'gc, '_> {
         })
     }
 
-    /// The numeric part of relational comparison (both sides already primitives, not both strings): `None` means
-    /// incomparable.
     pub(crate) fn numeric_order(&mut self, l: Value<'gc>, r: Value<'gc>) -> Result<Option<Ordering>, Error> {
         Ok(match (l.kind(), r.kind()) {
             (ValueKind::BigInt(a), ValueKind::String(s)) => Self::parse_bigint(&s).map(|b| a.0.cmp(&b)),
@@ -156,7 +138,6 @@ impl<'gc> Agent<'gc, '_> {
         })
     }
 
-    /// Shift: shifts left when `left` is true, reversed for a negative amount; right shifts round toward −∞.
     fn shift(&self, a: &BigInt, by: &BigInt, left: bool) -> Result<BigInt, Error> {
         let n = by.to_i64().filter(|n| n.abs() <= MAX_SHIFT).ok_or_else(|| self.throw(ErrorKind::Range, "Maximum BigInt size exceeded"))?;
         let n = if left { n } else { -n };
@@ -164,14 +145,12 @@ impl<'gc> Agent<'gc, '_> {
         Ok(if n >= 0 { a << amount } else { a >> amount })
     }
 
-    /// A binary operation on two BigInts.
     pub(crate) fn bigint_binary(&self, op: BinaryOp, a: &BigInt, b: &BigInt) -> Result<Value<'gc>, Error> {
         let r = match op {
             BinaryOp::Add => a + b,
             BinaryOp::Sub => a - b,
             BinaryOp::Mul => a * b,
             BinaryOp::Div | BinaryOp::Rem if b.is_zero() => return Err(self.throw(ErrorKind::Range, "Division by zero")),
-            // num-bigint's / and % both round toward 0, matching the spec
             BinaryOp::Div => a / b,
             BinaryOp::Rem => a % b,
             BinaryOp::Exp => {
@@ -196,7 +175,6 @@ impl<'gc> Agent<'gc, '_> {
     }
 }
 
-/// Evenness check (for the sign of `(±1)^e`).
 trait Parity {
     fn is_even(&self) -> bool;
 }

@@ -7,7 +7,7 @@ license.workspace = true
 autotests = false
 repository.workspace = true
 readme = "README.md"
-# 只发库本身：tests/test262 子模块有五万多个文件，crates.io 收不下
+# Publish only the library: the tests/test262 submodule has over fifty thousand files, too many for crates.io
 include = ["/src", "/tests/binding.rs", "/tests/runtime.rs", "/tests/bindings_more.rs", "/tests/event_loop.rs", "/tests/terminate.rs", "/README.md", "/README.zh-CN.md", "/EMBEDDING.md", "/LICENSE"]
 
 [lib]
@@ -29,30 +29,30 @@ j8compiler = { workspace = true, optional = true }
 j8jit = { workspace = true, optional = true }
 j8napi = { workspace = true, optional = true }
 
-# 根包按 feature 分发；每个子 crate 也单独发在 crates.io，可以直接依赖
+# The root package re-exports by feature; every sub-crate is also published on crates.io and can be depended on directly
 [features]
 default = ["runtime"]
-# 跑 JS 的一套：执行器 + 内建对象 + 标准平台
+# Everything to run JS: executor + built-ins + standard platform
 runtime = ["executor", "builtins", "platform"]
-# j8::bytecode：字节码定义（JSON 生成）、汇编 / 反汇编
+# j8::bytecode: the bytecode (V8 Ignition, tables generated from V8's headers), encoder / decoder
 bytecode = ["dep:j8bytecode"]
-# j8::compiler：JS ⇒ 字节码（oxc 解析）
+# j8::compiler: JS ⇒ bytecode (oxc parses)
 compiler = ["dep:j8compiler", "bytecode"]
-# j8::executor：字节码执行器，实现 Engine
+# j8::executor: the bytecode executor, implements Engine
 executor = ["dep:j8executor", "compiler"]
-# j8::builtins：内建对象（Intrinsics 的实现）
+# j8::builtins: built-in objects (the Intrinsics implementation)
 builtins = ["dep:j8builtins"]
-# j8::platform：Platform 的标准库实现
+# j8::platform: the standard-library Platform
 platform = ["dep:j8platform"]
-# j8::taskqueue：无锁数据流任务队列
+# j8::taskqueue: lock-free dataflow task queue
 taskqueue = ["dep:j8taskqueue"]
-# j8::lockfree：无锁基础件
+# j8::lockfree: lock-free building blocks
 lockfree = []
-# j8::jit：字节码 ⇒ MLIR ⇒ x86-64 机器码 + JIT 调度（x86-64 Unix）
+# j8::jit: the speculative JIT, bytecode ⇒ x86-64 machine code (x86-64 Unix)
 jit = ["executor", "dep:j8jit"]
 # j8::Json<T>: Rust values crossing as JSON-shaped data through serde
 json = ["j8binding/json"]
-# j8::napi：Node-API（原生插件链接的 C 接口）
+# j8::napi: Node-API (the C interface native addons link against)
 napi = ["dep:j8napi"]
 full = ["runtime", "taskqueue", "lockfree", "jit", "json", "napi"]
 
@@ -143,6 +143,8 @@ module_name_repetitions = "allow"
 doc_markdown = "allow"
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"
+# Source files carry no comments: safety contracts are documented in the guides
+missing_safety_doc = "allow"
 must_use_candidate = "allow"
 # JS numeric semantics are exact comparisons by definition
 float_cmp = "allow"

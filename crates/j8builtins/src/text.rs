@@ -10,27 +10,24 @@ use unicode_normalization::UnicodeNormalization;
 
 use crate::{Args, Installer};
 
-/// The remaining String / Number / Math / Symbol / URI functions.
 struct Texts;
 
-/// Upper bound on fraction digits / significant digits
 const MAX_DIGITS: f64 = 100.0;
-/// Beyond this, toFixed falls back to ToString
+
 const FIXED_LIMIT: f64 = 1e21;
-/// Exponent of the smallest f64 subnormal (2^-1074)
+
 const MIN_EXP: i64 = 1074;
-/// Number of f64 mantissa bits (including the implicit bit)
+
 const MANTISSA_BITS: u64 = 53;
-/// Largest code point
+
 const MAX_CODE_POINT: f64 = 1_114_111.0;
-/// Reserved characters left unescaped in URIs
+
 const URI_RESERVED: &str = ";/?:@&=+$,";
-/// Unreserved punctuation left unescaped in URIs
+
 const URI_MARK: &str = "-_.!~*'()";
-/// Punctuation that `escape` leaves unescaped
+
 const ESCAPE_KEEP: &str = "@*_+-./";
 
-/// Normalization form.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Form {
     Nfc,
@@ -40,10 +37,7 @@ enum Form {
 }
 
 impl Texts {
-    // ---- String ----
-
     fn from_char_code<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        // A single non-surrogate code unit: encode it directly into a stack buffer (ToUint16 = low 16 bits of ToUint32)
         if let [v] = args {
             #[expect(clippy::cast_possible_truncation, reason = "ToUint16 just takes the low 16 bits")]
             let u = a.to_uint32(*v)? as u16;
@@ -76,7 +70,6 @@ impl Texts {
         Ok(a.string(&out).into())
     }
 
-    /// `String.raw(template, ...substitutions)`.
     fn raw<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let cooked = a.to_object(args.at(0))?;
         let literals = a.get_named(cooked.into(), "raw")?;
@@ -167,7 +160,6 @@ impl Texts {
         Ok(a.string(&out).into())
     }
 
-    /// `substr(start, length)` (annexB).
     fn substr<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let s = Self::this_string(a, this)?;
         let units: Vec<u16> = s.encode_utf16().collect();
@@ -185,7 +177,6 @@ impl Texts {
         Ok(a.string(&String::from_utf16_lossy(&units[s0..e0])).into())
     }
 
-    /// Annex B HTML methods: `<tag attr="value">s</tag>`.
     fn html<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>], tag: &str, attr: Option<&str>) -> Result<Value<'gc>, Error> {
         let s = Self::this_string(a, this)?;
         let mut open = alloc::format!("<{tag}");
@@ -196,8 +187,6 @@ impl Texts {
         Ok(a.string(&alloc::format!("{open}>{}</{tag}>", &**s)).into())
     }
 
-    // ---- Number ----
-
     fn this_number<'gc>(a: &Agent<'gc, '_>, this: Value<'gc>, method: &str) -> Result<f64, Error> {
         match this.unwrapped().kind() {
             ValueKind::Number(x) => Ok(x),
@@ -205,7 +194,6 @@ impl Texts {
         }
     }
 
-    /// round_half_up(x · 10^k), computed exactly; `x` is non-negative and finite.
     fn scaled(x: f64, k: i64) -> BigInt {
         let bits = x.to_bits();
         let exp = i64::try_from((bits >> 52) & 0x7ff).unwrap_or(0);
@@ -227,8 +215,6 @@ impl Texts {
         (num * 2 + &den) / (den * 2)
     }
 
-    /// Decimal significand `n` (exactly `digits` digits) and exponent `e` such that n · 10^(e − digits + 1) is closest
-    /// to x.
     fn significant(x: f64, digits: i64) -> (String, i64) {
         #[expect(clippy::cast_possible_truncation, reason = "exponent is within ±400")]
         let mut ei = libm::floor(libm::log10(x)) as i64;
@@ -290,7 +276,6 @@ impl Texts {
             let fd = if args.at(0) == Value::Undefined { 0 } else { f as usize };
             Self::exponential(&"0".repeat(fd + 1), 0)
         } else if args.at(0) == Value::Undefined {
-            // Shortest digit count that round-trips
             let shortest = String::from(ryu_js::Buffer::new().format(ax));
             let digits: String = shortest.split('e').next().unwrap_or("").chars().filter(char::is_ascii_digit).collect::<String>().trim_start_matches('0').trim_end_matches('0').into();
             let digits = if digits.is_empty() { String::from("0") } else { digits };
@@ -344,8 +329,6 @@ impl Texts {
         Ok(matches!(args.at(0).kind(), ValueKind::Number(x) if x.is_finite()).into())
     }
 
-    // ---- Math ----
-
     fn unary<'gc>(a: &mut Agent<'gc, '_>, args: &[Value<'gc>], f: fn(f64) -> f64) -> Result<Value<'gc>, Error> {
         Ok(f(a.to_number(args.at(0))?).into())
     }
@@ -369,7 +352,6 @@ impl Texts {
         Ok(f64::from(x.wrapping_mul(y)).into())
     }
 
-    /// `Math.random`: xorshift64*, seeded from the wall clock on first use.
     fn random<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let mut s = a.realm.random_state.load(core::sync::atomic::Ordering::Relaxed);
         if s == 0 {
@@ -385,7 +367,6 @@ impl Texts {
         Ok(x.into())
     }
 
-    /// `Math.sumPrecise(items)`: exact sum, rounded once.
     fn sum_precise<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let items = args.at(0);
         if items.is_nullish() {
@@ -421,7 +402,6 @@ impl Texts {
         Ok(Self::to_f64(&sum).into())
     }
 
-    /// Finite f64 ⇒ integer (in units of 2^-1074).
     fn exact(x: f64) -> BigInt {
         let bits = x.to_bits();
         let exp = i64::try_from((bits >> 52) & 0x7ff).unwrap_or(0);
@@ -431,7 +411,6 @@ impl Texts {
         if x < 0.0 { -v } else { v }
     }
 
-    /// Integer in units of 2^-1074 ⇒ nearest f64 (ties to even).
     fn to_f64(n: &BigInt) -> f64 {
         if n.is_zero() {
             return 0.0;
@@ -457,8 +436,6 @@ impl Texts {
         if neg { -v } else { v }
     }
 
-    // ---- Symbol ----
-
     fn symbol_for<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let key = a.to_string(args.at(0))?;
         let registry = &a.realm.realm().get().symbol_registry;
@@ -466,7 +443,6 @@ impl Texts {
             return Ok(s.into());
         }
         let fresh: JsSymbol<'gc> = a.mc.alloc(SymbolData { description: Some((&**key).into()), private: false });
-        // Another thread may have registered the key meanwhile: then its symbol wins
         let s = registry.update_with(a.mc, |entries| {
             let mut entries = entries.clone();
             let found = entries.iter().find(|(k, _)| ***k == **key).map(|&(_, s)| s);
@@ -494,8 +470,6 @@ impl Texts {
         }
     }
 
-    // ---- BigInt ----
-
     fn as_n<'gc>(a: &mut Agent<'gc, '_>, args: &[Value<'gc>], signed: bool) -> Result<Value<'gc>, Error> {
         let bits = a.to_index(args.at(0))?;
         let b = a.to_bigint(args.at(1))?;
@@ -516,8 +490,6 @@ impl Texts {
             _ => Err(a.throw(ErrorKind::Type, "BigInt.prototype.toLocaleString requires that 'this' be a BigInt")),
         }
     }
-
-    // ---- URI ----
 
     fn encode<'gc>(a: &mut Agent<'gc, '_>, v: Value<'gc>, keep: &str) -> Result<Value<'gc>, Error> {
         let s = a.to_string(v)?;
@@ -607,7 +579,6 @@ impl Texts {
         Self::decode(a, args.at(0), "")
     }
 
-    /// `escape` (annexB).
     fn escape<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let s = a.to_string(args.at(0))?;
         let mut out = String::new();
@@ -621,7 +592,6 @@ impl Texts {
         Ok(a.string(&out).into())
     }
 
-    /// `unescape` (annexB).
     fn unescape<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let s = a.to_string(args.at(0))?;
         let units: Vec<u16> = s.encode_utf16().collect();
@@ -657,7 +627,6 @@ impl Texts {
     }
 }
 
-/// A group of host functions: each name maps to a closure body (`$body` gets `a` / `this` / `args`).
 macro_rules! natives {
     ($($name:ident($a:ident, $this:ident, $args:ident) $body:block)*) => {
         impl Texts {
@@ -726,12 +695,10 @@ impl<'gc> Installer<'_, 'gc> {
         for (name, f, n) in methods {
             self.method(sp, name, f, n);
         }
-        // trimLeft / trimRight are the same functions as trimStart / trimEnd
         for (alias, original) in [("trimLeft", "trimStart"), ("trimRight", "trimEnd")] {
             let f = sp.borrow().own(self.mc, original).unwrap_or_default();
             self.set(sp, alias, f);
         }
-        // Number
         if let Some(ctor) = self.global_fn("Number").as_object() {
             self.method(ctor, "isFinite", Texts::is_finite, 1);
             for name in ["parseFloat", "parseInt"] {
@@ -744,7 +711,6 @@ impl<'gc> Installer<'_, 'gc> {
         self.method(np, "toExponential", Texts::to_exponential, 1);
         self.method(np, "toPrecision", Texts::to_precision, 1);
         self.method(np, "toLocaleString", Texts::to_locale_string, 0);
-        // Math
         if let Some(m) = self.global_fn("Math").as_object() {
             let math: [(&str, j8framework::NativeFn, u32); 12] = [
                 ("sinh", Texts::sinh, 1),
@@ -764,20 +730,17 @@ impl<'gc> Installer<'_, 'gc> {
                 self.method(m, name, f, n);
             }
         }
-        // Symbol
         if let Some(ctor) = self.global_fn("Symbol").as_object() {
             self.method(ctor, "for", Texts::symbol_for, 1);
             self.method(ctor, "keyFor", Texts::key_for, 1);
         }
         let tp = r.named_native(self.mc, Texts::symbol_to_primitive, "[Symbol.toPrimitive]", 1);
         r.symbol_proto.borrow_mut(self.mc).define_symbol(r.symbols.to_primitive, j8framework::Property { slot: j8framework::Slot::Data(tp.into()), enumerable: false, writable: false, configurable: true });
-        // BigInt
         if let Some(ctor) = self.global_fn("BigInt").as_object() {
             self.method(ctor, "asIntN", Texts::as_int_n, 2);
             self.method(ctor, "asUintN", Texts::as_uint_n, 2);
         }
         self.method(r.bigint_proto, "toLocaleString", Texts::bigint_to_locale_string, 0);
-        // URI
         let g = r.global;
         self.method(g, "encodeURI", Texts::encode_uri, 1);
         self.method(g, "encodeURIComponent", Texts::encode_uri_component, 1);

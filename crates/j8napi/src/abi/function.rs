@@ -1,4 +1,3 @@
-//! 函数与类：创建、调用、`new`、回调信息、`napi_define_class`。
 use core::ffi::{c_char, c_void};
 
 use j8framework::{Descriptor, Key, Property};
@@ -7,7 +6,6 @@ use crate::convert::Ffi;
 use crate::{Attributes, Callback, CallbackInfo, Env, Handle, PropertyDescriptor, Status, napi};
 
 impl Env {
-    /// C 字符串名字（空指针是空名）
     fn label<'s>(name: *const c_char, length: usize) -> Result<alloc::borrow::Cow<'s, str>, Status> {
         if name.is_null() { Ok(alloc::borrow::Cow::Borrowed("")) } else { Ffi::utf8(name, length) }
     }
@@ -48,17 +46,14 @@ napi! {
     }
 
     fn napi_get_cb_info(env, cbinfo: *mut CallbackInfo, argc: *mut usize, argv: *mut Handle, this_arg: *mut Handle, data: *mut *mut c_void) {
-        // SAFETY: 回调拿到的 `info`，回调返回前有效
         let info = unsafe { cbinfo.as_ref() }.ok_or(Status::InvalidArg)?;
         if !argv.is_null() {
             if argc.is_null() {
                 return Err(Status::InvalidArg);
             }
-            // SAFETY: 输入时是 `argv` 的长度
             let cap = unsafe { argc.read() };
             let undefined = env.push(j8framework::Value::Undefined);
             for i in 0..cap {
-                // SAFETY: 调用方给的 `cap` 个槽
                 unsafe { argv.add(i).write(info.args.get(i).copied().unwrap_or(undefined)) };
             }
         }
@@ -70,7 +65,6 @@ napi! {
 
     fn napi_get_new_target(env, cbinfo: *mut CallbackInfo, result: *mut Handle) {
         let _ = env;
-        // SAFETY: 回调拿到的 `info`
         let info = unsafe { cbinfo.as_ref() }.ok_or(Status::InvalidArg)?;
         Ffi::put(result, info.new_target)
     }

@@ -1,15 +1,7 @@
-//! `#[derive(Collect)]`: j8 堆类型的追踪 / 重定位（实现 paragc 的 `Trace`，经 `::j8framework::gc` 引用）。
-//!
-//! - 逐个字段调 `trace` / `relocate`；`NO_EDGES` 是参与字段的与
-//! - `#[collect(require_static)]` 放在字段上：不是 GC 边的数据（`Arc<Shape>`、`Box<dyn Any + Send + Sync>` 之类），不追踪，
-//!   也不要求实现 `Trace`；放在类型上：整个类型没有 GC 边
-//! - `#[collect(no_drop)]`：只为兼容旧写法，什么都不做（下面这条检查总是开着）
-//! - 有 GC 边的类型不许实现 `Drop`（析构顺序不定，`Drop` 里可能碰到已析构的对象），derive 会检查
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use syn::{Attribute, Data, DeriveInput, Fields, Ident, Type, parse_quote};
 
-/// 属性里有没有 `#[collect(require_static)]`
 fn is_static(attrs: &[Attribute]) -> syn::Result<bool> {
     let mut found = false;
     for attr in attrs.iter().filter(|a| a.path().is_ident("collect")) {
@@ -20,14 +12,13 @@ fn is_static(attrs: &[Attribute]) -> syn::Result<bool> {
             } else if meta.path.is_ident("no_drop") {
                 Ok(())
             } else {
-                Err(meta.error("只认 #[collect(require_static)] / #[collect(no_drop)]"))
+                Err(meta.error("expected #[collect(require_static)] or #[collect(no_drop)]"))
             }
         })?;
     }
     Ok(found)
 }
 
-/// 一个 match 分支：模式 + 参与追踪的绑定名与类型
 struct Arm {
     pattern: TokenStream,
     traced: Vec<(Ident, Type)>,
@@ -70,7 +61,7 @@ pub fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
                 Arm::of(&quote!(Self::#n), &v.fields)
             })
             .collect::<syn::Result<_>>()?,
-        Data::Union(_) => return Err(syn::Error::new_spanned(name, "union 不能 derive(Collect)")),
+        Data::Union(_) => return Err(syn::Error::new_spanned(name, "a union cannot derive(Collect)")),
     };
     let mut generics = input.generics.clone();
     let params: Vec<Ident> = generics.type_params().map(|p| p.ident.clone()).collect();
@@ -90,7 +81,6 @@ pub fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
     });
     let body = |arms: Vec<TokenStream>| if leaf { quote!() } else { quote!(#[allow(unused_variables)] match self { #(#arms)* }) };
     let (trace_body, relocate_body) = (body(trace_arms.collect()), body(relocate_arms.collect()));
-    // 没有边的类型可以有 Drop（析构里碰不到 Gc）
     let no_drop = (!types.is_empty()).then(|| {
         quote! {
             const _: () = {
@@ -102,7 +92,6 @@ pub fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
         }
     });
     Ok(quote! {
-        // SAFETY: 逐个字段追踪 / 重定位（require_static 的字段与类型不含 GC 边）
         unsafe impl #ig ::j8framework::Trace for #name #tg #wc {
             const NO_EDGES: bool = true #(&& <#types as ::j8framework::Trace>::NO_EDGES)*;
 

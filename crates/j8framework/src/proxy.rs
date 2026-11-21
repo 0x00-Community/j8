@@ -1,12 +1,9 @@
-//! Internal methods of Proxy (spec 10.5): each entry point first looks up the trap on the handler; if absent it
-//! forwards to the target, otherwise it calls the trap and then checks the invariants.
 use crate::ValueKind;
 use alloc::vec::Vec;
 
 use crate::property::validate;
 use crate::{Agent, Descriptor, Error, ErrorKind, JsObject, Key, ObjectKind, Property, PropertyKey, Slot, Value};
 
-/// Trap names on the handler.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Trap {
     GetPrototypeOf,
@@ -45,9 +42,7 @@ impl Trap {
 }
 
 impl<'gc> Agent<'gc, '_> {
-    /// If it is a Proxy, returns (target, handler); throws a TypeError if revoked.
     pub fn proxy_parts(&self, o: JsObject<'gc>) -> Option<Result<(JsObject<'gc>, JsObject<'gc>), Error>> {
-        // Plain objects are never proxies (no borrowing)
         if o.is_plain() {
             return None;
         }
@@ -60,7 +55,6 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    /// A trap on the handler: `None` for `undefined` / `null`; throws a TypeError if not callable.
     fn trap(&mut self, handler: JsObject<'gc>, trap: Trap) -> Result<Option<Value<'gc>>, Error> {
         match (self.get_named(handler.into(), trap.name())?).kind() {
             ValueKind::Undefined | ValueKind::Null => Ok(None),
@@ -69,7 +63,6 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    /// Key ⇒ value (an argument passed to the trap).
     pub fn key_value(&self, key: Key<'_, 'gc>) -> Value<'gc> {
         match key {
             Key::Str(s) => self.string(s).into(),
@@ -170,7 +163,6 @@ impl<'gc> Agent<'gc, '_> {
         Ok(Some(full))
     }
 
-    /// Partial descriptor ⇒ object (containing only the given fields).
     pub fn from_partial_descriptor(&mut self, d: &Descriptor<'gc>) -> Value<'gc> {
         let o = self.object();
         let data = o.borrow_mut(self.mc);
@@ -359,7 +351,6 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    /// [[Call]] of a Proxy.
     pub fn proxy_call(&mut self, o: JsObject<'gc>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let (target, handler) = self.proxy_parts(o).expect("a proxy")?;
         let Some(trap) = self.trap(handler, Trap::Apply)? else { return self.call(target.into(), this, args) };
@@ -367,7 +358,6 @@ impl<'gc> Agent<'gc, '_> {
         self.call(trap, handler.into(), &[target.into(), this, list.into()])
     }
 
-    /// [[Construct]] of a Proxy.
     pub fn proxy_construct(&mut self, o: JsObject<'gc>, args: &[Value<'gc>], new_target: Value<'gc>) -> Result<Value<'gc>, Error> {
         let (target, handler) = self.proxy_parts(o).expect("a proxy")?;
         let Some(trap) = self.trap(handler, Trap::Construct)? else { return self.construct(target.into(), args, new_target) };

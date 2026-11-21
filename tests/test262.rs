@@ -1,15 +1,3 @@
-//! test262 conformance tests (`harness = false`, part of the root package: `cargo test --release --test test262`).
-//!
-//! - No arguments: run only the cases in the baseline `tests/test262.passing`; fail if any regress (regression check)
-//! - With arguments: run these directories / files under `tests/test262/test/`,
-//!   e.g. `-- language/expressions/addition built-ins/Math`
-//! - `J8_TEST262_UPDATE=1`: write the results of the cases run this time back to the baseline
-//!   (entries not run are kept)
-//! - `J8_TEST262_VERBOSE=1`: print the reason for each failure
-//!
-//! Each case runs in a child process (this test binary started again with `J8_TEST262_CASE`): infinite loops are killed
-//! by a timeout, and crashes don't take other cases down.
-//! Modes: only non-strict mode is run, `onlyStrict` cases run in strict mode; `module` is skipped.
 use std::collections::BTreeSet;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -23,27 +11,24 @@ use j8executor::Executor;
 use j8framework::{CreateParams, Error, Isolate, Platform, Source, Task};
 use serde::Deserialize;
 
-
-/// test262 checkout (submodule)
 const ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/test262");
-/// Baseline: passing cases, one per line (relative to `test/`)
+
 const BASELINE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/test262.passing");
-/// The case a child process runs
+
 const CASE_ENV: &str = "J8_TEST262_CASE";
 const UPDATE_ENV: &str = "J8_TEST262_UPDATE";
 const VERBOSE_ENV: &str = "J8_TEST262_VERBOSE";
-/// Enable the JIT (threshold 0: every function is compiled on its first call) to cross-check machine code on all cases
+
 const JIT_ENV: &str = "J8_TEST262_JIT";
-/// Time limit for a single case
+
 const TIMEOUT: Duration = Duration::from_secs(10);
-/// Polling interval while waiting for a child process
+
 const POLL: Duration = Duration::from_millis(2);
-/// The line `$DONE` prints when an async case finishes
+
 const ASYNC_DONE: &str = "Test262:AsyncTestComplete";
-/// The summary table groups by the first few path segments
+
 const GROUP_DEPTH: usize = 2;
 
-/// Metadata in the `/*--- … ---*/` header of a case (only the keys we use).
 #[derive(Deserialize, Default)]
 struct Meta {
     #[serde(default)]
@@ -94,7 +79,6 @@ impl Phase {
     }
 }
 
-/// The error constructor expected to be thrown.
 #[derive(Deserialize, Clone, Copy, PartialEq, Eq)]
 enum ErrorType {
     SyntaxError,
@@ -123,18 +107,14 @@ impl ErrorType {
     }
 }
 
-/// The result of one case; the child process reports it through its exit code.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u8)]
 enum Outcome {
     Pass = 0,
     Fail = 1,
-    /// j8 reported `Error::Unsupported`
     Unsupported = 2,
-    /// Not run (`module`)
     Skip = 3,
     Timeout = 4,
-    /// The child process crashed (panic / stack overflow / killed by a signal)
     Crash = 5,
 }
 
@@ -167,7 +147,6 @@ impl TryFrom<i32> for Outcome {
     }
 }
 
-/// Single-threaded platform that captures `print` / `console.log`.
 struct Capture {
     start: Instant,
     lines: Mutex<Vec<String>>,
@@ -190,7 +169,6 @@ impl Platform for Capture {
         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default()
     }
 
-    /// Modules: relative paths resolve against the referrer's directory (referrer relative to `test/` or absolute).
     fn load_module(&self, referrer: &str, specifier: &str) -> Option<(String, String)> {
         let referrer = Suite::test_dir().join(referrer);
         let base = referrer.parent()?;
@@ -206,10 +184,8 @@ impl Platform for Capture {
     fn print(&self, line: &str) {
         self.lines.lock().expect("an unpoisoned log").push(line.into());
     }
-
 }
 
-/// One case file.
 struct Case {
     path: PathBuf,
     text: String,
@@ -230,7 +206,6 @@ impl Case {
         self.meta.flags.contains(&flag)
     }
 
-    /// The full source with the harness prepended.
     fn source(&self) -> Result<String, String> {
         if self.has(Flag::Raw) {
             return Ok(self.text.clone());
@@ -250,14 +225,12 @@ impl Case {
             src.push_str(&std::fs::read_to_string(&p).map_err(|e| format!("{}: {e}", p.display()))?);
             src.push('\n');
         }
-        // Module cases: the harness runs first as a script (global), the module is just the case itself
         if !self.has(Flag::Module) {
             src.push_str(&self.text);
         }
         Ok(src)
     }
 
-    /// Run in this process, returning the result and the reason.
     fn run(&self) -> (Outcome, String) {
         let src = match self.source() {
             Ok(s) => s,
@@ -311,22 +284,17 @@ impl Case {
     }
 }
 
-/// Host object `$262`: evalScript uses indirect eval, detachArrayBuffer borrows `transfer` (saved up front, so a case
-/// modifying the prototype doesn't affect it); createRealm is not implemented yet.
 const HOST_262: &str = "var $262 = (function (transfer) { return { global: globalThis, gc: function () {}, evalScript: function (s) { return (0, eval)(s); }, \
 createRealm: function () { throw new TypeError('createRealm is not supported'); }, \
 detachArrayBuffer: function (b) { transfer.call(b); return null; }, agent: {} }; })(ArrayBuffer.prototype.transfer);\n";
 
-/// Parent process: the child process's result for one case.
 struct Ran {
     rel: String,
     outcome: Outcome,
     why: String,
 }
 
-/// One run of the parent process.
 struct Suite {
-    /// Path relative to `test/`
     cases: Vec<String>,
     exe: PathBuf,
 }
@@ -340,7 +308,6 @@ impl Suite {
         std::fs::read_to_string(BASELINE).unwrap_or_default().lines().filter(|l| !l.is_empty()).map(String::from).collect()
     }
 
-    /// All cases under `dir` (`_FIXTURE` files are referenced by other cases and aren't run on their own)
     fn walk(dir: &Path, out: &mut Vec<String>) {
         let Ok(rd) = std::fs::read_dir(dir) else { return };
         for e in rd.flatten() {
@@ -392,7 +359,6 @@ impl Suite {
                 Ok(Some(s)) => break Some(s),
                 Ok(None) if start.elapsed() < TIMEOUT => std::thread::sleep(POLL),
                 _ => {
-                    // Already timed out; if it can't be killed, there's nothing more to do
                     let _ = child.kill();
                     let _ = child.wait();
                     break None;
@@ -410,7 +376,6 @@ impl Suite {
         Ran { rel: rel.into(), outcome, why: why.trim().into() }
     }
 
-    /// Run all cases in parallel (worker threads = half the CPU count, leaving headroom for other work).
     fn run(&self) -> Vec<Ran> {
         let jobs = std::thread::available_parallelism().map_or(1, |n| (n.get() / 2).max(1));
         let next = AtomicUsize::new(0);
@@ -431,7 +396,6 @@ impl Suite {
     }
 }
 
-/// Summary and comparison with the baseline.
 struct Report<'r> {
     ran: &'r [Ran],
 }
@@ -467,13 +431,10 @@ impl Report<'_> {
         }
     }
 
-    /// The first `GROUP_DEPTH` path segments
     fn group(rel: &str) -> &str {
         rel.match_indices('/').nth(GROUP_DEPTH - 1).map_or(rel, |(i, _)| &rel[..i])
     }
 
-    /// Compare with the baseline and return the regressed cases. With `update`, write this run's results back to the
-    /// baseline.
     fn against_baseline(&self, update: bool) -> Result<Vec<&str>, String> {
         let base = Suite::baseline();
         let passing: BTreeSet<&str> = self.ran.iter().filter(|r| r.outcome == Outcome::Pass).map(|r| r.rel.as_str()).collect();
@@ -503,7 +464,6 @@ fn main() -> ExitCode {
         }
         return outcome.into();
     }
-    // cargo test also passes flags like `--quiet`; only paths are recognized
     let filters: Vec<String> = std::env::args().skip(1).filter(|a| !a.starts_with('-')).collect();
     let suite = match Suite::new(&filters) {
         Ok(s) => s,

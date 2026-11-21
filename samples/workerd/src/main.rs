@@ -1,10 +1,3 @@
-//! workerd: a minimal host that loads Cloudflare Workers (ES modules) and Durable Objects with j8.
-//!
-//! ```text
-//! workerd examples/counter.js --bind COUNTER=Counter --request "GET /counter/inc?name=a"
-//! workerd examples/counter.js --bind COUNTER=Counter --port 8787
-//! workerd examples/chat.js --bind ROOM=ChatRoom --port 0 --instances 1000
-//! ```
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -15,35 +8,32 @@ use j8::executor::{CodeCache, Executor};
 use j8::platform::DefaultPlatform;
 use workerd::{Worker, Workerd, ws};
 
-/// Load a Worker and call its `fetch` for each request
 #[derive(Parser)]
+#[command(about = "Load a Worker and call its `fetch` for each request")]
 #[command(name = "workerd", version)]
 struct Cli {
-    /// Worker script (ES module, `export default { fetch }`)
+    #[arg(help = "Worker script (ES module, `export default { fetch }`)")]
     script: PathBuf,
-    /// Durable Object binding: `name in env=exported class name`
+    #[arg(help = "Durable Object binding: `name in env=exported class name`")]
     #[arg(long = "bind", value_name = "NAME=CLASS")]
     bindings: Vec<String>,
-    /// One-shot request: `"METHOD path"`, may be repeated; if given, no server is started
+    #[arg(help = "One-shot request: `\"METHOD path\"`, may be repeated; if given, no server is started")]
     #[arg(long = "request", value_name = "METHOD PATH")]
     requests: Vec<String>,
-    /// Port for the HTTP / WebSocket server (`0` picks a free one, printed on stderr)
+    #[arg(help = "Port for the HTTP / WebSocket server (`0` picks a free one, printed on stderr)")]
     #[arg(long, default_value_t = 8787)]
     port: u16,
-    /// Directory for Durable Objects' SQL storage (one SQLite file per object); in memory when not given. With several
-    /// instances, instance `i` keeps its storage in `<storage>/<i>`
+    #[arg(help = "Directory for Durable Objects' SQL storage (one SQLite file per object); in memory when not given. With several instances, instance `i` keeps its storage in `<storage>/<i>`")]
     #[arg(long)]
     storage: Option<PathBuf>,
-    /// How many copies of the Worker to serve, each its own runtime on its own port (`--port` + its index, or a free
-    /// one each with `--port 0`), all in one event loop set
+    #[arg(help = "How many copies of the Worker to serve, each its own runtime on its own port (`--port` + its index, or a free one each with `--port 0`), all in one event loop set")]
     #[arg(long, default_value_t = NonZeroUsize::MIN)]
     instances: NonZeroUsize,
-    /// Loop threads the instances run on (default: one per instance, at most one per CPU)
+    #[arg(help = "Loop threads the instances run on (default: one per instance, at most one per CPU)")]
     #[arg(long)]
     threads: Option<NonZeroUsize>,
 }
 
-/// Copies of one Worker to start
 struct Fleet<'a> {
     script: &'a str,
     bindings: &'a [(String, String)],
@@ -55,7 +45,6 @@ struct Fleet<'a> {
 }
 
 impl Fleet<'_> {
-    /// Where instance `i` keeps its storage
     fn storage(&self, i: usize) -> Result<String, String> {
         if self.storage.is_empty() || self.instances == 1 {
             return Ok(self.storage.to_owned());
@@ -65,7 +54,6 @@ impl Fleet<'_> {
         Ok(dir)
     }
 
-    /// The port instance `i` asks for
     fn port(&self, i: usize) -> Result<u16, String> {
         if self.port == 0 {
             return Ok(0);
@@ -80,7 +68,6 @@ impl Fleet<'_> {
         Ok((w, port))
     }
 
-    /// Starts every instance, `hosts` at a time; gives them with their ports, by index
     fn start<'p>(&self, set: &j8::EventLoopSet<'_, 'p, Executor>, hosts: usize) -> Result<Vec<(Worker<'p>, u16)>, String> {
         let mut started: Vec<(usize, (Worker<'p>, u16))> = std::thread::scope(|s| {
             let handles: Vec<_> = (0..hosts).map(|h| s.spawn(move || (h..self.instances).step_by(hosts).map(|i| self.one(set, i).map(|w| (i, w))).collect::<Result<Vec<_>, String>>())).collect();
@@ -124,7 +111,6 @@ fn main() -> ExitCode {
         }
     };
     let platform = Workerd::platform(DefaultPlatform::default());
-    // One epoll thread for every socket of every instance
     let reactor_thread = match ws::ReactorThread::start() {
         Ok(r) => r,
         Err(e) => {
@@ -133,7 +119,6 @@ fn main() -> ExitCode {
         }
     };
     let reactor = reactor_thread.reactor();
-    // The prelude and the Worker's modules compile once for every instance
     let code = CodeCache::shared();
     let instances = cli.instances.get();
     let threads = cli.threads.unwrap_or_else(|| std::thread::available_parallelism().unwrap_or(NonZeroUsize::MIN).min(cli.instances));

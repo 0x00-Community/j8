@@ -2,13 +2,10 @@ use j8framework::{Agent, Error, Value};
 
 use crate::{Args, Installer};
 
-/// `Math`.
 struct Math;
 
-/// Unary math functions.
 type Unary = fn(f64) -> f64;
 
-/// Table of unary math functions: name ⇒ implementation.
 const UNARY: [(&str, Unary); 19] = [
     ("abs", libm::fabs),
     ("floor", libm::floor),
@@ -36,13 +33,10 @@ impl Math {
         if x.is_nan() || x == 0.0 { x } else { x.signum() }
     }
 
-    /// Take the first argument as a number and look up the implementation by name in the table (host functions are
-    /// function pointers that can't carry state, so each name needs its own entry point).
     fn unary<'gc, const N: usize>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         Ok((UNARY[N].1)(a.to_number(args.at(0))?).into())
     }
 
-    /// `Math.round`: round to nearest, exact halves toward +∞.
     fn round<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let x = a.to_number(args.at(0))?;
         let f = libm::floor(x);
@@ -58,7 +52,6 @@ impl Math {
         Ok(libm::atan2(a.to_number(args.at(0))?, a.to_number(args.at(1))?).into())
     }
 
-    /// `max` / `min`: NaN if any argument is NaN; `+0` is greater than `-0`.
     fn extreme<'gc>(a: &mut Agent<'gc, '_>, args: &[Value<'gc>], max: bool) -> Result<Value<'gc>, Error> {
         let mut acc = if max { f64::NEG_INFINITY } else { f64::INFINITY };
         for &v in args {

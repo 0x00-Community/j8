@@ -1,8 +1,7 @@
-//! `dune repl`: the interactive REPL (also what `dune` with no arguments starts).
 use crate::job::Job;
 
-/// Interactive REPL (the default with no arguments)
 #[derive(clap::Args)]
+#[command(about = "Interactive REPL (the default with no arguments)")]
 pub struct Repl;
 
 impl From<Repl> for Job {

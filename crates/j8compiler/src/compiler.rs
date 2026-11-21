@@ -1,9 +1,3 @@
-//! JS ⇒ V8 bytecode: scopes, functions, statements, after V8's `BytecodeGenerator`. Expressions are in `expr.rs`.
-//!
-//! Variables live where V8 puts them: a function's own variables in registers (parameters are `a0` …, `this` the
-//! receiver), variables inner functions capture in context slots (a context per scope level that has any), top-level
-//! script `var`s / functions on the global object (`DeclareGlobals`), top-level script `let` / `const` / `class` in the
-//! script context, names inside `with` or reachable by a sloppy direct eval looked up by name (`LdaLookupSlot`).
 use std::collections::HashSet;
 
 use oxc_allocator::Allocator;
@@ -17,22 +11,18 @@ use crate::builder::{Builder, JumpTable, Label, RegisterList};
 use crate::scope::{Decl, DeclKind, Decls, Hidden, Key, Resolver, NEW_TARGET, THIS};
 use j8bytecode::{Bytecode, ClassBoilerplate, ClassMember, Constant, Context, ContextVariable, MemberKind, CreateClosureFlags, FunctionKind, GlobalDeclaration, Module, Register, Runtime, ScopeInfo, ScopeType, SharedFunction, VariableMode};
 
-/// finally continuation token: entered with an exception, rethrows on exit (V8's `kRethrowToken`)
 const COMPLETION_THROW: i32 = j8bytecode::ContinuationToken::RETHROW;
-/// finally continuation token: entered with a return value, keeps returning on exit
+
 const COMPLETION_RETURN: i32 = 1;
-/// finally continuation token: the n-th detoured break / continue is this number plus n
+
 const COMPLETION_ROUTE: i32 = 2;
-/// finally continuation token: normal fall-through (V8's `kFallthroughToken`)
+
 const COMPLETION_NORMAL: i32 = j8bytecode::ContinuationToken::FALLTHROUGH;
 
-/// Where a name is bound.
 #[derive(Clone, Copy)]
 enum Binding {
     Reg(Register),
-    /// A slot of this level's context (the slot index includes the context's fixed slots)
     Context(u32),
-    /// A module import cell (V8's `LdaModuleVariable`: imports are negative cell indices)
     Import(i32),
 }
 
@@ -40,47 +30,31 @@ struct Bound<'a> {
     name: &'a str,
     binding: Binding,
     constant: bool,
-    /// The temporal dead zone ends at this position (`u32::MAX`: always check)
     ready: Option<u32>,
-    /// The own name of a named function expression (immutable)
     self_name: bool,
 }
 
-/// Binding name for `export default expression` / an anonymous default export
 const DEFAULT_BINDING: &str = "*default*";
 
-/// One scope level during code generation.
 struct Level<'a> {
-    /// Which function level it belongs to (index into `frames`; `usize::MAX`: the module scope)
     func: usize,
     names: Vec<Bound<'a>>,
-    /// This level has a context: the register holding the outer context while it is current
     context: Option<Register>,
-    /// The constant pool entry of its context's scope info
     scope: Option<usize>,
-    /// Its context slots are accessed with context cells (V8's `has_context_cells`: the script context)
     cells: bool,
-    /// Names not bound here may still be found at run time (a `with` object, `var`s a sloppy direct eval adds): they
-    /// are looked up by name
     dynamic: bool,
-    /// The register stack top before entering, restored on exit
     mark: i32,
-    /// The level of a `switch`: cases may skip over declarations, so TDZ checks cannot be elided
     switch: bool,
 }
 
-/// Result of name resolution: where it is, whether it is constant, and whether reads / writes need a TDZ check (giving
-/// the position where the declaration ends).
 #[derive(Clone, Copy)]
 pub struct Resolved<'a> {
     pub place: Place<'a>,
     pub constant: bool,
-    /// `Some(ready)`: a check is needed if the use is before `ready`, or the binding is in a context / in a `switch`
     pub tdz: Option<(u32, bool)>,
 }
 
 impl Resolved<'_> {
-    /// Whether a use at `pos` needs a TDZ check.
     pub fn needs_check(&self, pos: u32) -> bool {
         match self.tdz {
             Some((ready, always)) => always || pos < ready,
@@ -89,30 +63,24 @@ impl Resolved<'_> {
     }
 }
 
-/// Where a name lives.
 #[derive(Clone, Copy)]
 pub enum Place<'a> {
     Reg(Register),
     Context { depth: u32, slot: u32, cells: bool },
     Global(&'a str),
     Import(i32),
-    /// Looked up by name at run time (inside `with`, under a sloppy direct eval, from eval code)
     Lookup(&'a str),
 }
 
-/// Where a `break` / `continue` goes.
 struct Jump<'a> {
     label: Option<&'a str>,
-    /// Whether an unlabeled `break` can exit it (loops and `switch` can, labeled blocks cannot)
     breakable: bool,
     continuable: bool,
     breaks: Label,
     continues: Label,
-    /// How many contexts this function had pushed on entering it: jumping out must pop the extra ones
     contexts: Vec<Register>,
 }
 
-/// A `break` / `continue` passing through a finally: the jump continues after the finally runs.
 #[derive(Clone, Copy)]
 struct Route<'a> {
     span: Span,
@@ -120,8 +88,6 @@ struct Route<'a> {
     cont: bool,
 }
 
-/// A finally (V8's `TryFinallyBuilder` + `ControlScopeForTryFinally`): registers for the continuation token and
-/// value, where it is entered, and the detoured jumps.
 struct Finally<'a> {
     token: Register,
     value: Register,
@@ -130,20 +96,14 @@ struct Finally<'a> {
     routes: Vec<Route<'a>>,
 }
 
-/// One level of the control stack: jump targets, a `try` region, a finally.
 enum Control<'a> {
     Jump(Jump<'a>),
-    /// Inside a `try` block (handled by the handler table: nothing to undo when jumping out)
     Handler,
     Finally(Finally<'a>),
-    /// The iterator of a `for-of` (its record is in these three registers: iterator, next, done): must be closed before
-    /// jumping out
     Iterator(Register),
-    /// The iterator of a `for await` (iterator, next, done, sync): jumping out must call `return` and await it
     AsyncIterator(Register),
 }
 
-/// What kind of function, before V8's `FunctionKind` is picked (with generator / async from the flavor).
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 pub enum Kind {
     #[default]
@@ -153,24 +113,18 @@ pub enum Kind {
     Getter,
     Setter,
     Constructor { derived: bool },
-    /// Class field / static block initializers
     Initializer { statik: bool },
 }
 
-/// Function kind and flavor (generator, async).
 #[derive(Clone, Copy, Default)]
 pub struct Flavor {
     pub kind: Kind,
     pub generator: bool,
     pub asynchronous: bool,
-    /// Strict on its own (`'use strict'` at the start of the body, inside a class body); strictness of an enclosing
-    /// scope is inherited regardless
     pub strict: bool,
-    /// A static class member
     pub statik: bool,
 }
 
-/// Flavor of a function node: generator / async from the node, kind given by the caller.
 impl From<(&AstFunction<'_>, Kind)> for Flavor {
     fn from((f, kind): (&AstFunction<'_>, Kind)) -> Self {
         let strict = f.body.as_ref().is_some_and(|b| Self::use_strict(&b.directives));
@@ -185,12 +139,10 @@ impl From<Kind> for Flavor {
 }
 
 impl Flavor {
-    /// Whether the directive prologue contains `'use strict'` (written exactly so, without escapes).
     pub fn use_strict(directives: &[Directive<'_>]) -> bool {
         directives.iter().any(|d| d.directive.as_str() == "use strict")
     }
 
-    /// V8's `FunctionKind` for this flavor (`default`: a class without a `constructor`)
     pub fn v8_kind(self, default: bool) -> FunctionKind {
         let (g, a, s) = (self.generator, self.asynchronous, self.statik);
         match self.kind {
@@ -226,14 +178,12 @@ impl Flavor {
     }
 }
 
-/// Where a jump out lands: the jump target / finally of a control stack level, or leaving the function directly.
 enum Exit {
     Jump(usize),
     Finally(usize),
     Function,
 }
 
-/// A function being compiled.
 #[expect(clippy::struct_excessive_bools, reason = "state of a function being compiled: several unrelated flags")]
 struct Frame<'a> {
     index: usize,
@@ -243,44 +193,26 @@ struct Frame<'a> {
     default_constructor: bool,
     length: u16,
     formals: u16,
-    /// The function context's layout, when the function level has a context
     scope: Option<ScopeInfo>,
-    /// The registers saving the outer contexts of the contexts this function has pushed so far (innermost last)
     contexts: Vec<Register>,
-    /// How many loops enclose the current position (`JumpLoop`'s depth operand)
     loop_depth: u32,
     controls: Vec<Control<'a>>,
-    /// The label for the next loop / `switch`
     label: Option<&'a str>,
-    /// The script's completion value goes here (only the script itself has one)
     completion: Option<Register>,
-    /// The generator object of a generator / async function (V8's generator register)
     generator: Option<Register>,
-    /// Suspend points so far (`SuspendGenerator` ids)
     suspends: u32,
-    /// The binding of the home object `super.x` reads (methods and arrow functions in them)
     home: Option<&'static str>,
-    /// The resume points' jump table (`SwitchOnGeneratorState` at the top dispatches on the suspend id)
     resume_table: Option<JumpTable>,
-    /// Async generator: `yield` / `return` await the value first
     async_generator: bool,
-    /// Strict mode
     strict: bool,
-    /// annexB: block-level functions whose value must be written to the outer `var` when execution reaches the
-    /// declaration (by start position of the function node)
     annexb: Vec<u32>,
-    /// Index of the function-level scope (where `var`s live); global for a script
     var_level: Option<usize>,
-    /// Eval code: names not bound in it are looked up by name
     eval: bool,
-    /// Compiling the parameter prologue (an eval here cannot see the body's lexical declarations)
     prologue: bool,
-    /// All parameters are simple names (no default values, destructuring, or rest)
     simple_params: bool,
 }
 
 impl Frame<'_> {
-    /// The finished function
     fn finish(self) -> SharedFunction {
         SharedFunction {
             name: self.name,
@@ -294,54 +226,37 @@ impl Frame<'_> {
     }
 }
 
-/// A function body: statements, an arrow function's expression, class field initializers, a default constructor.
 #[derive(Clone, Copy)]
 pub enum Body<'a> {
     Statements(&'a [Statement<'a>]),
     Expression(&'a Expression<'a>),
-    /// Instance (`statik` false) or static fields of a class: defined one by one on `this`
     Fields { class: &'a Class<'a>, statik: bool },
-    /// A class without a `constructor`: a derived class forwards `super(...arguments)`
     DefaultConstructor { derived: bool },
 }
 
-/// V8's `JSGeneratorObject::ResumeMode`: how a generator is resumed (`GeneratorGetResumeMode`)
 const RESUME_NEXT: i32 = 0;
 const RESUME_RETURN: i32 = 1;
 const RESUME_THROW: i32 = 2;
 
 pub struct Compiler<'a, 's> {
     src: &'s Source<'s>,
-    /// The AST allocator: hidden binding names in class scopes (`#x` etc.) are allocated here too
     pub alloc: &'a Allocator,
-    /// Referenced bindings (`new.target` / `arguments` are prepared only if used)
     used: HashSet<Key>,
-    /// How many class bodies are being compiled (a class body is entirely strict code)
     class_depth: u32,
     captured: HashSet<Key>,
     module: Vec<SharedFunction>,
     frames: Vec<Frame<'a>>,
     levels: Vec<Level<'a>>,
-    /// Optional chains being compiled: in each chain, `?.` jumps to the end of the chain on null / undefined
     pub chains: Vec<Label>,
-    /// Functions containing a direct eval (by start position of the parameter list)
     eval_fns: HashSet<u32>,
-    /// Suspend points of each generator / async function, by start position of the parameter list
     suspends: std::collections::HashMap<u32, u32>,
-    /// Completion value (V8's `Rewriter`): expression statements that assign it, and statements before which it is
-    /// reset to `undefined` (by start position)
     completion_assign: HashSet<u32>,
     completion_reset: HashSet<u32>,
-    /// While entering a `for` head's scope: the source text of its initializers
     for_init_text: Option<&'a str>,
-    /// The classes whose bodies are being compiled (innermost last): what their private names are
     pub classes: Vec<ClassInfo<'a>>,
-    /// The home object binding of the next method compiled (`super.x` reads it)
     pub next_home: Option<&'static str>,
 }
 
-/// What a private name of a class is: its binding holds a private symbol (field), the method itself, or the accessor
-/// pair; methods and accessors check the class's brand first.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Private {
     Field,
@@ -349,20 +264,13 @@ pub enum Private {
     Accessor { statik: bool, get: bool, set: bool },
 }
 
-/// A class being compiled.
 pub struct ClassInfo<'a> {
     pub privates: Vec<(&'a str, Private)>,
-    /// The bindings of its instance / static brand
     pub brands: [&'a str; 2],
-    /// The constructor brands its instances (it has private instance methods or accessors)
     pub brand: bool,
-    /// The constructor runs the instance members initializer (there are instance fields)
     pub fields: bool,
 }
 
-/// V8's `Rewriter` (`Processor`): which statements of a script / eval code produce its completion value. Statements
-/// are walked backwards; only the last value-producing statement assigns it, except inside breakable statements, where
-/// a `break` / `continue` makes the one before it assign too.
 #[derive(Default)]
 struct Rewriter {
     is_set: bool,
@@ -459,17 +367,11 @@ impl Rewriter {
     }
 }
 
-/// JS ⇒ bytecode: every piece of JS (scripts, modules, `eval` / `Function` code) becomes a [`Module`] before it runs.
 pub trait Compile: Sized {
-    /// Compiles by kind: a script's top-level declarations go to the global object / script context; eval code's are
-    /// declared at run time (`DeclareEvalVar` / `DeclareEvalFunction`) or stay within itself (strict). For a script the
-    /// value of the last expression statement is the return value.
     fn compile(src: &Source<'_>, kind: CodeKind) -> Result<Self, Error>;
 
-    /// Direct eval code: names it doesn't bind are looked up by name in the calling scope chain at run time.
     fn compile_direct(src: &Source<'_>, strict: bool) -> Result<Self, Error>;
 
-    /// Compiles a module: gives the bytecode and the module info (requests, imports, exports, environment layout).
     fn compile_module(src: &Source<'_>) -> Result<(Self, ModuleInfo), Error>;
 }
 
@@ -490,20 +392,16 @@ impl Compile for Module {
 impl Compiler<'_, '_> {
     fn compile_in(src: &Source<'_>, kind: CodeKind, direct: bool) -> Result<Module, Error> {
         let allocator = Allocator::default();
-        // Script (not module); regular expression literals are validated during parsing
         let options = ParseOptions { parse_regular_expression: true, ..ParseOptions::default() };
         let ret = Parser::new(&allocator, src.text, SourceType::script()).with_options(options).parse();
         if let Some(d) = ret.diagnostics.first() {
             return Err(Error::Syntax(format!("{}: {d}", src.file)));
         }
         let program = &ret.program;
-        // Early errors (duplicate declarations, illegal break / super / new.target, …): oxc's parser does not check
-        // them, the semantic check is needed
         let checked = SemanticBuilder::new().with_check_syntax_error(true).build(program);
         if let Some(d) = checked.diagnostics.errors().next() {
             return Err(Error::Syntax(format!("{}: {d}", src.file)));
         }
-        // Functions containing a direct eval: all their bindings go into contexts (an eval may read any of them)
         let scoping = checked.semantic.scoping();
         let eval_scopes: HashSet<oxc_syntax::scope::ScopeId> = scoping.scope_descendants_from_root().filter(|&id| scoping.scope_flags(id).contains_direct_eval()).collect();
         let strict = kind == CodeKind::StrictEval || Flavor::use_strict(&program.directives);
@@ -515,22 +413,17 @@ impl Compiler<'_, '_> {
     }
 }
 
-/// A top-level module name: a context slot (with whether it is a lexical declaration and whether it is const), or
-/// an import binding.
 #[derive(Clone, Copy)]
 enum ModuleName {
     Slot { slot: u16, lexical: bool, constant: bool },
     Import(u16),
 }
 
-/// State while collecting top-level module names and module info.
 struct Layout<'a> {
     names: Vec<(&'a str, ModuleName)>,
     info: ModuleInfo,
     slots: u16,
-    /// (export name, local name): split into local exports and re-exports at the end
     local_exports: Vec<(&'a str, &'a str)>,
-    /// Import binding name ⇒ import number
     imports: Vec<(&'a str, usize)>,
 }
 
@@ -592,7 +485,6 @@ impl<'a> Layout<'a> {
         }
     }
 
-    /// Exports: local bindings get slots; exports that are actually import bindings become indirect exports.
     fn finish(mut self) -> (Vec<(&'a str, ModuleName)>, ModuleInfo) {
         for (exported, local) in core::mem::take(&mut self.local_exports) {
             if let Some(&(_, idx)) = self.imports.iter().find(|(n, _)| *n == local) {
@@ -638,7 +530,6 @@ impl Compiler<'_, '_> {
         Ok((Module { functions: c.module }, info))
     }
 
-    /// Top-level module names and module info: slot 0 is `this` (undefined), then in declaration order.
     fn module_layout<'a>(program: &'a Program<'a>) -> (Vec<(&'a str, ModuleName)>, ModuleInfo) {
         use oxc_ast::ast::{ExportDefaultDeclarationKind, ImportDeclarationSpecifier};
         let mut l = Layout { names: alloc::vec![(THIS, ModuleName::Slot { slot: 0, lexical: false, constant: true })], info: ModuleInfo::default(), slots: 1, local_exports: Vec::new(), imports: Vec::new() };
@@ -714,7 +605,6 @@ impl Compiler<'_, '_> {
                 _ => {}
             }
         }
-        // `var`s in blocks are also at the module top level
         let mut vars = Decls::default();
         vars.vars(&program.body);
         for d in &vars.0 {
@@ -725,9 +615,6 @@ impl Compiler<'_, '_> {
 }
 
 impl<'a> Compiler<'a, '_> {
-    // ---- Basics ------------------------------------------------------------------------
-
-    /// The file name being compiled (base for relative paths in dynamic import).
     pub fn file(&self) -> &'a str {
         self.alloc.alloc_str(self.src.file)
     }
@@ -736,8 +623,6 @@ impl<'a> Compiler<'a, '_> {
         self.src.unsupported(span.start, what)
     }
 
-    /// annexB: when execution reaches a block-level function declaration, writes the function value from the block to
-    /// the outer `var` (a function-level binding or a global).
     fn annexb_copy(&mut self, f: &'a oxc_ast::ast::Function<'a>) {
         let Some(id) = &f.id else { return };
         if !self.frame().annexb.contains(&f.span.start) {
@@ -773,23 +658,18 @@ impl<'a> Compiler<'a, '_> {
         }
     }
 
-    /// `CallRuntime [ThrowConstAssignError]`
     pub fn throw_const_assign(&mut self) {
         self.b().call_runtime(Runtime::ThrowConstAssignError, RegisterList::EMPTY);
     }
 
-    /// Whether the name resolves to the own name of a named function expression.
     fn is_self_name(&self, name: &str) -> bool {
         self.levels.iter().rev().find_map(|l| l.names.iter().find(|n| n.name == name)).is_some_and(|n| n.self_name)
     }
 
-    /// Whether the code here is strict: the function itself is strict, or it is inside a class body (`extends` and
-    /// computed keys are evaluated in the outer function, also as strict code).
     pub fn strict_here(&self) -> bool {
         self.strict() || self.class_depth > 0
     }
 
-    /// Whether the current function is in strict mode.
     pub fn strict(&self) -> bool {
         self.frames.last().is_some_and(|f| f.strict)
     }
@@ -798,7 +678,6 @@ impl<'a> Compiler<'a, '_> {
         self.frames.last_mut().expect("inside a function")
     }
 
-    /// The current function's bytecode builder
     pub fn b(&mut self) -> &mut Builder {
         &mut self.frame().b
     }
@@ -811,7 +690,6 @@ impl<'a> Compiler<'a, '_> {
         self.b().name(s)
     }
 
-    /// `n` consecutive temporary registers, [`release`](Self::release)d in stack order.
     pub fn temps(&mut self, n: u32) -> Register {
         self.b().new_register_list(n).first
     }
@@ -824,18 +702,12 @@ impl<'a> Compiler<'a, '_> {
         self.b().release_to(r.0);
     }
 
-    /// `CreateClosure` of function `index` of the module (V8's flags: fast new closure inside a function scope)
     pub fn closure(&mut self, index: u32) {
         let k = self.constant(Constant::Function(index));
         let in_function = self.frames.len() > 1 || self.levels.first().is_some_and(|l| l.func == usize::MAX);
         self.b().create_closure(k, CreateClosureFlags::encode(false, in_function));
     }
 
-    // ---- Scopes ------------------------------------------------------------------------
-
-    /// Enters a scope level: allocates bindings (captured ones go into a new context of `scope_type`), copies in the
-    /// captured `this` / parameters, creates closures for function declarations. A function level's context is a
-    /// function context, recorded as the function's scope.
     fn enter(&mut self, decls: &Decls<'a>, scope_type: ScopeType) -> Result<(), Error> {
         let func = self.frames.len() - 1;
         let mark = self.b().mark();
@@ -843,7 +715,6 @@ impl<'a> Compiler<'a, '_> {
         let mut names = Vec::with_capacity(decls.0.len());
         let mut variables = Vec::new();
         for d in &decls.0 {
-            // Pseudo-bindings nobody reads take no register
             if matches!(d.kind, DeclKind::NewTarget | DeclKind::Arguments) && !self.used.contains(&d.key) {
                 continue;
             }
@@ -888,8 +759,6 @@ impl<'a> Compiler<'a, '_> {
         let bindings: Vec<Binding> = names.iter().map(|n| n.binding).collect();
         self.levels.push(Level { func, names, context, scope, dynamic: false, mark, switch: false, cells: false });
         let decls: Vec<&Decl<'a>> = decls.0.iter().filter(|d| !(matches!(d.kind, DeclKind::NewTarget | DeclKind::Arguments) && !self.used.contains(&d.key))).collect();
-        // Temporal dead zone: slots are first filled with the hole (not for a `for` head's register variable its own
-        // initializer doesn't mention: nothing can read it before it is initialized)
         for (d, &b) in decls.iter().zip(&bindings) {
             let skip = self.for_init_text.is_some_and(|t| !t.contains(d.name)) && matches!(b, Binding::Reg(_));
             if d.ready.is_some() && !skip {
@@ -908,12 +777,8 @@ impl<'a> Compiler<'a, '_> {
                     self.bind(b);
                     None
                 }
-                // A generator / async function is never constructed: its new.target stays `undefined`, and the
-                // register carries the generator object (V8's `VisitNewTargetVariable`)
                 DeclKind::NewTarget if self.frame().generator.is_some() => None,
                 DeclKind::NewTarget if self.used.contains(&d.key) => {
-                    // The interpreter puts new.target into this register on entry (V8's
-                    // `incoming_new_target_or_generator_register`)
                     let r = self.temp();
                     self.b().new_target_or_generator = Some(r.0);
                     self.b().ldar(r);
@@ -921,7 +786,6 @@ impl<'a> Compiler<'a, '_> {
                     None
                 }
                 DeclKind::Arguments if self.used.contains(&d.key) => {
-                    // Sloppy functions with simple parameters get a mapped arguments object (aliasing the parameters)
                     let mapped = self.frame().simple_params && !self.frame().strict;
                     self.b().create_arguments(mapped);
                     self.bind(b);
@@ -937,7 +801,6 @@ impl<'a> Compiler<'a, '_> {
         Ok(())
     }
 
-    /// Stores acc into the binding just allocated at this level.
     fn bind(&mut self, b: Binding) {
         match b {
             Binding::Reg(r) => self.b().star(r),
@@ -946,7 +809,6 @@ impl<'a> Compiler<'a, '_> {
         }
     }
 
-    /// Leaves a block scope level.
     fn leave(&mut self) {
         let l = self.levels.pop().expect("a scope to leave");
         if let Some(saved) = l.context {
@@ -963,15 +825,12 @@ impl<'a> Compiler<'a, '_> {
         Ok(())
     }
 
-    /// Name resolution: innermost first, counting the contexts passed; a dynamic level passed makes it a lookup by name,
-    /// so do names eval code doesn't bind; global otherwise.
     pub fn resolve(&self, name: &'a str) -> Resolved<'a> {
         let cur = self.frames.len() - 1;
         let mut depth = 0;
         for l in self.levels.iter().rev() {
             if let Some(n) = l.names.iter().find(|n| n.name == name) {
                 let (place, in_context) = match n.binding {
-                    // The script's `this` is the global `this` (V8 reads it with `LdaGlobal`)
                     Binding::Reg(_) if l.func != cur && name == THIS && l.func == 0 && self.frames.first().is_some_and(|f| !f.eval) => (Place::Global(THIS), false),
                     Binding::Reg(r) => {
                         assert_eq!(l.func, cur, "an outer function's binding `{name}` used from inside must be captured");
@@ -980,8 +839,6 @@ impl<'a> Compiler<'a, '_> {
                     Binding::Context(slot) => (Place::Context { depth, slot, cells: l.cells }, true),
                     Binding::Import(i) => (Place::Import(i), false),
                 };
-                // Inside the declaring function the position decides; from an inner function (which may run any time)
-                // or a `switch` (whose cases may skip the declaration) always check (V8's hole check elimination)
                 return Resolved { place, constant: n.constant, tdz: n.ready.map(|r| (r, (in_context && l.func != cur) || l.switch)) };
             }
             if l.dynamic {
@@ -997,8 +854,6 @@ impl<'a> Compiler<'a, '_> {
         Resolved { place: Place::Global(name), constant: false, tdz: None }
     }
 
-    /// If the name is in this function's registers and needs no TDZ check at `pos`, gives that register. Only this
-    /// function's own code can change it (bindings captured by inner functions are in contexts, not registers).
     pub fn register_of(&self, name: &'a str, pos: u32) -> Option<Register> {
         let r = self.resolve(name);
         match r.place {
@@ -1012,12 +867,10 @@ impl<'a> Compiler<'a, '_> {
         (r.place, r.constant)
     }
 
-    /// Reads a name into acc (use position unknown, so the TDZ is checked).
     pub fn load(&mut self, name: &'a str) {
         self.load_at(name, 0);
     }
 
-    /// Reads a name for `typeof`: an unresolvable name gives `undefined` instead of throwing
     pub fn load_typeof(&mut self, name: &'a str) {
         match self.resolve(name).place {
             Place::Global(g) if !matches!(g, "undefined" | "NaN" | "Infinity") => self.b().load_global(g, true),
@@ -1026,7 +879,6 @@ impl<'a> Compiler<'a, '_> {
         }
     }
 
-    /// Reads a name into acc at source position `pos`. `undefined` / `NaN` / `Infinity` are constants unless shadowed.
     pub fn load_at(&mut self, name: &'a str, pos: u32) {
         let r = self.resolve(name);
         match r.place {
@@ -1051,14 +903,10 @@ impl<'a> Compiler<'a, '_> {
         }
     }
 
-    /// Stores acc into a name; `init` is the initialization in a declaration (the only time `const` allows it, with no
-    /// TDZ check).
     pub fn store(&mut self, name: &'a str, init: bool) {
         self.store_at(name, init, 0);
     }
 
-    /// Same as [`store`](Self::store); `pos` is the source position of the assignment: no TDZ check after the
-    /// declaration. acc is kept.
     pub fn store_at(&mut self, name: &'a str, init: bool, pos: u32) {
         if !init && self.is_self_name(name) {
             if self.strict_here() {
@@ -1069,7 +917,6 @@ impl<'a> Compiler<'a, '_> {
         let r = self.resolve(name);
         let check = !init && r.needs_check(pos);
         if check || (r.constant && !init) {
-            // V8's `BuildVariableAssignment`: the hole check reads the variable, so the value waits in a register
             let value = self.temp();
             self.b().star(value);
             if check {
@@ -1099,24 +946,16 @@ impl<'a> Compiler<'a, '_> {
         }
     }
 
-    // ---- Functions ---------------------------------------------------------------------
-
-    /// Compiles a function, returning its index in the module.
     #[expect(clippy::too_many_lines, reason = "function prologue follows V8's GenerateBytecodeBody step by step")]
     pub fn function(&mut self, name: &str, flavor: Flavor, this: Option<Key>, self_name: Option<&'a BindingIdentifier<'a>>, params: Option<&'a FormalParameters<'a>>, body: Body<'a>) -> Result<u32, Error> {
         let count = params.map_or(0, |p| p.items.len());
         let n = u16::try_from(count).map_err(|_| self.unsupported(params.map_or(Span::default(), |p| p.span), "more than 65535 parameters"))?;
         let index = self.module.len();
-        // A placeholder until the function is done (inner functions get the next indices)
         self.module.push(SharedFunction { name: "".into(), kind: FunctionKind::NormalFunction, strict: false, length: 0, formal_parameters: 0, scope: None, bytecode: j8bytecode::BytecodeArray::default() });
-        // length: the number of parameters before the first one with a default value (the rest parameter does not
-        // count)
         let length = u16::try_from(params.map_or(0, |p| p.items.iter().take_while(|i| i.initializer.is_none()).count())).unwrap_or(u16::MAX);
-        // Functions in a class (methods, constructors, field initializers) are all strict
         let strict = flavor.strict || self.class_depth > 0 || self.frames.last().is_some_and(|f| f.strict);
         let default_constructor = matches!(body, Body::DefaultConstructor { .. });
         let simple_params = params.is_some_and(|p| p.rest.is_none() && p.items.iter().all(|i| i.initializer.is_none() && matches!(i.pattern, BindingPattern::BindingIdentifier(_))));
-        // An arrow function sees its enclosing method's home object; any other function only its own
         let next_home = self.next_home.take();
         let home = if flavor.kind == Kind::Arrow { self.frames.last().and_then(|f| f.home) } else { next_home };
         self.frames.push(Frame {
@@ -1146,11 +985,9 @@ impl<'a> Compiler<'a, '_> {
             simple_params,
         });
         if flavor.generator || flavor.asynchronous {
-            // The interpreter puts the generator object into this register on entry
             let g = self.temp();
             self.b().new_target_or_generator = Some(g.0);
             self.frame().generator = Some(g);
-            // V8's `BuildGeneratorPrologue`: a resumed generator jumps to its resume point, a call falls through
             let count = params.and_then(|p| self.suspends.get(&p.span.start)).copied().unwrap_or(0);
             if count > 0 {
                 let mut table = self.b().jump_table(count, 0);
@@ -1163,7 +1000,6 @@ impl<'a> Compiler<'a, '_> {
             _ => &[],
         };
         let sloppy_eval = params.is_some_and(|p| !strict && self.eval_fns.contains(&p.span.start));
-        // A mapped arguments object aliases the parameters: they live in the context (V8 forces them there)
         let mut decls = Decls::function(this, self_name, params, stmts, !strict, None);
         if simple_params && !strict && decls.0.iter().any(|d| matches!(d.kind, DeclKind::Arguments) && self.used.contains(&d.key)) {
             for d in &decls.0 {
@@ -1172,7 +1008,6 @@ impl<'a> Compiler<'a, '_> {
                 }
             }
         }
-        // An arrow function calling `super(…)` reaches the constructor, new.target and `this` through the context
         let super_in_arrow = flavor.kind == (Kind::Constructor { derived: true })
             && params.is_some_and(|p| {
                 let text = &self.src.text[p.span.start as usize..];
@@ -1181,7 +1016,6 @@ impl<'a> Compiler<'a, '_> {
                 text.contains("=>") && text.contains("super")
             });
         if flavor.kind == (Kind::Constructor { derived: true }) {
-            // `super(…)` passes new.target on
             for d in decls.0.iter().filter(|d| matches!(d.kind, DeclKind::NewTarget | DeclKind::This)) {
                 self.used.insert(d.key);
                 if super_in_arrow {
@@ -1200,8 +1034,6 @@ impl<'a> Compiler<'a, '_> {
             self.store(Hidden::THIS_FUNCTION, true);
         }
         if sloppy_eval && let Some(l) = self.levels.last_mut() {
-            // `var`s a sloppy direct eval declares land in this function's context extension: names not bound here
-            // are looked up by name
             l.dynamic = true;
             if let Some(s) = self.frames.last_mut().and_then(|f| f.scope.as_mut()) {
                 s.has_extension = true;
@@ -1214,11 +1046,9 @@ impl<'a> Compiler<'a, '_> {
         if flavor.kind == (Kind::Constructor { derived: true })
             && let Some(t) = self.levels.last_mut().and_then(|l| l.names.iter_mut().find(|n| n.name == THIS))
         {
-            // In a derived class constructor `this` is the hole before `super()`
             t.ready = Some(u32::MAX);
         }
         if flavor.kind == (Kind::Constructor { derived: false }) {
-            // A base class constructor initializes the instance before the parameters (a derived one after `super`)
             self.load(THIS);
             let this = self.temp();
             self.b().star(this);
@@ -1230,15 +1060,11 @@ impl<'a> Compiler<'a, '_> {
             self.prologue(p)?;
             self.frame().prologue = false;
         }
-        // Generator: suspend only after parameters and declarations are set up (a call runs up to here, so parameter
-        // errors throw synchronously); the first next resumes from here
         if flavor.generator && !flavor.asynchronous {
             self.generator_object(Runtime::InlineCreateJSGeneratorObject);
             self.yield_value();
         }
         if flavor.generator && flavor.asynchronous {
-            // V8's `GenerateAsyncGeneratorFunctionBody`: a throw out of the body rejects the request, and the generator
-            // is closed however the body ends
             self.generator_object(Runtime::InlineCreateJSGeneratorObject);
             let g = self.frame().generator.expect("a generator register");
             self.try_finally(j8bytecode::CatchPrediction::AsyncAwait, |c| c.try_catch(j8bytecode::CatchPrediction::AsyncAwait, |c| {
@@ -1262,7 +1088,6 @@ impl<'a> Compiler<'a, '_> {
                 Ok(())
             })?;
         } else if flavor.asynchronous {
-            // V8's `GenerateAsyncFunctionBody`: a throw out of the body rejects the promise
             self.generator_object(Runtime::InlineAsyncFunctionEnter);
             self.try_catch(j8bytecode::CatchPrediction::AsyncAwait, |c| c.function_body(body), |c, _| {
                 let g = c.frame().generator.expect("a generator register");
@@ -1286,7 +1111,6 @@ impl<'a> Compiler<'a, '_> {
         Ok(u32::try_from(index).expect("fewer than 2^32 functions"))
     }
 
-    /// The statements of a function body, then the implicit `return undefined`
     fn function_body(&mut self, body: Body<'a>) -> Result<(), Error> {
         match body {
             Body::Statements(s) => self.statements(s)?,
@@ -1306,7 +1130,6 @@ impl<'a> Compiler<'a, '_> {
         Ok(())
     }
 
-    /// Parameter prologue: default values, destructured parameters, rest parameter.
     fn prologue(&mut self, params: &'a FormalParameters<'a>) -> Result<(), Error> {
         for (i, p) in (0u16..).zip(&params.items) {
             let reg = Register::parameter(i32::from(i) + 1);
@@ -1323,8 +1146,6 @@ impl<'a> Compiler<'a, '_> {
             }
             match &p.pattern {
                 BindingPattern::BindingIdentifier(id) => {
-                    // Captured parameters were copied into the context on frame entry; after the default value is
-                    // computed they must be copied again
                     let name = id.name.as_str();
                     if p.initializer.is_some() && !matches!(self.lookup(name).0, Place::Reg(r) if r == reg) {
                         self.b().ldar(reg);
@@ -1344,7 +1165,6 @@ impl<'a> Compiler<'a, '_> {
         Ok(())
     }
 
-    /// Binds the value in register `value` to names according to the pattern (`init`: initialization in a declaration).
     pub fn bind_pattern(&mut self, p: &'a BindingPattern<'a>, value: Register, init: bool) -> Result<(), Error> {
         match p {
             BindingPattern::BindingIdentifier(id) => {
@@ -1365,8 +1185,6 @@ impl<'a> Compiler<'a, '_> {
                 if o.properties.is_empty() {
                     self.require_object(value);
                 }
-                // With a rest element the keys go after a copy of the source, ready for
-                // `CopyDataPropertiesWithExcludedPropertiesOnStack(source, ...keys)`
                 let list = o.rest.as_ref().map(|_| {
                     let l = self.b().new_register_list(n + 1);
                     self.b().mov(value, l.first);
@@ -1401,7 +1219,6 @@ impl<'a> Compiler<'a, '_> {
             }
             BindingPattern::ArrayPattern(a) => {
                 let iter = self.iterate(value);
-                // If a default value throws, the iterator must be closed first
                 self.closing_on_throw(iter, |c| {
                     for e in &a.elements {
                         c.iterator_next(iter);
@@ -1429,8 +1246,6 @@ impl<'a> Compiler<'a, '_> {
         Ok(())
     }
 
-    /// `body` in a `try` region whose handler runs `catch` with the exception in acc (V8's `TryCatchBuilder`: the
-    /// context is saved in a register first; the handler table restores it)
     pub fn try_catch(&mut self, prediction: j8bytecode::CatchPrediction, body: impl FnOnce(&mut Self) -> Result<(), Error>, catch: impl FnOnce(&mut Self, Register) -> Result<(), Error>) -> Result<(), Error> {
         let ctx = self.temp();
         self.b().mov(Register::current_context(), ctx);
@@ -1449,8 +1264,6 @@ impl<'a> Compiler<'a, '_> {
         Ok(())
     }
 
-    /// Runs `f`; if it throws, closes iterator `iter` first (calling `return` only if not done, ignoring what it does)
-    /// and then rethrows.
     pub fn closing_on_throw(&mut self, iter: Register, f: impl FnOnce(&mut Self) -> Result<(), Error>) -> Result<(), Error> {
         self.try_catch(j8bytecode::CatchPrediction::Uncaught, f, |c, _| {
             let e = c.temp();
@@ -1463,8 +1276,6 @@ impl<'a> Compiler<'a, '_> {
         })
     }
 
-    /// Gets the iterator of register `value`: the iterator record takes three consecutive registers (iterator, next,
-    /// done; the caller frees them)
     pub fn iterate(&mut self, value: Register) -> Register {
         let rec = self.temps(3);
         self.b().get_iterator(value);
@@ -1476,7 +1287,6 @@ impl<'a> Compiler<'a, '_> {
         rec
     }
 
-    /// Calls the record's `next`, checks the result is an object, leaves it in acc
     fn step_result(&mut self, rec: Register) {
         let args = RegisterList { first: rec, count: 1 };
         self.b().call_property(Register(rec.0 + 1), args);
@@ -1489,7 +1299,6 @@ impl<'a> Compiler<'a, '_> {
         self.b().bind(&mut ok);
     }
 
-    /// The next value of the iterator record into acc (`undefined` once done); an error while stepping marks it done
     pub fn iterator_next(&mut self, rec: Register) {
         let done = Register(rec.0 + 2);
         let mut finished = Label::default();
@@ -1515,7 +1324,6 @@ impl<'a> Compiler<'a, '_> {
         self.b().bind(&mut end);
     }
 
-    /// The rest of the iterator record's values as a new array in acc
     pub fn iterator_rest(&mut self, rec: Register) {
         let done = Register(rec.0 + 2);
         let arr = self.temp();
@@ -1549,8 +1357,6 @@ impl<'a> Compiler<'a, '_> {
         self.release(arr);
     }
 
-    /// Closes the iterator record unless done (V8's `BuildIteratorClose`): calls `return` if there is one and checks its
-    /// result is an object. acc is clobbered.
     pub fn iterator_close(&mut self, rec: Register) {
         let mut end = Label::default();
         self.b().ldar(Register(rec.0 + 2));
@@ -1567,7 +1373,6 @@ impl<'a> Compiler<'a, '_> {
         self.b().bind(&mut end);
     }
 
-    /// Closes the iterator record unless done, on a throw: whatever `return` throws or gives is ignored
     pub fn iterator_close_quiet(&mut self, rec: Register) {
         let mut end = Label::default();
         self.b().ldar(Register(rec.0 + 2));
@@ -1586,8 +1391,6 @@ impl<'a> Compiler<'a, '_> {
         self.b().bind(&mut end);
     }
 
-    /// The left side of `for-of` / `for-in`: a declaration (including destructuring) or an assignment target, with the
-    /// value in `v`.
     fn for_left(&mut self, left: &'a ForStatementLeft<'a>, v: Register) -> Result<(), Error> {
         match left {
             ForStatementLeft::VariableDeclaration(d) => {
@@ -1598,7 +1401,6 @@ impl<'a> Compiler<'a, '_> {
         }
     }
 
-    /// `for (left of right) body`: iterator protocol; `break` / `return` / a throw all close the iterator.
     fn for_of(&mut self, f: &'a ForOfStatement<'a>) -> Result<(), Error> {
         if f.r#await {
             return self.for_await(f);
@@ -1620,7 +1422,6 @@ impl<'a> Compiler<'a, '_> {
         self.b().ldar(Register(iter.0 + 2));
         self.b().jump(Bytecode::JumpIfTrue, &mut exit);
         self.push_jump(label, true, true);
-        // A throw from the body closes the iterator and rethrows
         self.closing_on_throw(iter, |c| {
             c.scoped(&Decls::for_head(&f.left), |c| {
                 c.for_left(&f.left, v)?;
@@ -1631,7 +1432,6 @@ impl<'a> Compiler<'a, '_> {
         let depth = self.frame().loop_depth - 1;
         self.b().jump_loop(header, depth);
         self.frame().loop_depth -= 1;
-        // break lands here: close the iterator
         self.pop_jump();
         self.iterator_close(iter);
         self.b().bind(&mut exit);
@@ -1640,8 +1440,6 @@ impl<'a> Compiler<'a, '_> {
         Ok(())
     }
 
-    /// `for await (left of right) body` (V8's `VisitForOfStatement` for an async iterator): the loop runs inside a
-    /// try-finally whose finally closes the iterator unless it is done, awaiting `return`'s result
     fn for_await(&mut self, f: &'a ForOfStatement<'a>) -> Result<(), Error> {
         let label = self.take_label();
         self.expr(&f.right)?;
@@ -1659,7 +1457,6 @@ impl<'a> Compiler<'a, '_> {
             let mut exit = Label::default();
             c.b().load_bool(true);
             c.b().star(done);
-            // V8's `BuildIteratorNext`: the result of `next()` is awaited, and must be an object
             c.b().call_property(Register(rec.0 + 1), RegisterList { first: rec, count: 1 });
             c.await_value();
             let mut ok = Label::default();
@@ -1672,7 +1469,6 @@ impl<'a> Compiler<'a, '_> {
             c.b().jump(Bytecode::JumpIfToBooleanTrue, &mut exit);
             c.b().get_named(next_result, "value");
             c.b().star(next_result);
-            // Not done while the value is assigned: a throw there closes the iterator
             c.b().load_bool(false);
             c.b().star(done);
             c.push_jump(label, true, true);
@@ -1695,8 +1491,6 @@ impl<'a> Compiler<'a, '_> {
         Ok(())
     }
 
-    /// V8's `BuildGetIteratorRecord` for an async iterator: `src[Symbol.asyncIterator]()`, or the sync iterator wrapped
-    /// by `CreateAsyncFromSyncIterator`. The record takes three registers (iterator, next, done).
     fn async_iterate(&mut self, src: Register) -> Register {
         let rec = self.temps(3);
         let mut sync = Label::default();
@@ -1721,8 +1515,6 @@ impl<'a> Compiler<'a, '_> {
         rec
     }
 
-    /// V8's `BuildFinalizeIteration` (async iterator): unless done, calls `return` and awaits its result, which must be
-    /// an object; when the loop is left by a throw, whatever closing throws is dropped
     fn finalize_iteration(&mut self, rec: Register, done: Register, token: Register, prediction: j8bytecode::CatchPrediction) {
         let mut is_done = Label::default();
         self.b().ldar(done);
@@ -1755,8 +1547,6 @@ impl<'a> Compiler<'a, '_> {
         self.b().bind(&mut is_done);
     }
 
-    /// `for (left in right) body` (V8's `VisitForInStatement`: `ForInEnumerate` / `ForInPrepare`, then by index with
-    /// `ForInNext`, skipping keys deleted meanwhile)
     fn for_in(&mut self, f: &'a ForInStatement<'a>) -> Result<(), Error> {
         let label = self.take_label();
         let mut exit = Label::default();
@@ -1795,8 +1585,6 @@ impl<'a> Compiler<'a, '_> {
         Ok(())
     }
 
-    /// V8's `BuildGeneratorObjectVariableInitialization`: `create(<closure>, <this>)` into the generator register, left
-    /// in acc
     fn generator_object(&mut self, create: Runtime) {
         let g = self.frame().generator.expect("a generator register");
         let args = self.b().new_register_list(2);
@@ -1807,8 +1595,6 @@ impl<'a> Compiler<'a, '_> {
         self.release(args.first);
     }
 
-    /// V8's `BuildSuspendPoint`: saves every live register and suspends with acc; on resumption the registers are back
-    /// and acc holds the value sent in
     fn suspend_point(&mut self) {
         if !self.b().reachable() {
             return;
@@ -1824,9 +1610,6 @@ impl<'a> Compiler<'a, '_> {
         self.b().resume_generator(g, live);
     }
 
-    /// V8's `VisitYieldStar`: delegates to the operand's iterator, forwarding `next` / `return` / `throw` and suspending
-    /// with each of its results unchanged (an async generator awaits each result and answers the request with its
-    /// value), until one is done; its value is the result (or the generator returns it, after a `return`).
     #[expect(clippy::too_many_lines, reason = "follows V8's VisitYieldStar step by step")]
     pub fn yield_star(&mut self, operand: &'a Expression<'a>) -> Result<(), Error> {
         let asynchronous = self.frame().async_generator;
@@ -1859,10 +1642,8 @@ impl<'a> Compiler<'a, '_> {
         let mut table = self.b().jump_table(2, RESUME_RETURN);
         self.b().ldar(resume_mode);
         self.b().switch_on_smi(&mut table);
-        // next (the fall-through)
         self.b().call_property(next, iterator_and_input);
         self.b().jump(Bytecode::Jump, &mut after_switch);
-        // return: without a `return` method the generator returns the value sent in
         self.b().bind_case(&table, RESUME_RETURN);
         let mut no_return = Label::default();
         self.call_iterator_method(iterator, "return", iterator_and_input, &mut after_switch, &mut no_return);
@@ -1872,7 +1653,6 @@ impl<'a> Compiler<'a, '_> {
             self.await_value();
         }
         self.ret();
-        // throw: without a `throw` method the iterator is closed, then a TypeError
         self.b().bind_case(&table, RESUME_THROW);
         let mut no_throw = Label::default();
         self.call_iterator_method(iterator, "throw", iterator_and_input, &mut after_switch, &mut no_throw);
@@ -1904,7 +1684,6 @@ impl<'a> Compiler<'a, '_> {
         let mut exit = Label::default();
         self.b().jump(Bytecode::JumpIfToBooleanTrue, &mut exit);
         if asynchronous {
-            // The request is answered with the inner result's value, not done
             self.b().get_named(output, "value");
             let args = self.b().new_register_list(3);
             self.b().mov(g, args.first);
@@ -1925,7 +1704,6 @@ impl<'a> Compiler<'a, '_> {
         self.frame().loop_depth -= 1;
         self.b().bind(&mut exit);
         self.release(iterator);
-        // A `return` delegated to the iterator returns its value; otherwise the value is the result
         let output_value = self.temp();
         self.b().get_named(output, "value");
         self.b().star(output_value);
@@ -1941,8 +1719,6 @@ impl<'a> Compiler<'a, '_> {
         Ok(())
     }
 
-    /// V8's `BuildCallIteratorMethod`: calls `iterator[name]` with `receiver_and_args` and jumps to `called`, or to
-    /// `missing` when it is `undefined` / `null`
     fn call_iterator_method(&mut self, iterator: Register, name: &str, receiver_and_args: RegisterList, called: &mut Label, missing: &mut Label) {
         let method = self.temp();
         self.b().get_named(iterator, name);
@@ -1953,8 +1729,6 @@ impl<'a> Compiler<'a, '_> {
         self.release(method);
     }
 
-    /// V8's `BuildAwait` with the operand in acc: suspends until the value settles; a rejection throws the reason, a
-    /// fulfillment gives the value
     pub fn await_value(&mut self) {
         let g = self.frame().generator.expect("a generator register");
         let args = self.b().new_register_list(2);
@@ -1980,16 +1754,12 @@ impl<'a> Compiler<'a, '_> {
         self.release(input);
     }
 
-    /// V8's `VisitYield` with the operand in acc (the initial yield suspends with the generator object itself): suspends,
-    /// then dispatches on the resume mode — `throw` throws the value sent in, `return` returns it (through any
-    /// `finally`), `next` gives it as the value of the `yield`.
     pub fn yield_value(&mut self) {
         let g = self.frame().generator.expect("a generator register");
         let asynchronous = self.frame().async_generator;
         if self.frame().suspends > 0 {
             let args = self.b().new_register_list(2);
             if asynchronous {
-                // The value is awaited, then given to the request as a not-done result
                 self.b().mov(g, args.first);
                 self.b().star(args.at(1));
                 self.b().call_runtime(Runtime::InlineAsyncGeneratorYieldWithAwait, args);
@@ -2004,7 +1774,6 @@ impl<'a> Compiler<'a, '_> {
         let input = self.temp();
         self.b().star(input);
         self.b().call_runtime(Runtime::InlineGeneratorGetResumeMode, RegisterList { first: g, count: 1 });
-        // JSGeneratorObject::kNext / kReturn / kThrow (an async generator also kRethrow: the yielded value was rejected)
         let mut table = self.b().jump_table(if asynchronous { 3 } else { 2 }, RESUME_NEXT);
         self.b().switch_on_smi(&mut table);
         if asynchronous {
@@ -2012,7 +1781,6 @@ impl<'a> Compiler<'a, '_> {
             self.b().plain(Bytecode::ReThrow);
             self.b().bind_case(&table, RESUME_THROW);
         }
-        // Throw (the fall-through of a sync generator)
         self.b().ldar(input);
         self.b().plain(Bytecode::Throw);
         self.b().bind_case(&table, RESUME_RETURN);
@@ -2023,8 +1791,6 @@ impl<'a> Compiler<'a, '_> {
         self.release(input);
     }
 
-    /// How many loops enclose the current position (the depth operand of a `JumpLoop` emitted here for a loop of its
-    /// own)
     pub fn frame_loop_depth(&mut self) -> u32 {
         self.frame().loop_depth
     }
@@ -2033,8 +1799,6 @@ impl<'a> Compiler<'a, '_> {
         self.frame().async_generator
     }
 
-    /// Replaces `value` with the default value if it is `undefined`: the result goes into a new temporary register (the
-    /// caller frees it). `name` is the name inferred for the default value when it is an anonymous function.
     pub fn with_default(&mut self, value: Register, default: &'a Expression<'a>, name: Option<&'a str>) -> Result<Register, Error> {
         let t = self.temp();
         self.b().ldar(value);
@@ -2050,7 +1814,6 @@ impl<'a> Compiler<'a, '_> {
         Ok(t)
     }
 
-    /// Destructuring `null` / `undefined` throws TypeError (for `{} = v`, where there is no property to read)
     pub fn require_object(&mut self, value: Register) {
         let mut ok = Label::default();
         self.b().ldar(value);
@@ -2062,7 +1825,6 @@ impl<'a> Compiler<'a, '_> {
         self.b().bind(&mut done);
     }
 
-    /// Evaluates a property key into register `k` (a static key is a string constant).
     pub fn property_key_into(&mut self, key: &'a PropertyKey<'a>, computed: bool, k: Register) -> Result<(), Error> {
         match self.static_key(key, computed) {
             Some(c) => {
@@ -2078,8 +1840,6 @@ impl<'a> Compiler<'a, '_> {
         Ok(())
     }
 
-    /// Ordinary function (declaration or expression): rejects unsupported kinds.
-    /// Ordinary function; an anonymous one uses the inferred name `inferred`.
     pub fn plain_function(&mut self, f: &'a AstFunction<'a>, self_name: bool, inferred: &str) -> Result<u32, Error> {
         let flavor = Flavor::from((f, Kind::Normal));
         let body = f.body.as_ref().ok_or_else(|| self.unsupported(f.span, "a function without a body"))?;
@@ -2087,15 +1847,12 @@ impl<'a> Compiler<'a, '_> {
         self.function(name, flavor, Some(Decls::this_key(f.span)), if self_name { f.id.as_ref() } else { None }, Some(&f.params), Body::Statements(&body.statements))
     }
 
-    /// Method (class method, object literal method, accessor): not `new`able.
     pub fn method(&mut self, name: &str, f: &'a AstFunction<'a>, kind: Kind) -> Result<u32, Error> {
         let flavor = Flavor::from((f, kind));
         let body = f.body.as_ref().ok_or_else(|| self.unsupported(f.span, "a method without a body"))?;
         self.function(name, flavor, Some(Decls::this_key(f.span)), None, Some(&f.params), Body::Statements(&body.statements))
     }
 
-    /// The text of a non-computed property key (for function name inference; private names include `#`); `None` for
-    /// computed keys.
     pub fn static_name(&self, key: &'a PropertyKey<'a>, computed: bool) -> Option<&'a str> {
         if computed {
             return None;
@@ -2109,8 +1866,6 @@ impl<'a> Compiler<'a, '_> {
         }
     }
 
-    /// Function name of a method / accessor: the key name, prefixed with `get ` / `set ` for accessors; empty for
-    /// computed keys (known only at runtime).
     pub fn method_name(&self, key: &'a PropertyKey<'a>, computed: bool, kind: MethodDefinitionKind) -> &'a str {
         let Some(n) = self.static_name(key, computed) else { return "" };
         match kind {
@@ -2120,7 +1875,6 @@ impl<'a> Compiler<'a, '_> {
         }
     }
 
-    /// The constant for a non-computed property key (identifier / string / number); `None` for computed keys.
     pub fn static_key(&mut self, key: &'a PropertyKey<'a>, computed: bool) -> Option<Result<usize, Error>> {
         if computed {
             return None;
@@ -2137,12 +1891,9 @@ impl<'a> Compiler<'a, '_> {
         })
     }
 
-    /// A class (V8's `BuildClassLiteral`); the constructor ends in acc. `inferred` names an anonymous class. The class
-    /// body is strict code.
     pub fn class(&mut self, c: &'a Class<'a>, inferred: &'a str) -> Result<(), Error> {
         let info = self.class_info(c)?;
         let decls = Decls::class_scope(c, self.alloc);
-        // The hidden bindings and private names are read by the class's functions: they live in the class context
         for d in &decls.0 {
             if d.name.starts_with(['.', '#', '%']) {
                 self.captured.insert(d.key);
@@ -2158,7 +1909,6 @@ impl<'a> Compiler<'a, '_> {
         r
     }
 
-    /// What a class's private names are
     fn class_info(&self, c: &'a Class<'a>) -> Result<ClassInfo<'a>, Error> {
         let mut info = ClassInfo { privates: Vec::new(), brands: [Hidden::brand(self.alloc, c.span, false), Hidden::brand(self.alloc, c.span, true)], brand: false, fields: false };
         for e in &c.body.body {
@@ -2191,7 +1941,6 @@ impl<'a> Compiler<'a, '_> {
         Ok(info)
     }
 
-    /// A method of a class (static ones are `static` V8 function kinds) with its home object
     fn class_method(&mut self, name: &str, f: &'a AstFunction<'a>, kind: Kind, statik: bool) -> Result<u32, Error> {
         let flavor = Flavor { statik, ..Flavor::from((f, kind)) };
         let body = f.body.as_ref().ok_or_else(|| self.unsupported(f.span, "a method without a body"))?;
@@ -2199,7 +1948,6 @@ impl<'a> Compiler<'a, '_> {
         self.function(name, flavor, Some(Decls::this_key(f.span)), None, Some(&f.params), Body::Statements(&body.statements))
     }
 
-    /// `CallRuntime [name](text)` into binding `binding` (a new private name / brand symbol)
     fn private_symbol(&mut self, create: Runtime, text: &str, binding: &'a str) {
         let k = self.name(text);
         let arg = self.temp();
@@ -2210,7 +1958,6 @@ impl<'a> Compiler<'a, '_> {
         self.store(binding, true);
     }
 
-    /// Throws a static member's computed key `prototype` (V8: `ThrowStaticPrototypeError`)
     fn static_prototype_check(&mut self, key: Register) {
         let mut done = Label::default();
         self.b().load_string("prototype");
@@ -2229,7 +1976,6 @@ impl<'a> Compiler<'a, '_> {
         let [brand_binding, static_brand_binding] = info.brands;
         let brand = info.brand;
         let static_brand = privates.iter().any(|(_, p)| matches!(p, Private::Method { statik: true } | Private::Accessor { statik: true, .. }));
-        // Brands and private names first, so computed keys can't reach private members early
         if brand {
             self.private_symbol(Runtime::CreatePrivateBrandSymbol, name, brand_binding);
         }
@@ -2282,7 +2028,6 @@ impl<'a> Compiler<'a, '_> {
         self.closure(f);
         self.b().star(ctor);
         self.b().mov(ctor, ctor_in_args);
-        // The public members: computed keys and functions go to `DefineClass` as arguments
         let mut members = Vec::new();
         let mut statics = false;
         for e in &c.body.body {
@@ -2314,7 +2059,6 @@ impl<'a> Compiler<'a, '_> {
                 ClassElement::PropertyDefinition(p) => {
                     statics |= p.r#static;
                     if p.computed && !matches!(p.key, PropertyKey::PrivateIdentifier(_)) {
-                        // Computed field keys are evaluated once, here; the initializer reads them back
                         let k = self.temp();
                         self.property_key_into(&p.key, true, k)?;
                         if p.r#static {
@@ -2335,7 +2079,6 @@ impl<'a> Compiler<'a, '_> {
         let count = u32::try_from(self.b().mark() - boilerplate.0).unwrap_or(0);
         self.b().call_runtime(Runtime::DefineClass, RegisterList { first: boilerplate, count });
         self.release(boilerplate);
-        // acc: the prototype
         self.store(Hidden::HOME, true);
         self.b().ldar(ctor);
         self.store(Hidden::STATIC_HOME, true);
@@ -2343,7 +2086,6 @@ impl<'a> Compiler<'a, '_> {
             self.b().ldar(ctor);
             self.store(name, true);
         }
-        // Private accessors: one getter / setter pair per name
         for (n, p) in &privates {
             let Private::Accessor { statik, .. } = *p else { continue };
             let pair = self.b().new_register_list(2);
@@ -2382,7 +2124,6 @@ impl<'a> Compiler<'a, '_> {
             self.store(Hidden::FIELDS, true);
         }
         if statics {
-            // Static fields and blocks run now, in order, with the constructor as `this`
             self.next_home = Some(Hidden::STATIC_HOME);
             let f = self.function("", Kind::Initializer { statik: true }.into(), Some(Decls::this_key(c.span)), None, None, Body::Fields { class: c, statik: true })?;
             let init = self.temp();
@@ -2396,8 +2137,6 @@ impl<'a> Compiler<'a, '_> {
         Ok(())
     }
 
-    /// The body of a class's members initializer (V8's `<instance_members_initializer>` / static initializer): defines
-    /// the fields in order on `this` (private ones as private members); the static one also runs the static blocks.
     fn fields(&mut self, class: &'a Class<'a>, statik: bool) -> Result<(), Error> {
         self.load(THIS);
         let this = self.temp();
@@ -2432,7 +2171,6 @@ impl<'a> Compiler<'a, '_> {
                     };
                     match k {
                         Some(k) => {
-                            // A computed key names an anonymous function value at run time
                             let flags = u8::from(anonymous && fname.is_none());
                             self.b().define_keyed_own(this, k, flags);
                             self.release(k);
@@ -2448,7 +2186,6 @@ impl<'a> Compiler<'a, '_> {
         Ok(())
     }
 
-    /// A function / class expression without its own name (it takes the name of what it is assigned to)
     pub fn anonymous_function(e: &Expression<'_>) -> bool {
         match e {
             Expression::FunctionExpression(f) => f.id.is_none(),
@@ -2459,41 +2196,33 @@ impl<'a> Compiler<'a, '_> {
         }
     }
 
-    /// The source text being compiled
     pub fn source_text(&self) -> &str {
         self.src.text
     }
 
-    /// Makes a binding live in a context
     pub fn captured_insert(&mut self, key: Key) {
         self.captured.insert(key);
     }
 
-    /// A block scope declaring `decls` around `f`
     pub fn scoped_block(&mut self, decls: &Decls<'a>, f: impl FnOnce(&mut Self) -> Result<(), Error>) -> Result<(), Error> {
         self.scoped(decls, f)
     }
 
-    /// What private name `name` (`#x`) is in the innermost class declaring it
     pub fn private_kind(&self, name: &str) -> Option<Private> {
         self.classes.iter().rev().find_map(|c| c.privates.iter().find(|(n, _)| *n == name).map(|&(_, p)| p))
     }
 
-    /// The brand binding the methods / accessors of private name `name` check (of the class declaring it)
     pub fn brand_of(&self, name: &str, statik: bool) -> &'a str {
         let class = self.classes.iter().rev().find(|c| c.privates.iter().any(|(n, _)| *n == name));
         class.map_or("", |c| c.brands[usize::from(statik)])
     }
 
-    /// The object must carry the brand of the class declaring `name` (instances) / be that class (static): reading
-    /// the brand throws otherwise
     pub fn brand_check(&mut self, obj: Register, name: &str, statik: bool) {
         let brand = self.brand_of(name, statik);
         self.load(brand);
         self.b().get_keyed(obj);
     }
 
-    /// Throws a TypeError with `message`
     pub fn throw_type_error(&mut self, message: &str) {
         let k = self.name(message);
         let arg = self.temp();
@@ -2503,23 +2232,19 @@ impl<'a> Compiler<'a, '_> {
         self.release(arg);
     }
 
-    /// The home object of the method being compiled into acc (`super.x` looks up from its prototype)
     pub fn load_home(&mut self) {
         let home = self.frame().home.unwrap_or(Hidden::HOME);
         self.load(home);
     }
 
-    /// `super(…)` may be called here: in a derived class constructor, or an arrow function inside one
     pub fn in_derived_constructor(&self) -> bool {
         self.frames.iter().rev().find(|f| f.flavor.kind != Kind::Arrow).is_some_and(|f| f.flavor.kind == (Kind::Constructor { derived: true }))
     }
 
-    /// The kind of the function being compiled
     pub fn frame_kind(&mut self) -> Kind {
         self.frame().flavor.kind
     }
 
-    /// Reads a binding without its TDZ check
     fn load_raw(&mut self, name: &'a str) {
         match self.resolve(name).place {
             Place::Reg(reg) => self.b().ldar(reg),
@@ -2528,7 +2253,6 @@ impl<'a> Compiler<'a, '_> {
         }
     }
 
-    /// After `super(…)` returned `instance`: it becomes `this` (once only), then it is branded and its fields defined
     pub fn bind_this(&mut self, instance: Register) {
         self.load_raw(THIS);
         self.b().plain(Bytecode::ThrowSuperAlreadyCalledIfNotHole);
@@ -2538,8 +2262,6 @@ impl<'a> Compiler<'a, '_> {
         self.b().ldar(instance);
     }
 
-    /// The instance's private brand, then the instance fields (V8's `BuildPrivateBrandInitialization` /
-    /// `BuildInstanceMemberInitialization`)
     fn instance_init(&mut self, this: Register) {
         let Some(info) = self.classes.last() else { return };
         let (brand, fields) = (info.brand, info.fields);
@@ -2564,8 +2286,6 @@ impl<'a> Compiler<'a, '_> {
         }
     }
 
-    /// The parent constructor of a derived class constructor (V8's `FindNonDefaultConstructorOrConstruct`), not
-    /// done yet: `(done, constructor)` in a new register pair (the caller frees it)
     pub fn super_constructor(&mut self) -> (RegisterList, Register) {
         let this_function = self.temp();
         if self.frame_kind() == Kind::Arrow {
@@ -2582,7 +2302,6 @@ impl<'a> Compiler<'a, '_> {
         (pair, new_target)
     }
 
-    /// `super(...arguments)` of a default derived constructor (V8's `ConstructForwardAllArgs`)
     fn super_call_forward(&mut self) {
         let first = self.b().mark();
         let (pair, new_target) = self.super_constructor();
@@ -2603,16 +2322,10 @@ impl<'a> Compiler<'a, '_> {
         self.plain_function(f, false, "")
     }
 
-    /// Module body (not yet on V8 bytecode)
     fn module_body(&mut self, program: &'a Program<'a>) -> Result<(), Error> {
         Err(self.unsupported(program.span, "modules"))
     }
 
-    /// The top level of a script or eval code (V8's `GenerateBytecodeBody` for a script / eval scope). A script's `var`s
-    /// and function declarations are declared on the global object by `DeclareGlobals`, its `let` / `const` / `class`
-    /// are slots of the script context the interpreter creates before running it (recorded as the function's scope).
-    /// Sloppy eval code declares its `var`s / functions with `DeclareEvalVar` / `DeclareEvalFunction` in the calling
-    /// variable environment; strict eval code keeps everything to itself. `local` is the eval code's own level.
     #[expect(clippy::too_many_lines, reason = "follows V8's GenerateBytecodeBody for a script / eval scope step by step")]
     fn script(&mut self, program: &'a Program<'a>, local: Option<&Decls<'a>>, strict: bool, direct: bool) -> Result<(), Error> {
         self.module.push(SharedFunction { name: "".into(), kind: FunctionKind::NormalFunction, strict, length: 0, formal_parameters: 0, scope: None, bytecode: j8bytecode::BytecodeArray::default() });
@@ -2649,10 +2362,7 @@ impl<'a> Compiler<'a, '_> {
         rw.process(program.body.iter());
         self.completion_assign = rw.assign;
         self.completion_reset = rw.reset;
-        // `this` is the receiver (the global object) for a script and indirect eval code; direct eval code looks it up
-        // by name (functions with a direct eval keep `this` in their context, as V8 does)
         if !(eval && direct) {
-            // Never in a context: inner functions read it as the global `this`
             if !eval {
                 self.captured.remove(&Decls::this_key(program.span));
             }
@@ -2663,7 +2373,6 @@ impl<'a> Compiler<'a, '_> {
             globals.vars(&program.body);
             globals.lexical(&program.body);
         }
-        // annexB: block-level functions in sloppy code also create a `var` in the variable environment
         if !strict {
             let hoisted = Decls::annexb_functions(&program.body, None);
             self.frame().annexb = hoisted.iter().map(|f| f.span.start).collect();
@@ -2698,8 +2407,6 @@ impl<'a> Compiler<'a, '_> {
                 }
             }
         } else {
-            // Script: `var`s and functions on the global object in one `DeclareGlobals`; lexical declarations in the
-            // script context
             let mut declarations = Vec::new();
             let mut variables = Vec::new();
             let mut lexical = Vec::new();
@@ -2723,7 +2430,6 @@ impl<'a> Compiler<'a, '_> {
             if !variables.is_empty() {
                 self.frame().scope = Some(ScopeInfo { scope_type: Some(ScopeType::ScriptScope), variables, has_extension: false });
             }
-            // The script context is already current: this level doesn't push or pop it
             let mark = self.b().mark();
             self.levels.push(Level { func: 0, names: lexical, context: None, scope: None, dynamic: false, mark, switch: false, cells: true });
             if !declarations.is_empty() {
@@ -2736,8 +2442,6 @@ impl<'a> Compiler<'a, '_> {
                 self.release(args.first);
             }
         }
-        // The directive prologue (`'use strict'` etc.) is not in body in oxc, but it consists of expression statements
-        // and counts toward the completion value
         for d in &program.directives {
             let k = self.string_const(d.expression.value.as_str(), d.expression.span)?;
             self.b().load_constant(k);
@@ -2752,8 +2456,6 @@ impl<'a> Compiler<'a, '_> {
         Ok(())
     }
 
-    // ---- Statements --------------------------------------------------------------------
-
     fn statements(&mut self, stmts: &'a [Statement<'a>]) -> Result<(), Error> {
         stmts.iter().try_for_each(|s| self.statement(s))
     }
@@ -2764,7 +2466,6 @@ impl<'a> Compiler<'a, '_> {
         f.controls.push(Control::Jump(Jump { label, breakable, continuable, breaks: Label::default(), continues: Label::default(), contexts }));
     }
 
-    /// The innermost jump target's `continue`s land here
     fn bind_continues(&mut self) {
         let f = self.frame();
         let Some(Control::Jump(j)) = f.controls.iter_mut().rev().find(|c| matches!(c, Control::Jump(_))) else { unreachable!("a loop is the innermost jump target") };
@@ -2772,19 +2473,15 @@ impl<'a> Compiler<'a, '_> {
         f.b.bind(&mut l);
     }
 
-    /// Pops the innermost jump target: its `break`s land here
     fn pop_jump(&mut self) {
         let Some(Control::Jump(mut j)) = self.frame().controls.pop() else { unreachable!("the innermost control is this jump target") };
         self.b().bind(&mut j.breaks);
     }
 
-    /// A loop / `switch` consumes the pending labels.
     fn take_label(&mut self) -> Option<&'a str> {
         self.frame().label.take()
     }
 
-    /// Finds where a jump out lands, innermost first: detours into the first finally encountered; `target` of `None`
-    /// means `return`.
     fn exit_plan(&self, target: Option<(Option<&'a str>, bool)>) -> Exit {
         let f = self.frames.last().expect("inside a function");
         for (i, c) in f.controls.iter().enumerate().rev() {
@@ -2808,8 +2505,6 @@ impl<'a> Compiler<'a, '_> {
         Exit::Function
     }
 
-    /// Makes the context the one of a landing point that had `contexts` pushed (one `PopContext` to the saved outer
-    /// context of the first extra one)
     fn restore_contexts(&mut self, contexts: &[Register]) {
         let cur = self.frame().contexts.clone();
         if cur.len() > contexts.len() {
@@ -2817,7 +2512,6 @@ impl<'a> Compiler<'a, '_> {
         }
     }
 
-    /// Leaves control stack levels `from` and above, innermost first: closes iterators passed. acc is kept.
     fn leave_controls(&mut self, from: usize) -> Result<(), Error> {
         let iters: Vec<Control<'a>> = self.frame().controls[from..]
             .iter()
@@ -2844,7 +2538,6 @@ impl<'a> Compiler<'a, '_> {
         Ok(())
     }
 
-    /// Jumps into the finally of level `i`, carrying continuation token `token`.
     fn enter_finally(&mut self, i: usize, token: i32) -> Result<(), Error> {
         let Control::Finally(fin) = &self.frame().controls[i] else { unreachable!("a finally") };
         let (contexts, token_reg) = (fin.contexts.clone(), fin.token);
@@ -2865,8 +2558,6 @@ impl<'a> Compiler<'a, '_> {
         Ok(())
     }
 
-    /// `break` / `continue`: restores the context, closes the iterators passed, then jumps; detours into any finally
-    /// in between first.
     fn exit(&mut self, span: Span, label: Option<&'a str>, cont: bool) -> Result<(), Error> {
         match self.exit_plan(Some((label, cont))) {
             Exit::Jump(i) => {
@@ -2892,8 +2583,6 @@ impl<'a> Compiler<'a, '_> {
         }
     }
 
-    /// `return` (value in acc): if a finally is in between, stores the value and detours into it first; closes all
-    /// iterators passed.
     pub fn ret(&mut self) {
         match self.exit_plan(None) {
             Exit::Finally(i) => {
@@ -2906,8 +2595,6 @@ impl<'a> Compiler<'a, '_> {
                 let _ = self.leave_controls(0);
                 let flavor = self.frame().flavor;
                 if flavor.asynchronous {
-                    // V8's `BuildAsyncReturn`: the value fulfills the promise (async function) / the request, as a done
-                    // result (async generator)
                     let g = self.frame().generator.expect("a generator register");
                     let args = self.b().new_register_list(if flavor.generator { 3 } else { 2 });
                     self.b().mov(g, args.first);
@@ -2922,8 +2609,6 @@ impl<'a> Compiler<'a, '_> {
                     self.release(args.first);
                 }
                 if flavor.kind == (Kind::Constructor { derived: true }) {
-                    // V8's `GenerateDerivedConstructorBody`: returning `undefined` returns `this` (which `super()` must
-                    // have initialized)
                     let mut this = Label::default();
                     self.b().jump(Bytecode::JumpIfUndefined, &mut this);
                     self.b().plain(Bytecode::Return);
@@ -2935,7 +2620,6 @@ impl<'a> Compiler<'a, '_> {
         }
     }
 
-    /// Branches of `if`: a bare function declaration is treated as a block containing only it (annexB B.3.3).
     fn clause(&mut self, s: &'a Statement<'a>) -> Result<(), Error> {
         if matches!(s, Statement::FunctionDeclaration(_)) {
             let one = core::slice::from_ref(s);
@@ -2949,7 +2633,6 @@ impl<'a> Compiler<'a, '_> {
         self.scoped(&Decls::block([b.body.as_slice()]), |c| c.statements(&b.body))
     }
 
-    /// Runs `then` when the continuation token in `reg` is `token`.
     pub fn on_completion(&mut self, reg: Register, token: i32, then: impl FnOnce(&mut Self) -> Result<(), Error>) -> Result<(), Error> {
         self.b().load_smi(token);
         self.b().compare(CompareOp::StrictEq, reg);
@@ -2960,8 +2643,6 @@ impl<'a> Compiler<'a, '_> {
         Ok(())
     }
 
-    /// The current level gets a fresh copy of its context (a `for (let …)` iteration: closures from the previous
-    /// iteration keep the old one)
     fn renew_context(&mut self) {
         let Some(level) = self.levels.last() else { return };
         let Some(saved) = level.context else { return };
@@ -2986,8 +2667,6 @@ impl<'a> Compiler<'a, '_> {
         self.release(tmp.first);
     }
 
-    /// `try` / `catch` / `finally` (V8's `TryCatchBuilder` / `TryFinallyBuilder`: handler table regions; a finally is
-    /// entered with a continuation token and dispatches on it at the end)
     fn try_statement(&mut self, t: &'a TryStatement<'a>) -> Result<(), Error> {
         let body = |s: &mut Self| match &t.handler {
             Some(c) => s.try_catch(j8bytecode::CatchPrediction::Caught, |s| s.block(&t.block), |s, ctx| s.catch_clause(c, ctx)),
@@ -2999,9 +2678,6 @@ impl<'a> Compiler<'a, '_> {
         }
     }
 
-    /// `try { body } finally { finalizer }` (V8's `BuildTryFinally`): every way out of the body — falling through, a
-    /// throw, a `return`, a `break` / `continue` — runs the finalizer first, then carries on.
-    /// The finalizer gets the register holding how the body was left (the continuation token).
     pub fn try_finally(&mut self, prediction: j8bytecode::CatchPrediction, body: impl FnOnce(&mut Self) -> Result<(), Error>, finalizer: impl FnOnce(&mut Self, Register) -> Result<(), Error>) -> Result<(), Error> {
         let token = self.temp();
         let value = self.temp();
@@ -3019,7 +2695,6 @@ impl<'a> Compiler<'a, '_> {
         self.b().load_smi(COMPLETION_NORMAL);
         self.b().star(token);
         self.b().jump(Bytecode::Jump, &mut fall);
-        // Entered by a throw: keep the exception for the rethrow
         self.b().handler_target(h);
         self.b().star(value);
         self.b().load_smi(COMPLETION_THROW);
@@ -3045,9 +2720,6 @@ impl<'a> Compiler<'a, '_> {
         Ok(())
     }
 
-    /// A `catch` clause, entered with the exception in acc and the context saved in `ctx` (V8's
-    /// `VisitTryCatchStatement`): the catch variable always lives in a catch context (a pattern binds `.catch` there and
-    /// is destructured in a block scope), and the pending message is cleared
     fn catch_clause(&mut self, c: &'a CatchClause<'a>, ctx: Register) -> Result<(), Error> {
         let Some(p) = &c.param else {
             self.b().load_the_hole();
@@ -3092,7 +2764,6 @@ impl<'a> Compiler<'a, '_> {
         Ok(())
     }
 
-    /// A loop's back edge: `continue`s land here, then `JumpLoop` to `header`
     fn loop_back(&mut self, header: crate::builder::LoopHeader) {
         self.bind_continues();
         let depth = self.frame().loop_depth - 1;
@@ -3101,7 +2772,6 @@ impl<'a> Compiler<'a, '_> {
 
     #[expect(clippy::too_many_lines, reason = "one arm per statement kind; splitting it would hurt readability")]
     fn statement(&mut self, s: &'a Statement<'a>) -> Result<(), Error> {
-        // The completion value resets to `undefined` before a statement that may not produce one (V8's Rewriter)
         if let Some(c) = self.frame().completion
             && self.completion_reset.contains(&s.span().start)
         {
@@ -3130,7 +2800,6 @@ impl<'a> Compiler<'a, '_> {
                 match &r.argument {
                     Some(e) => {
                         self.expr(e)?;
-                        // An async generator awaits the operand (V8's parser wraps it in an `Await`)
                         if self.frame().async_generator {
                             self.await_value();
                         }
@@ -3218,7 +2887,6 @@ impl<'a> Compiler<'a, '_> {
                     }
                     c.statement(&f.body)?;
                     c.bind_continues();
-                    // A fresh `let` context per iteration; closures from the previous iteration keep the old one
                     c.renew_context();
                     if let Some(u) = &f.update {
                         c.effect(u)?;
@@ -3286,7 +2954,6 @@ impl<'a> Compiler<'a, '_> {
             };
             match (&v.init, d.kind) {
                 (Some(e), _) => self.expr_named(e, id.name.as_str())?,
-                // `let x;` in a loop body must reset to undefined every iteration
                 (None, VariableDeclarationKind::Let) => self.b().load_undefined(),
                 (None, _) => continue,
             }
@@ -3295,8 +2962,6 @@ impl<'a> Compiler<'a, '_> {
         Ok(())
     }
 
-    /// `switch` (V8's `VisitSwitchStatement`): compares each `case` with strict equality to jump into its body; bodies
-    /// fall through in order.
     fn switch(&mut self, sw: &'a SwitchStatement<'a>) -> Result<(), Error> {
         let label = self.take_label();
         self.expr(&sw.discriminant)?;

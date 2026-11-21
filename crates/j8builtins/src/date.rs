@@ -6,27 +6,25 @@ use j8framework::{Agent, Error, ErrorKind, Hint, JsObject, ObjectKind, Property,
 
 use crate::{Args, Installer};
 
-/// `Date`: time values are milliseconds; the local time zone is UTC (LocalTZA = 0).
 struct Dates;
 
 const MS_PER_SECOND: f64 = 1000.0;
 const MS_PER_MINUTE: f64 = 60_000.0;
 const MS_PER_HOUR: f64 = 3_600_000.0;
 const MS_PER_DAY: f64 = 86_400_000.0;
-/// Range of TimeClip: ±100 million days
+
 const MAX_TIME: f64 = 8.64e15;
-/// A year larger than this cannot fall within the TimeClip range
+
 const MAX_YEAR: f64 = 400_000.0;
-/// Average number of days per year (Gregorian 400-year cycle)
+
 const DAYS_PER_YEAR: f64 = 365.2425;
-/// Day of a common year on which each month starts
+
 const MONTH_START: [f64; 13] = [0.0, 31.0, 59.0, 90.0, 120.0, 151.0, 181.0, 212.0, 243.0, 273.0, 304.0, 334.0, 365.0];
 const WEEKDAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-/// Time zone shown by toString
+
 const TIME_ZONE: &str = "GMT+0000 (Coordinated Universal Time)";
 
-/// Which field to extract from a time value.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Field {
     Year,
@@ -39,7 +37,6 @@ enum Field {
     Milliseconds,
 }
 
-/// Which group of fields a setter changes: the first field and the maximum number of arguments.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Setter {
     Milliseconds,
@@ -51,7 +48,6 @@ enum Setter {
     FullYear,
 }
 
-/// Non-negative modulo.
 fn modulo(a: f64, b: f64) -> f64 {
     let r = a % b;
     if r < 0.0 { r + b } else { r + 0.0 }
@@ -93,7 +89,6 @@ impl Dates {
         if Self::days_in_year(y) == 366.0 { 1.0 } else { 0.0 }
     }
 
-    /// First day of a month (day within the year, plus one after February in leap years).
     fn month_start(m: usize, y: f64) -> f64 {
         MONTH_START[m] + if m >= 2 { Self::leap(y) } else { 0.0 }
     }
@@ -153,7 +148,6 @@ impl Dates {
         if !t.is_finite() || t.abs() > MAX_TIME { f64::NAN } else { libm::trunc(t) + 0.0 }
     }
 
-    /// Two-digit years are in the 1900s.
     fn full_year(y: f64) -> f64 {
         if y.is_nan() {
             return y;
@@ -179,8 +173,6 @@ impl Dates {
         }
     }
 
-    // ---- Formatting ----
-
     fn year_text(y: f64) -> String {
         #[expect(clippy::cast_possible_truncation, reason = "year is within ±275760")]
         let yi = y as i64;
@@ -193,7 +185,6 @@ impl Dates {
         i
     }
 
-    /// Index into the weekday / month tables.
     fn slot(x: f64) -> usize {
         usize::try_from(Self::int(x)).unwrap_or(0)
     }
@@ -250,9 +241,6 @@ impl Dates {
         )
     }
 
-    // ---- Parsing ----
-
-    /// Parse ISO format and the output of toString / toUTCString; anything unrecognized gives NaN.
     fn parse(s: &str) -> f64 {
         Self::parse_iso(s).or_else(|| Self::parse_text(s)).map_or(f64::NAN, Self::time_clip)
     }
@@ -347,7 +335,6 @@ impl Dates {
                     }
                     offset = (oh * 60.0 + om) * MS_PER_MINUTE * if neg { -1.0 } else { 1.0 };
                 }
-                // A date-time without a time zone is local time (which is UTC here)
                 _ => {}
             }
             if i != b.len() {
@@ -361,7 +348,6 @@ impl Dates {
         Some(t - offset)
     }
 
-    /// `Tue Feb 01 2022 00:00:00 GMT+0000 (…)` and `Tue, 01 Feb 2022 00:00:00 GMT`.
     fn parse_text(s: &str) -> Option<f64> {
         let s = s.split('(').next()?.trim();
         let words: alloc::vec::Vec<&str> = s.split(|c: char| c.is_whitespace() || c == ',').filter(|w| !w.is_empty()).collect();
@@ -395,14 +381,11 @@ impl Dates {
         }
         let month = month?;
         let [a, b] = nums[..] else { return None };
-        // Either "day year" or "year day" is possible: the one greater than 31 is the year
         let (day, year) = if a > 31.0 { (b, a) } else { (a, b) };
         let t = time.unwrap_or_default();
         let (h, m, sec) = (t.first().copied().unwrap_or(0.0), t.get(1).copied().unwrap_or(0.0), t.get(2).copied().unwrap_or(0.0));
         Some(Self::make_date(Self::make_day(year, month, day), Self::make_time(h, m, sec, 0.0)) - offset)
     }
-
-    // ---- Constructor and static methods ----
 
     fn date<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let new_target = a.new_target;
@@ -433,7 +416,6 @@ impl Dates {
         Ok(a.create_from_ctor(new_target, a.realm.date_proto, ObjectKind::Date(tv))?.into())
     }
 
-    /// Year, month, day, hours, minutes, seconds, milliseconds (trailing ones may be omitted) ⇒ time value.
     fn from_parts<'gc>(a: &mut Agent<'gc, '_>, args: &[Value<'gc>]) -> Result<f64, Error> {
         let defaults = [f64::NAN, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0];
         let mut n = defaults;
@@ -466,8 +448,6 @@ impl Dates {
         let y = Self::full_year(n[0]);
         Ok(Self::time_clip(Self::make_date(Self::make_day(y, n[1], n[2]), Self::make_time(n[3], n[4], n[5], n[6]))).into())
     }
-
-    // ---- Prototype methods ----
 
     fn get<'gc, const F: u8>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let (_, t) = Self::this_time(a, this)?;
@@ -504,7 +484,6 @@ impl Dates {
         Ok(Self::store(a, o, t))
     }
 
-    /// setMilliseconds / setSeconds / … / setFullYear (local and UTC are the same).
     fn set<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>], which: Setter) -> Result<Value<'gc>, Error> {
         let (o, t) = Self::this_time(a, this)?;
         let count = match which {
@@ -604,7 +583,6 @@ impl Dates {
         Ok(Self::this_time(a, this)?.1.into())
     }
 
-    /// `Date.prototype[Symbol.toPrimitive](hint)`.
     fn to_primitive<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         if this.as_object().is_none() {
             return Err(a.throw(ErrorKind::Type, "Date.prototype[Symbol.toPrimitive] called on a non-object"));
@@ -627,7 +605,6 @@ impl Dates {
     }
 }
 
-/// The setter family: each host function corresponds to one [`Setter`].
 macro_rules! setters {
     ($($name:ident => $which:ident),* $(,)?) => {
         impl Dates {
@@ -703,7 +680,6 @@ impl Installer<'_, '_> {
         for (name, f, n) in methods {
             self.method(proto, name, f, n);
         }
-        // toGMTString is the same function as toUTCString
         let utc = proto.borrow().own(self.mc, "toUTCString").unwrap_or_default();
         self.set(proto, "toGMTString", utc);
         let tp = r.named_native(self.mc, Dates::to_primitive, "[Symbol.toPrimitive]", 1);

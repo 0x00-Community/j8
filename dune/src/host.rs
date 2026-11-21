@@ -1,5 +1,3 @@
-//! Pieces both layers share: [`Offload`] runs blocking work on a thread for an `async fn` binding, [`Io`] is a result
-//! that throws a JS error carrying a Node-style error code.
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
@@ -8,13 +6,11 @@ use std::task::{Context, Poll};
 use j8::IntoJs;
 use j8::frame::{Agent, Error, ErrorKind, Value};
 
-/// Blocking work moved to a thread of its own; ready once it is done (the thread wakes the event loop)
 pub struct Offload<T, F> {
     work: Option<F>,
     done: Option<Receiver<T>>,
 }
 
-// Nothing in it points into itself
 impl<T, F> Unpin for Offload<T, F> {}
 
 impl<T: Send + 'static, F: FnOnce() -> T + Send + 'static> Offload<T, F> {
@@ -32,7 +28,6 @@ impl<T: Send + 'static, F: FnOnce() -> T + Send + 'static> Future for Offload<T,
             let (tx, rx) = mpsc::channel();
             let waker = cx.waker().clone();
             std::thread::spawn(move || {
-                // The receiver is gone only when the runtime dropped the job
                 let _ = tx.send(work());
                 waker.wake();
             });
@@ -46,7 +41,6 @@ impl<T: Send + 'static, F: FnOnce() -> T + Send + 'static> Future for Offload<T,
     }
 }
 
-/// Node's system error codes (the subset `std::io::ErrorKind` tells apart)
 #[derive(Clone, Copy)]
 pub enum Errno {
     Enoent,
@@ -65,7 +59,6 @@ pub enum Errno {
 }
 
 impl Errno {
-    /// (code, description) as libuv words them
     const fn text(self) -> (&'static str, &'static str) {
         match self {
             Self::Enoent => ("ENOENT", "no such file or directory"),
@@ -106,25 +99,21 @@ impl From<std::io::ErrorKind> for Errno {
     }
 }
 
-/// Why a host call failed: thrown as `kind` with `message` once back on the runtime thread
 pub struct Failure {
     kind: ErrorKind,
     message: String,
 }
 
 impl Failure {
-    /// `ENOENT: no such file or directory, open 'a.txt'` (the JS side reads the code back off the front)
     pub fn io(e: &std::io::Error, syscall: &str, path: &str) -> Self {
         let (code, text) = Errno::from(e.kind()).text();
         Self { kind: ErrorKind::Error, message: format!("{code}: {text}, {syscall} '{path}'") }
     }
 }
 
-/// A host call's result: the value, or a [`Failure`] thrown as a JS error
 pub struct Io<T>(pub Result<T, Failure>);
 
 impl<T> Io<T> {
-    /// `r`, with an I/O error described as `syscall` on `path`
     pub fn new(r: std::io::Result<T>, syscall: &str, path: &str) -> Self {
         Self(r.map_err(|e| Failure::io(&e, syscall, path)))
     }

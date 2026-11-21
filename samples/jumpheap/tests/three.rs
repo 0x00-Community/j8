@@ -1,24 +1,16 @@
-//! Three resident workers in three processes, wa / wb / wc, each with a JS matrix in its own public heap (a, b, c).
-//! wc sends c to wa, which computes a·c in JS on the object it received; wa sends a to wb, which writes the first
-//! half of b over it (into wa's heap) and then dies; wc sends c again, and a·c and the sum of a must now be those of
-//! the half-overwritten a.
-//!
-//! `JUMPHEAP_ROWS` sets the rows (100 000 columns each); the default is small, `10000` is the full 10000 × 100000.
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::process::{Child, Command, Stdio};
 use std::time::Instant;
 
-/// Columns of every matrix (the sample's row size)
 const COLS: usize = 100_000;
-/// Rows when `JUMPHEAP_ROWS` is not set
+
 const ROWS: usize = 40;
-/// Values repeat along a row and down a column with this period
+
 const PERIOD: usize = 9;
-/// The seeds wa, wb and wc fill their matrices from
+
 const SEEDS: [usize; 3] = [1, 2, 3];
 
-/// A jumpheap process: its child and its port
 struct Worker {
     child: Child,
     port: u16,
@@ -41,7 +33,6 @@ impl Worker {
         format!("http://127.0.0.1:{}", self.port)
     }
 
-    /// `method path` to this worker: the response body (status 200 or a panic)
     fn call(&self, method: &str, path: &str) -> serde_json::Value {
         let mut s = TcpStream::connect(("127.0.0.1", self.port)).expect("connect");
         write!(s, "{method} {path} HTTP/1.1\r\nhost: x\r\ncontent-length: 0\r\nconnection: close\r\n\r\n").expect("send");
@@ -52,7 +43,6 @@ impl Worker {
         serde_json::from_str(body).unwrap_or_else(|e| panic!("{method} {path}: {e}: {body}"))
     }
 
-    /// Like [`Self::call`], timed on stderr
     fn timed(&self, method: &str, path: &str) -> serde_json::Value {
         let t = Instant::now();
         let v = self.call(method, path);
@@ -68,10 +58,7 @@ impl Drop for Worker {
     }
 }
 
-/// The matrices as the example fills them: m[i][j] = (i·7 + j·13 + seed·31) mod 9 − 4. A row is fixed by its residue
-/// (i·7 + seed·31) mod 9, so every row sum and row dot product is one of a few, computed once.
 struct Filled {
-    /// Dot product of a row of residue k with one of residue l
     dot: [[i64; PERIOD]; PERIOD],
     sum: [i64; PERIOD],
 }
@@ -85,7 +72,6 @@ impl Filled {
         }
     }
 
-    /// The residues of a matrix's rows
     fn rows(seed: usize, rows: usize) -> Vec<usize> {
         (0..rows).map(|i| (i * 7 + seed * 31) % PERIOD).collect()
     }
@@ -99,7 +85,6 @@ impl Filled {
     }
 }
 
-/// JSON number as an exact integer (every value here is an integer well inside 2^53)
 fn int(v: &serde_json::Value) -> i64 {
     let x = v.as_f64().unwrap_or_else(|| panic!("not a number: {v}"));
     #[expect(clippy::cast_possible_truncation, reason = "checked to be an integer below")]
@@ -115,7 +100,6 @@ fn half_of_a_dead_heap() {
     let [wa, mut wb, wc] = ["wa", "wb", "wc"].map(|n| Worker::start(n, &dir));
     let f = Filled::new();
     let [ra, rb, rc] = SEEDS.map(|s| Filled::rows(s, rows));
-    // a once wb has written the first half of b over it
     let half = rows / 2;
     let a: Vec<usize> = rb[..half].iter().chain(&ra[half..]).copied().collect();
 
@@ -124,15 +108,12 @@ fn half_of_a_dead_heap() {
         assert_eq!(made["rows"], rows);
         assert_eq!(made["cols"], COLS);
     }
-    // c arrives at wa as a JS object over wc's heap; wa computes a·c in JS
     let before = wc.timed("POST", &format!("/send?to={}&name=c&task=dot", wa.url()));
     assert_eq!(int(&before["dot"]), f.dot(&ra, &rc));
-    // a arrives at wb as a JS object over wa's heap; wb writes half of b over it, then dies
     let written = wa.timed("POST", &format!("/send?to={}&name=a&task=overwrite", wb.url()));
     assert_eq!(written["rows"], half);
     wb.child.kill().expect("wb dies");
     wb.child.wait().expect("wb is gone");
-    // b is gone; what it wrote into a stays, and a·c is the half-overwritten a's
     let after = wc.timed("POST", &format!("/send?to={}&name=c2&task=dot", wa.url()));
     assert_eq!(int(&after["dot"]), f.dot(&a, &rc));
     assert_ne!(f.dot(&a, &rc), f.dot(&ra, &rc), "the overwrite changes a·c");

@@ -1,5 +1,3 @@
-//! `j8::runtime!`: globals, native modules (`import` and the registry), hidden bindings, preludes, a runtime built on
-//! top of another.
 use j8executor::Executor;
 use j8platform::DefaultPlatform;
 

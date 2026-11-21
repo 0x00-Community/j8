@@ -7,16 +7,12 @@ use j8framework::{Agent, Error, ErrorKind, JsObject, ObjectData, ObjectKind, Pro
 
 use crate::{Args, Installer};
 
-/// `Array` and `Array.prototype`: per spec, every method works generically on any array-like (via `length` and index
-/// properties).
 struct Arrays;
 
-/// 2^53 − 1: maximum length of an array-like
 const MAX_LENGTH: f64 = 9_007_199_254_740_991.0;
-/// 2^32 − 1: maximum length of a true array
+
 const MAX_ARRAY_LENGTH: f64 = 4_294_967_295.0;
 
-/// How a callback method collects its results.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Visit {
     ForEach,
@@ -26,7 +22,6 @@ enum Visit {
     Every,
 }
 
-/// The `find` family: direction, and whether to return the value or the index.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Find {
     Value,
@@ -36,14 +31,12 @@ enum Find {
 }
 
 impl Arrays {
-    /// O = ToObject(this), len = LengthOfArrayLike(O).
     fn target<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>) -> Result<(JsObject<'gc>, f64), Error> {
         let o = a.to_object(this)?;
         let len = a.length_of_array_like(o.into())?;
         Ok((o, len))
     }
 
-    /// ArrayCreate(len): throws RangeError if the length exceeds 2^32 − 1; all elements are holes.
     fn create<'gc>(a: &mut Agent<'gc, '_>, len: f64, proto: Option<JsObject<'gc>>) -> Result<JsObject<'gc>, Error> {
         if len > MAX_ARRAY_LENGTH {
             return Err(a.throw(ErrorKind::Range, "Invalid array length"));
@@ -55,7 +48,6 @@ impl Arrays {
         Ok(arr)
     }
 
-    /// ArraySpeciesCreate(original, len).
     fn species_create<'gc>(a: &mut Agent<'gc, '_>, original: JsObject<'gc>, len: f64) -> Result<JsObject<'gc>, Error> {
         if !a.is_array(original.into())? {
             return Self::create(a, len, None);
@@ -79,12 +71,10 @@ impl Arrays {
         }
     }
 
-    /// `Set(O, "length", n, true)`.
     fn set_length<'gc>(a: &mut Agent<'gc, '_>, o: JsObject<'gc>, n: f64) -> Result<(), Error> {
         a.set_named(o.into(), "length", n.into())
     }
 
-    /// Relative index (negative counts from the end), clamped to `[0, len]`; `undefined` gives `default`.
     fn relative<'gc>(a: &mut Agent<'gc, '_>, v: Value<'gc>, len: f64, default: f64) -> Result<f64, Error> {
         if v == Value::Undefined {
             return Ok(default);
@@ -102,7 +92,6 @@ impl Arrays {
         }
     }
 
-    /// `new Array(...)` / `Array(...)`.
     fn array<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let new_target = a.new_target;
         let proto = a.proto_from_ctor(new_target, a.realm.array_proto)?;
@@ -127,7 +116,6 @@ impl Arrays {
         Ok(a.is_array(args.at(0))?.into())
     }
 
-    /// `new this(len?)` if `this` is a constructor, otherwise ArrayCreate.
     fn construct_this<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, len: Option<f64>) -> Result<JsObject<'gc>, Error> {
         if a.is_constructor(this) {
             let args: Vec<Value<'gc>> = len.map(Value::from).into_iter().collect();
@@ -140,7 +128,6 @@ impl Arrays {
         }
     }
 
-    /// `Array.of(...items)`.
     fn of<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         #[expect(clippy::cast_precision_loss, reason = "argument count is far below 2^53")]
         let len = args.len() as f64;
@@ -152,7 +139,6 @@ impl Arrays {
         Ok(arr.into())
     }
 
-    /// `Array.from(items, mapFn, thisArg)`.
     fn from<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let (items, mapper, this_arg) = (args.at(0), args.at(1), args.at(2));
         let mapping = mapper != Value::Undefined;
@@ -219,7 +205,6 @@ impl Arrays {
 
     fn push<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let (o, len) = Self::target(a, this)?;
-        // Fast path: dense, extensible true array; append directly
         if o.no_indexed_protos() {
             let fast = !o.non_extensible() && !o.length_readonly() && o.sparse_length() == 0;
             if fast && o.is_array() {
@@ -266,7 +251,6 @@ impl Arrays {
             return Ok(Value::Undefined);
         }
         let first = a.get_index(o.into(), 0.0)?;
-        // Fast path: shift a dense true array as a whole
         if o.no_indexed_protos() {
             let fast = !o.non_extensible() && !o.length_readonly() && o.sparse_length() == 0;
             if fast && o.is_array() && !o.elements().is_empty() {
@@ -280,8 +264,6 @@ impl Arrays {
         Ok(first)
     }
 
-    /// Move `[from, from + count)` to start at `to` (holes are carried over as deletions), one element at a time in the
-    /// appropriate direction.
     fn move_range<'gc>(a: &mut Agent<'gc, '_>, o: JsObject<'gc>, from: f64, to: f64, count: f64) -> Result<(), Error> {
         let step = |a: &mut Agent<'gc, '_>, f: f64, t: f64| -> Result<(), Error> {
             if let Some(v) = a.present_index(o, f)? {
@@ -373,7 +355,6 @@ impl Arrays {
         Ok(removed.into())
     }
 
-    /// In splice, move the elements after the deleted range: remove `delete_count`, make room for `item_count`.
     fn shift_tail<'gc>(a: &mut Agent<'gc, '_>, o: JsObject<'gc>, len: f64, start: f64, delete_count: f64, item_count: f64) -> Result<(), Error> {
         if item_count < delete_count {
             Self::move_range(a, o, start + delete_count, start + item_count, len - start - delete_count)?;
@@ -388,7 +369,6 @@ impl Arrays {
         Ok(())
     }
 
-    /// IsConcatSpreadable.
     fn spreadable<'gc>(a: &mut Agent<'gc, '_>, v: Value<'gc>) -> Result<bool, Error> {
         if v.as_object().is_none() {
             return Ok(false);
@@ -456,11 +436,7 @@ impl Arrays {
         Ok(a.string(&out).into())
     }
 
-    /// Dense array whose elements are all primitives: reading each element and ToString are both unobservable, so join
-    /// it as plain data (number-to-string conversion runs in parallel on the thread pool). Returns `None` if these
-    /// conditions don't hold.
     fn join_plain<'gc>(a: &Agent<'gc, '_>, o: JsObject<'gc>, len: f64, sep: &str) -> Option<String> {
-        /// Shape of one element (no GC pointers, so it can be handed to other threads)
         #[derive(Clone, Copy)]
         enum Part<'s> {
             Number(f64),
@@ -486,8 +462,6 @@ impl Arrays {
                 _ => Part::Text(""),
             })
             .collect();
-        // Each chunk is joined on its own (numbers formatted straight into the chunk's buffer), then the chunks are
-        // concatenated in order
         let pieces = a.par().chunks(&parts, &|chunk: &[Part<'_>]| {
             let mut s = String::new();
             for (i, p) in chunk.iter().enumerate() {
@@ -611,7 +585,6 @@ impl Arrays {
         Ok((-1.0).into())
     }
 
-    /// SameValueZero: `NaN` equals itself.
     fn same_value_zero<'gc>(x: Value<'gc>, y: Value<'gc>) -> bool {
         x == y || matches!((x.kind(), y.kind()), (ValueKind::Number(p), ValueKind::Number(q)) if p.is_nan() && q.is_nan())
     }
@@ -636,7 +609,6 @@ impl Arrays {
         Ok(false.into())
     }
 
-    /// forEach / map / filter / some / every: skip holes, call `f(item, index, O)` for each element.
     fn visit<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>], how: Visit) -> Result<Value<'gc>, Error> {
         let (o, len) = Self::target(a, this)?;
         let (f, this_arg) = (args.at(0), args.at(1));
@@ -691,7 +663,6 @@ impl Arrays {
         Self::visit(a, this, args, Visit::Every)
     }
 
-    /// find / findIndex / findLast / findLastIndex: holes are not skipped.
     fn find_by<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>], how: Find) -> Result<Value<'gc>, Error> {
         let (o, len) = Self::target(a, this)?;
         let (f, this_arg) = (args.at(0), args.at(1));
@@ -726,7 +697,6 @@ impl Arrays {
         Self::find_by(a, this, args, Find::LastIndex)
     }
 
-    /// reduce / reduceRight.
     fn fold<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>], right: bool) -> Result<Value<'gc>, Error> {
         let (o, len) = Self::target(a, this)?;
         let f = args.at(0);
@@ -769,7 +739,6 @@ impl Arrays {
         let (o, len) = Self::target(a, this)?;
         let mut k = Self::relative(a, args.at(1), len, 0.0)?;
         let end = Self::relative(a, args.at(2), len, len)?;
-        // A real array filled from within its dense part: write the cells directly, leaf by leaf
         #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "integers in [0, len], checked against u32 first")]
         if k < end && end < f64::from(u32::MAX) && o.borrow_mut(a.mc).fill_index(k as u32, end as u32, args.at(0)) {
             return Ok(o.into());
@@ -793,7 +762,6 @@ impl Arrays {
         Ok(o.into())
     }
 
-    /// FlattenIntoArray: returns the next target index.
     #[expect(clippy::too_many_arguments, reason = "these are exactly the parameters of the spec's abstract operation")]
     fn flatten<'gc>(a: &mut Agent<'gc, '_>, target: JsObject<'gc>, source: JsObject<'gc>, len: f64, start: f64, depth: f64, mapper: Value<'gc>, this_arg: Value<'gc>) -> Result<f64, Error> {
         let mut to = start;
@@ -840,8 +808,6 @@ impl Arrays {
         Ok(arr.into())
     }
 
-    /// SortCompare: `undefined` sorts last; with a comparator, order by its sign (NaN counts as 0), otherwise by the
-    /// UTF-16 order of ToString.
     fn order<'gc>(a: &mut Agent<'gc, '_>, f: Value<'gc>, x: Value<'gc>, y: Value<'gc>) -> Result<Ordering, Error> {
         Ok(match (x.kind(), y.kind()) {
             (ValueKind::Undefined, ValueKind::Undefined) => Ordering::Equal,
@@ -858,10 +824,6 @@ impl Arrays {
         })
     }
 
-    /// No comparator, and all elements are numbers / strings / booleans / null / undefined: their ToString has no side
-    /// effects, so the keys can be computed up front (number-to-string conversion in parallel on the thread pool), then
-    /// stable-sorted in parallel on the thread pool; undefined sorts last. Any other element gives `None` (compare one
-    /// by one).
     fn sort_plain<'gc>(a: &Agent<'gc, '_>, items: &[Value<'gc>]) -> Option<Vec<Value<'gc>>> {
         if !items.iter().all(|v| matches!(v.kind(), ValueKind::Number(_) | ValueKind::String(_) | ValueKind::Bool(_) | ValueKind::Null | ValueKind::Undefined)) {
             return None;
@@ -880,7 +842,6 @@ impl Arrays {
                 _ => "null",
             })
             .collect();
-        // Without characters at or above U+E000, UTF-8 byte order matches UTF-16 code unit order
         let bytewise = keys.iter().all(|k| !k.chars().any(|c| c >= '\u{E000}'));
         let mut order: Vec<u32> = (0..u32::try_from(keys.len()).ok()?).collect();
         let cmp = |&i: &u32, &j: &u32| {
@@ -891,7 +852,6 @@ impl Arrays {
         Some(order.iter().map(|&i| rest[i as usize]).chain(undef).collect())
     }
 
-    /// Stable merge sort (the comparator may throw, so `sort_by` can't be used).
     fn merge_sort<'gc>(a: &mut Agent<'gc, '_>, f: Value<'gc>, v: Vec<Value<'gc>>) -> Result<Vec<Value<'gc>>, Error> {
         if v.len() <= 1 {
             return Ok(v);
@@ -1043,7 +1003,6 @@ impl Arrays {
 impl Installer<'_, '_> {
     pub(crate) fn array(&mut self) {
         let proto = self.realm.array_proto;
-        // Array.prototype itself is an empty array
         proto.borrow_mut(self.mc).kind = ObjectKind::Array;
         let ctor = self.constructor("Array", Arrays::array, proto, 1);
         self.method(ctor, "isArray", Arrays::is_array, 1);
@@ -1091,7 +1050,6 @@ impl Installer<'_, '_> {
             self.method(proto, name, f, n);
         }
         self.method(proto, "with", Arrays::with, 2);
-        // `[Symbol.unscopables]`: method names not exposed inside `with` statements
         let unscopables = ObjectData::default().alloc(self.mc);
         for name in ["at", "copyWithin", "entries", "fill", "find", "findIndex", "findLast", "findLastIndex", "flat", "flatMap", "includes", "keys", "toReversed", "toSorted", "toSpliced", "values"] {
             unscopables.borrow_mut(self.mc).define(name, Property::data(true.into()));

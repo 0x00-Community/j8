@@ -1,15 +1,9 @@
-//! `#[j8::class]`: placed on an `impl` block; methods are exported as members of a JS class (constructor,
-//! prototype methods, accessors, static methods). Generates an `j8::Class` implementation.
-//!
-//! `#[j8::class(extends = Base)]` (with an optional name first): the class's prototype chain goes through `Base`'s, and
-//! `Base`'s methods work on instances through `AsRef<Base>` / `AsMut<Base>` (the type must implement both).
 use proc_macro2::TokenStream;
 use quote::quote;
 use syn::ItemImpl;
 
 use crate::method::{Bound, Role};
 
-/// The attribute: an optional JS name and an optional `extends = Base`
 struct Attr {
     name: Option<syn::LitStr>,
     extends: Option<syn::Type>,
@@ -40,7 +34,6 @@ impl syn::parse::Parse for Attr {
 pub fn expand(attr: TokenStream, mut item: ItemImpl) -> syn::Result<TokenStream> {
     let Attr { name, extends } = syn::parse2(attr)?;
     let b = Bound::of_impl(name.map(|n| quote!(#n)).unwrap_or_default(), &mut item)?;
-    // `extends = Base`: the prototype chain, and the base's methods see `AsRef<Base>` / `AsMut<Base>` of this value
     let inherit = extends.map(|base| {
         quote! {
             fn parent<'gc>(a: &mut ::j8::frame::Agent<'gc, '_>, target: ::j8::frame::JsObject<'gc>) -> ::core::option::Option<::j8::ClassHandle<'gc>> {
