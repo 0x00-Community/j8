@@ -405,6 +405,7 @@ impl Arena {
     const CHUNK: usize = 1 << 20;
     const ALIGN: usize = 16;
 
+    #[cfg(target_os = "linux")]
     fn chunk(len: usize) -> Option<(Mapped, Mapped)> {
         unsafe {
             let fd = libc::memfd_create(c"j8jit".as_ptr(), libc::MFD_CLOEXEC);
@@ -419,6 +420,18 @@ impl Arena {
                 return None;
             }
             Some((Mapped { at: w.cast(), len }, Mapped { at: x.cast(), len }))
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn chunk(len: usize) -> Option<(Mapped, Mapped)> {
+        unsafe {
+            let at = libc::mmap(core::ptr::null_mut(), len, libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC, libc::MAP_PRIVATE | libc::MAP_ANON, -1, 0);
+            if at == libc::MAP_FAILED {
+                return None;
+            }
+            let at = at.cast();
+            Some((Mapped { at, len }, Mapped { at, len }))
         }
     }
 
