@@ -1,11 +1,11 @@
 # JIT: the speculative optimizing tier
 
-`crates/j8jit` is j8's JIT (x86-64 Unix). It implements the executor's `Tier`: hot functions and hot loops are built
-into a **speculative SSA graph** from the inline caches' feedback, optimized, and emitted as x86-64 machine code that
+`crates/j8jit` is j8's JIT (x86-64 Unix, AArch64 Linux). It implements the executor's `Tier`: hot functions and hot loops are built
+into a **speculative SSA graph** from the inline caches' feedback, optimized, and emitted as x86-64 or AArch64 machine code that
 runs directly on the interpreter's frames; when a speculation fails, it **deoptimizes** back to the interpreter.
 
 ```text
-hot function / loop ─ build (bytecode + inline caches ⇒ speculative graph) ─ opt ─ codegen ─▶ x86-64, on the interpreter's frame
+hot function / loop ─ build (bytecode + inline caches ⇒ speculative graph) ─ opt ─ codegen ─▶ machine code, on the interpreter's frame
 a guard fails ─▶ j8_deopt rebuilds the interpreter frames; the hint it leaves shapes the next compilation
 ```
 
@@ -35,7 +35,7 @@ let executor = j8executor::Executor::default().with_tier(Rc::new(j8jit::Jit::def
 
 Plain functions (not class constructors, not called with `new`, at most 3 formals) get a native entry: arguments in
 registers, int32 results back unboxed through a second return register. Every function has a trampoline
-`jmp [rip + cell]`: its machine code when it has some, otherwise the interpreter.
+`jmp [rip + cell]` (AArch64: `ldr x16, cell; br x16`): its machine code when it has some, otherwise the interpreter.
 
 Script and eval top-level code runs once: it isn't compiled on entry, only its hot loops are (OSR).
 
@@ -87,8 +87,11 @@ Every guard carries a `FrameState`: which instruction, and which register conten
 - `opt.rs`: phis that pick one value go away, and so does whatever nothing needs;
 - loop-invariant code motion, path facts across loops, constant modulus as multiplication and so on happen while
   building and optimizing;
-- `codegen.rs`: **graph ⇒ x86-64 directly**: linear-scan register allocation over the blocks in reverse postorder, then
-  one pass of instruction selection; `asm.rs` holds the x86-64 encodings used.
+- `codegen.rs`: **graph ⇒ machine code directly**: linear-scan register allocation over the blocks in reverse postorder,
+  then one pass of instruction selection. It is written against x86-64 register roles (RAX … R15) and flag conditions;
+  `asm.rs` picks the encoder for the target: `asm/x64.rs` (x86-64) or `asm/a64.rs` (AArch64, which maps each role to
+  an AAPCS64 register, emulates x86 flag conditions on NZCV, and moves `x0`/`x1` into the RAX/RDX roles after every
+  call). Frame setup and caller-saved spills are the encoder's `enter` / `leave` / `save` / `restore`.
 
 ```text
 rbp frame   saved rbx r12 r13 r14 r15 at −8 … −40, entry pointers at −48 … −88, spill slots below

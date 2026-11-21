@@ -8,7 +8,7 @@ j8 是**用 Rust 从头写的 JavaScript 引擎**。除了解析器用 [oxc](htt
 ```text
 JS 源码 ─ oxc 解析 ─ j8compiler ─▶ V8 Ignition 字节码 ─ j8executor 解释 ─┐
                                                                          ├─▶ 结果
-                       热函数 / 热循环 ─ j8jit 推测式编译 ─▶ x86-64 机器码 ─┘
+                       热函数 / 热循环 ─ j8jit 推测式编译 ─▶ 机器码 ─────┘
 ```
 
 ## 设计取向

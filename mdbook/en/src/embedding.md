@@ -8,7 +8,7 @@ This part shows how to build your own JavaScript runtime on the `j8` crate, the 
 ```toml
 [dependencies]
 j8 = "0.4"                                          # default feature `runtime`: executor + built-ins + platform
-# j8 = { version = "0.4", features = ["jit"] }      # + the x86-64 JIT (x86-64 Unix)
+# j8 = { version = "0.4", features = ["jit"] }      # + the JIT (x86-64 Unix, AArch64 Linux)
 # j8 = { version = "0.4", features = ["json"] }     # + j8::Json<T> (serde)
 ```
 

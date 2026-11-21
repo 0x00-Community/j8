@@ -448,6 +448,7 @@ impl Arena {
         buf[..bytes.len()].copy_from_slice(bytes);
         let addr = x.at as usize + at;
         patch(buf, addr);
+        Code::sync(buf.as_ptr() as usize, addr, len);
         self.used = at + len;
         Some(addr)
     }
@@ -478,14 +479,13 @@ impl Trampolines {
             for i in 0..Self::PER_PAGE {
                 let stub = at.add(i * Self::STUB);
                 let cell = at.add(Self::PAGE + i * 8);
-                let disp = i32::try_from(cell as isize - (stub as isize + 6)).unwrap_or(0);
-                let mut code = [0xff, 0x25, 0, 0, 0, 0, 0xcc, 0xcc];
-                code[2..6].copy_from_slice(&disp.to_le_bytes());
+                let code = Code::jump_through(stub as usize, cell as usize);
                 core::ptr::copy_nonoverlapping(code.as_ptr(), stub, Self::STUB);
             }
             if libc::mprotect(at.cast(), Self::PAGE, libc::PROT_READ | libc::PROT_EXEC) != 0 {
                 return None;
             }
+            Code::sync(at as usize, at as usize, Self::PAGE);
             Some(Trampolines { at, used: 0 })
         }
     }
@@ -517,5 +517,55 @@ impl Trampolines {
 impl Drop for Trampolines {
     fn drop(&mut self) {
         unsafe { libc::munmap(self.at.cast(), 2 * Self::PAGE) };
+    }
+}
+
+struct Code;
+
+#[cfg(not(target_arch = "aarch64"))]
+impl Code {
+    fn jump_through(stub: usize, cell: usize) -> [u8; Trampolines::STUB] {
+        let disp = i32::try_from(cell.wrapping_sub(stub + 6).cast_signed()).unwrap_or(0);
+        let mut code = [0xff, 0x25, 0, 0, 0, 0, 0xcc, 0xcc];
+        code[2..6].copy_from_slice(&disp.to_le_bytes());
+        code
+    }
+
+    fn sync(_written: usize, _run: usize, _len: usize) {}
+}
+
+#[cfg(target_arch = "aarch64")]
+impl Code {
+    const LDR_X16: u32 = 0x5800_0010;
+    const BR_X16: u32 = 0xD61F_0200;
+    const LINE_FIELD: u64 = 0xF;
+    const DLINE_SHIFT: u64 = 16;
+    const WORD: usize = 4;
+
+    fn jump_through(stub: usize, cell: usize) -> [u8; Trampolines::STUB] {
+        let words = u32::try_from((cell - stub) / Self::WORD).unwrap_or(0);
+        let mut code = [0; Trampolines::STUB];
+        code[..4].copy_from_slice(&(Self::LDR_X16 | words << 5).to_le_bytes());
+        code[4..].copy_from_slice(&Self::BR_X16.to_le_bytes());
+        code
+    }
+
+    fn sync(written: usize, run: usize, len: usize) {
+        let ctr: u64;
+        unsafe { core::arch::asm!("mrs {}, ctr_el0", out(reg) ctr, options(nomem, nostack)) };
+        let dline = Self::WORD << (ctr >> Self::DLINE_SHIFT & Self::LINE_FIELD);
+        let iline = Self::WORD << (ctr & Self::LINE_FIELD);
+        let mut p = written & !(dline - 1);
+        while p < written + len {
+            unsafe { core::arch::asm!("dc cvau, {}", in(reg) p, options(nostack)) };
+            p += dline;
+        }
+        unsafe { core::arch::asm!("dsb ish", options(nostack)) };
+        let mut p = run & !(iline - 1);
+        while p < run + len {
+            unsafe { core::arch::asm!("ic ivau, {}", in(reg) p, options(nostack)) };
+            p += iline;
+        }
+        unsafe { core::arch::asm!("dsb ish", "isb", options(nostack)) };
     }
 }
