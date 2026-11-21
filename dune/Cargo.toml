@@ -1,12 +1,14 @@
 [package]
-# published as j8dune (the name dune is taken on crates.io); the library and the executables keep the name dune / dunx
+# published as j8dune (the name dune is taken on crates.io); the library and the executable keep the name dune.
+# There is one executable: dunx is a link to dune, which tells the two apart by the name it is started under
 name = "j8dune"
 description = "dune and dunx: a JavaScript runtime on j8 with a Node-compatible layer and a Web-standard layer, and a runner for npm packages' executables"
 readme = "README.md"
-default-run = "dune"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 license = "MIT"
+# the npm packages are laid out from npm/ (see npm/pack.js), not shipped in the crate
+exclude = ["npm"]
 repository = "https://github.com/0x00-Community/j8"
 keywords = ["javascript", "runtime", "node", "npm", "j8"]
 categories = ["command-line-utilities", "development-tools"]
@@ -21,10 +23,6 @@ path = "src/lib.rs"
 [[bin]]
 name = "dune"
 path = "src/main.rs"
-
-[[bin]]
-name = "dunx"
-path = "src/dunx.rs"
 
 [dependencies]
 j8 = { version = "0.4.0", features = ["runtime", "jit", "json"] }

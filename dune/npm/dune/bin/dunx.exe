@@ -1,0 +1,27 @@
+#!/usr/bin/env node
+// Placeholder: the postinstall script (install.js) replaces this file with the dune binary itself, so that running
+// dune does not start Node first. When install scripts did not run (--ignore-scripts), this runs the binary from the
+// platform package instead. dunx.exe is the same file; the binary tells the two apart by the name it is started under.
+'use strict';
+const path = require('path');
+const { spawnSync } = require('child_process');
+const host = require('../platform.js');
+
+const name = path.basename(__filename, '.exe');
+if (!host) {
+  console.error(`${name}: no dune binary for ${process.platform}-${process.arch}`);
+  process.exit(1);
+}
+let exe;
+try {
+  exe = require.resolve(`${host.package}/${host.file}`);
+} catch {
+  console.error(`${name}: package ${host.package} is not installed (was it left out with --no-optional?)`);
+  process.exit(1);
+}
+const run = spawnSync(exe, process.argv.slice(2), { stdio: 'inherit', argv0: name });
+if (run.error) {
+  console.error(`${name}: ${run.error.message}`);
+  process.exit(1);
+}
+process.exit(run.status === null ? 1 : run.status);

@@ -18,16 +18,33 @@ cargo run --release                                  # REPL (.help / .exit)
 cargo run --release -- --jit a.js                    # with the JIT
 ```
 
-This is a package of its own (not part of the j8 workspace) and depends on the published `j8` crate. It is published
-as `j8dune` (the name `dune` is taken on crates.io): `cargo install j8dune` installs both `dune` and `dunx`.
+This is a package of its own (not part of the j8 workspace) and depends on the published `j8` crate.
+
+## Install
+
+```sh
+npm install -g @dune/dune         # prebuilt binary for your platform, dune and dunx
+cargo install j8dune              # or build it (the name dune is taken on crates.io); then ln -s dune ~/.cargo/bin/dunx
+```
+
+There is one executable. `dunx` is a link to `dune`, which tells the two apart by the name it is started under, as
+`bun` / `bunx` do. On npm, `@dune/dune` carries placeholders and depends on one package per platform
+(`@dune/linux-x64`, `@dune/linux-x64-musl`, `@dune/darwin-arm64`, `@dune/win32-x64`, ...); npm installs the one that
+fits, and the postinstall script puts its binary in place of the placeholders and links `dunx` to it. `npm/` holds
+the main package and `npm/pack.js`, which lays out all the packages of a release from the built binaries.
+
+## Command line
+
+Each folder under `src/cli/` is one level of subcommands: `run/` is `dune run`, `repl/` is `dune repl`, `x/` is
+`dune x`. `--jit` and `--web` are accepted before or after the subcommand.
 
 ## dunx
 
-The package also builds `dunx` (the same as `dune x`), which runs a package's executable:
+`dunx` (the same as `dune x`) runs a package's executable:
 
 ```sh
 dunx cowsay hello                 # the package's own executable
-dunx semver@^7 1.2.3 -r '>1'      # a version or range; options after the command are the executable's
+dunx semver@^7 1.2.3 -r '>1.0.0'  # a version or range; options after the command are the executable's
 dunx -p typescript tsc --version  # an executable whose name differs from its package
 dunx --no-install json5 --version # never touch the registry
 ```

@@ -70,7 +70,7 @@ cargo run --release -- --web examples/web.mjs
 cargo run --release -- -p '[1, 2, 3].map(x => x * 2)'
 cargo run --release                             # REPL (.help / .exit)
 cargo run --release -- --jit a.js               # 开 JIT
-cargo run --release --bin dunx -- cowsay hi     # dunx (同 dune x): 跑包里的可执行文件, 没装就从 npm 装进缓存
+cargo run --release -- x cowsay hi             # dune x (dunx 是 dune 的链接): 跑包里的可执行文件, 没装就从 npm 装进缓存
 
 # ☁️ Cloudflare Worker 式: ES 模块 + Durable Object
 cd samples/workerd && cargo run -- examples/counter.js --bind COUNTER=Counter --request "GET /c/inc?name=a"

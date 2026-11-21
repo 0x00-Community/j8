@@ -17,16 +17,32 @@ cargo run --release                                  # REPL（.help / .exit）
 cargo run --release -- --jit a.js                    # 打开 JIT
 ```
 
-本包自成一体（不在 j8 的 workspace 里），依赖 crates.io 上发布的 `j8`。crates.io 上的包名是 `j8dune`（`dune` 已被占用），
-`cargo install j8dune` 同时装上 `dune` 和 `dunx`。
+本包自成一体（不在 j8 的 workspace 里），依赖 crates.io 上发布的 `j8`。
+
+## 安装
+
+```sh
+npm install -g @dune/dune         # 本平台的预编译二进制，dune 和 dunx 都有
+cargo install j8dune              # 或者自己编（crates.io 上 dune 已被占用）；再 ln -s dune ~/.cargo/bin/dunx
+```
+
+只有一个可执行文件：`dunx` 是 `dune` 的链接，程序按启动时的文件名区分两者（同 `bun` / `bunx`）。npm 上的 `@dune/dune`
+只带占位脚本，依赖每个平台一个包（`@dune/linux-x64`、`@dune/linux-x64-musl`、`@dune/darwin-arm64`、`@dune/win32-x64`
+……），npm 只装符合本机的那个；postinstall 脚本把其中的二进制放到占位脚本的位置，再把 `dunx` 链接过去。`npm/` 放主包和
+`npm/pack.js`，后者用编好的二进制排出一次发版的全部包。
+
+## 命令行
+
+`src/cli/` 下每一层文件夹就是一层子命令：`run/` 是 `dune run`，`repl/` 是 `dune repl`，`x/` 是 `dune x`。`--jit`、`--web`
+写在子命令前后都行。
 
 ## dunx
 
-本包同时出 `dunx`（等同 `dune x`），用来跑包里的可执行文件：
+`dunx`（等同 `dune x`）用来跑包里的可执行文件：
 
 ```sh
 dunx cowsay hello                 # 包自己的可执行文件
-dunx semver@^7 1.2.3 -r '>1'      # 指定版本或范围；命令之后的选项都给可执行文件
+dunx semver@^7 1.2.3 -r '>1.0.0'  # 指定版本或范围；命令之后的选项都给可执行文件
 dunx -p typescript tsc --version  # 可执行文件名和包名不同
 dunx --no-install json5 --version # 不访问 registry
 ```
