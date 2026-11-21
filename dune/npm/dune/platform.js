@@ -1,9 +1,9 @@
-// Which @dune/<platform> package holds the binary for this machine, and where in it the binary is.
+// Which @jabberwocky238/dune-<platform> package holds the binary for this machine, and where in it the binary is.
 'use strict';
 const path = require('path');
 const platforms = require('./platforms.json');
 
-const SCOPE = '@dune';
+const SCOPE = '@jabberwocky238';
 
 /** `glibc` or `musl` on Linux (Node built against glibc reports its version), nothing elsewhere */
 function libc() {
@@ -18,7 +18,7 @@ const host = platforms.find(
 
 module.exports = host && {
   ...host,
-  package: `${SCOPE}/${host.name}`,
+  package: `${SCOPE}/dune-${host.name}`,
   /** The binary's path inside the platform package */
   file: path.posix.join('bin', `dune${host.exe || ''}`),
 };

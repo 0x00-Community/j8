@@ -5,6 +5,16 @@ in Rust, layered like V8. JS is compiled to bytecode that matches V8's Ignition 
 executor, and hot functions and loops go to a speculative JIT that emits x86-64 machine code. The heap is
 [paragc](https://crates.io/crates/paragc).
 
+## Install dune
+
+```sh
+curl -fsSL https://j8.app238.com/install | bash                 # macOS, Linux
+powershell -c "irm https://j8.app238.com/install.ps1 | iex"     # Windows
+npm install -g @jabberwocky238/dune                              # anywhere with npm
+```
+
+More in [Installing dune](install.md).
+
 ## How to read it
 
 | You want to … | Start here |

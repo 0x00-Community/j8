@@ -1,0 +1,180 @@
+name: dune release
+
+# A vX.Y or vX.Y.Z tag builds dune for every platform in dune/npm/platforms.json, attaches the archives to the
+# GitHub release of that tag and publishes the npm packages. The tag must match the version in dune/Cargo.toml
+# (v0.5 means 0.5.0).
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+"
+      - "v[0-9]+.[0-9]+.[0-9]+"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to (re)build and release, such as v0.5.0"
+        required: true
+
+permissions:
+  contents: write
+  id-token: write
+
+concurrency:
+  group: dune-release-${{ github.event.inputs.tag || github.ref_name }}
+
+env:
+  TAG: ${{ github.event.inputs.tag || github.ref_name }}
+  CARGO_TERM_COLOR: always
+
+jobs:
+  version:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - id: check
+        run: |
+          bare=${TAG#v}
+          [[ $bare == *.*.* ]] || bare=$bare.0
+          cargo=$(sed -n 's/^version *= *"\(.*\)"/\1/p' dune/Cargo.toml | head -1)
+          if [[ $bare != "$cargo" ]]; then
+            echo "::error::tag $TAG is version $bare but dune/Cargo.toml says $cargo"
+            exit 1
+          fi
+          echo "version=$bare" >>"$GITHUB_OUTPUT"
+
+  build:
+    needs: version
+    name: build ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: linux-x64, target: x86_64-unknown-linux-gnu, zig: x86_64-unknown-linux-gnu.2.17, os: ubuntu-24.04, run: true }
+          - { name: linux-x64-musl, target: x86_64-unknown-linux-musl, zig: x86_64-unknown-linux-musl, os: ubuntu-24.04, run: true }
+          - { name: linux-arm64, target: aarch64-unknown-linux-gnu, zig: aarch64-unknown-linux-gnu.2.17, os: ubuntu-24.04-arm, run: true }
+          - { name: linux-arm64-musl, target: aarch64-unknown-linux-musl, zig: aarch64-unknown-linux-musl, os: ubuntu-24.04-arm, run: true }
+          - { name: darwin-x64, target: x86_64-apple-darwin, os: macos-15, run: true }
+          - { name: darwin-arm64, target: aarch64-apple-darwin, os: macos-15, run: true }
+          - { name: win32-x64, target: x86_64-pc-windows-msvc, os: windows-2025, exe: .exe, run: true }
+          - { name: win32-arm64, target: aarch64-pc-windows-msvc, os: windows-11-arm, exe: .exe, run: true }
+    defaults:
+      run:
+        shell: bash
+        working-directory: dune
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: dune
+          key: ${{ matrix.target }}
+      - if: matrix.zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.13.0
+      - if: matrix.zig
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
+      - name: cargo build
+        run: |
+          if [[ -n "${{ matrix.zig }}" ]]; then
+            cargo zigbuild --release --locked --target "${{ matrix.zig }}"
+          else
+            cargo build --release --locked --target "${{ matrix.target }}"
+          fi
+      - name: smoke test
+        if: matrix.run
+        run: |
+          exe=target/${{ matrix.target }}/release/dune${{ matrix.exe }}
+          "$exe" --version
+          [[ $("$exe" -p '[1, 2, 3].map(x => x * 2).join()') == 2,4,6 ]]
+      - name: package
+        run: |
+          stage=../dist
+          mkdir -p "$stage/dune-${{ matrix.name }}" "$stage/${{ matrix.target }}"
+          cp "target/${{ matrix.target }}/release/dune${{ matrix.exe }}" "$stage/dune-${{ matrix.name }}/"
+          cp "target/${{ matrix.target }}/release/dune${{ matrix.exe }}" "$stage/${{ matrix.target }}/"
+          tar -C "$stage" -czf "$stage/dune-${{ matrix.name }}.tar.gz" "dune-${{ matrix.name }}"
+          rm -r "$stage/dune-${{ matrix.name }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dune-${{ matrix.name }}
+          path: dist/
+          if-no-files-found: error
+
+  github:
+    needs: [version, build]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: dune-*
+          path: dist
+          merge-multiple: true
+      - name: checksums
+        working-directory: dist
+        run: sha256sum dune-*.tar.gz | tee SHA256SUMS
+      - name: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          notes="dune $VERSION
+
+          \`\`\`sh
+          curl -fsSL https://j8.app238.com/install | bash                 # macOS, Linux
+          powershell -c \"irm https://j8.app238.com/install.ps1 | iex\"     # Windows
+          npm install -g @jabberwocky238/dune
+          \`\`\`"
+          if gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/dune-*.tar.gz dist/SHA256SUMS --clobber -R "$GITHUB_REPOSITORY"
+          else
+            gh release create "$TAG" dist/dune-*.tar.gz dist/SHA256SUMS -R "$GITHUB_REPOSITORY" \
+              --verify-tag --title "$TAG" --notes "$notes" --generate-notes
+          fi
+
+  npm:
+    needs: [version, build]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: dune-*
+          path: dist
+          merge-multiple: true
+      - name: lay out packages
+        run: node dune/npm/pack.js dist npm-out
+      - name: publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          publish() {
+            local dir=$1 name
+            name=$(node -p "require('./$dir/package.json').name")
+            if npm view "$name@$VERSION" version >/dev/null 2>&1; then
+              echo "$name@$VERSION is already published"
+            else
+              (cd "$dir" && npm publish --access public --provenance)
+            fi
+          }
+          for dir in npm-out/*/; do
+            [[ $dir == npm-out/dune/ ]] || publish "${dir%/}"
+          done
+          publish npm-out/dune

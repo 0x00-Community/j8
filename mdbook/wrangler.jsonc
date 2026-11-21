@@ -11,6 +11,9 @@
 		"directory": "./book",
 		"not_found_handling": "404-page"
 	},
+	"routes": [
+		{ "pattern": "j8.app238.com", "custom_domain": true }
+	],
 	"observability": {
 		"enabled": true
 	},

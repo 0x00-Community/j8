@@ -1,5 +1,6 @@
 mod repl;
 mod run;
+mod upgrade;
 mod x;
 
 use std::ffi::OsStr;
@@ -11,6 +12,7 @@ use clap::{Parser, Subcommand};
 use crate::job::{Job, Layer};
 use repl::Repl;
 use run::Run;
+use upgrade::Upgrade;
 use x::{Dunx, X};
 
 #[derive(Parser)]
@@ -42,11 +44,13 @@ enum Command {
     Repl(Repl),
     #[command(about = "Run a package's executable, installing the package first when needed (the same as `dunx`)")]
     X(X),
+    Upgrade(Upgrade),
 }
 
 enum Ask {
     Job(Job),
     X(X),
+    Upgrade(Upgrade),
 }
 
 impl TryFrom<Dune> for Ask {
@@ -56,6 +60,7 @@ impl TryFrom<Dune> for Ask {
         let mut argv = cli.argv.into_iter();
         match (cli.command, argv.next(), cli.eval, cli.print) {
             (Some(Command::X(x)), ..) => Ok(Ask::X(x)),
+            (Some(Command::Upgrade(upgrade)), ..) => Ok(Ask::Upgrade(upgrade)),
             (Some(Command::Run(run)), ..) => Job::try_from(run).map(Ask::Job),
             (None, Some(file), ..) => Job::try_from(Run { file: file.into(), args: argv.collect() }).map(Ask::Job),
             (Some(Command::Repl(repl)), ..) => Ok(Ask::Job(repl.into())),
@@ -74,6 +79,7 @@ impl Dune {
         match Ask::try_from(self) {
             Ok(Ask::Job(job)) => job.run(layer, jit),
             Ok(Ask::X(x)) => x.run(jit),
+            Ok(Ask::Upgrade(upgrade)) => upgrade.run(),
             Err(e) => {
                 eprintln!("dune: {e}");
                 ExitCode::FAILURE

@@ -4,6 +4,16 @@
 JS 先编成与 V8 Ignition 逐字节一致的字节码，由执行器解释，热函数和热循环交给推测式 JIT 出 x86-64 机器码；堆是
 [paragc](https://crates.io/crates/paragc)。
 
+## 安装 dune
+
+```sh
+curl -fsSL https://j8.app238.com/install | bash                 # macOS、Linux
+powershell -c "irm https://j8.app238.com/install.ps1 | iex"     # Windows
+npm install -g @jabberwocky238/dune                              # 有 npm 的地方
+```
+
+详见[安装 dune](install.md)。
+
 ## 怎么读
 
 | 你想…… | 从这里读 |

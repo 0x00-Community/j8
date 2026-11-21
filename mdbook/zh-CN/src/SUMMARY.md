@@ -5,6 +5,7 @@
 # 入门
 
 - [j8 是什么](intro.md)
+- [安装 dune](install.md)
 - [快速开始](quickstart.md)
 - [总体架构：一段 JS 的一生](architecture.md)
 

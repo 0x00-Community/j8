@@ -5,6 +5,7 @@
 # Getting started
 
 - [What j8 is](intro.md)
+- [Installing dune](install.md)
 - [Quick start](quickstart.md)
 - [Architecture: the life of a script](architecture.md)
 

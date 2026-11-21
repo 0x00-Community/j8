@@ -22,12 +22,18 @@ cargo run --release -- --jit a.js                    # 打开 JIT
 ## 安装
 
 ```sh
-npm install -g @dune/dune         # 本平台的预编译二进制，dune 和 dunx 都有
-cargo install j8dune              # 或者自己编（crates.io 上 dune 已被占用）；再 ln -s dune ~/.cargo/bin/dunx
+curl -fsSL https://j8.app238.com/install | bash               # macOS、Linux：装进 ~/.dune/bin
+powershell -c "irm https://j8.app238.com/install.ps1 | iex"   # Windows
+npm install -g @jabberwocky238/dune                            # 本平台的预编译二进制，dune 和 dunx 都有
+cargo install j8dune      # 或者自己编（crates.io 上 dune 已被占用）；再 ln -s dune ~/.cargo/bin/dunx
+dune upgrade              # 用 GitHub 上的最新 Release 替换自己
 ```
 
-只有一个可执行文件：`dunx` 是 `dune` 的链接，程序按启动时的文件名区分两者（同 `bun` / `bunx`）。npm 上的 `@dune/dune`
-只带占位脚本，依赖每个平台一个包（`@dune/linux-x64`、`@dune/linux-x64-musl`、`@dune/darwin-arm64`、`@dune/win32-x64`
+每个 `vX.Y` / `vX.Y.Z` 标签会编出 `npm/platforms.json` 里全部平台的二进制，挂到 GitHub Release（`dune-<平台>.tar.gz`
+和 `SHA256SUMS`），并发布 npm 包（`.github/workflows/dune-release.yml`）。安装脚本放在 `mdbook/install/`。
+
+只有一个可执行文件：`dunx` 是 `dune` 的链接，程序按启动时的文件名区分两者（同 `bun` / `bunx`）。npm 上的 `@jabberwocky238/dune`
+只带占位脚本，依赖每个平台一个包（`@jabberwocky238/dune-linux-x64`、`@jabberwocky238/dune-linux-x64-musl`、`@jabberwocky238/dune-darwin-arm64`、`@jabberwocky238/dune-win32-x64`
 ……），npm 只装符合本机的那个；postinstall 脚本把其中的二进制放到占位脚本的位置，再把 `dunx` 链接过去。`npm/` 放主包和
 `npm/pack.js`，后者用编好的二进制排出一次发版的全部包。
 
@@ -69,6 +75,18 @@ j8::runtime! { pub Dune: Web { globals: [Process], natives: [Fs, Os, Child], pre
   `fs`，带具名导出）。
 - 事件循环是 `j8::Runtime::run_until_idle`：没有定时器和宿主任务时进程结束，退出码取 `process.exitCode`。没人接住的
   错误（定时器里、回调里）打印 `Uncaught …` 并以 1 退出，除非 `process.on('uncaughtException')` 接走了。
+
+## 测试
+
+`tests/node/` 照 Bun 的做法拿 Node 自己的测试集测 dune：Node v25.9.0 `test/parallel`、`test/sequential` 的文件原样复制，
+连同 `common/` 和它们读的 `fixtures/`；`dune test-….js` 退出码为 0 即通过（Node 自己的判据）。只收能过的，
+每一个都是回归测试；`common/` 的改动标了 `// dune:`。
+
+```sh
+cargo test --release --test node                          # 全部，并行，每个 10 秒
+DUNE_NODE_TEST=test-fs- cargo test --release --test node  # 路径含这段的
+tests/node/fetch.sh test-path-join.js                     # 再从 Node v25.9.0 拷一个
+```
 
 ## 还没有的
 

@@ -43,7 +43,7 @@ let result = isolate.run(&mut executor, &cx, &Source { text: "1 + 2 * 3", file: 
 ## 用 dune 跑 JS
 
 ```sh
-cargo install j8dune           # npm 包 @dune/dune 准备中
+curl -fsSL https://j8.app238.com/install | bash   # 或 npm i -g @jabberwocky238/dune，见「安装 dune」
 dune app.js                    # Node 兼容层（缺省）
 dune --web app.mjs             # 只要 Web 标准接口
 dune -p '[1, 2, 3].map(x => x * 2)'

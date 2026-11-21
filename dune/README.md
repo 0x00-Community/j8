@@ -23,13 +23,20 @@ This is a package of its own (not part of the j8 workspace) and depends on the p
 ## Install
 
 ```sh
-npm install -g @dune/dune         # prebuilt binary for your platform, dune and dunx
-cargo install j8dune              # or build it (the name dune is taken on crates.io); then ln -s dune ~/.cargo/bin/dunx
+curl -fsSL https://j8.app238.com/install | bash               # macOS, Linux: into ~/.dune/bin
+powershell -c "irm https://j8.app238.com/install.ps1 | iex"   # Windows
+npm install -g @jabberwocky238/dune                            # prebuilt binary for your platform, dune and dunx
+cargo install j8dune      # or build it (the name dune is taken on crates.io); then ln -s dune ~/.cargo/bin/dunx
+dune upgrade              # replace itself with the latest GitHub release
 ```
 
+Every `vX.Y` / `vX.Y.Z` tag builds the binaries for all platforms in `npm/platforms.json`, attaches them to a GitHub
+release (`dune-<platform>.tar.gz` and `SHA256SUMS`) and publishes the npm packages
+(`.github/workflows/dune-release.yml`). The install scripts are served from `mdbook/install/`.
+
 There is one executable. `dunx` is a link to `dune`, which tells the two apart by the name it is started under, as
-`bun` / `bunx` do. On npm, `@dune/dune` carries placeholders and depends on one package per platform
-(`@dune/linux-x64`, `@dune/linux-x64-musl`, `@dune/darwin-arm64`, `@dune/win32-x64`, ...); npm installs the one that
+`bun` / `bunx` do. On npm, `@jabberwocky238/dune` carries placeholders and depends on one package per platform
+(`@jabberwocky238/dune-linux-x64`, `@jabberwocky238/dune-linux-x64-musl`, `@jabberwocky238/dune-darwin-arm64`, `@jabberwocky238/dune-win32-x64`, ...); npm installs the one that
 fits, and the postinstall script puts its binary in place of the placeholders and links `dunx` to it. `npm/` holds
 the main package and `npm/pack.js`, which lays out all the packages of a release from the built binaries.
 
@@ -73,6 +80,19 @@ j8::runtime! { pub Dune: Web { globals: [Process], natives: [Fs, Os, Child], pre
 - The event loop is `j8::Runtime::run_until_idle`: the process ends when no timer or host work is left; the exit
   code is `process.exitCode`. An error nobody caught (in a timer, a callback) prints `Uncaught …` and exits with 1,
   unless `process.on('uncaughtException')` takes it.
+
+## Tests
+
+`tests/node/` runs Node's own test suite against dune, the way Bun does: files from Node v25.9.0's `test/parallel`
+and `test/sequential` are copied as they are, with `common/` and the `fixtures/` they read, and a test passes when
+`dune test-….js` exits with 0 (Node's own criterion). Only tests that pass are kept, so every one is a regression
+test; the patches to `common/` are marked `// dune:`.
+
+```sh
+cargo test --release --test node                          # all of them, in parallel, 10 s each
+DUNE_NODE_TEST=test-fs- cargo test --release --test node  # the ones whose path contains this
+tests/node/fetch.sh test-path-join.js                     # copy one more from Node v25.9.0
+```
 
 ## Not there yet
 

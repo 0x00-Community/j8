@@ -10,3 +10,7 @@ if ! command -v mdbook >/dev/null 2>&1; then
 fi
 mdbook build en
 mdbook build zh-CN
+# install scripts: curl -fsSL https://j8.app238.com/install | bash, irm https://j8.app238.com/install.ps1 | iex
+cp install/install.sh book/install
+cp install/install.ps1 book/install.ps1
+cp install/_headers book/_headers
