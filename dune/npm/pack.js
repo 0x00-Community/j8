@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Lays out the npm packages of one dune release, ready for `npm publish` in each directory:
-//   <out>/dune/            the main package (@dune/dune): placeholders, install.js, optionalDependencies on all below
-//   <out>/<platform>/      one per platforms.json entry found in <dist> (@dune/linux-x64, @dune/darwin-arm64, ...)
+//   <out>/dune/            the main package (@jabberwocky238/dune): placeholders, install.js, optionalDependencies on all below
+//   <out>/<platform>/      one per platforms.json entry found in <dist> (@jabberwocky238/dune-linux-x64, @jabberwocky238/dune-darwin-arm64, ...)
 // <dist>/<rust target>/dune[.exe] are the release binaries (cargo build --release --target <rust target>); the
 // version is the one in ../Cargo.toml. Publish the platform packages before the main package.
 //   node npm/pack.js <dist> <out>
@@ -9,7 +9,7 @@
 const fs = require('fs');
 const path = require('path');
 
-const SCOPE = '@dune';
+const SCOPE = '@jabberwocky238';
 const MAIN = `${SCOPE}/dune`;
 const HERE = __dirname;
 const REPOSITORY = { type: 'git', url: 'git+https://github.com/0x00-Community/j8.git', directory: 'dune' };
@@ -28,7 +28,7 @@ if (platforms.length === 0) {
   console.error(`${dist}: no binaries (expected <dist>/<rust target>/dune)`);
   process.exit(1);
 }
-const common = { version, license: 'MIT', homepage: 'https://github.com/0x00-Community/j8/tree/main/dune', repository: REPOSITORY };
+const common = { version, license: 'MIT', homepage: 'https://j8.app238.com/dune.html', repository: REPOSITORY };
 
 function write(file, content) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -39,7 +39,7 @@ for (const p of platforms) {
   const dir = path.join(out, p.name);
   const exe = `dune${p.exe || ''}`;
   write(path.join(dir, 'package.json'), {
-    name: `${SCOPE}/${p.name}`,
+    name: `${SCOPE}/dune-${p.name}`,
     description: `The dune binary for ${p.name} (installed by ${MAIN})`,
     ...common,
     preferUnplugged: true,
@@ -47,7 +47,7 @@ for (const p of platforms) {
     cpu: [p.cpu],
     ...(p.libc && { libc: [p.libc] }),
   });
-  write(path.join(dir, 'README.md'), `# ${SCOPE}/${p.name}\n\nThe \`dune\` binary for ${p.name}. Install [${MAIN}](https://www.npmjs.com/package/${MAIN}) instead.\n`);
+  write(path.join(dir, 'README.md'), `# ${SCOPE}/dune-${p.name}\n\nThe \`dune\` binary for ${p.name}. Install [${MAIN}](https://www.npmjs.com/package/${MAIN}) instead.\n`);
   fs.mkdirSync(path.join(dir, 'bin'), { recursive: true });
   fs.copyFileSync(path.join(dist, p.target, exe), path.join(dir, 'bin', exe));
   fs.chmodSync(path.join(dir, 'bin', exe), 0o755);
@@ -66,6 +66,6 @@ write(path.join(main, 'package.json'), {
   engines: { node: '>=18' },
   os: [...new Set(platforms.map((p) => p.os))],
   cpu: [...new Set(platforms.map((p) => p.cpu))],
-  optionalDependencies: Object.fromEntries(platforms.map((p) => [`${SCOPE}/${p.name}`, version])),
+  optionalDependencies: Object.fromEntries(platforms.map((p) => [`${SCOPE}/dune-${p.name}`, version])),
 });
 console.log(`${MAIN}@${version}: ${platforms.map((p) => p.name).join(', ')}`);

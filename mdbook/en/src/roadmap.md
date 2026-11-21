@@ -35,5 +35,5 @@ json, regexp) benefit, aiming to beat V8 with its JIT on common benchmarks.
 ## Runtimes
 
 - dune: top-level `await`, `https:`, `http` / `net` servers, streams, async child processes, `worker_threads`, `zlib`,
-  `crypto` hashes and more; publishing the npm package `@dune/dune`;
+  `crypto` hashes and more; publishing the npm package `@jabberwocky238/dune`;
 - Node-API: real weak references.

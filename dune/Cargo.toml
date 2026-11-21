@@ -8,7 +8,7 @@ version = "0.4.0"
 edition = "2024"
 license = "MIT"
 # the npm packages are laid out from npm/ (see npm/pack.js), not shipped in the crate
-exclude = ["npm"]
+exclude = ["npm", "tests"]
 repository = "https://github.com/0x00-Community/j8"
 keywords = ["javascript", "runtime", "node", "npm", "j8"]
 categories = ["command-line-utilities", "development-tools"]
@@ -25,7 +25,7 @@ name = "dune"
 path = "src/main.rs"
 
 [dependencies]
-j8 = { version = "0.4.0", features = ["runtime", "jit", "json"] }
+j8 = { version = "0.4.0", features = ["runtime", "json"] }
 clap = { version = "4.6", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
@@ -35,6 +35,9 @@ tar = "0.4.46"
 sha2 = "0.10"
 base64 = "0.22"
 ureq = { version = "3", features = ["json"] }
+
+[target.'cfg(all(unix, target_arch = "x86_64"))'.dependencies]
+j8 = { version = "0.4.0", features = ["jit"] }
 
 [lints.clippy]
 all = { level = "warn", priority = -1 }

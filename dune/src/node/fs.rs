@@ -12,16 +12,39 @@ impl Stat {
     fn millis(t: std::io::Result<SystemTime>) -> f64 {
         t.ok().and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok()).map_or(0.0, |d| d.as_secs_f64() * 1e3)
     }
+
+    #[cfg(unix)]
+    #[expect(clippy::cast_precision_loss, reason = "times, inodes and ids fit a double in practice")]
+    fn owner(&self) -> [f64; 7] {
+        use std::os::unix::fs::MetadataExt;
+        let m = &self.0;
+        [f64::from(m.mode()), m.ctime() as f64 * 1e3, m.nlink() as f64, f64::from(m.uid()), f64::from(m.gid()), m.ino() as f64, m.dev() as f64]
+    }
+
+    #[cfg(not(unix))]
+    fn owner(&self) -> [f64; 7] {
+        const REGULAR: u32 = 0o100_000;
+        const DIRECTORY: u32 = 0o040_000;
+        const SYMLINK: u32 = 0o120_000;
+        const READ_WRITE: u32 = 0o666;
+        const READ_ONLY: u32 = 0o444;
+        const SEARCH: u32 = 0o111;
+        let m = &self.0;
+        let t = m.file_type();
+        let access = if m.permissions().readonly() { READ_ONLY } else { READ_WRITE };
+        let mode = if t.is_dir() { DIRECTORY | access | SEARCH } else if t.is_symlink() { SYMLINK | access } else { REGULAR | access };
+        [f64::from(mode), Self::millis(m.modified()), 1.0, 0.0, 0.0, 0.0, 0.0]
+    }
 }
 
 impl<'gc> IntoJs<'gc> for Stat {
-    #[expect(clippy::cast_precision_loss, reason = "sizes, inodes and ids fit a double in practice")]
+    #[expect(clippy::cast_precision_loss, reason = "sizes fit a double in practice")]
     fn into_js(self, a: &mut Agent<'gc, '_>) -> Result<Value<'gc>, Error> {
-        use std::os::unix::fs::MetadataExt;
         let m = &self.0;
         let t = m.file_type();
         let kind = if t.is_file() { 0.0 } else if t.is_dir() { 1.0 } else if t.is_symlink() { 2.0 } else { 3.0 };
-        let fields = [kind, m.len() as f64, f64::from(m.mode()), Self::millis(m.modified()), Self::millis(m.accessed()), m.ctime() as f64 * 1e3, Self::millis(m.created()), m.nlink() as f64, f64::from(m.uid()), f64::from(m.gid()), m.ino() as f64, m.dev() as f64];
+        let [mode, ctime, nlink, uid, gid, ino, dev] = self.owner();
+        let fields = [kind, m.len() as f64, mode, Self::millis(m.modified()), Self::millis(m.accessed()), ctime, Self::millis(m.created()), nlink, uid, gid, ino, dev];
         fields.to_vec().into_js(a)
     }
 }
@@ -39,6 +62,31 @@ impl<'gc> IntoJs<'gc> for Listing {
 pub struct Fs;
 
 impl Fs {
+    #[cfg(unix)]
+    fn link(target: &str, path: &str) -> std::io::Result<()> {
+        std::os::unix::fs::symlink(target, path)
+    }
+
+    #[cfg(windows)]
+    fn link(target: &str, path: &str) -> std::io::Result<()> {
+        let resolved = Path::new(path).parent().map_or_else(|| Path::new(target).to_path_buf(), |dir| dir.join(target));
+        if resolved.is_dir() { std::os::windows::fs::symlink_dir(target, path) } else { std::os::windows::fs::symlink_file(target, path) }
+    }
+
+    #[cfg(unix)]
+    fn set_mode(path: &str, mode: u32) -> std::io::Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+    }
+
+    #[cfg(not(unix))]
+    fn set_mode(path: &str, mode: u32) -> std::io::Result<()> {
+        const OWNER_WRITE: u32 = 0o200;
+        let mut permissions = std::fs::metadata(path)?.permissions();
+        permissions.set_readonly(mode & OWNER_WRITE == 0);
+        std::fs::set_permissions(path, permissions)
+    }
+
     fn read(path: &str) -> Io<Bytes> {
         Io::new(std::fs::read(path).map(Bytes), "open", path)
     }
@@ -164,12 +212,11 @@ impl Fs {
     }
 
     fn symlink_sync(target: &str, path: &str) -> Io<()> {
-        Io::new(std::os::unix::fs::symlink(target, path), "symlink", path)
+        Io::new(Self::link(target, path), "symlink", path)
     }
 
     fn chmod_sync(path: &str, mode: u32) -> Io<()> {
-        use std::os::unix::fs::PermissionsExt;
-        Io::new(std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)), "chmod", path)
+        Io::new(Self::set_mode(path, mode), "chmod", path)
     }
 
     fn mkdtemp_sync(prefix: &str) -> Io<String> {
