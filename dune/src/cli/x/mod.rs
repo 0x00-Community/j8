@@ -1,4 +1,4 @@
-//! `dunx` / `dune x`: run a package's executable. The package comes from the nearest `node_modules` up from the
+//! `dune x` (and `dunx`, the same executable started under that name): run a package's executable. The package comes from the nearest `node_modules` up from the
 //! current directory, else from dune's cache, else it is installed from the npm registry into the cache (with its
 //! dependencies, in a hoisted `node_modules`; no lifecycle scripts run). JavaScript executables run in this process on
 //! the Node layer; other executables (shell scripts, native programs) run as child processes.
@@ -17,6 +17,23 @@ use spec::{Spec, Want};
 use tree::{Store, Tree};
 
 use crate::job::{Job, Layer};
+
+/// Run a package's executable with dune (`dunx` is `dune x`)
+#[derive(clap::Parser)]
+#[command(name = "dunx", version)]
+pub struct Dunx {
+    /// Enable the JIT: hot functions are compiled to x86-64 machine code (j8jit)
+    #[arg(long)]
+    jit: bool,
+    #[command(flatten)]
+    x: X,
+}
+
+impl Dunx {
+    pub fn run(&self) -> ExitCode {
+        self.x.run(self.jit)
+    }
+}
 
 /// Run a package's executable
 #[derive(clap::Args)]
