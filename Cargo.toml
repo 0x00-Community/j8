@@ -99,6 +99,10 @@ path = "tests/crossheap.rs"
 required-features = ["crossheap"]
 
 [[test]]
+name = "semantics"
+path = "tests/semantics.rs"
+
+[[test]]
 name = "jit_typeof"
 path = "tests/jit_typeof.rs"
 
