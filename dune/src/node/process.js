@@ -99,6 +99,7 @@
     return true;
   };
   native.finish = () => finish();
+  native.define('process', () => process);
 
   const define = (name, value) => Object.defineProperty(globalThis, name, { value, writable: true, configurable: true });
   define('global', globalThis);
