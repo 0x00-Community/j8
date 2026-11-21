@@ -39,7 +39,7 @@ fn decodes_v8_output() {
             _ => {}
         }
         let printed = args.split(", ").filter_map(printed_register);
-        let ours = d.bytecode.operand_types().iter().zip(&d.operands).filter(|(t, _)| t.is_register()).map(|(_, &v)| Register::from(i32::try_from(v).expect("register operand")));
+        let ours = d.bytecode.operand_types().iter().zip(d.operands.iter()).filter(|(t, _)| t.is_register()).map(|(_, &v)| Register::from(i32::try_from(v).expect("register operand")));
         for (p, o) in printed.zip(ours) {
             assert_eq!(p, o, "{line}");
             registers += 1;
