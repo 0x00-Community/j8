@@ -270,9 +270,11 @@ impl<'gc> Value<'gc> {
         Self::word(ValueBits::boxed(ValueTag::LAZY, u64::from(l)))
     }
 
+    pub const LAZY_TAG: u64 = ValueBits::boxed(ValueTag::LAZY, 0) >> ValueBits::TAG_SHIFT;
+
     #[inline]
     pub fn as_lazy(self) -> Option<crate::Lazy> {
-        (self.bits >> ValueBits::TAG_SHIFT == ValueBits::boxed(ValueTag::LAZY, 0) >> ValueBits::TAG_SHIFT)
+        (self.bits >> ValueBits::TAG_SHIFT == Self::LAZY_TAG)
             .then(|| crate::Lazy::try_from(self.bits & ValueBits::PAYLOAD).ok())
             .flatten()
     }

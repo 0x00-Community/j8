@@ -3,7 +3,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use j8executor::FrameSlots;
-use j8framework::{Layout, ValueBits};
+use j8framework::{Layout, Value, ValueBits};
 
 use crate::asm::{Alu, Asm, Cc, Label, R, RAX, RBP, RBX, RCX, RDI, RDX, RSI, RSP, R10, R11, R12, R13, R14, R15, R8, R9, X};
 use crate::build::{Kind, OBJECT_TAG};
@@ -974,6 +974,13 @@ impl<'g> Gen<'g> {
                 self.a.mov_ri(RCX, ValueBits::UNINIT);
                 self.a.alu_rr(Alu::Cmp, true, r, RCX);
                 self.exit_if(Cc::E, fs, Reason::Hole);
+            }
+            Op::CheckNotLazy(x, fs) => {
+                let r = self.gpr(x, RAX);
+                self.a.mov_rr(RCX, r);
+                self.a.shift_ri(5, true, RCX, u8::try_from(ValueBits::TAG_SHIFT).unwrap_or(48));
+                self.a.alu_ri(Alu::Cmp, false, RCX, i32::try_from(Value::LAZY_TAG).unwrap_or(0));
+                self.exit_if(Cc::E, fs, Reason::Shape);
             }
             Op::CheckFunc(p, f, fs) => {
                 let r = self.gpr(p, RAX);
