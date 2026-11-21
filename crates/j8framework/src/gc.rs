@@ -1,59 +1,31 @@
-//! j8 的 GC 层：全部建在 paragc 的公开接口上（`Gc` / `Slot` / `Mutator` / `Root`），不碰它的内部。
-//!
-//! paragc 里对象里能改的边只有 [`Slot`]（带写屏障），所以 j8 的可变堆数据分两种放：
-//! - [`GcCell`]：一整块可变数据（`ObjectData` 等）。当前版本放在槽指着的快照里；快照是本轮（上次回收之后）新分配的就
-//!   原地改，否则先挪进一份新快照再改，槽换过去时写屏障就记下了它。每块数据每个回收周期最多挪一次
-//! - [`ValueCell`]：一个 `Value`（环境槽等），字 + 槽
-//!
-//! 一个 isolate 同一时刻只在一个线程上跑 JS（V8 的模型），它堆里的对象只由这个线程读写，所以借用标志、标量字段都是
-//! 普通读写（[`IsoCell`]），⛔ 原子读改写。只有 paragc 的 [`Slot`] 自带原子（写屏障要）。
-//!
-//! 原地改年轻快照不经过写屏障，所以 j8 的堆只用停顿式回收（`collect_if_needed` / `collect`），⛔ `mark_concurrently`。
-//!
-//! 写屏障记下的是槽的地址：⛔ 给还没放进堆的值写槽（先分配进堆再填）。
-//!
-//! 年轻回收会搬存活的年轻对象（paragc 缺省的 `YoungEvacuation::SkipRemembered`：老对象直接指着的不动，被搬的对象的
-//! 字段都走 `relocate`），`ValueCell` 字里的地址随之改写。⛔ `YoungEvacuation::Full`：它会改老对象槽里的地址，
-//! 但不知道 `ValueCell` 字里另存的那一份。
 use core::cell::UnsafeCell;
 use core::fmt;
 use core::mem::ManuallyDrop;
 use core::ops::{Deref, DerefMut};
 use core::ptr::NonNull;
 
-/// 堆类型要实现的 trait 是 paragc 的 `Trace`，用 `#[derive(Collect)]` 生成
 pub use j8macros::Collect;
 pub use paragc::{Brand, Gc, Heap, Mutator, Root, Slot, Tlab, Trace, Tracer, WordSlot};
 
 use crate::Value;
 
-/// 地址 ⇒ `Gc`。
-///
-/// # Safety
-/// `ptr` 是本堆里、当前 mutate 品牌下一个活着的 `T` 的数据指针（某个 `Gc::as_ptr` 的结果）。
 #[inline]
 pub unsafe fn gc_from_raw<'gc, T>(ptr: *const T) -> Gc<'gc, T> {
-    // SAFETY: 见上
     unsafe { Gc::from_raw(ptr) }
 }
 
-/// 一次 mutate 的令牌：paragc 的 [`Mutator`] 加上堆的回收代号（[`GcCell`] 据此判断快照是不是本轮新分配的）。
 pub struct Mutation<'gc> {
     m: NonNull<Mutator<'gc>>,
     generation: u64,
 }
 
 impl<'gc> Mutation<'gc> {
-    /// # Safety
-    /// 只能在 `Heap::mutate` 的闭包里、用这次的 `m` 构造（`'gc` 品牌保证它逃不出闭包，`m` 一直有效）；
-    /// `generation` 是这个堆完成过的回收次数。
     pub unsafe fn new(m: &Mutator<'gc>, generation: u64) -> Self {
         Self { m: NonNull::from(m), generation }
     }
 
     #[inline]
     pub fn mutator(&self) -> &Mutator<'gc> {
-        // SAFETY: 见 new：Mutation 活着时 m 一直有效
         unsafe { self.m.as_ref() }
     }
 
@@ -67,36 +39,25 @@ impl<'gc> Mutation<'gc> {
     }
 }
 
-/// 抹掉类型的堆对象：只用来把不同类型的 `Gc` 放进同一种槽（回收时按对象头里的真实类型追踪）。
 pub struct Erased(());
 
-// SAFETY: 从不被直接追踪：槽里的对象由回收器按对象头访问
 unsafe impl Trace for Erased {
     fn trace(&self, _: &mut Tracer<'_>) {}
 
     fn relocate(&mut self, _: &mut Tracer<'_>) {}
 }
 
-/// 任意 `Gc` ⇒ 抹掉类型
 #[inline]
 pub fn erase<T>(g: Gc<'_, T>) -> Gc<'_, Erased> {
-    // SAFETY: 同一个活对象，只换了静态类型
     unsafe { gc_from_raw(g.as_ptr().cast()) }
 }
 
-// ---- IsoCell ----
-
-/// isolate 内单线程的单元：普通读写，没有原子操作。
-///
-/// paragc 要求堆类型 `Send + Sync`，这里按契约声明：一个 isolate 同一时刻只在一个线程上跑（整体挪到别的线程可以，
-/// 两个线程同时进不行），它堆里的 `IsoCell` 只由当前线程读写；回收线程只在停顿时读（这时没有 mutator）。
 #[derive(Default)]
 #[repr(transparent)]
 pub struct IsoCell<T>(core::cell::Cell<T>);
 
-// SAFETY: 见类型说明：同一时刻只有 isolate 的当前线程写，回收停顿时多个回收线程只读
 unsafe impl<T: Copy> Sync for IsoCell<T> {}
-// SAFETY: 随 isolate 整体挪到别的线程
+
 unsafe impl<T: Copy> Send for IsoCell<T> {}
 
 impl<T: Copy> IsoCell<T> {
@@ -120,7 +81,6 @@ impl<T: Copy> IsoCell<T> {
     }
 }
 
-// SAFETY: 只放标量 / 地址字（`Copy`），没有 Gc 边
 unsafe impl<T: Copy + Send + 'static> Trace for IsoCell<T> {
     const NO_EDGES: bool = true;
     fn trace(&self, _: &mut Tracer<'_>) {}
@@ -132,34 +92,27 @@ impl<T: Copy + fmt::Debug> fmt::Debug for IsoCell<T> {
     }
 }
 
-// ---- GcCell ----
-
-/// [`GcCell`] 的一份快照。被挪走后（`moved`）只剩空壳：不追踪、不析构。
 struct Snap<T> {
     generation: u64,
     moved: IsoCell<bool>,
     data: UnsafeCell<ManuallyDrop<T>>,
 }
 
-// SAFETY: data 只在 GcCell 的借用标志保护下、由 isolate 的当前线程访问（见 IsoCell）
 unsafe impl<T: Send + Sync> Sync for Snap<T> {}
 
 impl<T> Drop for Snap<T> {
     fn drop(&mut self) {
         if !*self.moved.get_mut() {
-            // SAFETY: 没被挪走，归自己
             unsafe { ManuallyDrop::drop(self.data.get_mut()) };
         }
     }
 }
 
-// SAFETY: 没挪走时逐个追踪数据；回收时没有 mutator，读数据不冲突。Drop 只析构自己的数据、不碰别的对象
 unsafe impl<T: Trace> Trace for Snap<T> {
     const NO_EDGES: bool = T::NO_EDGES;
 
     fn trace(&self, t: &mut Tracer<'_>) {
         if !self.moved.get() {
-            // SAFETY: 回收或释放死对象时没有人持有可变借用
             unsafe { &*self.data.get() }.trace(t);
         }
     }
@@ -171,11 +124,8 @@ unsafe impl<T: Trace> Trace for Snap<T> {
     }
 }
 
-/// 借用状态：最高位 = 有人在写，其余位 = 读者数
 const WRITING: usize = 1 << (usize::BITS - 1);
 
-/// 堆里的 `RefCell`（isolate 内单线程，见 [`IsoCell`]；冲突时报错），可变借用经 [`Mutation`] 保住写屏障。
-/// 放在 `Gc<GcCell<T>>` 里用。
 pub struct GcCell<'gc, T> {
     state: IsoCell<usize>,
     snap: Slot<'gc, Snap<T>>,
@@ -187,18 +137,15 @@ impl<'gc, T: Trace + 'gc> GcCell<'gc, T> {
         Self { state: IsoCell::new(0), snap: Slot::from(snap) }
     }
 
-    /// 还没有值（[`GcCell::empty`]）：读者自己造缺省值，第一次可变借用时才分配快照
     pub fn empty() -> Self {
         Self { state: IsoCell::new(0), snap: Slot::default() }
     }
 
-    /// 有没有值（空的单元由持有者解释成某个缺省值）
     #[inline]
     pub fn has_value(&self) -> bool {
         self.snap.get().is_some()
     }
 
-    /// 当前快照
     fn current(&self) -> Gc<'gc, Snap<T>> {
         self.snap.get().expect("borrowed an empty GcCell (check has_value first)")
     }
@@ -209,20 +156,17 @@ impl<'gc, T: Trace + 'gc> GcCell<'gc, T> {
             return None;
         }
         self.state.set(s + 1);
-        // SAFETY: 读者计数挂着，没有写者
         Some(CellRef { state: &self.state, data: unsafe { &*self.current().get().data.get() } })
     }
 
     pub fn borrow(&self) -> CellRef<'_, T> {
-        self.try_borrow().expect("GcCell 已被可变借用")
+        self.try_borrow().expect("GcCell already mutably borrowed")
     }
 
-    /// 可变借用：快照是本轮新分配的就原地改，否则挪进新快照（槽换过去，写屏障记下）
     pub fn try_borrow_mut<'c>(&'c self, mc: &Mutation<'gc>) -> Option<CellMut<'c, T>> {
         self.try_borrow_mut_or(mc, || unreachable!("borrowed an empty GcCell mutably without an initial value"))
     }
 
-    /// 同 [`GcCell::try_borrow_mut`]；空的单元先放进 `init()`
     pub fn try_borrow_mut_or<'c>(&'c self, mc: &Mutation<'gc>, init: impl FnOnce() -> T) -> Option<CellMut<'c, T>> {
         if self.state.get() != 0 {
             return None;
@@ -231,33 +175,27 @@ impl<'gc, T: Trace + 'gc> GcCell<'gc, T> {
         let Some(mut snap) = self.snap.get() else {
             let snap = mc.alloc(Snap { generation: mc.generation, moved: IsoCell::new(false), data: UnsafeCell::new(ManuallyDrop::new(init())) });
             self.snap.set(mc.mutator(), Some(snap));
-            // SAFETY: 独占（WRITING）
             return Some(CellMut { state: &self.state, data: unsafe { &mut *snap.get().data.get() } });
         };
         if snap.generation != mc.generation {
-            // SAFETY: 独占（WRITING）；旧快照标成已挪走，之后不再析构 / 追踪它的数据
             let data = unsafe { ManuallyDrop::take(&mut *snap.data.get()) };
             snap.moved.set(true);
             snap = mc.alloc(Snap { generation: mc.generation, moved: IsoCell::new(false), data: UnsafeCell::new(ManuallyDrop::new(data)) });
             self.snap.set(mc.mutator(), Some(snap));
         }
-        // SAFETY: 独占（WRITING）
         Some(CellMut { state: &self.state, data: unsafe { &mut *snap.get().data.get() } })
     }
 
     pub fn borrow_mut<'c>(&'c self, mc: &Mutation<'gc>) -> CellMut<'c, T> {
-        self.try_borrow_mut(mc).expect("GcCell 已被借用")
+        self.try_borrow_mut(mc).expect("GcCell already borrowed")
     }
 
-    /// 独占时直接改（还没放进堆，或回收时）
     pub fn get_mut(&mut self) -> &mut T {
         let snap = self.current();
-        // SAFETY: &mut self ⇒ 没有借用
         unsafe { &mut *snap.get().data.get() }
     }
 }
 
-// SAFETY: 槽就是唯一的边
 unsafe impl<'gc, T: Trace + 'gc> Trace for GcCell<'gc, T> {
     fn trace(&self, t: &mut Tracer<'_>) {
         self.snap.trace(t);
@@ -280,7 +218,6 @@ impl<'gc, T: Trace + fmt::Debug + 'gc> fmt::Debug for GcCell<'gc, T> {
     }
 }
 
-/// [`GcCell`] 的共享借用
 pub struct CellRef<'c, T> {
     state: &'c IsoCell<usize>,
     data: &'c T,
@@ -300,7 +237,6 @@ impl<T> Drop for CellRef<'_, T> {
     }
 }
 
-/// [`GcCell`] 的可变借用
 pub struct CellMut<'c, T> {
     state: &'c IsoCell<usize>,
     data: &'c mut T,
@@ -326,10 +262,6 @@ impl<T> Drop for CellMut<'_, T> {
     }
 }
 
-// ---- ValueCell ----
-
-/// 一个可变的 `Value`：就是 paragc 的 [`WordSlot`]，NaN-boxed 的字原样放在槽里（指针字的标签落在 paragc 的指针区间，
-/// 见 [`crate::ValueBits`]）：回收器从字里认出指针，疏散时就地改地址，写经它走写屏障。
 pub struct ValueCell<'gc>(WordSlot<'gc>);
 
 impl<'gc> ValueCell<'gc> {
@@ -339,7 +271,6 @@ impl<'gc> ValueCell<'gc> {
 
     #[inline]
     pub fn get(&self) -> Value<'gc> {
-        // SAFETY: 槽里的字都是 `Value::bits`；字里的对象由回收器保活、搬走时就地改了地址
         unsafe { Value::from_bits(self.0.get()) }
     }
 
@@ -348,13 +279,11 @@ impl<'gc> ValueCell<'gc> {
         self.0.set(mc.mutator(), v.bits());
     }
 
-    /// 独占时写（还没放进堆）
     pub fn set_mut(&mut self, v: Value<'gc>) {
         self.0.set_mut(v.bits());
     }
 }
 
-// SAFETY: 槽是唯一的边（字里的指针）
 unsafe impl Trace for ValueCell<'_> {
     fn trace(&self, t: &mut Tracer<'_>) {
         self.0.trace(t);
@@ -371,9 +300,6 @@ impl fmt::Debug for ValueCell<'_> {
     }
 }
 
-// ---- Cow ----
-
-/// 写时复制的单元（少写多读的数据）：读是一次原子读拿到不可变的当前版本；写是复制、改、比较交换（别人先换了就重来）。
 pub struct Cow<'gc, T>(Slot<'gc, T>);
 
 impl<'gc, T: Trace + 'gc> Cow<'gc, T> {
@@ -381,16 +307,14 @@ impl<'gc, T: Trace + 'gc> Cow<'gc, T> {
         Self(Slot::from(mc.alloc(t)))
     }
 
-    /// 当前版本（整个 mutate 里都有效）
     pub fn get(&self) -> &'gc T {
-        self.0.get().expect("Cow 总有值").get()
+        self.0.get().expect("a Cow always holds a value").get()
     }
 
-    /// 换成 `f(当前)`，同时返回 `f` 的第二个结果。`f` 可能跑不止一次。
     pub fn update_with<R>(&self, mc: &Mutation<'gc>, mut f: impl FnMut(&T) -> (T, R)) -> R {
         let mut cur = self.0.get();
         loop {
-            let (next, r) = f(cur.expect("Cow 总有值").get());
+            let (next, r) = f(cur.expect("a Cow always holds a value").get());
             match self.0.compare_exchange(mc.mutator(), cur, Some(mc.alloc(next))) {
                 Ok(_) => return r,
                 Err(now) => cur = now,
@@ -407,7 +331,6 @@ impl<'gc, T: Trace + 'gc> Cow<'gc, T> {
     }
 }
 
-// SAFETY: 槽是唯一的边
 unsafe impl<'gc, T: Trace + 'gc> Trace for Cow<'gc, T> {
     fn trace(&self, t: &mut Tracer<'_>) {
         self.0.trace(t);
@@ -418,15 +341,11 @@ unsafe impl<'gc, T: Trace + 'gc> Trace for Cow<'gc, T> {
     }
 }
 
-// ---- GcQueue ----
-
-/// [`GcQueue`] 的节点：第一个是不带值的哑节点
 struct QNode<'gc, T> {
     value: Option<T>,
     next: Slot<'gc, QNode<'gc, T>>,
 }
 
-// SAFETY: 逐个字段
 unsafe impl<'gc, T: Trace + 'gc> Trace for QNode<'gc, T> {
     fn trace(&self, t: &mut Tracer<'_>) {
         self.value.trace(t);
@@ -439,7 +358,6 @@ unsafe impl<'gc, T: Trace + 'gc> Trace for QNode<'gc, T> {
     }
 }
 
-/// 堆里的 Michael–Scott 无锁 FIFO：任何线程都能同时进出；出队的节点交给回收器（没有 ABA）。
 pub struct GcQueue<'gc, T> {
     head: Slot<'gc, QNode<'gc, T>>,
     tail: Slot<'gc, QNode<'gc, T>>,
@@ -452,7 +370,7 @@ impl<'gc, T: Trace + Clone + 'gc> GcQueue<'gc, T> {
     }
 
     fn node(s: &Slot<'gc, QNode<'gc, T>>) -> Gc<'gc, QNode<'gc, T>> {
-        s.get().expect("队列总有哑节点")
+        s.get().expect("the queue always has a dummy node")
     }
 
     pub fn push(&self, mc: &Mutation<'gc>, value: T) {
@@ -467,7 +385,6 @@ impl<'gc, T: Trace + Clone + 'gc> GcQueue<'gc, T> {
                         return;
                     }
                 }
-                // 尾巴落后了：帮它往前挪
                 Some(n) => {
                     let _ = self.tail.compare_exchange(m, Some(last), Some(n));
                 }
@@ -497,7 +414,6 @@ impl<'gc, T: Trace + Clone + 'gc> GcQueue<'gc, T> {
     }
 }
 
-// SAFETY: 两个槽
 unsafe impl<'gc, T: Trace + 'gc> Trace for GcQueue<'gc, T> {
     fn trace(&self, t: &mut Tracer<'_>) {
         self.head.trace(t);
@@ -510,14 +426,10 @@ unsafe impl<'gc, T: Trace + 'gc> Trace for GcQueue<'gc, T> {
     }
 }
 
-// ---- Static ----
-
-/// 原样放进堆里的 `'static` 数据（不含 `Gc`，不追踪）。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(transparent)]
 pub struct Static<T: ?Sized>(pub T);
 
-// SAFETY: 'static 数据里没有 Gc
 unsafe impl<T: Send + Sync + 'static> Trace for Static<T> {
     const NO_EDGES: bool = true;
 
@@ -544,11 +456,9 @@ impl<T: ?Sized> DerefMut for Static<T> {
     }
 }
 
-/// 没有边的类型：`leaf!(A, B<..>)` 实现 `Trace`（它们必须是 `Send + Sync`）。
 #[macro_export]
 macro_rules! leaf {
     ($($ty:ty),* $(,)?) => {$(
-        // SAFETY: 没有 Gc
         unsafe impl $crate::Trace for $ty {
             const NO_EDGES: bool = true;
             fn trace(&self, _: &mut $crate::Tracer<'_>) {}
@@ -556,7 +466,6 @@ macro_rules! leaf {
     )*};
 }
 
-/// `Gc<GcCell<T>>` 上的借用：取出来的借用活满整个 `'gc`（同 gc-arena 的 `Gc<RefLock>`）。
 pub trait CellExt<'gc, T> {
     fn borrow(self) -> CellRef<'gc, T>;
     fn try_borrow(self) -> Option<CellRef<'gc, T>>;
@@ -586,11 +495,8 @@ impl<'gc, T: Trace + 'gc> CellExt<'gc, T> for Gc<'gc, GcCell<'gc, T>> {
     }
 }
 
-/// How a plain field type is kept when it must change in place in a heap object (`#[j8::heap]` with `#[mutable]`):
-/// the cell type, and loading / storing through it (stores take the [`Mutation`] for the write barrier).
 pub trait Mutable<'gc>: Sized {
     type Cell: Trace + 'gc;
-    /// The cell holding `v` (before the object is on the heap: no barrier)
     fn cell(v: Self) -> Self::Cell;
     fn load(cell: &Self::Cell) -> Self;
     fn store(cell: &Self::Cell, mc: &Mutation<'gc>, v: Self);
@@ -650,7 +556,6 @@ impl<'gc, T: Trace + 'gc> Mutable<'gc> for Gc<'gc, T> {
     }
 }
 
-/// Scalars and `f64`: an [`IsoCell`] (no barrier)
 macro_rules! mutable_scalar {
     ($($t:ty),* $(,)?) => {$(
         impl<'gc> Mutable<'gc> for $t {

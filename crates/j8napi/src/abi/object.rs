@@ -1,4 +1,3 @@
-//! 对象：创建、属性读写、`napi_define_properties`、冻结 / 封存、原型、数组、wrap、external、类型标签、终结器、引用、实例数据。
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::ffi::{c_char, c_void};
@@ -9,32 +8,26 @@ use crate::convert::Name;
 use crate::convert::Ffi;
 use crate::{Attributes, Callback, Env, Finalize, Finalizer, Handle, KeyConversion, KeyFilter, KeyMode, PropertyDescriptor, Status, TypeTag, napi};
 
-/// `napi_wrap` 挂在对象上的原生指针
 struct Wrapped {
     data: *mut c_void,
     finalizer: Finalizer,
 }
 
-// SAFETY: 插件的指针，只在 JS 线程上交还给插件
 unsafe impl Send for Wrapped {}
-// SAFETY: 同上
+
 unsafe impl Sync for Wrapped {}
 
-/// `napi_create_external` 的值
 pub struct External {
     data: *mut c_void,
     _finalizer: Finalizer,
 }
 
-// SAFETY: 同 `Wrapped`
 unsafe impl Send for External {}
-// SAFETY: 同上
+
 unsafe impl Sync for External {}
 
-/// `napi_add_finalizer` 挂的终结器
-struct Attached(#[expect(dead_code, reason = "只为随宿主对象一起 drop")] Finalizer);
+struct Attached(#[expect(dead_code, reason = "only dropped along with the host object")] Finalizer);
 
-/// 引用（`napi_ref`）。计数降到 0 时仍是强引用：堆还没有弱引用。
 #[derive(Debug)]
 pub struct Reference {
     value: j8framework::Global,
@@ -42,7 +35,6 @@ pub struct Reference {
 }
 
 impl Env {
-    /// `napi_define_properties` / `napi_define_class` 的一条
     pub fn define<'gc>(&self, a: &mut j8framework::Agent<'gc, '_>, target: JsObject<'gc>, p: &PropertyDescriptor) -> Result<(), Status> {
         let name: Name<'gc> = if p.utf8name.is_null() {
             self.name(p.name)?
@@ -73,12 +65,10 @@ impl Env {
         self.js(a.define_property_or_throw(target, name.key(), desc))
     }
 
-    /// 对象上 wrap 的指针
     fn wrapped<'gc>(&self, a: &j8framework::Agent<'gc, '_>, o: JsObject<'gc>) -> Option<JsObject<'gc>> {
         Self::private(o, self.wrap_key(a)).and_then(Value::as_object)
     }
 
-    /// `napi_get_property_names` / `napi_get_all_property_names`
     fn keys<'gc>(&self, a: &mut j8framework::Agent<'gc, '_>, o: JsObject<'gc>, mode: KeyMode, filter: KeyFilter, conversion: KeyConversion) -> Result<Vec<Value<'gc>>, Status> {
         let mut out = Vec::new();
         let mut at = Some(o);
@@ -124,7 +114,7 @@ napi! {
     fn napi_create_array_with_length(env, length: usize, result: *mut Handle) {
         let a = env.agent()?;
         let o = a.array(Vec::new());
-        #[expect(clippy::cast_precision_loss, reason = "数组长度最多 2^32 - 1")]
+        #[expect(clippy::cast_precision_loss, reason = "array lengths are at most 2^32 - 1")]
         let n = length.min(u32::MAX as usize) as f64;
         env.js(a.set_named(o.into(), "length", n.into()))?;
         env.out(result, o.into())
@@ -147,8 +137,6 @@ napi! {
         let p = env.js(a.get_prototype_of(o))?;
         env.out(result, p.map_or(Value::Null, Value::from))
     }
-
-    // ---- 属性 ----
 
     fn napi_set_property(env, object: Handle, key: Handle, value: Handle) {
         env.preamble()?;
@@ -290,8 +278,6 @@ napi! {
         env.js(a.set_integrity_level(o, Integrity::Sealed)).map(drop)
     }
 
-    // ---- wrap / external / 类型标签 / 终结器 ----
-
     fn napi_wrap(env, js_object: Handle, native_object: *mut c_void, finalize_cb: Finalize, finalize_hint: *mut c_void, result: *mut *mut Reference) {
         let a = env.agent()?;
         let o = env.object(js_object)?;
@@ -315,7 +301,6 @@ napi! {
         let a = env.agent()?;
         let o = env.object(js_object)?;
         let w = env.wrapped(a, o).ok_or(Status::InvalidArg)?;
-        // 拿走指针、撤销终结回调
         let data = Env::hosted::<Wrapped, _>(w, |w| {
             w.finalizer.pending = None;
             w.data
@@ -344,7 +329,6 @@ napi! {
         if Env::private(o, key).is_some() || type_tag.is_null() {
             return Err(Status::InvalidArg);
         }
-        // SAFETY: 非空
         let tag = unsafe { type_tag.read() };
         Env::set_private(a, o, key, Env::host(a, tag).into());
         Ok(())
@@ -356,7 +340,6 @@ napi! {
         if type_tag.is_null() {
             return Err(Status::InvalidArg);
         }
-        // SAFETY: 非空
         let tag = unsafe { type_tag.read() };
         let same = Env::private(o, env.tag_key(a)).and_then(Value::as_object).and_then(|h| Env::hosted::<TypeTag, _>(h, |t| *t == tag));
         Ffi::put(result, same.unwrap_or(false))
@@ -368,7 +351,6 @@ napi! {
         if finalize_cb.is_none() {
             return Err(Status::InvalidArg);
         }
-        // 每个终结器一个私有名：一个对象可以挂好几个
         let key = a.mc.alloc(SymbolData { description: Some(Box::from("napi finalizer")), private: false });
         Env::set_private(a, o, key, Env::host(a, Attached(env.finalizer(finalize_cb, finalize_data, finalize_hint))).into());
         Ffi::put_opt(result, Box::into_raw(Box::new(Reference { value: a.global(o.into()), count: 0 })));
@@ -381,8 +363,6 @@ napi! {
         Ok(())
     }
 
-    // ---- 引用 ----
-
     fn napi_create_reference(env, value: Handle, initial_refcount: u32, result: *mut *mut Reference) {
         let a = env.agent()?;
         let v = env.value(value)?;
@@ -394,14 +374,12 @@ napi! {
         if reference.is_null() {
             return Err(Status::InvalidArg);
         }
-        // SAFETY: `napi_create_reference` 给出的指针，只删一次
         drop(unsafe { Box::from_raw(reference) });
         Ok(())
     }
 
     fn napi_reference_ref(env, reference: *mut Reference, result: *mut u32) {
         let _ = env;
-        // SAFETY: `napi_create_reference` 给出的指针
         let r = unsafe { reference.as_mut() }.ok_or(Status::InvalidArg)?;
         r.count += 1;
         Ffi::put_opt(result, r.count);
@@ -410,7 +388,6 @@ napi! {
 
     fn napi_reference_unref(env, reference: *mut Reference, result: *mut u32) {
         let _ = env;
-        // SAFETY: `napi_create_reference` 给出的指针
         let r = unsafe { reference.as_mut() }.ok_or(Status::InvalidArg)?;
         r.count = r.count.checked_sub(1).ok_or(Status::GenericFailure)?;
         Ffi::put_opt(result, r.count);
@@ -419,12 +396,9 @@ napi! {
 
     fn napi_get_reference_value(env, reference: *mut Reference, result: *mut Handle) {
         let a = env.agent()?;
-        // SAFETY: `napi_create_reference` 给出的指针
         let r = unsafe { reference.as_ref() }.ok_or(Status::InvalidArg)?;
         env.out(result, a.local(&r.value))
     }
-
-    // ---- 实例数据、外部内存、版本 ----
 
     fn napi_set_instance_data(env, data: *mut c_void, finalize_cb: Finalize, finalize_hint: *mut c_void) {
         env.set_instance(data, finalize_cb, finalize_hint);

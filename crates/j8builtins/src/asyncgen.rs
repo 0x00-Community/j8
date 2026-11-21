@@ -5,11 +5,9 @@ use j8framework::{Agent, Capability, Error, ErrorKind, IterRecord, JsObject, Nat
 
 use crate::{Args, Installer};
 
-/// %AsyncGeneratorPrototype% and %AsyncIteratorPrototype%.
 struct AsyncGenerators;
 
 impl AsyncGenerators {
-    /// `next` / `return` / `throw`: enqueue the request and return its Promise (a rejected Promise if `this` is wrong).
     fn enqueue<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, mode: Resume, v: Value<'gc>) -> Result<Value<'gc>, Error> {
         let co = match this.kind() {
             ValueKind::Object(o) if matches!(&o.borrow().kind, ObjectKind::Coroutine(c) if c.requests.is_some()) => o,
@@ -40,16 +38,12 @@ impl AsyncGenerators {
     }
 }
 
-/// %AsyncFromSyncIteratorPrototype%: `next` / `return` / `throw` call the sync iterator's method and give a Promise of
-/// its result, the value awaited first (ECMA-262 27.1.6).
 struct AsyncFromSync;
 
-/// Slots of the continuation closures: the result's `done`, and the sync iterator (closed when the value rejects)
 const DONE: usize = 0;
 const ITERATOR: usize = 1;
 
 impl AsyncFromSync {
-    /// The sync iterator record of `this`
     fn record(this: Value<'_>) -> Option<IterRecord<'_>> {
         match this.as_object()?.borrow().kind {
             ObjectKind::AsyncFromSyncIterator(r) => Some(r),
@@ -57,14 +51,12 @@ impl AsyncFromSync {
         }
     }
 
-    /// A new Promise with its capability record
     fn capability<'gc>(a: &mut Agent<'gc, '_>) -> (JsObject<'gc>, Capability<'gc>) {
         let p = a.new_promise();
         let (resolve, reject) = a.promise_resolvers(p);
         (p, Capability { promise: p.into(), resolve: resolve.into(), reject: reject.into() })
     }
 
-    /// IfAbruptRejectPromise: a thrown value rejects `p`
     fn rejected<'gc>(a: &mut Agent<'gc, '_>, p: JsObject<'gc>, e: Error) -> Result<Value<'gc>, Error> {
         match e {
             Error::Exception(g) => {
@@ -89,20 +81,17 @@ impl AsyncFromSync {
         }
     }
 
-    /// The fulfillment of the awaited value: `{ value, done }`
     fn unwrap<'gc>(a: &mut Agent<'gc, '_>, f: JsObject<'gc>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let done = a.to_boolean(Self::slot(f, DONE));
         Ok(a.iter_result(args.at(0), done).into())
     }
 
-    /// The rejection of the awaited value: the sync iterator is closed, then the reason rethrown
     fn close<'gc>(a: &mut Agent<'gc, '_>, f: JsObject<'gc>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let reason = args.at(0);
         let _ = a.iterator_close(Self::slot(f, ITERATOR));
         Err(a.throw_value(reason))
     }
 
-    /// AsyncFromSyncIteratorContinuation
     fn continuation<'gc>(a: &mut Agent<'gc, '_>, result: Value<'gc>, p: JsObject<'gc>, cap: Capability<'gc>, rec: IterRecord<'gc>, close_on_rejection: bool) -> Result<Value<'gc>, Error> {
         let done = match a.get_named(result, "done") {
             Ok(d) => a.to_boolean(d),
@@ -143,8 +132,6 @@ impl AsyncFromSync {
         Self::continuation(a, result, p, cap, rec, true)
     }
 
-    /// `return` / `throw`: the sync iterator's method of that name; without one, `return` is done with the value and
-    /// `throw` closes the iterator and rejects with a TypeError
     fn forward<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>], name: &str) -> Result<Value<'gc>, Error> {
         let (p, cap) = Self::capability(a);
         let Some(rec) = Self::record(this) else { unreachable!("only reachable through CreateAsyncFromSyncIterator") };

@@ -1,5 +1,3 @@
-//! A Durable Object's SQL storage (`ctx.storage.sql`): one SQLite database per object, bound to JS as
-//! `__j8_native.SqlStorage`. Results cross as JSON text; the cursor (`toArray()`, `one()`, `raw()` …) is in the prelude.
 use std::sync::Mutex;
 
 use j8::frame::{Agent, Error, ErrorKind};
@@ -8,13 +6,10 @@ use rusqlite::fallible_iterator::FallibleIterator as _;
 use rusqlite::{Batch, Connection};
 use serde_json::{Value as Json, json};
 
-/// One object's database. Only the runtime thread uses it; the mutex is there because a bound type must be `Sync`
-/// and a SQLite connection is not.
 pub struct SqlStorage {
     db: Mutex<Connection>,
 }
 
-/// A JSON binding as a SQL value (booleans become 0 / 1, as in Cloudflare's API)
 struct Param(Sql);
 
 impl From<Json> for Param {
@@ -29,7 +24,6 @@ impl From<Json> for Param {
     }
 }
 
-/// A SQL column value as JSON (a BLOB becomes an array of bytes)
 struct Column(Json);
 
 impl From<ValueRef<'_>> for Column {
@@ -46,32 +40,24 @@ impl From<ValueRef<'_>> for Column {
 
 #[j8::class]
 impl SqlStorage {
-    /// Opens (creating it if needed) the database at `path`; an empty path is an in-memory database. Cheap once
-    /// [`prepare`](Self::prepare) has made the file.
     #[js(constructor)]
     fn open(a: &mut Agent<'_, '_>, path: &str) -> Result<Self, Error> {
         let db = Self::configure(path).map_err(|e| a.throw(ErrorKind::Error, &e))?;
         Ok(Self { db: Mutex::new(db) })
     }
 
-    /// Creates the database at `path` and switches it to the write-ahead log, on a thread of its own: making a new
-    /// database syncs the disk several times, which must not hold up the event loop thread (and the other event
-    /// loops on it). Gives an error message, or nothing.
     async fn prepare(path: String) -> Option<String> {
         let (tx, rx) = j8::lockfree::Oneshot::new();
         std::thread::spawn(move || tx.send(Self::configure(&path).err()));
         rx.await
     }
 
-    /// Runs `query` (one or more statements; `params`, a JSON array, binds the last one):
-    /// `{"columns":[…],"rows":[[…]…],"rowsRead":n,"rowsWritten":n}` for the last statement
     fn exec(&self, a: &mut Agent<'_, '_>, query: &str, params: &str) -> Result<String, Error> {
         let params: Vec<Json> = serde_json::from_str(params).map_err(|e| a.throw(ErrorKind::Type, &format!("SQL bindings: {e}")))?;
         let db = self.db.lock().map_err(|_| a.throw(ErrorKind::Error, "SQLite: the database is poisoned"))?;
         Self::run(&db, query, params).map_err(|e| a.throw(ErrorKind::Error, &format!("SQLite: {e}")))
     }
 
-    /// Size of the database file in bytes
     #[js(getter)]
     #[expect(clippy::cast_precision_loss, reason = "a JS number; sizes stay far below 2^53")]
     fn database_size(&self) -> f64 {
@@ -81,9 +67,6 @@ impl SqlStorage {
 }
 
 impl SqlStorage {
-    /// Opens the database at `path` (in memory when empty) in write-ahead-log mode, synced at checkpoints rather than
-    /// every commit (as Durable Objects' SQLite does): a commit survives the process crashing; a power cut may lose
-    /// the last few, never the database
     fn configure(path: &str) -> Result<Connection, String> {
         let db = if path.is_empty() { Connection::open_in_memory() } else { Connection::open(path) };
         let db = db.map_err(|e| format!("SQLite: open {path}: {e}"))?;

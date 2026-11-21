@@ -1,9 +1,5 @@
-//! j8bytecode decodes V8's own output the same way: `v8-15.2.124.txt` is `--print-bytecode` from V8 15.2.124 (rusty_v8
-//! 152.2.0) for the benchv8 scripts plus generators / async / classes / `with` / labels (addresses blanked), one
-//! instruction per line: its bytes in hex, then V8's name and operands.
 use j8bytecode::{Bytecode, Decoder, Intrinsic, Register, Runtime};
 
-/// The register V8 prints (`r3`, `a0`, `<this>`, `<context>`, `<closure>`; a list `r1-r3` by its first)
 fn printed_register(arg: &str) -> Option<Register> {
     let first = arg.split('-').next()?;
     match first {
@@ -30,7 +26,6 @@ fn decodes_v8_output() {
         assert_eq!(format!("{:?}", d.bytecode), name, "{line}");
         assert_eq!(d.next, bytes.len(), "{line}");
         let args = words[n + 1..].join(" ");
-        // `CallRuntime [Name]` / `InvokeIntrinsic [_Name]`: the id names the same function
         let first = args.split(']').next().unwrap_or("").trim_start_matches('[');
         match d.bytecode {
             Bytecode::CallRuntime | Bytecode::CallRuntimeForPair => {

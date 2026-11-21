@@ -1,10 +1,3 @@
-//! [`CodeCache`]: bytecode shared by executors. Many isolates run the same preludes and import the same module files;
-//! with a cache, each such source is parsed and compiled once, and every executor loads its own copy. Only what is
-//! meant to be shared goes in (scripts run as [`ScriptKind::Shared`](j8framework::ScriptKind::Shared), and ES
-//! modules), so one-off scripts don't pile up.
-//!
-//! No source text is kept: an entry is found by file name, length and a 128-bit hash of the text (two randomly keyed
-//! SipHash, so collisions can't be crafted), and holds the compiled module, cloned out for each executor.
 use alloc::boxed::Box;
 use alloc::sync::Arc;
 use core::hash::BuildHasher;
@@ -15,7 +8,6 @@ use j8compiler::Compile;
 use j8framework::{Error, ModuleInfo, Source};
 use j8lockfree::Chain;
 
-/// What a source is looked up by
 #[derive(PartialEq, Eq)]
 struct Key {
     file: Box<str>,
@@ -23,7 +15,6 @@ struct Key {
     hash: [u64; 2],
 }
 
-/// One compiled source: the module, plus `T` (the module info for an ES module)
 struct Entry<T> {
     key: Key,
     code: Module,
@@ -31,14 +22,11 @@ struct Entry<T> {
 }
 
 impl<T> Entry<T> {
-    /// A copy of the bytecode
     fn module(&self) -> Module {
         self.code.clone()
     }
 }
 
-/// Compiled sources by file name and text, shared by executors (lock-free: a source compiled by two threads at once
-/// is kept twice, harmlessly)
 #[derive(Default)]
 pub struct CodeCache {
     seeds: [RandomState; 2],
@@ -47,12 +35,10 @@ pub struct CodeCache {
 }
 
 impl CodeCache {
-    /// A new cache, to hand to executors with [`Executor::with_cache`](crate::Executor::with_cache)
     pub fn shared() -> Arc<Self> {
         Arc::default()
     }
 
-    /// The compiled classic script `src`
     pub fn script(&self, src: &Source<'_>) -> Result<Module, Error> {
         let key = self.key(src);
         if let Some(e) = self.scripts.iter().find(|e| e.key == key) {
@@ -63,7 +49,6 @@ impl CodeCache {
         Ok(module)
     }
 
-    /// The compiled ES module `src`, with its module info
     pub fn module(&self, src: &Source<'_>) -> Result<(Module, Arc<ModuleInfo>), Error> {
         let key = self.key(src);
         if let Some(e) = self.modules.iter().find(|e| e.key == key) {

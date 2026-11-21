@@ -1,10 +1,7 @@
-//! Shared by the three binding macros: reads `#[js(…)]`, analyzes signatures, generates the conversion wrapper
-//! (`fn(agent, this, args) -> Result<Value>`).
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use syn::{FnArg, Ident, ImplItemFn, LitStr, ReturnType, Type};
 
-/// What the method is in JS.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Role {
     Constructor,
@@ -15,7 +12,6 @@ pub(crate) enum Role {
     Skip,
 }
 
-/// The receiver.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Receiver {
     None,
@@ -23,21 +19,14 @@ pub(crate) enum Receiver {
     Mutable,
 }
 
-/// Where a parameter comes from.
 enum Param {
-    /// `&mut Agent`
     Agent,
-    /// `This`: the raw `this`
     This,
-    /// `Rest`: all arguments starting at index `usize`
     Rest(usize),
-    /// Argument at index `usize`, converted with `FromJs`
     Arg(usize, Box<Type>),
-    /// Argument at index `usize`: borrowed as `&str` after ToString
     Str(usize),
 }
 
-/// A parsed method.
 pub(crate) struct Method {
     pub(crate) rust: Ident,
     pub(crate) js: String,
@@ -46,15 +35,12 @@ pub(crate) struct Method {
     params: Vec<Param>,
     pub(crate) length: u32,
     returns_result: bool,
-    /// `async fn`: returns a promise, settled by the runtime's event loop
     is_async: bool,
 }
 
-/// Name utilities.
 pub(crate) struct Names;
 
 impl Names {
-    /// The name of the last segment of a type path.
     pub(crate) fn last_segment(ty: &Type) -> Option<String> {
     match ty {
         Type::Path(p) => p.path.segments.last().map(|s| s.ident.to_string()),
@@ -63,7 +49,6 @@ impl Names {
     }
     }
 
-    /// `snake_case` ⇒ `camelCase`.
     pub(crate) fn camel(name: &str) -> String {
     let mut out = String::new();
     let mut up = false;
@@ -82,13 +67,10 @@ impl Names {
 }
 
 impl Method {
-    /// Reads `#[js(…)]` (removing it from the method afterwards) and analyzes the signature.
-    /// Reads a method (inside an `impl` block).
     pub(crate) fn parse(f: &mut ImplItemFn) -> syn::Result<Self> {
         Self::parse_parts(&mut f.attrs, &f.sig)
     }
 
-    /// Reads a function's `#[js(…)]` (removing it afterwards) and its signature.
     pub(crate) fn parse_parts(attrs: &mut Vec<syn::Attribute>, sig: &syn::Signature) -> syn::Result<Self> {
         let mut role = None;
         let mut name = None;
@@ -152,7 +134,6 @@ impl Method {
         let rust = sig.ident.clone();
         let js = name.unwrap_or_else(|| Names::camel(&rust.to_string()));
         let is_async = sig.asyncness.is_some();
-        // The future outlives this call (it runs on the event loop), so it may own only plain data
         if is_async && (receiver != Receiver::None || params.iter().any(|p| !matches!(p, Param::Arg(..)))) {
             return Err(syn::Error::new_spanned(&sig.ident, "an async binding takes owned parameters only (no self, &str, Agent, This or Rest): its future runs later on the event loop"));
         }
@@ -163,8 +144,6 @@ impl Method {
         format_ident!("__j8_js_{}", self.rust)
     }
 
-    /// Conversion wrapper: `fn(agent, this, args) -> Result<Value>`.
-    /// `owner` is the path prefix used to call the original function (`Self` or `super`).
     pub(crate) fn wrapper(&self, class: &str, owner: &TokenStream) -> TokenStream {
         let name = self.wrapper_name();
         let rust = &self.rust;
@@ -209,7 +188,6 @@ impl Method {
             }
         } else if self.role == Role::Constructor {
             let made = if self.returns_result { call } else { quote!(::core::result::Result::Ok(#call)) };
-            // The value is made before `construct` borrows the agent: the constructor may take `&mut Agent` itself
             quote! {
                 ::j8::Glue::require_new(a, #class)?;
                 #(#prepare)*
@@ -233,16 +211,12 @@ impl Method {
     }
 }
 
-
-/// All methods to export from an `impl` block, plus the JS name (shared by `class` / `object`).
 pub(crate) struct Bound {
     pub(crate) name: syn::LitStr,
     pub(crate) methods: Vec<Method>,
 }
 
 impl Bound {
-    /// Reads an `impl` block: the attribute argument is the JS name (defaults to the type name); `#[js(skip)]`
-    /// methods are left out.
     pub(crate) fn of_impl(attr: TokenStream, item: &mut syn::ItemImpl) -> syn::Result<Self> {
         let name = if attr.is_empty() {
             let n = Names::last_segment(&item.self_ty).ok_or_else(|| syn::Error::new_spanned(&item.self_ty, "cannot name this type"))?;
@@ -267,8 +241,6 @@ impl Bound {
         self.methods.iter().map(|m| m.wrapper(&self.name.value(), &owner)).collect()
     }
 
-    /// The `j8::Member` table: methods, static methods, and getter / setter pairs with the same name combined into
-    /// one accessor.
     pub(crate) fn members(&self) -> Vec<TokenStream> {
         let native = quote!(::j8::frame::NativeFn);
         let mut members = Vec::new();

@@ -1,6 +1,3 @@
-//! Conversion types for host functions beyond plain values: [`Persistent`] keeps a JS value across `enter` calls (a
-//! host struct can store it), [`Function`] is a callable one, [`Bytes`] is binary data (`ArrayBuffer` / typed arrays /
-//! `DataView` ⇄ `Vec<u8>`), [`Promise`] is a JS promise awaited from Rust.
 use alloc::boxed::Box;
 #[cfg(feature = "json")]
 use alloc::string::String;
@@ -10,8 +7,6 @@ use j8framework::{Agent, BufferData, ElementKind, Error, ErrorKind, Global, Host
 
 use crate::{FromJs, IntoJs};
 
-/// A JS value held across `enter` calls (a GC root; dropping it releases the value). Storing one in a host object that
-/// the value itself reaches keeps both alive until the host object is dropped from Rust.
 #[derive(Debug)]
 pub struct Persistent(pub Global);
 
@@ -28,13 +23,11 @@ impl<'gc> IntoJs<'gc> for &Persistent {
 }
 
 impl Persistent {
-    /// The value in this entry
     pub fn get<'gc>(&self, a: &Agent<'gc, '_>) -> Value<'gc> {
         a.local(&self.0)
     }
 }
 
-/// A JS function held across `enter` calls (a [`Persistent`] that was callable when taken).
 #[derive(Debug)]
 pub struct Function(pub Persistent);
 
@@ -55,15 +48,12 @@ impl<'gc> IntoJs<'gc> for &Function {
 }
 
 impl Function {
-    /// Calls it with `this` and `args`
     pub fn call<'gc>(&self, a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let f = a.local(&self.0.0);
         a.call(f, this, args)
     }
 }
 
-/// Binary data: taken from an `ArrayBuffer`, a typed array or a `DataView` (the bytes it views), given back as a
-/// `Uint8Array`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Bytes(pub Vec<u8>);
 
@@ -86,7 +76,6 @@ impl<'gc> FromJs<'gc> for Bytes {
 }
 
 impl Bytes {
-    /// The bytes a view covers (`None` when its buffer is detached)
     fn view(view: &ViewData<'_>, size: usize) -> Option<Vec<u8>> {
         let b = view.buffer.borrow();
         let ObjectKind::ArrayBuffer(data) = &b.kind else { return None };
@@ -108,15 +97,12 @@ impl<'gc> IntoJs<'gc> for Bytes {
     }
 }
 
-/// A Rust value that crosses as JSON-shaped data (`serde`, feature `json`): taken through `JSON.stringify`, given
-/// back through `JSON.parse`, so it follows JSON's rules (no functions, `undefined` fields dropped, …).
 #[cfg(feature = "json")]
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Json<T>(pub T);
 
 #[cfg(feature = "json")]
 impl<T> Json<T> {
-    /// Calls `JSON.<name>(arg)`
     fn json<'gc>(a: &mut Agent<'gc, '_>, name: &str, arg: Value<'gc>) -> Result<Value<'gc>, Error> {
         let json = a.get_named(a.realm.global.into(), "JSON")?;
         let f = a.get_named(json, name)?;
@@ -142,22 +128,6 @@ impl<'gc, T: serde::Serialize> IntoJs<'gc> for Json<T> {
     }
 }
 
-/// A JS promise awaited from Rust. Taken as a parameter the way `await` takes its operand (a promise is watched
-/// directly, a thenable is adopted, any other value counts as already fulfilled), then `.await`ed in an `async fn`
-/// binding or a future given to `Glue::spawn`:
-///
-/// ```ignore
-/// #[j8::object("math")]
-/// impl Math {
-///     async fn double(p: j8::Promise<f64>) -> Result<f64, Error> {
-///         Ok(p.await? * 2.0)          // a rejection passes on to this function's own promise
-///     }
-/// }
-/// ```
-///
-/// The output is the fulfilled value converted with `FromJs` into `T` (on the runtime thread, when the promise
-/// settles), or `Err(Error::Exception(reason))` for a rejection or a value that does not convert. A promise that never
-/// settles keeps the future pending, like `await` in JS.
 pub struct Promise<T>(j8lockfree::Receiver<Result<T, Error>>);
 
 impl<'gc, T: for<'g> FromJs<'g> + Send + 'static> FromJs<'gc> for Promise<T> {

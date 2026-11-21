@@ -6,17 +6,13 @@ use j8framework::{Agent, Error, ErrorKind, JsString, Units, Value};
 
 use crate::{Args, Installer};
 
-/// Maximum string length in UTF-16 code units (same as V8's 2^29 − 24); anything longer throws RangeError
 const MAX_STRING_LENGTH: f64 = 536_870_888.0;
 
-/// `String` / `Number` and their prototype methods. All indices are in UTF-16 code units.
 pub(crate) struct Strings;
 
-/// `Number.MAX_SAFE_INTEGER`
 const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
 
 impl Strings {
-    /// Convert `this` to a string (throws TypeError when called on `null` / `undefined`).
     fn this<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>) -> Result<JsString<'gc>, Error> {
         if this.is_nullish() {
             return Err(a.throw(ErrorKind::Type, "String.prototype method called on null or undefined"));
@@ -28,7 +24,6 @@ impl Strings {
         Ok(Self::this(a, this)?.encode_utf16().collect())
     }
 
-    /// UTF-16 code units `r` of `s` (clamped): an all-ASCII string is cut by byte and shares its copy
     fn cut<'gc>(a: &Agent<'gc, '_>, s: JsString<'gc>, r: core::ops::Range<usize>) -> JsString<'gc> {
         match s.units() {
             Units::Ascii(b) => {
@@ -47,7 +42,6 @@ impl Strings {
         Value::Number(f64::from(u32::try_from(n).unwrap_or(u32::MAX)))
     }
 
-    /// Convert an argument to an integer index in `[0, len]` (negatives clamp to 0).
     fn clamp<'gc>(a: &mut Agent<'gc, '_>, v: Value<'gc>, len: usize, default: usize) -> Result<usize, Error> {
         if v == Value::Undefined {
             return Ok(default);
@@ -58,7 +52,6 @@ impl Strings {
         Ok(r)
     }
 
-    /// Relative index (negative counts from the end).
     fn relative<'gc>(a: &mut Agent<'gc, '_>, v: Value<'gc>, len: usize, default: usize) -> Result<usize, Error> {
         if v == Value::Undefined {
             return Ok(default);
@@ -71,7 +64,6 @@ impl Strings {
         Ok(r)
     }
 
-    /// JS WhiteSpace and LineTerminator (U+0085 excluded, U+FEFF included).
     pub(crate) fn is_space(c: char) -> bool {
         (c.is_whitespace() && c != '\u{85}') || c == '\u{feff}'
     }
@@ -90,7 +82,6 @@ impl Strings {
         a.wrap_primitive(new_target, s, a.realm.string_proto)
     }
 
-    /// thisStringValue (`toString` / `valueOf`): a string or String wrapper object; anything else throws TypeError.
     fn to_string<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         match this.unwrapped().kind() {
             v @ ValueKind::String(_) => Ok(Value::from(v)),
@@ -113,7 +104,6 @@ impl Strings {
     fn index_of<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let s = Self::this(a, this)?;
         let n = a.to_string(args.at(0))?;
-        // All ASCII: byte index = UTF-16 code unit index, so search directly in UTF-8
         if s.is_ascii() {
             let from = Self::clamp(a, args.at(1), s.len(), 0)?;
             return Ok(a.par().find_str(&s[from..], &n).map_or(Value::Number(-1.0), |i| Self::count(from + i)));
@@ -131,8 +121,6 @@ impl Strings {
         Ok(last.and_then(|l| (0..=l).rev().find(|&i| u[i..].starts_with(&n))).map_or(Value::Number(-1.0), Self::count))
     }
 
-    /// Shared part of includes / startsWith / endsWith: convert `this` to a string, reject a regex argument, convert
-    /// the search string to a string
     fn needle<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>], method: &str) -> Result<(JsString<'gc>, JsString<'gc>), Error> {
         let s = Self::this(a, this)?;
         if crate::regexp::Regexps::is_regexp(a, args.at(0))? {
@@ -146,8 +134,6 @@ impl Strings {
         let (s, n) = Self::needle(a, this, args, "includes")?;
         let len = s.utf16_len();
         let from = Self::clamp(a, args.at(1), len, 0)?;
-        // Pure ASCII: search in UTF-8 (byte index = code unit index; large strings are split into chunks searched in
-        // parallel)
         if s.is_ascii() {
             return Ok(a.par().find_str(&s[from..], &n).is_some().into());
         }
@@ -231,7 +217,6 @@ impl Strings {
         Ok(a.piece(s, s.trim_end_matches(Self::is_space)).into())
     }
 
-    /// `split(sep, limit)`: `sep` is a string (regexes are left to phase 5); an empty string splits by code unit.
     pub(crate) fn split<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let s = Self::this(a, this)?;
         let limit = match args.at(1).kind() {
@@ -244,15 +229,12 @@ impl Strings {
             sep => {
                 let sep = a.to_string(Value::from(sep))?;
                 if sep.is_empty() {
-                    // Empty separator: split one UTF-16 code unit at a time (byte by byte when all ASCII)
                     if s.is_ascii() {
                         s.as_bytes().iter().take(limit).map(|&c| a.string(core::str::from_utf8(&[c]).unwrap_or_default()).into()).collect()
                     } else {
                         s.encode_utf16().take(limit).map(|c| Self::from_units(a, &[c])).collect()
                     }
                 } else {
-                    // All strings are valid UTF-8: splitting in UTF-8 gives the same result as splitting by UTF-16 code
-                    // unit, so no round-trip conversion is needed
                     s.split(&**sep).take(limit).map(|p| a.piece(s, p).into()).collect()
                 }
             }
@@ -281,7 +263,6 @@ impl Strings {
 
     fn pad<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>], start: bool) -> Result<Value<'gc>, Error> {
         let u = Self::units(a, this)?;
-        // ToLength: negatives and NaN become 0
         let target = libm::trunc(a.to_number(args.at(0))?);
         let fill: Vec<u16> = match args.at(1).kind() {
             ValueKind::Undefined => alloc::vec![u16::from(b' ')],
@@ -318,7 +299,6 @@ impl Strings {
         Ok(a.string(&out).into())
     }
 
-    /// `Number(v)`: a BigInt becomes the nearest Number.
     fn number<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let new_target = a.new_target;
         let n = match args.first() {
@@ -343,10 +323,7 @@ impl Strings {
         Ok(matches!(args.at(0).kind(), ValueKind::Number(x) if x.is_nan()).into())
     }
 
-    /// `n.toString(radix)`: divide out the integer part digit by digit, multiply out the fraction digit by digit (up to
-    /// the number of digits a double can distinguish).
     fn number_to_string<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        /// Maximum number of fraction digits produced
         const MAX_FRACTION_DIGITS: usize = 52;
         const DIGITS: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
         let Some(x) = this.unwrapped().as_number() else {
@@ -393,7 +370,6 @@ impl Strings {
         Ok(a.string(&if neg { alloc::format!("-{s}") } else { s }).into())
     }
 
-    /// thisNumberValue (`Number.prototype.valueOf`): a Number or Number wrapper object; anything else throws TypeError.
     fn number_value_of<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         match this.unwrapped().kind() {
             v @ ValueKind::Number(_) => Ok(Value::from(v)),
@@ -405,7 +381,6 @@ impl Strings {
 impl Installer<'_, '_> {
     pub(crate) fn string(&mut self) {
         let proto = self.realm.string_proto;
-        // String.prototype itself is a String object wrapping ""
         proto.borrow_mut(self.mc).kind = j8framework::ObjectKind::Primitive(self.text(""));
         self.constructor("String", Strings::string, proto, 1);
         let methods: [(&str, j8framework::NativeFn, u32); 25] = [
@@ -442,7 +417,6 @@ impl Installer<'_, '_> {
 
     pub(crate) fn number(&mut self) {
         let proto = self.realm.number_proto;
-        // Number.prototype itself is a Number object wrapping +0
         proto.borrow_mut(self.mc).kind = j8framework::ObjectKind::Primitive(0.0.into());
         let ctor = self.constructor("Number", Strings::number, proto, 1);
         self.method(ctor, "isInteger", Strings::is_integer, 1);

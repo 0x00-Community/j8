@@ -3,11 +3,9 @@ use j8framework::{Agent, Error, ErrorKind, JsObject, NativeClosure, ObjectData, 
 
 use crate::{Args, Installer};
 
-/// `Proxy` and `Reflect`.
 struct Reflects;
 
 impl Reflects {
-    /// ProxyCreate: target and handler must both be objects.
     fn create<'gc>(a: &mut Agent<'gc, '_>, target: Value<'gc>, handler: Value<'gc>) -> Result<JsObject<'gc>, Error> {
         let (ValueKind::Object(t), ValueKind::Object(h)) = (target.kind(), handler.kind()) else {
             return Err(a.throw(ErrorKind::Type, "Cannot create proxy with a non-object as target or handler"));
@@ -24,7 +22,6 @@ impl Reflects {
         Ok(Self::create(a, args.at(0), args.at(1))?.into())
     }
 
-    /// `Proxy.revocable(target, handler)`: `{ proxy, revoke }`.
     fn revocable<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let p = Self::create(a, args.at(0), args.at(1))?;
         let revoke = ObjectData { kind: ObjectKind::NativeClosure(NativeClosure { f: Self::revoke, slots: alloc::vec![p.into()], constructor: false }), proto: Some(a.realm.function_proto), ..ObjectData::default() }.alloc(a.mc);
@@ -35,7 +32,6 @@ impl Reflects {
         Ok(out.into())
     }
 
-    /// Revocation function: only the first call has an effect.
     fn revoke<'gc>(a: &mut Agent<'gc, '_>, f: JsObject<'gc>, _: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let target = match &mut f.borrow_mut(a.mc).kind {
             ObjectKind::NativeClosure(c) => core::mem::take(&mut c.slots[0]),
@@ -157,7 +153,6 @@ impl Reflects {
 impl Installer<'_, '_> {
     pub(crate) fn reflect(&mut self) {
         let r = self.realm;
-        // Proxy has no `prototype`
         let proxy = r.named_native(self.mc, Reflects::proxy, "Proxy", 2);
         if let ObjectKind::Native(n) = &mut proxy.borrow_mut(self.mc).kind {
             n.constructor = true;

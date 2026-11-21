@@ -1,17 +1,3 @@
-//! Bytecode ⇒ graph: an abstract interpretation of the bytecode that keeps, for every interpreter register, the IR
-//! value it holds, speculating on what the inline caches saw.
-//!
-//! - Numbers become int32 (guarded: a failed guard records a hint, and the next compilation uses doubles there)
-//! - Calls to a known small function are inlined (its frames rebuilt on a deopt); others call compiled code or the
-//!   runtime
-//! - Objects made here stay virtual (fields tracked here) until something needs the object itself
-//! - Context slots read and written here are kept in values and written back only when someone else could look
-//! - A loop entered on-stack (OSR) is peeled once, so what one iteration allocates and the next one replaces never
-//!   exists
-//!
-//! The bytecode is walked region by region (see [`Region`]), each region's blocks in order: forward edges always go to
-//! blocks not walked yet, so a block's state is the merge of its predecessors'; a loop header speculates on its back
-//! edges (phis for everything live) and the walk restarts with a hint when a back edge disagrees.
 use alloc::collections::BTreeMap;
 use alloc::rc::Rc;
 use alloc::sync::Arc;
@@ -26,62 +12,48 @@ use crate::cfg::{Bits, Cfg};
 use crate::ir::{Cond, FloatOp, Frame, FrameState, Graph, Helper, IntOp, Op, Rep, Slot, VirtualObject, B, Fs, V};
 use crate::runtime::Ctx;
 
-/// How long the hints say "don't": per (function, instruction)
 pub type Hints = BTreeMap<(u32, u32), u8>;
-/// Arithmetic here overflowed / saw a non-integer: use doubles
+
 pub const HINT_FLOAT: u8 = 1;
-/// Speculation here failed even as doubles / shapes: call the runtime
+
 pub const HINT_GENERIC: u8 = 2;
-/// Don't inline this call
+
 pub const HINT_NO_INLINE: u8 = 4;
 
-/// Tag words of boxed pointers
 pub const OBJECT_TAG: u64 = 0xFFF0_0000_0000_0000 | ((j8framework::ValueTag::OBJECT as u64 + 1) << 48);
 pub const CONTEXT_TAG: u64 = 0xFFF0_0000_0000_0000 | ((j8framework::ValueTag::CONTEXT as u64 + 1) << 48);
 
-/// Inline at most this deep
 const INLINE_DEPTH: usize = 4;
-/// Inline functions of at most this many instructions
+
 const INLINE_SIZE: usize = 80;
-/// Load kinds of [`Fact::Load`]
+
 const LOAD_WORD: u8 = 0;
 const LOAD_PTR: u8 = 1;
 const LOAD_RAW: u8 = 2;
-/// A recursive function is inlined into itself this many levels
+
 const RECURSIVE_INLINE: usize = 2;
-/// Walks restarted for loop headers before giving up
+
 const RESTARTS: usize = 12;
 
-/// How the compiled code is entered.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
-    /// From the interpreter at the function's start: the frame exists
     Enter,
-    /// From the interpreter at a loop header (on-stack replacement); the `JumpLoop` instruction
     Osr(usize),
-    /// From compiled code, with `argc` arguments in registers (no interpreter frame)
     Native(usize),
 }
 
-/// What a compilation gives the code generator.
 pub struct Built {
     pub graph: Graph,
-    /// `CallJit` targets
     pub targets: Vec<FuncId>,
-    /// `Helper::Alloc` shapes
     pub shapes: Vec<Option<Arc<Shape>>>,
-    /// Shapes the code compares against: kept alive with it
     pub keep: Vec<Arc<Shape>>,
 }
 
-/// Why compiling failed.
 #[derive(Debug)]
 pub enum Reject {
-    /// Bytecode or a situation not handled
     Unsupported,
 }
 
-/// A virtual object while building.
 #[derive(Clone)]
 struct VObj {
     proto: V,
@@ -89,7 +61,6 @@ struct VObj {
     fields: Vec<V>,
 }
 
-/// A context slot whose value is known here (and maybe not written back yet).
 #[derive(Clone)]
 struct Mem {
     ctx: V,
@@ -98,38 +69,26 @@ struct Mem {
     dirty: bool,
 }
 
-/// What a path knows about memory: virtual objects and context slots (shared by all inline levels of the path).
 #[derive(Clone, Default)]
 struct Heap {
     objs: Vec<(V, VObj)>,
     mem: Vec<Mem>,
-    /// What this path has checked or loaded already (dropped by anything that may change it)
     known: Vec<Fact>,
 }
 
-/// A fact about values on a path.
 #[derive(Clone, PartialEq)]
 enum Fact {
-    /// The object has this shape (address; 0: none) and is plain
     Shape(V, usize),
-    /// A load from `base + offset` (of this kind) gave this value
     Load(u8, V, i32, V),
-    /// The word was checked to be an object: its address
     Object(V, V),
-    /// The object runs this function
     Func(V, FuncId),
-    /// The object's prototype is null
     NoProto(V),
-    /// The two contexts are different ones
     Distinct(V, V),
-    /// The function (its word) was made in this context: its closure's environment
     Env(V, V),
-    /// Global name constant `.1` of function `.0` read as this value (nothing ran since)
     Global(u32, u32, V),
 }
 
 impl Fact {
-    /// The same fact with values replaced
     fn map(&self, f: impl Fn(V) -> V) -> Fact {
         match self {
             Fact::Shape(v, s) => Fact::Shape(f(*v), *s),
@@ -144,7 +103,6 @@ impl Fact {
     }
 }
 
-/// One activation's registers.
 #[derive(Clone)]
 struct Regs {
     params: Vec<V>,
@@ -153,19 +111,16 @@ struct Regs {
     ctx: V,
 }
 
-/// The state along a path: the innermost activation's registers, and the heap.
 #[derive(Clone)]
 struct St {
     r: Regs,
     heap: Heap,
 }
 
-/// A caller frozen at an inlined call.
 struct Caller {
     func: FuncId,
     pc: u32,
     callee: V,
-    /// The closure's context as loaded (a frame state slot holding it rebuilds it from the function)
     env: V,
     argc: u32,
     r: Regs,
@@ -173,80 +128,57 @@ struct Caller {
     parent: Option<Rc<Caller>>,
 }
 
-/// A walk over part of a function's bytecode.
 #[derive(Clone, Copy, Debug)]
 struct Region {
     start: usize,
     end: usize,
-    /// A peeled iteration: back edges to this header go to the next region
     peel: Option<usize>,
 }
 
-/// Which loop-header slot a hint is about.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Key {
     Reg(usize),
     Ctx,
-    /// Context slot entry `i` of the heap's list (by position)
     Mem(usize),
 }
 
-/// Per-walk hints learned from back edges.
 #[derive(Default, Clone)]
 struct Widen {
-    /// (inline instance, region, header) ⇒ slots whose phi must be a word / double
     word: BTreeMap<(u32, usize, usize, Key), Rep>,
-    /// Virtual objects held in these slots get materialized before the header
     real: BTreeMap<(u32, usize, usize, Key), ()>,
-    /// Memory isn't tracked across this header
     flush: BTreeMap<(u32, usize, usize), ()>,
-    /// Facts aren't kept across this header
     unknown: BTreeMap<(u32, usize, usize), ()>,
-    /// These facts aren't kept across these headers
     bad: Vec<((u32, usize, usize), Fact)>,
 }
 
-/// A loop header being walked: its phis by slot, to be completed by the back edges.
 struct Header {
     block: B,
-    /// (slot, phi)
     phis: Vec<(Key, V)>,
-    /// Virtual objects at the header: (identity at the header, field phis)
     objs: Vec<(V, Vec<V>)>,
-    /// Memory entries at the header
     mem: Vec<(V, u32, V)>,
-    /// Facts at the header (each must still hold on every back edge)
     known: Vec<Fact>,
-    /// The state at the header (what back edges are compared with)
     st: St,
 }
 
-/// One inlined (or the outermost) activation.
 struct Act<'e> {
     f: Function<'e>,
     id: FuncId,
     cfg: Rc<Cfg>,
     callee: V,
-    /// The closure's context as loaded (`u32::MAX`: none)
     env: V,
     argc: u32,
     construct: Option<(V, V)>,
     caller: Option<Rc<Caller>>,
     depth: usize,
-    /// Its instance number (hints are per instance)
     inst: u32,
     regions: Vec<Region>,
-    /// Pending edges into (region, block)
     edges: BTreeMap<(usize, u32), Vec<(B, St)>>,
     headers: BTreeMap<(usize, u32), Header>,
-    /// Returns of an inlined activation: (block, value, state)
     rets: Vec<(B, V, St)>,
 }
 
-/// A restart request.
 struct Restart;
 
-/// The builder.
 pub struct Builder<'e> {
     exe: &'e Executor,
     hints: &'e Hints,
@@ -257,24 +189,18 @@ pub struct Builder<'e> {
     cfgs: BTreeMap<u32, Rc<Cfg>>,
     widen: Widen,
     instances: u32,
-    /// The block being filled (`None`: unreachable)
     cur: Option<B>,
-    /// A placeholder value meaning "not set" (undefined)
     undef: V,
-    /// Restart requested by a back edge
     restart: bool,
     kind: Kind,
     root: FuncId,
-    /// How to reach entry `i` of the global object (`true`) / the script scope in their stores, now
     paths: &'e dyn Fn(bool, usize) -> Option<j8framework::StorePath>,
-    /// Debugging output (`J8_JIT_LOG`)
     log: bool,
 }
 
 type R<T> = Result<T, Reject>;
 
 impl<'e> Builder<'e> {
-    /// Compiles `root` entered as `kind`.
     pub fn build(exe: &'e Executor, hints: &'e Hints, root: FuncId, kind: Kind, paths: &'e dyn Fn(bool, usize) -> Option<j8framework::StorePath>, log: bool) -> R<Built> {
         let mut widen = Widen::default();
         for round in 0..RESTARTS {
@@ -305,8 +231,6 @@ impl<'e> Builder<'e> {
         self.hints.get(&(f.0, u32::try_from(pc).unwrap_or(u32::MAX))).copied().unwrap_or(0)
     }
 
-    // ---- emitting ----
-
     fn emit(&mut self, op: Op, rep: Rep) -> V {
         let b = self.cur.expect("emitting into a live block");
         self.g.push(b, op, rep)
@@ -334,7 +258,6 @@ impl<'e> Builder<'e> {
         }
     }
 
-    /// Emits `op` before the terminator of the already finished block `b`
     fn emit_before_end(&mut self, b: B, op: Op, rep: Rep) -> V {
         let v = u32::try_from(self.g.insts.len()).unwrap_or(u32::MAX);
         self.g.insts.push(crate::ir::Inst { op, rep, block: b });
@@ -343,8 +266,6 @@ impl<'e> Builder<'e> {
         blk.insts.insert(at, v);
         v
     }
-
-    // ---- the walk ----
 
     fn run(&mut self) -> R<()> {
         let entry = self.g.add_block();
@@ -420,12 +341,10 @@ impl<'e> Builder<'e> {
         let from = self.jump(u32::MAX);
         let key = (0, cfg.block_of[start_pc]);
         act.edges.entry(key).or_default().push((from, st));
-        // A restart request ends the walk early; `build` tries again
         let _ = self.walk(&mut act);
         Ok(())
     }
 
-    /// The current block ends with a jump to `b`; gives the block that ended
     fn jump(&mut self, b: B) -> B {
         let from = self.cur.expect("a live block");
         self.g.push(from, Op::Jump(b), Rep::None);
@@ -433,7 +352,6 @@ impl<'e> Builder<'e> {
         from
     }
 
-    /// Regions of an OSR walk entering at loop header `h` (see the module docs)
     fn osr_regions(cfg: &Cfg, h: usize, last: usize) -> Vec<Region> {
         let loops = cfg.enclosing(h);
         let mut out = Vec::new();
@@ -460,7 +378,6 @@ impl<'e> Builder<'e> {
         Act { f, id: f.id(), cfg, callee, env: u32::MAX, argc, construct, caller, depth, inst: self.instances, regions, edges: BTreeMap::new(), headers: BTreeMap::new(), rets: Vec::new() }
     }
 
-    /// Walks an activation's regions in order
     fn walk(&mut self, act: &mut Act<'e>) -> Result<(), Restart> {
         for ri in 0..act.regions.len() {
             let reg = act.regions[ri];
@@ -481,7 +398,6 @@ impl<'e> Builder<'e> {
         Ok(())
     }
 
-    /// Opens a block for `edges`: merges their states (phis), or makes a loop header's phis
     fn enter_block(&mut self, act: &mut Act<'e>, ri: usize, bb: u32, edges: Vec<(B, St)>, header: bool) -> Option<St> {
         let b = self.g.add_block();
         for (p, _) in &edges {
@@ -498,7 +414,6 @@ impl<'e> Builder<'e> {
         Some(st)
     }
 
-    /// Points the jump at the end of `p` (still aimed at a placeholder) at `b`
     fn retarget(&mut self, p: B, b: B) {
         if let Some(&last) = self.g.blocks[p as usize].insts.last()
             && let Op::Jump(t) = &mut self.g.insts[last as usize].op
@@ -507,7 +422,6 @@ impl<'e> Builder<'e> {
         }
     }
 
-    /// Analysis register `i` of a state
     fn get(cfg: &Cfg, r: &Regs, i: usize) -> V {
         if i < cfg.params {
             r.params[i]
@@ -528,7 +442,6 @@ impl<'e> Builder<'e> {
         }
     }
 
-    /// The representation two values merge to
     fn join(a: Rep, b: Rep) -> Rep {
         match (a, b) {
             (x, y) if x == y => x,
@@ -537,7 +450,6 @@ impl<'e> Builder<'e> {
         }
     }
 
-    /// `v` converted to `rep` at the end of block `p`
     fn convert_at(&mut self, p: B, v: V, rep: Rep) -> V {
         let have = self.g.rep(v);
         if have == rep {
@@ -554,7 +466,6 @@ impl<'e> Builder<'e> {
         }
     }
 
-    /// Materializes virtual object `id` of `st` at the end of block `p` (or in the current block when `p` is `None`)
     fn materialize(&mut self, st: &mut St, id: V, p: Option<B>) -> V {
         let Some(pos) = st.heap.objs.iter().position(|(v, _)| *v == id) else { return id };
         let (_, o) = st.heap.objs.remove(pos);
@@ -579,7 +490,6 @@ impl<'e> Builder<'e> {
         real
     }
 
-    /// Replaces value `from` by `to` everywhere in a state
     fn replace(st: &mut St, from: V, to: V) {
         let r = &mut st.r;
         for v in r.params.iter_mut().chain(r.regs.iter_mut()).chain([&mut r.acc, &mut r.ctx]) {
@@ -615,14 +525,12 @@ impl<'e> Builder<'e> {
         st.heap.objs.iter().find(|(id, _)| *id == v).map(|(_, o)| o)
     }
 
-    /// Merges the incoming states of a block (see [`Builder::enter_block`])
     #[expect(clippy::too_many_arguments, reason = "the parts of a merge")]
     fn merge(&mut self, act: &mut Act<'e>, ri: usize, bb: u32, b: B, edges: &[(B, St)], live: &Bits, header: bool) -> St {
         let cfg = act.cfg.clone();
         let n = cfg.params + cfg.regs + 1;
         let mut edges: Vec<(B, St)> = edges.to_vec();
         let hkey = |k: Key| (act.inst, ri, bb as usize, k);
-        // Virtual objects that can't stay virtual across the merge: in a slot where another edge has something else
         let slots: Vec<Key> = (0..n).filter(|&i| live.get(i)).map(Key::Reg).chain([Key::Ctx]).collect();
         let slot_val = |st: &St, k: Key| match k {
             Key::Reg(i) => Self::get(&cfg, &st.r, i),
@@ -650,7 +558,6 @@ impl<'e> Builder<'e> {
                 break;
             }
         }
-        // Values
         let mut out = edges[0].1.clone();
         out.r.params.iter_mut().chain(out.r.regs.iter_mut()).for_each(|v| *v = self.undef);
         out.r.acc = self.undef;
@@ -660,7 +567,6 @@ impl<'e> Builder<'e> {
             let merged = if !header && vals.iter().all(|v| *v == vals[0]) {
                 vals[0]
             } else if header && Self::is_virtual(&edges[0].1, vals[0]) && edges.len() == 1 {
-                // A virtual object stays virtual at the header (its fields get phis below)
                 vals[0]
             } else {
                 let mut rep = vals.iter().map(|v| self.g.rep(*v)).reduce(Self::join).unwrap_or(Rep::Word);
@@ -681,7 +587,6 @@ impl<'e> Builder<'e> {
                 Key::Mem(_) => {}
             }
         }
-        // Virtual objects (now the same identities on every edge): field phis
         let ids: Vec<V> = out.heap.objs.iter().map(|(id, _)| *id).filter(|id| Self::reachable(&out, *id)).collect();
         out.heap.objs.retain(|(id, _)| ids.contains(id));
         let mut hobjs = Vec::new();
@@ -709,11 +614,9 @@ impl<'e> Builder<'e> {
                 o.proto = proto;
             }
         }
-        // Memory: entries every edge has (same context value and slot)
         let flush = header && self.widen.flush.contains_key(&(act.inst, ri, bb as usize));
         let mut mem = Vec::new();
         let mut hmem = Vec::new();
-        // A context register that got a phi: memory keyed by its old value is keyed by the phi now
         let remap: Vec<(V, V)> = phis.iter().filter_map(|(k, phi)| matches!(k, Key::Ctx | Key::Reg(_)).then(|| (slot_val(&edges[0].1, *k), *phi))).collect();
         let rekey = |c: V| remap.iter().find(|(from, _)| *from == c).map_or(c, |(_, to)| *to);
         if !flush {
@@ -731,7 +634,6 @@ impl<'e> Builder<'e> {
                         rep = Self::join(rep, *w);
                     }
                     if vals.iter().any(|(v, _)| edges.iter().any(|(_, s)| Self::is_virtual(s, *v))) {
-                        // Values that are virtual objects get materialized: mixing them into a phi needs the object
                         for (p, s) in &mut edges {
                             let x = s.heap.mem.iter().find(|x| x.ctx == m.ctx && x.idx == m.idx).map(|x| x.val);
                             if let Some(x) = x
@@ -755,7 +657,6 @@ impl<'e> Builder<'e> {
                 mem.push(Mem { ctx: rekey(m.ctx), idx: m.idx, val, dirty });
             }
         }
-        // Dirty entries some edge drops: written back on that edge
         for (p, s) in &mut edges {
             for m in s.heap.mem.clone() {
                 if m.dirty && !mem.iter().any(|x| x.ctx == m.ctx && x.idx == m.idx) {
@@ -764,8 +665,6 @@ impl<'e> Builder<'e> {
             }
         }
         out.heap.mem = mem;
-        // Facts: those every edge has; a header keeps them unless a back edge broke them before, also about the
-        // phis its values went into
         let mut known: Vec<Fact> = edges[0].1.heap.known.clone();
         known.retain(|f| edges.iter().all(|(_, s)| s.heap.known.contains(f)));
         if header && self.widen.unknown.contains_key(&(act.inst, ri, bb as usize)) {
@@ -781,13 +680,10 @@ impl<'e> Builder<'e> {
                     into.push((x, i));
                 }
             }
-            // Facts carry over to the phis their values went into (a back edge breaking one drops it next time)
             let sub = |v: V| into.iter().find(|(x, _)| *x == v).map_or(v, |(_, phi)| *phi);
             let extra: Vec<Fact> = known.iter().filter_map(|f| {
                 let g = match f {
-                    // A load: only its base moves to the phi (the value loaded stays what it was)
                     Fact::Load(k, b, o, v) => Fact::Load(*k, sub(*b), *o, *v),
-                    // A check: only the word moves to the phi (the address it gave stays)
                     Fact::Object(w, p) => Fact::Object(sub(*w), *p),
                     Fact::Env(w, c) => Fact::Env(sub(*w), *c),
                     f => f.map(sub),
@@ -809,13 +705,11 @@ impl<'e> Builder<'e> {
         out
     }
 
-    /// Whether virtual object `id` is reachable from the registers (or another reachable object / memory)
     fn reachable(st: &St, id: V) -> bool {
         let r = &st.r;
         r.params.iter().chain(&r.regs).chain([&r.acc, &r.ctx]).any(|v| *v == id) || st.heap.objs.iter().any(|(o, x)| *o != id && (x.fields.contains(&id) || x.proto == id)) || st.heap.mem.iter().any(|m| m.val == id)
     }
 
-    /// Writes a memory entry back (at the end of block `p`, or here)
     fn write_back(&mut self, st: &mut St, m: &Mem, p: Option<B>) {
         let val = self.materialize(st, m.val, p);
         let (cell, w) = match p {
@@ -838,7 +732,6 @@ impl<'e> Builder<'e> {
         }
     }
 
-    /// Writes every dirty memory entry back here (before something that may read contexts)
     fn flush(&mut self, st: &mut St) {
         for m in st.heap.mem.clone() {
             if m.dirty {
@@ -847,18 +740,15 @@ impl<'e> Builder<'e> {
         }
     }
 
-    /// Forgets what memory holds (after something that may write contexts)
     fn forget(st: &mut St) {
         st.heap.mem.retain(|m| m.dirty);
         st.heap.known.clear();
     }
 
-    /// A store into an object's property: loads of properties may have changed
     fn stored(st: &mut St) {
         st.heap.known.retain(|f| !matches!(f, Fact::Load(LOAD_WORD, ..)));
     }
 
-    /// Guards that the object at `p` has `shape` (once per path)
     fn shape_check(&mut self, act: &Act<'e>, st: &mut St, p: V, shape: Option<Arc<Shape>>, pc: usize) {
         let addr = shape.as_ref().map_or(0, |s| Arc::as_ptr(s) as usize);
         if st.heap.known.contains(&Fact::Shape(p, addr)) {
@@ -870,7 +760,6 @@ impl<'e> Builder<'e> {
         st.heap.known.push(Fact::Shape(p, addr));
     }
 
-    /// A load (`LoadWord` / `LoadPtr` / `LoadRaw` of `base + off`), reusing one this path did
     fn load(&mut self, st: &mut St, kind: u8, base: V, off: i32) -> V {
         if let Some(Fact::Load(.., v)) = st.heap.known.iter().find(|f| matches!(f, Fact::Load(k, b, o, _) if *k == kind && *b == base && *o == off)) {
             return *v;
@@ -885,7 +774,6 @@ impl<'e> Builder<'e> {
         v
     }
 
-    /// `v` as a word (materializing a virtual object)
     fn to_word(&mut self, v: V) -> V {
         match self.g.rep(v) {
             Rep::Word => v,
@@ -898,20 +786,15 @@ impl<'e> Builder<'e> {
         }
     }
 
-    /// `v` as a real word in state `st`
     fn real(&mut self, st: &mut St, v: V) -> V {
         let v = if Self::is_virtual(st, v) { self.materialize(st, v, None) } else { v };
         self.to_word(v)
     }
 
-    // ---- frame states ----
-
-    /// The frame state at instruction `pc` of the innermost activation (the interpreter goes on there)
     fn state(&mut self, act: &Act<'e>, st: &St, pc: usize) -> Fs {
         let mut objects: Vec<VirtualObject> = Vec::new();
         let mut ids: Vec<V> = Vec::new();
         let mut frames = Vec::new();
-        // Callers, outermost first
         let mut chain = Vec::new();
         let mut c = act.caller.clone();
         while let Some(x) = c {
@@ -957,9 +840,6 @@ impl<'e> Builder<'e> {
         Slot::Virtual(u32::try_from(i).unwrap_or(0))
     }
 
-    // ---- one block ----
-
-    /// Interprets block `bb` of region `ri` from state `st`
     fn block(&mut self, act: &mut Act<'e>, ri: usize, bb: u32, mut st: St) -> Result<(), Restart> {
         let cfg = act.cfg.clone();
         let reg = act.regions[ri];
@@ -977,7 +857,6 @@ impl<'e> Builder<'e> {
                     return Ok(());
                 }
                 Ok(Flow::Branch(cond, t, on_true)) => {
-                    // Each side gets a block of its own (edges carry their own conversions)
                     let b = self.cur.expect("a live block");
                     let (bt, bf) = (self.g.add_block(), self.g.add_block());
                     let op = if on_true { Op::Branch(cond, bt, bf) } else { Op::Branch(cond, bf, bt) };
@@ -997,7 +876,6 @@ impl<'e> Builder<'e> {
                 }
                 Ok(Flow::End) => return Ok(()),
                 Err(Reject::Unsupported) => {
-                    // Hand over here: the interpreter runs the rest
                     let fs = self.state(act, &st, pc);
                     self.emit(Op::Deopt(fs), Rep::None);
                     self.cur = None;
@@ -1008,14 +886,12 @@ impl<'e> Builder<'e> {
                 return Err(Restart);
             }
         }
-        // Falls through into the next block
         if self.cur.is_some() {
             self.edge(act, ri, &reg, end - 1, end, st, false);
         }
         Ok(())
     }
 
-    /// The current block jumps to instruction `t`
     #[expect(clippy::too_many_arguments, reason = "an edge's parts")]
     fn edge(&mut self, act: &mut Act<'e>, ri: usize, reg: &Region, _pc: usize, t: usize, st: St, back: bool) {
         let b = self.cur.expect("a live block");
@@ -1024,7 +900,6 @@ impl<'e> Builder<'e> {
         self.edge_from(act, ri, reg, b, t, st, back);
     }
 
-    /// Block `b` (ending in a jump / branch with a placeholder target) goes to instruction `t`
     #[expect(clippy::too_many_arguments, reason = "an edge's parts")]
     fn edge_from(&mut self, act: &mut Act<'e>, ri: usize, reg: &Region, b: B, t: usize, st: St, back: bool) {
         let tb = act.cfg.block_of.get(t).copied().unwrap_or(u32::MAX);
@@ -1036,7 +911,6 @@ impl<'e> Builder<'e> {
             match (ri + 1..act.regions.len()).find(|&r| act.regions[r].start <= t && t <= act.regions[r].end) {
                 Some(r) => r,
                 None => {
-                    // Leaves everything compiled: hand over at `t`
                     self.cur = Some(b);
                     self.undo_jump(b);
                     let fs = self.state(act, &st, t);
@@ -1046,14 +920,12 @@ impl<'e> Builder<'e> {
             }
         };
         if back && target == ri {
-            // A back edge into this region's loop header: complete its phis
             self.back_edge(act, ri, tb, b, st);
             return;
         }
         act.edges.entry((target, tb)).or_default().push((b, st));
     }
 
-    /// The block's last instruction was a jump with a placeholder: drop it
     fn undo_jump(&mut self, b: B) {
         if let Some(&last) = self.g.blocks[b as usize].insts.last()
             && matches!(self.g.insts[last as usize].op, Op::Jump(_))
@@ -1067,11 +939,8 @@ impl<'e> Builder<'e> {
         self.cur = None;
     }
 
-    /// A back edge from block `b` into header `(ri, tb)`: its values become the phis' second inputs, or the walk
-    /// restarts with a hint when they don't fit
     fn back_edge(&mut self, act: &mut Act<'e>, ri: usize, tb: u32, b: B, mut st: St) {
         let Some(h) = act.headers.get(&(ri, tb)) else {
-            // A loop whose header wasn't reached by a forward edge: not compiled
             if self.log { std::eprintln!("j8jit: restart: no header"); }
             self.restart = true;
             return;
@@ -1080,7 +949,6 @@ impl<'e> Builder<'e> {
         let hb = h.block;
         let key = |k: Key| (act.inst, ri, tb as usize, k);
         let mut fail = false;
-        // Virtual objects at the header must be virtual here too, in the same slots, with the same shapes
         let mut map: Vec<(V, V)> = Vec::new();
         let slots: Vec<(Key, V)> = h.phis.clone();
         let hst = h.st.clone();
@@ -1113,12 +981,10 @@ impl<'e> Builder<'e> {
                 },
                 None => {
                     if Self::is_virtual(&st, bv) {
-                        // Materialized below
                     }
                 }
             }
         }
-        // Virtual objects held in memory at the header: virtual here too, same shapes
         for (mi, hm) in hst.heap.mem.iter().enumerate() {
             let Some(ho) = Self::vobj(&hst, hm.val).cloned() else { continue };
             let bv = st.heap.mem.iter().find(|m| m.ctx == hm.ctx && m.idx == hm.idx).map(|m| m.val);
@@ -1137,7 +1003,6 @@ impl<'e> Builder<'e> {
                 }
             }
         }
-        // Facts at the header must still hold (facts about its phis: about what the back edge passes them)
         let h = act.headers.get(&(ri, tb)).expect("checked above");
         let back = |v: V| -> V {
             let phi_in = |p: V| -> Option<V> {
@@ -1147,7 +1012,6 @@ impl<'e> Builder<'e> {
                 if !matches!(self.g.op(p), Op::Phi(_)) {
                     return None;
                 }
-                // The back edge's input: what the state holds where the phi stood
                 h.phis.iter().find(|(_, x)| *x == p).map(|(k, _)| match k {
                     Key::Reg(i) => Self::get(&cfg, &st.r, *i),
                     Key::Ctx => st.r.ctx,
@@ -1163,7 +1027,6 @@ impl<'e> Builder<'e> {
             };
             phi_in(v).unwrap_or(v)
         };
-        // A word checked into an object: the register holds the address afterwards (then it must be that one)
         let holds = |f: &Fact| -> bool {
             let g = f.map(back);
             match g {
@@ -1195,7 +1058,6 @@ impl<'e> Builder<'e> {
             }
             fail = true;
         }
-        // Memory entries at the header must be here too
         let h = act.headers.get(&(ri, tb)).expect("checked above");
         for (ctx, idx, _) in &h.mem {
             if !st.heap.mem.iter().any(|m| m.ctx == *ctx && m.idx == *idx) {
@@ -1208,14 +1070,12 @@ impl<'e> Builder<'e> {
             self.restart = true;
             return;
         }
-        // Inputs: registers
         let mut inputs: Vec<(V, V)> = Vec::new();
         for (k, phi) in &slots {
             let mut v = get(&st, *k);
             if Self::is_virtual(&st, v) && !map.iter().any(|(_, y)| *y == v) {
                 v = self.materialize(&mut st, v, Some(b));
             }
-            // The phi's own word, checked or untagged on the way: the phi itself goes round (no boxing again)
             if self.g.rep(*phi) == Rep::Word && v != *phi {
                 let own = match self.g.op(v) {
                     Op::Untag(w) | Op::CheckObject(w, _) => *w == *phi,
@@ -1227,7 +1087,6 @@ impl<'e> Builder<'e> {
             }
             inputs.push((*phi, v));
         }
-        // The back edge's frame state (its poll's: the loop header with this edge's values)
         let poll_fs = self.g.blocks[b as usize].insts.iter().rev().find_map(|&i| match self.g.op(i) {
             Op::Poll(fs) => Some(*fs),
             _ => None,
@@ -1239,7 +1098,6 @@ impl<'e> Builder<'e> {
             let Some(bo) = Self::vobj(&st, *bid).cloned() else { continue };
             for (j, phi) in phis.iter().enumerate() {
                 let mut v = if j == 0 { bo.proto } else { bo.fields[j - 1] };
-                // The prototype: the same each time around, speculatively (so what hangs off it doesn't change)
                 if j == 0
                     && v != *phi
                     && let Some(fs) = poll_fs
@@ -1256,7 +1114,6 @@ impl<'e> Builder<'e> {
                 inputs.push((*phi, m.val));
             }
         }
-        // Dirty memory the header doesn't track: written back on the edge
         let hm = h.mem.clone();
         let tracked = h.st.heap.mem.clone();
         for m in st.heap.mem.clone() {
@@ -1264,7 +1121,6 @@ impl<'e> Builder<'e> {
                 self.write_back(&mut st, &m, Some(b));
             }
         }
-        // Representations: widen and restart when an input doesn't fit its phi
         for (phi, v) in &inputs {
             let want = self.g.rep(*phi);
             let have = self.g.rep(*v);
@@ -1282,7 +1138,6 @@ impl<'e> Builder<'e> {
                     self.restart = true;
                     return;
                 }
-                // A virtual object's field: materialize the object at the header next time
                 for (k, hv) in keys.iter().map(|k| (*k, get(&hst, *k))) {
                     if Self::is_virtual(&hst, hv) {
                         self.widen.real.insert(key(k), ());
@@ -1312,9 +1167,6 @@ impl<'e> Builder<'e> {
         }
     }
 
-    // ---- values ----
-
-    /// Register operand `k`'s value
     fn reg(act: &Act<'e>, st: &St, k: OperandValue) -> R<V> {
         match act.f.reg(k) {
             Reg::Param(i) => st.r.params.get(i).copied().ok_or(Reject::Unsupported),
@@ -1335,7 +1187,6 @@ impl<'e> Builder<'e> {
         Ok(())
     }
 
-    /// `v` as an int32 (guarded), if the hints allow; replaces `v` in the state
     fn as_int(&mut self, act: &Act<'e>, st: &mut St, v: V, pc: usize) -> R<Option<V>> {
         if self.hint(act.id, pc) & HINT_FLOAT != 0 {
             return Ok(None);
@@ -1370,7 +1221,6 @@ impl<'e> Builder<'e> {
         }
     }
 
-    /// `v` as a double (guarded); replaces `v` in the state when it unboxes
     fn as_float(&mut self, act: &Act<'e>, st: &mut St, v: V, pc: usize) -> R<Option<V>> {
         if self.hint(act.id, pc) & HINT_GENERIC != 0 {
             return Ok(None);
@@ -1397,7 +1247,6 @@ impl<'e> Builder<'e> {
         }
     }
 
-    /// Both operands as int32s, or both as doubles; `None`: neither
     fn numbers(&mut self, act: &Act<'e>, st: &mut St, l: V, r: V, pc: usize) -> R<Option<(V, V, bool)>> {
         let float_hint = self.hint(act.id, pc) & HINT_FLOAT != 0;
         let lr = self.g.rep(l);
@@ -1410,7 +1259,6 @@ impl<'e> Builder<'e> {
                 if let Some(b) = b {
                     return Ok(Some((a, b, true)));
                 }
-                // Mixed: doubles
                 let fa = self.as_float(act, st, a, pc)?;
                 let fb = self.as_float(act, st, r, pc)?;
                 return Ok(fa.zip(fb).map(|(x, y)| (x, y, false)));
@@ -1421,7 +1269,6 @@ impl<'e> Builder<'e> {
         Ok(fa.zip(fb).map(|(x, y)| (x, y, false)))
     }
 
-    /// `l op r`, speculating on numbers
     fn arith(&mut self, act: &Act<'e>, st: &mut St, op: BinaryOp, l: V, r: V, pc: usize) -> R<V> {
         let int_op = match op {
             BinaryOp::Add => Some(IntOp::Add),
@@ -1439,7 +1286,6 @@ impl<'e> Builder<'e> {
         let bitwise = matches!(op, BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor | BinaryOp::Shl | BinaryOp::Shr | BinaryOp::UShr);
         if self.hint(act.id, pc) & HINT_GENERIC == 0 {
             if bitwise {
-                // Int32 operands only (ToInt32 of other doubles goes through the runtime)
                 if let (Some(a), Some(b)) = (self.as_int(act, st, l, pc)?, self.as_int(act, st, r, pc)?) {
                     let fs = (int_op == Some(IntOp::Shr)).then(|| self.state(act, st, pc));
                     return Ok(self.emit(Op::Int(int_op.unwrap_or(IntOp::And), a, b, fs), Rep::I32));
@@ -1480,7 +1326,6 @@ impl<'e> Builder<'e> {
         }
     }
 
-    /// A runtime call that may run any code (memory written back first, forgotten after)
     fn helper_call(&mut self, act: &Act<'e>, st: &mut St, h: Helper, args: &[V], pc: usize) -> V {
         let ws: Vec<V> = args.iter().map(|a| self.real(st, *a)).collect();
         self.flush(st);
@@ -1500,7 +1345,6 @@ impl<'e> Builder<'e> {
         Ok(v)
     }
 
-    /// `l cond r` as a flag
     fn compare(&mut self, act: &Act<'e>, st: &mut St, op: CompareOp, l: V, r: V, pc: usize) -> R<V> {
         let cond = match op {
             CompareOp::Lt => Cond::Lt,
@@ -1523,7 +1367,6 @@ impl<'e> Builder<'e> {
         Ok(v)
     }
 
-    /// A word that is not a number nor a string (a strict comparison of it is a comparison of bits)
     fn plain_word(&self, v: V) -> bool {
         match self.g.op(v) {
             Op::Word(w) => *w >= ValueBits::BOXED_MIN && (*w >> 48) != (0xFFF0 | (u64::from(j8framework::ValueTag::STRING) + 1)),
@@ -1531,7 +1374,6 @@ impl<'e> Builder<'e> {
         }
     }
 
-    /// `l === r`
     fn strict_equals(&mut self, act: &Act<'e>, st: &mut St, l: V, r: V, pc: usize) -> R<V> {
         let (lr, rr) = (self.g.rep(l), self.g.rep(r));
         if matches!(lr, Rep::I32 | Rep::F64) || matches!(rr, Rep::I32 | Rep::F64) {
@@ -1540,7 +1382,6 @@ impl<'e> Builder<'e> {
             }
         }
         if Self::is_virtual(st, l) || Self::is_virtual(st, r) {
-            // A new object is only ever equal to itself
             return Ok(self.emit(Op::I32(i32::from(l == r)), Rep::Bool));
         }
         if self.plain_word(l) || self.plain_word(r) {
@@ -1553,7 +1394,6 @@ impl<'e> Builder<'e> {
         Ok(self.emit(Op::Call(Helper::StrictEquals, vec![a, b], None), Rep::Bool))
     }
 
-    /// The accumulator as a flag (ToBoolean)
     fn truthy(&mut self, st: &mut St, v: V) -> V {
         match self.g.rep(v) {
             Rep::Bool => v,
@@ -1562,7 +1402,6 @@ impl<'e> Builder<'e> {
                 self.emit(Op::CmpInt(Cond::Ne, v, z), Rep::Bool)
             }
             Rep::F64 => {
-                // x != 0 and not NaN: `x < 0 || x > 0`
                 let z = self.emit(Op::F64(0.0), Rep::F64);
                 self.emit(Op::CmpFloat(Cond::Ne, v, z), Rep::Bool)
             }
@@ -1580,10 +1419,7 @@ impl<'e> Builder<'e> {
         }
     }
 
-    /// A function object's context (its closure's environment) as a context address
-    /// As [`Builder::closure_env`], reusing loads this path did
     fn closure_env_on(&mut self, st: &mut St, f: V) -> V {
-        // A closure made here: its context is the one it was made in
         let made = st.heap.known.iter().find_map(|x| match x {
             Fact::Env(p, c) if *p == f => Some(*c),
             _ => None,
@@ -1604,7 +1440,6 @@ impl<'e> Builder<'e> {
         i32::try_from(x).unwrap_or(i32::MAX)
     }
 
-    /// A context value's address
     fn ctx_ptr(&mut self, v: V) -> V {
         match self.g.rep(v) {
             Rep::Ctx => v,
@@ -1612,8 +1447,6 @@ impl<'e> Builder<'e> {
         }
     }
 
-    /// Context slot `idx` of context `ctx` (a context address); through the path's memory
-    /// Guards that two contexts differ (once per path): their slots then don't alias
     fn distinct(&mut self, act: &Act<'e>, st: &mut St, a: V, b: V, pc: usize) {
         if st.heap.known.contains(&Fact::Distinct(a, b)) || st.heap.known.contains(&Fact::Distinct(b, a)) {
             return;
@@ -1628,13 +1461,10 @@ impl<'e> Builder<'e> {
         if let Some(m) = st.heap.mem.iter().find(|m| m.ctx == ctx && m.idx == idx) {
             return m.val;
         }
-        // Another context's entry at the same index could be this one: they differ (guarded; when that failed
-        // here before, the other's value is written back instead)
         let alias = self.hint(act.id, pc) & HINT_GENERIC != 0;
         for m in st.heap.mem.clone() {
             if m.idx == idx && m.ctx != ctx {
                 if alias {
-                    // Reading doesn't change it: written back so the load sees it, and still known
                     if m.dirty {
                         self.write_back(st, &m, None);
                     }
@@ -1650,7 +1480,6 @@ impl<'e> Builder<'e> {
     }
 
     fn store_slot(&mut self, act: &Act<'e>, st: &mut St, ctx: V, idx: u32, v: V, pc: usize) {
-        // Entries at the same index of other contexts may be this one: they differ (guarded; see `load_slot`)
         let alias = self.hint(act.id, pc) & HINT_GENERIC != 0;
         let others: Vec<Mem> = st.heap.mem.iter().filter(|m| m.idx == idx && m.ctx != ctx).cloned().collect();
         for m in others {
@@ -1672,7 +1501,6 @@ impl<'e> Builder<'e> {
         }
     }
 
-    /// The context `depth` levels up from `ctx` (an address)
     fn context_up(&mut self, ctx: V, depth: OperandValue) -> V {
         let mut c = ctx;
         for _ in 0..depth {
@@ -1681,7 +1509,6 @@ impl<'e> Builder<'e> {
         c
     }
 
-    /// The cell of property entry `slot` of an object address
     fn prop_cell(&mut self, o: V, slot: usize) -> V {
         if slot < Layout::INLINE_PROPS {
             o
@@ -1700,7 +1527,6 @@ impl<'e> Builder<'e> {
         }
     }
 
-    /// `v` as an object address (guarded)
     fn object(&mut self, act: &Act<'e>, st: &mut St, v: V, pc: usize) -> V {
         match self.g.rep(v) {
             Rep::Ptr => v,
@@ -1725,7 +1551,6 @@ impl<'e> Builder<'e> {
         }
     }
 
-    /// Named property `name` of `obj` read through feedback `slot`
     fn get_named(&mut self, act: &Act<'e>, st: &mut St, obj: V, name: OperandValue, slot: OperandValue, pc: usize) -> R<V> {
         let fb = act.f.property(slot);
         let key = act.f.name(name);
@@ -1733,7 +1558,6 @@ impl<'e> Builder<'e> {
             if let Some(i) = o.shape.as_ref().and_then(|s| s.find(key)) {
                 return Ok(o.fields[i]);
             }
-            // Not an own property: from the prototype, as the feedback says
             if let Some(fb) = &fb
                 && fb.depth >= 1
                 && Self::same_shape(&o.shape, &fb.shape)
@@ -1762,7 +1586,6 @@ impl<'e> Builder<'e> {
         }
     }
 
-    /// A read `fb.depth` levels up the prototype chain, starting at prototype address `proto` (level 1)
     fn proto_load(&mut self, act: &Act<'e>, st: &mut St, proto: V, fb: &j8executor::PropertyFeedback, pc: usize) -> V {
         let mut p = proto;
         for (i, s) in fb.chain.iter().enumerate() {
@@ -1786,7 +1609,6 @@ impl<'e> Builder<'e> {
         Ok(v)
     }
 
-    /// `obj.name = v` (`assign`: an assignment; else a definition)
     #[expect(clippy::too_many_arguments, reason = "a store's parts")]
     fn set_named(&mut self, act: &Act<'e>, st: &mut St, obj: V, name: OperandValue, slot: OperandValue, v: V, assign: bool, pc: usize) -> R<()> {
         let fb = act.f.property(slot);
@@ -1798,7 +1620,6 @@ impl<'e> Builder<'e> {
             match &fb.to {
                 Some(to) if fb.slot == o.fields.len() => {
                     if assign {
-                        // No setter / read-only property of that name up the chain: the chain is as the cache saw it
                         let mut p = o.proto;
                         for (i, s) in fb.chain.iter().enumerate() {
                             self.shape_check(act, st, p, Some(s.clone()), pc);
@@ -1866,9 +1687,6 @@ impl<'e> Builder<'e> {
         Ok(())
     }
 
-    // ---- calls ----
-
-    /// A call of `callee` with `this` and `args` at instruction `pc` (feedback `fb`); the result
     #[expect(clippy::too_many_arguments, reason = "a call's parts")]
     fn call(&mut self, act: &mut Act<'e>, st: &mut St, callee: V, this: V, args: Vec<V>, fb: OperandValue, pc: usize) -> R<V> {
         let target = self.known_target(act, st, callee, fb);
@@ -1892,8 +1710,6 @@ impl<'e> Builder<'e> {
                     let k = self.target(t);
                     let v = self.emit(Op::CallJit(k, cw, tw, aw, fs), Rep::Word);
                     Self::forget(st);
-                    // Speculated to give an int32 (read from the call's second return register); else the
-                    // interpreter goes on after the call with the word
                     if self.hint(act.id, pc + 1) & HINT_FLOAT == 0 {
                         let mut after = st.clone();
                         after.r.acc = v;
@@ -1917,7 +1733,6 @@ impl<'e> Builder<'e> {
         Ok(v)
     }
 
-    /// The callee's address, checked to run `t`: a global from a cache site takes the check into its slow path
     fn checked_callee(&mut self, act: &Act<'e>, st: &mut St, callee: V, t: FuncId, pc: usize) -> V {
         if let Op::Global(k, None, fs) = self.g.op(callee).clone() {
             self.g.insts[callee as usize].op = Op::Global(k, Some(t), fs);
@@ -1949,8 +1764,6 @@ impl<'e> Builder<'e> {
         }
     }
 
-    /// The receiver a call of `tf` sees: a sloppy function gets the global object for `undefined` (other primitives:
-    /// `None`, not handled)
     fn receiver(&mut self, st: &St, tf: Function<'_>, this: V) -> Option<V> {
         if !tf.wraps_this() || matches!(self.g.rep(this), Rep::Ptr) || Self::is_virtual(st, this) {
             return Some(this);
@@ -1964,17 +1777,14 @@ impl<'e> Builder<'e> {
         }
     }
 
-    /// The function a callee value runs, if the feedback knows one
     fn known_target(&self, act: &Act<'e>, _st: &St, _callee: V, fb: OperandValue) -> Option<FuncId> {
         act.f.call_target(fb)
     }
 
-    /// Whether to inline `tf` here
     fn inlinable(&self, act: &Act<'e>, tf: Function<'_>, pc: usize) -> bool {
         if act.depth + 1 >= INLINE_DEPTH || tf.len() > INLINE_SIZE || self.hint(act.id, pc) & HINT_NO_INLINE != 0 {
             return false;
         }
-        // Recursion: inlined at most this many levels
         let mut c = act.caller.clone();
         let mut seen = usize::from(tf.id() == act.id);
         while let Some(x) = c {
@@ -1984,11 +1794,9 @@ impl<'e> Builder<'e> {
         if seen > RECURSIVE_INLINE {
             return false;
         }
-        // No loops (a loop inside an inlined function is walked as its own region: fine, but keep it simple)
         self.cfgs.get(&tf.id().0).map_or_else(|| Cfg::new(tf).ok, |c| c.ok)
     }
 
-    /// Inlines a call of `tf` (function object address `fp`); `construct`: (new.target, `this`)
     #[expect(clippy::too_many_arguments, reason = "a call's parts")]
     fn inline(&mut self, act: &mut Act<'e>, st: &mut St, fp: V, tf: Function<'e>, this: V, args: Vec<V>, construct: Option<(V, V)>, pc: usize) -> R<V> {
         let cfg = self.cfg(tf);
@@ -2011,10 +1819,8 @@ impl<'e> Builder<'e> {
             self.restart = true;
             return Err(Reject::Unsupported);
         }
-        // The returns meet in a new block
         let rets = core::mem::take(&mut a.rets);
         if rets.is_empty() {
-            // Never returns normally (always hands over / throws)
             self.cur = None;
             return Ok(self.undef);
         }
@@ -2023,7 +1829,6 @@ impl<'e> Builder<'e> {
             self.retarget(*b, join);
         }
         self.g.blocks[join as usize].preds = rets.iter().map(|(b, _, _)| *b).collect();
-        // The heap: merged like a block's (virtual objects, memory)
         let mut edges: Vec<(B, St)> = rets.iter().map(|(b, v, s)| {
             let mut s = s.clone();
             s.r = st.r.clone();
@@ -2043,7 +1848,6 @@ impl<'e> Builder<'e> {
             b
         };
         let _ = live;
-        // Merge: the caller's registers are the same on every edge; only the accumulator and the heap differ
         let accs: Vec<V> = edges.iter().map(|(_, s)| s.r.acc).collect();
         for (p, s) in &mut edges {
             let v = s.r.acc;
@@ -2060,7 +1864,6 @@ impl<'e> Builder<'e> {
             let ins: Vec<V> = edges.iter().zip(&accs).map(|((p, _), v)| self.convert_at(*p, *v, rep)).collect();
             self.g.push_phi(join, ins, rep)
         };
-        // Memory: keep only what all agree on; write back the rest on their edges
         let mut mem = Vec::new();
         for m in &edges[0].1.heap.mem {
             if edges.iter().all(|(_, s)| s.heap.mem.iter().any(|x| x.ctx == m.ctx && x.idx == m.idx && x.val == m.val)) {
@@ -2074,7 +1877,6 @@ impl<'e> Builder<'e> {
                 }
             }
         }
-        // Virtual objects: only those identical on every edge stay virtual
         let mut objs = Vec::new();
         for (id, o) in &edges[0].1.heap.objs {
             if edges.iter().all(|(_, s)| Self::vobj(s, *id).is_some_and(|x| x.fields == o.fields && x.proto == o.proto && Self::same_shape(&x.shape, &o.shape))) {
@@ -2096,7 +1898,6 @@ impl<'e> Builder<'e> {
         Ok(acc)
     }
 
-    /// `new callee(...args)` with new.target `nt`
     #[expect(clippy::too_many_arguments, reason = "a construct's parts")]
     fn construct(&mut self, act: &mut Act<'e>, st: &mut St, callee: V, nt: V, args: Vec<V>, fb: OperandValue, pc: usize) -> R<V> {
         let target = act.f.call_target(fb);
@@ -2113,7 +1914,6 @@ impl<'e> Builder<'e> {
                 && pfb.shape.is_some()
             {
                 let p = self.checked_callee(act, st, callee, t, pc);
-                // `this`: an empty object whose prototype is `new.target.prototype`
                 self.shape_check(act, st, p, pfb.shape.clone(), pc);
                 let c = self.prop_cell(p, pfb.slot);
                 let pw = self.load(st, LOAD_WORD, c, Self::prop_off(pfb.slot));
@@ -2136,8 +1936,6 @@ impl<'e> Builder<'e> {
         Self::forget(st);
         Ok(v)
     }
-
-    // ---- one instruction ----
 
     fn insn(&mut self, act: &mut Act<'e>, st: &mut St, pc: usize, d: j8executor::JitInsn<'e>) -> R<Flow> {
         use Bytecode as Bc;
@@ -2187,7 +1985,6 @@ impl<'e> Builder<'e> {
             Bc::Inc | Bc::Dec => {
                 let one = self.int(1);
                 let op = if d.bytecode == Bc::Inc { BinaryOp::Add } else { BinaryOp::Sub };
-                // ToNumeric first: only numbers here
                 let v = self.arith(act, st, op, acc, one, pc)?;
                 set_acc!(v);
             }
@@ -2287,7 +2084,6 @@ impl<'e> Builder<'e> {
             }
             Bc::Jump | Bc::JumpConstant => return Ok(Flow::Jump(d.target)),
             Bc::JumpLoop => {
-                // The budget: may hand over at the loop header
                 let fs = self.state(act, st, d.target);
                 self.emit(Op::Poll(fs), Rep::None);
                 return Ok(Flow::Loop(d.target));
@@ -2315,10 +2111,8 @@ impl<'e> Builder<'e> {
                 return Ok(Flow::Branch(eq, d.target, !matches!(d.bytecode, Bc::JumpIfNotUndefined | Bc::JumpIfNotUndefinedConstant | Bc::JumpIfNotNull | Bc::JumpIfNotNullConstant)));
             }
             Bc::Return => {
-                // A constructor returning undefined gives `this`
                 let v = if act.construct.is_some() && self.const_word(acc) == Some(ValueBits::UNDEFINED) { st.r.params[0] } else { acc };
                 if act.caller.is_some() {
-                    // An inlined return: to the join after the call
                     let b = self.cur.expect("a live block");
                     self.g.push(b, Op::Jump(u32::MAX), Rep::None);
                     self.cur = None;
@@ -2380,7 +2174,6 @@ impl<'e> Builder<'e> {
                 let v = Self::reg(act, st, o[0])?;
                 st.r.ctx = v;
             }
-            // The interpreter makes a context with an extension object (sloppy direct eval)
             Bc::CreateFunctionContext if act.f.extension() => return Err(Reject::Unsupported),
             Bc::CreateFunctionContext | Bc::CreateBlockContext => {
                 let (shape, n) = match d.bytecode {
@@ -2469,7 +2262,6 @@ impl<'e> Builder<'e> {
         Ok(Flow::Next)
     }
 
-    /// After untagging the context register, keep the address in it
     fn replace_ctx(st: &mut St, c: V) {
         st.r.ctx = c;
     }
@@ -2500,7 +2292,6 @@ impl<'e> Builder<'e> {
         }
     }
 
-    /// A global name through its cache
     fn global(&mut self, act: &Act<'e>, st: &mut St, name: OperandValue, slot: OperandValue, pc: usize) -> R<V> {
         if self.hint(act.id, pc) & HINT_GENERIC == 0 {
             let nk = u32::try_from(name).unwrap_or(0);
@@ -2545,7 +2336,6 @@ impl<'e> Builder<'e> {
                 let Some(path) = path else {
                     return Ok(self.emit(Op::LoadWord(holder, Self::prop_off(fb.slot)), Rep::Word));
                 };
-                // Through the store: its head as it was (the tree's shape), then the path's slots
                 let mut p = self.emit(Op::LoadPtr(holder, Self::off(Layout::OBJECT_STORE)), Rep::Ptr);
                 let head = self.emit(Op::LoadRaw(p, 0), Rep::Word);
                 let want = self.word(path.head as u64);
@@ -2568,7 +2358,6 @@ impl<'e> Builder<'e> {
         Ok(v)
     }
 
-    /// `CreateObjectLiteral` of boilerplate `k`: virtual when its shape is known and its values constant
     fn object_literal(&mut self, act: &Act<'e>, st: &mut St, k: OperandValue, pc: usize) -> R<V> {
         let Some(Constant::Object(b)) = act.f.constant(k) else { return Err(Reject::Unsupported) };
         let shape = act.f.literal_shape(k);
@@ -2595,14 +2384,10 @@ impl<'e> Builder<'e> {
     }
 }
 
-/// Where the walk goes after an instruction.
 enum Flow {
     Next,
     Jump(usize),
-    /// To `target` when the flag is the given value, else on
     Branch(V, usize, bool),
-    /// A loop back edge
     Loop(usize),
-    /// The block ended (return / hand-over)
     End,
 }

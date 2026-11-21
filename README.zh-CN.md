@@ -36,8 +36,8 @@ j8 是**用 Rust 从头写的 JavaScript 引擎**, 照着 V8 的分层来: 所�
 | | |
 | --- | --- |
 | 🦀 **全 Rust** | 解析用 oxc, 其余从字节码到 GC 都是自己写的. 没有 C++ 引擎在下面. |
-| 🧱 **字节码先行** | 不设 AST 解释层: 所有 JS (包括 `eval`、`Function`) 都先编成字节码. 全部字节码类型由 `insn.json` 生成; 字节码没有文本形式, 只有二进制形式. |
-| 🧬 **JIT 走 MLIR** | 字节码 ⇒ MLIR `llvm` 方言 ⇒ [mlirpass](https://crates.io/crates/mlirpass) 的 x86-64 后端 (线性扫描寄存器分配), 支持 OSR. |
+| 🧱 **字节码先行** | 不设 AST 解释层: 所有 JS (包括 `eval`、`Function`) 都先编成字节码, 而且就是 V8 Ignition 的字节码, 逐字节一致 (表格从 V8 头文件生成). |
+| 🧬 **推测式 JIT** | 依据内联缓存的反馈把热字节码建成推测性 SSA 图 (内联、逃逸分析、循环不变量外提、OSR、去优化), 直接出 x86-64. |
 | ♻️ **paragc 堆** | Immix 式块 / 行堆: 年轻回收 + 老对象引用计数、稀疏块疏散, 标记与清扫并行, 无锁; `'gc` 品牌生命周期, 编译期保证句柄不逃逸. |
 | 🚫 **没有 `'static`** | 不用全局状态; 后台任务借用调用方数据, 多个 Isolate 共用一个线程池. |
 
@@ -47,8 +47,8 @@ j8 是**用 Rust 从头写的 JavaScript 引擎**, 照着 V8 的分层来: 所�
 | --- | --- |
 | 📜 test262 基线 | **42,443** 条通过 (非严格 + `onlyStrict`; 不含 Temporal / intl402 等, 见 PLAN.md), 每次提交零回归 |
 | 🧮 JIT | `J8_TEST262_JIT=1` 开着 JIT (每个函数第一次调用就编) 跑同一份基线 |
-| ⏱️ 对 V8 jitless | 11 个基准几何平均慢 **3.7×**, 校验和三种引擎全一致 |
-| 🚄 对 V8 (带 JIT) | 几何平均慢 **9.4×**; 差距主要在调用和分配, 详见 [benchmark.md](samples/benchv8/benchmark.md) |
+| ⏱️ 对 V8 jitless | 11 个基准几何平均耗时 **0.6×**, 校验和三种引擎全一致 |
+| 🚄 对 V8 (带 JIT) | 几何平均耗时 **1.7×**; 差距在内建函数 (array、sort、string、collections、json、regexp), 详见 [benchmark.md](samples/benchv8/benchmark.md) |
 
 ## 📦 安装
 
@@ -96,7 +96,7 @@ cd samples/benchv8 && cargo run --release
 | `j8binding` | std | Rust ⇄ JS 绑定的运行时：`FromJs` / `IntoJs`、宿主对象、`Class` / `Object` |
 | `j8builtins` | std | 实现 `Intrinsics`：往 `Realm` 装 Object / Function / Array / String / Number / Boolean / Math / Error 系列 / `console` / `parseInt` 等 |
 | `j8platform` | std | 实现 `Platform`（`DefaultPlatform`）：后台任务跑在 moremath `ThreadMulti` 线程池上（起一次复用、任务可借用调用方数据，经 `j8framework::Pool`），时钟用 `Instant` |
-| `j8bytecode` | std | 虚拟指令集，依赖根（不依赖其他 j8 crate）：累加器式寄存器字节码（`Insn` / `Function` / `Module` …），全部类型由 `insn.json` 生成；没有文本形式，只有二进制形式 `Vec::<u8>::from(&module)` / `Module::try_from(bytes)` |
+| `j8bytecode` | std | 字节码，依赖根（不依赖其他 j8 crate）：与 V8 Ignition 逐字节一致（`Bytecode` / `OperandType` … 由 `v8.json` 生成，`tools/v8bytecodes.py` 从 V8 头文件写出），`Encoder` / `Decoder`，`SharedFunction` / `BytecodeArray` / `Module` |
 | `j8compiler` | std | JS ⇒ 字节码（`Module` 实现 `j8compiler::Compile`：脚本、模块、`eval` / `Function`），用 oxc 解析 |
 | `j8taskqueue` | `no_std` | 任务队列：`ITask`（`recursable` / `depend` / `exec`）与 `ITaskPoll`（`add` / `run`）；无锁数据流调度（手写 MPMC 就绪队列、原子依赖计数），依赖做完的任务立刻在宿主给的 `Pool` 上并行跑（或就在调用线程上跑）、没有轮次屏障；`TaskId::family` 并查集找爹、`cancel` 整家取消；配额按字节码条数（`Quota` / `Flow::Yield`、每次 run 的预算）；取不到活的线程直接离开、不自旋。每个 `j8framework::EventLoop` 就是一个 `Queue`：脚本、兑现、宿主 future 的 poll，脚本每让出一次就检查一次队列 |
 | `j8macros` | proc-macro | 过程宏：`enums!("x.json")` 从 JSON 生成枚举（定义、`Display`、按字段类型取 `&mut`）、堆类型的 `#[derive(Collect)]`（paragc `Trace`）、绑定宏，用法见 `crates/macros/USAGE.md` |
@@ -145,43 +145,23 @@ isolate.enter(|scope| {
 });
 ```
 
-## 🧬 JIT（第一档）
+## 🧬 JIT
 
-`dune --jit a.js` 开 JIT；`J8_TEST262_JIT=1 cargo test --release --test test262` 开着 JIT（每个函数第一次调用、每个循环第一次往回跳就编）跑基线。
+`dune --jit a.js` 开 JIT；`J8_TEST262_JIT=1 cargo test --release --test test262` 开着 JIT（每个函数第一次调用就编）跑基线。
 
-- `j8jit` 编译部分：字节码函数 ⇒ MLIR（`llvm` 方言）⇒ mlirpass `target.x86_64` ⇒ x86-64 机器码（`Compiler` 建一次反复用，只装 builtin 与 `llvm` 方言）。
-  机器码是 `extern "C" fn(regs, acc, start) -> u64`，直接读写本帧寄存器文件与累加器里的 `Value`（布局见 `j8framework::ValueTag`：16 字节、首字节标签、第 8 字节起载荷）；
-  `start` 是 0 从函数开头进、`h + 1` 从循环头 `h` 进（OSR）；返回 0 是函数返回了，`pc + 1` 是停在第 pc 条指令之前（`j8executor::Exit`），解释器从那里接着跑
-- 第一档收的指令：寄存器读写、数 / 布尔常量、四则（取余、乘方、位运算调运行时函数）与比较、`++` / `--`、跳转、死区检查、返回；
-  操作数不是数等快路前提不成立就退回解释器；别的指令（调用、属性、闭包……）机器码停在它之前交给解释器
-- 能整体在机器码里跑的函数进帧时就跑；别的函数只从「循环体里没有交给解释器的指令」的循环头切进去（OSR，从中途进的遇到 `return` 也交回解释器收尾）；
-  两样都没有的函数不编
-- `j8jit`（std，x86-64 Unix）：实现执行器的 `Tier`（`Executor::with_tier`）：调用次数过阈值（缺省 100）或循环圈数过 10 倍阈值就编、
-  `mmap` 成可执行内存、填运行时函数地址；回答 `Tiered::Never` 的函数执行器记下、以后不再问
-- 寄存器文件与累加器在机器码里是局部变量（每个寄存器一对 `llvm.alloca`：标签、载荷）：进来时从帧读一次、所有出口经同一个写回块写回帧；
-  出机器码前跑 mlirpass `llvm.func(mem2reg, canonicalize, cse)`，局部变量提成 SSA，块之间按块参数传值
-- 机器码后端是 mlirpass（crates.io，`=0.10.4`，`target.x86_64`，带线性扫描寄存器分配）；MLIR 用 `llvm` 方言的自定义写法（mlirformat 0.8.1 起真解析）
-- 还没有：调用 / 属性 / 全局名等快路
+- `j8jit` 实现执行器的 `Tier`。热函数（缺省 64 次调用）或热循环依据内联缓存看到的东西建成推测性 SSA 图：数先当 int32、小函数内联、对象逃逸前保持虚拟、上下文槽留在值里
+- 图直接出 x86-64（线性扫描寄存器分配，然后指令选择），在解释器的帧上跑；三种入口：解释器调用、循环中途切入（OSR）、已编译代码之间不建解释器帧的调用
+- 守卫失败就去优化：`j8_deopt` 重建解释器帧（含内联掉的），给下次编译留提示（用 double、走通用路径、不内联）；一个函数去优化 24 次后一直解释
+- 仍导出 `Compiler` / `Backend`（MLIR `llvm` 方言经 [mlirpass](https://crates.io/crates/mlirpass)，再由 j8jit 自己的 x86-64 后端出机器码）
 
 ## 🔣 字节码
 
-累加器式寄存器机（同 V8 Ignition）：结果都进隐式的 `acc`，二元运算 `acc = reg op acc`。
+V8 Ignition 的字节码，逐字节一致，对齐 V8 15.2.124：累加器式寄存器机（`acc = reg op acc`），操作数小端、带 `Wide` / `ExtraWide` 放宽，寄存器操作数是 V8 的帧槽号（r0 是 −7，receiver 是 +2）。表格从 V8 头文件生成（`tools/v8bytecodes.py` ⇒ `crates/j8bytecode/v8.json` ⇒ `j8macros::bytecodes!`），⛔ 手改。`samples/j8bcdbg` 按 V8 `--print-bytecode` 的格式列出字节码。
 
-j8bytecode 的全部类型（指令、操作符、常量、`Function` / `Module` 等结构体）定义在 `crates/j8bytecode/insn.json`，由 `j8macros::enums!` 生成，⛔ 手写类型定义；加指令只改 JSON（带 `Label` 字段的自动算跳转，进 `target_mut`）。
+- 变量照 V8 的放法：寄存器、被捕获的绑定进上下文槽、顶层 `var` 在全局对象上、顶层 `let` / `const` 在脚本上下文里、`with` / 宽松模式直接 eval 下按名字查
+- 执行器把每个函数解码一次成线程化代码（nightly 下处理函数之间尾调用），用显式帧栈（深度上限 10000，超了抛 RangeError），异常查字节码的处理表
 
-### 二进制形式
-
-字节码没有文本形式，存储与分发只用 insn.json（开 `binary`）生成的二进制形式：魔数 ` j8b`、insn.json 指纹（只有同一套指令集能读回）、模块本体，枚举是一字节标签加字段。
-
-- 调用约定：`r0` 是 `this`，`r1` 是被调函数本身（具名函数表达式靠它递归），形参从 `r2` 起；`Call` 的被调者、`this`、实参排在连续寄存器
-- 作用域：编译前预扫一遍（`scope.rs` 的 `Resolver`），找出被内层函数捕获的绑定放进堆上的 `Env` 链（`PushEnv` / `PopEnv` / `LdaEnv depth.slot`），其余放寄存器；`for (let …)` 每轮 `CloneEnv`，闭包各拿各的那一轮
-- 脚本顶层的 `var` / 函数 / `let` / `const` 是全局对象的属性（`LdaGlobal` / `StaGlobal`）
-- 编译完每个函数跑一遍窥孔融合（`fuse.rs` 的 `Function::fuse`）：`lda.smi n; add r` ⇒ `add.smi r, n`、`ldar y; add x` ⇒ `add.reg x, y`（比较同理）、`ldar a; star b` ⇒ `mov b, a`、`ldar r; inc; star r` ⇒ `inc.reg r`、`star r; ldar r` ⇒ `star r`、紧接着的 `mov b, a; mov a, b` 丢掉第二条；
-  组里第一条之后有跳转落点就不融合，跳转目标按新下标改写。融合指令的语义就是原来几条依次执行（`Insn::unfused` 拆回），JIT 照拆回的逐条下降
-- 执行器用显式帧栈（不靠宿主递归），调用深度上限 10000（含宿主函数里重入的 JS），超了抛 RangeError
-- 异常：每帧一个动态处理器栈（`PushHandler` / `PopHandler`），抛出时弹本帧处理器、没有就展开到调用者；`finally` 用（完成类型, 值）寄存器对，穿过它的 `return` / `break` / `continue` 先绕进去再接着走
-
-`j8executor` 里的 `javascript_semantics` 测试是一张逐条确定的 JS 语义表。
+`j8executor` 里的 `javascript_semantics` 测试是一张逐条确定的 JS 语义表。完整讲解见[本书](https://j8-mdbook.jabberwocky238.workers.dev/zh-CN/)。
 
 ## 📋 现状
 
@@ -243,6 +223,7 @@ cargo test --release --test test262                                             
 - 字符串反序列化后立即转枚举，⛔ 拿字符串做判断
 - 转换走 `From` / `TryFrom`
 - 单元测试只钉确定的事实（每次只跑一个，`timeout 15`）
+- 源码里不写注释：文档放在 README、指南和[本书](https://j8-mdbook.jabberwocky238.workers.dev/zh-CN/)里
 
 ## 📄 许可证
 

@@ -1,11 +1,3 @@
-//! Strings (shared by property keys and JS string values).
-//!
-//! Short ones (at most [`INLINE`] bytes) are stored inline without a separate allocation; long ones share a single heap
-//! copy, and a piece cut out of a long one (`split`, `slice`, a regex match) points into that copy instead of copying
-//! (V8's sliced strings). When string `+` produces something long enough it is first stored as a rope (two halves plus
-//! the total length) and flattened and cached only when the content is first needed (so a `s += c` loop no longer
-//! copies the whole string each time). Flattening and dropping are both iterative, so ropes hundreds of thousands of
-//! levels deep don't overflow the stack. No `Gc`: the GC doesn't need to manage it.
 use alloc::sync::Arc;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -17,14 +9,12 @@ use j8lockfree::OnceBox;
 
 use crate::{Collect};
 
-/// Below this many bytes, concatenation flattens directly (copying a short string is cheaper than building a rope node)
 const ROPE_MIN: usize = 128;
-/// The longest string stored inline
+
 const INLINE: usize = 22;
-/// The longest piece kept as a slice of its parent's copy (longer pieces get their own: the length is 16 bits)
+
 const SLICE_MAX: usize = u16::MAX as usize;
 
-/// A string.
 #[derive(Clone, Collect)]
 #[collect(require_static)]
 pub struct SmallStr(Repr);
@@ -33,15 +23,12 @@ pub struct SmallStr(Repr);
 enum Repr {
     Inline { len: u8, bytes: [u8; INLINE] },
     Heap(Arc<str>),
-    /// Bytes `start .. start + len` of `buf` (on character boundaries)
     Slice { len: u16, start: u32, buf: Arc<str> },
     Rope(Arc<Rope>),
 }
 
 const _: () = assert!(core::mem::size_of::<SmallStr>() == 24, "a string is three words");
 
-/// A rope node: two halves plus the flattened text once someone needed it. The halves stay until the node is dropped
-/// (other threads may be reading them while one flattens; freeing them early would need hazard pointers).
 struct Rope {
     len: usize,
     flat: OnceBox<SmallStr>,
@@ -49,7 +36,6 @@ struct Rope {
 }
 
 impl SmallStr {
-    /// `a + b`
     pub fn concat(a: &SmallStr, b: &SmallStr) -> SmallStr {
         let (la, lb) = (a.byte_len(), b.byte_len());
         if lb == 0 {
@@ -67,7 +53,6 @@ impl SmallStr {
         Self(Repr::Rope(Arc::new(Rope { len: la + lb, flat: OnceBox::default(), halves: Some((a.clone(), b.clone())) })))
     }
 
-    /// Byte count (without flattening)
     #[inline]
     pub fn byte_len(&self) -> usize {
         match &self.0 {
@@ -81,17 +66,13 @@ impl SmallStr {
     #[inline]
     pub fn as_str(&self) -> &str {
         match &self.0 {
-            // SAFETY: the inline bytes are a copy of a `str` (cut on a character boundary)
             Repr::Inline { len, bytes } => unsafe { core::str::from_utf8_unchecked(&bytes[..usize::from(*len)]) },
             Repr::Heap(s) => s,
-            // SAFETY: `slice` cut the range on character boundaries inside `buf`
             Repr::Slice { len, start, buf } => unsafe { buf.get_unchecked(*start as usize..*start as usize + usize::from(*len)) },
             Repr::Rope(r) => r.flat.get_or_init(|| r.flatten()).as_str(),
         }
     }
 
-    /// `piece`, borrowed from this string's text, as a string of its own: short pieces are copied inline, longer
-    /// ones point into this string's heap copy; `None` for text from anywhere else
     pub fn piece(&self, piece: &str) -> Option<SmallStr> {
         let text = self.as_str();
         let at = (piece.as_ptr() as usize).checked_sub(text.as_ptr() as usize)?;
@@ -117,7 +98,6 @@ impl SmallStr {
 }
 
 impl Rope {
-    /// Concatenate the leaves in order (nested nodes that are already flat contribute their text)
     fn flatten(&self) -> SmallStr {
         let mut out = String::with_capacity(self.len);
         let (l, r) = self.halves.clone().expect("a rope keeps its halves");
@@ -140,7 +120,6 @@ impl Rope {
 }
 
 impl Drop for Rope {
-    /// Iteratively release child nodes held only by us (recursively dropping a deep rope overflows the stack)
     fn drop(&mut self) {
         let mut stack: Vec<SmallStr> = Vec::new();
         if let Some((l, r)) = self.halves.take() {
@@ -193,7 +172,6 @@ impl fmt::Debug for SmallStr {
     }
 }
 
-/// Comparison and hashing are by content (consistent with `str`, as `Borrow<str>` lookups require)
 impl PartialEq for SmallStr {
     #[inline]
     fn eq(&self, o: &Self) -> bool {
@@ -221,11 +199,6 @@ impl Hash for SmallStr {
     }
 }
 
-/// A JS string value: content plus a lazily computed UTF-16 view.
-///
-/// Content is stored as UTF-8, while JS lengths and indices count UTF-16 code units: on first use it is scanned once.
-/// For pure ASCII the code units are the bytes (only a flag is recorded); otherwise the code unit array is computed and
-/// kept. After that `length`, `s[i]`, and `charCodeAt` are all O(1).
 #[derive(Collect)]
 #[collect(require_static)]
 pub struct JsStr {
@@ -233,9 +206,7 @@ pub struct JsStr {
     utf16: OnceBox<Utf16>,
 }
 
-/// The UTF-16 view.
 enum Utf16 {
-    /// Pure ASCII: the i-th code unit is the i-th byte
     Ascii,
     Wide(alloc::boxed::Box<[u16]>),
 }
@@ -249,7 +220,6 @@ impl JsStr {
         self.utf16.get_or_init(|| if self.text.is_ascii() { Utf16::Ascii } else { Utf16::Wide(self.text.encode_utf16().collect()) })
     }
 
-    /// UTF-16 code unit count (JS `length`)
     pub fn utf16_len(&self) -> usize {
         match self.utf16() {
             Utf16::Ascii => self.text.byte_len(),
@@ -257,7 +227,6 @@ impl JsStr {
         }
     }
 
-    /// The `i`-th UTF-16 code unit
     pub fn code_unit(&self, i: usize) -> Option<u16> {
         match self.utf16() {
             Utf16::Ascii => self.text.as_bytes().get(i).map(|&b| u16::from(b)),
@@ -265,7 +234,6 @@ impl JsStr {
         }
     }
 
-    /// All UTF-16 code units; `None` for pure ASCII (the code units are the bytes; the caller uses `as_bytes` directly)
     pub fn wide(&self) -> Option<&[u16]> {
         match self.utf16() {
             Utf16::Ascii => None,
@@ -332,7 +300,6 @@ impl Hash for JsStr {
     }
 }
 
-/// A (borrowed) UTF-16 code unit view of a string: pure ASCII uses the bytes directly.
 #[derive(Clone, Copy)]
 pub enum Units<'a> {
     Ascii(&'a [u8]),
@@ -358,7 +325,6 @@ impl Units<'_> {
         }
     }
 
-    /// The substring `[start, end)` (out-of-range parts are cut off; pure ASCII is sliced directly without transcoding)
     pub fn substring(self, r: core::ops::Range<usize>) -> String {
         let end = r.end.min(self.len());
         let start = r.start.min(end);
@@ -377,7 +343,6 @@ impl Units<'_> {
 }
 
 impl JsStr {
-    /// The UTF-16 code unit view (scanned once on first use to see whether it is pure ASCII; O(1) afterwards)
     pub fn units(&self) -> Units<'_> {
         match self.utf16() {
             Utf16::Ascii => Units::Ascii(self.text.as_bytes()),

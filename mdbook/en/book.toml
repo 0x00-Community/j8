@@ -1,0 +1,22 @@
+[book]
+title = "j8: V8, rewritten in Rust"
+description = "A complete guide to the j8 JavaScript engine: bytecode, compiler, executor, JIT, heap, event loop, embedding and dune"
+authors = ["0x00 Community"]
+language = "en"
+src = "src"
+
+[build]
+# The English book is the site root; build it first (it empties ../book), then zh-CN into ../book/zh-CN
+build-dir = "../book"
+
+[output.html]
+git-repository-url = "https://github.com/0x00-Community/j8"
+edit-url-template = "https://github.com/0x00-Community/j8/edit/main/mdbook/en/src/{path}"
+site-url = "/"
+default-theme = "light"
+preferred-dark-theme = "navy"
+additional-js = ["lang.js"]
+
+[output.html.fold]
+enable = true
+level = 1

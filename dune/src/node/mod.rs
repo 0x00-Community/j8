@@ -1,9 +1,3 @@
-//! The Node-compatible layer, on top of [`Web`](crate::web::Web): `process`, `require` / `module` (CommonJS), and the
-//! built-in modules `fs` (+ `fs/promises`), `path`, `os`, `events`, `util`, `buffer` (`Buffer`), `assert`, `url`,
-//! `timers` (+ `timers/promises`), `child_process`, `crypto`, `module`, `string_decoder`, `perf_hooks`.
-//!
-//! The parts that need the machine are bound here in Rust; the modules themselves are JavaScript in this directory
-//! (the prelude), registered for `require`, and served to `import` by [`NodePlatform`].
 mod esm;
 mod fs;
 
@@ -20,7 +14,6 @@ pub use fs::Fs;
 use crate::host::Io;
 use crate::web::Web;
 
-/// The prelude: the module system first, then the modules in dependency order, then `process` and the globals
 const PRELUDE: &str = concat!(
     include_str!("loader.js"),
     include_str!("events.js"),
@@ -33,7 +26,6 @@ const PRELUDE: &str = concat!(
     include_str!("process.js"),
 );
 
-/// `process`: the parts that touch the OS (`argv`, `env` … are set per run by [`Dune::argv`])
 pub struct Process;
 
 #[j8::object("process")]
@@ -46,19 +38,16 @@ impl Process {
         Io::new(std::env::set_current_dir(dir), "chdir", dir)
     }
 
-    /// Seconds since the runtime started
     fn uptime(a: &mut Agent<'_, '_>) -> f64 {
         a.platform.now().as_secs_f64()
     }
 
-    /// `memoryUsage().rss`, from /proc
     fn rss() -> f64 {
         let pages = std::fs::read_to_string("/proc/self/statm").ok().and_then(|s| s.split_whitespace().nth(1).and_then(|n| n.parse::<f64>().ok()));
         pages.unwrap_or(0.0) * 4096.0
     }
 }
 
-/// `os`
 pub struct Os;
 
 #[j8::object("os")]
@@ -83,14 +72,12 @@ impl Os {
         std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
     }
 
-    /// `[total, free]` bytes, from /proc/meminfo
     fn memory() -> Vec<f64> {
         let info = std::fs::read_to_string("/proc/meminfo").unwrap_or_default();
         let field = |name: &str| info.lines().find(|l| l.starts_with(name)).and_then(|l| l.split_whitespace().nth(1)).and_then(|n| n.parse::<f64>().ok()).unwrap_or(0.0) * 1024.0;
         vec![field("MemTotal:"), field("MemAvailable:")]
     }
 
-    /// `[1, 5, 15]` minute load averages
     fn loadavg() -> Vec<f64> {
         let text = std::fs::read_to_string("/proc/loadavg").unwrap_or_default();
         text.split_whitespace().take(3).map(|n| n.parse().unwrap_or(0.0)).collect()
@@ -105,7 +92,6 @@ impl Os {
     }
 }
 
-/// What a child process left: `[status, stdout, stderr]` (status `null` when a signal ended it)
 pub struct Finished(std::process::Output);
 
 impl<'gc> IntoJs<'gc> for Finished {
@@ -116,21 +102,16 @@ impl<'gc> IntoJs<'gc> for Finished {
     }
 }
 
-/// What a child's standard stream is connected to (`stdio` of `spawnSync`)
 #[derive(serde::Deserialize, Clone, Copy, Default)]
 #[serde(rename_all = "lowercase")]
 enum Stream {
-    /// Read by the parent (stdin: fed `input`)
     #[default]
     Pipe,
-    /// The parent's own stream
     Inherit,
-    /// `/dev/null`
     Ignore,
 }
 
 impl Stream {
-    /// For a stream the parent reads or writes through `pipe`
     fn stdio(self, pipe: bool) -> std::process::Stdio {
         match (self, pipe) {
             (Self::Pipe, true) => std::process::Stdio::piped(),
@@ -140,24 +121,19 @@ impl Stream {
     }
 }
 
-/// The options of `spawnSync`, already normalized by `misc.js`
 #[derive(serde::Deserialize, Default)]
 #[serde(default)]
 struct Spawn {
     shell: bool,
     cwd: Option<String>,
-    /// The child's whole environment; the parent's when absent
     env: Option<BTreeMap<String, String>>,
-    /// stdin, stdout, stderr
     stdio: [Stream; 3],
 }
 
-/// `child_process`, synchronous forms
 pub struct Child;
 
 #[j8::object("child")]
 impl Child {
-    /// Runs `file` with `args` (through `/bin/sh -c` when `shell`), feeding it `input`
     fn spawn_sync(file: String, args: Vec<String>, options: j8::Json<Spawn>, input: Option<Bytes>) -> Io<Finished> {
         use std::io::Write;
         let o = options.0;
@@ -189,8 +165,6 @@ impl Child {
     }
 }
 
-/// Built-in modules written in JavaScript, served to `import` as `node:<name>` (or the bare name) with these named
-/// exports; the module object is `__j8_native.builtin(name)`
 #[derive(Clone, Copy)]
 enum Builtin {
     Fs,
@@ -215,7 +189,6 @@ enum Builtin {
 impl Builtin {
     const ALL: [Self; 17] = [Self::Fs, Self::FsPromises, Self::Path, Self::Os, Self::Events, Self::Util, Self::Buffer, Self::Assert, Self::Url, Self::Timers, Self::TimersPromises, Self::ChildProcess, Self::Crypto, Self::Module, Self::Process, Self::StringDecoder, Self::PerfHooks];
 
-    /// (name, named exports)
     const fn spec(self) -> (&'static str, &'static [&'static str]) {
         match self {
             Self::Fs => ("fs", &["readFileSync", "writeFileSync", "appendFileSync", "existsSync", "statSync", "lstatSync", "readdirSync", "mkdirSync", "rmSync", "rmdirSync", "unlinkSync", "renameSync", "copyFileSync", "realpathSync", "readlinkSync", "symlinkSync", "chmodSync", "mkdtempSync", "accessSync", "readFile", "writeFile", "appendFile", "stat", "lstat", "readdir", "mkdir", "rm", "rmdir", "unlink", "rename", "copyFile", "realpath", "access", "exists", "promises", "constants", "Stats", "Dirent"]),
@@ -238,7 +211,6 @@ impl Builtin {
         }
     }
 
-    /// The ES module source standing for this built-in
     fn source(self) -> String {
         let (name, exports) = self.spec();
         let mut out = format!("const m = globalThis.{}.builtin({name:?});\nexport default m;\n", j8::NATIVE);
@@ -258,7 +230,6 @@ impl TryFrom<&str> for Builtin {
     }
 }
 
-/// Serves the built-in modules to `import`, everything else through `inner`
 pub struct NodePlatform<P> {
     inner: P,
 }
@@ -280,8 +251,6 @@ impl<P: Pool> Pool for NodePlatform<P> {
 }
 
 impl<P: Platform> NodePlatform<P> {
-    /// The module file at `path` (relative to `referrer`), named by its `file:` URL; a CommonJS file is `require`d and
-    /// its `module.exports` is the default export
     fn file(&self, referrer: &str, path: &str) -> Option<(String, String)> {
         let (name, text) = self.inner.load_module(referrer, path)?;
         let text = if esm::Package::commonjs(std::path::Path::new(&name)) {
@@ -332,7 +301,6 @@ impl<P: Platform> Platform for NodePlatform<P> {
 }
 
 j8::runtime! {
-    /// The Node-compatible runtime: everything [`Web`] has, plus `process`, `require` and the `node:` modules
     pub Dune: Web {
         globals: [Process],
         natives: [Fs, Os, Child],
@@ -341,7 +309,6 @@ j8::runtime! {
 }
 
 impl Dune {
-    /// This run's `process.argv` (`dune`, the script, its arguments), `env`, `platform`, `arch`, `pid`, `execPath`
     pub fn argv(rt: &mut j8::Runtime<'_>, script: Option<&str>, args: &[String]) -> Result<(), Error> {
         let exe = std::env::current_exe().map_or_else(|_| String::from("dune"), |p| Self::exec_path(&p).display().to_string());
         let all: Vec<String> = std::iter::once(exe.clone()).chain(script.map(String::from)).chain(args.iter().cloned()).collect();
@@ -353,7 +320,6 @@ impl Dune {
         rt.set("process.pid", std::process::id())
     }
 
-    /// The runtime executable: `dune` beside `dunx` when `dunx` runs, so scripts that start `process.execPath` get dune
     fn exec_path(exe: &std::path::Path) -> std::path::PathBuf {
         const RUNNER: &str = "dunx";
         const RUNTIME: &str = "dune";
@@ -363,7 +329,6 @@ impl Dune {
         }
     }
 
-    /// Node's name for this CPU architecture
     const fn arch() -> &'static str {
         if cfg!(target_arch = "x86_64") {
             "x64"
@@ -376,4 +341,3 @@ impl Dune {
         }
     }
 }
-

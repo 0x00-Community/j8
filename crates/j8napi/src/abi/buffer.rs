@@ -1,4 +1,3 @@
-//! 二进制数据（ArrayBuffer、typed array、DataView）、Date、Promise、跑脚本。
 use alloc::boxed::Box;
 use core::ffi::c_void;
 
@@ -7,7 +6,6 @@ use j8framework::{Backing, BufferData, CodeKind, ElementKind, External, Global, 
 use crate::convert::Ffi;
 use crate::{Env, Finalize, Handle, Status, TypedArrayType, napi};
 
-/// `napi_create_promise` 给出的 deferred：promise 的 resolve / reject
 #[derive(Debug)]
 pub struct Deferred {
     resolve: Global,
@@ -15,13 +13,11 @@ pub struct Deferred {
 }
 
 impl Env {
-    /// 一个 ArrayBuffer 对象
     fn array_buffer<'gc>(a: &j8framework::Agent<'gc, '_>, bytes: Backing) -> JsObject<'gc> {
         let data = BufferData { bytes: Some(bytes), max: None, shared: false };
         ObjectData { kind: ObjectKind::ArrayBuffer(Box::new(data)), proto: Some(a.realm.array_buffer_proto), ..ObjectData::default() }.alloc(a.mc)
     }
 
-    /// buffer 字节的起点与长度（detach 后为空、0）
     fn buffer_bytes<'gc>(a: &j8framework::Agent<'gc, '_>, buffer: JsObject<'gc>) -> (*mut c_void, usize) {
         match &mut buffer.borrow_mut(a.mc).kind {
             ObjectKind::ArrayBuffer(b) => b.bytes.as_deref_mut().map_or((core::ptr::null_mut(), 0), |s| (s.as_mut_ptr().cast(), s.len())),
@@ -29,14 +25,12 @@ impl Env {
         }
     }
 
-    /// 句柄里的（非共享）ArrayBuffer
     fn array_buffer_of<'gc>(&self, h: Handle) -> Result<JsObject<'gc>, Status> {
         let o = self.value(h)?.as_object().ok_or(Status::ArraybufferExpected)?;
         let ok = matches!(&o.borrow().kind, ObjectKind::ArrayBuffer(b) if !b.shared);
         if ok { Ok(o) } else { Err(Status::ArraybufferExpected) }
     }
 
-    /// 在 `buffer` 上开视图的检查：越界或没对齐抛 RangeError（挂起）
     fn check_view<'gc>(&self, a: &j8framework::Agent<'gc, '_>, buffer: JsObject<'gc>, offset: usize, bytes: usize, size: usize, what: &str) -> Result<(), Status> {
         let len = Self::buffer_bytes(a, buffer).1;
         let msg = if !offset.is_multiple_of(size) {
@@ -50,7 +44,6 @@ impl Env {
         Err(Status::PendingException)
     }
 
-    /// 句柄里的视图（typed array 或 DataView）：种类与范围
     fn view_of<'gc>(&self, h: Handle) -> Result<(Option<ElementKind>, ViewData<'gc>), Status> {
         let o = self.value(h)?.as_object().ok_or(Status::InvalidArg)?;
         match &o.borrow().kind {
@@ -62,8 +55,6 @@ impl Env {
 }
 
 napi! {
-    // ---- ArrayBuffer ----
-
     fn napi_create_arraybuffer(env, byte_length: usize, data: *mut *mut c_void, result: *mut Handle) {
         let a = env.agent()?;
         let mut bytes = alloc::vec![0u8; byte_length];
@@ -74,7 +65,6 @@ napi! {
     fn napi_create_external_arraybuffer(env, external_data: *mut c_void, byte_length: usize, finalize_cb: Finalize, finalize_hint: *mut c_void, result: *mut Handle) {
         let a = env.agent()?;
         let owner = Box::new(env.finalizer(finalize_cb, external_data, finalize_hint));
-        // SAFETY: Node-API 约定：插件保证 `external_data` 在终结回调之前一直有效
         let e = unsafe { External::from_raw(external_data.cast(), byte_length, owner) };
         env.out(result, Env::array_buffer(a, e.into()).into())
     }
@@ -100,8 +90,6 @@ napi! {
         let detached = env.value(value)?.as_object().is_some_and(|o| matches!(&o.borrow().kind, ObjectKind::ArrayBuffer(b) if b.bytes.is_none()));
         Ffi::put(result, detached)
     }
-
-    // ---- typed array / DataView ----
 
     fn napi_create_typedarray(env, r#type: i32, length: usize, arraybuffer: Handle, byte_offset: usize, result: *mut Handle) {
         env.preamble()?;
@@ -153,8 +141,6 @@ napi! {
         Ok(())
     }
 
-    // ---- Date ----
-
     fn napi_create_date(env, time: f64, result: *mut Handle) {
         let a = env.agent()?;
         let o = ObjectData { kind: ObjectKind::Date(time), proto: Some(a.realm.date_proto), ..ObjectData::default() }.alloc(a.mc);
@@ -166,8 +152,6 @@ napi! {
         let ObjectKind::Date(t) = o.borrow().kind else { return Err(Status::DateExpected) };
         Ffi::put(result, t)
     }
-
-    // ---- Promise ----
 
     fn napi_create_promise(env, deferred: *mut *mut Deferred, promise: *mut Handle) {
         let a = env.agent()?;
@@ -188,8 +172,6 @@ napi! {
         env.settle(deferred, rejection, true)
     }
 
-    // ---- 跑脚本 ----
-
     fn napi_run_script(env, script: Handle, result: *mut Handle) {
         env.preamble()?;
         let a = env.agent()?;
@@ -200,13 +182,11 @@ napi! {
 }
 
 impl Env {
-    /// 兑现 / 拒绝一个 deferred（用掉它）
     fn settle(&self, deferred: *mut Deferred, v: Handle, reject: bool) -> Result<(), Status> {
         let a = self.agent()?;
         if deferred.is_null() {
             return Err(Status::InvalidArg);
         }
-        // SAFETY: `napi_create_promise` 给出的指针，只用一次
         let d = unsafe { Box::from_raw(deferred) };
         let f = a.local(if reject { &d.reject } else { &d.resolve });
         let v: Value<'_> = self.value(v)?;

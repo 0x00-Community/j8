@@ -6,12 +6,9 @@ use j8framework::{Agent, CodeKind, Error, Native, ObjectKind, Property, Slot, Va
 
 use crate::{Args, Installer};
 
-/// The `Function` family of constructors and global `eval` (dynamic code goes through [`Agent::eval_code`]).
 struct Functions;
 
 impl Functions {
-    /// CreateDynamicFunction: join parameters and body into `(prefix anonymous(params\n) {\nbody\n})`, then compile and
-    /// evaluate it.
     fn dynamic<'gc>(a: &mut Agent<'gc, '_>, args: &[Value<'gc>], new_target: Value<'gc>, prefix: &str) -> Result<Value<'gc>, Error> {
         let (params, body) = match args.split_last() {
             Some((&body, params)) => (params, body),
@@ -24,7 +21,6 @@ impl Functions {
         };
         let src = alloc::format!("({prefix} anonymous({}\n) {{\n{body}\n}})", params.join(","));
         let f = a.eval_code(&src, CodeKind::Eval)?;
-        // When constructing a subclass (`class F extends Function`), the prototype comes from new.target.prototype
         if let Some(fo) = f.as_object()
             && new_target != Value::Undefined
         {
@@ -51,7 +47,6 @@ impl Functions {
         Self::dynamic(a, args, a.new_target, "async function*")
     }
 
-    /// Global `eval` (indirect): non-strings are returned as is; strings run as global code.
     fn eval<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         match args.at(0).kind() {
             ValueKind::String(s) => {
@@ -67,8 +62,6 @@ impl<'gc> Installer<'_, 'gc> {
     pub(crate) fn functions(&mut self) {
         let r = self.realm;
         let ctor = self.constructor("Function", Functions::function, r.function_proto, 1);
-        // Generator / async function constructors aren't globals: they're reached via the `constructor` of their
-        // prototypes
         let kinds: [(&str, j8framework::NativeFn, j8framework::JsObject<'gc>, Option<j8framework::JsObject<'gc>>); 3] = [
             ("GeneratorFunction", Functions::generator_function, r.generator_function_proto, Some(r.generator_proto)),
             ("AsyncFunction", Functions::async_function, r.async_function_proto, None),
@@ -88,7 +81,6 @@ impl<'gc> Installer<'_, 'gc> {
                 i.borrow_mut(self.mc).define("constructor", Property { writable: false, ..Property::hidden(proto.into()) });
             }
         }
-        // %eval% is the reserved object in the Realm (the executor uses it to recognize direct eval)
         r.eval.borrow_mut(self.mc).kind = ObjectKind::Native(Native::function(Functions::eval));
         r.name_function(self.mc, r.eval, "eval", Some(1));
         r.global.borrow_mut(self.mc).define("eval", Property::hidden(r.eval.into()));

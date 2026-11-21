@@ -1,14 +1,3 @@
-//! Inline caches for property reads/writes: one per `get.named` / `set.named` / `define.named` site.
-//!
-//! Keyed only by shape address (GC moves objects, so the cache must not hold object pointers); also holds a `Weak` so a
-//! recognized address is not reused by another shape.
-//! Dictionary shapes mutate in place (same address, different contents), so they are never cached.
-//!
-//! - Read: a data property owned by the receiver, or by a prototype 1..=[`DEPTH`] levels up (the shape of every level
-//! on the way is checked)
-//! - Write: a writable data property owned by the receiver
-//! - Add property: old shape ⇒ new shape; assignments also check the shape of every level of the prototype chain (no
-//! one on the chain has since added a setter / read-only property of the same name)
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
@@ -16,26 +5,21 @@ use core::cell::{Cell, RefCell};
 use j8framework::{JsObject, Object, Shape, Slot, Value};
 use j8framework::{Mutation};
 
-/// Address in the cache of an empty object that has no shape yet (real shape addresses are 8-aligned, so never this)
 const EMPTY: usize = 1;
-/// Maximum number of prototype levels cached
+
 const DEPTH: usize = 4;
 
-/// Address of the object's current shape
 fn addr(d: &Object<'_>) -> usize {
     d.props().shape_ptr().map_or(EMPTY, |s| s as usize)
 }
 
-/// All own properties are in the shape (and their names pass [`Ic::name_ok`]), and the shape does not mutate in place
 fn plain(d: &Object<'_>) -> bool {
     d.is_plain() && !d.props().is_dict()
 }
 
-/// What it looked like before the change (compared against by the add-property cache).
 #[derive(Clone)]
 pub struct Before {
     shape: usize,
-    /// Keeps the starting shape's allocation (so its address isn't reused while the cache holds it)
     from: Option<Weak<Shape>>,
     len: usize,
     plain: bool,
@@ -48,28 +32,18 @@ impl From<JsObject<'_>> for Before {
     }
 }
 
-/// The cache for one property read/write site.
 #[derive(Default)]
 pub struct Ic {
-    /// Receiver shape address (0: nothing cached)
     shape: Cell<usize>,
-    /// Slot index
     slot: Cell<u32>,
-    /// Read: how many prototype levels up holds it (0 is own); add property: how many levels the prototype chain has
-    /// (checked to the end)
     depth: Cell<u8>,
-    /// Shape addresses of each prototype level
     chain: [Cell<usize>; DEPTH],
-    /// Add property: the shape transitioned to
     to: RefCell<Option<Arc<Shape>>>,
-    /// `to` is set (a write adds the property rather than modifies it)
     adds: Cell<bool>,
-    /// Keeps the recognized shape addresses alive
     keep: RefCell<Vec<Weak<Shape>>>,
 }
 
 impl Ic {
-    /// Array `length`, indices and number-like names (typed arrays) take their own special paths and are not cached
     fn name_ok(name: &str) -> bool {
         name != "length" && name != "NaN" && name != "Infinity" && !name.starts_with(|c: char| c.is_ascii_digit() || c == '-')
     }
@@ -88,7 +62,6 @@ impl Ic {
         addr(d)
     }
 
-    /// Checks `depth` (≥ 1) shape levels along the prototype chain, returning the last level
     fn holder<'gc>(&self, mut proto: Option<JsObject<'gc>>, depth: usize) -> Option<JsObject<'gc>> {
         let mut last = None;
         for c in &self.chain[..depth] {
@@ -103,7 +76,6 @@ impl Ic {
         last
     }
 
-    /// Every shape level of the whole prototype chain (ending after `depth` levels) is unchanged
     fn chain_intact(&self, mut proto: Option<JsObject<'_>>, depth: usize) -> bool {
         for c in &self.chain[..depth] {
             let Some(p) = proto else { return false };
@@ -116,11 +88,8 @@ impl Ic {
         proto.is_none()
     }
 
-    // ---- Read ----
-
     #[inline]
     pub fn get<'gc>(&self, o: JsObject<'gc>) -> Option<Value<'gc>> {
-        // A cached shape is a fast-mode one: matching it rules out a dictionary
         let want = self.shape.get();
         let d = o.get();
         if addr(d) != want || !d.is_plain() {
@@ -141,7 +110,6 @@ impl Ic {
         }
     }
 
-    /// After a slow-path read, records where it was found
     pub fn fill_get(&self, o: JsObject<'_>, name: &str) {
         self.reset();
         if !Self::name_ok(name) {
@@ -184,9 +152,6 @@ impl Ic {
         }
     }
 
-    // ---- Write / add property ----
-
-    /// On a hit, writes and returns `true`
     #[inline]
     pub fn set<'gc>(&self, mc: &Mutation<'gc>, o: JsObject<'gc>, v: Value<'gc>, assign: bool) -> bool {
         let want = self.shape.get();
@@ -194,12 +159,9 @@ impl Ic {
         if addr(d) != want || !d.is_plain() {
             return false;
         }
-        // Modify an own writable data property (the cached shape is a fast-mode one)
         if !self.adds.get() {
             return d.props().write_data(mc, self.slot.get() as usize, v);
         }
-        // Add property: extensible; assignments also require the whole prototype chain to be unchanged (an empty
-        // object's address also matches a dictionary's)
         if d.props().is_dict() || d.non_extensible() || (assign && !self.chain_intact(d.proto(), usize::from(self.depth.get()))) {
             return false;
         }
@@ -209,8 +171,6 @@ impl Ic {
         true
     }
 
-    /// After a slow-path write, records it: an own property was modified, or a property was added (`assign`: an
-    /// assignment, so the prototype chain must be checked)
     pub fn fill_set(&self, o: JsObject<'_>, name: &str, before: Before, assign: bool) {
         self.reset();
         if !Self::name_ok(name) || !before.plain {
@@ -247,8 +207,6 @@ impl Ic {
             }
             self.depth.set(u8::try_from(depth).unwrap_or(u8::MAX));
         }
-        // `to` is held strongly and the starting shape through a weak link in `keep`: neither address can be reused
-        // while cached
         *self.to.borrow_mut() = Some(to);
         self.adds.set(true);
         self.keep.borrow_mut().extend(before.from);
@@ -256,33 +214,22 @@ impl Ic {
     }
 }
 
-/// Address standing for a dictionary-mode object (never cached: real shape addresses are 8-aligned and `EMPTY` is 1)
 const DICT: usize = 2;
 
-/// The shape address of a fast-mode object (`EMPTY` with no keys yet), [`DICT`] in dictionary mode
 fn fast(d: &Object<'_>) -> usize {
     if d.props().is_dict() { DICT } else { addr(d) }
 }
 
-/// Where a global name lives, for one `lda.global` / `sta.global` constant: an entry of the script scope or of the
-/// global object, recognized by shape (the global object and the script scope stay in fast mode, see
-/// `Object::widen`). A shape fixes the key at every index, so a hit reads the slot without comparing names; `keep`
-/// stops the shapes' addresses from being reused while cached.
 #[derive(Default)]
 pub struct GlobalIc {
-    /// Shape address of the script scope (0: nothing cached). Also checked for global object entries: a new top-level
-    /// `let` changes it, and may shadow the name
     scope: Cell<usize>,
-    /// Shape address of the global object; 0 when the name is a script scope entry
     global: Cell<usize>,
     slot: Cell<u32>,
-    /// A writable data property (`sta.global` may write it in place)
     writable: Cell<bool>,
     keep: RefCell<Vec<Weak<Shape>>>,
 }
 
 impl GlobalIc {
-    /// The object and slot holding the name, if the shapes are the cached ones
     #[inline]
     pub fn locate<'gc>(&self, scope: JsObject<'gc>, global: JsObject<'gc>) -> Option<(JsObject<'gc>, usize)> {
         let want = self.scope.get();
@@ -297,20 +244,17 @@ impl GlobalIc {
         Some((holder, self.slot.get() as usize))
     }
 
-    /// The value, if cached and a data property
     #[inline]
     pub fn get<'gc>(&self, scope: JsObject<'gc>, global: JsObject<'gc>) -> Option<Value<'gc>> {
         let (o, at) = self.locate(scope, global)?;
         Ic::data(o.get().props().slot(at))
     }
 
-    /// The holder and slot, if cached as a writable data property
     #[inline]
     pub fn writable<'gc>(&self, scope: JsObject<'gc>, global: JsObject<'gc>) -> Option<(JsObject<'gc>, usize)> {
         self.locate(scope, global).filter(|_| self.writable.get())
     }
 
-    /// After a slow-path access, records where `name` is now (own data properties only)
     pub fn fill<'gc>(&self, scope: JsObject<'gc>, global: JsObject<'gc>, name: &str) {
         self.scope.set(0);
         let mut keep = self.keep.borrow_mut();
@@ -340,29 +284,20 @@ impl GlobalIc {
     }
 }
 
-/// What a property site's cache knows, for the JIT: the receiver shape, where the property is, and the shapes on the
-/// way (all held strongly, so the addresses stay meaningful while the compiled code keeps them).
 #[derive(Clone)]
 pub struct PropertyFeedback {
-    /// The receiver's shape (`None`: an empty object without a shape yet)
     pub shape: Option<Arc<Shape>>,
-    /// The property's index in the holder's shape (read / write), or in `to` (add)
     pub slot: usize,
-    /// Read: the holder is this many prototype levels up (0: the receiver itself); add: the prototype chain's length
     pub depth: usize,
-    /// The shapes of the prototype levels checked
     pub chain: Vec<Arc<Shape>>,
-    /// Add property: the shape the receiver transitions to
     pub to: Option<Arc<Shape>>,
 }
 
 impl Ic {
-    /// The shape at address `addr` among the kept ones
     fn kept(&self, addr: usize) -> Option<Arc<Shape>> {
         self.keep.borrow().iter().chain(self.to.borrow().as_ref().map(Arc::downgrade).as_ref()).find(|w| w.as_ptr() as usize == addr).and_then(Weak::upgrade)
     }
 
-    /// What the cache holds (`None` when empty)
     pub fn feedback(&self) -> Option<PropertyFeedback> {
         let shape = match self.shape.get() {
             0 => return None,
@@ -371,27 +306,21 @@ impl Ic {
         };
         let depth = usize::from(self.depth.get());
         let adds = self.adds.get();
-        // An add caches the chain only for assignments (`depth` levels); a read caches `depth` levels when not own
         let levels = depth.min(DEPTH);
         let chain = self.chain[..levels].iter().map(|c| self.kept(c.get())).collect::<Option<Vec<_>>>()?;
         let to = if adds { Some(self.to.borrow().clone()?) } else { None };
-        // An add puts the property last in the new shape
         let slot = to.as_ref().map_or(self.slot.get() as usize, |t| t.len() - 1);
         Some(PropertyFeedback { shape, slot, depth, chain, to })
     }
 
-    /// The cache is for adding a property
     pub fn adds(&self) -> bool {
         self.adds.get()
     }
 }
 
-/// Where a cached global name lives, for the JIT.
 #[derive(Clone)]
 pub struct GlobalFeedback {
-    /// The script scope's shape (`None`: empty)
     pub scope: Option<Arc<Shape>>,
-    /// The global object's shape, when the name lives there (else in the script scope)
     pub global: Option<Arc<Shape>>,
     pub slot: usize,
     pub writable: bool,
@@ -402,7 +331,6 @@ impl GlobalIc {
         self.keep.borrow().iter().find(|w| w.as_ptr() as usize == addr).and_then(Weak::upgrade)
     }
 
-    /// What the cache holds
     pub fn feedback(&self) -> Option<GlobalFeedback> {
         let scope = match self.scope.get() {
             0 | DICT => return None,

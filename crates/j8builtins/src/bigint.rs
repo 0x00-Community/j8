@@ -4,11 +4,9 @@ use j8framework::{Agent, Error, ErrorKind, Hint, Value};
 
 use crate::{Args, Installer};
 
-/// `BigInt` and its prototype methods.
 struct BigInts;
 
 impl BigInts {
-    /// `BigInt(v)`: Numbers with integer values, booleans, strings (via StringToBigInt), BigInts.
     fn construct<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let prim = a.to_primitive(args.at(0), Hint::Number)?;
         let b = match prim.kind() {
@@ -34,7 +32,6 @@ impl BigInts {
         }
     }
 
-    /// `n.toString(radix)`.
     fn to_string<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let b = Self::this(a, this)?;
         let radix = match args.at(0).kind() {

@@ -1,15 +1,3 @@
-//! Graph ⇒ x86-64 machine code directly: linear-scan register allocation over the blocks in reverse postorder, then
-//! one pass of instruction selection. Guards jump to cold stubs that store the frame state's values into
-//! `Ctx::BUF` and call `j8_deopt`.
-//!
-//! ```text
-//! rbp frame: saved rbx r12 r13 r14 r15 at −8 … −40, entry pointers at −48 … −88, spill slots below
-//! r15        the context (Ctx) the whole time
-//! scratch    rax rcx rdx r11 xmm14 xmm15 (never allocated)
-//! allocated  rsi rdi r8 r9 r10 (caller-saved), rbx r12 r13 r14 (callee-saved), xmm0 … xmm13
-//! calls      operands through Ctx::ARGS, then the argument registers; values live across a call sit in callee-saved
-//!            registers or stack slots; slow paths that call (poll, write barrier) save the caller-saved ones
-//! ```
 use alloc::collections::BTreeMap;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -22,60 +10,42 @@ use crate::build::{Kind, OBJECT_TAG};
 use crate::ir::{Cond, FloatOp, Graph, Helper, IntOp, Op, Rep, Slot, B, Fs, V};
 use crate::runtime::Ctx;
 
-/// Where a value lives.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Loc {
     Gpr(R),
     Xmm(X),
-    /// `[rbp + d]`
     Stack(i32),
-    /// Rematerialized at each use
     Const,
     None,
 }
 
-/// What a guard checks, for the hints a failure leaves.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Reason {
-    /// Not an int32 / overflowed / −0
     Int,
-    /// Not a number
     Number,
-    /// Another object / shape / function than expected
     Shape,
     Func,
-    /// The hole
     Hole,
-    /// The budget ran out
     Poll,
-    /// Something thrown
     Throw,
-    /// Unconditional (bytecode not compiled)
     Always,
-    /// Too deep
     Depth,
 }
 
-/// One guard's hand-over: its frame state, why, and whether it throws.
 pub struct Exit {
     pub fs: Fs,
     pub reason: Reason,
-    /// The instruction that jumps here (the first one, when shared)
     pub op: u32,
-    /// A guard moved out of a loop: the frame state it had (a failure's hint goes to its instruction)
     pub hint: Option<Fs>,
 }
 
-/// Status codes of an interpreter entry
 pub const RETURNED: i64 = 0;
 pub const RESUMED: i64 = 1;
 pub const THREW: i64 = 2;
 
-/// A parallel copy's source.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Src {
     Reg(R),
-    /// An int32 in a register, passed as a number word
     Int(R),
     Stack(i32),
     IntStack(i32),
@@ -83,7 +53,6 @@ enum Src {
     Xmm(X),
 }
 
-/// What the code calls (patched by the installer).
 #[derive(Clone, Copy, Debug)]
 pub enum Sym {
     Deopt,
@@ -92,7 +61,6 @@ pub enum Sym {
     Target(u32),
 }
 
-/// The machine code and what the runtime needs to read it.
 pub struct Generated {
     pub bytes: Vec<u8>,
     pub relocs: Vec<(usize, Sym)>,
@@ -107,9 +75,9 @@ const CALLEE_SAVED: [R; 4] = [RBX, R12, R13, R14];
 const XMMS: u8 = 14;
 const XS: X = 15;
 const XT: X = 14;
-/// Saved registers end here; entry pointers below
+
 const SAVED_END: i32 = -40;
-/// Entry pointer slots: interpreter params / r0, or native callee / this / a0 / a1 / a2
+
 const ENTRY_SLOT: i32 = -48;
 
 struct Interval {
@@ -122,7 +90,6 @@ struct Interval {
 
 pub struct Gen<'g> {
     g: &'g Graph,
-    /// Global cache sites' addresses
     globals: &'g [u64],
     kind: Kind,
     a: Asm,
@@ -136,32 +103,20 @@ pub struct Gen<'g> {
     arity: Vec<usize>,
     deopt_base: u32,
     helper_base: u32,
-    /// (fs, reason, hint state) ⇒ its stub's label, and the first instruction using it
     stubs: Vec<(Fs, Reason, Option<Fs>, Label, V)>,
-    /// The instruction being emitted
     cur: V,
-    /// A `CallJit` followed by an unbox of its result: (the unbox, its frame state)
     unbox_next: Option<(V, Fs)>,
-    /// An instruction already emitted with the previous one
     skip: Option<V>,
-    /// Cold code emitted after the body: (label, what)
     cold: Vec<(Label, Cold)>,
-    /// Uses of each value (to fuse compares into their only branch)
     uses: Vec<u32>,
-    /// Caller-saved registers in use anywhere (slow paths save them)
     used_caller: Vec<R>,
     used_xmm: u8,
 }
 
-/// Out-of-line code.
 enum Cold {
-    /// Poll: call j8_poll, back to `cont` or exit
     Poll { cont: Label, exit: Label },
-    /// Write barrier: helper StoreCell(addr in rcx, word in rdx), back to `cont`
     Barrier { cont: Label, id: u32 },
-    /// A float remainder the slow way: helper ModF(x, y), the result into XT, back at `done`
     ModF { done: Label, id: u32, x: Src, y: Src },
-    /// Global cache miss: helper GlobalProbe(cache), the value in rax back at `cont`
     Global { cont: Label, id: u32, cache: u64, miss: Label, throw: Label },
 }
 
@@ -175,7 +130,6 @@ impl<'g> Gen<'g> {
         Generated { bytes: cg.a.bytes, relocs: cg.relocs, exits: cg.exits, values: cg.values, calls: cg.calls, arity: cg.arity }
     }
 
-    /// Reachable blocks in reverse postorder
     fn order(&self) -> Vec<B> {
         let n = self.g.blocks.len();
         let mut seen = vec![false; n];
@@ -196,7 +150,6 @@ impl<'g> Gen<'g> {
             }
         }
         post.reverse();
-        // Cold blocks last
         let (hot, cold): (Vec<B>, Vec<B>) = post.into_iter().partition(|b| !self.g.blocks[*b as usize].cold);
         hot.into_iter().chain(cold).collect()
     }
@@ -205,11 +158,9 @@ impl<'g> Gen<'g> {
         matches!(self.g.op(v), Op::I32(_) | Op::F64(_) | Op::Word(_))
     }
 
-    /// Values an instruction reads (operands and its frame state's values)
     fn reads(&self, v: V, out: &mut Vec<V>) {
         let op = self.g.op(v);
         op.inputs(out);
-        // A native return of a boxed int32 also hands over the int (in rdx)
         if let Op::Return(w, _) = op
             && let Op::BoxInt(i) = self.g.op(*w)
         {
@@ -255,8 +206,6 @@ impl<'g> Gen<'g> {
         matches!(op, Op::Call(h, ..) if *h != Helper::ModF) || matches!(op, Op::CallJit(..))
     }
 
-    // ---- allocation ----
-
     fn allocate(&mut self, order: &[B]) {
         let g = self.g;
         let n = g.insts.len();
@@ -277,7 +226,6 @@ impl<'g> Gen<'g> {
             p += 2;
             end[b as usize] = p;
         }
-        // Block liveness (phi inputs live out of their predecessor)
         let words = n.div_ceil(64);
         let mut gen_ = vec![vec![0u64; words]; g.blocks.len()];
         let mut kill = vec![vec![0u64; words]; g.blocks.len()];
@@ -323,7 +271,6 @@ impl<'g> Gen<'g> {
                     for (o, i) in out.iter_mut().zip(&live_in[s as usize]) {
                         *o |= *i;
                     }
-                    // A successor's phis are defined there, not live into it from here
                 }
                 for &x in &phi_out[bi] {
                     set(&mut out, x);
@@ -332,7 +279,6 @@ impl<'g> Gen<'g> {
                 for ((i, o), k) in inn.iter_mut().zip(&out).zip(&kill[bi]) {
                     *i |= o & !k;
                 }
-                // Phis of this block are defined at its start: not live in
                 for &v in &g.blocks[bi].insts {
                     if matches!(g.op(v), Op::Phi(_)) {
                         inn[v as usize / 64] &= !(1 << (v % 64));
@@ -348,7 +294,6 @@ impl<'g> Gen<'g> {
                 break;
             }
         }
-        // Intervals
         let mut lo = vec![u32::MAX; n];
         let mut hi = vec![0u32; n];
         for &b in order {
@@ -363,7 +308,6 @@ impl<'g> Gen<'g> {
                     for &x in &ins {
                         hi[x as usize] = hi[x as usize].max(pos[v as usize]);
                     }
-                    // A call's frame state is read after it returns (a pending exception)
                     if let Some(fs) = op.frame_state() {
                         ins.clear();
                         Self::state_values(g, fs, &mut ins);
@@ -377,7 +321,6 @@ impl<'g> Gen<'g> {
             for &x in &phi_out[bi] {
                 hi[x as usize] = hi[x as usize].max(end[bi]);
             }
-            // Only the set bits
             for (wi, (&li, &lo_)) in live_in[bi].iter().zip(&live_out[bi]).enumerate() {
                 let mut w = li;
                 while w != 0 {
@@ -405,7 +348,6 @@ impl<'g> Gen<'g> {
                 continue;
             }
             let (l, h) = (lo[v], hi[v].max(lo[v]));
-            // A call strictly inside (calls are in position order)
             let k = calls.partition_point(|&c| c <= l);
             let across = calls.get(k).is_some_and(|&c| c < h);
             ivs.push(Interval { v: vv, lo: l, hi: h, float: g.insts[v].rep == Rep::F64, across });
@@ -426,7 +368,6 @@ impl<'g> Gen<'g> {
             let l = match pick {
                 Some(l) => l,
                 None => {
-                    // A stack slot no live value uses
                     match free_slots.iter().position(|&(h, _)| h <= iv.lo) {
                         Some(k) => {
                             let (_, d) = free_slots.remove(k);
@@ -451,18 +392,13 @@ impl<'g> Gen<'g> {
             }
             self.loc[iv.v as usize] = l;
         }
-        // Frame: entry slots (5) + spill slots + room to save xmm registers in slow paths, 16-aligned at calls
         let size = 8 * 5 + 8 * slots + 8 * i32::from(XMMS);
-        // After push rbp + 5 pushes, rsp ≡ 8 (mod 16): the frame size must be ≡ 8 too
         self.frame = (size + 15) / 16 * 16 + 8;
     }
 
-    /// Where slow paths save xmm registers
     fn xmm_save(&self, x: X) -> i32 {
         SAVED_END - self.frame + 8 * i32::from(x)
     }
-
-    // ---- moving values ----
 
     fn loc(&self, v: V) -> Loc {
         self.loc[v as usize]
@@ -477,7 +413,6 @@ impl<'g> Gen<'g> {
         }
     }
 
-    /// `v` in a general register: its own, or loaded into `scratch`
     fn gpr(&mut self, v: V, scratch: R) -> R {
         match self.loc(v) {
             Loc::Gpr(r) => r,
@@ -502,7 +437,6 @@ impl<'g> Gen<'g> {
         }
     }
 
-    /// `v` into exactly `dst`
     fn into_gpr(&mut self, v: V, dst: R) {
         let r = self.gpr(v, dst);
         self.a.mov_rr(dst, r);
@@ -523,7 +457,6 @@ impl<'g> Gen<'g> {
         }
     }
 
-    /// Where a result goes: its register, or a scratch to store from
     fn dst(&self, v: V, scratch: R) -> R {
         match self.loc(v) {
             Loc::Gpr(r) => r,
@@ -531,7 +464,6 @@ impl<'g> Gen<'g> {
         }
     }
 
-    /// After computing `v` into `r`: store it if it lives on the stack
     fn put(&mut self, v: V, r: R) {
         match self.loc(v) {
             Loc::Gpr(d) => self.a.mov_rr(d, r),
@@ -557,9 +489,6 @@ impl<'g> Gen<'g> {
         }
     }
 
-    // ---- exits ----
-
-    /// The stub handing over with `fs` (one per frame state and reason)
     fn exit(&mut self, fs: Fs, reason: Reason) -> Label {
         let hint = self.g.hoisted.iter().find(|(v, _)| *v == self.cur).map(|(_, f)| *f);
         if let Some(&(_, _, _, l, _)) = self.stubs.iter().find(|(f, r, h, _, _)| *f == fs && *r == reason && *h == hint) {
@@ -605,13 +534,10 @@ impl<'g> Gen<'g> {
         self.epilogue();
     }
 
-    /// Jumps to the exit when `cc` holds
     fn exit_if(&mut self, cc: Cc, fs: Fs, reason: Reason) {
         let l = self.exit(fs, reason);
         self.a.jcc(cc, l);
     }
-
-    // ---- prologue / epilogue ----
 
     fn prologue(&mut self) {
         self.a.push(RBP);
@@ -623,7 +549,6 @@ impl<'g> Gen<'g> {
         self.a.mov_rr(R15, RDI);
         match self.kind {
             Kind::Native(_) => {
-                // The callee and the arguments go straight where their values live
                 let incoming = [RSI, RDX, RCX, R8, R9];
                 let mut to_regs: Vec<(R, R)> = Vec::new();
                 for &v in &self.g.blocks[0].insts {
@@ -648,7 +573,6 @@ impl<'g> Gen<'g> {
         }
     }
 
-    /// Returns rax (natives count their depth down first)
     fn epilogue(&mut self) {
         self.a.lea(RSP, RBP, SAVED_END);
         for r in [R15, R14, R13, R12, RBX] {
@@ -658,10 +582,7 @@ impl<'g> Gen<'g> {
         self.a.ret();
     }
 
-    // ---- the body ----
-
     fn emit(&mut self, order: &[B]) {
-        // Blocks that only jump on are not emitted: jumps to them go to their targets
         let order: Vec<B> = order.iter().copied().filter(|&b| b == 0 || self.through(b) == b).collect();
         for &b in &order {
             let l = self.a.label();
@@ -678,7 +599,6 @@ impl<'g> Gen<'g> {
                 if matches!(self.g.op(v), Op::Phi(_)) {
                     continue;
                 }
-                // A compare used only by the branch right after it: fused there
                 if let Some(&nx) = insts.get(k + 1)
                     && self.fusable(v, nx)
                 {
@@ -807,14 +727,12 @@ impl<'g> Gen<'g> {
         }
     }
 
-    /// `v` is a compare whose only use is the branch / check `next`
     fn fusable(&self, v: V, next: V) -> bool {
         matches!(self.g.op(v), Op::CmpInt(..) | Op::CmpWord(..) | Op::CmpFloat(..))
             && self.uses[v as usize] == 1
             && matches!(self.g.op(next), Op::Branch(c, _, _) | Op::Check(c, _, _) if *c == v)
     }
 
-    /// Sets flags for compare `v`; the condition that holds when it is true
     fn compare(&mut self, v: V) -> Cc {
         match self.g.op(v).clone() {
             Op::CmpInt(c, a, b) => {
@@ -851,7 +769,6 @@ impl<'g> Gen<'g> {
                 match c {
                     Cond::Lt | Cond::Gt => Cc::A,
                     Cond::Le | Cond::Ge => Cc::Ae,
-                    // Ordered equality needs PF clear too: handled by the caller through `float_eq`
                     Cond::Eq => Cc::E,
                     Cond::Ne => Cc::Ne,
                 }
@@ -871,18 +788,15 @@ impl<'g> Gen<'g> {
         }
     }
 
-    /// A float equality (ordered): ZF set and PF clear
     fn is_float_eq(&self, v: V) -> bool {
         matches!(self.g.op(v), Op::CmpFloat(Cond::Eq, ..))
     }
 
-    /// Jumps to `to` when `cond` (a flag value or a fused compare) is `when`, else falls through
     fn branch_on(&mut self, cond: V, to: Label, fused: bool, when: bool) {
         if fused {
             let feq = self.is_float_eq(cond);
             let cc = self.compare(cond);
             if feq {
-                // Unordered: not equal
                 if when {
                     let skip = self.a.label();
                     self.a.jcc(Cc::P, skip);
@@ -902,7 +816,6 @@ impl<'g> Gen<'g> {
         self.a.jcc(if when { Cc::Ne } else { Cc::E }, to);
     }
 
-    /// A block that only jumps on (no phi moves): its target instead, transitively
     fn through(&self, mut b: B) -> B {
         for _ in 0..8 {
             let blk = &self.g.blocks[b as usize];
@@ -1187,13 +1100,10 @@ impl<'g> Gen<'g> {
                 self.cold.push((slow, Cold::Global { cont, id, cache, miss, throw }));
             }
             Op::Enter(fs) => {
-                // Too deep on the machine stack: the interpreter goes on (and throws when it is too deep too)
                 self.a.alu_rm(Alu::Cmp, true, RSP, R15, Ctx::STACK_FLOOR);
                 self.exit_if(Cc::B, fs, Reason::Depth);
             }
             Op::Call(Helper::ModF, args, _) => {
-                // Two integers below 2^53 (exact as int64): an integer remainder with the dividend's sign (−0
-                // included); anything else through the runtime (a cold call saving the caller-saved registers)
                 let (x, y) = (args[0], args[1]);
                 let slow = self.a.label();
                 let done = self.a.label();
@@ -1211,7 +1121,6 @@ impl<'g> Gen<'g> {
                 self.a.cvttsd2si64(RCX, XT);
                 self.a.test_rr(true, RCX, RCX);
                 self.a.jcc(Cc::E, slow);
-                // Exact: both convert back
                 self.a.mov_rr(R11, RAX);
                 self.a.cvtsi2sd64(XT, RCX);
                 let xb = self.xmm(y, XS);
@@ -1226,7 +1135,6 @@ impl<'g> Gen<'g> {
                 self.a.cqo_idiv(RCX);
                 self.a.zero_x(XT);
                 self.a.cvtsi2sd64(XT, RDX);
-                // A zero remainder of a negative (or −0) dividend is −0
                 self.a.test_rr(true, RDX, RDX);
                 self.a.jcc(Cc::Ne, done);
                 let xa = self.xmm(x, XS);
@@ -1274,7 +1182,6 @@ impl<'g> Gen<'g> {
                 }
             }
             Op::CallJit(k, callee, this, args, fs) => {
-                // Straight into the argument registers (a parallel copy); missing arguments are undefined
                 let mut srcs: Vec<(Src, R)> = vec![(Src::Reg(R15), RDI), (self.src(callee), RSI), (self.src(this), RDX)];
                 for (i, r) in [RCX, R8, R9].into_iter().enumerate() {
                     srcs.push((args.get(i).map_or(Src::Imm(ValueBits::UNDEFINED), |a| self.src(*a)), r));
@@ -1285,7 +1192,6 @@ impl<'g> Gen<'g> {
                 self.a.cmp_mi(true, R15, Ctx::PENDING, 0);
                 self.exit_if(Cc::Ne, fs, Reason::Throw);
                 self.put(v, RAX);
-                // An int32 result straight from rdx when the callee marked it (the unbox right after is then done)
                 if let Some((u, ufs)) = self.unbox_next {
                     self.unbox_next = None;
                     let slow = self.a.label();
@@ -1318,7 +1224,6 @@ impl<'g> Gen<'g> {
             Op::Branch(c, t, f) => {
                 let (t, f) = (self.through(t), self.through(f));
                 let (lt, lf) = (self.blocks[&t], self.blocks[&f]);
-                // Fall into the next block when it is one side
                 if next == Some(t) {
                     self.branch_on(c, lf, fused_prev, false);
                 } else {
@@ -1362,7 +1267,6 @@ impl<'g> Gen<'g> {
         i32::try_from(x).unwrap_or(i32::MAX)
     }
 
-    /// Clears the tag: the low 48 bits stay
     fn untag(&mut self, r: R) {
         self.a.shift_ri(4, true, r, 16);
         self.a.shift_ri(5, true, r, 16);
@@ -1375,7 +1279,6 @@ impl<'g> Gen<'g> {
         id
     }
 
-    /// Operands as words into Ctx::ARGS (in order)
     fn args_to_ctx(&mut self, args: &[V]) {
         for (i, &x) in args.iter().enumerate() {
             let d = Ctx::ARGS + 8 * i32::try_from(i).unwrap_or(0);
@@ -1394,7 +1297,6 @@ impl<'g> Gen<'g> {
         }
     }
 
-    /// The double in XS ⇒ int32 in `v`'s place; RAX holds its bits (for −0)
     fn to_int(&mut self, v: V, fs: Fs) {
         self.a.cvttsd2si(RCX, XS);
         self.a.zero_x(XT);
@@ -1402,7 +1304,6 @@ impl<'g> Gen<'g> {
         self.a.ucomisd(XS, XT);
         self.exit_if(Cc::Ne, fs, Reason::Int);
         self.exit_if(Cc::P, fs, Reason::Int);
-        // −0: an int 0 from nonzero bits
         let ok = self.a.label();
         self.a.test_rr(false, RCX, RCX);
         self.a.jcc(Cc::Ne, ok);
@@ -1451,7 +1352,6 @@ impl<'g> Gen<'g> {
                 }
                 if let Some(fs) = fs {
                     self.exit_if(Cc::O, fs, Reason::Int);
-                    // 0 from a negative operand is −0
                     let ok = self.a.label();
                     self.a.test_rr(false, RAX, RAX);
                     self.a.jcc(Cc::Ne, ok);
@@ -1465,8 +1365,6 @@ impl<'g> Gen<'g> {
                 self.put(v, RAX);
             }
             IntOp::Mod if imm.is_some_and(|d| d >= 2) => {
-                // By a constant: |x| − ⌊|x|·m / 2^n⌋·d with the sign of x (m = ⌊2^n / d⌋ + 1, n = 31 + ⌈log2 d⌉:
-                // exact for |x| < 2^31), no division
                 let fs = fs.expect("a modulus has a frame state");
                 let d = imm.unwrap_or(2);
                 let l = 32 - (d - 1).cast_unsigned().leading_zeros();
@@ -1486,7 +1384,6 @@ impl<'g> Gen<'g> {
                 self.a.alu_rr(Alu::Sub, true, RAX, RCX);
                 self.a.alu_rr(Alu::Xor, true, RAX, RDX);
                 self.a.alu_rr(Alu::Sub, true, RAX, RDX);
-                // 0 from a negative dividend is −0
                 let ok = self.a.label();
                 self.a.test_rr(false, RAX, RAX);
                 self.a.jcc(Cc::Ne, ok);
@@ -1507,7 +1404,6 @@ impl<'g> Gen<'g> {
                 self.a.mov_rr32(RAX, rx);
                 self.a.mov_rr32(R11, RAX);
                 self.a.cdq_idiv(RCX);
-                // 0 from a negative dividend is −0
                 let ok = self.a.label();
                 self.a.test_rr(false, RDX, RDX);
                 self.a.jcc(Cc::Ne, ok);
@@ -1543,7 +1439,6 @@ impl<'g> Gen<'g> {
         }
     }
 
-    /// The parallel copy of `to`'s phi inputs from block `from`
     fn phi_moves(&mut self, from: B, to: B) {
         let blk = &self.g.blocks[to as usize];
         let Some(k) = blk.preds.iter().position(|&p| p == from) else { return };
@@ -1557,7 +1452,6 @@ impl<'g> Gen<'g> {
                 }
             }
         }
-        // Sequentialize: a move whose destination no pending move reads goes first; cycles go through memory
         let mut pending = moves;
         while !pending.is_empty() {
             let pos = pending.iter().position(|(_, _, d)| !pending.iter().any(|(s, _, _)| s == d && *s != Loc::Const));
@@ -1567,7 +1461,6 @@ impl<'g> Gen<'g> {
                     self.move_to(src, d);
                 }
                 None => {
-                    // A cycle: park the first source in Ctx::ARGS
                     let (s, src, _) = pending[0];
                     let r = self.gpr(src, RAX);
                     self.a.store(R15, Ctx::ARGS + 8 * 15, r);
@@ -1576,12 +1469,10 @@ impl<'g> Gen<'g> {
                             m.0 = Loc::Stack(i32::MIN);
                         }
                     }
-                    // Moves from the parked value read it back
                     let parked: Vec<(V, Loc)> = pending.iter().filter(|m| m.0 == Loc::Stack(i32::MIN)).map(|m| (m.1, m.2)).collect();
                     pending.retain(|m| m.0 != Loc::Stack(i32::MIN));
                     let rest = core::mem::take(&mut pending);
                     pending = rest;
-                    // Do the others first, then the parked ones
                     while !pending.is_empty() {
                         let (_, src, d) = pending.remove(0);
                         self.move_to(src, d);
@@ -1600,7 +1491,6 @@ impl<'g> Gen<'g> {
         }
     }
 
-    /// Where a word operand comes from, for a parallel copy into fixed registers
     fn src(&self, v: V) -> Src {
         match (self.loc(v), self.g.rep(v)) {
             (Loc::Gpr(r), Rep::I32) => Src::Int(r),
@@ -1615,7 +1505,6 @@ impl<'g> Gen<'g> {
         }
     }
 
-    /// Moves sources into registers at once (no source is clobbered before it is read)
     fn fixed_moves(&mut self, mut pending: Vec<(Src, R)>) {
         pending.retain(|(s, d)| *s != Src::Reg(*d));
         while !pending.is_empty() {
@@ -1626,7 +1515,6 @@ impl<'g> Gen<'g> {
                     self.load_src(s, d);
                 }
                 None => {
-                    // A cycle: the first destination's current value goes to RAX
                     let d = pending[0].1;
                     self.a.mov_rr(RAX, d);
                     for (s, _) in &mut pending {
@@ -1647,7 +1535,6 @@ impl<'g> Gen<'g> {
             Src::Stack(o) => self.a.load(d, RBP, o),
             Src::Imm(x) => self.a.mov_ri(d, x),
             Src::Xmm(x) => self.a.movq_rx(d, x),
-            // An int32 travels as a number word
             Src::Int(r) => {
                 self.a.zero_x(XS);
                 self.a.cvtsi2sd(XS, r);

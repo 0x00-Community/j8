@@ -1,17 +1,6 @@
-//! benchv8: timing comparison of the same JS benchmarks on j8 and V8 (rusty_v8).
-//!
-//! ```text
-//! cargo run --release                    # run all three engines once each and print the comparison table
-//! cargo run --release -- --engine j8     # run only one: j8 / v8 / v8-jitless
-//! cargo run --release -- --runs 10       # runs per benchmark, the shortest is kept (default 5)
-//! ```
-//! V8's `--jitless` is a process-wide flag, so each engine runs in its own child process; timing covers compile +
-//! execute only, and each run uses a fresh execution environment (top-level `let` / `const` don't collide with the
-//! previous run's).
 use std::process::{Command, ExitCode};
 use std::time::Instant;
 
-/// Benchmarks: name and source (the script's completion value is a checksum that must match across the three engines).
 const BENCHES: [(&str, &str); 11] = [
     ("fib", include_str!("../bench/fib.js")),
     ("loop", include_str!("../bench/loop.js")),
@@ -26,10 +15,8 @@ const BENCHES: [(&str, &str); 11] = [
     ("regexp", include_str!("../bench/regexp.js")),
 ];
 
-/// Default runs per benchmark (the shortest is kept)
 const DEFAULT_RUNS: usize = 5;
 
-/// Engines in the comparison.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Engine {
     J8,
@@ -60,10 +47,8 @@ impl TryFrom<&str> for Engine {
     }
 }
 
-/// Result of one benchmark: shortest time (milliseconds) and checksum; error text on failure.
 type Outcome = Result<(f64, String), String>;
 
-/// Run on j8.
 struct J8Runner;
 
 impl J8Runner {
@@ -73,7 +58,6 @@ impl J8Runner {
         use j8::frame::{CreateParams, Error, Isolate, Source};
         let platform = j8::platform::DefaultPlatform::default();
         let mut isolate = Isolate::new(&platform, CreateParams::default());
-        // With the JIT unless `J8_NOJIT` is set
         let mut executor = if std::env::var_os("J8_NOJIT").is_some() { Executor::default() } else { Executor::default().with_tier(j8::jit::Jit::default()) };
         let mut best = f64::INFINITY;
         let mut result = String::new();
@@ -115,7 +99,6 @@ impl J8Runner {
     }
 }
 
-/// Run on V8.
 struct V8Runner;
 
 impl V8Runner {
@@ -156,7 +139,6 @@ impl V8Runner {
 }
 
 impl Engine {
-    /// Child process: run all benchmarks on this engine, one line each: `name\tms\tchecksum` or `name\tERR\terror`.
     fn run_all(self, runs: usize) {
         let engine = self;
         if engine != Engine::J8 {
@@ -175,17 +157,14 @@ impl Engine {
     }
 }
 
-/// One result line.
 struct Row {
     ms: Option<f64>,
     sum: String,
 }
 
-/// The main process's comparison table.
 struct Comparison;
 
 impl Comparison {
-    /// Start one child process per engine and collect the results into a table.
     fn run(runs: usize) -> Result<(), String> {
         let exe = std::env::current_exe().map_err(|e| e.to_string())?;
         let mut table: Vec<Vec<Row>> = Vec::new();

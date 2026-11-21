@@ -1,11 +1,8 @@
-//! Node's ES module resolution for `import`: bare specifiers through `node_modules` and package.json `exports` /
-//! `main`, `#` specifiers through `imports`, `file:` URLs; paths are left to the inner platform.
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 use serde_json::Value;
 
-/// The `exports` / `imports` conditions `import` matches, in the order a target object lists them
 #[derive(Clone, Copy)]
 enum Condition {
     Import,
@@ -22,17 +19,12 @@ impl TryFrom<&str> for Condition {
     }
 }
 
-/// What an `import` specifier names
 pub enum Specifier<'s> {
-    /// A path (relative or absolute), for the inner platform
     Path(&'s str),
-    /// `#name`: the importing package's `imports`
     Private(&'s str),
-    /// `name` or `@scope/name`, then a subpath (`.` for none, else `./x`)
     Bare { name: &'s str, subpath: String },
 }
 
-/// Prefix of a `file:` URL: file modules are named by theirs, as `import.meta.url` is the name
 pub const FILE_URL: &str = "file://";
 
 impl<'s> From<&'s str> for Specifier<'s> {
@@ -50,7 +42,6 @@ impl<'s> From<&'s str> for Specifier<'s> {
     }
 }
 
-/// package.json `type`: how its `.js` (and extensionless) files load
 #[derive(Deserialize, Default, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 enum Kind {
@@ -59,7 +50,6 @@ enum Kind {
     Module,
 }
 
-/// The parts of a package.json resolution reads
 #[derive(Deserialize, Default)]
 struct Manifest {
     #[serde(default, rename = "type")]
@@ -69,7 +59,6 @@ struct Manifest {
     main: Option<String>,
 }
 
-/// A package directory and its package.json
 pub struct Package {
     dir: PathBuf,
     manifest: Manifest,
@@ -81,17 +70,14 @@ impl Package {
         Some(Self { dir: dir.to_path_buf(), manifest: serde_json::from_str(&text).unwrap_or_default() })
     }
 
-    /// The package holding `file`: the nearest package.json above it
     pub fn holding(file: &Path) -> Option<Self> {
         file.ancestors().skip(1).find_map(Self::at)
     }
 
-    /// Package `name` as seen from `from`: the first `node_modules/<name>` up from it
     pub fn find(from: &Path, name: &str) -> Option<Self> {
         from.ancestors().skip(1).find_map(|d| Self::at(&d.join("node_modules").join(name)))
     }
 
-    /// The file `subpath` names: through `exports` when there is one, else `main` / the path itself
     pub fn export(&self, subpath: &str) -> Option<PathBuf> {
         if let Some(exports) = &self.manifest.exports {
             let sugar = exports.as_object().is_none_or(|m| m.keys().next().is_some_and(|k| !k.starts_with('.')));
@@ -106,13 +92,10 @@ impl Package {
         tries.into_iter().find(|p| p.is_file())
     }
 
-    /// The target `#name` maps to in `imports`: a file of this package, or another specifier
     pub fn import(&self, name: &str) -> Option<String> {
         self.manifest.imports.as_ref().and_then(|imports| Self::lookup(imports, name))
     }
 
-    /// Whether `file` is CommonJS by Node's rules: `.cjs`, or `.js` / no extension where the nearest package.json
-    /// doesn't say `"type": "module"`
     pub fn commonjs(file: &Path) -> bool {
         const MODULE: &str = "mjs";
         const COMMONJS: &str = "cjs";
@@ -128,7 +111,6 @@ impl Package {
         &self.dir
     }
 
-    /// `key` in a subpath map: exact, else the `*` pattern with the longest prefix
     fn lookup(map: &Value, key: &str) -> Option<String> {
         let map = map.as_object()?;
         if let Some(target) = map.get(key) {
@@ -143,8 +125,6 @@ impl Package {
         Self::target(target, Some(hole))
     }
 
-    /// A target: a string (with `*` filled by `hole`), the first resolvable of an array, or the first matching
-    /// condition of an object
     fn target(target: &Value, hole: Option<&str>) -> Option<String> {
         match target {
             Value::String(s) => Some(hole.map_or_else(|| s.clone(), |h| s.replace('*', h))),

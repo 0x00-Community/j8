@@ -1,19 +1,6 @@
-//! benchquickjs: timing comparison of the same JS benchmarks on j8 and QuickJS (quickjs-ng, built from source by
-//! rquickjs).
-//!
-//! ```text
-//! cargo run --release                        # run both engines once each and print the comparison table
-//! cargo run --release -- --engine quickjs    # run only one: j8 / quickjs
-//! cargo run --release -- --runs 10           # runs per benchmark, the shortest is kept (default 5)
-//! ```
-//! QuickJS has no JIT, so it is compared with j8's interpreter. Each engine runs in its own child process (neither
-//! heap's leftovers affect the other); timing covers compile + execute only, and each run uses a fresh context
-//! (top-level `let` / `const` don't collide with the previous run's). The benchmarks are benchv8's, so the checksums
-//! match V8's and JavaScriptCore's too.
 use std::process::{Command, ExitCode};
 use std::time::Instant;
 
-/// Benchmarks: name and source (the script's completion value is a checksum that must match across the engines).
 const BENCHES: [(&str, &str); 11] = [
     ("fib", include_str!("../../benchv8/bench/fib.js")),
     ("loop", include_str!("../../benchv8/bench/loop.js")),
@@ -28,10 +15,8 @@ const BENCHES: [(&str, &str); 11] = [
     ("regexp", include_str!("../../benchv8/bench/regexp.js")),
 ];
 
-/// Default runs per benchmark (the shortest is kept)
 const DEFAULT_RUNS: usize = 5;
 
-/// Engines in the comparison.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Engine {
     J8,
@@ -60,10 +45,8 @@ impl TryFrom<&str> for Engine {
     }
 }
 
-/// Result of one benchmark: shortest time (milliseconds) and checksum; error text on failure.
 type Outcome = Result<(f64, String), String>;
 
-/// Run on j8.
 struct J8Runner;
 
 impl J8Runner {
@@ -73,7 +56,6 @@ impl J8Runner {
         use j8::frame::{CreateParams, Error, Isolate, Source};
         let platform = j8::platform::DefaultPlatform::default();
         let mut isolate = Isolate::new(&platform, CreateParams::default());
-        // With the JIT unless `J8_NOJIT` is set
         let mut executor = if std::env::var_os("J8_NOJIT").is_some() { Executor::default() } else { Executor::default().with_tier(j8::jit::Jit::default()) };
         let mut best = f64::INFINITY;
         let mut result = String::new();
@@ -115,7 +97,6 @@ impl J8Runner {
     }
 }
 
-/// Run on QuickJS: one runtime (like a V8 isolate) and a fresh full context per run.
 struct QuickJsRunner;
 
 impl QuickJsRunner {
@@ -132,7 +113,6 @@ impl QuickJsRunner {
         for _ in 0..runs {
             let cx = Context::full(&rt).map_err(|e| e.to_string())?;
             result = cx.with(|ctx| {
-                // eval takes the source as an owned byte buffer: make it before the clock starts
                 let code = src.as_bytes().to_vec();
                 let start = Instant::now();
                 let value = ctx.eval::<Value, _>(code);
@@ -156,7 +136,6 @@ impl QuickJsRunner {
 }
 
 impl Engine {
-    /// Child process: run all benchmarks on this engine, one line each: `name\tms\tchecksum` or `name\tERR\terror`.
     fn run_all(self, runs: usize) {
         for (name, src) in BENCHES {
             let r = match self {
@@ -171,17 +150,14 @@ impl Engine {
     }
 }
 
-/// One result line.
 struct Row {
     ms: Option<f64>,
     sum: String,
 }
 
-/// The main process's comparison table.
 struct Comparison;
 
 impl Comparison {
-    /// Start one child process per engine and collect the results into a table.
     fn run(runs: usize) -> Result<(), String> {
         let exe = std::env::current_exe().map_err(|e| e.to_string())?;
         let mut table: Vec<Vec<Row>> = Vec::new();

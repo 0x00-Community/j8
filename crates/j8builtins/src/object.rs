@@ -6,17 +6,13 @@ use j8framework::{Agent, Bound, Descriptor, Error, ErrorKind, Integrity, IterKin
 
 use crate::{Args, Installer};
 
-/// `Object` / `Function` / `Boolean` and their prototype methods.
 pub(crate) struct Objects;
 
 impl Objects {
-    /// Whether `new.target` is `Object` itself.
     fn is_object_ctor(v: Value<'_>) -> bool {
         matches!(v.kind(), ValueKind::Object(f) if matches!(f.borrow().kind, ObjectKind::Native(n) if core::ptr::fn_addr_eq(n.f, Self::object as j8framework::NativeFn)))
     }
 
-    /// `Object(v)`: when constructing a subclass, create from `new.target`; otherwise objects are returned as is,
-    /// `undefined` / `null` give a new empty object, and primitives are wrapped.
     fn object<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let new_target = a.new_target;
         if new_target != Value::Undefined && !Self::is_object_ctor(new_target) {
@@ -28,7 +24,6 @@ impl Objects {
         })
     }
 
-    /// Require an object (`Object.defineProperty` etc.).
     fn require_object<'gc>(a: &mut Agent<'gc, '_>, v: Value<'gc>, method: &str) -> Result<JsObject<'gc>, Error> {
         match v.kind() {
             ValueKind::Object(o) => Ok(o),
@@ -36,7 +31,6 @@ impl Objects {
         }
     }
 
-    /// The three kinds of EnumerableOwnProperties.
     fn enumerable_own<'gc>(a: &mut Agent<'gc, '_>, v: Value<'gc>, kind: IterKind) -> Result<Value<'gc>, Error> {
         let o = a.to_object(v)?;
         let mut out = Vec::new();
@@ -69,7 +63,6 @@ impl Objects {
         Self::enumerable_own(a, args.at(0), IterKind::Entries)
     }
 
-    /// `Object.assign(target, ...sources)`.
     fn assign<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let to = a.to_object(args.at(0))?;
         for &src in args.iter().skip(1).filter(|v| !v.is_nullish()) {
@@ -93,7 +86,6 @@ impl Objects {
         Ok(a.get_prototype_of(o)?.map_or(Value::Null, Value::Object))
     }
 
-    /// Prototype argument: an object or `null`.
     fn proto_arg<'gc>(a: &mut Agent<'gc, '_>, v: Value<'gc>) -> Result<Option<JsObject<'gc>>, Error> {
         match v.kind() {
             ValueKind::Object(o) => Ok(Some(o)),
@@ -118,7 +110,6 @@ impl Objects {
         Ok(target)
     }
 
-    /// ObjectDefineProperties.
     fn define_properties_on<'gc>(a: &mut Agent<'gc, '_>, o: JsObject<'gc>, props: Value<'gc>) -> Result<(), Error> {
         let props = a.to_object(props)?;
         let mut descs = Vec::new();
@@ -177,7 +168,6 @@ impl Objects {
         Ok(out.into())
     }
 
-    /// GetOwnPropertyKeys: string keys only / Symbol keys only.
     fn own_keys_of<'gc>(a: &mut Agent<'gc, '_>, v: Value<'gc>, symbols: bool) -> Result<Value<'gc>, Error> {
         let o = a.to_object(v)?;
         let keys = a.own_property_keys(o)?.into_iter().filter(|k| matches!(k, PropertyKey::Symbol(_)) == symbols).map(Value::from).collect();
@@ -252,7 +242,6 @@ impl Objects {
         Ok(a.has_own_property(o, key.key())?.into())
     }
 
-    /// `Object.fromEntries(iterable)`.
     fn from_entries<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let iterable = args.at(0);
         if iterable.is_nullish() {
@@ -279,7 +268,6 @@ impl Objects {
         Ok(o.into())
     }
 
-    /// `Object.groupBy(items, callback)`.
     fn group_by<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let groups = Self::group(a, args.at(0), args.at(1), true)?;
         let o = ObjectData::default().alloc(a.mc);
@@ -291,8 +279,6 @@ impl Objects {
         Ok(o.into())
     }
 
-    /// GroupBy: group by key in order of appearance (with `property`, keys go through ToPropertyKey first; otherwise
-    /// `-0` is normalized to `+0`).
     pub(crate) fn group<'gc>(a: &mut Agent<'gc, '_>, items: Value<'gc>, callback: Value<'gc>, property: bool) -> Result<Vec<(Value<'gc>, Vec<Value<'gc>>)>, Error> {
         if items.is_nullish() {
             return Err(a.throw(ErrorKind::Type, "groupBy called on null or undefined"));
@@ -410,7 +396,6 @@ impl Objects {
         Ok(Value::Undefined)
     }
 
-    /// `__defineGetter__` / `__defineSetter__` (annexB).
     fn define_half<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>], setter: bool) -> Result<Value<'gc>, Error> {
         let o = a.to_object(this)?;
         let f = match args.at(1).kind() {
@@ -432,7 +417,6 @@ impl Objects {
         Self::define_half(a, this, args, true)
     }
 
-    /// `__lookupGetter__` / `__lookupSetter__` (annexB).
     fn lookup_half<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>], setter: bool) -> Result<Value<'gc>, Error> {
         let o = a.to_object(this)?;
         let key = a.to_property_key(args.at(0))?;
@@ -461,7 +445,6 @@ impl Objects {
         Ok(a.to_object(this)?.into())
     }
 
-    /// `f.call(this, ...args)`.
     fn call<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         if !a.is_callable(this) {
             return Err(a.throw(ErrorKind::Type, "Function.prototype.call called on a non-function"));
@@ -469,7 +452,6 @@ impl Objects {
         a.call(this, args.at(0), args.get(1..).unwrap_or(&[]))
     }
 
-    /// `f.apply(this, arrayLike)`.
     fn apply<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         if !a.is_callable(this) {
             return Err(a.throw(ErrorKind::Type, "Function.prototype.apply was called on a non-function"));
@@ -481,8 +463,6 @@ impl Objects {
         a.call(this, args.at(0), &list)
     }
 
-    /// `f.bind(this, ...args)`: `length` = max(0, target's length − number of bound arguments), `name` = "bound " +
-    /// target's name.
     fn bind<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let Some(target) = this.as_object() else {
             return Err(a.throw(ErrorKind::Type, "Bind must be called on a function"));
@@ -522,8 +502,6 @@ impl Objects {
         if !a.is_callable(this) {
             return Err(a.throw(ErrorKind::Type, "Function.prototype.toString requires that 'this' be a Function"));
         }
-        // In NativeFunction syntax the name can only be a property name (optionally with get / set): private names,
-        // `bound f` and the like are left out
         let name = match this.kind() {
             ValueKind::Object(o) => match o.borrow().get_own(a.mc, "name").and_then(|p| p.value()).map(Value::kind) {
                 Some(ValueKind::String(s)) if Self::native_name(&s) => alloc::string::String::from(&**s),
@@ -534,19 +512,16 @@ impl Objects {
         Ok(a.string(&alloc::format!("function {name}() {{ [native code] }}")).into())
     }
 
-    /// Names that can be written verbatim into `function name() { [native code] }`.
     fn native_name(s: &str) -> bool {
         let bare = s.strip_prefix("get ").or_else(|| s.strip_prefix("set ")).unwrap_or(s);
         let ident = bare.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_' || c == '$') && bare.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '$');
         ident || (bare.starts_with('[') && bare.ends_with(']'))
     }
 
-    /// `Function.prototype` itself: calling it gives `undefined`.
     fn noop<'gc>(_: &mut Agent<'gc, '_>, _: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         Ok(Value::Undefined)
     }
 
-    /// `Function.prototype[Symbol.hasInstance](v)`: OrdinaryHasInstance.
     fn has_instance<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         Ok(a.ordinary_has_instance(this, args.at(0))?.into())
     }
@@ -557,7 +532,6 @@ impl Objects {
         a.wrap_primitive(new_target, b.into(), a.realm.boolean_proto)
     }
 
-    /// thisBooleanValue: a boolean or Boolean wrapper object; anything else throws TypeError.
     fn this_boolean<'gc>(a: &Agent<'gc, '_>, this: Value<'gc>, method: &str) -> Result<bool, Error> {
         match this.unwrapped().kind() {
             ValueKind::Bool(b) => Ok(b),
@@ -622,7 +596,6 @@ impl Installer<'_, '_> {
         for (name, f, n) in methods {
             self.method(proto, name, f, n);
         }
-        // `__proto__` is an accessor
         let get = self.realm.named_native(self.mc, Objects::proto_getter, "get __proto__", 0);
         let set = self.realm.named_native(self.mc, Objects::proto_setter, "set __proto__", 1);
         proto.borrow_mut(self.mc).define("__proto__", Property { slot: Slot::Accessor { get: Some(get), set: Some(set) }, enumerable: false, writable: false, configurable: true });
@@ -634,8 +607,6 @@ impl Installer<'_, '_> {
         self.realm.name_function(self.mc, proto, "", Some(0));
         self.method(proto, "call", Objects::call, 1);
         self.method(proto, "apply", Objects::apply, 2);
-        // The execution layer expands call / apply inline (the host implementation stays for cases like a non-callable
-        // target)
         for (name, forward) in [("call", j8framework::Forward::Call), ("apply", j8framework::Forward::Apply)] {
             let f = proto.borrow().own(self.mc, name);
             if let Some(ValueKind::Object(f)) = f.map(Value::kind)
@@ -649,7 +620,6 @@ impl Installer<'_, '_> {
         let has_instance = self.realm.named_native(self.mc, Objects::has_instance, "[Symbol.hasInstance]", 1);
         proto.borrow_mut(self.mc).define_symbol(self.realm.symbols.has_instance, Property { slot: Slot::Data(has_instance.into()), enumerable: false, writable: false, configurable: false });
         let b = self.realm.boolean_proto;
-        // Boolean.prototype itself is a Boolean object wrapping false
         b.borrow_mut(self.mc).kind = ObjectKind::Primitive(false.into());
         self.constructor("Boolean", Objects::boolean, b, 1);
         self.method(b, "toString", Objects::boolean_to_string, 0);

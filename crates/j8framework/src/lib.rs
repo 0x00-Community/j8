@@ -1,25 +1,5 @@
-//! j8framework: the core framework layer. It defines traits and common structs / enums; concrete implementations live
-//! in the per-layer crates (e.g. j8platform implements [`Platform`]).
-//!
-//! The heap is [paragc](https://crates.io/crates/paragc) (wrapped in `gc.rs`): every JS value carries the branded lifetime
-//! `'gc` and can only live within one [`Isolate::enter`].
-//!
-//! - [`Platform`]: threads and clocks (j8platform provides a standard library implementation)
-//! - [`Isolate`]: an independent JS world, holding the GC heap and the profiler
-//! - [`Scope`]: the scope of one entry into an isolate; a [`Value`] in it is V8's Local and becomes invisible once the
-//!   scope is left
-//! - [`Global`]: a persistent handle, surviving across multiple `enter` calls and released on drop
-//! - [`Context`] / [`Realm`]: the execution context, with the global object and the built-in prototypes ([`Intrinsics`]
-//!   is implemented by j8builtins)
-//! - [`Agent`]: the context of one run; JS operation semantics hang off it, and calls back into JS go through
-//!   [`Invoke`] (implemented by the execution engine)
-//! - [`Profiler`]: call / back-edge counters
-//! - [`Engine`]: the unified entry point implemented by the execution engine (j8executor); resumable
-//!   ([`Engine::start`] / [`Engine::resume`])
-//! - [`EventLoop`] / [`EventLoopSet`]: JS event loops (an isolate, its engine and a context each) and the loop threads
-//!   they are pinned to, placed on the least loaded thread
 extern crate alloc;
-// `#[derive(Collect)]` 生成的代码写 `::j8framework::…`，本 crate 里也要能这样引用自己
+
 extern crate self as j8framework;
 
 mod agent;

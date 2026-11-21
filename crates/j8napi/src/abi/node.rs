@@ -1,8 +1,3 @@
-//! Node 专有的部分：Buffer（这里就是 Uint8Array）、版本、清理钩子、致命异常、异步工作、线程安全函数。
-//!
-//! 异步工作与线程安全函数靠 isolate 的事件循环（[`j8framework::Agent::spawn`]）：工作线程做完后送一个 [`Oneshot`]，
-//! 事件循环在 JS 线程上跑 `Settle` 闭包。线程安全函数一批一批地跑：一批的 future 在有调用排队（或要关掉）时完成，
-//! 闭包跑完队列后再挂下一批。没有事件循环的 isolate 上这两样返回 `GenericFailure`。
 use alloc::boxed::Box;
 use alloc::sync::Arc;
 use core::ffi::c_void;
@@ -15,24 +10,20 @@ use j8lockfree::{Fifo, Oneshot, Sender};
 use crate::convert::Ffi;
 use crate::{CleanupHook, Env, Finalize, Handle, NodeVersion, Status, napi};
 
-/// 交给别的线程的裸指针（Node-API 约定插件自己保证它能跨线程）
 #[derive(Clone, Copy, Debug)]
 struct Raw<T>(T);
 
-// SAFETY: 见上
 unsafe impl<T> Send for Raw<T> {}
-// SAFETY: 见上
+
 unsafe impl<T> Sync for Raw<T> {}
 
 impl<T> Raw<T> {
-    /// 取出里面的值（闭包里用它，整个 `Raw` 被捕获，`Send` 才算数）
     fn get(self) -> T {
         self.0
     }
 }
 
 impl Env {
-    /// 一个 Uint8Array 视图，盖住整个 `buffer`
     fn uint8_array<'gc>(a: &Agent<'gc, '_>, bytes: Backing) -> j8framework::JsObject<'gc> {
         let len = bytes.len();
         let buffer = ObjectData { kind: ObjectKind::ArrayBuffer(Box::new(j8framework::BufferData { bytes: Some(bytes), max: None, shared: false })), proto: Some(a.realm.array_buffer_proto), ..ObjectData::default() }.alloc(a.mc);
@@ -41,7 +32,6 @@ impl Env {
         ObjectData { kind: ObjectKind::TypedArray(ElementKind::Uint8, view), proto: Some(a.realm.typed_protos[at]), ..ObjectData::default() }.alloc(a.mc)
     }
 
-    /// 在事件循环上排一件事：`ready` 完成后在 JS 线程上跑 `settle`（结果丢掉；抛的异常也就没人管）
     fn spawn(a: &Agent<'_, '_>, ready: impl core::future::Future<Output = ()> + Send + 'static, settle: Settle) -> Result<(), Status> {
         let p = a.new_promise();
         let (resolve, reject) = a.promise_resolvers(p);
@@ -53,9 +43,6 @@ impl Env {
     }
 }
 
-// ---- 异步工作 ----
-
-/// 异步工作的状态
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum WorkState {
@@ -65,7 +52,6 @@ enum WorkState {
     Cancelled = 3,
 }
 
-/// `napi_async_work`
 pub struct Work {
     env: NonNull<Env>,
     execute: unsafe extern "C" fn(env: *mut Env, data: *mut c_void),
@@ -85,7 +71,6 @@ impl Work {
             let (env, execute, data, state) = job.get();
             let start = state.compare_exchange(WorkState::Queued as u8, WorkState::Running as u8, Ordering::AcqRel, Ordering::Acquire);
             if start.is_ok() {
-                // SAFETY: 插件的 execute（不碰 JS）
                 unsafe { execute(env.as_ptr(), data) };
                 tx.send(Status::Ok);
             } else {
@@ -103,11 +88,9 @@ impl Work {
             let (env, complete, data, state) = back.get();
             let s = if status.load(Ordering::Acquire) == Status::Cancelled as u8 { Status::Cancelled } else { Status::Ok };
             state.store(WorkState::Idle as u8, Ordering::Release);
-            // SAFETY: Env 随 global 对象活
             let env = unsafe { env.as_ref() };
             env.enter(a, |env| {
                 if let Some(complete) = complete {
-                    // SAFETY: 插件的 complete，在 JS 线程上
                     unsafe { complete(env.as_ptr(), s, data) };
                 }
                 env.take_pending().map_or(Ok(Value::Undefined), Err)
@@ -117,9 +100,6 @@ impl Work {
     }
 }
 
-// ---- 线程安全函数 ----
-
-/// 线程安全函数的释放方式（`napi_threadsafe_function_release_mode`）
 #[repr(i32)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReleaseMode {
@@ -127,7 +107,6 @@ pub enum ReleaseMode {
     Abort = 1,
 }
 
-/// 调用时队列满了怎么办（`napi_threadsafe_function_call_mode`）
 #[repr(i32)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CallMode {
@@ -161,7 +140,6 @@ impl TryFrom<i32> for CallMode {
 
 type CallJs = unsafe extern "C" fn(env: *mut Env, js_callback: Handle, context: *mut c_void, data: *mut c_void);
 
-/// 线程安全函数里只在 JS 线程上碰的部分
 struct TsfnJs {
     env: NonNull<Env>,
     func: Option<Global>,
@@ -170,37 +148,30 @@ struct TsfnJs {
     finalize_data: *mut c_void,
 }
 
-/// `napi_threadsafe_function`：任何线程都能用
 pub struct Tsfn {
     queue: Fifo<Raw<*mut c_void>>,
     queued: AtomicUsize,
-    /// 队列上限（0 不限）
     max: usize,
     threads: AtomicUsize,
     closing: AtomicBool,
     aborted: AtomicBool,
-    /// 当前这批的扳机：送一下，事件循环就来跑队列
     armed: AtomicPtr<Sender<()>>,
     context: *mut c_void,
     js: *mut TsfnJs,
 }
 
-// SAFETY: 跨线程的字段都是原子的或无锁队列；`js` 只在 JS 线程上解引用
 unsafe impl Send for Tsfn {}
-// SAFETY: 同上
+
 unsafe impl Sync for Tsfn {}
 
 impl Tsfn {
-    /// 叫醒事件循环来跑队列（没挂着就算了：挂下一批时会再看队列）
     fn trigger(&self) {
         let p = self.armed.swap(core::ptr::null_mut(), Ordering::AcqRel);
         if !p.is_null() {
-            // SAFETY: `arm` 放进去的 Box，换出来的只有这一个人
             unsafe { Box::from_raw(p) }.send(());
         }
     }
 
-    /// 挂下一批（在 JS 线程上）
     fn arm(self: &Arc<Self>, a: &Agent<'_, '_>) -> Result<(), Status> {
         let (tx, rx) = Oneshot::<()>::new();
         let me = Arc::clone(self);
@@ -211,21 +182,16 @@ impl Tsfn {
         Env::spawn(a, rx, settle)?;
         let old = self.armed.swap(Box::into_raw(Box::new(tx)), Ordering::AcqRel);
         if !old.is_null() {
-            // SAFETY: 之前放进去、没人取走的扳机
             drop(unsafe { Box::from_raw(old) });
         }
-        // 挂上之前排进来的调用（或关闭）没有扳机可扣：自己扣
         if !self.queue.is_empty() || self.closing.load(Ordering::Acquire) {
             self.trigger();
         }
         Ok(())
     }
 
-    /// 这一批：跑掉队列里的调用；要关就收尾，否则挂下一批
     fn run(self: &Arc<Self>, a: &mut Agent<'_, '_>) {
-        // SAFETY: JS 线程上，收尾之前一直有效
         let js = unsafe { &*self.js };
-        // SAFETY: Env 随 global 对象活
         let env = unsafe { js.env.as_ref() };
         let aborted = self.aborted.load(Ordering::Acquire);
         env.enter(a, |env| {
@@ -237,7 +203,6 @@ impl Tsfn {
                 let Ok(a) = env.agent() else { return };
                 let f = js.func.as_ref().map_or(Value::Undefined, |g| a.local(g));
                 match js.call_js {
-                    // SAFETY: 插件的 call_js，在 JS 线程上
                     Some(cb) => unsafe { cb(env.as_ptr(), env.push(f), self.context, data) },
                     None if a.is_callable(f) => {
                         let r = a.call(f, Value::Undefined, &[]);
@@ -247,39 +212,29 @@ impl Tsfn {
                     }
                     None => {}
                 }
-                // 回调里抛的异常没人接：丢掉，接着跑
                 drop(env.take_pending());
             }
         });
         let done = self.closing.load(Ordering::Acquire) && (aborted || self.threads.load(Ordering::Acquire) == 0);
-        // 关了、或者挂不上下一批：收尾
         if done || self.arm(a).is_err() {
             self.finish(env);
         }
     }
 
-    /// 收尾：跑终结回调，放掉 JS 那一半和句柄持有的那份
     fn finish(self: &Arc<Self>, env: &Env) {
-        // SAFETY: 收尾只发生一次（之后不再挂批）
         let js = unsafe { Box::from_raw(self.js) };
         if let Some(cb) = js.finalize {
-            // SAFETY: 插件的终结回调
             unsafe { cb(env.as_ptr(), js.finalize_data, self.context) };
         }
-        // SAFETY: `napi_create_threadsafe_function` 交出去的那份
         drop(unsafe { Arc::from_raw(Arc::as_ptr(self)) });
     }
 
-    /// 句柄 ⇒ 共享部分
     fn of<'t>(p: *const Self) -> Result<&'t Self, Status> {
-        // SAFETY: `napi_create_threadsafe_function` 给出的指针，收尾之前有效
         unsafe { p.as_ref() }.ok_or(Status::InvalidArg)
     }
 }
 
 napi! {
-    // ---- Buffer ----
-
     fn napi_create_buffer(env, size: usize, data: *mut *mut c_void, result: *mut Handle) {
         let a = env.agent()?;
         let mut bytes = alloc::vec![0u8; size];
@@ -297,7 +252,6 @@ napi! {
     fn napi_create_external_buffer(env, length: usize, data: *mut c_void, finalize_cb: Finalize, finalize_hint: *mut c_void, result: *mut Handle) {
         let a = env.agent()?;
         let owner = Box::new(env.finalizer(finalize_cb, data, finalize_hint));
-        // SAFETY: Node-API 约定：插件保证 `data` 在终结回调之前一直有效
         let e = unsafe { External::from_raw(data.cast(), length, owner) };
         env.out(result, Env::uint8_array(a, e.into()).into())
     }
@@ -342,8 +296,6 @@ napi! {
         Ffi::put(result, is)
     }
 
-    // ---- 版本、清理钩子、致命异常 ----
-
     fn napi_get_node_version(env, result: *mut *const NodeVersion) {
         Ffi::put(result, env.node_version())
     }
@@ -373,8 +325,6 @@ napi! {
         Err(Status::GenericFailure)
     }
 
-    // ---- 异步工作 ----
-
     fn napi_create_async_work(
         env,
         async_resource: Handle,
@@ -395,25 +345,20 @@ napi! {
         if work.is_null() {
             return Err(Status::InvalidArg);
         }
-        // SAFETY: `napi_create_async_work` 给出的指针，只删一次
         drop(unsafe { Box::from_raw(work) });
         Ok(())
     }
 
     fn napi_queue_async_work(env, work: *mut Work) {
         let a = env.agent()?;
-        // SAFETY: `napi_create_async_work` 给出的指针
         unsafe { work.as_ref() }.ok_or(Status::InvalidArg)?.queue(a)
     }
 
     fn napi_cancel_async_work(env, work: *mut Work) {
         let _ = env;
-        // SAFETY: `napi_create_async_work` 给出的指针
         let w = unsafe { work.as_ref() }.ok_or(Status::InvalidArg)?;
         w.state.compare_exchange(WorkState::Queued as u8, WorkState::Cancelled as u8, Ordering::AcqRel, Ordering::Acquire).map(drop).map_err(|_| Status::GenericFailure)
     }
-
-    // ---- 线程安全函数 ----
 
     fn napi_create_threadsafe_function(
         env,
@@ -454,7 +399,6 @@ napi! {
             js,
         });
         if let Err(s) = t.arm(a) {
-            // SAFETY: 刚造的，没交出去
             drop(unsafe { Box::from_raw(js) });
             return Err(s);
         }
@@ -477,7 +421,6 @@ napi! {
     }
 }
 
-/// `napi_call_threadsafe_function`：任何线程（没有 env）
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn napi_call_threadsafe_function(func: *const Tsfn, data: *mut c_void, is_blocking: i32) -> Status {
     let (Ok(t), Ok(is_blocking)) = (Tsfn::of(func), CallMode::try_from(is_blocking)) else { return Status::InvalidArg };
@@ -499,7 +442,6 @@ pub unsafe extern "C" fn napi_call_threadsafe_function(func: *const Tsfn, data: 
     Status::Ok
 }
 
-/// `napi_acquire_threadsafe_function`
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn napi_acquire_threadsafe_function(func: *const Tsfn) -> Status {
     let Ok(t) = Tsfn::of(func) else { return Status::InvalidArg };
@@ -510,7 +452,6 @@ pub unsafe extern "C" fn napi_acquire_threadsafe_function(func: *const Tsfn) -> 
     Status::Ok
 }
 
-/// `napi_release_threadsafe_function`：计数到 0（或 abort）就关，事件循环随后收尾
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn napi_release_threadsafe_function(func: *const Tsfn, mode: i32) -> Status {
     let (Ok(t), Ok(mode)) = (Tsfn::of(func), ReleaseMode::try_from(mode)) else { return Status::InvalidArg };
@@ -525,4 +466,3 @@ pub unsafe extern "C" fn napi_release_threadsafe_function(func: *const Tsfn, mod
     }
     Status::Ok
 }
-

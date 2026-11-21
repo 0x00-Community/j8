@@ -1,6 +1,6 @@
 [package]
 name = "j8taskqueue"
-description = "j8 任务队列：无锁数据流调度，依赖做完的任务立刻在宿主线程池上并行跑；并查集归家族，配额按字节码条数"
+description = "j8's task queue: lock-free dataflow scheduling; tasks run in parallel on the host's thread pool as soon as their dependencies finish; union-find families, quotas counted in bytecodes"
 readme = "README.md"
 version.workspace = true
 edition.workspace = true

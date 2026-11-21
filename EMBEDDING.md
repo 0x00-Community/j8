@@ -9,9 +9,9 @@ together. The attribute-by-attribute reference for the binding macros is
 
 ```toml
 [dependencies]
-j8 = "0.3"                                          # default feature `runtime`: executor + built-ins + platform
-# j8 = { version = "0.3", features = ["jit"] }      # + the x86-64 JIT (x86-64 Unix)
-# j8 = { version = "0.3", features = ["json"] }     # + j8::Json<T> (serde)
+j8 = "0.4"                                          # default feature `runtime`: executor + built-ins + platform
+# j8 = { version = "0.4", features = ["jit"] }      # + the x86-64 JIT (x86-64 Unix)
+# j8 = { version = "0.4", features = ["json"] }     # + j8::Json<T> (serde)
 ```
 
 What you use from it:

@@ -1,6 +1,3 @@
-//! `#[j8::object]`: placed on an `impl` block containing only associated functions; exports it as a plain
-//! object (like `console` / `process`): the functions are the object's methods, and `#[js(getter)]` /
-//! `#[js(setter)]` are the object's accessors. Generates an `j8::Object` implementation.
 use proc_macro2::TokenStream;
 use quote::quote;
 use syn::ItemImpl;
@@ -34,9 +31,6 @@ pub fn expand(attr: TokenStream, mut item: ItemImpl) -> syn::Result<TokenStream>
     })
 }
 
-/// `#[j8::module("node:fs", "fs")]`: an object of functions exported as a native module under these specifiers (the
-/// first is canonical): `import fs from "node:fs"` / `import { readFileSync } from "fs"` / `require("fs")` in a runtime
-/// built with `j8::runtime!`.
 pub fn expand_module(attr: TokenStream, item: ItemImpl) -> syn::Result<TokenStream> {
     let specs = syn::parse::Parser::parse2(syn::punctuated::Punctuated::<syn::LitStr, syn::Token![,]>::parse_terminated, attr)?;
     let Some(first) = specs.first() else {

@@ -8,11 +8,8 @@ use j8framework::{Agent, Element, ElementKind, Error, ErrorKind, IterKind, JsObj
 use crate::buffer::Buffers;
 use crate::{Args, Installer};
 
-/// `%TypedArray%` and the concrete TypedArrays.
 struct Typed;
 
-/// How a callback method collects its results (same as the Array methods of the same name, except holes aren't
-/// skipped).
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Visit {
     ForEach,
@@ -33,8 +30,6 @@ impl Typed {
         x.into()
     }
 
-    /// ValidateTypedArray: returns (object, element type, view, length); throws TypeError if not a TypedArray or out of
-    /// bounds.
     fn validate<'gc>(a: &Agent<'gc, '_>, v: Value<'gc>) -> Result<(JsObject<'gc>, ElementKind, ViewData<'gc>, usize), Error> {
         let Some(o) = v.as_object() else { return Err(a.throw(ErrorKind::Type, "this is not a typed array")) };
         let Some((k, view)) = Agent::typed_array(o) else { return Err(a.throw(ErrorKind::Type, "this is not a typed array")) };
@@ -44,7 +39,6 @@ impl Typed {
         }
     }
 
-    /// Create a TypedArray holding `len` elements (with a new buffer).
     fn create<'gc>(a: &mut Agent<'gc, '_>, kind: ElementKind, proto: JsObject<'gc>, len: usize) -> Result<JsObject<'gc>, Error> {
         let Some(bytes) = len.checked_mul(kind.size()) else { return Err(a.throw(ErrorKind::Range, "Invalid typed array length")) };
         let buffer = Buffers::allocate(a, a.realm.array_buffer_proto, bytes, None, false)?;
@@ -55,7 +49,6 @@ impl Typed {
         ElementKind::ALL.iter().position(|&k| k == kind).unwrap_or(0)
     }
 
-    /// Concrete constructor: `K` is the element type index.
     #[expect(clippy::too_many_lines, reason = "the spec initializes from four kinds of argument in one place")]
     fn construct<'gc, const K: usize>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let new_target = a.new_target;
@@ -69,7 +62,6 @@ impl Typed {
             let proto = a.proto_from_ctor(new_target, a.realm.typed_protos[K])?;
             return Ok(Self::create(a, kind, proto, len)?.into());
         };
-        // View over a buffer
         if matches!(src.borrow().kind, ObjectKind::ArrayBuffer(_)) {
             let proto = a.proto_from_ctor(new_target, a.realm.typed_protos[K])?;
             let size = kind.size();
@@ -112,7 +104,6 @@ impl Typed {
             let view = ViewData { buffer: src, offset, length };
             return Ok(ObjectData { kind: ObjectKind::TypedArray(kind, view), proto: Some(proto), ..ObjectData::default() }.alloc(a.mc).into());
         }
-        // Copy from another TypedArray
         if let Some((sk, sview)) = Agent::typed_array(src) {
             let proto = a.proto_from_ctor(new_target, a.realm.typed_protos[K])?;
             let Some(len) = Agent::view_length(&sview, sk.size()) else {
@@ -130,7 +121,6 @@ impl Typed {
             }
             return Ok(out.into());
         }
-        // Iterable or array-like
         let proto = a.proto_from_ctor(new_target, a.realm.typed_protos[K])?;
         let using = a.get_symbol(first, a.realm.symbols.iterator, first)?;
         let values = if using.is_nullish() {
@@ -175,13 +165,10 @@ impl Typed {
         Ok(out.into())
     }
 
-    /// `%TypedArray%` itself can be neither called nor `new`ed.
     fn abstract_ctor<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         Err(a.throw(ErrorKind::Type, "Abstract class TypedArray not directly constructable"))
     }
 
-    /// TypedArrayCreateFromConstructor: the result must be an in-bounds TypedArray, and if only a length was given it
-    /// must not be shorter than that.
     fn create_from_ctor<'gc>(a: &mut Agent<'gc, '_>, ctor: Value<'gc>, args: &[Value<'gc>]) -> Result<(JsObject<'gc>, ElementKind, usize), Error> {
         let made = a.construct(ctor, args, ctor)?;
         let (o, k, _, len) = Self::validate(a, made)?;
@@ -194,7 +181,6 @@ impl Typed {
         Ok((o, k, len))
     }
 
-    /// TypedArraySpeciesCreate: the result's content type (BigInt / Number) must match the exemplar's.
     fn species_create<'gc>(a: &mut Agent<'gc, '_>, exemplar: JsObject<'gc>, kind: ElementKind, args: &[Value<'gc>]) -> Result<JsObject<'gc>, Error> {
         let default = a.realm.typed_ctors[Self::index_of_kind(kind)].into();
         let ctor = Buffers::species_constructor(a, exemplar.into(), default)?;
@@ -209,7 +195,6 @@ impl Typed {
         Ok(this)
     }
 
-    /// `%TypedArray%.from(source, mapFn, thisArg)`.
     fn from<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         if !a.is_constructor(this) {
             return Err(a.throw(ErrorKind::Type, "TypedArray.from: this is not a constructor"));
@@ -224,8 +209,6 @@ impl Typed {
             let like = a.to_object(source)?;
             let len = a.length_of_array_like(like.into())?;
             let mut k = 0.0;
-            // Array-like: create the result first, then read element by element (the reads' side effects happen after
-            // creation)
             let (target, _, _) = Self::create_from_ctor(a, this, &[len.into()])?;
             while k < len {
                 let v = a.get_index(like.into(), k)?;
@@ -372,7 +355,6 @@ impl Typed {
     }
 }
 
-/// Callback methods: each host function corresponds to one [`Visit`].
 macro_rules! visits {
     ($($name:ident => $how:ident),* $(,)?) => {
         impl Typed {
@@ -445,7 +427,6 @@ impl Typed {
         let end = Self::relative(a, args.at(2), lenf, lenf)?;
         let (_, _, view, len) = Self::validate(a, o.into())?;
         let end = end.min(Self::f(len));
-        // Encode once, borrow the buffer once, fill it chunk by chunk on the thread pool
         let pattern = kind.encode(&e);
         let size = kind.size();
         #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "clamped to [0, len]")]
@@ -459,7 +440,6 @@ impl Typed {
         Ok(o.into())
     }
 
-    /// Lookup by SameValueZero / strict equality.
     fn search<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>], last: bool, zero: bool) -> Result<Value<'gc>, Error> {
         let (o, _, _, len) = Self::validate(a, this)?;
         let not_found: Value<'gc> = if zero { false.into() } else { (-1.0).into() };
@@ -489,9 +469,6 @@ impl Typed {
             return Ok(not_found);
         }
         let mut k = if n >= 0.0 { n } else { (lenf + n).max(0.0) };
-        // Searching for a Number and elements aren't BigInt: borrow the buffer once and decode and compare chunks in
-        // parallel on the thread pool (only scan what is still in bounds now: out-of-bounds reads give undefined, which
-        // can't equal a Number)
         if let Some(w) = want.as_number()
             && let Some((kind, view)) = Agent::typed_array(o)
             && !kind.is_bigint()
@@ -579,7 +556,6 @@ impl Typed {
         Ok(a.string(&out).into())
     }
 
-    /// Read out the whole range of elements.
     fn elements<'gc>(a: &Agent<'gc, '_>, kind: ElementKind, view: &ViewData<'gc>, len: usize) -> Vec<Value<'gc>> {
         (0..len).filter_map(|i| Agent::read_raw(view.buffer, view.offset + i * kind.size(), kind)).map(|e| a.element_value(e)).collect()
     }
@@ -613,7 +589,6 @@ impl Typed {
         Ok(out.into())
     }
 
-    /// Default comparison: numbers ascending (-0 before +0), NaN last.
     fn order<'gc>(a: &mut Agent<'gc, '_>, f: Value<'gc>, x: Value<'gc>, y: Value<'gc>) -> Result<Ordering, Error> {
         if f != Value::Undefined {
             let r = a.call(f, Value::Undefined, &[x, y])?;
@@ -632,7 +607,6 @@ impl Typed {
         })
     }
 
-    /// Default numeric order: NaN last, -0 before +0
     fn numeric_order(x: f64, y: f64) -> Ordering {
         match (x.is_nan(), y.is_nan()) {
             (true, true) => Ordering::Equal,
@@ -646,7 +620,6 @@ impl Typed {
         if v.len() <= 1 {
             return Ok(v);
         }
-        // No comparator and all elements are Numbers: sort numerically in parallel (no user code is called)
         if f == Value::Undefined && v.iter().all(|x| x.is_number()) {
             let mut xs: Vec<f64> = v.iter().map(|x| x.as_number().unwrap_or(0.0)).collect();
             a.par().sort_by(&mut xs, &|x, y| Self::numeric_order(*x, *y));
@@ -683,7 +656,6 @@ impl Typed {
         let (o, kind, view, len) = Self::validate(a, this)?;
         let values = Self::elements(a, kind, &view, len);
         let sorted = Self::sorted(a, args.at(0), values)?;
-        // The comparator may have shrunk the buffer: only write what is still in bounds
         let len = Agent::view_length(&view, kind.size()).unwrap_or(0);
         Self::write_all(a, kind, &view, &sorted[..len.min(sorted.len())]);
         Ok(o.into())
@@ -759,7 +731,6 @@ impl Typed {
         Ok(Self::species_create(a, o, kind, &ctor_args)?.into())
     }
 
-    /// `set(source, offset)`.
     fn set<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let (kind, _) = Self::this_typed(a, this)?;
         let Some(target) = this.as_object() else { unreachable!("checked above") };
@@ -783,7 +754,6 @@ impl Typed {
             }
             #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "checked to be in bounds")]
             let off = offset as usize;
-            // Read everything out first (so the same buffer doesn't overwrite itself)
             let items: Vec<Element> = (0..slen).filter_map(|i| Agent::read_raw(sview.buffer, sview.offset + i * sk.size(), sk)).collect();
             for (i, e) in items.iter().enumerate() {
                 a.write_raw(tview.buffer, tview.offset + (off + i) * kind.size(), kind, e);
@@ -901,7 +871,6 @@ impl<'gc> Installer<'_, 'gc> {
         for (name, f, n) in methods {
             self.method(proto, name, f, n);
         }
-        // `[Symbol.iterator]` is the same function as `values`, and `toString` the same as Array.prototype.toString
         let values = proto.borrow().own(self.mc, "values").unwrap_or_default();
         proto.borrow_mut(self.mc).define_symbol(r.symbols.iterator, Property::hidden(values));
         let to_string = r.array_proto.borrow().own(self.mc, "toString").unwrap_or_default();

@@ -7,22 +7,21 @@ use j8::bytecode::{Decoder, Module, OperandScale, OperandType, Register, SharedF
 use j8::compiler::Compile;
 use j8::frame::{CodeKind, Source};
 
-/// Input (file / stdin / command line) and output (file / stdout).
 #[derive(Args)]
+#[command(about = "Input (file / stdin / command line) and output (file / stdout)")]
 pub struct Io {
-    /// Input file; `-` reads stdin
+    #[arg(help = "Input file; `-` reads stdin")]
     #[arg(required_unless_present = "eval", conflicts_with = "eval")]
     file: Option<PathBuf>,
-    /// Input given directly
+    #[arg(help = "Input given directly")]
     #[arg(short, long)]
     eval: Option<String>,
-    /// Write to a file; defaults to stdout
+    #[arg(help = "Write to a file; defaults to stdout")]
     #[arg(short, long)]
     output: Option<PathBuf>,
 }
 
 impl Io {
-    /// Input bytes and the file name used in errors
     fn bytes(&self) -> Result<(Vec<u8>, String), String> {
         match (&self.eval, &self.file) {
             (Some(code), _) => Ok((code.clone().into_bytes(), "<eval>".into())),
@@ -47,9 +46,8 @@ impl Io {
     }
 }
 
-/// `j8bcdbg compile`: JS ⇒ bytecode, listed per function the way V8's `--print-bytecode` lists instructions (to compare
-/// with V8 line by line).
 #[derive(Args)]
+#[command(about = "`j8bcdbg compile`: JS ⇒ bytecode, listed per function the way V8's `--print-bytecode` lists instructions (to compare with V8 line by line)")]
 pub struct Compiled {
     #[command(flatten)]
     io: Io,
@@ -68,7 +66,6 @@ impl Compiled {
     }
 }
 
-/// One function's listing.
 struct Listing<'a>(&'a SharedFunction);
 
 impl Listing<'_> {

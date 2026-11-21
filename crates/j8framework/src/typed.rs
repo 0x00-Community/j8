@@ -1,5 +1,3 @@
-//! Binary data: element encoding / decoding (including Float16), TypedArray length and out-of-bounds handling, and the
-//! property behavior of integer-indexed exotic objects (spec 10.4.5).
 use alloc::vec::Vec;
 
 use num_bigint::BigInt;
@@ -7,24 +5,20 @@ use num_traits::ToPrimitive;
 
 use crate::{Agent, ElementKind, Error, JsObject, Key, ObjectKind, Value, ViewData};
 
-/// 2^32
 const TWO_32: f64 = 4_294_967_296.0;
-/// Float16 exponent bias
+
 const F16_BIAS: i32 = 15;
-/// Float16 mantissa bit count
+
 const F16_MANTISSA: u32 = 10;
-/// Float16 all-ones exponent (infinity / NaN)
+
 const F16_EXP_MAX: u16 = 0x1f;
 
-/// A number to be written into a buffer: a TypedArray converts it by element type first (ToNumber / ToBigInt), then
-/// checks the index.
 #[derive(Clone, Debug)]
 pub enum Element {
     Number(f64),
     BigInt(BigInt),
 }
 
-/// Float ⇒ unsigned integer modulo 2^bits (the common part of ToInt8 / ToUint16 …).
 fn modulo(x: f64, bits: u32) -> u64 {
     if !x.is_finite() {
         return 0;
@@ -37,7 +31,6 @@ fn modulo(x: f64, bits: u32) -> u64 {
     r
 }
 
-/// ToUint8Clamp: clamp to [0, 255], rounding half to even.
 fn clamp_u8(x: f64) -> u8 {
     if x.is_nan() || x <= 0.0 {
         return 0;
@@ -46,7 +39,6 @@ fn clamp_u8(x: f64) -> u8 {
         return 255;
     }
     let f = libm::floor(x);
-    // Round up above one half; at exactly one half round toward even
     let up = f + 0.5 < x || (f + 0.5 == x && f % 2.0 != 0.0);
     let r = if up { f + 1.0 } else { f };
     #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "already clamped to [0, 255]")]
@@ -54,7 +46,6 @@ fn clamp_u8(x: f64) -> u8 {
     r
 }
 
-/// f64 ⇒ Float16 bits (round to nearest, ties to even, in a single rounding without going through f32).
 pub fn f64_to_f16(x: f64) -> u16 {
     let bits = x.to_bits();
     let sign = u16::from(bits >> 63 != 0) << 15;
@@ -65,15 +56,12 @@ pub fn f64_to_f16(x: f64) -> u16 {
     if a == 0.0 {
         return sign;
     }
-    // The largest finite value is 65504; the boundary for rounding to infinity is 65520
     if a >= 65520.0 {
         return sign | (F16_EXP_MAX << F16_MANTISSA);
     }
-    // 2^-24 is the smallest subnormal; round to nearest even in units of 2^-24
     let e = libm::floor(libm::log2(a));
     #[expect(clippy::cast_possible_truncation, reason = "the exponent is in [-1075, 16]")]
     let mut e = e as i32;
-    // log2 may be off by one; correct it
     if libm::ldexp(1.0, e) > a {
         e -= 1;
     } else if libm::ldexp(1.0, e + 1) <= a {
@@ -89,7 +77,6 @@ pub fn f64_to_f16(x: f64) -> u16 {
     #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "the mantissa is at most 2^11")]
     let m = m as u32;
     if !normal {
-        // Subnormal (rounding may carry into the smallest normal; the bit patterns are exactly contiguous)
         #[expect(clippy::cast_possible_truncation, reason = "at most 2^10")]
         return sign | m as u16;
     }
@@ -107,7 +94,6 @@ pub fn f64_to_f16(x: f64) -> u16 {
     r
 }
 
-/// Float16 bits ⇒ f64.
 pub fn f16_to_f64(h: u16) -> f64 {
     let sign = if h & 0x8000 != 0 { -1.0 } else { 1.0 };
     let exp = (h >> F16_MANTISSA) & F16_EXP_MAX;
@@ -121,7 +107,6 @@ pub fn f16_to_f64(h: u16) -> f64 {
 }
 
 impl ElementKind {
-    /// Encode into little-endian bytes.
     pub fn encode(self, v: &Element) -> Vec<u8> {
         match (self, v) {
             (ElementKind::BigInt64 | ElementKind::BigUint64, Element::BigInt(b)) => {
@@ -149,7 +134,6 @@ impl ElementKind {
         }
     }
 
-    /// Decode from little-endian bytes.
     pub fn decode(self, b: &[u8]) -> Element {
         let arr = |n: usize| {
             let mut x = [0u8; 8];
@@ -172,7 +156,6 @@ impl ElementKind {
     }
 }
 
-/// CanonicalNumericIndexString: `"-0"`, or ToString(ToNumber(s)) is exactly itself.
 pub fn canonical_numeric(key: &str) -> Option<f64> {
     if key == "-0" {
         return Some(-0.0);
@@ -186,7 +169,6 @@ pub fn canonical_numeric(key: &str) -> Option<f64> {
 }
 
 impl<'gc> Agent<'gc, '_> {
-    /// The buffer's byte count (`None` if detached).
     pub fn buffer_len(buffer: JsObject<'gc>) -> Option<usize> {
         match &buffer.borrow().kind {
             ObjectKind::ArrayBuffer(b) => b.bytes.as_deref().map(<[u8]>::len),
@@ -194,8 +176,6 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    /// The view's current length (by element for a TypedArray, by byte for a DataView): `None` if out of bounds /
-    /// detached.
     pub fn view_length(view: &ViewData<'gc>, size: usize) -> Option<usize> {
         let len = Self::buffer_len(view.buffer)?;
         if view.offset > len {
@@ -207,7 +187,6 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    /// If it is a TypedArray, returns the element type and the view.
     pub fn typed_array(o: JsObject<'gc>) -> Option<(ElementKind, ViewData<'gc>)> {
         match o.borrow().kind {
             ObjectKind::TypedArray(k, v) => Some((k, v)),
@@ -215,12 +194,10 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    /// The length of a TypedArray (0 if out of bounds).
     pub fn typed_length(o: JsObject<'gc>) -> usize {
         Self::typed_array(o).and_then(|(k, v)| Self::view_length(&v, k.size())).unwrap_or(0)
     }
 
-    /// IsValidIntegerIndex: an integer, not -0, within the length.
     fn valid_index(o: JsObject<'gc>, i: f64) -> Option<usize> {
         let (k, v) = Self::typed_array(o)?;
         if i != libm::trunc(i) || (i == 0.0 && i.is_sign_negative()) || i < 0.0 {
@@ -232,7 +209,6 @@ impl<'gc> Agent<'gc, '_> {
         (i < 9_007_199_254_740_992.0 && n < len).then_some(n)
     }
 
-    /// Element ⇒ JS value.
     pub fn element_value(&self, e: Element) -> Value<'gc> {
         match e {
             Element::Number(x) => x.into(),
@@ -240,7 +216,6 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    /// Read the `i`-th element of a TypedArray (`None` if the index is invalid).
     pub fn typed_get(&self, o: JsObject<'gc>, i: f64) -> Option<Value<'gc>> {
         let n = Self::valid_index(o, i)?;
         let (k, v) = Self::typed_array(o)?;
@@ -248,7 +223,6 @@ impl<'gc> Agent<'gc, '_> {
         Some(self.element_value(e))
     }
 
-    /// Read one element from the buffer starting at byte `at`.
     pub fn read_raw(buffer: JsObject<'gc>, at: usize, k: ElementKind) -> Option<Element> {
         match &buffer.borrow().kind {
             ObjectKind::ArrayBuffer(b) => b.bytes.as_ref().and_then(|bytes| bytes.get(at..at + k.size())).map(|s| k.decode(s)),
@@ -256,7 +230,6 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    /// Write one element into the buffer starting at byte `at`.
     pub fn write_raw(&self, buffer: JsObject<'gc>, at: usize, k: ElementKind, e: &Element) {
         let bytes = k.encode(e);
         if let ObjectKind::ArrayBuffer(b) = &mut buffer.borrow_mut(self.mc).kind
@@ -266,12 +239,10 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    /// Convert to a number by element type (ToBigInt for BigInt types, ToNumber otherwise).
     pub fn to_element(&mut self, k: ElementKind, v: Value<'gc>) -> Result<Element, Error> {
         if k.is_bigint() { Ok(Element::BigInt(self.to_bigint(v)?)) } else { Ok(Element::Number(self.to_number(v)?)) }
     }
 
-    /// TypedArraySetElement: convert to a number first, and write only if the index is valid.
     pub fn typed_set(&mut self, o: JsObject<'gc>, i: f64, v: Value<'gc>) -> Result<(), Error> {
         let Some((k, _)) = Self::typed_array(o) else { return Ok(()) };
         let e = self.to_element(k, v)?;
@@ -283,7 +254,6 @@ impl<'gc> Agent<'gc, '_> {
         Ok(())
     }
 
-    /// A numeric key on a TypedArray: returns the canonicalized index.
     pub(crate) fn typed_numeric(o: JsObject<'gc>, key: Key<'_, 'gc>) -> Option<f64> {
         let Key::Str(k) = key else { return None };
         if o.is_plain() || !matches!(o.borrow().kind, ObjectKind::TypedArray(..)) {

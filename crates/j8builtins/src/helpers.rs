@@ -6,10 +6,8 @@ use j8framework::{Agent, Error, ErrorKind, HelperKind, HelperState, IterRecord, 
 
 use crate::{Args, Installer};
 
-/// The global `Iterator`, the helper methods on `Iterator.prototype`, and `Iterator.from`.
 struct Helpers;
 
-/// How `some` / `every` / `find` collect their result.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Probe {
     Some,
@@ -22,7 +20,6 @@ impl Helpers {
         matches!(v.kind(), ValueKind::Object(f) if matches!(f.borrow().kind, ObjectKind::Native(n) if core::ptr::fn_addr_eq(n.f, Self::iterator as j8framework::NativeFn)))
     }
 
-    /// `Iterator` is abstract: it can only be constructed through a subclass.
     fn iterator<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let new_target = a.new_target;
         if new_target == Value::Undefined || Self::is_iterator_ctor(new_target) {
@@ -31,13 +28,11 @@ impl Helpers {
         Ok(a.create_from_ctor(new_target, a.realm.iterator_proto, ObjectKind::Ordinary)?.into())
     }
 
-    /// GetIteratorDirect.
     fn direct<'gc>(a: &mut Agent<'gc, '_>, o: Value<'gc>) -> Result<IterRecord<'gc>, Error> {
         let next = a.get_named(o, "next")?;
         Ok(IterRecord { iterator: o, next })
     }
 
-    /// `this` must be an object.
     fn this_object<'gc>(a: &Agent<'gc, '_>, this: Value<'gc>) -> Result<Value<'gc>, Error> {
         match this.kind() {
             ValueKind::Object(_) => Ok(this),
@@ -45,7 +40,6 @@ impl Helpers {
         }
     }
 
-    /// Argument validation failed: close the `this` iterator first, then throw.
     fn reject<'gc>(a: &mut Agent<'gc, '_>, iterator: Value<'gc>, kind: ErrorKind, message: &str) -> Error {
         let e = a.throw(kind, message);
         let _ = a.iterator_close(iterator);
@@ -61,7 +55,6 @@ impl Helpers {
         }
     }
 
-    /// On error, quietly close the underlying iterator and rethrow the original error.
     fn close_on<'gc, T>(a: &mut Agent<'gc, '_>, iterator: Value<'gc>, r: Result<T, Error>) -> Result<T, Error> {
         if r.is_err() {
             let _ = a.iterator_close(iterator);
@@ -93,7 +86,6 @@ impl Helpers {
         Self::with_callback(a, this, args, HelperKind::FlatMap)
     }
 
-    /// Count for `take` / `drop`: not NaN, not negative (may be +∞).
     fn limited<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>], kind: HelperKind) -> Result<Value<'gc>, Error> {
         let this = Self::this_object(a, this)?;
         let n = a.to_number(args.at(0));
@@ -116,7 +108,6 @@ impl Helpers {
         Self::limited(a, this, args, HelperKind::Drop)
     }
 
-    /// GetIteratorFlattenable: with `strings`, strings are accepted too; other primitives throw TypeError.
     fn flattenable<'gc>(a: &mut Agent<'gc, '_>, v: Value<'gc>, strings: bool) -> Result<IterRecord<'gc>, Error> {
         match v.kind() {
             ValueKind::Object(_) => {}
@@ -134,7 +125,6 @@ impl Helpers {
         Self::direct(a, iterator)
     }
 
-    /// Run the helper one step: returns the produced value, or `None` when done.
     fn step<'gc>(a: &mut Agent<'gc, '_>, h: &mut IteratorHelper<'gc>) -> Result<Option<Value<'gc>>, Error> {
         let under = h.underlying;
         loop {
@@ -246,7 +236,6 @@ impl Helpers {
         Ok(a.iter_result(Value::Undefined, true).into())
     }
 
-    /// Start of a consuming method: validate the callback, get `next`.
     fn consumer<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, f: Value<'gc>) -> Result<IterRecord<'gc>, Error> {
         let this = Self::this_object(a, this)?;
         Self::callable(a, this, f)?;
@@ -333,7 +322,6 @@ impl Helpers {
         Self::probe(a, this, args, Probe::Find)
     }
 
-    /// `Iterator.from(o)`: returned as is if it already inherits from Iterator.prototype, otherwise wrapped.
     fn from<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let rec = Self::flattenable(a, args.at(0), true)?;
         let inherits = match rec.iterator.kind() {
@@ -381,18 +369,14 @@ impl Helpers {
         a.call(ret, r.iterator, &[])
     }
 
-    /// Getter for `Iterator.prototype[Symbol.toStringTag]`.
     fn tag_get<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         Ok(a.string("Iterator").into())
     }
 
-    /// Getter for `Iterator.prototype.constructor`.
     fn ctor_get<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         Ok(a.realm.global.borrow().own(a.mc, "Iterator").unwrap_or_default())
     }
 
-    /// SetterThatIgnoresPrototypeProperties: writing on Iterator.prototype itself throws TypeError; on other objects it
-    /// creates / changes an own property.
     fn ignoring_setter<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, key: Key<'_, 'gc>, v: Value<'gc>) -> Result<Value<'gc>, Error> {
         let Some(o) = this.as_object() else {
             return Err(a.throw(ErrorKind::Type, "setter called on a non-object"));

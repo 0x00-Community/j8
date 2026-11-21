@@ -1,18 +1,6 @@
-//! benchjsc: timing comparison of the same JS benchmarks on j8 and JavaScriptCore (WebKitGTK's
-//! `libjavascriptcoregtk-6.0`, through its C API).
-//!
-//! ```text
-//! cargo run --release                    # run all three engines once each and print the comparison table
-//! cargo run --release -- --engine j8     # run only one: j8 / jsc / jsc-nojit
-//! cargo run --release -- --runs 10       # runs per benchmark, the shortest is kept (default 5)
-//! ```
-//! JSC reads its options from `JSC_*` environment variables once per process, so each engine runs in its own child
-//! process; timing covers compile + execute only, and each run uses a fresh global context (top-level `let` / `const`
-//! don't collide with the previous run's). The benchmarks are benchv8's, so the checksums match V8's too.
 use std::process::{Command, ExitCode};
 use std::time::Instant;
 
-/// Benchmarks: name and source (the script's completion value is a checksum that must match across the engines).
 const BENCHES: [(&str, &str); 11] = [
     ("fib", include_str!("../../benchv8/bench/fib.js")),
     ("loop", include_str!("../../benchv8/bench/loop.js")),
@@ -27,13 +15,10 @@ const BENCHES: [(&str, &str); 11] = [
     ("regexp", include_str!("../../benchv8/bench/regexp.js")),
 ];
 
-/// Default runs per benchmark (the shortest is kept)
 const DEFAULT_RUNS: usize = 5;
 
-/// JSC option turning off every JIT tier (baseline, DFG, FTL), leaving the LLInt interpreter: JSC's `--jitless`
 const JSC_NO_JIT: (&str, &str) = ("JSC_useJIT", "false");
 
-/// Engines in the comparison.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Engine {
     J8,
@@ -64,10 +49,8 @@ impl TryFrom<&str> for Engine {
     }
 }
 
-/// Result of one benchmark: shortest time (milliseconds) and checksum; error text on failure.
 type Outcome = Result<(f64, String), String>;
 
-/// Run on j8.
 struct J8Runner;
 
 impl J8Runner {
@@ -77,7 +60,6 @@ impl J8Runner {
         use j8::frame::{CreateParams, Error, Isolate, Source};
         let platform = j8::platform::DefaultPlatform::default();
         let mut isolate = Isolate::new(&platform, CreateParams::default());
-        // With the JIT unless `J8_NOJIT` is set
         let mut executor = if std::env::var_os("J8_NOJIT").is_some() { Executor::default() } else { Executor::default().with_tier(j8::jit::Jit::default()) };
         let mut best = f64::INFINITY;
         let mut result = String::new();
@@ -119,8 +101,6 @@ impl J8Runner {
     }
 }
 
-/// The part of JavaScriptCore's C API (`JavaScriptCore/JavaScript.h`) the runner needs. The library is linked by its
-/// file name, so only the runtime package is needed, not the -dev one.
 mod jsc {
     use std::ffi::{c_char, c_void};
 
@@ -151,20 +131,17 @@ mod jsc {
     }
 }
 
-/// An owned `JSStringRef`.
 struct JscString(jsc::JsString);
 
 impl From<&str> for JscString {
     fn from(s: &str) -> Self {
         let c = std::ffi::CString::new(s).unwrap_or_default();
-        // SAFETY: `c` is a NUL-terminated UTF-8 string that JSC copies
         Self(unsafe { jsc::JSStringCreateWithUTF8CString(c.as_ptr()) })
     }
 }
 
 impl From<&JscString> for String {
     fn from(s: &JscString) -> Self {
-        // SAFETY: the buffer is as large as JSC says the UTF-8 form can be; it writes the NUL and returns the count with it
         unsafe {
             let mut buf = vec![0u8; jsc::JSStringGetMaximumUTF8CStringSize(s.0)];
             let n = jsc::JSStringGetUTF8CString(s.0, buf.as_mut_ptr().cast(), buf.len());
@@ -176,32 +153,25 @@ impl From<&JscString> for String {
 
 impl Drop for JscString {
     fn drop(&mut self) {
-        // SAFETY: the string was created by JSC and is released once
         unsafe { jsc::JSStringRelease(self.0) }
     }
 }
 
-/// A global context, released on drop.
 struct JscContext(jsc::GlobalContext);
 
 impl JscContext {
     fn new(group: jsc::ContextGroup) -> Self {
-        // SAFETY: a null class gives the default global object
         Self(unsafe { jsc::JSGlobalContextCreateInGroup(group, std::ptr::null()) })
     }
 
-    /// The value's `ToString`, or `None` if that throws.
     fn string(&self, value: jsc::Value) -> Option<String> {
         let mut exception = std::ptr::null();
-        // SAFETY: `value` belongs to this context and is kept alive by the stack scan while it is converted
         let s = unsafe { jsc::JSValueToStringCopy(self.0, value, &raw mut exception) };
         (!s.is_null()).then(|| String::from(&JscString(s)))
     }
 
-    /// Evaluate a script; `Err` holds the thrown value.
     fn eval(&self, script: &JscString) -> Result<jsc::Value, jsc::Value> {
         let mut exception = std::ptr::null();
-        // SAFETY: both strings outlive the call; a null URL and `this` are allowed
         let v = unsafe {
             jsc::JSEvaluateScript(self.0, script.0, std::ptr::null(), std::ptr::null_mut(), 1, &raw mut exception)
         };
@@ -211,17 +181,14 @@ impl JscContext {
 
 impl Drop for JscContext {
     fn drop(&mut self) {
-        // SAFETY: the context was created by JSC and is released once
         unsafe { jsc::JSGlobalContextRelease(self.0) }
     }
 }
 
-/// Run on JavaScriptCore: one context group (a JSC VM, like a V8 isolate) and a fresh global context per run.
 struct JscRunner;
 
 impl JscRunner {
     fn run(src: &str, runs: usize) -> Outcome {
-        // SAFETY: the group is released below, after every context of it
         let group = unsafe { jsc::JSContextGroupCreate() };
         let script = JscString::from(src);
         let mut best = f64::INFINITY;
@@ -240,14 +207,12 @@ impl JscRunner {
             }
         }
         drop(script);
-        // SAFETY: no context of the group is left
         unsafe { jsc::JSContextGroupRelease(group) };
         result.map(|r| (best, r))
     }
 }
 
 impl Engine {
-    /// Child process: run all benchmarks on this engine, one line each: `name\tms\tchecksum` or `name\tERR\terror`.
     fn run_all(self, runs: usize) {
         for (name, src) in BENCHES {
             let r = match self {
@@ -261,7 +226,6 @@ impl Engine {
         }
     }
 
-    /// The child process for this engine, with JSC's options in its environment.
     fn command(self, exe: &std::path::Path, runs: usize) -> Command {
         let mut cmd = Command::new(exe);
         cmd.args(["--engine", self.name(), "--runs", &runs.to_string()]);
@@ -272,17 +236,14 @@ impl Engine {
     }
 }
 
-/// One result line.
 struct Row {
     ms: Option<f64>,
     sum: String,
 }
 
-/// The main process's comparison table.
 struct Comparison;
 
 impl Comparison {
-    /// Start one child process per engine and collect the results into a table.
     fn run(runs: usize) -> Result<(), String> {
         let exe = std::env::current_exe().map_err(|e| e.to_string())?;
         let mut table: Vec<Vec<Row>> = Vec::new();
@@ -354,7 +315,6 @@ fn main() -> ExitCode {
         .and_then(|r| r.parse().ok())
         .unwrap_or(DEFAULT_RUNS);
     let r = match flag("--engine") {
-        // run directly as `--engine jsc-nojit`: re-run with JSC's options set, since JSC reads them at startup
         Some(e) if e == Engine::JscNoJit.name() && std::env::var_os(JSC_NO_JIT.0).is_none() => {
             std::env::current_exe()
                 .map_err(|e| e.to_string())

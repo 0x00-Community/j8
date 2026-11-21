@@ -1,4 +1,3 @@
-//! j8bcdbg: the j8 debugging CLI.
 mod code;
 
 use std::process::ExitCode;
@@ -7,8 +6,8 @@ use clap::{Parser, Subcommand};
 
 use code::Compiled;
 
-/// j8 debugging tool
 #[derive(Parser)]
+#[command(about = "j8 debugging tool")]
 #[command(name = "j8bcdbg", version)]
 struct Cli {
     #[command(subcommand)]
@@ -17,7 +16,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// JS ⇒ bytecode, listed like V8's --print-bytecode
+    #[command(about = "JS ⇒ bytecode, listed like V8's --print-bytecode")]
     Compile(Compiled),
 }
 

@@ -3,15 +3,12 @@ use j8framework::{Agent, Error, ErrorKind, Value};
 
 use crate::{Args, Installer};
 
-/// The Error constructors and `Error.prototype.toString`.
 struct Errors;
 
 impl Errors {
-    /// `XxxError(message)`: kind `K` (per [`ErrorKind::ALL`]).
     fn construct<'gc, const K: usize>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let new_target = a.new_target;
         let kind = ErrorKind::ALL[K];
-        // AggregateError(errors, message, options): arguments are shifted by one
         let all = args;
         let args = if kind == ErrorKind::Aggregate { all.get(1..).unwrap_or(&[]) } else { all };
         let proto = a.proto_from_ctor(new_target, a.realm.error_proto(kind))?;
@@ -22,7 +19,6 @@ impl Errors {
             let m = a.to_string(args.at(0))?;
             e.borrow_mut(a.mc).define("message", j8framework::Property::hidden(m.into()));
         }
-        // InstallErrorCause
         let options = args.at(1);
         if let Some(opts) = options.as_object()
             && a.has_key(opts, j8framework::Key::Str("cause"))?
@@ -38,7 +34,6 @@ impl Errors {
         Ok(e.into())
     }
 
-    /// `name: message`; if either side is empty, just the other.
     fn to_string<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         if this.as_object().is_none() {
             return Err(a.throw(ErrorKind::Type, "Error.prototype.toString called on non-object"));
@@ -75,7 +70,6 @@ impl Installer<'_, '_> {
         for (kind, f) in ErrorKind::ALL.into_iter().zip(ctors) {
             let proto = self.realm.error_proto(kind);
             let ctor = self.constructor(kind.name(), f, proto, if kind == ErrorKind::Aggregate { 2 } else { 1 });
-            // The prototype of a NativeError constructor is the Error constructor
             match base {
                 None => base = Some(ctor),
                 Some(b) => ctor.set_proto(self.mc, Some(b)),

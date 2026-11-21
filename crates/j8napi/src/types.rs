@@ -1,10 +1,8 @@
-//! Node-API 的 C 类型（布局照 `js_native_api_types.h` / `node_api_types.h`）。
 use core::ffi::{c_char, c_void};
 use core::num::NonZeroUsize;
 
 use crate::Env;
 
-/// 返回码（`napi_status`）
 #[repr(i32)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Status {
@@ -35,7 +33,6 @@ pub enum Status {
 }
 
 impl Status {
-    /// `napi_get_last_error_info` 给的说明（顺序同 Node 的 `error_messages`）
     pub fn message(self) -> &'static core::ffi::CStr {
         match self {
             Self::Ok => c"",
@@ -66,12 +63,10 @@ impl Status {
     }
 }
 
-/// 一个 JS 值的句柄（`napi_value`）：句柄栈里的位置加一，0 是空
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Handle(pub Option<NonZeroUsize>);
 
-/// `napi_typeof` 的结果（`napi_valuetype`）
 #[repr(i32)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ValueType {
@@ -87,7 +82,6 @@ pub enum ValueType {
     Bigint = 9,
 }
 
-/// typed array 的元素类型（`napi_typedarray_type`）
 #[repr(i32)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TypedArrayType {
@@ -166,7 +160,6 @@ impl TryFrom<i32> for TypedArrayType {
     }
 }
 
-/// 属性特性位（`napi_property_attributes`）
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[repr(transparent)]
 pub struct Attributes(pub i32);
@@ -175,7 +168,6 @@ impl Attributes {
     pub const WRITABLE: i32 = 1 << 0;
     pub const ENUMERABLE: i32 = 1 << 1;
     pub const CONFIGURABLE: i32 = 1 << 2;
-    /// `napi_define_class`：放在构造函数上而不是原型上
     pub const STATIC: i32 = 1 << 10;
 
     pub fn has(self, bit: i32) -> bool {
@@ -183,12 +175,10 @@ impl Attributes {
     }
 }
 
-/// 原生回调（`napi_callback`）
 pub type Callback = Option<unsafe extern "C" fn(env: *mut Env, info: *mut crate::CallbackInfo) -> Handle>;
-/// 终结回调（`napi_finalize`）
+
 pub type Finalize = Option<unsafe extern "C" fn(env: *mut Env, data: *mut c_void, hint: *mut c_void)>;
 
-/// 一条属性（`napi_property_descriptor`）
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct PropertyDescriptor {
@@ -202,7 +192,6 @@ pub struct PropertyDescriptor {
     pub data: *mut c_void,
 }
 
-/// `napi_get_last_error_info` 的结果（`napi_extended_error_info`）
 #[repr(C)]
 #[derive(Debug)]
 pub struct ExtendedErrorInfo {
@@ -218,7 +207,6 @@ impl Default for ExtendedErrorInfo {
     }
 }
 
-/// 类型标签（`napi_type_tag`）
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TypeTag {
@@ -226,7 +214,6 @@ pub struct TypeTag {
     pub upper: u64,
 }
 
-/// `napi_get_all_property_names` 的范围（`napi_key_collection_mode`）
 #[repr(i32)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum KeyMode {
@@ -246,7 +233,6 @@ impl TryFrom<i32> for KeyMode {
     }
 }
 
-/// `napi_get_all_property_names` 的筛选位（`napi_key_filter`）
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(transparent)]
 pub struct KeyFilter(pub i32);
@@ -263,7 +249,6 @@ impl KeyFilter {
     }
 }
 
-/// 整数键要不要转成字符串（`napi_key_conversion`）
 #[repr(i32)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum KeyConversion {
@@ -271,10 +256,8 @@ pub enum KeyConversion {
     NumbersToStrings = 1,
 }
 
-/// 清理钩子（`napi_cleanup_hook`）
 pub type CleanupHook = unsafe extern "C" fn(arg: *mut c_void);
 
-/// `napi_get_node_version` 的结果（`napi_node_version`）
 #[repr(C)]
 #[derive(Debug)]
 pub struct NodeVersion {
@@ -285,7 +268,6 @@ pub struct NodeVersion {
 }
 
 impl NodeVersion {
-    /// 对插件报的 Node 版本（插件按它判断能用哪些 API）
     pub const MAJOR: u32 = 24;
 }
 
@@ -307,5 +289,4 @@ impl TryFrom<i32> for KeyConversion {
     }
 }
 
-/// 插件注册函数（`napi_addon_register_func`）
 pub type RegisterFn = unsafe extern "C" fn(env: *mut Env, exports: Handle) -> Handle;

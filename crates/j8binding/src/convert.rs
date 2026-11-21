@@ -1,25 +1,20 @@
-//! JS values ⇄ Rust values.
 use j8framework::ValueKind;
 use alloc::string::String;
 use alloc::vec::Vec;
 
 use j8framework::{Agent, Error, ErrorKind, JsObject, JsString, Value};
 
-/// JS value ⇒ Rust value (arguments of a host function).
 pub trait FromJs<'gc>: Sized {
     fn from_js(a: &mut Agent<'gc, '_>, v: Value<'gc>) -> Result<Self, Error>;
 }
 
-/// Rust value ⇒ JS value (return value of a host function).
 pub trait IntoJs<'gc> {
     fn into_js(self, a: &mut Agent<'gc, '_>) -> Result<Value<'gc>, Error>;
 }
 
-/// The raw `this` for a method.
 #[derive(Clone, Copy, Debug)]
 pub struct This<'gc>(pub Value<'gc>);
 
-/// All remaining arguments (placed in the last parameter).
 #[derive(Clone, Debug)]
 pub struct Rest<'gc>(pub Vec<Value<'gc>>);
 
@@ -47,7 +42,6 @@ impl<'gc> FromJs<'gc> for u32 {
     }
 }
 
-/// Index / length: ToIndex.
 impl<'gc> FromJs<'gc> for usize {
     fn from_js(a: &mut Agent<'gc, '_>, v: Value<'gc>) -> Result<Self, Error> {
         a.to_index(v)
@@ -84,14 +78,12 @@ impl<'gc> FromJs<'gc> for JsObject<'gc> {
     }
 }
 
-/// `undefined` / `null` is `None`.
 impl<'gc, T: FromJs<'gc>> FromJs<'gc> for Option<T> {
     fn from_js(a: &mut Agent<'gc, '_>, v: Value<'gc>) -> Result<Self, Error> {
         if v.is_nullish() { Ok(None) } else { T::from_js(a, v).map(Some) }
     }
 }
 
-/// Converts an iterable item by item.
 impl<'gc, T: FromJs<'gc>> FromJs<'gc> for Vec<T> {
     fn from_js(a: &mut Agent<'gc, '_>, v: Value<'gc>) -> Result<Self, Error> {
         a.to_list(v)?.into_iter().map(|x| T::from_js(a, x)).collect()
@@ -166,7 +158,6 @@ impl<'gc> IntoJs<'gc> for JsObject<'gc> {
     }
 }
 
-/// `None` is `undefined`.
 impl<'gc, T: IntoJs<'gc>> IntoJs<'gc> for Option<T> {
     fn into_js(self, a: &mut Agent<'gc, '_>) -> Result<Value<'gc>, Error> {
         match self {
@@ -176,7 +167,6 @@ impl<'gc, T: IntoJs<'gc>> IntoJs<'gc> for Option<T> {
     }
 }
 
-/// An array.
 impl<'gc, T: IntoJs<'gc>> IntoJs<'gc> for Vec<T> {
     fn into_js(self, a: &mut Agent<'gc, '_>) -> Result<Value<'gc>, Error> {
         let items = self.into_iter().map(|x| x.into_js(a)).collect::<Result<Vec<_>, _>>()?;
@@ -184,14 +174,12 @@ impl<'gc, T: IntoJs<'gc>> IntoJs<'gc> for Vec<T> {
     }
 }
 
-/// Throws on error.
 impl<'gc, T: IntoJs<'gc>> IntoJs<'gc> for Result<T, Error> {
     fn into_js(self, a: &mut Agent<'gc, '_>) -> Result<Value<'gc>, Error> {
         self?.into_js(a)
     }
 }
 
-/// A string-keyed map ⇒ a plain object (data properties in the map's iteration order)
 fn object_of<'gc, T: IntoJs<'gc>>(a: &mut Agent<'gc, '_>, entries: impl IntoIterator<Item = (String, T)>) -> Result<Value<'gc>, Error> {
     let o = a.object();
     for (k, v) in entries {

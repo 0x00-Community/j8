@@ -1,41 +1,26 @@
-//! A second engine for the patterns the `regex` crate matches exactly like ECMAScript does on an all-ASCII subject
-//! (finite automata with a literal prefilter instead of backtracking). [`Dfa::new`] translates the pattern and refuses
-//! everything whose meaning could differ: back references, lookaround, named groups, `v` mode, anchors under `m`,
-//! capture groups inside or under a quantifier (ECMAScript resets them on every iteration), Annex B oddities
-//! (quantifiers without an atom, `{` that is not a quantifier, identity escapes of letters), non-ASCII pattern text.
-//! regress stays the engine for the rest and for non-ASCII subjects.
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::Write;
 use core::ops::Range;
 
-/// The translated pattern, compiled; `groups` is the number of capture groups.
 pub(crate) struct Dfa {
     re: regex::bytes::Regex,
     groups: usize,
 }
 
-/// What a class atom is.
 enum ClassAtom {
     Unit(u8),
-    /// `\d` / `\w` / `\s`, already written out as class contents
     Set,
 }
 
-/// A match: whole range and each capture group's range.
 type Match = (Range<usize>, Vec<Option<Range<usize>>>);
 
-/// One open group (the whole pattern is the outermost) while translating.
 #[expect(clippy::struct_excessive_bools, reason = "independent facts about one group")]
 struct Open {
     capturing: bool,
-    /// A capture group is somewhere inside
     captures: bool,
-    /// Some finished alternative can match the empty string
     alt: bool,
-    /// The items of this alternative before the last one can all match empty
     done: bool,
-    /// The last item can match empty
     last: bool,
 }
 
@@ -60,30 +45,24 @@ impl Open {
     }
 }
 
-/// ECMAScript pattern ⇒ `regex` syntax, over the pattern's bytes (all ASCII, checked on the way).
 struct Translate<'s> {
     src: &'s [u8],
     at: usize,
     out: String,
     open: Vec<Open>,
     groups: usize,
-    /// The last thing written can take a quantifier
     atom: bool,
-    /// `m` flag: anchors would be line anchors with ECMAScript's four line terminators
     multiline: bool,
     dot_all: bool,
 }
 
-/// ECMAScript `\d` / `\w` / `\s` restricted to ASCII (the subject is ASCII), as class contents.
 const DIGIT: &str = "0-9";
 const WORD: &str = "0-9A-Za-z_";
 const SPACE: &str = "\\t\\n\\x0B\\x0C\\r ";
 
-/// Repetition counts above this are left to regress (the automaton would grow with them).
 const MAX_REPEAT: u32 = 1000;
 
 impl Dfa {
-    /// `None` when the pattern / flags are outside what is translated exactly.
     pub(crate) fn new(source: &str, flags: &str) -> Option<Self> {
         if flags.contains('v') || !source.is_ascii() {
             return None;
@@ -94,12 +73,10 @@ impl Dfa {
         (re.captures_len() == t.groups + 1).then_some(Self { re, groups: t.groups })
     }
 
-    /// Whether there is a match anywhere in the ASCII text `s`
     pub(crate) fn is_match(&self, s: &str) -> bool {
         self.re.is_match(s.as_bytes())
     }
 
-    /// The first match at or after `start` in the ASCII text `s`: whole match and each group (byte = code unit index).
     pub(crate) fn find(&self, s: &str, start: usize) -> Option<Match> {
         if self.groups == 0 {
             return self.re.find_at(s.as_bytes(), start).map(|m| (m.range(), Vec::new()));
@@ -170,12 +147,10 @@ impl Translate<'_> {
         (self.open.len() == 1).then_some(())
     }
 
-    /// The innermost open group
     fn top(&mut self) -> Option<&mut Open> {
         self.open.last_mut()
     }
 
-    /// An item that cannot match empty (a character or class)
     fn atom(&mut self) -> Option<()> {
         self.top()?.item(false);
         self.atom = true;
@@ -211,7 +186,6 @@ impl Translate<'_> {
             Some(b'{') => self.src.get(self.at + 1).is_some_and(u8::is_ascii_digit),
             _ => false,
         };
-        // ECMAScript fails an iteration that matched empty and backtracks into it; `regex` takes it
         if quantified && (g.capturing || g.captures || g.nullable()) {
             return None;
         }
@@ -220,8 +194,6 @@ impl Translate<'_> {
         Some(())
     }
 
-    /// A quantifier needs an atom right before it (no quantifier after a quantifier, an assertion or nothing);
-    /// `optional`: it may repeat zero times
     fn quantifier(&mut self, optional: bool) -> Option<()> {
         self.atom.then_some(())?;
         self.atom = false;
@@ -245,7 +217,6 @@ impl Translate<'_> {
         core::str::from_utf8(self.src.get(from..self.at)?).ok()?.parse().ok().filter(|&n| n <= MAX_REPEAT)
     }
 
-    /// `{n}` / `{n,}` / `{n,m}`; anything else (a literal `{` in Annex B) is refused
     fn braces(&mut self) -> Option<()> {
         let lo = self.number()?;
         self.quantifier(lo == 0)?;
@@ -262,7 +233,6 @@ impl Translate<'_> {
         Some(())
     }
 
-    /// A character escape's code unit (`\t`, `\x41`, `A`, `\0`, escaped punctuation); `None` for anything else
     fn char_escape(&mut self, c: u8) -> Option<u8> {
         match c {
             b't' => Some(b'\t'),
@@ -311,7 +281,6 @@ impl Translate<'_> {
         self.atom()
     }
 
-    /// One class atom
     fn class_atom(&mut self) -> Option<ClassAtom> {
         match self.next()? {
             b'\\' => match self.next()? {
@@ -340,7 +309,6 @@ impl Translate<'_> {
         }
         while !self.eat(b']') {
             let ClassAtom::Unit(lo) = self.class_atom()? else {
-                // `\d-x` is Annex B's literal `-`: refused
                 if self.peek() == Some(b'-') && self.src.get(self.at + 1) != Some(&b']') {
                     return None;
                 }
@@ -363,4 +331,3 @@ impl Translate<'_> {
         self.atom()
     }
 }
-

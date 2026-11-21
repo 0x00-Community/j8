@@ -1,14 +1,9 @@
-//! A function's bytecode as blocks, its loops, and which registers are live where.
-//!
-//! Registers are numbered for the analysis as: the receiver and parameters `0 .. P`, r`i` as `P + i`, the accumulator
-//! `P + R`; the context register is always live (it is not tracked).
 use alloc::vec;
 use alloc::vec::Vec;
 
 use j8bytecode::{Bytecode, OperandType};
 use j8executor::{JitFunction as Function, JitInsn, JitReg as Reg};
 
-/// A set of analysis registers.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Bits(Vec<u64>);
 
@@ -50,23 +45,16 @@ impl Bits {
     }
 }
 
-/// A function's control flow and liveness.
 pub struct Cfg {
     pub params: usize,
     pub regs: usize,
-    /// Instruction index ⇒ its block
     pub block_of: Vec<u32>,
-    /// Block ⇒ its first instruction
     pub starts: Vec<usize>,
-    /// Loops as (header instruction, `JumpLoop` instruction)
     pub loops: Vec<(usize, usize)>,
-    /// Live registers before each instruction
     pub live: Vec<Bits>,
-    /// Everything compiles (no exception handlers, no bytecode the builder rejects up front)
     pub ok: bool,
 }
 
-/// What an instruction reads and writes, in analysis registers.
 struct UseDef {
     uses: Vec<usize>,
     defs: Vec<usize>,
@@ -80,7 +68,6 @@ impl Cfg {
         let n = f.len();
         let total = params + regs + 1;
         let acc = params + regs;
-        // Block starts: the first instruction, jump targets, and what follows a jump / return
         let mut start = vec![false; n + 1];
         start[0] = true;
         let mut loops = Vec::new();
@@ -110,7 +97,6 @@ impl Cfg {
             }
             block_of[i] = u32::try_from(starts.len() - 1).unwrap_or(0);
         }
-        // Liveness: backwards to a fixed point
         let ud: Vec<UseDef> = (0..n).map(|i| Self::use_def(f, f.insn(i), params, acc)).collect();
         let mut live = vec![Bits::new(total); n + 1];
         if !ok {
@@ -145,7 +131,6 @@ impl Cfg {
         Cfg { params, regs, block_of, starts, loops, live, ok }
     }
 
-    /// The analysis registers an instruction reads and writes
     fn use_def(f: Function<'_>, d: JitInsn<'_>, params: usize, acc: usize) -> UseDef {
         let mut u = UseDef { uses: Vec::new(), defs: Vec::new() };
         let reg = |k: i64| -> Option<usize> {
@@ -181,7 +166,6 @@ impl Cfg {
                 _ => {}
             }
         }
-        // `Star` was decoded from short stars too: its register is an output
         if d.bytecode == Bytecode::Star {
             u.uses.clear();
             u.defs.clear();
@@ -195,21 +179,16 @@ impl Cfg {
         if d.bytecode.writes_accumulator() && !d.bytecode.reads_accumulator() {
             u.defs.push(acc);
         }
-        // Exits read everything the interpreter could look at: keep the parameters (an outer frame's caller sees
-        // nothing of them, but a deopt rebuilds the frame)
         u
     }
 
-    /// The loop a `JumpLoop` at `at` closes
     pub fn loop_at(&self, at: usize) -> Option<(usize, usize)> {
         self.loops.iter().copied().find(|&(_, j)| j == at)
     }
 
-    /// Loops containing instruction `pc`, innermost first
     pub fn enclosing(&self, pc: usize) -> Vec<(usize, usize)> {
         let mut v: Vec<(usize, usize)> = self.loops.iter().copied().filter(|&(h, j)| h <= pc && pc <= j).collect();
         v.sort_by_key(|&(h, j)| j - h);
         v
     }
-
 }

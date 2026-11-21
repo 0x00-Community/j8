@@ -1,6 +1,3 @@
-//! The command line. One executable serves as both `dune` and `dunx`, told apart by the name it is started under
-//! (`dunx` is a link to `dune`). Each folder under `cli/` is one level of subcommands: `run/` is `dune run`, `repl/` is
-//! `dune repl`, `x/` is `dune x` (which `dunx` is).
 mod repl;
 mod run;
 mod x;
@@ -16,26 +13,25 @@ use repl::Repl;
 use run::Run;
 use x::{Dunx, X};
 
-/// The j8 JavaScript runtime
 #[derive(Parser)]
+#[command(about = "The j8 JavaScript runtime")]
 #[command(name = "dune", version, override_usage = Dune::USAGE)]
 pub struct Dune {
     #[command(subcommand)]
     command: Option<Command>,
-    /// Run this source
+    #[arg(help = "Run this source")]
     #[arg(short, long, conflicts_with_all = ["argv", "print"])]
     eval: Option<String>,
-    /// Run this source and print the result
+    #[arg(help = "Run this source and print the result")]
     #[arg(short, long, conflicts_with = "argv")]
     print: Option<String>,
-    /// Enable the JIT: hot functions are compiled to x86-64 machine code (j8jit)
+    #[arg(help = "Enable the JIT: hot functions are compiled to x86-64 machine code (j8jit)")]
     #[arg(long, global = true)]
     jit: bool,
-    /// Web-standard globals only (no `process`, `require` or `node:` modules); files run as ES modules
+    #[arg(help = "Web-standard globals only (no `process`, `require` or `node:` modules); files run as ES modules")]
     #[arg(long, global = true)]
     web: bool,
-    /// Script to run (same as `dune run`; `-` reads stdin), then the arguments passed to it (after the script path in
-    /// `process.argv`)
+    #[arg(help = "Script to run (same as `dune run`; `-` reads stdin), then the arguments passed to it (after the script path in `process.argv`)")]
     #[arg(trailing_var_arg = true, allow_hyphen_values = true, value_name = "FILE [ARGS]")]
     argv: Vec<String>,
 }
@@ -44,11 +40,10 @@ pub struct Dune {
 enum Command {
     Run(Run),
     Repl(Repl),
-    /// Run a package's executable, installing the package first when needed (the same as `dunx`)
+    #[command(about = "Run a package's executable, installing the package first when needed (the same as `dunx`)")]
     X(X),
 }
 
-/// What a `dune` command line asks for
 enum Ask {
     Job(Job),
     X(X),
@@ -87,7 +82,6 @@ impl Dune {
     }
 }
 
-/// The name this executable was started under
 #[derive(Clone, Copy)]
 enum Program {
     Dune,
@@ -99,7 +93,6 @@ impl Program {
 }
 
 impl From<&Path> for Program {
-    /// By the file name without its extension (`dunx`, `dunx.exe`); anything else is `dune`
     fn from(exe: &Path) -> Self {
         match exe.file_stem().and_then(OsStr::to_str) {
             Some(Self::DUNX) => Self::Dunx,
@@ -108,14 +101,12 @@ impl From<&Path> for Program {
     }
 }
 
-/// A parsed command line, of `dune` or of `dunx`
 pub enum Cli {
     Dune(Dune),
     Dunx(Dunx),
 }
 
 impl Cli {
-    /// Parses this process's command line as the program its name says
     pub fn parse() -> Self {
         let exe = std::env::args_os().next().map(PathBuf::from).unwrap_or_default();
         match Program::from(exe.as_path()) {

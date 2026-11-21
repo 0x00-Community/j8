@@ -1,17 +1,14 @@
-//! Clean-up after building: phis that pick one value go away, and so does whatever nothing needs.
 use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::ir::{Graph, Helper, Op, Slot, B, V};
 
-/// Trivial phis, then dead instructions, then loop-invariant code out of loops that change nothing in memory.
 pub fn simplify(g: &mut Graph) {
     trivial_phis(g);
     dead(g);
     hoist(g);
 }
 
-/// Reachable blocks in reverse postorder, and each block's predecessors
 fn rpo(g: &Graph) -> (Vec<B>, Vec<Vec<B>>) {
     let n = g.blocks.len();
     let mut seen = vec![false; n];
@@ -37,7 +34,6 @@ fn rpo(g: &Graph) -> (Vec<B>, Vec<Vec<B>>) {
     (post, preds)
 }
 
-/// Immediate dominators (Cooper, Harvey, Kennedy), by block; the entry's is itself
 fn dominators(order: &[B], preds: &[Vec<B>], n: usize) -> Vec<Option<B>> {
     let mut rank = vec![usize::MAX; n];
     for (i, &b) in order.iter().enumerate() {
@@ -91,7 +87,6 @@ fn dominates(idom: &[Option<B>], a: B, mut b: B) -> bool {
     }
 }
 
-/// Changes memory or runs other code
 fn clobbers(op: &Op) -> bool {
     match op {
         Op::Call(h, ..) => !matches!(h, Helper::ModF | Helper::ToBoolean | Helper::Alloc(_) | Helper::CreateClosure(..) | Helper::CreateContext(..) | Helper::ObjectLiteral(..)),
@@ -100,12 +95,10 @@ fn clobbers(op: &Op) -> bool {
     }
 }
 
-/// May move to a loop's preheader when its operands are invariant (guards take the preheader's frame state)
 fn hoistable(op: &Op) -> bool {
     matches!(op, Op::Untag(_) | Op::BoxPtr(..) | Op::BoxInt(_) | Op::BoxBool(_) | Op::IntToFloat(_) | Op::CmpWord(..) | Op::CmpInt(..) | Op::LoadWord(..) | Op::LoadPtr(..) | Op::LoadRaw(..) | Op::ContextCell(..) | Op::StoreCellAddr(..) | Op::CtxField(_) | Op::I32(_) | Op::F64(_) | Op::Word(_) | Op::CheckObject(..) | Op::CheckShape(..) | Op::CheckFunc(..) | Op::CheckNotHole(..) | Op::UnboxInt(..) | Op::UnboxFloat(..) | Op::Check(..))
 }
 
-/// Loop-invariant code motion for loops whose bodies change no memory and call nothing
 fn hoist(g: &mut Graph) {
     let n = g.blocks.len();
     let (order, preds) = rpo(g);
@@ -118,12 +111,10 @@ fn hoist(g: &mut Graph) {
         if idom.get(h as usize).copied().flatten().is_none() {
             continue;
         }
-        // Back edges: predecessors the header dominates
         let latches: Vec<B> = preds[h as usize].iter().copied().filter(|&p| dominates(&idom, h, p)).collect();
         if latches.is_empty() || !preds[h as usize].contains(&ph) {
             continue;
         }
-        // The body: what reaches a latch without passing the header
         let mut body = vec![false; n];
         body[h as usize] = true;
         let mut work = latches.clone();
@@ -135,7 +126,6 @@ fn hoist(g: &mut Graph) {
             work.extend(preds[b as usize].iter().copied());
         }
         let in_body: Vec<B> = order.iter().copied().filter(|b| body[*b as usize]).collect();
-        // Writes to context slots change only context slots; anything else that writes or calls stops the motion
         let ctx_store = |op: &Op| matches!(op, Op::StoreCell(base, _, _) if matches!(g.insts[*base as usize].op, Op::ContextCell(..)));
         let mut ctx_writes = false;
         let mut other = false;
@@ -152,7 +142,6 @@ fn hoist(g: &mut Graph) {
         if other {
             continue;
         }
-        // Blocks run every iteration: dominating every latch
         let always: Vec<B> = in_body.iter().copied().filter(|&b| latches.iter().all(|&l| dominates(&idom, b, l))).collect();
         let mut inside = vec![false; g.insts.len()];
         for &b in &in_body {
@@ -172,11 +161,9 @@ fn hoist(g: &mut Graph) {
                 if ins.iter().any(|&x| inside[x as usize]) {
                     continue;
                 }
-                // A context slot read stays when the loop writes context slots
                 if ctx_writes && matches!(op, Op::LoadWord(base, _) if matches!(g.insts[*base as usize].op, Op::ContextCell(..))) {
                     continue;
                 }
-                // Guards hand over at the loop's entry instead
                 let mut op = op.clone();
                 if let Some(old) = op.frame_state() {
                     set_frame_state(&mut op, fs);
@@ -188,7 +175,6 @@ fn hoist(g: &mut Graph) {
                 moved.push(v);
             }
         }
-        // Into the preheader, before its jump
         let blk = &mut g.blocks[ph as usize];
         let at = blk.insts.len().saturating_sub(1);
         for (k, v) in moved.into_iter().enumerate() {
@@ -205,7 +191,6 @@ fn set_frame_state(op: &mut Op, to: crate::ir::Fs) {
     }
 }
 
-/// Every use of `from` becomes `to`
 fn replace_all(g: &mut Graph, from: V, to: V) {
     let f = |v: V| if v == from { to } else { v };
     for i in &mut g.insts {
@@ -241,7 +226,6 @@ fn replace_all(g: &mut Graph, from: V, to: V) {
     }
 }
 
-/// A phi whose inputs are all one value (or itself) is that value
 fn trivial_phis(g: &mut Graph) {
     loop {
         let mut changed = false;
@@ -282,7 +266,6 @@ fn trivial_phis(g: &mut Graph) {
     }
 }
 
-/// Drops instructions no effect, terminator or frame state needs
 fn dead(g: &mut Graph) {
     let n = g.insts.len();
     let mut live = vec![false; n];

@@ -1,13 +1,7 @@
-//! `#[j8::heap]` (`j8framework::heap`): a heap struct whose `#[mutable]` fields change in place. Each such field `x: T`
-//! is kept as `<T as Mutable<'gc>>::Cell` (`Value` ⇒ `ValueCell`, `Gc` / `Option<Gc>` ⇒ `Slot`, scalars ⇒ atomics;
-//! aliases like `JsObject` work since the trait picks the cell), and gets `x(&self) -> T` and
-//! `set_x(&self, mc, v)` (renamed with `#[mutable(set = name)]`, e.g. to wrap it in a setter of your own).
-//! `#[derive(Collect)]` is added when missing; `#[j8::heap(new)]` also generates `new` taking every field in order.
 use proc_macro2::{Span, TokenStream};
 use quote::{format_ident, quote};
 use syn::{Fields, Ident, ItemStruct, Lifetime};
 
-/// `#[mutable]` / `#[mutable(set = name)]` on a field: `None` when absent, `Some(setter name)` when present
 fn mutable(attrs: &mut Vec<syn::Attribute>, field: &Ident) -> syn::Result<Option<Ident>> {
     let mut found = None;
     let mut err = None;
@@ -83,7 +77,6 @@ pub fn expand(attr: &TokenStream, mut item: ItemStruct) -> syn::Result<TokenStre
     let (ig, tg, wc) = item.generics.split_for_impl();
     let new = with_new.then(|| {
         quote! {
-            /// Every field in declaration order (mutable ones go into their cells; the object is not on the heap yet)
             #[allow(clippy::too_many_arguments)]
             pub fn new(#(#params),*) -> Self {
                 Self { #(#inits),* }
@@ -100,7 +93,6 @@ pub fn expand(attr: &TokenStream, mut item: ItemStruct) -> syn::Result<TokenStre
     })
 }
 
-/// Whether an attribute's tokens mention `word`
 trait ContainsWord {
     fn to_token_stream_contains(&self, word: &str) -> bool;
 }

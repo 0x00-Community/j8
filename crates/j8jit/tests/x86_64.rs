@@ -1,20 +1,15 @@
-//! The x86-64 backend runs: each function of tests/x86_64/run.mlir is emitted, mapped executable and called, and its
-//! result compared with the same computation in Rust.
-
 #![cfg(target_arch = "x86_64")]
 
 use mlirpass::mlirformat::MlirOpt;
 use j8jit::{X86_64Code, X86_64Emit};
 use mlirpass::{Body, Ctx, Emit, Interfaces};
 
-/// Machine code mapped read-execute.
 struct Mapped {
     at: *mut libc::c_void,
     len: usize,
 }
 
 impl Mapped {
-    /// `code` with its calls pointed at `symbols`.
     fn new(code: &X86_64Code, symbols: &[(&str, usize)]) -> Mapped {
         let mut bytes = code.bytes.clone();
         for r in &code.relocs {
@@ -22,7 +17,6 @@ impl Mapped {
             bytes[r.offset..r.offset + 8].copy_from_slice(&(*addr as u64).to_le_bytes());
         }
         let len = bytes.len().max(1);
-        // SAFETY: a fresh private anonymous mapping, written while writable, then made read-execute
         unsafe {
             let at = libc::mmap(core::ptr::null_mut(), len, libc::PROT_READ | libc::PROT_WRITE, libc::MAP_PRIVATE | libc::MAP_ANONYMOUS, -1, 0);
             assert_ne!(at, libc::MAP_FAILED);
@@ -35,7 +29,6 @@ impl Mapped {
 
 impl Drop for Mapped {
     fn drop(&mut self) {
-        // SAFETY: the mapping made in `new`
         unsafe { libc::munmap(self.at, self.len) };
     }
 }
@@ -61,7 +54,6 @@ fn runs() {
     let symbols = [("twice", twice as *const () as usize), ("hypot", hypot as *const () as usize)];
     let map: Vec<(String, Mapped)> = codes.iter().map(|c| (c.name.clone(), Mapped::new(c, &symbols))).collect();
     let f = |name: &str| map.iter().find(|(n, _)| n == name).unwrap_or_else(|| panic!("no function {name}")).1.at;
-    // SAFETY: each function has the signature its MLIR declares (System V)
     unsafe {
         let poly: extern "C" fn(i64, i64) -> i64 = core::mem::transmute(f("poly"));
         let sum: extern "C" fn(i64) -> i64 = core::mem::transmute(f("sum"));

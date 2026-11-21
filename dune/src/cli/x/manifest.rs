@@ -7,7 +7,6 @@ use sha2::Digest;
 
 use super::spec::{Dep, Spec};
 
-/// One version of a package: from the registry, or a package.json on disk
 #[derive(Deserialize)]
 pub struct Manifest {
     pub version: Option<Version>,
@@ -34,22 +33,17 @@ struct PeerMeta {
     optional: bool,
 }
 
-/// Whether a dependency must be there
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Need {
     Required,
-    /// `optionalDependencies` (and optional peers): left out when they can't be installed
     Optional,
 }
 
 impl Manifest {
-    /// Whether this package runs here, by its `os` and `cpu` fields
     pub fn fits(&self) -> bool {
         self.os.admit(Os::HOST) && self.cpu.admit(Cpu::HOST)
     }
 
-    /// What to install with it: dependencies, optional dependencies, and peers (as bun and npm 7+ do); an optional
-    /// dependency listed in `dependencies` too is optional
     pub fn deps(&self) -> Vec<(String, Dep, Need)> {
         let peer_need = |name: &str| if self.peer_meta.get(name).is_some_and(|m| m.optional) { Need::Optional } else { Need::Required };
         let mut all: BTreeMap<&str, (&str, Need)> = BTreeMap::new();
@@ -60,20 +54,16 @@ impl Manifest {
     }
 }
 
-/// package.json `bin`
 #[derive(Deserialize, Default)]
 #[serde(untagged)]
 pub enum Bin {
     #[default]
     None,
-    /// One executable, named after the package
     One(String),
     Many(BTreeMap<String, String>),
 }
 
 impl Bin {
-    /// The file (relative to the package) of executable `command`; with no command, the package's only executable or
-    /// the one named after it
     pub fn entry(&self, package: &str, command: Option<&str>) -> Result<&str, String> {
         let own = Spec::unscoped(package);
         let found = match (self, command) {
@@ -90,14 +80,12 @@ impl Bin {
     }
 }
 
-/// `dist` of a registry version
 #[derive(Deserialize)]
 pub struct Dist {
     pub tarball: String,
     pub integrity: Option<Integrity>,
 }
 
-/// Subresource integrity: the strongest digest of the ones listed
 #[derive(Deserialize)]
 #[serde(try_from = "String")]
 pub struct Integrity {
@@ -143,7 +131,6 @@ impl Integrity {
     }
 }
 
-/// `os` / `cpu`: names allowed, and `!name` refused
 #[derive(Deserialize)]
 #[serde(from = "Names", bound = "T: for<'a> From<&'a str>")]
 struct Allows<T>(Vec<(bool, T)>);
@@ -154,7 +141,6 @@ impl<T> Default for Allows<T> {
     }
 }
 
-/// A list of names, or one
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum Names {
@@ -173,7 +159,6 @@ impl<T: for<'a> From<&'a str>> From<Names> for Allows<T> {
 }
 
 impl<T: PartialEq> Allows<T> {
-    /// Refused when listed with `!`, or when names are listed without `!` and this one isn't
     fn admit(&self, host: T) -> bool {
         let mut allowed = self.0.iter().filter(|(yes, _)| *yes).peekable();
         let listed = allowed.peek().is_none() || allowed.any(|(_, t)| *t == host);
@@ -181,7 +166,6 @@ impl<T: PartialEq> Allows<T> {
     }
 }
 
-/// Node's `process.platform`
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Os {
     Aix,
@@ -221,7 +205,6 @@ impl From<&str> for Os {
     }
 }
 
-/// Node's `process.arch`
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Cpu {
     X64,

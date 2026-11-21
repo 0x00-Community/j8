@@ -1,4 +1,3 @@
-//! 像插件那样链接 napi 符号：函数、类（wrap / unwrap、JS 继承它）、带 code 的异常。
 use core::ffi::{c_char, c_void};
 use core::ptr::{null, null_mut};
 
@@ -11,7 +10,7 @@ use j8platform::DefaultPlatform;
 type Cb = Option<unsafe extern "C" fn(*mut Env, *mut CallbackInfo) -> Handle>;
 type Fin = Option<unsafe extern "C" fn(*mut Env, *mut c_void, *mut c_void)>;
 
-#[allow(improper_ctypes, reason = "插件只把 env / info 当不透明指针")]
+#[allow(improper_ctypes, reason = "the addon treats env / info as opaque pointers")]
 unsafe extern "C" {
     fn napi_create_function(env: *mut Env, name: *const c_char, len: usize, cb: Cb, data: *mut c_void, result: *mut Handle) -> Status;
     fn napi_define_class(env: *mut Env, name: *const c_char, len: usize, ctor: Cb, data: *mut c_void, n: usize, props: *const PropertyDescriptor, result: *mut Handle) -> Status;
@@ -24,7 +23,6 @@ unsafe extern "C" {
     fn napi_throw_error(env: *mut Env, code: *const c_char, msg: *const c_char) -> Status;
 }
 
-/// 每次调用的计数（测试里的原生状态，wrap 在 JS 对象上）
 struct Count(f64);
 
 unsafe extern "C" fn add(env: *mut Env, info: *mut CallbackInfo) -> Handle {

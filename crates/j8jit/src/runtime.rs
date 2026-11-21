@@ -1,12 +1,3 @@
-//! What machine code calls and reads: the context (`Ctx`, one per entry from the interpreter), the runtime functions
-//! (`j8_helper`, `j8_deopt`, `j8_poll`), the trampolines calls between compiled functions go through, and the
-//! executable memory.
-//!
-//! ```text
-//! Ctx  +0 budget  +8 pending  +16 global  +24 script scope  +32 Object.prototype  +40 ret  +48 ret pc  +56 acc
-//!      +64 depth  +72 depth limit  +128 ARGS (16 words)  +256 BUF (deopt values)
-//! trampoline  jmp [rip + cell]   one per function: its native code, or the interpreter until it has some
-//! ```
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::cell::RefCell;
@@ -19,18 +10,16 @@ use crate::ir::{Helper, Rep, Slot};
 use crate::codegen::{Reason, RESUMED, THREW};
 use crate::Jit;
 
-/// How many values a deopt can hand over through the buffer
 pub const BUF_WORDS: usize = 2048;
-/// Operands of runtime calls with more than four
+
 pub const ARGS_WORDS: usize = 16;
-/// Loop iterations between polls
+
 pub const BUDGET_CHUNK: i64 = 1024;
-/// Native frames at most (deeper hands over to the interpreter, which throws when it is too deep)
+
 pub const DEPTH_LIMIT: u64 = 2000;
-/// Stack native code may use below where the JIT first ran (machine code past it hands over)
+
 pub const NATIVE_STACK: u64 = 1 << 20;
 
-/// The context machine code runs with (see the module docs for the layout).
 #[repr(C)]
 pub struct Ctx {
     pub budget: i64,
@@ -43,20 +32,13 @@ pub struct Ctx {
     pub acc: u64,
     pub depth: u64,
     pub limit: u64,
-    /// Changes whenever code other than compiled code may have run (global cache sites compare it)
     pub epoch: u64,
-    /// A global cache site's slow path found another function than expected
     pub miss: u64,
-    /// Native code doesn't go below this stack address (deeper calls hand over to the interpreter)
     pub stack_floor: u64,
     pad: [u64; 3],
     pub args: [u64; ARGS_WORDS],
     pub buf: [u64; BUF_WORDS],
-    // ---- not read by machine code ----
-    /// The entry (lifetimes erased: only used while the entry is on the stack); null for a call from the executor
-    /// without an interpreter frame
     pub entry: *mut core::ffi::c_void,
-    /// The executor and the agent (lifetimes erased likewise)
     pub exe: *const core::ffi::c_void,
     pub agent: *mut core::ffi::c_void,
     pub jit: *const Jit,
@@ -78,7 +60,6 @@ impl Ctx {
     pub const ARGS: i32 = 128;
     pub const BUF: i32 = 256;
 
-    /// A context for running machine code on `e`: a recycled one (see [`Jit::recycle`]) or a new one
     pub fn new(e: &mut Entry<'_, '_, '_, '_>, jit: &Jit) -> Box<Ctx> {
         let acc = e.acc().bits();
         let entry: *mut core::ffi::c_void = core::ptr::from_mut(e).cast();
@@ -89,7 +70,6 @@ impl Ctx {
         c
     }
 
-    /// A context for a call from the executor (no entry frame)
     pub fn bare(exe: &Executor, a: &mut Agent<'_, '_>, jit: &Jit) -> Box<Ctx> {
         let addr = |v: Value<'_>| v.bits() & ValueBits::PAYLOAD;
         let (global, scope, proto) = (addr(Value::Object(a.realm.global)), addr(Value::Object(a.realm.script_scope)), addr(Value::Object(a.realm.object_proto)));
@@ -136,26 +116,15 @@ impl Ctx {
         })
     }
 
-    /// The executor and the agent (erased lifetimes: `'gc` is the running mutate's, for the duration of the call)
-    ///
-    /// # Safety
-    /// Only while the code this context was made for runs.
     pub unsafe fn parts<'a>(&mut self) -> (&'a Executor, &'a mut Agent<'a, 'a>) {
-        // SAFETY: the caller's contract
         unsafe { (&*self.exe.cast(), &mut *self.agent.cast()) }
     }
 
-    /// The entry and agent (erased lifetimes: `'gc` is the running mutate's, for the duration of the call)
-    ///
-    /// # Safety
-    /// Only while the entry this context was made for is running machine code.
     pub unsafe fn entry<'a>(&mut self) -> &'a mut Entry<'a, 'a, 'a, 'a> {
-        // SAFETY: the caller's contract
         unsafe { &mut *self.entry.cast() }
     }
 
     fn jit<'a>(&self) -> &'a Jit {
-        // SAFETY: the JIT outlives every entry it runs
         unsafe { &*self.jit }
     }
 
@@ -166,39 +135,24 @@ impl Ctx {
     }
 }
 
-/// A word ⇒ a value of this mutate
-///
-/// # Safety
-/// The word came from this mutate's heap (or is a scalar).
 unsafe fn val<'gc>(w: u64) -> Value<'gc> {
-    // SAFETY: the caller's contract
     unsafe { Value::from_bits(w) }
 }
 
-/// The value a deopt slot holds in representation `rep` with raw bits `bits`
-///
-/// # Safety
-/// As [`val`].
 #[expect(clippy::cast_possible_truncation, reason = "an i32 sign-extended to 64 bits")]
 unsafe fn boxed<'gc>(rep: Rep, bits: u64) -> Value<'gc> {
     match rep {
         Rep::I32 => Value::Number(f64::from(bits as i64 as i32)),
         Rep::F64 => Value::Number(f64::from_bits(bits)),
         Rep::Bool => Value::Bool(bits & 1 != 0),
-        // SAFETY: an address of this mutate's heap
         Rep::Ptr => unsafe { val(bits | OBJECT_TAG) },
-        // SAFETY: as above
         Rep::Ctx => unsafe { val(bits | CONTEXT_TAG) },
-        // SAFETY: the caller's contract
         Rep::Word | Rep::None => unsafe { val(bits) },
     }
 }
 
-/// A runtime call: `id` names the helper (see `lower`); `a … d` its operands (more through `Ctx::ARGS`: then `a` is
-/// their count)
 #[unsafe(no_mangle)]
 pub extern "C" fn j8_helper(ctx: *mut Ctx, id: u64, a: u64, b: u64, c: u64, d: u64) -> u64 {
-    // SAFETY: machine code passes its context
     let ctx = unsafe { &mut *ctx };
     let jit = ctx.jit();
     let (h, n) = jit.call(id);
@@ -209,7 +163,6 @@ pub extern "C" fn j8_helper(ctx: *mut Ctx, id: u64, a: u64, b: u64, c: u64, d: u
         buf[..4].copy_from_slice(&[a, b, c, d]);
     }
     let ops = &buf[..n.min(ARGS_WORDS)];
-    // SAFETY: the code is running
     let (exe, a) = unsafe { ctx.parts() };
     let r = helper(jit, exe, a, h, ops, ctx.epoch);
     if !matches!(h, Helper::ModF | Helper::ToBoolean | Helper::StoreCell | Helper::Alloc(_) | Helper::CreateClosure(..) | Helper::CreateContext(..) | Helper::ObjectLiteral(..) | Helper::GlobalProbe(_)) {
@@ -225,11 +178,9 @@ pub extern "C" fn j8_helper(ctx: *mut Ctx, id: u64, a: u64, b: u64, c: u64, d: u
     }
 }
 
-/// What a global cache probe gives when the function isn't the expected one
 const GLOBAL_MISS: u64 = u64::MAX;
 
 fn helper<'gc>(jit: &Jit, exe: &Executor, a: &mut Agent<'gc, '_>, h: Helper, ops: &[u64], epoch: u64) -> Result<u64, Error> {
-    // SAFETY: operands are words / addresses of this mutate
     let v = |i: usize| unsafe { val::<'gc>(ops.get(i).copied().unwrap_or(ValueBits::UNDEFINED)) };
     Ok(match h {
         Helper::Call => {
@@ -252,7 +203,6 @@ fn helper<'gc>(jit: &Jit, exe: &Executor, a: &mut Agent<'gc, '_>, h: Helper, ops
             let name = exe.jit_function(f).name(i64::from(k));
             match (assign, v(0).as_object()) {
                 (false, Some(o)) => a.define(o, name, j8framework::Property::data(v(1)))?,
-                // As the interpreter: a failed assignment throws in strict code only
                 _ => a.put_named(v(0), name, v(1), exe.jit_function(f).strict())?,
             }
             0
@@ -263,7 +213,6 @@ fn helper<'gc>(jit: &Jit, exe: &Executor, a: &mut Agent<'gc, '_>, h: Helper, ops
         Helper::ModF => (f64::from_bits(ops[0]) % f64::from_bits(ops[1])).to_bits(),
         Helper::ToBoolean => u64::from(a.to_boolean(v(0))),
         Helper::StoreCell => {
-            // SAFETY: the address of a value cell of this mutate's heap
             let cell = unsafe { &*(ops[0] as usize as *const j8framework::ValueCell<'gc>) };
             cell.set(a.mc, v(1));
             0
@@ -277,7 +226,6 @@ fn helper<'gc>(jit: &Jit, exe: &Executor, a: &mut Agent<'gc, '_>, h: Helper, ops
             {
                 return Ok(GLOBAL_MISS);
             }
-            // SAFETY: the site's cache: two words the code reads
             unsafe {
                 let cache = ops[0] as usize as *mut u64;
                 cache.write(epoch);
@@ -298,7 +246,6 @@ fn helper<'gc>(jit: &Jit, exe: &Executor, a: &mut Agent<'gc, '_>, h: Helper, ops
         Helper::StrictEquals => u64::from(a.compare(j8framework::CompareOp::StrictEq, v(0), v(1))?),
         Helper::Alloc(k) => {
             let shape = jit.shape(k);
-            // SAFETY: an object address of this mutate
             let proto = unsafe { val::<'gc>(ops[0] | OBJECT_TAG) }.as_object();
             let o = ObjectData::ordinary(a.mc, proto, ops.len() - 1);
             if let Some(s) = &shape {
@@ -309,31 +256,24 @@ fn helper<'gc>(jit: &Jit, exe: &Executor, a: &mut Agent<'gc, '_>, h: Helper, ops
     })
 }
 
-/// A loop back edge spent its budget: `0` go on, `1` hand over (out of budget, or terminated)
 #[unsafe(no_mangle)]
 pub extern "C" fn j8_poll(ctx: *mut Ctx) -> u64 {
-    // SAFETY: machine code passes its context
     let ctx = unsafe { &mut *ctx };
     ctx.budget = BUDGET_CHUNK;
     if ctx.entry.is_null() {
-        // No interpreter frame below to pause: only a termination request stops it
-        // SAFETY: the code is running
         let (_, a) = unsafe { ctx.parts() };
         return u64::from(a.stop.observe());
     }
-    // SAFETY: the entry is running
     let e = unsafe { ctx.entry() };
     #[expect(clippy::cast_sign_loss, reason = "positive")]
     u64::from(e.spend(BUDGET_CHUNK as usize))
 }
 
-/// A guard failed (or the code hands over): rebuilds the interpreter frames of deopt `id` and continues there
 #[unsafe(no_mangle)]
 pub extern "C" fn j8_deopt(ctx: *mut Ctx, id: u64) -> Ret {
     Ret { value: deopt(ctx, id), int: 0 }
 }
 
-/// What native code returns: the value's word in rax, and in rdx [`Ret::INT`] | the int32 when it is one (0 else)
 #[repr(C)]
 pub struct Ret {
     pub value: u64,
@@ -341,17 +281,14 @@ pub struct Ret {
 }
 
 impl Ret {
-    /// rdx's mark: the low 32 bits hold the value as an int32
     pub const INT: u64 = 1 << 32;
 }
 
 fn deopt(ctx: *mut Ctx, id: u64) -> u64 {
-    // SAFETY: machine code passes its context
     let ctx = unsafe { &mut *ctx };
     let jit = ctx.jit();
     let d = jit.deopt(id);
     jit.learn(&d);
-    // SAFETY: the code is running
     let (exe, a) = unsafe { ctx.parts() };
     let frames = frames(a, ctx, &d);
     ctx.epoch = jit.bump();
@@ -371,7 +308,6 @@ fn deopt(ctx: *mut Ctx, id: u64) -> u64 {
             Err(err) => ctx.fail(err),
         };
     }
-    // SAFETY: interpreter-entry code runs on an entry
     let e = unsafe { ctx.entry() };
     e.resume(frames);
     match throw {
@@ -383,7 +319,6 @@ fn deopt(ctx: *mut Ctx, id: u64) -> u64 {
     }
 }
 
-/// The interpreter frames a deopt's state stands for
 fn frames<'gc>(a: &mut Agent<'gc, '_>, ctx: &Ctx, d: &crate::Deopt) -> Vec<DeoptFrame<'gc>> {
     let st = d.state();
     let mut objs: Vec<Option<Value<'gc>>> = alloc::vec![None; st.objects.len()];
@@ -393,11 +328,8 @@ fn frames<'gc>(a: &mut Agent<'gc, '_>, ctx: &Ctx, d: &crate::Deopt) -> Vec<Deopt
             crate::Src::Buf(i) => ctx.buf[i as usize],
             crate::Src::Const(b) => b,
         };
-        // SAFETY: words / addresses of this mutate
         unsafe { boxed(rep, bits) }
     };
-    // Objects first (fields may be objects too: those come first in the list, see `Builder::slot`; materialize in
-    // reverse so inner ones exist)
     let cell = RefCell::new(&mut objs);
     let slot = |s: &Slot| -> Value<'gc> {
         match s {
@@ -418,7 +350,6 @@ fn frames<'gc>(a: &mut Agent<'gc, '_>, ctx: &Ctx, d: &crate::Deopt) -> Vec<Deopt
     }
     for (c, idx, s) in &st.writes {
         let env = get(*c);
-        // SAFETY: a context address of this mutate
         let env = unsafe { val::<'gc>((env.bits() & ValueBits::PAYLOAD) | CONTEXT_TAG) }.as_context();
         if let Some(env) = env {
             j8framework::Env::set(env, a.mc, *idx as usize, slot(s));
@@ -433,7 +364,6 @@ fn frames<'gc>(a: &mut Agent<'gc, '_>, ctx: &Ctx, d: &crate::Deopt) -> Vec<Deopt
         context: {
             let c = slot(&f.context);
             if c.as_context().is_some() || c.bits() == ValueBits::UNDEFINED || c.bits() == ValueBits::UNINIT { c } else {
-                // SAFETY: a context address of this mutate
                 unsafe { val::<'gc>((c.bits() & ValueBits::PAYLOAD) | CONTEXT_TAG) }
             }
         },
@@ -443,19 +373,15 @@ fn frames<'gc>(a: &mut Agent<'gc, '_>, ctx: &Ctx, d: &crate::Deopt) -> Vec<Deopt
     }).collect()
 }
 
-/// A call through a trampoline that has no native code yet: run it in the interpreter (and count it)
 #[unsafe(no_mangle)]
 pub extern "C" fn j8_interp(ctx: *mut Ctx, callee: u64, this: u64, a0: u64, a1: u64, a2: u64) -> Ret {
     Ret { value: interp(ctx, callee, this, a0, a1, a2), int: 0 }
 }
 
 fn interp(ctx: *mut Ctx, callee: u64, this: u64, a0: u64, a1: u64, a2: u64) -> u64 {
-    // SAFETY: machine code passes its context
     let ctx = unsafe { &mut *ctx };
     let jit = ctx.jit();
-    // SAFETY: the code is running
     let (exe, a) = unsafe { ctx.parts() };
-    // SAFETY: words of this mutate
     let (f, t, args) = unsafe { (val(callee), val(this), [val(a0), val(a1), val(a2)]) };
     if let Some(c) = f.as_object().and_then(|o| o.closure()) {
         jit.native_hot(exe, a, c.func);
@@ -469,25 +395,17 @@ fn interp(ctx: *mut Ctx, callee: u64, this: u64, a0: u64, a1: u64, a2: u64) -> u
     }
 }
 
-/// Executable memory: big shared-memory chunks mapped twice, writable at one address and executable at another, that
-/// pieces of code are cut from (no permission changes per piece), kept for as long as the JIT lives.
 #[derive(Default)]
 pub struct Arena {
-    /// (writable view, executable view)
     chunks: Vec<(Mapped, Mapped)>,
-    /// Bytes used in the last chunk
     used: usize,
 }
 
 impl Arena {
-    /// Bytes per chunk
     const CHUNK: usize = 1 << 20;
-    /// Code starts at multiples of this
     const ALIGN: usize = 16;
 
-    /// A chunk of `len` bytes: its two views
     fn chunk(len: usize) -> Option<(Mapped, Mapped)> {
-        // SAFETY: a fresh anonymous file, sized, mapped shared twice
         unsafe {
             let fd = libc::memfd_create(c"j8jit".as_ptr(), libc::MFD_CLOEXEC);
             if fd < 0 {
@@ -504,7 +422,6 @@ impl Arena {
         }
     }
 
-    /// `bytes` placed executable (`patch` fixes it up, given its executable address): that address
     pub fn place(&mut self, bytes: &[u8], patch: impl FnOnce(&mut [u8], usize)) -> Option<usize> {
         let len = bytes.len().max(1);
         let at = self.used.next_multiple_of(Self::ALIGN);
@@ -514,7 +431,6 @@ impl Arena {
             return self.place(bytes, patch);
         }
         let (w, x) = self.chunks.last()?;
-        // SAFETY: [at, at + len) of the writable view, not used by any other piece
         let buf = unsafe { core::slice::from_raw_parts_mut(w.at.add(at), len) };
         buf[..bytes.len()].copy_from_slice(bytes);
         let addr = x.at as usize + at;
@@ -524,14 +440,11 @@ impl Arena {
     }
 }
 
-/// Executable memory: one mapping.
 pub struct Mapped {
     pub at: *mut u8,
     pub len: usize,
 }
 
-
-/// Trampolines: `jmp [rip + d]` to a cell in a writable page next to them. One page of stubs, one of cells.
 pub struct Trampolines {
     at: *mut u8,
     used: usize,
@@ -543,7 +456,6 @@ impl Trampolines {
     pub const PER_PAGE: usize = Self::PAGE / Self::STUB;
 
     pub fn new() -> Option<Self> {
-        // SAFETY: a fresh mapping: stubs page read-execute, cells page read-write
         unsafe {
             let at = libc::mmap(core::ptr::null_mut(), 2 * Self::PAGE, libc::PROT_READ | libc::PROT_WRITE, libc::MAP_PRIVATE | libc::MAP_ANONYMOUS, -1, 0);
             if at == libc::MAP_FAILED {
@@ -553,7 +465,6 @@ impl Trampolines {
             for i in 0..Self::PER_PAGE {
                 let stub = at.add(i * Self::STUB);
                 let cell = at.add(Self::PAGE + i * 8);
-                // jmp [rip + disp32]: rip is after the 6-byte instruction
                 let disp = i32::try_from(cell as isize - (stub as isize + 6)).unwrap_or(0);
                 let mut code = [0xff, 0x25, 0, 0, 0, 0, 0xcc, 0xcc];
                 code[2..6].copy_from_slice(&disp.to_le_bytes());
@@ -566,7 +477,6 @@ impl Trampolines {
         }
     }
 
-    /// A free stub pointing at `target`: its address
     pub fn take(&mut self, target: usize) -> Option<usize> {
         if self.used == Self::PER_PAGE {
             return None;
@@ -577,14 +487,12 @@ impl Trampolines {
         Some(self.at as usize + i * Self::STUB)
     }
 
-    /// Repoints stub `stub` (an address from `take`)
     pub fn set_at(&self, stub: usize, target: usize) {
         let i = (stub - self.at as usize) / Self::STUB;
         self.set(i, target);
     }
 
     fn set(&self, i: usize, target: usize) {
-        // SAFETY: cell `i` of the writable page
         unsafe { core::ptr::write_volatile(self.at.add(Self::PAGE + i * 8).cast::<usize>(), target) };
     }
 
@@ -595,7 +503,6 @@ impl Trampolines {
 
 impl Drop for Trampolines {
     fn drop(&mut self) {
-        // SAFETY: the mapping made in `new`
         unsafe { libc::munmap(self.at.cast(), 2 * Self::PAGE) };
     }
 }

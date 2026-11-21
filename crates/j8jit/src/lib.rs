@@ -1,13 +1,3 @@
-//! j8jit: the JIT for j8 (x86-64 Unix).
-//!
-//! ```text
-//! hot function / hot loop ─ build (bytecode + inline caches ⇒ speculative graph) ─ lower (MLIR llvm dialect)
-//!   ─ mlirpass (mem2reg, canonicalize, cse) ─ x86-64 backend ─▶ machine code, run on the interpreter's frame
-//! a guard fails ─▶ j8_deopt rebuilds the interpreter frames; the hint it leaves shapes the next compilation
-//! ```
-//!
-//! Three entries: [`Kind::Enter`] (a call from the interpreter, on its frame), [`Kind::Osr`] (a hot loop, on its
-//! frame), [`Kind::Native`] (a call from compiled code, through the callee's trampoline, no interpreter frame).
 extern crate alloc;
 
 mod build;
@@ -41,35 +31,26 @@ use ir::{FrameState, Helper, Op, Rep, V};
 use codegen::{Reason, RESUMED, RETURNED, THREW};
 use runtime::{Arena, Ctx, Trampolines};
 
-/// Where a deopt slot's bits are.
 #[derive(Clone, Copy, Debug)]
 pub enum Src {
     Buf(u32),
     Const(u64),
 }
 
-/// What every hand-over of one compiled function shares: its frame states, and each value's representation and
-/// constant bits (for values that are constants)
 pub struct Meta {
     states: Vec<FrameState>,
     reps: Vec<Rep>,
     consts: Vec<Option<u64>>,
 }
 
-/// One hand-over point of some compiled code.
 pub struct Deopt {
     meta: Rc<Meta>,
     fs: u32,
-    /// Values the stub stored in `Ctx::BUF`: (value, buffer index)
     slots: Vec<(V, u32)>,
     reason: Reason,
-    /// The guarding instruction (debugging)
     op: u32,
-    /// Where a failure's hint goes, when not at the state's innermost frame (a guard moved out of a loop)
     hint_at: Option<(FuncId, u32)>,
-    /// The code was entered natively (no interpreter frame below)
     native: bool,
-    /// The compiled function and how it was entered (to drop the code when a speculation fails)
     root: FuncId,
     kind: Kind,
 }
@@ -79,7 +60,6 @@ impl Deopt {
         &self.meta.states[self.fs as usize]
     }
 
-    /// Where value `v`'s bits are, and its representation
     fn value(&self, v: V) -> (Rep, Src) {
         let rep = self.meta.reps.get(v as usize).copied().unwrap_or(Rep::Word);
         match self.slots.iter().find(|(x, _)| *x == v) {
@@ -89,28 +69,23 @@ impl Deopt {
     }
 }
 
-/// What the JIT knows about one function.
 #[derive(Default)]
 struct Func {
     enter: Option<usize>,
     osr: BTreeMap<usize, usize>,
     native: Option<usize>,
-    /// Its trampoline (0: none yet)
     stub: usize,
-    /// Calls through the trampoline while interpreted
     native_calls: u32,
     deopts: u32,
     never: bool,
     native_never: bool,
 }
 
-/// A global cache site: where the name is, the function it is expected to hold, and its two-word cache
 struct Site {
     func: FuncId,
     name: u32,
     slot: u32,
     expect: Option<FuncId>,
-    /// Its cache (the code reads it by address: kept here)
     #[expect(dead_code, reason = "owned for its address only")]
     cache: Box<[u64; 2]>,
 }
@@ -118,7 +93,6 @@ struct Site {
 #[derive(Default)]
 struct State {
     sites: Vec<Site>,
-    /// By function id
     funcs: Vec<Func>,
     deopts: Vec<Rc<Deopt>>,
     calls: Vec<(Helper, usize)>,
@@ -129,14 +103,10 @@ struct State {
     hints: Hints,
 }
 
-/// ⭐ The JIT: handed to the executor (`Executor::with_tier`).
 pub struct Jit {
     threshold: u32,
-    /// Debugging switches, read once
     debug: Debug,
-    /// Contexts of finished runs, for the next ones (a host function calling back into JS starts one each time)
     ctxs: RefCell<Vec<Box<Ctx>>>,
-    /// The lowest stack address native code runs at (set the first time it runs)
     floor: core::cell::Cell<u64>,
     epoch: core::cell::Cell<u64>,
     st: RefCell<State>,
@@ -149,13 +119,11 @@ impl Default for Jit {
 }
 
 impl From<u32> for Jit {
-    /// Native code after `threshold` calls through a trampoline
     fn from(threshold: u32) -> Self {
         Self { threshold, debug: Debug::from_env(), ctxs: RefCell::new(Vec::new()), floor: core::cell::Cell::new(0), epoch: core::cell::Cell::new(1), st: RefCell::new(State::default()) }
     }
 }
 
-/// Debugging output: `J8_JIT_LOG` (compilations, hand-overs), `J8_JIT_IR` (graphs), `J8_JIT_BIN=dir` (machine code)
 struct Debug {
     log: bool,
     ir: bool,
@@ -168,21 +136,17 @@ impl Debug {
     }
 }
 
-/// Deopts of one function before the JIT gives up on it
 const MAX_DEOPTS: u32 = 24;
 
-/// An interpreter entry
 type EntryFn = unsafe extern "C" fn(*mut Ctx, *mut Value<'static>, *mut Value<'static>) -> i64;
 
 impl Jit {
-    /// Default hotness threshold
     pub const THRESHOLD: u32 = 64;
 
     pub fn threshold(&self) -> u32 {
         self.threshold
     }
 
-    /// Helper call `id`: what and how many operands
     fn call(&self, id: u64) -> (Helper, usize) {
         self.st.borrow().calls[usize::try_from(id).unwrap_or(0)]
     }
@@ -191,7 +155,6 @@ impl Jit {
         self.ctxs.borrow_mut().pop()
     }
 
-    /// Keeps a context for reuse
     fn recycle(&self, ctx: Box<Ctx>) {
         let mut v = self.ctxs.borrow_mut();
         if v.len() < 8 {
@@ -199,7 +162,6 @@ impl Jit {
         }
     }
 
-    /// See `Ctx::stack_floor`
     fn stack_floor(&self) -> u64 {
         if self.floor.get() == 0 {
             let here = 0u8;
@@ -209,21 +171,18 @@ impl Jit {
         self.floor.get()
     }
 
-    /// The machine stack has room for native code (else the interpreter goes on with its own frames)
     fn stack_room(&self) -> bool {
         let here = 0u8;
         let at = core::ptr::from_ref(&here) as u64;
         at > self.stack_floor() + runtime::NATIVE_STACK / 4
     }
 
-    /// A new epoch (see `Ctx::epoch`)
     fn bump(&self) -> u64 {
         let e = self.epoch.get() + 1;
         self.epoch.set(e);
         e
     }
 
-    /// Global cache site `k`: (function, name constant, feedback slot, expected function)
     fn site(&self, k: u32) -> (FuncId, u32, u32, Option<FuncId>) {
         let st = self.st.borrow();
         let s = &st.sites[k as usize];
@@ -246,7 +205,6 @@ impl Jit {
         &mut st.funcs[i]
     }
 
-    /// A failed speculation: a hint for next time, and the code that made it goes
     fn learn(&self, d: &Deopt) {
         let Some(fr) = d.state().frames.last() else { return };
         if self.debug.log {
@@ -258,8 +216,6 @@ impl Jit {
             Reason::Number | Reason::Shape => HINT_GENERIC,
             Reason::Func => HINT_NO_INLINE | HINT_GENERIC,
             Reason::Poll | Reason::Throw | Reason::Hole | Reason::Depth => return,
-            // Bytecode the JIT doesn't compile: compiling again changes nothing. A loop's code stays (that was after
-            // the loop); in an inlined callee, that call isn't inlined next time; a function's own code goes for good
             Reason::Always => {
                 if let Kind::Osr(_) = d.kind {
                     return;
@@ -313,7 +269,6 @@ impl Jit {
         }
     }
 
-    /// The trampoline of `f` (made pointing at the interpreter)
     fn stub(st: &mut State, f: FuncId) -> usize {
         let s = Self::func(st, f).stub;
         if s != 0 {
@@ -332,7 +287,6 @@ impl Jit {
         s
     }
 
-    /// A call through `f`'s trampoline was interpreted: compiles native code when hot
     fn native_hot(&self, exe: &j8executor::Executor, a: &mut j8framework::Agent<'_, '_>, f: FuncId) {
         {
             let mut st = self.st.borrow_mut();
@@ -357,7 +311,6 @@ impl Jit {
         }
     }
 
-    /// Compiles `f` entered as `kind`: the machine code's address
     fn compile(&self, exe: &j8executor::Executor, a: &mut j8framework::Agent<'_, '_>, f: FuncId, kind: Kind) -> Option<usize> {
         if self.debug.log {
             std::eprintln!("j8jit: compile {f:?} {kind:?}");
@@ -378,7 +331,6 @@ impl Jit {
         if self.debug.ir {
             std::eprintln!("== {f:?} {kind:?}\n{}", built.graph.dump());
         }
-        // Global cache sites: their caches first (the code embeds their addresses), numbered globally
         let mut graph = built.graph;
         let (site_base, addrs) = {
             let mut st = self.st.borrow_mut();
@@ -429,7 +381,6 @@ impl Jit {
             }
         })?;
         let lowered = generated;
-        // Runtime calls: shapes get global indices
         let shape_base = u32::try_from(st.shapes.len()).ok()?;
         st.shapes.extend(built.shapes.iter().cloned());
         st.keep.extend(built.keep.iter().cloned());
@@ -449,7 +400,6 @@ impl Jit {
             Op::Word(w) => Some(*w),
             _ => None,
         }).collect();
-        // Constants are stored boxed already: a number word for I32 / F64 constants
         let reps = built.graph.insts.iter().map(|i| match i.op {
             Op::I32(_) | Op::F64(_) if i.rep != Rep::Bool => Rep::Word,
             _ => i.rep,
@@ -466,10 +416,8 @@ impl Jit {
         Some(addr)
     }
 
-    /// Runs native code at `addr` for the entry frame's call; the frame then returns by its `Return` at `ret`
     fn run_native(&self, e: &mut Entry<'_, '_, '_, '_>, addr: usize, ret: usize) -> Tiered {
         let params = e.params();
-        // SAFETY: the receiver and the formal parameters (at most three) are in the frame
         let words: [u64; 4] = core::array::from_fn(|i| if i <= e.function().shared().formal_parameters as usize { unsafe { (*params.add(i)).bits() } } else { j8framework::ValueBits::UNDEFINED });
         let callee = e.callee().bits();
         let level = e.depth();
@@ -477,7 +425,6 @@ impl Jit {
         let saved = exe.jit_depth().replace(level);
         let mut ctx = Ctx::new(e, self);
         type NativeFn = unsafe extern "C" fn(*mut Ctx, u64, u64, u64, u64, u64) -> u64;
-        // SAFETY: native code takes (context, callee, this, three arguments)
         let r = unsafe {
             let f: NativeFn = core::mem::transmute::<usize, NativeFn>(addr);
             f(&raw mut *ctx, callee, words[0], words[1], words[2], words[3])
@@ -488,12 +435,10 @@ impl Jit {
         if let Some(err) = threw {
             return Tiered::Threw(err);
         }
-        // SAFETY: a word of this mutate
         e.resume_at(ret, unsafe { Value::from_bits(r) });
         Tiered::Resumed
     }
 
-    /// Runs interpreter-entry code at `addr` on the entry frame
     fn run(&self, e: &mut Entry<'_, '_, '_, '_>, addr: usize) -> Tiered {
         let params = e.params().cast::<Value<'static>>();
         let r0 = e.r0().cast::<Value<'static>>();
@@ -501,8 +446,6 @@ impl Jit {
         let exe = e.executor();
         let saved = exe.jit_depth().replace(level);
         let mut ctx = Ctx::new(e, self);
-        // SAFETY: the code was compiled for this entry kind; it reads the frame through the pointers, and the
-        // context through `ctx`
         let status = unsafe {
             let f: EntryFn = core::mem::transmute::<usize, EntryFn>(addr);
             f(&raw mut *ctx, params, r0)
@@ -510,7 +453,6 @@ impl Jit {
         exe.jit_depth().set(saved);
         let r = match status {
             RETURNED => {
-                // SAFETY: a word of this mutate
                 let v = unsafe { Value::from_bits(ctx.ret) };
                 e.resume_at(usize::try_from(ctx.ret_pc).unwrap_or(0), v);
                 Tiered::Resumed
@@ -539,7 +481,6 @@ impl Tier for Jit {
             let mut st = self.st.borrow_mut();
             Self::func(&mut st, f).native?
         };
-        // A sloppy function's receiver: the global object for undefined / null; other primitives the usual way
         let this = if func.wraps_this() {
             match this.bits() {
                 j8framework::ValueBits::UNDEFINED | j8framework::ValueBits::NULL => Value::Object(a.realm.global),
@@ -552,7 +493,6 @@ impl Tier for Jit {
         let arg = |i: usize| if i < formals { args.get(i).copied().unwrap_or_default().bits() } else { j8framework::ValueBits::UNDEFINED };
         let mut ctx = Ctx::bare(exe, a, self);
         type NativeFn = unsafe extern "C" fn(*mut Ctx, u64, u64, u64, u64, u64) -> u64;
-        // SAFETY: native code takes (context, callee, this, three arguments)
         let r = unsafe {
             let code: NativeFn = core::mem::transmute::<usize, NativeFn>(addr);
             code(&raw mut *ctx, callee.bits(), this.bits(), arg(0), arg(1), arg(2))
@@ -561,7 +501,6 @@ impl Tier for Jit {
         self.recycle(ctx);
         Some(match threw {
             Some(e) => Err(e),
-            // SAFETY: a word of this mutate
             None => Ok(unsafe { Value::from_bits(r) }),
         })
     }
@@ -570,11 +509,9 @@ impl Tier for Jit {
         let f = e.function();
         let id = f.id();
         f.tier_word().set(1);
-        // Script / eval top-level code runs once: not compiled on entry (its loops are, on-stack)
         if !self.stack_room() || e.callee().as_object().and_then(|o| o.closure()).is_none() {
             return Tiered::Interpret;
         }
-        // An ordinary call of a plain function: its native code (one compilation serves both kinds of callers)
         let formals = usize::from(f.shared().formal_parameters);
         if f.plain() && !f.class_constructor() && !e.constructing() && formals <= 3 && e.callee().as_object().and_then(|o| o.closure()).is_some() {
             let native = {
@@ -682,6 +619,4 @@ impl Tier for Jit {
     }
 }
 
-// SAFETY: the JIT lives in an executor, which moves between threads with its isolate, one thread at a time; its
-// code and trampolines are only run and changed from that thread
 unsafe impl Send for Jit {}

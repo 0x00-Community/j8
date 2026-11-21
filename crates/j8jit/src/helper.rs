@@ -1,16 +1,11 @@
 use j8framework::BinaryOp;
 
-/// Runtime functions called from machine code (addresses filled in by the loader; see
-/// [`Native::relocs`](crate::Native::relocs)).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Helper {
-    /// `extern "C" fn(f64, f64) -> f64`: applies this binary operation to two numbers (ops other than the four
-    /// arithmetic ones: remainder, exponentiation, bitwise ops)
     Number(BinaryOp),
 }
 
 impl Helper {
-    /// All runtime functions and their symbol names in MLIR (each name appears only here).
     const TABLE: [(Helper, &'static str); 8] = [
         (Helper::Number(BinaryOp::Rem), "j8_number_rem"),
         (Helper::Number(BinaryOp::Exp), "j8_number_exp"),
@@ -32,7 +27,6 @@ impl Helper {
         all
     };
 
-    /// Symbol name in MLIR; the four arithmetic ops don't go through runtime functions (`None`).
     pub fn symbol(self) -> Option<&'static str> {
         Self::TABLE.iter().find(|(h, _)| *h == self).map(|(_, s)| *s)
     }

@@ -1,0 +1,15 @@
+{
+	"name": "j8-mdbook",
+	"version": "0.0.0",
+	"private": true,
+	"scripts": {
+		"build": "mdbook build en && mdbook build zh-CN",
+		"serve": "mdbook serve en --open",
+		"serve:zh": "mdbook serve zh-CN --open",
+		"dev": "bun run build && wrangler dev",
+		"deploy": "bun run build && wrangler deploy"
+	},
+	"devDependencies": {
+		"wrangler": "^4.166.0"
+	}
+}

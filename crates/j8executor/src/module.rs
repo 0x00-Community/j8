@@ -1,6 +1,3 @@
-//! Loading, linking and evaluation of ES modules (synchronous: dependencies are read in via `Platform::load_module`;
-//! top-level await is not supported yet).
-
 use alloc::string::String;
 use j8compiler::Compile;
 use alloc::vec::Vec;
@@ -10,8 +7,6 @@ use j8framework::{Agent, Closure, Error, ErrorKind, ImportName, ModuleStatus, Ob
 use crate::{Executor, Outcome};
 
 impl Executor {
-    /// Loads the module at `path` and its dependencies (an already-loaded module just returns its id). A compile error
-    /// or a missing dependency gives `Error::Syntax`.
     pub fn load_module(&self, a: &mut Agent<'_, '_>, path: &str, text: &str) -> Result<u32, Error> {
         if let Some(i) = a.modules().iter().position(|m| **m.path == *path) {
             return Ok(u32::try_from(i).unwrap_or(u32::MAX));
@@ -41,7 +36,6 @@ impl Executor {
         Ok(index)
     }
 
-    /// Linking: resolves each module's imports and re-exports (unresolvable / ambiguous gives `Error::Syntax`).
     pub fn link(a: &mut Agent<'_, '_>, m: u32, seen: &mut Vec<u32>) -> Result<(), Error> {
         if seen.contains(&m) {
             return Ok(());
@@ -79,8 +73,6 @@ impl Executor {
         Ok(())
     }
 
-    /// Evaluation: dependencies are evaluated first (cycles skipped), each module runs only once; re-evaluating a
-    /// module that threw throws the same error again.
     pub fn evaluate(&self, a: &mut Agent<'_, '_>, m: u32, depth: usize) -> Result<(), Error> {
         let (status, error, requested, main, env) = {
             let r = &a.modules()[m as usize];
@@ -117,19 +109,16 @@ impl Executor {
         r
     }
 
-    /// The module a function belongs to (`None` for functions in scripts).
     pub fn module_index(&self, base: u32) -> Option<u32> {
         self.module_of.borrow().get(&base).copied()
     }
 
-    /// `LdaImport`: the value of this module's `index`-th import binding.
     pub fn import_value<'gc>(&self, a: &mut Agent<'gc, '_>, base: u32, index: u16) -> Result<Value<'gc>, Error> {
         let Some(m) = self.module_index(base) else { return Err(a.throw(ErrorKind::Reference, "import binding outside a module")) };
         let b = a.modules()[m as usize].imports[usize::from(index)];
         a.binding_value(b, "import")
     }
 
-    /// `import.meta`: one per module (no prototype).
     pub fn import_meta<'gc>(&self, a: &mut Agent<'gc, '_>, base: u32) -> Result<Value<'gc>, Error> {
         let Some(m) = self.module_index(base) else { return Err(a.throw(ErrorKind::Syntax, "Cannot use 'import.meta' outside a module")) };
         if let Some(meta) = a.modules()[m as usize].meta {
@@ -142,7 +131,6 @@ impl Executor {
         Ok(meta.into())
     }
 
-    /// Loads, links and evaluates a module, returning its id.
     pub fn run_module(&self, a: &mut Agent<'_, '_>, path: &str, text: &str, depth: usize) -> Result<u32, Error> {
         let m = self.load_module(a, path, text)?;
         Self::link(a, m, &mut Vec::new())?;
@@ -150,8 +138,6 @@ impl Executor {
         Ok(m)
     }
 
-    /// `import(specifier)`: returns a Promise; loading / linking / evaluation all happen synchronously here, and the
-    /// Promise is fulfilled with the namespace object.
     pub fn dynamic_import<'gc>(&self, a: &mut Agent<'gc, '_>, referrer: &str, specifier: Value<'gc>, depth: usize) -> Result<Value<'gc>, Error> {
         let promise = a.new_promise();
         let r = (|| -> Result<Value<'gc>, Error> {

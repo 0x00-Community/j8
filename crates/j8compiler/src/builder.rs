@@ -1,15 +1,9 @@
-//! Emitting one function's bytecode, after V8's `BytecodeArrayBuilder` / `BytecodeArrayWriter` /
-//! `BytecodeRegisterAllocator` / `ConstantArrayBuilder` / `HandlerTableBuilder` / `FeedbackVectorSpec`: picks the
-//! bytecode for each operation the way V8 does (short `Star`, `LdaZero`, call forms by argument count, `InvokeIntrinsic`
-//! for intrinsics …), patches forward jumps (a reserved constant pool entry backs a jump whose offset doesn't fit its
-//! operand), allocates registers in stack order, numbers feedback slots.
 #![allow(clippy::cast_possible_wrap, reason = "constant pool and feedback indices are far below i64::MAX")]
 use alloc::vec::Vec;
 
 use j8bytecode::{Bytecode, BytecodeArray, CatchPrediction, Constant, Encoder, FeedbackSlotKind, HandlerEntry, Intrinsic, OperandScale, OperandValue, Register, Runtime, TypeOfLiteral};
 use j8framework::{BinaryOp, CompareOp};
 
-/// Consecutive registers (V8's `RegisterList`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RegisterList {
     pub first: Register,
@@ -24,52 +18,36 @@ impl RegisterList {
     }
 }
 
-/// A forward jump target (V8's `BytecodeLabel`): jumps to it are patched when it is bound.
 #[derive(Default)]
 pub struct Label {
     bound: Option<usize>,
-    /// Each jump to it: where it starts (its prefix included) and its constant pool reservation
     refs: Vec<(usize, usize)>,
 }
 
-/// A loop header (V8's `BytecodeLoopHeader`): `JumpLoop` jumps back to it.
 #[derive(Clone, Copy)]
 pub struct LoopHeader(usize);
 
-/// A jump table (V8's `BytecodeJumpTable`): `SwitchOnSmiNoFeedback` / `SwitchOnGeneratorState` over `size` cases
-/// starting at `case_base`, their targets in consecutive constant pool entries from `constant`.
 pub struct JumpTable {
     constant: usize,
     pub size: u32,
     pub case_base: i32,
-    /// Offset of the switch bytecode itself (the prefix not counted)
     switch_at: usize,
 }
 
-/// One function's bytecode in the making.
 pub struct Builder {
     enc: Encoder,
     constants: Vec<Constant>,
     handlers: Vec<HandlerEntry>,
     feedback: Vec<FeedbackSlotKind>,
     parameter_count: u16,
-    /// Registers r0 … `locals` - 1 are the function's own variables; temporaries follow
     locals: i32,
     next: i32,
     max: i32,
-    /// Jumps whose label isn't bound yet (they keep their constant pool reservation)
     unbound: usize,
-    /// Constant pool entries reserved for unbound jumps (V8's `ConstantArrayBuilder` reservations: counted, an index is
-    /// only taken when a jump needs it)
     reserved: usize,
-    /// Feedback slots shared between uses (V8's `FeedbackSlotCache`): (kind, key) ⇒ slot
     slot_cache: Vec<(FeedbackSlotKind, alloc::string::String, usize)>,
-    /// The accumulator holds a boolean (the last bytecode was a test): conditional jumps need no ToBoolean
     boolean: bool,
-    /// The register the last bytecode stored the accumulator in (an `Ldar` of it right after is elided)
     stored: Option<Register>,
-    /// The code here is unreachable (after a return / throw / unconditional jump, until a label is bound): nothing is
-    /// emitted (V8's `exit_seen_in_block_`)
     dead: bool,
     pub new_target_or_generator: Option<i32>,
 }
@@ -79,7 +57,6 @@ impl Builder {
         Self { enc: Encoder::default(), constants: Vec::new(), handlers: Vec::new(), feedback: Vec::new(), parameter_count, locals, next: locals, max: locals, unbound: 0, reserved: 0, slot_cache: Vec::new(), boolean: false, stored: None, dead: false, new_target_or_generator: None }
     }
 
-    /// The finished bytecode
     pub fn finish(self) -> BytecodeArray {
         debug_assert_eq!(self.unbound, 0, "every label is bound");
         BytecodeArray {
@@ -93,7 +70,6 @@ impl Builder {
         }
     }
 
-    /// Current bytecode offset
     pub fn offset(&self) -> usize {
         self.enc.code.len()
     }
@@ -109,12 +85,10 @@ impl Builder {
         at
     }
 
-    /// Whether code emitted now is reachable
     pub fn reachable(&self) -> bool {
         !self.dead
     }
 
-    /// A feedback slot of `kind` shared by every use with the same `key` (V8's `FeedbackSlotCache`)
     pub fn cached_slot(&mut self, kind: FeedbackSlotKind, key: &str) -> usize {
         if let Some(&(_, _, s)) = self.slot_cache.iter().find(|(k, n, _)| *k == kind && n == key) {
             return s;
@@ -123,8 +97,6 @@ impl Builder {
         self.slot_cache.push((kind, key.into(), s));
         s
     }
-
-    // ---- registers (V8's BytecodeRegisterAllocator: stack discipline) ----
 
     pub fn new_register(&mut self) -> Register {
         self.new_register_list(1).first
@@ -137,7 +109,6 @@ impl Builder {
         RegisterList { first, count }
     }
 
-    /// The next register to be allocated (to release back to, V8's `RegisterAllocationScope`)
     pub fn mark(&self) -> i32 {
         self.next
     }
@@ -147,7 +118,6 @@ impl Builder {
         self.next = mark;
     }
 
-    /// Grows the local variables by one register (only before any temporary is live)
     pub fn new_local(&mut self) -> Register {
         debug_assert_eq!(self.next, self.locals, "locals are allocated before temporaries");
         let r = Register(self.locals);
@@ -157,9 +127,6 @@ impl Builder {
         r
     }
 
-    // ---- constant pool and feedback ----
-
-    /// The pool entry of `c` (strings, numbers and functions are shared)
     pub fn constant(&mut self, c: Constant) -> usize {
         let shared = matches!(c, Constant::Number(_) | Constant::String(_) | Constant::BigInt(_) | Constant::Function(_));
         if shared && let Some(i) = self.constants.iter().position(|x| *x == c) {
@@ -173,7 +140,6 @@ impl Builder {
         self.constant(Constant::String(s.into()))
     }
 
-    /// A new feedback slot of `kind` (V8's `FeedbackVectorSpec::AddSlot`)
     pub fn slot(&mut self, kind: FeedbackSlotKind) -> usize {
         let at = self.feedback.len();
         self.feedback.push(kind);
@@ -183,8 +149,6 @@ impl Builder {
         at
     }
 
-    // ---- accumulator and registers ----
-
     pub fn load_smi(&mut self, v: i32) {
         if v == 0 {
             self.out(Bytecode::LdaZero, &[]);
@@ -193,7 +157,6 @@ impl Builder {
         }
     }
 
-    /// A number: a Smi when it is one (V8's `DoubleToSmiInteger`: an int32 that isn't -0), else a constant
     pub fn load_number(&mut self, v: f64) {
         if let Some(i) = Self::is_smi(v) {
             self.load_smi(i);
@@ -229,21 +192,18 @@ impl Builder {
     }
 
     pub fn ldar(&mut self, r: Register) {
-        // The accumulator still holds what was just stored there (a simple case of V8's register optimizer)
         if self.stored == Some(r) {
             return;
         }
         self.out(Bytecode::Ldar, &[i32::from(r).into()]);
     }
 
-    /// `Star`, or the short `Star0` … `Star15`
     pub fn star(&mut self, r: Register) {
         let boolean = self.boolean;
         match Bytecode::short_star(r) {
             Some(b) => self.out(b, &[]),
             None => self.out(Bytecode::Star, &[i32::from(r).into()]),
         };
-        // A store leaves the accumulator as it was
         self.boolean = boolean;
         if !self.dead {
             self.stored = Some(r);
@@ -255,8 +215,6 @@ impl Builder {
             self.out(Bytecode::Mov, &[i32::from(from).into(), i32::from(to).into()]);
         }
     }
-
-    // ---- globals, contexts ----
 
     pub fn load_global(&mut self, name: &str, inside_typeof: bool) {
         let k = self.name(name);
@@ -270,9 +228,6 @@ impl Builder {
         self.out(Bytecode::StaGlobal, &[k as OperandValue, s as OperandValue]);
     }
 
-    /// Context slot `slot` of the context `depth` levels out from `context` (V8's `LoadContextSlot`: the
-    /// current-context form for depth 0 of the current context; immutable forms for never-assigned variables)
-    /// `cells`: the context has context cells (V8's script context), accessed with the plain forms instead of `NoCell`
     pub fn load_context_slot(&mut self, context: Register, slot: u32, depth: u32, immutable: bool, cells: bool) {
         let current = context == Register::current_context() && depth == 0;
         let c = i32::from(context).into();
@@ -300,7 +255,6 @@ impl Builder {
         };
     }
 
-    /// Whether `v` is a Smi (V8 with pointer compression: 31 bits)
     pub fn is_smi(v: f64) -> Option<i32> {
         #[expect(clippy::cast_possible_truncation, reason = "checked to round-trip exactly")]
         let i = v as i32;
@@ -335,8 +289,6 @@ impl Builder {
         self.out(Bytecode::CreateEvalContext, &[scope as OperandValue, slots.into()]);
     }
 
-    // ---- lookup slots (dynamic: with / sloppy eval) ----
-
     pub fn load_lookup_slot(&mut self, name: &str, inside_typeof: bool) {
         let k = self.name(name);
         self.out(if inside_typeof { Bytecode::LdaLookupSlotInsideTypeof } else { Bytecode::LdaLookupSlot }, &[k as OperandValue]);
@@ -347,14 +299,10 @@ impl Builder {
         self.out(Bytecode::StaLookupSlot, &[k as OperandValue, flags.into()]);
     }
 
-    // ---- properties ----
-
     pub fn get_named(&mut self, object: Register, name: &str) {
         self.get_named_shared(object, name, None);
     }
 
-    /// `GetNamedProperty`; `variable` names the variable the object came from: then the feedback slot is shared with
-    /// other reads of the same property of the same variable (V8's `GetCachedLoadICSlot`)
     pub fn get_named_shared(&mut self, object: Register, name: &str, variable: Option<&str>) {
         let k = self.name(name);
         let s = match variable {
@@ -374,7 +322,6 @@ impl Builder {
         self.set_named_shared(object, name, strict, None);
     }
 
-    /// `SetNamedProperty`, sharing the feedback slot per variable like [`Self::get_named_shared`]
     pub fn set_named_shared(&mut self, object: Register, name: &str, strict: bool, variable: Option<&str>) {
         let k = self.name(name);
         let kind = if strict { FeedbackSlotKind::SetNamedStrict } else { FeedbackSlotKind::SetNamedSloppy };
@@ -391,13 +338,11 @@ impl Builder {
         self.out(Bytecode::DefineNamedOwnProperty, &[i32::from(object).into(), k as OperandValue, s as OperandValue]);
     }
 
-    /// `object[acc]`
     pub fn get_keyed(&mut self, object: Register) {
         let s = self.slot(FeedbackSlotKind::LoadKeyed);
         self.out(Bytecode::GetKeyedProperty, &[i32::from(object).into(), s as OperandValue]);
     }
 
-    /// `object[key] = acc`
     pub fn set_keyed(&mut self, object: Register, key: Register, strict: bool) {
         let s = self.slot(if strict { FeedbackSlotKind::SetKeyedStrict } else { FeedbackSlotKind::SetKeyedSloppy });
         self.out(Bytecode::SetKeyedProperty, &[i32::from(object).into(), i32::from(key).into(), s as OperandValue]);
@@ -422,14 +367,10 @@ impl Builder {
         self.out(if strict { Bytecode::DeletePropertyStrict } else { Bytecode::DeletePropertySloppy }, &[i32::from(object).into()]);
     }
 
-    // ---- operators ----
-
-    /// `reg op acc` (V8's `BinaryOperation`: one bytecode per operator, feedback embedded)
     pub fn binary(&mut self, op: BinaryOp, reg: Register) {
         self.out(Self::binary_bytecode(op), &[i32::from(reg).into(), 0]);
     }
 
-    /// `acc op smi` (V8's `BinaryOperationSmiLiteral`)
     pub fn binary_smi(&mut self, op: BinaryOp, smi: i32) {
         let b = match op {
             BinaryOp::Add => Bytecode::AddSmi,
@@ -465,8 +406,6 @@ impl Builder {
         }
     }
 
-    /// `reg op acc` for comparisons (V8's `CompareOperation`; `!=` / `!==` are a test then `LogicalNot`, as V8's
-    /// generator does)
     pub fn compare(&mut self, op: CompareOp, reg: Register) {
         let (b, negate) = match op {
             CompareOp::Eq => (Bytecode::TestEqual, false),
@@ -514,14 +453,12 @@ impl Builder {
         self.out(Bytecode::TestIn, &[i32::from(reg).into(), s as OperandValue]);
     }
 
-    /// `Inc` / `Dec` / `Negate` / `BitwiseNot` / `TypeOf` (feedback-taking unary operations)
     pub fn unary(&mut self, b: Bytecode) {
         let kind = if b == Bytecode::TypeOf { FeedbackSlotKind::TypeOf } else { FeedbackSlotKind::BinaryOp };
         let s = self.slot(kind);
         self.out(b, &[s as OperandValue]);
     }
 
-    /// Bytecodes without operands (`LogicalNot`, `ToBooleanLogicalNot`, `ToName`, `ToString`, `Return`, `Throw` …)
     pub fn plain(&mut self, b: Bytecode) {
         self.out(b, &[]);
     }
@@ -540,26 +477,20 @@ impl Builder {
         self.out(Bytecode::ToObject, &[i32::from(out).into()]);
     }
 
-    // ---- jumps ----
-
-    /// A forward jump to `label` (V8's `EmitJump`: the operand is sized by a constant pool reservation)
     pub fn jump(&mut self, b: Bytecode, label: &mut Label) {
         self.jump_with(b, label, &[]);
     }
 
-    /// A forward jump whose target is its first operand, followed by `rest`
     fn jump_with(&mut self, b: Bytecode, label: &mut Label, rest: &[OperandValue]) {
         debug_assert!(label.bound.is_none(), "backward jumps are JumpLoop");
         if self.dead {
             return;
         }
-        // A boolean accumulator needs no ToBoolean (V8 picks the plain form after a test)
         let b = match (b, self.boolean) {
             (Bytecode::JumpIfToBooleanTrue, true) => Bytecode::JumpIfTrue,
             (Bytecode::JumpIfToBooleanFalse, true) => Bytecode::JumpIfFalse,
             (b, _) => b,
         };
-        // The reservation guarantees an entry of the operand's size will be free if the offset doesn't fit
         let entry = self.constants.len() + self.reserved;
         self.reserved += 1;
         let placeholder: OperandValue = match OperandScale::for_unsigned(u32::try_from(entry).unwrap_or(u32::MAX)) {
@@ -576,11 +507,9 @@ impl Builder {
         self.unbound += 1;
     }
 
-    /// Binds `label` here, patching the jumps to it (V8's `PatchJump`)
     pub fn bind(&mut self, label: &mut Label) {
         let target = self.offset();
         label.bound = Some(target);
-        // Control flow merges here: nothing is known about the accumulator; code is reachable if anything jumps here
         if !label.refs.is_empty() {
             self.dead = false;
         }
@@ -601,10 +530,8 @@ impl Builder {
         let width = usize::from(j8bytecode::OperandSize::from(scale));
         self.reserved -= 1;
         let value = if OperandScale::for_unsigned(delta) <= scale {
-            // Fits: the reservation is just dropped
             delta
         } else {
-            // Doesn't fit: the offset goes into the constant pool and the jump takes its constant form
             let b = Bytecode::from_u8(code[start]).expect("a jump");
             code[start] = Self::with_constant_operand(b) as u8;
             self.constants.push(Constant::Offset(delta));
@@ -615,7 +542,6 @@ impl Builder {
         self.unbound -= 1;
     }
 
-    /// The `*Constant` form of a forward jump (V8's `GetJumpWithConstantOperand`)
     fn with_constant_operand(b: Bytecode) -> Bytecode {
         match b {
             Bytecode::Jump => Bytecode::JumpConstant,
@@ -635,18 +561,14 @@ impl Builder {
     }
 
     pub fn loop_header(&mut self) -> LoopHeader {
-        // Reached by the back edge
         self.dead = false;
         self.boolean = false;
         self.stored = None;
         LoopHeader(self.offset())
     }
 
-    /// Jumps back to `header` (V8's `JumpLoop`: the offset back, the loop depth, a feedback slot for OSR)
     pub fn jump_loop(&mut self, header: LoopHeader, depth: u32) {
         let s = self.slot(FeedbackSlotKind::JumpLoop);
-        // The offset counts from the JumpLoop bytecode itself (its prefix, if any, not counted): compute it for the
-        // smallest form first, then once more if the operands need a prefix
         let back = self.offset() - header.0;
         let mut ops = [back as OperandValue, depth.into(), s as OperandValue];
         if Encoder::scale(Bytecode::JumpLoop, &ops) > OperandScale::Single {
@@ -655,7 +577,6 @@ impl Builder {
         self.out(Bytecode::JumpLoop, &ops);
     }
 
-    /// A jump table over `size` cases from `case_base` (targets bound with [`Self::bind_case`])
     pub fn jump_table(&mut self, size: u32, case_base: i32) -> JumpTable {
         let constant = self.constants.len();
         for _ in 0..size {
@@ -680,9 +601,7 @@ impl Builder {
         table.switch_at = at + usize::from(self.enc.code[at] != Bytecode::SwitchOnGeneratorState as u8);
     }
 
-    /// Binds case `case` of `table` here: its constant holds the offset relative to the switch bytecode
     pub fn bind_case(&mut self, table: &JumpTable, case: i32) {
-        // A jump lands here (V8's `Bind(jump_table, index)` starts a basic block)
         self.dead = false;
         self.boolean = false;
         self.stored = None;
@@ -690,9 +609,6 @@ impl Builder {
         self.constants[table.constant + i] = Constant::Offset(u32::try_from(self.offset() - table.switch_at).unwrap_or(u32::MAX));
     }
 
-    // ---- calls ----
-
-    /// `callable(receiver, …args)` with the receiver as `args[0]` (V8's `CallProperty`)
     pub fn call_property(&mut self, callable: Register, args: RegisterList) {
         let s = self.slot(FeedbackSlotKind::Call);
         let c = i32::from(callable).into();
@@ -705,7 +621,6 @@ impl Builder {
         };
     }
 
-    /// `callable(…args)` with an undefined receiver (V8's `CallUndefinedReceiver`)
     pub fn call_undefined_receiver(&mut self, callable: Register, args: RegisterList) {
         let s = self.slot(FeedbackSlotKind::Call);
         let c = i32::from(callable).into();
@@ -718,19 +633,16 @@ impl Builder {
         };
     }
 
-    /// `callable` with receiver `args[0]` that may be anything (V8's `CallAnyReceiver`)
     pub fn call_any_receiver(&mut self, callable: Register, args: RegisterList) {
         let s = self.slot(FeedbackSlotKind::Call);
         self.out(Bytecode::CallAnyReceiver, &[i32::from(callable).into(), i32::from(args.first).into(), args.count.into(), s as OperandValue]);
     }
 
-    /// The last argument is spread (V8's `CallWithSpread`)
     pub fn call_with_spread(&mut self, callable: Register, args: RegisterList) {
         let s = self.slot(FeedbackSlotKind::Call);
         self.out(Bytecode::CallWithSpread, &[i32::from(callable).into(), i32::from(args.first).into(), args.count.into(), s as OperandValue]);
     }
 
-    /// `new constructor(…args)` with `new.target` in the accumulator (V8's `Construct`)
     pub fn construct(&mut self, constructor: Register, args: RegisterList) {
         let s = self.slot(FeedbackSlotKind::Call);
         self.out(Bytecode::Construct, &[i32::from(constructor).into(), i32::from(args.first).into(), args.count.into(), s as OperandValue]);
@@ -741,7 +653,6 @@ impl Builder {
         self.out(Bytecode::ConstructWithSpread, &[i32::from(constructor).into(), i32::from(args.first).into(), args.count.into(), s as OperandValue]);
     }
 
-    /// A runtime function (V8's `CallRuntime`: `InvokeIntrinsic` when it is one)
     pub fn call_runtime(&mut self, f: Runtime, args: RegisterList) {
         match Self::intrinsic(f) {
             Some(i) => self.out(Bytecode::InvokeIntrinsic, &[OperandValue::from(i as u8), i32::from(args.first).into(), args.count.into()]),
@@ -749,14 +660,11 @@ impl Builder {
         };
     }
 
-    /// The intrinsic standing for runtime function `f` (V8's `IntrinsicsHelper::FromRuntimeId`: `InlineX` ⇒ `X`)
     fn intrinsic(f: Runtime) -> Option<Intrinsic> {
         let name = alloc::format!("{f:?}");
         let inner = name.strip_prefix("Inline")?;
         Intrinsic::ALL.into_iter().find(|i| alloc::format!("{i:?}") == inner)
     }
-
-    // ---- closures, literals ----
 
     pub fn create_closure(&mut self, function: usize, flags: u8) {
         let s = self.slot(FeedbackSlotKind::Literal);
@@ -793,8 +701,6 @@ impl Builder {
         self.out(Bytecode::CloneObject, &[i32::from(source).into(), flags.into(), s as OperandValue]);
     }
 
-    // ---- iteration ----
-
     pub fn get_iterator(&mut self, object: Register) {
         let load = self.slot(FeedbackSlotKind::LoadProperty);
         let call = self.slot(FeedbackSlotKind::Call);
@@ -805,7 +711,6 @@ impl Builder {
         self.out(Bytecode::ForInEnumerate, &[i32::from(receiver).into()]);
     }
 
-    /// Fills three registers from `out` (cache type, array, length); returns the feedback slot shared with `ForInNext`
     pub fn for_in_prepare(&mut self, out: RegisterList) -> usize {
         let s = self.slot(FeedbackSlotKind::ForIn);
         self.out(Bytecode::ForInPrepare, &[i32::from(out.first).into(), s as OperandValue]);
@@ -824,9 +729,6 @@ impl Builder {
         self.out(Bytecode::ForInStep, &[i32::from(index).into()]);
     }
 
-    // ---- generators ----
-
-    /// Every register allocated now (V8's `AllLiveRegisters`: r0 up to the next free one)
     pub fn live_registers(&self) -> RegisterList {
         RegisterList { first: Register(0), count: u32::try_from(self.next).unwrap_or(0) }
     }
@@ -839,9 +741,6 @@ impl Builder {
         self.out(Bytecode::ResumeGenerator, &[i32::from(generator).into(), i32::from(registers.first).into(), registers.count.into()]);
     }
 
-    // ---- exceptions ----
-
-    /// A new handler table entry (V8's `HandlerTableBuilder::NewHandlerEntry`)
     pub fn new_handler(&mut self, context: Register, prediction: CatchPrediction) -> usize {
         self.handlers.push(HandlerEntry { start: 0, end: 0, handler: 0, context: context.0, prediction });
         self.handlers.len() - 1
@@ -856,7 +755,6 @@ impl Builder {
     }
 
     pub fn handler_target(&mut self, handler: usize) {
-        // Reached by the exception edge
         self.dead = false;
         self.boolean = false;
         self.stored = None;
@@ -876,7 +774,6 @@ impl Builder {
         self.out(if mapped { Bytecode::CreateMappedArguments } else { Bytecode::CreateUnmappedArguments }, &[]);
     }
 
-    /// Any bytecode with the given operands (for the rare ones without a helper)
     pub fn raw(&mut self, b: Bytecode, ops: &[OperandValue]) -> usize {
         self.out(b, ops)
     }

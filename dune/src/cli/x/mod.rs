@@ -1,7 +1,3 @@
-//! `dune x` (and `dunx`, the same executable started under that name): run a package's executable. The package comes from the nearest `node_modules` up from the
-//! current directory, else from dune's cache, else it is installed from the npm registry into the cache (with its
-//! dependencies, in a hoisted `node_modules`; no lifecycle scripts run). JavaScript executables run in this process on
-//! the Node layer; other executables (shell scripts, native programs) run as child processes.
 mod manifest;
 mod registry;
 mod spec;
@@ -18,11 +14,11 @@ use tree::{Store, Tree};
 
 use crate::job::{Job, Layer};
 
-/// Run a package's executable with dune (`dunx` is `dune x`)
 #[derive(clap::Parser)]
+#[command(about = "Run a package's executable with dune (`dunx` is `dune x`)")]
 #[command(name = "dunx", version)]
 pub struct Dunx {
-    /// Enable the JIT: hot functions are compiled to x86-64 machine code (j8jit)
+    #[arg(help = "Enable the JIT: hot functions are compiled to x86-64 machine code (j8jit)")]
     #[arg(long)]
     jit: bool,
     #[command(flatten)]
@@ -35,17 +31,16 @@ impl Dunx {
     }
 }
 
-/// Run a package's executable
 #[derive(clap::Args)]
+#[command(about = "Run a package's executable")]
 pub struct X {
-    /// The package to use when its name differs from the command's (`-p typescript tsc`)
+    #[arg(help = "The package to use when its name differs from the command's (`-p typescript tsc`)")]
     #[arg(short, long)]
     package: Option<String>,
-    /// Never install: use only what the project's `node_modules` or the cache has
+    #[arg(help = "Never install: use only what the project's `node_modules` or the cache has")]
     #[arg(long)]
     no_install: bool,
-    /// `<package>[@<version>]` (or the executable's name with `--package`), then the arguments passed to it; options
-    /// after it are the executable's
+    #[arg(help = "`<package>[@<version>]` (or the executable's name with `--package`), then the arguments passed to it; options after it are the executable's")]
     #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true, value_name = "COMMAND [ARGS]")]
     argv: Vec<String>,
 }
@@ -62,7 +57,6 @@ impl X {
         }
     }
 
-    /// The executable's file
     fn locate(&self, command: &str) -> Result<PathBuf, String> {
         let spec = Spec::try_from(self.package.as_deref().unwrap_or(command))?;
         let command = self.package.as_ref().map(|_| command);
@@ -79,8 +73,6 @@ impl X {
         Self::entry(&dir, &spec.name, command)?.ok_or_else(|| format!("{}: no package.json", dir.display()))
     }
 
-    /// The executable in the project's `node_modules`, searched up from the current directory: `.bin/<command>` when no
-    /// version was asked for, then the package itself when its version is one `spec` accepts
     fn local(spec: &Spec, command: Option<&str>) -> Option<PathBuf> {
         let cwd = std::env::current_dir().ok()?;
         let any_version = matches!(spec.want, Want::Latest);
@@ -101,7 +93,6 @@ impl X {
         })
     }
 
-    /// Resolves `spec` with the registry and installs it into the cache, unless the version picked is there already
     fn install(store: &Store, spec: &Spec) -> Result<PathBuf, String> {
         let registry = Registry::default();
         let mut tree = Tree::new(&registry, spec.clone());
@@ -119,8 +110,6 @@ impl X {
         serde_json::from_str(&text).ok()
     }
 
-    /// The file of executable `command` (or the package's default one) in the package at `dir`; `None` without a
-    /// package.json
     fn entry(dir: &Path, package: &str, command: Option<&str>) -> Result<Option<PathBuf>, String> {
         let Some(manifest) = Self::manifest(dir) else { return Ok(None) };
         let file = manifest.bin.entry(package, command)?;
@@ -128,20 +117,15 @@ impl X {
     }
 }
 
-/// How an executable runs
 #[derive(Clone, Copy)]
 enum Launch {
-    /// JavaScript: in this process, on the Node layer
     Js,
-    /// Anything else: as a child process
     Exec,
 }
 
 impl Launch {
-    /// Interpreters whose scripts are JavaScript
     const JS_INTERPRETERS: [&str; 4] = ["node", "nodejs", "bun", "dune"];
     const JS_EXTENSIONS: [&str; 3] = ["js", "cjs", "mjs"];
-    /// Enough of a file to hold its `#!` line
     const HEAD: u64 = 512;
 
     fn run(self, file: &Path, args: &[String], jit: bool) -> ExitCode {
@@ -166,7 +150,6 @@ impl Launch {
         }
     }
 
-    /// Package files may come without the execute bit, as npm sets it on install
     #[cfg(unix)]
     fn executable(file: &Path) {
         use std::os::unix::fs::PermissionsExt;
@@ -183,8 +166,6 @@ impl Launch {
 }
 
 impl From<&Path> for Launch {
-    /// By the `#!` line (`#!/usr/bin/env node`, `#!/usr/bin/env -S node --flag`, `#!/usr/bin/node`); without one, by
-    /// the extension (none counts as JavaScript, as npm packages' bins often have none)
     fn from(file: &Path) -> Self {
         let mut head = String::new();
         let _ = std::fs::File::open(file).map(|f| f.take(Self::HEAD).read_to_string(&mut head));

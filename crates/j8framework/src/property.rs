@@ -1,6 +1,3 @@
-//! Internal methods of objects (spec 10.1 ordinary objects, 10.4 arrays and string wrapper objects): get / define /
-//! delete own properties, own keys, extensibility, prototype. Property access (ops.rs) goes through them along the
-//! prototype chain.
 use crate::ValueKind;
 use alloc::format;
 use alloc::vec::Vec;
@@ -10,7 +7,6 @@ use crate::{Gc};
 use crate::ops::index_of_str;
 use crate::{Agent, Error, ErrorKind, JsObject, JsString, JsSymbol, ObjectKind, Property, Slot, Value};
 
-/// A borrowed property key: string keys need not go onto the heap first.
 #[derive(Clone, Copy, Debug)]
 pub enum Key<'k, 'gc> {
     Str(&'k str),
@@ -23,7 +19,6 @@ impl<'k> From<&'k str> for Key<'k, '_> {
     }
 }
 
-/// A property key on the heap (one entry in an own-keys list).
 #[derive(Clone, Copy, Debug)]
 pub enum PropertyKey<'gc> {
     String(JsString<'gc>),
@@ -48,8 +43,6 @@ impl<'gc> From<PropertyKey<'gc>> for Value<'gc> {
     }
 }
 
-/// A property descriptor: any field may be absent (`Object.defineProperty` changes only the given ones). For `get` /
-/// `set`, an outer `None` means not given, and `Some(None)` means given as `undefined`.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Descriptor<'gc> {
     pub value: Option<Value<'gc>>,
@@ -73,19 +66,16 @@ impl<'gc> Descriptor<'gc> {
         !self.is_accessor() && !self.is_data()
     }
 
-    /// Only a value (used when assignment updates an existing property).
     pub fn value(v: Value<'gc>) -> Self {
         Self { value: Some(v), ..Self::default() }
     }
 
-    /// Fill absent fields with defaults (`false` / `undefined`).
     pub fn complete(&self) -> Property<'gc> {
         let slot = if self.is_accessor() { Slot::Accessor { get: self.get.flatten(), set: self.set.flatten() } } else { Slot::Data(self.value.unwrap_or_default()) };
         Property { slot, enumerable: self.enumerable.unwrap_or(false), writable: self.writable.unwrap_or(false), configurable: self.configurable.unwrap_or(false) }
     }
 }
 
-/// A complete property ⇒ a descriptor with every field given.
 impl<'gc> From<Property<'gc>> for Descriptor<'gc> {
     fn from(p: Property<'gc>) -> Self {
         let base = Self { enumerable: Some(p.enumerable), configurable: Some(p.configurable), ..Self::default() };
@@ -96,7 +86,6 @@ impl<'gc> From<Property<'gc>> for Descriptor<'gc> {
     }
 }
 
-/// The levels of SetIntegrityLevel / TestIntegrityLevel.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Integrity {
     Sealed,
@@ -111,7 +100,6 @@ fn same_object<'gc>(a: Option<JsObject<'gc>>, b: Option<JsObject<'gc>>) -> bool 
     }
 }
 
-/// ValidateAndApplyPropertyDescriptor: returns the updated property if the change is allowed, `None` otherwise.
 pub fn validate<'gc>(extensible: bool, desc: &Descriptor<'gc>, current: Option<Property<'gc>>) -> Option<Property<'gc>> {
     let Some(cur) = current else {
         return extensible.then(|| desc.complete());
@@ -168,7 +156,6 @@ pub fn validate<'gc>(extensible: bool, desc: &Descriptor<'gc>, current: Option<P
 }
 
 impl<'gc> Agent<'gc, '_> {
-    /// Indices and `length` of a string wrapper object (non-writable, non-configurable).
     fn string_own(&self, s: JsString<'gc>, key: &str) -> Option<Property<'gc>> {
         let fixed = |v: Value<'gc>, enumerable| Property { slot: Slot::Data(v), enumerable, writable: false, configurable: false };
         if key == "length" {
@@ -178,7 +165,6 @@ impl<'gc> Agent<'gc, '_> {
         Some(fixed(self.unit_string(unit).into(), true))
     }
 
-    /// [[GetOwnProperty]].
     pub fn get_own_property(&mut self, o: JsObject<'gc>, key: Key<'_, 'gc>) -> Result<Option<Property<'gc>>, Error> {
         if let Some(parts) = self.proxy_parts(o) {
             let (t, h) = parts?;
@@ -190,11 +176,9 @@ impl<'gc> Agent<'gc, '_> {
         if let Some(i) = Self::typed_numeric(o, key) {
             return Ok(self.typed_get(o, i).map(Property::data));
         }
-        // Own properties are exactly the stored ones: no borrowing
         if o.has_ordinary_properties() {
             return Ok(o.own_slot(self.mc, key));
         }
-        // An array: `length` plus what is stored, also without borrowing
         if o.is_array() {
             return Ok(match key {
                 Key::Str("length") => {
@@ -226,7 +210,6 @@ impl<'gc> Agent<'gc, '_> {
         Ok(self.get_own_property(o, key)?.is_some())
     }
 
-    /// [[DefineOwnProperty]]: returns whether it succeeded.
     pub fn define_own_property(&mut self, o: JsObject<'gc>, key: Key<'_, 'gc>, desc: Descriptor<'gc>) -> Result<bool, Error> {
         if let Some(parts) = self.proxy_parts(o) {
             let (t, h) = parts?;
@@ -275,7 +258,6 @@ impl<'gc> Agent<'gc, '_> {
         Ok(self.ordinary_define(o, key, &desc))
     }
 
-    /// A mapped arguments index: returns the parameter's slot.
     fn mapped_slot(o: JsObject<'gc>, key: Key<'_, 'gc>) -> Option<u16> {
         let Key::Str(k) = key else { return None };
         match &o.borrow().kind {
@@ -292,7 +274,6 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    /// [[DefineOwnProperty]] of arguments (mapped indices).
     fn arguments_define(&mut self, o: JsObject<'gc>, key: Key<'_, 'gc>, desc: Descriptor<'gc>, slot: u16) -> bool {
         let env = match &o.borrow().kind {
             ObjectKind::Arguments(Some(map)) => map.env,
@@ -318,7 +299,6 @@ impl<'gc> Agent<'gc, '_> {
         true
     }
 
-    /// OrdinaryDefineOwnProperty.
     fn ordinary_define(&self, o: JsObject<'gc>, key: Key<'_, 'gc>, desc: &Descriptor<'gc>) -> bool {
         let (current, extensible) = {
             let d = o.borrow();
@@ -333,7 +313,6 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    /// ArraySetLength.
     fn array_set_length(&mut self, o: JsObject<'gc>, desc: Descriptor<'gc>) -> Result<bool, Error> {
         let length_prop = |a: &mut Self| a.get_own_property(o, Key::Str("length")).map(|p| p.expect("arrays have a length"));
         let Some(v) = desc.value else {
@@ -367,7 +346,6 @@ impl<'gc> Agent<'gc, '_> {
             d.set_length_readonly(!p.writable);
             return Ok(true);
         }
-        // Delete from the back; on hitting a non-configurable element, stop just after it
         let blocker = d.props().entries().into_iter().filter(|(_, p)| !p.configurable).filter_map(|(k, _)| index_of_str(&k)).filter(|&i| i >= new_len).max();
         let ok = blocker.is_none();
         d.set_array_length(blocker.map_or(new_len, |i| i + 1));
@@ -375,7 +353,6 @@ impl<'gc> Agent<'gc, '_> {
         Ok(ok)
     }
 
-    /// DefinePropertyOrThrow.
     pub fn define_property_or_throw(&mut self, o: JsObject<'gc>, key: Key<'_, 'gc>, desc: Descriptor<'gc>) -> Result<(), Error> {
         if self.define_own_property(o, key, desc)? {
             Ok(())
@@ -385,12 +362,10 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    /// CreateDataProperty: a writable, enumerable, configurable data property.
     pub fn create_data_property(&mut self, o: JsObject<'gc>, key: Key<'_, 'gc>, v: Value<'gc>) -> Result<bool, Error> {
         self.define_own_property(o, key, Property::data(v).into())
     }
 
-    /// CreateDataPropertyOrThrow.
     pub fn create_data_property_or_throw(&mut self, o: JsObject<'gc>, key: Key<'_, 'gc>, v: Value<'gc>) -> Result<(), Error> {
         if self.create_data_property(o, key, v)? {
             Ok(())
@@ -400,7 +375,6 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    /// The key for error messages.
     pub fn key_text(&self, key: Key<'_, 'gc>) -> alloc::string::String {
         match key {
             Key::Str(s) => s.into(),
@@ -408,7 +382,6 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    /// [[Delete]]: non-configurable ones can't be deleted (returns `false`); a nonexistent one counts as deleted.
     pub fn delete_property(&mut self, o: JsObject<'gc>, key: Key<'_, 'gc>) -> Result<bool, Error> {
         if let Some(parts) = self.proxy_parts(o) {
             let (t, h) = parts?;
@@ -431,8 +404,6 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    /// [[OwnPropertyKeys]]: array indices in ascending order, then string keys in creation order, then Symbol keys in
-    /// creation order.
     pub fn own_property_keys(&mut self, o: JsObject<'gc>) -> Result<Vec<PropertyKey<'gc>>, Error> {
         if let Some(parts) = self.proxy_parts(o) {
             let (t, h) = parts?;
@@ -497,8 +468,6 @@ impl<'gc> Agent<'gc, '_> {
         Ok(o.borrow().proto())
     }
 
-    /// [[SetPrototypeOf]]: a non-extensible object can only be set to its current prototype; cycles are not allowed;
-    /// the prototype of `Object.prototype` can't be changed.
     pub fn set_prototype_of(&mut self, o: JsObject<'gc>, proto: Option<JsObject<'gc>>) -> Result<bool, Error> {
         if let Some(parts) = self.proxy_parts(o) {
             let (t, h) = parts?;
@@ -531,7 +500,6 @@ impl<'gc> Agent<'gc, '_> {
         Ok(true)
     }
 
-    /// SetIntegrityLevel.
     pub fn set_integrity_level(&mut self, o: JsObject<'gc>, level: Integrity) -> Result<bool, Error> {
         if !self.prevent_extensions(o)? {
             return Ok(false);
@@ -548,7 +516,6 @@ impl<'gc> Agent<'gc, '_> {
         Ok(true)
     }
 
-    /// TestIntegrityLevel.
     pub fn test_integrity_level(&mut self, o: JsObject<'gc>, level: Integrity) -> Result<bool, Error> {
         if self.is_extensible(o)? {
             return Ok(false);
@@ -563,7 +530,6 @@ impl<'gc> Agent<'gc, '_> {
         Ok(true)
     }
 
-    /// ToPropertyDescriptor.
     pub fn to_property_descriptor(&mut self, v: Value<'gc>) -> Result<Descriptor<'gc>, Error> {
         if v.as_object().is_none() {
             let t = self.describe(v);
@@ -603,7 +569,6 @@ impl<'gc> Agent<'gc, '_> {
         Ok(d)
     }
 
-    /// FromPropertyDescriptor: `undefined` if there is no property.
     pub fn from_property_descriptor(&mut self, p: Option<Property<'gc>>) -> Value<'gc> {
         let Some(p) = p else { return Value::Undefined };
         let o = self.object();
@@ -624,7 +589,6 @@ impl<'gc> Agent<'gc, '_> {
         o.into()
     }
 
-    /// Use a value as a property key (ToPropertyKey): Symbols as is, everything else ToString.
     pub fn to_property_key(&mut self, v: Value<'gc>) -> Result<PropertyKey<'gc>, Error> {
         match (self.to_primitive(v, crate::Hint::String)?).kind() {
             ValueKind::Symbol(s) => Ok(PropertyKey::Symbol(s)),

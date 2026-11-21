@@ -1,5 +1,3 @@
-//! `__j8_native.http`: outbound HTTP for `fetch`, so a worker can call another worker's HTTP interface. Plain
-//! `http://`, one request per connection, on a thread of its own (the event loop does not wait).
 use std::io::{Read, Write};
 use std::net::TcpStream;
 
@@ -7,11 +5,9 @@ use j8::frame::{Agent, Error, ErrorKind, Value};
 use j8::IntoJs;
 use j8::lockfree::Oneshot;
 
-/// A response: status and body, or why there is none
 pub struct Reply(Result<(u32, String), String>);
 
 impl<'gc> IntoJs<'gc> for Reply {
-    /// `[status, body]`; a failed request throws
     fn into_js(self, a: &mut Agent<'gc, '_>) -> Result<Value<'gc>, Error> {
         match self.0 {
             Ok((status, body)) => {
@@ -43,7 +39,6 @@ pub struct Http;
 
 #[j8::object("http")]
 impl Http {
-    /// A promise of `[status, body]`
     async fn request(method: String, url: String, body: String) -> Reply {
         let (tx, rx) = Oneshot::new();
         std::thread::spawn(move || tx.send(Reply(Reply::send(&method, &url, &body))));

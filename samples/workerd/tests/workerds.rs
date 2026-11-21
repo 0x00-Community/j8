@@ -1,8 +1,3 @@
-//! A thousand chat rooms in one process: `workerd --instances 1000`, one runtime per Worker on its own port, all on
-//! one event loop set. Two clients per room, two rounds of messages in every room at once with five silent seconds
-//! between them (the whole process must sleep), then a restart that replays every room's history.
-//!
-//! Heavy: run it on its own, in release (`cargo test --release --test workerds -- --nocapture`).
 use std::io::{BufRead, BufReader};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
@@ -14,22 +9,20 @@ use serde_json::Value;
 use tungstenite::stream::MaybeTlsStream;
 use tungstenite::{Message, WebSocket};
 
-/// Chat rooms, one Worker each
 const WORKERS: usize = 1000;
-/// Clients in each room
+
 const CLIENTS: usize = 2;
-/// Messages each client sends per round
+
 const ROUND: usize = 5;
-/// The quiet stretch between the two rounds
+
 const SILENCE: Duration = Duration::from_secs(5);
-/// Server CPU time allowed during the silence: a thousand sleeping event loops use next to none
+
 const SILENT_CPU: Duration = Duration::from_millis(200);
-/// Linux clock ticks per second in /proc/<pid>/stat (USER_HZ)
+
 const USER_HZ: u64 = 100;
 
 type Client = WebSocket<MaybeTlsStream<TcpStream>>;
 
-/// One broadcast as a client saw it
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Said {
     id: i64,
@@ -43,10 +36,8 @@ impl From<&Value> for Said {
     }
 }
 
-/// A running `workerd examples/chat.js --instances WORKERS`
 struct Server {
     child: Child,
-    /// By instance (and so by storage directory)
     ports: Vec<u16>,
 }
 
@@ -79,19 +70,16 @@ impl Server {
         Self { child, ports }
     }
 
-    /// User + system CPU time the server has used so far
     fn cpu(&self) -> Duration {
         let stat = std::fs::read_to_string(format!("/proc/{}/stat", self.child.id())).expect("/proc stat");
         let fields: Vec<u64> = stat.rsplit_once(')').expect("stat format").1.split_whitespace().filter_map(|f| f.parse().ok()).collect();
         Duration::from_millis((fields[10] + fields[11]) * 1000 / USER_HZ)
     }
 
-    /// Threads of the server process
     fn threads(&self) -> usize {
         std::fs::read_dir(format!("/proc/{}/task", self.child.id())).map_or(0, Iterator::count)
     }
 
-    /// Resident memory of the server process
     fn rss(&self) -> u64 {
         let statm = std::fs::read_to_string(format!("/proc/{}/statm", self.child.id())).unwrap_or_default();
         statm.split_whitespace().nth(1).and_then(|p| p.parse::<u64>().ok()).unwrap_or(0) * 4096
@@ -110,7 +98,6 @@ fn join(port: u16, name: &str) -> Client {
     ws
 }
 
-/// Reads the next broadcast
 fn next(ws: &mut Client) -> Value {
     loop {
         match ws.read().expect("message") {
@@ -121,7 +108,6 @@ fn next(ws: &mut Client) -> Value {
     }
 }
 
-/// Runs `f` for every room at once, one thread each; gives the results by room
 fn every_room<T: Send>(rooms: Vec<T>, f: impl Fn(usize, T) -> T + Sync) -> Vec<T> {
     thread::scope(|s| {
         let f = &f;
@@ -130,13 +116,11 @@ fn every_room<T: Send>(rooms: Vec<T>, f: impl Fn(usize, T) -> T + Sync) -> Vec<T
     })
 }
 
-/// One room's clients and everything each of them saw, in order
 struct Room {
     clients: Vec<Client>,
     seen: Vec<Vec<Said>>,
 }
 
-/// Every client of the room sends `ROUND` messages, then reads all `CLIENTS * ROUND` of the round; checks the order
 fn round(r: usize, mut room: Room, tag: &str) -> Room {
     for (c, ws) in room.clients.iter_mut().enumerate() {
         for k in 0..ROUND {
@@ -158,7 +142,6 @@ fn round(r: usize, mut room: Room, tag: &str) -> Room {
     room
 }
 
-/// Messages per second and broadcasts delivered per second, for one round over every room
 fn rate(took: Duration) -> String {
     let count = |n: usize| f64::from(u32::try_from(n).unwrap_or(u32::MAX));
     let (sent, delivered) = (count(WORKERS * CLIENTS * ROUND), count(WORKERS * CLIENTS * ROUND * CLIENTS));
@@ -185,7 +168,6 @@ fn a_thousand_chat_rooms_in_one_process() {
     let mut rooms = every_room(rooms, |r, room| round(r, room, "a"));
     eprintln!("round a, {}", rate(t.elapsed()));
 
-    // Silence everywhere: nothing arrives, and the whole server sleeps
     let before = server.cpu();
     thread::sleep(SILENCE);
     let spent = server.cpu().saturating_sub(before);
@@ -222,7 +204,6 @@ fn a_thousand_chat_rooms_in_one_process() {
         .collect();
     drop(server);
 
-    // A new process on the same storage: every room replays its history to a newcomer
     let t = Instant::now();
     let server = Server::start(&storage);
     eprintln!("restart {WORKERS} workers: {:.1?}", t.elapsed());

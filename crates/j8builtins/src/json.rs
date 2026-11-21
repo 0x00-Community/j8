@@ -7,20 +7,15 @@ use j8framework::{Agent, Error, ErrorKind, JsObject, JsString, ObjectData, Prope
 
 use crate::{Args, Installer};
 
-/// Maximum number of indentation characters for `JSON.stringify`
 const MAX_GAP: usize = 10;
 
-/// Parser for `JSON.parse`, following the spec's JSON grammar (only the four whitespace characters, no trailing commas,
-/// no leading zeros in numbers).
 struct Parser<'s, 'a, 'gc, 'x> {
     a: &'a mut Agent<'gc, 'x>,
     text: &'s str,
     pos: usize,
-    /// Key sequences seen and the shapes they built: an object with the same keys takes its shape at once
     shapes: Vec<(Vec<String>, alloc::sync::Arc<Shape>)>,
 }
 
-/// How many key sequences a parse remembers shapes for
 const SHAPES_CACHED: usize = 8;
 
 impl<'s, 'gc> Parser<'s, '_, 'gc, '_> {
@@ -105,9 +100,6 @@ impl<'s, 'gc> Parser<'s, '_, 'gc, '_> {
         }
     }
 
-    /// A fresh ordinary object with these properties in order. CreateDataProperty always succeeds on it; `__proto__`
-    /// is just an ordinary key, and a duplicate key replaces the previous one entirely. Keys seen before in the same
-    /// order (all distinct, none an index) give the shape they built then, filled in one step.
     fn build(&mut self, pairs: Vec<(alloc::borrow::Cow<'s, str>, Value<'gc>)>) -> JsObject<'gc> {
         let a = &*self.a;
         let o = a.object_with(pairs.len());
@@ -147,17 +139,13 @@ impl<'s, 'gc> Parser<'s, '_, 'gc, '_> {
         }
     }
 
-    /// Four hex digits.
     fn hex4(&mut self) -> Result<u16, Error> {
         let digits = self.text.get(self.pos..self.pos + 4).filter(|d| d.bytes().all(|c| c.is_ascii_hexdigit())).ok_or_else(|| self.error("bad \\u escape"))?;
         self.pos += 4;
         u16::from_str_radix(digits, 16).map_err(|_| self.error("bad \\u escape"))
     }
 
-    /// A string (currently at the opening quote). `\u` surrogate pairs are combined; lone surrogates become U+FFFD.
     fn string(&mut self) -> Result<alloc::borrow::Cow<'s, str>, Error> {
-        // No escapes (the common case): borrow the source directly; `"`, `\\` and control characters never occur inside
-        // UTF-8 multi-byte sequences, so scanning by byte is fine
         let start = self.pos + 1;
         let text: &'s str = self.text;
         let end = text.as_bytes()[start..].iter().position(|&b| b == b'"' || b == b'\\' || b < 0x20).map(|i| start + i);
@@ -170,7 +158,6 @@ impl<'s, 'gc> Parser<'s, '_, 'gc, '_> {
         self.escaped().map(alloc::borrow::Cow::Owned)
     }
 
-    /// A string with escapes (currently at the opening quote).
     fn escaped(&mut self) -> Result<String, Error> {
         self.pos += 1;
         let mut out = String::new();
@@ -225,7 +212,6 @@ impl<'s, 'gc> Parser<'s, '_, 'gc, '_> {
         }
     }
 
-    /// A number: `-? (0 | [1-9][0-9]*) (. [0-9]+)? ([eE] [+-]? [0-9]+)?`.
     fn number(&mut self) -> Result<Value<'gc>, Error> {
         let start = self.pos;
         let digits = |p: &mut Self| {
@@ -265,8 +251,6 @@ impl<'s, 'gc> Parser<'s, '_, 'gc, '_> {
     }
 }
 
-/// State of `JSON.stringify`: indentation, key allowlist, replacer function, objects being serialized (cycle
-/// detection).
 struct Writer<'gc> {
     gap: String,
     indent: String,
@@ -276,12 +260,9 @@ struct Writer<'gc> {
 }
 
 impl<'gc> Writer<'gc> {
-    /// A quoted and escaped string.
     fn quote(out: &mut String, s: &str) {
         out.reserve(s.len() + 2);
         out.push('"');
-        // Copy runs that need no escaping verbatim (only ASCII needs escaping, and it never occurs inside UTF-8
-        // multi-byte sequences)
         let mut from = 0;
         for (i, &b) in s.as_bytes().iter().enumerate() {
             let esc = match b {
@@ -297,7 +278,6 @@ impl<'gc> Writer<'gc> {
             };
             out.push_str(&s[from..i]);
             if esc.is_empty() {
-                // Writing into a String can't fail
                 let _ = write!(out, "\\u{b:04x}");
             } else {
                 out.push_str(esc);
@@ -308,10 +288,6 @@ impl<'gc> Writer<'gc> {
         out.push('"');
     }
 
-    /// Own enumerable string keys (array indices first). Keys aren't created as JS strings (short ones are inline);
-    /// they're created only when passed to `toJSON` / the replacer.
-    /// The enumerable own keys, each with its entry index when `o` is a plain fast-mode object (read in place while
-    /// its shape stays the same, see [`Writer::object`])
     fn keys(o: JsObject<'gc>) -> Vec<(SmallStr, Option<usize>)> {
         let d = o.borrow();
         let mut keys = Vec::new();
@@ -324,10 +300,6 @@ impl<'gc> Writer<'gc> {
         keys
     }
 
-    /// SerializeJSONProperty: `toJSON`, the replacer, output by type; `undefined` / functions / Symbols give `None`
-    /// (omitted).
-    /// `v.toJSON`: `undefined` straight away when no object on an object's prototype chain has the key (all plain
-    /// objects: then the lookup is unobservable), otherwise a Get
     fn to_json(a: &mut Agent<'gc, '_>, v: Value<'gc>) -> Result<Value<'gc>, Error> {
         const KEY: &str = "toJSON";
         let mut at = v.as_object();
@@ -341,8 +313,6 @@ impl<'gc> Writer<'gc> {
         if v.as_object().is_some() { Ok(Value::Undefined) } else { a.get_named(v, KEY) }
     }
 
-    /// `read`: the value when the caller read it in place (an unobservable Get of a data property), else it is got
-    /// here
     fn property(&mut self, a: &mut Agent<'gc, '_>, holder: Value<'gc>, key: &SmallStr, read: Option<Value<'gc>>, out: &mut String) -> Result<bool, Error> {
         let mut v = match read {
             Some(v) => v,
@@ -380,7 +350,6 @@ impl<'gc> Writer<'gc> {
         Ok(true)
     }
 
-    /// Newline and indentation at the start of a level / before each item (nothing if there is no gap).
     fn newline(&self, out: &mut String) {
         if !self.gap.is_empty() {
             out.push('\n');
@@ -395,8 +364,6 @@ impl<'gc> Writer<'gc> {
             Some(k) => k.iter().map(|s| (s.text().clone(), None)).collect(),
             None => Self::keys(o),
         };
-        // While the shape is the one the keys came from, entry `i` is still that key's data property (serializing a
-        // value may run `toJSON` / the replacer, which can change the object: then the rest are got by name)
         let shape = o.get().props().shape_ptr();
         out.push('{');
         let mut first = true;
@@ -426,11 +393,7 @@ impl<'gc> Writer<'gc> {
         Ok(())
     }
 
-    /// Array with no replacer, no indentation, dense, all elements primitive: primitives don't look up `toJSON` and
-    /// reading each element is unobservable, so chunks are written as JSON in parallel on the thread pool, then
-    /// concatenated. Returns `false` otherwise (nothing written).
     fn plain_array(&self, a: &Agent<'gc, '_>, o: JsObject<'gc>, out: &mut String) -> bool {
-        /// Shape of one element (no GC pointers, so it can be handed to other threads)
         #[derive(Clone, Copy)]
         enum Part<'s> {
             Number(f64),
@@ -511,11 +474,9 @@ impl<'gc> Writer<'gc> {
     }
 }
 
-/// `JSON`.
 struct Json;
 
 impl Json {
-    /// `JSON.parse(text, reviver)`.
     fn parse<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let text = a.to_string(args.at(0))?;
         let mut p = Parser { a, text: &text, pos: 0, shapes: Vec::new() };
@@ -533,8 +494,6 @@ impl Json {
         Self::revive(a, root.into(), key, reviver)
     }
 
-    /// InternalizeJSONProperty: process children bottom-up first, then call `reviver.call(holder, key, value)`;
-    /// `undefined` deletes the property.
     fn revive<'gc>(a: &mut Agent<'gc, '_>, holder: Value<'gc>, key: JsString<'gc>, reviver: Value<'gc>) -> Result<Value<'gc>, Error> {
         let v = a.get_named(holder, &key)?;
         if let Some(o) = v.as_object() {
@@ -552,7 +511,6 @@ impl Json {
         a.call(reviver, holder, &[key.into(), v])
     }
 
-    /// `JSON.stringify(value, replacer, space)`.
     fn stringify<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let (replacer, allow) = match args.at(1).kind() {
             f if a.is_callable(Value::from(f)) => (Some(Value::from(f)), None),
