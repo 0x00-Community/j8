@@ -1,0 +1,22 @@
+[book]
+title = "j8：用 Rust 重写 V8"
+description = "j8 JavaScript 引擎的完整讲解：字节码、编译器、执行器、JIT、堆、事件循环、嵌入与 dune"
+authors = ["0x00 Community"]
+language = "zh-CN"
+src = "src"
+
+[build]
+# 中文版输出到站点的 /zh-CN/（英文版在根，先编英文：它会清空 ../book）
+build-dir = "../book/zh-CN"
+
+[output.html]
+git-repository-url = "https://github.com/0x00-Community/j8"
+edit-url-template = "https://github.com/0x00-Community/j8/edit/main/mdbook/zh-CN/src/{path}"
+site-url = "/zh-CN/"
+default-theme = "light"
+preferred-dark-theme = "navy"
+additional-js = ["lang.js"]
+
+[output.html.fold]
+enable = true
+level = 1

@@ -1,2 +1,4 @@
 /target
 **/target/
+# nightly builds of the samples (threaded-code tail calls)
+**/target-nightly/

@@ -39,8 +39,8 @@ and [crates/macros/USAGE.md](crates/macros/USAGE.md) (the macro reference).
 | | |
 | --- | --- |
 | 🦀 **All Rust** | Parsing is oxc; everything else, from bytecode to GC, is ours. No C++ engine underneath. |
-| 🧱 **Bytecode first** | There is no AST interpreter: all JS (including `eval` and `Function`) is compiled to bytecode. Every bytecode type is generated from `insn.json`; bytecode has no text form, only a binary one. |
-| 🧬 **A JIT on MLIR** | Bytecode ⇒ the MLIR `llvm` dialect ⇒ the x86-64 backend of [mlirpass](https://crates.io/crates/mlirpass) (linear-scan register allocation), with OSR. |
+| 🧱 **Bytecode first** | There is no AST interpreter: all JS (including `eval` and `Function`) is compiled to bytecode, and that bytecode is V8 Ignition's, byte for byte (tables generated from V8's headers). |
+| 🧬 **A speculative JIT** | Inline-cache feedback turns hot bytecode into a speculative SSA graph (inlining, escape analysis, loop-invariant code motion, OSR, deoptimization), emitted straight to x86-64. |
 | ♻️ **paragc heap** | Immix-style mark-region heap: young collections plus reference counting for old objects, evacuation of sparse blocks, marking and sweeping in parallel, no locks. `'gc` brand lifetimes guarantee at compile time that handles never escape. |
 | 🚫 **No `'static`** | No global state. Background tasks borrow the caller's data, and several isolates share one thread pool. |
 
@@ -50,8 +50,8 @@ and [crates/macros/USAGE.md](crates/macros/USAGE.md) (the macro reference).
 | --- | --- |
 | 📜 test262 baseline | **42,443** tests passing (sloppy mode plus `onlyStrict`; Temporal, intl402 and the like are out of scope, see PLAN.md), zero regressions on every commit |
 | 🧮 JIT | `J8_TEST262_JIT=1` runs the same baseline with the JIT on (every function compiled on its first call) |
-| ⏱️ vs V8 jitless | **3.7×** slower, geometric mean over 11 benchmarks; checksums identical on all three engines |
-| 🚄 vs V8 (with JIT) | **9.4×** slower, geometric mean; the gap is mostly calls and allocation, see [benchmark.md](samples/benchv8/benchmark.md) |
+| ⏱️ vs V8 jitless | **0.6×** the time (geometric mean over 11 benchmarks); checksums identical on all three engines |
+| 🚄 vs V8 (with JIT) | **1.7×** the time, geometric mean; the gap is in built-ins (array, sort, string, collections, json, regexp), see [benchmark.md](samples/benchv8/benchmark.md) |
 
 ## 📦 Install
 
@@ -101,7 +101,7 @@ workspace, and depend on the published `j8` by version, the way an embedder woul
 | `j8binding` | std | The Rust ⇄ JS binding runtime: `FromJs` / `IntoJs`, host objects, `Class` / `Object` |
 | `j8builtins` | std | Implements `Intrinsics`: installs Object / Function / Array / String / Number / Boolean / Math / the Error family / `console` / `parseInt` and so on into a `Realm` |
 | `j8platform` | std | Implements `Platform` (`DefaultPlatform`): background tasks run on a moremath `ThreadMulti` pool (started once and reused; tasks may borrow the caller's data, through `j8framework::Pool`), the clock is `Instant` |
-| `j8bytecode` | std | The virtual instruction set, the dependency root (no other j8 crate): accumulator-style register bytecode (`Insn` / `Function` / `Module` …), every type generated from `insn.json`; no text form, only the binary form `Vec::<u8>::from(&module)` / `Module::try_from(bytes)` |
+| `j8bytecode` | std | The bytecode, the dependency root (no other j8 crate): V8 Ignition's, byte for byte (`Bytecode` / `OperandType` … generated from `v8.json`, which `tools/v8bytecodes.py` writes from V8's headers), `Encoder` / `Decoder`, `SharedFunction` / `BytecodeArray` / `Module` |
 | `j8compiler` | std | JS ⇒ bytecode (`j8compiler::Compile` for `Module`: scripts, modules, `eval` / `Function`), parsing with oxc |
 | `j8taskqueue` | `no_std` | Task queue: `ITask` (`recursable` / `depend` / `exec`) and `ITaskPoll` (`add` / `run`); lock-free dataflow scheduling (hand-written MPMC ready queue, atomic dependency counts): a task whose dependencies are done runs at once, in parallel on the host's `Pool` or on the calling thread, with no round barrier; `TaskId::family` finds the union-find root, `cancel` cancels a whole family; quotas count bytecodes (`Quota` / `Flow::Yield`, a per-run budget); idle workers leave instead of spinning. Every `j8framework::EventLoop` is one `Queue`: scripts, settlements and polls of host futures, checked each time a script yields |
 | `j8macros` | proc-macro | Procedural macros: `enums!("x.json")` generates enums from JSON (definitions, `Display`, `&mut` accessors by field type), `#[derive(Collect)]` for heap types (paragc `Trace`), and the binding macros; see `crates/macros/USAGE.md` |
@@ -154,43 +154,23 @@ isolate.enter(|scope| {
 });
 ```
 
-## 🧬 JIT (tier one)
+## 🧬 JIT
 
-`dune --jit a.js` turns the JIT on; `J8_TEST262_JIT=1 cargo test --release --test test262` runs the baseline with the JIT on (every function is compiled on its first call, every loop on its first back edge).
+`dune --jit a.js` turns the JIT on; `J8_TEST262_JIT=1 cargo test --release --test test262` runs the baseline with the JIT on (every function compiled on its first call).
 
-- `j8jit`, compilation: bytecode function ⇒ MLIR (`llvm` dialect) ⇒ mlirpass `target.x86_64` ⇒ x86-64 machine code (one `Compiler` is built and reused, loading only the builtin and `llvm` dialects).
-  The machine code is `extern "C" fn(regs, acc, start) -> u64` and reads and writes the frame's register file and accumulator `Value`s directly (layout in `j8framework::ValueTag`: 16 bytes, tag in the first byte, payload from byte 8);
-  `start` 0 enters at the top of the function, `h + 1` enters at loop header `h` (OSR); returning 0 means the function returned, `pc + 1` means it stopped before instruction pc (`j8executor::Exit`) and the interpreter carries on from there
-- Instructions in tier one: register reads and writes, number / boolean constants, arithmetic (remainder, exponentiation and bitwise operations call runtime functions) and comparisons, `++` / `--`, jumps, TDZ checks, returns;
-  when a fast-path precondition fails (an operand is not a number, say) it falls back to the interpreter; for any other instruction (calls, properties, closures …) the machine code stops before it and hands over to the interpreter
-- A function that can run entirely in machine code runs it on frame entry; any other function is only entered at loop headers whose loop body hands nothing to the interpreter (OSR; entered midway, a `return` is also handed back to the interpreter to finish);
-  functions with neither are not compiled
-- `j8jit`, scheduling (std, x86-64 Unix): implements the executor's `Tier` (`Executor::with_tier`): compiles once the call count passes a threshold (100 by default) or the loop iterations pass 10× the threshold,
-  `mmap`s executable memory and fills in runtime function addresses; the executor remembers functions answered with `Tiered::Never` and never asks again
-- The register file and accumulator are local variables inside the machine code (a pair of `llvm.alloca` per register: tag and payload): read from the frame once on entry, written back to the frame through one shared write-back block on every exit;
-  before leaving MLIR it runs mlirpass `llvm.func(mem2reg, canonicalize, cse)`, so the locals become SSA values passed between blocks as block arguments
-- The machine code backend is mlirpass (crates.io, `=0.10.4`, `target.x86_64`, with linear-scan register allocation); the MLIR uses the custom form of the `llvm` dialect (really parsed since mlirformat 0.8.1)
-- Not yet: fast paths for calls / properties / global names
+- `j8jit` implements the executor's `Tier`. A hot function (64 calls by default) or a hot loop is built into a speculative SSA graph from what the inline caches saw: numbers as int32, small callees inlined, objects kept virtual until they escape, context slots in values
+- The graph goes straight to x86-64 (linear-scan register allocation, then instruction selection) and runs on the interpreter's frame; three entries: a call from the interpreter, a loop entered on-stack (OSR), a call from compiled code without an interpreter frame
+- A failed guard deoptimizes: `j8_deopt` rebuilds the interpreter frames (inlined ones too) and leaves a hint for the next compilation (doubles, the generic path, no inlining); after 24 deopts a function stays interpreted
+- `Compiler` / `Backend` (MLIR `llvm` dialect through [mlirpass](https://crates.io/crates/mlirpass), then j8jit's own x86-64 back end) are still exported
 
 ## 🔣 Bytecode
 
-An accumulator register machine (like V8's Ignition): results go into the implicit `acc`, and binary operations are `acc = reg op acc`.
+V8's Ignition bytecode, byte for byte, aligned with V8 15.2.124: an accumulator register machine (`acc = reg op acc`), operands little-endian with `Wide` / `ExtraWide` scaling, register operands as V8's frame slots (r0 is −7, the receiver +2). The tables come from V8's headers (`tools/v8bytecodes.py` ⇒ `crates/j8bytecode/v8.json` ⇒ `j8macros::bytecodes!`); ⛔ editing them by hand. `samples/j8bcdbg` lists bytecode in the format of V8's `--print-bytecode`.
 
-Every j8bytecode type (instructions, operators, constants, `Function` / `Module` and the other structs) is defined in `crates/j8bytecode/insn.json` and generated by `j8macros::enums!`; ⛔ hand-written type definitions. Adding an instruction only touches the JSON (fields of type `Label` get jump targets computed automatically and go into `target_mut`).
+- Variables live where V8 puts them: registers, context slots for captured bindings, the global object for top-level `var`s, the script context for top-level `let` / `const`, lookup slots under `with` / sloppy direct eval
+- The executor decodes each function once into threaded code (handlers chained by tail calls on nightly), keeps an explicit frame stack (depth limit 10000, then RangeError) and finds exception handlers in the bytecode's handler table
 
-### Binary form
-
-Bytecode has no text form. It is stored and shipped only in the binary form generated from insn.json (`binary` on): the magic ` j8b`, a fingerprint of insn.json (a binary only reads back under the same instruction set), then the module with each enum as a one-byte tag plus its fields.
-
-- Calling convention: `r0` is `this`, `r1` is the callee itself (named function expressions recurse through it), parameters start at `r2`; a `Call`'s callee, `this` and arguments sit in consecutive registers
-- Scopes: a pre-pass before compiling (`Resolver` in `scope.rs`) finds bindings captured by inner functions and puts them on the heap `Env` chain (`PushEnv` / `PopEnv` / `LdaEnv depth.slot`), the rest go in registers; `for (let …)` does a `CloneEnv` every iteration so each closure gets its own iteration
-- Top-level `var` / functions / `let` / `const` in a script are properties of the global object (`LdaGlobal` / `StaGlobal`)
-- After compiling, every function goes through peephole fusion (`Function::fuse` in `fuse.rs`): `lda.smi n; add r` ⇒ `add.smi r, n`, `ldar y; add x` ⇒ `add.reg x, y` (comparisons likewise), `ldar a; star b` ⇒ `mov b, a`, `ldar r; inc; star r` ⇒ `inc.reg r`, `star r; ldar r` ⇒ `star r`, and of `mov b, a; mov a, b` back to back the second is dropped;
-  a group is not fused if a jump lands after its first instruction, and jump targets are rewritten to the new indexes. A fused instruction means exactly the original instructions run in order (`Insn::unfused` splits it back), and the JIT lowers the split-back instructions one by one
-- The executor uses an explicit frame stack (no host recursion), with a call depth limit of 10000 (including JS re-entered from host functions); going over throws a RangeError
-- Exceptions: one dynamic handler stack per frame (`PushHandler` / `PopHandler`); a throw pops this frame's handler, or unwinds to the caller if there is none; `finally` uses a (completion type, value) register pair, and a `return` / `break` / `continue` passing through it detours into it first and then carries on
-
-The `javascript_semantics` test in `j8executor` is a table of JS semantics, each entry certain.
+The `javascript_semantics` test in `j8executor` is a table of JS semantics, each entry certain. The full walk-through is in [the book](https://j8-mdbook.jabberwocky238.workers.dev).
 
 ## 📋 Status
 
@@ -252,6 +232,7 @@ cargo test --release --test test262                                             
 - Strings are turned into enums right after deserialization; ⛔ making decisions on strings
 - Conversions go through `From` / `TryFrom`
 - Unit tests only pin down facts that are certain (run one at a time, with `timeout 15`)
+- Source files carry no comments: documentation lives in the READMEs, the guides and [the book](https://j8-mdbook.jabberwocky238.workers.dev)
 
 ## 📄 License
 
