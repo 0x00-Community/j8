@@ -1,7 +1,8 @@
 // The smaller built-ins: os, url, timers (+ timers/promises), child_process, crypto, string_decoder, perf_hooks.
 (function (native) {
   'use strict';
-  const { Buffer, timers, random, child, codec } = native;
+  const { timers, random, child, codec } = native;
+  const Buffer = { from: (...args) => native.builtin('buffer').Buffer.from(...args), wrap: (b) => native.builtin('buffer').Buffer.from(b.buffer, b.byteOffset, b.byteLength) };
   const os = native.os;
 
   native.define('os', () => {

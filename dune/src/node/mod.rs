@@ -22,15 +22,10 @@ use crate::web::Web;
 
 const PRELUDE: &str = concat!(
     include_str!("loader.js"),
-    include_str!("events.js"),
-    include_str!("buffer.js"),
-    include_str!("util.js"),
-    include_str!("path.js"),
+    include_str!("internal.js"),
     include_str!("fs.js"),
     include_str!("misc.js"),
-    include_str!("assert.js"),
     include_str!("process.js"),
-    include_str!("internal.js"),
 );
 
 pub struct Process;
@@ -96,6 +91,22 @@ impl Os {
 
     fn username() -> String {
         std::env::var("USER").unwrap_or_default()
+    }
+
+    fn version() -> &'static str {
+        env!("CARGO_PKG_VERSION")
+    }
+
+    fn platform() -> &'static str {
+        std::env::consts::OS
+    }
+
+    fn arch() -> &'static str {
+        Dune::arch()
+    }
+
+    fn env() -> BTreeMap<String, String> {
+        std::env::vars().collect()
     }
 
     fn handle_type(fd: u32) -> u32 {
@@ -237,16 +248,17 @@ enum Builtin {
     StreamPromises,
     StreamConsumers,
     AsyncHooks,
+    Querystring,
 }
 
 impl Builtin {
-    const ALL: [Self; 21] = [Self::Fs, Self::FsPromises, Self::Path, Self::Os, Self::Events, Self::Util, Self::Buffer, Self::Assert, Self::Url, Self::Timers, Self::TimersPromises, Self::ChildProcess, Self::Crypto, Self::Module, Self::Process, Self::StringDecoder, Self::PerfHooks, Self::Stream, Self::StreamPromises, Self::StreamConsumers, Self::AsyncHooks];
+    const ALL: [Self; 22] = [Self::Fs, Self::FsPromises, Self::Path, Self::Os, Self::Events, Self::Util, Self::Buffer, Self::Assert, Self::Url, Self::Timers, Self::TimersPromises, Self::ChildProcess, Self::Crypto, Self::Module, Self::Process, Self::StringDecoder, Self::PerfHooks, Self::Stream, Self::StreamPromises, Self::StreamConsumers, Self::AsyncHooks, Self::Querystring];
 
     const fn spec(self) -> (&'static str, &'static [&'static str]) {
         match self {
             Self::Fs => ("fs", &["readFileSync", "writeFileSync", "appendFileSync", "existsSync", "statSync", "lstatSync", "readdirSync", "mkdirSync", "rmSync", "rmdirSync", "unlinkSync", "renameSync", "copyFileSync", "realpathSync", "readlinkSync", "symlinkSync", "chmodSync", "mkdtempSync", "accessSync", "readFile", "writeFile", "appendFile", "stat", "lstat", "readdir", "mkdir", "rm", "rmdir", "unlink", "rename", "copyFile", "realpath", "access", "exists", "promises", "constants", "Stats", "Dirent"]),
             Self::FsPromises => ("fs/promises", &["readFile", "writeFile", "appendFile", "stat", "lstat", "readdir", "mkdir", "rm", "rmdir", "unlink", "rename", "copyFile", "realpath", "readlink", "symlink", "chmod", "mkdtemp", "access", "constants"]),
-            Self::Path => ("path", &["join", "resolve", "normalize", "dirname", "basename", "extname", "isAbsolute", "relative", "parse", "format", "sep", "delimiter", "posix", "toNamespacedPath"]),
+            Self::Path => ("path", &["join", "resolve", "normalize", "dirname", "basename", "extname", "isAbsolute", "relative", "parse", "format", "sep", "delimiter", "posix", "win32", "toNamespacedPath", "matchesGlob"]),
             Self::Os => ("os", &["EOL", "platform", "type", "arch", "release", "hostname", "homedir", "tmpdir", "cpus", "availableParallelism", "totalmem", "freemem", "loadavg", "uptime", "endianness", "userInfo", "networkInterfaces", "machine", "version", "devNull"]),
             Self::Events => ("events", &["EventEmitter", "once", "on", "getEventListeners", "defaultMaxListeners", "errorMonitor", "captureRejectionSymbol"]),
             Self::Util => ("util", &["format", "inspect", "promisify", "callbackify", "inherits", "deprecate", "isDeepStrictEqual", "types", "TextEncoder", "TextDecoder", "debuglog", "stripVTControlCharacters", "styleText", "parseArgs", "toUSVString"]),
@@ -263,6 +275,7 @@ impl Builtin {
             Self::PerfHooks => ("perf_hooks", &["performance", "PerformanceEntry"]),
             Self::Stream => ("stream", &["Stream", "Readable", "Writable", "Duplex", "Transform", "PassThrough", "pipeline", "finished", "compose", "addAbortSignal", "destroy", "isDestroyed", "isDisturbed", "isErrored", "isReadable", "isWritable", "duplexPair", "promises", "getDefaultHighWaterMark", "setDefaultHighWaterMark"]),
             Self::StreamPromises => ("stream/promises", &["pipeline", "finished"]),
+            Self::Querystring => ("querystring", &["decode", "encode", "escape", "parse", "stringify", "unescape", "unescapeBuffer"]),
             Self::StreamConsumers => ("stream/consumers", &["arrayBuffer", "blob", "buffer", "json", "text", "bytes"]),
             Self::AsyncHooks => ("async_hooks", &["AsyncLocalStorage", "AsyncResource", "createHook", "executionAsyncId", "triggerAsyncId", "executionAsyncResource", "asyncWrapProviders"]),
         }
@@ -371,9 +384,6 @@ impl Dune {
         let all: Vec<String> = std::iter::once(exe.clone()).chain(script.map(String::from)).chain(args.iter().cloned()).collect();
         rt.set("process.argv", all)?;
         rt.set("process.execPath", exe)?;
-        rt.set("process.env", std::env::vars().collect::<BTreeMap<String, String>>())?;
-        rt.set("process.platform", std::env::consts::OS)?;
-        rt.set("process.arch", Self::arch())?;
         rt.set("process.pid", std::process::id())
     }
 

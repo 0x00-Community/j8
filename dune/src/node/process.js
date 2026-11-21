@@ -2,8 +2,18 @@
 // setImmediate, Timeout-returning timers.
 (function (native) {
   'use strict';
-  const { stdio, clock, EventEmitter, Buffer } = native;
+  const { stdio, clock, os } = native;
+  const Buffer = { from: (...args) => native.builtin('buffer').Buffer.from(...args), wrap: (b) => native.builtin('buffer').Buffer.from(b.buffer, b.byteOffset, b.byteLength) };
   const process = globalThis.process;
+  const nodeVersion = '25.9.0';
+  Object.assign(process, {
+    platform: os.platform(),
+    arch: os.arch(),
+    env: os.env(),
+    version: 'v' + nodeVersion,
+    versions: { node: nodeVersion, dune: os.version() },
+  });
+  const EventEmitter = native.builtin('events');
   Object.setPrototypeOf(process, EventEmitter.prototype);
   EventEmitter.init.call(process);
 
@@ -40,11 +50,8 @@
     return process.exitCode | 0;
   }
 
-  const nodeVersion = '22.12.0';
   Object.assign(process, {
     title: 'dune',
-    version: 'v' + nodeVersion,
-    versions: { node: nodeVersion, dune: '0.3.0', j8: '0.3.0' },
     release: { name: 'node' },
     argv0: 'dune',
     execArgv: [],
@@ -95,7 +102,12 @@
 
   const define = (name, value) => Object.defineProperty(globalThis, name, { value, writable: true, configurable: true });
   define('global', globalThis);
-  define('Buffer', Buffer);
+  const lazy = (name, get) => Object.defineProperty(globalThis, name, {
+    configurable: true,
+    get() { const value = get(); define(name, value); return value; },
+    set(value) { define(name, value); },
+  });
+  lazy('Buffer', () => native.builtin('buffer').Buffer);
   for (const [name, f] of Object.entries(native.nodeTimers)) define(name, f);
   // `require` for -e / -p / the REPL: relative to the working directory
   define('require', native.makeRequire(new native.Module(process.cwd() + '/[eval]')));

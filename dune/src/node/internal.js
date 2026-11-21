@@ -1,6 +1,6 @@
 // Node's own library: the files of Node v25.9.0's lib/ (src/node/lib) and dune's stand-ins for the parts that are C++
 // in Node (src/node/shim, which win over lib), compiled the way Node compiles its built-in modules, with `primordials`
-// and `internalBinding`. Every public module found there replaces dune's hand-written one of the same name.
+// and `internalBinding`. Every public module found there replaces dune's hand-written one of the same name (their `define` is ignored).
 (function (native) {
   'use strict';
   const { lib } = native;
@@ -62,7 +62,11 @@
   }
 
   native.requireLib = requireLib;
+  const define = native.define;
+  native.define = (name, factory) => {
+    if (lib.source(name) === undefined) define(name, factory);
+  };
   for (const id of lib.ids()) {
-    if (!id.startsWith('internal/')) native.define(id, () => requireLib(id));
+    if (!id.startsWith('internal/')) define(id, () => requireLib(id));
   }
 })(globalThis.__j8_native);
