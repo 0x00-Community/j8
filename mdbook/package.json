@@ -3,7 +3,7 @@
 	"version": "0.0.0",
 	"private": true,
 	"scripts": {
-		"build": "mdbook build en && mdbook build zh-CN",
+		"build": "sh build.sh",
 		"serve": "mdbook serve en --open",
 		"serve:zh": "mdbook serve zh-CN --open",
 		"dev": "bun run build && wrangler dev",

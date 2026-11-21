@@ -168,3 +168,5 @@ dist
 
 # mdbook output
 book/
+# mdbook downloaded by build.sh
+.bin/
