@@ -7,7 +7,7 @@
 | 层 | 目录 | 提供什么 |
 |---|---|---|
 | **Web** | `src/web/` | 服务端共有的 Web 标准接口（WinterTC 最小公共 API）：`console`、`setTimeout` / `setInterval` / `queueMicrotask`、`structuredClone`、`EventTarget` / `Event` / `CustomEvent`、`AbortController` / `AbortSignal`、`DOMException`、`TextEncoder` / `TextDecoder`、`atob` / `btoa`、`URL` / `URLSearchParams`、`Blob` / `File`、`Headers` / `Request` / `Response` / `fetch`（明文 `http:` 与 `data:`）、`performance`、`crypto.getRandomValues` / `randomUUID`、`navigator`、`reportError` |
-| **Node** | `src/node/` | 叠在 Web 层上的 Node 兼容：`process`（是 `EventEmitter`；`argv`、`env`、`exit`、`exitCode`、`nextTick`、`hrtime`、`stdout` / `stderr`、`'exit'` / `'uncaughtException'`）、按 Node 规则解析的 `require` / `module`（`node_modules`、package.json 的 `main` / `exports`、`.json`）、ES 模块（`.mjs`、`"type": "module"`；裸说明符按 `node_modules` 与 package.json 的 `exports` / `imports` 解析）、`Buffer`、`global`、`setImmediate`，以及模块 `fs`（含 `fs/promises`、回调式）、`path`、`os`、`events`、`util`、`buffer`、`assert`（含 `assert/strict`）、`url`、`timers`（含 `timers/promises`）、`child_process`（同步）、`crypto`、`module`、`string_decoder`、`perf_hooks` |
+| **Node** | `src/node/` | 叠在 Web 层上的 Node 兼容：`process`（是 `EventEmitter`；`argv`、`env`、`exit`、`exitCode`、`nextTick`、`hrtime`、`stdout` / `stderr`、`'exit'` / `'uncaughtException'`）、按 Node 规则解析的 `require` / `module`（`node_modules`、package.json 的 `main` / `exports`、`.json`）、ES 模块（`.mjs`、`"type": "module"`；裸说明符按 `node_modules` 与 package.json 的 `exports` / `imports` 解析）、`Buffer`、`global`、`setImmediate`，以及模块 `fs`（含 `fs/promises`、回调式）、`path`、`os`、`events`、`util`、`buffer`、`assert`（含 `assert/strict`）、`url`、`timers`（含 `timers/promises`）、`child_process`（同步）、`crypto`、`module`、`string_decoder`、`perf_hooks`、`stream`（含 `stream/promises`、`stream/consumers`，用 Node 自己的实现） |
 
 ```sh
 cargo run --release -- examples/node.js              # Node 层（缺省）：按 Node 规则当 CommonJS 或 ES 模块跑
@@ -64,7 +64,7 @@ Node 层里跑，其余（原生程序、shell 脚本）作为子进程跑。
 
 ```rust
 j8::runtime! { pub Web { natives: [Stdio, Clock, Codec, Random, Timer, Http], prelude: PRELUDE, } }
-j8::runtime! { pub Dune: Web { globals: [Process], natives: [Fs, Os, Child], prelude: PRELUDE, } }
+j8::runtime! { pub Dune: Web { globals: [Process], natives: [Fs, Os, Child, V8, Lib, Raw], prelude: PRELUDE, } }
 ```
 
 - 要碰机器的部分写在 Rust 里，用 `#[j8::object]` / `#[j8::class]` 绑定（`web/mod.rs`、`web/timer.rs`、`web/http.rs`、
@@ -73,6 +73,11 @@ j8::runtime! { pub Dune: Web { globals: [Process], natives: [Fs, Os, Child], pre
 - 接口本身是 JavaScript，一族一个文件（`web/*.js`、`node/*.js`），作为 prelude 运行。
 - 内置模块用 `__j8_native.define(name, factory)` 登记给 `require`，`NodePlatform` 把它们供给 `import`（`node:fs` 或
   `fs`，带具名导出）。
+- Node 自己的库能原样跑的地方就用它：`node/lib/` 放 Node v25.9.0 `lib/` 的原文件（MIT，`node/lib/LICENSE`），按 Node
+  编译内置模块的方式编译（`node/internal.js`，带 `primordials` 和 `internalBinding`）。Node 里是 C++ 的部分放在
+  `node/shim/`，用同样的模块 id，优先于 `lib/`：binding `internal/binding/*`（建在原生对象 `v8.rs` 上——它看引擎里的
+  对象——和 `bytes.rs`——`Buffer` 的字节活）和少量替身，如 `internal/bootstrap/realm`。在那里找到的公开模块
+  （`stream`、`stream/promises` 等）取代 dune 手写的同名模块。`build.rs` 把两个目录嵌进二进制。
 - 事件循环是 `j8::Runtime::run_until_idle`：没有定时器和宿主任务时进程结束，退出码取 `process.exitCode`。没人接住的
   错误（定时器里、回调里）打印 `Uncaught …` 并以 1 退出，除非 `process.on('uncaughtException')` 接走了。
 
@@ -90,7 +95,7 @@ tests/node/fetch.sh test-path-join.js                     # 再从 Node v25.9.0 
 
 ## 还没有的
 
-顶层 `await`（j8 还不支持）、ES 模块 import CommonJS 时的具名导出（只有 `default`）、未处理的 promise 拒绝（不报）、`fetch` 的 `https:`、`http` / `net` 服务端、流、异步的
+顶层 `await`（j8 还不支持）、ES 模块 import CommonJS 时的具名导出（只有 `default`）、未处理的 promise 拒绝（不报）、`fetch` 的 `https:`、`http` / `net` 服务端、Web 流（`stream/web`）、`async_hooks` 的钩子和跨 `await` / 定时器 / 回调的 `AsyncLocalStorage`（只有 `run()` 里同步调用的代码看得到 store）、异步的
 `child_process.spawn`、`worker_threads`、`zlib`、`crypto` 的哈希与加解密、`Error.stack`（j8 还没有调用栈）。
 
 ## 许可

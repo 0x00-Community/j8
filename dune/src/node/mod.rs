@@ -1,5 +1,8 @@
 mod esm;
 mod fs;
+mod bytes;
+mod v8;
+mod vendor;
 
 use std::collections::BTreeMap;
 use std::fmt::Write;
@@ -10,6 +13,9 @@ use j8::frame::{Agent, Error, Platform, Pool, Task, Value};
 use j8::{Bytes, IntoJs};
 
 pub use fs::Fs;
+pub use bytes::Raw;
+pub use v8::V8;
+pub use vendor::Lib;
 
 use crate::host::Io;
 use crate::web::Web;
@@ -24,6 +30,7 @@ const PRELUDE: &str = concat!(
     include_str!("misc.js"),
     include_str!("assert.js"),
     include_str!("process.js"),
+    include_str!("internal.js"),
 );
 
 pub struct Process;
@@ -89,6 +96,48 @@ impl Os {
 
     fn username() -> String {
         std::env::var("USER").unwrap_or_default()
+    }
+
+    fn handle_type(fd: u32) -> u32 {
+        Handle::guess(fd).into()
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Handle {
+    Tty,
+    File,
+    Pipe,
+    Unknown,
+}
+
+impl Handle {
+    fn guess(fd: u32) -> Self {
+        use std::io::IsTerminal;
+        use std::os::unix::fs::FileTypeExt;
+        let path = format!("/proc/self/fd/{fd}");
+        let Ok(meta) = std::fs::metadata(&path) else { return Self::Unknown };
+        let kind = meta.file_type();
+        if kind.is_char_device() && std::fs::File::open(&path).is_ok_and(|f| f.is_terminal()) {
+            Self::Tty
+        } else if kind.is_file() || kind.is_char_device() || kind.is_block_device() || kind.is_dir() {
+            Self::File
+        } else if kind.is_fifo() || kind.is_socket() {
+            Self::Pipe
+        } else {
+            Self::Unknown
+        }
+    }
+}
+
+impl From<Handle> for u32 {
+    fn from(h: Handle) -> Self {
+        match h {
+            Handle::Tty => 1,
+            Handle::File => 3,
+            Handle::Pipe => 4,
+            Handle::Unknown => 5,
+        }
     }
 }
 
@@ -184,10 +233,14 @@ enum Builtin {
     Process,
     StringDecoder,
     PerfHooks,
+    Stream,
+    StreamPromises,
+    StreamConsumers,
+    AsyncHooks,
 }
 
 impl Builtin {
-    const ALL: [Self; 17] = [Self::Fs, Self::FsPromises, Self::Path, Self::Os, Self::Events, Self::Util, Self::Buffer, Self::Assert, Self::Url, Self::Timers, Self::TimersPromises, Self::ChildProcess, Self::Crypto, Self::Module, Self::Process, Self::StringDecoder, Self::PerfHooks];
+    const ALL: [Self; 21] = [Self::Fs, Self::FsPromises, Self::Path, Self::Os, Self::Events, Self::Util, Self::Buffer, Self::Assert, Self::Url, Self::Timers, Self::TimersPromises, Self::ChildProcess, Self::Crypto, Self::Module, Self::Process, Self::StringDecoder, Self::PerfHooks, Self::Stream, Self::StreamPromises, Self::StreamConsumers, Self::AsyncHooks];
 
     const fn spec(self) -> (&'static str, &'static [&'static str]) {
         match self {
@@ -208,6 +261,10 @@ impl Builtin {
             Self::Process => ("process", &["argv", "env", "exit", "cwd", "platform", "nextTick", "stdout", "stderr", "version", "versions", "pid", "hrtime"]),
             Self::StringDecoder => ("string_decoder", &["StringDecoder"]),
             Self::PerfHooks => ("perf_hooks", &["performance", "PerformanceEntry"]),
+            Self::Stream => ("stream", &["Stream", "Readable", "Writable", "Duplex", "Transform", "PassThrough", "pipeline", "finished", "compose", "addAbortSignal", "destroy", "isDestroyed", "isDisturbed", "isErrored", "isReadable", "isWritable", "duplexPair", "promises", "getDefaultHighWaterMark", "setDefaultHighWaterMark"]),
+            Self::StreamPromises => ("stream/promises", &["pipeline", "finished"]),
+            Self::StreamConsumers => ("stream/consumers", &["arrayBuffer", "blob", "buffer", "json", "text", "bytes"]),
+            Self::AsyncHooks => ("async_hooks", &["AsyncLocalStorage", "AsyncResource", "createHook", "executionAsyncId", "triggerAsyncId", "executionAsyncResource", "asyncWrapProviders"]),
         }
     }
 
@@ -303,7 +360,7 @@ impl<P: Platform> Platform for NodePlatform<P> {
 j8::runtime! {
     pub Dune: Web {
         globals: [Process],
-        natives: [Fs, Os, Child],
+        natives: [Fs, Os, Child, V8, Lib, Raw],
         prelude: PRELUDE,
     }
 }

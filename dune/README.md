@@ -8,7 +8,7 @@ directory:
 | Layer | Directory | What it provides |
 |---|---|---|
 | **Web** | `src/web/` | The Web-standard APIs servers share (WinterTC's minimum common API): `console`, `setTimeout` / `setInterval` / `queueMicrotask`, `structuredClone`, `EventTarget` / `Event` / `CustomEvent`, `AbortController` / `AbortSignal`, `DOMException`, `TextEncoder` / `TextDecoder`, `atob` / `btoa`, `URL` / `URLSearchParams`, `Blob` / `File`, `Headers` / `Request` / `Response` / `fetch` (plain `http:` and `data:`), `performance`, `crypto.getRandomValues` / `randomUUID`, `navigator`, `reportError` |
-| **Node** | `src/node/` | Node compatibility on top of the Web layer: `process` (an `EventEmitter`; `argv`, `env`, `exit`, `exitCode`, `nextTick`, `hrtime`, `stdout` / `stderr`, `'exit'` / `'uncaughtException'`), `require` / `module` with Node's resolution (`node_modules`, package.json `main` / `exports`, `.json`), ES modules (`.mjs`, `"type": "module"`; bare imports through `node_modules` and package.json `exports` / `imports`), `Buffer`, `global`, `setImmediate`, and the modules `fs` (+ `fs/promises`, callbacks), `path`, `os`, `events`, `util`, `buffer`, `assert` (+ `assert/strict`), `url`, `timers` (+ `timers/promises`), `child_process` (synchronous), `crypto`, `module`, `string_decoder`, `perf_hooks` |
+| **Node** | `src/node/` | Node compatibility on top of the Web layer: `process` (an `EventEmitter`; `argv`, `env`, `exit`, `exitCode`, `nextTick`, `hrtime`, `stdout` / `stderr`, `'exit'` / `'uncaughtException'`), `require` / `module` with Node's resolution (`node_modules`, package.json `main` / `exports`, `.json`), ES modules (`.mjs`, `"type": "module"`; bare imports through `node_modules` and package.json `exports` / `imports`), `Buffer`, `global`, `setImmediate`, and the modules `fs` (+ `fs/promises`, callbacks), `path`, `os`, `events`, `util`, `buffer`, `assert` (+ `assert/strict`), `url`, `timers` (+ `timers/promises`), `child_process` (synchronous), `crypto`, `module`, `string_decoder`, `perf_hooks`, `stream` (+ `stream/promises`, `stream/consumers`, Node's own) |
 
 ```sh
 cargo run --release -- examples/node.js              # Node layer (the default): CommonJS or ES module by Node's rules
@@ -68,7 +68,7 @@ Each layer is one `j8::runtime!` declaration, and the Node one stands on the Web
 
 ```rust
 j8::runtime! { pub Web { natives: [Stdio, Clock, Codec, Random, Timer, Http], prelude: PRELUDE, } }
-j8::runtime! { pub Dune: Web { globals: [Process], natives: [Fs, Os, Child], prelude: PRELUDE, } }
+j8::runtime! { pub Dune: Web { globals: [Process], natives: [Fs, Os, Child, V8, Lib, Raw], prelude: PRELUDE, } }
 ```
 
 - What needs the machine is Rust, bound with `#[j8::object]` / `#[j8::class]` (`web/mod.rs`, `web/timer.rs`,
@@ -77,6 +77,13 @@ j8::runtime! { pub Dune: Web { globals: [Process], natives: [Fs, Os, Child], pre
 - The APIs themselves are JavaScript, one file per family (`web/*.js`, `node/*.js`), run as the preludes.
 - Built-in modules are registered with `__j8_native.define(name, factory)` for `require`, and `NodePlatform` serves
   them to `import` (`node:fs` or `fs`, with their named exports).
+- Where Node's own library can run as it is, dune uses it: `node/lib/` holds files of Node v25.9.0's `lib/`
+  unchanged (MIT, `node/lib/LICENSE`), compiled the way Node compiles its built-in modules (`node/internal.js`,
+  with `primordials` and `internalBinding`). What is C++ in Node is in `node/shim/` under the same module ids,
+  which win over `lib/`: the bindings `internal/binding/*` (on the natives `v8.rs`, which looks at the engine's
+  objects, and `bytes.rs`, the byte work of `Buffer`) and a few stand-ins such as `internal/bootstrap/realm`. A
+  public module found there (`stream`, `stream/promises`, ...) replaces dune's hand-written one. `build.rs` embeds
+  both directories.
 - The event loop is `j8::Runtime::run_until_idle`: the process ends when no timer or host work is left; the exit
   code is `process.exitCode`. An error nobody caught (in a timer, a callback) prints `Uncaught …` and exits with 1,
   unless `process.on('uncaughtException')` takes it.
@@ -97,7 +104,7 @@ tests/node/fetch.sh test-path-join.js                     # copy one more from N
 ## Not there yet
 
 Top-level `await` (j8 does not support it yet), named exports when an ES module imports CommonJS (only `default`), unhandled promise rejections (not reported), `https:` in `fetch`,
-`http` / `net` servers, streams, asynchronous `child_process.spawn`, `worker_threads`, `zlib`, `crypto` hashes and
+`http` / `net` servers, web streams (`stream/web`), `async_hooks` hooks and `AsyncLocalStorage` across `await` / timers / callbacks (only synchronous calls inside `run()` see the store), asynchronous `child_process.spawn`, `worker_threads`, `zlib`, `crypto` hashes and
 ciphers, `Error.stack` (j8 has no stack traces yet).
 
 ## License

@@ -15,6 +15,7 @@
     }
     return builtins[name];
   };
+  native.builtinNames = () => Object.keys(factories);
   const builtinName = (request) => {
     const name = request.startsWith('node:') ? request.slice(5) : request;
     return name in factories ? name : null;
