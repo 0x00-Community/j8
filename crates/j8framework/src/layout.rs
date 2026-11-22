@@ -14,14 +14,11 @@ impl Layout {
     pub const INLINE_PROPS: usize = Props::INLINE;
     pub const CELL: usize = core::mem::size_of::<ValueCell<'static>>();
     pub const STORE_CELLS: usize = core::mem::size_of::<usize>();
-    pub const STORE_LEAF_MAX: usize = 128;
     pub const ENV_PARENT: usize = Env::PARENT_OFFSET;
     pub const ENV_TAG: usize = Env::SLOTS_OFFSET;
     pub const ENV_INLINE_TAG: u8 = 0;
-    pub const ENV_INLINE_LEN: usize = Env::SLOTS_OFFSET + 8;
     pub const ENV_INLINE_CELLS: usize = Env::SLOTS_OFFSET + 16;
     pub const ENV_BOXED_PTR: usize = Env::SLOTS_OFFSET + 8;
-    pub const ENV_INLINE_SLOTS: usize = 4;
     pub const FAST_CLOSURE_TAG: u8 = 0;
     pub const FAST_CLOSURE: usize = 8;
     pub const CLOSURE_FUNC: usize = core::mem::offset_of!(Closure<'static>, func);

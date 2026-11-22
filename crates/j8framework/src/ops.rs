@@ -717,15 +717,6 @@ impl<'gc> Agent<'gc, '_> {
         self.set_key(target, Key::Sym(key), value, target)
     }
 
-    pub fn set_symbol(&mut self, target: Value<'gc>, key: JsSymbol<'gc>, value: Value<'gc>) -> Result<(), Error> {
-        if self.try_set_symbol(target, key, value)? {
-            Ok(())
-        } else {
-            let what = self.symbol_descriptive(key);
-            Err(self.read_only(&what))
-        }
-    }
-
     fn set_failure(&self, target: Value<'gc>, key: &str) -> Error {
         if let Some(o) = target.as_object() {
             let d = o.borrow();
@@ -926,10 +917,6 @@ impl<'gc> Agent<'gc, '_> {
             let k = self.key_text(key);
             Err(self.throw(ErrorKind::Type, &format!("Cannot define property {k}, object is not extensible")))
         }
-    }
-
-    pub fn define_accessor(&mut self, o: JsObject<'gc>, key: &str, f: JsObject<'gc>, setter: bool, enumerable: bool) {
-        self.define_accessor_key(o, Key::Str(key), f, setter, enumerable);
     }
 
     fn define_accessor_key(&mut self, o: JsObject<'gc>, key: Key<'_, 'gc>, f: JsObject<'gc>, setter: bool, enumerable: bool) {

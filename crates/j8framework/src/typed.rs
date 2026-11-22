@@ -194,10 +194,6 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    pub fn typed_length(o: JsObject<'gc>) -> usize {
-        Self::typed_array(o).and_then(|(k, v)| Self::view_length(&v, k.size())).unwrap_or(0)
-    }
-
     fn valid_index(o: JsObject<'gc>, i: f64) -> Option<usize> {
         let (k, v) = Self::typed_array(o)?;
         if i != libm::trunc(i) || (i == 0.0 && i.is_sign_negative()) || i < 0.0 {

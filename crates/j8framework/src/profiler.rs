@@ -9,7 +9,6 @@ pub struct FuncId(pub u32);
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Counter {
     pub calls: u32,
-    pub backedges: u32,
 }
 
 #[derive(Debug, Default)]
@@ -27,13 +26,6 @@ impl Profiler {
     pub fn enter(&mut self, f: FuncId) {
         if self.enabled {
             self.counter_mut(f).calls += 1;
-        }
-    }
-
-    #[inline]
-    pub fn backedge(&mut self, f: FuncId) {
-        if self.enabled {
-            self.counter_mut(f).backedges += 1;
         }
     }
 

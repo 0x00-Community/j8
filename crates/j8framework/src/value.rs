@@ -1,4 +1,4 @@
-use crate::gc::{Collect, Erased, Gc, Trace, Tracer, erase, gc_from_raw};
+use crate::gc::{Collect, Gc, Trace, Tracer, gc_from_raw};
 
 use crate::{JsBigInt, JsObject, JsString, JsSymbol};
 
@@ -238,26 +238,6 @@ impl<'gc> Value<'gc> {
     #[inline]
     pub unsafe fn from_bits(bits: u64) -> Self {
         Self::word(bits)
-    }
-
-    #[inline]
-    pub fn erased(self) -> Option<Gc<'gc, Erased>> {
-        if !self.is_pointer() {
-            return None;
-        }
-        if let Some(a) = self.as_accessor() {
-            return Some(erase(a));
-        }
-        if let Some(c) = self.as_context() {
-            return Some(erase(c));
-        }
-        match self.kind() {
-            ValueKind::String(s) => Some(erase(s)),
-            ValueKind::Symbol(s) => Some(erase(s)),
-            ValueKind::BigInt(b) => Some(erase(b)),
-            ValueKind::Object(o) => Some(erase(o)),
-            _ => None,
-        }
     }
 
     #[inline]

@@ -101,7 +101,6 @@ enum Control<'a> {
     Handler,
     Finally(Finally<'a>),
     Iterator(Register),
-    AsyncIterator(Register),
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
@@ -618,10 +617,6 @@ impl Compiler<'_, '_> {
 }
 
 impl<'a> Compiler<'a, '_> {
-    pub fn file(&self) -> &'a str {
-        self.alloc.alloc_str(self.src.file)
-    }
-
     pub fn unsupported(&self, span: Span, what: &str) -> Error {
         self.src.unsupported(span.start, what)
     }
@@ -1798,10 +1793,6 @@ impl<'a> Compiler<'a, '_> {
         self.frame().loop_depth
     }
 
-    pub fn is_async_generator(&mut self) -> bool {
-        self.frame().async_generator
-    }
-
     pub fn with_default(&mut self, value: Register, default: &'a Expression<'a>, name: Option<&'a str>) -> Result<Register, Error> {
         let t = self.temp();
         self.b().ldar(value);
@@ -2582,7 +2573,7 @@ impl<'a> Compiler<'a, '_> {
                         return Exit::Jump(i);
                     }
                 }
-                Control::Handler | Control::Iterator(_) | Control::AsyncIterator(_) => {}
+                Control::Handler | Control::Iterator(_) => {}
             }
         }
         Exit::Function
@@ -2595,36 +2586,31 @@ impl<'a> Compiler<'a, '_> {
         }
     }
 
-    fn leave_controls(&mut self, from: usize) -> Result<(), Error> {
-        let iters: Vec<Control<'a>> = self.frame().controls[from..]
+    fn leave_controls(&mut self, from: usize) {
+        let iters: Vec<Register> = self.frame().controls[from..]
             .iter()
             .rev()
             .filter_map(|c| match c {
-                Control::Iterator(i) => Some(Control::Iterator(*i)),
-                Control::AsyncIterator(i) => Some(Control::AsyncIterator(*i)),
+                Control::Iterator(i) => Some(*i),
                 _ => None,
             })
             .collect();
         if iters.is_empty() {
-            return Ok(());
+            return;
         }
         let saved = self.temp();
         self.b().star(saved);
-        for c in iters {
-            match c {
-                Control::Iterator(iter) => self.iterator_close(iter),
-                _ => return Err(self.unsupported(Span::default(), "for await")),
-            }
+        for iter in iters {
+            self.iterator_close(iter);
         }
         self.b().ldar(saved);
         self.release(saved);
-        Ok(())
     }
 
     fn enter_finally(&mut self, i: usize, token: i32) -> Result<(), Error> {
         let Control::Finally(fin) = &self.frame().controls[i] else { unreachable!("a finally") };
         let (contexts, token_reg) = (fin.contexts.clone(), fin.token);
-        self.leave_controls(i + 1)?;
+        self.leave_controls(i + 1);
         self.restore_contexts(&contexts);
         let saved = self.temp();
         self.b().star(saved);
@@ -2646,7 +2632,7 @@ impl<'a> Compiler<'a, '_> {
             Exit::Jump(i) => {
                 let Control::Jump(j) = &self.frame().controls[i] else { unreachable!("a jump target") };
                 let contexts = j.contexts.clone();
-                self.leave_controls(i + 1)?;
+                self.leave_controls(i + 1);
                 self.restore_contexts(&contexts);
                 let f = self.frame();
                 let Control::Jump(j) = &mut f.controls[i] else { unreachable!("a jump target") };
@@ -2675,7 +2661,7 @@ impl<'a> Compiler<'a, '_> {
                 let _ = self.enter_finally(i, COMPLETION_RETURN);
             }
             _ => {
-                let _ = self.leave_controls(0);
+                self.leave_controls(0);
                 let flavor = self.frame().flavor;
                 if flavor.asynchronous {
                     let g = self.frame().generator.expect("a generator register");

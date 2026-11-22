@@ -378,19 +378,11 @@ impl Executor {
         Self::object_literal(a, self.function(f), k)
     }
 
-    pub fn jit_create_this<'gc>(&self, a: &mut Agent<'gc, '_>, ctor: FuncId, new_target: Value<'gc>) -> Result<JsObject<'gc>, Error> {
-        Self::create_this(a, self.function(ctor), new_target)
-    }
-
     pub fn jit_global_load<'gc>(&self, a: &mut Agent<'gc, '_>, f: FuncId, k: OperandValue, slot: OperandValue, inside_typeof: bool) -> Result<Value<'gc>, Error> {
         let l = self.function(f);
         let name = Self::name_at(l, k);
         let ic = l.globals.get(usize::try_from(slot).unwrap_or(usize::MAX)).ok_or_else(|| a.throw(j8framework::ErrorKind::Reference, "no global cache"))?;
         self.global_load(a, ic, name, inside_typeof)
-    }
-
-    pub fn jit_instance_size(&self, ctor: FuncId, n: usize) {
-        self.function(ctor).instance_size.set(u8::try_from(n).unwrap_or(u8::MAX));
     }
 
     pub fn jit_depth(&self) -> &Cell<usize> {
