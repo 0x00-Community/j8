@@ -1,17 +1,17 @@
 name: dune release
 
-# A vX.Y or vX.Y.Z tag builds dune for every platform in dune/npm/platforms.json, attaches the archives to the
-# GitHub release of that tag and publishes the npm packages. The tag must match the version in dune/Cargo.toml
-# (v0.5 means 0.5.0).
+# Every new vX.Y.Z tag (a change in any of major, minor or patch) builds dune for every platform in
+# dune/npm/platforms.json, attaches the archives to the GitHub release of that tag and publishes the npm packages.
+# The tag must match the version in dune/Cargo.toml. npm publishing uses trusted publishing (OIDC): no token,
+# each package names 0x00-Community/j8 and this workflow file as its trusted publisher on npmjs.com.
 on:
   push:
     tags:
-      - "v[0-9]+.[0-9]+"
       - "v[0-9]+.[0-9]+.[0-9]+"
   workflow_dispatch:
     inputs:
       tag:
-        description: "Existing tag to (re)build and release, such as v0.5.0"
+        description: "Existing vX.Y.Z tag to (re)build and release, such as v0.5.0"
         required: true
 
 permissions:
@@ -36,8 +36,11 @@ jobs:
           ref: ${{ env.TAG }}
       - id: check
         run: |
+          if [[ ! $TAG =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::tag $TAG is not vX.Y.Z"
+            exit 1
+          fi
           bare=${TAG#v}
-          [[ $bare == *.*.* ]] || bare=$bare.0
           cargo=$(sed -n 's/^version *= *"\(.*\)"/\1/p' dune/Cargo.toml | head -1)
           if [[ $bare != "$cargo" ]]; then
             echo "::error::tag $TAG is version $bare but dune/Cargo.toml says $cargo"
@@ -151,8 +154,9 @@ jobs:
           ref: ${{ env.TAG }}
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
-          registry-url: https://registry.npmjs.org
+          node-version: 24
+      - name: npm with trusted publishing
+        run: npm install -g npm@^11.5.1
       - uses: actions/download-artifact@v4
         with:
           pattern: dune-*
@@ -162,7 +166,6 @@ jobs:
         run: node dune/npm/pack.js dist npm-out
       - name: publish
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           VERSION: ${{ needs.version.outputs.version }}
         run: |
           publish() {
@@ -171,7 +174,7 @@ jobs:
             if npm view "$name@$VERSION" version >/dev/null 2>&1; then
               echo "$name@$VERSION is already published"
             else
-              (cd "$dir" && npm publish --access public --provenance)
+              (cd "$dir" && npm publish --access public)
             fi
           }
           for dir in npm-out/*/; do
