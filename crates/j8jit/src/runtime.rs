@@ -221,10 +221,10 @@ fn helper<'gc>(jit: &Jit, exe: &Executor, a: &mut Agent<'gc, '_>, h: Helper, ops
             cell.set(a.mc, v(1));
             0
         }
-        Helper::LoadGlobal(f, k, slot) => exe.jit_global_load(a, f, i64::from(k), i64::from(slot))?.bits(),
+        Helper::LoadGlobal(f, k, slot, inside_typeof) => exe.jit_global_load(a, f, i64::from(k), i64::from(slot), inside_typeof)?.bits(),
         Helper::GlobalProbe(k) => {
             let (f, name, slot, expect) = jit.site(k);
-            let v = exe.jit_global_load(a, f, i64::from(name), i64::from(slot))?;
+            let v = exe.jit_global_load(a, f, i64::from(name), i64::from(slot), false)?;
             if let Some(want) = expect
                 && v.as_object().and_then(|o| o.closure()).is_none_or(|c| c.func != want)
             {

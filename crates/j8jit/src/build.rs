@@ -6,7 +6,7 @@ use alloc::vec::Vec;
 
 use j8bytecode::{Bytecode, Constant, LiteralValue, OperandValue};
 use j8executor::{Executor, JitFunction as Function, JitReg as Reg};
-use j8framework::{BinaryOp, CompareOp, FuncId, Layout, Shape, ValueBits};
+use j8framework::{BinaryOp, CompareOp, FuncId, Layout, Lazy, Shape, ValueBits};
 
 use crate::cfg::{Bits, Cfg};
 use crate::ir::{Cond, FloatOp, Frame, FrameState, Graph, Helper, IntOp, Op, Rep, Slot, VirtualObject, B, Fs, V};
@@ -1563,7 +1563,7 @@ impl<'e> Builder<'e> {
                 && Self::same_shape(&o.shape, &fb.shape)
                 && self.hint(act.id, pc) & HINT_GENERIC == 0
             {
-                return Ok(self.proto_load(act, st, o.proto, fb, pc));
+                return Ok(self.proto_load(act, st, o.proto, fb, key, pc));
             }
             let w = self.real(st, obj);
             return self.generic_get(act, st, w, name, pc);
@@ -1574,10 +1574,11 @@ impl<'e> Builder<'e> {
                 self.shape_check(act, st, p, fb.shape.clone(), pc);
                 if fb.depth == 0 {
                     let c = self.prop_cell(p, fb.slot);
-                    return Ok(self.load(st, LOAD_WORD, c, Self::prop_off(fb.slot)));
+                    let v = self.load(st, LOAD_WORD, c, Self::prop_off(fb.slot));
+                    return Ok(self.guard_lazy(act, st, v, key, pc));
                 }
                 let proto = self.load(st, LOAD_PTR, p, Self::off(Layout::OBJECT_PROTO));
-                Ok(self.proto_load(act, st, proto, &fb, pc))
+                Ok(self.proto_load(act, st, proto, &fb, key, pc))
             }
             _ => {
                 let w = self.real(st, obj);
@@ -1586,7 +1587,7 @@ impl<'e> Builder<'e> {
         }
     }
 
-    fn proto_load(&mut self, act: &Act<'e>, st: &mut St, proto: V, fb: &j8executor::PropertyFeedback, pc: usize) -> V {
+    fn proto_load(&mut self, act: &Act<'e>, st: &mut St, proto: V, fb: &j8executor::PropertyFeedback, name: &str, pc: usize) -> V {
         let mut p = proto;
         for (i, s) in fb.chain.iter().enumerate() {
             self.shape_check(act, st, p, Some(s.clone()), pc);
@@ -1595,7 +1596,16 @@ impl<'e> Builder<'e> {
             }
         }
         let c = self.prop_cell(p, fb.slot);
-        self.load(st, LOAD_WORD, c, Self::prop_off(fb.slot))
+        let v = self.load(st, LOAD_WORD, c, Self::prop_off(fb.slot));
+        self.guard_lazy(act, st, v, name, pc)
+    }
+
+    fn guard_lazy(&mut self, act: &Act<'e>, st: &mut St, v: V, name: &str, pc: usize) -> V {
+        if Lazy::possible(name) {
+            let fs = self.state(act, st, pc);
+            self.emit(Op::CheckNotLazy(v, fs), Rep::None);
+        }
+        v
     }
 
     fn generic_get(&mut self, act: &Act<'e>, st: &mut St, w: V, name: OperandValue, pc: usize) -> R<V> {
@@ -1917,6 +1927,7 @@ impl<'e> Builder<'e> {
                 self.shape_check(act, st, p, pfb.shape.clone(), pc);
                 let c = self.prop_cell(p, pfb.slot);
                 let pw = self.load(st, LOAD_WORD, c, Self::prop_off(pfb.slot));
+                let pw = self.guard_lazy(act, st, pw, "prototype", pc);
                 let proto = self.object(act, st, pw, pc);
                 let id = self.emit(Op::Word(0), Rep::Ptr);
                 st.heap.objs.push((id, VObj { proto, shape: None, fields: Vec::new() }));
@@ -2199,8 +2210,12 @@ impl<'e> Builder<'e> {
                 st.heap.known.push(Fact::Env(f, c));
                 set_acc!(f);
             }
-            Bc::LdaGlobal | Bc::LdaGlobalInsideTypeof => {
-                let v = self.global(act, st, o[0], o[1], pc)?;
+            Bc::LdaGlobal => {
+                let v = self.global(act, st, o[0], o[1], pc, false)?;
+                set_acc!(v);
+            }
+            Bc::LdaGlobalInsideTypeof => {
+                let v = self.global(act, st, o[0], o[1], pc, true)?;
                 set_acc!(v);
             }
             Bc::GetNamedProperty => {
@@ -2296,7 +2311,7 @@ impl<'e> Builder<'e> {
         }
     }
 
-    fn global(&mut self, act: &Act<'e>, st: &mut St, name: OperandValue, slot: OperandValue, pc: usize) -> R<V> {
+    fn global(&mut self, act: &Act<'e>, st: &mut St, name: OperandValue, slot: OperandValue, pc: usize, typeof_: bool) -> R<V> {
         if self.hint(act.id, pc) & HINT_GENERIC == 0 {
             let nk = u32::try_from(name).unwrap_or(0);
             if let Some(v) = st.heap.known.iter().find_map(|f| match f {
@@ -2305,15 +2320,18 @@ impl<'e> Builder<'e> {
             }) {
                 return Ok(v);
             }
-            let k = u32::try_from(self.g.globals.len()).unwrap_or(0);
-            self.g.globals.push((act.id, nk, u32::try_from(slot).unwrap_or(0)));
-            let fs = self.state(act, st, pc);
-            let v = self.emit(Op::Global(k, None, fs), Rep::Word);
-            st.heap.known.push(Fact::Global(act.id.0, nk, v));
-            return Ok(v);
+            if !typeof_ {
+                let k = u32::try_from(self.g.globals.len()).unwrap_or(0);
+                self.g.globals.push((act.id, nk, u32::try_from(slot).unwrap_or(0)));
+                let fs = self.state(act, st, pc);
+                let v = self.emit(Op::Global(k, None, fs), Rep::Word);
+                st.heap.known.push(Fact::Global(act.id.0, nk, v));
+                return Ok(v);
+            }
         }
         let fb = act.f.global(slot);
-        if let Some(fb) = fb
+        if !typeof_
+            && let Some(fb) = fb
             && self.hint(act.id, pc) & HINT_GENERIC == 0
         {
             let path = if fb.slot < Layout::INLINE_PROPS { None } else { (self.paths)(fb.global.is_some(), fb.slot) };
@@ -2337,8 +2355,10 @@ impl<'e> Builder<'e> {
                     }
                     None => scope,
                 };
+                let key = act.f.name(name);
                 let Some(path) = path else {
-                    return Ok(self.emit(Op::LoadWord(holder, Self::prop_off(fb.slot)), Rep::Word));
+                    let v = self.emit(Op::LoadWord(holder, Self::prop_off(fb.slot)), Rep::Word);
+                    return Ok(self.guard_lazy(act, st, v, key, pc));
                 };
                 let mut p = self.emit(Op::LoadPtr(holder, Self::off(Layout::OBJECT_STORE)), Rep::Ptr);
                 let head = self.emit(Op::LoadRaw(p, 0), Rep::Word);
@@ -2349,7 +2369,8 @@ impl<'e> Builder<'e> {
                 for k in &path.kids {
                     p = self.emit(Op::LoadPtr(p, Self::off(*k)), Rep::Ptr);
                 }
-                return Ok(self.emit(Op::LoadWord(p, Self::off(path.cell)), Rep::Word));
+                let v = self.emit(Op::LoadWord(p, Self::off(path.cell)), Rep::Word);
+                return Ok(self.guard_lazy(act, st, v, key, pc));
             }
         }
         if self.log {
@@ -2357,7 +2378,7 @@ impl<'e> Builder<'e> {
         }
         self.flush(st);
         let fs = self.state(act, st, pc);
-        let v = self.emit(Op::Call(Helper::LoadGlobal(act.id, u32::try_from(name).unwrap_or(0), u32::try_from(slot).unwrap_or(0)), vec![], Some(fs)), Rep::Word);
+        let v = self.emit(Op::Call(Helper::LoadGlobal(act.id, u32::try_from(name).unwrap_or(0), u32::try_from(slot).unwrap_or(0), typeof_), vec![], Some(fs)), Rep::Word);
         Self::forget(st);
         Ok(v)
     }

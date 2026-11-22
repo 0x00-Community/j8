@@ -9,6 +9,16 @@ pub enum Lazy {
 impl Lazy {
     const ALL: [Self; 1] = [Self::FunctionName];
 
+    pub fn possible(name: &str) -> bool {
+        Self::ALL.iter().any(|k| k.key() == name)
+    }
+
+    const fn key(self) -> &'static str {
+        match self {
+            Self::FunctionName => "name",
+        }
+    }
+
     pub fn resolve<'gc>(self, holder: &Object<'gc>, mc: &Mutation<'gc>) -> Value<'gc> {
         let Some(info) = holder.closure().and_then(|c| c.code).map(|c| unsafe { c.info() }) else { return Value::Undefined };
         match self {

@@ -71,7 +71,7 @@ pub enum Helper {
     ModF,
     ToBoolean,
     StoreCell,
-    LoadGlobal(FuncId, u32, u32),
+    LoadGlobal(FuncId, u32, u32, bool),
     GlobalProbe(u32),
     Binary(j8framework::BinaryOp),
     Compare(j8framework::CompareOp),
@@ -120,6 +120,7 @@ pub enum Op {
     FloatToInt(V, Fs),
     CheckObject(V, Fs),
     CheckNotHole(V, Fs),
+    CheckNotLazy(V, Fs),
     CheckFunc(V, FuncId, Fs),
     CheckShape(V, Option<Arc<Shape>>, Fs),
     Check(V, bool, Fs),
@@ -156,7 +157,7 @@ impl Op {
             Op::I32(_) | Op::F64(_) | Op::Word(_) | Op::Param(_) | Op::Callee | Op::CtxField(_) | Op::Poll(_) | Op::Enter(_) | Op::Global(..) | Op::Jump(_) | Op::Deopt(_) => {}
             Op::Phi(v) => out.extend_from_slice(v),
             Op::Int(_, a, b, _) | Op::Float(_, a, b) | Op::CmpInt(_, a, b) | Op::CmpFloat(_, a, b) | Op::CmpWord(_, a, b) | Op::StoreCell(a, _, b) => out.extend([*a, *b]),
-            Op::IntToFloat(a) | Op::BoxInt(a) | Op::BoxFloat(a) | Op::BoxBool(a) | Op::BoxPtr(a, _) | Op::UnboxInt(a, _) | Op::UnboxFloat(a, _) | Op::FloatToInt(a, _) | Op::CheckObject(a, _) | Op::CheckNotHole(a, _) | Op::CheckFunc(a, _, _) | Op::CheckShape(a, _, _) | Op::Check(a, _, _) | Op::LoadWord(a, _) | Op::LoadPtr(a, _) | Op::LoadRaw(a, _) | Op::StoreCellAddr(a, _) | Op::ContextCell(a, _) | Op::Untag(a) | Op::Branch(a, _, _) | Op::Return(a, _) => out.push(*a),
+            Op::IntToFloat(a) | Op::BoxInt(a) | Op::BoxFloat(a) | Op::BoxBool(a) | Op::BoxPtr(a, _) | Op::UnboxInt(a, _) | Op::UnboxFloat(a, _) | Op::FloatToInt(a, _) | Op::CheckObject(a, _) | Op::CheckNotHole(a, _) | Op::CheckNotLazy(a, _) | Op::CheckFunc(a, _, _) | Op::CheckShape(a, _, _) | Op::Check(a, _, _) | Op::LoadWord(a, _) | Op::LoadPtr(a, _) | Op::LoadRaw(a, _) | Op::StoreCellAddr(a, _) | Op::ContextCell(a, _) | Op::Untag(a) | Op::Branch(a, _, _) | Op::Return(a, _) => out.push(*a),
             Op::Call(_, args, _) => out.extend_from_slice(args),
             Op::CallJit(_, c, t, args, _) => {
                 out.extend([*c, *t]);
@@ -173,7 +174,7 @@ impl Op {
                 *a = f(*a);
                 *b = f(*b);
             }
-            Op::IntToFloat(a) | Op::BoxInt(a) | Op::BoxFloat(a) | Op::BoxBool(a) | Op::BoxPtr(a, _) | Op::UnboxInt(a, _) | Op::UnboxFloat(a, _) | Op::FloatToInt(a, _) | Op::CheckObject(a, _) | Op::CheckNotHole(a, _) | Op::CheckFunc(a, _, _) | Op::CheckShape(a, _, _) | Op::Check(a, _, _) | Op::LoadWord(a, _) | Op::LoadPtr(a, _) | Op::LoadRaw(a, _) | Op::StoreCellAddr(a, _) | Op::ContextCell(a, _) | Op::Untag(a) | Op::Branch(a, _, _) | Op::Return(a, _) => *a = f(*a),
+            Op::IntToFloat(a) | Op::BoxInt(a) | Op::BoxFloat(a) | Op::BoxBool(a) | Op::BoxPtr(a, _) | Op::UnboxInt(a, _) | Op::UnboxFloat(a, _) | Op::FloatToInt(a, _) | Op::CheckObject(a, _) | Op::CheckNotHole(a, _) | Op::CheckNotLazy(a, _) | Op::CheckFunc(a, _, _) | Op::CheckShape(a, _, _) | Op::Check(a, _, _) | Op::LoadWord(a, _) | Op::LoadPtr(a, _) | Op::LoadRaw(a, _) | Op::StoreCellAddr(a, _) | Op::ContextCell(a, _) | Op::Untag(a) | Op::Branch(a, _, _) | Op::Return(a, _) => *a = f(*a),
             Op::Call(_, args, _) => args.iter_mut().for_each(|x| *x = f(*x)),
             Op::CallJit(_, c, t, args, _) => {
                 *c = f(*c);
@@ -186,7 +187,7 @@ impl Op {
     pub fn frame_state(&self) -> Option<Fs> {
         match self {
             Op::Int(_, _, _, fs) | Op::Call(_, _, fs) => *fs,
-            Op::UnboxInt(_, fs) | Op::UnboxFloat(_, fs) | Op::FloatToInt(_, fs) | Op::CheckObject(_, fs) | Op::CheckNotHole(_, fs) | Op::CheckFunc(_, _, fs) | Op::CheckShape(_, _, fs) | Op::Check(_, _, fs) | Op::CallJit(.., fs) | Op::Poll(fs) | Op::Enter(fs) | Op::Global(_, _, fs) | Op::Deopt(fs) => Some(*fs),
+            Op::UnboxInt(_, fs) | Op::UnboxFloat(_, fs) | Op::FloatToInt(_, fs) | Op::CheckObject(_, fs) | Op::CheckNotHole(_, fs) | Op::CheckNotLazy(_, fs) | Op::CheckFunc(_, _, fs) | Op::CheckShape(_, _, fs) | Op::Check(_, _, fs) | Op::CallJit(.., fs) | Op::Poll(fs) | Op::Enter(fs) | Op::Global(_, _, fs) | Op::Deopt(fs) => Some(*fs),
             _ => None,
         }
     }
@@ -195,7 +196,7 @@ impl Op {
         match self {
             Op::Int(op, _, _, fs) => fs.is_some() && !op.total(),
             Op::Call(..) | Op::CallJit(..) | Op::StoreCell(..) | Op::Poll(_) | Op::Enter(_) | Op::Global(..) => true,
-            Op::UnboxInt(..) | Op::UnboxFloat(..) | Op::FloatToInt(..) | Op::CheckObject(..) | Op::CheckNotHole(..) | Op::CheckFunc(..) | Op::CheckShape(..) | Op::Check(..) => true,
+            Op::UnboxInt(..) | Op::UnboxFloat(..) | Op::FloatToInt(..) | Op::CheckObject(..) | Op::CheckNotHole(..) | Op::CheckNotLazy(..) | Op::CheckFunc(..) | Op::CheckShape(..) | Op::Check(..) => true,
             o => o.is_terminator(),
         }
     }
@@ -369,6 +370,7 @@ impl Graph {
                     Op::FloatToInt(..) => "FloatToInt",
                     Op::CheckObject(..) => "CheckObject",
                     Op::CheckNotHole(..) => "CheckNotHole",
+                    Op::CheckNotLazy(..) => "CheckNotLazy",
                     Op::Check(..) => "Check",
                     Op::StoreCellAddr(..) => "StoreCellAddr",
                     Op::Untag(_) => "Untag",
