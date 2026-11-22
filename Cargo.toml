@@ -8,7 +8,7 @@ autotests = false
 repository.workspace = true
 readme = "README.md"
 # Publish only the library: the tests/test262 submodule has over fifty thousand files, too many for crates.io
-include = ["/src", "/tests/binding.rs", "/tests/runtime.rs", "/tests/bindings_more.rs", "/tests/event_loop.rs", "/tests/terminate.rs", "/tests/jit_typeof.rs", "/tests/jit_lazy.rs", "/tests/jit_stack.rs", "/tests/regexp_fast.rs", "/README.md", "/README.zh-CN.md", "/EMBEDDING.md", "/LICENSE"]
+include = ["/src", "/tests/binding.rs", "/tests/runtime.rs", "/tests/bindings_more.rs", "/tests/event_loop.rs", "/tests/terminate.rs", "/tests/jit_typeof.rs", "/tests/jit_lazy.rs", "/tests/jit_stack.rs", "/tests/regexp_fast.rs", "/tests/json_fast.rs", "/README.md", "/README.zh-CN.md", "/EMBEDDING.md", "/LICENSE"]
 
 [lib]
 name = "j8"
@@ -105,6 +105,10 @@ path = "tests/jit_stack.rs"
 [[test]]
 name = "regexp_fast"
 path = "tests/regexp_fast.rs"
+
+[[test]]
+name = "json_fast"
+path = "tests/json_fast.rs"
 
 [lints]
 workspace = true
