@@ -11,7 +11,7 @@
 [![License](https://img.shields.io/badge/License-MIT-brightgreen?style=for-the-badge)](#-license)
 
 [![ECMAScript](https://img.shields.io/badge/ECMAScript-core%20language-F7DF1E?style=flat-square&logo=javascript&logoColor=black)](#-status)
-[![JIT](https://img.shields.io/badge/JIT-x86--64%20via%20MLIR-262D3A?style=flat-square&logo=llvm)](#-jit-tier-one)
+[![JIT](https://img.shields.io/badge/JIT-x86--64%20%C2%B7%20AArch64-262D3A?style=flat-square&logo=llvm)](#-jit-tier-one)
 [![GC](https://img.shields.io/badge/GC-paragc%20%C2%B7%20parallel%20%C2%B7%20lock--free-8A2BE2?style=flat-square)](#-heap-and-handles)
 
 **🇺🇸 English** · [🇨🇳 简体中文](README.zh-CN.md)
@@ -24,7 +24,7 @@
 
 j8 is **a JavaScript engine written from scratch in Rust**, layered the way V8 is: every piece of JS is first compiled to
 accumulator-style bytecode (like V8's Ignition) and run by the executor, while hot functions and hot loops go to a JIT that
-emits x86-64 machine code. The heap is [paragc](https://crates.io/crates/paragc), wrapped by `j8framework`'s GC layer.
+emits x86-64 or AArch64 machine code. The heap is [paragc](https://crates.io/crates/paragc), wrapped by `j8framework`'s GC layer.
 
 🎯 **The main line:** the test262 pass rate. Core ECMAScript is filled in stage by stage following [PLAN.md](PLAN.md), with
 zero regressions against the baseline at every step.
@@ -40,7 +40,7 @@ and [crates/macros/USAGE.md](crates/macros/USAGE.md) (the macro reference).
 | --- | --- |
 | 🦀 **All Rust** | Parsing is oxc; everything else, from bytecode to GC, is ours. No C++ engine underneath. |
 | 🧱 **Bytecode first** | There is no AST interpreter: all JS (including `eval` and `Function`) is compiled to bytecode, and that bytecode is V8 Ignition's, byte for byte (tables generated from V8's headers). |
-| 🧬 **A speculative JIT** | Inline-cache feedback turns hot bytecode into a speculative SSA graph (inlining, escape analysis, loop-invariant code motion, OSR, deoptimization), emitted straight to x86-64. |
+| 🧬 **A speculative JIT** | Inline-cache feedback turns hot bytecode into a speculative SSA graph (inlining, escape analysis, loop-invariant code motion, OSR, deoptimization), emitted straight to x86-64 or AArch64. |
 | ♻️ **paragc heap** | Immix-style mark-region heap: young collections plus reference counting for old objects, evacuation of sparse blocks, marking and sweeping in parallel, no locks. `'gc` brand lifetimes guarantee at compile time that handles never escape. |
 | 🚫 **No `'static`** | No global state. Background tasks borrow the caller's data, and several isolates share one thread pool. |
 
@@ -57,7 +57,7 @@ and [crates/macros/USAGE.md](crates/macros/USAGE.md) (the macro reference).
 
 ```sh
 cargo add j8                                    # default feature `runtime`: executor + builtins + standard platform
-cargo add j8 --features jit                     # plus the x86-64 JIT (x86-64 Unix)
+cargo add j8 --features jit                     # plus the JIT (x86-64 Unix, AArch64 Linux)
 cargo add j8 --no-default-features --features compiler   # only JS ⇒ bytecode
 ```
 
@@ -159,7 +159,7 @@ isolate.enter(|scope| {
 `dune --jit a.js` turns the JIT on; `J8_TEST262_JIT=1 cargo test --release --test test262` runs the baseline with the JIT on (every function compiled on its first call).
 
 - `j8jit` implements the executor's `Tier`. A hot function (64 calls by default) or a hot loop is built into a speculative SSA graph from what the inline caches saw: numbers as int32, small callees inlined, objects kept virtual until they escape, context slots in values
-- The graph goes straight to x86-64 (linear-scan register allocation, then instruction selection) and runs on the interpreter's frame; three entries: a call from the interpreter, a loop entered on-stack (OSR), a call from compiled code without an interpreter frame
+- The graph goes straight to machine code, x86-64 or AArch64 (linear-scan register allocation, then instruction selection) and runs on the interpreter's frame; three entries: a call from the interpreter, a loop entered on-stack (OSR), a call from compiled code without an interpreter frame
 - A failed guard deoptimizes: `j8_deopt` rebuilds the interpreter frames (inlined ones too) and leaves a hint for the next compilation (doubles, the generic path, no inlining); after 24 deopts a function stays interpreted
 - `Compiler` / `Backend` (MLIR `llvm` dialect through [mlirpass](https://crates.io/crates/mlirpass), then j8jit's own x86-64 back end) are still exported
 

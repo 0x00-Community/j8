@@ -11,7 +11,7 @@
 [![License](https://img.shields.io/badge/License-MIT-brightgreen?style=for-the-badge)](#-许可证)
 
 [![ECMAScript](https://img.shields.io/badge/ECMAScript-%E6%A0%B8%E5%BF%83%E8%AF%AD%E8%A8%80-F7DF1E?style=flat-square&logo=javascript&logoColor=black)](#-现状)
-[![JIT](https://img.shields.io/badge/JIT-x86--64%20via%20MLIR-262D3A?style=flat-square&logo=llvm)](#-jit第一档)
+[![JIT](https://img.shields.io/badge/JIT-x86--64%20%C2%B7%20AArch64-262D3A?style=flat-square&logo=llvm)](#-jit第一档)
 [![GC](https://img.shields.io/badge/GC-paragc%20%C2%B7%20%E5%B9%B6%E8%A1%8C%20%C2%B7%20%E6%97%A0%E9%94%81-8A2BE2?style=flat-square)](#-堆与句柄)
 
 [🇺🇸 English](README.md) · **🇨🇳 简体中文**
@@ -23,7 +23,7 @@
 ## ⚡ j8 是什么
 
 j8 是**用 Rust 从头写的 JavaScript 引擎**, 照着 V8 的分层来: 所有 JS 先编成累加器式字节码 (同 V8 Ignition),
-由执行器解释, 热函数和热循环交给 JIT 出 x86-64 机器码. 堆是 [paragc](https://crates.io/crates/paragc), 外面包一层 `j8framework` 的 GC 层.
+由执行器解释, 热函数和热循环交给 JIT 出 x86-64 或 AArch64 机器码. 堆是 [paragc](https://crates.io/crates/paragc), 外面包一层 `j8framework` 的 GC 层.
 
 🎯 **主线:** test262 通过率. 核心 ECMAScript 按 [PLAN.md](PLAN.md) 逐阶段补齐, 每一步跑基线零回归.
 
@@ -37,7 +37,7 @@ j8 是**用 Rust 从头写的 JavaScript 引擎**, 照着 V8 的分层来: 所�
 | --- | --- |
 | 🦀 **全 Rust** | 解析用 oxc, 其余从字节码到 GC 都是自己写的. 没有 C++ 引擎在下面. |
 | 🧱 **字节码先行** | 不设 AST 解释层: 所有 JS (包括 `eval`、`Function`) 都先编成字节码, 而且就是 V8 Ignition 的字节码, 逐字节一致 (表格从 V8 头文件生成). |
-| 🧬 **推测式 JIT** | 依据内联缓存的反馈把热字节码建成推测性 SSA 图 (内联、逃逸分析、循环不变量外提、OSR、去优化), 直接出 x86-64. |
+| 🧬 **推测式 JIT** | 依据内联缓存的反馈把热字节码建成推测性 SSA 图 (内联、逃逸分析、循环不变量外提、OSR、去优化), 直接出 x86-64 或 AArch64. |
 | ♻️ **paragc 堆** | Immix 式块 / 行堆: 年轻回收 + 老对象引用计数、稀疏块疏散, 标记与清扫并行, 无锁; `'gc` 品牌生命周期, 编译期保证句柄不逃逸. |
 | 🚫 **没有 `'static`** | 不用全局状态; 后台任务借用调用方数据, 多个 Isolate 共用一个线程池. |
 
@@ -54,7 +54,7 @@ j8 是**用 Rust 从头写的 JavaScript 引擎**, 照着 V8 的分层来: 所�
 
 ```sh
 cargo add j8                                    # 缺省 feature `runtime`: 执行器 + 内建对象 + 标准平台
-cargo add j8 --features jit                     # 再加 x86-64 JIT (x86-64 Unix)
+cargo add j8 --features jit                     # 再加 JIT (x86-64 Unix、AArch64 Linux)
 cargo add j8 --no-default-features --features compiler   # 只要 JS ⇒ 字节码
 ```
 
@@ -150,7 +150,7 @@ isolate.enter(|scope| {
 `dune --jit a.js` 开 JIT；`J8_TEST262_JIT=1 cargo test --release --test test262` 开着 JIT（每个函数第一次调用就编）跑基线。
 
 - `j8jit` 实现执行器的 `Tier`。热函数（缺省 64 次调用）或热循环依据内联缓存看到的东西建成推测性 SSA 图：数先当 int32、小函数内联、对象逃逸前保持虚拟、上下文槽留在值里
-- 图直接出 x86-64（线性扫描寄存器分配，然后指令选择），在解释器的帧上跑；三种入口：解释器调用、循环中途切入（OSR）、已编译代码之间不建解释器帧的调用
+- 图直接出 x86-64 或 AArch64 机器码（线性扫描寄存器分配，然后指令选择），在解释器的帧上跑；三种入口：解释器调用、循环中途切入（OSR）、已编译代码之间不建解释器帧的调用
 - 守卫失败就去优化：`j8_deopt` 重建解释器帧（含内联掉的），给下次编译留提示（用 double、走通用路径、不内联）；一个函数去优化 24 次后一直解释
 - 仍导出 `Compiler` / `Backend`（MLIR `llvm` 方言经 [mlirpass](https://crates.io/crates/mlirpass)，再由 j8jit 自己的 x86-64 后端出机器码）
 

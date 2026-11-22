@@ -2,7 +2,7 @@
 
 [English](README.md) · **简体中文**
 
-[j8](https://github.com/0x00-Community/j8) 的 JIT（x86-64 Unix）。负责字节码 ⇒ 机器码与 JIT 调度本身：实现执行器的 `Tier`，
+[j8](https://github.com/0x00-Community/j8) 的 JIT（x86-64 Unix、AArch64 Linux）。负责字节码 ⇒ 机器码与 JIT 调度本身：实现执行器的 `Tier`，
 热函数与热循环降成 MLIR（`llvm` 方言，经 [mlirpass](https://crates.io/crates/mlirpass)），由 x86-64 后端（`x86_64.rs`）出机器码，
 装进可执行内存，代替解释执行。
 

@@ -2,7 +2,7 @@
 
 This book explains [j8](https://github.com/0x00-Community/j8) from end to end: a JavaScript engine written from scratch
 in Rust, layered like V8. JS is compiled to bytecode that matches V8's Ignition byte for byte, interpreted by the
-executor, and hot functions and loops go to a speculative JIT that emits x86-64 machine code. The heap is
+executor, and hot functions and loops go to a speculative JIT that emits x86-64 or AArch64 machine code. The heap is
 [paragc](https://crates.io/crates/paragc).
 
 ## Install dune

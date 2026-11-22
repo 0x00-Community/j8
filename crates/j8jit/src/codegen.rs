@@ -5,9 +5,9 @@ use alloc::vec::Vec;
 use j8executor::FrameSlots;
 use j8framework::{Layout, ValueBits};
 
-use crate::asm::{Alu, Asm, Cc, Label, R, RAX, RBP, RBX, RCX, RDI, RDX, RSI, RSP, R10, R11, R12, R13, R14, R15, R8, R9, X};
+use crate::asm::{Alu, Asm, Cc, Label, Shift, R, RAX, RBP, RBX, RCX, RDI, RDX, RSI, RSP, R10, R11, R12, R13, R14, R15, R8, R9, SAVED_END, X};
 use crate::build::{Kind, OBJECT_TAG};
-use crate::ir::{Cond, FloatOp, Graph, Helper, IntOp, Op, Rep, Slot, B, Fs, V};
+use crate::ir::{Cond, Graph, Helper, IntOp, Op, Rep, Slot, B, Fs, V};
 use crate::runtime::Ctx;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -75,8 +75,6 @@ const CALLEE_SAVED: [R; 4] = [RBX, R12, R13, R14];
 const XMMS: u8 = 14;
 const XS: X = 15;
 const XT: X = 14;
-
-const SAVED_END: i32 = -40;
 
 const ENTRY_SLOT: i32 = -48;
 
@@ -540,12 +538,7 @@ impl<'g> Gen<'g> {
     }
 
     fn prologue(&mut self) {
-        self.a.push(RBP);
-        self.a.mov_rr(RBP, RSP);
-        for r in [RBX, R12, R13, R14, R15] {
-            self.a.push(r);
-        }
-        self.a.alu_ri(Alu::Sub, true, RSP, self.frame);
+        self.a.enter(self.frame);
         self.a.mov_rr(R15, RDI);
         match self.kind {
             Kind::Native(_) => {
@@ -574,12 +567,7 @@ impl<'g> Gen<'g> {
     }
 
     fn epilogue(&mut self) {
-        self.a.lea(RSP, RBP, SAVED_END);
-        for r in [R15, R14, R13, R12, RBX] {
-            self.a.pop(r);
-        }
-        self.a.pop(RBP);
-        self.a.ret();
+        self.a.leave();
     }
 
     fn emit(&mut self, order: &[B]) {
@@ -700,13 +688,7 @@ impl<'g> Gen<'g> {
     }
 
     fn save_caller(&mut self) {
-        let regs = self.used_caller.clone();
-        for r in &regs {
-            self.a.push(*r);
-        }
-        if regs.len() % 2 == 1 {
-            self.a.alu_ri(Alu::Sub, true, RSP, 8);
-        }
+        self.a.save(&self.used_caller);
         for x in 0..self.used_xmm {
             let d = self.xmm_save(x);
             self.a.movsd_store(RBP, d, x);
@@ -718,13 +700,7 @@ impl<'g> Gen<'g> {
             let d = self.xmm_save(x);
             self.a.movsd_load(x, RBP, d);
         }
-        let regs = self.used_caller.clone();
-        if regs.len() % 2 == 1 {
-            self.a.alu_ri(Alu::Add, true, RSP, 8);
-        }
-        for r in regs.iter().rev() {
-            self.a.pop(*r);
-        }
+        self.a.restore(&self.used_caller);
     }
 
     fn fusable(&self, v: V, next: V) -> bool {
@@ -878,16 +854,10 @@ impl<'g> Gen<'g> {
             }
             Op::Int(op, x, y, fs) => self.int(v, op, x, y, fs),
             Op::Float(op, x, y) => {
-                let code = match op {
-                    FloatOp::Add => 0x58,
-                    FloatOp::Mul => 0x59,
-                    FloatOp::Sub => 0x5c,
-                    FloatOp::Div => 0x5e,
-                };
                 let xa = self.xmm(x, XS);
                 self.a.movsd_xx(XS, xa);
                 let xb = self.xmm(y, XT);
-                self.a.sse(code, XS, xb);
+                self.a.float(op, XS, xb);
                 self.xput(v, XS);
             }
             Op::IntToFloat(x) => {
@@ -963,7 +933,7 @@ impl<'g> Gen<'g> {
                 let r = self.gpr(x, RAX);
                 self.a.mov_rr(RAX, r);
                 self.a.mov_rr(RCX, r);
-                self.a.shift_ri(5, true, RCX, 48);
+                self.a.shift_ri(Shift::Shr, true, RCX, 48);
                 self.a.alu_ri(Alu::Cmp, false, RCX, i32::try_from(OBJECT_TAG >> 48).unwrap_or(0));
                 self.exit_if(Cc::Ne, fs, Reason::Shape);
                 self.untag(RAX);
@@ -1197,7 +1167,7 @@ impl<'g> Gen<'g> {
                     let slow = self.a.label();
                     let done = self.a.label();
                     self.a.mov_rr(RCX, RDX);
-                    self.a.shift_ri(5, true, RCX, 32);
+                    self.a.shift_ri(Shift::Shr, true, RCX, 32);
                     self.a.alu_ri(Alu::Cmp, false, RCX, 1);
                     self.a.jcc(Cc::Ne, slow);
                     self.a.mov_rr32(RCX, RDX);
@@ -1268,8 +1238,8 @@ impl<'g> Gen<'g> {
     }
 
     fn untag(&mut self, r: R) {
-        self.a.shift_ri(4, true, r, 16);
-        self.a.shift_ri(5, true, r, 16);
+        self.a.shift_ri(Shift::Shl, true, r, 16);
+        self.a.shift_ri(Shift::Shr, true, r, 16);
     }
 
     fn helper_id(&mut self, h: Helper, n: usize) -> u32 {
@@ -1374,12 +1344,12 @@ impl<'g> Gen<'g> {
                 self.a.movsxd(RAX, rx);
                 self.a.mov_rr(R11, RAX);
                 self.a.mov_rr(RDX, RAX);
-                self.a.shift_ri(7, true, RDX, 63);
+                self.a.shift_ri(Shift::Sar, true, RDX, 63);
                 self.a.alu_rr(Alu::Xor, true, RAX, RDX);
                 self.a.alu_rr(Alu::Sub, true, RAX, RDX);
                 self.a.mov_ri(RCX, m);
                 self.a.imul_rr(true, RCX, RAX);
-                self.a.shift_ri(5, true, RCX, u8::try_from(n).unwrap_or(63));
+                self.a.shift_ri(Shift::Shr, true, RCX, u8::try_from(n).unwrap_or(63));
                 self.a.imul_rri(true, RCX, RCX, d);
                 self.a.alu_rr(Alu::Sub, true, RAX, RCX);
                 self.a.alu_rr(Alu::Xor, true, RAX, RDX);
@@ -1414,9 +1384,9 @@ impl<'g> Gen<'g> {
             }
             IntOp::Shl | IntOp::Sar | IntOp::Shr => {
                 let kind = match op {
-                    IntOp::Shl => 4,
-                    IntOp::Sar => 7,
-                    _ => 5,
+                    IntOp::Shl => Shift::Shl,
+                    IntOp::Sar => Shift::Sar,
+                    _ => Shift::Shr,
                 };
                 let rx = self.gpr(x, RAX);
                 self.a.mov_rr32(RAX, rx);

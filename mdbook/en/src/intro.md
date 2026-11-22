@@ -9,7 +9,7 @@ It follows V8's layering:
 ```text
 JS source ─ oxc parse ─ j8compiler ─▶ V8 Ignition bytecode ─ j8executor interprets ─┐
                                                                                     ├─▶ result
-                hot functions / hot loops ─ j8jit speculative compile ─▶ x86-64 ────┘
+             hot functions / hot loops ─ j8jit speculative compile ─▶ machine code ─┘
 ```
 
 ## Design choices

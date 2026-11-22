@@ -48,7 +48,7 @@ platform = ["dep:j8platform"]
 taskqueue = ["dep:j8taskqueue"]
 # j8::lockfree: lock-free building blocks
 lockfree = []
-# j8::jit: the speculative JIT, bytecode ⇒ x86-64 machine code (x86-64 Unix)
+# j8::jit: the speculative JIT, bytecode ⇒ machine code (x86-64 Unix, AArch64 Linux)
 jit = ["executor", "dep:j8jit"]
 # j8::Json<T>: Rust values crossing as JSON-shaped data through serde
 json = ["j8binding/json"]
