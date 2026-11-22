@@ -190,7 +190,7 @@ impl Fs {
     }
 
     fn realpath_sync(path: &str) -> Io<String> {
-        Io::new(std::fs::canonicalize(path).map(|p| p.display().to_string()), "realpath", path)
+        Io::new(dunce::canonicalize(path).map(|p| p.display().to_string()), "realpath", path)
     }
 
     fn readlink_sync(path: &str) -> Io<String> {

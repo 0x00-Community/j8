@@ -42,7 +42,7 @@ impl Platform for DefaultPlatform {
 
     fn load_module(&self, referrer: &str, specifier: &str) -> Option<(String, String)> {
         let base = std::path::Path::new(referrer).parent().unwrap_or_else(|| std::path::Path::new("."));
-        let path = std::fs::canonicalize(base.join(specifier)).ok()?;
+        let path = dunce::canonicalize(base.join(specifier)).ok()?;
         let text = std::fs::read_to_string(&path).ok()?;
         Some((path.display().to_string(), text))
     }

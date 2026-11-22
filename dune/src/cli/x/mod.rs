@@ -3,6 +3,8 @@ mod registry;
 mod spec;
 mod tree;
 
+pub use manifest::Os;
+
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;

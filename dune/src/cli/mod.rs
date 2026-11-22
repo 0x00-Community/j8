@@ -15,6 +15,8 @@ use run::Run;
 use upgrade::Upgrade;
 use x::{Dunx, X};
 
+pub use x::Os;
+
 #[derive(Parser)]
 #[command(about = "The j8 JavaScript runtime")]
 #[command(name = "dune", version, override_usage = Dune::USAGE)]

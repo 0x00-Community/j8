@@ -100,7 +100,7 @@ impl Os {
     }
 
     fn platform() -> &'static str {
-        std::env::consts::OS
+        crate::cli::Os::HOST.into()
     }
 
     fn arch() -> &'static str {

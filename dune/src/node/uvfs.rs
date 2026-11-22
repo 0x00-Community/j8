@@ -663,7 +663,7 @@ impl Call {
             Self::Symlink { target, path } => unit(Fd::symlink(target, path)),
             Self::Readlink { path } => std::fs::read_link(path).map(|p| Reply::Text(p.to_string_lossy().into_owned())),
             Self::Unlink { path } => unit(std::fs::remove_file(path)),
-            Self::Realpath { path } => std::fs::canonicalize(path).map(|p| Reply::Text(p.to_string_lossy().into_owned())),
+            Self::Realpath { path } => dunce::canonicalize(path).map(|p| Reply::Text(p.to_string_lossy().into_owned())),
             Self::CopyFile { from, to, mode } => {
                 const EXCL: u32 = 1;
                 if mode & EXCL != 0 && std::fs::symlink_metadata(to).is_ok() {

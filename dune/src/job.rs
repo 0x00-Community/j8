@@ -22,7 +22,7 @@ impl Job {
         if !file.is_file() {
             return Err(format!("{}: no such file", file.display()));
         }
-        let file = std::fs::canonicalize(file).map_err(|e| format!("{}: {e}", file.display()))?;
+        let file = dunce::canonicalize(file).map_err(|e| format!("{}: {e}", file.display()))?;
         Ok(Job::Main { file: file.display().to_string(), args })
     }
 }

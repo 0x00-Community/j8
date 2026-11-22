@@ -51,6 +51,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "cc"
+version = "1.11.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "02f0e023adb368345ce0ca6cdfc0f24a06554468d0e8503e14a0841de79bfa69"
+dependencies = [
+ "find-msvc-tools",
+ "shlex",
+]
+
+[[package]]
 name = "cfg-if"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -122,6 +132,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "dunce"
+version = "1.0.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "92773504d58c093f6de2459af4af33faa518c13451eb8f2b5698ed3d36e7c813"
+
+[[package]]
 name = "either"
 version = "1.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -138,6 +154,12 @@ name = "fastrand"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
+
+[[package]]
+name = "find-msvc-tools"
+version = "0.1.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1c66915cc5391097de7a2b0b972e8505aa33c0df401fd3a6811dbdb32881ba48"
 
 [[package]]
 name = "foldhash"
@@ -374,6 +396,7 @@ dependencies = [
  "j8framework",
  "libc",
  "mlirpass",
+ "moremath",
  "region",
 ]
 
@@ -408,6 +431,7 @@ dependencies = [
 name = "j8platform"
 version = "0.4.2"
 dependencies = [
+ "dunce",
  "j8framework",
  "moremath",
 ]
@@ -454,22 +478,23 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "mlirformat"
-version = "0.8.2"
+version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "edae6787054f49dee7e997e4a3ca5a4569e965ed7663007f74ee63b6755c303a"
+checksum = "8e00b3ef18f125b5a232777ac903c3ccc7e6e278423e615eb768f9a69c98dcf4"
 dependencies = [
  "mlirformat-macros",
  "moremath",
  "serde",
  "smallvec",
  "thiserror",
+ "tikv-jemallocator",
 ]
 
 [[package]]
 name = "mlirformat-macros"
-version = "0.8.2"
+version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3ce79768ca103ccadcaa966c7f07f4b6ca49f7d098b3ebee7bd62d4b8aa87685"
+checksum = "82f5f571fe71c9447f5ae610cecfa588cff2282f982f43ce249218babf06c911"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -478,9 +503,9 @@ dependencies = [
 
 [[package]]
 name = "mlirpass"
-version = "0.10.4"
+version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b4deaf752b92a68669599eb7dc476ba9c5a8097cf621352a60802e3d7978f00b"
+checksum = "0536ea2aa59919a3e41f11f5eef22cd88c3ae6b144c92eb01720d5db4ed2b395"
 dependencies = [
  "libm",
  "mlirformat",
@@ -1034,6 +1059,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "shlex"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
+
+[[package]]
 name = "siphasher"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1128,6 +1159,26 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.10",
+]
+
+[[package]]
+name = "tikv-jemalloc-sys"
+version = "0.7.1+5.3.1-0-g81034ce1f1373e37dc865038e1bc8eeecf559ce8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1a2825c78386b4ae0314074867860ba9577875de945f05992c38815cbec327f0"
+dependencies = [
+ "cc",
+ "libc",
+]
+
+[[package]]
+name = "tikv-jemallocator"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "249f09e49ab1609436f34c776e84231bead18d6a955f119f939bdc1d847561bd"
+dependencies = [
+ "libc",
+ "tikv-jemalloc-sys",
 ]
 
 [[package]]

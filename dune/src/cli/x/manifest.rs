@@ -167,7 +167,7 @@ impl<T: PartialEq> Allows<T> {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Os {
+pub enum Os {
     Aix,
     Android,
     Darwin,
@@ -182,7 +182,7 @@ enum Os {
 impl Os {
     const TABLE: [(Self, &str); 8] = [(Self::Aix, "aix"), (Self::Android, "android"), (Self::Darwin, "darwin"), (Self::Freebsd, "freebsd"), (Self::Linux, "linux"), (Self::Openbsd, "openbsd"), (Self::Sunos, "sunos"), (Self::Win32, "win32")];
 
-    const HOST: Self = if cfg!(target_os = "android") {
+    pub const HOST: Self = if cfg!(target_os = "android") {
         Self::Android
     } else if cfg!(target_os = "linux") {
         Self::Linux
@@ -197,6 +197,12 @@ impl Os {
     } else {
         Self::Other
     };
+}
+
+impl From<Os> for &'static str {
+    fn from(os: Os) -> Self {
+        Os::TABLE.into_iter().find(|(o, _)| *o == os).map_or(std::env::consts::OS, |(_, n)| n)
+    }
 }
 
 impl From<&str> for Os {

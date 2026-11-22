@@ -339,6 +339,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "dunce"
+version = "1.0.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "92773504d58c093f6de2459af4af33faa518c13451eb8f2b5698ed3d36e7c813"
+
+[[package]]
 name = "either"
 version = "1.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -677,9 +683,9 @@ checksum = "3bd1574e617a9a6c1f8f8181bd7e841e1f20e4277607ef28945765188d6284d4"
 
 [[package]]
 name = "j8"
-version = "0.4.1"
+version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b4482040878915d6afdf2309484d2b144ba8d2953f4b34f25a4d2efbd98d45e8"
+checksum = "6d09d3a0a03ad09210049680d4bbbc6012b14126c5ac62649c17f10cdb966fe7"
 dependencies = [
  "j8binding",
  "j8builtins",
@@ -695,9 +701,9 @@ dependencies = [
 
 [[package]]
 name = "j8binding"
-version = "0.4.1"
+version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9d6ec4696a93abbe1d756e87be22ac38a92ffd7c6b433d5e16786c3c0a2b8bc1"
+checksum = "161e669fa0607ff1b4b9f16a62d6a9eab6ab1ac51f195384efc0820f55fc9d67"
 dependencies = [
  "j8framework",
  "j8lockfree",
@@ -707,9 +713,9 @@ dependencies = [
 
 [[package]]
 name = "j8builtins"
-version = "0.4.1"
+version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ed1fa897c44e0a99e4641ad4e88786da4c20d3b248837e82b2bbf6add0ed9c1e"
+checksum = "3f95be871682db6c9503bcc51bf709cfbd8449aa3b6d069e64c9c7de4d794e7b"
 dependencies = [
  "j8framework",
  "libm",
@@ -723,18 +729,18 @@ dependencies = [
 
 [[package]]
 name = "j8bytecode"
-version = "0.4.1"
+version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6c71ed4b8e7dfa7c5187fe4c9e37a26b901620b8a09888101d7ad5d1f69c8a1b"
+checksum = "d5b431a07c5399b8fc5520ab4540b82d620374dc00899a31d86735f6a8890eb8"
 dependencies = [
  "j8macros",
 ]
 
 [[package]]
 name = "j8compiler"
-version = "0.4.1"
+version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "68232319ba8e309c99d73c5368be582901926cfeb81715d8584facdacdc5dccb"
+checksum = "9f445b1c84144b6060e851134087b65374e59e33af5ae95b297b1835e9a31b6a"
 dependencies = [
  "j8bytecode",
  "j8framework",
@@ -749,10 +755,11 @@ dependencies = [
 
 [[package]]
 name = "j8dune"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "base64 0.22.1",
  "clap",
+ "dunce",
  "faccess",
  "filetime",
  "flate2",
@@ -772,9 +779,9 @@ dependencies = [
 
 [[package]]
 name = "j8executor"
-version = "0.4.1"
+version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7147d7f863dc4efd7fcad79c130430e5fc8c324fbdc032c92a4ad86d349a2eca"
+checksum = "fa69af69d83ddf1d705e862048a5e11e92e3d56a751e7c22f6f119a9cc6e80c0"
 dependencies = [
  "j8bytecode",
  "j8compiler",
@@ -786,9 +793,9 @@ dependencies = [
 
 [[package]]
 name = "j8framework"
-version = "0.4.1"
+version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "abf90a3c5f184ea148833c41f749a698d8eb5caf0ff2dd2b79e1e5f118e135d7"
+checksum = "2db0fae6443da25652ba9c1f62de3daa29234f426e9f2cb35f109f815007507a"
 dependencies = [
  "hashbrown",
  "j8lockfree",
@@ -804,9 +811,9 @@ dependencies = [
 
 [[package]]
 name = "j8jit"
-version = "0.4.1"
+version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ee435ce0fe2dc0afd64a15a14e930971c65c5332dd64ceaeb809e70ef13da63e"
+checksum = "811de5fa4f192d89953a0e904788b295824df5615c5044032050d54b019f4743"
 dependencies = [
  "j8bytecode",
  "j8executor",
@@ -817,15 +824,15 @@ dependencies = [
 
 [[package]]
 name = "j8lockfree"
-version = "0.4.1"
+version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "33f850d8dc78f979216b8ba929b27eac4f95ad28e198e496493d4877526ebd73"
+checksum = "ebe0cd520171eb99dbd6ad763e134d0c79fb1dd8fba1fe8cdf60f21b211e14b6"
 
 [[package]]
 name = "j8macros"
-version = "0.4.1"
+version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ff5b60e79b44da1586266bb7090c07c57e69ccb050cacd4edf101d3b7afec5ed"
+checksum = "b4f5e7284912d64ee96715c1297f0eade027ceee23514d22b5af2789ff6b3b02"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -836,9 +843,9 @@ dependencies = [
 
 [[package]]
 name = "j8platform"
-version = "0.4.1"
+version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fc3eab5024fcfe3039236289fa41e1b8bbfc1daba6615147090d37cb7fa1fee8"
+checksum = "b0318fe32537950fdc6416564c7565da4ddcb61a04c9f3e19ad5eaf489763117"
 dependencies = [
  "j8framework",
  "moremath",
@@ -846,9 +853,9 @@ dependencies = [
 
 [[package]]
 name = "j8taskqueue"
-version = "0.4.1"
+version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0b717b55438089b0676fe8e19e8f3f49574408af7e15b614fd76f1335ba5fde7"
+checksum = "eb2f0f278508838ec76893d44e322fb37e6b571358c7561306257de85819bca7"
 dependencies = [
  "j8lockfree",
 ]
