@@ -2195,8 +2195,12 @@ impl<'e> Builder<'e> {
                 st.heap.known.push(Fact::Env(f, c));
                 set_acc!(f);
             }
-            Bc::LdaGlobal | Bc::LdaGlobalInsideTypeof => {
-                let v = self.global(act, st, o[0], o[1], pc)?;
+            Bc::LdaGlobal => {
+                let v = self.global(act, st, o[0], o[1], pc, false)?;
+                set_acc!(v);
+            }
+            Bc::LdaGlobalInsideTypeof => {
+                let v = self.global(act, st, o[0], o[1], pc, true)?;
                 set_acc!(v);
             }
             Bc::GetNamedProperty => {
@@ -2292,7 +2296,7 @@ impl<'e> Builder<'e> {
         }
     }
 
-    fn global(&mut self, act: &Act<'e>, st: &mut St, name: OperandValue, slot: OperandValue, pc: usize) -> R<V> {
+    fn global(&mut self, act: &Act<'e>, st: &mut St, name: OperandValue, slot: OperandValue, pc: usize, typeof_: bool) -> R<V> {
         if self.hint(act.id, pc) & HINT_GENERIC == 0 {
             let nk = u32::try_from(name).unwrap_or(0);
             if let Some(v) = st.heap.known.iter().find_map(|f| match f {
@@ -2301,15 +2305,18 @@ impl<'e> Builder<'e> {
             }) {
                 return Ok(v);
             }
-            let k = u32::try_from(self.g.globals.len()).unwrap_or(0);
-            self.g.globals.push((act.id, nk, u32::try_from(slot).unwrap_or(0)));
-            let fs = self.state(act, st, pc);
-            let v = self.emit(Op::Global(k, None, fs), Rep::Word);
-            st.heap.known.push(Fact::Global(act.id.0, nk, v));
-            return Ok(v);
+            if !typeof_ {
+                let k = u32::try_from(self.g.globals.len()).unwrap_or(0);
+                self.g.globals.push((act.id, nk, u32::try_from(slot).unwrap_or(0)));
+                let fs = self.state(act, st, pc);
+                let v = self.emit(Op::Global(k, None, fs), Rep::Word);
+                st.heap.known.push(Fact::Global(act.id.0, nk, v));
+                return Ok(v);
+            }
         }
         let fb = act.f.global(slot);
-        if let Some(fb) = fb
+        if !typeof_
+            && let Some(fb) = fb
             && self.hint(act.id, pc) & HINT_GENERIC == 0
         {
             let path = if fb.slot < Layout::INLINE_PROPS { None } else { (self.paths)(fb.global.is_some(), fb.slot) };
@@ -2353,7 +2360,7 @@ impl<'e> Builder<'e> {
         }
         self.flush(st);
         let fs = self.state(act, st, pc);
-        let v = self.emit(Op::Call(Helper::LoadGlobal(act.id, u32::try_from(name).unwrap_or(0), u32::try_from(slot).unwrap_or(0)), vec![], Some(fs)), Rep::Word);
+        let v = self.emit(Op::Call(Helper::LoadGlobal(act.id, u32::try_from(name).unwrap_or(0), u32::try_from(slot).unwrap_or(0), typeof_), vec![], Some(fs)), Rep::Word);
         Self::forget(st);
         Ok(v)
     }

@@ -70,7 +70,7 @@ pub enum Helper {
     ModF,
     ToBoolean,
     StoreCell,
-    LoadGlobal(FuncId, u32, u32),
+    LoadGlobal(FuncId, u32, u32, bool),
     GlobalProbe(u32),
     Binary(j8framework::BinaryOp),
     Compare(j8framework::CompareOp),
