@@ -9,7 +9,7 @@ dune (and its package runner dunx) ships as one prebuilt executable per platform
 curl -fsSL https://j8.app238.com/install | bash
 ```
 
-The script picks the build for your machine (x64 or arm64; glibc or musl on Linux; the native build under Rosetta),
+The script picks the build for your machine (x64 or arm64; the native build under Rosetta),
 checks it against the release's `SHA256SUMS`, puts `dune` and the `dunx` link in `~/.dune/bin` and adds that directory
 to `PATH` in your shell's startup file (bash, zsh or fish).
 
@@ -67,8 +67,8 @@ dune upgrade --tag v0.4.0
 
 | Platform | Release archive | JIT |
 |---|---|---|
-| Linux x64 (glibc 2.17+ / musl) | `dune-linux-x64.tar.gz` / `dune-linux-x64-musl.tar.gz` | yes |
-| Linux arm64 (glibc 2.17+ / musl) | `dune-linux-arm64.tar.gz` / `dune-linux-arm64-musl.tar.gz` | no |
+| Linux x64 (glibc 2.17+) | `dune-linux-x64.tar.gz` | yes |
+| Linux arm64 (glibc 2.17+) | `dune-linux-arm64.tar.gz` | no |
 | macOS x64 / arm64 | `dune-darwin-x64.tar.gz` / `dune-darwin-arm64.tar.gz` | x64 only |
 | Windows x64 / arm64 | `dune-win32-x64.tar.gz` / `dune-win32-arm64.tar.gz` | no |
 

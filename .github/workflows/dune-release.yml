@@ -71,9 +71,7 @@ jobs:
       matrix:
         include:
           - { name: linux-x64, target: x86_64-unknown-linux-gnu, zig: x86_64-unknown-linux-gnu.2.17, os: ubuntu-24.04, run: true }
-          - { name: linux-x64-musl, target: x86_64-unknown-linux-musl, zig: x86_64-unknown-linux-musl, os: ubuntu-24.04, run: true }
           - { name: linux-arm64, target: aarch64-unknown-linux-gnu, zig: aarch64-unknown-linux-gnu.2.17, os: ubuntu-24.04-arm, run: true }
-          - { name: linux-arm64-musl, target: aarch64-unknown-linux-musl, zig: aarch64-unknown-linux-musl, os: ubuntu-24.04-arm, run: true }
           - { name: darwin-x64, target: x86_64-apple-darwin, os: macos-15, run: true }
           - { name: darwin-arm64, target: aarch64-apple-darwin, os: macos-15, run: true }
           - { name: win32-x64, target: x86_64-pc-windows-msvc, os: windows-2025, exe: .exe, run: true }

@@ -15,7 +15,7 @@ dune upgrade                      # 用 GitHub 上的最新 Release 替换自己
 ```
 
 全部方式见[安装 dune](install.md)。npm 渠道照 Bun 的做法（`dune/npm/`）：主包 `@jabberwocky238/dune` 只带占位脚本，用 `optionalDependencies` 依赖每个平台一个包
-（`@jabberwocky238/dune-linux-x64`、`@jabberwocky238/dune-linux-x64-musl`、`@jabberwocky238/dune-darwin-arm64`、`@jabberwocky238/dune-win32-x64` ……）；npm 只装符合本机的那个，
+（`@jabberwocky238/dune-linux-x64`、`@jabberwocky238/dune-darwin-arm64`、`@jabberwocky238/dune-win32-x64` ……）；npm 只装符合本机的那个，
 postinstall 脚本把其中的二进制硬链接到占位脚本的位置、再把 `dunx` 链过去，所以 `dune` 启动时不经过 Node。
 `--ignore-scripts` 时占位脚本经 Node 启动二进制。`npm/pack.js` 用编好的二进制排出一次发版的全部包。
 
