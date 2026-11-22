@@ -4,6 +4,7 @@ use alloc::vec::Vec;
 use core::cmp::Ordering;
 use core::fmt;
 use core::hash::{Hash, Hasher};
+use core::sync::atomic::{AtomicPtr, Ordering as AtomicOrdering};
 
 use j8lockfree::OnceBox;
 
@@ -174,6 +175,51 @@ impl From<&str> for SmallStr {
     }
 }
 
+pub struct Pieces {
+    to: *mut u8,
+    len: usize,
+    at: usize,
+}
+
+impl Pieces {
+    pub fn push(&mut self, piece: &str) {
+        assert!(piece.len() <= self.len - self.at, "a piece runs past the announced length");
+        unsafe { core::ptr::copy_nonoverlapping(piece.as_ptr(), self.to.add(self.at), piece.len()) };
+        self.at += piece.len();
+    }
+
+    pub fn push_swapped(&mut self, piece: &str, from: u8, to: u8) {
+        assert!(from.is_ascii() && to.is_ascii(), "only ASCII bytes are swapped, which keeps UTF-8 well formed");
+        assert!(piece.len() <= self.len - self.at, "a piece runs past the announced length");
+        let out = unsafe { core::slice::from_raw_parts_mut(self.to.add(self.at).cast::<core::mem::MaybeUninit<u8>>(), piece.len()) };
+        for (o, &b) in out.iter_mut().zip(piece.as_bytes()) {
+            o.write(if b == from { to } else { b });
+        }
+        self.at += piece.len();
+    }
+}
+
+impl SmallStr {
+    pub fn build(len: usize, fill: impl FnOnce(&mut Pieces)) -> Self {
+        if let Ok(n) = u8::try_from(len)
+            && len <= INLINE
+        {
+            let mut bytes = [0; INLINE];
+            let mut pieces = Pieces { to: bytes.as_mut_ptr(), len, at: 0 };
+            fill(&mut pieces);
+            assert!(pieces.at == len, "the pieces add up to the announced length");
+            return Self(Repr::Inline { len: n, bytes });
+        }
+        let mut buf = Arc::<[u8]>::new_uninit_slice(len);
+        let to = Arc::get_mut(&mut buf).expect("a fresh buffer").as_mut_ptr().cast::<u8>();
+        let mut pieces = Pieces { to, len, at: 0 };
+        fill(&mut pieces);
+        assert!(pieces.at == len, "the pieces add up to the announced length");
+        let raw = Arc::into_raw(unsafe { buf.assume_init() });
+        Self(Repr::Heap(unsafe { Arc::from_raw(raw as *const str) }))
+    }
+}
+
 impl fmt::Debug for SmallStr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Debug::fmt(self.as_str(), f)
@@ -211,48 +257,92 @@ impl Hash for SmallStr {
 #[collect(require_static)]
 pub struct JsStr {
     text: SmallStr,
-    utf16: OnceBox<Utf16>,
+    utf16: AtomicPtr<Wide>,
 }
 
-enum Utf16 {
-    Ascii,
-    Wide(alloc::boxed::Box<[u16]>),
+struct Wide(alloc::boxed::Box<[u16]>);
+
+const _: () = assert!(core::mem::size_of::<JsStr>() == 32, "a js string stays two words plus the utf16 state");
+
+impl Drop for JsStr {
+    fn drop(&mut self) {
+        let p = *self.utf16.get_mut();
+        if !p.is_null() && !core::ptr::eq(p, Self::ASCII) {
+            drop(unsafe { alloc::boxed::Box::from_raw(p) });
+        }
+    }
 }
 
 impl JsStr {
+    const ASCII: *mut Wide = core::ptr::without_provenance_mut(1);
+
     pub fn text(&self) -> &SmallStr {
         &self.text
     }
 
-    fn utf16(&self) -> &Utf16 {
-        self.utf16.get_or_init(|| if self.text.is_ascii() { Utf16::Ascii } else { Utf16::Wide(self.text.encode_utf16().collect()) })
+    #[inline]
+    pub fn unit_ascii(&self) -> bool {
+        let p = self.utf16.load(AtomicOrdering::Acquire);
+        if core::ptr::eq(p, Self::ASCII) {
+            return true;
+        }
+        if !p.is_null() {
+            return false;
+        }
+        if !self.text.is_ascii() {
+            return false;
+        }
+        match self.utf16.compare_exchange(core::ptr::null_mut(), Self::ASCII, AtomicOrdering::AcqRel, AtomicOrdering::Acquire) {
+            Ok(_) => true,
+            Err(won) => core::ptr::eq(won, Self::ASCII),
+        }
+    }
+
+    fn ensure(&self) -> *mut Wide {
+        let p = self.utf16.load(AtomicOrdering::Acquire);
+        if !p.is_null() {
+            return p;
+        }
+        if self.unit_ascii() {
+            return Self::ASCII;
+        }
+        let wide = alloc::boxed::Box::into_raw(alloc::boxed::Box::new(Wide(self.text.encode_utf16().collect())));
+        match self.utf16.compare_exchange(core::ptr::null_mut(), wide, AtomicOrdering::AcqRel, AtomicOrdering::Acquire) {
+            Ok(_) => wide,
+            Err(won) => {
+                drop(unsafe { alloc::boxed::Box::from_raw(wide) });
+                won
+            }
+        }
+    }
+
+    unsafe fn wide_units<'a>(p: *const Wide) -> &'a [u16] {
+        unsafe { &(*p).0 }
     }
 
     pub fn utf16_len(&self) -> usize {
-        match self.utf16() {
-            Utf16::Ascii => self.text.byte_len(),
-            Utf16::Wide(w) => w.len(),
-        }
+        let p = self.ensure();
+        if core::ptr::eq(p, Self::ASCII) { self.text.byte_len() } else { unsafe { Self::wide_units(p).len() } }
     }
 
     pub fn code_unit(&self, i: usize) -> Option<u16> {
-        match self.utf16() {
-            Utf16::Ascii => self.text.as_bytes().get(i).map(|&b| u16::from(b)),
-            Utf16::Wide(w) => w.get(i).copied(),
-        }
+        let p = self.ensure();
+        if core::ptr::eq(p, Self::ASCII) { self.text.as_bytes().get(i).copied().map(u16::from) } else { unsafe { Self::wide_units(p).get(i).copied() } }
     }
 
     pub fn wide(&self) -> Option<&[u16]> {
-        match self.utf16() {
-            Utf16::Ascii => None,
-            Utf16::Wide(w) => Some(w),
-        }
+        let p = self.ensure();
+        if core::ptr::eq(p, Self::ASCII) { None } else { Some(unsafe { Self::wide_units(p) }) }
+    }
+
+    pub fn from_ascii(text: SmallStr) -> Self {
+        Self { text, utf16: AtomicPtr::new(Self::ASCII) }
     }
 }
 
 impl From<SmallStr> for JsStr {
     fn from(text: SmallStr) -> Self {
-        Self { text, utf16: OnceBox::default() }
+        Self { text, utf16: AtomicPtr::new(core::ptr::null_mut()) }
     }
 }
 
@@ -352,9 +442,9 @@ impl Units<'_> {
 
 impl JsStr {
     pub fn units(&self) -> Units<'_> {
-        match self.utf16() {
-            Utf16::Ascii => Units::Ascii(self.text.as_bytes()),
-            Utf16::Wide(w) => Units::Wide(w),
+        match self.wide() {
+            Some(w) => Units::Wide(w),
+            None => Units::Ascii(self.text.as_bytes()),
         }
     }
 }

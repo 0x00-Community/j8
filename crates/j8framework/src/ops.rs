@@ -278,6 +278,11 @@ impl<'gc> Agent<'gc, '_> {
         self.mc.alloc(crate::JsStr::from(s))
     }
 
+    pub fn string_from(&self, text: crate::SmallStr, ascii: bool) -> JsString<'gc> {
+        let s = if ascii { crate::JsStr::from_ascii(text) } else { crate::JsStr::from(text) };
+        self.mc.alloc(s)
+    }
+
     pub fn piece(&self, of: JsString<'gc>, piece: &str) -> JsString<'gc> {
         if core::ptr::eq(piece, of.text().as_str()) {
             return of;
@@ -298,6 +303,14 @@ impl<'gc> Agent<'gc, '_> {
 
     pub fn array(&self, items: Vec<Value<'gc>>) -> JsObject<'gc> {
         ObjectData { kind: ObjectKind::Array, elements: items, proto: Some(self.realm.array_proto), ..ObjectData::default() }.alloc(self.mc)
+    }
+
+    pub fn array_from_slice(&self, items: &[Value<'gc>]) -> JsObject<'gc> {
+        let o = ObjectData { kind: ObjectKind::Array, proto: Some(self.realm.array_proto), ..ObjectData::default() }.alloc(self.mc);
+        if !items.is_empty() {
+            o.elements().replace(self.mc, items);
+        }
+        o
     }
 
     pub fn error(&self, kind: ErrorKind, message: &str) -> JsObject<'gc> {

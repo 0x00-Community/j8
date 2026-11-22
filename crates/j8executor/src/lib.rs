@@ -1639,18 +1639,18 @@ impl Executor {
             B::CreateRegExpLiteral => {
                 let pattern = Self::name_at(loaded, o[0]);
                 let bits = u16::try_from(o[2]).unwrap_or(0);
-                let mut flags = [0u8; REGEXP_FLAGS.len()];
-                let mut n = 0;
-                for (c, b) in REGEXP_FLAGS {
-                    if bits & b != 0 && let Some(f) = flags.get_mut(n) {
-                        *f = c;
-                        n += 1;
-                    }
-                }
-                let flags = core::str::from_utf8(flags.get(..n).unwrap_or_default()).unwrap_or_default();
                 *acc = match a.realm.regexp_literal.get().0 {
-                    Some(literal) => literal(a, pattern, flags)?,
+                    Some(literal) => literal(a, pattern, bits)?,
                     None => {
+                        let mut flags = [0u8; REGEXP_FLAGS.len()];
+                        let mut n = 0;
+                        for (c, b) in REGEXP_FLAGS {
+                            if bits & b != 0 && let Some(f) = flags.get_mut(n) {
+                                *f = c;
+                                n += 1;
+                            }
+                        }
+                        let flags = core::str::from_utf8(flags.get(..n).unwrap_or_default()).unwrap_or_default();
                         let (p, fl) = (a.string(pattern), a.string(flags));
                         a.call(a.realm.regexp_ctor.into(), Value::Undefined, &[p.into(), fl.into()])?
                     }
