@@ -89,7 +89,7 @@ fn dominates(idom: &[Option<B>], a: B, mut b: B) -> bool {
 
 fn clobbers(op: &Op) -> bool {
     match op {
-        Op::Call(h, ..) => !matches!(h, Helper::ModF | Helper::ToBoolean | Helper::Alloc(_) | Helper::CreateClosure(..) | Helper::CreateContext(..) | Helper::ObjectLiteral(..)),
+        Op::Call(h, ..) => !matches!(h, Helper::ModF | Helper::ToBoolean | Helper::Alloc(_) | Helper::CreateClosure(..) | Helper::CreateContext(..) | Helper::ObjectLiteral(..) | Helper::Constant(..)),
         Op::CallJit(..) | Op::StoreCell(..) => true,
         _ => false,
     }

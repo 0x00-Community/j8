@@ -17,6 +17,10 @@ pub trait Tier {
     }
 
     fn call<'gc>(&self, exe: &Executor, a: &mut Agent<'gc, '_>, f: FuncId, callee: Value<'gc>, this: Value<'gc>, args: &[Value<'gc>]) -> Option<Result<Value<'gc>, Error>>;
+
+    fn callback<'gc>(&self, _exe: &Executor, _a: &mut Agent<'gc, '_>, _f: Function<'_>, _callee: Value<'gc>, _this: Value<'gc>) -> Option<j8framework::Callback<'gc>> {
+        None
+    }
 }
 
 #[derive(Debug)]

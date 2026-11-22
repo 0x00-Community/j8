@@ -48,6 +48,16 @@ impl Collections {
         }
     }
 
+    fn read<'gc, R>(a: &Agent<'gc, '_>, this: Value<'gc>, shape: Shape, f: impl FnOnce(&Collection<'gc>) -> R) -> Result<R, Error> {
+        if let Some(o) = this.as_object() {
+            match (&o.borrow().kind, shape) {
+                (ObjectKind::Map(c), Shape::Map) | (ObjectKind::Set(c), Shape::Set) if !c.weak => return Ok(f(c)),
+                _ => {}
+            }
+        }
+        Err(a.throw(ErrorKind::Type, "Method called on an incompatible receiver"))
+    }
+
     fn with<'gc, R>(a: &Agent<'gc, '_>, o: JsObject<'gc>, f: impl FnOnce(&mut Collection<'gc>) -> R) -> R {
         match &mut o.borrow_mut(a.mc).kind {
             ObjectKind::Map(c) | ObjectKind::Set(c) => f(c),
@@ -113,8 +123,7 @@ impl Collections {
     }
 
     fn map_get<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        let o = Self::this(a, this, Shape::Map, false)?;
-        Ok(Self::with(a, o, |c| c.get(args.at(0))).unwrap_or_default())
+        Ok(Self::read(a, this, Shape::Map, |c| c.get(args.at(0)))?.unwrap_or_default())
     }
 
     fn map_set<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
@@ -124,8 +133,7 @@ impl Collections {
     }
 
     fn map_has<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        let o = Self::this(a, this, Shape::Map, false)?;
-        Ok(Self::with(a, o, |c| c.has(args.at(0))).into())
+        Ok(Self::read(a, this, Shape::Map, |c| c.has(args.at(0)))?.into())
     }
 
     fn map_delete<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
@@ -141,8 +149,7 @@ impl Collections {
     }
 
     fn set_has<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        let o = Self::this(a, this, Shape::Set, false)?;
-        Ok(Self::with(a, o, |c| c.has(args.at(0))).into())
+        Ok(Self::read(a, this, Shape::Set, |c| c.has(args.at(0)))?.into())
     }
 
     fn set_delete<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {

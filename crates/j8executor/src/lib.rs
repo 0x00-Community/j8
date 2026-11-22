@@ -2188,6 +2188,17 @@ impl<'gc> Invoke<'gc> for Executor {
             let f = self.open_with(a, &mut regs, l, c, callee, this, Args::Values(args));
             return self.run_frame(a, regs, f, level);
         }
+        if let ValueKind::Object(o) = callee.kind()
+            && let Some(n) = o.native()
+            && n.forward == j8framework::Forward::No
+        {
+            let saved = self.depth.replace(level);
+            let outer = core::mem::replace(&mut a.new_target, Value::Undefined);
+            let r = (n.f)(a, this, args);
+            a.new_target = outer;
+            self.depth.set(saved);
+            return r;
+        }
         match self.resolve(a, callee, this, args.to_vec(), level)? {
             Callee::Done(v) => Ok(v),
             Callee::Closure { closure, callee, this, args } => {
@@ -2197,6 +2208,18 @@ impl<'gc> Invoke<'gc> for Executor {
                 self.run_frame(a, regs, f, level)
             }
         }
+    }
+
+    fn callback(&self, a: &mut Agent<'gc, '_>, callee: Value<'gc>, this: Value<'gc>) -> j8framework::Callback<'gc> {
+        if let Some(t) = &self.tier
+            && let Some(c) = callee.as_object().and_then(|o| o.closure())
+            && let f = self.jit_closure_function(&c)
+            && !f.class_constructor()
+            && let Some(cb) = t.callback(self, a, f, callee, this)
+        {
+            return cb;
+        }
+        j8framework::Callback::from((callee, this))
     }
 
     fn constructs(&self, closure: &Closure<'gc>) -> bool {

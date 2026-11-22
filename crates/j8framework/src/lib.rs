@@ -32,7 +32,7 @@ mod terminate;
 mod text;
 mod value;
 
-pub use agent::{Agent, CodeKind, Invoke, Resume, Step};
+pub use agent::{Agent, Callback, CallbackRun, CodeKind, Invoke, Resume, Step};
 pub use engine::{Engine, ScriptKind, Source};
 pub use event_loop::{EventLoop, EventLoopSet, Ticket, CHECK, SLICE};
 pub use j8taskqueue::Quota;

@@ -78,6 +78,18 @@ let err = a.throw(ErrorKind::Type, "x is not a function");   // an Error; `?` it
 
 Built-ins and host functions all have the signature `fn(&mut Agent, this, &[Value]) -> Result<Value, Error>`.
 
+A built-in that calls the same function many times (`map`, `filter`, `reduce`, `sort`'s comparator …) resolves it once
+with `a.callback(f, this)` and calls the returned `Callback` in the loop. The engine fills it in through
+`Invoke::callback`: with the JIT, a plain function of up to three parameters goes straight to its compiled code (through
+the function's stub, so a later compile or deopt is picked up); anything else falls back to `Agent::call`.
+
+```rust,ignore
+let cb = a.callback(f, this_arg);
+for (k, v) in items {
+    let r = cb.call(a, &[v, k.into(), o.into()])?;
+}
+```
+
 ## Error
 
 | Variant | Meaning |

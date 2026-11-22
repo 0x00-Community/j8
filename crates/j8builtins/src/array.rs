@@ -3,7 +3,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::cmp::Ordering;
 
-use j8framework::{Agent, Error, ErrorKind, JsObject, ObjectData, ObjectKind, Property, Slot, Value};
+use j8framework::{Agent, Callback, Error, ErrorKind, JsObject, ObjectData, ObjectKind, Property, Slot, Value, ValueBits};
 
 use crate::{Args, Installer};
 
@@ -618,10 +618,11 @@ impl Arrays {
             Visit::Filter => Some(Self::species_create(a, o, 0.0)?),
             _ => None,
         };
+        let cb = a.callback(f, this_arg);
         let (mut k, mut to) = (0.0, 0.0);
         while k < len {
             if let Some(v) = a.present_index(o, k)? {
-                let r = a.call(f, this_arg, &[v, k.into(), o.into()])?;
+                let r = cb.call(a, &[v, k.into(), o.into()])?;
                 match (how, out) {
                     (Visit::Map, Some(arr)) => a.create_index(arr, k, r)?,
                     (Visit::Filter, Some(arr)) if a.to_boolean(r) => {
@@ -668,11 +669,12 @@ impl Arrays {
         let (f, this_arg) = (args.at(0), args.at(1));
         Self::callback(a, f)?;
         let backward = matches!(how, Find::LastValue | Find::LastIndex);
+        let cb = a.callback(f, this_arg);
         let mut i = 0.0;
         while i < len {
             let k = if backward { len - 1.0 - i } else { i };
             let v = a.get_index(o.into(), k)?;
-            let r = a.call(f, this_arg, &[v, k.into(), o.into()])?;
+            let r = cb.call(a, &[v, k.into(), o.into()])?;
             if a.to_boolean(r) {
                 return Ok(if matches!(how, Find::Value | Find::LastValue) { v } else { k.into() });
             }
@@ -717,10 +719,11 @@ impl Arrays {
                 }
             }
         };
+        let cb = a.callback(f, Value::Undefined);
         while i < len {
             let k = index(i);
             if let Some(v) = a.present_index(o, k)? {
-                acc = a.call(f, Value::Undefined, &[acc, v, k.into(), o.into()])?;
+                acc = cb.call(a, &[acc, v, k.into(), o.into()])?;
             }
             i += 1.0;
         }
@@ -808,19 +811,25 @@ impl Arrays {
         Ok(arr.into())
     }
 
-    fn order<'gc>(a: &mut Agent<'gc, '_>, f: Value<'gc>, x: Value<'gc>, y: Value<'gc>) -> Result<Ordering, Error> {
-        Ok(match (x.kind(), y.kind()) {
-            (ValueKind::Undefined, ValueKind::Undefined) => Ordering::Equal,
-            (ValueKind::Undefined, _) => Ordering::Greater,
-            (_, ValueKind::Undefined) => Ordering::Less,
-            _ if f != Value::Undefined => {
-                let r = a.call(f, Value::Undefined, &[x, y])?;
-                a.to_number(r)?.partial_cmp(&0.0).unwrap_or(Ordering::Equal)
-            }
-            _ => {
-                let (s, t) = (a.to_string(x)?, a.to_string(y)?);
-                s.encode_utf16().cmp(t.encode_utf16())
-            }
+    fn order<'gc>(a: &mut Agent<'gc, '_>, cmp: Option<&Callback<'gc>>, x: Value<'gc>, y: Value<'gc>) -> Result<Ordering, Error> {
+        Ok(match (x.bits() == ValueBits::UNDEFINED, y.bits() == ValueBits::UNDEFINED) {
+            (true, true) => Ordering::Equal,
+            (true, false) => Ordering::Greater,
+            (false, true) => Ordering::Less,
+            (false, false) => match cmp {
+                Some(cmp) => {
+                    let r = cmp.call(a, &[x, y])?;
+                    let n = match r.as_number() {
+                        Some(n) => n,
+                        None => a.to_number(r)?,
+                    };
+                    n.partial_cmp(&0.0).unwrap_or(Ordering::Equal)
+                }
+                None => {
+                    let (s, t) = (a.to_string(x)?, a.to_string(y)?);
+                    s.encode_utf16().cmp(t.encode_utf16())
+                }
+            },
         })
     }
 
@@ -852,27 +861,39 @@ impl Arrays {
         Some(order.iter().map(|&i| rest[i as usize]).chain(undef).collect())
     }
 
-    fn merge_sort<'gc>(a: &mut Agent<'gc, '_>, f: Value<'gc>, v: Vec<Value<'gc>>) -> Result<Vec<Value<'gc>>, Error> {
-        if v.len() <= 1 {
+    fn merge_sort<'gc>(a: &mut Agent<'gc, '_>, f: Value<'gc>, mut v: Vec<Value<'gc>>) -> Result<Vec<Value<'gc>>, Error> {
+        let n = v.len();
+        if n <= 1 {
             return Ok(v);
         }
-        let mut right = v;
-        let left = right.drain(..right.len() / 2).collect();
-        let (left, right) = (Self::merge_sort(a, f, left)?, Self::merge_sort(a, f, right)?);
-        let mut out = Vec::with_capacity(left.len() + right.len());
-        let (mut l, mut r) = (left.into_iter().peekable(), right.into_iter().peekable());
-        while let (Some(&x), Some(&y)) = (l.peek(), r.peek()) {
-            if Self::order(a, f, x, y)? == Ordering::Greater {
-                out.push(y);
-                r.next();
-            } else {
-                out.push(x);
-                l.next();
+        let cmp = (f != Value::Undefined).then(|| a.callback(f, Value::Undefined));
+        let mut out = v.clone();
+        let mut width = 1;
+        while width < n {
+            let mut lo = 0;
+            while lo < n {
+                let mid = (lo + width).min(n);
+                let hi = (lo + 2 * width).min(n);
+                let (mut i, mut j, mut k) = (lo, mid, lo);
+                while i < mid && j < hi {
+                    if Self::order(a, cmp.as_ref(), v[i], v[j])? == Ordering::Greater {
+                        out[k] = v[j];
+                        j += 1;
+                    } else {
+                        out[k] = v[i];
+                        i += 1;
+                    }
+                    k += 1;
+                }
+                out[k..k + mid - i].copy_from_slice(&v[i..mid]);
+                k += mid - i;
+                out[k..k + hi - j].copy_from_slice(&v[j..hi]);
+                lo = hi;
             }
+            core::mem::swap(&mut v, &mut out);
+            width *= 2;
         }
-        out.extend(l);
-        out.extend(r);
-        Ok(out)
+        Ok(v)
     }
 
     fn comparator<'gc>(a: &mut Agent<'gc, '_>, f: Value<'gc>) -> Result<(), Error> {

@@ -165,7 +165,7 @@ pub extern "C" fn j8_helper(ctx: *mut Ctx, id: u64, a: u64, b: u64, c: u64, d: u
     let ops = &buf[..n.min(ARGS_WORDS)];
     let (exe, a) = unsafe { ctx.parts() };
     let r = helper(jit, exe, a, h, ops, ctx.epoch);
-    if !matches!(h, Helper::ModF | Helper::ToBoolean | Helper::StoreCell | Helper::Alloc(_) | Helper::CreateClosure(..) | Helper::CreateContext(..) | Helper::ObjectLiteral(..) | Helper::GlobalProbe(_)) {
+    if !matches!(h, Helper::ModF | Helper::ToBoolean | Helper::StoreCell | Helper::Alloc(_) | Helper::CreateClosure(..) | Helper::CreateContext(..) | Helper::ObjectLiteral(..) | Helper::Constant(..) | Helper::GlobalProbe(_)) {
         ctx.epoch = jit.bump();
     }
     if let (Helper::GlobalProbe(_), Ok(GLOBAL_MISS)) = (h, &r) {
@@ -210,6 +210,10 @@ fn helper<'gc>(jit: &Jit, exe: &Executor, a: &mut Agent<'gc, '_>, h: Helper, ops
         Helper::CreateClosure(f, k) => Value::Object(exe.jit_create_closure(a, f, i64::from(k), v(0).as_context())).bits(),
         Helper::CreateContext(shape, n) => Value::context(j8framework::Env::context(n as usize, Value::Undefined, v(0).as_context(), Some(shape), None).alloc(a.mc)).bits(),
         Helper::ObjectLiteral(f, k) => Value::Object(exe.jit_object_literal(a, f, i64::from(k))).bits(),
+        Helper::Constant(f, k) => match exe.jit_function(f).constant(i64::from(k)) {
+            Some(j8bytecode::Constant::String(s)) => Value::String(a.string(s)).bits(),
+            _ => ValueBits::UNDEFINED,
+        },
         Helper::ModF => (f64::from_bits(ops[0]) % f64::from_bits(ops[1])).to_bits(),
         Helper::ToBoolean => u64::from(a.to_boolean(v(0))),
         Helper::StoreCell => {

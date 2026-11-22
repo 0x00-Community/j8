@@ -67,6 +67,7 @@ pub enum Helper {
     CreateClosure(FuncId, u32),
     CreateContext(j8framework::ShapeId, u32),
     ObjectLiteral(FuncId, u32),
+    Constant(FuncId, u32),
     ModF,
     ToBoolean,
     StoreCell,
