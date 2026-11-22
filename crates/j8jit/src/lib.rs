@@ -184,7 +184,7 @@ impl Jit {
     }
 
     unsafe fn run_callback<'gc>(a: &mut j8framework::Agent<'gc, '_>, cb: &j8framework::Callback<'gc>, args: &[Value<'gc>]) -> Option<Result<Value<'gc>, j8framework::Error>> {
-        type StubFn = unsafe extern "C" fn(*mut Ctx, u64, u64, u64, u64, u64) -> runtime::Ret;
+        type StubFn = sysv!(unsafe fn(*mut Ctx, u64, u64, u64, u64, u64) -> runtime::Ret);
         let (jit, exe) = unsafe { (&*(cb.env[0] as *const Jit), &*(cb.env[1] as *const j8executor::Executor)) };
         if !jit.stack_room() {
             return None;

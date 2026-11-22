@@ -1578,6 +1578,12 @@ impl<'e> Builder<'e> {
                     return Ok(self.guard_lazy(act, st, v, key, pc));
                 }
                 let proto = self.load(st, LOAD_PTR, p, Self::off(Layout::OBJECT_PROTO));
+                if fb.shape.is_none() {
+                    let fs = self.state(act, st, pc);
+                    let z = self.emit(Op::Word(0), Rep::Word);
+                    let gone = self.emit(Op::CmpWord(Cond::Eq, proto, z), Rep::Bool);
+                    self.emit(Op::Check(gone, false, fs), Rep::None);
+                }
                 Ok(self.proto_load(act, st, proto, &fb, key, pc))
             }
             _ => {
