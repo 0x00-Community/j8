@@ -488,6 +488,13 @@ impl<'b, 'a> Lower<'b, 'a> {
         let blocks: Vec<BlockId> = body[region].blocks.iter().copied().collect();
         self.asm.byte(0x55);
         self.asm.mov_rr(Gpr::Rbp, Gpr::Rsp);
+        #[cfg(windows)]
+        if self.frame >= 4096 {
+            let mut probe = crate::asm::Asm::default();
+            probe.probe_stack(self.frame);
+            let _ = probe.finish();
+            self.asm.bytes(&probe.bytes);
+        }
         if self.frame > 0 {
             self.asm.bytes(&[0x48, 0x81, 0xec]);
             self.asm.bytes(&self.frame.to_le_bytes());

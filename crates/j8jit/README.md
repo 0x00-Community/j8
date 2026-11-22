@@ -2,7 +2,7 @@
 
 **English** · [简体中文](README.zh-CN.md)
 
-The JIT of [j8](https://github.com/0x00-Community/j8) (x86-64 Unix, AArch64 Linux). It owns bytecode ⇒ machine code and the JIT
+The JIT of [j8](https://github.com/0x00-Community/j8) (x86-64 Unix and Windows, AArch64 Linux). It owns bytecode ⇒ machine code and the JIT
 scheduling itself: it implements the executor's `Tier`; hot functions and hot loops are lowered to MLIR (`llvm` dialect,
 via [mlirpass](https://crates.io/crates/mlirpass)), emitted by the x86-64 backend (`x86_64.rs`), loaded into executable
 memory and run in place of interpretation.

@@ -4,7 +4,7 @@
 
 ```sh
 cargo add j8                                              # default feature `runtime`: executor + built-ins + standard platform
-cargo add j8 --features jit                               # plus the x86-64 JIT (x86-64 Unix)
+cargo add j8 --features jit                               # plus the x86-64 JIT (x86-64 Unix and Windows)
 cargo add j8 --no-default-features --features compiler    # only JS ⇒ bytecode
 ```
 
@@ -35,7 +35,7 @@ Real hosts rarely handle isolates directly; they declare a runtime with `j8::run
 | `compiler` | `j8::compiler`: JS ⇒ bytecode (includes `bytecode`) |
 | `executor` | `j8::executor`: the bytecode executor (includes `compiler`) |
 | `builtins` / `platform` | built-in objects / the standard-library platform |
-| `jit` | `j8::jit`: the JIT (x86-64 Unix, includes `executor`) |
+| `jit` | `j8::jit`: the JIT (x86-64 Unix and Windows, includes `executor`) |
 | `json` | `j8::Json<T>`: Rust values crossing as JSON-shaped data through serde |
 | `napi` | `j8::napi`: Node-API |
 | `taskqueue` / `lockfree` | the task queue / lock-free building blocks |

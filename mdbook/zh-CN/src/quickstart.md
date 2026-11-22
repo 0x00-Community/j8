@@ -4,7 +4,7 @@
 
 ```sh
 cargo add j8                                              # 缺省 feature `runtime`：执行器 + 内建对象 + 标准平台
-cargo add j8 --features jit                               # 再加 x86-64 JIT（x86-64 Unix）
+cargo add j8 --features jit                               # 再加 x86-64 JIT（x86-64 Unix 和 Windows）
 cargo add j8 --no-default-features --features compiler    # 只要 JS ⇒ 字节码
 ```
 
@@ -34,7 +34,7 @@ let result = isolate.run(&mut executor, &cx, &Source { text: "1 + 2 * 3", file: 
 | `compiler` | `j8::compiler`：JS ⇒ 字节码（含 `bytecode`） |
 | `executor` | `j8::executor`：字节码执行器（含 `compiler`） |
 | `builtins` / `platform` | 内建对象 / 标准库平台 |
-| `jit` | `j8::jit`：JIT（x86-64 Unix，含 `executor`） |
+| `jit` | `j8::jit`：JIT（x86-64 Unix 和 Windows，含 `executor`） |
 | `json` | `j8::Json<T>`：经 serde 以 JSON 形状过界的 Rust 值 |
 | `napi` | `j8::napi`：Node-API |
 | `taskqueue` / `lockfree` | 任务队列 / 无锁基础件 |

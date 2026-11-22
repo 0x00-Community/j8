@@ -1,11 +1,11 @@
 #![cfg(target_arch = "x86_64")]
 
 use mlirpass::mlirformat::MlirOpt;
-use j8jit::{X86_64Code, X86_64Emit};
+use j8jit::{sysv, X86_64Code, X86_64Emit};
 use mlirpass::{Body, Ctx, Emit, Interfaces};
 
 struct Mapped {
-    at: *mut libc::c_void,
+    at: *mut u8,
     len: usize,
 }
 
@@ -17,28 +17,85 @@ impl Mapped {
             bytes[r.offset..r.offset + 8].copy_from_slice(&(*addr as u64).to_le_bytes());
         }
         let len = bytes.len().max(1);
+        let at = mem::alloc(len);
+        assert!(!at.is_null(), "executable mapping");
         unsafe {
-            let at = libc::mmap(core::ptr::null_mut(), len, libc::PROT_READ | libc::PROT_WRITE, libc::MAP_PRIVATE | libc::MAP_ANONYMOUS, -1, 0);
-            assert_ne!(at, libc::MAP_FAILED);
-            core::ptr::copy_nonoverlapping(bytes.as_ptr(), at.cast::<u8>(), bytes.len());
-            assert_eq!(libc::mprotect(at, len, libc::PROT_READ | libc::PROT_EXEC), 0);
-            Mapped { at, len }
+            core::ptr::copy_nonoverlapping(bytes.as_ptr(), at, bytes.len());
+            assert!(mem::exec(at, len), "executable protection");
         }
+        Mapped { at, len }
     }
 }
 
 impl Drop for Mapped {
     fn drop(&mut self) {
-        unsafe { libc::munmap(self.at, self.len) };
+        mem::free(self.at, self.len);
     }
 }
 
-extern "C" fn twice(x: i64) -> i64 {
-    2 * x
+mod mem {
+    #[cfg(windows)]
+    const MEM_COMMIT: u32 = 0x1000;
+    #[cfg(windows)]
+    const MEM_RESERVE: u32 = 0x2000;
+    #[cfg(windows)]
+    const MEM_RELEASE: u32 = 0x8000;
+    #[cfg(windows)]
+    const PAGE_READWRITE: u32 = 0x04;
+    #[cfg(windows)]
+    const PAGE_EXECUTE_READ: u32 = 0x20;
+
+    #[cfg(windows)]
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn VirtualAlloc(addr: *mut core::ffi::c_void, size: usize, flags: u32, prot: u32) -> *mut core::ffi::c_void;
+        fn VirtualProtect(addr: *mut core::ffi::c_void, size: usize, prot: u32, old: *mut u32) -> i32;
+        fn VirtualFree(addr: *mut core::ffi::c_void, size: usize, flags: u32) -> i32;
+    }
+
+    #[cfg(not(windows))]
+    pub fn alloc(len: usize) -> *mut u8 {
+        let at = unsafe { libc::mmap(core::ptr::null_mut(), len, libc::PROT_READ | libc::PROT_WRITE, libc::MAP_PRIVATE | libc::MAP_ANONYMOUS, -1, 0) };
+        if at == libc::MAP_FAILED { core::ptr::null_mut() } else { at.cast() }
+    }
+
+    #[cfg(windows)]
+    pub fn alloc(len: usize) -> *mut u8 {
+        unsafe { VirtualAlloc(core::ptr::null_mut(), len, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE).cast() }
+    }
+
+    #[cfg(not(windows))]
+    pub fn exec(at: *mut u8, len: usize) -> bool {
+        unsafe { libc::mprotect(at.cast(), len, libc::PROT_READ | libc::PROT_EXEC) == 0 }
+    }
+
+    #[cfg(windows)]
+    pub fn exec(at: *mut u8, len: usize) -> bool {
+        let mut old = 0u32;
+        unsafe { VirtualProtect(at.cast(), len, PAGE_EXECUTE_READ, &raw mut old) != 0 }
+    }
+
+    #[cfg(not(windows))]
+    pub fn free(at: *mut u8, len: usize) {
+        unsafe { libc::munmap(at.cast(), len) };
+    }
+
+    #[cfg(windows)]
+    pub fn free(at: *mut u8, _len: usize) {
+        unsafe { VirtualFree(at.cast(), 0, MEM_RELEASE) };
+    }
 }
 
-extern "C" fn hypot(x: f64, y: f64) -> f64 {
-    (x * x + y * y).sqrt()
+sysv! {
+    fn twice(x: i64) -> i64 {
+        2 * x
+    }
+}
+
+sysv! {
+    fn hypot(x: f64, y: f64) -> f64 {
+        (x * x + y * y).sqrt()
+    }
 }
 
 fn compiled() -> Vec<X86_64Code> {
@@ -55,18 +112,18 @@ fn runs() {
     let map: Vec<(String, Mapped)> = codes.iter().map(|c| (c.name.clone(), Mapped::new(c, &symbols))).collect();
     let f = |name: &str| map.iter().find(|(n, _)| n == name).unwrap_or_else(|| panic!("no function {name}")).1.at;
     unsafe {
-        let poly: extern "C" fn(i64, i64) -> i64 = core::mem::transmute(f("poly"));
-        let sum: extern "C" fn(i64) -> i64 = core::mem::transmute(f("sum"));
-        let divs: extern "C" fn(i64, i64) -> i64 = core::mem::transmute(f("divs"));
-        let narrow: extern "C" fn(i32, i32) -> i32 = core::mem::transmute(f("narrow"));
-        let fmax: extern "C" fn(f64, f64) -> f64 = core::mem::transmute(f("fmax"));
-        let unordered: extern "C" fn(f64, f64) -> i64 = core::mem::transmute(f("unordered"));
-        let calls: extern "C" fn(i64, f64) -> f64 = core::mem::transmute(f("calls"));
-        let memory: extern "C" fn(*mut i64, i64) -> i64 = core::mem::transmute(f("memory"));
-        let bytes: extern "C" fn(*mut u8) -> i64 = core::mem::transmute(f("bytes"));
-        let pressure: extern "C" fn(i64) -> i64 = core::mem::transmute(f("pressure"));
-        let across: extern "C" fn(i64, f64) -> f64 = core::mem::transmute(f("across"));
-        let fsum: extern "C" fn(i64, f64) -> f64 = core::mem::transmute(f("fsum"));
+        let poly: sysv!(fn(i64, i64) -> i64) = core::mem::transmute(f("poly"));
+        let sum: sysv!(fn(i64) -> i64) = core::mem::transmute(f("sum"));
+        let divs: sysv!(fn(i64, i64) -> i64) = core::mem::transmute(f("divs"));
+        let narrow: sysv!(fn(i32, i32) -> i32) = core::mem::transmute(f("narrow"));
+        let fmax: sysv!(fn(f64, f64) -> f64) = core::mem::transmute(f("fmax"));
+        let unordered: sysv!(fn(f64, f64) -> i64) = core::mem::transmute(f("unordered"));
+        let calls: sysv!(fn(i64, f64) -> f64) = core::mem::transmute(f("calls"));
+        let memory: sysv!(fn(*mut i64, i64) -> i64) = core::mem::transmute(f("memory"));
+        let bytes: sysv!(fn(*mut u8) -> i64) = core::mem::transmute(f("bytes"));
+        let pressure: sysv!(fn(i64) -> i64) = core::mem::transmute(f("pressure"));
+        let across: sysv!(fn(i64, f64) -> f64) = core::mem::transmute(f("across"));
+        let fsum: sysv!(fn(i64, f64) -> f64) = core::mem::transmute(f("fsum"));
         for (a, b) in [(3, 4), (-7, 5), (1 << 40, -3), (0, 0)] {
             assert_eq!(poly(a, b), a.wrapping_mul(a).wrapping_add(b.wrapping_mul(3)) ^ (a - b), "poly({a}, {b})");
         }
