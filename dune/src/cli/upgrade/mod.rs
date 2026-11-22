@@ -16,7 +16,6 @@ const SUMS: &str = "SHA256SUMS";
 const EXE: &str = if cfg!(windows) { ".exe" } else { "" };
 const OS: &str = if cfg!(target_os = "macos") { "darwin" } else if cfg!(windows) { "win32" } else { "linux" };
 const CPU: &str = if cfg!(target_arch = "aarch64") { "arm64" } else { "x64" };
-const LIBC: &str = if cfg!(target_env = "musl") { "-musl" } else { "" };
 
 #[derive(clap::Args)]
 #[command(about = "Replace this dune with the latest release (or the one given) from GitHub")]
@@ -40,7 +39,7 @@ struct Asset {
 
 impl Default for Asset {
     fn default() -> Self {
-        Self { name: format!("dune-{OS}-{CPU}{LIBC}") }
+        Self { name: format!("dune-{OS}-{CPU}") }
     }
 }
 

@@ -37,7 +37,7 @@ crates.io with the `CRATE_TOKEN` secret (`.github/workflows/j8-release.yml`, cra
 
 There is one executable. `dunx` is a link to `dune`, which tells the two apart by the name it is started under, as
 `bun` / `bunx` do. On npm, `@jabberwocky238/dune` carries placeholders and depends on one package per platform
-(`@jabberwocky238/dune-linux-x64`, `@jabberwocky238/dune-linux-x64-musl`, `@jabberwocky238/dune-darwin-arm64`, `@jabberwocky238/dune-win32-x64`, ...); npm installs the one that
+(`@jabberwocky238/dune-linux-x64`, `@jabberwocky238/dune-darwin-arm64`, `@jabberwocky238/dune-win32-x64`, ...); npm installs the one that
 fits, and the postinstall script puts its binary in place of the placeholders and links `dunx` to it. `npm/` holds
 the main package and `npm/pack.js`, which lays out all the packages of a release from the built binaries.
 

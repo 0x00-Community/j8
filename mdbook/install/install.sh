@@ -42,12 +42,11 @@ if [[ $os == darwin && $cpu == x64 && $(sysctl -n sysctl.proc_translated 2>/dev/
   info "Rosetta 2 detected: installing the arm64 build"
 fi
 
-libc=
 if [[ $os == linux ]] && { ls /lib/ld-musl-* >/dev/null 2>&1 || ldd --version 2>&1 | grep -qi musl; }; then
-  libc=-musl
+  error "musl Linux has no prebuilt dune: build it with cargo install j8dune"
 fi
 
-target=dune-$os-$cpu$libc
+target=dune-$os-$cpu
 archive=$target.tar.gz
 if [[ -z $TAG ]]; then
   url=$RELEASES/latest/download

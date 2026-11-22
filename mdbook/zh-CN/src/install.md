@@ -9,7 +9,7 @@ dune（连同跑包的 dunx）每个平台一个预编译的可执行文件，�
 curl -fsSL https://j8.app238.com/install | bash
 ```
 
-脚本按本机选包（x64 或 arm64；Linux 上分 glibc 和 musl；Rosetta 下装原生版），用 Release 里的 `SHA256SUMS` 校验，
+脚本按本机选包（x64 或 arm64；Rosetta 下装原生版），用 Release 里的 `SHA256SUMS` 校验，
 把 `dune` 和 `dunx` 链接放进 `~/.dune/bin`，再把这个目录写进 shell 启动文件的 `PATH`（bash、zsh 或 fish）。
 
 装指定版本：
@@ -65,8 +65,8 @@ dune upgrade --tag v0.4.0
 
 | 平台 | Release 包 | JIT |
 |---|---|---|
-| Linux x64（glibc 2.17+ / musl） | `dune-linux-x64.tar.gz` / `dune-linux-x64-musl.tar.gz` | 有 |
-| Linux arm64（glibc 2.17+ / musl） | `dune-linux-arm64.tar.gz` / `dune-linux-arm64-musl.tar.gz` | 无 |
+| Linux x64（glibc 2.17+） | `dune-linux-x64.tar.gz` | 有 |
+| Linux arm64（glibc 2.17+） | `dune-linux-arm64.tar.gz` | 无 |
 | macOS x64 / arm64 | `dune-darwin-x64.tar.gz` / `dune-darwin-arm64.tar.gz` | 仅 x64 |
 | Windows x64 / arm64 | `dune-win32-x64.tar.gz` / `dune-win32-arm64.tar.gz` | 无 |
 

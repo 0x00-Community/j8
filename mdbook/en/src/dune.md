@@ -15,7 +15,7 @@ dune upgrade                      # replace itself with the latest GitHub releas
 ```
 
 See [Installing dune](install.md) for every option. The npm channel works the way Bun's does (`dune/npm/`): the main package `@jabberwocky238/dune` carries placeholders and
-depends, through `optionalDependencies`, on one package per platform (`@jabberwocky238/dune-linux-x64`, `@jabberwocky238/dune-linux-x64-musl`,
+depends, through `optionalDependencies`, on one package per platform (`@jabberwocky238/dune-linux-x64`,
 `@jabberwocky238/dune-darwin-arm64`, `@jabberwocky238/dune-win32-x64` …). npm installs only the one that fits, and the postinstall script hard-links its
 binary over the placeholders and links `dunx` to it, so `dune` starts without Node. With `--ignore-scripts` the
 placeholders start the binary through Node. `npm/pack.js` lays out every package of a release from the built binaries.
