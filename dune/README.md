@@ -33,7 +33,7 @@ dune upgrade              # replace itself with the latest GitHub release
 Every `vX.Y.Z` tag (a new major, minor or patch) builds the binaries for all platforms in `npm/platforms.json`, attaches them to a GitHub
 release (`dune-<platform>.tar.gz` and `SHA256SUMS`) and publishes the npm packages
 with npm trusted publishing (`.github/workflows/dune-release.yml`); the same tag publishes the j8 crates and `j8dune` to
-crates.io (`.github/workflows/j8-release.yml`, crates.io only), and the dune build waits for that j8. The install scripts are served from `mdbook/install/`.
+crates.io with the `CRATE_TOKEN` secret (`.github/workflows/j8-release.yml`, crates.io only), and the dune build waits for that j8. The install scripts are served from `mdbook/install/`.
 
 There is one executable. `dunx` is a link to `dune`, which tells the two apart by the name it is started under, as
 `bun` / `bunx` do. On npm, `@jabberwocky238/dune` carries placeholders and depends on one package per platform

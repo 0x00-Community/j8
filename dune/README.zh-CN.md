@@ -31,7 +31,7 @@ dune upgrade              # 用 GitHub 上的最新 Release 替换自己
 
 每个 `vX.Y.Z` 标签（主、次、补丁任一位变化）会编出 `npm/platforms.json` 里全部平台的二进制，挂到 GitHub Release（`dune-<平台>.tar.gz`
 和 `SHA256SUMS`），并用 npm trusted publishing 发布 npm 包（`.github/workflows/dune-release.yml`）；同一标签由 `.github/workflows/j8-release.yml`
-把 j8 各 crate 和 `j8dune` 发到 crates.io（它只管 crates.io），dune 的构建会等这一版 j8 上线。安装脚本放在 `mdbook/install/`。
+用 `CRATE_TOKEN` 密钥把 j8 各 crate 和 `j8dune` 发到 crates.io（它只管 crates.io），dune 的构建会等这一版 j8 上线。安装脚本放在 `mdbook/install/`。
 
 只有一个可执行文件：`dunx` 是 `dune` 的链接，程序按启动时的文件名区分两者（同 `bun` / `bunx`）。npm 上的 `@jabberwocky238/dune`
 只带占位脚本，依赖每个平台一个包（`@jabberwocky238/dune-linux-x64`、`@jabberwocky238/dune-linux-x64-musl`、`@jabberwocky238/dune-darwin-arm64`、`@jabberwocky238/dune-win32-x64`
