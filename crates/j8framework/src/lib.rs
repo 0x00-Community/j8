@@ -43,7 +43,7 @@ pub use handle::{ContextRoot, Global, RealmBrand, ValueBrand};
 pub use isolate::{CreateParams, Isolate, Scope};
 pub use backing::{Backing, External, SharedMemory};
 pub use terminate::{IsolateHandle, Termination};
-pub use object::{Accessor, ObjMut, ObjRef, Object, ObjectState, Few, ArgumentsMap, HostData, HostHook, HostReaction, BigIntData, Bound, BufferData, Capability, Closure, ClosureFn, Code, FunctionInfo, ElementKind, ViewData, HelperKind, HelperState, IteratorHelper, NativeClosure, ProxyData, Collection, ContextKind, ContextName, ContextShape, ShapeId, MapKey, Request, JsBigInt, RegExpData, Coroutine, CoroutineState, Waiting, Settlement, Env, IterKind, IteratorState, Job, JsEnv, JsObject, JsString, JsSymbol, Forward, Native, NativeFn, ObjectData, ObjectKind, JsStr, SmallStr, Units, Property, Reaction, Settled, Slot, Suspended, SymbolData};
+pub use object::{Accessor, ObjMut, ObjRef, Object, ObjectState, Few, ArgumentsMap, HostData, HostHook, HostReaction, BigIntData, Bound, BufferData, Capability, Closure, ClosureFn, Code, FunctionInfo, ElementKind, ViewData, HelperKind, HelperState, IteratorHelper, NativeClosure, ProxyData, Collection, ContextKind, ContextName, ContextShape, ShapeId, MapKey, Request, JsBigInt, RegExpData, Coroutine, CoroutineState, Waiting, Settlement, Env, IterKind, IteratorState, Job, JsEnv, JsObject, JsString, JsSymbol, Forward, Native, NativeFn, ObjectData, ObjectKind, JsStr, Pieces, SmallStr, Units, Property, Reaction, Settled, Slot, Suspended, SymbolData};
 pub use bigint::Numeric;
 pub use ops::{number_text, BinaryOp, CompareOp, ErrorKind, Hint, IterRecord, Numbers, UnaryOp};
 pub use platform::{AsyncJob, Platform, Settle, Task};
@@ -58,5 +58,5 @@ pub use module::{ImportEntry, ImportName, ModuleInfo, ModuleRecord, ModuleStatus
 pub use profiler::{Counter, FuncId, Profiler};
 pub use typed::{Element, canonical_numeric, f16_to_f64, f64_to_f16};
 pub use property::{Descriptor, Integrity, Key, PropertyKey};
-pub use realm::{Context, Intrinsics, Realm, RegExpCompiled, RegExpLiteral, RegExpPristine, WellKnown};
+pub use realm::{Context, Intrinsics, Realm, RegExpCompiled, RegExpLiteral, RegExpLiteralEntry, RegExpPristine, WellKnown};
 pub use value::{Value, ValueBits, ValueKind, ValueTag};

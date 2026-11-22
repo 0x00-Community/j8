@@ -278,6 +278,11 @@ impl<'gc> Agent<'gc, '_> {
         self.mc.alloc(crate::JsStr::from(s))
     }
 
+    pub fn string_from(&self, text: crate::SmallStr, ascii: bool) -> JsString<'gc> {
+        let s = if ascii { crate::JsStr::from_ascii(text) } else { crate::JsStr::from(text) };
+        self.mc.alloc(s)
+    }
+
     pub fn piece(&self, of: JsString<'gc>, piece: &str) -> JsString<'gc> {
         if core::ptr::eq(piece, of.text().as_str()) {
             return of;
