@@ -4,7 +4,7 @@
 name = "j8dune"
 description = "dune and dunx: a JavaScript runtime on j8 with a Node-compatible layer and a Web-standard layer, and a runner for npm packages' executables"
 readme = "README.md"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2024"
 license = "MIT"
 # the npm packages are laid out from npm/ (see npm/pack.js), not shipped in the crate
@@ -25,7 +25,7 @@ name = "dune"
 path = "src/main.rs"
 
 [dependencies]
-j8 = { version = "0.4.0", features = ["runtime", "json"] }
+j8 = { version = "0.4.1", features = ["runtime", "json"] }
 clap = { version = "4.6", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
@@ -40,7 +40,7 @@ ureq = { version = "3", features = ["json"] }
 libc = "0.2"
 
 [target.'cfg(all(unix, target_arch = "x86_64"))'.dependencies]
-j8 = { version = "0.4.0", features = ["jit"] }
+j8 = { version = "0.4.1", features = ["jit"] }
 
 [lints.clippy]
 all = { level = "warn", priority = -1 }
