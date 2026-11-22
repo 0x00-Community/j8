@@ -300,6 +300,14 @@ impl<'gc> Agent<'gc, '_> {
         ObjectData { kind: ObjectKind::Array, elements: items, proto: Some(self.realm.array_proto), ..ObjectData::default() }.alloc(self.mc)
     }
 
+    pub fn array_from_slice(&self, items: &[Value<'gc>]) -> JsObject<'gc> {
+        let o = ObjectData { kind: ObjectKind::Array, proto: Some(self.realm.array_proto), ..ObjectData::default() }.alloc(self.mc);
+        if !items.is_empty() {
+            o.elements().replace(self.mc, items);
+        }
+        o
+    }
+
     pub fn error(&self, kind: ErrorKind, message: &str) -> JsObject<'gc> {
         let e = ObjectData { kind: ObjectKind::Error, proto: Some(self.realm.error_proto(kind)), ..ObjectData::default() }.alloc(self.mc);
         let m = self.string(message);
