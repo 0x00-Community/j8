@@ -3,7 +3,6 @@ mod fs;
 mod bytes;
 mod v8;
 mod vendor;
-#[cfg(unix)]
 mod uvfs;
 
 use std::collections::BTreeMap;
@@ -18,7 +17,6 @@ pub use fs::Fs;
 pub use bytes::Raw;
 pub use v8::V8;
 pub use vendor::Lib;
-#[cfg(unix)]
 pub use uvfs::Uvfs;
 
 use crate::host::Io;
@@ -129,18 +127,17 @@ enum Handle {
 impl Handle {
     fn guess(fd: u32) -> Self {
         use std::io::IsTerminal;
-        use std::os::unix::fs::FileTypeExt;
-        let path = format!("/proc/self/fd/{fd}");
-        let Ok(meta) = std::fs::metadata(&path) else { return Self::Unknown };
-        let kind = meta.file_type();
-        if kind.is_char_device() && std::fs::File::open(&path).is_ok_and(|f| f.is_terminal()) {
-            Self::Tty
-        } else if kind.is_file() || kind.is_char_device() || kind.is_block_device() || kind.is_dir() {
-            Self::File
-        } else if kind.is_fifo() || kind.is_socket() {
-            Self::Pipe
-        } else {
-            Self::Unknown
+        use uvfs::Dirent;
+        let Ok(fd) = i32::try_from(fd) else { return Self::Unknown };
+        let file = uvfs::Fd(fd).file();
+        if file.is_terminal() {
+            return Self::Tty;
+        }
+        match file.metadata().map(|m| Dirent::from(m.file_type())) {
+            Ok(Dirent::File | Dirent::Dir | Dirent::Char | Dirent::Block) => Self::File,
+            Ok(Dirent::Fifo | Dirent::Socket) => Self::Pipe,
+            Err(_) if cfg!(windows) => Self::Pipe,
+            _ => Self::Unknown,
         }
     }
 }
@@ -374,20 +371,10 @@ impl<P: Platform> Platform for NodePlatform<P> {
     }
 }
 
-#[cfg(unix)]
 j8::runtime! {
     pub Dune: Web {
         globals: [Process],
         natives: [Fs, Os, Child, V8, Lib, Raw, Uvfs],
-        prelude: PRELUDE,
-    }
-}
-
-#[cfg(not(unix))]
-j8::runtime! {
-    pub Dune: Web {
-        globals: [Process],
-        natives: [Fs, Os, Child, V8, Lib, Raw],
         prelude: PRELUDE,
     }
 }

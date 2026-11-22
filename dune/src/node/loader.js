@@ -140,7 +140,7 @@
     require(request) { return load(resolve(request, this.path), this); }
     _compile(source, filename) {
       const dirname = path().dirname(filename);
-      const body = source.startsWith('#!') ? '//' + source : source;
+      const body = (source.startsWith('#!') ? '//' + source : source) + '\n//# sourceURL=' + filename;
       const wrapper = Function('exports', 'require', 'module', '__filename', '__dirname', body);
       wrapper.call(this.exports, this.exports, makeRequire(this), this, filename, dirname);
     }

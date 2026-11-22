@@ -6,6 +6,8 @@ use j8::{Bytes, IntoJs};
 
 use crate::host::{Io, Offload};
 
+use super::uvfs::{Fd, Platform};
+
 pub struct Stat(std::fs::Metadata);
 
 impl Stat {
@@ -62,29 +64,13 @@ impl<'gc> IntoJs<'gc> for Listing {
 pub struct Fs;
 
 impl Fs {
-    #[cfg(unix)]
     fn link(target: &str, path: &str) -> std::io::Result<()> {
-        std::os::unix::fs::symlink(target, path)
+        Fd::symlink(target, path)
     }
 
-    #[cfg(windows)]
-    fn link(target: &str, path: &str) -> std::io::Result<()> {
-        let resolved = Path::new(path).parent().map_or_else(|| Path::new(target).to_path_buf(), |dir| dir.join(target));
-        if resolved.is_dir() { std::os::windows::fs::symlink_dir(target, path) } else { std::os::windows::fs::symlink_file(target, path) }
-    }
-
-    #[cfg(unix)]
     fn set_mode(path: &str, mode: u32) -> std::io::Result<()> {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
-    }
-
-    #[cfg(not(unix))]
-    fn set_mode(path: &str, mode: u32) -> std::io::Result<()> {
-        const OWNER_WRITE: u32 = 0o200;
-        let mut permissions = std::fs::metadata(path)?.permissions();
-        permissions.set_readonly(mode & OWNER_WRITE == 0);
-        std::fs::set_permissions(path, permissions)
+        let permissions = std::fs::metadata(path)?.permissions();
+        std::fs::set_permissions(path, Platform::permissions(permissions, mode))
     }
 
     fn read(path: &str) -> Io<Bytes> {

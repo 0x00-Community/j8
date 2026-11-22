@@ -35,8 +35,12 @@ tar = "0.4.46"
 sha2 = "0.10"
 base64 = "0.22"
 ureq = { version = "3", features = ["json"] }
-
-[target.'cfg(unix)'.dependencies]
+filetime = "0.2.30"
+tempfile = "3.27.0"
+faccess = "0.2.4"
+fs4 = "1.1.0"
+positioned-io = "0.3.5"
+symlink = "0.1.0"
 libc = "0.2"
 
 [target.'cfg(all(unix, target_arch = "x86_64"))'.dependencies]
