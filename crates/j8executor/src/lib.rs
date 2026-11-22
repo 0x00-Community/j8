@@ -7,7 +7,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
 
-use j8bytecode::{Bytecode, Constant, Context, Decoded, FunctionKind, Intrinsic, LiteralValue, Module, Operands, OperandValue, Register, Runtime, ScopeInfo, ScopeType, SharedFunction};
+use j8bytecode::{Bytecode, Constant, Context, Decoded, FunctionKind, Intrinsic, LiteralValue, Module, NativeContextIndex, Operands, OperandValue, Register, Runtime, ScopeInfo, ScopeType, SharedFunction};
 use j8compiler::Compile;
 use j8framework::{Agent, BinaryOp, Closure, Shape, SmallStr, Collect, CompareOp, ContextKind, ContextName, ContextShape, ShapeId, Env, Error, ErrorKind, FuncId, FunctionInfo, Gc, Lazy, Invoke, JsEnv, JsObject, Numbers, ObjectData, ObjectKind, Property, Resume, Slot, Step, Value, ValueKind};
 use j8lockfree::SegVec;
@@ -17,6 +17,7 @@ mod ic;
 mod jit;
 mod module;
 mod threaded;
+use module::EVAL_FILE;
 
 pub use cache::CodeCache;
 pub use jit::{DeoptFrame, Entry, FrameSlots, Function as JitFunction, GlobalFeedback, Insn as JitInsn, PropertyFeedback, Reg as JitReg, ScopeLayout, Tier, Tiered};
@@ -440,6 +441,7 @@ pub struct Executor {
     code: SegVec<Loaded>,
     depth: Cell<usize>,
     module_of: RefCell<alloc::collections::BTreeMap<u32, u32>>,
+    script_files: RefCell<alloc::collections::BTreeMap<u32, alloc::string::String>>,
     cache: Option<Arc<CodeCache>>,
     context_shapes: SegVec<ContextShape>,
     with_shape: Cell<Option<ShapeId>>,
@@ -1331,6 +1333,13 @@ impl Executor {
                 let strict_slot = loaded.func.bytecode.feedback.get(slot) == Some(&j8bytecode::FeedbackSlotKind::StoreGlobalStrict);
                 self.global_store(a, &loaded.globals[slot], name, *acc, strict_slot || strict)?;
             }
+            B::LdaModuleVariable => {
+                let cell = o[0];
+                if cell >= 0 {
+                    return Err(a.throw(ErrorKind::Reference, "module export cells are context slots"));
+                }
+                *acc = self.import_value(a, loaded.base, u16::try_from(-1 - cell).unwrap_or(u16::MAX))?;
+            }
             B::LdaCurrentContextSlot | B::LdaCurrentContextSlotNoCell | B::LdaImmutableCurrentContextSlot => {
                 let e = f.env(regs).ok_or_else(|| a.throw(ErrorKind::Reference, "no context"))?;
                 *acc = e.load(Self::env_index(o[0]));
@@ -1605,11 +1614,27 @@ impl Executor {
                 let nt = *acc;
                 return self.construct_from(a, st, callee, args, nt, level + 1);
             }
+            B::CallJSRuntime => {
+                let list = Self::reg_list(regs, f, o[1], o[2]);
+                let arg = |i: usize| list.get(i).copied().unwrap_or_default();
+                return match NativeContextIndex::from_u8(u8::try_from(o[0]).unwrap_or(u8::MAX)) {
+                    Some(NativeContextIndex::ReflectApply) => {
+                        let args = a.list_from_array_like(arg(2))?;
+                        self.call_from(a, st, arg(0), arg(1), Args::Values(&args), level + 1)
+                    }
+                    Some(NativeContextIndex::ReflectConstruct) => {
+                        let args = a.list_from_array_like(arg(1))?;
+                        let new_target = if list.len() > 2 { arg(2) } else { arg(0) };
+                        self.construct_from(a, st, arg(0), args, new_target, level + 1)
+                    }
+                    _ => Err(a.throw(ErrorKind::Type, "unsupported native context function")),
+                };
+            }
             B::CallRuntime | B::InvokeIntrinsic => {
                 let args = Self::reg_list(regs, f, o[1], o[2]);
                 st.acc = if d.bytecode == B::InvokeIntrinsic {
                     let i = Intrinsic::from_u8(u8::try_from(o[0]).unwrap_or(u8::MAX)).ok_or_else(|| a.throw(ErrorKind::Type, "unknown intrinsic"))?;
-                    self.intrinsic(a, i, &args)?
+                    if i == Intrinsic::GetImportMetaObject { self.import_meta(a, loaded.base)? } else { self.intrinsic(a, i, &args)? }
                 } else {
                     let rt = Runtime::from_u16(u16::try_from(o[0]).unwrap_or(u16::MAX)).ok_or_else(|| a.throw(ErrorKind::Type, "unknown runtime function"))?;
                     self.runtime(a, st, loaded, rt, &args)?
@@ -2091,7 +2116,7 @@ impl Executor {
                 }
                 let strict = arg(3).as_number().is_some_and(|x| x != 0.0);
                 let src = alloc::string::String::from(&**s);
-                let module = match Module::compile_direct(&j8framework::Source { text: &src, file: "[eval]" }, strict) {
+                let module = match Module::compile_direct(&j8framework::Source { text: &src, file: EVAL_FILE }, strict) {
                     Ok(m) => m,
                     Err(Error::Syntax(m)) => return Err(a.throw(ErrorKind::Syntax, &m)),
                     Err(e) => return Err(e),
@@ -2099,6 +2124,10 @@ impl Executor {
                 let main = self.load(module);
                 let closure = Closure::new(main, st.f().env(&st.regs));
                 Ok(self.function_object(a, closure).into())
+            }
+            Runtime::DynamicImportCall => {
+                let referrer = self.referrer(a, loaded.base);
+                self.dynamic_import(a, &referrer, arg(1), self.depth.get() + 1)
             }
             Runtime::DeleteLookupSlot => {
                 let name = text(a, arg(0))?;
@@ -2228,12 +2257,13 @@ impl<'gc> Invoke<'gc> for Executor {
     }
 
     fn eval_code(&self, a: &mut Agent<'gc, '_>, src: &str, kind: j8framework::CodeKind) -> Result<Value<'gc>, Error> {
-        let module = match Module::compile(&j8framework::Source { text: src, file: "[eval]" }, kind) {
+        let file = Executor::source_url(src).unwrap_or(EVAL_FILE);
+        let module = match Module::compile(&j8framework::Source { text: src, file }, kind) {
             Ok(m) => m,
             Err(Error::Syntax(m)) => return Err(a.throw(ErrorKind::Syntax, &m)),
             Err(e) => return Err(e),
         };
-        let main = self.load(module);
+        let main = self.load_script(module, file);
         let level = self.depth.get() + 1;
         if level >= STACK_LIMIT {
             return Err(a.throw(ErrorKind::Range, "Maximum call stack size exceeded"));
@@ -2358,11 +2388,14 @@ impl j8framework::Engine for Executor {
 
     fn start(&mut self, _: &mut j8framework::Isolate<'_>, _: &j8framework::ContextRoot, src: &j8framework::Source<'_>, kind: j8framework::ScriptKind) -> Result<Job, Error> {
         Ok(Job(match kind {
-            j8framework::ScriptKind::Classic => Started::Script(self.load(Module::compile(src, j8framework::CodeKind::Script)?)),
-            j8framework::ScriptKind::Shared => Started::Script(self.load(match &self.cache {
-                Some(cache) => cache.script(src)?,
-                None => Module::compile(src, j8framework::CodeKind::Script)?,
-            })),
+            j8framework::ScriptKind::Classic => Started::Script(self.load_script(Module::compile(src, j8framework::CodeKind::Script)?, src.file)),
+            j8framework::ScriptKind::Shared => Started::Script(self.load_script(
+                match &self.cache {
+                    Some(cache) => cache.script(src)?,
+                    None => Module::compile(src, j8framework::CodeKind::Script)?,
+                },
+                src.file,
+            )),
             j8framework::ScriptKind::Module => Started::Module { text: src.text.into(), file: src.file.into() },
         }))
     }

@@ -65,8 +65,8 @@ dune upgrade --tag v0.4.0
 
 | 平台 | Release 包 | JIT |
 |---|---|---|
-| Linux x64（glibc 2.17+） | `dune-linux-x64.tar.gz` | 有 |
-| Linux arm64（glibc 2.17+） | `dune-linux-arm64.tar.gz` | 无 |
+| Linux x64（glibc 2.28+） | `dune-linux-x64.tar.gz` | 有 |
+| Linux arm64（glibc 2.28+） | `dune-linux-arm64.tar.gz` | 无 |
 | macOS x64 / arm64 | `dune-darwin-x64.tar.gz` / `dune-darwin-arm64.tar.gz` | 仅 x64 |
 | Windows x64 / arm64 | `dune-win32-x64.tar.gz` / `dune-win32-arm64.tar.gz` | 无 |
 

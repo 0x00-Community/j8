@@ -1,7 +1,7 @@
 #![allow(clippy::cast_possible_wrap, reason = "constant pool and feedback indices are far below i64::MAX")]
 use alloc::vec::Vec;
 
-use j8bytecode::{Bytecode, BytecodeArray, CatchPrediction, Constant, Encoder, FeedbackSlotKind, HandlerEntry, Intrinsic, OperandScale, OperandValue, Register, Runtime, TypeOfLiteral};
+use j8bytecode::{Bytecode, BytecodeArray, CatchPrediction, Constant, Encoder, FeedbackSlotKind, HandlerEntry, Intrinsic, NativeContextIndex, OperandScale, OperandValue, Register, Runtime, TypeOfLiteral};
 use j8framework::{BinaryOp, CompareOp};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -658,6 +658,10 @@ impl Builder {
             Some(i) => self.out(Bytecode::InvokeIntrinsic, &[OperandValue::from(i as u8), i32::from(args.first).into(), args.count.into()]),
             None => self.out(Bytecode::CallRuntime, &[OperandValue::from(f as u16), i32::from(args.first).into(), args.count.into()]),
         };
+    }
+
+    pub fn call_js_runtime(&mut self, f: NativeContextIndex, args: RegisterList) {
+        self.out(Bytecode::CallJSRuntime, &[OperandValue::from(f as u16), i32::from(args.first).into(), args.count.into()]);
     }
 
     fn intrinsic(f: Runtime) -> Option<Intrinsic> {
