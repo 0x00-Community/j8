@@ -129,14 +129,6 @@ impl Shape {
         let child = Arc::new(Self { tree: IsoCell::new(self.tree.get()), ..Self::new(keys, self.len + 1) });
         &self.transitions.push((SmallStr::from(key), attrs, child)).2
     }
-
-    fn child(&self, key: &str, attrs: Attrs) -> Arc<Self> {
-        let c = self.child_ref(key, attrs);
-        unsafe {
-            Arc::increment_strong_count(c);
-            Arc::from_raw(c)
-        }
-    }
 }
 
 #[derive(Collect)]
@@ -501,12 +493,6 @@ impl<'gc> Props<'gc> {
         {
             self.anchor(mc, s);
         }
-    }
-
-    pub fn transition(&self, key: &str, prop: &Property<'gc>) -> Option<Arc<Shape>> {
-        let attrs = Attrs::from(prop);
-        let s = self.shape()?;
-        (s.len() < MAX_FAST).then(|| s.child(key, attrs))
     }
 
     pub fn replace(&self, mc: &Mutation<'gc>, i: usize, prop: Property<'gc>) {

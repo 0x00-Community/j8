@@ -122,10 +122,6 @@ impl<'gc> Env<'gc> {
         Self { slots: EnvSlots::new(n, |_| values.next().unwrap_or_default()), parent, shape: None, extension: None }
     }
 
-    pub fn with_len(n: usize, parent: Option<JsEnv<'gc>>) -> Self {
-        Self { slots: EnvSlots::new(n, |_| Value::Undefined), parent, shape: None, extension: None }
-    }
-
     pub fn context(n: usize, init: Value<'gc>, parent: Option<JsEnv<'gc>>, shape: Option<ShapeId>, extension: Option<JsObject<'gc>>) -> Self {
         Self { slots: EnvSlots::new(n, |_| init), parent, shape, extension }
     }
@@ -885,16 +881,6 @@ impl<'gc> ObjectState<'gc> {
         }
     }
 
-    pub fn remove_symbol(&mut self, key: JsSymbol<'gc>) -> bool {
-        match self.symbols.iter().position(|(k, _)| Gc::ptr_eq(*k, key)) {
-            Some(i) if self.symbols[i].1.configurable => {
-                self.symbols.remove(i);
-                true
-            }
-            Some(_) => false,
-            None => true,
-        }
-    }
 }
 
 impl fmt::Debug for ObjectState<'_> {
@@ -1156,10 +1142,6 @@ impl<'gc> ObjMut<'_, 'gc> {
 
     pub fn set_length_readonly(&self, v: bool) {
         self.obj.length_readonly.set(v);
-    }
-
-    pub fn set_sparse_length(&self, v: u32) {
-        self.obj.sparse_length.set(v);
     }
 
     pub fn write_index(&self, i: u32, value: Value<'gc>) -> bool {

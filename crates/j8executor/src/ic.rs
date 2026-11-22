@@ -313,9 +313,6 @@ impl Ic {
         Some(PropertyFeedback { shape, slot, depth, chain, to })
     }
 
-    pub fn adds(&self) -> bool {
-        self.adds.get()
-    }
 }
 
 #[derive(Clone)]

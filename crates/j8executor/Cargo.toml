@@ -12,7 +12,6 @@ j8framework.workspace = true
 j8lockfree.workspace = true
 j8bytecode.workspace = true
 j8compiler.workspace = true
-j8macros.workspace = true
 ryu-js.workspace = true
 
 [dev-dependencies]

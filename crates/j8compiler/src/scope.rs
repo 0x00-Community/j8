@@ -451,10 +451,6 @@ impl Hidden {
         alloc.alloc_str(&format!("%with@eval@{}", params.span.start))
     }
 
-    pub fn is_eval_vars(name: &str) -> bool {
-        name.starts_with("%with@eval@")
-    }
-
     pub fn with(alloc: &Allocator, span: Span) -> &str {
         alloc.alloc_str(&format!("%with@{}", span.start))
     }

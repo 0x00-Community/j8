@@ -53,11 +53,7 @@ pub struct ContextVariable {
 pub struct Context;
 
 impl Context {
-    pub const SCOPE_INFO_INDEX: u32 = 0;
-    pub const PREVIOUS_INDEX: u32 = 1;
-    pub const EXTENSION_INDEX: u32 = 2;
     pub const MIN_SLOTS: u32 = 2;
-    pub const MIN_SLOTS_WITH_EXTENSION: u32 = 3;
 }
 
 #[derive(Clone, Debug)]
@@ -182,10 +178,6 @@ pub struct LiteralFlags;
 impl LiteralFlags {
     pub const NO_FLAGS: u8 = 0;
     pub const IS_SHALLOW: u8 = 1;
-    pub const DISABLE_MEMENTOS: u8 = 1 << 1;
-    pub const NEEDS_INITIAL_ALLOCATION_SITE: u8 = 1 << 2;
-    pub const IS_BREAK_AT_ENTRY: u8 = 1 << 3;
-    pub const HAS_NULL_PROTOTYPE: u8 = 1 << 3;
 }
 
 pub struct CreateClosureFlags;

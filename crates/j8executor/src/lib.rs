@@ -1173,7 +1173,6 @@ impl Executor {
         st.frames.push(next);
     }
 
-    #[expect(clippy::too_many_arguments, reason = "the parts of a call")]
     fn call_from<'gc>(&self, a: &mut Agent<'gc, '_>, st: &mut State<'gc>, callee: Value<'gc>, this: Value<'gc>, args: Args<'_, 'gc>, level: usize) -> Result<Flow<'gc>, Error> {
         if level >= STACK_LIMIT {
             return Err(a.throw(ErrorKind::Range, "Maximum call stack size exceeded"));

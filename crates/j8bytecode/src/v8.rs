@@ -138,10 +138,6 @@ impl Bytecode {
         Register((Self::LAST_SHORT_STAR as u8 - self as u8) as i32)
     }
 
-    pub fn has_scalable_operands(self) -> bool {
-        self.operand_types().iter().any(|t| t.info().is_scalable())
-    }
-
     pub fn operand_offset(self, i: usize, scale: OperandScale) -> usize {
         1 + self.operand_types()[..i].iter().map(|t| usize::from(t.size(scale))).sum::<usize>()
     }
@@ -164,7 +160,6 @@ pub struct Register(pub i32);
 
 impl Register {
     pub const REGISTER_FILE_FROM_FP: i32 = -7;
-    pub const CALLER_PC_FROM_FP: i32 = 1;
     pub const FIRST_PARAM_FROM_FP: i32 = 2;
     pub const CONTEXT_FROM_FP: i32 = -1;
     pub const FUNCTION_FROM_FP: i32 = -2;
@@ -183,22 +178,6 @@ impl Register {
 
     pub const fn current_context() -> Self {
         Self::at_fp_slot(Self::CONTEXT_FROM_FP)
-    }
-
-    pub const fn bytecode_array() -> Self {
-        Self::at_fp_slot(Self::BYTECODE_ARRAY_FROM_FP)
-    }
-
-    pub const fn bytecode_offset() -> Self {
-        Self::at_fp_slot(Self::BYTECODE_OFFSET_FROM_FP)
-    }
-
-    pub const fn feedback_vector() -> Self {
-        Self::at_fp_slot(Self::FEEDBACK_VECTOR_FROM_FP)
-    }
-
-    pub const fn argument_count() -> Self {
-        Self::at_fp_slot(Self::ARGC_FROM_FP)
     }
 
     pub const fn parameter(i: i32) -> Self {

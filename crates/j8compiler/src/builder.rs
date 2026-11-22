@@ -1,7 +1,7 @@
 #![allow(clippy::cast_possible_wrap, reason = "constant pool and feedback indices are far below i64::MAX")]
 use alloc::vec::Vec;
 
-use j8bytecode::{Bytecode, BytecodeArray, CatchPrediction, Constant, Encoder, FeedbackSlotKind, HandlerEntry, Intrinsic, NativeContextIndex, OperandScale, OperandValue, Register, Runtime, TypeOfLiteral};
+use j8bytecode::{Bytecode, BytecodeArray, CatchPrediction, Constant, Encoder, FeedbackSlotKind, HandlerEntry, Intrinsic, NativeContextIndex, OperandScale, OperandValue, Register, Runtime};
 use j8framework::{BinaryOp, CompareOp};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -98,10 +98,6 @@ impl Builder {
         s
     }
 
-    pub fn new_register(&mut self) -> Register {
-        self.new_register_list(1).first
-    }
-
     pub fn new_register_list(&mut self, count: u32) -> RegisterList {
         let first = Register(self.next);
         self.next += i32::try_from(count).unwrap_or(i32::MAX);
@@ -116,15 +112,6 @@ impl Builder {
     pub fn release_to(&mut self, mark: i32) {
         debug_assert!(mark >= self.locals && mark <= self.next);
         self.next = mark;
-    }
-
-    pub fn new_local(&mut self) -> Register {
-        debug_assert_eq!(self.next, self.locals, "locals are allocated before temporaries");
-        let r = Register(self.locals);
-        self.locals += 1;
-        self.next = self.locals;
-        self.max = self.max.max(self.next);
-        r
     }
 
     pub fn constant(&mut self, c: Constant) -> usize {
@@ -285,10 +272,6 @@ impl Builder {
         self.out(Bytecode::CreateWithContext, &[i32::from(object).into(), scope as OperandValue]);
     }
 
-    pub fn create_eval_context(&mut self, scope: usize, slots: u32) {
-        self.out(Bytecode::CreateEvalContext, &[scope as OperandValue, slots.into()]);
-    }
-
     pub fn load_lookup_slot(&mut self, name: &str, inside_typeof: bool) {
         let k = self.name(name);
         self.out(if inside_typeof { Bytecode::LdaLookupSlotInsideTypeof } else { Bytecode::LdaLookupSlot }, &[k as OperandValue]);
@@ -421,22 +404,6 @@ impl Builder {
         if negate {
             self.out(Bytecode::LogicalNot, &[]);
         }
-    }
-
-    pub fn test_typeof(&mut self, literal: TypeOfLiteral) {
-        self.out(Bytecode::TestTypeOf, &[OperandValue::from(literal as u8)]);
-    }
-
-    pub fn test_undetectable(&mut self) {
-        self.out(Bytecode::TestUndetectable, &[]);
-    }
-
-    pub fn test_null(&mut self) {
-        self.out(Bytecode::TestNull, &[]);
-    }
-
-    pub fn test_undefined(&mut self) {
-        self.out(Bytecode::TestUndefined, &[]);
     }
 
     pub fn test_reference_equal(&mut self, reg: Register) {
@@ -633,11 +600,6 @@ impl Builder {
         };
     }
 
-    pub fn call_any_receiver(&mut self, callable: Register, args: RegisterList) {
-        let s = self.slot(FeedbackSlotKind::Call);
-        self.out(Bytecode::CallAnyReceiver, &[i32::from(callable).into(), i32::from(args.first).into(), args.count.into(), s as OperandValue]);
-    }
-
     pub fn call_with_spread(&mut self, callable: Register, args: RegisterList) {
         let s = self.slot(FeedbackSlotKind::Call);
         self.out(Bytecode::CallWithSpread, &[i32::from(callable).into(), i32::from(args.first).into(), args.count.into(), s as OperandValue]);
@@ -698,11 +660,6 @@ impl Builder {
     pub fn get_template_object(&mut self, template: usize) {
         let s = self.slot(FeedbackSlotKind::Literal);
         self.out(Bytecode::GetTemplateObject, &[template as OperandValue, s as OperandValue]);
-    }
-
-    pub fn clone_object(&mut self, source: Register, flags: u8) {
-        let s = self.slot(FeedbackSlotKind::CloneObject);
-        self.out(Bytecode::CloneObject, &[i32::from(source).into(), flags.into(), s as OperandValue]);
     }
 
     pub fn get_iterator(&mut self, object: Register) {
