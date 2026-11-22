@@ -2,7 +2,8 @@
 (function (native) {
   'use strict';
   const raw = native.fs;
-  const { Buffer, codec } = native;
+  const { codec } = native;
+  const Buffer = { from: (...args) => native.builtin('buffer').Buffer.from(...args), wrap: (b) => native.builtin('buffer').Buffer.from(b.buffer, b.byteOffset, b.byteLength) };
   const constants = { F_OK: 0, R_OK: 4, W_OK: 2, X_OK: 1, O_RDONLY: 0, O_WRONLY: 1, O_RDWR: 2, O_CREAT: 64, O_EXCL: 128, O_TRUNC: 512, O_APPEND: 1024, S_IFMT: 61440, S_IFREG: 32768, S_IFDIR: 16384, S_IFLNK: 40960, COPYFILE_EXCL: 1 };
 
   /** Adds `code` / `errno` / `syscall` / `path` to the native error (its message starts with the code) */
