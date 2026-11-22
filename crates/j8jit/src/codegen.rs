@@ -948,7 +948,7 @@ impl<'g> Gen<'g> {
             Op::CheckNotLazy(x, fs) => {
                 let r = self.gpr(x, RAX);
                 self.a.mov_rr(RCX, r);
-                self.a.shift_ri(5, true, RCX, u8::try_from(ValueBits::TAG_SHIFT).unwrap_or(48));
+                self.a.shift_ri(Shift::Shr, true, RCX, u8::try_from(ValueBits::TAG_SHIFT).unwrap_or(48));
                 self.a.alu_ri(Alu::Cmp, false, RCX, i32::try_from(Value::LAZY_TAG).unwrap_or(0));
                 self.exit_if(Cc::E, fs, Reason::Shape);
             }
