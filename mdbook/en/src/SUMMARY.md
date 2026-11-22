@@ -27,6 +27,7 @@
 
 - [Building a host](embedding.md)
 - [Binding macros](bindings.md)
+- [Custom content with the macros: iterators and async](custom-host.md)
 - [Async and promises](async.md)
 - [Modules](modules.md)
 - [Node-API](napi.md)
