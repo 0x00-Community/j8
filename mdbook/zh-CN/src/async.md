@@ -1,6 +1,7 @@
 # 异步与 Promise
 
 j8 不带异步运行时（没有 tokio）。每个 `j8::Runtime` 就是一个[事件循环](event-loop.md)：`eval` 与 `run_until_idle` 驱动它。
+异步迭代器、Rust 活干完时回调 JS：见[用宏开发自定义内容](custom-host.md)。
 
 ## 核心规则：future 必须唤醒它的 waker
 

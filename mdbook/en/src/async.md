@@ -2,6 +2,7 @@
 
 j8 has no async runtime (no tokio). Each `j8::Runtime` is one [event loop](event-loop.md), driven by `eval` and
 `run_until_idle`.
+Async iterators and calling back into JS when Rust work finishes: [Custom content with the macros](custom-host.md).
 
 ## The core rule: a future must wake its waker
 

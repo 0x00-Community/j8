@@ -27,6 +27,7 @@
 
 - [搭一个宿主](embedding.md)
 - [绑定宏](bindings.md)
+- [用宏开发自定义内容：迭代器与异步](custom-host.md)
 - [异步与 Promise](async.md)
 - [模块](modules.md)
 - [Node-API](napi.md)

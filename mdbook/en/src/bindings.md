@@ -4,6 +4,7 @@ The macros are in `crates/macros` (j8macros), written `#[j8::class]` and so on t
 side is `crates/j8binding`, V8's `FunctionTemplate` / `ObjectTemplate`. Each macro has its own file (`class.rs` /
 `object.rs` / `function.rs`); reading `#[js(…)]`, analyzing signatures and generating the conversion wrapper is shared in
 `method.rs`.
+A worked example focused on iterators and async in both directions: [Custom content with the macros](custom-host.md).
 
 ## `#[j8::class]`: a Rust type as a JS class
 

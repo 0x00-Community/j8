@@ -3,6 +3,7 @@
 宏在 `crates/macros`（j8macros），经门面 crate 写成 `#[j8::class]` 等；运行时支撑在 `crates/j8binding`，对应 V8 的
 `FunctionTemplate` / `ObjectTemplate`。三个宏各一个文件（`class.rs` / `object.rs` / `function.rs`），读 `#[js(…)]`、
 分析签名、生成转换包装的共用代码在 `method.rs`。
+迭代器与异步双向交互的完整示例见[用宏开发自定义内容](custom-host.md)。
 
 ## `#[j8::class]`：Rust 类型导出为 JS 类
 
