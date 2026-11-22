@@ -12,6 +12,7 @@ pub struct Tables {
     bytecodes: Vec<Code>,
     runtime: Vec<RuntimeFn>,
     intrinsics: Vec<IntrinsicFn>,
+    native_context: Vec<String>,
     function_kinds: Vec<String>,
     feedback_slot_kinds: Vec<SlotKind>,
     scope_types: Vec<String>,
@@ -38,12 +39,15 @@ fn camel(name: &str) -> String {
 fn simple_enum(name: &str, doc: &str, variants: &[String]) -> TokenStream {
     let ident = format_ident!("{name}");
     let vs: Vec<_> = variants.iter().map(|v| format_ident!("{}", camel(v))).collect();
-    let tags = (0..vs.len()).map(|i| u8::try_from(i).unwrap_or(u8::MAX));
     let n = vs.len();
+    let (repr, tags): (_, Vec<_>) = match u8::try_from(n) {
+        Ok(_) => (format_ident!("u8"), (0..n).map(|i| proc_macro2::Literal::u8_unsuffixed(u8::try_from(i).unwrap_or(u8::MAX))).collect()),
+        Err(_) => (format_ident!("u16"), (0..n).map(|i| proc_macro2::Literal::u16_unsuffixed(u16::try_from(i).unwrap_or(u16::MAX))).collect()),
+    };
     quote! {
         #[doc = #doc]
         #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-        #[repr(u8)]
+        #[repr(#repr)]
         pub enum #ident { #(#vs = #tags),* }
         impl #ident {
             pub const ALL: [#ident; #n] = [#(#ident::#vs),*];
@@ -129,6 +133,7 @@ impl Tables {
         let kinds = simple_enum("FunctionKind", "V8's `FunctionKind`.", &self.function_kinds);
         let scopes = simple_enum("ScopeType", "V8's `ScopeType`.", &self.scope_types);
         let modes = simple_enum("VariableMode", "V8's `VariableMode`.", &self.variable_modes);
+        let native_context = simple_enum("NativeContextIndex", "V8's native `Context::Field`.", &self.native_context);
         let slot_names: Vec<String> = self.feedback_slot_kinds.iter().map(|k| k.name.clone()).collect();
         let slots = simple_enum("FeedbackSlotKind", "V8's `FeedbackSlotKind`.", &slot_names);
         let slot_vs: Vec<_> = slot_names.iter().map(|n| format_ident!("{n}")).collect();
@@ -178,6 +183,7 @@ impl Tables {
             #runtime
             #kinds
             #scopes
+            #native_context
             #modes
             #slots
 

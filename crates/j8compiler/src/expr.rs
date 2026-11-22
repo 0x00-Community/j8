@@ -8,8 +8,10 @@ use j8framework::{BinaryOp, CompareOp, Error};
 use crate::builder::{Label, RegisterList};
 use crate::compiler::{Body, Compiler, Flavor, Kind, Place, Private};
 use crate::scope::{Hidden, THIS};
-use j8bytecode::{ArrayBoilerplate, Bytecode, Constant, CreateArrayLiteralFlags, CreateObjectLiteralFlags, LiteralFlags, LiteralValue, ObjectBoilerplate, Register, Runtime, TemplateObject, TypeOfLiteral};
+use j8bytecode::{ArrayBoilerplate, Bytecode, Constant, CreateArrayLiteralFlags, CreateObjectLiteralFlags, LiteralFlags, LiteralValue, NativeContextIndex, ObjectBoilerplate, Register, Runtime, TemplateObject, TypeOfLiteral};
 
+const DYNAMIC_IMPORT_ARGS: u32 = 3;
+const IMPORT_PHASE_EVALUATION: i32 = 2;
 const REGEXP_FLAGS: [(char, u16); 9] = [('g', 1), ('i', 1 << 1), ('m', 1 << 2), ('y', 1 << 3), ('u', 1 << 4), ('s', 1 << 5), ('l', 1 << 6), ('d', 1 << 7), ('v', 1 << 8)];
 
 #[derive(Clone, Copy)]
@@ -24,6 +26,13 @@ enum Assign {
     Plain,
     Binary(BinaryOp),
     Logical(LogicalOperator),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Spread {
+    None,
+    Last,
+    Array,
 }
 
 enum Element<'a> {
@@ -198,11 +207,16 @@ impl<'a> Compiler<'a, '_> {
                 self.expr(&n.callee)?;
                 self.b().star(callee);
                 let (args, spread) = self.argument_list(&n.arguments, None)?;
-                self.b().ldar(callee);
-                if spread {
-                    self.b().construct_with_spread(callee, args);
-                } else {
-                    self.b().construct(callee, args);
+                match spread {
+                    Spread::Array => self.reflect(NativeContextIndex::ReflectConstruct, &[callee, args.first]),
+                    Spread::Last => {
+                        self.b().ldar(callee);
+                        self.b().construct_with_spread(callee, args);
+                    }
+                    Spread::None => {
+                        self.b().ldar(callee);
+                        self.b().construct(callee, args);
+                    }
                 }
                 self.release(callee);
             }
@@ -349,6 +363,21 @@ impl<'a> Compiler<'a, '_> {
                 }
                 self.yield_value();
             }
+            Expression::ImportExpression(i) => {
+                let args = self.b().new_register_list(if i.options.is_some() { DYNAMIC_IMPORT_ARGS + 1 } else { DYNAMIC_IMPORT_ARGS });
+                self.b().mov(Register::function_closure(), args.first);
+                self.expr(&i.source)?;
+                self.b().star(args.at(1));
+                self.b().load_smi(IMPORT_PHASE_EVALUATION);
+                self.b().star(args.at(2));
+                if let Some(o) = &i.options {
+                    self.expr(o)?;
+                    self.b().star(args.at(DYNAMIC_IMPORT_ARGS));
+                }
+                self.b().call_runtime(Runtime::DynamicImportCall, args);
+                self.release(args.first);
+            }
+            Expression::ImportMeta(_) => self.b().call_runtime(Runtime::InlineGetImportMetaObject, RegisterList::EMPTY),
             e => return Err(self.unsupported(e.span(), "expression")),
         }
         Ok(())
@@ -681,11 +710,16 @@ impl<'a> Compiler<'a, '_> {
         self.b().jump(Bytecode::JumpIfTrue, &mut done);
         self.b().raw(Bytecode::ThrowIfNotSuperConstructor, &[i32::from(pair.at(1)).into()]);
         let (args, spread) = self.argument_list(&c.arguments, None)?;
-        self.b().ldar(new_target);
-        if spread {
-            self.b().construct_with_spread(pair.at(1), args);
-        } else {
-            self.b().construct(pair.at(1), args);
+        match spread {
+            Spread::Array => self.reflect(NativeContextIndex::ReflectConstruct, &[pair.at(1), args.first, new_target]),
+            Spread::Last => {
+                self.b().ldar(new_target);
+                self.b().construct_with_spread(pair.at(1), args);
+            }
+            Spread::None => {
+                self.b().ldar(new_target);
+                self.b().construct(pair.at(1), args);
+            }
         }
         self.b().star(pair.at(1));
         self.b().bind(&mut done);
@@ -790,10 +824,11 @@ impl<'a> Compiler<'a, '_> {
         Ok(())
     }
 
-    fn argument_list(&mut self, args: &'a [Argument<'a>], receiver: Option<Register>) -> Result<(RegisterList, bool), Error> {
+    fn argument_list(&mut self, args: &'a [Argument<'a>], receiver: Option<Register>) -> Result<(RegisterList, Spread), Error> {
         let spread_at = args.iter().position(|a| matches!(a, Argument::SpreadElement(_)));
         if spread_at.is_some_and(|i| i + 1 != args.len()) {
-            return Err(self.unsupported(args[spread_at.unwrap_or(0)].span(), "a spread argument before the last"));
+            let arr = self.spread_array(args.iter().map(Element::from))?;
+            return Ok((RegisterList { first: arr, count: 1 }, Spread::Array));
         }
         let n = u32::try_from(args.len()).map_err(|_| self.unsupported(Span::default(), "too many arguments"))?;
         let list = self.b().new_register_list(n);
@@ -809,7 +844,7 @@ impl<'a> Compiler<'a, '_> {
             Some(r) => RegisterList { first: r, count: n + 1 },
             None => list,
         };
-        Ok((out, spread_at.is_some()))
+        Ok((out, if spread_at.is_some() { Spread::Last } else { Spread::None }))
     }
 
     fn call(&mut self, c: &'a CallExpression<'a>) -> Result<(), Error> {
@@ -869,13 +904,34 @@ impl<'a> Compiler<'a, '_> {
         };
         self.optional(c.optional, c.span)?;
         self.b().star(callee);
+        let receiver = match receiver {
+            None if matches!(c.arguments.last(), Some(Argument::SpreadElement(_))) => {
+                let r = self.temp();
+                self.b().load_undefined();
+                self.b().star(r);
+                Some(r)
+            }
+            r => r,
+        };
         let (args, spread) = self.argument_list(&c.arguments, receiver)?;
-        let eval = receiver.is_none() && matches!(&c.callee, Expression::Identifier(id) if id.name == "eval") && !spread;
+        let eval = receiver.is_none() && matches!(&c.callee, Expression::Identifier(id) if id.name == "eval") && spread == Spread::None;
         if eval {
             self.resolve_possibly_direct_eval(callee, args, c.span);
         }
         match (receiver, spread) {
-            (_, true) => {
+            (_, Spread::Array) => {
+                let this = match receiver {
+                    Some(r) => r,
+                    None => {
+                        let r = self.temp();
+                        self.b().load_undefined();
+                        self.b().star(r);
+                        r
+                    }
+                };
+                self.reflect(NativeContextIndex::ReflectApply, &[callee, this, args.first]);
+            }
+            (_, Spread::Last) => {
                 let list = match receiver {
                     Some(r) => RegisterList { first: r, count: args.count },
                     None => {
@@ -884,11 +940,20 @@ impl<'a> Compiler<'a, '_> {
                 };
                 self.b().call_with_spread(callee, list);
             }
-            (Some(_), false) => self.b().call_property(callee, args),
-            (None, false) => self.b().call_undefined_receiver(callee, args),
+            (Some(_), Spread::None) => self.b().call_property(callee, args),
+            (None, Spread::None) => self.b().call_undefined_receiver(callee, args),
         }
         self.release(callee);
         Ok(())
+    }
+
+    fn reflect(&mut self, f: NativeContextIndex, operands: &[Register]) {
+        let list = self.b().new_register_list(u32::try_from(operands.len()).unwrap_or(u32::MAX));
+        for (i, &r) in (0u32..).zip(operands) {
+            self.b().mov(r, list.at(i));
+        }
+        self.b().call_js_runtime(f, list);
+        self.release(list.first);
     }
 
     fn resolve_possibly_direct_eval(&mut self, callee: Register, args: RegisterList, span: Span) {

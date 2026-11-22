@@ -516,7 +516,7 @@ impl Compiler<'_, '_> {
         let eval_scopes: HashSet<oxc_syntax::scope::ScopeId> = scoping.scope_descendants_from_root().filter(|&id| scoping.scope_flags(id).contains_direct_eval()).collect();
         let (names, info) = Compiler::module_layout(program);
         let order: Vec<&str> = names.iter().map(|&(n, _)| n).collect();
-        let Resolver { captured, used, eval_fns, suspends, .. } = Resolver::script(&program.body, Decls::this_key(program.span), &allocator, None, true, eval_scopes, Some(&[order]));
+        let Resolver { captured, used, eval_fns, suspends, suspend_count, .. } = Resolver::script(&program.body, Decls::this_key(program.span), &allocator, None, true, eval_scopes, Some(&[order]));
         let mut c = Compiler { src, alloc: &allocator, captured, used, class_depth: 0, module: Vec::new(), frames: Vec::new(), levels: Vec::new(), chains: Vec::new(), eval_fns, suspends, completion_assign: HashSet::new(), completion_reset: HashSet::new(), for_init_text: None, classes: Vec::new(), next_home: None };
         let bound = names
             .iter()
@@ -525,6 +525,9 @@ impl Compiler<'_, '_> {
                 ModuleName::Import(i) => Bound { name, binding: Binding::Import(-1 - i32::from(i)), constant: true, ready: None, self_name: false },
             })
             .collect();
+        if suspend_count > 0 {
+            return Err(c.unsupported(program.span, "top-level await"));
+        }
         c.levels.push(Level { func: usize::MAX, names: bound, context: Some(Register::current_context()), scope: None, dynamic: false, mark: 0, switch: false, cells: false });
         c.module_body(program)?;
         Ok((Module { functions: c.module }, info))
@@ -2323,7 +2326,87 @@ impl<'a> Compiler<'a, '_> {
     }
 
     fn module_body(&mut self, program: &'a Program<'a>) -> Result<(), Error> {
-        Err(self.unsupported(program.span, "modules"))
+        use oxc_ast::ast::{Declaration, ExportDefaultDeclarationKind};
+        self.module.push(SharedFunction { name: "".into(), kind: FunctionKind::Module, strict: true, length: 0, formal_parameters: 0, scope: None, bytecode: j8bytecode::BytecodeArray::default() });
+        self.frames.push(Frame {
+            index: 0,
+            b: Builder::new(1, 0),
+            name: "".into(),
+            flavor: Flavor { strict: true, ..Flavor::default() },
+            default_constructor: false,
+            length: 0,
+            formals: 0,
+            scope: None,
+            contexts: Vec::new(),
+            loop_depth: 0,
+            controls: Vec::new(),
+            label: None,
+            completion: None,
+            generator: None,
+            suspends: 0,
+            resume_table: None,
+            home: None,
+            async_generator: false,
+            strict: true,
+            annexb: Vec::new(),
+            var_level: None,
+            eval: false,
+            prologue: false,
+            simple_params: false,
+        });
+        for s in &program.body {
+            let (f, name, inferred) = match s {
+                Statement::FunctionDeclaration(f) => (f, f.id.as_ref().map(|i| i.name.as_str()), ""),
+                Statement::ExportDeclaration(e) => match &e.declaration {
+                    Declaration::FunctionDeclaration(f) => (f, f.id.as_ref().map(|i| i.name.as_str()), ""),
+                    _ => continue,
+                },
+                Statement::ExportDefaultDeclaration(e) => match &e.declaration {
+                    ExportDefaultDeclarationKind::FunctionDeclaration(f) => (f, Some(f.id.as_ref().map_or(DEFAULT_BINDING, |i| i.name.as_str())), "default"),
+                    _ => continue,
+                },
+                _ => continue,
+            };
+            let Some(name) = name else { continue };
+            let n = self.plain_function(f, false, inferred)?;
+            self.closure(n);
+            self.store(name, true);
+        }
+        for s in &program.body {
+            match s {
+                Statement::ImportDeclaration(_) | Statement::ExportAllDeclaration(_) | Statement::FunctionDeclaration(_) | Statement::ExportNamedDeclaration(_) | Statement::ExportFromDeclaration(_) => {}
+                Statement::ExportDeclaration(e) => match &e.declaration {
+                    Declaration::VariableDeclaration(v) => self.declaration(v)?,
+                    Declaration::ClassDeclaration(c) => {
+                        self.class(c, "")?;
+                        if let Some(id) = &c.id {
+                            self.store(id.name.as_str(), true);
+                        }
+                    }
+                    Declaration::FunctionDeclaration(_) => {}
+                    _ => return Err(self.unsupported(e.span, "declaration")),
+                },
+                Statement::ExportDefaultDeclaration(e) => match &e.declaration {
+                    ExportDefaultDeclarationKind::FunctionDeclaration(_) => {}
+                    ExportDefaultDeclarationKind::ClassDeclaration(c) => {
+                        self.class(c, "default")?;
+                        self.store(c.id.as_ref().map_or(DEFAULT_BINDING, |i| i.name.as_str()), true);
+                    }
+                    other => {
+                        let e = other.as_expression().ok_or_else(|| self.unsupported(e.span, "default export"))?;
+                        self.expr_named(e, "default")?;
+                        self.store(DEFAULT_BINDING, true);
+                    }
+                },
+                s => self.statement(s)?,
+            }
+        }
+        self.b().load_undefined();
+        self.b().plain(Bytecode::Return);
+        let f = self.frames.pop().expect("the module's frame");
+        self.levels.clear();
+        self.module[0] = f.finish();
+        Ok(())
     }
 
     #[expect(clippy::too_many_lines, reason = "follows V8's GenerateBytecodeBody for a script / eval scope step by step")]

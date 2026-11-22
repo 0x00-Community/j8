@@ -488,7 +488,7 @@ pub(crate) struct Resolver<'a> {
     eval_scopes: HashSet<oxc_syntax::scope::ScopeId>,
     pub eval_fns: HashSet<u32>,
     pub suspends: HashMap<u32, u32>,
-    suspend_count: u32,
+    pub suspend_count: u32,
     async_generator: bool,
 }
 

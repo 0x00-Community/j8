@@ -6,6 +6,9 @@ use j8framework::{Agent, Closure, Error, ErrorKind, ImportName, ModuleStatus, Ob
 
 use crate::{Executor, Outcome};
 
+pub const EVAL_FILE: &str = "[eval]";
+const SOURCE_URL: &str = "//# sourceURL=";
+
 impl Executor {
     pub fn load_module(&self, a: &mut Agent<'_, '_>, path: &str, text: &str) -> Result<u32, Error> {
         if let Some(i) = a.modules().iter().position(|m| **m.path == *path) {
@@ -107,6 +110,25 @@ impl Executor {
             r.error = error;
         });
         r
+    }
+
+    pub fn load_script(&self, module: j8bytecode::Module, file: &str) -> j8framework::FuncId {
+        let main = self.load(module);
+        self.script_files.borrow_mut().insert(main.0 - j8bytecode::Module::MAIN, file.into());
+        main
+    }
+
+    pub fn source_url(src: &str) -> Option<&str> {
+        let at = src.rfind(SOURCE_URL)? + SOURCE_URL.len();
+        let url = src[at..].split(char::is_whitespace).next()?;
+        (!url.is_empty()).then_some(url)
+    }
+
+    pub fn referrer(&self, a: &Agent<'_, '_>, base: u32) -> String {
+        match self.module_index(base) {
+            Some(m) => String::from(&**a.modules()[m as usize].path),
+            None => self.script_files.borrow().get(&base).cloned().unwrap_or_default(),
+        }
     }
 
     pub fn module_index(&self, base: u32) -> Option<u32> {
