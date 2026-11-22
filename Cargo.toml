@@ -122,30 +122,30 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.4.1"
+version = "0.4.2"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/0x00-Community/j8"
 
 [workspace.dependencies]
-j8framework = { version = "0.4.1", path = "crates/j8framework" }
-j8platform = { version = "0.4.1", path = "crates/j8platform" }
-j8builtins = { version = "0.4.1", path = "crates/j8builtins" }
-j8bytecode = { version = "0.4.1", path = "crates/j8bytecode" }
-j8executor = { version = "0.4.1", path = "crates/j8executor" }
-j8compiler = { version = "0.4.1", path = "crates/j8compiler" }
-j8jit = { version = "0.4.1", path = "crates/j8jit" }
+j8framework = { version = "0.4.2", path = "crates/j8framework" }
+j8platform = { version = "0.4.2", path = "crates/j8platform" }
+j8builtins = { version = "0.4.2", path = "crates/j8builtins" }
+j8bytecode = { version = "0.4.2", path = "crates/j8bytecode" }
+j8executor = { version = "0.4.2", path = "crates/j8executor" }
+j8compiler = { version = "0.4.2", path = "crates/j8compiler" }
+j8jit = { version = "0.4.2", path = "crates/j8jit" }
 mlirpass = { version = "=0.10.4", default-features = false, features = ["target.x86_64"] }
 libc = "0.2"
-j8macros = { version = "0.4.1", path = "crates/macros" }
-j8binding = { version = "0.4.1", path = "crates/j8binding" }
-j8napi = { version = "0.4.1", path = "crates/j8napi" }
-j8 = { version = "0.4.1", path = "." }
+j8macros = { version = "0.4.2", path = "crates/macros" }
+j8binding = { version = "0.4.2", path = "crates/j8binding" }
+j8napi = { version = "0.4.2", path = "crates/j8napi" }
+j8 = { version = "0.4.2", path = "." }
 moremath = { version = "=0.2.3", default-features = false }
 libm = "0.2"
 paragc = "0.5.2"
-j8lockfree = { version = "0.4.1", path = "crates/j8lockfree" }
-j8taskqueue = { version = "0.4.1", path = "crates/j8taskqueue" }
+j8lockfree = { version = "0.4.2", path = "crates/j8lockfree" }
+j8taskqueue = { version = "0.4.2", path = "crates/j8taskqueue" }
 hashbrown = { version = "0.17", default-features = false }
 rustc-hash = { version = "2", default-features = false }
 ryu-js = { version = "1", default-features = false }
