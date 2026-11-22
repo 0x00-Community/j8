@@ -23,7 +23,7 @@
 | `j8bytecode` | bytecode definitions, byte for byte V8 Ignition's; the dependency root, depends on no other j8 crate |
 | `j8compiler` | JS ⇒ bytecode (oxc parses; code generation after V8's `BytecodeGenerator`) |
 | `j8executor` | the bytecode executor: implements `Engine`, with inline caches, sliced execution and the JIT hook |
-| `j8jit` | the speculative JIT (x86-64 Unix): implements the executor's `Tier` |
+| `j8jit` | the speculative JIT (x86-64 Unix and Windows): implements the executor's `Tier` |
 | `j8builtins` | the standard built-in objects: implements `Intrinsics` |
 | `j8platform` | the standard-library `Platform`: thread pool, clocks, module loading |
 | `j8binding` | the runtime side of Rust ⇄ JS bindings (`FromJs` / `IntoJs`, host objects) |

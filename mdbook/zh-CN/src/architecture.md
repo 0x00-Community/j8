@@ -23,7 +23,7 @@
 | `j8bytecode` | 字节码定义，与 V8 Ignition 逐字节一致；依赖根，不依赖其他 j8 crate |
 | `j8compiler` | JS ⇒ 字节码（oxc 解析，代码生成照 V8 的 `BytecodeGenerator`） |
 | `j8executor` | 字节码执行器：实现 `Engine`，带内联缓存、分片执行与 JIT 钩子 |
-| `j8jit` | 推测式 JIT（x86-64 Unix）：实现执行器的 `Tier` |
+| `j8jit` | 推测式 JIT（x86-64 Unix 和 Windows）：实现执行器的 `Tier` |
 | `j8builtins` | 标准内建对象：实现 `Intrinsics` |
 | `j8platform` | `Platform` 的标准库实现：线程池、时钟、模块加载 |
 | `j8binding` | Rust ⇄ JS 绑定的运行时（`FromJs` / `IntoJs`、宿主对象） |

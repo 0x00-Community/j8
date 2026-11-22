@@ -57,7 +57,7 @@ and [crates/macros/USAGE.md](crates/macros/USAGE.md) (the macro reference).
 
 ```sh
 cargo add j8                                    # default feature `runtime`: executor + builtins + standard platform
-cargo add j8 --features jit                     # plus the JIT (x86-64 Unix, AArch64 Linux)
+cargo add j8 --features jit                     # plus the JIT (x86-64 Unix and Windows, AArch64 Linux)
 cargo add j8 --no-default-features --features compiler   # only JS ⇒ bytecode
 ```
 

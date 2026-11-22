@@ -1,6 +1,6 @@
 # JIT: the speculative optimizing tier
 
-`crates/j8jit` is j8's JIT (x86-64 Unix, AArch64 Linux). It implements the executor's `Tier`: hot functions and hot loops are built
+`crates/j8jit` is j8's JIT (x86-64 Unix and Windows, AArch64 Linux). It implements the executor's `Tier`: hot functions and hot loops are built
 into a **speculative SSA graph** from the inline caches' feedback, optimized, and emitted as x86-64 or AArch64 machine code that
 runs directly on the interpreter's frames; when a speculation fails, it **deoptimizes** back to the interpreter.
 
@@ -114,7 +114,7 @@ Ctx  +0 budget  +8 pending  +16 global  +24 script scope  +32 Object.prototype  
 - `j8_helper`: slow-path runtime functions (property access, allocation, generic operators);
 - `j8_poll`: loops check the budget and termination requests, so machine code can be interrupted like the interpreter;
 - `j8_deopt`: the deoptimization entry;
-- executable memory comes from `mmap`.
+- executable memory comes from `mmap` on Unix and `VirtualAlloc` on Windows.
 
 ## Deopts and learning
 

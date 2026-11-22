@@ -10,7 +10,7 @@ together. The attribute-by-attribute reference for the binding macros is
 ```toml
 [dependencies]
 j8 = "0.4"                                          # default feature `runtime`: executor + built-ins + platform
-# j8 = { version = "0.4", features = ["jit"] }      # + the x86-64 JIT (x86-64 Unix)
+# j8 = { version = "0.4", features = ["jit"] }      # + the x86-64 JIT (x86-64 Unix and Windows)
 # j8 = { version = "0.4", features = ["json"] }     # + j8::Json<T> (serde)
 ```
 
@@ -480,7 +480,7 @@ lookups try the child's modules first, then the parent's. The parent does not ch
 
 ## 8. The JIT
 
-With feature `jit` (x86-64 Unix):
+With feature `jit` (x86-64 Unix and Windows):
 
 ```rust,ignore
 let executor = Executor::default().with_tier(j8::jit::Jit::default());

@@ -1,5 +1,23 @@
 extern crate alloc;
 
+#[cfg(all(windows, target_arch = "x86_64"))]
+#[macro_export]
+#[doc(hidden)]
+macro_rules! sysv {
+    ($(#[$m:meta])* $v:vis fn $name:ident($($p:tt)*) $(-> $ret:ty)? $body:block) => { $(#[$m])* $v extern "sysv64" fn $name($($p)*) $(-> $ret)? $body };
+    (unsafe fn($($p:ty),* $(,)?) -> $ret:ty) => { unsafe extern "sysv64" fn($($p),*) -> $ret };
+    (fn($($p:ty),* $(,)?) -> $ret:ty) => { extern "sysv64" fn($($p),*) -> $ret };
+}
+
+#[cfg(not(all(windows, target_arch = "x86_64")))]
+#[macro_export]
+#[doc(hidden)]
+macro_rules! sysv {
+    ($(#[$m:meta])* $v:vis fn $name:ident($($p:tt)*) $(-> $ret:ty)? $body:block) => { $(#[$m])* $v extern "C" fn $name($($p)*) $(-> $ret)? $body };
+    (unsafe fn($($p:ty),* $(,)?) -> $ret:ty) => { unsafe extern "C" fn($($p),*) -> $ret };
+    (fn($($p:ty),* $(,)?) -> $ret:ty) => { extern "C" fn($($p),*) -> $ret };
+}
+
 mod build;
 mod asm;
 mod cfg;
@@ -139,7 +157,7 @@ impl Debug {
 
 const MAX_DEOPTS: u32 = 24;
 
-type EntryFn = unsafe extern "C" fn(*mut Ctx, *mut Value<'static>, *mut Value<'static>) -> i64;
+type EntryFn = sysv!(unsafe fn(*mut Ctx, *mut Value<'static>, *mut Value<'static>) -> i64);
 
 impl Jit {
     pub const THRESHOLD: u32 = 64;
@@ -192,7 +210,11 @@ impl Jit {
         if self.floor.get() == 0 {
             let here = 0u8;
             let at = core::ptr::from_ref(&here) as u64;
-            self.floor.set(at.saturating_sub(runtime::NATIVE_STACK));
+            #[cfg(not(windows))]
+            let floor = at.saturating_sub(runtime::NATIVE_STACK);
+            #[cfg(windows)]
+            let floor = at.saturating_sub(runtime::NATIVE_STACK).max(runtime::stack_low().saturating_add(runtime::STACK_MARGIN));
+            self.floor.set(floor);
         }
         self.floor.get()
     }
@@ -450,7 +472,7 @@ impl Jit {
         let exe = e.executor();
         let saved = exe.jit_depth().replace(level);
         let mut ctx = Ctx::new(e, self);
-        type NativeFn = unsafe extern "C" fn(*mut Ctx, u64, u64, u64, u64, u64) -> u64;
+        type NativeFn = sysv!(unsafe fn(*mut Ctx, u64, u64, u64, u64, u64) -> u64);
         let r = unsafe {
             let f: NativeFn = core::mem::transmute::<usize, NativeFn>(addr);
             f(&raw mut *ctx, callee, words[0], words[1], words[2], words[3])
@@ -518,7 +540,7 @@ impl Tier for Jit {
         };
         let arg = |i: usize| if i < formals { args.get(i).copied().unwrap_or_default().bits() } else { j8framework::ValueBits::UNDEFINED };
         let mut ctx = Ctx::bare(exe, a, self);
-        type NativeFn = unsafe extern "C" fn(*mut Ctx, u64, u64, u64, u64, u64) -> u64;
+        type NativeFn = sysv!(unsafe fn(*mut Ctx, u64, u64, u64, u64, u64) -> u64);
         let r = unsafe {
             let code: NativeFn = core::mem::transmute::<usize, NativeFn>(addr);
             code(&raw mut *ctx, callee.bits(), this.bits(), arg(0), arg(1), arg(2))

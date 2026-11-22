@@ -8,7 +8,7 @@
 ```toml
 [dependencies]
 j8 = "0.4"                                          # 缺省 feature `runtime`：执行器 + 内建对象 + 平台
-# j8 = { version = "0.4", features = ["jit"] }      # + x86-64 JIT（x86-64 Unix）
+# j8 = { version = "0.4", features = ["jit"] }      # + x86-64 JIT（x86-64 Unix 和 Windows）
 # j8 = { version = "0.4", features = ["json"] }     # + j8::Json<T>（serde）
 ```
 

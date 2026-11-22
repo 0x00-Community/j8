@@ -8,7 +8,7 @@ autotests = false
 repository.workspace = true
 readme = "README.md"
 # Publish only the library: the tests/test262 submodule has over fifty thousand files, too many for crates.io
-include = ["/src", "/tests/binding.rs", "/tests/runtime.rs", "/tests/bindings_more.rs", "/tests/event_loop.rs", "/tests/terminate.rs", "/tests/jit_typeof.rs", "/tests/jit_lazy.rs", "/README.md", "/README.zh-CN.md", "/EMBEDDING.md", "/LICENSE"]
+include = ["/src", "/tests/binding.rs", "/tests/runtime.rs", "/tests/bindings_more.rs", "/tests/event_loop.rs", "/tests/terminate.rs", "/tests/jit_typeof.rs", "/tests/jit_lazy.rs", "/tests/jit_stack.rs", "/README.md", "/README.zh-CN.md", "/EMBEDDING.md", "/LICENSE"]
 
 [lib]
 name = "j8"
@@ -48,7 +48,7 @@ platform = ["dep:j8platform"]
 taskqueue = ["dep:j8taskqueue"]
 # j8::lockfree: lock-free building blocks
 lockfree = []
-# j8::jit: the speculative JIT, bytecode ⇒ machine code (x86-64 Unix, AArch64 Linux)
+# j8::jit: the speculative JIT, bytecode ⇒ machine code (x86-64 Unix and Windows, AArch64 Linux)
 jit = ["executor", "dep:j8jit"]
 # j8::Json<T>: Rust values crossing as JSON-shaped data through serde
 json = ["j8binding/json"]
@@ -97,6 +97,10 @@ path = "tests/jit_typeof.rs"
 [[test]]
 name = "jit_lazy"
 path = "tests/jit_lazy.rs"
+
+[[test]]
+name = "jit_stack"
+path = "tests/jit_stack.rs"
 
 [lints]
 workspace = true

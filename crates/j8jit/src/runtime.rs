@@ -20,6 +20,9 @@ pub const DEPTH_LIMIT: u64 = 2000;
 
 pub const NATIVE_STACK: u64 = 1 << 20;
 
+#[cfg(windows)]
+pub(crate) const STACK_MARGIN: u64 = NATIVE_STACK / 4;
+
 #[repr(C)]
 pub struct Ctx {
     pub budget: i64,
@@ -151,8 +154,14 @@ unsafe fn boxed<'gc>(rep: Rep, bits: u64) -> Value<'gc> {
     }
 }
 
-#[unsafe(no_mangle)]
-pub extern "C" fn j8_helper(ctx: *mut Ctx, id: u64, a: u64, b: u64, c: u64, d: u64) -> u64 {
+sysv! {
+    #[unsafe(no_mangle)]
+    pub fn j8_helper(ctx: *mut Ctx, id: u64, a: u64, b: u64, c: u64, d: u64) -> u64 {
+        dispatch(ctx, id, a, b, c, d)
+    }
+}
+
+fn dispatch(ctx: *mut Ctx, id: u64, a: u64, b: u64, c: u64, d: u64) -> u64 {
     let ctx = unsafe { &mut *ctx };
     let jit = ctx.jit();
     let (h, n) = jit.call(id);
@@ -260,8 +269,14 @@ fn helper<'gc>(jit: &Jit, exe: &Executor, a: &mut Agent<'gc, '_>, h: Helper, ops
     })
 }
 
-#[unsafe(no_mangle)]
-pub extern "C" fn j8_poll(ctx: *mut Ctx) -> u64 {
+sysv! {
+    #[unsafe(no_mangle)]
+    pub fn j8_poll(ctx: *mut Ctx) -> u64 {
+        poll(ctx)
+    }
+}
+
+fn poll(ctx: *mut Ctx) -> u64 {
     let ctx = unsafe { &mut *ctx };
     ctx.budget = BUDGET_CHUNK;
     if ctx.entry.is_null() {
@@ -273,9 +288,11 @@ pub extern "C" fn j8_poll(ctx: *mut Ctx) -> u64 {
     u64::from(e.spend(BUDGET_CHUNK as usize))
 }
 
-#[unsafe(no_mangle)]
-pub extern "C" fn j8_deopt(ctx: *mut Ctx, id: u64) -> Ret {
-    Ret { value: deopt(ctx, id), int: 0 }
+sysv! {
+    #[unsafe(no_mangle)]
+    pub fn j8_deopt(ctx: *mut Ctx, id: u64) -> Ret {
+        Ret { value: deopt(ctx, id), int: 0 }
+    }
 }
 
 #[repr(C)]
@@ -377,9 +394,11 @@ fn frames<'gc>(a: &mut Agent<'gc, '_>, ctx: &Ctx, d: &crate::Deopt) -> Vec<Deopt
     }).collect()
 }
 
-#[unsafe(no_mangle)]
-pub extern "C" fn j8_interp(ctx: *mut Ctx, callee: u64, this: u64, a0: u64, a1: u64, a2: u64) -> Ret {
-    Ret { value: interp(ctx, callee, this, a0, a1, a2), int: 0 }
+sysv! {
+    #[unsafe(no_mangle)]
+    pub fn j8_interp(ctx: *mut Ctx, callee: u64, this: u64, a0: u64, a1: u64, a2: u64) -> Ret {
+        Ret { value: interp(ctx, callee, this, a0, a1, a2), int: 0 }
+    }
 }
 
 fn interp(ctx: *mut Ctx, callee: u64, this: u64, a0: u64, a1: u64, a2: u64) -> u64 {
@@ -427,11 +446,23 @@ impl Arena {
         }
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(all(not(target_os = "linux"), not(windows)))]
     fn chunk(len: usize) -> Option<(Mapped, Mapped)> {
         unsafe {
             let at = libc::mmap(core::ptr::null_mut(), len, libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC, libc::MAP_PRIVATE | libc::MAP_ANON, -1, 0);
             if at == libc::MAP_FAILED {
+                return None;
+            }
+            let at = at.cast();
+            Some((Mapped { at, len }, Mapped { at, len }))
+        }
+    }
+
+    #[cfg(windows)]
+    fn chunk(len: usize) -> Option<(Mapped, Mapped)> {
+        unsafe {
+            let at = VirtualAlloc(core::ptr::null_mut(), len, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+            if at.is_null() {
                 return None;
             }
             let at = at.cast();
@@ -473,25 +504,54 @@ impl Trampolines {
     const STUB: usize = 8;
     pub const PER_PAGE: usize = Self::PAGE / Self::STUB;
 
-    pub fn new() -> Option<Self> {
+    #[cfg(not(windows))]
+    fn reserve() -> Option<*mut u8> {
         unsafe {
             let at = libc::mmap(core::ptr::null_mut(), 2 * Self::PAGE, libc::PROT_READ | libc::PROT_WRITE, libc::MAP_PRIVATE | libc::MAP_ANONYMOUS, -1, 0);
-            if at == libc::MAP_FAILED {
-                return None;
+            if at == libc::MAP_FAILED { None } else { Some(at.cast()) }
+        }
+    }
+
+    #[cfg(not(windows))]
+    fn lock(at: *mut u8) -> bool {
+        unsafe { libc::mprotect(at.cast(), Self::PAGE, libc::PROT_READ | libc::PROT_EXEC) == 0 }
+    }
+
+    #[cfg(windows)]
+    fn reserve() -> Option<*mut u8> {
+        unsafe {
+            let at = VirtualAlloc(core::ptr::null_mut(), 2 * Self::PAGE, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+            if at.is_null() { None } else { Some(at.cast()) }
+        }
+    }
+
+    #[cfg(windows)]
+    fn lock(at: *mut u8) -> bool {
+        unsafe {
+            let mut old = 0u32;
+            if VirtualProtect(at.cast(), Self::PAGE, PAGE_EXECUTE_READ, &raw mut old) != 0 {
+                return true;
             }
-            let at = at.cast::<u8>();
+            let _ = VirtualFree(at.cast(), 0, MEM_RELEASE);
+            false
+        }
+    }
+
+    pub fn new() -> Option<Self> {
+        let at = Self::reserve()?;
+        unsafe {
             for i in 0..Self::PER_PAGE {
                 let stub = at.add(i * Self::STUB);
                 let cell = at.add(Self::PAGE + i * 8);
                 let code = Code::jump_through(stub as usize, cell as usize);
                 core::ptr::copy_nonoverlapping(code.as_ptr(), stub, Self::STUB);
             }
-            if libc::mprotect(at.cast(), Self::PAGE, libc::PROT_READ | libc::PROT_EXEC) != 0 {
-                return None;
-            }
-            Code::sync(at as usize, at as usize, Self::PAGE);
-            Some(Trampolines { at, used: 0 })
         }
+        if !Self::lock(at) {
+            return None;
+        }
+        Code::sync(at as usize, at as usize, Self::PAGE);
+        Some(Trampolines { at, used: 0 })
     }
 
     pub fn take(&mut self, target: usize) -> Option<usize> {
@@ -520,7 +580,10 @@ impl Trampolines {
 
 impl Drop for Trampolines {
     fn drop(&mut self) {
+        #[cfg(not(windows))]
         unsafe { libc::munmap(self.at.cast(), 2 * Self::PAGE) };
+        #[cfg(windows)]
+        unsafe { let _ = VirtualFree(self.at.cast(), 0, MEM_RELEASE); }
     }
 }
 
@@ -572,4 +635,39 @@ impl Code {
         }
         unsafe { core::arch::asm!("dsb ish", "isb", options(nostack)) };
     }
+}
+
+#[cfg(windows)]
+const MEM_COMMIT: u32 = 0x1000;
+
+#[cfg(windows)]
+const MEM_RESERVE: u32 = 0x2000;
+
+#[cfg(windows)]
+const MEM_RELEASE: u32 = 0x8000;
+
+#[cfg(windows)]
+const PAGE_READWRITE: u32 = 0x04;
+
+#[cfg(windows)]
+const PAGE_EXECUTE_READ: u32 = 0x20;
+
+#[cfg(windows)]
+const PAGE_EXECUTE_READWRITE: u32 = 0x40;
+
+#[cfg(windows)]
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    fn VirtualAlloc(addr: *mut core::ffi::c_void, size: usize, flags: u32, prot: u32) -> *mut core::ffi::c_void;
+    fn VirtualProtect(addr: *mut core::ffi::c_void, size: usize, prot: u32, old: *mut u32) -> i32;
+    fn VirtualFree(addr: *mut core::ffi::c_void, size: usize, flags: u32) -> i32;
+    fn GetCurrentThreadStackLimits(low: *mut usize, high: *mut usize);
+}
+
+#[cfg(windows)]
+pub(crate) fn stack_low() -> u64 {
+    let mut low = 0usize;
+    let mut high = 0usize;
+    unsafe { GetCurrentThreadStackLimits(&raw mut low, &raw mut high) };
+    u64::try_from(low).unwrap_or(u64::MAX)
 }

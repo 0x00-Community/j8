@@ -2,6 +2,8 @@ use alloc::vec::Vec;
 
 use super::{Alu, Cc, Label, Shift, R, RBP, RSP, SAVED, SAVED_END, X};
 use crate::ir::FloatOp;
+#[cfg(windows)]
+use super::{R11, RAX};
 
 #[derive(Default)]
 pub struct Asm {
@@ -237,7 +239,32 @@ impl Asm {
         for r in SAVED {
             self.push(r);
         }
+        #[cfg(windows)]
+        self.probe_stack(frame);
         self.alu_ri(Alu::Sub, true, RSP, frame);
+    }
+
+    #[cfg(windows)]
+    pub fn probe_stack(&mut self, frame: i32) {
+        const PAGE: i32 = 4096;
+        if frame < PAGE {
+            return;
+        }
+        self.mov_rr(R11, RSP);
+        self.mov_ri(RAX, u64::from(u32::try_from(frame).unwrap_or(0)));
+        let again = self.label();
+        self.bind(again);
+        self.alu_ri(Alu::Sub, true, R11, PAGE);
+        self.store(R11, 0, RAX);
+        self.alu_ri(Alu::Sub, true, RAX, PAGE);
+        self.alu_ri(Alu::Cmp, true, RAX, PAGE);
+        self.jcc(Cc::Ae, again);
+        let done = self.label();
+        self.test_rr(true, RAX, RAX);
+        self.jcc(Cc::E, done);
+        self.alu_rr(Alu::Sub, true, R11, RAX);
+        self.store(R11, 0, RAX);
+        self.bind(done);
     }
 
     pub fn leave(&mut self) {
