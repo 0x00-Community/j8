@@ -103,6 +103,7 @@ pub struct Realm<'gc> {
     pub templates: Cow<'gc, alloc::collections::BTreeMap<(u32, u32), JsObject<'gc>>>,
     pub script_contexts: Cow<'gc, Vec<crate::JsEnv<'gc>>>,
     pub regexp_cache: [Slot<'gc, RegExpCompiled<'gc>>; RegExpCompiled::BUCKETS],
+    pub regexp_literals: [Slot<'gc, RegExpLiteralEntry<'gc>>; RegExpCompiled::BUCKETS],
     pub regexp_pristine: Cow<'gc, Option<RegExpPristine<'gc>>>,
     pub regexp_literal: Cow<'gc, crate::Static<Option<RegExpLiteral>>>,
     pub builtin_nexts: Cow<'gc, [Option<JsObject<'gc>>; 2]>,
@@ -113,11 +114,25 @@ pub struct Realm<'gc> {
 pub struct RegExpPristine<'gc> {
     #[collect(require_static)]
     pub shape: alloc::sync::Arc<crate::Shape>,
+    #[collect(require_static)]
+    pub last_index: alloc::sync::Arc<crate::Shape>,
     pub slots: alloc::vec::Vec<(usize, Value<'gc>)>,
     pub replace: JsObject<'gc>,
 }
 
-pub type RegExpLiteral = for<'gc, 'a> fn(&crate::Agent<'gc, 'a>, &str, &str) -> Result<Value<'gc>, crate::Error>;
+pub type RegExpLiteral = for<'gc, 'a> fn(&crate::Agent<'gc, 'a>, &str, u16) -> Result<Value<'gc>, crate::Error>;
+
+#[derive(Clone, Collect)]
+#[collect(no_drop)]
+pub struct RegExpLiteralEntry<'gc> {
+    #[collect(require_static)]
+    pub ptr: usize,
+    #[collect(require_static)]
+    pub len: usize,
+    #[collect(require_static)]
+    pub flags: u16,
+    pub compiled: RegExpCompiled<'gc>,
+}
 
 #[derive(Clone, Collect)]
 #[collect(no_drop)]
@@ -211,6 +226,7 @@ impl<'gc> Realm<'gc> {
             },
             jobs: GcQueue::new(mc),
             regexp_cache: core::array::from_fn(|_| Slot::default()),
+            regexp_literals: core::array::from_fn(|_| Slot::default()),
             regexp_pristine: Cow::new(mc, None),
             regexp_literal: Cow::new(mc, crate::Static(None)),
             builtin_nexts: Cow::new(mc, [None, None]),

@@ -5,7 +5,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use j8framework::{Gc, Static};
-use j8framework::{Agent, Error, ErrorKind, JsObject, JsString, Key, ObjectData, ObjectKind, Property, RegExpData, Slot, Units, Value};
+use j8framework::{Agent, Error, ErrorKind, JsObject, JsString, Key, ObjectData, ObjectKind, Property, RegExpData, Slot, SmallStr, Units, Value};
 
 use crate::buffer::Buffers;
 use crate::string::Strings;
@@ -29,15 +29,89 @@ struct Compiled {
     regex: regress::Regex,
     atom: Option<Box<str>>,
     dfa: Option<crate::dfa::Dfa>,
+    flags: u16,
+    named: bool,
 }
 
 impl Compiled {
     const SYNTAX: &'static str = "\\^$.|?*+()[]{}/";
+    const GLOBAL: u16 = 1;
+    const IGNORE_CASE: u16 = 1 << 1;
+    const MULTILINE: u16 = 1 << 2;
+    const STICKY: u16 = 1 << 3;
+    const UNICODE: u16 = 1 << 4;
+    const DOT_ALL: u16 = 1 << 5;
+    const INDICES: u16 = 1 << 7;
+    const UNICODE_SETS: u16 = 1 << 8;
 
     fn new(regex: regress::Regex, source: &str, flags: &str) -> Self {
-        let atom = (!source.is_empty() && !flags.contains('i') && !source.contains(|c| Self::SYNTAX.contains(c))).then(|| source.into());
+        let bits = Self::bits(flags);
+        let atom = (!source.is_empty() && !Self::on(bits, Self::IGNORE_CASE) && !source.contains(|c| Self::SYNTAX.contains(c))).then(|| source.into());
         let dfa = if atom.is_none() { crate::dfa::Dfa::new(source, flags) } else { None };
-        Self { regex, atom, dfa }
+        Self { regex, atom, dfa, flags: bits, named: source.contains("(?<") }
+    }
+
+    fn bits(flags: &str) -> u16 {
+        let mut bits = 0;
+        for c in flags.chars() {
+            bits |= match c {
+                'g' => Self::GLOBAL,
+                'i' => Self::IGNORE_CASE,
+                'm' => Self::MULTILINE,
+                'y' => Self::STICKY,
+                'u' => Self::UNICODE,
+                's' => Self::DOT_ALL,
+                'd' => Self::INDICES,
+                'v' => Self::UNICODE_SETS,
+                _ => 0,
+            };
+        }
+        bits
+    }
+
+    fn text(bits: u16) -> String {
+        let mut out = String::new();
+        for (c, bit) in [('d', Self::INDICES), ('g', Self::GLOBAL), ('i', Self::IGNORE_CASE), ('m', Self::MULTILINE), ('s', Self::DOT_ALL), ('u', Self::UNICODE), ('v', Self::UNICODE_SETS), ('y', Self::STICKY)] {
+            if Self::on(bits, bit) {
+                out.push(c);
+            }
+        }
+        out
+    }
+
+    fn on(bits: u16, bit: u16) -> bool {
+        bits & bit != 0
+    }
+
+    fn global(&self) -> bool {
+        Self::on(self.flags, Self::GLOBAL)
+    }
+
+    fn sticky(&self) -> bool {
+        Self::on(self.flags, Self::STICKY)
+    }
+
+    fn unicode(&self) -> bool {
+        Self::on(self.flags, Self::UNICODE | Self::UNICODE_SETS)
+    }
+
+    fn indices(&self) -> bool {
+        Self::on(self.flags, Self::INDICES)
+    }
+
+    fn has(&self, c: char) -> bool {
+        let bit = match c {
+            'd' => Self::INDICES,
+            'g' => Self::GLOBAL,
+            'i' => Self::IGNORE_CASE,
+            'm' => Self::MULTILINE,
+            's' => Self::DOT_ALL,
+            'u' => Self::UNICODE,
+            'v' => Self::UNICODE_SETS,
+            'y' => Self::STICKY,
+            _ => 0,
+        };
+        Self::on(self.flags, bit)
     }
 }
 
@@ -69,15 +143,54 @@ impl Regexps {
         Ok(entry)
     }
 
-    fn make<'gc>(a: &Agent<'gc, '_>, c: j8framework::RegExpCompiled<'gc>) -> JsObject<'gc> {
+    fn make<'gc>(a: &Agent<'gc, '_>, c: &j8framework::RegExpCompiled<'gc>) -> JsObject<'gc> {
         let kind = ObjectKind::RegExp(RegExpData { source: c.source, flags: c.flags, compiled: c.compiled, legacy: true });
         let o = ObjectData { kind, proto: Some(a.realm.regexp_proto), ..ObjectData::default() }.alloc(a.mc);
-        o.borrow_mut(a.mc).define("lastIndex", Property { slot: Slot::Data(0.0.into()), enumerable: false, writable: true, configurable: false });
+        Self::stamp(a, o, 0.0.into());
         o
     }
 
-    pub(crate) fn literal<'gc>(a: &Agent<'gc, '_>, source: &str, flags: &str) -> Result<Value<'gc>, Error> {
-        Ok(Self::make(a, Self::cached(a, source, flags)?).into())
+    fn stamp<'gc>(a: &Agent<'gc, '_>, o: JsObject<'gc>, v: Value<'gc>) {
+        if let Some(p) = a.realm.regexp_pristine.get().as_ref() {
+            o.fill(a.mc, &p.last_index, core::iter::once(Slot::Data(v)));
+            return;
+        }
+        o.borrow_mut(a.mc).define("lastIndex", Property { slot: Slot::Data(v), enumerable: false, writable: true, configurable: false });
+    }
+
+    fn literal_bucket(ptr: usize, len: usize, flags: u16) -> usize {
+        let mixed = (ptr as u64 ^ (len as u64).rotate_left(32) ^ u64::from(flags).rotate_left(48)).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        usize::try_from(mixed >> 40).unwrap_or(0) % j8framework::RegExpCompiled::BUCKETS
+    }
+
+    fn literal_load<'gc>(slot: &j8framework::paragc::Slot<'gc, j8framework::RegExpLiteralEntry<'gc>>, ptr: usize, len: usize, flags: u16, source: &str) -> Option<j8framework::RegExpCompiled<'gc>> {
+        let e = slot.get()?;
+        (e.ptr == ptr && e.len == len && e.flags == flags && **e.compiled.source == *source).then(|| e.compiled.clone())
+    }
+
+    fn literal_store<'gc>(a: &Agent<'gc, '_>, bucket: usize, entry: j8framework::RegExpLiteralEntry<'gc>) {
+        let cache = &a.realm.realm().get().regexp_literals;
+        let buddy = (bucket + 1) % j8framework::RegExpCompiled::BUCKETS;
+        let key = |e: &j8framework::RegExpLiteralEntry<'gc>| e.ptr == entry.ptr && e.len == entry.len && e.flags == entry.flags;
+        let at = if cache[bucket].get().is_none_or(|e| key(&e)) || cache[buddy].get().is_some_and(|e| !key(&e)) { bucket } else { buddy };
+        cache[at].set(a.mc.mutator(), Some(a.mc.alloc(entry)));
+    }
+
+    pub(crate) fn literal<'gc>(a: &Agent<'gc, '_>, source: &str, flags: u16) -> Result<Value<'gc>, Error> {
+        let ptr = source.as_ptr().addr();
+        let len = source.len();
+        let bucket = Self::literal_bucket(ptr, len, flags);
+        let buddy = (bucket + 1) % j8framework::RegExpCompiled::BUCKETS;
+        let hit = {
+            let cache = &a.realm.realm().get().regexp_literals;
+            Self::literal_load(&cache[bucket], ptr, len, flags, source).or_else(|| Self::literal_load(&cache[buddy], ptr, len, flags, source))
+        };
+        if let Some(c) = hit {
+            return Ok(Self::make(a, &c).into());
+        }
+        let compiled = Self::cached(a, source, &Compiled::text(flags))?;
+        Self::literal_store(a, bucket, j8framework::RegExpLiteralEntry { ptr, len, flags, compiled: compiled.clone() });
+        Ok(Self::make(a, &compiled).into())
     }
 
     pub(crate) fn is_regexp<'gc>(a: &mut Agent<'gc, '_>, v: Value<'gc>) -> Result<bool, Error> {
@@ -111,7 +224,11 @@ impl Regexps {
         let compiled = Self::compiled(a, "", "")?;
         let kind = ObjectKind::RegExp(RegExpData { source: empty, flags: empty, compiled, legacy });
         let o = ObjectData { kind, proto: Some(proto), ..ObjectData::default() }.alloc(a.mc);
-        o.borrow_mut(a.mc).define("lastIndex", Property { slot: Slot::Data(Value::Undefined), enumerable: false, writable: true, configurable: false });
+        if Gc::ptr_eq(proto, a.realm.regexp_proto) {
+            Self::stamp(a, o, Value::Undefined);
+        } else {
+            o.borrow_mut(a.mc).define("lastIndex", Property { slot: Slot::Data(Value::Undefined), enumerable: false, writable: true, configurable: false });
+        }
         Ok(o)
     }
 
@@ -128,7 +245,7 @@ impl Regexps {
             && let (ValueKind::String(source), ValueKind::String(flags)) = (pattern.kind(), flags.kind())
         {
             let compiled = Self::compiled(a, &source, &flags)?;
-            return Ok(Self::make(a, j8framework::RegExpCompiled { source, flags, compiled }).into());
+            return Ok(Self::make(a, &j8framework::RegExpCompiled { source, flags, compiled }).into());
         }
         let pattern_is_regexp = Self::is_regexp(a, pattern)?;
         let mut new_target = new_target;
@@ -198,17 +315,18 @@ impl Regexps {
         (d.source, d.flags, d.compiled)
     }
 
-    fn find(o: JsObject<'_>, units: &[u16], start: usize) -> Option<Found> {
-        let (_, flags, compiled) = Self::data(o);
-        let re = &compiled.0.downcast_ref::<Compiled>().expect("a compiled regex").regex;
-        let m = if flags.contains('u') || flags.contains('v') { re.find_from_utf16(units, start).next() } else { re.find_from_ucs2(units, start).next() }?;
+    fn with_program<R>(o: JsObject<'_>, f: impl FnOnce(&Compiled) -> R) -> R {
+        let compiled = o.regexp().expect("checked to be a regexp").compiled;
+        f(compiled.0.downcast_ref::<Compiled>().expect("a compiled regex"))
+    }
+
+    fn find(c: &Compiled, units: &[u16], start: usize) -> Option<Found> {
+        let m = if c.unicode() { c.regex.find_from_utf16(units, start).next() } else { c.regex.find_from_ucs2(units, start).next() }?;
         let named = m.named_groups().map(|(n, r)| (String::from(n), r)).collect();
         Some(Found { range: m.range(), groups: m.captures, named })
     }
 
-    fn find_ascii(o: JsObject<'_>, s: &str, start: usize) -> Option<Found> {
-        let (_, _, compiled) = Self::data(o);
-        let c = compiled.0.downcast_ref::<Compiled>().expect("a compiled regex");
+    fn find_ascii(c: &Compiled, s: &str, start: usize) -> Option<Found> {
         if let Some(atom) = &c.atom {
             let rest = &s[start..];
             let at = start + if let [b] = atom.as_bytes() { rest.find(char::from(*b)) } else { rest.find(&**atom) }?;
@@ -221,6 +339,25 @@ impl Regexps {
         let m = c.regex.find_from(s, start).next()?;
         let named = m.named_groups().map(|(n, r)| (String::from(n), r)).collect();
         Some(Found { range: m.range(), groups: m.captures, named })
+    }
+
+    fn span(c: &Compiled, s: &str, start: usize) -> Option<core::ops::Range<usize>> {
+        if start > s.len() {
+            return None;
+        }
+        if let Some(atom) = &c.atom {
+            if !atom.is_ascii() {
+                return None;
+            }
+            let rest = &s[start..];
+            let rel = if let [b] = atom.as_bytes() { rest.find(char::from(*b))? } else { rest.find(atom.as_ref())? };
+            let i = start + rel;
+            return Some(i..i + atom.len());
+        }
+        if let Some(d) = &c.dfa {
+            return d.find_at(s, start);
+        }
+        c.regex.find_from(s, start).next().map(|m| m.range())
     }
 
     fn text<'gc>(a: &Agent<'gc, '_>, units: &[u16], r: Option<core::ops::Range<usize>>) -> Value<'gc> {
@@ -238,8 +375,7 @@ impl Regexps {
     fn builtin_exec<'gc>(a: &mut Agent<'gc, '_>, o: JsObject<'gc>, s: JsString<'gc>) -> Result<Value<'gc>, Error> {
         let li = a.get_named(o.into(), "lastIndex")?;
         let last = a.to_length(li)?;
-        let flags = Self::data(o).1;
-        let (global, sticky, indices) = (flags.contains('g'), flags.contains('y'), flags.contains('d'));
+        let (global, sticky, indices) = Self::with_program(o, |c| (c.global(), c.sticky(), c.indices()));
         let ascii = s.is_ascii();
         let units: Vec<u16> = if ascii { Vec::new() } else { s.encode_utf16().collect() };
         let text = |a: &Agent<'gc, '_>, r: Option<core::ops::Range<usize>>| if ascii { r.map_or(Value::Undefined, |r| a.piece(s, &s[r]).into()) } else { Self::text(a, &units, r) };
@@ -254,7 +390,7 @@ impl Regexps {
         }
         #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "checked not to exceed the length")]
         let start = last as usize;
-        let found = if ascii { Self::find_ascii(o, &s, start) } else { Self::find(o, &units, start) };
+        let found = Self::with_program(o, |c| if ascii { Self::find_ascii(c, &s, start) } else { Self::find(c, &units, start) });
         let Some(m) = found.filter(|m| !sticky || m.range.start == start) else {
             if global || sticky {
                 a.set_named(o.into(), "lastIndex", 0.0.into())?;
@@ -299,64 +435,225 @@ impl Regexps {
     }
 
     fn pristine<'gc>(a: &Agent<'gc, '_>, r: Value<'gc>) -> Option<(JsObject<'gc>, f64)> {
-        let d = r.as_object()?;
-        let own_ok = d.regexp().is_some()
-            && d.proto().is_some_and(|p| Gc::ptr_eq(p, a.realm.regexp_proto))
-            && !d.has_symbols()
-            && d.props().len() == 1
-            && d.props().shape_ref().is_some_and(|s| &**s.key(0) == "lastIndex" && s.attrs(0).writable());
-        if !own_ok {
+        let o = r.as_object()?;
+        if o.regexp().is_none() || o.has_symbols() {
             return None;
         }
-        let Slot::Data(v) = d.props().slot(0) else { return None };
-        let last = v.as_number()?;
-        let o = d;
+        let proto = o.proto()?;
+        if !Gc::ptr_eq(proto, a.realm.regexp_proto) {
+            return None;
+        }
         let p = a.realm.regexp_pristine.get().as_ref()?;
-        let proto = a.realm.regexp_proto.get();
-        let props = proto.props();
+        if o.props().shape_ptr() != Some(alloc::sync::Arc::as_ptr(&p.last_index)) {
+            return None;
+        }
+        let Slot::Data(v) = o.props().slot(0) else { return None };
+        let last = v.as_number()?;
+        let props = a.realm.regexp_proto.get().props();
         let intact = props.shape_ptr().is_some_and(|s| core::ptr::eq(s, alloc::sync::Arc::as_ptr(&p.shape))) && p.slots.iter().all(|&(i, orig)| props.word(i).is_some_and(|w| w.bits() == orig.bits()));
         intact.then_some((o, last))
+    }
+
+    fn length_from_number(n: f64) -> f64 {
+        const I64_SAFE: f64 = 9_223_372_036_854_775_808.0;
+        const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
+        let n = if n.is_nan() {
+            0.0
+        } else if n.abs() < I64_SAFE {
+            #[expect(clippy::cast_possible_truncation, clippy::cast_precision_loss, reason = "magnitude below 2^63; dropping the fraction is intended")]
+            {
+                (n as i64) as f64
+            }
+        } else {
+            libm::trunc(n) + 0.0
+        };
+        n.clamp(0.0, MAX_SAFE_INTEGER)
+    }
+
+    fn dollars(s: &str) -> u8 {
+        let b = s.as_bytes();
+        let mut i = 0;
+        let mut kind = 0;
+        while i < b.len() {
+            if b[i] == b'$' {
+                kind = 1;
+                if b.get(i + 1) == Some(&b'<') {
+                    return 2;
+                }
+            }
+            i += 1;
+        }
+        kind
     }
 
     fn set_last<'gc>(a: &Agent<'gc, '_>, o: JsObject<'gc>, i: usize) {
         o.borrow_mut(a.mc).set_at(0, Self::index(i));
     }
 
-    fn find_in(o: JsObject<'_>, s: &str, units: Units<'_>, start: usize) -> Option<Found> {
+    fn find_in(c: &Compiled, s: &str, units: Units<'_>, start: usize) -> Option<Found> {
         match units {
-            Units::Ascii(_) => Self::find_ascii(o, s, start),
-            Units::Wide(w) => Self::find(o, w, start),
+            Units::Ascii(_) => Self::find_ascii(c, s, start),
+            Units::Wide(w) => Self::find(c, w, start),
         }
     }
 
-    fn quick_exec<'gc>(a: &mut Agent<'gc, '_>, o: JsObject<'gc>, last: f64, s: &str, units: Units<'_>) -> Result<Option<Found>, Error> {
-        let flags = Self::data(o).1;
-        let (global, sticky) = (flags.contains('g'), flags.contains('y'));
+    fn locate(c: &Compiled, s: &str, units: Units<'_>, start: usize) -> Option<core::ops::Range<usize>> {
+        match units {
+            Units::Ascii(_) => Self::span(c, s, start),
+            Units::Wide(w) => {
+                let m = if c.unicode() { c.regex.find_from_utf16(w, start).next() } else { c.regex.find_from_ucs2(w, start).next() }?;
+                Some(m.range())
+            }
+        }
+    }
+
+    fn quick_exec<'gc>(a: &Agent<'gc, '_>, o: JsObject<'gc>, last: f64, s: &str, units: Units<'_>) -> Result<Option<Found>, Error> {
         let len = units.len();
-        let last = if global || sticky { a.to_length(last.into())? } else { 0.0 };
-        #[expect(clippy::cast_precision_loss, reason = "string length is far below 2^53")]
-        let fits = last <= len as f64;
-        #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "checked not to exceed the length")]
-        let start = last as usize;
-        let found = if fits { Self::find_in(o, s, units, start).filter(|m| !sticky || m.range.start == start) } else { None };
+        let (global, sticky, found) = Self::with_program(o, |c| {
+            let (global, sticky) = (c.global(), c.sticky());
+            let last = if global || sticky { Self::length_from_number(last) } else { 0.0 };
+            #[expect(clippy::cast_precision_loss, reason = "string length is far below 2^53")]
+            let fits = last <= len as f64;
+            let found = if fits {
+                #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "checked not to exceed the length")]
+                let start = last as usize;
+                Self::find_in(c, s, units, start).filter(|m| !sticky || m.range.start == start)
+            } else {
+                None
+            };
+            (global, sticky, found)
+        });
         if global || sticky {
             Self::set_last(a, o, found.as_ref().map_or(0, |m| m.range.end));
         }
         Ok(found)
     }
 
+    fn seek(text: &str, needle: &str, from: usize) -> Option<usize> {
+        let rest = text.get(from..)?;
+        let at = if let [b] = needle.as_bytes() { rest.find(char::from(*b)) } else { rest.find(needle) }?;
+        Some(from + at)
+    }
+
+    fn splice(text: &str, r: core::ops::Range<usize>, repl: &str) -> SmallStr {
+        SmallStr::build(text.len() - r.len() + repl.len(), |out| {
+            out.push(&text[..r.start]);
+            out.push(repl);
+            out.push(&text[r.end..]);
+        })
+    }
+
+    fn paint(text: &str, repl: &str, find: &impl Fn(usize) -> Option<core::ops::Range<usize>>) -> Option<SmallStr> {
+        let n = text.len();
+        let step = |r: &core::ops::Range<usize>| if r.is_empty() { r.end + 1 } else { r.end };
+        let (mut at, mut prev, mut len, mut any) = (0, 0, 0, false);
+        while at <= n
+            && let Some(r) = find(at)
+        {
+            any = true;
+            len += r.start - prev + repl.len();
+            prev = r.end;
+            at = step(&r);
+        }
+        if !any {
+            return None;
+        }
+        len += n - prev;
+        Some(SmallStr::build(len, |out| {
+            let (mut at, mut prev) = (0, 0);
+            while at <= n
+                && let Some(r) = find(at)
+            {
+                out.push(&text[prev..r.start]);
+                out.push(repl);
+                prev = r.end;
+                at = step(&r);
+            }
+            out.push(&text[prev..]);
+        }))
+    }
+
+    fn swap(text: &str, needle: &str, repl: &str) -> Option<SmallStr> {
+        let first = Self::seek(text, needle, 0)?;
+        if let ([from], [to]) = (needle.as_bytes(), repl.as_bytes())
+            && from.is_ascii()
+            && to.is_ascii()
+        {
+            return Some(SmallStr::build(text.len(), |out| out.push_swapped(text, *from, *to)));
+        }
+        let len = if needle.len() == repl.len() {
+            text.len()
+        } else {
+            let (mut count, mut at) = (0, Some(first));
+            while let Some(i) = at {
+                count += 1;
+                at = Self::seek(text, needle, i + needle.len());
+            }
+            text.len() - count * needle.len() + count * repl.len()
+        };
+        Some(SmallStr::build(len, |out| {
+            let (mut prev, mut at) = (0, Some(first));
+            while let Some(i) = at {
+                out.push(&text[prev..i]);
+                out.push(repl);
+                prev = i + needle.len();
+                at = Self::seek(text, needle, prev);
+            }
+            out.push(&text[prev..]);
+        }))
+    }
+
+    fn replace_fast<'gc>(a: &Agent<'gc, '_>, o: JsObject<'gc>, last: f64, s: JsString<'gc>, repl: &str) -> Value<'gc> {
+        let text: &str = &s;
+        let buf = Self::with_program(o, |c| {
+            if c.global() {
+                let buf = if !c.sticky()
+                    && let Some(atom) = c.atom.as_deref()
+                {
+                    Self::swap(text, atom, repl)
+                } else {
+                    let sticky = c.sticky();
+                    Self::paint(text, repl, &|at| Self::span(c, text, at).filter(|r| !sticky || r.start == at))
+                };
+                Self::set_last(a, o, 0);
+                return buf;
+            }
+            let cursor = if c.sticky() { Self::length_from_number(last) } else { 0.0 };
+            #[expect(clippy::cast_precision_loss, reason = "string length is far below 2^53")]
+            let fits = cursor <= text.len() as f64;
+            let found = if fits {
+                #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "checked not to exceed the length")]
+                let start = cursor as usize;
+                Self::span(c, text, start).filter(|r| !c.sticky() || r.start == start)
+            } else {
+                None
+            };
+            if c.sticky() {
+                Self::set_last(a, o, found.as_ref().map_or(0, |r| r.end));
+            }
+            found.map(|r| Self::splice(text, r, repl))
+        });
+        match buf {
+            Some(buf) => a.string_from(buf, true).into(),
+            None => s.into(),
+        }
+    }
+
     fn quick_replace<'gc>(a: &mut Agent<'gc, '_>, o: JsObject<'gc>, last: f64, s: JsString<'gc>, with: JsString<'gc>) -> Result<Option<Value<'gc>>, Error> {
-        let (source, flags, _) = Self::data(o);
-        if with.contains("$<") && source.contains("(?<") {
+        let dollars = Self::dollars(&with);
+        if dollars == 2 && Self::with_program(o, |c| c.named) {
             return Ok(None);
         }
-        let (global, sticky, unicode) = (flags.contains('g'), flags.contains('y'), flags.contains('u') || flags.contains('v'));
+        if dollars == 0 && s.unit_ascii() && with.unit_ascii() {
+            return Ok(Some(Self::replace_fast(a, o, last, s, &with)));
+        }
         let units = s.units();
+        let (global, unicode) = Self::with_program(o, |c| (c.global(), c.unicode()));
         let mut found = Vec::new();
         if global {
             let mut start = 0;
             while start <= units.len() {
-                let Some(m) = Self::find_in(o, &s, units, start).filter(|m| !sticky || m.range.start == start) else { break };
+                let Some(m) = Self::with_program(o, |c| Self::find_in(c, &s, units, start).filter(|m| !c.sticky() || m.range.start == start)) else { break };
                 let next = match (m.range.is_empty(), units) {
                     (false, _) => m.range.end,
                     (true, Units::Ascii(_)) => m.range.end + 1,
@@ -370,22 +667,12 @@ impl Regexps {
         } else {
             found.extend(Self::quick_exec(a, o, last, &s, units)?);
         }
-        if let Units::Ascii(_) = units
-            && !with.contains('$')
-        {
-            let mut out = String::with_capacity(s.len());
-            let mut next = 0;
-            for m in found {
-                out.push_str(&s[next..m.range.start]);
-                out.push_str(&with);
-                next = m.range.end;
-            }
-            out.push_str(&s[next..]);
-            return Ok(Some(a.string(&out).into()));
+        if found.is_empty() {
+            return Ok(Some(s.into()));
         }
         let units = units.to_vec();
         let template: Vec<u16> = with.encode_utf16().collect();
-        let dollar = template.contains(&u16::from(b'$'));
+        let dollar = dollars != 0;
         let mut out: Vec<u16> = Vec::with_capacity(units.len());
         let mut next = 0;
         for m in found {
@@ -426,24 +713,44 @@ impl Regexps {
         let r = Self::this_object(a, this)?;
         let s = a.to_string(args.at(0))?;
         if let Some((o, last)) = Self::pristine(a, r) {
-            let flags = Self::data(o).1;
-            if !flags.contains('g') && !flags.contains('y') {
-                return Ok(Self::matches(o, &s, s.units()).into());
-            }
-            return Ok(Self::quick_exec(a, o, last, &s, s.units())?.is_some().into());
+            return Ok(Self::fast_test(a, o, last, &s).into());
         }
         Ok((Self::regexp_exec(a, r, s)? != Value::Null).into())
     }
 
-    fn matches(o: JsObject<'_>, s: &str, units: Units<'_>) -> bool {
-        let Units::Ascii(_) = units else { return Self::find_in(o, s, units, 0).is_some() };
-        let (_, _, compiled) = Self::data(o);
-        let Some(c) = compiled.0.downcast_ref::<Compiled>() else { return false };
-        match (&c.atom, &c.dfa) {
-            (Some(atom), _) => s.contains(&**atom),
-            (None, Some(d)) => d.is_match(s),
-            (None, None) => c.regex.find_from(s, 0).next().is_some(),
+    fn fast_test<'gc>(a: &Agent<'gc, '_>, o: JsObject<'gc>, last: f64, s: &j8framework::JsStr) -> bool {
+        Self::with_program(o, |c| {
+            if !c.global() && !c.sticky() {
+                return Self::matches(c, s);
+            }
+            let units = s.units();
+            let len = units.len();
+            let cursor = Self::length_from_number(last);
+            #[expect(clippy::cast_precision_loss, reason = "string length is far below 2^53")]
+            let fits = cursor <= len as f64;
+            let found = if fits {
+                #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "checked not to exceed the length")]
+                let start = cursor as usize;
+                Self::locate(c, s, units, start).filter(|r| !c.sticky() || r.start == start)
+            } else {
+                None
+            };
+            Self::set_last(a, o, found.as_ref().map_or(0, |r| r.end));
+            found.is_some()
+        })
+    }
+
+    fn matches(c: &Compiled, s: &j8framework::JsStr) -> bool {
+        if s.unit_ascii() {
+            return match (&c.atom, &c.dfa) {
+                (Some(atom), _) => {
+                    if let [b] = atom.as_bytes() { s.contains(char::from(*b)) } else { s.contains(atom.as_ref()) }
+                }
+                (None, Some(d)) => d.is_match(s),
+                (None, None) => c.regex.find_from(s, 0).next().is_some(),
+            };
         }
+        Self::locate(c, s, s.units(), 0).is_some()
     }
 
     fn to_string<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
@@ -509,7 +816,7 @@ impl Regexps {
     fn flag<'gc, const C: char>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let Some(o) = this.as_object() else { return Err(a.throw(ErrorKind::Type, "RegExp flag getter called on a non-object")) };
         match Self::regexp(this) {
-            Some(r) => Ok(Self::data(r).1.contains(C).into()),
+            Some(r) => Ok(Self::with_program(r, |c| c.has(C)).into()),
             None if Gc::ptr_eq(o, a.realm.regexp_proto) => Ok(Value::Undefined),
             None => Err(a.throw(ErrorKind::Type, "RegExp flag getter called on an incompatible receiver")),
         }
@@ -518,6 +825,17 @@ impl Regexps {
     fn get_flags<'gc>(a: &mut Agent<'gc, '_>, r: Value<'gc>) -> Result<String, Error> {
         let f = a.get_named(r, "flags")?;
         Ok(String::from(&**a.to_string(f)?))
+    }
+
+    fn builtin_bits<'gc>(a: &Agent<'gc, '_>, r: Value<'gc>) -> Option<u16> {
+        let o = Self::regexp(r)?;
+        let saved = a.realm.regexp_pristine.get().as_ref()?;
+        if o.props().shape_ptr() != Some(alloc::sync::Arc::as_ptr(&saved.last_index)) || o.proto().is_none_or(|p| !Gc::ptr_eq(p, a.realm.regexp_proto)) {
+            return None;
+        }
+        let props = a.realm.regexp_proto.get().props();
+        let intact = props.shape_ptr().is_some_and(|s| core::ptr::eq(s, alloc::sync::Arc::as_ptr(&saved.shape))) && saved.slots.iter().all(|&(i, orig)| props.word(i).is_some_and(|w| w.bits() == orig.bits()));
+        intact.then(|| Self::with_program(o, |c| c.flags))
     }
 
     fn advance(units: &[u16], index: f64, unicode: bool) -> f64 {
@@ -543,11 +861,15 @@ impl Regexps {
     fn match_symbol<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let r = Self::this_object(a, this)?;
         let s = a.to_string(args.at(0))?;
-        let flags = Self::get_flags(a, r)?;
-        if !flags.contains('g') {
+        let (global, unicode) = if let Some(bits) = Self::builtin_bits(a, r) {
+            (Compiled::on(bits, Compiled::GLOBAL), Compiled::on(bits, Compiled::UNICODE | Compiled::UNICODE_SETS))
+        } else {
+            let flags = Self::get_flags(a, r)?;
+            (flags.contains('g'), flags.contains('u') || flags.contains('v'))
+        };
+        if !global {
             return Self::regexp_exec(a, r, s);
         }
-        let unicode = flags.contains('u') || flags.contains('v');
         a.set_named(r, "lastIndex", 0.0.into())?;
         let units: Vec<u16> = s.encode_utf16().collect();
         let arr = a.array(Vec::new());
@@ -797,9 +1119,13 @@ impl Regexps {
         let s = a.to_string(args.at(0))?;
         let default = a.realm.global.borrow().own(a.mc, "RegExp").unwrap_or_default();
         let ctor = Buffers::species_constructor(a, r, default)?;
-        let flags = Self::get_flags(a, r)?;
-        let unicode = flags.contains('u') || flags.contains('v');
-        let new_flags = if flags.contains('y') { flags } else { alloc::format!("{flags}y") };
+        let (unicode, new_flags) = if let Some(bits) = Self::builtin_bits(a, r) {
+            let flags = Compiled::text(bits);
+            (Compiled::on(bits, Compiled::UNICODE | Compiled::UNICODE_SETS), if Compiled::on(bits, Compiled::STICKY) { flags } else { alloc::format!("{flags}y") })
+        } else {
+            let flags = Self::get_flags(a, r)?;
+            (flags.contains('u') || flags.contains('v'), if flags.contains('y') { flags } else { alloc::format!("{flags}y") })
+        };
         let nf = a.string(&new_flags);
         let splitter = a.construct(ctor, &[r, nf.into()], ctor)?;
         let arr = a.array(Vec::new());
@@ -974,32 +1300,71 @@ impl Regexps {
             }
         }
         let s = a.to_string(o)?;
+        let needle = a.to_string(search)?;
+        if !a.is_callable(with) {
+            let repl = a.to_string(with)?;
+            if s.unit_ascii() && needle.unit_ascii() && repl.unit_ascii() && Self::dollars(&repl) == 0 {
+                return Ok(Self::replace_ascii(a, s, &needle, &repl, all));
+            }
+            return Self::replace_pattern(a, s, needle, repl.into(), false, all);
+        }
+        Self::replace_pattern(a, s, needle, with, true, all)
+    }
+
+    fn replace_gaps<'gc>(a: &Agent<'gc, '_>, text: &str, repl: &str, all: bool) -> Value<'gc> {
+        if !all {
+            return a.string_from(Self::splice(text, 0..0, repl), true).into();
+        }
+        let buf = SmallStr::build(repl.len() * (text.len() + 1) + text.len(), |out| {
+            for i in 0..text.len() {
+                out.push(repl);
+                out.push(&text[i..=i]);
+            }
+            out.push(repl);
+        });
+        a.string_from(buf, true).into()
+    }
+
+    fn replace_ascii<'gc>(a: &Agent<'gc, '_>, s: JsString<'gc>, needle: &str, repl: &str, all: bool) -> Value<'gc> {
+        let text: &str = &s;
+        if needle.is_empty() {
+            if repl.is_empty() {
+                return s.into();
+            }
+            return Self::replace_gaps(a, text, repl, all);
+        }
+        let buf = if all { Self::swap(text, needle, repl) } else { Self::seek(text, needle, 0).map(|p| Self::splice(text, p..p + needle.len(), repl)) };
+        match buf {
+            Some(buf) => a.string_from(buf, true).into(),
+            None => s.into(),
+        }
+    }
+
+    fn replace_pattern<'gc>(a: &mut Agent<'gc, '_>, s: JsString<'gc>, needle: JsString<'gc>, with: Value<'gc>, functional: bool, all: bool) -> Result<Value<'gc>, Error> {
         let units: Vec<u16> = s.encode_utf16().collect();
-        let needle: Vec<u16> = a.to_string(search)?.encode_utf16().collect();
-        let functional = a.is_callable(with);
+        let needle_units: Vec<u16> = needle.encode_utf16().collect();
         let template: Vec<u16> = if functional { Vec::new() } else { a.to_string(with)?.encode_utf16().collect() };
         let mut positions = Vec::new();
-        let mut at = Strings::find(&units, &needle, 0);
+        let mut at = Strings::find(&units, &needle_units, 0);
         while let Some(p) = at {
             positions.push(p);
             if !all {
                 break;
             }
-            at = Strings::find(&units, &needle, p + needle.len().max(1));
+            at = Strings::find(&units, &needle_units, p + needle_units.len().max(1));
         }
         let mut out = Vec::new();
         let mut end = 0;
         for p in positions {
             out.extend_from_slice(&units[end..p]);
             let replacement: Vec<u16> = if functional {
-                let n = a.string(&String::from_utf16_lossy(&needle));
-                let v = a.call(with, Value::Undefined, &[n.into(), Self::index(p), s.into()])?;
+                let v = a.call(with, Value::Undefined, &[needle.into(), Self::index(p), s.into()])?;
                 a.to_string(v)?.encode_utf16().collect()
             } else {
-                Self::substitution(a, &needle, &units, p, &[], Value::Undefined, &template)?
+                Self::substitution(a, &needle_units, &units, p, &[], Value::Undefined, &template)?
             };
             out.extend(replacement);
-            end = p + needle.len();
+            end = p + needle_units.len();
         }
         out.extend_from_slice(&units[end.min(units.len())..]);
         Ok(a.string(&String::from_utf16_lossy(&out)).into())
@@ -1061,10 +1426,15 @@ impl<'gc> Installer<'_, 'gc> {
             (r.symbols.split, Regexps::split_symbol, 2),
         ];
         let methods = symbols.map(|(sym, f, n)| r.symbol_method(self.mc, proto, sym, f, n));
+        let last_index = {
+            let sample = ObjectData { proto: Some(proto), ..ObjectData::default() }.alloc(self.mc);
+            sample.borrow_mut(self.mc).define("lastIndex", Property { slot: Slot::Data(0.0.into()), enumerable: false, writable: true, configurable: false });
+            sample.props().shape().expect("a lastIndex shape")
+        };
         let pristine = {
             let d = proto.borrow();
             let slots = ["exec", "flags"].into_iter().chain(FLAG_PROPERTIES.map(|(_, n)| n)).filter_map(|n| d.props().position(n).and_then(|i| Some((i, d.props().word(i)?)))).collect();
-            d.props().shape().map(|shape| j8framework::RegExpPristine { shape, slots, replace: methods[2] })
+            d.props().shape().map(|shape| j8framework::RegExpPristine { shape, last_index, slots, replace: methods[2] })
         };
         r.regexp_pristine.set(self.mc, pristine);
         r.regexp_literal.set(self.mc, j8framework::Static(Some(Regexps::literal)));
