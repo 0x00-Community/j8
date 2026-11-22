@@ -25,12 +25,26 @@ pub enum Specifier<'s> {
     Bare { name: &'s str, subpath: String },
 }
 
-pub const FILE_URL: &str = "file://";
+pub struct FileUrl;
+
+impl FileUrl {
+    const SCHEME: &str = "file:";
+
+    pub fn of(path: &str) -> String {
+        url::Url::from_file_path(path).map_or_else(|()| path.to_owned(), String::from)
+    }
+
+    pub fn path(text: &str) -> std::borrow::Cow<'_, str> {
+        if !text.starts_with(Self::SCHEME) {
+            return std::borrow::Cow::Borrowed(text);
+        }
+        url::Url::parse(text).ok().and_then(|u| u.to_file_path().ok()).map_or(std::borrow::Cow::Borrowed(text), |p| std::borrow::Cow::Owned(p.display().to_string()))
+    }
+}
 
 impl<'s> From<&'s str> for Specifier<'s> {
     fn from(text: &'s str) -> Self {
-        let text = text.strip_prefix(FILE_URL).unwrap_or(text);
-        if text.starts_with('.') || text.starts_with('/') {
+        if text.starts_with('.') || text.starts_with('/') || std::path::Path::new(text).is_absolute() {
             return Self::Path(text);
         }
         if text.starts_with('#') {

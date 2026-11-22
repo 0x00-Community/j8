@@ -230,9 +230,7 @@ impl Default for Store {
     fn default() -> Self {
         let dir = std::env::var_os(CACHE_VAR).map_or_else(
             || {
-                let cache = std::env::var_os("XDG_CACHE_HOME").map(PathBuf::from);
-                let cache = cache.or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")));
-                cache.unwrap_or_else(std::env::temp_dir).join("dune").join("x")
+                dirs::cache_dir().unwrap_or_else(std::env::temp_dir).join("dune").join("x")
             },
             PathBuf::from,
         );

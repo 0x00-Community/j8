@@ -716,9 +716,11 @@ impl Uvfs {
     }
 
     fn module_stat(path: &str) -> i32 {
+        const FILE: i32 = 0;
+        const DIR: i32 = 1;
         match std::fs::metadata(path) {
-            Ok(m) if m.is_dir() => 1,
-            Ok(_) => 0,
+            Ok(m) if m.is_dir() => DIR,
+            Ok(_) => FILE,
             Err(e) => -Errno::code(&e),
         }
     }

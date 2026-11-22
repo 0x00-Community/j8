@@ -1,5 +1,4 @@
 mod esm;
-mod fs;
 mod bytes;
 mod v8;
 mod vendor;
@@ -13,7 +12,6 @@ use std::time::Duration;
 use j8::frame::{Agent, Error, Platform, Pool, Task, Value};
 use j8::{Bytes, IntoJs};
 
-pub use fs::Fs;
 pub use bytes::Raw;
 pub use v8::V8;
 pub use vendor::Lib;
@@ -25,7 +23,6 @@ use crate::web::Web;
 const PRELUDE: &str = concat!(
     include_str!("loader.js"),
     include_str!("internal.js"),
-    include_str!("fs.js"),
     include_str!("misc.js"),
     include_str!("process.js"),
 );
@@ -46,9 +43,11 @@ impl Process {
         a.platform.now().as_secs_f64()
     }
 
+    #[expect(clippy::cast_precision_loss, reason = "a resident set fits a double")]
     fn rss() -> f64 {
-        let pages = std::fs::read_to_string("/proc/self/statm").ok().and_then(|s| s.split_whitespace().nth(1).and_then(|n| n.parse::<f64>().ok()));
-        pages.unwrap_or(0.0) * 4096.0
+        let (Ok(pid), Ok(mut system)) = (sysinfo::get_current_pid(), sysinfo::System::new()) else { return 0.0 };
+        system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), true);
+        system.process(pid).map_or(0.0, |p| p.memory() as f64)
     }
 }
 
@@ -57,15 +56,15 @@ pub struct Os;
 #[j8::object("os")]
 impl Os {
     fn hostname() -> String {
-        std::fs::read_to_string("/proc/sys/kernel/hostname").map_or_else(|_| String::from("localhost"), |s| s.trim().to_owned())
+        sysinfo::System::host_name().unwrap_or_else(|_| String::from("localhost"))
     }
 
     fn release() -> String {
-        std::fs::read_to_string("/proc/sys/kernel/osrelease").map(|s| s.trim().to_owned()).unwrap_or_default()
+        sysinfo::System::kernel_version().unwrap_or_default()
     }
 
     fn homedir() -> String {
-        std::env::var("HOME").unwrap_or_else(|_| String::from("/"))
+        std::env::home_dir().map_or_else(|| String::from("/"), |p| p.display().to_string())
     }
 
     fn tmpdir() -> String {
@@ -76,23 +75,24 @@ impl Os {
         std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
     }
 
+    #[expect(clippy::cast_precision_loss, reason = "memory sizes fit a double")]
     fn memory() -> Vec<f64> {
-        let info = std::fs::read_to_string("/proc/meminfo").unwrap_or_default();
-        let field = |name: &str| info.lines().find(|l| l.starts_with(name)).and_then(|l| l.split_whitespace().nth(1)).and_then(|n| n.parse::<f64>().ok()).unwrap_or(0.0) * 1024.0;
-        vec![field("MemTotal:"), field("MemAvailable:")]
+        let Ok(mut system) = sysinfo::System::new() else { return vec![0.0, 0.0] };
+        system.refresh_memory();
+        vec![system.total_memory() as f64, system.available_memory() as f64]
     }
 
     fn loadavg() -> Vec<f64> {
-        let text = std::fs::read_to_string("/proc/loadavg").unwrap_or_default();
-        text.split_whitespace().take(3).map(|n| n.parse().unwrap_or(0.0)).collect()
+        sysinfo::System::load_average().map_or_else(|_| vec![0.0; 3], |l| vec![l.one, l.five, l.fifteen])
     }
 
+    #[expect(clippy::cast_precision_loss, reason = "seconds since boot fit a double")]
     fn uptime() -> f64 {
-        std::fs::read_to_string("/proc/uptime").ok().and_then(|s| s.split_whitespace().next().and_then(|n| n.parse().ok())).unwrap_or(0.0)
+        sysinfo::System::uptime().map_or(0.0, |s| s as f64)
     }
 
     fn username() -> String {
-        std::env::var("USER").unwrap_or_default()
+        whoami::username().unwrap_or_default()
     }
 
     fn version() -> &'static str {
@@ -330,7 +330,7 @@ impl<P: Platform> NodePlatform<P> {
         } else {
             text
         };
-        Some((format!("{}{name}", esm::FILE_URL), text))
+        Some((esm::FileUrl::of(&name), text))
     }
 }
 
@@ -347,9 +347,11 @@ impl<P: Platform> Platform for NodePlatform<P> {
         if let Ok(b) = Builtin::try_from(specifier) {
             return Some((format!("node:{}", b.spec().0), b.source()));
         }
-        let referrer = referrer.strip_prefix(esm::FILE_URL).unwrap_or(referrer);
+        let referrer = esm::FileUrl::path(referrer);
+        let referrer = referrer.as_ref();
         let from = std::path::Path::new(referrer);
-        match esm::Specifier::from(specifier) {
+        let specifier = esm::FileUrl::path(specifier);
+        match esm::Specifier::from(specifier.as_ref()) {
             esm::Specifier::Path(path) => self.file(referrer, path),
             esm::Specifier::Private(name) => {
                 let package = esm::Package::holding(from)?;
@@ -374,7 +376,7 @@ impl<P: Platform> Platform for NodePlatform<P> {
 j8::runtime! {
     pub Dune: Web {
         globals: [Process],
-        natives: [Fs, Os, Child, V8, Lib, Raw, Uvfs],
+        natives: [Os, Child, V8, Lib, Raw, Uvfs],
         prelude: PRELUDE,
     }
 }
