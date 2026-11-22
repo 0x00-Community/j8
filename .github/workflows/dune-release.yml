@@ -2,7 +2,8 @@ name: dune release
 
 # Every new vX.Y.Z tag (a change in any of major, minor or patch) builds dune for every platform in
 # dune/npm/platforms.json, attaches the archives to the GitHub release of that tag and publishes the npm packages.
-# The tag must match the version in dune/Cargo.toml. npm publishing uses trusted publishing (OIDC): no token,
+# The tag must match the version in dune/Cargo.toml. dune is built against the j8 that j8-release.yml publishes to
+# crates.io from the same tag, so the build waits for it. npm publishing uses trusted publishing (OIDC): no token,
 # each package names 0x00-Community/j8 and this workflow file as its trusted publisher on npmjs.com.
 on:
   push:
@@ -47,6 +48,19 @@ jobs:
             exit 1
           fi
           echo "version=$bare" >>"$GITHUB_OUTPUT"
+      - name: wait for j8 on crates.io
+        env:
+          VERSION: ${{ steps.check.outputs.version }}
+        run: |
+          for _ in $(seq 120); do
+            if curl -fsS https://index.crates.io/2/j8 2>/dev/null | jq -e --arg v "$VERSION" 'select(.vers == $v)' >/dev/null; then
+              echo "j8@$VERSION is on crates.io"
+              exit 0
+            fi
+            sleep 30
+          done
+          echo "::error::j8@$VERSION did not appear on crates.io within an hour (see j8-release.yml)"
+          exit 1
 
   build:
     needs: version
@@ -87,6 +101,8 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-zigbuild
+      - name: lock the published j8
+        run: cargo update -p j8 --precise "${{ needs.version.outputs.version }}"
       - name: cargo build
         run: |
           if [[ -n "${{ matrix.zig }}" ]]; then
