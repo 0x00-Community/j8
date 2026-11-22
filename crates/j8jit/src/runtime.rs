@@ -284,7 +284,6 @@ fn poll(ctx: *mut Ctx) -> u64 {
         return u64::from(a.stop.observe());
     }
     let e = unsafe { ctx.entry() };
-    #[expect(clippy::cast_sign_loss, reason = "positive")]
     u64::from(e.spend(BUDGET_CHUNK as usize))
 }
 
@@ -446,28 +445,13 @@ impl Arena {
         }
     }
 
-    #[cfg(all(not(target_os = "linux"), not(windows)))]
+    #[cfg(not(target_os = "linux"))]
     fn chunk(len: usize) -> Option<(Mapped, Mapped)> {
-        unsafe {
-            let at = libc::mmap(core::ptr::null_mut(), len, libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC, libc::MAP_PRIVATE | libc::MAP_ANON, -1, 0);
-            if at == libc::MAP_FAILED {
-                return None;
-            }
-            let at = at.cast();
-            Some((Mapped { at, len }, Mapped { at, len }))
-        }
-    }
-
-    #[cfg(windows)]
-    fn chunk(len: usize) -> Option<(Mapped, Mapped)> {
-        unsafe {
-            let at = VirtualAlloc(core::ptr::null_mut(), len, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
-            if at.is_null() {
-                return None;
-            }
-            let at = at.cast();
-            Some((Mapped { at, len }, Mapped { at, len }))
-        }
+        let mut mem = region::alloc(len, region::Protection::READ_WRITE_EXECUTE).ok()?;
+        let at = mem.as_mut_ptr::<u8>();
+        let len = mem.len();
+        core::mem::forget(mem);
+        Some((Mapped { at, len }, Mapped { at, len }))
     }
 
     pub fn place(&mut self, bytes: &[u8], patch: impl FnOnce(&mut [u8], usize)) -> Option<usize> {
@@ -480,10 +464,12 @@ impl Arena {
         }
         let (w, x) = self.chunks.last()?;
         let buf = unsafe { core::slice::from_raw_parts_mut(w.at.add(at), len) };
-        buf[..bytes.len()].copy_from_slice(bytes);
         let addr = x.at as usize + at;
-        patch(buf, addr);
-        Code::sync(buf.as_ptr() as usize, addr, len);
+        Code::writable(|| {
+            buf[..bytes.len()].copy_from_slice(bytes);
+            patch(buf, addr);
+        });
+        Code::sync(addr, len);
         self.used = at + len;
         Some(addr)
     }
@@ -495,7 +481,7 @@ pub struct Mapped {
 }
 
 pub struct Trampolines {
-    at: *mut u8,
+    mem: region::Allocation,
     used: usize,
 }
 
@@ -504,54 +490,26 @@ impl Trampolines {
     const STUB: usize = 8;
     pub const PER_PAGE: usize = Self::PAGE / Self::STUB;
 
-    #[cfg(not(windows))]
-    fn reserve() -> Option<*mut u8> {
-        unsafe {
-            let at = libc::mmap(core::ptr::null_mut(), 2 * Self::PAGE, libc::PROT_READ | libc::PROT_WRITE, libc::MAP_PRIVATE | libc::MAP_ANONYMOUS, -1, 0);
-            if at == libc::MAP_FAILED { None } else { Some(at.cast()) }
-        }
-    }
-
-    #[cfg(not(windows))]
-    fn lock(at: *mut u8) -> bool {
-        unsafe { libc::mprotect(at.cast(), Self::PAGE, libc::PROT_READ | libc::PROT_EXEC) == 0 }
-    }
-
-    #[cfg(windows)]
-    fn reserve() -> Option<*mut u8> {
-        unsafe {
-            let at = VirtualAlloc(core::ptr::null_mut(), 2 * Self::PAGE, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-            if at.is_null() { None } else { Some(at.cast()) }
-        }
-    }
-
-    #[cfg(windows)]
-    fn lock(at: *mut u8) -> bool {
-        unsafe {
-            let mut old = 0u32;
-            if VirtualProtect(at.cast(), Self::PAGE, PAGE_EXECUTE_READ, &raw mut old) != 0 {
-                return true;
-            }
-            let _ = VirtualFree(at.cast(), 0, MEM_RELEASE);
-            false
-        }
-    }
-
     pub fn new() -> Option<Self> {
-        let at = Self::reserve()?;
-        unsafe {
+        let mut mem = region::alloc(2 * Self::PAGE, Code::STUBS).ok()?;
+        let at = mem.as_mut_ptr::<u8>();
+        Code::writable(|| unsafe {
             for i in 0..Self::PER_PAGE {
                 let stub = at.add(i * Self::STUB);
                 let cell = at.add(Self::PAGE + i * 8);
                 let code = Code::jump_through(stub as usize, cell as usize);
                 core::ptr::copy_nonoverlapping(code.as_ptr(), stub, Self::STUB);
             }
-        }
-        if !Self::lock(at) {
+        });
+        if Code::STUBS != region::Protection::READ_WRITE_EXECUTE && unsafe { region::protect(at, Self::PAGE, region::Protection::READ_EXECUTE) }.is_err() {
             return None;
         }
-        Code::sync(at as usize, at as usize, Self::PAGE);
-        Some(Trampolines { at, used: 0 })
+        Code::sync(at as usize, Self::PAGE);
+        Some(Trampolines { mem, used: 0 })
+    }
+
+    fn base(&self) -> *mut u8 {
+        self.mem.as_ptr::<u8>().cast_mut()
     }
 
     pub fn take(&mut self, target: usize) -> Option<usize> {
@@ -561,33 +519,51 @@ impl Trampolines {
         let i = self.used;
         self.used += 1;
         self.set(i, target);
-        Some(self.at as usize + i * Self::STUB)
+        Some(self.base() as usize + i * Self::STUB)
     }
 
     pub fn set_at(&self, stub: usize, target: usize) {
-        let i = (stub - self.at as usize) / Self::STUB;
+        let i = (stub - self.base() as usize) / Self::STUB;
         self.set(i, target);
     }
 
     fn set(&self, i: usize, target: usize) {
-        unsafe { core::ptr::write_volatile(self.at.add(Self::PAGE + i * 8).cast::<usize>(), target) };
+        Code::writable(|| unsafe { core::ptr::write_volatile(self.base().add(Self::PAGE + i * 8).cast::<usize>(), target) });
     }
 
     pub fn owns(&self, stub: usize) -> bool {
-        stub >= self.at as usize && stub < self.at as usize + Self::PAGE
-    }
-}
-
-impl Drop for Trampolines {
-    fn drop(&mut self) {
-        #[cfg(not(windows))]
-        unsafe { libc::munmap(self.at.cast(), 2 * Self::PAGE) };
-        #[cfg(windows)]
-        unsafe { let _ = VirtualFree(self.at.cast(), 0, MEM_RELEASE); }
+        stub >= self.base() as usize && stub < self.base() as usize + Self::PAGE
     }
 }
 
 struct Code;
+
+impl Code {
+    #[cfg(all(target_vendor = "apple", target_arch = "aarch64"))]
+    const STUBS: region::Protection = region::Protection::READ_WRITE_EXECUTE;
+    #[cfg(not(all(target_vendor = "apple", target_arch = "aarch64")))]
+    const STUBS: region::Protection = region::Protection::READ_WRITE;
+
+    #[cfg(all(target_vendor = "apple", target_arch = "aarch64"))]
+    fn writable<T>(f: impl FnOnce() -> T) -> T {
+        const WRITE: libc::c_int = 0;
+        const EXECUTE: libc::c_int = 1;
+        unsafe { libc::pthread_jit_write_protect_np(WRITE) };
+        let r = f();
+        unsafe { libc::pthread_jit_write_protect_np(EXECUTE) };
+        r
+    }
+
+    #[cfg(not(all(target_vendor = "apple", target_arch = "aarch64")))]
+    fn writable<T>(f: impl FnOnce() -> T) -> T {
+        f()
+    }
+
+    fn sync(run: usize, len: usize) {
+        let start = run as *const u8;
+        unsafe { clear_cache::clear_cache(start, start.wrapping_add(len)) };
+    }
+}
 
 #[cfg(not(target_arch = "aarch64"))]
 impl Code {
@@ -597,16 +573,12 @@ impl Code {
         code[2..6].copy_from_slice(&disp.to_le_bytes());
         code
     }
-
-    fn sync(_written: usize, _run: usize, _len: usize) {}
 }
 
 #[cfg(target_arch = "aarch64")]
 impl Code {
     const LDR_X16: u32 = 0x5800_0010;
     const BR_X16: u32 = 0xD61F_0200;
-    const LINE_FIELD: u64 = 0xF;
-    const DLINE_SHIFT: u64 = 16;
     const WORD: usize = 4;
 
     fn jump_through(stub: usize, cell: usize) -> [u8; Trampolines::STUB] {
@@ -616,51 +588,11 @@ impl Code {
         code[4..].copy_from_slice(&Self::BR_X16.to_le_bytes());
         code
     }
-
-    fn sync(written: usize, run: usize, len: usize) {
-        let ctr: u64;
-        unsafe { core::arch::asm!("mrs {}, ctr_el0", out(reg) ctr, options(nomem, nostack)) };
-        let dline = Self::WORD << (ctr >> Self::DLINE_SHIFT & Self::LINE_FIELD);
-        let iline = Self::WORD << (ctr & Self::LINE_FIELD);
-        let mut p = written & !(dline - 1);
-        while p < written + len {
-            unsafe { core::arch::asm!("dc cvau, {}", in(reg) p, options(nostack)) };
-            p += dline;
-        }
-        unsafe { core::arch::asm!("dsb ish", options(nostack)) };
-        let mut p = run & !(iline - 1);
-        while p < run + len {
-            unsafe { core::arch::asm!("ic ivau, {}", in(reg) p, options(nostack)) };
-            p += iline;
-        }
-        unsafe { core::arch::asm!("dsb ish", "isb", options(nostack)) };
-    }
 }
-
-#[cfg(windows)]
-const MEM_COMMIT: u32 = 0x1000;
-
-#[cfg(windows)]
-const MEM_RESERVE: u32 = 0x2000;
-
-#[cfg(windows)]
-const MEM_RELEASE: u32 = 0x8000;
-
-#[cfg(windows)]
-const PAGE_READWRITE: u32 = 0x04;
-
-#[cfg(windows)]
-const PAGE_EXECUTE_READ: u32 = 0x20;
-
-#[cfg(windows)]
-const PAGE_EXECUTE_READWRITE: u32 = 0x40;
 
 #[cfg(windows)]
 #[link(name = "kernel32")]
 unsafe extern "system" {
-    fn VirtualAlloc(addr: *mut core::ffi::c_void, size: usize, flags: u32, prot: u32) -> *mut core::ffi::c_void;
-    fn VirtualProtect(addr: *mut core::ffi::c_void, size: usize, prot: u32, old: *mut u32) -> i32;
-    fn VirtualFree(addr: *mut core::ffi::c_void, size: usize, flags: u32) -> i32;
     fn GetCurrentThreadStackLimits(low: *mut usize, high: *mut usize);
 }
 

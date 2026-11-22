@@ -18,7 +18,7 @@ use crate::job::{Job, Layer};
 #[command(about = "Run a package's executable with dune (`dunx` is `dune x`)")]
 #[command(name = "dunx", version)]
 pub struct Dunx {
-    #[arg(help = "Enable the JIT: hot functions are compiled to x86-64 machine code (j8jit)")]
+    #[arg(help = "Enable the JIT: hot functions are compiled to x86-64 or AArch64 machine code (j8jit)")]
     #[arg(long)]
     jit: bool,
     #[command(flatten)]
