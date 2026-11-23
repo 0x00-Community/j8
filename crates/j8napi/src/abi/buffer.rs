@@ -14,7 +14,7 @@ pub struct Deferred<'e> {
 impl Env<'_> {
     fn array_buffer<'scope>(a: &j8framework::Agent<'scope, '_>, bytes: Backing) -> JsObject<'scope> {
         let data = BufferData { bytes: Some(bytes), max: None, shared: false };
-        ObjectData { kind: ObjectKind::ArrayBuffer(Box::new(data)), proto: Some(a.realm.array_buffer_proto), ..ObjectData::default() }.alloc(a.mc)
+        ObjectData { kind: ObjectKind::ArrayBuffer(Box::new(data)), proto: Some(a.context.array_buffer_proto), ..ObjectData::default() }.alloc(a.mc)
     }
 
     fn buffer_bytes<'scope>(a: &j8framework::Agent<'scope, '_>, buffer: JsObject<'scope>) -> (*mut c_void, usize) {
@@ -99,7 +99,7 @@ napi! {
         env.check_view(a, buffer, byte_offset, bytes, kind.size(), kind.view_name())?;
         let at = ElementKind::ALL.iter().position(|&k| k == kind).ok_or(Status::InvalidArg)?;
         let view = ViewData { buffer, offset: byte_offset, length: Some(length) };
-        let o = ObjectData { kind: ObjectKind::TypedArray(kind, view), proto: Some(a.realm.typed_protos[at]), ..ObjectData::default() }.alloc(a.mc);
+        let o = ObjectData { kind: ObjectKind::TypedArray(kind, view), proto: Some(a.context.typed_protos[at]), ..ObjectData::default() }.alloc(a.mc);
         env.out(result, o.into())
     }
 
@@ -123,7 +123,7 @@ napi! {
         let buffer = env.array_buffer_of(arraybuffer).map_err(|_| Status::InvalidArg)?;
         env.check_view(a, buffer, byte_offset, byte_length, 1, "DataView")?;
         let view = ViewData { buffer, offset: byte_offset, length: Some(byte_length) };
-        let o = ObjectData { kind: ObjectKind::DataView(view), proto: Some(a.realm.data_view_proto), ..ObjectData::default() }.alloc(a.mc);
+        let o = ObjectData { kind: ObjectKind::DataView(view), proto: Some(a.context.data_view_proto), ..ObjectData::default() }.alloc(a.mc);
         env.out(result, o.into())
     }
 
@@ -142,7 +142,7 @@ napi! {
 
     fn napi_create_date(env, time: f64, result: *mut Handle) {
         let a = env.agent()?;
-        let o = ObjectData { kind: ObjectKind::Date(time), proto: Some(a.realm.date_proto), ..ObjectData::default() }.alloc(a.mc);
+        let o = ObjectData { kind: ObjectKind::Date(time), proto: Some(a.context.date_proto), ..ObjectData::default() }.alloc(a.mc);
         env.out(result, o.into())
     }
 

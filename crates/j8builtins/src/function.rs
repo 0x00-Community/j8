@@ -34,7 +34,7 @@ impl Functions {
         if let Some(fo) = f.as_object()
             && new_target != Value::Undefined
         {
-            let fallback = fo.borrow().proto().unwrap_or(a.realm.function_proto);
+            let fallback = fo.borrow().proto().unwrap_or(a.context.function_proto);
             let proto = a.proto_from_ctor(new_target, fallback)?;
             fo.borrow_mut(a.mc).set_proto(Some(proto));
         }
@@ -70,7 +70,7 @@ impl Functions {
 
 impl<'scope> Installer<'_, 'scope> {
     pub(crate) fn functions(&mut self) {
-        let r = self.realm;
+        let r = self.context;
         let ctor = self.constructor("Function", Functions::function, r.function_proto, 1);
         let kinds: [(&str, j8framework::NativeFn, j8framework::JsObject<'scope>, Option<j8framework::JsObject<'scope>>); 3] = [
             ("GeneratorFunction", Functions::generator_function, r.generator_function_proto, Some(r.generator_proto)),

@@ -80,10 +80,10 @@ impl<'scope> IntoJs<'scope> for Bytes {
     fn into_js(self, a: &mut Agent<'scope, '_>) -> Result<Value<'scope>, Error> {
         let len = self.0.len();
         let data = BufferData { bytes: Some(self.0.into()), max: None, shared: false };
-        let buffer = ObjectData { kind: ObjectKind::ArrayBuffer(Box::new(data)), proto: Some(a.realm.array_buffer_proto), ..ObjectData::default() }.alloc(a.mc);
+        let buffer = ObjectData { kind: ObjectKind::ArrayBuffer(Box::new(data)), proto: Some(a.context.array_buffer_proto), ..ObjectData::default() }.alloc(a.mc);
         let at = ElementKind::ALL.iter().position(|&k| k == ElementKind::Uint8).expect("Uint8 is a typed array kind");
         let view = ViewData { buffer, offset: 0, length: Some(len) };
-        let o = ObjectData { kind: ObjectKind::TypedArray(ElementKind::Uint8, view), proto: Some(a.realm.typed_protos[at]), ..ObjectData::default() }.alloc(a.mc);
+        let o = ObjectData { kind: ObjectKind::TypedArray(ElementKind::Uint8, view), proto: Some(a.context.typed_protos[at]), ..ObjectData::default() }.alloc(a.mc);
         Ok(o.into())
     }
 }
@@ -95,7 +95,7 @@ pub struct Json<T>(pub T);
 #[cfg(feature = "json")]
 impl<T> Json<T> {
     fn json<'scope>(a: &mut Agent<'scope, '_>, name: &str, arg: Value<'scope>) -> Result<Value<'scope>, Error> {
-        let json = a.get_named(a.realm.global.into(), "JSON")?;
+        let json = a.get_named(a.context.global.into(), "JSON")?;
         let f = a.get_named(json, name)?;
         a.call(f, json, &[arg])
     }

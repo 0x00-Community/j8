@@ -7,7 +7,7 @@ use crate::{Agent, Error, ErrorKind, HostReaction, Job, JsObject, ObjectData, Ob
 
 impl<'scope> Agent<'scope, '_> {
     pub fn new_promise(&self) -> JsObject<'scope> {
-        ObjectData { kind: ObjectKind::Promise { state: Settled::Pending, reactions: Vec::new() }, proto: Some(self.realm.promise_proto), ..ObjectData::default() }.alloc(self.mc)
+        ObjectData { kind: ObjectKind::Promise { state: Settled::Pending, reactions: Vec::new() }, proto: Some(self.context.promise_proto), ..ObjectData::default() }.alloc(self.mc)
     }
 
     pub fn is_promise(v: Value<'scope>) -> bool {
@@ -17,8 +17,8 @@ impl<'scope> Agent<'scope, '_> {
     pub fn promise_resolvers(&self, promise: JsObject<'scope>) -> (JsObject<'scope>, JsObject<'scope>) {
         let done = self.mc.alloc(core::sync::atomic::AtomicBool::new(false));
         let make = |reject| {
-            let f = ObjectData { kind: ObjectKind::Resolver { promise, reject, done }, proto: Some(self.realm.function_proto), ..ObjectData::default() }.alloc(self.mc);
-            self.realm.name_function(self.mc, f, "", Some(1));
+            let f = ObjectData { kind: ObjectKind::Resolver { promise, reject, done }, proto: Some(self.context.function_proto), ..ObjectData::default() }.alloc(self.mc);
+            self.context.name_function(self.mc, f, "", Some(1));
             f
         };
         (make(false), make(true))
@@ -37,7 +37,7 @@ impl<'scope> Agent<'scope, '_> {
     }
 
     fn enqueue(&self, job: Job<'scope>) {
-        self.realm.jobs.push(self.mc, job);
+        self.context.jobs.push(self.mc, job);
     }
 
     fn settle(&mut self, promise: JsObject<'scope>, value: Value<'scope>, rejected: bool) {
@@ -112,7 +112,7 @@ impl<'scope> Agent<'scope, '_> {
     pub fn promise_resolve(&mut self, v: Value<'scope>) -> Result<JsObject<'scope>, Error> {
         if let Some(o) = v.as_object()
             && Self::is_promise(v)
-            && matches!((self.get_named(v, "constructor")?).kind(), ValueKind::Object(c) if ScopeLocal::ptr_eq(c, self.realm.promise_ctor))
+            && matches!((self.get_named(v, "constructor")?).kind(), ValueKind::Object(c) if ScopeLocal::ptr_eq(c, self.context.promise_ctor))
         {
             return Ok(o);
         }
@@ -255,7 +255,7 @@ impl<'scope> Agent<'scope, '_> {
 
     pub fn run_jobs(&mut self) -> Result<(), Error> {
         loop {
-            let job = self.realm.jobs.pop(self.mc);
+            let job = self.context.jobs.pop(self.mc);
             match job {
                 Some(j) => self.run_job(j)?,
                 None => return Ok(()),

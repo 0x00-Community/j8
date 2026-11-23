@@ -75,7 +75,7 @@ impl Buffers {
         if max.is_some_and(|m| len > m) {
             return Err(a.throw(ErrorKind::Range, "byteLength exceeds maxByteLength"));
         }
-        let fallback = if shared { a.realm.shared_array_buffer_proto } else { a.realm.array_buffer_proto };
+        let fallback = if shared { a.context.shared_array_buffer_proto } else { a.context.array_buffer_proto };
         let proto = a.proto_from_ctor(new_target, fallback)?;
         Ok(Self::allocate(a, proto, len, max, shared)?.into())
     }
@@ -189,7 +189,7 @@ impl Buffers {
         if c.as_object().is_none() {
             return Err(a.throw(ErrorKind::Type, "object.constructor is not an object"));
         }
-        let s = a.get_symbol(c, a.realm.symbols.species, c)?;
+        let s = a.get_symbol(c, a.context.symbols.species, c)?;
         if s.is_nullish() {
             return Ok(fallback);
         }
@@ -200,7 +200,7 @@ impl Buffers {
     }
 
     fn global_ctor<'scope>(a: &Agent<'scope, '_>, name: &str) -> Value<'scope> {
-        a.realm.global.borrow().own(a.mc, name).unwrap_or_default()
+        a.context.global.borrow().own(a.mc, name).unwrap_or_default()
     }
 
     fn slice_with<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>], shared: bool) -> Result<Value<'scope>, Error> {
@@ -273,7 +273,7 @@ impl Buffers {
         if max.is_some_and(|m| new_len > m) {
             return Err(a.throw(ErrorKind::Range, "new length exceeds maxByteLength"));
         }
-        let n = Self::allocate(a, a.realm.array_buffer_proto, 0, max, false)?;
+        let n = Self::allocate(a, a.context.array_buffer_proto, 0, max, false)?;
         let mut bytes = Self::take_bytes(a, o).unwrap_or_else(|| Backing::from(alloc::vec::Vec::new()));
         if !bytes.resize(new_len) {
             let mut v = bytes.into_vec();
@@ -317,7 +317,7 @@ impl Buffers {
                 Some(n)
             }
         };
-        let proto = a.proto_from_ctor(new_target, a.realm.data_view_proto)?;
+        let proto = a.proto_from_ctor(new_target, a.context.data_view_proto)?;
         let Some(len) = Self::info(buffer).0 else { return Err(a.throw(ErrorKind::Type, "Cannot construct a DataView on a detached ArrayBuffer")) };
         if offset > len || length.is_some_and(|n| offset + n > len) {
             return Err(a.throw(ErrorKind::Range, "Invalid DataView length"));
@@ -547,7 +547,7 @@ impl Buffers {
 
 impl<'scope> Installer<'_, 'scope> {
     pub(crate) fn buffers(&mut self) {
-        let r = self.realm;
+        let r = self.context;
         let tag = |o: JsObject<'scope>, t: &str| {
             let v = self.text(t);
             o.borrow_mut(self.mc).define_symbol(r.symbols.to_string_tag, Property { slot: Slot::Data(v), enumerable: false, writable: false, configurable: true });

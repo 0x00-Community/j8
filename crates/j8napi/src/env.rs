@@ -317,7 +317,7 @@ impl Env<'_> {
         });
         let ptr = NonNull::from(&*env);
         let holder = Self::host(a, Holder(env));
-        let global = a.realm.global;
+        let global = a.context.global;
         let holder_key = a.mc.alloc(SymbolData { description: Some(Box::from("napi env")), private: false });
         Self::set_private(a, global, holder_key, holder.into());
         let env = unsafe { ptr.as_ref() };

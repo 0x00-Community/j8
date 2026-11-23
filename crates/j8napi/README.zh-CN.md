@@ -11,7 +11,7 @@
 ```rust
 // 在某次 `Isolate::enter` 里，拿着插件所属 context 的 agent
 let exports = j8napi::Env::open(&mut agent, napi_register_module_v1)?;
-agent.set_named(agent.realm.global.into(), "addon", exports)?;
+agent.set_named(agent.context.global.into(), "addon", exports)?;
 ```
 
 `Env::open` 建插件的环境（和 context 的 global 对象一样长寿），调注册函数，给出它的 exports。

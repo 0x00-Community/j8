@@ -19,7 +19,7 @@ use j8::platform::DefaultPlatform;
 let platform = DefaultPlatform::default();
 let mut isolate = Isolate::new(&platform, CreateParams::default());
 let executor = Executor::default();
-let cx = isolate.enter(|scope| scope.mc.stash::<RealmBrand>(scope.context(&Builtins).realm()));
+let cx = isolate.enter(|scope| scope.mc.stash::<ContextBrand>(scope.context(&Builtins)));
 let result = executor.eval(&mut isolate, &cx, &Source { text: "1 + 2 * 3", file: "a.js" })?;
 ```
 

@@ -3,7 +3,7 @@
 **English** · [简体中文](README.zh-CN.md)
 
 The JavaScript standard built-in objects of [j8](https://github.com/0x00-Community/j8). It implements
-`j8framework::Intrinsics`: when a new `Realm` is created, `Builtins::install` puts the global object, the global
+`j8framework::Intrinsics`: when a new `Context` is created, `Builtins::install` puts the global object, the global
 functions and every built-in constructor, prototype and method into it.
 
 ## Where it sits
@@ -12,7 +12,7 @@ functions and every built-in constructor, prototype and method into it.
 when creating a context, and can replace or trim it:
 
 ```rust
-let cx = isolate.enter(|scope| scope.mc.stash::<RealmBrand>(scope.context(&j8builtins::Builtins).realm()));
+let cx = isolate.enter(|scope| scope.mc.stash::<ContextBrand>(scope.context(&j8builtins::Builtins)));
 ```
 
 It depends only on `j8framework`, not on the executor: every built-in is a host function

@@ -25,7 +25,7 @@ impl Helpers {
         if new_target == Value::Undefined || Self::is_iterator_ctor(new_target) {
             return Err(a.throw(ErrorKind::Type, "Abstract class Iterator not directly constructable"));
         }
-        Ok(a.create_from_ctor(new_target, a.realm.iterator_proto, ObjectKind::Ordinary)?.into())
+        Ok(a.create_from_ctor(new_target, a.context.iterator_proto, ObjectKind::Ordinary)?.into())
     }
 
     fn direct<'scope>(a: &mut Agent<'scope, '_>, o: Value<'scope>) -> Result<IterRecord<'scope>, Error> {
@@ -65,7 +65,7 @@ impl Helpers {
     fn make<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, kind: HelperKind, f: Value<'scope>, remaining: f64) -> Result<Value<'scope>, Error> {
         let underlying = Self::direct(a, this)?;
         let h = IteratorHelper { kind, state: HelperState::Start, underlying, f, remaining, counter: 0.0, inner: None };
-        Ok(ObjectData { kind: ObjectKind::IteratorHelper(Box::new(h)), proto: Some(a.realm.iterator_helper_proto), ..ObjectData::default() }.alloc(a.mc).into())
+        Ok(ObjectData { kind: ObjectKind::IteratorHelper(Box::new(h)), proto: Some(a.context.iterator_helper_proto), ..ObjectData::default() }.alloc(a.mc).into())
     }
 
     fn with_callback<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>], kind: HelperKind) -> Result<Value<'scope>, Error> {
@@ -117,7 +117,7 @@ impl Helpers {
                 return Err(a.throw(ErrorKind::Type, &alloc::format!("{t} is not an object")));
             }
         }
-        let method = a.get_symbol(v, a.realm.symbols.iterator, v)?;
+        let method = a.get_symbol(v, a.context.symbols.iterator, v)?;
         let iterator = if method.is_nullish() { v } else { a.call(method, v, &[])? };
         if iterator.as_object().is_none() {
             return Err(a.throw(ErrorKind::Type, "the iterator is not an object"));
@@ -329,7 +329,7 @@ impl Helpers {
                 let mut cur = a.get_prototype_of(it)?;
                 let mut found = false;
                 while let Some(p) = cur {
-                    if j8framework::ScopeLocal::ptr_eq(p, a.realm.iterator_proto) {
+                    if j8framework::ScopeLocal::ptr_eq(p, a.context.iterator_proto) {
                         found = true;
                         break;
                     }
@@ -342,7 +342,7 @@ impl Helpers {
         if inherits {
             return Ok(rec.iterator);
         }
-        Ok(ObjectData { kind: ObjectKind::WrappedIterator(rec), proto: Some(a.realm.wrap_iterator_proto), ..ObjectData::default() }.alloc(a.mc).into())
+        Ok(ObjectData { kind: ObjectKind::WrappedIterator(rec), proto: Some(a.context.wrap_iterator_proto), ..ObjectData::default() }.alloc(a.mc).into())
     }
 
     fn wrapped<'scope>(a: &Agent<'scope, '_>, this: Value<'scope>) -> Result<IterRecord<'scope>, Error> {
@@ -374,14 +374,14 @@ impl Helpers {
     }
 
     fn ctor_get<'scope>(a: &mut Agent<'scope, '_>, _: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
-        Ok(a.realm.global.borrow().own(a.mc, "Iterator").unwrap_or_default())
+        Ok(a.context.global.borrow().own(a.mc, "Iterator").unwrap_or_default())
     }
 
     fn ignoring_setter<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, key: Key<'_, 'scope>, v: Value<'scope>) -> Result<Value<'scope>, Error> {
         let Some(o) = this.as_object() else {
             return Err(a.throw(ErrorKind::Type, "setter called on a non-object"));
         };
-        if j8framework::ScopeLocal::ptr_eq(o, a.realm.iterator_proto) {
+        if j8framework::ScopeLocal::ptr_eq(o, a.context.iterator_proto) {
             return Err(a.throw(ErrorKind::Type, "Cannot assign to this property of Iterator.prototype"));
         }
         if a.get_own_property(o, key)?.is_none() {
@@ -394,7 +394,7 @@ impl Helpers {
     }
 
     fn tag_set<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
-        Self::ignoring_setter(a, this, Key::Sym(a.realm.symbols.to_string_tag), args.at(0))
+        Self::ignoring_setter(a, this, Key::Sym(a.context.symbols.to_string_tag), args.at(0))
     }
 
     fn ctor_set<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
@@ -404,7 +404,7 @@ impl Helpers {
 
 impl Installer<'_, '_> {
     pub(crate) fn helpers(&mut self) {
-        let r = self.realm;
+        let r = self.context;
         let proto = r.iterator_proto;
         let ctor = r.named_native(self.mc, Helpers::iterator, "Iterator", 0);
         if let ObjectKind::Native(n) = &mut ctor.borrow_mut(self.mc).kind {

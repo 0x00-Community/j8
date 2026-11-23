@@ -65,11 +65,11 @@ fn class_binding() {
     let platform = DefaultPlatform::default();
     let mut isolate = Isolate::new(&platform, CreateParams::default());
     let executor = Executor::default();
-    let cx = isolate.enter(|scope| scope.mc.stash::<j8framework::RealmBrand>(scope.context(&Builtins).realm()));
+    let cx = isolate.enter(|scope| scope.mc.stash::<j8framework::ContextBrand>(scope.context(&Builtins)));
     isolate.enter(|scope| {
-        let realm = scope.mc.fetch(&cx).into();
-        let mut a = scope.agent(realm, &executor);
-        let global = a.realm.global;
+        let context = scope.mc.fetch(&cx);
+        let mut a = scope.agent(context, &executor);
+        let global = a.context.global;
         Counter::install(&mut a, global);
         Calc::install(&mut a, global);
         greet::install(&mut a, global);
@@ -77,8 +77,8 @@ fn class_binding() {
     let src = "const c = new Counter(2); c.inc(3); c.value = c.value * 2; [c.value, c.describe('n'), Counter.sum(1, 2, 3), c instanceof Counter, String(Object.prototype.toString.call(c)), calc.twice(4), calc.answer, greet('j8'), greet.length].join()";
     let r = executor.eval(&mut isolate, &cx, &Source { text: src, file: "t.js" });
     let text = isolate.enter(|scope| {
-        let realm = scope.mc.fetch(&cx).into();
-        let mut a = scope.agent(realm, &executor);
+        let context = scope.mc.fetch(&cx);
+        let mut a = scope.agent(context, &executor);
         let v = a.local(&r.expect("the script runs"));
         String::from(&**a.to_string(v).expect("a string"))
     });

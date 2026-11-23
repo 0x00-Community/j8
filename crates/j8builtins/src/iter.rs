@@ -112,7 +112,7 @@ impl Iters {
 
 impl Installer<'_, '_> {
     pub(crate) fn iterators(&mut self) {
-        let r = self.realm;
+        let r = self.context;
         let sym = r.symbols;
         let proto = r.symbol_proto;
         let ctor = self.constructor("Symbol", Iters::symbol, proto, 0);

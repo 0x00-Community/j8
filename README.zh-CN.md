@@ -92,10 +92,10 @@ cd samples/benchv8 && cargo run --release
 
 | crate | std | 职责 |
 |---|---|---|
-| `j8framework` | std | 核心框架层：定义 trait（`Platform`、`Invoke`、`Intrinsics`）与通用结构体 / 枚举（`Isolate`、`Scope`、`Agent`、`Context`·`Realm`、`ScopeGlobal`、`Host`、`Value`、`JsString`·`JsObject`、`Profiler`、`BinaryOp`、`Error`……），JS 运算语义挂在 `Agent` 上，实现归各层 crate。 |
+| `j8framework` | std | 核心框架层：定义 trait（`Platform`、`Invoke`、`Intrinsics`）与通用结构体 / 枚举（`Isolate`、`Scope`、`Agent`、`Context`、`ScopeGlobal`、`Host`、`Value`、`JsString`·`JsObject`、`Profiler`、`BinaryOp`、`Error`……），JS 运算语义挂在 `Agent` 上，实现归各层 crate。 |
 | `j8`（仓库根 `src/`） | std | 聚合导出：`#[j8::class]` / `#[j8::object]` / `#[j8::function]`（宏在 j8macros，见 `crates/macros/USAGE.md`）与 j8binding 的 trait；其余 crate 按 feature 导出（缺省 `runtime` = `j8::executor` + `j8::builtins` + `j8::platform`，另有 `bytecode` / `taskqueue` / `lockfree` / `jit` / `full`），每个子 crate 也单独发在 crates.io |
 | `j8binding` | std | Rust ⇄ JS 绑定的运行时：`FromJs` / `IntoJs`、宿主对象、`Class` / `Object` |
-| `j8builtins` | std | 实现 `Intrinsics`：往 `Realm` 装 Object / Function / Array / String / Number / Boolean / Math / Error 系列 / `console` / `parseInt` 等 |
+| `j8builtins` | std | 实现 `Intrinsics`：往 `Context` 装 Object / Function / Array / String / Number / Boolean / Math / Error 系列 / `console` / `parseInt` 等 |
 | `j8platform` | std | 实现 `Platform`（`DefaultPlatform`）：后台任务跑在 moremath `ThreadMulti` 线程池上（起一次复用、任务可借用调用方数据，经 `j8framework::Pool`），时钟用 `Instant` |
 | `j8bytecode` | std | 字节码，依赖根（不依赖其他 j8 crate）：与 V8 Ignition 逐字节一致（`Bytecode` / `OperandType` … 由 `v8.json` 生成，`tools/v8bytecodes.py` 从 V8 头文件写出），`Encoder` / `Decoder`，`SharedFunction` / `BytecodeArray` / `Module` |
 | `j8compiler` | std | JS ⇒ 字节码（`Module` 实现 `j8compiler::Compile`：脚本、模块、`eval` / `Function`），用 oxc 解析 |
@@ -126,21 +126,21 @@ cd samples/benchv8 && cargo run --release
 - 堆有自己的回收线程（数目同平台线程池）；`Platform` 的父 trait `Pool` 给并行内建函数用
 
 - `Isolate::enter(|scope| …)` 进入一次，`'scope` 是这次进入的品牌；闭包期间不回收，返回后分配够多就回收（通常是年轻回收，每隔几轮一次完整回收）
-- `Executor::eval` 拿 `&mut Isolate` 自己分片进入：每片最多一万条指令，停下时执行状态挂到根上、`enter` 返回时回收一段再接着跑；执行环境用 `ScopeGlobal<'p, RealmBrand>` 跨片保留（宿主函数里重入的 JS 在当前片里跑完）
+- `Executor::eval` 拿 `&mut Isolate` 自己分片进入：每片最多一万条指令，停下时执行状态挂到根上、`enter` 返回时回收一段再接着跑；执行环境用 `ScopeGlobal<'p, ContextBrand>` 跨片保留（宿主函数里重入的 JS 在当前片里跑完）
 - `Value<'scope>` 就是 V8 的 Local：出不了闭包，编译期保证
-- `ScopeGlobal<'p, B>` 是根（paragc 的），跨多次 `enter` 存活，drop 即放掉；`B` 标明类型（`ValueBrand`、`RealmBrand`）
+- `ScopeGlobal<'p, B>` 是根（paragc 的），跨多次 `enter` 存活，drop 即放掉；`B` 标明类型（`ValueBrand`、`ContextBrand`）
 - 抛出的值照 V8 放在待处理异常槽里（`Error::Exception`，`agent.take_exception()`）
 
 ```rust
 use j8builtins::Builtins;
 use j8executor::Executor;
-use j8framework::{CreateParams, Isolate, RealmBrand, Source};
+use j8framework::{CreateParams, Isolate, ContextBrand, Source};
 use j8platform::DefaultPlatform;
 
 let platform = DefaultPlatform::default();
 let mut isolate = Isolate::new(&platform, CreateParams::default());
 let executor = Executor::default();
-let cx = isolate.enter(|scope| scope.mc.stash::<RealmBrand>(scope.context(&Builtins).realm()));
+let cx = isolate.enter(|scope| scope.mc.stash::<ContextBrand>(scope.context(&Builtins)));
 let result = executor.eval(&mut isolate, &cx, &Source { text: "1 + 2 * 3", file: "a.js" })?;
 isolate.enter(|scope| {
     let v = scope.local(&result);

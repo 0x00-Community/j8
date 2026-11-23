@@ -5,8 +5,8 @@ use crate::{Agent, Error, ErrorKind, JsObject, Key, PropertyKey, Value};
 impl<'scope> Agent<'scope, '_> {
     pub fn class_heritage(&mut self, superclass: Value<'scope>) -> Result<(Option<JsObject<'scope>>, JsObject<'scope>), Error> {
         match superclass.kind() {
-            ValueKind::Uninit => Ok((Some(self.realm.object_proto), self.realm.function_proto)),
-            ValueKind::Null => Ok((None, self.realm.function_proto)),
+            ValueKind::Uninit => Ok((Some(self.context.object_proto), self.context.function_proto)),
+            ValueKind::Null => Ok((None, self.context.function_proto)),
             ValueKind::Object(s) if self.is_constructor(superclass) => match self.get_named(superclass, "prototype")?.kind() {
                 ValueKind::Object(p) => Ok((Some(p), s)),
                 ValueKind::Null => Ok((None, s)),
@@ -77,8 +77,8 @@ impl<'scope> Agent<'scope, '_> {
             Some(p) => alloc::format!("{p} {name}"),
             None => name,
         };
-        let realm = self.realm;
-        realm.name_function(self.mc, f, &name, None);
+        let context = self.context;
+        context.name_function(self.mc, f, &name, None);
         Ok(())
     }
 }

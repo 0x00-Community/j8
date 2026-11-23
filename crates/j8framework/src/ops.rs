@@ -270,7 +270,7 @@ impl<'scope> Agent<'scope, '_> {
     }
 
     pub fn unit_string(&self, u: u16) -> JsString<'scope> {
-        match self.realm.chars.get(usize::from(u)) {
+        match self.context.chars.get(usize::from(u)) {
             Some(&s) => s,
             None => self.string_units(&[u]),
         }
@@ -297,19 +297,19 @@ impl<'scope> Agent<'scope, '_> {
     }
 
     pub fn object(&self) -> JsObject<'scope> {
-        ObjectData { proto: Some(self.realm.object_proto), ..ObjectData::default() }.alloc(self.mc)
+        ObjectData { proto: Some(self.context.object_proto), ..ObjectData::default() }.alloc(self.mc)
     }
 
     pub fn object_with(&self, capacity: usize) -> JsObject<'scope> {
-        ObjectData::ordinary(self.mc, Some(self.realm.object_proto), capacity)
+        ObjectData::ordinary(self.mc, Some(self.context.object_proto), capacity)
     }
 
     pub fn array(&self, items: Vec<Value<'scope>>) -> JsObject<'scope> {
-        ObjectData { kind: ObjectKind::Array, elements: items, proto: Some(self.realm.array_proto), ..ObjectData::default() }.alloc(self.mc)
+        ObjectData { kind: ObjectKind::Array, elements: items, proto: Some(self.context.array_proto), ..ObjectData::default() }.alloc(self.mc)
     }
 
     pub fn array_from_slice(&self, items: &[Value<'scope>]) -> JsObject<'scope> {
-        let o = ObjectData { kind: ObjectKind::Array, proto: Some(self.realm.array_proto), ..ObjectData::default() }.alloc(self.mc);
+        let o = ObjectData { kind: ObjectKind::Array, proto: Some(self.context.array_proto), ..ObjectData::default() }.alloc(self.mc);
         if !items.is_empty() {
             o.elements().replace(self.mc, items);
         }
@@ -317,7 +317,7 @@ impl<'scope> Agent<'scope, '_> {
     }
 
     pub fn error(&self, kind: ErrorKind, message: &str) -> JsObject<'scope> {
-        let e = ObjectData { kind: ObjectKind::Error, proto: Some(self.realm.error_proto(kind)), ..ObjectData::default() }.alloc(self.mc);
+        let e = ObjectData { kind: ObjectKind::Error, proto: Some(self.context.error_proto(kind)), ..ObjectData::default() }.alloc(self.mc);
         let m = self.string(message);
         e.borrow_mut(self.mc).define("message", Property::hidden(m.into()));
         e
@@ -355,7 +355,7 @@ impl<'scope> Agent<'scope, '_> {
         if v.as_object().is_none() {
             return Ok(v);
         }
-        let exotic = self.get_symbol(v, self.realm.symbols.to_primitive, v)?;
+        let exotic = self.get_symbol(v, self.context.symbols.to_primitive, v)?;
         if !exotic.is_nullish() {
             let h = self.string(match hint {
                 Hint::Default => "default",
@@ -555,11 +555,11 @@ impl<'scope> Agent<'scope, '_> {
 
     fn proto_of(&self, v: Value<'scope>) -> Option<JsObject<'scope>> {
         match v.kind() {
-            ValueKind::String(_) => Some(self.realm.string_proto),
-            ValueKind::Number(_) => Some(self.realm.number_proto),
-            ValueKind::Bool(_) => Some(self.realm.boolean_proto),
-            ValueKind::Symbol(_) => Some(self.realm.symbol_proto),
-            ValueKind::BigInt(_) => Some(self.realm.bigint_proto),
+            ValueKind::String(_) => Some(self.context.string_proto),
+            ValueKind::Number(_) => Some(self.context.number_proto),
+            ValueKind::Bool(_) => Some(self.context.boolean_proto),
+            ValueKind::Symbol(_) => Some(self.context.symbol_proto),
+            ValueKind::BigInt(_) => Some(self.context.bigint_proto),
             ValueKind::Object(o) => Some(o),
             ValueKind::Undefined | ValueKind::Null | ValueKind::Uninit => None,
         }
@@ -950,7 +950,7 @@ impl<'scope> Agent<'scope, '_> {
     pub fn can_be_held_weakly(&self, v: Value<'scope>) -> bool {
         match v.kind() {
             ValueKind::Object(_) => true,
-            ValueKind::Symbol(s) => !self.realm.symbol_registry.get().iter().any(|(_, x)| ScopeLocal::ptr_eq(*x, s)),
+            ValueKind::Symbol(s) => !self.context.symbol_registry.get().iter().any(|(_, x)| ScopeLocal::ptr_eq(*x, s)),
             _ => false,
         }
     }
@@ -985,7 +985,7 @@ impl<'scope> Agent<'scope, '_> {
             let what = self.describe(f);
             return Err(self.throw(ErrorKind::Type, &format!("Right-hand side of 'instanceof' is not an object: {what}")));
         }
-        let h = self.get_symbol(f, self.realm.symbols.has_instance, f)?;
+        let h = self.get_symbol(f, self.context.symbols.has_instance, f)?;
         if !h.is_nullish() {
             let r = self.call(h, f, &[v])?;
             return Ok(self.to_boolean(r));
@@ -1154,7 +1154,7 @@ impl<'scope> Agent<'scope, '_> {
     }
 
     pub fn iterator_object(&mut self, v: Value<'scope>) -> Result<Value<'scope>, Error> {
-        let method = if v.is_nullish() { Value::Undefined } else { self.get_symbol(v, self.realm.symbols.iterator, v)? };
+        let method = if v.is_nullish() { Value::Undefined } else { self.get_symbol(v, self.context.symbols.iterator, v)? };
         if !self.is_callable(method) {
             let what = match v.kind() {
                 ValueKind::Symbol(s) => self.symbol_descriptive(s),
@@ -1230,7 +1230,7 @@ impl<'scope> Agent<'scope, '_> {
 
     pub fn iterator_step(&mut self, it: IterRecord<'scope>) -> Result<Option<Value<'scope>>, Error> {
         if let (ValueKind::Object(n), ValueKind::Object(o)) = (it.next.kind(), it.iterator.kind()) {
-            let [array, string] = *self.realm.builtin_nexts.get();
+            let [array, string] = *self.context.builtin_nexts.get();
             let (is_array, is_string) = match &o.borrow().kind {
                 ObjectKind::Iterator(IteratorState::Array { .. }) => (true, false),
                 ObjectKind::Iterator(IteratorState::String { .. }) => (false, true),
@@ -1273,8 +1273,8 @@ impl<'scope> Agent<'scope, '_> {
 
     pub fn builtin_iterator(&self, state: IteratorState<'scope>) -> JsObject<'scope> {
         let proto = match state {
-            IteratorState::Array { .. } => self.realm.array_iterator_proto,
-            IteratorState::String { .. } => self.realm.string_iterator_proto,
+            IteratorState::Array { .. } => self.context.array_iterator_proto,
+            IteratorState::String { .. } => self.context.string_iterator_proto,
         };
         ObjectData { kind: ObjectKind::Iterator(state), proto: Some(proto), ..ObjectData::default() }.alloc(self.mc)
     }
@@ -1338,7 +1338,7 @@ impl<'scope> Agent<'scope, '_> {
     pub fn create_this(&mut self, new_target: Value<'scope>) -> Result<JsObject<'scope>, Error> {
         let proto = match (self.get_named(new_target, "prototype")?).kind() {
             ValueKind::Object(p) => p,
-            _ => self.realm.object_proto,
+            _ => self.context.object_proto,
         };
         Ok(ObjectData { proto: Some(proto), ..ObjectData::default() }.alloc(self.mc))
     }

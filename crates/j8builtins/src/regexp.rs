@@ -251,7 +251,7 @@ impl Regexps {
     }
 
     fn cached<'scope>(a: &Agent<'scope, '_>, source: &str, flags: &str) -> Result<j8framework::RegExpCompiled<'scope>, Error> {
-        let slot = &a.realm.realm().get().regexp_cache[j8framework::RegExpCompiled::bucket(source, flags)];
+        let slot = &a.context.get().regexp_cache[j8framework::RegExpCompiled::bucket(source, flags)];
         if let Some(c) = slot.get().filter(|c| **c.source == *source && **c.flags == *flags) {
             return Ok((*c).clone());
         }
@@ -264,13 +264,13 @@ impl Regexps {
 
     fn make<'scope>(a: &Agent<'scope, '_>, c: &j8framework::RegExpCompiled<'scope>) -> JsObject<'scope> {
         let kind = ObjectKind::RegExp(RegExpData { source: c.source, flags: c.flags, compiled: c.compiled, legacy: true });
-        let o = ObjectData { kind, proto: Some(a.realm.regexp_proto), ..ObjectData::default() }.alloc(a.mc);
+        let o = ObjectData { kind, proto: Some(a.context.regexp_proto), ..ObjectData::default() }.alloc(a.mc);
         Self::stamp(a, o, 0.0.into());
         o
     }
 
     fn stamp<'scope>(a: &Agent<'scope, '_>, o: JsObject<'scope>, v: Value<'scope>) {
-        if let Some(p) = a.realm.regexp_pristine.get().as_ref() {
+        if let Some(p) = a.context.regexp_pristine.get().as_ref() {
             o.fill(a.mc, p.last_index, core::iter::once(Slot::Data(v)));
             return;
         }
@@ -288,7 +288,7 @@ impl Regexps {
     }
 
     fn literal_store<'scope>(a: &Agent<'scope, '_>, bucket: usize, entry: j8framework::RegExpLiteralEntry<'scope>) {
-        let cache = &a.realm.realm().get().regexp_literals;
+        let cache = &a.context.get().regexp_literals;
         let buddy = (bucket + 1) % j8framework::RegExpCompiled::BUCKETS;
         let key = |e: &j8framework::RegExpLiteralEntry<'scope>| e.ptr == entry.ptr && e.len == entry.len && e.flags == entry.flags;
         let at = if cache[bucket].get().is_none_or(|e| key(&e)) || cache[buddy].get().is_some_and(|e| !key(&e)) { bucket } else { buddy };
@@ -301,7 +301,7 @@ impl Regexps {
         let bucket = Self::literal_bucket(ptr, len, flags);
         let buddy = (bucket + 1) % j8framework::RegExpCompiled::BUCKETS;
         let hit = {
-            let cache = &a.realm.realm().get().regexp_literals;
+            let cache = &a.context.get().regexp_literals;
             Self::literal_load(&cache[bucket], ptr, len, flags, source).or_else(|| Self::literal_load(&cache[buddy], ptr, len, flags, source))
         };
         if let Some(c) = hit {
@@ -316,7 +316,7 @@ impl Regexps {
         if v.as_object().is_none() {
             return Ok(false);
         }
-        let m = a.get_symbol(v, a.realm.symbols.match_, v)?;
+        let m = a.get_symbol(v, a.context.symbols.match_, v)?;
         if m != Value::Undefined {
             return Ok(a.to_boolean(m));
         }
@@ -337,13 +337,13 @@ impl Regexps {
     }
 
     fn alloc<'scope>(a: &mut Agent<'scope, '_>, new_target: Value<'scope>) -> Result<JsObject<'scope>, Error> {
-        let proto = a.proto_from_ctor(new_target, a.realm.regexp_proto)?;
+        let proto = a.proto_from_ctor(new_target, a.context.regexp_proto)?;
         let legacy = new_target == Value::Undefined || Self::is_regexp_ctor(new_target);
         let empty = a.string("");
         let compiled = Self::compiled(a, "", "")?;
         let kind = ObjectKind::RegExp(RegExpData { source: empty, flags: empty, compiled, legacy });
         let o = ObjectData { kind, proto: Some(proto), ..ObjectData::default() }.alloc(a.mc);
-        if ScopeLocal::ptr_eq(proto, a.realm.regexp_proto) {
+        if ScopeLocal::ptr_eq(proto, a.context.regexp_proto) {
             Self::stamp(a, o, Value::Undefined);
         } else {
             o.borrow_mut(a.mc).define("lastIndex", Property { slot: Slot::Data(Value::Undefined), enumerable: false, writable: true, configurable: false });
@@ -579,10 +579,10 @@ impl Regexps {
             return None;
         }
         let proto = o.proto()?;
-        if !ScopeLocal::ptr_eq(proto, a.realm.regexp_proto) {
+        if !ScopeLocal::ptr_eq(proto, a.context.regexp_proto) {
             return None;
         }
-        let saved = a.realm.regexp_pristine.get().as_ref()?;
+        let saved = a.context.regexp_pristine.get().as_ref()?;
         if o.props().shape() != Some(saved.last_index) {
             return None;
         }
@@ -597,9 +597,9 @@ impl Regexps {
     }
 
     fn symbol_holds(a: &Agent<'_, '_>, index: usize) -> bool {
-        let Some(saved) = a.realm.regexp_pristine.get().as_ref() else { return false };
+        let Some(saved) = a.context.regexp_pristine.get().as_ref() else { return false };
         let Some(&expected) = saved.methods.get(index) else { return false };
-        let symbols = &a.realm.symbols;
+        let symbols = &a.context.symbols;
         let sym = match index {
             SYM_MATCH => symbols.match_,
             SYM_MATCH_ALL => symbols.match_all,
@@ -608,17 +608,17 @@ impl Regexps {
             SYM_SPLIT => symbols.split,
             _ => return false,
         };
-        a.realm.regexp_proto.borrow().get_own_symbol(sym).is_some_and(|prop| matches!(prop.slot, Slot::Data(v) if v.as_object().is_some_and(|f| ScopeLocal::ptr_eq(f, expected))))
+        a.context.regexp_proto.borrow().get_own_symbol(sym).is_some_and(|prop| matches!(prop.slot, Slot::Data(v) if v.as_object().is_some_and(|f| ScopeLocal::ptr_eq(f, expected))))
     }
 
     fn species_builtin(a: &Agent<'_, '_>) -> bool {
-        let Some(saved) = a.realm.regexp_pristine.get().as_ref() else { return false };
-        let props = a.realm.regexp_proto.get().props();
+        let Some(saved) = a.context.regexp_pristine.get().as_ref() else { return false };
+        let props = a.context.regexp_proto.get().props();
         if !props.same_words(&[saved.constructor]) {
             return false;
         }
         let Some(ctor) = saved.constructor.1.as_object() else { return false };
-        ctor.borrow().get_own_symbol(a.realm.symbols.species).is_some_and(|prop| matches!(prop.slot, Slot::Accessor { get: Some(g), set: None } if ScopeLocal::ptr_eq(g, saved.species)))
+        ctor.borrow().get_own_symbol(a.context.symbols.species).is_some_and(|prop| matches!(prop.slot, Slot::Accessor { get: Some(g), set: None } if ScopeLocal::ptr_eq(g, saved.species)))
     }
 
     fn prepared<'scope>(a: &mut Agent<'scope, '_>, recv: Value<'scope>, arg: Value<'scope>, wide: bool, sym: usize) -> Result<Option<(JsObject<'scope>, f64, JsString<'scope>)>, Error> {
@@ -671,7 +671,7 @@ impl Regexps {
         match units {
             Units::Ascii(bytes) => {
                 if to == from.wrapping_add(1)
-                    && let Some(&cached) = bytes.get(from).and_then(|&b| a.realm.chars.get(usize::from(b)))
+                    && let Some(&cached) = bytes.get(from).and_then(|&b| a.context.chars.get(usize::from(b)))
                 {
                     return cached.into();
                 }
@@ -703,7 +703,7 @@ impl Regexps {
                 && let (Some(atom), Units::Ascii(_)) = (c.atom.as_deref(), units)
                 && let [b] = atom.as_bytes()
             {
-                let cached = a.realm.chars.get(usize::from(*b)).copied();
+                let cached = a.context.chars.get(usize::from(*b)).copied();
                 let text: &str = &s;
                 let mut start = 0usize;
                 while let Some(rel) = text[start..].find(char::from(*b)) {
@@ -1194,7 +1194,7 @@ impl Regexps {
 
     fn source<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         if let Some(o) = this.as_object()
-            && ScopeLocal::ptr_eq(o, a.realm.regexp_proto)
+            && ScopeLocal::ptr_eq(o, a.context.regexp_proto)
         {
             return Ok(a.string("(?:)").into());
         }
@@ -1228,7 +1228,7 @@ impl Regexps {
         let Some(o) = this.as_object() else { return Err(a.throw(ErrorKind::Type, "RegExp flag getter called on a non-object")) };
         match Self::regexp(this) {
             Some(r) => Ok(Self::with_program(r, |c| c.has(C)).into()),
-            None if ScopeLocal::ptr_eq(o, a.realm.regexp_proto) => Ok(Value::Undefined),
+            None if ScopeLocal::ptr_eq(o, a.context.regexp_proto) => Ok(Value::Undefined),
             None => Err(a.throw(ErrorKind::Type, "RegExp flag getter called on an incompatible receiver")),
         }
     }
@@ -1240,11 +1240,11 @@ impl Regexps {
 
     fn builtin_bits<'scope>(a: &Agent<'scope, '_>, r: Value<'scope>) -> Option<u16> {
         let o = Self::regexp(r)?;
-        let saved = a.realm.regexp_pristine.get().as_ref()?;
-        if o.props().shape() != Some(saved.last_index) || o.proto().is_none_or(|p| !ScopeLocal::ptr_eq(p, a.realm.regexp_proto)) {
+        let saved = a.context.regexp_pristine.get().as_ref()?;
+        if o.props().shape() != Some(saved.last_index) || o.proto().is_none_or(|p| !ScopeLocal::ptr_eq(p, a.context.regexp_proto)) {
             return None;
         }
-        let props = a.realm.regexp_proto.get().props();
+        let props = a.context.regexp_proto.get().props();
         let intact = props.shape() == Some(saved.shape) && props.same_words(&saved.words);
         intact.then(|| Self::with_program(o, |c| c.flags))
     }
@@ -1313,7 +1313,7 @@ impl Regexps {
     fn match_all_symbol<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let r = Self::this_object(a, this)?;
         let s = a.to_string(args.at(0))?;
-        let default = a.realm.global.borrow().own(a.mc, "RegExp").unwrap_or_default();
+        let default = a.context.global.borrow().own(a.mc, "RegExp").unwrap_or_default();
         let ctor = Buffers::species_constructor(a, r, default)?;
         let flags = Self::get_flags(a, r)?;
         let f = a.string(&flags);
@@ -1323,7 +1323,7 @@ impl Regexps {
         a.set_named(matcher, "lastIndex", last.into())?;
         let Some(matcher) = matcher.as_object() else { return Err(a.throw(ErrorKind::Type, "species constructor returned a non-object")) };
         let kind = ObjectKind::RegExpStringIterator { matcher, string: s, global: flags.contains('g'), unicode: flags.contains('u') || flags.contains('v'), done: false };
-        Ok(ObjectData { kind, proto: Some(a.realm.regexp_string_iterator_proto), ..ObjectData::default() }.alloc(a.mc).into())
+        Ok(ObjectData { kind, proto: Some(a.context.regexp_string_iterator_proto), ..ObjectData::default() }.alloc(a.mc).into())
     }
 
     fn string_iterator_next<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
@@ -1584,7 +1584,7 @@ impl Regexps {
             }
         }
         let s = a.to_string(raw)?;
-        let default = a.realm.global.borrow().own(a.mc, "RegExp").unwrap_or_default();
+        let default = a.context.global.borrow().own(a.mc, "RegExp").unwrap_or_default();
         let ctor = Buffers::species_constructor(a, r, default)?;
         let (unicode, new_flags) = if let Some(bits) = Self::builtin_bits(a, r) {
             let flags = Compiled::text(bits);
@@ -1733,7 +1733,7 @@ impl Regexps {
         if let Some((rx, last, s)) = Self::prepared(a, recv, args.at(0), true, SYM_MATCH)? {
             return Self::fast_match(a, rx, last, s);
         }
-        Self::dispatch(a, this, args.at(0), a.realm.symbols.match_, Value::Undefined)
+        Self::dispatch(a, this, args.at(0), a.context.symbols.match_, Value::Undefined)
     }
 
     fn search<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
@@ -1741,7 +1741,7 @@ impl Regexps {
         if let Some((rx, _, s)) = Self::prepared(a, recv, args.at(0), false, SYM_SEARCH)? {
             return Ok(Self::fast_search(rx, s));
         }
-        Self::dispatch(a, this, args.at(0), a.realm.symbols.search, Value::Undefined)
+        Self::dispatch(a, this, args.at(0), a.context.symbols.search, Value::Undefined)
     }
 
     fn require_global<'scope>(a: &mut Agent<'scope, '_>, v: Value<'scope>, method: &str) -> Result<(), Error> {
@@ -1778,7 +1778,7 @@ impl Regexps {
             Self::require_global(a, arg, "matchAll")?;
         }
         let g = a.string("g");
-        Self::dispatch(a, this, arg, a.realm.symbols.match_all, g.into())
+        Self::dispatch(a, this, arg, a.context.symbols.match_all, g.into())
     }
 
     fn replace_impl<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>], all: bool) -> Result<Value<'scope>, Error> {
@@ -1793,7 +1793,7 @@ impl Regexps {
             {
                 return Ok(v);
             }
-            if let Some(f) = Self::method_of(a, search, a.realm.symbols.replace)? {
+            if let Some(f) = Self::method_of(a, search, a.context.symbols.replace)? {
                 return a.call(f, search, &[o, with]);
             }
         }
@@ -1886,7 +1886,7 @@ impl Regexps {
             return Ok(Self::fast_split(a, rx, s, lim));
         }
         if sep.as_object().is_some()
-            && let Some(f) = Self::method_of(a, sep, a.realm.symbols.split)?
+            && let Some(f) = Self::method_of(a, sep, a.context.symbols.split)?
         {
             return a.call(f, sep, &[o, args.at(1)]);
         }
@@ -1896,7 +1896,7 @@ impl Regexps {
 
 impl<'scope> Installer<'_, 'scope> {
     pub(crate) fn regexp(&mut self) {
-        let r = self.realm;
+        let r = self.context;
         let proto = r.regexp_proto;
         let ctor = self.constructor("RegExp", Regexps::construct, proto, 2);
         self.method(ctor, "escape", Regexps::escape, 1);

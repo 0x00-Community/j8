@@ -125,11 +125,11 @@ impl Ctx {
 
     pub fn refresh_ptrs(&mut self, a: &Agent<'_, '_>) {
         let addr = |o: j8framework::JsObject| Value::Object(o).bits() & ValueBits::PAYLOAD;
-        self.global = addr(a.realm.global);
-        self.script_scope = addr(a.realm.script_scope);
-        self.object_proto = addr(a.realm.object_proto);
-        self.array_proto = addr(a.realm.array_proto);
-        self.indexed_cache = a.realm.indexed_cache_addr();
+        self.global = addr(a.context.global);
+        self.script_scope = addr(a.context.script_scope);
+        self.object_proto = addr(a.context.object_proto);
+        self.array_proto = addr(a.context.array_proto);
+        self.indexed_cache = a.context.indexed_cache_addr();
     }
 
     pub unsafe fn parts<'a>(&mut self) -> (&'a Executor<'a>, &'a mut Agent<'a, 'a>) {
@@ -219,7 +219,7 @@ fn direct<'scope>(a: &mut Agent<'scope, '_>, index: u32, out: j8framework::FastO
     let v = |i: usize| unsafe { val::<'scope>(ops.get(i).copied().unwrap_or(ValueBits::UNDEFINED)) };
     let this = v(1);
     let callee = v(0).as_object().and_then(|o| o.native());
-    let entry = a.realm.fast_builtins.get().get(usize::try_from(index).unwrap_or(usize::MAX));
+    let entry = a.context.fast_builtins.get().get(usize::try_from(index).unwrap_or(usize::MAX));
     let call = entry.filter(|e| callee.is_some_and(|n| core::ptr::fn_addr_eq(n.f, e.native))).map(|e| e.call);
     let got = match call {
         Some(j8framework::FastCall::A0(f)) if ops.len() == 2 => f(a, this),
@@ -256,7 +256,7 @@ fn direct_parts(packed: u64) -> (u32, j8framework::FastOut) {
 
 fn fast_of<'scope>(a: &mut Agent<'scope, '_>, index: u32, callee: Value<'scope>) -> Option<j8framework::FastCall> {
     let native = callee.as_object().and_then(|o| o.native());
-    let entry = a.realm.fast_builtins.get().get(usize::try_from(index).unwrap_or(usize::MAX))?;
+    let entry = a.context.fast_builtins.get().get(usize::try_from(index).unwrap_or(usize::MAX))?;
     native.is_some_and(|n| core::ptr::fn_addr_eq(n.f, entry.native)).then_some(entry.call)
 }
 

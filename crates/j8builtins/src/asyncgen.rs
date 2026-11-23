@@ -69,8 +69,8 @@ impl AsyncFromSync {
     }
 
     fn closure<'scope>(a: &Agent<'scope, '_>, f: j8framework::ClosureFn, slots: Vec<Value<'scope>>) -> Value<'scope> {
-        let o = ObjectData { kind: ObjectKind::NativeClosure(NativeClosure { f, slots, constructor: false }), proto: Some(a.realm.function_proto), ..ObjectData::default() }.alloc(a.mc);
-        a.realm.name_function(a.mc, o, "", Some(1));
+        let o = ObjectData { kind: ObjectKind::NativeClosure(NativeClosure { f, slots, constructor: false }), proto: Some(a.context.function_proto), ..ObjectData::default() }.alloc(a.mc);
+        a.context.name_function(a.mc, o, "", Some(1));
         o.into()
     }
 
@@ -176,7 +176,7 @@ impl AsyncFromSync {
 
 impl Installer<'_, '_> {
     pub(crate) fn async_generators(&mut self) {
-        let r = self.realm;
+        let r = self.context;
         r.symbol_method(self.mc, r.async_iterator_proto, r.symbols.async_iterator, AsyncGenerators::this_value, 0);
         let p = r.async_generator_proto;
         self.method(p, "next", AsyncGenerators::next, 1);

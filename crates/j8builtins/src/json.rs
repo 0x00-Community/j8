@@ -867,7 +867,7 @@ impl Json {
             cached_at: Vec::new(),
             cached_len: Vec::new(),
         };
-        let wrapper = ObjectData { proto: Some(a.realm.object_proto), ..ObjectData::default() }.alloc(a.mc);
+        let wrapper = ObjectData { proto: Some(a.context.object_proto), ..ObjectData::default() }.alloc(a.mc);
         wrapper.borrow_mut(a.mc).set("", args.at(0));
         let key = SmallStr::from("");
         let mut out = String::new();
@@ -880,7 +880,7 @@ impl Installer<'_, '_> {
         let j = self.plain();
         self.method(j, "parse", Json::parse, 2);
         self.method(j, "stringify", Json::stringify, 3);
-        self.set(self.realm.global, "JSON", j.into());
+        self.set(self.context.global, "JSON", j.into());
     }
 }
 

@@ -70,7 +70,7 @@ napi! {
 
     fn napi_get_global(env, result: *mut Handle) {
         let a = env.agent()?;
-        env.out(result, a.realm.global.into())
+        env.out(result, a.context.global.into())
     }
 
     fn napi_get_boolean(env, value: bool, result: *mut Handle) {
@@ -239,7 +239,7 @@ napi! {
     fn node_api_symbol_for(env, utf8description: *const c_char, length: usize, result: *mut Handle) {
         let a = env.agent()?;
         let key = Ffi::utf8(utf8description, length)?;
-        let symbol = env.js(a.get_named(a.realm.global.into(), "Symbol"))?;
+        let symbol = env.js(a.get_named(a.context.global.into(), "Symbol"))?;
         let for_ = env.js(a.get_named(symbol, "for"))?;
         let k = a.string(&key).into();
         let s = env.js(a.call(for_, symbol, &[k]))?;

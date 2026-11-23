@@ -43,7 +43,7 @@ impl Arrays {
         }
         #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "checked to be in [0, 2^32 − 1]")]
         let n = len as u32;
-        let arr = ObjectData { kind: ObjectKind::Array, proto: Some(proto.unwrap_or(a.realm.array_proto)), ..ObjectData::default() }.alloc(a.mc);
+        let arr = ObjectData { kind: ObjectKind::Array, proto: Some(proto.unwrap_or(a.context.array_proto)), ..ObjectData::default() }.alloc(a.mc);
         arr.borrow_mut(a.mc).set_array_length(n);
         Ok(arr)
     }
@@ -54,7 +54,7 @@ impl Arrays {
         }
         let mut c = a.get_named(original.into(), "constructor")?;
         if c.as_object().is_some() {
-            c = a.get_symbol(c, a.realm.symbols.species, c)?;
+            c = a.get_symbol(c, a.context.symbols.species, c)?;
             if c == Value::Null {
                 c = Value::Undefined;
             }
@@ -95,7 +95,7 @@ impl Arrays {
 
     fn array<'scope>(a: &mut Agent<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let new_target = a.new_target;
-        let proto = a.proto_from_ctor(new_target, a.realm.array_proto)?;
+        let proto = a.proto_from_ctor(new_target, a.context.array_proto)?;
         match *args {
             [] => Ok(Self::create(a, 0.0, Some(proto))?.into()),
             [v] if let Some(n) = v.as_number() => {
@@ -146,7 +146,7 @@ impl Arrays {
         if mapping {
             Self::callback(a, mapper)?;
         }
-        let using = if items.is_nullish() { Value::Undefined } else { a.get_symbol(items, a.realm.symbols.iterator, items)? };
+        let using = if items.is_nullish() { Value::Undefined } else { a.get_symbol(items, a.context.symbols.iterator, items)? };
         if !using.is_nullish() {
             if !a.is_callable(using) {
                 return Err(a.throw(ErrorKind::Type, "Symbol.iterator is not a function"));
@@ -230,7 +230,7 @@ impl Arrays {
 
     fn indexed_clean<'scope>(a: &Agent<'scope, '_>, o: JsObject<'scope>) -> bool {
         match o.proto() {
-            Some(p) if j8framework::ScopeLocal::ptr_eq(p, a.realm.array_proto) && a.realm.indexed_fast() && p.elements().is_empty() => true,
+            Some(p) if j8framework::ScopeLocal::ptr_eq(p, a.context.array_proto) && a.context.indexed_fast() && p.elements().is_empty() => true,
             _ => o.no_indexed_protos(),
         }
     }
@@ -416,7 +416,7 @@ impl Arrays {
         if v.as_object().is_none() {
             return Ok(false);
         }
-        let s = a.get_symbol(v, a.realm.symbols.is_concat_spreadable, v)?;
+        let s = a.get_symbol(v, a.context.symbols.is_concat_spreadable, v)?;
         if s != Value::Undefined {
             return Ok(a.to_boolean(s));
         }
@@ -535,7 +535,7 @@ impl Arrays {
         if a.is_callable(join) {
             return a.call(join, o.into(), &[]);
         }
-        let f = a.get_named(a.realm.object_proto.into(), "toString")?;
+        let f = a.get_named(a.context.object_proto.into(), "toString")?;
         a.call(f, o.into(), &[])
     }
 
@@ -1394,14 +1394,14 @@ impl Arrays {
 
 impl Installer<'_, '_> {
     pub(crate) fn array(&mut self) {
-        let proto = self.realm.array_proto;
+        let proto = self.context.array_proto;
         proto.borrow_mut(self.mc).kind = ObjectKind::Array;
         let ctor = self.constructor("Array", Arrays::array, proto, 1);
         self.method(ctor, "isArray", Arrays::is_array, 1);
         self.method(ctor, "of", Arrays::of, 0);
         self.method(ctor, "from", Arrays::from, 1);
-        let species = self.realm.named_native(self.mc, Arrays::species, "get [Symbol.species]", 0);
-        ctor.borrow_mut(self.mc).define_symbol(self.realm.symbols.species, Property { slot: Slot::Accessor { get: Some(species), set: None }, enumerable: false, writable: false, configurable: true });
+        let species = self.context.named_native(self.mc, Arrays::species, "get [Symbol.species]", 0);
+        ctor.borrow_mut(self.mc).define_symbol(self.context.symbols.species, Property { slot: Slot::Accessor { get: Some(species), set: None }, enumerable: false, writable: false, configurable: true });
         let methods: [(&str, j8framework::NativeFn, u32); 34] = [
             ("at", Arrays::at, 1),
             ("concat", Arrays::concat, 1),
@@ -1449,6 +1449,6 @@ impl Installer<'_, '_> {
         for name in ["at", "copyWithin", "entries", "fill", "find", "findIndex", "findLast", "findLastIndex", "flat", "flatMap", "includes", "keys", "toReversed", "toSorted", "toSpliced", "values"] {
             unscopables.borrow_mut(self.mc).define(name, Property::data(true.into()));
         }
-        proto.borrow_mut(self.mc).define_symbol(self.realm.symbols.unscopables, Property { slot: Slot::Data(unscopables.into()), enumerable: false, writable: false, configurable: true });
+        proto.borrow_mut(self.mc).define_symbol(self.context.symbols.unscopables, Property { slot: Slot::Data(unscopables.into()), enumerable: false, writable: false, configurable: true });
     }
 }

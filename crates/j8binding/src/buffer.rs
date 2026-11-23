@@ -12,7 +12,7 @@ impl<'scope> IntoJs<'scope> for ArrayBuffer {
     fn into_js(self, a: &mut Agent<'scope, '_>) -> Result<Value<'scope>, Error> {
         let max = self.0.shared().and_then(|s| s.max());
         let shared = self.0.shared().is_some();
-        let proto = if shared { a.realm.shared_array_buffer_proto } else { a.realm.array_buffer_proto };
+        let proto = if shared { a.context.shared_array_buffer_proto } else { a.context.array_buffer_proto };
         let data = BufferData { bytes: Some(self.0), max, shared };
         Ok(ObjectData { kind: ObjectKind::ArrayBuffer(Box::new(data)), proto: Some(proto), ..ObjectData::default() }.alloc(a.mc).into())
     }

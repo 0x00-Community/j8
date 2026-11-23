@@ -105,7 +105,7 @@ impl Strings {
             (Some(&v), ValueKind::Undefined) if let ValueKind::Symbol(s) = v.kind() => a.symbol_descriptive(s).into(),
             (Some(&v), _) => a.to_string(v)?.into(),
         };
-        a.wrap_primitive(new_target, s, a.realm.string_proto)
+        a.wrap_primitive(new_target, s, a.context.string_proto)
     }
 
     fn to_string<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
@@ -343,7 +343,7 @@ impl Strings {
                 j8framework::Numeric::BigInt(b) => num_traits::ToPrimitive::to_f64(&b.0).unwrap_or(f64::NAN),
             },
         };
-        a.wrap_primitive(new_target, n.into(), a.realm.number_proto)
+        a.wrap_primitive(new_target, n.into(), a.context.number_proto)
     }
 
     fn is_integer<'scope>(_: &mut Agent<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
@@ -415,7 +415,7 @@ impl Strings {
 
 impl Installer<'_, '_> {
     pub(crate) fn string(&mut self) {
-        let proto = self.realm.string_proto;
+        let proto = self.context.string_proto;
         proto.borrow_mut(self.mc).kind = j8framework::ObjectKind::Primitive(self.text(""));
         self.constructor("String", Strings::string, proto, 1);
         let methods: [(&str, j8framework::NativeFn, u32); 25] = [
@@ -451,7 +451,7 @@ impl Installer<'_, '_> {
     }
 
     pub(crate) fn number(&mut self) {
-        let proto = self.realm.number_proto;
+        let proto = self.context.number_proto;
         proto.borrow_mut(self.mc).kind = j8framework::ObjectKind::Primitive(0.0.into());
         let ctor = self.constructor("Number", Strings::number, proto, 1);
         self.method(ctor, "isInteger", Strings::is_integer, 1);

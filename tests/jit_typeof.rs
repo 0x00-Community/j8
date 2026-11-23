@@ -26,11 +26,11 @@ fn outcome(jit: bool, text: &str) -> String {
     let platform = DefaultPlatform::default();
     let mut isolate = Isolate::new(&platform, CreateParams::default());
     let executor = if jit { Executor::default().with_tier(j8jit::Jit::from(0)) } else { Executor::default() };
-    let cx = isolate.enter(|scope| scope.mc.stash::<j8framework::RealmBrand>(scope.context(&Builtins).realm()));
+    let cx = isolate.enter(|scope| scope.mc.stash::<j8framework::ContextBrand>(scope.context(&Builtins)));
     let r = executor.eval(&mut isolate, &cx, &Source { text, file: "typeof.js" });
     isolate.enter(|scope| {
-        let realm = scope.mc.fetch(&cx).into();
-        let mut a = scope.agent(realm, &executor);
+        let context = scope.mc.fetch(&cx);
+        let mut a = scope.agent(context, &executor);
         match r {
             Ok(g) => {
                 let v = a.local(&g);

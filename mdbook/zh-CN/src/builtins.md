@@ -1,10 +1,10 @@
 # 内建对象
 
-`crates/j8builtins` 是 JavaScript 标准内建对象，实现 `j8framework::Intrinsics`：新建 `Realm` 时由 `Builtins::install`
+`crates/j8builtins` 是 JavaScript 标准内建对象，实现 `j8framework::Intrinsics`：新建 `Context` 时由 `Builtins::install`
 把全局对象、全局函数和全部内建构造器、原型、方法装进去。
 
 ```rust,ignore
-let cx = isolate.enter(|scope| scope.mc.stash::<RealmBrand>(scope.context(&j8builtins::Builtins).realm()));
+let cx = isolate.enter(|scope| scope.mc.stash::<ContextBrand>(scope.context(&j8builtins::Builtins)));
 ```
 
 `j8framework` 只定义 `Intrinsics` 接口，这里是缺省实现；宿主可以换掉或裁剪。j8builtins **只依赖 `j8framework`**，

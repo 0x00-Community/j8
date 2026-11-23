@@ -1,6 +1,6 @@
 use j8builtins::Builtins;
 use j8executor::Executor;
-use j8framework::{CreateParams, Isolate, RealmBrand, ScopeGlobal, Source};
+use j8framework::{CreateParams, Isolate, ContextBrand, ScopeGlobal, Source};
 use j8platform::DefaultPlatform;
 
 const FUNCTIONS: usize = 200;
@@ -11,11 +11,11 @@ const CALL: &str = "(() => { let s = 0; for (let i = 0; i < 200; i++) { const o 
 
 const SUM: f64 = 39_800.0;
 
-fn number<'p>(isolate: &mut Isolate<'p>, executor: &Executor<'p>, cx: &ScopeGlobal<'p, RealmBrand>, text: &str) -> f64 {
+fn number<'p>(isolate: &mut Isolate<'p>, executor: &Executor<'p>, cx: &ScopeGlobal<'p, ContextBrand>, text: &str) -> f64 {
     let g = executor.eval(isolate, cx, &Source { text, file: "code_gc.js" }).expect("runs");
     isolate.enter(|scope| {
-        let realm = scope.mc.fetch(cx).into();
-        let a = scope.agent(realm, executor);
+        let context = scope.mc.fetch(cx);
+        let a = scope.agent(context, executor);
         a.local(&g).as_number().expect("a number")
     })
 }
@@ -24,7 +24,7 @@ fn moves_and_frees_code(tiered: bool) {
     let platform = DefaultPlatform::default();
     let mut isolate = Isolate::new(&platform, CreateParams::default());
     let executor = if tiered { Executor::default().with_tier(j8jit::Jit::from(0)) } else { Executor::default() };
-    let cx = isolate.enter(|scope| scope.mc.stash::<j8framework::RealmBrand>(scope.context(&Builtins).realm()));
+    let cx = isolate.enter(|scope| scope.mc.stash::<j8framework::ContextBrand>(scope.context(&Builtins)));
     executor.eval(&mut isolate, &cx, &Source { text: MAKE, file: "code_gc.js" }).expect("runs");
     let made = executor.live_functions();
     assert!(made >= FUNCTIONS, "{made} live functions after making {FUNCTIONS}");

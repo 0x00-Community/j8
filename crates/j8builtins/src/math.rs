@@ -152,6 +152,6 @@ impl Installer<'_, '_> {
         for (name, v) in [("PI", core::f64::consts::PI), ("E", core::f64::consts::E), ("LN2", core::f64::consts::LN_2), ("LN10", core::f64::consts::LN_10), ("LOG2E", core::f64::consts::LOG2_E), ("LOG10E", core::f64::consts::LOG10_E), ("SQRT2", core::f64::consts::SQRT_2), ("SQRT1_2", core::f64::consts::FRAC_1_SQRT_2)] {
             self.set(m, name, v.into());
         }
-        self.set(self.realm.global, "Math", m.into());
+        self.set(self.context.global, "Math", m.into());
     }
 }

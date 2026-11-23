@@ -23,7 +23,7 @@ paragc types carry two lifetimes, the heap's brand `'heap` and the scope's `'sco
   exclusive paragc scope and rebrands it to the entry's `'scope`, so nothing of one entry can be kept for the next;
 - j8's aliases fold both paragc lifetimes into one: `ScopeLocal<'scope, T>`, `Slot<'scope, T>`, `Handle<'scope, T>`;
 - what must survive an entry is a root, `ScopeGlobal<'p, B>` (the brand `B` names its type: `ValueBrand`,
-  `RealmBrand`, …), made by `mc.stash` and read back by `mc.fetch`, or a `Weak<'p, B>`;
+  `ContextBrand`, …), made by `mc.stash` and read back by `mc.fetch`, or a `Weak<'p, B>`;
 - the executor, which keeps weak references to its loaded code, is `Executor<'p>`.
 
 ## Pending exception

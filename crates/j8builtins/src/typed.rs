@@ -41,7 +41,7 @@ impl Typed {
 
     fn create<'scope>(a: &mut Agent<'scope, '_>, kind: ElementKind, proto: JsObject<'scope>, len: usize) -> Result<JsObject<'scope>, Error> {
         let Some(bytes) = len.checked_mul(kind.size()) else { return Err(a.throw(ErrorKind::Range, "Invalid typed array length")) };
-        let buffer = Buffers::allocate(a, a.realm.array_buffer_proto, bytes, None, false)?;
+        let buffer = Buffers::allocate(a, a.context.array_buffer_proto, bytes, None, false)?;
         Ok(ObjectData { kind: ObjectKind::TypedArray(kind, ViewData { buffer, offset: 0, length: Some(len) }), proto: Some(proto), ..ObjectData::default() }.alloc(a.mc))
     }
 
@@ -59,11 +59,11 @@ impl Typed {
         let first = args.at(0);
         let Some(src) = first.as_object() else {
             let len = a.to_index(first)?;
-            let proto = a.proto_from_ctor(new_target, a.realm.typed_protos[K])?;
+            let proto = a.proto_from_ctor(new_target, a.context.typed_protos[K])?;
             return Ok(Self::create(a, kind, proto, len)?.into());
         };
         if matches!(src.borrow().kind, ObjectKind::ArrayBuffer(_)) {
-            let proto = a.proto_from_ctor(new_target, a.realm.typed_protos[K])?;
+            let proto = a.proto_from_ctor(new_target, a.context.typed_protos[K])?;
             let size = kind.size();
             let offset = a.to_index(args.at(1))?;
             if offset % size != 0 {
@@ -105,7 +105,7 @@ impl Typed {
             return Ok(ObjectData { kind: ObjectKind::TypedArray(kind, view), proto: Some(proto), ..ObjectData::default() }.alloc(a.mc).into());
         }
         if let Some((sk, sview)) = Agent::typed_array(src) {
-            let proto = a.proto_from_ctor(new_target, a.realm.typed_protos[K])?;
+            let proto = a.proto_from_ctor(new_target, a.context.typed_protos[K])?;
             let Some(len) = Agent::view_length(&sview, sk.size()) else {
                 return Err(a.throw(ErrorKind::Type, "source TypedArray is detached or out of bounds"));
             };
@@ -121,8 +121,8 @@ impl Typed {
             }
             return Ok(out.into());
         }
-        let proto = a.proto_from_ctor(new_target, a.realm.typed_protos[K])?;
-        let using = a.get_symbol(first, a.realm.symbols.iterator, first)?;
+        let proto = a.proto_from_ctor(new_target, a.context.typed_protos[K])?;
+        let using = a.get_symbol(first, a.context.symbols.iterator, first)?;
         let values = if using.is_nullish() {
             None
         } else {
@@ -182,7 +182,7 @@ impl Typed {
     }
 
     fn species_create<'scope>(a: &mut Agent<'scope, '_>, exemplar: JsObject<'scope>, kind: ElementKind, args: &[Value<'scope>]) -> Result<JsObject<'scope>, Error> {
-        let default = a.realm.typed_ctors[Self::index_of_kind(kind)].into();
+        let default = a.context.typed_ctors[Self::index_of_kind(kind)].into();
         let ctor = Buffers::species_constructor(a, exemplar.into(), default)?;
         let (o, k, _) = Self::create_from_ctor(a, ctor, args)?;
         if k.is_bigint() != kind.is_bigint() {
@@ -204,7 +204,7 @@ impl Typed {
         if mapping && !a.is_callable(mapper) {
             return Err(a.throw(ErrorKind::Type, "TypedArray.from: mapFn is not a function"));
         }
-        let using = if source.is_nullish() { Value::Undefined } else { a.get_symbol(source, a.realm.symbols.iterator, source)? };
+        let using = if source.is_nullish() { Value::Undefined } else { a.get_symbol(source, a.context.symbols.iterator, source)? };
         let values = if using.is_nullish() {
             let like = a.to_object(source)?;
             let len = a.length_of_array_like(like.into())?;
@@ -583,7 +583,7 @@ impl Typed {
         let (_, kind, view, len) = Self::validate(a, this)?;
         let mut values = Self::elements(a, kind, &view, len);
         values.reverse();
-        let out = Self::create(a, kind, a.realm.typed_protos[Self::index_of_kind(kind)], len)?;
+        let out = Self::create(a, kind, a.context.typed_protos[Self::index_of_kind(kind)], len)?;
         let (_, ov) = Agent::typed_array(out).expect("just created");
         Self::write_all(a, kind, &ov, &values);
         Ok(out.into())
@@ -664,7 +664,7 @@ impl Typed {
     fn to_sorted<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Self::comparator(a, args.at(0))?;
         let (_, kind, view, len) = Self::validate(a, this)?;
-        let out = Self::create(a, kind, a.realm.typed_protos[Self::index_of_kind(kind)], len)?;
+        let out = Self::create(a, kind, a.context.typed_protos[Self::index_of_kind(kind)], len)?;
         let values = Self::elements(a, kind, &view, len);
         let sorted = Self::sorted(a, args.at(0), values)?;
         let (_, ov) = Agent::typed_array(out).expect("just created");
@@ -681,7 +681,7 @@ impl Typed {
         if a.typed_get(o, at).is_none() {
             return Err(a.throw(ErrorKind::Range, "Invalid typed array index"));
         }
-        let out = Self::create(a, kind, a.realm.typed_protos[Self::index_of_kind(kind)], len)?;
+        let out = Self::create(a, kind, a.context.typed_protos[Self::index_of_kind(kind)], len)?;
         for k in 0..len {
             let kf = Self::f(k);
             let x = if kf == at { v } else { a.get_index(o.into(), kf)? };
@@ -819,7 +819,7 @@ impl Typed {
 
 impl<'scope> Installer<'_, 'scope> {
     pub(crate) fn typed_arrays(&mut self) {
-        let r = self.realm;
+        let r = self.context;
         let base = r.typed_array_ctor;
         let proto = r.typed_array_proto;
         base.borrow_mut(self.mc).kind = ObjectKind::Native(j8framework::Native::constructor(Typed::abstract_ctor));

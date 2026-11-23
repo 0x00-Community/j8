@@ -86,11 +86,11 @@ impl ResolvedBinding<'_> {
 
 impl<'scope> Agent<'scope, '_> {
     pub fn modules(&self) -> &'scope [ModuleRecord<'scope>] {
-        self.realm.modules.get()
+        self.context.modules.get()
     }
 
     pub fn update_module(&self, m: u32, mut f: impl FnMut(&mut ModuleRecord<'scope>)) {
-        self.realm.modules.update(self.mc, |mods| {
+        self.context.modules.update(self.mc, |mods| {
             let mut mods = mods.clone();
             f(&mut mods[m as usize]);
             mods
@@ -98,7 +98,7 @@ impl<'scope> Agent<'scope, '_> {
     }
 
     pub fn push_module(&self, record: &ModuleRecord<'scope>) -> u32 {
-        self.realm.modules.update_with(self.mc, |mods| {
+        self.context.modules.update_with(self.mc, |mods| {
             let mut mods = mods.clone();
             mods.push(record.clone());
             let id = u32::try_from(mods.len() - 1).unwrap_or(u32::MAX);
@@ -186,7 +186,7 @@ impl<'scope> Agent<'scope, '_> {
         }
         let ns = crate::ObjectData { kind: ObjectKind::ModuleNamespace(exports), proto: None, non_extensible: true, ..crate::ObjectData::default() }.alloc(self.mc);
         let tag = self.string("Module");
-        ns.borrow_mut(self.mc).define_symbol(self.realm.symbols.to_string_tag, Property { slot: Slot::Data(tag.into()), enumerable: false, writable: false, configurable: false });
+        ns.borrow_mut(self.mc).define_symbol(self.context.symbols.to_string_tag, Property { slot: Slot::Data(tag.into()), enumerable: false, writable: false, configurable: false });
         self.update_module(m, |r| r.namespace = Some(ns));
         ns
     }

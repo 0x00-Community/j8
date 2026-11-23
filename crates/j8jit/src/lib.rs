@@ -412,7 +412,7 @@ impl Jit {
         let t0 = std::time::Instant::now();
         let st = self.st.borrow();
         let hints = &st.hints;
-        let (global, scope) = (a.realm.global, a.realm.script_scope);
+        let (global, scope) = (a.context.global, a.context.script_scope);
         let paths = move |g: bool, i: usize| if g { global.get().props().store_path(i) } else { scope.get().props().store_path(i) };
         let directs = build::directs_from(a);
         let built = Builder::build(exe, hints, f, kind, &paths, &directs, self.debug.log).ok();
@@ -607,7 +607,7 @@ impl Tier for Jit {
         };
         let this = if func.wraps_this() {
             match this.bits() {
-                j8framework::ValueBits::UNDEFINED | j8framework::ValueBits::NULL => Value::Object(a.realm.global),
+                j8framework::ValueBits::UNDEFINED | j8framework::ValueBits::NULL => Value::Object(a.context.global),
                 _ if this.as_object().is_some() => this,
                 _ => return None,
             }
@@ -636,7 +636,7 @@ impl Tier for Jit {
         }
         let this = if func.wraps_this() {
             match this.bits() {
-                j8framework::ValueBits::UNDEFINED | j8framework::ValueBits::NULL => Value::Object(a.realm.global),
+                j8framework::ValueBits::UNDEFINED | j8framework::ValueBits::NULL => Value::Object(a.context.global),
                 _ if this.as_object().is_some() => this,
                 _ => return None,
             }

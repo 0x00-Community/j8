@@ -11,8 +11,8 @@
 | `Isolate` | an independent JS world: one GC heap (paragc) and a profiler | `v8::Isolate` |
 | `Scope` | one entry into an isolate; values in it carry the `'scope` brand and can't leave it | `HandleScope` |
 | `Value<'scope>` | a JS value: V8's `Local`, it can't leave the closure | `Local<Value>` |
-| `ScopeGlobal<'p, B>` | a root (paragc `ScopeGlobal`): survives `enter` calls, released on drop; `B` names what it holds (`ValueBrand`, `RealmBrand`, …) | `Global<T>` |
-| `Context` / `Realm` | the execution context: the global object and built-in prototypes (`Intrinsics`, from j8builtins) | `Context` |
+| `ScopeGlobal<'p, B>` | a root (paragc `ScopeGlobal`): survives `enter` calls, released on drop; `B` names what it holds (`ValueBrand`, `ContextBrand`, …) | `Global<T>` |
+| `Context` | the execution context: the global object and built-in prototypes (`Intrinsics`, from j8builtins) | `Context` |
 | `Agent` | the context of one run; all JS operation semantics hang off it, calls back into JS go through `Invoke` | — |
 | `Profiler` | call / back-edge counters | — |
 | `Host` / `HostObject` | a Rust value inside a JS object, traced by the collector ([Bindings](bindings.md)) | `cppgc` objects |
@@ -23,7 +23,7 @@
 let platform = DefaultPlatform::default();
 let mut isolate = Isolate::new(&platform, CreateParams::default());
 let executor = Executor::default();
-let cx = isolate.enter(|scope| scope.mc.stash::<RealmBrand>(scope.context(&Builtins).realm()));   // ScopeGlobal<RealmBrand>
+let cx = isolate.enter(|scope| scope.mc.stash::<ContextBrand>(scope.context(&Builtins)));   // ScopeGlobal<ContextBrand>
 let result = executor.eval(&mut isolate, &cx, &Source { text: "1 + 2 * 3", file: "a.js" })?;
 isolate.enter(|scope| {
     let v = scope.local(&result);       // ScopeGlobal ⇒ Value<'scope>, valid only in this closure
@@ -34,7 +34,7 @@ isolate.enter(|scope| {
   after it returns, a collection runs if enough was allocated (usually young, a full one every few).
 - `Value<'scope>` can't leave the closure, **checked at compile time**: Rust lifetimes stand in for V8's `HandleScope`.
 - To keep a value across entries, root it: `agent.global(v)` gives a `ScopeGlobal<'p, ValueBrand>`,
-  `scope.mc.stash::<B>(x)` roots any heap object (`RealmBrand` for a context). `local` / `mc.fetch` read them back.
+  `scope.mc.stash::<B>(x)` roots any heap object (`ContextBrand` for a context). `local` / `mc.fetch` read them back.
 - The executor (`j8executor::Executor<'p>`) runs scripts: `eval` / `eval_module`, or `start` / `resume` in slices.
   Event loops live in j8executor too ([Event loops](event-loop.md)).
 

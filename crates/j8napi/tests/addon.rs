@@ -95,12 +95,12 @@ fn functions_classes_and_errors() {
     let platform = DefaultPlatform::default();
     let mut isolate = Isolate::new(&platform, CreateParams::default());
     let executor = Executor::default();
-    let cx = isolate.enter(|scope| scope.mc.stash::<j8framework::RealmBrand>(scope.context(&Builtins).realm()));
+    let cx = isolate.enter(|scope| scope.mc.stash::<j8framework::ContextBrand>(scope.context(&Builtins)));
     isolate.enter(|scope| {
-        let realm: j8framework::Context<'_> = scope.mc.fetch(&cx).into();
-        let mut a = scope.agent(realm, &executor);
+        let context = scope.mc.fetch(&cx);
+        let mut a = scope.agent(context, &executor);
         let exports = Env::open(&mut a, register).expect("register");
-        a.set_named(a.realm.global.into(), "addon", exports).expect("global");
+        a.set_named(a.context.global.into(), "addon", exports).expect("global");
     });
     let text = "
         const { add, Counter, boom } = addon;
@@ -112,8 +112,8 @@ fn functions_classes_and_errors() {
     ";
     let r = executor.eval(&mut isolate, &cx, &Source { text, file: "addon.js" }).expect("run");
     let got = isolate.enter(|scope| {
-        let realm: j8framework::Context<'_> = scope.mc.fetch(&cx).into();
-        let mut a = scope.agent(realm, &executor);
+        let context = scope.mc.fetch(&cx);
+        let mut a = scope.agent(context, &executor);
         let v = a.local(&r);
         String::from(&**a.to_string(v).expect("ToString"))
     });

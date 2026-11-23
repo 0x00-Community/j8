@@ -47,7 +47,7 @@ handler(cx, pc, regs, acc)  ─ 做完 ─▶  直接跳到下一条指令的 ha
 ## 分片执行
 
 `Executor::eval` 拿 `&mut Isolate`，自己分片进入：每片最多一万条指令，停下时把执行状态挂到根上、让堆回收一段，
-再接着跑。执行环境以 `ScopeGlobal<'p, RealmBrand>` 跨片保留。每 1024 条指令检查一次预算与终止请求——在事件循环里，这就是检查
+再接着跑。执行环境以 `ScopeGlobal<'p, ContextBrand>` 跨片保留。每 1024 条指令检查一次预算与终止请求——在事件循环里，这就是检查
 任务队列的时机（[事件循环](event-loop.md)）。
 
 已知偏差：宿主函数里重入的 JS（如 `map` 的回调）在当前片里跑完，期间不回收。`Function.prototype.call` / `apply`

@@ -243,7 +243,7 @@ handlers! {
         fall!(cx, pc, regs, acc)
     }
     lda_global(cx, pc, regs, acc, o) {
-        let (scope, global) = (cx.a.realm.script_scope, cx.a.realm.global);
+        let (scope, global) = (cx.a.context.script_scope, cx.a.context.global);
         match cx.loaded.globals[o[1] as usize].get(scope, global) {
             Some(v) => next!(cx, step!(pc), regs, v),
             None => fall!(cx, pc, regs, acc),

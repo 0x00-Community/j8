@@ -16,7 +16,7 @@ impl Objects {
     fn object<'scope>(a: &mut Agent<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let new_target = a.new_target;
         if new_target != Value::Undefined && !Self::is_object_ctor(new_target) {
-            return Ok(a.create_from_ctor(new_target, a.realm.object_proto, ObjectKind::Ordinary)?.into());
+            return Ok(a.create_from_ctor(new_target, a.context.object_proto, ObjectKind::Ordinary)?.into());
         }
         Ok(match args.at(0).kind() {
             ValueKind::Undefined | ValueKind::Null | ValueKind::Uninit => a.object().into(),
@@ -335,7 +335,7 @@ impl Objects {
                     ObjectKind::Date(_) => "Date",
                     _ => "Object",
                 };
-                let t = a.get_symbol(o.into(), a.realm.symbols.to_string_tag, o.into())?;
+                let t = a.get_symbol(o.into(), a.context.symbols.to_string_tag, o.into())?;
                 if let ValueKind::String(s) = t.kind() {
                     return Ok(a.string(&alloc::format!("[object {}]", &**s)).into());
                 }
@@ -529,7 +529,7 @@ impl Objects {
     fn boolean<'scope>(a: &mut Agent<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let new_target = a.new_target;
         let b = a.to_boolean(args.at(0));
-        a.wrap_primitive(new_target, b.into(), a.realm.boolean_proto)
+        a.wrap_primitive(new_target, b.into(), a.context.boolean_proto)
     }
 
     fn this_boolean<'scope>(a: &Agent<'scope, '_>, this: Value<'scope>, method: &str) -> Result<bool, Error> {
@@ -551,7 +551,7 @@ impl Objects {
 
 impl Installer<'_, '_> {
     pub(crate) fn object(&mut self) {
-        let proto = self.realm.object_proto;
+        let proto = self.context.object_proto;
         let ctor = self.constructor("Object", Objects::object, proto, 1);
         let statics: [(&str, j8framework::NativeFn, u32); 23] = [
             ("assign", Objects::assign, 2),
@@ -596,15 +596,15 @@ impl Installer<'_, '_> {
         for (name, f, n) in methods {
             self.method(proto, name, f, n);
         }
-        let get = self.realm.named_native(self.mc, Objects::proto_getter, "get __proto__", 0);
-        let set = self.realm.named_native(self.mc, Objects::proto_setter, "set __proto__", 1);
+        let get = self.context.named_native(self.mc, Objects::proto_getter, "get __proto__", 0);
+        let set = self.context.named_native(self.mc, Objects::proto_setter, "set __proto__", 1);
         proto.borrow_mut(self.mc).define("__proto__", Property { slot: Slot::Accessor { get: Some(get), set: Some(set) }, enumerable: false, writable: false, configurable: true });
     }
 
     pub(crate) fn function(&mut self) {
-        let proto = self.realm.function_proto;
+        let proto = self.context.function_proto;
         proto.borrow_mut(self.mc).kind = ObjectKind::Native(j8framework::Native::function(Objects::noop));
-        self.realm.name_function(self.mc, proto, "", Some(0));
+        self.context.name_function(self.mc, proto, "", Some(0));
         self.method(proto, "call", Objects::call, 1);
         self.method(proto, "apply", Objects::apply, 2);
         for (name, forward) in [("call", j8framework::Forward::Call), ("apply", j8framework::Forward::Apply)] {
@@ -617,9 +617,9 @@ impl Installer<'_, '_> {
         }
         self.method(proto, "bind", Objects::bind, 1);
         self.method(proto, "toString", Objects::function_to_string, 0);
-        let has_instance = self.realm.named_native(self.mc, Objects::has_instance, "[Symbol.hasInstance]", 1);
-        proto.borrow_mut(self.mc).define_symbol(self.realm.symbols.has_instance, Property { slot: Slot::Data(has_instance.into()), enumerable: false, writable: false, configurable: false });
-        let b = self.realm.boolean_proto;
+        let has_instance = self.context.named_native(self.mc, Objects::has_instance, "[Symbol.hasInstance]", 1);
+        proto.borrow_mut(self.mc).define_symbol(self.context.symbols.has_instance, Property { slot: Slot::Data(has_instance.into()), enumerable: false, writable: false, configurable: false });
+        let b = self.context.boolean_proto;
         b.borrow_mut(self.mc).kind = ObjectKind::Primitive(false.into());
         self.constructor("Boolean", Objects::boolean, b, 1);
         self.method(b, "toString", Objects::boolean_to_string, 0);

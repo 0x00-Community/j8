@@ -24,7 +24,7 @@ mod typed;
 mod profiler;
 mod property;
 mod promise;
-mod realm;
+mod context;
 mod shape;
 mod store;
 mod terminate;
@@ -37,7 +37,7 @@ pub use j8taskqueue::Quota;
 pub use error::Error;
 pub use lazy::Lazy;
 pub use layout::Layout;
-pub use handle::{RealmBrand, ValueBrand};
+pub use handle::{ContextBrand, ValueBrand};
 pub use isolate::{CreateParams, Isolate, Parked, Scope};
 #[cfg(all(target_os = "linux", feature = "crossheap"))]
 pub use isolate::{ErasedBrand, Shares};
@@ -58,5 +58,5 @@ pub use module::{ImportEntry, ImportName, ModuleInfo, ModuleRecord, ModuleStatus
 pub use profiler::{Counter, FuncId, Profiler};
 pub use typed::{Element, canonical_numeric, f16_to_f64, f64_to_f16};
 pub use property::{Descriptor, Integrity, Key, PropertyKey};
-pub use realm::{Context, FastBuiltin, FastCall, FastOut, FastTable, Intrinsics, Realm, RegExpCompiled, RegExpLiteral, RegExpLiteralEntry, RegExpPristine, WellKnown};
+pub use context::{Context, FastBuiltin, FastCall, FastOut, FastTable, Intrinsics, RegExpCompiled, RegExpLiteral, RegExpLiteralEntry, RegExpPristine, WellKnown};
 pub use value::{Value, ValueBits, ValueKind, ValueTag};

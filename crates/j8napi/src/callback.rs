@@ -36,11 +36,11 @@ impl Env<'_> {
         let hook = Self::host(a, Hook { env: NonNull::from(self).cast::<Env<'scope>>(), cb, data });
         let f = ObjectData {
             kind: ObjectKind::NativeClosure(NativeClosure { f: Self::trampoline, slots: alloc::vec![hook.into()], constructor }),
-            proto: Some(a.realm.function_proto),
+            proto: Some(a.context.function_proto),
             ..ObjectData::default()
         }
         .alloc(a.mc);
-        a.realm.name_function(a.mc, f, name, Some(0));
+        a.context.name_function(a.mc, f, name, Some(0));
         f
     }
 

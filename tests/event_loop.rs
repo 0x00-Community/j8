@@ -175,7 +175,7 @@ fn the_queue_is_checked_between_slices_of_a_script() {
             assert!(a.spawn(job).is_ok(), "the event loop takes host work");
             let p = a.global(promise.into());
             let v = a.local(&p);
-            a.realm.global.borrow_mut(a.mc).define("p", j8framework::Property::data(v));
+            a.context.global.borrow_mut(a.mc).define("p", j8framework::Property::data(v));
         });
         lp.eval(&Source { text: "globalThis.log = []; p.then(v => log.push('settled ' + v + ' after ' + log.join()));", file: "a.js" }, ScriptKind::Classic).expect("runs");
         let started = Instant::now();

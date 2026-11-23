@@ -123,7 +123,7 @@ fn async_work_and_threadsafe_functions() {
         let l = set.spawn(Executor::default(), &Builtins);
         l.enter(|a| {
             let exports = Env::open(a, register).expect("register");
-            a.set_named(a.realm.global.into(), "addon", exports).expect("global");
+            a.set_named(a.context.global.into(), "addon", exports).expect("global");
         });
         let start = "globalThis.got = []; addon.work(s => got.push(`sum ${s}`)); addon.feed(x => got.push(x));";
         l.eval(&Source { text: start, file: "start.js" }, ScriptKind::Classic).expect("start");

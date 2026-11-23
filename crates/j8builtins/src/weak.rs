@@ -15,7 +15,7 @@ impl Weaks {
         if !a.can_be_held_weakly(target) {
             return Err(a.throw(ErrorKind::Type, "WeakRef: target must be an object or a non-registered symbol"));
         }
-        Ok(a.create_from_ctor(new_target, a.realm.weak_ref_proto, ObjectKind::WeakRef(target))?.into())
+        Ok(a.create_from_ctor(new_target, a.context.weak_ref_proto, ObjectKind::WeakRef(target))?.into())
     }
 
     fn deref<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
@@ -37,7 +37,7 @@ impl Weaks {
         if !a.is_callable(cleanup) {
             return Err(a.throw(ErrorKind::Type, "FinalizationRegistry: cleanup must be callable"));
         }
-        Ok(a.create_from_ctor(new_target, a.realm.finalization_registry_proto, ObjectKind::FinalizationRegistry { cleanup, cells: alloc::vec::Vec::new() })?.into())
+        Ok(a.create_from_ctor(new_target, a.context.finalization_registry_proto, ObjectKind::FinalizationRegistry { cleanup, cells: alloc::vec::Vec::new() })?.into())
     }
 
     fn this_registry<'scope>(a: &Agent<'scope, '_>, this: Value<'scope>) -> Result<JsObject<'scope>, Error> {
@@ -83,7 +83,7 @@ impl Weaks {
 
 impl Installer<'_, '_> {
     pub(crate) fn weaks(&mut self) {
-        let r = self.realm;
+        let r = self.context;
         let wr = r.weak_ref_proto;
         self.constructor("WeakRef", Weaks::weak_ref, wr, 1);
         self.method(wr, "deref", Weaks::deref, 0);

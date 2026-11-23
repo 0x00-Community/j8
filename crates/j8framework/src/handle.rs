@@ -1,10 +1,10 @@
-use crate::{Agent, Realm, Scope, ScopeGlobal, Value};
+use crate::{Agent, Context, Scope, ScopeGlobal, Value};
 
 paragc::brand!(
     pub ValueBrand = for<'heap, 'scope> Value<'scope>
 );
 paragc::brand!(
-    pub RealmBrand = for<'heap, 'scope> Realm<'scope>
+    pub ContextBrand = for<'heap, 'scope> Context<'scope>
 );
 
 impl<'scope> Agent<'scope, '_> {

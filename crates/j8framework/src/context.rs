@@ -1,5 +1,4 @@
 use core::fmt;
-use core::ops::Deref;
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -48,7 +47,7 @@ impl<'scope> WellKnown<'scope> {
 
 #[derive(Collect)]
 #[collect(no_drop)]
-pub struct Realm<'scope> {
+pub struct Context<'scope> {
     pub global: JsObject<'scope>,
     pub object_proto: JsObject<'scope>,
     pub function_proto: JsObject<'scope>,
@@ -224,13 +223,13 @@ impl RegExpCompiled<'_> {
     }
 }
 
-impl fmt::Debug for Realm<'_> {
+impl fmt::Debug for Context<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("Realm")
+        f.write_str("Context")
     }
 }
 
-impl<'scope> Realm<'scope> {
+impl<'scope> Context<'scope> {
     fn new(mc: &Mutation<'scope>) -> Self {
         let object_proto = ObjectData::default().alloc(mc);
         let derived = |proto: JsObject<'scope>| ObjectData { proto: Some(proto), ..ObjectData::default() }.alloc(mc);
@@ -388,7 +387,7 @@ impl<'scope> Realm<'scope> {
     }
 
     pub fn indexed_cache_addr(&self) -> u64 {
-        u64::try_from(core::ptr::from_ref(&self.indexed_cache).addr()).expect("a realm field address fits in a machine word")
+        u64::try_from(core::ptr::from_ref(&self.indexed_cache).addr()).expect("a context field address fits in a machine word")
     }
 
     pub fn indexed_fast(&self) -> bool {
@@ -411,38 +410,14 @@ impl<'scope> Realm<'scope> {
     }
 }
 
-#[derive(Clone, Copy, Debug, Collect)]
-#[collect(no_drop)]
-pub struct Context<'scope>(ScopeLocal<'scope, Realm<'scope>>);
-
-impl<'scope> Context<'scope> {
-    pub fn realm(self) -> ScopeLocal<'scope, Realm<'scope>> {
-        self.0
-    }
-}
-
-impl<'scope> From<ScopeLocal<'scope, Realm<'scope>>> for Context<'scope> {
-    fn from(r: ScopeLocal<'scope, Realm<'scope>>) -> Self {
-        Self(r)
-    }
-}
-
-impl<'scope> Deref for Context<'scope> {
-    type Target = Realm<'scope>;
-
-    fn deref(&self) -> &Realm<'scope> {
-        &self.0
-    }
-}
-
 pub trait Intrinsics {
-    fn install<'scope>(&self, mc: &Mutation<'scope>, realm: &Realm<'scope>);
+    fn install<'scope>(&self, mc: &Mutation<'scope>, context: &Context<'scope>);
 }
 
 impl<'scope> Scope<'scope, '_> {
-    pub fn context(&self, intrinsics: &dyn Intrinsics) -> Context<'scope> {
-        let realm = self.mc.alloc(Realm::new(self.mc));
-        intrinsics.install(self.mc, realm.get());
-        Context(realm)
+    pub fn context(&self, intrinsics: &dyn Intrinsics) -> ScopeLocal<'scope, Context<'scope>> {
+        let context = self.mc.alloc(Context::new(self.mc));
+        intrinsics.install(self.mc, context.get());
+        context
     }
 }

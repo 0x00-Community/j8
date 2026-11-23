@@ -241,7 +241,7 @@ impl Case {
         let executor = if std::env::var_os(JIT_ENV).is_some() { Executor::default().with_tier(j8jit::Jit::from(0)) } else { Executor::default() };
         let file = self.path.strip_prefix(Suite::test_dir()).unwrap_or(&self.path).display().to_string();
         let expected = self.meta.negative.as_ref();
-        let cx = isolate.enter(|scope| scope.mc.stash::<j8framework::RealmBrand>(scope.context(&Builtins).realm()));
+        let cx = isolate.enter(|scope| scope.mc.stash::<j8framework::ContextBrand>(scope.context(&Builtins)));
         let r = if self.has(Flag::Module) {
             match executor.eval(&mut isolate, &cx, &Source { text: &src, file: "[harness]" }) {
                 Ok(_) => executor.eval_module(&mut isolate, &cx, &Source { text: &self.text, file: &file }),
@@ -251,8 +251,8 @@ impl Case {
             executor.eval(&mut isolate, &cx, &Source { text: &src, file: &file })
         };
         let (outcome, why) = isolate.enter(|scope| {
-            let realm = scope.mc.fetch(&cx).into();
-            let mut agent = scope.agent(realm, &executor);
+            let context = scope.mc.fetch(&cx);
+            let mut agent = scope.agent(context, &executor);
             match (r, expected) {
                 (Err(Error::Unsupported(m)), _) => (Outcome::Unsupported, m),
                 (Err(Error::Syntax(_)), Some(n)) if n.phase != Phase::Runtime && n.kind == ErrorType::SyntaxError => (Outcome::Pass, String::new()),

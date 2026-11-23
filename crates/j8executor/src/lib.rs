@@ -598,7 +598,7 @@ impl Executor<'_> {
         a.profiler.enter(closure.func);
         let this = match this.kind() {
             _ if !loaded.wraps_this => this,
-            ValueKind::Undefined | ValueKind::Null => Value::Object(a.realm.global),
+            ValueKind::Undefined | ValueKind::Null => Value::Object(a.context.global),
             ValueKind::Object(_) | ValueKind::Uninit => this,
             prim => a.to_object(Value::from(prim)).map_or(Value::from(prim), Value::Object),
         };
@@ -743,7 +743,7 @@ impl Executor<'_> {
     }
 
     fn construct_closure<'scope>(a: &mut Agent<'scope, '_>, o: JsObject<'scope>, f: j8framework::ClosureFn, args: &[Value<'scope>], new_target: Value<'scope>) -> Result<Value<'scope>, Error> {
-        let proto = a.proto_from_ctor(new_target, a.realm.object_proto)?;
+        let proto = a.proto_from_ctor(new_target, a.context.object_proto)?;
         let this: Value<'scope> = ObjectData { proto: Some(proto), ..ObjectData::default() }.alloc(a.mc).into();
         let outer = core::mem::replace(&mut a.new_target, new_target);
         let r = f(a, o, this, args);
@@ -828,7 +828,7 @@ impl Executor<'_> {
             },
             _ => a.get_named(new_target, "prototype")?,
         };
-        let proto = proto.as_object().unwrap_or(a.realm.object_proto);
+        let proto = proto.as_object().unwrap_or(a.context.object_proto);
         Ok(ObjectData::ordinary(a.mc, Some(proto), usize::from(ctor.instance_size.get())))
     }
 
@@ -860,16 +860,16 @@ impl Executor<'_> {
         closure.code = Some(loaded.code());
         let func = &loaded.func;
         let proto = match (loaded.generator, loaded.asynchronous) {
-            (true, true) => a.realm.async_generator_function_proto,
-            (true, false) => a.realm.generator_function_proto,
-            (false, true) => a.realm.async_function_proto,
-            (false, false) => a.realm.function_proto,
+            (true, true) => a.context.async_generator_function_proto,
+            (true, false) => a.context.generator_function_proto,
+            (false, true) => a.context.async_function_proto,
+            (false, false) => a.context.function_proto,
         };
         let fo = ObjectData { kind: ObjectKind::Function(closure), proto: Some(proto), ..ObjectData::default() }.alloc(a.mc);
         let length = Value::Number(f64::from(func.length));
         let name = Value::lazy(Lazy::FunctionName);
         let prototype = if loaded.generator {
-            let base = if loaded.asynchronous { a.realm.async_generator_proto } else { a.realm.generator_proto };
+            let base = if loaded.asynchronous { a.context.async_generator_proto } else { a.context.generator_proto };
             Some((ObjectData { proto: Some(base), ..ObjectData::default() }.alloc(a.mc), true))
         } else if !loaded.no_prototype && !loaded.asynchronous {
             let p = a.object();
@@ -927,7 +927,7 @@ impl Executor<'_> {
     }
 
     fn script_slot<'scope>(&self, a: &Agent<'scope, '_>, name: &str) -> Option<(JsEnv<'scope>, usize, Mutability)> {
-        a.realm.script_contexts.get().iter().find_map(|e| {
+        a.context.script_contexts.get().iter().find_map(|e| {
             let (i, n) = self.context_shape(e.shape?).slot(name)?;
             Some((*e, i, Mutability::from(n)))
         })
@@ -940,9 +940,9 @@ impl Executor<'_> {
 
     fn global_load<'scope>(&self, a: &mut Agent<'scope, '_>, cache: &ic::GlobalIc, name: &str, inside_typeof: bool) -> Result<Value<'scope>, Error> {
         if name == SCRIPT_THIS {
-            return Ok(Value::Object(a.realm.global));
+            return Ok(Value::Object(a.context.global));
         }
-        let (scope, global) = (a.realm.script_scope, a.realm.global);
+        let (scope, global) = (a.context.script_scope, a.context.global);
         if let Some(v) = cache.get(scope, global) {
             return Ok(v);
         }
@@ -963,7 +963,7 @@ impl Executor<'_> {
     }
 
     fn global_store<'scope>(&self, a: &mut Agent<'scope, '_>, cache: &ic::GlobalIc, name: &str, v: Value<'scope>, strict: bool) -> Result<(), Error> {
-        let (scope, global) = (a.realm.script_scope, a.realm.global);
+        let (scope, global) = (a.context.script_scope, a.context.global);
         if let Some((o, at)) = cache.writable(scope, global)
             && let Slot::Data(_) = o.get().props().slot(at)
         {
@@ -1007,15 +1007,15 @@ impl Executor<'_> {
         if let Some((e, i, constant)) = self.script_slot(a, name) {
             return Ok(Found::Slot(e, i, constant));
         }
-        let g = Value::Object(a.realm.global);
+        let g = Value::Object(a.context.global);
         if a.has_property(g, name)? {
-            return Ok(Found::Object(a.realm.global));
+            return Ok(Found::Object(a.context.global));
         }
         Ok(Found::Nothing)
     }
 
     fn unscopable<'scope>(a: &mut Agent<'scope, '_>, o: JsObject<'scope>, name: &str) -> Result<bool, Error> {
-        let u = a.get_symbol(Value::Object(o), a.realm.symbols.unscopables, Value::Object(o))?;
+        let u = a.get_symbol(Value::Object(o), a.context.symbols.unscopables, Value::Object(o))?;
         if u.as_object().is_none() {
             return Ok(false);
         }
@@ -1035,7 +1035,7 @@ impl Executor<'_> {
                 if matches!(v.kind(), ValueKind::Uninit) { Err(Self::uninitialized(a, name)) } else { Ok(v) }
             }
             Found::Object(o) | Found::With(o) => a.get_named(Value::Object(o), name),
-            Found::Nothing if name == "this" => Ok(Value::Object(a.realm.global)),
+            Found::Nothing if name == "this" => Ok(Value::Object(a.context.global)),
             Found::Nothing if inside_typeof => Ok(Value::Undefined),
             Found::Nothing => Err(a.throw(ErrorKind::Reference, &alloc::format!("{name} is not defined"))),
         }
@@ -1066,7 +1066,7 @@ impl Executor<'_> {
             }
             Found::Object(o) | Found::With(o) => a.put_named(Value::Object(o), name, v, strict),
             Found::Nothing if strict => Err(a.throw(ErrorKind::Reference, &alloc::format!("{name} is not defined"))),
-            Found::Nothing => a.put_named(Value::Object(a.realm.global), name, v, false),
+            Found::Nothing => a.put_named(Value::Object(a.context.global), name, v, false),
         }
     }
 
@@ -1089,7 +1089,7 @@ impl Executor<'_> {
             }
             e = c.parent;
         }
-        a.realm.global
+        a.context.global
     }
 
     fn check_eval<'scope>(&self, a: &mut Agent<'scope, '_>, env: Option<JsEnv<'scope>>, name: &str, kind: j8bytecode::EvalDeclaration) -> Result<(), Error> {
@@ -1107,7 +1107,7 @@ impl Executor<'_> {
             e = c.parent;
         }
         let target = self.var_scope(a, env);
-        if !ScopeLocal::ptr_eq(target, a.realm.global) {
+        if !ScopeLocal::ptr_eq(target, a.context.global) {
             return Ok(());
         }
         if self.script_slot(a, name).is_some() {
@@ -1147,7 +1147,7 @@ impl Executor<'_> {
             e = c.parent;
         }
         let target = self.var_scope(a, env);
-        if ScopeLocal::ptr_eq(target, a.realm.global) && self.script_slot(a, name).is_some() {
+        if ScopeLocal::ptr_eq(target, a.context.global) && self.script_slot(a, name).is_some() {
             return Err(a.throw(ErrorKind::Syntax, &alloc::format!("Identifier '{name}' has already been declared")));
         }
         let existing = target.borrow().get_own(a.mc, name);
@@ -1166,7 +1166,7 @@ impl Executor<'_> {
                 return Err(a.throw(ErrorKind::Syntax, &alloc::format!("Identifier '{name}' has already been declared")));
             }
             let (existing, extensible) = {
-                let g = a.realm.global.borrow();
+                let g = a.context.global.borrow();
                 (g.get_own(a.mc, name), !g.non_extensible())
             };
             match existing {
@@ -1178,7 +1178,7 @@ impl Executor<'_> {
         let base = self.function(f.func).base;
         for d in decls {
             let name = &*d.name;
-            let global = a.realm.global;
+            let global = a.context.global;
             let existing = global.borrow().get_own(a.mc, name);
             let value = d.function.map(|n| {
                 let closure = Closure::new(FuncId(base + n), env);
@@ -1204,26 +1204,26 @@ impl Executor<'_> {
         }
         for n in shape.names.iter() {
             let name = &*n.name;
-            let restricted = a.realm.global.borrow().get_own(a.mc, name).is_some_and(|p| !p.configurable);
+            let restricted = a.context.global.borrow().get_own(a.mc, name).is_some_and(|p| !p.configurable);
             if self.script_slot(a, name).is_some() || restricted {
                 return Err(a.throw(ErrorKind::Syntax, &alloc::format!("Identifier '{name}' has already been declared")));
             }
         }
         let env = Env::context(shape.names.len(), Value::Uninit, None, Some(id), None).alloc(a.mc);
-        a.realm.script_contexts.update(a.mc, |v| {
+        a.context.script_contexts.update(a.mc, |v| {
             let mut v = v.clone();
             v.push(env);
             v
         });
         for n in shape.names.iter() {
-            a.realm.script_scope.borrow_mut(a.mc).define(&n.name, Property::data(Value::Undefined));
+            a.context.script_scope.borrow_mut(a.mc).define(&n.name, Property::data(Value::Undefined));
         }
         Ok(Some(env))
     }
 
     fn script_state<'scope>(&self, a: &mut Agent<'scope, '_>, main: FuncId) -> Result<State<'scope>, Error> {
         let env = self.script_context(a, main)?;
-        let this = Value::Object(a.realm.global);
+        let this = Value::Object(a.context.global);
         let mut regs = Vec::new();
         let f = self.open(a, &mut regs, Closure::new(main, env), Value::Undefined, this, &[]);
         Ok(self.state(regs, f))
@@ -1395,7 +1395,7 @@ impl Executor<'_> {
             Constant::String(s) => a.string(s).into(),
             Constant::Utf16(u) => a.string_units(u).into(),
             Constant::BigInt(digits) => a.bigint(Agent::parse_bigint(digits).unwrap_or_default()),
-            Constant::AsyncIteratorSymbol => a.realm.symbols.async_iterator.into(),
+            Constant::AsyncIteratorSymbol => a.context.symbols.async_iterator.into(),
             _ => Value::Undefined,
         }
     }
@@ -1843,7 +1843,7 @@ impl Executor<'_> {
                     _ => None,
                 };
                 let bits = u16::try_from(o[2]).unwrap_or(0);
-                *acc = match (a.realm.regexp_literal.get().0, lone) {
+                *acc = match (a.context.regexp_literal.get().0, lone) {
                     (Some(literal), None) => literal(a, pattern, bits)?,
                     (_, lone) => {
                         let mut flags = [0u8; REGEXP_FLAGS.len()];
@@ -1860,13 +1860,13 @@ impl Executor<'_> {
                             None => a.string(pattern),
                         };
                         let fl = a.string(flags);
-                        a.call(a.realm.regexp_ctor.into(), Value::Undefined, &[p.into(), fl.into()])?
+                        a.call(a.context.regexp_ctor.into(), Value::Undefined, &[p.into(), fl.into()])?
                     }
                 };
             }
             B::GetTemplateObject => {
                 let key = (f.func.0, u32::try_from(o[0]).unwrap_or(0));
-                let cached = a.realm.templates.get().get(&key).copied();
+                let cached = a.context.templates.get().get(&key).copied();
                 *acc = match cached {
                     Some(t) => t.into(),
                     None => {
@@ -1877,7 +1877,7 @@ impl Executor<'_> {
                         let raw = a.array(raw);
                         let frozen = |v: Value<'scope>| Property { slot: Slot::Data(v), enumerable: false, writable: false, configurable: false };
                         cooked.borrow_mut(a.mc).define("raw", frozen(raw.into()));
-                        a.realm.templates.update(a.mc, |m| {
+                        a.context.templates.update(a.mc, |m| {
                             let mut m = m.clone();
                             m.insert(key, cooked);
                             m
@@ -2063,23 +2063,23 @@ impl Executor<'_> {
         let args = f.args(regs);
         let outer = f.slot(regs, Frame::CLOSURE).as_object().and_then(|o| o.closure()).and_then(|c| c.env);
         let map = if strict { None } else { self.arguments_map(f.env(regs), outer, args.len()) };
-        let o = ObjectData { kind: ObjectKind::Arguments(map), proto: Some(a.realm.object_proto), ..ObjectData::default() }.alloc(a.mc);
+        let o = ObjectData { kind: ObjectKind::Arguments(map), proto: Some(a.context.object_proto), ..ObjectData::default() }.alloc(a.mc);
         let hidden = |v: Value<'scope>| Property { slot: Slot::Data(v), enumerable: false, writable: true, configurable: true };
         for (i, &v) in args.iter().enumerate() {
             let k = alloc::string::String::from(ryu_js::Buffer::new().format(f64::from(u32::try_from(i).unwrap_or(u32::MAX))));
             o.borrow_mut(a.mc).define(&k, Property::data(v));
         }
         let len = f64::from(u32::try_from(args.len()).unwrap_or(u32::MAX));
-        let values = a.get_symbol(Value::Object(a.realm.array_proto), a.realm.symbols.iterator, Value::Undefined)?;
+        let values = a.get_symbol(Value::Object(a.context.array_proto), a.context.symbols.iterator, Value::Undefined)?;
         let mut dd = o.borrow_mut(a.mc);
         dd.define("length", hidden(len.into()));
         if strict {
-            let thrower = a.realm.named_native(a.mc, Self::throw_type_error, "", 0);
+            let thrower = a.context.named_native(a.mc, Self::throw_type_error, "", 0);
             dd.define("callee", Property { slot: Slot::Accessor { get: Some(thrower), set: Some(thrower) }, enumerable: false, writable: false, configurable: false });
         } else {
             dd.define("callee", hidden(f.slot(regs, Frame::CLOSURE)));
         }
-        dd.define_symbol(a.realm.symbols.iterator, hidden(values));
+        dd.define_symbol(a.context.symbols.iterator, hidden(values));
         drop(dd);
         Ok(o.into())
     }
@@ -2183,8 +2183,8 @@ impl Executor<'_> {
                 let asynchronous = closure.as_object().is_some_and(|o| matches!(&o.borrow().kind, ObjectKind::Function(c) if self.function(c.func).asynchronous));
                 let proto = match a.get_named(closure, "prototype")?.as_object() {
                     Some(p) => p,
-                    None if asynchronous => a.realm.async_generator_proto,
-                    None => a.realm.generator_proto,
+                    None if asynchronous => a.context.async_generator_proto,
+                    None => a.context.generator_proto,
                 };
                 let co = j8framework::Coroutine::new(closure, None, asynchronous);
                 Ok(ObjectData { kind: ObjectKind::Coroutine(Box::new(co)), proto: Some(proto), ..ObjectData::default() }.alloc(a.mc).into())
@@ -2192,7 +2192,7 @@ impl Executor<'_> {
             Intrinsic::AsyncFunctionEnter => {
                 let promise = a.new_promise();
                 let co = j8framework::Coroutine::new(arg(0), Some(promise), false);
-                Ok(ObjectData { kind: ObjectKind::Coroutine(Box::new(co)), proto: Some(a.realm.object_proto), ..ObjectData::default() }.alloc(a.mc).into())
+                Ok(ObjectData { kind: ObjectKind::Coroutine(Box::new(co)), proto: Some(a.context.object_proto), ..ObjectData::default() }.alloc(a.mc).into())
             }
             Intrinsic::AsyncFunctionAwait => {
                 let Some(co) = arg(0).as_object() else { unreachable!("a generator object") };
@@ -2214,7 +2214,7 @@ impl Executor<'_> {
                 let iterator = arg(0);
                 let next = a.get_named(iterator, "next")?;
                 let rec = j8framework::IterRecord { iterator, next };
-                Ok(ObjectData { kind: ObjectKind::AsyncFromSyncIterator(rec), proto: Some(a.realm.async_from_sync_iterator_proto), ..ObjectData::default() }.alloc(a.mc).into())
+                Ok(ObjectData { kind: ObjectKind::AsyncFromSyncIterator(rec), proto: Some(a.context.async_from_sync_iterator_proto), ..ObjectData::default() }.alloc(a.mc).into())
             }
             Intrinsic::GeneratorGetResumeMode => {
                 let Some(co) = arg(0).as_object() else { unreachable!("a generator object") };
@@ -2319,7 +2319,7 @@ impl Executor<'_> {
             }
             Runtime::ResolvePossiblyDirectEval => {
                 let (callee, source) = (arg(0), arg(1));
-                let real = matches!(callee.kind(), ValueKind::Object(o) if ScopeLocal::ptr_eq(o, a.realm.eval));
+                let real = matches!(callee.kind(), ValueKind::Object(o) if ScopeLocal::ptr_eq(o, a.context.eval));
                 let ValueKind::String(s) = source.kind() else { return Ok(callee) };
                 if !real {
                     return Ok(callee);
@@ -2635,13 +2635,13 @@ impl<'p> Executor<'p> {
         }))
     }
 
-    pub fn resume(&self, isolate: &mut j8framework::Isolate<'p>, cx: &j8framework::ScopeGlobal<'p, j8framework::RealmBrand>, job: &mut Job<'p>, quota: &mut j8framework::Quota) -> Result<Option<j8framework::ScopeGlobal<'p, j8framework::ValueBrand>>, Error> {
+    pub fn resume(&self, isolate: &mut j8framework::Isolate<'p>, cx: &j8framework::ScopeGlobal<'p, j8framework::ContextBrand>, job: &mut Job<'p>, quota: &mut j8framework::Quota) -> Result<Option<j8framework::ScopeGlobal<'p, j8framework::ValueBrand>>, Error> {
         let this = self;
         let started = core::mem::replace(&mut job.0, Started::Spent);
         let mut budget = Some(quota.left());
         let slice = isolate.enter(|scope| -> Result<Slice, Error> {
-            let realm = scope.mc.fetch(cx).into();
-            let mut a = scope.agent(realm, this);
+            let context = scope.mc.fetch(cx);
+            let mut a = scope.agent(context, this);
             let st = match started {
                 Started::Script { module, file } => {
                     let main = this.load_script(a.mc, module, &file);
@@ -2673,15 +2673,15 @@ impl<'p> Executor<'p> {
         }
     }
 
-    pub fn eval(&self, isolate: &mut j8framework::Isolate<'p>, cx: &j8framework::ScopeGlobal<'p, j8framework::RealmBrand>, src: &j8framework::Source<'_>) -> Result<j8framework::ScopeGlobal<'p, j8framework::ValueBrand>, Error> {
+    pub fn eval(&self, isolate: &mut j8framework::Isolate<'p>, cx: &j8framework::ScopeGlobal<'p, j8framework::ContextBrand>, src: &j8framework::Source<'_>) -> Result<j8framework::ScopeGlobal<'p, j8framework::ValueBrand>, Error> {
         self.run_to_end(isolate, cx, src, j8framework::ScriptKind::Classic)
     }
 
-    pub fn eval_module(&self, isolate: &mut j8framework::Isolate<'p>, cx: &j8framework::ScopeGlobal<'p, j8framework::RealmBrand>, src: &j8framework::Source<'_>) -> Result<j8framework::ScopeGlobal<'p, j8framework::ValueBrand>, Error> {
+    pub fn eval_module(&self, isolate: &mut j8framework::Isolate<'p>, cx: &j8framework::ScopeGlobal<'p, j8framework::ContextBrand>, src: &j8framework::Source<'_>) -> Result<j8framework::ScopeGlobal<'p, j8framework::ValueBrand>, Error> {
         self.run_to_end(isolate, cx, src, j8framework::ScriptKind::Module)
     }
 
-    pub fn run_to_end(&self, isolate: &mut j8framework::Isolate<'p>, cx: &j8framework::ScopeGlobal<'p, j8framework::RealmBrand>, src: &j8framework::Source<'_>, kind: j8framework::ScriptKind) -> Result<j8framework::ScopeGlobal<'p, j8framework::ValueBrand>, Error> {
+    pub fn run_to_end(&self, isolate: &mut j8framework::Isolate<'p>, cx: &j8framework::ScopeGlobal<'p, j8framework::ContextBrand>, src: &j8framework::Source<'_>, kind: j8framework::ScriptKind) -> Result<j8framework::ScopeGlobal<'p, j8framework::ValueBrand>, Error> {
         let mut job = self.start(src, kind)?;
         loop {
             if let Some(g) = self.resume(isolate, cx, &mut job, &mut j8framework::Quota::from(Self::SLICE))? {

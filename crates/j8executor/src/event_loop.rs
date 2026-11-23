@@ -15,7 +15,7 @@ use std::thread::{Scope, Thread};
 use j8lockfree::{AtomicRefCell, Fifo, Oneshot, Receiver, SegVec, Sender};
 use j8taskqueue::{Flow, ITask, ITaskPoll, Queue, Task, TaskId};
 
-use j8framework::{Agent, AsyncJob, CreateParams, Error, ErrorKind, Intrinsics, Isolate, IsolateHandle, Platform, Quota, RealmBrand, ScopeGlobal, ScriptKind, Settle, Source, Value, ValueBrand};
+use j8framework::{Agent, AsyncJob, CreateParams, Error, ErrorKind, Intrinsics, Isolate, IsolateHandle, Platform, Quota, ContextBrand, ScopeGlobal, ScriptKind, Settle, Source, Value, ValueBrand};
 
 use crate::{Executor, Job};
 
@@ -212,7 +212,7 @@ struct JsState<'p> {
     bell: Arc<Bell>,
     isolate: Isolate<'p>,
     engine: Executor<'p>,
-    cx: ScopeGlobal<'p, RealmBrand>,
+    cx: ScopeGlobal<'p, ContextBrand>,
     pending: Vec<Option<Pending<'p>>>,
     holes: Vec<usize>,
     last: Option<TaskId<'p>>,
@@ -284,8 +284,8 @@ impl<'p> JsState<'p> {
     fn enter<R>(&mut self, f: impl for<'scope> FnOnce(&mut Agent<'scope, '_>) -> R) -> R {
         let (engine, cx) = (&self.engine, &self.cx);
         self.isolate.enter(|scope| {
-            let realm = scope.mc.fetch(cx).into();
-            let mut a = scope.agent(realm, engine);
+            let context = scope.mc.fetch(cx);
+            let mut a = scope.agent(context, engine);
             f(&mut a)
         })
     }
@@ -415,7 +415,7 @@ struct Lane<'p> {
 impl<'p> Lane<'p> {
     fn new(platform: &'p dyn Platform, engine: Executor<'p>, intrinsics: &dyn Intrinsics, doors: &Arc<Doors>, home: usize) -> Box<Self> {
         let mut isolate = Isolate::new(platform, CreateParams { event_loop: true, collector_threads: Some(NonZeroUsize::MIN), ..CreateParams::default() });
-        let cx = isolate.enter(|scope| scope.mc.stash(scope.context(intrinsics).realm()));
+        let cx = isolate.enter(|scope| scope.mc.stash(scope.context(intrinsics)));
         let bell = Arc::new(Bell {
             doors: Arc::clone(doors),
             home: AtomicUsize::new(home),

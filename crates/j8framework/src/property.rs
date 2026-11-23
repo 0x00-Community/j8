@@ -483,7 +483,7 @@ impl<'scope> Agent<'scope, '_> {
         if same_object(current, proto) {
             return Ok(true);
         }
-        if !extensible || ScopeLocal::ptr_eq(o, self.realm.object_proto) {
+        if !extensible || ScopeLocal::ptr_eq(o, self.context.object_proto) {
             return Ok(false);
         }
         let mut p = proto;

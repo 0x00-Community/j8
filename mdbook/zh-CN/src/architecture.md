@@ -19,7 +19,7 @@
 
 | crate | 职责 |
 |---|---|
-| `j8framework` | 核心框架层：定义各层要实现的 trait（`Platform`、`Invoke`、`Intrinsics`）和共用的结构体（`Isolate`、`Scope`、`Agent`、`Context` / `Realm`、`Value`、对象模型、宿主对象）。JS 运算语义挂在 `Agent` 上。不依赖任何其他层 |
+| `j8framework` | 核心框架层：定义各层要实现的 trait（`Platform`、`Invoke`、`Intrinsics`）和共用的结构体（`Isolate`、`Scope`、`Agent`、`Context`、`Value`、对象模型、宿主对象）。JS 运算语义挂在 `Agent` 上。不依赖任何其他层 |
 | `j8bytecode` | 字节码定义，与 V8 Ignition 逐字节一致；依赖根，不依赖其他 j8 crate |
 | `j8compiler` | JS ⇒ 字节码（oxc 解析，代码生成照 V8 的 `BytecodeGenerator`） |
 | `j8executor` | 字节码执行器 `Executor<'p>`（`eval`，可续跑的 `start` / `resume`），带内联缓存、分片执行、JIT 钩子，以及驱动它的事件循环 |
@@ -43,7 +43,7 @@
 | trait | 谁实现 | 干什么 |
 |---|---|---|
 | `Platform`（父 trait `Pool`） | `j8platform::DefaultPlatform`、宿主自己的平台 | 线程池、时钟、`console.log` 输出、模块加载 |
-| `Intrinsics` | `j8builtins::Builtins` | 往新 `Realm` 装全局对象与内建构造器 |
+| `Intrinsics` | `j8builtins::Builtins` | 往新 `Context` 装全局对象与内建构造器 |
 | `Invoke` | 执行器 | 内建函数回调 JS（`map` 的回调、getter……） |
 | `Tier` | `j8jit::Jit` | 执行器问「这个函数 / 循环要不要编」 |
 

@@ -26,10 +26,10 @@ impl<T> Raw<T> {
 impl Env<'_> {
     fn uint8_array<'scope>(a: &Agent<'scope, '_>, bytes: Backing) -> j8framework::JsObject<'scope> {
         let len = bytes.len();
-        let buffer = ObjectData { kind: ObjectKind::ArrayBuffer(Box::new(j8framework::BufferData { bytes: Some(bytes), max: None, shared: false })), proto: Some(a.realm.array_buffer_proto), ..ObjectData::default() }.alloc(a.mc);
+        let buffer = ObjectData { kind: ObjectKind::ArrayBuffer(Box::new(j8framework::BufferData { bytes: Some(bytes), max: None, shared: false })), proto: Some(a.context.array_buffer_proto), ..ObjectData::default() }.alloc(a.mc);
         let at = ElementKind::ALL.iter().position(|&k| k == ElementKind::Uint8).unwrap_or_default();
         let view = ViewData { buffer, offset: 0, length: Some(len) };
-        ObjectData { kind: ObjectKind::TypedArray(ElementKind::Uint8, view), proto: Some(a.realm.typed_protos[at]), ..ObjectData::default() }.alloc(a.mc)
+        ObjectData { kind: ObjectKind::TypedArray(ElementKind::Uint8, view), proto: Some(a.context.typed_protos[at]), ..ObjectData::default() }.alloc(a.mc)
     }
 
     fn spawn(a: &Agent<'_, '_>, ready: impl core::future::Future<Output = ()> + Send + 'static, settle: Settle) -> Result<(), Status> {
@@ -269,7 +269,7 @@ napi! {
         }
         let at = ElementKind::ALL.iter().position(|&k| k == ElementKind::Uint8).unwrap_or_default();
         let view = ViewData { buffer, offset: byte_offset, length: Some(byte_length) };
-        let o = ObjectData { kind: ObjectKind::TypedArray(ElementKind::Uint8, view), proto: Some(a.realm.typed_protos[at]), ..ObjectData::default() }.alloc(a.mc);
+        let o = ObjectData { kind: ObjectKind::TypedArray(ElementKind::Uint8, view), proto: Some(a.context.typed_protos[at]), ..ObjectData::default() }.alloc(a.mc);
         env.out(result, o.into())
     }
 
@@ -311,7 +311,7 @@ napi! {
     fn napi_fatal_exception(env, err: Handle) {
         let a = env.agent()?;
         let e = env.value(err)?;
-        let report = env.js(a.get_named(a.realm.global.into(), "reportError"))?;
+        let report = env.js(a.get_named(a.context.global.into(), "reportError"))?;
         if a.is_callable(report) {
             env.js(a.call(report, Value::Undefined, &[e])).map(drop)
         } else {

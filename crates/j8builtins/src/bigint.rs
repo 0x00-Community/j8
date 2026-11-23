@@ -49,7 +49,7 @@ impl BigInts {
 
 impl Installer<'_, '_> {
     pub(crate) fn bigint(&mut self) {
-        let proto = self.realm.bigint_proto;
+        let proto = self.context.bigint_proto;
         let ctor = self.constructor("BigInt", BigInts::construct, proto, 1);
         self.not_constructor(ctor);
         self.method(proto, "toString", BigInts::to_string, 0);

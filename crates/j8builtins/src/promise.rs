@@ -26,12 +26,12 @@ mod slot {
 
 impl Promises {
     fn is_intrinsic<'scope>(a: &Agent<'scope, '_>, c: Value<'scope>) -> bool {
-        matches!(c.kind(), ValueKind::Object(o) if j8framework::ScopeLocal::ptr_eq(o, a.realm.promise_ctor))
+        matches!(c.kind(), ValueKind::Object(o) if j8framework::ScopeLocal::ptr_eq(o, a.context.promise_ctor))
     }
 
     fn closure<'scope>(a: &Agent<'scope, '_>, f: j8framework::ClosureFn, slots: Vec<Value<'scope>>, length: u32) -> JsObject<'scope> {
-        let o = ObjectData { kind: ObjectKind::NativeClosure(NativeClosure { f, slots, constructor: false }), proto: Some(a.realm.function_proto), ..ObjectData::default() }.alloc(a.mc);
-        a.realm.name_function(a.mc, o, "", Some(length));
+        let o = ObjectData { kind: ObjectKind::NativeClosure(NativeClosure { f, slots, constructor: false }), proto: Some(a.context.function_proto), ..ObjectData::default() }.alloc(a.mc);
+        a.context.name_function(a.mc, o, "", Some(length));
         o
     }
 
@@ -98,7 +98,7 @@ impl Promises {
             let what = a.describe(executor);
             return Err(a.throw(ErrorKind::Type, &alloc::format!("Promise resolver {what} is not a function")));
         }
-        let proto = a.proto_from_ctor(new_target, a.realm.promise_proto)?;
+        let proto = a.proto_from_ctor(new_target, a.context.promise_proto)?;
         let p = a.new_promise();
         p.borrow_mut(a.mc).set_proto(Some(proto));
         let (resolve, reject) = a.promise_resolvers(p);
@@ -163,7 +163,7 @@ impl Promises {
 
     fn then<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let p = Self::this_promise(a, this)?;
-        let c = Buffers::species_constructor(a, this, a.realm.promise_ctor.into())?;
+        let c = Buffers::species_constructor(a, this, a.context.promise_ctor.into())?;
         let cap = Self::new_capability(a, c)?;
         a.perform_then(p, Reaction::Then { on_fulfilled: args.at(0), on_rejected: args.at(1), capability: Some(cap) });
         Ok(cap.promise)
@@ -176,7 +176,7 @@ impl Promises {
 
     fn finally<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let p = Self::this_object(a, this)?;
-        let c = Buffers::species_constructor(a, p, a.realm.promise_ctor.into())?;
+        let c = Buffers::species_constructor(a, p, a.context.promise_ctor.into())?;
         let f = args.at(0);
         let (then_f, catch_f): (Value<'scope>, Value<'scope>) = if a.is_callable(f) {
             (Self::closure(a, Self::then_finally, alloc::vec![f, c], 1).into(), Self::closure(a, Self::catch_finally, alloc::vec![f, c], 1).into())
@@ -399,7 +399,7 @@ impl Promises {
 
 impl Installer<'_, '_> {
     pub(crate) fn promise(&mut self) {
-        let r = self.realm;
+        let r = self.context;
         let proto = r.promise_proto;
         let ctor = r.promise_ctor;
         ctor.borrow_mut(self.mc).kind = ObjectKind::Native(j8framework::Native::constructor(Promises::construct));

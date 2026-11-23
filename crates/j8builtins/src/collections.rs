@@ -22,10 +22,10 @@ enum Shape {
 impl Collections {
     fn make<'scope>(a: &mut Agent<'scope, '_>, new_target: Value<'scope>, shape: Shape, weak: bool) -> Result<JsObject<'scope>, Error> {
         let (kind, proto, name) = match (shape, weak) {
-            (Shape::Map, false) => (ObjectKind::Map(Box::new(Collection::new(false))), a.realm.map_proto, "Map"),
-            (Shape::Map, true) => (ObjectKind::Map(Box::new(Collection::new(true))), a.realm.weakmap_proto, "WeakMap"),
-            (Shape::Set, false) => (ObjectKind::Set(Box::new(Collection::new(false))), a.realm.set_proto, "Set"),
-            (Shape::Set, true) => (ObjectKind::Set(Box::new(Collection::new(true))), a.realm.weakset_proto, "WeakSet"),
+            (Shape::Map, false) => (ObjectKind::Map(Box::new(Collection::new(false))), a.context.map_proto, "Map"),
+            (Shape::Map, true) => (ObjectKind::Map(Box::new(Collection::new(true))), a.context.weakmap_proto, "WeakMap"),
+            (Shape::Set, false) => (ObjectKind::Set(Box::new(Collection::new(false))), a.context.set_proto, "Set"),
+            (Shape::Set, true) => (ObjectKind::Set(Box::new(Collection::new(true))), a.context.weakset_proto, "WeakSet"),
         };
         if new_target == Value::Undefined {
             return Err(a.throw(ErrorKind::Type, &alloc::format!("Constructor {name} requires 'new'")));
@@ -256,7 +256,7 @@ impl Collections {
     }
 
     fn iterator<'scope>(a: &Agent<'scope, '_>, o: JsObject<'scope>, kind: IterKind, set: bool) -> Value<'scope> {
-        let proto = if set { a.realm.set_iterator_proto } else { a.realm.collection_iterator_proto };
+        let proto = if set { a.context.set_iterator_proto } else { a.context.collection_iterator_proto };
         ObjectData { kind: ObjectKind::CollectionIterator { target: Some(o), index: 0, kind, set }, proto: Some(proto), ..ObjectData::default() }.alloc(a.mc).into()
     }
 
@@ -304,7 +304,7 @@ impl Collections {
 
     fn group_by<'scope>(a: &mut Agent<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let groups = crate::object::Objects::group(a, args.at(0), args.at(1), false)?;
-        let m = ObjectData { kind: ObjectKind::Map(Box::new(Collection::new(false))), proto: Some(a.realm.map_proto), ..ObjectData::default() }.alloc(a.mc);
+        let m = ObjectData { kind: ObjectKind::Map(Box::new(Collection::new(false))), proto: Some(a.context.map_proto), ..ObjectData::default() }.alloc(a.mc);
         for (k, items) in groups {
             let arr = a.array(items);
             Self::with(a, m, |c| c.set(k, arr.into()));
@@ -357,7 +357,7 @@ impl Collections {
         for v in items {
             c.set(v, v);
         }
-        ObjectData { kind: ObjectKind::Set(Box::new(c)), proto: Some(a.realm.set_proto), ..ObjectData::default() }.alloc(a.mc).into()
+        ObjectData { kind: ObjectKind::Set(Box::new(c)), proto: Some(a.context.set_proto), ..ObjectData::default() }.alloc(a.mc).into()
     }
 
     fn set_values<'scope>(a: &Agent<'scope, '_>, o: JsObject<'scope>) -> alloc::vec::Vec<Value<'scope>> {
@@ -549,7 +549,7 @@ impl Collections {
 
 impl Installer<'_, '_> {
     pub(crate) fn collections(&mut self) {
-        let r = self.realm;
+        let r = self.context;
         let iter = r.symbols.iterator;
         let map = r.map_proto;
         let map_ctor = self.constructor("Map", Collections::map, map, 0);

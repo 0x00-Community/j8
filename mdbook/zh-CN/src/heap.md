@@ -21,7 +21,7 @@ paragc 的类型带两个生命周期：堆的 Brand `'heap` 和 scope 的 `'sco
 - `Isolate<'p>` 拥有一个 `Heap<'p>`（用 `Heap::new_unchecked` 创建，才能放进结构体）；每次 `enter` 开一个独占的
   paragc scope，并换成这次进入的 `'scope`，所以一次进入的东西留不到下一次；
 - j8 的别名把 paragc 的两个生命周期并成一个：`ScopeLocal<'scope, T>`、`Slot<'scope, T>`、`Handle<'scope, T>`；
-- 要活过一次进入的东西是根 `ScopeGlobal<'p, B>`（Brand `B` 标明类型：`ValueBrand`、`RealmBrand` …），由
+- 要活过一次进入的东西是根 `ScopeGlobal<'p, B>`（Brand `B` 标明类型：`ValueBrand`、`ContextBrand` …），由
   `mc.stash` 建、`mc.fetch` 读回，或者是 `Weak<'p, B>`；
 - 执行器对载入的代码持有弱引用，所以是 `Executor<'p>`。
 

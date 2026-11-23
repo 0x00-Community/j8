@@ -69,7 +69,7 @@ impl Global {
 
 impl Installer<'_, '_> {
     pub(crate) fn global(&mut self) {
-        let g = self.realm.global;
+        let g = self.context.global;
         self.set(g, "globalThis", g.into());
         for (name, v) in [("undefined", Value::Undefined), ("NaN", f64::NAN.into()), ("Infinity", f64::INFINITY.into())] {
             g.borrow_mut(self.mc).define(name, j8framework::Property { slot: j8framework::Slot::Data(v), enumerable: false, writable: false, configurable: false });

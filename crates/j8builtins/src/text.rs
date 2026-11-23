@@ -368,14 +368,14 @@ impl Texts {
     }
 
     fn random<'scope>(a: &mut Agent<'scope, '_>, _: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
-        let mut s = a.realm.random_state.load(core::sync::atomic::Ordering::Relaxed);
+        let mut s = a.context.random_state.load(core::sync::atomic::Ordering::Relaxed);
         if s == 0 {
             s = u64::try_from(a.platform.wall_clock().as_nanos() & u128::from(u64::MAX)).unwrap_or(1) | 1;
         }
         s ^= s >> 12;
         s ^= s << 25;
         s ^= s >> 27;
-        a.realm.random_state.store(s, core::sync::atomic::Ordering::Relaxed);
+        a.context.random_state.store(s, core::sync::atomic::Ordering::Relaxed);
         let r = s.wrapping_mul(0x2545_f491_4f6c_dd1d) >> 11;
         #[expect(clippy::cast_precision_loss, reason = "takes 53 bits")]
         let x = r as f64 / 9_007_199_254_740_992.0;
@@ -453,7 +453,7 @@ impl Texts {
 
     fn symbol_for<'scope>(a: &mut Agent<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let key = a.to_string(args.at(0))?;
-        let registry = &a.realm.realm().get().symbol_registry;
+        let registry = &a.context.get().symbol_registry;
         if let Some(&(_, s)) = registry.get().iter().find(|(k, _)| ***k == **key) {
             return Ok(s.into());
         }
@@ -475,7 +475,7 @@ impl Texts {
             let t = a.describe(args.at(0));
             return Err(a.throw(ErrorKind::Type, &alloc::format!("{t} is not a symbol")));
         };
-        Ok(a.realm.symbol_registry.get().iter().find(|(_, x)| j8framework::ScopeLocal::ptr_eq(*x, s)).map_or(Value::Undefined, |&(k, _)| k.into()))
+        Ok(a.context.symbol_registry.get().iter().find(|(_, x)| j8framework::ScopeLocal::ptr_eq(*x, s)).map_or(Value::Undefined, |&(k, _)| k.into()))
     }
 
     fn symbol_to_primitive<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
@@ -694,11 +694,11 @@ natives! {
 
 impl<'scope> Installer<'_, 'scope> {
     fn global_fn(&self, name: &str) -> Value<'scope> {
-        self.realm.global.borrow().own(self.mc, name).unwrap_or_default()
+        self.context.global.borrow().own(self.mc, name).unwrap_or_default()
     }
 
     pub(crate) fn texts(&mut self) {
-        let r = self.realm;
+        let r = self.context;
         let string = self.global_fn("String");
         if let Some(ctor) = string.as_object() {
             self.method(ctor, "fromCharCode", Texts::from_char_code, 1);

@@ -24,8 +24,8 @@ impl Reflects {
 
     fn revocable<'scope>(a: &mut Agent<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let p = Self::create(a, args.at(0), args.at(1))?;
-        let revoke = ObjectData { kind: ObjectKind::NativeClosure(NativeClosure { f: Self::revoke, slots: alloc::vec![p.into()], constructor: false }), proto: Some(a.realm.function_proto), ..ObjectData::default() }.alloc(a.mc);
-        a.realm.name_function(a.mc, revoke, "", Some(0));
+        let revoke = ObjectData { kind: ObjectKind::NativeClosure(NativeClosure { f: Self::revoke, slots: alloc::vec![p.into()], constructor: false }), proto: Some(a.context.function_proto), ..ObjectData::default() }.alloc(a.mc);
+        a.context.name_function(a.mc, revoke, "", Some(0));
         let out = a.object();
         a.create_data_property_or_throw(out, j8framework::Key::Str("proxy"), p.into())?;
         a.create_data_property_or_throw(out, j8framework::Key::Str("revoke"), revoke.into())?;
@@ -152,7 +152,7 @@ impl Reflects {
 
 impl Installer<'_, '_> {
     pub(crate) fn reflect(&mut self) {
-        let r = self.realm;
+        let r = self.context;
         let proxy = r.named_native(self.mc, Reflects::proxy, "Proxy", 2);
         if let ObjectKind::Native(n) = &mut proxy.borrow_mut(self.mc).kind {
             n.constructor = true;

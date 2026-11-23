@@ -33,7 +33,7 @@ impl Glue {
 
     #[doc(hidden)]
     pub fn natives<'scope>(a: &mut Agent<'scope, '_>) -> JsObject<'scope> {
-        let global = a.realm.global;
+        let global = a.context.global;
         if let Some(j8framework::Slot::Data(v)) = global.borrow().get_own(a.mc, NATIVE).map(|p| p.slot)
             && let Some(o) = v.as_object()
         {

@@ -97,10 +97,10 @@ workspace, and depend on the published `j8` by version, the way an embedder woul
 
 | crate | std | What it does |
 |---|---|---|
-| `j8framework` | std | The core framework: defines the traits (`Platform`, `Invoke`, `Intrinsics`) and the shared structs / enums (`Isolate`, `Scope`, `Agent`, `Context` / `Realm`, `ScopeGlobal`, `Value`, `Host`, `JsString` / `JsObject`, `Profiler`, `BinaryOp`, `Error` …). JS operation semantics hang off `Agent`; the implementations belong to the other crates. |
+| `j8framework` | std | The core framework: defines the traits (`Platform`, `Invoke`, `Intrinsics`) and the shared structs / enums (`Isolate`, `Scope`, `Agent`, `Context`, `ScopeGlobal`, `Value`, `Host`, `JsString` / `JsObject`, `Profiler`, `BinaryOp`, `Error` …). JS operation semantics hang off `Agent`; the implementations belong to the other crates. |
 | `j8` (repository root `src/`) | std | Re-exports: `#[j8::class]` / `#[j8::object]` / `#[j8::function]` (the macros live in j8macros, see `crates/macros/USAGE.md`) and the j8binding traits; the other crates by feature (default `runtime` = `j8::executor` + `j8::builtins` + `j8::platform`, plus `bytecode` / `taskqueue` / `lockfree` / `jit` / `full`); every crate is also published on its own on crates.io |
 | `j8binding` | std | The Rust ⇄ JS binding runtime: `FromJs` / `IntoJs`, host objects, `Class` / `Object` |
-| `j8builtins` | std | Implements `Intrinsics`: installs Object / Function / Array / String / Number / Boolean / Math / the Error family / `console` / `parseInt` and so on into a `Realm` |
+| `j8builtins` | std | Implements `Intrinsics`: installs Object / Function / Array / String / Number / Boolean / Math / the Error family / `console` / `parseInt` and so on into a `Context` |
 | `j8platform` | std | Implements `Platform` (`DefaultPlatform`): background tasks run on a moremath `ThreadMulti` pool (started once and reused; tasks may borrow the caller's data, through `j8framework::Pool`), the clock is `Instant` |
 | `j8bytecode` | std | The bytecode, the dependency root (no other j8 crate): V8 Ignition's, byte for byte (`Bytecode` / `OperandType` … generated from `v8.json`, which `tools/v8bytecodes.py` writes from V8's headers), `Encoder` / `Decoder`, `SharedFunction` / `BytecodeArray` / `Module` |
 | `j8compiler` | std | JS ⇒ bytecode (`j8compiler::Compile` for `Module`: scripts, modules, `eval` / `Function`), parsing with oxc |
@@ -135,21 +135,21 @@ barrier sees it), `ValueCell` (one NaN-boxed `Value`, an atomic word plus a `Slo
 - The heap has its own collector threads (as many as the platform's pool); `Platform`'s supertrait `Pool` is for parallel built-ins
 
 - `Isolate::enter(|scope| …)` enters once, and `'scope` is the brand of that entry; nothing is collected during the closure, and after it returns the heap collects if enough was allocated (a young collection usually, a full one every few rounds)
-- `Executor::eval` takes `&mut Isolate` and enters in slices itself: at most ten thousand instructions per slice; when it stops, the execution state is put under a root, and when `enter` returns a step of collection runs before execution continues. The execution context survives across slices as a `ScopeGlobal<'p, RealmBrand>` (JS re-entered from a host function runs to completion within the current slice)
+- `Executor::eval` takes `&mut Isolate` and enters in slices itself: at most ten thousand instructions per slice; when it stops, the execution state is put under a root, and when `enter` returns a step of collection runs before execution continues. The execution context survives across slices as a `ScopeGlobal<'p, ContextBrand>` (JS re-entered from a host function runs to completion within the current slice)
 - `Value<'scope>` is V8's Local: it cannot leave the closure, guaranteed at compile time
-- `ScopeGlobal<'p, B>` is a root (paragc's) that lives across many `enter`s and is released on drop; `B` names its type (`ValueBrand`, `RealmBrand`)
+- `ScopeGlobal<'p, B>` is a root (paragc's) that lives across many `enter`s and is released on drop; `B` names its type (`ValueBrand`, `ContextBrand`)
 - A thrown value waits in the pending slot as in V8 (`Error::Exception`, `agent.take_exception()`)
 
 ```rust
 use j8builtins::Builtins;
 use j8executor::Executor;
-use j8framework::{CreateParams, Isolate, RealmBrand, Source};
+use j8framework::{CreateParams, Isolate, ContextBrand, Source};
 use j8platform::DefaultPlatform;
 
 let platform = DefaultPlatform::default();
 let mut isolate = Isolate::new(&platform, CreateParams::default());
 let executor = Executor::default();
-let cx = isolate.enter(|scope| scope.mc.stash::<RealmBrand>(scope.context(&Builtins).realm()));
+let cx = isolate.enter(|scope| scope.mc.stash::<ContextBrand>(scope.context(&Builtins)));
 let result = executor.eval(&mut isolate, &cx, &Source { text: "1 + 2 * 3", file: "a.js" })?;
 isolate.enter(|scope| {
     let v = scope.local(&result);

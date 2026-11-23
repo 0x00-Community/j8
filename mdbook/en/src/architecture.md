@@ -19,7 +19,7 @@
 
 | crate | Role |
 |---|---|
-| `j8framework` | the core: the traits each layer implements (`Platform`, `Invoke`, `Intrinsics`) and the shared structs (`Isolate`, `Scope`, `Agent`, `Context` / `Realm`, `Value`, the object model, host objects). JS operation semantics hang off `Agent`. Depends on no other layer |
+| `j8framework` | the core: the traits each layer implements (`Platform`, `Invoke`, `Intrinsics`) and the shared structs (`Isolate`, `Scope`, `Agent`, `Context`, `Value`, the object model, host objects). JS operation semantics hang off `Agent`. Depends on no other layer |
 | `j8bytecode` | bytecode definitions, byte for byte V8 Ignition's; the dependency root, depends on no other j8 crate |
 | `j8compiler` | JS ⇒ bytecode (oxc parses; code generation after V8's `BytecodeGenerator`) |
 | `j8executor` | the bytecode executor `Executor<'p>` (`eval`, resumable `start` / `resume`), with inline caches, sliced execution, the JIT hook and the event loops that drive it |
@@ -44,7 +44,7 @@ traits in `j8framework`.
 | trait | implemented by | does |
 |---|---|---|
 | `Platform` (supertrait `Pool`) | `j8platform::DefaultPlatform`, or the host's own | thread pool, clocks, `console.log` output, module loading |
-| `Intrinsics` | `j8builtins::Builtins` | installs the global object and built-in constructors into a new `Realm` |
+| `Intrinsics` | `j8builtins::Builtins` | installs the global object and built-in constructors into a new `Context` |
 | `Invoke` | the executor | built-ins calling back into JS (`map`'s callback, getters …) |
 | `Tier` | `j8jit::Jit` | the executor asks "compile this function / loop?" |
 

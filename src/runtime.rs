@@ -107,7 +107,7 @@ impl<'p> Runtime<'p> {
     pub fn set<V: for<'g> crate::IntoJs<'g> + Send>(&self, path: &str, value: V) -> Result<(), Error> {
         self.enter(|a| {
             let (holder, key) = path.rsplit_once('.').unwrap_or(("", path));
-            let mut target: Value<'_> = a.realm.global.into();
+            let mut target: Value<'_> = a.context.global.into();
             for part in holder.split('.').filter(|p| !p.is_empty()) {
                 target = a.get_named(target, part)?;
             }
@@ -139,7 +139,7 @@ macro_rules! runtime {
         impl $crate::Host for $name {
             fn install(a: &mut $crate::frame::Agent<'_, '_>) {
                 $(<$parent as $crate::Host>::install(a);)?
-                let global = a.realm.global;
+                let global = a.context.global;
                 $($(<$global as $crate::Install>::install_into(a, global);)*)?
                 $($($crate::Glue::register_module::<$module>(a);)*)?
                 $(

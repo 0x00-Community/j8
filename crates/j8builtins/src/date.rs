@@ -413,7 +413,7 @@ impl Dates {
             }
             _ => Self::time_clip(Self::from_parts(a, args)?),
         };
-        Ok(a.create_from_ctor(new_target, a.realm.date_proto, ObjectKind::Date(tv))?.into())
+        Ok(a.create_from_ctor(new_target, a.context.date_proto, ObjectKind::Date(tv))?.into())
     }
 
     fn from_parts<'scope>(a: &mut Agent<'scope, '_>, args: &[Value<'scope>]) -> Result<f64, Error> {
@@ -627,7 +627,7 @@ setters! {
 
 impl Installer<'_, '_> {
     pub(crate) fn date(&mut self) {
-        let r = self.realm;
+        let r = self.context;
         let proto = r.date_proto;
         let ctor = self.constructor("Date", Dates::date, proto, 7);
         self.method(ctor, "now", Dates::date_now, 0);

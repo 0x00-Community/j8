@@ -1,3 +1,4 @@
+use crate::ScopeLocal;
 use crate::ValueKind;
 use alloc::vec::Vec;
 
@@ -117,7 +118,7 @@ pub struct Agent<'scope, 'x> {
     pub mc: &'x Mutation<'scope>,
     pub platform: &'x dyn Platform,
     pub profiler: &'x mut Profiler,
-    pub realm: Context<'scope>,
+    pub context: ScopeLocal<'scope, Context<'scope>>,
     pub new_target: Value<'scope>,
     invoke: &'x dyn Invoke<'scope>,
     spawned: Option<&'x j8lockfree::Fifo<crate::AsyncJob<'x>>>,
@@ -127,8 +128,8 @@ pub struct Agent<'scope, 'x> {
 }
 
 impl<'scope> Scope<'scope, '_> {
-    pub fn agent<'x>(&'x mut self, realm: Context<'scope>, invoke: &'x dyn Invoke<'scope>) -> Agent<'scope, 'x> {
-        Agent { mc: self.mc, platform: self.platform, profiler: &mut *self.profiler, realm, new_target: Value::Undefined, invoke, spawned: self.spawned.map(|q| unsafe { crate::rebrand_ref(q) }), stop: self.stop, parked: unsafe { crate::rebrand_ref(self.parked) }, spare_regs: Vec::new() }
+    pub fn agent<'x>(&'x mut self, context: ScopeLocal<'scope, Context<'scope>>, invoke: &'x dyn Invoke<'scope>) -> Agent<'scope, 'x> {
+        Agent { mc: self.mc, platform: self.platform, profiler: &mut *self.profiler, context, new_target: Value::Undefined, invoke, spawned: self.spawned.map(|q| unsafe { crate::rebrand_ref(q) }), stop: self.stop, parked: unsafe { crate::rebrand_ref(self.parked) }, spare_regs: Vec::new() }
     }
 }
 

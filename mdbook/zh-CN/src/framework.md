@@ -11,8 +11,8 @@
 | `Isolate` | 独立的 JS 世界：一个 GC 堆（paragc）加一个 profiler | `v8::Isolate` |
 | `Scope` | 进入 isolate 的一次；里面的值带 `'scope` 品牌，出不了这次进入 | `HandleScope` |
 | `Value<'scope>` | 一个 JS 值，就是 V8 的 `Local`，出不了闭包 | `Local<Value>` |
-| `ScopeGlobal<'p, B>` | 根（paragc `ScopeGlobal`），跨多次 `enter` 存活，drop 即放掉；`B` 标明持有的类型（`ValueBrand`、`RealmBrand` …） | `Global<T>` |
-| `Context` / `Realm` | 执行上下文：全局对象与内建原型（`Intrinsics` 由 j8builtins 实现） | `Context` |
+| `ScopeGlobal<'p, B>` | 根（paragc `ScopeGlobal`），跨多次 `enter` 存活，drop 即放掉；`B` 标明持有的类型（`ValueBrand`、`ContextBrand` …） | `Global<T>` |
+| `Context` | 执行上下文：全局对象与内建原型（`Intrinsics` 由 j8builtins 实现） | `Context` |
 | `Agent` | 一次运行的上下文；全部 JS 运算语义挂在它上面，回调 JS 经 `Invoke` | — |
 | `Profiler` | 调用 / 回跳计数器 | — |
 | `Host` / `HostObject` | 放在 JS 对象里、由回收器追踪的 Rust 值（见[绑定](bindings.md)） | cppgc 对象 |
@@ -23,7 +23,7 @@
 let platform = DefaultPlatform::default();
 let mut isolate = Isolate::new(&platform, CreateParams::default());
 let executor = Executor::default();
-let cx = isolate.enter(|scope| scope.mc.stash::<RealmBrand>(scope.context(&Builtins).realm()));   // ScopeGlobal<RealmBrand>
+let cx = isolate.enter(|scope| scope.mc.stash::<ContextBrand>(scope.context(&Builtins)));   // ScopeGlobal<ContextBrand>
 let result = executor.eval(&mut isolate, &cx, &Source { text: "1 + 2 * 3", file: "a.js" })?;
 isolate.enter(|scope| {
     let v = scope.local(&result);       // ScopeGlobal ⇒ Value<'scope>，只在这个闭包里有效
@@ -34,7 +34,7 @@ isolate.enter(|scope| {
   （通常是年轻回收，每隔几轮一次完整回收）。
 - `Value<'scope>` 出不了闭包，**编译期保证**——这是 j8 用 Rust 生命周期替代 V8 `HandleScope` 的方式。
 - 要跨 `enter` 保留一个值，就挂到根上：`agent.global(v)` 得到 `ScopeGlobal<'p, ValueBrand>`，`scope.mc.stash::<B>(x)`
-  可以把任何堆对象挂上（上下文用 `RealmBrand`）；`local` / `mc.fetch` 读回。
+  可以把任何堆对象挂上（上下文用 `ContextBrand`）；`local` / `mc.fetch` 读回。
 - 执行器（`j8executor::Executor<'p>`）跑脚本：`eval` / `eval_module`，或者分片的 `start` / `resume`。事件循环也在
   j8executor 里（[事件循环](event-loop.md)）。
 

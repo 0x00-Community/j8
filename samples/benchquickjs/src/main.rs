@@ -60,7 +60,7 @@ impl J8Runner {
         let mut best = f64::INFINITY;
         let mut result = String::new();
         for _ in 0..runs {
-            let cx = isolate.enter(|scope| scope.mc.stash::<j8::frame::RealmBrand>(scope.context(&Builtins).realm()));
+            let cx = isolate.enter(|scope| scope.mc.stash::<j8::frame::ContextBrand>(scope.context(&Builtins)));
             let start = Instant::now();
             let r = executor.eval(
                 &mut isolate,
@@ -72,8 +72,8 @@ impl J8Runner {
             );
             best = best.min(start.elapsed().as_secs_f64() * 1e3);
             let text = isolate.enter(|scope| {
-                let realm = scope.mc.fetch(&cx).into();
-                let mut a = scope.agent(realm, &executor);
+                let context = scope.mc.fetch(&cx);
+                let mut a = scope.agent(context, &executor);
                 match r {
                     Ok(g) => {
                         let v = a.local(&g);

@@ -31,7 +31,7 @@ pub unsafe trait Class<'scope>: Trace + Send + Sync + Sized + 'scope {
 
     fn install(a: &mut Agent<'scope, '_>, target: JsObject<'scope>) -> ClassHandle<'scope> {
         let (f, length) = Self::CONSTRUCTOR.unwrap_or((Glue::illegal_constructor, 0));
-        let ctor = a.realm.named_native(a.mc, f, Self::NAME, length);
+        let ctor = a.context.named_native(a.mc, f, Self::NAME, length);
         if let ObjectKind::Native(n) = &mut ctor.borrow_mut(a.mc).kind {
             *n = Native::constructor(f);
         }
@@ -46,7 +46,7 @@ pub unsafe trait Class<'scope>: Trace + Send + Sync + Sized + 'scope {
             ctor.set_proto(a.mc, Some(base.ctor));
         }
         let tag = a.string(Self::NAME);
-        proto.borrow_mut(a.mc).define_symbol(a.realm.symbols.to_string_tag, Property { slot: Slot::Data(tag.into()), enumerable: false, writable: false, configurable: true });
+        proto.borrow_mut(a.mc).define_symbol(a.context.symbols.to_string_tag, Property { slot: Slot::Data(tag.into()), enumerable: false, writable: false, configurable: true });
         target.borrow_mut(a.mc).define(Self::NAME, Property::hidden(ctor.into()));
         ClassHandle { ctor, proto }
     }
@@ -103,11 +103,11 @@ pub struct Glue;
 impl Glue {
     fn member<'scope>(a: &Agent<'scope, '_>, ctor: JsObject<'scope>, proto: JsObject<'scope>, m: &Member) {
         match *m {
-            Member::Method { name, f, length } => a.realm.method(a.mc, proto, name, f, length),
-            Member::Static { name, f, length } => a.realm.method(a.mc, ctor, name, f, length),
+            Member::Method { name, f, length } => a.context.method(a.mc, proto, name, f, length),
+            Member::Static { name, f, length } => a.context.method(a.mc, ctor, name, f, length),
             Member::Accessor { name, get, set } => {
-                let get = get.map(|f| a.realm.named_native(a.mc, f, &alloc::format!("get {name}"), 0));
-                let set = set.map(|f| a.realm.named_native(a.mc, f, &alloc::format!("set {name}"), 1));
+                let get = get.map(|f| a.context.named_native(a.mc, f, &alloc::format!("get {name}"), 0));
+                let set = set.map(|f| a.context.named_native(a.mc, f, &alloc::format!("set {name}"), 1));
                 proto.borrow_mut(a.mc).define(name, Property { slot: Slot::Accessor { get, set }, enumerable: false, writable: false, configurable: true });
             }
         }
@@ -115,7 +115,7 @@ impl Glue {
 
     #[doc(hidden)]
     pub fn function<'scope>(a: &Agent<'scope, '_>, target: JsObject<'scope>, name: &str, f: NativeFn, length: u32) -> JsObject<'scope> {
-        let func = a.realm.named_native(a.mc, f, name, length);
+        let func = a.context.named_native(a.mc, f, name, length);
         target.borrow_mut(a.mc).define(name, Property::hidden(func.into()));
         func
     }
@@ -139,7 +139,7 @@ impl Glue {
     #[doc(hidden)]
     pub fn construct<'scope, T: Class<'scope>>(a: &mut Agent<'scope, '_>, value: Result<T, Error>) -> Result<Value<'scope>, Error> {
         let value = value?;
-        let proto = a.proto_from_ctor(a.new_target, a.realm.object_proto)?;
+        let proto = a.proto_from_ctor(a.new_target, a.context.object_proto)?;
         Ok(Self::wrap(a, value, proto).into())
     }
 
