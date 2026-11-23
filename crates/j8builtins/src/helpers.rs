@@ -42,8 +42,7 @@ impl Helpers {
 
     fn reject<'scope>(a: &mut Scope<'scope, '_>, iterator: Value<'scope>, kind: ErrorKind, message: &str) -> Error {
         let e = a.throw(kind, message);
-        let _ = a.iterator_close(iterator);
-        e
+        a.iterator_close_abrupt(iterator, e)
     }
 
     fn callable<'scope>(a: &mut Scope<'scope, '_>, iterator: Value<'scope>, f: Value<'scope>) -> Result<(), Error> {
@@ -56,10 +55,7 @@ impl Helpers {
     }
 
     fn close_on<'scope, T>(a: &mut Scope<'scope, '_>, iterator: Value<'scope>, r: Result<T, Error>) -> Result<T, Error> {
-        if r.is_err() {
-            let _ = a.iterator_close(iterator);
-        }
-        r
+        r.map_err(|e| a.iterator_close_abrupt(iterator, e))
     }
 
     fn make<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, kind: HelperKind, f: Value<'scope>, remaining: f64) -> Result<Value<'scope>, Error> {

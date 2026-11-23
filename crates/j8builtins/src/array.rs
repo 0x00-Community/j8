@@ -168,8 +168,7 @@ impl Arrays {
                     a.create_index(arr, k, v)
                 })();
                 if let Err(e) = r {
-                    let _ = a.iterator_close(iterator);
-                    return Err(e);
+                    return Err(a.iterator_close_abrupt(iterator, e));
                 }
                 k += 1.0;
             }

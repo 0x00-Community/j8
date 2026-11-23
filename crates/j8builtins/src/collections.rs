@@ -99,8 +99,7 @@ impl Collections {
                 a.call(adder, o.into(), &entry)
             })();
             if let Err(e) = r {
-                let _ = a.iterator_close(it.iterator);
-                return Err(e);
+                return Err(a.iterator_close_abrupt(it.iterator, e));
             }
         }
         Ok(o.into())

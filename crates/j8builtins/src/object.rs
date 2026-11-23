@@ -261,8 +261,7 @@ impl Objects {
                 a.create_data_property_or_throw(o, key.key(), v)
             })();
             if let Err(e) = r {
-                let _ = a.iterator_close(it.iterator);
-                return Err(e);
+                return Err(a.iterator_close_abrupt(it.iterator, e));
             }
         }
         Ok(o.into())
@@ -303,8 +302,7 @@ impl Objects {
             let key = match key {
                 Ok(key) => key,
                 Err(e) => {
-                    let _ = a.iterator_close(it.iterator);
-                    return Err(e);
+                    return Err(a.iterator_close_abrupt(it.iterator, e));
                 }
             };
             match groups.iter_mut().find(|(g, _)| g.same_value(key)) {

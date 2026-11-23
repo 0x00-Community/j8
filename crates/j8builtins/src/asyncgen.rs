@@ -104,9 +104,7 @@ impl AsyncFromSync {
         let wrapper = match a.promise_resolve(value) {
             Ok(w) => w,
             Err(e) => {
-                if !done && close_on_rejection {
-                    let _ = a.iterator_close(rec.iterator);
-                }
+                let e = if !done && close_on_rejection { a.iterator_close_abrupt(rec.iterator, e) } else { e };
                 return Self::rejected(a, p, e);
             }
         };

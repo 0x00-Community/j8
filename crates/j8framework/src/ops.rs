@@ -1262,6 +1262,19 @@ impl<'scope> Scope<'scope, '_> {
         Ok(())
     }
 
+    pub fn iterator_close_abrupt(&mut self, iterator: Value<'scope>, e: Error) -> Error {
+        if matches!(e, Error::Terminated) {
+            return e;
+        }
+        let saved = self.mc.take_exception();
+        let _ = self.iterator_close(iterator);
+        self.mc.take_exception();
+        if let Some(v) = saved {
+            self.mc.raise(v);
+        }
+        e
+    }
+
     pub fn iter_result(&self, value: Value<'scope>, done: bool) -> JsObject<'scope> {
         let o = self.object();
         let d = o.borrow_mut(self.mc);

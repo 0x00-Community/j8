@@ -257,12 +257,7 @@ impl Promises {
         match Self::perform(a, c, resolve, it, &cap, how, &mut done) {
             Ok(v) => Ok(v),
             Err(e) => {
-                let e = if done {
-                    e
-                } else {
-                    let _ = a.iterator_close(it.iterator);
-                    e
-                };
+                let e = if done { e } else { a.iterator_close_abrupt(it.iterator, e) };
                 Self::reject_on(a, &cap, e)
             }
         }
