@@ -18,6 +18,7 @@ macro_rules! sysv {
     (fn($($p:ty),* $(,)?) -> $ret:ty) => { extern "C" fn($($p),*) -> $ret };
 }
 
+mod aarch64;
 mod build;
 mod asm;
 mod cfg;
@@ -25,6 +26,7 @@ mod codegen;
 mod compile;
 mod helper;
 mod ir;
+mod live;
 mod stitch;
 mod opt;
 mod runtime;
@@ -33,6 +35,7 @@ mod x86_64;
 pub use build::Kind;
 pub use compile::{Backend, CompileError, Compiler, MachineCode};
 pub use helper::Helper as NumberHelper;
+pub use aarch64::AArch64Emit;
 pub use x86_64::{X86_64Code, X86_64Emit, X86_64Reloc};
 
 use alloc::boxed::Box;
@@ -467,7 +470,6 @@ impl Jit {
         Some(addr)
     }
 
-    #[cfg(target_arch = "x86_64")]
     fn through_mlir(&self, g: &ir::Graph, kind: Kind, deopt_base: u32, helper_base: u32, globals: &[u64]) -> Option<codegen::Generated> {
         if !self.debug.mlir {
             return None;
@@ -488,11 +490,6 @@ impl Jit {
                 None
             }
         }
-    }
-
-    #[cfg(not(target_arch = "x86_64"))]
-    fn through_mlir(&self, _: &ir::Graph, _: Kind, _: u32, _: u32, _: &[u64]) -> Option<codegen::Generated> {
-        None
     }
 
     fn run_native(&self, e: &mut Entry<'_, '_, '_, '_>, addr: usize, ret: usize) -> Tiered {

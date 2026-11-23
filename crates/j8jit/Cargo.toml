@@ -1,6 +1,6 @@
 [package]
 name = "j8jit"
-description = "j8 JIT: bytecode ⇒ speculative graph ⇒ machine code, emitted directly or stitched from stencils mlirpass compiles once (x86-64), plus the scheduling (picks hot functions, loads the machine code and replaces interpretation; falls back to the interpreter when a fast path doesn't hold)"
+description = "j8 JIT: bytecode ⇒ speculative graph ⇒ machine code, emitted directly or stitched from stencils mlirpass compiles once (x86-64, AArch64), plus the scheduling (picks hot functions, loads the machine code and replaces interpretation; falls back to the interpreter when a fast path doesn't hold)"
 readme = "README.md"
 version.workspace = true
 edition.workspace = true

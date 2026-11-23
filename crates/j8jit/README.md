@@ -8,12 +8,12 @@ scheduling itself: it implements the executor's `Tier`; hot functions and hot lo
 
 ```text
 j8bytecode::Function ─ build ─▶ graph ─┬─ codegen.rs ──────────────────────────────▶ machine code (default; x86-64, AArch64)
-                                       └─ stitch.rs: copy stencils, patch holes ─▶ machine code (J8_JIT_MLIR=1; x86-64)
-templates (one per graph instruction) ─ mlirpass pipeline + x86_64.rs, once per process ─▶ stencils
+                                       └─ stitch.rs: copy stencils, patch holes ─▶ machine code (J8_JIT_MLIR=1; x86-64, AArch64)
+templates (one per graph instruction) ─ mlirpass pipeline + x86_64.rs / aarch64.rs, once per process ─▶ stencils
 ```
 
 The stitched path is the [mlirpass](https://crates.io/crates/mlirpass) fast path (`Stencils`): every template goes through
-the pipeline and the x86-64 backend once, the first time the JIT is used; a function is then compiled by copying stencils
+the pipeline and the x86-64 or AArch64 backend once, the first time the JIT is used; a function is then compiled by copying stencils
 and filling their holes (frame slots, constants, jumps to deoptimization exits), with no MLIR built per function.
 
 ```text
