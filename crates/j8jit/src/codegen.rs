@@ -1138,6 +1138,7 @@ impl<'g> Gen<'g> {
                 let (xs, ys) = (self.src(x), self.src(y));
                 self.cold.push((slow, Cold::ModF { done, id, x: xs, y: ys }));
             }
+            Op::Call(Helper::InlinePush(index), args, fs) if args.len() == 3 => self.emit_inline_push(index, &args, fs, v),
             Op::Call(Helper::Direct(index, out), args, fs) if (2..=4).contains(&args.len()) => {
                 self.emit_direct(index, out, &args);
                 if let Some(fs) = fs {
@@ -1276,6 +1277,105 @@ impl<'g> Gen<'g> {
         self.a.alu_rr(Alu::Add, true, R11, R11);
         self.a.alu_rr(Alu::Cmp, true, RDX, R11);
         self.a.jcc(Cc::A, slow);
+    }
+
+    fn emit_inline_push(&mut self, index: u32, args: &[V], fs: Option<Fs>, v: V) {
+        let packed = u64::from(index) | (1u64 << 32);
+        let dst = self.xdst(v);
+        let srcs = vec![(Src::Reg(R15), RDI), (self.src(args[0]), RSI), (self.src(args[1]), RDX), (self.src(args[2]), RCX), (Src::Imm(packed), R8)];
+        self.fixed_moves(srcs);
+        let slow = self.a.label();
+        let done = self.a.label();
+        self.a.mov_rr(RAX, RDX);
+        self.a.shift_ri(Shift::Shr, true, RAX, 48);
+        self.a.alu_ri(Alu::Cmp, false, RAX, i32::try_from(OBJECT_TAG >> 48).unwrap_or(0));
+        self.a.jcc(Cc::Ne, slow);
+        self.a.mov_rr(RDI, RDX);
+        self.untag(RDI);
+        self.a.load(RAX, RDI, Self::o(Layout::OBJECT_PROTO));
+        self.untag(RAX);
+        self.a.test_rr(true, RAX, RAX);
+        self.a.jcc(Cc::E, slow);
+        self.a.load(R9, R15, Ctx::ARRAY_PROTO);
+        self.a.alu_rr(Alu::Cmp, true, RAX, R9);
+        self.a.jcc(Cc::Ne, slow);
+        self.a.load32(R9, RAX, Self::o(Layout::ARRAY_LEN));
+        self.a.test_rr(true, R9, R9);
+        self.a.jcc(Cc::Ne, slow);
+        self.a.load(R9, R15, Ctx::INDEXED_CACHE);
+        self.a.load(RAX, R9, 0);
+        self.a.mov_ri(R11, j8framework::indexed_stamp_addr());
+        self.a.load(R10, R11, 0);
+        self.a.mov_rr(R9, RAX);
+        self.a.mov_ri(R11, (1u64 << 63) - 1);
+        self.a.alu_rr(Alu::And, true, R9, R11);
+        self.a.alu_rr(Alu::Cmp, true, R9, R10);
+        self.a.jcc(Cc::Ne, slow);
+        self.a.mov_ri(R11, 1u64 << 63);
+        self.a.alu_rr(Alu::And, true, RAX, R11);
+        self.a.jcc(Cc::E, slow);
+        self.a.load(R9, RDI, Self::o(Layout::OBJECT_FLAGS_WORD));
+        self.a.mov_rr(RAX, R9);
+        self.a.mov_ri(R11, Layout::DENSE_ZERO_MASK);
+        self.a.alu_rr(Alu::And, true, RAX, R11);
+        self.a.jcc(Cc::Ne, slow);
+        self.a.mov_ri(R11, Layout::DENSE_ARRAY_BIT);
+        self.a.alu_rr(Alu::And, true, R9, R11);
+        self.a.jcc(Cc::E, slow);
+        self.a.load32(R9, RDI, Self::o(Layout::ARRAY_LEN));
+        self.a.test_rr(true, R9, R9);
+        self.a.jcc(Cc::E, slow);
+        self.a.mov_ri(R11, 0xFFFF_FFFF);
+        self.a.alu_rr(Alu::Cmp, true, R9, R11);
+        self.a.jcc(Cc::Ae, slow);
+        self.a.load(RAX, RDI, Self::o(Layout::ARRAY_ROOT));
+        self.untag(RAX);
+        self.a.test_rr(true, RAX, RAX);
+        self.a.jcc(Cc::E, slow);
+        self.a.load(R10, RAX, 0);
+        self.a.mov_ri(R11, u64::try_from(Layout::NODE_MARK).unwrap_or(0));
+        self.a.alu_rr(Alu::Cmp, true, R10, R11);
+        self.a.jcc(Cc::B, slow);
+        self.a.load(R10, RAX, Self::o(Layout::NODE_TAIL));
+        self.untag(R10);
+        self.a.test_rr(true, R10, R10);
+        self.a.jcc(Cc::E, slow);
+        self.a.load(RAX, RAX, Self::o(Layout::NODE_TAIL_META));
+        self.a.mov_rr(R11, RAX);
+        self.a.shift_ri(Shift::Shr, true, R11, 32);
+        self.a.mov_rr32(RAX, RAX);
+        self.a.alu_rr(Alu::Cmp, true, R9, RAX);
+        self.a.jcc(Cc::B, slow);
+        self.a.alu_rr(Alu::Sub, true, R9, RAX);
+        self.a.alu_rr(Alu::Cmp, true, R9, R11);
+        self.a.jcc(Cc::Ae, slow);
+        self.a.shift_ri(Shift::Shl, true, R9, 4);
+        self.a.alu_ri(Alu::Add, true, R9, Self::o(Layout::STORE_CELLS));
+        self.a.alu_rr(Alu::Add, true, R9, R10);
+        self.a.load(RAX, R9, 0);
+        self.a.mov_ri(R10, j8framework::paragc::WORD_POINTER_MIN);
+        self.a.alu_rr(Alu::Cmp, true, RAX, R10);
+        self.a.jcc(Cc::Ae, slow);
+        self.a.mov_rr(R11, RCX);
+        self.a.alu_rr(Alu::Cmp, true, R11, R10);
+        self.a.jcc(Cc::Ae, slow);
+        self.a.store(R9, 0, R11);
+        self.a.load32(R9, RDI, Self::o(Layout::ARRAY_LEN));
+        self.a.alu_ri(Alu::Add, true, R9, 1);
+        self.a.store32(RDI, Self::o(Layout::ARRAY_LEN), R9);
+        self.a.cvtsi2sd64(dst, R9);
+        self.a.jmp(done);
+        self.a.bind(slow);
+        self.a.mov_rr(RDI, R15);
+        let at = self.a.call_abs(0);
+        self.relocs.push((at, Sym::Direct(1)));
+        if let Some(fs) = fs {
+            self.a.cmp_mi(true, R15, Ctx::PENDING, 0);
+            self.exit_if(Cc::Ne, fs, Reason::Throw);
+        }
+        self.a.movq_xr(dst, RAX);
+        self.a.bind(done);
+        self.xput(v, dst);
     }
 
     fn emit_direct(&mut self, index: u32, out: j8framework::FastOut, args: &[V]) {

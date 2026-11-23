@@ -4,6 +4,15 @@ pub struct Layout;
 
 impl Layout {
     pub const OBJECT_PROTO: usize = Object::PROTO_OFFSET;
+    pub const OBJECT_ELEMENTS: usize = Object::ELEMENTS_OFFSET;
+    pub const OBJECT_FLAGS_WORD: usize = Object::SPARSE_OFFSET;
+    pub const ARRAY_LEN: usize = Object::ELEMENTS_OFFSET + crate::ValueArray::LEN_OFFSET;
+    pub const ARRAY_ROOT: usize = Object::ELEMENTS_OFFSET + crate::ValueArray::ROOT_OFFSET;
+    pub const DENSE_ZERO_MASK: u64 = 0x00FF_FF00_FFFF_FFFF;
+    pub const DENSE_ARRAY_BIT: u64 = 1 << 32;
+    pub const NODE_MARK: usize = crate::Store::NODE_MARK;
+    pub const NODE_TAIL_META: usize = crate::Store::TAIL_META;
+    pub const NODE_TAIL: usize = crate::Store::TAIL_SLOT;
     pub const OBJECT_CALL: usize = Object::CALL_OFFSET;
     pub const OBJECT_CLASS: usize = Object::CLASS_OFFSET;
     pub const OBJECT_PLAIN_BIT: u8 = Object::PLAIN_BIT;
@@ -26,3 +35,8 @@ impl Layout {
     pub const CLOSURE_FUNC: usize = core::mem::offset_of!(Closure<'static>, func);
     pub const CLOSURE_ENV: usize = core::mem::offset_of!(Closure<'static>, env);
 }
+
+const _: () = assert!(core::mem::size_of::<crate::ValueCell<'static>>() == 16);
+const _: () = assert!(Object::CLASS_OFFSET == Object::SPARSE_OFFSET + 4);
+const _: () = assert!(Layout::ARRAY_LEN == 152 && Layout::ARRAY_ROOT == 136);
+const _: () = assert!(Layout::NODE_TAIL_META == 8 + 128 * 16);

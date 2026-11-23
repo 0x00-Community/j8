@@ -310,6 +310,10 @@ impl Asm {
         self.mem(Mem::X, false, hw(src), hw(base), disp);
     }
 
+    pub fn store32(&mut self, base: R, disp: i32, src: R) {
+        self.mem(Mem::W, false, hw(src), hw(base), disp);
+    }
+
     pub fn lea(&mut self, dst: R, base: R, disp: i32) {
         self.add_imm(hw(dst), hw(base), i64::from(disp));
     }

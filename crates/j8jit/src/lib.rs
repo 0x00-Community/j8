@@ -196,10 +196,7 @@ impl Jit {
     }
 
     fn watch_realm(ctx: &mut Ctx, a: &j8framework::Agent<'_, '_>) {
-        let addr = |o: j8framework::JsObject| Value::Object(o).bits() & j8framework::ValueBits::PAYLOAD;
-        ctx.global = addr(a.realm.global);
-        ctx.script_scope = addr(a.realm.script_scope);
-        ctx.object_proto = addr(a.realm.object_proto);
+        ctx.refresh_ptrs(a);
     }
 
     unsafe fn release_callback(env: *mut ()) {

@@ -206,17 +206,13 @@ impl Arrays {
 
     fn push<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let (o, len) = Self::target(a, this)?;
-        if o.no_indexed_protos() {
-            let fast = !o.non_extensible() && !o.length_readonly() && o.sparse_length() == 0;
-            if fast && o.is_array() {
-                let items = o.elements();
-                for &v in args {
-                    items.push(a.mc, v);
-                }
-                #[expect(clippy::cast_precision_loss, reason = "array length is at most 2^32")]
-                let n = items.len() as f64;
-                return Ok(n.into());
+        if Self::dense_object(a, o) {
+            for &v in args {
+                o.elements().push(a.mc, v);
             }
+            #[expect(clippy::cast_precision_loss, reason = "array length is at most 2^32")]
+            let n = o.elements().len() as f64;
+            return Ok(n.into());
         }
         #[expect(clippy::cast_precision_loss, reason = "argument count is far below 2^53")]
         let count = args.len() as f64;
@@ -232,9 +228,20 @@ impl Arrays {
         Ok(n.into())
     }
 
-    fn dense_array(this: Value<'_>) -> Option<JsObject<'_>> {
+    fn indexed_clean<'gc>(a: &Agent<'gc, '_>, o: JsObject<'gc>) -> bool {
+        match o.proto() {
+            Some(p) if j8framework::Gc::ptr_eq(p, a.realm.array_proto) && a.realm.indexed_fast() && p.elements().is_empty() => true,
+            _ => o.no_indexed_protos(),
+        }
+    }
+
+    fn dense_object<'gc>(a: &Agent<'gc, '_>, o: JsObject<'gc>) -> bool {
+        o.is_array() && !o.non_extensible() && !o.length_readonly() && o.sparse_length() == 0 && Self::indexed_clean(a, o)
+    }
+
+    fn dense_array<'gc>(a: &Agent<'gc, '_>, this: Value<'gc>) -> Option<JsObject<'gc>> {
         let o = this.as_object()?;
-        (o.is_array() && !o.non_extensible() && !o.length_readonly() && o.sparse_length() == 0 && o.no_indexed_protos()).then_some(o)
+        Self::dense_object(a, o).then_some(o)
     }
 
     fn push_values<'gc>(a: &mut Agent<'gc, '_>, o: JsObject<'gc>, vs: &[Value<'gc>]) -> Option<Value<'gc>> {
@@ -242,33 +249,31 @@ impl Arrays {
         if n.checked_add(vs.len()).is_none_or(|t| t > usize::try_from(u32::MAX).unwrap_or(usize::MAX)) {
             return None;
         }
-        let items = o.elements();
         for &v in vs {
-            items.push(a.mc, v);
+            o.elements().push(a.mc, v);
         }
         #[expect(clippy::cast_precision_loss, reason = "array length is at most 2^32")]
-        Some(Value::Number(items.len() as f64))
+        Some(Value::Number(o.elements().len() as f64))
     }
 
     fn push1<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, v: Value<'gc>) -> Option<Value<'gc>> {
-        let o = Self::dense_array(this)?;
-        let items = o.elements();
-        let n = items.len();
+        let o = Self::dense_array(a, this)?;
+        let n = o.elements().len();
         if n >= usize::try_from(u32::MAX).unwrap_or(usize::MAX) {
             return None;
         }
-        items.push(a.mc, v);
+        o.elements().push(a.mc, v);
         #[expect(clippy::cast_precision_loss, reason = "array length is at most 2^32")]
         Some(Value::Number((n + 1) as f64))
     }
 
     fn push2<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, x: Value<'gc>, y: Value<'gc>) -> Option<Value<'gc>> {
-        let o = Self::dense_array(this)?;
+        let o = Self::dense_array(a, this)?;
         Self::push_values(a, o, &[x, y])
     }
 
     fn pop0<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>) -> Option<Value<'gc>> {
-        let o = Self::dense_array(this)?;
+        let o = Self::dense_array(a, this)?;
         Some(o.elements().pop(a.mc).unwrap_or(Value::Undefined))
     }
 
@@ -292,12 +297,9 @@ impl Arrays {
             return Ok(Value::Undefined);
         }
         let first = a.get_index(o.into(), 0.0)?;
-        if o.no_indexed_protos() {
-            let fast = !o.non_extensible() && !o.length_readonly() && o.sparse_length() == 0;
-            if fast && o.is_array() && !o.elements().is_empty() {
-                o.elements().remove(a.mc, 0);
-                return Ok(first);
-            }
+        if Self::dense_object(a, o) && !o.elements().is_empty() {
+            o.elements().remove(a.mc, 0);
+            return Ok(first);
         }
         Self::move_range(a, o, 1.0, 0.0, len - 1.0)?;
         a.delete_index(o, len - 1.0)?;
@@ -1439,7 +1441,7 @@ impl Installer<'_, '_> {
         for (name, f, n) in methods {
             self.method(proto, name, f, n);
         }
-        self.direct(Arrays::push, j8framework::FastCall::A1(Arrays::push1), j8framework::FastOut::Number);
+        self.direct_push(Arrays::push, j8framework::FastCall::A1(Arrays::push1), j8framework::FastOut::Number);
         self.direct(Arrays::push, j8framework::FastCall::A2(Arrays::push2), j8framework::FastOut::Number);
         self.direct(Arrays::pop, j8framework::FastCall::A0(Arrays::pop0), j8framework::FastOut::Value);
         self.method(proto, "with", Arrays::with, 2);

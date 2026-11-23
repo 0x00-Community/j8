@@ -38,7 +38,9 @@ pub struct Ctx {
     pub epoch: u64,
     pub miss: u64,
     pub stack_floor: u64,
-    pad: [u64; 3],
+    pub array_proto: u64,
+    pub indexed_cache: u64,
+    pad: [u64; 1],
     pub args: [u64; ARGS_WORDS],
     pub buf: [u64; BUF_WORDS],
     pub entry: *mut core::ffi::c_void,
@@ -60,6 +62,8 @@ impl Ctx {
     pub const EPOCH: i32 = 80;
     pub const MISS: i32 = 88;
     pub const STACK_FLOOR: i32 = 96;
+    pub const ARRAY_PROTO: i32 = 104;
+    pub const INDEXED_CACHE: i32 = 112;
     pub const ARGS: i32 = 128;
     pub const BUF: i32 = 256;
 
@@ -74,16 +78,12 @@ impl Ctx {
     }
 
     pub fn bare(exe: &Executor, a: &mut Agent<'_, '_>, jit: &Jit) -> Box<Ctx> {
-        let addr = |v: Value<'_>| v.bits() & ValueBits::PAYLOAD;
-        let (global, scope, proto) = (addr(Value::Object(a.realm.global)), addr(Value::Object(a.realm.script_scope)), addr(Value::Object(a.realm.object_proto)));
         let exe: *const core::ffi::c_void = core::ptr::from_ref(exe).cast();
         let agent: *mut core::ffi::c_void = core::ptr::from_mut(a).cast();
         if let Some(mut c) = jit.spare_ctx() {
             c.budget = BUDGET_CHUNK;
             c.pending = 0;
-            c.global = global;
-            c.script_scope = scope;
-            c.object_proto = proto;
+            c.refresh_ptrs(a);
             c.acc = ValueBits::UNDEFINED;
             c.epoch = jit.bump();
             c.miss = 0;
@@ -94,12 +94,12 @@ impl Ctx {
             c.error = None;
             return c;
         }
-        Box::new(Ctx {
+        let mut c = Box::new(Ctx {
             budget: BUDGET_CHUNK,
             pending: 0,
-            global,
-            script_scope: scope,
-            object_proto: proto,
+            global: 0,
+            script_scope: 0,
+            object_proto: 0,
             ret: 0,
             ret_pc: 0,
             acc: ValueBits::UNDEFINED,
@@ -108,7 +108,9 @@ impl Ctx {
             epoch: jit.bump(),
             miss: 0,
             stack_floor: jit.stack_floor(),
-            pad: [0; 3],
+            array_proto: 0,
+            indexed_cache: 0,
+            pad: [0; 1],
             args: [0; ARGS_WORDS],
             buf: [0; BUF_WORDS],
             entry: core::ptr::null_mut(),
@@ -116,7 +118,18 @@ impl Ctx {
             agent,
             jit,
             error: None,
-        })
+        });
+        c.refresh_ptrs(a);
+        c
+    }
+
+    pub fn refresh_ptrs(&mut self, a: &Agent<'_, '_>) {
+        let addr = |o: j8framework::JsObject| Value::Object(o).bits() & ValueBits::PAYLOAD;
+        self.global = addr(a.realm.global);
+        self.script_scope = addr(a.realm.script_scope);
+        self.object_proto = addr(a.realm.object_proto);
+        self.array_proto = addr(a.realm.array_proto);
+        self.indexed_cache = a.realm.indexed_cache_addr();
     }
 
     pub unsafe fn parts<'a>(&mut self) -> (&'a Executor, &'a mut Agent<'a, 'a>) {
@@ -137,6 +150,10 @@ impl Ctx {
         0
     }
 }
+
+const _: () = assert!(core::mem::offset_of!(Ctx, args) == 128);
+const _: () = assert!(core::mem::offset_of!(Ctx, array_proto) == 104);
+const _: () = assert!(core::mem::offset_of!(Ctx, indexed_cache) == 112);
 
 unsafe fn val<'gc>(w: u64) -> Value<'gc> {
     unsafe { Value::from_bits(w) }
@@ -387,6 +404,7 @@ fn helper<'gc>(jit: &Jit, exe: &Executor, a: &mut Agent<'gc, '_>, h: Helper, ops
         Helper::Compare(op) => u64::from(a.compare(op, v(0), v(1))?),
         Helper::StrictEquals => u64::from(a.compare(j8framework::CompareOp::StrictEq, v(0), v(1))?),
         Helper::Direct(index, out) => return direct(a, index, out, ops, keep),
+        Helper::InlinePush(index) => return direct(a, index, j8framework::FastOut::Number, ops, keep),
         Helper::Alloc(k) => {
             let shape = jit.shape(k);
             let proto = unsafe { val::<'gc>(ops[0] | OBJECT_TAG) }.as_object();
