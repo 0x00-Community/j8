@@ -9,7 +9,7 @@ use j8framework::{Layout, Value, ValueBits};
 use mlirpass::{HoleKind, Stencil, Stencils};
 
 use crate::asm::{Asm, Label, RAX, RCX, RDI, RDX, RSI, R15, R8, R9, RBP};
-use crate::build::{Kind, OBJECT_TAG};
+use crate::build::{Kind, OBJECT_TAG, STRING_TAG};
 use crate::codegen::{Exit, Generated, Reason, Sym, RETURNED};
 use crate::ir::{Cond, FloatOp, Graph, Helper, IntOp, Op, Rep, Slot, B, Fs, V};
 use crate::runtime::{Ctx, Ret};
@@ -32,6 +32,7 @@ enum St {
     FloatToInt,
     UnboxFloat,
     CheckObject,
+    CheckString,
     CheckNotHole,
     CheckNotLazy,
     CheckFunc,
@@ -42,6 +43,7 @@ enum St {
     CmpWord(Cond),
     CmpFloat(Cond),
     LoadWord(bool),
+    Load32,
     StoreCell,
     StoreCellAddr,
     ContextCell,
@@ -71,11 +73,11 @@ impl St {
             }
         }
         out.extend(FLOAT_OPS.map(St::Float));
-        out.extend([St::IntToFloat, St::BoxFloat, St::BoxBool, St::BoxPtr, St::Untag, St::UnboxInt, St::FloatToInt, St::UnboxFloat, St::CheckObject, St::CheckNotHole, St::CheckNotLazy, St::CheckFunc, St::CheckNative, St::CheckShape(false), St::CheckShape(true), St::Check(false), St::Check(true)]);
+        out.extend([St::IntToFloat, St::BoxFloat, St::BoxBool, St::BoxPtr, St::Untag, St::UnboxInt, St::FloatToInt, St::UnboxFloat, St::CheckObject, St::CheckString, St::CheckNotHole, St::CheckNotLazy, St::CheckFunc, St::CheckNative, St::CheckShape(false), St::CheckShape(true), St::Check(false), St::Check(true)]);
         for c in CONDS {
             out.extend([St::CmpInt(c), St::CmpWord(c), St::CmpFloat(c)]);
         }
-        out.extend([St::LoadWord(false), St::LoadWord(true), St::StoreCell, St::StoreCellAddr, St::ContextCell, St::Poll, St::Global, St::Enter]);
+        out.extend([St::LoadWord(false), St::LoadWord(true), St::Load32, St::StoreCell, St::StoreCellAddr, St::ContextCell, St::Poll, St::Global, St::Enter]);
         for throws in [false, true] {
             for result in [false, true] {
                 out.extend((0..=HELPER_REGS).map(|n| St::Helper(n, throws, result)));
@@ -318,6 +320,15 @@ impl Tpl {
                 let r = self.untag(&x);
                 self.write(&r, "i64");
             }
+            St::CheckString => {
+                let x = self.read(0, "i64");
+                let s = self.c64(u64::from(ValueBits::TAG_SHIFT));
+                let tag = self.bin("lshr", &x, &s, "i64");
+                let bad = self.icmp64("ne", &tag, STRING_TAG >> ValueBits::TAG_SHIFT);
+                self.exit_if(&bad, 0);
+                let r = self.untag(&x);
+                self.write(&r, "i64");
+            }
             St::CheckNotHole => {
                 let x = self.read(0, "i64");
                 let hole = self.icmp64("eq", &x, ValueBits::UNINIT);
@@ -414,6 +425,13 @@ impl Tpl {
                 let v = self.load(&a, 0, "i64");
                 let v = if ptr { self.untag(&v) } else { v };
                 self.write(&v, "i64");
+            }
+            St::Load32 => {
+                let base = self.read(0, "i64");
+                let off = self.hole(0);
+                let a = self.bin("add", &base, &off, "i64");
+                let v = self.load(&a, 0, "i32");
+                self.write_i32(&v);
             }
             St::StoreCell => {
                 let base = self.read(0, "i64");
@@ -1031,6 +1049,10 @@ impl<'g, 't> Stitch<'g, 't> {
                 let jumps = vec![self.exit(fs, Reason::Shape)];
                 self.emit(St::CheckObject, &[x], Some(v), Vec::new(), jumps)?;
             }
+            Op::CheckString(x, fs) => {
+                let jumps = vec![self.exit(fs, Reason::Shape)];
+                self.emit(St::CheckString, &[x], Some(v), Vec::new(), jumps)?;
+            }
             Op::CheckNotHole(x, fs) | Op::CheckNotLazy(x, fs) => {
                 let (st, reason) = if let Op::CheckNotHole(..) = op { (St::CheckNotHole, Reason::Hole) } else { (St::CheckNotLazy, Reason::Shape) };
                 let jumps = vec![self.exit(fs, reason)];
@@ -1064,6 +1086,7 @@ impl<'g, 't> Stitch<'g, 't> {
             Op::CmpWord(c, x, y) => self.emit(St::CmpWord(c), &[x, y], Some(v), Vec::new(), Vec::new())?,
             Op::CmpFloat(c, x, y) => self.emit(St::CmpFloat(c), &[x, y], Some(v), Vec::new(), Vec::new())?,
             Op::LoadWord(base, off) | Op::LoadRaw(base, off) => self.emit(St::LoadWord(false), &[base], Some(v), vec![i64::from(off).cast_unsigned()], Vec::new())?,
+            Op::Load32(base, off) => self.emit(St::Load32, &[base], Some(v), vec![i64::from(off).cast_unsigned()], Vec::new())?,
             Op::LoadPtr(base, off) => self.emit(St::LoadWord(true), &[base], Some(v), vec![i64::from(off).cast_unsigned()], Vec::new())?,
             Op::StoreCell(base, off, w) => {
                 let id = self.helper_id(Helper::StoreCell, 2);

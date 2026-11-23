@@ -96,7 +96,7 @@ fn clobbers(op: &Op) -> bool {
 }
 
 fn hoistable(op: &Op) -> bool {
-    matches!(op, Op::Untag(_) | Op::BoxPtr(..) | Op::BoxInt(_) | Op::BoxBool(_) | Op::IntToFloat(_) | Op::CmpWord(..) | Op::CmpInt(..) | Op::LoadWord(..) | Op::LoadPtr(..) | Op::LoadRaw(..) | Op::ContextCell(..) | Op::StoreCellAddr(..) | Op::CtxField(_) | Op::I32(_) | Op::F64(_) | Op::Word(_) | Op::CheckObject(..) | Op::CheckShape(..) | Op::CheckFunc(..) | Op::CheckNotHole(..) | Op::CheckNotLazy(..) | Op::UnboxInt(..) | Op::UnboxFloat(..) | Op::Check(..))
+    matches!(op, Op::Untag(_) | Op::BoxPtr(..) | Op::BoxInt(_) | Op::BoxBool(_) | Op::IntToFloat(_) | Op::CmpWord(..) | Op::CmpInt(..) | Op::LoadWord(..) | Op::Load32(..) | Op::LoadPtr(..) | Op::LoadRaw(..) | Op::ContextCell(..) | Op::StoreCellAddr(..) | Op::CtxField(_) | Op::I32(_) | Op::F64(_) | Op::Word(_) | Op::CheckObject(..) | Op::CheckString(..) | Op::CheckShape(..) | Op::CheckFunc(..) | Op::CheckNotHole(..) | Op::CheckNotLazy(..) | Op::UnboxInt(..) | Op::UnboxFloat(..) | Op::Check(..))
 }
 
 fn hoist(g: &mut Graph) {
@@ -186,7 +186,7 @@ fn hoist(g: &mut Graph) {
 
 fn set_frame_state(op: &mut Op, to: crate::ir::Fs) {
     match op {
-        Op::UnboxInt(_, fs) | Op::UnboxFloat(_, fs) | Op::FloatToInt(_, fs) | Op::CheckObject(_, fs) | Op::CheckNotHole(_, fs) | Op::CheckNotLazy(_, fs) | Op::CheckFunc(_, _, fs) | Op::CheckNative(_, _, fs) | Op::CheckShape(_, _, fs) | Op::Check(_, _, fs) => *fs = to,
+        Op::UnboxInt(_, fs) | Op::UnboxFloat(_, fs) | Op::FloatToInt(_, fs) | Op::CheckObject(_, fs) | Op::CheckString(_, fs) | Op::CheckNotHole(_, fs) | Op::CheckNotLazy(_, fs) | Op::CheckFunc(_, _, fs) | Op::CheckNative(_, _, fs) | Op::CheckShape(_, _, fs) | Op::Check(_, _, fs) => *fs = to,
         _ => {}
     }
 }

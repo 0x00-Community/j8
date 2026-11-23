@@ -20,7 +20,7 @@ mod threaded;
 use module::EVAL_FILE;
 
 pub use cache::CodeCache;
-pub use jit::{DeoptFrame, Entry, FrameSlots, Function as JitFunction, GlobalFeedback, Insn as JitInsn, PropertyFeedback, Reg as JitReg, ScopeLayout, Tier, Tiered};
+pub use jit::{DeoptFrame, Entry, FrameSlots, Function as JitFunction, GlobalFeedback, Insn as JitInsn, PropertyFeedback, Reg as JitReg, ScopeLayout, StringFeedback, Tier, Tiered};
 
 const STACK_LIMIT: usize = 10_000;
 
@@ -1467,8 +1467,11 @@ impl Executor {
             B::LdaFalse => *acc = Value::Bool(false),
             B::LdaConstant => {
                 let k = usize::try_from(o[0]).unwrap_or(0);
+                let slot = u32::try_from(k).unwrap_or(0);
                 *acc = match &loaded.func.bytecode.constants[k] {
                     Constant::Class(_) => Value::Number(k as f64),
+                    Constant::String(s) => a.constant_string(loaded.id.0, slot, s).into(),
+                    Constant::Utf16(u) => a.constant_units(loaded.id.0, slot, u).into(),
                     c => Self::constant(a, c),
                 };
             }
@@ -1566,6 +1569,18 @@ impl Executor {
                         None => {
                             let v = a.get_named(obj, name)?;
                             ic.fill_get(a.mc, ob, name);
+                            v
+                        }
+                    },
+                    ValueKind::String(s) if name == "length" => {
+                        ic.note_length();
+                        f64::from(u32::try_from(s.utf16_len()).unwrap_or(u32::MAX)).into()
+                    }
+                    ValueKind::String(_) => match ic.string_value(a.realm.string_proto) {
+                        Some(v) => v,
+                        None => {
+                            let v = a.get_named(obj, name)?;
+                            ic.fill_primitive(a.mc, a.realm.string_proto, name);
                             v
                         }
                     },

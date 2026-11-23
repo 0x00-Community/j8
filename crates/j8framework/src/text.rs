@@ -163,10 +163,14 @@ pub struct JsStr<'gc> {
 }
 
 const _: () = assert!(core::mem::size_of::<JsStr<'static>>() == 32, "a js string is four words before its bytes");
+const _: () = assert!(core::mem::offset_of!(JsStr<'static>, units) == 12);
+const _: () = assert!(JsStr::UNITS_OFFSET == 12);
 
 type Tail<'a> = &'a mut [MaybeUninit<u8>];
 
 impl<'gc> JsStr<'gc> {
+    pub const UNITS_OFFSET: usize = core::mem::offset_of!(JsStr<'static>, units);
+
     const LONE: u32 = 1 << 31;
 
     fn capacity(&self) -> usize {
@@ -338,16 +342,77 @@ impl<'gc> JsStr<'gc> {
         })
     }
 
+    pub fn concat_ascii(mc: &Mutation<'gc>, s: Gc<'gc, Self>, extra: &[u8], extra_first: bool) -> Gc<'gc, Self> {
+        debug_assert!(extra.is_ascii(), "appended text is ASCII");
+        if extra.is_empty() {
+            return s;
+        }
+        if s.len == 0 {
+            return Self::alloc_known(mc, core::str::from_utf8(extra).expect("appended text is ASCII"), true);
+        }
+        if s.lone_surrogates() || !s.unit_ascii() {
+            return Self::concat_wide(mc, s, extra, extra_first);
+        }
+        let total = s.byte_len() + extra.len();
+        if !extra_first
+            && total >= EXTEND_MIN
+            && let Some(v) = Self::extend_bytes(mc, s, extra)
+        {
+            return v;
+        }
+        let cap = if !extra_first && total >= EXTEND_MIN { total.saturating_mul(2).min((Self::LONE - 1) as usize) } else { total };
+        Self::own(mc, total, total, cap, false, |bytes, _| {
+            let (first, second) = if extra_first { (extra, s.as_bytes()) } else { (s.as_bytes(), extra) };
+            let at = Self::write(bytes, first);
+            Self::write(&mut bytes[at..], second);
+        })
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn concat_wide(mc: &Mutation<'gc>, s: Gc<'gc, Self>, extra: &[u8], extra_first: bool) -> Gc<'gc, Self> {
+        if s.lone_surrogates() {
+            let mut units = alloc::vec::Vec::with_capacity(s.utf16_len() + extra.len());
+            if extra_first {
+                units.extend(extra.iter().copied().map(u16::from));
+                units.extend(s.encode_utf16());
+            } else {
+                units.extend(s.encode_utf16());
+                units.extend(extra.iter().copied().map(u16::from));
+            }
+            return Self::alloc_units(mc, &units);
+        }
+        let total = s.byte_len() + extra.len();
+        let units = s.utf16_len() + extra.len();
+        Self::own(mc, total, units, total, false, |bytes, wide| {
+            if extra_first {
+                let at = Self::write(bytes, extra);
+                Self::write(&mut bytes[at..], s.as_bytes());
+                let at = Self::write_units(wide, extra.iter().copied().map(u16::from));
+                Self::write_units(&mut wide[at..], s.units().iter());
+            } else {
+                let at = Self::write(bytes, s.as_bytes());
+                Self::write(&mut bytes[at..], extra);
+                let at = Self::write_units(wide, s.units().iter());
+                Self::write_units(&mut wide[at..], extra.iter().copied().map(u16::from));
+            }
+        })
+    }
+
     fn extend(mc: &Mutation<'gc>, a: Gc<'gc, Self>, b: Gc<'gc, Self>) -> Option<Gc<'gc, Self>> {
+        Self::extend_bytes(mc, a, b.as_str().as_bytes())
+    }
+
+    fn extend_bytes(mc: &Mutation<'gc>, a: Gc<'gc, Self>, bytes: &[u8]) -> Option<Gc<'gc, Self>> {
         let (own, start) = Self::backing(a);
         let end = start + a.byte_len();
-        if own.capacity().checked_sub(end)? < b.byte_len() {
+        if own.capacity().checked_sub(end)? < bytes.len() {
             return None;
         }
-        let (from, to) = (u32::try_from(end).ok()?, u32::try_from(end + b.byte_len()).ok()?);
+        let (from, to) = (u32::try_from(end).ok()?, u32::try_from(end + bytes.len()).ok()?);
         own.used.compare_exchange(from, to, AtomicOrdering::AcqRel, AtomicOrdering::Relaxed).ok()?;
-        unsafe { core::ptr::copy_nonoverlapping(b.as_str().as_ptr(), own.as_ptr().cast_mut().add(1).cast::<u8>().add(end), b.byte_len()) };
-        Some(Self::view(mc, own, start, a.byte_len() + b.byte_len()))
+        unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), own.as_ptr().cast_mut().add(1).cast::<u8>().add(end), bytes.len()) };
+        Some(Self::view(mc, own, start, a.byte_len() + bytes.len()))
     }
 
     fn view(mc: &Mutation<'gc>, own: Gc<'gc, Self>, start: usize, len: usize) -> Gc<'gc, Self> {
@@ -495,5 +560,83 @@ impl<'a> Units<'a> {
             Units::Wide(w) => (&[][..], w),
         };
         ascii.iter().map(|&c| u16::from(c)).chain(wide.iter().copied())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use core::num::NonZeroUsize;
+
+    use super::JsStr;
+    use crate::{Heap, Mutation};
+
+    fn with_heap(f: impl FnOnce(&Mutation<'_>)) {
+        let heap = Heap::new(NonZeroUsize::MIN);
+        heap.mutate(|m| {
+            let mc = unsafe { Mutation::new(m, 0) };
+            f(&mc);
+        });
+    }
+
+    fn ascii<'gc>(mc: &Mutation<'gc>, n: usize, byte: u8) -> crate::Gc<'gc, JsStr<'gc>> {
+        JsStr::alloc_known(mc, core::str::from_utf8(&alloc::vec![byte; n]).expect("one ASCII byte"), true)
+    }
+
+    #[test]
+    fn concat_ascii_matches_concat_including_lone_surrogates() {
+        with_heap(|mc| {
+            let left = JsStr::alloc(mc, "é");
+            let digits = JsStr::alloc(mc, "21");
+            let joined = JsStr::concat_ascii(mc, left, b"21", false);
+            assert_eq!(&*joined, &*JsStr::concat(mc, left, digits), "ASCII digits after a non-ASCII string");
+            let before = JsStr::concat_ascii(mc, left, b"21", true);
+            assert_eq!(&*before, &*JsStr::concat(mc, digits, left), "ASCII digits before a non-ASCII string");
+            let high = JsStr::alloc_units(mc, &[0xD800]);
+            let low = JsStr::alloc_units(mc, &[0xDE00]);
+            let pair = JsStr::concat(mc, high, low);
+            assert!(!pair.lone_surrogates(), "a split surrogate pair is one code point");
+            assert_eq!(pair.utf16_len(), 2, "the pair is two units");
+            assert_eq!((pair.code_unit(0), pair.code_unit(1)), (Some(0xD800), Some(0xDE00)), "the units stay the surrogate pair");
+            assert_eq!(pair.as_str().chars().count(), 1, "the pair is one scalar");
+            let held = JsStr::concat_ascii(mc, high, b"A", false);
+            assert_eq!(&*held, &*JsStr::concat(mc, high, JsStr::alloc(mc, "A")), "a digit cannot complete a lone surrogate");
+            assert!(held.lone_surrogates(), "the high surrogate is still lone");
+            let grown = JsStr::concat(mc, JsStr::concat(mc, JsStr::alloc(mc, "ab"), high), low);
+            assert!(!grown.lone_surrogates(), "a high surrogate at the end of one piece joins the next low surrogate");
+            assert_eq!(grown.as_str(), "ab\u{10200}", "D800 DE00 is U+10200");
+        });
+    }
+
+    #[test]
+    fn long_appends_keep_spare_and_prepends_stay_exact() {
+        with_heap(|mc| {
+            let short = JsStr::concat(mc, JsStr::alloc(mc, "hi"), JsStr::alloc(mc, "!"));
+            assert_eq!(short.capacity(), short.byte_len(), "a short result is exact");
+            let fresh = ascii(mc, 200, b'x');
+            let doubled = JsStr::concat(mc, fresh, JsStr::alloc(mc, "b"));
+            assert_eq!(doubled.capacity(), doubled.byte_len() * 2, "a long ASCII append keeps spare");
+            assert_eq!(doubled.as_str(), &("x".repeat(200) + "b"), "the doubled result is the concatenation");
+            let head = ascii(mc, 100, b'a');
+            let tail = ascii(mc, 60, b'b');
+            let owned = JsStr::concat(mc, head, tail);
+            assert!(owned.capacity() >= owned.byte_len() * 2, "the first long join has spare");
+            let extended = JsStr::concat(mc, owned, JsStr::alloc(mc, "c"));
+            assert_eq!(extended.as_str(), &("a".repeat(100) + &"b".repeat(60) + "c"), "the spare is claimed by the next append");
+            let forked = JsStr::concat(mc, owned, JsStr::alloc(mc, "!"));
+            assert!(forked.capacity() >= forked.byte_len() * 2, "a forked append still keeps spare for whoever holds the result");
+            assert_eq!(forked.as_str(), &("a".repeat(100) + &"b".repeat(60) + "!"), "the fork is the prefix plus the new piece");
+            assert_eq!(owned.as_str(), &("a".repeat(100) + &"b".repeat(60)), "the prefix is unchanged");
+            let same = ascii(mc, 80, b'q');
+            let doubled_self = JsStr::concat(mc, same, same);
+            assert_eq!(doubled_self.as_str(), "q".repeat(160), "appending a string to itself copies both halves");
+            let prefix = ascii(mc, 180, b'm');
+            let one = JsStr::concat(mc, prefix, JsStr::alloc(mc, "a"));
+            let other = JsStr::concat(mc, prefix, JsStr::alloc(mc, "b"));
+            assert_eq!(one.as_str(), &("m".repeat(180) + "a"), "the first continuation");
+            assert_eq!(other.as_str(), &("m".repeat(180) + "b"), "the second continuation of the same prefix");
+            let pre = JsStr::concat_ascii(mc, fresh, b"n", true);
+            assert_eq!(pre.capacity(), pre.byte_len(), "a prepend has no spare an append could not claim");
+            assert_eq!(pre.as_str(), &("n".to_owned() + &"x".repeat(200)), "the digits come first");
+        });
     }
 }

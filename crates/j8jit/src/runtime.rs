@@ -40,7 +40,9 @@ pub struct Ctx {
     pub stack_floor: u64,
     pub array_proto: u64,
     pub indexed_cache: u64,
-    pad: [u64; 1],
+    pub string_proto: u64,
+    pub chars: u64,
+    pub empty: u64,
     pub args: [u64; ARGS_WORDS],
     pub buf: [u64; BUF_WORDS],
     pub entry: *mut core::ffi::c_void,
@@ -64,8 +66,11 @@ impl Ctx {
     pub const STACK_FLOOR: i32 = 96;
     pub const ARRAY_PROTO: i32 = 104;
     pub const INDEXED_CACHE: i32 = 112;
-    pub const ARGS: i32 = 128;
-    pub const BUF: i32 = 256;
+    pub const STRING_PROTO: i32 = 120;
+    pub const CHARS: i32 = 128;
+    pub const EMPTY: i32 = 136;
+    pub const ARGS: i32 = 144;
+    pub const BUF: i32 = 272;
 
     pub fn new(e: &mut Entry<'_, '_, '_, '_>, jit: &Jit) -> Box<Ctx> {
         let acc = e.acc().bits();
@@ -110,7 +115,9 @@ impl Ctx {
             stack_floor: jit.stack_floor(),
             array_proto: 0,
             indexed_cache: 0,
-            pad: [0; 1],
+            string_proto: 0,
+            chars: 0,
+            empty: 0,
             args: [0; ARGS_WORDS],
             buf: [0; BUF_WORDS],
             entry: core::ptr::null_mut(),
@@ -130,6 +137,9 @@ impl Ctx {
         self.object_proto = addr(a.realm.object_proto);
         self.array_proto = addr(a.realm.array_proto);
         self.indexed_cache = a.realm.indexed_cache_addr();
+        self.string_proto = addr(a.realm.string_proto);
+        self.chars = a.realm.chars.as_ptr() as usize as u64;
+        self.empty = Value::String(a.realm.empty).bits() & ValueBits::PAYLOAD;
     }
 
     pub unsafe fn parts<'a>(&mut self) -> (&'a Executor, &'a mut Agent<'a, 'a>) {
@@ -151,9 +161,14 @@ impl Ctx {
     }
 }
 
-const _: () = assert!(core::mem::offset_of!(Ctx, args) == 128);
+const _: () = assert!(core::mem::offset_of!(Ctx, args) == 144);
+const _: () = assert!(core::mem::offset_of!(Ctx, buf) == 272);
 const _: () = assert!(core::mem::offset_of!(Ctx, array_proto) == 104);
 const _: () = assert!(core::mem::offset_of!(Ctx, indexed_cache) == 112);
+const _: () = assert!(core::mem::offset_of!(Ctx, string_proto) == 120);
+const _: () = assert!(core::mem::offset_of!(Ctx, chars) == 128);
+const _: () = assert!(core::mem::offset_of!(Ctx, empty) == 136);
+const _: () = assert!(Ctx::ARGS == 144 && Ctx::BUF == 272 && Ctx::STRING_PROTO == 120 && Ctx::CHARS == 128 && Ctx::EMPTY == 136);
 
 unsafe fn val<'gc>(w: u64) -> Value<'gc> {
     unsafe { Value::from_bits(w) }
@@ -175,6 +190,33 @@ sysv! {
     #[unsafe(no_mangle)]
     pub fn j8_helper(ctx: *mut Ctx, id: u64, a: u64, b: u64, c: u64, d: u64) -> u64 {
         dispatch(ctx, id, a, b, c, d)
+    }
+}
+
+sysv! {
+    #[unsafe(no_mangle)]
+    pub fn j8_concat(ctx: *mut Ctx, _id: u64, a: u64, b: u64, _c: u64, _d: u64) -> u64 {
+        concat_entry(ctx, a, b)
+    }
+}
+
+fn concat_entry(ctx: *mut Ctx, a: u64, b: u64) -> u64 {
+    let ctx = unsafe { &mut *ctx };
+    let lhs = unsafe { val(a) };
+    let rhs = unsafe { val(b) };
+    let (bits, keep, err) = {
+        let (_, agent) = unsafe { ctx.parts() };
+        match agent.concat_add(lhs, rhs) {
+            Ok((v, keep)) => (v.bits(), keep, None),
+            Err(err) => (0, false, Some(err)),
+        }
+    };
+    if !keep || err.is_some() {
+        ctx.epoch = ctx.jit().bump();
+    }
+    match err {
+        Some(err) => ctx.fail(err),
+        None => bits,
     }
 }
 
@@ -365,9 +407,14 @@ fn helper<'gc>(jit: &Jit, exe: &Executor, a: &mut Agent<'gc, '_>, h: Helper, ops
         Helper::CreateContext(shape, n) => Value::context(j8framework::Env::context(n as usize, Value::Undefined, v(0).as_context(), Some(shape), None).alloc(a.mc)).bits(),
         Helper::ObjectLiteral(f, k) => Value::Object(exe.jit_object_literal(a, f, i64::from(k))).bits(),
         Helper::Constant(f, k) => match exe.jit_function(f).constant(i64::from(k)) {
-            Some(j8bytecode::Constant::String(s)) => Value::String(a.string(s)).bits(),
-            Some(j8bytecode::Constant::Utf16(u)) => Value::String(a.string_units(u)).bits(),
+            Some(j8bytecode::Constant::String(s)) => Value::String(a.constant_string(f.0, k, s)).bits(),
+            Some(j8bytecode::Constant::Utf16(u)) => Value::String(a.constant_units(f.0, k, u)).bits(),
             _ => ValueBits::UNDEFINED,
+        },
+        Helper::Concat => {
+            let (value, keep_epoch) = a.concat_add(v(0), v(1))?;
+            *keep = keep_epoch;
+            value.bits()
         },
         Helper::ModF => (f64::from_bits(ops[0]) % f64::from_bits(ops[1])).to_bits(),
         Helper::ToBoolean => u64::from(a.to_boolean(v(0))),
