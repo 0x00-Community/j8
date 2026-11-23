@@ -74,6 +74,10 @@ impl<'gc> Installer<'_, 'gc> {
         self.realm.method(self.mc, target, name, f, n);
     }
 
+    fn direct(&self, f: j8framework::NativeFn, call: j8framework::FastCall, out: j8framework::FastOut) {
+        self.realm.add_fast(self.mc, f, call, out);
+    }
+
     fn constructor(&self, name: &str, f: j8framework::NativeFn, proto: JsObject<'gc>, n: u32) -> JsObject<'gc> {
         let ctor = self.realm.named_native(self.mc, f, name, n);
         if let j8framework::ObjectKind::Native(native) = &mut ctor.borrow_mut(self.mc).kind {

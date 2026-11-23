@@ -106,6 +106,7 @@ pub struct Realm<'gc> {
     pub regexp_literals: [Slot<'gc, RegExpLiteralEntry<'gc>>; RegExpCompiled::BUCKETS],
     pub regexp_pristine: Cow<'gc, Option<RegExpPristine<'gc>>>,
     pub regexp_literal: Cow<'gc, crate::Static<Option<RegExpLiteral>>>,
+    pub fast_builtins: Cow<'gc, crate::Static<FastTable>>,
     pub builtin_nexts: Cow<'gc, [Option<JsObject<'gc>>; 2]>,
 }
 
@@ -130,6 +131,75 @@ pub struct RegExpLiteralEntry<'gc> {
     #[collect(require_static)]
     pub flags: u16,
     pub compiled: RegExpCompiled<'gc>,
+}
+
+pub type Fast0 = for<'gc, 'x> fn(&mut crate::Agent<'gc, 'x>, Value<'gc>) -> Option<Value<'gc>>;
+
+pub type Fast1 = for<'gc, 'x> fn(&mut crate::Agent<'gc, 'x>, Value<'gc>, Value<'gc>) -> Option<Value<'gc>>;
+
+pub type Fast2 = for<'gc, 'x> fn(&mut crate::Agent<'gc, 'x>, Value<'gc>, Value<'gc>, Value<'gc>) -> Option<Value<'gc>>;
+
+#[derive(Clone, Copy)]
+pub enum FastCall {
+    A0(Fast0),
+    A1(Fast1),
+    A2(Fast2),
+}
+
+impl FastCall {
+    pub fn arity(self) -> u8 {
+        match self {
+            Self::A0(_) => 0,
+            Self::A1(_) => 1,
+            Self::A2(_) => 2,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FastOut {
+    Value,
+    Number,
+    Bool,
+}
+
+#[derive(Clone, Copy)]
+pub struct FastBuiltin {
+    pub native: NativeFn,
+    pub call: FastCall,
+    pub out: FastOut,
+}
+
+#[derive(Clone, Copy)]
+pub struct FastTable {
+    len: u8,
+    entries: [Option<FastBuiltin>; Self::CAP],
+}
+
+impl Default for FastTable {
+    fn default() -> Self {
+        Self { len: 0, entries: [None; Self::CAP] }
+    }
+}
+
+impl FastTable {
+    pub const CAP: usize = 24;
+
+    pub fn push(&mut self, entry: FastBuiltin) {
+        let i = usize::from(self.len);
+        assert!(i < Self::CAP, "fast builtin table is full");
+        self.entries[i] = Some(entry);
+        self.len += 1;
+    }
+
+    pub fn get(&self, index: usize) -> Option<FastBuiltin> {
+        self.entries.get(index).copied().flatten()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (u32, FastBuiltin)> + '_ {
+        let n = usize::from(self.len);
+        self.entries[..n].iter().enumerate().filter_map(|(i, e)| e.map(|e| (u32::try_from(i).unwrap_or(0), e)))
+    }
 }
 
 #[derive(Clone, Collect)]
@@ -227,6 +297,7 @@ impl<'gc> Realm<'gc> {
             regexp_literals: core::array::from_fn(|_| Slot::default()),
             regexp_pristine: Cow::new(mc, None),
             regexp_literal: Cow::new(mc, crate::Static(None)),
+            fast_builtins: Cow::new(mc, crate::Static(FastTable::default())),
             builtin_nexts: Cow::new(mc, [None, None]),
             symbol_registry: Cow::new(mc, alloc::vec::Vec::new()),
             modules: Cow::new(mc, alloc::vec::Vec::new()),
@@ -290,6 +361,14 @@ impl<'gc> Realm<'gc> {
     pub fn method(&self, mc: &Mutation<'gc>, target: JsObject<'gc>, name: &str, f: NativeFn, length: u32) {
         let func = self.named_native(mc, f, name, length);
         target.borrow_mut(mc).define(name, Property::hidden(Value::Object(func)));
+    }
+
+    pub fn add_fast(&self, mc: &Mutation<'gc>, native: NativeFn, call: FastCall, out: FastOut) {
+        self.fast_builtins.update_with(mc, |table| {
+            let mut table = *table;
+            table.push(FastBuiltin { native, call, out });
+            (table, ())
+        });
     }
 }
 

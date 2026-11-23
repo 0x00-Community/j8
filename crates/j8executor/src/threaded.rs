@@ -320,9 +320,10 @@ fn tier_enter<'gc>(cx: &mut Cx<'_, 'gc, '_, '_>) -> Entered<'gc> {
 }
 
 #[inline]
-fn native<'gc>(cx: &mut Cx<'_, 'gc, '_, '_>, pc: *const Insn, callee: Value<'gc>, this: Value<'gc>, args: &[Value<'gc>]) -> Option<Result<Value<'gc>, Error>> {
+fn native<'gc>(cx: &mut Cx<'_, 'gc, '_, '_>, pc: *const Insn, callee: Value<'gc>, this: Value<'gc>, args: &[Value<'gc>], fb: OperandValue) -> Option<Result<Value<'gc>, Error>> {
     let Some(o) = callee.as_object() else { return None };
     let n = o.native()?;
+    Executor::record_native(cx.loaded, fb, n.f);
     let level = cx.depth + cx.st.frames.len();
     if n.forward != j8framework::Forward::No || level >= STACK_LIMIT {
         return None;
@@ -383,7 +384,7 @@ macro_rules! call {
         match enter($cx, $pc, callee, $this, Args::Values(&args), $o[$fb]) {
             Entered::At(pc, regs, acc) => next!($cx, pc, regs, acc),
             Entered::Throw(e) => return Exit::Throw(e),
-            Entered::No => match native($cx, $pc, callee, $this, &args) {
+            Entered::No => match native($cx, $pc, callee, $this, &args, $o[$fb]) {
                 Some(Ok(v)) => {
                     let $regs = $cx.st.regs.as_mut_ptr().wrapping_add($cx.st.f().base);
                     next!($cx, $pc.wrapping_add(1), $regs, v)

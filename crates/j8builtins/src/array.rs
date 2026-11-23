@@ -232,6 +232,46 @@ impl Arrays {
         Ok(n.into())
     }
 
+    fn dense_array(this: Value<'_>) -> Option<JsObject<'_>> {
+        let o = this.as_object()?;
+        (o.is_array() && !o.non_extensible() && !o.length_readonly() && o.sparse_length() == 0 && o.no_indexed_protos()).then_some(o)
+    }
+
+    fn push_values<'gc>(a: &mut Agent<'gc, '_>, o: JsObject<'gc>, vs: &[Value<'gc>]) -> Option<Value<'gc>> {
+        let n = o.elements().len();
+        if n.checked_add(vs.len()).is_none_or(|t| t > usize::try_from(u32::MAX).unwrap_or(usize::MAX)) {
+            return None;
+        }
+        let items = o.elements();
+        for &v in vs {
+            items.push(a.mc, v);
+        }
+        #[expect(clippy::cast_precision_loss, reason = "array length is at most 2^32")]
+        Some(Value::Number(items.len() as f64))
+    }
+
+    fn push1<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, v: Value<'gc>) -> Option<Value<'gc>> {
+        let o = Self::dense_array(this)?;
+        let items = o.elements();
+        let n = items.len();
+        if n >= usize::try_from(u32::MAX).unwrap_or(usize::MAX) {
+            return None;
+        }
+        items.push(a.mc, v);
+        #[expect(clippy::cast_precision_loss, reason = "array length is at most 2^32")]
+        Some(Value::Number((n + 1) as f64))
+    }
+
+    fn push2<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, x: Value<'gc>, y: Value<'gc>) -> Option<Value<'gc>> {
+        let o = Self::dense_array(this)?;
+        Self::push_values(a, o, &[x, y])
+    }
+
+    fn pop0<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>) -> Option<Value<'gc>> {
+        let o = Self::dense_array(this)?;
+        Some(o.elements().pop(a.mc).unwrap_or(Value::Undefined))
+    }
+
     fn pop<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let (o, len) = Self::target(a, this)?;
         if len == 0.0 {
@@ -1399,6 +1439,9 @@ impl Installer<'_, '_> {
         for (name, f, n) in methods {
             self.method(proto, name, f, n);
         }
+        self.direct(Arrays::push, j8framework::FastCall::A1(Arrays::push1), j8framework::FastOut::Number);
+        self.direct(Arrays::push, j8framework::FastCall::A2(Arrays::push2), j8framework::FastOut::Number);
+        self.direct(Arrays::pop, j8framework::FastCall::A0(Arrays::pop0), j8framework::FastOut::Value);
         self.method(proto, "with", Arrays::with, 2);
         let unscopables = ObjectData::default().alloc(self.mc);
         for name in ["at", "copyWithin", "entries", "fill", "find", "findIndex", "findLast", "findLastIndex", "flat", "flatMap", "includes", "keys", "toReversed", "toSorted", "toSpliced", "values"] {

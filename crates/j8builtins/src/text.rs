@@ -37,6 +37,15 @@ enum Form {
 }
 
 impl Texts {
+    fn from_char_code1<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, v: Value<'gc>) -> Option<Value<'gc>> {
+        if !matches!(v.kind(), ValueKind::Number(_)) {
+            return None;
+        }
+        #[expect(clippy::cast_possible_truncation, reason = "ToUint16 just takes the low 16 bits")]
+        let u = a.to_uint32(v).ok()? as u16;
+        Some(Value::String(a.unit_string(u)))
+    }
+
     fn from_char_code<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         if let [v] = args {
             #[expect(clippy::cast_possible_truncation, reason = "ToUint16 just takes the low 16 bits")]
@@ -693,6 +702,7 @@ impl<'gc> Installer<'_, 'gc> {
         let string = self.global_fn("String");
         if let Some(ctor) = string.as_object() {
             self.method(ctor, "fromCharCode", Texts::from_char_code, 1);
+            self.direct(Texts::from_char_code, j8framework::FastCall::A1(Texts::from_char_code1), j8framework::FastOut::Value);
             self.method(ctor, "fromCodePoint", Texts::from_code_point, 1);
             self.method(ctor, "raw", Texts::raw, 1);
         }

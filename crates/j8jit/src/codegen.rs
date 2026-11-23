@@ -963,6 +963,18 @@ impl<'g> Gen<'g> {
                 self.a.cmp_mi(false, RCX, Self::o(Layout::FAST_CLOSURE + Layout::CLOSURE_FUNC), i32::try_from(f.0).unwrap_or(-1));
                 self.exit_if(Cc::Ne, fs, Reason::Func);
             }
+            Op::CheckNative(p, native, fs) => {
+                let r = self.gpr(p, RAX);
+                self.a.load(RCX, r, Self::o(Layout::OBJECT_CALL));
+                self.untag(RCX);
+                self.a.test_rr(true, RCX, RCX);
+                self.exit_if(Cc::E, fs, Reason::Shape);
+                self.a.cmp_m8i(RCX, 0, Layout::FAST_NATIVE_TAG);
+                self.exit_if(Cc::Ne, fs, Reason::Shape);
+                self.a.mov_ri(RAX, native);
+                self.a.alu_rm(Alu::Cmp, true, RAX, RCX, Self::o(Layout::FAST_NATIVE_FN));
+                self.exit_if(Cc::Ne, fs, Reason::Shape);
+            }
             Op::CheckShape(p, shape, fs) => {
                 let r = self.gpr(p, RAX);
                 let want = shape.as_ref().map_or(0, |s| s.id() as u64);

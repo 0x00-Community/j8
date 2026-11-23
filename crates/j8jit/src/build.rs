@@ -49,6 +49,18 @@ pub struct Built {
     pub codes: Vec<FuncId>,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct Direct {
+    native: u64,
+    index: u32,
+    arity: u8,
+    out: j8framework::FastOut,
+}
+
+pub(crate) fn directs_from(a: &j8framework::Agent<'_, '_>) -> Vec<Direct> {
+    a.realm.fast_builtins.get().iter().map(|(index, e)| Direct { native: e.native as usize as u64, index, arity: e.call.arity(), out: e.out }).collect()
+}
+
 #[derive(Debug)]
 pub enum Reject {
     Unsupported,
@@ -196,19 +208,20 @@ pub struct Builder<'e> {
     kind: Kind,
     root: FuncId,
     paths: &'e dyn Fn(bool, usize) -> Option<j8framework::StorePath>,
+    directs: &'e [Direct],
     log: bool,
 }
 
 type R<T> = Result<T, Reject>;
 
 impl<'e> Builder<'e> {
-    pub fn build(exe: &'e Executor, hints: &'e Hints, root: FuncId, kind: Kind, paths: &'e dyn Fn(bool, usize) -> Option<j8framework::StorePath>, log: bool) -> R<Built> {
+    pub fn build(exe: &'e Executor, hints: &'e Hints, root: FuncId, kind: Kind, paths: &'e dyn Fn(bool, usize) -> Option<j8framework::StorePath>, directs: &'e [Direct], log: bool) -> R<Built> {
         let mut widen = Widen::default();
         for round in 0..RESTARTS {
             if log && round > 0 {
                 std::eprintln!("j8jit: restart {round}");
             }
-            let mut b = Builder { exe, hints, g: Graph::default(), targets: Vec::new(), shapes: Vec::new(), keep: Vec::new(), codes: Vec::new(), cfgs: BTreeMap::new(), widen: widen.clone(), instances: 0, cur: None, undef: 0, restart: false, kind, root, paths, log };
+            let mut b = Builder { exe, hints, g: Graph::default(), targets: Vec::new(), shapes: Vec::new(), keep: Vec::new(), codes: Vec::new(), cfgs: BTreeMap::new(), widen: widen.clone(), instances: 0, cur: None, undef: 0, restart: false, kind, root, paths, directs, log };
             if let Err(e) = b.run() {
                 if log {
                     std::eprintln!("j8jit: rejected {e:?}");
@@ -1706,6 +1719,11 @@ impl<'e> Builder<'e> {
 
     #[expect(clippy::too_many_arguments, reason = "a call's parts")]
     fn call(&mut self, act: &mut Act<'e>, st: &mut St, callee: V, this: V, args: Vec<V>, fb: OperandValue, pc: usize) -> R<V> {
+        if self.hint(act.id, pc) & HINT_GENERIC == 0
+            && let Some(d) = self.known_direct(act, fb, args.len())
+        {
+            return Ok(self.direct_call(act, st, callee, this, args, d, pc));
+        }
         let target = self.known_target(act, st, callee, fb);
         if let Some(t) = target
             && self.hint(act.id, pc) & HINT_GENERIC == 0
@@ -1752,6 +1770,35 @@ impl<'e> Builder<'e> {
         let v = self.emit(Op::Call(Helper::Call, ins, Some(fs)), Rep::Word);
         Self::forget(st);
         Ok(v)
+    }
+
+    fn known_direct(&self, act: &Act<'e>, fb: OperandValue, arity: usize) -> Option<Direct> {
+        let native = u64::try_from(act.f.call_native(fb)?).ok()?;
+        let arity = u8::try_from(arity).ok()?;
+        self.directs.iter().copied().find(|d| d.native == native && d.arity == arity)
+    }
+
+    #[expect(clippy::too_many_arguments, reason = "a call's parts")]
+    fn direct_call(&mut self, act: &mut Act<'e>, st: &mut St, callee: V, this: V, args: Vec<V>, d: Direct, pc: usize) -> V {
+        let cw = self.real(st, callee);
+        self.guard_native(act, st, callee, d.native, pc);
+        let tw = self.real(st, this);
+        let mut ins = vec![cw, tw];
+        for a in args {
+            ins.push(self.real(st, a));
+        }
+        self.flush(st);
+        let fs = self.state(act, st, pc);
+        let h = Helper::Direct(d.index, d.out);
+        let v = self.emit(Op::Call(h, ins, Some(fs)), h.rep());
+        Self::forget(st);
+        v
+    }
+
+    fn guard_native(&mut self, act: &Act<'e>, st: &mut St, callee: V, native: u64, pc: usize) {
+        let p = self.object(act, st, callee, pc);
+        let fs = self.state(act, st, pc);
+        self.emit(Op::CheckNative(p, native, fs), Rep::None);
     }
 
     fn checked_callee(&mut self, act: &Act<'e>, st: &mut St, callee: V, t: FuncId, pc: usize) -> V {

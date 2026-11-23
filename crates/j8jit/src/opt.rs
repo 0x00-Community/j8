@@ -186,7 +186,7 @@ fn hoist(g: &mut Graph) {
 
 fn set_frame_state(op: &mut Op, to: crate::ir::Fs) {
     match op {
-        Op::UnboxInt(_, fs) | Op::UnboxFloat(_, fs) | Op::FloatToInt(_, fs) | Op::CheckObject(_, fs) | Op::CheckNotHole(_, fs) | Op::CheckNotLazy(_, fs) | Op::CheckFunc(_, _, fs) | Op::CheckShape(_, _, fs) | Op::Check(_, _, fs) => *fs = to,
+        Op::UnboxInt(_, fs) | Op::UnboxFloat(_, fs) | Op::FloatToInt(_, fs) | Op::CheckObject(_, fs) | Op::CheckNotHole(_, fs) | Op::CheckNotLazy(_, fs) | Op::CheckFunc(_, _, fs) | Op::CheckNative(_, _, fs) | Op::CheckShape(_, _, fs) | Op::Check(_, _, fs) => *fs = to,
         _ => {}
     }
 }

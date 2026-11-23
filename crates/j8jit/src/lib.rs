@@ -417,7 +417,8 @@ impl Jit {
         let hints = &st.hints;
         let (global, scope) = (a.realm.global, a.realm.script_scope);
         let paths = move |g: bool, i: usize| if g { global.get().props().store_path(i) } else { scope.get().props().store_path(i) };
-        let built = Builder::build(exe, hints, f, kind, &paths, self.debug.log).ok();
+        let directs = build::directs_from(a);
+        let built = Builder::build(exe, hints, f, kind, &paths, &directs, self.debug.log).ok();
         drop(st);
         let built = built?;
         let (deopt_base, helper_base) = {

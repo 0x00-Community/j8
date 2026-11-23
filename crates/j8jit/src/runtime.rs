@@ -173,8 +173,9 @@ fn dispatch(ctx: *mut Ctx, id: u64, a: u64, b: u64, c: u64, d: u64) -> u64 {
     }
     let ops = &buf[..n.min(ARGS_WORDS)];
     let (exe, a) = unsafe { ctx.parts() };
-    let r = helper(jit, exe, a, h, ops, ctx.epoch);
-    if !matches!(h, Helper::ModF | Helper::ToBoolean | Helper::StoreCell | Helper::Alloc(_) | Helper::CreateClosure(..) | Helper::CreateContext(..) | Helper::ObjectLiteral(..) | Helper::Constant(..) | Helper::GlobalProbe(_)) {
+    let mut keep = false;
+    let r = helper(jit, exe, a, h, ops, ctx.epoch, &mut keep);
+    if !keep && !matches!(h, Helper::ModF | Helper::ToBoolean | Helper::StoreCell | Helper::Alloc(_) | Helper::CreateClosure(..) | Helper::CreateContext(..) | Helper::ObjectLiteral(..) | Helper::Constant(..) | Helper::GlobalProbe(_)) {
         ctx.epoch = jit.bump();
     }
     if let (Helper::GlobalProbe(_), Ok(GLOBAL_MISS)) = (h, &r) {
@@ -189,7 +190,44 @@ fn dispatch(ctx: *mut Ctx, id: u64, a: u64, b: u64, c: u64, d: u64) -> u64 {
 
 const GLOBAL_MISS: u64 = u64::MAX;
 
-fn helper<'gc>(jit: &Jit, exe: &Executor, a: &mut Agent<'gc, '_>, h: Helper, ops: &[u64], epoch: u64) -> Result<u64, Error> {
+fn pack(out: j8framework::FastOut, v: Value<'_>) -> u64 {
+    match out {
+        j8framework::FastOut::Number => v.as_number().unwrap_or(f64::NAN).to_bits(),
+        j8framework::FastOut::Bool => u64::from(v.bits() == ValueBits::TRUE),
+        j8framework::FastOut::Value => v.bits(),
+    }
+}
+
+fn direct<'gc>(a: &mut Agent<'gc, '_>, index: u32, out: j8framework::FastOut, ops: &[u64], keep: &mut bool) -> Result<u64, Error> {
+    let v = |i: usize| unsafe { val::<'gc>(ops.get(i).copied().unwrap_or(ValueBits::UNDEFINED)) };
+    let this = v(1);
+    let callee = v(0).as_object().and_then(|o| o.native());
+    let entry = a.realm.fast_builtins.get().get(usize::try_from(index).unwrap_or(usize::MAX));
+    let call = entry.filter(|e| callee.is_some_and(|n| core::ptr::fn_addr_eq(n.f, e.native))).map(|e| e.call);
+    let got = match call {
+        Some(j8framework::FastCall::A0(f)) if ops.len() == 2 => f(a, this),
+        Some(j8framework::FastCall::A1(f)) if ops.len() == 3 => f(a, this, v(2)),
+        Some(j8framework::FastCall::A2(f)) if ops.len() == 4 => f(a, this, v(2), v(3)),
+        _ => None,
+    };
+    let value = match got {
+        Some(value) => {
+            *keep = true;
+            value
+        }
+        None => {
+            let mut args = [Value::Undefined; ARGS_WORDS];
+            let n = ops.len().saturating_sub(2);
+            for (i, x) in args.iter_mut().enumerate().take(n) {
+                *x = v(2 + i);
+            }
+            a.call(v(0), this, &args[..n])?
+        }
+    };
+    Ok(pack(out, value))
+}
+
+fn helper<'gc>(jit: &Jit, exe: &Executor, a: &mut Agent<'gc, '_>, h: Helper, ops: &[u64], epoch: u64, keep: &mut bool) -> Result<u64, Error> {
     let v = |i: usize| unsafe { val::<'gc>(ops.get(i).copied().unwrap_or(ValueBits::UNDEFINED)) };
     Ok(match h {
         Helper::Call => {
@@ -258,6 +296,7 @@ fn helper<'gc>(jit: &Jit, exe: &Executor, a: &mut Agent<'gc, '_>, h: Helper, ops
         Helper::InstanceOf => u64::from(a.instance_of(v(0), v(1))?),
         Helper::Compare(op) => u64::from(a.compare(op, v(0), v(1))?),
         Helper::StrictEquals => u64::from(a.compare(j8framework::CompareOp::StrictEq, v(0), v(1))?),
+        Helper::Direct(index, out) => return direct(a, index, out, ops, keep),
         Helper::Alloc(k) => {
             let shape = jit.shape(k);
             let proto = unsafe { val::<'gc>(ops[0] | OBJECT_TAG) }.as_object();
