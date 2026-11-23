@@ -147,7 +147,7 @@ j8bytecode = { version = "0.4.2", path = "crates/j8bytecode" }
 j8executor = { version = "0.4.2", path = "crates/j8executor" }
 j8compiler = { version = "0.4.2", path = "crates/j8compiler" }
 j8jit = { version = "0.4.2", path = "crates/j8jit" }
-mlirpass = { version = "0.13.1", default-features = false, features = ["std", "dialect.llvm"] }
+mlirpass = { version = "0.13.3", default-features = false, features = ["std", "dialect.llvm"] }
 libc = "0.2"
 region = "3"
 clear-cache = "0.1"

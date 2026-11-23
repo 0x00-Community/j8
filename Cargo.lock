@@ -487,9 +487,9 @@ dependencies = [
 
 [[package]]
 name = "mlirpass"
-version = "0.13.2"
+version = "0.13.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ecf533cceb91508176afe01f8e1e6f1c52ef17b4cd3de66e11bcb8e0c03e7d90"
+checksum = "577b4e8fe6cb88842456c14d9caa346f82e4ca038b86a4eea8ee341a648f3cba"
 dependencies = [
  "libm",
  "mlirformat",

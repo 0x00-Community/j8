@@ -1,13 +1,13 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::format;
 use std::string::{String, ToString};
 use std::vec::Vec;
 
-use mlirpass::mlirformat::llvm::{FCmpOp, FCmpPredicate, ICmpOp, ICmpPredicate};
+use mlirpass::mlirformat::llvm::{FCmpPredicate, ICmpPredicate};
 use mlirpass::mlirformat::llvm_types::LlvmType;
 use mlirpass::mlirformat::{Attribute, Error, FloatKind, Type};
 
-use mlirpass::{Attrs, Body, BlockId, Emit, Heads, OpId, ValueId};
+use mlirpass::{Attrs, Body, BlockId, Emit, Hole, HoleKind, OpId, Stencil, StencilEmit, ValueId};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct X86_64Code {
@@ -286,6 +286,52 @@ struct Lower<'b, 'a> {
     blocks: BTreeMap<BlockId, usize>,
     fixups: Vec<(usize, BlockId)>,
     relocs: Vec<X86_64Reloc>,
+    stencil: Option<Stenciled>,
+}
+
+#[derive(Default)]
+pub struct Stenciled {
+    holes: Vec<Hole>,
+    slots: BTreeMap<ValueId, String>,
+    ends: Vec<usize>,
+}
+
+impl Stenciled {
+    pub const SPILL_TOP: i32 = crate::asm::SAVED_END;
+    pub const SPILL_WORDS: i32 = 16;
+    const ATTR: &str = "stencil";
+    const HOLE: &str = "hole.";
+    const SLOT: &str = "slot.";
+    const JUMP: &str = "jump.";
+
+    fn callee<'s>(body: &'s Body<'_>, op: OpId) -> Option<&'s str> {
+        (body[op].name == "llvm.call").then(|| body[op].get("callee").and_then(|a| Attrs::as_symbol(a).ok())).flatten()
+    }
+
+    fn of(body: &Body<'_>, f: OpId) -> Option<Self> {
+        if !body[f].has_flag(Self::ATTR) {
+            return None;
+        }
+        let region = body[f].regions[0];
+        let frame = body[region].blocks.first().and_then(|b| body[*b].args.get(1).copied());
+        let mut me = Stenciled::default();
+        for &b in body[region].blocks.iter() {
+            for op in body.block_ops(b) {
+                let virt = match Self::callee(body, op) {
+                    Some(c) if c.starts_with(Self::SLOT) => Some(String::from(c)),
+                    _ => match (&*body[op].name, body[op].operands.first()) {
+                        ("llvm.add", Some(&a)) if Some(a) == frame => body[op].operands.get(1).and_then(|o| me.slots.get(o)).cloned(),
+                        ("llvm.inttoptr", Some(a)) => me.slots.get(a).cloned(),
+                        _ => None,
+                    },
+                };
+                if let (Some(name), Some(&r)) = (virt, body[op].results.first()) {
+                    me.slots.insert(r, name);
+                }
+            }
+        }
+        Some(me)
+    }
 }
 
 impl X86_64Code {
@@ -299,6 +345,7 @@ impl X86_64Code {
 
 impl<'b, 'a> Lower<'b, 'a> {
     fn new(body: &'b Body<'a>, f: OpId) -> Result<Self, Error> {
+        let stencil = Stenciled::of(body, f);
         let region = body[f].regions[0];
         let blocks: Vec<BlockId> = body[region].blocks.iter().copied().collect();
         let mut widest_copy = 0usize;
@@ -310,9 +357,20 @@ impl<'b, 'a> Lower<'b, 'a> {
                 widest_copy = widest_copy.max(body[op].operands.len());
             }
         }
-        let intervals = Self::intervals(body, &blocks)?;
-        let (mut slots, used) = Self::allocate(&intervals);
-        let mut next = 0i32;
+        let mut intervals = Self::intervals(body, &blocks)?;
+        let mut fixed = BTreeMap::new();
+        if let Some(st) = &stencil {
+            let args = &body[blocks[0]].args;
+            if args.len() != 2 {
+                return Err(Error("a stencil takes the context and the frame".into()));
+            }
+            fixed.insert(args[0], Loc::Gpr(Gpr::R15));
+            fixed.insert(args[1], Loc::Gpr(Gpr::Rbp));
+            intervals.retain(|iv| !st.slots.contains_key(&iv.value) && !fixed.contains_key(&iv.value));
+        }
+        let (mut slots, used) = Self::allocate(&intervals, stencil.is_some());
+        slots.extend(fixed);
+        let mut next = if stencil.is_some() { Stenciled::SPILL_TOP } else { 0 };
         let mut saved = Vec::new();
         for r in used {
             next -= 8;
@@ -324,56 +382,95 @@ impl<'b, 'a> Lower<'b, 'a> {
                 e.insert(Loc::Slot(next));
             }
         }
+        if stencil.is_some() && next < Stenciled::SPILL_TOP - 8 * Stenciled::SPILL_WORDS {
+            return Err(Error("a stencil spills more than its words".into()));
+        }
         let scratch = next - 8 * i32::try_from(widest_copy).unwrap_or(0);
         let frame = (-scratch + 15) & !15;
-        Ok(Lower { body, asm: Asm::default(), slots, saved, scratch, frame, blocks: BTreeMap::new(), fixups: Vec::new(), relocs: Vec::new() })
+        Ok(Lower { body, asm: Asm::default(), slots, saved, scratch, frame, blocks: BTreeMap::new(), fixups: Vec::new(), relocs: Vec::new(), stencil })
     }
 
     fn intervals(body: &Body<'_>, blocks: &[BlockId]) -> Result<Vec<Interval>, Error> {
-        use std::collections::BTreeSet;
-        let mut pos = 0u32;
-        let (mut start, mut end) = (BTreeMap::new(), BTreeMap::new());
-        let mut def: BTreeMap<ValueId, u32> = BTreeMap::new();
-        let mut last_use: BTreeMap<ValueId, u32> = BTreeMap::new();
+        let mut index: HashMap<ValueId, u32> = HashMap::new();
+        let mut values: Vec<ValueId> = Vec::new();
+        let mut def: Vec<u32> = Vec::new();
+        let mut used: Vec<u32> = Vec::new();
+        let block_at: HashMap<BlockId, usize> = blocks.iter().enumerate().map(|(i, &b)| (b, i)).collect();
+        let (mut start, mut end) = (std::vec![0u32; blocks.len()], std::vec![0u32; blocks.len()]);
         let mut calls = Vec::new();
-        let mut gen_kill: Vec<(BTreeSet<ValueId>, BTreeSet<ValueId>, Vec<BlockId>)> = Vec::new();
-        for &b in blocks {
-            start.insert(b, pos);
-            let (mut gen_, mut kill) = (BTreeSet::new(), BTreeSet::new());
+        let mut uses: Vec<Vec<u32>> = std::vec![Vec::new(); blocks.len()];
+        let mut defs: Vec<Vec<u32>> = std::vec![Vec::new(); blocks.len()];
+        let mut succs: Vec<Vec<usize>> = std::vec![Vec::new(); blocks.len()];
+        let mut pos = 0u32;
+        let define = |v: ValueId, at: u32, index: &mut HashMap<ValueId, u32>, values: &mut Vec<ValueId>, def: &mut Vec<u32>, used: &mut Vec<u32>| -> u32 {
+            let k = u32::try_from(values.len()).unwrap_or(u32::MAX);
+            index.insert(v, k);
+            values.push(v);
+            def.push(at);
+            used.push(at);
+            k
+        };
+        for (bi, &b) in blocks.iter().enumerate() {
+            start[bi] = pos;
             for &a in body[b].args.iter() {
-                def.insert(a, pos);
-                kill.insert(a);
+                let k = define(a, pos, &mut index, &mut values, &mut def, &mut used);
+                defs[bi].push(k);
             }
-            let mut succ = Vec::new();
             for op in body.block_ops(b) {
                 pos += 1;
-                for &v in body[op].operands.iter() {
-                    last_use.insert(v, pos);
-                    if !kill.contains(&v) {
-                        gen_.insert(v);
-                    }
-                }
                 for &r in body[op].results.iter() {
-                    def.insert(r, pos);
-                    kill.insert(r);
+                    let k = define(r, pos, &mut index, &mut values, &mut def, &mut used);
+                    defs[bi].push(k);
                 }
                 if body[op].name == "llvm.call" {
                     calls.push(pos);
                 }
-                succ = body[op].successors.iter().copied().collect();
+                succs[bi] = body[op].successors.iter().filter_map(|s| block_at.get(s).copied()).collect();
             }
-            end.insert(b, pos);
+            end[bi] = pos;
             pos += 1;
-            gen_kill.push((gen_, kill, succ));
         }
-        let index: BTreeMap<BlockId, usize> = blocks.iter().enumerate().map(|(i, &b)| (b, i)).collect();
-        let mut live_in: Vec<BTreeSet<ValueId>> = std::vec![BTreeSet::new(); blocks.len()];
-        let mut live_out: Vec<BTreeSet<ValueId>> = std::vec![BTreeSet::new(); blocks.len()];
+        let mut seen = std::vec![u32::MAX; values.len()];
+        for (bi, &b) in blocks.iter().enumerate() {
+            let mut at = start[bi];
+            for &k in &defs[bi] {
+                seen[k as usize] = u32::try_from(bi).unwrap_or(u32::MAX);
+            }
+            for op in body.block_ops(b) {
+                at += 1;
+                for &v in body[op].operands.iter() {
+                    let k = *index.get(&v).ok_or_else(|| Error("a value defined outside the function".into()))?;
+                    used[k as usize] = used[k as usize].max(at);
+                    let local = seen[k as usize] == u32::try_from(bi).unwrap_or(u32::MAX) && def[k as usize] < at;
+                    if !local {
+                        uses[bi].push(k);
+                    }
+                }
+            }
+        }
+        let n = values.len();
+        let words = n.div_ceil(64);
+        let bits = |list: &[u32]| {
+            let mut w = std::vec![0u64; words];
+            for &k in list {
+                w[k as usize / 64] |= 1 << (k % 64);
+            }
+            w
+        };
+        let gen_: Vec<Vec<u64>> = uses.iter().map(|u| bits(u)).collect();
+        let kill: Vec<Vec<u64>> = defs.iter().map(|d| bits(d)).collect();
+        let mut live_in = std::vec![std::vec![0u64; words]; blocks.len()];
+        let mut live_out = std::vec![std::vec![0u64; words]; blocks.len()];
         loop {
             let mut changed = false;
             for i in (0..blocks.len()).rev() {
-                let out: BTreeSet<ValueId> = gen_kill[i].2.iter().filter_map(|s| index.get(s)).flat_map(|&j| live_in[j].iter().copied()).collect();
-                let inn: BTreeSet<ValueId> = gen_kill[i].0.iter().copied().chain(out.iter().filter(|v| !gen_kill[i].1.contains(v)).copied()).collect();
+                let mut out = std::vec![0u64; words];
+                for &s in &succs[i] {
+                    for (o, x) in out.iter_mut().zip(&live_in[s]) {
+                        *o |= *x;
+                    }
+                }
+                let inn: Vec<u64> = gen_[i].iter().zip(&out).zip(&kill[i]).map(|((g, o), k)| g | (o & !k)).collect();
                 if out != live_out[i] || inn != live_in[i] {
                     changed = true;
                     live_out[i] = out;
@@ -384,27 +481,37 @@ impl<'b, 'a> Lower<'b, 'a> {
                 break;
             }
         }
-        let mut out = Vec::new();
-        for (&value, &d) in &def {
-            let (mut lo, mut hi) = (d, last_use.get(&value).copied().unwrap_or(d).max(d));
-            for (i, &b) in blocks.iter().enumerate() {
-                if live_in[i].contains(&value) {
-                    lo = lo.min(start[&b]);
-                    hi = hi.max(start[&b]);
+        let (mut lo, mut hi): (Vec<u32>, Vec<u32>) = (def.clone(), def.iter().zip(&used).map(|(d, u)| (*d).max(*u)).collect());
+        for i in 0..blocks.len() {
+            for (wi, (&li, &lo_)) in live_in[i].iter().zip(&live_out[i]).enumerate() {
+                let mut w = li;
+                while w != 0 {
+                    let k = wi * 64 + w.trailing_zeros() as usize;
+                    w &= w - 1;
+                    lo[k] = lo[k].min(start[i]);
+                    hi[k] = hi[k].max(start[i]);
                 }
-                if live_out[i].contains(&value) {
-                    hi = hi.max(end[&b]);
+                let mut w = lo_;
+                while w != 0 {
+                    let k = wi * 64 + w.trailing_zeros() as usize;
+                    w &= w - 1;
+                    hi[k] = hi[k].max(end[i]);
                 }
             }
-            let float = matches!(Kind::of(&body[value].ty)?, Kind::F64);
-            let across_call = calls.iter().any(|&c| lo < c && c < hi);
-            out.push(Interval { value, lo, hi, float, across_call });
+        }
+        let mut out = Vec::with_capacity(n);
+        for (k, &value) in values.iter().enumerate() {
+            let kind = Kind::of(&body[value].ty)?;
+            let float = kind == Kind::F64;
+            let first = calls.partition_point(|&c| c <= lo[k]);
+            let across_call = calls.get(first).is_some_and(|&c| c < hi[k]);
+            out.push(Interval { value, lo: lo[k], hi: hi[k], float, across_call });
         }
         out.sort_by_key(|iv| (iv.lo, iv.hi));
         Ok(out)
     }
 
-    fn allocate(intervals: &[Interval]) -> (BTreeMap<ValueId, Loc>, Vec<Gpr>) {
+    fn allocate(intervals: &[Interval], stencil: bool) -> (BTreeMap<ValueId, Loc>, Vec<Gpr>) {
         let mut locs = BTreeMap::new();
         let mut active: Vec<(u32, Loc)> = Vec::new();
         let mut used: Vec<Gpr> = Vec::new();
@@ -415,10 +522,11 @@ impl<'b, 'a> Lower<'b, 'a> {
                 if iv.across_call { None } else { Pool::XMM.iter().map(|&x| Loc::Xmm(x)).find(|&l| !busy(l)) }
             } else {
                 let scratch = (!iv.across_call).then_some(Pool::SCRATCH.iter()).into_iter().flatten();
-                scratch.chain(Pool::SAVED.iter()).map(|&r| Loc::Gpr(r)).find(|&l| !busy(l))
+                scratch.chain(Pool::SAVED.iter()).filter(|&&r| !stencil || r != Gpr::R15).map(|&r| Loc::Gpr(r)).find(|&l| !busy(l))
             };
             if let Some(l) = pick {
                 if let Loc::Gpr(r) = l
+                    && !stencil
                     && Pool::SAVED.contains(&r)
                     && !used.contains(&r)
                 {
@@ -486,6 +594,9 @@ impl<'b, 'a> Lower<'b, 'a> {
         let body = self.body;
         let region = body[f].regions[0];
         let blocks: Vec<BlockId> = body[region].blocks.iter().copied().collect();
+        if self.stencil.is_some() {
+            return self.stencil_body(&blocks);
+        }
         self.asm.byte(0x55);
         self.asm.mov_rr(Gpr::Rbp, Gpr::Rsp);
         #[cfg(all(windows, target_arch = "x86_64"))]
@@ -531,6 +642,42 @@ impl<'b, 'a> Lower<'b, 'a> {
         Ok(())
     }
 
+    fn stencil_body(&mut self, blocks: &[BlockId]) -> Result<(), Error> {
+        let body = self.body;
+        for &block in blocks {
+            self.blocks.insert(block, self.asm.here());
+            for op in body.block_ops(block) {
+                self.op(op)?;
+            }
+        }
+        for (at, block) in core::mem::take(&mut self.fixups) {
+            let target = self.blocks[&block];
+            self.asm.patch(at, target);
+        }
+        let mut ends = core::mem::take(&mut self.stencil.as_mut().expect("a stencil").ends);
+        if let Some(last) = ends.iter().position(|&at| at + 4 == self.asm.here()) {
+            let at = ends.swap_remove(last);
+            self.asm.bytes.truncate(at - 1);
+        }
+        let end = self.asm.here();
+        for at in ends {
+            self.asm.patch(at, end);
+        }
+        Ok(())
+    }
+
+    fn frame_slot(&self, v: ValueId) -> Option<String> {
+        self.stencil.as_ref().and_then(|st| st.slots.get(&v).cloned())
+    }
+
+    fn hole(&mut self, kind: HoleKind, name: String) {
+        let width = if kind == HoleKind::Abs64 { 8 } else { 4 };
+        let at = self.asm.here() - width;
+        if let Some(st) = self.stencil.as_mut() {
+            st.holes.push(Hole { at, kind, name });
+        }
+    }
+
     fn operand(&self, op: OpId, i: usize) -> Result<ValueId, Error> {
         self.body[op].operands.get(i).copied().ok_or_else(|| Error(format!("{} needs operand {i}", self.body[op].name)))
     }
@@ -567,6 +714,11 @@ impl<'b, 'a> Lower<'b, 'a> {
 
     fn op(&mut self, op: OpId) -> Result<(), Error> {
         let body = self.body;
+        if let Some(&r) = body[op].results.first()
+            && self.frame_slot(r).is_some()
+        {
+            return Ok(());
+        }
         let name: &str = &body[op].name;
         match name {
             "llvm.mlir.constant" => self.constant(op),
@@ -592,11 +744,18 @@ impl<'b, 'a> Lower<'b, 'a> {
             "llvm.store" => self.store(op),
             "llvm.getelementptr" => self.gep(op),
             "llvm.call" => self.call(op),
+            "llvm.intr.stacksave" => {
+                let (_, at) = self.result(op)?;
+                self.put64(at, Gpr::Rsp);
+                Ok(())
+            }
             "llvm.br" => self.branch(op),
             "llvm.cond_br" => self.cond_branch(op),
             "llvm.return" => self.ret(op),
             "llvm.unreachable" => {
-                self.asm.bytes(&[0x0f, 0x0b]);
+                if self.stencil.is_none() {
+                    self.asm.bytes(&[0x0f, 0x0b]);
+                }
                 Ok(())
             }
             other => Err(Error(format!("{other} is not supported"))),
@@ -608,7 +767,10 @@ impl<'b, 'a> Lower<'b, 'a> {
         let value = self.body[op].get("value").ok_or_else(|| Error("llvm.mlir.constant without a value".into()))?;
         let bits: u64 = match (value, self.kind(r)?) {
             (Attribute::Bool(b), _) => u64::from(*b),
-            (Attribute::Float { lit, .. }, Kind::F64) => lit.parse::<f64>().map_err(|_| Error(format!("bad float {lit}")))?.to_bits(),
+            (Attribute::Float { lit, .. }, Kind::F64) => match lit.strip_prefix("0x").or_else(|| lit.strip_prefix("0X")) {
+                Some(h) => u64::from_str_radix(h, 16).map_err(|_| Error(format!("bad float {lit}")))?,
+                None => lit.parse::<f64>().map_err(|_| Error(format!("bad float {lit}")))?.to_bits(),
+            },
             (Attribute::Int { lit, .. }, _) => match lit.strip_prefix("0x") {
                 Some(h) => u64::from_str_radix(h, 16).map_err(|_| Error(format!("bad integer {lit}")))?,
                 None => Attrs::as_int(value)?.cast_unsigned(),
@@ -677,7 +839,7 @@ impl<'b, 'a> Lower<'b, 'a> {
 
     fn icmp(&mut self, op: OpId) -> Result<(), Error> {
         let (_, at) = self.result(op)?;
-        let pred = self.body.head::<ICmpOp>(op)?.predicate;
+        let pred = ICmpPredicate::of(self.predicate(op)?)?;
         let signed = matches!(pred, ICmpPredicate::Slt | ICmpPredicate::Sle | ICmpPredicate::Sgt | ICmpPredicate::Sge);
         self.int(Gpr::Rax, self.operand(op, 0)?, signed)?;
         self.int(Gpr::Rcx, self.operand(op, 1)?, signed)?;
@@ -697,6 +859,13 @@ impl<'b, 'a> Lower<'b, 'a> {
         self.asm.setcc(cc);
         self.put_int(at, 1);
         Ok(())
+    }
+
+    fn predicate(&self, op: OpId) -> Result<i64, Error> {
+        match self.body[op].get("predicate") {
+            Some(a @ Attribute::Int { .. }) => Attrs::as_int(a),
+            _ => Err(Error(format!("{} without a predicate", self.body[op].name))),
+        }
     }
 
     fn floats(&mut self, a: ValueId, b: ValueId) -> Result<(), Error> {
@@ -732,7 +901,7 @@ impl<'b, 'a> Lower<'b, 'a> {
 
     fn fcmp(&mut self, op: OpId) -> Result<(), Error> {
         let (_, at) = self.result(op)?;
-        let pred = self.body.head::<FCmpOp>(op)?.predicate;
+        let pred = FCmpPredicate::of(self.predicate(op)?)?;
         let (a, b) = (self.operand(op, 0)?, self.operand(op, 1)?);
         let (swap, cc, extra) = match pred {
             FCmpPredicate::False => (false, None, None),
@@ -822,11 +991,22 @@ impl<'b, 'a> Lower<'b, 'a> {
 
     fn load(&mut self, op: OpId) -> Result<(), Error> {
         let (r, at) = self.result(op)?;
-        let ptr = self.slot(self.operand(op, 0)?)?;
-        self.get64(Gpr::Rcx, ptr);
+        let addr = self.operand(op, 0)?;
+        let frame = self.frame_slot(addr);
+        let base = match &frame {
+            Some(_) => Gpr::Rbp,
+            None => {
+                let ptr = self.slot(addr)?;
+                self.get64(Gpr::Rcx, ptr);
+                Gpr::Rcx
+            }
+        };
         match self.kind(r)? {
-            Kind::Int(bits) => self.asm.load_int(Gpr::Rax, Gpr::Rcx, 0, bits.max(8).next_power_of_two(), false),
-            Kind::F64 => self.asm.load64(Gpr::Rax, Gpr::Rcx, 0),
+            Kind::Int(bits) => self.asm.load_int(Gpr::Rax, base, 0, bits.max(8).next_power_of_two(), false),
+            Kind::F64 => self.asm.load64(Gpr::Rax, base, 0),
+        }
+        if let Some(name) = frame {
+            self.hole(HoleKind::Disp32, name);
         }
         self.put64(at, Gpr::Rax);
         Ok(())
@@ -835,10 +1015,19 @@ impl<'b, 'a> Lower<'b, 'a> {
     fn store(&mut self, op: OpId) -> Result<(), Error> {
         let (v, p) = (self.operand(op, 0)?, self.operand(op, 1)?);
         let bytes = Kind::size(&self.body[v].ty)?;
-        let (sv, sp) = (self.slot(v)?, self.slot(p)?);
+        let sv = self.slot(v)?;
         self.get64(Gpr::Rax, sv);
-        self.get64(Gpr::Rcx, sp);
-        self.asm.store_int(Gpr::Rcx, 0, Gpr::Rax, bytes);
+        match self.frame_slot(p) {
+            Some(name) => {
+                self.asm.store_int(Gpr::Rbp, 0, Gpr::Rax, bytes);
+                self.hole(HoleKind::Disp32, name);
+            }
+            None => {
+                let sp = self.slot(p)?;
+                self.get64(Gpr::Rcx, sp);
+                self.asm.store_int(Gpr::Rcx, 0, Gpr::Rax, bytes);
+            }
+        }
         Ok(())
     }
 
@@ -874,6 +1063,23 @@ impl<'b, 'a> Lower<'b, 'a> {
             Some(a) => Attrs::as_symbol(a)?.to_string(),
             None => return Err(Error("an indirect call is not supported".into())),
         };
+        if self.stencil.is_some() {
+            if callee.starts_with(Stenciled::SLOT) {
+                return Ok(());
+            }
+            if callee.starts_with(Stenciled::JUMP) {
+                self.asm.jump(None);
+                self.hole(HoleKind::Rel32, callee);
+                return Ok(());
+            }
+            if callee.starts_with(Stenciled::HOLE) {
+                let (_, at) = self.result(op)?;
+                self.asm.mov_imm64(Gpr::Rax, 0);
+                self.hole(HoleKind::Abs64, callee);
+                self.put64(at, Gpr::Rax);
+                return Ok(());
+            }
+        }
         let (mut ints, mut floats) = (0usize, 0u8);
         let args: Vec<ValueId> = self.body[op].operands.iter().copied().collect();
         for v in args {
@@ -892,7 +1098,11 @@ impl<'b, 'a> Lower<'b, 'a> {
             }
         }
         let offset = self.asm.mov_imm64(Gpr::Rax, 0);
-        self.relocs.push(X86_64Reloc { offset, symbol: callee });
+        if self.stencil.is_some() {
+            self.hole(HoleKind::Abs64, callee);
+        } else {
+            self.relocs.push(X86_64Reloc { offset, symbol: callee });
+        }
         self.asm.bytes(&[0xff, 0xd0]);
         if let Some(&r) = self.body[op].results.first() {
             let at = self.slot(r)?;
@@ -906,6 +1116,9 @@ impl<'b, 'a> Lower<'b, 'a> {
 
     fn pass(&mut self, values: &[ValueId], to: BlockId) -> Result<(), Error> {
         let args: Vec<ValueId> = self.body[to].args.iter().copied().collect();
+        if self.stencil.is_some() && !values.is_empty() {
+            return Err(Error("a stencil passes no block arguments".into()));
+        }
         if args.len() != values.len() {
             return Err(Error("a jump with the wrong number of block arguments".into()));
         }
@@ -958,6 +1171,13 @@ impl<'b, 'a> Lower<'b, 'a> {
     }
 
     fn ret(&mut self, op: OpId) -> Result<(), Error> {
+        if let Some(st) = self.stencil.as_mut() {
+            if !self.body[op].operands.is_empty() {
+                return Err(Error("a stencil returns nothing".into()));
+            }
+            st.ends.push(self.asm.jump(None));
+            return Ok(());
+        }
         if let Some(&v) = self.body[op].operands.first() {
             let at = self.slot(v)?;
             match self.kind(v)? {
@@ -976,8 +1196,45 @@ impl From<X86_64Code> for crate::MachineCode {
     }
 }
 
+impl StencilEmit for X86_64Emit {
+    fn stencils(&self, body: &Body<'_>, root: OpId) -> Result<Vec<Stencil>, Error> {
+        let mut out = Vec::new();
+        for &region in body[root].regions.iter() {
+            for &block in body[region].blocks.iter() {
+                for f in body.block_ops(block) {
+                    if body[f].name != "llvm.func" || !body[f].has_flag(Stenciled::ATTR) {
+                        continue;
+                    }
+                    let name = body[f].get_str("sym_name").ok_or_else(|| Error("x86-64: a stencil without a name".into()))?.to_string();
+                    let mut lower = Lower::new(body, f).map_err(|e| Error(format!("x86-64: stencil @{name}: {}", e.0)))?;
+                    lower.function(f).map_err(|e| Error(format!("x86-64: stencil @{name}: {}", e.0)))?;
+                    let holes = lower.stencil.map(|st| st.holes).unwrap_or_default();
+                    out.push(Stencil { name, code: lower.asm.bytes, holes });
+                }
+            }
+        }
+        Ok(out)
+    }
+}
+
 impl crate::Backend for X86_64Emit {
     fn emit(&self, body: &Body<'_>, root: OpId) -> Result<Vec<crate::MachineCode>, Error> {
         Emit::emit(self, body, root).map(|codes| codes.into_iter().map(Into::into).collect())
     }
+}
+
+trait Predicate: Sized + Copy + 'static {
+    const ALL: &'static [Self];
+
+    fn of(i: i64) -> Result<Self, Error> {
+        usize::try_from(i).ok().and_then(|i| Self::ALL.get(i)).copied().ok_or_else(|| Error(format!("predicate {i} out of range")))
+    }
+}
+
+impl Predicate for ICmpPredicate {
+    const ALL: &'static [Self] = &[ICmpPredicate::Eq, ICmpPredicate::Ne, ICmpPredicate::Slt, ICmpPredicate::Sle, ICmpPredicate::Sgt, ICmpPredicate::Sge, ICmpPredicate::Ult, ICmpPredicate::Ule, ICmpPredicate::Ugt, ICmpPredicate::Uge];
+}
+
+impl Predicate for FCmpPredicate {
+    const ALL: &'static [Self] = &[FCmpPredicate::False, FCmpPredicate::Oeq, FCmpPredicate::Ogt, FCmpPredicate::Oge, FCmpPredicate::Olt, FCmpPredicate::Ole, FCmpPredicate::One, FCmpPredicate::Ord, FCmpPredicate::Ueq, FCmpPredicate::Ugt, FCmpPredicate::Uge, FCmpPredicate::Ult, FCmpPredicate::Ule, FCmpPredicate::Une, FCmpPredicate::Uno, FCmpPredicate::True];
 }
