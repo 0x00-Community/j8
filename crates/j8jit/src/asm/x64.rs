@@ -22,6 +22,10 @@ impl Asm {
         self.labels[l as usize] = Some(self.bytes.len());
     }
 
+    pub fn at(&self, l: Label) -> Option<usize> {
+        self.labels.get(l as usize).copied().flatten()
+    }
+
     pub fn here(&self) -> usize {
         self.bytes.len()
     }

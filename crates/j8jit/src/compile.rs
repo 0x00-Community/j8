@@ -1,7 +1,7 @@
 use alloc::vec::Vec;
 
 use mlirpass::mlirformat::MlirOpt;
-use mlirpass::{Body, Ctx, Interfaces, PassManager, Passes};
+use mlirpass::{Body, Ctx, Interfaces, PassManager, Passes, StencilEmit, Stencils};
 
 pub struct MachineCode {
     pub name: alloc::string::String,
@@ -16,6 +16,12 @@ pub trait Backend: Sync {
 #[derive(Clone, Debug)]
 pub enum CompileError {
     Backend(alloc::string::String),
+}
+
+impl From<mlirpass::mlirformat::Error> for CompileError {
+    fn from(e: mlirpass::mlirformat::Error) -> Self {
+        CompileError::Backend(e.0)
+    }
 }
 
 pub struct Compiler {
@@ -39,13 +45,16 @@ impl Default for Compiler {
 }
 
 impl Compiler {
-    const PIPELINE: &str = "builtin.module(llvm.func(mem2reg, canonicalize, cse))";
+    const PIPELINE: &str = "builtin.module(llvm.func(canonicalize, cse))";
 
     pub fn emit(&self, mlir: &str, backend: &dyn Backend) -> Result<Vec<MachineCode>, CompileError> {
-        let failed = |e: mlirpass::mlirformat::Error| CompileError::Backend(e.0);
-        let mut body = Body::parse(Ctx::new(&self.opt, &self.interfaces), mlir).map_err(failed)?;
+        let mut body = Body::parse(Ctx::new(&self.opt, &self.interfaces), mlir)?;
         let root = body.root;
-        self.pipeline.run_on(&mut body, root, &moremath::ThreadSingle).map_err(failed)?;
-        backend.emit(&body, body.root).map_err(failed)
+        self.pipeline.run_on(&mut body, root, &moremath::ThreadSingle)?;
+        Ok(backend.emit(&body, body.root)?)
+    }
+
+    pub fn stencils(&self, templates: &str, emit: &dyn StencilEmit) -> Result<Stencils, CompileError> {
+        Ok(Stencils::compile(Ctx::new(&self.opt, &self.interfaces), templates, &self.pipeline, emit)?)
     }
 }

@@ -3,13 +3,18 @@
 **English** · [简体中文](README.zh-CN.md)
 
 The JIT of [j8](https://github.com/0x00-Community/j8) (x86-64 Unix and Windows, AArch64 Linux). It owns bytecode ⇒ machine code and the JIT
-scheduling itself: it implements the executor's `Tier`; hot functions and hot loops are lowered to MLIR (`llvm` dialect,
-via [mlirpass](https://crates.io/crates/mlirpass)), emitted by the x86-64 backend (`x86_64.rs`), loaded into executable
-memory and run in place of interpretation.
+scheduling itself: it implements the executor's `Tier`; hot functions and hot loops are built into a speculative SSA graph
+(`build.rs`), which becomes machine code in one of two ways, is loaded into executable memory and runs in place of interpretation.
 
 ```text
-j8bytecode::Function ─ Lower ─▶ MLIR (llvm dialect) ─ Backend (x86-64) ─▶ machine code + addresses to patch
+j8bytecode::Function ─ build ─▶ graph ─┬─ codegen.rs ──────────────────────────────▶ machine code (default; x86-64, AArch64)
+                                       └─ stitch.rs: copy stencils, patch holes ─▶ machine code (J8_JIT_MLIR=1; x86-64)
+templates (one per graph instruction) ─ mlirpass pipeline + x86_64.rs, once per process ─▶ stencils
 ```
+
+The stitched path is the [mlirpass](https://crates.io/crates/mlirpass) fast path (`Stencils`): every template goes through
+the pipeline and the x86-64 backend once, the first time the JIT is used; a function is then compiled by copying stencils
+and filling their holes (frame slots, constants, jumps to deoptimization exits), with no MLIR built per function.
 
 ```text
 calls / iterations below the threshold  ⇒ count, interpret as usual
@@ -26,8 +31,7 @@ use std::rc::Rc;
 let executor = j8executor::Executor::default().with_tier(Rc::new(j8jit::Jit::default()));
 ```
 
-`Jit::from(n)` sets the call threshold (`Jit::THRESHOLD` = 100 by default; loops take `LOOP_FACTOR` times as many
-iterations; 0 compiles every function on its first call). `dune --jit` and `J8_TEST262_JIT=1` turn it on.
+`Jit::from(n)` sets the call threshold (`Jit::THRESHOLD` = 64 by default; 0 compiles every function on its first call). `dune --jit` and `J8_TEST262_JIT=1` turn it on.
 
 ## License
 

@@ -25,6 +25,7 @@ mod codegen;
 mod compile;
 mod helper;
 mod ir;
+mod stitch;
 mod opt;
 mod runtime;
 mod x86_64;
@@ -129,6 +130,7 @@ pub struct Jit {
     floor: core::cell::Cell<u64>,
     epoch: core::cell::Cell<u64>,
     st: RefCell<State>,
+    stencils: core::cell::OnceCell<Option<stitch::Table>>,
 }
 
 impl Default for Jit {
@@ -139,19 +141,20 @@ impl Default for Jit {
 
 impl From<u32> for Jit {
     fn from(threshold: u32) -> Self {
-        Self { threshold, debug: Debug::from_env(), ctx: core::cell::Cell::new(None), ctxs: RefCell::new(Vec::new()), floor: core::cell::Cell::new(0), epoch: core::cell::Cell::new(1), st: RefCell::new(State::default()) }
+        Self { threshold, debug: Debug::from_env(), ctx: core::cell::Cell::new(None), ctxs: RefCell::new(Vec::new()), floor: core::cell::Cell::new(0), epoch: core::cell::Cell::new(1), st: RefCell::new(State::default()), stencils: core::cell::OnceCell::new() }
     }
 }
 
 struct Debug {
     log: bool,
     ir: bool,
+    mlir: bool,
     bin: Option<std::ffi::OsString>,
 }
 
 impl Debug {
     fn from_env() -> Self {
-        Debug { log: std::env::var_os("J8_JIT_LOG").is_some(), ir: std::env::var_os("J8_JIT_IR").is_some(), bin: std::env::var_os("J8_JIT_BIN") }
+        Debug { log: std::env::var_os("J8_JIT_LOG").is_some(), ir: std::env::var_os("J8_JIT_IR").is_some(), mlir: std::env::var_os("J8_JIT_MLIR").is_some(), bin: std::env::var_os("J8_JIT_BIN") }
     }
 }
 
@@ -401,7 +404,7 @@ impl Jit {
         let mut all_addrs = alloc::vec![0u64; site_base as usize];
         all_addrs.extend(addrs);
         let mut built = build::Built { graph, ..built };
-        let generated = codegen::Gen::generate(&built.graph, kind, deopt_base, helper_base, &all_addrs);
+        let generated = self.through_mlir(&built.graph, kind, deopt_base, helper_base, &all_addrs).unwrap_or_else(|| codegen::Gen::generate(&built.graph, kind, deopt_base, helper_base, &all_addrs));
         if self.debug.log {
             std::eprintln!("j8jit: {f:?} {kind:?}: {} insts, {} bytes, build {t_build:?} total {:?}", built.graph.insts.len(), generated.bytes.len(), t0.elapsed());
         }
@@ -462,6 +465,34 @@ impl Jit {
             std::eprintln!("j8jit: installed {f:?} {kind:?} at {:?}", t0.elapsed());
         }
         Some(addr)
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    fn through_mlir(&self, g: &ir::Graph, kind: Kind, deopt_base: u32, helper_base: u32, globals: &[u64]) -> Option<codegen::Generated> {
+        if !self.debug.mlir {
+            return None;
+        }
+        let table = self.stencils.get_or_init(|| match stitch::Table::compile(&Compiler::default()) {
+            Ok(t) => Some(t),
+            Err(e) => {
+                std::eprintln!("j8jit: the stencils did not compile: {e:?}");
+                None
+            }
+        });
+        match stitch::Stitch::stitch(g, kind, deopt_base, helper_base, globals, table.as_ref()?) {
+            Ok(g) => Some(g),
+            Err(e) => {
+                if self.debug.log {
+                    std::eprintln!("j8jit: stitching failed, direct code instead: {}", e.0);
+                }
+                None
+            }
+        }
+    }
+
+    #[cfg(not(target_arch = "x86_64"))]
+    fn through_mlir(&self, _: &ir::Graph, _: Kind, _: u32, _: u32, _: &[u64]) -> Option<codegen::Generated> {
+        None
     }
 
     fn run_native(&self, e: &mut Entry<'_, '_, '_, '_>, addr: usize, ret: usize) -> Tiered {
