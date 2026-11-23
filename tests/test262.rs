@@ -258,6 +258,7 @@ impl Case {
                 (Err(Error::Syntax(_)), Some(n)) if n.phase != Phase::Runtime && n.kind == ErrorType::SyntaxError => (Outcome::Pass, String::new()),
                 (Err(Error::Syntax(m)), _) => (Outcome::Fail, format!("syntax error: {m}")),
                 (Err(Error::Terminated), _) => (Outcome::Fail, String::from("execution terminated")),
+                (Err(Error::Parked(_)), _) => (Outcome::Fail, String::from("a parked exception reached the script")),
                 (Err(Error::Exception), n) => {
                     let v = agent.take_exception();
                     let name = agent.get_named(v, "constructor").and_then(|c| agent.get_named(c, "name")).and_then(|n| agent.to_string(n));

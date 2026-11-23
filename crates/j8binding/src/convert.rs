@@ -176,7 +176,11 @@ impl<'scope, T: IntoJs<'scope>> IntoJs<'scope> for Vec<T> {
 
 impl<'scope, T: IntoJs<'scope>> IntoJs<'scope> for Result<T, Error> {
     fn into_js(self, a: &mut Agent<'scope, '_>) -> Result<Value<'scope>, Error> {
-        self?.into_js(a)
+        match self {
+            Ok(v) => v.into_js(a),
+            Err(Error::Parked(ticket)) => Err(a.unpark(ticket)),
+            Err(e) => Err(e),
+        }
     }
 }
 

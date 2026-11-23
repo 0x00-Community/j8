@@ -40,6 +40,26 @@ impl<'i> Shares<'i> {
     }
 }
 
+#[derive(Default)]
+pub struct Parked<'i> {
+    next: u64,
+    held: Vec<(u64, ScopeGlobal<'i, ValueBrand>)>,
+}
+
+impl<'i> Parked<'i> {
+    pub fn park(&mut self, root: ScopeGlobal<'i, ValueBrand>) -> u64 {
+        let ticket = self.next;
+        self.next += 1;
+        self.held.push((ticket, root));
+        ticket
+    }
+
+    pub fn unpark(&mut self, ticket: u64) -> Option<ScopeGlobal<'i, ValueBrand>> {
+        let at = self.held.iter().position(|(t, _)| *t == ticket)?;
+        Some(self.held.swap_remove(at).1)
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 pub struct CreateParams {
     pub profile: bool,
@@ -55,6 +75,7 @@ pub struct Isolate<'p> {
     spawned: Option<Fifo<AsyncJob<'p>>>,
     stop: Arc<Termination>,
     exception: Option<ScopeGlobal<'p, ValueBrand>>,
+    parked: core::cell::RefCell<Parked<'p>>,
     #[cfg(all(target_os = "linux", feature = "crossheap"))]
     shares: Shares<'p>,
 }
@@ -65,6 +86,7 @@ pub struct Scope<'scope, 'i> {
     pub profiler: &'i mut Profiler,
     pub spawned: Option<&'i Fifo<AsyncJob<'i>>>,
     pub stop: &'i Termination,
+    pub parked: &'i core::cell::RefCell<Parked<'i>>,
     #[cfg(all(target_os = "linux", feature = "crossheap"))]
     pub shares: &'i mut Shares<'i>,
 }
@@ -83,6 +105,7 @@ impl<'p> Isolate<'p> {
             spawned: params.event_loop.then(Fifo::default),
             stop: Arc::default(),
             exception: None,
+            parked: core::cell::RefCell::default(),
             #[cfg(all(target_os = "linux", feature = "crossheap"))]
             shares: Shares::default(),
         }
@@ -124,6 +147,7 @@ impl<'p> Isolate<'p> {
     pub fn enter<R>(&mut self, f: impl for<'scope> FnOnce(&mut Scope<'scope, '_>) -> R) -> R {
         let (platform, profiler, generation, stop) = (self.platform, &mut self.profiler, self.generation, &*self.stop);
         let spawned = self.spawned.as_ref();
+        let parked = &self.parked;
         #[cfg(all(target_os = "linux", feature = "crossheap"))]
         let shares = &mut self.shares;
         let carried = self.exception.take();
@@ -141,6 +165,7 @@ impl<'p> Isolate<'p> {
                 profiler,
                 spawned: spawned.map(|q| unsafe { rebrand_ref(q) }),
                 stop,
+                parked: unsafe { rebrand_ref(parked) },
                 #[cfg(all(target_os = "linux", feature = "crossheap"))]
                 shares: unsafe { &mut *core::ptr::from_mut(shares).cast() },
             });

@@ -128,7 +128,10 @@ impl<'scope, T: for<'g> FromJs<'g> + Send + 'static> FromJs<'scope> for Promise<
             v,
             HostReaction::new(move |a, value, rejected| {
                 let out = if rejected { Err(a.throw_value(value)) } else { T::from_js(a, value) };
-                tx.send(out);
+                tx.send(out.map_err(|e| match e {
+                    Error::Exception => a.park(),
+                    e => e,
+                }));
             }),
         )?;
         Ok(Self(rx))

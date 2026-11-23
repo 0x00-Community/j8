@@ -122,12 +122,13 @@ pub struct Agent<'scope, 'x> {
     invoke: &'x dyn Invoke<'scope>,
     spawned: Option<&'x j8lockfree::Fifo<crate::AsyncJob<'x>>>,
     pub stop: &'x crate::Termination,
+    parked: &'x core::cell::RefCell<crate::Parked<'x>>,
     spare_regs: Vec<Vec<Value<'scope>>>,
 }
 
 impl<'scope> Scope<'scope, '_> {
     pub fn agent<'x>(&'x mut self, realm: Context<'scope>, invoke: &'x dyn Invoke<'scope>) -> Agent<'scope, 'x> {
-        Agent { mc: self.mc, platform: self.platform, profiler: &mut *self.profiler, realm, new_target: Value::Undefined, invoke, spawned: self.spawned.map(|q| unsafe { crate::rebrand_ref(q) }), stop: self.stop, spare_regs: Vec::new() }
+        Agent { mc: self.mc, platform: self.platform, profiler: &mut *self.profiler, realm, new_target: Value::Undefined, invoke, spawned: self.spawned.map(|q| unsafe { crate::rebrand_ref(q) }), stop: self.stop, parked: unsafe { crate::rebrand_ref(self.parked) }, spare_regs: Vec::new() }
     }
 }
 
@@ -142,6 +143,17 @@ impl<'scope> Agent<'scope, '_> {
             }
             None => Err(job),
         }
+    }
+
+    pub fn park(&self) -> crate::Error {
+        let v = self.take_exception();
+        let root = self.global(v);
+        crate::Error::Parked(self.parked.borrow_mut().park(root))
+    }
+
+    pub fn unpark(&self, ticket: u64) -> crate::Error {
+        let v = self.parked.borrow_mut().unpark(ticket).map_or(Value::Undefined, |root| self.local(&root));
+        self.mc.raise(v)
     }
 
     pub fn take_regs(&mut self) -> Vec<Value<'scope>> {

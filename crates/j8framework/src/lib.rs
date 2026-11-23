@@ -38,7 +38,7 @@ pub use error::Error;
 pub use lazy::Lazy;
 pub use layout::Layout;
 pub use handle::{RealmBrand, ValueBrand};
-pub use isolate::{CreateParams, Isolate, Scope};
+pub use isolate::{CreateParams, Isolate, Parked, Scope};
 #[cfg(all(target_os = "linux", feature = "crossheap"))]
 pub use isolate::{ErasedBrand, Shares};
 pub use backing::{Backing, External, SharedMemory};

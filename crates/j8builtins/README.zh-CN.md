@@ -10,7 +10,7 @@
 `j8framework` 只定义 `Intrinsics` 接口，这里是缺省实现。宿主建上下文时传进去，也可以换掉或裁剪：
 
 ```rust
-let cx = isolate.enter(|scope| scope.persist(scope.context(&j8builtins::Builtins)));
+let cx = isolate.enter(|scope| scope.mc.stash::<RealmBrand>(scope.context(&j8builtins::Builtins).realm()));
 ```
 
 只依赖 `j8framework`，不依赖执行器：每个内建函数都是宿主函数 `fn(&mut Agent, this, &[Value]) -> Result<Value, Error>`，

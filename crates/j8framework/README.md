@@ -11,7 +11,7 @@ implements and the structs / enums they share; it depends on no other j8 layer.
 | --- | --- |
 | `Platform` / `Pool` | Threads and clocks lent by the embedder (`j8platform` implements them) |
 | `Isolate` | An independent JS world: a GC heap ([paragc](https://crates.io/crates/paragc)) plus a profiler |
-| `Scope` | One entry into an isolate; values in it carry the `'gc` brand and cannot leave it (V8's `Local`) |
+| `Scope` | One entry into an isolate; values in it carry the `'scope` brand and cannot leave it (V8's `Local`) |
 | `Global` / `ContextRoot` | Persistent handles that live across `enter` calls |
 | `Context` / `Realm` | An execution context: the global object and the built-in prototypes (`Intrinsics`, implemented by `j8builtins`) |
 | `Agent` | The context of one run; all JS operation semantics hang off it, calls back into JS go through `Invoke` |
@@ -36,14 +36,14 @@ once its owner is on the heap; heap types are `Send + Sync`; the heap collects s
 ```rust
 use j8builtins::Builtins;
 use j8executor::Executor;
-use j8framework::{CreateParams, Isolate, Source};
+use j8framework::{CreateParams, Isolate, RealmBrand, Source};
 use j8platform::DefaultPlatform;
 
 let platform = DefaultPlatform::default();
 let mut isolate = Isolate::new(&platform, CreateParams::default());
-let mut executor = Executor::default();
-let cx = isolate.enter(|scope| scope.persist(scope.context(&Builtins)));
-let result = isolate.run(&mut executor, &cx, &Source { text: "1 + 2 * 3", file: "a.js" })?;
+let executor = Executor::default();
+let cx = isolate.enter(|scope| scope.mc.stash::<RealmBrand>(scope.context(&Builtins).realm()));
+let result = executor.eval(&mut isolate, &cx, &Source { text: "1 + 2 * 3", file: "a.js" })?;
 ```
 
 ## License

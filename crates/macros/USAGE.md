@@ -177,7 +177,7 @@ the host object is dropped from Rust.
 Parameters are taken by type: `&mut Agent` receives the current agent; `This` is the raw `this`; `Rest` is all remaining
 arguments; `&str` is converted with ToString and then borrowed; anything else is converted in order with `FromJs`
 (`f64` / `i32` / `u32` / `usize` / `bool` / `String` / `JsString` / `JsObject` / `Value` / `Option<T>` / `Vec<T>`).
-Return values are converted with `IntoJs`; `Result<T, Error>` throws on error. Write lifetimes in parameters as `'gc`.
+Return values are converted with `IntoJs`; `Result<T, Error>` throws on error. Write lifetimes in parameters as `'scope`.
 `&self` / `&mut self` methods that re-enter the same object throw a TypeError (no panic).
 
 ## Heap structs inside j8: `#[j8framework::heap]`
@@ -191,12 +191,12 @@ also generates `new` taking every field in order.
 
 ```rust
 #[j8framework::heap]
-pub struct Object<'gc> {
+pub struct Object<'scope> {
     #[mutable(set = write_proto)]
-    proto: Option<JsObject<'gc>>,      // proto() / write_proto(mc, p)
+    proto: Option<JsObject<'scope>>,      // proto() / write_proto(mc, p)
     #[mutable]
     non_extensible: bool,              // non_extensible() / set_non_extensible(mc, b)
-    data: GcCell<'gc, ObjectState<'gc>>,
+    data: GcCell<'scope, ObjectState<'scope>>,
 }
 ```
 

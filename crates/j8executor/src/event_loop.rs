@@ -265,6 +265,10 @@ impl<'p> JsState<'p> {
             let (target, value) = match settle(a) {
                 Ok(v) => (resolve, v),
                 Err(Error::Exception) => (reject, a.take_exception()),
+                Err(Error::Parked(ticket)) => {
+                    let _ = a.unpark(ticket);
+                    (reject, a.take_exception())
+                }
                 Err(e) => {
                     let message = alloc::string::ToString::to_string(&e);
                     let _ = a.throw(ErrorKind::Error, &message);

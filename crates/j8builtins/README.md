@@ -12,7 +12,7 @@ functions and every built-in constructor, prototype and method into it.
 when creating a context, and can replace or trim it:
 
 ```rust
-let cx = isolate.enter(|scope| scope.persist(scope.context(&j8builtins::Builtins)));
+let cx = isolate.enter(|scope| scope.mc.stash::<RealmBrand>(scope.context(&j8builtins::Builtins).realm()));
 ```
 
 It depends only on `j8framework`, not on the executor: every built-in is a host function

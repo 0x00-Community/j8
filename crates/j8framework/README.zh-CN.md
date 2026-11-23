@@ -10,7 +10,7 @@
 | --- | --- |
 | `Platform` / `Pool` | 宿主借给引擎的线程与时钟（`j8platform` 实现） |
 | `Isolate` | 独立的 JS 世界：一个 GC 堆（[paragc](https://crates.io/crates/paragc)）加一个 profiler |
-| `Scope` | 进入 isolate 的一次；里面的值带 `'gc` 品牌，出不了这次进入（V8 的 `Local`） |
+| `Scope` | 进入 isolate 的一次；里面的值带 `'scope` 品牌，出不了这次进入（V8 的 `Local`） |
 | `Global` / `ContextRoot` | 跨多次 `enter` 存活的持久句柄 |
 | `Context` / `Realm` | 执行上下文：全局对象与内建原型（`Intrinsics`，由 `j8builtins` 实现） |
 | `Agent` | 一次运行的上下文；全部 JS 运算语义挂在它上面，回调 JS 经 `Invoke` |
@@ -33,14 +33,14 @@
 ```rust
 use j8builtins::Builtins;
 use j8executor::Executor;
-use j8framework::{CreateParams, Isolate, Source};
+use j8framework::{CreateParams, Isolate, RealmBrand, Source};
 use j8platform::DefaultPlatform;
 
 let platform = DefaultPlatform::default();
 let mut isolate = Isolate::new(&platform, CreateParams::default());
-let mut executor = Executor::default();
-let cx = isolate.enter(|scope| scope.persist(scope.context(&Builtins)));
-let result = isolate.run(&mut executor, &cx, &Source { text: "1 + 2 * 3", file: "a.js" })?;
+let executor = Executor::default();
+let cx = isolate.enter(|scope| scope.mc.stash::<RealmBrand>(scope.context(&Builtins).realm()));
+let result = executor.eval(&mut isolate, &cx, &Source { text: "1 + 2 * 3", file: "a.js" })?;
 ```
 
 ## 许可

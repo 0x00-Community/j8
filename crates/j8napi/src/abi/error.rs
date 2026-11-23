@@ -81,6 +81,10 @@ napi! {
         let a = env.agent()?;
         let v = match env.take_pending() {
             Some(Error::Exception) => a.take_exception(),
+            Some(Error::Parked(ticket)) => {
+                let _ = a.unpark(ticket);
+                a.take_exception()
+            }
             Some(e @ Error::Terminated) => {
                 env.throw(e);
                 Value::Undefined
