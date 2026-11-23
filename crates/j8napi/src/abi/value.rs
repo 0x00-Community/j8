@@ -27,7 +27,7 @@ impl Env {
 
     fn bigint<'scope>(&self, h: Handle) -> Result<&'scope BigInt, Status> {
         match self.value(h)?.kind() {
-            ValueKind::BigInt(b) => Ok(&j8framework::Gc::get(b).0),
+            ValueKind::BigInt(b) => Ok(&j8framework::ScopeLocal::get(b).0),
             _ => Err(Status::BigintExpected),
         }
     }

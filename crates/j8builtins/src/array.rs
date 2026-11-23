@@ -230,7 +230,7 @@ impl Arrays {
 
     fn indexed_clean<'scope>(a: &Agent<'scope, '_>, o: JsObject<'scope>) -> bool {
         match o.proto() {
-            Some(p) if j8framework::Gc::ptr_eq(p, a.realm.array_proto) && a.realm.indexed_fast() && p.elements().is_empty() => true,
+            Some(p) if j8framework::ScopeLocal::ptr_eq(p, a.realm.array_proto) && a.realm.indexed_fast() && p.elements().is_empty() => true,
             _ => o.no_indexed_protos(),
         }
     }
@@ -499,7 +499,7 @@ impl Arrays {
             .iter()
             .map(|v| match v.kind() {
                 ValueKind::Number(x) => Part::Number(x),
-                ValueKind::String(s) => Part::Text(j8framework::Gc::get(s)),
+                ValueKind::String(s) => Part::Text(j8framework::ScopeLocal::get(s)),
                 ValueKind::Bool(true) => Part::Text("true"),
                 ValueKind::Bool(false) => Part::Text("false"),
                 _ => Part::Text(""),
@@ -1215,7 +1215,7 @@ impl Arrays {
             .iter()
             .map(|v| match v.kind() {
                 ValueKind::Number(_) => next.next().map_or("", String::as_str),
-                ValueKind::String(s) => &**j8framework::Gc::get(s),
+                ValueKind::String(s) => &**j8framework::ScopeLocal::get(s),
                 ValueKind::Bool(true) => "true",
                 ValueKind::Bool(false) => "false",
                 _ => "null",

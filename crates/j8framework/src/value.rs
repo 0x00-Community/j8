@@ -1,4 +1,4 @@
-use crate::gc::{Collect, Gc, Trace, Tracer, gc_from_raw};
+use crate::gc::{Collect, ScopeLocal, Trace, Tracer, gc_from_raw};
 
 use crate::{JsBigInt, JsObject, JsString, JsSymbol};
 
@@ -265,12 +265,12 @@ impl<'scope> Value<'scope> {
     }
 
     #[inline]
-    pub fn accessor(a: Gc<'scope, crate::Accessor<'scope>>) -> Self {
+    pub fn accessor(a: ScopeLocal<'scope, crate::Accessor<'scope>>) -> Self {
         Self::pointer(ValueTag::ACCESSOR, a.as_ptr().expose_provenance() as u64)
     }
 
     #[inline]
-    pub fn as_accessor(self) -> Option<Gc<'scope, crate::Accessor<'scope>>> {
+    pub fn as_accessor(self) -> Option<ScopeLocal<'scope, crate::Accessor<'scope>>> {
         (self.bits >> ValueBits::TAG_SHIFT == ValueBits::boxed(ValueTag::ACCESSOR, 0) >> ValueBits::TAG_SHIFT)
             .then(|| unsafe { gc_from_raw(Self::address(self.bits & ValueBits::PAYLOAD)) })
     }
@@ -331,8 +331,8 @@ impl PartialEq for Value<'_> {
             (ValueKind::Bool(a), ValueKind::Bool(b)) => a == b,
             (ValueKind::Number(a), ValueKind::Number(b)) => a == b,
             (ValueKind::String(a), ValueKind::String(b)) => *a == *b,
-            (ValueKind::Object(a), ValueKind::Object(b)) => Gc::ptr_eq(a, b),
-            (ValueKind::Symbol(a), ValueKind::Symbol(b)) => Gc::ptr_eq(a, b),
+            (ValueKind::Object(a), ValueKind::Object(b)) => ScopeLocal::ptr_eq(a, b),
+            (ValueKind::Symbol(a), ValueKind::Symbol(b)) => ScopeLocal::ptr_eq(a, b),
             (ValueKind::BigInt(a), ValueKind::BigInt(b)) => a.0 == b.0,
             _ => false,
         }

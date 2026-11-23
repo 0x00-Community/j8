@@ -3,7 +3,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use crate::{Gc};
+use crate::{ScopeLocal};
 
 use num_traits::Zero;
 
@@ -324,11 +324,15 @@ impl<'scope> Agent<'scope, '_> {
     }
 
     pub fn throw(&self, kind: ErrorKind, message: &str) -> Error {
-        Error::Exception(self.global(self.error(kind, message).into()))
+        self.throw_value(self.error(kind, message).into())
     }
 
     pub fn throw_value(&self, v: Value<'scope>) -> Error {
-        Error::Exception(self.global(v))
+        self.mc.raise(v)
+    }
+
+    pub fn take_exception(&self) -> Value<'scope> {
+        self.mc.take_exception().unwrap_or_default()
     }
 
     pub fn is_callable(&self, v: Value<'scope>) -> bool {
@@ -681,7 +685,7 @@ impl<'scope> Agent<'scope, '_> {
                 return Ok(false);
             }
             if let Some(i) = Self::typed_numeric(cur, key) {
-                if matches!(receiver.kind(), ValueKind::Object(r) if Gc::ptr_eq(r, cur)) {
+                if matches!(receiver.kind(), ValueKind::Object(r) if ScopeLocal::ptr_eq(r, cur)) {
                     self.typed_set(cur, i, value)?;
                     return Ok(true);
                 }
@@ -946,7 +950,7 @@ impl<'scope> Agent<'scope, '_> {
     pub fn can_be_held_weakly(&self, v: Value<'scope>) -> bool {
         match v.kind() {
             ValueKind::Object(_) => true,
-            ValueKind::Symbol(s) => !self.realm.symbol_registry.get().iter().any(|(_, x)| Gc::ptr_eq(*x, s)),
+            ValueKind::Symbol(s) => !self.realm.symbol_registry.get().iter().any(|(_, x)| ScopeLocal::ptr_eq(*x, s)),
             _ => false,
         }
     }
@@ -1008,7 +1012,7 @@ impl<'scope> Agent<'scope, '_> {
         };
         let mut cur = self.get_prototype_of(o)?;
         while let Some(c) = cur {
-            if Gc::ptr_eq(c, proto) {
+            if ScopeLocal::ptr_eq(c, proto) {
                 return Ok(true);
             }
             cur = self.get_prototype_of(c)?;
@@ -1233,7 +1237,7 @@ impl<'scope> Agent<'scope, '_> {
                 _ => (false, false),
             };
             let builtin = if is_array { array } else if is_string { string } else { None };
-            if builtin.is_some_and(|k| Gc::ptr_eq(k, n)) {
+            if builtin.is_some_and(|k| ScopeLocal::ptr_eq(k, n)) {
                 return if is_array { self.array_iter_step(o) } else { self.string_iter_step(o) };
             }
         }

@@ -203,7 +203,7 @@ impl Env {
     }
 
     pub fn private<'scope>(o: JsObject<'scope>, key: JsSymbol<'scope>) -> Option<Value<'scope>> {
-        o.borrow().privates.iter().find_map(|&(k, p)| (j8framework::Gc::ptr_eq(k, key)).then_some(p)).and_then(|p| match p.slot {
+        o.borrow().privates.iter().find_map(|&(k, p)| (j8framework::ScopeLocal::ptr_eq(k, key)).then_some(p)).and_then(|p| match p.slot {
             j8framework::Slot::Data(v) => Some(v),
             j8framework::Slot::Accessor { .. } => None,
         })
@@ -211,12 +211,12 @@ impl Env {
 
     pub fn set_private<'scope>(a: &Agent<'scope, '_>, o: JsObject<'scope>, key: JsSymbol<'scope>, v: Value<'scope>) {
         let mut d = o.borrow_mut(a.mc);
-        d.privates.retain(|&(k, _)| !j8framework::Gc::ptr_eq(k, key));
+        d.privates.retain(|&(k, _)| !j8framework::ScopeLocal::ptr_eq(k, key));
         d.privates.push((key, Property::hidden(v)));
     }
 
     pub fn remove_private<'scope>(a: &Agent<'scope, '_>, o: JsObject<'scope>, key: JsSymbol<'scope>) {
-        o.borrow_mut(a.mc).privates.retain(|&(k, _)| !j8framework::Gc::ptr_eq(k, key));
+        o.borrow_mut(a.mc).privates.retain(|&(k, _)| !j8framework::ScopeLocal::ptr_eq(k, key));
     }
 
     pub fn finalizer(&self, cb: Finalize, data: *mut c_void, hint: *mut c_void) -> Finalizer {

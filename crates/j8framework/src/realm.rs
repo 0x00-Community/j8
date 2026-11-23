@@ -3,8 +3,8 @@ use core::ops::Deref;
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use crate::{Collect, Cow, Gc, GcQueue, Mutation};
-use paragc::Slot;
+use crate::{Collect, Cow, ScopeLocal, GcQueue, Mutation};
+use crate::GcSlot as Slot;
 
 use crate::{ErrorKind, Job, JsObject, JsString, JsSymbol, Native, NativeFn, ObjectData, ObjectKind, Property, Scope, SymbolData, Value};
 
@@ -211,7 +211,7 @@ impl FastTable {
 pub struct RegExpCompiled<'scope> {
     pub source: JsString<'scope>,
     pub flags: JsString<'scope>,
-    pub compiled: Gc<'scope, crate::Static<alloc::boxed::Box<dyn core::any::Any + Send + Sync>>>,
+    pub compiled: ScopeLocal<'scope, crate::Static<alloc::boxed::Box<dyn core::any::Any + Send + Sync>>>,
 }
 
 impl RegExpCompiled<'_> {
@@ -413,16 +413,16 @@ impl<'scope> Realm<'scope> {
 
 #[derive(Clone, Copy, Debug, Collect)]
 #[collect(no_drop)]
-pub struct Context<'scope>(Gc<'scope, Realm<'scope>>);
+pub struct Context<'scope>(ScopeLocal<'scope, Realm<'scope>>);
 
 impl<'scope> Context<'scope> {
-    pub fn realm(self) -> Gc<'scope, Realm<'scope>> {
+    pub fn realm(self) -> ScopeLocal<'scope, Realm<'scope>> {
         self.0
     }
 }
 
-impl<'scope> From<Gc<'scope, Realm<'scope>>> for Context<'scope> {
-    fn from(r: Gc<'scope, Realm<'scope>>) -> Self {
+impl<'scope> From<ScopeLocal<'scope, Realm<'scope>>> for Context<'scope> {
+    fn from(r: ScopeLocal<'scope, Realm<'scope>>) -> Self {
         Self(r)
     }
 }

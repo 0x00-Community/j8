@@ -27,8 +27,8 @@ fn outcome(text: &str) -> String {
                 let v = a.local(&g);
                 String::from(&**a.to_string(v).expect("ToString"))
             }
-            Err(Error::Exception(g)) => {
-                let v = a.local(&g);
+            Err(Error::Exception) => {
+                let v = a.take_exception();
                 format!("Uncaught {}", String::from(&**a.to_string(v).expect("ToString")))
             }
             Err(e) => panic!("not a completion: {e}"),

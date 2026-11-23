@@ -258,8 +258,8 @@ impl Case {
                 (Err(Error::Syntax(_)), Some(n)) if n.phase != Phase::Runtime && n.kind == ErrorType::SyntaxError => (Outcome::Pass, String::new()),
                 (Err(Error::Syntax(m)), _) => (Outcome::Fail, format!("syntax error: {m}")),
                 (Err(Error::Terminated), _) => (Outcome::Fail, String::from("execution terminated")),
-                (Err(Error::Exception(g)), n) => {
-                    let v = agent.local(&g);
+                (Err(Error::Exception), n) => {
+                    let v = agent.take_exception();
                     let name = agent.get_named(v, "constructor").and_then(|c| agent.get_named(c, "name")).and_then(|n| agent.to_string(n));
                     let name = name.map_or_else(|_| String::new(), |s| String::from(&**s));
                     match n {

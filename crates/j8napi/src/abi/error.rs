@@ -80,7 +80,7 @@ napi! {
     fn napi_get_and_clear_last_exception(env, result: *mut Handle) {
         let a = env.agent()?;
         let v = match env.take_pending() {
-            Some(Error::Exception(g)) => a.local(&g),
+            Some(Error::Exception) => a.take_exception(),
             Some(e @ Error::Terminated) => {
                 env.throw(e);
                 Value::Undefined

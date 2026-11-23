@@ -102,7 +102,7 @@ impl Executor {
             self.depth.set(saved);
         }
         let error = match &r {
-            Err(Error::Exception(g)) => Some(a.local(g)),
+            Err(Error::Exception) => Some(a.take_exception()),
             _ => None,
         };
         a.update_module(m, |r| {
@@ -172,8 +172,8 @@ impl Executor {
         })();
         match r {
             Ok(ns) => a.resolve_promise(promise, ns)?,
-            Err(Error::Exception(g)) => {
-                let reason = a.local(&g);
+            Err(Error::Exception) => {
+                let reason = a.take_exception();
                 a.reject_promise(promise, reason);
             }
             Err(Error::Syntax(msg)) => {

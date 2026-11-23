@@ -228,7 +228,7 @@ impl Buffers {
         if !ok {
             return Err(a.throw(ErrorKind::Type, "species constructor did not return a usable buffer"));
         }
-        if j8framework::Gc::ptr_eq(n, o) {
+        if j8framework::ScopeLocal::ptr_eq(n, o) {
             return Err(a.throw(ErrorKind::Type, "species constructor returned the same buffer"));
         }
         #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "clamped to [0, len]")]

@@ -1,7 +1,7 @@
 use crate::ValueKind;
 use alloc::vec::Vec;
 
-use crate::Gc;
+use crate::ScopeLocal;
 
 use crate::{Agent, Error, ErrorKind, HostReaction, Job, JsObject, ObjectData, ObjectKind, Reaction, Request, Resume, Settled, Static, Step, Value};
 
@@ -61,15 +61,15 @@ impl<'scope> Agent<'scope, '_> {
 
     pub fn resolve_promise(&mut self, promise: JsObject<'scope>, value: Value<'scope>) -> Result<(), Error> {
         if let Some(o) = value.as_object() {
-            if Gc::ptr_eq(o, promise) {
+            if ScopeLocal::ptr_eq(o, promise) {
                 let e = self.error(ErrorKind::Type, "Chaining cycle detected for promise");
                 self.reject_promise(promise, e.into());
                 return Ok(());
             }
             let then = match self.get_named(value, "then") {
                 Ok(t) => t,
-                Err(Error::Exception(g)) => {
-                    let reason = self.local(&g);
+                Err(Error::Exception) => {
+                    let reason = self.take_exception();
                     self.reject_promise(promise, reason);
                     return Ok(());
                 }
@@ -112,7 +112,7 @@ impl<'scope> Agent<'scope, '_> {
     pub fn promise_resolve(&mut self, v: Value<'scope>) -> Result<JsObject<'scope>, Error> {
         if let Some(o) = v.as_object()
             && Self::is_promise(v)
-            && matches!((self.get_named(v, "constructor")?).kind(), ValueKind::Object(c) if Gc::ptr_eq(c, self.realm.promise_ctor))
+            && matches!((self.get_named(v, "constructor")?).kind(), ValueKind::Object(c) if ScopeLocal::ptr_eq(c, self.realm.promise_ctor))
         {
             return Ok(o);
         }
@@ -131,8 +131,8 @@ impl<'scope> Agent<'scope, '_> {
         }
         match self.resume(coroutine, mode, value) {
             Ok(_) => Ok(()),
-            Err(Error::Exception(g)) => {
-                let reason = self.local(&g);
+            Err(Error::Exception) => {
+                let reason = self.take_exception();
                 if let Some(p) = promise {
                     self.reject_promise(p, reason);
                 }
@@ -186,16 +186,16 @@ impl<'scope> Agent<'scope, '_> {
                     self.perform_then(p, Reaction::Await { coroutine });
                     Ok(())
                 }
-                Err(Error::Exception(g)) => {
-                    let reason = self.local(&g);
+                Err(Error::Exception) => {
+                    let reason = self.take_exception();
                     self.drive_async_generator(coroutine, Resume::Throw, reason)
                 }
                 Err(e) => Err(e),
             },
             Ok(Step::Yield(v)) => self.settle_request(coroutine, Ok((v, false))),
             Ok(Step::Done(v)) => self.settle_request(coroutine, Ok((v, true))),
-            Err(Error::Exception(g)) => {
-                let reason = self.local(&g);
+            Err(Error::Exception) => {
+                let reason = self.take_exception();
                 self.settle_request(coroutine, Err(reason))
             }
             Err(e) => Err(e),
@@ -216,7 +216,7 @@ impl<'scope> Agent<'scope, '_> {
                 let outcome = if self.is_callable(handler) {
                     match self.call(handler, Value::Undefined, &[value]) {
                         Ok(r) => Ok(r),
-                        Err(Error::Exception(g)) => Err(self.local(&g)),
+                        Err(Error::Exception) => Err(self.take_exception()),
                         Err(e) => return Err(e),
                     }
                 } else if rejected {
@@ -230,7 +230,10 @@ impl<'scope> Agent<'scope, '_> {
                         Err(reason) => self.call(cap.reject, Value::Undefined, &[reason]),
                     };
                     match r {
-                        Ok(_) | Err(Error::Exception(_)) => {}
+                        Ok(_) => {}
+                        Err(Error::Exception) => {
+                            self.take_exception();
+                        }
                         Err(e) => return Err(e),
                     }
                 }
@@ -240,8 +243,8 @@ impl<'scope> Agent<'scope, '_> {
                 let (resolve, reject) = self.promise_resolvers(promise);
                 match self.call(then, thenable, &[resolve.into(), reject.into()]) {
                     Ok(_) => Ok(()),
-                    Err(Error::Exception(g)) => {
-                        let reason = self.local(&g);
+                    Err(Error::Exception) => {
+                        let reason = self.take_exception();
                         self.run_resolver(reject, reason).map(drop)
                     }
                     Err(e) => Err(e),

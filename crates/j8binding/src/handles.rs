@@ -136,7 +136,7 @@ impl<'scope, T: for<'g> FromJs<'g> + Send + 'static> FromJs<'scope> for Promise<
         a.on_settled(
             v,
             HostReaction::new(move |a, value, rejected| {
-                let out = if rejected { Err(Error::Exception(a.global(value))) } else { T::from_js(a, value) };
+                let out = if rejected { Err(a.throw_value(value)) } else { T::from_js(a, value) };
                 tx.send(out);
             }),
         )?;

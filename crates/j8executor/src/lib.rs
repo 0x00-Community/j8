@@ -9,7 +9,7 @@ use core::cell::{Cell, RefCell};
 
 use j8bytecode::{Bytecode, Constant, Context, Decoded, FunctionKind, Intrinsic, LiteralValue, Module, NativeContextIndex, Operands, OperandValue, Register, Runtime, ScopeInfo, ScopeType, SharedFunction};
 use j8compiler::Compile;
-use j8framework::{Agent, BinaryOp, Closure, Code, ShapeKey, SmallStr, Collect, CompareOp, ContextKind, ContextName, ContextShape, ShapeId, Env, Error, ErrorKind, FuncId, FunctionInfo, Gc, Lazy, Invoke, JsEnv, JsObject, Numbers, ObjectData, ObjectKind, Property, Resume, Slot, Step, Value, ValueKind};
+use j8framework::{Agent, BinaryOp, Closure, Code, ShapeKey, SmallStr, Collect, CompareOp, ContextKind, ContextName, ContextShape, ShapeId, Env, Error, ErrorKind, FuncId, FunctionInfo, ScopeLocal, Lazy, Invoke, JsEnv, JsObject, Numbers, ObjectData, ObjectKind, Property, Resume, Slot, Step, Value, ValueKind};
 use j8lockfree::SegVec;
 
 mod cache;
@@ -269,7 +269,7 @@ impl LoadedRef {
     }
 }
 
-j8framework::paragc::brand!(LoadedBrand = for<'scope> Loaded);
+j8framework::paragc::brand!(LoadedBrand = for<'heap, 'scope> Loaded);
 
 unsafe impl Send for Loaded {}
 
@@ -531,7 +531,7 @@ impl Executor {
     }
 
     pub fn load(&self, mc: &j8framework::Mutation<'_>, module: Module) -> FuncId {
-        let m = mc.mutator();
+        let m = mc.gc_scope();
         let base = u32::try_from(self.code.len()).expect("fewer than 2^32 functions");
         let mut codes = Vec::with_capacity(module.functions.len());
         for func in module.functions {
@@ -802,7 +802,7 @@ impl Executor {
                     return r.map(Prepared::Done);
                 }
                 Err(Some((target, mut bound_args))) => {
-                    if matches!(new_target.kind(), ValueKind::Object(t) if Gc::ptr_eq(t, o)) {
+                    if matches!(new_target.kind(), ValueKind::Object(t) if ScopeLocal::ptr_eq(t, o)) {
                         new_target = target;
                     }
                     bound_args.extend(args);
@@ -1105,7 +1105,7 @@ impl Executor {
             e = c.parent;
         }
         let target = self.var_scope(a, env);
-        if !Gc::ptr_eq(target, a.realm.global) {
+        if !ScopeLocal::ptr_eq(target, a.realm.global) {
             return Ok(());
         }
         if self.script_slot(a, name).is_some() {
@@ -1145,7 +1145,7 @@ impl Executor {
             e = c.parent;
         }
         let target = self.var_scope(a, env);
-        if Gc::ptr_eq(target, a.realm.global) && self.script_slot(a, name).is_some() {
+        if ScopeLocal::ptr_eq(target, a.realm.global) && self.script_slot(a, name).is_some() {
             return Err(a.throw(ErrorKind::Syntax, &alloc::format!("Identifier '{name}' has already been declared")));
         }
         let existing = target.borrow().get_own(a.mc, name);
@@ -1262,10 +1262,10 @@ impl Executor {
                 Ok(Some(v)) => break Ok(Some(v)),
                 Ok(None) if b.terminated => break Err(Error::Terminated),
                 Ok(None) => break Ok(None),
-                Err(Error::Exception(g)) => {
-                    let v = a.local(&g);
+                Err(Error::Exception) => {
+                    let v = a.take_exception();
                     if !Self::unwind(&mut st, v) {
-                        break Err(Error::Exception(g));
+                        break Err(Error::Exception);
                     }
                 }
                 Err(e) => break Err(e),
@@ -2083,7 +2083,7 @@ impl Executor {
     }
 
     fn arguments_map<'scope>(&self, env: Option<JsEnv<'scope>>, outer: Option<JsEnv<'scope>>, count: usize) -> Option<j8framework::ArgumentsMap<'scope>> {
-        let env = env.filter(|e| outer.is_none_or(|o| !Gc::ptr_eq(*e, o)))?;
+        let env = env.filter(|e| outer.is_none_or(|o| !ScopeLocal::ptr_eq(*e, o)))?;
         let shape = self.context_shape(env.shape?);
         if shape.kind != ContextKind::Function {
             return None;
@@ -2317,7 +2317,7 @@ impl Executor {
             }
             Runtime::ResolvePossiblyDirectEval => {
                 let (callee, source) = (arg(0), arg(1));
-                let real = matches!(callee.kind(), ValueKind::Object(o) if Gc::ptr_eq(o, a.realm.eval));
+                let real = matches!(callee.kind(), ValueKind::Object(o) if ScopeLocal::ptr_eq(o, a.realm.eval));
                 let ValueKind::String(s) = source.kind() else { return Ok(callee) };
                 if !real {
                     return Ok(callee);
@@ -2597,7 +2597,7 @@ impl<'scope> Invoke<'scope> for Executor {
 }
 
 j8framework::paragc::brand!(
-    ParkedBrand = for<'scope> j8framework::GcCell<'scope, Option<State<'scope>>>
+    ParkedBrand = for<'heap, 'scope> j8framework::GcCell<'scope, Option<State<'scope>>>
 );
 
 type Parked = j8framework::Root<ParkedBrand>;

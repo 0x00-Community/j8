@@ -63,7 +63,7 @@ impl<'p> Session<'p> {
     pub fn eval(&mut self, src: &Source<'_>) -> Outcome {
         match self.rt.eval(src.text, src.file).and_then(|g| self.rt.run_until_idle().map(|()| g)) {
             Ok(g) => Outcome::Value(self.rt.text(&g)),
-            Err(Error::Exception(g)) => Outcome::Thrown(self.rt.text(&g)),
+            Err(Error::Exception) => Outcome::Thrown(self.rt.exception_text()),
             Err(e) => Outcome::Failed(e.to_string()),
         }
     }

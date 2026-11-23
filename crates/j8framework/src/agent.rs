@@ -120,24 +120,24 @@ pub struct Agent<'scope, 'x> {
     pub realm: Context<'scope>,
     pub new_target: Value<'scope>,
     invoke: &'x dyn Invoke<'scope>,
-    spawned: Option<&'x j8lockfree::Fifo<crate::AsyncJob>>,
+    spawned: Option<&'x j8lockfree::Fifo<crate::AsyncJob<'x>>>,
     pub stop: &'x crate::Termination,
     spare_regs: Vec<Vec<Value<'scope>>>,
 }
 
 impl<'scope> Scope<'scope, '_> {
     pub fn agent<'x>(&'x mut self, realm: Context<'scope>, invoke: &'x dyn Invoke<'scope>) -> Agent<'scope, 'x> {
-        Agent { mc: self.mc, platform: self.platform, profiler: &mut *self.profiler, realm, new_target: Value::Undefined, invoke, spawned: self.spawned, stop: self.stop, spare_regs: Vec::new() }
+        Agent { mc: self.mc, platform: self.platform, profiler: &mut *self.profiler, realm, new_target: Value::Undefined, invoke, spawned: self.spawned.map(|q| unsafe { crate::rebrand_ref(q) }), stop: self.stop, spare_regs: Vec::new() }
     }
 }
 
 impl<'scope> Agent<'scope, '_> {
     const SPARE_REGS: usize = 8;
 
-    pub fn spawn(&self, job: crate::AsyncJob) -> Result<(), crate::AsyncJob> {
+    pub fn spawn<'i>(&self, job: crate::AsyncJob<'i>) -> Result<(), crate::AsyncJob<'i>> {
         match self.spawned {
             Some(q) => {
-                q.push(job);
+                q.push(unsafe { crate::rebrand(job) });
                 Ok(())
             }
             None => Err(job),

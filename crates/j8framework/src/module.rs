@@ -2,7 +2,7 @@ use crate::ValueKind;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
-use crate::{Collect, Gc};
+use crate::{Collect, ScopeLocal};
 
 use crate::{Agent, Error, ErrorKind, FuncId, JsEnv, JsObject, JsString, Key, ObjectKind, Property, PropertyKey, Slot, Value};
 
@@ -77,7 +77,7 @@ pub enum Resolution<'scope> {
 impl ResolvedBinding<'_> {
     fn same(self, other: Self) -> bool {
         match (self, other) {
-            (ResolvedBinding::Slot(e1, s1), ResolvedBinding::Slot(e2, s2)) => Gc::ptr_eq(e1, e2) && s1 == s2,
+            (ResolvedBinding::Slot(e1, s1), ResolvedBinding::Slot(e2, s2)) => ScopeLocal::ptr_eq(e1, e2) && s1 == s2,
             (ResolvedBinding::Namespace(x), ResolvedBinding::Namespace(y)) => x == y,
             _ => false,
         }

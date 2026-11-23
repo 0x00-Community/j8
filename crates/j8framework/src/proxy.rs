@@ -346,7 +346,7 @@ impl<'scope> Agent<'scope, '_> {
     fn same_key(a: &PropertyKey<'scope>, b: &PropertyKey<'scope>) -> bool {
         match (a, b) {
             (PropertyKey::String(x), PropertyKey::String(y)) => ***x == ***y,
-            (PropertyKey::Symbol(x), PropertyKey::Symbol(y)) => crate::Gc::ptr_eq(*x, *y),
+            (PropertyKey::Symbol(x), PropertyKey::Symbol(y)) => crate::ScopeLocal::ptr_eq(*x, *y),
             _ => false,
         }
     }

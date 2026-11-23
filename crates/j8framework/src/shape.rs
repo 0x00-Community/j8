@@ -3,13 +3,13 @@ use alloc::vec::Vec;
 use core::hash::BuildHasherDefault;
 
 use j8lockfree::{AtomicRefCell, OnceBox, Prefix};
-use paragc::{Handle, HandleSlot};
+use crate::{Handle, HandleSlot, Weak};
 
 use crate::Collect;
 use rustc_hash::FxHasher;
 
 use crate::store::Store;
-use crate::{Erased, Gc, GcCell, GcSlot, IsoCell, Mutation, Property, SmallStr, Slot, Value, ValueCell};
+use crate::{Erased, ScopeLocal, GcCell, GcSlot, IsoCell, Mutation, Property, SmallStr, Slot, Value, ValueCell};
 
 const LINEAR: usize = 8;
 
@@ -52,7 +52,7 @@ impl<'scope> From<(Slot<'scope>, Attrs)> for Property<'scope> {
     }
 }
 
-pub type ShapeRef<'scope> = Handle<'scope, Shape>;
+pub type ShapeRef<'scope> = Handle<'scope, Shape<'scope>>;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct ShapeKey(usize);
@@ -62,8 +62,8 @@ impl ShapeKey {
         self.0
     }
 
-    pub unsafe fn shape<'a>(self) -> &'a Shape {
-        unsafe { Handle::<'a, Shape>::from_id(self.0) }.get().get()
+    pub unsafe fn shape<'a>(self) -> &'a Shape<'a> {
+        unsafe { Handle::<'a, Shape<'a>>::from_id(self.0) }.get().get()
     }
 
     pub unsafe fn handle<'scope>(self) -> ShapeRef<'scope> {
@@ -87,39 +87,39 @@ impl From<ShapeRef<'_>> for ShapeKey {
     }
 }
 
-paragc::brand!(pub ShapeBrand = for<'scope> Shape);
+paragc::brand!(pub ShapeBrand = for<'heap, 'scope> Shape<'scope>);
 
-type Transition = (SmallStr, Attrs, paragc::Weak<ShapeBrand>);
+type Transition<'scope> = (SmallStr, Attrs, Weak<'scope, ShapeBrand>);
 
-pub struct Shape {
+pub struct Shape<'scope> {
     keys: Arc<Prefix<(SmallStr, Attrs)>>,
     len: usize,
     index: OnceBox<hashbrown::HashMap<SmallStr, u32, BuildHasherDefault<FxHasher>>>,
     searches: IsoCell<u32>,
-    transitions: AtomicRefCell<Vec<Transition>>,
+    transitions: AtomicRefCell<Vec<Transition<'scope>>>,
     this: IsoCell<usize>,
     digit_keys: bool,
 }
 
-unsafe impl crate::Trace for Shape {
+unsafe impl crate::Trace for Shape<'_> {
     const NO_EDGES: bool = true;
 
     fn trace(&self, _: &mut crate::Tracer<'_>) {}
 }
 
-impl Shape {
+impl<'scope> Shape<'scope> {
     fn new(keys: Arc<Prefix<(SmallStr, Attrs)>>, len: usize) -> Self {
         let digit_keys = keys.prefix(len).iter().any(|(k, _)| k.as_bytes().first().is_some_and(u8::is_ascii_digit));
         Self { keys, len, index: OnceBox::default(), searches: IsoCell::new(0), transitions: AtomicRefCell::new(Vec::new()), this: IsoCell::new(0), digit_keys }
     }
 
-    fn alloc<'scope>(mc: &Mutation<'scope>, keys: Arc<Prefix<(SmallStr, Attrs)>>, len: usize) -> ShapeRef<'scope> {
-        let h = mc.mutator().alloc_handle(Self::new(keys, len));
+    fn alloc(mc: &Mutation<'scope>, keys: Arc<Prefix<(SmallStr, Attrs)>>, len: usize) -> ShapeRef<'scope> {
+        let h = mc.gc_scope().alloc_handle(Self::new(keys, len));
         h.this.set(h.id());
         h
     }
 
-    pub fn handle<'scope>(&self, _: &Mutation<'scope>) -> ShapeRef<'scope> {
+    pub fn handle(&self, _: &Mutation<'scope>) -> ShapeRef<'scope> {
         unsafe { Handle::from_id(self.this.get()) }
     }
 
@@ -166,20 +166,19 @@ impl Shape {
         self.keys()[i].1
     }
 
-    pub fn rooted<'scope>(mc: &Mutation<'scope>, keys: Vec<(SmallStr, Attrs)>) -> ShapeRef<'scope> {
+    pub fn rooted(mc: &Mutation<'scope>, keys: Vec<(SmallStr, Attrs)>) -> ShapeRef<'scope> {
         let len = keys.len();
         Self::alloc(mc, Prefix::new(keys), len)
     }
 
-    pub fn empty<'scope>(mc: &Mutation<'scope>) -> ShapeRef<'scope> {
+    pub fn empty(mc: &Mutation<'scope>) -> ShapeRef<'scope> {
         Self::rooted(mc, Vec::new())
     }
 
-    pub fn child<'scope>(&self, mc: &Mutation<'scope>, key: &str, attrs: Attrs) -> ShapeRef<'scope> {
-        let m = mc.mutator();
+    pub fn child(&self, mc: &Mutation<'scope>, key: &str, attrs: Attrs) -> ShapeRef<'scope> {
         let mut ts = self.transitions.borrow_mut();
         let mut found = None;
-        ts.retain(|(k, a, w)| match m.upgrade(w) {
+        ts.retain(|(k, a, w)| match mc.upgrade(w) {
             Some(c) => {
                 if found.is_none() && **k == *key && *a == attrs {
                     found = Some(c);
@@ -192,7 +191,7 @@ impl Shape {
             return c.get().handle(mc);
         }
         let child = Self::alloc(mc, self.keys.extend(self.len, (SmallStr::from(key), attrs)), self.len + 1);
-        ts.push((SmallStr::from(key), attrs, m.weak::<ShapeBrand>(child.get())));
+        ts.push((SmallStr::from(key), attrs, mc.weak::<ShapeBrand>(child.get())));
         child
     }
 }
@@ -220,7 +219,7 @@ impl Dict<'_> {
 }
 
 pub struct Props<'scope> {
-    shape: HandleSlot<'scope, Shape>,
+    shape: HandleSlot<'scope, Shape<'scope>>,
     store: GcSlot<'scope, Erased>,
     dict: GcSlot<'scope, GcCell<'scope, Dict<'scope>>>,
     inline: [ValueCell<'scope>; INLINE],
@@ -266,7 +265,7 @@ impl<'scope> Props<'scope> {
     }
 
     fn dict_cell(&self) -> Option<&'scope GcCell<'scope, Dict<'scope>>> {
-        self.dict.get().map(Gc::get)
+        self.dict.get().map(ScopeLocal::get)
     }
 
     fn store(&self) -> Option<Store<'scope>> {
@@ -286,7 +285,7 @@ impl<'scope> Props<'scope> {
     }
 
     #[inline]
-    pub fn shape_ref(&self) -> Option<&'scope Shape> {
+    pub fn shape_ref(&self) -> Option<&'scope Shape<'scope>> {
         self.shape.get().map(|h| h.get().get())
     }
 
@@ -459,7 +458,7 @@ impl<'scope> Props<'scope> {
     fn with_dict(&self, mc: &Mutation<'scope>, f: impl FnOnce(&mut Dict<'scope>)) {
         if self.dict.get().is_none() {
             let d = mc.alloc(GcCell::new(mc, self.to_dict()));
-            self.dict.set(mc.mutator(), Some(d));
+            self.dict.set(mc.gc_scope(), Some(d));
             self.shape.set(None);
         }
         f(&mut self.dict_cell().expect("just converted").borrow_mut(mc));
@@ -473,8 +472,8 @@ impl<'scope> Props<'scope> {
             Some(k) => {
                 let cur = self.store();
                 let grown = Store::put(cur, mc, k, k, v);
-                if cur.is_none_or(|s| !Gc::ptr_eq(s.gc(), grown.gc())) {
-                    self.store.set(mc.mutator(), Some(grown.gc()));
+                if cur.is_none_or(|s| !ScopeLocal::ptr_eq(s.gc(), grown.gc())) {
+                    self.store.set(mc.gc_scope(), Some(grown.gc()));
                 }
             }
         }
@@ -532,8 +531,8 @@ impl<'scope> Props<'scope> {
                 Some(k) => {
                     let cur = self.store();
                     let grown = Store::put(cur, mc, k, k, v);
-                    if cur.is_none_or(|s| !Gc::ptr_eq(s.gc(), grown.gc())) {
-                        self.store.set(mc.mutator(), Some(grown.gc()));
+                    if cur.is_none_or(|s| !ScopeLocal::ptr_eq(s.gc(), grown.gc())) {
+                        self.store.set(mc.gc_scope(), Some(grown.gc()));
                     }
                 }
             }

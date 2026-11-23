@@ -7,9 +7,9 @@ pub type Task<'t> = Job<'t>;
 
 pub type Settle = Box<dyn for<'scope, 'x> FnOnce(&mut crate::Agent<'scope, 'x>) -> Result<crate::Value<'scope>, crate::Error> + Send>;
 
-pub struct AsyncJob {
-    pub resolve: crate::Global,
-    pub reject: crate::Global,
+pub struct AsyncJob<'i> {
+    pub resolve: crate::Global<'i>,
+    pub reject: crate::Global<'i>,
     pub future: core::pin::Pin<Box<dyn core::future::Future<Output = Settle> + Send>>,
 }
 

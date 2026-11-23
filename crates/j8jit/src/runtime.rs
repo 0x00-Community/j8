@@ -464,7 +464,7 @@ fn deopt(ctx: *mut Ctx, id: u64) -> u64 {
     if d.native {
         ctx.pending = 0;
         let thrown = match throw {
-            Some(Error::Exception(g)) => Some(a.local(&g)),
+            Some(Error::Exception) => Some(a.take_exception()),
             Some(other) => return ctx.fail(other),
             None => None,
         };

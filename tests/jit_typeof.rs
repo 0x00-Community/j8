@@ -36,8 +36,8 @@ fn outcome(jit: bool, text: &str) -> String {
                 let v = a.local(&g);
                 String::from(&**a.to_string(v).expect("ToString"))
             }
-            Err(Error::Exception(g)) => {
-                let v = a.local(&g);
+            Err(Error::Exception) => {
+                let v = a.take_exception();
                 let s = String::from(&**a.to_string(v).expect("ToString"));
                 format!("Uncaught {s}")
             }

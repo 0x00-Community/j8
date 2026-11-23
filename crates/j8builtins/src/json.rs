@@ -395,7 +395,7 @@ impl<'scope> Writer<'scope> {
     }
 
     fn remember_proto(&mut self, o: JsObject<'scope>) {
-        if self.clean_protos.len() < TOJSON_PROTOS && !self.clean_protos.iter().any(|&p| j8framework::Gc::ptr_eq(p, o)) {
+        if self.clean_protos.len() < TOJSON_PROTOS && !self.clean_protos.iter().any(|&p| j8framework::ScopeLocal::ptr_eq(p, o)) {
             self.clean_protos.push(o);
         }
     }
@@ -416,7 +416,7 @@ impl<'scope> Writer<'scope> {
             return false;
         }
         match o.get().proto() {
-            Some(p) => self.clean_protos.iter().any(|&c| j8framework::Gc::ptr_eq(c, p)),
+            Some(p) => self.clean_protos.iter().any(|&c| j8framework::ScopeLocal::ptr_eq(c, p)),
             None => true,
         }
     }
@@ -432,7 +432,7 @@ impl<'scope> Writer<'scope> {
         };
         let mut root = true;
         loop {
-            if self.clean_protos.iter().any(|&p| j8framework::Gc::ptr_eq(p, o)) {
+            if self.clean_protos.iter().any(|&p| j8framework::ScopeLocal::ptr_eq(p, o)) {
                 return Ok(Value::Undefined);
             }
             if !o.get().is_plain() || self.owns_to_json(o) {
@@ -484,11 +484,11 @@ impl<'scope> Writer<'scope> {
             ValueKind::Number(x) if !x.is_finite() => out.push_str("null"),
             ValueKind::Bool(true) => out.push_str("true"),
             ValueKind::Bool(false) => out.push_str("false"),
-            ValueKind::String(s) => Self::quote_string(out, j8framework::Gc::get(s)),
+            ValueKind::String(s) => Self::quote_string(out, j8framework::ScopeLocal::get(s)),
             ValueKind::Number(x) => push_number(out, x),
             ValueKind::BigInt(_) => return Err(a.throw(ErrorKind::Type, "Do not know how to serialize a BigInt")),
             ValueKind::Object(o) if !o.is_callable() => {
-                if self.stack.iter().any(|&s| j8framework::Gc::ptr_eq(s, o)) {
+                if self.stack.iter().any(|&s| j8framework::ScopeLocal::ptr_eq(s, o)) {
                     return Err(a.throw(ErrorKind::Type, "Converting circular structure to JSON"));
                 }
                 self.stack.push(o);
@@ -710,7 +710,7 @@ impl<'scope> Writer<'scope> {
             .iter()
             .map(|v| match v.kind() {
                 ValueKind::Number(x) if x.is_finite() => Part::Number(x),
-                ValueKind::String(s) => Part::Text(j8framework::Gc::get(s).as_str()),
+                ValueKind::String(s) => Part::Text(j8framework::ScopeLocal::get(s).as_str()),
                 ValueKind::Bool(true) => Part::Raw("true"),
                 ValueKind::Bool(false) => Part::Raw("false"),
                 _ => Part::Raw("null"),
@@ -893,7 +893,7 @@ impl Writer<'_> {
     fn push_plain(out: &mut String, v: Value<'_>) {
         match v.kind() {
             ValueKind::Number(x) if x.is_finite() => push_number(out, x),
-            ValueKind::String(s) => Self::quote_string(out, j8framework::Gc::get(s)),
+            ValueKind::String(s) => Self::quote_string(out, j8framework::ScopeLocal::get(s)),
             ValueKind::Bool(true) => out.push_str("true"),
             ValueKind::Bool(false) => out.push_str("false"),
             _ => out.push_str("null"),

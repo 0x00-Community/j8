@@ -30,7 +30,7 @@ fn shared_objects_are_signed_when_the_turn_ends() {
     let mut isolate = Isolate::new(&platform, CreateParams::default());
     isolate.attach_cross_heap(space.create_anonymous(THREADS).unwrap()).unwrap();
     let tickets = isolate.enter(|scope| {
-        let m = scope.mc.mutator();
+        let m = scope.mc.gc_scope();
         let tail = m.alloc_shared(Payload { value: 1, next: None.into() });
         let head = m.alloc_shared(Payload { value: 42, next: Some(tail).into() });
         let local = m.alloc(Local { value: 7 });

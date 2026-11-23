@@ -26,7 +26,7 @@ mod slot {
 
 impl Promises {
     fn is_intrinsic<'scope>(a: &Agent<'scope, '_>, c: Value<'scope>) -> bool {
-        matches!(c.kind(), ValueKind::Object(o) if j8framework::Gc::ptr_eq(o, a.realm.promise_ctor))
+        matches!(c.kind(), ValueKind::Object(o) if j8framework::ScopeLocal::ptr_eq(o, a.realm.promise_ctor))
     }
 
     fn closure<'scope>(a: &Agent<'scope, '_>, f: j8framework::ClosureFn, slots: Vec<Value<'scope>>, length: u32) -> JsObject<'scope> {
@@ -104,8 +104,8 @@ impl Promises {
         let (resolve, reject) = a.promise_resolvers(p);
         match a.call(executor, Value::Undefined, &[resolve.into(), reject.into()]) {
             Ok(_) => {}
-            Err(Error::Exception(g)) => {
-                let reason = a.local(&g);
+            Err(Error::Exception) => {
+                let reason = a.take_exception();
                 a.call(reject.into(), Value::Undefined, &[reason])?;
             }
             Err(e) => return Err(e),
@@ -145,8 +145,8 @@ impl Promises {
         let cap = Self::new_capability(a, c)?;
         match a.call(args.at(0), Value::Undefined, args.get(1..).unwrap_or(&[])) {
             Ok(v) => a.call(cap.resolve, Value::Undefined, &[v])?,
-            Err(Error::Exception(g)) => {
-                let reason = a.local(&g);
+            Err(Error::Exception) => {
+                let reason = a.take_exception();
                 a.call(cap.reject, Value::Undefined, &[reason])?
             }
             Err(e) => return Err(e),
@@ -230,8 +230,8 @@ impl Promises {
 
     fn reject_on<'scope>(a: &mut Agent<'scope, '_>, cap: &Capability<'scope>, e: Error) -> Result<Value<'scope>, Error> {
         match e {
-            Error::Exception(g) => {
-                let reason = a.local(&g);
+            Error::Exception => {
+                let reason = a.take_exception();
                 a.call(cap.reject, Value::Undefined, &[reason])?;
                 Ok(cap.promise)
             }

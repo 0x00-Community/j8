@@ -1,7 +1,7 @@
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use crate::{Collect, Erased, Gc, GcSlot, IsoCell, Mutation, Value, ValueCell, erase};
+use crate::{Collect, Erased, ScopeLocal, GcSlot, IsoCell, Mutation, Value, ValueCell, erase};
 
 pub(crate) static INDEXED_STAMP: AtomicU64 = AtomicU64::new(1);
 
@@ -45,7 +45,7 @@ struct Node<'scope> {
 }
 
 #[derive(Clone, Copy)]
-pub struct Store<'scope>(Gc<'scope, Erased>);
+pub struct Store<'scope>(ScopeLocal<'scope, Erased>);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StorePath {
@@ -56,7 +56,7 @@ pub struct StorePath {
 
 impl<'scope> Store<'scope> {
     fn leaf(mc: &Mutation<'scope>, cap: usize, init: &[Value<'scope>]) -> Self {
-        fn make<'scope, const N: usize>(mc: &Mutation<'scope>, init: &[Value<'scope>]) -> Gc<'scope, Erased> {
+        fn make<'scope, const N: usize>(mc: &Mutation<'scope>, init: &[Value<'scope>]) -> ScopeLocal<'scope, Erased> {
             erase(mc.alloc(Leaf::<N> { head: N, cells: core::array::from_fn(|i| ValueCell::new(init.get(i).copied().unwrap_or_default())) }))
         }
         Self(match cap.max(init.len()).max(MIN_LEAF).next_power_of_two() {
@@ -137,13 +137,13 @@ impl<'scope> Store<'scope> {
             return;
         }
         let Some((leaf, base, cap)) = self.locate(index) else {
-            self.tail_slot().set(mc.mutator(), None);
+            self.tail_slot().set(mc.gc_scope(), None);
             return;
         };
         let meta = u64::from(u32::try_from(base).expect("element index fits u32")) | (u64::from(u32::try_from(cap).expect("leaf capacity fits u32")) << 32);
-        self.tail_slot().set(mc.mutator(), None);
+        self.tail_slot().set(mc.gc_scope(), None);
         self.tail_meta().set(meta);
-        self.tail_slot().set(mc.mutator(), Some(leaf.0));
+        self.tail_slot().set(mc.gc_scope(), Some(leaf.0));
     }
 
     pub const NODE_MARK: usize = NODE;
@@ -210,7 +210,7 @@ impl<'scope> Store<'scope> {
                 Some(k) => Self(k),
                 None => {
                     let fresh = if level == 1 { Self::leaf(mc, FAN, &[]) } else { Self::node(mc, level - 1, None) };
-                    slot.set(mc.mutator(), Some(fresh.0));
+                    slot.set(mc.gc_scope(), Some(fresh.0));
                     fresh
                 }
             };
@@ -272,11 +272,11 @@ impl<'scope> Store<'scope> {
         s
     }
 
-    pub fn gc(self) -> Gc<'scope, Erased> {
+    pub fn gc(self) -> ScopeLocal<'scope, Erased> {
         self.0
     }
 
-    pub unsafe fn from_gc(g: Gc<'scope, Erased>) -> Self {
+    pub unsafe fn from_gc(g: ScopeLocal<'scope, Erased>) -> Self {
         Self(g)
     }
 }
@@ -398,8 +398,8 @@ impl<'scope> ValueArray<'scope> {
             None => Store::leaf(mc, need, &[]),
         };
         let grown = s.grown(mc, need, self.len());
-        if cur.is_none_or(|c| !Gc::ptr_eq(c, grown.0)) {
-            self.root.set(mc.mutator(), Some(grown.0));
+        if cur.is_none_or(|c| !ScopeLocal::ptr_eq(c, grown.0)) {
+            self.root.set(mc.gc_scope(), Some(grown.0));
         }
         grown
     }
@@ -428,7 +428,7 @@ impl<'scope> ValueArray<'scope> {
         let s = match self.root.get() {
             None => {
                 let s = Store::reserve(mc, to);
-                self.root.set(mc.mutator(), Some(s.0));
+                self.root.set(mc.gc_scope(), Some(s.0));
                 s
             }
             Some(_) => self.reserve(mc, to),
@@ -503,7 +503,7 @@ impl<'scope> ValueArray<'scope> {
 
     pub fn replace(&self, mc: &Mutation<'scope>, values: &[Value<'scope>]) {
         let fresh = Store::from_values(mc, values);
-        self.root.set(mc.mutator(), fresh.map(Store::gc));
+        self.root.set(mc.gc_scope(), fresh.map(Store::gc));
         self.len.set(u32::try_from(values.len()).expect("array length fits u32"));
     }
 
@@ -529,7 +529,7 @@ mod tests {
 
     use crate::{Heap, Mutation, Value, ValueArray};
 
-    crate::paragc::brand!(ArrayBrand = for<'scope> ValueArray<'scope>);
+    crate::paragc::brand!(ArrayBrand = for<'heap, 'scope> ValueArray<'scope>);
 
     fn number_at(a: &ValueArray<'_>, i: usize) -> f64 {
         a.get(i).and_then(Value::as_number).unwrap_or(f64::NAN)

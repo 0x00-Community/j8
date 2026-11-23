@@ -4,7 +4,7 @@ use core::fmt::Write;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use j8framework::{Gc, Static};
+use j8framework::{ScopeLocal, Static};
 use j8framework::{Agent, Error, ErrorKind, JsObject, JsString, Key, ObjectData, ObjectKind, Property, RegExpData, Slot, SmallStr, Units, Value};
 
 use crate::buffer::Buffers;
@@ -230,11 +230,11 @@ impl Regexps {
         out
     }
 
-    fn compiled<'scope>(a: &Agent<'scope, '_>, source: &str, flags: &str) -> Result<Gc<'scope, Static<Box<dyn core::any::Any + Send + Sync>>>, Error> {
+    fn compiled<'scope>(a: &Agent<'scope, '_>, source: &str, flags: &str) -> Result<ScopeLocal<'scope, Static<Box<dyn core::any::Any + Send + Sync>>>, Error> {
         Self::cached(a, source, flags).map(|c| c.compiled)
     }
 
-    fn compiled_string<'scope>(a: &Agent<'scope, '_>, source: JsString<'scope>, flags: &str) -> Result<Gc<'scope, Static<Box<dyn core::any::Any + Send + Sync>>>, Error> {
+    fn compiled_string<'scope>(a: &Agent<'scope, '_>, source: JsString<'scope>, flags: &str) -> Result<ScopeLocal<'scope, Static<Box<dyn core::any::Any + Send + Sync>>>, Error> {
         if !source.lone_surrogates() {
             return Self::compiled(a, &source, flags);
         }
@@ -258,7 +258,7 @@ impl Regexps {
         let regex = Compiled::new(Self::compile(a, source, flags)?, source, flags);
         let compiled = a.mc.alloc(Static(Box::new(regex) as Box<dyn core::any::Any + Send + Sync>));
         let entry = j8framework::RegExpCompiled { source: a.string(source), flags: a.string(flags), compiled };
-        slot.set(a.mc.mutator(), Some(a.mc.alloc(entry.clone())));
+        slot.set(a.mc.gc_scope(), Some(a.mc.alloc(entry.clone())));
         Ok(entry)
     }
 
@@ -292,7 +292,7 @@ impl Regexps {
         let buddy = (bucket + 1) % j8framework::RegExpCompiled::BUCKETS;
         let key = |e: &j8framework::RegExpLiteralEntry<'scope>| e.ptr == entry.ptr && e.len == entry.len && e.flags == entry.flags;
         let at = if cache[bucket].get().is_none_or(|e| key(&e)) || cache[buddy].get().is_some_and(|e| !key(&e)) { bucket } else { buddy };
-        cache[at].set(a.mc.mutator(), Some(a.mc.alloc(entry)));
+        cache[at].set(a.mc.gc_scope(), Some(a.mc.alloc(entry)));
     }
 
     pub(crate) fn literal<'scope>(a: &Agent<'scope, '_>, source: &str, flags: u16) -> Result<Value<'scope>, Error> {
@@ -343,7 +343,7 @@ impl Regexps {
         let compiled = Self::compiled(a, "", "")?;
         let kind = ObjectKind::RegExp(RegExpData { source: empty, flags: empty, compiled, legacy });
         let o = ObjectData { kind, proto: Some(proto), ..ObjectData::default() }.alloc(a.mc);
-        if Gc::ptr_eq(proto, a.realm.regexp_proto) {
+        if ScopeLocal::ptr_eq(proto, a.realm.regexp_proto) {
             Self::stamp(a, o, Value::Undefined);
         } else {
             o.borrow_mut(a.mc).define("lastIndex", Property { slot: Slot::Data(Value::Undefined), enumerable: false, writable: true, configurable: false });
@@ -429,7 +429,7 @@ impl Regexps {
         }
     }
 
-    fn data(o: JsObject<'_>) -> (JsString<'_>, JsString<'_>, Gc<'_, Static<Box<dyn core::any::Any + Send + Sync>>>) {
+    fn data(o: JsObject<'_>) -> (JsString<'_>, JsString<'_>, ScopeLocal<'_, Static<Box<dyn core::any::Any + Send + Sync>>>) {
         let d = o.regexp().expect("checked to be a regexp");
         (d.source, d.flags, d.compiled)
     }
@@ -579,7 +579,7 @@ impl Regexps {
             return None;
         }
         let proto = o.proto()?;
-        if !Gc::ptr_eq(proto, a.realm.regexp_proto) {
+        if !ScopeLocal::ptr_eq(proto, a.realm.regexp_proto) {
             return None;
         }
         let saved = a.realm.regexp_pristine.get().as_ref()?;
@@ -608,7 +608,7 @@ impl Regexps {
             SYM_SPLIT => symbols.split,
             _ => return false,
         };
-        a.realm.regexp_proto.borrow().get_own_symbol(sym).is_some_and(|prop| matches!(prop.slot, Slot::Data(v) if v.as_object().is_some_and(|f| Gc::ptr_eq(f, expected))))
+        a.realm.regexp_proto.borrow().get_own_symbol(sym).is_some_and(|prop| matches!(prop.slot, Slot::Data(v) if v.as_object().is_some_and(|f| ScopeLocal::ptr_eq(f, expected))))
     }
 
     fn species_builtin(a: &Agent<'_, '_>) -> bool {
@@ -618,7 +618,7 @@ impl Regexps {
             return false;
         }
         let Some(ctor) = saved.constructor.1.as_object() else { return false };
-        ctor.borrow().get_own_symbol(a.realm.symbols.species).is_some_and(|prop| matches!(prop.slot, Slot::Accessor { get: Some(g), set: None } if Gc::ptr_eq(g, saved.species)))
+        ctor.borrow().get_own_symbol(a.realm.symbols.species).is_some_and(|prop| matches!(prop.slot, Slot::Accessor { get: Some(g), set: None } if ScopeLocal::ptr_eq(g, saved.species)))
     }
 
     fn prepared<'scope>(a: &mut Agent<'scope, '_>, recv: Value<'scope>, arg: Value<'scope>, wide: bool, sym: usize) -> Result<Option<(JsObject<'scope>, f64, JsString<'scope>)>, Error> {
@@ -1194,7 +1194,7 @@ impl Regexps {
 
     fn source<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         if let Some(o) = this.as_object()
-            && Gc::ptr_eq(o, a.realm.regexp_proto)
+            && ScopeLocal::ptr_eq(o, a.realm.regexp_proto)
         {
             return Ok(a.string("(?:)").into());
         }
@@ -1228,7 +1228,7 @@ impl Regexps {
         let Some(o) = this.as_object() else { return Err(a.throw(ErrorKind::Type, "RegExp flag getter called on a non-object")) };
         match Self::regexp(this) {
             Some(r) => Ok(Self::with_program(r, |c| c.has(C)).into()),
-            None if Gc::ptr_eq(o, a.realm.regexp_proto) => Ok(Value::Undefined),
+            None if ScopeLocal::ptr_eq(o, a.realm.regexp_proto) => Ok(Value::Undefined),
             None => Err(a.throw(ErrorKind::Type, "RegExp flag getter called on an incompatible receiver")),
         }
     }
@@ -1241,7 +1241,7 @@ impl Regexps {
     fn builtin_bits<'scope>(a: &Agent<'scope, '_>, r: Value<'scope>) -> Option<u16> {
         let o = Self::regexp(r)?;
         let saved = a.realm.regexp_pristine.get().as_ref()?;
-        if o.props().shape() != Some(saved.last_index) || o.proto().is_none_or(|p| !Gc::ptr_eq(p, a.realm.regexp_proto)) {
+        if o.props().shape() != Some(saved.last_index) || o.proto().is_none_or(|p| !ScopeLocal::ptr_eq(p, a.realm.regexp_proto)) {
             return None;
         }
         let props = a.realm.regexp_proto.get().props();

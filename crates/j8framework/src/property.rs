@@ -2,7 +2,7 @@ use crate::ValueKind;
 use alloc::format;
 use alloc::vec::Vec;
 
-use crate::{Gc};
+use crate::{ScopeLocal};
 
 use crate::ops::index_of_str;
 use crate::{Agent, Error, ErrorKind, JsObject, JsString, JsSymbol, ObjectKind, Property, Slot, Value};
@@ -94,7 +94,7 @@ pub enum Integrity {
 
 fn same_object<'scope>(a: Option<JsObject<'scope>>, b: Option<JsObject<'scope>>) -> bool {
     match (a, b) {
-        (Some(x), Some(y)) => Gc::ptr_eq(x, y),
+        (Some(x), Some(y)) => ScopeLocal::ptr_eq(x, y),
         (None, None) => true,
         _ => false,
     }
@@ -483,12 +483,12 @@ impl<'scope> Agent<'scope, '_> {
         if same_object(current, proto) {
             return Ok(true);
         }
-        if !extensible || Gc::ptr_eq(o, self.realm.object_proto) {
+        if !extensible || ScopeLocal::ptr_eq(o, self.realm.object_proto) {
             return Ok(false);
         }
         let mut p = proto;
         while let Some(x) = p {
-            if Gc::ptr_eq(x, o) {
+            if ScopeLocal::ptr_eq(x, o) {
                 return Ok(false);
             }
             if matches!(x.borrow().kind, ObjectKind::Proxy(_)) {

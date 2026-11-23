@@ -1,7 +1,7 @@
 use crate::ValueKind;
 use alloc::boxed::Box;
 
-use crate::{Gc};
+use crate::{ScopeLocal};
 
 use crate::{Agent, Error, ErrorKind, JsObject, JsSymbol, Property, Slot, SymbolData, Value};
 
@@ -18,7 +18,7 @@ impl<'scope> Agent<'scope, '_> {
     }
 
     fn private_label(key: JsSymbol<'scope>) -> &'scope str {
-        Gc::get(key).description.as_deref().unwrap_or("#")
+        ScopeLocal::get(key).description.as_deref().unwrap_or("#")
     }
 
     fn private_holder(&self, obj: Value<'scope>, key: JsSymbol<'scope>, verb: &str) -> Result<JsObject<'scope>, Error> {
@@ -29,7 +29,7 @@ impl<'scope> Agent<'scope, '_> {
     }
 
     fn private_lookup(o: JsObject<'scope>, key: JsSymbol<'scope>) -> Option<Property<'scope>> {
-        o.borrow().privates.iter().find_map(|&(k, p)| Gc::ptr_eq(k, key).then_some(p))
+        o.borrow().privates.iter().find_map(|&(k, p)| ScopeLocal::ptr_eq(k, key).then_some(p))
     }
 
     pub fn private_get(&mut self, obj: Value<'scope>, key: JsSymbol<'scope>) -> Result<Value<'scope>, Error> {
@@ -47,7 +47,7 @@ impl<'scope> Agent<'scope, '_> {
         match Self::private_lookup(o, key) {
             Some(Property { slot: Slot::Data(_), writable: true, .. }) => {
                 let mut d = o.borrow_mut(self.mc);
-                if let Some((_, p)) = d.privates.iter_mut().find(|(k, _)| Gc::ptr_eq(*k, key)) {
+                if let Some((_, p)) = d.privates.iter_mut().find(|(k, _)| ScopeLocal::ptr_eq(*k, key)) {
                     p.slot = Slot::Data(value);
                 }
                 Ok(())
@@ -73,7 +73,7 @@ impl<'scope> Agent<'scope, '_> {
             _ => return Err(self.throw(ErrorKind::Type, &alloc::format!("Cannot initialize {} twice on the same object", Self::private_label(key)))),
         };
         let mut d = o.borrow_mut(self.mc);
-        match d.privates.iter_mut().find(|(k, _)| Gc::ptr_eq(*k, key)) {
+        match d.privates.iter_mut().find(|(k, _)| ScopeLocal::ptr_eq(*k, key)) {
             Some((_, p)) => *p = merged,
             None => d.privates.push((key, merged)),
         }

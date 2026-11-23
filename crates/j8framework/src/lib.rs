@@ -53,7 +53,7 @@ pub use shape::{Attrs, Dict, Props, Shape, ShapeBrand, ShapeKey, ShapeRef};
 pub use store::{ElementRun, Store, StorePath, ValueArray, indexed_stamp_addr};
 pub use parallel::Par;
 pub use platform::Pool;
-pub use gc::{IsoCell, Mutable, CellExt, CellMut, CellRef, Collect, Cow, Erased, Gc, GcCell, GcQueue, Heap, Mutation, Mutator, Root, Slot as GcSlot, Brand, Static, Tlab, Trace, Tracer, ValueCell, erase, gc_from_raw};
+pub use gc::{IsoCell, Mutable, CellExt, CellMut, CellRef, Collect, Cow, Erased, GcCell, GcQueue, GcScope, Handle, HandleSlot, Heap, Mutation, ScopeGlobal, ScopeLocal, Slot as GcSlot, Brand, Static, Tlab, Trace, Tracer, ValueCell, Weak, WordSlot, erase, gc_from_raw, rebrand, rebrand_ref};
 pub use paragc;
 pub use j8macros::heap;
 pub use module::{ImportEntry, ImportName, ModuleInfo, ModuleRecord, ModuleStatus, Resolution, ResolvedBinding};

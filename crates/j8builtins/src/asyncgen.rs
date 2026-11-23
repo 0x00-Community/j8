@@ -59,8 +59,8 @@ impl AsyncFromSync {
 
     fn rejected<'scope>(a: &mut Agent<'scope, '_>, p: JsObject<'scope>, e: Error) -> Result<Value<'scope>, Error> {
         match e {
-            Error::Exception(g) => {
-                let reason = a.local(&g);
+            Error::Exception => {
+                let reason = a.take_exception();
                 a.reject_promise(p, reason);
                 Ok(p.into())
             }

@@ -5,38 +5,98 @@ use core::ops::{Deref, DerefMut};
 use core::ptr::NonNull;
 
 pub use j8macros::Collect;
-pub use paragc::{Brand, Gc, Heap, Mutator, Root, Slot, Tlab, Trace, Tracer, WordSlot};
+pub use paragc::{Brand, Heap, Tlab, Trace, Tracer};
 
 use crate::Value;
 
+pub type ScopeLocal<'scope, T> = paragc::ScopeLocal<'scope, 'scope, T>;
+
+pub type Slot<'scope, T> = paragc::Slot<'scope, 'scope, T>;
+
+pub type WordSlot<'scope> = paragc::WordSlot<'scope, 'scope>;
+
+pub type GcScope<'scope> = paragc::Scope<'scope, 'scope>;
+
+pub type Handle<'scope, T> = paragc::Handle<'scope, 'scope, T>;
+
+pub type HandleSlot<'scope, T> = paragc::HandleSlot<'scope, 'scope, T>;
+
+pub type ScopeGlobal<'i, B> = paragc::ScopeGlobal<'i, 'i, B>;
+
+pub type Weak<'i, B> = paragc::Weak<'i, B>;
+
+pub unsafe fn rebrand<From, To>(v: From) -> To {
+    const { assert!(size_of::<From>() == size_of::<To>()) };
+    let v = ManuallyDrop::new(v);
+    unsafe { core::ptr::read(core::ptr::from_ref::<From>(&v).cast::<To>()) }
+}
+
+pub unsafe fn rebrand_ref<From, To>(v: &From) -> &To {
+    unsafe { &*core::ptr::from_ref(v).cast::<To>() }
+}
+
 #[inline]
-pub unsafe fn gc_from_raw<'scope, T>(ptr: *const T) -> Gc<'scope, T> {
-    unsafe { Gc::from_raw(ptr) }
+pub unsafe fn gc_from_raw<'scope, T>(ptr: *const T) -> ScopeLocal<'scope, T> {
+    unsafe { ScopeLocal::from_raw(ptr) }
 }
 
 pub struct Mutation<'scope> {
-    m: NonNull<Mutator<'scope>>,
+    m: NonNull<GcScope<'scope>>,
     generation: u64,
+    pending: core::cell::Cell<Option<Value<'scope>>>,
 }
 
 impl<'scope> Mutation<'scope> {
-    pub unsafe fn new(m: &Mutator<'scope>, generation: u64) -> Self {
-        Self { m: NonNull::from(m), generation }
+    pub unsafe fn new(m: &GcScope<'scope>, generation: u64) -> Self {
+        Self { m: NonNull::from(m), generation, pending: core::cell::Cell::new(None) }
+    }
+
+    pub fn raise(&self, v: Value<'scope>) -> crate::Error {
+        self.pending.set(Some(v));
+        crate::Error::Exception
+    }
+
+    pub fn take_exception(&self) -> Option<Value<'scope>> {
+        self.pending.take()
+    }
+
+    pub fn has_exception(&self) -> bool {
+        self.pending.get().is_some()
     }
 
     #[inline]
-    pub fn mutator(&self) -> &Mutator<'scope> {
+    pub fn gc_scope(&self) -> &'scope GcScope<'scope> {
         unsafe { self.m.as_ref() }
     }
 
     #[inline]
-    pub fn alloc<T: Trace + 'scope>(&self, v: T) -> Gc<'scope, T> {
-        self.mutator().alloc(v)
+    pub fn alloc<T: Trace + 'scope>(&self, v: T) -> ScopeLocal<'scope, T> {
+        self.gc_scope().alloc(v)
     }
 
     #[inline]
     pub fn generation(&self) -> u64 {
         self.generation
+    }
+
+    pub fn stash<'i, B: Brand>(&self, v: ScopeLocal<'scope, B::Of<'scope, 'scope>>) -> ScopeGlobal<'i, B> {
+        let g: paragc::ScopeGlobal<'scope, 'scope, B> = self.gc_scope().scope_out(v);
+        unsafe { rebrand(g) }
+    }
+
+    pub fn fetch<B: Brand>(&self, g: &ScopeGlobal<'_, B>) -> ScopeLocal<'scope, B::Of<'scope, 'scope>> {
+        let g: &paragc::ScopeGlobal<'scope, 'scope, B> = unsafe { rebrand_ref(g) };
+        self.gc_scope().scope_in(g)
+    }
+
+    pub fn weak<'i, B: Brand>(&self, v: ScopeLocal<'scope, B::Of<'scope, 'scope>>) -> Weak<'i, B> {
+        let w: paragc::Weak<'scope, B> = self.gc_scope().weak(v);
+        unsafe { rebrand(w) }
+    }
+
+    pub fn upgrade<B: Brand>(&self, w: &Weak<'_, B>) -> Option<ScopeLocal<'scope, B::Of<'scope, 'scope>>> {
+        let w: &paragc::Weak<'scope, B> = unsafe { rebrand_ref(w) };
+        self.gc_scope().upgrade(w)
     }
 }
 
@@ -49,7 +109,7 @@ unsafe impl Trace for Erased {
 }
 
 #[inline]
-pub fn erase<T>(g: Gc<'_, T>) -> Gc<'_, Erased> {
+pub fn erase<T>(g: ScopeLocal<'_, T>) -> ScopeLocal<'_, Erased> {
     unsafe { gc_from_raw(g.as_ptr().cast()) }
 }
 
@@ -147,7 +207,7 @@ impl<'scope, T: Trace + 'scope> GcCell<'scope, T> {
         self.snap.get().is_some()
     }
 
-    fn current(&self) -> Gc<'scope, Snap<T>> {
+    fn current(&self) -> ScopeLocal<'scope, Snap<T>> {
         self.snap.get().expect("borrowed an empty GcCell (check has_value first)")
     }
 
@@ -175,14 +235,14 @@ impl<'scope, T: Trace + 'scope> GcCell<'scope, T> {
         self.state.set(WRITING);
         let Some(mut snap) = self.snap.get() else {
             let snap = mc.alloc(Snap { generation: mc.generation, moved: IsoCell::new(false), data: UnsafeCell::new(ManuallyDrop::new(init())) });
-            self.snap.set(mc.mutator(), Some(snap));
+            self.snap.set(mc.gc_scope(), Some(snap));
             return Some(CellMut { state: &self.state, data: unsafe { &mut *snap.get().data.get() } });
         };
         if snap.generation != mc.generation {
             let data = unsafe { ManuallyDrop::take(&mut *snap.data.get()) };
             snap.moved.set(true);
             snap = mc.alloc(Snap { generation: mc.generation, moved: IsoCell::new(false), data: UnsafeCell::new(ManuallyDrop::new(data)) });
-            self.snap.set(mc.mutator(), Some(snap));
+            self.snap.set(mc.gc_scope(), Some(snap));
         }
         Some(CellMut { state: &self.state, data: unsafe { &mut *snap.get().data.get() } })
     }
@@ -277,7 +337,7 @@ impl<'scope> ValueCell<'scope> {
 
     #[inline]
     pub fn set(&self, mc: &Mutation<'scope>, v: Value<'scope>) {
-        self.0.set(mc.mutator(), v.bits());
+        self.0.set(mc.gc_scope(), v.bits());
     }
 
     pub fn set_mut(&mut self, v: Value<'scope>) {
@@ -316,7 +376,7 @@ impl<'scope, T: Trace + 'scope> Cow<'scope, T> {
         let mut cur = self.0.get();
         loop {
             let (next, r) = f(cur.expect("a Cow always holds a value").get());
-            match self.0.compare_exchange(mc.mutator(), cur, Some(mc.alloc(next))) {
+            match self.0.compare_exchange(mc.gc_scope(), cur, Some(mc.alloc(next))) {
                 Ok(_) => return r,
                 Err(now) => cur = now,
             }
@@ -328,7 +388,7 @@ impl<'scope, T: Trace + 'scope> Cow<'scope, T> {
     }
 
     pub fn set(&self, mc: &Mutation<'scope>, t: T) {
-        self.0.set(mc.mutator(), Some(mc.alloc(t)));
+        self.0.set(mc.gc_scope(), Some(mc.alloc(t)));
     }
 }
 
@@ -370,12 +430,12 @@ impl<'scope, T: Trace + Clone + 'scope> GcQueue<'scope, T> {
         Self { head: Slot::from(dummy), tail: Slot::from(dummy) }
     }
 
-    fn node(s: &Slot<'scope, QNode<'scope, T>>) -> Gc<'scope, QNode<'scope, T>> {
+    fn node(s: &Slot<'scope, QNode<'scope, T>>) -> ScopeLocal<'scope, QNode<'scope, T>> {
         s.get().expect("the queue always has a dummy node")
     }
 
     pub fn push(&self, mc: &Mutation<'scope>, value: T) {
-        let m = mc.mutator();
+        let m = mc.gc_scope();
         let node = mc.alloc(QNode { value: Some(value), next: Slot::default() });
         loop {
             let last = Self::node(&self.tail);
@@ -394,12 +454,12 @@ impl<'scope, T: Trace + Clone + 'scope> GcQueue<'scope, T> {
     }
 
     pub fn pop(&self, mc: &Mutation<'scope>) -> Option<T> {
-        let m = mc.mutator();
+        let m = mc.gc_scope();
         loop {
             let first = Self::node(&self.head);
             let last = Self::node(&self.tail);
             let next = first.get().next.get()?;
-            if Gc::ptr_eq(first, last) {
+            if ScopeLocal::ptr_eq(first, last) {
                 let _ = self.tail.compare_exchange(m, Some(last), Some(next));
                 continue;
             }
@@ -474,7 +534,7 @@ pub trait CellExt<'scope, T> {
     fn try_borrow_mut(self, mc: &Mutation<'scope>) -> Option<CellMut<'scope, T>>;
 }
 
-impl<'scope, T: Trace + 'scope> CellExt<'scope, T> for Gc<'scope, GcCell<'scope, T>> {
+impl<'scope, T: Trace + 'scope> CellExt<'scope, T> for ScopeLocal<'scope, GcCell<'scope, T>> {
     #[inline]
     fn borrow(self) -> CellRef<'scope, T> {
         self.get().borrow()
@@ -521,7 +581,7 @@ impl<'scope> Mutable<'scope> for Value<'scope> {
     }
 }
 
-impl<'scope, T: Trace + 'scope> Mutable<'scope> for Option<Gc<'scope, T>> {
+impl<'scope, T: Trace + 'scope> Mutable<'scope> for Option<ScopeLocal<'scope, T>> {
     type Cell = Slot<'scope, T>;
 
     fn cell(v: Self) -> Self::Cell {
@@ -535,11 +595,11 @@ impl<'scope, T: Trace + 'scope> Mutable<'scope> for Option<Gc<'scope, T>> {
 
     #[inline]
     fn store(cell: &Self::Cell, mc: &Mutation<'scope>, v: Self) {
-        cell.set(mc.mutator(), v);
+        cell.set(mc.gc_scope(), v);
     }
 }
 
-impl<'scope, T: Trace + 'scope> Mutable<'scope> for Gc<'scope, T> {
+impl<'scope, T: Trace + 'scope> Mutable<'scope> for ScopeLocal<'scope, T> {
     type Cell = Slot<'scope, T>;
 
     fn cell(v: Self) -> Self::Cell {
@@ -548,12 +608,12 @@ impl<'scope, T: Trace + 'scope> Mutable<'scope> for Gc<'scope, T> {
 
     #[inline]
     fn load(cell: &Self::Cell) -> Self {
-        cell.get().expect("a non-optional Gc field is always set")
+        cell.get().expect("a non-optional ScopeLocal field is always set")
     }
 
     #[inline]
     fn store(cell: &Self::Cell, mc: &Mutation<'scope>, v: Self) {
-        cell.set(mc.mutator(), Some(v));
+        cell.set(mc.gc_scope(), Some(v));
     }
 }
 
