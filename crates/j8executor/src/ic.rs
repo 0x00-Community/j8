@@ -1,13 +1,12 @@
 use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
 
-use j8framework::{JsObject, Mutation, Object, ShapeBrand, ShapeKey, ShapeRef, Slot, Value};
-use j8framework::Root;
+use j8framework::{JsObject, Mutation, Object, ShapeKey, ShapeRef, Slot, Trace, Tracer, Value};
 
-pub type Kept = (ShapeKey, Root<ShapeBrand>);
+type Kept = ShapeKey;
 
-pub fn kept_from<'gc>(mc: &Mutation<'gc>, h: ShapeRef<'gc>) -> Kept {
-    (ShapeKey::from(h), mc.mutator().root::<ShapeBrand>(h.get()))
+fn kept_from<'gc>(_: &Mutation<'gc>, h: ShapeRef<'gc>) -> Kept {
+    ShapeKey::from(h)
 }
 
 const EMPTY: usize = 1;
@@ -22,7 +21,7 @@ fn plain(d: &Object<'_>) -> bool {
     d.is_plain() && !d.props().is_dict()
 }
 
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 pub struct Before {
     shape: usize,
     from: Option<ShapeKey>,
@@ -171,8 +170,8 @@ impl Ic {
             return false;
         }
         let to = self.to.borrow();
-        let Some((_, to)) = &*to else { return false };
-        o.push_to(mc, mc.mutator().get(to).handle(mc), Slot::Data(v));
+        let Some(to) = *to else { return false };
+        o.push_to(mc, unsafe { to.handle() }, Slot::Data(v));
         true
     }
 
@@ -301,7 +300,7 @@ pub struct PropertyFeedback {
 impl Ic {
     fn kept(&self, addr: usize) -> Option<ShapeKey> {
         let to = self.to.borrow();
-        self.keep.borrow().iter().chain(to.as_ref()).map(|(k, _)| *k).find(|k| k.id() == addr)
+        self.keep.borrow().iter().chain(to.as_ref()).copied().find(|k| k.id() == addr)
     }
 
     pub fn feedback(&self) -> Option<PropertyFeedback> {
@@ -314,7 +313,7 @@ impl Ic {
         let adds = self.adds.get();
         let levels = depth.min(DEPTH);
         let chain = self.chain[..levels].iter().map(|c| self.kept(c.get())).collect::<Option<Vec<_>>>()?;
-        let to = if adds { Some(self.to.borrow().as_ref()?.0) } else { None };
+        let to = if adds { Some((*self.to.borrow())?) } else { None };
         let slot = to.map_or(self.slot.get() as usize, |t| unsafe { t.shape() }.len() - 1);
         Some(PropertyFeedback { shape, slot, depth, chain, to })
     }
@@ -331,7 +330,7 @@ pub struct GlobalFeedback {
 
 impl GlobalIc {
     fn kept(&self, addr: usize) -> Option<ShapeKey> {
-        self.keep.borrow().iter().map(|(k, _)| *k).find(|k| k.id() == addr)
+        self.keep.borrow().iter().copied().find(|k| k.id() == addr)
     }
 
     pub fn feedback(&self) -> Option<GlobalFeedback> {
@@ -346,5 +345,17 @@ impl GlobalIc {
             g => Some(self.kept(g)?),
         };
         Some(GlobalFeedback { scope, global, slot: self.slot.get() as usize, writable: self.writable.get() })
+    }
+}
+
+impl Ic {
+    pub fn trace_keys(&self, t: &mut Tracer<'_>) {
+        self.keep.borrow().iter().chain(self.to.borrow().as_ref()).for_each(|k| k.trace(t));
+    }
+}
+
+impl GlobalIc {
+    pub fn trace_keys(&self, t: &mut Tracer<'_>) {
+        self.keep.borrow().iter().for_each(|k| k.trace(t));
     }
 }

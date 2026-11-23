@@ -46,6 +46,7 @@ pub struct Built {
     pub targets: Vec<FuncId>,
     pub shapes: Vec<Option<ShapeKey>>,
     pub keep: Vec<ShapeKey>,
+    pub codes: Vec<FuncId>,
 }
 
 #[derive(Debug)]
@@ -185,6 +186,7 @@ pub struct Builder<'e> {
     targets: Vec<FuncId>,
     shapes: Vec<Option<ShapeKey>>,
     keep: Vec<ShapeKey>,
+    codes: Vec<FuncId>,
     cfgs: BTreeMap<u32, Rc<Cfg>>,
     widen: Widen,
     instances: u32,
@@ -206,7 +208,7 @@ impl<'e> Builder<'e> {
             if log && round > 0 {
                 std::eprintln!("j8jit: restart {round}");
             }
-            let mut b = Builder { exe, hints, g: Graph::default(), targets: Vec::new(), shapes: Vec::new(), keep: Vec::new(), cfgs: BTreeMap::new(), widen: widen.clone(), instances: 0, cur: None, undef: 0, restart: false, kind, root, paths, log };
+            let mut b = Builder { exe, hints, g: Graph::default(), targets: Vec::new(), shapes: Vec::new(), keep: Vec::new(), codes: Vec::new(), cfgs: BTreeMap::new(), widen: widen.clone(), instances: 0, cur: None, undef: 0, restart: false, kind, root, paths, log };
             if let Err(e) = b.run() {
                 if log {
                     std::eprintln!("j8jit: rejected {e:?}");
@@ -215,7 +217,7 @@ impl<'e> Builder<'e> {
             }
             if !b.restart {
                 crate::opt::simplify(&mut b.g);
-                return Ok(Built { graph: b.g, targets: b.targets, shapes: b.shapes, keep: b.keep });
+                return Ok(Built { graph: b.g, targets: b.targets, shapes: b.shapes, keep: b.keep, codes: b.codes });
             }
             widen = b.widen;
         }
@@ -479,7 +481,7 @@ impl<'e> Builder<'e> {
             fields.push(w);
         }
         let k = u32::try_from(self.shapes.len()).unwrap_or(0);
-        self.shapes.push(o.shape.clone());
+        self.shapes.push(o.shape);
         let op = Op::Call(Helper::Alloc(k), fields, None);
         let real = match p {
             Some(p) => self.emit_before_end(p, op, Rep::Ptr),
@@ -833,7 +835,7 @@ impl<'e> Builder<'e> {
         }
         let i = objects.len();
         ids.push(v);
-        objects.push(VirtualObject { proto: o.proto, shape: o.shape.clone(), fields: Vec::new() });
+        objects.push(VirtualObject { proto: o.proto, shape: o.shape, fields: Vec::new() });
         let fields = o.fields.iter().map(|f| self.slot(st, objects, ids, *f)).collect();
         objects[i].fields = fields;
         Slot::Virtual(u32::try_from(i).unwrap_or(0))
@@ -1522,7 +1524,7 @@ impl<'e> Builder<'e> {
 
     fn keep(&mut self, s: &Option<ShapeKey>) {
         if let Some(s) = s {
-            self.keep.push(s.clone());
+            self.keep.push(*s);
         }
     }
 
@@ -1570,7 +1572,7 @@ impl<'e> Builder<'e> {
         match fb {
             Some(fb) if self.hint(act.id, pc) & HINT_GENERIC == 0 && fb.to.is_none() && (fb.shape.is_some() || fb.depth >= 1) => {
                 let p = self.object(act, st, obj, pc);
-                self.shape_check(act, st, p, fb.shape.clone(), pc);
+                self.shape_check(act, st, p, fb.shape, pc);
                 if fb.depth == 0 {
                     let c = self.prop_cell(p, fb.slot);
                     let v = self.load(st, LOAD_WORD, c, Self::prop_off(fb.slot));
@@ -1595,7 +1597,7 @@ impl<'e> Builder<'e> {
     fn proto_load(&mut self, act: &Act<'e>, st: &mut St, proto: V, fb: &j8executor::PropertyFeedback, name: &str, pc: usize) -> V {
         let mut p = proto;
         for (i, s) in fb.chain.iter().enumerate() {
-            self.shape_check(act, st, p, Some(s.clone()), pc);
+            self.shape_check(act, st, p, Some(*s), pc);
             if i + 1 < fb.chain.len() {
                 p = self.load(st, LOAD_PTR, p, Self::off(Layout::OBJECT_PROTO));
             }
@@ -1637,7 +1639,7 @@ impl<'e> Builder<'e> {
                     if assign {
                         let mut p = o.proto;
                         for (i, s) in fb.chain.iter().enumerate() {
-                            self.shape_check(act, st, p, Some(s.clone()), pc);
+                            self.shape_check(act, st, p, Some(*s), pc);
                             p = self.load(st, LOAD_PTR, p, Self::off(Layout::OBJECT_PROTO));
                             if i + 1 == fb.chain.len() && !st.heap.known.contains(&Fact::NoProto(p)) {
                                 let fs = self.state(act, st, pc);
@@ -1651,9 +1653,9 @@ impl<'e> Builder<'e> {
                             return self.generic_set(act, st, obj, name, v, assign, pc);
                         }
                     }
-                    self.keep(&Some(to.clone()));
+                    self.keep(&Some(*to));
                     if let Some((_, x)) = st.heap.objs.iter_mut().find(|(id, _)| *id == obj) {
-                        x.shape = Some(to.clone());
+                        x.shape = Some(*to);
                         x.fields.push(v);
                     }
                     return Ok(());
@@ -1674,7 +1676,7 @@ impl<'e> Builder<'e> {
             && self.hint(act.id, pc) & HINT_GENERIC == 0
         {
             let p = self.object(act, st, obj, pc);
-            self.shape_check(act, st, p, fb.shape.clone(), pc);
+            self.shape_check(act, st, p, fb.shape, pc);
             let w = self.real(st, v);
             let c = self.prop_cell(p, fb.slot);
             self.emit(Op::StoreCell(c, Self::prop_off(fb.slot), w), Rep::None);
@@ -1709,6 +1711,7 @@ impl<'e> Builder<'e> {
             && self.hint(act.id, pc) & HINT_GENERIC == 0
         {
             let tf = self.exe.jit_function(t);
+            self.codes.push(t);
             if tf.plain() && !tf.class_constructor()
                 && let Some(this) = self.receiver(st, tf, this)
             {
@@ -1793,7 +1796,7 @@ impl<'e> Builder<'e> {
     }
 
     fn known_target(&self, act: &Act<'e>, _st: &St, _callee: V, fb: OperandValue) -> Option<FuncId> {
-        act.f.call_target(fb)
+        act.f.call_target(fb).filter(|&t| self.exe.jit_live_function(t).is_some())
     }
 
     fn inlinable(&self, act: &Act<'e>, tf: Function<'_>, pc: usize) -> bool {
@@ -1915,12 +1918,13 @@ impl<'e> Builder<'e> {
 
     #[expect(clippy::too_many_arguments, reason = "a construct's parts")]
     fn construct(&mut self, act: &mut Act<'e>, st: &mut St, callee: V, nt: V, args: Vec<V>, fb: OperandValue, pc: usize) -> R<V> {
-        let target = act.f.call_target(fb);
+        let target = act.f.call_target(fb).filter(|&t| self.exe.jit_live_function(t).is_some());
         if let Some(t) = target
             && self.hint(act.id, pc) & (HINT_GENERIC | HINT_NO_INLINE) == 0
             && callee == nt
         {
             let tf = self.exe.jit_function(t);
+            self.codes.push(t);
             let returns_undefined = (0..tf.len()).all(|i| tf.insn(i).bytecode != Bytecode::Return || (i > 0 && tf.insn(i - 1).bytecode == Bytecode::LdaUndefined));
             if (tf.constructs() || tf.class_constructor()) && !tf.derived() && returns_undefined && self.inlinable(act, tf, pc)
                 && let Some(pfb) = tf.prototype()
@@ -1929,7 +1933,7 @@ impl<'e> Builder<'e> {
                 && pfb.shape.is_some()
             {
                 let p = self.checked_callee(act, st, callee, t, pc);
-                self.shape_check(act, st, p, pfb.shape.clone(), pc);
+                self.shape_check(act, st, p, pfb.shape, pc);
                 let c = self.prop_cell(p, pfb.slot);
                 let pw = self.load(st, LOAD_WORD, c, Self::prop_off(pfb.slot));
                 let pw = self.guard_lazy(act, st, pw, "prototype", pc);
@@ -2346,14 +2350,14 @@ impl<'e> Builder<'e> {
             if fb.slot < Layout::INLINE_PROPS || path.is_some() {
                 let scope = self.emit(Op::CtxField(Ctx::SCRIPT_SCOPE), Rep::Ptr);
                 let fs = self.state(act, st, pc);
-                let s = fb.scope.clone();
+                let s = fb.scope;
                 self.keep(&s);
                 self.emit(Op::CheckShape(scope, s, fs), Rep::None);
                 let holder = match &fb.global {
                     Some(g) => {
                         let global = self.emit(Op::CtxField(Ctx::GLOBAL), Rep::Ptr);
                         let fs = self.state(act, st, pc);
-                        let s = Some(g.clone());
+                        let s = Some(*g);
                         self.keep(&s);
                         self.emit(Op::CheckShape(global, s, fs), Rep::None);
                         global

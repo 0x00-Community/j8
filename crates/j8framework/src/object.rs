@@ -158,7 +158,6 @@ impl<'gc> Env<'gc> {
 pub struct Closure<'gc> {
     pub func: FuncId,
     pub env: Option<JsEnv<'gc>>,
-    #[collect(require_static)]
     pub code: Option<Code>,
 }
 
@@ -174,25 +173,44 @@ pub struct FunctionInfo {
     pub length: u16,
 }
 
-#[derive(Clone, Copy, Debug)]
-pub struct Code(core::ptr::NonNull<FunctionInfo>);
-
-unsafe impl Send for Code {}
-
-unsafe impl Sync for Code {}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Code(usize);
 
 impl Code {
-    pub fn new(info: &FunctionInfo) -> Self {
-        Self(core::ptr::NonNull::from(info))
+    pub fn new(handle: paragc::Handle<'_, impl crate::Trace>) -> Self {
+        Self(handle.id())
+    }
+
+    pub fn id(self) -> usize {
+        self.0
+    }
+
+    pub unsafe fn from_id(id: usize) -> Self {
+        Self(id)
+    }
+
+    fn erased<'gc>(self) -> paragc::Handle<'gc, crate::Erased> {
+        unsafe { paragc::Handle::from_id(self.0) }
     }
 
     #[inline]
     pub unsafe fn info<'e>(self) -> &'e FunctionInfo {
-        unsafe { self.0.as_ref() }
+        unsafe { self.get() }
     }
 
+    #[inline]
     pub unsafe fn get<'e, T>(self) -> &'e T {
-        unsafe { self.0.cast::<T>().as_ref() }
+        unsafe { &*self.erased().get().as_ptr().cast::<T>() }
+    }
+}
+
+unsafe impl crate::Trace for Code {
+    fn trace(&self, t: &mut crate::Tracer<'_>) {
+        self.erased().trace(t);
+    }
+
+    fn relocate(&mut self, t: &mut crate::Tracer<'_>) {
+        self.trace(t);
     }
 }
 

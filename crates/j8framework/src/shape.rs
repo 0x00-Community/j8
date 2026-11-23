@@ -71,6 +71,16 @@ impl ShapeKey {
     }
 }
 
+unsafe impl crate::Trace for ShapeKey {
+    fn trace(&self, t: &mut crate::Tracer<'_>) {
+        unsafe { self.handle() }.trace(t);
+    }
+
+    fn relocate(&mut self, t: &mut crate::Tracer<'_>) {
+        self.trace(t);
+    }
+}
+
 impl From<ShapeRef<'_>> for ShapeKey {
     fn from(h: ShapeRef<'_>) -> Self {
         Self(h.id())

@@ -118,7 +118,6 @@ struct State {
     deopts: Vec<Rc<Deopt>>,
     calls: Vec<(Helper, usize)>,
     shapes: Vec<Option<ShapeKey>>,
-    keep: Vec<j8framework::Root<j8framework::ShapeBrand>>,
     code: Arena,
     tramps: Vec<Trampolines>,
     hints: Hints,
@@ -436,8 +435,7 @@ impl Jit {
         let lowered = generated;
         let shape_base = u32::try_from(st.shapes.len()).ok()?;
         st.shapes.extend(built.shapes.iter().copied());
-        let m = a.mc.mutator();
-        st.keep.extend(built.keep.iter().chain(built.shapes.iter().flatten()).map(|k| m.root::<j8framework::ShapeBrand>(unsafe { k.handle() }.get())));
+        exe.jit_keep(f, &built.keep.iter().chain(built.shapes.iter().flatten()).copied().collect::<Vec<ShapeKey>>(), &[&built.codes[..], &built.targets[..]].concat());
         let arity = &lowered.arity;
         for (i, h) in lowered.calls.iter().enumerate() {
             let h = match h {
