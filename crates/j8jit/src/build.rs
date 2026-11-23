@@ -892,6 +892,9 @@ impl<'e, 'p> Builder<'e, 'p> {
                 }
                 Ok(Flow::End) => return Ok(()),
                 Err(Reject::Unsupported) => {
+                    if self.restart {
+                        return Err(Restart);
+                    }
                     let fs = self.state(act, &st, pc);
                     self.emit(Op::Deopt(fs), Rep::None);
                     self.cur = None;
