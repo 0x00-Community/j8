@@ -1,7 +1,7 @@
 use core::fmt;
 use core::ops::Deref;
 
-use core::sync::atomic::AtomicU64;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::{Collect, Cow, Gc, GcQueue, Mutation};
 use paragc::Slot;
@@ -108,6 +108,7 @@ pub struct Realm<'gc> {
     pub regexp_literal: Cow<'gc, crate::Static<Option<RegExpLiteral>>>,
     pub fast_builtins: Cow<'gc, crate::Static<FastTable>>,
     pub builtin_nexts: Cow<'gc, [Option<JsObject<'gc>>; 2]>,
+    pub indexed_cache: AtomicU64,
 }
 
 #[derive(Clone, Collect)]
@@ -168,6 +169,7 @@ pub struct FastBuiltin {
     pub native: NativeFn,
     pub call: FastCall,
     pub out: FastOut,
+    pub inline_push: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -239,6 +241,9 @@ impl<'gc> Realm<'gc> {
         let placeholder = |proto: JsObject<'gc>| ObjectData { kind: ObjectKind::Native(Native::function(Self::no_regexp)), proto: Some(proto), ..ObjectData::default() }.alloc(mc);
         let typed_array_ctor = placeholder(function_proto);
         let typed_array_proto = derived(object_proto);
+        let array_proto = derived(object_proto);
+        object_proto.get().mark_watched();
+        array_proto.get().mark_watched();
         Self {
             date_proto: derived(object_proto),
             weak_ref_proto: derived(object_proto),
@@ -299,6 +304,7 @@ impl<'gc> Realm<'gc> {
             regexp_literal: Cow::new(mc, crate::Static(None)),
             fast_builtins: Cow::new(mc, crate::Static(FastTable::default())),
             builtin_nexts: Cow::new(mc, [None, None]),
+            indexed_cache: AtomicU64::new(0),
             symbol_registry: Cow::new(mc, alloc::vec::Vec::new()),
             modules: Cow::new(mc, alloc::vec::Vec::new()),
             random_state: AtomicU64::new(0),
@@ -307,7 +313,7 @@ impl<'gc> Realm<'gc> {
             global: Self::wide(derived(object_proto)),
             object_proto,
             function_proto,
-            array_proto: derived(object_proto),
+            array_proto,
             string_proto: derived(object_proto),
             chars: (0u8..128).map(|c| crate::JsStr::alloc_known(mc, alloc::string::String::from(char::from(c)).as_str(), true)).collect(),
             number_proto: derived(object_proto),
@@ -364,11 +370,42 @@ impl<'gc> Realm<'gc> {
     }
 
     pub fn add_fast(&self, mc: &Mutation<'gc>, native: NativeFn, call: FastCall, out: FastOut) {
+        self.add_fast_at(mc, native, call, out, false);
+    }
+
+    pub fn add_fast_inline(&self, mc: &Mutation<'gc>, native: NativeFn, call: FastCall, out: FastOut) {
+        self.add_fast_at(mc, native, call, out, true);
+    }
+
+    fn add_fast_at(&self, mc: &Mutation<'gc>, native: NativeFn, call: FastCall, out: FastOut, inline_push: bool) {
         self.fast_builtins.update_with(mc, |table| {
             let mut table = *table;
-            table.push(FastBuiltin { native, call, out });
+            table.push(FastBuiltin { native, call, out, inline_push });
             (table, ())
         });
+    }
+
+    pub fn indexed_cache_addr(&self) -> u64 {
+        u64::try_from(core::ptr::from_ref(&self.indexed_cache).addr()).expect("a realm field address fits in a machine word")
+    }
+
+    pub fn indexed_fast(&self) -> bool {
+        let stamp = crate::store::indexed_stamp();
+        let cached = self.indexed_cache.load(Ordering::Relaxed);
+        if stamp != 0 && stamp < 1 << 63 && cached & ((1 << 63) - 1) == stamp {
+            return cached >> 63 != 0;
+        }
+        self.indexed_refill(stamp)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn indexed_refill(&self, stamp: u64) -> bool {
+        let clean = self.array_proto.get().anchors_plain_arrays(self.object_proto);
+        if stamp != 0 && stamp < 1 << 63 && crate::store::indexed_stamp() == stamp {
+            self.indexed_cache.store(stamp | (u64::from(clean) << 63), Ordering::Relaxed);
+        }
+        clean
     }
 }
 

@@ -55,10 +55,11 @@ pub(crate) struct Direct {
     index: u32,
     arity: u8,
     out: j8framework::FastOut,
+    inline_push: bool,
 }
 
 pub(crate) fn directs_from(a: &j8framework::Agent<'_, '_>) -> Vec<Direct> {
-    a.realm.fast_builtins.get().iter().map(|(index, e)| Direct { native: e.native as usize as u64, index, arity: e.call.arity(), out: e.out }).collect()
+    a.realm.fast_builtins.get().iter().map(|(index, e)| Direct { native: e.native as usize as u64, index, arity: e.call.arity(), out: e.out, inline_push: e.inline_push }).collect()
 }
 
 #[derive(Debug)]
@@ -1789,7 +1790,7 @@ impl<'e> Builder<'e> {
         }
         self.flush(st);
         let fs = self.state(act, st, pc);
-        let h = Helper::Direct(d.index, d.out);
+        let h = if d.inline_push && d.arity == 1 { Helper::InlinePush(d.index) } else { Helper::Direct(d.index, d.out) };
         let v = self.emit(Op::Call(h, ins, Some(fs)), h.rep());
         Self::forget(st);
         v

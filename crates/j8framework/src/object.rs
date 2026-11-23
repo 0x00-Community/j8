@@ -851,7 +851,7 @@ impl<'gc> ObjectData<'gc> {
             class: crate::IsoCell::new(Class::ORDINARY | Class::PLAIN | Class::UNIT_ORDINARY),
             non_extensible: crate::IsoCell::new(false),
             length_readonly: crate::IsoCell::new(false),
-            digit_keys: crate::IsoCell::new(false),
+            flags: crate::IsoCell::new(0),
             sparse_length: crate::IsoCell::new(0),
             shape_root: paragc::HandleSlot::default(),
             data: GcCell::empty(),
@@ -872,7 +872,7 @@ impl<'gc> ObjectData<'gc> {
             class: crate::IsoCell::new(class),
             non_extensible: crate::IsoCell::new(non_extensible),
             length_readonly: crate::IsoCell::new(length_readonly),
-            digit_keys: crate::IsoCell::new(false),
+            flags: crate::IsoCell::new(0),
             sparse_length: crate::IsoCell::new(sparse_length),
             shape_root: paragc::HandleSlot::default(),
             data: if unit.is_some() { GcCell::empty() } else { GcCell::new(mc, state) },
@@ -1003,7 +1003,7 @@ pub struct Object<'gc> {
     #[mutable]
     length_readonly: bool,
     #[mutable]
-    digit_keys: bool,
+    flags: u8,
     #[mutable]
     sparse_length: u32,
     shape_root: paragc::HandleSlot<'gc, crate::Shape>,
@@ -1011,6 +1011,15 @@ pub struct Object<'gc> {
 }
 
 const _: () = assert!(!core::mem::needs_drop::<Object<'static>>(), "objects need no destructor: sweeping skips them");
+const _: () = assert!(core::mem::size_of::<Object<'static>>() == 200);
+const _: () = assert!(core::mem::offset_of!(Object<'static>, proto) == 0);
+const _: () = assert!(core::mem::offset_of!(Object<'static>, elements) == 136);
+const _: () = assert!(core::mem::offset_of!(Object<'static>, sparse_length) == 192);
+const _: () = assert!(core::mem::offset_of!(Object<'static>, class) == 196);
+const _: () = assert!(core::mem::offset_of!(Object<'static>, non_extensible) == 197);
+const _: () = assert!(core::mem::offset_of!(Object<'static>, length_readonly) == 198);
+const _: () = assert!(core::mem::offset_of!(Object<'static>, flags) == 199);
+const _: () = assert!(Class::ARRAY == 1, "compiled code tests the array bit as bit 32 of the word at the sparse length");
 
 impl fmt::Debug for Object<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -1073,8 +1082,12 @@ impl<'gc> DerefMut for ObjMut<'_, 'gc> {
 impl Drop for ObjMut<'_, '_> {
     fn drop(&mut self) {
         if let Some(d) = self.data.take() {
-            let wide = self.obj.class() & Class::WIDE;
-            self.obj.class.set(Class::of(&d.kind) | wide | if d.symbols.is_empty() { 0 } else { Class::SYMBOLS });
+            let old = self.obj.class();
+            let new = Class::of(&d.kind) | (old & Class::WIDE) | if d.symbols.is_empty() { 0 } else { Class::SYMBOLS };
+            self.obj.class.set(new);
+            if (old ^ new) & !(Class::WIDE | Class::SYMBOLS) != 0 {
+                self.obj.bump_if_watched();
+            }
             let call = Object::call_of(self.mc, &d.kind);
             drop(d);
             if call.is_some() || self.obj.call.get().is_some() {
@@ -1315,6 +1328,7 @@ impl<'gc> Object<'gc> {
 
     pub fn set_proto(&self, mc: &Mutation<'gc>, proto: Option<JsObject<'gc>>) {
         self.write_proto(mc, proto);
+        self.bump_if_watched();
     }
 
     #[inline]
@@ -1325,6 +1339,42 @@ impl<'gc> Object<'gc> {
     #[inline]
     pub fn elements(&self) -> &crate::ValueArray<'gc> {
         &self.elements
+    }
+
+    pub const FLAG_DIGIT: u8 = 1;
+    pub const FLAG_WATCHED: u8 = 2;
+    pub const SPARSE_OFFSET: usize = core::mem::offset_of!(Object<'static>, sparse_length);
+    pub const FLAGS_OFFSET: usize = core::mem::offset_of!(Object<'static>, flags);
+    pub const ELEMENTS_OFFSET: usize = core::mem::offset_of!(Object<'static>, elements);
+
+    pub fn digit_keys(&self) -> bool {
+        self.flags() & Self::FLAG_DIGIT != 0
+    }
+
+    pub fn watched(&self) -> bool {
+        self.flags() & Self::FLAG_WATCHED != 0
+    }
+
+    pub fn mark_watched(&self) {
+        self.flags.set(self.flags() | Self::FLAG_WATCHED);
+    }
+
+    fn note_digit(&self) {
+        if self.flags() & Self::FLAG_DIGIT == 0 {
+            self.flags.set(self.flags() | Self::FLAG_DIGIT);
+            self.bump_if_watched();
+        }
+    }
+
+    fn bump_if_watched(&self) {
+        if self.watched() {
+            crate::store::bump_indexed();
+        }
+    }
+
+    pub fn anchors_plain_arrays(&self, root: JsObject<'gc>) -> bool {
+        let quiet = |o: &Object<'gc>| o.sparse_length() == 0 && !o.digit_keys();
+        self.is_array() && quiet(self) && self.proto().is_some_and(|p| Gc::ptr_eq(p, root)) && root.has_ordinary_properties() && quiet(&root) && root.proto().is_none()
     }
 
     fn class(&self) -> u8 {
@@ -1352,7 +1402,13 @@ impl<'gc> Object<'gc> {
     }
 
     fn raise_sparse_length(&self, n: u32) {
-        self.sparse_length.set(self.sparse_length.get().max(n));
+        let old = self.sparse_length.get();
+        if n > old {
+            self.sparse_length.set(n);
+            if old == 0 {
+                self.bump_if_watched();
+            }
+        }
     }
 
     pub fn array_length(&self) -> Option<u32> {
@@ -1450,7 +1506,12 @@ impl<'gc> Object<'gc> {
         if self.sparse_length() > 0 {
             self.props.retain(mc, |k| crate::ops::index_of_str(k).is_none_or(|i| i < n));
         }
-        self.sparse_length.set(if len > dense { n } else { 0 });
+        let prev = self.sparse_length();
+        let next = if len > dense { n } else { 0 };
+        self.sparse_length.set(next);
+        if (prev == 0) != (next == 0) {
+            self.bump_if_watched();
+        }
     }
 
     pub fn own_str(&self, mc: &Mutation<'gc>, k: &str) -> Option<Property<'gc>> {
@@ -1549,7 +1610,7 @@ impl<'gc> Object<'gc> {
 
     fn push_prop(&self, mc: &Mutation<'gc>, key: &str, prop: Property<'gc>) {
         if key.as_bytes().first().is_some_and(u8::is_ascii_digit) {
-            self.digit_keys.set(true);
+            self.note_digit();
         }
         let proto = self.proto();
         self.props.push(mc, key, prop, self.class() & Class::WIDE != 0, || proto.map(|p| p.get().root_shape(mc)));
@@ -1572,14 +1633,14 @@ impl<'gc> Object<'gc> {
 
     pub fn push_to(&self, mc: &Mutation<'gc>, to: crate::ShapeRef<'gc>, slot: Slot<'gc>) {
         if to.digit_keys() {
-            self.digit_keys.set(true);
+            self.note_digit();
         }
         self.props.push_to(mc, to, slot);
     }
 
     pub fn fill(&self, mc: &Mutation<'gc>, to: crate::ShapeRef<'gc>, slots: impl IntoIterator<Item = Slot<'gc>>) {
         if to.digit_keys() {
-            self.digit_keys.set(true);
+            self.note_digit();
         }
         self.props.fill(mc, to, slots);
     }

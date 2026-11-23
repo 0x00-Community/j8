@@ -129,6 +129,10 @@ impl Asm {
         self.op_rm(None, true, &[0x89], src, base, disp, false);
     }
 
+    pub fn store32(&mut self, base: R, disp: i32, src: R) {
+        self.op_rm(None, false, &[0x89], src, base, disp, false);
+    }
+
     pub fn lea(&mut self, dst: R, base: R, disp: i32) {
         self.op_rm(None, true, &[0x8d], dst, base, disp, false);
     }

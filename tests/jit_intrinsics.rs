@@ -159,6 +159,71 @@ const CASES: &[Case] = &[
         text: "function f() { const a = []; let s = 0; for (let i = 0; i < 50; i++) s += a.push(i); return s + ':' + a.length + ':' + String(a[0]); } let r = f(); Object.defineProperty(Array.prototype, '0', { set() {}, configurable: true }); r += '|' + f(); delete Array.prototype[0]; const saved = Array.prototype.push; function g() { const a = []; let s = 0; for (let i = 0; i < 80; i++) { if (i === 40) Array.prototype.push = function () { return 5; }; s += a.push(i); } return s + ':' + a.length + ':' + a[39]; } r += '|' + g(); Array.prototype.push = saved; r",
         want: "1275:50:0|1275:50:undefined|1020:40:39",
     },
+    Case {
+        what: "an indexed setter on Array.prototype defined, exercised and removed inside a compiled loop",
+        text: "function f() { const a = []; let sets = 0; let s = 0; for (let i = 0; i < 300; i++) { if (i === 100) Object.defineProperty(Array.prototype, '100', { set() { sets++; }, configurable: true }); if (i === 200) delete Array.prototype[100]; s += a.push(i); } return sets + ':' + s + ':' + a.length + ':' + String(a[100]) + ':' + a[101] + ':' + a[199] + ':' + a[200]; } f()",
+        want: "1:45150:300:undefined:101:199:200",
+    },
+    Case {
+        what: "a read-only index on Array.prototype defined, exercised and removed inside a compiled loop",
+        text: "function f() { const a = []; let thrown = 0; let s = 0; let name = ''; for (let i = 0; i < 20; i++) { if (i === 5) Object.defineProperty(Array.prototype, '5', { writable: false, configurable: true, value: 'ro' }); if (i === 12) delete Array.prototype[5]; try { s += a.push(i); } catch (e) { thrown++; name = e.name; } } return thrown + ':' + name + ':' + s + ':' + a.length + ':' + String(a[4]) + ':' + String(a[5]) + ':' + String(a[6]) + ':' + a[12]; } f()",
+        want: "7:TypeError:91:13:4:12:13:19",
+    },
+    Case {
+        what: "an indexed setter on Object.prototype defined, exercised and removed inside a compiled loop",
+        text: "function f() { const a = []; let sets = 0; let s = 0; for (let i = 0; i < 80; i++) { if (i === 20) Object.defineProperty(Object.prototype, '20', { set() { sets++; }, configurable: true }); if (i === 50) delete Object.prototype[20]; s += a.push(i); } return sets + ':' + s + ':' + a.length + ':' + String(a[20]) + ':' + a[21] + ':' + a[50]; } f()",
+        want: "1:3240:80:undefined:21:50",
+    },
+    Case {
+        what: "a read-only index on Object.prototype defined, exercised and removed inside a compiled loop",
+        text: "function f() { const a = []; let thrown = 0; let s = 0; let name = ''; for (let i = 0; i < 16; i++) { if (i === 4) Object.defineProperty(Object.prototype, '4', { writable: false, configurable: true, value: 'ro' }); if (i === 9) delete Object.prototype[4]; try { s += a.push(i); } catch (e) { thrown++; name = e.name; } } return thrown + ':' + name + ':' + s + ':' + a.length + ':' + String(a[3]) + ':' + String(a[4]) + ':' + a[9]; } f()",
+        want: "5:TypeError:66:11:3:9:14",
+    },
+    Case {
+        what: "a digit-named data property on Object.prototype defined and removed inside a compiled loop",
+        text: "function f() { const a = []; let s = 0; for (let i = 0; i < 40; i++) { if (i === 10) Object.prototype[8] = 'digit'; if (i === 25) delete Object.prototype[8]; s += a.push(i); } const hole = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]; delete hole[8]; Object.prototype[8] = 'again'; const seen = hole[8]; delete Object.prototype[8]; return s + ':' + a.length + ':' + a[8] + ':' + a[10] + ':' + String(seen) + ':' + String(hole[8]); } f()",
+        want: "820:40:8:10:again:undefined",
+    },
+    Case {
+        what: "Array.prototype given elements and a length, then emptied, inside a compiled loop",
+        text: "function f() { const a = []; let s = 0; for (let i = 0; i < 40; i++) { if (i === 12) Array.prototype.push(7); if (i === 18) Array.prototype[5] = 1; if (i === 24) Array.prototype.length = 3; if (i === 32) Array.prototype.length = 0; s += a.push(i); } const hole = []; hole.length = 6; Array.prototype[5] = 9; const via = hole[5]; Array.prototype.length = 0; return s + ':' + a.length + ':' + a[0] + ':' + a[11] + ':' + a[12] + ':' + String(Array.prototype.length) + ':' + String(via) + ':' + String(hole[5]); } f()",
+        want: "820:40:0:11:12:0:9:undefined",
+    },
+    Case {
+        what: "setPrototypeOf on Array.prototype to an object with a setter, then restored, inside a compiled loop",
+        text: "function f() { const x = {}; let sets = 0; Object.defineProperty(x, '50', { set() { sets++; }, configurable: true }); const saved = Object.getPrototypeOf(Array.prototype); const a = []; let s = 0; for (let i = 0; i < 80; i++) { if (i === 40) Object.setPrototypeOf(Array.prototype, x); if (i === 60) Object.setPrototypeOf(Array.prototype, saved); s += a.push(i); } return sets + ':' + s + ':' + a.length + ':' + String(a[50]) + ':' + a[51] + ':' + a[60] + ':' + (Object.getPrototypeOf(Array.prototype) === saved); } f()",
+        want: "1:3240:80:undefined:51:60:true",
+    },
+    Case {
+        what: "setPrototypeOf on one array to an array with a setter, then restored, while another array is filled at the same site",
+        text: "function f() { const x = []; let sets = 0; Object.defineProperty(x, '15', { set() { sets++; }, configurable: true }); const a = []; const b = []; let s = 0; for (let i = 0; i < 40; i++) { if (i === 10) Object.setPrototypeOf(a, x); if (i === 25) Object.setPrototypeOf(a, Array.prototype); s += a.push(i); s += b.push(i + 100); } return sets + ':' + s + ':' + a.length + ':' + String(a[15]) + ':' + a[16] + ':' + a[25] + ':' + b[15] + ':' + b.length; } f()",
+        want: "1:1640:40:undefined:16:25:115:40",
+    },
+    Case {
+        what: "two arrays filled alternately past a leaf boundary",
+        text: "function f() { const a = []; const b = []; for (let i = 0; i < 400; i++) { a.push(i); b.push(i + 1000); } return a.length + ':' + b.length + ':' + a[127] + ':' + a[128] + ':' + a[399] + ':' + b[127] + ':' + b[128] + ':' + b[399]; } f()",
+        want: "400:400:127:128:399:1127:1128:1399",
+    },
+    Case {
+        what: "push after copyWithin and unshift",
+        text: "function f() { const a = []; for (let i = 0; i < 200; i++) a.push(i); a.copyWithin(0, 10, 14); const p1 = a.push(300); a.unshift(9); const p2 = a.push(301); return a[0] + ':' + a[1] + ':' + a[3] + ':' + p1 + ':' + a.length + ':' + p2 + ':' + a[a.length - 1]; } f()",
+        want: "9:10:12:201:203:203:301",
+    },
+    Case {
+        what: "a setter on an object behind Array.prototype in the chain, defined half-way through a compiled fill",
+        text: "const p = []; Object.setPrototypeOf(p, null); Object.setPrototypeOf(Array.prototype, p); let hits = 0; const a = []; for (let i = 0; i < 6000; i++) { if (i === 3000) Object.defineProperty(p, '4000', { set(v) { hits++; }, get() { return 'g'; }, configurable: true }); a.push(i); } hits + ':' + a.length + ':' + a[4000] + ':' + (4000 in a) + ':' + Object.prototype.hasOwnProperty.call(a, 4000)",
+        want: "1:6000:g:true:false",
+    },
+    Case {
+        what: "an object put behind Array.prototype gets a setter between two compiled fills",
+        text: "function fill(a, n) { for (let i = 0; i < n; i++) a.push(i); return a.length; } const p = { __proto__: null }; Object.setPrototypeOf(Array.prototype, p); let hits = 0; let out = fill([], 3000); Object.defineProperty(p, '10', { set(v) { hits++; }, configurable: true }); const b = []; out += fill(b, 3000); out + ':' + hits + ':' + b.length + ':' + Object.prototype.hasOwnProperty.call(b, 10) + ':' + b[11]",
+        want: "6000:1:3000:false:11",
+    },
+    Case {
+        what: "Array.prototype holds an element between two compiled fills and is emptied again",
+        text: "function fill(a, n) { for (let i = 0; i < n; i++) a.push(i); return a.length; } let out = fill([], 3000); Array.prototype.unshift('q'); const b = []; out += fill(b, 3000); Array.prototype.shift(); const c = []; out += fill(c, 3000); out + ':' + b.length + ':' + b[0] + ':' + c.length + ':' + Array.prototype.length",
+        want: "9000:3000:0:3000:0",
+    },
 ];
 
 fn completion(text: &str, tier: Tier) -> String {

@@ -77,6 +77,7 @@ pub enum Helper {
     StrictEquals,
     Alloc(u32),
     Direct(u32, j8framework::FastOut),
+    InlinePush(u32),
     GetKeyed,
     SetKeyed(bool),
     Unary(j8framework::UnaryOp),
@@ -86,12 +87,12 @@ pub enum Helper {
 
 impl Helper {
     pub fn throws(self) -> bool {
-        matches!(self, Helper::Call | Helper::Construct | Helper::GetNamed(..) | Helper::SetNamed(..) | Helper::GetKeyed | Helper::SetKeyed(_) | Helper::Unary(_) | Helper::LooseEquals | Helper::InstanceOf | Helper::LoadGlobal(..) | Helper::GlobalProbe(_) | Helper::Binary(_) | Helper::Compare(_) | Helper::Direct(..))
+        matches!(self, Helper::Call | Helper::Construct | Helper::GetNamed(..) | Helper::SetNamed(..) | Helper::GetKeyed | Helper::SetKeyed(_) | Helper::Unary(_) | Helper::LooseEquals | Helper::InstanceOf | Helper::LoadGlobal(..) | Helper::GlobalProbe(_) | Helper::Binary(_) | Helper::Compare(_) | Helper::Direct(..) | Helper::InlinePush(_))
     }
 
     pub fn rep(self) -> Rep {
         match self {
-            Helper::ModF | Helper::Direct(_, j8framework::FastOut::Number) => Rep::F64,
+            Helper::ModF | Helper::Direct(_, j8framework::FastOut::Number) | Helper::InlinePush(_) => Rep::F64,
             Helper::ToBoolean | Helper::Compare(_) | Helper::StrictEquals | Helper::LooseEquals | Helper::InstanceOf | Helper::Direct(_, j8framework::FastOut::Bool) => Rep::Bool,
             Helper::Alloc(_) => Rep::Ptr,
             Helper::SetNamed(..) | Helper::SetKeyed(_) | Helper::StoreCell => Rep::None,
