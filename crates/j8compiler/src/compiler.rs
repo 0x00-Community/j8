@@ -254,6 +254,7 @@ pub struct Compiler<'a, 's> {
     for_init_text: Option<&'a str>,
     pub classes: Vec<ClassInfo<'a>>,
     pub next_home: Option<&'static str>,
+    pub hidden: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -369,18 +370,24 @@ impl Rewriter {
 pub trait Compile: Sized {
     fn compile(src: &Source<'_>, kind: CodeKind) -> Result<Self, Error>;
 
-    fn compile_direct(src: &Source<'_>, strict: bool) -> Result<Self, Error>;
+    fn compile_direct(src: &Source<'_>, strict: bool, hidden: bool) -> Result<Self, Error>;
+
+    fn compile_eval(src: &Source<'_>, kind: CodeKind, hidden: bool) -> Result<Self, Error>;
 
     fn compile_module(src: &Source<'_>) -> Result<(Self, ModuleInfo), Error>;
 }
 
 impl Compile for Module {
     fn compile(src: &Source<'_>, kind: CodeKind) -> Result<Self, Error> {
-        Compiler::compile_in(src, kind, false)
+        Compiler::compile_in(src, kind, false, false)
     }
 
-    fn compile_direct(src: &Source<'_>, strict: bool) -> Result<Self, Error> {
-        Compiler::compile_in(src, if strict { CodeKind::StrictEval } else { CodeKind::Eval }, true)
+    fn compile_direct(src: &Source<'_>, strict: bool, hidden: bool) -> Result<Self, Error> {
+        Compiler::compile_in(src, if strict { CodeKind::StrictEval } else { CodeKind::Eval }, true, hidden)
+    }
+
+    fn compile_eval(src: &Source<'_>, kind: CodeKind, hidden: bool) -> Result<Self, Error> {
+        Compiler::compile_in(src, kind, false, hidden)
     }
 
     fn compile_module(src: &Source<'_>) -> Result<(Self, ModuleInfo), Error> {
@@ -389,7 +396,7 @@ impl Compile for Module {
 }
 
 impl Compiler<'_, '_> {
-    fn compile_in(src: &Source<'_>, kind: CodeKind, direct: bool) -> Result<Module, Error> {
+    fn compile_in(src: &Source<'_>, kind: CodeKind, direct: bool, hidden: bool) -> Result<Module, Error> {
         let allocator = Allocator::default();
         let options = ParseOptions { parse_regular_expression: true, ..ParseOptions::default() };
         let ret = Parser::new(&allocator, src.text, SourceType::script()).with_options(options).parse();
@@ -406,7 +413,7 @@ impl Compiler<'_, '_> {
         let strict = kind == CodeKind::StrictEval || Flavor::use_strict(&program.directives);
         let local = (kind != CodeKind::Script).then(|| Decls::eval_local(&program.body, strict));
         let Resolver { captured, used, eval_fns, suspends, .. } = Resolver::script(&program.body, Decls::this_key(program.span), &allocator, local.as_ref(), strict, eval_scopes, None);
-        let mut c = Compiler { src, alloc: &allocator, captured, used, class_depth: 0, module: Vec::new(), frames: Vec::new(), levels: Vec::new(), chains: Vec::new(), eval_fns, suspends, completion_assign: HashSet::new(), completion_reset: HashSet::new(), for_init_text: None, classes: Vec::new(), next_home: None };
+        let mut c = Compiler { src, alloc: &allocator, captured, used, class_depth: 0, module: Vec::new(), frames: Vec::new(), levels: Vec::new(), chains: Vec::new(), eval_fns, suspends, completion_assign: HashSet::new(), completion_reset: HashSet::new(), for_init_text: None, classes: Vec::new(), next_home: None, hidden };
         c.script(program, local.as_ref(), strict, direct)?;
         Ok(Module { functions: c.module })
     }
@@ -516,7 +523,7 @@ impl Compiler<'_, '_> {
         let (names, info) = Compiler::module_layout(program);
         let order: Vec<&str> = names.iter().map(|&(n, _)| n).collect();
         let Resolver { captured, used, eval_fns, suspends, suspend_count, .. } = Resolver::script(&program.body, Decls::this_key(program.span), &allocator, None, true, eval_scopes, Some(&[order]));
-        let mut c = Compiler { src, alloc: &allocator, captured, used, class_depth: 0, module: Vec::new(), frames: Vec::new(), levels: Vec::new(), chains: Vec::new(), eval_fns, suspends, completion_assign: HashSet::new(), completion_reset: HashSet::new(), for_init_text: None, classes: Vec::new(), next_home: None };
+        let mut c = Compiler { src, alloc: &allocator, captured, used, class_depth: 0, module: Vec::new(), frames: Vec::new(), levels: Vec::new(), chains: Vec::new(), eval_fns, suspends, completion_assign: HashSet::new(), completion_reset: HashSet::new(), for_init_text: None, classes: Vec::new(), next_home: None, hidden: false };
         let bound = names
             .iter()
             .map(|&(name, n)| match n {
@@ -1892,10 +1899,10 @@ impl<'a> Compiler<'a, '_> {
         }
         Some(match key {
             PropertyKey::StaticIdentifier(id) => Ok(self.name(id.name.as_str())),
-            PropertyKey::StringLiteral(s) => match s.value.as_str() {
-                Some(t) => Ok(self.name(t)),
-                None => Err(self.unsupported(s.span, "lone surrogates")),
-            },
+            PropertyKey::StringLiteral(s) => Ok(match s.value.as_str() {
+                Some(t) => self.name(t),
+                None => self.string_const(s.value),
+            }),
             PropertyKey::NumericLiteral(n) => Ok(self.name(ryu_js::Buffer::new().format(n.value))),
             PropertyKey::PrivateIdentifier(id) => Err(self.unsupported(id.span, "private names")),
             _ => return None,
@@ -2548,7 +2555,7 @@ impl<'a> Compiler<'a, '_> {
             }
         }
         for d in &program.directives {
-            let k = self.string_const(d.expression.value.as_str(), d.expression.span)?;
+            let k = self.string_const(d.expression.value);
             self.b().load_constant(k);
             self.b().star(completion);
         }

@@ -64,7 +64,7 @@ const MAX_REPEAT: u32 = 1000;
 
 impl Dfa {
     pub(crate) fn new(source: &str, flags: &str) -> Option<Self> {
-        if flags.contains('v') || !source.is_ascii() {
+        if flags.contains('v') || !source.is_ascii() || (flags.contains('u') && source.contains("\\u{")) {
             return None;
         }
         let mut t = Translate { src: source.as_bytes(), at: 0, out: String::with_capacity(source.len() * 2), open: alloc::vec![Open::new(false)], groups: 0, atom: false, multiline: flags.contains('m'), dot_all: flags.contains('s') };

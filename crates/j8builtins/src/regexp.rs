@@ -51,6 +51,10 @@ impl Compiled {
         Self { regex, atom, dfa, flags: bits, named: source.contains("(?<") }
     }
 
+    fn plain(regex: regress::Regex, source: &str, flags: &str) -> Self {
+        Self { regex, atom: None, dfa: None, flags: Self::bits(flags), named: source.contains("(?<") }
+    }
+
     fn bits(flags: &str) -> u16 {
         let mut bits = 0;
         for c in flags.chars() {
@@ -119,16 +123,121 @@ pub(crate) struct Regexps;
 
 impl Regexps {
     fn compile(a: &Agent<'_, '_>, source: &str, flags: &str) -> Result<regress::Regex, Error> {
-        let bad = flags.chars().enumerate().any(|(i, c)| !FLAGS.contains(c) || flags[..i].contains(c)) || (flags.contains('u') && flags.contains('v'));
-        if bad {
-            return Err(a.throw(ErrorKind::Syntax, &alloc::format!("Invalid flags supplied to RegExp constructor '{flags}'")));
-        }
+        Self::compile_units(a, source.encode_utf16(), source, flags)
+    }
+
+    fn compile_units(a: &Agent<'_, '_>, units: impl Iterator<Item = u16>, source: &str, flags: &str) -> Result<regress::Regex, Error> {
+        Self::check_flags(a, flags)?;
         let engine: String = flags.chars().filter(|&c| ENGINE_FLAGS.contains(c)).collect();
-        regress::Regex::with_flags(source, engine.as_str()).map_err(|e| a.throw(ErrorKind::Syntax, &alloc::format!("Invalid regular expression: /{source}/{flags}: {e}")))
+        let points = Self::pattern_points(units, flags.contains('u') || flags.contains('v'));
+        regress::Regex::from_unicode(points.into_iter(), engine.as_str()).map_err(|e| a.throw(ErrorKind::Syntax, &alloc::format!("Invalid regular expression: /{source}/{flags}: {e}")))
+    }
+
+    fn pattern_points(units: impl Iterator<Item = u16>, unicode: bool) -> Vec<u32> {
+        const BACKSLASH: u32 = b'\\' as u32;
+        const U: u32 = b'u' as u32;
+        const OPEN: u32 = b'{' as u32;
+        const CLOSE: u32 = b'}' as u32;
+        const LT: u32 = b'<' as u32;
+        const GT: u32 = b'>' as u32;
+        const PAREN: u32 = b'(' as u32;
+        const QUESTION: u32 = b'?' as u32;
+        const K: u32 = b'k' as u32;
+        const EQ: u32 = b'=' as u32;
+        const BANG: u32 = b'!' as u32;
+        let points: Vec<u32> = if unicode {
+            char::decode_utf16(units).map(|c| c.map_or_else(|e| u32::from(e.unpaired_surrogate()), u32::from)).collect()
+        } else {
+            units.map(u32::from).collect()
+        };
+        let lead = Surrogate::lead;
+        let trail = Surrogate::trail;
+        let hex4 = |at: usize| -> Option<u32> {
+            let digits = points.get(at..at + 4)?;
+            digits.iter().try_fold(0u32, |acc, &d| Some(acc * 16 + char::from_u32(d)?.to_digit(16)?))
+        };
+        let mut out = Vec::with_capacity(points.len());
+        let mut i = 0;
+        let mut name = false;
+        while i < points.len() {
+            let c = points[i];
+            if name && c == GT {
+                name = false;
+            } else if (c == PAREN && points.get(i + 1) == Some(&QUESTION) && points.get(i + 2) == Some(&LT) && !matches!(points.get(i + 3), Some(&EQ | &BANG)))
+                || (c == BACKSLASH && points.get(i + 1) == Some(&K) && points.get(i + 2) == Some(&LT))
+            {
+                out.extend_from_slice(&points[i..i + 3]);
+                i += 3;
+                name = true;
+                continue;
+            }
+            let joined = unicode || name;
+            if name && lead(c) && points.get(i + 1).is_some_and(|&t| trail(t)) {
+                out.push(Surrogate::join(c, points[i + 1]));
+                i += 2;
+                continue;
+            }
+            if c != BACKSLASH || i + 1 >= points.len() {
+                out.push(c);
+                i += 1;
+                continue;
+            }
+            if points[i + 1] != U {
+                out.extend_from_slice(&points[i..i + 2]);
+                i += 2;
+                continue;
+            }
+            if !joined && hex4(i + 2).is_none() {
+                out.push(U);
+                i += 2;
+                continue;
+            }
+            if let Some(v) = hex4(i + 2) {
+                if joined && lead(v) && points.get(i + 6) == Some(&BACKSLASH) && points.get(i + 7) == Some(&U)
+                    && let Some(t) = hex4(i + 8).filter(|&t| trail(t))
+                {
+                    out.push(Surrogate::join(v, t));
+                    i += 12;
+                    continue;
+                }
+                if lead(v) || trail(v) {
+                    out.push(v);
+                    i += 6;
+                    continue;
+                }
+            } else if joined && points.get(i + 2) == Some(&OPEN)
+                && let Some(len) = points[i + 3..].iter().position(|&d| d == CLOSE)
+                && let Some(v) = points[i + 3..i + 3 + len].iter().try_fold(0u32, |acc, &d| acc.checked_mul(16)?.checked_add(char::from_u32(d)?.to_digit(16)?))
+                && (lead(v) || trail(v))
+            {
+                out.push(v);
+                i += 4 + len;
+                continue;
+            }
+            out.extend_from_slice(&points[i..i + 2]);
+            i += 2;
+        }
+        out
     }
 
     fn compiled<'gc>(a: &Agent<'gc, '_>, source: &str, flags: &str) -> Result<Gc<'gc, Static<Box<dyn core::any::Any + Send + Sync>>>, Error> {
         Self::cached(a, source, flags).map(|c| c.compiled)
+    }
+
+    fn compiled_string<'gc>(a: &Agent<'gc, '_>, source: JsString<'gc>, flags: &str) -> Result<Gc<'gc, Static<Box<dyn core::any::Any + Send + Sync>>>, Error> {
+        if !source.lone_surrogates() {
+            return Self::compiled(a, &source, flags);
+        }
+        let regex = Self::compile_units(a, source.encode_utf16(), source.as_str(), flags)?;
+        Ok(a.mc.alloc(Static(Box::new(Compiled::plain(regex, &source, flags)) as Box<dyn core::any::Any + Send + Sync>)))
+    }
+
+    fn check_flags(a: &Agent<'_, '_>, flags: &str) -> Result<(), Error> {
+        let bad = flags.chars().enumerate().any(|(i, c)| !FLAGS.contains(c) || flags[..i].contains(c)) || (flags.contains('u') && flags.contains('v'));
+        if bad {
+            return Err(a.throw(ErrorKind::Syntax, &alloc::format!("Invalid flags supplied to RegExp constructor '{flags}'")));
+        }
+        Ok(())
     }
 
     fn cached<'gc>(a: &Agent<'gc, '_>, source: &str, flags: &str) -> Result<j8framework::RegExpCompiled<'gc>, Error> {
@@ -211,7 +320,7 @@ impl Regexps {
     fn initialize<'gc>(a: &mut Agent<'gc, '_>, o: JsObject<'gc>, pattern: Value<'gc>, flags: Value<'gc>) -> Result<(), Error> {
         let source = if pattern == Value::Undefined { a.string("") } else { a.to_string(pattern)? };
         let flags = if flags == Value::Undefined { a.string("") } else { a.to_string(flags)? };
-        let compiled = Self::compiled(a, &source, &flags)?;
+        let compiled = Self::compiled_string(a, source, &flags)?;
         let legacy = matches!(&o.borrow().kind, ObjectKind::RegExp(d) if d.legacy);
         o.borrow_mut(a.mc).kind = ObjectKind::RegExp(RegExpData { source, flags, compiled, legacy });
         a.set_named(o.into(), "lastIndex", 0.0.into())
@@ -244,7 +353,7 @@ impl Regexps {
         if new_target == Value::Undefined
             && let (ValueKind::String(source), ValueKind::String(flags)) = (pattern.kind(), flags.kind())
         {
-            let compiled = Self::compiled(a, &source, &flags)?;
+            let compiled = Self::compiled_string(a, source, &flags)?;
             return Ok(Self::make(a, &j8framework::RegExpCompiled { source, flags, compiled }).into());
         }
         let pattern_is_regexp = Self::is_regexp(a, pattern)?;
@@ -320,8 +429,24 @@ impl Regexps {
         f(compiled.0.downcast_ref::<Compiled>().expect("a compiled regex"))
     }
 
+    fn first_match(c: &Compiled, units: &[u16], start: usize) -> Option<regress::Match> {
+        if !c.unicode() {
+            return c.regex.find_from_ucs2(units, start).next();
+        }
+        let mut from = start;
+        loop {
+            let m = c.regex.find_from_utf16(units, from).next()?;
+            let end = m.range().end;
+            let splits = end > 0 && units.get(end - 1).is_some_and(|&u| Surrogate::lead(u.into())) && units.get(end).is_some_and(|&u| Surrogate::trail(u.into()));
+            if !splits {
+                return Some(m);
+            }
+            from = m.range().start + 1;
+        }
+    }
+
     fn find(c: &Compiled, units: &[u16], start: usize) -> Option<Found> {
-        let m = if c.unicode() { c.regex.find_from_utf16(units, start).next() } else { c.regex.find_from_ucs2(units, start).next() }?;
+        let m = Self::first_match(c, units, start)?;
         let named = m.named_groups().map(|(n, r)| (String::from(n), r)).collect();
         Some(Found { range: m.range(), groups: m.captures, named })
     }
@@ -361,7 +486,7 @@ impl Regexps {
     }
 
     fn text<'gc>(a: &Agent<'gc, '_>, units: &[u16], r: Option<core::ops::Range<usize>>) -> Value<'gc> {
-        r.map_or(Value::Undefined, |r| a.string(&String::from_utf16_lossy(&units[r])).into())
+        r.map_or(Value::Undefined, |r| a.string_units(&units[r]).into())
     }
 
     fn index<'gc>(i: usize) -> Value<'gc> {
@@ -501,7 +626,7 @@ impl Regexps {
         match units {
             Units::Ascii(_) => Self::span(c, s, start),
             Units::Wide(w) => {
-                let m = if c.unicode() { c.regex.find_from_utf16(w, start).next() } else { c.regex.find_from_ucs2(w, start).next() }?;
+                let m = Self::first_match(c, w, start)?;
                 Some(m.range())
             }
         }
@@ -687,7 +812,7 @@ impl Regexps {
             next = end;
         }
         out.extend_from_slice(&units[next..]);
-        Ok(Some(a.string(&String::from_utf16_lossy(&out)).into()))
+        Ok(Some(a.string_units(&out).into()))
     }
 
     fn regexp_exec<'gc>(a: &mut Agent<'gc, '_>, r: Value<'gc>, s: JsString<'gc>) -> Result<Value<'gc>, Error> {
@@ -797,7 +922,16 @@ impl Regexps {
             return Ok(a.string("(?:)").into());
         }
         let o = Self::this(a, this)?;
-        let s = Self::escape_pattern(&Self::data(o).0);
+        let pattern = Self::data(o).0;
+        if pattern.lone_surrogates() {
+            let s = Self::escape_pattern(&pattern.source_text());
+            return Ok(match j8framework::HiddenSurrogates::reveal(&s) {
+                Some(units) => a.string_units(&units),
+                None => a.string(&s),
+            }
+            .into());
+        }
+        let s = Self::escape_pattern(&pattern);
         Ok(a.string(&s).into())
     }
 
@@ -1070,7 +1204,7 @@ impl Regexps {
             }
             let named = a.get_named(result, "groups")?;
             let replacement: Vec<u16> = if functional {
-                let mut call_args = alloc::vec![a.string(&String::from_utf16_lossy(&matched)).into()];
+                let mut call_args = alloc::vec![a.string_units(&matched).into()];
                 call_args.extend(captures.iter().copied());
                 call_args.push(pos.into());
                 call_args.push(s.into());
@@ -1093,7 +1227,7 @@ impl Regexps {
         if next < units.len() {
             out.extend_from_slice(&units[next..]);
         }
-        Ok(a.string(&String::from_utf16_lossy(&out)).into())
+        Ok(a.string_units(&out).into())
     }
 
     fn search_symbol<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
@@ -1197,7 +1331,14 @@ impl Regexps {
     fn escape<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let ValueKind::String(s) = args.at(0).kind() else { return Err(a.throw(ErrorKind::Type, "RegExp.escape requires a string")) };
         let mut out = String::new();
-        for (i, c) in s.chars().enumerate() {
+        for (i, c) in char::decode_utf16(s.encode_utf16()).enumerate() {
+            let c = match c {
+                Ok(c) => c,
+                Err(e) => {
+                    let _ = write!(out, "\\u{:04x}", e.unpaired_surrogate());
+                    continue;
+                }
+            };
             match c {
                 _ if i == 0 && c.is_ascii_alphanumeric() => _ = write!(out, "\\x{:02x}", u32::from(c)),
                 '^' | '$' | '\\' | '.' | '*' | '+' | '?' | '(' | ')' | '[' | ']' | '{' | '}' | '|' | '/' => {
@@ -1367,7 +1508,7 @@ impl Regexps {
             end = p + needle_units.len();
         }
         out.extend_from_slice(&units[end.min(units.len())..]);
-        Ok(a.string(&String::from_utf16_lossy(&out)).into())
+        Ok(a.string_units(&out).into())
     }
 
     fn replace<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
@@ -1446,5 +1587,27 @@ impl<'gc> Installer<'_, 'gc> {
         self.method(s, "replace", Regexps::replace, 2);
         self.method(s, "replaceAll", Regexps::replace_all, 2);
         self.method(s, "split", Regexps::split, 2);
+    }
+}
+
+struct Surrogate;
+
+impl Surrogate {
+    const LEAD: u32 = 0xD800;
+    const TRAIL: u32 = 0xDC00;
+    const END: u32 = 0xE000;
+    const ASTRAL: u32 = 0x1_0000;
+    const BITS: u32 = 10;
+
+    fn lead(v: u32) -> bool {
+        (Self::LEAD..Self::TRAIL).contains(&v)
+    }
+
+    fn trail(v: u32) -> bool {
+        (Self::TRAIL..Self::END).contains(&v)
+    }
+
+    fn join(lead: u32, trail: u32) -> u32 {
+        Self::ASTRAL + ((lead - Self::LEAD) << Self::BITS) + (trail - Self::TRAIL)
     }
 }

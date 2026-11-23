@@ -30,12 +30,12 @@ impl Strings {
                 let end = r.end.min(b.len());
                 a.piece(s, &s[r.start.min(end)..end])
             }
-            u => a.string(&u.substring(r)),
+            Units::Wide(_) => a.slice_units(s, r),
         }
     }
 
     fn from_units<'gc>(a: &Agent<'gc, '_>, u: &[u16]) -> Value<'gc> {
-        a.string(&String::from_utf16_lossy(u)).into()
+        a.string_units(u).into()
     }
 
     fn count<'gc>(n: usize) -> Value<'gc> {
@@ -62,6 +62,32 @@ impl Strings {
         #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "clamped to [0, len]")]
         let r = if r.is_nan() { 0 } else { r as usize };
         Ok(r)
+    }
+
+    fn case<'gc>(a: &Agent<'gc, '_>, s: JsString<'gc>, map: fn(&str) -> String) -> Value<'gc> {
+        let Some(w) = s.wide().filter(|_| s.lone_surrogates()) else { return a.string(&map(&s)).into() };
+        let mut out = Vec::with_capacity(w.len());
+        let mut run = String::new();
+        for c in char::decode_utf16(w.iter().copied()) {
+            match c {
+                Ok(c) => run.push(c),
+                Err(e) => {
+                    out.extend(map(&run).encode_utf16());
+                    run.clear();
+                    out.push(e.unpaired_surrogate());
+                }
+            }
+        }
+        out.extend(map(&run).encode_utf16());
+        a.string_units(&out).into()
+    }
+
+    fn trim_units<'gc>(a: &Agent<'gc, '_>, s: JsString<'gc>, start: bool, end: bool) -> Value<'gc> {
+        let w: Vec<u16> = s.encode_utf16().collect();
+        let space = |u: &u16| char::from_u32(u32::from(*u)).is_some_and(Self::is_space);
+        let lo = if start { w.iter().take_while(|u| space(u)).count() } else { 0 };
+        let hi = if end { w.len() - w[lo..].iter().rev().take_while(|u| space(u)).count() } else { w.len() };
+        a.slice_units(s, lo..hi).into()
     }
 
     pub(crate) fn is_space(c: char) -> bool {
@@ -184,7 +210,7 @@ impl Strings {
 
     fn at<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let s = Self::this(a, this)?;
-        let x = libm::trunc(a.to_number(args.at(0))?);
+        let x = a.to_integer_or_infinity(args.at(0))?;
         let len = f64::from(u32::try_from(s.utf16_len()).unwrap_or(u32::MAX));
         let i = if x < 0.0 { len + x } else { x };
         #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "checked to be in [0, len)")]
@@ -194,26 +220,35 @@ impl Strings {
 
     fn to_upper_case<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let s = Self::this(a, this)?;
-        Ok(a.string(&s.to_uppercase()).into())
+        Ok(Self::case(a, s, str::to_uppercase))
     }
 
     fn to_lower_case<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let s = Self::this(a, this)?;
-        Ok(a.string(&s.to_lowercase()).into())
+        Ok(Self::case(a, s, str::to_lowercase))
     }
 
     fn trim<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let s = Self::this(a, this)?;
+        if s.lone_surrogates() {
+            return Ok(Self::trim_units(a, s, true, true));
+        }
         Ok(a.piece(s, s.trim_matches(Self::is_space)).into())
     }
 
     fn trim_start<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let s = Self::this(a, this)?;
+        if s.lone_surrogates() {
+            return Ok(Self::trim_units(a, s, true, false));
+        }
         Ok(a.piece(s, s.trim_start_matches(Self::is_space)).into())
     }
 
     fn trim_end<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let s = Self::this(a, this)?;
+        if s.lone_surrogates() {
+            return Ok(Self::trim_units(a, s, false, true));
+        }
         Ok(a.piece(s, s.trim_end_matches(Self::is_space)).into())
     }
 

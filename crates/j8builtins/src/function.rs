@@ -14,13 +14,23 @@ impl Functions {
             Some((&body, params)) => (params, body),
             None => (&[][..], Value::Undefined),
         };
-        let params = params.iter().map(|&p| a.to_string(p).map(|s| String::from(&**s))).collect::<Result<Vec<_>, _>>()?;
+        let mut hidden = false;
+        let mut params_text = Vec::with_capacity(params.len());
+        for &p in params {
+            let s = a.to_string(p)?;
+            hidden |= s.lone_surrogates();
+            params_text.push(s.source_text());
+        }
         let body = match body.kind() {
             ValueKind::Undefined => String::new(),
-            b => String::from(&**a.to_string(Value::from(b))?),
+            b => {
+                let s = a.to_string(Value::from(b))?;
+                hidden |= s.lone_surrogates();
+                s.source_text()
+            }
         };
-        let src = alloc::format!("({prefix} anonymous({}\n) {{\n{body}\n}})", params.join(","));
-        let f = a.eval_code(&src, CodeKind::Eval)?;
+        let src = alloc::format!("({prefix} anonymous({}\n) {{\n{body}\n}})", params_text.join(","));
+        let f = a.eval_text(&src, CodeKind::Eval, hidden)?;
         if let Some(fo) = f.as_object()
             && new_target != Value::Undefined
         {
@@ -50,8 +60,8 @@ impl Functions {
     fn eval<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         match args.at(0).kind() {
             ValueKind::String(s) => {
-                let src = String::from(&**s);
-                a.eval_code(&src, CodeKind::Eval)
+                let src = s.source_text();
+                a.eval_text(&src, CodeKind::Eval, s.lone_surrogates())
             }
             v => Ok(Value::from(v)),
         }

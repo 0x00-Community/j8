@@ -221,6 +221,7 @@ fn helper<'gc>(jit: &Jit, exe: &Executor, a: &mut Agent<'gc, '_>, h: Helper, ops
         Helper::ObjectLiteral(f, k) => Value::Object(exe.jit_object_literal(a, f, i64::from(k))).bits(),
         Helper::Constant(f, k) => match exe.jit_function(f).constant(i64::from(k)) {
             Some(j8bytecode::Constant::String(s)) => Value::String(a.string(s)).bits(),
+            Some(j8bytecode::Constant::Utf16(u)) => Value::String(a.string_units(u)).bits(),
             _ => ValueBits::UNDEFINED,
         },
         Helper::ModF => (f64::from_bits(ops[0]) % f64::from_bits(ops[1])).to_bits(),

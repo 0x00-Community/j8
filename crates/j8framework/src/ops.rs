@@ -270,12 +270,20 @@ impl<'gc> Agent<'gc, '_> {
     pub fn unit_string(&self, u: u16) -> JsString<'gc> {
         match self.realm.chars.get(usize::from(u)) {
             Some(&s) => s,
-            None => self.string(&alloc::string::String::from_utf16_lossy(&[u])),
+            None => self.string_units(&[u]),
         }
     }
 
     pub fn string(&self, s: &str) -> JsString<'gc> {
         crate::JsStr::alloc(self.mc, s)
+    }
+
+    pub fn slice_units(&self, of: JsString<'gc>, r: core::ops::Range<usize>) -> JsString<'gc> {
+        crate::JsStr::slice_units(self.mc, of, r)
+    }
+
+    pub fn string_units(&self, units: &[u16]) -> JsString<'gc> {
+        crate::JsStr::alloc_units(self.mc, units)
     }
 
     pub fn string_from(&self, text: &str, ascii: bool) -> JsString<'gc> {
@@ -1198,6 +1206,15 @@ impl<'gc> Agent<'gc, '_> {
         let ObjectKind::Iterator(IteratorState::String { s, pos }) = o.borrow().kind else {
             return Err(self.throw(ErrorKind::Type, "next method called on an incompatible receiver"));
         };
+        if let Some(w) = s.wide().filter(|_| s.lone_surrogates()) {
+            let Some(&first) = w.get(pos) else { return Ok(None) };
+            let pair = (0xD800..0xDC00).contains(&first) && w.get(pos + 1).is_some_and(|u| (0xDC00..0xE000).contains(u));
+            let n = if pair { 2 } else { 1 };
+            if let ObjectKind::Iterator(IteratorState::String { pos, .. }) = &mut o.borrow_mut(self.mc).kind {
+                *pos += n;
+            }
+            return Ok(Some(self.string_units(&w[pos..pos + n]).into()));
+        }
         let Some(c) = s[pos..].chars().next() else { return Ok(None) };
         if let ObjectKind::Iterator(IteratorState::String { pos, .. }) = &mut o.borrow_mut(self.mc).kind {
             *pos += c.len_utf8();
