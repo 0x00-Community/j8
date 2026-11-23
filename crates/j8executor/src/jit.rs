@@ -1,9 +1,8 @@
-use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::cell::Cell;
 
 use j8bytecode::{Bytecode, Constant, OperandValue, SharedFunction};
-use j8framework::{Agent, Closure, Error, FuncId, JsEnv, JsObject, Shape, Value};
+use j8framework::{Agent, Closure, Error, FuncId, JsEnv, JsObject, ShapeKey, Value};
 
 pub use crate::ic::{GlobalFeedback, PropertyFeedback};
 use crate::{Args, Budget, Executor, Frame, Loaded, State, STACK_LIMIT};
@@ -136,8 +135,8 @@ impl<'e> Function<'e> {
         }
     }
 
-    pub fn literal_shape(self, k: OperandValue) -> Option<Arc<Shape>> {
-        self.0.literals.get(usize::try_from(k).ok()?)?.borrow().clone()
+    pub fn literal_shape(self, k: OperandValue) -> Option<ShapeKey> {
+        self.0.literals.get(usize::try_from(k).ok()?)?.get()
     }
 
     pub fn scope(self, k: OperandValue) -> Option<ScopeLayout> {
@@ -321,6 +320,16 @@ impl Executor {
         Function(self.function(f))
     }
 
+    pub fn jit_live_function(&self, f: FuncId) -> Option<Function<'_>> {
+        self.live_function(f).map(Function)
+    }
+
+    pub fn jit_keep(&self, f: FuncId, shapes: &[ShapeKey], codes: &[FuncId]) {
+        let Some(l) = self.live_function(f) else { return };
+        l.jit_shapes.borrow_mut().extend_from_slice(shapes);
+        l.jit_codes.borrow_mut().extend(codes.iter().filter_map(|&c| self.live_function(c)).map(Loaded::code));
+    }
+
     pub fn jit_closure_function(&self, c: &Closure<'_>) -> Function<'_> {
         Function(self.code(c))
     }
@@ -330,7 +339,7 @@ impl Executor {
         let l = self.code(&c);
         let args: Vec<Value<'gc>> = d.params.iter().skip(1).copied().chain(core::iter::repeat(Value::Undefined)).take(d.argc.max(d.params.len().saturating_sub(1))).collect();
         let this = d.params.first().copied().unwrap_or_default();
-        let (params, base) = self.open_regs(a, &mut st.regs, l, c, d.callee, this, Args::Values(&args));
+        let (params, base) = Self::open_regs(a, &mut st.regs, l, c, d.callee, this, Args::Values(&args));
         st.regs[params] = this;
         for (i, v) in d.regs.iter().enumerate() {
             st.regs[base + i] = *v;
@@ -359,7 +368,7 @@ impl Executor {
             self.push_deopt(a, &mut st, d);
         }
         if let Some(v) = throw
-            && !self.unwind(&mut st, v)
+            && !Self::unwind(&mut st, v)
         {
             self.recycle(a, st);
             return Err(a.throw_value(v));

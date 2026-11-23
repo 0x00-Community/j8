@@ -103,6 +103,10 @@ name = "semantics"
 path = "tests/semantics.rs"
 
 [[test]]
+name = "code_gc"
+path = "tests/code_gc.rs"
+
+[[test]]
 name = "jit_typeof"
 path = "tests/jit_typeof.rs"
 
@@ -158,7 +162,7 @@ j8napi = { version = "0.4.2", path = "crates/j8napi" }
 j8 = { version = "0.4.2", path = "." }
 moremath = { version = "=0.2.3", default-features = false }
 libm = "0.2"
-paragc = "0.6.1"
+paragc = "0.6.3"
 j8lockfree = { version = "0.4.2", path = "crates/j8lockfree" }
 j8taskqueue = { version = "0.4.2", path = "crates/j8taskqueue" }
 hashbrown = { version = "0.17", default-features = false }

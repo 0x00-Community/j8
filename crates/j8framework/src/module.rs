@@ -52,6 +52,7 @@ pub struct ModuleRecord<'gc> {
     #[collect(require_static)]
     pub info: alloc::sync::Arc<ModuleInfo>,
     pub main: FuncId,
+    pub code: crate::Code,
     pub status: ModuleStatus,
     pub error: Option<Value<'gc>>,
     pub requested: Vec<u32>,

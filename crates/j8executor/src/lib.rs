@@ -9,7 +9,7 @@ use core::cell::{Cell, RefCell};
 
 use j8bytecode::{Bytecode, Constant, Context, Decoded, FunctionKind, Intrinsic, LiteralValue, Module, NativeContextIndex, Operands, OperandValue, Register, Runtime, ScopeInfo, ScopeType, SharedFunction};
 use j8compiler::Compile;
-use j8framework::{Agent, BinaryOp, Closure, Shape, SmallStr, Collect, CompareOp, ContextKind, ContextName, ContextShape, ShapeId, Env, Error, ErrorKind, FuncId, FunctionInfo, Gc, Lazy, Invoke, JsEnv, JsObject, Numbers, ObjectData, ObjectKind, Property, Resume, Slot, Step, Value, ValueKind};
+use j8framework::{Agent, BinaryOp, Closure, Code, ShapeKey, SmallStr, Collect, CompareOp, ContextKind, ContextName, ContextShape, ShapeId, Env, Error, ErrorKind, FuncId, FunctionInfo, Gc, Lazy, Invoke, JsEnv, JsObject, Numbers, ObjectData, ObjectKind, Property, Resume, Slot, Step, Value, ValueKind};
 use j8lockfree::SegVec;
 
 mod cache;
@@ -60,9 +60,13 @@ struct Loaded {
     insns: Box<[Insn]>,
     ics: Box<[ic::Ic]>,
     globals: Box<[ic::GlobalIc]>,
-    literals: Box<[RefCell<Option<Arc<Shape>>>]>,
-    function_shape: RefCell<Option<Arc<Shape>>>,
-    prototype_shape: RefCell<Option<Arc<Shape>>>,
+    literals: Box<[Cell<Option<ShapeKey>>]>,
+    function_shape: Cell<Option<ShapeKey>>,
+    prototype_shape: Cell<Option<ShapeKey>>,
+    this: Cell<usize>,
+    unit: Cell<Option<Code>>,
+    jit_shapes: RefCell<Vec<ShapeKey>>,
+    jit_codes: RefCell<Vec<Code>>,
     shapes: Box<[Option<(ShapeId, u32)>]>,
     scope: Option<ShapeId>,
     extension: bool,
@@ -79,6 +83,10 @@ struct Loaded {
 }
 
 impl Loaded {
+    fn code(&self) -> Code {
+        unsafe { Code::from_id(self.this.get()) }
+    }
+
     fn new(base: u32, id: FuncId, func: SharedFunction, table: &SegVec<ContextShape>) -> Self {
         let bc = &func.bytecode;
         let call_ics = bc.feedback.iter().map(|_| Cell::new(0)).collect();
@@ -88,7 +96,7 @@ impl Loaded {
             Constant::Scope(s) => Some((Self::add_shape(table, s), u32::try_from(Self::shape(s).names.len()).expect("fewer than 2^32 slots"))),
             _ => None,
         }).collect();
-        let literals = bc.constants.iter().map(|_| RefCell::new(None)).collect();
+        let literals = bc.constants.iter().map(|_| Cell::new(None)).collect();
         let scope = func.scope.as_ref().map(|s| Self::add_shape(table, s));
         let extension = func.scope.as_ref().is_some_and(|s| s.has_extension);
         let k = func.kind;
@@ -111,8 +119,12 @@ impl Loaded {
             globals,
             literals,
             info: FunctionInfo { name: SmallStr::from(&*func.name), length: func.length },
-            function_shape: RefCell::new(None),
-            prototype_shape: RefCell::new(None),
+            function_shape: Cell::new(None),
+            prototype_shape: Cell::new(None),
+            this: Cell::new(0),
+            unit: Cell::new(None),
+            jit_shapes: RefCell::new(Vec::new()),
+            jit_codes: RefCell::new(Vec::new()),
             shapes,
             scope,
             extension,
@@ -224,7 +236,6 @@ impl Loaded {
 }
 
 #[derive(Clone, Copy, Collect)]
-#[collect(require_static)]
 struct Frame {
     func: FuncId,
     loaded: LoadedRef,
@@ -235,22 +246,55 @@ struct Frame {
     argc: usize,
 }
 
-#[derive(Clone, Copy)]
-struct LoadedRef(core::ptr::NonNull<Loaded>);
-
-unsafe impl Send for LoadedRef {}
-
-unsafe impl Sync for LoadedRef {}
+#[derive(Clone, Copy, Collect)]
+struct LoadedRef(Code);
 
 impl From<&Loaded> for LoadedRef {
     fn from(l: &Loaded) -> Self {
-        Self(core::ptr::NonNull::from(l))
+        Self(l.code())
     }
 }
 
 impl LoadedRef {
     unsafe fn get<'e>(self) -> &'e Loaded {
-        unsafe { self.0.as_ref() }
+        unsafe { self.0.get() }
+    }
+}
+
+j8framework::paragc::brand!(LoadedBrand = for<'gc> Loaded);
+
+unsafe impl Send for Loaded {}
+
+unsafe impl Sync for Loaded {}
+
+unsafe impl j8framework::Trace for Loaded {
+    fn trace(&self, t: &mut j8framework::Tracer<'_>) {
+        self.ics.iter().for_each(|ic| ic.trace_keys(t));
+        self.globals.iter().for_each(|ic| ic.trace_keys(t));
+        self.prototype.trace_keys(t);
+        let cells = self.literals.iter().chain([&self.function_shape, &self.prototype_shape]);
+        cells.filter_map(Cell::get).for_each(|k| k.trace(t));
+        if let Some(u) = self.unit.get() {
+            u.trace(t);
+        }
+        self.jit_shapes.borrow().iter().for_each(|k| k.trace(t));
+        self.jit_codes.borrow().iter().for_each(|c| c.trace(t));
+    }
+
+    fn relocate(&mut self, t: &mut j8framework::Tracer<'_>) {
+        self.trace(t);
+    }
+}
+
+struct Unit(Box<[Code]>);
+
+unsafe impl j8framework::Trace for Unit {
+    fn trace(&self, t: &mut j8framework::Tracer<'_>) {
+        self.0.iter().for_each(|c| c.trace(t));
+    }
+
+    fn relocate(&mut self, t: &mut j8framework::Tracer<'_>) {
+        self.trace(t);
     }
 }
 
@@ -438,7 +482,7 @@ impl<'s> Budget<'s> {
 #[derive(Default)]
 pub struct Executor {
     tier: Option<Box<dyn Tier + Send>>,
-    code: SegVec<Loaded>,
+    code: SegVec<(j8framework::paragc::Weak<LoadedBrand>, Code)>,
     depth: Cell<usize>,
     module_of: RefCell<alloc::collections::BTreeMap<u32, u32>>,
     script_files: RefCell<alloc::collections::BTreeMap<u32, alloc::string::String>>,
@@ -472,11 +516,20 @@ impl Executor {
         self
     }
 
-    pub fn load(&self, module: Module) -> FuncId {
+    pub fn load(&self, mc: &j8framework::Mutation<'_>, module: Module) -> FuncId {
+        let m = mc.mutator();
         let base = u32::try_from(self.code.len()).expect("fewer than 2^32 functions");
+        let mut codes = Vec::with_capacity(module.functions.len());
         for func in module.functions {
             let id = FuncId(u32::try_from(self.code.len()).expect("fewer than 2^32 functions"));
-            self.code.push(Loaded::new(base, id, func, &self.context_shapes));
+            let h = m.alloc_handle(Loaded::new(base, id, func, &self.context_shapes));
+            h.this.set(h.id());
+            codes.push(Code::new(h));
+            self.code.push((m.weak::<LoadedBrand>(h.get()), Code::new(h)));
+        }
+        let unit = Code::new(m.alloc_handle(Unit(codes.clone().into_boxed_slice())));
+        for c in &codes {
+            unsafe { c.get::<Loaded>() }.unit.set(Some(unit));
         }
         FuncId(base + Module::MAIN)
     }
@@ -493,9 +546,17 @@ impl Executor {
         }
     }
 
-    #[inline]
+    pub fn live_functions(&self) -> usize {
+        self.code.iter().filter(|(w, _)| !w.is_cleared()).count()
+    }
+
     fn function(&self, f: FuncId) -> &Loaded {
-        self.code.get(f.0 as usize).expect("function ids come from load")
+        self.live_function(f).expect("the code of a live function")
+    }
+
+    fn live_function(&self, f: FuncId) -> Option<&Loaded> {
+        let (weak, code) = self.code.get(f.0 as usize)?;
+        (!weak.is_cleared()).then(|| unsafe { code.get() })
     }
 
     fn open<'gc>(&self, a: &mut Agent<'gc, '_>, regs: &mut Vec<Value<'gc>>, closure: Closure<'gc>, callee: Value<'gc>, this: Value<'gc>, args: &[Value<'gc>]) -> Frame {
@@ -504,20 +565,19 @@ impl Executor {
 
     #[expect(clippy::too_many_arguments, reason = "the parts of a call")]
     fn open_with<'gc>(&self, a: &mut Agent<'gc, '_>, regs: &mut Vec<Value<'gc>>, loaded: &Loaded, closure: Closure<'gc>, callee: Value<'gc>, this: Value<'gc>, args: Args<'_, 'gc>) -> Frame {
-        let (params, base) = self.open_regs(a, regs, loaded, closure, callee, this, args);
+        let (params, base) = Self::open_regs(a, regs, loaded, closure, callee, this, args);
         Frame { func: closure.func, loaded: LoadedRef::from(loaded), pc: 0, insn: 0, params, base, argc: args.len() }
     }
 
     #[expect(clippy::too_many_arguments, reason = "the parts of a call")]
     #[inline]
     fn push_open<'gc>(&self, a: &mut Agent<'gc, '_>, st: &mut State<'gc>, loaded: &Loaded, closure: Closure<'gc>, callee: Value<'gc>, this: Value<'gc>, args: Args<'_, 'gc>) -> usize {
-        let (params, base) = self.open_regs(a, &mut st.regs, loaded, closure, callee, this, args);
+        let (params, base) = Self::open_regs(a, &mut st.regs, loaded, closure, callee, this, args);
         st.frames.push(Frame { func: closure.func, loaded: LoadedRef::from(loaded), pc: 0, insn: 0, params, base, argc: args.len() });
         base
     }
 
-    #[expect(clippy::too_many_arguments, reason = "the parts of a call")]
-    fn open_regs<'gc>(&self, a: &mut Agent<'gc, '_>, regs: &mut Vec<Value<'gc>>, loaded: &Loaded, closure: Closure<'gc>, callee: Value<'gc>, this: Value<'gc>, args: Args<'_, 'gc>) -> (usize, usize) {
+    fn open_regs<'gc>(a: &mut Agent<'gc, '_>, regs: &mut Vec<Value<'gc>>, loaded: &Loaded, closure: Closure<'gc>, callee: Value<'gc>, this: Value<'gc>, args: Args<'_, 'gc>) -> (usize, usize) {
         let f = &loaded.func;
         a.profiler.enter(closure.func);
         let this = match this.kind() {
@@ -540,7 +600,7 @@ impl Executor {
         (params, base)
     }
 
-    fn set_new_target<'gc>(&self, regs: &mut [Value<'gc>], f: &mut Frame, nt: Value<'gc>) {
+    fn set_new_target<'gc>(regs: &mut [Value<'gc>], f: &mut Frame, nt: Value<'gc>) {
         f.set_slot(regs, Frame::NEW_TARGET, nt);
         if let Some(r) = unsafe { f.loaded.get::<'_>() }.func.bytecode.new_target_or_generator {
             regs[f.base + usize::try_from(r).unwrap_or(0)] = nt;
@@ -705,7 +765,7 @@ impl Executor {
                         Some(Value::Object(this))
                     };
                     let mut f = self.open(a, regs, closure, callee, this.unwrap_or(Value::Uninit), &args);
-                    self.set_new_target(regs, &mut f, new_target);
+                    Self::set_new_target(regs, &mut f, new_target);
                     f.set_slot(regs, Frame::NEW_THIS, this.unwrap_or(Value::Uninit));
                     return Ok(Prepared::Frame(f));
                 }
@@ -746,7 +806,7 @@ impl Executor {
                 Some(v) => v,
                 None => {
                     let v = a.get_named(new_target, "prototype")?;
-                    ctor.prototype.fill_get(o, "prototype");
+                    ctor.prototype.fill_get(a.mc, o, "prototype");
                     v
                 }
             },
@@ -781,7 +841,7 @@ impl Executor {
 
     fn function_object<'gc>(&self, a: &Agent<'gc, '_>, mut closure: Closure<'gc>) -> JsObject<'gc> {
         let loaded = self.function(closure.func);
-        closure.code = Some(j8framework::Code::new(&loaded.info));
+        closure.code = Some(loaded.code());
         let func = &loaded.func;
         let proto = match (loaded.generator, loaded.asynchronous) {
             (true, true) => a.realm.async_generator_function_proto,
@@ -797,8 +857,8 @@ impl Executor {
             Some((ObjectData { proto: Some(base), ..ObjectData::default() }.alloc(a.mc), true))
         } else if !loaded.no_prototype && !loaded.asynchronous {
             let p = a.object();
-            match &*loaded.prototype_shape.borrow() {
-                Some(shape) => p.fill(a.mc, shape, [Slot::Data(fo.into())]),
+            match loaded.prototype_shape.get() {
+                Some(shape) => p.fill(a.mc, unsafe { shape.handle() }, [Slot::Data(fo.into())]),
                 None => p.borrow_mut(a.mc).define("constructor", Property::hidden(fo.into())),
             }
             Self::remember_shape(&loaded.prototype_shape, p, 1);
@@ -806,8 +866,8 @@ impl Executor {
         } else {
             None
         };
-        match &*loaded.function_shape.borrow() {
-            Some(shape) => fo.fill(a.mc, shape, [Slot::Data(length), Slot::Data(name)].into_iter().chain(prototype.map(|(p, _)| Slot::Data(p.into())))),
+        match loaded.function_shape.get() {
+            Some(shape) => fo.fill(a.mc, unsafe { shape.handle() }, [Slot::Data(length), Slot::Data(name)].into_iter().chain(prototype.map(|(p, _)| Slot::Data(p.into())))),
             None => {
                 let prop = |v: Value<'gc>| Property { slot: Slot::Data(v), enumerable: false, writable: false, configurable: true };
                 let d = fo.borrow_mut(a.mc);
@@ -828,9 +888,9 @@ impl Executor {
         let ob = a.object_with(b.properties.len());
         let cache = &loaded.literals[k];
         let value = |v: &Option<LiteralValue>| v.as_ref().map_or(Value::Undefined, |v| Self::literal(a, v));
-        match &*cache.borrow() {
+        match cache.get() {
             Some(shape) => {
-                ob.fill(a.mc, shape, b.properties.iter().map(|(_, v)| Slot::Data(value(v))));
+                ob.fill(a.mc, unsafe { shape.handle() }, b.properties.iter().map(|(_, v)| Slot::Data(value(v))));
                 return ob;
             }
             None => {
@@ -843,12 +903,11 @@ impl Executor {
         ob
     }
 
-    fn remember_shape(cache: &RefCell<Option<Arc<Shape>>>, o: JsObject<'_>, n: usize) {
-        if cache.borrow().is_some() {
+    fn remember_shape(cache: &Cell<Option<ShapeKey>>, o: JsObject<'_>, n: usize) {
+        if cache.get().is_some() {
             return;
         }
-        let shape = o.get().props().shape().filter(|s| s.len() == n);
-        *cache.borrow_mut() = shape;
+        cache.set(o.get().props().shape().filter(|s| s.len() == n).map(ShapeKey::from));
     }
 
     fn script_slot<'gc>(&self, a: &Agent<'gc, '_>, name: &str) -> Option<(JsEnv<'gc>, usize, bool)> {
@@ -883,7 +942,7 @@ impl Executor {
             return Err(a.throw(ErrorKind::Reference, &alloc::format!("{name} is not defined")));
         }
         let v = a.get_named(g, name)?;
-        cache.fill(scope, global, name);
+        cache.fill(a.mc, scope, global, name);
         Ok(v)
     }
 
@@ -910,7 +969,7 @@ impl Executor {
             return Err(a.throw(ErrorKind::Reference, &alloc::format!("{name} is not defined")));
         }
         a.put_named(g, name, v, strict)?;
-        cache.fill(scope, global, name);
+        cache.fill(a.mc, scope, global, name);
         Ok(())
     }
 
@@ -1091,9 +1150,9 @@ impl Executor {
         self.execute(a, st, &mut None).map(Outcome::returned)
     }
 
-    fn unwind<'gc>(&self, st: &mut State<'gc>, v: Value<'gc>) -> bool {
+    fn unwind<'gc>(st: &mut State<'gc>, v: Value<'gc>) -> bool {
         loop {
-            let loaded = self.function(st.f().func);
+            let loaded = unsafe { st.f().loaded.get() };
             let at = loaded.insns.get(st.f().insn).map_or(u32::MAX, |d| d.start);
             let h = loaded.func.bytecode.handlers.iter().filter(|h| h.start <= at && at < h.end).min_by_key(|h| h.end - h.start).copied();
             if let Some(h) = h {
@@ -1120,7 +1179,7 @@ impl Executor {
                 Ok(None) => break Ok(None),
                 Err(Error::Exception(g)) => {
                     let v = a.local(&g);
-                    if !self.unwind(&mut st, v) {
+                    if !Self::unwind(&mut st, v) {
                         break Err(Error::Exception(g));
                     }
                 }
@@ -1404,7 +1463,7 @@ impl Executor {
                         Some(v) => v,
                         None => {
                             let v = a.get_named(obj, name)?;
-                            ic.fill_get(ob, name);
+                            ic.fill_get(a.mc, ob, name);
                             v
                         }
                     },
@@ -1422,7 +1481,7 @@ impl Executor {
                         if !ic.set(a.mc, ob, *acc, true) {
                             let before = ic::Before::from(ob);
                             a.put_named(obj, name, *acc, s)?;
-                            ic.fill_set(ob, name, before, true);
+                            ic.fill_set(a.mc, ob, name, before, true);
                         }
                     }
                     _ => a.put_named(obj, name, *acc, s)?,
@@ -1435,7 +1494,7 @@ impl Executor {
                     if !ic.set(a.mc, ob, *acc, false) {
                         let before = ic::Before::from(ob);
                         a.define(ob, name, Property::data(*acc))?;
-                        ic.fill_set(ob, name, before, false);
+                        ic.fill_set(a.mc, ob, name, before, false);
                     }
                 }
             }
@@ -1711,7 +1770,7 @@ impl Executor {
                 let formals = usize::from(loaded.func.formal_parameters);
                 *acc = a.array(f.args(regs).get(formals..).unwrap_or(&[]).to_vec()).into();
             }
-            B::CreateMappedArguments | B::CreateUnmappedArguments => *acc = self.arguments(a, regs, f, loaded.func.strict || d.bytecode == B::CreateUnmappedArguments)?,
+            B::CreateMappedArguments | B::CreateUnmappedArguments => *acc = Self::arguments(a, regs, f, loaded.func.strict || d.bytecode == B::CreateUnmappedArguments)?,
             B::GetIterator => *acc = a.iterator_object(r!(0))?,
             B::ForInEnumerate => {
                 let keys = a.for_in_keys(r!(0))?;
@@ -1872,7 +1931,7 @@ impl Executor {
         a.to_list(v)
     }
 
-    fn arguments<'gc>(&self, a: &mut Agent<'gc, '_>, regs: &[Value<'gc>], f: &Frame, strict: bool) -> Result<Value<'gc>, Error> {
+    fn arguments<'gc>(a: &mut Agent<'gc, '_>, regs: &[Value<'gc>], f: &Frame, strict: bool) -> Result<Value<'gc>, Error> {
         let args = f.args(regs);
         let o = ObjectData { kind: ObjectKind::Arguments(None), proto: Some(a.realm.object_proto), ..ObjectData::default() }.alloc(a.mc);
         let hidden = |v: Value<'gc>| Property { slot: Slot::Data(v), enumerable: false, writable: true, configurable: true };
@@ -2120,7 +2179,7 @@ impl Executor {
                     Err(Error::Syntax(m)) => return Err(a.throw(ErrorKind::Syntax, &m)),
                     Err(e) => return Err(e),
                 };
-                let main = self.load(module);
+                let main = self.load(a.mc, module);
                 let closure = Closure::new(main, st.f().env(&st.regs));
                 Ok(self.function_object(a, closure).into())
             }
@@ -2251,7 +2310,7 @@ impl<'gc> Invoke<'gc> for Executor {
     }
 
     fn constructs(&self, closure: &Closure<'gc>) -> bool {
-        let loaded = self.function(closure.func);
+        let loaded: &Loaded = unsafe { closure.code.expect("closures carry their code").get() };
         loaded.constructs || loaded.class_constructor
     }
 
@@ -2262,7 +2321,7 @@ impl<'gc> Invoke<'gc> for Executor {
             Err(Error::Syntax(m)) => return Err(a.throw(ErrorKind::Syntax, &m)),
             Err(e) => return Err(e),
         };
-        let main = self.load_script(module, file);
+        let main = self.load_script(a.mc, module, file);
         let level = self.depth.get() + 1;
         if level >= STACK_LIMIT {
             return Err(a.throw(ErrorKind::Range, "Maximum call stack size exceeded"));
@@ -2376,7 +2435,7 @@ enum Slice {
 pub struct Job(Started);
 
 enum Started {
-    Script(FuncId),
+    Script { module: Module, file: alloc::string::String },
     Paused(Parked),
     Module { text: alloc::string::String, file: alloc::string::String },
     Spent,
@@ -2387,14 +2446,14 @@ impl j8framework::Engine for Executor {
 
     fn start(&mut self, _: &mut j8framework::Isolate<'_>, _: &j8framework::ContextRoot, src: &j8framework::Source<'_>, kind: j8framework::ScriptKind) -> Result<Job, Error> {
         Ok(Job(match kind {
-            j8framework::ScriptKind::Classic => Started::Script(self.load_script(Module::compile(src, j8framework::CodeKind::Script)?, src.file)),
-            j8framework::ScriptKind::Shared => Started::Script(self.load_script(
-                match &self.cache {
+            j8framework::ScriptKind::Classic => Started::Script { module: Module::compile(src, j8framework::CodeKind::Script)?, file: src.file.into() },
+            j8framework::ScriptKind::Shared => Started::Script {
+                module: match &self.cache {
                     Some(cache) => cache.script(src)?,
                     None => Module::compile(src, j8framework::CodeKind::Script)?,
                 },
-                src.file,
-            )),
+                file: src.file.into(),
+            },
             j8framework::ScriptKind::Module => Started::Module { text: src.text.into(), file: src.file.into() },
         }))
     }
@@ -2407,7 +2466,10 @@ impl j8framework::Engine for Executor {
             let realm = scope.context_of(cx);
             let mut a = scope.agent(realm, this);
             let st = match started {
-                Started::Script(main) => this.script_state(&mut a, main)?,
+                Started::Script { module, file } => {
+                    let main = this.load_script(a.mc, module, &file);
+                    this.script_state(&mut a, main)?
+                }
                 Started::Paused(root) => j8framework::CellExt::borrow_mut(a.fetch(&root), a.mc).take().expect("a parked state"),
                 Started::Module { text, file } => {
                     this.run_module(&mut a, &file, &text, 0)?;

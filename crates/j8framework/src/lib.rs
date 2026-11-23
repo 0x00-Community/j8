@@ -49,7 +49,7 @@ pub use object::{Accessor, ObjMut, ObjRef, Object, ObjectState, Few, ArgumentsMa
 pub use bigint::Numeric;
 pub use ops::{number_text, BinaryOp, CompareOp, ErrorKind, Hint, IterRecord, Numbers, UnaryOp};
 pub use platform::{AsyncJob, Platform, Settle, Task};
-pub use shape::{Attrs, Dict, Props, Shape};
+pub use shape::{Attrs, Dict, Props, Shape, ShapeBrand, ShapeKey, ShapeRef};
 pub use store::{Store, StorePath, ValueArray};
 pub use parallel::Par;
 pub use platform::Pool;

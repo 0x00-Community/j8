@@ -1,10 +1,9 @@
 use j8framework::ValueKind;
 use alloc::borrow::Cow;
 use alloc::string::String;
-use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-use j8framework::{Agent, Error, ErrorKind, JsObject, JsString, ObjectData, Property, Shape, Slot, SmallStr, Value};
+use j8framework::{Agent, Error, ErrorKind, JsObject, JsString, ObjectData, Property, ShapeRef, Slot, SmallStr, Value};
 
 use crate::{Args, Installer};
 
@@ -40,7 +39,7 @@ struct Parser<'s, 'a, 'gc, 'x> {
     a: &'a mut Agent<'gc, 'x>,
     text: &'s str,
     pos: usize,
-    shapes: Vec<(Vec<String>, Arc<Shape>)>,
+    shapes: Vec<(Vec<String>, ShapeRef<'gc>)>,
     spare_pairs: Vec<Vec<(Cow<'s, str>, Value<'gc>)>>,
     spare_items: Vec<Vec<Value<'gc>>>,
 }
@@ -139,7 +138,7 @@ impl<'s, 'gc> Parser<'s, '_, 'gc, '_> {
                 self.shapes.swap(hit, last);
             }
             let o = self.a.object_with(n);
-            o.fill(self.a.mc, &self.shapes[last].1, pairs.iter().map(|&(_, v)| Slot::Data(v)));
+            o.fill(self.a.mc, self.shapes[last].1, pairs.iter().map(|&(_, v)| Slot::Data(v)));
             return o;
         }
         let o = self.a.object_with(n);
@@ -303,9 +302,9 @@ impl<'s, 'gc> Parser<'s, '_, 'gc, '_> {
     }
 }
 
-struct CachedShape {
-    ptr: *const Shape,
-    shape: Arc<Shape>,
+struct CachedShape<'gc> {
+    ptr: usize,
+    shape: ShapeRef<'gc>,
     base: usize,
     n: usize,
 }
@@ -316,10 +315,10 @@ struct Writer<'gc> {
     allow: Option<Vec<JsString<'gc>>>,
     replacer: Option<Value<'gc>>,
     stack: Vec<JsObject<'gc>>,
-    clean_shapes: Vec<*const Shape>,
+    clean_shapes: Vec<usize>,
     clean_protos: Vec<JsObject<'gc>>,
     quoted: String,
-    cached_shapes: Vec<CachedShape>,
+    cached_shapes: Vec<CachedShape<'gc>>,
     cached_at: Vec<usize>,
     cached_len: Vec<usize>,
 }
@@ -373,8 +372,8 @@ impl<'gc> Writer<'gc> {
     fn owns_to_json(&mut self, o: JsObject<'gc>) -> bool {
         const KEY: &str = "toJSON";
         let props = o.get().props();
-        if let Some(ptr) = props.shape_ptr() {
-            if self.clean_shapes.iter().any(|&s| core::ptr::eq(s, ptr)) {
+        if let Some(ptr) = props.shape_id() {
+            if self.clean_shapes.contains(&ptr) {
                 return false;
             }
             if props.position(KEY).is_some() {
@@ -402,8 +401,8 @@ impl<'gc> Writer<'gc> {
             return false;
         }
         let props = o.get().props();
-        let own_clean = match props.shape_ptr() {
-            Some(ptr) => self.clean_shapes.iter().any(|&s| core::ptr::eq(s, ptr)),
+        let own_clean = match props.shape_id() {
+            Some(ptr) => self.clean_shapes.contains(&ptr),
             None => !props.is_dict(),
         };
         if !own_clean {
@@ -539,17 +538,17 @@ impl<'gc> Writer<'gc> {
 
     fn object_keys(&mut self, a: &mut Agent<'gc, '_>, o: JsObject<'gc>, out: &mut String, first: &mut bool) -> Result<(), Error> {
         let keys = Self::keys(o);
-        let shape = o.get().props().shape_ptr();
+        let shape = o.get().props().shape_id();
         for (k, at) in keys {
-            let read = at.filter(|_| shape.is_some() && o.get().props().shape_ptr() == shape).and_then(|i| o.get().props().read_data(i));
+            let read = at.filter(|_| shape.is_some() && o.get().props().shape_id() == shape).and_then(|i| o.get().props().read_data(i));
             self.one(a, o.into(), &k, read, out, first)?;
         }
         Ok(())
     }
 
     fn object_cached(&mut self, a: &mut Agent<'gc, '_>, o: JsObject<'gc>, out: &mut String, first: &mut bool) -> Result<(), Error> {
-        let ptr = o.get().props().shape_ptr().expect("shaped object");
-        if let Some(hit) = self.cached_shapes.iter().position(|c| core::ptr::eq(c.ptr, ptr)) {
+        let ptr = o.get().props().shape_id().expect("shaped object");
+        if let Some(hit) = self.cached_shapes.iter().position(|c| c.ptr == ptr) {
             return self.write_cached(a, o, hit, out, first);
         }
         if self.cached_shapes.len() >= SHAPES_WRITTEN {
@@ -569,7 +568,7 @@ impl<'gc> Writer<'gc> {
             self.cached_at.push(start);
             self.cached_len.push(self.quoted.len() - start);
         }
-        self.cached_shapes.push(CachedShape { ptr: Arc::as_ptr(&shape), shape, base, n });
+        self.cached_shapes.push(CachedShape { ptr: shape.id(), shape, base, n });
         self.write_cached(a, o, self.cached_shapes.len() - 1, out, first)
     }
 
@@ -594,7 +593,7 @@ impl<'gc> Writer<'gc> {
             if !self.gap.is_empty() {
                 out.push(' ');
             }
-            let read = if o.get().props().shape_ptr() == Some(ptr) { o.get().props().read_data(i) } else { None };
+            let read = if o.get().props().shape_id() == Some(ptr) { o.get().props().read_data(i) } else { None };
             let wrote = match read {
                 Some(v) if self.replacer.is_none() && self.to_json_absent(v) => self.write_value(a, v, out)?,
                 _ => {
@@ -620,7 +619,7 @@ impl<'gc> Writer<'gc> {
         let mut first = true;
         if self.allow.is_some() {
             self.object_allow(a, o, out, &mut first)?;
-        } else if self.replacer.is_none() && !o.is_array() && o.get().is_plain() && !o.get().props().is_dict() && o.get().props().shape_ptr().is_some() {
+        } else if self.replacer.is_none() && !o.is_array() && o.get().is_plain() && !o.get().props().is_dict() && o.get().props().shape_id().is_some() {
             self.object_cached(a, o, out, &mut first)?;
         } else {
             self.object_keys(a, o, out, &mut first)?;
