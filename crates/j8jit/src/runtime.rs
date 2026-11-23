@@ -406,6 +406,11 @@ fn helper<'gc>(jit: &Jit, exe: &Executor, a: &mut Agent<'gc, '_>, h: Helper, ops
         Helper::CreateClosure(f, k) => Value::Object(exe.jit_create_closure(a, f, i64::from(k), v(0).as_context())).bits(),
         Helper::CreateContext(shape, n) => Value::context(j8framework::Env::context(n as usize, Value::Undefined, v(0).as_context(), Some(shape), None).alloc(a.mc)).bits(),
         Helper::ObjectLiteral(f, k) => Value::Object(exe.jit_object_literal(a, f, i64::from(k))).bits(),
+        Helper::RegExpLiteral(f, pat, bits) => {
+            let (v, keep_epoch) = exe.jit_regexp_literal(a, f, i64::from(pat), i64::from(bits))?;
+            *keep = keep_epoch;
+            v.bits()
+        }
         Helper::Constant(f, k) => match exe.jit_function(f).constant(i64::from(k)) {
             Some(j8bytecode::Constant::String(s)) => Value::String(a.constant_string(f.0, k, s)).bits(),
             Some(j8bytecode::Constant::Utf16(u)) => Value::String(a.constant_units(f.0, k, u)).bits(),
