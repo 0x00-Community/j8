@@ -10,8 +10,9 @@ use j8::Glue;
 
 use crate::host::Offload;
 
-#[derive(Default)]
+#[derive(Default, j8::Trace)]
 pub struct Timer {
+    #[collect(require_static)]
     cancelled: Arc<AtomicBool>,
 }
 

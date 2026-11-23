@@ -28,7 +28,7 @@ pub struct Session<'p> {
 }
 
 impl<'p> Session<'p> {
-    pub fn new<H: Host>(set: &j8::EventLoopSet<'_, 'p, Executor>, jit: bool) -> Self {
+    pub fn new<H: Host>(set: &j8::EventLoopSet<'_, 'p>, jit: bool) -> Self {
         let executor = if jit { Executor::default().with_tier(j8::jit::Jit::default()) } else { Executor::default() };
         match Runtime::on::<H>(set, executor) {
             Ok(rt) => Self { rt },

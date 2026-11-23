@@ -93,6 +93,17 @@ impl<'p> Runtime<'p> {
         })
     }
 
+    pub fn exception_text(&self) -> String {
+        self.enter(|a| {
+            let v = a.take_exception();
+            let text = a.to_string(v).map(|s| String::from(&**s));
+            text.unwrap_or_else(|_| {
+                let _ = a.take_exception();
+                String::from("<ToString threw>")
+            })
+        })
+    }
+
     pub fn set<V: for<'g> crate::IntoJs<'g> + Send>(&self, path: &str, value: V) -> Result<(), Error> {
         self.enter(|a| {
             let (holder, key) = path.rsplit_once('.').unwrap_or(("", path));
