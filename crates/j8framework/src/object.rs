@@ -303,6 +303,8 @@ impl fmt::Debug for Native {
     }
 }
 
+const _: () = assert!(core::mem::offset_of!(Native, f) == 0);
+
 #[derive(Debug, Collect)]
 #[collect(no_drop)]
 pub struct Bound<'gc> {
@@ -1247,6 +1249,8 @@ impl<'gc> Object<'gc> {
     pub const PROPS_OFFSET: usize = core::mem::offset_of!(Object<'static>, props);
     pub const CLASS_OFFSET: usize = core::mem::offset_of!(Object<'static>, class);
     pub const PLAIN_BIT: u8 = Class::PLAIN;
+    pub const FAST_NATIVE_TAG: u8 = 1;
+    pub const FAST_NATIVE_FN: usize = 8;
 
     pub fn borrow(&self) -> ObjRef<'_, 'gc> {
         ObjRef { obj: self, data: core::cell::OnceCell::new() }

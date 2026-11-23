@@ -55,6 +55,7 @@ struct Loaded {
     id: FuncId,
     calls: Cell<u32>,
     call_ics: Box<[Cell<u32>]>,
+    native_ics: Box<[Cell<u64>]>,
     tier: Cell<usize>,
     func: SharedFunction,
     insns: Box<[Insn]>,
@@ -90,6 +91,7 @@ impl Loaded {
     fn new(base: u32, id: FuncId, func: SharedFunction, table: &SegVec<ContextShape>) -> Self {
         let bc = &func.bytecode;
         let call_ics = bc.feedback.iter().map(|_| Cell::new(0)).collect();
+        let native_ics = bc.feedback.iter().map(|_| Cell::new(0)).collect();
         let ics = bc.feedback.iter().map(|_| ic::Ic::default()).collect();
         let globals = bc.feedback.iter().map(|_| ic::GlobalIc::default()).collect();
         let shapes = bc.constants.iter().map(|c| match c {
@@ -113,6 +115,7 @@ impl Loaded {
             id,
             calls: Cell::new(0),
             call_ics,
+            native_ics,
             tier: Cell::new(0),
             insns,
             ics,
@@ -1305,6 +1308,17 @@ impl Executor {
                 0 => ic.set(id),
                 x if x != id => ic.set(u32::MAX),
                 _ => {}
+            }
+        }
+    }
+
+    #[inline]
+    fn record_native(loaded: &Loaded, fb: OperandValue, f: j8framework::NativeFn) {
+        if let Some(n) = loaded.native_ics.get(usize::try_from(fb).unwrap_or(usize::MAX)) {
+            let p = f as usize as u64;
+            let seen = n.get();
+            if seen != p {
+                n.set(if seen == 0 { p } else { u64::MAX });
             }
         }
     }

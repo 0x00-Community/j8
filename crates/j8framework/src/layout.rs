@@ -21,6 +21,8 @@ impl Layout {
     pub const ENV_BOXED_PTR: usize = Env::SLOTS_OFFSET + 8;
     pub const FAST_CLOSURE_TAG: u8 = 0;
     pub const FAST_CLOSURE: usize = 8;
+    pub const FAST_NATIVE_TAG: u8 = Object::FAST_NATIVE_TAG;
+    pub const FAST_NATIVE_FN: usize = Object::FAST_NATIVE_FN;
     pub const CLOSURE_FUNC: usize = core::mem::offset_of!(Closure<'static>, func);
     pub const CLOSURE_ENV: usize = core::mem::offset_of!(Closure<'static>, env);
 }

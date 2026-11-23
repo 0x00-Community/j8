@@ -122,6 +122,62 @@ impl Collections {
         Self::construct(a, args, Shape::Set, true)
     }
 
+    fn read_collection<'gc>(this: Value<'gc>, set: bool, f: impl FnOnce(&Collection<'gc>) -> Value<'gc>) -> Option<Value<'gc>> {
+        let o = this.as_object()?;
+        let r = o.try_borrow()?;
+        match &r.kind {
+            ObjectKind::Map(c) if !set && !c.weak => Some(f(c)),
+            ObjectKind::Set(c) if set && !c.weak => Some(f(c)),
+            _ => None,
+        }
+    }
+
+    fn write_collection<'gc>(a: &Agent<'gc, '_>, this: Value<'gc>, set: bool, f: impl FnOnce(&mut Collection<'gc>)) -> Option<Value<'gc>> {
+        let o = this.as_object()?;
+        {
+            let r = o.try_borrow()?;
+            let ok = match &r.kind {
+                ObjectKind::Map(c) if !set => !c.weak,
+                ObjectKind::Set(c) if set => !c.weak,
+                _ => false,
+            };
+            if !ok {
+                return None;
+            }
+        }
+        match &mut o.borrow_mut(a.mc).kind {
+            ObjectKind::Map(c) if !set && !c.weak => {
+                f(c);
+                Some(this)
+            }
+            ObjectKind::Set(c) if set && !c.weak => {
+                f(c);
+                Some(this)
+            }
+            _ => None,
+        }
+    }
+
+    fn map_get1<'gc>(_: &mut Agent<'gc, '_>, this: Value<'gc>, key: Value<'gc>) -> Option<Value<'gc>> {
+        Self::read_collection(this, false, |c| c.get(key).unwrap_or(Value::Undefined))
+    }
+
+    fn map_has1<'gc>(_: &mut Agent<'gc, '_>, this: Value<'gc>, key: Value<'gc>) -> Option<Value<'gc>> {
+        Self::read_collection(this, false, |c| c.has(key).into())
+    }
+
+    fn map_set2<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, key: Value<'gc>, value: Value<'gc>) -> Option<Value<'gc>> {
+        Self::write_collection(a, this, false, |c| c.set(key, value))
+    }
+
+    fn set_has1<'gc>(_: &mut Agent<'gc, '_>, this: Value<'gc>, key: Value<'gc>) -> Option<Value<'gc>> {
+        Self::read_collection(this, true, |c| c.has(key).into())
+    }
+
+    fn set_add1<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, key: Value<'gc>) -> Option<Value<'gc>> {
+        Self::write_collection(a, this, true, |c| c.set(key, key))
+    }
+
     fn map_get<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         Ok(Self::read(a, this, Shape::Map, |c| c.get(args.at(0)))?.unwrap_or_default())
     }
@@ -511,6 +567,9 @@ impl Installer<'_, '_> {
         for (name, f, n) in methods {
             self.method(map, name, f, n);
         }
+        self.direct(Collections::map_get, j8framework::FastCall::A1(Collections::map_get1), j8framework::FastOut::Value);
+        self.direct(Collections::map_has, j8framework::FastCall::A1(Collections::map_has1), j8framework::FastOut::Bool);
+        self.direct(Collections::map_set, j8framework::FastCall::A2(Collections::map_set2), j8framework::FastOut::Value);
         let entries = r.named_native(self.mc, Collections::entries::<false>, "entries", 0);
         self.set(map, "entries", entries.into());
         map.borrow_mut(self.mc).define_symbol(iter, j8framework::Property::hidden(entries.into()));
@@ -535,6 +594,8 @@ impl Installer<'_, '_> {
         for (name, f, n) in methods {
             self.method(set, name, f, n);
         }
+        self.direct(Collections::set_has, j8framework::FastCall::A1(Collections::set_has1), j8framework::FastOut::Bool);
+        self.direct(Collections::set_add, j8framework::FastCall::A1(Collections::set_add1), j8framework::FastOut::Value);
         let values = r.named_native(self.mc, Collections::values::<true>, "values", 0);
         self.set(set, "values", values.into());
         self.set(set, "keys", values.into());

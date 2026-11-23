@@ -137,6 +137,17 @@ impl<'e> Function<'e> {
         }
     }
 
+    pub fn call_native(self, slot: OperandValue) -> Option<usize> {
+        let i = usize::try_from(slot).ok()?;
+        if self.0.call_ics.get(i)?.get() != 0 {
+            return None;
+        }
+        match self.0.native_ics.get(i)?.get() {
+            0 | u64::MAX => None,
+            p => usize::try_from(p).ok(),
+        }
+    }
+
     pub fn literal_shape(self, k: OperandValue) -> Option<ShapeKey> {
         self.0.literals.get(usize::try_from(k).ok()?)?.get()
     }

@@ -35,6 +35,7 @@ enum St {
     CheckNotHole,
     CheckNotLazy,
     CheckFunc,
+    CheckNative,
     CheckShape(bool),
     Check(bool),
     CmpInt(Cond),
@@ -70,7 +71,7 @@ impl St {
             }
         }
         out.extend(FLOAT_OPS.map(St::Float));
-        out.extend([St::IntToFloat, St::BoxFloat, St::BoxBool, St::BoxPtr, St::Untag, St::UnboxInt, St::FloatToInt, St::UnboxFloat, St::CheckObject, St::CheckNotHole, St::CheckNotLazy, St::CheckFunc, St::CheckShape(false), St::CheckShape(true), St::Check(false), St::Check(true)]);
+        out.extend([St::IntToFloat, St::BoxFloat, St::BoxBool, St::BoxPtr, St::Untag, St::UnboxInt, St::FloatToInt, St::UnboxFloat, St::CheckObject, St::CheckNotHole, St::CheckNotLazy, St::CheckFunc, St::CheckNative, St::CheckShape(false), St::CheckShape(true), St::Check(false), St::Check(true)]);
         for c in CONDS {
             out.extend([St::CmpInt(c), St::CmpWord(c), St::CmpFloat(c)]);
         }
@@ -343,6 +344,21 @@ impl Tpl {
                 let f = self.hole(0);
                 let f = self.line(&format!("llvm.trunc {f} : i64 to i32"));
                 let other = self.icmp("ne", &id, &f, "i32");
+                self.exit_if(&other, 0);
+            }
+            St::CheckNative => {
+                let p = self.read(0, "i64");
+                let c = self.load(&p, Self::off(Layout::OBJECT_CALL), "i64");
+                let c = self.untag(&c);
+                let none = self.icmp64("eq", &c, 0);
+                self.exit_if(&none, 0);
+                let tag = self.load(&c, 0, "i8");
+                let want = self.line(&format!("llvm.mlir.constant({} : i8) : i8", Layout::FAST_NATIVE_TAG));
+                let other = self.icmp("ne", &tag, &want, "i8");
+                self.exit_if(&other, 0);
+                let f = self.load(&c, Self::off(Layout::FAST_NATIVE_FN), "i64");
+                let want = self.hole(0);
+                let other = self.icmp("ne", &f, &want, "i64");
                 self.exit_if(&other, 0);
             }
             St::CheckShape(dict) => {
@@ -1027,6 +1043,10 @@ impl<'g, 't> Stitch<'g, 't> {
             Op::CheckFunc(p, f, fs) => {
                 let jumps = vec![self.exit(fs, Reason::Func)];
                 self.emit(St::CheckFunc, &[p], None, vec![u64::from(f.0)], jumps)?;
+            }
+            Op::CheckNative(p, native, fs) => {
+                let jumps = vec![self.exit(fs, Reason::Shape)];
+                self.emit(St::CheckNative, &[p], None, vec![native], jumps)?;
             }
             Op::CheckShape(p, shape, fs) => {
                 let want = shape.as_ref().map_or(0, |s| s.id() as u64);

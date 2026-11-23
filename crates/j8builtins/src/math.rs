@@ -37,6 +37,28 @@ impl Math {
         Ok((UNARY[N].1)(a.to_number(args.at(0))?).into())
     }
 
+    fn unary1<'gc, const N: usize>(_: &mut Agent<'gc, '_>, _: Value<'gc>, v: Value<'gc>) -> Option<Value<'gc>> {
+        match v.kind() {
+            j8framework::ValueKind::Number(x) => Some((UNARY[N].1)(x).into()),
+            _ => None,
+        }
+    }
+
+    fn extreme2<'gc>(a: &mut Agent<'gc, '_>, x: Value<'gc>, y: Value<'gc>, max: bool) -> Option<Value<'gc>> {
+        if !matches!((x.kind(), y.kind()), (j8framework::ValueKind::Number(_), j8framework::ValueKind::Number(_))) {
+            return None;
+        }
+        Self::extreme(a, &[x, y], max).ok()
+    }
+
+    fn max2<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, x: Value<'gc>, y: Value<'gc>) -> Option<Value<'gc>> {
+        Self::extreme2(a, x, y, true)
+    }
+
+    fn min2<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, x: Value<'gc>, y: Value<'gc>) -> Option<Value<'gc>> {
+        Self::extreme2(a, x, y, false)
+    }
+
     fn round<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let x = a.to_number(args.at(0))?;
         let f = libm::floor(x);
@@ -115,11 +137,17 @@ impl Installer<'_, '_> {
         for ((name, _), f) in UNARY.iter().zip(unary) {
             self.method(m, name, f, 1);
         }
+        self.direct(Math::unary::<0>, j8framework::FastCall::A1(Math::unary1::<0>), j8framework::FastOut::Number);
+        self.direct(Math::unary::<1>, j8framework::FastCall::A1(Math::unary1::<1>), j8framework::FastOut::Number);
+        self.direct(Math::unary::<2>, j8framework::FastCall::A1(Math::unary1::<2>), j8framework::FastOut::Number);
+        self.direct(Math::unary::<4>, j8framework::FastCall::A1(Math::unary1::<4>), j8framework::FastOut::Number);
         self.method(m, "round", Math::round, 1);
         self.method(m, "pow", Math::pow, 2);
         self.method(m, "atan2", Math::atan2, 2);
         self.method(m, "max", Math::max, 2);
         self.method(m, "min", Math::min, 2);
+        self.direct(Math::max, j8framework::FastCall::A2(Math::max2), j8framework::FastOut::Number);
+        self.direct(Math::min, j8framework::FastCall::A2(Math::min2), j8framework::FastOut::Number);
         self.method(m, "hypot", Math::hypot, 2);
         for (name, v) in [("PI", core::f64::consts::PI), ("E", core::f64::consts::E), ("LN2", core::f64::consts::LN_2), ("LN10", core::f64::consts::LN_10), ("LOG2E", core::f64::consts::LOG2_E), ("LOG10E", core::f64::consts::LOG10_E), ("SQRT2", core::f64::consts::SQRT_2), ("SQRT1_2", core::f64::consts::FRAC_1_SQRT_2)] {
             self.set(m, name, v.into());
