@@ -136,6 +136,7 @@ pub struct RegExpLiteralEntry<'gc> {
     #[collect(require_static)]
     pub flags: u16,
     pub compiled: RegExpCompiled<'gc>,
+    pub shared: crate::object::RegExpShared<'gc>,
 }
 
 pub type Fast0 = for<'gc, 'x> fn(&mut crate::Agent<'gc, 'x>, Value<'gc>) -> Option<Value<'gc>>;

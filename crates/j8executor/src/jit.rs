@@ -405,6 +405,10 @@ impl Executor {
         Self::object_literal(a, self.function(f), k)
     }
 
+    pub fn jit_regexp_literal<'gc>(&self, a: &mut Agent<'gc, '_>, f: FuncId, k: OperandValue, bits: OperandValue) -> Result<(Value<'gc>, bool), Error> {
+        Self::regexp_literal(a, self.function(f), k, bits)
+    }
+
     pub fn jit_global_load<'gc>(&self, a: &mut Agent<'gc, '_>, f: FuncId, k: OperandValue, slot: OperandValue, inside_typeof: bool) -> Result<Value<'gc>, Error> {
         let l = self.function(f);
         let name = Self::name_at(l, k);

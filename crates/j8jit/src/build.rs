@@ -2368,6 +2368,11 @@ impl<'e> Builder<'e> {
                 let v = self.object_literal(act, st, o[0], pc)?;
                 set_acc!(v);
             }
+            Bc::CreateRegExpLiteral => {
+                let fs = self.state(act, st, pc);
+                let v = self.emit(Op::Call(Helper::RegExpLiteral(act.id, u32::try_from(o[0]).unwrap_or(0), u32::try_from(o[2]).unwrap_or(0)), vec![], Some(fs)), Rep::Word);
+                set_acc!(v);
+            }
             Bc::CallUndefinedReceiver0 | Bc::CallUndefinedReceiver1 | Bc::CallUndefinedReceiver2 => {
                 let callee = Self::reg(act, st, o[0])?;
                 let n = (d.bytecode as u8 - Bc::CallUndefinedReceiver0 as u8) as usize;

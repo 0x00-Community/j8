@@ -66,6 +66,7 @@ pub enum Helper {
     CreateClosure(FuncId, u32),
     CreateContext(j8framework::ShapeId, u32),
     ObjectLiteral(FuncId, u32),
+    RegExpLiteral(FuncId, u32, u32),
     Constant(FuncId, u32),
     ModF,
     ToBoolean,
@@ -88,7 +89,7 @@ pub enum Helper {
 
 impl Helper {
     pub fn throws(self) -> bool {
-        matches!(self, Helper::Call | Helper::Construct | Helper::GetNamed(..) | Helper::SetNamed(..) | Helper::GetKeyed | Helper::SetKeyed(_) | Helper::Unary(_) | Helper::LooseEquals | Helper::InstanceOf | Helper::LoadGlobal(..) | Helper::GlobalProbe(_) | Helper::Binary(_) | Helper::Concat | Helper::Compare(_) | Helper::Direct(..) | Helper::InlinePush(_))
+        matches!(self, Helper::Call | Helper::Construct | Helper::GetNamed(..) | Helper::SetNamed(..) | Helper::GetKeyed | Helper::SetKeyed(_) | Helper::Unary(_) | Helper::LooseEquals | Helper::InstanceOf | Helper::LoadGlobal(..) | Helper::GlobalProbe(_) | Helper::Binary(_) | Helper::Concat | Helper::Compare(_) | Helper::Direct(..) | Helper::InlinePush(_) | Helper::RegExpLiteral(..))
     }
 
     pub fn rep(self) -> Rep {

@@ -35,6 +35,10 @@ pub struct RegExpData<'gc> {
     pub legacy: bool,
 }
 
+#[derive(Clone, Copy, Collect)]
+#[collect(no_drop)]
+pub struct RegExpShared<'gc>(Gc<'gc, Fast<'gc>>);
+
 pub type JsObject<'gc> = Gc<'gc, Object<'gc>>;
 
 pub type JsEnv<'gc> = Gc<'gc, Env<'gc>>;
@@ -1643,6 +1647,32 @@ impl<'gc> Object<'gc> {
             self.note_digit();
         }
         self.props.fill(mc, to, slots);
+    }
+
+    pub fn share_regexp(mc: &Mutation<'gc>, data: RegExpData<'gc>) -> RegExpShared<'gc> {
+        RegExpShared(mc.alloc(Fast::RegExp(data)))
+    }
+
+    pub fn regexp_with(mc: &Mutation<'gc>, proto: JsObject<'gc>, shared: RegExpShared<'gc>) -> JsObject<'gc> {
+        let data = match Gc::get(shared.0) {
+            Fast::RegExp(r) => *r,
+            _ => unreachable!("a shared regexp body"),
+        };
+        let state = ObjectState { kind: ObjectKind::RegExp(data), ..ObjectState::default() };
+        let class = Class::of(&state.kind) | Class::unit(&state).unwrap_or(0);
+        mc.alloc(Object {
+            proto: GcSlot::from(Some(proto)),
+            call: GcSlot::from(Some(shared.0)),
+            props: crate::Props::default(),
+            elements: crate::ValueArray::default(),
+            class: crate::IsoCell::new(class),
+            non_extensible: crate::IsoCell::new(false),
+            length_readonly: crate::IsoCell::new(false),
+            flags: crate::IsoCell::new(0),
+            sparse_length: crate::IsoCell::new(0),
+            shape_root: paragc::HandleSlot::default(),
+            data: GcCell::empty(),
+        })
     }
 
     pub fn get_own(&self, mc: &Mutation<'gc>, key: &str) -> Option<Property<'gc>> {
