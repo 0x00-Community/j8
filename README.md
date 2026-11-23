@@ -4,15 +4,11 @@
 # j8
 
 ### V8, rewritten in Rust.
-**A bytecode interpreter, a JIT built on MLIR and a parallel garbage-collected heap ([paragc](https://crates.io/crates/paragc)).**
+**A bytecode interpreter, a JIT and a parallel garbage-collected heap ([paragc](https://crates.io/crates/paragc)).**
 
 [![Rust](https://img.shields.io/badge/Rust-100%25-orange?style=for-the-badge&logo=rust)](https://www.rust-lang.org)
 [![test262](https://img.shields.io/badge/test262-42%2C500%20passing-success?style=for-the-badge)](#-test262)
 [![License](https://img.shields.io/badge/License-MIT-brightgreen?style=for-the-badge)](#-license)
-
-[![ECMAScript](https://img.shields.io/badge/ECMAScript-core%20language-F7DF1E?style=flat-square&logo=javascript&logoColor=black)](#-status)
-[![JIT](https://img.shields.io/badge/JIT-x86--64%20%C2%B7%20AArch64-262D3A?style=flat-square&logo=llvm)](#-jit-tier-one)
-[![GC](https://img.shields.io/badge/GC-paragc%20%C2%B7%20parallel%20%C2%B7%20lock--free-8A2BE2?style=flat-square)](#-heap-and-handles)
 
 **🇺🇸 English** · [🇨🇳 简体中文](README.zh-CN.md)
 
@@ -22,128 +18,35 @@
 
 ## ⚡ What is j8
 
-j8 is **a JavaScript engine written from scratch in Rust**, layered the way V8 is: every piece of JS is first compiled to
-accumulator-style bytecode (like V8's Ignition) and run by the executor, while hot functions and hot loops go to a JIT that
-emits x86-64 or AArch64 machine code. The heap is [paragc](https://crates.io/crates/paragc), wrapped by `j8framework`'s GC layer.
+A JavaScript engine in Rust, layered like V8:
 
-🎯 **The main line:** the test262 pass rate. Core ECMAScript is filled in stage by stage following [PLAN.md](PLAN.md), with
-zero regressions against the baseline at every step.
+- **Bytecode:** all JS (including `eval` and `Function`) compiles to V8 Ignition bytecode, byte for byte. There is no AST interpreter.
+- **JIT:** hot functions and loops become a speculative SSA graph, emitted as x86-64 or AArch64 machine code.
+- **Heap:** [paragc](https://crates.io/crates/paragc). There is no `'static` and no global state.
+- **Parsing:** oxc.
 
-🧩 **Embeddable:** `#[j8::class]` / `#[j8::object]` / `#[j8::function]` bind Rust types to JS in one line. Two sample hosts
-come with it: `dune`, a runtime with a Web-standard layer and a Node-compatible layer, and `workerd`, a Cloudflare
-Worker-style runtime. To build your own host the same way, read [EMBEDDING.md](EMBEDDING.md) (how the pieces fit)
-and [crates/macros/USAGE.md](crates/macros/USAGE.md) (the macro reference).
+Core ECMAScript is covered except what [PLAN.md](PLAN.md) puts out of scope (Temporal, intl402, …).
+Top-level await in modules is not supported yet.
 
-## 🔥 Why it's different
-
-| | |
+| Check | Result |
 | --- | --- |
-| 🦀 **All Rust** | Parsing is oxc; everything else, from bytecode to GC, is ours. No C++ engine underneath. |
-| 🧱 **Bytecode first** | There is no AST interpreter: all JS (including `eval` and `Function`) is compiled to bytecode, and that bytecode is V8 Ignition's, byte for byte (tables generated from V8's headers). |
-| 🧬 **A speculative JIT** | Inline-cache feedback turns hot bytecode into a speculative SSA graph (inlining, escape analysis, loop-invariant code motion, OSR, deoptimization), emitted straight to x86-64 or AArch64. |
-| ♻️ **paragc heap** | Immix-style mark-region heap: young collections plus reference counting for old objects, evacuation of sparse blocks, marking and sweeping in parallel, no locks. `'scope` brand lifetimes guarantee at compile time that handles never escape. |
-| 🚫 **No `'static`** | No global state. Background tasks borrow the caller's data, and several isolates share one thread pool. |
-
-## 🏆 Numbers
-
-| ✔️ Check | Result |
-| --- | --- |
-| 📜 test262 baseline | **42,500** tests passing (sloppy mode plus `onlyStrict`; Temporal, intl402 and the like are out of scope, see PLAN.md), zero regressions on every commit |
-| 🧮 JIT | `J8_TEST262_JIT=1` runs the same baseline with the JIT on (every function compiled on its first call) |
-| ⏱️ vs V8 jitless | **0.6×** the time (geometric mean over 11 benchmarks); checksums identical on all three engines |
-| 🚄 vs V8 (with JIT) | **1.7×** the time, geometric mean; the gap is in built-ins (array, sort, string, collections, json, regexp), see [benchmark.md](samples/benchv8/benchmark.md) |
+| test262 baseline | **42,500** passing, interpreter and JIT, no regression allowed |
+| vs V8 jitless | **0.6×** the time (geometric mean over 11 benchmarks) |
+| vs V8 (with JIT) | **1.7×** the time, see [benchmark.md](samples/benchv8/benchmark.md) |
 
 ## 📦 Install
 
 ```sh
-cargo add j8                                    # default feature `runtime`: executor + builtins + standard platform
-cargo add j8 --features jit                     # plus the JIT (x86-64 Unix and Windows, AArch64 Linux)
-cargo add j8 --features crossheap               # Linux: share heap objects with other processes by signature (EMBEDDING.md §9)
-cargo add j8 --no-default-features --features compiler   # only JS ⇒ bytecode
+cargo add j8                                    # executor + builtins + standard platform
+cargo add j8 --features jit                     # plus the JIT (x86-64 Unix / Windows, AArch64 Linux)
+cargo add j8 --features crossheap               # Linux: share heap objects across processes
+cargo add j8 --no-default-features --features compiler   # JS ⇒ bytecode only
 ```
-
-The sub-crates (`j8bytecode`, `j8compiler`, `j8executor`, …) are published separately too, but going through the root
-package and its features is the usual way. See [EMBEDDING.md](EMBEDDING.md) for wiring up a host.
-
-## 🚀 Quick start
-
-```sh
-# 🟢 dune, the Node challenger (or --web for the Web-standard APIs only): run a script / evaluate / REPL
-cd dune
-cargo run --release -- examples/node.js
-cargo run --release -- --web examples/web.mjs
-cargo run --release -- -p '[1, 2, 3].map(x => x * 2)'
-cargo run --release                             # REPL (.help / .exit)
-cargo run --release -- --jit a.js               # with the JIT
-cargo run --release -- x cowsay hi             # dune x (dunx is a link to dune): run a package's executable, installed from npm into a cache when missing
-
-# ☁️ Cloudflare Worker style: ES modules + Durable Objects
-cd samples/workerd && cargo run -- examples/counter.js --bind COUNTER=Counter --request "GET /c/inc?name=a"
-
-# 🔬 list the bytecode, like V8's --print-bytecode
-cd samples/j8bcdbg && cargo run -- compile -e 'let s = 0; for (let i = 0; i < 10; i++) s += i; s'
-
-# 📜 the test262 regression run (git submodule update --init first)
-cargo test --release --test test262
-
-# 🥊 benchmarks against V8 (downloads rusty_v8's prebuilt library)
-cd samples/benchv8 && cargo run --release
-```
-
-## 🧱 Crates
-
-A Cargo workspace of several crates. `dune/` (the runtime that takes on Node) and the samples under `samples/` are packages of their own, outside the
-workspace, and depend on the published `j8` by version, the way an embedder would.
-
-| crate | std | What it does |
-|---|---|---|
-| `j8framework` | std | The core framework: defines the traits (`Platform`, `Invoke`, `Intrinsics`) and the shared structs / enums (`Isolate`, `Scope`, `Scope`, `Context`, `ScopeGlobal`, `Value`, `Host`, `JsString` / `JsObject`, `Profiler`, `BinaryOp`, `Error` …). JS operation semantics hang off `Scope`; the implementations belong to the other crates. |
-| `j8` (repository root `src/`) | std | Re-exports: `#[j8::class]` / `#[j8::object]` / `#[j8::function]` (the macros live in j8macros, see `crates/macros/USAGE.md`) and the j8binding traits; the other crates by feature (default `runtime` = `j8::executor` + `j8::builtins` + `j8::platform`, plus `bytecode` / `taskqueue` / `lockfree` / `jit` / `full`); every crate is also published on its own on crates.io |
-| `j8binding` | std | The Rust ⇄ JS binding runtime: `FromJs` / `IntoJs`, host objects, `Class` / `Object` |
-| `j8builtins` | std | Implements `Intrinsics`: installs Object / Function / Array / String / Number / Boolean / Math / the Error family / `console` / `parseInt` and so on into a `Context` |
-| `j8platform` | std | Implements `Platform` (`DefaultPlatform`): background tasks run on a moremath `ThreadMulti` pool (started once and reused; tasks may borrow the caller's data, through `j8framework::Pool`), the clock is `Instant` |
-| `j8bytecode` | std | The bytecode, the dependency root (no other j8 crate): V8 Ignition's, byte for byte (`Bytecode` / `OperandType` … generated from `v8.json`, which `tools/v8bytecodes.py` writes from V8's headers), `Encoder` / `Decoder`, `SharedFunction` / `BytecodeArray` / `Module` |
-| `j8compiler` | std | JS ⇒ bytecode (`j8compiler::Compile` for `Module`: scripts, modules, `eval` / `Function`), parsing with oxc |
-| `j8taskqueue` | `no_std` | Task queue: `ITask` (`recursable` / `depend` / `exec`) and `ITaskPoll` (`add` / `run`); lock-free dataflow scheduling (hand-written MPMC ready queue, atomic dependency counts): a task whose dependencies are done runs at once, in parallel on the host's `Pool` or on the calling thread, with no round barrier; `TaskId::family` finds the union-find root, `cancel` cancels a whole family; quotas count bytecodes (`Quota` / `Flow::Yield`, a per-run budget); idle workers leave instead of spinning. Every `j8executor::EventLoop` is one `Queue`: scripts, settlements and polls of host futures, checked each time a script yields |
-| `j8macros` | proc-macro | Procedural macros: `enums!("x.json")` generates enums from JSON (definitions, `Display`, `&mut` accessors by field type), `#[derive(Collect)]` for heap types (paragc `Trace`), and the binding macros; see `crates/macros/USAGE.md` |
-| `dune` | std | The runtime that takes on Node, with two layers: `src/web/` (the Web-standard APIs: `console`, timers, `URL`, `TextEncoder`, `EventTarget` / `AbortController`, `fetch`, `structuredClone`, `crypto` …) and `src/node/` on top of it (`process`, `require` / ES modules, `Buffer`, `fs`, `path`, `os`, `events`, `util`, `assert`, `child_process` …); machine access is Rust bound with `#[j8::object]` / `#[j8::class]`, the APIs are JS preludes; `dune a.js`, `dune --web a.mjs`, `dune -e` / `-p`, a REPL; see its README |
-| `samples/workerd` | std | Loads Cloudflare Workers (ES modules with `export default { fetch }`) and Durable Objects with j8: `workerd examples/counter.js --bind COUNTER=Counter --request "GET /c/inc?name=a"`, or `--port 8787` for an HTTP server; the Fetch API subset and DOs live in a JS prelude, storage is a Rust KV bound with `#[j8::class]` |
-| `samples/benchv8` | std | The same JS benchmarks timed on j8 and V8 (rusty_v8 152, with JIT / `--jitless`): `cd samples/benchv8 && cargo run --release` (downloads V8's prebuilt library) |
-| `samples/j8bcdbg` | std | The bytecode debugging command line (clap): `j8bcdbg compile <file.js \| ->` / `j8bcdbg compile -e '<js>'` lists the bytecode per function like V8's `--print-bytecode` (`-o` writes a file) |
-| `j8executor` | std | The bytecode `Executor<'p>`, **currently the last layer** (`eval`, resumable `start` / `resume`); `EventLoop` is one JS event loop (an isolate, the executor and a context, host async work), `EventLoopSet` runs many on pinned loop threads with load balancing (placement, work stealing, `rebalance`, `split`) and one quota; always carries the JS ⇒ bytecode compiler (scripts, modules, `eval` / `Function` all compile to bytecode first) |
-
-All JS is compiled to bytecode before it runs; there is no AST interpreter.
-Dependency direction: every layer depends only on `j8framework` (`j8executor` also on `j8compiler`; `j8bytecode` is the root, `j8framework` and `j8compiler` depend on it), and `j8framework` depends on no layer, only on the building blocks `j8lockfree` and `j8taskqueue`.
-
-### 🧹 Heap and handles
-
-The heap is [paragc](https://crates.io/crates/paragc), used only through its public API; `j8framework`'s GC layer adds what a
-JS engine needs on top: `GcCell` (a lock-free `RefCell` whose data lives in a snapshot behind a paragc `Slot`: a snapshot
-allocated since the last collection is changed in place, an older one is moved into a fresh snapshot first, so the write
-barrier sees it), `ValueCell` (one NaN-boxed `Value`, an atomic word plus a `Slot`), `Cow`, `GcQueue`, `Static`, and
-`#[derive(Collect)]` (from j8macros; `#[collect(require_static)]` skips a field or a whole type). Brand lifetimes, no `'static`.
-
-- Collection only happens outside `enter`, when every `ScopeLocal` is under a root, so objects can move: ⛔ storing a `ScopeLocal` or an object
-  address anywhere that is not traversed by `Trace` (`Static`, side caches); anything hashed by address (the indexes of Map / Set) is
-  updated in `relocate` (see `Collection`)
-- ⛔ writing a `Slot` / `ValueCell` / `Cow` of a value that is not on the heap yet (the barrier records the slot's address): allocate first,
-  then fill in (see `Scope::context`)
-- The heap only collects stop-the-world (`collect_if_needed` / `collect`, parallel inside); `GcCell` changes young snapshots without a
-  barrier, so ⛔ `mark_concurrently`
-- Every heap type is `Send + Sync` (paragc's rule): host data is a traced `Box<dyn HostObject + Send + Sync>` in a `GcCell`,
-  shapes and ropes are `Arc`
-- The heap has its own collector threads (as many as the platform's pool); `Platform`'s supertrait `Pool` is for parallel built-ins
-
-- `Isolate::enter(&cx, &executor, |scope| …)` enters once, and `'scope` is the brand of that entry; nothing is collected during the closure, and after it returns the heap collects if enough was allocated (a young collection usually, a full one every few rounds)
-- `Executor::eval` takes `&mut Isolate` and enters in slices itself: at most ten thousand instructions per slice; when it stops, the execution state is put under a root, and when `enter` returns a step of collection runs before execution continues. The execution context survives across slices as a `ScopeGlobal<'p, ContextBrand>` (JS re-entered from a host function runs to completion within the current slice)
-- `Value<'scope>` is V8's Local: it cannot leave the closure, guaranteed at compile time
-- `ScopeGlobal<'p, B>` is a root (paragc's) that lives across many `enter`s and is released on drop; `B` names its type (`ValueBrand`, `ContextBrand`)
-- A thrown value waits in the pending slot as in V8 (`Error::Exception`, `scope.take_exception()`)
 
 ```rust
 use j8builtins::Builtins;
 use j8executor::Executor;
-use j8framework::{CreateParams, Isolate, ContextBrand, Source};
+use j8framework::{CreateParams, Isolate, Source};
 use j8platform::DefaultPlatform;
 
 let platform = DefaultPlatform::default();
@@ -156,93 +59,59 @@ isolate.enter(&cx, &executor, |scope| {
 });
 ```
 
-## 🧬 JIT
+Binding Rust types to JS: `#[j8::class]` / `#[j8::object]` / `#[j8::function]`, see [crates/macros/USAGE.md](crates/macros/USAGE.md).
+Writing a host: [EMBEDDING.md](EMBEDDING.md). Internals: [the book](https://j8.app238.com).
 
-`dune --jit a.js` turns the JIT on; `J8_TEST262_JIT=1 cargo test --release --test test262` runs the baseline with the JIT on (every function compiled on its first call).
+## 🚀 Quick start
 
-- `j8jit` implements the executor's `Tier`. A hot function (64 calls by default) or a hot loop is built into a speculative SSA graph from what the inline caches saw: numbers as int32, small callees inlined, objects kept virtual until they escape, context slots in values
-- The graph goes straight to machine code, x86-64 or AArch64 (linear-scan register allocation, then instruction selection) and runs on the interpreter's frame; three entries: a call from the interpreter, a loop entered on-stack (OSR), a call from compiled code without an interpreter frame
-- A failed guard deoptimizes: `j8_deopt` rebuilds the interpreter frames (inlined ones too) and leaves a hint for the next compilation (doubles, the generic path, no inlining); after 24 deopts a function stays interpreted
-- `Compiler` / `Backend` (MLIR `llvm` dialect through [mlirpass](https://crates.io/crates/mlirpass), then j8jit's own x86-64 back end) are still exported
+```sh
+cd dune && cargo run --release -- examples/node.js         # dune: a Node-compatible runtime (--web, -p, REPL, --jit)
+cd samples/workerd && cargo run -- examples/counter.js --bind COUNTER=Counter --request "GET /c/inc?name=a"
+cd samples/j8bcdbg && cargo run -- compile -e 'let s = 0; for (let i = 0; i < 10; i++) s += i; s'
+cd samples/benchv8 && cargo run --release                   # benchmarks against V8
+```
 
-## 🔣 Bytecode
+## 🧱 Crates
 
-V8's Ignition bytecode, byte for byte, aligned with V8 15.2.124: an accumulator register machine (`acc = reg op acc`), operands little-endian with `Wide` / `ExtraWide` scaling, register operands as V8's frame slots (r0 is −7, the receiver +2). The tables come from V8's headers (`tools/v8bytecodes.py` ⇒ `crates/j8bytecode/v8.json` ⇒ `j8macros::bytecodes!`); ⛔ editing them by hand. `samples/j8bcdbg` lists bytecode in the format of V8's `--print-bytecode`.
+| crate | Role |
+|---|---|
+| `j8` | Root package: re-exports the crates below by feature, plus the binding macros |
+| `j8framework` | Core types and traits: `Isolate`, `Scope`, `Context`, `Value`, `Platform`, `Intrinsics`, JS operation semantics |
+| `j8bytecode` | Ignition bytecode, encoder / decoder (tables generated from V8's headers) |
+| `j8compiler` | JS ⇒ bytecode |
+| `j8executor` | Bytecode executor, event loops |
+| `j8jit` | The JIT tier |
+| `j8builtins` | Built-in objects |
+| `j8platform` | `DefaultPlatform`: thread pool, clock |
+| `j8binding` / `j8macros` | Rust ⇄ JS bindings |
+| `j8napi` | Node-API |
+| `j8taskqueue` / `j8lockfree` | Lock-free task queue and data structures |
 
-- Variables live where V8 puts them: registers, context slots for captured bindings, the global object for top-level `var`s, the script context for top-level `let` / `const`, lookup slots under `with` / sloppy direct eval
-- The executor decodes each function once into threaded code (handlers chained by tail calls on nightly), keeps an explicit frame stack (depth limit 10000, then RangeError) and finds exception handlers in the bytecode's handler table
-
-The `javascript_semantics` test in `j8executor` is a table of JS semantics, each entry certain. The full walk-through is in [the book](https://j8-mdbook.jabberwocky238.workers.dev).
-
-## 📋 Status
-
-Supported:
-
-- Literals (number / string / boolean / `null` / template strings), object literals (including method shorthand and computed keys), array literals
-- All arithmetic, comparisons (`==` / `===`, strings compared by UTF-16), bitwise operations, `**`, `typeof` / `void` / `!` / `~`, `&&` / `||` / `??`, `?:`, comma
-- Assignment and compound assignment (including `||=` / `&&=` / `??=`), `++` / `--`, with a name or a property as the target
-- `var` / `let` / `const` (block scoping, assigning to a `const` throws TypeError), function declaration hoisting
-- `if` / `while` / `do-while` / `for` / `switch` / labeled `break` / `continue` / `return` / `throw`
-- Function declarations / expressions / arrow functions (lexical `this`), closures, `this` in method calls
-- Property reads and writes (array indexes and `length`, string indexes and `length`, prototype chain reads)
-- `try` / `catch` / `finally` (`return` / `break` / `continue` inside `finally` and jumps through `finally` all follow the spec), Error objects (`Error` / `TypeError` / `ReferenceError` / `RangeError` / `SyntaxError`)
-- Builtins (j8builtins) and host functions, `console.log` (through `Platform::print`), ToPrimitive (`valueOf` / `toString`)
-- `new`, classes (constructors, methods, static methods, getters / setters, `extends` / `super(...)` / `super.m()`, instance and static fields, inheriting from host constructors such as `Error`), methods and getters / setters in object literals
-- Property attributes (enumerable / writable / configurable), `Object.defineProperty` / `freeze`, `instanceof` / `in` / `delete`
-- Rest / default parameters, spread (array / call / `new` / `super` / object), destructuring (declarations / assignment / parameters / `catch`, with defaults and rest), optional chaining `?.`
-- Symbols (including `Symbol.iterator` / `toPrimitive` / `hasInstance`), the iteration protocol, `for-of` (closing the iterator on `break` / `return` / throw) / `for-in`
-- Generators (`yield` / `yield*`, `return()` / `throw()` through `finally`), Promises (`then` / `catch` / `finally` / `all` / `race`), `async` / `await`, with the microtask queue drained after the script finishes
-- Regex literals and `RegExp` (the regress engine, matching by UTF-16 code unit; `exec` / `test`, `lastIndex` for `g` / `y`, named groups) and the string methods `match` / `matchAll` / `replace` / `replaceAll` / `search` / `split`
-- BigInt literals and arithmetic (arbitrary precision; mixing with Number throws TypeError, comparable, `BigInt()` / `toString(radix)`)
-- The temporal dead zone (`let` / `const` / `class` and `this` before `super()` in derived classes; checks are dropped at compile time where initialization can be proven), the script scope (top-level `let` / `const` / `class` shared across scripts, not on the global object)
-
-- Class static blocks / private names (fields, methods, accessors, `#x in o`) / computed field names, async generators / `for await`, tagged templates (cached per call site), `new.target`, `arguments`
-- Dynamic code: global `Function` / `eval` (indirect), the generator / async function constructors; early errors (oxc_semantic checks plus validation when regex literals are parsed) are reported as SyntaxError at compile time
-- Strict mode (directive prologues / class bodies / inherited from the outside): in sloppy calls `this` becomes the global object or a wrapper object; in strict mode failed assignments / deletes throw TypeError, assigning to an undeclared name throws ReferenceError, `arguments.callee` throws TypeError; `eval(…)` in strict code runs as a direct eval (the code is strict, its `var`s stay inside it)
-
-- The property model follows the spec's object internal methods (ValidateAndApplyPropertyDescriptor, array holes and per-element attributes, read-only `length`, non-extensible objects, indexes on string wrapper objects); every method of `Object` / `Array` (Array methods are generic over array-likes, species)
-- Date, RegExp's Symbol protocol, String / Number / Math / Symbol / URI functions completed, Promise subclassing and combinators, WeakRef / FinalizationRegistry (strong references)
-- ArrayBuffer / SharedArrayBuffer / DataView / TypedArray (including Float16 and lengths that track resizable buffers) / Atomics
-- Proxy / Reflect, Iterator helpers, Set methods (union and friends), Map.groupBy
-- Host functions distinguish whether they can be `new`ed, and builtin constructors pick the prototype from `new.target` (`class X extends Map` and the like)
-
-Not supported yet (reported as `Error::Unsupported`, with `file:line:column`): top-level await in modules, and the rule about `arguments` conflicting with eval in parameter expressions. The test262 baseline is in `tests/test262.passing`; the plan for the rest is in PLAN.md.
-
-Known deviation: JS re-entered from a host function (the callback of `map`, say) runs to completion within the current slice, and nothing is collected meanwhile (`Function.prototype.call` / `apply` are expanded by the executor into ordinary calls and do not count as re-entry).
+`dune/` and `samples/*` are separate packages that depend on the published `j8`.
 
 ## 📜 test262
 
-`tests/test262` is the tc39/test262 submodule (a shallow clone, fetched with `git submodule update --init`); the runner `tests/test262.rs` is a test of the root package (`harness = false`, not published):
-
 ```sh
-cargo test --release --test test262 -- language/expressions/addition built-ins/Math   # run these directories
-J8_TEST262_JIT=1 cargo test --release --test test262                                   # with the JIT on (every function compiled on its first call)
-J8_TEST262_VERBOSE=1 cargo test --release --test test262 -- <path>                    # list why each failing test failed
-J8_TEST262_UPDATE=1 cargo test --release --test test262 -- <path>                     # write the results back to the baseline
-cargo test --release --test test262                                                   # run only the baseline tests, fail if any drops
+git submodule update --init
+cargo test --release --test test262                          # the baseline (tests/test262.passing), fails on any drop
+cargo test --release --test test262 -- built-ins/Math         # some directories
+J8_TEST262_JIT=1      cargo test --release --test test262     # with the JIT on every function
+J8_TEST262_VERBOSE=1  cargo test --release --test test262 -- <path>   # why each test failed
+J8_TEST262_UPDATE=1   cargo test --release --test test262 -- <path>   # write results back to the baseline
 ```
-
-- One subprocess per test with a 10 s timeout; results are pass / fail / unsupported (j8 reported `Error::Unsupported`) / skip / timeout / crash, summarized by directory
-- The baseline `tests/test262.passing`: one passing test per line; with no arguments only these run, as a regression check
-- Only sloppy mode runs (`onlyStrict` runs strict); `module` is skipped; there is no `$262` host object; line numbers in errors for unsupported syntax include the prepended harness
 
 ## ✍️ Conventions
 
-
-- Submodules are private `mod`s, the crate root flattens exports with `pub use`; ⛔ `pub mod`
-- ⛔ `static` and the `'static` lifetime (except `&'static str` names inside enums); background tasks borrow the caller's data with `Task<'t>`
-- Strings are turned into enums right after deserialization; ⛔ making decisions on strings
-- Conversions go through `From` / `TryFrom`
-- Unit tests only pin down facts that are certain (run one at a time, with `timeout 15`)
-- Source files carry no comments: documentation lives in the READMEs, the guides and [the book](https://j8-mdbook.jabberwocky238.workers.dev)
+- Private `mod`s, flat `pub use` exports; ⛔ `pub mod`
+- ⛔ `static` / `'static` (except `&'static str` in enums)
+- Strings become enums right after deserialization; conversions go through `From` / `TryFrom`
+- No comments in source files; documentation lives in the READMEs and the book
 
 ## 📄 License
 
 MIT.
 
 <div align="center">
-
-**🦀 Same language, written another way.**
 
 [⬆️ Back to top](#top) · [🇨🇳 简体中文](README.zh-CN.md)
 

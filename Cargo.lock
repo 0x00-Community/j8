@@ -277,7 +277,7 @@ checksum = "3bd1574e617a9a6c1f8f8181bd7e841e1f20e4277607ef28945765188d6284d4"
 
 [[package]]
 name = "j8"
-version = "0.4.2"
+version = "0.5.1"
 dependencies = [
  "j8binding",
  "j8builtins",
@@ -298,7 +298,7 @@ dependencies = [
 
 [[package]]
 name = "j8binding"
-version = "0.4.2"
+version = "0.5.1"
 dependencies = [
  "j8framework",
  "j8lockfree",
@@ -308,7 +308,7 @@ dependencies = [
 
 [[package]]
 name = "j8builtins"
-version = "0.4.2"
+version = "0.5.1"
 dependencies = [
  "j8framework",
  "libm",
@@ -322,14 +322,14 @@ dependencies = [
 
 [[package]]
 name = "j8bytecode"
-version = "0.4.2"
+version = "0.5.1"
 dependencies = [
  "j8macros",
 ]
 
 [[package]]
 name = "j8compiler"
-version = "0.4.2"
+version = "0.5.1"
 dependencies = [
  "j8bytecode",
  "j8framework",
@@ -345,7 +345,7 @@ dependencies = [
 
 [[package]]
 name = "j8executor"
-version = "0.4.2"
+version = "0.5.1"
 dependencies = [
  "j8builtins",
  "j8bytecode",
@@ -359,7 +359,7 @@ dependencies = [
 
 [[package]]
 name = "j8framework"
-version = "0.4.2"
+version = "0.5.1"
 dependencies = [
  "hashbrown",
  "j8lockfree",
@@ -375,7 +375,7 @@ dependencies = [
 
 [[package]]
 name = "j8jit"
-version = "0.4.2"
+version = "0.5.1"
 dependencies = [
  "clear-cache",
  "j8bytecode",
@@ -389,11 +389,11 @@ dependencies = [
 
 [[package]]
 name = "j8lockfree"
-version = "0.4.2"
+version = "0.5.1"
 
 [[package]]
 name = "j8macros"
-version = "0.4.2"
+version = "0.5.1"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -404,7 +404,7 @@ dependencies = [
 
 [[package]]
 name = "j8napi"
-version = "0.4.2"
+version = "0.5.1"
 dependencies = [
  "j8builtins",
  "j8executor",
@@ -416,7 +416,7 @@ dependencies = [
 
 [[package]]
 name = "j8platform"
-version = "0.4.2"
+version = "0.5.1"
 dependencies = [
  "dunce",
  "j8framework",
@@ -425,7 +425,7 @@ dependencies = [
 
 [[package]]
 name = "j8taskqueue"
-version = "0.4.2"
+version = "0.5.1"
 dependencies = [
  "j8lockfree",
 ]
