@@ -92,6 +92,7 @@ pub struct ContextName {
     pub name: SmallStr,
     pub constant: bool,
     pub lexical: bool,
+    pub parameter: Option<u16>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

@@ -218,6 +218,7 @@ impl Loaded {
             name: (&*v.name).into(),
             constant: v.mode == j8bytecode::VariableMode::Const,
             lexical: matches!(v.mode, j8bytecode::VariableMode::Let | j8bytecode::VariableMode::Const),
+            parameter: v.parameter,
         }).collect();
         ContextShape { kind, names }
     }
@@ -979,6 +980,17 @@ impl Executor {
         }
     }
 
+    fn declaration_context<'gc>(&self, env: Option<JsEnv<'gc>>) -> Option<JsEnv<'gc>> {
+        let mut e = env;
+        while let Some(c) = e {
+            match c.shape.map(|s| self.context_shape(s).kind) {
+                Some(ContextKind::Catch | ContextKind::With | ContextKind::Block) => e = c.parent,
+                _ => break,
+            }
+        }
+        e
+    }
+
     fn var_scope<'gc>(&self, a: &Agent<'gc, '_>, env: Option<JsEnv<'gc>>) -> JsObject<'gc> {
         let mut e = env;
         while let Some(c) = e {
@@ -1392,8 +1404,13 @@ impl Executor {
             }
             B::StaLookupSlot => {
                 let name = Self::name_at(loaded, o[0]);
-                let s = u8::try_from(o[1]).unwrap_or(0) & j8bytecode::StoreLookupSlotFlags::STRICT != 0;
-                self.lookup_store(a, f.env(regs), name, *acc, s)?;
+                let flags = u8::try_from(o[1]).unwrap_or(0);
+                let s = flags & j8bytecode::StoreLookupSlotFlags::STRICT != 0;
+                let mut env = f.env(regs);
+                if flags & j8bytecode::StoreLookupSlotFlags::LOOKUP_HOISTING != 0 {
+                    env = self.declaration_context(env);
+                }
+                self.lookup_store(a, env, name, *acc, s)?;
             }
             B::GetNamedProperty => {
                 let obj = r!(0);
@@ -1711,7 +1728,10 @@ impl Executor {
                 let formals = usize::from(loaded.func.formal_parameters);
                 *acc = a.array(f.args(regs).get(formals..).unwrap_or(&[]).to_vec()).into();
             }
-            B::CreateMappedArguments | B::CreateUnmappedArguments => *acc = self.arguments(a, regs, f, loaded.func.strict || d.bytecode == B::CreateUnmappedArguments)?,
+            B::CreateMappedArguments | B::CreateUnmappedArguments => {
+                let strict = loaded.func.strict || d.bytecode == B::CreateUnmappedArguments;
+                *acc = self.arguments(a, regs, f, strict)?;
+            }
             B::GetIterator => *acc = a.iterator_object(r!(0))?,
             B::ForInEnumerate => {
                 let keys = a.for_in_keys(r!(0))?;
@@ -1874,7 +1894,9 @@ impl Executor {
 
     fn arguments<'gc>(&self, a: &mut Agent<'gc, '_>, regs: &[Value<'gc>], f: &Frame, strict: bool) -> Result<Value<'gc>, Error> {
         let args = f.args(regs);
-        let o = ObjectData { kind: ObjectKind::Arguments(None), proto: Some(a.realm.object_proto), ..ObjectData::default() }.alloc(a.mc);
+        let outer = f.slot(regs, Frame::CLOSURE).as_object().and_then(|o| o.closure()).and_then(|c| c.env);
+        let map = if strict { None } else { self.arguments_map(f.env(regs), outer, args.len()) };
+        let o = ObjectData { kind: ObjectKind::Arguments(map), proto: Some(a.realm.object_proto), ..ObjectData::default() }.alloc(a.mc);
         let hidden = |v: Value<'gc>| Property { slot: Slot::Data(v), enumerable: false, writable: true, configurable: true };
         for (i, &v) in args.iter().enumerate() {
             let k = alloc::string::String::from(ryu_js::Buffer::new().format(f64::from(u32::try_from(i).unwrap_or(u32::MAX))));
@@ -1893,6 +1915,23 @@ impl Executor {
         dd.define_symbol(a.realm.symbols.iterator, hidden(values));
         drop(dd);
         Ok(o.into())
+    }
+
+    fn arguments_map<'gc>(&self, env: Option<JsEnv<'gc>>, outer: Option<JsEnv<'gc>>, count: usize) -> Option<j8framework::ArgumentsMap<'gc>> {
+        let env = env.filter(|e| outer.is_none_or(|o| !Gc::ptr_eq(*e, o)))?;
+        let shape = self.context_shape(env.shape?);
+        if shape.kind != ContextKind::Function {
+            return None;
+        }
+        let mut slots = alloc::vec![None; count];
+        for (k, n) in shape.names.iter().enumerate() {
+            if let Some(p) = n.parameter
+                && let Some(s) = slots.get_mut(usize::from(p))
+            {
+                *s = u16::try_from(k).ok();
+            }
+        }
+        slots.iter().any(Option::is_some).then_some(j8framework::ArgumentsMap { env, slots })
     }
 
     fn throw_type_error<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {

@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use oxc_ast::ast::{
-    Argument, ArrayExpressionElement, ArrowFunctionBody, AssignmentTargetMaybeDefault, AssignmentTargetProperty, CatchClause, ChainElement, Class, ClassElement, ArrowFunctionExpression, AssignmentTarget, BindingIdentifier, BindingPattern, Expression, ForStatementInit, ForStatementLeft, FormalParameters, Function, MemberExpression, ObjectPropertyKind, PrivateIdentifier, PropertyKey, SimpleAssignmentTarget, Statement, VariableDeclaration, VariableDeclarationKind,
+    Argument, ArrayExpressionElement, Declaration, ExportDefaultDeclarationKind, ArrowFunctionBody, AssignmentTargetMaybeDefault, AssignmentTargetProperty, CatchClause, ChainElement, Class, ClassElement, ArrowFunctionExpression, AssignmentTarget, BindingIdentifier, BindingPattern, Expression, ForStatementInit, ForStatementLeft, FormalParameters, Function, MemberExpression, ObjectPropertyKind, PrivateIdentifier, PropertyKey, SimpleAssignmentTarget, Statement, VariableDeclaration, VariableDeclarationKind,
 };
 use oxc_allocator::Allocator;
 use oxc_span::Span;
@@ -528,9 +528,10 @@ impl<'a> Resolver<'a> {
     }
 
     fn reference(&mut self, name: &str) {
+        let mut dynamic = false;
         for l in self.levels.iter().rev() {
             if let Some(&(_, key)) = l.names.iter().find(|(n, _)| *n == name) {
-                if l.func != self.func {
+                if dynamic || l.func != self.func {
                     self.captured.insert(key);
                 }
                 self.used.insert(key);
@@ -543,6 +544,7 @@ impl<'a> Resolver<'a> {
                     self.captured.insert(key);
                 }
                 self.used.insert(key);
+                dynamic = true;
             }
         }
     }
@@ -855,6 +857,21 @@ impl<'a> Resolver<'a> {
                 self.function(f, false);
             }
             Statement::ClassDeclaration(c) => self.class(c),
+            Statement::ExportDeclaration(e) => match &e.declaration {
+                Declaration::VariableDeclaration(v) => self.declaration(v),
+                Declaration::FunctionDeclaration(f) => self.function(f, false),
+                Declaration::ClassDeclaration(c) => self.class(c),
+                _ => {}
+            },
+            Statement::ExportDefaultDeclaration(e) => match &e.declaration {
+                ExportDefaultDeclarationKind::FunctionDeclaration(f) => self.function(f, false),
+                ExportDefaultDeclarationKind::ClassDeclaration(c) => self.class(c),
+                other => {
+                    if let Some(x) = other.as_expression() {
+                        self.expr(x);
+                    }
+                }
+            },
             Statement::BlockStatement(b) => self.scoped(&Decls::block([b.body.as_slice()]), |r| r.statements(&b.body)),
             Statement::IfStatement(i) => {
                 self.expr(&i.test);

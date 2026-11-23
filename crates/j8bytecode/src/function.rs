@@ -48,6 +48,7 @@ pub struct ScopeInfo {
 pub struct ContextVariable {
     pub name: Box<str>,
     pub mode: VariableMode,
+    pub parameter: Option<u16>,
 }
 
 pub struct Context;

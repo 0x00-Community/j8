@@ -723,7 +723,11 @@ impl<'a> Compiler<'a, '_> {
                     DeclKind::Const => VariableMode::Const,
                     _ => VariableMode::Var,
                 };
-                variables.push(ContextVariable { name: d.name.into(), mode });
+                let parameter = match d.kind {
+                    DeclKind::Param(i) => Some(i),
+                    _ => None,
+                };
+                variables.push(ContextVariable { name: d.name.into(), mode, parameter });
                 Binding::Context(Context::MIN_SLOTS + slots - 1)
             } else {
                 match d.kind {
@@ -2495,7 +2499,7 @@ impl<'a> Compiler<'a, '_> {
                     DeclKind::Let | DeclKind::Const => {
                         let slot = Context::MIN_SLOTS + u32::try_from(variables.len()).unwrap_or(u32::MAX);
                         let mode = if matches!(d.kind, DeclKind::Const) { VariableMode::Const } else { VariableMode::Let };
-                        variables.push(ContextVariable { name: d.name.into(), mode });
+                        variables.push(ContextVariable { name: d.name.into(), mode, parameter: None });
                         lexical.push(Bound { name: d.name, binding: Binding::Context(slot), constant: matches!(d.kind, DeclKind::Const), ready: d.ready.or(Some(u32::MAX)), self_name: false });
                     }
                     _ => {}
@@ -2802,7 +2806,7 @@ impl<'a> Compiler<'a, '_> {
         };
         let func = self.frames.len() - 1;
         let mark = self.b().mark();
-        let info = ScopeInfo { scope_type: Some(ScopeType::CatchScope), variables: alloc::vec![ContextVariable { name: name.into(), mode: VariableMode::Var }], has_extension: false };
+        let info = ScopeInfo { scope_type: Some(ScopeType::CatchScope), variables: alloc::vec![ContextVariable { name: name.into(), mode: VariableMode::Var, parameter: None }], has_extension: false };
         let k = self.constant(Constant::Scope(info));
         let e = self.temp();
         self.b().star(e);
