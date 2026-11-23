@@ -19,6 +19,16 @@ const FLAG_PROPERTIES: [(char, &str); 8] = [('d', "hasIndices"), ('g', "global")
 
 const MAX_SPLIT: f64 = 4_294_967_295.0;
 
+const SYM_MATCH: usize = 0;
+
+const SYM_MATCH_ALL: usize = 1;
+
+const SYM_REPLACE: usize = 2;
+
+const SYM_SEARCH: usize = 3;
+
+const SYM_SPLIT: usize = 4;
+
 struct Found {
     range: core::ops::Range<usize>,
     groups: Vec<Option<core::ops::Range<usize>>>,
@@ -500,6 +510,10 @@ impl Regexps {
     fn builtin_exec<'gc>(a: &mut Agent<'gc, '_>, o: JsObject<'gc>, s: JsString<'gc>) -> Result<Value<'gc>, Error> {
         let li = a.get_named(o.into(), "lastIndex")?;
         let last = a.to_length(li)?;
+        Self::exec_from(a, o, last, s, false)
+    }
+
+    fn exec_from<'gc>(a: &mut Agent<'gc, '_>, o: JsObject<'gc>, last: f64, s: JsString<'gc>, direct: bool) -> Result<Value<'gc>, Error> {
         let (global, sticky, indices) = Self::with_program(o, |c| (c.global(), c.sticky(), c.indices()));
         let ascii = s.is_ascii();
         let units: Vec<u16> = if ascii { Vec::new() } else { s.encode_utf16().collect() };
@@ -509,7 +523,7 @@ impl Regexps {
         let last = if global || sticky { last } else { 0.0 };
         if last > len {
             if global || sticky {
-                a.set_named(o.into(), "lastIndex", 0.0.into())?;
+                Self::write_last(a, o, direct, 0)?;
             }
             return Ok(Value::Null);
         }
@@ -518,12 +532,12 @@ impl Regexps {
         let found = Self::with_program(o, |c| if ascii { Self::find_ascii(c, &s, start) } else { Self::find(c, &units, start) });
         let Some(m) = found.filter(|m| !sticky || m.range.start == start) else {
             if global || sticky {
-                a.set_named(o.into(), "lastIndex", 0.0.into())?;
+                Self::write_last(a, o, direct, 0)?;
             }
             return Ok(Value::Null);
         };
         if global || sticky {
-            a.set_named(o.into(), "lastIndex", Self::index(m.range.end))?;
+            Self::write_last(a, o, direct, m.range.end)?;
         }
         let arr = a.array(Vec::new());
         a.create_data_property_or_throw(arr, Key::Str("index"), Self::index(m.range.start))?;
@@ -559,7 +573,7 @@ impl Regexps {
         Ok(arr.into())
     }
 
-    fn pristine<'gc>(a: &Agent<'gc, '_>, r: Value<'gc>) -> Option<(JsObject<'gc>, f64)> {
+    fn open<'gc>(a: &Agent<'gc, '_>, r: Value<'gc>, wide: bool) -> Option<(JsObject<'gc>, f64)> {
         let o = r.as_object()?;
         if o.regexp().is_none() || o.has_symbols() {
             return None;
@@ -568,15 +582,278 @@ impl Regexps {
         if !Gc::ptr_eq(proto, a.realm.regexp_proto) {
             return None;
         }
-        let p = a.realm.regexp_pristine.get().as_ref()?;
-        if o.props().shape() != Some(p.last_index) {
+        let saved = a.realm.regexp_pristine.get().as_ref()?;
+        if o.props().shape() != Some(saved.last_index) {
             return None;
         }
         let Slot::Data(v) = o.props().slot(0) else { return None };
         let last = v.as_number()?;
+        let props = proto.props();
+        if props.shape() != Some(saved.shape) {
+            return None;
+        }
+        let words = if wide { &saved.words[..] } else { &saved.words[..1] };
+        props.same_words(words).then_some((o, last))
+    }
+
+    fn symbol_holds(a: &Agent<'_, '_>, index: usize) -> bool {
+        let Some(saved) = a.realm.regexp_pristine.get().as_ref() else { return false };
+        let Some(&expected) = saved.methods.get(index) else { return false };
+        let symbols = &a.realm.symbols;
+        let sym = match index {
+            SYM_MATCH => symbols.match_,
+            SYM_MATCH_ALL => symbols.match_all,
+            SYM_REPLACE => symbols.replace,
+            SYM_SEARCH => symbols.search,
+            SYM_SPLIT => symbols.split,
+            _ => return false,
+        };
+        a.realm.regexp_proto.borrow().get_own_symbol(sym).is_some_and(|prop| matches!(prop.slot, Slot::Data(v) if v.as_object().is_some_and(|f| Gc::ptr_eq(f, expected))))
+    }
+
+    fn species_builtin(a: &Agent<'_, '_>) -> bool {
+        let Some(saved) = a.realm.regexp_pristine.get().as_ref() else { return false };
         let props = a.realm.regexp_proto.get().props();
-        let intact = props.shape() == Some(p.shape) && p.slots.iter().all(|&(i, orig)| props.word(i).is_some_and(|w| w.bits() == orig.bits()));
-        intact.then_some((o, last))
+        if !props.same_words(&[saved.constructor]) {
+            return false;
+        }
+        let Some(ctor) = saved.constructor.1.as_object() else { return false };
+        ctor.borrow().get_own_symbol(a.realm.symbols.species).is_some_and(|prop| matches!(prop.slot, Slot::Accessor { get: Some(g), set: None } if Gc::ptr_eq(g, saved.species)))
+    }
+
+    fn prepared<'gc>(a: &mut Agent<'gc, '_>, recv: Value<'gc>, arg: Value<'gc>, wide: bool, sym: usize) -> Result<Option<(JsObject<'gc>, f64, JsString<'gc>)>, Error> {
+        if matches!(recv.kind(), ValueKind::Object(_)) || arg.as_object().is_none() {
+            return Ok(None);
+        }
+        let Some((rx, last)) = Self::open(a, arg, wide) else { return Ok(None) };
+        if !Self::symbol_holds(a, sym) {
+            return Ok(None);
+        }
+        let s = match recv.kind() {
+            ValueKind::String(s) => s,
+            _ => a.to_string(recv)?,
+        };
+        Ok(Some((rx, last, s)))
+    }
+
+    fn write_last<'gc>(a: &mut Agent<'gc, '_>, o: JsObject<'gc>, direct: bool, at: usize) -> Result<(), Error> {
+        if direct {
+            Self::set_last(a, o, at);
+            Ok(())
+        } else {
+            a.set_named(o.into(), "lastIndex", Self::index(at))
+        }
+    }
+
+    fn hop(units: Units<'_>, index: usize, unicode: bool) -> usize {
+        if unicode
+            && let (Some(lead), Some(trail)) = (units.get(index), units.get(index + 1))
+            && (0xd800..0xdc00).contains(&lead)
+            && (0xdc00..0xe000).contains(&trail)
+        {
+            return index + 2;
+        }
+        index + 1
+    }
+
+    fn place(units: Units<'_>, q: usize, start: usize, unicode: bool) -> (bool, usize) {
+        if start <= q || !unicode || matches!(units, Units::Ascii(_)) {
+            return (true, start);
+        }
+        let mut at = q;
+        while at < start {
+            at = Self::hop(units, at, true);
+        }
+        if at == start { (true, start) } else { (false, at) }
+    }
+
+    fn cut<'gc>(a: &Agent<'gc, '_>, s: JsString<'gc>, units: Units<'_>, from: usize, to: usize) -> Value<'gc> {
+        match units {
+            Units::Ascii(bytes) => {
+                if to == from.wrapping_add(1)
+                    && let Some(&cached) = bytes.get(from).and_then(|&b| a.realm.chars.get(usize::from(b)))
+                {
+                    return cached.into();
+                }
+                let text: &str = &s;
+                a.piece(s, &text[from..to]).into()
+            }
+            Units::Wide(wide) => Self::text(a, wide, Some(from..to)),
+        }
+    }
+
+    fn grouped(c: &Compiled) -> bool {
+        c.atom.is_none() && c.dfa.as_ref().is_none_or(|d| d.group_count() != 0)
+    }
+
+    fn room(len: usize, lim: f64) -> bool {
+        #[expect(clippy::cast_precision_loss, reason = "a result length is far below 2^53")]
+        let n = len as f64;
+        n < lim
+    }
+
+    fn fast_match<'gc>(a: &mut Agent<'gc, '_>, o: JsObject<'gc>, last: f64, s: JsString<'gc>) -> Result<Value<'gc>, Error> {
+        let units = s.units();
+        let mut items = Vec::new();
+        let global = Self::with_program(o, |c| {
+            if !c.global() {
+                return false;
+            }
+            if !c.sticky()
+                && let (Some(atom), Units::Ascii(_)) = (c.atom.as_deref(), units)
+                && let [b] = atom.as_bytes()
+            {
+                let cached = a.realm.chars.get(usize::from(*b)).copied();
+                let text: &str = &s;
+                let mut start = 0usize;
+                while let Some(rel) = text[start..].find(char::from(*b)) {
+                    let i = start + rel;
+                    items.push(cached.map_or_else(|| Self::cut(a, s, units, i, i + 1), Value::from));
+                    start = i + 1;
+                }
+                return true;
+            }
+            let (unicode, sticky, n) = (c.unicode(), c.sticky(), units.len());
+            let mut start = 0usize;
+            while start <= n {
+                let Some(range) = Self::locate(c, &s, units, start).filter(|r| !sticky || r.start == start) else { break };
+                let next = if range.is_empty() { Self::hop(units, range.end, unicode) } else { range.end };
+                items.push(Self::cut(a, s, units, range.start, range.end));
+                start = next;
+            }
+            true
+        });
+        if !global {
+            return Self::exec_from(a, o, Self::length_from_number(last), s, true);
+        }
+        Self::set_last(a, o, 0);
+        if items.is_empty() {
+            return Ok(Value::Null);
+        }
+        Ok(a.array(items).into())
+    }
+
+    fn fast_search<'gc>(o: JsObject<'gc>, s: JsString<'gc>) -> Value<'gc> {
+        let units = s.units();
+        match Self::with_program(o, |c| Self::locate(c, &s, units, 0).filter(|r| !c.sticky() || r.start == 0).map(|r| r.start)) {
+            Some(i) => Self::index(i),
+            None => (-1.0).into(),
+        }
+    }
+
+    fn split_limit<'gc>(a: &mut Agent<'gc, '_>, limit: Value<'gc>) -> Result<Option<f64>, Error> {
+        if limit == Value::Undefined {
+            return Ok(Some(MAX_SPLIT));
+        }
+        if limit.as_object().is_some() {
+            return Ok(None);
+        }
+        Ok(Some(f64::from(a.to_uint32(limit)?)))
+    }
+
+    fn fast_split<'gc>(a: &Agent<'gc, '_>, o: JsObject<'gc>, s: JsString<'gc>, lim: f64) -> Value<'gc> {
+        if lim == 0.0 {
+            return a.array(Vec::new()).into();
+        }
+        let units = s.units();
+        let mut items = Vec::new();
+        if units.is_empty() {
+            let matched = Self::with_program(o, |c| Self::locate(c, &s, units, 0).is_some_and(|r| r.start == 0));
+            if !matched {
+                items.push(s.into());
+            }
+            return a.array(items).into();
+        }
+        Self::with_program(o, |c| Self::split_scan(a, c, s, units, lim, &mut items));
+        a.array(items).into()
+    }
+
+    fn split_scan<'gc>(a: &Agent<'gc, '_>, c: &Compiled, s: JsString<'gc>, units: Units<'_>, lim: f64, items: &mut Vec<Value<'gc>>) {
+        if let (Some(atom), Units::Ascii(_)) = (c.atom.as_deref(), units)
+            && atom.is_ascii()
+        {
+            let step = atom.len();
+            let text: &str = &s;
+            let n = text.len();
+            let mut p = 0usize;
+            while p < n && Self::room(items.len(), lim) {
+                let Some(rel) = text[p..].find(atom) else { break };
+                let q = p + rel;
+                items.push(Self::cut(a, s, units, p, q));
+                if !Self::room(items.len(), lim) {
+                    return;
+                }
+                p = q + step;
+            }
+            if Self::room(items.len(), lim) {
+                items.push(Self::cut(a, s, units, p, n));
+            }
+            return;
+        }
+        let (n, unicode) = (units.len(), c.unicode());
+        let mut p = 0usize;
+        let mut q = 0usize;
+        if Self::grouped(c) {
+            while q < n && Self::room(items.len(), lim) {
+                let Some(m) = Self::find_in(c, &s, units, q) else { break };
+                if m.range.start < q || m.range.start >= n {
+                    break;
+                }
+                let (ok, at) = Self::place(units, q, m.range.start, unicode);
+                if !ok {
+                    q = at;
+                    continue;
+                }
+                q = at;
+                let end = m.range.end.min(n);
+                if end == p {
+                    q = Self::hop(units, q, unicode);
+                    continue;
+                }
+                items.push(Self::cut(a, s, units, p, q));
+                if !Self::room(items.len(), lim) {
+                    return;
+                }
+                for g in &m.groups {
+                    items.push(match g {
+                        Some(r) => Self::cut(a, s, units, r.start, r.end.min(n)),
+                        None => Value::Undefined,
+                    });
+                    if !Self::room(items.len(), lim) {
+                        return;
+                    }
+                }
+                p = end;
+                q = end;
+            }
+        } else {
+            while q < n && Self::room(items.len(), lim) {
+                let Some(range) = Self::locate(c, &s, units, q) else { break };
+                if range.start < q || range.start >= n {
+                    break;
+                }
+                let (ok, at) = Self::place(units, q, range.start, unicode);
+                if !ok {
+                    q = at;
+                    continue;
+                }
+                q = at;
+                let end = range.end.min(n);
+                if end == p {
+                    q = Self::hop(units, q, unicode);
+                    continue;
+                }
+                items.push(Self::cut(a, s, units, p, q));
+                if !Self::room(items.len(), lim) {
+                    return;
+                }
+                p = end;
+                q = end;
+            }
+        }
+        if Self::room(items.len(), lim) {
+            items.push(Self::cut(a, s, units, p, n));
+        }
     }
 
     fn length_from_number(n: f64) -> f64 {
@@ -837,7 +1114,7 @@ impl Regexps {
     fn test<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let r = Self::this_object(a, this)?;
         let s = a.to_string(args.at(0))?;
-        if let Some((o, last)) = Self::pristine(a, r) {
+        if let Some((o, last)) = Self::open(a, r, false) {
             return Ok(Self::fast_test(a, o, last, &s).into());
         }
         Ok((Self::regexp_exec(a, r, s)? != Value::Null).into())
@@ -968,7 +1245,7 @@ impl Regexps {
             return None;
         }
         let props = a.realm.regexp_proto.get().props();
-        let intact = props.shape() == Some(saved.shape) && saved.slots.iter().all(|&(i, orig)| props.word(i).is_some_and(|w| w.bits() == orig.bits()));
+        let intact = props.shape() == Some(saved.shape) && props.same_words(&saved.words);
         intact.then(|| Self::with_program(o, |c| c.flags))
     }
 
@@ -994,7 +1271,17 @@ impl Regexps {
 
     fn match_symbol<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let r = Self::this_object(a, this)?;
-        let s = a.to_string(args.at(0))?;
+        let raw = args.at(0);
+        if raw.as_object().is_none()
+            && let Some((o, last)) = Self::open(a, r, true)
+        {
+            let s = match raw.kind() {
+                ValueKind::String(s) => s,
+                _ => a.to_string(raw)?,
+            };
+            return Self::fast_match(a, o, last, s);
+        }
+        let s = a.to_string(raw)?;
         let (global, unicode) = if let Some(bits) = Self::builtin_bits(a, r) {
             (Compiled::on(bits, Compiled::GLOBAL), Compiled::on(bits, Compiled::UNICODE | Compiled::UNICODE_SETS))
         } else {
@@ -1146,19 +1433,21 @@ impl Regexps {
         Ok(out)
     }
 
-    fn replace_symbol<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        let r = Self::this_object(a, this)?;
-        let s = a.to_string(args.at(0))?;
-        let mut with = args.at(1);
+    fn replace_quick<'gc>(a: &mut Agent<'gc, '_>, rx: JsObject<'gc>, last: f64, s: JsString<'gc>, with: Value<'gc>) -> Result<Option<Value<'gc>>, Error> {
+        if a.is_callable(with) || with.as_object().is_some() {
+            return Ok(None);
+        }
+        let w = a.to_string(with)?;
+        match Self::quick_replace(a, rx, last, s, w)? {
+            Some(v) => Ok(Some(v)),
+            None => Ok(Some(Self::replace_general(a, rx.into(), s, w.into())?)),
+        }
+    }
+
+    fn replace_general<'gc>(a: &mut Agent<'gc, '_>, r: Value<'gc>, s: JsString<'gc>, mut with: Value<'gc>) -> Result<Value<'gc>, Error> {
         let functional = a.is_callable(with);
         if !functional {
-            let w = a.to_string(with)?;
-            if let Some((o, last)) = Self::pristine(a, r)
-                && let Some(v) = Self::quick_replace(a, o, last, s, w)?
-            {
-                return Ok(v);
-            }
-            with = w.into();
+            with = a.to_string(with)?.into();
         }
         let units: Vec<u16> = s.encode_utf16().collect();
         let flags = Self::get_flags(a, r)?;
@@ -1230,9 +1519,39 @@ impl Regexps {
         Ok(a.string_units(&out).into())
     }
 
+    fn replace_symbol<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+        let r = Self::this_object(a, this)?;
+        let raw = args.at(0);
+        let with = args.at(1);
+        if raw.as_object().is_none()
+            && let Some((o, last)) = Self::open(a, r, true)
+        {
+            let s = match raw.kind() {
+                ValueKind::String(s) => s,
+                _ => a.to_string(raw)?,
+            };
+            if let Some(v) = Self::replace_quick(a, o, last, s, with)? {
+                return Ok(v);
+            }
+            return Self::replace_general(a, r, s, with);
+        }
+        let s = a.to_string(raw)?;
+        Self::replace_general(a, r, s, with)
+    }
+
     fn search_symbol<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let r = Self::this_object(a, this)?;
-        let s = a.to_string(args.at(0))?;
+        let raw = args.at(0);
+        if raw.as_object().is_none()
+            && let Some((o, _)) = Self::open(a, r, false)
+        {
+            let s = match raw.kind() {
+                ValueKind::String(s) => s,
+                _ => a.to_string(raw)?,
+            };
+            return Ok(Self::fast_search(o, s));
+        }
+        let s = a.to_string(raw)?;
         let previous = a.get_named(r, "lastIndex")?;
         if !previous.same_value(0.0.into()) {
             a.set_named(r, "lastIndex", 0.0.into())?;
@@ -1250,7 +1569,21 @@ impl Regexps {
 
     fn split_symbol<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let r = Self::this_object(a, this)?;
-        let s = a.to_string(args.at(0))?;
+        let raw = args.at(0);
+        let limit = args.at(1);
+        if raw.as_object().is_none()
+            && let Some((o, _)) = Self::open(a, r, true)
+            && Self::species_builtin(a)
+        {
+            let s = match raw.kind() {
+                ValueKind::String(s) => s,
+                _ => a.to_string(raw)?,
+            };
+            if let Some(lim) = Self::split_limit(a, limit)? {
+                return Ok(Self::fast_split(a, o, s, lim));
+            }
+        }
+        let s = a.to_string(raw)?;
         let default = a.realm.global.borrow().own(a.mc, "RegExp").unwrap_or_default();
         let ctor = Buffers::species_constructor(a, r, default)?;
         let (unicode, new_flags) = if let Some(bits) = Self::builtin_bits(a, r) {
@@ -1396,10 +1729,18 @@ impl Regexps {
     }
 
     fn string_match<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+        let recv = Self::subject(a, this)?;
+        if let Some((rx, last, s)) = Self::prepared(a, recv, args.at(0), true, SYM_MATCH)? {
+            return Self::fast_match(a, rx, last, s);
+        }
         Self::dispatch(a, this, args.at(0), a.realm.symbols.match_, Value::Undefined)
     }
 
     fn search<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+        let recv = Self::subject(a, this)?;
+        if let Some((rx, _, s)) = Self::prepared(a, recv, args.at(0), false, SYM_SEARCH)? {
+            return Ok(Self::fast_search(rx, s));
+        }
         Self::dispatch(a, this, args.at(0), a.realm.symbols.search, Value::Undefined)
     }
 
@@ -1418,7 +1759,21 @@ impl Regexps {
 
     fn match_all<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let arg = args.at(0);
-        Self::subject(a, this)?;
+        let recv = Self::subject(a, this)?;
+        if arg.as_object().is_some() && !matches!(recv.kind(), ValueKind::Object(_))
+            && let Some((rx, _)) = Self::open(a, arg, true)
+            && Self::symbol_holds(a, SYM_MATCH_ALL)
+            && Self::symbol_holds(a, SYM_MATCH)
+        {
+            if !Self::with_program(rx, Compiled::global) {
+                return Err(a.throw(ErrorKind::Type, "String.prototype.matchAll called with a non-global RegExp argument"));
+            }
+            let s = match recv.kind() {
+                ValueKind::String(s) => s,
+                _ => a.to_string(recv)?,
+            };
+            return Self::match_all_symbol(a, arg, &[s.into()]);
+        }
         if arg.as_object().is_some() {
             Self::require_global(a, arg, "matchAll")?;
         }
@@ -1433,10 +1788,12 @@ impl Regexps {
             if all {
                 Self::require_global(a, search, "replaceAll")?;
             }
+            if let Some((rx, last, s)) = Self::prepared(a, o, search, true, SYM_REPLACE)?
+                && let Some(v) = Self::replace_quick(a, rx, last, s, with)?
+            {
+                return Ok(v);
+            }
             if let Some(f) = Self::method_of(a, search, a.realm.symbols.replace)? {
-                if a.realm.regexp_pristine.get().as_ref().is_some_and(|p| f.as_object().is_some_and(|f| Gc::ptr_eq(f, p.replace))) {
-                    return Self::replace_symbol(a, search, &[o, with]);
-                }
                 return a.call(f, search, &[o, with]);
             }
         }
@@ -1522,6 +1879,12 @@ impl Regexps {
     fn split<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let o = Self::subject(a, this)?;
         let sep = args.at(0);
+        if let Some((rx, _, s)) = Self::prepared(a, o, sep, true, SYM_SPLIT)?
+            && Self::species_builtin(a)
+            && let Some(lim) = Self::split_limit(a, args.at(1))?
+        {
+            return Ok(Self::fast_split(a, rx, s, lim));
+        }
         if sep.as_object().is_some()
             && let Some(f) = Self::method_of(a, sep, a.realm.symbols.split)?
         {
@@ -1574,8 +1937,32 @@ impl<'gc> Installer<'_, 'gc> {
         };
         let pristine = {
             let d = proto.borrow();
-            let slots = ["exec", "flags"].into_iter().chain(FLAG_PROPERTIES.map(|(_, n)| n)).filter_map(|n| d.props().position(n).and_then(|i| Some((i, d.props().word(i)?)))).collect();
-            d.props().shape().map(|shape| j8framework::RegExpPristine { shape, last_index, slots, replace: methods[2] })
+            let names = ["exec", "flags", "hasIndices", "global", "ignoreCase", "multiline", "dotAll", "unicode", "unicodeSets", "sticky"];
+            let mut words = [(0u16, Value::Undefined); 10];
+            let mut complete = true;
+            for (slot, name) in words.iter_mut().zip(names) {
+                let Some(i) = d.props().position(name) else {
+                    complete = false;
+                    break;
+                };
+                let Ok(index) = u16::try_from(i) else {
+                    complete = false;
+                    break;
+                };
+                let Some(v) = d.props().word(i) else {
+                    complete = false;
+                    break;
+                };
+                *slot = (index, v);
+            }
+            let constructor = d.props().position("constructor").and_then(|i| {
+                let index = u16::try_from(i).ok()?;
+                Some((index, d.props().word(i)?))
+            });
+            match (complete, constructor, d.props().shape()) {
+                (true, Some(constructor), Some(shape)) => Some(j8framework::RegExpPristine { shape, last_index, words, constructor, methods, species }),
+                _ => None,
+            }
         };
         r.regexp_pristine.set(self.mc, pristine);
         r.regexp_literal.set(self.mc, j8framework::Static(Some(Regexps::literal)));
