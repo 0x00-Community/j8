@@ -153,8 +153,8 @@ const VIEW_MIN: usize = 32;
 #[repr(C)]
 #[derive(Collect)]
 #[cfg_attr(all(target_os = "linux", feature = "crossheap"), derive(paragc::Shared))]
-pub struct JsStr<'gc> {
-    buf: Option<Gc<'gc, JsStr<'gc>>>,
+pub struct JsStr<'scope> {
+    buf: Option<Gc<'scope, JsStr<'scope>>>,
     len: u32,
     units: u32,
     start: u32,
@@ -166,7 +166,7 @@ const _: () = assert!(core::mem::size_of::<JsStr<'static>>() == 32, "a js string
 
 type Tail<'a> = &'a mut [MaybeUninit<u8>];
 
-impl<'gc> JsStr<'gc> {
+impl<'scope> JsStr<'scope> {
     const LONE: u32 = 1 << 31;
 
     fn capacity(&self) -> usize {
@@ -182,7 +182,7 @@ impl<'gc> JsStr<'gc> {
         (&raw const *self).wrapping_add(1).cast()
     }
 
-    fn backing(this: Gc<'gc, Self>) -> (Gc<'gc, Self>, usize) {
+    fn backing(this: Gc<'scope, Self>) -> (Gc<'scope, Self>, usize) {
         match this.buf {
             Some(b) => (b, this.start as usize),
             None => (this, 0),
@@ -240,14 +240,14 @@ impl<'gc> JsStr<'gc> {
         }
     }
 
-    fn place(mc: &Mutation<'gc>, s: Self, tail: usize, fill: impl FnOnce(Tail<'_>)) -> Gc<'gc, Self> {
+    fn place(mc: &Mutation<'scope>, s: Self, tail: usize, fill: impl FnOnce(Tail<'_>)) -> Gc<'scope, Self> {
         #[cfg(all(target_os = "linux", feature = "crossheap"))]
         return mc.mutator().alloc_shared_tail(s, tail, fill);
         #[cfg(not(all(target_os = "linux", feature = "crossheap")))]
         mc.mutator().alloc_tail(s, tail, fill)
     }
 
-    fn own(mc: &Mutation<'gc>, len: usize, units: usize, cap: usize, lone: bool, fill: impl FnOnce(Tail<'_>, Tail<'_>)) -> Gc<'gc, Self> {
+    fn own(mc: &Mutation<'scope>, len: usize, units: usize, cap: usize, lone: bool, fill: impl FnOnce(Tail<'_>, Tail<'_>)) -> Gc<'scope, Self> {
         let n = |x: usize| u32::try_from(x).ok().filter(|x| x & Self::LONE == 0).expect("a string is shorter than 2 GiB");
         let wide = if len == units && !lone { 0 } else { 2 * units };
         let head = if wide == 0 { cap } else { cap.next_multiple_of(2) };
@@ -277,11 +277,11 @@ impl<'gc> JsStr<'gc> {
         n
     }
 
-    pub fn alloc(mc: &Mutation<'gc>, s: &str) -> Gc<'gc, Self> {
+    pub fn alloc(mc: &Mutation<'scope>, s: &str) -> Gc<'scope, Self> {
         Self::alloc_known(mc, s, s.is_ascii())
     }
 
-    pub fn alloc_known(mc: &Mutation<'gc>, s: &str, ascii: bool) -> Gc<'gc, Self> {
+    pub fn alloc_known(mc: &Mutation<'scope>, s: &str, ascii: bool) -> Gc<'scope, Self> {
         let units = if ascii { s.len() } else { s.encode_utf16().count() };
         Self::own(mc, s.len(), units, s.len(), false, |bytes, wide| {
             Self::write(bytes, s.as_bytes());
@@ -289,7 +289,7 @@ impl<'gc> JsStr<'gc> {
         })
     }
 
-    pub fn alloc_units(mc: &Mutation<'gc>, units: &[u16]) -> Gc<'gc, Self> {
+    pub fn alloc_units(mc: &Mutation<'scope>, units: &[u16]) -> Gc<'scope, Self> {
         if let Ok(s) = String::from_utf16(units) {
             return Self::alloc(mc, &s);
         }
@@ -300,7 +300,7 @@ impl<'gc> JsStr<'gc> {
         })
     }
 
-    pub fn slice_units(mc: &Mutation<'gc>, of: Gc<'gc, Self>, r: core::ops::Range<usize>) -> Gc<'gc, Self> {
+    pub fn slice_units(mc: &Mutation<'scope>, of: Gc<'scope, Self>, r: core::ops::Range<usize>) -> Gc<'scope, Self> {
         if r.start == 0 && r.end == of.utf16_len() {
             return of;
         }
@@ -310,7 +310,7 @@ impl<'gc> JsStr<'gc> {
         }
     }
 
-    pub fn concat(mc: &Mutation<'gc>, a: Gc<'gc, Self>, b: Gc<'gc, Self>) -> Gc<'gc, Self> {
+    pub fn concat(mc: &Mutation<'scope>, a: Gc<'scope, Self>, b: Gc<'scope, Self>) -> Gc<'scope, Self> {
         if b.len == 0 {
             return a;
         }
@@ -338,7 +338,7 @@ impl<'gc> JsStr<'gc> {
         })
     }
 
-    fn extend(mc: &Mutation<'gc>, a: Gc<'gc, Self>, b: Gc<'gc, Self>) -> Option<Gc<'gc, Self>> {
+    fn extend(mc: &Mutation<'scope>, a: Gc<'scope, Self>, b: Gc<'scope, Self>) -> Option<Gc<'scope, Self>> {
         let (own, start) = Self::backing(a);
         let end = start + a.byte_len();
         if own.capacity().checked_sub(end)? < b.byte_len() {
@@ -350,12 +350,12 @@ impl<'gc> JsStr<'gc> {
         Some(Self::view(mc, own, start, a.byte_len() + b.byte_len()))
     }
 
-    fn view(mc: &Mutation<'gc>, own: Gc<'gc, Self>, start: usize, len: usize) -> Gc<'gc, Self> {
+    fn view(mc: &Mutation<'scope>, own: Gc<'scope, Self>, start: usize, len: usize) -> Gc<'scope, Self> {
         let n = |x: usize| u32::try_from(x).expect("a string is shorter than 4 GiB");
         Self::place(mc, Self { buf: Some(own), len: n(len), units: n(len), start: n(start), cap: 0, used: AtomicU32::new(0) }, 0, |_| {})
     }
 
-    pub fn piece(mc: &Mutation<'gc>, of: Gc<'gc, Self>, piece: &str) -> Gc<'gc, Self> {
+    pub fn piece(mc: &Mutation<'scope>, of: Gc<'scope, Self>, piece: &str) -> Gc<'scope, Self> {
         let text = of.as_str();
         let at = piece.as_ptr().addr().checked_sub(text.as_ptr().addr()).filter(|&at| at + piece.len() <= text.len());
         match at {

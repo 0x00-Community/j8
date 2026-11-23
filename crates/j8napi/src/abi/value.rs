@@ -25,7 +25,7 @@ impl Env {
         Ok(())
     }
 
-    fn bigint<'gc>(&self, h: Handle) -> Result<&'gc BigInt, Status> {
+    fn bigint<'scope>(&self, h: Handle) -> Result<&'scope BigInt, Status> {
         match self.value(h)?.kind() {
             ValueKind::BigInt(b) => Ok(&j8framework::Gc::get(b).0),
             _ => Err(Status::BigintExpected),
@@ -47,7 +47,7 @@ impl Env {
         }
     }
 
-    fn strict_equals<'gc>(x: Value<'gc>, y: Value<'gc>) -> bool {
+    fn strict_equals<'scope>(x: Value<'scope>, y: Value<'scope>) -> bool {
         match (x.as_number(), y.as_number()) {
             (Some(a), Some(b)) => a == b,
             _ => x.same_value(y),

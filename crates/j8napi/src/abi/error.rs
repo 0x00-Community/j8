@@ -6,7 +6,7 @@ use crate::convert::Ffi;
 use crate::{Env, ExtendedErrorInfo, Handle, Status, napi};
 
 impl Env {
-    fn make_error<'gc>(&self, a: &mut j8framework::Agent<'gc, '_>, kind: ErrorKind, code: Option<Value<'gc>>, msg: &str) -> Result<Value<'gc>, Status> {
+    fn make_error<'scope>(&self, a: &mut j8framework::Agent<'scope, '_>, kind: ErrorKind, code: Option<Value<'scope>>, msg: &str) -> Result<Value<'scope>, Status> {
         let e = a.error(kind, msg);
         if let Some(code) = code {
             self.js(a.set_named(e.into(), "code", code))?;

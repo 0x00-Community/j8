@@ -20,7 +20,7 @@ impl Helpers {
         matches!(v.kind(), ValueKind::Object(f) if matches!(f.borrow().kind, ObjectKind::Native(n) if core::ptr::fn_addr_eq(n.f, Self::iterator as j8framework::NativeFn)))
     }
 
-    fn iterator<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn iterator<'scope>(a: &mut Agent<'scope, '_>, _: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let new_target = a.new_target;
         if new_target == Value::Undefined || Self::is_iterator_ctor(new_target) {
             return Err(a.throw(ErrorKind::Type, "Abstract class Iterator not directly constructable"));
@@ -28,25 +28,25 @@ impl Helpers {
         Ok(a.create_from_ctor(new_target, a.realm.iterator_proto, ObjectKind::Ordinary)?.into())
     }
 
-    fn direct<'gc>(a: &mut Agent<'gc, '_>, o: Value<'gc>) -> Result<IterRecord<'gc>, Error> {
+    fn direct<'scope>(a: &mut Agent<'scope, '_>, o: Value<'scope>) -> Result<IterRecord<'scope>, Error> {
         let next = a.get_named(o, "next")?;
         Ok(IterRecord { iterator: o, next })
     }
 
-    fn this_object<'gc>(a: &Agent<'gc, '_>, this: Value<'gc>) -> Result<Value<'gc>, Error> {
+    fn this_object<'scope>(a: &Agent<'scope, '_>, this: Value<'scope>) -> Result<Value<'scope>, Error> {
         match this.kind() {
             ValueKind::Object(_) => Ok(this),
             _ => Err(a.throw(ErrorKind::Type, "Iterator.prototype method called on a non-object")),
         }
     }
 
-    fn reject<'gc>(a: &mut Agent<'gc, '_>, iterator: Value<'gc>, kind: ErrorKind, message: &str) -> Error {
+    fn reject<'scope>(a: &mut Agent<'scope, '_>, iterator: Value<'scope>, kind: ErrorKind, message: &str) -> Error {
         let e = a.throw(kind, message);
         let _ = a.iterator_close(iterator);
         e
     }
 
-    fn callable<'gc>(a: &mut Agent<'gc, '_>, iterator: Value<'gc>, f: Value<'gc>) -> Result<(), Error> {
+    fn callable<'scope>(a: &mut Agent<'scope, '_>, iterator: Value<'scope>, f: Value<'scope>) -> Result<(), Error> {
         if a.is_callable(f) {
             Ok(())
         } else {
@@ -55,38 +55,38 @@ impl Helpers {
         }
     }
 
-    fn close_on<'gc, T>(a: &mut Agent<'gc, '_>, iterator: Value<'gc>, r: Result<T, Error>) -> Result<T, Error> {
+    fn close_on<'scope, T>(a: &mut Agent<'scope, '_>, iterator: Value<'scope>, r: Result<T, Error>) -> Result<T, Error> {
         if r.is_err() {
             let _ = a.iterator_close(iterator);
         }
         r
     }
 
-    fn make<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, kind: HelperKind, f: Value<'gc>, remaining: f64) -> Result<Value<'gc>, Error> {
+    fn make<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, kind: HelperKind, f: Value<'scope>, remaining: f64) -> Result<Value<'scope>, Error> {
         let underlying = Self::direct(a, this)?;
         let h = IteratorHelper { kind, state: HelperState::Start, underlying, f, remaining, counter: 0.0, inner: None };
         Ok(ObjectData { kind: ObjectKind::IteratorHelper(Box::new(h)), proto: Some(a.realm.iterator_helper_proto), ..ObjectData::default() }.alloc(a.mc).into())
     }
 
-    fn with_callback<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>], kind: HelperKind) -> Result<Value<'gc>, Error> {
+    fn with_callback<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>], kind: HelperKind) -> Result<Value<'scope>, Error> {
         let this = Self::this_object(a, this)?;
         Self::callable(a, this, args.at(0))?;
         Self::make(a, this, kind, args.at(0), 0.0)
     }
 
-    fn map<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn map<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Self::with_callback(a, this, args, HelperKind::Map)
     }
 
-    fn filter<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn filter<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Self::with_callback(a, this, args, HelperKind::Filter)
     }
 
-    fn flat_map<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn flat_map<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Self::with_callback(a, this, args, HelperKind::FlatMap)
     }
 
-    fn limited<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>], kind: HelperKind) -> Result<Value<'gc>, Error> {
+    fn limited<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>], kind: HelperKind) -> Result<Value<'scope>, Error> {
         let this = Self::this_object(a, this)?;
         let n = a.to_number(args.at(0));
         let n = Self::close_on(a, this, n)?;
@@ -100,15 +100,15 @@ impl Helpers {
         Self::make(a, this, kind, Value::Undefined, n)
     }
 
-    fn take<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn take<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Self::limited(a, this, args, HelperKind::Take)
     }
 
-    fn drop<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn drop<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Self::limited(a, this, args, HelperKind::Drop)
     }
 
-    fn flattenable<'gc>(a: &mut Agent<'gc, '_>, v: Value<'gc>, strings: bool) -> Result<IterRecord<'gc>, Error> {
+    fn flattenable<'scope>(a: &mut Agent<'scope, '_>, v: Value<'scope>, strings: bool) -> Result<IterRecord<'scope>, Error> {
         match v.kind() {
             ValueKind::Object(_) => {}
             ValueKind::String(_) if strings => {}
@@ -125,7 +125,7 @@ impl Helpers {
         Self::direct(a, iterator)
     }
 
-    fn step<'gc>(a: &mut Agent<'gc, '_>, h: &mut IteratorHelper<'gc>) -> Result<Option<Value<'gc>>, Error> {
+    fn step<'scope>(a: &mut Agent<'scope, '_>, h: &mut IteratorHelper<'scope>) -> Result<Option<Value<'scope>>, Error> {
         let under = h.underlying;
         loop {
             match h.kind {
@@ -187,7 +187,7 @@ impl Helpers {
         }
     }
 
-    fn helper<'gc>(a: &Agent<'gc, '_>, this: Value<'gc>) -> Result<(JsObject<'gc>, IteratorHelper<'gc>), Error> {
+    fn helper<'scope>(a: &Agent<'scope, '_>, this: Value<'scope>) -> Result<(JsObject<'scope>, IteratorHelper<'scope>), Error> {
         match this.kind() {
             ValueKind::Object(o) => match &o.borrow().kind {
                 ObjectKind::IteratorHelper(h) => Ok((o, **h)),
@@ -197,13 +197,13 @@ impl Helpers {
         }
     }
 
-    fn store<'gc>(a: &Agent<'gc, '_>, o: JsObject<'gc>, h: IteratorHelper<'gc>) {
+    fn store<'scope>(a: &Agent<'scope, '_>, o: JsObject<'scope>, h: IteratorHelper<'scope>) {
         if let ObjectKind::IteratorHelper(x) = &mut o.borrow_mut(a.mc).kind {
             **x = h;
         }
     }
 
-    fn helper_next<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn helper_next<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let (o, mut h) = Self::helper(a, this)?;
         match h.state {
             HelperState::Running => return Err(a.throw(ErrorKind::Type, "Generator is already running")),
@@ -220,7 +220,7 @@ impl Helpers {
         }
     }
 
-    fn helper_return<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn helper_return<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let (o, h) = Self::helper(a, this)?;
         match h.state {
             HelperState::Running => return Err(a.throw(ErrorKind::Type, "Generator is already running")),
@@ -236,13 +236,13 @@ impl Helpers {
         Ok(a.iter_result(Value::Undefined, true).into())
     }
 
-    fn consumer<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, f: Value<'gc>) -> Result<IterRecord<'gc>, Error> {
+    fn consumer<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, f: Value<'scope>) -> Result<IterRecord<'scope>, Error> {
         let this = Self::this_object(a, this)?;
         Self::callable(a, this, f)?;
         Self::direct(a, this)
     }
 
-    fn reduce<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn reduce<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let f = args.at(0);
         let it = Self::consumer(a, this, f)?;
         let (mut acc, mut counter) = if args.len() >= 2 {
@@ -261,7 +261,7 @@ impl Helpers {
         Ok(acc)
     }
 
-    fn to_array<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn to_array<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let this = Self::this_object(a, this)?;
         let it = Self::direct(a, this)?;
         let mut out = Vec::new();
@@ -271,7 +271,7 @@ impl Helpers {
         Ok(a.array(out).into())
     }
 
-    fn for_each<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn for_each<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let f = args.at(0);
         let it = Self::consumer(a, this, f)?;
         let mut counter = 0.0;
@@ -283,7 +283,7 @@ impl Helpers {
         Ok(Value::Undefined)
     }
 
-    fn probe<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>], how: Probe) -> Result<Value<'gc>, Error> {
+    fn probe<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>], how: Probe) -> Result<Value<'scope>, Error> {
         let f = args.at(0);
         let it = Self::consumer(a, this, f)?;
         let mut counter = 0.0;
@@ -310,19 +310,19 @@ impl Helpers {
         })
     }
 
-    fn some<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn some<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Self::probe(a, this, args, Probe::Some)
     }
 
-    fn every<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn every<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Self::probe(a, this, args, Probe::Every)
     }
 
-    fn find<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn find<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Self::probe(a, this, args, Probe::Find)
     }
 
-    fn from<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn from<'scope>(a: &mut Agent<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let rec = Self::flattenable(a, args.at(0), true)?;
         let inherits = match rec.iterator.kind() {
             ValueKind::Object(it) => {
@@ -345,7 +345,7 @@ impl Helpers {
         Ok(ObjectData { kind: ObjectKind::WrappedIterator(rec), proto: Some(a.realm.wrap_iterator_proto), ..ObjectData::default() }.alloc(a.mc).into())
     }
 
-    fn wrapped<'gc>(a: &Agent<'gc, '_>, this: Value<'gc>) -> Result<IterRecord<'gc>, Error> {
+    fn wrapped<'scope>(a: &Agent<'scope, '_>, this: Value<'scope>) -> Result<IterRecord<'scope>, Error> {
         match this.kind() {
             ValueKind::Object(o) => match o.borrow().kind {
                 ObjectKind::WrappedIterator(r) => Ok(r),
@@ -355,12 +355,12 @@ impl Helpers {
         }
     }
 
-    fn wrapped_next<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn wrapped_next<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let r = Self::wrapped(a, this)?;
         a.call(r.next, r.iterator, &[])
     }
 
-    fn wrapped_return<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn wrapped_return<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let r = Self::wrapped(a, this)?;
         let ret = a.get_named(r.iterator, "return")?;
         if ret.is_nullish() {
@@ -369,15 +369,15 @@ impl Helpers {
         a.call(ret, r.iterator, &[])
     }
 
-    fn tag_get<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn tag_get<'scope>(a: &mut Agent<'scope, '_>, _: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Ok(a.string("Iterator").into())
     }
 
-    fn ctor_get<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn ctor_get<'scope>(a: &mut Agent<'scope, '_>, _: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Ok(a.realm.global.borrow().own(a.mc, "Iterator").unwrap_or_default())
     }
 
-    fn ignoring_setter<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, key: Key<'_, 'gc>, v: Value<'gc>) -> Result<Value<'gc>, Error> {
+    fn ignoring_setter<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, key: Key<'_, 'scope>, v: Value<'scope>) -> Result<Value<'scope>, Error> {
         let Some(o) = this.as_object() else {
             return Err(a.throw(ErrorKind::Type, "setter called on a non-object"));
         };
@@ -393,11 +393,11 @@ impl Helpers {
         Ok(Value::Undefined)
     }
 
-    fn tag_set<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn tag_set<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Self::ignoring_setter(a, this, Key::Sym(a.realm.symbols.to_string_tag), args.at(0))
     }
 
-    fn ctor_set<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn ctor_set<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Self::ignoring_setter(a, this, Key::Str("constructor"), args.at(0))
     }
 }

@@ -36,7 +36,7 @@ pub fn expand(attr: TokenStream, mut item: ItemImpl) -> syn::Result<TokenStream>
     let b = Bound::of_impl(name.map(|n| quote!(#n)).unwrap_or_default(), &mut item)?;
     let inherit = extends.map(|base| {
         quote! {
-            fn parent<'gc>(a: &mut ::j8::frame::Agent<'gc, '_>, target: ::j8::frame::JsObject<'gc>) -> ::core::option::Option<::j8::ClassHandle<'gc>> {
+            fn parent<'scope>(a: &mut ::j8::frame::Agent<'scope, '_>, target: ::j8::frame::JsObject<'scope>) -> ::core::option::Option<::j8::ClassHandle<'scope>> {
                 ::core::option::Option::Some(::j8::Glue::parent::<#base>(a, target))
             }
 
@@ -83,7 +83,7 @@ pub fn expand(attr: TokenStream, mut item: ItemImpl) -> syn::Result<TokenStream>
         }
 
         impl #impl_generics ::j8::Install for #self_ty #where_clause {
-            fn install_into<'gc>(a: &mut ::j8::frame::Agent<'gc, '_>, target: ::j8::frame::JsObject<'gc>) {
+            fn install_into<'scope>(a: &mut ::j8::frame::Agent<'scope, '_>, target: ::j8::frame::JsObject<'scope>) {
                 let _ = <Self as ::j8::Class>::install(a, target);
             }
         }

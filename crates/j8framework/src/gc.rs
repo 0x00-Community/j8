@@ -10,27 +10,27 @@ pub use paragc::{Brand, Gc, Heap, Mutator, Root, Slot, Tlab, Trace, Tracer, Word
 use crate::Value;
 
 #[inline]
-pub unsafe fn gc_from_raw<'gc, T>(ptr: *const T) -> Gc<'gc, T> {
+pub unsafe fn gc_from_raw<'scope, T>(ptr: *const T) -> Gc<'scope, T> {
     unsafe { Gc::from_raw(ptr) }
 }
 
-pub struct Mutation<'gc> {
-    m: NonNull<Mutator<'gc>>,
+pub struct Mutation<'scope> {
+    m: NonNull<Mutator<'scope>>,
     generation: u64,
 }
 
-impl<'gc> Mutation<'gc> {
-    pub unsafe fn new(m: &Mutator<'gc>, generation: u64) -> Self {
+impl<'scope> Mutation<'scope> {
+    pub unsafe fn new(m: &Mutator<'scope>, generation: u64) -> Self {
         Self { m: NonNull::from(m), generation }
     }
 
     #[inline]
-    pub fn mutator(&self) -> &Mutator<'gc> {
+    pub fn mutator(&self) -> &Mutator<'scope> {
         unsafe { self.m.as_ref() }
     }
 
     #[inline]
-    pub fn alloc<T: Trace + 'gc>(&self, v: T) -> Gc<'gc, T> {
+    pub fn alloc<T: Trace + 'scope>(&self, v: T) -> Gc<'scope, T> {
         self.mutator().alloc(v)
     }
 
@@ -127,13 +127,13 @@ unsafe impl<T: Trace> Trace for Snap<T> {
 
 const WRITING: usize = 1 << (usize::BITS - 1);
 
-pub struct GcCell<'gc, T> {
+pub struct GcCell<'scope, T> {
     state: IsoCell<usize>,
-    snap: Slot<'gc, Snap<T>>,
+    snap: Slot<'scope, Snap<T>>,
 }
 
-impl<'gc, T: Trace + 'gc> GcCell<'gc, T> {
-    pub fn new(mc: &Mutation<'gc>, t: T) -> Self {
+impl<'scope, T: Trace + 'scope> GcCell<'scope, T> {
+    pub fn new(mc: &Mutation<'scope>, t: T) -> Self {
         let snap = mc.alloc(Snap { generation: mc.generation, moved: IsoCell::new(false), data: UnsafeCell::new(ManuallyDrop::new(t)) });
         Self { state: IsoCell::new(0), snap: Slot::from(snap) }
     }
@@ -147,7 +147,7 @@ impl<'gc, T: Trace + 'gc> GcCell<'gc, T> {
         self.snap.get().is_some()
     }
 
-    fn current(&self) -> Gc<'gc, Snap<T>> {
+    fn current(&self) -> Gc<'scope, Snap<T>> {
         self.snap.get().expect("borrowed an empty GcCell (check has_value first)")
     }
 
@@ -164,11 +164,11 @@ impl<'gc, T: Trace + 'gc> GcCell<'gc, T> {
         self.try_borrow().expect("GcCell already mutably borrowed")
     }
 
-    pub fn try_borrow_mut<'c>(&'c self, mc: &Mutation<'gc>) -> Option<CellMut<'c, T>> {
+    pub fn try_borrow_mut<'c>(&'c self, mc: &Mutation<'scope>) -> Option<CellMut<'c, T>> {
         self.try_borrow_mut_or(mc, || unreachable!("borrowed an empty GcCell mutably without an initial value"))
     }
 
-    pub fn try_borrow_mut_or<'c>(&'c self, mc: &Mutation<'gc>, init: impl FnOnce() -> T) -> Option<CellMut<'c, T>> {
+    pub fn try_borrow_mut_or<'c>(&'c self, mc: &Mutation<'scope>, init: impl FnOnce() -> T) -> Option<CellMut<'c, T>> {
         if self.state.get() != 0 {
             return None;
         }
@@ -187,7 +187,7 @@ impl<'gc, T: Trace + 'gc> GcCell<'gc, T> {
         Some(CellMut { state: &self.state, data: unsafe { &mut *snap.get().data.get() } })
     }
 
-    pub fn borrow_mut<'c>(&'c self, mc: &Mutation<'gc>) -> CellMut<'c, T> {
+    pub fn borrow_mut<'c>(&'c self, mc: &Mutation<'scope>) -> CellMut<'c, T> {
         self.try_borrow_mut(mc).expect("GcCell already borrowed")
     }
 
@@ -197,7 +197,7 @@ impl<'gc, T: Trace + 'gc> GcCell<'gc, T> {
     }
 }
 
-unsafe impl<'gc, T: Trace + 'gc> Trace for GcCell<'gc, T> {
+unsafe impl<'scope, T: Trace + 'scope> Trace for GcCell<'scope, T> {
     fn trace(&self, t: &mut Tracer<'_>) {
         self.snap.trace(t);
     }
@@ -207,7 +207,7 @@ unsafe impl<'gc, T: Trace + 'gc> Trace for GcCell<'gc, T> {
     }
 }
 
-impl<'gc, T: Trace + fmt::Debug + 'gc> fmt::Debug for GcCell<'gc, T> {
+impl<'scope, T: Trace + fmt::Debug + 'scope> fmt::Debug for GcCell<'scope, T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if !self.has_value() {
             return f.write_str("GcCell(<empty>)");
@@ -263,24 +263,24 @@ impl<T> Drop for CellMut<'_, T> {
     }
 }
 
-pub struct ValueCell<'gc>(WordSlot<'gc>);
+pub struct ValueCell<'scope>(WordSlot<'scope>);
 
-impl<'gc> ValueCell<'gc> {
-    pub fn new(v: Value<'gc>) -> Self {
+impl<'scope> ValueCell<'scope> {
+    pub fn new(v: Value<'scope>) -> Self {
         Self(WordSlot::new(v.bits()))
     }
 
     #[inline]
-    pub fn get(&self) -> Value<'gc> {
+    pub fn get(&self) -> Value<'scope> {
         unsafe { Value::from_bits(self.0.get()) }
     }
 
     #[inline]
-    pub fn set(&self, mc: &Mutation<'gc>, v: Value<'gc>) {
+    pub fn set(&self, mc: &Mutation<'scope>, v: Value<'scope>) {
         self.0.set(mc.mutator(), v.bits());
     }
 
-    pub fn set_mut(&mut self, v: Value<'gc>) {
+    pub fn set_mut(&mut self, v: Value<'scope>) {
         self.0.set_mut(v.bits());
     }
 }
@@ -301,18 +301,18 @@ impl fmt::Debug for ValueCell<'_> {
     }
 }
 
-pub struct Cow<'gc, T>(Slot<'gc, T>);
+pub struct Cow<'scope, T>(Slot<'scope, T>);
 
-impl<'gc, T: Trace + 'gc> Cow<'gc, T> {
-    pub fn new(mc: &Mutation<'gc>, t: T) -> Self {
+impl<'scope, T: Trace + 'scope> Cow<'scope, T> {
+    pub fn new(mc: &Mutation<'scope>, t: T) -> Self {
         Self(Slot::from(mc.alloc(t)))
     }
 
-    pub fn get(&self) -> &'gc T {
+    pub fn get(&self) -> &'scope T {
         self.0.get().expect("a Cow always holds a value").get()
     }
 
-    pub fn update_with<R>(&self, mc: &Mutation<'gc>, mut f: impl FnMut(&T) -> (T, R)) -> R {
+    pub fn update_with<R>(&self, mc: &Mutation<'scope>, mut f: impl FnMut(&T) -> (T, R)) -> R {
         let mut cur = self.0.get();
         loop {
             let (next, r) = f(cur.expect("a Cow always holds a value").get());
@@ -323,16 +323,16 @@ impl<'gc, T: Trace + 'gc> Cow<'gc, T> {
         }
     }
 
-    pub fn update(&self, mc: &Mutation<'gc>, mut f: impl FnMut(&T) -> T) {
+    pub fn update(&self, mc: &Mutation<'scope>, mut f: impl FnMut(&T) -> T) {
         self.update_with(mc, |t| (f(t), ()));
     }
 
-    pub fn set(&self, mc: &Mutation<'gc>, t: T) {
+    pub fn set(&self, mc: &Mutation<'scope>, t: T) {
         self.0.set(mc.mutator(), Some(mc.alloc(t)));
     }
 }
 
-unsafe impl<'gc, T: Trace + 'gc> Trace for Cow<'gc, T> {
+unsafe impl<'scope, T: Trace + 'scope> Trace for Cow<'scope, T> {
     fn trace(&self, t: &mut Tracer<'_>) {
         self.0.trace(t);
     }
@@ -342,12 +342,12 @@ unsafe impl<'gc, T: Trace + 'gc> Trace for Cow<'gc, T> {
     }
 }
 
-struct QNode<'gc, T> {
+struct QNode<'scope, T> {
     value: Option<T>,
-    next: Slot<'gc, QNode<'gc, T>>,
+    next: Slot<'scope, QNode<'scope, T>>,
 }
 
-unsafe impl<'gc, T: Trace + 'gc> Trace for QNode<'gc, T> {
+unsafe impl<'scope, T: Trace + 'scope> Trace for QNode<'scope, T> {
     fn trace(&self, t: &mut Tracer<'_>) {
         self.value.trace(t);
         self.next.trace(t);
@@ -359,22 +359,22 @@ unsafe impl<'gc, T: Trace + 'gc> Trace for QNode<'gc, T> {
     }
 }
 
-pub struct GcQueue<'gc, T> {
-    head: Slot<'gc, QNode<'gc, T>>,
-    tail: Slot<'gc, QNode<'gc, T>>,
+pub struct GcQueue<'scope, T> {
+    head: Slot<'scope, QNode<'scope, T>>,
+    tail: Slot<'scope, QNode<'scope, T>>,
 }
 
-impl<'gc, T: Trace + Clone + 'gc> GcQueue<'gc, T> {
-    pub fn new(mc: &Mutation<'gc>) -> Self {
+impl<'scope, T: Trace + Clone + 'scope> GcQueue<'scope, T> {
+    pub fn new(mc: &Mutation<'scope>) -> Self {
         let dummy = mc.alloc(QNode { value: None, next: Slot::default() });
         Self { head: Slot::from(dummy), tail: Slot::from(dummy) }
     }
 
-    fn node(s: &Slot<'gc, QNode<'gc, T>>) -> Gc<'gc, QNode<'gc, T>> {
+    fn node(s: &Slot<'scope, QNode<'scope, T>>) -> Gc<'scope, QNode<'scope, T>> {
         s.get().expect("the queue always has a dummy node")
     }
 
-    pub fn push(&self, mc: &Mutation<'gc>, value: T) {
+    pub fn push(&self, mc: &Mutation<'scope>, value: T) {
         let m = mc.mutator();
         let node = mc.alloc(QNode { value: Some(value), next: Slot::default() });
         loop {
@@ -393,7 +393,7 @@ impl<'gc, T: Trace + Clone + 'gc> GcQueue<'gc, T> {
         }
     }
 
-    pub fn pop(&self, mc: &Mutation<'gc>) -> Option<T> {
+    pub fn pop(&self, mc: &Mutation<'scope>) -> Option<T> {
         let m = mc.mutator();
         loop {
             let first = Self::node(&self.head);
@@ -415,7 +415,7 @@ impl<'gc, T: Trace + Clone + 'gc> GcQueue<'gc, T> {
     }
 }
 
-unsafe impl<'gc, T: Trace + 'gc> Trace for GcQueue<'gc, T> {
+unsafe impl<'scope, T: Trace + 'scope> Trace for GcQueue<'scope, T> {
     fn trace(&self, t: &mut Tracer<'_>) {
         self.head.trace(t);
         self.tail.trace(t);
@@ -467,44 +467,44 @@ macro_rules! leaf {
     )*};
 }
 
-pub trait CellExt<'gc, T> {
-    fn borrow(self) -> CellRef<'gc, T>;
-    fn try_borrow(self) -> Option<CellRef<'gc, T>>;
-    fn borrow_mut(self, mc: &Mutation<'gc>) -> CellMut<'gc, T>;
-    fn try_borrow_mut(self, mc: &Mutation<'gc>) -> Option<CellMut<'gc, T>>;
+pub trait CellExt<'scope, T> {
+    fn borrow(self) -> CellRef<'scope, T>;
+    fn try_borrow(self) -> Option<CellRef<'scope, T>>;
+    fn borrow_mut(self, mc: &Mutation<'scope>) -> CellMut<'scope, T>;
+    fn try_borrow_mut(self, mc: &Mutation<'scope>) -> Option<CellMut<'scope, T>>;
 }
 
-impl<'gc, T: Trace + 'gc> CellExt<'gc, T> for Gc<'gc, GcCell<'gc, T>> {
+impl<'scope, T: Trace + 'scope> CellExt<'scope, T> for Gc<'scope, GcCell<'scope, T>> {
     #[inline]
-    fn borrow(self) -> CellRef<'gc, T> {
+    fn borrow(self) -> CellRef<'scope, T> {
         self.get().borrow()
     }
 
     #[inline]
-    fn try_borrow(self) -> Option<CellRef<'gc, T>> {
+    fn try_borrow(self) -> Option<CellRef<'scope, T>> {
         self.get().try_borrow()
     }
 
     #[inline]
-    fn borrow_mut(self, mc: &Mutation<'gc>) -> CellMut<'gc, T> {
+    fn borrow_mut(self, mc: &Mutation<'scope>) -> CellMut<'scope, T> {
         self.get().borrow_mut(mc)
     }
 
     #[inline]
-    fn try_borrow_mut(self, mc: &Mutation<'gc>) -> Option<CellMut<'gc, T>> {
+    fn try_borrow_mut(self, mc: &Mutation<'scope>) -> Option<CellMut<'scope, T>> {
         self.get().try_borrow_mut(mc)
     }
 }
 
-pub trait Mutable<'gc>: Sized {
-    type Cell: Trace + 'gc;
+pub trait Mutable<'scope>: Sized {
+    type Cell: Trace + 'scope;
     fn cell(v: Self) -> Self::Cell;
     fn load(cell: &Self::Cell) -> Self;
-    fn store(cell: &Self::Cell, mc: &Mutation<'gc>, v: Self);
+    fn store(cell: &Self::Cell, mc: &Mutation<'scope>, v: Self);
 }
 
-impl<'gc> Mutable<'gc> for Value<'gc> {
-    type Cell = ValueCell<'gc>;
+impl<'scope> Mutable<'scope> for Value<'scope> {
+    type Cell = ValueCell<'scope>;
 
     fn cell(v: Self) -> Self::Cell {
         ValueCell::new(v)
@@ -516,13 +516,13 @@ impl<'gc> Mutable<'gc> for Value<'gc> {
     }
 
     #[inline]
-    fn store(cell: &Self::Cell, mc: &Mutation<'gc>, v: Self) {
+    fn store(cell: &Self::Cell, mc: &Mutation<'scope>, v: Self) {
         cell.set(mc, v);
     }
 }
 
-impl<'gc, T: Trace + 'gc> Mutable<'gc> for Option<Gc<'gc, T>> {
-    type Cell = Slot<'gc, T>;
+impl<'scope, T: Trace + 'scope> Mutable<'scope> for Option<Gc<'scope, T>> {
+    type Cell = Slot<'scope, T>;
 
     fn cell(v: Self) -> Self::Cell {
         Slot::from(v)
@@ -534,13 +534,13 @@ impl<'gc, T: Trace + 'gc> Mutable<'gc> for Option<Gc<'gc, T>> {
     }
 
     #[inline]
-    fn store(cell: &Self::Cell, mc: &Mutation<'gc>, v: Self) {
+    fn store(cell: &Self::Cell, mc: &Mutation<'scope>, v: Self) {
         cell.set(mc.mutator(), v);
     }
 }
 
-impl<'gc, T: Trace + 'gc> Mutable<'gc> for Gc<'gc, T> {
-    type Cell = Slot<'gc, T>;
+impl<'scope, T: Trace + 'scope> Mutable<'scope> for Gc<'scope, T> {
+    type Cell = Slot<'scope, T>;
 
     fn cell(v: Self) -> Self::Cell {
         Slot::from(v)
@@ -552,14 +552,14 @@ impl<'gc, T: Trace + 'gc> Mutable<'gc> for Gc<'gc, T> {
     }
 
     #[inline]
-    fn store(cell: &Self::Cell, mc: &Mutation<'gc>, v: Self) {
+    fn store(cell: &Self::Cell, mc: &Mutation<'scope>, v: Self) {
         cell.set(mc.mutator(), Some(v));
     }
 }
 
 macro_rules! mutable_scalar {
     ($($t:ty),* $(,)?) => {$(
-        impl<'gc> Mutable<'gc> for $t {
+        impl<'scope> Mutable<'scope> for $t {
             type Cell = IsoCell<$t>;
 
             fn cell(v: Self) -> Self::Cell {
@@ -572,7 +572,7 @@ macro_rules! mutable_scalar {
             }
 
             #[inline]
-            fn store(cell: &Self::Cell, _: &Mutation<'gc>, v: Self) {
+            fn store(cell: &Self::Cell, _: &Mutation<'scope>, v: Self) {
                 cell.set(v);
             }
         }

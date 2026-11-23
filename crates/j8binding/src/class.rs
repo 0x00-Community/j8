@@ -18,7 +18,7 @@ pub trait Class: Any + Send + Sync + Sized {
     const CONSTRUCTOR: Option<(NativeFn, u32)>;
     const MEMBERS: &'static [Member];
 
-    fn parent<'gc>(a: &mut Agent<'gc, '_>, target: JsObject<'gc>) -> Option<ClassHandle<'gc>> {
+    fn parent<'scope>(a: &mut Agent<'scope, '_>, target: JsObject<'scope>) -> Option<ClassHandle<'scope>> {
         let _ = (a, target);
         None
     }
@@ -33,7 +33,7 @@ pub trait Class: Any + Send + Sync + Sized {
         (ty == TypeId::of::<Self>()).then_some(me as &mut dyn Any)
     }
 
-    fn install<'gc>(a: &mut Agent<'gc, '_>, target: JsObject<'gc>) -> ClassHandle<'gc> {
+    fn install<'scope>(a: &mut Agent<'scope, '_>, target: JsObject<'scope>) -> ClassHandle<'scope> {
         let (f, length) = Self::CONSTRUCTOR.unwrap_or((Glue::illegal_constructor, 0));
         let ctor = a.realm.named_native(a.mc, f, Self::NAME, length);
         if let ObjectKind::Native(n) = &mut ctor.borrow_mut(a.mc).kind {
@@ -60,7 +60,7 @@ pub trait Object {
     const NAME: &'static str;
     const MEMBERS: &'static [Member];
 
-    fn install<'gc>(a: &mut Agent<'gc, '_>, target: JsObject<'gc>) -> JsObject<'gc> {
+    fn install<'scope>(a: &mut Agent<'scope, '_>, target: JsObject<'scope>) -> JsObject<'scope> {
         let o = a.object();
         for m in Self::MEMBERS {
             Glue::member(a, o, o, m);
@@ -71,13 +71,13 @@ pub trait Object {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct ClassHandle<'gc> {
-    pub ctor: JsObject<'gc>,
-    pub proto: JsObject<'gc>,
+pub struct ClassHandle<'scope> {
+    pub ctor: JsObject<'scope>,
+    pub proto: JsObject<'scope>,
 }
 
-impl<'gc> ClassHandle<'gc> {
-    pub fn instance<T: Class>(&self, a: &Agent<'gc, '_>, value: T) -> JsObject<'gc> {
+impl<'scope> ClassHandle<'scope> {
+    pub fn instance<T: Class>(&self, a: &Agent<'scope, '_>, value: T) -> JsObject<'scope> {
         Glue::wrap(a, value, self.proto)
     }
 }
@@ -91,7 +91,7 @@ struct Hosted {
 pub struct Glue;
 
 impl Glue {
-    fn member<'gc>(a: &Agent<'gc, '_>, ctor: JsObject<'gc>, proto: JsObject<'gc>, m: &Member) {
+    fn member<'scope>(a: &Agent<'scope, '_>, ctor: JsObject<'scope>, proto: JsObject<'scope>, m: &Member) {
         match *m {
             Member::Method { name, f, length } => a.realm.method(a.mc, proto, name, f, length),
             Member::Static { name, f, length } => a.realm.method(a.mc, ctor, name, f, length),
@@ -104,31 +104,31 @@ impl Glue {
     }
 
     #[doc(hidden)]
-    pub fn function<'gc>(a: &Agent<'gc, '_>, target: JsObject<'gc>, name: &str, f: NativeFn, length: u32) -> JsObject<'gc> {
+    pub fn function<'scope>(a: &Agent<'scope, '_>, target: JsObject<'scope>, name: &str, f: NativeFn, length: u32) -> JsObject<'scope> {
         let func = a.realm.named_native(a.mc, f, name, length);
         target.borrow_mut(a.mc).define(name, Property::hidden(func.into()));
         func
     }
 
     #[doc(hidden)]
-    pub fn illegal_constructor<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    pub fn illegal_constructor<'scope>(a: &mut Agent<'scope, '_>, _: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Err(a.throw(ErrorKind::Type, "Illegal constructor"))
     }
 
     #[doc(hidden)]
-    pub fn arg<'gc>(args: &[Value<'gc>], i: usize) -> Value<'gc> {
+    pub fn arg<'scope>(args: &[Value<'scope>], i: usize) -> Value<'scope> {
         args.get(i).copied().unwrap_or_default()
     }
 
     #[doc(hidden)]
-    pub fn wrap<'gc, T: Class>(a: &Agent<'gc, '_>, value: T, proto: JsObject<'gc>) -> JsObject<'gc> {
+    pub fn wrap<'scope, T: Class>(a: &Agent<'scope, '_>, value: T, proto: JsObject<'scope>) -> JsObject<'scope> {
         let host = Hosted { value: Box::new(value), upcast: T::upcast, upcast_mut: T::upcast_mut };
         let data = a.mc.alloc(Static(AtomicRefCell::new(Box::new(host) as Box<dyn Any + Send + Sync>)));
         ObjectData { kind: ObjectKind::Host(data), proto: Some(proto), ..ObjectData::default() }.alloc(a.mc)
     }
 
     #[doc(hidden)]
-    pub fn construct<'gc, T: Class>(a: &mut Agent<'gc, '_>, value: Result<T, Error>) -> Result<Value<'gc>, Error> {
+    pub fn construct<'scope, T: Class>(a: &mut Agent<'scope, '_>, value: Result<T, Error>) -> Result<Value<'scope>, Error> {
         let value = value?;
         let proto = a.proto_from_ctor(a.new_target, a.realm.object_proto)?;
         Ok(Self::wrap(a, value, proto).into())
@@ -143,7 +143,7 @@ impl Glue {
     }
 
     #[doc(hidden)]
-    pub fn host<'gc, T: Class>(a: &Agent<'gc, '_>, this: Value<'gc>) -> Result<HostData<'gc>, Error> {
+    pub fn host<'scope, T: Class>(a: &Agent<'scope, '_>, this: Value<'scope>) -> Result<HostData<'scope>, Error> {
         let data = match this.kind() {
             ValueKind::Object(o) => match o.borrow().kind {
                 ObjectKind::Host(h) => Some(h),
@@ -181,7 +181,7 @@ impl Glue {
     }
 
     #[doc(hidden)]
-    pub fn parent<'gc, P: Class>(a: &mut Agent<'gc, '_>, target: JsObject<'gc>) -> ClassHandle<'gc> {
+    pub fn parent<'scope, P: Class>(a: &mut Agent<'scope, '_>, target: JsObject<'scope>) -> ClassHandle<'scope> {
         let ctor = target.borrow().own(a.mc, P::NAME).and_then(Value::as_object);
         let proto = ctor.and_then(|c| c.borrow().own(a.mc, "prototype")).and_then(Value::as_object);
         match (ctor, proto) {

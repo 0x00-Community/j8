@@ -31,7 +31,7 @@ use j8framework::{Intrinsics, JsObject, Realm, Value};
 pub struct Builtins;
 
 impl Intrinsics for Builtins {
-    fn install<'gc>(&self, mc: &Mutation<'gc>, realm: &Realm<'gc>) {
+    fn install<'scope>(&self, mc: &Mutation<'scope>, realm: &Realm<'scope>) {
         let mut b = Installer { mc, realm };
         b.global();
         b.object();
@@ -60,17 +60,17 @@ impl Intrinsics for Builtins {
     }
 }
 
-struct Installer<'r, 'gc> {
-    mc: &'r Mutation<'gc>,
-    realm: &'r Realm<'gc>,
+struct Installer<'r, 'scope> {
+    mc: &'r Mutation<'scope>,
+    realm: &'r Realm<'scope>,
 }
 
-impl<'gc> Installer<'_, 'gc> {
-    fn set(&self, target: JsObject<'gc>, name: &str, v: Value<'gc>) {
+impl<'scope> Installer<'_, 'scope> {
+    fn set(&self, target: JsObject<'scope>, name: &str, v: Value<'scope>) {
         target.borrow_mut(self.mc).define(name, j8framework::Property::hidden(v));
     }
 
-    fn method(&self, target: JsObject<'gc>, name: &str, f: j8framework::NativeFn, n: u32) {
+    fn method(&self, target: JsObject<'scope>, name: &str, f: j8framework::NativeFn, n: u32) {
         self.realm.method(self.mc, target, name, f, n);
     }
 
@@ -82,7 +82,7 @@ impl<'gc> Installer<'_, 'gc> {
         self.realm.add_fast_inline(self.mc, f, call, out);
     }
 
-    fn constructor(&self, name: &str, f: j8framework::NativeFn, proto: JsObject<'gc>, n: u32) -> JsObject<'gc> {
+    fn constructor(&self, name: &str, f: j8framework::NativeFn, proto: JsObject<'scope>, n: u32) -> JsObject<'scope> {
         let ctor = self.realm.named_native(self.mc, f, name, n);
         if let j8framework::ObjectKind::Native(native) = &mut ctor.borrow_mut(self.mc).kind {
             native.constructor = true;
@@ -127,32 +127,32 @@ impl<'gc> Installer<'_, 'gc> {
         }
     }
 
-    fn not_constructor(&self, f: JsObject<'gc>) {
+    fn not_constructor(&self, f: JsObject<'scope>) {
         if let j8framework::ObjectKind::Native(native) = &mut f.borrow_mut(self.mc).kind {
             native.constructor = false;
         }
     }
 
-    fn getter(&self, target: JsObject<'gc>, name: &str, f: j8framework::NativeFn) {
+    fn getter(&self, target: JsObject<'scope>, name: &str, f: j8framework::NativeFn) {
         let g = self.realm.named_native(self.mc, f, &alloc::format!("get {name}"), 0);
         target.borrow_mut(self.mc).define(name, j8framework::Property { slot: j8framework::Slot::Accessor { get: Some(g), set: None }, enumerable: false, writable: false, configurable: true });
     }
 
-    fn text(&self, s: &str) -> Value<'gc> {
+    fn text(&self, s: &str) -> Value<'scope> {
         Value::String(j8framework::JsStr::alloc(self.mc, s))
     }
 
-    fn plain(&self) -> JsObject<'gc> {
+    fn plain(&self) -> JsObject<'scope> {
         j8framework::ObjectData { proto: Some(self.realm.object_proto), ..j8framework::ObjectData::default() }.alloc(self.mc)
     }
 }
 
-trait Args<'gc> {
-    fn at(&self, i: usize) -> Value<'gc>;
+trait Args<'scope> {
+    fn at(&self, i: usize) -> Value<'scope>;
 }
 
-impl<'gc> Args<'gc> for [Value<'gc>] {
-    fn at(&self, i: usize) -> Value<'gc> {
+impl<'scope> Args<'scope> for [Value<'scope>] {
+    fn at(&self, i: usize) -> Value<'scope> {
         self.get(i).copied().unwrap_or_default()
     }
 }

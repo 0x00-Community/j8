@@ -35,7 +35,7 @@ impl Counter {
         items.0.len()
     }
 
-    fn describe<'gc>(&self, a: &mut Agent<'gc, '_>, label: String) -> Result<Value<'gc>, Error> {
+    fn describe<'scope>(&self, a: &mut Agent<'scope, '_>, label: String) -> Result<Value<'scope>, Error> {
         Ok(a.string(&format!("{label}={}", self.n)).into())
     }
 }

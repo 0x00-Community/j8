@@ -9,7 +9,7 @@ use crate::{CellMut, CellRef, Collect, Gc, GcCell, GcSlot, Mutation, ValueCell};
 
 use crate::{Agent, Backing, Error, FuncId, Key, Value};
 
-pub type JsString<'gc> = Gc<'gc, crate::text::JsStr<'gc>>;
+pub type JsString<'scope> = Gc<'scope, crate::text::JsStr<'scope>>;
 
 #[derive(Debug, Collect)]
 #[collect(require_static)]
@@ -18,37 +18,37 @@ pub struct SymbolData {
     pub private: bool,
 }
 
-pub type JsSymbol<'gc> = Gc<'gc, SymbolData>;
+pub type JsSymbol<'scope> = Gc<'scope, SymbolData>;
 
 #[derive(Debug, Collect)]
 #[collect(require_static)]
 pub struct BigIntData(pub num_bigint::BigInt);
 
-pub type JsBigInt<'gc> = Gc<'gc, BigIntData>;
+pub type JsBigInt<'scope> = Gc<'scope, BigIntData>;
 
 #[derive(Clone, Copy, Debug, Collect)]
 #[collect(no_drop)]
-pub struct RegExpData<'gc> {
-    pub source: JsString<'gc>,
-    pub flags: JsString<'gc>,
-    pub compiled: Gc<'gc, crate::Static<Box<dyn core::any::Any + Send + Sync>>>,
+pub struct RegExpData<'scope> {
+    pub source: JsString<'scope>,
+    pub flags: JsString<'scope>,
+    pub compiled: Gc<'scope, crate::Static<Box<dyn core::any::Any + Send + Sync>>>,
     pub legacy: bool,
 }
 
-pub type JsObject<'gc> = Gc<'gc, Object<'gc>>;
+pub type JsObject<'scope> = Gc<'scope, Object<'scope>>;
 
-pub type JsEnv<'gc> = Gc<'gc, Env<'gc>>;
+pub type JsEnv<'scope> = Gc<'scope, Env<'scope>>;
 
-pub type NativeFn = for<'gc, 'x> fn(&mut Agent<'gc, 'x>, Value<'gc>, &[Value<'gc>]) -> Result<Value<'gc>, Error>;
+pub type NativeFn = for<'scope, 'x> fn(&mut Agent<'scope, 'x>, Value<'scope>, &[Value<'scope>]) -> Result<Value<'scope>, Error>;
 
 #[derive(Debug, Collect)]
 #[collect(no_drop)]
-pub struct Env<'gc> {
-    slots: EnvSlots<'gc>,
-    pub parent: Option<JsEnv<'gc>>,
+pub struct Env<'scope> {
+    slots: EnvSlots<'scope>,
+    pub parent: Option<JsEnv<'scope>>,
     #[collect(require_static)]
     pub shape: Option<ShapeId>,
-    pub extension: Option<JsObject<'gc>>,
+    pub extension: Option<JsObject<'scope>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -59,13 +59,13 @@ const INLINE_SLOTS: usize = 4;
 #[derive(Debug, Collect)]
 #[collect(no_drop)]
 #[repr(C, u8)]
-enum EnvSlots<'gc> {
-    Inline { len: u8, cells: [ValueCell<'gc>; INLINE_SLOTS] },
-    Boxed(Box<[ValueCell<'gc>]>),
+enum EnvSlots<'scope> {
+    Inline { len: u8, cells: [ValueCell<'scope>; INLINE_SLOTS] },
+    Boxed(Box<[ValueCell<'scope>]>),
 }
 
-impl<'gc> EnvSlots<'gc> {
-    fn new(n: usize, mut init: impl FnMut(usize) -> Value<'gc>) -> Self {
+impl<'scope> EnvSlots<'scope> {
+    fn new(n: usize, mut init: impl FnMut(usize) -> Value<'scope>) -> Self {
         match u8::try_from(n) {
             Ok(len) if n <= INLINE_SLOTS => Self::Inline { len, cells: core::array::from_fn(|i| ValueCell::new(if i < n { init(i) } else { Value::Undefined })) },
             _ => Self::Boxed((0..n).map(|i| ValueCell::new(init(i))).collect()),
@@ -73,7 +73,7 @@ impl<'gc> EnvSlots<'gc> {
     }
 
     #[inline]
-    fn cells(&self) -> &[ValueCell<'gc>] {
+    fn cells(&self) -> &[ValueCell<'scope>] {
         match self {
             Self::Inline { len, cells } => &cells[..usize::from(*len)],
             Self::Boxed(b) => b,
@@ -114,17 +114,17 @@ impl ContextShape {
     }
 }
 
-impl<'gc> Env<'gc> {
+impl<'scope> Env<'scope> {
     pub const SLOTS_OFFSET: usize = core::mem::offset_of!(Env<'static>, slots);
     pub const PARENT_OFFSET: usize = core::mem::offset_of!(Env<'static>, parent);
 
-    pub fn new(slots: Vec<Value<'gc>>, parent: Option<JsEnv<'gc>>) -> Self {
+    pub fn new(slots: Vec<Value<'scope>>, parent: Option<JsEnv<'scope>>) -> Self {
         let n = slots.len();
         let mut values = slots.into_iter();
         Self { slots: EnvSlots::new(n, |_| values.next().unwrap_or_default()), parent, shape: None, extension: None }
     }
 
-    pub fn context(n: usize, init: Value<'gc>, parent: Option<JsEnv<'gc>>, shape: Option<ShapeId>, extension: Option<JsObject<'gc>>) -> Self {
+    pub fn context(n: usize, init: Value<'scope>, parent: Option<JsEnv<'scope>>, shape: Option<ShapeId>, extension: Option<JsObject<'scope>>) -> Self {
         Self { slots: EnvSlots::new(n, |_| init), parent, shape, extension }
     }
 
@@ -136,35 +136,35 @@ impl<'gc> Env<'gc> {
         self.slots.cells().is_empty()
     }
 
-    pub fn alloc(self, mc: &Mutation<'gc>) -> JsEnv<'gc> {
+    pub fn alloc(self, mc: &Mutation<'scope>) -> JsEnv<'scope> {
         mc.alloc(self)
     }
 
     #[inline]
-    pub fn load(&self, i: usize) -> Value<'gc> {
+    pub fn load(&self, i: usize) -> Value<'scope> {
         self.slots.cells()[i].get()
     }
 
-    pub fn values(&self) -> Vec<Value<'gc>> {
+    pub fn values(&self) -> Vec<Value<'scope>> {
         self.slots.cells().iter().map(ValueCell::get).collect()
     }
 
     #[inline]
-    pub fn set(env: JsEnv<'gc>, mc: &Mutation<'gc>, i: usize, v: Value<'gc>) {
+    pub fn set(env: JsEnv<'scope>, mc: &Mutation<'scope>, i: usize, v: Value<'scope>) {
         env.get().slots.cells()[i].set(mc, v);
     }
 }
 
 #[derive(Clone, Copy, Debug, Collect)]
 #[collect(no_drop)]
-pub struct Closure<'gc> {
+pub struct Closure<'scope> {
     pub func: FuncId,
-    pub env: Option<JsEnv<'gc>>,
+    pub env: Option<JsEnv<'scope>>,
     pub code: Option<Code>,
 }
 
-impl<'gc> Closure<'gc> {
-    pub fn new(func: FuncId, env: Option<JsEnv<'gc>>) -> Self {
+impl<'scope> Closure<'scope> {
+    pub fn new(func: FuncId, env: Option<JsEnv<'scope>>) -> Self {
         Self { func, env, code: None }
     }
 }
@@ -191,7 +191,7 @@ impl Code {
         Self(id)
     }
 
-    fn erased<'gc>(self) -> paragc::Handle<'gc, crate::Erased> {
+    fn erased<'scope>(self) -> paragc::Handle<'scope, crate::Erased> {
         unsafe { paragc::Handle::from_id(self.0) }
     }
 
@@ -218,26 +218,26 @@ unsafe impl crate::Trace for Code {
 
 #[derive(Clone, Copy, Debug, Collect)]
 #[collect(no_drop)]
-pub enum Slot<'gc> {
-    Data(Value<'gc>),
-    Accessor { get: Option<JsObject<'gc>>, set: Option<JsObject<'gc>> },
+pub enum Slot<'scope> {
+    Data(Value<'scope>),
+    Accessor { get: Option<JsObject<'scope>>, set: Option<JsObject<'scope>> },
 }
 
 #[derive(Clone, Copy, Debug, Collect)]
-pub struct Accessor<'gc> {
-    pub get: Option<JsObject<'gc>>,
-    pub set: Option<JsObject<'gc>>,
+pub struct Accessor<'scope> {
+    pub get: Option<JsObject<'scope>>,
+    pub set: Option<JsObject<'scope>>,
 }
 
-impl<'gc> Slot<'gc> {
-    pub fn encode(self, mc: &Mutation<'gc>) -> Value<'gc> {
+impl<'scope> Slot<'scope> {
+    pub fn encode(self, mc: &Mutation<'scope>) -> Value<'scope> {
         match self {
             Slot::Data(v) => v,
             Slot::Accessor { get, set } => Value::accessor(mc.alloc(Accessor { get, set })),
         }
     }
 
-    pub fn decode(v: Value<'gc>) -> Self {
+    pub fn decode(v: Value<'scope>) -> Self {
         match v.as_accessor() {
             Some(a) => Slot::Accessor { get: a.get().get, set: a.get().set },
             None => Slot::Data(v),
@@ -247,23 +247,23 @@ impl<'gc> Slot<'gc> {
 
 #[derive(Clone, Copy, Debug, Collect)]
 #[collect(no_drop)]
-pub struct Property<'gc> {
-    pub slot: Slot<'gc>,
+pub struct Property<'scope> {
+    pub slot: Slot<'scope>,
     pub enumerable: bool,
     pub writable: bool,
     pub configurable: bool,
 }
 
-impl<'gc> Property<'gc> {
-    pub fn data(v: Value<'gc>) -> Self {
+impl<'scope> Property<'scope> {
+    pub fn data(v: Value<'scope>) -> Self {
         Self { slot: Slot::Data(v), enumerable: true, writable: true, configurable: true }
     }
 
-    pub fn hidden(v: Value<'gc>) -> Self {
+    pub fn hidden(v: Value<'scope>) -> Self {
         Self { enumerable: false, ..Self::data(v) }
     }
 
-    pub fn value(&self) -> Option<Value<'gc>> {
+    pub fn value(&self) -> Option<Value<'scope>> {
         match self.slot {
             Slot::Data(v) => Some(v),
             Slot::Accessor { .. } => None,
@@ -307,10 +307,10 @@ const _: () = assert!(core::mem::offset_of!(Native, f) == 0);
 
 #[derive(Debug, Collect)]
 #[collect(no_drop)]
-pub struct Bound<'gc> {
-    pub target: Value<'gc>,
-    pub this: Value<'gc>,
-    pub args: Vec<Value<'gc>>,
+pub struct Bound<'scope> {
+    pub target: Value<'scope>,
+    pub this: Value<'scope>,
+    pub args: Vec<Value<'scope>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Collect)]
@@ -323,18 +323,18 @@ pub enum IterKind {
 
 #[derive(Debug, Collect)]
 #[collect(no_drop)]
-pub enum IteratorState<'gc> {
-    Array { target: Option<Value<'gc>>, index: usize, kind: IterKind },
-    String { s: JsString<'gc>, pos: usize },
+pub enum IteratorState<'scope> {
+    Array { target: Option<Value<'scope>>, index: usize, kind: IterKind },
+    String { s: JsString<'scope>, pos: usize },
 }
 
 #[derive(Debug, Collect)]
 #[collect(no_drop)]
-pub struct Suspended<'gc> {
-    pub closure: Value<'gc>,
-    pub params: Vec<Value<'gc>>,
-    pub regs: Vec<Value<'gc>>,
-    pub context: Option<JsEnv<'gc>>,
+pub struct Suspended<'scope> {
+    pub closure: Value<'scope>,
+    pub params: Vec<Value<'scope>>,
+    pub regs: Vec<Value<'scope>>,
+    pub context: Option<JsEnv<'scope>>,
     pub continuation: u32,
 }
 
@@ -348,19 +348,19 @@ pub enum CoroutineState {
 
 #[derive(Debug, Collect)]
 #[collect(no_drop)]
-pub struct Coroutine<'gc> {
+pub struct Coroutine<'scope> {
     pub state: CoroutineState,
-    pub frame: Suspended<'gc>,
+    pub frame: Suspended<'scope>,
     pub mode: crate::Resume,
-    pub input: Value<'gc>,
-    pub waiting: Waiting<'gc>,
-    pub settlement: Settlement<'gc>,
-    pub promise: Option<JsObject<'gc>>,
-    pub requests: Option<alloc::collections::VecDeque<Request<'gc>>>,
+    pub input: Value<'scope>,
+    pub waiting: Waiting<'scope>,
+    pub settlement: Settlement<'scope>,
+    pub promise: Option<JsObject<'scope>>,
+    pub requests: Option<alloc::collections::VecDeque<Request<'scope>>>,
 }
 
-impl<'gc> Coroutine<'gc> {
-    pub fn new(closure: Value<'gc>, promise: Option<JsObject<'gc>>, async_generator: bool) -> Self {
+impl<'scope> Coroutine<'scope> {
+    pub fn new(closure: Value<'scope>, promise: Option<JsObject<'scope>>, async_generator: bool) -> Self {
         Self {
             state: CoroutineState::Running,
             frame: Suspended { closure, params: Vec::new(), regs: Vec::new(), context: None, continuation: 0 },
@@ -376,44 +376,44 @@ impl<'gc> Coroutine<'gc> {
 
 #[derive(Clone, Copy, Debug, Collect)]
 #[collect(no_drop)]
-pub enum Waiting<'gc> {
+pub enum Waiting<'scope> {
     Nothing,
-    Await(Value<'gc>),
-    Yield(Value<'gc>),
+    Await(Value<'scope>),
+    Yield(Value<'scope>),
     Return,
     Rethrow,
 }
 
 #[derive(Clone, Copy, Debug, Collect)]
 #[collect(no_drop)]
-pub enum Settlement<'gc> {
+pub enum Settlement<'scope> {
     Nothing,
-    Resolved(Value<'gc>),
-    Rejected(Value<'gc>),
+    Resolved(Value<'scope>),
+    Rejected(Value<'scope>),
 }
 
 #[derive(Clone, Copy, Debug, Collect)]
 #[collect(no_drop)]
-pub struct Request<'gc> {
+pub struct Request<'scope> {
     pub mode: crate::Resume,
-    pub value: Value<'gc>,
-    pub promise: JsObject<'gc>,
+    pub value: Value<'scope>,
+    pub promise: JsObject<'scope>,
 }
 
 #[derive(Clone, Copy, Debug, Collect)]
 #[collect(no_drop)]
-pub enum Settled<'gc> {
+pub enum Settled<'scope> {
     Pending,
-    Fulfilled(Value<'gc>),
-    Rejected(Value<'gc>),
+    Fulfilled(Value<'scope>),
+    Rejected(Value<'scope>),
 }
 
 #[derive(Clone, Copy, Debug, Collect)]
 #[collect(no_drop)]
-pub enum Reaction<'gc> {
-    Then { on_fulfilled: Value<'gc>, on_rejected: Value<'gc>, capability: Option<Capability<'gc>> },
-    Await { coroutine: JsObject<'gc> },
-    Host { hook: HostHook<'gc> },
+pub enum Reaction<'scope> {
+    Then { on_fulfilled: Value<'scope>, on_rejected: Value<'scope>, capability: Option<Capability<'scope>> },
+    Await { coroutine: JsObject<'scope> },
+    Host { hook: HostHook<'scope> },
 }
 
 pub struct HostReaction(pub Box<HostReactionFn>);
@@ -432,21 +432,21 @@ impl core::fmt::Debug for HostReaction {
     }
 }
 
-pub type HostHook<'gc> = Gc<'gc, crate::Static<j8lockfree::AtomicRefCell<Option<HostReaction>>>>;
+pub type HostHook<'scope> = Gc<'scope, crate::Static<j8lockfree::AtomicRefCell<Option<HostReaction>>>>;
 
 #[derive(Clone, Copy, Debug, Collect)]
 #[collect(no_drop)]
-pub struct Capability<'gc> {
-    pub promise: Value<'gc>,
-    pub resolve: Value<'gc>,
-    pub reject: Value<'gc>,
+pub struct Capability<'scope> {
+    pub promise: Value<'scope>,
+    pub resolve: Value<'scope>,
+    pub reject: Value<'scope>,
 }
 
 #[derive(Clone, Copy, Debug, Collect)]
 #[collect(no_drop)]
-pub enum Job<'gc> {
-    Reaction { reaction: Reaction<'gc>, value: Value<'gc>, rejected: bool },
-    Thenable { promise: JsObject<'gc>, thenable: Value<'gc>, then: Value<'gc> },
+pub enum Job<'scope> {
+    Reaction { reaction: Reaction<'scope>, value: Value<'scope>, rejected: bool },
+    Thenable { promise: JsObject<'scope>, thenable: Value<'scope>, then: Value<'scope> },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -477,8 +477,8 @@ impl From<Value<'_>> for MapKey {
 }
 
 #[derive(Debug)]
-pub struct Collection<'gc> {
-    entries: Vec<Option<(Value<'gc>, Value<'gc>)>>,
+pub struct Collection<'scope> {
+    entries: Vec<Option<(Value<'scope>, Value<'scope>)>>,
     index: crate::Static<hashbrown::HashMap<MapKey, usize, core::hash::BuildHasherDefault<rustc_hash::FxHasher>>>,
     pub size: usize,
     pub weak: bool,
@@ -506,25 +506,25 @@ unsafe impl crate::Trace for Collection<'_> {
     }
 }
 
-impl<'gc> Collection<'gc> {
+impl<'scope> Collection<'scope> {
     pub fn new(weak: bool) -> Self {
         Self { entries: Vec::new(), index: crate::Static(hashbrown::HashMap::default()), size: 0, weak }
     }
 
-    pub fn entries(&self) -> &[Option<(Value<'gc>, Value<'gc>)>] {
+    pub fn entries(&self) -> &[Option<(Value<'scope>, Value<'scope>)>] {
         &self.entries
     }
 
-    pub fn get(&self, key: Value<'gc>) -> Option<Value<'gc>> {
+    pub fn get(&self, key: Value<'scope>) -> Option<Value<'scope>> {
         let i = *self.index.0.get(&MapKey::from(key))?;
         self.entries[i].map(|(_, v)| v)
     }
 
-    pub fn has(&self, key: Value<'gc>) -> bool {
+    pub fn has(&self, key: Value<'scope>) -> bool {
         self.index.0.contains_key(&MapKey::from(key))
     }
 
-    pub fn set(&mut self, key: Value<'gc>, value: Value<'gc>) {
+    pub fn set(&mut self, key: Value<'scope>, value: Value<'scope>) {
         let key = match key.kind() {
             ValueKind::Number(x) => Value::Number(x + 0.0),
             k => k.into(),
@@ -542,7 +542,7 @@ impl<'gc> Collection<'gc> {
         }
     }
 
-    pub fn delete(&mut self, key: Value<'gc>) -> bool {
+    pub fn delete(&mut self, key: Value<'scope>) -> bool {
         match self.index.0.remove(&MapKey::from(key)) {
             Some(i) => {
                 self.entries[i] = None;
@@ -560,14 +560,14 @@ impl<'gc> Collection<'gc> {
     }
 }
 
-pub type ClosureFn = for<'gc, 'x> fn(&mut Agent<'gc, 'x>, JsObject<'gc>, Value<'gc>, &[Value<'gc>]) -> Result<Value<'gc>, Error>;
+pub type ClosureFn = for<'scope, 'x> fn(&mut Agent<'scope, 'x>, JsObject<'scope>, Value<'scope>, &[Value<'scope>]) -> Result<Value<'scope>, Error>;
 
 #[derive(Collect)]
 #[collect(no_drop)]
-pub struct NativeClosure<'gc> {
+pub struct NativeClosure<'scope> {
     #[collect(require_static)]
     pub f: ClosureFn,
-    pub slots: Vec<Value<'gc>>,
+    pub slots: Vec<Value<'scope>>,
     #[collect(require_static)]
     pub constructor: bool,
 }
@@ -580,9 +580,9 @@ impl fmt::Debug for NativeClosure<'_> {
 
 #[derive(Clone, Copy, Debug, Collect)]
 #[collect(no_drop)]
-pub struct ProxyData<'gc> {
-    pub target: Option<JsObject<'gc>>,
-    pub handler: Option<JsObject<'gc>>,
+pub struct ProxyData<'scope> {
+    pub target: Option<JsObject<'scope>>,
+    pub handler: Option<JsObject<'scope>>,
     pub callable: bool,
     pub constructor: bool,
 }
@@ -608,14 +608,14 @@ pub enum HelperState {
 
 #[derive(Clone, Copy, Debug, Collect)]
 #[collect(no_drop)]
-pub struct IteratorHelper<'gc> {
+pub struct IteratorHelper<'scope> {
     pub kind: HelperKind,
     pub state: HelperState,
-    pub underlying: crate::IterRecord<'gc>,
-    pub f: Value<'gc>,
+    pub underlying: crate::IterRecord<'scope>,
+    pub f: Value<'scope>,
     pub remaining: f64,
     pub counter: f64,
-    pub inner: Option<crate::IterRecord<'gc>>,
+    pub inner: Option<crate::IterRecord<'scope>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Collect)]
@@ -708,56 +708,56 @@ pub struct BufferData {
 
 #[derive(Clone, Copy, Debug, Collect)]
 #[collect(no_drop)]
-pub struct ViewData<'gc> {
-    pub buffer: JsObject<'gc>,
+pub struct ViewData<'scope> {
+    pub buffer: JsObject<'scope>,
     pub offset: usize,
     pub length: Option<usize>,
 }
 
 #[derive(Clone, Debug, Collect)]
 #[collect(no_drop)]
-pub struct ArgumentsMap<'gc> {
-    pub env: JsEnv<'gc>,
+pub struct ArgumentsMap<'scope> {
+    pub env: JsEnv<'scope>,
     pub slots: Vec<Option<u16>>,
 }
 
-pub type HostData<'gc> = Gc<'gc, crate::Static<j8lockfree::AtomicRefCell<Box<dyn core::any::Any + Send + Sync>>>>;
+pub type HostData<'scope> = Gc<'scope, crate::Static<j8lockfree::AtomicRefCell<Box<dyn core::any::Any + Send + Sync>>>>;
 
 #[derive(Debug, Default, Collect)]
 #[collect(no_drop)]
-pub enum ObjectKind<'gc> {
+pub enum ObjectKind<'scope> {
     #[default]
     Ordinary,
-    Arguments(Option<ArgumentsMap<'gc>>),
+    Arguments(Option<ArgumentsMap<'scope>>),
     Error,
     Array,
-    Function(Closure<'gc>),
+    Function(Closure<'scope>),
     Native(Native),
-    Bound(Box<Bound<'gc>>),
-    Iterator(IteratorState<'gc>),
-    Coroutine(Box<Coroutine<'gc>>),
-    Promise { state: Settled<'gc>, reactions: Vec<Reaction<'gc>> },
-    Resolver { promise: JsObject<'gc>, reject: bool, done: Gc<'gc, core::sync::atomic::AtomicBool> },
-    RegExp(RegExpData<'gc>),
-    Primitive(Value<'gc>),
-    Map(Box<Collection<'gc>>),
-    Set(Box<Collection<'gc>>),
-    CollectionIterator { target: Option<JsObject<'gc>>, index: usize, kind: IterKind, set: bool },
-    NativeClosure(NativeClosure<'gc>),
-    Proxy(ProxyData<'gc>),
-    IteratorHelper(Box<IteratorHelper<'gc>>),
-    WrappedIterator(crate::IterRecord<'gc>),
-    AccessorPair { get: Option<JsObject<'gc>>, set: Option<JsObject<'gc>> },
-    AsyncFromSyncIterator(crate::IterRecord<'gc>),
+    Bound(Box<Bound<'scope>>),
+    Iterator(IteratorState<'scope>),
+    Coroutine(Box<Coroutine<'scope>>),
+    Promise { state: Settled<'scope>, reactions: Vec<Reaction<'scope>> },
+    Resolver { promise: JsObject<'scope>, reject: bool, done: Gc<'scope, core::sync::atomic::AtomicBool> },
+    RegExp(RegExpData<'scope>),
+    Primitive(Value<'scope>),
+    Map(Box<Collection<'scope>>),
+    Set(Box<Collection<'scope>>),
+    CollectionIterator { target: Option<JsObject<'scope>>, index: usize, kind: IterKind, set: bool },
+    NativeClosure(NativeClosure<'scope>),
+    Proxy(ProxyData<'scope>),
+    IteratorHelper(Box<IteratorHelper<'scope>>),
+    WrappedIterator(crate::IterRecord<'scope>),
+    AccessorPair { get: Option<JsObject<'scope>>, set: Option<JsObject<'scope>> },
+    AsyncFromSyncIterator(crate::IterRecord<'scope>),
     ArrayBuffer(Box<BufferData>),
     Date(f64),
-    Host(HostData<'gc>),
-    ModuleNamespace(Vec<(JsString<'gc>, crate::ResolvedBinding<'gc>)>),
-    WeakRef(Value<'gc>),
-    FinalizationRegistry { cleanup: Value<'gc>, cells: Vec<(Value<'gc>, Value<'gc>, Value<'gc>)> },
-    RegExpStringIterator { matcher: JsObject<'gc>, string: JsString<'gc>, global: bool, unicode: bool, done: bool },
-    TypedArray(ElementKind, ViewData<'gc>),
-    DataView(ViewData<'gc>),
+    Host(HostData<'scope>),
+    ModuleNamespace(Vec<(JsString<'scope>, crate::ResolvedBinding<'scope>)>),
+    WeakRef(Value<'scope>),
+    FinalizationRegistry { cleanup: Value<'scope>, cells: Vec<(Value<'scope>, Value<'scope>, Value<'scope>)> },
+    RegExpStringIterator { matcher: JsObject<'scope>, string: JsString<'scope>, global: bool, unicode: bool, done: bool },
+    TypedArray(ElementKind, ViewData<'scope>),
+    DataView(ViewData<'scope>),
 }
 
 impl ObjectKind<'_> {
@@ -829,20 +829,20 @@ impl<T> From<Vec<T>> for Few<T> {
 }
 
 #[derive(Default)]
-pub struct ObjectData<'gc> {
-    pub kind: ObjectKind<'gc>,
+pub struct ObjectData<'scope> {
+    pub kind: ObjectKind<'scope>,
     pub capacity: usize,
-    pub elements: Vec<Value<'gc>>,
-    pub symbols: Few<(JsSymbol<'gc>, Property<'gc>)>,
-    pub privates: Few<(JsSymbol<'gc>, Property<'gc>)>,
-    pub proto: Option<JsObject<'gc>>,
+    pub elements: Vec<Value<'scope>>,
+    pub symbols: Few<(JsSymbol<'scope>, Property<'scope>)>,
+    pub privates: Few<(JsSymbol<'scope>, Property<'scope>)>,
+    pub proto: Option<JsObject<'scope>>,
     pub sparse_length: u32,
     pub non_extensible: bool,
     pub length_readonly: bool,
 }
 
-impl<'gc> ObjectData<'gc> {
-    pub fn ordinary(mc: &Mutation<'gc>, proto: Option<JsObject<'gc>>, capacity: usize) -> JsObject<'gc> {
+impl<'scope> ObjectData<'scope> {
+    pub fn ordinary(mc: &Mutation<'scope>, proto: Option<JsObject<'scope>>, capacity: usize) -> JsObject<'scope> {
         mc.alloc(Object {
             proto: GcSlot::from(proto),
             call: GcSlot::default(),
@@ -858,7 +858,7 @@ impl<'gc> ObjectData<'gc> {
         })
     }
 
-    pub fn alloc(self, mc: &Mutation<'gc>) -> JsObject<'gc> {
+    pub fn alloc(self, mc: &Mutation<'scope>) -> JsObject<'scope> {
         let Self { kind, capacity, elements, symbols, privates, proto, sparse_length, non_extensible, length_readonly } = self;
         let state = ObjectState { kind, symbols, privates };
         let unit = Class::unit(&state);
@@ -885,18 +885,18 @@ impl<'gc> ObjectData<'gc> {
 }
 
 #[derive(Default, Collect)]
-pub struct ObjectState<'gc> {
-    pub kind: ObjectKind<'gc>,
-    pub symbols: Few<(JsSymbol<'gc>, Property<'gc>)>,
-    pub privates: Few<(JsSymbol<'gc>, Property<'gc>)>,
+pub struct ObjectState<'scope> {
+    pub kind: ObjectKind<'scope>,
+    pub symbols: Few<(JsSymbol<'scope>, Property<'scope>)>,
+    pub privates: Few<(JsSymbol<'scope>, Property<'scope>)>,
 }
 
-impl<'gc> ObjectState<'gc> {
-    pub fn get_own_symbol(&self, key: JsSymbol<'gc>) -> Option<Property<'gc>> {
+impl<'scope> ObjectState<'scope> {
+    pub fn get_own_symbol(&self, key: JsSymbol<'scope>) -> Option<Property<'scope>> {
         self.symbols.iter().find_map(|&(k, p)| Gc::ptr_eq(k, key).then_some(p))
     }
 
-    pub fn define_symbol(&mut self, key: JsSymbol<'gc>, prop: Property<'gc>) {
+    pub fn define_symbol(&mut self, key: JsSymbol<'scope>, prop: Property<'scope>) {
         match self.symbols.iter_mut().find(|(k, _)| Gc::ptr_eq(*k, key)) {
             Some((_, p)) => *p = prop,
             None => self.symbols.push((key, prop)),
@@ -936,10 +936,10 @@ impl fmt::Debug for ObjectState<'_> {
 
 #[derive(Collect)]
 #[repr(C, u8)]
-enum Fast<'gc> {
-    Closure(Closure<'gc>),
+enum Fast<'scope> {
+    Closure(Closure<'scope>),
     Native(Native),
-    RegExp(RegExpData<'gc>),
+    RegExp(RegExpData<'scope>),
 }
 
 struct Class;
@@ -969,7 +969,7 @@ impl Class {
         }
     }
 
-    fn unit_state<'gc>(class: u8, fast: Option<&Fast<'gc>>) -> ObjectState<'gc> {
+    fn unit_state<'scope>(class: u8, fast: Option<&Fast<'scope>>) -> ObjectState<'scope> {
         let kind = match (class & Self::UNIT_MASK, fast) {
             (Self::UNIT_ERROR, _) => ObjectKind::Error,
             (Self::UNIT_DERIVED, Some(Fast::Closure(c))) => ObjectKind::Function(*c),
@@ -991,12 +991,12 @@ impl Class {
 }
 
 #[crate::heap]
-pub struct Object<'gc> {
+pub struct Object<'scope> {
     #[mutable(set = write_proto)]
-    proto: Option<JsObject<'gc>>,
-    call: GcSlot<'gc, Fast<'gc>>,
-    props: crate::Props<'gc>,
-    elements: crate::ValueArray<'gc>,
+    proto: Option<JsObject<'scope>>,
+    call: GcSlot<'scope, Fast<'scope>>,
+    props: crate::Props<'scope>,
+    elements: crate::ValueArray<'scope>,
     class: crate::IsoCell<u8>,
     #[mutable]
     non_extensible: bool,
@@ -1006,8 +1006,8 @@ pub struct Object<'gc> {
     flags: u8,
     #[mutable]
     sparse_length: u32,
-    shape_root: paragc::HandleSlot<'gc, crate::Shape>,
-    data: GcCell<'gc, ObjectState<'gc>>,
+    shape_root: paragc::HandleSlot<'scope, crate::Shape>,
+    data: GcCell<'scope, ObjectState<'scope>>,
 }
 
 const _: () = assert!(!core::mem::needs_drop::<Object<'static>>(), "objects need no destructor: sweeping skips them");
@@ -1028,20 +1028,20 @@ impl fmt::Debug for Object<'_> {
     }
 }
 
-pub struct ObjRef<'a, 'gc> {
-    obj: &'a Object<'gc>,
-    data: core::cell::OnceCell<StateRef<'a, 'gc>>,
+pub struct ObjRef<'a, 'scope> {
+    obj: &'a Object<'scope>,
+    data: core::cell::OnceCell<StateRef<'a, 'scope>>,
 }
 
-enum StateRef<'a, 'gc> {
-    Cell(CellRef<'a, ObjectState<'gc>>),
-    Unit(core::mem::ManuallyDrop<ObjectState<'gc>>),
+enum StateRef<'a, 'scope> {
+    Cell(CellRef<'a, ObjectState<'scope>>),
+    Unit(core::mem::ManuallyDrop<ObjectState<'scope>>),
 }
 
-impl<'gc> Deref for ObjRef<'_, 'gc> {
-    type Target = ObjectState<'gc>;
+impl<'scope> Deref for ObjRef<'_, 'scope> {
+    type Target = ObjectState<'scope>;
 
-    fn deref(&self) -> &ObjectState<'gc> {
+    fn deref(&self) -> &ObjectState<'scope> {
         match self.data.get_or_init(|| self.obj.state_ref()) {
             StateRef::Cell(c) => c,
             StateRef::Unit(u) => u,
@@ -1049,14 +1049,14 @@ impl<'gc> Deref for ObjRef<'_, 'gc> {
     }
 }
 
-pub struct ObjMut<'a, 'gc> {
-    obj: &'a Object<'gc>,
-    mc: &'a Mutation<'gc>,
-    data: core::cell::OnceCell<CellMut<'a, ObjectState<'gc>>>,
+pub struct ObjMut<'a, 'scope> {
+    obj: &'a Object<'scope>,
+    mc: &'a Mutation<'scope>,
+    data: core::cell::OnceCell<CellMut<'a, ObjectState<'scope>>>,
 }
 
-impl<'gc> ObjMut<'_, 'gc> {
-    fn cell(&self) -> &CellMut<'_, ObjectState<'gc>> {
+impl<'scope> ObjMut<'_, 'scope> {
+    fn cell(&self) -> &CellMut<'_, ObjectState<'scope>> {
         self.data.get_or_init(|| {
             let (class, fast) = (self.obj.class(), self.obj.fast());
             self.obj.data.try_borrow_mut_or(self.mc, || Class::unit_state(class, fast)).expect("object state already borrowed")
@@ -1064,16 +1064,16 @@ impl<'gc> ObjMut<'_, 'gc> {
     }
 }
 
-impl<'gc> Deref for ObjMut<'_, 'gc> {
-    type Target = ObjectState<'gc>;
+impl<'scope> Deref for ObjMut<'_, 'scope> {
+    type Target = ObjectState<'scope>;
 
-    fn deref(&self) -> &ObjectState<'gc> {
+    fn deref(&self) -> &ObjectState<'scope> {
         self.cell()
     }
 }
 
-impl<'gc> DerefMut for ObjMut<'_, 'gc> {
-    fn deref_mut(&mut self) -> &mut ObjectState<'gc> {
+impl<'scope> DerefMut for ObjMut<'_, 'scope> {
+    fn deref_mut(&mut self) -> &mut ObjectState<'scope> {
         self.cell();
         self.data.get_mut().expect("just borrowed")
     }
@@ -1099,17 +1099,17 @@ impl Drop for ObjMut<'_, '_> {
 
 macro_rules! forward_reads {
     ($($guard:ident)*) => {$(
-        impl<'a, 'gc> $guard<'a, 'gc> {
-            pub fn object(&self) -> &'a Object<'gc> {
+        impl<'a, 'scope> $guard<'a, 'scope> {
+            pub fn object(&self) -> &'a Object<'scope> {
                 self.obj
             }
-            pub fn proto(&self) -> Option<JsObject<'gc>> {
+            pub fn proto(&self) -> Option<JsObject<'scope>> {
                 self.obj.proto()
             }
-            pub fn props(&self) -> &'a crate::Props<'gc> {
+            pub fn props(&self) -> &'a crate::Props<'scope> {
                 &self.obj.props
             }
-            pub fn elements(&self) -> &'a crate::ValueArray<'gc> {
+            pub fn elements(&self) -> &'a crate::ValueArray<'scope> {
                 &self.obj.elements
             }
             pub fn non_extensible(&self) -> bool {
@@ -1127,22 +1127,22 @@ macro_rules! forward_reads {
             pub fn array_length(&self) -> Option<u32> {
                 self.obj.array_length()
             }
-            pub fn sparse_elements(&self) -> Vec<(u32, Value<'gc>)> {
+            pub fn sparse_elements(&self) -> Vec<(u32, Value<'scope>)> {
                 self.obj.sparse_elements()
             }
-            pub fn prop_at(&self, mc: &Mutation<'gc>, at: usize, key: &str) -> Option<Property<'gc>> {
+            pub fn prop_at(&self, mc: &Mutation<'scope>, at: usize, key: &str) -> Option<Property<'scope>> {
                 self.obj.prop_at(mc, at, key)
             }
             pub fn position(&self, key: &str) -> Option<usize> {
                 self.obj.position(key)
             }
-            pub fn get_own(&self, mc: &Mutation<'gc>, key: &str) -> Option<Property<'gc>> {
+            pub fn get_own(&self, mc: &Mutation<'scope>, key: &str) -> Option<Property<'scope>> {
                 self.obj.get_own(mc, key)
             }
-            pub fn own(&self, mc: &Mutation<'gc>, key: &str) -> Option<Value<'gc>> {
+            pub fn own(&self, mc: &Mutation<'scope>, key: &str) -> Option<Value<'scope>> {
                 self.obj.own(mc, key)
             }
-            pub fn root_shape(&self, mc: &Mutation<'gc>) -> crate::ShapeRef<'gc> {
+            pub fn root_shape(&self, mc: &Mutation<'scope>) -> crate::ShapeRef<'scope> {
                 self.obj.root_shape(mc)
             }
         }
@@ -1150,8 +1150,8 @@ macro_rules! forward_reads {
 }
 forward_reads!(ObjRef ObjMut);
 
-impl<'gc> ObjRef<'_, 'gc> {
-    pub fn own_slot(&self, mc: &Mutation<'gc>, key: Key<'_, 'gc>) -> Option<Property<'gc>> {
+impl<'scope> ObjRef<'_, 'scope> {
+    pub fn own_slot(&self, mc: &Mutation<'scope>, key: Key<'_, 'scope>) -> Option<Property<'scope>> {
         match key {
             Key::Str(k) => self.obj.own_str(mc, k),
             Key::Sym(s) => self.get_own_symbol(s),
@@ -1159,15 +1159,15 @@ impl<'gc> ObjRef<'_, 'gc> {
     }
 }
 
-impl<'gc> ObjMut<'_, 'gc> {
-    pub fn own_slot(&mut self, key: Key<'_, 'gc>) -> Option<Property<'gc>> {
+impl<'scope> ObjMut<'_, 'scope> {
+    pub fn own_slot(&mut self, key: Key<'_, 'scope>) -> Option<Property<'scope>> {
         match key {
             Key::Str(k) => self.obj.own_str(self.mc, k),
             Key::Sym(s) => self.deref_mut().get_own_symbol(s),
         }
     }
 
-    pub fn set_proto(&self, proto: Option<JsObject<'gc>>) {
+    pub fn set_proto(&self, proto: Option<JsObject<'scope>>) {
         self.obj.set_proto(self.mc, proto);
     }
 
@@ -1179,11 +1179,11 @@ impl<'gc> ObjMut<'_, 'gc> {
         self.obj.length_readonly.set(v);
     }
 
-    pub fn write_index(&self, i: u32, value: Value<'gc>) -> bool {
+    pub fn write_index(&self, i: u32, value: Value<'scope>) -> bool {
         self.obj.write_index(self.mc, i, value)
     }
 
-    pub fn fill_index(&self, from: u32, to: u32, value: Value<'gc>) -> bool {
+    pub fn fill_index(&self, from: u32, to: u32, value: Value<'scope>) -> bool {
         self.obj.fill_index(self.mc, from, to, value)
     }
 
@@ -1195,19 +1195,19 @@ impl<'gc> ObjMut<'_, 'gc> {
         self.obj.set_array_length(self.mc, n);
     }
 
-    pub fn set_at(&self, at: usize, value: Value<'gc>) {
+    pub fn set_at(&self, at: usize, value: Value<'scope>) {
         self.obj.set_at(self.mc, at, value);
     }
 
-    pub fn push_to(&self, to: crate::ShapeRef<'gc>, slot: Slot<'gc>) {
+    pub fn push_to(&self, to: crate::ShapeRef<'scope>, slot: Slot<'scope>) {
         self.obj.push_to(self.mc, to, slot);
     }
 
-    pub fn set(&self, key: &str, value: Value<'gc>) {
+    pub fn set(&self, key: &str, value: Value<'scope>) {
         self.obj.set(self.mc, key, value);
     }
 
-    pub fn define(&self, key: &str, prop: Property<'gc>) {
+    pub fn define(&self, key: &str, prop: Property<'scope>) {
         self.obj.define(self.mc, key, prop);
     }
 
@@ -1215,21 +1215,21 @@ impl<'gc> ObjMut<'_, 'gc> {
         self.obj.remove(self.mc, key)
     }
 
-    pub fn store(&mut self, key: Key<'_, 'gc>, prop: Property<'gc>) {
+    pub fn store(&mut self, key: Key<'_, 'scope>, prop: Property<'scope>) {
         match key {
             Key::Sym(s) => self.deref_mut().define_symbol(s, prop),
             Key::Str(k) => self.obj.store_str(self.mc, k, prop),
         }
     }
 
-    pub fn unstore(&mut self, key: Key<'_, 'gc>) {
+    pub fn unstore(&mut self, key: Key<'_, 'scope>) {
         match key {
             Key::Sym(s) => self.deref_mut().symbols.retain(|(k, _)| !Gc::ptr_eq(*k, s)),
             Key::Str(k) => self.obj.unstore_str(self.mc, k),
         }
     }
 
-    pub fn ordinary_put(&mut self, key: Key<'_, 'gc>, value: Value<'gc>) -> Option<bool> {
+    pub fn ordinary_put(&mut self, key: Key<'_, 'scope>, value: Value<'scope>) -> Option<bool> {
         if !self.obj.has_ordinary_properties() {
             return None;
         }
@@ -1237,7 +1237,7 @@ impl<'gc> ObjMut<'_, 'gc> {
             Key::Str(k) => self.obj.put_str(self.mc, k, value),
             Key::Sym(s) => {
                 let non_extensible = self.obj.non_extensible();
-                let d: &mut ObjectState<'gc> = self;
+                let d: &mut ObjectState<'scope> = self;
                 match d.symbols.iter_mut().find(|(k, _)| Gc::ptr_eq(*k, s)).map(|(_, p)| (p.writable, &mut p.slot)) {
                     Some((true, Slot::Data(v))) => {
                         *v = value;
@@ -1256,7 +1256,7 @@ impl<'gc> ObjMut<'_, 'gc> {
     }
 }
 
-impl<'gc> Object<'gc> {
+impl<'scope> Object<'scope> {
     pub const PROTO_OFFSET: usize = core::mem::offset_of!(Object<'static>, proto);
     pub const CALL_OFFSET: usize = core::mem::offset_of!(Object<'static>, call);
     pub const PROPS_OFFSET: usize = core::mem::offset_of!(Object<'static>, props);
@@ -1265,26 +1265,26 @@ impl<'gc> Object<'gc> {
     pub const FAST_NATIVE_TAG: u8 = 1;
     pub const FAST_NATIVE_FN: usize = 8;
 
-    pub fn borrow(&self) -> ObjRef<'_, 'gc> {
+    pub fn borrow(&self) -> ObjRef<'_, 'scope> {
         ObjRef { obj: self, data: core::cell::OnceCell::new() }
     }
 
-    pub fn try_borrow(&self) -> Option<ObjRef<'_, 'gc>> {
+    pub fn try_borrow(&self) -> Option<ObjRef<'_, 'scope>> {
         let r = self.borrow();
         let d = if self.data.has_value() { StateRef::Cell(self.data.try_borrow()?) } else { StateRef::Unit(core::mem::ManuallyDrop::new(Class::unit_state(self.class(), self.fast()))) };
         let _ = r.data.set(d);
         Some(r)
     }
 
-    fn state_ref(&self) -> StateRef<'_, 'gc> {
+    fn state_ref(&self) -> StateRef<'_, 'scope> {
         if self.data.has_value() { StateRef::Cell(self.data.borrow()) } else { StateRef::Unit(core::mem::ManuallyDrop::new(Class::unit_state(self.class(), self.fast()))) }
     }
 
-    pub fn borrow_mut<'a>(&'a self, mc: &'a Mutation<'gc>) -> ObjMut<'a, 'gc> {
+    pub fn borrow_mut<'a>(&'a self, mc: &'a Mutation<'scope>) -> ObjMut<'a, 'scope> {
         ObjMut { obj: self, mc, data: core::cell::OnceCell::new() }
     }
 
-    fn call_of(mc: &Mutation<'gc>, kind: &ObjectKind<'gc>) -> Option<Gc<'gc, Fast<'gc>>> {
+    fn call_of(mc: &Mutation<'scope>, kind: &ObjectKind<'scope>) -> Option<Gc<'scope, Fast<'scope>>> {
         match kind {
             ObjectKind::Function(c) => Some(mc.alloc(Fast::Closure(*c))),
             ObjectKind::Native(n) => Some(mc.alloc(Fast::Native(*n))),
@@ -1293,7 +1293,7 @@ impl<'gc> Object<'gc> {
         }
     }
 
-    fn fast(&self) -> Option<&'gc Fast<'gc>> {
+    fn fast(&self) -> Option<&'scope Fast<'scope>> {
         self.call.get().map(Gc::get)
     }
 
@@ -1306,7 +1306,7 @@ impl<'gc> Object<'gc> {
     }
 
     #[inline]
-    pub fn regexp(&self) -> Option<RegExpData<'gc>> {
+    pub fn regexp(&self) -> Option<RegExpData<'scope>> {
         match self.fast()? {
             Fast::RegExp(r) => Some(*r),
             _ => None,
@@ -1319,25 +1319,25 @@ impl<'gc> Object<'gc> {
     }
 
     #[inline]
-    pub fn closure(&self) -> Option<Closure<'gc>> {
+    pub fn closure(&self) -> Option<Closure<'scope>> {
         match self.fast()? {
             Fast::Closure(c) => Some(*c),
             _ => None,
         }
     }
 
-    pub fn set_proto(&self, mc: &Mutation<'gc>, proto: Option<JsObject<'gc>>) {
+    pub fn set_proto(&self, mc: &Mutation<'scope>, proto: Option<JsObject<'scope>>) {
         self.write_proto(mc, proto);
         self.bump_if_watched();
     }
 
     #[inline]
-    pub fn props(&self) -> &crate::Props<'gc> {
+    pub fn props(&self) -> &crate::Props<'scope> {
         &self.props
     }
 
     #[inline]
-    pub fn elements(&self) -> &crate::ValueArray<'gc> {
+    pub fn elements(&self) -> &crate::ValueArray<'scope> {
         &self.elements
     }
 
@@ -1372,8 +1372,8 @@ impl<'gc> Object<'gc> {
         }
     }
 
-    pub fn anchors_plain_arrays(&self, root: JsObject<'gc>) -> bool {
-        let quiet = |o: &Object<'gc>| o.sparse_length() == 0 && !o.digit_keys();
+    pub fn anchors_plain_arrays(&self, root: JsObject<'scope>) -> bool {
+        let quiet = |o: &Object<'scope>| o.sparse_length() == 0 && !o.digit_keys();
         self.is_array() && quiet(self) && self.proto().is_some_and(|p| Gc::ptr_eq(p, root)) && root.has_ordinary_properties() && quiet(&root) && root.proto().is_none()
     }
 
@@ -1415,7 +1415,7 @@ impl<'gc> Object<'gc> {
         self.is_array().then(|| u32::try_from(self.elements.len()).unwrap_or(u32::MAX).max(self.sparse_length()))
     }
 
-    pub fn write_index(&self, mc: &Mutation<'gc>, i: u32, value: Value<'gc>) -> bool {
+    pub fn write_index(&self, mc: &Mutation<'scope>, i: u32, value: Value<'scope>) -> bool {
         if !self.is_array() {
             return false;
         }
@@ -1431,7 +1431,7 @@ impl<'gc> Object<'gc> {
         false
     }
 
-    pub fn fill_index(&self, mc: &Mutation<'gc>, from: u32, to: u32, value: Value<'gc>) -> bool {
+    pub fn fill_index(&self, mc: &Mutation<'scope>, from: u32, to: u32, value: Value<'scope>) -> bool {
         let n = self.elements.len();
         if !self.is_array() || from as usize > n || to == u32::MAX {
             return false;
@@ -1465,12 +1465,12 @@ impl<'gc> Object<'gc> {
         true
     }
 
-    pub fn spill(&self, mc: &Mutation<'gc>, from: usize) {
+    pub fn spill(&self, mc: &Mutation<'scope>, from: usize) {
         let n = self.elements.len();
         if !self.is_array() || from >= n {
             return;
         }
-        let moved: Vec<Value<'gc>> = (from..n).map(|i| self.elements.get(i).unwrap_or_default()).collect();
+        let moved: Vec<Value<'scope>> = (from..n).map(|i| self.elements.get(i).unwrap_or_default()).collect();
         self.elements.truncate(mc, from);
         for (i, v) in (from..).zip(moved) {
             self.push_prop(mc, &alloc::format!("{i}"), Property::data(v));
@@ -1478,12 +1478,12 @@ impl<'gc> Object<'gc> {
         self.raise_sparse_length(u32::try_from(n).unwrap_or(u32::MAX));
     }
 
-    pub fn sparse_elements(&self) -> Vec<(u32, Value<'gc>)> {
+    pub fn sparse_elements(&self) -> Vec<(u32, Value<'scope>)> {
         let dense = self.elements.len();
         if !self.is_array() || self.sparse_length() as usize <= dense {
             return Vec::new();
         }
-        let mut out: Vec<(u32, Value<'gc>)> = self
+        let mut out: Vec<(u32, Value<'scope>)> = self
             .props
             .entries()
             .into_iter()
@@ -1496,7 +1496,7 @@ impl<'gc> Object<'gc> {
         out
     }
 
-    pub fn set_array_length(&self, mc: &Mutation<'gc>, n: u32) {
+    pub fn set_array_length(&self, mc: &Mutation<'scope>, n: u32) {
         if !self.is_array() {
             return;
         }
@@ -1514,7 +1514,7 @@ impl<'gc> Object<'gc> {
         }
     }
 
-    pub fn own_str(&self, mc: &Mutation<'gc>, k: &str) -> Option<Property<'gc>> {
+    pub fn own_str(&self, mc: &Mutation<'scope>, k: &str) -> Option<Property<'scope>> {
         if self.is_array()
             && let Some(i) = crate::ops::index_of_str(k)
             && let Some(v) = self.elements.get(i as usize)
@@ -1524,7 +1524,7 @@ impl<'gc> Object<'gc> {
         self.get_own(mc, k)
     }
 
-    pub fn own_slot(&self, mc: &Mutation<'gc>, key: Key<'_, 'gc>) -> Option<Property<'gc>> {
+    pub fn own_slot(&self, mc: &Mutation<'scope>, key: Key<'_, 'scope>) -> Option<Property<'scope>> {
         match key {
             Key::Str(k) => self.own_str(mc, k),
             Key::Sym(_) if !self.has_symbols() => None,
@@ -1532,7 +1532,7 @@ impl<'gc> Object<'gc> {
         }
     }
 
-    fn put_str(&self, mc: &Mutation<'gc>, k: &str, value: Value<'gc>) -> Option<bool> {
+    fn put_str(&self, mc: &Mutation<'scope>, k: &str, value: Value<'scope>) -> Option<bool> {
         match self.props.position(k) {
             Some(i) => match (self.props.attrs(i).writable(), self.props.slot(i)) {
                 (true, Slot::Data(_)) => {
@@ -1550,7 +1550,7 @@ impl<'gc> Object<'gc> {
         }
     }
 
-    pub fn store_str(&self, mc: &Mutation<'gc>, k: &str, prop: Property<'gc>) {
+    pub fn store_str(&self, mc: &Mutation<'scope>, k: &str, prop: Property<'scope>) {
         let plain = prop.enumerable && prop.writable && prop.configurable;
         let index = if self.is_array() { crate::ops::index_of_str(k) } else { None };
         if let Some(i) = index {
@@ -1569,7 +1569,7 @@ impl<'gc> Object<'gc> {
         }
     }
 
-    pub fn unstore_str(&self, mc: &Mutation<'gc>, k: &str) {
+    pub fn unstore_str(&self, mc: &Mutation<'scope>, k: &str) {
         if self.is_array()
             && let Some(i) = crate::ops::index_of_str(k)
             && (i as usize) < self.elements.len()
@@ -1581,13 +1581,13 @@ impl<'gc> Object<'gc> {
         }
     }
 
-    pub fn prop_at(&self, mc: &Mutation<'gc>, at: usize, key: &str) -> Option<Property<'gc>> {
+    pub fn prop_at(&self, mc: &Mutation<'scope>, at: usize, key: &str) -> Option<Property<'scope>> {
         let p = self.props.get_if(at, key)?;
         Some(self.resolved(mc, at, p))
     }
 
     #[inline]
-    fn resolved(&self, mc: &Mutation<'gc>, i: usize, mut p: Property<'gc>) -> Property<'gc> {
+    fn resolved(&self, mc: &Mutation<'scope>, i: usize, mut p: Property<'scope>) -> Property<'scope> {
         if let Slot::Data(v) = p.slot
             && let Some(l) = v.as_lazy()
         {
@@ -1598,7 +1598,7 @@ impl<'gc> Object<'gc> {
         p
     }
 
-    pub fn set_at(&self, mc: &Mutation<'gc>, at: usize, value: Value<'gc>) {
+    pub fn set_at(&self, mc: &Mutation<'scope>, at: usize, value: Value<'scope>) {
         if at < self.props.len() {
             self.props.set_slot(mc, at, Slot::Data(value));
         }
@@ -1608,7 +1608,7 @@ impl<'gc> Object<'gc> {
         self.props.position(key)
     }
 
-    fn push_prop(&self, mc: &Mutation<'gc>, key: &str, prop: Property<'gc>) {
+    fn push_prop(&self, mc: &Mutation<'scope>, key: &str, prop: Property<'scope>) {
         if key.as_bytes().first().is_some_and(u8::is_ascii_digit) {
             self.note_digit();
         }
@@ -1620,7 +1620,7 @@ impl<'gc> Object<'gc> {
         self.class.set(self.class.get() | Class::WIDE);
     }
 
-    pub fn root_shape(&self, mc: &Mutation<'gc>) -> crate::ShapeRef<'gc> {
+    pub fn root_shape(&self, mc: &Mutation<'scope>) -> crate::ShapeRef<'scope> {
         match self.shape_root.get() {
             Some(h) => h,
             None => {
@@ -1631,29 +1631,29 @@ impl<'gc> Object<'gc> {
         }
     }
 
-    pub fn push_to(&self, mc: &Mutation<'gc>, to: crate::ShapeRef<'gc>, slot: Slot<'gc>) {
+    pub fn push_to(&self, mc: &Mutation<'scope>, to: crate::ShapeRef<'scope>, slot: Slot<'scope>) {
         if to.digit_keys() {
             self.note_digit();
         }
         self.props.push_to(mc, to, slot);
     }
 
-    pub fn fill(&self, mc: &Mutation<'gc>, to: crate::ShapeRef<'gc>, slots: impl IntoIterator<Item = Slot<'gc>>) {
+    pub fn fill(&self, mc: &Mutation<'scope>, to: crate::ShapeRef<'scope>, slots: impl IntoIterator<Item = Slot<'scope>>) {
         if to.digit_keys() {
             self.note_digit();
         }
         self.props.fill(mc, to, slots);
     }
 
-    pub fn get_own(&self, mc: &Mutation<'gc>, key: &str) -> Option<Property<'gc>> {
+    pub fn get_own(&self, mc: &Mutation<'scope>, key: &str) -> Option<Property<'scope>> {
         self.props.lookup(key).map(|(i, p)| self.resolved(mc, i, p))
     }
 
-    pub fn own(&self, mc: &Mutation<'gc>, key: &str) -> Option<Value<'gc>> {
+    pub fn own(&self, mc: &Mutation<'scope>, key: &str) -> Option<Value<'scope>> {
         self.get_own(mc, key).and_then(|p| p.value())
     }
 
-    pub fn set(&self, mc: &Mutation<'gc>, key: &str, value: Value<'gc>) {
+    pub fn set(&self, mc: &Mutation<'scope>, key: &str, value: Value<'scope>) {
         match self.position(key) {
             Some(i) => {
                 if self.props.attrs(i).writable() {
@@ -1664,14 +1664,14 @@ impl<'gc> Object<'gc> {
         }
     }
 
-    pub fn define(&self, mc: &Mutation<'gc>, key: &str, prop: Property<'gc>) {
+    pub fn define(&self, mc: &Mutation<'scope>, key: &str, prop: Property<'scope>) {
         match self.position(key) {
             Some(i) => self.props.replace(mc, i, prop),
             None => self.push_prop(mc, key, prop),
         }
     }
 
-    pub fn remove(&self, mc: &Mutation<'gc>, key: &str) -> bool {
+    pub fn remove(&self, mc: &Mutation<'scope>, key: &str) -> bool {
         match self.position(key) {
             Some(i) if self.props.attrs(i).configurable() => {
                 self.props.remove(mc, i);
@@ -1683,8 +1683,8 @@ impl<'gc> Object<'gc> {
     }
 }
 
-impl<'gc> From<ObjectKind<'gc>> for ObjectData<'gc> {
-    fn from(kind: ObjectKind<'gc>) -> Self {
+impl<'scope> From<ObjectKind<'scope>> for ObjectData<'scope> {
+    fn from(kind: ObjectKind<'scope>) -> Self {
         Self { kind, ..Self::default() }
     }
 }

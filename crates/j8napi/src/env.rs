@@ -70,9 +70,9 @@ unsafe impl Sync for Env {}
 struct Holder(#[expect(dead_code, reason = "only dropped along with the host object")] Box<Env>);
 
 impl Env {
-    pub fn agent<'a, 'gc>(&self) -> Result<&'a mut Agent<'gc, 'a>, Status> {
+    pub fn agent<'a, 'scope>(&self) -> Result<&'a mut Agent<'scope, 'a>, Status> {
         let p = self.agent.get().ok_or(Status::CannotRunJs)?;
-        Ok(unsafe { p.cast::<Agent<'gc, 'a>>().as_mut() })
+        Ok(unsafe { p.cast::<Agent<'scope, 'a>>().as_mut() })
     }
 
     pub fn enter<R>(&self, a: &mut Agent<'_, '_>, f: impl FnOnce(&Self) -> R) -> R {
@@ -95,7 +95,7 @@ impl Env {
         Handle(NonZeroUsize::new(h.len()))
     }
 
-    pub fn value<'gc>(&self, h: Handle) -> Result<Value<'gc>, Status> {
+    pub fn value<'scope>(&self, h: Handle) -> Result<Value<'scope>, Status> {
         let at = h.0.ok_or(Status::InvalidArg)?.get() - 1;
         let bits = *self.handles.borrow().get(at).ok_or(Status::InvalidArg)?;
         Ok(unsafe { Value::from_bits(bits) })
@@ -176,22 +176,22 @@ impl Env {
         self.pending.borrow().is_some()
     }
 
-    pub fn wrap_key<'gc>(&self, a: &Agent<'gc, '_>) -> JsSymbol<'gc> {
+    pub fn wrap_key<'scope>(&self, a: &Agent<'scope, '_>) -> JsSymbol<'scope> {
         Self::symbol(a, &self.wrap_key)
     }
 
-    pub fn tag_key<'gc>(&self, a: &Agent<'gc, '_>) -> JsSymbol<'gc> {
+    pub fn tag_key<'scope>(&self, a: &Agent<'scope, '_>) -> JsSymbol<'scope> {
         Self::symbol(a, &self.tag_key)
     }
 
-    fn symbol<'gc>(a: &Agent<'gc, '_>, g: &Global) -> JsSymbol<'gc> {
+    fn symbol<'scope>(a: &Agent<'scope, '_>, g: &Global) -> JsSymbol<'scope> {
         match a.local(g).kind() {
             ValueKind::Symbol(s) => s,
             _ => unreachable!("the keys are symbols"),
         }
     }
 
-    pub fn host<'gc>(a: &Agent<'gc, '_>, v: impl Any + Send + Sync) -> JsObject<'gc> {
+    pub fn host<'scope>(a: &Agent<'scope, '_>, v: impl Any + Send + Sync) -> JsObject<'scope> {
         let data = a.mc.alloc(Static(AtomicRefCell::new(Box::new(v) as Box<dyn Any + Send + Sync>)));
         ObjectData { kind: ObjectKind::Host(data), proto: None, ..ObjectData::default() }.alloc(a.mc)
     }
@@ -202,20 +202,20 @@ impl Env {
         cell.downcast_mut::<T>().map(f)
     }
 
-    pub fn private<'gc>(o: JsObject<'gc>, key: JsSymbol<'gc>) -> Option<Value<'gc>> {
+    pub fn private<'scope>(o: JsObject<'scope>, key: JsSymbol<'scope>) -> Option<Value<'scope>> {
         o.borrow().privates.iter().find_map(|&(k, p)| (j8framework::Gc::ptr_eq(k, key)).then_some(p)).and_then(|p| match p.slot {
             j8framework::Slot::Data(v) => Some(v),
             j8framework::Slot::Accessor { .. } => None,
         })
     }
 
-    pub fn set_private<'gc>(a: &Agent<'gc, '_>, o: JsObject<'gc>, key: JsSymbol<'gc>, v: Value<'gc>) {
+    pub fn set_private<'scope>(a: &Agent<'scope, '_>, o: JsObject<'scope>, key: JsSymbol<'scope>, v: Value<'scope>) {
         let mut d = o.borrow_mut(a.mc);
         d.privates.retain(|&(k, _)| !j8framework::Gc::ptr_eq(k, key));
         d.privates.push((key, Property::hidden(v)));
     }
 
-    pub fn remove_private<'gc>(a: &Agent<'gc, '_>, o: JsObject<'gc>, key: JsSymbol<'gc>) {
+    pub fn remove_private<'scope>(a: &Agent<'scope, '_>, o: JsObject<'scope>, key: JsSymbol<'scope>) {
         o.borrow_mut(a.mc).privates.retain(|&(k, _)| !j8framework::Gc::ptr_eq(k, key));
     }
 
@@ -267,8 +267,8 @@ impl Env {
         n
     }
 
-    pub fn open<'gc>(a: &mut Agent<'gc, '_>, register: crate::RegisterFn) -> Result<Value<'gc>, Error> {
-        let key = |a: &Agent<'gc, '_>, d: &str| -> Global { a.global(Value::Symbol(a.mc.alloc(SymbolData { description: Some(Box::from(d)), private: false }))) };
+    pub fn open<'scope>(a: &mut Agent<'scope, '_>, register: crate::RegisterFn) -> Result<Value<'scope>, Error> {
+        let key = |a: &Agent<'scope, '_>, d: &str| -> Global { a.global(Value::Symbol(a.mc.alloc(SymbolData { description: Some(Box::from(d)), private: false }))) };
         let env = Box::new(Self {
             agent: Cell::new(None),
             handles: RefCell::default(),
@@ -289,7 +289,7 @@ impl Env {
         let holder_key = a.mc.alloc(SymbolData { description: Some(Box::from("napi env")), private: false });
         Self::set_private(a, global, holder_key, holder.into());
         let env = unsafe { ptr.as_ref() };
-        let exports: Value<'gc> = a.object().into();
+        let exports: Value<'scope> = a.object().into();
         env.enter(a, |env| {
             let h = env.push(exports);
             let r = unsafe { register(env.as_ptr(), h) };

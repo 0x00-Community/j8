@@ -5,7 +5,7 @@ use j8framework::{JsObject, Mutation, Object, ShapeKey, ShapeRef, Slot, Trace, T
 
 type Kept = ShapeKey;
 
-fn kept_from<'gc>(_: &Mutation<'gc>, h: ShapeRef<'gc>) -> Kept {
+fn kept_from<'scope>(_: &Mutation<'scope>, h: ShapeRef<'scope>) -> Kept {
     ShapeKey::from(h)
 }
 
@@ -59,14 +59,14 @@ impl Ic {
         self.adds.set(false);
     }
 
-    fn keep<'gc>(&self, mc: &Mutation<'gc>, d: &Object<'gc>) -> usize {
+    fn keep<'scope>(&self, mc: &Mutation<'scope>, d: &Object<'scope>) -> usize {
         if let Some(s) = d.props().shape() {
             self.keep.borrow_mut().push(kept_from(mc, s));
         }
         addr(d)
     }
 
-    fn holder<'gc>(&self, mut proto: Option<JsObject<'gc>>, depth: usize) -> Option<JsObject<'gc>> {
+    fn holder<'scope>(&self, mut proto: Option<JsObject<'scope>>, depth: usize) -> Option<JsObject<'scope>> {
         let mut last = None;
         for c in &self.chain[..depth] {
             let p = proto?;
@@ -93,7 +93,7 @@ impl Ic {
     }
 
     #[inline]
-    pub fn get<'gc>(&self, o: JsObject<'gc>) -> Option<Value<'gc>> {
+    pub fn get<'scope>(&self, o: JsObject<'scope>) -> Option<Value<'scope>> {
         let want = self.shape.get();
         let d = o.get();
         if addr(d) != want || !d.is_plain() {
@@ -114,7 +114,7 @@ impl Ic {
         }
     }
 
-    pub fn fill_get<'gc>(&self, mc: &Mutation<'gc>, o: JsObject<'gc>, name: &str) {
+    pub fn fill_get<'scope>(&self, mc: &Mutation<'scope>, o: JsObject<'scope>, name: &str) {
         self.reset();
         if !Self::name_ok(name) {
             return;
@@ -157,7 +157,7 @@ impl Ic {
     }
 
     #[inline]
-    pub fn set<'gc>(&self, mc: &Mutation<'gc>, o: JsObject<'gc>, v: Value<'gc>, assign: bool) -> bool {
+    pub fn set<'scope>(&self, mc: &Mutation<'scope>, o: JsObject<'scope>, v: Value<'scope>, assign: bool) -> bool {
         let want = self.shape.get();
         let d = o.get();
         if addr(d) != want || !d.is_plain() {
@@ -175,7 +175,7 @@ impl Ic {
         true
     }
 
-    pub fn fill_set<'gc>(&self, mc: &Mutation<'gc>, o: JsObject<'gc>, name: &str, before: Before, assign: bool) {
+    pub fn fill_set<'scope>(&self, mc: &Mutation<'scope>, o: JsObject<'scope>, name: &str, before: Before, assign: bool) {
         self.reset();
         if !Self::name_ok(name) || !before.plain {
             return;
@@ -235,7 +235,7 @@ pub struct GlobalIc {
 
 impl GlobalIc {
     #[inline]
-    pub fn locate<'gc>(&self, scope: JsObject<'gc>, global: JsObject<'gc>) -> Option<(JsObject<'gc>, usize)> {
+    pub fn locate<'scope>(&self, scope: JsObject<'scope>, global: JsObject<'scope>) -> Option<(JsObject<'scope>, usize)> {
         let want = self.scope.get();
         if want == 0 || fast(scope.get()) != want {
             return None;
@@ -249,17 +249,17 @@ impl GlobalIc {
     }
 
     #[inline]
-    pub fn get<'gc>(&self, scope: JsObject<'gc>, global: JsObject<'gc>) -> Option<Value<'gc>> {
+    pub fn get<'scope>(&self, scope: JsObject<'scope>, global: JsObject<'scope>) -> Option<Value<'scope>> {
         let (o, at) = self.locate(scope, global)?;
         Ic::data(o.get().props().slot(at))
     }
 
     #[inline]
-    pub fn writable<'gc>(&self, scope: JsObject<'gc>, global: JsObject<'gc>) -> Option<(JsObject<'gc>, usize)> {
+    pub fn writable<'scope>(&self, scope: JsObject<'scope>, global: JsObject<'scope>) -> Option<(JsObject<'scope>, usize)> {
         self.locate(scope, global).filter(|_| self.writable.get())
     }
 
-    pub fn fill<'gc>(&self, mc: &Mutation<'gc>, scope: JsObject<'gc>, global: JsObject<'gc>, name: &str) {
+    pub fn fill<'scope>(&self, mc: &Mutation<'scope>, scope: JsObject<'scope>, global: JsObject<'scope>, name: &str) {
         self.scope.set(0);
         let mut keep = self.keep.borrow_mut();
         keep.clear();

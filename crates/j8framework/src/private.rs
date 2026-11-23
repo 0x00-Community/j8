@@ -5,34 +5,34 @@ use crate::{Gc};
 
 use crate::{Agent, Error, ErrorKind, JsObject, JsSymbol, Property, Slot, SymbolData, Value};
 
-impl<'gc> Agent<'gc, '_> {
-    pub fn private_key(key: Value<'gc>) -> Option<JsSymbol<'gc>> {
+impl<'scope> Agent<'scope, '_> {
+    pub fn private_key(key: Value<'scope>) -> Option<JsSymbol<'scope>> {
         match key.kind() {
             ValueKind::Symbol(s) if s.private => Some(s),
             _ => None,
         }
     }
 
-    pub fn private_name(&self, description: &str) -> JsSymbol<'gc> {
+    pub fn private_name(&self, description: &str) -> JsSymbol<'scope> {
         self.mc.alloc(SymbolData { description: Some(Box::from(description)), private: true })
     }
 
-    fn private_label(key: JsSymbol<'gc>) -> &'gc str {
+    fn private_label(key: JsSymbol<'scope>) -> &'scope str {
         Gc::get(key).description.as_deref().unwrap_or("#")
     }
 
-    fn private_holder(&self, obj: Value<'gc>, key: JsSymbol<'gc>, verb: &str) -> Result<JsObject<'gc>, Error> {
+    fn private_holder(&self, obj: Value<'scope>, key: JsSymbol<'scope>, verb: &str) -> Result<JsObject<'scope>, Error> {
         match obj.kind() {
             ValueKind::Object(o) => Ok(o),
             _ => Err(self.throw(ErrorKind::Type, &alloc::format!("Cannot {verb} private member {} from a non-object", Self::private_label(key)))),
         }
     }
 
-    fn private_lookup(o: JsObject<'gc>, key: JsSymbol<'gc>) -> Option<Property<'gc>> {
+    fn private_lookup(o: JsObject<'scope>, key: JsSymbol<'scope>) -> Option<Property<'scope>> {
         o.borrow().privates.iter().find_map(|&(k, p)| Gc::ptr_eq(k, key).then_some(p))
     }
 
-    pub fn private_get(&mut self, obj: Value<'gc>, key: JsSymbol<'gc>) -> Result<Value<'gc>, Error> {
+    pub fn private_get(&mut self, obj: Value<'scope>, key: JsSymbol<'scope>) -> Result<Value<'scope>, Error> {
         let o = self.private_holder(obj, key, "read")?;
         match Self::private_lookup(o, key).map(|p| p.slot) {
             Some(Slot::Data(v)) => Ok(v),
@@ -42,7 +42,7 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    pub fn private_set(&mut self, obj: Value<'gc>, key: JsSymbol<'gc>, value: Value<'gc>) -> Result<(), Error> {
+    pub fn private_set(&mut self, obj: Value<'scope>, key: JsSymbol<'scope>, value: Value<'scope>) -> Result<(), Error> {
         let o = self.private_holder(obj, key, "write")?;
         match Self::private_lookup(o, key) {
             Some(Property { slot: Slot::Data(_), writable: true, .. }) => {
@@ -59,7 +59,7 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    pub fn private_define(&mut self, obj: Value<'gc>, key: JsSymbol<'gc>, prop: Property<'gc>) -> Result<(), Error> {
+    pub fn private_define(&mut self, obj: Value<'scope>, key: JsSymbol<'scope>, prop: Property<'scope>) -> Result<(), Error> {
         let o = self.private_holder(obj, key, "define")?;
         let existing = Self::private_lookup(o, key);
         if existing.is_none() && o.borrow().non_extensible() {
@@ -80,7 +80,7 @@ impl<'gc> Agent<'gc, '_> {
         Ok(())
     }
 
-    pub fn private_has(&mut self, obj: Value<'gc>, key: JsSymbol<'gc>) -> Result<bool, Error> {
+    pub fn private_has(&mut self, obj: Value<'scope>, key: JsSymbol<'scope>) -> Result<bool, Error> {
         match obj.kind() {
             ValueKind::Object(o) => Ok(Self::private_lookup(o, key).is_some()),
             _ => {

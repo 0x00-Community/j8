@@ -223,14 +223,14 @@ struct Js<'p, E: Engine> {
 
 unsafe impl<E: Engine> Sync for Js<'_, E> where for<'p> JsState<'p, E>: Send {}
 
-impl<'p, E: Engine + Send + for<'gc> Invoke<'gc> + 'p> Js<'p, E> {
+impl<'p, E: Engine + Send + for<'scope> Invoke<'scope> + 'p> Js<'p, E> {
     #[expect(clippy::mut_from_ref, reason = "exclusive by the queue's protocol, see the type")]
     unsafe fn state(&self) -> &mut JsState<'p, E> {
         unsafe { &mut *self.state.get() }
     }
 }
 
-impl<'p, E: Engine + Send + for<'gc> Invoke<'gc> + 'p> JsState<'p, E> {
+impl<'p, E: Engine + Send + for<'scope> Invoke<'scope> + 'p> JsState<'p, E> {
     fn chain(&mut self, add: impl FnOnce(Task<'p>) -> TaskId<'p>, make: impl FnOnce(Vec<TaskId<'p>>) -> Task<'p>) {
         let after = self.last.take().into_iter().collect();
         self.last = Some(add(make(after)));
@@ -282,7 +282,7 @@ impl<'p, E: Engine + Send + for<'gc> Invoke<'gc> + 'p> JsState<'p, E> {
         })
     }
 
-    fn enter<R>(&mut self, f: impl for<'gc> FnOnce(&mut Agent<'gc, '_>) -> R) -> R {
+    fn enter<R>(&mut self, f: impl for<'scope> FnOnce(&mut Agent<'scope, '_>) -> R) -> R {
         let (engine, cx) = (&self.engine, &self.cx);
         self.isolate.enter(|scope| {
             let realm = scope.context_of(cx);
@@ -307,7 +307,7 @@ struct ScriptTask<'p, E: Engine> {
     reply: Option<Answer>,
 }
 
-impl<'p, E: Engine + Send + for<'gc> Invoke<'gc> + 'p> ITask<'p> for ScriptTask<'p, E> {
+impl<'p, E: Engine + Send + for<'scope> Invoke<'scope> + 'p> ITask<'p> for ScriptTask<'p, E> {
     fn recursable(&self) -> bool {
         true
     }
@@ -356,7 +356,7 @@ struct SettleTask<'p, E: Engine> {
     settle: Option<Settle>,
 }
 
-impl<'p, E: Engine + Send + for<'gc> Invoke<'gc> + 'p> ITask<'p> for SettleTask<'p, E> {
+impl<'p, E: Engine + Send + for<'scope> Invoke<'scope> + 'p> ITask<'p> for SettleTask<'p, E> {
     fn recursable(&self) -> bool {
         true
     }
@@ -386,7 +386,7 @@ struct PollTask<'p, E: Engine> {
     job: usize,
 }
 
-impl<'p, E: Engine + Send + for<'gc> Invoke<'gc> + 'p> ITask<'p> for PollTask<'p, E> {
+impl<'p, E: Engine + Send + for<'scope> Invoke<'scope> + 'p> ITask<'p> for PollTask<'p, E> {
     fn recursable(&self) -> bool {
         true
     }
@@ -412,7 +412,7 @@ struct Lane<'p, E: Engine> {
     bell: Arc<Bell>,
 }
 
-impl<'p, E: Engine + Send + for<'gc> Invoke<'gc> + 'p> Lane<'p, E> {
+impl<'p, E: Engine + Send + for<'scope> Invoke<'scope> + 'p> Lane<'p, E> {
     fn new(platform: &'p dyn Platform, engine: E, intrinsics: &dyn Intrinsics, doors: &Arc<Doors>, home: usize) -> Box<Self> {
         let mut isolate = Isolate::new(platform, CreateParams { event_loop: true, collector_threads: Some(NonZeroUsize::MIN), ..CreateParams::default() });
         let cx = isolate.enter(|scope| scope.persist(scope.context(intrinsics)));
@@ -458,7 +458,7 @@ impl<'p, E: Engine + Send + for<'gc> Invoke<'gc> + 'p> Lane<'p, E> {
         }
     }
 
-    fn enter<R>(&mut self, f: impl for<'gc> FnOnce(&mut Agent<'gc, '_>) -> R) -> R {
+    fn enter<R>(&mut self, f: impl for<'scope> FnOnce(&mut Agent<'scope, '_>) -> R) -> R {
         let st = unsafe { self.js.state() };
         let r = st.enter(f);
         let tasks = &mut self.tasks;
@@ -511,7 +511,7 @@ struct Set<'p, E: Engine> {
     check: AtomicUsize,
 }
 
-impl<'p, E: Engine + Send + for<'gc> Invoke<'gc> + 'p> Set<'p, E> {
+impl<'p, E: Engine + Send + for<'scope> Invoke<'scope> + 'p> Set<'p, E> {
     fn new(platform: &'p dyn Platform) -> Self {
         Self { platform, doors: Arc::default(), ports: SegVec::default(), growing: AtomicBool::new(false), next: AtomicUsize::new(0), slice: AtomicUsize::new(SLICE), check: AtomicUsize::new(CHECK) }
     }
@@ -567,7 +567,7 @@ struct LoopState<'p, E: Engine> {
     early: Vec<Msg<'p, E>>,
 }
 
-impl<'p, E: Engine + Send + for<'gc> Invoke<'gc> + 'p> LoopState<'p, E> {
+impl<'p, E: Engine + Send + for<'scope> Invoke<'scope> + 'p> LoopState<'p, E> {
     fn new(me: usize, set: Arc<Set<'p, E>>) -> Self {
         Self { me, set, lanes: Vec::new(), holes: Vec::new(), ready: VecDeque::new(), early: Vec::new() }
     }
@@ -762,12 +762,12 @@ impl Ticket {
     }
 }
 
-pub struct EventLoop<'p, E: Engine + Send + for<'gc> Invoke<'gc> + 'p> {
+pub struct EventLoop<'p, E: Engine + Send + for<'scope> Invoke<'scope> + 'p> {
     bell: Arc<Bell>,
     set: Arc<Set<'p, E>>,
 }
 
-impl<'p, E: Engine + Send + for<'gc> Invoke<'gc> + 'p> EventLoop<'p, E> {
+impl<'p, E: Engine + Send + for<'scope> Invoke<'scope> + 'p> EventLoop<'p, E> {
     pub fn submit(&self, src: &Source<'_>, kind: ScriptKind) -> Ticket {
         let (reply, rx) = Oneshot::new();
         self.bell.begin();
@@ -797,7 +797,7 @@ impl<'p, E: Engine + Send + for<'gc> Invoke<'gc> + 'p> EventLoop<'p, E> {
         bell.faults.pop().map_or(Ok(()), Err)
     }
 
-    pub fn enter<R: Send>(&self, f: impl for<'gc> FnOnce(&mut Agent<'gc, '_>) -> R + Send) -> R {
+    pub fn enter<R: Send>(&self, f: impl for<'scope> FnOnce(&mut Agent<'scope, '_>) -> R + Send) -> R {
         self.set.call(&self.bell, move |l| l.enter(f))
     }
 
@@ -818,13 +818,13 @@ impl<'p, E: Engine + Send + for<'gc> Invoke<'gc> + 'p> EventLoop<'p, E> {
     }
 }
 
-impl<'p, E: Engine + Send + for<'gc> Invoke<'gc> + 'p> Drop for EventLoop<'p, E> {
+impl<'p, E: Engine + Send + for<'scope> Invoke<'scope> + 'p> Drop for EventLoop<'p, E> {
     fn drop(&mut self) {
         self.set.port(self.bell.home.load(Ordering::Acquire)).send(Msg::Remove(Arc::clone(&self.bell)));
     }
 }
 
-pub struct EventLoopSet<'s, 'p, E: Engine + Send + for<'gc> Invoke<'gc> + 'p> {
+pub struct EventLoopSet<'s, 'p, E: Engine + Send + for<'scope> Invoke<'scope> + 'p> {
     set: Arc<Set<'p, E>>,
     scope: &'s Scope<'s, 'p>,
 }
@@ -840,7 +840,7 @@ impl<E: Engine> Drop for Close<'_, E> {
     }
 }
 
-impl<'p, E: Engine + Send + for<'gc> Invoke<'gc> + 'p> EventLoopSet<'_, 'p, E> {
+impl<'p, E: Engine + Send + for<'scope> Invoke<'scope> + 'p> EventLoopSet<'_, 'p, E> {
     pub fn scope<R>(platform: &'p dyn Platform, threads: NonZeroUsize, body: impl for<'a> FnOnce(&EventLoopSet<'a, 'p, E>) -> R) -> R {
         let set = Arc::new(Set::new(platform));
         std::thread::scope::<'p, _, _>(|scope| {

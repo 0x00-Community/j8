@@ -35,32 +35,32 @@ impl From<Resume> for f64 {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub enum Step<'gc> {
-    Yield(Value<'gc>),
-    Await(Value<'gc>),
-    Done(Value<'gc>),
+pub enum Step<'scope> {
+    Yield(Value<'scope>),
+    Await(Value<'scope>),
+    Done(Value<'scope>),
 }
 
-pub trait Invoke<'gc> {
-    fn call(&self, agent: &mut Agent<'gc, '_>, callee: Value<'gc>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error>;
+pub trait Invoke<'scope> {
+    fn call(&self, agent: &mut Agent<'scope, '_>, callee: Value<'scope>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error>;
 
-    fn construct(&self, agent: &mut Agent<'gc, '_>, callee: Value<'gc>, args: &[Value<'gc>], new_target: Value<'gc>) -> Result<Value<'gc>, Error>;
+    fn construct(&self, agent: &mut Agent<'scope, '_>, callee: Value<'scope>, args: &[Value<'scope>], new_target: Value<'scope>) -> Result<Value<'scope>, Error>;
 
-    fn eval_code(&self, agent: &mut Agent<'gc, '_>, src: &str, kind: CodeKind, hidden: bool) -> Result<Value<'gc>, Error>;
-    fn constructs(&self, closure: &crate::Closure<'gc>) -> bool;
+    fn eval_code(&self, agent: &mut Agent<'scope, '_>, src: &str, kind: CodeKind, hidden: bool) -> Result<Value<'scope>, Error>;
+    fn constructs(&self, closure: &crate::Closure<'scope>) -> bool;
 
-    fn resume(&self, agent: &mut Agent<'gc, '_>, coroutine: crate::JsObject<'gc>, mode: Resume, value: Value<'gc>) -> Result<Step<'gc>, Error>;
+    fn resume(&self, agent: &mut Agent<'scope, '_>, coroutine: crate::JsObject<'scope>, mode: Resume, value: Value<'scope>) -> Result<Step<'scope>, Error>;
 
-    fn callback(&self, _agent: &mut Agent<'gc, '_>, callee: Value<'gc>, this: Value<'gc>) -> Callback<'gc> {
+    fn callback(&self, _agent: &mut Agent<'scope, '_>, callee: Value<'scope>, this: Value<'scope>) -> Callback<'scope> {
         Callback::from((callee, this))
     }
 }
 
-pub type CallbackRun = for<'gc, 'x> unsafe fn(&mut Agent<'gc, 'x>, &Callback<'gc>, &[Value<'gc>]) -> Option<Result<Value<'gc>, Error>>;
+pub type CallbackRun = for<'scope, 'x> unsafe fn(&mut Agent<'scope, 'x>, &Callback<'scope>, &[Value<'scope>]) -> Option<Result<Value<'scope>, Error>>;
 
-pub struct Callback<'gc> {
-    pub callee: Value<'gc>,
-    pub this: Value<'gc>,
+pub struct Callback<'scope> {
+    pub callee: Value<'scope>,
+    pub this: Value<'scope>,
     pub run: Option<CallbackRun>,
     pub code: usize,
     pub arity: usize,
@@ -69,8 +69,8 @@ pub struct Callback<'gc> {
     pub quiet: core::cell::Cell<bool>,
 }
 
-impl<'gc> From<(Value<'gc>, Value<'gc>)> for Callback<'gc> {
-    fn from((callee, this): (Value<'gc>, Value<'gc>)) -> Self {
+impl<'scope> From<(Value<'scope>, Value<'scope>)> for Callback<'scope> {
+    fn from((callee, this): (Value<'scope>, Value<'scope>)) -> Self {
         Self { callee, this, run: None, code: 0, arity: 0, env: core::ptr::null_mut(), release: None, quiet: core::cell::Cell::new(false) }
     }
 }
@@ -83,26 +83,26 @@ impl Drop for Callback<'_> {
     }
 }
 
-impl<'gc> Callback<'gc> {
+impl<'scope> Callback<'scope> {
     #[inline]
     pub fn passed(&self) -> Option<usize> {
         self.run.map(|_| self.arity)
     }
 
     #[inline]
-    pub fn call(&self, a: &mut Agent<'gc, '_>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    pub fn call(&self, a: &mut Agent<'scope, '_>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         self.quiet.set(false);
         self.enter(a, args)
     }
 
     #[inline]
-    pub fn again(&self, a: &mut Agent<'gc, '_>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    pub fn again(&self, a: &mut Agent<'scope, '_>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         self.quiet.set(true);
         self.enter(a, args)
     }
 
     #[inline]
-    fn enter(&self, a: &mut Agent<'gc, '_>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn enter(&self, a: &mut Agent<'scope, '_>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         if let Some(run) = self.run
             && let Some(r) = unsafe { run(a, self, args) }
         {
@@ -113,25 +113,25 @@ impl<'gc> Callback<'gc> {
     }
 }
 
-pub struct Agent<'gc, 'x> {
-    pub mc: &'x Mutation<'gc>,
+pub struct Agent<'scope, 'x> {
+    pub mc: &'x Mutation<'scope>,
     pub platform: &'x dyn Platform,
     pub profiler: &'x mut Profiler,
-    pub realm: Context<'gc>,
-    pub new_target: Value<'gc>,
-    invoke: &'x dyn Invoke<'gc>,
+    pub realm: Context<'scope>,
+    pub new_target: Value<'scope>,
+    invoke: &'x dyn Invoke<'scope>,
     spawned: Option<&'x j8lockfree::Fifo<crate::AsyncJob>>,
     pub stop: &'x crate::Termination,
-    spare_regs: Vec<Vec<Value<'gc>>>,
+    spare_regs: Vec<Vec<Value<'scope>>>,
 }
 
-impl<'gc> Scope<'gc, '_> {
-    pub fn agent<'x>(&'x mut self, realm: Context<'gc>, invoke: &'x dyn Invoke<'gc>) -> Agent<'gc, 'x> {
+impl<'scope> Scope<'scope, '_> {
+    pub fn agent<'x>(&'x mut self, realm: Context<'scope>, invoke: &'x dyn Invoke<'scope>) -> Agent<'scope, 'x> {
         Agent { mc: self.mc, platform: self.platform, profiler: &mut *self.profiler, realm, new_target: Value::Undefined, invoke, spawned: self.spawned, stop: self.stop, spare_regs: Vec::new() }
     }
 }
 
-impl<'gc> Agent<'gc, '_> {
+impl<'scope> Agent<'scope, '_> {
     const SPARE_REGS: usize = 8;
 
     pub fn spawn(&self, job: crate::AsyncJob) -> Result<(), crate::AsyncJob> {
@@ -144,11 +144,11 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    pub fn take_regs(&mut self) -> Vec<Value<'gc>> {
+    pub fn take_regs(&mut self) -> Vec<Value<'scope>> {
         self.spare_regs.pop().unwrap_or_default()
     }
 
-    pub fn give_regs(&mut self, mut regs: Vec<Value<'gc>>) {
+    pub fn give_regs(&mut self, mut regs: Vec<Value<'scope>>) {
         if self.spare_regs.len() < Self::SPARE_REGS {
             regs.clear();
             self.spare_regs.push(regs);
@@ -156,18 +156,18 @@ impl<'gc> Agent<'gc, '_> {
     }
 }
 
-impl<'gc> Agent<'gc, '_> {
-    pub fn call(&mut self, callee: Value<'gc>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+impl<'scope> Agent<'scope, '_> {
+    pub fn call(&mut self, callee: Value<'scope>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let invoke = self.invoke;
         invoke.call(self, callee, this, args)
     }
 
-    pub fn callback(&mut self, callee: Value<'gc>, this: Value<'gc>) -> Callback<'gc> {
+    pub fn callback(&mut self, callee: Value<'scope>, this: Value<'scope>) -> Callback<'scope> {
         let invoke = self.invoke;
         invoke.callback(self, callee, this)
     }
 
-    pub fn is_constructor(&self, v: Value<'gc>) -> bool {
+    pub fn is_constructor(&self, v: Value<'scope>) -> bool {
         let Some(o) = v.as_object() else { return false };
         match &o.borrow().kind {
             crate::ObjectKind::Function(c) => self.invoke.constructs(c),
@@ -179,7 +179,7 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    pub fn proto_from_ctor(&mut self, new_target: Value<'gc>, fallback: JsObject<'gc>) -> Result<JsObject<'gc>, Error> {
+    pub fn proto_from_ctor(&mut self, new_target: Value<'scope>, fallback: JsObject<'scope>) -> Result<JsObject<'scope>, Error> {
         if new_target == Value::Undefined {
             return Ok(fallback);
         }
@@ -189,33 +189,33 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    pub fn create_from_ctor(&mut self, new_target: Value<'gc>, fallback: JsObject<'gc>, kind: crate::ObjectKind<'gc>) -> Result<JsObject<'gc>, Error> {
+    pub fn create_from_ctor(&mut self, new_target: Value<'scope>, fallback: JsObject<'scope>, kind: crate::ObjectKind<'scope>) -> Result<JsObject<'scope>, Error> {
         let proto = self.proto_from_ctor(new_target, fallback)?;
         Ok(crate::ObjectData { kind, proto: Some(proto), ..crate::ObjectData::default() }.alloc(self.mc))
     }
 
-    pub fn wrap_primitive(&mut self, new_target: Value<'gc>, v: Value<'gc>, fallback: JsObject<'gc>) -> Result<Value<'gc>, Error> {
+    pub fn wrap_primitive(&mut self, new_target: Value<'scope>, v: Value<'scope>, fallback: JsObject<'scope>) -> Result<Value<'scope>, Error> {
         if new_target == Value::Undefined {
             return Ok(v);
         }
         Ok(self.create_from_ctor(new_target, fallback, crate::ObjectKind::Primitive(v))?.into())
     }
 
-    pub fn eval_code(&mut self, src: &str, kind: CodeKind) -> Result<Value<'gc>, Error> {
+    pub fn eval_code(&mut self, src: &str, kind: CodeKind) -> Result<Value<'scope>, Error> {
         self.eval_text(src, kind, false)
     }
 
-    pub fn eval_text(&mut self, src: &str, kind: CodeKind, hidden: bool) -> Result<Value<'gc>, Error> {
+    pub fn eval_text(&mut self, src: &str, kind: CodeKind, hidden: bool) -> Result<Value<'scope>, Error> {
         let invoke = self.invoke;
         invoke.eval_code(self, src, kind, hidden)
     }
 
-    pub fn resume(&mut self, coroutine: crate::JsObject<'gc>, mode: Resume, value: Value<'gc>) -> Result<Step<'gc>, Error> {
+    pub fn resume(&mut self, coroutine: crate::JsObject<'scope>, mode: Resume, value: Value<'scope>) -> Result<Step<'scope>, Error> {
         let invoke = self.invoke;
         invoke.resume(self, coroutine, mode, value)
     }
 
-    pub fn construct(&mut self, callee: Value<'gc>, args: &[Value<'gc>], new_target: Value<'gc>) -> Result<Value<'gc>, Error> {
+    pub fn construct(&mut self, callee: Value<'scope>, args: &[Value<'scope>], new_target: Value<'scope>) -> Result<Value<'scope>, Error> {
         let invoke = self.invoke;
         invoke.construct(self, callee, args, new_target)
     }

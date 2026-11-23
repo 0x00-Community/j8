@@ -10,24 +10,24 @@ use crate::{ErrorKind, Job, JsObject, JsString, JsSymbol, Native, NativeFn, Obje
 
 #[derive(Clone, Copy, Collect)]
 #[collect(no_drop)]
-pub struct WellKnown<'gc> {
-    pub iterator: JsSymbol<'gc>,
-    pub async_iterator: JsSymbol<'gc>,
-    pub has_instance: JsSymbol<'gc>,
-    pub to_primitive: JsSymbol<'gc>,
-    pub to_string_tag: JsSymbol<'gc>,
-    pub species: JsSymbol<'gc>,
-    pub unscopables: JsSymbol<'gc>,
-    pub is_concat_spreadable: JsSymbol<'gc>,
-    pub match_: JsSymbol<'gc>,
-    pub match_all: JsSymbol<'gc>,
-    pub replace: JsSymbol<'gc>,
-    pub search: JsSymbol<'gc>,
-    pub split: JsSymbol<'gc>,
+pub struct WellKnown<'scope> {
+    pub iterator: JsSymbol<'scope>,
+    pub async_iterator: JsSymbol<'scope>,
+    pub has_instance: JsSymbol<'scope>,
+    pub to_primitive: JsSymbol<'scope>,
+    pub to_string_tag: JsSymbol<'scope>,
+    pub species: JsSymbol<'scope>,
+    pub unscopables: JsSymbol<'scope>,
+    pub is_concat_spreadable: JsSymbol<'scope>,
+    pub match_: JsSymbol<'scope>,
+    pub match_all: JsSymbol<'scope>,
+    pub replace: JsSymbol<'scope>,
+    pub search: JsSymbol<'scope>,
+    pub split: JsSymbol<'scope>,
 }
 
-impl<'gc> WellKnown<'gc> {
-    pub fn all(&self) -> [(&'static str, JsSymbol<'gc>); 13] {
+impl<'scope> WellKnown<'scope> {
+    pub fn all(&self) -> [(&'static str, JsSymbol<'scope>); 13] {
         [
             ("iterator", self.iterator),
             ("asyncIterator", self.async_iterator),
@@ -48,99 +48,99 @@ impl<'gc> WellKnown<'gc> {
 
 #[derive(Collect)]
 #[collect(no_drop)]
-pub struct Realm<'gc> {
-    pub global: JsObject<'gc>,
-    pub object_proto: JsObject<'gc>,
-    pub function_proto: JsObject<'gc>,
-    pub array_proto: JsObject<'gc>,
-    pub string_proto: JsObject<'gc>,
-    pub chars: alloc::vec::Vec<crate::JsString<'gc>>,
-    pub number_proto: JsObject<'gc>,
-    pub boolean_proto: JsObject<'gc>,
-    pub error_protos: [JsObject<'gc>; ErrorKind::ALL.len()],
-    pub symbol_proto: JsObject<'gc>,
-    pub iterator_proto: JsObject<'gc>,
-    pub array_iterator_proto: JsObject<'gc>,
-    pub string_iterator_proto: JsObject<'gc>,
-    pub generator_proto: JsObject<'gc>,
-    pub generator_function_proto: JsObject<'gc>,
-    pub async_function_proto: JsObject<'gc>,
-    pub async_generator_function_proto: JsObject<'gc>,
-    pub async_iterator_proto: JsObject<'gc>,
-    pub async_generator_proto: JsObject<'gc>,
-    pub async_from_sync_iterator_proto: JsObject<'gc>,
-    pub promise_proto: JsObject<'gc>,
-    pub promise_ctor: JsObject<'gc>,
-    pub regexp_proto: JsObject<'gc>,
-    pub regexp_ctor: JsObject<'gc>,
-    pub eval: JsObject<'gc>,
-    pub bigint_proto: JsObject<'gc>,
-    pub map_proto: JsObject<'gc>,
-    pub set_proto: JsObject<'gc>,
-    pub weakmap_proto: JsObject<'gc>,
-    pub weakset_proto: JsObject<'gc>,
-    pub collection_iterator_proto: JsObject<'gc>,
-    pub set_iterator_proto: JsObject<'gc>,
-    pub iterator_helper_proto: JsObject<'gc>,
-    pub wrap_iterator_proto: JsObject<'gc>,
-    pub date_proto: JsObject<'gc>,
-    pub weak_ref_proto: JsObject<'gc>,
-    pub finalization_registry_proto: JsObject<'gc>,
-    pub regexp_string_iterator_proto: JsObject<'gc>,
-    pub array_buffer_proto: JsObject<'gc>,
-    pub shared_array_buffer_proto: JsObject<'gc>,
-    pub data_view_proto: JsObject<'gc>,
-    pub typed_array_ctor: JsObject<'gc>,
-    pub typed_array_proto: JsObject<'gc>,
-    pub typed_ctors: [JsObject<'gc>; 12],
-    pub typed_protos: [JsObject<'gc>; 12],
-    pub script_scope: JsObject<'gc>,
-    pub symbols: WellKnown<'gc>,
-    pub modules: Cow<'gc, alloc::vec::Vec<crate::ModuleRecord<'gc>>>,
-    pub symbol_registry: Cow<'gc, alloc::vec::Vec<(JsString<'gc>, JsSymbol<'gc>)>>,
+pub struct Realm<'scope> {
+    pub global: JsObject<'scope>,
+    pub object_proto: JsObject<'scope>,
+    pub function_proto: JsObject<'scope>,
+    pub array_proto: JsObject<'scope>,
+    pub string_proto: JsObject<'scope>,
+    pub chars: alloc::vec::Vec<crate::JsString<'scope>>,
+    pub number_proto: JsObject<'scope>,
+    pub boolean_proto: JsObject<'scope>,
+    pub error_protos: [JsObject<'scope>; ErrorKind::ALL.len()],
+    pub symbol_proto: JsObject<'scope>,
+    pub iterator_proto: JsObject<'scope>,
+    pub array_iterator_proto: JsObject<'scope>,
+    pub string_iterator_proto: JsObject<'scope>,
+    pub generator_proto: JsObject<'scope>,
+    pub generator_function_proto: JsObject<'scope>,
+    pub async_function_proto: JsObject<'scope>,
+    pub async_generator_function_proto: JsObject<'scope>,
+    pub async_iterator_proto: JsObject<'scope>,
+    pub async_generator_proto: JsObject<'scope>,
+    pub async_from_sync_iterator_proto: JsObject<'scope>,
+    pub promise_proto: JsObject<'scope>,
+    pub promise_ctor: JsObject<'scope>,
+    pub regexp_proto: JsObject<'scope>,
+    pub regexp_ctor: JsObject<'scope>,
+    pub eval: JsObject<'scope>,
+    pub bigint_proto: JsObject<'scope>,
+    pub map_proto: JsObject<'scope>,
+    pub set_proto: JsObject<'scope>,
+    pub weakmap_proto: JsObject<'scope>,
+    pub weakset_proto: JsObject<'scope>,
+    pub collection_iterator_proto: JsObject<'scope>,
+    pub set_iterator_proto: JsObject<'scope>,
+    pub iterator_helper_proto: JsObject<'scope>,
+    pub wrap_iterator_proto: JsObject<'scope>,
+    pub date_proto: JsObject<'scope>,
+    pub weak_ref_proto: JsObject<'scope>,
+    pub finalization_registry_proto: JsObject<'scope>,
+    pub regexp_string_iterator_proto: JsObject<'scope>,
+    pub array_buffer_proto: JsObject<'scope>,
+    pub shared_array_buffer_proto: JsObject<'scope>,
+    pub data_view_proto: JsObject<'scope>,
+    pub typed_array_ctor: JsObject<'scope>,
+    pub typed_array_proto: JsObject<'scope>,
+    pub typed_ctors: [JsObject<'scope>; 12],
+    pub typed_protos: [JsObject<'scope>; 12],
+    pub script_scope: JsObject<'scope>,
+    pub symbols: WellKnown<'scope>,
+    pub modules: Cow<'scope, alloc::vec::Vec<crate::ModuleRecord<'scope>>>,
+    pub symbol_registry: Cow<'scope, alloc::vec::Vec<(JsString<'scope>, JsSymbol<'scope>)>>,
     pub random_state: AtomicU64,
-    pub jobs: GcQueue<'gc, Job<'gc>>,
-    pub templates: Cow<'gc, alloc::collections::BTreeMap<(u32, u32), JsObject<'gc>>>,
-    pub script_contexts: Cow<'gc, Vec<crate::JsEnv<'gc>>>,
-    pub regexp_cache: [Slot<'gc, RegExpCompiled<'gc>>; RegExpCompiled::BUCKETS],
-    pub regexp_literals: [Slot<'gc, RegExpLiteralEntry<'gc>>; RegExpCompiled::BUCKETS],
-    pub regexp_pristine: Cow<'gc, Option<RegExpPristine<'gc>>>,
-    pub regexp_literal: Cow<'gc, crate::Static<Option<RegExpLiteral>>>,
-    pub fast_builtins: Cow<'gc, crate::Static<FastTable>>,
-    pub builtin_nexts: Cow<'gc, [Option<JsObject<'gc>>; 2]>,
+    pub jobs: GcQueue<'scope, Job<'scope>>,
+    pub templates: Cow<'scope, alloc::collections::BTreeMap<(u32, u32), JsObject<'scope>>>,
+    pub script_contexts: Cow<'scope, Vec<crate::JsEnv<'scope>>>,
+    pub regexp_cache: [Slot<'scope, RegExpCompiled<'scope>>; RegExpCompiled::BUCKETS],
+    pub regexp_literals: [Slot<'scope, RegExpLiteralEntry<'scope>>; RegExpCompiled::BUCKETS],
+    pub regexp_pristine: Cow<'scope, Option<RegExpPristine<'scope>>>,
+    pub regexp_literal: Cow<'scope, crate::Static<Option<RegExpLiteral>>>,
+    pub fast_builtins: Cow<'scope, crate::Static<FastTable>>,
+    pub builtin_nexts: Cow<'scope, [Option<JsObject<'scope>>; 2]>,
     pub indexed_cache: AtomicU64,
 }
 
 #[derive(Clone, Collect)]
 #[collect(no_drop)]
-pub struct RegExpPristine<'gc> {
-    pub shape: crate::ShapeRef<'gc>,
-    pub last_index: crate::ShapeRef<'gc>,
-    pub words: [(u16, Value<'gc>); 10],
-    pub constructor: (u16, Value<'gc>),
-    pub methods: [JsObject<'gc>; 5],
-    pub species: JsObject<'gc>,
+pub struct RegExpPristine<'scope> {
+    pub shape: crate::ShapeRef<'scope>,
+    pub last_index: crate::ShapeRef<'scope>,
+    pub words: [(u16, Value<'scope>); 10],
+    pub constructor: (u16, Value<'scope>),
+    pub methods: [JsObject<'scope>; 5],
+    pub species: JsObject<'scope>,
 }
 
-pub type RegExpLiteral = for<'gc, 'a> fn(&crate::Agent<'gc, 'a>, &str, u16) -> Result<Value<'gc>, crate::Error>;
+pub type RegExpLiteral = for<'scope, 'a> fn(&crate::Agent<'scope, 'a>, &str, u16) -> Result<Value<'scope>, crate::Error>;
 
 #[derive(Clone, Collect)]
 #[collect(no_drop)]
-pub struct RegExpLiteralEntry<'gc> {
+pub struct RegExpLiteralEntry<'scope> {
     #[collect(require_static)]
     pub ptr: usize,
     #[collect(require_static)]
     pub len: usize,
     #[collect(require_static)]
     pub flags: u16,
-    pub compiled: RegExpCompiled<'gc>,
+    pub compiled: RegExpCompiled<'scope>,
 }
 
-pub type Fast0 = for<'gc, 'x> fn(&mut crate::Agent<'gc, 'x>, Value<'gc>) -> Option<Value<'gc>>;
+pub type Fast0 = for<'scope, 'x> fn(&mut crate::Agent<'scope, 'x>, Value<'scope>) -> Option<Value<'scope>>;
 
-pub type Fast1 = for<'gc, 'x> fn(&mut crate::Agent<'gc, 'x>, Value<'gc>, Value<'gc>) -> Option<Value<'gc>>;
+pub type Fast1 = for<'scope, 'x> fn(&mut crate::Agent<'scope, 'x>, Value<'scope>, Value<'scope>) -> Option<Value<'scope>>;
 
-pub type Fast2 = for<'gc, 'x> fn(&mut crate::Agent<'gc, 'x>, Value<'gc>, Value<'gc>, Value<'gc>) -> Option<Value<'gc>>;
+pub type Fast2 = for<'scope, 'x> fn(&mut crate::Agent<'scope, 'x>, Value<'scope>, Value<'scope>, Value<'scope>) -> Option<Value<'scope>>;
 
 #[derive(Clone, Copy)]
 pub enum FastCall {
@@ -208,10 +208,10 @@ impl FastTable {
 
 #[derive(Clone, Collect)]
 #[collect(no_drop)]
-pub struct RegExpCompiled<'gc> {
-    pub source: JsString<'gc>,
-    pub flags: JsString<'gc>,
-    pub compiled: Gc<'gc, crate::Static<alloc::boxed::Box<dyn core::any::Any + Send + Sync>>>,
+pub struct RegExpCompiled<'scope> {
+    pub source: JsString<'scope>,
+    pub flags: JsString<'scope>,
+    pub compiled: Gc<'scope, crate::Static<alloc::boxed::Box<dyn core::any::Any + Send + Sync>>>,
 }
 
 impl RegExpCompiled<'_> {
@@ -230,17 +230,17 @@ impl fmt::Debug for Realm<'_> {
     }
 }
 
-impl<'gc> Realm<'gc> {
-    fn new(mc: &Mutation<'gc>) -> Self {
+impl<'scope> Realm<'scope> {
+    fn new(mc: &Mutation<'scope>) -> Self {
         let object_proto = ObjectData::default().alloc(mc);
-        let derived = |proto: JsObject<'gc>| ObjectData { proto: Some(proto), ..ObjectData::default() }.alloc(mc);
+        let derived = |proto: JsObject<'scope>| ObjectData { proto: Some(proto), ..ObjectData::default() }.alloc(mc);
         let error = derived(object_proto);
         let error_protos = ErrorKind::ALL.map(|k| if k == ErrorKind::Error { error } else { derived(error) });
         let symbol = |d: &str| mc.alloc(SymbolData { description: Some(alloc::format!("Symbol.{d}").into()), private: false });
         let iterator_proto = derived(object_proto);
         let async_iterator_proto = derived(object_proto);
         let function_proto = derived(object_proto);
-        let placeholder = |proto: JsObject<'gc>| ObjectData { kind: ObjectKind::Native(Native::function(Self::no_regexp)), proto: Some(proto), ..ObjectData::default() }.alloc(mc);
+        let placeholder = |proto: JsObject<'scope>| ObjectData { kind: ObjectKind::Native(Native::function(Self::no_regexp)), proto: Some(proto), ..ObjectData::default() }.alloc(mc);
         let typed_array_ctor = placeholder(function_proto);
         let typed_array_proto = derived(object_proto);
         let array_proto = derived(object_proto);
@@ -324,7 +324,7 @@ impl<'gc> Realm<'gc> {
         }
     }
 
-    fn wide(o: JsObject<'gc>) -> JsObject<'gc> {
+    fn wide(o: JsObject<'scope>) -> JsObject<'scope> {
         o.get().widen();
         o
     }
@@ -337,16 +337,16 @@ impl<'gc> Realm<'gc> {
         Err(a.throw(ErrorKind::Type, "eval is not available in this realm"))
     }
 
-    pub fn error_proto(&self, kind: ErrorKind) -> JsObject<'gc> {
+    pub fn error_proto(&self, kind: ErrorKind) -> JsObject<'scope> {
         self.error_protos[kind as usize]
     }
 
-    pub fn native(&self, mc: &Mutation<'gc>, f: NativeFn) -> JsObject<'gc> {
+    pub fn native(&self, mc: &Mutation<'scope>, f: NativeFn) -> JsObject<'scope> {
         ObjectData { kind: ObjectKind::Native(Native::function(f)), proto: Some(self.function_proto), ..ObjectData::default() }.alloc(mc)
     }
 
-    pub fn name_function(&self, mc: &Mutation<'gc>, f: JsObject<'gc>, name: &str, length: Option<u32>) {
-        let prop = |v: Value<'gc>| Property { slot: crate::Slot::Data(v), enumerable: false, writable: false, configurable: true };
+    pub fn name_function(&self, mc: &Mutation<'scope>, f: JsObject<'scope>, name: &str, length: Option<u32>) {
+        let prop = |v: Value<'scope>| Property { slot: crate::Slot::Data(v), enumerable: false, writable: false, configurable: true };
         let d = f.borrow_mut(mc);
         if let Some(n) = length {
             d.define("length", prop(f64::from(n).into()));
@@ -354,32 +354,32 @@ impl<'gc> Realm<'gc> {
         d.define("name", prop(Value::String(crate::JsStr::alloc(mc, name))));
     }
 
-    pub fn named_native(&self, mc: &Mutation<'gc>, f: NativeFn, name: &str, length: u32) -> JsObject<'gc> {
+    pub fn named_native(&self, mc: &Mutation<'scope>, f: NativeFn, name: &str, length: u32) -> JsObject<'scope> {
         let func = self.native(mc, f);
         self.name_function(mc, func, name, Some(length));
         func
     }
 
-    pub fn symbol_method(&self, mc: &Mutation<'gc>, target: JsObject<'gc>, key: JsSymbol<'gc>, f: NativeFn, length: u32) -> JsObject<'gc> {
+    pub fn symbol_method(&self, mc: &Mutation<'scope>, target: JsObject<'scope>, key: JsSymbol<'scope>, f: NativeFn, length: u32) -> JsObject<'scope> {
         let func = self.named_native(mc, f, &alloc::format!("[{}]", key.description.as_deref().unwrap_or("")), length);
         target.borrow_mut(mc).define_symbol(key, Property::hidden(Value::Object(func)));
         func
     }
 
-    pub fn method(&self, mc: &Mutation<'gc>, target: JsObject<'gc>, name: &str, f: NativeFn, length: u32) {
+    pub fn method(&self, mc: &Mutation<'scope>, target: JsObject<'scope>, name: &str, f: NativeFn, length: u32) {
         let func = self.named_native(mc, f, name, length);
         target.borrow_mut(mc).define(name, Property::hidden(Value::Object(func)));
     }
 
-    pub fn add_fast(&self, mc: &Mutation<'gc>, native: NativeFn, call: FastCall, out: FastOut) {
+    pub fn add_fast(&self, mc: &Mutation<'scope>, native: NativeFn, call: FastCall, out: FastOut) {
         self.add_fast_at(mc, native, call, out, false);
     }
 
-    pub fn add_fast_inline(&self, mc: &Mutation<'gc>, native: NativeFn, call: FastCall, out: FastOut) {
+    pub fn add_fast_inline(&self, mc: &Mutation<'scope>, native: NativeFn, call: FastCall, out: FastOut) {
         self.add_fast_at(mc, native, call, out, true);
     }
 
-    fn add_fast_at(&self, mc: &Mutation<'gc>, native: NativeFn, call: FastCall, out: FastOut, inline_push: bool) {
+    fn add_fast_at(&self, mc: &Mutation<'scope>, native: NativeFn, call: FastCall, out: FastOut, inline_push: bool) {
         self.fast_builtins.update_with(mc, |table| {
             let mut table = *table;
             table.push(FastBuiltin { native, call, out, inline_push });
@@ -413,34 +413,34 @@ impl<'gc> Realm<'gc> {
 
 #[derive(Clone, Copy, Debug, Collect)]
 #[collect(no_drop)]
-pub struct Context<'gc>(Gc<'gc, Realm<'gc>>);
+pub struct Context<'scope>(Gc<'scope, Realm<'scope>>);
 
-impl<'gc> Context<'gc> {
-    pub fn realm(self) -> Gc<'gc, Realm<'gc>> {
+impl<'scope> Context<'scope> {
+    pub fn realm(self) -> Gc<'scope, Realm<'scope>> {
         self.0
     }
 }
 
-impl<'gc> From<Gc<'gc, Realm<'gc>>> for Context<'gc> {
-    fn from(r: Gc<'gc, Realm<'gc>>) -> Self {
+impl<'scope> From<Gc<'scope, Realm<'scope>>> for Context<'scope> {
+    fn from(r: Gc<'scope, Realm<'scope>>) -> Self {
         Self(r)
     }
 }
 
-impl<'gc> Deref for Context<'gc> {
-    type Target = Realm<'gc>;
+impl<'scope> Deref for Context<'scope> {
+    type Target = Realm<'scope>;
 
-    fn deref(&self) -> &Realm<'gc> {
+    fn deref(&self) -> &Realm<'scope> {
         &self.0
     }
 }
 
 pub trait Intrinsics {
-    fn install<'gc>(&self, mc: &Mutation<'gc>, realm: &Realm<'gc>);
+    fn install<'scope>(&self, mc: &Mutation<'scope>, realm: &Realm<'scope>);
 }
 
-impl<'gc> Scope<'gc, '_> {
-    pub fn context(&self, intrinsics: &dyn Intrinsics) -> Context<'gc> {
+impl<'scope> Scope<'scope, '_> {
+    pub fn context(&self, intrinsics: &dyn Intrinsics) -> Context<'scope> {
         let realm = self.mc.alloc(Realm::new(self.mc));
         intrinsics.install(self.mc, realm.get());
         Context(realm)

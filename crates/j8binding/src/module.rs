@@ -9,7 +9,7 @@ use crate::{Glue, Member, Object};
 pub const NATIVE: &str = "__j8_native";
 
 pub trait Install {
-    fn install_into<'gc>(a: &mut Agent<'gc, '_>, target: JsObject<'gc>);
+    fn install_into<'scope>(a: &mut Agent<'scope, '_>, target: JsObject<'scope>);
 }
 
 pub trait Module: Object {
@@ -17,7 +17,7 @@ pub trait Module: Object {
 }
 
 impl Glue {
-    pub fn spawn<'gc>(a: &mut Agent<'gc, '_>, future: impl core::future::Future<Output = j8framework::Settle> + Send + 'static) -> Result<j8framework::Value<'gc>, j8framework::Error> {
+    pub fn spawn<'scope>(a: &mut Agent<'scope, '_>, future: impl core::future::Future<Output = j8framework::Settle> + Send + 'static) -> Result<j8framework::Value<'scope>, j8framework::Error> {
         let promise = a.new_promise();
         let (resolve, reject) = a.promise_resolvers(promise);
         let job = j8framework::AsyncJob { resolve: a.global(resolve.into()), reject: a.global(reject.into()), future: alloc::boxed::Box::pin(future) };
@@ -32,7 +32,7 @@ impl Glue {
     }
 
     #[doc(hidden)]
-    pub fn natives<'gc>(a: &mut Agent<'gc, '_>) -> JsObject<'gc> {
+    pub fn natives<'scope>(a: &mut Agent<'scope, '_>) -> JsObject<'scope> {
         let global = a.realm.global;
         if let Some(j8framework::Slot::Data(v)) = global.borrow().get_own(a.mc, NATIVE).map(|p| p.slot)
             && let Some(o) = v.as_object()

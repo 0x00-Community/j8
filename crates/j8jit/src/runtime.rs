@@ -155,12 +155,12 @@ const _: () = assert!(core::mem::offset_of!(Ctx, args) == 128);
 const _: () = assert!(core::mem::offset_of!(Ctx, array_proto) == 104);
 const _: () = assert!(core::mem::offset_of!(Ctx, indexed_cache) == 112);
 
-unsafe fn val<'gc>(w: u64) -> Value<'gc> {
+unsafe fn val<'scope>(w: u64) -> Value<'scope> {
     unsafe { Value::from_bits(w) }
 }
 
 #[expect(clippy::cast_possible_truncation, reason = "an i32 sign-extended to 64 bits")]
-unsafe fn boxed<'gc>(rep: Rep, bits: u64) -> Value<'gc> {
+unsafe fn boxed<'scope>(rep: Rep, bits: u64) -> Value<'scope> {
     match rep {
         Rep::I32 => Value::Number(f64::from(bits as i64 as i32)),
         Rep::F64 => Value::Number(f64::from_bits(bits)),
@@ -215,8 +215,8 @@ fn pack(out: j8framework::FastOut, v: Value<'_>) -> u64 {
     }
 }
 
-fn direct<'gc>(a: &mut Agent<'gc, '_>, index: u32, out: j8framework::FastOut, ops: &[u64], keep: &mut bool) -> Result<u64, Error> {
-    let v = |i: usize| unsafe { val::<'gc>(ops.get(i).copied().unwrap_or(ValueBits::UNDEFINED)) };
+fn direct<'scope>(a: &mut Agent<'scope, '_>, index: u32, out: j8framework::FastOut, ops: &[u64], keep: &mut bool) -> Result<u64, Error> {
+    let v = |i: usize| unsafe { val::<'scope>(ops.get(i).copied().unwrap_or(ValueBits::UNDEFINED)) };
     let this = v(1);
     let callee = v(0).as_object().and_then(|o| o.native());
     let entry = a.realm.fast_builtins.get().get(usize::try_from(index).unwrap_or(usize::MAX));
@@ -254,7 +254,7 @@ fn direct_parts(packed: u64) -> (u32, j8framework::FastOut) {
     (packed as u32, out)
 }
 
-fn fast_of<'gc>(a: &mut Agent<'gc, '_>, index: u32, callee: Value<'gc>) -> Option<j8framework::FastCall> {
+fn fast_of<'scope>(a: &mut Agent<'scope, '_>, index: u32, callee: Value<'scope>) -> Option<j8framework::FastCall> {
     let native = callee.as_object().and_then(|o| o.native());
     let entry = a.realm.fast_builtins.get().get(usize::try_from(index).unwrap_or(usize::MAX))?;
     native.is_some_and(|n| core::ptr::fn_addr_eq(n.f, entry.native)).then_some(entry.call)
@@ -334,8 +334,8 @@ sysv! {
     }
 }
 
-fn helper<'gc>(jit: &Jit, exe: &Executor, a: &mut Agent<'gc, '_>, h: Helper, ops: &[u64], epoch: u64, keep: &mut bool) -> Result<u64, Error> {
-    let v = |i: usize| unsafe { val::<'gc>(ops.get(i).copied().unwrap_or(ValueBits::UNDEFINED)) };
+fn helper<'scope>(jit: &Jit, exe: &Executor, a: &mut Agent<'scope, '_>, h: Helper, ops: &[u64], epoch: u64, keep: &mut bool) -> Result<u64, Error> {
+    let v = |i: usize| unsafe { val::<'scope>(ops.get(i).copied().unwrap_or(ValueBits::UNDEFINED)) };
     Ok(match h {
         Helper::Call => {
             let mut args = [Value::Undefined; ARGS_WORDS];
@@ -346,7 +346,7 @@ fn helper<'gc>(jit: &Jit, exe: &Executor, a: &mut Agent<'gc, '_>, h: Helper, ops
             a.call(v(0), v(1), &args[..n])?.bits()
         }
         Helper::Construct => {
-            let args: Vec<Value<'gc>> = (2..ops.len()).map(v).collect();
+            let args: Vec<Value<'scope>> = (2..ops.len()).map(v).collect();
             a.construct(v(0), &args, v(1))?.bits()
         }
         Helper::GetNamed(f, k) => {
@@ -372,7 +372,7 @@ fn helper<'gc>(jit: &Jit, exe: &Executor, a: &mut Agent<'gc, '_>, h: Helper, ops
         Helper::ModF => (f64::from_bits(ops[0]) % f64::from_bits(ops[1])).to_bits(),
         Helper::ToBoolean => u64::from(a.to_boolean(v(0))),
         Helper::StoreCell => {
-            let cell = unsafe { &*(ops[0] as usize as *const j8framework::ValueCell<'gc>) };
+            let cell = unsafe { &*(ops[0] as usize as *const j8framework::ValueCell<'scope>) };
             cell.set(a.mc, v(1));
             0
         }
@@ -407,7 +407,7 @@ fn helper<'gc>(jit: &Jit, exe: &Executor, a: &mut Agent<'gc, '_>, h: Helper, ops
         Helper::InlinePush(index) => return direct(a, index, j8framework::FastOut::Number, ops, keep),
         Helper::Alloc(k) => {
             let shape = jit.shape(k);
-            let proto = unsafe { val::<'gc>(ops[0] | OBJECT_TAG) }.as_object();
+            let proto = unsafe { val::<'scope>(ops[0] | OBJECT_TAG) }.as_object();
             let o = ObjectData::ordinary(a.mc, proto, ops.len() - 1);
             if let Some(s) = &shape {
                 o.fill(a.mc, unsafe { s.handle() }, (1..ops.len()).map(|i| PropSlot::Data(v(i))));
@@ -487,10 +487,10 @@ fn deopt(ctx: *mut Ctx, id: u64) -> u64 {
     }
 }
 
-fn frames<'gc>(a: &mut Agent<'gc, '_>, ctx: &Ctx, d: &crate::Deopt) -> Vec<DeoptFrame<'gc>> {
+fn frames<'scope>(a: &mut Agent<'scope, '_>, ctx: &Ctx, d: &crate::Deopt) -> Vec<DeoptFrame<'scope>> {
     let st = d.state();
-    let mut objs: Vec<Option<Value<'gc>>> = alloc::vec![None; st.objects.len()];
-    let get = |v: u32| -> Value<'gc> {
+    let mut objs: Vec<Option<Value<'scope>>> = alloc::vec![None; st.objects.len()];
+    let get = |v: u32| -> Value<'scope> {
         let (rep, src) = d.value(v);
         let bits = match src {
             crate::Src::Buf(i) => ctx.buf[i as usize],
@@ -499,7 +499,7 @@ fn frames<'gc>(a: &mut Agent<'gc, '_>, ctx: &Ctx, d: &crate::Deopt) -> Vec<Deopt
         unsafe { boxed(rep, bits) }
     };
     let cell = RefCell::new(&mut objs);
-    let slot = |s: &Slot| -> Value<'gc> {
+    let slot = |s: &Slot| -> Value<'scope> {
         match s {
             Slot::Value(v) => get(*v),
             Slot::Virtual(i) => cell.borrow()[*i as usize].unwrap_or(Value::Undefined),
@@ -509,7 +509,7 @@ fn frames<'gc>(a: &mut Agent<'gc, '_>, ctx: &Ctx, d: &crate::Deopt) -> Vec<Deopt
     for i in (0..st.objects.len()).rev() {
         let o = &st.objects[i];
         let proto = get(o.proto).as_object();
-        let fields: Vec<Value<'gc>> = o.fields.iter().map(slot).collect();
+        let fields: Vec<Value<'scope>> = o.fields.iter().map(slot).collect();
         let ob = ObjectData::ordinary(a.mc, proto, fields.len());
         if let Some(s) = &o.shape {
             ob.fill(a.mc, unsafe { s.handle() }, fields.into_iter().map(PropSlot::Data));
@@ -518,7 +518,7 @@ fn frames<'gc>(a: &mut Agent<'gc, '_>, ctx: &Ctx, d: &crate::Deopt) -> Vec<Deopt
     }
     for (c, idx, s) in &st.writes {
         let env = get(*c);
-        let env = unsafe { val::<'gc>((env.bits() & ValueBits::PAYLOAD) | CONTEXT_TAG) }.as_context();
+        let env = unsafe { val::<'scope>((env.bits() & ValueBits::PAYLOAD) | CONTEXT_TAG) }.as_context();
         if let Some(env) = env {
             j8framework::Env::set(env, a.mc, *idx as usize, slot(s));
         }
@@ -532,7 +532,7 @@ fn frames<'gc>(a: &mut Agent<'gc, '_>, ctx: &Ctx, d: &crate::Deopt) -> Vec<Deopt
         context: {
             let c = slot(&f.context);
             if c.as_context().is_some() || c.bits() == ValueBits::UNDEFINED || c.bits() == ValueBits::UNINIT { c } else {
-                unsafe { val::<'gc>((c.bits() & ValueBits::PAYLOAD) | CONTEXT_TAG) }
+                unsafe { val::<'scope>((c.bits() & ValueBits::PAYLOAD) | CONTEXT_TAG) }
             }
         },
         acc: slot(&f.acc),

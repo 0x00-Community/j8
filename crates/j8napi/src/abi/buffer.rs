@@ -13,25 +13,25 @@ pub struct Deferred {
 }
 
 impl Env {
-    fn array_buffer<'gc>(a: &j8framework::Agent<'gc, '_>, bytes: Backing) -> JsObject<'gc> {
+    fn array_buffer<'scope>(a: &j8framework::Agent<'scope, '_>, bytes: Backing) -> JsObject<'scope> {
         let data = BufferData { bytes: Some(bytes), max: None, shared: false };
         ObjectData { kind: ObjectKind::ArrayBuffer(Box::new(data)), proto: Some(a.realm.array_buffer_proto), ..ObjectData::default() }.alloc(a.mc)
     }
 
-    fn buffer_bytes<'gc>(a: &j8framework::Agent<'gc, '_>, buffer: JsObject<'gc>) -> (*mut c_void, usize) {
+    fn buffer_bytes<'scope>(a: &j8framework::Agent<'scope, '_>, buffer: JsObject<'scope>) -> (*mut c_void, usize) {
         match &mut buffer.borrow_mut(a.mc).kind {
             ObjectKind::ArrayBuffer(b) => b.bytes.as_deref_mut().map_or((core::ptr::null_mut(), 0), |s| (s.as_mut_ptr().cast(), s.len())),
             _ => (core::ptr::null_mut(), 0),
         }
     }
 
-    fn array_buffer_of<'gc>(&self, h: Handle) -> Result<JsObject<'gc>, Status> {
+    fn array_buffer_of<'scope>(&self, h: Handle) -> Result<JsObject<'scope>, Status> {
         let o = self.value(h)?.as_object().ok_or(Status::ArraybufferExpected)?;
         let ok = matches!(&o.borrow().kind, ObjectKind::ArrayBuffer(b) if !b.shared);
         if ok { Ok(o) } else { Err(Status::ArraybufferExpected) }
     }
 
-    fn check_view<'gc>(&self, a: &j8framework::Agent<'gc, '_>, buffer: JsObject<'gc>, offset: usize, bytes: usize, size: usize, what: &str) -> Result<(), Status> {
+    fn check_view<'scope>(&self, a: &j8framework::Agent<'scope, '_>, buffer: JsObject<'scope>, offset: usize, bytes: usize, size: usize, what: &str) -> Result<(), Status> {
         let len = Self::buffer_bytes(a, buffer).1;
         let msg = if !offset.is_multiple_of(size) {
             alloc::format!("start offset of {what} should be a multiple of {size}")
@@ -44,7 +44,7 @@ impl Env {
         Err(Status::PendingException)
     }
 
-    fn view_of<'gc>(&self, h: Handle) -> Result<(Option<ElementKind>, ViewData<'gc>), Status> {
+    fn view_of<'scope>(&self, h: Handle) -> Result<(Option<ElementKind>, ViewData<'scope>), Status> {
         let o = self.value(h)?.as_object().ok_or(Status::InvalidArg)?;
         match &o.borrow().kind {
             ObjectKind::TypedArray(k, v) => Ok((Some(*k), *v)),

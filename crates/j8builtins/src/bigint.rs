@@ -7,7 +7,7 @@ use crate::{Args, Installer};
 struct BigInts;
 
 impl BigInts {
-    fn construct<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn construct<'scope>(a: &mut Agent<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let prim = a.to_primitive(args.at(0), Hint::Number)?;
         let b = match prim.kind() {
             ValueKind::Number(x) => Agent::number_to_bigint(x).ok_or_else(|| a.throw(ErrorKind::Range, &alloc::format!("The number {} cannot be converted to a BigInt because it is not an integer", ryu_js::Buffer::new().format(x))))?,
@@ -25,14 +25,14 @@ impl BigInts {
         Ok(a.bigint(b))
     }
 
-    fn this<'gc>(a: &Agent<'gc, '_>, this: Value<'gc>) -> Result<j8framework::JsBigInt<'gc>, Error> {
+    fn this<'scope>(a: &Agent<'scope, '_>, this: Value<'scope>) -> Result<j8framework::JsBigInt<'scope>, Error> {
         match this.unwrapped().kind() {
             ValueKind::BigInt(b) => Ok(b),
             _ => Err(a.throw(ErrorKind::Type, "BigInt.prototype method called on a non-BigInt")),
         }
     }
 
-    fn to_string<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn to_string<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let b = Self::this(a, this)?;
         let radix = match args.at(0).kind() {
             ValueKind::Undefined => 10,
@@ -42,7 +42,7 @@ impl BigInts {
         Ok(a.string(&b.0.to_str_radix(radix)).into())
     }
 
-    fn value_of<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn value_of<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Ok(Value::BigInt(Self::this(a, this)?))
     }
 }

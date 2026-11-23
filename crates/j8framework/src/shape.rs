@@ -46,13 +46,13 @@ impl From<&Property<'_>> for Attrs {
     }
 }
 
-impl<'gc> From<(Slot<'gc>, Attrs)> for Property<'gc> {
-    fn from((slot, a): (Slot<'gc>, Attrs)) -> Self {
+impl<'scope> From<(Slot<'scope>, Attrs)> for Property<'scope> {
+    fn from((slot, a): (Slot<'scope>, Attrs)) -> Self {
         Self { slot, enumerable: a.enumerable(), writable: a.writable(), configurable: a.configurable() }
     }
 }
 
-pub type ShapeRef<'gc> = Handle<'gc, Shape>;
+pub type ShapeRef<'scope> = Handle<'scope, Shape>;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct ShapeKey(usize);
@@ -66,7 +66,7 @@ impl ShapeKey {
         unsafe { Handle::<'a, Shape>::from_id(self.0) }.get().get()
     }
 
-    pub unsafe fn handle<'gc>(self) -> ShapeRef<'gc> {
+    pub unsafe fn handle<'scope>(self) -> ShapeRef<'scope> {
         unsafe { Handle::from_id(self.0) }
     }
 }
@@ -87,7 +87,7 @@ impl From<ShapeRef<'_>> for ShapeKey {
     }
 }
 
-paragc::brand!(pub ShapeBrand = for<'gc> Shape);
+paragc::brand!(pub ShapeBrand = for<'scope> Shape);
 
 type Transition = (SmallStr, Attrs, paragc::Weak<ShapeBrand>);
 
@@ -113,13 +113,13 @@ impl Shape {
         Self { keys, len, index: OnceBox::default(), searches: IsoCell::new(0), transitions: AtomicRefCell::new(Vec::new()), this: IsoCell::new(0), digit_keys }
     }
 
-    fn alloc<'gc>(mc: &Mutation<'gc>, keys: Arc<Prefix<(SmallStr, Attrs)>>, len: usize) -> ShapeRef<'gc> {
+    fn alloc<'scope>(mc: &Mutation<'scope>, keys: Arc<Prefix<(SmallStr, Attrs)>>, len: usize) -> ShapeRef<'scope> {
         let h = mc.mutator().alloc_handle(Self::new(keys, len));
         h.this.set(h.id());
         h
     }
 
-    pub fn handle<'gc>(&self, _: &Mutation<'gc>) -> ShapeRef<'gc> {
+    pub fn handle<'scope>(&self, _: &Mutation<'scope>) -> ShapeRef<'scope> {
         unsafe { Handle::from_id(self.this.get()) }
     }
 
@@ -166,16 +166,16 @@ impl Shape {
         self.keys()[i].1
     }
 
-    pub fn rooted<'gc>(mc: &Mutation<'gc>, keys: Vec<(SmallStr, Attrs)>) -> ShapeRef<'gc> {
+    pub fn rooted<'scope>(mc: &Mutation<'scope>, keys: Vec<(SmallStr, Attrs)>) -> ShapeRef<'scope> {
         let len = keys.len();
         Self::alloc(mc, Prefix::new(keys), len)
     }
 
-    pub fn empty<'gc>(mc: &Mutation<'gc>) -> ShapeRef<'gc> {
+    pub fn empty<'scope>(mc: &Mutation<'scope>) -> ShapeRef<'scope> {
         Self::rooted(mc, Vec::new())
     }
 
-    pub fn child<'gc>(&self, mc: &Mutation<'gc>, key: &str, attrs: Attrs) -> ShapeRef<'gc> {
+    pub fn child<'scope>(&self, mc: &Mutation<'scope>, key: &str, attrs: Attrs) -> ShapeRef<'scope> {
         let m = mc.mutator();
         let mut ts = self.transitions.borrow_mut();
         let mut found = None;
@@ -198,12 +198,12 @@ impl Shape {
 }
 
 #[derive(Collect)]
-pub struct Dict<'gc> {
+pub struct Dict<'scope> {
     #[collect(require_static)]
     keys: Vec<(SmallStr, Attrs)>,
     #[collect(require_static)]
     index: Option<hashbrown::HashMap<SmallStr, u32, BuildHasherDefault<FxHasher>>>,
-    slots: Vec<Slot<'gc>>,
+    slots: Vec<Slot<'scope>>,
 }
 
 impl Dict<'_> {
@@ -219,11 +219,11 @@ impl Dict<'_> {
     }
 }
 
-pub struct Props<'gc> {
-    shape: HandleSlot<'gc, Shape>,
-    store: GcSlot<'gc, Erased>,
-    dict: GcSlot<'gc, GcCell<'gc, Dict<'gc>>>,
-    inline: [ValueCell<'gc>; INLINE],
+pub struct Props<'scope> {
+    shape: HandleSlot<'scope, Shape>,
+    store: GcSlot<'scope, Erased>,
+    dict: GcSlot<'scope, GcCell<'scope, Dict<'scope>>>,
+    inline: [ValueCell<'scope>; INLINE],
 }
 
 impl Default for Props<'_> {
@@ -253,23 +253,23 @@ unsafe impl crate::Trace for Props<'_> {
     }
 }
 
-impl<'gc> Props<'gc> {
+impl<'scope> Props<'scope> {
     pub const SHAPE_OFFSET: usize = core::mem::offset_of!(Props<'static>, shape);
     pub const STORE_OFFSET: usize = core::mem::offset_of!(Props<'static>, store);
     pub const DICT_OFFSET: usize = core::mem::offset_of!(Props<'static>, dict);
     pub const INLINE_OFFSET: usize = core::mem::offset_of!(Props<'static>, inline);
     pub const INLINE: usize = INLINE;
 
-    pub fn with_capacity(mc: &Mutation<'gc>, n: usize) -> Self {
+    pub fn with_capacity(mc: &Mutation<'scope>, n: usize) -> Self {
         let store = (n > INLINE).then(|| Store::reserve(mc, n - INLINE).gc());
         Self { store: GcSlot::from(store), ..Self::default() }
     }
 
-    fn dict_cell(&self) -> Option<&'gc GcCell<'gc, Dict<'gc>>> {
+    fn dict_cell(&self) -> Option<&'scope GcCell<'scope, Dict<'scope>>> {
         self.dict.get().map(Gc::get)
     }
 
-    fn store(&self) -> Option<Store<'gc>> {
+    fn store(&self) -> Option<Store<'scope>> {
         self.store.get().map(|g| unsafe { Store::from_gc(g) })
     }
 
@@ -278,7 +278,7 @@ impl<'gc> Props<'gc> {
     }
 
     #[inline]
-    fn cell(&self, i: usize) -> Option<&ValueCell<'gc>> {
+    fn cell(&self, i: usize) -> Option<&ValueCell<'scope>> {
         match i.checked_sub(INLINE) {
             None => Some(&self.inline[i]),
             Some(k) => self.store()?.cell(k),
@@ -286,7 +286,7 @@ impl<'gc> Props<'gc> {
     }
 
     #[inline]
-    pub fn shape_ref(&self) -> Option<&'gc Shape> {
+    pub fn shape_ref(&self) -> Option<&'scope Shape> {
         self.shape.get().map(|h| h.get().get())
     }
 
@@ -296,7 +296,7 @@ impl<'gc> Props<'gc> {
     }
 
     #[inline]
-    pub fn shape(&self) -> Option<ShapeRef<'gc>> {
+    pub fn shape(&self) -> Option<ShapeRef<'scope>> {
         self.shape.get()
     }
 
@@ -338,13 +338,13 @@ impl<'gc> Props<'gc> {
     }
 
     #[inline]
-    pub fn read_data(&self, i: usize) -> Option<Value<'gc>> {
+    pub fn read_data(&self, i: usize) -> Option<Value<'scope>> {
         let v = self.cell(i)?.get();
         v.is_plain_slot().then_some(v)
     }
 
     #[inline]
-    pub fn write_data(&self, mc: &Mutation<'gc>, i: usize, v: Value<'gc>) -> bool {
+    pub fn write_data(&self, mc: &Mutation<'scope>, i: usize, v: Value<'scope>) -> bool {
         let Some(c) = self.cell(i) else { return false };
         if c.get().as_accessor().is_some() {
             return false;
@@ -354,7 +354,7 @@ impl<'gc> Props<'gc> {
     }
 
     #[inline]
-    pub fn word(&self, i: usize) -> Option<Value<'gc>> {
+    pub fn word(&self, i: usize) -> Option<Value<'scope>> {
         if self.dict.get().is_some() {
             return None;
         }
@@ -362,7 +362,7 @@ impl<'gc> Props<'gc> {
     }
 
     #[inline]
-    pub fn same_words(&self, slots: &[(u16, Value<'gc>)]) -> bool {
+    pub fn same_words(&self, slots: &[(u16, Value<'scope>)]) -> bool {
         if self.dict.get().is_some() {
             return false;
         }
@@ -388,14 +388,14 @@ impl<'gc> Props<'gc> {
     }
 
     #[inline]
-    pub fn slot(&self, i: usize) -> Slot<'gc> {
+    pub fn slot(&self, i: usize) -> Slot<'scope> {
         match self.dict_cell() {
             Some(d) => d.borrow().slots[i],
             None => Slot::decode(self.cell(i).map_or(Value::Undefined, ValueCell::get)),
         }
     }
 
-    pub fn get(&self, i: usize) -> Property<'gc> {
+    pub fn get(&self, i: usize) -> Property<'scope> {
         if let Some(d) = self.dict_cell() {
             let d = d.borrow();
             return Property::from((d.slots[i], d.keys[i].1));
@@ -404,7 +404,7 @@ impl<'gc> Props<'gc> {
     }
 
     #[inline]
-    pub fn get_if(&self, i: usize, key: &str) -> Option<Property<'gc>> {
+    pub fn get_if(&self, i: usize, key: &str) -> Option<Property<'scope>> {
         match self.dict_cell() {
             Some(d) => {
                 let d = d.borrow();
@@ -418,7 +418,7 @@ impl<'gc> Props<'gc> {
         }
     }
 
-    pub fn lookup(&self, key: &str) -> Option<(usize, Property<'gc>)> {
+    pub fn lookup(&self, key: &str) -> Option<(usize, Property<'scope>)> {
         match self.dict_cell() {
             Some(d) => {
                 let d = d.borrow();
@@ -429,7 +429,7 @@ impl<'gc> Props<'gc> {
     }
 
     #[inline]
-    pub fn set_slot(&self, mc: &Mutation<'gc>, i: usize, slot: Slot<'gc>) {
+    pub fn set_slot(&self, mc: &Mutation<'scope>, i: usize, slot: Slot<'scope>) {
         match self.dict_cell() {
             Some(d) => d.borrow_mut(mc).slots[i] = slot,
             None => {
@@ -440,11 +440,11 @@ impl<'gc> Props<'gc> {
         }
     }
 
-    pub fn entries(&self) -> Vec<(SmallStr, Property<'gc>)> {
+    pub fn entries(&self) -> Vec<(SmallStr, Property<'scope>)> {
         (0..self.len()).map(|i| (self.key(i), self.get(i))).collect()
     }
 
-    fn to_dict(&self) -> Dict<'gc> {
+    fn to_dict(&self) -> Dict<'scope> {
         let shape = self.shape_ref();
         let n = shape.map_or(0, Shape::len);
         let mut d = Dict {
@@ -456,7 +456,7 @@ impl<'gc> Props<'gc> {
         d
     }
 
-    fn with_dict(&self, mc: &Mutation<'gc>, f: impl FnOnce(&mut Dict<'gc>)) {
+    fn with_dict(&self, mc: &Mutation<'scope>, f: impl FnOnce(&mut Dict<'scope>)) {
         if self.dict.get().is_none() {
             let d = mc.alloc(GcCell::new(mc, self.to_dict()));
             self.dict.set(mc.mutator(), Some(d));
@@ -465,7 +465,7 @@ impl<'gc> Props<'gc> {
         f(&mut self.dict_cell().expect("just converted").borrow_mut(mc));
     }
 
-    fn advance(&self, mc: &Mutation<'gc>, from: Option<ShapeRef<'gc>>, to: ShapeRef<'gc>, slot: Slot<'gc>) -> bool {
+    fn advance(&self, mc: &Mutation<'scope>, from: Option<ShapeRef<'scope>>, to: ShapeRef<'scope>, slot: Slot<'scope>) -> bool {
         let n = to.len() - 1;
         let v = slot.encode(mc);
         match n.checked_sub(INLINE) {
@@ -485,7 +485,7 @@ impl<'gc> Props<'gc> {
         true
     }
 
-    pub fn push(&self, mc: &Mutation<'gc>, key: &str, prop: Property<'gc>, wide: bool, root: impl Fn() -> Option<ShapeRef<'gc>>) {
+    pub fn push(&self, mc: &Mutation<'scope>, key: &str, prop: Property<'scope>, wide: bool, root: impl Fn() -> Option<ShapeRef<'scope>>) {
         let attrs = Attrs::from(&prop);
         while !self.is_dict() {
             let from = self.shape();
@@ -513,7 +513,7 @@ impl<'gc> Props<'gc> {
         });
     }
 
-    pub fn push_to(&self, mc: &Mutation<'gc>, to: ShapeRef<'gc>, slot: Slot<'gc>) {
+    pub fn push_to(&self, mc: &Mutation<'scope>, to: ShapeRef<'scope>, slot: Slot<'scope>) {
         loop {
             let from = self.shape();
             debug_assert_eq!(to.len(), from.map_or(0, |f| f.len()) + 1);
@@ -523,7 +523,7 @@ impl<'gc> Props<'gc> {
         }
     }
 
-    pub fn fill(&self, mc: &Mutation<'gc>, to: ShapeRef<'gc>, slots: impl IntoIterator<Item = Slot<'gc>>) {
+    pub fn fill(&self, mc: &Mutation<'scope>, to: ShapeRef<'scope>, slots: impl IntoIterator<Item = Slot<'scope>>) {
         debug_assert!(self.shape_ref().is_none() && !self.is_dict());
         for (i, slot) in slots.into_iter().enumerate().take(to.len()) {
             let v = slot.encode(mc);
@@ -541,7 +541,7 @@ impl<'gc> Props<'gc> {
         self.shape.set(Some(to));
     }
 
-    pub fn replace(&self, mc: &Mutation<'gc>, i: usize, prop: Property<'gc>) {
+    pub fn replace(&self, mc: &Mutation<'scope>, i: usize, prop: Property<'scope>) {
         let attrs = Attrs::from(&prop);
         if self.attrs(i) == attrs {
             return self.set_slot(mc, i, prop.slot);
@@ -552,7 +552,7 @@ impl<'gc> Props<'gc> {
         });
     }
 
-    pub fn remove(&self, mc: &Mutation<'gc>, i: usize) {
+    pub fn remove(&self, mc: &Mutation<'scope>, i: usize) {
         self.with_dict(mc, |d| {
             d.keys.remove(i);
             d.slots.remove(i);
@@ -560,7 +560,7 @@ impl<'gc> Props<'gc> {
         });
     }
 
-    pub fn retain(&self, mc: &Mutation<'gc>, keep: impl Fn(&str) -> bool) {
+    pub fn retain(&self, mc: &Mutation<'scope>, keep: impl Fn(&str) -> bool) {
         let gone: Vec<usize> = (0..self.len()).filter(|&i| !keep(&self.key(i))).collect();
         if gone.is_empty() {
             return;

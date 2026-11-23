@@ -25,11 +25,11 @@ mod slot {
 }
 
 impl Promises {
-    fn is_intrinsic<'gc>(a: &Agent<'gc, '_>, c: Value<'gc>) -> bool {
+    fn is_intrinsic<'scope>(a: &Agent<'scope, '_>, c: Value<'scope>) -> bool {
         matches!(c.kind(), ValueKind::Object(o) if j8framework::Gc::ptr_eq(o, a.realm.promise_ctor))
     }
 
-    fn closure<'gc>(a: &Agent<'gc, '_>, f: j8framework::ClosureFn, slots: Vec<Value<'gc>>, length: u32) -> JsObject<'gc> {
+    fn closure<'scope>(a: &Agent<'scope, '_>, f: j8framework::ClosureFn, slots: Vec<Value<'scope>>, length: u32) -> JsObject<'scope> {
         let o = ObjectData { kind: ObjectKind::NativeClosure(NativeClosure { f, slots, constructor: false }), proto: Some(a.realm.function_proto), ..ObjectData::default() }.alloc(a.mc);
         a.realm.name_function(a.mc, o, "", Some(length));
         o
@@ -42,13 +42,13 @@ impl Promises {
         }
     }
 
-    fn set_slot<'gc>(a: &Agent<'gc, '_>, f: JsObject<'gc>, i: usize, v: Value<'gc>) {
+    fn set_slot<'scope>(a: &Agent<'scope, '_>, f: JsObject<'scope>, i: usize, v: Value<'scope>) {
         if let ObjectKind::NativeClosure(c) = &mut f.borrow_mut(a.mc).kind {
             c.slots[i] = v;
         }
     }
 
-    fn capability_executor<'gc>(a: &mut Agent<'gc, '_>, f: JsObject<'gc>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn capability_executor<'scope>(a: &mut Agent<'scope, '_>, f: JsObject<'scope>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let s = Self::slots(f);
         if s[0] != Value::Undefined || s[1] != Value::Undefined {
             return Err(a.throw(ErrorKind::Type, "Promise executor has already been invoked with non-undefined arguments"));
@@ -58,7 +58,7 @@ impl Promises {
         Ok(Value::Undefined)
     }
 
-    fn new_capability<'gc>(a: &mut Agent<'gc, '_>, c: Value<'gc>) -> Result<Capability<'gc>, Error> {
+    fn new_capability<'scope>(a: &mut Agent<'scope, '_>, c: Value<'scope>) -> Result<Capability<'scope>, Error> {
         if Self::is_intrinsic(a, c) {
             let p = a.new_promise();
             let (resolve, reject) = a.promise_resolvers(p);
@@ -76,7 +76,7 @@ impl Promises {
         Ok(Capability { promise, resolve: s[0], reject: s[1] })
     }
 
-    fn resolve_with<'gc>(a: &mut Agent<'gc, '_>, c: Value<'gc>, x: Value<'gc>) -> Result<Value<'gc>, Error> {
+    fn resolve_with<'scope>(a: &mut Agent<'scope, '_>, c: Value<'scope>, x: Value<'scope>) -> Result<Value<'scope>, Error> {
         if Agent::is_promise(x) {
             let xc = a.get_named(x, "constructor")?;
             if xc.same_value(c) {
@@ -88,7 +88,7 @@ impl Promises {
         Ok(cap.promise)
     }
 
-    fn construct<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn construct<'scope>(a: &mut Agent<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let new_target = a.new_target;
         let executor = args.at(0);
         if new_target == Value::Undefined {
@@ -113,25 +113,25 @@ impl Promises {
         Ok(p.into())
     }
 
-    fn this_object<'gc>(a: &Agent<'gc, '_>, this: Value<'gc>) -> Result<Value<'gc>, Error> {
+    fn this_object<'scope>(a: &Agent<'scope, '_>, this: Value<'scope>) -> Result<Value<'scope>, Error> {
         match this.kind() {
             ValueKind::Object(_) => Ok(this),
             _ => Err(a.throw(ErrorKind::Type, "Promise method called on a non-object")),
         }
     }
 
-    fn resolve<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn resolve<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let c = Self::this_object(a, this)?;
         Self::resolve_with(a, c, args.at(0))
     }
 
-    fn reject<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn reject<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let cap = Self::new_capability(a, this)?;
         a.call(cap.reject, Value::Undefined, &[args.at(0)])?;
         Ok(cap.promise)
     }
 
-    fn with_resolvers<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn with_resolvers<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let cap = Self::new_capability(a, this)?;
         let o = a.object();
         a.create_data_property_or_throw(o, Key::Str("promise"), cap.promise)?;
@@ -140,7 +140,7 @@ impl Promises {
         Ok(o.into())
     }
 
-    fn try_<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn try_<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let c = Self::this_object(a, this)?;
         let cap = Self::new_capability(a, c)?;
         match a.call(args.at(0), Value::Undefined, args.get(1..).unwrap_or(&[])) {
@@ -154,14 +154,14 @@ impl Promises {
         Ok(cap.promise)
     }
 
-    fn this_promise<'gc>(a: &Agent<'gc, '_>, this: Value<'gc>) -> Result<JsObject<'gc>, Error> {
+    fn this_promise<'scope>(a: &Agent<'scope, '_>, this: Value<'scope>) -> Result<JsObject<'scope>, Error> {
         match this.kind() {
             ValueKind::Object(o) if Agent::is_promise(this) => Ok(o),
             _ => Err(a.throw(ErrorKind::Type, "Promise.prototype method called on a non-promise")),
         }
     }
 
-    fn then<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn then<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let p = Self::this_promise(a, this)?;
         let c = Buffers::species_constructor(a, this, a.realm.promise_ctor.into())?;
         let cap = Self::new_capability(a, c)?;
@@ -169,16 +169,16 @@ impl Promises {
         Ok(cap.promise)
     }
 
-    fn catch<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn catch<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let then = a.get_named(this, "then")?;
         a.call(then, this, &[Value::Undefined, args.at(0)])
     }
 
-    fn finally<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn finally<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let p = Self::this_object(a, this)?;
         let c = Buffers::species_constructor(a, p, a.realm.promise_ctor.into())?;
         let f = args.at(0);
-        let (then_f, catch_f): (Value<'gc>, Value<'gc>) = if a.is_callable(f) {
+        let (then_f, catch_f): (Value<'scope>, Value<'scope>) = if a.is_callable(f) {
             (Self::closure(a, Self::then_finally, alloc::vec![f, c], 1).into(), Self::closure(a, Self::catch_finally, alloc::vec![f, c], 1).into())
         } else {
             (f, f)
@@ -187,7 +187,7 @@ impl Promises {
         a.call(then, p, &[then_f, catch_f])
     }
 
-    fn finally_step<'gc>(a: &mut Agent<'gc, '_>, f: JsObject<'gc>, v: Value<'gc>, rethrow: bool) -> Result<Value<'gc>, Error> {
+    fn finally_step<'scope>(a: &mut Agent<'scope, '_>, f: JsObject<'scope>, v: Value<'scope>, rethrow: bool) -> Result<Value<'scope>, Error> {
         let s = Self::slots(f);
         let result = a.call(s[0], Value::Undefined, &[])?;
         let p = Self::resolve_with(a, s[1], result)?;
@@ -196,39 +196,39 @@ impl Promises {
         a.call(then, p, &[thunk.into()])
     }
 
-    fn then_finally<'gc>(a: &mut Agent<'gc, '_>, f: JsObject<'gc>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn then_finally<'scope>(a: &mut Agent<'scope, '_>, f: JsObject<'scope>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Self::finally_step(a, f, args.at(0), false)
     }
 
-    fn catch_finally<'gc>(a: &mut Agent<'gc, '_>, f: JsObject<'gc>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn catch_finally<'scope>(a: &mut Agent<'scope, '_>, f: JsObject<'scope>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Self::finally_step(a, f, args.at(0), true)
     }
 
-    fn value_thunk<'gc>(_: &mut Agent<'gc, '_>, f: JsObject<'gc>, _: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn value_thunk<'scope>(_: &mut Agent<'scope, '_>, f: JsObject<'scope>, _: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Ok(Self::slots(f)[0])
     }
 
-    fn thrower<'gc>(a: &mut Agent<'gc, '_>, f: JsObject<'gc>, _: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn thrower<'scope>(a: &mut Agent<'scope, '_>, f: JsObject<'scope>, _: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Err(a.throw_value(Self::slots(f)[0]))
     }
 
-    fn all<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn all<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Self::combine(a, this, args.at(0), Combinator::All)
     }
 
-    fn all_settled<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn all_settled<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Self::combine(a, this, args.at(0), Combinator::AllSettled)
     }
 
-    fn any<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn any<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Self::combine(a, this, args.at(0), Combinator::Any)
     }
 
-    fn race<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn race<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Self::combine(a, this, args.at(0), Combinator::Race)
     }
 
-    fn reject_on<'gc>(a: &mut Agent<'gc, '_>, cap: &Capability<'gc>, e: Error) -> Result<Value<'gc>, Error> {
+    fn reject_on<'scope>(a: &mut Agent<'scope, '_>, cap: &Capability<'scope>, e: Error) -> Result<Value<'scope>, Error> {
         match e {
             Error::Exception(g) => {
                 let reason = a.local(&g);
@@ -239,7 +239,7 @@ impl Promises {
         }
     }
 
-    fn combine<'gc>(a: &mut Agent<'gc, '_>, c: Value<'gc>, iterable: Value<'gc>, how: Combinator) -> Result<Value<'gc>, Error> {
+    fn combine<'scope>(a: &mut Agent<'scope, '_>, c: Value<'scope>, iterable: Value<'scope>, how: Combinator) -> Result<Value<'scope>, Error> {
         let cap = Self::new_capability(a, c)?;
         let resolve = match a.get_named(c, "resolve") {
             Ok(f) if a.is_callable(f) => f,
@@ -268,18 +268,18 @@ impl Promises {
         }
     }
 
-    fn box_value<'gc>(a: &Agent<'gc, '_>, v: Value<'gc>) -> Value<'gc> {
+    fn box_value<'scope>(a: &Agent<'scope, '_>, v: Value<'scope>) -> Value<'scope> {
         a.array(alloc::vec![v]).into()
     }
 
-    fn remaining_add<'gc>(a: &mut Agent<'gc, '_>, remaining: Value<'gc>, d: f64) -> Result<f64, Error> {
+    fn remaining_add<'scope>(a: &mut Agent<'scope, '_>, remaining: Value<'scope>, d: f64) -> Result<f64, Error> {
         let n = a.get_index(remaining, 0.0)?;
         let Some(n) = n.as_number() else { return Ok(0.0) };
         a.set_index(remaining, 0.0, (n + d).into())?;
         Ok(n + d)
     }
 
-    fn perform<'gc>(a: &mut Agent<'gc, '_>, c: Value<'gc>, resolve: Value<'gc>, it: j8framework::IterRecord<'gc>, cap: &Capability<'gc>, how: Combinator, done: &mut bool) -> Result<Value<'gc>, Error> {
+    fn perform<'scope>(a: &mut Agent<'scope, '_>, c: Value<'scope>, resolve: Value<'scope>, it: j8framework::IterRecord<'scope>, cap: &Capability<'scope>, how: Combinator, done: &mut bool) -> Result<Value<'scope>, Error> {
         let values = a.array(Vec::new());
         let remaining = Self::box_value(a, 1.0.into());
         let mut index = 0.0;
@@ -302,7 +302,7 @@ impl Promises {
                 a.create_index(values, index, Value::Undefined)?;
             }
             let next_promise = a.call(resolve, c, &[v])?;
-            let element = |a: &mut Agent<'gc, '_>, f: j8framework::ClosureFn, settle: Value<'gc>, called: Value<'gc>| -> Value<'gc> {
+            let element = |a: &mut Agent<'scope, '_>, f: j8framework::ClosureFn, settle: Value<'scope>, called: Value<'scope>| -> Value<'scope> {
                 Self::closure(a, f, alloc::vec![called, index.into(), values.into(), settle, remaining], 1).into()
             };
             let (on_fulfilled, on_rejected) = match how {
@@ -329,7 +329,7 @@ impl Promises {
         }
     }
 
-    fn finish<'gc>(a: &mut Agent<'gc, '_>, how: Combinator, values: JsObject<'gc>, cap: &Capability<'gc>) -> Result<(), Error> {
+    fn finish<'scope>(a: &mut Agent<'scope, '_>, how: Combinator, values: JsObject<'scope>, cap: &Capability<'scope>) -> Result<(), Error> {
         let list = a.list_from_array_like(values.into())?;
         let arr = a.array(list);
         if how == Combinator::Any {
@@ -342,7 +342,7 @@ impl Promises {
         Ok(())
     }
 
-    fn element_step<'gc>(a: &mut Agent<'gc, '_>, f: JsObject<'gc>, v: Value<'gc>, how: Combinator) -> Result<Value<'gc>, Error> {
+    fn element_step<'scope>(a: &mut Agent<'scope, '_>, f: JsObject<'scope>, v: Value<'scope>, how: Combinator) -> Result<Value<'scope>, Error> {
         let s = Self::slots(f);
         if a.get_index(s[slot::CALLED], 0.0)? == Value::Bool(true) {
             return Ok(Value::Undefined);
@@ -364,15 +364,15 @@ impl Promises {
         Ok(Value::Undefined)
     }
 
-    fn all_element<'gc>(a: &mut Agent<'gc, '_>, f: JsObject<'gc>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn all_element<'scope>(a: &mut Agent<'scope, '_>, f: JsObject<'scope>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Self::element_step(a, f, args.at(0), Combinator::All)
     }
 
-    fn any_element<'gc>(a: &mut Agent<'gc, '_>, f: JsObject<'gc>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn any_element<'scope>(a: &mut Agent<'scope, '_>, f: JsObject<'scope>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Self::element_step(a, f, args.at(0), Combinator::Any)
     }
 
-    fn settled<'gc>(a: &mut Agent<'gc, '_>, f: JsObject<'gc>, v: Value<'gc>, fulfilled: bool) -> Result<Value<'gc>, Error> {
+    fn settled<'scope>(a: &mut Agent<'scope, '_>, f: JsObject<'scope>, v: Value<'scope>, fulfilled: bool) -> Result<Value<'scope>, Error> {
         let s = Self::slots(f);
         if a.get_index(s[slot::CALLED], 0.0)? == Value::Bool(true) {
             return Ok(Value::Undefined);
@@ -384,15 +384,15 @@ impl Promises {
         Self::element_step(a, f, o.into(), Combinator::AllSettled)
     }
 
-    fn settled_fulfilled<'gc>(a: &mut Agent<'gc, '_>, f: JsObject<'gc>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn settled_fulfilled<'scope>(a: &mut Agent<'scope, '_>, f: JsObject<'scope>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Self::settled(a, f, args.at(0), true)
     }
 
-    fn settled_rejected<'gc>(a: &mut Agent<'gc, '_>, f: JsObject<'gc>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn settled_rejected<'scope>(a: &mut Agent<'scope, '_>, f: JsObject<'scope>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Self::settled(a, f, args.at(0), false)
     }
 
-    fn species<'gc>(_: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn species<'scope>(_: &mut Agent<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Ok(this)
     }
 }

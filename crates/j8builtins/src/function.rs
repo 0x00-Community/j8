@@ -9,7 +9,7 @@ use crate::{Args, Installer};
 struct Functions;
 
 impl Functions {
-    fn dynamic<'gc>(a: &mut Agent<'gc, '_>, args: &[Value<'gc>], new_target: Value<'gc>, prefix: &str) -> Result<Value<'gc>, Error> {
+    fn dynamic<'scope>(a: &mut Agent<'scope, '_>, args: &[Value<'scope>], new_target: Value<'scope>, prefix: &str) -> Result<Value<'scope>, Error> {
         let (params, body) = match args.split_last() {
             Some((&body, params)) => (params, body),
             None => (&[][..], Value::Undefined),
@@ -41,23 +41,23 @@ impl Functions {
         Ok(f)
     }
 
-    fn function<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn function<'scope>(a: &mut Agent<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Self::dynamic(a, args, a.new_target, "function")
     }
 
-    fn generator_function<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn generator_function<'scope>(a: &mut Agent<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Self::dynamic(a, args, a.new_target, "function*")
     }
 
-    fn async_function<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn async_function<'scope>(a: &mut Agent<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Self::dynamic(a, args, a.new_target, "async function")
     }
 
-    fn async_generator_function<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn async_generator_function<'scope>(a: &mut Agent<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Self::dynamic(a, args, a.new_target, "async function*")
     }
 
-    fn eval<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn eval<'scope>(a: &mut Agent<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         match args.at(0).kind() {
             ValueKind::String(s) => {
                 let src = s.source_text();
@@ -68,11 +68,11 @@ impl Functions {
     }
 }
 
-impl<'gc> Installer<'_, 'gc> {
+impl<'scope> Installer<'_, 'scope> {
     pub(crate) fn functions(&mut self) {
         let r = self.realm;
         let ctor = self.constructor("Function", Functions::function, r.function_proto, 1);
-        let kinds: [(&str, j8framework::NativeFn, j8framework::JsObject<'gc>, Option<j8framework::JsObject<'gc>>); 3] = [
+        let kinds: [(&str, j8framework::NativeFn, j8framework::JsObject<'scope>, Option<j8framework::JsObject<'scope>>); 3] = [
             ("GeneratorFunction", Functions::generator_function, r.generator_function_proto, Some(r.generator_proto)),
             ("AsyncFunction", Functions::async_function, r.async_function_proto, None),
             ("AsyncGeneratorFunction", Functions::async_generator_function, r.async_generator_function_proto, Some(r.async_generator_proto)),
@@ -82,7 +82,7 @@ impl<'gc> Installer<'_, 'gc> {
             if let ObjectKind::Native(n) = &mut c.borrow_mut(self.mc).kind {
                 n.constructor = true;
             }
-            let fixed = |v: Value<'gc>| Property { slot: Slot::Data(v), enumerable: false, writable: false, configurable: false };
+            let fixed = |v: Value<'scope>| Property { slot: Slot::Data(v), enumerable: false, writable: false, configurable: false };
             c.borrow_mut(self.mc).define("prototype", fixed(proto.into()));
             c.borrow_mut(self.mc).set_proto(Some(ctor));
             proto.borrow_mut(self.mc).define("constructor", Property { writable: false, ..Property::hidden(c.into()) });

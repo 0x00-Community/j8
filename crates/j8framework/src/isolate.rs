@@ -8,7 +8,7 @@ use crate::{AsyncJob, Heap, IsolateHandle, Mutation, Platform, Profiler, Termina
 use crate::{Erased, Gc, Root, erase};
 
 #[cfg(all(target_os = "linux", feature = "crossheap"))]
-paragc::brand!(pub ErasedBrand = for<'gc> Erased);
+paragc::brand!(pub ErasedBrand = for<'scope> Erased);
 
 #[cfg(all(target_os = "linux", feature = "crossheap"))]
 #[derive(Default)]
@@ -21,7 +21,7 @@ pub struct Shares {
 
 #[cfg(all(target_os = "linux", feature = "crossheap"))]
 impl Shares {
-    pub fn share<'gc, T>(&mut self, mc: &Mutation<'gc>, gc: Gc<'gc, T>) -> u64 {
+    pub fn share<'scope, T>(&mut self, mc: &Mutation<'scope>, gc: Gc<'scope, T>) -> u64 {
         let ticket = self.next;
         self.next += 1;
         self.pending.push((ticket, mc.mutator().root::<ErasedBrand>(erase(gc))));
@@ -58,8 +58,8 @@ pub struct Isolate<'p> {
     shares: Shares,
 }
 
-pub struct Scope<'gc, 'i> {
-    pub mc: &'i Mutation<'gc>,
+pub struct Scope<'scope, 'i> {
+    pub mc: &'i Mutation<'scope>,
     pub platform: &'i dyn Platform,
     pub profiler: &'i mut Profiler,
     pub spawned: Option<&'i Fifo<AsyncJob>>,
@@ -127,7 +127,7 @@ impl<'p> Isolate<'p> {
         self.spawned.as_ref().map(|q| core::iter::from_fn(|| q.pop()).collect()).unwrap_or_default()
     }
 
-    pub fn enter<R>(&mut self, f: impl for<'gc> FnOnce(&mut Scope<'gc, '_>) -> R) -> R {
+    pub fn enter<R>(&mut self, f: impl for<'scope> FnOnce(&mut Scope<'scope, '_>) -> R) -> R {
         let (platform, profiler, generation, spawned, stop) = (self.platform, &mut self.profiler, self.generation, self.spawned.as_ref(), &*self.stop);
         #[cfg(all(target_os = "linux", feature = "crossheap"))]
         let shares = &mut self.shares;

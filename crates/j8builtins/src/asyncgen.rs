@@ -8,7 +8,7 @@ use crate::{Args, Installer};
 struct AsyncGenerators;
 
 impl AsyncGenerators {
-    fn enqueue<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, mode: Resume, v: Value<'gc>) -> Result<Value<'gc>, Error> {
+    fn enqueue<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, mode: Resume, v: Value<'scope>) -> Result<Value<'scope>, Error> {
         let co = match this.kind() {
             ValueKind::Object(o) if matches!(&o.borrow().kind, ObjectKind::Coroutine(c) if c.requests.is_some()) => o,
             _ => {
@@ -21,19 +21,19 @@ impl AsyncGenerators {
         Ok(a.async_generator_enqueue(co, mode, v)?.into())
     }
 
-    fn next<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn next<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Self::enqueue(a, this, Resume::Next, args.at(0))
     }
 
-    fn return_<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn return_<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Self::enqueue(a, this, Resume::Return, args.at(0))
     }
 
-    fn throw<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn throw<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Self::enqueue(a, this, Resume::Throw, args.at(0))
     }
 
-    fn this_value<'gc>(_: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn this_value<'scope>(_: &mut Agent<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Ok(this)
     }
 }
@@ -51,13 +51,13 @@ impl AsyncFromSync {
         }
     }
 
-    fn capability<'gc>(a: &mut Agent<'gc, '_>) -> (JsObject<'gc>, Capability<'gc>) {
+    fn capability<'scope>(a: &mut Agent<'scope, '_>) -> (JsObject<'scope>, Capability<'scope>) {
         let p = a.new_promise();
         let (resolve, reject) = a.promise_resolvers(p);
         (p, Capability { promise: p.into(), resolve: resolve.into(), reject: reject.into() })
     }
 
-    fn rejected<'gc>(a: &mut Agent<'gc, '_>, p: JsObject<'gc>, e: Error) -> Result<Value<'gc>, Error> {
+    fn rejected<'scope>(a: &mut Agent<'scope, '_>, p: JsObject<'scope>, e: Error) -> Result<Value<'scope>, Error> {
         match e {
             Error::Exception(g) => {
                 let reason = a.local(&g);
@@ -68,7 +68,7 @@ impl AsyncFromSync {
         }
     }
 
-    fn closure<'gc>(a: &Agent<'gc, '_>, f: j8framework::ClosureFn, slots: Vec<Value<'gc>>) -> Value<'gc> {
+    fn closure<'scope>(a: &Agent<'scope, '_>, f: j8framework::ClosureFn, slots: Vec<Value<'scope>>) -> Value<'scope> {
         let o = ObjectData { kind: ObjectKind::NativeClosure(NativeClosure { f, slots, constructor: false }), proto: Some(a.realm.function_proto), ..ObjectData::default() }.alloc(a.mc);
         a.realm.name_function(a.mc, o, "", Some(1));
         o.into()
@@ -81,18 +81,18 @@ impl AsyncFromSync {
         }
     }
 
-    fn unwrap<'gc>(a: &mut Agent<'gc, '_>, f: JsObject<'gc>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn unwrap<'scope>(a: &mut Agent<'scope, '_>, f: JsObject<'scope>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let done = a.to_boolean(Self::slot(f, DONE));
         Ok(a.iter_result(args.at(0), done).into())
     }
 
-    fn close<'gc>(a: &mut Agent<'gc, '_>, f: JsObject<'gc>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn close<'scope>(a: &mut Agent<'scope, '_>, f: JsObject<'scope>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let reason = args.at(0);
         let _ = a.iterator_close(Self::slot(f, ITERATOR));
         Err(a.throw_value(reason))
     }
 
-    fn continuation<'gc>(a: &mut Agent<'gc, '_>, result: Value<'gc>, p: JsObject<'gc>, cap: Capability<'gc>, rec: IterRecord<'gc>, close_on_rejection: bool) -> Result<Value<'gc>, Error> {
+    fn continuation<'scope>(a: &mut Agent<'scope, '_>, result: Value<'scope>, p: JsObject<'scope>, cap: Capability<'scope>, rec: IterRecord<'scope>, close_on_rejection: bool) -> Result<Value<'scope>, Error> {
         let done = match a.get_named(result, "done") {
             Ok(d) => a.to_boolean(d),
             Err(e) => return Self::rejected(a, p, e),
@@ -116,10 +116,10 @@ impl AsyncFromSync {
         Ok(p.into())
     }
 
-    fn next<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn next<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let (p, cap) = Self::capability(a);
         let Some(rec) = Self::record(this) else { unreachable!("only reachable through CreateAsyncFromSyncIterator") };
-        let sent: &[Value<'gc>] = if args.is_empty() { &[] } else { &args[..1] };
+        let sent: &[Value<'scope>] = if args.is_empty() { &[] } else { &args[..1] };
         let result = match a.call(rec.next, rec.iterator, sent) {
             Ok(r) if r.as_object().is_some() => r,
             Ok(r) => {
@@ -132,7 +132,7 @@ impl AsyncFromSync {
         Self::continuation(a, result, p, cap, rec, true)
     }
 
-    fn forward<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>], name: &str) -> Result<Value<'gc>, Error> {
+    fn forward<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>], name: &str) -> Result<Value<'scope>, Error> {
         let (p, cap) = Self::capability(a);
         let Some(rec) = Self::record(this) else { unreachable!("only reachable through CreateAsyncFromSyncIterator") };
         let method = match a.get_named(rec.iterator, name) {
@@ -152,7 +152,7 @@ impl AsyncFromSync {
             let e = a.throw(ErrorKind::Type, "The iterator does not provide a 'throw' method");
             return Self::rejected(a, p, e);
         }
-        let sent: &[Value<'gc>] = if args.is_empty() { &[] } else { &args[..1] };
+        let sent: &[Value<'scope>] = if args.is_empty() { &[] } else { &args[..1] };
         let result = match a.call(method, rec.iterator, sent) {
             Ok(r) if r.as_object().is_some() => r,
             Ok(r) => {
@@ -165,11 +165,11 @@ impl AsyncFromSync {
         Self::continuation(a, result, p, cap, rec, throw)
     }
 
-    fn return_<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn return_<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Self::forward(a, this, args, "return")
     }
 
-    fn throw<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn throw<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Self::forward(a, this, args, "throw")
     }
 }

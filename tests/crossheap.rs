@@ -10,9 +10,9 @@ const THREADS: NonZeroUsize = NonZeroUsize::new(2).unwrap();
 
 #[repr(C)]
 #[derive(Trace, Shared)]
-struct Payload<'gc> {
+struct Payload<'scope> {
     value: u64,
-    next: Slot<'gc, Payload<'gc>>,
+    next: Slot<'scope, Payload<'scope>>,
 }
 
 cross_heap_brand!(PayloadX = for<'p> Payload<'p>);

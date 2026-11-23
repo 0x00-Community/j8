@@ -24,7 +24,7 @@ impl<T> Raw<T> {
 }
 
 impl Env {
-    fn uint8_array<'gc>(a: &Agent<'gc, '_>, bytes: Backing) -> j8framework::JsObject<'gc> {
+    fn uint8_array<'scope>(a: &Agent<'scope, '_>, bytes: Backing) -> j8framework::JsObject<'scope> {
         let len = bytes.len();
         let buffer = ObjectData { kind: ObjectKind::ArrayBuffer(Box::new(j8framework::BufferData { bytes: Some(bytes), max: None, shared: false })), proto: Some(a.realm.array_buffer_proto), ..ObjectData::default() }.alloc(a.mc);
         let at = ElementKind::ALL.iter().position(|&k| k == ElementKind::Uint8).unwrap_or_default();

@@ -155,8 +155,8 @@ impl From<Handle> for u32 {
 
 pub struct Finished(std::process::Output);
 
-impl<'gc> IntoJs<'gc> for Finished {
-    fn into_js(self, a: &mut Agent<'gc, '_>) -> Result<Value<'gc>, Error> {
+impl<'scope> IntoJs<'scope> for Finished {
+    fn into_js(self, a: &mut Agent<'scope, '_>) -> Result<Value<'scope>, Error> {
         let status = self.0.status.code().into_js(a)?;
         let out = vec![status, Bytes(self.0.stdout).into_js(a)?, Bytes(self.0.stderr).into_js(a)?];
         out.into_js(a)

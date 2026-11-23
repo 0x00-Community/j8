@@ -35,8 +35,8 @@ pub struct Reference {
 }
 
 impl Env {
-    pub fn define<'gc>(&self, a: &mut j8framework::Agent<'gc, '_>, target: JsObject<'gc>, p: &PropertyDescriptor) -> Result<(), Status> {
-        let name: Name<'gc> = if p.utf8name.is_null() {
+    pub fn define<'scope>(&self, a: &mut j8framework::Agent<'scope, '_>, target: JsObject<'scope>, p: &PropertyDescriptor) -> Result<(), Status> {
+        let name: Name<'scope> = if p.utf8name.is_null() {
             self.name(p.name)?
         } else {
             Name::Str(a.string(&Ffi::utf8(p.utf8name, crate::AUTO_LENGTH)?))
@@ -65,11 +65,11 @@ impl Env {
         self.js(a.define_property_or_throw(target, name.key(), desc))
     }
 
-    fn wrapped<'gc>(&self, a: &j8framework::Agent<'gc, '_>, o: JsObject<'gc>) -> Option<JsObject<'gc>> {
+    fn wrapped<'scope>(&self, a: &j8framework::Agent<'scope, '_>, o: JsObject<'scope>) -> Option<JsObject<'scope>> {
         Self::private(o, self.wrap_key(a)).and_then(Value::as_object)
     }
 
-    fn keys<'gc>(&self, a: &mut j8framework::Agent<'gc, '_>, o: JsObject<'gc>, mode: KeyMode, filter: KeyFilter, conversion: KeyConversion) -> Result<Vec<Value<'gc>>, Status> {
+    fn keys<'scope>(&self, a: &mut j8framework::Agent<'scope, '_>, o: JsObject<'scope>, mode: KeyMode, filter: KeyFilter, conversion: KeyConversion) -> Result<Vec<Value<'scope>>, Status> {
         let mut out = Vec::new();
         let mut at = Some(o);
         while let Some(cur) = at {
@@ -78,7 +78,7 @@ impl Env {
                 let keep = (!filter.has(KeyFilter::ENUMERABLE) || p.enumerable)
                     && (!filter.has(KeyFilter::WRITABLE) || p.writable)
                     && (!filter.has(KeyFilter::CONFIGURABLE) || p.configurable);
-                let v: Value<'gc> = match k {
+                let v: Value<'scope> = match k {
                     PropertyKey::String(_) if filter.has(KeyFilter::SKIP_STRINGS) => continue,
                     PropertyKey::Symbol(_) if filter.has(KeyFilter::SKIP_SYMBOLS) => continue,
                     PropertyKey::String(s) => match (conversion, s.parse::<u32>()) {
@@ -87,7 +87,7 @@ impl Env {
                     },
                     PropertyKey::Symbol(s) => Value::Symbol(s),
                 };
-                if keep && !out.iter().any(|&x: &Value<'gc>| x.same_value(v)) {
+                if keep && !out.iter().any(|&x: &Value<'scope>| x.same_value(v)) {
                     out.push(v);
                 }
             }

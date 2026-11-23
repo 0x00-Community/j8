@@ -30,22 +30,22 @@ const MIN_LEAF: usize = 2;
 
 #[repr(C)]
 #[derive(Collect)]
-struct Leaf<'gc, const N: usize> {
+struct Leaf<'scope, const N: usize> {
     head: usize,
-    cells: [ValueCell<'gc>; N],
+    cells: [ValueCell<'scope>; N],
 }
 
 #[repr(C)]
 #[derive(Collect)]
-struct Node<'gc> {
+struct Node<'scope> {
     head: usize,
-    kids: [GcSlot<'gc, Erased>; FAN],
+    kids: [GcSlot<'scope, Erased>; FAN],
     tail_meta: IsoCell<u64>,
-    tail: GcSlot<'gc, Erased>,
+    tail: GcSlot<'scope, Erased>,
 }
 
 #[derive(Clone, Copy)]
-pub struct Store<'gc>(Gc<'gc, Erased>);
+pub struct Store<'scope>(Gc<'scope, Erased>);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StorePath {
@@ -54,9 +54,9 @@ pub struct StorePath {
     pub cell: usize,
 }
 
-impl<'gc> Store<'gc> {
-    fn leaf(mc: &Mutation<'gc>, cap: usize, init: &[Value<'gc>]) -> Self {
-        fn make<'gc, const N: usize>(mc: &Mutation<'gc>, init: &[Value<'gc>]) -> Gc<'gc, Erased> {
+impl<'scope> Store<'scope> {
+    fn leaf(mc: &Mutation<'scope>, cap: usize, init: &[Value<'scope>]) -> Self {
+        fn make<'scope, const N: usize>(mc: &Mutation<'scope>, init: &[Value<'scope>]) -> Gc<'scope, Erased> {
             erase(mc.alloc(Leaf::<N> { head: N, cells: core::array::from_fn(|i| ValueCell::new(init.get(i).copied().unwrap_or_default())) }))
         }
         Self(match cap.max(init.len()).max(MIN_LEAF).next_power_of_two() {
@@ -71,7 +71,7 @@ impl<'gc> Store<'gc> {
         })
     }
 
-    fn node(mc: &Mutation<'gc>, level: usize, first: Option<Self>) -> Self {
+    fn node(mc: &Mutation<'scope>, level: usize, first: Option<Self>) -> Self {
         let kids = core::array::from_fn(|i| GcSlot::from(if i == 0 { first.map(|s| s.0) } else { None }));
         Self(erase(mc.alloc(Node { head: NODE + level, kids, tail_meta: IsoCell::new(0), tail: GcSlot::default() })))
     }
@@ -94,27 +94,27 @@ impl<'gc> Store<'gc> {
         if bits >= usize::BITS as usize { usize::MAX } else { 1 << bits }
     }
 
-    fn leaf_cell(self, i: usize) -> &'gc ValueCell<'gc> {
+    fn leaf_cell(self, i: usize) -> &'scope ValueCell<'scope> {
         debug_assert!(self.is_leaf() && i < self.head());
-        unsafe { &*self.0.as_ptr().cast::<usize>().add(1).cast::<ValueCell<'gc>>().add(i) }
+        unsafe { &*self.0.as_ptr().cast::<usize>().add(1).cast::<ValueCell<'scope>>().add(i) }
     }
 
-    fn kid(self, i: usize) -> &'gc GcSlot<'gc, Erased> {
+    fn kid(self, i: usize) -> &'scope GcSlot<'scope, Erased> {
         debug_assert!(!self.is_leaf() && i < FAN);
-        unsafe { &*self.0.as_ptr().cast::<usize>().add(1).cast::<GcSlot<'gc, Erased>>().add(i) }
+        unsafe { &*self.0.as_ptr().cast::<usize>().add(1).cast::<GcSlot<'scope, Erased>>().add(i) }
     }
 
-    fn tail_meta(self) -> &'gc IsoCell<u64> {
+    fn tail_meta(self) -> &'scope IsoCell<u64> {
         debug_assert!(!self.is_leaf());
         unsafe { &*self.0.as_ptr().byte_add(Self::TAIL_META).cast::<IsoCell<u64>>() }
     }
 
-    fn tail_slot(self) -> &'gc GcSlot<'gc, Erased> {
+    fn tail_slot(self) -> &'scope GcSlot<'scope, Erased> {
         debug_assert!(!self.is_leaf());
-        unsafe { &*self.0.as_ptr().byte_add(Self::TAIL_SLOT).cast::<GcSlot<'gc, Erased>>() }
+        unsafe { &*self.0.as_ptr().byte_add(Self::TAIL_SLOT).cast::<GcSlot<'scope, Erased>>() }
     }
 
-    fn locate(self, i: usize) -> Option<(Store<'gc>, usize, usize)> {
+    fn locate(self, i: usize) -> Option<(Store<'scope>, usize, usize)> {
         if self.is_leaf() {
             let cap = self.head();
             return (i < cap).then_some((self, 0, cap));
@@ -132,7 +132,7 @@ impl<'gc> Store<'gc> {
         }
     }
 
-    fn remember(self, mc: &Mutation<'gc>, index: usize) {
+    fn remember(self, mc: &Mutation<'scope>, index: usize) {
         if self.is_leaf() {
             return;
         }
@@ -161,7 +161,7 @@ impl<'gc> Store<'gc> {
                 if at >= s.head() {
                     return None;
                 }
-                return Some(StorePath { head, kids, cell: core::mem::size_of::<usize>() + at * core::mem::size_of::<ValueCell<'gc>>() });
+                return Some(StorePath { head, kids, cell: core::mem::size_of::<usize>() + at * core::mem::size_of::<ValueCell<'scope>>() });
             }
             let level = s.head() - NODE;
             let shift = FAN_BITS * u32::try_from(level).ok()?;
@@ -169,13 +169,13 @@ impl<'gc> Store<'gc> {
                 return None;
             }
             let k = (i >> shift) & (FAN - 1);
-            kids.push(core::mem::size_of::<usize>() + k * core::mem::size_of::<GcSlot<'gc, Erased>>());
+            kids.push(core::mem::size_of::<usize>() + k * core::mem::size_of::<GcSlot<'scope, Erased>>());
             s = Self(s.kid(k).get()?);
             i_left = i;
         }
     }
 
-    pub fn cell(self, i: usize) -> Option<&'gc ValueCell<'gc>> {
+    pub fn cell(self, i: usize) -> Option<&'scope ValueCell<'scope>> {
         let h = self.head();
         if h < NODE {
             return (i < h).then(|| self.leaf_cell(i));
@@ -194,7 +194,7 @@ impl<'gc> Store<'gc> {
         }
     }
 
-    fn cell_mut(self, mc: &Mutation<'gc>, i: usize) -> &'gc ValueCell<'gc> {
+    fn cell_mut(self, mc: &Mutation<'scope>, i: usize) -> &'scope ValueCell<'scope> {
         if self.is_leaf() {
             return self.leaf_cell(i);
         }
@@ -217,18 +217,18 @@ impl<'gc> Store<'gc> {
         }
     }
 
-    fn run_mut(self, mc: &Mutation<'gc>, i: usize) -> &'gc [ValueCell<'gc>] {
+    fn run_mut(self, mc: &Mutation<'scope>, i: usize) -> &'scope [ValueCell<'scope>] {
         let first = self.cell_mut(mc, i);
         let left = if self.is_leaf() { self.head() - i } else { FAN - (i & (FAN - 1)) };
         unsafe { core::slice::from_raw_parts(first, left) }
     }
 
-    fn grown(self, mc: &Mutation<'gc>, need: usize, len: usize) -> Self {
+    fn grown(self, mc: &Mutation<'scope>, need: usize, len: usize) -> Self {
         if need <= self.capacity() {
             return self;
         }
         if self.is_leaf() {
-            let old: alloc::vec::Vec<Value<'gc>> = (0..len.min(self.head())).map(|i| self.leaf_cell(i).get()).collect();
+            let old: alloc::vec::Vec<Value<'scope>> = (0..len.min(self.head())).map(|i| self.leaf_cell(i).get()).collect();
             if need <= FAN {
                 return Self::leaf(mc, need, &old);
             }
@@ -239,7 +239,7 @@ impl<'gc> Store<'gc> {
         Self::node(mc, level + 1, Some(self)).grown(mc, need, len)
     }
 
-    pub fn from_values(mc: &Mutation<'gc>, values: &[Value<'gc>]) -> Option<Self> {
+    pub fn from_values(mc: &Mutation<'scope>, values: &[Value<'scope>]) -> Option<Self> {
         if values.is_empty() {
             return None;
         }
@@ -253,13 +253,13 @@ impl<'gc> Store<'gc> {
         Some(s)
     }
 
-    pub fn reserve(mc: &Mutation<'gc>, n: usize) -> Self {
+    pub fn reserve(mc: &Mutation<'scope>, n: usize) -> Self {
         if n <= FAN { Self::leaf(mc, n, &[]) } else { Self::leaf(mc, FAN, &[]).grown(mc, n, 0) }
     }
 
-    pub fn put(this: Option<Self>, mc: &Mutation<'gc>, len: usize, i: usize, v: Value<'gc>) -> Self {
+    pub fn put(this: Option<Self>, mc: &Mutation<'scope>, len: usize, i: usize, v: Value<'scope>) -> Self {
         if i < FAN && this.is_none_or(|s| s.is_leaf() && i >= s.head()) {
-            let mut init: alloc::vec::Vec<Value<'gc>> = this.map_or_else(alloc::vec::Vec::new, |s| (0..len.min(s.head())).map(|k| s.leaf_cell(k).get()).collect());
+            let mut init: alloc::vec::Vec<Value<'scope>> = this.map_or_else(alloc::vec::Vec::new, |s| (0..len.min(s.head())).map(|k| s.leaf_cell(k).get()).collect());
             init.resize(i, Value::Undefined);
             init.push(v);
             return Self::leaf(mc, i + 1, &init);
@@ -272,19 +272,19 @@ impl<'gc> Store<'gc> {
         s
     }
 
-    pub fn gc(self) -> Gc<'gc, Erased> {
+    pub fn gc(self) -> Gc<'scope, Erased> {
         self.0
     }
 
-    pub unsafe fn from_gc(g: Gc<'gc, Erased>) -> Self {
+    pub unsafe fn from_gc(g: Gc<'scope, Erased>) -> Self {
         Self(g)
     }
 }
 
 #[derive(Default)]
-pub struct ValueArray<'gc> {
+pub struct ValueArray<'scope> {
     len: IsoCell<u32>,
-    root: GcSlot<'gc, Erased>,
+    root: GcSlot<'scope, Erased>,
 }
 
 unsafe impl crate::Trace for ValueArray<'_> {
@@ -298,16 +298,16 @@ unsafe impl crate::Trace for ValueArray<'_> {
 }
 
 #[derive(Clone, Copy)]
-pub struct ElementRun<'gc> {
+pub struct ElementRun<'scope> {
     root: usize,
     base: u32,
     count: u32,
-    cells: *const ValueCell<'gc>,
+    cells: *const ValueCell<'scope>,
 }
 
-impl<'gc> ElementRun<'gc> {
+impl<'scope> ElementRun<'scope> {
     #[inline]
-    pub fn get(self, elements: &ValueArray<'gc>, i: usize) -> Option<Value<'gc>> {
+    pub fn get(self, elements: &ValueArray<'scope>, i: usize) -> Option<Value<'scope>> {
         let at = i.checked_sub(self.base as usize)?;
         if at >= self.count as usize || i >= elements.len() {
             return None;
@@ -320,7 +320,7 @@ impl<'gc> ElementRun<'gc> {
     }
 }
 
-impl<'gc> ValueArray<'gc> {
+impl<'scope> ValueArray<'scope> {
     pub const LEN_OFFSET: usize = core::mem::offset_of!(ValueArray<'static>, len);
     pub const ROOT_OFFSET: usize = core::mem::offset_of!(ValueArray<'static>, root);
 
@@ -330,7 +330,7 @@ impl<'gc> ValueArray<'gc> {
     }
 
     #[inline]
-    fn append_cell(&self, i: usize) -> Option<&'gc ValueCell<'gc>> {
+    fn append_cell(&self, i: usize) -> Option<&'scope ValueCell<'scope>> {
         let root = Store(self.root.get()?);
         let h = root.head();
         if h < NODE {
@@ -345,7 +345,7 @@ impl<'gc> ValueArray<'gc> {
     }
 
     #[inline]
-    pub fn run(&self, i: usize) -> Option<ElementRun<'gc>> {
+    pub fn run(&self, i: usize) -> Option<ElementRun<'scope>> {
         if i >= self.len() {
             return None;
         }
@@ -365,19 +365,19 @@ impl<'gc> ValueArray<'gc> {
         self.len() == 0
     }
 
-    fn store(&self) -> Option<Store<'gc>> {
+    fn store(&self) -> Option<Store<'scope>> {
         self.root.get().map(Store)
     }
 
     #[inline]
-    pub fn get(&self, i: usize) -> Option<Value<'gc>> {
+    pub fn get(&self, i: usize) -> Option<Value<'scope>> {
         if i >= self.len() {
             return None;
         }
         Some(self.store()?.cell(i).map_or(Value::Undefined, ValueCell::get))
     }
 
-    pub fn set(&self, mc: &Mutation<'gc>, i: usize, v: Value<'gc>) {
+    pub fn set(&self, mc: &Mutation<'scope>, i: usize, v: Value<'scope>) {
         if i < self.len()
             && let Some(s) = self.store()
         {
@@ -386,7 +386,7 @@ impl<'gc> ValueArray<'gc> {
     }
 
     #[inline]
-    fn reserve(&self, mc: &Mutation<'gc>, need: usize) -> Store<'gc> {
+    fn reserve(&self, mc: &Mutation<'scope>, need: usize) -> Store<'scope> {
         let cur = self.root.get();
         if let Some(g) = cur
             && need <= Store(g).capacity()
@@ -405,7 +405,7 @@ impl<'gc> ValueArray<'gc> {
     }
 
     #[inline]
-    pub fn push(&self, mc: &Mutation<'gc>, v: Value<'gc>) {
+    pub fn push(&self, mc: &Mutation<'scope>, v: Value<'scope>) {
         let i = self.len();
         let n = i + 1;
         if let Some(cell) = self.append_cell(i) {
@@ -420,7 +420,7 @@ impl<'gc> ValueArray<'gc> {
         self.len.set(u32::try_from(n).expect("array length fits u32"));
     }
 
-    pub fn fill(&self, mc: &Mutation<'gc>, from: usize, to: usize, v: Value<'gc>) {
+    pub fn fill(&self, mc: &Mutation<'scope>, from: usize, to: usize, v: Value<'scope>) {
         let n = self.len();
         if from > n || from >= to {
             return;
@@ -447,7 +447,7 @@ impl<'gc> ValueArray<'gc> {
         }
     }
 
-    pub fn pop(&self, mc: &Mutation<'gc>) -> Option<Value<'gc>> {
+    pub fn pop(&self, mc: &Mutation<'scope>) -> Option<Value<'scope>> {
         let n = self.len().checked_sub(1)?;
         if let Some(cell) = self.append_cell(n) {
             let v = cell.get();
@@ -460,7 +460,7 @@ impl<'gc> ValueArray<'gc> {
         v
     }
 
-    pub fn truncate(&self, mc: &Mutation<'gc>, n: usize) {
+    pub fn truncate(&self, mc: &Mutation<'scope>, n: usize) {
         let old = self.len();
         if n >= old {
             return;
@@ -475,11 +475,11 @@ impl<'gc> ValueArray<'gc> {
         }
     }
 
-    pub fn clear(&self, mc: &Mutation<'gc>) {
+    pub fn clear(&self, mc: &Mutation<'scope>) {
         self.truncate(mc, 0);
     }
 
-    pub fn insert(&self, mc: &Mutation<'gc>, i: usize, v: Value<'gc>) {
+    pub fn insert(&self, mc: &Mutation<'scope>, i: usize, v: Value<'scope>) {
         let n = self.len();
         let s = self.reserve(mc, n + 1);
         for k in (i..n).rev() {
@@ -489,7 +489,7 @@ impl<'gc> ValueArray<'gc> {
         self.len.set(u32::try_from(n + 1).expect("array length fits u32"));
     }
 
-    pub fn remove(&self, mc: &Mutation<'gc>, i: usize) -> Value<'gc> {
+    pub fn remove(&self, mc: &Mutation<'scope>, i: usize) -> Value<'scope> {
         let n = self.len();
         let v = self.get(i).unwrap_or_default();
         if let Some(s) = self.store() {
@@ -501,19 +501,19 @@ impl<'gc> ValueArray<'gc> {
         v
     }
 
-    pub fn replace(&self, mc: &Mutation<'gc>, values: &[Value<'gc>]) {
+    pub fn replace(&self, mc: &Mutation<'scope>, values: &[Value<'scope>]) {
         let fresh = Store::from_values(mc, values);
         self.root.set(mc.mutator(), fresh.map(Store::gc));
         self.len.set(u32::try_from(values.len()).expect("array length fits u32"));
     }
 
-    pub fn to_vec(&self) -> alloc::vec::Vec<Value<'gc>> {
+    pub fn to_vec(&self) -> alloc::vec::Vec<Value<'scope>> {
         let n = self.len();
         let Some(s) = self.store() else { return alloc::vec::Vec::new() };
         (0..n).map(|i| s.cell(i).map_or(Value::Undefined, ValueCell::get)).collect()
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = Value<'gc>> + '_ {
+    pub fn iter(&self) -> impl Iterator<Item = Value<'scope>> + '_ {
         (0..self.len()).map(|i| self.get(i).unwrap_or_default())
     }
 }
@@ -529,7 +529,7 @@ mod tests {
 
     use crate::{Heap, Mutation, Value, ValueArray};
 
-    crate::paragc::brand!(ArrayBrand = for<'gc> ValueArray<'gc>);
+    crate::paragc::brand!(ArrayBrand = for<'scope> ValueArray<'scope>);
 
     fn number_at(a: &ValueArray<'_>, i: usize) -> f64 {
         a.get(i).and_then(Value::as_number).unwrap_or(f64::NAN)
@@ -565,7 +565,7 @@ mod tests {
     }
 
     #[expect(clippy::cast_precision_loss, reason = "every index in this test is below 2^53")]
-    fn push_to<'gc>(mc: &Mutation<'gc>, a: &ValueArray<'gc>, n: usize) {
+    fn push_to<'scope>(mc: &Mutation<'scope>, a: &ValueArray<'scope>, n: usize) {
         while a.len() < n {
             let i = a.len();
             a.push(mc, Value::Number(i as f64));
@@ -573,7 +573,7 @@ mod tests {
     }
 
     #[expect(clippy::cast_precision_loss, reason = "every index in this test is below 2^53")]
-    fn across_boundary<'gc>(mc: &Mutation<'gc>, a: &ValueArray<'gc>, low: usize, high: usize) {
+    fn across_boundary<'scope>(mc: &Mutation<'scope>, a: &ValueArray<'scope>, low: usize, high: usize) {
         push_to(mc, a, high);
         expect_filled(a, high);
         let mut popped = alloc::vec::Vec::new();

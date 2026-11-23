@@ -156,11 +156,11 @@ impl Method {
                 Param::This => call_args.push(quote!(::j8::This(this))),
                 Param::Rest(from) => call_args.push(quote!(::j8::Rest(args.get(#from..).unwrap_or(&[]).to_vec()))),
                 Param::Arg(at, ty) => {
-                    prepare.push(quote!(let #var = <#ty as ::j8::FromJs<'gc>>::from_js(a, ::j8::Glue::arg(args, #at))?;));
+                    prepare.push(quote!(let #var = <#ty as ::j8::FromJs<'scope>>::from_js(a, ::j8::Glue::arg(args, #at))?;));
                     call_args.push(quote!(#var));
                 }
                 Param::Str(at) => {
-                    prepare.push(quote!(let #var = <::j8::frame::JsString<'gc> as ::j8::FromJs<'gc>>::from_js(a, ::j8::Glue::arg(args, #at))?;));
+                    prepare.push(quote!(let #var = <::j8::frame::JsString<'scope> as ::j8::FromJs<'scope>>::from_js(a, ::j8::Glue::arg(args, #at))?;));
                     call_args.push(quote!(&**#var));
                 }
             }
@@ -204,7 +204,7 @@ impl Method {
         quote! {
             #[doc(hidden)]
             #[allow(clippy::needless_question_mark, unused_variables, clippy::unnecessary_wraps)]
-            fn #name<'gc>(a: &mut ::j8::frame::Agent<'gc, '_>, this: ::j8::frame::Value<'gc>, args: &[::j8::frame::Value<'gc>]) -> ::core::result::Result<::j8::frame::Value<'gc>, ::j8::frame::Error> {
+            fn #name<'scope>(a: &mut ::j8::frame::Agent<'scope, '_>, this: ::j8::frame::Value<'scope>, args: &[::j8::frame::Value<'scope>]) -> ::core::result::Result<::j8::frame::Value<'scope>, ::j8::frame::Error> {
                 #body
             }
         }

@@ -81,7 +81,7 @@ impl<'p> Runtime<'p> {
         self.js.eval(&Source { text, file }, ScriptKind::Module)
     }
 
-    pub fn enter<R: Send>(&self, f: impl for<'gc> FnOnce(&mut Agent<'gc, '_>) -> R + Send) -> R {
+    pub fn enter<R: Send>(&self, f: impl for<'scope> FnOnce(&mut Agent<'scope, '_>) -> R + Send) -> R {
         self.js.enter(f)
     }
 

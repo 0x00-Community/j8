@@ -223,7 +223,7 @@ impl Jit {
     }
 
     #[expect(clippy::unnecessary_wraps, reason = "the callback hook declines a call by returning None")]
-    unsafe fn run_callback<'gc>(a: &mut j8framework::Agent<'gc, '_>, cb: &j8framework::Callback<'gc>, args: &[Value<'gc>]) -> Option<Result<Value<'gc>, j8framework::Error>> {
+    unsafe fn run_callback<'scope>(a: &mut j8framework::Agent<'scope, '_>, cb: &j8framework::Callback<'scope>, args: &[Value<'scope>]) -> Option<Result<Value<'scope>, j8framework::Error>> {
         type StubFn = sysv!(unsafe fn(*mut Ctx, u64, u64, u64, u64, u64) -> runtime::Ret);
         let prep = unsafe { &mut *cb.env.cast::<Prepared>() };
         let jit = unsafe { &*prep.ctx.jit };
@@ -595,7 +595,7 @@ impl Tier for Jit {
         self.entries.set(self.entries.get().wrapping_add(1));
     }
 
-    fn call<'gc>(&self, exe: &j8executor::Executor, a: &mut j8framework::Agent<'gc, '_>, f: FuncId, callee: Value<'gc>, this: Value<'gc>, args: &[Value<'gc>]) -> Option<Result<Value<'gc>, j8framework::Error>> {
+    fn call<'scope>(&self, exe: &j8executor::Executor, a: &mut j8framework::Agent<'scope, '_>, f: FuncId, callee: Value<'scope>, this: Value<'scope>, args: &[Value<'scope>]) -> Option<Result<Value<'scope>, j8framework::Error>> {
         let func = exe.jit_function(f);
         let formals = usize::from(func.shared().formal_parameters);
         if formals > 3 || !func.plain() || func.class_constructor() || !self.stack_room() {
@@ -629,7 +629,7 @@ impl Tier for Jit {
         })
     }
 
-    fn callback<'gc>(&self, exe: &j8executor::Executor, a: &mut j8framework::Agent<'gc, '_>, func: j8executor::JitFunction<'_>, callee: Value<'gc>, this: Value<'gc>) -> Option<j8framework::Callback<'gc>> {
+    fn callback<'scope>(&self, exe: &j8executor::Executor, a: &mut j8framework::Agent<'scope, '_>, func: j8executor::JitFunction<'_>, callee: Value<'scope>, this: Value<'scope>) -> Option<j8framework::Callback<'scope>> {
         let arity = usize::from(func.shared().formal_parameters);
         if arity > 3 || !func.plain() || func.class_constructor() || !self.stack_room() {
             return None;

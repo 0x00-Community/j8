@@ -6,7 +6,7 @@ use crate::{Args, Installer};
 struct Weaks;
 
 impl Weaks {
-    fn weak_ref<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn weak_ref<'scope>(a: &mut Agent<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let new_target = a.new_target;
         if new_target == Value::Undefined {
             return Err(a.throw(ErrorKind::Type, "Constructor WeakRef requires 'new'"));
@@ -18,7 +18,7 @@ impl Weaks {
         Ok(a.create_from_ctor(new_target, a.realm.weak_ref_proto, ObjectKind::WeakRef(target))?.into())
     }
 
-    fn deref<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn deref<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         match this.kind() {
             ValueKind::Object(o) => match o.borrow().kind {
                 ObjectKind::WeakRef(t) => Ok(t),
@@ -28,7 +28,7 @@ impl Weaks {
         }
     }
 
-    fn registry<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn registry<'scope>(a: &mut Agent<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let new_target = a.new_target;
         if new_target == Value::Undefined {
             return Err(a.throw(ErrorKind::Type, "Constructor FinalizationRegistry requires 'new'"));
@@ -40,14 +40,14 @@ impl Weaks {
         Ok(a.create_from_ctor(new_target, a.realm.finalization_registry_proto, ObjectKind::FinalizationRegistry { cleanup, cells: alloc::vec::Vec::new() })?.into())
     }
 
-    fn this_registry<'gc>(a: &Agent<'gc, '_>, this: Value<'gc>) -> Result<JsObject<'gc>, Error> {
+    fn this_registry<'scope>(a: &Agent<'scope, '_>, this: Value<'scope>) -> Result<JsObject<'scope>, Error> {
         match this.kind() {
             ValueKind::Object(o) if matches!(o.borrow().kind, ObjectKind::FinalizationRegistry { .. }) => Ok(o),
             _ => Err(a.throw(ErrorKind::Type, "FinalizationRegistry method called on an incompatible receiver")),
         }
     }
 
-    fn register<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn register<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let o = Self::this_registry(a, this)?;
         let (target, held, token) = (args.at(0), args.at(1), args.at(2));
         if !a.can_be_held_weakly(target) {
@@ -65,7 +65,7 @@ impl Weaks {
         Ok(Value::Undefined)
     }
 
-    fn unregister<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn unregister<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let o = Self::this_registry(a, this)?;
         let token = args.at(0);
         if !a.can_be_held_weakly(token) {

@@ -71,7 +71,7 @@ impl Hooks {
         self.kept = Some(keep);
     }
 
-    fn fire<'gc>(&self, a: &mut Agent<'gc, '_>, x: f64) -> Result<Value<'gc>, Error> {
+    fn fire<'scope>(&self, a: &mut Agent<'scope, '_>, x: f64) -> Result<Value<'scope>, Error> {
         let kept = self.kept.as_ref().map_or(Value::Undefined, |k| k.get(a));
         match &self.on {
             Some(f) => f.call(a, Value::Undefined, &[x.into(), kept]),

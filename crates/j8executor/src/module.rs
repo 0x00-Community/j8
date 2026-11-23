@@ -135,13 +135,13 @@ impl Executor {
         self.module_of.borrow().get(&base).copied()
     }
 
-    pub fn import_value<'gc>(&self, a: &mut Agent<'gc, '_>, base: u32, index: u16) -> Result<Value<'gc>, Error> {
+    pub fn import_value<'scope>(&self, a: &mut Agent<'scope, '_>, base: u32, index: u16) -> Result<Value<'scope>, Error> {
         let Some(m) = self.module_index(base) else { return Err(a.throw(ErrorKind::Reference, "import binding outside a module")) };
         let b = a.modules()[m as usize].imports[usize::from(index)];
         a.binding_value(b, "import")
     }
 
-    pub fn import_meta<'gc>(&self, a: &mut Agent<'gc, '_>, base: u32) -> Result<Value<'gc>, Error> {
+    pub fn import_meta<'scope>(&self, a: &mut Agent<'scope, '_>, base: u32) -> Result<Value<'scope>, Error> {
         let Some(m) = self.module_index(base) else { return Err(a.throw(ErrorKind::Syntax, "Cannot use 'import.meta' outside a module")) };
         if let Some(meta) = a.modules()[m as usize].meta {
             return Ok(meta.into());
@@ -160,9 +160,9 @@ impl Executor {
         Ok(m)
     }
 
-    pub fn dynamic_import<'gc>(&self, a: &mut Agent<'gc, '_>, referrer: &str, specifier: Value<'gc>, depth: usize) -> Result<Value<'gc>, Error> {
+    pub fn dynamic_import<'scope>(&self, a: &mut Agent<'scope, '_>, referrer: &str, specifier: Value<'scope>, depth: usize) -> Result<Value<'scope>, Error> {
         let promise = a.new_promise();
-        let r = (|| -> Result<Value<'gc>, Error> {
+        let r = (|| -> Result<Value<'scope>, Error> {
             let spec = a.to_string(specifier)?;
             let Some((path, text)) = a.platform.load_module(referrer, &spec) else {
                 return Err(a.throw(ErrorKind::Type, &alloc::format!("Cannot find module '{}'", &**spec)));

@@ -26,7 +26,7 @@ unsafe impl Send for Hook {}
 unsafe impl Sync for Hook {}
 
 impl Env {
-    pub fn function<'gc>(&self, a: &Agent<'gc, '_>, name: &str, cb: unsafe extern "C" fn(*mut Env, *mut CallbackInfo) -> Handle, data: *mut c_void, constructor: bool) -> JsObject<'gc> {
+    pub fn function<'scope>(&self, a: &Agent<'scope, '_>, name: &str, cb: unsafe extern "C" fn(*mut Env, *mut CallbackInfo) -> Handle, data: *mut c_void, constructor: bool) -> JsObject<'scope> {
         let hook = Self::host(a, Hook { env: NonNull::from(self), cb, data });
         let f = ObjectData {
             kind: ObjectKind::NativeClosure(NativeClosure { f: Self::trampoline, slots: alloc::vec![hook.into()], constructor }),
@@ -38,7 +38,7 @@ impl Env {
         f
     }
 
-    fn trampoline<'gc>(a: &mut Agent<'gc, '_>, me: JsObject<'gc>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn trampoline<'scope>(a: &mut Agent<'scope, '_>, me: JsObject<'scope>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let hook = match &me.borrow().kind {
             ObjectKind::NativeClosure(c) => c.slots.first().and_then(|v| v.as_object()).and_then(|h| Self::hosted::<Hook, _>(h, |h| *h)),
             _ => None,

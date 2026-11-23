@@ -6,7 +6,7 @@ use crate::{Args, Installer};
 struct Errors;
 
 impl Errors {
-    fn construct<'gc, const K: usize>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn construct<'scope, const K: usize>(a: &mut Agent<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let new_target = a.new_target;
         let kind = ErrorKind::ALL[K];
         let all = args;
@@ -34,7 +34,7 @@ impl Errors {
         Ok(e.into())
     }
 
-    fn to_string<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn to_string<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         if this.as_object().is_none() {
             return Err(a.throw(ErrorKind::Type, "Error.prototype.toString called on non-object"));
         }

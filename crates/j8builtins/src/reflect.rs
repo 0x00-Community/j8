@@ -6,7 +6,7 @@ use crate::{Args, Installer};
 struct Reflects;
 
 impl Reflects {
-    fn create<'gc>(a: &mut Agent<'gc, '_>, target: Value<'gc>, handler: Value<'gc>) -> Result<JsObject<'gc>, Error> {
+    fn create<'scope>(a: &mut Agent<'scope, '_>, target: Value<'scope>, handler: Value<'scope>) -> Result<JsObject<'scope>, Error> {
         let (ValueKind::Object(t), ValueKind::Object(h)) = (target.kind(), handler.kind()) else {
             return Err(a.throw(ErrorKind::Type, "Cannot create proxy with a non-object as target or handler"));
         };
@@ -14,7 +14,7 @@ impl Reflects {
         Ok(ObjectData { kind: ObjectKind::Proxy(data), ..ObjectData::default() }.alloc(a.mc))
     }
 
-    fn proxy<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn proxy<'scope>(a: &mut Agent<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let new_target = a.new_target;
         if new_target == Value::Undefined {
             return Err(a.throw(ErrorKind::Type, "Constructor Proxy requires 'new'"));
@@ -22,7 +22,7 @@ impl Reflects {
         Ok(Self::create(a, args.at(0), args.at(1))?.into())
     }
 
-    fn revocable<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn revocable<'scope>(a: &mut Agent<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let p = Self::create(a, args.at(0), args.at(1))?;
         let revoke = ObjectData { kind: ObjectKind::NativeClosure(NativeClosure { f: Self::revoke, slots: alloc::vec![p.into()], constructor: false }), proto: Some(a.realm.function_proto), ..ObjectData::default() }.alloc(a.mc);
         a.realm.name_function(a.mc, revoke, "", Some(0));
@@ -32,7 +32,7 @@ impl Reflects {
         Ok(out.into())
     }
 
-    fn revoke<'gc>(a: &mut Agent<'gc, '_>, f: JsObject<'gc>, _: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn revoke<'scope>(a: &mut Agent<'scope, '_>, f: JsObject<'scope>, _: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let target = match &mut f.borrow_mut(a.mc).kind {
             ObjectKind::NativeClosure(c) => core::mem::take(&mut c.slots[0]),
             _ => Value::Undefined,
@@ -46,14 +46,14 @@ impl Reflects {
         Ok(Value::Undefined)
     }
 
-    fn target<'gc>(a: &Agent<'gc, '_>, v: Value<'gc>, method: &str) -> Result<JsObject<'gc>, Error> {
+    fn target<'scope>(a: &Agent<'scope, '_>, v: Value<'scope>, method: &str) -> Result<JsObject<'scope>, Error> {
         match v.kind() {
             ValueKind::Object(o) => Ok(o),
             _ => Err(a.throw(ErrorKind::Type, &alloc::format!("Reflect.{method} called on non-object"))),
         }
     }
 
-    fn apply<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn apply<'scope>(a: &mut Agent<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let f = args.at(0);
         if !a.is_callable(f) {
             let t = a.describe(f);
@@ -63,7 +63,7 @@ impl Reflects {
         a.call(f, args.at(1), &list)
     }
 
-    fn construct<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn construct<'scope>(a: &mut Agent<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let f = args.at(0);
         if !a.is_constructor(f) {
             let t = a.describe(f);
@@ -78,68 +78,68 @@ impl Reflects {
         a.construct(f, &list, new_target)
     }
 
-    fn define_property<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn define_property<'scope>(a: &mut Agent<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let o = Self::target(a, args.at(0), "defineProperty")?;
         let key = a.to_property_key(args.at(1))?;
         let desc = a.to_property_descriptor(args.at(2))?;
         Ok(a.define_own_property(o, key.key(), desc)?.into())
     }
 
-    fn delete_property<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn delete_property<'scope>(a: &mut Agent<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let o = Self::target(a, args.at(0), "deleteProperty")?;
         let key = a.to_property_key(args.at(1))?;
         Ok(a.delete_property(o, key.key())?.into())
     }
 
-    fn get<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn get<'scope>(a: &mut Agent<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let o = Self::target(a, args.at(0), "get")?;
         let key = a.to_property_key(args.at(1))?;
         let receiver = if args.len() > 2 { args[2] } else { o.into() };
         a.object_get(o, key.key(), receiver)
     }
 
-    fn get_own_property_descriptor<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn get_own_property_descriptor<'scope>(a: &mut Agent<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let o = Self::target(a, args.at(0), "getOwnPropertyDescriptor")?;
         let key = a.to_property_key(args.at(1))?;
         let p = a.get_own_property(o, key.key())?;
         Ok(a.from_property_descriptor(p))
     }
 
-    fn get_prototype_of<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn get_prototype_of<'scope>(a: &mut Agent<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let o = Self::target(a, args.at(0), "getPrototypeOf")?;
         Ok(Value::from_proto(a.get_prototype_of(o)?))
     }
 
-    fn has<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn has<'scope>(a: &mut Agent<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let o = Self::target(a, args.at(0), "has")?;
         let key = a.to_property_key(args.at(1))?;
         Ok(a.has_key(o, key.key())?.into())
     }
 
-    fn is_extensible<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn is_extensible<'scope>(a: &mut Agent<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let o = Self::target(a, args.at(0), "isExtensible")?;
         Ok(a.is_extensible(o)?.into())
     }
 
-    fn own_keys<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn own_keys<'scope>(a: &mut Agent<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let o = Self::target(a, args.at(0), "ownKeys")?;
         let keys = a.own_property_keys(o)?.into_iter().map(Value::from).collect();
         Ok(a.array(keys).into())
     }
 
-    fn prevent_extensions<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn prevent_extensions<'scope>(a: &mut Agent<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let o = Self::target(a, args.at(0), "preventExtensions")?;
         Ok(a.prevent_extensions(o)?.into())
     }
 
-    fn set<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn set<'scope>(a: &mut Agent<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let o = Self::target(a, args.at(0), "set")?;
         let key = a.to_property_key(args.at(1))?;
         let receiver = if args.len() > 3 { args[3] } else { o.into() };
         Ok(a.object_set(o, key.key(), args.at(2), receiver)?.into())
     }
 
-    fn set_prototype_of<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn set_prototype_of<'scope>(a: &mut Agent<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let o = Self::target(a, args.at(0), "setPrototypeOf")?;
         let proto = match args.at(1).kind() {
             ValueKind::Object(p) => Some(p),
