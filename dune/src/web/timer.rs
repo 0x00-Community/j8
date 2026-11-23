@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use j8::frame::{Agent, Error, Value};
+use j8::frame::{Scope, Error, Value};
 use j8::Glue;
 
 use crate::host::Offload;
@@ -23,7 +23,7 @@ impl Timer {
         Self::default()
     }
 
-    fn wait<'scope>(&self, a: &mut Agent<'scope, '_>, ms: f64) -> Result<Value<'scope>, Error> {
+    fn wait<'scope>(&self, a: &mut Scope<'scope, '_>, ms: f64) -> Result<Value<'scope>, Error> {
         let sleep = Sleep { cancelled: self.cancelled.clone(), slept: Offload::new(move || std::thread::sleep(Duration::from_secs_f64(ms.max(0.0) / 1e3))) };
         Glue::spawn(a, async move { Glue::settle(sleep.await) })
     }

@@ -5,7 +5,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use j8framework::{ScopeLocal, Static};
-use j8framework::{Agent, Error, ErrorKind, JsObject, JsString, Key, ObjectData, ObjectKind, Property, RegExpData, Slot, SmallStr, Units, Value};
+use j8framework::{Scope, Error, ErrorKind, JsObject, JsString, Key, ObjectData, ObjectKind, Property, RegExpData, Slot, SmallStr, Units, Value};
 
 use crate::buffer::Buffers;
 use crate::string::Strings;
@@ -132,11 +132,11 @@ impl Compiled {
 pub(crate) struct Regexps;
 
 impl Regexps {
-    fn compile(a: &Agent<'_, '_>, source: &str, flags: &str) -> Result<regress::Regex, Error> {
+    fn compile(a: &Scope<'_, '_>, source: &str, flags: &str) -> Result<regress::Regex, Error> {
         Self::compile_units(a, source.encode_utf16(), source, flags)
     }
 
-    fn compile_units(a: &Agent<'_, '_>, units: impl Iterator<Item = u16>, source: &str, flags: &str) -> Result<regress::Regex, Error> {
+    fn compile_units(a: &Scope<'_, '_>, units: impl Iterator<Item = u16>, source: &str, flags: &str) -> Result<regress::Regex, Error> {
         Self::check_flags(a, flags)?;
         let engine: String = flags.chars().filter(|&c| ENGINE_FLAGS.contains(c)).collect();
         let points = Self::pattern_points(units, flags.contains('u') || flags.contains('v'));
@@ -230,11 +230,11 @@ impl Regexps {
         out
     }
 
-    fn compiled<'scope>(a: &Agent<'scope, '_>, source: &str, flags: &str) -> Result<ScopeLocal<'scope, Static<Box<dyn core::any::Any + Send + Sync>>>, Error> {
+    fn compiled<'scope>(a: &Scope<'scope, '_>, source: &str, flags: &str) -> Result<ScopeLocal<'scope, Static<Box<dyn core::any::Any + Send + Sync>>>, Error> {
         Self::cached(a, source, flags).map(|c| c.compiled)
     }
 
-    fn compiled_string<'scope>(a: &Agent<'scope, '_>, source: JsString<'scope>, flags: &str) -> Result<ScopeLocal<'scope, Static<Box<dyn core::any::Any + Send + Sync>>>, Error> {
+    fn compiled_string<'scope>(a: &Scope<'scope, '_>, source: JsString<'scope>, flags: &str) -> Result<ScopeLocal<'scope, Static<Box<dyn core::any::Any + Send + Sync>>>, Error> {
         if !source.lone_surrogates() {
             return Self::compiled(a, &source, flags);
         }
@@ -242,7 +242,7 @@ impl Regexps {
         Ok(a.mc.alloc(Static(Box::new(Compiled::plain(regex, &source, flags)) as Box<dyn core::any::Any + Send + Sync>)))
     }
 
-    fn check_flags(a: &Agent<'_, '_>, flags: &str) -> Result<(), Error> {
+    fn check_flags(a: &Scope<'_, '_>, flags: &str) -> Result<(), Error> {
         let bad = flags.chars().enumerate().any(|(i, c)| !FLAGS.contains(c) || flags[..i].contains(c)) || (flags.contains('u') && flags.contains('v'));
         if bad {
             return Err(a.throw(ErrorKind::Syntax, &alloc::format!("Invalid flags supplied to RegExp constructor '{flags}'")));
@@ -250,7 +250,7 @@ impl Regexps {
         Ok(())
     }
 
-    fn cached<'scope>(a: &Agent<'scope, '_>, source: &str, flags: &str) -> Result<j8framework::RegExpCompiled<'scope>, Error> {
+    fn cached<'scope>(a: &Scope<'scope, '_>, source: &str, flags: &str) -> Result<j8framework::RegExpCompiled<'scope>, Error> {
         let slot = &a.context.get().regexp_cache[j8framework::RegExpCompiled::bucket(source, flags)];
         if let Some(c) = slot.get().filter(|c| **c.source == *source && **c.flags == *flags) {
             return Ok((*c).clone());
@@ -262,14 +262,14 @@ impl Regexps {
         Ok(entry)
     }
 
-    fn make<'scope>(a: &Agent<'scope, '_>, c: &j8framework::RegExpCompiled<'scope>) -> JsObject<'scope> {
+    fn make<'scope>(a: &Scope<'scope, '_>, c: &j8framework::RegExpCompiled<'scope>) -> JsObject<'scope> {
         let kind = ObjectKind::RegExp(RegExpData { source: c.source, flags: c.flags, compiled: c.compiled, legacy: true });
         let o = ObjectData { kind, proto: Some(a.context.regexp_proto), ..ObjectData::default() }.alloc(a.mc);
         Self::stamp(a, o, 0.0.into());
         o
     }
 
-    fn stamp<'scope>(a: &Agent<'scope, '_>, o: JsObject<'scope>, v: Value<'scope>) {
+    fn stamp<'scope>(a: &Scope<'scope, '_>, o: JsObject<'scope>, v: Value<'scope>) {
         if let Some(p) = a.context.regexp_pristine.get().as_ref() {
             o.fill(a.mc, p.last_index, core::iter::once(Slot::Data(v)));
             return;
@@ -287,7 +287,7 @@ impl Regexps {
         (e.ptr == ptr && e.len == len && e.flags == flags && **e.compiled.source == *source).then(|| e.compiled.clone())
     }
 
-    fn literal_store<'scope>(a: &Agent<'scope, '_>, bucket: usize, entry: j8framework::RegExpLiteralEntry<'scope>) {
+    fn literal_store<'scope>(a: &Scope<'scope, '_>, bucket: usize, entry: j8framework::RegExpLiteralEntry<'scope>) {
         let cache = &a.context.get().regexp_literals;
         let buddy = (bucket + 1) % j8framework::RegExpCompiled::BUCKETS;
         let key = |e: &j8framework::RegExpLiteralEntry<'scope>| e.ptr == entry.ptr && e.len == entry.len && e.flags == entry.flags;
@@ -295,7 +295,7 @@ impl Regexps {
         cache[at].set(a.mc.gc_scope(), Some(a.mc.alloc(entry)));
     }
 
-    pub(crate) fn literal<'scope>(a: &Agent<'scope, '_>, source: &str, flags: u16) -> Result<Value<'scope>, Error> {
+    pub(crate) fn literal<'scope>(a: &Scope<'scope, '_>, source: &str, flags: u16) -> Result<Value<'scope>, Error> {
         let ptr = source.as_ptr().addr();
         let len = source.len();
         let bucket = Self::literal_bucket(ptr, len, flags);
@@ -312,7 +312,7 @@ impl Regexps {
         Ok(Self::make(a, &compiled).into())
     }
 
-    pub(crate) fn is_regexp<'scope>(a: &mut Agent<'scope, '_>, v: Value<'scope>) -> Result<bool, Error> {
+    pub(crate) fn is_regexp<'scope>(a: &mut Scope<'scope, '_>, v: Value<'scope>) -> Result<bool, Error> {
         if v.as_object().is_none() {
             return Ok(false);
         }
@@ -327,7 +327,7 @@ impl Regexps {
         matches!(v.kind(), ValueKind::Object(f) if matches!(f.borrow().kind, ObjectKind::Native(n) if core::ptr::fn_addr_eq(n.f, Self::construct as j8framework::NativeFn)))
     }
 
-    fn initialize<'scope>(a: &mut Agent<'scope, '_>, o: JsObject<'scope>, pattern: Value<'scope>, flags: Value<'scope>) -> Result<(), Error> {
+    fn initialize<'scope>(a: &mut Scope<'scope, '_>, o: JsObject<'scope>, pattern: Value<'scope>, flags: Value<'scope>) -> Result<(), Error> {
         let source = if pattern == Value::Undefined { a.string("") } else { a.to_string(pattern)? };
         let flags = if flags == Value::Undefined { a.string("") } else { a.to_string(flags)? };
         let compiled = Self::compiled_string(a, source, &flags)?;
@@ -336,7 +336,7 @@ impl Regexps {
         a.set_named(o.into(), "lastIndex", 0.0.into())
     }
 
-    fn alloc<'scope>(a: &mut Agent<'scope, '_>, new_target: Value<'scope>) -> Result<JsObject<'scope>, Error> {
+    fn alloc<'scope>(a: &mut Scope<'scope, '_>, new_target: Value<'scope>) -> Result<JsObject<'scope>, Error> {
         let proto = a.proto_from_ctor(new_target, a.context.regexp_proto)?;
         let legacy = new_target == Value::Undefined || Self::is_regexp_ctor(new_target);
         let empty = a.string("");
@@ -351,13 +351,13 @@ impl Regexps {
         Ok(o)
     }
 
-    fn create<'scope>(a: &mut Agent<'scope, '_>, pattern: Value<'scope>, flags: Value<'scope>) -> Result<JsObject<'scope>, Error> {
+    fn create<'scope>(a: &mut Scope<'scope, '_>, pattern: Value<'scope>, flags: Value<'scope>) -> Result<JsObject<'scope>, Error> {
         let o = Self::alloc(a, Value::Undefined)?;
         Self::initialize(a, o, pattern, flags)?;
         Ok(o)
     }
 
-    fn construct<'scope>(a: &mut Agent<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn construct<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let new_target = a.new_target;
         let (pattern, flags) = (args.at(0), args.at(1));
         if new_target == Value::Undefined
@@ -392,7 +392,7 @@ impl Regexps {
         Ok(o.into())
     }
 
-    fn compile_method<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn compile_method<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let o = Self::this(a, this)?;
         if !matches!(&o.borrow().kind, ObjectKind::RegExp(d) if d.legacy) {
             return Err(a.throw(ErrorKind::Type, "RegExp.prototype.compile cannot be used on RegExp subclass instances"));
@@ -418,11 +418,11 @@ impl Regexps {
         }
     }
 
-    fn this<'scope>(a: &Agent<'scope, '_>, this: Value<'scope>) -> Result<JsObject<'scope>, Error> {
+    fn this<'scope>(a: &Scope<'scope, '_>, this: Value<'scope>) -> Result<JsObject<'scope>, Error> {
         Self::regexp(this).ok_or_else(|| a.throw(ErrorKind::Type, "RegExp.prototype method called on an incompatible receiver"))
     }
 
-    fn this_object<'scope>(a: &Agent<'scope, '_>, this: Value<'scope>) -> Result<Value<'scope>, Error> {
+    fn this_object<'scope>(a: &Scope<'scope, '_>, this: Value<'scope>) -> Result<Value<'scope>, Error> {
         match this.kind() {
             ValueKind::Object(_) => Ok(this),
             _ => Err(a.throw(ErrorKind::Type, "RegExp.prototype method called on a non-object")),
@@ -495,7 +495,7 @@ impl Regexps {
         c.regex.find_from(s, start).next().map(|m| m.range())
     }
 
-    fn text<'scope>(a: &Agent<'scope, '_>, units: &[u16], r: Option<core::ops::Range<usize>>) -> Value<'scope> {
+    fn text<'scope>(a: &Scope<'scope, '_>, units: &[u16], r: Option<core::ops::Range<usize>>) -> Value<'scope> {
         r.map_or(Value::Undefined, |r| a.string_units(&units[r]).into())
     }
 
@@ -503,21 +503,21 @@ impl Regexps {
         Value::Number(f64::from(u32::try_from(i).unwrap_or(u32::MAX)))
     }
 
-    fn pair<'scope>(a: &Agent<'scope, '_>, r: Option<&core::ops::Range<usize>>) -> Value<'scope> {
+    fn pair<'scope>(a: &Scope<'scope, '_>, r: Option<&core::ops::Range<usize>>) -> Value<'scope> {
         r.map_or(Value::Undefined, |r| a.array(alloc::vec![Self::index(r.start), Self::index(r.end)]).into())
     }
 
-    fn builtin_exec<'scope>(a: &mut Agent<'scope, '_>, o: JsObject<'scope>, s: JsString<'scope>) -> Result<Value<'scope>, Error> {
+    fn builtin_exec<'scope>(a: &mut Scope<'scope, '_>, o: JsObject<'scope>, s: JsString<'scope>) -> Result<Value<'scope>, Error> {
         let li = a.get_named(o.into(), "lastIndex")?;
         let last = a.to_length(li)?;
         Self::exec_from(a, o, last, s, false)
     }
 
-    fn exec_from<'scope>(a: &mut Agent<'scope, '_>, o: JsObject<'scope>, last: f64, s: JsString<'scope>, direct: bool) -> Result<Value<'scope>, Error> {
+    fn exec_from<'scope>(a: &mut Scope<'scope, '_>, o: JsObject<'scope>, last: f64, s: JsString<'scope>, direct: bool) -> Result<Value<'scope>, Error> {
         let (global, sticky, indices) = Self::with_program(o, |c| (c.global(), c.sticky(), c.indices()));
         let ascii = s.is_ascii();
         let units: Vec<u16> = if ascii { Vec::new() } else { s.encode_utf16().collect() };
-        let text = |a: &Agent<'scope, '_>, r: Option<core::ops::Range<usize>>| if ascii { r.map_or(Value::Undefined, |r| a.piece(s, &s[r]).into()) } else { Self::text(a, &units, r) };
+        let text = |a: &Scope<'scope, '_>, r: Option<core::ops::Range<usize>>| if ascii { r.map_or(Value::Undefined, |r| a.piece(s, &s[r]).into()) } else { Self::text(a, &units, r) };
         #[expect(clippy::cast_precision_loss, reason = "string length is far below 2^53")]
         let len = (if ascii { s.len() } else { units.len() }) as f64;
         let last = if global || sticky { last } else { 0.0 };
@@ -573,7 +573,7 @@ impl Regexps {
         Ok(arr.into())
     }
 
-    fn open<'scope>(a: &Agent<'scope, '_>, r: Value<'scope>, wide: bool) -> Option<(JsObject<'scope>, f64)> {
+    fn open<'scope>(a: &Scope<'scope, '_>, r: Value<'scope>, wide: bool) -> Option<(JsObject<'scope>, f64)> {
         let o = r.as_object()?;
         if o.regexp().is_none() || o.has_symbols() {
             return None;
@@ -596,7 +596,7 @@ impl Regexps {
         props.same_words(words).then_some((o, last))
     }
 
-    fn symbol_holds(a: &Agent<'_, '_>, index: usize) -> bool {
+    fn symbol_holds(a: &Scope<'_, '_>, index: usize) -> bool {
         let Some(saved) = a.context.regexp_pristine.get().as_ref() else { return false };
         let Some(&expected) = saved.methods.get(index) else { return false };
         let symbols = &a.context.symbols;
@@ -611,7 +611,7 @@ impl Regexps {
         a.context.regexp_proto.borrow().get_own_symbol(sym).is_some_and(|prop| matches!(prop.slot, Slot::Data(v) if v.as_object().is_some_and(|f| ScopeLocal::ptr_eq(f, expected))))
     }
 
-    fn species_builtin(a: &Agent<'_, '_>) -> bool {
+    fn species_builtin(a: &Scope<'_, '_>) -> bool {
         let Some(saved) = a.context.regexp_pristine.get().as_ref() else { return false };
         let props = a.context.regexp_proto.get().props();
         if !props.same_words(&[saved.constructor]) {
@@ -621,7 +621,7 @@ impl Regexps {
         ctor.borrow().get_own_symbol(a.context.symbols.species).is_some_and(|prop| matches!(prop.slot, Slot::Accessor { get: Some(g), set: None } if ScopeLocal::ptr_eq(g, saved.species)))
     }
 
-    fn prepared<'scope>(a: &mut Agent<'scope, '_>, recv: Value<'scope>, arg: Value<'scope>, wide: bool, sym: usize) -> Result<Option<(JsObject<'scope>, f64, JsString<'scope>)>, Error> {
+    fn prepared<'scope>(a: &mut Scope<'scope, '_>, recv: Value<'scope>, arg: Value<'scope>, wide: bool, sym: usize) -> Result<Option<(JsObject<'scope>, f64, JsString<'scope>)>, Error> {
         if matches!(recv.kind(), ValueKind::Object(_)) || arg.as_object().is_none() {
             return Ok(None);
         }
@@ -636,7 +636,7 @@ impl Regexps {
         Ok(Some((rx, last, s)))
     }
 
-    fn write_last<'scope>(a: &mut Agent<'scope, '_>, o: JsObject<'scope>, direct: bool, at: usize) -> Result<(), Error> {
+    fn write_last<'scope>(a: &mut Scope<'scope, '_>, o: JsObject<'scope>, direct: bool, at: usize) -> Result<(), Error> {
         if direct {
             Self::set_last(a, o, at);
             Ok(())
@@ -667,7 +667,7 @@ impl Regexps {
         if at == start { (true, start) } else { (false, at) }
     }
 
-    fn cut<'scope>(a: &Agent<'scope, '_>, s: JsString<'scope>, units: Units<'_>, from: usize, to: usize) -> Value<'scope> {
+    fn cut<'scope>(a: &Scope<'scope, '_>, s: JsString<'scope>, units: Units<'_>, from: usize, to: usize) -> Value<'scope> {
         match units {
             Units::Ascii(bytes) => {
                 if to == from.wrapping_add(1)
@@ -692,7 +692,7 @@ impl Regexps {
         n < lim
     }
 
-    fn fast_match<'scope>(a: &mut Agent<'scope, '_>, o: JsObject<'scope>, last: f64, s: JsString<'scope>) -> Result<Value<'scope>, Error> {
+    fn fast_match<'scope>(a: &mut Scope<'scope, '_>, o: JsObject<'scope>, last: f64, s: JsString<'scope>) -> Result<Value<'scope>, Error> {
         let units = s.units();
         let mut items = Vec::new();
         let global = Self::with_program(o, |c| {
@@ -741,7 +741,7 @@ impl Regexps {
         }
     }
 
-    fn split_limit<'scope>(a: &mut Agent<'scope, '_>, limit: Value<'scope>) -> Result<Option<f64>, Error> {
+    fn split_limit<'scope>(a: &mut Scope<'scope, '_>, limit: Value<'scope>) -> Result<Option<f64>, Error> {
         if limit == Value::Undefined {
             return Ok(Some(MAX_SPLIT));
         }
@@ -751,7 +751,7 @@ impl Regexps {
         Ok(Some(f64::from(a.to_uint32(limit)?)))
     }
 
-    fn fast_split<'scope>(a: &Agent<'scope, '_>, o: JsObject<'scope>, s: JsString<'scope>, lim: f64) -> Value<'scope> {
+    fn fast_split<'scope>(a: &Scope<'scope, '_>, o: JsObject<'scope>, s: JsString<'scope>, lim: f64) -> Value<'scope> {
         if lim == 0.0 {
             return a.array(Vec::new()).into();
         }
@@ -768,7 +768,7 @@ impl Regexps {
         a.array(items).into()
     }
 
-    fn split_scan<'scope>(a: &Agent<'scope, '_>, c: &Compiled, s: JsString<'scope>, units: Units<'_>, lim: f64, items: &mut Vec<Value<'scope>>) {
+    fn split_scan<'scope>(a: &Scope<'scope, '_>, c: &Compiled, s: JsString<'scope>, units: Units<'_>, lim: f64, items: &mut Vec<Value<'scope>>) {
         if let (Some(atom), Units::Ascii(_)) = (c.atom.as_deref(), units)
             && atom.is_ascii()
         {
@@ -888,7 +888,7 @@ impl Regexps {
         kind
     }
 
-    fn set_last<'scope>(a: &Agent<'scope, '_>, o: JsObject<'scope>, i: usize) {
+    fn set_last<'scope>(a: &Scope<'scope, '_>, o: JsObject<'scope>, i: usize) {
         o.borrow_mut(a.mc).set_at(0, Self::index(i));
     }
 
@@ -909,7 +909,7 @@ impl Regexps {
         }
     }
 
-    fn quick_exec<'scope>(a: &Agent<'scope, '_>, o: JsObject<'scope>, last: f64, s: &str, units: Units<'_>) -> Result<Option<Found>, Error> {
+    fn quick_exec<'scope>(a: &Scope<'scope, '_>, o: JsObject<'scope>, last: f64, s: &str, units: Units<'_>) -> Result<Option<Found>, Error> {
         let len = units.len();
         let (global, sticky, found) = Self::with_program(o, |c| {
             let (global, sticky) = (c.global(), c.sticky());
@@ -1005,7 +1005,7 @@ impl Regexps {
         }))
     }
 
-    fn replace_fast<'scope>(a: &Agent<'scope, '_>, o: JsObject<'scope>, last: f64, s: JsString<'scope>, repl: &str) -> Value<'scope> {
+    fn replace_fast<'scope>(a: &Scope<'scope, '_>, o: JsObject<'scope>, last: f64, s: JsString<'scope>, repl: &str) -> Value<'scope> {
         let text: &str = &s;
         let buf = Self::with_program(o, |c| {
             if c.global() {
@@ -1041,7 +1041,7 @@ impl Regexps {
         }
     }
 
-    fn quick_replace<'scope>(a: &mut Agent<'scope, '_>, o: JsObject<'scope>, last: f64, s: JsString<'scope>, with: JsString<'scope>) -> Result<Option<Value<'scope>>, Error> {
+    fn quick_replace<'scope>(a: &mut Scope<'scope, '_>, o: JsObject<'scope>, last: f64, s: JsString<'scope>, with: JsString<'scope>) -> Result<Option<Value<'scope>>, Error> {
         let dollars = Self::dollars(&with);
         if dollars == 2 && Self::with_program(o, |c| c.named) {
             return Ok(None);
@@ -1092,7 +1092,7 @@ impl Regexps {
         Ok(Some(a.string_units(&out).into()))
     }
 
-    fn regexp_exec<'scope>(a: &mut Agent<'scope, '_>, r: Value<'scope>, s: JsString<'scope>) -> Result<Value<'scope>, Error> {
+    fn regexp_exec<'scope>(a: &mut Scope<'scope, '_>, r: Value<'scope>, s: JsString<'scope>) -> Result<Value<'scope>, Error> {
         let exec = a.get_named(r, "exec")?;
         if a.is_callable(exec) {
             let result = a.call(exec, r, &[s.into()])?;
@@ -1105,13 +1105,13 @@ impl Regexps {
         Self::builtin_exec(a, o, s)
     }
 
-    fn exec<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn exec<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let o = Self::this(a, this)?;
         let s = a.to_string(args.at(0))?;
         Self::builtin_exec(a, o, s)
     }
 
-    fn test<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn test<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let r = Self::this_object(a, this)?;
         let s = a.to_string(args.at(0))?;
         if let Some((o, last)) = Self::open(a, r, false) {
@@ -1120,7 +1120,7 @@ impl Regexps {
         Ok((Self::regexp_exec(a, r, s)? != Value::Null).into())
     }
 
-    fn fast_test<'scope>(a: &Agent<'scope, '_>, o: JsObject<'scope>, last: f64, s: &j8framework::JsStr) -> bool {
+    fn fast_test<'scope>(a: &Scope<'scope, '_>, o: JsObject<'scope>, last: f64, s: &j8framework::JsStr) -> bool {
         Self::with_program(o, |c| {
             if !c.global() && !c.sticky() {
                 return Self::matches(c, s);
@@ -1155,7 +1155,7 @@ impl Regexps {
         Self::locate(c, s, s.units(), 0).is_some()
     }
 
-    fn to_string<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn to_string<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let r = Self::this_object(a, this)?;
         let p = a.get_named(r, "source")?;
         let p = a.to_string(p)?;
@@ -1192,7 +1192,7 @@ impl Regexps {
         out
     }
 
-    fn source<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn source<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         if let Some(o) = this.as_object()
             && ScopeLocal::ptr_eq(o, a.context.regexp_proto)
         {
@@ -1212,7 +1212,7 @@ impl Regexps {
         Ok(a.string(&s).into())
     }
 
-    fn flags<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn flags<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let r = Self::this_object(a, this)?;
         let mut out = String::new();
         for (c, name) in FLAG_PROPERTIES {
@@ -1224,7 +1224,7 @@ impl Regexps {
         Ok(a.string(&out).into())
     }
 
-    fn flag<'scope, const C: char>(a: &mut Agent<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn flag<'scope, const C: char>(a: &mut Scope<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let Some(o) = this.as_object() else { return Err(a.throw(ErrorKind::Type, "RegExp flag getter called on a non-object")) };
         match Self::regexp(this) {
             Some(r) => Ok(Self::with_program(r, |c| c.has(C)).into()),
@@ -1233,12 +1233,12 @@ impl Regexps {
         }
     }
 
-    fn get_flags<'scope>(a: &mut Agent<'scope, '_>, r: Value<'scope>) -> Result<String, Error> {
+    fn get_flags<'scope>(a: &mut Scope<'scope, '_>, r: Value<'scope>) -> Result<String, Error> {
         let f = a.get_named(r, "flags")?;
         Ok(String::from(&**a.to_string(f)?))
     }
 
-    fn builtin_bits<'scope>(a: &Agent<'scope, '_>, r: Value<'scope>) -> Option<u16> {
+    fn builtin_bits<'scope>(a: &Scope<'scope, '_>, r: Value<'scope>) -> Option<u16> {
         let o = Self::regexp(r)?;
         let saved = a.context.regexp_pristine.get().as_ref()?;
         if o.props().shape() != Some(saved.last_index) || o.proto().is_none_or(|p| !ScopeLocal::ptr_eq(p, a.context.regexp_proto)) {
@@ -1263,13 +1263,13 @@ impl Regexps {
         }
     }
 
-    fn step_last_index<'scope>(a: &mut Agent<'scope, '_>, r: Value<'scope>, units: &[u16], unicode: bool) -> Result<(), Error> {
+    fn step_last_index<'scope>(a: &mut Scope<'scope, '_>, r: Value<'scope>, units: &[u16], unicode: bool) -> Result<(), Error> {
         let li = a.get_named(r, "lastIndex")?;
         let this_index = a.to_length(li)?;
         a.set_named(r, "lastIndex", Self::advance(units, this_index, unicode).into())
     }
 
-    fn match_symbol<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn match_symbol<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let r = Self::this_object(a, this)?;
         let raw = args.at(0);
         if raw.as_object().is_none()
@@ -1310,7 +1310,7 @@ impl Regexps {
         }
     }
 
-    fn match_all_symbol<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn match_all_symbol<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let r = Self::this_object(a, this)?;
         let s = a.to_string(args.at(0))?;
         let default = a.context.global.borrow().own(a.mc, "RegExp").unwrap_or_default();
@@ -1326,7 +1326,7 @@ impl Regexps {
         Ok(ObjectData { kind, proto: Some(a.context.regexp_string_iterator_proto), ..ObjectData::default() }.alloc(a.mc).into())
     }
 
-    fn string_iterator_next<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn string_iterator_next<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let state = match this.kind() {
             ValueKind::Object(o) => match o.borrow().kind {
                 ObjectKind::RegExpStringIterator { matcher, string, global, unicode, done } => Some((o, matcher, string, global, unicode, done)),
@@ -1337,7 +1337,7 @@ impl Regexps {
         let Some((o, matcher, s, global, unicode, done)) = state else {
             return Err(a.throw(ErrorKind::Type, "%RegExpStringIterator%.next called on an incompatible receiver"));
         };
-        let finish = |a: &mut Agent<'scope, '_>| {
+        let finish = |a: &mut Scope<'scope, '_>| {
             if let ObjectKind::RegExpStringIterator { done, .. } = &mut o.borrow_mut(a.mc).kind {
                 *done = true;
             }
@@ -1362,7 +1362,7 @@ impl Regexps {
         Ok(a.iter_result(m, false).into())
     }
 
-    fn substitution<'scope>(a: &mut Agent<'scope, '_>, matched: &[u16], units: &[u16], position: usize, captures: &[Value<'scope>], named: Value<'scope>, template: &[u16]) -> Result<Vec<u16>, Error> {
+    fn substitution<'scope>(a: &mut Scope<'scope, '_>, matched: &[u16], units: &[u16], position: usize, captures: &[Value<'scope>], named: Value<'scope>, template: &[u16]) -> Result<Vec<u16>, Error> {
         let dollar = u16::from(b'$');
         let digit = |c: u16| char::from_u32(u32::from(c)).and_then(|c| c.to_digit(10));
         let tail = (position + matched.len()).min(units.len());
@@ -1433,7 +1433,7 @@ impl Regexps {
         Ok(out)
     }
 
-    fn replace_quick<'scope>(a: &mut Agent<'scope, '_>, rx: JsObject<'scope>, last: f64, s: JsString<'scope>, with: Value<'scope>) -> Result<Option<Value<'scope>>, Error> {
+    fn replace_quick<'scope>(a: &mut Scope<'scope, '_>, rx: JsObject<'scope>, last: f64, s: JsString<'scope>, with: Value<'scope>) -> Result<Option<Value<'scope>>, Error> {
         if a.is_callable(with) || with.as_object().is_some() {
             return Ok(None);
         }
@@ -1444,7 +1444,7 @@ impl Regexps {
         }
     }
 
-    fn replace_general<'scope>(a: &mut Agent<'scope, '_>, r: Value<'scope>, s: JsString<'scope>, mut with: Value<'scope>) -> Result<Value<'scope>, Error> {
+    fn replace_general<'scope>(a: &mut Scope<'scope, '_>, r: Value<'scope>, s: JsString<'scope>, mut with: Value<'scope>) -> Result<Value<'scope>, Error> {
         let functional = a.is_callable(with);
         if !functional {
             with = a.to_string(with)?.into();
@@ -1519,7 +1519,7 @@ impl Regexps {
         Ok(a.string_units(&out).into())
     }
 
-    fn replace_symbol<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn replace_symbol<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let r = Self::this_object(a, this)?;
         let raw = args.at(0);
         let with = args.at(1);
@@ -1539,7 +1539,7 @@ impl Regexps {
         Self::replace_general(a, r, s, with)
     }
 
-    fn search_symbol<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn search_symbol<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let r = Self::this_object(a, this)?;
         let raw = args.at(0);
         if raw.as_object().is_none()
@@ -1567,7 +1567,7 @@ impl Regexps {
         a.get_named(result, "index")
     }
 
-    fn split_symbol<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn split_symbol<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let r = Self::this_object(a, this)?;
         let raw = args.at(0);
         let limit = args.at(1);
@@ -1612,7 +1612,7 @@ impl Regexps {
             }
             return Ok(arr.into());
         }
-        let slice = |a: &Agent<'scope, '_>, from: f64, to: f64| {
+        let slice = |a: &Scope<'scope, '_>, from: f64, to: f64| {
             #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "index is in [0, length]")]
             let (f, t) = (from as usize, to as usize);
             Self::text(a, &units, Some(f..t.max(f)))
@@ -1657,11 +1657,11 @@ impl Regexps {
         Ok(arr.into())
     }
 
-    fn species<'scope>(_: &mut Agent<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn species<'scope>(_: &mut Scope<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Ok(this)
     }
 
-    fn escape<'scope>(a: &mut Agent<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn escape<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let ValueKind::String(s) = args.at(0).kind() else { return Err(a.throw(ErrorKind::Type, "RegExp.escape requires a string")) };
         let mut out = String::new();
         for (i, c) in char::decode_utf16(s.encode_utf16()).enumerate() {
@@ -1696,14 +1696,14 @@ impl Regexps {
         Ok(a.string(&out).into())
     }
 
-    fn subject<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>) -> Result<Value<'scope>, Error> {
+    fn subject<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>) -> Result<Value<'scope>, Error> {
         if this.is_nullish() {
             return Err(a.throw(ErrorKind::Type, "String.prototype method called on null or undefined"));
         }
         Ok(this)
     }
 
-    fn method_of<'scope>(a: &mut Agent<'scope, '_>, v: Value<'scope>, sym: j8framework::JsSymbol<'scope>) -> Result<Option<Value<'scope>>, Error> {
+    fn method_of<'scope>(a: &mut Scope<'scope, '_>, v: Value<'scope>, sym: j8framework::JsSymbol<'scope>) -> Result<Option<Value<'scope>>, Error> {
         let f = a.get_symbol(v, sym, v)?;
         if f.is_nullish() {
             return Ok(None);
@@ -1715,7 +1715,7 @@ impl Regexps {
         Ok(Some(f))
     }
 
-    fn dispatch<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, arg: Value<'scope>, sym: j8framework::JsSymbol<'scope>, flags: Value<'scope>) -> Result<Value<'scope>, Error> {
+    fn dispatch<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, arg: Value<'scope>, sym: j8framework::JsSymbol<'scope>, flags: Value<'scope>) -> Result<Value<'scope>, Error> {
         let o = Self::subject(a, this)?;
         if arg.as_object().is_some()
             && let Some(f) = Self::method_of(a, arg, sym)?
@@ -1728,7 +1728,7 @@ impl Regexps {
         a.call(f, rx.into(), &[s.into()])
     }
 
-    fn string_match<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn string_match<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let recv = Self::subject(a, this)?;
         if let Some((rx, last, s)) = Self::prepared(a, recv, args.at(0), true, SYM_MATCH)? {
             return Self::fast_match(a, rx, last, s);
@@ -1736,7 +1736,7 @@ impl Regexps {
         Self::dispatch(a, this, args.at(0), a.context.symbols.match_, Value::Undefined)
     }
 
-    fn search<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn search<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let recv = Self::subject(a, this)?;
         if let Some((rx, _, s)) = Self::prepared(a, recv, args.at(0), false, SYM_SEARCH)? {
             return Ok(Self::fast_search(rx, s));
@@ -1744,7 +1744,7 @@ impl Regexps {
         Self::dispatch(a, this, args.at(0), a.context.symbols.search, Value::Undefined)
     }
 
-    fn require_global<'scope>(a: &mut Agent<'scope, '_>, v: Value<'scope>, method: &str) -> Result<(), Error> {
+    fn require_global<'scope>(a: &mut Scope<'scope, '_>, v: Value<'scope>, method: &str) -> Result<(), Error> {
         if Self::is_regexp(a, v)? {
             let flags = a.get_named(v, "flags")?;
             if flags.is_nullish() {
@@ -1757,7 +1757,7 @@ impl Regexps {
         Ok(())
     }
 
-    fn match_all<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn match_all<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let arg = args.at(0);
         let recv = Self::subject(a, this)?;
         if arg.as_object().is_some() && !matches!(recv.kind(), ValueKind::Object(_))
@@ -1781,7 +1781,7 @@ impl Regexps {
         Self::dispatch(a, this, arg, a.context.symbols.match_all, g.into())
     }
 
-    fn replace_impl<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>], all: bool) -> Result<Value<'scope>, Error> {
+    fn replace_impl<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>], all: bool) -> Result<Value<'scope>, Error> {
         let o = Self::subject(a, this)?;
         let (search, with) = (args.at(0), args.at(1));
         if search.as_object().is_some() {
@@ -1809,7 +1809,7 @@ impl Regexps {
         Self::replace_pattern(a, s, needle, with, true, all)
     }
 
-    fn replace_gaps<'scope>(a: &Agent<'scope, '_>, text: &str, repl: &str, all: bool) -> Value<'scope> {
+    fn replace_gaps<'scope>(a: &Scope<'scope, '_>, text: &str, repl: &str, all: bool) -> Value<'scope> {
         if !all {
             return a.string_from(&Self::splice(text, 0..0, repl), true).into();
         }
@@ -1823,7 +1823,7 @@ impl Regexps {
         a.string_from(&buf, true).into()
     }
 
-    fn replace_ascii<'scope>(a: &Agent<'scope, '_>, s: JsString<'scope>, needle: &str, repl: &str, all: bool) -> Value<'scope> {
+    fn replace_ascii<'scope>(a: &Scope<'scope, '_>, s: JsString<'scope>, needle: &str, repl: &str, all: bool) -> Value<'scope> {
         let text: &str = &s;
         if needle.is_empty() {
             if repl.is_empty() {
@@ -1838,7 +1838,7 @@ impl Regexps {
         }
     }
 
-    fn replace_pattern<'scope>(a: &mut Agent<'scope, '_>, s: JsString<'scope>, needle: JsString<'scope>, with: Value<'scope>, functional: bool, all: bool) -> Result<Value<'scope>, Error> {
+    fn replace_pattern<'scope>(a: &mut Scope<'scope, '_>, s: JsString<'scope>, needle: JsString<'scope>, with: Value<'scope>, functional: bool, all: bool) -> Result<Value<'scope>, Error> {
         let units: Vec<u16> = s.encode_utf16().collect();
         let needle_units: Vec<u16> = needle.encode_utf16().collect();
         let template: Vec<u16> = if functional { Vec::new() } else { a.to_string(with)?.encode_utf16().collect() };
@@ -1868,15 +1868,15 @@ impl Regexps {
         Ok(a.string_units(&out).into())
     }
 
-    fn replace<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn replace<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Self::replace_impl(a, this, args, false)
     }
 
-    fn replace_all<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn replace_all<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Self::replace_impl(a, this, args, true)
     }
 
-    fn split<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn split<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let o = Self::subject(a, this)?;
         let sep = args.at(0);
         if let Some((rx, _, s)) = Self::prepared(a, o, sep, true, SYM_SPLIT)?

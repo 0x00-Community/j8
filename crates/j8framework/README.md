@@ -11,10 +11,9 @@ implements and the structs / enums they share; it depends on no other j8 layer.
 | --- | --- |
 | `Platform` / `Pool` | Threads and clocks lent by the embedder (`j8platform` implements them) |
 | `Isolate` | An independent JS world: a GC heap ([paragc](https://crates.io/crates/paragc)) plus a profiler |
-| `Scope` | One entry into an isolate; values in it carry the `'scope` brand and cannot leave it (V8's `Local`) |
+| `Scope` | One entry into an isolate with a `Context` and the executor; values in it carry the `'scope` brand and cannot leave it; all JS operation semantics hang off it, calls back into JS go through `Invoke` |
 | `ScopeGlobal<'p, B>` | Roots that live across `enter` calls; `B` names the type (`ValueBrand`, `ContextBrand`) |
 | `Context` | An execution context: the global object and the built-in prototypes (`Intrinsics`, implemented by `j8builtins`) |
-| `Agent` | The context of one run; all JS operation semantics hang off it, calls back into JS go through `Invoke` |
 | `Host` / `HostObject` | A Rust value inside a JS object, traced by the collector |
 | `Value` / `JsObject` / `JsString` … | NaN-boxed values and heap objects |
 
@@ -42,7 +41,7 @@ use j8platform::DefaultPlatform;
 let platform = DefaultPlatform::default();
 let mut isolate = Isolate::new(&platform, CreateParams::default());
 let executor = Executor::default();
-let cx = isolate.enter(|scope| scope.mc.stash::<ContextBrand>(scope.context(&Builtins)));
+let cx = isolate.create_context(&Builtins);
 let result = executor.eval(&mut isolate, &cx, &Source { text: "1 + 2 * 3", file: "a.js" })?;
 ```
 

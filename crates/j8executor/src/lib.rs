@@ -9,7 +9,7 @@ use core::cell::{Cell, RefCell};
 
 use j8bytecode::{Bytecode, Constant, Context, Decoded, FunctionKind, Intrinsic, LiteralValue, Module, NativeContextIndex, Operands, OperandValue, Register, Runtime, ScopeInfo, ScopeType, SharedFunction};
 use j8compiler::Compile;
-use j8framework::{Agent, BinaryOp, Closure, Code, ShapeKey, SmallStr, Collect, CompareOp, ContextKind, ContextName, ContextShape, ShapeId, Env, Error, ErrorKind, FuncId, FunctionInfo, ScopeLocal, Lazy, Invoke, JsEnv, JsObject, Numbers, ObjectData, ObjectKind, Property, Resume, Slot, Step, Value, ValueKind};
+use j8framework::{Scope, BinaryOp, Closure, Code, ShapeKey, SmallStr, Collect, CompareOp, ContextKind, ContextName, ContextShape, ShapeId, Env, Error, ErrorKind, FuncId, FunctionInfo, ScopeLocal, Lazy, Invoke, JsEnv, JsObject, Numbers, ObjectData, ObjectKind, Property, Resume, Slot, Step, Value, ValueKind};
 use j8lockfree::SegVec;
 
 mod cache;
@@ -212,7 +212,7 @@ impl Loaded {
     }
 
     #[inline]
-    fn block_context<'scope>(&self, a: &Agent<'scope, '_>, k: OperandValue, parent: Option<JsEnv<'scope>>) -> Value<'scope> {
+    fn block_context<'scope>(&self, a: &Scope<'scope, '_>, k: OperandValue, parent: Option<JsEnv<'scope>>) -> Value<'scope> {
         let (shape, n) = self.scope_shape(k).map_or((None, 0), |(s, n)| (Some(s), n as usize));
         Value::context(Env::context(n, Value::Undefined, parent, shape, None).alloc(a.mc))
     }
@@ -575,25 +575,25 @@ impl Executor<'_> {
         (!weak.is_cleared()).then(|| unsafe { code.get() })
     }
 
-    fn open<'scope>(&self, a: &mut Agent<'scope, '_>, regs: &mut Vec<Value<'scope>>, closure: Closure<'scope>, callee: Value<'scope>, this: Value<'scope>, args: &[Value<'scope>]) -> Frame {
+    fn open<'scope>(&self, a: &mut Scope<'scope, '_>, regs: &mut Vec<Value<'scope>>, closure: Closure<'scope>, callee: Value<'scope>, this: Value<'scope>, args: &[Value<'scope>]) -> Frame {
         self.open_with(a, regs, self.function(closure.func), closure, callee, this, Args::Values(args))
     }
 
     #[expect(clippy::too_many_arguments, reason = "the parts of a call")]
-    fn open_with<'scope>(&self, a: &mut Agent<'scope, '_>, regs: &mut Vec<Value<'scope>>, loaded: &Loaded, closure: Closure<'scope>, callee: Value<'scope>, this: Value<'scope>, args: Args<'_, 'scope>) -> Frame {
+    fn open_with<'scope>(&self, a: &mut Scope<'scope, '_>, regs: &mut Vec<Value<'scope>>, loaded: &Loaded, closure: Closure<'scope>, callee: Value<'scope>, this: Value<'scope>, args: Args<'_, 'scope>) -> Frame {
         let (params, base) = Self::open_regs(a, regs, loaded, closure, callee, this, args);
         Frame { func: closure.func, loaded: LoadedRef::from(loaded), pc: 0, insn: 0, params, base, argc: args.len() }
     }
 
     #[expect(clippy::too_many_arguments, reason = "the parts of a call")]
     #[inline]
-    fn push_open<'scope>(&self, a: &mut Agent<'scope, '_>, st: &mut State<'scope>, loaded: &Loaded, closure: Closure<'scope>, callee: Value<'scope>, this: Value<'scope>, args: Args<'_, 'scope>) -> usize {
+    fn push_open<'scope>(&self, a: &mut Scope<'scope, '_>, st: &mut State<'scope>, loaded: &Loaded, closure: Closure<'scope>, callee: Value<'scope>, this: Value<'scope>, args: Args<'_, 'scope>) -> usize {
         let (params, base) = Self::open_regs(a, &mut st.regs, loaded, closure, callee, this, args);
         st.frames.push(Frame { func: closure.func, loaded: LoadedRef::from(loaded), pc: 0, insn: 0, params, base, argc: args.len() });
         base
     }
 
-    fn open_regs<'scope>(a: &mut Agent<'scope, '_>, regs: &mut Vec<Value<'scope>>, loaded: &Loaded, closure: Closure<'scope>, callee: Value<'scope>, this: Value<'scope>, args: Args<'_, 'scope>) -> (usize, usize) {
+    fn open_regs<'scope>(a: &mut Scope<'scope, '_>, regs: &mut Vec<Value<'scope>>, loaded: &Loaded, closure: Closure<'scope>, callee: Value<'scope>, this: Value<'scope>, args: Args<'_, 'scope>) -> (usize, usize) {
         let f = &loaded.func;
         a.profiler.enter(closure.func);
         let this = match this.kind() {
@@ -658,7 +658,7 @@ impl Executor<'_> {
         (0..count).map(|i| Self::reg(regs, f, first + i)).collect()
     }
 
-    fn context_at<'scope>(a: &Agent<'scope, '_>, context: Value<'scope>, depth: OperandValue) -> Result<JsEnv<'scope>, Error> {
+    fn context_at<'scope>(a: &Scope<'scope, '_>, context: Value<'scope>, depth: OperandValue) -> Result<JsEnv<'scope>, Error> {
         let mut e = context.as_context().ok_or_else(|| a.throw(ErrorKind::Reference, "no context"))?;
         for _ in 0..depth {
             e = e.parent.ok_or_else(|| a.throw(ErrorKind::Reference, "no outer context"))?;
@@ -670,7 +670,7 @@ impl Executor<'_> {
         usize::try_from(slot).unwrap_or(0).saturating_sub(Context::MIN_SLOTS as usize)
     }
 
-    fn resolve<'scope>(&self, a: &mut Agent<'scope, '_>, mut callee: Value<'scope>, mut this: Value<'scope>, mut args: Vec<Value<'scope>>, depth: usize) -> Result<Callee<'scope>, Error> {
+    fn resolve<'scope>(&self, a: &mut Scope<'scope, '_>, mut callee: Value<'scope>, mut this: Value<'scope>, mut args: Vec<Value<'scope>>, depth: usize) -> Result<Callee<'scope>, Error> {
         while let ValueKind::Object(o) = callee.kind() {
             let step = if let Some(c) = o.closure() {
                 CallStep::Closure(c)
@@ -742,7 +742,7 @@ impl Executor<'_> {
         Err(a.throw(ErrorKind::Type, &alloc::format!("{what} is not a function")))
     }
 
-    fn construct_closure<'scope>(a: &mut Agent<'scope, '_>, o: JsObject<'scope>, f: j8framework::ClosureFn, args: &[Value<'scope>], new_target: Value<'scope>) -> Result<Value<'scope>, Error> {
+    fn construct_closure<'scope>(a: &mut Scope<'scope, '_>, o: JsObject<'scope>, f: j8framework::ClosureFn, args: &[Value<'scope>], new_target: Value<'scope>) -> Result<Value<'scope>, Error> {
         let proto = a.proto_from_ctor(new_target, a.context.object_proto)?;
         let this: Value<'scope> = ObjectData { proto: Some(proto), ..ObjectData::default() }.alloc(a.mc).into();
         let outer = core::mem::replace(&mut a.new_target, new_target);
@@ -752,7 +752,7 @@ impl Executor<'_> {
         Ok(if v.as_object().is_some() { v } else { this })
     }
 
-    fn prepare<'scope>(&self, a: &mut Agent<'scope, '_>, regs: &mut Vec<Value<'scope>>, mut callee: Value<'scope>, mut args: Vec<Value<'scope>>, mut new_target: Value<'scope>, depth: usize) -> Result<Prepared<'scope>, Error> {
+    fn prepare<'scope>(&self, a: &mut Scope<'scope, '_>, regs: &mut Vec<Value<'scope>>, mut callee: Value<'scope>, mut args: Vec<Value<'scope>>, mut new_target: Value<'scope>, depth: usize) -> Result<Prepared<'scope>, Error> {
         while let ValueKind::Object(o) = callee.kind() {
             let kind = match &o.borrow().kind {
                 ObjectKind::Function(c) => Ok(Ok(*c)),
@@ -816,7 +816,7 @@ impl Executor<'_> {
         Err(a.throw(ErrorKind::Type, &alloc::format!("{what} is not a constructor")))
     }
 
-    fn create_this<'scope>(a: &mut Agent<'scope, '_>, ctor: &Loaded, new_target: Value<'scope>) -> Result<JsObject<'scope>, Error> {
+    fn create_this<'scope>(a: &mut Scope<'scope, '_>, ctor: &Loaded, new_target: Value<'scope>) -> Result<JsObject<'scope>, Error> {
         let proto = match new_target.kind() {
             ValueKind::Object(o) => match ctor.prototype.get(o) {
                 Some(v) => v,
@@ -832,7 +832,7 @@ impl Executor<'_> {
         Ok(ObjectData::ordinary(a.mc, Some(proto), usize::from(ctor.instance_size.get())))
     }
 
-    fn construct_result<'scope>(&self, a: &Agent<'scope, '_>, regs: &[Value<'scope>], f: &Frame, v: Value<'scope>) -> Result<Value<'scope>, Error> {
+    fn construct_result<'scope>(&self, a: &Scope<'scope, '_>, regs: &[Value<'scope>], f: &Frame, v: Value<'scope>) -> Result<Value<'scope>, Error> {
         let loaded = self.function(f.func);
         if v.as_object().is_some() {
             return Ok(v);
@@ -850,12 +850,12 @@ impl Executor<'_> {
     }
 
     #[inline]
-    fn create_closure<'scope>(&self, a: &Agent<'scope, '_>, loaded: &Loaded, k: OperandValue, env: Option<JsEnv<'scope>>) -> JsObject<'scope> {
+    fn create_closure<'scope>(&self, a: &Scope<'scope, '_>, loaded: &Loaded, k: OperandValue, env: Option<JsEnv<'scope>>) -> JsObject<'scope> {
         let Some(Constant::Function(n)) = loaded.func.bytecode.constants.get(usize::try_from(k).unwrap_or(0)) else { unreachable!("a function constant") };
         self.function_object(a, Closure::new(FuncId(loaded.base + n), env))
     }
 
-    fn function_object<'scope>(&self, a: &Agent<'scope, '_>, mut closure: Closure<'scope>) -> JsObject<'scope> {
+    fn function_object<'scope>(&self, a: &Scope<'scope, '_>, mut closure: Closure<'scope>) -> JsObject<'scope> {
         let loaded = self.function(closure.func);
         closure.code = Some(loaded.code());
         let func = &loaded.func;
@@ -898,7 +898,7 @@ impl Executor<'_> {
         fo
     }
 
-    fn object_literal<'scope>(a: &Agent<'scope, '_>, loaded: &Loaded, k: OperandValue) -> JsObject<'scope> {
+    fn object_literal<'scope>(a: &Scope<'scope, '_>, loaded: &Loaded, k: OperandValue) -> JsObject<'scope> {
         let k = usize::try_from(k).unwrap_or(0);
         let Some(Constant::Object(b)) = loaded.func.bytecode.constants.get(k) else { unreachable!("an object boilerplate") };
         let ob = a.object_with(b.properties.len());
@@ -926,7 +926,7 @@ impl Executor<'_> {
         cache.set(o.get().props().shape().filter(|s| s.len() == n).map(ShapeKey::from));
     }
 
-    fn script_slot<'scope>(&self, a: &Agent<'scope, '_>, name: &str) -> Option<(JsEnv<'scope>, usize, Mutability)> {
+    fn script_slot<'scope>(&self, a: &Scope<'scope, '_>, name: &str) -> Option<(JsEnv<'scope>, usize, Mutability)> {
         a.context.script_contexts.get().iter().find_map(|e| {
             let (i, n) = self.context_shape(e.shape?).slot(name)?;
             Some((*e, i, Mutability::from(n)))
@@ -934,11 +934,11 @@ impl Executor<'_> {
     }
 
     #[cold]
-    fn uninitialized(a: &Agent<'_, '_>, name: &str) -> Error {
+    fn uninitialized(a: &Scope<'_, '_>, name: &str) -> Error {
         a.throw(ErrorKind::Reference, &alloc::format!("Cannot access '{name}' before initialization"))
     }
 
-    fn global_load<'scope>(&self, a: &mut Agent<'scope, '_>, cache: &ic::GlobalIc, name: &str, inside_typeof: bool) -> Result<Value<'scope>, Error> {
+    fn global_load<'scope>(&self, a: &mut Scope<'scope, '_>, cache: &ic::GlobalIc, name: &str, inside_typeof: bool) -> Result<Value<'scope>, Error> {
         if name == SCRIPT_THIS {
             return Ok(Value::Object(a.context.global));
         }
@@ -962,7 +962,7 @@ impl Executor<'_> {
         Ok(v)
     }
 
-    fn global_store<'scope>(&self, a: &mut Agent<'scope, '_>, cache: &ic::GlobalIc, name: &str, v: Value<'scope>, strict: bool) -> Result<(), Error> {
+    fn global_store<'scope>(&self, a: &mut Scope<'scope, '_>, cache: &ic::GlobalIc, name: &str, v: Value<'scope>, strict: bool) -> Result<(), Error> {
         let (scope, global) = (a.context.script_scope, a.context.global);
         if let Some((o, at)) = cache.writable(scope, global)
             && let Slot::Data(_) = o.get().props().slot(at)
@@ -989,7 +989,7 @@ impl Executor<'_> {
         Ok(())
     }
 
-    fn lookup<'scope>(&self, a: &mut Agent<'scope, '_>, env: Option<JsEnv<'scope>>, name: &str) -> Result<Found<'scope>, Error> {
+    fn lookup<'scope>(&self, a: &mut Scope<'scope, '_>, env: Option<JsEnv<'scope>>, name: &str) -> Result<Found<'scope>, Error> {
         let mut e = env;
         while let Some(c) = e {
             if let Some(ext) = c.extension {
@@ -1014,7 +1014,7 @@ impl Executor<'_> {
         Ok(Found::Nothing)
     }
 
-    fn unscopable<'scope>(a: &mut Agent<'scope, '_>, o: JsObject<'scope>, name: &str) -> Result<bool, Error> {
+    fn unscopable<'scope>(a: &mut Scope<'scope, '_>, o: JsObject<'scope>, name: &str) -> Result<bool, Error> {
         let u = a.get_symbol(Value::Object(o), a.context.symbols.unscopables, Value::Object(o))?;
         if u.as_object().is_none() {
             return Ok(false);
@@ -1023,12 +1023,12 @@ impl Executor<'_> {
         Ok(a.to_boolean(blocked))
     }
 
-    fn lookup_load<'scope>(&self, a: &mut Agent<'scope, '_>, env: Option<JsEnv<'scope>>, name: &str, inside_typeof: bool) -> Result<Value<'scope>, Error> {
+    fn lookup_load<'scope>(&self, a: &mut Scope<'scope, '_>, env: Option<JsEnv<'scope>>, name: &str, inside_typeof: bool) -> Result<Value<'scope>, Error> {
         let found = self.lookup(a, env, name)?;
         Self::load_found(a, found, name, inside_typeof)
     }
 
-    fn load_found<'scope>(a: &mut Agent<'scope, '_>, found: Found<'scope>, name: &str, inside_typeof: bool) -> Result<Value<'scope>, Error> {
+    fn load_found<'scope>(a: &mut Scope<'scope, '_>, found: Found<'scope>, name: &str, inside_typeof: bool) -> Result<Value<'scope>, Error> {
         match found {
             Found::Slot(c, i, _) => {
                 let v = c.load(i);
@@ -1041,14 +1041,14 @@ impl Executor<'_> {
         }
     }
 
-    fn lookup_for_call<'scope>(&self, a: &mut Agent<'scope, '_>, env: Option<JsEnv<'scope>>, name: &str) -> Result<(Value<'scope>, Value<'scope>), Error> {
+    fn lookup_for_call<'scope>(&self, a: &mut Scope<'scope, '_>, env: Option<JsEnv<'scope>>, name: &str) -> Result<(Value<'scope>, Value<'scope>), Error> {
         match self.lookup(a, env, name)? {
             Found::With(o) => Ok((a.get_named(Value::Object(o), name)?, Value::Object(o))),
             found => Ok((Self::load_found(a, found, name, false)?, Value::Undefined)),
         }
     }
 
-    fn lookup_store<'scope>(&self, a: &mut Agent<'scope, '_>, env: Option<JsEnv<'scope>>, name: &str, v: Value<'scope>, strict: bool) -> Result<(), Error> {
+    fn lookup_store<'scope>(&self, a: &mut Scope<'scope, '_>, env: Option<JsEnv<'scope>>, name: &str, v: Value<'scope>, strict: bool) -> Result<(), Error> {
         match self.lookup(a, env, name)? {
             Found::Slot(c, i, mutability) => {
                 if matches!(c.load(i).kind(), ValueKind::Uninit) {
@@ -1081,7 +1081,7 @@ impl Executor<'_> {
         e
     }
 
-    fn var_scope<'scope>(&self, a: &Agent<'scope, '_>, env: Option<JsEnv<'scope>>) -> JsObject<'scope> {
+    fn var_scope<'scope>(&self, a: &Scope<'scope, '_>, env: Option<JsEnv<'scope>>) -> JsObject<'scope> {
         let mut e = env;
         while let Some(c) = e {
             if let (Some(ext), Some(ContextKind::Function)) = (c.extension, c.shape.map(|s| self.context_shape(s).kind)) {
@@ -1092,7 +1092,7 @@ impl Executor<'_> {
         a.context.global
     }
 
-    fn check_eval<'scope>(&self, a: &mut Agent<'scope, '_>, env: Option<JsEnv<'scope>>, name: &str, kind: j8bytecode::EvalDeclaration) -> Result<(), Error> {
+    fn check_eval<'scope>(&self, a: &mut Scope<'scope, '_>, env: Option<JsEnv<'scope>>, name: &str, kind: j8bytecode::EvalDeclaration) -> Result<(), Error> {
         let mut e = env;
         while let Some(c) = e {
             if let Some(s) = c.shape.map(|s| self.context_shape(s)) {
@@ -1124,7 +1124,7 @@ impl Executor<'_> {
         }
     }
 
-    fn declare_eval<'scope>(&self, a: &mut Agent<'scope, '_>, env: Option<JsEnv<'scope>>, name: &str, value: Option<Value<'scope>>) -> Result<(), Error> {
+    fn declare_eval<'scope>(&self, a: &mut Scope<'scope, '_>, env: Option<JsEnv<'scope>>, name: &str, value: Option<Value<'scope>>) -> Result<(), Error> {
         let mut e = env;
         while let Some(c) = e {
             if let Some(s) = c.shape.map(|s| self.context_shape(s)) {
@@ -1159,7 +1159,7 @@ impl Executor<'_> {
         Ok(())
     }
 
-    fn declare_globals<'scope>(&self, a: &mut Agent<'scope, '_>, f: &Frame, env: Option<JsEnv<'scope>>, decls: &[j8bytecode::GlobalDeclaration]) -> Result<(), Error> {
+    fn declare_globals<'scope>(&self, a: &mut Scope<'scope, '_>, f: &Frame, env: Option<JsEnv<'scope>>, decls: &[j8bytecode::GlobalDeclaration]) -> Result<(), Error> {
         for d in decls {
             let name = &*d.name;
             if self.script_slot(a, name).is_some() {
@@ -1196,7 +1196,7 @@ impl Executor<'_> {
         Ok(())
     }
 
-    fn script_context<'scope>(&self, a: &mut Agent<'scope, '_>, main: FuncId) -> Result<Option<JsEnv<'scope>>, Error> {
+    fn script_context<'scope>(&self, a: &mut Scope<'scope, '_>, main: FuncId) -> Result<Option<JsEnv<'scope>>, Error> {
         let Some(id) = self.function(main).scope else { return Ok(None) };
         let shape = self.context_shape(id);
         if shape.kind != ContextKind::Script {
@@ -1221,7 +1221,7 @@ impl Executor<'_> {
         Ok(Some(env))
     }
 
-    fn script_state<'scope>(&self, a: &mut Agent<'scope, '_>, main: FuncId) -> Result<State<'scope>, Error> {
+    fn script_state<'scope>(&self, a: &mut Scope<'scope, '_>, main: FuncId) -> Result<State<'scope>, Error> {
         let env = self.script_context(a, main)?;
         let this = Value::Object(a.context.global);
         let mut regs = Vec::new();
@@ -1229,7 +1229,7 @@ impl Executor<'_> {
         Ok(self.state(regs, f))
     }
 
-    pub fn run_script<'scope>(&self, a: &mut Agent<'scope, '_>, main: FuncId) -> Result<Value<'scope>, Error> {
+    pub fn run_script<'scope>(&self, a: &mut Scope<'scope, '_>, main: FuncId) -> Result<Value<'scope>, Error> {
         let st = self.script_state(a, main)?;
         self.execute(a, st, &mut None).map(Outcome::returned)
     }
@@ -1256,7 +1256,7 @@ impl Executor<'_> {
         }
     }
 
-    fn execute<'scope>(&self, a: &mut Agent<'scope, '_>, mut st: State<'scope>, budget: &mut Option<usize>) -> Result<Outcome<'scope>, Error> {
+    fn execute<'scope>(&self, a: &mut Scope<'scope, '_>, mut st: State<'scope>, budget: &mut Option<usize>) -> Result<Outcome<'scope>, Error> {
         let base = self.depth.get();
         let mut b = Budget::new(a.stop, *budget);
         let r = loop {
@@ -1285,7 +1285,7 @@ impl Executor<'_> {
         r
     }
 
-    fn run<'scope>(&self, a: &mut Agent<'scope, '_>, st: &mut State<'scope>, depth: usize, budget: &mut Budget<'_>) -> Result<Option<Outcome<'scope>>, Error> {
+    fn run<'scope>(&self, a: &mut Scope<'scope, '_>, st: &mut State<'scope>, depth: usize, budget: &mut Budget<'_>) -> Result<Option<Outcome<'scope>>, Error> {
         loop {
             if budget.spent() {
                 return Ok(None);
@@ -1330,7 +1330,7 @@ impl Executor<'_> {
         st.frames.push(next);
     }
 
-    fn call_from<'scope>(&self, a: &mut Agent<'scope, '_>, st: &mut State<'scope>, callee: Value<'scope>, this: Value<'scope>, args: Args<'_, 'scope>, level: usize) -> Result<Flow<'scope>, Error> {
+    fn call_from<'scope>(&self, a: &mut Scope<'scope, '_>, st: &mut State<'scope>, callee: Value<'scope>, this: Value<'scope>, args: Args<'_, 'scope>, level: usize) -> Result<Flow<'scope>, Error> {
         if level >= STACK_LIMIT {
             return Err(a.throw(ErrorKind::Range, "Maximum call stack size exceeded"));
         }
@@ -1373,7 +1373,7 @@ impl Executor<'_> {
         }
     }
 
-    fn construct_from<'scope>(&self, a: &mut Agent<'scope, '_>, st: &mut State<'scope>, callee: Value<'scope>, args: Vec<Value<'scope>>, new_target: Value<'scope>, level: usize) -> Result<Flow<'scope>, Error> {
+    fn construct_from<'scope>(&self, a: &mut Scope<'scope, '_>, st: &mut State<'scope>, callee: Value<'scope>, args: Vec<Value<'scope>>, new_target: Value<'scope>, level: usize) -> Result<Flow<'scope>, Error> {
         if level >= STACK_LIMIT {
             return Err(a.throw(ErrorKind::Range, "Maximum call stack size exceeded"));
         }
@@ -1389,18 +1389,18 @@ impl Executor<'_> {
         }
     }
 
-    fn constant<'scope>(a: &Agent<'scope, '_>, c: &Constant) -> Value<'scope> {
+    fn constant<'scope>(a: &Scope<'scope, '_>, c: &Constant) -> Value<'scope> {
         match c {
             Constant::Number(x) => Value::Number(*x),
             Constant::String(s) => a.string(s).into(),
             Constant::Utf16(u) => a.string_units(u).into(),
-            Constant::BigInt(digits) => a.bigint(Agent::parse_bigint(digits).unwrap_or_default()),
+            Constant::BigInt(digits) => a.bigint(Scope::parse_bigint(digits).unwrap_or_default()),
             Constant::AsyncIteratorSymbol => a.context.symbols.async_iterator.into(),
             _ => Value::Undefined,
         }
     }
 
-    fn literal<'scope>(a: &Agent<'scope, '_>, v: &LiteralValue) -> Value<'scope> {
+    fn literal<'scope>(a: &Scope<'scope, '_>, v: &LiteralValue) -> Value<'scope> {
         match v {
             LiteralValue::Number(x) => Value::Number(*x),
             LiteralValue::String(s) => a.string(s).into(),
@@ -1418,7 +1418,7 @@ impl Executor<'_> {
     }
 
     #[expect(clippy::too_many_lines, reason = "one arm per bytecode")]
-    fn step<'scope>(&self, a: &mut Agent<'scope, '_>, st: &mut State<'scope>, loaded: &Loaded, d: &Insn, level: usize, budget: &mut Budget<'_>) -> Result<Flow<'scope>, Error> {
+    fn step<'scope>(&self, a: &mut Scope<'scope, '_>, st: &mut State<'scope>, loaded: &Loaded, d: &Insn, level: usize, budget: &mut Budget<'_>) -> Result<Flow<'scope>, Error> {
         let o = &d.operands;
         let State { regs, frames, acc, message } = st;
         let f = frames.last_mut().expect("a running frame");
@@ -1446,13 +1446,13 @@ impl Executor<'_> {
                 };
             }};
         }
-        let binary = |op: BinaryOp, a: &mut Agent<'scope, '_>, l: Value<'scope>, r: Value<'scope>| -> Result<Value<'scope>, Error> {
+        let binary = |op: BinaryOp, a: &mut Scope<'scope, '_>, l: Value<'scope>, r: Value<'scope>| -> Result<Value<'scope>, Error> {
             match (l.as_number(), r.as_number()) {
                 (Some(x), Some(y)) => Ok(op.numbers(x, y).into()),
                 _ => a.binary(op, l, r),
             }
         };
-        let compare = |op: CompareOp, a: &mut Agent<'scope, '_>, l: Value<'scope>, r: Value<'scope>| -> Result<Value<'scope>, Error> {
+        let compare = |op: CompareOp, a: &mut Scope<'scope, '_>, l: Value<'scope>, r: Value<'scope>| -> Result<Value<'scope>, Error> {
             match (l.as_number(), r.as_number()) {
                 (Some(x), Some(y)) => Ok(op.numbers(x, y).into()),
                 _ => a.compare(op, l, r).map(Value::Bool),
@@ -2055,11 +2055,11 @@ impl Executor<'_> {
         }
     }
 
-    fn spread<'scope>(a: &mut Agent<'scope, '_>, v: Value<'scope>) -> Result<Vec<Value<'scope>>, Error> {
+    fn spread<'scope>(a: &mut Scope<'scope, '_>, v: Value<'scope>) -> Result<Vec<Value<'scope>>, Error> {
         a.to_list(v)
     }
 
-    fn arguments<'scope>(&self, a: &mut Agent<'scope, '_>, regs: &[Value<'scope>], f: &Frame, strict: bool) -> Result<Value<'scope>, Error> {
+    fn arguments<'scope>(&self, a: &mut Scope<'scope, '_>, regs: &[Value<'scope>], f: &Frame, strict: bool) -> Result<Value<'scope>, Error> {
         let args = f.args(regs);
         let outer = f.slot(regs, Frame::CLOSURE).as_object().and_then(|o| o.closure()).and_then(|c| c.env);
         let map = if strict { None } else { self.arguments_map(f.env(regs), outer, args.len()) };
@@ -2101,11 +2101,11 @@ impl Executor<'_> {
         slots.iter().any(Option::is_some).then_some(j8framework::ArgumentsMap { env, slots })
     }
 
-    fn throw_type_error<'scope>(a: &mut Agent<'scope, '_>, _: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn throw_type_error<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Err(a.throw(ErrorKind::Type, "'caller', 'callee', and 'arguments' properties may not be accessed on strict mode functions or the arguments objects for calls to them"))
     }
 
-    fn define_class<'scope>(a: &mut Agent<'scope, '_>, b: &j8bytecode::ClassBoilerplate, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn define_class<'scope>(a: &mut Scope<'scope, '_>, b: &j8bytecode::ClassBoilerplate, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         use j8bytecode::MemberKind as M;
         let arg = |n: usize| args.get(n).copied().unwrap_or_default();
         let Some(ctor) = arg(1).as_object() else { unreachable!("a class constructor") };
@@ -2152,14 +2152,14 @@ impl Executor<'_> {
         }
     }
 
-    fn coroutine_mut<'scope, T>(a: &Agent<'scope, '_>, co: JsObject<'scope>, write: impl FnOnce(&mut j8framework::Coroutine<'scope>) -> T) -> T {
+    fn coroutine_mut<'scope, T>(a: &Scope<'scope, '_>, co: JsObject<'scope>, write: impl FnOnce(&mut j8framework::Coroutine<'scope>) -> T) -> T {
         match &mut co.borrow_mut(a.mc).kind {
             ObjectKind::Coroutine(c) => write(c),
             _ => unreachable!("a generator object"),
         }
     }
 
-    fn intrinsic<'scope>(&self, a: &mut Agent<'scope, '_>, i: Intrinsic, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn intrinsic<'scope>(&self, a: &mut Scope<'scope, '_>, i: Intrinsic, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let arg = |n: usize| args.get(n).copied().unwrap_or_default();
         match i {
             Intrinsic::CopyDataProperties => {
@@ -2250,9 +2250,9 @@ impl Executor<'_> {
     }
 
     #[expect(clippy::too_many_lines, reason = "one arm per runtime function")]
-    fn runtime<'scope>(&self, a: &mut Agent<'scope, '_>, st: &mut State<'scope>, loaded: &Loaded, rt: Runtime, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn runtime<'scope>(&self, a: &mut Scope<'scope, '_>, st: &mut State<'scope>, loaded: &Loaded, rt: Runtime, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let arg = |n: usize| args.get(n).copied().unwrap_or_default();
-        let text = |a: &mut Agent<'scope, '_>, v: Value<'scope>| -> Result<alloc::string::String, Error> { Ok(alloc::string::String::from(&**a.to_string(v)?)) };
+        let text = |a: &mut Scope<'scope, '_>, v: Value<'scope>| -> Result<alloc::string::String, Error> { Ok(alloc::string::String::from(&**a.to_string(v)?)) };
         match rt {
             Runtime::DeclareGlobals => {
                 let decls = loaded.func.bytecode.constants.iter().find_map(|c| match c {
@@ -2377,7 +2377,7 @@ impl Executor<'_> {
         State::new(regs, frames, f)
     }
 
-    fn recycle<'scope>(&self, a: &mut Agent<'scope, '_>, st: State<'scope>) {
+    fn recycle<'scope>(&self, a: &mut Scope<'scope, '_>, st: State<'scope>) {
         let State { regs, mut frames, .. } = st;
         a.give_regs(regs);
         frames.clear();
@@ -2387,7 +2387,7 @@ impl Executor<'_> {
         }
     }
 
-    fn run_frame<'scope>(&self, a: &mut Agent<'scope, '_>, regs: Vec<Value<'scope>>, f: Frame, level: usize) -> Result<Value<'scope>, Error> {
+    fn run_frame<'scope>(&self, a: &mut Scope<'scope, '_>, regs: Vec<Value<'scope>>, f: Frame, level: usize) -> Result<Value<'scope>, Error> {
         let saved = self.depth.replace(level);
         let r = self.execute(a, self.state(regs, f), &mut None).map(Outcome::returned);
         self.depth.set(saved);
@@ -2420,7 +2420,7 @@ enum Found<'scope> {
 }
 
 impl<'scope> Invoke<'scope> for Executor<'_> {
-    fn call(&self, a: &mut Agent<'scope, '_>, callee: Value<'scope>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn call(&self, a: &mut Scope<'scope, '_>, callee: Value<'scope>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let level = self.depth.get() + 1;
         if level >= STACK_LIMIT {
             return Err(a.throw(ErrorKind::Range, "Maximum call stack size exceeded"));
@@ -2469,7 +2469,7 @@ impl<'scope> Invoke<'scope> for Executor<'_> {
         }
     }
 
-    fn callback(&self, a: &mut Agent<'scope, '_>, callee: Value<'scope>, this: Value<'scope>) -> j8framework::Callback<'scope> {
+    fn callback(&self, a: &mut Scope<'scope, '_>, callee: Value<'scope>, this: Value<'scope>) -> j8framework::Callback<'scope> {
         if let Some(t) = &self.tier
             && let Some(c) = callee.as_object().and_then(|o| o.closure())
             && let f = self.jit_closure_function(&c)
@@ -2486,7 +2486,7 @@ impl<'scope> Invoke<'scope> for Executor<'_> {
         loaded.constructs || loaded.class_constructor
     }
 
-    fn eval_code(&self, a: &mut Agent<'scope, '_>, src: &str, kind: j8framework::CodeKind, hidden: bool) -> Result<Value<'scope>, Error> {
+    fn eval_code(&self, a: &mut Scope<'scope, '_>, src: &str, kind: j8framework::CodeKind, hidden: bool) -> Result<Value<'scope>, Error> {
         let file = Executor::source_url(src).unwrap_or(EVAL_FILE);
         let module = match Module::compile_eval(&j8framework::Source { text: src, file }, kind, hidden) {
             Ok(m) => m,
@@ -2505,7 +2505,7 @@ impl<'scope> Invoke<'scope> for Executor<'_> {
         r
     }
 
-    fn resume(&self, a: &mut Agent<'scope, '_>, co: JsObject<'scope>, mode: Resume, value: Value<'scope>) -> Result<Step<'scope>, Error> {
+    fn resume(&self, a: &mut Scope<'scope, '_>, co: JsObject<'scope>, mode: Resume, value: Value<'scope>) -> Result<Step<'scope>, Error> {
         use j8framework::{CoroutineState as S, Settlement, Waiting as W};
         let level = self.depth.get() + 1;
         if level >= STACK_LIMIT {
@@ -2582,7 +2582,7 @@ impl<'scope> Invoke<'scope> for Executor<'_> {
         }
     }
 
-    fn construct(&self, a: &mut Agent<'scope, '_>, callee: Value<'scope>, args: &[Value<'scope>], new_target: Value<'scope>) -> Result<Value<'scope>, Error> {
+    fn construct(&self, a: &mut Scope<'scope, '_>, callee: Value<'scope>, args: &[Value<'scope>], new_target: Value<'scope>) -> Result<Value<'scope>, Error> {
         let level = self.depth.get() + 1;
         if level >= STACK_LIMIT {
             return Err(a.throw(ErrorKind::Range, "Maximum call stack size exceeded"));
@@ -2639,23 +2639,21 @@ impl<'p> Executor<'p> {
         let this = self;
         let started = core::mem::replace(&mut job.0, Started::Spent);
         let mut budget = Some(quota.left());
-        let slice = isolate.enter(|scope| -> Result<Slice, Error> {
-            let context = scope.mc.fetch(cx);
-            let mut a = scope.agent(context, this);
+        let slice = isolate.enter(cx, this, |a| -> Result<Slice, Error> {
             let st = match started {
                 Started::Script { module, file } => {
                     let main = this.load_script(a.mc, module, &file);
-                    this.script_state(&mut a, main)?
+                    this.script_state(a, main)?
                 }
                 Started::Paused(root) => j8framework::CellExt::borrow_mut(a.mc.fetch(&root), a.mc).take().expect("a parked state"),
                 Started::Module { text, file } => {
-                    this.run_module(&mut a, &file, &text, 0)?;
+                    this.run_module(a, &file, &text, 0)?;
                     a.run_jobs()?;
                     return Ok(Slice::Done(a.global(Value::Undefined)));
                 }
                 Started::Spent => unreachable!("a finished job is not resumed"),
             };
-            match this.execute(&mut a, st, &mut budget)? {
+            match this.execute(a, st, &mut budget)? {
                 Outcome::Paused(st) => Ok(Slice::Paused(a.mc.stash::<ParkedBrand>(a.mc.alloc(j8framework::GcCell::new(a.mc, Some(*st)))))),
                 Outcome::Return(v) => {
                     a.run_jobs()?;

@@ -2,7 +2,7 @@ use alloc::borrow::Cow;
 use alloc::string::String;
 use core::ffi::c_char;
 
-use j8framework::{Agent, JsObject, JsString, Key, PropertyKey, Value, ValueKind};
+use j8framework::{Scope, JsObject, JsString, Key, PropertyKey, Value, ValueKind};
 
 use crate::{AUTO_LENGTH, Env, Handle, Status};
 
@@ -80,7 +80,7 @@ impl Env<'_> {
         self.value(h)?.as_object().ok_or(Status::ObjectExpected)
     }
 
-    pub fn to_object<'scope>(&self, a: &Agent<'scope, '_>, h: Handle) -> Result<JsObject<'scope>, Status> {
+    pub fn to_object<'scope>(&self, a: &Scope<'scope, '_>, h: Handle) -> Result<JsObject<'scope>, Status> {
         a.to_object(self.value(h)?).map_err(|_| Status::ObjectExpected)
     }
 
@@ -95,7 +95,7 @@ impl Env<'_> {
         self.value(h)?.as_number().ok_or(Status::NumberExpected)
     }
 
-    pub fn callable<'scope>(&self, a: &Agent<'scope, '_>, h: Handle) -> Result<Value<'scope>, Status> {
+    pub fn callable<'scope>(&self, a: &Scope<'scope, '_>, h: Handle) -> Result<Value<'scope>, Status> {
         let v = self.value(h)?;
         if a.is_callable(v) { Ok(v) } else { Err(Status::FunctionExpected) }
     }

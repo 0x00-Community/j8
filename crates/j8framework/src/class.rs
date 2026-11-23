@@ -1,8 +1,8 @@
 use crate::ValueKind;
 
-use crate::{Agent, Error, ErrorKind, JsObject, Key, PropertyKey, Value};
+use crate::{Scope, Error, ErrorKind, JsObject, Key, PropertyKey, Value};
 
-impl<'scope> Agent<'scope, '_> {
+impl<'scope> Scope<'scope, '_> {
     pub fn class_heritage(&mut self, superclass: Value<'scope>) -> Result<(Option<JsObject<'scope>>, JsObject<'scope>), Error> {
         match superclass.kind() {
             ValueKind::Uninit => Ok((Some(self.context.object_proto), self.context.function_proto)),

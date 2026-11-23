@@ -1,6 +1,6 @@
 use std::sync::Mutex;
 
-use j8::frame::{Agent, Error, ErrorKind};
+use j8::frame::{Scope, Error, ErrorKind};
 use rusqlite::types::{Value as Sql, ValueRef};
 use rusqlite::fallible_iterator::FallibleIterator as _;
 use rusqlite::{Batch, Connection};
@@ -43,7 +43,7 @@ impl From<ValueRef<'_>> for Column {
 #[j8::class]
 impl SqlStorage {
     #[js(constructor)]
-    fn open(a: &mut Agent<'_, '_>, path: &str) -> Result<Self, Error> {
+    fn open(a: &mut Scope<'_, '_>, path: &str) -> Result<Self, Error> {
         let db = Self::configure(path).map_err(|e| a.throw(ErrorKind::Error, &e))?;
         Ok(Self { db: Mutex::new(db) })
     }
@@ -54,7 +54,7 @@ impl SqlStorage {
         rx.await
     }
 
-    fn exec(&self, a: &mut Agent<'_, '_>, query: &str, params: &str) -> Result<String, Error> {
+    fn exec(&self, a: &mut Scope<'_, '_>, query: &str, params: &str) -> Result<String, Error> {
         let params: Vec<Json> = serde_json::from_str(params).map_err(|e| a.throw(ErrorKind::Type, &format!("SQL bindings: {e}")))?;
         let db = self.db.lock().map_err(|_| a.throw(ErrorKind::Error, "SQLite: the database is poisoned"))?;
         Self::run(&db, query, params).map_err(|e| a.throw(ErrorKind::Error, &format!("SQLite: {e}")))

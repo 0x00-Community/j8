@@ -29,9 +29,9 @@ paragc types carry two lifetimes, the heap's brand `'heap` and the scope's `'sco
 ## Pending exception
 
 As in V8, a thrown value doesn't travel inside `Error`: `Error::Exception` only says "JS threw", and the value waits in
-the entry's pending slot (`mc.raise` / `agent.take_exception`). A value left pending when an entry ends is rooted and
+the entry's pending slot (`mc.raise` / `scope.take_exception`). A value left pending when an entry ends is rooted and
 raised again at the start of the next one, so the host can read it (`Runtime::exception_text`). Host code that must hold
-a rejection across turns parks it in the isolate (`agent.park()` ⇒ `Error::Parked(ticket)`, `agent.unpark(ticket)`).
+a rejection across turns parks it in the isolate (`scope.park()` ⇒ `Error::Parked(ticket)`, `scope.unpark(ticket)`).
 
 ## j8's GC layer
 

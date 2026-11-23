@@ -3,7 +3,7 @@
 | 术语 | 含义 |
 |---|---|
 | **acc（累加器）** | 字节码隐式的结果寄存器，大多数指令读写它 |
-| **Agent** | 一次运行的上下文；JS 运算语义挂在它上面 |
+| **Scope** | 带着 `Context` 和执行器进入 isolate 的一次；JS 运算语义挂在它上面（V8 的 `HandleScope` + `Context::Scope`；规范里的 agent） |
 | **Context** | 执行上下文：全局对象与内建原型 |
 | **上下文槽 / Env** | 被闭包捕获的变量所在的堆上环境 |
 | **CodeCache** | 多个 executor 共享的字节码缓存 |

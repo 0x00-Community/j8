@@ -9,7 +9,7 @@ use std::fmt::Write;
 use std::process::Command;
 use std::time::Duration;
 
-use j8::frame::{Agent, Error, Platform, Pool, Task, Value};
+use j8::frame::{Scope, Error, Platform, Pool, Task, Value};
 use j8::{Bytes, IntoJs};
 
 pub use bytes::Raw;
@@ -39,7 +39,7 @@ impl Process {
         Io::new(std::env::set_current_dir(dir), "chdir", dir)
     }
 
-    fn uptime(a: &mut Agent<'_, '_>) -> f64 {
+    fn uptime(a: &mut Scope<'_, '_>) -> f64 {
         a.platform.now().as_secs_f64()
     }
 
@@ -156,7 +156,7 @@ impl From<Handle> for u32 {
 pub struct Finished(std::process::Output);
 
 impl<'scope> IntoJs<'scope> for Finished {
-    fn into_js(self, a: &mut Agent<'scope, '_>) -> Result<Value<'scope>, Error> {
+    fn into_js(self, a: &mut Scope<'scope, '_>) -> Result<Value<'scope>, Error> {
         let status = self.0.status.code().into_js(a)?;
         let out = vec![status, Bytes(self.0.stdout).into_js(a)?, Bytes(self.0.stderr).into_js(a)?];
         out.into_js(a)

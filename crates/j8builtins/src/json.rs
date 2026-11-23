@@ -3,7 +3,7 @@ use alloc::borrow::Cow;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use j8framework::{Agent, Error, ErrorKind, JsObject, JsString, ObjectData, Property, ShapeRef, Slot, SmallStr, Value};
+use j8framework::{Scope, Error, ErrorKind, JsObject, JsString, ObjectData, Property, ShapeRef, Slot, SmallStr, Value};
 
 use crate::{Args, Installer};
 
@@ -36,7 +36,7 @@ const ESCAPE: [u8; 256] = {
 };
 
 struct Parser<'s, 'a, 'scope, 'x> {
-    a: &'a mut Agent<'scope, 'x>,
+    a: &'a mut Scope<'scope, 'x>,
     text: &'s str,
     pos: usize,
     shapes: Vec<(Vec<String>, ShapeRef<'scope>)>,
@@ -421,7 +421,7 @@ impl<'scope> Writer<'scope> {
         }
     }
 
-    fn resolve_to_json(&mut self, a: &mut Agent<'scope, '_>, v: Value<'scope>) -> Result<Value<'scope>, Error> {
+    fn resolve_to_json(&mut self, a: &mut Scope<'scope, '_>, v: Value<'scope>) -> Result<Value<'scope>, Error> {
         const KEY: &str = "toJSON";
         if self.to_json_absent(v) {
             return Ok(Value::Undefined);
@@ -453,7 +453,7 @@ impl<'scope> Writer<'scope> {
         }
     }
 
-    fn property(&mut self, a: &mut Agent<'scope, '_>, holder: Value<'scope>, key: &str, read: Option<Value<'scope>>, out: &mut String) -> Result<bool, Error> {
+    fn property(&mut self, a: &mut Scope<'scope, '_>, holder: Value<'scope>, key: &str, read: Option<Value<'scope>>, out: &mut String) -> Result<bool, Error> {
         let mut v = match read {
             Some(v) => v,
             None => {
@@ -478,7 +478,7 @@ impl<'scope> Writer<'scope> {
         self.write_value(a, v, out)
     }
 
-    fn write_value(&mut self, a: &mut Agent<'scope, '_>, v: Value<'scope>, out: &mut String) -> Result<bool, Error> {
+    fn write_value(&mut self, a: &mut Scope<'scope, '_>, v: Value<'scope>, out: &mut String) -> Result<bool, Error> {
         match v.kind() {
             ValueKind::Null => out.push_str("null"),
             ValueKind::Number(x) if !x.is_finite() => out.push_str("null"),
@@ -515,7 +515,7 @@ impl<'scope> Writer<'scope> {
         out.reserve(step.saturating_mul(rest).min(RESERVE_MAX));
     }
 
-    fn one(&mut self, a: &mut Agent<'scope, '_>, holder: Value<'scope>, key: &str, read: Option<Value<'scope>>, out: &mut String, first: &mut bool) -> Result<(), Error> {
+    fn one(&mut self, a: &mut Scope<'scope, '_>, holder: Value<'scope>, key: &str, read: Option<Value<'scope>>, out: &mut String, first: &mut bool) -> Result<(), Error> {
         let mark = out.len();
         if !*first {
             out.push(',');
@@ -534,7 +534,7 @@ impl<'scope> Writer<'scope> {
         Ok(())
     }
 
-    fn object_allow(&mut self, a: &mut Agent<'scope, '_>, o: JsObject<'scope>, out: &mut String, first: &mut bool) -> Result<(), Error> {
+    fn object_allow(&mut self, a: &mut Scope<'scope, '_>, o: JsObject<'scope>, out: &mut String, first: &mut bool) -> Result<(), Error> {
         let keys = self.allow.clone().unwrap_or_default();
         for k in keys {
             let text = j8framework::SmallStr::from(k.as_str());
@@ -543,7 +543,7 @@ impl<'scope> Writer<'scope> {
         Ok(())
     }
 
-    fn object_keys(&mut self, a: &mut Agent<'scope, '_>, o: JsObject<'scope>, out: &mut String, first: &mut bool) -> Result<(), Error> {
+    fn object_keys(&mut self, a: &mut Scope<'scope, '_>, o: JsObject<'scope>, out: &mut String, first: &mut bool) -> Result<(), Error> {
         let keys = Self::keys(o);
         let shape = o.get().props().shape_id();
         for (k, at) in keys {
@@ -553,7 +553,7 @@ impl<'scope> Writer<'scope> {
         Ok(())
     }
 
-    fn object_cached(&mut self, a: &mut Agent<'scope, '_>, o: JsObject<'scope>, out: &mut String, first: &mut bool) -> Result<(), Error> {
+    fn object_cached(&mut self, a: &mut Scope<'scope, '_>, o: JsObject<'scope>, out: &mut String, first: &mut bool) -> Result<(), Error> {
         let ptr = o.get().props().shape_id().expect("shaped object");
         if let Some(hit) = self.cached_shapes.iter().position(|c| c.ptr == ptr) {
             return self.write_cached(a, o, hit, out, first);
@@ -579,7 +579,7 @@ impl<'scope> Writer<'scope> {
         self.write_cached(a, o, self.cached_shapes.len() - 1, out, first)
     }
 
-    fn write_cached(&mut self, a: &mut Agent<'scope, '_>, o: JsObject<'scope>, hit: usize, out: &mut String, first: &mut bool) -> Result<(), Error> {
+    fn write_cached(&mut self, a: &mut Scope<'scope, '_>, o: JsObject<'scope>, hit: usize, out: &mut String, first: &mut bool) -> Result<(), Error> {
         let (base, n, ptr) = {
             let c = &self.cached_shapes[hit];
             (c.base, c.n, c.ptr)
@@ -617,7 +617,7 @@ impl<'scope> Writer<'scope> {
         Ok(())
     }
 
-    fn object(&mut self, a: &mut Agent<'scope, '_>, o: JsObject<'scope>, out: &mut String) -> Result<(), Error> {
+    fn object(&mut self, a: &mut Scope<'scope, '_>, o: JsObject<'scope>, out: &mut String) -> Result<(), Error> {
         let outer = if self.gap.is_empty() { String::new() } else { self.indent.clone() };
         if !self.gap.is_empty() {
             self.indent.push_str(&self.gap);
@@ -657,7 +657,7 @@ impl<'scope> Writer<'scope> {
         o.elements().get(i as usize)
     }
 
-    fn plain_array(&mut self, a: &Agent<'scope, '_>, o: JsObject<'scope>, out: &mut String) -> bool {
+    fn plain_array(&mut self, a: &Scope<'scope, '_>, o: JsObject<'scope>, out: &mut String) -> bool {
         if self.replacer.is_some() || !self.gap.is_empty() || !o.is_array() {
             return false;
         }
@@ -695,7 +695,7 @@ impl<'scope> Writer<'scope> {
         true
     }
 
-    fn parallel_plain(a: &Agent<'scope, '_>, o: JsObject<'scope>, out: &mut String) -> bool {
+    fn parallel_plain(a: &Scope<'scope, '_>, o: JsObject<'scope>, out: &mut String) -> bool {
         #[derive(Clone, Copy)]
         enum Part<'s> {
             Number(f64),
@@ -743,7 +743,7 @@ impl<'scope> Writer<'scope> {
         true
     }
 
-    fn array(&mut self, a: &mut Agent<'scope, '_>, o: JsObject<'scope>, out: &mut String) -> Result<(), Error> {
+    fn array(&mut self, a: &mut Scope<'scope, '_>, o: JsObject<'scope>, out: &mut String) -> Result<(), Error> {
         if self.plain_array(a, o, out) {
             return Ok(());
         }
@@ -789,7 +789,7 @@ impl<'scope> Writer<'scope> {
 struct Json;
 
 impl Json {
-    fn parse<'scope>(a: &mut Agent<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn parse<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let text = a.to_string(args.at(0))?;
         let mut p = Parser { a, text: &text, pos: 0, shapes: Vec::with_capacity(SHAPES_CACHED), spare_pairs: Vec::new(), spare_items: Vec::new() };
         let v = p.value()?;
@@ -806,7 +806,7 @@ impl Json {
         Self::revive(a, root.into(), key, reviver)
     }
 
-    fn revive<'scope>(a: &mut Agent<'scope, '_>, holder: Value<'scope>, key: JsString<'scope>, reviver: Value<'scope>) -> Result<Value<'scope>, Error> {
+    fn revive<'scope>(a: &mut Scope<'scope, '_>, holder: Value<'scope>, key: JsString<'scope>, reviver: Value<'scope>) -> Result<Value<'scope>, Error> {
         let v = a.get_named(holder, &key)?;
         if let Some(o) = v.as_object() {
             let keys = Writer::keys(o);
@@ -823,7 +823,7 @@ impl Json {
         a.call(reviver, holder, &[key.into(), v])
     }
 
-    fn stringify<'scope>(a: &mut Agent<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn stringify<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let (replacer, allow) = match args.at(1).kind() {
             f if a.is_callable(Value::from(f)) => (Some(Value::from(f)), None),
             ValueKind::Object(o) if a.is_array(o.into())? => {

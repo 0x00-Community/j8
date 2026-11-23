@@ -17,11 +17,9 @@ fn outcome(text: &str) -> String {
     let platform = DefaultPlatform::default();
     let mut isolate = Isolate::new(&platform, CreateParams::default());
     let executor = Executor::default();
-    let cx = isolate.enter(|scope| scope.mc.stash::<j8framework::ContextBrand>(scope.context(&Builtins)));
+    let cx = isolate.create_context(&Builtins);
     let r = executor.eval(&mut isolate, &cx, &Source { text, file: "semantics.js" });
-    isolate.enter(|scope| {
-        let context = scope.mc.fetch(&cx);
-        let mut a = scope.agent(context, &executor);
+    isolate.enter(&cx, &executor, |a| {
         match r {
             Ok(g) => {
                 let v = a.local(&g);

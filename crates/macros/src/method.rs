@@ -20,7 +20,7 @@ pub(crate) enum Receiver {
 }
 
 enum Param {
-    Agent,
+    Scope,
     This,
     Rest(usize),
     Arg(usize, Box<Type>),
@@ -116,7 +116,7 @@ impl Method {
             let FnArg::Typed(t) = input else { continue };
             let is_str = matches!(&*t.ty, Type::Reference(r) if r.mutability.is_none() && matches!(&*r.elem, Type::Path(p) if p.path.is_ident("str")));
             let param = match Names::last_segment(&t.ty).as_deref() {
-                Some("Agent") => Param::Agent,
+                Some("Scope") => Param::Scope,
                 Some("This") => Param::This,
                 Some("Rest") => Param::Rest(index),
                 _ if is_str => {
@@ -135,7 +135,7 @@ impl Method {
         let js = name.unwrap_or_else(|| Names::camel(&rust.to_string()));
         let is_async = sig.asyncness.is_some();
         if is_async && (receiver != Receiver::None || params.iter().any(|p| !matches!(p, Param::Arg(..)))) {
-            return Err(syn::Error::new_spanned(&sig.ident, "an async binding takes owned parameters only (no self, &str, Agent, This or Rest): its future runs later on the event loop"));
+            return Err(syn::Error::new_spanned(&sig.ident, "an async binding takes owned parameters only (no self, &str, Scope, This or Rest): its future runs later on the event loop"));
         }
         Ok(Self { rust, js, role, receiver, params, length: u32::try_from(index).unwrap_or(u32::MAX), returns_result, is_async })
     }
@@ -152,7 +152,7 @@ impl Method {
         for (i, p) in self.params.iter().enumerate() {
             let var = format_ident!("__p{}", i);
             match p {
-                Param::Agent => call_args.push(quote!(a)),
+                Param::Scope => call_args.push(quote!(a)),
                 Param::This => call_args.push(quote!(::j8::This(this))),
                 Param::Rest(from) => call_args.push(quote!(::j8::Rest(args.get(#from..).unwrap_or(&[]).to_vec()))),
                 Param::Arg(at, ty) => {
@@ -204,7 +204,7 @@ impl Method {
         quote! {
             #[doc(hidden)]
             #[allow(clippy::needless_question_mark, unused_variables, clippy::unnecessary_wraps)]
-            fn #name<'scope>(a: &mut ::j8::frame::Agent<'scope, '_>, this: ::j8::frame::Value<'scope>, args: &[::j8::frame::Value<'scope>]) -> ::core::result::Result<::j8::frame::Value<'scope>, ::j8::frame::Error> {
+            fn #name<'scope>(a: &mut ::j8::frame::Scope<'scope, '_>, this: ::j8::frame::Value<'scope>, args: &[::j8::frame::Value<'scope>]) -> ::core::result::Result<::j8::frame::Value<'scope>, ::j8::frame::Error> {
                 #body
             }
         }

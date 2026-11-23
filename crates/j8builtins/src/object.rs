@@ -2,7 +2,7 @@ use j8framework::ValueKind;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
-use j8framework::{Agent, Bound, Descriptor, Error, ErrorKind, Integrity, IterKind, JsObject, Key, ObjectData, ObjectKind, Property, PropertyKey, Slot, Value};
+use j8framework::{Scope, Bound, Descriptor, Error, ErrorKind, Integrity, IterKind, JsObject, Key, ObjectData, ObjectKind, Property, PropertyKey, Slot, Value};
 
 use crate::{Args, Installer};
 
@@ -13,7 +13,7 @@ impl Objects {
         matches!(v.kind(), ValueKind::Object(f) if matches!(f.borrow().kind, ObjectKind::Native(n) if core::ptr::fn_addr_eq(n.f, Self::object as j8framework::NativeFn)))
     }
 
-    fn object<'scope>(a: &mut Agent<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn object<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let new_target = a.new_target;
         if new_target != Value::Undefined && !Self::is_object_ctor(new_target) {
             return Ok(a.create_from_ctor(new_target, a.context.object_proto, ObjectKind::Ordinary)?.into());
@@ -24,14 +24,14 @@ impl Objects {
         })
     }
 
-    fn require_object<'scope>(a: &mut Agent<'scope, '_>, v: Value<'scope>, method: &str) -> Result<JsObject<'scope>, Error> {
+    fn require_object<'scope>(a: &mut Scope<'scope, '_>, v: Value<'scope>, method: &str) -> Result<JsObject<'scope>, Error> {
         match v.kind() {
             ValueKind::Object(o) => Ok(o),
             _ => Err(a.throw(ErrorKind::Type, &alloc::format!("Object.{method} called on non-object"))),
         }
     }
 
-    fn enumerable_own<'scope>(a: &mut Agent<'scope, '_>, v: Value<'scope>, kind: IterKind) -> Result<Value<'scope>, Error> {
+    fn enumerable_own<'scope>(a: &mut Scope<'scope, '_>, v: Value<'scope>, kind: IterKind) -> Result<Value<'scope>, Error> {
         let o = a.to_object(v)?;
         let mut out = Vec::new();
         for k in a.own_property_keys(o)? {
@@ -51,19 +51,19 @@ impl Objects {
         Ok(a.array(out).into())
     }
 
-    fn keys<'scope>(a: &mut Agent<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn keys<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Self::enumerable_own(a, args.at(0), IterKind::Keys)
     }
 
-    fn values<'scope>(a: &mut Agent<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn values<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Self::enumerable_own(a, args.at(0), IterKind::Values)
     }
 
-    fn entries<'scope>(a: &mut Agent<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn entries<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Self::enumerable_own(a, args.at(0), IterKind::Entries)
     }
 
-    fn assign<'scope>(a: &mut Agent<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn assign<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let to = a.to_object(args.at(0))?;
         for &src in args.iter().skip(1).filter(|v| !v.is_nullish()) {
             let from = a.to_object(src)?;
@@ -81,12 +81,12 @@ impl Objects {
         Ok(to.into())
     }
 
-    fn get_prototype_of<'scope>(a: &mut Agent<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn get_prototype_of<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let o = a.to_object(args.at(0))?;
         Ok(a.get_prototype_of(o)?.map_or(Value::Null, Value::Object))
     }
 
-    fn proto_arg<'scope>(a: &mut Agent<'scope, '_>, v: Value<'scope>) -> Result<Option<JsObject<'scope>>, Error> {
+    fn proto_arg<'scope>(a: &mut Scope<'scope, '_>, v: Value<'scope>) -> Result<Option<JsObject<'scope>>, Error> {
         match v.kind() {
             ValueKind::Object(o) => Ok(Some(o)),
             ValueKind::Null => Ok(None),
@@ -97,7 +97,7 @@ impl Objects {
         }
     }
 
-    fn set_prototype_of<'scope>(a: &mut Agent<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn set_prototype_of<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let target = args.at(0);
         if target.is_nullish() {
             return Err(a.throw(ErrorKind::Type, "Object.setPrototypeOf called on null or undefined"));
@@ -110,7 +110,7 @@ impl Objects {
         Ok(target)
     }
 
-    fn define_properties_on<'scope>(a: &mut Agent<'scope, '_>, o: JsObject<'scope>, props: Value<'scope>) -> Result<(), Error> {
+    fn define_properties_on<'scope>(a: &mut Scope<'scope, '_>, o: JsObject<'scope>, props: Value<'scope>) -> Result<(), Error> {
         let props = a.to_object(props)?;
         let mut descs = Vec::new();
         for k in a.own_property_keys(props)? {
@@ -125,7 +125,7 @@ impl Objects {
         Ok(())
     }
 
-    fn create<'scope>(a: &mut Agent<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn create<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let proto = Self::proto_arg(a, args.at(0))?;
         let o = ObjectData { proto, ..ObjectData::default() }.alloc(a.mc);
         if args.at(1) != Value::Undefined {
@@ -134,13 +134,13 @@ impl Objects {
         Ok(o.into())
     }
 
-    fn define_properties<'scope>(a: &mut Agent<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn define_properties<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let o = Self::require_object(a, args.at(0), "defineProperties")?;
         Self::define_properties_on(a, o, args.at(1))?;
         Ok(o.into())
     }
 
-    fn define_property<'scope>(a: &mut Agent<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn define_property<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let o = Self::require_object(a, args.at(0), "defineProperty")?;
         let key = a.to_property_key(args.at(1))?;
         let desc = a.to_property_descriptor(args.at(2))?;
@@ -148,14 +148,14 @@ impl Objects {
         Ok(o.into())
     }
 
-    fn get_own_property_descriptor<'scope>(a: &mut Agent<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn get_own_property_descriptor<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let o = a.to_object(args.at(0))?;
         let key = a.to_property_key(args.at(1))?;
         let p = a.get_own_property(o, key.key())?;
         Ok(a.from_property_descriptor(p))
     }
 
-    fn get_own_property_descriptors<'scope>(a: &mut Agent<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn get_own_property_descriptors<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let o = a.to_object(args.at(0))?;
         let out = a.object();
         for k in a.own_property_keys(o)? {
@@ -168,29 +168,29 @@ impl Objects {
         Ok(out.into())
     }
 
-    fn own_keys_of<'scope>(a: &mut Agent<'scope, '_>, v: Value<'scope>, symbols: bool) -> Result<Value<'scope>, Error> {
+    fn own_keys_of<'scope>(a: &mut Scope<'scope, '_>, v: Value<'scope>, symbols: bool) -> Result<Value<'scope>, Error> {
         let o = a.to_object(v)?;
         let keys = a.own_property_keys(o)?.into_iter().filter(|k| matches!(k, PropertyKey::Symbol(_)) == symbols).map(Value::from).collect();
         Ok(a.array(keys).into())
     }
 
-    fn get_own_property_names<'scope>(a: &mut Agent<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn get_own_property_names<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Self::own_keys_of(a, args.at(0), false)
     }
 
-    fn get_own_property_symbols<'scope>(a: &mut Agent<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn get_own_property_symbols<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Self::own_keys_of(a, args.at(0), true)
     }
 
-    fn freeze<'scope>(a: &mut Agent<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn freeze<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Self::integrity(a, args.at(0), Integrity::Frozen)
     }
 
-    fn seal<'scope>(a: &mut Agent<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn seal<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Self::integrity(a, args.at(0), Integrity::Sealed)
     }
 
-    fn integrity<'scope>(a: &mut Agent<'scope, '_>, v: Value<'scope>, level: Integrity) -> Result<Value<'scope>, Error> {
+    fn integrity<'scope>(a: &mut Scope<'scope, '_>, v: Value<'scope>, level: Integrity) -> Result<Value<'scope>, Error> {
         if let Some(o) = v.as_object()
             && !a.set_integrity_level(o, level)?
         {
@@ -199,7 +199,7 @@ impl Objects {
         Ok(v)
     }
 
-    fn prevent_extensions<'scope>(a: &mut Agent<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn prevent_extensions<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         if let Some(o) = args.at(0).as_object()
             && !a.prevent_extensions(o)?
         {
@@ -208,7 +208,7 @@ impl Objects {
         Ok(args.at(0))
     }
 
-    fn is_extensible<'scope>(a: &mut Agent<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn is_extensible<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Ok(match args.at(0).kind() {
             ValueKind::Object(o) => a.is_extensible(o)?,
             _ => false,
@@ -216,7 +216,7 @@ impl Objects {
         .into())
     }
 
-    fn is_frozen<'scope>(a: &mut Agent<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn is_frozen<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Ok(match args.at(0).kind() {
             ValueKind::Object(o) => a.test_integrity_level(o, Integrity::Frozen)?,
             _ => true,
@@ -224,7 +224,7 @@ impl Objects {
         .into())
     }
 
-    fn is_sealed<'scope>(a: &mut Agent<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn is_sealed<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Ok(match args.at(0).kind() {
             ValueKind::Object(o) => a.test_integrity_level(o, Integrity::Sealed)?,
             _ => true,
@@ -232,17 +232,17 @@ impl Objects {
         .into())
     }
 
-    fn is<'scope>(_: &mut Agent<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn is<'scope>(_: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Ok(args.at(0).same_value(args.at(1)).into())
     }
 
-    fn has_own<'scope>(a: &mut Agent<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn has_own<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let o = a.to_object(args.at(0))?;
         let key = a.to_property_key(args.at(1))?;
         Ok(a.has_own_property(o, key.key())?.into())
     }
 
-    fn from_entries<'scope>(a: &mut Agent<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn from_entries<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let iterable = args.at(0);
         if iterable.is_nullish() {
             return Err(a.throw(ErrorKind::Type, "Object.fromEntries requires an iterable"));
@@ -268,7 +268,7 @@ impl Objects {
         Ok(o.into())
     }
 
-    fn group_by<'scope>(a: &mut Agent<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn group_by<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let groups = Self::group(a, args.at(0), args.at(1), true)?;
         let o = ObjectData::default().alloc(a.mc);
         for (k, items) in groups {
@@ -279,7 +279,7 @@ impl Objects {
         Ok(o.into())
     }
 
-    pub(crate) fn group<'scope>(a: &mut Agent<'scope, '_>, items: Value<'scope>, callback: Value<'scope>, property: bool) -> Result<Vec<(Value<'scope>, Vec<Value<'scope>>)>, Error> {
+    pub(crate) fn group<'scope>(a: &mut Scope<'scope, '_>, items: Value<'scope>, callback: Value<'scope>, property: bool) -> Result<Vec<(Value<'scope>, Vec<Value<'scope>>)>, Error> {
         if items.is_nullish() {
             return Err(a.throw(ErrorKind::Type, "groupBy called on null or undefined"));
         }
@@ -316,7 +316,7 @@ impl Objects {
         Ok(groups)
     }
 
-    fn to_string<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn to_string<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let builtin = match this.kind() {
             ValueKind::Undefined | ValueKind::Uninit => return Ok(a.string("[object Undefined]").into()),
             ValueKind::Null => return Ok(a.string("[object Null]").into()),
@@ -345,18 +345,18 @@ impl Objects {
         Ok(a.string(&alloc::format!("[object {builtin}]")).into())
     }
 
-    fn to_locale_string<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn to_locale_string<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let f = a.get_named(this, "toString")?;
         a.call(f, this, &[])
     }
 
-    fn has_own_property<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn has_own_property<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let key = a.to_property_key(args.at(0))?;
         let o = a.to_object(this)?;
         Ok(a.has_own_property(o, key.key())?.into())
     }
 
-    fn is_prototype_of<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn is_prototype_of<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let Some(v) = args.at(0).as_object() else { return Ok(false.into()) };
         let o = a.to_object(this)?;
         let mut cur = a.get_prototype_of(v)?;
@@ -369,18 +369,18 @@ impl Objects {
         Ok(false.into())
     }
 
-    fn property_is_enumerable<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn property_is_enumerable<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let key = a.to_property_key(args.at(0))?;
         let o = a.to_object(this)?;
         Ok(a.get_own_property(o, key.key())?.is_some_and(|p| p.enumerable).into())
     }
 
-    fn proto_getter<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn proto_getter<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let o = a.to_object(this)?;
         Ok(a.get_prototype_of(o)?.map_or(Value::Null, Value::Object))
     }
 
-    fn proto_setter<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn proto_setter<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         if this.is_nullish() {
             return Err(a.throw(ErrorKind::Type, "Object.prototype.__proto__ called on null or undefined"));
         }
@@ -396,7 +396,7 @@ impl Objects {
         Ok(Value::Undefined)
     }
 
-    fn define_half<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>], setter: bool) -> Result<Value<'scope>, Error> {
+    fn define_half<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>], setter: bool) -> Result<Value<'scope>, Error> {
         let o = a.to_object(this)?;
         let f = match args.at(1).kind() {
             ValueKind::Object(f) if f.borrow().kind.is_callable() => f,
@@ -409,15 +409,15 @@ impl Objects {
         Ok(Value::Undefined)
     }
 
-    fn define_getter<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn define_getter<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Self::define_half(a, this, args, false)
     }
 
-    fn define_setter<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn define_setter<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Self::define_half(a, this, args, true)
     }
 
-    fn lookup_half<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>], setter: bool) -> Result<Value<'scope>, Error> {
+    fn lookup_half<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>], setter: bool) -> Result<Value<'scope>, Error> {
         let o = a.to_object(this)?;
         let key = a.to_property_key(args.at(0))?;
         let mut cur = Some(o);
@@ -433,26 +433,26 @@ impl Objects {
         Ok(Value::Undefined)
     }
 
-    fn lookup_getter<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn lookup_getter<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Self::lookup_half(a, this, args, false)
     }
 
-    fn lookup_setter<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn lookup_setter<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Self::lookup_half(a, this, args, true)
     }
 
-    fn value_of<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn value_of<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Ok(a.to_object(this)?.into())
     }
 
-    fn call<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn call<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         if !a.is_callable(this) {
             return Err(a.throw(ErrorKind::Type, "Function.prototype.call called on a non-function"));
         }
         a.call(this, args.at(0), args.get(1..).unwrap_or(&[]))
     }
 
-    fn apply<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn apply<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         if !a.is_callable(this) {
             return Err(a.throw(ErrorKind::Type, "Function.prototype.apply was called on a non-function"));
         }
@@ -463,7 +463,7 @@ impl Objects {
         a.call(this, args.at(0), &list)
     }
 
-    fn bind<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn bind<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let Some(target) = this.as_object() else {
             return Err(a.throw(ErrorKind::Type, "Bind must be called on a function"));
         };
@@ -498,7 +498,7 @@ impl Objects {
         Ok(f.into())
     }
 
-    fn function_to_string<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn function_to_string<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         if !a.is_callable(this) {
             return Err(a.throw(ErrorKind::Type, "Function.prototype.toString requires that 'this' be a Function"));
         }
@@ -518,33 +518,33 @@ impl Objects {
         ident || (bare.starts_with('[') && bare.ends_with(']'))
     }
 
-    fn noop<'scope>(_: &mut Agent<'scope, '_>, _: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn noop<'scope>(_: &mut Scope<'scope, '_>, _: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Ok(Value::Undefined)
     }
 
-    fn has_instance<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn has_instance<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Ok(a.ordinary_has_instance(this, args.at(0))?.into())
     }
 
-    fn boolean<'scope>(a: &mut Agent<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn boolean<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let new_target = a.new_target;
         let b = a.to_boolean(args.at(0));
         a.wrap_primitive(new_target, b.into(), a.context.boolean_proto)
     }
 
-    fn this_boolean<'scope>(a: &Agent<'scope, '_>, this: Value<'scope>, method: &str) -> Result<bool, Error> {
+    fn this_boolean<'scope>(a: &Scope<'scope, '_>, this: Value<'scope>, method: &str) -> Result<bool, Error> {
         match this.unwrapped().kind() {
             ValueKind::Bool(b) => Ok(b),
             _ => Err(a.throw(ErrorKind::Type, &alloc::format!("Boolean.prototype.{method} requires that 'this' be a Boolean"))),
         }
     }
 
-    fn boolean_to_string<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn boolean_to_string<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let b = Self::this_boolean(a, this, "toString")?;
         Ok(a.string(if b { "true" } else { "false" }).into())
     }
 
-    fn boolean_value_of<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn boolean_value_of<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Ok(Self::this_boolean(a, this, "valueOf")?.into())
     }
 }

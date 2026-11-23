@@ -3,9 +3,9 @@ use alloc::vec::Vec;
 
 use crate::ScopeLocal;
 
-use crate::{Agent, Error, ErrorKind, HostReaction, Job, JsObject, ObjectData, ObjectKind, Reaction, Request, Resume, Settled, Static, Step, Value};
+use crate::{Scope, Error, ErrorKind, HostReaction, Job, JsObject, ObjectData, ObjectKind, Reaction, Request, Resume, Settled, Static, Step, Value};
 
-impl<'scope> Agent<'scope, '_> {
+impl<'scope> Scope<'scope, '_> {
     pub fn new_promise(&self) -> JsObject<'scope> {
         ObjectData { kind: ObjectKind::Promise { state: Settled::Pending, reactions: Vec::new() }, proto: Some(self.context.promise_proto), ..ObjectData::default() }.alloc(self.mc)
     }

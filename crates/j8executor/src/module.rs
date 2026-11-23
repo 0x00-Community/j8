@@ -2,7 +2,7 @@ use alloc::string::String;
 use j8compiler::Compile;
 use alloc::vec::Vec;
 
-use j8framework::{Agent, Closure, Error, ErrorKind, ImportName, ModuleStatus, ObjectData, Resolution, ResolvedBinding, Value};
+use j8framework::{Scope, Closure, Error, ErrorKind, ImportName, ModuleStatus, ObjectData, Resolution, ResolvedBinding, Value};
 
 use crate::{Executor, Outcome};
 
@@ -10,7 +10,7 @@ pub const EVAL_FILE: &str = "[eval]";
 const SOURCE_URL: &str = "//# sourceURL=";
 
 impl Executor<'_> {
-    pub fn load_module(&self, a: &mut Agent<'_, '_>, path: &str, text: &str) -> Result<u32, Error> {
+    pub fn load_module(&self, a: &mut Scope<'_, '_>, path: &str, text: &str) -> Result<u32, Error> {
         if let Some(i) = a.modules().iter().position(|m| **m.path == *path) {
             return Ok(u32::try_from(i).unwrap_or(u32::MAX));
         }
@@ -39,7 +39,7 @@ impl Executor<'_> {
         Ok(index)
     }
 
-    pub fn link(a: &mut Agent<'_, '_>, m: u32, seen: &mut Vec<u32>) -> Result<(), Error> {
+    pub fn link(a: &mut Scope<'_, '_>, m: u32, seen: &mut Vec<u32>) -> Result<(), Error> {
         if seen.contains(&m) {
             return Ok(());
         }
@@ -76,7 +76,7 @@ impl Executor<'_> {
         Ok(())
     }
 
-    pub fn evaluate(&self, a: &mut Agent<'_, '_>, m: u32, depth: usize) -> Result<(), Error> {
+    pub fn evaluate(&self, a: &mut Scope<'_, '_>, m: u32, depth: usize) -> Result<(), Error> {
         let (status, error, requested, main, env) = {
             let r = &a.modules()[m as usize];
             (r.status, r.error, r.requested.clone(), r.main, r.env)
@@ -127,7 +127,7 @@ impl Executor<'_> {
         (!url.is_empty()).then_some(url)
     }
 
-    pub fn referrer(&self, a: &Agent<'_, '_>, base: u32) -> String {
+    pub fn referrer(&self, a: &Scope<'_, '_>, base: u32) -> String {
         match self.module_index(base) {
             Some(m) => String::from(&**a.modules()[m as usize].path),
             None => self.script_files.borrow().get(&base).cloned().unwrap_or_default(),
@@ -138,13 +138,13 @@ impl Executor<'_> {
         self.module_of.borrow().get(&base).copied()
     }
 
-    pub fn import_value<'scope>(&self, a: &mut Agent<'scope, '_>, base: u32, index: u16) -> Result<Value<'scope>, Error> {
+    pub fn import_value<'scope>(&self, a: &mut Scope<'scope, '_>, base: u32, index: u16) -> Result<Value<'scope>, Error> {
         let Some(m) = self.module_index(base) else { return Err(a.throw(ErrorKind::Reference, "import binding outside a module")) };
         let b = a.modules()[m as usize].imports[usize::from(index)];
         a.binding_value(b, "import")
     }
 
-    pub fn import_meta<'scope>(&self, a: &mut Agent<'scope, '_>, base: u32) -> Result<Value<'scope>, Error> {
+    pub fn import_meta<'scope>(&self, a: &mut Scope<'scope, '_>, base: u32) -> Result<Value<'scope>, Error> {
         let Some(m) = self.module_index(base) else { return Err(a.throw(ErrorKind::Syntax, "Cannot use 'import.meta' outside a module")) };
         if let Some(meta) = a.modules()[m as usize].meta {
             return Ok(meta.into());
@@ -156,14 +156,14 @@ impl Executor<'_> {
         Ok(meta.into())
     }
 
-    pub fn run_module(&self, a: &mut Agent<'_, '_>, path: &str, text: &str, depth: usize) -> Result<u32, Error> {
+    pub fn run_module(&self, a: &mut Scope<'_, '_>, path: &str, text: &str, depth: usize) -> Result<u32, Error> {
         let m = self.load_module(a, path, text)?;
         Self::link(a, m, &mut Vec::new())?;
         self.evaluate(a, m, depth)?;
         Ok(m)
     }
 
-    pub fn dynamic_import<'scope>(&self, a: &mut Agent<'scope, '_>, referrer: &str, specifier: Value<'scope>, depth: usize) -> Result<Value<'scope>, Error> {
+    pub fn dynamic_import<'scope>(&self, a: &mut Scope<'scope, '_>, referrer: &str, specifier: Value<'scope>, depth: usize) -> Result<Value<'scope>, Error> {
         let promise = a.new_promise();
         let r = (|| -> Result<Value<'scope>, Error> {
             let spec = a.to_string(specifier)?;

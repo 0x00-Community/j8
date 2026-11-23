@@ -19,7 +19,7 @@
 
 | crate | 职责 |
 |---|---|
-| `j8framework` | 核心框架层：定义各层要实现的 trait（`Platform`、`Invoke`、`Intrinsics`）和共用的结构体（`Isolate`、`Scope`、`Agent`、`Context`、`Value`、对象模型、宿主对象）。JS 运算语义挂在 `Agent` 上。不依赖任何其他层 |
+| `j8framework` | 核心框架层：定义各层要实现的 trait（`Platform`、`Invoke`、`Intrinsics`）和共用的结构体（`Isolate`、`Scope`、`Scope`、`Context`、`Value`、对象模型、宿主对象）。JS 运算语义挂在 `Scope` 上。不依赖任何其他层 |
 | `j8bytecode` | 字节码定义，与 V8 Ignition 逐字节一致；依赖根，不依赖其他 j8 crate |
 | `j8compiler` | JS ⇒ 字节码（oxc 解析，代码生成照 V8 的 `BytecodeGenerator`） |
 | `j8executor` | 字节码执行器 `Executor<'p>`（`eval`，可续跑的 `start` / `resume`），带内联缓存、分片执行、JIT 钩子，以及驱动它的事件循环 |

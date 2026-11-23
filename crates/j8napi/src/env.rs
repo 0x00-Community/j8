@@ -7,13 +7,13 @@ use core::ffi::c_void;
 use core::num::NonZeroUsize;
 use core::ptr::NonNull;
 
-use j8framework::{Agent, Error, GcCell, Host, HostObject, JsObject, JsSymbol, ObjectData, ObjectKind, Property, ScopeGlobal, SymbolData, Tracer, Value, ValueBrand, ValueKind};
+use j8framework::{Scope, Error, GcCell, Host, HostObject, JsObject, JsSymbol, ObjectData, ObjectKind, Property, ScopeGlobal, SymbolData, Tracer, Value, ValueBrand, ValueKind};
 use j8lockfree::Fifo;
 
 use crate::{Finalize, Handle, Status};
 
 #[derive(Clone, Copy, Debug)]
-struct Scope {
+struct Frame {
     base: usize,
     escape: Option<(usize, bool)>,
 }
@@ -49,9 +49,9 @@ struct Instance {
 }
 
 pub struct Env<'e> {
-    agent: Cell<Option<NonNull<c_void>>>,
+    scope: Cell<Option<NonNull<c_void>>>,
     handles: RefCell<Vec<u64>>,
-    scopes: RefCell<Vec<Scope>>,
+    scopes: RefCell<Vec<Frame>>,
     pending: RefCell<Option<Error>>,
     last: UnsafeCell<crate::ExtendedErrorInfo>,
     wrap_key: ScopeGlobal<'e, ValueBrand>,
@@ -96,18 +96,18 @@ unsafe impl<'scope, T: Opaque<'scope>> HostObject<'scope> for Boxed<T> {
 }
 
 impl Env<'_> {
-    pub fn agent<'a, 'scope>(&self) -> Result<&'a mut Agent<'scope, 'a>, Status> {
-        let p = self.agent.get().ok_or(Status::CannotRunJs)?;
-        Ok(unsafe { p.cast::<Agent<'scope, 'a>>().as_mut() })
+    pub fn scope<'a, 'scope>(&self) -> Result<&'a mut Scope<'scope, 'a>, Status> {
+        let p = self.scope.get().ok_or(Status::CannotRunJs)?;
+        Ok(unsafe { p.cast::<Scope<'scope, 'a>>().as_mut() })
     }
 
-    pub fn enter<R>(&self, a: &mut Agent<'_, '_>, f: impl FnOnce(&Self) -> R) -> R {
-        let outer = self.agent.replace(Some(NonNull::from(a).cast()));
+    pub fn enter<R>(&self, a: &mut Scope<'_, '_>, f: impl FnOnce(&Self) -> R) -> R {
+        let outer = self.scope.replace(Some(NonNull::from(a).cast()));
         let (handles, scopes) = (self.handles.borrow().len(), self.scopes.borrow().len());
         let r = f(self);
         self.handles.borrow_mut().truncate(handles);
         self.scopes.borrow_mut().truncate(scopes);
-        self.agent.set(outer);
+        self.scope.set(outer);
         r
     }
 
@@ -140,7 +140,7 @@ impl Env<'_> {
         });
         let base = self.handles.borrow().len();
         let mut s = self.scopes.borrow_mut();
-        s.push(Scope { base, escape });
+        s.push(Frame { base, escape });
         core::ptr::without_provenance_mut(s.len())
     }
 
@@ -202,22 +202,22 @@ impl Env<'_> {
         self.pending.borrow().is_some()
     }
 
-    pub fn wrap_key<'scope>(&self, a: &Agent<'scope, '_>) -> JsSymbol<'scope> {
+    pub fn wrap_key<'scope>(&self, a: &Scope<'scope, '_>) -> JsSymbol<'scope> {
         Self::symbol(a, &self.wrap_key)
     }
 
-    pub fn tag_key<'scope>(&self, a: &Agent<'scope, '_>) -> JsSymbol<'scope> {
+    pub fn tag_key<'scope>(&self, a: &Scope<'scope, '_>) -> JsSymbol<'scope> {
         Self::symbol(a, &self.tag_key)
     }
 
-    fn symbol<'scope>(a: &Agent<'scope, '_>, g: &ScopeGlobal<'_, ValueBrand>) -> JsSymbol<'scope> {
+    fn symbol<'scope>(a: &Scope<'scope, '_>, g: &ScopeGlobal<'_, ValueBrand>) -> JsSymbol<'scope> {
         match a.local(g).kind() {
             ValueKind::Symbol(s) => s,
             _ => unreachable!("the keys are symbols"),
         }
     }
 
-    pub fn host<'scope>(a: &Agent<'scope, '_>, v: impl Opaque<'scope>) -> JsObject<'scope> {
+    pub fn host<'scope>(a: &Scope<'scope, '_>, v: impl Opaque<'scope>) -> JsObject<'scope> {
         let data = a.mc.alloc(GcCell::new(a.mc, Host::new(Boxed(v))));
         ObjectData { kind: ObjectKind::Host(data), proto: None, ..ObjectData::default() }.alloc(a.mc)
     }
@@ -227,7 +227,7 @@ impl Env<'_> {
         h.try_borrow().is_some_and(|cell| cell.find(TypeId::of::<T::Brand>()).is_some())
     }
 
-    pub fn hosted<'scope, T: Opaque<'scope>, R>(a: &Agent<'scope, '_>, o: JsObject<'scope>, f: impl FnOnce(&mut T) -> R) -> Option<R> {
+    pub fn hosted<'scope, T: Opaque<'scope>, R>(a: &Scope<'scope, '_>, o: JsObject<'scope>, f: impl FnOnce(&mut T) -> R) -> Option<R> {
         let ObjectKind::Host(h) = o.borrow().kind else { return None };
         let mut cell = h.try_borrow_mut(a.mc)?;
         let p = cell.find_mut(TypeId::of::<T::Brand>())?;
@@ -241,13 +241,13 @@ impl Env<'_> {
         })
     }
 
-    pub fn set_private<'scope>(a: &Agent<'scope, '_>, o: JsObject<'scope>, key: JsSymbol<'scope>, v: Value<'scope>) {
+    pub fn set_private<'scope>(a: &Scope<'scope, '_>, o: JsObject<'scope>, key: JsSymbol<'scope>, v: Value<'scope>) {
         let mut d = o.borrow_mut(a.mc);
         d.privates.retain(|&(k, _)| !j8framework::ScopeLocal::ptr_eq(k, key));
         d.privates.push((key, Property::hidden(v)));
     }
 
-    pub fn remove_private<'scope>(a: &Agent<'scope, '_>, o: JsObject<'scope>, key: JsSymbol<'scope>) {
+    pub fn remove_private<'scope>(a: &Scope<'scope, '_>, o: JsObject<'scope>, key: JsSymbol<'scope>) {
         o.borrow_mut(a.mc).privates.retain(|&(k, _)| !j8framework::ScopeLocal::ptr_eq(k, key));
     }
 
@@ -299,10 +299,10 @@ impl Env<'_> {
         n
     }
 
-    pub fn open<'scope>(a: &mut Agent<'scope, '_>, register: crate::RegisterFn) -> Result<Value<'scope>, Error> {
-        let key = |a: &Agent<'scope, '_>, d: &str| -> ScopeGlobal<'scope, ValueBrand> { a.global(Value::Symbol(a.mc.alloc(SymbolData { description: Some(Box::from(d)), private: false }))) };
+    pub fn open<'scope>(a: &mut Scope<'scope, '_>, register: crate::RegisterFn) -> Result<Value<'scope>, Error> {
+        let key = |a: &Scope<'scope, '_>, d: &str| -> ScopeGlobal<'scope, ValueBrand> { a.global(Value::Symbol(a.mc.alloc(SymbolData { description: Some(Box::from(d)), private: false }))) };
         let env = Box::new(Env {
-            agent: Cell::new(None),
+            scope: Cell::new(None),
             handles: RefCell::default(),
             scopes: RefCell::default(),
             pending: RefCell::new(None),

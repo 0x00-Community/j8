@@ -22,7 +22,7 @@ What you use from it:
 | `j8::runtime!` | Declare a runtime: which bound types go where, plus a JS prelude |
 | `j8::Runtime` | A ready execution environment: `eval`, `eval_module`, `run_until_idle`, `set`, `text`, `enter` |
 | `j8::Host` / `j8::HostPlatform` | The trait `runtime!` implements / the platform that serves its native modules (stateless: runtimes may share one) |
-| `j8::frame` | `j8framework`: `Agent`, `Error`, `ErrorKind`, `Value`, `Platform`, `Source` … |
+| `j8::frame` | `j8framework`: `Scope`, `Error`, `ErrorKind`, `Value`, `Platform`, `Source` … |
 | `j8::platform::DefaultPlatform` | The standard-library platform: clock, `console.log` to stdout, ES modules from files |
 | `j8::executor::Executor` | The bytecode executor; `with_tier` adds the JIT |
 | `j8::Promise<T>` | A JS promise awaited from Rust (see [5.4](#54-awaiting-a-js-promise-from-rust)) |
@@ -36,7 +36,7 @@ use std::num::NonZeroUsize;
 use std::process::ExitCode;
 
 use j8::executor::Executor;
-use j8::frame::{Agent, Error, ErrorKind};
+use j8::frame::{Scope, Error, ErrorKind};
 use j8::platform::DefaultPlatform;
 
 /// Machine access, kept in `__j8_native.env`
@@ -49,7 +49,7 @@ impl Env {
     }
 
     /// Throws a TypeError when the variable is missing
-    fn must(a: &mut Agent<'_, '_>, name: &str) -> Result<String, Error> {
+    fn must(a: &mut Scope<'_, '_>, name: &str) -> Result<String, Error> {
         std::env::var(name).map_err(|_| a.throw(ErrorKind::Type, &format!("{name} is not set")))
     }
 }
@@ -180,7 +180,7 @@ rt.eval(&call, file)?;
 rt.run_until_idle()?;
 ```
 
-For lower-level work use `rt.enter(|a| …)`, which gives you the `Agent` of the context (`a.get_named`, `a.call`,
+For lower-level work use `rt.enter(|a| …)`, which gives you the `Scope` of the context (`a.get_named`, `a.call`,
 `a.local`, `a.to_string` …). `Value`s cannot leave the closure. Root them with `a.global(v)` (a
 `ScopeGlobal<'p, ValueBrand>`) if you need them afterwards.
 
@@ -192,7 +192,7 @@ A quick summary (USAGE.md has the full table):
 
 - Plain parameters are converted with `FromJs`: `f64`, `i32`, `u32`, `usize`, `bool`, `String`, `Option<T>`,
   `Vec<T>`, `Value`, `JsObject`, `JsString`. `&str` is ToString, borrowed.
-- `&mut Agent<'_, '_>` anywhere in the list receives the current agent (it does not count as a JS argument).
+- `&mut Scope<'_, '_>` anywhere in the list receives the current scope (it does not count as a JS argument).
 - `j8::Bytes` takes an `ArrayBuffer` / typed array / `DataView`; returning `j8::Bytes` creates a `Uint8Array`.
 - `Value<'scope>` / `j8::Function<'scope>` fields keep a JS value or callback in a class (they are traced);
   `ScopeGlobal<'p, ValueBrand>` keeps one outside the heap.
@@ -200,10 +200,10 @@ A quick summary (USAGE.md has the full table):
 
 ### 4.2 Throwing
 
-Take `&mut Agent` and return `Result<T, Error>`. Build the error with `a.throw(kind, message)`:
+Take `&mut Scope` and return `Result<T, Error>`. Build the error with `a.throw(kind, message)`:
 
 ```rust,ignore
-fn must(a: &mut Agent<'_, '_>, name: &str) -> Result<String, Error> {
+fn must(a: &mut Scope<'_, '_>, name: &str) -> Result<String, Error> {
     std::env::var(name).map_err(|_| a.throw(ErrorKind::Type, &format!("{name} is not set")))
 }
 ```
@@ -215,7 +215,7 @@ When the error is only known later, or you want structured errors (Node's `err.c
 pub struct Io<T>(pub Result<T, Failure>);
 
 impl<'scope, T: IntoJs<'scope>> IntoJs<'scope> for Io<T> {
-    fn into_js(self, a: &mut Agent<'scope, '_>) -> Result<Value<'scope>, Error> {
+    fn into_js(self, a: &mut Scope<'scope, '_>) -> Result<Value<'scope>, Error> {
         match self.0 {
             Ok(v) => v.into_js(a),
             Err(f) => Err(a.throw(f.kind, &f.message)),   // "ENOENT: no such file or directory, open 'a.txt'"
@@ -293,7 +293,7 @@ EventLoopSet::scope(&platform, NonZeroUsize::new(8).unwrap(), |set| {
 
 ### 5.1 `async fn` bindings
 
-An `async fn` takes owned parameters only: no `self`, `&str`, `&mut Agent`, `This` or `Rest`. Its future runs later,
+An `async fn` takes owned parameters only: no `self`, `&str`, `&mut Scope`, `This` or `Rest`. Its future runs later,
 after the call has returned. The call returns a promise at once, and the result is converted with `IntoJs` when the
 promise settles (so `Io<T>`-style errors reject it).
 
@@ -333,7 +333,7 @@ impl Fs {
 
 ### 5.3 A method that returns a promise
 
-When the async work needs `&self`, the `Agent`, or should be cancellable, write a normal method and make the promise
+When the async work needs `&self`, the `Scope`, or should be cancellable, write a normal method and make the promise
 yourself with `j8::Glue`:
 
 - `Glue::spawn(a, future)` creates a pending promise, hands `future` to the event loop and returns the promise.
@@ -342,7 +342,7 @@ yourself with `j8::Glue`:
 ```rust,ignore
 #[j8::class]
 impl Timer {
-    fn wait<'scope>(&self, a: &mut Agent<'scope, '_>, ms: f64) -> Result<Value<'scope>, Error> {
+    fn wait<'scope>(&self, a: &mut Scope<'scope, '_>, ms: f64) -> Result<Value<'scope>, Error> {
         let sleep = Sleep { cancelled: self.cancelled.clone(), /* … */ };
         Glue::spawn(a, async move { Glue::settle(sleep.await) })
     }
@@ -500,9 +500,10 @@ into it when they survive a young collection, and other processes find them by a
 
 ```rust,ignore
 let space = paragc::CrossHeapSpace::reserve_fixed()?;
-isolate.attach_cross_heap(space.create("/dev/shm/my-heap", threads)?)?;
-let ticket = isolate.enter(|scope| {
-    let gc = scope.mc.mutator().alloc_shared(Payload { value: 42, next: None.into() });
+isolate.attach_cross_heap(unsafe { space.create_unchecked("/dev/shm/my-heap", threads) }?)?;
+let cx = isolate.create_context(&j8builtins::Builtins);
+let ticket = isolate.enter(&cx, &executor, |scope| {
+    let gc = scope.mc.gc_scope().alloc_shared(Payload { value: 42, next: None.into() });
     scope.shares.share(scope.mc, gc)
 });
 for (ticket, signature) in isolate.take_signatures() {

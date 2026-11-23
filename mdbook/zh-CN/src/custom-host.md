@@ -6,23 +6,23 @@
 ## 一张图看懂桥
 
 ```text
- JS 调用 ─▶ 生成的包装 ─▶ 你的 Rust fn(&mut Agent<'scope>, …)                 ◀── 同步：值只活在 'scope 里
+ JS 调用 ─▶ 生成的包装 ─▶ 你的 Rust fn(&mut Scope<'scope>, …)                 ◀── 同步：值只活在 'scope 里
                                 │
                                 ├─ 返回 T: IntoJs ─────────────────────────▶ JS 值
                                 │
                                 └─ Glue::spawn(future) ─▶ promise ─────────▶ JS 立刻拿到 promise
                                                │
-                   事件循环（run_until_idle）轮询 future：Send + 'static，没有 Agent，没有 Value
+                   事件循环（run_until_idle）轮询 future：Send + 'static，没有 Scope，没有 Value
                                                │
-                                   future 返回一个 Settle ─▶ 带 &mut Agent 运行 ─▶ resolve / reject
+                                   future 返回一个 Settle ─▶ 带 &mut Scope 运行 ─▶ resolve / reject
 ```
 
 由此得出三条规则，本章所有写法都是它们的推论：
 
 1. **`Value<'scope>` / `JsObject<'scope>` 只在一次调用里存在。** 要把 JS 值留得更久，存
    `ScopeGlobal<'p, ValueBrand>`（根，`Send`）；在 class 里，`Value<'scope>` 字段是被追踪的边。
-2. **future 里没有 `Agent`。** 它不能读 JS 值、不能调 JS 函数、不能推进 JS 迭代器，只能计算和等待；只有在最后，通过它
-   返回的 `Settle`，才拿回一次 `Agent`。
+2. **future 里没有 `Scope`。** 它不能读 JS 值、不能调 JS 函数、不能推进 JS 迭代器，只能计算和等待；只有在最后，通过它
+   返回的 `Settle`，才拿回一次 `Scope`。
 3. **future 必须唤醒它的 waker**，否则 `run_until_idle` 会一直睡下去（见[异步与 Promise](async.md)）。
 
 ## 准备
@@ -34,21 +34,21 @@ j8 = { version = "0.4", features = ["runtime", "json"] }
 
 ```rust,ignore
 use j8::executor::Executor;
-use j8::frame::{Agent, Error, ErrorKind, Settle, Value};
+use j8::frame::{Scope, Error, ErrorKind, Settle, Value};
 use j8::platform::DefaultPlatform;
 use j8::{Function, Glue, IntoJs, Promise};
 ```
 
 ## 把迭代结果做成 Rust 类型
 
-两种迭代器最后都落到同一个对象 `{ value, done }`。把它写成一个 Rust 类型，`IntoJs` 里调 `Agent::iter_result`。
-`Step<T>` 是普通数据（`T` 是 `Send` 它就是 `Send`），所以既能从同步方法返回，**也**能从还没有 `Agent` 的 future 里带出来：
+两种迭代器最后都落到同一个对象 `{ value, done }`。把它写成一个 Rust 类型，`IntoJs` 里调 `Scope::iter_result`。
+`Step<T>` 是普通数据（`T` 是 `Send` 它就是 `Send`），所以既能从同步方法返回，**也**能从还没有 `Scope` 的 future 里带出来：
 
 ```rust,ignore
 pub struct Step<T>(pub Option<T>);   // Some(v) ⇒ { value: v, done: false }，None ⇒ { value: undefined, done: true }
 
 impl<'scope, T: IntoJs<'scope>> IntoJs<'scope> for Step<T> {
-    fn into_js(self, a: &mut Agent<'scope, '_>) -> Result<Value<'scope>, Error> {
+    fn into_js(self, a: &mut Scope<'scope, '_>) -> Result<Value<'scope>, Error> {
         let (value, done) = match self.0 {
             Some(v) => (v.into_js(a)?, false),
             None => (Value::Undefined, true),
@@ -70,7 +70,7 @@ struct Range { next: f64, end: f64, step: f64, #[collect(require_static)] closed
 #[j8::class]
 impl Range {
     #[js(constructor)]
-    fn new(a: &mut Agent<'_, '_>, end: f64, step: Option<f64>) -> Result<Self, Error> {
+    fn new(a: &mut Scope<'_, '_>, end: f64, step: Option<f64>) -> Result<Self, Error> {
         let step = step.unwrap_or(1.0);
         if step <= 0.0 {
             return Err(a.throw(ErrorKind::Range, "step must be positive"));
@@ -130,12 +130,12 @@ impl Sink {
 }
 ```
 
-**按需读：** 把可迭代对象当 `Value` 收下，再加 `&mut Agent`，自己一步步推。`get_iterator` 调 `[Symbol.iterator]`，
+**按需读：** 把可迭代对象当 `Value` 收下，再加 `&mut Scope`，自己一步步推。`get_iterator` 调 `[Symbol.iterator]`，
 `iterator_step` 调 `next()`、`done` 时返回 `None`，`iterator_close` 调 `return()`。**没读完就停时一定要关闭迭代器**，
 生产方的清理才会运行（生成器的 `finally`、`Range` 的 `return`）：
 
 ```rust,ignore
-fn sum_until<'scope>(a: &mut Agent<'scope, '_>, iterable: Value<'scope>, limit: f64) -> Result<f64, Error> {
+fn sum_until<'scope>(a: &mut Scope<'scope, '_>, iterable: Value<'scope>, limit: f64) -> Result<f64, Error> {
     let it = a.get_iterator(iterable)?;
     let mut sum = 0.0;
     while let Some(v) = a.iterator_step(it)? {
@@ -148,7 +148,7 @@ fn sum_until<'scope>(a: &mut Agent<'scope, '_>, iterable: Value<'scope>, limit: 
     Ok(sum)
 }
 
-fn each<'scope>(a: &mut Agent<'scope, '_>, iterable: Value<'scope>, f: Function) -> Result<u32, Error> {
+fn each<'scope>(a: &mut Scope<'scope, '_>, iterable: Value<'scope>, f: Function) -> Result<u32, Error> {
     let it = a.get_iterator(iterable)?;
     let mut n = 0;
     while let Some(v) = a.iterator_step(it)? {
@@ -175,7 +175,7 @@ sink.each(naturals(), x => { if (x === 2) throw new Error('stop at ' + x); })   
 
 ## 异步：Rust ⇒ JS
 
-**`async fn`** 最省事。它只收自有参数（不能有 `self`、`&str`、`Agent`）；调用立刻返回 promise，兑现时结果经 `IntoJs`
+**`async fn`** 最省事。它只收自有参数（不能有 `self`、`&str`、`Scope`）；调用立刻返回 promise，兑现时结果经 `IntoJs`
 转换，`Result::Err` 则 reject。
 
 ```rust,ignore
@@ -184,11 +184,11 @@ async fn doubled(p: Promise<f64>) -> Result<f64, Error> {
 }
 ```
 
-**`Glue::spawn`** 用来做 `async fn` 做不到的事：用 `&self` / `&mut self`、借 `Agent` 读 JS 参数、或者同步地决定要不要开工。
+**`Glue::spawn`** 用来做 `async fn` 做不到的事：用 `&self` / `&mut self`、借 `Scope` 读 JS 参数、或者同步地决定要不要开工。
 先把 JS 那边的活做完，只把 `Send` 的数据移进 future，future 最后返回 `Glue::settle(value)`：
 
 ```rust,ignore
-fn later<'scope>(&self, a: &mut Agent<'scope, '_>, ms: f64) -> Result<Value<'scope>, Error> {
+fn later<'scope>(&self, a: &mut Scope<'scope, '_>, ms: f64) -> Result<Value<'scope>, Error> {
     let wait = Duration::from_secs_f64(ms / 1000.0);
     let label = self.label.clone();                         // 从 self 里克隆出来：future 是 'static
     Glue::spawn(a, async move {
@@ -201,11 +201,11 @@ fn later<'scope>(&self, a: &mut Agent<'scope, '_>, ms: f64) -> Result<Value<'sco
 `Offload` 就是[异步与 Promise](async.md) 里「线程 + waker」的那个 future。
 
 **活干完时回到 JS。** `Glue::settle` 只是转换一个值。future 返回的 `Settle` 其实是
-`Box<dyn FnOnce(&mut Agent) -> Result<Value, Error> + Send>`，所以可以自己写，在那一刻做任何需要 `Agent` 的事——
+`Box<dyn FnOnce(&mut Scope) -> Result<Value, Error> + Send>`，所以可以自己写，在那一刻做任何需要 `Scope` 的事——
 这里调一个 JS 回调，它的返回值成为 promise 的值：
 
 ```rust,ignore
-fn after<'scope>(a: &mut Agent<'scope, '_>, ms: f64, f: Function) -> Result<Value<'scope>, Error> {
+fn after<'scope>(a: &mut Scope<'scope, '_>, ms: f64, f: Function) -> Result<Value<'scope>, Error> {
     let wait = Duration::from_secs_f64(ms / 1000.0);
     Glue::spawn(a, async move {
         Offload::new(move || std::thread::sleep(wait)).await;
@@ -231,11 +231,11 @@ try { await sink.doubled(Promise.reject(new TypeError('nope'))) }
 catch (e) { e instanceof TypeError && e.message === 'nope' }  // true
 ```
 
-**调一个 JS 异步函数并在 Rust 里 await 它：** 趁手里还有 `Agent` 时调用，用 `FromJs` 把它的 promise 转过来，再在 future 里
+**调一个 JS 异步函数并在 Rust 里 await 它：** 趁手里还有 `Scope` 时调用，用 `FromJs` 把它的 promise 转过来，再在 future 里
 await：
 
 ```rust,ignore
-fn call_async<'scope>(a: &mut Agent<'scope, '_>, f: Function, x: f64) -> Result<Value<'scope>, Error> {
+fn call_async<'scope>(a: &mut Scope<'scope, '_>, f: Function, x: f64) -> Result<Value<'scope>, Error> {
     let p = f.call(a, Value::Undefined, &[x.into()])?;
     let p = <Promise<String> as j8::FromJs>::from_js(a, p)?;
     Glue::spawn(a, async move { Glue::settle(p.await.map(|s| format!("rust saw {s}"))) })
@@ -265,7 +265,7 @@ impl Ticker {
         Self { left: count, every: Duration::from_secs_f64(ms / 1000.0) }
     }
 
-    fn next<'scope>(&mut self, a: &mut Agent<'scope, '_>) -> Result<Value<'scope>, Error> {
+    fn next<'scope>(&mut self, a: &mut Scope<'scope, '_>) -> Result<Value<'scope>, Error> {
         let tick = (self.left > 0).then_some(self.left);    // 状态现在就改，按调用顺序
         self.left = self.left.saturating_sub(1);
         let every = self.every;
@@ -292,7 +292,7 @@ for await (const t of new Ticker(3, 5)) ticks.push(t);      // 3,2,1
 
 ## 异步迭代器：JS ⇒ Rust
 
-这是 Rust future 唯一独自推不动的方向：推进 JS 异步迭代器要在每次 await 之后再调 `next()`，而 future 里没有 `Agent`
+这是 Rust future 唯一独自推不动的方向：推进 JS 异步迭代器要在每次 await 之后再调 `next()`，而 future 里没有 `Scope`
 （规则 2）。让 JavaScript 来跑循环、把每个元素交给 Rust——在绑定类上加几行 prelude：
 
 ```rust,ignore

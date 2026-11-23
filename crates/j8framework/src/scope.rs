@@ -4,7 +4,7 @@ use alloc::vec::Vec;
 
 use crate::{Collect, Mutation};
 
-use crate::{Context, Error, JsObject, Platform, Profiler, Scope, Value};
+use crate::{Context, Error, JsObject, Platform, Profiler, Value};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum CodeKind {
@@ -43,21 +43,21 @@ pub enum Step<'scope> {
 }
 
 pub trait Invoke<'scope> {
-    fn call(&self, agent: &mut Agent<'scope, '_>, callee: Value<'scope>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error>;
+    fn call(&self, agent: &mut Scope<'scope, '_>, callee: Value<'scope>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error>;
 
-    fn construct(&self, agent: &mut Agent<'scope, '_>, callee: Value<'scope>, args: &[Value<'scope>], new_target: Value<'scope>) -> Result<Value<'scope>, Error>;
+    fn construct(&self, agent: &mut Scope<'scope, '_>, callee: Value<'scope>, args: &[Value<'scope>], new_target: Value<'scope>) -> Result<Value<'scope>, Error>;
 
-    fn eval_code(&self, agent: &mut Agent<'scope, '_>, src: &str, kind: CodeKind, hidden: bool) -> Result<Value<'scope>, Error>;
+    fn eval_code(&self, agent: &mut Scope<'scope, '_>, src: &str, kind: CodeKind, hidden: bool) -> Result<Value<'scope>, Error>;
     fn constructs(&self, closure: &crate::Closure<'scope>) -> bool;
 
-    fn resume(&self, agent: &mut Agent<'scope, '_>, coroutine: crate::JsObject<'scope>, mode: Resume, value: Value<'scope>) -> Result<Step<'scope>, Error>;
+    fn resume(&self, agent: &mut Scope<'scope, '_>, coroutine: crate::JsObject<'scope>, mode: Resume, value: Value<'scope>) -> Result<Step<'scope>, Error>;
 
-    fn callback(&self, _agent: &mut Agent<'scope, '_>, callee: Value<'scope>, this: Value<'scope>) -> Callback<'scope> {
+    fn callback(&self, _agent: &mut Scope<'scope, '_>, callee: Value<'scope>, this: Value<'scope>) -> Callback<'scope> {
         Callback::from((callee, this))
     }
 }
 
-pub type CallbackRun = for<'scope, 'x> unsafe fn(&mut Agent<'scope, 'x>, &Callback<'scope>, &[Value<'scope>]) -> Option<Result<Value<'scope>, Error>>;
+pub type CallbackRun = for<'scope, 'x> unsafe fn(&mut Scope<'scope, 'x>, &Callback<'scope>, &[Value<'scope>]) -> Option<Result<Value<'scope>, Error>>;
 
 pub struct Callback<'scope> {
     pub callee: Value<'scope>,
@@ -91,19 +91,19 @@ impl<'scope> Callback<'scope> {
     }
 
     #[inline]
-    pub fn call(&self, a: &mut Agent<'scope, '_>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    pub fn call(&self, a: &mut Scope<'scope, '_>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         self.quiet.set(false);
         self.enter(a, args)
     }
 
     #[inline]
-    pub fn again(&self, a: &mut Agent<'scope, '_>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    pub fn again(&self, a: &mut Scope<'scope, '_>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         self.quiet.set(true);
         self.enter(a, args)
     }
 
     #[inline]
-    fn enter(&self, a: &mut Agent<'scope, '_>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn enter(&self, a: &mut Scope<'scope, '_>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         if let Some(run) = self.run
             && let Some(r) = unsafe { run(a, self, args) }
         {
@@ -114,26 +114,23 @@ impl<'scope> Callback<'scope> {
     }
 }
 
-pub struct Agent<'scope, 'x> {
+pub struct Scope<'scope, 'x> {
     pub mc: &'x Mutation<'scope>,
     pub platform: &'x dyn Platform,
     pub profiler: &'x mut Profiler,
     pub context: ScopeLocal<'scope, Context<'scope>>,
     pub new_target: Value<'scope>,
-    invoke: &'x dyn Invoke<'scope>,
-    spawned: Option<&'x j8lockfree::Fifo<crate::AsyncJob<'x>>>,
+    pub invoke: &'x dyn Invoke<'scope>,
+    pub spawned: Option<&'x j8lockfree::Fifo<crate::AsyncJob<'x>>>,
     pub stop: &'x crate::Termination,
-    parked: &'x core::cell::RefCell<crate::Parked<'x>>,
-    spare_regs: Vec<Vec<Value<'scope>>>,
+    pub parked: &'x core::cell::RefCell<crate::Parked<'x>>,
+    pub spare_regs: Vec<Vec<Value<'scope>>>,
+    #[cfg(all(target_os = "linux", feature = "crossheap"))]
+    pub shares: &'x mut crate::Shares<'x>,
 }
+
 
 impl<'scope> Scope<'scope, '_> {
-    pub fn agent<'x>(&'x mut self, context: ScopeLocal<'scope, Context<'scope>>, invoke: &'x dyn Invoke<'scope>) -> Agent<'scope, 'x> {
-        Agent { mc: self.mc, platform: self.platform, profiler: &mut *self.profiler, context, new_target: Value::Undefined, invoke, spawned: self.spawned.map(|q| unsafe { crate::rebrand_ref(q) }), stop: self.stop, parked: unsafe { crate::rebrand_ref(self.parked) }, spare_regs: Vec::new() }
-    }
-}
-
-impl<'scope> Agent<'scope, '_> {
     const SPARE_REGS: usize = 8;
 
     pub fn spawn<'i>(&self, job: crate::AsyncJob<'i>) -> Result<(), crate::AsyncJob<'i>> {
@@ -169,7 +166,7 @@ impl<'scope> Agent<'scope, '_> {
     }
 }
 
-impl<'scope> Agent<'scope, '_> {
+impl<'scope> Scope<'scope, '_> {
     pub fn call(&mut self, callee: Value<'scope>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let invoke = self.invoke;
         invoke.call(self, callee, this, args)

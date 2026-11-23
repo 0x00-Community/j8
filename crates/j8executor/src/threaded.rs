@@ -1,12 +1,12 @@
 use j8bytecode::{Bytecode, OperandValue};
-use j8framework::{Agent, Env, Error, ErrorKind, Value, ValueBits};
+use j8framework::{Scope, Env, Error, ErrorKind, Value, ValueBits};
 
 use crate::{Args, Budget, Executor, Flow, Frame, Insn, Loaded, Outcome, State, STACK_LIMIT};
 
 #[expect(private_interfaces, reason = "crate-internal types; the module is private")]
 pub struct Cx<'r, 'scope, 'x, 'b, 'p> {
     pub exe: &'r Executor<'p>,
-    pub a: &'r mut Agent<'scope, 'x>,
+    pub a: &'r mut Scope<'scope, 'x>,
     pub st: &'r mut State<'scope>,
     pub loaded: &'r Loaded,
     pub budget: &'r mut Budget<'b>,

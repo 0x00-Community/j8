@@ -2,14 +2,14 @@ use j8framework::ValueKind;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use j8framework::{Agent, CodeKind, Error, Native, ObjectKind, Property, Slot, Value};
+use j8framework::{Scope, CodeKind, Error, Native, ObjectKind, Property, Slot, Value};
 
 use crate::{Args, Installer};
 
 struct Functions;
 
 impl Functions {
-    fn dynamic<'scope>(a: &mut Agent<'scope, '_>, args: &[Value<'scope>], new_target: Value<'scope>, prefix: &str) -> Result<Value<'scope>, Error> {
+    fn dynamic<'scope>(a: &mut Scope<'scope, '_>, args: &[Value<'scope>], new_target: Value<'scope>, prefix: &str) -> Result<Value<'scope>, Error> {
         let (params, body) = match args.split_last() {
             Some((&body, params)) => (params, body),
             None => (&[][..], Value::Undefined),
@@ -41,23 +41,23 @@ impl Functions {
         Ok(f)
     }
 
-    fn function<'scope>(a: &mut Agent<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn function<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Self::dynamic(a, args, a.new_target, "function")
     }
 
-    fn generator_function<'scope>(a: &mut Agent<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn generator_function<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Self::dynamic(a, args, a.new_target, "function*")
     }
 
-    fn async_function<'scope>(a: &mut Agent<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn async_function<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Self::dynamic(a, args, a.new_target, "async function")
     }
 
-    fn async_generator_function<'scope>(a: &mut Agent<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn async_generator_function<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Self::dynamic(a, args, a.new_target, "async function*")
     }
 
-    fn eval<'scope>(a: &mut Agent<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn eval<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         match args.at(0).kind() {
             ValueKind::String(s) => {
                 let src = s.source_text();

@@ -1,7 +1,7 @@
 use alloc::boxed::Box;
 use alloc::sync::Arc;
 
-use j8framework::{Agent, Backing, BufferData, Error, ErrorKind, JsObject, ObjectData, ObjectKind, SharedMemory, Value};
+use j8framework::{Scope, Backing, BufferData, Error, ErrorKind, JsObject, ObjectData, ObjectKind, SharedMemory, Value};
 
 use crate::{FromJs, IntoJs};
 
@@ -9,7 +9,7 @@ use crate::{FromJs, IntoJs};
 pub struct ArrayBuffer(pub Backing);
 
 impl<'scope> IntoJs<'scope> for ArrayBuffer {
-    fn into_js(self, a: &mut Agent<'scope, '_>) -> Result<Value<'scope>, Error> {
+    fn into_js(self, a: &mut Scope<'scope, '_>) -> Result<Value<'scope>, Error> {
         let max = self.0.shared().and_then(|s| s.max());
         let shared = self.0.shared().is_some();
         let proto = if shared { a.context.shared_array_buffer_proto } else { a.context.array_buffer_proto };
@@ -22,7 +22,7 @@ impl<'scope> IntoJs<'scope> for ArrayBuffer {
 pub struct Shared(pub Arc<SharedMemory>);
 
 impl<'scope> FromJs<'scope> for Shared {
-    fn from_js(a: &mut Agent<'scope, '_>, v: Value<'scope>) -> Result<Self, Error> {
+    fn from_js(a: &mut Scope<'scope, '_>, v: Value<'scope>) -> Result<Self, Error> {
         let memory = BufferRef::target(v).and_then(|(buffer, ..)| match &buffer.borrow().kind {
             ObjectKind::ArrayBuffer(b) => b.bytes.as_ref().and_then(Backing::shared).cloned(),
             _ => None,
@@ -35,7 +35,7 @@ impl<'scope> FromJs<'scope> for Shared {
 }
 
 impl<'scope> IntoJs<'scope> for Shared {
-    fn into_js(self, a: &mut Agent<'scope, '_>) -> Result<Value<'scope>, Error> {
+    fn into_js(self, a: &mut Scope<'scope, '_>) -> Result<Value<'scope>, Error> {
         ArrayBuffer(Backing::Shared(self.0)).into_js(a)
     }
 }
@@ -44,7 +44,7 @@ impl<'scope> IntoJs<'scope> for Shared {
 pub struct Transfer(pub Backing);
 
 impl<'scope> FromJs<'scope> for Transfer {
-    fn from_js(a: &mut Agent<'scope, '_>, v: Value<'scope>) -> Result<Self, Error> {
+    fn from_js(a: &mut Scope<'scope, '_>, v: Value<'scope>) -> Result<Self, Error> {
         let bytes = v.as_object().and_then(|o| match &mut o.borrow_mut(a.mc).kind {
             ObjectKind::ArrayBuffer(b) if !b.shared => b.bytes.take(),
             _ => None,
@@ -64,7 +64,7 @@ pub struct BufferRef<'scope> {
 }
 
 impl<'scope> FromJs<'scope> for BufferRef<'scope> {
-    fn from_js(a: &mut Agent<'scope, '_>, v: Value<'scope>) -> Result<Self, Error> {
+    fn from_js(a: &mut Scope<'scope, '_>, v: Value<'scope>) -> Result<Self, Error> {
         Self::target(v).map(|(buffer, offset, len)| Self { buffer, offset, len }).ok_or_else(|| {
             let t = a.describe(v);
             a.throw(ErrorKind::Type, &alloc::format!("{t} is not an ArrayBuffer, typed array or DataView"))
@@ -88,14 +88,14 @@ impl<'scope> BufferRef<'scope> {
         self.buffer
     }
 
-    pub fn with<R>(&self, a: &Agent<'scope, '_>, f: impl FnOnce(&mut [u8]) -> R) -> Option<R> {
+    pub fn with<R>(&self, a: &Scope<'scope, '_>, f: impl FnOnce(&mut [u8]) -> R) -> Option<R> {
         let ObjectKind::ArrayBuffer(b) = &mut self.buffer.borrow_mut(a.mc).kind else { return None };
         let bytes = b.bytes.as_deref_mut()?;
         let end = self.len.map_or(bytes.len(), |n| self.offset + n);
         bytes.get_mut(self.offset..end).map(f)
     }
 
-    pub fn detach(&self, a: &Agent<'scope, '_>) -> Option<Backing> {
+    pub fn detach(&self, a: &Scope<'scope, '_>) -> Option<Backing> {
         match &mut self.buffer.borrow_mut(a.mc).kind {
             ObjectKind::ArrayBuffer(b) if !b.shared => b.bytes.take(),
             _ => None,

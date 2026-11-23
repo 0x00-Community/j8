@@ -8,7 +8,7 @@ A worked example focused on iterators and async in both directions: [Custom cont
 
 ## `#[j8::class]`: a Rust type as a JS class
 
-On an `impl` block: generates a conversion wrapper (`fn(agent, this, args) -> Result<Value>`) for each method and
+On an `impl` block: generates a conversion wrapper (`fn(scope, this, args) -> Result<Value>`) for each method and
 implements `j8::Class`. Instances are host objects (`ObjectKind::Host`): the Rust value lives inside the JS object, in the
 GC heap, so the type derives `j8::Trace` and the collector sees every JS value it holds.
 
@@ -32,8 +32,8 @@ impl Counter {
     fn zero() -> f64 { 0.0 }      // no self: a static method on the constructor
 }
 
-let handle = Counter::install(&mut agent, global);      // global `Counter`; returns the constructor and prototype
-let obj = handle.instance(&agent, Counter { n: 1.0 });   // an instance made from Rust
+let handle = Counter::install(&mut scope, global);      // global `Counter`; returns the constructor and prototype
+let obj = handle.instance(&scope, Counter { n: 1.0 });   // an instance made from Rust
 ```
 
 ### Inheritance: `#[j8::class(extends = Base)]`
@@ -72,7 +72,7 @@ impl Fs {
 #[j8::function]                    // or #[j8::function("name")]
 fn greet(name: &str) -> String { format!("hi {name}") }
 
-greet::install(&mut agent, global);   // the function stays; a module of the same name holds `greet::NATIVE`
+greet::install(&mut scope, global);   // the function stays; a module of the same name holds `greet::NATIVE`
 ```
 
 ## `#[j8::module]`: native modules
@@ -108,7 +108,7 @@ Parameters are taken **by type**:
 
 | Parameter type | Receives |
 |---|---|
-| `&mut Agent<'_, '_>` | the current agent (not a JS argument; any position) |
+| `&mut Scope<'_, '_>` | the current scope (not a JS argument; any position) |
 | `This` | the raw `this` |
 | `Rest` | all remaining arguments |
 | `&str` | ToString, then borrowed |
@@ -129,10 +129,10 @@ Handle types:
 
 ## Throwing
 
-Take `&mut Agent`, return `Result<T, Error>`, build the error with `a.throw(kind, message)`:
+Take `&mut Scope`, return `Result<T, Error>`, build the error with `a.throw(kind, message)`:
 
 ```rust,ignore
-fn must(a: &mut Agent<'_, '_>, name: &str) -> Result<String, Error> {
+fn must(a: &mut Scope<'_, '_>, name: &str) -> Result<String, Error> {
     std::env::var(name).map_err(|_| a.throw(ErrorKind::Type, &format!("{name} is not set")))
 }
 ```
@@ -144,7 +144,7 @@ When the error is only known later, or you want structured errors (Node's `err.c
 pub struct Io<T>(pub Result<T, Failure>);
 
 impl<'scope, T: IntoJs<'scope>> IntoJs<'scope> for Io<T> {
-    fn into_js(self, a: &mut Agent<'scope, '_>) -> Result<Value<'scope>, Error> {
+    fn into_js(self, a: &mut Scope<'scope, '_>) -> Result<Value<'scope>, Error> {
         match self.0 {
             Ok(v) => v.into_js(a),
             Err(f) => Err(a.throw(f.kind, &f.message)),   // "ENOENT: no such file or directory, open 'a.txt'"
@@ -186,7 +186,7 @@ impl<'scope> Hooks<'scope> {
 
     fn set(&mut self, f: j8::Function<'scope>, keep: Value<'scope>) { self.on = Some(f); self.kept = Some(keep); }
 
-    fn fire(&self, a: &mut Agent<'scope, '_>, x: f64) -> Result<Value<'scope>, Error> {
+    fn fire(&self, a: &mut Scope<'scope, '_>, x: f64) -> Result<Value<'scope>, Error> {
         match self.on {
             Some(f) => f.call(a, Value::Undefined, &[x.into(), self.kept.unwrap_or(Value::Undefined)]),
             None => Ok(Value::Undefined),

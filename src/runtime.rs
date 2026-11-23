@@ -2,10 +2,10 @@ use std::marker::PhantomData;
 use std::time::Duration;
 
 use j8executor::{EventLoop, EventLoopSet, Executor};
-use j8framework::{Agent, Error, ErrorKind, Platform, Pool, ScopeGlobal, ScriptKind, Source, Task, Value, ValueBrand};
+use j8framework::{Scope, Error, ErrorKind, Platform, Pool, ScopeGlobal, ScriptKind, Source, Task, Value, ValueBrand};
 
 pub trait Host {
-    fn install(a: &mut Agent<'_, '_>);
+    fn install(a: &mut Scope<'_, '_>);
 
     fn module_source(specifier: &str) -> Option<String>;
 
@@ -82,7 +82,7 @@ impl<'p> Runtime<'p> {
         self.js.eval(&Source { text, file }, ScriptKind::Module)
     }
 
-    pub fn enter<R: Send>(&self, f: impl for<'scope> FnOnce(&mut Agent<'scope, '_>) -> R + Send) -> R {
+    pub fn enter<R: Send>(&self, f: impl for<'scope> FnOnce(&mut Scope<'scope, '_>) -> R + Send) -> R {
         self.js.enter(f)
     }
 
@@ -137,7 +137,7 @@ macro_rules! runtime {
         $vis struct $name;
 
         impl $crate::Host for $name {
-            fn install(a: &mut $crate::frame::Agent<'_, '_>) {
+            fn install(a: &mut $crate::frame::Scope<'_, '_>) {
                 $(<$parent as $crate::Host>::install(a);)?
                 let global = a.context.global;
                 $($(<$global as $crate::Install>::install_into(a, global);)*)?

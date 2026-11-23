@@ -1,4 +1,4 @@
-use j8framework::{Agent, Error, Value};
+use j8framework::{Scope, Error, Value};
 
 use crate::{Args, Installer};
 
@@ -33,48 +33,48 @@ impl Math {
         if x.is_nan() || x == 0.0 { x } else { x.signum() }
     }
 
-    fn unary<'scope, const N: usize>(a: &mut Agent<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn unary<'scope, const N: usize>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Ok((UNARY[N].1)(a.to_number(args.at(0))?).into())
     }
 
-    fn unary1<'scope, const N: usize>(_: &mut Agent<'scope, '_>, _: Value<'scope>, v: Value<'scope>) -> Option<Value<'scope>> {
+    fn unary1<'scope, const N: usize>(_: &mut Scope<'scope, '_>, _: Value<'scope>, v: Value<'scope>) -> Option<Value<'scope>> {
         match v.kind() {
             j8framework::ValueKind::Number(x) => Some((UNARY[N].1)(x).into()),
             _ => None,
         }
     }
 
-    fn extreme2<'scope>(a: &mut Agent<'scope, '_>, x: Value<'scope>, y: Value<'scope>, max: bool) -> Option<Value<'scope>> {
+    fn extreme2<'scope>(a: &mut Scope<'scope, '_>, x: Value<'scope>, y: Value<'scope>, max: bool) -> Option<Value<'scope>> {
         if !matches!((x.kind(), y.kind()), (j8framework::ValueKind::Number(_), j8framework::ValueKind::Number(_))) {
             return None;
         }
         Self::extreme(a, &[x, y], max).ok()
     }
 
-    fn max2<'scope>(a: &mut Agent<'scope, '_>, _: Value<'scope>, x: Value<'scope>, y: Value<'scope>) -> Option<Value<'scope>> {
+    fn max2<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, x: Value<'scope>, y: Value<'scope>) -> Option<Value<'scope>> {
         Self::extreme2(a, x, y, true)
     }
 
-    fn min2<'scope>(a: &mut Agent<'scope, '_>, _: Value<'scope>, x: Value<'scope>, y: Value<'scope>) -> Option<Value<'scope>> {
+    fn min2<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, x: Value<'scope>, y: Value<'scope>) -> Option<Value<'scope>> {
         Self::extreme2(a, x, y, false)
     }
 
-    fn round<'scope>(a: &mut Agent<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn round<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let x = a.to_number(args.at(0))?;
         let f = libm::floor(x);
         Ok((if x - f >= 0.5 { f + 1.0 } else { f }).into())
     }
 
-    fn pow<'scope>(a: &mut Agent<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn pow<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let (x, y) = (args.at(0), args.at(1));
         a.binary(j8framework::BinaryOp::Exp, x, y)
     }
 
-    fn atan2<'scope>(a: &mut Agent<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn atan2<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Ok(libm::atan2(a.to_number(args.at(0))?, a.to_number(args.at(1))?).into())
     }
 
-    fn extreme<'scope>(a: &mut Agent<'scope, '_>, args: &[Value<'scope>], max: bool) -> Result<Value<'scope>, Error> {
+    fn extreme<'scope>(a: &mut Scope<'scope, '_>, args: &[Value<'scope>], max: bool) -> Result<Value<'scope>, Error> {
         let mut acc = if max { f64::NEG_INFINITY } else { f64::INFINITY };
         for &v in args {
             let x = a.to_number(v)?;
@@ -92,15 +92,15 @@ impl Math {
         Ok(acc.into())
     }
 
-    fn max<'scope>(a: &mut Agent<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn max<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Self::extreme(a, args, true)
     }
 
-    fn min<'scope>(a: &mut Agent<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn min<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Self::extreme(a, args, false)
     }
 
-    fn hypot<'scope>(a: &mut Agent<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn hypot<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let mut sum = 0.0;
         for &v in args {
             let x = a.to_number(v)?;

@@ -12,11 +12,11 @@ functions and every built-in constructor, prototype and method into it.
 when creating a context, and can replace or trim it:
 
 ```rust
-let cx = isolate.enter(|scope| scope.mc.stash::<ContextBrand>(scope.context(&j8builtins::Builtins)));
+let cx = isolate.create_context(&j8builtins::Builtins);
 ```
 
 It depends only on `j8framework`, not on the executor: every built-in is a host function
-`fn(&mut Agent, this, &[Value]) -> Result<Value, Error>` written against the operation semantics on `Agent`.
+`fn(&mut Scope, this, &[Value]) -> Result<Value, Error>` written against the operation semantics on `Scope`.
 
 ## Contents
 

@@ -2,28 +2,28 @@ use j8framework::ValueKind;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use j8framework::{Agent, Error, Value};
+use j8framework::{Scope, Error, Value};
 
 use crate::{Args, Installer};
 
 struct Global;
 
 impl Global {
-    fn log<'scope>(a: &mut Agent<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn log<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let parts = args.iter().map(|&v| a.to_string(v).map(|s| String::from(&**s))).collect::<Result<Vec<_>, _>>()?;
         a.platform.print(&parts.join(" "));
         Ok(Value::Undefined)
     }
 
-    fn is_nan<'scope>(a: &mut Agent<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn is_nan<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Ok(a.to_number(args.at(0))?.is_nan().into())
     }
 
-    fn is_finite<'scope>(a: &mut Agent<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn is_finite<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Ok(a.to_number(args.at(0))?.is_finite().into())
     }
 
-    fn parse_int<'scope>(a: &mut Agent<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn parse_int<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         const DECIMAL: u32 = 10;
         const HEX: u32 = 16;
         let s = a.to_string(args.at(0))?;
@@ -54,7 +54,7 @@ impl Global {
         Ok((if negative { -n } else { n }).into())
     }
 
-    fn parse_float<'scope>(a: &mut Agent<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn parse_float<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let s = a.to_string(args.at(0))?;
         let t = s.trim_start();
         for (inf, x) in [("Infinity", f64::INFINITY), ("+Infinity", f64::INFINITY), ("-Infinity", f64::NEG_INFINITY)] {

@@ -1,6 +1,6 @@
 use j8::{Bytes, Function};
 use j8executor::Executor;
-use j8framework::{Agent, Error, Value};
+use j8framework::{Scope, Error, Value};
 use j8platform::DefaultPlatform;
 
 #[derive(j8::Trace)]
@@ -73,7 +73,7 @@ impl<'scope> Hooks<'scope> {
         self.kept = Some(keep);
     }
 
-    fn fire(&self, a: &mut Agent<'scope, '_>, x: f64) -> Result<Value<'scope>, Error> {
+    fn fire(&self, a: &mut Scope<'scope, '_>, x: f64) -> Result<Value<'scope>, Error> {
         let kept = self.kept.unwrap_or(Value::Undefined);
         match self.on {
             Some(f) => f.call(a, Value::Undefined, &[x.into(), kept]),
@@ -186,17 +186,13 @@ fn async_bindings_settle_on_the_event_loop() {
         assert_eq!(rt.text(&r), "8");
         let mut isolate = j8framework::Isolate::new(&plain, j8framework::CreateParams::default());
         let executor = Executor::default();
-        let cx = isolate.enter(|scope| scope.mc.stash::<j8framework::ContextBrand>(scope.context(&j8builtins::Builtins)));
-        isolate.enter(|scope| {
-            let context = scope.mc.fetch(&cx);
-            let mut a = scope.agent(context, &executor);
-            <Loop as j8::Host>::install(&mut a);
+        let cx = isolate.create_context(&j8builtins::Builtins);
+        isolate.enter(&cx, &executor, |a| {
+            <Loop as j8::Host>::install(a);
         });
         let src = j8framework::Source { text: "try { later.double(1); 'no' } catch (e) { e instanceof TypeError }", file: "t.js" };
         let r = executor.eval(&mut isolate, &cx, &src).expect("runs");
-        let text = isolate.enter(|scope| {
-            let context = scope.mc.fetch(&cx);
-            let mut a = scope.agent(context, &executor);
+        let text = isolate.enter(&cx, &executor, |a| {
             let v = a.local(&r);
             a.to_string(v).map(|s| String::from(&**s)).expect("ToString")
         });
@@ -206,9 +202,7 @@ fn async_bindings_settle_on_the_event_loop() {
 
 fn eval_text<'p>(isolate: &mut j8framework::Isolate<'p>, executor: &Executor<'p>, cx: &j8framework::ScopeGlobal<'p, j8framework::ContextBrand>, text: &str) -> String {
     let r = executor.eval(isolate, cx, &j8framework::Source { text, file: "t.js" }).expect("runs");
-    isolate.enter(|scope| {
-        let context = scope.mc.fetch(cx);
-        let mut a = scope.agent(context, executor);
+    isolate.enter(cx, executor, |a| {
         let v = a.local(&r);
         a.to_string(v).map(|s| String::from(&**s)).expect("ToString")
     })
@@ -219,11 +213,9 @@ fn host_fields_keep_their_objects_across_collections() {
     let platform = DefaultPlatform::default();
     let mut isolate = j8framework::Isolate::new(&platform, j8framework::CreateParams::default());
     let executor = Executor::default();
-    let cx = isolate.enter(|scope| scope.mc.stash::<j8framework::ContextBrand>(scope.context(&j8builtins::Builtins)));
-    isolate.enter(|scope| {
-        let context = scope.mc.fetch(&cx);
-        let mut a = scope.agent(context, &executor);
-        <Zoo as j8::Host>::install(&mut a);
+    let cx = isolate.create_context(&j8builtins::Builtins);
+    isolate.enter(&cx, &executor, |a| {
+        <Zoo as j8::Host>::install(a);
     });
     eval_text(&mut isolate, &executor, &cx, "globalThis.h = new Hooks(); h.set((x, k) => x * 2 + k.n, { n: 1 }); 0");
     for _ in 0..3 {

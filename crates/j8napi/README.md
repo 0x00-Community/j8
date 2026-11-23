@@ -11,8 +11,8 @@ for addons it loads at run time).
 
 ```rust
 // inside an `Isolate::enter`, with an agent of the context the addon belongs to
-let exports = j8napi::Env::open(&mut agent, napi_register_module_v1)?;
-agent.set_named(agent.context.global.into(), "addon", exports)?;
+let exports = j8napi::Env::open(&mut scope, napi_register_module_v1)?;
+scope.set_named(scope.context.global.into(), "addon", exports)?;
 ```
 
 `Env::open` creates the addon's environment (it lives as long as the context's global object), calls the register

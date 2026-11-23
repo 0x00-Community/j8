@@ -7,7 +7,7 @@
 
 ## `#[j8::class]`：Rust 类型导出为 JS 类
 
-放在 `impl` 块上：为每个方法生成转换包装（`fn(agent, this, args) -> Result<Value>`）并实现 `j8::Class`。实例是宿主对象（`ObjectKind::Host`）：
+放在 `impl` 块上：为每个方法生成转换包装（`fn(scope, this, args) -> Result<Value>`）并实现 `j8::Class`。实例是宿主对象（`ObjectKind::Host`）：
 Rust 值放在 JS 对象里、在 GC 堆中，所以类型要派生 `j8::Trace`，回收器才看得到它持有的每个 JS 值。
 
 ```rust,ignore
@@ -30,8 +30,8 @@ impl Counter {
     fn zero() -> f64 { 0.0 }      // 没有 self：构造器上的静态方法
 }
 
-let handle = Counter::install(&mut agent, global);      // 全局 `Counter`，返回构造器与原型
-let obj = handle.instance(&agent, Counter { n: 1.0 });   // 从 Rust 建实例
+let handle = Counter::install(&mut scope, global);      // 全局 `Counter`，返回构造器与原型
+let obj = handle.instance(&scope, Counter { n: 1.0 });   // 从 Rust 建实例
 ```
 
 ### 继承：`#[j8::class(extends = Base)]`
@@ -69,7 +69,7 @@ impl Fs {
 #[j8::function]                    // 或 #[j8::function("name")]
 fn greet(name: &str) -> String { format!("hi {name}") }
 
-greet::install(&mut agent, global);   // 原函数保留，旁边生成同名模块，`greet::NATIVE` 是宿主函数
+greet::install(&mut scope, global);   // 原函数保留，旁边生成同名模块，`greet::NATIVE` 是宿主函数
 ```
 
 ## `#[j8::module]`：原生模块
@@ -104,7 +104,7 @@ import fs, { existsSync } from "node:fs";
 
 | 参数类型 | 拿到什么 |
 |---|---|
-| `&mut Agent<'_, '_>` | 当前 agent（不算 JS 实参，放在哪个位置都行） |
+| `&mut Scope<'_, '_>` | 当前 agent（不算 JS 实参，放在哪个位置都行） |
 | `This` | 原始的 `this` |
 | `Rest` | 剩下的全部实参 |
 | `&str` | ToString 后借用 |
@@ -125,10 +125,10 @@ import fs, { existsSync } from "node:fs";
 
 ## 抛异常
 
-拿 `&mut Agent`、返回 `Result<T, Error>`，用 `a.throw(kind, message)` 造错误：
+拿 `&mut Scope`、返回 `Result<T, Error>`，用 `a.throw(kind, message)` 造错误：
 
 ```rust,ignore
-fn must(a: &mut Agent<'_, '_>, name: &str) -> Result<String, Error> {
+fn must(a: &mut Scope<'_, '_>, name: &str) -> Result<String, Error> {
     std::env::var(name).map_err(|_| a.throw(ErrorKind::Type, &format!("{name} is not set")))
 }
 ```
@@ -140,7 +140,7 @@ fn must(a: &mut Agent<'_, '_>, name: &str) -> Result<String, Error> {
 pub struct Io<T>(pub Result<T, Failure>);
 
 impl<'scope, T: IntoJs<'scope>> IntoJs<'scope> for Io<T> {
-    fn into_js(self, a: &mut Agent<'scope, '_>) -> Result<Value<'scope>, Error> {
+    fn into_js(self, a: &mut Scope<'scope, '_>) -> Result<Value<'scope>, Error> {
         match self.0 {
             Ok(v) => v.into_js(a),
             Err(f) => Err(a.throw(f.kind, &f.message)),   // "ENOENT: no such file or directory, open 'a.txt'"
@@ -178,7 +178,7 @@ impl<'scope> Hooks<'scope> {
 
     fn set(&mut self, f: j8::Function<'scope>, keep: Value<'scope>) { self.on = Some(f); self.kept = Some(keep); }
 
-    fn fire(&self, a: &mut Agent<'scope, '_>, x: f64) -> Result<Value<'scope>, Error> {
+    fn fire(&self, a: &mut Scope<'scope, '_>, x: f64) -> Result<Value<'scope>, Error> {
         match self.on {
             Some(f) => f.call(a, Value::Undefined, &[x.into(), self.kept.unwrap_or(Value::Undefined)]),
             None => Ok(Value::Undefined),

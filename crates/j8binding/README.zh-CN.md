@@ -25,7 +25,7 @@ impl Counter {
     fn value(&self) -> f64 { self.n }
 }
 
-let handle = Counter::install(&mut agent, global);   // 全局 `Counter`
+let handle = Counter::install(&mut scope, global);   // 全局 `Counter`
 ```
 
 宿主类型必须是 `Send + Sync`（堆的规矩）。全部属性见 `crates/macros/USAGE.md`。

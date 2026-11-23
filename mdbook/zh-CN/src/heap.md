@@ -28,9 +28,9 @@ paragc 的类型带两个生命周期：堆的 Brand `'heap` 和 scope 的 `'sco
 ## 待处理异常
 
 照 V8 的做法，抛出的值不放在 `Error` 里：`Error::Exception` 只表示"JS 抛了"，值在这次进入的待处理槽里
-（`mc.raise` / `agent.take_exception`）。进入结束时还留在槽里的值会被挂到根上，下次进入开始时重新抛出，宿主因此能读到它
-（`Runtime::exception_text`）。宿主代码要跨轮持有一个 reject 原因时，把它暂存进 isolate（`agent.park()` ⇒
-`Error::Parked(ticket)`，`agent.unpark(ticket)`）。
+（`mc.raise` / `scope.take_exception`）。进入结束时还留在槽里的值会被挂到根上，下次进入开始时重新抛出，宿主因此能读到它
+（`Runtime::exception_text`）。宿主代码要跨轮持有一个 reject 原因时，把它暂存进 isolate（`scope.park()` ⇒
+`Error::Parked(ticket)`，`scope.unpark(ticket)`）。
 
 ## j8 的 GC 层
 

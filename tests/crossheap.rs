@@ -29,7 +29,9 @@ fn shared_objects_are_signed_when_the_turn_ends() {
     let platform = DefaultPlatform::default();
     let mut isolate = Isolate::new(&platform, CreateParams::default());
     isolate.attach_cross_heap(unsafe { space.create_anonymous_unchecked(THREADS) }.unwrap()).unwrap();
-    let tickets = isolate.enter(|scope| {
+    let executor = j8executor::Executor::default();
+    let cx = isolate.create_context(&j8builtins::Builtins);
+    let tickets = isolate.enter(&cx, &executor, |scope| {
         let m = scope.mc.gc_scope();
         let tail = m.alloc_shared(Payload { value: 1, next: None.into() });
         let head = m.alloc_shared(Payload { value: 42, next: Some(tail).into() });

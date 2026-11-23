@@ -2,7 +2,7 @@
 use j8::{Class, Object, Rest};
 use j8builtins::Builtins;
 use j8executor::Executor;
-use j8framework::{Agent, CreateParams, Error, Isolate, Source, Value};
+use j8framework::{Scope, CreateParams, Error, Isolate, Source, Value};
 use j8platform::DefaultPlatform;
 
 #[derive(j8::Trace)]
@@ -36,7 +36,7 @@ impl Counter {
         items.0.len()
     }
 
-    fn describe<'scope>(&self, a: &mut Agent<'scope, '_>, label: String) -> Result<Value<'scope>, Error> {
+    fn describe<'scope>(&self, a: &mut Scope<'scope, '_>, label: String) -> Result<Value<'scope>, Error> {
         Ok(a.string(&format!("{label}={}", self.n)).into())
     }
 }
@@ -65,20 +65,16 @@ fn class_binding() {
     let platform = DefaultPlatform::default();
     let mut isolate = Isolate::new(&platform, CreateParams::default());
     let executor = Executor::default();
-    let cx = isolate.enter(|scope| scope.mc.stash::<j8framework::ContextBrand>(scope.context(&Builtins)));
-    isolate.enter(|scope| {
-        let context = scope.mc.fetch(&cx);
-        let mut a = scope.agent(context, &executor);
+    let cx = isolate.create_context(&Builtins);
+    isolate.enter(&cx, &executor, |a| {
         let global = a.context.global;
-        Counter::install(&mut a, global);
-        Calc::install(&mut a, global);
-        greet::install(&mut a, global);
+        Counter::install(a, global);
+        Calc::install(a, global);
+        greet::install(a, global);
     });
     let src = "const c = new Counter(2); c.inc(3); c.value = c.value * 2; [c.value, c.describe('n'), Counter.sum(1, 2, 3), c instanceof Counter, String(Object.prototype.toString.call(c)), calc.twice(4), calc.answer, greet('j8'), greet.length].join()";
     let r = executor.eval(&mut isolate, &cx, &Source { text: src, file: "t.js" });
-    let text = isolate.enter(|scope| {
-        let context = scope.mc.fetch(&cx);
-        let mut a = scope.agent(context, &executor);
+    let text = isolate.enter(&cx, &executor, |a| {
         let v = a.local(&r.expect("the script runs"));
         String::from(&**a.to_string(v).expect("a string"))
     });

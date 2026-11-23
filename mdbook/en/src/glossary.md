@@ -3,7 +3,7 @@
 | Term | Meaning |
 |---|---|
 | **acc (accumulator)** | the implicit result register of the bytecode; most instructions read or write it |
-| **Agent** | the context of one run; JS operation semantics hang off it |
+| **Scope** | one entry into an isolate, with a `Context` and the executor; JS operation semantics hang off it (V8's `HandleScope` + `Context::Scope`; the spec's agent) |
 | **Context** | an execution context: the global object and built-in prototypes |
 | **context slot / Env** | the heap environment holding variables that closures capture |
 | **CodeCache** | bytecode shared by several executors |

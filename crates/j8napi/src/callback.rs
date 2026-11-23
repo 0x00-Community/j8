@@ -2,7 +2,7 @@ use alloc::vec::Vec;
 use core::ffi::c_void;
 use core::ptr::NonNull;
 
-use j8framework::{Agent, Error, JsObject, NativeClosure, ObjectData, ObjectKind, Value};
+use j8framework::{Scope, Error, JsObject, NativeClosure, ObjectData, ObjectKind, Value};
 
 use crate::{Env, Handle};
 
@@ -32,7 +32,7 @@ unsafe impl<'e> crate::Opaque<'e> for Hook<'e> {
 pub enum HookBrand {}
 
 impl Env<'_> {
-    pub fn function<'scope>(&self, a: &Agent<'scope, '_>, name: &str, cb: unsafe extern "C" fn(*mut Env<'_>, *mut CallbackInfo) -> Handle, data: *mut c_void, constructor: bool) -> JsObject<'scope> {
+    pub fn function<'scope>(&self, a: &Scope<'scope, '_>, name: &str, cb: unsafe extern "C" fn(*mut Env<'_>, *mut CallbackInfo) -> Handle, data: *mut c_void, constructor: bool) -> JsObject<'scope> {
         let hook = Self::host(a, Hook { env: NonNull::from(self).cast::<Env<'scope>>(), cb, data });
         let f = ObjectData {
             kind: ObjectKind::NativeClosure(NativeClosure { f: Self::trampoline, slots: alloc::vec![hook.into()], constructor }),
@@ -44,7 +44,7 @@ impl Env<'_> {
         f
     }
 
-    fn trampoline<'scope>(a: &mut Agent<'scope, '_>, me: JsObject<'scope>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn trampoline<'scope>(a: &mut Scope<'scope, '_>, me: JsObject<'scope>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let hook = match &me.borrow().kind {
             ObjectKind::NativeClosure(c) => c.slots.first().and_then(|v| v.as_object()).and_then(|h| Self::hosted::<Hook<'scope>, _>(a, h, |h| *h)),
             _ => None,

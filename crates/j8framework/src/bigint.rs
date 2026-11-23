@@ -4,7 +4,7 @@ use core::cmp::Ordering;
 use num_bigint::BigInt;
 use num_traits::{FromPrimitive, One, Signed, ToPrimitive, Zero};
 
-use crate::{Agent, BigIntData, BinaryOp, Error, ErrorKind, Hint, JsBigInt, Value};
+use crate::{Scope, BigIntData, BinaryOp, Error, ErrorKind, Hint, JsBigInt, Value};
 
 const MAX_SHIFT: i64 = 1 << 30;
 
@@ -14,7 +14,7 @@ pub enum Numeric<'scope> {
     BigInt(JsBigInt<'scope>),
 }
 
-impl<'scope> Agent<'scope, '_> {
+impl<'scope> Scope<'scope, '_> {
     pub fn bigint(&self, b: BigInt) -> Value<'scope> {
         Value::BigInt(self.mc.alloc(BigIntData(b)))
     }

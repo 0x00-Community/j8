@@ -6,7 +6,7 @@ use std::time::SystemTime;
 
 use faccess::{AccessMode, PathExt};
 use filetime::FileTime;
-use j8::frame::{Agent, Error, Value};
+use j8::frame::{Scope, Error, Value};
 use j8::{Bytes, IntoJs, Json};
 use positioned_io::{ReadAt, WriteAt};
 use serde::Deserialize;
@@ -150,7 +150,7 @@ pub struct Fail {
 pub struct Outcome(Result<Reply, Fail>);
 
 impl<'scope> IntoJs<'scope> for Outcome {
-    fn into_js(self, a: &mut Agent<'scope, '_>) -> Result<Value<'scope>, Error> {
+    fn into_js(self, a: &mut Scope<'scope, '_>) -> Result<Value<'scope>, Error> {
         let parts = match self.0 {
             Ok(reply) => vec![reply.into_js(a)?],
             Err(f) => vec![f64::from(-f.errno).into_js(a)?, f.syscall.into_js(a)?, f.path.into_js(a)?, f.dest.into_js(a)?],
@@ -160,7 +160,7 @@ impl<'scope> IntoJs<'scope> for Outcome {
 }
 
 impl<'scope> IntoJs<'scope> for Reply {
-    fn into_js(self, a: &mut Agent<'scope, '_>) -> Result<Value<'scope>, Error> {
+    fn into_js(self, a: &mut Scope<'scope, '_>) -> Result<Value<'scope>, Error> {
         match self {
             Self::Unit => Ok(Value::Undefined),
             Self::Number(n) => n.into_js(a),

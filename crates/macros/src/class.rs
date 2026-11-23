@@ -59,7 +59,7 @@ pub fn expand(attr: TokenStream, mut item: ItemImpl) -> syn::Result<TokenStream>
     let inherit = extends.map(|base| {
         let base = Relabel::ty("'scope", &base);
         quote! {
-            fn parent(a: &mut ::j8::frame::Agent<'scope, '_>, target: ::j8::frame::JsObject<'scope>) -> ::core::option::Option<::j8::ClassHandle<'scope>> {
+            fn parent(a: &mut ::j8::frame::Scope<'scope, '_>, target: ::j8::frame::JsObject<'scope>) -> ::core::option::Option<::j8::ClassHandle<'scope>> {
                 ::core::option::Option::Some(::j8::Glue::parent::<#base>(a, target))
             }
 
@@ -111,7 +111,7 @@ pub fn expand(attr: TokenStream, mut item: ItemImpl) -> syn::Result<TokenStream>
         }
 
         impl ::j8::Install for #anon {
-            fn install_into<'scope>(a: &mut ::j8::frame::Agent<'scope, '_>, target: ::j8::frame::JsObject<'scope>) {
+            fn install_into<'scope>(a: &mut ::j8::frame::Scope<'scope, '_>, target: ::j8::frame::JsObject<'scope>) {
                 let _ = <#ty as ::j8::Class<'scope>>::install(a, target);
             }
         }

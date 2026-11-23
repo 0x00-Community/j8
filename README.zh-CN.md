@@ -92,7 +92,7 @@ cd samples/benchv8 && cargo run --release
 
 | crate | std | 职责 |
 |---|---|---|
-| `j8framework` | std | 核心框架层：定义 trait（`Platform`、`Invoke`、`Intrinsics`）与通用结构体 / 枚举（`Isolate`、`Scope`、`Agent`、`Context`、`ScopeGlobal`、`Host`、`Value`、`JsString`·`JsObject`、`Profiler`、`BinaryOp`、`Error`……），JS 运算语义挂在 `Agent` 上，实现归各层 crate。 |
+| `j8framework` | std | 核心框架层：定义 trait（`Platform`、`Invoke`、`Intrinsics`）与通用结构体 / 枚举（`Isolate`、`Scope`、`Scope`、`Context`、`ScopeGlobal`、`Host`、`Value`、`JsString`·`JsObject`、`Profiler`、`BinaryOp`、`Error`……），JS 运算语义挂在 `Scope` 上，实现归各层 crate。 |
 | `j8`（仓库根 `src/`） | std | 聚合导出：`#[j8::class]` / `#[j8::object]` / `#[j8::function]`（宏在 j8macros，见 `crates/macros/USAGE.md`）与 j8binding 的 trait；其余 crate 按 feature 导出（缺省 `runtime` = `j8::executor` + `j8::builtins` + `j8::platform`，另有 `bytecode` / `taskqueue` / `lockfree` / `jit` / `full`），每个子 crate 也单独发在 crates.io |
 | `j8binding` | std | Rust ⇄ JS 绑定的运行时：`FromJs` / `IntoJs`、宿主对象、`Class` / `Object` |
 | `j8builtins` | std | 实现 `Intrinsics`：往 `Context` 装 Object / Function / Array / String / Number / Boolean / Math / Error 系列 / `console` / `parseInt` 等 |
@@ -125,11 +125,11 @@ cd samples/benchv8 && cargo run --release
   rope 用 `Arc`
 - 堆有自己的回收线程（数目同平台线程池）；`Platform` 的父 trait `Pool` 给并行内建函数用
 
-- `Isolate::enter(|scope| …)` 进入一次，`'scope` 是这次进入的品牌；闭包期间不回收，返回后分配够多就回收（通常是年轻回收，每隔几轮一次完整回收）
+- `Isolate::enter(&cx, &executor, |scope| …)` 进入一次，`'scope` 是这次进入的品牌；闭包期间不回收，返回后分配够多就回收（通常是年轻回收，每隔几轮一次完整回收）
 - `Executor::eval` 拿 `&mut Isolate` 自己分片进入：每片最多一万条指令，停下时执行状态挂到根上、`enter` 返回时回收一段再接着跑；执行环境用 `ScopeGlobal<'p, ContextBrand>` 跨片保留（宿主函数里重入的 JS 在当前片里跑完）
 - `Value<'scope>` 就是 V8 的 Local：出不了闭包，编译期保证
 - `ScopeGlobal<'p, B>` 是根（paragc 的），跨多次 `enter` 存活，drop 即放掉；`B` 标明类型（`ValueBrand`、`ContextBrand`）
-- 抛出的值照 V8 放在待处理异常槽里（`Error::Exception`，`agent.take_exception()`）
+- 抛出的值照 V8 放在待处理异常槽里（`Error::Exception`，`scope.take_exception()`）
 
 ```rust
 use j8builtins::Builtins;
@@ -140,9 +140,9 @@ use j8platform::DefaultPlatform;
 let platform = DefaultPlatform::default();
 let mut isolate = Isolate::new(&platform, CreateParams::default());
 let executor = Executor::default();
-let cx = isolate.enter(|scope| scope.mc.stash::<ContextBrand>(scope.context(&Builtins)));
+let cx = isolate.create_context(&Builtins);
 let result = executor.eval(&mut isolate, &cx, &Source { text: "1 + 2 * 3", file: "a.js" })?;
-isolate.enter(|scope| {
+isolate.enter(&cx, &executor, |scope| {
     let v = scope.local(&result);
 });
 ```

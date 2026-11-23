@@ -4,12 +4,12 @@
 把全局对象、全局函数和全部内建构造器、原型、方法装进去。
 
 ```rust,ignore
-let cx = isolate.enter(|scope| scope.mc.stash::<ContextBrand>(scope.context(&j8builtins::Builtins)));
+let cx = isolate.create_context(&j8builtins::Builtins);
 ```
 
 `j8framework` 只定义 `Intrinsics` 接口，这里是缺省实现；宿主可以换掉或裁剪。j8builtins **只依赖 `j8framework`**，
-不依赖执行器：每个内建函数都是宿主函数 `fn(&mut Agent, this, &[Value]) -> Result<Value, Error>`，用
-`Agent` 上的运算语义写成；需要回调 JS 时经 `Invoke`。
+不依赖执行器：每个内建函数都是宿主函数 `fn(&mut Scope, this, &[Value]) -> Result<Value, Error>`，用
+`Scope` 上的运算语义写成；需要回调 JS 时经 `Invoke`。
 
 ## 文件
 

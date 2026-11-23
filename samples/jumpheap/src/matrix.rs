@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
-use j8::frame::{Agent, Error, ErrorKind, Property, Value};
+use j8::frame::{Scope, Error, ErrorKind, Property, Value};
 use j8::lockfree::{Chain, Oneshot};
 use j8::{ArrayBuffer, Backing, Class, External, Glue, IntoJs};
 use paragc::{Public, PublicHeap, PublicMutator, PublicSlot, PublicSpace, Shared, public_brand};
@@ -110,7 +110,7 @@ impl Rows {
 }
 
 impl<'gc> IntoJs<'gc> for Rows {
-    fn into_js(self, a: &mut Agent<'gc, '_>) -> Result<Value<'gc>, Error> {
+    fn into_js(self, a: &mut Scope<'gc, '_>) -> Result<Value<'gc>, Error> {
         let path = self.held.path.display().to_string().into_js(a)?;
         let index = self.held.table.index().into_js(a)?;
         let buffers = self
@@ -133,7 +133,7 @@ impl<'gc> IntoJs<'gc> for Rows {
 struct Done<T>(Result<T, String>);
 
 impl<'gc, T: IntoJs<'gc>> IntoJs<'gc> for Done<T> {
-    fn into_js(self, a: &mut Agent<'gc, '_>) -> Result<Value<'gc>, Error> {
+    fn into_js(self, a: &mut Scope<'gc, '_>) -> Result<Value<'gc>, Error> {
         match self.0 {
             Ok(v) => v.into_js(a),
             Err(e) => Err(a.throw(ErrorKind::Error, &e)),
@@ -154,7 +154,7 @@ impl Heaps {
         self.space.path.display().to_string()
     }
 
-    fn allocate<'gc>(&self, a: &mut Agent<'gc, '_>, rows: u32) -> Result<Value<'gc>, Error> {
+    fn allocate<'gc>(&self, a: &mut Scope<'gc, '_>, rows: u32) -> Result<Value<'gc>, Error> {
         let rows = rows as usize;
         if rows == 0 || rows > MAX_ROWS {
             return Err(a.throw(ErrorKind::Range, &format!("a matrix has 1 to {MAX_ROWS} rows")));
@@ -168,7 +168,7 @@ impl Heaps {
         Glue::spawn(a, async move { Glue::settle(rx.await) })
     }
 
-    fn take(&self, a: &mut Agent<'_, '_>, path: String, index: u32) -> Result<Rows, Error> {
+    fn take(&self, a: &mut Scope<'_, '_>, path: String, index: u32) -> Result<Rows, Error> {
         let heap = self.space.heap(Path::new(&path)).map_err(|e| a.throw(ErrorKind::Error, &format!("{path}: {e}")))?;
         let found = heap.try_mutate(|m| m.find::<TableB>(index));
         let Ok(Some(table)) = found else { return Err(a.throw(ErrorKind::Error, &format!("{path}: no matrix at entry {index}"))) };
@@ -181,7 +181,7 @@ impl Heaps {
 }
 
 impl Heaps {
-    pub fn attach(a: &mut Agent<'_, '_>, space: Arc<Space>) {
+    pub fn attach(a: &mut Scope<'_, '_>, space: Arc<Space>) {
         let natives = Glue::natives(a);
         let heaps = <Self as Class>::install(a, natives).instance(a, Self { space });
         natives.borrow_mut(a.mc).define("heaps", Property::hidden(heaps.into()));

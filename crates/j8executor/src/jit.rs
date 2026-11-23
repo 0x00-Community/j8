@@ -2,7 +2,7 @@ use alloc::vec::Vec;
 use core::cell::Cell;
 
 use j8bytecode::{Bytecode, Constant, OperandValue, SharedFunction};
-use j8framework::{Agent, Closure, Error, FuncId, JsEnv, JsObject, ShapeKey, Value};
+use j8framework::{Scope, Closure, Error, FuncId, JsEnv, JsObject, ShapeKey, Value};
 
 pub use crate::ic::{GlobalFeedback, PropertyFeedback};
 use crate::{Args, Budget, Executor, Frame, Loaded, State, STACK_LIMIT};
@@ -15,9 +15,9 @@ pub trait Tier {
         false
     }
 
-    fn call<'scope>(&self, exe: &Executor, a: &mut Agent<'scope, '_>, f: FuncId, callee: Value<'scope>, this: Value<'scope>, args: &[Value<'scope>]) -> Option<Result<Value<'scope>, Error>>;
+    fn call<'scope>(&self, exe: &Executor, a: &mut Scope<'scope, '_>, f: FuncId, callee: Value<'scope>, this: Value<'scope>, args: &[Value<'scope>]) -> Option<Result<Value<'scope>, Error>>;
 
-    fn callback<'scope>(&self, _exe: &Executor, _a: &mut Agent<'scope, '_>, _f: Function<'_>, _callee: Value<'scope>, _this: Value<'scope>) -> Option<j8framework::Callback<'scope>> {
+    fn callback<'scope>(&self, _exe: &Executor, _a: &mut Scope<'scope, '_>, _f: Function<'_>, _callee: Value<'scope>, _this: Value<'scope>) -> Option<j8framework::Callback<'scope>> {
         None
     }
 
@@ -218,7 +218,7 @@ pub struct DeoptFrame<'scope> {
 #[expect(private_interfaces, reason = "built by the executor only")]
 pub struct Entry<'r, 'scope, 'x, 'b, 'p> {
     pub exe: &'r Executor<'p>,
-    pub a: &'r mut Agent<'scope, 'x>,
+    pub a: &'r mut Scope<'scope, 'x>,
     pub st: &'r mut State<'scope>,
     pub budget: &'r mut Budget<'b>,
     pub level: usize,
@@ -229,7 +229,7 @@ impl<'r, 'scope, 'x, 'p> Entry<'r, 'scope, 'x, '_, 'p> {
         self.exe
     }
 
-    pub fn agent(&mut self) -> &mut Agent<'scope, 'x> {
+    pub fn scope(&mut self) -> &mut Scope<'scope, 'x> {
         self.a
     }
 
@@ -347,7 +347,7 @@ impl Executor<'_> {
         Function(self.code(c))
     }
 
-    fn push_deopt<'scope>(&self, a: &mut Agent<'scope, '_>, st: &mut State<'scope>, d: DeoptFrame<'scope>) {
+    fn push_deopt<'scope>(&self, a: &mut Scope<'scope, '_>, st: &mut State<'scope>, d: DeoptFrame<'scope>) {
         let Some(c) = d.callee.as_object().and_then(|o| o.closure()) else { unreachable!("a deopt frame of a closure") };
         let l = self.code(&c);
         let args: Vec<Value<'scope>> = d.params.iter().skip(1).copied().chain(core::iter::repeat(Value::Undefined)).take(d.argc.max(d.params.len().saturating_sub(1))).collect();
@@ -368,7 +368,7 @@ impl Executor<'_> {
         st.acc = d.acc;
     }
 
-    pub fn resume_frames<'scope>(&self, a: &mut Agent<'scope, '_>, frames: Vec<DeoptFrame<'scope>>, throw: Option<Value<'scope>>) -> Result<Value<'scope>, Error> {
+    pub fn resume_frames<'scope>(&self, a: &mut Scope<'scope, '_>, frames: Vec<DeoptFrame<'scope>>, throw: Option<Value<'scope>>) -> Result<Value<'scope>, Error> {
         let level = self.depth.get() + 1;
         if level >= STACK_LIMIT {
             return Err(a.throw(j8framework::ErrorKind::Range, "Maximum call stack size exceeded"));
@@ -393,15 +393,15 @@ impl Executor<'_> {
         r
     }
 
-    pub fn jit_create_closure<'scope>(&self, a: &Agent<'scope, '_>, f: FuncId, k: OperandValue, env: Option<JsEnv<'scope>>) -> JsObject<'scope> {
+    pub fn jit_create_closure<'scope>(&self, a: &Scope<'scope, '_>, f: FuncId, k: OperandValue, env: Option<JsEnv<'scope>>) -> JsObject<'scope> {
         self.create_closure(a, self.function(f), k, env)
     }
 
-    pub fn jit_object_literal<'scope>(&self, a: &Agent<'scope, '_>, f: FuncId, k: OperandValue) -> JsObject<'scope> {
+    pub fn jit_object_literal<'scope>(&self, a: &Scope<'scope, '_>, f: FuncId, k: OperandValue) -> JsObject<'scope> {
         Self::object_literal(a, self.function(f), k)
     }
 
-    pub fn jit_global_load<'scope>(&self, a: &mut Agent<'scope, '_>, f: FuncId, k: OperandValue, slot: OperandValue, inside_typeof: bool) -> Result<Value<'scope>, Error> {
+    pub fn jit_global_load<'scope>(&self, a: &mut Scope<'scope, '_>, f: FuncId, k: OperandValue, slot: OperandValue, inside_typeof: bool) -> Result<Value<'scope>, Error> {
         let l = self.function(f);
         let name = Self::name_at(l, k);
         let ic = l.globals.get(usize::try_from(slot).unwrap_or(usize::MAX)).ok_or_else(|| a.throw(j8framework::ErrorKind::Reference, "no global cache"))?;

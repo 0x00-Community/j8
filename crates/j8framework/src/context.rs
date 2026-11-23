@@ -5,7 +5,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use crate::{Collect, Cow, ScopeLocal, GcQueue, Mutation};
 use crate::GcSlot as Slot;
 
-use crate::{ErrorKind, Job, JsObject, JsString, JsSymbol, Native, NativeFn, ObjectData, ObjectKind, Property, Scope, SymbolData, Value};
+use crate::{ErrorKind, Job, JsObject, JsString, JsSymbol, Native, NativeFn, ObjectData, ObjectKind, Property, SymbolData, Value};
 
 #[derive(Clone, Copy, Collect)]
 #[collect(no_drop)]
@@ -121,7 +121,7 @@ pub struct RegExpPristine<'scope> {
     pub species: JsObject<'scope>,
 }
 
-pub type RegExpLiteral = for<'scope, 'a> fn(&crate::Agent<'scope, 'a>, &str, u16) -> Result<Value<'scope>, crate::Error>;
+pub type RegExpLiteral = for<'scope, 'a> fn(&crate::Scope<'scope, 'a>, &str, u16) -> Result<Value<'scope>, crate::Error>;
 
 #[derive(Clone, Collect)]
 #[collect(no_drop)]
@@ -135,11 +135,11 @@ pub struct RegExpLiteralEntry<'scope> {
     pub compiled: RegExpCompiled<'scope>,
 }
 
-pub type Fast0 = for<'scope, 'x> fn(&mut crate::Agent<'scope, 'x>, Value<'scope>) -> Option<Value<'scope>>;
+pub type Fast0 = for<'scope, 'x> fn(&mut crate::Scope<'scope, 'x>, Value<'scope>) -> Option<Value<'scope>>;
 
-pub type Fast1 = for<'scope, 'x> fn(&mut crate::Agent<'scope, 'x>, Value<'scope>, Value<'scope>) -> Option<Value<'scope>>;
+pub type Fast1 = for<'scope, 'x> fn(&mut crate::Scope<'scope, 'x>, Value<'scope>, Value<'scope>) -> Option<Value<'scope>>;
 
-pub type Fast2 = for<'scope, 'x> fn(&mut crate::Agent<'scope, 'x>, Value<'scope>, Value<'scope>, Value<'scope>) -> Option<Value<'scope>>;
+pub type Fast2 = for<'scope, 'x> fn(&mut crate::Scope<'scope, 'x>, Value<'scope>, Value<'scope>, Value<'scope>) -> Option<Value<'scope>>;
 
 #[derive(Clone, Copy)]
 pub enum FastCall {
@@ -328,11 +328,11 @@ impl<'scope> Context<'scope> {
         o
     }
 
-    fn no_regexp<'g>(a: &mut crate::Agent<'g, '_>, _: Value<'g>, _: &[Value<'g>]) -> Result<Value<'g>, crate::Error> {
+    fn no_regexp<'g>(a: &mut crate::Scope<'g, '_>, _: Value<'g>, _: &[Value<'g>]) -> Result<Value<'g>, crate::Error> {
         Err(a.throw(ErrorKind::Syntax, "regular expressions are not available in this realm"))
     }
 
-    fn no_eval<'g>(a: &mut crate::Agent<'g, '_>, _: Value<'g>, _: &[Value<'g>]) -> Result<Value<'g>, crate::Error> {
+    fn no_eval<'g>(a: &mut crate::Scope<'g, '_>, _: Value<'g>, _: &[Value<'g>]) -> Result<Value<'g>, crate::Error> {
         Err(a.throw(ErrorKind::Type, "eval is not available in this realm"))
     }
 
@@ -414,10 +414,10 @@ pub trait Intrinsics {
     fn install<'scope>(&self, mc: &Mutation<'scope>, context: &Context<'scope>);
 }
 
-impl<'scope> Scope<'scope, '_> {
-    pub fn context(&self, intrinsics: &dyn Intrinsics) -> ScopeLocal<'scope, Context<'scope>> {
-        let context = self.mc.alloc(Context::new(self.mc));
-        intrinsics.install(self.mc, context.get());
+impl<'scope> Context<'scope> {
+    pub fn create(mc: &Mutation<'scope>, intrinsics: &dyn Intrinsics) -> ScopeLocal<'scope, Self> {
+        let context = mc.alloc(Self::new(mc));
+        intrinsics.install(mc, context.get());
         context
     }
 }

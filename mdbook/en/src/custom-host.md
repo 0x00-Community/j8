@@ -7,23 +7,23 @@ concentrates on the two places where JavaScript and Rust have to hand control ba
 ## The bridge in one picture
 
 ```text
- JS call ─▶ generated wrapper ─▶ your Rust fn(&mut Agent<'scope>, …)          ◀── synchronous: values live for 'scope
+ JS call ─▶ generated wrapper ─▶ your Rust fn(&mut Scope<'scope>, …)          ◀── synchronous: values live for 'scope
                                       │
                                       ├─ returns T: IntoJs ─────────────────▶ JS value
                                       │
                                       └─ Glue::spawn(future) ─▶ promise ────▶ JS gets the promise at once
                                                      │
-                       event loop (run_until_idle) polls the future: Send + 'static, no Agent, no Value
+                       event loop (run_until_idle) polls the future: Send + 'static, no Scope, no Value
                                                      │
-                                         future returns a Settle ─▶ runs with &mut Agent ─▶ resolves / rejects
+                                         future returns a Settle ─▶ runs with &mut Scope ─▶ resolves / rejects
 ```
 
 Three rules follow from it, and everything in this chapter is a consequence of them:
 
 1. **A `Value<'scope>` / `JsObject<'scope>` exists only during one call.** To keep a JS value longer, store a
    `ScopeGlobal<'p, ValueBrand>` (a root, `Send`); inside a class, a `Value<'scope>` field is a traced edge.
-2. **A future has no `Agent`.** It cannot read a JS value, call a JS function or step a JS iterator. It can only
-   compute and wait; it gets the `Agent` back once, at the very end, through the `Settle` it returns.
+2. **A future has no `Scope`.** It cannot read a JS value, call a JS function or step a JS iterator. It can only
+   compute and wait; it gets the `Scope` back once, at the very end, through the `Settle` it returns.
 3. **A future must wake its waker**, or `run_until_idle` parks forever (see [Async and promises](async.md)).
 
 ## Setup
@@ -35,7 +35,7 @@ j8 = { version = "0.4", features = ["runtime", "json"] }
 
 ```rust,ignore
 use j8::executor::Executor;
-use j8::frame::{Agent, Error, ErrorKind, Settle, Value};
+use j8::frame::{Scope, Error, ErrorKind, Settle, Value};
 use j8::platform::DefaultPlatform;
 use j8::{Function, Glue, IntoJs, Promise};
 ```
@@ -43,14 +43,14 @@ use j8::{Function, Glue, IntoJs, Promise};
 ## The iterator result as a Rust type
 
 Both kinds of iterator end in the same object, `{ value, done }`. Build it once as a Rust type whose `IntoJs` calls
-`Agent::iter_result`. Because `Step<T>` is plain data (`Send` when `T` is), it can be returned from a sync method **and**
-carried out of a future, where no `Agent` exists yet:
+`Scope::iter_result`. Because `Step<T>` is plain data (`Send` when `T` is), it can be returned from a sync method **and**
+carried out of a future, where no `Scope` exists yet:
 
 ```rust,ignore
 pub struct Step<T>(pub Option<T>);   // Some(v) ⇒ { value: v, done: false }, None ⇒ { value: undefined, done: true }
 
 impl<'scope, T: IntoJs<'scope>> IntoJs<'scope> for Step<T> {
-    fn into_js(self, a: &mut Agent<'scope, '_>) -> Result<Value<'scope>, Error> {
+    fn into_js(self, a: &mut Scope<'scope, '_>) -> Result<Value<'scope>, Error> {
         let (value, done) = match self.0 {
             Some(v) => (v.into_js(a)?, false),
             None => (Value::Undefined, true),
@@ -72,7 +72,7 @@ struct Range { next: f64, end: f64, step: f64, #[collect(require_static)] closed
 #[j8::class]
 impl Range {
     #[js(constructor)]
-    fn new(a: &mut Agent<'_, '_>, end: f64, step: Option<f64>) -> Result<Self, Error> {
+    fn new(a: &mut Scope<'_, '_>, end: f64, step: Option<f64>) -> Result<Self, Error> {
         let step = step.unwrap_or(1.0);
         if step <= 0.0 {
             return Err(a.throw(ErrorKind::Range, "step must be positive"));
@@ -134,13 +134,13 @@ impl Sink {
 }
 ```
 
-**Lazy:** take the iterable as a `Value` together with `&mut Agent` and step it yourself. `get_iterator` calls
+**Lazy:** take the iterable as a `Value` together with `&mut Scope` and step it yourself. `get_iterator` calls
 `[Symbol.iterator]`, `iterator_step` calls `next()` and returns `None` when `done`, and `iterator_close` calls
 `return()`. **Close the iterator whenever you stop before it is done**, so the producer's cleanup runs (a generator's
 `finally`, a `Range`'s `return`):
 
 ```rust,ignore
-fn sum_until<'scope>(a: &mut Agent<'scope, '_>, iterable: Value<'scope>, limit: f64) -> Result<f64, Error> {
+fn sum_until<'scope>(a: &mut Scope<'scope, '_>, iterable: Value<'scope>, limit: f64) -> Result<f64, Error> {
     let it = a.get_iterator(iterable)?;
     let mut sum = 0.0;
     while let Some(v) = a.iterator_step(it)? {
@@ -153,7 +153,7 @@ fn sum_until<'scope>(a: &mut Agent<'scope, '_>, iterable: Value<'scope>, limit: 
     Ok(sum)
 }
 
-fn each<'scope>(a: &mut Agent<'scope, '_>, iterable: Value<'scope>, f: Function) -> Result<u32, Error> {
+fn each<'scope>(a: &mut Scope<'scope, '_>, iterable: Value<'scope>, f: Function) -> Result<u32, Error> {
     let it = a.get_iterator(iterable)?;
     let mut n = 0;
     while let Some(v) = a.iterator_step(it)? {
@@ -182,7 +182,7 @@ close — the spec says an iterator that threw is already finished.
 
 ## Async: Rust ⇒ JS
 
-**`async fn`** is the shortest path. It takes owned parameters only (no `self`, no `&str`, no `Agent`); the call
+**`async fn`** is the shortest path. It takes owned parameters only (no `self`, no `&str`, no `Scope`); the call
 returns a promise at once, and the result goes through `IntoJs` when it settles. `Result::Err` rejects.
 
 ```rust,ignore
@@ -192,11 +192,11 @@ async fn doubled(p: Promise<f64>) -> Result<f64, Error> {
 ```
 
 **`Glue::spawn`** is for everything an `async fn` can't do: use `&self` / `&mut self`, read JS arguments with the
-`Agent`, or decide synchronously whether to start work. Do the JS-side work first, move only `Send` data into the
+`Scope`, or decide synchronously whether to start work. Do the JS-side work first, move only `Send` data into the
 future, and end the future with `Glue::settle(value)`:
 
 ```rust,ignore
-fn later<'scope>(&self, a: &mut Agent<'scope, '_>, ms: f64) -> Result<Value<'scope>, Error> {
+fn later<'scope>(&self, a: &mut Scope<'scope, '_>, ms: f64) -> Result<Value<'scope>, Error> {
     let wait = Duration::from_secs_f64(ms / 1000.0);
     let label = self.label.clone();                         // clone out of self: the future is 'static
     Glue::spawn(a, async move {
@@ -209,11 +209,11 @@ fn later<'scope>(&self, a: &mut Agent<'scope, '_>, ms: f64) -> Result<Value<'sco
 `Offload` is the thread-plus-waker future from [Async and promises](async.md#blocking-work-offload-to-a-thread).
 
 **Back into JS when the work is done.** `Glue::settle` only converts a value. The `Settle` a future returns is really
-`Box<dyn FnOnce(&mut Agent) -> Result<Value, Error> + Send>`, so you can write it yourself and do any `Agent` work at
+`Box<dyn FnOnce(&mut Scope) -> Result<Value, Error> + Send>`, so you can write it yourself and do any `Scope` work at
 that moment — here, call a JS callback whose result becomes the promise's value:
 
 ```rust,ignore
-fn after<'scope>(a: &mut Agent<'scope, '_>, ms: f64, f: Function) -> Result<Value<'scope>, Error> {
+fn after<'scope>(a: &mut Scope<'scope, '_>, ms: f64, f: Function) -> Result<Value<'scope>, Error> {
     let wait = Duration::from_secs_f64(ms / 1000.0);
     Glue::spawn(a, async move {
         Offload::new(move || std::thread::sleep(wait)).await;
@@ -239,11 +239,11 @@ try { await sink.doubled(Promise.reject(new TypeError('nope'))) }
 catch (e) { e instanceof TypeError && e.message === 'nope' }  // true
 ```
 
-**Calling a JS async function and awaiting it in Rust:** call it while you still have the `Agent`, convert its
+**Calling a JS async function and awaiting it in Rust:** call it while you still have the `Scope`, convert its
 promise with `FromJs`, then await that inside the future:
 
 ```rust,ignore
-fn call_async<'scope>(a: &mut Agent<'scope, '_>, f: Function, x: f64) -> Result<Value<'scope>, Error> {
+fn call_async<'scope>(a: &mut Scope<'scope, '_>, f: Function, x: f64) -> Result<Value<'scope>, Error> {
     let p = f.call(a, Value::Undefined, &[x.into()])?;
     let p = <Promise<String> as j8::FromJs>::from_js(a, p)?;
     Glue::spawn(a, async move { Glue::settle(p.await.map(|s| format!("rust saw {s}"))) })
@@ -274,7 +274,7 @@ impl Ticker {
         Self { left: count, every: Duration::from_secs_f64(ms / 1000.0) }
     }
 
-    fn next<'scope>(&mut self, a: &mut Agent<'scope, '_>) -> Result<Value<'scope>, Error> {
+    fn next<'scope>(&mut self, a: &mut Scope<'scope, '_>) -> Result<Value<'scope>, Error> {
         let tick = (self.left > 0).then_some(self.left);    // state changes now, in call order
         self.left = self.left.saturating_sub(1);
         let every = self.every;
@@ -303,7 +303,7 @@ several times without awaiting must still get the items in order.
 ## Async iterators: JS ⇒ Rust
 
 This is the one direction a Rust future can't drive alone: stepping a JS async iterator means calling `next()` again
-after every await, and a future has no `Agent` (rule 2). Let JavaScript drive the loop and give each item to Rust —
+after every await, and a future has no `Scope` (rule 2). Let JavaScript drive the loop and give each item to Rust —
 a few lines of prelude on a bound class:
 
 ```rust,ignore

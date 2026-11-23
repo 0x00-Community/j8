@@ -18,7 +18,7 @@ j8 = "0.4"                                          # default feature `runtime`:
 | `j8::runtime!` | declare a runtime: which bound types go where, plus a JS prelude |
 | `j8::Runtime` | a ready execution environment: `eval`, `eval_module`, `run_until_idle`, `set`, `text`, `enter` |
 | `j8::Host` / `j8::HostPlatform` | the trait `runtime!` implements / the platform serving its native modules (stateless: runtimes may share one) |
-| `j8::frame` | `j8framework`: `Agent`, `Error`, `ErrorKind`, `Value`, `Platform`, `Source` … |
+| `j8::frame` | `j8framework`: `Scope`, `Error`, `ErrorKind`, `Value`, `Platform`, `Source` … |
 | `j8::platform::DefaultPlatform` | the standard-library platform |
 | `j8::executor::Executor` | the bytecode executor; `with_tier` adds the JIT |
 | `j8::Promise<T>` | a JS promise awaited from Rust |
@@ -32,7 +32,7 @@ use std::num::NonZeroUsize;
 use std::process::ExitCode;
 
 use j8::executor::Executor;
-use j8::frame::{Agent, Error, ErrorKind};
+use j8::frame::{Scope, Error, ErrorKind};
 use j8::platform::DefaultPlatform;
 
 /// Machine access, kept in `__j8_native.env`
@@ -45,7 +45,7 @@ impl Env {
     }
 
     /// Throws a TypeError when the variable is missing
-    fn must(a: &mut Agent<'_, '_>, name: &str) -> Result<String, Error> {
+    fn must(a: &mut Scope<'_, '_>, name: &str) -> Result<String, Error> {
         std::env::var(name).map_err(|_| a.throw(ErrorKind::Type, &format!("{name} is not set")))
     }
 }
@@ -167,7 +167,7 @@ rt.eval(&call, file)?;
 rt.run_until_idle()?;
 ```
 
-For lower-level work, `rt.enter(|a| …)` gives you the context's `Agent` (`a.get_named`, `a.call`, `a.local`,
+For lower-level work, `rt.enter(|a| …)` gives you the context's `Scope` (`a.get_named`, `a.call`, `a.local`,
 `a.to_string` …). `Value`s can't leave the closure; root them with `a.global(v)` (a
 `ScopeGlobal<'p, ValueBrand>`) for later.
 

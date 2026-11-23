@@ -2,7 +2,7 @@ use crate::ValueKind;
 use alloc::vec::Vec;
 
 use crate::property::validate;
-use crate::{Agent, Descriptor, Error, ErrorKind, JsObject, Key, ObjectKind, Property, PropertyKey, Slot, Value};
+use crate::{Scope, Descriptor, Error, ErrorKind, JsObject, Key, ObjectKind, Property, PropertyKey, Slot, Value};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Trap {
@@ -41,7 +41,7 @@ impl Trap {
     }
 }
 
-impl<'scope> Agent<'scope, '_> {
+impl<'scope> Scope<'scope, '_> {
     pub fn proxy_parts(&self, o: JsObject<'scope>) -> Option<Result<(JsObject<'scope>, JsObject<'scope>), Error>> {
         if o.is_plain() {
             return None;

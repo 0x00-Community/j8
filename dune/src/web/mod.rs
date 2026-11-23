@@ -3,7 +3,7 @@ mod timer;
 
 use std::io::Write;
 
-use j8::frame::Agent;
+use j8::frame::Scope;
 use j8::Bytes;
 
 pub use http::Http;
@@ -51,11 +51,11 @@ pub struct Clock;
 
 #[j8::object("clock")]
 impl Clock {
-    fn now(a: &mut Agent<'_, '_>) -> f64 {
+    fn now(a: &mut Scope<'_, '_>) -> f64 {
         a.platform.now().as_secs_f64() * 1e3
     }
 
-    fn wall(a: &mut Agent<'_, '_>) -> f64 {
+    fn wall(a: &mut Scope<'_, '_>) -> f64 {
         a.platform.wall_clock().as_secs_f64() * 1e3
     }
 }

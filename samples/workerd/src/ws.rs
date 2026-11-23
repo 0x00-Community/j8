@@ -9,7 +9,7 @@ use std::sync::{Arc, Weak};
 use std::task::{Context, Poll, Waker};
 use std::thread::JoinHandle;
 
-use j8::frame::{Agent, Error, ErrorKind, JsObject, Property, Value};
+use j8::frame::{Scope, Error, ErrorKind, JsObject, Property, Value};
 use j8::lockfree::{Fifo, SegVec};
 use j8::{Bytes, Class, Glue, IntoJs};
 use mio::net::{TcpListener, TcpStream};
@@ -183,7 +183,7 @@ impl Incoming {
     }
 }
 
-fn record<'gc>(a: &mut Agent<'gc, '_>, fields: Vec<(&str, Value<'gc>)>) -> JsObject<'gc> {
+fn record<'gc>(a: &mut Scope<'gc, '_>, fields: Vec<(&str, Value<'gc>)>) -> JsObject<'gc> {
     let o = a.object();
     for (k, v) in fields {
         o.borrow_mut(a.mc).define(k, Property::data(v));
@@ -192,7 +192,7 @@ fn record<'gc>(a: &mut Agent<'gc, '_>, fields: Vec<(&str, Value<'gc>)>) -> JsObj
 }
 
 impl<'gc> IntoJs<'gc> for Incoming {
-    fn into_js(self, a: &mut Agent<'gc, '_>) -> Result<Value<'gc>, Error> {
+    fn into_js(self, a: &mut Scope<'gc, '_>) -> Result<Value<'gc>, Error> {
         let fields = vec![
             ("id", self.id.into_js(a)?),
             ("method", self.method.into_js(a)?),
@@ -310,7 +310,7 @@ pub enum Message {
 }
 
 impl<'gc> IntoJs<'gc> for Message {
-    fn into_js(self, a: &mut Agent<'gc, '_>) -> Result<Value<'gc>, Error> {
+    fn into_js(self, a: &mut Scope<'gc, '_>) -> Result<Value<'gc>, Error> {
         match self {
             Self::Text(s) => s.into_js(a),
             Self::Binary(b) => Bytes(b).into_js(a),
@@ -666,7 +666,7 @@ pub struct Net {
 
 #[j8::class]
 impl Net {
-    fn listen(&self, a: &mut Agent<'_, '_>, port: u32) -> Result<u32, Error> {
+    fn listen(&self, a: &mut Scope<'_, '_>, port: u32) -> Result<u32, Error> {
         let port = u16::try_from(port).map_err(|_| a.throw(ErrorKind::Range, "port out of range"))?;
         let std = std::net::TcpListener::bind(("127.0.0.1", port)).map_err(|e| a.throw(ErrorKind::Error, &format!("bind 127.0.0.1:{port}: {e}")))?;
         std.set_nonblocking(true).map_err(|e| a.throw(ErrorKind::Error, &format!("listen: {e}")))?;
@@ -680,7 +680,7 @@ impl Net {
         self.reactor.server(id).map_or(0, |s| u32::from(s.port))
     }
 
-    fn accept<'gc>(&self, a: &mut Agent<'gc, '_>, id: u32) -> Result<Value<'gc>, Error> {
+    fn accept<'gc>(&self, a: &mut Scope<'gc, '_>, id: u32) -> Result<Value<'gc>, Error> {
         let Some(server) = self.reactor.server(id) else { return Err(a.throw(ErrorKind::Type, &format!("no server {id}"))) };
         let next = Next(Arc::clone(&server.requests));
         Glue::spawn(a, async move { Glue::settle(next.await) })
@@ -695,7 +695,7 @@ impl Net {
         self.reactor.send(Cmd::Respond { conn: id as usize, bytes: out.into_bytes() });
     }
 
-    fn upgrade(&self, a: &mut Agent<'_, '_>, id: u32) -> Result<(), Error> {
+    fn upgrade(&self, a: &mut Scope<'_, '_>, id: u32) -> Result<(), Error> {
         if !self.reactor.conn(id).is_some_and(|c| c.upgradable.load(Ordering::Acquire)) {
             return Err(a.throw(ErrorKind::Type, "a 101 response needs a pending WebSocket upgrade request"));
         }
@@ -703,7 +703,7 @@ impl Net {
         Ok(())
     }
 
-    fn recv<'gc>(&self, a: &mut Agent<'gc, '_>, id: u32) -> Result<Value<'gc>, Error> {
+    fn recv<'gc>(&self, a: &mut Scope<'gc, '_>, id: u32) -> Result<Value<'gc>, Error> {
         let Some(conn) = self.reactor.conn(id) else { return Err(a.throw(ErrorKind::Type, &format!("no WebSocket {id}"))) };
         let next = Next(Arc::clone(&conn.incoming));
         Glue::spawn(a, async move { Glue::settle(next.await) })
@@ -738,7 +738,7 @@ impl Net {
 }
 
 impl Net {
-    pub fn attach(a: &mut Agent<'_, '_>, reactor: Arc<Reactor>) {
+    pub fn attach(a: &mut Scope<'_, '_>, reactor: Arc<Reactor>) {
         let natives = Glue::natives(a);
         let net = <Self as Class>::install(a, natives).instance(a, Self { reactor });
         natives.borrow_mut(a.mc).define("net", Property::hidden(net.into()));

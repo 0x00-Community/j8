@@ -3,7 +3,7 @@ use alloc::vec::Vec;
 use num_bigint::BigInt;
 use num_traits::ToPrimitive;
 
-use crate::{Agent, ElementKind, Error, JsObject, Key, ObjectKind, Value, ViewData};
+use crate::{Scope, ElementKind, Error, JsObject, Key, ObjectKind, Value, ViewData};
 
 const TWO_32: f64 = 4_294_967_296.0;
 
@@ -110,7 +110,7 @@ impl ElementKind {
     pub fn encode(self, v: &Element) -> Vec<u8> {
         match (self, v) {
             (ElementKind::BigInt64 | ElementKind::BigUint64, Element::BigInt(b)) => {
-                let w = Agent::wrap_bigint(b, 64, false);
+                let w = Scope::wrap_bigint(b, 64, false);
                 w.to_u64().unwrap_or(0).to_le_bytes().to_vec()
             }
             (_, Element::Number(x)) => {
@@ -168,7 +168,7 @@ pub fn canonical_numeric(key: &str) -> Option<f64> {
     (ryu_js::Buffer::new().format(n) == key).then_some(n)
 }
 
-impl<'scope> Agent<'scope, '_> {
+impl<'scope> Scope<'scope, '_> {
     pub fn buffer_len(buffer: JsObject<'scope>) -> Option<usize> {
         match &buffer.borrow().kind {
             ObjectKind::ArrayBuffer(b) => b.bytes.as_deref().map(<[u8]>::len),

@@ -12,7 +12,7 @@ don't work as they are: run that work on a thread or a reactor of your own, and 
 
 ## `async fn` bindings
 
-An `async fn` takes **owned** parameters only: no `self`, `&str`, `&mut Agent`, `This` or `Rest`. Its future runs after
+An `async fn` takes **owned** parameters only: no `self`, `&str`, `&mut Scope`, `This` or `Rest`. Its future runs after
 the call has returned. The call returns a promise at once, and the result is converted with `IntoJs` when the promise
 settles (so `Io<T>`-style errors reject it).
 
@@ -58,7 +58,7 @@ impl Fs {
 
 ## Hand-made promises: `j8::Glue`
 
-When the async work needs `&self`, the `Agent`, or should be cancellable, write a normal method and make the promise
+When the async work needs `&self`, the `Scope`, or should be cancellable, write a normal method and make the promise
 yourself:
 
 - `Glue::spawn(a, future)` creates a pending promise, hands `future` to the event loop and returns the promise;
@@ -67,7 +67,7 @@ yourself:
 ```rust,ignore
 #[j8::class]
 impl Timer {
-    fn wait<'scope>(&self, a: &mut Agent<'scope, '_>, ms: f64) -> Result<Value<'scope>, Error> {
+    fn wait<'scope>(&self, a: &mut Scope<'scope, '_>, ms: f64) -> Result<Value<'scope>, Error> {
         let sleep = Sleep { cancelled: self.cancelled.clone(), /* … */ };
         Glue::spawn(a, async move { Glue::settle(sleep.await) })
     }

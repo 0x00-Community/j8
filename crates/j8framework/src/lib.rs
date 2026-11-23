@@ -2,7 +2,6 @@ extern crate alloc;
 
 extern crate self as j8framework;
 
-mod agent;
 mod backing;
 mod bigint;
 mod class;
@@ -25,20 +24,21 @@ mod profiler;
 mod property;
 mod promise;
 mod context;
+mod scope;
 mod shape;
 mod store;
 mod terminate;
 mod text;
 mod value;
 
-pub use agent::{Agent, Callback, CallbackRun, CodeKind, Invoke, Resume, Step};
+pub use scope::{Callback, CallbackRun, CodeKind, Invoke, Resume, Scope, Step};
 pub use engine::{ScriptKind, Source};
 pub use j8taskqueue::Quota;
 pub use error::Error;
 pub use lazy::Lazy;
 pub use layout::Layout;
 pub use handle::{ContextBrand, ValueBrand};
-pub use isolate::{CreateParams, Isolate, Parked, Scope};
+pub use isolate::{CreateParams, Isolate, Parked};
 #[cfg(all(target_os = "linux", feature = "crossheap"))]
 pub use isolate::{ErasedBrand, Shares};
 pub use backing::{Backing, External, SharedMemory};

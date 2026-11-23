@@ -7,7 +7,7 @@ use core::ops::{Deref, DerefMut};
 
 use crate::{CellMut, CellRef, Collect, ScopeLocal, GcCell, GcSlot, Mutation, ValueCell};
 
-use crate::{Agent, Backing, Error, FuncId, Key, Value};
+use crate::{Scope, Backing, Error, FuncId, Key, Value};
 
 pub type JsString<'scope> = ScopeLocal<'scope, crate::text::JsStr<'scope>>;
 
@@ -39,7 +39,7 @@ pub type JsObject<'scope> = ScopeLocal<'scope, Object<'scope>>;
 
 pub type JsEnv<'scope> = ScopeLocal<'scope, Env<'scope>>;
 
-pub type NativeFn = for<'scope, 'x> fn(&mut Agent<'scope, 'x>, Value<'scope>, &[Value<'scope>]) -> Result<Value<'scope>, Error>;
+pub type NativeFn = for<'scope, 'x> fn(&mut Scope<'scope, 'x>, Value<'scope>, &[Value<'scope>]) -> Result<Value<'scope>, Error>;
 
 #[derive(Debug, Collect)]
 #[collect(no_drop)]
@@ -418,10 +418,10 @@ pub enum Reaction<'scope> {
 
 pub struct HostReaction(pub Box<HostReactionFn>);
 
-pub type HostReactionFn = dyn for<'g, 'x> FnOnce(&mut crate::Agent<'g, 'x>, Value<'g>, bool) + Send + Sync;
+pub type HostReactionFn = dyn for<'g, 'x> FnOnce(&mut crate::Scope<'g, 'x>, Value<'g>, bool) + Send + Sync;
 
 impl HostReaction {
-    pub fn new(f: impl for<'g, 'x> FnOnce(&mut crate::Agent<'g, 'x>, Value<'g>, bool) + Send + Sync + 'static) -> Self {
+    pub fn new(f: impl for<'g, 'x> FnOnce(&mut crate::Scope<'g, 'x>, Value<'g>, bool) + Send + Sync + 'static) -> Self {
         Self(Box::new(f))
     }
 }
@@ -560,7 +560,7 @@ impl<'scope> Collection<'scope> {
     }
 }
 
-pub type ClosureFn = for<'scope, 'x> fn(&mut Agent<'scope, 'x>, JsObject<'scope>, Value<'scope>, &[Value<'scope>]) -> Result<Value<'scope>, Error>;
+pub type ClosureFn = for<'scope, 'x> fn(&mut Scope<'scope, 'x>, JsObject<'scope>, Value<'scope>, &[Value<'scope>]) -> Result<Value<'scope>, Error>;
 
 #[derive(Collect)]
 #[collect(no_drop)]

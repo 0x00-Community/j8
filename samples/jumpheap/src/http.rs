@@ -1,14 +1,14 @@
 use std::io::{Read, Write};
 use std::net::TcpStream;
 
-use j8::frame::{Agent, Error, ErrorKind, Value};
+use j8::frame::{Scope, Error, ErrorKind, Value};
 use j8::IntoJs;
 use j8::lockfree::Oneshot;
 
 pub struct Reply(Result<(u32, String), String>);
 
 impl<'gc> IntoJs<'gc> for Reply {
-    fn into_js(self, a: &mut Agent<'gc, '_>) -> Result<Value<'gc>, Error> {
+    fn into_js(self, a: &mut Scope<'gc, '_>) -> Result<Value<'gc>, Error> {
         match self.0 {
             Ok((status, body)) => {
                 let (status, body) = (status.into_js(a)?, body.into_js(a)?);

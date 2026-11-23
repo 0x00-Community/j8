@@ -95,11 +95,9 @@ fn functions_classes_and_errors() {
     let platform = DefaultPlatform::default();
     let mut isolate = Isolate::new(&platform, CreateParams::default());
     let executor = Executor::default();
-    let cx = isolate.enter(|scope| scope.mc.stash::<j8framework::ContextBrand>(scope.context(&Builtins)));
-    isolate.enter(|scope| {
-        let context = scope.mc.fetch(&cx);
-        let mut a = scope.agent(context, &executor);
-        let exports = Env::open(&mut a, register).expect("register");
+    let cx = isolate.create_context(&Builtins);
+    isolate.enter(&cx, &executor, |a| {
+        let exports = Env::open(a, register).expect("register");
         a.set_named(a.context.global.into(), "addon", exports).expect("global");
     });
     let text = "
@@ -111,9 +109,7 @@ fn functions_classes_and_errors() {
         [add(2, 3), c.inc(), new Sub().twice(), new Sub() instanceof Counter, Counter.name, caught].join(' ')
     ";
     let r = executor.eval(&mut isolate, &cx, &Source { text, file: "addon.js" }).expect("run");
-    let got = isolate.enter(|scope| {
-        let context = scope.mc.fetch(&cx);
-        let mut a = scope.agent(context, &executor);
+    let got = isolate.enter(&cx, &executor, |a| {
         let v = a.local(&r);
         String::from(&**a.to_string(v).expect("ToString"))
     });

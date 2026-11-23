@@ -195,7 +195,7 @@ impl Jit {
         }
     }
 
-    fn watch_realm(ctx: &mut Ctx, a: &j8framework::Agent<'_, '_>) {
+    fn watch_realm(ctx: &mut Ctx, a: &j8framework::Scope<'_, '_>) {
         ctx.refresh_ptrs(a);
     }
 
@@ -207,7 +207,7 @@ impl Jit {
 
     #[cold]
     #[inline(never)]
-    fn refresh_callback(prep: &mut Prepared, a: &j8framework::Agent<'_, '_>, jit: &Jit) {
+    fn refresh_callback(prep: &mut Prepared, a: &j8framework::Scope<'_, '_>, jit: &Jit) {
         let generation = a.mc.generation();
         if generation != prep.generation {
             Self::watch_realm(&mut prep.ctx, a);
@@ -223,7 +223,7 @@ impl Jit {
     }
 
     #[expect(clippy::unnecessary_wraps, reason = "the callback hook declines a call by returning None")]
-    unsafe fn run_callback<'scope>(a: &mut j8framework::Agent<'scope, '_>, cb: &j8framework::Callback<'scope>, args: &[Value<'scope>]) -> Option<Result<Value<'scope>, j8framework::Error>> {
+    unsafe fn run_callback<'scope>(a: &mut j8framework::Scope<'scope, '_>, cb: &j8framework::Callback<'scope>, args: &[Value<'scope>]) -> Option<Result<Value<'scope>, j8framework::Error>> {
         type StubFn = sysv!(unsafe fn(*mut Ctx, u64, u64, u64, u64, u64) -> runtime::Ret);
         let prep = unsafe { &mut *cb.env.cast::<Prepared>() };
         let jit = unsafe { &*prep.ctx.jit };
@@ -231,7 +231,7 @@ impl Jit {
             Self::refresh_callback(prep, a, jit);
         }
         let ctx = &mut prep.ctx;
-        ctx.agent = core::ptr::from_mut(a).cast();
+        ctx.scope = core::ptr::from_mut(a).cast();
         ctx.budget = runtime::BUDGET_CHUNK;
         ctx.pending = 0;
         ctx.miss = 0;
@@ -381,7 +381,7 @@ impl Jit {
         s
     }
 
-    fn native_hot(&self, exe: &j8executor::Executor, a: &mut j8framework::Agent<'_, '_>, f: FuncId) {
+    fn native_hot(&self, exe: &j8executor::Executor, a: &mut j8framework::Scope<'_, '_>, f: FuncId) {
         {
             let mut st = self.st.borrow_mut();
             let fs = Self::func(&mut st, f);
@@ -405,7 +405,7 @@ impl Jit {
         }
     }
 
-    fn compile(&self, exe: &j8executor::Executor, a: &mut j8framework::Agent<'_, '_>, f: FuncId, kind: Kind) -> Option<usize> {
+    fn compile(&self, exe: &j8executor::Executor, a: &mut j8framework::Scope<'_, '_>, f: FuncId, kind: Kind) -> Option<usize> {
         if self.debug.log {
             std::eprintln!("j8jit: compile {f:?} {kind:?}");
         }
@@ -595,7 +595,7 @@ impl Tier for Jit {
         self.entries.set(self.entries.get().wrapping_add(1));
     }
 
-    fn call<'scope>(&self, exe: &j8executor::Executor, a: &mut j8framework::Agent<'scope, '_>, f: FuncId, callee: Value<'scope>, this: Value<'scope>, args: &[Value<'scope>]) -> Option<Result<Value<'scope>, j8framework::Error>> {
+    fn call<'scope>(&self, exe: &j8executor::Executor, a: &mut j8framework::Scope<'scope, '_>, f: FuncId, callee: Value<'scope>, this: Value<'scope>, args: &[Value<'scope>]) -> Option<Result<Value<'scope>, j8framework::Error>> {
         let func = exe.jit_function(f);
         let formals = usize::from(func.shared().formal_parameters);
         if formals > 3 || !func.plain() || func.class_constructor() || !self.stack_room() {
@@ -629,7 +629,7 @@ impl Tier for Jit {
         })
     }
 
-    fn callback<'scope>(&self, exe: &j8executor::Executor, a: &mut j8framework::Agent<'scope, '_>, func: j8executor::JitFunction<'_>, callee: Value<'scope>, this: Value<'scope>) -> Option<j8framework::Callback<'scope>> {
+    fn callback<'scope>(&self, exe: &j8executor::Executor, a: &mut j8framework::Scope<'scope, '_>, func: j8executor::JitFunction<'_>, callee: Value<'scope>, this: Value<'scope>) -> Option<j8framework::Callback<'scope>> {
         let arity = usize::from(func.shared().formal_parameters);
         if arity > 3 || !func.plain() || func.class_constructor() || !self.stack_room() {
             return None;
@@ -675,7 +675,7 @@ impl Tier for Jit {
             if let Some(native) = native {
                 let addr = match native {
                     Some(a) => Some(a),
-                    None => match self.compile(e.executor(), e.agent(), id, Kind::Native(formals)) {
+                    None => match self.compile(e.executor(), e.scope(), id, Kind::Native(formals)) {
                         Some(a) => {
                             let mut st = self.st.borrow_mut();
                             Self::func(&mut st, id).native = Some(a);
@@ -706,7 +706,7 @@ impl Tier for Jit {
         };
         let addr = match code {
             Some(a) => a,
-            None => match self.compile(e.executor(), e.agent(), id, Kind::Enter) {
+            None => match self.compile(e.executor(), e.scope(), id, Kind::Enter) {
                 Some(a) => {
                     Self::func(&mut self.st.borrow_mut(), id).enter = Some(a);
                     a
@@ -757,7 +757,7 @@ impl Tier for Jit {
         };
         let addr = match code {
             Some(a) => a,
-            None => match self.compile(e.executor(), e.agent(), id, Kind::Osr(at)) {
+            None => match self.compile(e.executor(), e.scope(), id, Kind::Osr(at)) {
                 Some(a) => {
                     Self::func(&mut self.st.borrow_mut(), id).osr.insert(at, a);
                     a

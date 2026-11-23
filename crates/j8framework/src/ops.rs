@@ -7,7 +7,7 @@ use crate::{ScopeLocal};
 
 use num_traits::Zero;
 
-use crate::{Agent, Descriptor, Error, Key, Numeric, IterKind, IteratorState, JsObject, JsString, JsSymbol, ObjectData, ObjectKind, Property, PropertyKey, Slot, Value};
+use crate::{Scope, Descriptor, Error, Key, Numeric, IterKind, IteratorState, JsObject, JsString, JsSymbol, ObjectData, ObjectKind, Property, PropertyKey, Slot, Value};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ErrorKind {
@@ -264,7 +264,7 @@ pub(crate) fn index_of_str(s: &str) -> Option<u32> {
     canonical.then(|| s.parse().ok()).flatten().filter(|&i| f64::from(i) <= MAX_INDEX)
 }
 
-impl<'scope> Agent<'scope, '_> {
+impl<'scope> Scope<'scope, '_> {
     pub fn par(&self) -> crate::Par<'_> {
         crate::Par(self.platform)
     }

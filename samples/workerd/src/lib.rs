@@ -41,7 +41,7 @@ impl KvStore {
         self.map.keys().cloned().collect()
     }
 
-    fn unique_id(a: &mut j8::frame::Agent<'_, '_>) -> String {
+    fn unique_id(a: &mut j8::frame::Scope<'_, '_>) -> String {
         format!("{:032x}", a.platform.wall_clock().as_nanos())
     }
 }

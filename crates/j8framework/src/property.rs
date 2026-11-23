@@ -5,7 +5,7 @@ use alloc::vec::Vec;
 use crate::{ScopeLocal};
 
 use crate::ops::index_of_str;
-use crate::{Agent, Error, ErrorKind, JsObject, JsString, JsSymbol, ObjectKind, Property, Slot, Value};
+use crate::{Scope, Error, ErrorKind, JsObject, JsString, JsSymbol, ObjectKind, Property, Slot, Value};
 
 #[derive(Clone, Copy, Debug)]
 pub enum Key<'k, 'scope> {
@@ -155,7 +155,7 @@ pub fn validate<'scope>(extensible: bool, desc: &Descriptor<'scope>, current: Op
     Some(p)
 }
 
-impl<'scope> Agent<'scope, '_> {
+impl<'scope> Scope<'scope, '_> {
     fn string_own(&self, s: JsString<'scope>, key: &str) -> Option<Property<'scope>> {
         let fixed = |v: Value<'scope>, enumerable| Property { slot: Slot::Data(v), enumerable, writable: false, configurable: false };
         if key == "length" {

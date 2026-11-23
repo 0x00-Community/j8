@@ -3,9 +3,9 @@ use alloc::boxed::Box;
 
 use crate::{ScopeLocal};
 
-use crate::{Agent, Error, ErrorKind, JsObject, JsSymbol, Property, Slot, SymbolData, Value};
+use crate::{Scope, Error, ErrorKind, JsObject, JsSymbol, Property, Slot, SymbolData, Value};
 
-impl<'scope> Agent<'scope, '_> {
+impl<'scope> Scope<'scope, '_> {
     pub fn private_key(key: Value<'scope>) -> Option<JsSymbol<'scope>> {
         match key.kind() {
             ValueKind::Symbol(s) if s.private => Some(s),

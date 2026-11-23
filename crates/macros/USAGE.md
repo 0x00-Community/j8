@@ -16,7 +16,7 @@ j8binding's traits); the generated code uses `::j8::` paths.
 
 ### `#[j8::class]`: export a Rust type as a JS class
 
-Placed on an `impl` block: generates a conversion wrapper (`fn(agent, this, args) -> Result<Value>`) for each method
+Placed on an `impl` block: generates a conversion wrapper (`fn(scope, this, args) -> Result<Value>`) for each method
 and implements `j8::Class`. The type itself needs no changes; instances are host objects (`ObjectKind::Host`) holding a
 Rust value.
 
@@ -40,8 +40,8 @@ impl Counter {
     fn zero() -> f64 { 0.0 }      // no self: static method on the constructor
 }
 
-let handle = Counter::install(&mut agent, global);     // global `Counter`; returns the constructor and prototype
-let obj = handle.instance(&agent, Counter { n: 1.0 });  // create an instance from Rust
+let handle = Counter::install(&mut scope, global);     // global `Counter`; returns the constructor and prototype
+let obj = handle.instance(&scope, Counter { n: 1.0 });  // create an instance from Rust
 ```
 
 #### Inheritance: `#[j8::class(extends = Base)]`
@@ -73,7 +73,7 @@ impl Fs {
     fn sep() -> String { "/".into() }               // fs.sep (accessor)
 }
 
-Fs::install(&mut agent, global);                    // global `fs`
+Fs::install(&mut scope, global);                    // global `fs`
 ```
 
 ### `#[j8::function]`: export a function as a JS function
@@ -84,7 +84,7 @@ fn greet(name: &str) -> String { format!("hi {name}") }
 
 // The original function is kept; a module of the same name is generated next to it,
 // and `greet::NATIVE` is the host function
-greet::install(&mut agent, global);
+greet::install(&mut scope, global);
 ```
 
 ### `#[j8::module("node:fs", "fs")]`: export an object of functions as a native module
@@ -179,7 +179,7 @@ value reaching back to itself is collected like any other cycle. The class deriv
 JS values nor `Trace` (an `Arc`, a connection) take `#[collect(require_static)]`. A `ScopeGlobal` is a root and belongs
 outside the heap only.
 
-Parameters are taken by type: `&mut Agent` receives the current agent; `This` is the raw `this`; `Rest` is all remaining
+Parameters are taken by type: `&mut Scope` receives the current scope; `This` is the raw `this`; `Rest` is all remaining
 arguments; `&str` is converted with ToString and then borrowed; anything else is converted in order with `FromJs`
 (`f64` / `i32` / `u32` / `usize` / `bool` / `String` / `JsString` / `JsObject` / `Value` / `Option<T>` / `Vec<T>`).
 Return values are converted with `IntoJs`; `Result<T, Error>` throws on error. Write lifetimes in parameters as `'scope`.

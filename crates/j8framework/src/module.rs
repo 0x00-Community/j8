@@ -4,7 +4,7 @@ use alloc::vec::Vec;
 
 use crate::{Collect, ScopeLocal};
 
-use crate::{Agent, Error, ErrorKind, FuncId, JsEnv, JsObject, JsString, Key, ObjectKind, Property, PropertyKey, Slot, Value};
+use crate::{Scope, Error, ErrorKind, FuncId, JsEnv, JsObject, JsString, Key, ObjectKind, Property, PropertyKey, Slot, Value};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ImportName {
@@ -84,7 +84,7 @@ impl ResolvedBinding<'_> {
     }
 }
 
-impl<'scope> Agent<'scope, '_> {
+impl<'scope> Scope<'scope, '_> {
     pub fn modules(&self) -> &'scope [ModuleRecord<'scope>] {
         self.context.modules.get()
     }

@@ -13,9 +13,7 @@ const SUM: f64 = 39_800.0;
 
 fn number<'p>(isolate: &mut Isolate<'p>, executor: &Executor<'p>, cx: &ScopeGlobal<'p, ContextBrand>, text: &str) -> f64 {
     let g = executor.eval(isolate, cx, &Source { text, file: "code_gc.js" }).expect("runs");
-    isolate.enter(|scope| {
-        let context = scope.mc.fetch(cx);
-        let a = scope.agent(context, executor);
+    isolate.enter(cx, executor, |a| {
         a.local(&g).as_number().expect("a number")
     })
 }
@@ -24,7 +22,7 @@ fn moves_and_frees_code(tiered: bool) {
     let platform = DefaultPlatform::default();
     let mut isolate = Isolate::new(&platform, CreateParams::default());
     let executor = if tiered { Executor::default().with_tier(j8jit::Jit::from(0)) } else { Executor::default() };
-    let cx = isolate.enter(|scope| scope.mc.stash::<j8framework::ContextBrand>(scope.context(&Builtins)));
+    let cx = isolate.create_context(&Builtins);
     executor.eval(&mut isolate, &cx, &Source { text: MAKE, file: "code_gc.js" }).expect("runs");
     let made = executor.live_functions();
     assert!(made >= FUNCTIONS, "{made} live functions after making {FUNCTIONS}");

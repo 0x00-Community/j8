@@ -19,7 +19,7 @@
 
 | crate | Role |
 |---|---|
-| `j8framework` | the core: the traits each layer implements (`Platform`, `Invoke`, `Intrinsics`) and the shared structs (`Isolate`, `Scope`, `Agent`, `Context`, `Value`, the object model, host objects). JS operation semantics hang off `Agent`. Depends on no other layer |
+| `j8framework` | the core: the traits each layer implements (`Platform`, `Invoke`, `Intrinsics`) and the shared structs (`Isolate`, `Scope`, `Scope`, `Context`, `Value`, the object model, host objects). JS operation semantics hang off `Scope`. Depends on no other layer |
 | `j8bytecode` | bytecode definitions, byte for byte V8 Ignition's; the dependency root, depends on no other j8 crate |
 | `j8compiler` | JS ⇒ bytecode (oxc parses; code generation after V8's `BytecodeGenerator`) |
 | `j8executor` | the bytecode executor `Executor<'p>` (`eval`, resumable `start` / `resume`), with inline caches, sliced execution, the JIT hook and the event loops that drive it |

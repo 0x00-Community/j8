@@ -10,12 +10,12 @@ use core::cell::UnsafeCell;
 use core::pin::Pin;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use core::task::{Context, Poll, Waker};
-use std::thread::{Scope, Thread};
+use std::thread::Thread;
 
 use j8lockfree::{AtomicRefCell, Fifo, Oneshot, Receiver, SegVec, Sender};
 use j8taskqueue::{Flow, ITask, ITaskPoll, Queue, Task, TaskId};
 
-use j8framework::{Agent, AsyncJob, CreateParams, Error, ErrorKind, Intrinsics, Isolate, IsolateHandle, Platform, Quota, ContextBrand, ScopeGlobal, ScriptKind, Settle, Source, Value, ValueBrand};
+use j8framework::{Scope, AsyncJob, CreateParams, Error, ErrorKind, Intrinsics, Isolate, IsolateHandle, Platform, Quota, ContextBrand, ScopeGlobal, ScriptKind, Settle, Source, Value, ValueBrand};
 
 use crate::{Executor, Job};
 
@@ -281,13 +281,8 @@ impl<'p> JsState<'p> {
         })
     }
 
-    fn enter<R>(&mut self, f: impl for<'scope> FnOnce(&mut Agent<'scope, '_>) -> R) -> R {
-        let (engine, cx) = (&self.engine, &self.cx);
-        self.isolate.enter(|scope| {
-            let context = scope.mc.fetch(cx);
-            let mut a = scope.agent(context, engine);
-            f(&mut a)
-        })
+    fn enter<R>(&mut self, f: impl for<'scope> FnOnce(&mut Scope<'scope, '_>) -> R) -> R {
+        self.isolate.enter(&self.cx, &self.engine, f)
     }
 }
 
@@ -415,7 +410,7 @@ struct Lane<'p> {
 impl<'p> Lane<'p> {
     fn new(platform: &'p dyn Platform, engine: Executor<'p>, intrinsics: &dyn Intrinsics, doors: &Arc<Doors>, home: usize) -> Box<Self> {
         let mut isolate = Isolate::new(platform, CreateParams { event_loop: true, collector_threads: Some(NonZeroUsize::MIN), ..CreateParams::default() });
-        let cx = isolate.enter(|scope| scope.mc.stash(scope.context(intrinsics)));
+        let cx = isolate.create_context(intrinsics);
         let bell = Arc::new(Bell {
             doors: Arc::clone(doors),
             home: AtomicUsize::new(home),
@@ -457,7 +452,7 @@ impl<'p> Lane<'p> {
         }
     }
 
-    fn enter<R>(&mut self, f: impl for<'scope> FnOnce(&mut Agent<'scope, '_>) -> R) -> R {
+    fn enter<R>(&mut self, f: impl for<'scope> FnOnce(&mut Scope<'scope, '_>) -> R) -> R {
         let st = unsafe { self.js.state() };
         let r = st.enter(f);
         let tasks = &mut self.tasks;
@@ -797,7 +792,7 @@ impl<'p> EventLoop<'p> {
         bell.faults.pop().map_or(Ok(()), Err)
     }
 
-    pub fn enter<R: Send>(&self, f: impl for<'scope> FnOnce(&mut Agent<'scope, '_>) -> R + Send) -> R {
+    pub fn enter<R: Send>(&self, f: impl for<'scope> FnOnce(&mut Scope<'scope, '_>) -> R + Send) -> R {
         self.set.call(&self.bell, move |l| l.enter(f))
     }
 
@@ -826,7 +821,7 @@ impl Drop for EventLoop<'_> {
 
 pub struct EventLoopSet<'s, 'p> {
     set: Arc<Set<'p>>,
-    scope: &'s Scope<'s, 'p>,
+    scope: &'s std::thread::Scope<'s, 'p>,
 }
 
 struct Close<'p>(Arc<Set<'p>>);

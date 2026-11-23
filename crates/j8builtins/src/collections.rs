@@ -1,6 +1,6 @@
 use j8framework::ValueKind;
 use alloc::boxed::Box;
-use j8framework::{Agent, Collection, Error, ErrorKind, IterKind, JsObject, ObjectData, ObjectKind, Value};
+use j8framework::{Scope, Collection, Error, ErrorKind, IterKind, JsObject, ObjectData, ObjectKind, Value};
 
 use crate::{Args, Installer};
 
@@ -20,7 +20,7 @@ enum Shape {
 }
 
 impl Collections {
-    fn make<'scope>(a: &mut Agent<'scope, '_>, new_target: Value<'scope>, shape: Shape, weak: bool) -> Result<JsObject<'scope>, Error> {
+    fn make<'scope>(a: &mut Scope<'scope, '_>, new_target: Value<'scope>, shape: Shape, weak: bool) -> Result<JsObject<'scope>, Error> {
         let (kind, proto, name) = match (shape, weak) {
             (Shape::Map, false) => (ObjectKind::Map(Box::new(Collection::new(false))), a.context.map_proto, "Map"),
             (Shape::Map, true) => (ObjectKind::Map(Box::new(Collection::new(true))), a.context.weakmap_proto, "WeakMap"),
@@ -33,7 +33,7 @@ impl Collections {
         a.create_from_ctor(new_target, proto, kind)
     }
 
-    fn this<'scope>(a: &Agent<'scope, '_>, this: Value<'scope>, shape: Shape, weak: bool) -> Result<JsObject<'scope>, Error> {
+    fn this<'scope>(a: &Scope<'scope, '_>, this: Value<'scope>, shape: Shape, weak: bool) -> Result<JsObject<'scope>, Error> {
         let ok = match this.kind() {
             ValueKind::Object(o) => match &o.borrow().kind {
                 ObjectKind::Map(c) => shape == Shape::Map && c.weak == weak,
@@ -48,7 +48,7 @@ impl Collections {
         }
     }
 
-    fn read<'scope, R>(a: &Agent<'scope, '_>, this: Value<'scope>, shape: Shape, f: impl FnOnce(&Collection<'scope>) -> R) -> Result<R, Error> {
+    fn read<'scope, R>(a: &Scope<'scope, '_>, this: Value<'scope>, shape: Shape, f: impl FnOnce(&Collection<'scope>) -> R) -> Result<R, Error> {
         if let Some(o) = this.as_object() {
             match (&o.borrow().kind, shape) {
                 (ObjectKind::Map(c), Shape::Map) | (ObjectKind::Set(c), Shape::Set) if !c.weak => return Ok(f(c)),
@@ -58,14 +58,14 @@ impl Collections {
         Err(a.throw(ErrorKind::Type, "Method called on an incompatible receiver"))
     }
 
-    fn with<'scope, R>(a: &Agent<'scope, '_>, o: JsObject<'scope>, f: impl FnOnce(&mut Collection<'scope>) -> R) -> R {
+    fn with<'scope, R>(a: &Scope<'scope, '_>, o: JsObject<'scope>, f: impl FnOnce(&mut Collection<'scope>) -> R) -> R {
         match &mut o.borrow_mut(a.mc).kind {
             ObjectKind::Map(c) | ObjectKind::Set(c) => f(c),
             _ => unreachable!("checked to be a collection"),
         }
     }
 
-    fn weak_key<'scope>(a: &Agent<'scope, '_>, key: Value<'scope>, what: &str) -> Result<(), Error> {
+    fn weak_key<'scope>(a: &Scope<'scope, '_>, key: Value<'scope>, what: &str) -> Result<(), Error> {
         if a.can_be_held_weakly(key) {
             Ok(())
         } else {
@@ -73,7 +73,7 @@ impl Collections {
         }
     }
 
-    fn construct<'scope>(a: &mut Agent<'scope, '_>, args: &[Value<'scope>], shape: Shape, weak: bool) -> Result<Value<'scope>, Error> {
+    fn construct<'scope>(a: &mut Scope<'scope, '_>, args: &[Value<'scope>], shape: Shape, weak: bool) -> Result<Value<'scope>, Error> {
         let o = Self::make(a, a.new_target, shape, weak)?;
         let source = args.at(0);
         if source.is_nullish() {
@@ -106,19 +106,19 @@ impl Collections {
         Ok(o.into())
     }
 
-    fn map<'scope>(a: &mut Agent<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn map<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Self::construct(a, args, Shape::Map, false)
     }
 
-    fn set_ctor<'scope>(a: &mut Agent<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn set_ctor<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Self::construct(a, args, Shape::Set, false)
     }
 
-    fn weak_map<'scope>(a: &mut Agent<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn weak_map<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Self::construct(a, args, Shape::Map, true)
     }
 
-    fn weak_set<'scope>(a: &mut Agent<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn weak_set<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Self::construct(a, args, Shape::Set, true)
     }
 
@@ -132,7 +132,7 @@ impl Collections {
         }
     }
 
-    fn write_collection<'scope>(a: &Agent<'scope, '_>, this: Value<'scope>, set: bool, f: impl FnOnce(&mut Collection<'scope>)) -> Option<Value<'scope>> {
+    fn write_collection<'scope>(a: &Scope<'scope, '_>, this: Value<'scope>, set: bool, f: impl FnOnce(&mut Collection<'scope>)) -> Option<Value<'scope>> {
         let o = this.as_object()?;
         {
             let r = o.try_borrow()?;
@@ -158,57 +158,57 @@ impl Collections {
         }
     }
 
-    fn map_get1<'scope>(_: &mut Agent<'scope, '_>, this: Value<'scope>, key: Value<'scope>) -> Option<Value<'scope>> {
+    fn map_get1<'scope>(_: &mut Scope<'scope, '_>, this: Value<'scope>, key: Value<'scope>) -> Option<Value<'scope>> {
         Self::read_collection(this, false, |c| c.get(key).unwrap_or(Value::Undefined))
     }
 
-    fn map_has1<'scope>(_: &mut Agent<'scope, '_>, this: Value<'scope>, key: Value<'scope>) -> Option<Value<'scope>> {
+    fn map_has1<'scope>(_: &mut Scope<'scope, '_>, this: Value<'scope>, key: Value<'scope>) -> Option<Value<'scope>> {
         Self::read_collection(this, false, |c| c.has(key).into())
     }
 
-    fn map_set2<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, key: Value<'scope>, value: Value<'scope>) -> Option<Value<'scope>> {
+    fn map_set2<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, key: Value<'scope>, value: Value<'scope>) -> Option<Value<'scope>> {
         Self::write_collection(a, this, false, |c| c.set(key, value))
     }
 
-    fn set_has1<'scope>(_: &mut Agent<'scope, '_>, this: Value<'scope>, key: Value<'scope>) -> Option<Value<'scope>> {
+    fn set_has1<'scope>(_: &mut Scope<'scope, '_>, this: Value<'scope>, key: Value<'scope>) -> Option<Value<'scope>> {
         Self::read_collection(this, true, |c| c.has(key).into())
     }
 
-    fn set_add1<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, key: Value<'scope>) -> Option<Value<'scope>> {
+    fn set_add1<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, key: Value<'scope>) -> Option<Value<'scope>> {
         Self::write_collection(a, this, true, |c| c.set(key, key))
     }
 
-    fn map_get<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn map_get<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Ok(Self::read(a, this, Shape::Map, |c| c.get(args.at(0)))?.unwrap_or_default())
     }
 
-    fn map_set<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn map_set<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let o = Self::this(a, this, Shape::Map, false)?;
         Self::with(a, o, |c| c.set(args.at(0), args.at(1)));
         Ok(this)
     }
 
-    fn map_has<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn map_has<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Ok(Self::read(a, this, Shape::Map, |c| c.has(args.at(0)))?.into())
     }
 
-    fn map_delete<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn map_delete<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let o = Self::this(a, this, Shape::Map, false)?;
         Ok(Self::with(a, o, |c| c.delete(args.at(0))).into())
     }
 
-    fn set_add<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn set_add<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let o = Self::this(a, this, Shape::Set, false)?;
         let v = args.at(0);
         Self::with(a, o, |c| c.set(v, v));
         Ok(this)
     }
 
-    fn set_has<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn set_has<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Ok(Self::read(a, this, Shape::Set, |c| c.has(args.at(0)))?.into())
     }
 
-    fn set_delete<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn set_delete<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let o = Self::this(a, this, Shape::Set, false)?;
         Ok(Self::with(a, o, |c| c.delete(args.at(0))).into())
     }
@@ -217,26 +217,26 @@ impl Collections {
         if set { Shape::Set } else { Shape::Map }
     }
 
-    fn clear<'scope, const SET: bool>(a: &mut Agent<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn clear<'scope, const SET: bool>(a: &mut Scope<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let o = Self::this(a, this, Self::shape(SET), false)?;
         Self::with(a, o, Collection::clear);
         Ok(Value::Undefined)
     }
 
-    fn size<'scope, const SET: bool>(a: &mut Agent<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn size<'scope, const SET: bool>(a: &mut Scope<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let o = Self::this(a, this, Self::shape(SET), false)?;
         Ok(Self::size_of(a, o).into())
     }
 
-    fn size_of<'scope>(a: &Agent<'scope, '_>, o: JsObject<'scope>) -> f64 {
+    fn size_of<'scope>(a: &Scope<'scope, '_>, o: JsObject<'scope>) -> f64 {
         f64::from(u32::try_from(Self::with(a, o, |c| c.size)).unwrap_or(u32::MAX))
     }
 
-    fn entry_from<'scope>(a: &Agent<'scope, '_>, o: JsObject<'scope>, i: usize) -> Option<(usize, Value<'scope>, Value<'scope>)> {
+    fn entry_from<'scope>(a: &Scope<'scope, '_>, o: JsObject<'scope>, i: usize) -> Option<(usize, Value<'scope>, Value<'scope>)> {
         Self::with(a, o, |c| c.entries().iter().enumerate().skip(i).find_map(|(j, e)| e.map(|(k, v)| (j, k, v))))
     }
 
-    fn for_each<'scope, const SET: bool>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn for_each<'scope, const SET: bool>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let o = Self::this(a, this, Self::shape(SET), false)?;
         let f = args.at(0);
         if !a.is_callable(f) {
@@ -255,27 +255,27 @@ impl Collections {
         Ok(Value::Undefined)
     }
 
-    fn iterator<'scope>(a: &Agent<'scope, '_>, o: JsObject<'scope>, kind: IterKind, set: bool) -> Value<'scope> {
+    fn iterator<'scope>(a: &Scope<'scope, '_>, o: JsObject<'scope>, kind: IterKind, set: bool) -> Value<'scope> {
         let proto = if set { a.context.set_iterator_proto } else { a.context.collection_iterator_proto };
         ObjectData { kind: ObjectKind::CollectionIterator { target: Some(o), index: 0, kind, set }, proto: Some(proto), ..ObjectData::default() }.alloc(a.mc).into()
     }
 
-    fn entries<'scope, const SET: bool>(a: &mut Agent<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn entries<'scope, const SET: bool>(a: &mut Scope<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let o = Self::this(a, this, Self::shape(SET), false)?;
         Ok(Self::iterator(a, o, IterKind::Entries, SET))
     }
 
-    fn keys<'scope, const SET: bool>(a: &mut Agent<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn keys<'scope, const SET: bool>(a: &mut Scope<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let o = Self::this(a, this, Self::shape(SET), false)?;
         Ok(Self::iterator(a, o, IterKind::Keys, SET))
     }
 
-    fn values<'scope, const SET: bool>(a: &mut Agent<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn values<'scope, const SET: bool>(a: &mut Scope<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let o = Self::this(a, this, Self::shape(SET), false)?;
         Ok(Self::iterator(a, o, IterKind::Values, SET))
     }
 
-    fn next<'scope, const SET: bool>(a: &mut Agent<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn next<'scope, const SET: bool>(a: &mut Scope<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let state = match this.kind() {
             ValueKind::Object(it) => match it.borrow().kind {
                 ObjectKind::CollectionIterator { target, index, kind, set } if set == SET => Some((it, target, index, kind)),
@@ -302,7 +302,7 @@ impl Collections {
         Ok(a.iter_result(out, false).into())
     }
 
-    fn group_by<'scope>(a: &mut Agent<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn group_by<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let groups = crate::object::Objects::group(a, args.at(0), args.at(1), false)?;
         let m = ObjectData { kind: ObjectKind::Map(Box::new(Collection::new(false))), proto: Some(a.context.map_proto), ..ObjectData::default() }.alloc(a.mc);
         for (k, items) in groups {
@@ -312,7 +312,7 @@ impl Collections {
         Ok(m.into())
     }
 
-    fn set_record<'scope>(a: &mut Agent<'scope, '_>, other: Value<'scope>) -> Result<SetRecord<'scope>, Error> {
+    fn set_record<'scope>(a: &mut Scope<'scope, '_>, other: Value<'scope>) -> Result<SetRecord<'scope>, Error> {
         if other.as_object().is_none() {
             return Err(a.throw(ErrorKind::Type, "The argument must be a set-like object"));
         }
@@ -336,7 +336,7 @@ impl Collections {
         Ok(SetRecord { set: other, size, has, keys })
     }
 
-    fn keys_iterator<'scope>(a: &mut Agent<'scope, '_>, r: &SetRecord<'scope>) -> Result<j8framework::IterRecord<'scope>, Error> {
+    fn keys_iterator<'scope>(a: &mut Scope<'scope, '_>, r: &SetRecord<'scope>) -> Result<j8framework::IterRecord<'scope>, Error> {
         let iterator = a.call(r.keys, r.set, &[])?;
         if iterator.as_object().is_none() {
             return Err(a.throw(ErrorKind::Type, "keys() of a set-like object must return an object"));
@@ -352,7 +352,7 @@ impl Collections {
         }
     }
 
-    fn new_set<'scope>(a: &Agent<'scope, '_>, items: impl IntoIterator<Item = Value<'scope>>) -> Value<'scope> {
+    fn new_set<'scope>(a: &Scope<'scope, '_>, items: impl IntoIterator<Item = Value<'scope>>) -> Value<'scope> {
         let mut c = Collection::new(false);
         for v in items {
             c.set(v, v);
@@ -360,11 +360,11 @@ impl Collections {
         ObjectData { kind: ObjectKind::Set(Box::new(c)), proto: Some(a.context.set_proto), ..ObjectData::default() }.alloc(a.mc).into()
     }
 
-    fn set_values<'scope>(a: &Agent<'scope, '_>, o: JsObject<'scope>) -> alloc::vec::Vec<Value<'scope>> {
+    fn set_values<'scope>(a: &Scope<'scope, '_>, o: JsObject<'scope>) -> alloc::vec::Vec<Value<'scope>> {
         Self::with(a, o, |c| c.entries().iter().flatten().map(|&(k, _)| k).collect())
     }
 
-    fn union<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn union<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let o = Self::this(a, this, Shape::Set, false)?;
         let r = Self::set_record(a, args.at(0))?;
         let it = Self::keys_iterator(a, &r)?;
@@ -382,7 +382,7 @@ impl Collections {
         x == y || matches!((x.kind(), y.kind()), (ValueKind::Number(p), ValueKind::Number(q)) if p.is_nan() && q.is_nan())
     }
 
-    fn intersection<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn intersection<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let o = Self::this(a, this, Shape::Set, false)?;
         let r = Self::set_record(a, args.at(0))?;
         let mut out: alloc::vec::Vec<Value<'scope>> = alloc::vec::Vec::new();
@@ -407,7 +407,7 @@ impl Collections {
         Ok(Self::new_set(a, out))
     }
 
-    fn difference<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn difference<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let o = Self::this(a, this, Shape::Set, false)?;
         let r = Self::set_record(a, args.at(0))?;
         let mut out = Self::set_values(a, o);
@@ -430,7 +430,7 @@ impl Collections {
         Ok(Self::new_set(a, out))
     }
 
-    fn symmetric_difference<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn symmetric_difference<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let o = Self::this(a, this, Shape::Set, false)?;
         let r = Self::set_record(a, args.at(0))?;
         let it = Self::keys_iterator(a, &r)?;
@@ -449,7 +449,7 @@ impl Collections {
         Ok(Self::new_set(a, out))
     }
 
-    fn is_subset_of<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn is_subset_of<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let o = Self::this(a, this, Shape::Set, false)?;
         let r = Self::set_record(a, args.at(0))?;
         if Self::size_of(a, o) > r.size {
@@ -466,7 +466,7 @@ impl Collections {
         Ok(true.into())
     }
 
-    fn is_superset_of<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn is_superset_of<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let o = Self::this(a, this, Shape::Set, false)?;
         let r = Self::set_record(a, args.at(0))?;
         if Self::size_of(a, o) < r.size {
@@ -482,7 +482,7 @@ impl Collections {
         Ok(true.into())
     }
 
-    fn is_disjoint_from<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn is_disjoint_from<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let o = Self::this(a, this, Shape::Set, false)?;
         let r = Self::set_record(a, args.at(0))?;
         if Self::size_of(a, o) <= r.size {
@@ -506,29 +506,29 @@ impl Collections {
         Ok(true.into())
     }
 
-    fn weak_get<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn weak_get<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let o = Self::this(a, this, Shape::Map, true)?;
         Ok(Self::with(a, o, |c| c.get(args.at(0))).unwrap_or_default())
     }
 
-    fn weak_set_entry<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn weak_set_entry<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let o = Self::this(a, this, Shape::Map, true)?;
         Self::weak_key(a, args.at(0), "as weak map key")?;
         Self::with(a, o, |c| c.set(args.at(0), args.at(1)));
         Ok(this)
     }
 
-    fn weak_map_has<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn weak_map_has<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let o = Self::this(a, this, Shape::Map, true)?;
         Ok(Self::with(a, o, |c| c.has(args.at(0))).into())
     }
 
-    fn weak_map_delete<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn weak_map_delete<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let o = Self::this(a, this, Shape::Map, true)?;
         Ok(Self::with(a, o, |c| c.delete(args.at(0))).into())
     }
 
-    fn weak_add<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn weak_add<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let o = Self::this(a, this, Shape::Set, true)?;
         let v = args.at(0);
         Self::weak_key(a, v, "in weak set")?;
@@ -536,12 +536,12 @@ impl Collections {
         Ok(this)
     }
 
-    fn weak_set_has<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn weak_set_has<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let o = Self::this(a, this, Shape::Set, true)?;
         Ok(Self::with(a, o, |c| c.has(args.at(0))).into())
     }
 
-    fn weak_set_delete<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn weak_set_delete<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let o = Self::this(a, this, Shape::Set, true)?;
         Ok(Self::with(a, o, |c| c.delete(args.at(0))).into())
     }

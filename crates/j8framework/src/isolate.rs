@@ -3,7 +3,7 @@ use core::num::NonZeroUsize;
 
 use j8lockfree::Fifo;
 
-use crate::{AsyncJob, Heap, IsolateHandle, Mutation, Platform, Profiler, ScopeGlobal, Termination, ValueBrand, rebrand, rebrand_ref};
+use crate::{AsyncJob, Heap, Scope, IsolateHandle, Mutation, Platform, Profiler, ScopeGlobal, Termination, ValueBrand, rebrand, rebrand_ref};
 #[cfg(all(target_os = "linux", feature = "crossheap"))]
 use crate::{Erased, ScopeLocal, erase};
 
@@ -80,17 +80,6 @@ pub struct Isolate<'p> {
     shares: Shares<'p>,
 }
 
-pub struct Scope<'scope, 'i> {
-    pub mc: &'i Mutation<'scope>,
-    pub platform: &'i dyn Platform,
-    pub profiler: &'i mut Profiler,
-    pub spawned: Option<&'i Fifo<AsyncJob<'i>>>,
-    pub stop: &'i Termination,
-    pub parked: &'i core::cell::RefCell<Parked<'i>>,
-    #[cfg(all(target_os = "linux", feature = "crossheap"))]
-    pub shares: &'i mut Shares<'i>,
-}
-
 impl<'p> Isolate<'p> {
     pub fn new(platform: &'p dyn Platform, params: CreateParams) -> Self {
         let mut profiler = Profiler::default();
@@ -144,7 +133,18 @@ impl<'p> Isolate<'p> {
         self.spawned.as_ref().map(|q| core::iter::from_fn(|| q.pop()).collect()).unwrap_or_default()
     }
 
-    pub fn enter<R>(&mut self, f: impl for<'scope> FnOnce(&mut Scope<'scope, '_>) -> R) -> R {
+    pub fn create_context(&mut self, intrinsics: &dyn crate::Intrinsics) -> ScopeGlobal<'p, crate::ContextBrand> {
+        let generation = self.generation;
+        let cx = self.heap.scope(|s| {
+            let s: &paragc::Scope<'_, '_> = s;
+            let mc = unsafe { Mutation::new(rebrand_ref(s), generation) };
+            mc.stash::<crate::ContextBrand>(crate::Context::create(&mc, intrinsics))
+        });
+        self.after_enter();
+        cx
+    }
+
+    pub fn enter<R>(&mut self, cx: &ScopeGlobal<'p, crate::ContextBrand>, invoke: &dyn for<'s> crate::Invoke<'s>, f: impl for<'scope> FnOnce(&mut Scope<'scope, '_>) -> R) -> R {
         let (platform, profiler, generation, stop) = (self.platform, &mut self.profiler, self.generation, &*self.stop);
         let spawned = self.spawned.as_ref();
         let parked = &self.parked;
@@ -163,9 +163,13 @@ impl<'p> Isolate<'p> {
                 mc: &mc,
                 platform,
                 profiler,
+                context: mc.fetch(cx),
+                new_target: crate::Value::Undefined,
+                invoke,
                 spawned: spawned.map(|q| unsafe { rebrand_ref(q) }),
                 stop,
                 parked: unsafe { rebrand_ref(parked) },
+                spare_regs: Vec::new(),
                 #[cfg(all(target_os = "linux", feature = "crossheap"))]
                 shares: unsafe { &mut *core::ptr::from_mut(shares).cast() },
             });

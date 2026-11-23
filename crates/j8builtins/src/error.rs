@@ -1,12 +1,12 @@
 use j8framework::ValueKind;
-use j8framework::{Agent, Error, ErrorKind, Value};
+use j8framework::{Scope, Error, ErrorKind, Value};
 
 use crate::{Args, Installer};
 
 struct Errors;
 
 impl Errors {
-    fn construct<'scope, const K: usize>(a: &mut Agent<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn construct<'scope, const K: usize>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let new_target = a.new_target;
         let kind = ErrorKind::ALL[K];
         let all = args;
@@ -34,7 +34,7 @@ impl Errors {
         Ok(e.into())
     }
 
-    fn to_string<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn to_string<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         if this.as_object().is_none() {
             return Err(a.throw(ErrorKind::Type, "Error.prototype.toString called on non-object"));
         }

@@ -24,11 +24,9 @@ fn eval(text: &str, tier: Tier) -> String {
         #[cfg(windows)]
         Tier::Default => Executor::default().with_tier(j8jit::Jit::default()),
     };
-    let cx = isolate.enter(|scope| scope.mc.stash::<j8framework::ContextBrand>(scope.context(&Builtins)));
+    let cx = isolate.create_context(&Builtins);
     let result = executor.eval(&mut isolate, &cx, &Source { text, file: "stack.js" }).expect("the script runs");
-    isolate.enter(|scope| {
-        let context = scope.mc.fetch(&cx);
-        let mut a = scope.agent(context, &executor);
+    isolate.enter(&cx, &executor, |a| {
         let v = a.local(&result);
         String::from(&**a.to_string(v).expect("ToString"))
     })

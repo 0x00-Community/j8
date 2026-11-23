@@ -58,7 +58,7 @@ pub(crate) struct Direct {
     inline_push: bool,
 }
 
-pub(crate) fn directs_from(a: &j8framework::Agent<'_, '_>) -> Vec<Direct> {
+pub(crate) fn directs_from(a: &j8framework::Scope<'_, '_>) -> Vec<Direct> {
     a.context.fast_builtins.get().iter().map(|(index, e)| Direct { native: e.native as usize as u64, index, arity: e.call.arity(), out: e.out, inline_push: e.inline_push }).collect()
 }
 

@@ -2,7 +2,7 @@ use j8framework::ValueKind;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use j8framework::{Agent, Error, ErrorKind, JsString, Units, Value};
+use j8framework::{Scope, Error, ErrorKind, JsString, Units, Value};
 
 use crate::{Args, Installer};
 
@@ -13,18 +13,18 @@ pub(crate) struct Strings;
 const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
 
 impl Strings {
-    fn this<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>) -> Result<JsString<'scope>, Error> {
+    fn this<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>) -> Result<JsString<'scope>, Error> {
         if this.is_nullish() {
             return Err(a.throw(ErrorKind::Type, "String.prototype method called on null or undefined"));
         }
         a.to_string(this)
     }
 
-    fn units<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>) -> Result<Vec<u16>, Error> {
+    fn units<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>) -> Result<Vec<u16>, Error> {
         Ok(Self::this(a, this)?.encode_utf16().collect())
     }
 
-    fn cut<'scope>(a: &Agent<'scope, '_>, s: JsString<'scope>, r: core::ops::Range<usize>) -> JsString<'scope> {
+    fn cut<'scope>(a: &Scope<'scope, '_>, s: JsString<'scope>, r: core::ops::Range<usize>) -> JsString<'scope> {
         match s.units() {
             Units::Ascii(b) => {
                 let end = r.end.min(b.len());
@@ -34,7 +34,7 @@ impl Strings {
         }
     }
 
-    fn from_units<'scope>(a: &Agent<'scope, '_>, u: &[u16]) -> Value<'scope> {
+    fn from_units<'scope>(a: &Scope<'scope, '_>, u: &[u16]) -> Value<'scope> {
         a.string_units(u).into()
     }
 
@@ -42,7 +42,7 @@ impl Strings {
         Value::Number(f64::from(u32::try_from(n).unwrap_or(u32::MAX)))
     }
 
-    fn clamp<'scope>(a: &mut Agent<'scope, '_>, v: Value<'scope>, len: usize, default: usize) -> Result<usize, Error> {
+    fn clamp<'scope>(a: &mut Scope<'scope, '_>, v: Value<'scope>, len: usize, default: usize) -> Result<usize, Error> {
         if v == Value::Undefined {
             return Ok(default);
         }
@@ -52,7 +52,7 @@ impl Strings {
         Ok(r)
     }
 
-    fn relative<'scope>(a: &mut Agent<'scope, '_>, v: Value<'scope>, len: usize, default: usize) -> Result<usize, Error> {
+    fn relative<'scope>(a: &mut Scope<'scope, '_>, v: Value<'scope>, len: usize, default: usize) -> Result<usize, Error> {
         if v == Value::Undefined {
             return Ok(default);
         }
@@ -64,7 +64,7 @@ impl Strings {
         Ok(r)
     }
 
-    fn case<'scope>(a: &Agent<'scope, '_>, s: JsString<'scope>, map: fn(&str) -> String) -> Value<'scope> {
+    fn case<'scope>(a: &Scope<'scope, '_>, s: JsString<'scope>, map: fn(&str) -> String) -> Value<'scope> {
         let Some(w) = s.wide().filter(|_| s.lone_surrogates()) else { return a.string(&map(&s)).into() };
         let mut out = Vec::with_capacity(w.len());
         let mut run = String::new();
@@ -82,7 +82,7 @@ impl Strings {
         a.string_units(&out).into()
     }
 
-    fn trim_units<'scope>(a: &Agent<'scope, '_>, s: JsString<'scope>, start: bool, end: bool) -> Value<'scope> {
+    fn trim_units<'scope>(a: &Scope<'scope, '_>, s: JsString<'scope>, start: bool, end: bool) -> Value<'scope> {
         let w: Vec<u16> = s.encode_utf16().collect();
         let space = |u: &u16| char::from_u32(u32::from(*u)).is_some_and(Self::is_space);
         let lo = if start { w.iter().take_while(|u| space(u)).count() } else { 0 };
@@ -98,7 +98,7 @@ impl Strings {
         (from..=hay.len().checked_sub(needle.len())?).find(|&i| hay[i..].starts_with(needle))
     }
 
-    fn string<'scope>(a: &mut Agent<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn string<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let new_target = a.new_target;
         let s: Value<'scope> = match (args.first(), new_target.kind()) {
             (None, _) => a.string("").into(),
@@ -108,26 +108,26 @@ impl Strings {
         a.wrap_primitive(new_target, s, a.context.string_proto)
     }
 
-    fn to_string<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn to_string<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         match this.unwrapped().kind() {
             v @ ValueKind::String(_) => Ok(Value::from(v)),
             _ => Err(a.throw(ErrorKind::Type, "String.prototype.toString requires that 'this' be a String")),
         }
     }
 
-    fn char_at<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn char_at<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let s = Self::this(a, this)?;
         let i = Self::clamp(a, args.at(0), s.utf16_len(), 0)?;
         Ok(s.code_unit(i).map_or_else(|| a.string("").into(), |u| a.unit_string(u).into()))
     }
 
-    fn char_code_at<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn char_code_at<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let s = Self::this(a, this)?;
         let i = Self::clamp(a, args.at(0), s.utf16_len(), 0)?;
         Ok(s.code_unit(i).map_or(f64::NAN, f64::from).into())
     }
 
-    fn index_of<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn index_of<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let s = Self::this(a, this)?;
         let n = a.to_string(args.at(0))?;
         if s.is_ascii() {
@@ -140,14 +140,14 @@ impl Strings {
         Ok(Self::find(&u, &n, from).map_or(Value::Number(-1.0), Self::count))
     }
 
-    fn last_index_of<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn last_index_of<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let u = Self::units(a, this)?;
         let n: Vec<u16> = a.to_string(args.at(0))?.encode_utf16().collect();
         let last = u.len().checked_sub(n.len());
         Ok(last.and_then(|l| (0..=l).rev().find(|&i| u[i..].starts_with(&n))).map_or(Value::Number(-1.0), Self::count))
     }
 
-    fn needle<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>], method: &str) -> Result<(JsString<'scope>, JsString<'scope>), Error> {
+    fn needle<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>], method: &str) -> Result<(JsString<'scope>, JsString<'scope>), Error> {
         let s = Self::this(a, this)?;
         if crate::regexp::Regexps::is_regexp(a, args.at(0))? {
             return Err(a.throw(ErrorKind::Type, &alloc::format!("First argument to String.prototype.{method} must not be a regular expression")));
@@ -156,7 +156,7 @@ impl Strings {
         Ok((s, n))
     }
 
-    fn includes<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn includes<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let (s, n) = Self::needle(a, this, args, "includes")?;
         let len = s.utf16_len();
         let from = Self::clamp(a, args.at(1), len, 0)?;
@@ -168,7 +168,7 @@ impl Strings {
         Ok(Self::find(&u, &n, from).is_some().into())
     }
 
-    fn starts_with<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn starts_with<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let (s, n) = Self::needle(a, this, args, "startsWith")?;
         let len = s.utf16_len();
         let from = Self::clamp(a, args.at(1), len, 0)?;
@@ -180,7 +180,7 @@ impl Strings {
         Ok((from + n.len() <= len && n.iter().enumerate().all(|(i, &c)| u.get(from + i) == Some(c))).into())
     }
 
-    fn ends_with<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn ends_with<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let (s, n) = Self::needle(a, this, args, "endsWith")?;
         let len = s.utf16_len();
         let end = Self::clamp(a, args.at(1), len, len)?;
@@ -192,7 +192,7 @@ impl Strings {
         Ok((n.len() <= end && n.iter().enumerate().all(|(i, &c)| u.get(end - n.len() + i) == Some(c))).into())
     }
 
-    fn slice<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn slice<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let s = Self::this(a, this)?;
         let len = s.utf16_len();
         let start = Self::relative(a, args.at(0), len, 0)?;
@@ -200,7 +200,7 @@ impl Strings {
         Ok(Self::cut(a, s, start..end.max(start)).into())
     }
 
-    fn substring<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn substring<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let st = Self::this(a, this)?;
         let len = st.utf16_len();
         let s = Self::clamp(a, args.at(0), len, 0)?;
@@ -208,7 +208,7 @@ impl Strings {
         Ok(Self::cut(a, st, s.min(e)..s.max(e)).into())
     }
 
-    fn at<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn at<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let s = Self::this(a, this)?;
         let x = a.to_integer_or_infinity(args.at(0))?;
         let len = f64::from(u32::try_from(s.utf16_len()).unwrap_or(u32::MAX));
@@ -218,17 +218,17 @@ impl Strings {
         Ok(v)
     }
 
-    fn to_upper_case<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn to_upper_case<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let s = Self::this(a, this)?;
         Ok(Self::case(a, s, str::to_uppercase))
     }
 
-    fn to_lower_case<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn to_lower_case<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let s = Self::this(a, this)?;
         Ok(Self::case(a, s, str::to_lowercase))
     }
 
-    fn trim<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn trim<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let s = Self::this(a, this)?;
         if s.lone_surrogates() {
             return Ok(Self::trim_units(a, s, true, true));
@@ -236,7 +236,7 @@ impl Strings {
         Ok(a.piece(s, s.trim_matches(Self::is_space)).into())
     }
 
-    fn trim_start<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn trim_start<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let s = Self::this(a, this)?;
         if s.lone_surrogates() {
             return Ok(Self::trim_units(a, s, true, false));
@@ -244,7 +244,7 @@ impl Strings {
         Ok(a.piece(s, s.trim_start_matches(Self::is_space)).into())
     }
 
-    fn trim_end<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn trim_end<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let s = Self::this(a, this)?;
         if s.lone_surrogates() {
             return Ok(Self::trim_units(a, s, false, true));
@@ -252,7 +252,7 @@ impl Strings {
         Ok(a.piece(s, s.trim_end_matches(Self::is_space)).into())
     }
 
-    pub(crate) fn split<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    pub(crate) fn split<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let s = Self::this(a, this)?;
         let limit = match args.at(1).kind() {
             ValueKind::Undefined => usize::MAX,
@@ -277,7 +277,7 @@ impl Strings {
         Ok(a.array(items).into())
     }
 
-    fn repeat<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn repeat<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let s = Self::this(a, this)?;
         let n = a.to_number(args.at(0))?;
         if n < 0.0 || n.is_infinite() {
@@ -296,7 +296,7 @@ impl Strings {
         Ok(a.string(&s.repeat(n as usize)).into())
     }
 
-    fn pad<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>], start: bool) -> Result<Value<'scope>, Error> {
+    fn pad<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>], start: bool) -> Result<Value<'scope>, Error> {
         let u = Self::units(a, this)?;
         let target = libm::trunc(a.to_number(args.at(0))?);
         let fill: Vec<u16> = match args.at(1).kind() {
@@ -318,15 +318,15 @@ impl Strings {
         Ok(Self::from_units(a, &out))
     }
 
-    fn pad_start<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn pad_start<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Self::pad(a, this, args, true)
     }
 
-    fn pad_end<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn pad_end<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Self::pad(a, this, args, false)
     }
 
-    fn concat<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn concat<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let mut out = String::from(&**Self::this(a, this)?);
         for &v in args {
             out.push_str(&a.to_string(v)?);
@@ -334,7 +334,7 @@ impl Strings {
         Ok(a.string(&out).into())
     }
 
-    fn number<'scope>(a: &mut Agent<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn number<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let new_target = a.new_target;
         let n = match args.first() {
             None => 0.0,
@@ -346,19 +346,19 @@ impl Strings {
         a.wrap_primitive(new_target, n.into(), a.context.number_proto)
     }
 
-    fn is_integer<'scope>(_: &mut Agent<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn is_integer<'scope>(_: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Ok(matches!(args.at(0).kind(), ValueKind::Number(x) if x.is_finite() && libm::trunc(x) == x).into())
     }
 
-    fn is_safe_integer<'scope>(_: &mut Agent<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn is_safe_integer<'scope>(_: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Ok(matches!(args.at(0).kind(), ValueKind::Number(x) if x.is_finite() && libm::trunc(x) == x && libm::fabs(x) <= MAX_SAFE_INTEGER).into())
     }
 
-    fn number_is_nan<'scope>(_: &mut Agent<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn number_is_nan<'scope>(_: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Ok(matches!(args.at(0).kind(), ValueKind::Number(x) if x.is_nan()).into())
     }
 
-    fn number_to_string<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn number_to_string<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         const MAX_FRACTION_DIGITS: usize = 52;
         const DIGITS: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
         let Some(x) = this.unwrapped().as_number() else {
@@ -405,7 +405,7 @@ impl Strings {
         Ok(a.string(&if neg { alloc::format!("-{s}") } else { s }).into())
     }
 
-    fn number_value_of<'scope>(a: &mut Agent<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn number_value_of<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         match this.unwrapped().kind() {
             v @ ValueKind::Number(_) => Ok(Value::from(v)),
             _ => Err(a.throw(ErrorKind::Type, "Number.prototype.valueOf requires that 'this' be a Number")),

@@ -11,7 +11,7 @@ j8 不带异步运行时（没有 tokio）。每个 `j8::Runtime` 就是一个[�
 
 ## `async fn` 绑定
 
-`async fn` 只收**拥有所有权**的参数：不能有 `self`、`&str`、`&mut Agent`、`This`、`Rest`。它的 future 在调用返回之后才跑。
+`async fn` 只收**拥有所有权**的参数：不能有 `self`、`&str`、`&mut Scope`、`This`、`Rest`。它的 future 在调用返回之后才跑。
 调用立刻返回一个 promise，兑现时结果用 `IntoJs` 转换（所以 `Io<T>` 式的错误会拒绝它）。
 
 ```rust,ignore
@@ -56,7 +56,7 @@ impl Fs {
 
 ## 自己造 promise：`j8::Glue`
 
-异步活需要 `&self`、`Agent`、或者要能取消时，写普通方法，用 `j8::Glue` 自己造 promise：
+异步活需要 `&self`、`Scope`、或者要能取消时，写普通方法，用 `j8::Glue` 自己造 promise：
 
 - `Glue::spawn(a, future)` 建一个待定的 promise，把 `future` 交给事件循环，返回这个 promise；
 - `Glue::settle(value)` 是 future 必须产出的东西：兑现时 `value` 用 `IntoJs` 转换。
@@ -64,7 +64,7 @@ impl Fs {
 ```rust,ignore
 #[j8::class]
 impl Timer {
-    fn wait<'scope>(&self, a: &mut Agent<'scope, '_>, ms: f64) -> Result<Value<'scope>, Error> {
+    fn wait<'scope>(&self, a: &mut Scope<'scope, '_>, ms: f64) -> Result<Value<'scope>, Error> {
         let sleep = Sleep { cancelled: self.cancelled.clone(), /* … */ };
         Glue::spawn(a, async move { Glue::settle(sleep.await) })
     }

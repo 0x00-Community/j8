@@ -6,7 +6,7 @@ use crate::convert::Ffi;
 use crate::{Env, ExtendedErrorInfo, Handle, Status, napi};
 
 impl Env<'_> {
-    fn make_error<'scope>(&self, a: &mut j8framework::Agent<'scope, '_>, kind: ErrorKind, code: Option<Value<'scope>>, msg: &str) -> Result<Value<'scope>, Status> {
+    fn make_error<'scope>(&self, a: &mut j8framework::Scope<'scope, '_>, kind: ErrorKind, code: Option<Value<'scope>>, msg: &str) -> Result<Value<'scope>, Status> {
         let e = a.error(kind, msg);
         if let Some(code) = code {
             self.js(a.set_named(e.into(), "code", code))?;
@@ -15,7 +15,7 @@ impl Env<'_> {
     }
 
     fn create_error(&self, kind: ErrorKind, code: Handle, msg: Handle, result: *mut Handle) -> Result<(), Status> {
-        let a = self.agent()?;
+        let a = self.scope()?;
         let msg = self.string(msg)?;
         let code = if code.0.is_none() { None } else { Some(self.string(code)?.into()) };
         let e = self.make_error(a, kind, code, &msg)?;
@@ -24,7 +24,7 @@ impl Env<'_> {
 
     fn throw_error(&self, kind: ErrorKind, code: *const c_char, msg: *const c_char) -> Result<(), Status> {
         self.preamble()?;
-        let a = self.agent()?;
+        let a = self.scope()?;
         let msg = Ffi::utf8(msg, crate::AUTO_LENGTH)?;
         let code = if code.is_null() { None } else { Some(a.string(&Ffi::utf8(code, crate::AUTO_LENGTH)?).into()) };
         let e = self.make_error(a, kind, code, &msg)?;
@@ -52,7 +52,7 @@ napi! {
 
     fn napi_throw(env, error: Handle) {
         env.preamble()?;
-        let a = env.agent()?;
+        let a = env.scope()?;
         env.throw(a.throw_value(env.value(error)?));
         Ok(())
     }
@@ -78,7 +78,7 @@ napi! {
     }
 
     fn napi_get_and_clear_last_exception(env, result: *mut Handle) {
-        let a = env.agent()?;
+        let a = env.scope()?;
         let v = match env.take_pending() {
             Some(Error::Exception) => a.take_exception(),
             Some(Error::Parked(ticket)) => {

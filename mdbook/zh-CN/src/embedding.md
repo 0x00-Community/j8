@@ -18,7 +18,7 @@ j8 = "0.4"                                          # 缺省 feature `runtime`�
 | `j8::runtime!` | 声明一个运行时：哪些绑定类型放哪里，加一段 JS 序言 |
 | `j8::Runtime` | 准备好的执行环境：`eval`、`eval_module`、`run_until_idle`、`set`、`text`、`enter` |
 | `j8::Host` / `j8::HostPlatform` | `runtime!` 实现的 trait / 给它供原生模块的平台（无状态，运行时可共享） |
-| `j8::frame` | `j8framework`：`Agent`、`Error`、`ErrorKind`、`Value`、`Platform`、`Source` …… |
+| `j8::frame` | `j8framework`：`Scope`、`Error`、`ErrorKind`、`Value`、`Platform`、`Source` …… |
 | `j8::platform::DefaultPlatform` | 标准库平台 |
 | `j8::executor::Executor` | 字节码执行器；`with_tier` 加 JIT |
 | `j8::Promise<T>` | 在 Rust 里 await 的 JS promise |
@@ -32,7 +32,7 @@ use std::num::NonZeroUsize;
 use std::process::ExitCode;
 
 use j8::executor::Executor;
-use j8::frame::{Agent, Error, ErrorKind};
+use j8::frame::{Scope, Error, ErrorKind};
 use j8::platform::DefaultPlatform;
 
 /// 碰机器的部分，放在 `__j8_native.env`
@@ -45,7 +45,7 @@ impl Env {
     }
 
     /// 变量不存在时抛 TypeError
-    fn must(a: &mut Agent<'_, '_>, name: &str) -> Result<String, Error> {
+    fn must(a: &mut Scope<'_, '_>, name: &str) -> Result<String, Error> {
         std::env::var(name).map_err(|_| a.throw(ErrorKind::Type, &format!("{name} is not set")))
     }
 }
@@ -160,7 +160,7 @@ rt.eval(&call, file)?;
 rt.run_until_idle()?;
 ```
 
-更底层的活用 `rt.enter(|a| …)`，拿到上下文的 `Agent`（`a.get_named`、`a.call`、`a.local`、`a.to_string` ……）。
+更底层的活用 `rt.enter(|a| …)`，拿到上下文的 `Scope`（`a.get_named`、`a.call`、`a.local`、`a.to_string` ……）。
 `Value` 出不了闭包，之后还要用就用 `a.global(v)` 挂到根上（`ScopeGlobal<'p, ValueBrand>`）。
 
 ## Error 的含义

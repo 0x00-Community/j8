@@ -27,7 +27,7 @@ impl Counter {
     fn value(&self) -> f64 { self.n }
 }
 
-let handle = Counter::install(&mut agent, global);   // global `Counter`
+let handle = Counter::install(&mut scope, global);   // global `Counter`
 ```
 
 Host types must be `Send + Sync` (the heap's rule). See `crates/macros/USAGE.md` for every attribute.
