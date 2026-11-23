@@ -77,6 +77,10 @@ impl Dfa {
         self.re.is_match(s.as_bytes())
     }
 
+    pub(crate) fn group_count(&self) -> usize {
+        self.groups
+    }
+
     pub(crate) fn find_at(&self, s: &str, start: usize) -> Option<Range<usize>> {
         self.re.find_at(s.as_bytes(), start).map(|m| m.range())
     }

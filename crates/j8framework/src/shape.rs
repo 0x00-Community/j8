@@ -362,6 +362,32 @@ impl<'gc> Props<'gc> {
     }
 
     #[inline]
+    pub fn same_words(&self, slots: &[(u16, Value<'gc>)]) -> bool {
+        if self.dict.get().is_some() {
+            return false;
+        }
+        let mut store = None;
+        let mut loaded = false;
+        for &(i, orig) in slots {
+            let got = match usize::from(i).checked_sub(INLINE) {
+                None => self.inline[usize::from(i)].get(),
+                Some(k) => {
+                    if !loaded {
+                        store = self.store();
+                        loaded = true;
+                    }
+                    let Some(cell) = store.and_then(|s| s.cell(k)) else { return false };
+                    cell.get()
+                }
+            };
+            if got.bits() != orig.bits() {
+                return false;
+            }
+        }
+        true
+    }
+
+    #[inline]
     pub fn slot(&self, i: usize) -> Slot<'gc> {
         match self.dict_cell() {
             Some(d) => d.borrow().slots[i],

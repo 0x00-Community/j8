@@ -116,8 +116,10 @@ pub struct Realm<'gc> {
 pub struct RegExpPristine<'gc> {
     pub shape: crate::ShapeRef<'gc>,
     pub last_index: crate::ShapeRef<'gc>,
-    pub slots: alloc::vec::Vec<(usize, Value<'gc>)>,
-    pub replace: JsObject<'gc>,
+    pub words: [(u16, Value<'gc>); 10],
+    pub constructor: (u16, Value<'gc>),
+    pub methods: [JsObject<'gc>; 5],
+    pub species: JsObject<'gc>,
 }
 
 pub type RegExpLiteral = for<'gc, 'a> fn(&crate::Agent<'gc, 'a>, &str, u16) -> Result<Value<'gc>, crate::Error>;
