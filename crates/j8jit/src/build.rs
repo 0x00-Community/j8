@@ -1738,6 +1738,9 @@ impl<'e> Builder<'e> {
                 }
             }
         }
+        if args.len() + 2 > crate::runtime::ARGS_WORDS {
+            return Err(Reject::Unsupported);
+        }
         let cw = self.real(st, callee);
         let tw = self.real(st, this);
         let mut ins = vec![cw, tw];
@@ -1943,6 +1946,9 @@ impl<'e> Builder<'e> {
                 let ntw = self.to_word(p);
                 return self.inline(act, st, p, tf, id, args, Some((ntw, id)), pc);
             }
+        }
+        if args.len() + 2 > crate::runtime::ARGS_WORDS {
+            return Err(Reject::Unsupported);
         }
         let cw = self.real(st, callee);
         let nw = self.real(st, nt);
