@@ -34,9 +34,14 @@ impl Layout {
     pub const FAST_NATIVE_FN: usize = Object::FAST_NATIVE_FN;
     pub const CLOSURE_FUNC: usize = core::mem::offset_of!(Closure<'static>, func);
     pub const CLOSURE_ENV: usize = core::mem::offset_of!(Closure<'static>, env);
+    pub const STR_UNITS: usize = crate::JsStr::UNITS_OFFSET;
 }
 
 const _: () = assert!(core::mem::size_of::<crate::ValueCell<'static>>() == 16);
+const _: () = assert!(Layout::STR_UNITS == crate::JsStr::UNITS_OFFSET);
+const _: () = assert!(Layout::STR_UNITS == 12 && Layout::STR_UNITS + 4 <= 32);
+const _: () = assert!(core::mem::size_of::<crate::JsStr<'static>>() == 32);
+const _: () = assert!(core::mem::size_of::<crate::JsString<'static>>() == 8);
 const _: () = assert!(Object::CLASS_OFFSET == Object::SPARSE_OFFSET + 4);
 const _: () = assert!(Layout::ARRAY_LEN == 152 && Layout::ARRAY_ROOT == 136);
 const _: () = assert!(Layout::NODE_TAIL_META == 8 + 128 * 16);

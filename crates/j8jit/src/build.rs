@@ -21,6 +21,7 @@ pub const HINT_NO_INLINE: u8 = 4;
 
 pub const OBJECT_TAG: u64 = 0xFFF0_0000_0000_0000 | ((j8framework::ValueTag::OBJECT as u64 + 1) << 48);
 pub const CONTEXT_TAG: u64 = 0xFFF0_0000_0000_0000 | ((j8framework::ValueTag::CONTEXT as u64 + 1) << 48);
+pub const STRING_TAG: u64 = 0xFFF0_0000_0000_0000 | ((j8framework::ValueTag::STRING as u64 + 1) << 48);
 
 const INLINE_DEPTH: usize = 4;
 
@@ -1350,6 +1351,27 @@ impl<'e> Builder<'e> {
         v
     }
 
+    fn concat_values(&mut self, act: &Act<'e>, st: &mut St, l: V, r: V, pc: usize) -> V {
+        let a = self.real(st, l);
+        let b = self.real(st, r);
+        self.flush(st);
+        let fs = self.state(act, st, pc);
+        let v = self.emit(Op::Call(Helper::Concat, vec![a, b], Some(fs)), Rep::Word);
+        Self::forget(st);
+        v
+    }
+
+    fn string_empty(&mut self) -> V {
+        let raw = self.emit(Op::CtxField(Ctx::EMPTY), Rep::Ptr);
+        self.emit(Op::BoxPtr(raw, STRING_TAG), Rep::Word)
+    }
+
+    fn string_byte(&mut self, byte: u8) -> V {
+        let base = self.emit(Op::CtxField(Ctx::CHARS), Rep::Ptr);
+        let raw = self.emit(Op::LoadRaw(base, i32::from(byte) * 8), Rep::Ptr);
+        self.emit(Op::BoxPtr(raw, STRING_TAG), Rep::Word)
+    }
+
     fn generic_binary(&mut self, act: &Act<'e>, st: &mut St, op: BinaryOp, l: V, r: V, pc: usize) -> R<V> {
         let a = self.real(st, l);
         let b = self.real(st, r);
@@ -1569,6 +1591,19 @@ impl<'e> Builder<'e> {
     fn get_named(&mut self, act: &Act<'e>, st: &mut St, obj: V, name: OperandValue, slot: OperandValue, pc: usize) -> R<V> {
         let fb = act.f.property(slot);
         let key = act.f.name(name);
+        if Self::vobj(st, obj).is_none()
+            && self.hint(act.id, pc) & HINT_GENERIC == 0
+            && let Some(kind) = act.f.string_property(slot)
+        {
+            match kind {
+                j8executor::StringFeedback::Length => return Ok(self.string_length(act, st, obj, pc)),
+                j8executor::StringFeedback::Proto(fb) if fb.to.is_none() && (fb.shape.is_some() || fb.depth >= 1) => return Ok(self.string_proto_load(act, st, obj, &fb, key, pc)),
+                j8executor::StringFeedback::Proto(_) => {
+                    let w = self.real(st, obj);
+                    return self.generic_get(act, st, w, name, pc);
+                }
+            }
+        }
         if let Some(o) = Self::vobj(st, obj).cloned() {
             if let Some(i) = o.shape.and_then(|s| unsafe { s.shape() }.find(key)) {
                 return Ok(o.fields[i]);
@@ -1606,6 +1641,36 @@ impl<'e> Builder<'e> {
                 self.generic_get(act, st, w, name, pc)
             }
         }
+    }
+
+    fn string_length(&mut self, act: &Act<'e>, st: &mut St, obj: V, pc: usize) -> V {
+        let w = self.real(st, obj);
+        let fs = self.state(act, st, pc);
+        let p = self.emit(Op::CheckString(w, fs), Rep::Ptr);
+        let n = self.emit(Op::Load32(p, Self::off(Layout::STR_UNITS)), Rep::I32);
+        let z = self.int(0);
+        let neg = self.emit(Op::CmpInt(Cond::Lt, n, z), Rep::Bool);
+        self.emit(Op::Check(neg, false, fs), Rep::None);
+        n
+    }
+
+    fn string_proto_load(&mut self, act: &Act<'e>, st: &mut St, obj: V, fb: &j8executor::PropertyFeedback, name: &str, pc: usize) -> V {
+        let w = self.real(st, obj);
+        let fs = self.state(act, st, pc);
+        self.emit(Op::CheckString(w, fs), Rep::Ptr);
+        let proto = self.emit(Op::CtxField(Ctx::STRING_PROTO), Rep::Ptr);
+        self.shape_check(act, st, proto, fb.shape, pc);
+        if fb.depth == 0 {
+            let c = self.prop_cell(proto, fb.slot);
+            let v = self.load(st, LOAD_WORD, c, Self::prop_off(fb.slot));
+            return self.guard_lazy(act, st, v, name, pc);
+        }
+        let next = self.load(st, LOAD_PTR, proto, Self::off(Layout::OBJECT_PROTO));
+        let fs = self.state(act, st, pc);
+        let z = self.emit(Op::Word(0), Rep::Word);
+        let gone = self.emit(Op::CmpWord(Cond::Eq, next, z), Rep::Bool);
+        self.emit(Op::Check(gone, false, fs), Rep::None);
+        self.proto_load(act, st, next, fb, name, pc)
     }
 
     fn proto_load(&mut self, act: &Act<'e>, st: &mut St, proto: V, fb: &j8executor::PropertyFeedback, name: &str, pc: usize) -> V {
@@ -2041,6 +2106,10 @@ impl<'e> Builder<'e> {
                     let v = if f64::from(i) == *x && !(i == 0 && x.is_sign_negative()) { self.int(i) } else { self.emit(Op::F64(*x), Rep::F64) };
                     set_acc!(v);
                 }
+                Some(Constant::String(s)) if s.is_empty() => set_acc!(self.string_empty()),
+                Some(Constant::String(s)) if s.len() == 1 && s.as_bytes()[0] < 128 => set_acc!(self.string_byte(s.as_bytes()[0])),
+                Some(Constant::Utf16(u)) if u.is_empty() => set_acc!(self.string_empty()),
+                Some(Constant::Utf16(u)) if u.len() == 1 && u[0] < 128 => set_acc!(self.string_byte(u8::try_from(u[0]).unwrap_or(0))),
                 Some(Constant::String(_) | Constant::Utf16(_)) => {
                     let v = self.emit(Op::Call(Helper::Constant(act.id, u32::try_from(o[0]).unwrap_or(0)), Vec::new(), None), Rep::Word);
                     set_acc!(v);
@@ -2056,13 +2125,13 @@ impl<'e> Builder<'e> {
             Bc::Add | Bc::Sub | Bc::Mul | Bc::Div | Bc::Mod | Bc::BitwiseAnd | Bc::BitwiseOr | Bc::BitwiseXor | Bc::ShiftLeft | Bc::ShiftRight | Bc::ShiftRightLogical => {
                 let l = Self::reg(act, st, o[0])?;
                 let op = Self::binary_op(d.bytecode);
-                let v = self.arith(act, st, op, l, st.r.acc, pc)?;
+                let v = if d.bytecode == Bc::Add && self.hint(act.id, pc) & HINT_GENERIC != 0 { self.concat_values(act, st, l, st.r.acc, pc) } else { self.arith(act, st, op, l, st.r.acc, pc)? };
                 set_acc!(v);
             }
             Bc::AddSmi | Bc::SubSmi | Bc::MulSmi | Bc::DivSmi | Bc::ModSmi | Bc::BitwiseAndSmi | Bc::BitwiseOrSmi | Bc::BitwiseXorSmi | Bc::ShiftLeftSmi | Bc::ShiftRightSmi | Bc::ShiftRightLogicalSmi => {
                 let r = self.int(i32::try_from(o[0]).unwrap_or(0));
                 let op = Self::binary_op(d.bytecode);
-                let v = self.arith(act, st, op, acc, r, pc)?;
+                let v = if d.bytecode == Bc::AddSmi && self.hint(act.id, pc) & HINT_GENERIC != 0 { self.concat_values(act, st, acc, r, pc) } else { self.arith(act, st, op, acc, r, pc)? };
                 set_acc!(v);
             }
             Bc::Inc | Bc::Dec => {

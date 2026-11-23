@@ -108,6 +108,12 @@ impl<'gc> Value<'gc> {
     }
 
     #[inline]
+    pub fn as_string(self) -> Option<JsString<'gc>> {
+        (self.bits >> ValueBits::TAG_SHIFT == ValueBits::boxed(ValueTag::STRING, 0) >> ValueBits::TAG_SHIFT)
+            .then(|| unsafe { gc_from_raw(Self::address(self.bits & ValueBits::PAYLOAD)) })
+    }
+
+    #[inline]
     #[allow(clippy::cast_possible_truncation)]
     fn address<T>(payload: u64) -> *const T {
         core::ptr::with_exposed_provenance(payload as usize)

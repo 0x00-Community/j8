@@ -44,8 +44,13 @@ pub struct Ic {
     chain: [Cell<usize>; DEPTH],
     to: RefCell<Option<Kept>>,
     adds: Cell<bool>,
+    string_kind: Cell<u8>,
     keep: RefCell<Vec<Kept>>,
 }
+
+const STRING_LENGTH: u8 = 1;
+
+const STRING_PROTO: u8 = 2;
 
 impl Ic {
     fn name_ok(name: &str) -> bool {
@@ -54,9 +59,40 @@ impl Ic {
 
     fn reset(&self) {
         self.shape.set(0);
+        self.string_kind.set(0);
         self.keep.borrow_mut().clear();
         *self.to.borrow_mut() = None;
         self.adds.set(false);
+    }
+
+    #[inline]
+    pub fn names_length(&self) -> bool {
+        self.string_kind.get() == STRING_LENGTH
+    }
+
+    #[inline]
+    pub fn note_length(&self) {
+        if self.string_kind.get() == STRING_LENGTH {
+            return;
+        }
+        self.reset();
+        self.string_kind.set(STRING_LENGTH);
+    }
+
+    pub fn fill_primitive<'gc>(&self, mc: &Mutation<'gc>, proto: JsObject<'gc>, name: &str) {
+        self.fill_get(mc, proto, name);
+        if self.shape.get() != 0 {
+            self.string_kind.set(STRING_PROTO);
+        }
+    }
+
+    pub fn string_value<'gc>(&self, proto: JsObject<'gc>) -> Option<Value<'gc>> {
+        (self.string_kind.get() == STRING_PROTO).then(|| self.probe(proto)).flatten()
+    }
+
+    #[inline(never)]
+    fn probe<'gc>(&self, o: JsObject<'gc>) -> Option<Value<'gc>> {
+        self.get(o)
     }
 
     fn keep<'gc>(&self, mc: &Mutation<'gc>, d: &Object<'gc>) -> usize {
@@ -92,7 +128,8 @@ impl Ic {
         proto.is_none()
     }
 
-    #[inline]
+    #[expect(clippy::inline_always, reason = "the property-load handler keeps its cache hit inline; with the string caller added the compiler stopped inlining it")]
+    #[inline(always)]
     pub fn get<'gc>(&self, o: JsObject<'gc>) -> Option<Value<'gc>> {
         let want = self.shape.get();
         let d = o.get();
@@ -304,6 +341,21 @@ impl Ic {
     }
 
     pub fn feedback(&self) -> Option<PropertyFeedback> {
+        if self.string_kind.get() != 0 {
+            return None;
+        }
+        self.recorded()
+    }
+
+    pub fn string_feedback(&self) -> Option<StringFeedback> {
+        match self.string_kind.get() {
+            STRING_LENGTH => Some(StringFeedback::Length),
+            STRING_PROTO => self.recorded().map(StringFeedback::Proto),
+            _ => None,
+        }
+    }
+
+    fn recorded(&self) -> Option<PropertyFeedback> {
         let shape = match self.shape.get() {
             0 => return None,
             EMPTY => None,
@@ -318,6 +370,12 @@ impl Ic {
         Some(PropertyFeedback { shape, slot, depth, chain, to })
     }
 
+}
+
+#[derive(Clone)]
+pub enum StringFeedback {
+    Length,
+    Proto(PropertyFeedback),
 }
 
 #[derive(Clone)]

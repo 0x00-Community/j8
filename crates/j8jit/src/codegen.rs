@@ -6,7 +6,7 @@ use j8executor::FrameSlots;
 use j8framework::{Layout, Value, ValueBits};
 
 use crate::asm::{Alu, Asm, Cc, Label, Shift, R, RAX, RBP, RBX, RCX, RDI, RDX, RSI, RSP, R10, R11, R12, R13, R14, R15, R8, R9, SAVED_END, X};
-use crate::build::{Kind, OBJECT_TAG};
+use crate::build::{Kind, OBJECT_TAG, STRING_TAG};
 use crate::ir::{Cond, Graph, Helper, IntOp, Op, Rep, Slot, B, Fs, V};
 use crate::runtime::Ctx;
 
@@ -58,6 +58,7 @@ pub enum Sym {
     Deopt,
     Poll,
     Helper,
+    Concat,
     Direct(u8),
     Target(u32),
 }
@@ -940,6 +941,16 @@ impl<'g> Gen<'g> {
                 self.untag(RAX);
                 self.put(v, RAX);
             }
+            Op::CheckString(x, fs) => {
+                let r = self.gpr(x, RAX);
+                self.a.mov_rr(RAX, r);
+                self.a.mov_rr(RCX, r);
+                self.a.shift_ri(Shift::Shr, true, RCX, 48);
+                self.a.alu_ri(Alu::Cmp, false, RCX, i32::try_from(STRING_TAG >> 48).unwrap_or(0));
+                self.exit_if(Cc::Ne, fs, Reason::Shape);
+                self.untag(RAX);
+                self.put(v, RAX);
+            }
             Op::CheckNotHole(x, fs) => {
                 let r = self.gpr(x, RAX);
                 self.a.mov_ri(RCX, ValueBits::UNINIT);
@@ -1019,6 +1030,12 @@ impl<'g> Gen<'g> {
                 let r = self.gpr(base, RAX);
                 let d = self.dst(v, RAX);
                 self.a.load(d, r, off);
+                self.put(v, d);
+            }
+            Op::Load32(base, off) => {
+                let r = self.gpr(base, RAX);
+                let d = self.dst(v, RAX);
+                self.a.load32(d, r, off);
                 self.put(v, d);
             }
             Op::LoadPtr(base, off) => {
@@ -1155,7 +1172,8 @@ impl<'g> Gen<'g> {
                 }
             }
             Op::Call(h, args, fs) => {
-                let id = self.helper_id(h, args.len());
+                let concat = matches!(h, Helper::Concat);
+                let id = if concat { 0 } else { self.helper_id(h, args.len()) };
                 self.args_to_ctx(&args);
                 self.a.mov_rr(RDI, R15);
                 self.a.mov_ri(RSI, u64::from(id));
@@ -1167,7 +1185,7 @@ impl<'g> Gen<'g> {
                     }
                 }
                 let at = self.a.call_abs(0);
-                self.relocs.push((at, Sym::Helper));
+                self.relocs.push((at, if concat { Sym::Concat } else { Sym::Helper }));
                 if let Some(fs) = fs
                     && h.throws()
                 {
