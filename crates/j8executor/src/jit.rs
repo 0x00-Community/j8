@@ -20,6 +20,8 @@ pub trait Tier {
     fn callback<'gc>(&self, _exe: &Executor, _a: &mut Agent<'gc, '_>, _f: Function<'_>, _callee: Value<'gc>, _this: Value<'gc>) -> Option<j8framework::Callback<'gc>> {
         None
     }
+
+    fn entered(&self) {}
 }
 
 #[derive(Debug)]
@@ -373,6 +375,7 @@ impl Executor {
             self.recycle(a, st);
             return Err(a.throw_value(v));
         }
+        self.note_user();
         let saved = self.depth.replace(level);
         let r = self.execute(a, st, &mut None).map(crate::Outcome::returned);
         self.depth.set(saved);

@@ -231,9 +231,50 @@ unsafe impl crate::Trace for ValueArray<'_> {
     }
 }
 
+#[derive(Clone, Copy)]
+pub struct ElementRun<'gc> {
+    root: usize,
+    base: u32,
+    count: u32,
+    cells: *const ValueCell<'gc>,
+}
+
+impl<'gc> ElementRun<'gc> {
+    #[inline]
+    pub fn get(self, elements: &ValueArray<'gc>, i: usize) -> Option<Value<'gc>> {
+        let at = i.checked_sub(self.base as usize)?;
+        if at >= self.count as usize || i >= elements.len() {
+            return None;
+        }
+        let root = elements.root.get()?;
+        if root.as_ptr() as usize != self.root {
+            return None;
+        }
+        Some(unsafe { (*self.cells.add(at)).get() })
+    }
+}
+
 impl<'gc> ValueArray<'gc> {
+    #[inline]
     pub fn len(&self) -> usize {
         self.len.get() as usize
+    }
+
+    #[inline]
+    pub fn run(&self, i: usize) -> Option<ElementRun<'gc>> {
+        if i >= self.len() {
+            return None;
+        }
+        let root = self.root.get()?;
+        let s = Store(root);
+        let base = if s.is_leaf() { 0 } else { i & !(FAN - 1) };
+        let first = s.cell(base)?;
+        let span = if s.is_leaf() { s.head() } else { FAN };
+        let end = base.saturating_add(span).min(self.len());
+        if i >= end {
+            return None;
+        }
+        Some(ElementRun { root: root.as_ptr() as usize, base: u32::try_from(base).ok()?, count: u32::try_from(end - base).ok()?, cells: first })
     }
 
     pub fn is_empty(&self) -> bool {
@@ -244,6 +285,7 @@ impl<'gc> ValueArray<'gc> {
         self.root.get().map(Store)
     }
 
+    #[inline]
     pub fn get(&self, i: usize) -> Option<Value<'gc>> {
         if i >= self.len() {
             return None;
@@ -278,6 +320,7 @@ impl<'gc> ValueArray<'gc> {
         grown
     }
 
+    #[inline]
     pub fn push(&self, mc: &Mutation<'gc>, v: Value<'gc>) {
         let i = self.len();
         self.reserve(mc, i + 1).cell_mut(mc, i).set(mc, v);

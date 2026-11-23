@@ -58,25 +58,51 @@ pub trait Invoke<'gc> {
 
 pub type CallbackRun = for<'gc, 'x> unsafe fn(&mut Agent<'gc, 'x>, &Callback<'gc>, &[Value<'gc>]) -> Option<Result<Value<'gc>, Error>>;
 
-#[derive(Clone, Copy)]
 pub struct Callback<'gc> {
     pub callee: Value<'gc>,
     pub this: Value<'gc>,
     pub run: Option<CallbackRun>,
     pub code: usize,
     pub arity: usize,
-    pub env: [usize; 2],
+    pub env: *mut (),
+    pub release: Option<unsafe fn(*mut ())>,
+    pub quiet: core::cell::Cell<bool>,
 }
 
 impl<'gc> From<(Value<'gc>, Value<'gc>)> for Callback<'gc> {
     fn from((callee, this): (Value<'gc>, Value<'gc>)) -> Self {
-        Self { callee, this, run: None, code: 0, arity: 0, env: [0; 2] }
+        Self { callee, this, run: None, code: 0, arity: 0, env: core::ptr::null_mut(), release: None, quiet: core::cell::Cell::new(false) }
+    }
+}
+
+impl Drop for Callback<'_> {
+    fn drop(&mut self) {
+        if let Some(release) = self.release.take() {
+            unsafe { release(self.env) };
+        }
     }
 }
 
 impl<'gc> Callback<'gc> {
     #[inline]
+    pub fn passed(&self) -> Option<usize> {
+        self.run.map(|_| self.arity)
+    }
+
+    #[inline]
     pub fn call(&self, a: &mut Agent<'gc, '_>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+        self.quiet.set(false);
+        self.enter(a, args)
+    }
+
+    #[inline]
+    pub fn again(&self, a: &mut Agent<'gc, '_>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+        self.quiet.set(true);
+        self.enter(a, args)
+    }
+
+    #[inline]
+    fn enter(&self, a: &mut Agent<'gc, '_>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         if let Some(run) = self.run
             && let Some(r) = unsafe { run(a, self, args) }
         {
