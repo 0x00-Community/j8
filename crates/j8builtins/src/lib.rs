@@ -131,7 +131,7 @@ impl<'gc> Installer<'_, 'gc> {
     }
 
     fn text(&self, s: &str) -> Value<'gc> {
-        Value::String(self.mc.alloc(j8framework::JsStr::from(s)))
+        Value::String(j8framework::JsStr::alloc(self.mc, s))
     }
 
     fn plain(&self) -> JsObject<'gc> {

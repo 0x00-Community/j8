@@ -240,7 +240,7 @@ impl<'gc> Realm<'gc> {
             function_proto,
             array_proto: derived(object_proto),
             string_proto: derived(object_proto),
-            chars: (0u8..128).map(|c| mc.alloc(crate::JsStr::from(alloc::string::String::from(char::from(c)).as_str()))).collect(),
+            chars: (0u8..128).map(|c| crate::JsStr::alloc_known(mc, alloc::string::String::from(char::from(c)).as_str(), true)).collect(),
             number_proto: derived(object_proto),
             boolean_proto: derived(object_proto),
             error_protos,
@@ -274,7 +274,7 @@ impl<'gc> Realm<'gc> {
         if let Some(n) = length {
             d.define("length", prop(f64::from(n).into()));
         }
-        d.define("name", prop(Value::String(mc.alloc(crate::JsStr::from(name)))));
+        d.define("name", prop(Value::String(crate::JsStr::alloc(mc, name))));
     }
 
     pub fn named_native(&self, mc: &Mutation<'gc>, f: NativeFn, name: &str, length: u32) -> JsObject<'gc> {

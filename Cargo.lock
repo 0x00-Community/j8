@@ -765,9 +765,9 @@ dependencies = [
 
 [[package]]
 name = "paragc"
-version = "0.6.0"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9aa1eaeb6c74f9d3886f2860978d1208a49b6bdeb0ded4da9c899e3c849c9115"
+checksum = "be3d22eb93c0b5cf1ad1a7a45a958754969df1271700859944a407a59334a499"
 dependencies = [
  "crossbeam-deque",
  "crossbeam-utils",
@@ -777,9 +777,9 @@ dependencies = [
 
 [[package]]
 name = "paragc-macros"
-version = "0.6.0"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4e33f8e8d7cf9f6947000df1f5a52a04805a00531383ffd79bafc6e90b724adc"
+checksum = "e29da78c51cbbb676f9b46dc16dd1dd70f9078b79506b430c72164af1a52b913"
 dependencies = [
  "proc-macro2",
  "quote",

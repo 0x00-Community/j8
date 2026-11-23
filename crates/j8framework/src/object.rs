@@ -9,7 +9,7 @@ use crate::{CellMut, CellRef, Collect, Gc, GcCell, GcSlot, Mutation, ValueCell};
 
 use crate::{Agent, Backing, Error, FuncId, Key, Value};
 
-pub type JsString<'gc> = Gc<'gc, crate::text::JsStr>;
+pub type JsString<'gc> = Gc<'gc, crate::text::JsStr<'gc>>;
 
 #[derive(Debug, Collect)]
 #[collect(require_static)]
@@ -446,7 +446,7 @@ impl From<Value<'_>> for MapKey {
             ValueKind::Bool(b) => MapKey::Bool(b),
             ValueKind::Number(x) if x.is_nan() => MapKey::Number(f64::NAN.to_bits()),
             ValueKind::Number(x) => MapKey::Number((x + 0.0).to_bits()),
-            ValueKind::String(s) => MapKey::String(s.text().clone()),
+            ValueKind::String(s) => MapKey::String(crate::SmallStr::from(s.as_str())),
             ValueKind::BigInt(b) => MapKey::BigInt(alloc::format!("{}", b.0).into()),
             ValueKind::Symbol(s) => MapKey::Ref(Gc::as_ptr(s) as usize),
             ValueKind::Object(o) => MapKey::Ref(Gc::as_ptr(o).cast::<u8>() as usize),
