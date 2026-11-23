@@ -1,7 +1,7 @@
 use alloc::format;
 use alloc::string::String;
 
-use crate::{ContextRoot, Error, Global, Isolate, Quota};
+use crate::Error;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Source<'s> {
@@ -27,31 +27,4 @@ pub enum ScriptKind {
     Classic,
     Shared,
     Module,
-}
-
-pub trait Engine<'p> {
-    type Job: Send;
-
-    const SLICE: usize = 10_000;
-
-    fn start(&mut self, isolate: &mut Isolate<'p>, cx: &ContextRoot<'p>, src: &Source<'_>, kind: ScriptKind) -> Result<Self::Job, Error>;
-
-    fn resume(&mut self, isolate: &mut Isolate<'p>, cx: &ContextRoot<'p>, job: &mut Self::Job, quota: &mut Quota) -> Result<Option<Global<'p>>, Error>;
-
-    fn eval(&mut self, isolate: &mut Isolate<'p>, cx: &ContextRoot<'p>, src: &Source<'_>) -> Result<Global<'p>, Error> {
-        self.run_to_end(isolate, cx, src, ScriptKind::Classic)
-    }
-
-    fn eval_module(&mut self, isolate: &mut Isolate<'p>, cx: &ContextRoot<'p>, src: &Source<'_>) -> Result<Global<'p>, Error> {
-        self.run_to_end(isolate, cx, src, ScriptKind::Module)
-    }
-
-    fn run_to_end(&mut self, isolate: &mut Isolate<'p>, cx: &ContextRoot<'p>, src: &Source<'_>, kind: ScriptKind) -> Result<Global<'p>, Error> {
-        let mut job = self.start(isolate, cx, src, kind)?;
-        loop {
-            if let Some(g) = self.resume(isolate, cx, &mut job, &mut Quota::from(Self::SLICE))? {
-                return Ok(g);
-            }
-        }
-    }
 }

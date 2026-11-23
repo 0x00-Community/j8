@@ -1,14 +1,14 @@
 use alloc::boxed::Box;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::any::Any;
+use core::any::{Any, TypeId};
 use core::cell::{Cell, RefCell, UnsafeCell};
 use core::ffi::c_void;
 use core::num::NonZeroUsize;
 use core::ptr::NonNull;
 
-use j8framework::{Agent, Error, Global, JsObject, JsSymbol, ObjectData, ObjectKind, Property, Static, SymbolData, Value, ValueKind};
-use j8lockfree::{AtomicRefCell, Fifo};
+use j8framework::{Agent, Error, GcCell, Host, HostObject, JsObject, JsSymbol, ObjectData, ObjectKind, Property, ScopeGlobal, SymbolData, Tracer, Value, ValueBrand, ValueKind};
+use j8lockfree::Fifo;
 
 use crate::{Finalize, Handle, Status};
 
@@ -20,7 +20,7 @@ struct Scope {
 
 #[derive(Clone, Copy, Debug)]
 pub struct Pending {
-    pub cb: unsafe extern "C" fn(env: *mut Env, data: *mut c_void, hint: *mut c_void),
+    pub cb: unsafe extern "C" fn(env: *mut Env<'_>, data: *mut c_void, hint: *mut c_void),
     pub data: *mut c_void,
     pub hint: *mut c_void,
 }
@@ -48,14 +48,14 @@ struct Instance {
     finalize: Option<Pending>,
 }
 
-pub struct Env {
+pub struct Env<'e> {
     agent: Cell<Option<NonNull<c_void>>>,
     handles: RefCell<Vec<u64>>,
     scopes: RefCell<Vec<Scope>>,
     pending: RefCell<Option<Error>>,
     last: UnsafeCell<crate::ExtendedErrorInfo>,
-    wrap_key: Global,
-    tag_key: Global,
+    wrap_key: ScopeGlobal<'e, ValueBrand>,
+    tag_key: ScopeGlobal<'e, ValueBrand>,
     instance: RefCell<Option<Instance>>,
     finalizers: Arc<Fifo<Pending>>,
     external_memory: Cell<i64>,
@@ -63,13 +63,39 @@ pub struct Env {
     node_version: crate::NodeVersion,
 }
 
-unsafe impl Send for Env {}
+unsafe impl Send for Env<'_> {}
 
-unsafe impl Sync for Env {}
+unsafe impl Sync for Env<'_> {}
 
-struct Holder(#[expect(dead_code, reason = "only dropped along with the host object")] Box<Env>);
+struct Holder<'e>(#[expect(dead_code, reason = "only dropped along with the host object")] Box<Env<'e>>);
 
-impl Env {
+unsafe impl<'e> Opaque<'e> for Holder<'e> {
+    type Brand = HolderBrand;
+}
+
+pub enum HolderBrand {}
+
+pub unsafe trait Opaque<'scope>: Send + Sync + 'scope {
+    type Brand: Any;
+}
+
+struct Boxed<T>(T);
+
+unsafe impl<'scope, T: Opaque<'scope>> HostObject<'scope> for Boxed<T> {
+    fn trace(&self, _: &mut Tracer<'_>) {}
+
+    fn relocate(&mut self, _: &mut Tracer<'_>) {}
+
+    fn find(&self, brand: TypeId) -> Option<NonNull<()>> {
+        (brand == TypeId::of::<T::Brand>()).then(|| NonNull::from(&self.0).cast())
+    }
+
+    fn find_mut(&mut self, brand: TypeId) -> Option<NonNull<()>> {
+        (brand == TypeId::of::<T::Brand>()).then(|| NonNull::from(&mut self.0).cast())
+    }
+}
+
+impl Env<'_> {
     pub fn agent<'a, 'scope>(&self) -> Result<&'a mut Agent<'scope, 'a>, Status> {
         let p = self.agent.get().ok_or(Status::CannotRunJs)?;
         Ok(unsafe { p.cast::<Agent<'scope, 'a>>().as_mut() })
@@ -184,22 +210,28 @@ impl Env {
         Self::symbol(a, &self.tag_key)
     }
 
-    fn symbol<'scope>(a: &Agent<'scope, '_>, g: &Global) -> JsSymbol<'scope> {
+    fn symbol<'scope>(a: &Agent<'scope, '_>, g: &ScopeGlobal<'_, ValueBrand>) -> JsSymbol<'scope> {
         match a.local(g).kind() {
             ValueKind::Symbol(s) => s,
             _ => unreachable!("the keys are symbols"),
         }
     }
 
-    pub fn host<'scope>(a: &Agent<'scope, '_>, v: impl Any + Send + Sync) -> JsObject<'scope> {
-        let data = a.mc.alloc(Static(AtomicRefCell::new(Box::new(v) as Box<dyn Any + Send + Sync>)));
+    pub fn host<'scope>(a: &Agent<'scope, '_>, v: impl Opaque<'scope>) -> JsObject<'scope> {
+        let data = a.mc.alloc(GcCell::new(a.mc, Host::new(Boxed(v))));
         ObjectData { kind: ObjectKind::Host(data), proto: None, ..ObjectData::default() }.alloc(a.mc)
     }
 
-    pub fn hosted<T: Any, R>(o: JsObject<'_>, f: impl FnOnce(&mut T) -> R) -> Option<R> {
+    pub fn holds<'scope, T: Opaque<'scope>>(o: JsObject<'scope>) -> bool {
+        let ObjectKind::Host(h) = o.borrow().kind else { return false };
+        h.try_borrow().is_some_and(|cell| cell.find(TypeId::of::<T::Brand>()).is_some())
+    }
+
+    pub fn hosted<'scope, T: Opaque<'scope>, R>(a: &Agent<'scope, '_>, o: JsObject<'scope>, f: impl FnOnce(&mut T) -> R) -> Option<R> {
         let ObjectKind::Host(h) = o.borrow().kind else { return None };
-        let mut cell = h.0.try_borrow_mut()?;
-        cell.downcast_mut::<T>().map(f)
+        let mut cell = h.try_borrow_mut(a.mc)?;
+        let p = cell.find_mut(TypeId::of::<T::Brand>())?;
+        Some(f(unsafe { p.cast::<T>().as_mut() }))
     }
 
     pub fn private<'scope>(o: JsObject<'scope>, key: JsSymbol<'scope>) -> Option<Value<'scope>> {
@@ -268,8 +300,8 @@ impl Env {
     }
 
     pub fn open<'scope>(a: &mut Agent<'scope, '_>, register: crate::RegisterFn) -> Result<Value<'scope>, Error> {
-        let key = |a: &Agent<'scope, '_>, d: &str| -> Global { a.global(Value::Symbol(a.mc.alloc(SymbolData { description: Some(Box::from(d)), private: false }))) };
-        let env = Box::new(Self {
+        let key = |a: &Agent<'scope, '_>, d: &str| -> ScopeGlobal<'scope, ValueBrand> { a.global(Value::Symbol(a.mc.alloc(SymbolData { description: Some(Box::from(d)), private: false }))) };
+        let env = Box::new(Env {
             agent: Cell::new(None),
             handles: RefCell::default(),
             scopes: RefCell::default(),
@@ -300,7 +332,7 @@ impl Env {
     }
 }
 
-impl Drop for Env {
+impl Drop for Env<'_> {
     fn drop(&mut self) {
         while let Some((hook, arg)) = self.cleanup.get_mut().pop() {
             unsafe { hook(core::ptr::with_exposed_provenance_mut(arg)) };

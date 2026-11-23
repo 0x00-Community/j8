@@ -25,11 +25,11 @@ const CASES: &[Case] = &[
 fn outcome(jit: bool, text: &str) -> String {
     let platform = DefaultPlatform::default();
     let mut isolate = Isolate::new(&platform, CreateParams::default());
-    let mut executor = if jit { Executor::default().with_tier(j8jit::Jit::from(0)) } else { Executor::default() };
-    let cx = isolate.enter(|scope| scope.persist(scope.context(&Builtins)));
-    let r = isolate.run(&mut executor, &cx, &Source { text, file: "typeof.js" });
+    let executor = if jit { Executor::default().with_tier(j8jit::Jit::from(0)) } else { Executor::default() };
+    let cx = isolate.enter(|scope| scope.mc.stash::<j8framework::RealmBrand>(scope.context(&Builtins).realm()));
+    let r = executor.eval(&mut isolate, &cx, &Source { text, file: "typeof.js" });
     isolate.enter(|scope| {
-        let realm = scope.context_of(&cx);
+        let realm = scope.mc.fetch(&cx).into();
         let mut a = scope.agent(realm, &executor);
         match r {
             Ok(g) => {

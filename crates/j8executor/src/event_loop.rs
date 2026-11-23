@@ -15,7 +15,9 @@ use std::thread::{Scope, Thread};
 use j8lockfree::{AtomicRefCell, Fifo, Oneshot, Receiver, SegVec, Sender};
 use j8taskqueue::{Flow, ITask, ITaskPoll, Queue, Task, TaskId};
 
-use crate::{Agent, AsyncJob, ContextRoot, CreateParams, Engine, Error, ErrorKind, Global, Intrinsics, Invoke, Isolate, Platform, Quota, ScriptKind, Settle, Source, Value};
+use j8framework::{Agent, AsyncJob, CreateParams, Error, ErrorKind, Intrinsics, Isolate, IsolateHandle, Platform, Quota, RealmBrand, ScopeGlobal, ScriptKind, Settle, Source, Value, ValueBrand};
+
+use crate::{Executor, Job};
 
 pub const SLICE: usize = 10_000;
 
@@ -91,7 +93,7 @@ struct Bell {
     idle: Fifo<Thread>,
     weight: AtomicUsize,
     spent: AtomicU64,
-    handle: crate::IsolateHandle,
+    handle: IsolateHandle,
 }
 
 impl Bell {
@@ -190,7 +192,7 @@ impl<R> Drop for Reply<R> {
     }
 }
 
-type Answer<'p> = Sender<Result<Global<'p>, Error>>;
+type Answer<'p> = Sender<Result<ScopeGlobal<'p, ValueBrand>, Error>>;
 
 struct Submitted<'p> {
     text: String,
@@ -200,45 +202,42 @@ struct Submitted<'p> {
 }
 
 struct Pending<'p> {
-    resolve: Global<'p>,
-    reject: Global<'p>,
+    resolve: ScopeGlobal<'p, ValueBrand>,
+    reject: ScopeGlobal<'p, ValueBrand>,
     future: Pin<Box<dyn Future<Output = Settle> + Send>>,
     waker: Waker,
 }
 
-struct JsState<'p, E: Engine<'p>> {
+struct JsState<'p> {
     bell: Arc<Bell>,
     isolate: Isolate<'p>,
-    engine: E,
-    cx: ContextRoot<'p>,
+    engine: Executor<'p>,
+    cx: ScopeGlobal<'p, RealmBrand>,
     pending: Vec<Option<Pending<'p>>>,
     holes: Vec<usize>,
     last: Option<TaskId<'p>>,
 }
 
-struct Js<'p, E: Engine<'p>> {
-    state: UnsafeCell<JsState<'p, E>>,
+struct Js<'p> {
+    state: UnsafeCell<JsState<'p>>,
 }
 
-unsafe impl<'p, E: Engine<'p>> Sync for Js<'p, E> where JsState<'p, E>: Send {}
+unsafe impl<'p> Sync for Js<'p> where JsState<'p>: Send {}
 
-impl<'p, E: Engine<'p> + Send + for<'scope> Invoke<'scope> + 'p> Js<'p, E> {
+impl<'p> Js<'p> {
     #[expect(clippy::mut_from_ref, reason = "exclusive by the queue's protocol, see the type")]
-    unsafe fn state(&self) -> &mut JsState<'p, E> {
+    unsafe fn state(&self) -> &mut JsState<'p> {
         unsafe { &mut *self.state.get() }
     }
 }
 
-impl<'p, E: Engine<'p> + Send + for<'scope> Invoke<'scope> + 'p> JsState<'p, E> {
+impl<'p> JsState<'p> {
     fn chain(&mut self, add: impl FnOnce(Task<'p>) -> TaskId<'p>, make: impl FnOnce(Vec<TaskId<'p>>) -> Task<'p>) {
         let after = self.last.take().into_iter().collect();
         self.last = Some(add(make(after)));
     }
 
-    fn adopt(&mut self, js: &Arc<Js<'p, E>>, mut add: impl FnMut(Task<'p>))
-    where
-        E: Send + 'p,
-    {
+    fn adopt(&mut self, js: &Arc<Js<'p>>, mut add: impl FnMut(Task<'p>)) {
         for AsyncJob { resolve, reject, future } in self.isolate.take_spawned() {
             let job = self.holes.pop().unwrap_or(self.pending.len());
             let waker = Waker::from(Arc::new(JobWaker { job, bell: Arc::clone(&self.bell) }));
@@ -252,10 +251,7 @@ impl<'p, E: Engine<'p> + Send + for<'scope> Invoke<'scope> + 'p> JsState<'p, E> 
         }
     }
 
-    fn take_woken(&mut self, js: &Arc<Js<'p, E>>, mut add: impl FnMut(Task<'p>))
-    where
-        E: Send + 'p,
-    {
+    fn take_woken(&mut self, js: &Arc<Js<'p>>, mut add: impl FnMut(Task<'p>)) {
         let mut woken: Vec<usize> = core::iter::from_fn(|| self.bell.woken.pop()).collect();
         woken.sort_unstable();
         woken.dedup();
@@ -264,7 +260,7 @@ impl<'p, E: Engine<'p> + Send + for<'scope> Invoke<'scope> + 'p> JsState<'p, E> 
         }
     }
 
-    fn settle(&mut self, resolve: &Global<'p>, reject: &Global<'p>, settle: Settle) -> Result<(), Error> {
+    fn settle(&mut self, resolve: &ScopeGlobal<'p, ValueBrand>, reject: &ScopeGlobal<'p, ValueBrand>, settle: Settle) -> Result<(), Error> {
         self.enter(|a| {
             let (target, value) = match settle(a) {
                 Ok(v) => (resolve, v),
@@ -284,7 +280,7 @@ impl<'p, E: Engine<'p> + Send + for<'scope> Invoke<'scope> + 'p> JsState<'p, E> 
     fn enter<R>(&mut self, f: impl for<'scope> FnOnce(&mut Agent<'scope, '_>) -> R) -> R {
         let (engine, cx) = (&self.engine, &self.cx);
         self.isolate.enter(|scope| {
-            let realm = scope.context_of(cx);
+            let realm = scope.mc.fetch(cx).into();
             let mut a = scope.agent(realm, engine);
             f(&mut a)
         })
@@ -298,15 +294,15 @@ fn add_to<'p>(poll: &mut dyn ITaskPoll<'p>) -> impl FnMut(Task<'p>) -> TaskId<'p
     }
 }
 
-struct ScriptTask<'p, E: Engine<'p>> {
-    js: Arc<Js<'p, E>>,
+struct ScriptTask<'p> {
+    js: Arc<Js<'p>>,
     after: Vec<TaskId<'p>>,
     script: Option<(String, String, ScriptKind)>,
-    job: Option<E::Job>,
+    job: Option<Job<'p>>,
     reply: Option<Answer<'p>>,
 }
 
-impl<'p, E: Engine<'p> + Send + for<'scope> Invoke<'scope> + 'p> ITask<'p> for ScriptTask<'p, E> {
+impl<'p> ITask<'p> for ScriptTask<'p> {
     fn recursable(&self) -> bool {
         true
     }
@@ -319,13 +315,13 @@ impl<'p, E: Engine<'p> + Send + for<'scope> Invoke<'scope> + 'p> ITask<'p> for S
         let js = Arc::clone(&self.js);
         let st = unsafe { js.state() };
         if let Some((text, file, kind)) = self.script.take() {
-            match Engine::start(&mut st.engine, &mut st.isolate, &st.cx, &Source { text: &text, file: &file }, kind) {
+            match st.engine.start(&Source { text: &text, file: &file }, kind) {
                 Ok(job) => self.job = Some(job),
                 Err(e) => return self.finish(st, Err(e)),
             }
         }
         let Some(job) = &mut self.job else { return Flow::Done };
-        let r = Engine::resume(&mut st.engine, &mut st.isolate, &st.cx, job, quota);
+        let r = st.engine.resume(&mut st.isolate, &st.cx, job, quota);
         let mut add = add_to(poll);
         st.adopt(&self.js, |t| drop(add(t)));
         st.take_woken(&self.js, |t| drop(add(t)));
@@ -337,8 +333,8 @@ impl<'p, E: Engine<'p> + Send + for<'scope> Invoke<'scope> + 'p> ITask<'p> for S
     }
 }
 
-impl<'p, E: Engine<'p>> ScriptTask<'p, E> {
-    fn finish(&mut self, st: &mut JsState<'p, E>, done: Result<Global<'p>, Error>) -> Flow {
+impl<'p> ScriptTask<'p> {
+    fn finish(&mut self, st: &mut JsState<'p>, done: Result<ScopeGlobal<'p, ValueBrand>, Error>) -> Flow {
         if let Some(reply) = self.reply.take() {
             reply.send(done);
         }
@@ -347,15 +343,15 @@ impl<'p, E: Engine<'p>> ScriptTask<'p, E> {
     }
 }
 
-struct SettleTask<'p, E: Engine<'p>> {
-    js: Arc<Js<'p, E>>,
+struct SettleTask<'p> {
+    js: Arc<Js<'p>>,
     after: Vec<TaskId<'p>>,
-    resolve: Global<'p>,
-    reject: Global<'p>,
+    resolve: ScopeGlobal<'p, ValueBrand>,
+    reject: ScopeGlobal<'p, ValueBrand>,
     settle: Option<Settle>,
 }
 
-impl<'p, E: Engine<'p> + Send + for<'scope> Invoke<'scope> + 'p> ITask<'p> for SettleTask<'p, E> {
+impl<'p> ITask<'p> for SettleTask<'p> {
     fn recursable(&self) -> bool {
         true
     }
@@ -380,12 +376,12 @@ impl<'p, E: Engine<'p> + Send + for<'scope> Invoke<'scope> + 'p> ITask<'p> for S
     }
 }
 
-struct PollTask<'p, E: Engine<'p>> {
-    js: Arc<Js<'p, E>>,
+struct PollTask<'p> {
+    js: Arc<Js<'p>>,
     job: usize,
 }
 
-impl<'p, E: Engine<'p> + Send + for<'scope> Invoke<'scope> + 'p> ITask<'p> for PollTask<'p, E> {
+impl<'p> ITask<'p> for PollTask<'p> {
     fn recursable(&self) -> bool {
         true
     }
@@ -405,17 +401,17 @@ impl<'p, E: Engine<'p> + Send + for<'scope> Invoke<'scope> + 'p> ITask<'p> for P
     }
 }
 
-struct Lane<'p, E: Engine<'p>> {
+struct Lane<'p> {
     tasks: Queue<'p>,
-    js: Arc<Js<'p, E>>,
+    js: Arc<Js<'p>>,
     bell: Arc<Bell>,
     submitted: Arc<Fifo<Submitted<'p>>>,
 }
 
-impl<'p, E: Engine<'p> + Send + for<'scope> Invoke<'scope> + 'p> Lane<'p, E> {
-    fn new(platform: &'p dyn Platform, engine: E, intrinsics: &dyn Intrinsics, doors: &Arc<Doors>, home: usize) -> Box<Self> {
+impl<'p> Lane<'p> {
+    fn new(platform: &'p dyn Platform, engine: Executor<'p>, intrinsics: &dyn Intrinsics, doors: &Arc<Doors>, home: usize) -> Box<Self> {
         let mut isolate = Isolate::new(platform, CreateParams { event_loop: true, collector_threads: Some(NonZeroUsize::MIN), ..CreateParams::default() });
-        let cx = isolate.enter(|scope| scope.persist(scope.context(intrinsics)));
+        let cx = isolate.enter(|scope| scope.mc.stash(scope.context(intrinsics).realm()));
         let bell = Arc::new(Bell {
             doors: Arc::clone(doors),
             home: AtomicUsize::new(home),
@@ -466,19 +462,19 @@ impl<'p, E: Engine<'p> + Send + for<'scope> Invoke<'scope> + 'p> Lane<'p, E> {
     }
 }
 
-type WithLane<'a, 'p, E> = Box<dyn FnOnce(&mut Lane<'p, E>) + Send + 'a>;
+type WithLane<'a, 'p> = Box<dyn FnOnce(&mut Lane<'p>) + Send + 'a>;
 
-type OnThread<'a, 'p, E> = Box<dyn FnOnce(&mut LoopState<'p, E>) + Send + 'a>;
+type OnThread<'a, 'p> = Box<dyn FnOnce(&mut LoopState<'p>) + Send + 'a>;
 
-enum Msg<'p, E: Engine<'p>> {
-    Spawn(OnThread<'p, 'p, E>),
-    With(Arc<Bell>, WithLane<'p, 'p, E>),
-    Arrive(Box<Lane<'p, E>>),
+enum Msg<'p> {
+    Spawn(OnThread<'p, 'p>),
+    With(Arc<Bell>, WithLane<'p, 'p>),
+    Arrive(Box<Lane<'p>>),
     Give { n: usize, to: usize },
     Remove(Arc<Bell>),
 }
 
-impl<'p, E: Engine<'p>> Msg<'p, E> {
+impl Msg<'_> {
     fn bell(&self) -> Option<&Arc<Bell>> {
         match self {
             Self::With(b, _) | Self::Remove(b) => Some(b),
@@ -488,34 +484,34 @@ impl<'p, E: Engine<'p>> Msg<'p, E> {
     }
 }
 
-struct Port<'p, E: Engine<'p>> {
-    inbox: Fifo<Msg<'p, E>>,
+struct Port<'p> {
+    inbox: Fifo<Msg<'p>>,
     door: Arc<Door>,
 }
 
-impl<'p, E: Engine<'p>> Port<'p, E> {
-    fn send(&self, m: Msg<'p, E>) {
+impl<'p> Port<'p> {
+    fn send(&self, m: Msg<'p>) {
         self.inbox.push(m);
         self.door.unpark();
     }
 }
 
-struct Set<'p, E: Engine<'p>> {
+struct Set<'p> {
     platform: &'p dyn Platform,
     doors: Arc<Doors>,
-    ports: SegVec<Arc<Port<'p, E>>>,
+    ports: SegVec<Arc<Port<'p>>>,
     growing: AtomicBool,
     next: AtomicUsize,
     slice: AtomicUsize,
     check: AtomicUsize,
 }
 
-impl<'p, E: Engine<'p> + Send + for<'scope> Invoke<'scope> + 'p> Set<'p, E> {
+impl<'p> Set<'p> {
     fn new(platform: &'p dyn Platform) -> Self {
         Self { platform, doors: Arc::default(), ports: SegVec::default(), growing: AtomicBool::new(false), next: AtomicUsize::new(0), slice: AtomicUsize::new(SLICE), check: AtomicUsize::new(CHECK) }
     }
 
-    fn port(&self, i: usize) -> &Arc<Port<'p, E>> {
+    fn port(&self, i: usize) -> &Arc<Port<'p>> {
         self.ports.get(i).expect("a thread of the set")
     }
 
@@ -541,11 +537,11 @@ impl<'p, E: Engine<'p> + Send + for<'scope> Invoke<'scope> + 'p> Set<'p, E> {
         (0..n).map(|k| (start + k) % n).min_by_key(|&i| self.doors.get(i).load()).expect("at least one thread")
     }
 
-    fn call<R: Send>(&self, bell: &Arc<Bell>, f: impl FnOnce(&mut Lane<'p, E>) -> R + Send) -> R {
+    fn call<R: Send>(&self, bell: &Arc<Bell>, f: impl FnOnce(&mut Lane<'p>) -> R + Send) -> R {
         let (tx, rx) = Oneshot::new();
         let reply = Reply(Some(tx));
-        let with: WithLane<'_, 'p, E> = Box::new(move |l| reply.send(f(l)));
-        let with = unsafe { core::mem::transmute::<WithLane<'_, 'p, E>, WithLane<'p, 'p, E>>(with) };
+        let with: WithLane<'_, 'p> = Box::new(move |l| reply.send(f(l)));
+        let with = unsafe { core::mem::transmute::<WithLane<'_, 'p>, WithLane<'p, 'p>>(with) };
         self.port(bell.home.load(Ordering::Acquire)).send(Msg::With(Arc::clone(bell), with));
         block_on(rx).expect("the event loop's thread has shut down")
     }
@@ -557,17 +553,17 @@ impl<'p, E: Engine<'p> + Send + for<'scope> Invoke<'scope> + 'p> Set<'p, E> {
     }
 }
 
-struct LoopState<'p, E: Engine<'p>> {
+struct LoopState<'p> {
     me: usize,
-    set: Arc<Set<'p, E>>,
-    lanes: Vec<Option<Box<Lane<'p, E>>>>,
+    set: Arc<Set<'p>>,
+    lanes: Vec<Option<Box<Lane<'p>>>>,
     holes: Vec<usize>,
     ready: VecDeque<Arc<Bell>>,
-    early: Vec<Msg<'p, E>>,
+    early: Vec<Msg<'p>>,
 }
 
-impl<'p, E: Engine<'p> + Send + for<'scope> Invoke<'scope> + 'p> LoopState<'p, E> {
-    fn new(me: usize, set: Arc<Set<'p, E>>) -> Self {
+impl<'p> LoopState<'p> {
+    fn new(me: usize, set: Arc<Set<'p>>) -> Self {
         Self { me, set, lanes: Vec::new(), holes: Vec::new(), ready: VecDeque::new(), early: Vec::new() }
     }
 
@@ -575,7 +571,7 @@ impl<'p, E: Engine<'p> + Send + for<'scope> Invoke<'scope> + 'p> LoopState<'p, E
         self.set.doors.get(self.me)
     }
 
-    fn lane(&mut self, bell: &Arc<Bell>) -> Option<&mut Box<Lane<'p, E>>> {
+    fn lane(&mut self, bell: &Arc<Bell>) -> Option<&mut Box<Lane<'p>>> {
         if bell.home.load(Ordering::Acquire) != self.me {
             return None;
         }
@@ -588,7 +584,7 @@ impl<'p, E: Engine<'p> + Send + for<'scope> Invoke<'scope> + 'p> LoopState<'p, E
         }
     }
 
-    fn insert(&mut self, lane: Box<Lane<'p, E>>) -> Arc<Bell> {
+    fn insert(&mut self, lane: Box<Lane<'p>>) -> Arc<Bell> {
         let bell = Arc::clone(&lane.bell);
         let slot = self.holes.pop().unwrap_or(self.lanes.len());
         bell.slot.store(slot, Ordering::Release);
@@ -610,7 +606,7 @@ impl<'p, E: Engine<'p> + Send + for<'scope> Invoke<'scope> + 'p> LoopState<'p, E
         bell
     }
 
-    fn take(&mut self, bell: &Arc<Bell>) -> Option<Box<Lane<'p, E>>> {
+    fn take(&mut self, bell: &Arc<Bell>) -> Option<Box<Lane<'p>>> {
         self.lane(bell)?;
         let slot = bell.slot.load(Ordering::Acquire);
         let lane = self.lanes[slot].take()?;
@@ -647,7 +643,7 @@ impl<'p, E: Engine<'p> + Send + for<'scope> Invoke<'scope> + 'p> LoopState<'p, E
         self.door().asked.store(false, Ordering::Release);
     }
 
-    fn handle(&mut self, m: Msg<'p, E>) {
+    fn handle(&mut self, m: Msg<'p>) {
         if let Some(bell) = m.bell()
             && !matches!(m, Msg::Arrive(_))
             && self.lane(bell).is_none()
@@ -750,10 +746,10 @@ impl<'p, E: Engine<'p> + Send + for<'scope> Invoke<'scope> + 'p> LoopState<'p, E
     }
 }
 
-pub struct Ticket<'p>(Receiver<Result<Global<'p>, Error>>);
+pub struct Ticket<'p>(Receiver<Result<ScopeGlobal<'p, ValueBrand>, Error>>);
 
 impl<'p> Ticket<'p> {
-    pub fn try_take(&mut self) -> Option<Result<Global<'p>, Error>> {
+    pub fn try_take(&mut self) -> Option<Result<ScopeGlobal<'p, ValueBrand>, Error>> {
         match Pin::new(&mut self.0).poll(&mut Context::from_waker(Waker::noop())) {
             Poll::Ready(r) => Some(r),
             Poll::Pending => None,
@@ -761,13 +757,13 @@ impl<'p> Ticket<'p> {
     }
 }
 
-pub struct EventLoop<'p, E: Engine<'p> + Send + for<'scope> Invoke<'scope> + 'p> {
+pub struct EventLoop<'p> {
     bell: Arc<Bell>,
     submitted: Arc<Fifo<Submitted<'p>>>,
-    set: Arc<Set<'p, E>>,
+    set: Arc<Set<'p>>,
 }
 
-impl<'p, E: Engine<'p> + Send + for<'scope> Invoke<'scope> + 'p> EventLoop<'p, E> {
+impl<'p> EventLoop<'p> {
     pub fn submit(&self, src: &Source<'_>, kind: ScriptKind) -> Ticket<'p> {
         let (reply, rx) = Oneshot::new();
         self.bell.begin();
@@ -776,11 +772,11 @@ impl<'p, E: Engine<'p> + Send + for<'scope> Invoke<'scope> + 'p> EventLoop<'p, E
         Ticket(rx)
     }
 
-    pub fn wait(&self, ticket: Ticket<'p>) -> Result<Global<'p>, Error> {
+    pub fn wait(&self, ticket: Ticket<'p>) -> Result<ScopeGlobal<'p, ValueBrand>, Error> {
         block_on(ticket.0)
     }
 
-    pub fn eval(&self, src: &Source<'_>, kind: ScriptKind) -> Result<Global<'p>, Error> {
+    pub fn eval(&self, src: &Source<'_>, kind: ScriptKind) -> Result<ScopeGlobal<'p, ValueBrand>, Error> {
         let ticket = self.submit(src, kind);
         self.wait(ticket)
     }
@@ -813,25 +809,25 @@ impl<'p, E: Engine<'p> + Send + for<'scope> Invoke<'scope> + 'p> EventLoop<'p, E
         self.bell.home.load(Ordering::Acquire)
     }
 
-    pub fn handle(&self) -> crate::IsolateHandle {
+    pub fn handle(&self) -> IsolateHandle {
         self.bell.handle.clone()
     }
 }
 
-impl<'p, E: Engine<'p> + Send + for<'scope> Invoke<'scope> + 'p> Drop for EventLoop<'p, E> {
+impl Drop for EventLoop<'_> {
     fn drop(&mut self) {
         self.set.port(self.bell.home.load(Ordering::Acquire)).send(Msg::Remove(Arc::clone(&self.bell)));
     }
 }
 
-pub struct EventLoopSet<'s, 'p, E: Engine<'p> + Send + for<'scope> Invoke<'scope> + 'p> {
-    set: Arc<Set<'p, E>>,
+pub struct EventLoopSet<'s, 'p> {
+    set: Arc<Set<'p>>,
     scope: &'s Scope<'s, 'p>,
 }
 
-struct Close<'p, E: Engine<'p>>(Arc<Set<'p, E>>);
+struct Close<'p>(Arc<Set<'p>>);
 
-impl<'p, E: Engine<'p>> Drop for Close<'p, E> {
+impl Drop for Close<'_> {
     fn drop(&mut self) {
         for door in self.0.doors.0.iter() {
             door.closing.store(true, Ordering::Release);
@@ -840,8 +836,8 @@ impl<'p, E: Engine<'p>> Drop for Close<'p, E> {
     }
 }
 
-impl<'p, E: Engine<'p> + Send + for<'scope> Invoke<'scope> + 'p> EventLoopSet<'_, 'p, E> {
-    pub fn scope<R>(platform: &'p dyn Platform, threads: NonZeroUsize, body: impl for<'a> FnOnce(&EventLoopSet<'a, 'p, E>) -> R) -> R {
+impl<'p> EventLoopSet<'_, 'p> {
+    pub fn scope<R>(platform: &'p dyn Platform, threads: NonZeroUsize, body: impl for<'a> FnOnce(&EventLoopSet<'a, 'p>) -> R) -> R {
         let set = Arc::new(Set::new(platform));
         std::thread::scope::<'p, _, _>(|scope| {
             let lp = EventLoopSet { set: Arc::clone(&set), scope };
@@ -883,17 +879,17 @@ impl<'p, E: Engine<'p> + Send + for<'scope> Invoke<'scope> + 'p> EventLoopSet<'_
         self.set.check.store(steps.get(), Ordering::Relaxed);
     }
 
-    pub fn spawn(&self, engine: E, intrinsics: &(dyn Intrinsics + Sync)) -> EventLoop<'p, E> {
+    pub fn spawn(&self, engine: Executor<'p>, intrinsics: &(dyn Intrinsics + Sync)) -> EventLoop<'p> {
         let home = self.set.least_loaded();
         let (tx, rx) = Oneshot::new();
         let reply = Reply(Some(tx));
         let platform = self.set.platform;
-        let make: OnThread<'_, 'p, E> = Box::new(move |s| {
+        let make: OnThread<'_, 'p> = Box::new(move |s| {
             let lane = Lane::new(platform, engine, intrinsics, &s.set.doors, s.me);
             let submitted = Arc::clone(&lane.submitted);
             reply.send((s.insert(lane), submitted));
         });
-        let make = unsafe { core::mem::transmute::<OnThread<'_, 'p, E>, OnThread<'p, 'p, E>>(make) };
+        let make = unsafe { core::mem::transmute::<OnThread<'_, 'p>, OnThread<'p, 'p>>(make) };
         self.set.port(home).send(Msg::Spawn(make));
         let (bell, submitted) = block_on(rx).expect("the loop thread has shut down");
         EventLoop { bell, submitted, set: Arc::clone(&self.set) }

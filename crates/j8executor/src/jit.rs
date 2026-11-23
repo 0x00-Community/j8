@@ -8,9 +8,9 @@ pub use crate::ic::{GlobalFeedback, PropertyFeedback};
 use crate::{Args, Budget, Executor, Frame, Loaded, State, STACK_LIMIT};
 
 pub trait Tier {
-    fn enter(&self, e: &mut Entry<'_, '_, '_, '_>) -> Tiered;
-    fn osr(&self, e: &mut Entry<'_, '_, '_, '_>, at: usize) -> Tiered;
-    fn resume(&self, e: &mut Entry<'_, '_, '_, '_>, pc: usize) -> Tiered;
+    fn enter(&self, e: &mut Entry<'_, '_, '_, '_, '_>) -> Tiered;
+    fn osr(&self, e: &mut Entry<'_, '_, '_, '_, '_>, at: usize) -> Tiered;
+    fn resume(&self, e: &mut Entry<'_, '_, '_, '_, '_>, pc: usize) -> Tiered;
     fn eager(&self) -> bool {
         false
     }
@@ -216,16 +216,16 @@ pub struct DeoptFrame<'scope> {
 }
 
 #[expect(private_interfaces, reason = "built by the executor only")]
-pub struct Entry<'r, 'scope, 'x, 'b> {
-    pub exe: &'r Executor,
+pub struct Entry<'r, 'scope, 'x, 'b, 'p> {
+    pub exe: &'r Executor<'p>,
     pub a: &'r mut Agent<'scope, 'x>,
     pub st: &'r mut State<'scope>,
     pub budget: &'r mut Budget<'b>,
     pub level: usize,
 }
 
-impl<'r, 'scope, 'x, 'b> Entry<'r, 'scope, 'x, 'b> {
-    pub fn executor(&self) -> &'r Executor {
+impl<'r, 'scope, 'x, 'p> Entry<'r, 'scope, 'x, '_, 'p> {
+    pub fn executor(&self) -> &'r Executor<'p> {
         self.exe
     }
 
@@ -328,7 +328,7 @@ impl<'r, 'scope, 'x, 'b> Entry<'r, 'scope, 'x, 'b> {
     }
 }
 
-impl Executor {
+impl Executor<'_> {
     pub fn jit_function(&self, f: FuncId) -> Function<'_> {
         Function(self.function(f))
     }

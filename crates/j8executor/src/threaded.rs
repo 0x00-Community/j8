@@ -4,8 +4,8 @@ use j8framework::{Agent, Env, Error, ErrorKind, Value, ValueBits};
 use crate::{Args, Budget, Executor, Flow, Frame, Insn, Loaded, Outcome, State, STACK_LIMIT};
 
 #[expect(private_interfaces, reason = "crate-internal types; the module is private")]
-pub struct Cx<'r, 'scope, 'x, 'b> {
-    pub exe: &'r Executor,
+pub struct Cx<'r, 'scope, 'x, 'b, 'p> {
+    pub exe: &'r Executor<'p>,
     pub a: &'r mut Agent<'scope, 'x>,
     pub st: &'r mut State<'scope>,
     pub loaded: &'r Loaded,
@@ -22,7 +22,7 @@ pub enum Exit<'scope> {
     Next(*const Insn, Value<'scope>),
 }
 
-pub type Handler = for<'r, 'scope, 'x, 'b> fn(&mut Cx<'r, 'scope, 'x, 'b>, *const Insn, *mut Value<'scope>, Value<'scope>) -> Exit<'scope>;
+pub type Handler = for<'r, 'scope, 'x, 'b, 'p> fn(&mut Cx<'r, 'scope, 'x, 'b, 'p>, *const Insn, *mut Value<'scope>, Value<'scope>) -> Exit<'scope>;
 
 #[cfg(tail_calls)]
 macro_rules! next {
@@ -43,7 +43,7 @@ macro_rules! next {
 macro_rules! handlers {
     ($($name:ident($cx:ident, $pc:ident, $regs:ident, $acc:ident, $o:ident) $body:block)*) => {$(
         #[allow(unused_mut, unused_variables, clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "operands are in range")]
-        fn $name<'r, 'scope, 'x, 'b>($cx: &mut Cx<'r, 'scope, 'x, 'b>, $pc: *const Insn, $regs: *mut Value<'scope>, mut $acc: Value<'scope>) -> Exit<'scope> {
+        fn $name<'scope>($cx: &mut Cx<'_, 'scope, '_, '_, '_>, $pc: *const Insn, $regs: *mut Value<'scope>, mut $acc: Value<'scope>) -> Exit<'scope> {
             let $o = unsafe { (*$pc).operands.all() };
             $body
         }
@@ -258,7 +258,7 @@ pub enum Entered<'scope> {
 }
 
 #[inline]
-fn enter<'r, 'scope>(cx: &mut Cx<'r, 'scope, '_, '_>, pc: *const Insn, callee: Value<'scope>, this: Value<'scope>, args: Args<'_, 'scope>, fb: OperandValue) -> Entered<'scope> {
+fn enter<'r, 'scope>(cx: &mut Cx<'r, 'scope, '_, '_, '_>, pc: *const Insn, callee: Value<'scope>, this: Value<'scope>, args: Args<'_, 'scope>, fb: OperandValue) -> Entered<'scope> {
     let Some(o) = callee.as_object() else { return Entered::No };
     let Some(c) = o.closure() else { return Entered::No };
     let l: &'r Loaded = cx.exe.code(&c);
@@ -297,7 +297,7 @@ fn enter<'r, 'scope>(cx: &mut Cx<'r, 'scope, '_, '_>, pc: *const Insn, callee: V
 }
 
 #[inline(never)]
-fn tier_enter<'scope>(cx: &mut Cx<'_, 'scope, '_, '_>) -> Entered<'scope> {
+fn tier_enter<'scope>(cx: &mut Cx<'_, 'scope, '_, '_, '_>) -> Entered<'scope> {
     let l = cx.loaded;
     let n = l.calls.get().wrapping_add(1);
     l.calls.set(n);
@@ -320,7 +320,7 @@ fn tier_enter<'scope>(cx: &mut Cx<'_, 'scope, '_, '_>) -> Entered<'scope> {
 }
 
 #[inline]
-fn native<'scope>(cx: &mut Cx<'_, 'scope, '_, '_>, pc: *const Insn, callee: Value<'scope>, this: Value<'scope>, args: &[Value<'scope>], fb: OperandValue) -> Option<Result<Value<'scope>, Error>> {
+fn native<'scope>(cx: &mut Cx<'_, 'scope, '_, '_, '_>, pc: *const Insn, callee: Value<'scope>, this: Value<'scope>, args: &[Value<'scope>], fb: OperandValue) -> Option<Result<Value<'scope>, Error>> {
     let Some(o) = callee.as_object() else { return None };
     let n = o.native()?;
     Executor::record_native(cx.loaded, fb, n.f);
@@ -338,7 +338,7 @@ fn native<'scope>(cx: &mut Cx<'_, 'scope, '_, '_>, pc: *const Insn, callee: Valu
 }
 
 #[inline]
-fn sync(cx: &mut Cx<'_, '_, '_, '_>, pc: *const Insn) {
+fn sync(cx: &mut Cx<'_, '_, '_, '_, '_>, pc: *const Insn) {
     let at = usize::try_from(unsafe { pc.offset_from(cx.loaded.insns.as_ptr()) }).unwrap_or(0);
     let f = cx.st.f_mut();
     f.insn = at;
@@ -538,7 +538,7 @@ handlers! {
 }
 
 #[inline(never)]
-fn slow<'r, 'scope, 'x, 'b>(cx: &mut Cx<'r, 'scope, 'x, 'b>, pc: *const Insn, _: *mut Value<'scope>, acc: Value<'scope>) -> Exit<'scope> {
+fn slow<'scope>(cx: &mut Cx<'_, 'scope, '_, '_, '_>, pc: *const Insn, _: *mut Value<'scope>, acc: Value<'scope>) -> Exit<'scope> {
     let base = cx.loaded.insns.as_ptr();
     let at = usize::try_from(unsafe { pc.offset_from(base) }).unwrap_or(0);
     let st = &mut *cx.st;
@@ -561,7 +561,7 @@ fn slow<'r, 'scope, 'x, 'b>(cx: &mut Cx<'r, 'scope, 'x, 'b>, pc: *const Insn, _:
     }
 }
 
-fn illegal<'r, 'scope, 'x, 'b>(cx: &mut Cx<'r, 'scope, 'x, 'b>, _: *const Insn, _: *mut Value<'scope>, _: Value<'scope>) -> Exit<'scope> {
+fn illegal<'scope>(cx: &mut Cx<'_, 'scope, '_, '_, '_>, _: *const Insn, _: *mut Value<'scope>, _: Value<'scope>) -> Exit<'scope> {
     Exit::Throw(cx.a.throw(ErrorKind::Syntax, "ran past the end of the bytecode"))
 }
 
@@ -642,8 +642,8 @@ impl Insn {
     }
 }
 
-impl Executor {
-    pub fn threaded<'scope>(cx: &mut Cx<'_, 'scope, '_, '_>) -> Exit<'scope> {
+impl Executor<'_> {
+    pub fn threaded<'scope>(cx: &mut Cx<'_, 'scope, '_, '_, '_>) -> Exit<'scope> {
         if cx.exe.tier.is_some() {
             if cx.st.f().pc == 0 {
                 if let Entered::Throw(e) = tier_enter(cx) {

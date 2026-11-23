@@ -10,7 +10,7 @@ pub fn expand(attr: TokenStream, mut item: ItemFn) -> syn::Result<TokenStream> {
         m.js = syn::parse2::<LitStr>(attr)?.value();
     }
     let owner = quote!(super);
-    let wrapper = m.wrapper(&m.js, &owner);
+    let wrapper = m.wrapper(&m.js, &owner, &owner);
     let (rust, js, length, w) = (&m.rust, &m.js, m.length, m.wrapper_name());
     let vis = &item.vis;
     Ok(quote! {

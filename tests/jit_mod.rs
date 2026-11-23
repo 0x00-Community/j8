@@ -93,15 +93,15 @@ const CASES: &[Case] = &[
 fn completion(text: &str, tier: Tier) -> String {
     let platform = DefaultPlatform::default();
     let mut isolate = Isolate::new(&platform, CreateParams::default());
-    let mut executor = match tier {
+    let executor = match tier {
         Tier::Interpreter => Executor::default(),
         Tier::Immediate => Executor::default().with_tier(j8jit::Jit::from(0)),
         Tier::Default => Executor::default().with_tier(j8jit::Jit::default()),
     };
-    let cx = isolate.enter(|scope| scope.persist(scope.context(&Builtins)));
-    let r = isolate.run(&mut executor, &cx, &Source { text, file: "jit_mod.js" }).unwrap_or_else(|e| panic!("script failed ({}): {e:?}\n{text}", tier.label()));
+    let cx = isolate.enter(|scope| scope.mc.stash::<j8framework::RealmBrand>(scope.context(&Builtins).realm()));
+    let r = executor.eval(&mut isolate, &cx, &Source { text, file: "jit_mod.js" }).unwrap_or_else(|e| panic!("script failed ({}): {e:?}\n{text}", tier.label()));
     isolate.enter(|scope| {
-        let realm = scope.context_of(&cx);
+        let realm = scope.mc.fetch(&cx).into();
         let mut a = scope.agent(realm, &executor);
         let v = a.local(&r);
         String::from(&**a.to_string(v).unwrap_or_else(|e| panic!("ToString failed ({}): {e:?}\n{text}", tier.label())))

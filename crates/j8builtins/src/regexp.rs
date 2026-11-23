@@ -282,7 +282,7 @@ impl Regexps {
         usize::try_from(mixed >> 40).unwrap_or(0) % j8framework::RegExpCompiled::BUCKETS
     }
 
-    fn literal_load<'scope>(slot: &j8framework::paragc::Slot<'scope, j8framework::RegExpLiteralEntry<'scope>>, ptr: usize, len: usize, flags: u16, source: &str) -> Option<j8framework::RegExpCompiled<'scope>> {
+    fn literal_load<'scope>(slot: &j8framework::GcSlot<'scope, j8framework::RegExpLiteralEntry<'scope>>, ptr: usize, len: usize, flags: u16, source: &str) -> Option<j8framework::RegExpCompiled<'scope>> {
         let e = slot.get()?;
         (e.ptr == ptr && e.len == len && e.flags == flags && **e.compiled.source == *source).then(|| e.compiled.clone())
     }

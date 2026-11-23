@@ -17,9 +17,11 @@ mod ic;
 mod jit;
 mod module;
 mod threaded;
+mod event_loop;
 use module::EVAL_FILE;
 
 pub use cache::CodeCache;
+pub use event_loop::{EventLoop, EventLoopSet, Ticket, CHECK, SLICE};
 pub use jit::{DeoptFrame, Entry, FrameSlots, Function as JitFunction, GlobalFeedback, Insn as JitInsn, PropertyFeedback, Reg as JitReg, ScopeLayout, Tier, Tiered};
 
 const STACK_LIMIT: usize = 10_000;
@@ -488,9 +490,9 @@ impl<'s> Budget<'s> {
 }
 
 #[derive(Default)]
-pub struct Executor {
+pub struct Executor<'p> {
     tier: Option<Box<dyn Tier + Send>>,
-    code: SegVec<(j8framework::paragc::Weak<LoadedBrand>, Code)>,
+    code: SegVec<(j8framework::Weak<'p, LoadedBrand>, Code)>,
     depth: Cell<usize>,
     module_of: RefCell<alloc::collections::BTreeMap<u32, u32>>,
     script_files: RefCell<alloc::collections::BTreeMap<u32, alloc::string::String>>,
@@ -502,7 +504,7 @@ pub struct Executor {
 
 const _: () = {
     const fn send<T: Send>() {}
-    send::<Executor>();
+    send::<Executor<'_>>();
 };
 
 enum Flow<'scope> {
@@ -511,7 +513,7 @@ enum Flow<'scope> {
     Done(Outcome<'scope>),
 }
 
-impl Executor {
+impl Executor<'_> {
     #[must_use]
     pub fn with_tier(mut self, tier: impl Tier + Send + 'static) -> Self {
         self.tier = Some(Box::new(tier));
@@ -539,7 +541,7 @@ impl Executor {
             let h = m.alloc_handle(Loaded::new(base, id, func, &self.context_shapes));
             h.this.set(h.id());
             codes.push(Code::new(h));
-            self.code.push((m.weak::<LoadedBrand>(h.get()), Code::new(h)));
+            self.code.push((mc.weak::<LoadedBrand>(h.get()), Code::new(h)));
         }
         let unit = Code::new(m.alloc_handle(Unit(codes.clone().into_boxed_slice())));
         for c in &codes {
@@ -2417,7 +2419,7 @@ enum Found<'scope> {
     Nothing,
 }
 
-impl<'scope> Invoke<'scope> for Executor {
+impl<'scope> Invoke<'scope> for Executor<'_> {
     fn call(&self, a: &mut Agent<'scope, '_>, callee: Value<'scope>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let level = self.depth.get() + 1;
         if level >= STACK_LIMIT {
@@ -2600,26 +2602,26 @@ j8framework::paragc::brand!(
     ParkedBrand = for<'heap, 'scope> j8framework::GcCell<'scope, Option<State<'scope>>>
 );
 
-type Parked = j8framework::Root<ParkedBrand>;
+type Parked<'p> = j8framework::ScopeGlobal<'p, ParkedBrand>;
 
-enum Slice {
-    Done(j8framework::Global),
-    Paused(Parked),
+enum Slice<'p> {
+    Done(j8framework::ScopeGlobal<'p, j8framework::ValueBrand>),
+    Paused(Parked<'p>),
 }
 
-pub struct Job(Started);
+pub struct Job<'p>(Started<'p>);
 
-enum Started {
+enum Started<'p> {
     Script { module: Module, file: alloc::string::String },
-    Paused(Parked),
+    Paused(Parked<'p>),
     Module { text: alloc::string::String, file: alloc::string::String },
     Spent,
 }
 
-impl j8framework::Engine for Executor {
-    type Job = Job;
+impl<'p> Executor<'p> {
+    pub const SLICE: usize = 10_000;
 
-    fn start(&mut self, _: &mut j8framework::Isolate<'_>, _: &j8framework::ContextRoot, src: &j8framework::Source<'_>, kind: j8framework::ScriptKind) -> Result<Job, Error> {
+    pub fn start(&self, src: &j8framework::Source<'_>, kind: j8framework::ScriptKind) -> Result<Job<'p>, Error> {
         Ok(Job(match kind {
             j8framework::ScriptKind::Classic => Started::Script { module: Module::compile(src, j8framework::CodeKind::Script)?, file: src.file.into() },
             j8framework::ScriptKind::Shared => Started::Script {
@@ -2633,19 +2635,19 @@ impl j8framework::Engine for Executor {
         }))
     }
 
-    fn resume(&mut self, isolate: &mut j8framework::Isolate<'_>, cx: &j8framework::ContextRoot, job: &mut Job, quota: &mut j8framework::Quota) -> Result<Option<j8framework::Global>, Error> {
-        let this: &Executor = self;
+    pub fn resume(&self, isolate: &mut j8framework::Isolate<'p>, cx: &j8framework::ScopeGlobal<'p, j8framework::RealmBrand>, job: &mut Job<'p>, quota: &mut j8framework::Quota) -> Result<Option<j8framework::ScopeGlobal<'p, j8framework::ValueBrand>>, Error> {
+        let this = self;
         let started = core::mem::replace(&mut job.0, Started::Spent);
         let mut budget = Some(quota.left());
         let slice = isolate.enter(|scope| -> Result<Slice, Error> {
-            let realm = scope.context_of(cx);
+            let realm = scope.mc.fetch(cx).into();
             let mut a = scope.agent(realm, this);
             let st = match started {
                 Started::Script { module, file } => {
                     let main = this.load_script(a.mc, module, &file);
                     this.script_state(&mut a, main)?
                 }
-                Started::Paused(root) => j8framework::CellExt::borrow_mut(a.fetch(&root), a.mc).take().expect("a parked state"),
+                Started::Paused(root) => j8framework::CellExt::borrow_mut(a.mc.fetch(&root), a.mc).take().expect("a parked state"),
                 Started::Module { text, file } => {
                     this.run_module(&mut a, &file, &text, 0)?;
                     a.run_jobs()?;
@@ -2654,7 +2656,7 @@ impl j8framework::Engine for Executor {
                 Started::Spent => unreachable!("a finished job is not resumed"),
             };
             match this.execute(&mut a, st, &mut budget)? {
-                Outcome::Paused(st) => Ok(Slice::Paused(a.stash::<ParkedBrand>(a.mc.alloc(j8framework::GcCell::new(a.mc, Some(*st)))))),
+                Outcome::Paused(st) => Ok(Slice::Paused(a.mc.stash::<ParkedBrand>(a.mc.alloc(j8framework::GcCell::new(a.mc, Some(*st)))))),
                 Outcome::Return(v) => {
                     a.run_jobs()?;
                     Ok(Slice::Done(a.global(v)))
@@ -2667,6 +2669,23 @@ impl j8framework::Engine for Executor {
             Slice::Paused(root) => {
                 job.0 = Started::Paused(root);
                 Ok(None)
+            }
+        }
+    }
+
+    pub fn eval(&self, isolate: &mut j8framework::Isolate<'p>, cx: &j8framework::ScopeGlobal<'p, j8framework::RealmBrand>, src: &j8framework::Source<'_>) -> Result<j8framework::ScopeGlobal<'p, j8framework::ValueBrand>, Error> {
+        self.run_to_end(isolate, cx, src, j8framework::ScriptKind::Classic)
+    }
+
+    pub fn eval_module(&self, isolate: &mut j8framework::Isolate<'p>, cx: &j8framework::ScopeGlobal<'p, j8framework::RealmBrand>, src: &j8framework::Source<'_>) -> Result<j8framework::ScopeGlobal<'p, j8framework::ValueBrand>, Error> {
+        self.run_to_end(isolate, cx, src, j8framework::ScriptKind::Module)
+    }
+
+    pub fn run_to_end(&self, isolate: &mut j8framework::Isolate<'p>, cx: &j8framework::ScopeGlobal<'p, j8framework::RealmBrand>, src: &j8framework::Source<'_>, kind: j8framework::ScriptKind) -> Result<j8framework::ScopeGlobal<'p, j8framework::ValueBrand>, Error> {
+        let mut job = self.start(src, kind)?;
+        loop {
+            if let Some(g) = self.resume(isolate, cx, &mut job, &mut j8framework::Quota::from(Self::SLICE))? {
+                return Ok(g);
             }
         }
     }

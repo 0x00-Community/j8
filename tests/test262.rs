@@ -238,20 +238,20 @@ impl Case {
         };
         let platform = Capture { start: Instant::now(), lines: Mutex::default() };
         let mut isolate = Isolate::new(&platform, CreateParams::default());
-        let mut executor = if std::env::var_os(JIT_ENV).is_some() { Executor::default().with_tier(j8jit::Jit::from(0)) } else { Executor::default() };
+        let executor = if std::env::var_os(JIT_ENV).is_some() { Executor::default().with_tier(j8jit::Jit::from(0)) } else { Executor::default() };
         let file = self.path.strip_prefix(Suite::test_dir()).unwrap_or(&self.path).display().to_string();
         let expected = self.meta.negative.as_ref();
-        let cx = isolate.enter(|scope| scope.persist(scope.context(&Builtins)));
+        let cx = isolate.enter(|scope| scope.mc.stash::<j8framework::RealmBrand>(scope.context(&Builtins).realm()));
         let r = if self.has(Flag::Module) {
-            match isolate.run(&mut executor, &cx, &Source { text: &src, file: "[harness]" }) {
-                Ok(_) => isolate.run_module(&mut executor, &cx, &Source { text: &self.text, file: &file }),
+            match executor.eval(&mut isolate, &cx, &Source { text: &src, file: "[harness]" }) {
+                Ok(_) => executor.eval_module(&mut isolate, &cx, &Source { text: &self.text, file: &file }),
                 e => e,
             }
         } else {
-            isolate.run(&mut executor, &cx, &Source { text: &src, file: &file })
+            executor.eval(&mut isolate, &cx, &Source { text: &src, file: &file })
         };
         let (outcome, why) = isolate.enter(|scope| {
-            let realm = scope.context_of(&cx);
+            let realm = scope.mc.fetch(&cx).into();
             let mut agent = scope.agent(realm, &executor);
             match (r, expected) {
                 (Err(Error::Unsupported(m)), _) => (Outcome::Unsupported, m),

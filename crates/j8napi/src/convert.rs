@@ -71,7 +71,7 @@ impl Ffi {
     }
 }
 
-impl Env {
+impl Env<'_> {
     pub fn values<'scope>(&self, ptr: *const Handle, n: usize) -> Result<alloc::vec::Vec<Value<'scope>>, Status> {
         Ffi::slice(ptr, n)?.iter().map(|&h| self.value(h)).collect()
     }

@@ -3,8 +3,8 @@ use core::num::NonZeroUsize;
 use core::ptr::{null, null_mut};
 
 use j8builtins::Builtins;
-use j8executor::Executor;
-use j8framework::{EventLoopSet, ScriptKind, Source};
+use j8executor::{EventLoopSet, Executor};
+use j8framework::{ScriptKind, Source};
 use j8napi::{CallbackInfo, Env, Handle, Status};
 use j8platform::DefaultPlatform;
 

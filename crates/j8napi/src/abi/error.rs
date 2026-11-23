@@ -5,7 +5,7 @@ use j8framework::{Error, ErrorKind, Value};
 use crate::convert::Ffi;
 use crate::{Env, ExtendedErrorInfo, Handle, Status, napi};
 
-impl Env {
+impl Env<'_> {
     fn make_error<'scope>(&self, a: &mut j8framework::Agent<'scope, '_>, kind: ErrorKind, code: Option<Value<'scope>>, msg: &str) -> Result<Value<'scope>, Status> {
         let e = a.error(kind, msg);
         if let Some(code) = code {
@@ -114,7 +114,7 @@ napi! {
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn napi_get_last_error_info(env: *mut Env, result: *mut *const ExtendedErrorInfo) -> Status {
+pub unsafe extern "C" fn napi_get_last_error_info(env: *mut Env<'_>, result: *mut *const ExtendedErrorInfo) -> Status {
     let Some(env) = (unsafe { env.as_ref() }) else { return Status::InvalidArg };
     match Ffi::put(result, env.last_error()) {
         Ok(()) => Status::Ok,

@@ -353,6 +353,7 @@ dependencies = [
  "j8framework",
  "j8lockfree",
  "j8platform",
+ "j8taskqueue",
  "ryu-js",
 ]
 

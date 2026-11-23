@@ -28,13 +28,28 @@ unsafe impl Sync for External {}
 
 struct Attached(#[expect(dead_code, reason = "only dropped along with the host object")] Finalizer);
 
-#[derive(Debug)]
-pub struct Reference {
-    value: j8framework::Global,
+unsafe impl crate::Opaque<'_> for Wrapped {
+    type Brand = Self;
+}
+
+unsafe impl crate::Opaque<'_> for External {
+    type Brand = Self;
+}
+
+unsafe impl crate::Opaque<'_> for Attached {
+    type Brand = Self;
+}
+
+unsafe impl crate::Opaque<'_> for TypeTag {
+    type Brand = Self;
+}
+
+pub struct Reference<'e> {
+    value: j8framework::ScopeGlobal<'e, j8framework::ValueBrand>,
     count: u32,
 }
 
-impl Env {
+impl Env<'_> {
     pub fn define<'scope>(&self, a: &mut j8framework::Agent<'scope, '_>, target: JsObject<'scope>, p: &PropertyDescriptor) -> Result<(), Status> {
         let name: Name<'scope> = if p.utf8name.is_null() {
             self.name(p.name)?
@@ -294,14 +309,14 @@ napi! {
         let a = env.agent()?;
         let o = env.object(js_object)?;
         let w = env.wrapped(a, o).ok_or(Status::InvalidArg)?;
-        Ffi::put(result, Env::hosted::<Wrapped, _>(w, |w| w.data).ok_or(Status::InvalidArg)?)
+        Ffi::put(result, Env::hosted::<Wrapped, _>(a, w, |w| w.data).ok_or(Status::InvalidArg)?)
     }
 
     fn napi_remove_wrap(env, js_object: Handle, result: *mut *mut c_void) {
         let a = env.agent()?;
         let o = env.object(js_object)?;
         let w = env.wrapped(a, o).ok_or(Status::InvalidArg)?;
-        let data = Env::hosted::<Wrapped, _>(w, |w| {
+        let data = Env::hosted::<Wrapped, _>(a, w, |w| {
             w.finalizer.pending = None;
             w.data
         })
@@ -318,8 +333,9 @@ napi! {
     }
 
     fn napi_get_value_external(env, value: Handle, result: *mut *mut c_void) {
+        let a = env.agent()?;
         let o = env.value(value)?.as_object().ok_or(Status::InvalidArg)?;
-        Ffi::put(result, Env::hosted::<External, _>(o, |e| e.data).ok_or(Status::InvalidArg)?)
+        Ffi::put(result, Env::hosted::<External, _>(a, o, |e| e.data).ok_or(Status::InvalidArg)?)
     }
 
     fn napi_type_tag_object(env, value: Handle, type_tag: *const TypeTag) {
@@ -341,7 +357,7 @@ napi! {
             return Err(Status::InvalidArg);
         }
         let tag = unsafe { type_tag.read() };
-        let same = Env::private(o, env.tag_key(a)).and_then(Value::as_object).and_then(|h| Env::hosted::<TypeTag, _>(h, |t| *t == tag));
+        let same = Env::private(o, env.tag_key(a)).and_then(Value::as_object).and_then(|h| Env::hosted::<TypeTag, _>(a, h, |t| *t == tag));
         Ffi::put(result, same.unwrap_or(false))
     }
 

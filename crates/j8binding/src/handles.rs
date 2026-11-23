@@ -3,54 +3,45 @@ use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use j8framework::{Agent, BufferData, ElementKind, Error, ErrorKind, Global, HostReaction, ObjectData, ObjectKind, Value, ViewData};
+use j8framework::{Agent, BufferData, Collect, ElementKind, Error, ErrorKind, HostReaction, ObjectData, ObjectKind, ScopeGlobal, Value, ValueBrand, ViewData};
 
 use crate::{FromJs, IntoJs};
 
-#[derive(Debug)]
-pub struct Persistent(pub Global);
-
-impl<'scope> FromJs<'scope> for Persistent {
+impl<'scope> FromJs<'scope> for ScopeGlobal<'_, ValueBrand> {
     fn from_js(a: &mut Agent<'scope, '_>, v: Value<'scope>) -> Result<Self, Error> {
-        Ok(Self(a.global(v)))
+        Ok(a.global(v))
     }
 }
 
-impl<'scope> IntoJs<'scope> for &Persistent {
+impl<'scope> IntoJs<'scope> for &ScopeGlobal<'_, ValueBrand> {
     fn into_js(self, a: &mut Agent<'scope, '_>) -> Result<Value<'scope>, Error> {
-        Ok(a.local(&self.0))
+        Ok(a.local(self))
     }
 }
 
-impl Persistent {
-    pub fn get<'scope>(&self, a: &Agent<'scope, '_>) -> Value<'scope> {
-        a.local(&self.0)
-    }
-}
+#[derive(Clone, Copy, Debug, Collect)]
+#[collect(no_drop)]
+pub struct Function<'scope>(pub Value<'scope>);
 
-#[derive(Debug)]
-pub struct Function(pub Persistent);
-
-impl<'scope> FromJs<'scope> for Function {
+impl<'scope> FromJs<'scope> for Function<'scope> {
     fn from_js(a: &mut Agent<'scope, '_>, v: Value<'scope>) -> Result<Self, Error> {
         if !a.is_callable(v) {
             let t = a.describe(v);
             return Err(a.throw(ErrorKind::Type, &alloc::format!("{t} is not a function")));
         }
-        Ok(Self(Persistent(a.global(v))))
+        Ok(Self(v))
     }
 }
 
-impl<'scope> IntoJs<'scope> for &Function {
-    fn into_js(self, a: &mut Agent<'scope, '_>) -> Result<Value<'scope>, Error> {
-        Ok(a.local(&self.0.0))
+impl<'scope> IntoJs<'scope> for Function<'scope> {
+    fn into_js(self, _: &mut Agent<'scope, '_>) -> Result<Value<'scope>, Error> {
+        Ok(self.0)
     }
 }
 
-impl Function {
-    pub fn call<'scope>(&self, a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
-        let f = a.local(&self.0.0);
-        a.call(f, this, args)
+impl<'scope> Function<'scope> {
+    pub fn call(self, a: &mut Agent<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+        a.call(self.0, this, args)
     }
 }
 

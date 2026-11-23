@@ -10,7 +10,7 @@ use crate::{Env, Handle, Status, ValueType, napi};
 
 const I64_LIMIT: f64 = 9_223_372_036_854_775_808.0;
 
-impl Env {
+impl Env<'_> {
     fn write_units<T: Copy + Default>(units: &[T], buf: *mut T, size: usize, result: *mut usize) -> Result<(), Status> {
         if buf.is_null() {
             return Ffi::put(result, units.len());
@@ -42,7 +42,7 @@ impl Env {
             ValueKind::Symbol(_) => ValueType::Symbol,
             ValueKind::BigInt(_) => ValueType::Bigint,
             ValueKind::Object(o) if o.borrow().kind.is_callable() => ValueType::Function,
-            ValueKind::Object(o) if Self::hosted::<crate::abi::object::External, _>(o, |_| ()).is_some() => ValueType::External,
+            ValueKind::Object(o) if Self::holds::<crate::abi::object::External>(o) => ValueType::External,
             ValueKind::Object(_) => ValueType::Object,
         }
     }

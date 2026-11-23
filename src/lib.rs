@@ -3,15 +3,15 @@
 #[cfg(feature = "json")]
 pub use j8binding::Json;
 pub use j8binding::{ArrayBuffer, Backing, BufferRef, External, Shared, SharedMemory, Transfer};
-pub use j8binding::{Bytes, Class, ClassHandle, FromJs, Function, Install, IntoJs, Member, Module, Object, Persistent, Promise, Rest, This, NATIVE};
-pub use j8macros::{class, function, module, object};
+pub use j8binding::{Bytes, Class, ClassHandle, FromJs, Function, Install, IntoJs, Member, Module, Object, Promise, Rest, This, NATIVE};
+pub use j8macros::{Trace, class, function, module, object};
 
 #[cfg(all(feature = "executor", feature = "builtins"))]
 mod runtime;
 #[cfg(all(feature = "executor", feature = "builtins"))]
 pub use runtime::{Host, HostPlatform, Runtime};
 #[cfg(all(feature = "executor", feature = "builtins"))]
-pub use j8framework::{EventLoop, EventLoopSet};
+pub use j8executor::{EventLoop, EventLoopSet};
 
 pub use j8binding::Glue;
 pub use j8framework as frame;

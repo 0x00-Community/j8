@@ -4,7 +4,7 @@ use core::ffi::c_void;
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, AtomicUsize, Ordering};
 
-use j8framework::{Agent, AsyncJob, Backing, ElementKind, External, Global, ObjectData, ObjectKind, Settle, Value, ViewData};
+use j8framework::{Agent, AsyncJob, Backing, ElementKind, External, ObjectData, ObjectKind, ScopeGlobal, Settle, Value, ValueBrand, ViewData};
 use j8lockfree::{Fifo, Oneshot, Sender};
 
 use crate::convert::Ffi;
@@ -23,7 +23,7 @@ impl<T> Raw<T> {
     }
 }
 
-impl Env {
+impl Env<'_> {
     fn uint8_array<'scope>(a: &Agent<'scope, '_>, bytes: Backing) -> j8framework::JsObject<'scope> {
         let len = bytes.len();
         let buffer = ObjectData { kind: ObjectKind::ArrayBuffer(Box::new(j8framework::BufferData { bytes: Some(bytes), max: None, shared: false })), proto: Some(a.realm.array_buffer_proto), ..ObjectData::default() }.alloc(a.mc);
@@ -53,9 +53,9 @@ enum WorkState {
 }
 
 pub struct Work {
-    env: NonNull<Env>,
-    execute: unsafe extern "C" fn(env: *mut Env, data: *mut c_void),
-    complete: Option<unsafe extern "C" fn(env: *mut Env, status: Status, data: *mut c_void)>,
+    env: NonNull<c_void>,
+    execute: unsafe extern "C" fn(env: *mut Env<'_>, data: *mut c_void),
+    complete: Option<unsafe extern "C" fn(env: *mut Env<'_>, status: Status, data: *mut c_void)>,
     data: *mut c_void,
     state: Arc<AtomicU8>,
 }
@@ -71,7 +71,7 @@ impl Work {
             let (env, execute, data, state) = job.get();
             let start = state.compare_exchange(WorkState::Queued as u8, WorkState::Running as u8, Ordering::AcqRel, Ordering::Acquire);
             if start.is_ok() {
-                unsafe { execute(env.as_ptr(), data) };
+                unsafe { execute(env.as_ptr().cast(), data) };
                 tx.send(Status::Ok);
             } else {
                 tx.send(Status::Cancelled);
@@ -88,7 +88,7 @@ impl Work {
             let (env, complete, data, state) = back.get();
             let s = if status.load(Ordering::Acquire) == Status::Cancelled as u8 { Status::Cancelled } else { Status::Ok };
             state.store(WorkState::Idle as u8, Ordering::Release);
-            let env = unsafe { env.as_ref() };
+            let env = unsafe { env.cast::<Env<'_>>().as_ref() };
             env.enter(a, |env| {
                 if let Some(complete) = complete {
                     unsafe { complete(env.as_ptr(), s, data) };
@@ -138,11 +138,11 @@ impl TryFrom<i32> for CallMode {
     }
 }
 
-type CallJs = unsafe extern "C" fn(env: *mut Env, js_callback: Handle, context: *mut c_void, data: *mut c_void);
+type CallJs = unsafe extern "C" fn(env: *mut Env<'_>, js_callback: Handle, context: *mut c_void, data: *mut c_void);
 
-struct TsfnJs {
-    env: NonNull<Env>,
-    func: Option<Global>,
+struct TsfnJs<'e> {
+    env: NonNull<Env<'e>>,
+    func: Option<ScopeGlobal<'e, ValueBrand>>,
     call_js: Option<CallJs>,
     finalize: Finalize,
     finalize_data: *mut c_void,
@@ -157,7 +157,7 @@ pub struct Tsfn {
     aborted: AtomicBool,
     armed: AtomicPtr<Sender<()>>,
     context: *mut c_void,
-    js: *mut TsfnJs,
+    js: *mut c_void,
 }
 
 unsafe impl Send for Tsfn {}
@@ -191,7 +191,7 @@ impl Tsfn {
     }
 
     fn run(self: &Arc<Self>, a: &mut Agent<'_, '_>) {
-        let js = unsafe { &*self.js };
+        let js = unsafe { &*self.js.cast::<TsfnJs<'_>>() };
         let env = unsafe { js.env.as_ref() };
         let aborted = self.aborted.load(Ordering::Acquire);
         env.enter(a, |env| {
@@ -221,8 +221,8 @@ impl Tsfn {
         }
     }
 
-    fn finish(self: &Arc<Self>, env: &Env) {
-        let js = unsafe { Box::from_raw(self.js) };
+    fn finish(self: &Arc<Self>, env: &Env<'_>) {
+        let js = unsafe { Box::from_raw(self.js.cast::<TsfnJs<'_>>()) };
         if let Some(cb) = js.finalize {
             unsafe { cb(env.as_ptr(), js.finalize_data, self.context) };
         }
@@ -329,14 +329,14 @@ napi! {
         env,
         async_resource: Handle,
         async_resource_name: Handle,
-        execute: Option<unsafe extern "C" fn(*mut Env, *mut c_void)>,
-        complete: Option<unsafe extern "C" fn(*mut Env, Status, *mut c_void)>,
+        execute: Option<unsafe extern "C" fn(*mut Env<'_>, *mut c_void)>,
+        complete: Option<unsafe extern "C" fn(*mut Env<'_>, Status, *mut c_void)>,
         data: *mut c_void,
         result: *mut *mut Work,
     ) {
         let _ = (async_resource, async_resource_name);
         let execute = execute.ok_or(Status::InvalidArg)?;
-        let w = Work { env: NonNull::from(env), execute, complete, data, state: Arc::new(AtomicU8::new(WorkState::Idle as u8)) };
+        let w = Work { env: NonNull::from(env).cast(), execute, complete, data, state: Arc::new(AtomicU8::new(WorkState::Idle as u8)) };
         Ffi::put(result, Box::into_raw(Box::new(w)))
     }
 
@@ -386,7 +386,7 @@ napi! {
         if initial_thread_count == 0 || result.is_null() {
             return Err(Status::InvalidArg);
         }
-        let js = Box::into_raw(Box::new(TsfnJs { env: NonNull::from(env), func, call_js: call_js_cb, finalize: thread_finalize_cb, finalize_data: thread_finalize_data }));
+        let js = Box::into_raw(Box::new(TsfnJs { env: NonNull::from(env), func, call_js: call_js_cb, finalize: thread_finalize_cb, finalize_data: thread_finalize_data })).cast::<c_void>();
         let t = Arc::new(Tsfn {
             queue: Fifo::default(),
             queued: AtomicUsize::new(0),
@@ -399,7 +399,7 @@ napi! {
             js,
         });
         if let Err(s) = t.arm(a) {
-            drop(unsafe { Box::from_raw(js) });
+            drop(unsafe { Box::from_raw(js.cast::<TsfnJs<'_>>()) });
             return Err(s);
         }
         Ffi::put(result, Arc::into_raw(t))

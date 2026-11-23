@@ -175,9 +175,9 @@ impl Attributes {
     }
 }
 
-pub type Callback = Option<unsafe extern "C" fn(env: *mut Env, info: *mut crate::CallbackInfo) -> Handle>;
+pub type Callback = Option<unsafe extern "C" fn(env: *mut Env<'_>, info: *mut crate::CallbackInfo) -> Handle>;
 
-pub type Finalize = Option<unsafe extern "C" fn(env: *mut Env, data: *mut c_void, hint: *mut c_void)>;
+pub type Finalize = Option<unsafe extern "C" fn(env: *mut Env<'_>, data: *mut c_void, hint: *mut c_void)>;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
@@ -289,4 +289,4 @@ impl TryFrom<i32> for KeyConversion {
     }
 }
 
-pub type RegisterFn = unsafe extern "C" fn(env: *mut Env, exports: Handle) -> Handle;
+pub type RegisterFn = unsafe extern "C" fn(env: *mut Env<'_>, exports: Handle) -> Handle;

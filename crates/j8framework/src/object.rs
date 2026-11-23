@@ -721,7 +721,49 @@ pub struct ArgumentsMap<'scope> {
     pub slots: Vec<Option<u16>>,
 }
 
-pub type HostData<'scope> = ScopeLocal<'scope, crate::Static<j8lockfree::AtomicRefCell<Box<dyn core::any::Any + Send + Sync>>>>;
+pub unsafe trait HostObject<'scope>: Send + Sync + 'scope {
+    fn trace(&self, t: &mut crate::Tracer<'_>);
+
+    fn relocate(&mut self, t: &mut crate::Tracer<'_>);
+
+    fn find(&self, brand: core::any::TypeId) -> Option<core::ptr::NonNull<()>>;
+
+    fn find_mut(&mut self, brand: core::any::TypeId) -> Option<core::ptr::NonNull<()>>;
+}
+
+pub struct Host<'scope>(Box<dyn HostObject<'scope> + 'scope>);
+
+unsafe impl crate::Trace for Host<'_> {
+    fn trace(&self, t: &mut crate::Tracer<'_>) {
+        self.0.trace(t);
+    }
+
+    fn relocate(&mut self, t: &mut crate::Tracer<'_>) {
+        self.0.relocate(t);
+    }
+}
+
+impl fmt::Debug for Host<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Host")
+    }
+}
+
+impl<'scope> Host<'scope> {
+    pub fn new(v: impl HostObject<'scope>) -> Self {
+        Self(Box::new(v))
+    }
+
+    pub fn find(&self, brand: core::any::TypeId) -> Option<core::ptr::NonNull<()>> {
+        self.0.find(brand)
+    }
+
+    pub fn find_mut(&mut self, brand: core::any::TypeId) -> Option<core::ptr::NonNull<()>> {
+        self.0.find_mut(brand)
+    }
+}
+
+pub type HostData<'scope> = ScopeLocal<'scope, crate::GcCell<'scope, Host<'scope>>>;
 
 #[derive(Debug, Default, Collect)]
 #[collect(no_drop)]

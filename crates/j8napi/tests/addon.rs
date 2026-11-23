@@ -94,10 +94,10 @@ unsafe extern "C" fn register(env: *mut Env, exports: Handle) -> Handle {
 fn functions_classes_and_errors() {
     let platform = DefaultPlatform::default();
     let mut isolate = Isolate::new(&platform, CreateParams::default());
-    let mut executor = Executor::default();
-    let cx = isolate.enter(|scope| scope.persist(scope.context(&Builtins)));
+    let executor = Executor::default();
+    let cx = isolate.enter(|scope| scope.mc.stash::<j8framework::RealmBrand>(scope.context(&Builtins).realm()));
     isolate.enter(|scope| {
-        let realm = scope.context_of(&cx);
+        let realm: j8framework::Context<'_> = scope.mc.fetch(&cx).into();
         let mut a = scope.agent(realm, &executor);
         let exports = Env::open(&mut a, register).expect("register");
         a.set_named(a.realm.global.into(), "addon", exports).expect("global");
@@ -110,9 +110,9 @@ fn functions_classes_and_errors() {
         try { boom(); } catch (e) { caught = `${e.code}:${e.message}:${e instanceof Error}`; }
         [add(2, 3), c.inc(), new Sub().twice(), new Sub() instanceof Counter, Counter.name, caught].join(' ')
     ";
-    let r = isolate.run(&mut executor, &cx, &Source { text, file: "addon.js" }).expect("run");
+    let r = executor.eval(&mut isolate, &cx, &Source { text, file: "addon.js" }).expect("run");
     let got = isolate.enter(|scope| {
-        let realm = scope.context_of(&cx);
+        let realm: j8framework::Context<'_> = scope.mc.fetch(&cx).into();
         let mut a = scope.agent(realm, &executor);
         let v = a.local(&r);
         String::from(&**a.to_string(v).expect("ToString"))

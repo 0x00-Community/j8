@@ -67,7 +67,7 @@ impl Ctx {
     pub const ARGS: i32 = 128;
     pub const BUF: i32 = 256;
 
-    pub fn new(e: &mut Entry<'_, '_, '_, '_>, jit: &Jit) -> Box<Ctx> {
+    pub fn new(e: &mut Entry<'_, '_, '_, '_, '_>, jit: &Jit) -> Box<Ctx> {
         let acc = e.acc().bits();
         let entry: *mut core::ffi::c_void = core::ptr::from_mut(e).cast();
         let exe = e.executor();
@@ -132,11 +132,11 @@ impl Ctx {
         self.indexed_cache = a.realm.indexed_cache_addr();
     }
 
-    pub unsafe fn parts<'a>(&mut self) -> (&'a Executor, &'a mut Agent<'a, 'a>) {
+    pub unsafe fn parts<'a>(&mut self) -> (&'a Executor<'a>, &'a mut Agent<'a, 'a>) {
         unsafe { (&*self.exe.cast(), &mut *self.agent.cast()) }
     }
 
-    pub unsafe fn entry<'a>(&mut self) -> &'a mut Entry<'a, 'a, 'a, 'a> {
+    pub unsafe fn entry<'a>(&mut self) -> &'a mut Entry<'a, 'a, 'a, 'a, 'a> {
         unsafe { &mut *self.entry.cast() }
     }
 

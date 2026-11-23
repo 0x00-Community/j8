@@ -591,9 +591,9 @@ mod tests {
     fn append_truncate_and_reappend_across_leaves_levels_and_collections() {
         let fresh = ValueArray::default();
         assert_eq!(gc_word(&fresh.root), 0, "an empty root slot is a zero word");
-        let mut heap = Heap::new(NonZeroUsize::MIN);
-        let rooted = heap.mutate(|m| {
-            let mc = unsafe { Mutation::new(m, 0) };
+        Heap::new(NonZeroUsize::MIN, |mut heap| {
+        let rooted = heap.scope(|m| {
+            let mc = unsafe { Mutation::new(crate::rebrand_ref(&*m), 0) };
             let g = mc.alloc(ValueArray::default());
             let a = g.get();
             push_to(&mc, a, 100);
@@ -629,12 +629,12 @@ mod tests {
             a.truncate(&mc, 0);
             push_to(&mc, a, 16385);
             expect_filled(a, 16385);
-            m.root::<ArrayBrand>(g)
+            mc.stash::<ArrayBrand>(g)
         });
         heap.collect();
-        heap.mutate(|m| {
-            let mc = unsafe { Mutation::new(m, 1) };
-            let a = m.get(&rooted).get();
+        heap.scope(|m| {
+            let mc = unsafe { Mutation::new(crate::rebrand_ref(&*m), 1) };
+            let a = mc.fetch(&rooted).get();
             expect_filled(a, 16385);
             a.truncate(&mc, 16380);
             push_to(&mc, a, 16390);
@@ -644,14 +644,15 @@ mod tests {
             expect_filled(a, 2_097_153);
         });
         heap.collect();
-        heap.mutate(|m| {
-            let mc = unsafe { Mutation::new(m, 2) };
-            let a = m.get(&rooted).get();
+        heap.scope(|m| {
+            let mc = unsafe { Mutation::new(crate::rebrand_ref(&*m), 2) };
+            let a = mc.fetch(&rooted).get();
             expect_filled(a, 2_097_153);
             across_boundary(&mc, a, 2_097_150, 2_097_153);
             let run = a.run(2_097_152).expect("a cursor on the newest level");
             a.push(&mc, Value::Number(a.len() as f64));
             assert_eq!(run.get(a, 2_097_152).and_then(Value::as_number), Some(2_097_152.0), "a push past the snapped run stays invisible to it");
+        });
         });
     }
 }

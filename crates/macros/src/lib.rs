@@ -36,7 +36,13 @@ pub fn function(attr: TokenStream, item: TokenStream) -> TokenStream {
 #[proc_macro_derive(Collect, attributes(collect))]
 pub fn derive_trace(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
-    trace::expand(&input).unwrap_or_else(syn::Error::into_compile_error).into()
+    trace::expand(&input, &quote::quote!(::j8framework)).unwrap_or_else(syn::Error::into_compile_error).into()
+}
+
+#[proc_macro_derive(Trace, attributes(collect))]
+pub fn derive_j8_trace(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    trace::expand(&input, &quote::quote!(::j8::frame)).unwrap_or_else(syn::Error::into_compile_error).into()
 }
 
 #[proc_macro_attribute]

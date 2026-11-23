@@ -113,14 +113,6 @@ impl<'p> Isolate<'p> {
         self.generation
     }
 
-    pub fn run(&mut self, engine: &mut impl crate::Engine<'p>, cx: &crate::ContextRoot<'p>, src: &crate::Source<'_>) -> Result<crate::Global<'p>, crate::Error> {
-        engine.eval(self, cx, src)
-    }
-
-    pub fn run_module(&mut self, engine: &mut impl crate::Engine<'p>, cx: &crate::ContextRoot<'p>, src: &crate::Source<'_>) -> Result<crate::Global<'p>, crate::Error> {
-        engine.eval_module(self, cx, src)
-    }
-
     pub fn profiler(&self) -> &Profiler {
         &self.profiler
     }

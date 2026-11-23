@@ -1,10 +1,7 @@
-use j8framework::ValueKind;
-use alloc::boxed::Box;
-use core::any::{Any, TypeId};
-use j8lockfree::{AtomicRef as Ref, AtomicRefCell, AtomicRefMut as RefMut};
+use core::any::TypeId;
+use core::ptr::NonNull;
 
-use j8framework::Static;
-use j8framework::{Agent, Error, ErrorKind, HostData, JsObject, Native, NativeFn, ObjectData, ObjectKind, Property, Slot, Value};
+use j8framework::{Agent, CellMut, CellRef, Error, ErrorKind, GcCell, Host, HostData, HostObject, JsObject, Native, NativeFn, ObjectData, ObjectKind, Property, Slot, Trace, Tracer, Value, ValueKind};
 
 #[derive(Clone, Copy)]
 pub enum Member {
@@ -13,27 +10,26 @@ pub enum Member {
     Static { name: &'static str, f: NativeFn, length: u32 },
 }
 
-pub trait Class: Any + Send + Sync + Sized {
+pub unsafe trait Class<'scope>: Trace + Send + Sync + Sized + 'scope {
+    fn brand() -> TypeId;
     const NAME: &'static str;
     const CONSTRUCTOR: Option<(NativeFn, u32)>;
     const MEMBERS: &'static [Member];
 
-    fn parent<'scope>(a: &mut Agent<'scope, '_>, target: JsObject<'scope>) -> Option<ClassHandle<'scope>> {
+    fn parent(a: &mut Agent<'scope, '_>, target: JsObject<'scope>) -> Option<ClassHandle<'scope>> {
         let _ = (a, target);
         None
     }
 
-    fn upcast(this: &dyn Any, ty: TypeId) -> Option<&dyn Any> {
-        let me = this.downcast_ref::<Self>()?;
-        (ty == TypeId::of::<Self>()).then_some(me as &dyn Any)
+    fn find(&self, brand: TypeId) -> Option<NonNull<()>> {
+        (brand == Self::brand()).then(|| NonNull::from(self).cast())
     }
 
-    fn upcast_mut(this: &mut dyn Any, ty: TypeId) -> Option<&mut dyn Any> {
-        let me = this.downcast_mut::<Self>()?;
-        (ty == TypeId::of::<Self>()).then_some(me as &mut dyn Any)
+    fn find_mut(&mut self, brand: TypeId) -> Option<NonNull<()>> {
+        (brand == Self::brand()).then(|| NonNull::from(self).cast())
     }
 
-    fn install<'scope>(a: &mut Agent<'scope, '_>, target: JsObject<'scope>) -> ClassHandle<'scope> {
+    fn install(a: &mut Agent<'scope, '_>, target: JsObject<'scope>) -> ClassHandle<'scope> {
         let (f, length) = Self::CONSTRUCTOR.unwrap_or((Glue::illegal_constructor, 0));
         let ctor = a.realm.named_native(a.mc, f, Self::NAME, length);
         if let ObjectKind::Native(n) = &mut ctor.borrow_mut(a.mc).kind {
@@ -77,15 +73,29 @@ pub struct ClassHandle<'scope> {
 }
 
 impl<'scope> ClassHandle<'scope> {
-    pub fn instance<T: Class>(&self, a: &Agent<'scope, '_>, value: T) -> JsObject<'scope> {
+    pub fn instance<T: Class<'scope>>(&self, a: &Agent<'scope, '_>, value: T) -> JsObject<'scope> {
         Glue::wrap(a, value, self.proto)
     }
 }
 
-struct Hosted {
-    value: Box<dyn Any + Send + Sync>,
-    upcast: fn(&dyn Any, TypeId) -> Option<&dyn Any>,
-    upcast_mut: fn(&mut dyn Any, TypeId) -> Option<&mut dyn Any>,
+struct Hosted<T>(T);
+
+unsafe impl<'scope, T: Class<'scope>> HostObject<'scope> for Hosted<T> {
+    fn trace(&self, t: &mut Tracer<'_>) {
+        self.0.trace(t);
+    }
+
+    fn relocate(&mut self, t: &mut Tracer<'_>) {
+        self.0.relocate(t);
+    }
+
+    fn find(&self, brand: TypeId) -> Option<NonNull<()>> {
+        self.0.find(brand)
+    }
+
+    fn find_mut(&mut self, brand: TypeId) -> Option<NonNull<()>> {
+        self.0.find_mut(brand)
+    }
 }
 
 pub struct Glue;
@@ -121,14 +131,13 @@ impl Glue {
     }
 
     #[doc(hidden)]
-    pub fn wrap<'scope, T: Class>(a: &Agent<'scope, '_>, value: T, proto: JsObject<'scope>) -> JsObject<'scope> {
-        let host = Hosted { value: Box::new(value), upcast: T::upcast, upcast_mut: T::upcast_mut };
-        let data = a.mc.alloc(Static(AtomicRefCell::new(Box::new(host) as Box<dyn Any + Send + Sync>)));
+    pub fn wrap<'scope, T: Class<'scope>>(a: &Agent<'scope, '_>, value: T, proto: JsObject<'scope>) -> JsObject<'scope> {
+        let data = a.mc.alloc(GcCell::new(a.mc, Host::new(Hosted(value))));
         ObjectData { kind: ObjectKind::Host(data), proto: Some(proto), ..ObjectData::default() }.alloc(a.mc)
     }
 
     #[doc(hidden)]
-    pub fn construct<'scope, T: Class>(a: &mut Agent<'scope, '_>, value: Result<T, Error>) -> Result<Value<'scope>, Error> {
+    pub fn construct<'scope, T: Class<'scope>>(a: &mut Agent<'scope, '_>, value: Result<T, Error>) -> Result<Value<'scope>, Error> {
         let value = value?;
         let proto = a.proto_from_ctor(a.new_target, a.realm.object_proto)?;
         Ok(Self::wrap(a, value, proto).into())
@@ -143,7 +152,7 @@ impl Glue {
     }
 
     #[doc(hidden)]
-    pub fn host<'scope, T: Class>(a: &Agent<'scope, '_>, this: Value<'scope>) -> Result<HostData<'scope>, Error> {
+    pub fn host<'scope, T: Class<'scope>>(a: &Agent<'scope, '_>, this: Value<'scope>) -> Result<HostData<'scope>, Error> {
         let data = match this.kind() {
             ValueKind::Object(o) => match o.borrow().kind {
                 ObjectKind::Host(h) => Some(h),
@@ -159,29 +168,27 @@ impl Glue {
     }
 
     #[doc(hidden)]
-    pub fn borrow<'d>(a: &Agent<'_, '_>, data: &'d Static<AtomicRefCell<Box<dyn Any + Send + Sync>>>, class: &str) -> Result<Ref<'d, Box<dyn Any + Send + Sync>>, Error> {
-        data.0.try_borrow().ok_or_else(|| Self::busy(a, class))
+    pub fn borrow<'d, 'scope>(a: &Agent<'scope, '_>, data: &'d GcCell<'scope, Host<'scope>>, class: &str) -> Result<CellRef<'d, Host<'scope>>, Error> {
+        data.try_borrow().ok_or_else(|| Self::busy(a, class))
     }
 
     #[doc(hidden)]
-    pub fn borrow_mut<'d>(a: &Agent<'_, '_>, data: &'d Static<AtomicRefCell<Box<dyn Any + Send + Sync>>>, class: &str) -> Result<RefMut<'d, Box<dyn Any + Send + Sync>>, Error> {
-        data.0.try_borrow_mut().ok_or_else(|| Self::busy(a, class))
+    pub fn borrow_mut<'d, 'scope>(a: &Agent<'scope, '_>, data: &'d GcCell<'scope, Host<'scope>>, class: &str) -> Result<CellMut<'d, Host<'scope>>, Error> {
+        data.try_borrow_mut(a.mc).ok_or_else(|| Self::busy(a, class))
     }
 
     #[doc(hidden)]
-    pub fn cast<'d, T: Class>(a: &Agent<'_, '_>, cell: &'d Ref<'_, Box<dyn Any + Send + Sync>>) -> Result<&'d T, Error> {
-        let found = cell.downcast_ref::<Hosted>().and_then(|h| (h.upcast)(&*h.value, TypeId::of::<T>())).and_then(|v| v.downcast_ref::<T>());
-        found.ok_or_else(|| Self::illegal(a, T::NAME))
+    pub fn cast<'d, 'scope, T: Class<'scope>>(a: &Agent<'scope, '_>, cell: &'d CellRef<'_, Host<'scope>>) -> Result<&'d T, Error> {
+        cell.find(T::brand()).map(|p| unsafe { p.cast::<T>().as_ref() }).ok_or_else(|| Self::illegal(a, T::NAME))
     }
 
     #[doc(hidden)]
-    pub fn cast_mut<'d, T: Class>(a: &Agent<'_, '_>, cell: &'d mut RefMut<'_, Box<dyn Any + Send + Sync>>) -> Result<&'d mut T, Error> {
-        let found = cell.downcast_mut::<Hosted>().and_then(|h| (h.upcast_mut)(&mut *h.value, TypeId::of::<T>())).and_then(|v| v.downcast_mut::<T>());
-        found.ok_or_else(|| Self::illegal(a, T::NAME))
+    pub fn cast_mut<'d, 'scope, T: Class<'scope>>(a: &Agent<'scope, '_>, cell: &'d mut CellMut<'_, Host<'scope>>) -> Result<&'d mut T, Error> {
+        cell.find_mut(T::brand()).map(|p| unsafe { p.cast::<T>().as_mut() }).ok_or_else(|| Self::illegal(a, T::NAME))
     }
 
     #[doc(hidden)]
-    pub fn parent<'scope, P: Class>(a: &mut Agent<'scope, '_>, target: JsObject<'scope>) -> ClassHandle<'scope> {
+    pub fn parent<'scope, P: Class<'scope>>(a: &mut Agent<'scope, '_>, target: JsObject<'scope>) -> ClassHandle<'scope> {
         let ctor = target.borrow().own(a.mc, P::NAME).and_then(Value::as_object);
         let proto = ctor.and_then(|c| c.borrow().own(a.mc, "prototype")).and_then(Value::as_object);
         match (ctor, proto) {

@@ -1,18 +1,17 @@
 use alloc::boxed::Box;
 use core::ffi::c_void;
 
-use j8framework::{Backing, BufferData, CodeKind, ElementKind, External, Global, JsObject, ObjectData, ObjectKind, Value, ViewData};
+use j8framework::{Backing, BufferData, CodeKind, ElementKind, External, JsObject, ObjectData, ObjectKind, ScopeGlobal, Value, ValueBrand, ViewData};
 
 use crate::convert::Ffi;
 use crate::{Env, Finalize, Handle, Status, TypedArrayType, napi};
 
-#[derive(Debug)]
-pub struct Deferred {
-    resolve: Global,
-    reject: Global,
+pub struct Deferred<'e> {
+    resolve: ScopeGlobal<'e, ValueBrand>,
+    reject: ScopeGlobal<'e, ValueBrand>,
 }
 
-impl Env {
+impl Env<'_> {
     fn array_buffer<'scope>(a: &j8framework::Agent<'scope, '_>, bytes: Backing) -> JsObject<'scope> {
         let data = BufferData { bytes: Some(bytes), max: None, shared: false };
         ObjectData { kind: ObjectKind::ArrayBuffer(Box::new(data)), proto: Some(a.realm.array_buffer_proto), ..ObjectData::default() }.alloc(a.mc)
@@ -181,7 +180,7 @@ napi! {
     }
 }
 
-impl Env {
+impl Env<'_> {
     fn settle(&self, deferred: *mut Deferred, v: Handle, reject: bool) -> Result<(), Status> {
         let a = self.agent()?;
         if deferred.is_null() {

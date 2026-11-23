@@ -144,7 +144,7 @@ impl Method {
         format_ident!("__j8_js_{}", self.rust)
     }
 
-    pub(crate) fn wrapper(&self, class: &str, owner: &TokenStream) -> TokenStream {
+    pub(crate) fn wrapper(&self, class: &str, ty: &TokenStream, call: &TokenStream) -> TokenStream {
         let name = self.wrapper_name();
         let rust = &self.rust;
         let mut prepare = Vec::new();
@@ -166,17 +166,17 @@ impl Method {
             }
         }
         let call = match self.receiver {
-            Receiver::None => quote!(#owner::#rust(#(#call_args),*)),
+            Receiver::None => quote!(#call::#rust(#(#call_args),*)),
             Receiver::Shared => quote! {{
-                let __data = ::j8::Glue::host::<Self>(a, this)?;
+                let __data = ::j8::Glue::host::<#ty>(a, this)?;
                 let __cell = ::j8::Glue::borrow(a, &__data, #class)?;
-                let __self = ::j8::Glue::cast::<Self>(a, &__cell)?;
+                let __self = ::j8::Glue::cast::<#ty>(a, &__cell)?;
                 __self.#rust(#(#call_args),*)
             }},
             Receiver::Mutable => quote! {{
-                let __data = ::j8::Glue::host::<Self>(a, this)?;
+                let __data = ::j8::Glue::host::<#ty>(a, this)?;
                 let mut __cell = ::j8::Glue::borrow_mut(a, &__data, #class)?;
-                let __self = ::j8::Glue::cast_mut::<Self>(a, &mut __cell)?;
+                let __self = ::j8::Glue::cast_mut::<#ty>(a, &mut __cell)?;
                 __self.#rust(#(#call_args),*)
             }},
         };
@@ -192,7 +192,7 @@ impl Method {
                 ::j8::Glue::require_new(a, #class)?;
                 #(#prepare)*
                 let __made = #made;
-                ::j8::Glue::construct::<Self>(a, __made)
+                ::j8::Glue::construct::<#ty>(a, __made)
             }
         } else {
             quote! {
@@ -236,12 +236,11 @@ impl Bound {
         Ok(Self { name, methods })
     }
 
-    pub(crate) fn wrappers(&self) -> Vec<TokenStream> {
-        let owner = quote!(Self);
-        self.methods.iter().map(|m| m.wrapper(&self.name.value(), &owner)).collect()
+    pub(crate) fn wrappers(&self, ty: &TokenStream, call: &TokenStream) -> Vec<TokenStream> {
+        self.methods.iter().map(|m| m.wrapper(&self.name.value(), ty, call)).collect()
     }
 
-    pub(crate) fn members(&self) -> Vec<TokenStream> {
+    pub(crate) fn members(&self, owner: &TokenStream) -> Vec<TokenStream> {
         let native = quote!(::j8::frame::NativeFn);
         let mut members = Vec::new();
         let mut accessors: Vec<(String, Option<Ident>, Option<Ident>)> = Vec::new();
@@ -249,8 +248,8 @@ impl Bound {
             let w = m.wrapper_name();
             let (js, len) = (&m.js, m.length);
             match m.role {
-                Role::Method => members.push(quote!(::j8::Member::Method { name: #js, f: Self::#w as #native, length: #len })),
-                Role::Static => members.push(quote!(::j8::Member::Static { name: #js, f: Self::#w as #native, length: #len })),
+                Role::Method => members.push(quote!(::j8::Member::Method { name: #js, f: #owner::#w as #native, length: #len })),
+                Role::Static => members.push(quote!(::j8::Member::Static { name: #js, f: #owner::#w as #native, length: #len })),
                 Role::Getter | Role::Setter => {
                     let at = match accessors.iter().position(|(n, _, _)| n == js) {
                         Some(i) => i,
@@ -265,8 +264,8 @@ impl Bound {
             }
         }
         for (name, get, set) in accessors {
-            let get = get.map_or(quote!(::core::option::Option::None), |g| quote!(::core::option::Option::Some(Self::#g as #native)));
-            let set = set.map_or(quote!(::core::option::Option::None), |s| quote!(::core::option::Option::Some(Self::#s as #native)));
+            let get = get.map_or(quote!(::core::option::Option::None), |g| quote!(::core::option::Option::Some(#owner::#g as #native)));
+            let set = set.map_or(quote!(::core::option::Option::None), |s| quote!(::core::option::Option::Some(#owner::#s as #native)));
             members.push(quote!(::j8::Member::Accessor { name: #name, get: #get, set: #set }));
         }
         members

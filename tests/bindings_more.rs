@@ -1,8 +1,9 @@
-use j8::{Bytes, Function, Persistent};
+use j8::{Bytes, Function};
 use j8executor::Executor;
 use j8framework::{Agent, Error, Value};
 use j8platform::DefaultPlatform;
 
+#[derive(j8::Trace)]
 struct Animal {
     name: String,
 }
@@ -23,6 +24,7 @@ impl Animal {
     }
 }
 
+#[derive(j8::Trace)]
 struct Dog {
     base: Animal,
     tricks: u32,
@@ -53,27 +55,27 @@ impl Dog {
     }
 }
 
-#[derive(Default)]
-struct Hooks {
-    on: Option<Function>,
-    kept: Option<Persistent>,
+#[derive(Default, j8::Trace)]
+struct Hooks<'scope> {
+    on: Option<Function<'scope>>,
+    kept: Option<Value<'scope>>,
 }
 
 #[j8::class]
-impl Hooks {
+impl<'scope> Hooks<'scope> {
     #[js(constructor)]
     fn new() -> Self {
         Self::default()
     }
 
-    fn set(&mut self, f: Function, keep: Persistent) {
+    fn set(&mut self, f: Function<'scope>, keep: Value<'scope>) {
         self.on = Some(f);
         self.kept = Some(keep);
     }
 
-    fn fire<'scope>(&self, a: &mut Agent<'scope, '_>, x: f64) -> Result<Value<'scope>, Error> {
-        let kept = self.kept.as_ref().map_or(Value::Undefined, |k| k.get(a));
-        match &self.on {
+    fn fire(&self, a: &mut Agent<'scope, '_>, x: f64) -> Result<Value<'scope>, Error> {
+        let kept = self.kept.unwrap_or(Value::Undefined);
+        match self.on {
             Some(f) => f.call(a, Value::Undefined, &[x.into(), kept]),
             None => Ok(Value::Undefined),
         }
@@ -183,23 +185,52 @@ fn async_bindings_settle_on_the_event_loop() {
         let r = rt.eval("got", "check.js").expect("runs");
         assert_eq!(rt.text(&r), "8");
         let mut isolate = j8framework::Isolate::new(&plain, j8framework::CreateParams::default());
-        let mut executor = Executor::default();
-        let cx = isolate.enter(|scope| scope.persist(scope.context(&j8builtins::Builtins)));
+        let executor = Executor::default();
+        let cx = isolate.enter(|scope| scope.mc.stash::<j8framework::RealmBrand>(scope.context(&j8builtins::Builtins).realm()));
         isolate.enter(|scope| {
-            let realm = scope.context_of(&cx);
+            let realm = scope.mc.fetch(&cx).into();
             let mut a = scope.agent(realm, &executor);
             <Loop as j8::Host>::install(&mut a);
         });
         let src = j8framework::Source { text: "try { later.double(1); 'no' } catch (e) { e instanceof TypeError }", file: "t.js" };
-        let r = isolate.run(&mut executor, &cx, &src).expect("runs");
+        let r = executor.eval(&mut isolate, &cx, &src).expect("runs");
         let text = isolate.enter(|scope| {
-            let realm = scope.context_of(&cx);
+            let realm = scope.mc.fetch(&cx).into();
             let mut a = scope.agent(realm, &executor);
             let v = a.local(&r);
             a.to_string(v).map(|s| String::from(&**s)).expect("ToString")
         });
         assert_eq!(text, "true");
     });
+}
+
+fn eval_text<'p>(isolate: &mut j8framework::Isolate<'p>, executor: &Executor<'p>, cx: &j8framework::ScopeGlobal<'p, j8framework::RealmBrand>, text: &str) -> String {
+    let r = executor.eval(isolate, cx, &j8framework::Source { text, file: "t.js" }).expect("runs");
+    isolate.enter(|scope| {
+        let realm = scope.mc.fetch(cx).into();
+        let mut a = scope.agent(realm, executor);
+        let v = a.local(&r);
+        a.to_string(v).map(|s| String::from(&**s)).expect("ToString")
+    })
+}
+
+#[test]
+fn host_fields_keep_their_objects_across_collections() {
+    let platform = DefaultPlatform::default();
+    let mut isolate = j8framework::Isolate::new(&platform, j8framework::CreateParams::default());
+    let executor = Executor::default();
+    let cx = isolate.enter(|scope| scope.mc.stash::<j8framework::RealmBrand>(scope.context(&j8builtins::Builtins).realm()));
+    isolate.enter(|scope| {
+        let realm = scope.mc.fetch(&cx).into();
+        let mut a = scope.agent(realm, &executor);
+        <Zoo as j8::Host>::install(&mut a);
+    });
+    eval_text(&mut isolate, &executor, &cx, "globalThis.h = new Hooks(); h.set((x, k) => x * 2 + k.n, { n: 1 }); 0");
+    for _ in 0..3 {
+        eval_text(&mut isolate, &executor, &cx, "for (let i = 0; i < 10000; i++) ({ i }); 0");
+        isolate.collect();
+    }
+    assert_eq!(eval_text(&mut isolate, &executor, &cx, "h.fire(20)"), "41");
 }
 
 #[cfg(feature = "json")]

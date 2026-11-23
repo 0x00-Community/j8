@@ -8,7 +8,7 @@ mod env;
 mod types;
 
 pub use callback::CallbackInfo;
-pub use env::{Env, Finalizer, Pending};
+pub use env::{Env, Finalizer, Opaque, Pending};
 pub use types::{Attributes, Callback, CleanupHook, ExtendedErrorInfo, NodeVersion, Finalize, Handle, KeyConversion, KeyFilter, KeyMode, PropertyDescriptor, RegisterFn, Status, TypeTag, TypedArrayType, ValueType};
 
 pub const AUTO_LENGTH: usize = usize::MAX;

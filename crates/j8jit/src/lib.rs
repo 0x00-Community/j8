@@ -536,7 +536,7 @@ impl Jit {
         }
     }
 
-    fn run_native(&self, e: &mut Entry<'_, '_, '_, '_>, addr: usize, ret: usize) -> Tiered {
+    fn run_native(&self, e: &mut Entry<'_, '_, '_, '_, '_>, addr: usize, ret: usize) -> Tiered {
         let params = e.params();
         let words: [u64; 4] = core::array::from_fn(|i| if i <= e.function().shared().formal_parameters as usize { unsafe { (*params.add(i)).bits() } } else { j8framework::ValueBits::UNDEFINED });
         let callee = e.callee().bits();
@@ -559,7 +559,7 @@ impl Jit {
         Tiered::Resumed
     }
 
-    fn run(&self, e: &mut Entry<'_, '_, '_, '_>, addr: usize) -> Tiered {
+    fn run(&self, e: &mut Entry<'_, '_, '_, '_, '_>, addr: usize) -> Tiered {
         let params = e.params().cast::<Value<'static>>();
         let r0 = e.r0().cast::<Value<'static>>();
         let level = e.depth();
@@ -658,7 +658,7 @@ impl Tier for Jit {
         Some(j8framework::Callback { callee, this, run: Some(Self::run_callback), code, arity, env, release: Some(Self::release_callback), quiet: core::cell::Cell::new(false) })
     }
 
-    fn enter(&self, e: &mut Entry<'_, '_, '_, '_>) -> Tiered {
+    fn enter(&self, e: &mut Entry<'_, '_, '_, '_, '_>) -> Tiered {
         let f = e.function();
         let id = f.id();
         f.tier_word().set(1);
@@ -720,7 +720,7 @@ impl Tier for Jit {
         self.run(e, addr)
     }
 
-    fn resume(&self, e: &mut Entry<'_, '_, '_, '_>, pc: usize) -> Tiered {
+    fn resume(&self, e: &mut Entry<'_, '_, '_, '_, '_>, pc: usize) -> Tiered {
         let f = e.function();
         let id = f.id();
         if !self.stack_room() {
@@ -740,7 +740,7 @@ impl Tier for Jit {
         }
     }
 
-    fn osr(&self, e: &mut Entry<'_, '_, '_, '_>, at: usize) -> Tiered {
+    fn osr(&self, e: &mut Entry<'_, '_, '_, '_, '_>, at: usize) -> Tiered {
         let f = e.function();
         let id = f.id();
         f.tier_word().set(1);

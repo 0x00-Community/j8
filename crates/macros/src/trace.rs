@@ -47,7 +47,7 @@ impl Arm {
     }
 }
 
-pub fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
+pub fn expand(input: &DeriveInput, krate: &TokenStream) -> syn::Result<TokenStream> {
     let name = &input.ident;
     let leaf = is_static(&input.attrs)?;
     let arms: Vec<Arm> = match &input.data {
@@ -67,17 +67,17 @@ pub fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
     let params: Vec<Ident> = generics.type_params().map(|p| p.ident.clone()).collect();
     let wc = generics.make_where_clause();
     for p in params {
-        wc.predicates.push(parse_quote!(#p: ::j8framework::Trace));
+        wc.predicates.push(parse_quote!(#p: #krate::Trace));
     }
     let (ig, tg, wc) = generics.split_for_impl();
     let types: Vec<&Type> = arms.iter().flat_map(|a| a.traced.iter().map(|(_, t)| t)).collect();
     let trace_arms = arms.iter().map(|a| {
         let (p, b) = (&a.pattern, a.traced.iter().map(|(b, _)| b));
-        quote!(#p => { #(::j8framework::Trace::trace(#b, __t);)* })
+        quote!(#p => { #(#krate::Trace::trace(#b, __t);)* })
     });
     let relocate_arms = arms.iter().map(|a| {
         let (p, b) = (&a.pattern, a.traced.iter().map(|(b, _)| b));
-        quote!(#p => { #(::j8framework::Trace::relocate(#b, __t);)* })
+        quote!(#p => { #(#krate::Trace::relocate(#b, __t);)* })
     });
     let body = |arms: Vec<TokenStream>| if leaf { quote!() } else { quote!(#[allow(unused_variables)] match self { #(#arms)* }) };
     let (trace_body, relocate_body) = (body(trace_arms.collect()), body(relocate_arms.collect()));
@@ -92,20 +92,20 @@ pub fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
         }
     });
     Ok(quote! {
-        unsafe impl #ig ::j8framework::Trace for #name #tg #wc {
-            const NO_EDGES: bool = true #(&& <#types as ::j8framework::Trace>::NO_EDGES)*;
+        unsafe impl #ig #krate::Trace for #name #tg #wc {
+            const NO_EDGES: bool = true #(&& <#types as #krate::Trace>::NO_EDGES)*;
 
             #[inline]
-            fn trace(&self, __t: &mut ::j8framework::Tracer<'_>) {
-                if <Self as ::j8framework::Trace>::NO_EDGES {
+            fn trace(&self, __t: &mut #krate::Tracer<'_>) {
+                if <Self as #krate::Trace>::NO_EDGES {
                     return;
                 }
                 #trace_body
             }
 
             #[inline]
-            fn relocate(&mut self, __t: &mut ::j8framework::Tracer<'_>) {
-                if <Self as ::j8framework::Trace>::NO_EDGES {
+            fn relocate(&mut self, __t: &mut #krate::Tracer<'_>) {
+                if <Self as #krate::Trace>::NO_EDGES {
                     return;
                 }
                 #relocate_body

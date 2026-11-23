@@ -5,7 +5,7 @@ use j8framework::{Descriptor, Key, Property};
 use crate::convert::Ffi;
 use crate::{Attributes, Callback, CallbackInfo, Env, Handle, PropertyDescriptor, Status, napi};
 
-impl Env {
+impl Env<'_> {
     fn label<'s>(name: *const c_char, length: usize) -> Result<alloc::borrow::Cow<'s, str>, Status> {
         if name.is_null() { Ok(alloc::borrow::Cow::Borrowed("")) } else { Ffi::utf8(name, length) }
     }

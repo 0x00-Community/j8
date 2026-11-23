@@ -1,7 +1,8 @@
 use std::marker::PhantomData;
 use std::time::Duration;
 
-use j8framework::{Agent, Error, ErrorKind, EventLoop, EventLoopSet, Global, Platform, Pool, ScriptKind, Source, Task, Value};
+use j8executor::{EventLoop, EventLoopSet, Executor};
+use j8framework::{Agent, Error, ErrorKind, Platform, Pool, ScopeGlobal, ScriptKind, Source, Task, Value, ValueBrand};
 
 pub trait Host {
     fn install(a: &mut Agent<'_, '_>);
@@ -58,11 +59,11 @@ impl<H: Host, P: Platform> Platform for HostPlatform<H, P> {
 }
 
 pub struct Runtime<'p> {
-    js: EventLoop<'p, j8executor::Executor>,
+    js: EventLoop<'p>,
 }
 
 impl<'p> Runtime<'p> {
-    pub fn on<H: Host>(set: &EventLoopSet<'_, 'p, j8executor::Executor>, executor: j8executor::Executor) -> Result<Self, Error> {
+    pub fn on<H: Host>(set: &EventLoopSet<'_, 'p>, executor: Executor<'p>) -> Result<Self, Error> {
         let rt = Self { js: set.spawn(executor, &j8builtins::Builtins) };
         rt.enter(|a| H::install(a));
         let mut preludes = Vec::new();
@@ -73,11 +74,11 @@ impl<'p> Runtime<'p> {
         Ok(rt)
     }
 
-    pub fn eval(&self, text: &str, file: &str) -> Result<Global, Error> {
+    pub fn eval(&self, text: &str, file: &str) -> Result<ScopeGlobal<'p, ValueBrand>, Error> {
         self.js.eval(&Source { text, file }, ScriptKind::Classic)
     }
 
-    pub fn eval_module(&self, text: &str, file: &str) -> Result<Global, Error> {
+    pub fn eval_module(&self, text: &str, file: &str) -> Result<ScopeGlobal<'p, ValueBrand>, Error> {
         self.js.eval(&Source { text, file }, ScriptKind::Module)
     }
 
@@ -85,7 +86,7 @@ impl<'p> Runtime<'p> {
         self.js.enter(f)
     }
 
-    pub fn text(&self, g: &Global) -> String {
+    pub fn text(&self, g: &ScopeGlobal<'p, ValueBrand>) -> String {
         self.enter(|a| {
             let v = a.local(g);
             a.to_string(v).map_or_else(|_| String::from("<ToString threw>"), |s| String::from(&**s))
@@ -164,7 +165,7 @@ macro_rules! runtime {
                 $crate::HostPlatform::new(inner)
             }
 
-            pub fn runtime<'p>(set: &$crate::EventLoopSet<'_, 'p, $crate::executor::Executor>, executor: $crate::executor::Executor) -> ::core::result::Result<$crate::Runtime<'p>, $crate::frame::Error> {
+            pub fn runtime<'p>(set: &$crate::EventLoopSet<'_, 'p>, executor: $crate::executor::Executor<'p>) -> ::core::result::Result<$crate::Runtime<'p>, $crate::frame::Error> {
                 $crate::Runtime::on::<$name>(set, executor)
             }
         }

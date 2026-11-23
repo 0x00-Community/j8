@@ -5,6 +5,7 @@ use j8executor::Executor;
 use j8framework::{Agent, CreateParams, Error, Isolate, Source, Value};
 use j8platform::DefaultPlatform;
 
+#[derive(j8::Trace)]
 struct Counter {
     n: f64,
 }
@@ -63,10 +64,10 @@ fn greet(name: &str) -> String {
 fn class_binding() {
     let platform = DefaultPlatform::default();
     let mut isolate = Isolate::new(&platform, CreateParams::default());
-    let mut executor = Executor::default();
-    let cx = isolate.enter(|scope| scope.persist(scope.context(&Builtins)));
+    let executor = Executor::default();
+    let cx = isolate.enter(|scope| scope.mc.stash::<j8framework::RealmBrand>(scope.context(&Builtins).realm()));
     isolate.enter(|scope| {
-        let realm = scope.context_of(&cx);
+        let realm = scope.mc.fetch(&cx).into();
         let mut a = scope.agent(realm, &executor);
         let global = a.realm.global;
         Counter::install(&mut a, global);
@@ -74,9 +75,9 @@ fn class_binding() {
         greet::install(&mut a, global);
     });
     let src = "const c = new Counter(2); c.inc(3); c.value = c.value * 2; [c.value, c.describe('n'), Counter.sum(1, 2, 3), c instanceof Counter, String(Object.prototype.toString.call(c)), calc.twice(4), calc.answer, greet('j8'), greet.length].join()";
-    let r = isolate.run(&mut executor, &cx, &Source { text: src, file: "t.js" });
+    let r = executor.eval(&mut isolate, &cx, &Source { text: src, file: "t.js" });
     let text = isolate.enter(|scope| {
-        let realm = scope.context_of(&cx);
+        let realm = scope.mc.fetch(&cx).into();
         let mut a = scope.agent(realm, &executor);
         let v = a.local(&r.expect("the script runs"));
         String::from(&**a.to_string(v).expect("a string"))
