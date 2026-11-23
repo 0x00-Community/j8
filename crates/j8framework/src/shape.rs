@@ -2,7 +2,8 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::hash::BuildHasherDefault;
 
-use j8lockfree::{Chain, OnceBox, Prefix};
+use j8lockfree::{AtomicRefCell, OnceBox, Prefix};
+use paragc::{Handle, HandleSlot};
 
 use crate::Collect;
 use rustc_hash::FxHasher;
@@ -51,20 +52,69 @@ impl<'gc> From<(Slot<'gc>, Attrs)> for Property<'gc> {
     }
 }
 
+pub type ShapeRef<'gc> = Handle<'gc, Shape>;
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct ShapeKey(usize);
+
+impl ShapeKey {
+    pub fn id(self) -> usize {
+        self.0
+    }
+
+    pub unsafe fn shape<'a>(self) -> &'a Shape {
+        unsafe { Handle::<'a, Shape>::from_id(self.0) }.get().get()
+    }
+
+    pub unsafe fn handle<'gc>(self) -> ShapeRef<'gc> {
+        unsafe { Handle::from_id(self.0) }
+    }
+}
+
+impl From<ShapeRef<'_>> for ShapeKey {
+    fn from(h: ShapeRef<'_>) -> Self {
+        Self(h.id())
+    }
+}
+
+paragc::brand!(pub ShapeBrand = for<'gc> Shape);
+
+type Transition = (SmallStr, Attrs, paragc::Weak<ShapeBrand>);
+
 pub struct Shape {
     keys: Arc<Prefix<(SmallStr, Attrs)>>,
     len: usize,
     index: OnceBox<hashbrown::HashMap<SmallStr, u32, BuildHasherDefault<FxHasher>>>,
     searches: IsoCell<u32>,
-    transitions: Chain<(SmallStr, Attrs, Arc<Shape>)>,
-    tree: IsoCell<*const Shape>,
+    transitions: AtomicRefCell<Vec<Transition>>,
+    this: IsoCell<usize>,
     digit_keys: bool,
+}
+
+unsafe impl crate::Trace for Shape {
+    const NO_EDGES: bool = true;
+
+    fn trace(&self, _: &mut crate::Tracer<'_>) {}
 }
 
 impl Shape {
     fn new(keys: Arc<Prefix<(SmallStr, Attrs)>>, len: usize) -> Self {
         let digit_keys = keys.prefix(len).iter().any(|(k, _)| k.as_bytes().first().is_some_and(u8::is_ascii_digit));
-        Self { keys, len, index: OnceBox::default(), searches: IsoCell::new(0), transitions: Chain::default(), tree: IsoCell::new(core::ptr::null()), digit_keys }
+        Self { keys, len, index: OnceBox::default(), searches: IsoCell::new(0), transitions: AtomicRefCell::new(Vec::new()), this: IsoCell::new(0), digit_keys }
+    }
+
+    fn alloc<'gc>(mc: &Mutation<'gc>, keys: Arc<Prefix<(SmallStr, Attrs)>>, len: usize) -> ShapeRef<'gc> {
+        let h = mc.mutator().alloc_handle(Self::new(keys, len));
+        h.this.set(h.id());
+        h
+    }
+
+    pub fn handle<'gc>(&self, _: &Mutation<'gc>) -> ShapeRef<'gc> {
+        unsafe { Handle::from_id(self.this.get()) }
+    }
+
+    pub fn id(&self) -> usize {
+        self.this.get()
     }
 
     pub fn digit_keys(&self) -> bool {
@@ -77,10 +127,6 @@ impl Shape {
 
     pub fn len(&self) -> usize {
         self.len
-    }
-
-    pub fn in_tree(&self, root: &Shape) -> bool {
-        core::ptr::eq(self.tree.get(), root)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -110,24 +156,34 @@ impl Shape {
         self.keys()[i].1
     }
 
-    fn has_child(&self, to: &Shape) -> bool {
-        to.len() == self.len() + 1 && to.tree.get() == self.tree.get()
-    }
-
-    fn rooted(keys: Vec<(SmallStr, Attrs)>) -> Arc<Self> {
+    pub fn rooted<'gc>(mc: &Mutation<'gc>, keys: Vec<(SmallStr, Attrs)>) -> ShapeRef<'gc> {
         let len = keys.len();
-        let s = Arc::new(Self::new(Prefix::new(keys), len));
-        s.tree.set(Arc::as_ptr(&s));
-        s
+        Self::alloc(mc, Prefix::new(keys), len)
     }
 
-    fn child_ref(&self, key: &str, attrs: Attrs) -> &Shape {
-        if let Some((_, _, c)) = self.transitions.iter().find(|(k, a, _)| **k == *key && *a == attrs) {
-            return c;
+    pub fn empty<'gc>(mc: &Mutation<'gc>) -> ShapeRef<'gc> {
+        Self::rooted(mc, Vec::new())
+    }
+
+    pub fn child<'gc>(&self, mc: &Mutation<'gc>, key: &str, attrs: Attrs) -> ShapeRef<'gc> {
+        let m = mc.mutator();
+        let mut ts = self.transitions.borrow_mut();
+        let mut found = None;
+        ts.retain(|(k, a, w)| match m.upgrade(w) {
+            Some(c) => {
+                if found.is_none() && **k == *key && *a == attrs {
+                    found = Some(c);
+                }
+                true
+            }
+            None => false,
+        });
+        if let Some(c) = found {
+            return c.get().handle(mc);
         }
-        let keys = self.keys.extend(self.len, (SmallStr::from(key), attrs));
-        let child = Arc::new(Self { tree: IsoCell::new(self.tree.get()), ..Self::new(keys, self.len + 1) });
-        &self.transitions.push((SmallStr::from(key), attrs, child)).2
+        let child = Self::alloc(mc, self.keys.extend(self.len, (SmallStr::from(key), attrs)), self.len + 1);
+        ts.push((SmallStr::from(key), attrs, m.weak::<ShapeBrand>(child.get())));
+        child
     }
 }
 
@@ -153,25 +209,19 @@ impl Dict<'_> {
     }
 }
 
-#[derive(Collect)]
-#[collect(require_static)]
-pub struct Anchor(pub Arc<Shape>);
-
 pub struct Props<'gc> {
-    shape: IsoCell<*const Shape>,
+    shape: HandleSlot<'gc, Shape>,
     store: GcSlot<'gc, Erased>,
     dict: GcSlot<'gc, GcCell<'gc, Dict<'gc>>>,
-    anchor: GcSlot<'gc, Anchor>,
     inline: [ValueCell<'gc>; INLINE],
 }
 
 impl Default for Props<'_> {
     fn default() -> Self {
         Self {
-            shape: IsoCell::new(core::ptr::null()),
+            shape: HandleSlot::default(),
             store: GcSlot::default(),
             dict: GcSlot::default(),
-            anchor: GcSlot::default(),
             inline: core::array::from_fn(|_| ValueCell::new(Value::Undefined)),
         }
     }
@@ -179,16 +229,16 @@ impl Default for Props<'_> {
 
 unsafe impl crate::Trace for Props<'_> {
     fn trace(&self, t: &mut crate::Tracer<'_>) {
+        self.shape.trace(t);
         self.store.trace(t);
         self.dict.trace(t);
-        self.anchor.trace(t);
         self.inline.iter().for_each(|c| c.trace(t));
     }
 
     fn relocate(&mut self, t: &mut crate::Tracer<'_>) {
+        self.shape.relocate(t);
         self.store.relocate(t);
         self.dict.relocate(t);
-        self.anchor.relocate(t);
         self.inline.iter_mut().for_each(|c| c.relocate(t));
     }
 }
@@ -227,20 +277,17 @@ impl<'gc> Props<'gc> {
 
     #[inline]
     pub fn shape_ref(&self) -> Option<&'gc Shape> {
-        unsafe { self.shape.get().as_ref() }
+        self.shape.get().map(|h| h.get().get())
     }
 
     #[inline]
-    pub fn shape_ptr(&self) -> Option<*const Shape> {
-        self.shape_ref().map(core::ptr::from_ref)
+    pub fn shape_id(&self) -> Option<usize> {
+        self.shape.get().map(Handle::id)
     }
 
-    pub fn shape(&self) -> Option<Arc<Shape>> {
-        let p = self.shape_ptr()?;
-        unsafe {
-            Arc::increment_strong_count(p);
-            Some(Arc::from_raw(p))
-        }
+    #[inline]
+    pub fn shape(&self) -> Option<ShapeRef<'gc>> {
+        self.shape.get()
     }
 
     #[inline]
@@ -361,10 +408,6 @@ impl<'gc> Props<'gc> {
         (0..self.len()).map(|i| (self.key(i), self.get(i))).collect()
     }
 
-    pub fn empty() -> Arc<Shape> {
-        Shape::rooted(Vec::new())
-    }
-
     fn to_dict(&self) -> Dict<'gc> {
         let shape = self.shape_ref();
         let n = shape.map_or(0, Shape::len);
@@ -381,12 +424,12 @@ impl<'gc> Props<'gc> {
         if self.dict.get().is_none() {
             let d = mc.alloc(GcCell::new(mc, self.to_dict()));
             self.dict.set(mc.mutator(), Some(d));
-            self.shape.set(core::ptr::null());
+            self.shape.set(None);
         }
         f(&mut self.dict_cell().expect("just converted").borrow_mut(mc));
     }
 
-    fn advance(&self, mc: &Mutation<'gc>, from: Option<&Shape>, to: &Shape, slot: Slot<'gc>) -> bool {
+    fn advance(&self, mc: &Mutation<'gc>, from: Option<ShapeRef<'gc>>, to: ShapeRef<'gc>, slot: Slot<'gc>) -> bool {
         let n = to.len() - 1;
         let v = slot.encode(mc);
         match n.checked_sub(INLINE) {
@@ -399,36 +442,23 @@ impl<'gc> Props<'gc> {
                 }
             }
         }
-        let from = from.map_or(core::ptr::null(), core::ptr::from_ref);
         if self.shape.get() != from {
             return false;
         }
-        self.shape.set(core::ptr::from_ref(to));
+        self.shape.set(Some(to));
         true
     }
 
-    fn anchor(&self, mc: &Mutation<'gc>, tree: Arc<Shape>) {
-        self.anchor.set(mc.mutator(), Some(mc.alloc(Anchor(tree))));
-    }
-
-    pub fn push<'r>(&self, mc: &Mutation<'gc>, key: &str, prop: Property<'gc>, wide: bool, root: impl Fn() -> Option<&'r Shape>)
-    where
-        'gc: 'r,
-    {
+    pub fn push(&self, mc: &Mutation<'gc>, key: &str, prop: Property<'gc>, wide: bool, root: impl Fn() -> Option<ShapeRef<'gc>>) {
         let attrs = Attrs::from(&prop);
         while !self.is_dict() {
-            let from = self.shape_ref();
-            let anchored;
-            let to: &Shape = match from {
+            let from = self.shape();
+            let to = match from {
                 Some(f) if !wide && f.len() >= MAX_FAST => break,
-                Some(f) => f.child_ref(key, attrs),
+                Some(f) => f.child(mc, key, attrs),
                 None => match root() {
-                    Some(r) => r.child_ref(key, attrs),
-                    None => {
-                        anchored = Shape::rooted(alloc::vec![(SmallStr::from(key), attrs)]);
-                        self.anchor(mc, Arc::clone(&anchored));
-                        &anchored
-                    }
+                    Some(r) => r.child(mc, key, attrs),
+                    None => Shape::rooted(mc, alloc::vec![(SmallStr::from(key), attrs)]),
                 },
             };
             if self.advance(mc, from, to, prop.slot) {
@@ -447,26 +477,17 @@ impl<'gc> Props<'gc> {
         });
     }
 
-    pub fn push_to<'r>(&self, mc: &Mutation<'gc>, to: &Arc<Shape>, slot: Slot<'gc>, root: impl Fn() -> Option<&'r Shape>)
-    where
-        'gc: 'r,
-    {
+    pub fn push_to(&self, mc: &Mutation<'gc>, to: ShapeRef<'gc>, slot: Slot<'gc>) {
         loop {
-            let from = self.shape_ref();
-            debug_assert_eq!(to.len(), from.map_or(0, Shape::len) + 1);
-            if from.is_none() && !root().is_some_and(|r| r.has_child(to)) {
-                self.anchor(mc, Arc::clone(to));
-            }
+            let from = self.shape();
+            debug_assert_eq!(to.len(), from.map_or(0, |f| f.len()) + 1);
             if self.advance(mc, from, to, slot) {
                 return;
             }
         }
     }
 
-    pub fn fill<'r>(&self, mc: &Mutation<'gc>, to: &Arc<Shape>, slots: impl IntoIterator<Item = Slot<'gc>>, root: impl Fn() -> Option<&'r Shape>)
-    where
-        'gc: 'r,
-    {
+    pub fn fill(&self, mc: &Mutation<'gc>, to: ShapeRef<'gc>, slots: impl IntoIterator<Item = Slot<'gc>>) {
         debug_assert!(self.shape_ref().is_none() && !self.is_dict());
         for (i, slot) in slots.into_iter().enumerate().take(to.len()) {
             let v = slot.encode(mc);
@@ -481,18 +502,7 @@ impl<'gc> Props<'gc> {
                 }
             }
         }
-        if !root().is_some_and(|r| to.in_tree(r)) {
-            self.anchor(mc, Arc::clone(to));
-        }
-        self.shape.set(Arc::as_ptr(to));
-    }
-
-    pub fn reanchor(&self, mc: &Mutation<'gc>) {
-        if self.anchor.get().is_none()
-            && let Some(s) = self.shape()
-        {
-            self.anchor(mc, s);
-        }
+        self.shape.set(Some(to));
     }
 
     pub fn replace(&self, mc: &Mutation<'gc>, i: usize, prop: Property<'gc>) {

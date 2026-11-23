@@ -1029,7 +1029,7 @@ impl<'g, 't> Stitch<'g, 't> {
                 self.emit(St::CheckFunc, &[p], None, vec![u64::from(f.0)], jumps)?;
             }
             Op::CheckShape(p, shape, fs) => {
-                let want = shape.as_ref().map_or(0, |s| alloc::sync::Arc::as_ptr(s) as usize as u64);
+                let want = shape.as_ref().map_or(0, |s| s.id() as u64);
                 let jumps = vec![self.exit(fs, Reason::Shape)];
                 self.emit(St::CheckShape(shape.is_none()), &[p], None, vec![want], jumps)?;
             }

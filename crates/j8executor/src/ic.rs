@@ -1,16 +1,21 @@
-use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
 
-use j8framework::{JsObject, Object, Shape, Slot, Value};
-use j8framework::{Mutation};
+use j8framework::{JsObject, Mutation, Object, ShapeBrand, ShapeKey, ShapeRef, Slot, Value};
+use j8framework::Root;
+
+pub type Kept = (ShapeKey, Root<ShapeBrand>);
+
+pub fn kept_from<'gc>(mc: &Mutation<'gc>, h: ShapeRef<'gc>) -> Kept {
+    (ShapeKey::from(h), mc.mutator().root::<ShapeBrand>(h.get()))
+}
 
 const EMPTY: usize = 1;
 
 const DEPTH: usize = 4;
 
 fn addr(d: &Object<'_>) -> usize {
-    d.props().shape_ptr().map_or(EMPTY, |s| s as usize)
+    d.props().shape_id().unwrap_or(EMPTY)
 }
 
 fn plain(d: &Object<'_>) -> bool {
@@ -20,7 +25,7 @@ fn plain(d: &Object<'_>) -> bool {
 #[derive(Clone)]
 pub struct Before {
     shape: usize,
-    from: Option<Weak<Shape>>,
+    from: Option<ShapeKey>,
     len: usize,
     plain: bool,
 }
@@ -28,7 +33,7 @@ pub struct Before {
 impl From<JsObject<'_>> for Before {
     fn from(o: JsObject<'_>) -> Self {
         let d = o.get();
-        Self { shape: addr(d), from: d.props().shape().map(|s| Arc::downgrade(&s)), len: d.props().len(), plain: plain(d) }
+        Self { shape: addr(d), from: d.props().shape().map(ShapeKey::from), len: d.props().len(), plain: plain(d) }
     }
 }
 
@@ -38,9 +43,9 @@ pub struct Ic {
     slot: Cell<u32>,
     depth: Cell<u8>,
     chain: [Cell<usize>; DEPTH],
-    to: RefCell<Option<Arc<Shape>>>,
+    to: RefCell<Option<Kept>>,
     adds: Cell<bool>,
-    keep: RefCell<Vec<Weak<Shape>>>,
+    keep: RefCell<Vec<Kept>>,
 }
 
 impl Ic {
@@ -55,9 +60,9 @@ impl Ic {
         self.adds.set(false);
     }
 
-    fn keep(&self, d: &Object<'_>) -> usize {
+    fn keep<'gc>(&self, mc: &Mutation<'gc>, d: &Object<'gc>) -> usize {
         if let Some(s) = d.props().shape() {
-            self.keep.borrow_mut().push(Arc::downgrade(&s));
+            self.keep.borrow_mut().push(kept_from(mc, s));
         }
         addr(d)
     }
@@ -110,7 +115,7 @@ impl Ic {
         }
     }
 
-    pub fn fill_get(&self, o: JsObject<'_>, name: &str) {
+    pub fn fill_get<'gc>(&self, mc: &Mutation<'gc>, o: JsObject<'gc>, name: &str) {
         self.reset();
         if !Self::name_ok(name) {
             return;
@@ -119,7 +124,7 @@ impl Ic {
         if !plain(d) {
             return;
         }
-        let recv = self.keep(d);
+        let recv = self.keep(mc, d);
         if let Some(i) = d.props().position(name) {
             if matches!(d.props().slot(i), Slot::Data(_)) {
                 self.set_slot(recv, i, 0);
@@ -133,7 +138,7 @@ impl Ic {
             if !plain(d) {
                 return;
             }
-            c.set(self.keep(d));
+            c.set(self.keep(mc, d));
             if let Some(i) = d.props().position(name) {
                 if matches!(d.props().slot(i), Slot::Data(_)) {
                     self.set_slot(recv, i, level + 1);
@@ -166,12 +171,12 @@ impl Ic {
             return false;
         }
         let to = self.to.borrow();
-        let Some(to) = &*to else { return false };
-        o.push_to(mc, to, Slot::Data(v));
+        let Some((_, to)) = &*to else { return false };
+        o.push_to(mc, mc.mutator().get(to).handle(mc), Slot::Data(v));
         true
     }
 
-    pub fn fill_set(&self, o: JsObject<'_>, name: &str, before: Before, assign: bool) {
+    pub fn fill_set<'gc>(&self, mc: &Mutation<'gc>, o: JsObject<'gc>, name: &str, before: Before, assign: bool) {
         self.reset();
         if !Self::name_ok(name) || !before.plain {
             return;
@@ -181,7 +186,7 @@ impl Ic {
         if !plain(d) || !matches!(d.props().slot(i), Slot::Data(_)) {
             return;
         }
-        let now = self.keep(d);
+        let now = self.keep(mc, d);
         if now == before.shape {
             if d.props().attrs(i).writable() {
                 self.set_slot(now, i, 0);
@@ -201,15 +206,15 @@ impl Ic {
                 if !plain(pd) || pd.props().position(name).is_some() {
                     return;
                 }
-                c.set(self.keep(pd));
+                c.set(self.keep(mc, pd));
                 proto = pd.proto();
                 depth += 1;
             }
             self.depth.set(u8::try_from(depth).unwrap_or(u8::MAX));
         }
-        *self.to.borrow_mut() = Some(to);
+        *self.to.borrow_mut() = Some(kept_from(mc, to));
         self.adds.set(true);
-        self.keep.borrow_mut().extend(before.from);
+        self.keep.borrow_mut().extend(before.from.map(|k| kept_from(mc, unsafe { k.handle() })));
         self.shape.set(before.shape);
     }
 }
@@ -226,7 +231,7 @@ pub struct GlobalIc {
     global: Cell<usize>,
     slot: Cell<u32>,
     writable: Cell<bool>,
-    keep: RefCell<Vec<Weak<Shape>>>,
+    keep: RefCell<Vec<Kept>>,
 }
 
 impl GlobalIc {
@@ -255,7 +260,7 @@ impl GlobalIc {
         self.locate(scope, global).filter(|_| self.writable.get())
     }
 
-    pub fn fill<'gc>(&self, scope: JsObject<'gc>, global: JsObject<'gc>, name: &str) {
+    pub fn fill<'gc>(&self, mc: &Mutation<'gc>, scope: JsObject<'gc>, global: JsObject<'gc>, name: &str) {
         self.scope.set(0);
         let mut keep = self.keep.borrow_mut();
         keep.clear();
@@ -273,9 +278,9 @@ impl GlobalIc {
             },
         };
         let Ok(slot) = u32::try_from(at) else { return };
-        keep.extend(sd.props().shape().map(|s| Arc::downgrade(&s)));
+        keep.extend(sd.props().shape().map(|s| kept_from(mc, s)));
         self.global.set(holder.map_or(0, |g| {
-            keep.extend(g.props().shape().map(|s| Arc::downgrade(&s)));
+            keep.extend(g.props().shape().map(|s| kept_from(mc, s)));
             fast(g)
         }));
         self.slot.set(slot);
@@ -286,16 +291,17 @@ impl GlobalIc {
 
 #[derive(Clone)]
 pub struct PropertyFeedback {
-    pub shape: Option<Arc<Shape>>,
+    pub shape: Option<ShapeKey>,
     pub slot: usize,
     pub depth: usize,
-    pub chain: Vec<Arc<Shape>>,
-    pub to: Option<Arc<Shape>>,
+    pub chain: Vec<ShapeKey>,
+    pub to: Option<ShapeKey>,
 }
 
 impl Ic {
-    fn kept(&self, addr: usize) -> Option<Arc<Shape>> {
-        self.keep.borrow().iter().chain(self.to.borrow().as_ref().map(Arc::downgrade).as_ref()).find(|w| w.as_ptr() as usize == addr).and_then(Weak::upgrade)
+    fn kept(&self, addr: usize) -> Option<ShapeKey> {
+        let to = self.to.borrow();
+        self.keep.borrow().iter().chain(to.as_ref()).map(|(k, _)| *k).find(|k| k.id() == addr)
     }
 
     pub fn feedback(&self) -> Option<PropertyFeedback> {
@@ -308,8 +314,8 @@ impl Ic {
         let adds = self.adds.get();
         let levels = depth.min(DEPTH);
         let chain = self.chain[..levels].iter().map(|c| self.kept(c.get())).collect::<Option<Vec<_>>>()?;
-        let to = if adds { Some(self.to.borrow().clone()?) } else { None };
-        let slot = to.as_ref().map_or(self.slot.get() as usize, |t| t.len() - 1);
+        let to = if adds { Some(self.to.borrow().as_ref()?.0) } else { None };
+        let slot = to.map_or(self.slot.get() as usize, |t| unsafe { t.shape() }.len() - 1);
         Some(PropertyFeedback { shape, slot, depth, chain, to })
     }
 
@@ -317,15 +323,15 @@ impl Ic {
 
 #[derive(Clone)]
 pub struct GlobalFeedback {
-    pub scope: Option<Arc<Shape>>,
-    pub global: Option<Arc<Shape>>,
+    pub scope: Option<ShapeKey>,
+    pub global: Option<ShapeKey>,
     pub slot: usize,
     pub writable: bool,
 }
 
 impl GlobalIc {
-    fn kept(&self, addr: usize) -> Option<Arc<Shape>> {
-        self.keep.borrow().iter().find(|w| w.as_ptr() as usize == addr).and_then(Weak::upgrade)
+    fn kept(&self, addr: usize) -> Option<ShapeKey> {
+        self.keep.borrow().iter().map(|(k, _)| *k).find(|k| k.id() == addr)
     }
 
     pub fn feedback(&self) -> Option<GlobalFeedback> {

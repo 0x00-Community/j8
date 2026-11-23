@@ -1,12 +1,11 @@
 use alloc::collections::BTreeMap;
 use alloc::rc::Rc;
-use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 
 use j8bytecode::{Bytecode, Constant, LiteralValue, OperandValue};
 use j8executor::{Executor, JitFunction as Function, JitReg as Reg};
-use j8framework::{BinaryOp, CompareOp, FuncId, Layout, Lazy, Shape, ValueBits};
+use j8framework::{BinaryOp, CompareOp, FuncId, Layout, Lazy, ShapeKey, ValueBits};
 
 use crate::cfg::{Bits, Cfg};
 use crate::ir::{Cond, FloatOp, Frame, FrameState, Graph, Helper, IntOp, Op, Rep, Slot, VirtualObject, B, Fs, V};
@@ -45,8 +44,8 @@ pub enum Kind {
 pub struct Built {
     pub graph: Graph,
     pub targets: Vec<FuncId>,
-    pub shapes: Vec<Option<Arc<Shape>>>,
-    pub keep: Vec<Arc<Shape>>,
+    pub shapes: Vec<Option<ShapeKey>>,
+    pub keep: Vec<ShapeKey>,
 }
 
 #[derive(Debug)]
@@ -57,7 +56,7 @@ pub enum Reject {
 #[derive(Clone)]
 struct VObj {
     proto: V,
-    shape: Option<Arc<Shape>>,
+    shape: Option<ShapeKey>,
     fields: Vec<V>,
 }
 
@@ -184,8 +183,8 @@ pub struct Builder<'e> {
     hints: &'e Hints,
     g: Graph,
     targets: Vec<FuncId>,
-    shapes: Vec<Option<Arc<Shape>>>,
-    keep: Vec<Arc<Shape>>,
+    shapes: Vec<Option<ShapeKey>>,
+    keep: Vec<ShapeKey>,
     cfgs: BTreeMap<u32, Rc<Cfg>>,
     widen: Widen,
     instances: u32,
@@ -749,8 +748,8 @@ impl<'e> Builder<'e> {
         st.heap.known.retain(|f| !matches!(f, Fact::Load(LOAD_WORD, ..)));
     }
 
-    fn shape_check(&mut self, act: &Act<'e>, st: &mut St, p: V, shape: Option<Arc<Shape>>, pc: usize) {
-        let addr = shape.as_ref().map_or(0, |s| Arc::as_ptr(s) as usize);
+    fn shape_check(&mut self, act: &Act<'e>, st: &mut St, p: V, shape: Option<ShapeKey>, pc: usize) {
+        let addr = shape.as_ref().map_or(0, |s| s.id());
         if st.heap.known.contains(&Fact::Shape(p, addr)) {
             return;
         }
@@ -1159,10 +1158,10 @@ impl<'e> Builder<'e> {
         }
     }
 
-    fn same_shape(a: &Option<Arc<Shape>>, b: &Option<Arc<Shape>>) -> bool {
+    fn same_shape(a: &Option<ShapeKey>, b: &Option<ShapeKey>) -> bool {
         match (a, b) {
             (None, None) => true,
-            (Some(x), Some(y)) => Arc::ptr_eq(x, y),
+            (Some(x), Some(y)) => x == y,
             _ => false,
         }
     }
@@ -1521,7 +1520,7 @@ impl<'e> Builder<'e> {
         if slot < Layout::INLINE_PROPS { Self::off(Layout::OBJECT_INLINE + slot * Layout::CELL) } else { 0 }
     }
 
-    fn keep(&mut self, s: &Option<Arc<Shape>>) {
+    fn keep(&mut self, s: &Option<ShapeKey>) {
         if let Some(s) = s {
             self.keep.push(s.clone());
         }
@@ -1555,7 +1554,7 @@ impl<'e> Builder<'e> {
         let fb = act.f.property(slot);
         let key = act.f.name(name);
         if let Some(o) = Self::vobj(st, obj).cloned() {
-            if let Some(i) = o.shape.as_ref().and_then(|s| s.find(key)) {
+            if let Some(i) = o.shape.and_then(|s| unsafe { s.shape() }.find(key)) {
                 return Ok(o.fields[i]);
             }
             if let Some(fb) = &fb
@@ -1691,7 +1690,7 @@ impl<'e> Builder<'e> {
             std::eprintln!("j8jit: generic set {} at {:?}@{pc} (virtual {})", act.f.name(name), act.id, Self::is_virtual(st, obj));
             if let Some(fb) = act.f.property(act.f.insn(pc).operands[2]) {
                 let vo = Self::vobj(st, obj);
-                std::eprintln!("   fb shape {:?} slot {} depth {} chain {} to {:?}; virtual shape {:?} fields {:?}", fb.shape.as_ref().map(Arc::as_ptr), fb.slot, fb.depth, fb.chain.len(), fb.to.as_ref().map(Arc::as_ptr), vo.map(|o| o.shape.as_ref().map(Arc::as_ptr)), vo.map(|o| o.fields.len()));
+                std::eprintln!("   fb shape {:?} slot {} depth {} chain {} to {:?}; virtual shape {:?} fields {:?}", fb.shape.map(ShapeKey::id), fb.slot, fb.depth, fb.chain.len(), fb.to.map(ShapeKey::id), vo.map(|o| o.shape.map(ShapeKey::id)), vo.map(|o| o.fields.len()));
             }
         }
         let o = self.real(st, obj);

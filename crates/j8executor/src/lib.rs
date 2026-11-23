@@ -9,7 +9,7 @@ use core::cell::{Cell, RefCell};
 
 use j8bytecode::{Bytecode, Constant, Context, Decoded, FunctionKind, Intrinsic, LiteralValue, Module, NativeContextIndex, Operands, OperandValue, Register, Runtime, ScopeInfo, ScopeType, SharedFunction};
 use j8compiler::Compile;
-use j8framework::{Agent, BinaryOp, Closure, Shape, SmallStr, Collect, CompareOp, ContextKind, ContextName, ContextShape, ShapeId, Env, Error, ErrorKind, FuncId, FunctionInfo, Gc, Lazy, Invoke, JsEnv, JsObject, Numbers, ObjectData, ObjectKind, Property, Resume, Slot, Step, Value, ValueKind};
+use j8framework::{Agent, BinaryOp, Closure, SmallStr, Collect, CompareOp, ContextKind, ContextName, ContextShape, ShapeId, Env, Error, ErrorKind, FuncId, FunctionInfo, Gc, Lazy, Invoke, JsEnv, JsObject, Numbers, ObjectData, ObjectKind, Property, Resume, Slot, Step, Value, ValueKind};
 use j8lockfree::SegVec;
 
 mod cache;
@@ -60,9 +60,9 @@ struct Loaded {
     insns: Box<[Insn]>,
     ics: Box<[ic::Ic]>,
     globals: Box<[ic::GlobalIc]>,
-    literals: Box<[RefCell<Option<Arc<Shape>>>]>,
-    function_shape: RefCell<Option<Arc<Shape>>>,
-    prototype_shape: RefCell<Option<Arc<Shape>>>,
+    literals: Box<[RefCell<Option<ic::Kept>>]>,
+    function_shape: RefCell<Option<ic::Kept>>,
+    prototype_shape: RefCell<Option<ic::Kept>>,
     shapes: Box<[Option<(ShapeId, u32)>]>,
     scope: Option<ShapeId>,
     extension: bool,
@@ -746,7 +746,7 @@ impl Executor {
                 Some(v) => v,
                 None => {
                     let v = a.get_named(new_target, "prototype")?;
-                    ctor.prototype.fill_get(o, "prototype");
+                    ctor.prototype.fill_get(a.mc, o, "prototype");
                     v
                 }
             },
@@ -798,16 +798,16 @@ impl Executor {
         } else if !loaded.no_prototype && !loaded.asynchronous {
             let p = a.object();
             match &*loaded.prototype_shape.borrow() {
-                Some(shape) => p.fill(a.mc, shape, [Slot::Data(fo.into())]),
+                Some((_, shape)) => p.fill(a.mc, a.mc.mutator().get(shape).handle(a.mc), [Slot::Data(fo.into())]),
                 None => p.borrow_mut(a.mc).define("constructor", Property::hidden(fo.into())),
             }
-            Self::remember_shape(&loaded.prototype_shape, p, 1);
+            Self::remember_shape(a.mc, &loaded.prototype_shape, p, 1);
             Some((p, !loaded.class_constructor))
         } else {
             None
         };
         match &*loaded.function_shape.borrow() {
-            Some(shape) => fo.fill(a.mc, shape, [Slot::Data(length), Slot::Data(name)].into_iter().chain(prototype.map(|(p, _)| Slot::Data(p.into())))),
+            Some((_, shape)) => fo.fill(a.mc, a.mc.mutator().get(shape).handle(a.mc), [Slot::Data(length), Slot::Data(name)].into_iter().chain(prototype.map(|(p, _)| Slot::Data(p.into())))),
             None => {
                 let prop = |v: Value<'gc>| Property { slot: Slot::Data(v), enumerable: false, writable: false, configurable: true };
                 let d = fo.borrow_mut(a.mc);
@@ -818,7 +818,7 @@ impl Executor {
                 }
             }
         }
-        Self::remember_shape(&loaded.function_shape, fo, 2 + usize::from(prototype.is_some()));
+        Self::remember_shape(a.mc, &loaded.function_shape, fo, 2 + usize::from(prototype.is_some()));
         fo
     }
 
@@ -829,8 +829,8 @@ impl Executor {
         let cache = &loaded.literals[k];
         let value = |v: &Option<LiteralValue>| v.as_ref().map_or(Value::Undefined, |v| Self::literal(a, v));
         match &*cache.borrow() {
-            Some(shape) => {
-                ob.fill(a.mc, shape, b.properties.iter().map(|(_, v)| Slot::Data(value(v))));
+            Some((_, shape)) => {
+                ob.fill(a.mc, a.mc.mutator().get(shape).handle(a.mc), b.properties.iter().map(|(_, v)| Slot::Data(value(v))));
                 return ob;
             }
             None => {
@@ -839,16 +839,16 @@ impl Executor {
                 }
             }
         }
-        Self::remember_shape(cache, ob, b.properties.len());
+        Self::remember_shape(a.mc, cache, ob, b.properties.len());
         ob
     }
 
-    fn remember_shape(cache: &RefCell<Option<Arc<Shape>>>, o: JsObject<'_>, n: usize) {
+    fn remember_shape<'gc>(mc: &j8framework::Mutation<'gc>, cache: &RefCell<Option<ic::Kept>>, o: JsObject<'gc>, n: usize) {
         if cache.borrow().is_some() {
             return;
         }
         let shape = o.get().props().shape().filter(|s| s.len() == n);
-        *cache.borrow_mut() = shape;
+        *cache.borrow_mut() = shape.map(|s| ic::kept_from(mc, s));
     }
 
     fn script_slot<'gc>(&self, a: &Agent<'gc, '_>, name: &str) -> Option<(JsEnv<'gc>, usize, bool)> {
@@ -883,7 +883,7 @@ impl Executor {
             return Err(a.throw(ErrorKind::Reference, &alloc::format!("{name} is not defined")));
         }
         let v = a.get_named(g, name)?;
-        cache.fill(scope, global, name);
+        cache.fill(a.mc, scope, global, name);
         Ok(v)
     }
 
@@ -910,7 +910,7 @@ impl Executor {
             return Err(a.throw(ErrorKind::Reference, &alloc::format!("{name} is not defined")));
         }
         a.put_named(g, name, v, strict)?;
-        cache.fill(scope, global, name);
+        cache.fill(a.mc, scope, global, name);
         Ok(())
     }
 
@@ -1404,7 +1404,7 @@ impl Executor {
                         Some(v) => v,
                         None => {
                             let v = a.get_named(obj, name)?;
-                            ic.fill_get(ob, name);
+                            ic.fill_get(a.mc, ob, name);
                             v
                         }
                     },
@@ -1422,7 +1422,7 @@ impl Executor {
                         if !ic.set(a.mc, ob, *acc, true) {
                             let before = ic::Before::from(ob);
                             a.put_named(obj, name, *acc, s)?;
-                            ic.fill_set(ob, name, before, true);
+                            ic.fill_set(a.mc, ob, name, before, true);
                         }
                     }
                     _ => a.put_named(obj, name, *acc, s)?,
@@ -1435,7 +1435,7 @@ impl Executor {
                     if !ic.set(a.mc, ob, *acc, false) {
                         let before = ic::Before::from(ob);
                         a.define(ob, name, Property::data(*acc))?;
-                        ic.fill_set(ob, name, before, false);
+                        ic.fill_set(a.mc, ob, name, before, false);
                     }
                 }
             }

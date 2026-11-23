@@ -964,7 +964,7 @@ impl<'g> Gen<'g> {
             }
             Op::CheckShape(p, shape, fs) => {
                 let r = self.gpr(p, RAX);
-                let want = shape.as_ref().map_or(0, |s| alloc::sync::Arc::as_ptr(s) as usize as u64);
+                let want = shape.as_ref().map_or(0, |s| s.id() as u64);
                 self.a.mov_ri(RCX, want);
                 self.a.alu_rm(Alu::Cmp, true, RCX, r, Self::o(Layout::OBJECT_SHAPE));
                 self.exit_if(Cc::Ne, fs, Reason::Shape);

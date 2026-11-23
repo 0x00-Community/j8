@@ -1,9 +1,8 @@
-use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::cell::Cell;
 
 use j8bytecode::{Bytecode, Constant, OperandValue, SharedFunction};
-use j8framework::{Agent, Closure, Error, FuncId, JsEnv, JsObject, Shape, Value};
+use j8framework::{Agent, Closure, Error, FuncId, JsEnv, JsObject, ShapeKey, Value};
 
 pub use crate::ic::{GlobalFeedback, PropertyFeedback};
 use crate::{Args, Budget, Executor, Frame, Loaded, State, STACK_LIMIT};
@@ -136,8 +135,8 @@ impl<'e> Function<'e> {
         }
     }
 
-    pub fn literal_shape(self, k: OperandValue) -> Option<Arc<Shape>> {
-        self.0.literals.get(usize::try_from(k).ok()?)?.borrow().clone()
+    pub fn literal_shape(self, k: OperandValue) -> Option<ShapeKey> {
+        self.0.literals.get(usize::try_from(k).ok()?)?.borrow().as_ref().map(|(k, _)| *k)
     }
 
     pub fn scope(self, k: OperandValue) -> Option<ScopeLayout> {

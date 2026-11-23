@@ -831,7 +831,7 @@ impl<'gc> ObjectData<'gc> {
             length_readonly: crate::IsoCell::new(false),
             digit_keys: crate::IsoCell::new(false),
             sparse_length: crate::IsoCell::new(0),
-            shape_root: GcSlot::default(),
+            shape_root: paragc::HandleSlot::default(),
             data: GcCell::empty(),
         })
     }
@@ -852,7 +852,7 @@ impl<'gc> ObjectData<'gc> {
             length_readonly: crate::IsoCell::new(length_readonly),
             digit_keys: crate::IsoCell::new(false),
             sparse_length: crate::IsoCell::new(sparse_length),
-            shape_root: GcSlot::default(),
+            shape_root: paragc::HandleSlot::default(),
             data: if unit.is_some() { GcCell::empty() } else { GcCell::new(mc, state) },
         });
         if !elements.is_empty() {
@@ -984,7 +984,7 @@ pub struct Object<'gc> {
     digit_keys: bool,
     #[mutable]
     sparse_length: u32,
-    shape_root: GcSlot<'gc, crate::shape::Anchor>,
+    shape_root: paragc::HandleSlot<'gc, crate::Shape>,
     data: GcCell<'gc, ObjectState<'gc>>,
 }
 
@@ -1107,7 +1107,7 @@ macro_rules! forward_reads {
             pub fn own(&self, mc: &Mutation<'gc>, key: &str) -> Option<Value<'gc>> {
                 self.obj.own(mc, key)
             }
-            pub fn root_shape(&self, mc: &Mutation<'gc>) -> alloc::sync::Arc<crate::Shape> {
+            pub fn root_shape(&self, mc: &Mutation<'gc>) -> crate::ShapeRef<'gc> {
                 self.obj.root_shape(mc)
             }
         }
@@ -1164,7 +1164,7 @@ impl<'gc> ObjMut<'_, 'gc> {
         self.obj.set_at(self.mc, at, value);
     }
 
-    pub fn push_to(&self, to: &alloc::sync::Arc<crate::Shape>, slot: Slot<'gc>) {
+    pub fn push_to(&self, to: crate::ShapeRef<'gc>, slot: Slot<'gc>) {
         self.obj.push_to(self.mc, to, slot);
     }
 
@@ -1290,7 +1290,6 @@ impl<'gc> Object<'gc> {
     }
 
     pub fn set_proto(&self, mc: &Mutation<'gc>, proto: Option<JsObject<'gc>>) {
-        self.props.reanchor(mc);
         self.write_proto(mc, proto);
     }
 
@@ -1529,47 +1528,36 @@ impl<'gc> Object<'gc> {
             self.digit_keys.set(true);
         }
         let proto = self.proto();
-        self.props.push(mc, key, prop, self.class() & Class::WIDE != 0, || proto.map(|p| p.get().root_shape_ref(mc)));
+        self.props.push(mc, key, prop, self.class() & Class::WIDE != 0, || proto.map(|p| p.get().root_shape(mc)));
     }
 
     pub fn widen(&self) {
         self.class.set(self.class.get() | Class::WIDE);
     }
 
-    pub fn root_shape(&self, mc: &Mutation<'gc>) -> alloc::sync::Arc<crate::Shape> {
-        self.root_shape_ref_arc(mc).clone()
-    }
-
-    fn root_shape_ref_arc(&self, mc: &Mutation<'gc>) -> &'gc alloc::sync::Arc<crate::Shape> {
-        let held = match self.shape_root.get() {
+    pub fn root_shape(&self, mc: &Mutation<'gc>) -> crate::ShapeRef<'gc> {
+        match self.shape_root.get() {
             Some(h) => h,
             None => {
-                let h = mc.alloc(crate::shape::Anchor(crate::Props::empty()));
-                self.shape_root.set(mc.mutator(), Some(h));
+                let h = crate::Shape::empty(mc);
+                self.shape_root.set(Some(h));
                 h
             }
-        };
-        &Gc::get(held).0
+        }
     }
 
-    pub fn root_shape_ref(&self, mc: &Mutation<'gc>) -> &'gc crate::Shape {
-        self.root_shape_ref_arc(mc)
-    }
-
-    pub fn push_to(&self, mc: &Mutation<'gc>, to: &alloc::sync::Arc<crate::Shape>, slot: Slot<'gc>) {
+    pub fn push_to(&self, mc: &Mutation<'gc>, to: crate::ShapeRef<'gc>, slot: Slot<'gc>) {
         if to.digit_keys() {
             self.digit_keys.set(true);
         }
-        let proto = self.proto();
-        self.props.push_to(mc, to, slot, || proto.map(|p| p.get().root_shape_ref(mc)));
+        self.props.push_to(mc, to, slot);
     }
 
-    pub fn fill(&self, mc: &Mutation<'gc>, to: &alloc::sync::Arc<crate::Shape>, slots: impl IntoIterator<Item = Slot<'gc>>) {
+    pub fn fill(&self, mc: &Mutation<'gc>, to: crate::ShapeRef<'gc>, slots: impl IntoIterator<Item = Slot<'gc>>) {
         if to.digit_keys() {
             self.digit_keys.set(true);
         }
-        let proto = self.proto();
-        self.props.fill(mc, to, slots, || proto.map(|p| p.get().root_shape_ref(mc)));
+        self.props.fill(mc, to, slots);
     }
 
     pub fn get_own(&self, mc: &Mutation<'gc>, key: &str) -> Option<Property<'gc>> {
