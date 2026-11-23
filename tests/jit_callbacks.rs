@@ -244,6 +244,6 @@ fn run_cases() {
 
 #[test]
 fn builtins_calling_compiled_code_match_the_interpreter() {
-    let ran = std::thread::Builder::new().stack_size(16 << 20).spawn(run_cases).expect("a thread with room for callback recursion");
+    let ran = std::thread::Builder::new().stack_size(if cfg!(debug_assertions) { 64 << 20 } else { 16 << 20 }).spawn(run_cases).expect("a thread with room for callback recursion");
     ran.join().expect("the cases finish");
 }
