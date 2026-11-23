@@ -34,6 +34,7 @@ impl<'gc> Mutation<'gc> {
         self.mutator().alloc(v)
     }
 
+    #[inline]
     pub fn generation(&self) -> u64 {
         self.generation
     }

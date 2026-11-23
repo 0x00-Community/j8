@@ -50,7 +50,7 @@ pub use bigint::Numeric;
 pub use ops::{number_text, BinaryOp, CompareOp, ErrorKind, Hint, IterRecord, Numbers, UnaryOp};
 pub use platform::{AsyncJob, Platform, Settle, Task};
 pub use shape::{Attrs, Dict, Props, Shape, ShapeBrand, ShapeKey, ShapeRef};
-pub use store::{Store, StorePath, ValueArray};
+pub use store::{ElementRun, Store, StorePath, ValueArray};
 pub use parallel::Par;
 pub use platform::Pool;
 pub use gc::{IsoCell, Mutable, CellExt, CellMut, CellRef, Collect, Cow, Erased, Gc, GcCell, GcQueue, Heap, Mutation, Mutator, Root, Slot as GcSlot, Brand, Static, Tlab, Trace, Tracer, ValueCell, erase, gc_from_raw};

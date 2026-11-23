@@ -48,9 +48,9 @@ impl Arrays {
         Ok(arr)
     }
 
-    fn species_create<'gc>(a: &mut Agent<'gc, '_>, original: JsObject<'gc>, len: f64) -> Result<JsObject<'gc>, Error> {
+    fn species_create<'gc>(a: &mut Agent<'gc, '_>, original: JsObject<'gc>, len: f64) -> Result<(JsObject<'gc>, bool), Error> {
         if !a.is_array(original.into())? {
-            return Self::create(a, len, None);
+            return Ok((Self::create(a, len, None)?, true));
         }
         let mut c = a.get_named(original.into(), "constructor")?;
         if c.as_object().is_some() {
@@ -60,13 +60,14 @@ impl Arrays {
             }
         }
         if c == Value::Undefined {
-            return Self::create(a, len, None);
+            return Ok((Self::create(a, len, None)?, true));
         }
         if !a.is_constructor(c) {
             return Err(a.throw(ErrorKind::Type, "object.constructor[Symbol.species] is not a constructor"));
         }
+        let intrinsic = c.as_object().and_then(|o| o.native()).is_some_and(|n| core::ptr::fn_addr_eq(n.f, Self::array as j8framework::NativeFn));
         match (a.construct(c, &[len.into()], c)?).kind() {
-            ValueKind::Object(o) => Ok(o),
+            ValueKind::Object(o) => Ok((o, intrinsic && o.is_array() && !o.non_extensible() && !o.length_readonly())),
             _ => Err(a.throw(ErrorKind::Type, "species constructor returned a non-object")),
         }
     }
@@ -310,7 +311,7 @@ impl Arrays {
         let mut k = Self::relative(a, args.at(0), len, 0.0)?;
         let end = Self::relative(a, args.at(1), len, len)?;
         let count = (end - k).max(0.0);
-        let arr = Self::species_create(a, o, count)?;
+        let (arr, _) = Self::species_create(a, o, count)?;
         let mut n = 0.0;
         while k < end {
             if let Some(v) = a.present_index(o, k)? {
@@ -337,7 +338,7 @@ impl Arrays {
         if len + item_count - delete_count > MAX_LENGTH {
             return Err(a.throw(ErrorKind::Type, "Splice result exceeds 2^53 - 1 length"));
         }
-        let removed = Self::species_create(a, o, delete_count)?;
+        let (removed, _) = Self::species_create(a, o, delete_count)?;
         let mut k = 0.0;
         while k < delete_count {
             if a.has_index(o, start + k)? {
@@ -382,7 +383,7 @@ impl Arrays {
 
     fn concat<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let o = a.to_object(this)?;
-        let arr = Self::species_create(a, o, 0.0)?;
+        let (arr, _) = Self::species_create(a, o, 0.0)?;
         let mut n = 0.0;
         for e in core::iter::once(Value::Object(o)).chain(args.iter().copied()) {
             if Self::spreadable(a, e)? {
@@ -609,32 +610,297 @@ impl Arrays {
         Ok(false.into())
     }
 
+    fn span(len: f64) -> Option<u32> {
+        #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "rejected unless the value is an integer in range")]
+        let n = len as u32;
+        (len >= 0.0 && f64::from(n) == len).then_some(n)
+    }
+
+    #[inline]
+    fn dense<'gc>(o: JsObject<'gc>, i: usize, run: &mut Option<j8framework::ElementRun<'gc>>) -> Option<Value<'gc>> {
+        if !o.is_array() {
+            return None;
+        }
+        let els = o.elements();
+        if let Some(r) = *run
+            && let Some(v) = r.get(els, i)
+        {
+            return Some(v);
+        }
+        let next = els.run(i);
+        let v = next.and_then(|r| r.get(els, i));
+        *run = next;
+        v
+    }
+
+    #[inline]
+    fn load<'gc>(a: &mut Agent<'gc, '_>, o: JsObject<'gc>, k: f64, idx: Option<u32>, run: &mut Option<j8framework::ElementRun<'gc>>, skip_hole: bool) -> Result<Option<Value<'gc>>, Error> {
+        if let Some(i) = idx
+            && let Some(v) = Self::dense(o, i as usize, run)
+        {
+            return Ok(Some(v));
+        }
+        if skip_hole { a.present_index(o, k) } else { Ok(Some(a.get_index(o.into(), k)?)) }
+    }
+
+    #[inline]
+    fn append_fresh<'gc>(a: &Agent<'gc, '_>, arr: JsObject<'gc>, v: Value<'gc>, at: u32) -> bool {
+        let items = arr.elements();
+        if items.len() != at as usize {
+            return false;
+        }
+        items.push(a.mc, v);
+        true
+    }
+
+    #[inline]
+    fn apply<'gc>(a: &mut Agent<'gc, '_>, cb: &Callback<'gc>, n: usize, v0: Value<'gc>, v1: impl FnOnce() -> Value<'gc>, v2: impl FnOnce() -> Value<'gc>, v3: impl FnOnce() -> Value<'gc>) -> Result<Value<'gc>, Error> {
+        let k = match cb.passed() {
+            Some(p) => p.min(n),
+            None => n,
+        };
+        match k {
+            0 => cb.call(a, &[]),
+            1 => cb.call(a, &[v0]),
+            2 => cb.call(a, &[v0, v1()]),
+            3 => cb.call(a, &[v0, v1(), v2()]),
+            _ => cb.call(a, &[v0, v1(), v2(), v3()]),
+        }
+    }
+
+    #[expect(clippy::too_many_arguments, reason = "one step of a visiting loop")]
+    #[inline]
+    fn drive<'gc>(a: &mut Agent<'gc, '_>, cb: &Callback<'gc>, how: Visit, source: JsObject<'gc>, out: Option<JsObject<'gc>>, fresh: bool, k: f64, idx: Option<u32>, run: &mut Option<j8framework::ElementRun<'gc>>, to: &mut f64) -> Result<Option<Value<'gc>>, Error> {
+        let Some(v) = Self::load(a, source, k, idx, run, true)? else { return Ok(None) };
+        let r = Self::apply(a, cb, 3, v, || Value::from(k), || source.into(), || Value::Undefined)?;
+        match (how, out) {
+            (Visit::Map, Some(arr)) => {
+                if !(fresh && idx.is_some_and(|i| Self::append_fresh(a, arr, r, i))) {
+                    a.create_index(arr, k, r)?;
+                }
+            }
+            (Visit::Filter, Some(arr)) if a.to_boolean(r) => {
+                let at = *to;
+                #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "rejected unless the value is an integer in range")]
+                let n = at as u32;
+                if !(fresh && f64::from(n) == at && Self::append_fresh(a, arr, v, n)) {
+                    a.create_index(arr, at, v)?;
+                }
+                *to += 1.0;
+            }
+            (Visit::Some, _) if a.to_boolean(r) => return Ok(Some(true.into())),
+            (Visit::Every, _) if !a.to_boolean(r) => return Ok(Some(false.into())),
+            _ => {}
+        }
+        Ok(None)
+    }
+
+    #[expect(clippy::inline_always, reason = "the per-element call has to sit in the specialised loop")]
+    #[inline(always)]
+    fn call3<'gc>(a: &mut Agent<'gc, '_>, cb: &Callback<'gc>, arity: usize, quiet: bool, v: Value<'gc>, k: f64, source: JsObject<'gc>) -> Result<Value<'gc>, Error> {
+        match arity {
+            0 => Self::pass(a, cb, quiet, &[]),
+            1 => Self::pass(a, cb, quiet, &[v]),
+            2 => Self::pass(a, cb, quiet, &[v, Value::from(k)]),
+            _ => Self::pass(a, cb, quiet, &[v, Value::from(k), source.into()]),
+        }
+    }
+
+    #[expect(clippy::inline_always, reason = "the per-element call has to sit in the specialised loop")]
+    #[inline(always)]
+    fn pass<'gc>(a: &mut Agent<'gc, '_>, cb: &Callback<'gc>, quiet: bool, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+        if quiet { cb.again(a, args) } else { cb.call(a, args) }
+    }
+
+    #[expect(clippy::inline_always, reason = "the per-element call has to sit in the specialised loop")]
+    #[inline(always)]
+    fn call_fold<'gc>(a: &mut Agent<'gc, '_>, cb: &Callback<'gc>, arity: usize, quiet: bool, acc: Value<'gc>, v: Value<'gc>, k: f64) -> Result<Value<'gc>, Error> {
+        match arity {
+            0 => Self::pass(a, cb, quiet, &[]),
+            1 => Self::pass(a, cb, quiet, &[acc]),
+            2 => Self::pass(a, cb, quiet, &[acc, v]),
+            _ => Self::pass(a, cb, quiet, &[acc, v, Value::from(k)]),
+        }
+    }
+
+    #[expect(clippy::inline_always, reason = "the per-element load has to sit in the specialised loop")]
+    #[inline(always)]
+    fn dense_or<'gc>(a: &mut Agent<'gc, '_>, o: JsObject<'gc>, i: u32, run: &mut Option<j8framework::ElementRun<'gc>>, skip_hole: bool, quiet: &mut bool) -> Result<Option<Value<'gc>>, Error> {
+        if let Some(v) = Self::dense(o, i as usize, run) {
+            return Ok(Some(v));
+        }
+        *quiet = false;
+        Self::absent(a, o, f64::from(i), skip_hole)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn absent<'gc>(a: &mut Agent<'gc, '_>, o: JsObject<'gc>, k: f64, skip_hole: bool) -> Result<Option<Value<'gc>>, Error> {
+        if skip_hole { a.present_index(o, k) } else { Ok(Some(a.get_index(o.into(), k)?)) }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn write_at<'gc>(a: &mut Agent<'gc, '_>, arr: JsObject<'gc>, k: f64, v: Value<'gc>) -> Result<(), Error> {
+        a.create_index(arr, k, v)
+    }
+
+    #[inline(never)]
+    fn each_fast<'gc>(a: &mut Agent<'gc, '_>, o: JsObject<'gc>, n: u32, cb: &Callback<'gc>, arity: usize) -> Result<(), Error> {
+        let mut run = None;
+        let mut quiet = false;
+        for i in 0..n {
+            let Some(v) = Self::dense_or(a, o, i, &mut run, true, &mut quiet)? else { continue };
+            Self::call3(a, cb, arity, quiet, v, f64::from(i), o)?;
+            quiet = true;
+        }
+        Ok(())
+    }
+
+    #[inline(never)]
+    fn map_fast<'gc>(a: &mut Agent<'gc, '_>, o: JsObject<'gc>, arr: JsObject<'gc>, fresh: bool, n: u32, cb: &Callback<'gc>, arity: usize) -> Result<Value<'gc>, Error> {
+        let mut run = None;
+        let mut quiet = false;
+        for i in 0..n {
+            let Some(v) = Self::dense_or(a, o, i, &mut run, true, &mut quiet)? else { continue };
+            let r = Self::call3(a, cb, arity, quiet, v, f64::from(i), o)?;
+            quiet = fresh && Self::append_fresh(a, arr, r, i);
+            if !quiet {
+                Self::write_at(a, arr, f64::from(i), r)?;
+            }
+        }
+        Ok(arr.into())
+    }
+
+    #[inline(never)]
+    fn filter_fast<'gc>(a: &mut Agent<'gc, '_>, o: JsObject<'gc>, arr: JsObject<'gc>, fresh: bool, n: u32, cb: &Callback<'gc>, arity: usize) -> Result<Value<'gc>, Error> {
+        let mut run = None;
+        let mut to = 0u32;
+        let mut quiet = false;
+        for i in 0..n {
+            let Some(v) = Self::dense_or(a, o, i, &mut run, true, &mut quiet)? else { continue };
+            let r = Self::call3(a, cb, arity, quiet, v, f64::from(i), o)?;
+            quiet = true;
+            if a.to_boolean(r) {
+                if !(fresh && Self::append_fresh(a, arr, v, to)) {
+                    Self::write_at(a, arr, f64::from(to), v)?;
+                    quiet = false;
+                }
+                to += 1;
+            }
+        }
+        Ok(arr.into())
+    }
+
+    #[inline(never)]
+    fn pred_fast<'gc>(a: &mut Agent<'gc, '_>, o: JsObject<'gc>, n: u32, cb: &Callback<'gc>, arity: usize, stop_on: bool) -> Result<Value<'gc>, Error> {
+        let mut run = None;
+        let mut quiet = false;
+        for i in 0..n {
+            let Some(v) = Self::dense_or(a, o, i, &mut run, true, &mut quiet)? else { continue };
+            let r = Self::call3(a, cb, arity, quiet, v, f64::from(i), o)?;
+            quiet = true;
+            if a.to_boolean(r) == stop_on {
+                return Ok(stop_on.into());
+            }
+        }
+        Ok((!stop_on).into())
+    }
+
+    #[inline(never)]
+    fn find_fast<'gc>(a: &mut Agent<'gc, '_>, o: JsObject<'gc>, n: u32, cb: &Callback<'gc>, arity: usize, how: Find) -> Result<Value<'gc>, Error> {
+        let backward = matches!(how, Find::LastValue | Find::LastIndex);
+        let value = matches!(how, Find::Value | Find::LastValue);
+        let mut run = None;
+        let mut quiet = false;
+        for i in 0..n {
+            let at = if backward { n - 1 - i } else { i };
+            let Some(v) = Self::dense_or(a, o, at, &mut run, false, &mut quiet)? else { continue };
+            let k = f64::from(at);
+            let r = Self::call3(a, cb, arity, quiet, v, k, o)?;
+            quiet = true;
+            if a.to_boolean(r) {
+                return Ok(if value { v } else { Value::from(k) });
+            }
+        }
+        Ok(if value { Value::Undefined } else { (-1.0).into() })
+    }
+
+    #[inline(never)]
+    fn fold_fast<'gc>(a: &mut Agent<'gc, '_>, o: JsObject<'gc>, n: u32, right: bool, cb: &Callback<'gc>, arity: usize, init: Option<Value<'gc>>) -> Result<Value<'gc>, Error> {
+        let mut run = None;
+        let mut quiet = false;
+        let mut i = 0u32;
+        let mut acc = if let Some(v) = init {
+            v
+        } else {
+            loop {
+                if i >= n {
+                    return Err(a.throw(ErrorKind::Type, "Reduce of empty array with no initial value"));
+                }
+                let at = if right { n - 1 - i } else { i };
+                i += 1;
+                if let Some(v) = Self::dense_or(a, o, at, &mut run, true, &mut quiet)? {
+                    break v;
+                }
+            }
+        };
+        quiet = false;
+        while i < n {
+            let at = if right { n - 1 - i } else { i };
+            if let Some(v) = Self::dense_or(a, o, at, &mut run, true, &mut quiet)? {
+                acc = Self::call_fold(a, cb, arity, quiet, acc, v, f64::from(at))?;
+                quiet = true;
+            }
+            i += 1;
+        }
+        Ok(acc)
+    }
+
     fn visit<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>], how: Visit) -> Result<Value<'gc>, Error> {
         let (o, len) = Self::target(a, this)?;
         let (f, this_arg) = (args.at(0), args.at(1));
         Self::callback(a, f)?;
-        let out = match how {
-            Visit::Map => Some(Self::species_create(a, o, len)?),
-            Visit::Filter => Some(Self::species_create(a, o, 0.0)?),
-            _ => None,
+        let (out, fresh) = match how {
+            Visit::Map => {
+                let (arr, fresh) = Self::species_create(a, o, len)?;
+                (Some(arr), fresh)
+            }
+            Visit::Filter => {
+                let (arr, fresh) = Self::species_create(a, o, 0.0)?;
+                (Some(arr), fresh)
+            }
+            _ => (None, false),
         };
         let cb = a.callback(f, this_arg);
-        let (mut k, mut to) = (0.0, 0.0);
-        while k < len {
-            if let Some(v) = a.present_index(o, k)? {
-                let r = cb.call(a, &[v, k.into(), o.into()])?;
-                match (how, out) {
-                    (Visit::Map, Some(arr)) => a.create_index(arr, k, r)?,
-                    (Visit::Filter, Some(arr)) if a.to_boolean(r) => {
-                        a.create_index(arr, to, v)?;
-                        to += 1.0;
-                    }
-                    (Visit::Some, _) if a.to_boolean(r) => return Ok(true.into()),
-                    (Visit::Every, _) if !a.to_boolean(r) => return Ok(false.into()),
-                    _ => {}
+        if o.is_array()
+            && let Some(n) = Self::span(len)
+            && let Some(arity) = cb.passed()
+        {
+            return match how {
+                Visit::ForEach => Self::each_fast(a, o, n, &cb, arity).map(|()| Value::Undefined),
+                Visit::Map => Self::map_fast(a, o, out.expect("map builds an array"), fresh, n, &cb, arity),
+                Visit::Filter => Self::filter_fast(a, o, out.expect("filter builds an array"), fresh, n, &cb, arity),
+                Visit::Some => Self::pred_fast(a, o, n, &cb, arity, true),
+                Visit::Every => Self::pred_fast(a, o, n, &cb, arity, false),
+            };
+        }
+        let mut run = None;
+        let mut to = 0.0;
+        if let Some(n) = Self::span(len) {
+            for i in 0..n {
+                if let Some(done) = Self::drive(a, &cb, how, o, out, fresh, f64::from(i), Some(i), &mut run, &mut to)? {
+                    return Ok(done);
                 }
             }
-            k += 1.0;
+        } else {
+            let mut k = 0.0;
+            while k < len {
+                if let Some(done) = Self::drive(a, &cb, how, o, out, fresh, k, None, &mut run, &mut to)? {
+                    return Ok(done);
+                }
+                k += 1.0;
+            }
         }
         Ok(match (how, out) {
             (_, Some(arr)) => arr.into(),
@@ -670,15 +936,34 @@ impl Arrays {
         Self::callback(a, f)?;
         let backward = matches!(how, Find::LastValue | Find::LastIndex);
         let cb = a.callback(f, this_arg);
-        let mut i = 0.0;
-        while i < len {
-            let k = if backward { len - 1.0 - i } else { i };
-            let v = a.get_index(o.into(), k)?;
-            let r = cb.call(a, &[v, k.into(), o.into()])?;
-            if a.to_boolean(r) {
-                return Ok(if matches!(how, Find::Value | Find::LastValue) { v } else { k.into() });
+        if o.is_array()
+            && let Some(n) = Self::span(len)
+            && let Some(arity) = cb.passed()
+        {
+            return Self::find_fast(a, o, n, &cb, arity, how);
+        }
+        let mut run = None;
+        let mut hit = |a: &mut Agent<'gc, '_>, k: f64, idx: Option<u32>| -> Result<Option<Value<'gc>>, Error> {
+            let Some(v) = Self::load(a, o, k, idx, &mut run, false)? else { return Ok(None) };
+            let r = Self::apply(a, &cb, 3, v, || Value::from(k), || o.into(), || Value::Undefined)?;
+            Ok(a.to_boolean(r).then_some(if matches!(how, Find::Value | Find::LastValue) { v } else { Value::from(k) }))
+        };
+        if let Some(n) = Self::span(len) {
+            for i in 0..n {
+                let k = if backward { n - 1 - i } else { i };
+                if let Some(v) = hit(a, f64::from(k), Some(k))? {
+                    return Ok(v);
+                }
             }
-            i += 1.0;
+        } else {
+            let mut i = 0.0;
+            while i < len {
+                let k = if backward { len - 1.0 - i } else { i };
+                if let Some(v) = hit(a, k, None)? {
+                    return Ok(v);
+                }
+                i += 1.0;
+            }
         }
         Ok(if matches!(how, Find::Value | Find::LastValue) { Value::Undefined } else { (-1.0).into() })
     }
@@ -703,6 +988,40 @@ impl Arrays {
         let (o, len) = Self::target(a, this)?;
         let f = args.at(0);
         Self::callback(a, f)?;
+        let cb = a.callback(f, Value::Undefined);
+        if o.is_array()
+            && let Some(n) = Self::span(len)
+            && let Some(arity) = cb.passed()
+        {
+            let init = (args.len() >= 2).then(|| args[1]);
+            return Self::fold_fast(a, o, n, right, &cb, arity, init);
+        }
+        let mut run = None;
+        if let Some(n) = Self::span(len) {
+            let mut i = 0u32;
+            let mut acc = if args.len() >= 2 {
+                args[1]
+            } else {
+                loop {
+                    if i >= n {
+                        return Err(a.throw(ErrorKind::Type, "Reduce of empty array with no initial value"));
+                    }
+                    let k = if right { n - 1 - i } else { i };
+                    i += 1;
+                    if let Some(v) = Self::load(a, o, f64::from(k), Some(k), &mut run, true)? {
+                        break v;
+                    }
+                }
+            };
+            while i < n {
+                let k = if right { n - 1 - i } else { i };
+                if let Some(v) = Self::load(a, o, f64::from(k), Some(k), &mut run, true)? {
+                    acc = Self::apply(a, &cb, 4, acc, || v, || Value::from(f64::from(k)), || o.into())?;
+                }
+                i += 1;
+            }
+            return Ok(acc);
+        }
         let index = |i: f64| if right { len - 1.0 - i } else { i };
         let mut i = 0.0;
         let mut acc = if args.len() >= 2 {
@@ -714,16 +1033,15 @@ impl Arrays {
                 }
                 let k = index(i);
                 i += 1.0;
-                if let Some(v) = a.present_index(o, k)? {
+                if let Some(v) = Self::load(a, o, k, None, &mut run, true)? {
                     break v;
                 }
             }
         };
-        let cb = a.callback(f, Value::Undefined);
         while i < len {
             let k = index(i);
-            if let Some(v) = a.present_index(o, k)? {
-                acc = cb.call(a, &[acc, v, k.into(), o.into()])?;
+            if let Some(v) = Self::load(a, o, k, None, &mut run, true)? {
+                acc = Self::apply(a, &cb, 4, acc, || v, || Value::from(k), || o.into())?;
             }
             i += 1.0;
         }
@@ -798,7 +1116,7 @@ impl Arrays {
             ValueKind::Undefined => 1.0,
             d => a.to_integer_or_infinity(Value::from(d))?.max(0.0),
         };
-        let arr = Self::species_create(a, o, 0.0)?;
+        let (arr, _) = Self::species_create(a, o, 0.0)?;
         Self::flatten(a, arr, o, len, 0.0, depth, Value::Undefined, Value::Undefined)?;
         Ok(arr.into())
     }
@@ -806,22 +1124,32 @@ impl Arrays {
     fn flat_map<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let (o, len) = Self::target(a, this)?;
         Self::callback(a, args.at(0))?;
-        let arr = Self::species_create(a, o, 0.0)?;
+        let (arr, _) = Self::species_create(a, o, 0.0)?;
         Self::flatten(a, arr, o, len, 0.0, 1.0, args.at(0), args.at(1))?;
         Ok(arr.into())
     }
 
-    fn order<'gc>(a: &mut Agent<'gc, '_>, cmp: Option<&Callback<'gc>>, x: Value<'gc>, y: Value<'gc>) -> Result<Ordering, Error> {
+    fn order<'gc>(a: &mut Agent<'gc, '_>, cmp: Option<&Callback<'gc>>, quiet: &mut bool, x: Value<'gc>, y: Value<'gc>) -> Result<Ordering, Error> {
         Ok(match (x.bits() == ValueBits::UNDEFINED, y.bits() == ValueBits::UNDEFINED) {
             (true, true) => Ordering::Equal,
             (true, false) => Ordering::Greater,
             (false, true) => Ordering::Less,
             (false, false) => match cmp {
                 Some(cmp) => {
-                    let r = cmp.call(a, &[x, y])?;
+                    let r = match cmp.passed() {
+                        Some(0) => Self::pass(a, cmp, *quiet, &[])?,
+                        Some(1) => Self::pass(a, cmp, *quiet, &[x])?,
+                        _ => Self::pass(a, cmp, *quiet, &[x, y])?,
+                    };
                     let n = match r.as_number() {
-                        Some(n) => n,
-                        None => a.to_number(r)?,
+                        Some(n) => {
+                            *quiet = true;
+                            n
+                        }
+                        None => {
+                            *quiet = false;
+                            a.to_number(r)?
+                        }
                     };
                     n.partial_cmp(&0.0).unwrap_or(Ordering::Equal)
                 }
@@ -867,6 +1195,7 @@ impl Arrays {
             return Ok(v);
         }
         let cmp = (f != Value::Undefined).then(|| a.callback(f, Value::Undefined));
+        let mut quiet = false;
         let mut out = v.clone();
         let mut width = 1;
         while width < n {
@@ -876,7 +1205,7 @@ impl Arrays {
                 let hi = (lo + 2 * width).min(n);
                 let (mut i, mut j, mut k) = (lo, mid, lo);
                 while i < mid && j < hi {
-                    if Self::order(a, cmp.as_ref(), v[i], v[j])? == Ordering::Greater {
+                    if Self::order(a, cmp.as_ref(), &mut quiet, v[i], v[j])? == Ordering::Greater {
                         out[k] = v[j];
                         j += 1;
                     } else {

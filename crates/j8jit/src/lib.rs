@@ -130,6 +130,7 @@ pub struct Jit {
     ctxs: RefCell<Vec<Box<Ctx>>>,
     floor: core::cell::Cell<u64>,
     epoch: core::cell::Cell<u64>,
+    entries: core::cell::Cell<u64>,
     st: RefCell<State>,
     stencils: core::cell::OnceCell<Option<stitch::Table>>,
 }
@@ -142,7 +143,7 @@ impl Default for Jit {
 
 impl From<u32> for Jit {
     fn from(threshold: u32) -> Self {
-        Self { threshold, debug: Debug::from_env(), ctx: core::cell::Cell::new(None), ctxs: RefCell::new(Vec::new()), floor: core::cell::Cell::new(0), epoch: core::cell::Cell::new(1), st: RefCell::new(State::default()), stencils: core::cell::OnceCell::new() }
+        Self { threshold, debug: Debug::from_env(), ctx: core::cell::Cell::new(None), ctxs: RefCell::new(Vec::new()), floor: core::cell::Cell::new(0), epoch: core::cell::Cell::new(1), entries: core::cell::Cell::new(0), st: RefCell::new(State::default()), stencils: core::cell::OnceCell::new() }
     }
 }
 
@@ -160,6 +161,13 @@ impl Debug {
 }
 
 const MAX_DEOPTS: u32 = 24;
+
+struct Prepared {
+    ctx: Box<Ctx>,
+    seen_epoch: u64,
+    seen_entries: u64,
+    generation: u64,
+}
 
 type EntryFn = sysv!(unsafe fn(*mut Ctx, *mut Value<'static>, *mut Value<'static>) -> i64);
 
@@ -187,27 +195,64 @@ impl Jit {
         }
     }
 
+    fn watch_realm(ctx: &mut Ctx, a: &j8framework::Agent<'_, '_>) {
+        let addr = |o: j8framework::JsObject| Value::Object(o).bits() & j8framework::ValueBits::PAYLOAD;
+        ctx.global = addr(a.realm.global);
+        ctx.script_scope = addr(a.realm.script_scope);
+        ctx.object_proto = addr(a.realm.object_proto);
+    }
+
+    unsafe fn release_callback(env: *mut ()) {
+        let prep = unsafe { Box::from_raw(env.cast::<Prepared>()) };
+        let jit = unsafe { &*prep.ctx.jit };
+        jit.recycle(prep.ctx);
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn refresh_callback(prep: &mut Prepared, a: &j8framework::Agent<'_, '_>, jit: &Jit) {
+        let generation = a.mc.generation();
+        if generation != prep.generation {
+            Self::watch_realm(&mut prep.ctx, a);
+            prep.generation = generation;
+        }
+        prep.ctx.epoch = jit.bump();
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn callback_error(ctx: &mut Ctx) -> j8framework::Error {
+        ctx.error.take().unwrap_or(j8framework::Error::Terminated)
+    }
+
+    #[expect(clippy::unnecessary_wraps, reason = "the callback hook declines a call by returning None")]
     unsafe fn run_callback<'gc>(a: &mut j8framework::Agent<'gc, '_>, cb: &j8framework::Callback<'gc>, args: &[Value<'gc>]) -> Option<Result<Value<'gc>, j8framework::Error>> {
         type StubFn = sysv!(unsafe fn(*mut Ctx, u64, u64, u64, u64, u64) -> runtime::Ret);
-        let (jit, exe) = unsafe { (&*(cb.env[0] as *const Jit), &*(cb.env[1] as *const j8executor::Executor)) };
-        if !jit.stack_room() {
-            return None;
+        let prep = unsafe { &mut *cb.env.cast::<Prepared>() };
+        let jit = unsafe { &*prep.ctx.jit };
+        if !cb.quiet.get() || jit.epoch.get() != prep.seen_epoch || jit.entries.get() != prep.seen_entries || a.mc.generation() != prep.generation {
+            Self::refresh_callback(prep, a, jit);
         }
-        let mut w = [j8framework::ValueBits::UNDEFINED; 3];
-        for (d, v) in w.iter_mut().zip(args).take(cb.arity) {
-            *d = v.bits();
-        }
-        let mut ctx = Ctx::bare(exe, a, jit);
+        let ctx = &mut prep.ctx;
+        ctx.agent = core::ptr::from_mut(a).cast();
+        ctx.budget = runtime::BUDGET_CHUNK;
+        ctx.pending = 0;
+        ctx.miss = 0;
+        let undef = j8framework::ValueBits::UNDEFINED;
+        let n = cb.arity.min(args.len());
+        let w0 = if n > 0 { args[0].bits() } else { undef };
+        let w1 = if n > 1 { args[1].bits() } else { undef };
+        let w2 = if n > 2 { args[2].bits() } else { undef };
         let r = unsafe {
             let code: StubFn = core::mem::transmute::<usize, StubFn>(cb.code);
-            code(&raw mut *ctx, cb.callee.bits(), cb.this.bits(), w[0], w[1], w[2]).value
+            code(core::ptr::from_mut(&mut **ctx), cb.callee.bits(), cb.this.bits(), w0, w1, w2).value
         };
-        let threw = (ctx.pending != 0).then(|| ctx.error.take().unwrap_or(j8framework::Error::Terminated));
-        jit.recycle(ctx);
-        Some(match threw {
-            Some(e) => Err(e),
-            None => Ok(unsafe { Value::from_bits(r) }),
-        })
+        prep.seen_epoch = jit.epoch.get();
+        prep.seen_entries = jit.entries.get();
+        if prep.ctx.pending != 0 {
+            return Some(Err(Self::callback_error(&mut prep.ctx)));
+        }
+        Some(Ok(unsafe { Value::from_bits(r) }))
     }
 
     fn stack_floor(&self) -> u64 {
@@ -545,6 +590,10 @@ impl Tier for Jit {
         self.threshold == 0
     }
 
+    fn entered(&self) {
+        self.entries.set(self.entries.get().wrapping_add(1));
+    }
+
     fn call<'gc>(&self, exe: &j8executor::Executor, a: &mut j8framework::Agent<'gc, '_>, f: FuncId, callee: Value<'gc>, this: Value<'gc>, args: &[Value<'gc>]) -> Option<Result<Value<'gc>, j8framework::Error>> {
         let func = exe.jit_function(f);
         let formals = usize::from(func.shared().formal_parameters);
@@ -581,7 +630,7 @@ impl Tier for Jit {
 
     fn callback<'gc>(&self, exe: &j8executor::Executor, a: &mut j8framework::Agent<'gc, '_>, func: j8executor::JitFunction<'_>, callee: Value<'gc>, this: Value<'gc>) -> Option<j8framework::Callback<'gc>> {
         let arity = usize::from(func.shared().formal_parameters);
-        if arity > 3 || !func.plain() || func.class_constructor() {
+        if arity > 3 || !func.plain() || func.class_constructor() || !self.stack_room() {
             return None;
         }
         let this = if func.wraps_this() {
@@ -598,8 +647,14 @@ impl Tier for Jit {
             return None;
         }
         let code = Self::stub(&mut st, func.id());
-        let env = [core::ptr::from_ref(self) as usize, core::ptr::from_ref(exe) as usize];
-        (code != 0).then_some(j8framework::Callback { callee, this, run: Some(Self::run_callback), code, arity, env })
+        drop(st);
+        if code == 0 {
+            return None;
+        }
+        let ctx = Ctx::bare(exe, a, self);
+        let prep = Box::new(Prepared { ctx, seen_epoch: self.epoch.get(), seen_entries: self.entries.get(), generation: a.mc.generation() });
+        let env = Box::into_raw(prep).cast::<()>();
+        Some(j8framework::Callback { callee, this, run: Some(Self::run_callback), code, arity, env, release: Some(Self::release_callback), quiet: core::cell::Cell::new(false) })
     }
 
     fn enter(&self, e: &mut Entry<'_, '_, '_, '_>) -> Tiered {

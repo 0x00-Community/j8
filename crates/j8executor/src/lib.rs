@@ -521,6 +521,12 @@ impl Executor {
         self
     }
 
+    fn note_user(&self) {
+        if let Some(t) = &self.tier {
+            t.entered();
+        }
+    }
+
     pub fn load(&self, mc: &j8framework::Mutation<'_>, module: Module) -> FuncId {
         let m = mc.mutator();
         let base = u32::try_from(self.code.len()).expect("fewer than 2^32 functions");
@@ -2418,6 +2424,7 @@ impl<'gc> Invoke<'gc> for Executor {
                     return r;
                 }
             }
+            self.note_user();
             let mut regs = a.take_regs();
             regs.clear();
             let f = self.open_with(a, &mut regs, l, c, callee, this, Args::Values(args));
@@ -2437,6 +2444,7 @@ impl<'gc> Invoke<'gc> for Executor {
         match self.resolve(a, callee, this, args.to_vec(), level)? {
             Callee::Done(v) => Ok(v),
             Callee::Closure { closure, callee, this, args } => {
+                self.note_user();
                 let mut regs = a.take_regs();
                 regs.clear();
                 let f = self.open(a, &mut regs, closure, callee, this, &args);
@@ -2474,6 +2482,7 @@ impl<'gc> Invoke<'gc> for Executor {
         if level >= STACK_LIMIT {
             return Err(a.throw(ErrorKind::Range, "Maximum call stack size exceeded"));
         }
+        self.note_user();
         let saved = self.depth.replace(level);
         let r = self.run_script(a, main);
         self.depth.set(saved);
@@ -2527,6 +2536,7 @@ impl<'gc> Invoke<'gc> for Executor {
         let mut regs = a.take_regs();
         regs.clear();
         let (this, args) = params.split_first().map_or((Value::Undefined, &[][..]), |(t, rest)| (*t, rest));
+        self.note_user();
         let f = self.open(a, &mut regs, closure, callee, this, args);
         if let Some(r) = self.function(closure.func).func.bytecode.new_target_or_generator {
             regs[f.base + usize::try_from(r).unwrap_or(0)] = co.into();
@@ -2564,7 +2574,10 @@ impl<'gc> Invoke<'gc> for Executor {
         let mut regs = Vec::new();
         match self.prepare(a, &mut regs, callee, args.to_vec(), new_target, level)? {
             Prepared::Done(v) => Ok(v),
-            Prepared::Frame(f) => self.run_frame(a, regs, f, level),
+            Prepared::Frame(f) => {
+                self.note_user();
+                self.run_frame(a, regs, f, level)
+            }
         }
     }
 }

@@ -186,9 +186,14 @@ impl Collections {
         if !a.is_callable(f) {
             return Err(a.throw(ErrorKind::Type, "callback is not a function"));
         }
+        let cb = a.callback(f, args.at(1));
         let mut i = 0;
+        let mut quiet = false;
         while let Some((j, k, v)) = Self::entry_from(a, o, i) {
-            a.call(f, args.at(1), &[v, k, this])?;
+            let all = [v, k, this];
+            let args = &all[..cb.passed().map_or(3, |n| n.min(3))];
+            if quiet { cb.again(a, args)? } else { cb.call(a, args)? };
+            quiet = true;
             i = j + 1;
         }
         Ok(Value::Undefined)
