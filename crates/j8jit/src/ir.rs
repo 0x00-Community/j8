@@ -1,7 +1,6 @@
-use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-use j8framework::{FuncId, Shape};
+use j8framework::{FuncId, ShapeKey};
 
 pub type V = u32;
 
@@ -122,7 +121,7 @@ pub enum Op {
     CheckNotHole(V, Fs),
     CheckNotLazy(V, Fs),
     CheckFunc(V, FuncId, Fs),
-    CheckShape(V, Option<Arc<Shape>>, Fs),
+    CheckShape(V, Option<ShapeKey>, Fs),
     Check(V, bool, Fs),
     CmpInt(Cond, V, V),
     CmpFloat(Cond, V, V),
@@ -227,7 +226,7 @@ pub enum Slot {
 #[derive(Clone)]
 pub struct VirtualObject {
     pub proto: V,
-    pub shape: Option<Arc<Shape>>,
+    pub shape: Option<ShapeKey>,
     pub fields: Vec<Slot>,
 }
 
@@ -319,7 +318,7 @@ impl Graph {
             for &v in &blk.insts {
                 let i = &self.insts[v as usize];
                 let op = match &i.op {
-                    Op::CheckShape(a, sh, fs) => alloc::format!("CheckShape(v{a}, {:?}, fs{fs})", sh.as_ref().map(Arc::as_ptr)),
+                    Op::CheckShape(a, sh, fs) => alloc::format!("CheckShape(v{a}, {:?}, fs{fs})", sh.map(ShapeKey::id)),
                     Op::Call(h, args, fs) => alloc::format!("Call({h:?}, {args:?}, {fs:?})"),
                     o => {
                         let mut ins = Vec::new();
