@@ -1823,7 +1823,12 @@ impl<'e> Builder<'e> {
             params.push(args.get(i).copied().unwrap_or(self.undef));
         }
         let ctx = self.closure_env_on(st, fp);
-        let regs = Regs { params, regs: vec![self.undef; cfg.regs], acc: self.undef, ctx };
+        let mut regs = Regs { params, regs: vec![self.undef; cfg.regs], acc: self.undef, ctx };
+        if let (Some((nt, _)), Some(r)) = (construct, tf.shared().bytecode.new_target_or_generator)
+            && let Some(slot) = usize::try_from(r).ok().and_then(|r| regs.regs.get_mut(r))
+        {
+            *slot = nt;
+        }
         let inner = St { r: regs, heap: core::mem::take(&mut st.heap) };
         let regions = vec![Region { start: 0, end: tf.len().saturating_sub(1), peel: None }];
         let mut a = self.activation(tf, fw, u32::try_from(args.len()).unwrap_or(0), construct, Some(caller), act.depth + 1, regions);
