@@ -622,6 +622,10 @@ impl Builder {
         };
     }
 
+    pub fn call_runtime_for_pair(&mut self, f: Runtime, args: RegisterList, out: Register) {
+        self.out(Bytecode::CallRuntimeForPair, &[OperandValue::from(f as u16), i32::from(args.first).into(), args.count.into(), i32::from(out).into()]);
+    }
+
     pub fn call_js_runtime(&mut self, f: NativeContextIndex, args: RegisterList) {
         self.out(Bytecode::CallJSRuntime, &[OperandValue::from(f as u16), i32::from(args.first).into(), args.count.into()]);
     }
