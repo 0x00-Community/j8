@@ -170,11 +170,11 @@ const CASES: &[(&str, &str)] = &[
         "a,a|0|a|1|2|null|0|a|0|4",
     ),
     (
-        "let r = /\\u{1F600}/uy; r.lastIndex = 1; let m = 'a\\u{1F600}'.match(r); [m[0], m.index, r.lastIndex, 'a\\u{1F600}'.search(/\\u{1F600}/u), 'a\\u{1F600}b'.match(/\\u{1F600}/gu).join(','), '\\u{1F600}'.match(/(?:)/gu).join(','), '\\u{1F600}'.match(/(?:)/g).join(','), '\\u{00e9}-\\u{00e9}'.match(/\\u{00e9}/g).join(','), 'a\\u{00e9}a'.match(/\\u{00e9}/).index].join('|')",
+        "let r = /\\u{1F600}/uy; r.lastIndex = 1; let m = 'a\\u{1F600}'.match(r); [m[0], m.index, r.lastIndex, 'a\\u{1F600}'.search(/\\u{1F600}/u), 'a\\u{1F600}b'.match(/\\u{1F600}/gu).join(','), '\\u{1F600}'.match(/(?:)/gu).join(','), '\\u{1F600}'.match(/(?:)/g).join(','), '\\u{00e9}-\\u{00e9}'.match(/\\u00e9/g).join(','), 'a\\u{00e9}a'.match(/\\u00e9/).index].join('|')",
         "\u{1F600}|1|3|1|\u{1F600}|,|,,|\u{e9},\u{e9}|1",
     ),
     (
-        "['abc'.search(/z/), 'abc'.search(/a/), 'abc'.search(/c/), ''.search(/(?:)/), ''.search(/a/), 'a\\u{00e9}a'.search(/\\u{00e9}/), '\\u{1F600}'.search(/./u), '\\u{1F600}'.search(/./)].join('|')",
+        "['abc'.search(/z/), 'abc'.search(/a/), 'abc'.search(/c/), ''.search(/(?:)/), ''.search(/a/), 'a\\u{00e9}a'.search(/\\u00e9/), '\\u{1F600}'.search(/./u), '\\u{1F600}'.search(/./)].join('|')",
         "-1|0|2|0|-1|1|0|0",
     ),
     (
@@ -194,8 +194,8 @@ const CASES: &[(&str, &str)] = &[
         ";a;a,b;a,b,c;a,b,c;a;a;;a,b|1,0,0,1|,-,|2|,-,|4|,-,|9||,a",
     ),
     (
-        "const codes = s => { let o = []; for (let i = 0; i < s.length; i++) o.push(s.charCodeAt(i)); return o.join('.'); }; const parts = a => a.map(x => x === undefined ? 'u' : codes(String(x))).join(','); [parts('\\u{1F600}'.split(/(?:)/u)), parts('\\u{1F600}'.split(/(?:)/)), parts('a\\u{1F600}b'.split(/(?:)/u)), 'a\\u{1F600}b'.split(/\\u{1F600}/u).join(','), '\\u{00e9}-\\u{00e9}'.split(/-/).join(','), parts('\\u{00e9}'.split(/x*/)), 'a\\u{00e9}a'.search(/\\u{00e9}/)].join('|')",
-        "55357.56832|65533,65533|97,55357.56832,98|a,b|\u{e9},\u{e9}|233|1",
+        "const codes = s => { let o = []; for (let i = 0; i < s.length; i++) o.push(s.charCodeAt(i)); return o.join('.'); }; const parts = a => a.map(x => x === undefined ? 'u' : codes(String(x))).join(','); [parts('\\u{1F600}'.split(/(?:)/u)), parts('\\u{1F600}'.split(/(?:)/)), parts('a\\u{1F600}b'.split(/(?:)/u)), 'a\\u{1F600}b'.split(/\\u{1F600}/u).join(','), '\\u{00e9}-\\u{00e9}'.split(/-/).join(','), parts('\\u{00e9}'.split(/x*/)), 'a\\u{00e9}a'.search(/\\u00e9/)].join('|')",
+        "55357.56832|55357,56832|97,55357.56832,98|a,b|\u{e9},\u{e9}|233|1",
     ),
     (
         "[new String('a-b').split(/-/).join(','), new String('aba').match(/a/g).join(','), new String('abc').search(/b/), String.prototype.match.call(1, /1/), String.prototype.split.call(12, /1/).join(',')].join('|')",
@@ -219,7 +219,7 @@ const CASES: &[(&str, &str)] = &[
     ),
     (
         "let n = 0; Object.defineProperty(RegExp.prototype, 'unicode', { configurable: true, get() { n++; return false; } }); let s = '\\u{1F600}'.split(/(?:)/u); let codes = s.map(p => { let c = []; for (let i = 0; i < p.length; i++) c.push(p.charCodeAt(i)); return c.join('.'); }); [codes.join(','), n, '\\u{1F600}'.match(/(?:)/gu).length].join('|')",
-        "65533,65533|1|3",
+        "55357,56832|1|2",
     ),
     (
         "RegExp.prototype[Symbol.split] = function() { return 'X'; }; ['a-b'.split(/-/), 'ab'.match(/a/g).join(','), 'ab'.search(/b/)].join('|')",
