@@ -956,6 +956,7 @@ impl<'g> Gen<'g> {
                 let r = self.gpr(p, RAX);
                 self.a.load(RCX, r, Self::o(Layout::OBJECT_CALL));
                 self.untag(RCX);
+                self.a.test_rr(true, RCX, RCX);
                 self.exit_if(Cc::E, fs, Reason::Func);
                 self.a.cmp_m8i(RCX, 0, Layout::FAST_CLOSURE_TAG);
                 self.exit_if(Cc::Ne, fs, Reason::Func);
