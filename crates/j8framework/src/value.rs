@@ -282,7 +282,7 @@ impl<'gc> Value<'gc> {
 
     #[inline]
     pub fn as_context(self) -> Option<crate::JsEnv<'gc>> {
-        (self.bits >> ValueBits::TAG_SHIFT == ValueBits::boxed(ValueTag::CONTEXT, 0) >> ValueBits::TAG_SHIFT)
+        (self.bits >> ValueBits::TAG_SHIFT == ValueBits::boxed(ValueTag::CONTEXT, 0) >> ValueBits::TAG_SHIFT && self.bits & ValueBits::PAYLOAD != 0)
             .then(|| unsafe { gc_from_raw(Self::address(self.bits & ValueBits::PAYLOAD)) })
     }
 }

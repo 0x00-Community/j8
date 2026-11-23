@@ -92,7 +92,7 @@ const CASES: &[Case] = &[
     Case {
         what: "String.fromCharCode over the uint16 range and with a valueOf argument",
         text: "function f() { let s = 0; for (let i = 0; i <= 70000; i++) s += String.fromCharCode(i).charCodeAt(0); let n = 0; const o = { valueOf() { n = 9; return 67; } }; return s + ':' + String.fromCharCode(o) + ':' + n + ':' + String.fromCharCode().length + ':' + String.fromCharCode(65, 66) + ':' + String.fromCharCode(-1).charCodeAt(0) + ':' + String.fromCharCode(NaN).charCodeAt(0) + ':' + String.fromCharCode(Infinity).charCodeAt(0) + ':' + String.fromCharCode(70000).charCodeAt(0) + ':' + String.fromCharCode('65'); } f()",
-        want: "2176286008:C:9:0:AB:65535:0:0:4464:A",
+        want: "2157416760:C:9:0:AB:65535:0:0:4464:A",
     },
     Case {
         what: "one site alternates between two natives",
