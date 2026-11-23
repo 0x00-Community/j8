@@ -3,11 +3,11 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use crate::{Gc};
+use crate::{ScopeLocal};
 
 use num_traits::Zero;
 
-use crate::{Agent, Descriptor, Error, Key, Numeric, IterKind, IteratorState, JsObject, JsString, JsSymbol, ObjectData, ObjectKind, Property, PropertyKey, Slot, Value};
+use crate::{Scope, Descriptor, Error, Key, Numeric, IterKind, IteratorState, JsObject, JsString, JsSymbol, ObjectData, ObjectKind, Property, PropertyKey, Slot, Value};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ErrorKind {
@@ -129,9 +129,9 @@ impl ErrorKind {
 
 #[derive(Clone, Copy, Debug, crate::Collect)]
 #[collect(no_drop)]
-pub struct IterRecord<'gc> {
-    pub iterator: Value<'gc>,
-    pub next: Value<'gc>,
+pub struct IterRecord<'scope> {
+    pub iterator: Value<'scope>,
+    pub next: Value<'scope>,
 }
 
 const TWO_POW_32: f64 = 4_294_967_296.0;
@@ -271,79 +271,83 @@ pub(crate) fn index_of_str(s: &str) -> Option<u32> {
     canonical.then(|| s.parse().ok()).flatten().filter(|&i| f64::from(i) <= MAX_INDEX)
 }
 
-impl<'gc> Agent<'gc, '_> {
+impl<'scope> Scope<'scope, '_> {
     pub fn par(&self) -> crate::Par<'_> {
         crate::Par(self.platform)
     }
 
-    pub fn unit_string(&self, u: u16) -> JsString<'gc> {
-        match self.realm.chars.get(usize::from(u)) {
+    pub fn unit_string(&self, u: u16) -> JsString<'scope> {
+        match self.context.chars.get(usize::from(u)) {
             Some(&s) => s,
             None => self.string_units(&[u]),
         }
     }
 
-    pub fn string(&self, s: &str) -> JsString<'gc> {
+    pub fn string(&self, s: &str) -> JsString<'scope> {
         crate::JsStr::alloc(self.mc, s)
     }
 
-    pub fn slice_units(&self, of: JsString<'gc>, r: core::ops::Range<usize>) -> JsString<'gc> {
+    pub fn slice_units(&self, of: JsString<'scope>, r: core::ops::Range<usize>) -> JsString<'scope> {
         crate::JsStr::slice_units(self.mc, of, r)
     }
 
-    pub fn string_units(&self, units: &[u16]) -> JsString<'gc> {
+    pub fn string_units(&self, units: &[u16]) -> JsString<'scope> {
         crate::JsStr::alloc_units(self.mc, units)
     }
 
-    pub fn string_from(&self, text: &str, ascii: bool) -> JsString<'gc> {
+    pub fn string_from(&self, text: &str, ascii: bool) -> JsString<'scope> {
         crate::JsStr::alloc_known(self.mc, text, ascii)
     }
 
-    pub fn piece(&self, of: JsString<'gc>, piece: &str) -> JsString<'gc> {
+    pub fn piece(&self, of: JsString<'scope>, piece: &str) -> JsString<'scope> {
         crate::JsStr::piece(self.mc, of, piece)
     }
 
-    pub fn object(&self) -> JsObject<'gc> {
-        ObjectData { proto: Some(self.realm.object_proto), ..ObjectData::default() }.alloc(self.mc)
+    pub fn object(&self) -> JsObject<'scope> {
+        ObjectData { proto: Some(self.context.object_proto), ..ObjectData::default() }.alloc(self.mc)
     }
 
-    pub fn object_with(&self, capacity: usize) -> JsObject<'gc> {
-        ObjectData::ordinary(self.mc, Some(self.realm.object_proto), capacity)
+    pub fn object_with(&self, capacity: usize) -> JsObject<'scope> {
+        ObjectData::ordinary(self.mc, Some(self.context.object_proto), capacity)
     }
 
-    pub fn array(&self, items: Vec<Value<'gc>>) -> JsObject<'gc> {
-        ObjectData { kind: ObjectKind::Array, elements: items, proto: Some(self.realm.array_proto), ..ObjectData::default() }.alloc(self.mc)
+    pub fn array(&self, items: Vec<Value<'scope>>) -> JsObject<'scope> {
+        ObjectData { kind: ObjectKind::Array, elements: items, proto: Some(self.context.array_proto), ..ObjectData::default() }.alloc(self.mc)
     }
 
-    pub fn array_from_slice(&self, items: &[Value<'gc>]) -> JsObject<'gc> {
-        let o = ObjectData { kind: ObjectKind::Array, proto: Some(self.realm.array_proto), ..ObjectData::default() }.alloc(self.mc);
+    pub fn array_from_slice(&self, items: &[Value<'scope>]) -> JsObject<'scope> {
+        let o = ObjectData { kind: ObjectKind::Array, proto: Some(self.context.array_proto), ..ObjectData::default() }.alloc(self.mc);
         if !items.is_empty() {
             o.elements().replace(self.mc, items);
         }
         o
     }
 
-    pub fn error(&self, kind: ErrorKind, message: &str) -> JsObject<'gc> {
-        let e = ObjectData { kind: ObjectKind::Error, proto: Some(self.realm.error_proto(kind)), ..ObjectData::default() }.alloc(self.mc);
+    pub fn error(&self, kind: ErrorKind, message: &str) -> JsObject<'scope> {
+        let e = ObjectData { kind: ObjectKind::Error, proto: Some(self.context.error_proto(kind)), ..ObjectData::default() }.alloc(self.mc);
         let m = self.string(message);
         e.borrow_mut(self.mc).define("message", Property::hidden(m.into()));
         e
     }
 
     pub fn throw(&self, kind: ErrorKind, message: &str) -> Error {
-        Error::Exception(self.global(self.error(kind, message).into()))
+        self.throw_value(self.error(kind, message).into())
     }
 
-    pub fn throw_value(&self, v: Value<'gc>) -> Error {
-        Error::Exception(self.global(v))
+    pub fn throw_value(&self, v: Value<'scope>) -> Error {
+        self.mc.raise(v)
     }
 
-    pub fn is_callable(&self, v: Value<'gc>) -> bool {
+    pub fn take_exception(&self) -> Value<'scope> {
+        self.mc.take_exception().unwrap_or_default()
+    }
+
+    pub fn is_callable(&self, v: Value<'scope>) -> bool {
         matches!(v.kind(), ValueKind::Object(o) if o.borrow().kind.is_callable())
     }
 
     #[inline]
-    pub fn to_boolean(&self, v: Value<'gc>) -> bool {
+    pub fn to_boolean(&self, v: Value<'scope>) -> bool {
         match v.kind() {
             ValueKind::Undefined | ValueKind::Null | ValueKind::Uninit => false,
             ValueKind::Bool(b) => b,
@@ -354,11 +358,11 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    pub fn to_primitive(&mut self, v: Value<'gc>, hint: Hint) -> Result<Value<'gc>, Error> {
+    pub fn to_primitive(&mut self, v: Value<'scope>, hint: Hint) -> Result<Value<'scope>, Error> {
         if v.as_object().is_none() {
             return Ok(v);
         }
-        let exotic = self.get_symbol(v, self.realm.symbols.to_primitive, v)?;
+        let exotic = self.get_symbol(v, self.context.symbols.to_primitive, v)?;
         if !exotic.is_nullish() {
             let h = self.string(match hint {
                 Hint::Default => "default",
@@ -384,7 +388,7 @@ impl<'gc> Agent<'gc, '_> {
         Err(self.throw(ErrorKind::Type, "Cannot convert object to primitive value"))
     }
 
-    pub fn to_number(&mut self, v: Value<'gc>) -> Result<f64, Error> {
+    pub fn to_number(&mut self, v: Value<'scope>) -> Result<f64, Error> {
         Ok(match v.kind() {
             ValueKind::Undefined | ValueKind::Uninit => f64::NAN,
             ValueKind::Null => 0.0,
@@ -400,15 +404,15 @@ impl<'gc> Agent<'gc, '_> {
         })
     }
 
-    pub fn to_int32(&mut self, v: Value<'gc>) -> Result<i32, Error> {
+    pub fn to_int32(&mut self, v: Value<'scope>) -> Result<i32, Error> {
         Ok(modulo_u32(self.to_number(v)?).cast_signed())
     }
 
-    pub fn to_uint32(&mut self, v: Value<'gc>) -> Result<u32, Error> {
+    pub fn to_uint32(&mut self, v: Value<'scope>) -> Result<u32, Error> {
         Ok(modulo_u32(self.to_number(v)?))
     }
 
-    pub fn text_of(&mut self, v: Value<'gc>) -> Result<crate::SmallStr, Error> {
+    pub fn text_of(&mut self, v: Value<'scope>) -> Result<crate::SmallStr, Error> {
         Ok(match v.kind() {
             ValueKind::String(s) => crate::SmallStr::from(s.as_str()),
             ValueKind::Number(x) => number_text(x),
@@ -416,7 +420,7 @@ impl<'gc> Agent<'gc, '_> {
         })
     }
 
-    pub fn to_string(&mut self, v: Value<'gc>) -> Result<JsString<'gc>, Error> {
+    pub fn to_string(&mut self, v: Value<'scope>) -> Result<JsString<'scope>, Error> {
         Ok(match v.kind() {
             ValueKind::String(s) => s,
             ValueKind::Undefined | ValueKind::Uninit => self.string("undefined"),
@@ -433,11 +437,11 @@ impl<'gc> Agent<'gc, '_> {
         })
     }
 
-    pub fn symbol_descriptive(&self, s: JsSymbol<'gc>) -> JsString<'gc> {
+    pub fn symbol_descriptive(&self, s: JsSymbol<'scope>) -> JsString<'scope> {
         self.string(&format!("Symbol({})", s.description.as_deref().unwrap_or("")))
     }
 
-    pub fn type_of(&self, v: Value<'gc>) -> &'static str {
+    pub fn type_of(&self, v: Value<'scope>) -> &'static str {
         match v.kind() {
             ValueKind::Undefined | ValueKind::Uninit => "undefined",
             ValueKind::Bool(_) => "boolean",
@@ -451,7 +455,7 @@ impl<'gc> Agent<'gc, '_> {
     }
 
     #[inline]
-    pub fn try_concat(&self, lhs: Value<'gc>, rhs: Value<'gc>) -> Option<Value<'gc>> {
+    pub fn try_concat(&self, lhs: Value<'scope>, rhs: Value<'scope>) -> Option<Value<'scope>> {
         match (lhs.kind(), rhs.kind()) {
             (ValueKind::String(a), ValueKind::String(b)) => Some(Value::String(crate::JsStr::concat(self.mc, a, b))),
             (ValueKind::String(s), ValueKind::Number(x)) => Some(self.concat_number(s, x, false)),
@@ -462,7 +466,7 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    fn primitive_bytes(v: Value<'gc>) -> Option<&'static [u8]> {
+    fn primitive_bytes(v: Value<'scope>) -> Option<&'static [u8]> {
         match v.kind() {
             ValueKind::Bool(true) => Some(b"true"),
             ValueKind::Bool(false) => Some(b"false"),
@@ -473,7 +477,7 @@ impl<'gc> Agent<'gc, '_> {
     }
 
     #[inline]
-    pub fn concat_add(&mut self, lhs: Value<'gc>, rhs: Value<'gc>) -> Result<(Value<'gc>, bool), Error> {
+    pub fn concat_add(&mut self, lhs: Value<'scope>, rhs: Value<'scope>) -> Result<(Value<'scope>, bool), Error> {
         if let (Some(x), Some(y)) = (lhs.as_number(), rhs.as_number()) {
             return Ok((Value::Number(x + y), true));
         }
@@ -485,7 +489,7 @@ impl<'gc> Agent<'gc, '_> {
     }
 
     #[inline]
-    fn concat_number(&self, s: JsString<'gc>, x: f64, number_first: bool) -> Value<'gc> {
+    fn concat_number(&self, s: JsString<'scope>, x: f64, number_first: bool) -> Value<'scope> {
         let mut buf = [0u8; 20];
         if let Some(digits) = integer_digits(x, &mut buf) {
             return Value::String(crate::JsStr::concat_ascii(self.mc, s, digits, number_first));
@@ -495,45 +499,45 @@ impl<'gc> Agent<'gc, '_> {
 
     #[cold]
     #[inline(never)]
-    fn concat_number_slow(&self, s: JsString<'gc>, x: f64, number_first: bool) -> Value<'gc> {
+    fn concat_number_slow(&self, s: JsString<'scope>, x: f64, number_first: bool) -> Value<'scope> {
         let digits = number_text(x);
         Value::String(crate::JsStr::concat_ascii(self.mc, s, digits.as_str().as_bytes(), number_first))
     }
 
     const STRING_CONSTANTS: usize = 1024;
 
-    pub fn constant_string(&self, func: u32, slot: u32, text: &str) -> JsString<'gc> {
+    pub fn constant_string(&self, func: u32, slot: u32, text: &str) -> JsString<'scope> {
         if let [b] = text.as_bytes()
             && *b < 128
         {
-            return self.realm.chars[usize::from(*b)];
+            return self.context.chars[usize::from(*b)];
         }
         if text.is_empty() {
-            return self.realm.empty;
+            return self.context.empty;
         }
         self.intern_constant(func, slot, || self.string(text))
     }
 
-    pub fn constant_units(&self, func: u32, slot: u32, units: &[u16]) -> JsString<'gc> {
+    pub fn constant_units(&self, func: u32, slot: u32, units: &[u16]) -> JsString<'scope> {
         if let &[u] = units
             && u < 128
         {
-            return self.realm.chars[usize::from(u)];
+            return self.context.chars[usize::from(u)];
         }
         if units.is_empty() {
-            return self.realm.empty;
+            return self.context.empty;
         }
         self.intern_constant(func, slot, || self.string_units(units))
     }
 
-    fn intern_constant(&self, func: u32, slot: u32, make: impl FnOnce() -> JsString<'gc>) -> JsString<'gc> {
+    fn intern_constant(&self, func: u32, slot: u32, make: impl FnOnce() -> JsString<'scope>) -> JsString<'scope> {
         let key = (func, slot);
-        if let Some(s) = self.realm.string_constants.get().get(&key).copied() {
+        if let Some(s) = self.context.string_constants.get().get(&key).copied() {
             return s;
         }
         let s = make();
-        if self.realm.string_constants.get().len() < Self::STRING_CONSTANTS {
-            self.realm.string_constants.update(self.mc, |m| {
+        if self.context.string_constants.get().len() < Self::STRING_CONSTANTS {
+            self.context.string_constants.update(self.mc, |m| {
                 let mut m = m.clone();
                 if m.len() < Self::STRING_CONSTANTS {
                     m.insert(key, s);
@@ -544,7 +548,7 @@ impl<'gc> Agent<'gc, '_> {
         s
     }
 
-    pub fn binary(&mut self, op: BinaryOp, lhs: Value<'gc>, rhs: Value<'gc>) -> Result<Value<'gc>, Error> {
+    pub fn binary(&mut self, op: BinaryOp, lhs: Value<'scope>, rhs: Value<'scope>) -> Result<Value<'scope>, Error> {
         if let (ValueKind::Number(a), ValueKind::Number(b)) = (lhs.kind(), rhs.kind()) {
             return Ok(op.numbers(a, b).into());
         }
@@ -574,7 +578,7 @@ impl<'gc> Agent<'gc, '_> {
         Ok(op.numbers(a, b).into())
     }
 
-    pub fn loose_equals(&mut self, a: Value<'gc>, b: Value<'gc>) -> Result<bool, Error> {
+    pub fn loose_equals(&mut self, a: Value<'scope>, b: Value<'scope>) -> Result<bool, Error> {
         Ok(match (a.kind(), b.kind()) {
             _ if a.is_nullish() && b.is_nullish() => true,
             (ValueKind::Undefined | ValueKind::Null, _) | (_, ValueKind::Undefined | ValueKind::Null) => false,
@@ -600,7 +604,7 @@ impl<'gc> Agent<'gc, '_> {
         })
     }
 
-    pub fn compare(&mut self, op: CompareOp, lhs: Value<'gc>, rhs: Value<'gc>) -> Result<bool, Error> {
+    pub fn compare(&mut self, op: CompareOp, lhs: Value<'scope>, rhs: Value<'scope>) -> Result<bool, Error> {
         if let (ValueKind::Number(a), ValueKind::Number(b)) = (lhs.kind(), rhs.kind()) {
             return Ok(op.numbers(a, b));
         }
@@ -631,7 +635,7 @@ impl<'gc> Agent<'gc, '_> {
         })
     }
 
-    pub fn unary(&mut self, op: UnaryOp, v: Value<'gc>) -> Result<Value<'gc>, Error> {
+    pub fn unary(&mut self, op: UnaryOp, v: Value<'scope>) -> Result<Value<'scope>, Error> {
         Ok(match op {
             UnaryOp::Neg => match self.to_numeric(v)? {
                 Numeric::Number(x) => (-x).into(),
@@ -648,7 +652,7 @@ impl<'gc> Agent<'gc, '_> {
         })
     }
 
-    pub fn to_object(&self, v: Value<'gc>) -> Result<JsObject<'gc>, Error> {
+    pub fn to_object(&self, v: Value<'scope>) -> Result<JsObject<'scope>, Error> {
         match (v.kind(), self.proto_of(v)) {
             (ValueKind::Object(o), _) => Ok(o),
             (_, Some(proto)) => Ok(ObjectData { kind: ObjectKind::Primitive(v), proto: Some(proto), ..ObjectData::default() }.alloc(self.mc)),
@@ -656,24 +660,24 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    fn proto_of(&self, v: Value<'gc>) -> Option<JsObject<'gc>> {
+    fn proto_of(&self, v: Value<'scope>) -> Option<JsObject<'scope>> {
         match v.kind() {
-            ValueKind::String(_) => Some(self.realm.string_proto),
-            ValueKind::Number(_) => Some(self.realm.number_proto),
-            ValueKind::Bool(_) => Some(self.realm.boolean_proto),
-            ValueKind::Symbol(_) => Some(self.realm.symbol_proto),
-            ValueKind::BigInt(_) => Some(self.realm.bigint_proto),
+            ValueKind::String(_) => Some(self.context.string_proto),
+            ValueKind::Number(_) => Some(self.context.number_proto),
+            ValueKind::Bool(_) => Some(self.context.boolean_proto),
+            ValueKind::Symbol(_) => Some(self.context.symbol_proto),
+            ValueKind::BigInt(_) => Some(self.context.bigint_proto),
             ValueKind::Object(o) => Some(o),
             ValueKind::Undefined | ValueKind::Null | ValueKind::Uninit => None,
         }
     }
 
-    fn nullish_error(&self, target: Value<'gc>, verb: &str, key: &str) -> Error {
+    fn nullish_error(&self, target: Value<'scope>, verb: &str, key: &str) -> Error {
         let what = if target == Value::Undefined { "undefined" } else { "null" };
         self.throw(ErrorKind::Type, &format!("Cannot {verb} properties of {what} (reading '{key}')"))
     }
 
-    pub fn get_key(&mut self, holder: Value<'gc>, key: Key<'_, 'gc>, receiver: Value<'gc>) -> Result<Value<'gc>, Error> {
+    pub fn get_key(&mut self, holder: Value<'scope>, key: Key<'_, 'scope>, receiver: Value<'scope>) -> Result<Value<'scope>, Error> {
         if holder.is_nullish() {
             let k = self.key_text(key);
             return Err(self.nullish_error(holder, "read", &k));
@@ -694,7 +698,7 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    pub fn object_get(&mut self, o: JsObject<'gc>, key: Key<'_, 'gc>, receiver: Value<'gc>) -> Result<Value<'gc>, Error> {
+    pub fn object_get(&mut self, o: JsObject<'scope>, key: Key<'_, 'scope>, receiver: Value<'scope>) -> Result<Value<'scope>, Error> {
         let mut cur = o;
         loop {
             let fast = cur.has_ordinary_properties().then(|| (cur.own_slot(self.mc, key), cur.proto()));
@@ -740,23 +744,23 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    pub fn get(&mut self, holder: Value<'gc>, key: &str, receiver: Value<'gc>) -> Result<Value<'gc>, Error> {
+    pub fn get(&mut self, holder: Value<'scope>, key: &str, receiver: Value<'scope>) -> Result<Value<'scope>, Error> {
         self.get_key(holder, Key::Str(key), receiver)
     }
 
-    pub fn get_named(&mut self, target: Value<'gc>, key: &str) -> Result<Value<'gc>, Error> {
+    pub fn get_named(&mut self, target: Value<'scope>, key: &str) -> Result<Value<'scope>, Error> {
         self.get_key(target, Key::Str(key), target)
     }
 
-    pub fn property_key(&mut self, key: Value<'gc>) -> Result<JsString<'gc>, Error> {
+    pub fn property_key(&mut self, key: Value<'scope>) -> Result<JsString<'scope>, Error> {
         self.to_string(key)
     }
 
-    pub fn get_symbol(&mut self, holder: Value<'gc>, key: JsSymbol<'gc>, receiver: Value<'gc>) -> Result<Value<'gc>, Error> {
+    pub fn get_symbol(&mut self, holder: Value<'scope>, key: JsSymbol<'scope>, receiver: Value<'scope>) -> Result<Value<'scope>, Error> {
         self.get_key(holder, Key::Sym(key), receiver)
     }
 
-    pub fn set_key(&mut self, target: Value<'gc>, key: Key<'_, 'gc>, value: Value<'gc>, receiver: Value<'gc>) -> Result<bool, Error> {
+    pub fn set_key(&mut self, target: Value<'scope>, key: Key<'_, 'scope>, value: Value<'scope>, receiver: Value<'scope>) -> Result<bool, Error> {
         if target.is_nullish() {
             let k = self.key_text(key);
             return Err(self.nullish_error(target, "set", &k));
@@ -767,7 +771,7 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    pub fn object_set(&mut self, o: JsObject<'gc>, key: Key<'_, 'gc>, value: Value<'gc>, receiver: Value<'gc>) -> Result<bool, Error> {
+    pub fn object_set(&mut self, o: JsObject<'scope>, key: Key<'_, 'scope>, value: Value<'scope>, receiver: Value<'scope>) -> Result<bool, Error> {
         let mut cur = o;
         let found = loop {
             let fast = cur.has_ordinary_properties().then(|| (cur.own_slot(self.mc, key), cur.proto()));
@@ -788,7 +792,7 @@ impl<'gc> Agent<'gc, '_> {
                 return Ok(false);
             }
             if let Some(i) = Self::typed_numeric(cur, key) {
-                if matches!(receiver.kind(), ValueKind::Object(r) if Gc::ptr_eq(r, cur)) {
+                if matches!(receiver.kind(), ValueKind::Object(r) if ScopeLocal::ptr_eq(r, cur)) {
                     self.typed_set(cur, i, value)?;
                     return Ok(true);
                 }
@@ -823,11 +827,11 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    pub fn try_set_symbol(&mut self, target: Value<'gc>, key: JsSymbol<'gc>, value: Value<'gc>) -> Result<bool, Error> {
+    pub fn try_set_symbol(&mut self, target: Value<'scope>, key: JsSymbol<'scope>, value: Value<'scope>) -> Result<bool, Error> {
         self.set_key(target, Key::Sym(key), value, target)
     }
 
-    fn set_failure(&self, target: Value<'gc>, key: &str) -> Error {
+    fn set_failure(&self, target: Value<'scope>, key: &str) -> Error {
         if let Some(o) = target.as_object() {
             let d = o.borrow();
             if d.non_extensible() && d.own_slot(self.mc, Key::Str(key)).is_none() {
@@ -841,7 +845,7 @@ impl<'gc> Agent<'gc, '_> {
         self.throw(ErrorKind::Type, &format!("Cannot assign to read only property '{key}'"))
     }
 
-    pub fn has_keyed(&mut self, target: Value<'gc>, key: Value<'gc>) -> Result<bool, Error> {
+    pub fn has_keyed(&mut self, target: Value<'scope>, key: Value<'scope>) -> Result<bool, Error> {
         if let Some(k) = Self::private_key(key) {
             return self.private_has(target, k);
         }
@@ -859,7 +863,7 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    pub fn has_key(&mut self, o: JsObject<'gc>, key: Key<'_, 'gc>) -> Result<bool, Error> {
+    pub fn has_key(&mut self, o: JsObject<'scope>, key: Key<'_, 'scope>) -> Result<bool, Error> {
         let mut cur = o;
         loop {
             if let Some(parts) = self.proxy_parts(cur) {
@@ -882,7 +886,7 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    pub fn delete_keyed(&mut self, target: Value<'gc>, key: Value<'gc>) -> Result<bool, Error> {
+    pub fn delete_keyed(&mut self, target: Value<'scope>, key: Value<'scope>) -> Result<bool, Error> {
         if target.is_nullish() {
             let k = self.to_string(key)?;
             return Err(self.nullish_error(target, "delete", &k));
@@ -893,7 +897,7 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    pub fn delete_key(&mut self, target: Value<'gc>, key: Key<'_, 'gc>) -> Result<bool, Error> {
+    pub fn delete_key(&mut self, target: Value<'scope>, key: Key<'_, 'scope>) -> Result<bool, Error> {
         if target.is_nullish() {
             let k = self.key_text(key);
             return Err(self.nullish_error(target, "delete", &k));
@@ -902,7 +906,7 @@ impl<'gc> Agent<'gc, '_> {
         self.delete_property(o, key)
     }
 
-    pub fn define_keyed(&mut self, o: JsObject<'gc>, key: Value<'gc>, prop: Property<'gc>) -> Result<(), Error> {
+    pub fn define_keyed(&mut self, o: JsObject<'scope>, key: Value<'scope>, prop: Property<'scope>) -> Result<(), Error> {
         if let Some(k) = Self::private_key(key) {
             return self.private_define(o.into(), k, prop);
         }
@@ -912,7 +916,7 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    pub fn define_accessor_keyed(&mut self, o: JsObject<'gc>, key: Value<'gc>, f: JsObject<'gc>, setter: bool, enumerable: bool) -> Result<(), Error> {
+    pub fn define_accessor_keyed(&mut self, o: JsObject<'scope>, key: Value<'scope>, f: JsObject<'scope>, setter: bool, enumerable: bool) -> Result<(), Error> {
         match self.to_property_key(key)? {
             PropertyKey::Symbol(k) => self.define_accessor_key(o, Key::Sym(k), f, setter, enumerable),
             PropertyKey::String(k) => self.define_accessor_key(o, Key::Str(&k), f, setter, enumerable),
@@ -920,7 +924,7 @@ impl<'gc> Agent<'gc, '_> {
         Ok(())
     }
 
-    pub fn get_keyed(&mut self, target: Value<'gc>, key: Value<'gc>) -> Result<Value<'gc>, Error> {
+    pub fn get_keyed(&mut self, target: Value<'scope>, key: Value<'scope>) -> Result<Value<'scope>, Error> {
         if let ValueKind::Symbol(k) = key.kind() {
             if k.private {
                 return self.private_get(target, k);
@@ -954,7 +958,7 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    pub fn try_set_named(&mut self, target: Value<'gc>, key: &str, value: Value<'gc>) -> Result<bool, Error> {
+    pub fn try_set_named(&mut self, target: Value<'scope>, key: &str, value: Value<'scope>) -> Result<bool, Error> {
         if let (ValueKind::Object(o), Some(i)) = (target.kind(), index_of_str(key))
             && o.borrow_mut(self.mc).write_index(i, value)
         {
@@ -963,11 +967,11 @@ impl<'gc> Agent<'gc, '_> {
         self.set_key(target, Key::Str(key), value, target)
     }
 
-    pub fn set_named(&mut self, target: Value<'gc>, key: &str, value: Value<'gc>) -> Result<(), Error> {
+    pub fn set_named(&mut self, target: Value<'scope>, key: &str, value: Value<'scope>) -> Result<(), Error> {
         if self.try_set_named(target, key, value)? { Ok(()) } else { Err(self.set_failure(target, key)) }
     }
 
-    pub fn try_set_keyed(&mut self, target: Value<'gc>, key: Value<'gc>, value: Value<'gc>) -> Result<bool, Error> {
+    pub fn try_set_keyed(&mut self, target: Value<'scope>, key: Value<'scope>, value: Value<'scope>) -> Result<bool, Error> {
         if let ValueKind::Symbol(k) = key.kind() {
             return self.try_set_symbol(target, k, value);
         }
@@ -993,7 +997,7 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    pub fn set_keyed(&mut self, target: Value<'gc>, key: Value<'gc>, value: Value<'gc>) -> Result<(), Error> {
+    pub fn set_keyed(&mut self, target: Value<'scope>, key: Value<'scope>, value: Value<'scope>) -> Result<(), Error> {
         if self.try_set_keyed(target, key, value)? {
             Ok(())
         } else {
@@ -1005,22 +1009,22 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    pub fn put_named(&mut self, target: Value<'gc>, key: &str, value: Value<'gc>, strict: bool) -> Result<(), Error> {
+    pub fn put_named(&mut self, target: Value<'scope>, key: &str, value: Value<'scope>, strict: bool) -> Result<(), Error> {
         if strict { self.set_named(target, key, value) } else { self.try_set_named(target, key, value).map(drop) }
     }
 
-    pub fn put_keyed(&mut self, target: Value<'gc>, key: Value<'gc>, value: Value<'gc>, strict: bool) -> Result<(), Error> {
+    pub fn put_keyed(&mut self, target: Value<'scope>, key: Value<'scope>, value: Value<'scope>, strict: bool) -> Result<(), Error> {
         if let Some(k) = Self::private_key(key) {
             return self.private_set(target, k, value);
         }
         if strict { self.set_keyed(target, key, value) } else { self.try_set_keyed(target, key, value).map(drop) }
     }
 
-    pub fn define(&mut self, o: JsObject<'gc>, key: &str, prop: Property<'gc>) -> Result<(), Error> {
+    pub fn define(&mut self, o: JsObject<'scope>, key: &str, prop: Property<'scope>) -> Result<(), Error> {
         self.define_key(o, Key::Str(key), prop)
     }
 
-    pub fn define_key(&mut self, o: JsObject<'gc>, key: Key<'_, 'gc>, prop: Property<'gc>) -> Result<(), Error> {
+    pub fn define_key(&mut self, o: JsObject<'scope>, key: Key<'_, 'scope>, prop: Property<'scope>) -> Result<(), Error> {
         if self.define_own_property(o, key, prop.into())? {
             Ok(())
         } else {
@@ -1029,7 +1033,7 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    fn define_accessor_key(&mut self, o: JsObject<'gc>, key: Key<'_, 'gc>, f: JsObject<'gc>, setter: bool, enumerable: bool) {
+    fn define_accessor_key(&mut self, o: JsObject<'scope>, key: Key<'_, 'scope>, f: JsObject<'scope>, setter: bool, enumerable: bool) {
         let (mut get, mut set) = match o.borrow().own_slot(self.mc, key).map(|p| p.slot) {
             Some(Slot::Accessor { get, set }) => (get, set),
             _ => (None, None),
@@ -1038,7 +1042,7 @@ impl<'gc> Agent<'gc, '_> {
         o.borrow_mut(self.mc).store(key, Property { slot: Slot::Accessor { get, set }, enumerable, writable: true, configurable: true });
     }
 
-    pub fn has_property(&mut self, target: Value<'gc>, key: &str) -> Result<bool, Error> {
+    pub fn has_property(&mut self, target: Value<'scope>, key: &str) -> Result<bool, Error> {
         let Some(o) = target.as_object() else {
             let what = self.to_string(target)?;
             return Err(self.throw(ErrorKind::Type, &format!("Cannot use 'in' operator to search for '{key}' in {}", &**what)));
@@ -1046,19 +1050,19 @@ impl<'gc> Agent<'gc, '_> {
         self.has_key(o, Key::Str(key))
     }
 
-    pub fn delete(&mut self, target: Value<'gc>, key: &str) -> Result<bool, Error> {
+    pub fn delete(&mut self, target: Value<'scope>, key: &str) -> Result<bool, Error> {
         self.delete_key(target, Key::Str(key))
     }
 
-    pub fn can_be_held_weakly(&self, v: Value<'gc>) -> bool {
+    pub fn can_be_held_weakly(&self, v: Value<'scope>) -> bool {
         match v.kind() {
             ValueKind::Object(_) => true,
-            ValueKind::Symbol(s) => !self.realm.symbol_registry.get().iter().any(|(_, x)| Gc::ptr_eq(*x, s)),
+            ValueKind::Symbol(s) => !self.context.symbol_registry.get().iter().any(|(_, x)| ScopeLocal::ptr_eq(*x, s)),
             _ => false,
         }
     }
 
-    pub fn describe(&self, v: Value<'gc>) -> String {
+    pub fn describe(&self, v: Value<'scope>) -> String {
         match v.kind() {
             ValueKind::Undefined | ValueKind::Uninit => String::from("undefined"),
             ValueKind::Null => String::from("null"),
@@ -1083,12 +1087,12 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    pub fn instance_of(&mut self, v: Value<'gc>, f: Value<'gc>) -> Result<bool, Error> {
+    pub fn instance_of(&mut self, v: Value<'scope>, f: Value<'scope>) -> Result<bool, Error> {
         if f.as_object().is_none() {
             let what = self.describe(f);
             return Err(self.throw(ErrorKind::Type, &format!("Right-hand side of 'instanceof' is not an object: {what}")));
         }
-        let h = self.get_symbol(f, self.realm.symbols.has_instance, f)?;
+        let h = self.get_symbol(f, self.context.symbols.has_instance, f)?;
         if !h.is_nullish() {
             let r = self.call(h, f, &[v])?;
             return Ok(self.to_boolean(r));
@@ -1099,7 +1103,7 @@ impl<'gc> Agent<'gc, '_> {
         self.ordinary_has_instance(f, v)
     }
 
-    pub fn ordinary_has_instance(&mut self, f: Value<'gc>, v: Value<'gc>) -> Result<bool, Error> {
+    pub fn ordinary_has_instance(&mut self, f: Value<'scope>, v: Value<'scope>) -> Result<bool, Error> {
         if !self.is_callable(f) {
             return Ok(false);
         }
@@ -1115,7 +1119,7 @@ impl<'gc> Agent<'gc, '_> {
         };
         let mut cur = self.get_prototype_of(o)?;
         while let Some(c) = cur {
-            if Gc::ptr_eq(c, proto) {
+            if ScopeLocal::ptr_eq(c, proto) {
                 return Ok(true);
             }
             cur = self.get_prototype_of(c)?;
@@ -1123,7 +1127,7 @@ impl<'gc> Agent<'gc, '_> {
         Ok(false)
     }
 
-    pub fn to_integer_or_infinity(&mut self, v: Value<'gc>) -> Result<f64, Error> {
+    pub fn to_integer_or_infinity(&mut self, v: Value<'scope>) -> Result<f64, Error> {
         let x = self.to_number(v)?;
         const I64_SAFE: f64 = 9_223_372_036_854_775_808.0;
         #[expect(clippy::cast_possible_truncation, clippy::cast_precision_loss, reason = "magnitude below 2^63; dropping the fraction is intended")]
@@ -1136,12 +1140,12 @@ impl<'gc> Agent<'gc, '_> {
         })
     }
 
-    pub fn to_length(&mut self, v: Value<'gc>) -> Result<f64, Error> {
+    pub fn to_length(&mut self, v: Value<'scope>) -> Result<f64, Error> {
         let n = self.to_integer_or_infinity(v)?;
         Ok(n.clamp(0.0, MAX_SAFE_INTEGER))
     }
 
-    pub fn length_of_array_like(&mut self, o: Value<'gc>) -> Result<f64, Error> {
+    pub fn length_of_array_like(&mut self, o: Value<'scope>) -> Result<f64, Error> {
         if let Some(x) = o.as_object()
             && let Some(n) = x.borrow().array_length()
         {
@@ -1155,7 +1159,7 @@ impl<'gc> Agent<'gc, '_> {
         String::from(&*number_text(i))
     }
 
-    pub fn get_index(&mut self, o: Value<'gc>, i: f64) -> Result<Value<'gc>, Error> {
+    pub fn get_index(&mut self, o: Value<'scope>, i: f64) -> Result<Value<'scope>, Error> {
         if let Some(x) = o.as_object()
             && matches!(x.borrow().kind, ObjectKind::TypedArray(..))
         {
@@ -1171,7 +1175,7 @@ impl<'gc> Agent<'gc, '_> {
         self.get_named(o, &Self::index_key(i))
     }
 
-    pub fn set_index(&mut self, o: Value<'gc>, i: f64, v: Value<'gc>) -> Result<(), Error> {
+    pub fn set_index(&mut self, o: Value<'scope>, i: f64, v: Value<'scope>) -> Result<(), Error> {
         if let (ValueKind::Object(x), Some(n)) = (o.kind(), index_of_number(i))
             && x.borrow_mut(self.mc).write_index(n, v)
         {
@@ -1180,7 +1184,7 @@ impl<'gc> Agent<'gc, '_> {
         self.set_named(o, &Self::index_key(i), v)
     }
 
-    pub fn has_index(&mut self, o: JsObject<'gc>, i: f64) -> Result<bool, Error> {
+    pub fn has_index(&mut self, o: JsObject<'scope>, i: f64) -> Result<bool, Error> {
         if o.is_array()
             && let Some(n) = index_of_number(i)
             && (n as usize) < o.elements().len()
@@ -1190,7 +1194,7 @@ impl<'gc> Agent<'gc, '_> {
         self.has_key(o, Key::Str(&Self::index_key(i)))
     }
 
-    pub fn present_index(&mut self, o: JsObject<'gc>, i: f64) -> Result<Option<Value<'gc>>, Error> {
+    pub fn present_index(&mut self, o: JsObject<'scope>, i: f64) -> Result<Option<Value<'scope>>, Error> {
         if o.is_array()
             && let Some(n) = index_of_number(i)
             && let Some(v) = o.elements().get(n as usize)
@@ -1200,7 +1204,7 @@ impl<'gc> Agent<'gc, '_> {
         if self.has_index(o, i)? { self.get_index(o.into(), i).map(Some) } else { Ok(None) }
     }
 
-    pub fn delete_index(&mut self, o: JsObject<'gc>, i: f64) -> Result<(), Error> {
+    pub fn delete_index(&mut self, o: JsObject<'scope>, i: f64) -> Result<(), Error> {
         let k = Self::index_key(i);
         if self.delete_property(o, Key::Str(&k))? {
             Ok(())
@@ -1209,7 +1213,7 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    pub fn create_index(&mut self, o: JsObject<'gc>, i: f64, v: Value<'gc>) -> Result<(), Error> {
+    pub fn create_index(&mut self, o: JsObject<'scope>, i: f64, v: Value<'scope>) -> Result<(), Error> {
         if let Some(n) = index_of_number(i) {
             let append = !o.non_extensible() && !o.length_readonly() && (o.sparse_length() <= n || !o.digit_keys());
             if o.is_array() {
@@ -1227,7 +1231,7 @@ impl<'gc> Agent<'gc, '_> {
         self.create_data_property_or_throw(o, Key::Str(&Self::index_key(i)), v)
     }
 
-    pub fn is_array(&mut self, v: Value<'gc>) -> Result<bool, Error> {
+    pub fn is_array(&mut self, v: Value<'scope>) -> Result<bool, Error> {
         let Some(o) = v.as_object() else { return Ok(false) };
         if let Some(parts) = self.proxy_parts(o) {
             let (t, _) = parts?;
@@ -1236,7 +1240,7 @@ impl<'gc> Agent<'gc, '_> {
         Ok(o.is_array())
     }
 
-    pub fn list_from_array_like(&mut self, v: Value<'gc>) -> Result<Vec<Value<'gc>>, Error> {
+    pub fn list_from_array_like(&mut self, v: Value<'scope>) -> Result<Vec<Value<'scope>>, Error> {
         if v.as_object().is_none() {
             return Err(self.throw(ErrorKind::Type, "CreateListFromArrayLike called on non-object"));
         }
@@ -1250,14 +1254,14 @@ impl<'gc> Agent<'gc, '_> {
         Ok(out)
     }
 
-    pub fn get_iterator(&mut self, v: Value<'gc>) -> Result<IterRecord<'gc>, Error> {
+    pub fn get_iterator(&mut self, v: Value<'scope>) -> Result<IterRecord<'scope>, Error> {
         let iterator = self.iterator_object(v)?;
         let next = self.get_named(iterator, "next")?;
         Ok(IterRecord { iterator, next })
     }
 
-    pub fn iterator_object(&mut self, v: Value<'gc>) -> Result<Value<'gc>, Error> {
-        let method = if v.is_nullish() { Value::Undefined } else { self.get_symbol(v, self.realm.symbols.iterator, v)? };
+    pub fn iterator_object(&mut self, v: Value<'scope>) -> Result<Value<'scope>, Error> {
+        let method = if v.is_nullish() { Value::Undefined } else { self.get_symbol(v, self.context.symbols.iterator, v)? };
         if !self.is_callable(method) {
             let what = match v.kind() {
                 ValueKind::Symbol(s) => self.symbol_descriptive(s),
@@ -1272,7 +1276,7 @@ impl<'gc> Agent<'gc, '_> {
         Ok(iterator)
     }
 
-    pub fn array_iter_step(&mut self, o: JsObject<'gc>) -> Result<Option<Value<'gc>>, Error> {
+    pub fn array_iter_step(&mut self, o: JsObject<'scope>) -> Result<Option<Value<'scope>>, Error> {
         let ObjectKind::Iterator(IteratorState::Array { target, index, kind }) = o.borrow().kind else {
             return Err(self.throw(ErrorKind::Type, "next method called on an incompatible receiver"));
         };
@@ -1311,7 +1315,7 @@ impl<'gc> Agent<'gc, '_> {
         }))
     }
 
-    pub fn string_iter_step(&mut self, o: JsObject<'gc>) -> Result<Option<Value<'gc>>, Error> {
+    pub fn string_iter_step(&mut self, o: JsObject<'scope>) -> Result<Option<Value<'scope>>, Error> {
         let ObjectKind::Iterator(IteratorState::String { s, pos }) = o.borrow().kind else {
             return Err(self.throw(ErrorKind::Type, "next method called on an incompatible receiver"));
         };
@@ -1331,16 +1335,16 @@ impl<'gc> Agent<'gc, '_> {
         Ok(Some(if c.is_ascii() { self.unit_string(u16::from(c as u8)) } else { self.string(c.encode_utf8(&mut [0; 4])) }.into()))
     }
 
-    pub fn iterator_step(&mut self, it: IterRecord<'gc>) -> Result<Option<Value<'gc>>, Error> {
+    pub fn iterator_step(&mut self, it: IterRecord<'scope>) -> Result<Option<Value<'scope>>, Error> {
         if let (ValueKind::Object(n), ValueKind::Object(o)) = (it.next.kind(), it.iterator.kind()) {
-            let [array, string] = *self.realm.builtin_nexts.get();
+            let [array, string] = *self.context.builtin_nexts.get();
             let (is_array, is_string) = match &o.borrow().kind {
                 ObjectKind::Iterator(IteratorState::Array { .. }) => (true, false),
                 ObjectKind::Iterator(IteratorState::String { .. }) => (false, true),
                 _ => (false, false),
             };
             let builtin = if is_array { array } else if is_string { string } else { None };
-            if builtin.is_some_and(|k| Gc::ptr_eq(k, n)) {
+            if builtin.is_some_and(|k| ScopeLocal::ptr_eq(k, n)) {
                 return if is_array { self.array_iter_step(o) } else { self.string_iter_step(o) };
             }
         }
@@ -1353,7 +1357,7 @@ impl<'gc> Agent<'gc, '_> {
         if self.to_boolean(done) { Ok(None) } else { Ok(Some(self.get_named(r, "value")?)) }
     }
 
-    pub fn iterator_close(&mut self, iterator: Value<'gc>) -> Result<(), Error> {
+    pub fn iterator_close(&mut self, iterator: Value<'scope>) -> Result<(), Error> {
         let ret = self.get_named(iterator, "return")?;
         if ret.is_nullish() {
             return Ok(());
@@ -1365,7 +1369,20 @@ impl<'gc> Agent<'gc, '_> {
         Ok(())
     }
 
-    pub fn iter_result(&self, value: Value<'gc>, done: bool) -> JsObject<'gc> {
+    pub fn iterator_close_abrupt(&mut self, iterator: Value<'scope>, e: Error) -> Error {
+        if matches!(e, Error::Terminated) {
+            return e;
+        }
+        let saved = self.mc.take_exception();
+        let _ = self.iterator_close(iterator);
+        self.mc.take_exception();
+        if let Some(v) = saved {
+            self.mc.raise(v);
+        }
+        e
+    }
+
+    pub fn iter_result(&self, value: Value<'scope>, done: bool) -> JsObject<'scope> {
         let o = self.object();
         let d = o.borrow_mut(self.mc);
         d.set("value", value);
@@ -1374,19 +1391,19 @@ impl<'gc> Agent<'gc, '_> {
         o
     }
 
-    pub fn builtin_iterator(&self, state: IteratorState<'gc>) -> JsObject<'gc> {
+    pub fn builtin_iterator(&self, state: IteratorState<'scope>) -> JsObject<'scope> {
         let proto = match state {
-            IteratorState::Array { .. } => self.realm.array_iterator_proto,
-            IteratorState::String { .. } => self.realm.string_iterator_proto,
+            IteratorState::Array { .. } => self.context.array_iterator_proto,
+            IteratorState::String { .. } => self.context.string_iterator_proto,
         };
         ObjectData { kind: ObjectKind::Iterator(state), proto: Some(proto), ..ObjectData::default() }.alloc(self.mc)
     }
 
-    pub fn array_iterator(&self, target: Value<'gc>, kind: IterKind) -> JsObject<'gc> {
+    pub fn array_iterator(&self, target: Value<'scope>, kind: IterKind) -> JsObject<'scope> {
         self.builtin_iterator(IteratorState::Array { target: Some(target), index: 0, kind })
     }
 
-    pub fn to_list(&mut self, v: Value<'gc>) -> Result<Vec<Value<'gc>>, Error> {
+    pub fn to_list(&mut self, v: Value<'scope>) -> Result<Vec<Value<'scope>>, Error> {
         let it = self.get_iterator(v)?;
         let mut out = Vec::new();
         while let Some(x) = self.iterator_step(it)? {
@@ -1395,7 +1412,7 @@ impl<'gc> Agent<'gc, '_> {
         Ok(out)
     }
 
-    pub fn copy_data(&mut self, target: JsObject<'gc>, src: Value<'gc>, exclude: &[JsString<'gc>]) -> Result<(), Error> {
+    pub fn copy_data(&mut self, target: JsObject<'scope>, src: Value<'scope>, exclude: &[JsString<'scope>]) -> Result<(), Error> {
         if src.is_nullish() {
             return Ok(());
         }
@@ -1415,8 +1432,8 @@ impl<'gc> Agent<'gc, '_> {
         Ok(())
     }
 
-    pub fn for_in_keys(&mut self, v: Value<'gc>) -> Result<Vec<Value<'gc>>, Error> {
-        let mut seen: Vec<JsString<'gc>> = Vec::new();
+    pub fn for_in_keys(&mut self, v: Value<'scope>) -> Result<Vec<Value<'scope>>, Error> {
+        let mut seen: Vec<JsString<'scope>> = Vec::new();
         let mut out = Vec::new();
         if v.is_nullish() {
             return Ok(out);
@@ -1438,10 +1455,10 @@ impl<'gc> Agent<'gc, '_> {
         Ok(out)
     }
 
-    pub fn create_this(&mut self, new_target: Value<'gc>) -> Result<JsObject<'gc>, Error> {
+    pub fn create_this(&mut self, new_target: Value<'scope>) -> Result<JsObject<'scope>, Error> {
         let proto = match (self.get_named(new_target, "prototype")?).kind() {
             ValueKind::Object(p) => p,
-            _ => self.realm.object_proto,
+            _ => self.context.object_proto,
         };
         Ok(ObjectData { proto: Some(proto), ..ObjectData::default() }.alloc(self.mc))
     }

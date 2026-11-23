@@ -9,7 +9,7 @@ mod module;
 pub use buffer::{ArrayBuffer, BufferRef, Shared, Transfer};
 pub use class::{Class, ClassHandle, Member, Object};
 pub use convert::{FromJs, IntoJs, Rest, This};
-pub use handles::{Bytes, Function, Persistent, Promise};
+pub use handles::{Bytes, Function, Promise};
 #[cfg(feature = "json")]
 pub use handles::Json;
 pub use module::{Install, Module, NATIVE};

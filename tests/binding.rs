@@ -2,9 +2,10 @@
 use j8::{Class, Object, Rest};
 use j8builtins::Builtins;
 use j8executor::Executor;
-use j8framework::{Agent, CreateParams, Error, Isolate, Source, Value};
+use j8framework::{Scope, CreateParams, Error, Isolate, Source, Value};
 use j8platform::DefaultPlatform;
 
+#[derive(j8::Trace)]
 struct Counter {
     n: f64,
 }
@@ -35,7 +36,7 @@ impl Counter {
         items.0.len()
     }
 
-    fn describe<'gc>(&self, a: &mut Agent<'gc, '_>, label: String) -> Result<Value<'gc>, Error> {
+    fn describe<'scope>(&self, a: &mut Scope<'scope, '_>, label: String) -> Result<Value<'scope>, Error> {
         Ok(a.string(&format!("{label}={}", self.n)).into())
     }
 }
@@ -63,21 +64,17 @@ fn greet(name: &str) -> String {
 fn class_binding() {
     let platform = DefaultPlatform::default();
     let mut isolate = Isolate::new(&platform, CreateParams::default());
-    let mut executor = Executor::default();
-    let cx = isolate.enter(|scope| scope.persist(scope.context(&Builtins)));
-    isolate.enter(|scope| {
-        let realm = scope.context_of(&cx);
-        let mut a = scope.agent(realm, &executor);
-        let global = a.realm.global;
-        Counter::install(&mut a, global);
-        Calc::install(&mut a, global);
-        greet::install(&mut a, global);
+    let executor = Executor::default();
+    let cx = isolate.create_context(&Builtins);
+    isolate.enter(&cx, &executor, |a| {
+        let global = a.context.global;
+        Counter::install(a, global);
+        Calc::install(a, global);
+        greet::install(a, global);
     });
     let src = "const c = new Counter(2); c.inc(3); c.value = c.value * 2; [c.value, c.describe('n'), Counter.sum(1, 2, 3), c instanceof Counter, String(Object.prototype.toString.call(c)), calc.twice(4), calc.answer, greet('j8'), greet.length].join()";
-    let r = isolate.run(&mut executor, &cx, &Source { text: src, file: "t.js" });
-    let text = isolate.enter(|scope| {
-        let realm = scope.context_of(&cx);
-        let mut a = scope.agent(realm, &executor);
+    let r = executor.eval(&mut isolate, &cx, &Source { text: src, file: "t.js" });
+    let text = isolate.enter(&cx, &executor, |a| {
         let v = a.local(&r.expect("the script runs"));
         String::from(&**a.to_string(v).expect("a string"))
     });

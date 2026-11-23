@@ -1,10 +1,11 @@
 use std::marker::PhantomData;
 use std::time::Duration;
 
-use j8framework::{Agent, Error, ErrorKind, EventLoop, EventLoopSet, Global, Platform, Pool, ScriptKind, Source, Task, Value};
+use j8executor::{EventLoop, EventLoopSet, Executor};
+use j8framework::{Scope, Error, ErrorKind, Platform, Pool, ScopeGlobal, ScriptKind, Source, Task, Value, ValueBrand};
 
 pub trait Host {
-    fn install(a: &mut Agent<'_, '_>);
+    fn install(a: &mut Scope<'_, '_>);
 
     fn module_source(specifier: &str) -> Option<String>;
 
@@ -58,11 +59,11 @@ impl<H: Host, P: Platform> Platform for HostPlatform<H, P> {
 }
 
 pub struct Runtime<'p> {
-    js: EventLoop<'p, j8executor::Executor>,
+    js: EventLoop<'p>,
 }
 
 impl<'p> Runtime<'p> {
-    pub fn on<H: Host>(set: &EventLoopSet<'_, 'p, j8executor::Executor>, executor: j8executor::Executor) -> Result<Self, Error> {
+    pub fn on<H: Host>(set: &EventLoopSet<'_, 'p>, executor: Executor<'p>) -> Result<Self, Error> {
         let rt = Self { js: set.spawn(executor, &j8builtins::Builtins) };
         rt.enter(|a| H::install(a));
         let mut preludes = Vec::new();
@@ -73,29 +74,40 @@ impl<'p> Runtime<'p> {
         Ok(rt)
     }
 
-    pub fn eval(&self, text: &str, file: &str) -> Result<Global, Error> {
+    pub fn eval(&self, text: &str, file: &str) -> Result<ScopeGlobal<'p, ValueBrand>, Error> {
         self.js.eval(&Source { text, file }, ScriptKind::Classic)
     }
 
-    pub fn eval_module(&self, text: &str, file: &str) -> Result<Global, Error> {
+    pub fn eval_module(&self, text: &str, file: &str) -> Result<ScopeGlobal<'p, ValueBrand>, Error> {
         self.js.eval(&Source { text, file }, ScriptKind::Module)
     }
 
-    pub fn enter<R: Send>(&self, f: impl for<'gc> FnOnce(&mut Agent<'gc, '_>) -> R + Send) -> R {
+    pub fn enter<R: Send>(&self, f: impl for<'scope> FnOnce(&mut Scope<'scope, '_>) -> R + Send) -> R {
         self.js.enter(f)
     }
 
-    pub fn text(&self, g: &Global) -> String {
+    pub fn text(&self, g: &ScopeGlobal<'p, ValueBrand>) -> String {
         self.enter(|a| {
             let v = a.local(g);
             a.to_string(v).map_or_else(|_| String::from("<ToString threw>"), |s| String::from(&**s))
         })
     }
 
+    pub fn exception_text(&self) -> String {
+        self.enter(|a| {
+            let v = a.take_exception();
+            let text = a.to_string(v).map(|s| String::from(&**s));
+            text.unwrap_or_else(|_| {
+                let _ = a.take_exception();
+                String::from("<ToString threw>")
+            })
+        })
+    }
+
     pub fn set<V: for<'g> crate::IntoJs<'g> + Send>(&self, path: &str, value: V) -> Result<(), Error> {
         self.enter(|a| {
             let (holder, key) = path.rsplit_once('.').unwrap_or(("", path));
-            let mut target: Value<'_> = a.realm.global.into();
+            let mut target: Value<'_> = a.context.global.into();
             for part in holder.split('.').filter(|p| !p.is_empty()) {
                 target = a.get_named(target, part)?;
             }
@@ -125,9 +137,9 @@ macro_rules! runtime {
         $vis struct $name;
 
         impl $crate::Host for $name {
-            fn install(a: &mut $crate::frame::Agent<'_, '_>) {
+            fn install(a: &mut $crate::frame::Scope<'_, '_>) {
                 $(<$parent as $crate::Host>::install(a);)?
-                let global = a.realm.global;
+                let global = a.context.global;
                 $($(<$global as $crate::Install>::install_into(a, global);)*)?
                 $($($crate::Glue::register_module::<$module>(a);)*)?
                 $(
@@ -164,7 +176,7 @@ macro_rules! runtime {
                 $crate::HostPlatform::new(inner)
             }
 
-            pub fn runtime<'p>(set: &$crate::EventLoopSet<'_, 'p, $crate::executor::Executor>, executor: $crate::executor::Executor) -> ::core::result::Result<$crate::Runtime<'p>, $crate::frame::Error> {
+            pub fn runtime<'p>(set: &$crate::EventLoopSet<'_, 'p>, executor: $crate::executor::Executor<'p>) -> ::core::result::Result<$crate::Runtime<'p>, $crate::frame::Error> {
                 $crate::Runtime::on::<$name>(set, executor)
             }
         }

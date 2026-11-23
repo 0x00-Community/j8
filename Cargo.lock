@@ -353,6 +353,7 @@ dependencies = [
  "j8framework",
  "j8lockfree",
  "j8platform",
+ "j8taskqueue",
  "ryu-js",
 ]
 
@@ -801,9 +802,9 @@ dependencies = [
 
 [[package]]
 name = "paragc"
-version = "0.6.3"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "299c64c95d635a337ed30ff1bd34be8c05df3986b23181a8e847656ae667fe31"
+checksum = "e9285e645115a233d6e842eb1d9a5b88c9fdb551b1aae8f6dfb241c58dd8d3c1"
 dependencies = [
  "crossbeam-deque",
  "crossbeam-utils",
@@ -813,9 +814,9 @@ dependencies = [
 
 [[package]]
 name = "paragc-macros"
-version = "0.6.3"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ddc546bfc7bccbb957c41ac17be1e86f87fd691713a8eaf802f1b3813a25b145"
+checksum = "4713a8192fcd7aed6faf56df6fc5f6069f9a77d31e2b473a5857ca615898fd7b"
 dependencies = [
  "proc-macro2",
  "quote",

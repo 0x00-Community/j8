@@ -1,4 +1,4 @@
-use j8::frame::{Agent, JsString};
+use j8::frame::{Scope, JsString};
 use j8::{Bytes, BufferRef};
 
 pub struct Raw;
@@ -152,7 +152,7 @@ impl From<Ordering> for i32 {
 
 #[j8::object("raw")]
 impl Raw {
-    fn decode<'gc>(a: &mut Agent<'gc, '_>, buf: BufferRef<'gc>, start: usize, end: usize, encoding: u32) -> Option<String> {
+    fn decode<'scope>(a: &mut Scope<'scope, '_>, buf: BufferRef<'scope>, start: usize, end: usize, encoding: u32) -> Option<String> {
         let encoding = Encoding::try_from(encoding).ok()?;
         buf.with(a, |b| b.get(start..end).and_then(|bytes| Data { bytes }.decode(encoding))).flatten()
     }
@@ -163,7 +163,7 @@ impl Raw {
         Some(Bytes(Text { units: &units }.encode(encoding, usize::MAX)))
     }
 
-    fn write<'gc>(a: &mut Agent<'gc, '_>, buf: BufferRef<'gc>, text: JsString<'gc>, offset: usize, max: usize, encoding: u32) -> Option<usize> {
+    fn write<'scope>(a: &mut Scope<'scope, '_>, buf: BufferRef<'scope>, text: JsString<'scope>, offset: usize, max: usize, encoding: u32) -> Option<usize> {
         let encoding = Encoding::try_from(encoding).ok()?;
         let units = text.units().to_vec();
         let bytes = Text { units: &units }.encode(encoding, max);
@@ -181,24 +181,24 @@ impl Raw {
         Text { units: &units }.utf8_len()
     }
 
-    fn copy<'gc>(a: &mut Agent<'gc, '_>, source: BufferRef<'gc>, target: BufferRef<'gc>, target_start: usize, source_start: usize, count: usize) -> usize {
+    fn copy<'scope>(a: &mut Scope<'scope, '_>, source: BufferRef<'scope>, target: BufferRef<'scope>, target_start: usize, source_start: usize, count: usize) -> usize {
         let Some(data) = source.with(a, |b| b.get(source_start..source_start + count).map(<[u8]>::to_vec)).flatten() else { return 0 };
         target.with(a, |b| b.get_mut(target_start..target_start + data.len()).map(|t| t.copy_from_slice(&data))).flatten().map_or(0, |()| data.len())
     }
 
-    fn compare<'gc>(a: &mut Agent<'gc, '_>, x: BufferRef<'gc>, y: BufferRef<'gc>, x_start: usize, x_end: usize, y_start: usize, y_end: usize) -> i32 {
+    fn compare<'scope>(a: &mut Scope<'scope, '_>, x: BufferRef<'scope>, y: BufferRef<'scope>, x_start: usize, x_end: usize, y_start: usize, y_end: usize) -> i32 {
         let left = x.with(a, |b| b.get(x_start..x_end).map(<[u8]>::to_vec)).flatten().unwrap_or_default();
         y.with(a, |b| b.get(y_start..y_end).map(|right| i32::from(Ordering(left.as_slice().cmp(right))))).flatten().unwrap_or(0)
     }
 
-    fn fill<'gc>(a: &mut Agent<'gc, '_>, buf: BufferRef<'gc>, pattern: Bytes, start: usize, end: usize) -> bool {
+    fn fill<'scope>(a: &mut Scope<'scope, '_>, buf: BufferRef<'scope>, pattern: Bytes, start: usize, end: usize) -> bool {
         if pattern.0.is_empty() {
             return false;
         }
         buf.with(a, |b| b.get_mut(start..end).map(|t| t.iter_mut().zip(pattern.0.iter().cycle()).for_each(|(d, s)| *d = *s))).flatten().is_some()
     }
 
-    fn index_of<'gc>(a: &mut Agent<'gc, '_>, haystack: BufferRef<'gc>, needle: Bytes, from: usize, forward: bool, wide: bool) -> f64 {
+    fn index_of<'scope>(a: &mut Scope<'scope, '_>, haystack: BufferRef<'scope>, needle: Bytes, from: usize, forward: bool, wide: bool) -> f64 {
         let step = if wide { 2 } else { 1 };
         let found = haystack.with(a, |b| {
             let len = if wide { b.len() & !1 } else { b.len() };
@@ -207,15 +207,15 @@ impl Raw {
         found.flatten().and_then(|i| u32::try_from(i).ok()).map_or(-1.0, f64::from)
     }
 
-    fn swap<'gc>(a: &mut Agent<'gc, '_>, buf: BufferRef<'gc>, width: usize) {
+    fn swap<'scope>(a: &mut Scope<'scope, '_>, buf: BufferRef<'scope>, width: usize) {
         buf.with(a, |b| b.chunks_exact_mut(width).for_each(<[u8]>::reverse));
     }
 
-    fn is_utf8<'gc>(a: &mut Agent<'gc, '_>, buf: BufferRef<'gc>) -> Option<bool> {
+    fn is_utf8<'scope>(a: &mut Scope<'scope, '_>, buf: BufferRef<'scope>) -> Option<bool> {
         buf.with(a, |b| std::str::from_utf8(b).is_ok())
     }
 
-    fn is_ascii<'gc>(a: &mut Agent<'gc, '_>, buf: BufferRef<'gc>) -> Option<bool> {
+    fn is_ascii<'scope>(a: &mut Scope<'scope, '_>, buf: BufferRef<'scope>) -> Option<bool> {
         buf.with(a, |b| b.is_ascii())
     }
 }

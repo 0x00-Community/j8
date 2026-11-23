@@ -5,7 +5,7 @@ use alloc::vec::Vec;
 
 use num_bigint::BigInt;
 use num_traits::{One, Signed, ToPrimitive, Zero};
-use j8framework::{Agent, Error, ErrorKind, JsSymbol, SymbolData, Value};
+use j8framework::{Scope, Error, ErrorKind, JsSymbol, SymbolData, Value};
 use unicode_normalization::UnicodeNormalization;
 
 use crate::{Args, Installer};
@@ -43,14 +43,14 @@ fn exact_i32(x: f64) -> Option<i32> {
 }
 
 impl Texts {
-    fn from_char_code1<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, v: Value<'gc>) -> Option<Value<'gc>> {
+    fn from_char_code1<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, v: Value<'scope>) -> Option<Value<'scope>> {
         let ValueKind::Number(x) = v.kind() else { return None };
         #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "ToUint16 just takes the low 16 bits")]
         let u = if let Some(i) = exact_i32(x) { i as u16 } else { a.to_uint32(v).ok()? as u16 };
         Some(Value::String(a.unit_string(u)))
     }
 
-    fn from_char_code<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn from_char_code<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         if let [v] = args {
             #[expect(clippy::cast_possible_truncation, reason = "ToUint16 just takes the low 16 bits")]
             let u = a.to_uint32(*v)? as u16;
@@ -68,7 +68,7 @@ impl Texts {
         Ok(a.string_units(&units).into())
     }
 
-    fn from_code_point<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn from_code_point<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let mut out: Vec<u16> = Vec::with_capacity(args.len());
         for &v in args {
             let n = a.to_number(v)?;
@@ -86,7 +86,7 @@ impl Texts {
         Ok(a.string_units(&out).into())
     }
 
-    fn raw<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn raw<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let cooked = a.to_object(args.at(0))?;
         let literals = a.get_named(cooked.into(), "raw")?;
         let literals = a.to_object(literals)?;
@@ -109,14 +109,14 @@ impl Texts {
         Ok(a.string(&out).into())
     }
 
-    fn this_string<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>) -> Result<j8framework::JsString<'gc>, Error> {
+    fn this_string<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>) -> Result<j8framework::JsString<'scope>, Error> {
         if this.is_nullish() {
             return Err(a.throw(ErrorKind::Type, "String.prototype method called on null or undefined"));
         }
         a.to_string(this)
     }
 
-    fn code_point_at<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn code_point_at<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let s = Self::this_string(a, this)?;
         let units: Vec<u16> = s.encode_utf16().collect();
         let pos = a.to_integer_or_infinity(args.at(0))?;
@@ -134,11 +134,11 @@ impl Texts {
         Ok(f64::from(cp).into())
     }
 
-    fn is_well_formed<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn is_well_formed<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Ok((!Self::this_string(a, this)?.lone_surrogates()).into())
     }
 
-    fn to_well_formed<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn to_well_formed<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let s = Self::this_string(a, this)?;
         if !s.lone_surrogates() {
             return Ok(s.into());
@@ -146,7 +146,7 @@ impl Texts {
         Ok(a.string(s.as_str()).into())
     }
 
-    fn locale_compare<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn locale_compare<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let s = Self::this_string(a, this)?;
         let t = a.to_string(args.at(0))?;
         let (x, y): (String, String) = (s.nfc().collect(), t.nfc().collect());
@@ -158,7 +158,7 @@ impl Texts {
         .into())
     }
 
-    fn normalize<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn normalize<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let s = Self::this_string(a, this)?;
         let form = match args.at(0).kind() {
             ValueKind::Undefined => Form::Nfc,
@@ -179,7 +179,7 @@ impl Texts {
         Ok(a.string(&out).into())
     }
 
-    fn substr<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn substr<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let s = Self::this_string(a, this)?;
         let units: Vec<u16> = s.encode_utf16().collect();
         #[expect(clippy::cast_precision_loss, reason = "string length is far below 2^53")]
@@ -196,7 +196,7 @@ impl Texts {
         Ok(a.string_units(&units[s0..e0]).into())
     }
 
-    fn html<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>], tag: &str, attr: Option<&str>) -> Result<Value<'gc>, Error> {
+    fn html<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>], tag: &str, attr: Option<&str>) -> Result<Value<'scope>, Error> {
         let s = Self::this_string(a, this)?;
         let mut open = alloc::format!("<{tag}");
         if let Some(attr) = attr {
@@ -206,7 +206,7 @@ impl Texts {
         Ok(a.string(&alloc::format!("{open}>{}</{tag}>", &**s)).into())
     }
 
-    fn this_number<'gc>(a: &Agent<'gc, '_>, this: Value<'gc>, method: &str) -> Result<f64, Error> {
+    fn this_number<'scope>(a: &Scope<'scope, '_>, this: Value<'scope>, method: &str) -> Result<f64, Error> {
         match this.unwrapped().kind() {
             ValueKind::Number(x) => Ok(x),
             _ => Err(a.throw(ErrorKind::Type, &alloc::format!("Number.prototype.{method} requires that 'this' be a Number"))),
@@ -249,7 +249,7 @@ impl Texts {
         }
     }
 
-    fn to_fixed<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn to_fixed<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let x = Self::this_number(a, this, "toFixed")?;
         let f = a.to_integer_or_infinity(args.at(0))?;
         if !(0.0..=MAX_DIGITS).contains(&f) {
@@ -279,7 +279,7 @@ impl Texts {
         alloc::format!("{mantissa}e{sign}{}", e.abs())
     }
 
-    fn to_exponential<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn to_exponential<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let x = Self::this_number(a, this, "toExponential")?;
         let f = a.to_integer_or_infinity(args.at(0))?;
         if !x.is_finite() {
@@ -309,7 +309,7 @@ impl Texts {
         Ok(a.string(&alloc::format!("{sign}{s}")).into())
     }
 
-    fn to_precision<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn to_precision<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let x = Self::this_number(a, this, "toPrecision")?;
         if args.at(0) == Value::Undefined {
             return Ok(a.to_string(x.into())?.into());
@@ -339,54 +339,54 @@ impl Texts {
         Ok(a.string(&alloc::format!("{sign}{s}")).into())
     }
 
-    fn to_locale_string<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn to_locale_string<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let x = Self::this_number(a, this, "toLocaleString")?;
         Ok(a.to_string(x.into())?.into())
     }
 
-    fn is_finite<'gc>(_: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn is_finite<'scope>(_: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Ok(matches!(args.at(0).kind(), ValueKind::Number(x) if x.is_finite()).into())
     }
 
-    fn unary<'gc>(a: &mut Agent<'gc, '_>, args: &[Value<'gc>], f: fn(f64) -> f64) -> Result<Value<'gc>, Error> {
+    fn unary<'scope>(a: &mut Scope<'scope, '_>, args: &[Value<'scope>], f: fn(f64) -> f64) -> Result<Value<'scope>, Error> {
         Ok(f(a.to_number(args.at(0))?).into())
     }
 
-    fn fround<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn fround<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         #[expect(clippy::cast_possible_truncation, reason = "fround is exactly rounding to f32")]
         Self::unary(a, args, |x| f64::from(x as f32))
     }
 
-    fn f16round<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn f16round<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Self::unary(a, args, |x| j8framework::f16_to_f64(j8framework::f64_to_f16(x)))
     }
 
-    fn clz32<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn clz32<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Ok(f64::from(a.to_uint32(args.at(0))?.leading_zeros()).into())
     }
 
-    fn imul<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn imul<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let x = a.to_int32(args.at(0))?;
         let y = a.to_int32(args.at(1))?;
         Ok(f64::from(x.wrapping_mul(y)).into())
     }
 
-    fn random<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        let mut s = a.realm.random_state.load(core::sync::atomic::Ordering::Relaxed);
+    fn random<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+        let mut s = a.context.random_state.load(core::sync::atomic::Ordering::Relaxed);
         if s == 0 {
             s = u64::try_from(a.platform.wall_clock().as_nanos() & u128::from(u64::MAX)).unwrap_or(1) | 1;
         }
         s ^= s >> 12;
         s ^= s << 25;
         s ^= s >> 27;
-        a.realm.random_state.store(s, core::sync::atomic::Ordering::Relaxed);
+        a.context.random_state.store(s, core::sync::atomic::Ordering::Relaxed);
         let r = s.wrapping_mul(0x2545_f491_4f6c_dd1d) >> 11;
         #[expect(clippy::cast_precision_loss, reason = "takes 53 bits")]
         let x = r as f64 / 9_007_199_254_740_992.0;
         Ok(x.into())
     }
 
-    fn sum_precise<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn sum_precise<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let items = args.at(0);
         if items.is_nullish() {
             return Err(a.throw(ErrorKind::Type, "Math.sumPrecise requires an iterable"));
@@ -455,13 +455,13 @@ impl Texts {
         if neg { -v } else { v }
     }
 
-    fn symbol_for<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn symbol_for<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let key = a.to_string(args.at(0))?;
-        let registry = &a.realm.realm().get().symbol_registry;
+        let registry = &a.context.get().symbol_registry;
         if let Some(&(_, s)) = registry.get().iter().find(|(k, _)| ***k == **key) {
             return Ok(s.into());
         }
-        let fresh: JsSymbol<'gc> = a.mc.alloc(SymbolData { description: Some((&**key).into()), private: false });
+        let fresh: JsSymbol<'scope> = a.mc.alloc(SymbolData { description: Some((&**key).into()), private: false });
         let s = registry.update_with(a.mc, |entries| {
             let mut entries = entries.clone();
             let found = entries.iter().find(|(k, _)| ***k == **key).map(|&(_, s)| s);
@@ -474,43 +474,43 @@ impl Texts {
         Ok(s.into())
     }
 
-    fn key_for<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn key_for<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let ValueKind::Symbol(s) = args.at(0).kind() else {
             let t = a.describe(args.at(0));
             return Err(a.throw(ErrorKind::Type, &alloc::format!("{t} is not a symbol")));
         };
-        Ok(a.realm.symbol_registry.get().iter().find(|(_, x)| j8framework::Gc::ptr_eq(*x, s)).map_or(Value::Undefined, |&(k, _)| k.into()))
+        Ok(a.context.symbol_registry.get().iter().find(|(_, x)| j8framework::ScopeLocal::ptr_eq(*x, s)).map_or(Value::Undefined, |&(k, _)| k.into()))
     }
 
-    fn symbol_to_primitive<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn symbol_to_primitive<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         match this.unwrapped().kind() {
             v @ ValueKind::Symbol(_) => Ok(Value::from(v)),
             _ => Err(a.throw(ErrorKind::Type, "Symbol.prototype[Symbol.toPrimitive] requires that 'this' be a Symbol")),
         }
     }
 
-    fn as_n<'gc>(a: &mut Agent<'gc, '_>, args: &[Value<'gc>], signed: bool) -> Result<Value<'gc>, Error> {
+    fn as_n<'scope>(a: &mut Scope<'scope, '_>, args: &[Value<'scope>], signed: bool) -> Result<Value<'scope>, Error> {
         let bits = a.to_index(args.at(0))?;
         let b = a.to_bigint(args.at(1))?;
-        Ok(a.bigint(Agent::wrap_bigint(&b, u64::try_from(bits).unwrap_or(u64::MAX), signed)))
+        Ok(a.bigint(Scope::wrap_bigint(&b, u64::try_from(bits).unwrap_or(u64::MAX), signed)))
     }
 
-    fn as_int_n<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn as_int_n<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Self::as_n(a, args, true)
     }
 
-    fn as_uint_n<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn as_uint_n<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Self::as_n(a, args, false)
     }
 
-    fn bigint_to_locale_string<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn bigint_to_locale_string<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         match this.unwrapped().kind() {
             ValueKind::BigInt(b) => Ok(a.string(&b.0.to_str_radix(10)).into()),
             _ => Err(a.throw(ErrorKind::Type, "BigInt.prototype.toLocaleString requires that 'this' be a BigInt")),
         }
     }
 
-    fn encode<'gc>(a: &mut Agent<'gc, '_>, v: Value<'gc>, keep: &str) -> Result<Value<'gc>, Error> {
+    fn encode<'scope>(a: &mut Scope<'scope, '_>, v: Value<'scope>, keep: &str) -> Result<Value<'scope>, Error> {
         let s = a.to_string(v)?;
         let mut out = String::new();
         for c in s.chars() {
@@ -525,7 +525,7 @@ impl Texts {
         Ok(a.string(&out).into())
     }
 
-    fn uri_error(a: &Agent<'_, '_>) -> Error {
+    fn uri_error(a: &Scope<'_, '_>) -> Error {
         a.throw(ErrorKind::Uri, "URI malformed")
     }
 
@@ -538,7 +538,7 @@ impl Texts {
         u8::try_from(x * 16 + y).ok()
     }
 
-    fn decode<'gc>(a: &mut Agent<'gc, '_>, v: Value<'gc>, preserve: &str) -> Result<Value<'gc>, Error> {
+    fn decode<'scope>(a: &mut Scope<'scope, '_>, v: Value<'scope>, preserve: &str) -> Result<Value<'scope>, Error> {
         let s = a.to_string(v)?;
         if !s.lone_surrogates() {
             let text = Self::decode_text(a, s.as_str(), preserve)?;
@@ -560,7 +560,7 @@ impl Texts {
         Ok(a.string_units(&out).into())
     }
 
-    fn decode_text(a: &mut Agent<'_, '_>, s: &str, preserve: &str) -> Result<String, Error> {
+    fn decode_text(a: &mut Scope<'_, '_>, s: &str, preserve: &str) -> Result<String, Error> {
         let b = s.as_bytes();
         let mut out: Vec<u8> = Vec::new();
         let mut i = 0;
@@ -601,24 +601,24 @@ impl Texts {
         String::from_utf8(out).map_err(|_| Self::uri_error(a))
     }
 
-    fn encode_uri<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn encode_uri<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Self::encode(a, args.at(0), "#;/?:@&=+$,")
     }
 
-    fn encode_uri_component<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn encode_uri_component<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Self::encode(a, args.at(0), "")
     }
 
-    fn decode_uri<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn decode_uri<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let keep = alloc::format!("{URI_RESERVED}#");
         Self::decode(a, args.at(0), &keep)
     }
 
-    fn decode_uri_component<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn decode_uri_component<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Self::decode(a, args.at(0), "")
     }
 
-    fn escape<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn escape<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let s = a.to_string(args.at(0))?;
         let mut out = String::new();
         for u in s.encode_utf16() {
@@ -631,7 +631,7 @@ impl Texts {
         Ok(a.string(&out).into())
     }
 
-    fn unescape<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn unescape<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let s = a.to_string(args.at(0))?;
         let units: Vec<u16> = s.encode_utf16().collect();
         let hex = |slice: &[u16]| -> Option<u16> {
@@ -669,7 +669,7 @@ impl Texts {
 macro_rules! natives {
     ($($name:ident($a:ident, $this:ident, $args:ident) $body:block)*) => {
         impl Texts {
-            $(fn $name<'gc>($a: &mut Agent<'gc, '_>, $this: Value<'gc>, $args: &[Value<'gc>]) -> Result<Value<'gc>, Error> $body)*
+            $(fn $name<'scope>($a: &mut Scope<'scope, '_>, $this: Value<'scope>, $args: &[Value<'scope>]) -> Result<Value<'scope>, Error> $body)*
         }
     };
 }
@@ -696,13 +696,13 @@ natives! {
     sup(a, this, args) { Self::html(a, this, args, "sup", None) }
 }
 
-impl<'gc> Installer<'_, 'gc> {
-    fn global_fn(&self, name: &str) -> Value<'gc> {
-        self.realm.global.borrow().own(self.mc, name).unwrap_or_default()
+impl<'scope> Installer<'_, 'scope> {
+    fn global_fn(&self, name: &str) -> Value<'scope> {
+        self.context.global.borrow().own(self.mc, name).unwrap_or_default()
     }
 
     pub(crate) fn texts(&mut self) {
-        let r = self.realm;
+        let r = self.context;
         let string = self.global_fn("String");
         if let Some(ctor) = string.as_object() {
             self.method(ctor, "fromCharCode", Texts::from_char_code, 1);

@@ -1,12 +1,12 @@
 use j8framework::ValueKind;
-use j8framework::{Agent, Error, ErrorKind, IterKind, IteratorState, ObjectKind, Resume, Step, SymbolData, Value};
+use j8framework::{Scope, Error, ErrorKind, IterKind, IteratorState, ObjectKind, Resume, Step, SymbolData, Value};
 
 use crate::{Args, Installer};
 
 struct Iters;
 
 impl Iters {
-    fn symbol<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn symbol<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         if a.new_target != Value::Undefined {
             return Err(a.throw(ErrorKind::Type, "Symbol is not a constructor"));
         }
@@ -17,47 +17,47 @@ impl Iters {
         Ok(Value::Symbol(a.mc.alloc(SymbolData { description, private: false })))
     }
 
-    fn this_symbol<'gc>(a: &Agent<'gc, '_>, this: Value<'gc>) -> Result<j8framework::JsSymbol<'gc>, Error> {
+    fn this_symbol<'scope>(a: &Scope<'scope, '_>, this: Value<'scope>) -> Result<j8framework::JsSymbol<'scope>, Error> {
         match this.unwrapped().kind() {
             ValueKind::Symbol(s) => Ok(s),
             _ => Err(a.throw(ErrorKind::Type, "Symbol.prototype method called on a non-symbol")),
         }
     }
 
-    fn symbol_to_string<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn symbol_to_string<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let s = Self::this_symbol(a, this)?;
         Ok(a.symbol_descriptive(s).into())
     }
 
-    fn symbol_description<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn symbol_description<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let s = Self::this_symbol(a, this)?;
         Ok(s.description.as_deref().map_or(Value::Undefined, |d| a.string(d).into()))
     }
 
-    fn symbol_value_of<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn symbol_value_of<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Ok(Self::this_symbol(a, this)?.into())
     }
 
-    fn this_value<'gc>(_: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn this_value<'scope>(_: &mut Scope<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Ok(this)
     }
 
-    fn values<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn values<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let o = a.to_object(this)?;
         Ok(a.array_iterator(o.into(), IterKind::Values).into())
     }
 
-    fn keys<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn keys<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let o = a.to_object(this)?;
         Ok(a.array_iterator(o.into(), IterKind::Keys).into())
     }
 
-    fn entries<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn entries<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let o = a.to_object(this)?;
         Ok(a.array_iterator(o.into(), IterKind::Entries).into())
     }
 
-    fn string_iterator<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn string_iterator<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         if this.is_nullish() {
             return Err(a.throw(ErrorKind::Type, "String.prototype[Symbol.iterator] called on null or undefined"));
         }
@@ -65,26 +65,26 @@ impl Iters {
         Ok(a.builtin_iterator(IteratorState::String { s, pos: 0 }).into())
     }
 
-    fn state<'gc>(a: &Agent<'gc, '_>, this: Value<'gc>) -> Result<j8framework::JsObject<'gc>, Error> {
+    fn state<'scope>(a: &Scope<'scope, '_>, this: Value<'scope>) -> Result<j8framework::JsObject<'scope>, Error> {
         match this.kind() {
             ValueKind::Object(o) if matches!(o.borrow().kind, ObjectKind::Iterator(_)) => Ok(o),
             _ => Err(a.throw(ErrorKind::Type, "next method called on an incompatible receiver")),
         }
     }
 
-    fn array_next<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn array_next<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let o = Self::state(a, this)?;
         let v = a.array_iter_step(o)?;
         Ok(a.iter_result(v.unwrap_or_default(), v.is_none()).into())
     }
 
-    fn string_next<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn string_next<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let o = Self::state(a, this)?;
         let v = a.string_iter_step(o)?;
         Ok(a.iter_result(v.unwrap_or_default(), v.is_none()).into())
     }
 
-    fn resume<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, mode: Resume, v: Value<'gc>) -> Result<Value<'gc>, Error> {
+    fn resume<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, mode: Resume, v: Value<'scope>) -> Result<Value<'scope>, Error> {
         let co = match this.kind() {
             ValueKind::Object(o) if matches!(&o.borrow().kind, ObjectKind::Coroutine(c) if c.promise.is_none() && c.requests.is_none()) => o,
             _ => return Err(a.throw(ErrorKind::Type, "Generator method called on an incompatible receiver")),
@@ -97,22 +97,22 @@ impl Iters {
         .into())
     }
 
-    fn generator_next<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn generator_next<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Self::resume(a, this, Resume::Next, args.at(0))
     }
 
-    fn generator_return<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn generator_return<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Self::resume(a, this, Resume::Return, args.at(0))
     }
 
-    fn generator_throw<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn generator_throw<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Self::resume(a, this, Resume::Throw, args.at(0))
     }
 }
 
 impl Installer<'_, '_> {
     pub(crate) fn iterators(&mut self) {
-        let r = self.realm;
+        let r = self.context;
         let sym = r.symbols;
         let proto = r.symbol_proto;
         let ctor = self.constructor("Symbol", Iters::symbol, proto, 0);

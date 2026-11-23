@@ -20,7 +20,7 @@ pub(crate) enum Receiver {
 }
 
 enum Param {
-    Agent,
+    Scope,
     This,
     Rest(usize),
     Arg(usize, Box<Type>),
@@ -116,7 +116,7 @@ impl Method {
             let FnArg::Typed(t) = input else { continue };
             let is_str = matches!(&*t.ty, Type::Reference(r) if r.mutability.is_none() && matches!(&*r.elem, Type::Path(p) if p.path.is_ident("str")));
             let param = match Names::last_segment(&t.ty).as_deref() {
-                Some("Agent") => Param::Agent,
+                Some("Scope") => Param::Scope,
                 Some("This") => Param::This,
                 Some("Rest") => Param::Rest(index),
                 _ if is_str => {
@@ -135,7 +135,7 @@ impl Method {
         let js = name.unwrap_or_else(|| Names::camel(&rust.to_string()));
         let is_async = sig.asyncness.is_some();
         if is_async && (receiver != Receiver::None || params.iter().any(|p| !matches!(p, Param::Arg(..)))) {
-            return Err(syn::Error::new_spanned(&sig.ident, "an async binding takes owned parameters only (no self, &str, Agent, This or Rest): its future runs later on the event loop"));
+            return Err(syn::Error::new_spanned(&sig.ident, "an async binding takes owned parameters only (no self, &str, Scope, This or Rest): its future runs later on the event loop"));
         }
         Ok(Self { rust, js, role, receiver, params, length: u32::try_from(index).unwrap_or(u32::MAX), returns_result, is_async })
     }
@@ -144,7 +144,7 @@ impl Method {
         format_ident!("__j8_js_{}", self.rust)
     }
 
-    pub(crate) fn wrapper(&self, class: &str, owner: &TokenStream) -> TokenStream {
+    pub(crate) fn wrapper(&self, class: &str, ty: &TokenStream, call: &TokenStream) -> TokenStream {
         let name = self.wrapper_name();
         let rust = &self.rust;
         let mut prepare = Vec::new();
@@ -152,31 +152,31 @@ impl Method {
         for (i, p) in self.params.iter().enumerate() {
             let var = format_ident!("__p{}", i);
             match p {
-                Param::Agent => call_args.push(quote!(a)),
+                Param::Scope => call_args.push(quote!(a)),
                 Param::This => call_args.push(quote!(::j8::This(this))),
                 Param::Rest(from) => call_args.push(quote!(::j8::Rest(args.get(#from..).unwrap_or(&[]).to_vec()))),
                 Param::Arg(at, ty) => {
-                    prepare.push(quote!(let #var = <#ty as ::j8::FromJs<'gc>>::from_js(a, ::j8::Glue::arg(args, #at))?;));
+                    prepare.push(quote!(let #var = <#ty as ::j8::FromJs<'scope>>::from_js(a, ::j8::Glue::arg(args, #at))?;));
                     call_args.push(quote!(#var));
                 }
                 Param::Str(at) => {
-                    prepare.push(quote!(let #var = <::j8::frame::JsString<'gc> as ::j8::FromJs<'gc>>::from_js(a, ::j8::Glue::arg(args, #at))?;));
+                    prepare.push(quote!(let #var = <::j8::frame::JsString<'scope> as ::j8::FromJs<'scope>>::from_js(a, ::j8::Glue::arg(args, #at))?;));
                     call_args.push(quote!(&**#var));
                 }
             }
         }
         let call = match self.receiver {
-            Receiver::None => quote!(#owner::#rust(#(#call_args),*)),
+            Receiver::None => quote!(#call::#rust(#(#call_args),*)),
             Receiver::Shared => quote! {{
-                let __data = ::j8::Glue::host::<Self>(a, this)?;
+                let __data = ::j8::Glue::host::<#ty>(a, this)?;
                 let __cell = ::j8::Glue::borrow(a, &__data, #class)?;
-                let __self = ::j8::Glue::cast::<Self>(a, &__cell)?;
+                let __self = ::j8::Glue::cast::<#ty>(a, &__cell)?;
                 __self.#rust(#(#call_args),*)
             }},
             Receiver::Mutable => quote! {{
-                let __data = ::j8::Glue::host::<Self>(a, this)?;
+                let __data = ::j8::Glue::host::<#ty>(a, this)?;
                 let mut __cell = ::j8::Glue::borrow_mut(a, &__data, #class)?;
-                let __self = ::j8::Glue::cast_mut::<Self>(a, &mut __cell)?;
+                let __self = ::j8::Glue::cast_mut::<#ty>(a, &mut __cell)?;
                 __self.#rust(#(#call_args),*)
             }},
         };
@@ -192,7 +192,7 @@ impl Method {
                 ::j8::Glue::require_new(a, #class)?;
                 #(#prepare)*
                 let __made = #made;
-                ::j8::Glue::construct::<Self>(a, __made)
+                ::j8::Glue::construct::<#ty>(a, __made)
             }
         } else {
             quote! {
@@ -204,7 +204,7 @@ impl Method {
         quote! {
             #[doc(hidden)]
             #[allow(clippy::needless_question_mark, unused_variables, clippy::unnecessary_wraps)]
-            fn #name<'gc>(a: &mut ::j8::frame::Agent<'gc, '_>, this: ::j8::frame::Value<'gc>, args: &[::j8::frame::Value<'gc>]) -> ::core::result::Result<::j8::frame::Value<'gc>, ::j8::frame::Error> {
+            fn #name<'scope>(a: &mut ::j8::frame::Scope<'scope, '_>, this: ::j8::frame::Value<'scope>, args: &[::j8::frame::Value<'scope>]) -> ::core::result::Result<::j8::frame::Value<'scope>, ::j8::frame::Error> {
                 #body
             }
         }
@@ -236,12 +236,11 @@ impl Bound {
         Ok(Self { name, methods })
     }
 
-    pub(crate) fn wrappers(&self) -> Vec<TokenStream> {
-        let owner = quote!(Self);
-        self.methods.iter().map(|m| m.wrapper(&self.name.value(), &owner)).collect()
+    pub(crate) fn wrappers(&self, ty: &TokenStream, call: &TokenStream) -> Vec<TokenStream> {
+        self.methods.iter().map(|m| m.wrapper(&self.name.value(), ty, call)).collect()
     }
 
-    pub(crate) fn members(&self) -> Vec<TokenStream> {
+    pub(crate) fn members(&self, owner: &TokenStream) -> Vec<TokenStream> {
         let native = quote!(::j8::frame::NativeFn);
         let mut members = Vec::new();
         let mut accessors: Vec<(String, Option<Ident>, Option<Ident>)> = Vec::new();
@@ -249,8 +248,8 @@ impl Bound {
             let w = m.wrapper_name();
             let (js, len) = (&m.js, m.length);
             match m.role {
-                Role::Method => members.push(quote!(::j8::Member::Method { name: #js, f: Self::#w as #native, length: #len })),
-                Role::Static => members.push(quote!(::j8::Member::Static { name: #js, f: Self::#w as #native, length: #len })),
+                Role::Method => members.push(quote!(::j8::Member::Method { name: #js, f: #owner::#w as #native, length: #len })),
+                Role::Static => members.push(quote!(::j8::Member::Static { name: #js, f: #owner::#w as #native, length: #len })),
                 Role::Getter | Role::Setter => {
                     let at = match accessors.iter().position(|(n, _, _)| n == js) {
                         Some(i) => i,
@@ -265,8 +264,8 @@ impl Bound {
             }
         }
         for (name, get, set) in accessors {
-            let get = get.map_or(quote!(::core::option::Option::None), |g| quote!(::core::option::Option::Some(Self::#g as #native)));
-            let set = set.map_or(quote!(::core::option::Option::None), |s| quote!(::core::option::Option::Some(Self::#s as #native)));
+            let get = get.map_or(quote!(::core::option::Option::None), |g| quote!(::core::option::Option::Some(#owner::#g as #native)));
+            let set = set.map_or(quote!(::core::option::Option::None), |s| quote!(::core::option::Option::Some(#owner::#s as #native)));
             members.push(quote!(::j8::Member::Accessor { name: #name, get: #get, set: #set }));
         }
         members

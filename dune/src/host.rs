@@ -4,7 +4,7 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::task::{Context, Poll};
 
 use j8::IntoJs;
-use j8::frame::{Agent, Error, ErrorKind, Value};
+use j8::frame::{Scope, Error, ErrorKind, Value};
 
 pub struct Offload<T, F> {
     work: Option<F>,
@@ -119,8 +119,8 @@ impl<T> Io<T> {
     }
 }
 
-impl<'gc, T: IntoJs<'gc>> IntoJs<'gc> for Io<T> {
-    fn into_js(self, a: &mut Agent<'gc, '_>) -> Result<Value<'gc>, Error> {
+impl<'scope, T: IntoJs<'scope>> IntoJs<'scope> for Io<T> {
+    fn into_js(self, a: &mut Scope<'scope, '_>) -> Result<Value<'scope>, Error> {
         match self.0 {
             Ok(v) => v.into_js(a),
             Err(f) => Err(a.throw(f.kind, &f.message)),

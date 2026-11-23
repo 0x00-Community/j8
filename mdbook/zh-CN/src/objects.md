@@ -12,16 +12,16 @@ Object  + OBJECT_SHAPE     *const Shape（null：空对象，或字典模式）
 JIT 按 `j8framework::Layout` 给的偏移直接读写这些字段。
 
 j8 自己的堆结构体用 `#[j8framework::heap]` 声明，`#[mutable]` 字段按类型自动选单元（`Value` ⇒ `ValueCell`、
-`Gc` ⇒ paragc `Slot`、布尔与整数 ⇒ 原子量），并生成 getter / setter：
+`ScopeLocal` ⇒ paragc `Slot`、布尔与整数 ⇒ 原子量），并生成 getter / setter：
 
 ```rust,ignore
 #[j8framework::heap]
-pub struct Object<'gc> {
+pub struct Object<'scope> {
     #[mutable(set = write_proto)]
-    proto: Option<JsObject<'gc>>,      // proto() / write_proto(mc, p)
+    proto: Option<JsObject<'scope>>,      // proto() / write_proto(mc, p)
     #[mutable]
     non_extensible: bool,              // non_extensible() / set_non_extensible(mc, b)
-    data: GcCell<'gc, ObjectState<'gc>>,
+    data: GcCell<'scope, ObjectState<'scope>>,
 }
 ```
 
@@ -31,7 +31,8 @@ pub struct Object<'gc> {
 
 - 以同样方式建出的对象共享 shape：加属性沿**转移表**走到（或新建）子 shape；
 - 执行层按「shape ⇒ 槽下标」做[内联缓存](executor.md#内联缓存)；
-- shape 里没有 `Gc` 指针（回收会搬对象），用 `Arc` 管理；转移表存 `Weak`，没有对象用的 shape 自然释放；
+- shape 放在 GC 堆里，通过 **Handle**（`ShapeRef`，paragc Handle 表里的一项）引用：回收器搬 shape 时改写表项，
+  Handle 不变；转移表存 `Weak`，没有对象用的 shape 会被回收；
 - 删属性、改特性或键太多时，对象的属性转成**字典**（`Dict`，原地修改），内联缓存不接收字典。
 
 ## 值存储
@@ -63,11 +64,13 @@ paragc 只分配定长对象，所以按容量分档：
 - 长串共享一份堆拷贝，从长串切出的片段（`split`、`slice`、正则匹配）指向那份拷贝而不复制（V8 的 sliced string）；
 - 字符串 `+` 产生足够长的结果时先存成 **rope**（两半加总长），第一次需要内容时才拍平并缓存——`s += c` 的循环
   不再每次复制整串；拍平与释放都是迭代的，几十万层的 rope 也不会爆栈；
-- 不含 `Gc`，GC 不需要管它。
+- 不含 `ScopeLocal`，GC 不需要管它。
 
 当前字符串按 UTF-8 存储，所以落单的代理项（lone surrogate）会丢失；比较按 UTF-16 码元进行。
 
 ## 宿主对象
 
-`ObjectKind::Host`：持有 Rust 值的 JS 对象（`HostData`，`Box<dyn Any + Send + Sync>`，外面是借用标志）。
+`ObjectKind::Host`：持有 Rust 值的 JS 对象（`HostData`：`GcCell` 里的 `Host`，即 `Box<dyn HostObject>`）。和 V8 的
+cppgc 对象一样，宿主数据会被追踪：`HostObject::trace` 访问它持有的 JS 值；查找按 Brand 的 `TypeId`
+（`HostObject::find`），所以 Rust 类型可以带 `'scope` 生命周期。
 绑定方法里以 `&self` / `&mut self` 取出；重入的 `&mut self` 调用抛 `TypeError` 而不是 panic（见[绑定宏](bindings.md)）。

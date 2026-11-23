@@ -9,7 +9,8 @@ pub fn expand(attr: TokenStream, mut item: ItemImpl) -> syn::Result<TokenStream>
     if let Some(m) = b.methods.iter().find(|m| m.receiver != Receiver::None || m.role == Role::Constructor) {
         return Err(syn::Error::new(m.rust.span(), "#[j8::object] takes associated functions only (no self, no constructor)"));
     }
-    let (name, members, wrappers, self_ty) = (&b.name, b.members(), b.wrappers(), &item.self_ty);
+    let owner = quote!(Self);
+    let (name, members, wrappers, self_ty) = (&b.name, b.members(&owner), b.wrappers(&owner, &owner), &item.self_ty);
     let (impl_generics, _, where_clause) = item.generics.split_for_impl();
     Ok(quote! {
         #item
@@ -24,7 +25,7 @@ pub fn expand(attr: TokenStream, mut item: ItemImpl) -> syn::Result<TokenStream>
         }
 
         impl #impl_generics ::j8::Install for #self_ty #where_clause {
-            fn install_into<'gc>(a: &mut ::j8::frame::Agent<'gc, '_>, target: ::j8::frame::JsObject<'gc>) {
+            fn install_into<'scope>(a: &mut ::j8::frame::Scope<'scope, '_>, target: ::j8::frame::JsObject<'scope>) {
                 let _ = <Self as ::j8::Object>::install(a, target);
             }
         }

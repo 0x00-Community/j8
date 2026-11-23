@@ -58,14 +58,14 @@ impl J8Runner {
         use j8::frame::{CreateParams, Error, Isolate, Source};
         let platform = j8::platform::DefaultPlatform::default();
         let mut isolate = Isolate::new(&platform, CreateParams::default());
-        let mut executor = if std::env::var_os("J8_NOJIT").is_some() { Executor::default() } else { Executor::default().with_tier(j8::jit::Jit::default()) };
+        let executor = if std::env::var_os("J8_NOJIT").is_some() { Executor::default() } else { Executor::default().with_tier(j8::jit::Jit::default()) };
         let mut best = f64::INFINITY;
         let mut result = String::new();
         for _ in 0..runs {
-            let cx = isolate.enter(|scope| scope.persist(scope.context(&Builtins)));
+            let cx = isolate.create_context(&Builtins);
             let start = Instant::now();
-            let r = isolate.run(
-                &mut executor,
+            let r = executor.eval(
+                &mut isolate,
                 &cx,
                 &Source {
                     text: src,
@@ -73,9 +73,7 @@ impl J8Runner {
                 },
             );
             best = best.min(start.elapsed().as_secs_f64() * 1e3);
-            let text = isolate.enter(|scope| {
-                let realm = scope.context_of(&cx);
-                let mut a = scope.agent(realm, &executor);
+            let text = isolate.enter(&cx, &executor, |a| {
                 match r {
                     Ok(g) => {
                         let v = a.local(&g);
@@ -83,8 +81,8 @@ impl J8Runner {
                             .map(|s| String::from(&**s))
                             .map_err(|e| e.to_string())
                     }
-                    Err(Error::Exception(g)) => {
-                        let v = a.local(&g);
+                    Err(Error::Exception) => {
+                        let v = a.take_exception();
                         Err(a.to_string(v).map_or_else(
                             |_| String::from("exception"),
                             |s| format!("Uncaught {}", &**s),

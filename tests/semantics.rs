@@ -16,19 +16,17 @@ const CASES: &[(&str, &str)] = &[
 fn outcome(text: &str) -> String {
     let platform = DefaultPlatform::default();
     let mut isolate = Isolate::new(&platform, CreateParams::default());
-    let mut executor = Executor::default();
-    let cx = isolate.enter(|scope| scope.persist(scope.context(&Builtins)));
-    let r = isolate.run(&mut executor, &cx, &Source { text, file: "semantics.js" });
-    isolate.enter(|scope| {
-        let realm = scope.context_of(&cx);
-        let mut a = scope.agent(realm, &executor);
+    let executor = Executor::default();
+    let cx = isolate.create_context(&Builtins);
+    let r = executor.eval(&mut isolate, &cx, &Source { text, file: "semantics.js" });
+    isolate.enter(&cx, &executor, |a| {
         match r {
             Ok(g) => {
                 let v = a.local(&g);
                 String::from(&**a.to_string(v).expect("ToString"))
             }
-            Err(Error::Exception(g)) => {
-                let v = a.local(&g);
+            Err(Error::Exception) => {
+                let v = a.take_exception();
                 format!("Uncaught {}", String::from(&**a.to_string(v).expect("ToString")))
             }
             Err(e) => panic!("not a completion: {e}"),

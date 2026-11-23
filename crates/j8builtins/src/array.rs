@@ -3,7 +3,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::cmp::Ordering;
 
-use j8framework::{Agent, Callback, Error, ErrorKind, JsObject, ObjectData, ObjectKind, Property, Slot, Value, ValueBits};
+use j8framework::{Scope, Callback, Error, ErrorKind, JsObject, ObjectData, ObjectKind, Property, Slot, Value, ValueBits};
 
 use crate::{Args, Installer};
 
@@ -31,30 +31,30 @@ enum Find {
 }
 
 impl Arrays {
-    fn target<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>) -> Result<(JsObject<'gc>, f64), Error> {
+    fn target<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>) -> Result<(JsObject<'scope>, f64), Error> {
         let o = a.to_object(this)?;
         let len = a.length_of_array_like(o.into())?;
         Ok((o, len))
     }
 
-    fn create<'gc>(a: &mut Agent<'gc, '_>, len: f64, proto: Option<JsObject<'gc>>) -> Result<JsObject<'gc>, Error> {
+    fn create<'scope>(a: &mut Scope<'scope, '_>, len: f64, proto: Option<JsObject<'scope>>) -> Result<JsObject<'scope>, Error> {
         if len > MAX_ARRAY_LENGTH {
             return Err(a.throw(ErrorKind::Range, "Invalid array length"));
         }
         #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "checked to be in [0, 2^32 − 1]")]
         let n = len as u32;
-        let arr = ObjectData { kind: ObjectKind::Array, proto: Some(proto.unwrap_or(a.realm.array_proto)), ..ObjectData::default() }.alloc(a.mc);
+        let arr = ObjectData { kind: ObjectKind::Array, proto: Some(proto.unwrap_or(a.context.array_proto)), ..ObjectData::default() }.alloc(a.mc);
         arr.borrow_mut(a.mc).set_array_length(n);
         Ok(arr)
     }
 
-    fn species_create<'gc>(a: &mut Agent<'gc, '_>, original: JsObject<'gc>, len: f64) -> Result<(JsObject<'gc>, bool), Error> {
+    fn species_create<'scope>(a: &mut Scope<'scope, '_>, original: JsObject<'scope>, len: f64) -> Result<(JsObject<'scope>, bool), Error> {
         if !a.is_array(original.into())? {
             return Ok((Self::create(a, len, None)?, true));
         }
         let mut c = a.get_named(original.into(), "constructor")?;
         if c.as_object().is_some() {
-            c = a.get_symbol(c, a.realm.symbols.species, c)?;
+            c = a.get_symbol(c, a.context.symbols.species, c)?;
             if c == Value::Null {
                 c = Value::Undefined;
             }
@@ -72,11 +72,11 @@ impl Arrays {
         }
     }
 
-    fn set_length<'gc>(a: &mut Agent<'gc, '_>, o: JsObject<'gc>, n: f64) -> Result<(), Error> {
+    fn set_length<'scope>(a: &mut Scope<'scope, '_>, o: JsObject<'scope>, n: f64) -> Result<(), Error> {
         a.set_named(o.into(), "length", n.into())
     }
 
-    fn relative<'gc>(a: &mut Agent<'gc, '_>, v: Value<'gc>, len: f64, default: f64) -> Result<f64, Error> {
+    fn relative<'scope>(a: &mut Scope<'scope, '_>, v: Value<'scope>, len: f64, default: f64) -> Result<f64, Error> {
         if v == Value::Undefined {
             return Ok(default);
         }
@@ -84,7 +84,7 @@ impl Arrays {
         Ok(if x < 0.0 { (len + x).max(0.0) } else { x.min(len) })
     }
 
-    fn callback<'gc>(a: &mut Agent<'gc, '_>, f: Value<'gc>) -> Result<(), Error> {
+    fn callback<'scope>(a: &mut Scope<'scope, '_>, f: Value<'scope>) -> Result<(), Error> {
         if a.is_callable(f) {
             Ok(())
         } else {
@@ -93,9 +93,9 @@ impl Arrays {
         }
     }
 
-    fn array<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn array<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let new_target = a.new_target;
-        let proto = a.proto_from_ctor(new_target, a.realm.array_proto)?;
+        let proto = a.proto_from_ctor(new_target, a.context.array_proto)?;
         match *args {
             [] => Ok(Self::create(a, 0.0, Some(proto))?.into()),
             [v] if let Some(n) = v.as_number() => {
@@ -113,13 +113,13 @@ impl Arrays {
         }
     }
 
-    fn is_array<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn is_array<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Ok(a.is_array(args.at(0))?.into())
     }
 
-    fn construct_this<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, len: Option<f64>) -> Result<JsObject<'gc>, Error> {
+    fn construct_this<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, len: Option<f64>) -> Result<JsObject<'scope>, Error> {
         if a.is_constructor(this) {
-            let args: Vec<Value<'gc>> = len.map(Value::from).into_iter().collect();
+            let args: Vec<Value<'scope>> = len.map(Value::from).into_iter().collect();
             match (a.construct(this, &args, this)?).kind() {
                 ValueKind::Object(o) => Ok(o),
                 _ => Err(a.throw(ErrorKind::Type, "constructor returned a non-object")),
@@ -129,7 +129,7 @@ impl Arrays {
         }
     }
 
-    fn of<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn of<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         #[expect(clippy::cast_precision_loss, reason = "argument count is far below 2^53")]
         let len = args.len() as f64;
         let arr = Self::construct_this(a, this, Some(len))?;
@@ -140,13 +140,13 @@ impl Arrays {
         Ok(arr.into())
     }
 
-    fn from<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn from<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let (items, mapper, this_arg) = (args.at(0), args.at(1), args.at(2));
         let mapping = mapper != Value::Undefined;
         if mapping {
             Self::callback(a, mapper)?;
         }
-        let using = if items.is_nullish() { Value::Undefined } else { a.get_symbol(items, a.realm.symbols.iterator, items)? };
+        let using = if items.is_nullish() { Value::Undefined } else { a.get_symbol(items, a.context.symbols.iterator, items)? };
         if !using.is_nullish() {
             if !a.is_callable(using) {
                 return Err(a.throw(ErrorKind::Type, "Symbol.iterator is not a function"));
@@ -168,8 +168,7 @@ impl Arrays {
                     a.create_index(arr, k, v)
                 })();
                 if let Err(e) = r {
-                    let _ = a.iterator_close(iterator);
-                    return Err(e);
+                    return Err(a.iterator_close_abrupt(iterator, e));
                 }
                 k += 1.0;
             }
@@ -190,11 +189,11 @@ impl Arrays {
         Ok(arr.into())
     }
 
-    fn species<'gc>(_: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn species<'scope>(_: &mut Scope<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Ok(this)
     }
 
-    fn at<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn at<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let (o, len) = Self::target(a, this)?;
         let rel = a.to_integer_or_infinity(args.at(0))?;
         let k = if rel >= 0.0 { rel } else { len + rel };
@@ -204,7 +203,7 @@ impl Arrays {
         a.get_index(o.into(), k)
     }
 
-    fn push<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn push<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let (o, len) = Self::target(a, this)?;
         if Self::dense_object(a, o) {
             for &v in args {
@@ -228,23 +227,23 @@ impl Arrays {
         Ok(n.into())
     }
 
-    fn indexed_clean<'gc>(a: &Agent<'gc, '_>, o: JsObject<'gc>) -> bool {
+    fn indexed_clean<'scope>(a: &Scope<'scope, '_>, o: JsObject<'scope>) -> bool {
         match o.proto() {
-            Some(p) if j8framework::Gc::ptr_eq(p, a.realm.array_proto) && a.realm.indexed_fast() && p.elements().is_empty() => true,
+            Some(p) if j8framework::ScopeLocal::ptr_eq(p, a.context.array_proto) && a.context.indexed_fast() && p.elements().is_empty() => true,
             _ => o.no_indexed_protos(),
         }
     }
 
-    fn dense_object<'gc>(a: &Agent<'gc, '_>, o: JsObject<'gc>) -> bool {
+    fn dense_object<'scope>(a: &Scope<'scope, '_>, o: JsObject<'scope>) -> bool {
         o.is_array() && !o.non_extensible() && !o.length_readonly() && o.sparse_length() == 0 && Self::indexed_clean(a, o)
     }
 
-    fn dense_array<'gc>(a: &Agent<'gc, '_>, this: Value<'gc>) -> Option<JsObject<'gc>> {
+    fn dense_array<'scope>(a: &Scope<'scope, '_>, this: Value<'scope>) -> Option<JsObject<'scope>> {
         let o = this.as_object()?;
         Self::dense_object(a, o).then_some(o)
     }
 
-    fn push_values<'gc>(a: &mut Agent<'gc, '_>, o: JsObject<'gc>, vs: &[Value<'gc>]) -> Option<Value<'gc>> {
+    fn push_values<'scope>(a: &mut Scope<'scope, '_>, o: JsObject<'scope>, vs: &[Value<'scope>]) -> Option<Value<'scope>> {
         let n = o.elements().len();
         if n.checked_add(vs.len()).is_none_or(|t| t > usize::try_from(u32::MAX).unwrap_or(usize::MAX)) {
             return None;
@@ -256,7 +255,7 @@ impl Arrays {
         Some(Value::Number(o.elements().len() as f64))
     }
 
-    fn push1<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, v: Value<'gc>) -> Option<Value<'gc>> {
+    fn push1<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, v: Value<'scope>) -> Option<Value<'scope>> {
         let o = Self::dense_array(a, this)?;
         let n = o.elements().len();
         if n >= usize::try_from(u32::MAX).unwrap_or(usize::MAX) {
@@ -267,17 +266,17 @@ impl Arrays {
         Some(Value::Number((n + 1) as f64))
     }
 
-    fn push2<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, x: Value<'gc>, y: Value<'gc>) -> Option<Value<'gc>> {
+    fn push2<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, x: Value<'scope>, y: Value<'scope>) -> Option<Value<'scope>> {
         let o = Self::dense_array(a, this)?;
         Self::push_values(a, o, &[x, y])
     }
 
-    fn pop0<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>) -> Option<Value<'gc>> {
+    fn pop0<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>) -> Option<Value<'scope>> {
         let o = Self::dense_array(a, this)?;
         Some(o.elements().pop(a.mc).unwrap_or(Value::Undefined))
     }
 
-    fn pop<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn pop<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let (o, len) = Self::target(a, this)?;
         if len == 0.0 {
             Self::set_length(a, o, 0.0)?;
@@ -290,7 +289,7 @@ impl Arrays {
         Ok(v)
     }
 
-    fn shift<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn shift<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let (o, len) = Self::target(a, this)?;
         if len == 0.0 {
             Self::set_length(a, o, 0.0)?;
@@ -307,8 +306,8 @@ impl Arrays {
         Ok(first)
     }
 
-    fn move_range<'gc>(a: &mut Agent<'gc, '_>, o: JsObject<'gc>, from: f64, to: f64, count: f64) -> Result<(), Error> {
-        let step = |a: &mut Agent<'gc, '_>, f: f64, t: f64| -> Result<(), Error> {
+    fn move_range<'scope>(a: &mut Scope<'scope, '_>, o: JsObject<'scope>, from: f64, to: f64, count: f64) -> Result<(), Error> {
+        let step = |a: &mut Scope<'scope, '_>, f: f64, t: f64| -> Result<(), Error> {
             if let Some(v) = a.present_index(o, f)? {
                 a.set_index(o.into(), t, v)
             } else {
@@ -331,7 +330,7 @@ impl Arrays {
         Ok(())
     }
 
-    fn unshift<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn unshift<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let (o, len) = Self::target(a, this)?;
         #[expect(clippy::cast_precision_loss, reason = "argument count is far below 2^53")]
         let count = args.len() as f64;
@@ -348,7 +347,7 @@ impl Arrays {
         Ok((len + count).into())
     }
 
-    fn slice<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn slice<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let (o, len) = Self::target(a, this)?;
         let mut k = Self::relative(a, args.at(0), len, 0.0)?;
         let end = Self::relative(a, args.at(1), len, len)?;
@@ -366,7 +365,7 @@ impl Arrays {
         Ok(arr.into())
     }
 
-    fn splice<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn splice<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let (o, len) = Self::target(a, this)?;
         let start = Self::relative(a, args.at(0), len, 0.0)?;
         let items = args.get(2..).unwrap_or(&[]);
@@ -398,7 +397,7 @@ impl Arrays {
         Ok(removed.into())
     }
 
-    fn shift_tail<'gc>(a: &mut Agent<'gc, '_>, o: JsObject<'gc>, len: f64, start: f64, delete_count: f64, item_count: f64) -> Result<(), Error> {
+    fn shift_tail<'scope>(a: &mut Scope<'scope, '_>, o: JsObject<'scope>, len: f64, start: f64, delete_count: f64, item_count: f64) -> Result<(), Error> {
         if item_count < delete_count {
             Self::move_range(a, o, start + delete_count, start + item_count, len - start - delete_count)?;
             let mut k = len;
@@ -412,18 +411,18 @@ impl Arrays {
         Ok(())
     }
 
-    fn spreadable<'gc>(a: &mut Agent<'gc, '_>, v: Value<'gc>) -> Result<bool, Error> {
+    fn spreadable<'scope>(a: &mut Scope<'scope, '_>, v: Value<'scope>) -> Result<bool, Error> {
         if v.as_object().is_none() {
             return Ok(false);
         }
-        let s = a.get_symbol(v, a.realm.symbols.is_concat_spreadable, v)?;
+        let s = a.get_symbol(v, a.context.symbols.is_concat_spreadable, v)?;
         if s != Value::Undefined {
             return Ok(a.to_boolean(s));
         }
         a.is_array(v)
     }
 
-    fn concat<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn concat<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let o = a.to_object(this)?;
         let (arr, _) = Self::species_create(a, o, 0.0)?;
         let mut n = 0.0;
@@ -455,7 +454,7 @@ impl Arrays {
         Ok(arr.into())
     }
 
-    fn join<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn join<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let (o, len) = Self::target(a, this)?;
         let sep = match args.at(0).kind() {
             ValueKind::Undefined => a.string(","),
@@ -479,7 +478,7 @@ impl Arrays {
         Ok(a.string(&out).into())
     }
 
-    fn join_plain<'gc>(a: &Agent<'gc, '_>, o: JsObject<'gc>, len: f64, sep: &str) -> Option<String> {
+    fn join_plain<'scope>(a: &Scope<'scope, '_>, o: JsObject<'scope>, len: f64, sep: &str) -> Option<String> {
         #[derive(Clone, Copy)]
         enum Part<'s> {
             Number(f64),
@@ -499,7 +498,7 @@ impl Arrays {
             .iter()
             .map(|v| match v.kind() {
                 ValueKind::Number(x) => Part::Number(x),
-                ValueKind::String(s) => Part::Text(j8framework::Gc::get(s)),
+                ValueKind::String(s) => Part::Text(j8framework::ScopeLocal::get(s)),
                 ValueKind::Bool(true) => Part::Text("true"),
                 ValueKind::Bool(false) => Part::Text("false"),
                 _ => Part::Text(""),
@@ -529,17 +528,17 @@ impl Arrays {
         Some(out)
     }
 
-    fn to_string<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn to_string<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let o = a.to_object(this)?;
         let join = a.get_named(o.into(), "join")?;
         if a.is_callable(join) {
             return a.call(join, o.into(), &[]);
         }
-        let f = a.get_named(a.realm.object_proto.into(), "toString")?;
+        let f = a.get_named(a.context.object_proto.into(), "toString")?;
         a.call(f, o.into(), &[])
     }
 
-    fn to_locale_string<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn to_locale_string<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let (o, len) = Self::target(a, this)?;
         let mut out = String::new();
         let mut k = 0.0;
@@ -558,7 +557,7 @@ impl Arrays {
         Ok(a.string(&out).into())
     }
 
-    fn reverse<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn reverse<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let (o, len) = Self::target(a, this)?;
         let middle = libm::floor(len / 2.0);
         let mut lower = 0.0;
@@ -588,7 +587,7 @@ impl Arrays {
         Ok(o.into())
     }
 
-    fn index_of<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn index_of<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let (o, len) = Self::target(a, this)?;
         if len == 0.0 {
             return Ok((-1.0).into());
@@ -608,7 +607,7 @@ impl Arrays {
         Ok((-1.0).into())
     }
 
-    fn last_index_of<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn last_index_of<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let (o, len) = Self::target(a, this)?;
         if len == 0.0 {
             return Ok((-1.0).into());
@@ -628,11 +627,11 @@ impl Arrays {
         Ok((-1.0).into())
     }
 
-    fn same_value_zero<'gc>(x: Value<'gc>, y: Value<'gc>) -> bool {
+    fn same_value_zero<'scope>(x: Value<'scope>, y: Value<'scope>) -> bool {
         x == y || matches!((x.kind(), y.kind()), (ValueKind::Number(p), ValueKind::Number(q)) if p.is_nan() && q.is_nan())
     }
 
-    fn includes<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn includes<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let (o, len) = Self::target(a, this)?;
         if len == 0.0 {
             return Ok(false.into());
@@ -659,7 +658,7 @@ impl Arrays {
     }
 
     #[inline]
-    fn dense<'gc>(o: JsObject<'gc>, i: usize, run: &mut Option<j8framework::ElementRun<'gc>>) -> Option<Value<'gc>> {
+    fn dense<'scope>(o: JsObject<'scope>, i: usize, run: &mut Option<j8framework::ElementRun<'scope>>) -> Option<Value<'scope>> {
         if !o.is_array() {
             return None;
         }
@@ -676,7 +675,7 @@ impl Arrays {
     }
 
     #[inline]
-    fn load<'gc>(a: &mut Agent<'gc, '_>, o: JsObject<'gc>, k: f64, idx: Option<u32>, run: &mut Option<j8framework::ElementRun<'gc>>, skip_hole: bool) -> Result<Option<Value<'gc>>, Error> {
+    fn load<'scope>(a: &mut Scope<'scope, '_>, o: JsObject<'scope>, k: f64, idx: Option<u32>, run: &mut Option<j8framework::ElementRun<'scope>>, skip_hole: bool) -> Result<Option<Value<'scope>>, Error> {
         if let Some(i) = idx
             && let Some(v) = Self::dense(o, i as usize, run)
         {
@@ -686,7 +685,7 @@ impl Arrays {
     }
 
     #[inline]
-    fn append_fresh<'gc>(a: &Agent<'gc, '_>, arr: JsObject<'gc>, v: Value<'gc>, at: u32) -> bool {
+    fn append_fresh<'scope>(a: &Scope<'scope, '_>, arr: JsObject<'scope>, v: Value<'scope>, at: u32) -> bool {
         let items = arr.elements();
         if items.len() != at as usize {
             return false;
@@ -696,7 +695,7 @@ impl Arrays {
     }
 
     #[inline]
-    fn apply<'gc>(a: &mut Agent<'gc, '_>, cb: &Callback<'gc>, n: usize, v0: Value<'gc>, v1: impl FnOnce() -> Value<'gc>, v2: impl FnOnce() -> Value<'gc>, v3: impl FnOnce() -> Value<'gc>) -> Result<Value<'gc>, Error> {
+    fn apply<'scope>(a: &mut Scope<'scope, '_>, cb: &Callback<'scope>, n: usize, v0: Value<'scope>, v1: impl FnOnce() -> Value<'scope>, v2: impl FnOnce() -> Value<'scope>, v3: impl FnOnce() -> Value<'scope>) -> Result<Value<'scope>, Error> {
         let k = match cb.passed() {
             Some(p) => p.min(n),
             None => n,
@@ -712,7 +711,7 @@ impl Arrays {
 
     #[expect(clippy::too_many_arguments, reason = "one step of a visiting loop")]
     #[inline]
-    fn drive<'gc>(a: &mut Agent<'gc, '_>, cb: &Callback<'gc>, how: Visit, source: JsObject<'gc>, out: Option<JsObject<'gc>>, fresh: bool, k: f64, idx: Option<u32>, run: &mut Option<j8framework::ElementRun<'gc>>, to: &mut f64) -> Result<Option<Value<'gc>>, Error> {
+    fn drive<'scope>(a: &mut Scope<'scope, '_>, cb: &Callback<'scope>, how: Visit, source: JsObject<'scope>, out: Option<JsObject<'scope>>, fresh: bool, k: f64, idx: Option<u32>, run: &mut Option<j8framework::ElementRun<'scope>>, to: &mut f64) -> Result<Option<Value<'scope>>, Error> {
         let Some(v) = Self::load(a, source, k, idx, run, true)? else { return Ok(None) };
         let r = Self::apply(a, cb, 3, v, || Value::from(k), || source.into(), || Value::Undefined)?;
         match (how, out) {
@@ -739,7 +738,7 @@ impl Arrays {
 
     #[expect(clippy::inline_always, reason = "the per-element call has to sit in the specialised loop")]
     #[inline(always)]
-    fn call3<'gc>(a: &mut Agent<'gc, '_>, cb: &Callback<'gc>, arity: usize, quiet: bool, v: Value<'gc>, k: f64, source: JsObject<'gc>) -> Result<Value<'gc>, Error> {
+    fn call3<'scope>(a: &mut Scope<'scope, '_>, cb: &Callback<'scope>, arity: usize, quiet: bool, v: Value<'scope>, k: f64, source: JsObject<'scope>) -> Result<Value<'scope>, Error> {
         match arity {
             0 => Self::pass(a, cb, quiet, &[]),
             1 => Self::pass(a, cb, quiet, &[v]),
@@ -750,13 +749,13 @@ impl Arrays {
 
     #[expect(clippy::inline_always, reason = "the per-element call has to sit in the specialised loop")]
     #[inline(always)]
-    fn pass<'gc>(a: &mut Agent<'gc, '_>, cb: &Callback<'gc>, quiet: bool, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn pass<'scope>(a: &mut Scope<'scope, '_>, cb: &Callback<'scope>, quiet: bool, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         if quiet { cb.again(a, args) } else { cb.call(a, args) }
     }
 
     #[expect(clippy::inline_always, reason = "the per-element call has to sit in the specialised loop")]
     #[inline(always)]
-    fn call_fold<'gc>(a: &mut Agent<'gc, '_>, cb: &Callback<'gc>, arity: usize, quiet: bool, acc: Value<'gc>, v: Value<'gc>, k: f64) -> Result<Value<'gc>, Error> {
+    fn call_fold<'scope>(a: &mut Scope<'scope, '_>, cb: &Callback<'scope>, arity: usize, quiet: bool, acc: Value<'scope>, v: Value<'scope>, k: f64) -> Result<Value<'scope>, Error> {
         match arity {
             0 => Self::pass(a, cb, quiet, &[]),
             1 => Self::pass(a, cb, quiet, &[acc]),
@@ -767,7 +766,7 @@ impl Arrays {
 
     #[expect(clippy::inline_always, reason = "the per-element load has to sit in the specialised loop")]
     #[inline(always)]
-    fn dense_or<'gc>(a: &mut Agent<'gc, '_>, o: JsObject<'gc>, i: u32, run: &mut Option<j8framework::ElementRun<'gc>>, skip_hole: bool, quiet: &mut bool) -> Result<Option<Value<'gc>>, Error> {
+    fn dense_or<'scope>(a: &mut Scope<'scope, '_>, o: JsObject<'scope>, i: u32, run: &mut Option<j8framework::ElementRun<'scope>>, skip_hole: bool, quiet: &mut bool) -> Result<Option<Value<'scope>>, Error> {
         if let Some(v) = Self::dense(o, i as usize, run) {
             return Ok(Some(v));
         }
@@ -777,18 +776,18 @@ impl Arrays {
 
     #[cold]
     #[inline(never)]
-    fn absent<'gc>(a: &mut Agent<'gc, '_>, o: JsObject<'gc>, k: f64, skip_hole: bool) -> Result<Option<Value<'gc>>, Error> {
+    fn absent<'scope>(a: &mut Scope<'scope, '_>, o: JsObject<'scope>, k: f64, skip_hole: bool) -> Result<Option<Value<'scope>>, Error> {
         if skip_hole { a.present_index(o, k) } else { Ok(Some(a.get_index(o.into(), k)?)) }
     }
 
     #[cold]
     #[inline(never)]
-    fn write_at<'gc>(a: &mut Agent<'gc, '_>, arr: JsObject<'gc>, k: f64, v: Value<'gc>) -> Result<(), Error> {
+    fn write_at<'scope>(a: &mut Scope<'scope, '_>, arr: JsObject<'scope>, k: f64, v: Value<'scope>) -> Result<(), Error> {
         a.create_index(arr, k, v)
     }
 
     #[inline(never)]
-    fn each_fast<'gc>(a: &mut Agent<'gc, '_>, o: JsObject<'gc>, n: u32, cb: &Callback<'gc>, arity: usize) -> Result<(), Error> {
+    fn each_fast<'scope>(a: &mut Scope<'scope, '_>, o: JsObject<'scope>, n: u32, cb: &Callback<'scope>, arity: usize) -> Result<(), Error> {
         let mut run = None;
         let mut quiet = false;
         for i in 0..n {
@@ -800,7 +799,7 @@ impl Arrays {
     }
 
     #[inline(never)]
-    fn map_fast<'gc>(a: &mut Agent<'gc, '_>, o: JsObject<'gc>, arr: JsObject<'gc>, fresh: bool, n: u32, cb: &Callback<'gc>, arity: usize) -> Result<Value<'gc>, Error> {
+    fn map_fast<'scope>(a: &mut Scope<'scope, '_>, o: JsObject<'scope>, arr: JsObject<'scope>, fresh: bool, n: u32, cb: &Callback<'scope>, arity: usize) -> Result<Value<'scope>, Error> {
         let mut run = None;
         let mut quiet = false;
         for i in 0..n {
@@ -815,7 +814,7 @@ impl Arrays {
     }
 
     #[inline(never)]
-    fn filter_fast<'gc>(a: &mut Agent<'gc, '_>, o: JsObject<'gc>, arr: JsObject<'gc>, fresh: bool, n: u32, cb: &Callback<'gc>, arity: usize) -> Result<Value<'gc>, Error> {
+    fn filter_fast<'scope>(a: &mut Scope<'scope, '_>, o: JsObject<'scope>, arr: JsObject<'scope>, fresh: bool, n: u32, cb: &Callback<'scope>, arity: usize) -> Result<Value<'scope>, Error> {
         let mut run = None;
         let mut to = 0u32;
         let mut quiet = false;
@@ -835,7 +834,7 @@ impl Arrays {
     }
 
     #[inline(never)]
-    fn pred_fast<'gc>(a: &mut Agent<'gc, '_>, o: JsObject<'gc>, n: u32, cb: &Callback<'gc>, arity: usize, stop_on: bool) -> Result<Value<'gc>, Error> {
+    fn pred_fast<'scope>(a: &mut Scope<'scope, '_>, o: JsObject<'scope>, n: u32, cb: &Callback<'scope>, arity: usize, stop_on: bool) -> Result<Value<'scope>, Error> {
         let mut run = None;
         let mut quiet = false;
         for i in 0..n {
@@ -850,7 +849,7 @@ impl Arrays {
     }
 
     #[inline(never)]
-    fn find_fast<'gc>(a: &mut Agent<'gc, '_>, o: JsObject<'gc>, n: u32, cb: &Callback<'gc>, arity: usize, how: Find) -> Result<Value<'gc>, Error> {
+    fn find_fast<'scope>(a: &mut Scope<'scope, '_>, o: JsObject<'scope>, n: u32, cb: &Callback<'scope>, arity: usize, how: Find) -> Result<Value<'scope>, Error> {
         let backward = matches!(how, Find::LastValue | Find::LastIndex);
         let value = matches!(how, Find::Value | Find::LastValue);
         let mut run = None;
@@ -869,7 +868,7 @@ impl Arrays {
     }
 
     #[inline(never)]
-    fn fold_fast<'gc>(a: &mut Agent<'gc, '_>, o: JsObject<'gc>, n: u32, right: bool, cb: &Callback<'gc>, arity: usize, init: Option<Value<'gc>>) -> Result<Value<'gc>, Error> {
+    fn fold_fast<'scope>(a: &mut Scope<'scope, '_>, o: JsObject<'scope>, n: u32, right: bool, cb: &Callback<'scope>, arity: usize, init: Option<Value<'scope>>) -> Result<Value<'scope>, Error> {
         let mut run = None;
         let mut quiet = false;
         let mut i = 0u32;
@@ -899,7 +898,7 @@ impl Arrays {
         Ok(acc)
     }
 
-    fn visit<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>], how: Visit) -> Result<Value<'gc>, Error> {
+    fn visit<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>], how: Visit) -> Result<Value<'scope>, Error> {
         let (o, len) = Self::target(a, this)?;
         let (f, this_arg) = (args.at(0), args.at(1));
         Self::callback(a, f)?;
@@ -952,27 +951,27 @@ impl Arrays {
         })
     }
 
-    fn for_each<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn for_each<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Self::visit(a, this, args, Visit::ForEach)
     }
 
-    fn map<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn map<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Self::visit(a, this, args, Visit::Map)
     }
 
-    fn filter<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn filter<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Self::visit(a, this, args, Visit::Filter)
     }
 
-    fn some<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn some<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Self::visit(a, this, args, Visit::Some)
     }
 
-    fn every<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn every<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Self::visit(a, this, args, Visit::Every)
     }
 
-    fn find_by<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>], how: Find) -> Result<Value<'gc>, Error> {
+    fn find_by<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>], how: Find) -> Result<Value<'scope>, Error> {
         let (o, len) = Self::target(a, this)?;
         let (f, this_arg) = (args.at(0), args.at(1));
         Self::callback(a, f)?;
@@ -985,7 +984,7 @@ impl Arrays {
             return Self::find_fast(a, o, n, &cb, arity, how);
         }
         let mut run = None;
-        let mut hit = |a: &mut Agent<'gc, '_>, k: f64, idx: Option<u32>| -> Result<Option<Value<'gc>>, Error> {
+        let mut hit = |a: &mut Scope<'scope, '_>, k: f64, idx: Option<u32>| -> Result<Option<Value<'scope>>, Error> {
             let Some(v) = Self::load(a, o, k, idx, &mut run, false)? else { return Ok(None) };
             let r = Self::apply(a, &cb, 3, v, || Value::from(k), || o.into(), || Value::Undefined)?;
             Ok(a.to_boolean(r).then_some(if matches!(how, Find::Value | Find::LastValue) { v } else { Value::from(k) }))
@@ -1010,23 +1009,23 @@ impl Arrays {
         Ok(if matches!(how, Find::Value | Find::LastValue) { Value::Undefined } else { (-1.0).into() })
     }
 
-    fn find<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn find<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Self::find_by(a, this, args, Find::Value)
     }
 
-    fn find_index<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn find_index<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Self::find_by(a, this, args, Find::Index)
     }
 
-    fn find_last<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn find_last<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Self::find_by(a, this, args, Find::LastValue)
     }
 
-    fn find_last_index<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn find_last_index<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Self::find_by(a, this, args, Find::LastIndex)
     }
 
-    fn fold<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>], right: bool) -> Result<Value<'gc>, Error> {
+    fn fold<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>], right: bool) -> Result<Value<'scope>, Error> {
         let (o, len) = Self::target(a, this)?;
         let f = args.at(0);
         Self::callback(a, f)?;
@@ -1090,15 +1089,15 @@ impl Arrays {
         Ok(acc)
     }
 
-    fn reduce<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn reduce<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Self::fold(a, this, args, false)
     }
 
-    fn reduce_right<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn reduce_right<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Self::fold(a, this, args, true)
     }
 
-    fn fill<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn fill<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let (o, len) = Self::target(a, this)?;
         let mut k = Self::relative(a, args.at(1), len, 0.0)?;
         let end = Self::relative(a, args.at(2), len, len)?;
@@ -1113,7 +1112,7 @@ impl Arrays {
         Ok(o.into())
     }
 
-    fn copy_within<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn copy_within<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let (o, len) = Self::target(a, this)?;
         let to = Self::relative(a, args.at(0), len, 0.0)?;
         let from = Self::relative(a, args.at(1), len, 0.0)?;
@@ -1126,7 +1125,7 @@ impl Arrays {
     }
 
     #[expect(clippy::too_many_arguments, reason = "these are exactly the parameters of the spec's abstract operation")]
-    fn flatten<'gc>(a: &mut Agent<'gc, '_>, target: JsObject<'gc>, source: JsObject<'gc>, len: f64, start: f64, depth: f64, mapper: Value<'gc>, this_arg: Value<'gc>) -> Result<f64, Error> {
+    fn flatten<'scope>(a: &mut Scope<'scope, '_>, target: JsObject<'scope>, source: JsObject<'scope>, len: f64, start: f64, depth: f64, mapper: Value<'scope>, this_arg: Value<'scope>) -> Result<f64, Error> {
         let mut to = start;
         let mut k = 0.0;
         while k < len {
@@ -1152,7 +1151,7 @@ impl Arrays {
         Ok(to)
     }
 
-    fn flat<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn flat<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let (o, len) = Self::target(a, this)?;
         let depth = match args.at(0).kind() {
             ValueKind::Undefined => 1.0,
@@ -1163,7 +1162,7 @@ impl Arrays {
         Ok(arr.into())
     }
 
-    fn flat_map<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn flat_map<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let (o, len) = Self::target(a, this)?;
         Self::callback(a, args.at(0))?;
         let (arr, _) = Self::species_create(a, o, 0.0)?;
@@ -1171,7 +1170,7 @@ impl Arrays {
         Ok(arr.into())
     }
 
-    fn order<'gc>(a: &mut Agent<'gc, '_>, cmp: Option<&Callback<'gc>>, quiet: &mut bool, x: Value<'gc>, y: Value<'gc>) -> Result<Ordering, Error> {
+    fn order<'scope>(a: &mut Scope<'scope, '_>, cmp: Option<&Callback<'scope>>, quiet: &mut bool, x: Value<'scope>, y: Value<'scope>) -> Result<Ordering, Error> {
         Ok(match (x.bits() == ValueBits::UNDEFINED, y.bits() == ValueBits::UNDEFINED) {
             (true, true) => Ordering::Equal,
             (true, false) => Ordering::Greater,
@@ -1203,11 +1202,11 @@ impl Arrays {
         })
     }
 
-    fn sort_plain<'gc>(a: &Agent<'gc, '_>, items: &[Value<'gc>]) -> Option<Vec<Value<'gc>>> {
+    fn sort_plain<'scope>(a: &Scope<'scope, '_>, items: &[Value<'scope>]) -> Option<Vec<Value<'scope>>> {
         if !items.iter().all(|v| matches!(v.kind(), ValueKind::Number(_) | ValueKind::String(_) | ValueKind::Bool(_) | ValueKind::Null | ValueKind::Undefined)) {
             return None;
         }
-        let (undef, rest): (Vec<Value<'gc>>, Vec<Value<'gc>>) = items.iter().copied().partition(|v| *v == Value::Undefined);
+        let (undef, rest): (Vec<Value<'scope>>, Vec<Value<'scope>>) = items.iter().copied().partition(|v| *v == Value::Undefined);
         let numbers: Vec<f64> = rest.iter().filter_map(|v| v.as_number()).collect();
         let texts: Vec<String> = a.par().map(&numbers, &|&x| String::from(&*j8framework::number_text(x)));
         let mut next = texts.iter();
@@ -1215,7 +1214,7 @@ impl Arrays {
             .iter()
             .map(|v| match v.kind() {
                 ValueKind::Number(_) => next.next().map_or("", String::as_str),
-                ValueKind::String(s) => &**j8framework::Gc::get(s),
+                ValueKind::String(s) => &**j8framework::ScopeLocal::get(s),
                 ValueKind::Bool(true) => "true",
                 ValueKind::Bool(false) => "false",
                 _ => "null",
@@ -1231,7 +1230,7 @@ impl Arrays {
         Some(order.iter().map(|&i| rest[i as usize]).chain(undef).collect())
     }
 
-    fn merge_sort<'gc>(a: &mut Agent<'gc, '_>, f: Value<'gc>, mut v: Vec<Value<'gc>>) -> Result<Vec<Value<'gc>>, Error> {
+    fn merge_sort<'scope>(a: &mut Scope<'scope, '_>, f: Value<'scope>, mut v: Vec<Value<'scope>>) -> Result<Vec<Value<'scope>>, Error> {
         let n = v.len();
         if n <= 1 {
             return Ok(v);
@@ -1267,14 +1266,14 @@ impl Arrays {
         Ok(v)
     }
 
-    fn comparator<'gc>(a: &mut Agent<'gc, '_>, f: Value<'gc>) -> Result<(), Error> {
+    fn comparator<'scope>(a: &mut Scope<'scope, '_>, f: Value<'scope>) -> Result<(), Error> {
         if f != Value::Undefined && !a.is_callable(f) {
             return Err(a.throw(ErrorKind::Type, "The comparison function must be either a function or undefined"));
         }
         Ok(())
     }
 
-    fn sort<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn sort<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let f = args.at(0);
         Self::comparator(a, f)?;
         let (o, len) = Self::target(a, this)?;
@@ -1304,7 +1303,7 @@ impl Arrays {
         Ok(o.into())
     }
 
-    fn to_sorted<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn to_sorted<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let f = args.at(0);
         Self::comparator(a, f)?;
         let (o, len) = Self::target(a, this)?;
@@ -1326,7 +1325,7 @@ impl Arrays {
         Ok(arr.into())
     }
 
-    fn to_reversed<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn to_reversed<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let (o, len) = Self::target(a, this)?;
         let arr = Self::create(a, len, None)?;
         let mut k = 0.0;
@@ -1338,7 +1337,7 @@ impl Arrays {
         Ok(arr.into())
     }
 
-    fn to_spliced<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn to_spliced<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let (o, len) = Self::target(a, this)?;
         let start = Self::relative(a, args.at(0), len, 0.0)?;
         let items = args.get(2..).unwrap_or(&[]);
@@ -1374,7 +1373,7 @@ impl Arrays {
         Ok(arr.into())
     }
 
-    fn with<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn with<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let (o, len) = Self::target(a, this)?;
         let rel = a.to_integer_or_infinity(args.at(0))?;
         let at = if rel >= 0.0 { rel } else { len + rel };
@@ -1394,14 +1393,14 @@ impl Arrays {
 
 impl Installer<'_, '_> {
     pub(crate) fn array(&mut self) {
-        let proto = self.realm.array_proto;
+        let proto = self.context.array_proto;
         proto.borrow_mut(self.mc).kind = ObjectKind::Array;
         let ctor = self.constructor("Array", Arrays::array, proto, 1);
         self.method(ctor, "isArray", Arrays::is_array, 1);
         self.method(ctor, "of", Arrays::of, 0);
         self.method(ctor, "from", Arrays::from, 1);
-        let species = self.realm.named_native(self.mc, Arrays::species, "get [Symbol.species]", 0);
-        ctor.borrow_mut(self.mc).define_symbol(self.realm.symbols.species, Property { slot: Slot::Accessor { get: Some(species), set: None }, enumerable: false, writable: false, configurable: true });
+        let species = self.context.named_native(self.mc, Arrays::species, "get [Symbol.species]", 0);
+        ctor.borrow_mut(self.mc).define_symbol(self.context.symbols.species, Property { slot: Slot::Accessor { get: Some(species), set: None }, enumerable: false, writable: false, configurable: true });
         let methods: [(&str, j8framework::NativeFn, u32); 34] = [
             ("at", Arrays::at, 1),
             ("concat", Arrays::concat, 1),
@@ -1449,6 +1448,6 @@ impl Installer<'_, '_> {
         for name in ["at", "copyWithin", "entries", "fill", "find", "findIndex", "findLast", "findLastIndex", "flat", "flatMap", "includes", "keys", "toReversed", "toSorted", "toSpliced", "values"] {
             unscopables.borrow_mut(self.mc).define(name, Property::data(true.into()));
         }
-        proto.borrow_mut(self.mc).define_symbol(self.realm.symbols.unscopables, Property { slot: Slot::Data(unscopables.into()), enumerable: false, writable: false, configurable: true });
+        proto.borrow_mut(self.mc).define_symbol(self.context.symbols.unscopables, Property { slot: Slot::Data(unscopables.into()), enumerable: false, writable: false, configurable: true });
     }
 }

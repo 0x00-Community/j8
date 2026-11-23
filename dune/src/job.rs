@@ -3,7 +3,6 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use j8::Host;
-use j8::executor::Executor;
 use j8::frame::Source;
 use j8::platform::DefaultPlatform;
 
@@ -54,7 +53,7 @@ impl Job {
         j8::EventLoopSet::scope(platform, NonZeroUsize::MIN, |set| self.run_in::<H>(set, layer, jit))
     }
 
-    fn run_in<H: Host>(&self, set: &j8::EventLoopSet<'_, '_, Executor>, layer: Layer, jit: bool) -> ExitCode {
+    fn run_in<H: Host>(&self, set: &j8::EventLoopSet<'_, '_>, layer: Layer, jit: bool) -> ExitCode {
         let (script, args) = match self {
             Job::Main { file, args } => (Some(file.as_str()), args.as_slice()),
             _ => (None, &[][..]),

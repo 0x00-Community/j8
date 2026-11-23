@@ -3,7 +3,7 @@ use alloc::vec::Vec;
 use core::cell::RefCell;
 
 use j8executor::{DeoptFrame, Entry, Executor};
-use j8framework::{Agent, Error, ObjectData, Slot as PropSlot, Value, ValueBits};
+use j8framework::{Scope, Error, ObjectData, Slot as PropSlot, Value, ValueBits};
 
 use crate::build::{CONTEXT_TAG, OBJECT_TAG};
 use crate::ir::{Helper, Rep, Slot};
@@ -47,7 +47,7 @@ pub struct Ctx {
     pub buf: [u64; BUF_WORDS],
     pub entry: *mut core::ffi::c_void,
     pub exe: *const core::ffi::c_void,
-    pub agent: *mut core::ffi::c_void,
+    pub scope: *mut core::ffi::c_void,
     pub jit: *const Jit,
     pub error: Option<Error>,
 }
@@ -72,17 +72,17 @@ impl Ctx {
     pub const ARGS: i32 = 144;
     pub const BUF: i32 = 272;
 
-    pub fn new(e: &mut Entry<'_, '_, '_, '_>, jit: &Jit) -> Box<Ctx> {
+    pub fn new(e: &mut Entry<'_, '_, '_, '_, '_>, jit: &Jit) -> Box<Ctx> {
         let acc = e.acc().bits();
         let entry: *mut core::ffi::c_void = core::ptr::from_mut(e).cast();
         let exe = e.executor();
-        let mut c = Self::bare(exe, e.agent(), jit);
+        let mut c = Self::bare(exe, e.scope(), jit);
         c.acc = acc;
         c.entry = entry;
         c
     }
 
-    pub fn bare(exe: &Executor, a: &mut Agent<'_, '_>, jit: &Jit) -> Box<Ctx> {
+    pub fn bare(exe: &Executor, a: &mut Scope<'_, '_>, jit: &Jit) -> Box<Ctx> {
         let exe: *const core::ffi::c_void = core::ptr::from_ref(exe).cast();
         let agent: *mut core::ffi::c_void = core::ptr::from_mut(a).cast();
         if let Some(mut c) = jit.spare_ctx() {
@@ -95,7 +95,7 @@ impl Ctx {
             c.stack_floor = jit.stack_floor();
             c.entry = core::ptr::null_mut();
             c.exe = exe;
-            c.agent = agent;
+            c.scope = agent;
             c.error = None;
             return c;
         }
@@ -122,7 +122,7 @@ impl Ctx {
             buf: [0; BUF_WORDS],
             entry: core::ptr::null_mut(),
             exe,
-            agent,
+            scope: agent,
             jit,
             error: None,
         });
@@ -130,23 +130,23 @@ impl Ctx {
         c
     }
 
-    pub fn refresh_ptrs(&mut self, a: &Agent<'_, '_>) {
+    pub fn refresh_ptrs(&mut self, a: &Scope<'_, '_>) {
         let addr = |o: j8framework::JsObject| Value::Object(o).bits() & ValueBits::PAYLOAD;
-        self.global = addr(a.realm.global);
-        self.script_scope = addr(a.realm.script_scope);
-        self.object_proto = addr(a.realm.object_proto);
-        self.array_proto = addr(a.realm.array_proto);
-        self.indexed_cache = a.realm.indexed_cache_addr();
-        self.string_proto = addr(a.realm.string_proto);
-        self.chars = a.realm.chars.as_ptr() as usize as u64;
-        self.empty = Value::String(a.realm.empty).bits() & ValueBits::PAYLOAD;
+        self.global = addr(a.context.global);
+        self.script_scope = addr(a.context.script_scope);
+        self.object_proto = addr(a.context.object_proto);
+        self.array_proto = addr(a.context.array_proto);
+        self.indexed_cache = a.context.indexed_cache_addr();
+        self.string_proto = addr(a.context.string_proto);
+        self.chars = a.context.chars.as_ptr() as usize as u64;
+        self.empty = Value::String(a.context.empty).bits() & ValueBits::PAYLOAD;
     }
 
-    pub unsafe fn parts<'a>(&mut self) -> (&'a Executor, &'a mut Agent<'a, 'a>) {
-        unsafe { (&*self.exe.cast(), &mut *self.agent.cast()) }
+    pub unsafe fn parts<'a>(&mut self) -> (&'a Executor<'a>, &'a mut Scope<'a, 'a>) {
+        unsafe { (&*self.exe.cast(), &mut *self.scope.cast()) }
     }
 
-    pub unsafe fn entry<'a>(&mut self) -> &'a mut Entry<'a, 'a, 'a, 'a> {
+    pub unsafe fn entry<'a>(&mut self) -> &'a mut Entry<'a, 'a, 'a, 'a, 'a> {
         unsafe { &mut *self.entry.cast() }
     }
 
@@ -170,12 +170,12 @@ const _: () = assert!(core::mem::offset_of!(Ctx, chars) == 128);
 const _: () = assert!(core::mem::offset_of!(Ctx, empty) == 136);
 const _: () = assert!(Ctx::ARGS == 144 && Ctx::BUF == 272 && Ctx::STRING_PROTO == 120 && Ctx::CHARS == 128 && Ctx::EMPTY == 136);
 
-unsafe fn val<'gc>(w: u64) -> Value<'gc> {
+unsafe fn val<'scope>(w: u64) -> Value<'scope> {
     unsafe { Value::from_bits(w) }
 }
 
 #[expect(clippy::cast_possible_truncation, reason = "an i32 sign-extended to 64 bits")]
-unsafe fn boxed<'gc>(rep: Rep, bits: u64) -> Value<'gc> {
+unsafe fn boxed<'scope>(rep: Rep, bits: u64) -> Value<'scope> {
     match rep {
         Rep::I32 => Value::Number(f64::from(bits as i64 as i32)),
         Rep::F64 => Value::Number(f64::from_bits(bits)),
@@ -257,11 +257,11 @@ fn pack(out: j8framework::FastOut, v: Value<'_>) -> u64 {
     }
 }
 
-fn direct<'gc>(a: &mut Agent<'gc, '_>, index: u32, out: j8framework::FastOut, ops: &[u64], keep: &mut bool) -> Result<u64, Error> {
-    let v = |i: usize| unsafe { val::<'gc>(ops.get(i).copied().unwrap_or(ValueBits::UNDEFINED)) };
+fn direct<'scope>(a: &mut Scope<'scope, '_>, index: u32, out: j8framework::FastOut, ops: &[u64], keep: &mut bool) -> Result<u64, Error> {
+    let v = |i: usize| unsafe { val::<'scope>(ops.get(i).copied().unwrap_or(ValueBits::UNDEFINED)) };
     let this = v(1);
     let callee = v(0).as_object().and_then(|o| o.native());
-    let entry = a.realm.fast_builtins.get().get(usize::try_from(index).unwrap_or(usize::MAX));
+    let entry = a.context.fast_builtins.get().get(usize::try_from(index).unwrap_or(usize::MAX));
     let call = entry.filter(|e| callee.is_some_and(|n| core::ptr::fn_addr_eq(n.f, e.native))).map(|e| e.call);
     let got = match call {
         Some(j8framework::FastCall::A0(f)) if ops.len() == 2 => f(a, this),
@@ -296,9 +296,9 @@ fn direct_parts(packed: u64) -> (u32, j8framework::FastOut) {
     (packed as u32, out)
 }
 
-fn fast_of<'gc>(a: &mut Agent<'gc, '_>, index: u32, callee: Value<'gc>) -> Option<j8framework::FastCall> {
+fn fast_of<'scope>(a: &mut Scope<'scope, '_>, index: u32, callee: Value<'scope>) -> Option<j8framework::FastCall> {
     let native = callee.as_object().and_then(|o| o.native());
-    let entry = a.realm.fast_builtins.get().get(usize::try_from(index).unwrap_or(usize::MAX))?;
+    let entry = a.context.fast_builtins.get().get(usize::try_from(index).unwrap_or(usize::MAX))?;
     native.is_some_and(|n| core::ptr::fn_addr_eq(n.f, entry.native)).then_some(entry.call)
 }
 
@@ -376,8 +376,8 @@ sysv! {
     }
 }
 
-fn helper<'gc>(jit: &Jit, exe: &Executor, a: &mut Agent<'gc, '_>, h: Helper, ops: &[u64], epoch: u64, keep: &mut bool) -> Result<u64, Error> {
-    let v = |i: usize| unsafe { val::<'gc>(ops.get(i).copied().unwrap_or(ValueBits::UNDEFINED)) };
+fn helper<'scope>(jit: &Jit, exe: &Executor, a: &mut Scope<'scope, '_>, h: Helper, ops: &[u64], epoch: u64, keep: &mut bool) -> Result<u64, Error> {
+    let v = |i: usize| unsafe { val::<'scope>(ops.get(i).copied().unwrap_or(ValueBits::UNDEFINED)) };
     Ok(match h {
         Helper::Call => {
             let mut args = [Value::Undefined; ARGS_WORDS];
@@ -388,7 +388,7 @@ fn helper<'gc>(jit: &Jit, exe: &Executor, a: &mut Agent<'gc, '_>, h: Helper, ops
             a.call(v(0), v(1), &args[..n])?.bits()
         }
         Helper::Construct => {
-            let args: Vec<Value<'gc>> = (2..ops.len()).map(v).collect();
+            let args: Vec<Value<'scope>> = (2..ops.len()).map(v).collect();
             a.construct(v(0), &args, v(1))?.bits()
         }
         Helper::GetNamed(f, k) => {
@@ -424,7 +424,7 @@ fn helper<'gc>(jit: &Jit, exe: &Executor, a: &mut Agent<'gc, '_>, h: Helper, ops
         Helper::ModF => (f64::from_bits(ops[0]) % f64::from_bits(ops[1])).to_bits(),
         Helper::ToBoolean => u64::from(a.to_boolean(v(0))),
         Helper::StoreCell => {
-            let cell = unsafe { &*(ops[0] as usize as *const j8framework::ValueCell<'gc>) };
+            let cell = unsafe { &*(ops[0] as usize as *const j8framework::ValueCell<'scope>) };
             cell.set(a.mc, v(1));
             0
         }
@@ -459,7 +459,7 @@ fn helper<'gc>(jit: &Jit, exe: &Executor, a: &mut Agent<'gc, '_>, h: Helper, ops
         Helper::InlinePush(index) => return direct(a, index, j8framework::FastOut::Number, ops, keep),
         Helper::Alloc(k) => {
             let shape = jit.shape(k);
-            let proto = unsafe { val::<'gc>(ops[0] | OBJECT_TAG) }.as_object();
+            let proto = unsafe { val::<'scope>(ops[0] | OBJECT_TAG) }.as_object();
             let o = ObjectData::ordinary(a.mc, proto, ops.len() - 1);
             if let Some(s) = &shape {
                 o.fill(a.mc, unsafe { s.handle() }, (1..ops.len()).map(|i| PropSlot::Data(v(i))));
@@ -516,7 +516,7 @@ fn deopt(ctx: *mut Ctx, id: u64) -> u64 {
     if d.native {
         ctx.pending = 0;
         let thrown = match throw {
-            Some(Error::Exception(g)) => Some(a.local(&g)),
+            Some(Error::Exception) => Some(a.take_exception()),
             Some(other) => return ctx.fail(other),
             None => None,
         };
@@ -539,10 +539,10 @@ fn deopt(ctx: *mut Ctx, id: u64) -> u64 {
     }
 }
 
-fn frames<'gc>(a: &mut Agent<'gc, '_>, ctx: &Ctx, d: &crate::Deopt) -> Vec<DeoptFrame<'gc>> {
+fn frames<'scope>(a: &mut Scope<'scope, '_>, ctx: &Ctx, d: &crate::Deopt) -> Vec<DeoptFrame<'scope>> {
     let st = d.state();
-    let mut objs: Vec<Option<Value<'gc>>> = alloc::vec![None; st.objects.len()];
-    let get = |v: u32| -> Value<'gc> {
+    let mut objs: Vec<Option<Value<'scope>>> = alloc::vec![None; st.objects.len()];
+    let get = |v: u32| -> Value<'scope> {
         let (rep, src) = d.value(v);
         let bits = match src {
             crate::Src::Buf(i) => ctx.buf[i as usize],
@@ -551,7 +551,7 @@ fn frames<'gc>(a: &mut Agent<'gc, '_>, ctx: &Ctx, d: &crate::Deopt) -> Vec<Deopt
         unsafe { boxed(rep, bits) }
     };
     let cell = RefCell::new(&mut objs);
-    let slot = |s: &Slot| -> Value<'gc> {
+    let slot = |s: &Slot| -> Value<'scope> {
         match s {
             Slot::Value(v) => get(*v),
             Slot::Virtual(i) => cell.borrow()[*i as usize].unwrap_or(Value::Undefined),
@@ -561,7 +561,7 @@ fn frames<'gc>(a: &mut Agent<'gc, '_>, ctx: &Ctx, d: &crate::Deopt) -> Vec<Deopt
     for i in (0..st.objects.len()).rev() {
         let o = &st.objects[i];
         let proto = get(o.proto).as_object();
-        let fields: Vec<Value<'gc>> = o.fields.iter().map(slot).collect();
+        let fields: Vec<Value<'scope>> = o.fields.iter().map(slot).collect();
         let ob = ObjectData::ordinary(a.mc, proto, fields.len());
         if let Some(s) = &o.shape {
             ob.fill(a.mc, unsafe { s.handle() }, fields.into_iter().map(PropSlot::Data));
@@ -570,7 +570,7 @@ fn frames<'gc>(a: &mut Agent<'gc, '_>, ctx: &Ctx, d: &crate::Deopt) -> Vec<Deopt
     }
     for (c, idx, s) in &st.writes {
         let env = get(*c);
-        let env = unsafe { val::<'gc>((env.bits() & ValueBits::PAYLOAD) | CONTEXT_TAG) }.as_context();
+        let env = unsafe { val::<'scope>((env.bits() & ValueBits::PAYLOAD) | CONTEXT_TAG) }.as_context();
         if let Some(env) = env {
             j8framework::Env::set(env, a.mc, *idx as usize, slot(s));
         }
@@ -584,7 +584,7 @@ fn frames<'gc>(a: &mut Agent<'gc, '_>, ctx: &Ctx, d: &crate::Deopt) -> Vec<Deopt
         context: {
             let c = slot(&f.context);
             if c.as_context().is_some() || c.bits() == ValueBits::UNDEFINED || c.bits() == ValueBits::UNINIT { c } else {
-                unsafe { val::<'gc>((c.bits() & ValueBits::PAYLOAD) | CONTEXT_TAG) }
+                unsafe { val::<'scope>((c.bits() & ValueBits::PAYLOAD) | CONTEXT_TAG) }
             }
         },
         acc: slot(&f.acc),

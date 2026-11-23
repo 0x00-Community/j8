@@ -12,7 +12,7 @@ don't work as they are: run that work on a thread or a reactor of your own, and 
 
 ## `async fn` bindings
 
-An `async fn` takes **owned** parameters only: no `self`, `&str`, `&mut Agent`, `This` or `Rest`. Its future runs after
+An `async fn` takes **owned** parameters only: no `self`, `&str`, `&mut Scope`, `This` or `Rest`. Its future runs after
 the call has returned. The call returns a promise at once, and the result is converted with `IntoJs` when the promise
 settles (so `Io<T>`-style errors reject it).
 
@@ -58,7 +58,7 @@ impl Fs {
 
 ## Hand-made promises: `j8::Glue`
 
-When the async work needs `&self`, the `Agent`, or should be cancellable, write a normal method and make the promise
+When the async work needs `&self`, the `Scope`, or should be cancellable, write a normal method and make the promise
 yourself:
 
 - `Glue::spawn(a, future)` creates a pending promise, hands `future` to the event loop and returns the promise;
@@ -67,7 +67,7 @@ yourself:
 ```rust,ignore
 #[j8::class]
 impl Timer {
-    fn wait<'gc>(&self, a: &mut Agent<'gc, '_>, ms: f64) -> Result<Value<'gc>, Error> {
+    fn wait<'scope>(&self, a: &mut Scope<'scope, '_>, ms: f64) -> Result<Value<'scope>, Error> {
         let sleep = Sleep { cancelled: self.cancelled.clone(), /* … */ };
         Glue::spawn(a, async move { Glue::settle(sleep.await) })
     }
@@ -103,7 +103,8 @@ impl Math {
 - It takes its argument the way `await` does: a promise is watched directly (a `then` patched onto it is not called), a
   thenable is adopted, any other value counts as already fulfilled;
 - the fulfilled value is converted with `FromJs` into `T` on the runtime thread; a rejection, or a value that doesn't
-  convert, comes out as `Err(Error::Exception(reason))`, so `?` rejects the binding's own promise with the same reason;
+  convert, comes out as `Err(Error::Parked(ticket))` (the reason parked in the isolate), so `?` rejects the binding's own
+  promise with the same reason;
 - settling wakes the future, so it works with `run_until_idle`, and when polled elsewhere;
 - a promise that never settles keeps the future pending, like `await` in JS: the event loop keeps waiting.
 

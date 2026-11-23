@@ -1,4 +1,4 @@
-use j8framework::{Agent, Error, Value};
+use j8framework::{Scope, Error, Value};
 
 use crate::{Args, Installer};
 
@@ -33,48 +33,48 @@ impl Math {
         if x.is_nan() || x == 0.0 { x } else { x.signum() }
     }
 
-    fn unary<'gc, const N: usize>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn unary<'scope, const N: usize>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Ok((UNARY[N].1)(a.to_number(args.at(0))?).into())
     }
 
-    fn unary1<'gc, const N: usize>(_: &mut Agent<'gc, '_>, _: Value<'gc>, v: Value<'gc>) -> Option<Value<'gc>> {
+    fn unary1<'scope, const N: usize>(_: &mut Scope<'scope, '_>, _: Value<'scope>, v: Value<'scope>) -> Option<Value<'scope>> {
         match v.kind() {
             j8framework::ValueKind::Number(x) => Some((UNARY[N].1)(x).into()),
             _ => None,
         }
     }
 
-    fn extreme2<'gc>(a: &mut Agent<'gc, '_>, x: Value<'gc>, y: Value<'gc>, max: bool) -> Option<Value<'gc>> {
+    fn extreme2<'scope>(a: &mut Scope<'scope, '_>, x: Value<'scope>, y: Value<'scope>, max: bool) -> Option<Value<'scope>> {
         if !matches!((x.kind(), y.kind()), (j8framework::ValueKind::Number(_), j8framework::ValueKind::Number(_))) {
             return None;
         }
         Self::extreme(a, &[x, y], max).ok()
     }
 
-    fn max2<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, x: Value<'gc>, y: Value<'gc>) -> Option<Value<'gc>> {
+    fn max2<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, x: Value<'scope>, y: Value<'scope>) -> Option<Value<'scope>> {
         Self::extreme2(a, x, y, true)
     }
 
-    fn min2<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, x: Value<'gc>, y: Value<'gc>) -> Option<Value<'gc>> {
+    fn min2<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, x: Value<'scope>, y: Value<'scope>) -> Option<Value<'scope>> {
         Self::extreme2(a, x, y, false)
     }
 
-    fn round<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn round<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let x = a.to_number(args.at(0))?;
         let f = libm::floor(x);
         Ok((if x - f >= 0.5 { f + 1.0 } else { f }).into())
     }
 
-    fn pow<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn pow<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let (x, y) = (args.at(0), args.at(1));
         a.binary(j8framework::BinaryOp::Exp, x, y)
     }
 
-    fn atan2<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn atan2<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Ok(libm::atan2(a.to_number(args.at(0))?, a.to_number(args.at(1))?).into())
     }
 
-    fn extreme<'gc>(a: &mut Agent<'gc, '_>, args: &[Value<'gc>], max: bool) -> Result<Value<'gc>, Error> {
+    fn extreme<'scope>(a: &mut Scope<'scope, '_>, args: &[Value<'scope>], max: bool) -> Result<Value<'scope>, Error> {
         let mut acc = if max { f64::NEG_INFINITY } else { f64::INFINITY };
         for &v in args {
             let x = a.to_number(v)?;
@@ -92,15 +92,15 @@ impl Math {
         Ok(acc.into())
     }
 
-    fn max<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn max<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Self::extreme(a, args, true)
     }
 
-    fn min<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn min<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Self::extreme(a, args, false)
     }
 
-    fn hypot<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn hypot<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let mut sum = 0.0;
         for &v in args {
             let x = a.to_number(v)?;
@@ -152,6 +152,6 @@ impl Installer<'_, '_> {
         for (name, v) in [("PI", core::f64::consts::PI), ("E", core::f64::consts::E), ("LN2", core::f64::consts::LN_2), ("LN10", core::f64::consts::LN_10), ("LOG2E", core::f64::consts::LOG2_E), ("LOG10E", core::f64::consts::LOG10_E), ("SQRT2", core::f64::consts::SQRT_2), ("SQRT1_2", core::f64::consts::FRAC_1_SQRT_2)] {
             self.set(m, name, v.into());
         }
-        self.set(self.realm.global, "Math", m.into());
+        self.set(self.context.global, "Math", m.into());
     }
 }

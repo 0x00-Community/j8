@@ -8,8 +8,8 @@ embedders link them in (statically, or exported from the executable for addons l
 
 ```rust,ignore
 // inside an `Isolate::enter`, with the agent of the context the addon belongs to
-let exports = j8napi::Env::open(&mut agent, napi_register_module_v1)?;
-agent.set_named(agent.realm.global.into(), "addon", exports)?;
+let exports = j8napi::Env::open(&mut scope, napi_register_module_v1)?;
+scope.set_named(scope.context.global.into(), "addon", exports)?;
 ```
 
 `Env::open` makes the addon's environment (living as long as the context's global object), calls the register function

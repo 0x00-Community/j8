@@ -1,7 +1,7 @@
 use j8framework::ValueKind;
 use alloc::boxed::Box;
 
-use j8framework::{Agent, Backing, BufferData, ElementKind, Error, ErrorKind, JsObject, ObjectKind, Property, Slot, Value, ViewData};
+use j8framework::{Scope, Backing, BufferData, ElementKind, Error, ErrorKind, JsObject, ObjectKind, Property, Slot, Value, ViewData};
 
 use crate::{Args, Installer};
 
@@ -33,7 +33,7 @@ impl Rmw {
 }
 
 impl Buffers {
-    pub(crate) fn allocate<'gc>(a: &mut Agent<'gc, '_>, proto: JsObject<'gc>, len: usize, max: Option<usize>, shared: bool) -> Result<JsObject<'gc>, Error> {
+    pub(crate) fn allocate<'scope>(a: &mut Scope<'scope, '_>, proto: JsObject<'scope>, len: usize, max: Option<usize>, shared: bool) -> Result<JsObject<'scope>, Error> {
         if len > MAX_BYTES || max.is_some_and(|m| m > MAX_BYTES) {
             return Err(a.throw(ErrorKind::Range, "Array buffer allocation failed"));
         }
@@ -46,7 +46,7 @@ impl Buffers {
         Ok(j8framework::ObjectData { kind: ObjectKind::ArrayBuffer(Box::new(data)), proto: Some(proto), ..j8framework::ObjectData::default() }.alloc(a.mc))
     }
 
-    fn this_buffer<'gc>(a: &Agent<'gc, '_>, this: Value<'gc>, shared: bool) -> Result<JsObject<'gc>, Error> {
+    fn this_buffer<'scope>(a: &Scope<'scope, '_>, this: Value<'scope>, shared: bool) -> Result<JsObject<'scope>, Error> {
         match this.kind() {
             ValueKind::Object(o) if matches!(&o.borrow().kind, ObjectKind::ArrayBuffer(b) if b.shared == shared) => Ok(o),
             _ => Err(a.throw(ErrorKind::Type, if shared { "Method called on a non-SharedArrayBuffer" } else { "Method called on a non-ArrayBuffer" })),
@@ -60,7 +60,7 @@ impl Buffers {
         }
     }
 
-    fn construct_with<'gc>(a: &mut Agent<'gc, '_>, args: &[Value<'gc>], new_target: Value<'gc>, shared: bool) -> Result<Value<'gc>, Error> {
+    fn construct_with<'scope>(a: &mut Scope<'scope, '_>, args: &[Value<'scope>], new_target: Value<'scope>, shared: bool) -> Result<Value<'scope>, Error> {
         if new_target == Value::Undefined {
             return Err(a.throw(ErrorKind::Type, if shared { "Constructor SharedArrayBuffer requires 'new'" } else { "Constructor ArrayBuffer requires 'new'" }));
         }
@@ -75,39 +75,39 @@ impl Buffers {
         if max.is_some_and(|m| len > m) {
             return Err(a.throw(ErrorKind::Range, "byteLength exceeds maxByteLength"));
         }
-        let fallback = if shared { a.realm.shared_array_buffer_proto } else { a.realm.array_buffer_proto };
+        let fallback = if shared { a.context.shared_array_buffer_proto } else { a.context.array_buffer_proto };
         let proto = a.proto_from_ctor(new_target, fallback)?;
         Ok(Self::allocate(a, proto, len, max, shared)?.into())
     }
 
-    fn array_buffer<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn array_buffer<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Self::construct_with(a, args, a.new_target, false)
     }
 
-    fn shared_array_buffer<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn shared_array_buffer<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Self::construct_with(a, args, a.new_target, true)
     }
 
-    fn is_view<'gc>(_: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn is_view<'scope>(_: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Ok(matches!(args.at(0).kind(), ValueKind::Object(o) if matches!(o.borrow().kind, ObjectKind::TypedArray(..) | ObjectKind::DataView(_))).into())
     }
 
-    fn species<'gc>(_: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn species<'scope>(_: &mut Scope<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Ok(this)
     }
 
-    fn byte_length<'gc, const SHARED: bool>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn byte_length<'scope, const SHARED: bool>(a: &mut Scope<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let o = Self::this_buffer(a, this, SHARED)?;
         Ok(Self::number(Self::info(o).0.unwrap_or(0)))
     }
 
-    fn number<'gc>(n: usize) -> Value<'gc> {
+    fn number<'scope>(n: usize) -> Value<'scope> {
         #[expect(clippy::cast_precision_loss, reason = "byte count is at most 2^31")]
         let x = n as f64;
         x.into()
     }
 
-    fn max_byte_length<'gc, const SHARED: bool>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn max_byte_length<'scope, const SHARED: bool>(a: &mut Scope<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let o = Self::this_buffer(a, this, SHARED)?;
         let (len, max) = Self::info(o);
         Ok(Self::number(match len {
@@ -116,23 +116,23 @@ impl Buffers {
         }))
     }
 
-    fn resizable<'gc, const SHARED: bool>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn resizable<'scope, const SHARED: bool>(a: &mut Scope<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let o = Self::this_buffer(a, this, SHARED)?;
         Ok(Self::info(o).1.is_some().into())
     }
 
-    fn detached<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn detached<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let o = Self::this_buffer(a, this, false)?;
         Ok(Self::info(o).0.is_none().into())
     }
 
-    fn set_bytes<'gc>(a: &Agent<'gc, '_>, o: JsObject<'gc>, bytes: Option<Backing>) {
+    fn set_bytes<'scope>(a: &Scope<'scope, '_>, o: JsObject<'scope>, bytes: Option<Backing>) {
         if let ObjectKind::ArrayBuffer(b) = &mut o.borrow_mut(a.mc).kind {
             b.bytes = bytes;
         }
     }
 
-    fn take_bytes<'gc>(a: &Agent<'gc, '_>, o: JsObject<'gc>) -> Option<Backing> {
+    fn take_bytes<'scope>(a: &Scope<'scope, '_>, o: JsObject<'scope>) -> Option<Backing> {
         match &mut o.borrow_mut(a.mc).kind {
             ObjectKind::ArrayBuffer(b) => b.bytes.take(),
             _ => None,
@@ -149,14 +149,14 @@ impl Buffers {
         x
     }
 
-    fn update<'gc>(a: &Agent<'gc, '_>, o: JsObject<'gc>, at: usize, size: usize, f: impl Fn(u64) -> Option<u64>) -> u64 {
+    fn update<'scope>(a: &Scope<'scope, '_>, o: JsObject<'scope>, at: usize, size: usize, f: impl Fn(u64) -> Option<u64>) -> u64 {
         match &mut o.borrow_mut(a.mc).kind {
             ObjectKind::ArrayBuffer(b) => b.bytes.as_mut().map_or(0, |bytes| bytes.update(at, size, f)),
             _ => 0,
         }
     }
 
-    fn resize_with<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>], shared: bool) -> Result<Value<'gc>, Error> {
+    fn resize_with<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>], shared: bool) -> Result<Value<'scope>, Error> {
         let o = Self::this_buffer(a, this, shared)?;
         let Some(max) = Self::info(o).1 else {
             return Err(a.throw(ErrorKind::Type, "Method called on a fixed-length buffer"));
@@ -173,15 +173,15 @@ impl Buffers {
         }
     }
 
-    fn resize<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn resize<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Self::resize_with(a, this, args, false)
     }
 
-    fn grow<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn grow<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Self::resize_with(a, this, args, true)
     }
 
-    pub(crate) fn species_constructor<'gc>(a: &mut Agent<'gc, '_>, o: Value<'gc>, fallback: Value<'gc>) -> Result<Value<'gc>, Error> {
+    pub(crate) fn species_constructor<'scope>(a: &mut Scope<'scope, '_>, o: Value<'scope>, fallback: Value<'scope>) -> Result<Value<'scope>, Error> {
         let c = a.get_named(o, "constructor")?;
         if c == Value::Undefined {
             return Ok(fallback);
@@ -189,7 +189,7 @@ impl Buffers {
         if c.as_object().is_none() {
             return Err(a.throw(ErrorKind::Type, "object.constructor is not an object"));
         }
-        let s = a.get_symbol(c, a.realm.symbols.species, c)?;
+        let s = a.get_symbol(c, a.context.symbols.species, c)?;
         if s.is_nullish() {
             return Ok(fallback);
         }
@@ -199,18 +199,18 @@ impl Buffers {
         Err(a.throw(ErrorKind::Type, "object.constructor[Symbol.species] is not a constructor"))
     }
 
-    fn global_ctor<'gc>(a: &Agent<'gc, '_>, name: &str) -> Value<'gc> {
-        a.realm.global.borrow().own(a.mc, name).unwrap_or_default()
+    fn global_ctor<'scope>(a: &Scope<'scope, '_>, name: &str) -> Value<'scope> {
+        a.context.global.borrow().own(a.mc, name).unwrap_or_default()
     }
 
-    fn slice_with<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>], shared: bool) -> Result<Value<'gc>, Error> {
+    fn slice_with<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>], shared: bool) -> Result<Value<'scope>, Error> {
         let o = Self::this_buffer(a, this, shared)?;
         let Some(len) = Self::info(o).0 else {
             return Err(a.throw(ErrorKind::Type, "Cannot slice a detached ArrayBuffer"));
         };
         #[expect(clippy::cast_precision_loss, reason = "byte count is at most 2^31")]
         let lenf = len as f64;
-        let rel = |a: &mut Agent<'gc, '_>, v: Value<'gc>, default: f64| -> Result<f64, Error> {
+        let rel = |a: &mut Scope<'scope, '_>, v: Value<'scope>, default: f64| -> Result<f64, Error> {
             if v == Value::Undefined {
                 return Ok(default);
             }
@@ -228,7 +228,7 @@ impl Buffers {
         if !ok {
             return Err(a.throw(ErrorKind::Type, "species constructor did not return a usable buffer"));
         }
-        if j8framework::Gc::ptr_eq(n, o) {
+        if j8framework::ScopeLocal::ptr_eq(n, o) {
             return Err(a.throw(ErrorKind::Type, "species constructor returned the same buffer"));
         }
         #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "clamped to [0, len]")]
@@ -251,15 +251,15 @@ impl Buffers {
         Ok(n.into())
     }
 
-    fn slice<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn slice<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Self::slice_with(a, this, args, false)
     }
 
-    fn shared_slice<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn shared_slice<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Self::slice_with(a, this, args, true)
     }
 
-    fn transfer_with<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>], keep_resizable: bool) -> Result<Value<'gc>, Error> {
+    fn transfer_with<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>], keep_resizable: bool) -> Result<Value<'scope>, Error> {
         let o = Self::this_buffer(a, this, false)?;
         let new_len = match args.at(0).kind() {
             ValueKind::Undefined => Self::info(o).0.unwrap_or(0),
@@ -273,7 +273,7 @@ impl Buffers {
         if max.is_some_and(|m| new_len > m) {
             return Err(a.throw(ErrorKind::Range, "new length exceeds maxByteLength"));
         }
-        let n = Self::allocate(a, a.realm.array_buffer_proto, 0, max, false)?;
+        let n = Self::allocate(a, a.context.array_buffer_proto, 0, max, false)?;
         let mut bytes = Self::take_bytes(a, o).unwrap_or_else(|| Backing::from(alloc::vec::Vec::new()));
         if !bytes.resize(new_len) {
             let mut v = bytes.into_vec();
@@ -284,15 +284,15 @@ impl Buffers {
         Ok(n.into())
     }
 
-    fn transfer<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn transfer<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Self::transfer_with(a, this, args, true)
     }
 
-    fn transfer_fixed<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn transfer_fixed<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Self::transfer_with(a, this, args, false)
     }
 
-    fn data_view<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn data_view<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let new_target = a.new_target;
         if new_target == Value::Undefined {
             return Err(a.throw(ErrorKind::Type, "Constructor DataView requires 'new'"));
@@ -317,7 +317,7 @@ impl Buffers {
                 Some(n)
             }
         };
-        let proto = a.proto_from_ctor(new_target, a.realm.data_view_proto)?;
+        let proto = a.proto_from_ctor(new_target, a.context.data_view_proto)?;
         let Some(len) = Self::info(buffer).0 else { return Err(a.throw(ErrorKind::Type, "Cannot construct a DataView on a detached ArrayBuffer")) };
         if offset > len || length.is_some_and(|n| offset + n > len) {
             return Err(a.throw(ErrorKind::Range, "Invalid DataView length"));
@@ -326,7 +326,7 @@ impl Buffers {
         Ok(j8framework::ObjectData { kind: ObjectKind::DataView(view), proto: Some(proto), ..j8framework::ObjectData::default() }.alloc(a.mc).into())
     }
 
-    fn this_view<'gc>(a: &Agent<'gc, '_>, this: Value<'gc>) -> Result<ViewData<'gc>, Error> {
+    fn this_view<'scope>(a: &Scope<'scope, '_>, this: Value<'scope>) -> Result<ViewData<'scope>, Error> {
         match this.kind() {
             ValueKind::Object(o) => match o.borrow().kind {
                 ObjectKind::DataView(v) => Ok(v),
@@ -336,27 +336,27 @@ impl Buffers {
         }
     }
 
-    fn view_buffer<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn view_buffer<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Ok(Self::this_view(a, this)?.buffer.into())
     }
 
-    fn view_byte_length<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn view_byte_length<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let v = Self::this_view(a, this)?;
-        match Agent::view_length(&v, 1) {
+        match Scope::view_length(&v, 1) {
             Some(n) => Ok(Self::number(n)),
             None => Err(a.throw(ErrorKind::Type, "DataView is out of bounds")),
         }
     }
 
-    fn view_byte_offset<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn view_byte_offset<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let v = Self::this_view(a, this)?;
-        match Agent::view_length(&v, 1) {
+        match Scope::view_length(&v, 1) {
             Some(_) => Ok(Self::number(v.offset)),
             None => Err(a.throw(ErrorKind::Type, "DataView is out of bounds")),
         }
     }
 
-    fn get_value<'gc, const K: usize>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn get_value<'scope, const K: usize>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let kind = ElementKind::ALL[K];
         let v = Self::this_view(a, this)?;
         let index = a.to_index(args.at(0))?;
@@ -370,15 +370,15 @@ impl Buffers {
         Ok(a.element_value(kind.decode(bytes)))
     }
 
-    fn view_access<'gc>(a: &Agent<'gc, '_>, v: &ViewData<'gc>, index: usize, kind: ElementKind) -> Result<usize, Error> {
-        let Some(len) = Agent::view_length(v, 1) else { return Err(a.throw(ErrorKind::Type, "DataView is out of bounds")) };
+    fn view_access<'scope>(a: &Scope<'scope, '_>, v: &ViewData<'scope>, index: usize, kind: ElementKind) -> Result<usize, Error> {
+        let Some(len) = Scope::view_length(v, 1) else { return Err(a.throw(ErrorKind::Type, "DataView is out of bounds")) };
         if index + kind.size() > len {
             return Err(a.throw(ErrorKind::Range, "Offset is outside the bounds of the DataView"));
         }
         Ok(v.offset + index)
     }
 
-    fn set_value<'gc, const K: usize>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn set_value<'scope, const K: usize>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let kind = ElementKind::ALL[K];
         let v = Self::this_view(a, this)?;
         let index = a.to_index(args.at(0))?;
@@ -397,7 +397,7 @@ impl Buffers {
         Ok(Value::Undefined)
     }
 
-    fn atomic_target<'gc>(a: &mut Agent<'gc, '_>, ta: Value<'gc>, index: Value<'gc>, waitable: bool) -> Result<(ElementKind, JsObject<'gc>, usize), Error> {
+    fn atomic_target<'scope>(a: &mut Scope<'scope, '_>, ta: Value<'scope>, index: Value<'scope>, waitable: bool) -> Result<(ElementKind, JsObject<'scope>, usize), Error> {
         let (kind, view, len) = Self::integer_array(a, ta, waitable)?;
         let i = a.to_index(index)?;
         if i >= len {
@@ -406,14 +406,14 @@ impl Buffers {
         Ok((kind, view.buffer, view.offset + i * kind.size()))
     }
 
-    fn integer_array<'gc>(a: &mut Agent<'gc, '_>, ta: Value<'gc>, waitable: bool) -> Result<(ElementKind, ViewData<'gc>, usize), Error> {
+    fn integer_array<'scope>(a: &mut Scope<'scope, '_>, ta: Value<'scope>, waitable: bool) -> Result<(ElementKind, ViewData<'scope>, usize), Error> {
         let Some((kind, view)) = (match ta.kind() {
-            ValueKind::Object(o) => Agent::typed_array(o),
+            ValueKind::Object(o) => Scope::typed_array(o),
             _ => None,
         }) else {
             return Err(a.throw(ErrorKind::Type, "Atomics operation on a non-TypedArray"));
         };
-        let Some(len) = Agent::view_length(&view, kind.size()) else { return Err(a.throw(ErrorKind::Type, "TypedArray is out of bounds")) };
+        let Some(len) = Scope::view_length(&view, kind.size()) else { return Err(a.throw(ErrorKind::Type, "TypedArray is out of bounds")) };
         let ok = if waitable {
             matches!(kind, ElementKind::Int32 | ElementKind::BigInt64)
         } else {
@@ -425,7 +425,7 @@ impl Buffers {
         Ok((kind, view, len))
     }
 
-    fn revalidate<'gc>(a: &Agent<'gc, '_>, buffer: JsObject<'gc>, at: usize, kind: ElementKind) -> Result<(), Error> {
+    fn revalidate<'scope>(a: &Scope<'scope, '_>, buffer: JsObject<'scope>, at: usize, kind: ElementKind) -> Result<(), Error> {
         match Self::info(buffer).0 {
             None => Err(a.throw(ErrorKind::Type, "TypedArray is detached")),
             Some(len) if at + kind.size() > len => Err(a.throw(ErrorKind::Range, "Atomics access index out of range")),
@@ -433,7 +433,7 @@ impl Buffers {
         }
     }
 
-    fn atomic_value<'gc>(a: &mut Agent<'gc, '_>, kind: ElementKind, v: Value<'gc>) -> Result<j8framework::Element, Error> {
+    fn atomic_value<'scope>(a: &mut Scope<'scope, '_>, kind: ElementKind, v: Value<'scope>) -> Result<j8framework::Element, Error> {
         if kind.is_bigint() { Ok(j8framework::Element::BigInt(a.to_bigint(v)?)) } else { Ok(j8framework::Element::Number(a.to_integer_or_infinity(v)?)) }
     }
 
@@ -443,7 +443,7 @@ impl Buffers {
         u64::from_le_bytes(x)
     }
 
-    fn rmw<'gc>(a: &mut Agent<'gc, '_>, args: &[Value<'gc>], op: Rmw) -> Result<Value<'gc>, Error> {
+    fn rmw<'scope>(a: &mut Scope<'scope, '_>, args: &[Value<'scope>], op: Rmw) -> Result<Value<'scope>, Error> {
         let (kind, buffer, at) = Self::atomic_target(a, args.at(0), args.at(1), false)?;
         let v = Self::atomic_value(a, kind, args.at(2))?;
         Self::revalidate(a, buffer, at, kind)?;
@@ -452,31 +452,31 @@ impl Buffers {
         Ok(a.element_value(kind.decode(&old.to_le_bytes()[..kind.size()])))
     }
 
-    fn add<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn add<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Self::rmw(a, args, Rmw::Add)
     }
 
-    fn sub<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn sub<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Self::rmw(a, args, Rmw::Sub)
     }
 
-    fn and<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn and<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Self::rmw(a, args, Rmw::And)
     }
 
-    fn or<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn or<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Self::rmw(a, args, Rmw::Or)
     }
 
-    fn xor<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn xor<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Self::rmw(a, args, Rmw::Xor)
     }
 
-    fn exchange<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn exchange<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Self::rmw(a, args, Rmw::Exchange)
     }
 
-    fn compare_exchange<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn compare_exchange<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let (kind, buffer, at) = Self::atomic_target(a, args.at(0), args.at(1), false)?;
         let expected = Self::atomic_value(a, kind, args.at(2))?;
         let replacement = Self::atomic_value(a, kind, args.at(3))?;
@@ -486,14 +486,14 @@ impl Buffers {
         Ok(a.element_value(kind.decode(&old.to_le_bytes()[..kind.size()])))
     }
 
-    fn load<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn load<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let (kind, buffer, at) = Self::atomic_target(a, args.at(0), args.at(1), false)?;
         Self::revalidate(a, buffer, at, kind)?;
         let x = Self::update(a, buffer, at, kind.size(), |_| None);
         Ok(a.element_value(kind.decode(&x.to_le_bytes()[..kind.size()])))
     }
 
-    fn store<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn store<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let (kind, buffer, at) = Self::atomic_target(a, args.at(0), args.at(1), false)?;
         let v = Self::atomic_value(a, kind, args.at(2))?;
         Self::revalidate(a, buffer, at, kind)?;
@@ -505,7 +505,7 @@ impl Buffers {
         })
     }
 
-    fn is_lock_free<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn is_lock_free<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let n = a.to_integer_or_infinity(args.at(0))?;
         Ok((n == 1.0 || n == 2.0 || n == 4.0 || n == 8.0).into())
     }
@@ -514,13 +514,13 @@ impl Buffers {
         matches!(&buffer.borrow().kind, ObjectKind::ArrayBuffer(b) if b.shared)
     }
 
-    fn wait<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn wait<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let (_, view, _) = Self::integer_array(a, args.at(0), true)?;
         if !Self::shared(view.buffer) {
             return Err(a.throw(ErrorKind::Type, "Atomics.wait requires a shared TypedArray"));
         }
         let (kind, buffer, at) = Self::atomic_target(a, args.at(0), args.at(1), true)?;
-        let v = if kind.is_bigint() { j8framework::Element::BigInt(Agent::wrap_bigint(&a.to_bigint(args.at(2))?, 64, true)) } else { j8framework::Element::Number(f64::from(a.to_int32(args.at(2))?)) };
+        let v = if kind.is_bigint() { j8framework::Element::BigInt(Scope::wrap_bigint(&a.to_bigint(args.at(2))?, 64, true)) } else { j8framework::Element::Number(f64::from(a.to_int32(args.at(2))?)) };
         let t = a.to_number(args.at(3))?;
         let _ = if t.is_nan() { f64::INFINITY } else { t.max(0.0) };
         let cur = Self::update(a, buffer, at, kind.size(), |_| None);
@@ -528,7 +528,7 @@ impl Buffers {
         Ok(a.string(result).into())
     }
 
-    fn notify<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn notify<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let (_, _, _) = Self::atomic_target(a, args.at(0), args.at(1), true)?;
         if args.at(2) != Value::Undefined {
             a.to_integer_or_infinity(args.at(2))?;
@@ -536,7 +536,7 @@ impl Buffers {
         Ok(0.0.into())
     }
 
-    fn pause<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn pause<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         match args.at(0).kind() {
             ValueKind::Undefined => Ok(Value::Undefined),
             ValueKind::Number(x) if x.is_finite() && libm::trunc(x) == x => Ok(Value::Undefined),
@@ -545,14 +545,14 @@ impl Buffers {
     }
 }
 
-impl<'gc> Installer<'_, 'gc> {
+impl<'scope> Installer<'_, 'scope> {
     pub(crate) fn buffers(&mut self) {
-        let r = self.realm;
-        let tag = |o: JsObject<'gc>, t: &str| {
+        let r = self.context;
+        let tag = |o: JsObject<'scope>, t: &str| {
             let v = self.text(t);
             o.borrow_mut(self.mc).define_symbol(r.symbols.to_string_tag, Property { slot: Slot::Data(v), enumerable: false, writable: false, configurable: true });
         };
-        let species = |c: JsObject<'gc>| {
+        let species = |c: JsObject<'scope>| {
             let g = r.named_native(self.mc, Buffers::species, "get [Symbol.species]", 0);
             c.borrow_mut(self.mc).define_symbol(r.symbols.species, Property { slot: Slot::Accessor { get: Some(g), set: None }, enumerable: false, writable: false, configurable: true });
         };

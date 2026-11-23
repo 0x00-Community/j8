@@ -14,7 +14,7 @@ J8_TEST262_UPDATE=1 cargo test --release --test test262 -- <路径>             
 ```
 
 - 每个用例一个子进程、10 秒超时；结果分 pass / fail / unsupported（j8 报 `Error::Unsupported`）/ skip / timeout / crash，按目录汇总；
-- 基线 `tests/test262.passing`：过了的用例一行一个，当前 **42,443** 行；不带参数时只跑它做回归检查；
+- 基线 `tests/test262.passing`：过了的用例一行一个，当前 **42,500** 行；不带参数时只跑它做回归检查；
 - 非严格模式与 `onlyStrict`（严格模式跑）；模块用例先跑 harness 脚本再跑模块；
 - `$262` 宿主对象提供 `global` / `evalScript` / `gc` / `detachArrayBuffer`（`createRealm` 抛 TypeError）；
 - 不支持写法的报错行号含拼进去的 harness。

@@ -25,19 +25,17 @@ const CASES: &[Case] = &[
 fn outcome(jit: bool, text: &str) -> String {
     let platform = DefaultPlatform::default();
     let mut isolate = Isolate::new(&platform, CreateParams::default());
-    let mut executor = if jit { Executor::default().with_tier(j8jit::Jit::from(0)) } else { Executor::default() };
-    let cx = isolate.enter(|scope| scope.persist(scope.context(&Builtins)));
-    let r = isolate.run(&mut executor, &cx, &Source { text, file: "typeof.js" });
-    isolate.enter(|scope| {
-        let realm = scope.context_of(&cx);
-        let mut a = scope.agent(realm, &executor);
+    let executor = if jit { Executor::default().with_tier(j8jit::Jit::from(0)) } else { Executor::default() };
+    let cx = isolate.create_context(&Builtins);
+    let r = executor.eval(&mut isolate, &cx, &Source { text, file: "typeof.js" });
+    isolate.enter(&cx, &executor, |a| {
         match r {
             Ok(g) => {
                 let v = a.local(&g);
                 String::from(&**a.to_string(v).expect("ToString"))
             }
-            Err(Error::Exception(g)) => {
-                let v = a.local(&g);
+            Err(Error::Exception) => {
+                let v = a.take_exception();
                 let s = String::from(&**a.to_string(v).expect("ToString"));
                 format!("Uncaught {s}")
             }

@@ -10,7 +10,7 @@ pub fn expand(attr: TokenStream, mut item: ItemFn) -> syn::Result<TokenStream> {
         m.js = syn::parse2::<LitStr>(attr)?.value();
     }
     let owner = quote!(super);
-    let wrapper = m.wrapper(&m.js, &owner);
+    let wrapper = m.wrapper(&m.js, &owner, &owner);
     let (rust, js, length, w) = (&m.rust, &m.js, m.length, m.wrapper_name());
     let vis = &item.vis;
     Ok(quote! {
@@ -26,7 +26,7 @@ pub fn expand(attr: TokenStream, mut item: ItemFn) -> syn::Result<TokenStream> {
 
             pub const NATIVE: ::j8::frame::NativeFn = #w;
 
-            pub fn install<'gc>(a: &mut ::j8::frame::Agent<'gc, '_>, target: ::j8::frame::JsObject<'gc>) -> ::j8::frame::JsObject<'gc> {
+            pub fn install<'scope>(a: &mut ::j8::frame::Scope<'scope, '_>, target: ::j8::frame::JsObject<'scope>) -> ::j8::frame::JsObject<'scope> {
                 ::j8::Glue::function(a, target, #js, NATIVE, #length)
             }
         }

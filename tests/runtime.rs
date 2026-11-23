@@ -102,3 +102,26 @@ fn promise_handles_await_js_promises() {
         assert_eq!(rt.text(&r), "late 8|plain 10|rejected no|resolved 42|thenable 16");
     });
 }
+
+#[test]
+fn rejections_keep_their_own_reasons() {
+    let platform = Async::platform(DefaultPlatform::default());
+    j8::EventLoopSet::scope(&platform, std::num::NonZeroUsize::MIN, |set| {
+        let rt = Async::runtime(set, Executor::default()).expect("runtime");
+        let src = "
+            const out = [];
+            let rejectA, rejectB;
+            const a = new Promise((_, r) => rejectA = r);
+            const b = new Promise((_, r) => rejectB = r);
+            later.double(a).catch(e => out.push('a:' + e));
+            later.double(b).catch(e => out.push('b:' + e));
+            later.echo(0).then(() => { rejectB('second'); rejectA('first'); });
+            let after = 'unset';
+            later.echo(0).then(() => { try { after = 'clean'; } catch (e) { after = 'stale ' + e; } });
+        ";
+        rt.eval(src, "main.js").expect("script runs");
+        rt.run_until_idle().expect("loop runs");
+        let r = rt.eval("out.sort().join('|') + '|' + after", "check.js").expect("runs");
+        assert_eq!(rt.text(&r), "a:first|b:second|clean");
+    });
+}

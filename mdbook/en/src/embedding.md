@@ -18,7 +18,7 @@ j8 = "0.4"                                          # default feature `runtime`:
 | `j8::runtime!` | declare a runtime: which bound types go where, plus a JS prelude |
 | `j8::Runtime` | a ready execution environment: `eval`, `eval_module`, `run_until_idle`, `set`, `text`, `enter` |
 | `j8::Host` / `j8::HostPlatform` | the trait `runtime!` implements / the platform serving its native modules (stateless: runtimes may share one) |
-| `j8::frame` | `j8framework`: `Agent`, `Error`, `ErrorKind`, `Value`, `Platform`, `Source` … |
+| `j8::frame` | `j8framework`: `Scope`, `Error`, `ErrorKind`, `Value`, `Platform`, `Source` … |
 | `j8::platform::DefaultPlatform` | the standard-library platform |
 | `j8::executor::Executor` | the bytecode executor; `with_tier` adds the JIT |
 | `j8::Promise<T>` | a JS promise awaited from Rust |
@@ -32,7 +32,7 @@ use std::num::NonZeroUsize;
 use std::process::ExitCode;
 
 use j8::executor::Executor;
-use j8::frame::{Agent, Error, ErrorKind};
+use j8::frame::{Scope, Error, ErrorKind};
 use j8::platform::DefaultPlatform;
 
 /// Machine access, kept in `__j8_native.env`
@@ -45,7 +45,7 @@ impl Env {
     }
 
     /// Throws a TypeError when the variable is missing
-    fn must(a: &mut Agent<'_, '_>, name: &str) -> Result<String, Error> {
+    fn must(a: &mut Scope<'_, '_>, name: &str) -> Result<String, Error> {
         std::env::var(name).map_err(|_| a.throw(ErrorKind::Type, &format!("{name} is not set")))
     }
 }
@@ -81,8 +81,8 @@ fn main() -> ExitCode {
                 println!("{}", rt.text(&g));
                 ExitCode::SUCCESS
             }
-            Err(Error::Exception(g)) => {
-                eprintln!("Uncaught {}", rt.text(&g));
+            Err(Error::Exception) => {
+                eprintln!("Uncaught {}", rt.exception_text());
                 ExitCode::FAILURE
             }
             Err(e) => {
@@ -103,8 +103,8 @@ The steps are always the same:
 3. `X::runtime(set, executor)` creates the isolate and the context on the least loaded loop thread, installs everything
    and runs the preludes. A prelude that throws comes back as `Err` here. Every later call (`eval`, `enter`,
    `run_until_idle`) is a message to that thread and waits for its answer; any host thread may make it.
-4. `rt.eval(text, file)` runs a script and returns a `Global` (a handle that outlives the call); `rt.text(&g)` turns it
-   into a string with ToString.
+4. `rt.eval(text, file)` runs a script and returns a `ScopeGlobal<'p, ValueBrand>` (a root that outlives the
+   call); `rt.text(&g)` turns it into a string with ToString.
 5. `rt.run_until_idle()` waits until no async host work is left. Call it after every `eval` if your bindings have
    `async fn`s or return promises; otherwise those promises never settle.
 
@@ -167,14 +167,15 @@ rt.eval(&call, file)?;
 rt.run_until_idle()?;
 ```
 
-For lower-level work, `rt.enter(|a| …)` gives you the context's `Agent` (`a.get_named`, `a.call`, `a.local`,
-`a.to_string` …). `Value`s can't leave the closure; keep a `Global` (`a.global(v)`) for later.
+For lower-level work, `rt.enter(|a| …)` gives you the context's `Scope` (`a.get_named`, `a.call`, `a.local`,
+`a.to_string` …). `Value`s can't leave the closure; root them with `a.global(v)` (a
+`ScopeGlobal<'p, ValueBrand>`) for later.
 
 ## What an Error means
 
 | Variant | Meaning | What hosts do |
 |---|---|---|
-| `Error::Exception(g)` | JS threw; `g` is the thrown value | `rt.text(&g)` ⇒ `Uncaught …` |
+| `Error::Exception` | JS threw; the value waits in the isolate's pending slot, as in V8 | `rt.exception_text()` ⇒ `Uncaught …` |
 | `Error::Syntax(msg)` | the source doesn't parse | print `msg` |
 | `Error::Unsupported(msg)` | syntax j8 doesn't support yet | print `msg` |
 

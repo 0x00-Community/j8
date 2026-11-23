@@ -5,7 +5,7 @@ use j8framework::{Descriptor, Key, Property};
 use crate::convert::Ffi;
 use crate::{Attributes, Callback, CallbackInfo, Env, Handle, PropertyDescriptor, Status, napi};
 
-impl Env {
+impl Env<'_> {
     fn label<'s>(name: *const c_char, length: usize) -> Result<alloc::borrow::Cow<'s, str>, Status> {
         if name.is_null() { Ok(alloc::borrow::Cow::Borrowed("")) } else { Ffi::utf8(name, length) }
     }
@@ -13,7 +13,7 @@ impl Env {
 
 napi! {
     fn napi_create_function(env, utf8name: *const c_char, length: usize, cb: Callback, data: *mut c_void, result: *mut Handle) {
-        let a = env.agent()?;
+        let a = env.scope()?;
         let cb = cb.ok_or(Status::InvalidArg)?;
         let name = Env::label(utf8name, length)?;
         env.out(result, env.function(a, &name, cb, data, false).into())
@@ -30,7 +30,7 @@ napi! {
         result: *mut Handle,
     ) {
         env.preamble()?;
-        let a = env.agent()?;
+        let a = env.scope()?;
         let cb = constructor.ok_or(Status::InvalidArg)?;
         let name = Env::label(utf8name, length)?;
         let ctor = env.function(a, &name, cb, data, true);
@@ -71,7 +71,7 @@ napi! {
 
     fn napi_call_function(env, recv: Handle, func: Handle, argc: usize, argv: *const Handle, result: *mut Handle) {
         env.preamble()?;
-        let a = env.agent()?;
+        let a = env.scope()?;
         let this = env.value(recv)?;
         let f = env.callable(a, func)?;
         let args = env.values(argv, argc)?;
@@ -84,7 +84,7 @@ napi! {
 
     fn napi_new_instance(env, constructor: Handle, argc: usize, argv: *const Handle, result: *mut Handle) {
         env.preamble()?;
-        let a = env.agent()?;
+        let a = env.scope()?;
         let c = env.value(constructor)?;
         if !a.is_constructor(c) {
             return Err(Status::FunctionExpected);

@@ -2,7 +2,7 @@ use crate::ValueKind;
 use alloc::vec::Vec;
 
 use crate::property::validate;
-use crate::{Agent, Descriptor, Error, ErrorKind, JsObject, Key, ObjectKind, Property, PropertyKey, Slot, Value};
+use crate::{Scope, Descriptor, Error, ErrorKind, JsObject, Key, ObjectKind, Property, PropertyKey, Slot, Value};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Trap {
@@ -41,8 +41,8 @@ impl Trap {
     }
 }
 
-impl<'gc> Agent<'gc, '_> {
-    pub fn proxy_parts(&self, o: JsObject<'gc>) -> Option<Result<(JsObject<'gc>, JsObject<'gc>), Error>> {
+impl<'scope> Scope<'scope, '_> {
+    pub fn proxy_parts(&self, o: JsObject<'scope>) -> Option<Result<(JsObject<'scope>, JsObject<'scope>), Error>> {
         if o.is_plain() {
             return None;
         }
@@ -55,7 +55,7 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    fn trap(&mut self, handler: JsObject<'gc>, trap: Trap) -> Result<Option<Value<'gc>>, Error> {
+    fn trap(&mut self, handler: JsObject<'scope>, trap: Trap) -> Result<Option<Value<'scope>>, Error> {
         match (self.get_named(handler.into(), trap.name())?).kind() {
             ValueKind::Undefined | ValueKind::Null => Ok(None),
             f if self.is_callable(f.into()) => Ok(Some(f.into())),
@@ -63,7 +63,7 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    pub fn key_value(&self, key: Key<'_, 'gc>) -> Value<'gc> {
+    pub fn key_value(&self, key: Key<'_, 'scope>) -> Value<'scope> {
         match key {
             Key::Str(s) => self.string(s).into(),
             Key::Sym(s) => s.into(),
@@ -74,7 +74,7 @@ impl<'gc> Agent<'gc, '_> {
         self.throw(ErrorKind::Type, &alloc::format!("proxy invariant violated: {what}"))
     }
 
-    pub(crate) fn proxy_get_prototype_of(&mut self, target: JsObject<'gc>, handler: JsObject<'gc>) -> Result<Option<JsObject<'gc>>, Error> {
+    pub(crate) fn proxy_get_prototype_of(&mut self, target: JsObject<'scope>, handler: JsObject<'scope>) -> Result<Option<JsObject<'scope>>, Error> {
         let Some(trap) = self.trap(handler, Trap::GetPrototypeOf)? else { return self.get_prototype_of(target) };
         let proto = match (self.call(trap, handler.into(), &[target.into()])?).kind() {
             ValueKind::Object(p) => Some(p),
@@ -91,7 +91,7 @@ impl<'gc> Agent<'gc, '_> {
         Ok(proto)
     }
 
-    pub(crate) fn proxy_set_prototype_of(&mut self, target: JsObject<'gc>, handler: JsObject<'gc>, proto: Option<JsObject<'gc>>) -> Result<bool, Error> {
+    pub(crate) fn proxy_set_prototype_of(&mut self, target: JsObject<'scope>, handler: JsObject<'scope>, proto: Option<JsObject<'scope>>) -> Result<bool, Error> {
         let Some(trap) = self.trap(handler, Trap::SetPrototypeOf)? else { return self.set_prototype_of(target, proto) };
         let r = self.call(trap, handler.into(), &[target.into(), Value::from_proto(proto)])?;
         if !self.to_boolean(r) {
@@ -107,7 +107,7 @@ impl<'gc> Agent<'gc, '_> {
         Ok(true)
     }
 
-    pub(crate) fn proxy_is_extensible(&mut self, target: JsObject<'gc>, handler: JsObject<'gc>) -> Result<bool, Error> {
+    pub(crate) fn proxy_is_extensible(&mut self, target: JsObject<'scope>, handler: JsObject<'scope>) -> Result<bool, Error> {
         let Some(trap) = self.trap(handler, Trap::IsExtensible)? else { return self.is_extensible(target) };
         let r = self.call(trap, handler.into(), &[target.into()])?;
         let r = self.to_boolean(r);
@@ -117,7 +117,7 @@ impl<'gc> Agent<'gc, '_> {
         Ok(r)
     }
 
-    pub(crate) fn proxy_prevent_extensions(&mut self, target: JsObject<'gc>, handler: JsObject<'gc>) -> Result<bool, Error> {
+    pub(crate) fn proxy_prevent_extensions(&mut self, target: JsObject<'scope>, handler: JsObject<'scope>) -> Result<bool, Error> {
         let Some(trap) = self.trap(handler, Trap::PreventExtensions)? else { return self.prevent_extensions(target) };
         let r = self.call(trap, handler.into(), &[target.into()])?;
         let r = self.to_boolean(r);
@@ -127,7 +127,7 @@ impl<'gc> Agent<'gc, '_> {
         Ok(r)
     }
 
-    pub(crate) fn proxy_get_own_property(&mut self, target: JsObject<'gc>, handler: JsObject<'gc>, key: Key<'_, 'gc>) -> Result<Option<Property<'gc>>, Error> {
+    pub(crate) fn proxy_get_own_property(&mut self, target: JsObject<'scope>, handler: JsObject<'scope>, key: Key<'_, 'scope>) -> Result<Option<Property<'scope>>, Error> {
         let Some(trap) = self.trap(handler, Trap::GetOwnPropertyDescriptor)? else { return self.get_own_property(target, key) };
         let k = self.key_value(key);
         let result = self.call(trap, handler.into(), &[target.into(), k])?;
@@ -163,7 +163,7 @@ impl<'gc> Agent<'gc, '_> {
         Ok(Some(full))
     }
 
-    pub fn from_partial_descriptor(&mut self, d: &Descriptor<'gc>) -> Value<'gc> {
+    pub fn from_partial_descriptor(&mut self, d: &Descriptor<'scope>) -> Value<'scope> {
         let o = self.object();
         let data = o.borrow_mut(self.mc);
         if let Some(v) = d.value {
@@ -188,7 +188,7 @@ impl<'gc> Agent<'gc, '_> {
         o.into()
     }
 
-    pub(crate) fn proxy_define_own_property(&mut self, target: JsObject<'gc>, handler: JsObject<'gc>, key: Key<'_, 'gc>, desc: Descriptor<'gc>) -> Result<bool, Error> {
+    pub(crate) fn proxy_define_own_property(&mut self, target: JsObject<'scope>, handler: JsObject<'scope>, key: Key<'_, 'scope>, desc: Descriptor<'scope>) -> Result<bool, Error> {
         let Some(trap) = self.trap(handler, Trap::DefineProperty)? else { return self.define_own_property(target, key, desc) };
         let k = self.key_value(key);
         let d = self.from_partial_descriptor(&desc);
@@ -223,7 +223,7 @@ impl<'gc> Agent<'gc, '_> {
         Ok(true)
     }
 
-    pub(crate) fn proxy_has(&mut self, target: JsObject<'gc>, handler: JsObject<'gc>, key: Key<'_, 'gc>) -> Result<bool, Error> {
+    pub(crate) fn proxy_has(&mut self, target: JsObject<'scope>, handler: JsObject<'scope>, key: Key<'_, 'scope>) -> Result<bool, Error> {
         let Some(trap) = self.trap(handler, Trap::Has)? else { return self.has_key(target, key) };
         let k = self.key_value(key);
         let r = self.call(trap, handler.into(), &[target.into(), k])?;
@@ -239,7 +239,7 @@ impl<'gc> Agent<'gc, '_> {
         Ok(r)
     }
 
-    pub(crate) fn proxy_get(&mut self, target: JsObject<'gc>, handler: JsObject<'gc>, key: Key<'_, 'gc>, receiver: Value<'gc>) -> Result<Value<'gc>, Error> {
+    pub(crate) fn proxy_get(&mut self, target: JsObject<'scope>, handler: JsObject<'scope>, key: Key<'_, 'scope>, receiver: Value<'scope>) -> Result<Value<'scope>, Error> {
         let Some(trap) = self.trap(handler, Trap::Get)? else { return self.object_get(target, key, receiver) };
         let k = self.key_value(key);
         let v = self.call(trap, handler.into(), &[target.into(), k, receiver])?;
@@ -255,7 +255,7 @@ impl<'gc> Agent<'gc, '_> {
         Ok(v)
     }
 
-    pub(crate) fn proxy_set(&mut self, target: JsObject<'gc>, handler: JsObject<'gc>, key: Key<'_, 'gc>, value: Value<'gc>, receiver: Value<'gc>) -> Result<bool, Error> {
+    pub(crate) fn proxy_set(&mut self, target: JsObject<'scope>, handler: JsObject<'scope>, key: Key<'_, 'scope>, value: Value<'scope>, receiver: Value<'scope>) -> Result<bool, Error> {
         let Some(trap) = self.trap(handler, Trap::Set)? else { return self.object_set(target, key, value, receiver) };
         let k = self.key_value(key);
         let r = self.call(trap, handler.into(), &[target.into(), k, value, receiver])?;
@@ -274,7 +274,7 @@ impl<'gc> Agent<'gc, '_> {
         Ok(true)
     }
 
-    pub(crate) fn proxy_delete(&mut self, target: JsObject<'gc>, handler: JsObject<'gc>, key: Key<'_, 'gc>) -> Result<bool, Error> {
+    pub(crate) fn proxy_delete(&mut self, target: JsObject<'scope>, handler: JsObject<'scope>, key: Key<'_, 'scope>) -> Result<bool, Error> {
         let Some(trap) = self.trap(handler, Trap::DeleteProperty)? else { return self.delete_property(target, key) };
         let k = self.key_value(key);
         let r = self.call(trap, handler.into(), &[target.into(), k])?;
@@ -291,13 +291,13 @@ impl<'gc> Agent<'gc, '_> {
         Ok(true)
     }
 
-    pub(crate) fn proxy_own_keys(&mut self, target: JsObject<'gc>, handler: JsObject<'gc>) -> Result<Vec<PropertyKey<'gc>>, Error> {
+    pub(crate) fn proxy_own_keys(&mut self, target: JsObject<'scope>, handler: JsObject<'scope>) -> Result<Vec<PropertyKey<'scope>>, Error> {
         let Some(trap) = self.trap(handler, Trap::OwnKeys)? else { return self.own_property_keys(target) };
         let arr = self.call(trap, handler.into(), &[target.into()])?;
         if arr.as_object().is_none() {
             return Err(self.throw(ErrorKind::Type, "ownKeys trap result must be an object"));
         }
-        let mut keys: Vec<PropertyKey<'gc>> = Vec::new();
+        let mut keys: Vec<PropertyKey<'scope>> = Vec::new();
         for v in self.list_from_array_like(arr)? {
             let k = match v.kind() {
                 ValueKind::String(s) => PropertyKey::String(s),
@@ -321,7 +321,7 @@ impl<'gc> Agent<'gc, '_> {
         if extensible && fixed.is_empty() {
             return Ok(keys);
         }
-        let mut unchecked: Vec<PropertyKey<'gc>> = keys.clone();
+        let mut unchecked: Vec<PropertyKey<'scope>> = keys.clone();
         for k in &fixed {
             match unchecked.iter().position(|x| Self::same_key(x, k)) {
                 Some(i) => _ = unchecked.remove(i),
@@ -343,22 +343,22 @@ impl<'gc> Agent<'gc, '_> {
         Ok(keys)
     }
 
-    fn same_key(a: &PropertyKey<'gc>, b: &PropertyKey<'gc>) -> bool {
+    fn same_key(a: &PropertyKey<'scope>, b: &PropertyKey<'scope>) -> bool {
         match (a, b) {
             (PropertyKey::String(x), PropertyKey::String(y)) => ***x == ***y,
-            (PropertyKey::Symbol(x), PropertyKey::Symbol(y)) => crate::Gc::ptr_eq(*x, *y),
+            (PropertyKey::Symbol(x), PropertyKey::Symbol(y)) => crate::ScopeLocal::ptr_eq(*x, *y),
             _ => false,
         }
     }
 
-    pub fn proxy_call(&mut self, o: JsObject<'gc>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    pub fn proxy_call(&mut self, o: JsObject<'scope>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let (target, handler) = self.proxy_parts(o).expect("a proxy")?;
         let Some(trap) = self.trap(handler, Trap::Apply)? else { return self.call(target.into(), this, args) };
         let list = self.array(args.to_vec());
         self.call(trap, handler.into(), &[target.into(), this, list.into()])
     }
 
-    pub fn proxy_construct(&mut self, o: JsObject<'gc>, args: &[Value<'gc>], new_target: Value<'gc>) -> Result<Value<'gc>, Error> {
+    pub fn proxy_construct(&mut self, o: JsObject<'scope>, args: &[Value<'scope>], new_target: Value<'scope>) -> Result<Value<'scope>, Error> {
         let (target, handler) = self.proxy_parts(o).expect("a proxy")?;
         let Some(trap) = self.trap(handler, Trap::Construct)? else { return self.construct(target.into(), args, new_target) };
         let list = self.array(args.to_vec());

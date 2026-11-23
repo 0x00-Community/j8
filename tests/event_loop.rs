@@ -7,8 +7,8 @@ use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use j8builtins::Builtins;
-use j8executor::Executor;
-use j8framework::{EventLoop, EventLoopSet, ScriptKind, Source};
+use j8executor::{EventLoop, EventLoopSet, Executor};
+use j8framework::{ScopeGlobal, ScriptKind, Source, ValueBrand};
 use j8platform::DefaultPlatform;
 
 const LONG: u32 = 1_000_000;
@@ -37,7 +37,7 @@ fn long_value(seed: u32) -> String {
     (u64::from(seed) + (0..u64::from(LONG)).map(|i| i % 7).sum::<u64>()).to_string()
 }
 
-fn text(l: &EventLoop<'_, Executor>, g: &j8framework::Global) -> String {
+fn text(l: &EventLoop<'_>, g: &ScopeGlobal<'_, ValueBrand>) -> String {
     l.enter(|a| {
         let v = a.local(g);
         String::from(&**a.to_string(v).expect("ToString"))
@@ -83,7 +83,7 @@ fn eight_threads_a_thousand_runtimes() {
 fn split_moves_paused_scripts() {
     let platform = DefaultPlatform::default();
     EventLoopSet::scope(&platform, NonZeroUsize::MIN, |set| {
-        let mut loops: Vec<EventLoop<'_, Executor>> = (0..4).map(|_| set.spawn(Executor::default(), &Builtins)).collect();
+        let mut loops: Vec<EventLoop<'_>> = (0..4).map(|_| set.spawn(Executor::default(), &Builtins)).collect();
         let tickets: Vec<_> = loops.iter_mut().zip(0..).map(|(l, seed)| l.submit(&Source { text: &long(seed), file: "long.js" }, ScriptKind::Classic)).collect();
         assert!(until(|| loops.iter().all(|l| l.spent() > 0)));
         let new = set.split(0);
@@ -99,7 +99,7 @@ fn split_moves_paused_scripts() {
 fn idle_threads_pull_and_rebalance_evens_out() {
     let platform = DefaultPlatform::default();
     EventLoopSet::scope(&platform, NonZeroUsize::new(2).expect("threads"), |set| {
-        let mut loops: Vec<EventLoop<'_, Executor>> = (0..20).map(|_| set.spawn(Executor::default(), &Builtins)).collect();
+        let mut loops: Vec<EventLoop<'_>> = (0..20).map(|_| set.spawn(Executor::default(), &Builtins)).collect();
         assert_eq!(set.loads(), vec![10, 10]);
         set.split(0);
         assert!(until(|| set.loads()[1] < 10), "an idle thread pulled: {:?}", set.loads());
@@ -175,7 +175,7 @@ fn the_queue_is_checked_between_slices_of_a_script() {
             assert!(a.spawn(job).is_ok(), "the event loop takes host work");
             let p = a.global(promise.into());
             let v = a.local(&p);
-            a.realm.global.borrow_mut(a.mc).define("p", j8framework::Property::data(v));
+            a.context.global.borrow_mut(a.mc).define("p", j8framework::Property::data(v));
         });
         lp.eval(&Source { text: "globalThis.log = []; p.then(v => log.push('settled ' + v + ' after ' + log.join()));", file: "a.js" }, ScriptKind::Classic).expect("runs");
         let started = Instant::now();

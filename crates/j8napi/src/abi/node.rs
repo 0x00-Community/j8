@@ -4,7 +4,7 @@ use core::ffi::c_void;
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, AtomicUsize, Ordering};
 
-use j8framework::{Agent, AsyncJob, Backing, ElementKind, External, Global, ObjectData, ObjectKind, Settle, Value, ViewData};
+use j8framework::{Scope, AsyncJob, Backing, ElementKind, External, ObjectData, ObjectKind, ScopeGlobal, Settle, Value, ValueBrand, ViewData};
 use j8lockfree::{Fifo, Oneshot, Sender};
 
 use crate::convert::Ffi;
@@ -23,16 +23,16 @@ impl<T> Raw<T> {
     }
 }
 
-impl Env {
-    fn uint8_array<'gc>(a: &Agent<'gc, '_>, bytes: Backing) -> j8framework::JsObject<'gc> {
+impl Env<'_> {
+    fn uint8_array<'scope>(a: &Scope<'scope, '_>, bytes: Backing) -> j8framework::JsObject<'scope> {
         let len = bytes.len();
-        let buffer = ObjectData { kind: ObjectKind::ArrayBuffer(Box::new(j8framework::BufferData { bytes: Some(bytes), max: None, shared: false })), proto: Some(a.realm.array_buffer_proto), ..ObjectData::default() }.alloc(a.mc);
+        let buffer = ObjectData { kind: ObjectKind::ArrayBuffer(Box::new(j8framework::BufferData { bytes: Some(bytes), max: None, shared: false })), proto: Some(a.context.array_buffer_proto), ..ObjectData::default() }.alloc(a.mc);
         let at = ElementKind::ALL.iter().position(|&k| k == ElementKind::Uint8).unwrap_or_default();
         let view = ViewData { buffer, offset: 0, length: Some(len) };
-        ObjectData { kind: ObjectKind::TypedArray(ElementKind::Uint8, view), proto: Some(a.realm.typed_protos[at]), ..ObjectData::default() }.alloc(a.mc)
+        ObjectData { kind: ObjectKind::TypedArray(ElementKind::Uint8, view), proto: Some(a.context.typed_protos[at]), ..ObjectData::default() }.alloc(a.mc)
     }
 
-    fn spawn(a: &Agent<'_, '_>, ready: impl core::future::Future<Output = ()> + Send + 'static, settle: Settle) -> Result<(), Status> {
+    fn spawn(a: &Scope<'_, '_>, ready: impl core::future::Future<Output = ()> + Send + 'static, settle: Settle) -> Result<(), Status> {
         let p = a.new_promise();
         let (resolve, reject) = a.promise_resolvers(p);
         let future = Box::pin(async move {
@@ -53,15 +53,15 @@ enum WorkState {
 }
 
 pub struct Work {
-    env: NonNull<Env>,
-    execute: unsafe extern "C" fn(env: *mut Env, data: *mut c_void),
-    complete: Option<unsafe extern "C" fn(env: *mut Env, status: Status, data: *mut c_void)>,
+    env: NonNull<c_void>,
+    execute: unsafe extern "C" fn(env: *mut Env<'_>, data: *mut c_void),
+    complete: Option<unsafe extern "C" fn(env: *mut Env<'_>, status: Status, data: *mut c_void)>,
     data: *mut c_void,
     state: Arc<AtomicU8>,
 }
 
 impl Work {
-    fn queue(&self, a: &Agent<'_, '_>) -> Result<(), Status> {
+    fn queue(&self, a: &Scope<'_, '_>) -> Result<(), Status> {
         if self.state.compare_exchange(WorkState::Idle as u8, WorkState::Queued as u8, Ordering::AcqRel, Ordering::Acquire).is_err() {
             return Err(Status::GenericFailure);
         }
@@ -71,7 +71,7 @@ impl Work {
             let (env, execute, data, state) = job.get();
             let start = state.compare_exchange(WorkState::Queued as u8, WorkState::Running as u8, Ordering::AcqRel, Ordering::Acquire);
             if start.is_ok() {
-                unsafe { execute(env.as_ptr(), data) };
+                unsafe { execute(env.as_ptr().cast(), data) };
                 tx.send(Status::Ok);
             } else {
                 tx.send(Status::Cancelled);
@@ -88,7 +88,7 @@ impl Work {
             let (env, complete, data, state) = back.get();
             let s = if status.load(Ordering::Acquire) == Status::Cancelled as u8 { Status::Cancelled } else { Status::Ok };
             state.store(WorkState::Idle as u8, Ordering::Release);
-            let env = unsafe { env.as_ref() };
+            let env = unsafe { env.cast::<Env<'_>>().as_ref() };
             env.enter(a, |env| {
                 if let Some(complete) = complete {
                     unsafe { complete(env.as_ptr(), s, data) };
@@ -138,11 +138,11 @@ impl TryFrom<i32> for CallMode {
     }
 }
 
-type CallJs = unsafe extern "C" fn(env: *mut Env, js_callback: Handle, context: *mut c_void, data: *mut c_void);
+type CallJs = unsafe extern "C" fn(env: *mut Env<'_>, js_callback: Handle, context: *mut c_void, data: *mut c_void);
 
-struct TsfnJs {
-    env: NonNull<Env>,
-    func: Option<Global>,
+struct TsfnJs<'e> {
+    env: NonNull<Env<'e>>,
+    func: Option<ScopeGlobal<'e, ValueBrand>>,
     call_js: Option<CallJs>,
     finalize: Finalize,
     finalize_data: *mut c_void,
@@ -157,7 +157,7 @@ pub struct Tsfn {
     aborted: AtomicBool,
     armed: AtomicPtr<Sender<()>>,
     context: *mut c_void,
-    js: *mut TsfnJs,
+    js: *mut c_void,
 }
 
 unsafe impl Send for Tsfn {}
@@ -172,7 +172,7 @@ impl Tsfn {
         }
     }
 
-    fn arm(self: &Arc<Self>, a: &Agent<'_, '_>) -> Result<(), Status> {
+    fn arm(self: &Arc<Self>, a: &Scope<'_, '_>) -> Result<(), Status> {
         let (tx, rx) = Oneshot::<()>::new();
         let me = Arc::clone(self);
         let settle: Settle = Box::new(move |a| {
@@ -190,8 +190,8 @@ impl Tsfn {
         Ok(())
     }
 
-    fn run(self: &Arc<Self>, a: &mut Agent<'_, '_>) {
-        let js = unsafe { &*self.js };
+    fn run(self: &Arc<Self>, a: &mut Scope<'_, '_>) {
+        let js = unsafe { &*self.js.cast::<TsfnJs<'_>>() };
         let env = unsafe { js.env.as_ref() };
         let aborted = self.aborted.load(Ordering::Acquire);
         env.enter(a, |env| {
@@ -200,7 +200,7 @@ impl Tsfn {
                 if aborted {
                     continue;
                 }
-                let Ok(a) = env.agent() else { return };
+                let Ok(a) = env.scope() else { return };
                 let f = js.func.as_ref().map_or(Value::Undefined, |g| a.local(g));
                 match js.call_js {
                     Some(cb) => unsafe { cb(env.as_ptr(), env.push(f), self.context, data) },
@@ -221,8 +221,8 @@ impl Tsfn {
         }
     }
 
-    fn finish(self: &Arc<Self>, env: &Env) {
-        let js = unsafe { Box::from_raw(self.js) };
+    fn finish(self: &Arc<Self>, env: &Env<'_>) {
+        let js = unsafe { Box::from_raw(self.js.cast::<TsfnJs<'_>>()) };
         if let Some(cb) = js.finalize {
             unsafe { cb(env.as_ptr(), js.finalize_data, self.context) };
         }
@@ -236,28 +236,28 @@ impl Tsfn {
 
 napi! {
     fn napi_create_buffer(env, size: usize, data: *mut *mut c_void, result: *mut Handle) {
-        let a = env.agent()?;
+        let a = env.scope()?;
         let mut bytes = alloc::vec![0u8; size];
         Ffi::put_opt(data, bytes.as_mut_ptr().cast());
         env.out(result, Env::uint8_array(a, bytes.into()).into())
     }
 
     fn napi_create_buffer_copy(env, length: usize, data: *const c_void, result_data: *mut *mut c_void, result: *mut Handle) {
-        let a = env.agent()?;
+        let a = env.scope()?;
         let mut bytes = Ffi::slice(data.cast::<u8>(), length)?.to_vec();
         Ffi::put_opt(result_data, bytes.as_mut_ptr().cast());
         env.out(result, Env::uint8_array(a, bytes.into()).into())
     }
 
     fn napi_create_external_buffer(env, length: usize, data: *mut c_void, finalize_cb: Finalize, finalize_hint: *mut c_void, result: *mut Handle) {
-        let a = env.agent()?;
+        let a = env.scope()?;
         let owner = Box::new(env.finalizer(finalize_cb, data, finalize_hint));
         let e = unsafe { External::from_raw(data.cast(), length, owner) };
         env.out(result, Env::uint8_array(a, e.into()).into())
     }
 
     fn node_api_create_buffer_from_arraybuffer(env, arraybuffer: Handle, byte_offset: usize, byte_length: usize, result: *mut Handle) {
-        let a = env.agent()?;
+        let a = env.scope()?;
         let buffer = env.value(arraybuffer)?.as_object().ok_or(Status::ArraybufferExpected)?;
         let len = match &buffer.borrow().kind {
             ObjectKind::ArrayBuffer(b) if !b.shared => b.bytes.as_deref().map_or(0, <[u8]>::len),
@@ -269,19 +269,19 @@ napi! {
         }
         let at = ElementKind::ALL.iter().position(|&k| k == ElementKind::Uint8).unwrap_or_default();
         let view = ViewData { buffer, offset: byte_offset, length: Some(byte_length) };
-        let o = ObjectData { kind: ObjectKind::TypedArray(ElementKind::Uint8, view), proto: Some(a.realm.typed_protos[at]), ..ObjectData::default() }.alloc(a.mc);
+        let o = ObjectData { kind: ObjectKind::TypedArray(ElementKind::Uint8, view), proto: Some(a.context.typed_protos[at]), ..ObjectData::default() }.alloc(a.mc);
         env.out(result, o.into())
     }
 
     fn napi_get_buffer_info(env, value: Handle, data: *mut *mut c_void, length: *mut usize) {
-        let a = env.agent()?;
+        let a = env.scope()?;
         let o = env.value(value)?.as_object().ok_or(Status::InvalidArg)?;
         let (size, view) = match &o.borrow().kind {
             ObjectKind::TypedArray(k, v) => (k.size(), *v),
             ObjectKind::DataView(v) => (1, *v),
             _ => return Err(Status::InvalidArg),
         };
-        let n = Agent::view_length(&view, size).unwrap_or(0) * size;
+        let n = Scope::view_length(&view, size).unwrap_or(0) * size;
         let p = match &mut view.buffer.borrow_mut(a.mc).kind {
             ObjectKind::ArrayBuffer(b) => b.bytes.as_deref_mut().map_or(core::ptr::null_mut(), |s| s.as_mut_ptr().wrapping_add(view.offset)),
             _ => core::ptr::null_mut(),
@@ -309,9 +309,9 @@ napi! {
     }
 
     fn napi_fatal_exception(env, err: Handle) {
-        let a = env.agent()?;
+        let a = env.scope()?;
         let e = env.value(err)?;
-        let report = env.js(a.get_named(a.realm.global.into(), "reportError"))?;
+        let report = env.js(a.get_named(a.context.global.into(), "reportError"))?;
         if a.is_callable(report) {
             env.js(a.call(report, Value::Undefined, &[e])).map(drop)
         } else {
@@ -329,14 +329,14 @@ napi! {
         env,
         async_resource: Handle,
         async_resource_name: Handle,
-        execute: Option<unsafe extern "C" fn(*mut Env, *mut c_void)>,
-        complete: Option<unsafe extern "C" fn(*mut Env, Status, *mut c_void)>,
+        execute: Option<unsafe extern "C" fn(*mut Env<'_>, *mut c_void)>,
+        complete: Option<unsafe extern "C" fn(*mut Env<'_>, Status, *mut c_void)>,
         data: *mut c_void,
         result: *mut *mut Work,
     ) {
         let _ = (async_resource, async_resource_name);
         let execute = execute.ok_or(Status::InvalidArg)?;
-        let w = Work { env: NonNull::from(env), execute, complete, data, state: Arc::new(AtomicU8::new(WorkState::Idle as u8)) };
+        let w = Work { env: NonNull::from(env).cast(), execute, complete, data, state: Arc::new(AtomicU8::new(WorkState::Idle as u8)) };
         Ffi::put(result, Box::into_raw(Box::new(w)))
     }
 
@@ -350,7 +350,7 @@ napi! {
     }
 
     fn napi_queue_async_work(env, work: *mut Work) {
-        let a = env.agent()?;
+        let a = env.scope()?;
         unsafe { work.as_ref() }.ok_or(Status::InvalidArg)?.queue(a)
     }
 
@@ -374,7 +374,7 @@ napi! {
         result: *mut *const Tsfn,
     ) {
         let _ = (async_resource, async_resource_name);
-        let a = env.agent()?;
+        let a = env.scope()?;
         let func = if func.0.is_none() {
             if call_js_cb.is_none() {
                 return Err(Status::InvalidArg);
@@ -386,7 +386,7 @@ napi! {
         if initial_thread_count == 0 || result.is_null() {
             return Err(Status::InvalidArg);
         }
-        let js = Box::into_raw(Box::new(TsfnJs { env: NonNull::from(env), func, call_js: call_js_cb, finalize: thread_finalize_cb, finalize_data: thread_finalize_data }));
+        let js = Box::into_raw(Box::new(TsfnJs { env: NonNull::from(env), func, call_js: call_js_cb, finalize: thread_finalize_cb, finalize_data: thread_finalize_data })).cast::<c_void>();
         let t = Arc::new(Tsfn {
             queue: Fifo::default(),
             queued: AtomicUsize::new(0),
@@ -399,7 +399,7 @@ napi! {
             js,
         });
         if let Err(s) = t.arm(a) {
-            drop(unsafe { Box::from_raw(js) });
+            drop(unsafe { Box::from_raw(js.cast::<TsfnJs<'_>>()) });
             return Err(s);
         }
         Ffi::put(result, Arc::into_raw(t))

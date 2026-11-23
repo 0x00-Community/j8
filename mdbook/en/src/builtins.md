@@ -1,16 +1,16 @@
 # Built-in objects
 
 `crates/j8builtins` holds JavaScript's standard built-in objects and implements `j8framework::Intrinsics`: when a
-`Realm` is created, `Builtins::install` puts in the global object, the global functions and every built-in constructor,
+`Context` is created, `Builtins::install` puts in the global object, the global functions and every built-in constructor,
 prototype and method.
 
 ```rust,ignore
-let cx = isolate.enter(|scope| scope.persist(scope.context(&j8builtins::Builtins)));
+let cx = isolate.create_context(&j8builtins::Builtins);
 ```
 
 `j8framework` only defines `Intrinsics`; this is the default implementation, and hosts can replace or trim it.
 j8builtins **depends only on `j8framework`**, not on the executor: every built-in is a host function
-`fn(&mut Agent, this, &[Value]) -> Result<Value, Error>` written with the semantics on `Agent`, calling back into JS
+`fn(&mut Scope, this, &[Value]) -> Result<Value, Error>` written with the semantics on `Scope`, calling back into JS
 through `Invoke`.
 
 ## Files

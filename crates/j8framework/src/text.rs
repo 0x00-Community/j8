@@ -6,7 +6,7 @@ use core::hash::{Hash, Hasher};
 use core::mem::MaybeUninit;
 use core::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
 
-use crate::{Collect, Gc, Mutation};
+use crate::{Collect, ScopeLocal, Mutation};
 
 const INLINE: usize = 22;
 
@@ -153,8 +153,8 @@ const VIEW_MIN: usize = 32;
 #[repr(C)]
 #[derive(Collect)]
 #[cfg_attr(all(target_os = "linux", feature = "crossheap"), derive(paragc::Shared))]
-pub struct JsStr<'gc> {
-    buf: Option<Gc<'gc, JsStr<'gc>>>,
+pub struct JsStr<'scope> {
+    buf: Option<ScopeLocal<'scope, JsStr<'scope>>>,
     len: u32,
     units: u32,
     start: u32,
@@ -168,7 +168,7 @@ const _: () = assert!(JsStr::UNITS_OFFSET == 12);
 
 type Tail<'a> = &'a mut [MaybeUninit<u8>];
 
-impl<'gc> JsStr<'gc> {
+impl<'scope> JsStr<'scope> {
     pub const UNITS_OFFSET: usize = core::mem::offset_of!(JsStr<'static>, units);
 
     const LONE: u32 = 1 << 31;
@@ -186,7 +186,7 @@ impl<'gc> JsStr<'gc> {
         (&raw const *self).wrapping_add(1).cast()
     }
 
-    fn backing(this: Gc<'gc, Self>) -> (Gc<'gc, Self>, usize) {
+    fn backing(this: ScopeLocal<'scope, Self>) -> (ScopeLocal<'scope, Self>, usize) {
         match this.buf {
             Some(b) => (b, this.start as usize),
             None => (this, 0),
@@ -201,7 +201,7 @@ impl<'gc> JsStr<'gc> {
     #[inline]
     pub fn as_str(&self) -> &str {
         let (tail, start) = match &self.buf {
-            Some(b) => (Gc::get(*b).tail(), self.start as usize),
+            Some(b) => (ScopeLocal::get(*b).tail(), self.start as usize),
             None => (self.tail(), 0),
         };
         unsafe { core::str::from_utf8_unchecked(core::slice::from_raw_parts(tail.add(start), self.byte_len())) }
@@ -244,14 +244,14 @@ impl<'gc> JsStr<'gc> {
         }
     }
 
-    fn place(mc: &Mutation<'gc>, s: Self, tail: usize, fill: impl FnOnce(Tail<'_>)) -> Gc<'gc, Self> {
+    fn place(mc: &Mutation<'scope>, s: Self, tail: usize, fill: impl FnOnce(Tail<'_>)) -> ScopeLocal<'scope, Self> {
         #[cfg(all(target_os = "linux", feature = "crossheap"))]
-        return mc.mutator().alloc_shared_tail(s, tail, fill);
+        return mc.gc_scope().alloc_shared_tail(s, tail, fill);
         #[cfg(not(all(target_os = "linux", feature = "crossheap")))]
-        mc.mutator().alloc_tail(s, tail, fill)
+        mc.gc_scope().alloc_tail(s, tail, fill)
     }
 
-    fn own(mc: &Mutation<'gc>, len: usize, units: usize, cap: usize, lone: bool, fill: impl FnOnce(Tail<'_>, Tail<'_>)) -> Gc<'gc, Self> {
+    fn own(mc: &Mutation<'scope>, len: usize, units: usize, cap: usize, lone: bool, fill: impl FnOnce(Tail<'_>, Tail<'_>)) -> ScopeLocal<'scope, Self> {
         let n = |x: usize| u32::try_from(x).ok().filter(|x| x & Self::LONE == 0).expect("a string is shorter than 2 GiB");
         let wide = if len == units && !lone { 0 } else { 2 * units };
         let head = if wide == 0 { cap } else { cap.next_multiple_of(2) };
@@ -281,11 +281,11 @@ impl<'gc> JsStr<'gc> {
         n
     }
 
-    pub fn alloc(mc: &Mutation<'gc>, s: &str) -> Gc<'gc, Self> {
+    pub fn alloc(mc: &Mutation<'scope>, s: &str) -> ScopeLocal<'scope, Self> {
         Self::alloc_known(mc, s, s.is_ascii())
     }
 
-    pub fn alloc_known(mc: &Mutation<'gc>, s: &str, ascii: bool) -> Gc<'gc, Self> {
+    pub fn alloc_known(mc: &Mutation<'scope>, s: &str, ascii: bool) -> ScopeLocal<'scope, Self> {
         let units = if ascii { s.len() } else { s.encode_utf16().count() };
         Self::own(mc, s.len(), units, s.len(), false, |bytes, wide| {
             Self::write(bytes, s.as_bytes());
@@ -293,7 +293,7 @@ impl<'gc> JsStr<'gc> {
         })
     }
 
-    pub fn alloc_units(mc: &Mutation<'gc>, units: &[u16]) -> Gc<'gc, Self> {
+    pub fn alloc_units(mc: &Mutation<'scope>, units: &[u16]) -> ScopeLocal<'scope, Self> {
         if let Ok(s) = String::from_utf16(units) {
             return Self::alloc(mc, &s);
         }
@@ -304,7 +304,7 @@ impl<'gc> JsStr<'gc> {
         })
     }
 
-    pub fn slice_units(mc: &Mutation<'gc>, of: Gc<'gc, Self>, r: core::ops::Range<usize>) -> Gc<'gc, Self> {
+    pub fn slice_units(mc: &Mutation<'scope>, of: ScopeLocal<'scope, Self>, r: core::ops::Range<usize>) -> ScopeLocal<'scope, Self> {
         if r.start == 0 && r.end == of.utf16_len() {
             return of;
         }
@@ -314,7 +314,7 @@ impl<'gc> JsStr<'gc> {
         }
     }
 
-    pub fn concat(mc: &Mutation<'gc>, a: Gc<'gc, Self>, b: Gc<'gc, Self>) -> Gc<'gc, Self> {
+    pub fn concat(mc: &Mutation<'scope>, a: ScopeLocal<'scope, Self>, b: ScopeLocal<'scope, Self>) -> ScopeLocal<'scope, Self> {
         if b.len == 0 {
             return a;
         }
@@ -342,7 +342,7 @@ impl<'gc> JsStr<'gc> {
         })
     }
 
-    pub fn concat_ascii(mc: &Mutation<'gc>, s: Gc<'gc, Self>, extra: &[u8], extra_first: bool) -> Gc<'gc, Self> {
+    pub fn concat_ascii(mc: &Mutation<'scope>, s: ScopeLocal<'scope, Self>, extra: &[u8], extra_first: bool) -> ScopeLocal<'scope, Self> {
         debug_assert!(extra.is_ascii(), "appended text is ASCII");
         if extra.is_empty() {
             return s;
@@ -370,7 +370,7 @@ impl<'gc> JsStr<'gc> {
 
     #[cold]
     #[inline(never)]
-    fn concat_wide(mc: &Mutation<'gc>, s: Gc<'gc, Self>, extra: &[u8], extra_first: bool) -> Gc<'gc, Self> {
+    fn concat_wide(mc: &Mutation<'scope>, s: ScopeLocal<'scope, Self>, extra: &[u8], extra_first: bool) -> ScopeLocal<'scope, Self> {
         if s.lone_surrogates() {
             let mut units = alloc::vec::Vec::with_capacity(s.utf16_len() + extra.len());
             if extra_first {
@@ -399,11 +399,11 @@ impl<'gc> JsStr<'gc> {
         })
     }
 
-    fn extend(mc: &Mutation<'gc>, a: Gc<'gc, Self>, b: Gc<'gc, Self>) -> Option<Gc<'gc, Self>> {
+    fn extend(mc: &Mutation<'scope>, a: ScopeLocal<'scope, Self>, b: ScopeLocal<'scope, Self>) -> Option<ScopeLocal<'scope, Self>> {
         Self::extend_bytes(mc, a, b.as_str().as_bytes())
     }
 
-    fn extend_bytes(mc: &Mutation<'gc>, a: Gc<'gc, Self>, bytes: &[u8]) -> Option<Gc<'gc, Self>> {
+    fn extend_bytes(mc: &Mutation<'scope>, a: ScopeLocal<'scope, Self>, bytes: &[u8]) -> Option<ScopeLocal<'scope, Self>> {
         let (own, start) = Self::backing(a);
         let end = start + a.byte_len();
         if own.capacity().checked_sub(end)? < bytes.len() {
@@ -415,12 +415,12 @@ impl<'gc> JsStr<'gc> {
         Some(Self::view(mc, own, start, a.byte_len() + bytes.len()))
     }
 
-    fn view(mc: &Mutation<'gc>, own: Gc<'gc, Self>, start: usize, len: usize) -> Gc<'gc, Self> {
+    fn view(mc: &Mutation<'scope>, own: ScopeLocal<'scope, Self>, start: usize, len: usize) -> ScopeLocal<'scope, Self> {
         let n = |x: usize| u32::try_from(x).expect("a string is shorter than 4 GiB");
         Self::place(mc, Self { buf: Some(own), len: n(len), units: n(len), start: n(start), cap: 0, used: AtomicU32::new(0) }, 0, |_| {})
     }
 
-    pub fn piece(mc: &Mutation<'gc>, of: Gc<'gc, Self>, piece: &str) -> Gc<'gc, Self> {
+    pub fn piece(mc: &Mutation<'scope>, of: ScopeLocal<'scope, Self>, piece: &str) -> ScopeLocal<'scope, Self> {
         let text = of.as_str();
         let at = piece.as_ptr().addr().checked_sub(text.as_ptr().addr()).filter(|&at| at + piece.len() <= text.len());
         match at {
@@ -571,14 +571,15 @@ mod tests {
     use crate::{Heap, Mutation};
 
     fn with_heap(f: impl FnOnce(&Mutation<'_>)) {
-        let heap = Heap::new(NonZeroUsize::MIN);
-        heap.mutate(|m| {
-            let mc = unsafe { Mutation::new(m, 0) };
-            f(&mc);
+        Heap::new(NonZeroUsize::MIN, |mut heap| {
+            heap.scope(|m| {
+                let mc = unsafe { Mutation::new(crate::rebrand_ref(&*m), 0) };
+                f(&mc);
+            });
         });
     }
 
-    fn ascii<'gc>(mc: &Mutation<'gc>, n: usize, byte: u8) -> crate::Gc<'gc, JsStr<'gc>> {
+    fn ascii<'scope>(mc: &Mutation<'scope>, n: usize, byte: u8) -> crate::ScopeLocal<'scope, JsStr<'scope>> {
         JsStr::alloc_known(mc, core::str::from_utf8(&alloc::vec![byte; n]).expect("one ASCII byte"), true)
     }
 

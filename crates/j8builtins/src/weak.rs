@@ -1,12 +1,12 @@
 use j8framework::ValueKind;
-use j8framework::{Agent, Error, ErrorKind, JsObject, ObjectKind, Value};
+use j8framework::{Scope, Error, ErrorKind, JsObject, ObjectKind, Value};
 
 use crate::{Args, Installer};
 
 struct Weaks;
 
 impl Weaks {
-    fn weak_ref<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn weak_ref<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let new_target = a.new_target;
         if new_target == Value::Undefined {
             return Err(a.throw(ErrorKind::Type, "Constructor WeakRef requires 'new'"));
@@ -15,10 +15,10 @@ impl Weaks {
         if !a.can_be_held_weakly(target) {
             return Err(a.throw(ErrorKind::Type, "WeakRef: target must be an object or a non-registered symbol"));
         }
-        Ok(a.create_from_ctor(new_target, a.realm.weak_ref_proto, ObjectKind::WeakRef(target))?.into())
+        Ok(a.create_from_ctor(new_target, a.context.weak_ref_proto, ObjectKind::WeakRef(target))?.into())
     }
 
-    fn deref<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn deref<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         match this.kind() {
             ValueKind::Object(o) => match o.borrow().kind {
                 ObjectKind::WeakRef(t) => Ok(t),
@@ -28,7 +28,7 @@ impl Weaks {
         }
     }
 
-    fn registry<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn registry<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let new_target = a.new_target;
         if new_target == Value::Undefined {
             return Err(a.throw(ErrorKind::Type, "Constructor FinalizationRegistry requires 'new'"));
@@ -37,17 +37,17 @@ impl Weaks {
         if !a.is_callable(cleanup) {
             return Err(a.throw(ErrorKind::Type, "FinalizationRegistry: cleanup must be callable"));
         }
-        Ok(a.create_from_ctor(new_target, a.realm.finalization_registry_proto, ObjectKind::FinalizationRegistry { cleanup, cells: alloc::vec::Vec::new() })?.into())
+        Ok(a.create_from_ctor(new_target, a.context.finalization_registry_proto, ObjectKind::FinalizationRegistry { cleanup, cells: alloc::vec::Vec::new() })?.into())
     }
 
-    fn this_registry<'gc>(a: &Agent<'gc, '_>, this: Value<'gc>) -> Result<JsObject<'gc>, Error> {
+    fn this_registry<'scope>(a: &Scope<'scope, '_>, this: Value<'scope>) -> Result<JsObject<'scope>, Error> {
         match this.kind() {
             ValueKind::Object(o) if matches!(o.borrow().kind, ObjectKind::FinalizationRegistry { .. }) => Ok(o),
             _ => Err(a.throw(ErrorKind::Type, "FinalizationRegistry method called on an incompatible receiver")),
         }
     }
 
-    fn register<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn register<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let o = Self::this_registry(a, this)?;
         let (target, held, token) = (args.at(0), args.at(1), args.at(2));
         if !a.can_be_held_weakly(target) {
@@ -65,7 +65,7 @@ impl Weaks {
         Ok(Value::Undefined)
     }
 
-    fn unregister<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn unregister<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let o = Self::this_registry(a, this)?;
         let token = args.at(0);
         if !a.can_be_held_weakly(token) {
@@ -83,7 +83,7 @@ impl Weaks {
 
 impl Installer<'_, '_> {
     pub(crate) fn weaks(&mut self) {
-        let r = self.realm;
+        let r = self.context;
         let wr = r.weak_ref_proto;
         self.constructor("WeakRef", Weaks::weak_ref, wr, 1);
         self.method(wr, "deref", Weaks::deref, 0);

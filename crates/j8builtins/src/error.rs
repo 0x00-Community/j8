@@ -1,17 +1,17 @@
 use j8framework::ValueKind;
-use j8framework::{Agent, Error, ErrorKind, Value};
+use j8framework::{Scope, Error, ErrorKind, Value};
 
 use crate::{Args, Installer};
 
 struct Errors;
 
 impl Errors {
-    fn construct<'gc, const K: usize>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn construct<'scope, const K: usize>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let new_target = a.new_target;
         let kind = ErrorKind::ALL[K];
         let all = args;
         let args = if kind == ErrorKind::Aggregate { all.get(1..).unwrap_or(&[]) } else { all };
-        let proto = a.proto_from_ctor(new_target, a.realm.error_proto(kind))?;
+        let proto = a.proto_from_ctor(new_target, a.context.error_proto(kind))?;
         let e = a.error(kind, "");
         e.borrow_mut(a.mc).set_proto(Some(proto));
         e.borrow_mut(a.mc).remove("message");
@@ -34,7 +34,7 @@ impl Errors {
         Ok(e.into())
     }
 
-    fn to_string<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn to_string<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         if this.as_object().is_none() {
             return Err(a.throw(ErrorKind::Type, "Error.prototype.toString called on non-object"));
         }
@@ -68,7 +68,7 @@ impl Installer<'_, '_> {
         ];
         let mut base = None;
         for (kind, f) in ErrorKind::ALL.into_iter().zip(ctors) {
-            let proto = self.realm.error_proto(kind);
+            let proto = self.context.error_proto(kind);
             let ctor = self.constructor(kind.name(), f, proto, if kind == ErrorKind::Aggregate { 2 } else { 1 });
             match base {
                 None => base = Some(ctor),
@@ -77,6 +77,6 @@ impl Installer<'_, '_> {
             self.set(proto, "name", self.text(kind.name()));
             self.set(proto, "message", self.text(""));
         }
-        self.method(self.realm.error_proto(ErrorKind::Error), "toString", Errors::to_string, 0);
+        self.method(self.context.error_proto(ErrorKind::Error), "toString", Errors::to_string, 0);
     }
 }

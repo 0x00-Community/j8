@@ -1,28 +1,28 @@
-use crate::gc::{Collect, Gc, Trace, Tracer, gc_from_raw};
+use crate::gc::{Collect, ScopeLocal, Trace, Tracer, gc_from_raw};
 
 use crate::{JsBigInt, JsObject, JsString, JsSymbol};
 
 #[derive(Clone, Copy, Debug, Default, Collect)]
 #[collect(no_drop)]
 #[repr(C, u8)]
-pub enum ValueKind<'gc> {
+pub enum ValueKind<'scope> {
     #[default]
     Undefined = ValueTag::UNDEFINED,
     Null = ValueTag::NULL,
     Bool(bool) = ValueTag::BOOL,
     Number(f64) = ValueTag::NUMBER,
-    String(JsString<'gc>) = ValueTag::STRING,
-    Symbol(JsSymbol<'gc>) = ValueTag::SYMBOL,
-    BigInt(JsBigInt<'gc>) = ValueTag::BIGINT,
-    Object(JsObject<'gc>) = ValueTag::OBJECT,
+    String(JsString<'scope>) = ValueTag::STRING,
+    Symbol(JsSymbol<'scope>) = ValueTag::SYMBOL,
+    BigInt(JsBigInt<'scope>) = ValueTag::BIGINT,
+    Object(JsObject<'scope>) = ValueTag::OBJECT,
     Uninit = ValueTag::UNINIT,
 }
 
 #[derive(Clone, Copy)]
 #[repr(transparent)]
-pub struct Value<'gc> {
+pub struct Value<'scope> {
     bits: u64,
-    _brand: core::marker::PhantomData<JsObject<'gc>>,
+    _brand: core::marker::PhantomData<JsObject<'scope>>,
 }
 
 pub struct ValueBits;
@@ -45,7 +45,7 @@ impl ValueBits {
 }
 
 #[allow(non_upper_case_globals, non_snake_case)]
-impl<'gc> Value<'gc> {
+impl<'scope> Value<'scope> {
     pub const Undefined: Self = Self::word(ValueBits::UNDEFINED);
     pub const Null: Self = Self::word(ValueBits::NULL);
     pub const Uninit: Self = Self::word(ValueBits::UNINIT);
@@ -72,22 +72,22 @@ impl<'gc> Value<'gc> {
     }
 
     #[inline]
-    pub fn String(s: JsString<'gc>) -> Self {
+    pub fn String(s: JsString<'scope>) -> Self {
         Self::pointer(ValueTag::STRING, s.as_ptr().expose_provenance() as u64)
     }
 
     #[inline]
-    pub fn Symbol(s: JsSymbol<'gc>) -> Self {
+    pub fn Symbol(s: JsSymbol<'scope>) -> Self {
         Self::pointer(ValueTag::SYMBOL, s.as_ptr().expose_provenance() as u64)
     }
 
     #[inline]
-    pub fn BigInt(b: JsBigInt<'gc>) -> Self {
+    pub fn BigInt(b: JsBigInt<'scope>) -> Self {
         Self::pointer(ValueTag::BIGINT, b.as_ptr().expose_provenance() as u64)
     }
 
     #[inline]
-    pub fn Object(o: JsObject<'gc>) -> Self {
+    pub fn Object(o: JsObject<'scope>) -> Self {
         Self::pointer(ValueTag::OBJECT, o.as_ptr().expose_provenance() as u64)
     }
 
@@ -102,13 +102,13 @@ impl<'gc> Value<'gc> {
     }
 
     #[inline]
-    pub fn as_object(self) -> Option<JsObject<'gc>> {
+    pub fn as_object(self) -> Option<JsObject<'scope>> {
         (self.bits >> ValueBits::TAG_SHIFT == ValueBits::boxed(ValueTag::OBJECT, 0) >> ValueBits::TAG_SHIFT)
             .then(|| unsafe { gc_from_raw(Self::address(self.bits & ValueBits::PAYLOAD)) })
     }
 
     #[inline]
-    pub fn as_string(self) -> Option<JsString<'gc>> {
+    pub fn as_string(self) -> Option<JsString<'scope>> {
         (self.bits >> ValueBits::TAG_SHIFT == ValueBits::boxed(ValueTag::STRING, 0) >> ValueBits::TAG_SHIFT)
             .then(|| unsafe { gc_from_raw(Self::address(self.bits & ValueBits::PAYLOAD)) })
     }
@@ -120,7 +120,7 @@ impl<'gc> Value<'gc> {
     }
 
     #[inline]
-    pub fn kind(self) -> ValueKind<'gc> {
+    pub fn kind(self) -> ValueKind<'scope> {
         let w = self.bits;
         if w < ValueBits::BOXED_MIN {
             return ValueKind::Number(f64::from_bits(w));
@@ -142,9 +142,9 @@ impl<'gc> Value<'gc> {
     }
 }
 
-impl<'gc> From<ValueKind<'gc>> for Value<'gc> {
+impl<'scope> From<ValueKind<'scope>> for Value<'scope> {
     #[inline]
-    fn from(k: ValueKind<'gc>) -> Self {
+    fn from(k: ValueKind<'scope>) -> Self {
         match k {
             ValueKind::Undefined => Value::Undefined,
             ValueKind::Null => Value::Null,
@@ -235,7 +235,7 @@ unsafe impl Trace for Value<'_> {
     }
 }
 
-impl<'gc> Value<'gc> {
+impl<'scope> Value<'scope> {
     #[inline]
     pub fn bits(self) -> u64 {
         self.bits
@@ -271,23 +271,23 @@ impl<'gc> Value<'gc> {
     }
 
     #[inline]
-    pub fn accessor(a: Gc<'gc, crate::Accessor<'gc>>) -> Self {
+    pub fn accessor(a: ScopeLocal<'scope, crate::Accessor<'scope>>) -> Self {
         Self::pointer(ValueTag::ACCESSOR, a.as_ptr().expose_provenance() as u64)
     }
 
     #[inline]
-    pub fn as_accessor(self) -> Option<Gc<'gc, crate::Accessor<'gc>>> {
+    pub fn as_accessor(self) -> Option<ScopeLocal<'scope, crate::Accessor<'scope>>> {
         (self.bits >> ValueBits::TAG_SHIFT == ValueBits::boxed(ValueTag::ACCESSOR, 0) >> ValueBits::TAG_SHIFT)
             .then(|| unsafe { gc_from_raw(Self::address(self.bits & ValueBits::PAYLOAD)) })
     }
 
     #[inline]
-    pub fn context(e: crate::JsEnv<'gc>) -> Self {
+    pub fn context(e: crate::JsEnv<'scope>) -> Self {
         Self::pointer(ValueTag::CONTEXT, e.as_ptr().expose_provenance() as u64)
     }
 
     #[inline]
-    pub fn as_context(self) -> Option<crate::JsEnv<'gc>> {
+    pub fn as_context(self) -> Option<crate::JsEnv<'scope>> {
         (self.bits >> ValueBits::TAG_SHIFT == ValueBits::boxed(ValueTag::CONTEXT, 0) >> ValueBits::TAG_SHIFT && self.bits & ValueBits::PAYLOAD != 0)
             .then(|| unsafe { gc_from_raw(Self::address(self.bits & ValueBits::PAYLOAD)) })
     }
@@ -337,16 +337,16 @@ impl PartialEq for Value<'_> {
             (ValueKind::Bool(a), ValueKind::Bool(b)) => a == b,
             (ValueKind::Number(a), ValueKind::Number(b)) => a == b,
             (ValueKind::String(a), ValueKind::String(b)) => *a == *b,
-            (ValueKind::Object(a), ValueKind::Object(b)) => Gc::ptr_eq(a, b),
-            (ValueKind::Symbol(a), ValueKind::Symbol(b)) => Gc::ptr_eq(a, b),
+            (ValueKind::Object(a), ValueKind::Object(b)) => ScopeLocal::ptr_eq(a, b),
+            (ValueKind::Symbol(a), ValueKind::Symbol(b)) => ScopeLocal::ptr_eq(a, b),
             (ValueKind::BigInt(a), ValueKind::BigInt(b)) => a.0 == b.0,
             _ => false,
         }
     }
 }
 
-impl<'gc> Value<'gc> {
-    pub fn from_proto(p: Option<crate::JsObject<'gc>>) -> Self {
+impl<'scope> Value<'scope> {
+    pub fn from_proto(p: Option<crate::JsObject<'scope>>) -> Self {
         p.map_or(Value::Null, Value::Object)
     }
 }
@@ -387,20 +387,20 @@ impl From<f64> for Value<'_> {
     }
 }
 
-impl<'gc> From<JsString<'gc>> for Value<'gc> {
-    fn from(s: JsString<'gc>) -> Self {
+impl<'scope> From<JsString<'scope>> for Value<'scope> {
+    fn from(s: JsString<'scope>) -> Self {
         Value::String(s)
     }
 }
 
-impl<'gc> From<JsSymbol<'gc>> for Value<'gc> {
-    fn from(s: JsSymbol<'gc>) -> Self {
+impl<'scope> From<JsSymbol<'scope>> for Value<'scope> {
+    fn from(s: JsSymbol<'scope>) -> Self {
         Value::Symbol(s)
     }
 }
 
-impl<'gc> From<JsObject<'gc>> for Value<'gc> {
-    fn from(o: JsObject<'gc>) -> Self {
+impl<'scope> From<JsObject<'scope>> for Value<'scope> {
+    fn from(o: JsObject<'scope>) -> Self {
         Value::Object(o)
     }
 }

@@ -4,7 +4,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use clap::Parser;
-use j8::executor::{CodeCache, Executor};
+use j8::executor::CodeCache;
 use j8::platform::DefaultPlatform;
 use workerd::{Worker, Workerd, ws};
 
@@ -61,14 +61,14 @@ impl Fleet<'_> {
         u16::try_from(i).ok().and_then(|i| self.port.checked_add(i)).ok_or_else(|| format!("no port for instance {i}"))
     }
 
-    fn one<'p>(&self, set: &j8::EventLoopSet<'_, 'p, Executor>, i: usize) -> Result<(Worker<'p>, u16), String> {
+    fn one<'p>(&self, set: &j8::EventLoopSet<'_, 'p>, i: usize) -> Result<(Worker<'p>, u16), String> {
         let mut w = Worker::new::<Workerd>(set, self.reactor, self.code)?;
         w.load(self.script, self.bindings, &self.storage(i)?)?;
         let port = w.listen(self.port(i)?)?;
         Ok((w, port))
     }
 
-    fn start<'p>(&self, set: &j8::EventLoopSet<'_, 'p, Executor>, hosts: usize) -> Result<Vec<(Worker<'p>, u16)>, String> {
+    fn start<'p>(&self, set: &j8::EventLoopSet<'_, 'p>, hosts: usize) -> Result<Vec<(Worker<'p>, u16)>, String> {
         let mut started: Vec<(usize, (Worker<'p>, u16))> = std::thread::scope(|s| {
             let handles: Vec<_> = (0..hosts).map(|h| s.spawn(move || (h..self.instances).step_by(hosts).map(|i| self.one(set, i).map(|w| (i, w))).collect::<Result<Vec<_>, String>>())).collect();
             handles.into_iter().map(|h| h.join().unwrap_or_else(|_| Err("a starting thread panicked".to_owned()))).collect::<Result<Vec<_>, String>>()
@@ -122,7 +122,7 @@ fn main() -> ExitCode {
     let code = CodeCache::shared();
     let instances = cli.instances.get();
     let threads = cli.threads.unwrap_or_else(|| std::thread::available_parallelism().unwrap_or(NonZeroUsize::MIN).min(cli.instances));
-    let run = |set: &j8::EventLoopSet<'_, '_, Executor>| -> Result<(), String> {
+    let run = |set: &j8::EventLoopSet<'_, '_>| -> Result<(), String> {
         if !cli.requests.is_empty() {
             let mut rt = Worker::new::<Workerd>(set, &reactor, &code)?;
             rt.load(&script, &bindings, &storage)?;

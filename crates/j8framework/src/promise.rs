@@ -1,30 +1,30 @@
 use crate::ValueKind;
 use alloc::vec::Vec;
 
-use crate::Gc;
+use crate::ScopeLocal;
 
-use crate::{Agent, Error, ErrorKind, HostReaction, Job, JsObject, ObjectData, ObjectKind, Reaction, Request, Resume, Settled, Static, Step, Value};
+use crate::{Scope, Error, ErrorKind, HostReaction, Job, JsObject, ObjectData, ObjectKind, Reaction, Request, Resume, Settled, Static, Step, Value};
 
-impl<'gc> Agent<'gc, '_> {
-    pub fn new_promise(&self) -> JsObject<'gc> {
-        ObjectData { kind: ObjectKind::Promise { state: Settled::Pending, reactions: Vec::new() }, proto: Some(self.realm.promise_proto), ..ObjectData::default() }.alloc(self.mc)
+impl<'scope> Scope<'scope, '_> {
+    pub fn new_promise(&self) -> JsObject<'scope> {
+        ObjectData { kind: ObjectKind::Promise { state: Settled::Pending, reactions: Vec::new() }, proto: Some(self.context.promise_proto), ..ObjectData::default() }.alloc(self.mc)
     }
 
-    pub fn is_promise(v: Value<'gc>) -> bool {
+    pub fn is_promise(v: Value<'scope>) -> bool {
         matches!(v.kind(), ValueKind::Object(o) if matches!(o.borrow().kind, ObjectKind::Promise { .. }))
     }
 
-    pub fn promise_resolvers(&self, promise: JsObject<'gc>) -> (JsObject<'gc>, JsObject<'gc>) {
+    pub fn promise_resolvers(&self, promise: JsObject<'scope>) -> (JsObject<'scope>, JsObject<'scope>) {
         let done = self.mc.alloc(core::sync::atomic::AtomicBool::new(false));
         let make = |reject| {
-            let f = ObjectData { kind: ObjectKind::Resolver { promise, reject, done }, proto: Some(self.realm.function_proto), ..ObjectData::default() }.alloc(self.mc);
-            self.realm.name_function(self.mc, f, "", Some(1));
+            let f = ObjectData { kind: ObjectKind::Resolver { promise, reject, done }, proto: Some(self.context.function_proto), ..ObjectData::default() }.alloc(self.mc);
+            self.context.name_function(self.mc, f, "", Some(1));
             f
         };
         (make(false), make(true))
     }
 
-    pub fn run_resolver(&mut self, f: JsObject<'gc>, value: Value<'gc>) -> Result<Value<'gc>, Error> {
+    pub fn run_resolver(&mut self, f: JsObject<'scope>, value: Value<'scope>) -> Result<Value<'scope>, Error> {
         let ObjectKind::Resolver { promise, reject, done } = f.borrow().kind else { unreachable!("a resolver function") };
         if !done.swap(true, core::sync::atomic::Ordering::AcqRel) {
             if reject {
@@ -36,11 +36,11 @@ impl<'gc> Agent<'gc, '_> {
         Ok(Value::Undefined)
     }
 
-    fn enqueue(&self, job: Job<'gc>) {
-        self.realm.jobs.push(self.mc, job);
+    fn enqueue(&self, job: Job<'scope>) {
+        self.context.jobs.push(self.mc, job);
     }
 
-    fn settle(&mut self, promise: JsObject<'gc>, value: Value<'gc>, rejected: bool) {
+    fn settle(&mut self, promise: JsObject<'scope>, value: Value<'scope>, rejected: bool) {
         let reactions = {
             let mut d = promise.borrow_mut(self.mc);
             let ObjectKind::Promise { state, reactions } = &mut d.kind else { return };
@@ -55,21 +55,21 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    pub fn reject_promise(&mut self, promise: JsObject<'gc>, reason: Value<'gc>) {
+    pub fn reject_promise(&mut self, promise: JsObject<'scope>, reason: Value<'scope>) {
         self.settle(promise, reason, true);
     }
 
-    pub fn resolve_promise(&mut self, promise: JsObject<'gc>, value: Value<'gc>) -> Result<(), Error> {
+    pub fn resolve_promise(&mut self, promise: JsObject<'scope>, value: Value<'scope>) -> Result<(), Error> {
         if let Some(o) = value.as_object() {
-            if Gc::ptr_eq(o, promise) {
+            if ScopeLocal::ptr_eq(o, promise) {
                 let e = self.error(ErrorKind::Type, "Chaining cycle detected for promise");
                 self.reject_promise(promise, e.into());
                 return Ok(());
             }
             let then = match self.get_named(value, "then") {
                 Ok(t) => t,
-                Err(Error::Exception(g)) => {
-                    let reason = self.local(&g);
+                Err(Error::Exception) => {
+                    let reason = self.take_exception();
                     self.reject_promise(promise, reason);
                     return Ok(());
                 }
@@ -84,7 +84,7 @@ impl<'gc> Agent<'gc, '_> {
         Ok(())
     }
 
-    pub fn perform_then(&mut self, promise: JsObject<'gc>, reaction: Reaction<'gc>) {
+    pub fn perform_then(&mut self, promise: JsObject<'scope>, reaction: Reaction<'scope>) {
         let settled = {
             let mut d = promise.borrow_mut(self.mc);
             let ObjectKind::Promise { state, reactions } = &mut d.kind else { return };
@@ -102,17 +102,17 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    pub fn on_settled(&mut self, v: Value<'gc>, reaction: HostReaction) -> Result<(), Error> {
+    pub fn on_settled(&mut self, v: Value<'scope>, reaction: HostReaction) -> Result<(), Error> {
         let p = self.promise_resolve(v)?;
         let hook = self.mc.alloc(Static(j8lockfree::AtomicRefCell::new(Some(reaction))));
         self.perform_then(p, Reaction::Host { hook });
         Ok(())
     }
 
-    pub fn promise_resolve(&mut self, v: Value<'gc>) -> Result<JsObject<'gc>, Error> {
+    pub fn promise_resolve(&mut self, v: Value<'scope>) -> Result<JsObject<'scope>, Error> {
         if let Some(o) = v.as_object()
             && Self::is_promise(v)
-            && matches!((self.get_named(v, "constructor")?).kind(), ValueKind::Object(c) if Gc::ptr_eq(c, self.realm.promise_ctor))
+            && matches!((self.get_named(v, "constructor")?).kind(), ValueKind::Object(c) if ScopeLocal::ptr_eq(c, self.context.promise_ctor))
         {
             return Ok(o);
         }
@@ -121,7 +121,7 @@ impl<'gc> Agent<'gc, '_> {
         Ok(p)
     }
 
-    pub fn drive(&mut self, coroutine: JsObject<'gc>, mode: Resume, value: Value<'gc>) -> Result<(), Error> {
+    pub fn drive(&mut self, coroutine: JsObject<'scope>, mode: Resume, value: Value<'scope>) -> Result<(), Error> {
         let (promise, async_generator) = match &coroutine.borrow().kind {
             ObjectKind::Coroutine(c) => (c.promise, c.requests.is_some()),
             _ => (None, false),
@@ -131,8 +131,8 @@ impl<'gc> Agent<'gc, '_> {
         }
         match self.resume(coroutine, mode, value) {
             Ok(_) => Ok(()),
-            Err(Error::Exception(g)) => {
-                let reason = self.local(&g);
+            Err(Error::Exception) => {
+                let reason = self.take_exception();
                 if let Some(p) = promise {
                     self.reject_promise(p, reason);
                 }
@@ -142,7 +142,7 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    pub fn async_generator_enqueue(&mut self, coroutine: JsObject<'gc>, mode: Resume, value: Value<'gc>) -> Result<JsObject<'gc>, Error> {
+    pub fn async_generator_enqueue(&mut self, coroutine: JsObject<'scope>, mode: Resume, value: Value<'scope>) -> Result<JsObject<'scope>, Error> {
         let promise = self.new_promise();
         let idle = {
             let mut d = coroutine.borrow_mut(self.mc);
@@ -157,7 +157,7 @@ impl<'gc> Agent<'gc, '_> {
         Ok(promise)
     }
 
-    fn settle_request(&mut self, coroutine: JsObject<'gc>, outcome: Result<(Value<'gc>, bool), Value<'gc>>) -> Result<(), Error> {
+    fn settle_request(&mut self, coroutine: JsObject<'scope>, outcome: Result<(Value<'scope>, bool), Value<'scope>>) -> Result<(), Error> {
         let (done_req, next) = {
             let mut d = coroutine.borrow_mut(self.mc);
             let ObjectKind::Coroutine(c) = &mut d.kind else { unreachable!("an async generator") };
@@ -179,30 +179,30 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    fn drive_async_generator(&mut self, coroutine: JsObject<'gc>, mode: Resume, value: Value<'gc>) -> Result<(), Error> {
+    fn drive_async_generator(&mut self, coroutine: JsObject<'scope>, mode: Resume, value: Value<'scope>) -> Result<(), Error> {
         match self.resume(coroutine, mode, value) {
             Ok(Step::Await(v)) => match self.promise_resolve(v) {
                 Ok(p) => {
                     self.perform_then(p, Reaction::Await { coroutine });
                     Ok(())
                 }
-                Err(Error::Exception(g)) => {
-                    let reason = self.local(&g);
+                Err(Error::Exception) => {
+                    let reason = self.take_exception();
                     self.drive_async_generator(coroutine, Resume::Throw, reason)
                 }
                 Err(e) => Err(e),
             },
             Ok(Step::Yield(v)) => self.settle_request(coroutine, Ok((v, false))),
             Ok(Step::Done(v)) => self.settle_request(coroutine, Ok((v, true))),
-            Err(Error::Exception(g)) => {
-                let reason = self.local(&g);
+            Err(Error::Exception) => {
+                let reason = self.take_exception();
                 self.settle_request(coroutine, Err(reason))
             }
             Err(e) => Err(e),
         }
     }
 
-    fn run_job(&mut self, job: Job<'gc>) -> Result<(), Error> {
+    fn run_job(&mut self, job: Job<'scope>) -> Result<(), Error> {
         match job {
             Job::Reaction { reaction: Reaction::Await { coroutine }, value, rejected } => self.drive(coroutine, if rejected { Resume::Throw } else { Resume::Next }, value),
             Job::Reaction { reaction: Reaction::Host { hook }, value, rejected } => {
@@ -216,7 +216,7 @@ impl<'gc> Agent<'gc, '_> {
                 let outcome = if self.is_callable(handler) {
                     match self.call(handler, Value::Undefined, &[value]) {
                         Ok(r) => Ok(r),
-                        Err(Error::Exception(g)) => Err(self.local(&g)),
+                        Err(Error::Exception) => Err(self.take_exception()),
                         Err(e) => return Err(e),
                     }
                 } else if rejected {
@@ -230,7 +230,10 @@ impl<'gc> Agent<'gc, '_> {
                         Err(reason) => self.call(cap.reject, Value::Undefined, &[reason]),
                     };
                     match r {
-                        Ok(_) | Err(Error::Exception(_)) => {}
+                        Ok(_) => {}
+                        Err(Error::Exception) => {
+                            self.take_exception();
+                        }
                         Err(e) => return Err(e),
                     }
                 }
@@ -240,8 +243,8 @@ impl<'gc> Agent<'gc, '_> {
                 let (resolve, reject) = self.promise_resolvers(promise);
                 match self.call(then, thenable, &[resolve.into(), reject.into()]) {
                     Ok(_) => Ok(()),
-                    Err(Error::Exception(g)) => {
-                        let reason = self.local(&g);
+                    Err(Error::Exception) => {
+                        let reason = self.take_exception();
                         self.run_resolver(reject, reason).map(drop)
                     }
                     Err(e) => Err(e),
@@ -252,7 +255,7 @@ impl<'gc> Agent<'gc, '_> {
 
     pub fn run_jobs(&mut self) -> Result<(), Error> {
         loop {
-            let job = self.realm.jobs.pop(self.mc);
+            let job = self.context.jobs.pop(self.mc);
             match job {
                 Some(j) => self.run_job(j)?,
                 None => return Ok(()),

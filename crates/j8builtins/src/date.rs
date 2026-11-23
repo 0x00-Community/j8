@@ -2,7 +2,7 @@ use j8framework::ValueKind;
 use alloc::format;
 use alloc::string::String;
 
-use j8framework::{Agent, Error, ErrorKind, Hint, JsObject, ObjectKind, Property, Slot, Value};
+use j8framework::{Scope, Error, ErrorKind, Hint, JsObject, ObjectKind, Property, Slot, Value};
 
 use crate::{Args, Installer};
 
@@ -156,14 +156,14 @@ impl Dates {
         if (0.0..=99.0).contains(&t) { 1900.0 + t } else { t }
     }
 
-    fn now(a: &Agent<'_, '_>) -> f64 {
+    fn now(a: &Scope<'_, '_>) -> f64 {
         let d = a.platform.wall_clock();
         #[expect(clippy::cast_precision_loss, reason = "millisecond count is far below 2^53")]
         let ms = d.as_millis() as f64;
         ms
     }
 
-    fn this_time<'gc>(a: &Agent<'gc, '_>, this: Value<'gc>) -> Result<(JsObject<'gc>, f64), Error> {
+    fn this_time<'scope>(a: &Scope<'scope, '_>, this: Value<'scope>) -> Result<(JsObject<'scope>, f64), Error> {
         match this.kind() {
             ValueKind::Object(o) => match o.borrow().kind {
                 ObjectKind::Date(t) => Ok((o, t)),
@@ -387,7 +387,7 @@ impl Dates {
         Some(Self::make_date(Self::make_day(year, month, day), Self::make_time(h, m, sec, 0.0)) - offset)
     }
 
-    fn date<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn date<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let new_target = a.new_target;
         if new_target == Value::Undefined {
             let s = Self::to_date_string_of(Self::now(a));
@@ -413,10 +413,10 @@ impl Dates {
             }
             _ => Self::time_clip(Self::from_parts(a, args)?),
         };
-        Ok(a.create_from_ctor(new_target, a.realm.date_proto, ObjectKind::Date(tv))?.into())
+        Ok(a.create_from_ctor(new_target, a.context.date_proto, ObjectKind::Date(tv))?.into())
     }
 
-    fn from_parts<'gc>(a: &mut Agent<'gc, '_>, args: &[Value<'gc>]) -> Result<f64, Error> {
+    fn from_parts<'scope>(a: &mut Scope<'scope, '_>, args: &[Value<'scope>]) -> Result<f64, Error> {
         let defaults = [f64::NAN, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0];
         let mut n = defaults;
         for (i, slot) in n.iter_mut().enumerate() {
@@ -428,16 +428,16 @@ impl Dates {
         Ok(Self::make_date(Self::make_day(y, n[1], n[2]), Self::make_time(n[3], n[4], n[5], n[6])))
     }
 
-    fn date_now<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn date_now<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Ok(Self::now(a).into())
     }
 
-    fn date_parse<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn date_parse<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let s = a.to_string(args.at(0))?;
         Ok(Self::parse(&s).into())
     }
 
-    fn date_utc<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn date_utc<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let y = a.to_number(args.at(0))?;
         let mut n = [y, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0];
         for (i, slot) in n.iter_mut().enumerate().skip(1) {
@@ -449,7 +449,7 @@ impl Dates {
         Ok(Self::time_clip(Self::make_date(Self::make_day(y, n[1], n[2]), Self::make_time(n[3], n[4], n[5], n[6]))).into())
     }
 
-    fn get<'gc, const F: u8>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn get<'scope, const F: u8>(a: &mut Scope<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let (_, t) = Self::this_time(a, this)?;
         if t.is_nan() {
             return Ok(f64::NAN.into());
@@ -458,33 +458,33 @@ impl Dates {
         Ok(Self::field(t, f).into())
     }
 
-    fn get_time<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn get_time<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Ok(Self::this_time(a, this)?.1.into())
     }
 
-    fn get_timezone_offset<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn get_timezone_offset<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let (_, t) = Self::this_time(a, this)?;
         Ok(if t.is_nan() { f64::NAN } else { 0.0 }.into())
     }
 
-    fn get_year<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn get_year<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let (_, t) = Self::this_time(a, this)?;
         Ok(if t.is_nan() { f64::NAN } else { Self::year_from_time(t) - 1900.0 }.into())
     }
 
-    fn store<'gc>(a: &Agent<'gc, '_>, o: JsObject<'gc>, t: f64) -> Value<'gc> {
+    fn store<'scope>(a: &Scope<'scope, '_>, o: JsObject<'scope>, t: f64) -> Value<'scope> {
         let v = Self::time_clip(t);
         o.borrow_mut(a.mc).kind = ObjectKind::Date(v);
         v.into()
     }
 
-    fn set_time<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn set_time<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let (o, _) = Self::this_time(a, this)?;
         let t = a.to_number(args.at(0))?;
         Ok(Self::store(a, o, t))
     }
 
-    fn set<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>], which: Setter) -> Result<Value<'gc>, Error> {
+    fn set<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>], which: Setter) -> Result<Value<'scope>, Error> {
         let (o, t) = Self::this_time(a, this)?;
         let count = match which {
             Setter::Milliseconds | Setter::Date => 1,
@@ -522,7 +522,7 @@ impl Dates {
         Ok(Self::store(a, o, nt))
     }
 
-    fn set_year<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn set_year<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let (o, t) = Self::this_time(a, this)?;
         let y = a.to_number(args.at(0))?;
         if y.is_nan() {
@@ -534,29 +534,29 @@ impl Dates {
         Ok(Self::store(a, o, Self::make_date(d, modulo(t, MS_PER_DAY))))
     }
 
-    fn text<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, f: fn(f64) -> String) -> Result<Value<'gc>, Error> {
+    fn text<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, f: fn(f64) -> String) -> Result<Value<'scope>, Error> {
         let (_, t) = Self::this_time(a, this)?;
         let s = if t.is_nan() { String::from("Invalid Date") } else { f(t) };
         Ok(a.string(&s).into())
     }
 
-    fn to_string<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn to_string<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Self::text(a, this, Self::to_date_string_of)
     }
 
-    fn to_date_string<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn to_date_string<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Self::text(a, this, Self::date_part)
     }
 
-    fn to_time_string<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn to_time_string<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Self::text(a, this, Self::time_part)
     }
 
-    fn to_utc_string<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn to_utc_string<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Self::text(a, this, Self::utc_string)
     }
 
-    fn to_iso_string<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn to_iso_string<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let (_, t) = Self::this_time(a, this)?;
         if t.is_nan() {
             return Err(a.throw(ErrorKind::Range, "Invalid time value"));
@@ -564,7 +564,7 @@ impl Dates {
         Ok(a.string(&Self::iso_string(t)).into())
     }
 
-    fn to_json<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn to_json<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let o = a.to_object(this)?;
         let tv = a.to_primitive(o.into(), Hint::Number)?;
         if let Some(x) = tv.as_number()
@@ -579,11 +579,11 @@ impl Dates {
         a.call(f, o.into(), &[])
     }
 
-    fn value_of<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn value_of<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Ok(Self::this_time(a, this)?.1.into())
     }
 
-    fn to_primitive<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn to_primitive<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         if this.as_object().is_none() {
             return Err(a.throw(ErrorKind::Type, "Date.prototype[Symbol.toPrimitive] called on a non-object"));
         }
@@ -608,7 +608,7 @@ impl Dates {
 macro_rules! setters {
     ($($name:ident => $which:ident),* $(,)?) => {
         impl Dates {
-            $(fn $name<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+            $(fn $name<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
                 Self::set(a, this, args, Setter::$which)
             })*
         }
@@ -627,7 +627,7 @@ setters! {
 
 impl Installer<'_, '_> {
     pub(crate) fn date(&mut self) {
-        let r = self.realm;
+        let r = self.context;
         let proto = r.date_proto;
         let ctor = self.constructor("Date", Dates::date, proto, 7);
         self.method(ctor, "now", Dates::date_now, 0);

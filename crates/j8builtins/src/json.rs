@@ -3,7 +3,7 @@ use alloc::borrow::Cow;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use j8framework::{Agent, Error, ErrorKind, JsObject, JsString, ObjectData, Property, ShapeRef, Slot, SmallStr, Value};
+use j8framework::{Scope, Error, ErrorKind, JsObject, JsString, ObjectData, Property, ShapeRef, Slot, SmallStr, Value};
 
 use crate::{Args, Installer};
 
@@ -35,16 +35,16 @@ const ESCAPE: [u8; 256] = {
     t
 };
 
-struct Parser<'s, 'a, 'gc, 'x> {
-    a: &'a mut Agent<'gc, 'x>,
+struct Parser<'s, 'a, 'scope, 'x> {
+    a: &'a mut Scope<'scope, 'x>,
     text: &'s str,
     pos: usize,
-    shapes: Vec<(Vec<String>, ShapeRef<'gc>)>,
-    spare_pairs: Vec<Vec<(Cow<'s, str>, Value<'gc>)>>,
-    spare_items: Vec<Vec<Value<'gc>>>,
+    shapes: Vec<(Vec<String>, ShapeRef<'scope>)>,
+    spare_pairs: Vec<Vec<(Cow<'s, str>, Value<'scope>)>>,
+    spare_items: Vec<Vec<Value<'scope>>>,
 }
 
-impl<'s, 'gc> Parser<'s, '_, 'gc, '_> {
+impl<'s, 'scope> Parser<'s, '_, 'scope, '_> {
     fn error(&self, what: &str) -> Error {
         let found = self.text[self.pos..].chars().next().map_or_else(|| String::from("end of JSON input"), |c| alloc::format!("token '{c}'"));
         self.a.throw(ErrorKind::Syntax, &alloc::format!("Unexpected {found} in JSON at position {} ({what})", self.pos))
@@ -78,7 +78,7 @@ impl<'s, 'gc> Parser<'s, '_, 'gc, '_> {
         }
     }
 
-    fn value(&mut self) -> Result<Value<'gc>, Error> {
+    fn value(&mut self) -> Result<Value<'scope>, Error> {
         self.skip_ws();
         let v = match self.peek() {
             Some(b'{') => self.object()?,
@@ -97,7 +97,7 @@ impl<'s, 'gc> Parser<'s, '_, 'gc, '_> {
         Ok(v)
     }
 
-    fn object(&mut self) -> Result<Value<'gc>, Error> {
+    fn object(&mut self) -> Result<Value<'scope>, Error> {
         self.pos += 1;
         self.skip_ws();
         if self.peek() == Some(b'}') {
@@ -130,7 +130,7 @@ impl<'s, 'gc> Parser<'s, '_, 'gc, '_> {
         }
     }
 
-    fn build(&mut self, pairs: &[(Cow<'s, str>, Value<'gc>)]) -> JsObject<'gc> {
+    fn build(&mut self, pairs: &[(Cow<'s, str>, Value<'scope>)]) -> JsObject<'scope> {
         let n = pairs.len();
         if let Some(hit) = self.shapes.iter().rposition(|(keys, shape)| shape.len() == n && keys.len() == n && keys.iter().zip(pairs).all(|(k, (p, _))| k.as_str() == p.as_ref())) {
             let last = self.shapes.len() - 1;
@@ -153,7 +153,7 @@ impl<'s, 'gc> Parser<'s, '_, 'gc, '_> {
         o
     }
 
-    fn array(&mut self) -> Result<Value<'gc>, Error> {
+    fn array(&mut self) -> Result<Value<'scope>, Error> {
         self.pos += 1;
         self.skip_ws();
         if self.peek() == Some(b']') {
@@ -251,7 +251,7 @@ impl<'s, 'gc> Parser<'s, '_, 'gc, '_> {
         }
     }
 
-    fn number(&mut self) -> Result<Value<'gc>, Error> {
+    fn number(&mut self) -> Result<Value<'scope>, Error> {
         let start = self.pos;
         let neg = self.peek() == Some(b'-');
         if neg {
@@ -302,28 +302,28 @@ impl<'s, 'gc> Parser<'s, '_, 'gc, '_> {
     }
 }
 
-struct CachedShape<'gc> {
+struct CachedShape<'scope> {
     ptr: usize,
-    shape: ShapeRef<'gc>,
+    shape: ShapeRef<'scope>,
     base: usize,
     n: usize,
 }
 
-struct Writer<'gc> {
+struct Writer<'scope> {
     gap: String,
     indent: String,
-    allow: Option<Vec<JsString<'gc>>>,
-    replacer: Option<Value<'gc>>,
-    stack: Vec<JsObject<'gc>>,
+    allow: Option<Vec<JsString<'scope>>>,
+    replacer: Option<Value<'scope>>,
+    stack: Vec<JsObject<'scope>>,
     clean_shapes: Vec<usize>,
-    clean_protos: Vec<JsObject<'gc>>,
+    clean_protos: Vec<JsObject<'scope>>,
     quoted: String,
-    cached_shapes: Vec<CachedShape<'gc>>,
+    cached_shapes: Vec<CachedShape<'scope>>,
     cached_at: Vec<usize>,
     cached_len: Vec<usize>,
 }
 
-impl<'gc> Writer<'gc> {
+impl<'scope> Writer<'scope> {
     fn quote_string(out: &mut String, s: &j8framework::JsStr<'_>) {
         match s.wide().filter(|_| s.lone_surrogates()) {
             Some(units) => quote_units(out, units),
@@ -358,7 +358,7 @@ impl<'gc> Writer<'gc> {
         quote_from(out, s, i);
     }
 
-    fn keys(o: JsObject<'gc>) -> Vec<(SmallStr, Option<usize>)> {
+    fn keys(o: JsObject<'scope>) -> Vec<(SmallStr, Option<usize>)> {
         let d = o.borrow();
         let mut keys = Vec::new();
         if o.is_array() {
@@ -376,7 +376,7 @@ impl<'gc> Writer<'gc> {
         self.clean_protos.clear();
     }
 
-    fn owns_to_json(&mut self, o: JsObject<'gc>) -> bool {
+    fn owns_to_json(&mut self, o: JsObject<'scope>) -> bool {
         const KEY: &str = "toJSON";
         let props = o.get().props();
         if let Some(ptr) = props.shape_id() {
@@ -394,13 +394,13 @@ impl<'gc> Writer<'gc> {
         props.position(KEY).is_some()
     }
 
-    fn remember_proto(&mut self, o: JsObject<'gc>) {
-        if self.clean_protos.len() < TOJSON_PROTOS && !self.clean_protos.iter().any(|&p| j8framework::Gc::ptr_eq(p, o)) {
+    fn remember_proto(&mut self, o: JsObject<'scope>) {
+        if self.clean_protos.len() < TOJSON_PROTOS && !self.clean_protos.iter().any(|&p| j8framework::ScopeLocal::ptr_eq(p, o)) {
             self.clean_protos.push(o);
         }
     }
 
-    fn to_json_absent(&self, v: Value<'gc>) -> bool {
+    fn to_json_absent(&self, v: Value<'scope>) -> bool {
         let Some(o) = v.as_object() else {
             return !matches!(v.kind(), ValueKind::BigInt(_));
         };
@@ -416,12 +416,12 @@ impl<'gc> Writer<'gc> {
             return false;
         }
         match o.get().proto() {
-            Some(p) => self.clean_protos.iter().any(|&c| j8framework::Gc::ptr_eq(c, p)),
+            Some(p) => self.clean_protos.iter().any(|&c| j8framework::ScopeLocal::ptr_eq(c, p)),
             None => true,
         }
     }
 
-    fn resolve_to_json(&mut self, a: &mut Agent<'gc, '_>, v: Value<'gc>) -> Result<Value<'gc>, Error> {
+    fn resolve_to_json(&mut self, a: &mut Scope<'scope, '_>, v: Value<'scope>) -> Result<Value<'scope>, Error> {
         const KEY: &str = "toJSON";
         if self.to_json_absent(v) {
             return Ok(Value::Undefined);
@@ -432,7 +432,7 @@ impl<'gc> Writer<'gc> {
         };
         let mut root = true;
         loop {
-            if self.clean_protos.iter().any(|&p| j8framework::Gc::ptr_eq(p, o)) {
+            if self.clean_protos.iter().any(|&p| j8framework::ScopeLocal::ptr_eq(p, o)) {
                 return Ok(Value::Undefined);
             }
             if !o.get().is_plain() || self.owns_to_json(o) {
@@ -453,7 +453,7 @@ impl<'gc> Writer<'gc> {
         }
     }
 
-    fn property(&mut self, a: &mut Agent<'gc, '_>, holder: Value<'gc>, key: &str, read: Option<Value<'gc>>, out: &mut String) -> Result<bool, Error> {
+    fn property(&mut self, a: &mut Scope<'scope, '_>, holder: Value<'scope>, key: &str, read: Option<Value<'scope>>, out: &mut String) -> Result<bool, Error> {
         let mut v = match read {
             Some(v) => v,
             None => {
@@ -478,17 +478,17 @@ impl<'gc> Writer<'gc> {
         self.write_value(a, v, out)
     }
 
-    fn write_value(&mut self, a: &mut Agent<'gc, '_>, v: Value<'gc>, out: &mut String) -> Result<bool, Error> {
+    fn write_value(&mut self, a: &mut Scope<'scope, '_>, v: Value<'scope>, out: &mut String) -> Result<bool, Error> {
         match v.kind() {
             ValueKind::Null => out.push_str("null"),
             ValueKind::Number(x) if !x.is_finite() => out.push_str("null"),
             ValueKind::Bool(true) => out.push_str("true"),
             ValueKind::Bool(false) => out.push_str("false"),
-            ValueKind::String(s) => Self::quote_string(out, j8framework::Gc::get(s)),
+            ValueKind::String(s) => Self::quote_string(out, j8framework::ScopeLocal::get(s)),
             ValueKind::Number(x) => push_number(out, x),
             ValueKind::BigInt(_) => return Err(a.throw(ErrorKind::Type, "Do not know how to serialize a BigInt")),
             ValueKind::Object(o) if !o.is_callable() => {
-                if self.stack.iter().any(|&s| j8framework::Gc::ptr_eq(s, o)) {
+                if self.stack.iter().any(|&s| j8framework::ScopeLocal::ptr_eq(s, o)) {
                     return Err(a.throw(ErrorKind::Type, "Converting circular structure to JSON"));
                 }
                 self.stack.push(o);
@@ -515,7 +515,7 @@ impl<'gc> Writer<'gc> {
         out.reserve(step.saturating_mul(rest).min(RESERVE_MAX));
     }
 
-    fn one(&mut self, a: &mut Agent<'gc, '_>, holder: Value<'gc>, key: &str, read: Option<Value<'gc>>, out: &mut String, first: &mut bool) -> Result<(), Error> {
+    fn one(&mut self, a: &mut Scope<'scope, '_>, holder: Value<'scope>, key: &str, read: Option<Value<'scope>>, out: &mut String, first: &mut bool) -> Result<(), Error> {
         let mark = out.len();
         if !*first {
             out.push(',');
@@ -534,7 +534,7 @@ impl<'gc> Writer<'gc> {
         Ok(())
     }
 
-    fn object_allow(&mut self, a: &mut Agent<'gc, '_>, o: JsObject<'gc>, out: &mut String, first: &mut bool) -> Result<(), Error> {
+    fn object_allow(&mut self, a: &mut Scope<'scope, '_>, o: JsObject<'scope>, out: &mut String, first: &mut bool) -> Result<(), Error> {
         let keys = self.allow.clone().unwrap_or_default();
         for k in keys {
             let text = j8framework::SmallStr::from(k.as_str());
@@ -543,7 +543,7 @@ impl<'gc> Writer<'gc> {
         Ok(())
     }
 
-    fn object_keys(&mut self, a: &mut Agent<'gc, '_>, o: JsObject<'gc>, out: &mut String, first: &mut bool) -> Result<(), Error> {
+    fn object_keys(&mut self, a: &mut Scope<'scope, '_>, o: JsObject<'scope>, out: &mut String, first: &mut bool) -> Result<(), Error> {
         let keys = Self::keys(o);
         let shape = o.get().props().shape_id();
         for (k, at) in keys {
@@ -553,7 +553,7 @@ impl<'gc> Writer<'gc> {
         Ok(())
     }
 
-    fn object_cached(&mut self, a: &mut Agent<'gc, '_>, o: JsObject<'gc>, out: &mut String, first: &mut bool) -> Result<(), Error> {
+    fn object_cached(&mut self, a: &mut Scope<'scope, '_>, o: JsObject<'scope>, out: &mut String, first: &mut bool) -> Result<(), Error> {
         let ptr = o.get().props().shape_id().expect("shaped object");
         if let Some(hit) = self.cached_shapes.iter().position(|c| c.ptr == ptr) {
             return self.write_cached(a, o, hit, out, first);
@@ -579,7 +579,7 @@ impl<'gc> Writer<'gc> {
         self.write_cached(a, o, self.cached_shapes.len() - 1, out, first)
     }
 
-    fn write_cached(&mut self, a: &mut Agent<'gc, '_>, o: JsObject<'gc>, hit: usize, out: &mut String, first: &mut bool) -> Result<(), Error> {
+    fn write_cached(&mut self, a: &mut Scope<'scope, '_>, o: JsObject<'scope>, hit: usize, out: &mut String, first: &mut bool) -> Result<(), Error> {
         let (base, n, ptr) = {
             let c = &self.cached_shapes[hit];
             (c.base, c.n, c.ptr)
@@ -617,7 +617,7 @@ impl<'gc> Writer<'gc> {
         Ok(())
     }
 
-    fn object(&mut self, a: &mut Agent<'gc, '_>, o: JsObject<'gc>, out: &mut String) -> Result<(), Error> {
+    fn object(&mut self, a: &mut Scope<'scope, '_>, o: JsObject<'scope>, out: &mut String) -> Result<(), Error> {
         let outer = if self.gap.is_empty() { String::new() } else { self.indent.clone() };
         if !self.gap.is_empty() {
             self.indent.push_str(&self.gap);
@@ -641,7 +641,7 @@ impl<'gc> Writer<'gc> {
         Ok(())
     }
 
-    fn dense_len(o: JsObject<'gc>) -> Option<u32> {
+    fn dense_len(o: JsObject<'scope>) -> Option<u32> {
         if !o.is_array() {
             return None;
         }
@@ -649,7 +649,7 @@ impl<'gc> Writer<'gc> {
         (len as usize == o.elements().len()).then_some(len)
     }
 
-    fn element_at(o: JsObject<'gc>, i: u32, len: u32) -> Option<Value<'gc>> {
+    fn element_at(o: JsObject<'scope>, i: u32, len: u32) -> Option<Value<'scope>> {
         let n = o.elements().len();
         if o.array_length() != Some(len) || len as usize != n || i as usize >= n {
             return None;
@@ -657,7 +657,7 @@ impl<'gc> Writer<'gc> {
         o.elements().get(i as usize)
     }
 
-    fn plain_array(&mut self, a: &Agent<'gc, '_>, o: JsObject<'gc>, out: &mut String) -> bool {
+    fn plain_array(&mut self, a: &Scope<'scope, '_>, o: JsObject<'scope>, out: &mut String) -> bool {
         if self.replacer.is_some() || !self.gap.is_empty() || !o.is_array() {
             return false;
         }
@@ -695,7 +695,7 @@ impl<'gc> Writer<'gc> {
         true
     }
 
-    fn parallel_plain(a: &Agent<'gc, '_>, o: JsObject<'gc>, out: &mut String) -> bool {
+    fn parallel_plain(a: &Scope<'scope, '_>, o: JsObject<'scope>, out: &mut String) -> bool {
         #[derive(Clone, Copy)]
         enum Part<'s> {
             Number(f64),
@@ -710,7 +710,7 @@ impl<'gc> Writer<'gc> {
             .iter()
             .map(|v| match v.kind() {
                 ValueKind::Number(x) if x.is_finite() => Part::Number(x),
-                ValueKind::String(s) => Part::Text(j8framework::Gc::get(s).as_str()),
+                ValueKind::String(s) => Part::Text(j8framework::ScopeLocal::get(s).as_str()),
                 ValueKind::Bool(true) => Part::Raw("true"),
                 ValueKind::Bool(false) => Part::Raw("false"),
                 _ => Part::Raw("null"),
@@ -743,7 +743,7 @@ impl<'gc> Writer<'gc> {
         true
     }
 
-    fn array(&mut self, a: &mut Agent<'gc, '_>, o: JsObject<'gc>, out: &mut String) -> Result<(), Error> {
+    fn array(&mut self, a: &mut Scope<'scope, '_>, o: JsObject<'scope>, out: &mut String) -> Result<(), Error> {
         if self.plain_array(a, o, out) {
             return Ok(());
         }
@@ -789,7 +789,7 @@ impl<'gc> Writer<'gc> {
 struct Json;
 
 impl Json {
-    fn parse<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn parse<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let text = a.to_string(args.at(0))?;
         let mut p = Parser { a, text: &text, pos: 0, shapes: Vec::with_capacity(SHAPES_CACHED), spare_pairs: Vec::new(), spare_items: Vec::new() };
         let v = p.value()?;
@@ -806,7 +806,7 @@ impl Json {
         Self::revive(a, root.into(), key, reviver)
     }
 
-    fn revive<'gc>(a: &mut Agent<'gc, '_>, holder: Value<'gc>, key: JsString<'gc>, reviver: Value<'gc>) -> Result<Value<'gc>, Error> {
+    fn revive<'scope>(a: &mut Scope<'scope, '_>, holder: Value<'scope>, key: JsString<'scope>, reviver: Value<'scope>) -> Result<Value<'scope>, Error> {
         let v = a.get_named(holder, &key)?;
         if let Some(o) = v.as_object() {
             let keys = Writer::keys(o);
@@ -823,12 +823,12 @@ impl Json {
         a.call(reviver, holder, &[key.into(), v])
     }
 
-    fn stringify<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn stringify<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let (replacer, allow) = match args.at(1).kind() {
             f if a.is_callable(Value::from(f)) => (Some(Value::from(f)), None),
             ValueKind::Object(o) if a.is_array(o.into())? => {
                 let items = a.to_list(Value::Object(o))?;
-                let mut keys: Vec<JsString<'gc>> = Vec::new();
+                let mut keys: Vec<JsString<'scope>> = Vec::new();
                 for item in items {
                     let k = match item.kind() {
                         ValueKind::String(s) => Some(s),
@@ -867,7 +867,7 @@ impl Json {
             cached_at: Vec::new(),
             cached_len: Vec::new(),
         };
-        let wrapper = ObjectData { proto: Some(a.realm.object_proto), ..ObjectData::default() }.alloc(a.mc);
+        let wrapper = ObjectData { proto: Some(a.context.object_proto), ..ObjectData::default() }.alloc(a.mc);
         wrapper.borrow_mut(a.mc).set("", args.at(0));
         let key = SmallStr::from("");
         let mut out = String::new();
@@ -880,7 +880,7 @@ impl Installer<'_, '_> {
         let j = self.plain();
         self.method(j, "parse", Json::parse, 2);
         self.method(j, "stringify", Json::stringify, 3);
-        self.set(self.realm.global, "JSON", j.into());
+        self.set(self.context.global, "JSON", j.into());
     }
 }
 
@@ -893,7 +893,7 @@ impl Writer<'_> {
     fn push_plain(out: &mut String, v: Value<'_>) {
         match v.kind() {
             ValueKind::Number(x) if x.is_finite() => push_number(out, x),
-            ValueKind::String(s) => Self::quote_string(out, j8framework::Gc::get(s)),
+            ValueKind::String(s) => Self::quote_string(out, j8framework::ScopeLocal::get(s)),
             ValueKind::Bool(true) => out.push_str("true"),
             ValueKind::Bool(false) => out.push_str("false"),
             _ => out.push_str("null"),

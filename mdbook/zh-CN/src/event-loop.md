@@ -1,11 +1,11 @@
 # 事件循环与任务队列
 
-j8 不带异步运行时（没有 tokio）。事件循环是 j8 自己的：`j8framework::EventLoop` 建在 `j8taskqueue` 的队列上，
+j8 不带异步运行时（没有 tokio）。事件循环是 j8 自己的：`j8executor::EventLoop` 建在 `j8taskqueue` 的队列上，
 `EventLoopSet` 把成千上万个事件循环钉在少数几个 loop 线程上跑。
 
 ## 一个事件循环
 
-`EventLoop` 是一个 JS 事件循环：自己的 isolate、引擎、一个上下文，以及一个 j8taskqueue 队列。**队列就是事件循环**，
+`EventLoop` 是一个 JS 事件循环：自己的 isolate、执行器、一个上下文，以及一个 j8taskqueue 队列。**队列就是事件循环**，
 里面有三种任务：
 
 1. **脚本**：每次跑一个检查间隔的步数（缺省约一千条指令，V8 在函数入口与回跳处的中断检查），然后让回队列；
@@ -33,7 +33,7 @@ j8::EventLoopSet::scope(&platform, NonZeroUsize::new(8).unwrap(), |set| {
   迁入迁出）找到 loop 线程，并等它回答。发给已经搬走的事件循环的消息会被转发。
 - **负载均衡。** 新事件循环去负载最轻的线程。没活干的线程向最忙的线程要一半差额，对方先交出排队等着的事件循环（工作窃取）。
   `set.rebalance()` 按需拉平，`set.split(thread)` 新起一个线程、分走某线程一半的事件循环。事件循环只在回合之间迁移，
-  它的 isolate、引擎、暂停的脚本和挂起的 future 一起走。
+  它的 isolate、执行器、暂停的脚本和挂起的 future 一起走。
 - **统一配额。** 每个回合跑集合的切片步数（`set.set_slice`）乘以事件循环的权重（`EventLoop::set_weight`），每
   `set.set_check` 步检查一次队列；`set.loads()`、`set.spent()`、`EventLoop::spent()` 显示活都花在了哪里。长脚本不会
   卡住同线程的其他事件循环。

@@ -149,17 +149,22 @@ const CASES: &[Case] = &[
 fn completion(text: &str, tier: Tier) -> String {
     let platform = DefaultPlatform::default();
     let mut isolate = Isolate::new(&platform, CreateParams::default());
-    let mut executor = match tier {
+    let executor = match tier {
         Tier::Interpreter => Executor::default(),
         Tier::Immediate => Executor::default().with_tier(j8jit::Jit::from(0)),
         Tier::Default => Executor::default().with_tier(j8jit::Jit::default()),
     };
-    let cx = isolate.enter(|scope| scope.persist(scope.context(&Builtins)));
-    let r = isolate.run(&mut executor, &cx, &Source { text, file: "jit_regexp.js" }).unwrap_or_else(|e| panic!("script failed ({}): {e:?}\n{text}", tier.label()));
-    isolate.enter(|scope| {
-        let realm = scope.context_of(&cx);
-        let mut a = scope.agent(realm, &executor);
-        let v = a.local(&r);
+    let cx = isolate.create_context(&Builtins);
+    let r = executor.eval(&mut isolate, &cx, &Source { text, file: "jit_regexp.js" });
+    isolate.enter(&cx, &executor, |a| {
+        let v = match &r {
+            Ok(g) => a.local(g),
+            Err(e) => {
+                let thrown = a.take_exception();
+                let thrown = a.to_string(thrown).map(|s| String::from(&**s)).unwrap_or_default();
+                panic!("script failed ({}): {e:?} {thrown}\n{text}", tier.label())
+            }
+        };
         String::from(&**a.to_string(v).unwrap_or_else(|e| panic!("ToString failed ({}): {e:?}\n{text}", tier.label())))
     })
 }
@@ -175,25 +180,16 @@ fn run_cases() {
     for tier in [Tier::Interpreter, Tier::Immediate, Tier::Default] {
         let platform = DefaultPlatform::default();
         let mut isolate = Isolate::new(&platform, CreateParams::default());
-        let mut executor = match tier {
+        let executor = match tier {
             Tier::Interpreter => Executor::default(),
             Tier::Immediate => Executor::default().with_tier(j8jit::Jit::from(0)),
             Tier::Default => Executor::default().with_tier(j8jit::Jit::default()),
         };
-        let (ca, cb) = isolate.enter(|scope| (scope.persist(scope.context(&Builtins)), scope.persist(scope.context(&Builtins))));
-        let ra = isolate.run(&mut executor, &ca, &Source { text: script, file: "realm-a.js" }).unwrap_or_else(|e| panic!("realm a failed ({}): {e:?}", tier.label()));
-        let rb = isolate.run(&mut executor, &cb, &Source { text: script, file: "realm-b.js" }).unwrap_or_else(|e| panic!("realm b failed ({}): {e:?}", tier.label()));
-        let (va, vb) = isolate.enter(|scope| {
-            let va = {
-                let mut a = scope.agent(scope.context_of(&ca), &executor);
-                String::from(&**a.to_string(a.local(&ra)).expect("realm a ToString"))
-            };
-            let vb = {
-                let mut b = scope.agent(scope.context_of(&cb), &executor);
-                String::from(&**b.to_string(b.local(&rb)).expect("realm b ToString"))
-            };
-            (va, vb)
-        });
+        let (ca, cb) = (isolate.create_context(&Builtins), isolate.create_context(&Builtins));
+        let ra = executor.eval(&mut isolate, &ca, &Source { text: script, file: "realm-a.js" }).unwrap_or_else(|e| panic!("realm a failed ({}): {e:?}", tier.label()));
+        let rb = executor.eval(&mut isolate, &cb, &Source { text: script, file: "realm-b.js" }).unwrap_or_else(|e| panic!("realm b failed ({}): {e:?}", tier.label()));
+        let va = isolate.enter(&ca, &executor, |a| String::from(&**a.to_string(a.local(&ra)).expect("realm a ToString")));
+        let vb = isolate.enter(&cb, &executor, |b| String::from(&**b.to_string(b.local(&rb)).expect("realm b ToString")));
         assert_eq!(va, want, "realm a ({})", tier.label());
         assert_eq!(vb, want, "realm b ({})", tier.label());
     }

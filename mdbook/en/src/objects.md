@@ -13,16 +13,16 @@ a value store), array elements, and the immutable data of functions and regexps.
 at the offsets `j8framework::Layout` gives.
 
 j8's own heap structs are declared with `#[j8framework::heap]`; `#[mutable]` fields get the cell their type calls for
-(`Value` ⇒ `ValueCell`, `Gc` ⇒ a paragc `Slot`, bools and integers ⇒ atomics) plus a getter and setter:
+(`Value` ⇒ `ValueCell`, `ScopeLocal` ⇒ a paragc `Slot`, bools and integers ⇒ atomics) plus a getter and setter:
 
 ```rust,ignore
 #[j8framework::heap]
-pub struct Object<'gc> {
+pub struct Object<'scope> {
     #[mutable(set = write_proto)]
-    proto: Option<JsObject<'gc>>,      // proto() / write_proto(mc, p)
+    proto: Option<JsObject<'scope>>,      // proto() / write_proto(mc, p)
     #[mutable]
     non_extensible: bool,              // non_extensible() / set_non_extensible(mc, b)
-    data: GcCell<'gc, ObjectState<'gc>>,
+    data: GcCell<'scope, ObjectState<'scope>>,
 }
 ```
 
@@ -34,8 +34,9 @@ order; the values are stored separately in the object's slots.
 - Objects built the same way share shapes: adding a property follows the **transition table** to (or creates) a child
   shape;
 - the execution layer keeps [inline caches](executor.md#inline-caches) keyed by "shape ⇒ slot index";
-- shapes hold no `Gc` pointers (collection moves objects) and are managed with `Arc`; the transition table stores
-  `Weak`, so shapes no object uses are freed naturally;
+- shapes live in the GC heap behind a **handle** (`ShapeRef`, an entry of paragc's handle table): the collector moves
+  the shape and rewrites the entry, the handle stays the same; the transition table holds `Weak` references, so shapes
+  no object uses are collected;
 - deleting a property, changing attributes or having too many keys turns the object's properties into a
   **dictionary** (`Dict`, modified in place); inline caches don't accept those.
 
@@ -72,12 +73,14 @@ to its traps and checks the invariants.
 - when `+` produces something long enough, it is first a **rope** (two halves plus the total length), flattened and
   cached when the content is first needed, so a `s += c` loop doesn't copy the whole string every time; flattening and
   dropping are iterative, so ropes hundreds of thousands of levels deep don't overflow the stack;
-- no `Gc` inside: the GC doesn't manage them.
+- no `ScopeLocal` inside: the GC doesn't manage them.
 
 Strings are stored as UTF-8 for now, so lone surrogates are lost; comparisons go by UTF-16 code units.
 
 ## Host objects
 
-`ObjectKind::Host`: JS objects holding a Rust value (`HostData`, a `Box<dyn Any + Send + Sync>` behind a borrow flag).
+`ObjectKind::Host`: JS objects holding a Rust value (`HostData`: a `Host`, `Box<dyn HostObject>`, in a `GcCell`). Like
+cppgc objects in V8, host data is traced: `HostObject::trace` visits the JS values it holds, and lookups go by a brand's
+`TypeId` (`HostObject::find`), so the Rust type may carry the `'scope` lifetime.
 Binding methods take it as `&self` / `&mut self`; a re-entrant `&mut self` call throws a `TypeError` instead of
 panicking (see [Binding macros](bindings.md)).

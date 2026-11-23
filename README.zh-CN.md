@@ -7,7 +7,7 @@
 **字节码解释器 + 经 MLIR 的 JIT + 并行回收的堆 ([paragc](https://crates.io/crates/paragc)).**
 
 [![Rust](https://img.shields.io/badge/Rust-100%25-orange?style=for-the-badge&logo=rust)](https://www.rust-lang.org)
-[![test262](https://img.shields.io/badge/test262-42%2C443%20%E9%80%9A%E8%BF%87-success?style=for-the-badge)](#-test262)
+[![test262](https://img.shields.io/badge/test262-42%2C500%20%E9%80%9A%E8%BF%87-success?style=for-the-badge)](#-test262)
 [![License](https://img.shields.io/badge/License-MIT-brightgreen?style=for-the-badge)](#-许可证)
 
 [![ECMAScript](https://img.shields.io/badge/ECMAScript-%E6%A0%B8%E5%BF%83%E8%AF%AD%E8%A8%80-F7DF1E?style=flat-square&logo=javascript&logoColor=black)](#-现状)
@@ -38,14 +38,14 @@ j8 是**用 Rust 从头写的 JavaScript 引擎**, 照着 V8 的分层来: 所�
 | 🦀 **全 Rust** | 解析用 oxc, 其余从字节码到 GC 都是自己写的. 没有 C++ 引擎在下面. |
 | 🧱 **字节码先行** | 不设 AST 解释层: 所有 JS (包括 `eval`、`Function`) 都先编成字节码, 而且就是 V8 Ignition 的字节码, 逐字节一致 (表格从 V8 头文件生成). |
 | 🧬 **推测式 JIT** | 依据内联缓存的反馈把热字节码建成推测性 SSA 图 (内联、逃逸分析、循环不变量外提、OSR、去优化), 直接出 x86-64 或 AArch64. |
-| ♻️ **paragc 堆** | Immix 式块 / 行堆: 年轻回收 + 老对象引用计数、稀疏块疏散, 标记与清扫并行, 无锁; `'gc` 品牌生命周期, 编译期保证句柄不逃逸. |
+| ♻️ **paragc 堆** | Immix 式块 / 行堆: 年轻回收 + 老对象引用计数、稀疏块疏散, 标记与清扫并行, 无锁; `'scope` 品牌生命周期, 编译期保证句柄不逃逸. |
 | 🚫 **没有 `'static`** | 不用全局状态; 后台任务借用调用方数据, 多个 Isolate 共用一个线程池. |
 
 ## 🏆 数字
 
 | ✔️ 项目 | 结果 |
 | --- | --- |
-| 📜 test262 基线 | **42,443** 条通过 (非严格 + `onlyStrict`; 不含 Temporal / intl402 等, 见 PLAN.md), 每次提交零回归 |
+| 📜 test262 基线 | **42,500** 条通过 (非严格 + `onlyStrict`; 不含 Temporal / intl402 等, 见 PLAN.md), 每次提交零回归 |
 | 🧮 JIT | `J8_TEST262_JIT=1` 开着 JIT (每个函数第一次调用就编) 跑同一份基线 |
 | ⏱️ 对 V8 jitless | 11 个基准几何平均耗时 **0.6×**, 校验和三种引擎全一致 |
 | 🚄 对 V8 (带 JIT) | 几何平均耗时 **1.7×**; 差距在内建函数 (array、sort、string、collections、json、regexp), 详见 [benchmark.md](samples/benchv8/benchmark.md) |
@@ -92,20 +92,20 @@ cd samples/benchv8 && cargo run --release
 
 | crate | std | 职责 |
 |---|---|---|
-| `j8framework` | std | 核心框架层：定义 trait（`Platform`、`Engine`、`Invoke`、`Intrinsics`）与通用结构体 / 枚举（`Isolate`、`Scope`、`Agent`、`Context`·`Realm`、`Global`、`Value`、`JsString`·`JsObject`、`Profiler`、`BinaryOp`、`Error`……），JS 运算语义挂在 `Agent` 上，实现归各层 crate。`EventLoop` 是一个 JS 事件循环（一个 isolate、它的引擎与一个上下文；可续跑的 `Engine::start` / `resume`、宿主异步活）；`EventLoopSet` 把许多事件循环钉在少数 loop 线程上跑，带负载均衡（放置、工作窃取、`rebalance`、`split`）与统一配额 |
+| `j8framework` | std | 核心框架层：定义 trait（`Platform`、`Invoke`、`Intrinsics`）与通用结构体 / 枚举（`Isolate`、`Scope`、`Scope`、`Context`、`ScopeGlobal`、`Host`、`Value`、`JsString`·`JsObject`、`Profiler`、`BinaryOp`、`Error`……），JS 运算语义挂在 `Scope` 上，实现归各层 crate。 |
 | `j8`（仓库根 `src/`） | std | 聚合导出：`#[j8::class]` / `#[j8::object]` / `#[j8::function]`（宏在 j8macros，见 `crates/macros/USAGE.md`）与 j8binding 的 trait；其余 crate 按 feature 导出（缺省 `runtime` = `j8::executor` + `j8::builtins` + `j8::platform`，另有 `bytecode` / `taskqueue` / `lockfree` / `jit` / `full`），每个子 crate 也单独发在 crates.io |
 | `j8binding` | std | Rust ⇄ JS 绑定的运行时：`FromJs` / `IntoJs`、宿主对象、`Class` / `Object` |
-| `j8builtins` | std | 实现 `Intrinsics`：往 `Realm` 装 Object / Function / Array / String / Number / Boolean / Math / Error 系列 / `console` / `parseInt` 等 |
+| `j8builtins` | std | 实现 `Intrinsics`：往 `Context` 装 Object / Function / Array / String / Number / Boolean / Math / Error 系列 / `console` / `parseInt` 等 |
 | `j8platform` | std | 实现 `Platform`（`DefaultPlatform`）：后台任务跑在 moremath `ThreadMulti` 线程池上（起一次复用、任务可借用调用方数据，经 `j8framework::Pool`），时钟用 `Instant` |
 | `j8bytecode` | std | 字节码，依赖根（不依赖其他 j8 crate）：与 V8 Ignition 逐字节一致（`Bytecode` / `OperandType` … 由 `v8.json` 生成，`tools/v8bytecodes.py` 从 V8 头文件写出），`Encoder` / `Decoder`，`SharedFunction` / `BytecodeArray` / `Module` |
 | `j8compiler` | std | JS ⇒ 字节码（`Module` 实现 `j8compiler::Compile`：脚本、模块、`eval` / `Function`），用 oxc 解析 |
-| `j8taskqueue` | `no_std` | 任务队列：`ITask`（`recursable` / `depend` / `exec`）与 `ITaskPoll`（`add` / `run`）；无锁数据流调度（手写 MPMC 就绪队列、原子依赖计数），依赖做完的任务立刻在宿主给的 `Pool` 上并行跑（或就在调用线程上跑）、没有轮次屏障；`TaskId::family` 并查集找爹、`cancel` 整家取消；配额按字节码条数（`Quota` / `Flow::Yield`、每次 run 的预算）；取不到活的线程直接离开、不自旋。每个 `j8framework::EventLoop` 就是一个 `Queue`：脚本、兑现、宿主 future 的 poll，脚本每让出一次就检查一次队列 |
+| `j8taskqueue` | `no_std` | 任务队列：`ITask`（`recursable` / `depend` / `exec`）与 `ITaskPoll`（`add` / `run`）；无锁数据流调度（手写 MPMC 就绪队列、原子依赖计数），依赖做完的任务立刻在宿主给的 `Pool` 上并行跑（或就在调用线程上跑）、没有轮次屏障；`TaskId::family` 并查集找爹、`cancel` 整家取消；配额按字节码条数（`Quota` / `Flow::Yield`、每次 run 的预算）；取不到活的线程直接离开、不自旋。每个 `j8executor::EventLoop` 就是一个 `Queue`：脚本、兑现、宿主 future 的 poll，脚本每让出一次就检查一次队列 |
 | `j8macros` | proc-macro | 过程宏：`enums!("x.json")` 从 JSON 生成枚举（定义、`Display`、按字段类型取 `&mut`）、堆类型的 `#[derive(Collect)]`（paragc `Trace`）、绑定宏，用法见 `crates/macros/USAGE.md` |
 | `dune` | std | 对标 Node 的运行时，分两层：`src/web/`（Web 标准接口：`console`、定时器、`URL`、`TextEncoder`、`EventTarget` / `AbortController`、`fetch`、`structuredClone`、`crypto`……）和叠在上面的 `src/node/`（`process`、`require` / ES 模块、`Buffer`、`fs`、`path`、`os`、`events`、`util`、`assert`、`child_process`……）；碰机器的部分是 `#[j8::object]` / `#[j8::class]` 绑定的 Rust，接口本身是 JS prelude；`dune a.js`、`dune --web a.mjs`、`dune -e` / `-p`、REPL，详见其 README |
 | `samples/workerd` | std | 用 j8 加载 Cloudflare Worker（ES 模块 `export default { fetch }`）与 Durable Object：`workerd examples/counter.js --bind COUNTER=Counter --request "GET /c/inc?name=a"` 或 `--port 8787` 起 HTTP 服务；Fetch API 子集与 DO 在 JS 序言里，存储是 `#[j8::class]` 绑定的 Rust KV |
 | `samples/benchv8` | std | 同一组 JS 基准在 j8 与 V8（rusty_v8 152，带 JIT / `--jitless`）上的耗时对比：`cd samples/benchv8 && cargo run --release`（会下载 V8 预编译库） |
 | `samples/j8bcdbg` | std | 字节码调试命令行（clap）：`j8bcdbg compile <file.js \| ->` / `j8bcdbg compile -e '<js>'` 按函数列出字节码，格式照 V8 的 `--print-bytecode`（`-o` 写文件） |
-| `j8executor` | std | 字节码执行器 `Executor`，**目前是最后一层**；实现 `Engine`，固定带 JS ⇒ 字节码编译器（脚本、模块、`eval` / `Function` 都先编成字节码） |
+| `j8executor` | std | 字节码执行器 `Executor<'p>`，**目前是最后一层**（`eval`，可续跑的 `start` / `resume`）；`EventLoop` 是一个 JS 事件循环（一个 isolate、执行器与一个上下文，宿主异步活），`EventLoopSet` 把许多事件循环钉在少数 loop 线程上跑，带负载均衡（放置、工作窃取、`rebalance`、`split`）与统一配额；固定带 JS ⇒ 字节码编译器（脚本、模块、`eval` / `Function` 都先编成字节码） |
 
 所有 JS 都先编成字节码再执行，不设 AST 解释层。
 依赖方向：各层只依赖 `j8framework`（`j8executor` 另依赖 `j8compiler`；`j8bytecode` 是根，`j8framework` 与 `j8compiler` 依赖它），`j8framework` 不依赖任何层，只依赖基础件 `j8lockfree` 与 `j8taskqueue`。
@@ -117,31 +117,32 @@ cd samples/benchv8 && cargo run --release
 `ValueCell`（一个 NaN-boxing 的 `Value`：原子字 + `Slot`）、`Cow`、`GcQueue`、`Static`，以及 `#[derive(Collect)]`（在 j8macros；
 `#[collect(require_static)]` 跳过一个字段或整个类型）。品牌生命周期，无 `'static`。
 
-- 回收只在 `enter` 之外、所有 `Gc` 都挂在根上时发生，对象会被搬：⛔ 把 `Gc` 或对象地址存进 `Trace` 不遍历的地方（`Static`、旁路缓存）；
+- 回收只在 `enter` 之外、所有 `ScopeLocal` 都挂在根上时发生，对象会被搬：⛔ 把 `ScopeLocal` 或对象地址存进 `Trace` 不遍历的地方（`Static`、旁路缓存）；
   按地址哈希的东西（Map / Set 的索引）在 `relocate` 里更新（见 `Collection`）
 - ⛔ 给还没进堆的值写 `Slot` / `ValueCell` / `Cow`（写屏障记的是槽地址）：先分配进堆再填（见 `Scope::context`）
 - 堆只做停顿式回收（`collect_if_needed` / `collect`，内部并行）；`GcCell` 原地改年轻快照不经写屏障，所以 ⛔ `mark_concurrently`
-- 堆里的类型都是 `Send + Sync`（paragc 的规矩）：宿主数据是 j8lockfree `AtomicRefCell` 里的 `Box<dyn Any + Send + Sync>`，
-  Shape 与 rope 用 `Arc`
+- 堆里的类型都是 `Send + Sync`（paragc 的规矩）：宿主数据是 `GcCell` 里会被追踪的 `Box<dyn HostObject + Send + Sync>`，
+  rope 用 `Arc`
 - 堆有自己的回收线程（数目同平台线程池）；`Platform` 的父 trait `Pool` 给并行内建函数用
 
-- `Isolate::enter(|scope| …)` 进入一次，`'gc` 是这次进入的品牌；闭包期间不回收，返回后分配够多就回收（通常是年轻回收，每隔几轮一次完整回收）
-- `Engine::eval` 拿 `&mut Isolate` 自己分片进入：每片最多一万条指令，停下时执行状态挂到根上、`enter` 返回时回收一段再接着跑；执行环境用 `ContextRoot` 跨片保留（宿主函数里重入的 JS 在当前片里跑完）
-- `Value<'gc>` 就是 V8 的 Local：出不了闭包，编译期保证
-- `Global` 是持久句柄（paragc `Root`），跨多次 `enter` 存活，drop 即放掉
+- `Isolate::enter(&cx, &executor, |scope| …)` 进入一次，`'scope` 是这次进入的品牌；闭包期间不回收，返回后分配够多就回收（通常是年轻回收，每隔几轮一次完整回收）
+- `Executor::eval` 拿 `&mut Isolate` 自己分片进入：每片最多一万条指令，停下时执行状态挂到根上、`enter` 返回时回收一段再接着跑；执行环境用 `ScopeGlobal<'p, ContextBrand>` 跨片保留（宿主函数里重入的 JS 在当前片里跑完）
+- `Value<'scope>` 就是 V8 的 Local：出不了闭包，编译期保证
+- `ScopeGlobal<'p, B>` 是根（paragc 的），跨多次 `enter` 存活，drop 即放掉；`B` 标明类型（`ValueBrand`、`ContextBrand`）
+- 抛出的值照 V8 放在待处理异常槽里（`Error::Exception`，`scope.take_exception()`）
 
 ```rust
 use j8builtins::Builtins;
 use j8executor::Executor;
-use j8framework::{CreateParams, Isolate, Source};
+use j8framework::{CreateParams, Isolate, ContextBrand, Source};
 use j8platform::DefaultPlatform;
 
 let platform = DefaultPlatform::default();
 let mut isolate = Isolate::new(&platform, CreateParams::default());
-let mut executor = Executor::default();
-let cx = isolate.enter(|scope| scope.persist(scope.context(&Builtins)));
-let result = isolate.run(&mut executor, &cx, &Source { text: "1 + 2 * 3", file: "a.js" })?;
-isolate.enter(|scope| {
+let executor = Executor::default();
+let cx = isolate.create_context(&Builtins);
+let result = executor.eval(&mut isolate, &cx, &Source { text: "1 + 2 * 3", file: "a.js" })?;
+isolate.enter(&cx, &executor, |scope| {
     let v = scope.local(&result);
 });
 ```

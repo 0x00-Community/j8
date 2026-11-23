@@ -1,13 +1,12 @@
 use alloc::string::String;
 use core::fmt;
 
-use crate::Global;
-
 #[derive(Debug)]
 pub enum Error {
     Syntax(String),
     Unsupported(String),
-    Exception(Global),
+    Exception,
+    Parked(u64),
     Terminated,
 }
 
@@ -16,7 +15,7 @@ impl fmt::Display for Error {
         match self {
             Error::Syntax(m) => write!(f, "syntax error: {m}"),
             Error::Unsupported(m) => write!(f, "unsupported: {m}"),
-            Error::Exception(_) => f.write_str("uncaught exception"),
+            Error::Exception | Error::Parked(_) => f.write_str("uncaught exception"),
             Error::Terminated => f.write_str("execution terminated"),
         }
     }

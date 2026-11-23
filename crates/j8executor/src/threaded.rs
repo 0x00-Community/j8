@@ -1,28 +1,28 @@
 use j8bytecode::{Bytecode, Constant, OperandValue};
-use j8framework::{Agent, Env, Error, ErrorKind, Value, ValueBits};
+use j8framework::{Scope, Env, Error, ErrorKind, Value, ValueBits};
 
 use crate::{Args, Budget, Executor, Flow, Frame, Insn, Loaded, Outcome, State, STACK_LIMIT};
 
 #[expect(private_interfaces, reason = "crate-internal types; the module is private")]
-pub struct Cx<'r, 'gc, 'x, 'b> {
-    pub exe: &'r Executor,
-    pub a: &'r mut Agent<'gc, 'x>,
-    pub st: &'r mut State<'gc>,
+pub struct Cx<'r, 'scope, 'x, 'b, 'p> {
+    pub exe: &'r Executor<'p>,
+    pub a: &'r mut Scope<'scope, 'x>,
+    pub st: &'r mut State<'scope>,
     pub loaded: &'r Loaded,
     pub budget: &'r mut Budget<'b>,
     pub depth: usize,
 }
 
 #[expect(private_interfaces, reason = "crate-internal types; the module is private")]
-pub enum Exit<'gc> {
+pub enum Exit<'scope> {
     Frame,
-    Done(Outcome<'gc>),
+    Done(Outcome<'scope>),
     Throw(Error),
     #[cfg(not(tail_calls))]
-    Next(*const Insn, Value<'gc>),
+    Next(*const Insn, Value<'scope>),
 }
 
-pub type Handler = for<'r, 'gc, 'x, 'b> fn(&mut Cx<'r, 'gc, 'x, 'b>, *const Insn, *mut Value<'gc>, Value<'gc>) -> Exit<'gc>;
+pub type Handler = for<'r, 'scope, 'x, 'b, 'p> fn(&mut Cx<'r, 'scope, 'x, 'b, 'p>, *const Insn, *mut Value<'scope>, Value<'scope>) -> Exit<'scope>;
 
 #[cfg(tail_calls)]
 macro_rules! next {
@@ -43,7 +43,7 @@ macro_rules! next {
 macro_rules! handlers {
     ($($name:ident($cx:ident, $pc:ident, $regs:ident, $acc:ident, $o:ident) $body:block)*) => {$(
         #[allow(unused_mut, unused_variables, clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "operands are in range")]
-        fn $name<'r, 'gc, 'x, 'b>($cx: &mut Cx<'r, 'gc, 'x, 'b>, $pc: *const Insn, $regs: *mut Value<'gc>, mut $acc: Value<'gc>) -> Exit<'gc> {
+        fn $name<'scope>($cx: &mut Cx<'_, 'scope, '_, '_, '_>, $pc: *const Insn, $regs: *mut Value<'scope>, mut $acc: Value<'scope>) -> Exit<'scope> {
             let $o = unsafe { (*$pc).operands.all() };
             $body
         }
@@ -284,7 +284,7 @@ handlers! {
         }
     }
     lda_global(cx, pc, regs, acc, o) {
-        let (scope, global) = (cx.a.realm.script_scope, cx.a.realm.global);
+        let (scope, global) = (cx.a.context.script_scope, cx.a.context.global);
         match cx.loaded.globals[o[1] as usize].get(scope, global) {
             Some(v) => next!(cx, step!(pc), regs, v),
             None => fall!(cx, pc, regs, acc),
@@ -294,7 +294,7 @@ handlers! {
 
 #[inline(never)]
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "a register index fits in isize and a feedback slot is not negative")]
-fn get_named_string<'gc>(cx: &mut Cx<'_, 'gc, '_, '_>, pc: *const Insn, regs: *mut Value<'gc>, acc: Value<'gc>) -> Exit<'gc> {
+fn get_named_string<'scope>(cx: &mut Cx<'_, 'scope, '_, '_, '_>, pc: *const Insn, regs: *mut Value<'scope>, acc: Value<'scope>) -> Exit<'scope> {
     let o = unsafe { (*pc).operands.all() };
     if let Some(s) = reg!(cx, regs, o[0]).as_string() {
         let ic = &cx.loaded.ics[o[2] as usize];
@@ -302,7 +302,7 @@ fn get_named_string<'gc>(cx: &mut Cx<'_, 'gc, '_, '_>, pc: *const Insn, regs: *m
             let n = u32::try_from(s.utf16_len()).unwrap_or(u32::MAX);
             next!(cx, step!(pc), regs, Value::Number(f64::from(n)))
         }
-        if let Some(v) = ic.string_value(cx.a.realm.string_proto) {
+        if let Some(v) = ic.string_value(cx.a.context.string_proto) {
             next!(cx, step!(pc), regs, v)
         }
     }
@@ -311,7 +311,7 @@ fn get_named_string<'gc>(cx: &mut Cx<'_, 'gc, '_, '_>, pc: *const Insn, regs: *m
 
 #[inline(never)]
 #[allow(clippy::cast_possible_truncation, reason = "a register index fits in isize")]
-fn add_text<'gc>(cx: &mut Cx<'_, 'gc, '_, '_>, pc: *const Insn, regs: *mut Value<'gc>, acc: Value<'gc>) -> Exit<'gc> {
+fn add_text<'scope>(cx: &mut Cx<'_, 'scope, '_, '_, '_>, pc: *const Insn, regs: *mut Value<'scope>, acc: Value<'scope>) -> Exit<'scope> {
     let o = unsafe { (*pc).operands.all() };
     if let Some(v) = cx.a.try_concat(reg!(cx, regs, o[0]), acc) {
         next!(cx, step!(pc), regs, v)
@@ -321,7 +321,7 @@ fn add_text<'gc>(cx: &mut Cx<'_, 'gc, '_, '_>, pc: *const Insn, regs: *mut Value
 
 #[inline(never)]
 #[allow(clippy::cast_precision_loss, reason = "an smi operand fits in an f64")]
-fn add_smi_text<'gc>(cx: &mut Cx<'_, 'gc, '_, '_>, pc: *const Insn, regs: *mut Value<'gc>, acc: Value<'gc>) -> Exit<'gc> {
+fn add_smi_text<'scope>(cx: &mut Cx<'_, 'scope, '_, '_, '_>, pc: *const Insn, regs: *mut Value<'scope>, acc: Value<'scope>) -> Exit<'scope> {
     let o = unsafe { (*pc).operands.all() };
     if let Some(v) = cx.a.try_concat(acc, Value::Number(o[0] as f64)) {
         next!(cx, step!(pc), regs, v)
@@ -329,14 +329,14 @@ fn add_smi_text<'gc>(cx: &mut Cx<'_, 'gc, '_, '_>, pc: *const Insn, regs: *mut V
     fall!(cx, pc, regs, acc)
 }
 
-pub enum Entered<'gc> {
-    At(*const Insn, *mut Value<'gc>, Value<'gc>),
+pub enum Entered<'scope> {
+    At(*const Insn, *mut Value<'scope>, Value<'scope>),
     Throw(Error),
     No,
 }
 
 #[inline]
-fn enter<'r, 'gc>(cx: &mut Cx<'r, 'gc, '_, '_>, pc: *const Insn, callee: Value<'gc>, this: Value<'gc>, args: Args<'_, 'gc>, fb: OperandValue) -> Entered<'gc> {
+fn enter<'r, 'scope>(cx: &mut Cx<'r, 'scope, '_, '_, '_>, pc: *const Insn, callee: Value<'scope>, this: Value<'scope>, args: Args<'_, 'scope>, fb: OperandValue) -> Entered<'scope> {
     let Some(o) = callee.as_object() else { return Entered::No };
     let Some(c) = o.closure() else { return Entered::No };
     let l: &'r Loaded = cx.exe.code(&c);
@@ -375,7 +375,7 @@ fn enter<'r, 'gc>(cx: &mut Cx<'r, 'gc, '_, '_>, pc: *const Insn, callee: Value<'
 }
 
 #[inline(never)]
-fn tier_enter<'gc>(cx: &mut Cx<'_, 'gc, '_, '_>) -> Entered<'gc> {
+fn tier_enter<'scope>(cx: &mut Cx<'_, 'scope, '_, '_, '_>) -> Entered<'scope> {
     let l = cx.loaded;
     let n = l.calls.get().wrapping_add(1);
     l.calls.set(n);
@@ -398,7 +398,7 @@ fn tier_enter<'gc>(cx: &mut Cx<'_, 'gc, '_, '_>) -> Entered<'gc> {
 }
 
 #[inline]
-fn native<'gc>(cx: &mut Cx<'_, 'gc, '_, '_>, pc: *const Insn, callee: Value<'gc>, this: Value<'gc>, args: &[Value<'gc>], fb: OperandValue) -> Option<Result<Value<'gc>, Error>> {
+fn native<'scope>(cx: &mut Cx<'_, 'scope, '_, '_, '_>, pc: *const Insn, callee: Value<'scope>, this: Value<'scope>, args: &[Value<'scope>], fb: OperandValue) -> Option<Result<Value<'scope>, Error>> {
     let Some(o) = callee.as_object() else { return None };
     let n = o.native()?;
     Executor::record_native(cx.loaded, fb, n.f);
@@ -416,7 +416,7 @@ fn native<'gc>(cx: &mut Cx<'_, 'gc, '_, '_>, pc: *const Insn, callee: Value<'gc>
 }
 
 #[inline]
-fn sync(cx: &mut Cx<'_, '_, '_, '_>, pc: *const Insn) {
+fn sync(cx: &mut Cx<'_, '_, '_, '_, '_>, pc: *const Insn) {
     let at = usize::try_from(unsafe { pc.offset_from(cx.loaded.insns.as_ptr()) }).unwrap_or(0);
     let f = cx.st.f_mut();
     f.insn = at;
@@ -616,7 +616,7 @@ handlers! {
 }
 
 #[inline(never)]
-fn slow<'r, 'gc, 'x, 'b>(cx: &mut Cx<'r, 'gc, 'x, 'b>, pc: *const Insn, _: *mut Value<'gc>, acc: Value<'gc>) -> Exit<'gc> {
+fn slow<'scope>(cx: &mut Cx<'_, 'scope, '_, '_, '_>, pc: *const Insn, _: *mut Value<'scope>, acc: Value<'scope>) -> Exit<'scope> {
     let base = cx.loaded.insns.as_ptr();
     let at = usize::try_from(unsafe { pc.offset_from(base) }).unwrap_or(0);
     let st = &mut *cx.st;
@@ -639,7 +639,7 @@ fn slow<'r, 'gc, 'x, 'b>(cx: &mut Cx<'r, 'gc, 'x, 'b>, pc: *const Insn, _: *mut 
     }
 }
 
-fn illegal<'r, 'gc, 'x, 'b>(cx: &mut Cx<'r, 'gc, 'x, 'b>, _: *const Insn, _: *mut Value<'gc>, _: Value<'gc>) -> Exit<'gc> {
+fn illegal<'scope>(cx: &mut Cx<'_, 'scope, '_, '_, '_>, _: *const Insn, _: *mut Value<'scope>, _: Value<'scope>) -> Exit<'scope> {
     Exit::Throw(cx.a.throw(ErrorKind::Syntax, "ran past the end of the bytecode"))
 }
 
@@ -721,8 +721,8 @@ impl Insn {
     }
 }
 
-impl Executor {
-    pub fn threaded<'gc>(cx: &mut Cx<'_, 'gc, '_, '_>) -> Exit<'gc> {
+impl Executor<'_> {
+    pub fn threaded<'scope>(cx: &mut Cx<'_, 'scope, '_, '_, '_>) -> Exit<'scope> {
         if cx.exe.tier.is_some() {
             if cx.st.f().pc == 0 {
                 if let Entered::Throw(e) = tier_enter(cx) {

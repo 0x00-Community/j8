@@ -18,9 +18,9 @@ use j8::platform::DefaultPlatform;
 
 let platform = DefaultPlatform::default();
 let mut isolate = Isolate::new(&platform, CreateParams::default());
-let mut executor = Executor::default();
-let cx = isolate.enter(|scope| scope.persist(scope.context(&Builtins)));
-let result = isolate.run(&mut executor, &cx, &Source { text: "1 + 2 * 3", file: "a.js" })?;
+let executor = Executor::default();
+let cx = isolate.create_context(&Builtins);
+let result = executor.eval(&mut isolate, &cx, &Source { text: "1 + 2 * 3", file: "a.js" })?;
 ```
 
 真正的宿主一般不直接摆弄 Isolate，而是用 `j8::runtime!` 声明一个运行时，见[搭一个宿主](embedding.md)。

@@ -28,15 +28,30 @@ unsafe impl Sync for External {}
 
 struct Attached(#[expect(dead_code, reason = "only dropped along with the host object")] Finalizer);
 
-#[derive(Debug)]
-pub struct Reference {
-    value: j8framework::Global,
+unsafe impl crate::Opaque<'_> for Wrapped {
+    type Brand = Self;
+}
+
+unsafe impl crate::Opaque<'_> for External {
+    type Brand = Self;
+}
+
+unsafe impl crate::Opaque<'_> for Attached {
+    type Brand = Self;
+}
+
+unsafe impl crate::Opaque<'_> for TypeTag {
+    type Brand = Self;
+}
+
+pub struct Reference<'e> {
+    value: j8framework::ScopeGlobal<'e, j8framework::ValueBrand>,
     count: u32,
 }
 
-impl Env {
-    pub fn define<'gc>(&self, a: &mut j8framework::Agent<'gc, '_>, target: JsObject<'gc>, p: &PropertyDescriptor) -> Result<(), Status> {
-        let name: Name<'gc> = if p.utf8name.is_null() {
+impl Env<'_> {
+    pub fn define<'scope>(&self, a: &mut j8framework::Scope<'scope, '_>, target: JsObject<'scope>, p: &PropertyDescriptor) -> Result<(), Status> {
+        let name: Name<'scope> = if p.utf8name.is_null() {
             self.name(p.name)?
         } else {
             Name::Str(a.string(&Ffi::utf8(p.utf8name, crate::AUTO_LENGTH)?))
@@ -65,11 +80,11 @@ impl Env {
         self.js(a.define_property_or_throw(target, name.key(), desc))
     }
 
-    fn wrapped<'gc>(&self, a: &j8framework::Agent<'gc, '_>, o: JsObject<'gc>) -> Option<JsObject<'gc>> {
+    fn wrapped<'scope>(&self, a: &j8framework::Scope<'scope, '_>, o: JsObject<'scope>) -> Option<JsObject<'scope>> {
         Self::private(o, self.wrap_key(a)).and_then(Value::as_object)
     }
 
-    fn keys<'gc>(&self, a: &mut j8framework::Agent<'gc, '_>, o: JsObject<'gc>, mode: KeyMode, filter: KeyFilter, conversion: KeyConversion) -> Result<Vec<Value<'gc>>, Status> {
+    fn keys<'scope>(&self, a: &mut j8framework::Scope<'scope, '_>, o: JsObject<'scope>, mode: KeyMode, filter: KeyFilter, conversion: KeyConversion) -> Result<Vec<Value<'scope>>, Status> {
         let mut out = Vec::new();
         let mut at = Some(o);
         while let Some(cur) = at {
@@ -78,7 +93,7 @@ impl Env {
                 let keep = (!filter.has(KeyFilter::ENUMERABLE) || p.enumerable)
                     && (!filter.has(KeyFilter::WRITABLE) || p.writable)
                     && (!filter.has(KeyFilter::CONFIGURABLE) || p.configurable);
-                let v: Value<'gc> = match k {
+                let v: Value<'scope> = match k {
                     PropertyKey::String(_) if filter.has(KeyFilter::SKIP_STRINGS) => continue,
                     PropertyKey::Symbol(_) if filter.has(KeyFilter::SKIP_SYMBOLS) => continue,
                     PropertyKey::String(s) => match (conversion, s.parse::<u32>()) {
@@ -87,7 +102,7 @@ impl Env {
                     },
                     PropertyKey::Symbol(s) => Value::Symbol(s),
                 };
-                if keep && !out.iter().any(|&x: &Value<'gc>| x.same_value(v)) {
+                if keep && !out.iter().any(|&x: &Value<'scope>| x.same_value(v)) {
                     out.push(v);
                 }
             }
@@ -102,17 +117,17 @@ impl Env {
 
 napi! {
     fn napi_create_object(env, result: *mut Handle) {
-        let a = env.agent()?;
+        let a = env.scope()?;
         env.out(result, a.object().into())
     }
 
     fn napi_create_array(env, result: *mut Handle) {
-        let a = env.agent()?;
+        let a = env.scope()?;
         env.out(result, a.array(Vec::new()).into())
     }
 
     fn napi_create_array_with_length(env, length: usize, result: *mut Handle) {
-        let a = env.agent()?;
+        let a = env.scope()?;
         let o = a.array(Vec::new());
         #[expect(clippy::cast_precision_loss, reason = "array lengths are at most 2^32 - 1")]
         let n = length.min(u32::MAX as usize) as f64;
@@ -121,7 +136,7 @@ napi! {
     }
 
     fn napi_get_array_length(env, value: Handle, result: *mut u32) {
-        let a = env.agent()?;
+        let a = env.scope()?;
         let v = env.value(value)?;
         if !env.js(a.is_array(v))? {
             return Err(Status::ArrayExpected);
@@ -132,7 +147,7 @@ napi! {
 
     fn napi_get_prototype(env, object: Handle, result: *mut Handle) {
         env.preamble()?;
-        let a = env.agent()?;
+        let a = env.scope()?;
         let o = env.to_object(a, object)?;
         let p = env.js(a.get_prototype_of(o))?;
         env.out(result, p.map_or(Value::Null, Value::from))
@@ -140,14 +155,14 @@ napi! {
 
     fn napi_set_property(env, object: Handle, key: Handle, value: Handle) {
         env.preamble()?;
-        let a = env.agent()?;
+        let a = env.scope()?;
         let o = env.to_object(a, object)?;
         env.js(a.set_keyed(o.into(), env.value(key)?, env.value(value)?))
     }
 
     fn napi_get_property(env, object: Handle, key: Handle, result: *mut Handle) {
         env.preamble()?;
-        let a = env.agent()?;
+        let a = env.scope()?;
         let o = env.to_object(a, object)?;
         let v = env.js(a.get_keyed(o.into(), env.value(key)?))?;
         env.out(result, v)
@@ -155,7 +170,7 @@ napi! {
 
     fn napi_has_property(env, object: Handle, key: Handle, result: *mut bool) {
         env.preamble()?;
-        let a = env.agent()?;
+        let a = env.scope()?;
         let o = env.to_object(a, object)?;
         let b = env.js(a.has_keyed(o.into(), env.value(key)?))?;
         Ffi::put(result, b)
@@ -163,7 +178,7 @@ napi! {
 
     fn napi_delete_property(env, object: Handle, key: Handle, result: *mut bool) {
         env.preamble()?;
-        let a = env.agent()?;
+        let a = env.scope()?;
         let o = env.to_object(a, object)?;
         let b = env.js(a.delete_keyed(o.into(), env.value(key)?))?;
         Ffi::put_opt(result, b);
@@ -172,7 +187,7 @@ napi! {
 
     fn napi_has_own_property(env, object: Handle, key: Handle, result: *mut bool) {
         env.preamble()?;
-        let a = env.agent()?;
+        let a = env.scope()?;
         let o = env.to_object(a, object)?;
         let name = env.name(key)?;
         let b = env.js(a.has_own_property(o, name.key()))?;
@@ -181,7 +196,7 @@ napi! {
 
     fn napi_set_named_property(env, object: Handle, utf8name: *const c_char, value: Handle) {
         env.preamble()?;
-        let a = env.agent()?;
+        let a = env.scope()?;
         let o = env.to_object(a, object)?;
         let k = Ffi::utf8(utf8name, crate::AUTO_LENGTH)?;
         env.js(a.set_named(o.into(), &k, env.value(value)?))
@@ -189,7 +204,7 @@ napi! {
 
     fn napi_get_named_property(env, object: Handle, utf8name: *const c_char, result: *mut Handle) {
         env.preamble()?;
-        let a = env.agent()?;
+        let a = env.scope()?;
         let o = env.to_object(a, object)?;
         let k = Ffi::utf8(utf8name, crate::AUTO_LENGTH)?;
         let v = env.js(a.get_named(o.into(), &k))?;
@@ -198,7 +213,7 @@ napi! {
 
     fn napi_has_named_property(env, object: Handle, utf8name: *const c_char, result: *mut bool) {
         env.preamble()?;
-        let a = env.agent()?;
+        let a = env.scope()?;
         let o = env.to_object(a, object)?;
         let k = Ffi::utf8(utf8name, crate::AUTO_LENGTH)?;
         let b = env.js(a.has_property(o.into(), &k))?;
@@ -207,14 +222,14 @@ napi! {
 
     fn napi_set_element(env, object: Handle, index: u32, value: Handle) {
         env.preamble()?;
-        let a = env.agent()?;
+        let a = env.scope()?;
         let o = env.to_object(a, object)?;
         env.js(a.set_index(o.into(), f64::from(index), env.value(value)?))
     }
 
     fn napi_get_element(env, object: Handle, index: u32, result: *mut Handle) {
         env.preamble()?;
-        let a = env.agent()?;
+        let a = env.scope()?;
         let o = env.to_object(a, object)?;
         let v = env.js(a.get_index(o.into(), f64::from(index)))?;
         env.out(result, v)
@@ -222,7 +237,7 @@ napi! {
 
     fn napi_has_element(env, object: Handle, index: u32, result: *mut bool) {
         env.preamble()?;
-        let a = env.agent()?;
+        let a = env.scope()?;
         let o = env.to_object(a, object)?;
         let b = env.js(a.has_index(o, f64::from(index)))?;
         Ffi::put(result, b)
@@ -230,7 +245,7 @@ napi! {
 
     fn napi_delete_element(env, object: Handle, index: u32, result: *mut bool) {
         env.preamble()?;
-        let a = env.agent()?;
+        let a = env.scope()?;
         let o = env.to_object(a, object)?;
         let b = env.js(a.delete_keyed(o.into(), f64::from(index).into()))?;
         Ffi::put_opt(result, b);
@@ -239,7 +254,7 @@ napi! {
 
     fn napi_get_property_names(env, object: Handle, result: *mut Handle) {
         env.preamble()?;
-        let a = env.agent()?;
+        let a = env.scope()?;
         let o = env.to_object(a, object)?;
         let keys = env.keys(a, o, KeyMode::IncludePrototypes, KeyFilter(KeyFilter::ENUMERABLE | KeyFilter::SKIP_SYMBOLS), KeyConversion::NumbersToStrings)?;
         env.out(result, a.array(keys).into())
@@ -248,7 +263,7 @@ napi! {
     fn napi_get_all_property_names(env, object: Handle, key_mode: i32, key_filter: KeyFilter, key_conversion: i32, result: *mut Handle) {
         let (key_mode, key_conversion) = (KeyMode::try_from(key_mode)?, KeyConversion::try_from(key_conversion)?);
         env.preamble()?;
-        let a = env.agent()?;
+        let a = env.scope()?;
         let o = env.to_object(a, object)?;
         let keys = env.keys(a, o, key_mode, key_filter, key_conversion)?;
         env.out(result, a.array(keys).into())
@@ -256,7 +271,7 @@ napi! {
 
     fn napi_define_properties(env, object: Handle, property_count: usize, properties: *const PropertyDescriptor) {
         env.preamble()?;
-        let a = env.agent()?;
+        let a = env.scope()?;
         let o = env.object(object)?;
         for p in Ffi::slice(properties, property_count)? {
             env.define(a, o, p)?;
@@ -266,20 +281,20 @@ napi! {
 
     fn napi_object_freeze(env, object: Handle) {
         env.preamble()?;
-        let a = env.agent()?;
+        let a = env.scope()?;
         let o = env.object(object)?;
         env.js(a.set_integrity_level(o, Integrity::Frozen)).map(drop)
     }
 
     fn napi_object_seal(env, object: Handle) {
         env.preamble()?;
-        let a = env.agent()?;
+        let a = env.scope()?;
         let o = env.object(object)?;
         env.js(a.set_integrity_level(o, Integrity::Sealed)).map(drop)
     }
 
     fn napi_wrap(env, js_object: Handle, native_object: *mut c_void, finalize_cb: Finalize, finalize_hint: *mut c_void, result: *mut *mut Reference) {
-        let a = env.agent()?;
+        let a = env.scope()?;
         let o = env.object(js_object)?;
         if env.wrapped(a, o).is_some() {
             return Err(Status::InvalidArg);
@@ -291,17 +306,17 @@ napi! {
     }
 
     fn napi_unwrap(env, js_object: Handle, result: *mut *mut c_void) {
-        let a = env.agent()?;
+        let a = env.scope()?;
         let o = env.object(js_object)?;
         let w = env.wrapped(a, o).ok_or(Status::InvalidArg)?;
-        Ffi::put(result, Env::hosted::<Wrapped, _>(w, |w| w.data).ok_or(Status::InvalidArg)?)
+        Ffi::put(result, Env::hosted::<Wrapped, _>(a, w, |w| w.data).ok_or(Status::InvalidArg)?)
     }
 
     fn napi_remove_wrap(env, js_object: Handle, result: *mut *mut c_void) {
-        let a = env.agent()?;
+        let a = env.scope()?;
         let o = env.object(js_object)?;
         let w = env.wrapped(a, o).ok_or(Status::InvalidArg)?;
-        let data = Env::hosted::<Wrapped, _>(w, |w| {
+        let data = Env::hosted::<Wrapped, _>(a, w, |w| {
             w.finalizer.pending = None;
             w.data
         })
@@ -312,18 +327,19 @@ napi! {
     }
 
     fn napi_create_external(env, data: *mut c_void, finalize_cb: Finalize, finalize_hint: *mut c_void, result: *mut Handle) {
-        let a = env.agent()?;
+        let a = env.scope()?;
         let e = Env::host(a, External { data, _finalizer: env.finalizer(finalize_cb, data, finalize_hint) });
         env.out(result, e.into())
     }
 
     fn napi_get_value_external(env, value: Handle, result: *mut *mut c_void) {
+        let a = env.scope()?;
         let o = env.value(value)?.as_object().ok_or(Status::InvalidArg)?;
-        Ffi::put(result, Env::hosted::<External, _>(o, |e| e.data).ok_or(Status::InvalidArg)?)
+        Ffi::put(result, Env::hosted::<External, _>(a, o, |e| e.data).ok_or(Status::InvalidArg)?)
     }
 
     fn napi_type_tag_object(env, value: Handle, type_tag: *const TypeTag) {
-        let a = env.agent()?;
+        let a = env.scope()?;
         let o = env.object(value)?;
         let key = env.tag_key(a);
         if Env::private(o, key).is_some() || type_tag.is_null() {
@@ -335,18 +351,18 @@ napi! {
     }
 
     fn napi_check_object_type_tag(env, value: Handle, type_tag: *const TypeTag, result: *mut bool) {
-        let a = env.agent()?;
+        let a = env.scope()?;
         let o = env.object(value)?;
         if type_tag.is_null() {
             return Err(Status::InvalidArg);
         }
         let tag = unsafe { type_tag.read() };
-        let same = Env::private(o, env.tag_key(a)).and_then(Value::as_object).and_then(|h| Env::hosted::<TypeTag, _>(h, |t| *t == tag));
+        let same = Env::private(o, env.tag_key(a)).and_then(Value::as_object).and_then(|h| Env::hosted::<TypeTag, _>(a, h, |t| *t == tag));
         Ffi::put(result, same.unwrap_or(false))
     }
 
     fn napi_add_finalizer(env, js_object: Handle, finalize_data: *mut c_void, finalize_cb: Finalize, finalize_hint: *mut c_void, result: *mut *mut Reference) {
-        let a = env.agent()?;
+        let a = env.scope()?;
         let o = env.object(js_object)?;
         if finalize_cb.is_none() {
             return Err(Status::InvalidArg);
@@ -364,7 +380,7 @@ napi! {
     }
 
     fn napi_create_reference(env, value: Handle, initial_refcount: u32, result: *mut *mut Reference) {
-        let a = env.agent()?;
+        let a = env.scope()?;
         let v = env.value(value)?;
         Ffi::put(result, Box::into_raw(Box::new(Reference { value: a.global(v), count: initial_refcount })))
     }
@@ -395,7 +411,7 @@ napi! {
     }
 
     fn napi_get_reference_value(env, reference: *mut Reference, result: *mut Handle) {
-        let a = env.agent()?;
+        let a = env.scope()?;
         let r = unsafe { reference.as_ref() }.ok_or(Status::InvalidArg)?;
         env.out(result, a.local(&r.value))
     }

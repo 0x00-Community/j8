@@ -2,17 +2,17 @@ use alloc::borrow::Cow;
 use alloc::string::String;
 use core::ffi::c_char;
 
-use j8framework::{Agent, JsObject, JsString, Key, PropertyKey, Value, ValueKind};
+use j8framework::{Scope, JsObject, JsString, Key, PropertyKey, Value, ValueKind};
 
 use crate::{AUTO_LENGTH, Env, Handle, Status};
 
-pub enum Name<'gc> {
-    Str(JsString<'gc>),
-    Sym(j8framework::JsSymbol<'gc>),
+pub enum Name<'scope> {
+    Str(JsString<'scope>),
+    Sym(j8framework::JsSymbol<'scope>),
 }
 
-impl<'gc> Name<'gc> {
-    pub fn key(&self) -> Key<'_, 'gc> {
+impl<'scope> Name<'scope> {
+    pub fn key(&self) -> Key<'_, 'scope> {
         match self {
             Self::Str(s) => Key::Str(s),
             Self::Sym(s) => Key::Sym(*s),
@@ -20,8 +20,8 @@ impl<'gc> Name<'gc> {
     }
 }
 
-impl<'gc> From<PropertyKey<'gc>> for Name<'gc> {
-    fn from(k: PropertyKey<'gc>) -> Self {
+impl<'scope> From<PropertyKey<'scope>> for Name<'scope> {
+    fn from(k: PropertyKey<'scope>) -> Self {
         match k {
             PropertyKey::String(s) => Self::Str(s),
             PropertyKey::Symbol(s) => Self::Sym(s),
@@ -71,20 +71,20 @@ impl Ffi {
     }
 }
 
-impl Env {
-    pub fn values<'gc>(&self, ptr: *const Handle, n: usize) -> Result<alloc::vec::Vec<Value<'gc>>, Status> {
+impl Env<'_> {
+    pub fn values<'scope>(&self, ptr: *const Handle, n: usize) -> Result<alloc::vec::Vec<Value<'scope>>, Status> {
         Ffi::slice(ptr, n)?.iter().map(|&h| self.value(h)).collect()
     }
 
-    pub fn object<'gc>(&self, h: Handle) -> Result<JsObject<'gc>, Status> {
+    pub fn object<'scope>(&self, h: Handle) -> Result<JsObject<'scope>, Status> {
         self.value(h)?.as_object().ok_or(Status::ObjectExpected)
     }
 
-    pub fn to_object<'gc>(&self, a: &Agent<'gc, '_>, h: Handle) -> Result<JsObject<'gc>, Status> {
+    pub fn to_object<'scope>(&self, a: &Scope<'scope, '_>, h: Handle) -> Result<JsObject<'scope>, Status> {
         a.to_object(self.value(h)?).map_err(|_| Status::ObjectExpected)
     }
 
-    pub fn string<'gc>(&self, h: Handle) -> Result<JsString<'gc>, Status> {
+    pub fn string<'scope>(&self, h: Handle) -> Result<JsString<'scope>, Status> {
         match self.value(h)?.kind() {
             ValueKind::String(s) => Ok(s),
             _ => Err(Status::StringExpected),
@@ -95,12 +95,12 @@ impl Env {
         self.value(h)?.as_number().ok_or(Status::NumberExpected)
     }
 
-    pub fn callable<'gc>(&self, a: &Agent<'gc, '_>, h: Handle) -> Result<Value<'gc>, Status> {
+    pub fn callable<'scope>(&self, a: &Scope<'scope, '_>, h: Handle) -> Result<Value<'scope>, Status> {
         let v = self.value(h)?;
         if a.is_callable(v) { Ok(v) } else { Err(Status::FunctionExpected) }
     }
 
-    pub fn name<'gc>(&self, h: Handle) -> Result<Name<'gc>, Status> {
+    pub fn name<'scope>(&self, h: Handle) -> Result<Name<'scope>, Status> {
         match self.value(h)?.kind() {
             ValueKind::String(s) => Ok(Name::Str(s)),
             ValueKind::Symbol(s) => Ok(Name::Sym(s)),

@@ -4,22 +4,22 @@ use core::cmp::Ordering;
 use num_bigint::BigInt;
 use num_traits::{FromPrimitive, One, Signed, ToPrimitive, Zero};
 
-use crate::{Agent, BigIntData, BinaryOp, Error, ErrorKind, Hint, JsBigInt, Value};
+use crate::{Scope, BigIntData, BinaryOp, Error, ErrorKind, Hint, JsBigInt, Value};
 
 const MAX_SHIFT: i64 = 1 << 30;
 
 #[derive(Clone, Copy, Debug)]
-pub enum Numeric<'gc> {
+pub enum Numeric<'scope> {
     Number(f64),
-    BigInt(JsBigInt<'gc>),
+    BigInt(JsBigInt<'scope>),
 }
 
-impl<'gc> Agent<'gc, '_> {
-    pub fn bigint(&self, b: BigInt) -> Value<'gc> {
+impl<'scope> Scope<'scope, '_> {
+    pub fn bigint(&self, b: BigInt) -> Value<'scope> {
         Value::BigInt(self.mc.alloc(BigIntData(b)))
     }
 
-    pub fn to_numeric(&mut self, v: Value<'gc>) -> Result<Numeric<'gc>, Error> {
+    pub fn to_numeric(&mut self, v: Value<'scope>) -> Result<Numeric<'scope>, Error> {
         if let Some(x) = v.as_number() {
             return Ok(Numeric::Number(x));
         }
@@ -29,7 +29,7 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    pub fn to_bigint(&mut self, v: Value<'gc>) -> Result<BigInt, Error> {
+    pub fn to_bigint(&mut self, v: Value<'scope>) -> Result<BigInt, Error> {
         match (self.to_primitive(v, Hint::Number)?).kind() {
             ValueKind::BigInt(b) => Ok(b.0.clone()),
             ValueKind::Bool(t) => Ok(BigInt::from(u8::from(t))),
@@ -53,7 +53,7 @@ impl<'gc> Agent<'gc, '_> {
         r
     }
 
-    pub fn to_index(&mut self, v: Value<'gc>) -> Result<usize, Error> {
+    pub fn to_index(&mut self, v: Value<'scope>) -> Result<usize, Error> {
         if v == Value::Undefined {
             return Ok(0);
         }
@@ -65,7 +65,7 @@ impl<'gc> Agent<'gc, '_> {
         Ok(n as usize)
     }
 
-    pub fn increment(&mut self, v: Value<'gc>, delta: i8) -> Result<Value<'gc>, Error> {
+    pub fn increment(&mut self, v: Value<'scope>, delta: i8) -> Result<Value<'scope>, Error> {
         if let Some(x) = v.as_number() {
             return Ok((x + f64::from(delta)).into());
         }
@@ -125,7 +125,7 @@ impl<'gc> Agent<'gc, '_> {
         })
     }
 
-    pub(crate) fn numeric_order(&mut self, l: Value<'gc>, r: Value<'gc>) -> Result<Option<Ordering>, Error> {
+    pub(crate) fn numeric_order(&mut self, l: Value<'scope>, r: Value<'scope>) -> Result<Option<Ordering>, Error> {
         Ok(match (l.kind(), r.kind()) {
             (ValueKind::BigInt(a), ValueKind::String(s)) => Self::parse_bigint(&s).map(|b| a.0.cmp(&b)),
             (ValueKind::String(s), ValueKind::BigInt(b)) => Self::parse_bigint(&s).map(|a| a.cmp(&b.0)),
@@ -145,7 +145,7 @@ impl<'gc> Agent<'gc, '_> {
         Ok(if n >= 0 { a << amount } else { a >> amount })
     }
 
-    pub(crate) fn bigint_binary(&self, op: BinaryOp, a: &BigInt, b: &BigInt) -> Result<Value<'gc>, Error> {
+    pub(crate) fn bigint_binary(&self, op: BinaryOp, a: &BigInt, b: &BigInt) -> Result<Value<'scope>, Error> {
         let r = match op {
             BinaryOp::Add => a + b,
             BinaryOp::Sub => a - b,

@@ -2,14 +2,14 @@ use alloc::format;
 use alloc::string::String;
 use core::fmt::Write as _;
 
-use j8framework::{Agent, JsObject, Property};
+use j8framework::{Scope, JsObject, Property};
 
 use crate::{Glue, Member, Object};
 
 pub const NATIVE: &str = "__j8_native";
 
 pub trait Install {
-    fn install_into<'gc>(a: &mut Agent<'gc, '_>, target: JsObject<'gc>);
+    fn install_into<'scope>(a: &mut Scope<'scope, '_>, target: JsObject<'scope>);
 }
 
 pub trait Module: Object {
@@ -17,7 +17,7 @@ pub trait Module: Object {
 }
 
 impl Glue {
-    pub fn spawn<'gc>(a: &mut Agent<'gc, '_>, future: impl core::future::Future<Output = j8framework::Settle> + Send + 'static) -> Result<j8framework::Value<'gc>, j8framework::Error> {
+    pub fn spawn<'scope>(a: &mut Scope<'scope, '_>, future: impl core::future::Future<Output = j8framework::Settle> + Send + 'static) -> Result<j8framework::Value<'scope>, j8framework::Error> {
         let promise = a.new_promise();
         let (resolve, reject) = a.promise_resolvers(promise);
         let job = j8framework::AsyncJob { resolve: a.global(resolve.into()), reject: a.global(reject.into()), future: alloc::boxed::Box::pin(future) };
@@ -28,12 +28,12 @@ impl Glue {
     }
 
     pub fn settle<T: for<'g> crate::IntoJs<'g> + Send + 'static>(out: T) -> j8framework::Settle {
-        alloc::boxed::Box::new(move |a: &mut Agent<'_, '_>| out.into_js(a))
+        alloc::boxed::Box::new(move |a: &mut Scope<'_, '_>| out.into_js(a))
     }
 
     #[doc(hidden)]
-    pub fn natives<'gc>(a: &mut Agent<'gc, '_>) -> JsObject<'gc> {
-        let global = a.realm.global;
+    pub fn natives<'scope>(a: &mut Scope<'scope, '_>) -> JsObject<'scope> {
+        let global = a.context.global;
         if let Some(j8framework::Slot::Data(v)) = global.borrow().get_own(a.mc, NATIVE).map(|p| p.slot)
             && let Some(o) = v.as_object()
         {
@@ -45,7 +45,7 @@ impl Glue {
     }
 
     #[doc(hidden)]
-    pub fn register_module<M: Module>(a: &mut Agent<'_, '_>) {
+    pub fn register_module<M: Module>(a: &mut Scope<'_, '_>) {
         let registry = Self::natives(a);
         let m = <M as Object>::install(a, registry);
         for spec in M::SPECIFIERS {

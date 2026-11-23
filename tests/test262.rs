@@ -238,28 +238,27 @@ impl Case {
         };
         let platform = Capture { start: Instant::now(), lines: Mutex::default() };
         let mut isolate = Isolate::new(&platform, CreateParams::default());
-        let mut executor = if std::env::var_os(JIT_ENV).is_some() { Executor::default().with_tier(j8jit::Jit::from(0)) } else { Executor::default() };
+        let executor = if std::env::var_os(JIT_ENV).is_some() { Executor::default().with_tier(j8jit::Jit::from(0)) } else { Executor::default() };
         let file = self.path.strip_prefix(Suite::test_dir()).unwrap_or(&self.path).display().to_string();
         let expected = self.meta.negative.as_ref();
-        let cx = isolate.enter(|scope| scope.persist(scope.context(&Builtins)));
+        let cx = isolate.create_context(&Builtins);
         let r = if self.has(Flag::Module) {
-            match isolate.run(&mut executor, &cx, &Source { text: &src, file: "[harness]" }) {
-                Ok(_) => isolate.run_module(&mut executor, &cx, &Source { text: &self.text, file: &file }),
+            match executor.eval(&mut isolate, &cx, &Source { text: &src, file: "[harness]" }) {
+                Ok(_) => executor.eval_module(&mut isolate, &cx, &Source { text: &self.text, file: &file }),
                 e => e,
             }
         } else {
-            isolate.run(&mut executor, &cx, &Source { text: &src, file: &file })
+            executor.eval(&mut isolate, &cx, &Source { text: &src, file: &file })
         };
-        let (outcome, why) = isolate.enter(|scope| {
-            let realm = scope.context_of(&cx);
-            let mut agent = scope.agent(realm, &executor);
+        let (outcome, why) = isolate.enter(&cx, &executor, |agent| {
             match (r, expected) {
                 (Err(Error::Unsupported(m)), _) => (Outcome::Unsupported, m),
                 (Err(Error::Syntax(_)), Some(n)) if n.phase != Phase::Runtime && n.kind == ErrorType::SyntaxError => (Outcome::Pass, String::new()),
                 (Err(Error::Syntax(m)), _) => (Outcome::Fail, format!("syntax error: {m}")),
                 (Err(Error::Terminated), _) => (Outcome::Fail, String::from("execution terminated")),
-                (Err(Error::Exception(g)), n) => {
-                    let v = agent.local(&g);
+                (Err(Error::Parked(_)), _) => (Outcome::Fail, String::from("a parked exception reached the script")),
+                (Err(Error::Exception), n) => {
+                    let v = agent.take_exception();
                     let name = agent.get_named(v, "constructor").and_then(|c| agent.get_named(c, "name")).and_then(|n| agent.to_string(n));
                     let name = name.map_or_else(|_| String::new(), |s| String::from(&**s));
                     match n {

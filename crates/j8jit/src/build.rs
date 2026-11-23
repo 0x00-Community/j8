@@ -59,8 +59,8 @@ pub(crate) struct Direct {
     inline_push: bool,
 }
 
-pub(crate) fn directs_from(a: &j8framework::Agent<'_, '_>) -> Vec<Direct> {
-    a.realm.fast_builtins.get().iter().map(|(index, e)| Direct { native: e.native as usize as u64, index, arity: e.call.arity(), out: e.out, inline_push: e.inline_push }).collect()
+pub(crate) fn directs_from(a: &j8framework::Scope<'_, '_>) -> Vec<Direct> {
+    a.context.fast_builtins.get().iter().map(|(index, e)| Direct { native: e.native as usize as u64, index, arity: e.call.arity(), out: e.out, inline_push: e.inline_push }).collect()
 }
 
 #[derive(Debug)]
@@ -193,8 +193,8 @@ struct Act<'e> {
 
 struct Restart;
 
-pub struct Builder<'e> {
-    exe: &'e Executor,
+pub struct Builder<'e, 'p> {
+    exe: &'e Executor<'p>,
     hints: &'e Hints,
     g: Graph,
     targets: Vec<FuncId>,
@@ -216,8 +216,8 @@ pub struct Builder<'e> {
 
 type R<T> = Result<T, Reject>;
 
-impl<'e> Builder<'e> {
-    pub fn build(exe: &'e Executor, hints: &'e Hints, root: FuncId, kind: Kind, paths: &'e dyn Fn(bool, usize) -> Option<j8framework::StorePath>, directs: &'e [Direct], log: bool) -> R<Built> {
+impl<'e, 'p> Builder<'e, 'p> {
+    pub fn build(exe: &'e Executor<'p>, hints: &'e Hints, root: FuncId, kind: Kind, paths: &'e dyn Fn(bool, usize) -> Option<j8framework::StorePath>, directs: &'e [Direct], log: bool) -> R<Built> {
         let mut widen = Widen::default();
         for round in 0..RESTARTS {
             if log && round > 0 {

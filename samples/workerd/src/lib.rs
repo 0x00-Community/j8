@@ -13,7 +13,7 @@ pub const PRELUDE: &str = include_str!("prelude.js");
 
 const HOST: &str = "http://localhost";
 
-#[derive(Default)]
+#[derive(Default, j8::Trace)]
 pub struct KvStore {
     map: BTreeMap<String, String>,
 }
@@ -41,7 +41,7 @@ impl KvStore {
         self.map.keys().cloned().collect()
     }
 
-    fn unique_id(a: &mut j8::frame::Agent<'_, '_>) -> String {
+    fn unique_id(a: &mut j8::frame::Scope<'_, '_>) -> String {
         format!("{:032x}", a.platform.wall_clock().as_nanos())
     }
 }
@@ -74,7 +74,7 @@ pub struct Worker<'p> {
 }
 
 impl<'p> Worker<'p> {
-    pub fn new<H: Host>(set: &j8::EventLoopSet<'_, 'p, Executor>, reactor: &Arc<ws::Reactor>, code: &Arc<CodeCache>) -> Result<Self, String> {
+    pub fn new<H: Host>(set: &j8::EventLoopSet<'_, 'p>, reactor: &Arc<ws::Reactor>, code: &Arc<CodeCache>) -> Result<Self, String> {
         let rt = j8::Runtime::on::<H>(set, Executor::default().with_cache(Arc::clone(code))).map_err(|e| format!("prelude failed: {e}"))?;
         let reactor = Arc::clone(reactor);
         rt.enter(move |a| ws::Net::attach(a, reactor));
@@ -84,7 +84,7 @@ impl<'p> Worker<'p> {
     pub fn eval(&mut self, text: &str, file: &str) -> Result<String, String> {
         match self.rt.eval(text, file).and_then(|g| self.rt.run_until_idle().map(|()| g)) {
             Ok(g) => Ok(self.rt.text(&g)),
-            Err(Error::Exception(g)) => Err(format!("Uncaught {}", self.rt.text(&g))),
+            Err(Error::Exception) => Err(format!("Uncaught {}", self.rt.exception_text())),
             Err(e) => Err(e.to_string()),
         }
     }
@@ -136,7 +136,7 @@ impl<'p> Worker<'p> {
     pub fn listen(&mut self, port: u16) -> Result<u16, String> {
         let g = match self.rt.eval(&format!("__workerd.serve({port})"), "[serve]") {
             Ok(g) => g,
-            Err(Error::Exception(g)) => return Err(format!("Uncaught {}", self.rt.text(&g))),
+            Err(Error::Exception) => return Err(format!("Uncaught {}", self.rt.exception_text())),
             Err(e) => return Err(e.to_string()),
         };
         let port = self.rt.text(&g);

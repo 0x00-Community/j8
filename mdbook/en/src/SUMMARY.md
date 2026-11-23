@@ -15,7 +15,7 @@
 - [Compiler: JS ⇒ bytecode](compiler.md)
 - [Executor: interpreting bytecode](executor.md)
 - [JIT: the speculative optimizing tier](jit.md)
-- [Framework: Isolate, Agent and values](framework.md)
+- [Framework: Isolate, Scope and values](framework.md)
 - [Object model: shapes, stores, properties](objects.md)
 - [Heap and GC: built on paragc](heap.md)
 - [Built-in objects](builtins.md)

@@ -2,7 +2,7 @@ use alloc::vec::Vec;
 use core::ffi::c_void;
 use core::ptr::NonNull;
 
-use j8framework::{Agent, Error, JsObject, NativeClosure, ObjectData, ObjectKind, Value};
+use j8framework::{Scope, Error, JsObject, NativeClosure, ObjectData, ObjectKind, Value};
 
 use crate::{Env, Handle};
 
@@ -15,32 +15,38 @@ pub struct CallbackInfo {
 }
 
 #[derive(Clone, Copy, Debug)]
-struct Hook {
-    env: NonNull<Env>,
-    cb: unsafe extern "C" fn(env: *mut Env, info: *mut CallbackInfo) -> Handle,
+struct Hook<'e> {
+    env: NonNull<Env<'e>>,
+    cb: unsafe extern "C" fn(env: *mut Env<'_>, info: *mut CallbackInfo) -> Handle,
     data: *mut c_void,
 }
 
-unsafe impl Send for Hook {}
+unsafe impl Send for Hook<'_> {}
 
-unsafe impl Sync for Hook {}
+unsafe impl Sync for Hook<'_> {}
 
-impl Env {
-    pub fn function<'gc>(&self, a: &Agent<'gc, '_>, name: &str, cb: unsafe extern "C" fn(*mut Env, *mut CallbackInfo) -> Handle, data: *mut c_void, constructor: bool) -> JsObject<'gc> {
-        let hook = Self::host(a, Hook { env: NonNull::from(self), cb, data });
+unsafe impl<'e> crate::Opaque<'e> for Hook<'e> {
+    type Brand = HookBrand;
+}
+
+pub enum HookBrand {}
+
+impl Env<'_> {
+    pub fn function<'scope>(&self, a: &Scope<'scope, '_>, name: &str, cb: unsafe extern "C" fn(*mut Env<'_>, *mut CallbackInfo) -> Handle, data: *mut c_void, constructor: bool) -> JsObject<'scope> {
+        let hook = Self::host(a, Hook { env: NonNull::from(self).cast::<Env<'scope>>(), cb, data });
         let f = ObjectData {
             kind: ObjectKind::NativeClosure(NativeClosure { f: Self::trampoline, slots: alloc::vec![hook.into()], constructor }),
-            proto: Some(a.realm.function_proto),
+            proto: Some(a.context.function_proto),
             ..ObjectData::default()
         }
         .alloc(a.mc);
-        a.realm.name_function(a.mc, f, name, Some(0));
+        a.context.name_function(a.mc, f, name, Some(0));
         f
     }
 
-    fn trampoline<'gc>(a: &mut Agent<'gc, '_>, me: JsObject<'gc>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+    fn trampoline<'scope>(a: &mut Scope<'scope, '_>, me: JsObject<'scope>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let hook = match &me.borrow().kind {
-            ObjectKind::NativeClosure(c) => c.slots.first().and_then(|v| v.as_object()).and_then(|h| Self::hosted::<Hook, _>(h, |h| *h)),
+            ObjectKind::NativeClosure(c) => c.slots.first().and_then(|v| v.as_object()).and_then(|h| Self::hosted::<Hook<'scope>, _>(a, h, |h| *h)),
             _ => None,
         };
         let Some(hook) = hook else { unreachable!("napi functions carry their hook") };

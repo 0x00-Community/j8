@@ -15,7 +15,7 @@
 - [编译器：JS ⇒ 字节码](compiler.md)
 - [执行器：解释字节码](executor.md)
 - [JIT：推测式优化层](jit.md)
-- [框架层：Isolate、Agent 与值](framework.md)
+- [框架层：Isolate、Scope 与值](framework.md)
 - [对象模型：Shape、存储与属性](objects.md)
 - [堆与 GC：建在 paragc 上](heap.md)
 - [内建对象](builtins.md)

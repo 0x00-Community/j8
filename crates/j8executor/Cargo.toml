@@ -10,6 +10,7 @@ repository.workspace = true
 [dependencies]
 j8framework.workspace = true
 j8lockfree.workspace = true
+j8taskqueue.workspace = true
 j8bytecode.workspace = true
 j8compiler.workspace = true
 ryu-js.workspace = true

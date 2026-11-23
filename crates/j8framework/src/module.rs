@@ -2,9 +2,9 @@ use crate::ValueKind;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
-use crate::{Collect, Gc};
+use crate::{Collect, ScopeLocal};
 
-use crate::{Agent, Error, ErrorKind, FuncId, JsEnv, JsObject, JsString, Key, ObjectKind, Property, PropertyKey, Slot, Value};
+use crate::{Scope, Error, ErrorKind, FuncId, JsEnv, JsObject, JsString, Key, ObjectKind, Property, PropertyKey, Slot, Value};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ImportName {
@@ -39,26 +39,26 @@ pub enum ModuleStatus {
 
 #[derive(Clone, Copy, Debug, Collect)]
 #[collect(no_drop)]
-pub enum ResolvedBinding<'gc> {
-    Slot(JsEnv<'gc>, u16),
+pub enum ResolvedBinding<'scope> {
+    Slot(JsEnv<'scope>, u16),
     Namespace(u32),
 }
 
 #[derive(Clone, Collect)]
 #[collect(no_drop)]
-pub struct ModuleRecord<'gc> {
-    pub path: JsString<'gc>,
-    pub env: JsEnv<'gc>,
+pub struct ModuleRecord<'scope> {
+    pub path: JsString<'scope>,
+    pub env: JsEnv<'scope>,
     #[collect(require_static)]
     pub info: alloc::sync::Arc<ModuleInfo>,
     pub main: FuncId,
     pub code: crate::Code,
     pub status: ModuleStatus,
-    pub error: Option<Value<'gc>>,
+    pub error: Option<Value<'scope>>,
     pub requested: Vec<u32>,
-    pub imports: Vec<ResolvedBinding<'gc>>,
-    pub namespace: Option<JsObject<'gc>>,
-    pub meta: Option<JsObject<'gc>>,
+    pub imports: Vec<ResolvedBinding<'scope>>,
+    pub namespace: Option<JsObject<'scope>>,
+    pub meta: Option<JsObject<'scope>>,
 }
 
 impl core::fmt::Debug for ModuleRecord<'_> {
@@ -68,8 +68,8 @@ impl core::fmt::Debug for ModuleRecord<'_> {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub enum Resolution<'gc> {
-    Found(ResolvedBinding<'gc>),
+pub enum Resolution<'scope> {
+    Found(ResolvedBinding<'scope>),
     NotFound,
     Ambiguous,
 }
@@ -77,28 +77,28 @@ pub enum Resolution<'gc> {
 impl ResolvedBinding<'_> {
     fn same(self, other: Self) -> bool {
         match (self, other) {
-            (ResolvedBinding::Slot(e1, s1), ResolvedBinding::Slot(e2, s2)) => Gc::ptr_eq(e1, e2) && s1 == s2,
+            (ResolvedBinding::Slot(e1, s1), ResolvedBinding::Slot(e2, s2)) => ScopeLocal::ptr_eq(e1, e2) && s1 == s2,
             (ResolvedBinding::Namespace(x), ResolvedBinding::Namespace(y)) => x == y,
             _ => false,
         }
     }
 }
 
-impl<'gc> Agent<'gc, '_> {
-    pub fn modules(&self) -> &'gc [ModuleRecord<'gc>] {
-        self.realm.modules.get()
+impl<'scope> Scope<'scope, '_> {
+    pub fn modules(&self) -> &'scope [ModuleRecord<'scope>] {
+        self.context.modules.get()
     }
 
-    pub fn update_module(&self, m: u32, mut f: impl FnMut(&mut ModuleRecord<'gc>)) {
-        self.realm.modules.update(self.mc, |mods| {
+    pub fn update_module(&self, m: u32, mut f: impl FnMut(&mut ModuleRecord<'scope>)) {
+        self.context.modules.update(self.mc, |mods| {
             let mut mods = mods.clone();
             f(&mut mods[m as usize]);
             mods
         });
     }
 
-    pub fn push_module(&self, record: &ModuleRecord<'gc>) -> u32 {
-        self.realm.modules.update_with(self.mc, |mods| {
+    pub fn push_module(&self, record: &ModuleRecord<'scope>) -> u32 {
+        self.context.modules.update_with(self.mc, |mods| {
             let mut mods = mods.clone();
             mods.push(record.clone());
             let id = u32::try_from(mods.len() - 1).unwrap_or(u32::MAX);
@@ -106,12 +106,12 @@ impl<'gc> Agent<'gc, '_> {
         })
     }
 
-    fn module_info(&self, m: u32) -> (alloc::sync::Arc<ModuleInfo>, JsEnv<'gc>, Vec<u32>) {
+    fn module_info(&self, m: u32) -> (alloc::sync::Arc<ModuleInfo>, JsEnv<'scope>, Vec<u32>) {
         let r = &self.modules()[m as usize];
         (r.info.clone(), r.env, r.requested.clone())
     }
 
-    pub fn resolve_export(&self, m: u32, name: &str, seen: &mut Vec<(u32, Box<str>)>) -> Resolution<'gc> {
+    pub fn resolve_export(&self, m: u32, name: &str, seen: &mut Vec<(u32, Box<str>)>) -> Resolution<'scope> {
         if seen.iter().any(|(x, n)| *x == m && **n == *name) {
             return Resolution::NotFound;
         }
@@ -130,7 +130,7 @@ impl<'gc> Agent<'gc, '_> {
         if name == "default" {
             return Resolution::NotFound;
         }
-        let mut found: Option<ResolvedBinding<'gc>> = None;
+        let mut found: Option<ResolvedBinding<'scope>> = None;
         for &req in &info.star_exports {
             match self.resolve_export(requested[req], name, seen) {
                 Resolution::Ambiguous => return Resolution::Ambiguous,
@@ -162,7 +162,7 @@ impl<'gc> Agent<'gc, '_> {
         out
     }
 
-    pub fn binding_value(&mut self, b: ResolvedBinding<'gc>, name: &str) -> Result<Value<'gc>, Error> {
+    pub fn binding_value(&mut self, b: ResolvedBinding<'scope>, name: &str) -> Result<Value<'scope>, Error> {
         match b {
             ResolvedBinding::Slot(env, slot) => match env.load(usize::from(slot)).kind() {
                 ValueKind::Uninit => Err(self.throw(ErrorKind::Reference, &alloc::format!("Cannot access '{name}' before initialization"))),
@@ -172,7 +172,7 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    pub fn module_namespace(&mut self, m: u32) -> JsObject<'gc> {
+    pub fn module_namespace(&mut self, m: u32) -> JsObject<'scope> {
         if let Some(ns) = self.modules()[m as usize].namespace {
             return ns;
         }
@@ -186,13 +186,13 @@ impl<'gc> Agent<'gc, '_> {
         }
         let ns = crate::ObjectData { kind: ObjectKind::ModuleNamespace(exports), proto: None, non_extensible: true, ..crate::ObjectData::default() }.alloc(self.mc);
         let tag = self.string("Module");
-        ns.borrow_mut(self.mc).define_symbol(self.realm.symbols.to_string_tag, Property { slot: Slot::Data(tag.into()), enumerable: false, writable: false, configurable: false });
+        ns.borrow_mut(self.mc).define_symbol(self.context.symbols.to_string_tag, Property { slot: Slot::Data(tag.into()), enumerable: false, writable: false, configurable: false });
         self.update_module(m, |r| r.namespace = Some(ns));
         ns
     }
 
     #[expect(clippy::option_option, reason = "outer: whether it is a string key on a namespace object; inner: whether that export exists")]
-    pub(crate) fn namespace_export(o: JsObject<'gc>, key: Key<'_, 'gc>) -> Option<Option<ResolvedBinding<'gc>>> {
+    pub(crate) fn namespace_export(o: JsObject<'scope>, key: Key<'_, 'scope>) -> Option<Option<ResolvedBinding<'scope>>> {
         let Key::Str(k) = key else { return None };
         if o.is_plain() {
             return None;
@@ -203,16 +203,16 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    pub(crate) fn namespace_own(&mut self, b: Option<ResolvedBinding<'gc>>, key: &str) -> Result<Option<Property<'gc>>, Error> {
+    pub(crate) fn namespace_own(&mut self, b: Option<ResolvedBinding<'scope>>, key: &str) -> Result<Option<Property<'scope>>, Error> {
         let Some(b) = b else { return Ok(None) };
         let v = self.binding_value(b, key)?;
         Ok(Some(Property { slot: Slot::Data(v), enumerable: true, writable: true, configurable: false }))
     }
 
-    pub(crate) fn namespace_keys(o: JsObject<'gc>) -> Option<Vec<PropertyKey<'gc>>> {
+    pub(crate) fn namespace_keys(o: JsObject<'scope>) -> Option<Vec<PropertyKey<'scope>>> {
         let d = o.borrow();
         let ObjectKind::ModuleNamespace(exports) = &d.kind else { return None };
-        let mut keys: Vec<PropertyKey<'gc>> = exports.iter().map(|&(n, _)| PropertyKey::String(n)).collect();
+        let mut keys: Vec<PropertyKey<'scope>> = exports.iter().map(|&(n, _)| PropertyKey::String(n)).collect();
         keys.extend(d.symbols.iter().map(|&(s, _)| PropertyKey::Symbol(s)));
         Some(keys)
     }

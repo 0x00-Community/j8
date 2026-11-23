@@ -7,7 +7,7 @@
 **A bytecode interpreter, a JIT built on MLIR and a parallel garbage-collected heap ([paragc](https://crates.io/crates/paragc)).**
 
 [![Rust](https://img.shields.io/badge/Rust-100%25-orange?style=for-the-badge&logo=rust)](https://www.rust-lang.org)
-[![test262](https://img.shields.io/badge/test262-42%2C443%20passing-success?style=for-the-badge)](#-test262)
+[![test262](https://img.shields.io/badge/test262-42%2C500%20passing-success?style=for-the-badge)](#-test262)
 [![License](https://img.shields.io/badge/License-MIT-brightgreen?style=for-the-badge)](#-license)
 
 [![ECMAScript](https://img.shields.io/badge/ECMAScript-core%20language-F7DF1E?style=flat-square&logo=javascript&logoColor=black)](#-status)
@@ -41,14 +41,14 @@ and [crates/macros/USAGE.md](crates/macros/USAGE.md) (the macro reference).
 | 🦀 **All Rust** | Parsing is oxc; everything else, from bytecode to GC, is ours. No C++ engine underneath. |
 | 🧱 **Bytecode first** | There is no AST interpreter: all JS (including `eval` and `Function`) is compiled to bytecode, and that bytecode is V8 Ignition's, byte for byte (tables generated from V8's headers). |
 | 🧬 **A speculative JIT** | Inline-cache feedback turns hot bytecode into a speculative SSA graph (inlining, escape analysis, loop-invariant code motion, OSR, deoptimization), emitted straight to x86-64 or AArch64. |
-| ♻️ **paragc heap** | Immix-style mark-region heap: young collections plus reference counting for old objects, evacuation of sparse blocks, marking and sweeping in parallel, no locks. `'gc` brand lifetimes guarantee at compile time that handles never escape. |
+| ♻️ **paragc heap** | Immix-style mark-region heap: young collections plus reference counting for old objects, evacuation of sparse blocks, marking and sweeping in parallel, no locks. `'scope` brand lifetimes guarantee at compile time that handles never escape. |
 | 🚫 **No `'static`** | No global state. Background tasks borrow the caller's data, and several isolates share one thread pool. |
 
 ## 🏆 Numbers
 
 | ✔️ Check | Result |
 | --- | --- |
-| 📜 test262 baseline | **42,443** tests passing (sloppy mode plus `onlyStrict`; Temporal, intl402 and the like are out of scope, see PLAN.md), zero regressions on every commit |
+| 📜 test262 baseline | **42,500** tests passing (sloppy mode plus `onlyStrict`; Temporal, intl402 and the like are out of scope, see PLAN.md), zero regressions on every commit |
 | 🧮 JIT | `J8_TEST262_JIT=1` runs the same baseline with the JIT on (every function compiled on its first call) |
 | ⏱️ vs V8 jitless | **0.6×** the time (geometric mean over 11 benchmarks); checksums identical on all three engines |
 | 🚄 vs V8 (with JIT) | **1.7×** the time, geometric mean; the gap is in built-ins (array, sort, string, collections, json, regexp), see [benchmark.md](samples/benchv8/benchmark.md) |
@@ -97,20 +97,20 @@ workspace, and depend on the published `j8` by version, the way an embedder woul
 
 | crate | std | What it does |
 |---|---|---|
-| `j8framework` | std | The core framework: defines the traits (`Platform`, `Engine`, `Invoke`, `Intrinsics`) and the shared structs / enums (`Isolate`, `Scope`, `Agent`, `Context` / `Realm`, `Global`, `Value`, `JsString` / `JsObject`, `Profiler`, `BinaryOp`, `Error` …). JS operation semantics hang off `Agent`; the implementations belong to the other crates. `EventLoop` is one JS event loop (an isolate, its engine and a context; resumable `Engine::start` / `resume`, host async work); `EventLoopSet` runs many on pinned loop threads with load balancing (placement, work stealing, `rebalance`, `split`) and one quota |
+| `j8framework` | std | The core framework: defines the traits (`Platform`, `Invoke`, `Intrinsics`) and the shared structs / enums (`Isolate`, `Scope`, `Scope`, `Context`, `ScopeGlobal`, `Value`, `Host`, `JsString` / `JsObject`, `Profiler`, `BinaryOp`, `Error` …). JS operation semantics hang off `Scope`; the implementations belong to the other crates. |
 | `j8` (repository root `src/`) | std | Re-exports: `#[j8::class]` / `#[j8::object]` / `#[j8::function]` (the macros live in j8macros, see `crates/macros/USAGE.md`) and the j8binding traits; the other crates by feature (default `runtime` = `j8::executor` + `j8::builtins` + `j8::platform`, plus `bytecode` / `taskqueue` / `lockfree` / `jit` / `full`); every crate is also published on its own on crates.io |
 | `j8binding` | std | The Rust ⇄ JS binding runtime: `FromJs` / `IntoJs`, host objects, `Class` / `Object` |
-| `j8builtins` | std | Implements `Intrinsics`: installs Object / Function / Array / String / Number / Boolean / Math / the Error family / `console` / `parseInt` and so on into a `Realm` |
+| `j8builtins` | std | Implements `Intrinsics`: installs Object / Function / Array / String / Number / Boolean / Math / the Error family / `console` / `parseInt` and so on into a `Context` |
 | `j8platform` | std | Implements `Platform` (`DefaultPlatform`): background tasks run on a moremath `ThreadMulti` pool (started once and reused; tasks may borrow the caller's data, through `j8framework::Pool`), the clock is `Instant` |
 | `j8bytecode` | std | The bytecode, the dependency root (no other j8 crate): V8 Ignition's, byte for byte (`Bytecode` / `OperandType` … generated from `v8.json`, which `tools/v8bytecodes.py` writes from V8's headers), `Encoder` / `Decoder`, `SharedFunction` / `BytecodeArray` / `Module` |
 | `j8compiler` | std | JS ⇒ bytecode (`j8compiler::Compile` for `Module`: scripts, modules, `eval` / `Function`), parsing with oxc |
-| `j8taskqueue` | `no_std` | Task queue: `ITask` (`recursable` / `depend` / `exec`) and `ITaskPoll` (`add` / `run`); lock-free dataflow scheduling (hand-written MPMC ready queue, atomic dependency counts): a task whose dependencies are done runs at once, in parallel on the host's `Pool` or on the calling thread, with no round barrier; `TaskId::family` finds the union-find root, `cancel` cancels a whole family; quotas count bytecodes (`Quota` / `Flow::Yield`, a per-run budget); idle workers leave instead of spinning. Every `j8framework::EventLoop` is one `Queue`: scripts, settlements and polls of host futures, checked each time a script yields |
+| `j8taskqueue` | `no_std` | Task queue: `ITask` (`recursable` / `depend` / `exec`) and `ITaskPoll` (`add` / `run`); lock-free dataflow scheduling (hand-written MPMC ready queue, atomic dependency counts): a task whose dependencies are done runs at once, in parallel on the host's `Pool` or on the calling thread, with no round barrier; `TaskId::family` finds the union-find root, `cancel` cancels a whole family; quotas count bytecodes (`Quota` / `Flow::Yield`, a per-run budget); idle workers leave instead of spinning. Every `j8executor::EventLoop` is one `Queue`: scripts, settlements and polls of host futures, checked each time a script yields |
 | `j8macros` | proc-macro | Procedural macros: `enums!("x.json")` generates enums from JSON (definitions, `Display`, `&mut` accessors by field type), `#[derive(Collect)]` for heap types (paragc `Trace`), and the binding macros; see `crates/macros/USAGE.md` |
 | `dune` | std | The runtime that takes on Node, with two layers: `src/web/` (the Web-standard APIs: `console`, timers, `URL`, `TextEncoder`, `EventTarget` / `AbortController`, `fetch`, `structuredClone`, `crypto` …) and `src/node/` on top of it (`process`, `require` / ES modules, `Buffer`, `fs`, `path`, `os`, `events`, `util`, `assert`, `child_process` …); machine access is Rust bound with `#[j8::object]` / `#[j8::class]`, the APIs are JS preludes; `dune a.js`, `dune --web a.mjs`, `dune -e` / `-p`, a REPL; see its README |
 | `samples/workerd` | std | Loads Cloudflare Workers (ES modules with `export default { fetch }`) and Durable Objects with j8: `workerd examples/counter.js --bind COUNTER=Counter --request "GET /c/inc?name=a"`, or `--port 8787` for an HTTP server; the Fetch API subset and DOs live in a JS prelude, storage is a Rust KV bound with `#[j8::class]` |
 | `samples/benchv8` | std | The same JS benchmarks timed on j8 and V8 (rusty_v8 152, with JIT / `--jitless`): `cd samples/benchv8 && cargo run --release` (downloads V8's prebuilt library) |
 | `samples/j8bcdbg` | std | The bytecode debugging command line (clap): `j8bcdbg compile <file.js \| ->` / `j8bcdbg compile -e '<js>'` lists the bytecode per function like V8's `--print-bytecode` (`-o` writes a file) |
-| `j8executor` | std | The bytecode `Executor`, **currently the last layer**; implements `Engine` and always carries the JS ⇒ bytecode compiler (scripts, modules, `eval` / `Function` all compile to bytecode first) |
+| `j8executor` | std | The bytecode `Executor<'p>`, **currently the last layer** (`eval`, resumable `start` / `resume`); `EventLoop` is one JS event loop (an isolate, the executor and a context, host async work), `EventLoopSet` runs many on pinned loop threads with load balancing (placement, work stealing, `rebalance`, `split`) and one quota; always carries the JS ⇒ bytecode compiler (scripts, modules, `eval` / `Function` all compile to bytecode first) |
 
 All JS is compiled to bytecode before it runs; there is no AST interpreter.
 Dependency direction: every layer depends only on `j8framework` (`j8executor` also on `j8compiler`; `j8bytecode` is the root, `j8framework` and `j8compiler` depend on it), and `j8framework` depends on no layer, only on the building blocks `j8lockfree` and `j8taskqueue`.
@@ -123,34 +123,35 @@ allocated since the last collection is changed in place, an older one is moved i
 barrier sees it), `ValueCell` (one NaN-boxed `Value`, an atomic word plus a `Slot`), `Cow`, `GcQueue`, `Static`, and
 `#[derive(Collect)]` (from j8macros; `#[collect(require_static)]` skips a field or a whole type). Brand lifetimes, no `'static`.
 
-- Collection only happens outside `enter`, when every `Gc` is under a root, so objects can move: ⛔ storing a `Gc` or an object
+- Collection only happens outside `enter`, when every `ScopeLocal` is under a root, so objects can move: ⛔ storing a `ScopeLocal` or an object
   address anywhere that is not traversed by `Trace` (`Static`, side caches); anything hashed by address (the indexes of Map / Set) is
   updated in `relocate` (see `Collection`)
 - ⛔ writing a `Slot` / `ValueCell` / `Cow` of a value that is not on the heap yet (the barrier records the slot's address): allocate first,
   then fill in (see `Scope::context`)
 - The heap only collects stop-the-world (`collect_if_needed` / `collect`, parallel inside); `GcCell` changes young snapshots without a
   barrier, so ⛔ `mark_concurrently`
-- Every heap type is `Send + Sync` (paragc's rule): host data is `Box<dyn Any + Send + Sync>` behind j8lockfree's `AtomicRefCell`,
+- Every heap type is `Send + Sync` (paragc's rule): host data is a traced `Box<dyn HostObject + Send + Sync>` in a `GcCell`,
   shapes and ropes are `Arc`
 - The heap has its own collector threads (as many as the platform's pool); `Platform`'s supertrait `Pool` is for parallel built-ins
 
-- `Isolate::enter(|scope| …)` enters once, and `'gc` is the brand of that entry; nothing is collected during the closure, and after it returns the heap collects if enough was allocated (a young collection usually, a full one every few rounds)
-- `Engine::eval` takes `&mut Isolate` and enters in slices itself: at most ten thousand instructions per slice; when it stops, the execution state is put under a root, and when `enter` returns a step of collection runs before execution continues. The execution context survives across slices as a `ContextRoot` (JS re-entered from a host function runs to completion within the current slice)
-- `Value<'gc>` is V8's Local: it cannot leave the closure, guaranteed at compile time
-- `Global` is a persistent handle (a paragc `Root`) that lives across many `enter`s and is released on drop
+- `Isolate::enter(&cx, &executor, |scope| …)` enters once, and `'scope` is the brand of that entry; nothing is collected during the closure, and after it returns the heap collects if enough was allocated (a young collection usually, a full one every few rounds)
+- `Executor::eval` takes `&mut Isolate` and enters in slices itself: at most ten thousand instructions per slice; when it stops, the execution state is put under a root, and when `enter` returns a step of collection runs before execution continues. The execution context survives across slices as a `ScopeGlobal<'p, ContextBrand>` (JS re-entered from a host function runs to completion within the current slice)
+- `Value<'scope>` is V8's Local: it cannot leave the closure, guaranteed at compile time
+- `ScopeGlobal<'p, B>` is a root (paragc's) that lives across many `enter`s and is released on drop; `B` names its type (`ValueBrand`, `ContextBrand`)
+- A thrown value waits in the pending slot as in V8 (`Error::Exception`, `scope.take_exception()`)
 
 ```rust
 use j8builtins::Builtins;
 use j8executor::Executor;
-use j8framework::{CreateParams, Isolate, Source};
+use j8framework::{CreateParams, Isolate, ContextBrand, Source};
 use j8platform::DefaultPlatform;
 
 let platform = DefaultPlatform::default();
 let mut isolate = Isolate::new(&platform, CreateParams::default());
-let mut executor = Executor::default();
-let cx = isolate.enter(|scope| scope.persist(scope.context(&Builtins)));
-let result = isolate.run(&mut executor, &cx, &Source { text: "1 + 2 * 3", file: "a.js" })?;
-isolate.enter(|scope| {
+let executor = Executor::default();
+let cx = isolate.create_context(&Builtins);
+let result = executor.eval(&mut isolate, &cx, &Source { text: "1 + 2 * 3", file: "a.js" })?;
+isolate.enter(&cx, &executor, |scope| {
     let v = scope.local(&result);
 });
 ```

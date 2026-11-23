@@ -5,11 +5,11 @@ pub use j8taskqueue::{Job, Pool};
 
 pub type Task<'t> = Job<'t>;
 
-pub type Settle = Box<dyn for<'gc, 'x> FnOnce(&mut crate::Agent<'gc, 'x>) -> Result<crate::Value<'gc>, crate::Error> + Send>;
+pub type Settle = Box<dyn for<'scope, 'x> FnOnce(&mut crate::Scope<'scope, 'x>) -> Result<crate::Value<'scope>, crate::Error> + Send>;
 
-pub struct AsyncJob {
-    pub resolve: crate::Global,
-    pub reject: crate::Global,
+pub struct AsyncJob<'i> {
+    pub resolve: crate::ScopeGlobal<'i, crate::ValueBrand>,
+    pub reject: crate::ScopeGlobal<'i, crate::ValueBrand>,
     pub future: core::pin::Pin<Box<dyn core::future::Future<Output = Settle> + Send>>,
 }
 

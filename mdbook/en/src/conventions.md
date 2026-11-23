@@ -28,7 +28,7 @@ j8 has explicit code rules; pull requests follow them.
 
 ## The heap
 
-- Collection moves objects: ⛔ storing a `Gc` or an object address where it isn't traced.
+- Collection moves objects: ⛔ storing a `ScopeLocal` or an object address where it isn't traced.
 - Write a value's slots only once it is on the heap.
 - Stop-the-world collection only, ⛔ `mark_concurrently`.
 - Lock-free structures are hand-written in j8lockfree, ⛔ crossbeam.

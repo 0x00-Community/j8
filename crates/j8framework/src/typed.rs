@@ -3,7 +3,7 @@ use alloc::vec::Vec;
 use num_bigint::BigInt;
 use num_traits::ToPrimitive;
 
-use crate::{Agent, ElementKind, Error, JsObject, Key, ObjectKind, Value, ViewData};
+use crate::{Scope, ElementKind, Error, JsObject, Key, ObjectKind, Value, ViewData};
 
 const TWO_32: f64 = 4_294_967_296.0;
 
@@ -110,7 +110,7 @@ impl ElementKind {
     pub fn encode(self, v: &Element) -> Vec<u8> {
         match (self, v) {
             (ElementKind::BigInt64 | ElementKind::BigUint64, Element::BigInt(b)) => {
-                let w = Agent::wrap_bigint(b, 64, false);
+                let w = Scope::wrap_bigint(b, 64, false);
                 w.to_u64().unwrap_or(0).to_le_bytes().to_vec()
             }
             (_, Element::Number(x)) => {
@@ -168,15 +168,15 @@ pub fn canonical_numeric(key: &str) -> Option<f64> {
     (ryu_js::Buffer::new().format(n) == key).then_some(n)
 }
 
-impl<'gc> Agent<'gc, '_> {
-    pub fn buffer_len(buffer: JsObject<'gc>) -> Option<usize> {
+impl<'scope> Scope<'scope, '_> {
+    pub fn buffer_len(buffer: JsObject<'scope>) -> Option<usize> {
         match &buffer.borrow().kind {
             ObjectKind::ArrayBuffer(b) => b.bytes.as_deref().map(<[u8]>::len),
             _ => None,
         }
     }
 
-    pub fn view_length(view: &ViewData<'gc>, size: usize) -> Option<usize> {
+    pub fn view_length(view: &ViewData<'scope>, size: usize) -> Option<usize> {
         let len = Self::buffer_len(view.buffer)?;
         if view.offset > len {
             return None;
@@ -187,14 +187,14 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    pub fn typed_array(o: JsObject<'gc>) -> Option<(ElementKind, ViewData<'gc>)> {
+    pub fn typed_array(o: JsObject<'scope>) -> Option<(ElementKind, ViewData<'scope>)> {
         match o.borrow().kind {
             ObjectKind::TypedArray(k, v) => Some((k, v)),
             _ => None,
         }
     }
 
-    fn valid_index(o: JsObject<'gc>, i: f64) -> Option<usize> {
+    fn valid_index(o: JsObject<'scope>, i: f64) -> Option<usize> {
         let (k, v) = Self::typed_array(o)?;
         if i != libm::trunc(i) || (i == 0.0 && i.is_sign_negative()) || i < 0.0 {
             return None;
@@ -205,28 +205,28 @@ impl<'gc> Agent<'gc, '_> {
         (i < 9_007_199_254_740_992.0 && n < len).then_some(n)
     }
 
-    pub fn element_value(&self, e: Element) -> Value<'gc> {
+    pub fn element_value(&self, e: Element) -> Value<'scope> {
         match e {
             Element::Number(x) => x.into(),
             Element::BigInt(b) => self.bigint(b),
         }
     }
 
-    pub fn typed_get(&self, o: JsObject<'gc>, i: f64) -> Option<Value<'gc>> {
+    pub fn typed_get(&self, o: JsObject<'scope>, i: f64) -> Option<Value<'scope>> {
         let n = Self::valid_index(o, i)?;
         let (k, v) = Self::typed_array(o)?;
         let e = Self::read_raw(v.buffer, v.offset + n * k.size(), k)?;
         Some(self.element_value(e))
     }
 
-    pub fn read_raw(buffer: JsObject<'gc>, at: usize, k: ElementKind) -> Option<Element> {
+    pub fn read_raw(buffer: JsObject<'scope>, at: usize, k: ElementKind) -> Option<Element> {
         match &buffer.borrow().kind {
             ObjectKind::ArrayBuffer(b) => b.bytes.as_ref().and_then(|bytes| bytes.get(at..at + k.size())).map(|s| k.decode(s)),
             _ => None,
         }
     }
 
-    pub fn write_raw(&self, buffer: JsObject<'gc>, at: usize, k: ElementKind, e: &Element) {
+    pub fn write_raw(&self, buffer: JsObject<'scope>, at: usize, k: ElementKind, e: &Element) {
         let bytes = k.encode(e);
         if let ObjectKind::ArrayBuffer(b) = &mut buffer.borrow_mut(self.mc).kind
             && let Some(dst) = b.bytes.as_mut().and_then(|x| x.get_mut(at..at + bytes.len()))
@@ -235,11 +235,11 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    pub fn to_element(&mut self, k: ElementKind, v: Value<'gc>) -> Result<Element, Error> {
+    pub fn to_element(&mut self, k: ElementKind, v: Value<'scope>) -> Result<Element, Error> {
         if k.is_bigint() { Ok(Element::BigInt(self.to_bigint(v)?)) } else { Ok(Element::Number(self.to_number(v)?)) }
     }
 
-    pub fn typed_set(&mut self, o: JsObject<'gc>, i: f64, v: Value<'gc>) -> Result<(), Error> {
+    pub fn typed_set(&mut self, o: JsObject<'scope>, i: f64, v: Value<'scope>) -> Result<(), Error> {
         let Some((k, _)) = Self::typed_array(o) else { return Ok(()) };
         let e = self.to_element(k, v)?;
         if let Some(n) = Self::valid_index(o, i)
@@ -250,7 +250,7 @@ impl<'gc> Agent<'gc, '_> {
         Ok(())
     }
 
-    pub(crate) fn typed_numeric(o: JsObject<'gc>, key: Key<'_, 'gc>) -> Option<f64> {
+    pub(crate) fn typed_numeric(o: JsObject<'scope>, key: Key<'_, 'scope>) -> Option<f64> {
         let Key::Str(k) = key else { return None };
         if o.is_plain() || !matches!(o.borrow().kind, ObjectKind::TypedArray(..)) {
             return None;
@@ -258,7 +258,7 @@ impl<'gc> Agent<'gc, '_> {
         canonical_numeric(k)
     }
 
-    pub(crate) fn typed_has(o: JsObject<'gc>, i: f64) -> bool {
+    pub(crate) fn typed_has(o: JsObject<'scope>, i: f64) -> bool {
         Self::valid_index(o, i).is_some()
     }
 }

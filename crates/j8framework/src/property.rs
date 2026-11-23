@@ -2,15 +2,15 @@ use crate::ValueKind;
 use alloc::format;
 use alloc::vec::Vec;
 
-use crate::{Gc};
+use crate::{ScopeLocal};
 
 use crate::ops::index_of_str;
-use crate::{Agent, Error, ErrorKind, JsObject, JsString, JsSymbol, ObjectKind, Property, Slot, Value};
+use crate::{Scope, Error, ErrorKind, JsObject, JsString, JsSymbol, ObjectKind, Property, Slot, Value};
 
 #[derive(Clone, Copy, Debug)]
-pub enum Key<'k, 'gc> {
+pub enum Key<'k, 'scope> {
     Str(&'k str),
-    Sym(JsSymbol<'gc>),
+    Sym(JsSymbol<'scope>),
 }
 
 impl<'k> From<&'k str> for Key<'k, '_> {
@@ -20,13 +20,13 @@ impl<'k> From<&'k str> for Key<'k, '_> {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub enum PropertyKey<'gc> {
-    String(JsString<'gc>),
-    Symbol(JsSymbol<'gc>),
+pub enum PropertyKey<'scope> {
+    String(JsString<'scope>),
+    Symbol(JsSymbol<'scope>),
 }
 
-impl<'gc> PropertyKey<'gc> {
-    pub fn key(&self) -> Key<'_, 'gc> {
+impl<'scope> PropertyKey<'scope> {
+    pub fn key(&self) -> Key<'_, 'scope> {
         match self {
             PropertyKey::String(s) => Key::Str(s),
             PropertyKey::Symbol(s) => Key::Sym(*s),
@@ -34,8 +34,8 @@ impl<'gc> PropertyKey<'gc> {
     }
 }
 
-impl<'gc> From<PropertyKey<'gc>> for Value<'gc> {
-    fn from(k: PropertyKey<'gc>) -> Self {
+impl<'scope> From<PropertyKey<'scope>> for Value<'scope> {
+    fn from(k: PropertyKey<'scope>) -> Self {
         match k {
             PropertyKey::String(s) => Value::String(s),
             PropertyKey::Symbol(s) => Value::Symbol(s),
@@ -44,16 +44,16 @@ impl<'gc> From<PropertyKey<'gc>> for Value<'gc> {
 }
 
 #[derive(Clone, Copy, Debug, Default)]
-pub struct Descriptor<'gc> {
-    pub value: Option<Value<'gc>>,
+pub struct Descriptor<'scope> {
+    pub value: Option<Value<'scope>>,
     pub writable: Option<bool>,
-    pub get: Option<Option<JsObject<'gc>>>,
-    pub set: Option<Option<JsObject<'gc>>>,
+    pub get: Option<Option<JsObject<'scope>>>,
+    pub set: Option<Option<JsObject<'scope>>>,
     pub enumerable: Option<bool>,
     pub configurable: Option<bool>,
 }
 
-impl<'gc> Descriptor<'gc> {
+impl<'scope> Descriptor<'scope> {
     pub fn is_accessor(&self) -> bool {
         self.get.is_some() || self.set.is_some()
     }
@@ -66,18 +66,18 @@ impl<'gc> Descriptor<'gc> {
         !self.is_accessor() && !self.is_data()
     }
 
-    pub fn value(v: Value<'gc>) -> Self {
+    pub fn value(v: Value<'scope>) -> Self {
         Self { value: Some(v), ..Self::default() }
     }
 
-    pub fn complete(&self) -> Property<'gc> {
+    pub fn complete(&self) -> Property<'scope> {
         let slot = if self.is_accessor() { Slot::Accessor { get: self.get.flatten(), set: self.set.flatten() } } else { Slot::Data(self.value.unwrap_or_default()) };
         Property { slot, enumerable: self.enumerable.unwrap_or(false), writable: self.writable.unwrap_or(false), configurable: self.configurable.unwrap_or(false) }
     }
 }
 
-impl<'gc> From<Property<'gc>> for Descriptor<'gc> {
-    fn from(p: Property<'gc>) -> Self {
+impl<'scope> From<Property<'scope>> for Descriptor<'scope> {
+    fn from(p: Property<'scope>) -> Self {
         let base = Self { enumerable: Some(p.enumerable), configurable: Some(p.configurable), ..Self::default() };
         match p.slot {
             Slot::Data(v) => Self { value: Some(v), writable: Some(p.writable), ..base },
@@ -92,15 +92,15 @@ pub enum Integrity {
     Frozen,
 }
 
-fn same_object<'gc>(a: Option<JsObject<'gc>>, b: Option<JsObject<'gc>>) -> bool {
+fn same_object<'scope>(a: Option<JsObject<'scope>>, b: Option<JsObject<'scope>>) -> bool {
     match (a, b) {
-        (Some(x), Some(y)) => Gc::ptr_eq(x, y),
+        (Some(x), Some(y)) => ScopeLocal::ptr_eq(x, y),
         (None, None) => true,
         _ => false,
     }
 }
 
-pub fn validate<'gc>(extensible: bool, desc: &Descriptor<'gc>, current: Option<Property<'gc>>) -> Option<Property<'gc>> {
+pub fn validate<'scope>(extensible: bool, desc: &Descriptor<'scope>, current: Option<Property<'scope>>) -> Option<Property<'scope>> {
     let Some(cur) = current else {
         return extensible.then(|| desc.complete());
     };
@@ -155,9 +155,9 @@ pub fn validate<'gc>(extensible: bool, desc: &Descriptor<'gc>, current: Option<P
     Some(p)
 }
 
-impl<'gc> Agent<'gc, '_> {
-    fn string_own(&self, s: JsString<'gc>, key: &str) -> Option<Property<'gc>> {
-        let fixed = |v: Value<'gc>, enumerable| Property { slot: Slot::Data(v), enumerable, writable: false, configurable: false };
+impl<'scope> Scope<'scope, '_> {
+    fn string_own(&self, s: JsString<'scope>, key: &str) -> Option<Property<'scope>> {
+        let fixed = |v: Value<'scope>, enumerable| Property { slot: Slot::Data(v), enumerable, writable: false, configurable: false };
         if key == "length" {
             return Some(fixed(f64::from(u32::try_from(s.utf16_len()).unwrap_or(u32::MAX)).into(), false));
         }
@@ -165,7 +165,7 @@ impl<'gc> Agent<'gc, '_> {
         Some(fixed(self.unit_string(unit).into(), true))
     }
 
-    pub fn get_own_property(&mut self, o: JsObject<'gc>, key: Key<'_, 'gc>) -> Result<Option<Property<'gc>>, Error> {
+    pub fn get_own_property(&mut self, o: JsObject<'scope>, key: Key<'_, 'scope>) -> Result<Option<Property<'scope>>, Error> {
         if let Some(parts) = self.proxy_parts(o) {
             let (t, h) = parts?;
             return self.proxy_get_own_property(t, h, key);
@@ -206,11 +206,11 @@ impl<'gc> Agent<'gc, '_> {
         })
     }
 
-    pub fn has_own_property(&mut self, o: JsObject<'gc>, key: Key<'_, 'gc>) -> Result<bool, Error> {
+    pub fn has_own_property(&mut self, o: JsObject<'scope>, key: Key<'_, 'scope>) -> Result<bool, Error> {
         Ok(self.get_own_property(o, key)?.is_some())
     }
 
-    pub fn define_own_property(&mut self, o: JsObject<'gc>, key: Key<'_, 'gc>, desc: Descriptor<'gc>) -> Result<bool, Error> {
+    pub fn define_own_property(&mut self, o: JsObject<'scope>, key: Key<'_, 'scope>, desc: Descriptor<'scope>) -> Result<bool, Error> {
         if let Some(parts) = self.proxy_parts(o) {
             let (t, h) = parts?;
             return self.proxy_define_own_property(t, h, key, desc);
@@ -258,7 +258,7 @@ impl<'gc> Agent<'gc, '_> {
         Ok(self.ordinary_define(o, key, &desc))
     }
 
-    fn mapped_slot(o: JsObject<'gc>, key: Key<'_, 'gc>) -> Option<u16> {
+    fn mapped_slot(o: JsObject<'scope>, key: Key<'_, 'scope>) -> Option<u16> {
         let Key::Str(k) = key else { return None };
         match &o.borrow().kind {
             ObjectKind::Arguments(Some(map)) => index_of_str(k).and_then(|i| map.slots.get(i as usize).copied().flatten()),
@@ -266,7 +266,7 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    fn unmap(&self, o: JsObject<'gc>, key: Key<'_, 'gc>) {
+    fn unmap(&self, o: JsObject<'scope>, key: Key<'_, 'scope>) {
         if let (Key::Str(k), ObjectKind::Arguments(Some(map))) = (key, &mut o.borrow_mut(self.mc).kind)
             && let Some(s) = index_of_str(k).and_then(|i| map.slots.get_mut(i as usize))
         {
@@ -274,7 +274,7 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    fn arguments_define(&mut self, o: JsObject<'gc>, key: Key<'_, 'gc>, desc: Descriptor<'gc>, slot: u16) -> bool {
+    fn arguments_define(&mut self, o: JsObject<'scope>, key: Key<'_, 'scope>, desc: Descriptor<'scope>, slot: u16) -> bool {
         let env = match &o.borrow().kind {
             ObjectKind::Arguments(Some(map)) => map.env,
             _ => return self.ordinary_define(o, key, &desc),
@@ -299,7 +299,7 @@ impl<'gc> Agent<'gc, '_> {
         true
     }
 
-    fn ordinary_define(&self, o: JsObject<'gc>, key: Key<'_, 'gc>, desc: &Descriptor<'gc>) -> bool {
+    fn ordinary_define(&self, o: JsObject<'scope>, key: Key<'_, 'scope>, desc: &Descriptor<'scope>) -> bool {
         let (current, extensible) = {
             let d = o.borrow();
             (d.own_slot(self.mc, key), !d.non_extensible())
@@ -313,7 +313,7 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    fn array_set_length(&mut self, o: JsObject<'gc>, desc: Descriptor<'gc>) -> Result<bool, Error> {
+    fn array_set_length(&mut self, o: JsObject<'scope>, desc: Descriptor<'scope>) -> Result<bool, Error> {
         let length_prop = |a: &mut Self| a.get_own_property(o, Key::Str("length")).map(|p| p.expect("arrays have a length"));
         let Some(v) = desc.value else {
             let cur = length_prop(self)?;
@@ -353,7 +353,7 @@ impl<'gc> Agent<'gc, '_> {
         Ok(ok)
     }
 
-    pub fn define_property_or_throw(&mut self, o: JsObject<'gc>, key: Key<'_, 'gc>, desc: Descriptor<'gc>) -> Result<(), Error> {
+    pub fn define_property_or_throw(&mut self, o: JsObject<'scope>, key: Key<'_, 'scope>, desc: Descriptor<'scope>) -> Result<(), Error> {
         if self.define_own_property(o, key, desc)? {
             Ok(())
         } else {
@@ -362,11 +362,11 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    pub fn create_data_property(&mut self, o: JsObject<'gc>, key: Key<'_, 'gc>, v: Value<'gc>) -> Result<bool, Error> {
+    pub fn create_data_property(&mut self, o: JsObject<'scope>, key: Key<'_, 'scope>, v: Value<'scope>) -> Result<bool, Error> {
         self.define_own_property(o, key, Property::data(v).into())
     }
 
-    pub fn create_data_property_or_throw(&mut self, o: JsObject<'gc>, key: Key<'_, 'gc>, v: Value<'gc>) -> Result<(), Error> {
+    pub fn create_data_property_or_throw(&mut self, o: JsObject<'scope>, key: Key<'_, 'scope>, v: Value<'scope>) -> Result<(), Error> {
         if self.create_data_property(o, key, v)? {
             Ok(())
         } else {
@@ -375,14 +375,14 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    pub fn key_text(&self, key: Key<'_, 'gc>) -> alloc::string::String {
+    pub fn key_text(&self, key: Key<'_, 'scope>) -> alloc::string::String {
         match key {
             Key::Str(s) => s.into(),
             Key::Sym(s) => alloc::string::String::from(&**self.symbol_descriptive(s)),
         }
     }
 
-    pub fn delete_property(&mut self, o: JsObject<'gc>, key: Key<'_, 'gc>) -> Result<bool, Error> {
+    pub fn delete_property(&mut self, o: JsObject<'scope>, key: Key<'_, 'scope>) -> Result<bool, Error> {
         if let Some(parts) = self.proxy_parts(o) {
             let (t, h) = parts?;
             return self.proxy_delete(t, h, key);
@@ -404,7 +404,7 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    pub fn own_property_keys(&mut self, o: JsObject<'gc>) -> Result<Vec<PropertyKey<'gc>>, Error> {
+    pub fn own_property_keys(&mut self, o: JsObject<'scope>) -> Result<Vec<PropertyKey<'scope>>, Error> {
         if let Some(parts) = self.proxy_parts(o) {
             let (t, h) = parts?;
             return self.proxy_own_keys(t, h);
@@ -413,7 +413,7 @@ impl<'gc> Agent<'gc, '_> {
             return Ok(keys);
         }
         let d = o.borrow();
-        let mut indices: Vec<(u32, Option<JsString<'gc>>)> = Vec::new();
+        let mut indices: Vec<(u32, Option<JsString<'scope>>)> = Vec::new();
         let mut strings = Vec::new();
         match &d.kind {
             ObjectKind::Array => {
@@ -437,13 +437,13 @@ impl<'gc> Agent<'gc, '_> {
             }
         }
         indices.sort_unstable_by_key(|&(i, _)| i);
-        let mut keys: Vec<PropertyKey<'gc>> = indices.into_iter().map(|(i, k)| PropertyKey::String(k.unwrap_or_else(|| self.string(&format!("{i}"))))).collect();
+        let mut keys: Vec<PropertyKey<'scope>> = indices.into_iter().map(|(i, k)| PropertyKey::String(k.unwrap_or_else(|| self.string(&format!("{i}"))))).collect();
         keys.extend(strings);
         keys.extend(d.symbols.iter().map(|&(s, _)| PropertyKey::Symbol(s)));
         Ok(keys)
     }
 
-    pub fn is_extensible(&mut self, o: JsObject<'gc>) -> Result<bool, Error> {
+    pub fn is_extensible(&mut self, o: JsObject<'scope>) -> Result<bool, Error> {
         if let Some(parts) = self.proxy_parts(o) {
             let (t, h) = parts?;
             return self.proxy_is_extensible(t, h);
@@ -451,7 +451,7 @@ impl<'gc> Agent<'gc, '_> {
         Ok(!o.borrow().non_extensible())
     }
 
-    pub fn prevent_extensions(&mut self, o: JsObject<'gc>) -> Result<bool, Error> {
+    pub fn prevent_extensions(&mut self, o: JsObject<'scope>) -> Result<bool, Error> {
         if let Some(parts) = self.proxy_parts(o) {
             let (t, h) = parts?;
             return self.proxy_prevent_extensions(t, h);
@@ -460,7 +460,7 @@ impl<'gc> Agent<'gc, '_> {
         Ok(true)
     }
 
-    pub fn get_prototype_of(&mut self, o: JsObject<'gc>) -> Result<Option<JsObject<'gc>>, Error> {
+    pub fn get_prototype_of(&mut self, o: JsObject<'scope>) -> Result<Option<JsObject<'scope>>, Error> {
         if let Some(parts) = self.proxy_parts(o) {
             let (t, h) = parts?;
             return self.proxy_get_prototype_of(t, h);
@@ -468,7 +468,7 @@ impl<'gc> Agent<'gc, '_> {
         Ok(o.borrow().proto())
     }
 
-    pub fn set_prototype_of(&mut self, o: JsObject<'gc>, proto: Option<JsObject<'gc>>) -> Result<bool, Error> {
+    pub fn set_prototype_of(&mut self, o: JsObject<'scope>, proto: Option<JsObject<'scope>>) -> Result<bool, Error> {
         if let Some(parts) = self.proxy_parts(o) {
             let (t, h) = parts?;
             return self.proxy_set_prototype_of(t, h, proto);
@@ -483,12 +483,12 @@ impl<'gc> Agent<'gc, '_> {
         if same_object(current, proto) {
             return Ok(true);
         }
-        if !extensible || Gc::ptr_eq(o, self.realm.object_proto) {
+        if !extensible || ScopeLocal::ptr_eq(o, self.context.object_proto) {
             return Ok(false);
         }
         let mut p = proto;
         while let Some(x) = p {
-            if Gc::ptr_eq(x, o) {
+            if ScopeLocal::ptr_eq(x, o) {
                 return Ok(false);
             }
             if matches!(x.borrow().kind, ObjectKind::Proxy(_)) {
@@ -500,7 +500,7 @@ impl<'gc> Agent<'gc, '_> {
         Ok(true)
     }
 
-    pub fn set_integrity_level(&mut self, o: JsObject<'gc>, level: Integrity) -> Result<bool, Error> {
+    pub fn set_integrity_level(&mut self, o: JsObject<'scope>, level: Integrity) -> Result<bool, Error> {
         if !self.prevent_extensions(o)? {
             return Ok(false);
         }
@@ -516,7 +516,7 @@ impl<'gc> Agent<'gc, '_> {
         Ok(true)
     }
 
-    pub fn test_integrity_level(&mut self, o: JsObject<'gc>, level: Integrity) -> Result<bool, Error> {
+    pub fn test_integrity_level(&mut self, o: JsObject<'scope>, level: Integrity) -> Result<bool, Error> {
         if self.is_extensible(o)? {
             return Ok(false);
         }
@@ -530,7 +530,7 @@ impl<'gc> Agent<'gc, '_> {
         Ok(true)
     }
 
-    pub fn to_property_descriptor(&mut self, v: Value<'gc>) -> Result<Descriptor<'gc>, Error> {
+    pub fn to_property_descriptor(&mut self, v: Value<'scope>) -> Result<Descriptor<'scope>, Error> {
         if v.as_object().is_none() {
             let t = self.describe(v);
             return Err(self.throw(ErrorKind::Type, &format!("Property description must be an object: {t}")));
@@ -569,7 +569,7 @@ impl<'gc> Agent<'gc, '_> {
         Ok(d)
     }
 
-    pub fn from_property_descriptor(&mut self, p: Option<Property<'gc>>) -> Value<'gc> {
+    pub fn from_property_descriptor(&mut self, p: Option<Property<'scope>>) -> Value<'scope> {
         let Some(p) = p else { return Value::Undefined };
         let o = self.object();
         let d = o.borrow_mut(self.mc);
@@ -589,7 +589,7 @@ impl<'gc> Agent<'gc, '_> {
         o.into()
     }
 
-    pub fn to_property_key(&mut self, v: Value<'gc>) -> Result<PropertyKey<'gc>, Error> {
+    pub fn to_property_key(&mut self, v: Value<'scope>) -> Result<PropertyKey<'scope>, Error> {
         match (self.to_primitive(v, crate::Hint::String)?).kind() {
             ValueKind::Symbol(s) => Ok(PropertyKey::Symbol(s)),
             p => Ok(PropertyKey::String(self.to_string(p.into())?)),

@@ -1,4 +1,4 @@
-# Framework: Isolate, Agent and values
+# Framework: Isolate, Scope and values
 
 `crates/j8framework` is the core layer: the traits the other layers implement and the structs / enums they share. It
 **depends on no other j8 layer**; implementations live in the layer crates (`j8platform` implements `Platform`, and so on).
@@ -9,33 +9,33 @@
 |---|---|---|
 | `Platform` / `Pool` | the threads and clocks the host lends the engine | `v8::Platform` |
 | `Isolate` | an independent JS world: one GC heap (paragc) and a profiler | `v8::Isolate` |
-| `Scope` | one entry into an isolate; values in it carry the `'gc` brand and can't leave it | `HandleScope` |
-| `Value<'gc>` | a JS value: V8's `Local`, it can't leave the closure | `Local<Value>` |
-| `Global` | a persistent handle (paragc `Root`): survives `enter` calls, released on drop | `Global<T>` |
-| `ContextRoot` | the execution environment kept across slices | — |
-| `Context` / `Realm` | the execution context: the global object and built-in prototypes (`Intrinsics`, from j8builtins) | `Context` |
-| `Agent` | the context of one run; all JS operation semantics hang off it, calls back into JS go through `Invoke` | — |
-| `Engine` | the entry the execution engine (j8executor) implements; resumable (`start` / `resume`) | — |
+| `Scope` | one entry into an isolate, with a `Context` and the executor; values in it carry the `'scope` brand and can't leave it; all JS operation semantics hang off it, calls back into JS go through `Invoke` | `HandleScope` + `Context::Scope` |
+| `Value<'scope>` | a JS value: V8's `Local`, it can't leave the closure | `Local<Value>` |
+| `ScopeGlobal<'p, B>` | a root (paragc `ScopeGlobal`): survives `enter` calls, released on drop; `B` names what it holds (`ValueBrand`, `ContextBrand`, …) | `Global<T>` |
+| `Context` | the execution context: the global object and built-in prototypes (`Intrinsics`, from j8builtins) | `Context` |
 | `Profiler` | call / back-edge counters | — |
-| `EventLoop` / `EventLoopSet` | JS event loops and the loop threads they run on ([Event loops](event-loop.md)) | — |
+| `Host` / `HostObject` | a Rust value inside a JS object, traced by the collector ([Bindings](bindings.md)) | `cppgc` objects |
 
 ## Entering an isolate
 
 ```rust,ignore
 let platform = DefaultPlatform::default();
 let mut isolate = Isolate::new(&platform, CreateParams::default());
-let mut executor = Executor::default();
-let cx = isolate.enter(|scope| scope.persist(scope.context(&Builtins)));   // Global<Context>
-let result = isolate.run(&mut executor, &cx, &Source { text: "1 + 2 * 3", file: "a.js" })?;
-isolate.enter(|scope| {
-    let v = scope.local(&result);       // Global ⇒ Value<'gc>, valid only in this closure
+let executor = Executor::default();
+let cx = isolate.create_context(&Builtins);   // ScopeGlobal<ContextBrand>
+let result = executor.eval(&mut isolate, &cx, &Source { text: "1 + 2 * 3", file: "a.js" })?;
+isolate.enter(&cx, &executor, |scope| {
+    let v = scope.local(&result);       // ScopeGlobal ⇒ Value<'scope>, valid only in this closure
 });
 ```
 
-- `Isolate::enter(|scope| …)` enters once; `'gc` is that entry's **brand**. Nothing is collected during the closure;
+- `Isolate::enter(&cx, &executor, |scope| …)` enters once; `'scope` is that entry's **brand**. Nothing is collected during the closure;
   after it returns, a collection runs if enough was allocated (usually young, a full one every few).
-- `Value<'gc>` can't leave the closure, **checked at compile time**: Rust lifetimes stand in for V8's `HandleScope`.
-- To keep a value across entries, turn it into a `Global` with `scope.persist(v)` / `agent.global(v)`.
+- `Value<'scope>` can't leave the closure, **checked at compile time**: Rust lifetimes stand in for V8's `HandleScope`.
+- To keep a value across entries, root it: `scope.global(v)` gives a `ScopeGlobal<'p, ValueBrand>`,
+  `scope.mc.stash::<B>(x)` roots any heap object (`ContextBrand` for a context). `local` / `mc.fetch` read them back.
+- The executor (`j8executor::Executor<'p>`) runs scripts: `eval` / `eval_module`, or `start` / `resume` in slices.
+  Event loops live in j8executor too ([Event loops](event-loop.md)).
 
 ## Values: one NaN-boxed word
 
@@ -62,10 +62,10 @@ match v.kind() {
 }
 ```
 
-## Agent: operation semantics
+## Scope: operation semantics
 
-An `Agent` is the context of one run: the current realm, the heap's mutator and the engine's `Invoke`. The spec's
-abstract operations are its methods (`ops.rs`): conversions (ToNumber, ToString, ToPrimitive …), operators
+A `Scope` is one entry with everything a run needs: the current `Context`, the heap's allocator (`mc`), the executor's
+`Invoke`, `new.target` and the pending exception. The spec's abstract operations are its methods (`ops.rs`): conversions (ToNumber, ToString, ToPrimitive …), operators
 (`BinaryOp`, `CompareOp`, `UnaryOp`), property access (along the prototype chain, through the
 [internal methods](objects.md)). The executor, the built-ins and binding code share them, so semantics are written once.
 
@@ -76,12 +76,12 @@ let r = a.call(f, this, &[arg])?;
 let err = a.throw(ErrorKind::Type, "x is not a function");   // an Error; `?` it out of a host function to throw
 ```
 
-Built-ins and host functions all have the signature `fn(&mut Agent, this, &[Value]) -> Result<Value, Error>`.
+Built-ins and host functions all have the signature `fn(&mut Scope, this, &[Value]) -> Result<Value, Error>`.
 
 A built-in that calls the same function many times (`map`, `filter`, `reduce`, `sort`'s comparator …) resolves it once
 with `a.callback(f, this)` and calls the returned `Callback` in the loop. The engine fills it in through
 `Invoke::callback`: with the JIT, a plain function of up to three parameters goes straight to its compiled code (through
-the function's stub, so a later compile or deopt is picked up); anything else falls back to `Agent::call`.
+the function's stub, so a later compile or deopt is picked up); anything else falls back to `Scope::call`.
 
 ```rust,ignore
 let cb = a.callback(f, this_arg);
@@ -94,7 +94,8 @@ for (k, v) in items {
 
 | Variant | Meaning |
 |---|---|
-| `Error::Exception(g)` | JS threw the value `g` |
+| `Error::Exception` | JS threw; the value is in the pending slot (`scope.take_exception()`), as in V8 |
+| `Error::Parked(ticket)` | JS threw, and host code parked the value in the isolate (`scope.park()`) to settle it on a later turn; `scope.unpark(ticket)` puts it back in the pending slot |
 | `Error::Syntax(msg)` | the source doesn't parse (early errors included) |
 | `Error::Unsupported(msg)` | syntax j8 doesn't support yet, with `file:line:column` |
 | `Error::Terminated` | stopped by `IsolateHandle::terminate` |

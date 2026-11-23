@@ -3,7 +3,8 @@
 **English** · [简体中文](README.zh-CN.md)
 
 The bytecode executor of [j8](https://github.com/0x00-Community/j8): it runs the accumulator-style register
-bytecode of `j8bytecode` and implements `j8framework::Engine`.
+bytecode of `j8bytecode` (`Executor<'p>`: `eval`, resumable `start` / `resume`) and drives the JS event loops
+(`EventLoop` / `EventLoopSet`).
 
 ## How it runs
 
@@ -11,7 +12,7 @@ bytecode of `j8bytecode` and implements `j8framework::Engine`.
   heap-allocated `Env` chain
 - Exceptions: each frame has a dynamic handler stack; a throw pops this frame's handler, otherwise unwinds to the caller
 - Inline caches (`ic.rs`) for property reads, writes and property additions, keyed by shape address
-- Sliced execution: `Engine::eval` runs at most a fixed number of instructions per slice, parks the state under a root,
+- Sliced execution: `Executor::eval` runs at most a fixed number of instructions per slice, parks the state under a root,
   lets the heap collect, and continues
 - A `Tier` hook lets a JIT (`j8jit`) take over hot functions and loops
 
@@ -21,7 +22,7 @@ An `Executor` serves one isolate: it holds the loaded functions, and closures on
 
 ```rust
 let mut executor = j8executor::Executor::default();
-let result = isolate.run(&mut executor, &cx, &j8framework::Source { text: "1 + 2", file: "a.js" })?;
+let result = executor.eval(&mut isolate, &cx, &j8framework::Source { text: "1 + 2", file: "a.js" })?;
 ```
 
 ## License

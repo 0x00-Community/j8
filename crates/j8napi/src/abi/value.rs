@@ -10,7 +10,7 @@ use crate::{Env, Handle, Status, ValueType, napi};
 
 const I64_LIMIT: f64 = 9_223_372_036_854_775_808.0;
 
-impl Env {
+impl Env<'_> {
     fn write_units<T: Copy + Default>(units: &[T], buf: *mut T, size: usize, result: *mut usize) -> Result<(), Status> {
         if buf.is_null() {
             return Ffi::put(result, units.len());
@@ -25,9 +25,9 @@ impl Env {
         Ok(())
     }
 
-    fn bigint<'gc>(&self, h: Handle) -> Result<&'gc BigInt, Status> {
+    fn bigint<'scope>(&self, h: Handle) -> Result<&'scope BigInt, Status> {
         match self.value(h)?.kind() {
-            ValueKind::BigInt(b) => Ok(&j8framework::Gc::get(b).0),
+            ValueKind::BigInt(b) => Ok(&j8framework::ScopeLocal::get(b).0),
             _ => Err(Status::BigintExpected),
         }
     }
@@ -42,12 +42,12 @@ impl Env {
             ValueKind::Symbol(_) => ValueType::Symbol,
             ValueKind::BigInt(_) => ValueType::Bigint,
             ValueKind::Object(o) if o.borrow().kind.is_callable() => ValueType::Function,
-            ValueKind::Object(o) if Self::hosted::<crate::abi::object::External, _>(o, |_| ()).is_some() => ValueType::External,
+            ValueKind::Object(o) if Self::holds::<crate::abi::object::External>(o) => ValueType::External,
             ValueKind::Object(_) => ValueType::Object,
         }
     }
 
-    fn strict_equals<'gc>(x: Value<'gc>, y: Value<'gc>) -> bool {
+    fn strict_equals<'scope>(x: Value<'scope>, y: Value<'scope>) -> bool {
         match (x.as_number(), y.as_number()) {
             (Some(a), Some(b)) => a == b,
             _ => x.same_value(y),
@@ -69,8 +69,8 @@ napi! {
     }
 
     fn napi_get_global(env, result: *mut Handle) {
-        let a = env.agent()?;
-        env.out(result, a.realm.global.into())
+        let a = env.scope()?;
+        env.out(result, a.context.global.into())
     }
 
     fn napi_get_boolean(env, value: bool, result: *mut Handle) {
@@ -107,13 +107,13 @@ napi! {
     }
 
     fn napi_get_value_int32(env, value: Handle, result: *mut i32) {
-        let a = env.agent()?;
+        let a = env.scope()?;
         let x = env.number(value)?;
         Ffi::put(result, a.to_int32(x.into()).map_err(|_| Status::NumberExpected)?)
     }
 
     fn napi_get_value_uint32(env, value: Handle, result: *mut u32) {
-        let a = env.agent()?;
+        let a = env.scope()?;
         let x = env.number(value)?;
         Ffi::put(result, a.to_uint32(x.into()).map_err(|_| Status::NumberExpected)?)
     }
@@ -126,18 +126,18 @@ napi! {
     }
 
     fn napi_create_bigint_int64(env, value: i64, result: *mut Handle) {
-        let a = env.agent()?;
+        let a = env.scope()?;
         env.out(result, a.bigint(BigInt::from(value)))
     }
 
     fn napi_create_bigint_uint64(env, value: u64, result: *mut Handle) {
-        let a = env.agent()?;
+        let a = env.scope()?;
         env.out(result, a.bigint(BigInt::from(value)))
     }
 
     fn napi_create_bigint_words(env, sign_bit: i32, word_count: usize, words: *const u64, result: *mut Handle) {
         env.preamble()?;
-        let a = env.agent()?;
+        let a = env.scope()?;
         if i32::try_from(word_count).is_err() {
             return Err(Status::InvalidArg);
         }
@@ -148,7 +148,7 @@ napi! {
 
     fn napi_get_value_bigint_int64(env, value: Handle, result: *mut i64, lossless: *mut bool) {
         let b = env.bigint(value)?;
-        let wrapped = j8framework::Agent::wrap_bigint(b, 64, true);
+        let wrapped = j8framework::Scope::wrap_bigint(b, 64, true);
         let n = i64::try_from(&wrapped).unwrap_or_default();
         Ffi::put(lossless, wrapped == *b)?;
         Ffi::put(result, n)
@@ -156,7 +156,7 @@ napi! {
 
     fn napi_get_value_bigint_uint64(env, value: Handle, result: *mut u64, lossless: *mut bool) {
         let b = env.bigint(value)?;
-        let wrapped = j8framework::Agent::wrap_bigint(b, 64, false);
+        let wrapped = j8framework::Scope::wrap_bigint(b, 64, false);
         let n = u64::try_from(&wrapped).unwrap_or_default();
         Ffi::put(lossless, wrapped == *b)?;
         Ffi::put(result, n)
@@ -179,19 +179,19 @@ napi! {
     }
 
     fn napi_create_string_utf8(env, str: *const c_char, length: usize, result: *mut Handle) {
-        let a = env.agent()?;
+        let a = env.scope()?;
         let s = Ffi::utf8(str, length)?;
         env.out(result, a.string(&s).into())
     }
 
     fn napi_create_string_latin1(env, str: *const c_char, length: usize, result: *mut Handle) {
-        let a = env.agent()?;
+        let a = env.scope()?;
         let s: alloc::string::String = Ffi::bytes(str, length)?.iter().map(|&b| char::from(b)).collect();
         env.out(result, a.string(&s).into())
     }
 
     fn napi_create_string_utf16(env, str: *const u16, length: usize, result: *mut Handle) {
-        let a = env.agent()?;
+        let a = env.scope()?;
         let units = if length == crate::AUTO_LENGTH {
             if str.is_null() {
                 return Err(Status::InvalidArg);
@@ -231,15 +231,15 @@ napi! {
     }
 
     fn napi_create_symbol(env, description: Handle, result: *mut Handle) {
-        let a = env.agent()?;
+        let a = env.scope()?;
         let description = if description.0.is_none() { None } else { Some(Box::<str>::from(&**env.string(description)?)) };
         env.out(result, Value::Symbol(a.mc.alloc(SymbolData { description, private: false })))
     }
 
     fn node_api_symbol_for(env, utf8description: *const c_char, length: usize, result: *mut Handle) {
-        let a = env.agent()?;
+        let a = env.scope()?;
         let key = Ffi::utf8(utf8description, length)?;
-        let symbol = env.js(a.get_named(a.realm.global.into(), "Symbol"))?;
+        let symbol = env.js(a.get_named(a.context.global.into(), "Symbol"))?;
         let for_ = env.js(a.get_named(symbol, "for"))?;
         let k = a.string(&key).into();
         let s = env.js(a.call(for_, symbol, &[k]))?;
@@ -255,41 +255,41 @@ napi! {
     }
 
     fn napi_coerce_to_bool(env, value: Handle, result: *mut Handle) {
-        let a = env.agent()?;
+        let a = env.scope()?;
         env.out(result, a.to_boolean(env.value(value)?).into())
     }
 
     fn napi_coerce_to_number(env, value: Handle, result: *mut Handle) {
         env.preamble()?;
-        let a = env.agent()?;
+        let a = env.scope()?;
         let x = env.js(a.to_number(env.value(value)?))?;
         env.out(result, x.into())
     }
 
     fn napi_coerce_to_string(env, value: Handle, result: *mut Handle) {
         env.preamble()?;
-        let a = env.agent()?;
+        let a = env.scope()?;
         let s = env.js(a.to_string(env.value(value)?))?;
         env.out(result, s.into())
     }
 
     fn napi_coerce_to_object(env, value: Handle, result: *mut Handle) {
         env.preamble()?;
-        let a = env.agent()?;
+        let a = env.scope()?;
         let o = env.js(a.to_object(env.value(value)?))?;
         env.out(result, o.into())
     }
 
     fn napi_instanceof(env, object: Handle, constructor: Handle, result: *mut bool) {
         env.preamble()?;
-        let a = env.agent()?;
+        let a = env.scope()?;
         let c = env.callable(a, constructor)?;
         let b = env.js(a.instance_of(env.value(object)?, c))?;
         Ffi::put(result, b)
     }
 
     fn napi_is_array(env, value: Handle, result: *mut bool) {
-        let a = env.agent()?;
+        let a = env.scope()?;
         let b = env.js(a.is_array(env.value(value)?))?;
         Ffi::put(result, b)
     }
@@ -315,6 +315,6 @@ napi! {
     }
 
     fn napi_is_promise(env, value: Handle, result: *mut bool) {
-        Ffi::put(result, j8framework::Agent::is_promise(env.value(value)?))
+        Ffi::put(result, j8framework::Scope::is_promise(env.value(value)?))
     }
 }
