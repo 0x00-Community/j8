@@ -55,8 +55,11 @@ json = ["j8binding/json"]
 # j8::napi: Node-API (the C interface native addons link against)
 napi = ["dep:j8napi"]
 full = ["runtime", "taskqueue", "lockfree", "jit", "json", "napi"]
+# Cross-process JS objects (Linux only): a paragc cross-heap as the old generation, objects shared by signature
+crossheap = ["j8framework/crossheap"]
 
 [dev-dependencies]
+paragc.workspace = true
 j8executor.workspace = true
 j8builtins.workspace = true
 j8platform.workspace = true
@@ -89,6 +92,11 @@ path = "tests/event_loop.rs"
 [[test]]
 name = "terminate"
 path = "tests/terminate.rs"
+
+[[test]]
+name = "crossheap"
+path = "tests/crossheap.rs"
+required-features = ["crossheap"]
 
 [[test]]
 name = "jit_typeof"
@@ -146,7 +154,7 @@ j8napi = { version = "0.4.2", path = "crates/j8napi" }
 j8 = { version = "0.4.2", path = "." }
 moremath = { version = "=0.2.3", default-features = false }
 libm = "0.2"
-paragc = "0.5.2"
+paragc = "0.6.0"
 j8lockfree = { version = "0.4.2", path = "crates/j8lockfree" }
 j8taskqueue = { version = "0.4.2", path = "crates/j8taskqueue" }
 hashbrown = { version = "0.17", default-features = false }

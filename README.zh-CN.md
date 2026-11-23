@@ -55,6 +55,7 @@ j8 是**用 Rust 从头写的 JavaScript 引擎**, 照着 V8 的分层来: 所�
 ```sh
 cargo add j8                                    # 缺省 feature `runtime`: 执行器 + 内建对象 + 标准平台
 cargo add j8 --features jit                     # 再加 JIT (x86-64 Unix 和 Windows、AArch64 Linux)
+cargo add j8 --features crossheap               # Linux: 凭签名把堆对象共享给别的进程 (见 EMBEDDING.md 第 9 节)
 cargo add j8 --no-default-features --features compiler   # 只要 JS ⇒ 字节码
 ```
 

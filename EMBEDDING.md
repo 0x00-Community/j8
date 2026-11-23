@@ -490,7 +490,30 @@ let rt = MyHost::runtime(set, executor)?;
 Hot functions and loops are compiled to machine code. The test262 baseline also passes with the JIT on
 (`J8_TEST262_JIT=1`).
 
-## 9. Where to look in the samples
+## 9. Sharing objects across processes (Linux, feature `crossheap`)
+
+An isolate can take a paragc cross-heap (a heap in shared memory, reserved at the same fixed address in every process)
+as its old generation. Objects allocated with `alloc_shared` (types that are both `Trace` and paragc's `Shared`) move
+into it when they survive a young collection, and other processes find them by a 32-byte signature:
+
+```rust,ignore
+let space = paragc::CrossHeapSpace::reserve_fixed()?;
+isolate.attach_cross_heap(space.create("/dev/shm/my-heap", threads)?)?;
+let ticket = isolate.enter(|scope| {
+    let gc = scope.mc.mutator().alloc_shared(Payload { value: 42, next: None.into() });
+    scope.shares.share(scope.mc, gc)
+});
+for (ticket, signature) in isolate.take_signatures() {
+    // send `<[u8; 32]>::from(signature?)` to another process
+}
+```
+
+j8 collects only between turns, so a shared object is promoted and signed when the `enter` that shared it returns.
+A signature keeps nothing alive: the receiver opens the same heap (`CrossHeapSpace::open_fd` with a passed descriptor)
+and calls `CrossHeapMutator::resolve`, which gives `None` once the object is gone. JS objects themselves are not
+shareable yet; that comes in later steps.
+
+## 10. Where to look in the samples
 
 | You want to … | Look at |
 |---|---|

@@ -41,6 +41,8 @@ pub use lazy::Lazy;
 pub use layout::Layout;
 pub use handle::{ContextRoot, Global, RealmBrand, ValueBrand};
 pub use isolate::{CreateParams, Isolate, Scope};
+#[cfg(all(target_os = "linux", feature = "crossheap"))]
+pub use isolate::{ErasedBrand, Shares};
 pub use backing::{Backing, External, SharedMemory};
 pub use terminate::{IsolateHandle, Termination};
 pub use object::{Accessor, ObjMut, ObjRef, Object, ObjectState, Few, ArgumentsMap, HostData, HostHook, HostReaction, BigIntData, Bound, BufferData, Capability, Closure, ClosureFn, Code, FunctionInfo, ElementKind, ViewData, HelperKind, HelperState, IteratorHelper, NativeClosure, ProxyData, Collection, ContextKind, ContextName, ContextShape, ShapeId, MapKey, Request, JsBigInt, RegExpData, Coroutine, CoroutineState, Waiting, Settlement, Env, IterKind, IteratorState, Job, JsEnv, JsObject, JsString, JsSymbol, Forward, Native, NativeFn, ObjectData, ObjectKind, JsStr, Pieces, SmallStr, Units, Property, Reaction, Settled, Slot, Suspended, SymbolData};
