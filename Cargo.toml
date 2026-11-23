@@ -151,7 +151,7 @@ j8napi = { version = "0.4.2", path = "crates/j8napi" }
 j8 = { version = "0.4.2", path = "." }
 moremath = { version = "=0.2.3", default-features = false }
 libm = "0.2"
-paragc = "0.5.2"
+paragc = "0.6.0"
 j8lockfree = { version = "0.4.2", path = "crates/j8lockfree" }
 j8taskqueue = { version = "0.4.2", path = "crates/j8taskqueue" }
 hashbrown = { version = "0.17", default-features = false }
