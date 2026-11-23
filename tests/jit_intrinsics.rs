@@ -119,6 +119,46 @@ const CASES: &[Case] = &[
         text: "function f() { let s = 0; for (let i = 0; i < 3000; i++) s += Math.abs(i - 1500) + Math.floor(i / 7) + Math.ceil(i / 7) + Math.sqrt(i) + Math.max(i, 1000) + Math.min(i, 99); let n = 0; const o = { valueOf() { n++; return -4; } }; const r = Math.abs(o) + Math.floor(o) + Math.min(o, 1) + Math.max(2, o); let amin = 1, amax = 1, nan = 1; for (let i = 0; i < 100; i++) { amin = 1 / Math.min(-0, 0); amax = 1 / Math.max(-0, 0); nan = Math.min(nan, NaN); } return s + ':' + r + ':' + n + ':' + amin + ':' + amax + ':' + (1 / Math.abs(-0)) + ':' + String(nan); } f()",
         want: "8935853.918247666:-2:4:-Infinity:Infinity:Infinity:NaN",
     },
+    Case {
+        what: "push across leaf and level boundaries, including a three-level tree",
+        text: "function f() { const parts = []; for (const n of [127, 128, 129, 16383, 16384, 16385, 2097153]) { const a = []; for (let i = 0; i < n; i++) a.push(i); let ok = a.length === n && a[0] === 0 && a[n - 1] === n - 1; for (const i of [126, 127, 128, 129, 16382, 16383, 16384, 16385, 2097151, 2097152]) if (i < n && a[i] !== i) ok = false; parts.push(n + ':' + ok + ':' + a.push(n)); } return parts.join(','); } f()",
+        want: "127:true:128,128:true:129,129:true:130,16383:true:16384,16384:true:16385,16385:true:16386,2097153:true:2097154",
+    },
+    Case {
+        what: "push after length writes and pop back across a leaf boundary",
+        text: "function f() { const a = []; for (let i = 0; i < 300; i++) a.push(i); a.length = 0; const p0 = a.push(7); a.length = 50; const p50 = a.push(8); a.length = 128; const p128 = a.push(9); a.length = 129; const p129 = a.push(10); const b = []; for (let i = 0; i < 130; i++) b.push(i); const popped = []; while (b.length > 126) popped.push(b.pop()); const back = b.push(200); b.push(201, 202); return [p0, a[0], p50, a[50], a.length, p128, a[128], p129, a[129], a.length, popped.join('/'), back, b.length, b[126], b[127], b[128]].join(':'); } f()",
+        want: "1:7:51:8:130:129:9:130:10:130:129/128/127/126:127:129:200:201:202",
+    },
+    Case {
+        what: "push after splice, shift, sort, reverse and fill",
+        text: "function f() { const c = []; for (let i = 0; i < 200; i++) c.push(i); c.splice(10, 5, 1, 2); const ps = c.push(300); c.shift(); const psh = c.push(301); const d = []; for (let i = 0; i < 50; i++) d.push(50 - i); d.sort((x, y) => x - y); const pso = d.push(60); d.reverse(); const pr = d.push(0); d.fill(3, 0, 4); const pf = d.push(4); return [ps, c.length, c[10], c[c.length - 2], psh, c[c.length - 1], pso, d[0], pr, d[d.length - 2], pf, d[0], d[3], d[d.length - 1], d.length].join(':'); } f()",
+        want: "198:198:2:300:198:301:51:3:52:0:53:3:3:4:53",
+    },
+    Case {
+        what: "an indexed setter installed between two pushes of a compiled loop",
+        text: "function f() { let sets = 0; const e = []; let s = 0; for (let i = 0; i < 100; i++) { if (i === 40) Object.defineProperty(Array.prototype, '40', { set() { sets++; }, configurable: true }); s += e.push(i); } const r = sets + ':' + s + ':' + e.length + ':' + String(e[40]) + ':' + e[41]; delete Array.prototype[40]; return r; } f()",
+        want: "1:5050:100:undefined:41",
+    },
+    Case {
+        what: "setPrototypeOf to an array with elements between two pushes",
+        text: "function f() { const proto = [9]; const g = []; let s = 0; for (let i = 0; i < 80; i++) { if (i === 30) Object.setPrototypeOf(g, proto); s += g.push(i); } return s + ':' + g.length + ':' + g[0] + ':' + g[29] + ':' + g[30]; } f()",
+        want: "3240:80:0:29:30",
+    },
+    Case {
+        what: "push from a compiled map, reduce and forEach callback",
+        text: "function f() { const h = []; for (let i = 0; i < 20; i++) h.push(i); let mapped = 0; h.map((x) => { if (x === 5) { h.push(100); mapped++; } return x * 2; }); const reduced = h.reduce((acc, x, i) => { if (i === 3) h.push(7); return acc + x; }, 0); let seen = 0; h.forEach((x) => { seen++; if (x === 1) h.push(8); }); return mapped + ':' + h.length + ':' + reduced + ':' + h[20] + ':' + seen; } f()",
+        want: "1:23:290:100:22",
+    },
+    Case {
+        what: "a read-only index on Object.prototype and on Array.prototype",
+        text: "function f() { Object.defineProperty(Object.prototype, '2', { writable: false, configurable: true, value: 'ro' }); const k = []; let thrown = 0; let s = 0; let name = ''; for (let i = 0; i < 6; i++) { try { s += k.push(i); } catch (e) { thrown++; name = e.name; } } let r = thrown + ':' + name + ':' + s + ':' + k.length + ':' + k[1] + ':' + String(k[2]) + ':' + String(k[3]); delete Object.prototype[2]; Object.defineProperty(Array.prototype, '3', { writable: false, configurable: true, value: 'ro' }); const q = []; thrown = 0; s = 0; for (let i = 0; i < 6; i++) { try { s += q.push(i); } catch (e) { thrown++; } } r += '|' + thrown + ':' + s + ':' + q.length + ':' + String(q[3]) + ':' + String(q[4]); delete Array.prototype[3]; return r; } f()",
+        want: "4:TypeError:3:2:1:ro:undefined|3:6:3:ro:undefined",
+    },
+    Case {
+        what: "a setter defined after the push loop was compiled, and a replaced push inside the loop",
+        text: "function f() { const a = []; let s = 0; for (let i = 0; i < 50; i++) s += a.push(i); return s + ':' + a.length + ':' + String(a[0]); } let r = f(); Object.defineProperty(Array.prototype, '0', { set() {}, configurable: true }); r += '|' + f(); delete Array.prototype[0]; const saved = Array.prototype.push; function g() { const a = []; let s = 0; for (let i = 0; i < 80; i++) { if (i === 40) Array.prototype.push = function () { return 5; }; s += a.push(i); } return s + ':' + a.length + ':' + a[39]; } r += '|' + g(); Array.prototype.push = saved; r",
+        want: "1275:50:0|1275:50:undefined|1020:40:39",
+    },
 ];
 
 fn completion(text: &str, tier: Tier) -> String {

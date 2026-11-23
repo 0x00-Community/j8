@@ -227,6 +227,96 @@ fn direct<'gc>(a: &mut Agent<'gc, '_>, index: u32, out: j8framework::FastOut, op
     Ok(pack(out, value))
 }
 
+#[expect(clippy::cast_possible_truncation, reason = "the low 32 bits are the fast-table index")]
+fn direct_parts(packed: u64) -> (u32, j8framework::FastOut) {
+    let out = match packed >> 32 {
+        1 => j8framework::FastOut::Number,
+        2 => j8framework::FastOut::Bool,
+        _ => j8framework::FastOut::Value,
+    };
+    (packed as u32, out)
+}
+
+fn fast_of<'gc>(a: &mut Agent<'gc, '_>, index: u32, callee: Value<'gc>) -> Option<j8framework::FastCall> {
+    let native = callee.as_object().and_then(|o| o.native());
+    let entry = a.realm.fast_builtins.get().get(usize::try_from(index).unwrap_or(usize::MAX))?;
+    native.is_some_and(|n| core::ptr::fn_addr_eq(n.f, entry.native)).then_some(entry.call)
+}
+
+#[cold]
+#[inline(never)]
+fn direct_miss(ctx: &mut Ctx, callee: u64, this: u64, args: &[u64], out: j8framework::FastOut) -> u64 {
+    let r = {
+        let (_, agent) = unsafe { ctx.parts() };
+        let mut buf = [Value::Undefined; 2];
+        for (i, w) in args.iter().enumerate() {
+            buf[i] = unsafe { val(*w) };
+        }
+        agent.call(unsafe { val(callee) }, unsafe { val(this) }, &buf[..args.len()])
+    };
+    let epoch = ctx.jit().bump();
+    ctx.epoch = epoch;
+    match r {
+        Ok(v) => pack(out, v),
+        Err(e) => ctx.fail(e),
+    }
+}
+
+fn direct_finish(hit: Option<Value<'_>>, ctx: &mut Ctx, callee: u64, this: u64, args: &[u64], out: j8framework::FastOut) -> u64 {
+    match hit {
+        Some(v) => pack(out, v),
+        None => direct_miss(ctx, callee, this, args, out),
+    }
+}
+
+sysv! {
+    #[unsafe(no_mangle)]
+    pub fn j8_direct0(ctx: *mut Ctx, callee: u64, this: u64, packed: u64) -> u64 {
+        let ctx = unsafe { &mut *ctx };
+        let (index, out) = direct_parts(packed);
+        let hit = {
+            let (_, agent) = unsafe { ctx.parts() };
+            match fast_of(agent, index, unsafe { val(callee) }) {
+                Some(j8framework::FastCall::A0(f)) => f(agent, unsafe { val(this) }),
+                _ => None,
+            }
+        };
+        direct_finish(hit, ctx, callee, this, &[], out)
+    }
+}
+
+sysv! {
+    #[unsafe(no_mangle)]
+    pub fn j8_direct1(ctx: *mut Ctx, callee: u64, this: u64, arg: u64, packed: u64) -> u64 {
+        let ctx = unsafe { &mut *ctx };
+        let (index, out) = direct_parts(packed);
+        let hit = {
+            let (_, agent) = unsafe { ctx.parts() };
+            match fast_of(agent, index, unsafe { val(callee) }) {
+                Some(j8framework::FastCall::A1(f)) => f(agent, unsafe { val(this) }, unsafe { val(arg) }),
+                _ => None,
+            }
+        };
+        direct_finish(hit, ctx, callee, this, &[arg], out)
+    }
+}
+
+sysv! {
+    #[unsafe(no_mangle)]
+    pub fn j8_direct2(ctx: *mut Ctx, callee: u64, this: u64, x: u64, y: u64, packed: u64) -> u64 {
+        let ctx = unsafe { &mut *ctx };
+        let (index, out) = direct_parts(packed);
+        let hit = {
+            let (_, agent) = unsafe { ctx.parts() };
+            match fast_of(agent, index, unsafe { val(callee) }) {
+                Some(j8framework::FastCall::A2(f)) => f(agent, unsafe { val(this) }, unsafe { val(x) }, unsafe { val(y) }),
+                _ => None,
+            }
+        };
+        direct_finish(hit, ctx, callee, this, &[x, y], out)
+    }
+}
+
 fn helper<'gc>(jit: &Jit, exe: &Executor, a: &mut Agent<'gc, '_>, h: Helper, ops: &[u64], epoch: u64, keep: &mut bool) -> Result<u64, Error> {
     let v = |i: usize| unsafe { val::<'gc>(ops.get(i).copied().unwrap_or(ValueBits::UNDEFINED)) };
     Ok(match h {

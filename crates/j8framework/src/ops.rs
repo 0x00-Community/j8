@@ -225,12 +225,14 @@ fn to_int32(x: f64) -> i32 {
     modulo_u32(x).cast_signed()
 }
 
+const MOD_INT_LIMIT: f64 = 4_611_686_018_427_387_904.0;
+
 #[inline]
 fn remainder(a: f64, b: f64) -> f64 {
-    if a.abs() <= MAX_SAFE_INTEGER && b.abs() <= MAX_SAFE_INTEGER && b != 0.0 {
-        #[expect(clippy::cast_possible_truncation, reason = "checked to be in the safe integer range; the comparison below confirms it is an integer")]
+    if a.abs() <= MOD_INT_LIMIT && b.abs() <= MOD_INT_LIMIT && b != 0.0 {
+        #[expect(clippy::cast_possible_truncation, reason = "magnitude at most 2^62, so the value fits in i64; the comparison below confirms it is an integer")]
         let (x, y) = (a as i64, b as i64);
-        #[expect(clippy::cast_precision_loss, reason = "exact within the safe integer range")]
+        #[expect(clippy::cast_precision_loss, reason = "an integer whose magnitude is at most 2^62 is an exact f64")]
         if x as f64 == a && y as f64 == b {
             #[expect(clippy::cast_precision_loss, reason = "the remainder's magnitude is below the divisor's; exact")]
             let r = (x % y) as f64;
