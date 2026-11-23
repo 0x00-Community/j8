@@ -167,6 +167,17 @@ const _: () = assert!(core::mem::size_of::<JsStr<'static>>() == 32, "a js string
 type Tail<'a> = &'a mut [MaybeUninit<u8>];
 
 impl<'gc> JsStr<'gc> {
+    const LONE: u32 = 1 << 31;
+
+    fn capacity(&self) -> usize {
+        (self.cap & !Self::LONE) as usize
+    }
+
+    #[inline]
+    pub fn lone_surrogates(&self) -> bool {
+        self.buf.is_none() && self.cap & Self::LONE != 0
+    }
+
     fn tail(&self) -> *const u8 {
         (&raw const *self).wrapping_add(1).cast()
     }
@@ -207,7 +218,19 @@ impl<'gc> JsStr<'gc> {
 
     #[expect(clippy::cast_ptr_alignment)]
     pub fn wide(&self) -> Option<&[u16]> {
-        (!self.unit_ascii()).then(|| unsafe { core::slice::from_raw_parts(self.tail().add((self.cap as usize).next_multiple_of(2)).cast::<u16>(), self.utf16_len()) })
+        (!self.unit_ascii()).then(|| unsafe { core::slice::from_raw_parts(self.tail().add(self.capacity().next_multiple_of(2)).cast::<u16>(), self.utf16_len()) })
+    }
+
+    pub fn source_text(&self) -> String {
+        if self.lone_surrogates() {
+            HiddenSurrogates::hide(self.encode_utf16())
+        } else {
+            String::from(self.as_str())
+        }
+    }
+
+    pub fn encode_utf16(&self) -> impl Iterator<Item = u16> + Clone + '_ {
+        self.units().iter()
     }
 
     pub fn units(&self) -> Units<'_> {
@@ -224,11 +247,12 @@ impl<'gc> JsStr<'gc> {
         mc.mutator().alloc_tail(s, tail, fill)
     }
 
-    fn own(mc: &Mutation<'gc>, len: usize, units: usize, cap: usize, fill: impl FnOnce(Tail<'_>, Tail<'_>)) -> Gc<'gc, Self> {
-        let n = |x: usize| u32::try_from(x).expect("a string is shorter than 4 GiB");
-        let wide = if len == units { 0 } else { 2 * units };
+    fn own(mc: &Mutation<'gc>, len: usize, units: usize, cap: usize, lone: bool, fill: impl FnOnce(Tail<'_>, Tail<'_>)) -> Gc<'gc, Self> {
+        let n = |x: usize| u32::try_from(x).ok().filter(|x| x & Self::LONE == 0).expect("a string is shorter than 2 GiB");
+        let wide = if len == units && !lone { 0 } else { 2 * units };
         let head = if wide == 0 { cap } else { cap.next_multiple_of(2) };
-        let s = Self { buf: None, len: n(len), units: n(units), start: 0, cap: n(cap), used: AtomicU32::new(n(len)) };
+        let mark = if lone { Self::LONE } else { 0 };
+        let s = Self { buf: None, len: n(len), units: n(units), start: 0, cap: n(cap) | mark, used: AtomicU32::new(n(len)) };
         Self::place(mc, s, head + wide, |t| {
             let (bytes, rest) = t.split_at_mut(head);
             fill(&mut bytes[..len], &mut rest[..wide]);
@@ -259,10 +283,31 @@ impl<'gc> JsStr<'gc> {
 
     pub fn alloc_known(mc: &Mutation<'gc>, s: &str, ascii: bool) -> Gc<'gc, Self> {
         let units = if ascii { s.len() } else { s.encode_utf16().count() };
-        Self::own(mc, s.len(), units, s.len(), |bytes, wide| {
+        Self::own(mc, s.len(), units, s.len(), false, |bytes, wide| {
             Self::write(bytes, s.as_bytes());
             Self::write_units(wide, s.encode_utf16());
         })
+    }
+
+    pub fn alloc_units(mc: &Mutation<'gc>, units: &[u16]) -> Gc<'gc, Self> {
+        if let Ok(s) = String::from_utf16(units) {
+            return Self::alloc(mc, &s);
+        }
+        let lossy = String::from_utf16_lossy(units);
+        Self::own(mc, lossy.len(), units.len(), lossy.len(), true, |bytes, wide| {
+            Self::write(bytes, lossy.as_bytes());
+            Self::write_units(wide, units.iter().copied());
+        })
+    }
+
+    pub fn slice_units(mc: &Mutation<'gc>, of: Gc<'gc, Self>, r: core::ops::Range<usize>) -> Gc<'gc, Self> {
+        if r.start == 0 && r.end == of.utf16_len() {
+            return of;
+        }
+        match of.units() {
+            Units::Ascii(b) => Self::alloc_known(mc, core::str::from_utf8(&b[r]).unwrap_or_default(), true),
+            Units::Wide(w) => Self::alloc_units(mc, &w[r]),
+        }
     }
 
     pub fn concat(mc: &Mutation<'gc>, a: Gc<'gc, Self>, b: Gc<'gc, Self>) -> Gc<'gc, Self> {
@@ -272,6 +317,10 @@ impl<'gc> JsStr<'gc> {
         if a.len == 0 {
             return b;
         }
+        if a.lone_surrogates() || b.lone_surrogates() {
+            let units: alloc::vec::Vec<u16> = a.encode_utf16().chain(b.encode_utf16()).collect();
+            return Self::alloc_units(mc, &units);
+        }
         let total = a.byte_len() + b.byte_len();
         let ascii = a.unit_ascii() && b.unit_ascii();
         if ascii
@@ -280,8 +329,8 @@ impl<'gc> JsStr<'gc> {
         {
             return s;
         }
-        let cap = if ascii && total >= EXTEND_MIN { total.saturating_mul(2).min(u32::MAX as usize) } else { total };
-        Self::own(mc, total, a.utf16_len() + b.utf16_len(), cap, |bytes, wide| {
+        let cap = if ascii && total >= EXTEND_MIN { total.saturating_mul(2).min((Self::LONE - 1) as usize) } else { total };
+        Self::own(mc, total, a.utf16_len() + b.utf16_len(), cap, false, |bytes, wide| {
             let at = Self::write(bytes, a.as_bytes());
             Self::write(&mut bytes[at..], b.as_bytes());
             let at = Self::write_units(wide, a.units().iter());
@@ -292,7 +341,7 @@ impl<'gc> JsStr<'gc> {
     fn extend(mc: &Mutation<'gc>, a: Gc<'gc, Self>, b: Gc<'gc, Self>) -> Option<Gc<'gc, Self>> {
         let (own, start) = Self::backing(a);
         let end = start + a.byte_len();
-        if (own.cap as usize).checked_sub(end)? < b.byte_len() {
+        if own.capacity().checked_sub(end)? < b.byte_len() {
             return None;
         }
         let (from, to) = (u32::try_from(end).ok()?, u32::try_from(end + b.byte_len()).ok()?);
@@ -342,6 +391,9 @@ impl fmt::Debug for JsStr<'_> {
 
 impl PartialEq for JsStr<'_> {
     fn eq(&self, o: &Self) -> bool {
+        if self.lone_surrogates() || o.lone_surrogates() {
+            return self.lone_surrogates() == o.lone_surrogates() && self.wide() == o.wide();
+        }
         self.len == o.len && self.as_str() == o.as_str()
     }
 }
@@ -356,13 +408,50 @@ impl PartialOrd for JsStr<'_> {
 
 impl Ord for JsStr<'_> {
     fn cmp(&self, o: &Self) -> Ordering {
-        self.as_str().cmp(o.as_str())
+        if self.unit_ascii() && o.unit_ascii() {
+            return self.as_str().cmp(o.as_str());
+        }
+        self.units().iter().cmp(o.units().iter())
     }
 }
 
 impl Hash for JsStr<'_> {
     fn hash<H: Hasher>(&self, h: &mut H) {
-        self.as_str().hash(h);
+        match self.wide().filter(|_| self.lone_surrogates()) {
+            Some(w) => w.hash(h),
+            None => self.as_str().hash(h),
+        }
+    }
+}
+
+pub struct HiddenSurrogates;
+
+impl HiddenSurrogates {
+    const BASE: u32 = 0x10_F800;
+    const SURROGATES: u32 = 0x800;
+    const FIRST: u32 = 0xD800;
+
+    fn hidden(c: char) -> Option<u16> {
+        let v = u32::from(c).checked_sub(Self::BASE).filter(|&v| v < Self::SURROGATES)?;
+        u16::try_from(v + Self::FIRST).ok()
+    }
+
+    pub fn hide(units: impl Iterator<Item = u16>) -> String {
+        char::decode_utf16(units).map(|c| c.unwrap_or_else(|e| char::from_u32(Self::BASE + u32::from(e.unpaired_surrogate()) - Self::FIRST).unwrap_or(char::REPLACEMENT_CHARACTER))).collect()
+    }
+
+    pub fn reveal(text: &str) -> Option<alloc::vec::Vec<u16>> {
+        if !text.chars().any(|c| Self::hidden(c).is_some()) {
+            return None;
+        }
+        let mut out = alloc::vec::Vec::with_capacity(text.len());
+        for c in text.chars() {
+            match Self::hidden(c) {
+                Some(u) => out.push(u),
+                None => out.extend_from_slice(c.encode_utf16(&mut [0; 2])),
+            }
+        }
+        Some(out)
     }
 }
 
@@ -391,15 +480,6 @@ impl Units<'_> {
         }
     }
 
-    pub fn substring(self, r: core::ops::Range<usize>) -> String {
-        let end = r.end.min(self.len());
-        let start = r.start.min(end);
-        match self {
-            Units::Ascii(b) => b[start..end].iter().map(|&c| char::from(c)).collect(),
-            Units::Wide(w) => String::from_utf16_lossy(&w[start..end]),
-        }
-    }
-
     pub fn to_vec(self) -> Vec<u16> {
         match self {
             Units::Ascii(b) => b.iter().map(|&c| u16::from(c)).collect(),
@@ -409,7 +489,7 @@ impl Units<'_> {
 }
 
 impl<'a> Units<'a> {
-    pub fn iter(self) -> impl Iterator<Item = u16> + 'a {
+    pub fn iter(self) -> impl Iterator<Item = u16> + Clone + 'a {
         let (ascii, wide) = match self {
             Units::Ascii(b) => (b, &[][..]),
             Units::Wide(w) => (&[][..], w),

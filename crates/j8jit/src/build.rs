@@ -1984,7 +1984,7 @@ impl<'e> Builder<'e> {
                     let v = if f64::from(i) == *x && !(i == 0 && x.is_sign_negative()) { self.int(i) } else { self.emit(Op::F64(*x), Rep::F64) };
                     set_acc!(v);
                 }
-                Some(Constant::String(_)) => {
+                Some(Constant::String(_) | Constant::Utf16(_)) => {
                     let v = self.emit(Op::Call(Helper::Constant(act.id, u32::try_from(o[0]).unwrap_or(0)), Vec::new(), None), Rep::Word);
                     set_acc!(v);
                 }

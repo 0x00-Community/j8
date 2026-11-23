@@ -115,7 +115,7 @@ impl Builder {
     }
 
     pub fn constant(&mut self, c: Constant) -> usize {
-        let shared = matches!(c, Constant::Number(_) | Constant::String(_) | Constant::BigInt(_) | Constant::Function(_));
+        let shared = matches!(c, Constant::Number(_) | Constant::String(_) | Constant::Utf16(_) | Constant::BigInt(_) | Constant::Function(_));
         if shared && let Some(i) = self.constants.iter().position(|x| *x == c) {
             return i;
         }

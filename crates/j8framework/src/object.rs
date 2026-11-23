@@ -751,7 +751,7 @@ impl ObjectKind<'_> {
     }
 }
 
-pub use crate::text::{JsStr, Pieces, SmallStr, Units};
+pub use crate::text::{HiddenSurrogates, JsStr, Pieces, SmallStr, Units};
 
 #[derive(Collect)]
 #[collect(no_drop)]

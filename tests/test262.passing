@@ -57,6 +57,7 @@ annexB/built-ins/RegExp/prototype/compile/pattern-regexp-props.js
 annexB/built-ins/RegExp/prototype/compile/pattern-regexp-same.js
 annexB/built-ins/RegExp/prototype/compile/pattern-string-invalid-u.js
 annexB/built-ins/RegExp/prototype/compile/pattern-string-invalid.js
+annexB/built-ins/RegExp/prototype/compile/pattern-string-u.js
 annexB/built-ins/RegExp/prototype/compile/pattern-string.js
 annexB/built-ins/RegExp/prototype/compile/pattern-to-string-err.js
 annexB/built-ins/RegExp/prototype/compile/pattern-undefined.js
@@ -152,6 +153,7 @@ annexB/built-ins/String/prototype/substr/not-a-constructor.js
 annexB/built-ins/String/prototype/substr/start-and-length-as-numbers.js
 annexB/built-ins/String/prototype/substr/start-negative.js
 annexB/built-ins/String/prototype/substr/start-to-int-err.js
+annexB/built-ins/String/prototype/substr/surrogate-pairs.js
 annexB/built-ins/String/prototype/substr/this-non-obj-coerce.js
 annexB/built-ins/String/prototype/substr/this-to-str-err.js
 annexB/built-ins/String/prototype/sup/B.2.3.14.js
@@ -1252,6 +1254,7 @@ built-ins/Array/prototype/concat/Array.prototype.concat_spreadable-getter-throws
 built-ins/Array/prototype/concat/Array.prototype.concat_spreadable-number-wrapper.js
 built-ins/Array/prototype/concat/Array.prototype.concat_spreadable-reg-exp.js
 built-ins/Array/prototype/concat/Array.prototype.concat_spreadable-sparse-object.js
+built-ins/Array/prototype/concat/Array.prototype.concat_spreadable-string-wrapper.js
 built-ins/Array/prototype/concat/Array.prototype.concat_strict-arguments.js
 built-ins/Array/prototype/concat/S15.4.4.4_A1_T1.js
 built-ins/Array/prototype/concat/S15.4.4.4_A1_T2.js
@@ -6993,6 +6996,7 @@ built-ins/JSON/stringify/value-object-circular.js
 built-ins/JSON/stringify/value-object-proxy-revoked.js
 built-ins/JSON/stringify/value-primitive-top-level.js
 built-ins/JSON/stringify/value-string-escape-ascii.js
+built-ins/JSON/stringify/value-string-escape-unicode.js
 built-ins/JSON/stringify/value-symbol.js
 built-ins/JSON/stringify/value-tojson-abrupt.js
 built-ins/JSON/stringify/value-tojson-arguments.js
@@ -12782,6 +12786,10 @@ built-ins/RegExp/call_with_regexp_match_falsy.js
 built-ins/RegExp/call_with_regexp_not_same_constructor.js
 built-ins/RegExp/character-class-escape-non-whitespace-u180e.js
 built-ins/RegExp/character-class-escape-non-whitespace.js
+built-ins/RegExp/dotall/with-dotall-unicode.js
+built-ins/RegExp/dotall/with-dotall.js
+built-ins/RegExp/dotall/without-dotall-unicode.js
+built-ins/RegExp/dotall/without-dotall.js
 built-ins/RegExp/duplicate-flags.js
 built-ins/RegExp/duplicate-named-capturing-groups-syntax.js
 built-ins/RegExp/early-err-modifiers-code-point-repeat-i-1.js
@@ -12811,6 +12819,7 @@ built-ins/RegExp/escape/escaped-lineterminator.js
 built-ins/RegExp/escape/escaped-otherpunctuators.js
 built-ins/RegExp/escape/escaped-solidus-character-mixed.js
 built-ins/RegExp/escape/escaped-solidus-character-simple.js
+built-ins/RegExp/escape/escaped-surrogates.js
 built-ins/RegExp/escape/escaped-syntax-characters-mixed.js
 built-ins/RegExp/escape/escaped-syntax-characters-simple.js
 built-ins/RegExp/escape/escaped-utf16encodecodepoint.js
@@ -12880,6 +12889,7 @@ built-ins/RegExp/named-groups/groups-object.js
 built-ins/RegExp/named-groups/groups-properties.js
 built-ins/RegExp/named-groups/lookbehind.js
 built-ins/RegExp/named-groups/non-unicode-match.js
+built-ins/RegExp/named-groups/non-unicode-property-names-invalid.js
 built-ins/RegExp/named-groups/non-unicode-property-names-valid.js
 built-ins/RegExp/named-groups/non-unicode-property-names.js
 built-ins/RegExp/named-groups/non-unicode-references.js
@@ -12891,6 +12901,7 @@ built-ins/RegExp/named-groups/string-replace-numbered.js
 built-ins/RegExp/named-groups/string-replace-unclosed.js
 built-ins/RegExp/named-groups/string-replace-undefined.js
 built-ins/RegExp/named-groups/unicode-match.js
+built-ins/RegExp/named-groups/unicode-property-names-invalid.js
 built-ins/RegExp/named-groups/unicode-property-names-valid.js
 built-ins/RegExp/named-groups/unicode-property-names.js
 built-ins/RegExp/named-groups/unicode-references.js
@@ -13594,6 +13605,7 @@ built-ins/RegExp/prototype/Symbol.replace/arg-2-coerce-err.js
 built-ins/RegExp/prototype/Symbol.replace/arg-2-coerce.js
 built-ins/RegExp/prototype/Symbol.replace/coerce-lastindex-err.js
 built-ins/RegExp/prototype/Symbol.replace/coerce-lastindex.js
+built-ins/RegExp/prototype/Symbol.replace/coerce-unicode.js
 built-ins/RegExp/prototype/Symbol.replace/exec-err.js
 built-ins/RegExp/prototype/Symbol.replace/exec-invocation.js
 built-ins/RegExp/prototype/Symbol.replace/flags-tostring-error.js
@@ -13799,6 +13811,7 @@ built-ins/RegExp/prototype/exec/name.js
 built-ins/RegExp/prototype/exec/not-a-constructor.js
 built-ins/RegExp/prototype/exec/success-g-lastindex-no-access.js
 built-ins/RegExp/prototype/exec/success-lastindex-access.js
+built-ins/RegExp/prototype/exec/u-captured-value.js
 built-ins/RegExp/prototype/exec/u-lastindex-adv.js
 built-ins/RegExp/prototype/exec/u-lastindex-value.js
 built-ins/RegExp/prototype/exec/y-fail-lastindex-no-write.js
@@ -13979,6 +13992,7 @@ built-ins/RegExp/regexp-modifiers/add-dotAll-does-not-affect-alternatives-outsid
 built-ins/RegExp/regexp-modifiers/add-dotAll-does-not-affect-dotAll-property.js
 built-ins/RegExp/regexp-modifiers/add-dotAll-does-not-affect-ignoreCase-flag.js
 built-ins/RegExp/regexp-modifiers/add-dotAll-does-not-affect-multiline-flag.js
+built-ins/RegExp/regexp-modifiers/add-dotAll.js
 built-ins/RegExp/regexp-modifiers/add-ignoreCase-affects-backreferences.js
 built-ins/RegExp/regexp-modifiers/add-ignoreCase-affects-characterClasses.js
 built-ins/RegExp/regexp-modifiers/add-ignoreCase-affects-characterEscapes.js
@@ -13999,20 +14013,24 @@ built-ins/RegExp/regexp-modifiers/add-multiline-does-not-affect-ignoreCase-flag.
 built-ins/RegExp/regexp-modifiers/add-multiline-does-not-affect-multiline-property.js
 built-ins/RegExp/regexp-modifiers/add-multiline.js
 built-ins/RegExp/regexp-modifiers/add-remove-modifiers.js
+built-ins/RegExp/regexp-modifiers/changing-dotAll-flag-does-not-affect-dotAll-modifier.js
 built-ins/RegExp/regexp-modifiers/changing-ignoreCase-flag-does-not-affect-ignoreCase-modifier.js
 built-ins/RegExp/regexp-modifiers/changing-multiline-flag-does-not-affect-multiline-modifier.js
 built-ins/RegExp/regexp-modifiers/nested-add-remove-modifiers.js
+built-ins/RegExp/regexp-modifiers/nesting-add-dotAll-within-remove-dotAll.js
 built-ins/RegExp/regexp-modifiers/nesting-add-ignoreCase-within-remove-ignoreCase.js
 built-ins/RegExp/regexp-modifiers/nesting-add-multiline-within-remove-multiline.js
 built-ins/RegExp/regexp-modifiers/nesting-dotAll-does-not-affect-alternatives-outside.js
 built-ins/RegExp/regexp-modifiers/nesting-ignoreCase-does-not-affect-alternatives-outside.js
 built-ins/RegExp/regexp-modifiers/nesting-multiline-does-not-affect-alternatives-outside.js
+built-ins/RegExp/regexp-modifiers/nesting-remove-dotAll-within-add-dotAll.js
 built-ins/RegExp/regexp-modifiers/nesting-remove-ignoreCase-within-add-ignoreCase.js
 built-ins/RegExp/regexp-modifiers/nesting-remove-multiline-within-add-multiline.js
 built-ins/RegExp/regexp-modifiers/remove-dotAll-does-not-affect-alternatives-outside.js
 built-ins/RegExp/regexp-modifiers/remove-dotAll-does-not-affect-dotAll-property.js
 built-ins/RegExp/regexp-modifiers/remove-dotAll-does-not-affect-ignoreCase-flag.js
 built-ins/RegExp/regexp-modifiers/remove-dotAll-does-not-affect-multiline-flag.js
+built-ins/RegExp/regexp-modifiers/remove-dotAll.js
 built-ins/RegExp/regexp-modifiers/remove-ignoreCase-affects-backreferences.js
 built-ins/RegExp/regexp-modifiers/remove-ignoreCase-affects-characterClasses.js
 built-ins/RegExp/regexp-modifiers/remove-ignoreCase-affects-characterEscapes.js
@@ -14870,6 +14888,7 @@ built-ins/String/prototype/at/length.js
 built-ins/String/prototype/at/name.js
 built-ins/String/prototype/at/prop-desc.js
 built-ins/String/prototype/at/return-abrupt-from-this.js
+built-ins/String/prototype/at/returns-code-unit.js
 built-ins/String/prototype/at/returns-item-relative-index.js
 built-ins/String/prototype/at/returns-item.js
 built-ins/String/prototype/at/returns-undefined-for-out-of-range-index.js
@@ -14934,6 +14953,8 @@ built-ins/String/prototype/codePointAt/return-abrupt-from-symbol-pos-to-integer.
 built-ins/String/prototype/codePointAt/return-abrupt-from-this-as-symbol.js
 built-ins/String/prototype/codePointAt/return-abrupt-from-this.js
 built-ins/String/prototype/codePointAt/return-code-unit-coerced-position.js
+built-ins/String/prototype/codePointAt/return-first-code-unit.js
+built-ins/String/prototype/codePointAt/return-single-code-unit.js
 built-ins/String/prototype/codePointAt/return-utf16-decode.js
 built-ins/String/prototype/codePointAt/returns-undefined-on-position-equal-or-more-than-size.js
 built-ins/String/prototype/codePointAt/returns-undefined-on-position-less-than-zero.js
@@ -15069,6 +15090,7 @@ built-ins/String/prototype/isWellFormed/name.js
 built-ins/String/prototype/isWellFormed/not-a-constructor.js
 built-ins/String/prototype/isWellFormed/prop-desc.js
 built-ins/String/prototype/isWellFormed/return-abrupt-from-this.js
+built-ins/String/prototype/isWellFormed/returns-boolean.js
 built-ins/String/prototype/isWellFormed/to-string-primitive.js
 built-ins/String/prototype/isWellFormed/to-string.js
 built-ins/String/prototype/lastIndexOf/S15.5.4.8_A10.js
@@ -15154,6 +15176,7 @@ built-ins/String/prototype/match/invoke-builtin-match.js
 built-ins/String/prototype/match/length.js
 built-ins/String/prototype/match/name.js
 built-ins/String/prototype/match/not-a-constructor.js
+built-ins/String/prototype/match/regexp-prototype-match-v-u-flag.js
 built-ins/String/prototype/match/this-val-bool.js
 built-ins/String/prototype/match/this-val-obj.js
 built-ins/String/prototype/match/this-value-not-obj-coercible.js
@@ -15205,6 +15228,7 @@ built-ins/String/prototype/padEnd/function-length.js
 built-ins/String/prototype/padEnd/function-name.js
 built-ins/String/prototype/padEnd/function-property-descriptor.js
 built-ins/String/prototype/padEnd/max-length-not-greater-than-string.js
+built-ins/String/prototype/padEnd/normal-operation.js
 built-ins/String/prototype/padEnd/not-a-constructor.js
 built-ins/String/prototype/padEnd/observable-operations.js
 built-ins/String/prototype/padStart/exception-fill-string-symbol.js
@@ -15217,6 +15241,7 @@ built-ins/String/prototype/padStart/function-length.js
 built-ins/String/prototype/padStart/function-name.js
 built-ins/String/prototype/padStart/function-property-descriptor.js
 built-ins/String/prototype/padStart/max-length-not-greater-than-string.js
+built-ins/String/prototype/padStart/normal-operation.js
 built-ins/String/prototype/padStart/not-a-constructor.js
 built-ins/String/prototype/padStart/observable-operations.js
 built-ins/String/prototype/repeat/count-coerced-to-zero-returns-empty-string.js
@@ -15715,6 +15740,7 @@ built-ins/String/prototype/toWellFormed/name.js
 built-ins/String/prototype/toWellFormed/not-a-constructor.js
 built-ins/String/prototype/toWellFormed/prop-desc.js
 built-ins/String/prototype/toWellFormed/return-abrupt-from-this.js
+built-ins/String/prototype/toWellFormed/returns-well-formed-string.js
 built-ins/String/prototype/toWellFormed/to-string-primitive.js
 built-ins/String/prototype/toWellFormed/to-string.js
 built-ins/String/prototype/trim/15.5.4.20-0-1.js
@@ -15934,6 +15960,7 @@ built-ins/StringIteratorPrototype/Symbol.toStringTag.js
 built-ins/StringIteratorPrototype/ancestry.js
 built-ins/StringIteratorPrototype/next/length.js
 built-ins/StringIteratorPrototype/next/name.js
+built-ins/StringIteratorPrototype/next/next-iteration-surrogate-pairs.js
 built-ins/StringIteratorPrototype/next/next-iteration.js
 built-ins/StringIteratorPrototype/next/next-missing-internal-slots.js
 built-ins/Symbol/auto-boxing-non-strict.js
@@ -28101,6 +28128,7 @@ language/expressions/greater-than-or-equal/S11.8.4_A3.2_T1.2.js
 language/expressions/greater-than-or-equal/S11.8.4_A4.1.js
 language/expressions/greater-than-or-equal/S11.8.4_A4.10.js
 language/expressions/greater-than-or-equal/S11.8.4_A4.11.js
+language/expressions/greater-than-or-equal/S11.8.4_A4.12_T1.js
 language/expressions/greater-than-or-equal/S11.8.4_A4.12_T2.js
 language/expressions/greater-than-or-equal/S11.8.4_A4.2.js
 language/expressions/greater-than-or-equal/S11.8.4_A4.3.js
@@ -28147,6 +28175,7 @@ language/expressions/greater-than/S11.8.2_A3.2_T1.2.js
 language/expressions/greater-than/S11.8.2_A4.1.js
 language/expressions/greater-than/S11.8.2_A4.10.js
 language/expressions/greater-than/S11.8.2_A4.11.js
+language/expressions/greater-than/S11.8.2_A4.12_T1.js
 language/expressions/greater-than/S11.8.2_A4.12_T2.js
 language/expressions/greater-than/S11.8.2_A4.2.js
 language/expressions/greater-than/S11.8.2_A4.3.js
@@ -28346,6 +28375,7 @@ language/expressions/less-than-or-equal/S11.8.3_A3.2_T1.2.js
 language/expressions/less-than-or-equal/S11.8.3_A4.1.js
 language/expressions/less-than-or-equal/S11.8.3_A4.10.js
 language/expressions/less-than-or-equal/S11.8.3_A4.11.js
+language/expressions/less-than-or-equal/S11.8.3_A4.12_T1.js
 language/expressions/less-than-or-equal/S11.8.3_A4.12_T2.js
 language/expressions/less-than-or-equal/S11.8.3_A4.2.js
 language/expressions/less-than-or-equal/S11.8.3_A4.3.js
@@ -28388,6 +28418,7 @@ language/expressions/less-than/S11.8.1_A3.2_T1.2.js
 language/expressions/less-than/S11.8.1_A4.1.js
 language/expressions/less-than/S11.8.1_A4.10.js
 language/expressions/less-than/S11.8.1_A4.11.js
+language/expressions/less-than/S11.8.1_A4.12_T1.js
 language/expressions/less-than/S11.8.1_A4.12_T2.js
 language/expressions/less-than/S11.8.1_A4.2.js
 language/expressions/less-than/S11.8.1_A4.3.js
@@ -31530,6 +31561,7 @@ language/literals/regexp/named-groups/invalid-incomplete-groupname-without-group
 language/literals/regexp/named-groups/invalid-incomplete-groupname-without-group-3-u.js
 language/literals/regexp/named-groups/invalid-incomplete-groupname-without-group-u.js
 language/literals/regexp/named-groups/invalid-incomplete-groupname.js
+language/literals/regexp/named-groups/invalid-lone-surrogate-groupname.js
 language/literals/regexp/named-groups/invalid-non-id-continue-groupspecifier-4-u.js
 language/literals/regexp/named-groups/invalid-non-id-continue-groupspecifier-4.js
 language/literals/regexp/named-groups/invalid-non-id-continue-groupspecifier.js
@@ -31560,6 +31592,7 @@ language/literals/regexp/regexp-first-char-no-paragraph-separator.js
 language/literals/regexp/regexp-source-char-no-line-separator.js
 language/literals/regexp/regexp-source-char-no-paragraph-separator.js
 language/literals/regexp/u-astral-char-class-invert.js
+language/literals/regexp/u-astral.js
 language/literals/regexp/u-case-mapping.js
 language/literals/regexp/u-invalid-class-escape.js
 language/literals/regexp/u-invalid-extended-pattern-char.js
@@ -31580,8 +31613,10 @@ language/literals/regexp/u-invalid-range-lookbehind.js
 language/literals/regexp/u-invalid-range-negative-lookahead.js
 language/literals/regexp/u-invalid-range-negative-lookbehind.js
 language/literals/regexp/u-null-character-escape.js
+language/literals/regexp/u-surrogate-pairs-atom-char-class.js
 language/literals/regexp/u-surrogate-pairs-atom-dot.js
 language/literals/regexp/u-surrogate-pairs-atom-escape-char-class.js
+language/literals/regexp/u-surrogate-pairs-atom-escape-decimal.js
 language/literals/regexp/u-surrogate-pairs.js
 language/literals/regexp/u-unicode-esc-bounds.js
 language/literals/regexp/u-unicode-esc-non-hex.js
@@ -39121,6 +39156,7 @@ language/statements/for-of/set-contract.js
 language/statements/for-of/set-expand-contract.js
 language/statements/for-of/set-expand.js
 language/statements/for-of/set.js
+language/statements/for-of/string-astral-truncated.js
 language/statements/for-of/string-astral.js
 language/statements/for-of/string-bmp.js
 language/statements/for-of/throw-from-catch.js
@@ -41306,6 +41342,7 @@ staging/sm/Array/from_length_setter.js
 staging/sm/Array/from_mapping.js
 staging/sm/Array/from_primitive.js
 staging/sm/Array/from_proxy.js
+staging/sm/Array/from_string.js
 staging/sm/Array/from_surfaces.js
 staging/sm/Array/from_this.js
 staging/sm/Array/frozen-dense-array.js
@@ -41637,6 +41674,7 @@ staging/sm/JSON/stringify-replacer-array-edgecase-jsid-elements.js
 staging/sm/JSON/stringify-replacer-array-skipped-element.js
 staging/sm/JSON/stringify-replacer-with-array-indexes.js
 staging/sm/JSON/stringify-replacer.js
+staging/sm/JSON/stringify-special-escapes.js
 staging/sm/JSON/stringify-toJSON-arguments.js
 staging/sm/JSON/trailing-comma.js
 staging/sm/Map/NaN-as-key.js
@@ -41776,6 +41814,7 @@ staging/sm/RegExp/lastIndex-nonwritable.js
 staging/sm/RegExp/lastIndex-search.js
 staging/sm/RegExp/match-local-tolength-recompilation.js
 staging/sm/RegExp/match-this.js
+staging/sm/RegExp/match-trace.js
 staging/sm/RegExp/match.js
 staging/sm/RegExp/prototype.js
 staging/sm/RegExp/regress-576828.js
@@ -41791,6 +41830,7 @@ staging/sm/RegExp/replace-local-tolength-recompilation.js
 staging/sm/RegExp/replace-sticky-lastIndex.js
 staging/sm/RegExp/replace-sticky.js
 staging/sm/RegExp/replace-this.js
+staging/sm/RegExp/replace-trace.js
 staging/sm/RegExp/replace-twoBytes.js
 staging/sm/RegExp/replace.js
 staging/sm/RegExp/search-this.js
@@ -41804,18 +41844,30 @@ staging/sm/RegExp/split-limit.js
 staging/sm/RegExp/split-obj.js
 staging/sm/RegExp/split-prop-access.js
 staging/sm/RegExp/split-this.js
+staging/sm/RegExp/split-trace.js
 staging/sm/RegExp/split.js
 staging/sm/RegExp/sticky.js
 staging/sm/RegExp/test-emptyMatch.js
 staging/sm/RegExp/test-trailing.js
 staging/sm/RegExp/toString.js
+staging/sm/RegExp/unicode-back-reference.js
+staging/sm/RegExp/unicode-braced.js
+staging/sm/RegExp/unicode-character-class-escape.js
+staging/sm/RegExp/unicode-class-braced.js
+staging/sm/RegExp/unicode-class-empty.js
 staging/sm/RegExp/unicode-class-ignoreCase.js
+staging/sm/RegExp/unicode-class-lead-trail.js
+staging/sm/RegExp/unicode-class-negated.js
 staging/sm/RegExp/unicode-class-range.js
+staging/sm/RegExp/unicode-class-raw.js
 staging/sm/RegExp/unicode-disallow-extended.js
+staging/sm/RegExp/unicode-everything.js
 staging/sm/RegExp/unicode-ignoreCase-ascii.js
 staging/sm/RegExp/unicode-ignoreCase-negated.js
 staging/sm/RegExp/unicode-ignoreCase-word-boundary.js
 staging/sm/RegExp/unicode-ignoreCase.js
+staging/sm/RegExp/unicode-lead-trail.js
+staging/sm/RegExp/unicode-raw.js
 staging/sm/Set/difference.js
 staging/sm/Set/intersection.js
 staging/sm/Set/is-disjoint-from.js
@@ -41827,6 +41879,8 @@ staging/sm/String/15.5.4.11-01.js
 staging/sm/String/15.5.4.2.js
 staging/sm/String/15.5.4.7.js
 staging/sm/String/AdvanceStringIndex.js
+staging/sm/String/at.js
+staging/sm/String/codePointAt.js
 staging/sm/String/defaultvalue.js
 staging/sm/String/fromCodePoint.js
 staging/sm/String/internalUsage.js
@@ -41859,8 +41913,10 @@ staging/sm/String/split.js
 staging/sm/String/string-code-point-upper-lower-mapping.js
 staging/sm/String/string-pad-start-end.js
 staging/sm/String/string-space-trim.js
+staging/sm/String/string-upper-lower-mapping.js
 staging/sm/String/thisv-error.js
 staging/sm/String/two-length-nonlatin-indexOf.js
+staging/sm/String/unicode-braced.js
 staging/sm/Symbol/as-base-value.js
 staging/sm/Symbol/comparisons.js
 staging/sm/Symbol/constructor.js
@@ -41905,6 +41961,7 @@ staging/sm/TypedArray/from_constructor.js
 staging/sm/TypedArray/from_errors.js
 staging/sm/TypedArray/from_iterable.js
 staging/sm/TypedArray/from_mapping.js
+staging/sm/TypedArray/from_string.js
 staging/sm/TypedArray/from_surfaces.js
 staging/sm/TypedArray/from_this.js
 staging/sm/TypedArray/from_typedarray_fastpath_detached.js

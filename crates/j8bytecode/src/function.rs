@@ -7,6 +7,7 @@ use crate::{FeedbackSlotKind, FunctionKind, ScopeType, VariableMode};
 pub enum Constant {
     Number(f64),
     String(Box<str>),
+    Utf16(Box<[u16]>),
     BigInt(Box<str>),
     Function(u32),
     Scope(ScopeInfo),
@@ -25,6 +26,7 @@ impl PartialEq for Constant {
         match (self, o) {
             (Self::Number(a), Self::Number(b)) => a.to_bits() == b.to_bits(),
             (Self::String(a), Self::String(b)) | (Self::BigInt(a), Self::BigInt(b)) => a == b,
+            (Self::Utf16(a), Self::Utf16(b)) => a == b,
             (Self::Function(a), Self::Function(b)) | (Self::Offset(a), Self::Offset(b)) => a == b,
             _ => false,
         }

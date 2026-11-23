@@ -44,7 +44,7 @@ impl Texts {
             if let Some(c) = char::from_u32(u32::from(u)) {
                 return Ok(a.string(c.encode_utf8(&mut [0; 4])).into());
             }
-            return Ok(a.string(&String::from_utf16_lossy(&[u])).into());
+            return Ok(a.string_units(&[u]).into());
         }
         let mut units = Vec::with_capacity(args.len());
         for &v in args {
@@ -52,11 +52,11 @@ impl Texts {
             let u = j8framework::ElementKind::Uint16.encode(&j8framework::Element::Number(n));
             units.push(u16::from_le_bytes([u[0], u[1]]));
         }
-        Ok(a.string(&String::from_utf16_lossy(&units)).into())
+        Ok(a.string_units(&units).into())
     }
 
     fn from_code_point<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        let mut out = String::new();
+        let mut out: Vec<u16> = Vec::with_capacity(args.len());
         for &v in args {
             let n = a.to_number(v)?;
             if n != libm::trunc(n) || !(0.0..=MAX_CODE_POINT).contains(&n) {
@@ -65,9 +65,12 @@ impl Texts {
             }
             #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "checked to be within the code point range")]
             let cp = n as u32;
-            out.push(char::from_u32(cp).unwrap_or('\u{fffd}'));
+            match char::from_u32(cp) {
+                Some(c) => out.extend_from_slice(c.encode_utf16(&mut [0; 2])),
+                None => out.push(u16::try_from(cp).unwrap_or(0xFFFD)),
+            }
         }
-        Ok(a.string(&out).into())
+        Ok(a.string_units(&out).into())
     }
 
     fn raw<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
@@ -119,12 +122,15 @@ impl Texts {
     }
 
     fn is_well_formed<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        Self::this_string(a, this)?;
-        Ok(true.into())
+        Ok((!Self::this_string(a, this)?.lone_surrogates()).into())
     }
 
     fn to_well_formed<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, _: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
-        Ok(Self::this_string(a, this)?.into())
+        let s = Self::this_string(a, this)?;
+        if !s.lone_surrogates() {
+            return Ok(s.into());
+        }
+        Ok(a.string(s.as_str()).into())
     }
 
     fn locale_compare<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
@@ -174,7 +180,7 @@ impl Texts {
         let end = (start + len).clamp(start, size);
         #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "clamped to [0, size]")]
         let (s0, e0) = (start as usize, end as usize);
-        Ok(a.string(&String::from_utf16_lossy(&units[s0..e0])).into())
+        Ok(a.string_units(&units[s0..e0]).into())
     }
 
     fn html<'gc>(a: &mut Agent<'gc, '_>, this: Value<'gc>, args: &[Value<'gc>], tag: &str, attr: Option<&str>) -> Result<Value<'gc>, Error> {
@@ -521,6 +527,27 @@ impl Texts {
 
     fn decode<'gc>(a: &mut Agent<'gc, '_>, v: Value<'gc>, preserve: &str) -> Result<Value<'gc>, Error> {
         let s = a.to_string(v)?;
+        if !s.lone_surrogates() {
+            let text = Self::decode_text(a, s.as_str(), preserve)?;
+            return Ok(a.string(&text).into());
+        }
+        let mut out: Vec<u16> = Vec::new();
+        let mut run: Vec<u16> = Vec::new();
+        for c in char::decode_utf16(s.encode_utf16()) {
+            match c {
+                Ok(c) => run.extend_from_slice(c.encode_utf16(&mut [0; 2])),
+                Err(e) => {
+                    out.extend(Self::decode_text(a, &String::from_utf16_lossy(&run), preserve)?.encode_utf16());
+                    run.clear();
+                    out.push(e.unpaired_surrogate());
+                }
+            }
+        }
+        out.extend(Self::decode_text(a, &String::from_utf16_lossy(&run), preserve)?.encode_utf16());
+        Ok(a.string_units(&out).into())
+    }
+
+    fn decode_text(a: &mut Agent<'_, '_>, s: &str, preserve: &str) -> Result<String, Error> {
         let b = s.as_bytes();
         let mut out: Vec<u8> = Vec::new();
         let mut i = 0;
@@ -558,8 +585,7 @@ impl Texts {
             out.extend_from_slice(decoded.as_bytes());
             i += 3 * n;
         }
-        let text = String::from_utf8(out).map_err(|_| Self::uri_error(a))?;
-        Ok(a.string(&text).into())
+        String::from_utf8(out).map_err(|_| Self::uri_error(a))
     }
 
     fn encode_uri<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
@@ -623,7 +649,7 @@ impl Texts {
             out.push(c);
             i += 1;
         }
-        Ok(a.string(&String::from_utf16_lossy(&out)).into())
+        Ok(a.string_units(&out).into())
     }
 }
 

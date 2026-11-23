@@ -118,17 +118,19 @@ impl<'a> Compiler<'a, '_> {
         }
     }
 
-    pub fn string_const(&mut self, s: Option<&str>, span: Span) -> Result<usize, Error> {
-        let s = s.ok_or_else(|| self.unsupported(span, "lone surrogates"))?;
-        Ok(self.constant(Constant::String(s.into())))
+    pub fn string_const(&mut self, s: oxc_str::JSStr<'_>) -> usize {
+        match s.as_str() {
+            Some(t) => match j8framework::HiddenSurrogates::reveal(t).filter(|_| self.hidden) {
+                Some(units) => self.constant(Constant::Utf16(units.into())),
+                None => self.constant(Constant::String(t.into())),
+            },
+            None => self.constant(Constant::Utf16(s.encode_utf16().collect())),
+        }
     }
 
     fn quasi(&mut self, q: &TemplateElement<'a>) -> Result<usize, Error> {
-        let cooked = match q.value.cooked {
-            Some(c) => c.as_str(),
-            None => None,
-        };
-        self.string_const(cooked, q.span)
+        let cooked = q.value.cooked.ok_or_else(|| self.unsupported(q.span, "a template with an invalid escape"))?;
+        Ok(self.string_const(cooked))
     }
 
     fn literal_value(e: &Expression<'_>) -> Option<LiteralValue> {
@@ -159,7 +161,7 @@ impl<'a> Compiler<'a, '_> {
         match e {
             Expression::NumericLiteral(n) => self.b().load_number(n.value),
             Expression::StringLiteral(s) => {
-                let k = self.string_const(s.value.as_str(), s.span)?;
+                let k = self.string_const(s.value);
                 self.b().load_constant(k);
             }
             Expression::BooleanLiteral(b) => self.b().load_bool(b.value),
@@ -168,7 +170,11 @@ impl<'a> Compiler<'a, '_> {
                 self.b().load_constant(k);
             }
             Expression::RegExpLiteral(r) => {
-                let pattern = self.name(&r.regex.pattern.text);
+                let text = &r.regex.pattern.text;
+                let pattern = match j8framework::HiddenSurrogates::reveal(text).filter(|_| self.hidden) {
+                    Some(units) => self.constant(Constant::Utf16(units.into())),
+                    None => self.name(text),
+                };
                 let text = r.regex.flags.to_string();
                 let flags = REGEXP_FLAGS.iter().filter(|(c, _)| text.contains(*c)).fold(0, |a, (_, b)| a | b);
                 self.b().create_reg_exp_literal(pattern, flags);

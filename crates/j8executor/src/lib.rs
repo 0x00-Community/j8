@@ -1312,6 +1312,7 @@ impl Executor {
         match c {
             Constant::Number(x) => Value::Number(*x),
             Constant::String(s) => a.string(s).into(),
+            Constant::Utf16(u) => a.string_units(u).into(),
             Constant::BigInt(digits) => a.bigint(Agent::parse_bigint(digits).unwrap_or_default()),
             Constant::AsyncIteratorSymbol => a.realm.symbols.async_iterator.into(),
             _ => Value::Undefined,
@@ -1756,10 +1757,14 @@ impl Executor {
             }
             B::CreateRegExpLiteral => {
                 let pattern = Self::name_at(loaded, o[0]);
+                let lone = match loaded.func.bytecode.constants.get(usize::try_from(o[0]).unwrap_or(usize::MAX)) {
+                    Some(Constant::Utf16(u)) => Some(u),
+                    _ => None,
+                };
                 let bits = u16::try_from(o[2]).unwrap_or(0);
-                *acc = match a.realm.regexp_literal.get().0 {
-                    Some(literal) => literal(a, pattern, bits)?,
-                    None => {
+                *acc = match (a.realm.regexp_literal.get().0, lone) {
+                    (Some(literal), None) => literal(a, pattern, bits)?,
+                    (_, lone) => {
                         let mut flags = [0u8; REGEXP_FLAGS.len()];
                         let mut n = 0;
                         for (c, b) in REGEXP_FLAGS {
@@ -1769,7 +1774,11 @@ impl Executor {
                             }
                         }
                         let flags = core::str::from_utf8(flags.get(..n).unwrap_or_default()).unwrap_or_default();
-                        let (p, fl) = (a.string(pattern), a.string(flags));
+                        let p = match lone {
+                            Some(u) => a.string_units(u),
+                            None => a.string(pattern),
+                        };
+                        let fl = a.string(flags);
                         a.call(a.realm.regexp_ctor.into(), Value::Undefined, &[p.into(), fl.into()])?
                     }
                 };
@@ -2235,8 +2244,8 @@ impl Executor {
                     return Ok(callee);
                 }
                 let strict = arg(3).as_number().is_some_and(|x| x != 0.0);
-                let src = alloc::string::String::from(&**s);
-                let module = match Module::compile_direct(&j8framework::Source { text: &src, file: EVAL_FILE }, strict) {
+                let src = s.source_text();
+                let module = match Module::compile_direct(&j8framework::Source { text: &src, file: EVAL_FILE }, strict, s.lone_surrogates()) {
                     Ok(m) => m,
                     Err(Error::Syntax(m)) => return Err(a.throw(ErrorKind::Syntax, &m)),
                     Err(e) => return Err(e),
@@ -2394,9 +2403,9 @@ impl<'gc> Invoke<'gc> for Executor {
         loaded.constructs || loaded.class_constructor
     }
 
-    fn eval_code(&self, a: &mut Agent<'gc, '_>, src: &str, kind: j8framework::CodeKind) -> Result<Value<'gc>, Error> {
+    fn eval_code(&self, a: &mut Agent<'gc, '_>, src: &str, kind: j8framework::CodeKind, hidden: bool) -> Result<Value<'gc>, Error> {
         let file = Executor::source_url(src).unwrap_or(EVAL_FILE);
-        let module = match Module::compile(&j8framework::Source { text: src, file }, kind) {
+        let module = match Module::compile_eval(&j8framework::Source { text: src, file }, kind, hidden) {
             Ok(m) => m,
             Err(Error::Syntax(m)) => return Err(a.throw(ErrorKind::Syntax, &m)),
             Err(e) => return Err(e),

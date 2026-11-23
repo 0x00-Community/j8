@@ -325,6 +325,13 @@ struct Writer<'gc> {
 }
 
 impl<'gc> Writer<'gc> {
+    fn quote_string(out: &mut String, s: &j8framework::JsStr<'_>) {
+        match s.wide().filter(|_| s.lone_surrogates()) {
+            Some(units) => quote_units(out, units),
+            None => Self::quote(out, s.as_str()),
+        }
+    }
+
     fn quote(out: &mut String, s: &str) {
         let bytes = s.as_bytes();
         if bytes.is_empty() {
@@ -478,7 +485,7 @@ impl<'gc> Writer<'gc> {
             ValueKind::Number(x) if !x.is_finite() => out.push_str("null"),
             ValueKind::Bool(true) => out.push_str("true"),
             ValueKind::Bool(false) => out.push_str("false"),
-            ValueKind::String(s) => Self::quote(out, j8framework::Gc::get(s).as_str()),
+            ValueKind::String(s) => Self::quote_string(out, j8framework::Gc::get(s)),
             ValueKind::Number(x) => push_number(out, x),
             ValueKind::BigInt(_) => return Err(a.throw(ErrorKind::Type, "Do not know how to serialize a BigInt")),
             ValueKind::Object(o) if !o.is_callable() => {
@@ -486,7 +493,7 @@ impl<'gc> Writer<'gc> {
                     return Err(a.throw(ErrorKind::Type, "Converting circular structure to JSON"));
                 }
                 self.stack.push(o);
-                if o.is_array() { self.array(a, o, out)? } else { self.object(a, o, out)? }
+                if a.is_array(o.into())? { self.array(a, o, out)? } else { self.object(a, o, out)? }
                 self.stack.pop();
             }
             _ => return Ok(false),
@@ -820,7 +827,7 @@ impl Json {
     fn stringify<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
         let (replacer, allow) = match args.at(1).kind() {
             f if a.is_callable(Value::from(f)) => (Some(Value::from(f)), None),
-            ValueKind::Object(o) if o.is_array() => {
+            ValueKind::Object(o) if a.is_array(o.into())? => {
                 let items = a.to_list(Value::Object(o))?;
                 let mut keys: Vec<JsString<'gc>> = Vec::new();
                 for item in items {
@@ -887,7 +894,7 @@ impl Writer<'_> {
     fn push_plain(out: &mut String, v: Value<'_>) {
         match v.kind() {
             ValueKind::Number(x) if x.is_finite() => push_number(out, x),
-            ValueKind::String(s) => Self::quote(out, j8framework::Gc::get(s).as_str()),
+            ValueKind::String(s) => Self::quote_string(out, j8framework::Gc::get(s)),
             ValueKind::Bool(true) => out.push_str("true"),
             ValueKind::Bool(false) => out.push_str("false"),
             _ => out.push_str("null"),
@@ -979,6 +986,32 @@ fn quote_from(out: &mut String, s: &str, mut i: usize) {
         from = i;
     }
     out.push_str(&s[from..]);
+    out.push('"');
+}
+
+fn quote_units(out: &mut String, units: &[u16]) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    out.push('"');
+    for c in char::decode_utf16(units.iter().copied()) {
+        match c {
+            Ok('"') => out.push_str("\\\""),
+            Ok('\\') => out.push_str("\\\\"),
+            Ok('\u{8}') => out.push_str("\\b"),
+            Ok('\u{c}') => out.push_str("\\f"),
+            Ok('\n') => out.push_str("\\n"),
+            Ok('\r') => out.push_str("\\r"),
+            Ok('\t') => out.push_str("\\t"),
+            Ok(c) if u32::from(c) < 0x20 => push_u00(out, u8::try_from(c).unwrap_or_default()),
+            Ok(c) => out.push(c),
+            Err(e) => {
+                let u = e.unpaired_surrogate();
+                out.push_str("\\u");
+                for shift in [12, 8, 4, 0] {
+                    out.push(char::from(HEX[usize::from(u >> shift & 0xf)]));
+                }
+            }
+        }
+    }
     out.push('"');
 }
 

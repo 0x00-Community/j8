@@ -46,7 +46,7 @@ pub trait Invoke<'gc> {
 
     fn construct(&self, agent: &mut Agent<'gc, '_>, callee: Value<'gc>, args: &[Value<'gc>], new_target: Value<'gc>) -> Result<Value<'gc>, Error>;
 
-    fn eval_code(&self, agent: &mut Agent<'gc, '_>, src: &str, kind: CodeKind) -> Result<Value<'gc>, Error>;
+    fn eval_code(&self, agent: &mut Agent<'gc, '_>, src: &str, kind: CodeKind, hidden: bool) -> Result<Value<'gc>, Error>;
     fn constructs(&self, closure: &crate::Closure<'gc>) -> bool;
 
     fn resume(&self, agent: &mut Agent<'gc, '_>, coroutine: crate::JsObject<'gc>, mode: Resume, value: Value<'gc>) -> Result<Step<'gc>, Error>;
@@ -176,8 +176,12 @@ impl<'gc> Agent<'gc, '_> {
     }
 
     pub fn eval_code(&mut self, src: &str, kind: CodeKind) -> Result<Value<'gc>, Error> {
+        self.eval_text(src, kind, false)
+    }
+
+    pub fn eval_text(&mut self, src: &str, kind: CodeKind, hidden: bool) -> Result<Value<'gc>, Error> {
         let invoke = self.invoke;
-        invoke.eval_code(self, src, kind)
+        invoke.eval_code(self, src, kind, hidden)
     }
 
     pub fn resume(&mut self, coroutine: crate::JsObject<'gc>, mode: Resume, value: Value<'gc>) -> Result<Step<'gc>, Error> {
