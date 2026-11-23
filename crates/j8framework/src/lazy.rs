@@ -22,7 +22,7 @@ impl Lazy {
     pub fn resolve<'gc>(self, holder: &Object<'gc>, mc: &Mutation<'gc>) -> Value<'gc> {
         let Some(info) = holder.closure().and_then(|c| c.code).map(|c| unsafe { c.info() }) else { return Value::Undefined };
         match self {
-            Self::FunctionName => Value::String(mc.alloc(JsStr::from(info.name.clone()))),
+            Self::FunctionName => Value::String(JsStr::alloc(mc, &info.name)),
         }
     }
 }

@@ -634,7 +634,7 @@ impl Regexps {
             found.map(|r| Self::splice(text, r, repl))
         });
         match buf {
-            Some(buf) => a.string_from(buf, true).into(),
+            Some(buf) => a.string_from(&buf, true).into(),
             None => s.into(),
         }
     }
@@ -1313,7 +1313,7 @@ impl Regexps {
 
     fn replace_gaps<'gc>(a: &Agent<'gc, '_>, text: &str, repl: &str, all: bool) -> Value<'gc> {
         if !all {
-            return a.string_from(Self::splice(text, 0..0, repl), true).into();
+            return a.string_from(&Self::splice(text, 0..0, repl), true).into();
         }
         let buf = SmallStr::build(repl.len() * (text.len() + 1) + text.len(), |out| {
             for i in 0..text.len() {
@@ -1322,7 +1322,7 @@ impl Regexps {
             }
             out.push(repl);
         });
-        a.string_from(buf, true).into()
+        a.string_from(&buf, true).into()
     }
 
     fn replace_ascii<'gc>(a: &Agent<'gc, '_>, s: JsString<'gc>, needle: &str, repl: &str, all: bool) -> Value<'gc> {
@@ -1335,7 +1335,7 @@ impl Regexps {
         }
         let buf = if all { Self::swap(text, needle, repl) } else { Self::seek(text, needle, 0).map(|p| Self::splice(text, p..p + needle.len(), repl)) };
         match buf {
-            Some(buf) => a.string_from(buf, true).into(),
+            Some(buf) => a.string_from(&buf, true).into(),
             None => s.into(),
         }
     }

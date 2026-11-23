@@ -478,7 +478,7 @@ impl<'gc> Writer<'gc> {
             ValueKind::Number(x) if !x.is_finite() => out.push_str("null"),
             ValueKind::Bool(true) => out.push_str("true"),
             ValueKind::Bool(false) => out.push_str("false"),
-            ValueKind::String(s) => Self::quote(out, j8framework::Gc::get(s).text()),
+            ValueKind::String(s) => Self::quote(out, j8framework::Gc::get(s).as_str()),
             ValueKind::Number(x) => push_number(out, x),
             ValueKind::BigInt(_) => return Err(a.throw(ErrorKind::Type, "Do not know how to serialize a BigInt")),
             ValueKind::Object(o) if !o.is_callable() => {
@@ -531,7 +531,7 @@ impl<'gc> Writer<'gc> {
     fn object_allow(&mut self, a: &mut Agent<'gc, '_>, o: JsObject<'gc>, out: &mut String, first: &mut bool) -> Result<(), Error> {
         let keys = self.allow.clone().unwrap_or_default();
         for k in keys {
-            let text = k.text().clone();
+            let text = j8framework::SmallStr::from(k.as_str());
             self.one(a, o.into(), &text, None, out, first)?;
         }
         Ok(())
@@ -704,7 +704,7 @@ impl<'gc> Writer<'gc> {
             .iter()
             .map(|v| match v.kind() {
                 ValueKind::Number(x) if x.is_finite() => Part::Number(x),
-                ValueKind::String(s) => Part::Text(j8framework::Gc::get(s).text()),
+                ValueKind::String(s) => Part::Text(j8framework::Gc::get(s).as_str()),
                 ValueKind::Bool(true) => Part::Raw("true"),
                 ValueKind::Bool(false) => Part::Raw("false"),
                 _ => Part::Raw("null"),
@@ -887,7 +887,7 @@ impl Writer<'_> {
     fn push_plain(out: &mut String, v: Value<'_>) {
         match v.kind() {
             ValueKind::Number(x) if x.is_finite() => push_number(out, x),
-            ValueKind::String(s) => Self::quote(out, j8framework::Gc::get(s).text()),
+            ValueKind::String(s) => Self::quote(out, j8framework::Gc::get(s).as_str()),
             ValueKind::Bool(true) => out.push_str("true"),
             ValueKind::Bool(false) => out.push_str("false"),
             _ => out.push_str("null"),

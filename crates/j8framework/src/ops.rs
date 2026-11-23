@@ -275,22 +275,15 @@ impl<'gc> Agent<'gc, '_> {
     }
 
     pub fn string(&self, s: &str) -> JsString<'gc> {
-        self.mc.alloc(crate::JsStr::from(s))
+        crate::JsStr::alloc(self.mc, s)
     }
 
-    pub fn string_from(&self, text: crate::SmallStr, ascii: bool) -> JsString<'gc> {
-        let s = if ascii { crate::JsStr::from_ascii(text) } else { crate::JsStr::from(text) };
-        self.mc.alloc(s)
+    pub fn string_from(&self, text: &str, ascii: bool) -> JsString<'gc> {
+        crate::JsStr::alloc_known(self.mc, text, ascii)
     }
 
     pub fn piece(&self, of: JsString<'gc>, piece: &str) -> JsString<'gc> {
-        if core::ptr::eq(piece, of.text().as_str()) {
-            return of;
-        }
-        match of.text().piece(piece) {
-            Some(t) => self.mc.alloc(crate::JsStr::from(t)),
-            None => self.string(piece),
-        }
+        crate::JsStr::piece(self.mc, of, piece)
     }
 
     pub fn object(&self) -> JsObject<'gc> {
@@ -338,7 +331,7 @@ impl<'gc> Agent<'gc, '_> {
             ValueKind::Undefined | ValueKind::Null | ValueKind::Uninit => false,
             ValueKind::Bool(b) => b,
             ValueKind::Number(x) => !(x == 0.0 || x.is_nan()),
-            ValueKind::String(s) => s.text().byte_len() != 0,
+            ValueKind::String(s) => s.byte_len() != 0,
             ValueKind::BigInt(b) => !b.0.is_zero(),
             ValueKind::Symbol(_) | ValueKind::Object(_) => true,
         }
@@ -400,9 +393,9 @@ impl<'gc> Agent<'gc, '_> {
 
     pub fn text_of(&mut self, v: Value<'gc>) -> Result<crate::SmallStr, Error> {
         Ok(match v.kind() {
-            ValueKind::String(s) => s.text().clone(),
+            ValueKind::String(s) => crate::SmallStr::from(s.as_str()),
             ValueKind::Number(x) => number_text(x),
-            _ => self.to_string(v)?.text().clone(),
+            _ => crate::SmallStr::from(self.to_string(v)?.as_str()),
         })
     }
 
@@ -413,7 +406,7 @@ impl<'gc> Agent<'gc, '_> {
             ValueKind::Null => self.string("null"),
             ValueKind::Bool(true) => self.string("true"),
             ValueKind::Bool(false) => self.string("false"),
-            ValueKind::Number(x) => self.mc.alloc(crate::JsStr::from(number_text(x))),
+            ValueKind::Number(x) => crate::JsStr::alloc_known(self.mc, &number_text(x), true),
             ValueKind::Symbol(_) => return Err(self.throw(ErrorKind::Type, "Cannot convert a Symbol value to a string")),
             ValueKind::BigInt(b) => self.string(&format!("{}", b.0)),
             ValueKind::Object(_) => {
@@ -447,8 +440,8 @@ impl<'gc> Agent<'gc, '_> {
         let (l, r) = if op == BinaryOp::Add {
             let (l, r) = (self.to_primitive(lhs, Hint::Default)?, self.to_primitive(rhs, Hint::Default)?);
             if matches!(l.kind(), ValueKind::String(_)) || matches!(r.kind(), ValueKind::String(_)) {
-                let (a, b) = (self.text_of(l)?, self.text_of(r)?);
-                return Ok(Value::String(self.mc.alloc(crate::JsStr::from(crate::SmallStr::concat(&a, &b)))));
+                let (a, b) = (self.to_string(l)?, self.to_string(r)?);
+                return Ok(Value::String(crate::JsStr::concat(self.mc, a, b)));
             }
             (l, r)
         } else {
