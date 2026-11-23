@@ -93,6 +93,7 @@ pub struct ContextName {
     pub constant: bool,
     pub lexical: bool,
     pub parameter: Option<u16>,
+    pub function_name: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

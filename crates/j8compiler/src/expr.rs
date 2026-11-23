@@ -708,8 +708,8 @@ impl<'a> Compiler<'a, '_> {
         let mut done = Label::default();
         self.b().ldar(pair.first);
         self.b().jump(Bytecode::JumpIfTrue, &mut done);
-        self.b().raw(Bytecode::ThrowIfNotSuperConstructor, &[i32::from(pair.at(1)).into()]);
         let (args, spread) = self.argument_list(&c.arguments, None)?;
+        self.b().raw(Bytecode::ThrowIfNotSuperConstructor, &[i32::from(pair.at(1)).into()]);
         match spread {
             Spread::Array => self.reflect(NativeContextIndex::ReflectConstruct, &[pair.at(1), args.first, new_target]),
             Spread::Last => {
@@ -896,6 +896,15 @@ impl<'a> Compiler<'a, '_> {
                 self.optional(p.optional, p.span)?;
                 self.private_get(r, Hidden::private(self.alloc, &p.field));
                 Some(r)
+            }
+            Expression::Identifier(id) if id.name != "eval" && matches!(self.resolve(id.name.as_str()).place, Place::Lookup(_)) => {
+                let name = self.temp();
+                self.b().load_string(id.name.as_str());
+                self.b().star(name);
+                let pair = self.b().new_register_list(2);
+                self.b().call_runtime_for_pair(Runtime::LoadLookupSlotForCall, RegisterList { first: name, count: 1 }, pair.first);
+                self.b().ldar(pair.first);
+                Some(pair.at(1))
             }
             f => {
                 self.expr(f)?;
@@ -1283,6 +1292,9 @@ impl<'a> Compiler<'a, '_> {
     }
 
     fn delete(&mut self, e: &'a Expression<'a>) -> Result<(), Error> {
+        if let Expression::ParenthesizedExpression(p) = e {
+            return self.delete(&p.expression);
+        }
         let strict = self.strict_here();
         match e {
             Expression::StaticMemberExpression(m) if matches!(m.object, Expression::Super(_)) => {
@@ -1448,14 +1460,15 @@ impl<'a> Compiler<'a, '_> {
                 (Some(name), false) if !p.method => self.b().define_named_own(obj, name),
                 _ => {
                     let v = self.temp();
+                    let key = self.temp();
                     if p.method || self.static_name(&p.key, p.computed).is_some() {
                         self.b().star(v);
+                        self.property_key_into(&p.key, p.computed, key)?;
                     } else {
+                        self.property_key_into(&p.key, p.computed, key)?;
                         self.expr(&p.value)?;
                         self.b().star(v);
                     }
-                    let key = self.temp();
-                    self.property_key_into(&p.key, p.computed, key)?;
                     self.b().ldar(v);
                     self.b().define_keyed_own_in_literal(obj, key, 0);
                     self.release(v);

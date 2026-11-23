@@ -22,11 +22,14 @@ impl<'gc> Agent<'gc, '_> {
         }
     }
 
-    fn super_base(&mut self, home: Value<'gc>, key: &PropertyKey<'gc>) -> Result<JsObject<'gc>, Error> {
-        let base = match home.as_object() {
-            Some(h) => self.get_prototype_of(h)?,
-            None => None,
-        };
+    fn super_proto(&mut self, home: Value<'gc>) -> Result<Option<JsObject<'gc>>, Error> {
+        match home.as_object() {
+            Some(h) => self.get_prototype_of(h),
+            None => Ok(None),
+        }
+    }
+
+    fn super_base(&mut self, base: Option<JsObject<'gc>>, key: &PropertyKey<'gc>) -> Result<JsObject<'gc>, Error> {
         base.ok_or_else(|| {
             let what = match key {
                 PropertyKey::String(s) => alloc::string::String::from(&***s),
@@ -37,8 +40,9 @@ impl<'gc> Agent<'gc, '_> {
     }
 
     pub fn super_get(&mut self, home: Value<'gc>, key: Value<'gc>, receiver: Value<'gc>) -> Result<Value<'gc>, Error> {
+        let proto = self.super_proto(home)?;
         let k = self.to_property_key(key)?;
-        let base = self.super_base(home, &k)?;
+        let base = self.super_base(proto, &k)?;
         match k {
             PropertyKey::String(s) => self.get_key(base.into(), Key::Str(&s), receiver),
             PropertyKey::Symbol(s) => self.get_key(base.into(), Key::Sym(s), receiver),
@@ -46,8 +50,9 @@ impl<'gc> Agent<'gc, '_> {
     }
 
     pub fn super_set(&mut self, home: Value<'gc>, key: Value<'gc>, value: Value<'gc>, receiver: Value<'gc>) -> Result<(), Error> {
+        let proto = self.super_proto(home)?;
         let k = self.to_property_key(key)?;
-        let base = self.super_base(home, &k)?;
+        let base = self.super_base(proto, &k)?;
         let done = match k {
             PropertyKey::String(s) => self.set_key(base.into(), Key::Str(&s), value, receiver)?,
             PropertyKey::Symbol(s) => self.set_key(base.into(), Key::Sym(s), value, receiver)?,

@@ -48,7 +48,39 @@ pub struct ScopeInfo {
 pub struct ContextVariable {
     pub name: Box<str>,
     pub mode: VariableMode,
-    pub parameter: Option<u16>,
+    pub role: VariableRole,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(i32)]
+pub enum EvalDeclaration {
+    Var = 1,
+    Function = 2,
+}
+
+impl TryFrom<i32> for EvalDeclaration {
+    type Error = i32;
+
+    fn try_from(v: i32) -> Result<Self, i32> {
+        match v {
+            1 => Ok(EvalDeclaration::Var),
+            2 => Ok(EvalDeclaration::Function),
+            v => Err(v),
+        }
+    }
+}
+
+impl From<EvalDeclaration> for i32 {
+    fn from(d: EvalDeclaration) -> i32 {
+        d as i32
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VariableRole {
+    Local,
+    Parameter(u16),
+    FunctionName,
 }
 
 pub struct Context;

@@ -7,6 +7,9 @@ struct Iters;
 
 impl Iters {
     fn symbol<'gc>(a: &mut Agent<'gc, '_>, _: Value<'gc>, args: &[Value<'gc>]) -> Result<Value<'gc>, Error> {
+        if a.new_target != Value::Undefined {
+            return Err(a.throw(ErrorKind::Type, "Symbol is not a constructor"));
+        }
         let description = match args.at(0).kind() {
             ValueKind::Undefined => None,
             d => Some((&**a.to_string(Value::from(d))?).into()),
@@ -113,7 +116,6 @@ impl Installer<'_, '_> {
         let sym = r.symbols;
         let proto = r.symbol_proto;
         let ctor = self.constructor("Symbol", Iters::symbol, proto, 0);
-        self.not_constructor(ctor);
         for (name, s) in sym.all() {
             self.set(ctor, name, Value::Symbol(s));
         }

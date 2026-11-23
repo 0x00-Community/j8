@@ -9,7 +9,7 @@ use j8framework::{CodeKind, CompareOp, Error, ImportEntry, ImportName, ModuleInf
 
 use crate::builder::{Builder, JumpTable, Label, RegisterList};
 use crate::scope::{Decl, DeclKind, Decls, Hidden, Key, Resolver, NEW_TARGET, THIS};
-use j8bytecode::{Bytecode, ClassBoilerplate, ClassMember, Constant, Context, ContextVariable, MemberKind, CreateClosureFlags, FunctionKind, GlobalDeclaration, Module, Register, Runtime, ScopeInfo, ScopeType, SharedFunction, VariableMode};
+use j8bytecode::{Bytecode, ClassBoilerplate, ClassMember, Constant, Context, ContextVariable, MemberKind, CreateClosureFlags, FunctionKind, GlobalDeclaration, Module, Register, Runtime, ScopeInfo, ScopeType, SharedFunction, VariableMode, VariableRole, EvalDeclaration};
 
 const COMPLETION_THROW: i32 = j8bytecode::ContinuationToken::RETHROW;
 
@@ -720,14 +720,15 @@ impl<'a> Compiler<'a, '_> {
                 slots += 1;
                 let mode = match d.kind {
                     DeclKind::Let => VariableMode::Let,
-                    DeclKind::Const => VariableMode::Const,
+                    DeclKind::Const | DeclKind::SelfName => VariableMode::Const,
                     _ => VariableMode::Var,
                 };
-                let parameter = match d.kind {
-                    DeclKind::Param(i) => Some(i),
-                    _ => None,
+                let role = match d.kind {
+                    DeclKind::Param(i) => VariableRole::Parameter(i),
+                    DeclKind::SelfName => VariableRole::FunctionName,
+                    _ => VariableRole::Local,
                 };
-                variables.push(ContextVariable { name: d.name.into(), mode, parameter });
+                variables.push(ContextVariable { name: d.name.into(), mode, role });
                 Binding::Context(Context::MIN_SLOTS + slots - 1)
             } else {
                 match d.kind {
@@ -1057,7 +1058,10 @@ impl<'a> Compiler<'a, '_> {
             self.instance_init(this);
             self.release(this);
         }
-        if let Some(p) = params {
+        let async_function = flavor.asynchronous && !flavor.generator;
+        if let Some(p) = params
+            && !async_function
+        {
             self.frame().prologue = true;
             self.prologue(p)?;
             self.frame().prologue = false;
@@ -1091,7 +1095,14 @@ impl<'a> Compiler<'a, '_> {
             })?;
         } else if flavor.asynchronous {
             self.generator_object(Runtime::InlineAsyncFunctionEnter);
-            self.try_catch(j8bytecode::CatchPrediction::AsyncAwait, |c| c.function_body(body), |c, _| {
+            self.try_catch(j8bytecode::CatchPrediction::AsyncAwait, |c| {
+                if let Some(p) = params {
+                    c.frame().prologue = true;
+                    c.prologue(p)?;
+                    c.frame().prologue = false;
+                }
+                c.function_body(body)
+            }, |c, _| {
                 let g = c.frame().generator.expect("a generator register");
                 let args = c.b().new_register_list(2);
                 c.b().mov(g, args.first);
@@ -1363,6 +1374,8 @@ impl<'a> Compiler<'a, '_> {
         let mut end = Label::default();
         self.b().ldar(Register(rec.0 + 2));
         self.b().jump(Bytecode::JumpIfTrue, &mut end);
+        self.b().load_bool(true);
+        self.b().star(Register(rec.0 + 2));
         self.b().get_named(rec, "return");
         self.b().jump(Bytecode::JumpIfUndefinedOrNull, &mut end);
         let m = self.temp();
@@ -2462,6 +2475,20 @@ impl<'a> Compiler<'a, '_> {
             }
             if !strict {
                 for d in &globals.0 {
+                    let check = match d.kind {
+                        DeclKind::Var => EvalDeclaration::Var,
+                        DeclKind::Function(_) => EvalDeclaration::Function,
+                        _ => continue,
+                    };
+                    let args = self.b().new_register_list(2);
+                    self.b().load_string(d.name);
+                    self.b().star(args.first);
+                    self.b().load_smi(check.into());
+                    self.b().star(args.at(1));
+                    self.b().call_runtime(Runtime::DeclareEvalVar, args);
+                    self.release(args.first);
+                }
+                for d in &globals.0 {
                     match d.kind {
                         DeclKind::Var => {
                             let r = self.temp();
@@ -2499,7 +2526,7 @@ impl<'a> Compiler<'a, '_> {
                     DeclKind::Let | DeclKind::Const => {
                         let slot = Context::MIN_SLOTS + u32::try_from(variables.len()).unwrap_or(u32::MAX);
                         let mode = if matches!(d.kind, DeclKind::Const) { VariableMode::Const } else { VariableMode::Let };
-                        variables.push(ContextVariable { name: d.name.into(), mode, parameter: None });
+                        variables.push(ContextVariable { name: d.name.into(), mode, role: VariableRole::Local });
                         lexical.push(Bound { name: d.name, binding: Binding::Context(slot), constant: matches!(d.kind, DeclKind::Const), ready: d.ready.or(Some(u32::MAX)), self_name: false });
                     }
                     _ => {}
@@ -2806,7 +2833,7 @@ impl<'a> Compiler<'a, '_> {
         };
         let func = self.frames.len() - 1;
         let mark = self.b().mark();
-        let info = ScopeInfo { scope_type: Some(ScopeType::CatchScope), variables: alloc::vec![ContextVariable { name: name.into(), mode: VariableMode::Var, parameter: None }], has_extension: false };
+        let info = ScopeInfo { scope_type: Some(ScopeType::CatchScope), variables: alloc::vec![ContextVariable { name: name.into(), mode: VariableMode::Var, role: VariableRole::Local }], has_extension: false };
         let k = self.constant(Constant::Scope(info));
         let e = self.temp();
         self.b().star(e);
