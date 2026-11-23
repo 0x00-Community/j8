@@ -263,7 +263,7 @@ fn helper<'gc>(jit: &Jit, exe: &Executor, a: &mut Agent<'gc, '_>, h: Helper, ops
             let proto = unsafe { val::<'gc>(ops[0] | OBJECT_TAG) }.as_object();
             let o = ObjectData::ordinary(a.mc, proto, ops.len() - 1);
             if let Some(s) = &shape {
-                o.fill(a.mc, s, (1..ops.len()).map(|i| PropSlot::Data(v(i))));
+                o.fill(a.mc, unsafe { s.handle() }, (1..ops.len()).map(|i| PropSlot::Data(v(i))));
             }
             Value::Object(o).bits() & ValueBits::PAYLOAD
         }
@@ -365,7 +365,7 @@ fn frames<'gc>(a: &mut Agent<'gc, '_>, ctx: &Ctx, d: &crate::Deopt) -> Vec<Deopt
         let fields: Vec<Value<'gc>> = o.fields.iter().map(slot).collect();
         let ob = ObjectData::ordinary(a.mc, proto, fields.len());
         if let Some(s) = &o.shape {
-            ob.fill(a.mc, s, fields.into_iter().map(PropSlot::Data));
+            ob.fill(a.mc, unsafe { s.handle() }, fields.into_iter().map(PropSlot::Data));
         }
         cell.borrow_mut()[i] = Some(Value::Object(ob));
     }

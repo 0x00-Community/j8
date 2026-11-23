@@ -19,13 +19,13 @@ impl Executor {
             Some(cache) => cache.module(&src)?,
             None => <j8bytecode::Module as Compile>::compile_module(&src).map(|(m, info)| (m, alloc::sync::Arc::new(info)))?,
         };
-        let main = self.load(module);
+        let main = self.load(a.mc, module);
         let mut slots = alloc::vec![Value::Undefined; usize::from(info.slots)];
         for &s in &info.lexical {
             slots[usize::from(s)] = Value::Uninit;
         }
         let env = j8framework::Env::new(slots, None).alloc(a.mc);
-        let record = j8framework::ModuleRecord { path: a.string(path), env, info: alloc::sync::Arc::clone(&info), main, status: ModuleStatus::Linked, error: None, requested: Vec::new(), imports: Vec::new(), namespace: None, meta: None };
+        let record = j8framework::ModuleRecord { path: a.string(path), env, info: alloc::sync::Arc::clone(&info), main, code: self.function(main).code(), status: ModuleStatus::Linked, error: None, requested: Vec::new(), imports: Vec::new(), namespace: None, meta: None };
         let index = a.push_module(&record);
         self.module_of.borrow_mut().insert(main.0 - j8bytecode::Module::MAIN, index);
         let mut requested = Vec::with_capacity(info.requests.len());
@@ -112,8 +112,8 @@ impl Executor {
         r
     }
 
-    pub fn load_script(&self, module: j8bytecode::Module, file: &str) -> j8framework::FuncId {
-        let main = self.load(module);
+    pub fn load_script(&self, mc: &j8framework::Mutation<'_>, module: j8bytecode::Module, file: &str) -> j8framework::FuncId {
+        let main = self.load(mc, module);
         self.script_files.borrow_mut().insert(main.0 - j8bytecode::Module::MAIN, file.into());
         main
     }

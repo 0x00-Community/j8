@@ -112,10 +112,8 @@ pub struct Realm<'gc> {
 #[derive(Clone, Collect)]
 #[collect(no_drop)]
 pub struct RegExpPristine<'gc> {
-    #[collect(require_static)]
-    pub shape: alloc::sync::Arc<crate::Shape>,
-    #[collect(require_static)]
-    pub last_index: alloc::sync::Arc<crate::Shape>,
+    pub shape: crate::ShapeRef<'gc>,
+    pub last_index: crate::ShapeRef<'gc>,
     pub slots: alloc::vec::Vec<(usize, Value<'gc>)>,
     pub replace: JsObject<'gc>,
 }

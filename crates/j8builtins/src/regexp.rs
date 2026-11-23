@@ -261,7 +261,7 @@ impl Regexps {
 
     fn stamp<'gc>(a: &Agent<'gc, '_>, o: JsObject<'gc>, v: Value<'gc>) {
         if let Some(p) = a.realm.regexp_pristine.get().as_ref() {
-            o.fill(a.mc, &p.last_index, core::iter::once(Slot::Data(v)));
+            o.fill(a.mc, p.last_index, core::iter::once(Slot::Data(v)));
             return;
         }
         o.borrow_mut(a.mc).define("lastIndex", Property { slot: Slot::Data(v), enumerable: false, writable: true, configurable: false });
@@ -569,13 +569,13 @@ impl Regexps {
             return None;
         }
         let p = a.realm.regexp_pristine.get().as_ref()?;
-        if o.props().shape_ptr() != Some(alloc::sync::Arc::as_ptr(&p.last_index)) {
+        if o.props().shape() != Some(p.last_index) {
             return None;
         }
         let Slot::Data(v) = o.props().slot(0) else { return None };
         let last = v.as_number()?;
         let props = a.realm.regexp_proto.get().props();
-        let intact = props.shape_ptr().is_some_and(|s| core::ptr::eq(s, alloc::sync::Arc::as_ptr(&p.shape))) && p.slots.iter().all(|&(i, orig)| props.word(i).is_some_and(|w| w.bits() == orig.bits()));
+        let intact = props.shape() == Some(p.shape) && p.slots.iter().all(|&(i, orig)| props.word(i).is_some_and(|w| w.bits() == orig.bits()));
         intact.then_some((o, last))
     }
 
@@ -964,11 +964,11 @@ impl Regexps {
     fn builtin_bits<'gc>(a: &Agent<'gc, '_>, r: Value<'gc>) -> Option<u16> {
         let o = Self::regexp(r)?;
         let saved = a.realm.regexp_pristine.get().as_ref()?;
-        if o.props().shape_ptr() != Some(alloc::sync::Arc::as_ptr(&saved.last_index)) || o.proto().is_none_or(|p| !Gc::ptr_eq(p, a.realm.regexp_proto)) {
+        if o.props().shape() != Some(saved.last_index) || o.proto().is_none_or(|p| !Gc::ptr_eq(p, a.realm.regexp_proto)) {
             return None;
         }
         let props = a.realm.regexp_proto.get().props();
-        let intact = props.shape_ptr().is_some_and(|s| core::ptr::eq(s, alloc::sync::Arc::as_ptr(&saved.shape))) && saved.slots.iter().all(|&(i, orig)| props.word(i).is_some_and(|w| w.bits() == orig.bits()));
+        let intact = props.shape() == Some(saved.shape) && saved.slots.iter().all(|&(i, orig)| props.word(i).is_some_and(|w| w.bits() == orig.bits()));
         intact.then(|| Self::with_program(o, |c| c.flags))
     }
 

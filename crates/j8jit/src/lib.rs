@@ -41,12 +41,11 @@ pub use x86_64::{X86_64Code, X86_64Emit, X86_64Reloc};
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::rc::Rc;
-use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::cell::RefCell;
 
 use j8executor::{Entry, Tier, Tiered};
-use j8framework::{FuncId, Shape, Value};
+use j8framework::{FuncId, ShapeKey, Value};
 
 use build::{Builder, Hints, HINT_FLOAT, HINT_GENERIC, HINT_NO_INLINE};
 use ir::{FrameState, Helper, Op, Rep, V};
@@ -118,8 +117,7 @@ struct State {
     funcs: Vec<Func>,
     deopts: Vec<Rc<Deopt>>,
     calls: Vec<(Helper, usize)>,
-    shapes: Vec<Option<Arc<Shape>>>,
-    keep: Vec<Arc<Shape>>,
+    shapes: Vec<Option<ShapeKey>>,
     code: Arena,
     tramps: Vec<Trampolines>,
     hints: Hints,
@@ -243,8 +241,8 @@ impl Jit {
         (s.func, s.name, s.slot, s.expect)
     }
 
-    fn shape(&self, k: u32) -> Option<Arc<Shape>> {
-        self.st.borrow().shapes.get(k as usize).cloned().flatten()
+    fn shape(&self, k: u32) -> Option<ShapeKey> {
+        self.st.borrow().shapes.get(k as usize).copied().flatten()
     }
 
     fn deopt(&self, id: u64) -> Rc<Deopt> {
@@ -436,8 +434,8 @@ impl Jit {
         })?;
         let lowered = generated;
         let shape_base = u32::try_from(st.shapes.len()).ok()?;
-        st.shapes.extend(built.shapes.iter().cloned());
-        st.keep.extend(built.keep.iter().cloned());
+        st.shapes.extend(built.shapes.iter().copied());
+        exe.jit_keep(f, &built.keep.iter().chain(built.shapes.iter().flatten()).copied().collect::<Vec<ShapeKey>>(), &[&built.codes[..], &built.targets[..]].concat());
         let arity = &lowered.arity;
         for (i, h) in lowered.calls.iter().enumerate() {
             let h = match h {
