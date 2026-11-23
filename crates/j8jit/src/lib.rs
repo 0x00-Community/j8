@@ -470,6 +470,9 @@ impl Jit {
                 codegen::Sym::Deopt => runtime::j8_deopt as *const () as usize,
                 codegen::Sym::Poll => runtime::j8_poll as *const () as usize,
                 codegen::Sym::Helper => runtime::j8_helper as *const () as usize,
+                codegen::Sym::Direct(0) => runtime::j8_direct0 as *const () as usize,
+                codegen::Sym::Direct(1) => runtime::j8_direct1 as *const () as usize,
+                codegen::Sym::Direct(_) => runtime::j8_direct2 as *const () as usize,
                 codegen::Sym::Target(k) => targets[k as usize],
             }
         };

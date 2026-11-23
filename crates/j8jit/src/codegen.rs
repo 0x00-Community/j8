@@ -58,6 +58,7 @@ pub enum Sym {
     Deopt,
     Poll,
     Helper,
+    Direct(u8),
     Target(u32),
 }
 
@@ -1102,12 +1103,7 @@ impl<'g> Gen<'g> {
                 let xb = self.xmm(y, XT);
                 self.a.movsd_xx(XT, xb);
                 self.a.cvttsd2si64(RAX, XS);
-                self.a.mov_ri(R11, 1 << 53);
-                self.a.mov_rr(RDX, RAX);
-                self.a.alu_rr(Alu::Add, true, RDX, R11);
-                self.a.alu_rr(Alu::Add, true, R11, R11);
-                self.a.alu_rr(Alu::Cmp, true, RDX, R11);
-                self.a.jcc(Cc::Ae, slow);
+                self.mod_in_range(RAX, slow);
                 self.a.cvttsd2si64(RCX, XT);
                 self.a.test_rr(true, RCX, RCX);
                 self.a.jcc(Cc::E, slow);
@@ -1117,11 +1113,12 @@ impl<'g> Gen<'g> {
                 self.a.ucomisd(xb, XT);
                 self.a.jcc(Cc::Ne, slow);
                 self.a.jcc(Cc::P, slow);
-                self.a.cvtsi2sd64(XT, RAX);
+                self.a.cvtsi2sd64(XT, R11);
                 let xa = self.xmm(x, XS);
                 self.a.ucomisd(xa, XT);
                 self.a.jcc(Cc::Ne, slow);
                 self.a.jcc(Cc::P, slow);
+                self.a.mov_rr(RAX, R11);
                 self.a.cqo_idiv(RCX);
                 self.a.zero_x(XT);
                 self.a.cvtsi2sd64(XT, RDX);
@@ -1140,6 +1137,21 @@ impl<'g> Gen<'g> {
                 let id = self.helper_id(Helper::ModF, 2);
                 let (xs, ys) = (self.src(x), self.src(y));
                 self.cold.push((slow, Cold::ModF { done, id, x: xs, y: ys }));
+            }
+            Op::Call(Helper::Direct(index, out), args, fs) if (2..=4).contains(&args.len()) => {
+                self.emit_direct(index, out, &args);
+                if let Some(fs) = fs {
+                    self.a.cmp_mi(true, R15, Ctx::PENDING, 0);
+                    self.exit_if(Cc::Ne, fs, Reason::Throw);
+                }
+                match out {
+                    j8framework::FastOut::Number => {
+                        let d = self.xdst(v);
+                        self.a.movq_xr(d, RAX);
+                        self.xput(v, d);
+                    }
+                    _ => self.put(v, RAX),
+                }
             }
             Op::Call(h, args, fs) => {
                 let id = self.helper_id(h, args.len());
@@ -1255,6 +1267,37 @@ impl<'g> Gen<'g> {
 
     fn o(x: usize) -> i32 {
         i32::try_from(x).unwrap_or(i32::MAX)
+    }
+
+    fn mod_in_range(&mut self, r: R, slow: Label) {
+        self.a.mov_ri(R11, 1 << 62);
+        self.a.mov_rr(RDX, r);
+        self.a.alu_rr(Alu::Add, true, RDX, R11);
+        self.a.alu_rr(Alu::Add, true, R11, R11);
+        self.a.alu_rr(Alu::Cmp, true, RDX, R11);
+        self.a.jcc(Cc::A, slow);
+    }
+
+    fn emit_direct(&mut self, index: u32, out: j8framework::FastOut, args: &[V]) {
+        let tag = match out {
+            j8framework::FastOut::Value => 0u64,
+            j8framework::FastOut::Number => 1,
+            j8framework::FastOut::Bool => 2,
+        };
+        let packed = u64::from(index) | (tag << 32);
+        let user = args.len() - 2;
+        let mut srcs = Vec::with_capacity(user + 4);
+        srcs.push((Src::Reg(R15), RDI));
+        srcs.push((self.src(args[0]), RSI));
+        srcs.push((self.src(args[1]), RDX));
+        let regs = [RCX, R8, R9];
+        for (i, a) in args.iter().skip(2).enumerate() {
+            srcs.push((self.src(*a), regs[i]));
+        }
+        srcs.push((Src::Imm(packed), regs[user]));
+        self.fixed_moves(srcs);
+        let at = self.a.call_abs(0);
+        self.relocs.push((at, Sym::Direct(u8::try_from(user).unwrap_or(2))));
     }
 
     fn untag(&mut self, r: R) {
