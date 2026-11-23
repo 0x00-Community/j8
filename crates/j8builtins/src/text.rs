@@ -36,13 +36,17 @@ enum Form {
     Nfkd,
 }
 
+fn exact_i32(x: f64) -> Option<i32> {
+    #[expect(clippy::cast_possible_truncation, reason = "rejected unless the conversion is exact")]
+    let i = x as i32;
+    (f64::from(i) == x).then_some(i)
+}
+
 impl Texts {
     fn from_char_code1<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, v: Value<'scope>) -> Option<Value<'scope>> {
-        if !matches!(v.kind(), ValueKind::Number(_)) {
-            return None;
-        }
-        #[expect(clippy::cast_possible_truncation, reason = "ToUint16 just takes the low 16 bits")]
-        let u = a.to_uint32(v).ok()? as u16;
+        let ValueKind::Number(x) = v.kind() else { return None };
+        #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "ToUint16 just takes the low 16 bits")]
+        let u = if let Some(i) = exact_i32(x) { i as u16 } else { a.to_uint32(v).ok()? as u16 };
         Some(Value::String(a.unit_string(u)))
     }
 

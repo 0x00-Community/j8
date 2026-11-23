@@ -4,7 +4,7 @@ use core::cell::Cell;
 use j8bytecode::{Bytecode, Constant, OperandValue, SharedFunction};
 use j8framework::{Scope, Closure, Error, FuncId, JsEnv, JsObject, ShapeKey, Value};
 
-pub use crate::ic::{GlobalFeedback, PropertyFeedback};
+pub use crate::ic::{GlobalFeedback, PropertyFeedback, StringFeedback};
 use crate::{Args, Budget, Executor, Frame, Loaded, State, STACK_LIMIT};
 
 pub trait Tier {
@@ -124,6 +124,10 @@ impl<'e> Function<'e> {
 
     pub fn property(self, slot: OperandValue) -> Option<PropertyFeedback> {
         self.0.ics.get(usize::try_from(slot).ok()?)?.feedback()
+    }
+
+    pub fn string_property(self, slot: OperandValue) -> Option<StringFeedback> {
+        self.0.ics.get(usize::try_from(slot).ok()?)?.string_feedback()
     }
 
     pub fn global(self, slot: OperandValue) -> Option<GlobalFeedback> {
@@ -399,6 +403,10 @@ impl Executor<'_> {
 
     pub fn jit_object_literal<'scope>(&self, a: &Scope<'scope, '_>, f: FuncId, k: OperandValue) -> JsObject<'scope> {
         Self::object_literal(a, self.function(f), k)
+    }
+
+    pub fn jit_regexp_literal<'scope>(&self, a: &mut Scope<'scope, '_>, f: FuncId, k: OperandValue, bits: OperandValue) -> Result<(Value<'scope>, bool), Error> {
+        Self::regexp_literal(a, self.function(f), k, bits)
     }
 
     pub fn jit_global_load<'scope>(&self, a: &mut Scope<'scope, '_>, f: FuncId, k: OperandValue, slot: OperandValue, inside_typeof: bool) -> Result<Value<'scope>, Error> {

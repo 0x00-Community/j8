@@ -54,6 +54,7 @@ pub struct Context<'scope> {
     pub array_proto: JsObject<'scope>,
     pub string_proto: JsObject<'scope>,
     pub chars: alloc::vec::Vec<crate::JsString<'scope>>,
+    pub empty: crate::JsString<'scope>,
     pub number_proto: JsObject<'scope>,
     pub boolean_proto: JsObject<'scope>,
     pub error_protos: [JsObject<'scope>; ErrorKind::ALL.len()],
@@ -100,6 +101,7 @@ pub struct Context<'scope> {
     pub random_state: AtomicU64,
     pub jobs: GcQueue<'scope, Job<'scope>>,
     pub templates: Cow<'scope, alloc::collections::BTreeMap<(u32, u32), JsObject<'scope>>>,
+    pub string_constants: Cow<'scope, alloc::collections::BTreeMap<(u32, u32), JsString<'scope>>>,
     pub script_contexts: Cow<'scope, Vec<crate::JsEnv<'scope>>>,
     pub regexp_cache: [Slot<'scope, RegExpCompiled<'scope>>; RegExpCompiled::BUCKETS],
     pub regexp_literals: [Slot<'scope, RegExpLiteralEntry<'scope>>; RegExpCompiled::BUCKETS],
@@ -133,6 +135,7 @@ pub struct RegExpLiteralEntry<'scope> {
     #[collect(require_static)]
     pub flags: u16,
     pub compiled: RegExpCompiled<'scope>,
+    pub shared: crate::object::RegExpShared<'scope>,
 }
 
 pub type Fast0 = for<'scope, 'x> fn(&mut crate::Scope<'scope, 'x>, Value<'scope>) -> Option<Value<'scope>>;
@@ -310,6 +313,7 @@ impl<'scope> Context<'scope> {
             modules: Cow::new(mc, alloc::vec::Vec::new()),
             random_state: AtomicU64::new(0),
             templates: Cow::new(mc, alloc::collections::BTreeMap::new()),
+            string_constants: Cow::new(mc, alloc::collections::BTreeMap::new()),
             script_contexts: Cow::new(mc, Vec::new()),
             global: Self::wide(derived(object_proto)),
             object_proto,
@@ -317,6 +321,7 @@ impl<'scope> Context<'scope> {
             array_proto,
             string_proto: derived(object_proto),
             chars: (0u8..128).map(|c| crate::JsStr::alloc_known(mc, alloc::string::String::from(char::from(c)).as_str(), true)).collect(),
+            empty: crate::JsStr::alloc_known(mc, "", true),
             number_proto: derived(object_proto),
             boolean_proto: derived(object_proto),
             error_protos,

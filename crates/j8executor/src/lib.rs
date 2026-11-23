@@ -22,7 +22,7 @@ use module::EVAL_FILE;
 
 pub use cache::CodeCache;
 pub use event_loop::{EventLoop, EventLoopSet, Ticket, CHECK, SLICE};
-pub use jit::{DeoptFrame, Entry, FrameSlots, Function as JitFunction, GlobalFeedback, Insn as JitInsn, PropertyFeedback, Reg as JitReg, ScopeLayout, Tier, Tiered};
+pub use jit::{DeoptFrame, Entry, FrameSlots, Function as JitFunction, GlobalFeedback, Insn as JitInsn, PropertyFeedback, Reg as JitReg, ScopeLayout, StringFeedback, Tier, Tiered};
 
 const STACK_LIMIT: usize = 10_000;
 
@@ -919,6 +919,35 @@ impl Executor<'_> {
         ob
     }
 
+    pub(crate) fn regexp_literal<'scope>(a: &mut Scope<'scope, '_>, loaded: &Loaded, pattern: OperandValue, bits: OperandValue) -> Result<(Value<'scope>, bool), Error> {
+        let bits = u16::try_from(bits).unwrap_or(0);
+        let k = usize::try_from(pattern).unwrap_or(usize::MAX);
+        let lone = match loaded.func.bytecode.constants.get(k) {
+            Some(Constant::Utf16(u)) => Some(u.as_ref()),
+            _ => None,
+        };
+        match (a.context.regexp_literal.get().0, lone) {
+            (Some(literal), None) => Ok((literal(a, Self::name_at(loaded, pattern), bits)?, true)),
+            (_, lone) => {
+                let mut flags = [0u8; REGEXP_FLAGS.len()];
+                let mut n = 0;
+                for (c, b) in REGEXP_FLAGS {
+                    if bits & b != 0 && let Some(f) = flags.get_mut(n) {
+                        *f = c;
+                        n += 1;
+                    }
+                }
+                let flags = core::str::from_utf8(flags.get(..n).unwrap_or_default()).unwrap_or_default();
+                let p = match lone {
+                    Some(u) => a.string_units(u),
+                    None => a.string(Self::name_at(loaded, pattern)),
+                };
+                let fl = a.string(flags);
+                Ok((a.call(a.context.regexp_ctor.into(), Value::Undefined, &[p.into(), fl.into()])?, false))
+            }
+        }
+    }
+
     fn remember_shape(cache: &Cell<Option<ShapeKey>>, o: JsObject<'_>, n: usize) {
         if cache.get().is_some() {
             return;
@@ -1469,8 +1498,11 @@ impl Executor<'_> {
             B::LdaFalse => *acc = Value::Bool(false),
             B::LdaConstant => {
                 let k = usize::try_from(o[0]).unwrap_or(0);
+                let slot = u32::try_from(k).unwrap_or(0);
                 *acc = match &loaded.func.bytecode.constants[k] {
                     Constant::Class(_) => Value::Number(k as f64),
+                    Constant::String(s) => a.constant_string(loaded.id.0, slot, s).into(),
+                    Constant::Utf16(u) => a.constant_units(loaded.id.0, slot, u).into(),
                     c => Self::constant(a, c),
                 };
             }
@@ -1568,6 +1600,18 @@ impl Executor<'_> {
                         None => {
                             let v = a.get_named(obj, name)?;
                             ic.fill_get(a.mc, ob, name);
+                            v
+                        }
+                    },
+                    ValueKind::String(s) if name == "length" => {
+                        ic.note_length();
+                        f64::from(u32::try_from(s.utf16_len()).unwrap_or(u32::MAX)).into()
+                    }
+                    ValueKind::String(_) => match ic.string_value(a.context.string_proto) {
+                        Some(v) => v,
+                        None => {
+                            let v = a.get_named(obj, name)?;
+                            ic.fill_primitive(a.mc, a.context.string_proto, name);
                             v
                         }
                     },
@@ -1837,32 +1881,8 @@ impl Executor<'_> {
                 }
             }
             B::CreateRegExpLiteral => {
-                let pattern = Self::name_at(loaded, o[0]);
-                let lone = match loaded.func.bytecode.constants.get(usize::try_from(o[0]).unwrap_or(usize::MAX)) {
-                    Some(Constant::Utf16(u)) => Some(u),
-                    _ => None,
-                };
-                let bits = u16::try_from(o[2]).unwrap_or(0);
-                *acc = match (a.context.regexp_literal.get().0, lone) {
-                    (Some(literal), None) => literal(a, pattern, bits)?,
-                    (_, lone) => {
-                        let mut flags = [0u8; REGEXP_FLAGS.len()];
-                        let mut n = 0;
-                        for (c, b) in REGEXP_FLAGS {
-                            if bits & b != 0 && let Some(f) = flags.get_mut(n) {
-                                *f = c;
-                                n += 1;
-                            }
-                        }
-                        let flags = core::str::from_utf8(flags.get(..n).unwrap_or_default()).unwrap_or_default();
-                        let p = match lone {
-                            Some(u) => a.string_units(u),
-                            None => a.string(pattern),
-                        };
-                        let fl = a.string(flags);
-                        a.call(a.context.regexp_ctor.into(), Value::Undefined, &[p.into(), fl.into()])?
-                    }
-                };
+                let (v, _) = Self::regexp_literal(a, loaded, o[0], o[2])?;
+                *acc = v;
             }
             B::GetTemplateObject => {
                 let key = (f.func.0, u32::try_from(o[0]).unwrap_or(0));

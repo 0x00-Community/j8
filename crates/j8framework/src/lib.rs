@@ -43,7 +43,7 @@ pub use isolate::{CreateParams, Isolate, Parked};
 pub use isolate::{ErasedBrand, Shares};
 pub use backing::{Backing, External, SharedMemory};
 pub use terminate::{IsolateHandle, Termination};
-pub use object::{Accessor, ObjMut, ObjRef, Object, ObjectState, Few, ArgumentsMap, Host, HostData, HostHook, HostObject, HostReaction, BigIntData, Bound, BufferData, Capability, Closure, ClosureFn, Code, FunctionInfo, ElementKind, ViewData, HelperKind, HelperState, IteratorHelper, NativeClosure, ProxyData, Collection, ContextKind, ContextName, ContextShape, ShapeId, MapKey, Request, JsBigInt, RegExpData, Coroutine, CoroutineState, Waiting, Settlement, Env, IterKind, IteratorState, Job, JsEnv, JsObject, JsString, JsSymbol, Forward, Native, NativeFn, ObjectData, ObjectKind, JsStr, HiddenSurrogates, Pieces, SmallStr, Units, Property, Reaction, Settled, Slot, Suspended, SymbolData};
+pub use object::{Accessor, ObjMut, ObjRef, Object, ObjectState, Few, ArgumentsMap, Host, HostData, HostHook, HostObject, HostReaction, BigIntData, Bound, BufferData, Capability, Closure, ClosureFn, Code, FunctionInfo, ElementKind, ViewData, HelperKind, HelperState, IteratorHelper, NativeClosure, ProxyData, Collection, ContextKind, ContextName, ContextShape, ShapeId, MapKey, Request, JsBigInt, RegExpData, RegExpShared, Coroutine, CoroutineState, Waiting, Settlement, Env, IterKind, IteratorState, Job, JsEnv, JsObject, JsString, JsSymbol, Forward, Native, NativeFn, ObjectData, ObjectKind, JsStr, HiddenSurrogates, Pieces, SmallStr, Units, Property, Reaction, Settled, Slot, Suspended, SymbolData};
 pub use bigint::Numeric;
 pub use ops::{number_text, BinaryOp, CompareOp, ErrorKind, Hint, IterRecord, Numbers, UnaryOp};
 pub use platform::{AsyncJob, Platform, Settle, Task};

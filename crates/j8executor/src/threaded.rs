@@ -1,4 +1,4 @@
-use j8bytecode::{Bytecode, OperandValue};
+use j8bytecode::{Bytecode, Constant, OperandValue};
 use j8framework::{Scope, Env, Error, ErrorKind, Value, ValueBits};
 
 use crate::{Args, Budget, Executor, Flow, Frame, Insn, Loaded, Outcome, State, STACK_LIMIT};
@@ -87,6 +87,20 @@ macro_rules! fall {
     };
 }
 
+#[cfg(tail_calls)]
+macro_rules! pass {
+    ($f:ident, $cx:ident, $pc:ident, $regs:ident, $acc:ident) => {
+        become $f($cx, $pc, $regs, $acc)
+    };
+}
+
+#[cfg(not(tail_calls))]
+macro_rules! pass {
+    ($f:ident, $cx:ident, $pc:ident, $regs:ident, $acc:ident) => {
+        return $f($cx, $pc, $regs, $acc)
+    };
+}
+
 macro_rules! arith {
     ($cx:ident, $pc:ident, $regs:ident, $acc:ident, $l:expr, $r:expr, $sym:tt) => {{
         let (l, r) = ($l, $r);
@@ -127,11 +141,22 @@ handlers! {
     lda_the_hole(cx, pc, regs, acc, o) { next!(cx, step!(pc), regs, Value::Uninit) }
     lda_true(cx, pc, regs, acc, o) { next!(cx, step!(pc), regs, Value::Bool(true)) }
     lda_false(cx, pc, regs, acc, o) { next!(cx, step!(pc), regs, Value::Bool(false)) }
-    add(cx, pc, regs, acc, o) { arith!(cx, pc, regs, acc, reg!(cx, regs, o[0]), acc, +) }
+    add(cx, pc, regs, acc, o) {
+        let l = reg!(cx, regs, o[0]);
+        if let (Some(x), Some(y)) = (l.as_number(), acc.as_number()) {
+            next!(cx, step!(pc), regs, Value::Number(x + y))
+        }
+        pass!(add_text, cx, pc, regs, acc)
+    }
     sub(cx, pc, regs, acc, o) { arith!(cx, pc, regs, acc, reg!(cx, regs, o[0]), acc, -) }
     mul(cx, pc, regs, acc, o) { arith!(cx, pc, regs, acc, reg!(cx, regs, o[0]), acc, *) }
     div(cx, pc, regs, acc, o) { arith!(cx, pc, regs, acc, reg!(cx, regs, o[0]), acc, /) }
-    add_smi(cx, pc, regs, acc, o) { arith!(cx, pc, regs, acc, acc, Value::Number(o[0] as f64), +) }
+    add_smi(cx, pc, regs, acc, o) {
+        if let Some(x) = acc.as_number() {
+            next!(cx, step!(pc), regs, Value::Number(x + o[0] as f64))
+        }
+        pass!(add_smi_text, cx, pc, regs, acc)
+    }
     sub_smi(cx, pc, regs, acc, o) { arith!(cx, pc, regs, acc, acc, Value::Number(o[0] as f64), -) }
     mul_smi(cx, pc, regs, acc, o) { arith!(cx, pc, regs, acc, acc, Value::Number(o[0] as f64), *) }
     div_smi(cx, pc, regs, acc, o) { arith!(cx, pc, regs, acc, acc, Value::Number(o[0] as f64), /) }
@@ -235,12 +260,28 @@ handlers! {
         next!(cx, step!(pc), regs, cx.exe.create_closure(cx.a, cx.loaded, o[0], env).into())
     }
     get_named_property(cx, pc, regs, acc, o) {
-        if let Some(ob) = reg!(cx, regs, o[0]).as_object()
-            && let Some(v) = cx.loaded.ics[o[2] as usize].get(ob)
-        {
-            next!(cx, step!(pc), regs, v)
+        if let Some(ob) = reg!(cx, regs, o[0]).as_object() {
+            if let Some(v) = cx.loaded.ics[o[2] as usize].get(ob) {
+                next!(cx, step!(pc), regs, v)
+            }
+            fall!(cx, pc, regs, acc)
         }
-        fall!(cx, pc, regs, acc)
+        pass!(get_named_string, cx, pc, regs, acc)
+    }
+    lda_constant(cx, pc, regs, acc, o) {
+        let k = o[0] as usize;
+        let slot = o[0] as u32;
+        match &cx.loaded.func.bytecode.constants[k] {
+            Constant::String(s) => {
+                let v = cx.a.constant_string(cx.loaded.id.0, slot, s);
+                next!(cx, step!(pc), regs, Value::String(v))
+            }
+            Constant::Utf16(u) => {
+                let v = cx.a.constant_units(cx.loaded.id.0, slot, u);
+                next!(cx, step!(pc), regs, Value::String(v))
+            }
+            _ => fall!(cx, pc, regs, acc),
+        }
     }
     lda_global(cx, pc, regs, acc, o) {
         let (scope, global) = (cx.a.context.script_scope, cx.a.context.global);
@@ -249,6 +290,43 @@ handlers! {
             None => fall!(cx, pc, regs, acc),
         }
     }
+}
+
+#[inline(never)]
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "a register index fits in isize and a feedback slot is not negative")]
+fn get_named_string<'scope>(cx: &mut Cx<'_, 'scope, '_, '_, '_>, pc: *const Insn, regs: *mut Value<'scope>, acc: Value<'scope>) -> Exit<'scope> {
+    let o = unsafe { (*pc).operands.all() };
+    if let Some(s) = reg!(cx, regs, o[0]).as_string() {
+        let ic = &cx.loaded.ics[o[2] as usize];
+        if ic.names_length() {
+            let n = u32::try_from(s.utf16_len()).unwrap_or(u32::MAX);
+            next!(cx, step!(pc), regs, Value::Number(f64::from(n)))
+        }
+        if let Some(v) = ic.string_value(cx.a.context.string_proto) {
+            next!(cx, step!(pc), regs, v)
+        }
+    }
+    fall!(cx, pc, regs, acc)
+}
+
+#[inline(never)]
+#[allow(clippy::cast_possible_truncation, reason = "a register index fits in isize")]
+fn add_text<'scope>(cx: &mut Cx<'_, 'scope, '_, '_, '_>, pc: *const Insn, regs: *mut Value<'scope>, acc: Value<'scope>) -> Exit<'scope> {
+    let o = unsafe { (*pc).operands.all() };
+    if let Some(v) = cx.a.try_concat(reg!(cx, regs, o[0]), acc) {
+        next!(cx, step!(pc), regs, v)
+    }
+    fall!(cx, pc, regs, acc)
+}
+
+#[inline(never)]
+#[allow(clippy::cast_precision_loss, reason = "an smi operand fits in an f64")]
+fn add_smi_text<'scope>(cx: &mut Cx<'_, 'scope, '_, '_, '_>, pc: *const Insn, regs: *mut Value<'scope>, acc: Value<'scope>) -> Exit<'scope> {
+    let o = unsafe { (*pc).operands.all() };
+    if let Some(v) = cx.a.try_concat(acc, Value::Number(o[0] as f64)) {
+        next!(cx, step!(pc), regs, v)
+    }
+    fall!(cx, pc, regs, acc)
 }
 
 pub enum Entered<'scope> {
@@ -579,6 +657,7 @@ impl Insn {
             B::LdaTheHole => lda_the_hole,
             B::LdaTrue => lda_true,
             B::LdaFalse => lda_false,
+            B::LdaConstant => lda_constant,
             B::Add => add,
             B::Sub => sub,
             B::Mul => mul,

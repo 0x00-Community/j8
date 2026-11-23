@@ -282,9 +282,15 @@ impl Regexps {
         usize::try_from(mixed >> 40).unwrap_or(0) % j8framework::RegExpCompiled::BUCKETS
     }
 
-    fn literal_load<'scope>(slot: &j8framework::GcSlot<'scope, j8framework::RegExpLiteralEntry<'scope>>, ptr: usize, len: usize, flags: u16, source: &str) -> Option<j8framework::RegExpCompiled<'scope>> {
+    fn literal_load<'scope>(slot: &j8framework::GcSlot<'scope, j8framework::RegExpLiteralEntry<'scope>>, ptr: usize, len: usize, flags: u16, source: &str) -> Option<j8framework::RegExpShared<'scope>> {
         let e = slot.get()?;
-        (e.ptr == ptr && e.len == len && e.flags == flags && **e.compiled.source == *source).then(|| e.compiled.clone())
+        (e.ptr == ptr && e.len == len && e.flags == flags && **e.compiled.source == *source).then_some(e.shared)
+    }
+
+    fn fresh<'scope>(a: &Scope<'scope, '_>, shared: j8framework::RegExpShared<'scope>) -> JsObject<'scope> {
+        let o = j8framework::Object::regexp_with(a.mc, a.context.regexp_proto, shared);
+        Self::stamp(a, o, 0.0.into());
+        o
     }
 
     fn literal_store<'scope>(a: &Scope<'scope, '_>, bucket: usize, entry: j8framework::RegExpLiteralEntry<'scope>) {
@@ -304,12 +310,13 @@ impl Regexps {
             let cache = &a.context.get().regexp_literals;
             Self::literal_load(&cache[bucket], ptr, len, flags, source).or_else(|| Self::literal_load(&cache[buddy], ptr, len, flags, source))
         };
-        if let Some(c) = hit {
-            return Ok(Self::make(a, &c).into());
+        if let Some(shared) = hit {
+            return Ok(Self::fresh(a, shared).into());
         }
         let compiled = Self::cached(a, source, &Compiled::text(flags))?;
-        Self::literal_store(a, bucket, j8framework::RegExpLiteralEntry { ptr, len, flags, compiled: compiled.clone() });
-        Ok(Self::make(a, &compiled).into())
+        let shared = j8framework::Object::share_regexp(a.mc, RegExpData { source: compiled.source, flags: compiled.flags, compiled: compiled.compiled, legacy: true });
+        Self::literal_store(a, bucket, j8framework::RegExpLiteralEntry { ptr, len, flags, compiled, shared });
+        Ok(Self::fresh(a, shared).into())
     }
 
     pub(crate) fn is_regexp<'scope>(a: &mut Scope<'scope, '_>, v: Value<'scope>) -> Result<bool, Error> {
@@ -889,7 +896,7 @@ impl Regexps {
     }
 
     fn set_last<'scope>(a: &Scope<'scope, '_>, o: JsObject<'scope>, i: usize) {
-        o.borrow_mut(a.mc).set_at(0, Self::index(i));
+        o.set_at(a.mc, 0, Self::index(i));
     }
 
     fn find_in(c: &Compiled, s: &str, units: Units<'_>, start: usize) -> Option<Found> {
@@ -1109,6 +1116,12 @@ impl Regexps {
         let o = Self::this(a, this)?;
         let s = a.to_string(args.at(0))?;
         Self::builtin_exec(a, o, s)
+    }
+
+    fn test1<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, arg: Value<'scope>) -> Option<Value<'scope>> {
+        let s = arg.as_string()?;
+        let (o, last) = Self::open(a, this, false)?;
+        Some(Self::fast_test(a, o, last, &s).into())
     }
 
     fn test<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
@@ -1868,6 +1881,16 @@ impl Regexps {
         Ok(a.string_units(&out).into())
     }
 
+    fn replace2<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, search: Value<'scope>, with: Value<'scope>) -> Option<Value<'scope>> {
+        let (rx, last) = Self::open(a, search, true)?;
+        let s = this.as_string()?;
+        let repl = with.as_string()?;
+        if Self::dollars(&repl) != 0 || !s.unit_ascii() || !repl.unit_ascii() || !Self::symbol_holds(a, SYM_REPLACE) {
+            return None;
+        }
+        Some(Self::replace_fast(a, rx, last, s, &repl))
+    }
+
     fn replace<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Self::replace_impl(a, this, args, false)
     }
@@ -1966,6 +1989,8 @@ impl<'scope> Installer<'_, 'scope> {
         };
         r.regexp_pristine.set(self.mc, pristine);
         r.regexp_literal.set(self.mc, j8framework::Static(Some(Regexps::literal)));
+        self.direct(Regexps::test, j8framework::FastCall::A1(Regexps::test1), j8framework::FastOut::Bool);
+        self.direct(Regexps::replace, j8framework::FastCall::A2(Regexps::replace2), j8framework::FastOut::Value);
         self.method(r.regexp_string_iterator_proto, "next", Regexps::string_iterator_next, 0);
         let s = r.string_proto;
         self.method(s, "match", Regexps::string_match, 1);

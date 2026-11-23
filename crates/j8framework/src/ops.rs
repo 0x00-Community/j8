@@ -195,11 +195,18 @@ fn modulo_u32_slow(x: f64) -> u32 {
 }
 
 pub fn number_text(x: f64) -> crate::SmallStr {
+    let mut buf = [0u8; 20];
+    if let Some(digits) = integer_digits(x, &mut buf) {
+        return crate::SmallStr::from(core::str::from_utf8(digits).unwrap_or_default());
+    }
+    crate::SmallStr::from(ryu_js::Buffer::new().format(x))
+}
+
+fn integer_digits(x: f64, buf: &mut [u8; 20]) -> Option<&[u8]> {
     #[expect(clippy::cast_possible_truncation, reason = "the comparison below confirms it is a safe integer")]
     let i = x as i64;
     #[expect(clippy::cast_precision_loss, reason = "exact within the safe integer range")]
     if x.abs() <= MAX_SAFE_INTEGER && i as f64 == x {
-        let mut buf = [0u8; 20];
         let mut at = buf.len();
         let mut n = i.unsigned_abs();
         loop {
@@ -215,9 +222,9 @@ pub fn number_text(x: f64) -> crate::SmallStr {
             at -= 1;
             buf[at] = b'-';
         }
-        return crate::SmallStr::from(core::str::from_utf8(&buf[at..]).unwrap_or_default());
+        return Some(&buf[at..]);
     }
-    crate::SmallStr::from(ryu_js::Buffer::new().format(x))
+    None
 }
 
 #[inline]
@@ -447,12 +454,112 @@ impl<'scope> Scope<'scope, '_> {
         }
     }
 
+    #[inline]
+    pub fn try_concat(&self, lhs: Value<'scope>, rhs: Value<'scope>) -> Option<Value<'scope>> {
+        match (lhs.kind(), rhs.kind()) {
+            (ValueKind::String(a), ValueKind::String(b)) => Some(Value::String(crate::JsStr::concat(self.mc, a, b))),
+            (ValueKind::String(s), ValueKind::Number(x)) => Some(self.concat_number(s, x, false)),
+            (ValueKind::Number(x), ValueKind::String(s)) => Some(self.concat_number(s, x, true)),
+            (ValueKind::String(s), _) => Self::primitive_bytes(rhs).map(|t| Value::String(crate::JsStr::concat_ascii(self.mc, s, t, false))),
+            (_, ValueKind::String(s)) => Self::primitive_bytes(lhs).map(|t| Value::String(crate::JsStr::concat_ascii(self.mc, s, t, true))),
+            _ => None,
+        }
+    }
+
+    fn primitive_bytes(v: Value<'scope>) -> Option<&'static [u8]> {
+        match v.kind() {
+            ValueKind::Bool(true) => Some(b"true"),
+            ValueKind::Bool(false) => Some(b"false"),
+            ValueKind::Null => Some(b"null"),
+            ValueKind::Undefined | ValueKind::Uninit => Some(b"undefined"),
+            _ => None,
+        }
+    }
+
+    #[inline]
+    pub fn concat_add(&mut self, lhs: Value<'scope>, rhs: Value<'scope>) -> Result<(Value<'scope>, bool), Error> {
+        if let (Some(x), Some(y)) = (lhs.as_number(), rhs.as_number()) {
+            return Ok((Value::Number(x + y), true));
+        }
+        if let Some(v) = self.try_concat(lhs, rhs) {
+            return Ok((v, true));
+        }
+        let keep = lhs.as_object().is_none() && rhs.as_object().is_none();
+        Ok((self.binary(BinaryOp::Add, lhs, rhs)?, keep))
+    }
+
+    #[inline]
+    fn concat_number(&self, s: JsString<'scope>, x: f64, number_first: bool) -> Value<'scope> {
+        let mut buf = [0u8; 20];
+        if let Some(digits) = integer_digits(x, &mut buf) {
+            return Value::String(crate::JsStr::concat_ascii(self.mc, s, digits, number_first));
+        }
+        self.concat_number_slow(s, x, number_first)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn concat_number_slow(&self, s: JsString<'scope>, x: f64, number_first: bool) -> Value<'scope> {
+        let digits = number_text(x);
+        Value::String(crate::JsStr::concat_ascii(self.mc, s, digits.as_str().as_bytes(), number_first))
+    }
+
+    const STRING_CONSTANTS: usize = 1024;
+
+    pub fn constant_string(&self, func: u32, slot: u32, text: &str) -> JsString<'scope> {
+        if let [b] = text.as_bytes()
+            && *b < 128
+        {
+            return self.context.chars[usize::from(*b)];
+        }
+        if text.is_empty() {
+            return self.context.empty;
+        }
+        self.intern_constant(func, slot, || self.string(text))
+    }
+
+    pub fn constant_units(&self, func: u32, slot: u32, units: &[u16]) -> JsString<'scope> {
+        if let &[u] = units
+            && u < 128
+        {
+            return self.context.chars[usize::from(u)];
+        }
+        if units.is_empty() {
+            return self.context.empty;
+        }
+        self.intern_constant(func, slot, || self.string_units(units))
+    }
+
+    fn intern_constant(&self, func: u32, slot: u32, make: impl FnOnce() -> JsString<'scope>) -> JsString<'scope> {
+        let key = (func, slot);
+        if let Some(s) = self.context.string_constants.get().get(&key).copied() {
+            return s;
+        }
+        let s = make();
+        if self.context.string_constants.get().len() < Self::STRING_CONSTANTS {
+            self.context.string_constants.update(self.mc, |m| {
+                let mut m = m.clone();
+                if m.len() < Self::STRING_CONSTANTS {
+                    m.insert(key, s);
+                }
+                m
+            });
+        }
+        s
+    }
+
     pub fn binary(&mut self, op: BinaryOp, lhs: Value<'scope>, rhs: Value<'scope>) -> Result<Value<'scope>, Error> {
         if let (ValueKind::Number(a), ValueKind::Number(b)) = (lhs.kind(), rhs.kind()) {
             return Ok(op.numbers(a, b).into());
         }
         let (l, r) = if op == BinaryOp::Add {
+            if let Some(v) = self.try_concat(lhs, rhs) {
+                return Ok(v);
+            }
             let (l, r) = (self.to_primitive(lhs, Hint::Default)?, self.to_primitive(rhs, Hint::Default)?);
+            if let Some(v) = self.try_concat(l, r) {
+                return Ok(v);
+            }
             if matches!(l.kind(), ValueKind::String(_)) || matches!(r.kind(), ValueKind::String(_)) {
                 let (a, b) = (self.to_string(l)?, self.to_string(r)?);
                 return Ok(Value::String(crate::JsStr::concat(self.mc, a, b)));
