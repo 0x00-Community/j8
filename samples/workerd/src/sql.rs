@@ -6,7 +6,9 @@ use rusqlite::fallible_iterator::FallibleIterator as _;
 use rusqlite::{Batch, Connection};
 use serde_json::{Value as Json, json};
 
+#[derive(j8::Trace)]
 pub struct SqlStorage {
+    #[collect(require_static)]
     db: Mutex<Connection>,
 }
 

@@ -141,7 +141,9 @@ impl<'gc, T: IntoJs<'gc>> IntoJs<'gc> for Done<T> {
     }
 }
 
+#[derive(j8::Trace)]
 pub struct Heaps {
+    #[collect(require_static)]
     space: Arc<Space>,
 }
 

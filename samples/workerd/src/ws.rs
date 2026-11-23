@@ -658,7 +658,9 @@ impl Io {
     }
 }
 
+#[derive(j8::Trace)]
 pub struct Net {
+    #[collect(require_static)]
     reactor: Arc<Reactor>,
 }
 
