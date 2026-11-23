@@ -668,7 +668,11 @@ impl Table {
             text.push_str(&st.template());
         }
         text.push_str("}\n");
-        let stencils: Stencils = compiler.stencils(&text, &crate::X86_64Emit)?;
+        #[cfg(target_arch = "aarch64")]
+        let emit = crate::aarch64::AArch64Emit;
+        #[cfg(not(target_arch = "aarch64"))]
+        let emit = crate::X86_64Emit;
+        let stencils: Stencils = compiler.stencils(&text, &emit)?;
         let mut pieces = Vec::with_capacity(all.len());
         for st in all {
             let s = stencils.get(&st.name()).ok_or_else(|| crate::CompileError::Backend(format!("no stencil {}", st.name())))?;
@@ -711,7 +715,7 @@ pub struct Stitch<'g, 't> {
     regs: i32,
     blocks: Vec<Option<Label>>,
     epilogue: Label,
-    jumps: Vec<(usize, Label)>,
+    jumps: Vec<(usize, Label, HoleKind)>,
     relocs: Vec<(usize, Sym)>,
     stubs: Vec<Stub>,
     exits: Vec<Exit>,
@@ -724,7 +728,7 @@ pub struct Stitch<'g, 't> {
 }
 
 impl<'g, 't> Stitch<'g, 't> {
-    const FIRST_SLOT: i32 = crate::x86_64::Stenciled::SPILL_TOP - 8 * crate::x86_64::Stenciled::SPILL_WORDS - 8;
+    const FIRST_SLOT: i32 = crate::live::Template::SPILL_TOP - 8 * crate::live::Template::SPILL_WORDS - 8;
 
     pub fn stitch(g: &'g Graph, kind: Kind, deopt_base: u32, helper_base: u32, globals: &'g [u64], table: &'t Table) -> Stitching<Generated> {
         if !g.blocks[0].preds.is_empty() {
@@ -743,16 +747,20 @@ impl<'g, 't> Stitch<'g, 't> {
         let disp = |k: i32| Self::FIRST_SLOT - 8 * k;
         let (params, regs) = (disp(n), disp(n + 1));
         let temps = disp(n + 2 + spare - 1);
-        n += 2 + spare + crate::x86_64::Stenciled::SPILL_WORDS;
+        n += 2 + spare + crate::live::Template::SPILL_WORDS;
         let frame = (n * 8 + 15) / 16 * 16 + 8;
         let mut a = Asm::default();
         let epilogue = a.label();
         let mut me = Stitch { g, kind, globals, table, a, slot, temps, params, regs, blocks: vec![None; g.blocks.len()], epilogue, jumps: Vec::new(), relocs: Vec::new(), stubs: Vec::new(), exits: Vec::new(), values: Vec::new(), calls: Vec::new(), arity: Vec::new(), deopt_base, helper_base, cur: 0 };
         me.run(frame)?;
         let _ = me.a.finish();
-        for &(at, l) in &me.jumps {
+        for &(at, l, kind) in &me.jumps {
             let to = me.a.at(l).ok_or_else(|| Unsupported("a jump to an unbound label".into()))?;
-            Stencil::rel32(&mut me.a.bytes, at, to);
+            if kind == HoleKind::Branch26 {
+                Stencil::branch26(&mut me.a.bytes, at, to);
+            } else {
+                Stencil::rel32(&mut me.a.bytes, at, to);
+            }
         }
         Ok(Generated { bytes: me.a.bytes, relocs: me.relocs, exits: me.exits, values: me.values, calls: me.calls, arity: me.arity })
     }
@@ -835,7 +843,7 @@ impl<'g, 't> Stitch<'g, 't> {
                 (HoleKind::Abs64, Fill::Const(k)) => Stencil::abs64(&mut self.a.bytes, at, u.consts[k as usize]),
                 (HoleKind::Abs64, Fill::Sym(s)) => self.relocs.push((at, s)),
                 (HoleKind::Abs64, Fill::Target) => self.relocs.push((at, Sym::Target(u.target.unwrap_or(0)))),
-                (HoleKind::Rel32, Fill::Jump(k)) => self.jumps.push((at, u.jumps[k as usize])),
+                (HoleKind::Rel32 | HoleKind::Branch26, Fill::Jump(k)) => self.jumps.push((at, u.jumps[k as usize], kind)),
                 _ => {}
             }
         }

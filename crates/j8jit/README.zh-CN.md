@@ -7,12 +7,12 @@
 
 ```text
 j8bytecode::Function ─ build ─▶ 图 ─┬─ codegen.rs ─────────────────────▶ 机器码（缺省；x86-64、AArch64）
-                                    └─ stitch.rs：拷贝片段、填空位 ─▶ 机器码（J8_JIT_MLIR=1；x86-64）
-模板（图里每种指令一个）─ mlirpass 管线 + x86_64.rs，每个进程一次 ─▶ 片段
+                                    └─ stitch.rs：拷贝片段、填空位 ─▶ 机器码（J8_JIT_MLIR=1；x86-64、AArch64）
+模板（图里每种指令一个）─ mlirpass 管线 + x86_64.rs / aarch64.rs，每个进程一次 ─▶ 片段
 ```
 
 拼接这条路就是 [mlirpass](https://crates.io/crates/mlirpass) 的快路径（`Stencils`）：每个模板在进程第一次用 JIT 时走一遍管线
-和 x86-64 后端；之后编一个函数只是拷贝片段、填空位（帧槽、常量、跳到 deopt 出口），不再为每个函数构造 MLIR。
+和 x86-64 或 AArch64 后端；之后编一个函数只是拷贝片段、填空位（帧槽、常量、跳到 deopt 出口），不再为每个函数构造 MLIR。
 
 ```text
 调用 / 迭代没到阈值      ⇒ 计数，照常解释
