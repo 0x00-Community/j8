@@ -1267,7 +1267,7 @@ impl Executor<'_> {
                 Err(Error::Exception) => {
                     let v = a.take_exception();
                     if !Self::unwind(&mut st, v) {
-                        break Err(Error::Exception);
+                        break Err(a.throw_value(v));
                     }
                 }
                 Err(e) => break Err(e),

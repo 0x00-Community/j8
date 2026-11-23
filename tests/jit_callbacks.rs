@@ -225,11 +225,18 @@ fn completion(text: &str, tier: Tier) -> String {
         Tier::Default => Executor::default().with_tier(j8jit::Jit::default()),
     };
     let cx = isolate.enter(|scope| scope.mc.stash::<j8framework::RealmBrand>(scope.context(&Builtins).realm()));
-    let r = executor.eval(&mut isolate, &cx, &Source { text, file: "jit_callbacks.js" }).unwrap_or_else(|e| panic!("script failed ({}): {e:?}\n{text}", tier.label()));
+    let r = executor.eval(&mut isolate, &cx, &Source { text, file: "jit_callbacks.js" });
     isolate.enter(|scope| {
         let realm = scope.mc.fetch(&cx).into();
         let mut a = scope.agent(realm, &executor);
-        let v = a.local(&r);
+        let v = match &r {
+            Ok(g) => a.local(g),
+            Err(e) => {
+                let thrown = a.take_exception();
+                let thrown = a.to_string(thrown).map(|s| String::from(&**s)).unwrap_or_default();
+                panic!("script failed ({}): {e:?} {thrown}\n{text}", tier.label())
+            }
+        };
         String::from(&**a.to_string(v).unwrap_or_else(|e| panic!("ToString failed ({}): {e:?}\n{text}", tier.label())))
     })
 }

@@ -2,9 +2,9 @@
 
 use std::num::NonZeroUsize;
 
-use j8framework::{CreateParams, Isolate, JsStr};
+use j8framework::{CreateParams, GcSlot, Isolate, JsStr};
 use j8platform::DefaultPlatform;
-use paragc::{CrossHeapSpace, Shared, Slot, Trace, cross_heap_brand};
+use paragc::{CrossHeapSpace, Shared, Trace, cross_heap_brand};
 
 const THREADS: NonZeroUsize = NonZeroUsize::new(2).unwrap();
 
@@ -12,11 +12,11 @@ const THREADS: NonZeroUsize = NonZeroUsize::new(2).unwrap();
 #[derive(Trace, Shared)]
 struct Payload<'scope> {
     value: u64,
-    next: Slot<'scope, Payload<'scope>>,
+    next: GcSlot<'scope, Payload<'scope>>,
 }
 
-cross_heap_brand!(PayloadX = for<'p> Payload<'p>);
-cross_heap_brand!(StrX = for<'p> JsStr<'p>);
+cross_heap_brand!(PayloadX = for<'xheap, 'p> Payload<'p>);
+cross_heap_brand!(StrX = for<'xheap, 'p> JsStr<'p>);
 
 #[derive(Trace)]
 struct Local {
@@ -28,7 +28,7 @@ fn shared_objects_are_signed_when_the_turn_ends() {
     let space = CrossHeapSpace::reserve_fixed().unwrap();
     let platform = DefaultPlatform::default();
     let mut isolate = Isolate::new(&platform, CreateParams::default());
-    isolate.attach_cross_heap(space.create_anonymous(THREADS).unwrap()).unwrap();
+    isolate.attach_cross_heap(unsafe { space.create_anonymous_unchecked(THREADS) }.unwrap()).unwrap();
     let tickets = isolate.enter(|scope| {
         let m = scope.mc.gc_scope();
         let tail = m.alloc_shared(Payload { value: 1, next: None.into() });
@@ -43,11 +43,11 @@ fn shared_objects_are_signed_when_the_turn_ends() {
     let find = |ticket: u64| signed.iter().find(|(t, _)| *t == ticket).and_then(|(_, s)| *s);
     let sig = find(tickets.0).expect("a shareable object is signed once promoted");
     assert!(find(tickets.1).is_none(), "a private object gets no signature");
-    let read = |isolate: &Isolate<'_>| isolate.cross_heap().expect("attached").mutate(|cm| cm.resolve::<PayloadX>(&sig).map(|p| (p.value, p.next.get().map(|n| n.value))));
+    let read = |isolate: &Isolate<'_>| isolate.cross_heap().expect("attached").scope(|cm| cm.resolve::<PayloadX>(&sig).map(|p| (p.value, p.next.get().map(|n| n.value))));
     assert_eq!(read(&isolate), Some((42, Some(1))), "the receiver finds the object and what it points at");
     let text = |ticket: u64| {
         let sig = find(ticket).expect("a string is shareable");
-        isolate.cross_heap().expect("attached").mutate(|cm| cm.resolve::<StrX>(&sig).map(|s| (s.as_str().to_owned(), s.units().iter().collect::<Vec<u16>>())))
+        isolate.cross_heap().expect("attached").scope(|cm| cm.resolve::<StrX>(&sig).map(|s| (s.as_str().to_owned(), s.units().iter().collect::<Vec<u16>>())))
     };
     let long: String = (0..100).map(|i| format!("ab{i}")).collect();
     assert_eq!(text(tickets.2), Some((long.clone(), long.encode_utf16().collect())), "a string built by extending a buffer travels with its buffer");

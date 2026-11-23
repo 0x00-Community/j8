@@ -109,7 +109,10 @@ impl Executor<'_> {
             r.status = ModuleStatus::Evaluated;
             r.error = error;
         });
-        r
+        match error {
+            Some(v) => Err(a.throw_value(v)),
+            None => r,
+        }
     }
 
     pub fn load_script(&self, mc: &j8framework::Mutation<'_>, module: j8bytecode::Module, file: &str) -> j8framework::FuncId {
