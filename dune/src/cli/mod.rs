@@ -15,6 +15,8 @@ use run::Run;
 use upgrade::Upgrade;
 use x::{Dunx, X};
 
+pub use x::Os;
+
 #[derive(Parser)]
 #[command(about = "The j8 JavaScript runtime")]
 #[command(name = "dune", version, override_usage = Dune::USAGE)]
@@ -27,7 +29,7 @@ pub struct Dune {
     #[arg(help = "Run this source and print the result")]
     #[arg(short, long, conflicts_with = "argv")]
     print: Option<String>,
-    #[arg(help = "Enable the JIT: hot functions are compiled to x86-64 machine code (j8jit)")]
+    #[arg(help = "Enable the JIT: hot functions are compiled to x86-64 or AArch64 machine code (j8jit)")]
     #[arg(long, global = true)]
     jit: bool,
     #[arg(help = "Web-standard globals only (no `process`, `require` or `node:` modules); files run as ES modules")]

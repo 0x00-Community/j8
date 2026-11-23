@@ -14,7 +14,6 @@ const TIMEOUT: Duration = Duration::from_secs(300);
 const ARCHIVE_LIMIT: u64 = 1 << 30;
 const SUMS: &str = "SHA256SUMS";
 const EXE: &str = if cfg!(windows) { ".exe" } else { "" };
-const OS: &str = if cfg!(target_os = "macos") { "darwin" } else if cfg!(windows) { "win32" } else { "linux" };
 const CPU: &str = if cfg!(target_arch = "aarch64") { "arm64" } else { "x64" };
 
 #[derive(clap::Args)]
@@ -39,7 +38,8 @@ struct Asset {
 
 impl Default for Asset {
     fn default() -> Self {
-        Self { name: format!("dune-{OS}-{CPU}") }
+        let os: &str = crate::cli::Os::HOST.into();
+        Self { name: format!("dune-{os}-{CPU}") }
     }
 }
 
@@ -116,7 +116,7 @@ impl Upgrade {
         let sums = github.download(&tag, SUMS)?;
         Self::verify(&archive, &sums, &asset.archive())?;
         let binary = Self::extract(&archive, &asset.binary())?;
-        let exe = std::env::current_exe().and_then(|p| p.canonicalize()).map_err(|e| format!("this executable: {e}"))?;
+        let exe = std::env::current_exe().and_then(dunce::canonicalize).map_err(|e| format!("this executable: {e}"))?;
         Self::replace(&exe, &binary).map_err(|e| format!("{}: {e}", exe.display()))?;
         Ok(format!("dune {} ⇒ {tag} ({})", env!("CARGO_PKG_VERSION"), exe.display()))
     }

@@ -663,7 +663,7 @@ impl Call {
             Self::Symlink { target, path } => unit(Fd::symlink(target, path)),
             Self::Readlink { path } => std::fs::read_link(path).map(|p| Reply::Text(p.to_string_lossy().into_owned())),
             Self::Unlink { path } => unit(std::fs::remove_file(path)),
-            Self::Realpath { path } => std::fs::canonicalize(path).map(|p| Reply::Text(p.to_string_lossy().into_owned())),
+            Self::Realpath { path } => dunce::canonicalize(path).map(|p| Reply::Text(p.to_string_lossy().into_owned())),
             Self::CopyFile { from, to, mode } => {
                 const EXCL: u32 = 1;
                 if mode & EXCL != 0 && std::fs::symlink_metadata(to).is_ok() {
@@ -716,9 +716,11 @@ impl Uvfs {
     }
 
     fn module_stat(path: &str) -> i32 {
+        const FILE: i32 = 0;
+        const DIR: i32 = 1;
         match std::fs::metadata(path) {
-            Ok(m) if m.is_dir() => 1,
-            Ok(_) => 0,
+            Ok(m) if m.is_dir() => DIR,
+            Ok(_) => FILE,
             Err(e) => -Errno::code(&e),
         }
     }

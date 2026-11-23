@@ -1,6 +1,8 @@
 use alloc::vec::Vec;
 
 use super::{Alu, Cc, Label, Shift, R, RAX, RBP, RDX, RSP, SAVED, SAVED_END, X};
+#[cfg(windows)]
+use super::R11;
 use crate::ir::FloatOp;
 
 type H = u32;
@@ -475,10 +477,35 @@ impl Asm {
     pub fn enter(&mut self, frame: i32) {
         self.put(0xA9BF_0000 | LR << 10 | SP << 5 | FP);
         self.mov(FP, SP);
+        #[cfg(windows)]
+        self.probe_stack(frame - SAVED_END);
         self.add_imm(SP, FP, i64::from(SAVED_END - frame));
         for (i, r) in (1..).zip(SAVED) {
             self.store(RBP, -8 * i, r);
         }
+    }
+
+    #[cfg(windows)]
+    pub fn probe_stack(&mut self, frame: i32) {
+        const PAGE: i32 = 4096;
+        if frame < PAGE {
+            return;
+        }
+        self.mov_rr(R11, RSP);
+        self.mov_ri(RAX, u64::from(u32::try_from(frame).unwrap_or(0)));
+        let again = self.label();
+        self.bind(again);
+        self.alu_ri(Alu::Sub, true, R11, PAGE);
+        self.store(R11, 0, RAX);
+        self.alu_ri(Alu::Sub, true, RAX, PAGE);
+        self.alu_ri(Alu::Cmp, true, RAX, PAGE);
+        self.jcc(Cc::Ae, again);
+        let done = self.label();
+        self.test_rr(true, RAX, RAX);
+        self.jcc(Cc::E, done);
+        self.alu_rr(Alu::Sub, true, R11, RAX);
+        self.store(R11, 0, RAX);
+        self.bind(done);
     }
 
     pub fn leave(&mut self) {

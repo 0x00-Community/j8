@@ -3,7 +3,7 @@
 // index), and the entry point `native.runMain` (CommonJS, or an ES module by extension / package.json `type`).
 (function (native) {
   'use strict';
-  const { fs, codec } = native;
+  const { uvfs, codec } = native;
   const factories = Object.create(null);
   const builtins = Object.create(null);
 
@@ -22,12 +22,19 @@
   };
 
   const path = () => native.builtin('path');
+  const MODULE_FILE = 0;
+  const MODULE_DIR = 1;
   const text = (file) => {
-    const s = codec.utf8Decode(fs.readSync(file));
+    const outcome = uvfs.callSync({ op: 'readFile', target: file, flags: 0 });
+    if (outcome.length > 1) {
+      const [errno, syscall, path] = outcome;
+      throw new (native.requireLib('internal/errors').UVException)({ errno, syscall, path });
+    }
+    const s = codec.utf8Decode(outcome[0]);
     return s.charCodeAt(0) === 0xfeff ? s.slice(1) : s;
   };
-  const isFile = (p) => { try { return fs.statSync(p, true)[0] === 0; } catch { return false; } };
-  const isDir = (p) => { try { return fs.statSync(p, true)[0] === 1; } catch { return false; } };
+  const isFile = (p) => uvfs.moduleStat(p) === MODULE_FILE;
+  const isDir = (p) => uvfs.moduleStat(p) === MODULE_DIR;
   const readJson = (p) => { try { return JSON.parse(text(p)); } catch { return null; } };
 
   const EXTENSIONS = ['.js', '.json', '.cjs', '.mjs'];

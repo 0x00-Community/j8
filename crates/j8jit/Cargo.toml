@@ -13,6 +13,9 @@ j8bytecode.workspace = true
 j8executor.workspace = true
 mlirpass.workspace = true
 libc.workspace = true
+region.workspace = true
+clear-cache.workspace = true
+moremath.workspace = true
 
 [lints]
 workspace = true

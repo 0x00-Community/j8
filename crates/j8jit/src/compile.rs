@@ -45,7 +45,7 @@ impl Compiler {
         let failed = |e: mlirpass::mlirformat::Error| CompileError::Backend(e.0);
         let mut body = Body::parse(Ctx::new(&self.opt, &self.interfaces), mlir).map_err(failed)?;
         let root = body.root;
-        self.pipeline.run(&mut body, root).map_err(failed)?;
+        self.pipeline.run_on(&mut body, root, &moremath::ThreadSingle).map_err(failed)?;
         backend.emit(&body, body.root).map_err(failed)
     }
 }

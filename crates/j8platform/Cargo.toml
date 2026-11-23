@@ -8,6 +8,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+dunce.workspace = true
 j8framework.workspace = true
 moremath = { workspace = true, features = ["std"] }
 

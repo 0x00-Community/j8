@@ -1,7 +1,7 @@
 mod http;
 mod timer;
 
-use std::io::{Read, Write};
+use std::io::Write;
 
 use j8::frame::Agent;
 use j8::Bytes;
@@ -123,8 +123,7 @@ pub struct Random;
 impl Random {
     fn bytes(n: usize) -> Bytes {
         let mut out = vec![0; n];
-        let filled = std::fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut out));
-        filled.expect("reading /dev/urandom");
+        getrandom::fill(&mut out).expect("the system random source");
         Bytes(out)
     }
 }

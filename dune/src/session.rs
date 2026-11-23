@@ -29,15 +29,7 @@ pub struct Session<'p> {
 
 impl<'p> Session<'p> {
     pub fn new<H: Host>(set: &j8::EventLoopSet<'_, 'p, Executor>, jit: bool) -> Self {
-        #[cfg(all(unix, target_arch = "x86_64"))]
         let executor = if jit { Executor::default().with_tier(j8::jit::Jit::default()) } else { Executor::default() };
-        #[cfg(not(all(unix, target_arch = "x86_64")))]
-        let executor = {
-            if jit {
-                eprintln!("dune: --jit needs x86-64 on Linux or macOS; running without it");
-            }
-            Executor::default()
-        };
         match Runtime::on::<H>(set, executor) {
             Ok(rt) => Self { rt },
             Err(e) => {
