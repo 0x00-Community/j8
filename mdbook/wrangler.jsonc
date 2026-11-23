@@ -15,7 +15,7 @@
 		{ "pattern": "j8.app238.com", "custom_domain": true }
 	],
 	"observability": {
-		"enabled": true
+		"enabled": false
 	},
 	"upload_source_maps": true
 	/**
