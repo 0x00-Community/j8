@@ -7,10 +7,11 @@
 
 ## `#[j8::class]`：Rust 类型导出为 JS 类
 
-放在 `impl` 块上：为每个方法生成转换包装（`fn(agent, this, args) -> Result<Value>`）并实现 `j8::Class`。类型本身不用改；
-实例是持有 Rust 值的宿主对象（`ObjectKind::Host`）。
+放在 `impl` 块上：为每个方法生成转换包装（`fn(agent, this, args) -> Result<Value>`）并实现 `j8::Class`。实例是宿主对象（`ObjectKind::Host`）：
+Rust 值放在 JS 对象里、在 GC 堆中，所以类型要派生 `j8::Trace`，回收器才看得到它持有的每个 JS 值。
 
 ```rust,ignore
+#[derive(j8::Trace)]
 struct Counter { n: f64 }
 
 #[j8::class]                      // 或 #[j8::class("name")]；缺省是类型名
@@ -36,6 +37,7 @@ let obj = handle.instance(&agent, Counter { n: 1.0 });   // 从 Rust 建实例
 ### 继承：`#[j8::class(extends = Base)]`
 
 ```rust,ignore
+#[derive(j8::Trace)]
 struct Dog { base: Animal, tricks: u32 }
 
 impl AsRef<Animal> for Dog { fn as_ref(&self) -> &Animal { &self.base } }
@@ -108,14 +110,15 @@ import fs, { existsSync } from "node:fs";
 | `&str` | ToString 后借用 |
 | 其他 | 依次用 `FromJs` 转换：`f64` / `i32` / `u32` / `usize` / `bool` / `String` / `JsString` / `JsObject` / `Value` / `Option<T>` / `Vec<T>` |
 
-返回值用 `IntoJs` 转换；`Result<T, Error>` 在 `Err` 时抛出。参数里的生命周期写成 `'gc`。
+返回值用 `IntoJs` 转换；`Result<T, Error>` 在 `Err` 时抛出。参数里的生命周期写成 `'scope`。
 
 句柄类型：
 
 | 类型 | 作参数 | 作返回值 |
 |---|---|---|
-| `j8::Persistent` | 跨 `enter` 保留任意 JS 值（存进宿主结构体；`.get(a)` 读） | `&Persistent` 把值还回去 |
-| `j8::Function` | 可调用的 `Persistent`（不可调用抛 `TypeError`）；`.call(a, this, args)` | `&Function` |
+| `Value<'scope>` / `JsObject<'scope>` | 任意 JS 值；作为 class 的字段是被追踪的边 | 值本身 |
+| `j8::Function<'scope>` | 可调用的值（不可调用抛 `TypeError`）；`.call(a, this, args)`；作为字段是被追踪的边 | 这个函数 |
+| `ScopeGlobal<'p, ValueBrand>` | 根：给堆外的代码（线程、通道、Rust 结构体）留住一个 JS 值；`a.local(&g)` 读 | `&ScopeGlobal` 把值还回去 |
 | `j8::Bytes` | `ArrayBuffer` / TypedArray / `DataView` 的字节 | 新 `Uint8Array` |
 | `j8::Promise<T>` | JS promise（像 `await` 那样接收），在 Rust 里 `.await` | — |
 | `j8::Json<T>`（feature `json`） | 任何 `serde::Deserialize` 类型，经 `JSON.stringify` 读 | 任何 `serde::Serialize` 类型，经 `JSON.parse` 造 |
@@ -136,8 +139,8 @@ fn must(a: &mut Agent<'_, '_>, name: &str) -> Result<String, Error> {
 ```rust,ignore
 pub struct Io<T>(pub Result<T, Failure>);
 
-impl<'gc, T: IntoJs<'gc>> IntoJs<'gc> for Io<T> {
-    fn into_js(self, a: &mut Agent<'gc, '_>) -> Result<Value<'gc>, Error> {
+impl<'scope, T: IntoJs<'scope>> IntoJs<'scope> for Io<T> {
+    fn into_js(self, a: &mut Agent<'scope, '_>) -> Result<Value<'scope>, Error> {
         match self.0 {
             Ok(v) => v.into_js(a),
             Err(f) => Err(a.throw(f.kind, &f.message)),   // "ENOENT: no such file or directory, open 'a.txt'"
@@ -150,8 +153,36 @@ impl<'gc, T: IntoJs<'gc>> IntoJs<'gc> for Io<T> {
 
 ## 绑定类型的要求
 
-- `#[j8::class]` 类型存在 JS 对象里，所以必须 `Send + Sync + 'static`。和线程共享的状态用 `Arc` / 原子量
-  （见 `dune/src/web/timer.rs` 的 `Timer`）。
+- `#[j8::class]` 类型存在 JS 对象里、在 GC 堆中：它是 `Send + Sync`，派生 `j8::Trace`，可以带 `'scope` 生命周期
+  （`struct Hooks<'scope>`、`impl<'scope> Hooks<'scope>`）。它的 JS 值是字段（`Value<'scope>`、`j8::Function<'scope>` …），
+  回收器追踪它们、随对象一起搬。既不是 JS 值、也没有实现 `Trace` 的字段（`Arc`、连接）标 `#[collect(require_static)]`。
+  和线程共享的状态用 `Arc` / 原子量（见 `dune/src/web/timer.rs` 的 `Timer`）。
 - 方法回调 JS、JS 又碰到同一个对象（已借用时再要 `&mut self`）会抛 `TypeError`，不会 panic。
-- ⛔ 在结构体里存 `Value` / `JsObject`：它会活过它的 `enter`。存 `j8::Persistent`（或 `j8::Function`）。它们都是 GC 根：
-  经由宿主对象形成的环，要等那个宿主对象被丢掉才释放。
+- class 的 JS 字段是边、不是根，所以经由宿主对象形成的环（回调捕获了持有它的对象）和别的垃圾一样被回收。`ScopeGlobal`
+  是根：只放在堆外，⛔ 放进 class 的字段。
+- 宿主对象和它的 JS 包装是同一个对象：它活着的时候，从任何路径拿到的都是同一个 JS 对象。
+- class 的 `Drop` 不能读它的 JS 字段：`Drop` 运行时它们可能已经不在了。
+- 生命周期：`'scope` 是堆里值唯一的生命周期；不持有 JS 值的 class 不需要生命周期。
+
+```rust,ignore
+#[derive(Default, j8::Trace)]
+struct Hooks<'scope> {
+    on: Option<j8::Function<'scope>>,
+    kept: Option<Value<'scope>>,
+}
+
+#[j8::class]
+impl<'scope> Hooks<'scope> {
+    #[js(constructor)]
+    fn new() -> Self { Self::default() }
+
+    fn set(&mut self, f: j8::Function<'scope>, keep: Value<'scope>) { self.on = Some(f); self.kept = Some(keep); }
+
+    fn fire(&self, a: &mut Agent<'scope, '_>, x: f64) -> Result<Value<'scope>, Error> {
+        match self.on {
+            Some(f) => f.call(a, Value::Undefined, &[x.into(), self.kept.unwrap_or(Value::Undefined)]),
+            None => Ok(Value::Undefined),
+        }
+    }
+}
+```

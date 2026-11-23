@@ -21,6 +21,7 @@ and implements `j8::Class`. The type itself needs no changes; instances are host
 Rust value.
 
 ```rust
+#[derive(j8::Trace)]
 struct Counter { n: f64 }
 
 #[j8::class]                      // or #[j8::class("name")]; defaults to the type name
@@ -46,6 +47,7 @@ let obj = handle.instance(&agent, Counter { n: 1.0 });  // create an instance fr
 #### Inheritance: `#[j8::class(extends = Base)]`
 
 ```rust
+#[derive(j8::Trace)]
 struct Dog { base: Animal, tricks: u32 }
 
 impl AsRef<Animal> for Dog { fn as_ref(&self) -> &Animal { &self.base } }
@@ -153,10 +155,11 @@ Besides plain values, these handle types:
 
 | Type | As a parameter | As a return value |
 |---|---|---|
-| `j8::Persistent` | keeps any JS value across `enter` calls (store it in the host struct; `.get(a)` reads it) | `&Persistent` gives the value back |
-| `j8::Function` | a callable `Persistent` (`TypeError` if not callable); `.call(a, this, args)` | `&Function` |
+| `Value<'scope>` / `JsObject<'scope>` | any JS value; as a field of a class it is a traced edge | the value itself |
+| `j8::Function<'scope>` | a callable value (`TypeError` if not callable); `.call(a, this, args)`; as a field, a traced edge | the function |
+| `ScopeGlobal<'p, ValueBrand>` | a root: keeps a JS value for code outside the heap (a thread, a channel, a Rust struct); `a.local(&g)` reads it | `&ScopeGlobal` gives the value back |
 | `j8::Bytes` | the bytes of an `ArrayBuffer` / typed array / `DataView` | a new `Uint8Array` |
-| `j8::Promise<T>` | a JS promise (taken like `await` takes it) to `.await` in Rust: `Result<T, Error>`, the rejection as `Error::Exception` | — |
+| `j8::Promise<T>` | a JS promise (taken like `await` takes it) to `.await` in Rust: `Result<T, Error>`, the rejection parked in the isolate as `Error::Parked` (returning it settles with the same reason) | — |
 | `j8::Json<T>` (feature `json`) | any `serde::Deserialize` type, read through `JSON.stringify` (`TypeError` if it doesn't fit) | any `serde::Serialize` type, made through `JSON.parse` |
 
 `async fn` bindings (associated functions with owned parameters) return a promise at once; the future runs on the
@@ -171,8 +174,10 @@ impl Later {
 }
 ```
 
-A `Persistent` is a GC root: a host object that stores a value reaching back to the host object keeps both alive until
-the host object is dropped from Rust.
+A class is traced: its JS fields (`Value<'scope>`, `j8::Function<'scope>`) are edges, so a host object that stores a
+value reaching back to itself is collected like any other cycle. The class derives `j8::Trace`; fields that are neither
+JS values nor `Trace` (an `Arc`, a connection) take `#[collect(require_static)]`. A `ScopeGlobal` is a root and belongs
+outside the heap only.
 
 Parameters are taken by type: `&mut Agent` receives the current agent; `This` is the raw `this`; `Rest` is all remaining
 arguments; `&str` is converted with ToString and then borrowed; anything else is converted in order with `FromJs`
@@ -183,8 +188,8 @@ Return values are converted with `IntoJs`; `Result<T, Error>` throws on error. W
 ## Heap structs inside j8: `#[j8framework::heap]`
 
 For j8's own heap types (not for embedders). Fields marked `#[mutable]` change in place: a field `x: T` is kept in
-the cell `j8framework::Mutable` picks for `T` — `Value` ⇒ `ValueCell`, `Gc` / `Option<Gc>` (and aliases such as
-`JsObject`) ⇒ a paragc `Slot`, `bool` / integers ⇒ atomics, `f64` ⇒ an `AtomicU64` of its bits — and gets
+the cell `j8framework::Mutable` picks for `T` — `Value` ⇒ `ValueCell`, `ScopeLocal` / `Option<ScopeLocal>` (and aliases
+such as `JsObject`) ⇒ a paragc `Slot`, `bool` / integers ⇒ atomics, `f64` ⇒ an `AtomicU64` of its bits — and gets
 `x(&self) -> T` plus `set_x(&self, mc, v)` (through the write barrier where it matters). `#[mutable(set = name)]` renames
 the setter (to wrap it in one of your own); `#[derive(Collect)]` is added when missing; `#[j8framework::heap(new)]`
 also generates `new` taking every field in order.

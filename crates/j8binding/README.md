@@ -9,12 +9,13 @@ Rust ⇄ JavaScript bindings for [j8](https://github.com/0x00-Community/j8), the
 - `FromJs` / `IntoJs`: converting arguments and return values (numbers, booleans, strings, `Option`, `Vec`, objects,
   `Result` …)
 - `Class` / `Object`: a Rust type exported as a JS class / a plain object of functions
-- Host objects: a JS object holding a Rust value (`Box<dyn Any + Send + Sync>` behind a lock-free borrow flag), taken out
-  in methods as `&self` / `&mut self`; a re-entrant `&mut self` call throws a `TypeError`
+- Host objects: a JS object holding a Rust value, traced by the collector (the type derives `j8::Trace`; its JS values
+  are fields), taken out in methods as `&self` / `&mut self`; a re-entrant `&mut self` call throws a `TypeError`
 
 ## Usage
 
 ```rust
+#[derive(j8::Trace)]
 struct Counter { n: f64 }
 
 #[j8::class]

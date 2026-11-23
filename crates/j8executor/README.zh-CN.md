@@ -2,7 +2,8 @@
 
 [English](README.md) · **简体中文**
 
-[j8](https://github.com/0x00-Community/j8) 的字节码执行器：执行 `j8bytecode` 的累加器式寄存器字节码，实现 `j8framework::Engine`。
+[j8](https://github.com/0x00-Community/j8) 的字节码执行器：执行 `j8bytecode` 的累加器式寄存器字节码（`Executor<'p>`：`eval`，可续跑的
+`start` / `resume`），并驱动 JS 事件循环（`EventLoop` / `EventLoopSet`）。
 
 ## 怎么跑
 

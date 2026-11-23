@@ -4,7 +4,7 @@
 把全局对象、全局函数和全部内建构造器、原型、方法装进去。
 
 ```rust,ignore
-let cx = isolate.enter(|scope| scope.persist(scope.context(&j8builtins::Builtins)));
+let cx = isolate.enter(|scope| scope.mc.stash::<RealmBrand>(scope.context(&j8builtins::Builtins).realm()));
 ```
 
 `j8framework` 只定义 `Intrinsics` 接口，这里是缺省实现；宿主可以换掉或裁剪。j8builtins **只依赖 `j8framework`**，

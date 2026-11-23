@@ -19,10 +19,10 @@
 
 | crate | 职责 |
 |---|---|
-| `j8framework` | 核心框架层：定义各层要实现的 trait（`Platform`、`Engine`、`Invoke`、`Intrinsics`）和共用的结构体（`Isolate`、`Scope`、`Agent`、`Context` / `Realm`、`Value`、对象模型、事件循环）。JS 运算语义挂在 `Agent` 上。不依赖任何其他层 |
+| `j8framework` | 核心框架层：定义各层要实现的 trait（`Platform`、`Invoke`、`Intrinsics`）和共用的结构体（`Isolate`、`Scope`、`Agent`、`Context` / `Realm`、`Value`、对象模型、宿主对象）。JS 运算语义挂在 `Agent` 上。不依赖任何其他层 |
 | `j8bytecode` | 字节码定义，与 V8 Ignition 逐字节一致；依赖根，不依赖其他 j8 crate |
 | `j8compiler` | JS ⇒ 字节码（oxc 解析，代码生成照 V8 的 `BytecodeGenerator`） |
-| `j8executor` | 字节码执行器：实现 `Engine`，带内联缓存、分片执行与 JIT 钩子 |
+| `j8executor` | 字节码执行器 `Executor<'p>`（`eval`，可续跑的 `start` / `resume`），带内联缓存、分片执行、JIT 钩子，以及驱动它的事件循环 |
 | `j8jit` | 推测式 JIT（x86-64 Unix 和 Windows）：实现执行器的 `Tier` |
 | `j8builtins` | 标准内建对象：实现 `Intrinsics` |
 | `j8platform` | `Platform` 的标准库实现：线程池、时钟、模块加载 |
@@ -44,7 +44,6 @@
 |---|---|---|
 | `Platform`（父 trait `Pool`） | `j8platform::DefaultPlatform`、宿主自己的平台 | 线程池、时钟、`console.log` 输出、模块加载 |
 | `Intrinsics` | `j8builtins::Builtins` | 往新 `Realm` 装全局对象与内建构造器 |
-| `Engine` | `j8executor::Executor` | 执行入口：`eval`，可续跑的 `start` / `resume` |
 | `Invoke` | 执行器 | 内建函数回调 JS（`map` 的回调、getter……） |
 | `Tier` | `j8jit::Jit` | 执行器问「这个函数 / 循环要不要编」 |
 
@@ -64,7 +63,7 @@
    推测性 SSA 图（`s`、`i` 猜成 int32），优化后直接出 x86-64 机器码，从循环头切进去跑（OSR）。
 5. **去优化。** 推测落空（比如 `s` 超过 int32），守卫跳到冷路径，`j8_deopt` 按记下的帧状态重建解释器帧，
    解释器接着跑；JIT 留下提示，下次编译那里改用 double。
-6. **结束。** 结果是一个 `Value`（一个 NaN-boxing 的机器字），宿主拿到 `Global` 句柄，`ToString` 后打印。
+6. **结束。** 结果是一个 `Value`（一个 NaN-boxing 的机器字），宿主拿到 `ScopeGlobal` 根，`ToString` 后打印。
    事件循环里没有剩下的宿主任务，进程退出。
 
 接下来的章节按这条路逐段展开：[字节码](bytecode.md) → [编译器](compiler.md) → [执行器](executor.md) →

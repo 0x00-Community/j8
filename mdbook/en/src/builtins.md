@@ -5,7 +5,7 @@
 prototype and method.
 
 ```rust,ignore
-let cx = isolate.enter(|scope| scope.persist(scope.context(&j8builtins::Builtins)));
+let cx = isolate.enter(|scope| scope.mc.stash::<RealmBrand>(scope.context(&j8builtins::Builtins).realm()));
 ```
 
 `j8framework` only defines `Intrinsics`; this is the default implementation, and hosts can replace or trim it.

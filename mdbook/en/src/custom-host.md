@@ -7,7 +7,7 @@ concentrates on the two places where JavaScript and Rust have to hand control ba
 ## The bridge in one picture
 
 ```text
- JS call ─▶ generated wrapper ─▶ your Rust fn(&mut Agent<'gc>, …)          ◀── synchronous: values live for 'gc
+ JS call ─▶ generated wrapper ─▶ your Rust fn(&mut Agent<'scope>, …)          ◀── synchronous: values live for 'scope
                                       │
                                       ├─ returns T: IntoJs ─────────────────▶ JS value
                                       │
@@ -20,8 +20,8 @@ concentrates on the two places where JavaScript and Rust have to hand control ba
 
 Three rules follow from it, and everything in this chapter is a consequence of them:
 
-1. **A `Value<'gc>` / `JsObject<'gc>` exists only during one call.** To keep a JS value longer, store a
-   `j8::Persistent` or `j8::Function` (both are GC roots and `Send`).
+1. **A `Value<'scope>` / `JsObject<'scope>` exists only during one call.** To keep a JS value longer, store a
+   `ScopeGlobal<'p, ValueBrand>` (a root, `Send`); inside a class, a `Value<'scope>` field is a traced edge.
 2. **A future has no `Agent`.** It cannot read a JS value, call a JS function or step a JS iterator. It can only
    compute and wait; it gets the `Agent` back once, at the very end, through the `Settle` it returns.
 3. **A future must wake its waker**, or `run_until_idle` parks forever (see [Async and promises](async.md)).
@@ -49,8 +49,8 @@ carried out of a future, where no `Agent` exists yet:
 ```rust,ignore
 pub struct Step<T>(pub Option<T>);   // Some(v) ⇒ { value: v, done: false }, None ⇒ { value: undefined, done: true }
 
-impl<'gc, T: IntoJs<'gc>> IntoJs<'gc> for Step<T> {
-    fn into_js(self, a: &mut Agent<'gc, '_>) -> Result<Value<'gc>, Error> {
+impl<'scope, T: IntoJs<'scope>> IntoJs<'scope> for Step<T> {
+    fn into_js(self, a: &mut Agent<'scope, '_>) -> Result<Value<'scope>, Error> {
         let (value, done) = match self.0 {
             Some(v) => (v.into_js(a)?, false),
             None => (Value::Undefined, true),
@@ -66,7 +66,8 @@ A JS iterator is any object with `next()`. A `#[j8::class]` with a `next` method
 exits (`break`, destructuring, a throwing loop body) reach Rust.
 
 ```rust,ignore
-struct Range { next: f64, end: f64, step: f64, closed: Arc<AtomicBool> }
+#[derive(j8::Trace)]
+struct Range { next: f64, end: f64, step: f64, #[collect(require_static)] closed: Arc<AtomicBool> }
 
 #[j8::class]
 impl Range {
@@ -139,7 +140,7 @@ impl Sink {
 `finally`, a `Range`'s `return`):
 
 ```rust,ignore
-fn sum_until<'gc>(a: &mut Agent<'gc, '_>, iterable: Value<'gc>, limit: f64) -> Result<f64, Error> {
+fn sum_until<'scope>(a: &mut Agent<'scope, '_>, iterable: Value<'scope>, limit: f64) -> Result<f64, Error> {
     let it = a.get_iterator(iterable)?;
     let mut sum = 0.0;
     while let Some(v) = a.iterator_step(it)? {
@@ -152,7 +153,7 @@ fn sum_until<'gc>(a: &mut Agent<'gc, '_>, iterable: Value<'gc>, limit: f64) -> R
     Ok(sum)
 }
 
-fn each<'gc>(a: &mut Agent<'gc, '_>, iterable: Value<'gc>, f: Function) -> Result<u32, Error> {
+fn each<'scope>(a: &mut Agent<'scope, '_>, iterable: Value<'scope>, f: Function) -> Result<u32, Error> {
     let it = a.get_iterator(iterable)?;
     let mut n = 0;
     while let Some(v) = a.iterator_step(it)? {
@@ -195,7 +196,7 @@ async fn doubled(p: Promise<f64>) -> Result<f64, Error> {
 future, and end the future with `Glue::settle(value)`:
 
 ```rust,ignore
-fn later<'gc>(&self, a: &mut Agent<'gc, '_>, ms: f64) -> Result<Value<'gc>, Error> {
+fn later<'scope>(&self, a: &mut Agent<'scope, '_>, ms: f64) -> Result<Value<'scope>, Error> {
     let wait = Duration::from_secs_f64(ms / 1000.0);
     let label = self.label.clone();                         // clone out of self: the future is 'static
     Glue::spawn(a, async move {
@@ -212,7 +213,7 @@ fn later<'gc>(&self, a: &mut Agent<'gc, '_>, ms: f64) -> Result<Value<'gc>, Erro
 that moment — here, call a JS callback whose result becomes the promise's value:
 
 ```rust,ignore
-fn after<'gc>(a: &mut Agent<'gc, '_>, ms: f64, f: Function) -> Result<Value<'gc>, Error> {
+fn after<'scope>(a: &mut Agent<'scope, '_>, ms: f64, f: Function) -> Result<Value<'scope>, Error> {
     let wait = Duration::from_secs_f64(ms / 1000.0);
     Glue::spawn(a, async move {
         Offload::new(move || std::thread::sleep(wait)).await;
@@ -242,7 +243,7 @@ catch (e) { e instanceof TypeError && e.message === 'nope' }  // true
 promise with `FromJs`, then await that inside the future:
 
 ```rust,ignore
-fn call_async<'gc>(a: &mut Agent<'gc, '_>, f: Function, x: f64) -> Result<Value<'gc>, Error> {
+fn call_async<'scope>(a: &mut Agent<'scope, '_>, f: Function, x: f64) -> Result<Value<'scope>, Error> {
     let p = f.call(a, Value::Undefined, &[x.into()])?;
     let p = <Promise<String> as j8::FromJs>::from_js(a, p)?;
     Glue::spawn(a, async move { Glue::settle(p.await.map(|s| format!("rust saw {s}"))) })
@@ -263,6 +264,7 @@ An async iterator is an object whose `next()` returns a promise of `{ value, don
 `Glue::settle(Step(…))`.
 
 ```rust,ignore
+#[derive(j8::Trace)]
 struct Ticker { left: u32, every: Duration }
 
 #[j8::class]
@@ -272,7 +274,7 @@ impl Ticker {
         Self { left: count, every: Duration::from_secs_f64(ms / 1000.0) }
     }
 
-    fn next<'gc>(&mut self, a: &mut Agent<'gc, '_>) -> Result<Value<'gc>, Error> {
+    fn next<'scope>(&mut self, a: &mut Agent<'scope, '_>) -> Result<Value<'scope>, Error> {
         let tick = (self.left > 0).then_some(self.left);    // state changes now, in call order
         self.left = self.left.saturating_sub(1);
         let every = self.every;
@@ -305,6 +307,7 @@ after every await, and a future has no `Agent` (rule 2). Let JavaScript drive th
 a few lines of prelude on a bound class:
 
 ```rust,ignore
+#[derive(j8::Trace)]
 struct Collector { items: Vec<String> }
 
 #[j8::class]

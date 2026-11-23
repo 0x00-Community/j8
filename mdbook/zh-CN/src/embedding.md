@@ -81,8 +81,8 @@ fn main() -> ExitCode {
                 println!("{}", rt.text(&g));
                 ExitCode::SUCCESS
             }
-            Err(Error::Exception(g)) => {
-                eprintln!("Uncaught {}", rt.text(&g));
+            Err(Error::Exception) => {
+                eprintln!("Uncaught {}", rt.exception_text());
                 ExitCode::FAILURE
             }
             Err(e) => {
@@ -100,7 +100,8 @@ fn main() -> ExitCode {
 2. `j8::EventLoopSet::scope(&platform, threads, |set| …)` 在闭包期间起好运行时要住的 loop 线程。
 3. `X::runtime(set, executor)` 在负载最轻的 loop 线程上建 isolate 和上下文、装好一切、跑序言。序言抛异常在这里以
    `Err` 返回。之后的每次调用（`eval`、`enter`、`run_until_idle`）都是发给那个线程的消息，并等它回答；任何宿主线程都能发。
-4. `rt.eval(text, file)` 跑一段脚本，返回 `Global`（活过这次调用的句柄），`rt.text(&g)` 按 ToString 转成字符串。
+4. `rt.eval(text, file)` 跑一段脚本，返回 `ScopeGlobal<'p, ValueBrand>`（活过这次调用的根），`rt.text(&g)` 按 ToString
+   转成字符串。
 5. `rt.run_until_idle()` 等到没有剩下的异步宿主任务。绑定里有 `async fn` 或返回 promise 时，每次 `eval` 之后都要调它，
    否则那些 promise 永远不会兑现。
 
@@ -160,13 +161,13 @@ rt.run_until_idle()?;
 ```
 
 更底层的活用 `rt.enter(|a| …)`，拿到上下文的 `Agent`（`a.get_named`、`a.call`、`a.local`、`a.to_string` ……）。
-`Value` 出不了闭包，之后还要用就换成 `Global`（`a.global(v)`）。
+`Value` 出不了闭包，之后还要用就用 `a.global(v)` 挂到根上（`ScopeGlobal<'p, ValueBrand>`）。
 
 ## Error 的含义
 
 | 变体 | 含义 | 宿主怎么做 |
 |---|---|---|
-| `Error::Exception(g)` | JS 抛了，`g` 是抛出的值 | `rt.text(&g)` ⇒ `Uncaught …` |
+| `Error::Exception` | JS 抛了，值照 V8 等在 isolate 的待处理槽里 | `rt.exception_text()` ⇒ `Uncaught …` |
 | `Error::Syntax(msg)` | 源码解析不了 | 打印 `msg` |
 | `Error::Unsupported(msg)` | j8 还不支持的写法 | 打印 `msg` |
 

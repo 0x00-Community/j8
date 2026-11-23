@@ -1,6 +1,6 @@
 # 执行器：解释字节码
 
-`crates/j8executor` 执行 [V8 字节码](bytecode.md)，实现 `j8framework::Engine`。它目前是 j8 的最后一层：固定带着
+`crates/j8executor` 执行 [V8 字节码](bytecode.md)：`Executor<'p>` 是执行入口，事件循环也在这里。它目前是 j8 的最后一层：固定带着
 [编译器](compiler.md)，脚本、模块、`eval` / `Function` 都先编成字节码再跑。
 
 ## 一个 Executor 服务一个 isolate
@@ -46,8 +46,8 @@ handler(cx, pc, regs, acc)  ─ 做完 ─▶  直接跳到下一条指令的 ha
 
 ## 分片执行
 
-`Engine::eval` 拿 `&mut Isolate`，自己分片进入：每片最多一万条指令，停下时把执行状态挂到根上、让堆回收一段，
-再接着跑。执行环境用 `ContextRoot` 跨片保留。每 1024 条指令检查一次预算与终止请求——在事件循环里，这就是检查
+`Executor::eval` 拿 `&mut Isolate`，自己分片进入：每片最多一万条指令，停下时把执行状态挂到根上、让堆回收一段，
+再接着跑。执行环境以 `ScopeGlobal<'p, RealmBrand>` 跨片保留。每 1024 条指令检查一次预算与终止请求——在事件循环里，这就是检查
 任务队列的时机（[事件循环](event-loop.md)）。
 
 已知偏差：宿主函数里重入的 JS（如 `map` 的回调）在当前片里跑完，期间不回收。`Function.prototype.call` / `apply`
@@ -100,7 +100,7 @@ let executor = Executor::default().with_cache(Arc::clone(&code));
 
 ```rust,ignore
 let mut executor = j8executor::Executor::default();
-let result = isolate.run(&mut executor, &cx, &j8framework::Source { text: "1 + 2", file: "a.js" })?;
+let result = executor.eval(&mut isolate, &cx, &j8framework::Source { text: "1 + 2", file: "a.js" })?;
 ```
 
 `javascript_semantics` 测试是一张逐条确定的 JS 语义表。

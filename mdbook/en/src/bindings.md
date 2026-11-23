@@ -9,9 +9,11 @@ A worked example focused on iterators and async in both directions: [Custom cont
 ## `#[j8::class]`: a Rust type as a JS class
 
 On an `impl` block: generates a conversion wrapper (`fn(agent, this, args) -> Result<Value>`) for each method and
-implements `j8::Class`. The type needs no changes; instances are host objects (`ObjectKind::Host`) holding a Rust value.
+implements `j8::Class`. Instances are host objects (`ObjectKind::Host`): the Rust value lives inside the JS object, in the
+GC heap, so the type derives `j8::Trace` and the collector sees every JS value it holds.
 
 ```rust,ignore
+#[derive(j8::Trace)]
 struct Counter { n: f64 }
 
 #[j8::class]                      // or #[j8::class("name")]; defaults to the type name
@@ -37,6 +39,7 @@ let obj = handle.instance(&agent, Counter { n: 1.0 });   // an instance made fro
 ### Inheritance: `#[j8::class(extends = Base)]`
 
 ```rust,ignore
+#[derive(j8::Trace)]
 struct Dog { base: Animal, tricks: u32 }
 
 impl AsRef<Animal> for Dog { fn as_ref(&self) -> &Animal { &self.base } }
@@ -111,14 +114,15 @@ Parameters are taken **by type**:
 | `&str` | ToString, then borrowed |
 | anything else | converted in order with `FromJs`: `f64` / `i32` / `u32` / `usize` / `bool` / `String` / `JsString` / `JsObject` / `Value` / `Option<T>` / `Vec<T>` |
 
-Return values go through `IntoJs`; `Result<T, Error>` throws on `Err`. Write lifetimes in parameters as `'gc`.
+Return values go through `IntoJs`; `Result<T, Error>` throws on `Err`. Write lifetimes in parameters as `'scope`.
 
 Handle types:
 
 | Type | As a parameter | As a return value |
 |---|---|---|
-| `j8::Persistent` | keeps any JS value across `enter` calls (store it in the host struct; `.get(a)` reads it) | `&Persistent` gives the value back |
-| `j8::Function` | a callable `Persistent` (`TypeError` if not callable); `.call(a, this, args)` | `&Function` |
+| `Value<'scope>` / `JsObject<'scope>` | any JS value; as a field of a class it is a traced edge | the value itself |
+| `j8::Function<'scope>` | a callable value (`TypeError` if not callable); `.call(a, this, args)`; as a field, a traced edge | the function |
+| `ScopeGlobal<'p, ValueBrand>` | a root: keeps a JS value for code outside the heap (a thread, a channel, a Rust struct); `a.local(&g)` reads it | `&ScopeGlobal` gives the value back |
 | `j8::Bytes` | the bytes of an `ArrayBuffer` / TypedArray / `DataView` | a new `Uint8Array` |
 | `j8::Promise<T>` | a JS promise (taken like `await` takes it), `.await`ed in Rust | — |
 | `j8::Json<T>` (feature `json`) | any `serde::Deserialize` type, read through `JSON.stringify` | any `serde::Serialize` type, made through `JSON.parse` |
@@ -139,8 +143,8 @@ When the error is only known later, or you want structured errors (Node's `err.c
 ```rust,ignore
 pub struct Io<T>(pub Result<T, Failure>);
 
-impl<'gc, T: IntoJs<'gc>> IntoJs<'gc> for Io<T> {
-    fn into_js(self, a: &mut Agent<'gc, '_>) -> Result<Value<'gc>, Error> {
+impl<'scope, T: IntoJs<'scope>> IntoJs<'scope> for Io<T> {
+    fn into_js(self, a: &mut Agent<'scope, '_>) -> Result<Value<'scope>, Error> {
         match self.0 {
             Ok(v) => v.into_js(a),
             Err(f) => Err(a.throw(f.kind, &f.message)),   // "ENOENT: no such file or directory, open 'a.txt'"
@@ -154,9 +158,39 @@ this works for the results of `async fn`s too.
 
 ## What a bound type must be
 
-- A `#[j8::class]` type is stored inside the JS object, so it must be `Send + Sync + 'static`. Use `Arc` / atomics for
-  state shared with threads (see `Timer` in `dune/src/web/timer.rs`).
+- A `#[j8::class]` type is stored inside the JS object, in the GC heap: it is `Send + Sync`, derives `j8::Trace`, and
+  may carry the `'scope` lifetime (`struct Hooks<'scope>`, `impl<'scope> Hooks<'scope>`). Its JS values are fields
+  (`Value<'scope>`, `j8::Function<'scope>`, …) that the collector traces and moves with the object. Fields that hold
+  no JS value and are not `Trace` (an `Arc`, a connection) are marked `#[collect(require_static)]`. Use `Arc` / atomics
+  for state shared with threads (see `Timer` in `dune/src/web/timer.rs`).
 - A method that calls back into JS that reaches the same object again (`&mut self` while already borrowed) throws a
   `TypeError` instead of panicking.
-- ⛔ keeping a `Value` / `JsObject` in a struct: it would outlive its `enter`. Keep a `j8::Persistent` (or
-  `j8::Function`). Each is a GC root: a cycle through a host object is only freed when that object is dropped.
+- A class's JS fields are edges, not roots, so a cycle through a host object (a callback that captures the object
+  holding it) is collected like any other garbage. A `ScopeGlobal` is a root: keep it only outside the heap, never in a
+  class field.
+- The host object and its JS wrapper are one object: while it lives, every path to it gives the same JS object back.
+- `Drop` of a class must not read its JS fields: when it runs they may already be gone.
+- Lifetimes: `'scope` is the one lifetime of heap values; a class that holds none needs no lifetime at all.
+
+```rust,ignore
+#[derive(Default, j8::Trace)]
+struct Hooks<'scope> {
+    on: Option<j8::Function<'scope>>,
+    kept: Option<Value<'scope>>,
+}
+
+#[j8::class]
+impl<'scope> Hooks<'scope> {
+    #[js(constructor)]
+    fn new() -> Self { Self::default() }
+
+    fn set(&mut self, f: j8::Function<'scope>, keep: Value<'scope>) { self.on = Some(f); self.kept = Some(keep); }
+
+    fn fire(&self, a: &mut Agent<'scope, '_>, x: f64) -> Result<Value<'scope>, Error> {
+        match self.on {
+            Some(f) => f.call(a, Value::Undefined, &[x.into(), self.kept.unwrap_or(Value::Undefined)]),
+            None => Ok(Value::Undefined),
+        }
+    }
+}
+```

@@ -11,10 +11,10 @@
 | `Platform` / `Pool` | 宿主借给引擎的线程与时钟（`j8platform` 实现） |
 | `Isolate` | 独立的 JS 世界：一个 GC 堆（[paragc](https://crates.io/crates/paragc)）加一个 profiler |
 | `Scope` | 进入 isolate 的一次；里面的值带 `'scope` 品牌，出不了这次进入（V8 的 `Local`） |
-| `Global` / `ContextRoot` | 跨多次 `enter` 存活的持久句柄 |
+| `ScopeGlobal<'p, B>` | 跨多次 `enter` 存活的根；`B` 标明类型（`ValueBrand`、`RealmBrand`） |
 | `Context` / `Realm` | 执行上下文：全局对象与内建原型（`Intrinsics`，由 `j8builtins` 实现） |
 | `Agent` | 一次运行的上下文；全部 JS 运算语义挂在它上面，回调 JS 经 `Invoke` |
-| `Engine` | 执行引擎（`j8executor`）实现的统一入口 |
+| `Host` / `HostObject` | 放在 JS 对象里、由回收器追踪的 Rust 值 |
 | `Value` / `JsObject` / `JsString` … | NaN-boxing 的值与堆对象 |
 
 ### GC 层

@@ -1,8 +1,8 @@
 # Executor: interpreting bytecode
 
-`crates/j8executor` runs [V8 bytecode](bytecode.md) and implements `j8framework::Engine`. It is j8's last layer for now:
-it always carries the [compiler](compiler.md), and scripts, modules and `eval` / `Function` are all compiled to bytecode
-before they run.
+`crates/j8executor` runs [V8 bytecode](bytecode.md): `Executor<'p>` is the execution entry, and the event loops live
+here too. It is j8's last layer for now: it always carries the [compiler](compiler.md), and scripts, modules and `eval` /
+`Function` are all compiled to bytecode before they run.
 
 ## One executor per isolate
 
@@ -54,9 +54,9 @@ plus direct slot loads and stores.
 
 ## Sliced execution
 
-`Engine::eval` takes `&mut Isolate` and enters it in slices: at most ten thousand instructions each; between slices the
-execution state is rooted, the heap gets to collect, and the run continues. The environment survives slices in a
-`ContextRoot`. Every 1024 instructions the budget and termination requests are checked; inside an event loop that is
+`Executor::eval` takes `&mut Isolate` and enters it in slices: at most ten thousand instructions each; between slices the
+execution state is rooted, the heap gets to collect, and the run continues. The environment survives slices as a
+`ScopeGlobal<'p, RealmBrand>`. Every 1024 instructions the budget and termination requests are checked; inside an event loop that is
 when the task queue is checked ([Event loops](event-loop.md)).
 
 Known deviation: JS re-entered from a host function (`map`'s callback) runs to completion inside the current slice,
@@ -114,8 +114,8 @@ execution back (`DeoptFrame`).
 ## Use
 
 ```rust,ignore
-let mut executor = j8executor::Executor::default();
-let result = isolate.run(&mut executor, &cx, &j8framework::Source { text: "1 + 2", file: "a.js" })?;
+let executor = j8executor::Executor::default();
+let result = executor.eval(&mut isolate, &cx, &j8framework::Source { text: "1 + 2", file: "a.js" })?;
 ```
 
 The `javascript_semantics` test is a table of exactly determined JS semantics.

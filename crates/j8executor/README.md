@@ -3,7 +3,8 @@
 **English** · [简体中文](README.zh-CN.md)
 
 The bytecode executor of [j8](https://github.com/0x00-Community/j8): it runs the accumulator-style register
-bytecode of `j8bytecode` and implements `j8framework::Engine`.
+bytecode of `j8bytecode` (`Executor<'p>`: `eval`, resumable `start` / `resume`) and drives the JS event loops
+(`EventLoop` / `EventLoopSet`).
 
 ## How it runs
 

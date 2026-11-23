@@ -64,7 +64,7 @@ impl Fs {
 ```rust,ignore
 #[j8::class]
 impl Timer {
-    fn wait<'gc>(&self, a: &mut Agent<'gc, '_>, ms: f64) -> Result<Value<'gc>, Error> {
+    fn wait<'scope>(&self, a: &mut Agent<'scope, '_>, ms: f64) -> Result<Value<'scope>, Error> {
         let sleep = Sleep { cancelled: self.cancelled.clone(), /* … */ };
         Glue::spawn(a, async move { Glue::settle(sleep.await) })
     }
@@ -95,7 +95,7 @@ impl Math {
 ```
 
 - 像 `await` 一样接收参数：promise 直接监视（补丁上去的 `then` 不会被调用），thenable 被采纳，别的值算已经兑现；
-- 兑现的值在运行时线程上用 `FromJs` 转成 `T`；拒绝、或者转不过来，都以 `Err(Error::Exception(reason))` 出来，
+- 兑现的值在运行时线程上用 `FromJs` 转成 `T`；拒绝、或者转不过来，都以 `Err(Error::Parked(ticket))`（原因暂存在 isolate 里）出来，
   所以 `?` 用同一个理由拒绝绑定自己的 promise；
 - 兑现会唤醒 future，所以它能配合 `run_until_idle`，在别处 poll 也行；
 - 永不兑现的 promise 让 future 一直待定，和 JS 里的 `await` 一样，事件循环会一直等。

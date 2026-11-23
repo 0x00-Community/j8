@@ -12,10 +12,10 @@ implements and the structs / enums they share; it depends on no other j8 layer.
 | `Platform` / `Pool` | Threads and clocks lent by the embedder (`j8platform` implements them) |
 | `Isolate` | An independent JS world: a GC heap ([paragc](https://crates.io/crates/paragc)) plus a profiler |
 | `Scope` | One entry into an isolate; values in it carry the `'scope` brand and cannot leave it (V8's `Local`) |
-| `Global` / `ContextRoot` | Persistent handles that live across `enter` calls |
+| `ScopeGlobal<'p, B>` | Roots that live across `enter` calls; `B` names the type (`ValueBrand`, `RealmBrand`) |
 | `Context` / `Realm` | An execution context: the global object and the built-in prototypes (`Intrinsics`, implemented by `j8builtins`) |
 | `Agent` | The context of one run; all JS operation semantics hang off it, calls back into JS go through `Invoke` |
-| `Engine` | The entry point an execution engine implements (`j8executor`) |
+| `Host` / `HostObject` | A Rust value inside a JS object, traced by the collector |
 | `Value` / `JsObject` / `JsString` … | NaN-boxed values and heap objects |
 
 ### The GC layer

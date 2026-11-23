@@ -19,10 +19,10 @@
 
 | crate | Role |
 |---|---|
-| `j8framework` | the core: the traits each layer implements (`Platform`, `Engine`, `Invoke`, `Intrinsics`) and the shared structs (`Isolate`, `Scope`, `Agent`, `Context` / `Realm`, `Value`, the object model, event loops). JS operation semantics hang off `Agent`. Depends on no other layer |
+| `j8framework` | the core: the traits each layer implements (`Platform`, `Invoke`, `Intrinsics`) and the shared structs (`Isolate`, `Scope`, `Agent`, `Context` / `Realm`, `Value`, the object model, host objects). JS operation semantics hang off `Agent`. Depends on no other layer |
 | `j8bytecode` | bytecode definitions, byte for byte V8 Ignition's; the dependency root, depends on no other j8 crate |
 | `j8compiler` | JS ⇒ bytecode (oxc parses; code generation after V8's `BytecodeGenerator`) |
-| `j8executor` | the bytecode executor: implements `Engine`, with inline caches, sliced execution and the JIT hook |
+| `j8executor` | the bytecode executor `Executor<'p>` (`eval`, resumable `start` / `resume`), with inline caches, sliced execution, the JIT hook and the event loops that drive it |
 | `j8jit` | the speculative JIT (x86-64 Unix and Windows): implements the executor's `Tier` |
 | `j8builtins` | the standard built-in objects: implements `Intrinsics` |
 | `j8platform` | the standard-library `Platform`: thread pool, clocks, module loading |
@@ -45,7 +45,6 @@ traits in `j8framework`.
 |---|---|---|
 | `Platform` (supertrait `Pool`) | `j8platform::DefaultPlatform`, or the host's own | thread pool, clocks, `console.log` output, module loading |
 | `Intrinsics` | `j8builtins::Builtins` | installs the global object and built-in constructors into a new `Realm` |
-| `Engine` | `j8executor::Executor` | the execution entry: `eval`, resumable `start` / `resume` |
 | `Invoke` | the executor | built-ins calling back into JS (`map`'s callback, getters …) |
 | `Tier` | `j8jit::Jit` | the executor asks "compile this function / loop?" |
 
@@ -71,7 +70,7 @@ Take `dune -p 'let s = 0; for (let i = 0; i < 1e6; i++) s += i; s'`:
 5. **Deoptimize.** When a speculation fails (`s` outgrows int32), a guard jumps to a cold path; `j8_deopt` rebuilds the
    interpreter frames from the recorded frame state and the interpreter goes on. The JIT leaves a hint: next time it
    uses doubles there.
-6. **Finish.** The result is a `Value` (one NaN-boxed machine word); the host gets a `Global` handle, applies ToString
+6. **Finish.** The result is a `Value` (one NaN-boxed machine word); the host gets a `ScopeGlobal` root, applies ToString
    and prints it. No host work is left on the event loop, so the process exits.
 
 The following chapters walk that path: [bytecode](bytecode.md) → [compiler](compiler.md) → [executor](executor.md) →

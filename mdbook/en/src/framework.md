@@ -9,33 +9,34 @@
 |---|---|---|
 | `Platform` / `Pool` | the threads and clocks the host lends the engine | `v8::Platform` |
 | `Isolate` | an independent JS world: one GC heap (paragc) and a profiler | `v8::Isolate` |
-| `Scope` | one entry into an isolate; values in it carry the `'gc` brand and can't leave it | `HandleScope` |
-| `Value<'gc>` | a JS value: V8's `Local`, it can't leave the closure | `Local<Value>` |
-| `Global` | a persistent handle (paragc `Root`): survives `enter` calls, released on drop | `Global<T>` |
-| `ContextRoot` | the execution environment kept across slices | — |
+| `Scope` | one entry into an isolate; values in it carry the `'scope` brand and can't leave it | `HandleScope` |
+| `Value<'scope>` | a JS value: V8's `Local`, it can't leave the closure | `Local<Value>` |
+| `ScopeGlobal<'p, B>` | a root (paragc `ScopeGlobal`): survives `enter` calls, released on drop; `B` names what it holds (`ValueBrand`, `RealmBrand`, …) | `Global<T>` |
 | `Context` / `Realm` | the execution context: the global object and built-in prototypes (`Intrinsics`, from j8builtins) | `Context` |
 | `Agent` | the context of one run; all JS operation semantics hang off it, calls back into JS go through `Invoke` | — |
-| `Engine` | the entry the execution engine (j8executor) implements; resumable (`start` / `resume`) | — |
 | `Profiler` | call / back-edge counters | — |
-| `EventLoop` / `EventLoopSet` | JS event loops and the loop threads they run on ([Event loops](event-loop.md)) | — |
+| `Host` / `HostObject` | a Rust value inside a JS object, traced by the collector ([Bindings](bindings.md)) | `cppgc` objects |
 
 ## Entering an isolate
 
 ```rust,ignore
 let platform = DefaultPlatform::default();
 let mut isolate = Isolate::new(&platform, CreateParams::default());
-let mut executor = Executor::default();
-let cx = isolate.enter(|scope| scope.persist(scope.context(&Builtins)));   // Global<Context>
-let result = isolate.run(&mut executor, &cx, &Source { text: "1 + 2 * 3", file: "a.js" })?;
+let executor = Executor::default();
+let cx = isolate.enter(|scope| scope.mc.stash::<RealmBrand>(scope.context(&Builtins).realm()));   // ScopeGlobal<RealmBrand>
+let result = executor.eval(&mut isolate, &cx, &Source { text: "1 + 2 * 3", file: "a.js" })?;
 isolate.enter(|scope| {
-    let v = scope.local(&result);       // Global ⇒ Value<'gc>, valid only in this closure
+    let v = scope.local(&result);       // ScopeGlobal ⇒ Value<'scope>, valid only in this closure
 });
 ```
 
-- `Isolate::enter(|scope| …)` enters once; `'gc` is that entry's **brand**. Nothing is collected during the closure;
+- `Isolate::enter(|scope| …)` enters once; `'scope` is that entry's **brand**. Nothing is collected during the closure;
   after it returns, a collection runs if enough was allocated (usually young, a full one every few).
-- `Value<'gc>` can't leave the closure, **checked at compile time**: Rust lifetimes stand in for V8's `HandleScope`.
-- To keep a value across entries, turn it into a `Global` with `scope.persist(v)` / `agent.global(v)`.
+- `Value<'scope>` can't leave the closure, **checked at compile time**: Rust lifetimes stand in for V8's `HandleScope`.
+- To keep a value across entries, root it: `agent.global(v)` gives a `ScopeGlobal<'p, ValueBrand>`,
+  `scope.mc.stash::<B>(x)` roots any heap object (`RealmBrand` for a context). `local` / `mc.fetch` read them back.
+- The executor (`j8executor::Executor<'p>`) runs scripts: `eval` / `eval_module`, or `start` / `resume` in slices.
+  Event loops live in j8executor too ([Event loops](event-loop.md)).
 
 ## Values: one NaN-boxed word
 
@@ -94,7 +95,8 @@ for (k, v) in items {
 
 | Variant | Meaning |
 |---|---|
-| `Error::Exception(g)` | JS threw the value `g` |
+| `Error::Exception` | JS threw; the value is in the pending slot (`agent.take_exception()`), as in V8 |
+| `Error::Parked(ticket)` | JS threw, and host code parked the value in the isolate (`agent.park()`) to settle it on a later turn; `agent.unpark(ticket)` puts it back in the pending slot |
 | `Error::Syntax(msg)` | the source doesn't parse (early errors included) |
 | `Error::Unsupported(msg)` | syntax j8 doesn't support yet, with `file:line:column` |
 | `Error::Terminated` | stopped by `IsolateHandle::terminate` |

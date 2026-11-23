@@ -1,11 +1,11 @@
 # Event loops and the task queue
 
-j8 has no async runtime (no tokio). Its event loop is its own: `j8framework::EventLoop` is built on a `j8taskqueue`
+j8 has no async runtime (no tokio). Its event loop is its own: `j8executor::EventLoop` is built on a `j8taskqueue`
 queue, and an `EventLoopSet` pins thousands of event loops onto a few loop threads.
 
 ## One event loop
 
-An `EventLoop` is one JS event loop: its own isolate, engine and context, and a j8taskqueue queue. **The queue is the
+An `EventLoop` is one JS event loop: its own isolate, executor and context, and a j8taskqueue queue. **The queue is the
 event loop.** It holds three kinds of tasks:
 
 1. **scripts**, which run a check interval of steps at a time (about a thousand instructions by default; V8's interrupt
@@ -39,7 +39,7 @@ j8::EventLoopSet::scope(&platform, NonZeroUsize::new(8).unwrap(), |set| {
 - **Load balancing.** New event loops go to the least loaded thread. A thread with nothing to run asks the busiest one
   for half the difference, which hands over the event loops waiting in its queue first (work stealing).
   `set.rebalance()` evens the threads out on demand, `set.split(thread)` starts a new thread and gives it half of
-  another's. Event loops move only between turns, with their isolate, engine, paused script and pending futures.
+  another's. Event loops move only between turns, with their isolate, executor, paused script and pending futures.
 - **One quota.** Every turn runs the set's slice of steps (`set.set_slice`) times the event loop's weight
   (`EventLoop::set_weight`), checking the queue every `set.set_check` steps; `set.loads()`, `set.spent()` and
   `EventLoop::spent()` show where the work went. A long script doesn't hold up the other event loops on its thread.

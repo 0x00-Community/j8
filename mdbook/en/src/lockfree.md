@@ -31,6 +31,6 @@ downstream lists of a task graph) always has natural exclusive moments to tidy u
 | User | Uses |
 |---|---|
 | j8taskqueue | `Fifo` as the ready queue, `PushList` as downstream lists |
-| j8framework event loops | message queues, work stealing |
-| j8binding host objects | `AtomicRefCell` around `Box<dyn Any + Send + Sync>` |
+| j8executor event loops | message queues, work stealing |
+| j8binding host objects | a `GcCell` around `Box<dyn HostObject + Send + Sync>` |
 | j8executor | inline caches and load tables |

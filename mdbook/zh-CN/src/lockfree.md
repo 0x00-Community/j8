@@ -28,6 +28,6 @@
 | 使用方 | 用什么 |
 |---|---|
 | j8taskqueue | `Fifo` 作就绪队列、`PushList` 作下游表 |
-| j8framework 事件循环 | 消息队列、工作窃取 |
-| j8binding 宿主对象 | `AtomicRefCell` 包着 `Box<dyn Any + Send + Sync>` |
+| j8executor 事件循环 | 消息队列、工作窃取 |
+| j8binding 宿主对象 | `GcCell` 包着 `Box<dyn HostObject + Send + Sync>` |
 | j8executor | 内联缓存与加载表 |

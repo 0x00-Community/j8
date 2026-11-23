@@ -11,9 +11,10 @@
 | **EventLoop / EventLoopSet** | 一个 JS 事件循环 / 跑很多事件循环的 loop 线程组 |
 | **反馈槽（feedback slot）** | 字节码上记录类型 / shape 信息的位置，JIT 据此推测 |
 | **FrameState** | 守卫处每个解释器寄存器存着什么，去优化时据此重建帧 |
-| **'gc 品牌** | 一次 `Isolate::enter` 的生命周期；带它的值出不了这次进入 |
+| **'scope 品牌** | 一次 `Isolate::enter` 的生命周期；带它的值出不了这次进入 |
 | **GcCell / ValueCell** | j8 在 paragc 上的可变单元：整块数据的快照 / 单个值 |
-| **Global** | 持久句柄，跨多次 `enter` 存活 |
+| **ScopeGlobal** | 根（paragc 的），跨多次 `enter` 存活；`B` 标明类型（`ValueBrand`、`RealmBrand`） |
+| **待处理异常** | 抛出的值等待的槽，照 V8；`Error::Exception` 只表示槽里有值 |
 | **IC（内联缓存）** | 每个属性访问点按 shape 缓存的结果 |
 | **Ignition** | V8 的解释器；j8 的字节码与它逐字节一致 |
 | **Intrinsics** | 往 Realm 装内建对象的接口，j8builtins 实现 |

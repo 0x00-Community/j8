@@ -7,12 +7,13 @@
 
 - `FromJs` / `IntoJs`：参数与返回值的转换（数字、布尔、字符串、`Option`、`Vec`、对象、`Result`……）
 - `Class` / `Object`：把 Rust 类型导出为 JS 类 / 一组函数构成的普通对象
-- 宿主对象：持有 Rust 值的 JS 对象（`Box<dyn Any + Send + Sync>`，外面是无锁的借用标志），方法里以 `&self` / `&mut self` 取出；
+- 宿主对象：持有 Rust 值的 JS 对象，由回收器追踪（类型派生 `j8::Trace`，它的 JS 值是字段），方法里以 `&self` / `&mut self` 取出；
   重入的 `&mut self` 调用抛 `TypeError`
 
 ## 用法
 
 ```rust
+#[derive(j8::Trace)]
 struct Counter { n: f64 }
 
 #[j8::class]

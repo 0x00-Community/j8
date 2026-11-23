@@ -6,7 +6,7 @@
 ## 一张图看懂桥
 
 ```text
- JS 调用 ─▶ 生成的包装 ─▶ 你的 Rust fn(&mut Agent<'gc>, …)                 ◀── 同步：值只活在 'gc 里
+ JS 调用 ─▶ 生成的包装 ─▶ 你的 Rust fn(&mut Agent<'scope>, …)                 ◀── 同步：值只活在 'scope 里
                                 │
                                 ├─ 返回 T: IntoJs ─────────────────────────▶ JS 值
                                 │
@@ -19,8 +19,8 @@
 
 由此得出三条规则，本章所有写法都是它们的推论：
 
-1. **`Value<'gc>` / `JsObject<'gc>` 只在一次调用里存在。** 要把 JS 值留得更久，存 `j8::Persistent` 或 `j8::Function`
-   （两者都是 GC 根，且是 `Send`）。
+1. **`Value<'scope>` / `JsObject<'scope>` 只在一次调用里存在。** 要把 JS 值留得更久，存
+   `ScopeGlobal<'p, ValueBrand>`（根，`Send`）；在 class 里，`Value<'scope>` 字段是被追踪的边。
 2. **future 里没有 `Agent`。** 它不能读 JS 值、不能调 JS 函数、不能推进 JS 迭代器，只能计算和等待；只有在最后，通过它
    返回的 `Settle`，才拿回一次 `Agent`。
 3. **future 必须唤醒它的 waker**，否则 `run_until_idle` 会一直睡下去（见[异步与 Promise](async.md)）。
@@ -47,8 +47,8 @@ use j8::{Function, Glue, IntoJs, Promise};
 ```rust,ignore
 pub struct Step<T>(pub Option<T>);   // Some(v) ⇒ { value: v, done: false }，None ⇒ { value: undefined, done: true }
 
-impl<'gc, T: IntoJs<'gc>> IntoJs<'gc> for Step<T> {
-    fn into_js(self, a: &mut Agent<'gc, '_>) -> Result<Value<'gc>, Error> {
+impl<'scope, T: IntoJs<'scope>> IntoJs<'scope> for Step<T> {
+    fn into_js(self, a: &mut Agent<'scope, '_>) -> Result<Value<'scope>, Error> {
         let (value, done) = match self.0 {
             Some(v) => (v.into_js(a)?, false),
             None => (Value::Undefined, true),
@@ -64,7 +64,8 @@ JS 迭代器就是带 `next()` 的对象。一个有 `next` 方法的 `#[j8::cla
 （`break`、解构、循环体抛错）就能通知到 Rust。
 
 ```rust,ignore
-struct Range { next: f64, end: f64, step: f64, closed: Arc<AtomicBool> }
+#[derive(j8::Trace)]
+struct Range { next: f64, end: f64, step: f64, #[collect(require_static)] closed: Arc<AtomicBool> }
 
 #[j8::class]
 impl Range {
@@ -134,7 +135,7 @@ impl Sink {
 生产方的清理才会运行（生成器的 `finally`、`Range` 的 `return`）：
 
 ```rust,ignore
-fn sum_until<'gc>(a: &mut Agent<'gc, '_>, iterable: Value<'gc>, limit: f64) -> Result<f64, Error> {
+fn sum_until<'scope>(a: &mut Agent<'scope, '_>, iterable: Value<'scope>, limit: f64) -> Result<f64, Error> {
     let it = a.get_iterator(iterable)?;
     let mut sum = 0.0;
     while let Some(v) = a.iterator_step(it)? {
@@ -147,7 +148,7 @@ fn sum_until<'gc>(a: &mut Agent<'gc, '_>, iterable: Value<'gc>, limit: f64) -> R
     Ok(sum)
 }
 
-fn each<'gc>(a: &mut Agent<'gc, '_>, iterable: Value<'gc>, f: Function) -> Result<u32, Error> {
+fn each<'scope>(a: &mut Agent<'scope, '_>, iterable: Value<'scope>, f: Function) -> Result<u32, Error> {
     let it = a.get_iterator(iterable)?;
     let mut n = 0;
     while let Some(v) = a.iterator_step(it)? {
@@ -187,7 +188,7 @@ async fn doubled(p: Promise<f64>) -> Result<f64, Error> {
 先把 JS 那边的活做完，只把 `Send` 的数据移进 future，future 最后返回 `Glue::settle(value)`：
 
 ```rust,ignore
-fn later<'gc>(&self, a: &mut Agent<'gc, '_>, ms: f64) -> Result<Value<'gc>, Error> {
+fn later<'scope>(&self, a: &mut Agent<'scope, '_>, ms: f64) -> Result<Value<'scope>, Error> {
     let wait = Duration::from_secs_f64(ms / 1000.0);
     let label = self.label.clone();                         // 从 self 里克隆出来：future 是 'static
     Glue::spawn(a, async move {
@@ -204,7 +205,7 @@ fn later<'gc>(&self, a: &mut Agent<'gc, '_>, ms: f64) -> Result<Value<'gc>, Erro
 这里调一个 JS 回调，它的返回值成为 promise 的值：
 
 ```rust,ignore
-fn after<'gc>(a: &mut Agent<'gc, '_>, ms: f64, f: Function) -> Result<Value<'gc>, Error> {
+fn after<'scope>(a: &mut Agent<'scope, '_>, ms: f64, f: Function) -> Result<Value<'scope>, Error> {
     let wait = Duration::from_secs_f64(ms / 1000.0);
     Glue::spawn(a, async move {
         Offload::new(move || std::thread::sleep(wait)).await;
@@ -234,7 +235,7 @@ catch (e) { e instanceof TypeError && e.message === 'nope' }  // true
 await：
 
 ```rust,ignore
-fn call_async<'gc>(a: &mut Agent<'gc, '_>, f: Function, x: f64) -> Result<Value<'gc>, Error> {
+fn call_async<'scope>(a: &mut Agent<'scope, '_>, f: Function, x: f64) -> Result<Value<'scope>, Error> {
     let p = f.call(a, Value::Undefined, &[x.into()])?;
     let p = <Promise<String> as j8::FromJs>::from_js(a, p)?;
     Glue::spawn(a, async move { Glue::settle(p.await.map(|s| format!("rust saw {s}"))) })
@@ -254,6 +255,7 @@ JS 这边转换，只有 Rust 结果被送进 future。
 更新状态，返回 `Glue::spawn(…)`，future 以 `Glue::settle(Step(…))` 结束。
 
 ```rust,ignore
+#[derive(j8::Trace)]
 struct Ticker { left: u32, every: Duration }
 
 #[j8::class]
@@ -263,7 +265,7 @@ impl Ticker {
         Self { left: count, every: Duration::from_secs_f64(ms / 1000.0) }
     }
 
-    fn next<'gc>(&mut self, a: &mut Agent<'gc, '_>) -> Result<Value<'gc>, Error> {
+    fn next<'scope>(&mut self, a: &mut Agent<'scope, '_>) -> Result<Value<'scope>, Error> {
         let tick = (self.left > 0).then_some(self.left);    // 状态现在就改，按调用顺序
         self.left = self.left.saturating_sub(1);
         let every = self.every;
@@ -294,6 +296,7 @@ for await (const t of new Ticker(3, 5)) ticks.push(t);      // 3,2,1
 （规则 2）。让 JavaScript 来跑循环、把每个元素交给 Rust——在绑定类上加几行 prelude：
 
 ```rust,ignore
+#[derive(j8::Trace)]
 struct Collector { items: Vec<String> }
 
 #[j8::class]

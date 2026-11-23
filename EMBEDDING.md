@@ -85,8 +85,8 @@ fn main() -> ExitCode {
                 println!("{}", rt.text(&g));
                 ExitCode::SUCCESS
             }
-            Err(Error::Exception(g)) => {
-                eprintln!("Uncaught {}", rt.text(&g));
+            Err(Error::Exception) => {
+                eprintln!("Uncaught {}", rt.exception_text());
                 ExitCode::FAILURE
             }
             Err(e) => {
@@ -107,8 +107,8 @@ The steps are always the same:
 3. `X::runtime(set, executor)` creates the isolate and the context on the least loaded loop thread, installs
    everything and runs the preludes. A prelude that throws comes back as `Err` here. Every later call (`eval`,
    `enter`, `run_until_idle`) is a message to that thread, and waits for its answer; any host thread may make it.
-4. `rt.eval(text, file)` runs a script. It returns a `Global` (a handle that outlives the call), which `rt.text(&g)`
-   turns into a string with ToString.
+4. `rt.eval(text, file)` runs a script. It returns a `ScopeGlobal<'p, ValueBrand>` (a root that outlives the
+   call), which `rt.text(&g)` turns into a string with ToString.
 5. `rt.run_until_idle()` waits until no async host work is left. Call it after every `eval` if your
    bindings have `async fn`s or return promises; otherwise those promises never settle.
 
@@ -116,7 +116,7 @@ The steps are always the same:
 
 | Variant | Meaning | What hosts do |
 |---|---|---|
-| `Error::Exception(g)` | JS threw; `g` is the thrown value | `rt.text(&g)` ⇒ `Uncaught …` |
+| `Error::Exception` | JS threw; the value waits in the isolate's pending slot, as in V8 | `rt.exception_text()` ⇒ `Uncaught …` |
 | `Error::Syntax(msg)` | the source does not parse | print `msg` |
 | `Error::Unsupported(msg)` | syntax j8 does not support yet | print `msg` |
 
@@ -181,8 +181,8 @@ rt.run_until_idle()?;
 ```
 
 For lower-level work use `rt.enter(|a| …)`, which gives you the `Agent` of the context (`a.get_named`, `a.call`,
-`a.local`, `a.to_string` …). `Value`s cannot leave the closure. Keep them as a `Global` (`a.global(v)`) if you need
-them afterwards.
+`a.local`, `a.to_string` …). `Value`s cannot leave the closure. Root them with `a.global(v)` (a
+`ScopeGlobal<'p, ValueBrand>`) if you need them afterwards.
 
 ## 4. Writing bindings
 
@@ -194,7 +194,8 @@ A quick summary (USAGE.md has the full table):
   `Vec<T>`, `Value`, `JsObject`, `JsString`. `&str` is ToString, borrowed.
 - `&mut Agent<'_, '_>` anywhere in the list receives the current agent (it does not count as a JS argument).
 - `j8::Bytes` takes an `ArrayBuffer` / typed array / `DataView`; returning `j8::Bytes` creates a `Uint8Array`.
-- `j8::Persistent` / `j8::Function` keep a JS value or callback past the call (store them in your struct).
+- `Value<'scope>` / `j8::Function<'scope>` fields keep a JS value or callback in a class (they are traced);
+  `ScopeGlobal<'p, ValueBrand>` keeps one outside the heap.
 - Return values are converted with `IntoJs`. `Result<T, Error>` throws on `Err`.
 
 ### 4.2 Throwing
@@ -213,8 +214,8 @@ When the error is only known later, or you want structured errors (Node's `err.c
 ```rust,ignore
 pub struct Io<T>(pub Result<T, Failure>);
 
-impl<'gc, T: IntoJs<'gc>> IntoJs<'gc> for Io<T> {
-    fn into_js(self, a: &mut Agent<'gc, '_>) -> Result<Value<'gc>, Error> {
+impl<'scope, T: IntoJs<'scope>> IntoJs<'scope> for Io<T> {
+    fn into_js(self, a: &mut Agent<'scope, '_>) -> Result<Value<'scope>, Error> {
         match self.0 {
             Ok(v) => v.into_js(a),
             Err(f) => Err(a.throw(f.kind, &f.message)),   // "ENOENT: no such file or directory, open 'a.txt'"
@@ -233,16 +234,17 @@ runtime thread, this also works for the results of `async fn`s.
 
 ### 4.3 What a bound type must be
 
-- A `#[j8::class]` type is stored inside the JS object, so it must be `Send + Sync + 'static`. Use `Arc` / atomics
-  for state shared with threads (see `Timer` in `dune/src/web/timer.rs`).
+- A `#[j8::class]` type is stored inside the JS object, in the GC heap: it is `Send + Sync`, derives `j8::Trace`
+  and may carry `'scope`. Fields that are neither JS values nor `Trace` (an `Arc`) take `#[collect(require_static)]`.
+  Use `Arc` / atomics for state shared with threads (see `Timer` in `dune/src/web/timer.rs`).
 - A method that calls back into JS that reaches the same object again (`&mut self` while already borrowed) throws a
   TypeError instead of panicking.
-- Never keep a `Value` / `JsObject` in a struct: it would outlive its `enter`. Keep a `j8::Persistent` (or
-  `j8::Function`) instead. Each is a GC root: a cycle through a host object is only freed when that object is dropped.
+- JS values in a class are traced edges, not roots: a cycle through a host object is collected like any other.
+  Outside the heap (a thread, a channel) keep a `ScopeGlobal` root instead.
 
 ## 5. Async work and the event loop
 
-j8 does not include an async runtime (no tokio). A `j8framework::EventLoop` is one JS event loop: an isolate, its
+j8 does not include an async runtime (no tokio). A `j8executor::EventLoop` is one JS event loop: an isolate, its
 engine and one context, and a j8taskqueue queue; `j8::Runtime` is one event loop (`eval` and `run_until_idle` drive
 it). The queue holds three kinds of tasks:
 
@@ -340,7 +342,7 @@ yourself with `j8::Glue`:
 ```rust,ignore
 #[j8::class]
 impl Timer {
-    fn wait<'gc>(&self, a: &mut Agent<'gc, '_>, ms: f64) -> Result<Value<'gc>, Error> {
+    fn wait<'scope>(&self, a: &mut Agent<'scope, '_>, ms: f64) -> Result<Value<'scope>, Error> {
         let sleep = Sleep { cancelled: self.cancelled.clone(), /* … */ };
         Glue::spawn(a, async move { Glue::settle(sleep.await) })
     }
@@ -377,8 +379,8 @@ impl Math {
 - It takes its argument the way `await` does: a promise is watched directly (a `then` patched onto it is not called),
   a thenable is adopted, any other value counts as already fulfilled.
 - The fulfilled value is converted with `FromJs` into `T` on the runtime thread when the promise settles. A
-  rejection, or a value that does not convert, comes out as `Err(Error::Exception(reason))`, so `?` rejects the
-  binding's own promise with the same reason.
+  rejection, or a value that does not convert, comes out as `Err(Error::Parked(ticket))` (the reason parked in
+  the isolate), so `?` rejects the binding's own promise with the same reason.
 - Settling wakes the future, so it works with `run_until_idle`, and also when the future is polled somewhere else.
 - A promise that never settles keeps the future pending, like `await` in JS. The event loop then keeps waiting.
 
@@ -510,7 +512,7 @@ for (ticket, signature) in isolate.take_signatures() {
 
 j8 collects only between turns, so a shared object is promoted and signed when the `enter` that shared it returns.
 A signature keeps nothing alive: the receiver opens the same heap (`CrossHeapSpace::open_fd` with a passed descriptor)
-and calls `CrossHeapMutator::resolve`, which gives `None` once the object is gone. JS objects themselves are not
+and calls `CrossHeapScope::resolve`, which gives `None` once the object is gone. JS objects themselves are not
 shareable yet; that comes in later steps.
 
 ## 10. Where to look in the samples

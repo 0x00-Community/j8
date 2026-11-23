@@ -11,9 +11,10 @@
 | **EventLoop / EventLoopSet** | one JS event loop / the loop threads running many of them |
 | **feedback slot** | where bytecode records types and shapes it saw; the JIT speculates on them |
 | **FrameState** | what each interpreter register holds at a guard; frames are rebuilt from it on a deopt |
-| **'gc brand** | the lifetime of one `Isolate::enter`; values carrying it can't leave that entry |
+| **'scope brand** | the lifetime of one `Isolate::enter`; values carrying it can't leave that entry |
 | **GcCell / ValueCell** | j8's mutable cells on paragc: a snapshot of a block of data / a single value |
-| **Global** | a persistent handle, surviving `enter` calls |
+| **ScopeGlobal** | a root (paragc's), surviving `enter` calls; `B` names its type (`ValueBrand`, `RealmBrand`) |
+| **pending exception** | the slot a thrown value waits in, as in V8; `Error::Exception` only says something is there |
 | **IC (inline cache)** | per property-access site, results cached by shape |
 | **Ignition** | V8's interpreter; j8's bytecode matches it byte for byte |
 | **Intrinsics** | the interface that installs built-ins into a Realm, implemented by j8builtins |

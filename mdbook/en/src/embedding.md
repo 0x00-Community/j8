@@ -81,8 +81,8 @@ fn main() -> ExitCode {
                 println!("{}", rt.text(&g));
                 ExitCode::SUCCESS
             }
-            Err(Error::Exception(g)) => {
-                eprintln!("Uncaught {}", rt.text(&g));
+            Err(Error::Exception) => {
+                eprintln!("Uncaught {}", rt.exception_text());
                 ExitCode::FAILURE
             }
             Err(e) => {
@@ -103,8 +103,8 @@ The steps are always the same:
 3. `X::runtime(set, executor)` creates the isolate and the context on the least loaded loop thread, installs everything
    and runs the preludes. A prelude that throws comes back as `Err` here. Every later call (`eval`, `enter`,
    `run_until_idle`) is a message to that thread and waits for its answer; any host thread may make it.
-4. `rt.eval(text, file)` runs a script and returns a `Global` (a handle that outlives the call); `rt.text(&g)` turns it
-   into a string with ToString.
+4. `rt.eval(text, file)` runs a script and returns a `ScopeGlobal<'p, ValueBrand>` (a root that outlives the
+   call); `rt.text(&g)` turns it into a string with ToString.
 5. `rt.run_until_idle()` waits until no async host work is left. Call it after every `eval` if your bindings have
    `async fn`s or return promises; otherwise those promises never settle.
 
@@ -168,13 +168,14 @@ rt.run_until_idle()?;
 ```
 
 For lower-level work, `rt.enter(|a| …)` gives you the context's `Agent` (`a.get_named`, `a.call`, `a.local`,
-`a.to_string` …). `Value`s can't leave the closure; keep a `Global` (`a.global(v)`) for later.
+`a.to_string` …). `Value`s can't leave the closure; root them with `a.global(v)` (a
+`ScopeGlobal<'p, ValueBrand>`) for later.
 
 ## What an Error means
 
 | Variant | Meaning | What hosts do |
 |---|---|---|
-| `Error::Exception(g)` | JS threw; `g` is the thrown value | `rt.text(&g)` ⇒ `Uncaught …` |
+| `Error::Exception` | JS threw; the value waits in the isolate's pending slot, as in V8 | `rt.exception_text()` ⇒ `Uncaught …` |
 | `Error::Syntax(msg)` | the source doesn't parse | print `msg` |
 | `Error::Unsupported(msg)` | syntax j8 doesn't support yet | print `msg` |
 
