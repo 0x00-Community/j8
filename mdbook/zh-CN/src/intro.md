@@ -25,7 +25,7 @@ JS 源码 ─ oxc 解析 ─ j8compiler ─▶ V8 Ignition 字节码 ─ j8execu
 
 ## 主线：test262
 
-j8 的主线是 [test262](https://github.com/tc39/test262) 通过率。基线 `tests/test262.passing` 当前是 **42,443** 条用例
+j8 的主线是 [test262](https://github.com/tc39/test262) 通过率。基线 `tests/test262.passing` 当前是 **42,500** 条用例
 （非严格 + `onlyStrict`；不含 Temporal、intl402 等，见[路线图](roadmap.md)），每次提交都要零回归，开着 JIT 也跑同一份基线。
 
 ## 仓库里有什么

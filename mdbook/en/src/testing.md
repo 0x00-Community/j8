@@ -16,7 +16,7 @@ J8_TEST262_UPDATE=1 cargo test --release --test test262 -- <path>               
 
 - one child process per case, 10 s timeout; results are pass / fail / unsupported (j8 reported `Error::Unsupported`) /
   skip / timeout / crash, summarized by directory;
-- the baseline `tests/test262.passing` lists passing cases one per line, **42,443** now; without arguments only those run,
+- the baseline `tests/test262.passing` lists passing cases one per line, **42,500** now; without arguments only those run,
   as the regression check;
 - sloppy mode plus `onlyStrict` (run strict); module cases run the harness scripts first, then the module;
 - the `$262` host object provides `global` / `evalScript` / `gc` / `detachArrayBuffer` (`createRealm` throws TypeError);

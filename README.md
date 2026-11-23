@@ -7,7 +7,7 @@
 **A bytecode interpreter, a JIT built on MLIR and a parallel garbage-collected heap ([paragc](https://crates.io/crates/paragc)).**
 
 [![Rust](https://img.shields.io/badge/Rust-100%25-orange?style=for-the-badge&logo=rust)](https://www.rust-lang.org)
-[![test262](https://img.shields.io/badge/test262-42%2C443%20passing-success?style=for-the-badge)](#-test262)
+[![test262](https://img.shields.io/badge/test262-42%2C500%20passing-success?style=for-the-badge)](#-test262)
 [![License](https://img.shields.io/badge/License-MIT-brightgreen?style=for-the-badge)](#-license)
 
 [![ECMAScript](https://img.shields.io/badge/ECMAScript-core%20language-F7DF1E?style=flat-square&logo=javascript&logoColor=black)](#-status)
@@ -48,7 +48,7 @@ and [crates/macros/USAGE.md](crates/macros/USAGE.md) (the macro reference).
 
 | ✔️ Check | Result |
 | --- | --- |
-| 📜 test262 baseline | **42,443** tests passing (sloppy mode plus `onlyStrict`; Temporal, intl402 and the like are out of scope, see PLAN.md), zero regressions on every commit |
+| 📜 test262 baseline | **42,500** tests passing (sloppy mode plus `onlyStrict`; Temporal, intl402 and the like are out of scope, see PLAN.md), zero regressions on every commit |
 | 🧮 JIT | `J8_TEST262_JIT=1` runs the same baseline with the JIT on (every function compiled on its first call) |
 | ⏱️ vs V8 jitless | **0.6×** the time (geometric mean over 11 benchmarks); checksums identical on all three engines |
 | 🚄 vs V8 (with JIT) | **1.7×** the time, geometric mean; the gap is in built-ins (array, sort, string, collections, json, regexp), see [benchmark.md](samples/benchv8/benchmark.md) |

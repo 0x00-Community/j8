@@ -27,7 +27,7 @@ JS source ─ oxc parse ─ j8compiler ─▶ V8 Ignition bytecode ─ j8executo
 ## The main line: test262
 
 j8's main line is the [test262](https://github.com/tc39/test262) pass rate. The baseline `tests/test262.passing` is
-**42,443** cases (sloppy plus `onlyStrict`; without Temporal, intl402 and the like, see the [Roadmap](roadmap.md)).
+**42,500** cases (sloppy plus `onlyStrict`; without Temporal, intl402 and the like, see the [Roadmap](roadmap.md)).
 Every commit must keep it with zero regressions, and the same baseline runs with the JIT on.
 
 ## What is in the repository

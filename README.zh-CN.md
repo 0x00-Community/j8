@@ -7,7 +7,7 @@
 **字节码解释器 + 经 MLIR 的 JIT + 并行回收的堆 ([paragc](https://crates.io/crates/paragc)).**
 
 [![Rust](https://img.shields.io/badge/Rust-100%25-orange?style=for-the-badge&logo=rust)](https://www.rust-lang.org)
-[![test262](https://img.shields.io/badge/test262-42%2C443%20%E9%80%9A%E8%BF%87-success?style=for-the-badge)](#-test262)
+[![test262](https://img.shields.io/badge/test262-42%2C500%20%E9%80%9A%E8%BF%87-success?style=for-the-badge)](#-test262)
 [![License](https://img.shields.io/badge/License-MIT-brightgreen?style=for-the-badge)](#-许可证)
 
 [![ECMAScript](https://img.shields.io/badge/ECMAScript-%E6%A0%B8%E5%BF%83%E8%AF%AD%E8%A8%80-F7DF1E?style=flat-square&logo=javascript&logoColor=black)](#-现状)
@@ -45,7 +45,7 @@ j8 是**用 Rust 从头写的 JavaScript 引擎**, 照着 V8 的分层来: 所�
 
 | ✔️ 项目 | 结果 |
 | --- | --- |
-| 📜 test262 基线 | **42,443** 条通过 (非严格 + `onlyStrict`; 不含 Temporal / intl402 等, 见 PLAN.md), 每次提交零回归 |
+| 📜 test262 基线 | **42,500** 条通过 (非严格 + `onlyStrict`; 不含 Temporal / intl402 等, 见 PLAN.md), 每次提交零回归 |
 | 🧮 JIT | `J8_TEST262_JIT=1` 开着 JIT (每个函数第一次调用就编) 跑同一份基线 |
 | ⏱️ 对 V8 jitless | 11 个基准几何平均耗时 **0.6×**, 校验和三种引擎全一致 |
 | 🚄 对 V8 (带 JIT) | 几何平均耗时 **1.7×**; 差距在内建函数 (array、sort、string、collections、json、regexp), 详见 [benchmark.md](samples/benchv8/benchmark.md) |
