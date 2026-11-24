@@ -32,5 +32,5 @@ j8 的主线是 test262 通过率（`PLAN.md`）。每一阶段：往语义表�
 ## 运行时
 
 - dune：补齐顶层 `await`、`https:`、`http` / `net` 服务端、流、异步子进程、`worker_threads`、`zlib`、`crypto` 哈希等；
-  npm 包 `@litany/dune` 发布；
+  npm 包 `@jabberwocky238/dune` 发布；
 - Node-API：真弱引用。
