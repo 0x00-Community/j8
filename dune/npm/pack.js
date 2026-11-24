@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Lays out the npm packages of one dune release, ready for `npm publish` in each directory:
-//   <out>/dune/            the main package (@jabberwocky238/dune): placeholders, install.js, optionalDependencies on all below
-//   <out>/<platform>/      one per platforms.json entry found in <dist> (@jabberwocky238/dune-linux-x64, @jabberwocky238/dune-darwin-arm64, ...)
+//   <out>/dune/            the main package (@litany/dune): placeholders, install.js, optionalDependencies on all below
+//   <out>/<platform>/      one per platforms.json entry found in <dist> (@litany/dune-linux-x64, @litany/dune-darwin-arm64, ...)
 // <dist>/<rust target>/dune[.exe] are the release binaries (cargo build --release --target <rust target>); the
 // version is the one in ../Cargo.toml. Publish the platform packages before the main package.
 //   node npm/pack.js <dist> <out>
@@ -9,7 +9,7 @@
 const fs = require('fs');
 const path = require('path');
 
-const SCOPE = '@jabberwocky238';
+const SCOPE = '@litany';
 const MAIN = `${SCOPE}/dune`;
 const HERE = __dirname;
 const REPOSITORY = { type: 'git', url: 'git+https://github.com/0x00-Community/j8.git', directory: 'dune' };

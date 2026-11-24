@@ -1,9 +1,9 @@
-// Which @jabberwocky238/dune-<platform> package holds the binary for this machine, and where in it the binary is.
+// Which @litany/dune-<platform> package holds the binary for this machine, and where in it the binary is.
 'use strict';
 const path = require('path');
 const platforms = require('./platforms.json');
 
-const SCOPE = '@jabberwocky238';
+const SCOPE = '@litany';
 
 /** `glibc` or `musl` on Linux (Node built against glibc reports its version), nothing elsewhere */
 function libc() {

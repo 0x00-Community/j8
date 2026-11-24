@@ -9,7 +9,7 @@ JS 先编成与 V8 Ignition 逐字节一致的字节码，由执行器解释，�
 ```sh
 curl -fsSL https://j8.app238.com/install | bash                 # macOS、Linux
 powershell -c "irm https://j8.app238.com/install.ps1 | iex"     # Windows
-npm install -g @jabberwocky238/dune                              # 有 npm 的地方
+npm install -g @litany/dune                              # 有 npm 的地方
 ```
 
 详见[安装 dune](install.md)。
