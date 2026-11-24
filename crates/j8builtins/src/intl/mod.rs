@@ -18,6 +18,10 @@ use locale::Tags;
 use number::{NumberFormat, NumberFormats};
 use plural::PluralRulesBuiltins;
 
+pub(crate) fn host_zone(a: &Scope<'_, '_>, t: f64) -> (f64, Option<String>) {
+    zone::Zone::host(a.platform.time_zone()).local(t)
+}
+
 struct Intl;
 
 impl Intl {

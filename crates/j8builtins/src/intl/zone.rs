@@ -85,6 +85,21 @@ impl Zone {
         }
     }
 
+    pub(crate) fn local(&self, t: f64) -> (f64, Option<String>) {
+        const MS_PER_SECOND: f64 = 1000.0;
+        let offset = f64::from(self.offset_seconds(t)) * MS_PER_SECOND;
+        let name = match self {
+            Self::Utc => None,
+            Self::Offset(_) => Some(self.identifier()),
+            Self::Named(_, tz) => {
+                #[expect(clippy::cast_possible_truncation, reason = "time values are within ±8.64e15")]
+                let ms = t as i64;
+                jiff::Timestamp::from_millisecond(ms).ok().map(|ts| String::from(tz.to_offset_info(ts).abbreviation()))
+            }
+        };
+        (offset, name)
+    }
+
     pub(crate) fn id(&self) -> ZoneId {
         match self {
             Self::Utc => ZoneId::from_iana_id("Etc/UTC"),
