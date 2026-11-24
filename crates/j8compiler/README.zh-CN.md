@@ -5,6 +5,11 @@
 [j8](https://github.com/0x00-Community/j8) 的编译器：JavaScript ⇒ j8 字节码（`j8bytecode::Module`），用
 [oxc](https://oxc.rs) 解析。所有 JS 运行前都先过这里——脚本、ES 模块、动态代码（`eval`、`Function`）；不设 AST 解释层。
 
+WebAssembly 走同一条路：`CompileWasm::compile_wasm` 用 [wasmparser](https://crates.io/crates/wasmparser)
+（WebAssembly 3.0 特性）校验二进制模块，把每个函数体编成 j8 的 WebAssembly 寄存器字节码（`j8bytecode::WasmModule`）。
+操作数栈的每个槽是局部变量之上的固定寄存器，所以块的结果本来就在该在的位置，只有跳转需要搬值。常量表达式（全局 /
+表的初值、段偏移和段元素）也编成小函数。SIMD、GC 类型和异常处理目前报 `WasmErrorKind::Unsupported`。
+
 ```text
 源码 ─ oxc 解析 + 语义检查 ─▶ AST ─ 作用域解析 ─ 生成代码 ─ 窥孔融合 ─▶ Module
 ```

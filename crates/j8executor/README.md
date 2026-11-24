@@ -6,6 +6,11 @@ The bytecode executor of [j8](https://github.com/0x00-Community/j8): it runs the
 bytecode of `j8bytecode` (`Executor<'p>`: `eval`, resumable `start` / `resume`) and drives the JS event loops
 (`EventLoop` / `EventLoopSet`).
 
+`WasmStore` runs WebAssembly: host functions / tables / memories / globals, `instantiate` (import linking, globals,
+tables, memories, element and data segments, start function) and `invoke`. The interpreter decodes each function's
+bytecode once, keeps 64-bit register slots on one stack (a callee's frame starts at the caller's argument registers, so
+arguments and results are never copied), uses an explicit frame stack, and traps with `WasmTrap`.
+
 ## How it runs
 
 - An explicit frame stack (no host recursion); all frames share one register file; captured bindings live in the

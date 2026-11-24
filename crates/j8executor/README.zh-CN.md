@@ -5,6 +5,10 @@
 [j8](https://github.com/0x00-Community/j8) 的字节码执行器：执行 `j8bytecode` 的累加器式寄存器字节码（`Executor<'p>`：`eval`，可续跑的
 `start` / `resume`），并驱动 JS 事件循环（`EventLoop` / `EventLoopSet`）。
 
+`WasmStore` 运行 WebAssembly：宿主函数 / 表 / 内存 / 全局、`instantiate`（导入链接、全局、表、内存、元素段和数据段、
+start 函数）与 `invoke`。解释器每个函数只解码一次字节码，64 位寄存器槽放在同一个栈上（被调函数的帧从调用者的参数寄存器
+开始，参数和结果都不拷贝），用显式帧栈，出错返回 `WasmTrap`。
+
 ## 怎么跑
 
 - 显式帧栈（不靠宿主递归）；全部帧共用一个寄存器文件；被捕获的绑定放在堆上的 `Env` 链里
