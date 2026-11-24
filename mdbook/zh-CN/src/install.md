@@ -33,11 +33,11 @@ powershell -c "irm https://j8.app238.com/install.ps1 | iex"
 ## npm
 
 ```sh
-npm install -g @j8dune/dune
+npm install -g @litany/dune
 ```
 
-npm 只装符合本机的平台包（`@j8dune/dune-linux-x64`、`@j8dune/dune-darwin-arm64`、
-`@j8dune/dune-win32-x64` ……），postinstall 脚本把其中的二进制放到位，`dune` 启动时不经过 Node。
+npm 只装符合本机的平台包（`@litany/dune-linux-x64`、`@litany/dune-darwin-arm64`、
+`@litany/dune-win32-x64` ……），postinstall 脚本把其中的二进制放到位，`dune` 启动时不经过 Node。
 
 ## Cargo
 
@@ -75,4 +75,4 @@ JIT 只在 Unix 上出 x86-64 机器码；其他平台 `--jit` 打一行提示�
 ## 卸载
 
 删掉 `~/.dune`（或 `%USERPROFILE%\.dune`）和脚本写进 shell 启动文件的几行（`# dune` 标记），或者
-`npm uninstall -g @j8dune/dune`。
+`npm uninstall -g @litany/dune`。

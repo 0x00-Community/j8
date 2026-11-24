@@ -1,4 +1,4 @@
-# @j8dune/dune
+# @litany/dune
 
 [English](README.md) · **简体中文**
 
@@ -6,13 +6,13 @@
 **dunx**（等同 `dune x`）跑包里的可执行文件，没装就从 npm registry 装，对标 `npx` / `bunx`。
 
 ```sh
-npm install -g @j8dune/dune
+npm install -g @litany/dune
 dune app.js
 dune -p '[1, 2, 3].map(x => x * 2)'
 dunx cowsay hello
 ```
 
-本包自身不带二进制：npm 按本机平台从 `@j8dune/dune-<平台>`（`@j8dune/dune-linux-x64`、`@j8dune/dune-darwin-arm64`、`@j8dune/dune-win32-x64` ……）
+本包自身不带二进制：npm 按本机平台从 `@litany/dune-<平台>`（`@litany/dune-linux-x64`、`@litany/dune-darwin-arm64`、`@litany/dune-win32-x64` ……）
 装上对应的一个，postinstall 脚本把它放到 Node 占位脚本的位置，`dune` 和 `dunx` 启动时不经过 Node；`dunx` 是 `dune`
 的链接。用了 `--ignore-scripts` 时，占位脚本经 Node 启动二进制。
 

@@ -24,7 +24,7 @@ cargo run --release -- --jit a.js                    # 打开 JIT
 ```sh
 curl -fsSL https://j8.app238.com/install | bash               # macOS、Linux：装进 ~/.dune/bin
 powershell -c "irm https://j8.app238.com/install.ps1 | iex"   # Windows
-npm install -g @j8dune/dune                            # 本平台的预编译二进制，dune 和 dunx 都有
+npm install -g @litany/dune                            # 本平台的预编译二进制，dune 和 dunx 都有
 cargo install j8dune      # 或者自己编（crates.io 上 dune 已被占用）；再 ln -s dune ~/.cargo/bin/dunx
 dune upgrade              # 用 GitHub 上的最新 Release 替换自己
 ```
@@ -33,8 +33,8 @@ dune upgrade              # 用 GitHub 上的最新 Release 替换自己
 和 `SHA256SUMS`），并用 npm trusted publishing 发布 npm 包（`.github/workflows/dune-release.yml`）；同一标签由 `.github/workflows/j8-release.yml`
 用 `CRATE_TOKEN` 密钥把 j8 各 crate 和 `j8dune` 发到 crates.io（它只管 crates.io），dune 的构建会等这一版 j8 上线。安装脚本放在 `mdbook/install/`。
 
-只有一个可执行文件：`dunx` 是 `dune` 的链接，程序按启动时的文件名区分两者（同 `bun` / `bunx`）。npm 上的 `@j8dune/dune`
-只带占位脚本，依赖每个平台一个包（`@j8dune/dune-linux-x64`、`@j8dune/dune-darwin-arm64`、`@j8dune/dune-win32-x64`
+只有一个可执行文件：`dunx` 是 `dune` 的链接，程序按启动时的文件名区分两者（同 `bun` / `bunx`）。npm 上的 `@litany/dune`
+只带占位脚本，依赖每个平台一个包（`@litany/dune-linux-x64`、`@litany/dune-darwin-arm64`、`@litany/dune-win32-x64`
 ……），npm 只装符合本机的那个；postinstall 脚本把其中的二进制放到占位脚本的位置，再把 `dunx` 链接过去。`npm/` 放主包和
 `npm/pack.js`，后者用编好的二进制排出一次发版的全部包。
 

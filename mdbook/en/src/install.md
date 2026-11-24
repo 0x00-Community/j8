@@ -34,11 +34,11 @@ Installs `dune.exe` and `dunx.exe` to `%USERPROFILE%\.dune\bin` and adds it to t
 ## npm
 
 ```sh
-npm install -g @j8dune/dune
+npm install -g @litany/dune
 ```
 
-npm installs only the platform package that fits (`@j8dune/dune-linux-x64`, `@j8dune/dune-darwin-arm64`,
-`@j8dune/dune-win32-x64` …) and the postinstall script puts its binary in place, so `dune` starts without Node.
+npm installs only the platform package that fits (`@litany/dune-linux-x64`, `@litany/dune-darwin-arm64`,
+`@litany/dune-win32-x64` …) and the postinstall script puts its binary in place, so `dune` starts without Node.
 
 ## Cargo
 
@@ -77,4 +77,4 @@ The JIT emits x86-64 machine code on Unix; elsewhere `--jit` prints a notice and
 ## Uninstalling
 
 Delete `~/.dune` (or `%USERPROFILE%\.dune`) and the lines the script added to your shell's startup file (marked
-`# dune`), or `npm uninstall -g @j8dune/dune`.
+`# dune`), or `npm uninstall -g @litany/dune`.

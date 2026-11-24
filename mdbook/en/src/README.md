@@ -10,7 +10,7 @@ executor, and hot functions and loops go to a speculative JIT that emits x86-64 
 ```sh
 curl -fsSL https://j8.app238.com/install | bash                 # macOS, Linux
 powershell -c "irm https://j8.app238.com/install.ps1 | iex"     # Windows
-npm install -g @j8dune/dune                              # anywhere with npm
+npm install -g @litany/dune                              # anywhere with npm
 ```
 
 More in [Installing dune](install.md).
