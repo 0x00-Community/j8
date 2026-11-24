@@ -15,6 +15,13 @@ the bytecode; JavaScript ⇒ bytecode is `j8compiler`. It is the dependency root
   reads instructions back
 - A register operand is the register's slot from the frame pointer (`Register`, V8's x64 interpreter frame): r0 is
   -7, the receiver +2, the context -1, the closure -2
+- WebAssembly gets its own bytecode table, `WasmBytecode`: a three-address register form of the WebAssembly 3.0
+  instruction set. `tools/wasmbytecodes.py <v8 checkout>` writes `wasm.json` from V8's `src/wasm/wasm-opcodes.h` (V8's
+  operator names, `wasm()` / `from_wasm()` map to V8's `WasmOpcode` numbering), `j8macros::wasm_bytecodes!` turns it
+  into `WasmBytecode` / `WasmOperandType`. Operators with a signature take one register per result and parameter, then
+  their immediates; structured control, `local.*`, `drop` and `try_table` become `Jump*` / `Mov` / the handler table.
+  Page 0 is one byte, SIMD (page 1) follows the `Simd` prefix byte; `Wide` / `ExtraWide` scale operands as in V8.
+  `Encoder` / `Decoder` work on both tables (`Opcode`)
 - `tests/v8.rs` decodes 738 instructions V8 15.2.124 printed (`--print-bytecode`) and checks every name, length and
   register operand
 

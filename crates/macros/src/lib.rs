@@ -6,6 +6,7 @@ mod method;
 mod object;
 mod trace;
 
+use bytecodes::Json;
 use proc_macro::TokenStream;
 use syn::{DeriveInput, LitStr, parse_macro_input};
 
@@ -55,4 +56,10 @@ pub fn heap(attr: TokenStream, item: TokenStream) -> TokenStream {
 pub fn bytecodes(input: TokenStream) -> TokenStream {
     let rel = parse_macro_input!(input as LitStr);
     bytecodes::Tables::read(&rel).and_then(|t| t.expand(&rel)).unwrap_or_else(syn::Error::into_compile_error).into()
+}
+
+#[proc_macro]
+pub fn wasm_bytecodes(input: TokenStream) -> TokenStream {
+    let rel = parse_macro_input!(input as LitStr);
+    bytecodes::WasmTables::read(&rel).and_then(|t| t.expand(&rel)).unwrap_or_else(syn::Error::into_compile_error).into()
 }

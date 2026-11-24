@@ -3,6 +3,18 @@ use quote::{format_ident, quote};
 use serde::Deserialize;
 use syn::{Error, LitStr, Result};
 
+pub trait Json: serde::de::DeserializeOwned {
+    fn read(rel: &LitStr) -> Result<Self> {
+        let dir = std::env::var("CARGO_MANIFEST_DIR").map_err(|e| Error::new(rel.span(), e))?;
+        let path = std::path::Path::new(&dir).join(rel.value());
+        let text = std::fs::read_to_string(&path).map_err(|e| Error::new(rel.span(), format_args!("{}: {e}", path.display())))?;
+        serde_json::from_str(&text).map_err(|e| Error::new(rel.span(), format_args!("{}: {e}", path.display())))
+    }
+}
+
+impl Json for Tables {}
+impl Json for WasmTables {}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Tables {
@@ -97,13 +109,6 @@ struct Code {
 }
 
 impl Tables {
-    pub fn read(rel: &LitStr) -> Result<Self> {
-        let dir = std::env::var("CARGO_MANIFEST_DIR").map_err(|e| Error::new(rel.span(), e))?;
-        let path = std::path::Path::new(&dir).join(rel.value());
-        let text = std::fs::read_to_string(&path).map_err(|e| Error::new(rel.span(), format_args!("{}: {e}", path.display())))?;
-        serde_json::from_str(&text).map_err(|e| Error::new(rel.span(), format_args!("{}: {e}", path.display())))
-    }
-
     pub fn expand(&self, rel: &LitStr) -> Result<TokenStream> {
         let source = format!("V8's bytecodes, from {}.", self.source);
         let codes: Vec<_> = self.bytecodes.iter().map(|c| format_ident!("{}", c.name)).collect();
@@ -248,6 +253,121 @@ impl Tables {
 
                 pub const fn args(self) -> i8 {
                     match self { #(Intrinsic::#inames => #iargs,)* }
+                }
+            }
+        })
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WasmTables {
+    source: String,
+    operand_types: Vec<Operand>,
+    pages: Vec<WasmPage>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WasmPage {
+    prefix: Option<String>,
+    bytecodes: Vec<WasmCode>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WasmCode {
+    name: String,
+    wasm: Option<u32>,
+    operands: Vec<String>,
+}
+
+impl WasmTables {
+    pub fn expand(&self, rel: &LitStr) -> Result<TokenStream> {
+        let source = format!("j8's WebAssembly bytecodes, from {}.", self.source);
+        let mut codes = Vec::new();
+        let mut tags = Vec::new();
+        let mut operand_lists = Vec::new();
+        let mut wasm = Vec::new();
+        for (p, page) in self.pages.iter().enumerate() {
+            let p = u16::try_from(p).map_err(|_| Error::new(rel.span(), "more than 256 pages"))?;
+            for (i, c) in page.bytecodes.iter().enumerate() {
+                let i = u8::try_from(i).map_err(|_| Error::new(rel.span(), "more than 256 bytecodes in a page"))?;
+                let ident = format_ident!("{}", c.name);
+                codes.push(ident.clone());
+                tags.push(proc_macro2::Literal::u16_unsuffixed((p << 8) | u16::from(i)));
+                let o = c.operands.iter().map(|o| format_ident!("{o}"));
+                operand_lists.push(quote! { &[#(WasmOperandType::#o),*] });
+                if let Some(w) = c.wasm {
+                    wasm.push((ident, proc_macro2::Literal::u32_unsuffixed(w)));
+                }
+            }
+        }
+        let prefixes = self.pages.iter().enumerate().filter_map(|(p, page)| {
+            let name = format_ident!("{}", page.prefix.as_ref()?);
+            let p = proc_macro2::Literal::u8_unsuffixed(u8::try_from(p).unwrap_or(u8::MAX));
+            Some(quote! { WasmBytecode::#name => Some(#p), })
+        });
+        let pages: Vec<_> = self.pages.iter().map(|page| page.prefix.as_ref().map_or_else(|| quote! { None }, |n| {
+            let n = format_ident!("{n}");
+            quote! { Some(WasmBytecode::#n) }
+        })).collect();
+        let page_count = pages.len();
+        let page_sizes: Vec<_> = self.pages.iter().map(|page| page.bytecodes.len()).collect();
+        let page_firsts: Vec<_> = self.pages.iter().scan(0usize, |n, page| {
+            let first = *n;
+            *n += page.bytecodes.len();
+            Some(first)
+        }).collect();
+        let (wasm_names, wasm_codes): (Vec<_>, Vec<_>) = wasm.into_iter().unzip();
+        let count = codes.len();
+        let ops: Vec<_> = self.operand_types.iter().map(|o| format_ident!("{}", o.name)).collect();
+        let infos: Vec<_> = self.operand_types.iter().map(|o| format_ident!("{}", o.info)).collect();
+        let path = std::path::Path::new(&std::env::var("CARGO_MANIFEST_DIR").unwrap_or_default()).join(rel.value()).to_string_lossy().into_owned();
+        Ok(quote! {
+            const _: &[u8] = include_bytes!(#path);
+
+            #[doc = #source]
+            #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+            #[repr(u16)]
+            pub enum WasmBytecode { #(#codes = #tags),* }
+
+            #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+            #[repr(u8)]
+            pub enum WasmOperandType { #(#ops),* }
+
+            impl WasmBytecode {
+                pub const COUNT: usize = #count;
+                pub const ALL: [WasmBytecode; #count] = [#(WasmBytecode::#codes),*];
+                pub const PAGES: [Option<WasmBytecode>; #page_count] = [#(#pages),*];
+                const PAGE_SIZES: [usize; #page_count] = [#(#page_sizes),*];
+                const PAGE_FIRSTS: [usize; #page_count] = [#(#page_firsts),*];
+
+                pub const fn from_page(page: u8, b: u8) -> Option<Self> {
+                    let p = page as usize;
+                    if p < #page_count && (b as usize) < Self::PAGE_SIZES[p] { Some(Self::ALL[Self::PAGE_FIRSTS[p] + b as usize]) } else { None }
+                }
+
+                pub const fn page_prefix(self) -> Option<u8> {
+                    match self { #(#prefixes)* _ => None }
+                }
+
+                pub const fn from_wasm(opcode: u32) -> Option<Self> {
+                    match opcode { #(#wasm_codes => Some(WasmBytecode::#wasm_names),)* _ => None }
+                }
+
+                pub const fn wasm(self) -> Option<u32> {
+                    match self { #(WasmBytecode::#wasm_names => Some(#wasm_codes),)* _ => None }
+                }
+
+                pub const fn operand_types(self) -> &'static [WasmOperandType] {
+                    match self { #(WasmBytecode::#codes => #operand_lists,)* }
+                }
+            }
+
+            impl WasmOperandType {
+                pub const fn info(self) -> OperandTypeInfo {
+                    match self { #(WasmOperandType::#ops => OperandTypeInfo::#infos,)* }
                 }
             }
         })

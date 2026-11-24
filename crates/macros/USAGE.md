@@ -7,6 +7,13 @@ writes from V8's `src/interpreter/bytecodes.h` and `bytecode-operands.h`: `Bytec
 `OperandType`, `OperandTypeInfo`, `ImplicitRegisterUse`, and per bytecode `operand_types()` /
 `implicit_register_use()`. ⛔ edit the JSON or the generated tables by hand: regenerate from a V8 checkout.
 
+## `wasm_bytecodes!("wasm.json")`
+
+Generates j8bytecode's WebAssembly bytecode table from `crates/j8bytecode/wasm.json`, which
+`tools/wasmbytecodes.py <v8 checkout>` writes from V8's `src/wasm/wasm-opcodes.h`: `WasmBytecode` (`repr(u16)`,
+page << 8 | index), `WasmOperandType`, and `operand_types()`, `from_page()` / `page_prefix()` / `PAGES`,
+`wasm()` / `from_wasm()` (V8's `WasmOpcode` numbering). ⛔ edit the JSON by hand: regenerate from a V8 checkout.
+
 ## Binding macros: `#[j8::class]` / `#[j8::object]` / `#[j8::function]`
 
 Each of the three macros has its own file (`class.rs` / `object.rs` / `function.rs`); the shared code that reads
