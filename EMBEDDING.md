@@ -467,7 +467,7 @@ let platform = Dune::platform(NodePlatform::from(DefaultPlatform::default()));
 ```
 
 Other `Platform` methods you may override: `print` (where `console.log` goes), `now` / `wall_clock` (a fake clock for
-tests).
+tests), `locale` / `time_zone` (the default locale and time zone of `Intl` and `Date`, with the `intl` feature).
 
 ## 7. Building on another runtime
 
