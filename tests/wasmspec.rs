@@ -8,7 +8,7 @@ use wast::parser::{self, ParseBuffer};
 use j8bytecode::{WasmFuncType, WasmGlobalType, WasmHeapType, WasmLimits, WasmMemoryType, WasmModule, WasmRefType, WasmTableType, WasmValType};
 use j8compiler::{CompileWasm, WasmError, WasmErrorKind};
 use j8executor::{WasmExtern, WasmInstantiateError, WasmLinkError, WasmStore, WasmTrap, WasmValue};
-use wast::core::{AbstractHeapType, HeapType, NanPattern, WastArgCore, WastRetCore};
+use wast::core::{AbstractHeapType, HeapType, NanPattern, V128Pattern, WastArgCore, WastRetCore};
 use wast::token::{Id, F32, F64};
 use wast::{QuoteWat, Wast, WastArg, WastDirective, WastExecute, WastInvoke, WastRet};
 
@@ -226,6 +226,19 @@ impl Spec {
         }
     }
 
+    fn vector(p: &V128Pattern, v: u128) -> bool {
+        let b = v.to_le_bytes();
+        let chunk = |i: usize, n: usize| b[i * n..(i + 1) * n].iter().rev().fold(0u64, |a, &x| (a << 8) | u64::from(x));
+        match p {
+            V128Pattern::I8x16(l) => l.iter().enumerate().all(|(i, &x)| chunk(i, 1) == u64::from(x.cast_unsigned())),
+            V128Pattern::I16x8(l) => l.iter().enumerate().all(|(i, &x)| chunk(i, 2) == u64::from(x.cast_unsigned())),
+            V128Pattern::I32x4(l) => l.iter().enumerate().all(|(i, &x)| chunk(i, 4) == u64::from(x.cast_unsigned())),
+            V128Pattern::I64x2(l) => l.iter().enumerate().all(|(i, &x)| chunk(i, 8) == x.cast_unsigned()),
+            V128Pattern::F32x4(l) => l.iter().enumerate().all(|(i, &x)| Self::nan32(x, u32::try_from(chunk(i, 4)).unwrap_or(0))),
+            V128Pattern::F64x2(l) => l.iter().enumerate().all(|(i, &x)| Self::nan64(x, chunk(i, 8))),
+        }
+    }
+
     fn matches(want: &WastRetCore<'_>, got: WasmValue) -> bool {
         match (want, got) {
             (WastRetCore::I32(a), WasmValue::I32(b)) => *a == b,
@@ -234,6 +247,7 @@ impl Spec {
             (WastRetCore::F64(p), WasmValue::F64(b)) => Self::nan64(*p, b),
             (WastRetCore::RefNull(_), WasmValue::FuncRef(None) | WasmValue::ExternRef(None) | WasmValue::Ref(None)) | (WastRetCore::RefExtern(None), WasmValue::ExternRef(Some(_))) | (WastRetCore::RefFunc(_), WasmValue::FuncRef(Some(_))) => true,
             (WastRetCore::RefExtern(Some(a)), WasmValue::ExternRef(Some(b))) => *a == b,
+            (WastRetCore::V128(p), WasmValue::V128(v)) => Self::vector(p, v),
             (WastRetCore::Either(alts), v) => alts.iter().any(|a| Self::matches(a, v)),
             _ => false,
         }

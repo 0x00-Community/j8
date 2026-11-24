@@ -4,6 +4,8 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::OnceCell;
 
+mod simd;
+
 use j8bytecode::{Decoded, Decoder, OperandValue, WasmBytecode, WasmExternKind, WasmFuncType, WasmGlobalType, WasmHeapType, WasmImportKind, WasmMemoryType, WasmModule, WasmSegmentMode, WasmTableType, WasmValType};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -54,6 +56,10 @@ pub enum WasmValue {
 }
 
 impl WasmValue {
+    fn vector(self) -> u128 {
+        if let Self::V128(v) = self { v } else { 0 }
+    }
+
     fn slot(self) -> u64 {
         match self {
             Self::I32(v) => u64::from(v.cast_unsigned()),
@@ -66,14 +72,14 @@ impl WasmValue {
         }
     }
 
-    fn typed(ty: WasmValType, s: u64) -> Self {
+    fn typed(ty: WasmValType, s: u64, v: u128) -> Self {
         let r = |s: u64| if s == 0 { None } else { u32::try_from(s - 1).ok() };
         match ty {
             WasmValType::I32 => Self::I32(Slot(s).i32()),
             WasmValType::I64 => Self::I64(s.cast_signed()),
             WasmValType::F32 => Self::F32(Slot(s).u32()),
             WasmValType::F64 => Self::F64(s),
-            WasmValType::V128 => Self::V128(u128::from(s)),
+            WasmValType::V128 => Self::V128(v),
             WasmValType::Ref(t) => match t.heap {
                 WasmHeapType::Func | WasmHeapType::NoFunc | WasmHeapType::Concrete(_) => Self::FuncRef(r(s)),
                 WasmHeapType::Extern | WasmHeapType::NoExtern => Self::ExternRef(r(s)),
@@ -148,6 +154,8 @@ pub type WasmHost = Box<dyn Fn(&[WasmValue]) -> Result<Vec<WasmValue>, WasmTrap>
 struct Code {
     ops: Vec<Decoded<WasmBytecode>>,
     at: Vec<u32>,
+    bits: Box<[u64]>,
+    tables: Box<[Box<[u32]>]>,
 }
 
 impl Code {
@@ -180,6 +188,7 @@ struct Memory {
 struct Global {
     ty: WasmGlobalType,
     value: u64,
+    vector: u128,
 }
 
 struct Instance {
@@ -193,7 +202,6 @@ struct Instance {
 }
 
 struct Activation {
-    func: u32,
     instance: u32,
     code: Rc<Code>,
     fp: usize,
@@ -212,6 +220,7 @@ pub struct WasmStore {
     globals: Vec<Global>,
     instances: Vec<Instance>,
     stack: Vec<u64>,
+    vstack: Vec<u128>,
 }
 
 impl WasmStore {
@@ -233,7 +242,7 @@ impl WasmStore {
     }
 
     pub fn host_global(&mut self, ty: WasmGlobalType, value: WasmValue) -> u32 {
-        self.globals.push(Global { ty, value: value.slot() });
+        self.globals.push(Global { ty, value: value.slot(), vector: value.vector() });
         u32::try_from(self.globals.len() - 1).unwrap_or(0)
     }
 
@@ -252,7 +261,7 @@ impl WasmStore {
 
     pub fn global_value(&self, g: u32) -> WasmValue {
         let g = &self.globals[g as usize];
-        WasmValue::typed(g.ty.content, g.value)
+        WasmValue::typed(g.ty.content, g.value, g.vector)
     }
 
     pub fn func_type(&self, f: u32) -> &WasmFuncType {
@@ -312,14 +321,14 @@ impl WasmStore {
         }
         self.instances.push(inst);
         for g in &module.globals {
-            let value = self.eval(id, g.init)?;
-            self.globals.push(Global { ty: g.ty, value });
+            let (value, vector) = self.eval(id, g.init)?;
+            self.globals.push(Global { ty: g.ty, value, vector });
             let a = u32::try_from(self.globals.len() - 1).unwrap_or(0);
             self.instances[id as usize].globals.push(a);
         }
         for t in &module.tables {
             let init = match t.init {
-                Some(i) => self.eval(id, i)?,
+                Some(i) => self.eval(id, i)?.0,
                 None => 0,
             };
             let n = usize::try_from(t.ty.limits.min).unwrap_or(0);
@@ -334,7 +343,7 @@ impl WasmStore {
         for el in &module.elements {
             let mut items = Vec::with_capacity(el.items.len());
             for &i in &el.items {
-                items.push(self.eval(id, i)?);
+                items.push(self.eval(id, i)?.0);
             }
             self.instances[id as usize].elems.push(items.into());
         }
@@ -344,7 +353,7 @@ impl WasmStore {
         for (i, el) in module.elements.iter().enumerate() {
             match el.mode {
                 WasmSegmentMode::Active { index, offset } => {
-                    let at = self.eval(id, offset)?;
+                    let at = self.eval(id, offset)?.0;
                     let n = u64::try_from(el.items.len()).unwrap_or(0);
                     self.table_init(id, index, u32::try_from(i).unwrap_or(0), at, 0, n)?;
                     self.instances[id as usize].elems[i] = Rc::from([]);
@@ -355,7 +364,7 @@ impl WasmStore {
         }
         for (i, d) in module.data.iter().enumerate() {
             if let WasmSegmentMode::Active { index, offset } = d.mode {
-                let at = self.eval(id, offset)?;
+                let at = self.eval(id, offset)?.0;
                 let n = u64::try_from(d.bytes.len()).unwrap_or(0);
                 self.memory_init(id, index, u32::try_from(i).unwrap_or(0), at, 0, n)?;
                 self.instances[id as usize].data[i] = Rc::from([]);
@@ -368,21 +377,40 @@ impl WasmStore {
         Ok(id)
     }
 
-    fn eval(&mut self, instance: u32, init: u32) -> Result<u64, WasmTrap> {
+    fn eval(&mut self, instance: u32, init: u32) -> Result<(u64, u128), WasmTrap> {
         let fp = self.stack.len();
         self.call(FUNC_INIT, instance, init, fp)?;
-        let v = self.stack[fp];
-        self.stack.truncate(fp);
+        let v = (self.stack[fp], self.vstack[fp]);
+        self.truncate(fp);
         Ok(v)
+    }
+
+    fn truncate(&mut self, n: usize) {
+        self.stack.truncate(n);
+        self.vstack.truncate(n);
+    }
+
+    fn reserve(&mut self, n: usize) {
+        if self.stack.len() < n {
+            self.stack.resize(n, 0);
+            self.vstack.resize(n, 0);
+        }
+    }
+
+    fn copy(&mut self, from: usize, to: usize, n: usize) {
+        self.stack.copy_within(from..from + n, to);
+        self.vstack.copy_within(from..from + n, to);
     }
 
     pub fn invoke(&mut self, func: u32, args: &[WasmValue]) -> Result<Vec<WasmValue>, WasmTrap> {
         let ty = self.funcs[func as usize].ty.clone();
         let fp = self.stack.len();
         self.stack.extend(args.iter().map(|a| a.slot()));
+        self.vstack.extend(args.iter().map(|a| a.vector()));
+        self.reserve(fp + ty.results.len());
         let r = self.enter(func, fp);
-        let out = r.map(|()| ty.results.iter().enumerate().map(|(i, &t)| WasmValue::typed(t, self.stack[fp + i])).collect());
-        self.stack.truncate(fp);
+        let out = r.map(|()| ty.results.iter().enumerate().map(|(i, &t)| WasmValue::typed(t, self.stack[fp + i], self.vstack[fp + i])).collect());
+        self.truncate(fp);
         out
     }
 
@@ -398,14 +426,13 @@ impl WasmStore {
 
     fn host(&mut self, func: u32, fp: usize) -> Result<(), WasmTrap> {
         let f = &self.funcs[func as usize];
-        let args: Vec<WasmValue> = f.ty.params.iter().enumerate().map(|(i, &t)| WasmValue::typed(t, self.stack.get(fp + i).copied().unwrap_or(0))).collect();
+        let args: Vec<WasmValue> = f.ty.params.iter().enumerate().map(|(i, &t)| WasmValue::typed(t, self.stack.get(fp + i).copied().unwrap_or(0), self.vstack.get(fp + i).copied().unwrap_or(0))).collect();
         let FuncKind::Host(h) = &f.kind else { return Err(WasmTrap::Unsupported) };
         let results = h(&args)?;
-        if self.stack.len() < fp + results.len() {
-            self.stack.resize(fp + results.len(), 0);
-        }
+        self.reserve(fp + results.len());
         for (i, r) in results.iter().enumerate() {
             self.stack[fp + i] = r.slot();
+            self.vstack[fp + i] = r.vector();
         }
         Ok(())
     }
@@ -419,14 +446,14 @@ impl WasmStore {
             for (i, d) in ops.iter().enumerate() {
                 at[d.offset] = u32::try_from(i).unwrap_or(u32::MAX);
             }
-            Rc::new(Code { ops, at })
+            Rc::new(Code { ops, at, bits: f.bits.clone(), tables: f.tables.clone() })
         };
         if func == FUNC_INIT {
             return build();
         }
         match &self.funcs[func as usize].kind {
             FuncKind::Wasm { code, .. } => code.get_or_init(build).clone(),
-            FuncKind::Host(_) => Rc::new(Code { ops: Vec::new(), at: Vec::new() }),
+            FuncKind::Host(_) => Rc::new(Code { ops: Vec::new(), at: Vec::new(), bits: Box::new([]), tables: Box::new([]) }),
         }
     }
 
@@ -439,11 +466,10 @@ impl WasmStore {
     fn frame(&mut self, func: u32, instance: u32, index: u32, fp: usize) -> Activation {
         let (params, registers) = self.function(func, instance, index);
         let end = fp + registers as usize;
-        if self.stack.len() < end {
-            self.stack.resize(end, 0);
-        }
+        self.reserve(end);
         self.stack[fp + params as usize..end].fill(0);
-        Activation { func, instance, code: self.code(func, instance, index), fp, pc: 0 }
+        self.vstack[fp + params as usize..end].fill(0);
+        Activation { instance, code: self.code(func, instance, index), fp, pc: 0 }
     }
 
     fn mem(&self, instance: u32, m: OperandValue) -> usize {
@@ -616,18 +642,16 @@ impl WasmStore {
                     }
                 }
                 WasmBytecode::BrTable => {
-                    let (inst, func, idx) = (f.instance, f.func, Slot(r!(f, o[0])).u32() as usize);
-                    let m = &self.instances[inst as usize].module;
-                    let fun = if func == FUNC_INIT { &m.inits[index as usize] } else { &m.functions[match &self.funcs[func as usize].kind { FuncKind::Wasm { index, .. } => *index as usize, FuncKind::Host(_) => 0 }] };
-                    let table = &fun.tables[usize::try_from(o[1]).unwrap_or(0)];
+                    let idx = Slot(r!(f, o[0])).u32() as usize;
+                    let table = &f.code.tables[usize::try_from(o[1]).unwrap_or(0)];
                     let at = table[idx.min(table.len() - 1)] as usize;
                     f.pc = f.code.at[at] as usize;
                 }
-                WasmBytecode::Mov => r!(f, o[0]) = r!(f, o[1]),
+                WasmBytecode::Mov => self.copy(f.fp + o[1] as usize, f.fp + o[0] as usize, 1),
                 WasmBytecode::Unreachable => return Err(WasmTrap::Unreachable),
                 WasmBytecode::Return => {
                     let (fp, first, n) = (f.fp, f.fp + o[0] as usize, o[1] as usize);
-                    self.stack.copy_within(first..first + n, fp);
+                    self.copy(first, fp, n);
                     frames.pop();
                 }
                 WasmBytecode::CallFunction | WasmBytecode::ReturnCall | WasmBytecode::CallIndirect | WasmBytecode::ReturnCallIndirect | WasmBytecode::CallRef | WasmBytecode::ReturnCallRef => {
@@ -652,7 +676,7 @@ impl WasmStore {
                     let mut fp = f.fp + base as usize;
                     if tail {
                         let n = self.funcs[target as usize].ty.params.len();
-                        self.stack.copy_within(fp..fp + n, f.fp);
+                        self.copy(fp, f.fp, n);
                         fp = f.fp;
                         frames.pop();
                     }
@@ -669,16 +693,18 @@ impl WasmStore {
                     }
                 }
                 WasmBytecode::Select => {
-                    let v = if Slot(r!(f, o[3])).u32() != 0 { r!(f, o[1]) } else { r!(f, o[2]) };
-                    r!(f, o[0]) = v;
+                    let from = if Slot(r!(f, o[3])).u32() != 0 { o[1] } else { o[2] };
+                    self.copy(f.fp + from as usize, f.fp + o[0] as usize, 1);
                 }
                 WasmBytecode::GlobalGet => {
                     let g = self.instances[f.instance as usize].globals[o[1] as usize];
                     r!(f, o[0]) = self.globals[g as usize].value;
+                    self.vstack[f.fp + o[0] as usize] = self.globals[g as usize].vector;
                 }
                 WasmBytecode::GlobalSet => {
                     let g = self.instances[f.instance as usize].globals[o[0] as usize];
                     self.globals[g as usize].value = r!(f, o[1]);
+                    self.globals[g as usize].vector = self.vstack[f.fp + o[1] as usize];
                 }
                 WasmBytecode::TableGet => {
                     let t = self.table(f.instance, o[2]);
@@ -784,9 +810,7 @@ impl WasmStore {
                 WasmBytecode::I32Const | WasmBytecode::F32Const => r!(f, o[0]) = u32s(o[1] as u32),
                 WasmBytecode::I64Const => r!(f, o[0]) = o[1] as u64,
                 WasmBytecode::I64ConstPool | WasmBytecode::F64Const => {
-                    let m = &self.instances[f.instance as usize].module;
-                    let fun = if f.func == FUNC_INIT { &m.inits[index as usize] } else { match &self.funcs[f.func as usize].kind { FuncKind::Wasm { index, .. } => &m.functions[*index as usize], FuncKind::Host(_) => return Err(WasmTrap::Unsupported) } };
-                    r!(f, o[0]) = fun.bits[o[1] as usize];
+                    r!(f, o[0]) = f.code.bits[o[1] as usize];
                 }
                 WasmBytecode::RefNull => r!(f, o[0]) = 0,
                 WasmBytecode::RefIsNull => r!(f, o[0]) = b(r!(f, o[1]) == 0),
@@ -980,6 +1004,9 @@ impl WasmStore {
                 WasmBytecode::I64StoreMem | WasmBytecode::F64StoreMem => store!(f, o, 8),
                 WasmBytecode::I32StoreMem8 | WasmBytecode::I64StoreMem8 => store!(f, o, 1),
                 WasmBytecode::I32StoreMem16 | WasmBytecode::I64StoreMem16 => store!(f, o, 2),
+                b if b.page_prefix().is_none() && (b as u16) >> 8 == 1 => {
+                    simd::Vector { store: self, fp: f.fp, instance: f.instance }.run(d, &f.code.bits)?;
+                }
                 _ => return Err(WasmTrap::Unsupported),
             }
         }

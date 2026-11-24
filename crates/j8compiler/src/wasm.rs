@@ -566,12 +566,26 @@ impl Body<'_, '_> {
                 ops.extend(e.immediates(b, imm, 1));
                 e.emit(b, &ops)?;
             }
+            Operator::V128Const { value } => {
+                let d = e.reg(h);
+                let i = OperandValue::try_from(e.bits.len()).unwrap_or(0);
+                let v = value.i128().cast_unsigned();
+                e.bits.extend([u64::try_from(v & u128::from(u64::MAX)).unwrap_or(0), u64::try_from(v >> 64).unwrap_or(0)]);
+                e.emit(WasmBytecode::S128Const, &[d, i])?;
+            }
+            Operator::I8x16Shuffle { lanes } => {
+                let (dst, a, b) = (e.reg(h - 2), e.reg(h - 2), e.reg(h - 1));
+                let i = OperandValue::try_from(e.bits.len()).unwrap_or(0);
+                let v = u128::from_le_bytes(lanes);
+                e.bits.extend([u64::try_from(v & u128::from(u64::MAX)).unwrap_or(0), u64::try_from(v >> 64).unwrap_or(0)]);
+                e.emit(WasmBytecode::I8x16Shuffle, &[dst, a, b, i])?;
+            }
             Operator::TryTable { .. } | Operator::Throw { .. } | Operator::ThrowRef => return Err(WasmError::unsupported(at, "exception handling")),
             _ => {
                 let (code, imm) = e.raw(at);
                 let b = WasmBytecode::from_wasm(code).ok_or_else(|| WasmError::unsupported(at, format!("{op:?}")))?;
                 let types = b.operand_types();
-                if matches!(e.module[at], 0xfb | 0xfd) {
+                if e.module[at] == 0xfb {
                     return Err(WasmError::unsupported(at, format!("{op:?}")));
                 }
                 let k = types.iter().take_while(|t| **t == WasmOperandType::Reg).count();
@@ -640,6 +654,14 @@ impl ModuleBuilder<'_> {
                 Operator::GlobalGet { global_index } => {
                     let d = e.reg(h);
                     e.emit(WasmBytecode::GlobalGet, &[d, OperandValue::from(global_index)])?;
+                    h += 1;
+                }
+                Operator::V128Const { value } => {
+                    let d = e.reg(h);
+                    let i = OperandValue::try_from(e.bits.len()).unwrap_or(0);
+                    let v = value.i128().cast_unsigned();
+                    e.bits.extend([u64::try_from(v & u128::from(u64::MAX)).unwrap_or(0), u64::try_from(v >> 64).unwrap_or(0)]);
+                    e.emit(WasmBytecode::S128Const, &[d, i])?;
                     h += 1;
                 }
                 Operator::RefNull { .. } => {
@@ -807,10 +829,6 @@ impl CompileWasm for WasmModule {
         let mut b = ModuleBuilder { bytes, module: WasmModule::default(), functions: Vec::new() };
         for payload in Parser::new(0).parse_all(bytes) {
             b.payload(&mut validator, payload?)?;
-        }
-        let v128 = |t: &WasmValType| *t == WasmValType::V128;
-        if b.module.types.iter().any(|t| t.params.iter().chain(&t.results).any(v128)) || b.module.globals.iter().any(|g| v128(&g.ty.content)) {
-            return Err(WasmError::unsupported(0, "v128"));
         }
         Ok(b.module)
     }

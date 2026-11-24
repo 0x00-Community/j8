@@ -103,7 +103,7 @@ J8_TEST262_UPDATE=1   cargo test --release --test test262 -- <path>   # 结果�
 ## 🧪 WebAssembly 规范测试
 
 `tests/wasm-testsuite` 是 [WebAssembly/testsuite](https://github.com/WebAssembly/testsuite) 子模块；顶层的 `.wast`
-文件就是 WebAssembly 3.0 核心（模块加断言共 65,244 条）。解释器（#70）目前过 39,379 条；SIMD、GC、异常处理还没做。
+文件就是 WebAssembly 3.0 核心（模块加断言共 65,244 条）。解释器（#70）目前过 64,348 条（98.6%，含 SIMD 与 relaxed SIMD）；GC 和异常处理还没做。
 
 ```sh
 cargo test --release --test wasmspec                         # 跑基线 (tests/wasmspec.passing), 掉一条就失败

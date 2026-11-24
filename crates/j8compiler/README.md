@@ -10,8 +10,8 @@ WebAssembly goes the same way: `CompileWasm::compile_wasm` validates a binary mo
 [wasmparser](https://crates.io/crates/wasmparser) (WebAssembly 3.0 features) and turns every function body into
 j8's WebAssembly register bytecode (`j8bytecode::WasmModule`). Each operand-stack slot is a fixed register above the
 locals, so block results already sit where they are expected; only branches move values. Constant expressions
-(global / table initializers, segment offsets and elements) are compiled into small functions too. SIMD, GC types and
-exception handling are reported as `WasmErrorKind::Unsupported` for now.
+(global / table initializers, segment offsets and elements) are compiled into small functions too. GC types and exception
+handling are reported as `WasmErrorKind::Unsupported` for now.
 
 ```text
 source ─ oxc parser + semantic checks ─▶ AST ─ scope resolution ─ code generation ─ peephole fusion ─▶ Module
