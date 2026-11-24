@@ -12,6 +12,8 @@ mod error;
 mod function;
 mod global;
 mod helpers;
+#[cfg(feature = "intl")]
+mod intl;
 mod iter;
 mod json;
 mod math;
@@ -25,7 +27,13 @@ mod typed;
 mod weak;
 
 use j8framework::{Mutation};
-use j8framework::{Intrinsics, JsObject, Context, Value};
+use j8framework::{Error, Intrinsics, JsObject, Context, Scope, Value};
+
+#[cfg(feature = "intl")]
+const LOCALE_ARGS: usize = 2;
+
+#[cfg(not(feature = "intl"))]
+const LOCALE_ARGS: usize = 0;
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Builtins;
@@ -56,6 +64,8 @@ impl Intrinsics for Builtins {
         b.weaks();
         b.typed_arrays();
         b.reflect();
+        #[cfg(feature = "intl")]
+        b.intl();
         b.tags();
     }
 }
@@ -144,6 +154,29 @@ impl<'scope> Installer<'_, 'scope> {
 
     fn plain(&self) -> JsObject<'scope> {
         j8framework::ObjectData { proto: Some(self.context.object_proto), ..j8framework::ObjectData::default() }.alloc(self.mc)
+    }
+}
+
+struct LocaleJoin;
+
+impl LocaleJoin {
+    fn join<'scope>(a: &mut Scope<'scope, '_>, o: JsObject<'scope>, len: f64, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+        let passed: alloc::vec::Vec<Value<'scope>> = (0..LOCALE_ARGS).map(|i| args.at(i)).collect();
+        let mut out = alloc::string::String::new();
+        let mut k = 0.0;
+        while k < len {
+            if k > 0.0 {
+                out.push(',');
+            }
+            let v = a.get_index(o.into(), k)?;
+            if !v.is_nullish() {
+                let f = a.get_named(v, "toLocaleString")?;
+                let s = a.call(f, v, &passed)?;
+                out.push_str(&a.to_string(s)?);
+            }
+            k += 1.0;
+        }
+        Ok(a.string(&out).into())
     }
 }
 

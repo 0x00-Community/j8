@@ -605,6 +605,34 @@ impl Dates {
     }
 }
 
+#[cfg(feature = "intl")]
+pub(crate) struct Civil {
+    pub(crate) year: i32,
+    pub(crate) month: u8,
+    pub(crate) day: u8,
+    pub(crate) hour: u8,
+    pub(crate) minute: u8,
+    pub(crate) second: u8,
+    pub(crate) millisecond: u16,
+}
+
+#[cfg(feature = "intl")]
+impl From<f64> for Civil {
+    fn from(t: f64) -> Self {
+        let small = |f: Field| u8::try_from(Dates::int(Dates::field(t, f))).unwrap_or(0);
+        let (m, d) = Dates::month_and_date(t);
+        Self {
+            year: i32::try_from(Dates::int(Dates::year_from_time(t))).unwrap_or(0),
+            month: u8::try_from(Dates::int(m) + 1).unwrap_or(1),
+            day: u8::try_from(Dates::int(d)).unwrap_or(1),
+            hour: small(Field::Hours),
+            minute: small(Field::Minutes),
+            second: small(Field::Seconds),
+            millisecond: u16::try_from(Dates::int(Dates::field(t, Field::Milliseconds))).unwrap_or(0),
+        }
+    }
+}
+
 macro_rules! setters {
     ($($name:ident => $which:ident),* $(,)?) => {
         impl Dates {
