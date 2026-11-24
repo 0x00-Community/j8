@@ -362,6 +362,8 @@ dependencies = [
  "j8lockfree",
  "j8platform",
  "j8taskqueue",
+ "num-bigint 0.4.8",
+ "num-traits",
  "ryu-js",
 ]
 

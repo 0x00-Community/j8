@@ -18,6 +18,7 @@ const HOST_MASK: u64 = HOST_TAG - 1;
 const BYTE_MASK: u64 = 0xff;
 const SHORT_MASK: u64 = 0xffff;
 const EXCEPTION: u32 = u32::MAX;
+pub const BOX: u32 = u32::MAX - 1;
 
 #[derive(Collect)]
 #[collect(no_drop)]
@@ -78,6 +79,26 @@ impl<'scope> WasmObject<'scope> {
 
     pub fn aux(&self) -> u64 {
         self.aux.get()
+    }
+
+    pub fn js(&self) -> &WordSlot<'scope> {
+        &self.js
+    }
+
+    pub fn length(&self) -> u32 {
+        self.len
+    }
+
+    pub fn is_box(&self) -> bool {
+        self.head == BOX
+    }
+
+    pub fn boxed(&self) -> u64 {
+        self.data.first().map_or(0, IsoCell::get)
+    }
+
+    pub fn boxed_value(mc: &Mutation<'scope>, bits: u64) -> u64 {
+        Ptr::of(mc.alloc(Self { head: BOX, len: 0, aux: WordSlot::new(0), js: WordSlot::new(0), refs: Box::new([]), data: Box::new([IsoCell::new(bits)]) }))
     }
 
     fn make(mc: &Mutation<'scope>, head: u32, aux: u64, len: u32, layout: &Layout) -> u64 {

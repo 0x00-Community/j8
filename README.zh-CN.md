@@ -113,6 +113,16 @@ J8_WASMSPEC_UPDATE=1  cargo test --release --test wasmspec   # 结果写回基�
 J8_WASMSPEC_COLLECT=1 cargo test --release --test wasmspec   # 每条指令后做一次全量回收（检查 GC 根）
 ```
 
+`WebAssembly` JS API 用 `tests/wasm-jsapi` 检查，这是 [WebAssembly/spec](https://github.com/WebAssembly/spec/tree/main/test/js-api)
+的 JS API 测试（WPT `wasm/jsapi` 的上游），配一个精简的 testharness（`tests/wasmjsapi.harness.js`），每个文件单独一个进程：
+1,111 个子测试过 1,053 个。
+
+```sh
+cargo test --release --test wasmjsapi                          # 基线（tests/wasmjsapi.passing）
+J8_WASMJSAPI_VERBOSE=1 cargo test --release --test wasmjsapi   # 列出失败的子测试
+J8_WASMJSAPI_UPDATE=1  cargo test --release --test wasmjsapi   # 结果写回基线
+```
+
 ## ✍️ 约定
 
 - 子模块私有 `mod`, 用 `pub use` 平铺导出; ⛔ `pub mod`

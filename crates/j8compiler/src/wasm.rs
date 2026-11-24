@@ -3,7 +3,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use j8bytecode::{Encoder, Opcode, OperandScale, OperandValue, WasmBytecode, WasmCatch, WasmCatchKind, WasmCompositeType, WasmData, WasmElement, WasmExport, WasmExternKind, WasmFieldType, WasmFuncType, WasmFunction, WasmHandler, WasmStorageType, WasmSubType, WasmGlobal, WasmGlobalType, WasmHeapType, WasmImport, WasmImportKind, WasmLimits, WasmMemoryType, WasmModule, WasmOperandType, WasmRefType, WasmSegmentMode, WasmTable, WasmTableType, WasmValType};
+use j8bytecode::{Encoder, Opcode, OperandScale, OperandValue, WasmBytecode, WasmCatch, WasmCatchKind, WasmCompositeType, WasmCustom, WasmData, WasmElement, WasmExport, WasmExternKind, WasmFieldType, WasmFuncType, WasmFunction, WasmHandler, WasmStorageType, WasmSubType, WasmGlobal, WasmGlobalType, WasmHeapType, WasmImport, WasmImportKind, WasmLimits, WasmMemoryType, WasmModule, WasmOperandType, WasmRefType, WasmSegmentMode, WasmTable, WasmTableType, WasmValType};
 use wasmparser::{AbstractHeapType, BinaryReaderError, BlockType, Catch, CompositeInnerType, StorageType, ConstExpr, DataKind, ElementItems, ElementKind, ExternalKind, FuncValidator, FunctionBody, HeapType, MemoryType, Operator, Parser, Payload, RefType, TableInit, TableType, TypeRef, ValType, ValidPayload, Validator, ValidatorResources, WasmFeatures, WasmModuleResources};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -939,6 +939,7 @@ impl ModuleBuilder<'_> {
                 }
             }
             Payload::StartSection { func, .. } => self.module.start = Some(func),
+            Payload::CustomSection(c) => self.module.customs.push(WasmCustom { name: c.name().into(), bytes: c.data().into() }),
             Payload::ElementSection(r) => {
                 for el in r {
                     let el = el?;

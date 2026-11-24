@@ -114,6 +114,16 @@ J8_WASMSPEC_UPDATE=1  cargo test --release --test wasmspec   # write results bac
 J8_WASMSPEC_COLLECT=1 cargo test --release --test wasmspec   # a full collection after every directive (checks GC roots)
 ```
 
+The `WebAssembly` JavaScript API is checked against `tests/wasm-jsapi`, the JS API tests of
+[WebAssembly/spec](https://github.com/WebAssembly/spec/tree/main/test/js-api) (the upstream of WPT `wasm/jsapi`), run
+with a small testharness (`tests/wasmjsapi.harness.js`), each file in its own process: 1,053 of 1,111 subtests pass.
+
+```sh
+cargo test --release --test wasmjsapi                          # the baseline (tests/wasmjsapi.passing)
+J8_WASMJSAPI_VERBOSE=1 cargo test --release --test wasmjsapi   # list failing subtests
+J8_WASMJSAPI_UPDATE=1  cargo test --release --test wasmjsapi   # write results back to the baseline
+```
+
 ## ✍️ Conventions
 
 - Private `mod`s, flat `pub use` exports; ⛔ `pub mod`

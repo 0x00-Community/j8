@@ -4,12 +4,14 @@ use alloc::vec::Vec;
 
 mod entity;
 mod gc;
+mod js;
 mod simd;
 mod types;
 
 pub use entity::{CellsBrand, FuncBrand, GlobalBrand, InstanceBrand, MemoryBrand, TableBrand, TagBrand, TypesBrand, WasmCells, WasmCompiled, WasmFunc, WasmGlobal, WasmInstance, WasmMemory, WasmTable, WasmTag, WasmTypes};
 use entity::{Code, Ptr};
 use gc::{Objects, WasmObject, Word};
+pub use js::WebAssembly;
 use j8bytecode::{Decoded, OperandValue, WasmBytecode, WasmCatchKind, WasmCompositeType, WasmExternKind, WasmFuncType, WasmGlobalType, WasmImportKind, WasmMemoryType, WasmSegmentMode, WasmStorageType, WasmTableType, WasmValType};
 use j8framework::{GcSlot, IsoCell, Mutation, ScopeLocal, Static, WordSlot};
 use j8lockfree::AtomicRefCell;
@@ -298,7 +300,7 @@ impl<'a, 'scope> WasmStore<'a, 'scope> {
     }
 
     fn composite(&self, w: u64) -> Option<bool> {
-        let o = WasmObject::get(w)?;
+        let o = WasmObject::get(w).filter(|o| !o.is_box())?;
         Some(matches!(self.registry().get(o.head()).sub.composite, WasmCompositeType::Array(_)))
     }
 
@@ -543,13 +545,14 @@ impl<'a, 'scope> WasmStore<'a, 'scope> {
         Ok(())
     }
 
-    pub fn grow_memory(memory: &WasmMemory<'_>, delta: u64) -> u64 {
+    pub fn grow_memory(mc: &Mutation<'scope>, memory: &WasmMemory<'scope>, delta: u64) -> u64 {
         let page = 1u64 << memory.ty.page_size_log2;
         let old = memory.pages();
         let limit = memory.ty.limits.max.unwrap_or(u64::MAX).min(if memory.ty.page_size_log2 == 16 { MAX_PAGES } else { u64::from(u32::MAX) });
         match old.checked_add(delta) {
             Some(n) if n <= limit => {
                 memory.bytes.resize(usize::try_from(n * page).unwrap_or(0));
+                js::Js::detach(mc, memory);
                 old
             }
             _ => u64::MAX,
@@ -683,7 +686,11 @@ impl<'a, 'scope> WasmStore<'a, 'scope> {
             Word::Object(w) => match h {
                 Hierarchy::Exn => H::Exn,
                 Hierarchy::Extern => H::Extern,
-                _ => WasmObject::get(w).map_or(H::None, |o| H::Concrete(o.head())),
+                _ => match WasmObject::get(w) {
+                    Some(o) if o.is_box() => return matches!(heap, H::Any | H::Extern),
+                    Some(o) => H::Concrete(o.head()),
+                    None => H::None,
+                },
             },
         };
         match h {
@@ -940,7 +947,7 @@ impl<'a, 'scope> WasmStore<'a, 'scope> {
                 WasmBytecode::MemoryGrow => {
                     let m = f.instance.memory(o[2]);
                     let n = m.index(r!(f, o[1]));
-                    let old = Self::grow_memory(m, n);
+                    let old = Self::grow_memory(mc, m, n);
                     r!(f, o[0]) = m.index(old);
                 }
                 WasmBytecode::I32Const | WasmBytecode::F32Const => r!(f, o[0]) = u32s(o[1] as u32),

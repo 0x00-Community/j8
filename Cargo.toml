@@ -83,6 +83,11 @@ path = "tests/wasmspec.rs"
 harness = false
 
 [[test]]
+name = "wasmjsapi"
+path = "tests/wasmjsapi.rs"
+harness = false
+
+[[test]]
 name = "binding"
 path = "tests/binding.rs"
 

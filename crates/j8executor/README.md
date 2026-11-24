@@ -14,6 +14,12 @@ Every call that can touch the heap takes the isolate's `Mutation` (`Isolate::sco
 paragc objects (reference fields in `WordSlot`s), and tables, reference globals and element segments are rooted cells, so
 collections between calls reclaim and move them. Type indices are canonicalized per store (equal recursive groups share
 ids), which casts, `call_indirect` and import matching check subtyping against.
+Instances, functions, tables, memories, globals and tags are heap objects too, reclaimed once unreachable.
+
+`WebAssembly<I>` wraps any `Intrinsics` and adds the `WebAssembly` namespace: `validate` / `compile` / `instantiate`,
+`Module`, `Instance`, `Memory` (its `buffer` aliases linear memory and is detached on growth), `Table`, `Global`, `Tag`,
+`Exception`, `JSTag`, `CompileError` / `LinkError` / `RuntimeError`, the `wasm:js-string` builtins and imported string
+constants. JS exceptions cross wasm as `JSTag` exceptions; wasm GC objects reach JS as opaque objects.
 
 ## How it runs
 

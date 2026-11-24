@@ -11,6 +11,12 @@ start 函数）与 `invoke`。解释器每个函数只解码一次字节码，64
 会碰堆的调用都要传 isolate 的 `Mutation`（`Isolate::scope`）：struct、array 和异常是 paragc 对象（引用字段放 `WordSlot`），
 表、引用型全局和元素段是挂在根上的格子，所以两次调用之间的回收会回收、搬动它们。类型下标按 store 规范化（相同的递归分组
 共用编号），类型转换、`call_indirect` 和导入匹配都按它判断子类型。
+实例、函数、表、内存、全局、tag 也都是堆对象，不可达就回收。
+
+`WebAssembly<I>` 包住任意 `Intrinsics`，再装上 `WebAssembly` 命名空间：`validate` / `compile` / `instantiate`、`Module`、
+`Instance`、`Memory`（`buffer` 直接指向线性内存，扩容时旧的 buffer 被分离）、`Table`、`Global`、`Tag`、`Exception`、
+`JSTag`、`CompileError` / `LinkError` / `RuntimeError`、`wasm:js-string` 内建函数和导入字符串常量。JS 异常以 `JSTag`
+异常穿过 wasm；wasm 的 GC 对象到 JS 是不透明对象。
 
 ## 怎么跑
 

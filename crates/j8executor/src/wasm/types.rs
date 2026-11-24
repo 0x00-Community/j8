@@ -95,6 +95,11 @@ impl Types {
         ids
     }
 
+    pub fn char_array(&mut self) -> u32 {
+        let field = WasmFieldType { storage: WasmStorageType::I16, mutable: true };
+        self.group(Box::new([WasmSubType { is_final: true, supertype: None, composite: WasmCompositeType::Array(field) }]))
+    }
+
     pub fn func(&mut self, ty: &WasmFuncType) -> u32 {
         self.group(Box::new([WasmSubType { is_final: true, supertype: None, composite: WasmCompositeType::Func(ty.clone()) }]))
     }

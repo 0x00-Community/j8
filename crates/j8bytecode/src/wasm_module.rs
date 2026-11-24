@@ -279,6 +279,12 @@ pub struct WasmData {
 }
 
 #[derive(Clone, Debug)]
+pub struct WasmCustom {
+    pub name: Box<str>,
+    pub bytes: Box<[u8]>,
+}
+
+#[derive(Clone, Debug)]
 pub struct WasmGlobal {
     pub ty: WasmGlobalType,
     pub init: u32,
@@ -305,6 +311,7 @@ pub struct WasmModule {
     pub elements: Vec<WasmElement>,
     pub data: Vec<WasmData>,
     pub inits: Vec<WasmFunction>,
+    pub customs: Vec<WasmCustom>,
 }
 
 impl WasmModule {
