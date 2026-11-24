@@ -27,6 +27,84 @@ pub struct Label {
 #[derive(Clone, Copy)]
 pub struct LoopHeader(usize);
 
+const SLICE_CAPACITIES: [usize; 3] = [1 << 8, (1 << 16) - (1 << 8), usize::MAX - (1 << 16)];
+const SLICE_SCALES: [OperandScale; 3] = [OperandScale::Single, OperandScale::Double, OperandScale::Quadruple];
+
+#[derive(Default)]
+struct Slice {
+    items: Vec<Constant>,
+    reserved: usize,
+}
+
+#[derive(Default)]
+struct Pool {
+    slices: [Slice; 3],
+}
+
+impl Pool {
+    fn start(i: usize) -> usize {
+        SLICE_CAPACITIES[..i].iter().sum()
+    }
+
+    fn available(&self, i: usize) -> usize {
+        SLICE_CAPACITIES[i] - self.slices[i].items.len() - self.slices[i].reserved
+    }
+
+    fn position(&self, f: impl Fn(&Constant) -> bool) -> Option<usize> {
+        self.slices.iter().enumerate().find_map(|(i, s)| s.items.iter().position(&f).map(|k| Self::start(i) + k))
+    }
+
+    fn allocate(&mut self, c: Constant, n: usize) -> usize {
+        let i = (0..self.slices.len()).find(|&i| self.available(i) >= n).unwrap_or(self.slices.len() - 1);
+        self.push(i, c, n)
+    }
+
+    fn push(&mut self, i: usize, c: Constant, n: usize) -> usize {
+        let at = Self::start(i) + self.slices[i].items.len();
+        self.slices[i].items.extend(core::iter::repeat_n(c, n));
+        at
+    }
+
+    fn reserve(&mut self) -> usize {
+        let i = (0..self.slices.len()).find(|&i| self.available(i) > 0).unwrap_or(self.slices.len() - 1);
+        self.slices[i].reserved += 1;
+        i
+    }
+
+    fn commit(&mut self, i: usize, delta: u32) -> usize {
+        self.slices[i].reserved -= 1;
+        let fits = |at: usize| OperandScale::for_unsigned(u32::try_from(at).unwrap_or(u32::MAX)) <= SLICE_SCALES[i];
+        if let Some(at) = self.position(|x| *x == Constant::Offset(delta)).filter(|&at| fits(at)) {
+            return at;
+        }
+        self.push(i, Constant::Offset(delta), 1)
+    }
+
+    fn set(&mut self, at: usize, c: Constant) {
+        let mut at = at;
+        for (i, s) in self.slices.iter_mut().enumerate() {
+            if at < SLICE_CAPACITIES[i] {
+                s.items[at] = c;
+                return;
+            }
+            at -= SLICE_CAPACITIES[i];
+        }
+    }
+
+    fn finish(self) -> Vec<Constant> {
+        let last = self.slices.iter().rposition(|s| !s.items.is_empty()).unwrap_or(0);
+        let mut out = Vec::new();
+        for (i, s) in self.slices.into_iter().enumerate().take(last + 1) {
+            let n = s.items.len();
+            out.extend(s.items);
+            if i < last {
+                out.extend(core::iter::repeat_n(Constant::Reserved, SLICE_CAPACITIES[i] - n));
+            }
+        }
+        out
+    }
+}
+
 pub struct JumpTable {
     constant: usize,
     pub size: u32,
@@ -36,7 +114,7 @@ pub struct JumpTable {
 
 pub struct Builder {
     enc: Encoder,
-    constants: Vec<Constant>,
+    constants: Pool,
     handlers: Vec<HandlerEntry>,
     feedback: Vec<FeedbackSlotKind>,
     parameter_count: u16,
@@ -44,7 +122,6 @@ pub struct Builder {
     next: i32,
     max: i32,
     unbound: usize,
-    reserved: usize,
     slot_cache: Vec<(FeedbackSlotKind, alloc::string::String, usize)>,
     boolean: bool,
     stored: Option<Register>,
@@ -54,14 +131,14 @@ pub struct Builder {
 
 impl Builder {
     pub fn new(parameter_count: u16, locals: i32) -> Self {
-        Self { enc: Encoder::default(), constants: Vec::new(), handlers: Vec::new(), feedback: Vec::new(), parameter_count, locals, next: locals, max: locals, unbound: 0, reserved: 0, slot_cache: Vec::new(), boolean: false, stored: None, dead: false, new_target_or_generator: None }
+        Self { enc: Encoder::default(), constants: Pool::default(), handlers: Vec::new(), feedback: Vec::new(), parameter_count, locals, next: locals, max: locals, unbound: 0, slot_cache: Vec::new(), boolean: false, stored: None, dead: false, new_target_or_generator: None }
     }
 
     pub fn finish(self) -> BytecodeArray {
         debug_assert_eq!(self.unbound, 0, "every label is bound");
         BytecodeArray {
             code: self.enc.code.into_boxed_slice(),
-            constants: self.constants,
+            constants: self.constants.finish(),
             handlers: self.handlers,
             parameter_count: self.parameter_count,
             register_count: u32::try_from(self.max).unwrap_or(0),
@@ -116,11 +193,10 @@ impl Builder {
 
     pub fn constant(&mut self, c: Constant) -> usize {
         let shared = matches!(c, Constant::Number(_) | Constant::String(_) | Constant::Utf16(_) | Constant::BigInt(_) | Constant::Function(_));
-        if shared && let Some(i) = self.constants.iter().position(|x| *x == c) {
+        if shared && let Some(i) = self.constants.position(|x| *x == c) {
             return i;
         }
-        self.constants.push(c);
-        self.constants.len() - 1
+        self.constants.allocate(c, 1)
     }
 
     pub fn name(&mut self, s: &str) -> usize {
@@ -458,9 +534,8 @@ impl Builder {
             (Bytecode::JumpIfToBooleanFalse, true) => Bytecode::JumpIfFalse,
             (b, _) => b,
         };
-        let entry = self.constants.len() + self.reserved;
-        self.reserved += 1;
-        let placeholder: OperandValue = match OperandScale::for_unsigned(u32::try_from(entry).unwrap_or(u32::MAX)) {
+        let entry = self.constants.reserve();
+        let placeholder: OperandValue = match SLICE_SCALES[entry] {
             OperandScale::Single => 0,
             OperandScale::Double => 0x100,
             OperandScale::Quadruple => 0x1_0000,
@@ -487,7 +562,7 @@ impl Builder {
         }
     }
 
-    fn patch(&mut self, at: usize, _entry: usize, target: usize) {
+    fn patch(&mut self, at: usize, entry: usize, target: usize) {
         let code = &mut self.enc.code;
         let (scale, start) = match Bytecode::from_u8(code[at]).and_then(Bytecode::prefix_scale) {
             Some(s) => (s, at + 1),
@@ -495,14 +570,13 @@ impl Builder {
         };
         let delta = u32::try_from(target - start).unwrap_or(u32::MAX);
         let width = usize::from(j8bytecode::OperandSize::from(scale));
-        self.reserved -= 1;
         let value = if OperandScale::for_unsigned(delta) <= scale {
+            self.constants.slices[entry].reserved -= 1;
             delta
         } else {
             let b = Bytecode::from_u8(code[start]).expect("a jump");
             code[start] = Self::with_constant_operand(b) as u8;
-            self.constants.push(Constant::Offset(delta));
-            u32::try_from(self.constants.len() - 1).unwrap_or(u32::MAX)
+            u32::try_from(self.constants.commit(entry, delta)).unwrap_or(u32::MAX)
         };
         let code = &mut self.enc.code;
         code[start + 1..start + 1 + width].copy_from_slice(&value.to_le_bytes()[..width]);
@@ -545,10 +619,7 @@ impl Builder {
     }
 
     pub fn jump_table(&mut self, size: u32, case_base: i32) -> JumpTable {
-        let constant = self.constants.len();
-        for _ in 0..size {
-            self.constants.push(Constant::Reserved);
-        }
+        let constant = self.constants.allocate(Constant::Reserved, size as usize);
         JumpTable { constant, size, case_base, switch_at: 0 }
     }
 
@@ -573,7 +644,7 @@ impl Builder {
         self.boolean = false;
         self.stored = None;
         let i = usize::try_from(case - table.case_base).expect("case in range");
-        self.constants[table.constant + i] = Constant::Offset(u32::try_from(self.offset() - table.switch_at).unwrap_or(u32::MAX));
+        self.constants.set(table.constant + i, Constant::Offset(u32::try_from(self.offset() - table.switch_at).unwrap_or(u32::MAX)));
     }
 
     pub fn call_property(&mut self, callable: Register, args: RegisterList) {
