@@ -116,7 +116,7 @@ The steps are always the same:
 
 | Variant | Meaning | What hosts do |
 |---|---|---|
-| `Error::Exception` | JS threw; the value waits in the isolate's pending slot, as in V8 | `rt.exception_text()` ⇒ `Uncaught …` |
+| `Error::Exception` | JS threw; the value waits in the isolate's pending slot, as in V8 | `rt.exception_text()` ⇒ `Uncaught …` with the stack ([4.4](#44-stack-traces)) |
 | `Error::Syntax(msg)` | the source does not parse | print `msg` |
 | `Error::Unsupported(msg)` | syntax j8 does not support yet | print `msg` |
 
@@ -241,6 +241,33 @@ runtime thread, this also works for the results of `async fn`s.
   TypeError instead of panicking.
 - JS values in a class are traced edges, not roots: a cycle through a host object is collected like any other.
   Outside the heap (a thread, a channel) keep a `ScopeGlobal` root instead.
+
+### 4.4 Stack traces
+
+Every error object gets a V8-style `stack`: one made with `new Error()`, one the engine throws, and one a binding
+throws with `a.throw` (its top frame is the JS call of the binding).
+
+```text
+Error: boom
+    at inner (main.js:2:10)
+    at new Box (main.js:6:14)
+    at main.js:9:1
+```
+
+- `stack` is an accessor on `Error.prototype`, as in the TC39 proposal (V8 puts one on each error instead): the text is
+  made when it is read, from the error's `name` and `message` at that time; assigning a string puts an own `stack` in
+  front of it.
+- `Error.stackTraceLimit` (10, read from `Error` itself when an error is made) caps the frames; `Error.captureStackTrace(obj)`
+  puts a `stack` on any object.
+- An error keeps only its frames (code and bytecode offset, and whether it constructs); names, scripts, lines and
+  columns are looked up when `stack` is read, so making errors that nobody reads costs no formatting.
+- `a.stack_trace(limit)` gives the JS frames running now, innermost first, as `CallSite { function, script, line,
+  column, constructor }`: lines and columns count from 1, columns in UTF-16 units, and `Display` prints the frame the
+  way `stack` does. `a.stack_text(v)` is the `stack` of a thrown value, or its ToString when it has none;
+  `Runtime::exception_text` uses it, so an uncaught error prints with its frames.
+- Not shown yet: frames of built-in functions (`at Array.map`), receiver type names (`at Object.method`), async frames
+  (`at async f`), and the frame to hide (`captureStackTrace`'s second argument). With the JIT on, the frame of a
+  function running as compiled code can be missing or point at the line it was entered on.
 
 ## 5. Async work and the event loop
 

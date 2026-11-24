@@ -96,7 +96,7 @@ impl<'p> Runtime<'p> {
     pub fn exception_text(&self) -> String {
         self.enter(|a| {
             let v = a.take_exception();
-            let text = a.to_string(v).map(|s| String::from(&**s));
+            let text = a.stack_text(v).map(|s| String::from(&**s));
             text.unwrap_or_else(|_| {
                 let _ = a.take_exception();
                 String::from("<ToString threw>")

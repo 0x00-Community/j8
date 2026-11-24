@@ -55,6 +55,14 @@ pub trait Invoke<'scope> {
     fn callback(&self, _agent: &mut Scope<'scope, '_>, callee: Value<'scope>, this: Value<'scope>) -> Callback<'scope> {
         Callback::from((callee, this))
     }
+
+    fn capture(&self, _agent: &Scope<'scope, '_>, _limit: usize) -> Vec<crate::Captured> {
+        Vec::new()
+    }
+
+    fn call_site(&self, _agent: &Scope<'scope, '_>, _frame: &crate::Captured) -> crate::CallSite {
+        crate::CallSite::default()
+    }
 }
 
 pub type CallbackRun = for<'scope, 'x> unsafe fn(&mut Scope<'scope, 'x>, &Callback<'scope>, &[Value<'scope>]) -> Option<Result<Value<'scope>, Error>>;

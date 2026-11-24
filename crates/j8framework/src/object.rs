@@ -775,7 +775,7 @@ pub enum ObjectKind<'scope> {
     #[default]
     Ordinary,
     Arguments(Option<ArgumentsMap<'scope>>),
-    Error,
+    Error(Vec<crate::Captured>),
     Array,
     Function(Closure<'scope>),
     Native(Native),
@@ -955,7 +955,7 @@ impl fmt::Debug for ObjectState<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let kind = match self.kind {
             ObjectKind::Ordinary | ObjectKind::Arguments(_) | ObjectKind::AccessorPair { .. } => "Object",
-            ObjectKind::Error => "Error",
+            ObjectKind::Error(_) => "Error",
             ObjectKind::Array => "Array",
             ObjectKind::Function(_) | ObjectKind::Native(_) | ObjectKind::Bound(_) | ObjectKind::Resolver { .. } | ObjectKind::NativeClosure(_) => "Function",
             ObjectKind::Proxy(_) => "Proxy",
@@ -1007,9 +1007,9 @@ impl Class {
         if !state.symbols.is_empty() || !state.privates.is_empty() {
             return None;
         }
-        match state.kind {
+        match &state.kind {
             ObjectKind::Ordinary => Some(Self::UNIT_ORDINARY),
-            ObjectKind::Error => Some(Self::UNIT_ERROR),
+            ObjectKind::Error(frames) if frames.is_empty() => Some(Self::UNIT_ERROR),
             ObjectKind::Array | ObjectKind::Function(_) | ObjectKind::Native(_) | ObjectKind::RegExp(_) => Some(Self::UNIT_DERIVED),
             _ => None,
         }
@@ -1017,7 +1017,7 @@ impl Class {
 
     fn unit_state<'scope>(class: u8, fast: Option<&Fast<'scope>>) -> ObjectState<'scope> {
         let kind = match (class & Self::UNIT_MASK, fast) {
-            (Self::UNIT_ERROR, _) => ObjectKind::Error,
+            (Self::UNIT_ERROR, _) => ObjectKind::Error(Vec::new()),
             (Self::UNIT_DERIVED, Some(Fast::Closure(c))) => ObjectKind::Function(*c),
             (Self::UNIT_DERIVED, Some(Fast::Native(n))) => ObjectKind::Native(*n),
             (Self::UNIT_DERIVED, Some(Fast::RegExp(r))) => ObjectKind::RegExp(*r),

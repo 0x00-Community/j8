@@ -87,6 +87,16 @@ impl<'scope> Installer<'_, 'scope> {
         if let j8framework::ObjectKind::Native(native) = &mut ctor.borrow_mut(self.mc).kind {
             native.constructor = true;
         }
+        self.install_constructor(ctor, name, proto)
+    }
+
+    fn adopt_constructor(&self, ctor: JsObject<'scope>, name: &str, f: j8framework::NativeFn, proto: JsObject<'scope>, n: u32) -> JsObject<'scope> {
+        ctor.borrow_mut(self.mc).kind = j8framework::ObjectKind::Native(j8framework::Native::constructor(f));
+        self.context.name_function(self.mc, ctor, name, Some(n));
+        self.install_constructor(ctor, name, proto)
+    }
+
+    fn install_constructor(&self, ctor: JsObject<'scope>, name: &str, proto: JsObject<'scope>) -> JsObject<'scope> {
         ctor.borrow_mut(self.mc).define("prototype", j8framework::Property { slot: j8framework::Slot::Data(proto.into()), enumerable: false, writable: false, configurable: false });
         self.set(proto, "constructor", ctor.into());
         self.set(self.context.global, name, ctor.into());

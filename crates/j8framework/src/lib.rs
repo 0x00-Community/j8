@@ -26,12 +26,14 @@ mod promise;
 mod context;
 mod scope;
 mod shape;
+mod stack;
 mod store;
 mod terminate;
 mod text;
 mod value;
 
 pub use scope::{Callback, CallbackRun, CodeKind, Invoke, Resume, Scope, Step};
+pub use stack::{CallSite, Captured};
 pub use engine::{ScriptKind, Source};
 pub use j8taskqueue::Quota;
 pub use error::Error;

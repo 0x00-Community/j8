@@ -6,6 +6,7 @@ use alloc::boxed::Box;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
+use core::ptr::NonNull;
 
 use j8bytecode::{Bytecode, Constant, Context, Decoded, FunctionKind, Intrinsic, LiteralValue, Module, NativeContextIndex, Operands, OperandValue, Register, Runtime, ScopeInfo, ScopeType, SharedFunction};
 use j8compiler::Compile;
@@ -340,6 +341,10 @@ impl Frame {
         Some(self.slot(regs, Self::NEW_THIS)).filter(|v| !matches!(v.kind(), ValueKind::Uninit))
     }
 
+    fn constructing(&self, regs: &[Value<'_>]) -> bool {
+        self.slot(regs, Self::NEW_TARGET).bits() != j8framework::ValueBits::UNDEFINED
+    }
+
     fn args<'scope>(&self, regs: &[Value<'scope>]) -> Vec<Value<'scope>> {
         self.slot(regs, Self::ARGS).as_object().map_or_else(Vec::new, |o| o.elements().to_vec())
     }
@@ -489,6 +494,16 @@ impl<'s> Budget<'s> {
     }
 }
 
+struct Running {
+    state: NonNull<()>,
+    outer: Option<NonNull<Running>>,
+}
+
+#[derive(Default)]
+struct Active(Cell<Option<NonNull<Running>>>);
+
+unsafe impl Send for Active {}
+
 #[derive(Default)]
 pub struct Executor<'p> {
     tier: Option<Box<dyn Tier + Send>>,
@@ -500,6 +515,7 @@ pub struct Executor<'p> {
     context_shapes: SegVec<ContextShape>,
     with_shape: Cell<Option<ShapeId>>,
     spare_frames: RefCell<Vec<Vec<Frame>>>,
+    active: Active,
 }
 
 const _: () = {
@@ -1287,6 +1303,8 @@ impl Executor<'_> {
 
     fn execute<'scope>(&self, a: &mut Scope<'scope, '_>, mut st: State<'scope>, budget: &mut Option<usize>) -> Result<Outcome<'scope>, Error> {
         let base = self.depth.get();
+        let running = Running { state: NonNull::from(&st).cast(), outer: self.active.0.get() };
+        self.active.0.set(Some(NonNull::from(&running)));
         let mut b = Budget::new(a.stop, *budget);
         let r = loop {
             match self.run(a, &mut st, base, &mut b) {
@@ -1302,6 +1320,7 @@ impl Executor<'_> {
                 Err(e) => break Err(e),
             }
         };
+        self.active.0.set(running.outer);
         let r = match r {
             Ok(None) => Ok(Outcome::Paused(Box::new(st))),
             r => {
@@ -2407,6 +2426,16 @@ impl Executor<'_> {
         }
     }
 
+    fn frames<'s, 'scope: 's>(&'s self) -> impl Iterator<Item = (&'s State<'scope>, &'s Frame)> + 's {
+        let mut at = self.active.0.get();
+        let states = core::iter::from_fn(move || {
+            let running = unsafe { at?.as_ref() };
+            at = running.outer;
+            Some(unsafe { running.state.cast::<State<'scope>>().as_ref() })
+        });
+        states.flat_map(|st| st.frames.iter().rev().map(move |f| (st, f)))
+    }
+
     fn run_frame<'scope>(&self, a: &mut Scope<'scope, '_>, regs: Vec<Value<'scope>>, f: Frame, level: usize) -> Result<Value<'scope>, Error> {
         let saved = self.depth.replace(level);
         let r = self.execute(a, self.state(regs, f), &mut None).map(Outcome::returned);
@@ -2499,6 +2528,20 @@ impl<'scope> Invoke<'scope> for Executor<'_> {
             return cb;
         }
         j8framework::Callback::from((callee, this))
+    }
+
+    fn capture(&self, _: &Scope<'scope, '_>, limit: usize) -> Vec<j8framework::Captured> {
+        let captured = |(st, f): (&State<'_>, &Frame)| {
+            let loaded = unsafe { f.loaded.get() };
+            j8framework::Captured { code: f.loaded.0, at: loaded.insns.get(f.insn).map_or(0, |d| d.start), constructor: f.constructing(&st.regs) }
+        };
+        self.frames().take(limit).map(captured).collect()
+    }
+
+    fn call_site(&self, a: &Scope<'scope, '_>, frame: &j8framework::Captured) -> j8framework::CallSite {
+        let loaded: &Loaded = unsafe { frame.code.get() };
+        let (line, column) = loaded.func.bytecode.position_at(frame.at).map_or((0, 0), |p| (p.line, p.column));
+        j8framework::CallSite { function: loaded.func.name.clone(), script: self.referrer(a, loaded.base).into(), line, column, constructor: frame.constructor }
     }
 
     fn constructs(&self, closure: &Closure<'scope>) -> bool {
