@@ -2,6 +2,7 @@ mod collator;
 mod datetime;
 mod locale;
 mod number;
+mod plural;
 mod service;
 mod zone;
 
@@ -15,6 +16,7 @@ use collator::{Cases, Collation, Collators};
 use datetime::{DateTimeFormat, DateTimeFormats};
 use locale::Tags;
 use number::{NumberFormat, NumberFormats};
+use plural::PluralRulesBuiltins;
 
 struct Intl;
 
@@ -84,6 +86,11 @@ impl<'scope> Installer<'_, 'scope> {
         self.getter(date, "format", DateTimeFormats::format);
         self.method(date, "formatToParts", DateTimeFormats::format_to_parts, 1);
         self.method(date, "resolvedOptions", DateTimeFormats::resolved_options, 0);
+
+        let plural = self.service(intl, "PluralRules", PluralRulesBuiltins::construct, PluralRulesBuiltins::supported_locales_of, "Intl.PluralRules");
+        self.method(plural, "select", PluralRulesBuiltins::select, 1);
+        self.method(plural, "selectRange", PluralRulesBuiltins::select_range, 2);
+        self.method(plural, "resolvedOptions", PluralRulesBuiltins::resolved_options, 0);
 
         self.method(r.string_proto, "localeCompare", Collators::locale_compare, 1);
         self.method(r.string_proto, "toLocaleUpperCase", Cases::to_upper, 0);

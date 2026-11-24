@@ -427,6 +427,26 @@ impl NumberFormat {
         Self::build(a, &resolved.locale, settings)
     }
 
+    pub(crate) fn rounding(a: &Scope<'_, '_>, locale: &Locale, digits: Digits, notation: Notation, compact_display: CompactDisplay) -> Result<Self, Error> {
+        let settings = Settings {
+            locale: locale.to_string(),
+            numbering_system: Self::default_numbering(locale),
+            style: Style::Decimal,
+            currency: None,
+            unit: None,
+            notation,
+            compact_display: (notation == Notation::Compact).then_some(compact_display),
+            digits,
+            grouping: Some(Grouping::Auto),
+            sign_display: SignDisplay::Auto,
+        };
+        Self::build(a, locale, settings)
+    }
+
+    pub(crate) fn rounded(&self, x: &Decimal) -> (Decimal, i16) {
+        self.scaled(x)
+    }
+
     fn grouping<'scope>(a: &mut Scope<'scope, '_>, options: Options<'scope>, fallback: Grouping) -> Result<Option<Grouping>, Error> {
         let v = options.value(a, "useGrouping")?;
         match v.kind() {

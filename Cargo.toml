@@ -209,6 +209,7 @@ icu_calendar = { version = "=2.4.0", default-features = false, features = ["comp
 icu_time = { version = "=2.4.0", default-features = false, features = ["compiled_data"] }
 icu_collator = { version = "=2.4.0", default-features = false, features = ["compiled_data"] }
 icu_casemap = { version = "=2.4.0", default-features = false, features = ["compiled_data"] }
+icu_plurals = { version = "=2.4.0", default-features = false, features = ["compiled_data", "unstable"] }
 icu_provider = { version = "=2.4.0", default-features = false, features = ["sync"] }
 fixed_decimal = { version = "=0.7.3", default-features = false, features = ["ryu"] }
 writeable = { version = "=0.6.4", default-features = false }

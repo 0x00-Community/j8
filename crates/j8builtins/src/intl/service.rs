@@ -12,11 +12,13 @@ use super::collator::Collation;
 use super::locale::Tags;
 use super::datetime::DateTimeFormat;
 use super::number::NumberFormat;
+use super::plural::Plurals;
 
 pub(crate) enum Service<'scope> {
     Collator(Box<Collation<'scope>>),
     Number(Box<NumberFormat>),
     DateTime(Box<DateTimeFormat>),
+    Plural(Box<Plurals>),
 }
 
 struct Brand;
