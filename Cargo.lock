@@ -391,6 +391,7 @@ dependencies = [
  "j8bytecode",
  "j8executor",
  "j8framework",
+ "j8lockfree",
  "libc",
  "mlirpass",
  "moremath",

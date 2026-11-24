@@ -21,6 +21,7 @@ const BASELINE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/wasmspec.pass
 const UPDATE_ENV: &str = "J8_WASMSPEC_UPDATE";
 const VERBOSE_ENV: &str = "J8_WASMSPEC_VERBOSE";
 const COLLECT_ENV: &str = "J8_WASMSPEC_COLLECT";
+const JIT_ENV: &str = "J8_WASMSPEC_JIT";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Kind {
@@ -108,6 +109,7 @@ impl<'s> WasmHost<'s> for SpecHost {
 
 struct Spec<'p> {
     isolate: Isolate<'p>,
+    jit: Option<j8jit::WasmJit>,
     st: State<'p>,
 }
 
@@ -142,6 +144,7 @@ impl<'p> Spec<'p> {
     fn new(platform: &'p DefaultPlatform) -> Self {
         let mut s = Self {
             isolate: Isolate::new(platform, CreateParams::default()),
+            jit: std::env::var_os(JIT_ENV).map(|_| j8jit::WasmJit::from(0)),
             st: State {
             types: None,
             spectest: HashMap::new(),
@@ -193,10 +196,14 @@ impl<'p> Spec<'p> {
 
     fn with<R>(&mut self, f: impl for<'s> FnOnce(&Mutation<'s>, &mut WasmStore<'_, 's>, &State<'p>) -> R) -> R {
         let this = &self.st;
+        let jit = self.jit.as_ref();
         self.isolate.scope(|mc| {
             let Some(types) = &this.types else { unreachable!("reset stashes the type registry") };
             let mut host = SpecHost;
             let mut store = WasmStore::new(mc, mc.fetch(types), &mut host);
+            if let Some(j) = jit {
+                store = store.with_tier(j);
+            }
             f(mc, &mut store, this)
         })
     }

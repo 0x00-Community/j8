@@ -111,6 +111,7 @@ cargo test --release --test wasmspec -- simd_ i32            # 只跑文件名�
 J8_WASMSPEC_VERBOSE=1 cargo test --release --test wasmspec   # 列出失败的条目
 J8_WASMSPEC_UPDATE=1  cargo test --release --test wasmspec   # 结果写回基线
 J8_WASMSPEC_COLLECT=1 cargo test --release --test wasmspec   # 每条指令后做一次全量回收（检查 GC 根）
+J8_WASMSPEC_JIT=1     cargo test --release --test wasmspec   # 每个函数第一次调用就走 wasm JIT
 ```
 
 `WebAssembly` JS API 用 `tests/wasm-jsapi` 检查，这是 [WebAssembly/spec](https://github.com/WebAssembly/spec/tree/main/test/js-api)
@@ -121,6 +122,7 @@ J8_WASMSPEC_COLLECT=1 cargo test --release --test wasmspec   # 每条指令后�
 cargo test --release --test wasmjsapi                          # 基线（tests/wasmjsapi.passing）
 J8_WASMJSAPI_VERBOSE=1 cargo test --release --test wasmjsapi   # 列出失败的子测试
 J8_WASMJSAPI_UPDATE=1  cargo test --release --test wasmjsapi   # 结果写回基线
+J8_WASMJSAPI_JIT=1     cargo test --release --test wasmjsapi   # 开 wasm JIT
 ```
 
 ## ✍️ 约定

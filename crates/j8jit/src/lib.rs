@@ -30,6 +30,7 @@ mod live;
 mod stitch;
 mod opt;
 mod runtime;
+mod wasm;
 mod x86_64;
 
 pub use build::Kind;
@@ -37,6 +38,7 @@ pub use compile::{Backend, CompileError, Compiler, MachineCode};
 pub use helper::Helper as NumberHelper;
 pub use aarch64::AArch64Emit;
 pub use x86_64::{X86_64Code, X86_64Emit, X86_64Reloc};
+pub use wasm::WasmJit;
 
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;

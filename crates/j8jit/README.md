@@ -33,6 +33,16 @@ let executor = j8executor::Executor::default().with_tier(Rc::new(j8jit::Jit::def
 
 `Jit::from(n)` sets the call threshold (`Jit::THRESHOLD` = 64 by default; 0 compiles every function on its first call). `dune --jit` and `J8_TEST262_JIT=1` turn it on.
 
+## WebAssembly
+
+`WasmJit` is the tier for WebAssembly (`WasmStore::with_tier`, or `WebAssembly::from(builtins).with_tier(Arc::new(WasmJit::default()))`
+for the JS API). It uses the same stencil fast path: one template per kind of wasm bytecode, compiled through mlirpass once
+per process; a function (`WasmJit::THRESHOLD` = 16 calls) is then copied together from stencils with its registers in the
+native frame. Integer and f64 arithmetic, comparisons, constants, branches, `br_table`, `select`, linear-memory loads and
+stores run in machine code; other scalar operators call one numeric helper; direct calls go straight into the callee's
+machine code; anything else (globals, tables, GC, indirect calls, throws) is one interpreter step on the same registers.
+Functions that touch `v128`, have exception handlers or use `br_on_cast` stay interpreted.
+
 ## License
 
 MIT, as part of [j8](https://github.com/0x00-Community/j8).

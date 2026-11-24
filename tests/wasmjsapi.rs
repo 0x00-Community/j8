@@ -17,6 +17,7 @@ const BASELINE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/wasmjsapi.pas
 
 const UPDATE_ENV: &str = "J8_WASMJSAPI_UPDATE";
 const VERBOSE_ENV: &str = "J8_WASMJSAPI_VERBOSE";
+const JIT_ENV: &str = "J8_WASMJSAPI_JIT";
 const CASE_ENV: &str = "J8_WASMJSAPI_CASE";
 
 const TIMEOUT: Duration = Duration::from_secs(60);
@@ -175,7 +176,11 @@ impl File {
         let platform = Capture { rel: self.rel.clone(), start: Instant::now(), lines: Mutex::default() };
         let mut isolate = Isolate::new(&platform, CreateParams::default());
         let executor = Executor::default();
-        let cx = isolate.create_context(&WebAssembly(Builtins));
+        let mut wasm = WebAssembly::from(Builtins);
+        if std::env::var_os(JIT_ENV).is_some() {
+            wasm = wasm.with_tier(std::sync::Arc::new(j8jit::WasmJit::from(0)));
+        }
+        let cx = isolate.create_context(&wasm);
         let r = executor.eval(&mut isolate, &cx, &Source { text: &src, file: &self.rel });
         let error = isolate.enter(&cx, &executor, |agent| match r {
             Ok(_) => None,

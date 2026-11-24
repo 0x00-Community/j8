@@ -11,6 +11,7 @@ repository.workspace = true
 j8framework.workspace = true
 j8bytecode.workspace = true
 j8executor.workspace = true
+j8lockfree.workspace = true
 mlirpass.workspace = true
 libc.workspace = true
 region.workspace = true

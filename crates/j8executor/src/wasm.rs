@@ -4,6 +4,7 @@ use alloc::vec::Vec;
 
 mod entity;
 mod gc;
+mod jit;
 mod js;
 mod simd;
 mod types;
@@ -12,6 +13,8 @@ pub use entity::{CellsBrand, FuncBrand, GlobalBrand, InstanceBrand, MemoryBrand,
 use entity::{Code, Ptr};
 use gc::{Objects, WasmObject, Word};
 pub use js::WebAssembly;
+pub use jit::{WasmCtx, WasmJitFunction, WasmTier};
+use jit::WasmJit;
 use j8bytecode::{Decoded, OperandValue, WasmBytecode, WasmCatchKind, WasmCompositeType, WasmExternKind, WasmFuncType, WasmGlobalType, WasmImportKind, WasmMemoryType, WasmSegmentMode, WasmStorageType, WasmTableType, WasmValType};
 use j8framework::{GcSlot, IsoCell, Mutation, ScopeLocal, Static, WordSlot};
 use j8lockfree::AtomicRefCell;
@@ -219,11 +222,13 @@ pub struct WasmStore<'a, 'scope> {
     stack: Vec<u64>,
     vstack: Vec<u128>,
     thrown: u64,
+    tier: Option<&'a dyn WasmTier>,
+    ctx: alloc::boxed::Box<WasmCtx>,
 }
 
 impl<'a, 'scope> WasmStore<'a, 'scope> {
     pub fn new(mc: &'a Mutation<'scope>, types: ScopeLocal<'scope, WasmTypes>, host: &'a mut dyn WasmHost<'scope>) -> Self {
-        Self { mc, types: types.get(), host, stack: Vec::new(), vstack: Vec::new(), thrown: 0 }
+        Self { mc, types: types.get(), host, stack: Vec::new(), vstack: Vec::new(), thrown: 0, tier: None, ctx: alloc::boxed::Box::default() }
     }
 
     fn registry(&self) -> j8lockfree::AtomicRef<'_, Types> {
@@ -485,7 +490,11 @@ impl<'a, 'scope> WasmStore<'a, 'scope> {
         match func.instance.get() {
             Some(inst) => {
                 let instance = inst.get();
-                let frame = self.frame(instance, instance.module.code(func.index), fp);
+                let code = instance.module.code(func.index);
+                if let Some(e) = WasmJit::jitted(self, &code) {
+                    return WasmJit::machine(self, e, instance, code, fp);
+                }
+                let frame = self.frame(instance, code, fp);
                 self.call(frame)
             }
             None => self.host(func, fp),
@@ -656,10 +665,21 @@ impl<'a, 'scope> WasmStore<'a, 'scope> {
         false
     }
 
+    fn step(&mut self, act: Activation<'scope>) -> Result<(), WasmTrap> {
+        let start = act.pc;
+        let mut frames: Vec<Activation<'scope>> = vec![act];
+        loop {
+            match self.run(&mut frames, Some(start)) {
+                Err(WasmTrap::Exception) if self.catch(&mut frames) => {}
+                r => return r,
+            }
+        }
+    }
+
     fn call(&mut self, frame: Activation<'scope>) -> Result<(), WasmTrap> {
         let mut frames: Vec<Activation<'scope>> = vec![frame];
         loop {
-            match self.run(&mut frames) {
+            match self.run(&mut frames, None) {
                 Err(WasmTrap::Exception) if self.catch(&mut frames) => {}
                 r => return r,
             }
@@ -700,26 +720,13 @@ impl<'a, 'scope> WasmStore<'a, 'scope> {
         }
     }
 
-    #[expect(clippy::too_many_lines, clippy::cast_possible_truncation, clippy::cast_sign_loss, clippy::cast_possible_wrap, clippy::cast_precision_loss, clippy::float_cmp, reason = "the interpreter loop: one arm per bytecode, with WebAssembly's wrapping and bit-level numeric semantics")]
-    fn run(&mut self, frames: &mut Vec<Activation<'scope>>) -> Result<(), WasmTrap> {
+    #[expect(clippy::too_many_lines, clippy::cast_possible_truncation, clippy::cast_sign_loss, clippy::cast_possible_wrap, reason = "the interpreter loop: one arm per bytecode, with WebAssembly's wrapping and bit-level numeric semantics")]
+    fn run(&mut self, frames: &mut Vec<Activation<'scope>>, mut single: Option<usize>) -> Result<(), WasmTrap> {
         let mc = self.mc;
         macro_rules! r {
             ($f:expr, $o:expr) => {
                 self.stack[$f.fp + $o as usize]
             };
-        }
-        macro_rules! un {
-            ($f:expr, $o:expr, |$a:ident: $get:ident| $e:expr) => {{
-                let $a = Slot(r!($f, $o[1])).$get();
-                r!($f, $o[0]) = $e;
-            }};
-        }
-        macro_rules! bin {
-            ($f:expr, $o:expr, |$a:ident, $b:ident: $get:ident| $e:expr) => {{
-                let $a = Slot(r!($f, $o[1])).$get();
-                let $b = Slot(r!($f, $o[2])).$get();
-                r!($f, $o[0]) = $e;
-            }};
         }
         macro_rules! load {
             ($f:expr, $o:expr, $n:expr, |$b:ident| $e:expr) => {{
@@ -738,25 +745,13 @@ impl<'a, 'scope> WasmStore<'a, 'scope> {
                 m.data()[at..at + $n].copy_from_slice(&v[..$n]);
             }};
         }
-        macro_rules! trunc {
-            ($f:expr, $o:expr, $get:ident, $lo:expr, $hi:expr, $t:ty, $out:expr) => {{
-                let x = Slot(r!($f, $o[1])).$get();
-                if x.is_nan() {
-                    return Err(WasmTrap::InvalidConversion);
-                }
-                let t = x.trunc();
-                if !(t > $lo && t < $hi) {
-                    return Err(WasmTrap::IntegerOverflow);
-                }
-                r!($f, $o[0]) = $out(t as $t);
-            }};
-        }
         let i32s = |v: i32| u64::from(v.cast_unsigned());
         let u32s = |v: u32| u64::from(v);
-        let f32s = |v: f32| u64::from(v.to_bits());
-        let f64s = |v: f64| v.to_bits();
-        let b = |v: bool| u64::from(v);
-        while let Some(f) = frames.last_mut() {
+        while !frames.is_empty() {
+            if single.is_some_and(|s| frames.len() == 1 && frames[0].pc != s) {
+                return Ok(());
+            }
+            let Some(f) = frames.last_mut() else { break };
             let Some(d) = f.code.ops.get(f.pc) else { return Err(WasmTrap::Unsupported) };
             let d: &Decoded<WasmBytecode> = d;
             let o = d.operands;
@@ -815,6 +810,9 @@ impl<'a, 'scope> WasmStore<'a, 'scope> {
                         self.copy(fp, f.fp, n);
                         fp = f.fp;
                         frames.pop();
+                        if frames.is_empty() {
+                            single = None;
+                        }
                     }
                     match target.instance.get() {
                         None => self.host(target, fp)?,
@@ -823,8 +821,13 @@ impl<'a, 'scope> WasmStore<'a, 'scope> {
                                 return Err(WasmTrap::CallStackExhausted);
                             }
                             let i = i.get();
-                            let a = self.frame(i, i.module.code(target.index), fp);
-                            frames.push(a);
+                            let code = i.module.code(target.index);
+                            if let Some(e) = WasmJit::jitted(self, &code) {
+                                WasmJit::machine(self, e, i, code, fp)?;
+                            } else {
+                                let a = self.frame(i, code, fp);
+                                frames.push(a);
+                            }
                         }
                     }
                 }
@@ -956,183 +959,7 @@ impl<'a, 'scope> WasmStore<'a, 'scope> {
                     r!(f, o[0]) = f.code.bits[o[1] as usize];
                 }
                 WasmBytecode::RefNull => r!(f, o[0]) = 0,
-                WasmBytecode::RefIsNull => r!(f, o[0]) = b(r!(f, o[1]) == 0),
                 WasmBytecode::RefFunc => r!(f, o[0]) = f.instance.funcs[o[1] as usize].get().map_or(0, Ptr::of),
-                WasmBytecode::RefAsNonNull => {
-                    let v = r!(f, o[1]);
-                    if v == 0 {
-                        return Err(WasmTrap::NullReference);
-                    }
-                    r!(f, o[0]) = v;
-                }
-                WasmBytecode::I32Add => bin!(f, o, |x, y: i32| i32s(x.wrapping_add(y))),
-                WasmBytecode::I32Sub => bin!(f, o, |x, y: i32| i32s(x.wrapping_sub(y))),
-                WasmBytecode::I32Mul => bin!(f, o, |x, y: i32| i32s(x.wrapping_mul(y))),
-                WasmBytecode::I32DivS => {
-                    let (x, y) = (Slot(r!(f, o[1])).i32(), Slot(r!(f, o[2])).i32());
-                    if y == 0 {
-                        return Err(WasmTrap::IntegerDivideByZero);
-                    }
-                    r!(f, o[0]) = i32s(x.checked_div(y).ok_or(WasmTrap::IntegerOverflow)?);
-                }
-                WasmBytecode::I32DivU | WasmBytecode::I32RemU => {
-                    let (x, y) = (Slot(r!(f, o[1])).u32(), Slot(r!(f, o[2])).u32());
-                    if y == 0 {
-                        return Err(WasmTrap::IntegerDivideByZero);
-                    }
-                    r!(f, o[0]) = u32s(if d.bytecode == WasmBytecode::I32DivU { x / y } else { x % y });
-                }
-                WasmBytecode::I32RemS => {
-                    let (x, y) = (Slot(r!(f, o[1])).i32(), Slot(r!(f, o[2])).i32());
-                    if y == 0 {
-                        return Err(WasmTrap::IntegerDivideByZero);
-                    }
-                    r!(f, o[0]) = i32s(x.wrapping_rem(y));
-                }
-                WasmBytecode::I32And => bin!(f, o, |x, y: u32| u32s(x & y)),
-                WasmBytecode::I32Ior => bin!(f, o, |x, y: u32| u32s(x | y)),
-                WasmBytecode::I32Xor => bin!(f, o, |x, y: u32| u32s(x ^ y)),
-                WasmBytecode::I32Shl => bin!(f, o, |x, y: u32| u32s(x.wrapping_shl(y))),
-                WasmBytecode::I32ShrS => bin!(f, o, |x, y: i32| i32s(x.wrapping_shr(y.cast_unsigned()))),
-                WasmBytecode::I32ShrU => bin!(f, o, |x, y: u32| u32s(x.wrapping_shr(y))),
-                WasmBytecode::I32Rol => bin!(f, o, |x, y: u32| u32s(x.rotate_left(y % 32))),
-                WasmBytecode::I32Ror => bin!(f, o, |x, y: u32| u32s(x.rotate_right(y % 32))),
-                WasmBytecode::I32Clz => un!(f, o, |x: u32| u32s(x.leading_zeros())),
-                WasmBytecode::I32Ctz => un!(f, o, |x: u32| u32s(x.trailing_zeros())),
-                WasmBytecode::I32Popcnt => un!(f, o, |x: u32| u32s(x.count_ones())),
-                WasmBytecode::I32Eqz => un!(f, o, |x: u32| b(x == 0)),
-                WasmBytecode::I32Eq => bin!(f, o, |x, y: u32| b(x == y)),
-                WasmBytecode::I32Ne => bin!(f, o, |x, y: u32| b(x != y)),
-                WasmBytecode::I32LtS => bin!(f, o, |x, y: i32| b(x < y)),
-                WasmBytecode::I32LtU => bin!(f, o, |x, y: u32| b(x < y)),
-                WasmBytecode::I32GtS => bin!(f, o, |x, y: i32| b(x > y)),
-                WasmBytecode::I32GtU => bin!(f, o, |x, y: u32| b(x > y)),
-                WasmBytecode::I32LeS => bin!(f, o, |x, y: i32| b(x <= y)),
-                WasmBytecode::I32LeU => bin!(f, o, |x, y: u32| b(x <= y)),
-                WasmBytecode::I32GeS => bin!(f, o, |x, y: i32| b(x >= y)),
-                WasmBytecode::I32GeU => bin!(f, o, |x, y: u32| b(x >= y)),
-                WasmBytecode::I64Add => bin!(f, o, |x, y: i64| x.wrapping_add(y) as u64),
-                WasmBytecode::I64Sub => bin!(f, o, |x, y: i64| x.wrapping_sub(y) as u64),
-                WasmBytecode::I64Mul => bin!(f, o, |x, y: i64| x.wrapping_mul(y) as u64),
-                WasmBytecode::I64DivS => {
-                    let (x, y) = (Slot(r!(f, o[1])).i64(), Slot(r!(f, o[2])).i64());
-                    if y == 0 {
-                        return Err(WasmTrap::IntegerDivideByZero);
-                    }
-                    r!(f, o[0]) = x.checked_div(y).ok_or(WasmTrap::IntegerOverflow)? as u64;
-                }
-                WasmBytecode::I64DivU | WasmBytecode::I64RemU => {
-                    let (x, y) = (r!(f, o[1]), r!(f, o[2]));
-                    if y == 0 {
-                        return Err(WasmTrap::IntegerDivideByZero);
-                    }
-                    r!(f, o[0]) = if d.bytecode == WasmBytecode::I64DivU { x / y } else { x % y };
-                }
-                WasmBytecode::I64RemS => {
-                    let (x, y) = (Slot(r!(f, o[1])).i64(), Slot(r!(f, o[2])).i64());
-                    if y == 0 {
-                        return Err(WasmTrap::IntegerDivideByZero);
-                    }
-                    r!(f, o[0]) = x.wrapping_rem(y) as u64;
-                }
-                WasmBytecode::I64And => bin!(f, o, |x, y: u64| x & y),
-                WasmBytecode::I64Ior => bin!(f, o, |x, y: u64| x | y),
-                WasmBytecode::I64Xor => bin!(f, o, |x, y: u64| x ^ y),
-                WasmBytecode::I64Shl => bin!(f, o, |x, y: u64| x.wrapping_shl(y as u32)),
-                WasmBytecode::I64ShrS => bin!(f, o, |x, y: i64| x.wrapping_shr(y as u32) as u64),
-                WasmBytecode::I64ShrU => bin!(f, o, |x, y: u64| x.wrapping_shr(y as u32)),
-                WasmBytecode::I64Rol => bin!(f, o, |x, y: u64| x.rotate_left((y % 64) as u32)),
-                WasmBytecode::I64Ror => bin!(f, o, |x, y: u64| x.rotate_right((y % 64) as u32)),
-                WasmBytecode::I64Clz => un!(f, o, |x: u64| u64::from(x.leading_zeros())),
-                WasmBytecode::I64Ctz => un!(f, o, |x: u64| u64::from(x.trailing_zeros())),
-                WasmBytecode::I64Popcnt => un!(f, o, |x: u64| u64::from(x.count_ones())),
-                WasmBytecode::I64Eqz => un!(f, o, |x: u64| b(x == 0)),
-                WasmBytecode::I64Eq | WasmBytecode::RefEq => bin!(f, o, |x, y: u64| b(x == y)),
-                WasmBytecode::I64Ne => bin!(f, o, |x, y: u64| b(x != y)),
-                WasmBytecode::I64LtS => bin!(f, o, |x, y: i64| b(x < y)),
-                WasmBytecode::I64LtU => bin!(f, o, |x, y: u64| b(x < y)),
-                WasmBytecode::I64GtS => bin!(f, o, |x, y: i64| b(x > y)),
-                WasmBytecode::I64GtU => bin!(f, o, |x, y: u64| b(x > y)),
-                WasmBytecode::I64LeS => bin!(f, o, |x, y: i64| b(x <= y)),
-                WasmBytecode::I64LeU => bin!(f, o, |x, y: u64| b(x <= y)),
-                WasmBytecode::I64GeS => bin!(f, o, |x, y: i64| b(x >= y)),
-                WasmBytecode::I64GeU => bin!(f, o, |x, y: u64| b(x >= y)),
-                WasmBytecode::F32Eq => bin!(f, o, |x, y: f32| b(x == y)),
-                WasmBytecode::F32Ne => bin!(f, o, |x, y: f32| b(x != y)),
-                WasmBytecode::F32Lt => bin!(f, o, |x, y: f32| b(x < y)),
-                WasmBytecode::F32Gt => bin!(f, o, |x, y: f32| b(x > y)),
-                WasmBytecode::F32Le => bin!(f, o, |x, y: f32| b(x <= y)),
-                WasmBytecode::F32Ge => bin!(f, o, |x, y: f32| b(x >= y)),
-                WasmBytecode::F64Eq => bin!(f, o, |x, y: f64| b(x == y)),
-                WasmBytecode::F64Ne => bin!(f, o, |x, y: f64| b(x != y)),
-                WasmBytecode::F64Lt => bin!(f, o, |x, y: f64| b(x < y)),
-                WasmBytecode::F64Gt => bin!(f, o, |x, y: f64| b(x > y)),
-                WasmBytecode::F64Le => bin!(f, o, |x, y: f64| b(x <= y)),
-                WasmBytecode::F64Ge => bin!(f, o, |x, y: f64| b(x >= y)),
-                WasmBytecode::F32Abs => un!(f, o, |x: u32| u32s(x & 0x7fff_ffff)),
-                WasmBytecode::F32Neg => un!(f, o, |x: u32| u32s(x ^ 0x8000_0000)),
-                WasmBytecode::F32Ceil => un!(f, o, |x: f32| f32s(if x.is_nan() { x + x } else { x.ceil() })),
-                WasmBytecode::F32Floor => un!(f, o, |x: f32| f32s(if x.is_nan() { x + x } else { x.floor() })),
-                WasmBytecode::F32Trunc => un!(f, o, |x: f32| f32s(if x.is_nan() { x + x } else { x.trunc() })),
-                WasmBytecode::F32NearestInt => un!(f, o, |x: f32| f32s(if x.is_nan() { x + x } else { x.round_ties_even() })),
-                WasmBytecode::F32Sqrt => un!(f, o, |x: f32| f32s(x.sqrt())),
-                WasmBytecode::F32Add => bin!(f, o, |x, y: f32| f32s(x + y)),
-                WasmBytecode::F32Sub => bin!(f, o, |x, y: f32| f32s(x - y)),
-                WasmBytecode::F32Mul => bin!(f, o, |x, y: f32| f32s(x * y)),
-                WasmBytecode::F32Div => bin!(f, o, |x, y: f32| f32s(x / y)),
-                WasmBytecode::F32Min => bin!(f, o, |x, y: f32| f32s(Float::min32(x, y))),
-                WasmBytecode::F32Max => bin!(f, o, |x, y: f32| f32s(Float::max32(x, y))),
-                WasmBytecode::F32CopySign => bin!(f, o, |x, y: u32| u32s((x & 0x7fff_ffff) | (y & 0x8000_0000))),
-                WasmBytecode::F64Abs => un!(f, o, |x: u64| x & 0x7fff_ffff_ffff_ffff),
-                WasmBytecode::F64Neg => un!(f, o, |x: u64| x ^ 0x8000_0000_0000_0000),
-                WasmBytecode::F64Ceil => un!(f, o, |x: f64| f64s(if x.is_nan() { x + x } else { x.ceil() })),
-                WasmBytecode::F64Floor => un!(f, o, |x: f64| f64s(if x.is_nan() { x + x } else { x.floor() })),
-                WasmBytecode::F64Trunc => un!(f, o, |x: f64| f64s(if x.is_nan() { x + x } else { x.trunc() })),
-                WasmBytecode::F64NearestInt => un!(f, o, |x: f64| f64s(if x.is_nan() { x + x } else { x.round_ties_even() })),
-                WasmBytecode::F64Sqrt => un!(f, o, |x: f64| f64s(x.sqrt())),
-                WasmBytecode::F64Add => bin!(f, o, |x, y: f64| f64s(x + y)),
-                WasmBytecode::F64Sub => bin!(f, o, |x, y: f64| f64s(x - y)),
-                WasmBytecode::F64Mul => bin!(f, o, |x, y: f64| f64s(x * y)),
-                WasmBytecode::F64Div => bin!(f, o, |x, y: f64| f64s(x / y)),
-                WasmBytecode::F64Min => bin!(f, o, |x, y: f64| f64s(Float::min64(x, y))),
-                WasmBytecode::F64Max => bin!(f, o, |x, y: f64| f64s(Float::max64(x, y))),
-                WasmBytecode::F64CopySign => bin!(f, o, |x, y: u64| (x & 0x7fff_ffff_ffff_ffff) | (y & 0x8000_0000_0000_0000)),
-                WasmBytecode::I32ConvertI64 => un!(f, o, |x: u64| x & u64::from(u32::MAX)),
-                WasmBytecode::I32SConvertF32 => trunc!(f, o, f32, -2_147_483_904.0_f32, 2_147_483_648.0_f32, i32, i32s),
-                WasmBytecode::I32UConvertF32 => trunc!(f, o, f32, -1.0_f32, 4_294_967_296.0_f32, u32, u32s),
-                WasmBytecode::I32SConvertF64 => trunc!(f, o, f64, -2_147_483_649.0_f64, 2_147_483_648.0_f64, i32, i32s),
-                WasmBytecode::I32UConvertF64 => trunc!(f, o, f64, -1.0_f64, 4_294_967_296.0_f64, u32, u32s),
-                WasmBytecode::I64SConvertF32 => trunc!(f, o, f32, -9_223_373_136_366_403_584.0_f32, 9_223_372_036_854_775_808.0_f32, i64, |v: i64| v as u64),
-                WasmBytecode::I64UConvertF32 => trunc!(f, o, f32, -1.0_f32, 18_446_744_073_709_551_616.0_f32, u64, |v: u64| v),
-                WasmBytecode::I64SConvertF64 => trunc!(f, o, f64, -9_223_372_036_854_777_856.0_f64, 9_223_372_036_854_775_808.0_f64, i64, |v: i64| v as u64),
-                WasmBytecode::I64UConvertF64 => trunc!(f, o, f64, -1.0_f64, 18_446_744_073_709_551_616.0_f64, u64, |v: u64| v),
-                WasmBytecode::I32SConvertSatF32 => un!(f, o, |x: f32| i32s(x as i32)),
-                WasmBytecode::I32UConvertSatF32 => un!(f, o, |x: f32| u32s(x as u32)),
-                WasmBytecode::I32SConvertSatF64 => un!(f, o, |x: f64| i32s(x as i32)),
-                WasmBytecode::I32UConvertSatF64 => un!(f, o, |x: f64| u32s(x as u32)),
-                WasmBytecode::I64SConvertSatF32 => un!(f, o, |x: f32| (x as i64) as u64),
-                WasmBytecode::I64UConvertSatF32 => un!(f, o, |x: f32| x as u64),
-                WasmBytecode::I64SConvertSatF64 => un!(f, o, |x: f64| (x as i64) as u64),
-                WasmBytecode::I64UConvertSatF64 => un!(f, o, |x: f64| x as u64),
-                WasmBytecode::I64SConvertI32 => un!(f, o, |x: i32| i64::from(x) as u64),
-                WasmBytecode::I64UConvertI32 => un!(f, o, |x: u32| u64::from(x)),
-                WasmBytecode::F32SConvertI32 => un!(f, o, |x: i32| f32s(x as f32)),
-                WasmBytecode::F32UConvertI32 => un!(f, o, |x: u32| f32s(x as f32)),
-                WasmBytecode::F32SConvertI64 => un!(f, o, |x: i64| f32s(x as f32)),
-                WasmBytecode::F32UConvertI64 => un!(f, o, |x: u64| f32s(x as f32)),
-                WasmBytecode::F32ConvertF64 => un!(f, o, |x: f64| f32s(x as f32)),
-                WasmBytecode::F64SConvertI32 => un!(f, o, |x: i32| f64s(f64::from(x))),
-                WasmBytecode::F64UConvertI32 => un!(f, o, |x: u32| f64s(f64::from(x))),
-                WasmBytecode::F64SConvertI64 => un!(f, o, |x: i64| f64s(x as f64)),
-                WasmBytecode::F64UConvertI64 => un!(f, o, |x: u64| f64s(x as f64)),
-                WasmBytecode::F64ConvertF32 => un!(f, o, |x: f32| f64s(f64::from(x))),
-                WasmBytecode::I32ReinterpretF32 | WasmBytecode::F32ReinterpretI32 => un!(f, o, |x: u32| u32s(x)),
-                WasmBytecode::I64ReinterpretF64 | WasmBytecode::F64ReinterpretI64 => un!(f, o, |x: u64| x),
-                WasmBytecode::I32SExtendI8 => un!(f, o, |x: u32| i32s(i32::from(x as u8 as i8))),
-                WasmBytecode::I32SExtendI16 => un!(f, o, |x: u32| i32s(i32::from(x as u16 as i16))),
-                WasmBytecode::I64SExtendI8 => un!(f, o, |x: u64| i64::from(x as u8 as i8) as u64),
-                WasmBytecode::I64SExtendI16 => un!(f, o, |x: u64| i64::from(x as u16 as i16) as u64),
-                WasmBytecode::I64SExtendI32 => un!(f, o, |x: u64| i64::from(x as u32 as i32) as u64),
                 WasmBytecode::I32LoadMem | WasmBytecode::F32LoadMem => load!(f, o, 4, |x| u32s(u32::from_le_bytes(x))),
                 WasmBytecode::I64LoadMem | WasmBytecode::F64LoadMem => load!(f, o, 8, |x| u64::from_le_bytes(x)),
                 WasmBytecode::I32LoadMem8S => load!(f, o, 1, |x| i32s(i32::from(x[0] as i8))),
@@ -1181,10 +1008,246 @@ impl<'a, 'scope> WasmStore<'a, 'scope> {
                 | WasmBytecode::I31GetU => {
                     Objects { store: self, fp: f.fp, instance: f.instance }.run(d)?;
                 }
-                _ => return Err(WasmTrap::Unsupported),
+                op => match WasmScalar::eval(op, r!(f, o[1]), self.stack.get(f.fp + o.all()[2] as usize).copied().unwrap_or(0))? {
+                    Some(v) => r!(f, o[0]) = v,
+                    None => return Err(WasmTrap::Unsupported),
+                },
             }
         }
         Ok(())
+    }
+}
+
+pub struct WasmScalar;
+
+trait Truncate: Copy + PartialOrd {
+    fn nan(self) -> bool;
+    fn whole(self) -> Self;
+}
+
+impl Truncate for f32 {
+    fn nan(self) -> bool {
+        self.is_nan()
+    }
+
+    fn whole(self) -> Self {
+        self.trunc()
+    }
+}
+
+impl Truncate for f64 {
+    fn nan(self) -> bool {
+        self.is_nan()
+    }
+
+    fn whole(self) -> Self {
+        self.trunc()
+    }
+}
+
+impl WasmScalar {
+    pub fn handles(op: WasmBytecode) -> bool {
+        !matches!(Self::eval(op, 0, 1), Ok(None) | Err(WasmTrap::Unsupported))
+    }
+
+    fn trunc<T: Truncate>(x: T, lo: T, hi: T, out: impl FnOnce(T) -> u64) -> Result<u64, WasmTrap> {
+        if x.nan() {
+            return Err(WasmTrap::InvalidConversion);
+        }
+        let t = x.whole();
+        if !(t > lo && t < hi) {
+            return Err(WasmTrap::IntegerOverflow);
+        }
+        Ok(out(t))
+    }
+
+    #[inline]
+    #[expect(clippy::too_many_lines, clippy::cast_possible_truncation, clippy::cast_sign_loss, clippy::cast_possible_wrap, clippy::cast_precision_loss, clippy::float_cmp, reason = "one arm per scalar bytecode, with WebAssembly's wrapping and bit-level numeric semantics")]
+    pub fn eval(op: WasmBytecode, x0: u64, y0: u64) -> Result<Option<u64>, WasmTrap> {
+        let i32s = |v: i32| u64::from(v.cast_unsigned());
+        let u32s = |v: u32| u64::from(v);
+        let f32s = |v: f32| u64::from(v.to_bits());
+        let f64s = |v: f64| v.to_bits();
+        let b = |v: bool| u64::from(v);
+        Ok(Some(match op {
+            WasmBytecode::RefIsNull => b(x0 == 0),
+            WasmBytecode::RefAsNonNull => {
+                let v = x0;
+                if v == 0 {
+                    return Err(WasmTrap::NullReference);
+                }
+                v
+            }
+            WasmBytecode::I32Add => { let (x, y) = (Slot(x0).i32(), Slot(y0).i32()); i32s(x.wrapping_add(y)) }
+            WasmBytecode::I32Sub => { let (x, y) = (Slot(x0).i32(), Slot(y0).i32()); i32s(x.wrapping_sub(y)) }
+            WasmBytecode::I32Mul => { let (x, y) = (Slot(x0).i32(), Slot(y0).i32()); i32s(x.wrapping_mul(y)) }
+            WasmBytecode::I32DivS => {
+                let (x, y) = (Slot(x0).i32(), Slot(y0).i32());
+                if y == 0 {
+                    return Err(WasmTrap::IntegerDivideByZero);
+                }
+                i32s(x.checked_div(y).ok_or(WasmTrap::IntegerOverflow)?)
+            }
+            WasmBytecode::I32DivU | WasmBytecode::I32RemU => {
+                let (x, y) = (Slot(x0).u32(), Slot(y0).u32());
+                if y == 0 {
+                    return Err(WasmTrap::IntegerDivideByZero);
+                }
+                u32s(if op == WasmBytecode::I32DivU { x / y } else { x % y })
+            }
+            WasmBytecode::I32RemS => {
+                let (x, y) = (Slot(x0).i32(), Slot(y0).i32());
+                if y == 0 {
+                    return Err(WasmTrap::IntegerDivideByZero);
+                }
+                i32s(x.wrapping_rem(y))
+            }
+            WasmBytecode::I32And => { let (x, y) = (Slot(x0).u32(), Slot(y0).u32()); u32s(x & y) }
+            WasmBytecode::I32Ior => { let (x, y) = (Slot(x0).u32(), Slot(y0).u32()); u32s(x | y) }
+            WasmBytecode::I32Xor => { let (x, y) = (Slot(x0).u32(), Slot(y0).u32()); u32s(x ^ y) }
+            WasmBytecode::I32Shl => { let (x, y) = (Slot(x0).u32(), Slot(y0).u32()); u32s(x.wrapping_shl(y)) }
+            WasmBytecode::I32ShrS => { let (x, y) = (Slot(x0).i32(), Slot(y0).i32()); i32s(x.wrapping_shr(y.cast_unsigned())) }
+            WasmBytecode::I32ShrU => { let (x, y) = (Slot(x0).u32(), Slot(y0).u32()); u32s(x.wrapping_shr(y)) }
+            WasmBytecode::I32Rol => { let (x, y) = (Slot(x0).u32(), Slot(y0).u32()); u32s(x.rotate_left(y % 32)) }
+            WasmBytecode::I32Ror => { let (x, y) = (Slot(x0).u32(), Slot(y0).u32()); u32s(x.rotate_right(y % 32)) }
+            WasmBytecode::I32Clz => { let x = Slot(x0).u32(); u32s(x.leading_zeros()) }
+            WasmBytecode::I32Ctz => { let x = Slot(x0).u32(); u32s(x.trailing_zeros()) }
+            WasmBytecode::I32Popcnt => { let x = Slot(x0).u32(); u32s(x.count_ones()) }
+            WasmBytecode::I32Eqz => { let x = Slot(x0).u32(); b(x == 0) }
+            WasmBytecode::I32Eq => { let (x, y) = (Slot(x0).u32(), Slot(y0).u32()); b(x == y) }
+            WasmBytecode::I32Ne => { let (x, y) = (Slot(x0).u32(), Slot(y0).u32()); b(x != y) }
+            WasmBytecode::I32LtS => { let (x, y) = (Slot(x0).i32(), Slot(y0).i32()); b(x < y) }
+            WasmBytecode::I32LtU => { let (x, y) = (Slot(x0).u32(), Slot(y0).u32()); b(x < y) }
+            WasmBytecode::I32GtS => { let (x, y) = (Slot(x0).i32(), Slot(y0).i32()); b(x > y) }
+            WasmBytecode::I32GtU => { let (x, y) = (Slot(x0).u32(), Slot(y0).u32()); b(x > y) }
+            WasmBytecode::I32LeS => { let (x, y) = (Slot(x0).i32(), Slot(y0).i32()); b(x <= y) }
+            WasmBytecode::I32LeU => { let (x, y) = (Slot(x0).u32(), Slot(y0).u32()); b(x <= y) }
+            WasmBytecode::I32GeS => { let (x, y) = (Slot(x0).i32(), Slot(y0).i32()); b(x >= y) }
+            WasmBytecode::I32GeU => { let (x, y) = (Slot(x0).u32(), Slot(y0).u32()); b(x >= y) }
+            WasmBytecode::I64Add => { let (x, y) = (Slot(x0).i64(), Slot(y0).i64()); x.wrapping_add(y) as u64 }
+            WasmBytecode::I64Sub => { let (x, y) = (Slot(x0).i64(), Slot(y0).i64()); x.wrapping_sub(y) as u64 }
+            WasmBytecode::I64Mul => { let (x, y) = (Slot(x0).i64(), Slot(y0).i64()); x.wrapping_mul(y) as u64 }
+            WasmBytecode::I64DivS => {
+                let (x, y) = (Slot(x0).i64(), Slot(y0).i64());
+                if y == 0 {
+                    return Err(WasmTrap::IntegerDivideByZero);
+                }
+                x.checked_div(y).ok_or(WasmTrap::IntegerOverflow)? as u64
+            }
+            WasmBytecode::I64DivU | WasmBytecode::I64RemU => {
+                let (x, y) = (x0, y0);
+                if y == 0 {
+                    return Err(WasmTrap::IntegerDivideByZero);
+                }
+                if op == WasmBytecode::I64DivU { x / y } else { x % y }
+            }
+            WasmBytecode::I64RemS => {
+                let (x, y) = (Slot(x0).i64(), Slot(y0).i64());
+                if y == 0 {
+                    return Err(WasmTrap::IntegerDivideByZero);
+                }
+                x.wrapping_rem(y) as u64
+            }
+            WasmBytecode::I64And => { let (x, y) = (Slot(x0).u64(), Slot(y0).u64()); x & y }
+            WasmBytecode::I64Ior => { let (x, y) = (Slot(x0).u64(), Slot(y0).u64()); x | y }
+            WasmBytecode::I64Xor => { let (x, y) = (Slot(x0).u64(), Slot(y0).u64()); x ^ y }
+            WasmBytecode::I64Shl => { let (x, y) = (Slot(x0).u64(), Slot(y0).u64()); x.wrapping_shl(y as u32) }
+            WasmBytecode::I64ShrS => { let (x, y) = (Slot(x0).i64(), Slot(y0).i64()); x.wrapping_shr(y as u32) as u64 }
+            WasmBytecode::I64ShrU => { let (x, y) = (Slot(x0).u64(), Slot(y0).u64()); x.wrapping_shr(y as u32) }
+            WasmBytecode::I64Rol => { let (x, y) = (Slot(x0).u64(), Slot(y0).u64()); x.rotate_left((y % 64) as u32) }
+            WasmBytecode::I64Ror => { let (x, y) = (Slot(x0).u64(), Slot(y0).u64()); x.rotate_right((y % 64) as u32) }
+            WasmBytecode::I64Clz => { let x = Slot(x0).u64(); u64::from(x.leading_zeros()) }
+            WasmBytecode::I64Ctz => { let x = Slot(x0).u64(); u64::from(x.trailing_zeros()) }
+            WasmBytecode::I64Popcnt => { let x = Slot(x0).u64(); u64::from(x.count_ones()) }
+            WasmBytecode::I64Eqz => { let x = Slot(x0).u64(); b(x == 0) }
+            WasmBytecode::I64Eq | WasmBytecode::RefEq => { let (x, y) = (Slot(x0).u64(), Slot(y0).u64()); b(x == y) }
+            WasmBytecode::I64Ne => { let (x, y) = (Slot(x0).u64(), Slot(y0).u64()); b(x != y) }
+            WasmBytecode::I64LtS => { let (x, y) = (Slot(x0).i64(), Slot(y0).i64()); b(x < y) }
+            WasmBytecode::I64LtU => { let (x, y) = (Slot(x0).u64(), Slot(y0).u64()); b(x < y) }
+            WasmBytecode::I64GtS => { let (x, y) = (Slot(x0).i64(), Slot(y0).i64()); b(x > y) }
+            WasmBytecode::I64GtU => { let (x, y) = (Slot(x0).u64(), Slot(y0).u64()); b(x > y) }
+            WasmBytecode::I64LeS => { let (x, y) = (Slot(x0).i64(), Slot(y0).i64()); b(x <= y) }
+            WasmBytecode::I64LeU => { let (x, y) = (Slot(x0).u64(), Slot(y0).u64()); b(x <= y) }
+            WasmBytecode::I64GeS => { let (x, y) = (Slot(x0).i64(), Slot(y0).i64()); b(x >= y) }
+            WasmBytecode::I64GeU => { let (x, y) = (Slot(x0).u64(), Slot(y0).u64()); b(x >= y) }
+            WasmBytecode::F32Eq => { let (x, y) = (Slot(x0).f32(), Slot(y0).f32()); b(x == y) }
+            WasmBytecode::F32Ne => { let (x, y) = (Slot(x0).f32(), Slot(y0).f32()); b(x != y) }
+            WasmBytecode::F32Lt => { let (x, y) = (Slot(x0).f32(), Slot(y0).f32()); b(x < y) }
+            WasmBytecode::F32Gt => { let (x, y) = (Slot(x0).f32(), Slot(y0).f32()); b(x > y) }
+            WasmBytecode::F32Le => { let (x, y) = (Slot(x0).f32(), Slot(y0).f32()); b(x <= y) }
+            WasmBytecode::F32Ge => { let (x, y) = (Slot(x0).f32(), Slot(y0).f32()); b(x >= y) }
+            WasmBytecode::F64Eq => { let (x, y) = (Slot(x0).f64(), Slot(y0).f64()); b(x == y) }
+            WasmBytecode::F64Ne => { let (x, y) = (Slot(x0).f64(), Slot(y0).f64()); b(x != y) }
+            WasmBytecode::F64Lt => { let (x, y) = (Slot(x0).f64(), Slot(y0).f64()); b(x < y) }
+            WasmBytecode::F64Gt => { let (x, y) = (Slot(x0).f64(), Slot(y0).f64()); b(x > y) }
+            WasmBytecode::F64Le => { let (x, y) = (Slot(x0).f64(), Slot(y0).f64()); b(x <= y) }
+            WasmBytecode::F64Ge => { let (x, y) = (Slot(x0).f64(), Slot(y0).f64()); b(x >= y) }
+            WasmBytecode::F32Abs => { let x = Slot(x0).u32(); u32s(x & 0x7fff_ffff) }
+            WasmBytecode::F32Neg => { let x = Slot(x0).u32(); u32s(x ^ 0x8000_0000) }
+            WasmBytecode::F32Ceil => { let x = Slot(x0).f32(); f32s(if x.is_nan() { x + x } else { x.ceil() }) }
+            WasmBytecode::F32Floor => { let x = Slot(x0).f32(); f32s(if x.is_nan() { x + x } else { x.floor() }) }
+            WasmBytecode::F32Trunc => { let x = Slot(x0).f32(); f32s(if x.is_nan() { x + x } else { x.trunc() }) }
+            WasmBytecode::F32NearestInt => { let x = Slot(x0).f32(); f32s(if x.is_nan() { x + x } else { x.round_ties_even() }) }
+            WasmBytecode::F32Sqrt => { let x = Slot(x0).f32(); f32s(x.sqrt()) }
+            WasmBytecode::F32Add => { let (x, y) = (Slot(x0).f32(), Slot(y0).f32()); f32s(x + y) }
+            WasmBytecode::F32Sub => { let (x, y) = (Slot(x0).f32(), Slot(y0).f32()); f32s(x - y) }
+            WasmBytecode::F32Mul => { let (x, y) = (Slot(x0).f32(), Slot(y0).f32()); f32s(x * y) }
+            WasmBytecode::F32Div => { let (x, y) = (Slot(x0).f32(), Slot(y0).f32()); f32s(x / y) }
+            WasmBytecode::F32Min => { let (x, y) = (Slot(x0).f32(), Slot(y0).f32()); f32s(Float::min32(x, y)) }
+            WasmBytecode::F32Max => { let (x, y) = (Slot(x0).f32(), Slot(y0).f32()); f32s(Float::max32(x, y)) }
+            WasmBytecode::F32CopySign => { let (x, y) = (Slot(x0).u32(), Slot(y0).u32()); u32s((x & 0x7fff_ffff) | (y & 0x8000_0000)) }
+            WasmBytecode::F64Abs => { let x = Slot(x0).u64(); x & 0x7fff_ffff_ffff_ffff }
+            WasmBytecode::F64Neg => { let x = Slot(x0).u64(); x ^ 0x8000_0000_0000_0000 }
+            WasmBytecode::F64Ceil => { let x = Slot(x0).f64(); f64s(if x.is_nan() { x + x } else { x.ceil() }) }
+            WasmBytecode::F64Floor => { let x = Slot(x0).f64(); f64s(if x.is_nan() { x + x } else { x.floor() }) }
+            WasmBytecode::F64Trunc => { let x = Slot(x0).f64(); f64s(if x.is_nan() { x + x } else { x.trunc() }) }
+            WasmBytecode::F64NearestInt => { let x = Slot(x0).f64(); f64s(if x.is_nan() { x + x } else { x.round_ties_even() }) }
+            WasmBytecode::F64Sqrt => { let x = Slot(x0).f64(); f64s(x.sqrt()) }
+            WasmBytecode::F64Add => { let (x, y) = (Slot(x0).f64(), Slot(y0).f64()); f64s(x + y) }
+            WasmBytecode::F64Sub => { let (x, y) = (Slot(x0).f64(), Slot(y0).f64()); f64s(x - y) }
+            WasmBytecode::F64Mul => { let (x, y) = (Slot(x0).f64(), Slot(y0).f64()); f64s(x * y) }
+            WasmBytecode::F64Div => { let (x, y) = (Slot(x0).f64(), Slot(y0).f64()); f64s(x / y) }
+            WasmBytecode::F64Min => { let (x, y) = (Slot(x0).f64(), Slot(y0).f64()); f64s(Float::min64(x, y)) }
+            WasmBytecode::F64Max => { let (x, y) = (Slot(x0).f64(), Slot(y0).f64()); f64s(Float::max64(x, y)) }
+            WasmBytecode::F64CopySign => { let (x, y) = (Slot(x0).u64(), Slot(y0).u64()); (x & 0x7fff_ffff_ffff_ffff) | (y & 0x8000_0000_0000_0000) }
+            WasmBytecode::I32ConvertI64 => { let x = Slot(x0).u64(); x & u64::from(u32::MAX) }
+            WasmBytecode::I32SConvertF32 => Self::trunc(Slot(x0).f32(), -2_147_483_904.0_f32, 2_147_483_648.0_f32, |t| i32s(t as i32))?,
+            WasmBytecode::I32UConvertF32 => Self::trunc(Slot(x0).f32(), -1.0_f32, 4_294_967_296.0_f32, |t| u32s(t as u32))?,
+            WasmBytecode::I32SConvertF64 => Self::trunc(Slot(x0).f64(), -2_147_483_649.0_f64, 2_147_483_648.0_f64, |t| i32s(t as i32))?,
+            WasmBytecode::I32UConvertF64 => Self::trunc(Slot(x0).f64(), -1.0_f64, 4_294_967_296.0_f64, |t| u32s(t as u32))?,
+            WasmBytecode::I64SConvertF32 => Self::trunc(Slot(x0).f32(), -9_223_373_136_366_403_584.0_f32, 9_223_372_036_854_775_808.0_f32, |t| (t as i64) as u64)?,
+            WasmBytecode::I64UConvertF32 => Self::trunc(Slot(x0).f32(), -1.0_f32, 18_446_744_073_709_551_616.0_f32, |t| t as u64)?,
+            WasmBytecode::I64SConvertF64 => Self::trunc(Slot(x0).f64(), -9_223_372_036_854_777_856.0_f64, 9_223_372_036_854_775_808.0_f64, |t| (t as i64) as u64)?,
+            WasmBytecode::I64UConvertF64 => Self::trunc(Slot(x0).f64(), -1.0_f64, 18_446_744_073_709_551_616.0_f64, |t| t as u64)?,
+            WasmBytecode::I32SConvertSatF32 => { let x = Slot(x0).f32(); i32s(x as i32) }
+            WasmBytecode::I32UConvertSatF32 => { let x = Slot(x0).f32(); u32s(x as u32) }
+            WasmBytecode::I32SConvertSatF64 => { let x = Slot(x0).f64(); i32s(x as i32) }
+            WasmBytecode::I32UConvertSatF64 => { let x = Slot(x0).f64(); u32s(x as u32) }
+            WasmBytecode::I64SConvertSatF32 => { let x = Slot(x0).f32(); (x as i64) as u64 }
+            WasmBytecode::I64UConvertSatF32 => { let x = Slot(x0).f32(); x as u64 }
+            WasmBytecode::I64SConvertSatF64 => { let x = Slot(x0).f64(); (x as i64) as u64 }
+            WasmBytecode::I64UConvertSatF64 => { let x = Slot(x0).f64(); x as u64 }
+            WasmBytecode::I64SConvertI32 => { let x = Slot(x0).i32(); i64::from(x) as u64 }
+            WasmBytecode::I64UConvertI32 => { let x = Slot(x0).u32(); u64::from(x) }
+            WasmBytecode::F32SConvertI32 => { let x = Slot(x0).i32(); f32s(x as f32) }
+            WasmBytecode::F32UConvertI32 => { let x = Slot(x0).u32(); f32s(x as f32) }
+            WasmBytecode::F32SConvertI64 => { let x = Slot(x0).i64(); f32s(x as f32) }
+            WasmBytecode::F32UConvertI64 => { let x = Slot(x0).u64(); f32s(x as f32) }
+            WasmBytecode::F32ConvertF64 => { let x = Slot(x0).f64(); f32s(x as f32) }
+            WasmBytecode::F64SConvertI32 => { let x = Slot(x0).i32(); f64s(f64::from(x)) }
+            WasmBytecode::F64UConvertI32 => { let x = Slot(x0).u32(); f64s(f64::from(x)) }
+            WasmBytecode::F64SConvertI64 => { let x = Slot(x0).i64(); f64s(x as f64) }
+            WasmBytecode::F64UConvertI64 => { let x = Slot(x0).u64(); f64s(x as f64) }
+            WasmBytecode::F64ConvertF32 => { let x = Slot(x0).f32(); f64s(f64::from(x)) }
+            WasmBytecode::I32ReinterpretF32 | WasmBytecode::F32ReinterpretI32 => { let x = Slot(x0).u32(); u32s(x) }
+            WasmBytecode::I64ReinterpretF64 | WasmBytecode::F64ReinterpretI64 => Slot(x0).u64(),
+            WasmBytecode::I32SExtendI8 => { let x = Slot(x0).u32(); i32s(i32::from(x as u8 as i8)) }
+            WasmBytecode::I32SExtendI16 => { let x = Slot(x0).u32(); i32s(i32::from(x as u16 as i16)) }
+            WasmBytecode::I64SExtendI8 => { let x = Slot(x0).u64(); i64::from(x as u8 as i8) as u64 }
+            WasmBytecode::I64SExtendI16 => { let x = Slot(x0).u64(); i64::from(x as u16 as i16) as u64 }
+            WasmBytecode::I64SExtendI32 => { let x = Slot(x0).u64(); i64::from(x as u32 as i32) as u64 }
+            _ => return Ok(None),
+        }))
     }
 }
 

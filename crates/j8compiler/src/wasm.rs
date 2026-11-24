@@ -412,6 +412,7 @@ impl Body<'_, '_> {
             self.v.define_locals(at, n, t)?;
         }
         let total = self.v.len_locals();
+        let mut vector = (0..total).any(|i| self.v.get_local_type(i) == Some(ValType::V128));
         self.emitter.locals = total;
         self.emitter.registers = total;
         self.emitter.controls.push(Control { frame: Frame::Block, base: 0, params: 0, results, start: 0, exits: Vec::new(), otherwise: None, catches: None });
@@ -422,13 +423,14 @@ impl Body<'_, '_> {
             let h = self.height();
             let live = self.reachable();
             self.v.op(pos, &op)?;
+            vector |= self.v.get_operand_type(0) == Some(Some(ValType::V128));
             self.operator(&op, at, h, live)?;
         }
         if self.v.control_stack_height() != 0 {
             return Err(WasmError { kind: WasmErrorKind::Invalid, message: "function body does not end".into(), offset: usize::try_from(ops.original_position()).unwrap_or(usize::MAX) });
         }
         let e = self.emitter;
-        Ok(WasmFunction { ty, params, results, registers: e.registers + 1, code: e.enc.code.into(), bits: e.bits.into(), tables: e.tables.into(), handlers: e.handlers.into() })
+        Ok(WasmFunction { ty, params, results, registers: e.registers + 1, code: e.enc.code.into(), bits: e.bits.into(), tables: e.tables.into(), handlers: e.handlers.into(), vector })
     }
 
     #[expect(clippy::too_many_lines, reason = "one arm per WebAssembly control and special-shape operator")]
@@ -846,7 +848,7 @@ impl ModuleBuilder<'_> {
         }
         let base = e.reg(0);
         e.emit(WasmBytecode::Return, &[base, 1])?;
-        let f = WasmFunction { ty: u32::MAX, params: 0, results: 1, registers: e.registers + 1, code: e.enc.code.into(), bits: e.bits.into(), tables: e.tables.into(), handlers: Box::new([]) };
+        let f = WasmFunction { ty: u32::MAX, params: 0, results: 1, registers: e.registers + 1, code: e.enc.code.into(), bits: e.bits.into(), tables: e.tables.into(), handlers: Box::new([]), vector: true };
         self.module.inits.push(f);
         Ok(u32::try_from(self.module.inits.len() - 1).unwrap_or(0))
     }

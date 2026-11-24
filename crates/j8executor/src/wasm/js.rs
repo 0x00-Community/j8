@@ -15,14 +15,33 @@ use num_traits::ToPrimitive;
 use super::entity::Ptr;
 use super::gc::{WasmObject, Word};
 use super::types::Hierarchy;
-use super::{WasmCompiled, WasmExtern, WasmFunc, WasmGlobal, WasmHost, WasmInstance, WasmInstantiateError, WasmMemory, WasmStore, WasmTable, WasmTag, WasmThrow, WasmTrap, WasmTypes};
+use super::{WasmTier, WasmCompiled, WasmExtern, WasmFunc, WasmGlobal, WasmHost, WasmInstance, WasmInstantiateError, WasmMemory, WasmStore, WasmTable, WasmTag, WasmThrow, WasmTrap, WasmTypes};
 
-pub struct WebAssembly<I>(pub I);
+type Tier = Arc<dyn WasmTier + Send + Sync>;
+
+pub struct WebAssembly<I> {
+    intrinsics: I,
+    tier: Option<Tier>,
+}
+
+impl<I> From<I> for WebAssembly<I> {
+    fn from(intrinsics: I) -> Self {
+        Self { intrinsics, tier: None }
+    }
+}
+
+impl<I> WebAssembly<I> {
+    #[must_use]
+    pub fn with_tier(mut self, tier: Tier) -> Self {
+        self.tier = Some(tier);
+        self
+    }
+}
 
 impl<I: Intrinsics> Intrinsics for WebAssembly<I> {
     fn install<'scope>(&self, mc: &Mutation<'scope>, context: &Context<'scope>) {
-        self.0.install(mc, context);
-        Api { mc, cx: context }.install();
+        self.intrinsics.install(mc, context);
+        Api { mc, cx: context }.install(self.tier.clone());
     }
 }
 
@@ -64,6 +83,7 @@ struct Wrapped<'scope> {
     word: WordSlot<'scope>,
     module: Option<Compiled>,
     values: Box<[ValueCell<'scope>]>,
+    tier: Option<Tier>,
 }
 
 unsafe impl<'scope> HostObject<'scope> for Wrapped<'scope> {
@@ -224,12 +244,19 @@ impl Seen<'_> {
 struct Realm<'scope> {
     object: JsObject<'scope>,
     types: ScopeLocal<'scope, WasmTypes>,
+    tier: Option<&'scope (dyn WasmTier + Send + Sync)>,
 }
 
 impl<'scope> Realm<'scope> {
     fn of(o: JsObject<'scope>) -> Option<Self> {
         let s = Seen::of(o)?;
-        (s.kind == Kind::Realm).then(|| Self { object: o, types: Ptr::local(s.word).unwrap_or_else(|| unreachable!("a realm always holds its type registry")) })
+        let ObjectKind::Host(h) = o.borrow().kind else { return None };
+        let tier = h.get().try_borrow().and_then(|cell| {
+            let p = cell.find(TypeId::of::<Marker>())?;
+            let w = unsafe { p.cast::<Wrapped<'scope>>().as_ref() };
+            w.tier.as_deref().map(|t| unsafe { &*core::ptr::from_ref(t) })
+        });
+        (s.kind == Kind::Realm).then(|| Self { object: o, types: Ptr::local(s.word).unwrap_or_else(|| unreachable!("a realm always holds its type registry")), tier })
     }
 
     fn value(self, i: usize) -> Value<'scope> {
@@ -347,10 +374,16 @@ impl<'scope> Api<'_, 'scope> {
         (ctor, proto)
     }
 
-    fn install(&self) {
+    fn install(&self, tier: Option<Tier>) {
         let mc = self.mc;
         let types = WasmTypes::alloc(mc);
         let realm_obj = Js::wrap(mc, Kind::Realm, Ptr::of(types), None, &[Value::Undefined; REALM_LEN], None);
+        if let ObjectKind::Host(h) = realm_obj.borrow().kind
+            && let Some(mut cell) = h.get().try_borrow_mut(mc)
+            && let Some(p) = cell.find_mut(TypeId::of::<Marker>())
+        {
+            unsafe { p.cast::<Wrapped<'scope>>().as_mut() }.tier = tier;
+        }
         let realm: Value<'scope> = realm_obj.into();
         let ns = self.plain();
         self.tag(ns, "WebAssembly");
@@ -468,7 +501,7 @@ pub struct Js;
 
 impl Js {
     fn wrap<'scope>(mc: &Mutation<'scope>, kind: Kind, word: u64, module: Option<Compiled>, values: &[Value<'scope>], proto: Option<JsObject<'scope>>) -> JsObject<'scope> {
-        let w = Wrapped { kind, word: WordSlot::new(word), module, values: values.iter().map(|&v| ValueCell::new(v)).collect() };
+        let w = Wrapped { kind, word: WordSlot::new(word), module, values: values.iter().map(|&v| ValueCell::new(v)).collect(), tier: None };
         let data = mc.alloc(j8framework::GcCell::new(mc, Host::new(w)));
         ObjectData { kind: ObjectKind::Host(data), proto, ..ObjectData::default() }.alloc(mc)
     }
@@ -752,7 +785,11 @@ impl Js {
     fn store<'a, 'scope, 'x>(a: &'a mut Scope<'scope, 'x>, realm: Realm<'scope>, host: &'a mut Option<JsHost<'a, 'scope, 'x>>) -> WasmStore<'a, 'scope> {
         let mc: &'x Mutation<'scope> = a.mc;
         let h = host.insert(JsHost { a, realm });
-        WasmStore::new(mc, realm.types, h)
+        let store = WasmStore::new(mc, realm.types, h);
+        match realm.tier {
+            Some(t) => store.with_tier(t),
+            None => store,
+        }
     }
 
     fn read_imports<'scope>(a: &mut Scope<'scope, '_>, realm: Realm<'scope>, m: &Compiled, imports: Value<'scope>) -> Result<Vec<WasmExtern<'scope>>, Error> {

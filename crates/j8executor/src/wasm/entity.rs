@@ -2,6 +2,7 @@ use alloc::boxed::Box;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::cell::UnsafeCell;
+use core::sync::atomic::AtomicU32;
 
 use j8bytecode::{Decoded, Decoder, OperandValue, WasmBytecode, WasmGlobalType, WasmHandler, WasmMemoryType, WasmModule, WasmTableType};
 use j8framework::paragc::{WORD_POINTER_MIN, word_pointer};
@@ -21,7 +22,12 @@ pub struct Code {
     pub tables: Box<[Box<[u32]>]>,
     pub handlers: Box<[WasmHandler]>,
     pub params: u32,
+    pub results: u32,
     pub registers: u32,
+    pub vector: bool,
+    pub memory64: Option<bool>,
+    pub jit: OnceBox<u64>,
+    pub calls: AtomicU32,
 }
 
 impl Code {
@@ -31,14 +37,14 @@ impl Code {
     }
 }
 
-impl From<&j8bytecode::WasmFunction> for Code {
-    fn from(f: &j8bytecode::WasmFunction) -> Self {
+impl Code {
+    fn new(f: &j8bytecode::WasmFunction, memory64: Option<bool>) -> Self {
         let ops: Vec<Decoded<WasmBytecode>> = Decoder::<WasmBytecode>::from(&f.code[..]).map_while(Result::ok).collect();
         let mut at = alloc::vec![u32::MAX; f.code.len() + 1];
         for (i, d) in ops.iter().enumerate() {
             at[d.offset] = u32::try_from(i).unwrap_or(u32::MAX);
         }
-        Self { ops, at, bits: f.bits.clone(), tables: f.tables.clone(), handlers: f.handlers.clone(), params: f.params, registers: f.registers }
+        Self { ops, at, bits: f.bits.clone(), tables: f.tables.clone(), handlers: f.handlers.clone(), params: f.params, results: f.results, registers: f.registers, vector: f.vector, memory64, jit: OnceBox::default(), calls: AtomicU32::new(0) }
     }
 }
 
@@ -57,12 +63,17 @@ impl From<WasmModule> for WasmCompiled {
 }
 
 impl WasmCompiled {
+    fn memory64(&self) -> Option<bool> {
+        let imported = self.module.imports.iter().find_map(|i| if let j8bytecode::WasmImportKind::Memory(m) = i.kind { Some(m) } else { None });
+        imported.or_else(|| self.module.memories.first().copied()).map(|m| m.memory64)
+    }
+
     pub fn code(&self, index: u32) -> Arc<Code> {
-        self.code[index as usize].get_or_init(|| Arc::new(Code::from(&self.module.functions[index as usize]))).clone()
+        self.code[index as usize].get_or_init(|| Arc::new(Code::new(&self.module.functions[index as usize], self.memory64()))).clone()
     }
 
     pub fn init(&self, index: u32) -> Arc<Code> {
-        self.inits[index as usize].get_or_init(|| Arc::new(Code::from(&self.module.inits[index as usize]))).clone()
+        self.inits[index as usize].get_or_init(|| Arc::new(Code::new(&self.module.inits[index as usize], self.memory64()))).clone()
     }
 }
 

@@ -256,6 +256,7 @@ pub struct WasmFunction {
     pub bits: Box<[u64]>,
     pub tables: Box<[Box<[u32]>]>,
     pub handlers: Box<[WasmHandler]>,
+    pub vector: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
