@@ -25,5 +25,13 @@ pub trait Platform: Sync + Pool {
         None
     }
 
+    fn locale(&self) -> Option<alloc::string::String> {
+        None
+    }
+
+    fn time_zone(&self) -> Option<alloc::string::String> {
+        None
+    }
+
     fn print(&self, line: &str);
 }

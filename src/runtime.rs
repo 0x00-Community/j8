@@ -53,6 +53,14 @@ impl<H: Host, P: Platform> Platform for HostPlatform<H, P> {
         }
     }
 
+    fn locale(&self) -> Option<String> {
+        self.inner.locale()
+    }
+
+    fn time_zone(&self) -> Option<String> {
+        self.inner.time_zone()
+    }
+
     fn print(&self, line: &str) {
         self.inner.print(line);
     }
