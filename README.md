@@ -103,13 +103,15 @@ J8_TEST262_UPDATE=1   cargo test --release --test test262 -- <path>   # write re
 ## 🧪 WebAssembly spec tests
 
 `tests/wasm-testsuite` is the [WebAssembly/testsuite](https://github.com/WebAssembly/testsuite) submodule; its top-level
-`.wast` files are WebAssembly 3.0 core (65,244 directives). The interpreter (#70) passes 64,348 of them (98.6%, SIMD and relaxed SIMD included); GC and exception handling are not done yet.
+`.wast` files are WebAssembly 3.0 core (65,244 directives). The interpreter (#70) passes all of them: SIMD and relaxed SIMD, GC
+(structs, arrays, i31, casts, recursive type groups) and exception handling.
 
 ```sh
 cargo test --release --test wasmspec                         # the baseline (tests/wasmspec.passing), fails on any drop
 cargo test --release --test wasmspec -- simd_ i32            # files starting with these names
 J8_WASMSPEC_VERBOSE=1 cargo test --release --test wasmspec   # list failing directives
 J8_WASMSPEC_UPDATE=1  cargo test --release --test wasmspec   # write results back to the baseline
+J8_WASMSPEC_COLLECT=1 cargo test --release --test wasmspec   # a full collection after every directive (checks GC roots)
 ```
 
 ## ✍️ Conventions

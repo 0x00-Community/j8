@@ -76,13 +76,13 @@ impl Sat {
     }
 }
 
-pub struct Vector<'s> {
-    pub store: &'s mut WasmStore,
+pub struct Vector<'s, 'p> {
+    pub store: &'s mut WasmStore<'p>,
     pub fp: usize,
     pub instance: u32,
 }
 
-impl Vector<'_> {
+impl Vector<'_, '_> {
     #[expect(clippy::too_many_lines, clippy::cast_possible_truncation, clippy::cast_sign_loss, clippy::cast_possible_wrap, clippy::cast_precision_loss, clippy::float_cmp, clippy::cast_lossless, reason = "one arm per SIMD bytecode, lane-wise with WebAssembly's wrapping semantics")]
     pub fn run(self, d: &Decoded<WasmBytecode>, bits: &[u64]) -> Result<(), WasmTrap> {
         let (fp, instance) = (self.fp, self.instance);

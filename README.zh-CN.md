@@ -103,13 +103,14 @@ J8_TEST262_UPDATE=1   cargo test --release --test test262 -- <path>   # 结果�
 ## 🧪 WebAssembly 规范测试
 
 `tests/wasm-testsuite` 是 [WebAssembly/testsuite](https://github.com/WebAssembly/testsuite) 子模块；顶层的 `.wast`
-文件就是 WebAssembly 3.0 核心（模块加断言共 65,244 条）。解释器（#70）目前过 64,348 条（98.6%，含 SIMD 与 relaxed SIMD）；GC 和异常处理还没做。
+文件就是 WebAssembly 3.0 核心（模块加断言共 65,244 条）。解释器（#70）全部通过：SIMD 与 relaxed SIMD、GC（struct、array、i31、类型转换、递归类型分组）和异常处理。
 
 ```sh
 cargo test --release --test wasmspec                         # 跑基线 (tests/wasmspec.passing), 掉一条就失败
 cargo test --release --test wasmspec -- simd_ i32            # 只跑文件名以这些开头的
 J8_WASMSPEC_VERBOSE=1 cargo test --release --test wasmspec   # 列出失败的条目
 J8_WASMSPEC_UPDATE=1  cargo test --release --test wasmspec   # 结果写回基线
+J8_WASMSPEC_COLLECT=1 cargo test --release --test wasmspec   # 每条指令后做一次全量回收（检查 GC 根）
 ```
 
 ## ✍️ 约定

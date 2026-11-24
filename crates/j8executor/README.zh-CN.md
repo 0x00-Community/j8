@@ -8,6 +8,9 @@
 `WasmStore` 运行 WebAssembly：宿主函数 / 表 / 内存 / 全局、`instantiate`（导入链接、全局、表、内存、元素段和数据段、
 start 函数）与 `invoke`。解释器每个函数只解码一次字节码，64 位寄存器槽放在同一个栈上（被调函数的帧从调用者的参数寄存器
 开始，参数和结果都不拷贝），用显式帧栈，出错返回 `WasmTrap`。
+会碰堆的调用都要传 isolate 的 `Mutation`（`Isolate::scope`）：struct、array 和异常是 paragc 对象（引用字段放 `WordSlot`），
+表、引用型全局和元素段是挂在根上的格子，所以两次调用之间的回收会回收、搬动它们。类型下标按 store 规范化（相同的递归分组
+共用编号），类型转换、`call_indirect` 和导入匹配都按它判断子类型。
 
 ## 怎么跑
 

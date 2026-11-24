@@ -183,6 +183,17 @@ impl<'p> Isolate<'p> {
         r
     }
 
+    pub fn scope<R>(&mut self, f: impl for<'scope> FnOnce(&Mutation<'scope>) -> R) -> R {
+        let generation = self.generation;
+        let r = self.heap.scope(|s| {
+            let s: &paragc::Scope<'_, '_> = s;
+            let mc = unsafe { Mutation::new(rebrand_ref(s), generation) };
+            f(&mc)
+        });
+        self.after_enter();
+        r
+    }
+
     fn after_enter(&mut self) {
         self.stop.finish();
         #[cfg(all(target_os = "linux", feature = "crossheap"))]

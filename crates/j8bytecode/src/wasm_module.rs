@@ -1,7 +1,7 @@
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum WasmHeapType {
     Func,
     Extern,
@@ -18,13 +18,13 @@ pub enum WasmHeapType {
     Concrete(u32),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct WasmRefType {
     pub nullable: bool,
     pub heap: WasmHeapType,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum WasmValType {
     I32,
     I64,
@@ -34,10 +34,134 @@ pub enum WasmValType {
     Ref(WasmRefType),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Default)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Default, PartialOrd, Ord)]
 pub struct WasmFuncType {
     pub params: Box<[WasmValType]>,
     pub results: Box<[WasmValType]>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum WasmStorageType {
+    I8,
+    I16,
+    Val(WasmValType),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct WasmFieldType {
+    pub storage: WasmStorageType,
+    pub mutable: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum WasmCompositeType {
+    Func(WasmFuncType),
+    Struct(Box<[WasmFieldType]>),
+    Array(WasmFieldType),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct WasmSubType {
+    pub is_final: bool,
+    pub supertype: Option<u32>,
+    pub composite: WasmCompositeType,
+}
+
+impl WasmHeapType {
+    #[must_use]
+    pub fn map(self, f: &impl Fn(u32) -> u32) -> Self {
+        if let Self::Concrete(i) = self { Self::Concrete(f(i)) } else { self }
+    }
+}
+
+const HEAP_FUNC: i64 = -0x10;
+const HEAP_EXTERN: i64 = -0x11;
+const HEAP_ANY: i64 = -0x12;
+const HEAP_EQ: i64 = -0x13;
+const HEAP_I31: i64 = -0x14;
+const HEAP_STRUCT: i64 = -0x15;
+const HEAP_ARRAY: i64 = -0x16;
+const HEAP_EXN: i64 = -0x17;
+const HEAP_NOEXN: i64 = -0x0c;
+const HEAP_NOFUNC: i64 = -0x0d;
+const HEAP_NOEXTERN: i64 = -0x0e;
+const HEAP_NONE: i64 = -0x0f;
+
+impl From<WasmHeapType> for i64 {
+    fn from(h: WasmHeapType) -> Self {
+        match h {
+            WasmHeapType::Func => HEAP_FUNC,
+            WasmHeapType::Extern => HEAP_EXTERN,
+            WasmHeapType::Any => HEAP_ANY,
+            WasmHeapType::Eq => HEAP_EQ,
+            WasmHeapType::I31 => HEAP_I31,
+            WasmHeapType::Struct => HEAP_STRUCT,
+            WasmHeapType::Array => HEAP_ARRAY,
+            WasmHeapType::Exn => HEAP_EXN,
+            WasmHeapType::NoExn => HEAP_NOEXN,
+            WasmHeapType::NoFunc => HEAP_NOFUNC,
+            WasmHeapType::NoExtern => HEAP_NOEXTERN,
+            WasmHeapType::None => HEAP_NONE,
+            WasmHeapType::Concrete(i) => i64::from(i),
+        }
+    }
+}
+
+impl From<i64> for WasmHeapType {
+    fn from(v: i64) -> Self {
+        match v {
+            HEAP_FUNC => Self::Func,
+            HEAP_EXTERN => Self::Extern,
+            HEAP_ANY => Self::Any,
+            HEAP_EQ => Self::Eq,
+            HEAP_I31 => Self::I31,
+            HEAP_STRUCT => Self::Struct,
+            HEAP_ARRAY => Self::Array,
+            HEAP_EXN => Self::Exn,
+            HEAP_NOEXN => Self::NoExn,
+            HEAP_NOFUNC => Self::NoFunc,
+            HEAP_NOEXTERN => Self::NoExtern,
+            _ => u32::try_from(v).map_or(Self::None, Self::Concrete),
+        }
+    }
+}
+
+impl WasmValType {
+    #[must_use]
+    pub fn map(self, f: &impl Fn(u32) -> u32) -> Self {
+        if let Self::Ref(r) = self { Self::Ref(WasmRefType { nullable: r.nullable, heap: r.heap.map(f) }) } else { self }
+    }
+}
+
+impl WasmFieldType {
+    #[must_use]
+    pub fn map(self, f: &impl Fn(u32) -> u32) -> Self {
+        let storage = if let WasmStorageType::Val(v) = self.storage { WasmStorageType::Val(v.map(f)) } else { self.storage };
+        Self { storage, mutable: self.mutable }
+    }
+}
+
+impl WasmFuncType {
+    #[must_use]
+    pub fn map(&self, f: &impl Fn(u32) -> u32) -> Self {
+        Self { params: self.params.iter().map(|t| t.map(f)).collect(), results: self.results.iter().map(|t| t.map(f)).collect() }
+    }
+}
+
+impl WasmSubType {
+    #[must_use]
+    pub fn map(&self, f: &impl Fn(u32) -> u32) -> Self {
+        let composite = match &self.composite {
+            WasmCompositeType::Func(t) => WasmCompositeType::Func(t.map(f)),
+            WasmCompositeType::Struct(fs) => WasmCompositeType::Struct(fs.iter().map(|x| x.map(f)).collect()),
+            WasmCompositeType::Array(x) => WasmCompositeType::Array(x.map(f)),
+        };
+        Self { is_final: self.is_final, supertype: self.supertype.map(f), composite }
+    }
+
+    pub fn func(&self) -> Option<&WasmFuncType> {
+        if let WasmCompositeType::Func(t) = &self.composite { Some(t) } else { None }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -99,6 +223,29 @@ pub struct WasmExport {
     pub index: u32,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WasmCatchKind {
+    Catch,
+    CatchRef,
+    CatchAll,
+    CatchAllRef,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WasmCatch {
+    pub kind: WasmCatchKind,
+    pub tag: u32,
+    pub target: u32,
+    pub land: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WasmHandler {
+    pub start: u32,
+    pub end: u32,
+    pub catches: Box<[WasmCatch]>,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct WasmFunction {
     pub ty: u32,
@@ -108,6 +255,7 @@ pub struct WasmFunction {
     pub code: Box<[u8]>,
     pub bits: Box<[u64]>,
     pub tables: Box<[Box<[u32]>]>,
+    pub handlers: Box<[WasmHandler]>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -144,7 +292,8 @@ pub struct WasmTable {
 
 #[derive(Clone, Debug, Default)]
 pub struct WasmModule {
-    pub types: Vec<WasmFuncType>,
+    pub types: Vec<WasmSubType>,
+    pub groups: Vec<u32>,
     pub imports: Vec<WasmImport>,
     pub functions: Vec<WasmFunction>,
     pub tables: Vec<WasmTable>,
@@ -161,6 +310,10 @@ pub struct WasmModule {
 impl WasmModule {
     pub fn imported(&self, kind: WasmExternKind) -> impl Iterator<Item = &WasmImport> {
         self.imports.iter().filter(move |i| WasmExternKind::from(&i.kind) == kind)
+    }
+
+    pub fn func_type(&self, ty: u32) -> &WasmFuncType {
+        self.types[ty as usize].func().unwrap_or_else(|| unreachable!("type {ty} is validated as a function type"))
     }
 
     pub fn export(&self, name: &str) -> Option<&WasmExport> {

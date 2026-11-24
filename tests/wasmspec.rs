@@ -7,8 +7,10 @@ use wast::lexer::Lexer;
 use wast::parser::{self, ParseBuffer};
 use j8bytecode::{WasmFuncType, WasmGlobalType, WasmHeapType, WasmLimits, WasmMemoryType, WasmModule, WasmRefType, WasmTableType, WasmValType};
 use j8compiler::{CompileWasm, WasmError, WasmErrorKind};
-use j8executor::{WasmExtern, WasmInstantiateError, WasmLinkError, WasmStore, WasmTrap, WasmValue};
-use wast::core::{AbstractHeapType, HeapType, NanPattern, V128Pattern, WastArgCore, WastRetCore};
+use j8executor::{WasmExtern, WasmInstantiateError, WasmLinkError, WasmRef, WasmStore, WasmTrap, WasmValue};
+use j8framework::{CreateParams, Isolate};
+use j8platform::DefaultPlatform;
+use wast::core::{NanPattern, V128Pattern, WastArgCore, WastRetCore};
 use wast::token::{Id, F32, F64};
 use wast::{QuoteWat, Wast, WastArg, WastDirective, WastExecute, WastInvoke, WastRet};
 
@@ -18,6 +20,7 @@ const BASELINE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/wasmspec.pass
 
 const UPDATE_ENV: &str = "J8_WASMSPEC_UPDATE";
 const VERBOSE_ENV: &str = "J8_WASMSPEC_VERBOSE";
+const COLLECT_ENV: &str = "J8_WASMSPEC_COLLECT";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Kind {
@@ -65,14 +68,15 @@ struct Case {
     outcome: Outcome,
 }
 
-#[derive(Default)]
-struct Spec {
-    store: WasmStore,
+struct Spec<'p> {
+    isolate: Isolate<'p>,
+    store: WasmStore<'p>,
     spectest: HashMap<&'static str, WasmExtern>,
     modules: HashMap<String, Rc<WasmModule>>,
     instances: HashMap<String, u32>,
     registered: HashMap<String, u32>,
     current: Option<u32>,
+    collect: bool,
 }
 
 enum Run {
@@ -81,32 +85,46 @@ enum Run {
     Broken,
 }
 
-impl Spec {
-    fn new() -> Self {
-        let mut s = Self::default();
+impl<'p> Spec<'p> {
+    fn new(platform: &'p DefaultPlatform) -> Self {
+        let mut s = Self { isolate: Isolate::new(platform, CreateParams::default()), store: WasmStore::default(), spectest: HashMap::new(), modules: HashMap::new(), instances: HashMap::new(), registered: HashMap::new(), current: None, collect: std::env::var_os(COLLECT_ENV).is_some() };
+        s.spectest();
+        s
+    }
+
+    fn reset(&mut self) {
+        self.store = WasmStore::default();
+        self.spectest.clear();
+        self.modules.clear();
+        self.instances.clear();
+        self.registered.clear();
+        self.current = None;
+        self.spectest();
+    }
+
+    fn spectest(&mut self) {
+        let s = self;
         let i32t = WasmValType::I32;
-        let print = |s: &mut WasmStore, params: &[WasmValType]| WasmExtern::Func(s.host_func(WasmFuncType { params: params.into(), results: Box::new([]) }, Box::new(|_| Ok(Vec::new()))));
+        let print = |s: &mut WasmStore<'p>, params: &[WasmValType]| WasmExtern::Func(s.host_func(WasmFuncType { params: params.into(), results: Box::new([]) }, Box::new(|_| Ok(Vec::new()))));
         for (name, params) in [("print", &[][..]), ("print_i32", &[i32t][..]), ("print_i64", &[WasmValType::I64][..]), ("print_f32", &[WasmValType::F32][..]), ("print_f64", &[WasmValType::F64][..]), ("print_i32_f32", &[i32t, WasmValType::F32][..]), ("print_f64_f64", &[WasmValType::F64, WasmValType::F64][..])] {
             let f = print(&mut s.store, params);
             s.spectest.insert(name, f);
         }
-        let global = |s: &mut WasmStore, content, v| WasmExtern::Global(s.host_global(WasmGlobalType { content, mutable: false }, v));
-        let g = global(&mut s.store, i32t, WasmValue::I32(666));
-        s.spectest.insert("global_i32", g);
-        let g = global(&mut s.store, WasmValType::I64, WasmValue::I64(666));
-        s.spectest.insert("global_i64", g);
-        let g = global(&mut s.store, WasmValType::F32, WasmValue::F32(666.6_f32.to_bits()));
-        s.spectest.insert("global_f32", g);
-        let g = global(&mut s.store, WasmValType::F64, WasmValue::F64(666.6_f64.to_bits()));
-        s.spectest.insert("global_f64", g);
+        let (isolate, store) = (&mut s.isolate, &mut s.store);
+        let globals = [("global_i32", i32t, WasmValue::I32(666)), ("global_i64", WasmValType::I64, WasmValue::I64(666)), ("global_f32", WasmValType::F32, WasmValue::F32(666.6_f32.to_bits())), ("global_f64", WasmValType::F64, WasmValue::F64(666.6_f64.to_bits()))];
         let funcref = WasmRefType { nullable: true, heap: WasmHeapType::Func };
-        let t = s.store.host_table(WasmTableType { element: funcref, limits: WasmLimits { min: 10, max: Some(20) }, table64: false });
-        s.spectest.insert("table", WasmExtern::Table(t));
-        let t = s.store.host_table(WasmTableType { element: funcref, limits: WasmLimits { min: 10, max: Some(20) }, table64: true });
-        s.spectest.insert("table64", WasmExtern::Table(t));
+        let tables = [("table", false), ("table64", true)];
+        isolate.scope(|mc| {
+            for (name, content, v) in globals {
+                s.spectest.insert(name, WasmExtern::Global(store.host_global(mc, WasmGlobalType { content, mutable: false }, v)));
+            }
+            for (name, table64) in tables {
+                let t = store.host_table(mc, WasmTableType { element: funcref, limits: WasmLimits { min: 10, max: Some(20) }, table64 }, WasmValue::Ref(WasmRef::Null));
+                s.spectest.insert(name, WasmExtern::Table(t));
+            }
+        });
         let m = s.store.host_memory(WasmMemoryType { limits: WasmLimits { min: 1, max: Some(2) }, memory64: false, shared: false, page_size_log2: 16 });
         s.spectest.insert("memory", WasmExtern::Memory(m));
-        s
     }
 
     fn import(&self, module: &str, name: &str) -> Option<WasmExtern> {
@@ -119,7 +137,8 @@ impl Spec {
     fn instantiate(&mut self, m: &Rc<WasmModule>) -> Result<u32, WasmInstantiateError> {
         let imports: Option<Vec<WasmExtern>> = m.imports.iter().map(|i| self.import(&i.module, &i.name)).collect();
         let imports = imports.ok_or(WasmInstantiateError::Link(WasmLinkError::MissingImport))?;
-        self.store.instantiate(m, &imports)
+        let store = &mut self.store;
+        self.isolate.scope(|mc| store.instantiate(mc, m, &imports))
     }
 
     fn compile(bytes: &[u8]) -> Result<Rc<WasmModule>, WasmError> {
@@ -169,11 +188,8 @@ impl Spec {
             WastArgCore::F32(v) => WasmValue::F32(v.bits),
             WastArgCore::F64(v) => WasmValue::F64(v.bits),
             WastArgCore::V128(v) => WasmValue::V128(u128::from_le_bytes(v.to_le_bytes())),
-            WastArgCore::RefNull(HeapType::Abstract { ty: AbstractHeapType::Func | AbstractHeapType::NoFunc, .. }) => WasmValue::FuncRef(None),
-            WastArgCore::RefNull(HeapType::Abstract { ty: AbstractHeapType::Extern | AbstractHeapType::NoExtern, .. }) => WasmValue::ExternRef(None),
-            WastArgCore::RefNull(_) => WasmValue::Ref(None),
-            WastArgCore::RefExtern(n) => WasmValue::ExternRef(Some(*n)),
-            WastArgCore::RefHost(n) => WasmValue::Ref(Some(u64::from(*n))),
+            WastArgCore::RefNull(_) => WasmValue::Ref(WasmRef::Null),
+            WastArgCore::RefExtern(n) | WastArgCore::RefHost(n) => WasmValue::Ref(WasmRef::Host(*n)),
         })
     }
 
@@ -181,7 +197,8 @@ impl Spec {
         let Some(inst) = self.target(inv.module) else { return Run::Broken };
         let Some(WasmExtern::Func(f)) = self.store.export(inst, inv.name) else { return Run::Broken };
         let Some(args) = inv.args.iter().map(Self::arg).collect::<Option<Vec<_>>>() else { return Run::Broken };
-        match self.store.invoke(f, &args) {
+        let store = &mut self.store;
+        match self.isolate.scope(|mc| store.invoke(mc, f, &args)) {
             Ok(v) => Run::Values(v),
             Err(WasmTrap::Unsupported) => Run::Broken,
             Err(t) => Run::Trap(t),
@@ -194,7 +211,10 @@ impl Spec {
             WastExecute::Get { module, global, .. } => {
                 let Some(inst) = self.target(*module) else { return Run::Broken };
                 match self.store.export(inst, global) {
-                    Some(WasmExtern::Global(g)) => Run::Values(vec![self.store.global_value(g)]),
+                    Some(WasmExtern::Global(g)) => {
+                        let store = &self.store;
+                        Run::Values(vec![self.isolate.scope(|mc| store.global_value(mc, g))])
+                    }
                     _ => Run::Broken,
                 }
             }
@@ -245,8 +265,13 @@ impl Spec {
             (WastRetCore::I64(a), WasmValue::I64(b)) => *a == b,
             (WastRetCore::F32(p), WasmValue::F32(b)) => Self::nan32(*p, b),
             (WastRetCore::F64(p), WasmValue::F64(b)) => Self::nan64(*p, b),
-            (WastRetCore::RefNull(_), WasmValue::FuncRef(None) | WasmValue::ExternRef(None) | WasmValue::Ref(None)) | (WastRetCore::RefExtern(None), WasmValue::ExternRef(Some(_))) | (WastRetCore::RefFunc(_), WasmValue::FuncRef(Some(_))) => true,
-            (WastRetCore::RefExtern(Some(a)), WasmValue::ExternRef(Some(b))) => *a == b,
+            (WastRetCore::RefNull(_), WasmValue::Ref(WasmRef::Null))
+            | (WastRetCore::RefFunc(_), WasmValue::Ref(WasmRef::Func(_)))
+            | (WastRetCore::RefI31 | WastRetCore::RefEq, WasmValue::Ref(WasmRef::I31(_)))
+            | (WastRetCore::RefStruct | WastRetCore::RefEq, WasmValue::Ref(WasmRef::Struct))
+            | (WastRetCore::RefArray | WastRetCore::RefEq, WasmValue::Ref(WasmRef::Array)) => true,
+            (WastRetCore::RefExtern(None) | WastRetCore::RefAny, WasmValue::Ref(r)) => r != WasmRef::Null,
+            (WastRetCore::RefExtern(Some(a)) | WastRetCore::RefHost(a), WasmValue::Ref(WasmRef::Host(b))) => *a == b,
             (WastRetCore::V128(p), WasmValue::V128(v)) => Self::vector(p, v),
             (WastRetCore::Either(alts), v) => alts.iter().any(|a| Self::matches(a, v)),
             _ => false,
@@ -295,6 +320,11 @@ impl Spec {
                 Run::Values(_) => Outcome::Fail,
                 Run::Broken => Outcome::Unsupported,
             },
+            WastDirective::AssertException { exec, .. } => match self.execute(exec) {
+                Run::Trap(WasmTrap::Exception) => Outcome::Pass,
+                Run::Broken => Outcome::Unsupported,
+                _ => Outcome::Fail,
+            },
             WastDirective::AssertExhaustion { call, .. } => match self.invoke(call) {
                 Run::Trap(WasmTrap::CallStackExhausted) => Outcome::Pass,
                 Run::Broken => Outcome::Unsupported,
@@ -321,7 +351,7 @@ impl Spec {
     }
 
     fn file(&mut self, path: &Path, rel: &str) -> Result<Vec<Case>, String> {
-        *self = Self::new();
+        self.reset();
         let text = std::fs::read_to_string(path).map_err(|e| format!("{rel}: {e}"))?;
         let mut lexer = Lexer::new(&text);
         lexer.allow_confusing_unicode(true);
@@ -334,6 +364,9 @@ impl Spec {
                 let (line, _) = d.span().linecol_in(&text);
                 let kind = Kind::from(&d);
                 let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.run(&mut d))).unwrap_or(Outcome::Fail);
+                if self.collect {
+                    self.isolate.collect();
+                }
                 Case { id: format!("{rel}:{}", line + 1), kind, outcome }
             })
             .collect())
@@ -365,7 +398,8 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
     let verbose = std::env::var_os(VERBOSE_ENV).is_some();
-    let mut spec = Spec::new();
+    let platform = DefaultPlatform::default();
+    let mut spec = Spec::new(&platform);
     let mut cases = Vec::new();
     let mut broken = 0;
     for (path, rel) in &files {

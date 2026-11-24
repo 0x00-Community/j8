@@ -10,6 +10,10 @@ bytecode of `j8bytecode` (`Executor<'p>`: `eval`, resumable `start` / `resume`) 
 tables, memories, element and data segments, start function) and `invoke`. The interpreter decodes each function's
 bytecode once, keeps 64-bit register slots on one stack (a callee's frame starts at the caller's argument registers, so
 arguments and results are never copied), uses an explicit frame stack, and traps with `WasmTrap`.
+Every call that can touch the heap takes the isolate's `Mutation` (`Isolate::scope`): structs, arrays and exceptions are
+paragc objects (reference fields in `WordSlot`s), and tables, reference globals and element segments are rooted cells, so
+collections between calls reclaim and move them. Type indices are canonicalized per store (equal recursive groups share
+ids), which casts, `call_indirect` and import matching check subtyping against.
 
 ## How it runs
 

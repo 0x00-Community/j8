@@ -4,9 +4,14 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::OnceCell;
 
+mod gc;
 mod simd;
+mod types;
 
-use j8bytecode::{Decoded, Decoder, OperandValue, WasmBytecode, WasmExternKind, WasmFuncType, WasmGlobalType, WasmHeapType, WasmImportKind, WasmMemoryType, WasmModule, WasmSegmentMode, WasmTableType, WasmValType};
+use gc::{CellsBrand, Objects, WasmCells, WasmObject, Word};
+use j8bytecode::{Decoded, Decoder, OperandValue, WasmBytecode, WasmCatchKind, WasmCompositeType, WasmExternKind, WasmFuncType, WasmGlobalType, WasmHandler, WasmImportKind, WasmMemoryType, WasmModule, WasmSegmentMode, WasmStorageType, WasmTableType, WasmValType};
+use j8framework::{Mutation, ScopeGlobal, WordSlot};
+use types::{Hierarchy, Layout, Types};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WasmTrap {
@@ -21,6 +26,12 @@ pub enum WasmTrap {
     IndirectCallTypeMismatch,
     NullReference,
     CallStackExhausted,
+    NullStructure,
+    NullArray,
+    NullI31,
+    CastFailure,
+    OutOfBoundsArray,
+    Exception,
     Unsupported,
 }
 
@@ -38,9 +49,26 @@ impl WasmTrap {
             Self::IndirectCallTypeMismatch => "indirect call type mismatch",
             Self::NullReference => "null reference",
             Self::CallStackExhausted => "call stack exhausted",
+            Self::NullStructure => "null structure reference",
+            Self::NullArray => "null array reference",
+            Self::NullI31 => "null i31 reference",
+            Self::CastFailure => "cast failure",
+            Self::OutOfBoundsArray => "out of bounds array access",
+            Self::Exception => "uncaught exception",
             Self::Unsupported => "unsupported",
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WasmRef {
+    Null,
+    Func(u32),
+    Host(u32),
+    I31(i32),
+    Struct,
+    Array,
+    Exn,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -50,9 +78,7 @@ pub enum WasmValue {
     F32(u32),
     F64(u64),
     V128(u128),
-    FuncRef(Option<u32>),
-    ExternRef(Option<u32>),
-    Ref(Option<u64>),
+    Ref(WasmRef),
 }
 
 impl WasmValue {
@@ -67,24 +93,12 @@ impl WasmValue {
             Self::F32(v) => u64::from(v),
             Self::F64(v) => v,
             Self::V128(v) => u64::try_from(v & u128::from(u64::MAX)).unwrap_or(0),
-            Self::FuncRef(r) | Self::ExternRef(r) => r.map_or(0, |a| u64::from(a) + 1),
-            Self::Ref(r) => r.map_or(0, |a| a + 1),
-        }
-    }
-
-    fn typed(ty: WasmValType, s: u64, v: u128) -> Self {
-        let r = |s: u64| if s == 0 { None } else { u32::try_from(s - 1).ok() };
-        match ty {
-            WasmValType::I32 => Self::I32(Slot(s).i32()),
-            WasmValType::I64 => Self::I64(s.cast_signed()),
-            WasmValType::F32 => Self::F32(Slot(s).u32()),
-            WasmValType::F64 => Self::F64(s),
-            WasmValType::V128 => Self::V128(v),
-            WasmValType::Ref(t) => match t.heap {
-                WasmHeapType::Func | WasmHeapType::NoFunc | WasmHeapType::Concrete(_) => Self::FuncRef(r(s)),
-                WasmHeapType::Extern | WasmHeapType::NoExtern => Self::ExternRef(r(s)),
-                _ => Self::Ref(if s == 0 { None } else { Some(s - 1) }),
-            },
+            Self::Ref(r) => u64::from(match r {
+                WasmRef::Func(a) => Word::Func(a),
+                WasmRef::Host(n) => Word::Host(n),
+                WasmRef::I31(v) => Word::I31(v),
+                _ => Word::Null,
+            }),
         }
     }
 }
@@ -151,11 +165,14 @@ impl From<WasmTrap> for WasmInstantiateError {
 
 pub type WasmHost = Box<dyn Fn(&[WasmValue]) -> Result<Vec<WasmValue>, WasmTrap>>;
 
+type Cells<'p> = ScopeGlobal<'p, CellsBrand>;
+
 struct Code {
     ops: Vec<Decoded<WasmBytecode>>,
     at: Vec<u32>,
     bits: Box<[u64]>,
     tables: Box<[Box<[u32]>]>,
+    handlers: Box<[WasmHandler]>,
 }
 
 impl Code {
@@ -172,12 +189,13 @@ enum FuncKind {
 
 struct Func {
     ty: WasmFuncType,
+    canon: u32,
     kind: FuncKind,
 }
 
-struct Table {
+struct Table<'p> {
     ty: WasmTableType,
-    elems: Vec<u64>,
+    cells: Cells<'p>,
 }
 
 struct Memory {
@@ -185,19 +203,22 @@ struct Memory {
     bytes: Vec<u8>,
 }
 
-struct Global {
+struct Global<'p> {
     ty: WasmGlobalType,
     value: u64,
     vector: u128,
+    cell: Option<Cells<'p>>,
 }
 
-struct Instance {
+struct Instance<'p> {
     module: Rc<WasmModule>,
+    types: Vec<u32>,
     funcs: Vec<u32>,
     tables: Vec<u32>,
     memories: Vec<u32>,
     globals: Vec<u32>,
-    elems: Vec<Rc<[u64]>>,
+    tags: Vec<u32>,
+    elems: Vec<Cells<'p>>,
     data: Vec<Rc<[u8]>>,
 }
 
@@ -211,27 +232,34 @@ struct Activation {
 const MAX_DEPTH: usize = 50_000;
 const MAX_PAGES: u64 = 65_536;
 const FUNC_INIT: u32 = u32::MAX;
+const MAX_TABLE: u64 = 10_000_000;
+const FLAG_TO_NULLABLE: OperandValue = 0b10;
 
 #[derive(Default)]
-pub struct WasmStore {
+pub struct WasmStore<'p> {
+    types: Types,
     funcs: Vec<Func>,
-    tables: Vec<Table>,
+    tables: Vec<Table<'p>>,
     memories: Vec<Memory>,
-    globals: Vec<Global>,
-    instances: Vec<Instance>,
+    globals: Vec<Global<'p>>,
+    tags: Vec<u32>,
+    instances: Vec<Instance<'p>>,
     stack: Vec<u64>,
     vstack: Vec<u128>,
+    thrown: u64,
 }
 
-impl WasmStore {
+impl WasmStore<'_> {
     pub fn host_func(&mut self, ty: WasmFuncType, f: WasmHost) -> u32 {
-        self.funcs.push(Func { ty, kind: FuncKind::Host(f) });
+        let canon = self.types.func(&ty);
+        self.funcs.push(Func { ty, canon, kind: FuncKind::Host(f) });
         u32::try_from(self.funcs.len() - 1).unwrap_or(0)
     }
 
-    pub fn host_table(&mut self, ty: WasmTableType) -> u32 {
+    pub fn host_table(&mut self, mc: &Mutation<'_>, ty: WasmTableType, init: WasmValue) -> u32 {
         let n = usize::try_from(ty.limits.min).unwrap_or(0);
-        self.tables.push(Table { ty, elems: vec![0; n] });
+        let cells = mc.stash(WasmCells::alloc(mc, core::iter::repeat_n(init.slot(), n)));
+        self.tables.push(Table { ty, cells });
         u32::try_from(self.tables.len() - 1).unwrap_or(0)
     }
 
@@ -241,8 +269,19 @@ impl WasmStore {
         u32::try_from(self.memories.len() - 1).unwrap_or(0)
     }
 
-    pub fn host_global(&mut self, ty: WasmGlobalType, value: WasmValue) -> u32 {
-        self.globals.push(Global { ty, value: value.slot(), vector: value.vector() });
+    pub fn host_global(&mut self, mc: &Mutation<'_>, ty: WasmGlobalType, value: WasmValue) -> u32 {
+        self.global(mc, ty, value.slot(), value.vector())
+    }
+
+    pub fn host_tag(&mut self, ty: &WasmFuncType) -> u32 {
+        let canon = self.types.func(ty);
+        self.tags.push(canon);
+        u32::try_from(self.tags.len() - 1).unwrap_or(0)
+    }
+
+    fn global(&mut self, mc: &Mutation<'_>, ty: WasmGlobalType, value: u64, vector: u128) -> u32 {
+        let cell = matches!(ty.content, WasmValType::Ref(_)).then(|| mc.stash(WasmCells::alloc(mc, [value])));
+        self.globals.push(Global { ty, value, vector, cell });
         u32::try_from(self.globals.len() - 1).unwrap_or(0)
     }
 
@@ -255,17 +294,61 @@ impl WasmStore {
             WasmExternKind::Table => WasmExtern::Table(inst.tables[i]),
             WasmExternKind::Memory => WasmExtern::Memory(inst.memories[i]),
             WasmExternKind::Global => WasmExtern::Global(inst.globals[i]),
-            WasmExternKind::Tag => WasmExtern::Tag(e.index),
+            WasmExternKind::Tag => WasmExtern::Tag(inst.tags[i]),
         })
     }
 
-    pub fn global_value(&self, g: u32) -> WasmValue {
-        let g = &self.globals[g as usize];
-        WasmValue::typed(g.ty.content, g.value, g.vector)
+    pub fn global_value(&self, mc: &Mutation<'_>, g: u32) -> WasmValue {
+        let (s, v) = self.global_get(mc, g);
+        self.value(self.globals[g as usize].ty.content, s, v)
     }
 
     pub fn func_type(&self, f: u32) -> &WasmFuncType {
         &self.funcs[f as usize].ty
+    }
+
+    fn value(&self, ty: WasmValType, s: u64, v: u128) -> WasmValue {
+        match ty {
+            WasmValType::I32 => WasmValue::I32(Slot(s).i32()),
+            WasmValType::I64 => WasmValue::I64(s.cast_signed()),
+            WasmValType::F32 => WasmValue::F32(Slot(s).u32()),
+            WasmValType::F64 => WasmValue::F64(s),
+            WasmValType::V128 => WasmValue::V128(v),
+            WasmValType::Ref(t) => {
+                let h = self.types.hierarchy(t.heap);
+                WasmValue::Ref(match Word::decode(s, h) {
+                    Word::Null => WasmRef::Null,
+                    Word::Func(a) => WasmRef::Func(a),
+                    Word::Host(n) => WasmRef::Host(n),
+                    Word::I31(v) => WasmRef::I31(v),
+                    Word::Object(_) if h == Hierarchy::Exn => WasmRef::Exn,
+                    Word::Object(w) => match self.composite(w) {
+                        Some(WasmCompositeType::Array(_)) => WasmRef::Array,
+                        _ => WasmRef::Struct,
+                    },
+                })
+            }
+        }
+    }
+
+    fn global_get(&self, mc: &Mutation<'_>, g: u32) -> (u64, u128) {
+        let g = &self.globals[g as usize];
+        match &g.cell {
+            Some(c) => (mc.fetch(c).get().0[0].get(), 0),
+            None => (g.value, g.vector),
+        }
+    }
+
+    fn global_set(&mut self, mc: &Mutation<'_>, g: u32, (s, v): (u64, u128)) {
+        let g = &mut self.globals[g as usize];
+        match &g.cell {
+            Some(c) => mc.fetch(c).get().0[0].set(mc.gc_scope(), s),
+            None => (g.value, g.vector) = (s, v),
+        }
+    }
+
+    fn cells<'s>(&self, mc: &Mutation<'s>, t: usize) -> &'s [WordSlot<'s>] {
+        &mc.fetch(&self.tables[t].cells).get().0
     }
 
     fn limits_match(have: (u64, Option<u64>), want: (u64, Option<u64>)) -> bool {
@@ -276,63 +359,81 @@ impl WasmStore {
         }
     }
 
-    fn link(&self, kind: &WasmImportKind, ext: WasmExtern, module: &WasmModule) -> Result<(), WasmLinkError> {
+    fn link(&self, mc: &Mutation<'_>, kind: &WasmImportKind, ext: WasmExtern, ids: &[u32]) -> Result<(), WasmLinkError> {
+        let canon = |i: u32| ids[i as usize];
         let ok = match (kind, ext) {
-            (WasmImportKind::Func(t), WasmExtern::Func(f)) => self.funcs[f as usize].ty == module.types[*t as usize],
+            (WasmImportKind::Func(t), WasmExtern::Func(f)) => self.types.sub(self.funcs[f as usize].canon, canon(*t)),
             (WasmImportKind::Table(t), WasmExtern::Table(x)) => {
                 let have = &self.tables[x as usize];
-                let size = u64::try_from(have.elems.len()).unwrap_or(0);
-                have.ty.element == t.element && have.ty.table64 == t.table64 && Self::limits_match((size, have.ty.limits.max), (t.limits.min, t.limits.max))
+                let size = u64::try_from(self.cells(mc, x as usize).len()).unwrap_or(0);
+                let want = WasmValType::Ref(t.element).map(&canon);
+                WasmValType::Ref(have.ty.element) == want && have.ty.table64 == t.table64 && Self::limits_match((size, have.ty.limits.max), (t.limits.min, t.limits.max))
             }
             (WasmImportKind::Memory(t), WasmExtern::Memory(x)) => {
                 let have = &self.memories[x as usize];
                 let pages = u64::try_from(have.bytes.len()).unwrap_or(0) >> have.ty.page_size_log2;
                 have.ty.memory64 == t.memory64 && have.ty.page_size_log2 == t.page_size_log2 && Self::limits_match((pages, have.ty.limits.max), (t.limits.min, t.limits.max))
             }
-            (WasmImportKind::Global(t), WasmExtern::Global(g)) => self.globals[g as usize].ty == *t,
-            (WasmImportKind::Tag(_), WasmExtern::Tag(_)) => true,
+            (WasmImportKind::Global(t), WasmExtern::Global(g)) => {
+                let have = self.globals[g as usize].ty;
+                let want = t.content.map(&canon);
+                have.mutable == t.mutable && if t.mutable { have.content == want } else { self.types.val_sub(have.content, want) }
+            }
+            (WasmImportKind::Tag(t), WasmExtern::Tag(x)) => self.tags[x as usize] == canon(*t),
             _ => false,
         };
         if ok { Ok(()) } else { Err(WasmLinkError::IncompatibleImport) }
     }
 
-    pub fn instantiate(&mut self, module: &Rc<WasmModule>, imports: &[WasmExtern]) -> Result<u32, WasmInstantiateError> {
+    pub fn instantiate(&mut self, mc: &Mutation<'_>, module: &Rc<WasmModule>, imports: &[WasmExtern]) -> Result<u32, WasmInstantiateError> {
         if imports.len() != module.imports.len() {
             return Err(WasmInstantiateError::Link(WasmLinkError::MissingImport));
         }
+        let ids = self.types.canonicalize(module);
         for (imp, &ext) in module.imports.iter().zip(imports) {
-            self.link(&imp.kind, ext, module).map_err(WasmInstantiateError::Link)?;
+            self.link(mc, &imp.kind, ext, &ids).map_err(WasmInstantiateError::Link)?;
         }
+        let canon = |i: u32| ids[i as usize];
         let id = u32::try_from(self.instances.len()).unwrap_or(0);
-        let mut inst = Instance { module: module.clone(), funcs: Vec::new(), tables: Vec::new(), memories: Vec::new(), globals: Vec::new(), elems: Vec::new(), data: Vec::new() };
+        let mut inst = Instance { module: module.clone(), types: ids.clone(), funcs: Vec::new(), tables: Vec::new(), memories: Vec::new(), globals: Vec::new(), tags: Vec::new(), elems: Vec::new(), data: Vec::new() };
         for &ext in imports {
             match ext {
                 WasmExtern::Func(f) => inst.funcs.push(f),
                 WasmExtern::Table(t) => inst.tables.push(t),
                 WasmExtern::Memory(m) => inst.memories.push(m),
                 WasmExtern::Global(g) => inst.globals.push(g),
-                WasmExtern::Tag(_) => {}
+                WasmExtern::Tag(t) => inst.tags.push(t),
             }
         }
         let imported = inst.funcs.len();
         for (i, f) in module.functions.iter().enumerate().skip(imported) {
-            self.funcs.push(Func { ty: module.types[f.ty as usize].clone(), kind: FuncKind::Wasm { instance: id, index: u32::try_from(i).unwrap_or(0), code: OnceCell::new() } });
+            self.funcs.push(Func { ty: module.func_type(f.ty).map(&canon), canon: canon(f.ty), kind: FuncKind::Wasm { instance: id, index: u32::try_from(i).unwrap_or(0), code: OnceCell::new() } });
             inst.funcs.push(u32::try_from(self.funcs.len() - 1).unwrap_or(0));
+        }
+        for &t in &module.tags {
+            self.tags.push(canon(t));
+            inst.tags.push(u32::try_from(self.tags.len() - 1).unwrap_or(0));
         }
         self.instances.push(inst);
         for g in &module.globals {
-            let (value, vector) = self.eval(id, g.init)?;
-            self.globals.push(Global { ty: g.ty, value, vector });
-            let a = u32::try_from(self.globals.len() - 1).unwrap_or(0);
+            let (value, vector) = self.eval(mc, id, g.init)?;
+            let ty = WasmGlobalType { content: g.ty.content.map(&canon), mutable: g.ty.mutable };
+            let a = self.global(mc, ty, value, vector);
             self.instances[id as usize].globals.push(a);
         }
         for t in &module.tables {
             let init = match t.init {
-                Some(i) => self.eval(id, i)?.0,
+                Some(i) => self.eval(mc, id, i)?.0,
                 None => 0,
             };
             let n = usize::try_from(t.ty.limits.min).unwrap_or(0);
-            self.tables.push(Table { ty: t.ty, elems: vec![init; n] });
+            let ty = WasmTableType { element: t.ty.element, ..t.ty };
+            let element = match WasmValType::Ref(ty.element).map(&canon) {
+                WasmValType::Ref(r) => r,
+                _ => ty.element,
+            };
+            let cells = mc.stash(WasmCells::alloc(mc, core::iter::repeat_n(init, n)));
+            self.tables.push(Table { ty: WasmTableType { element, ..ty }, cells });
             let a = u32::try_from(self.tables.len() - 1).unwrap_or(0);
             self.instances[id as usize].tables.push(a);
         }
@@ -343,9 +444,10 @@ impl WasmStore {
         for el in &module.elements {
             let mut items = Vec::with_capacity(el.items.len());
             for &i in &el.items {
-                items.push(self.eval(id, i)?.0);
+                items.push(self.eval(mc, id, i)?.0);
             }
-            self.instances[id as usize].elems.push(items.into());
+            let cells = mc.stash(WasmCells::alloc(mc, items));
+            self.instances[id as usize].elems.push(cells);
         }
         for d in &module.data {
             self.instances[id as usize].data.push(d.bytes.clone().into());
@@ -353,18 +455,18 @@ impl WasmStore {
         for (i, el) in module.elements.iter().enumerate() {
             match el.mode {
                 WasmSegmentMode::Active { index, offset } => {
-                    let at = self.eval(id, offset)?.0;
+                    let at = self.eval(mc, id, offset)?.0;
                     let n = u64::try_from(el.items.len()).unwrap_or(0);
-                    self.table_init(id, index, u32::try_from(i).unwrap_or(0), at, 0, n)?;
-                    self.instances[id as usize].elems[i] = Rc::from([]);
+                    self.table_init(mc, id, index, u32::try_from(i).unwrap_or(0), at, 0, n)?;
+                    self.drop_elem(mc, id, i);
                 }
-                WasmSegmentMode::Declared => self.instances[id as usize].elems[i] = Rc::from([]),
+                WasmSegmentMode::Declared => self.drop_elem(mc, id, i),
                 WasmSegmentMode::Passive => {}
             }
         }
         for (i, d) in module.data.iter().enumerate() {
             if let WasmSegmentMode::Active { index, offset } = d.mode {
-                let at = self.eval(id, offset)?.0;
+                let at = self.eval(mc, id, offset)?.0;
                 let n = u64::try_from(d.bytes.len()).unwrap_or(0);
                 self.memory_init(id, index, u32::try_from(i).unwrap_or(0), at, 0, n)?;
                 self.instances[id as usize].data[i] = Rc::from([]);
@@ -372,14 +474,18 @@ impl WasmStore {
         }
         if let Some(s) = module.start {
             let f = self.instances[id as usize].funcs[s as usize];
-            self.invoke(f, &[])?;
+            self.invoke(mc, f, &[])?;
         }
         Ok(id)
     }
 
-    fn eval(&mut self, instance: u32, init: u32) -> Result<(u64, u128), WasmTrap> {
+    fn drop_elem(&mut self, mc: &Mutation<'_>, instance: u32, i: usize) {
+        self.instances[instance as usize].elems[i] = mc.stash(WasmCells::alloc(mc, []));
+    }
+
+    fn eval(&mut self, mc: &Mutation<'_>, instance: u32, init: u32) -> Result<(u64, u128), WasmTrap> {
         let fp = self.stack.len();
-        self.call(FUNC_INIT, instance, init, fp)?;
+        self.call(mc, FUNC_INIT, instance, init, fp)?;
         let v = (self.stack[fp], self.vstack[fp]);
         self.truncate(fp);
         Ok(v)
@@ -402,23 +508,24 @@ impl WasmStore {
         self.vstack.copy_within(from..from + n, to);
     }
 
-    pub fn invoke(&mut self, func: u32, args: &[WasmValue]) -> Result<Vec<WasmValue>, WasmTrap> {
+    pub fn invoke(&mut self, mc: &Mutation<'_>, func: u32, args: &[WasmValue]) -> Result<Vec<WasmValue>, WasmTrap> {
         let ty = self.funcs[func as usize].ty.clone();
         let fp = self.stack.len();
         self.stack.extend(args.iter().map(|a| a.slot()));
         self.vstack.extend(args.iter().map(|a| a.vector()));
         self.reserve(fp + ty.results.len());
-        let r = self.enter(func, fp);
-        let out = r.map(|()| ty.results.iter().enumerate().map(|(i, &t)| WasmValue::typed(t, self.stack[fp + i], self.vstack[fp + i])).collect());
+        let r = self.enter(mc, func, fp);
+        let out = r.map(|()| ty.results.iter().enumerate().map(|(i, &t)| self.value(t, self.stack[fp + i], self.vstack[fp + i])).collect());
         self.truncate(fp);
+        self.thrown = 0;
         out
     }
 
-    fn enter(&mut self, func: u32, fp: usize) -> Result<(), WasmTrap> {
+    fn enter(&mut self, mc: &Mutation<'_>, func: u32, fp: usize) -> Result<(), WasmTrap> {
         match &self.funcs[func as usize].kind {
             FuncKind::Wasm { instance, index, .. } => {
                 let (instance, index) = (*instance, *index);
-                self.call(func, instance, index, fp)
+                self.call(mc, func, instance, index, fp)
             }
             FuncKind::Host(_) => self.host(func, fp),
         }
@@ -426,7 +533,7 @@ impl WasmStore {
 
     fn host(&mut self, func: u32, fp: usize) -> Result<(), WasmTrap> {
         let f = &self.funcs[func as usize];
-        let args: Vec<WasmValue> = f.ty.params.iter().enumerate().map(|(i, &t)| WasmValue::typed(t, self.stack.get(fp + i).copied().unwrap_or(0), self.vstack.get(fp + i).copied().unwrap_or(0))).collect();
+        let args: Vec<WasmValue> = f.ty.params.iter().enumerate().map(|(i, &t)| self.value(t, self.stack.get(fp + i).copied().unwrap_or(0), self.vstack.get(fp + i).copied().unwrap_or(0))).collect();
         let FuncKind::Host(h) = &f.kind else { return Err(WasmTrap::Unsupported) };
         let results = h(&args)?;
         self.reserve(fp + results.len());
@@ -446,14 +553,14 @@ impl WasmStore {
             for (i, d) in ops.iter().enumerate() {
                 at[d.offset] = u32::try_from(i).unwrap_or(u32::MAX);
             }
-            Rc::new(Code { ops, at, bits: f.bits.clone(), tables: f.tables.clone() })
+            Rc::new(Code { ops, at, bits: f.bits.clone(), tables: f.tables.clone(), handlers: f.handlers.clone() })
         };
         if func == FUNC_INIT {
             return build();
         }
         match &self.funcs[func as usize].kind {
             FuncKind::Wasm { code, .. } => code.get_or_init(build).clone(),
-            FuncKind::Host(_) => Rc::new(Code { ops: Vec::new(), at: Vec::new(), bits: Box::new([]), tables: Box::new([]) }),
+            FuncKind::Host(_) => Rc::new(Code { ops: Vec::new(), at: Vec::new(), bits: Box::new([]), tables: Box::new([]), handlers: Box::new([]) }),
         }
     }
 
@@ -499,14 +606,18 @@ impl WasmStore {
         if self.tables[t].ty.table64 { v } else { v & u64::from(u32::MAX) }
     }
 
-    fn table_init(&mut self, instance: u32, table: u32, elem: u32, d: u64, s: u64, n: u64) -> Result<(), WasmTrap> {
+    #[expect(clippy::too_many_arguments, reason = "table.init's three operands plus its table and segment")]
+    fn table_init(&mut self, mc: &Mutation<'_>, instance: u32, table: u32, elem: u32, d: u64, s: u64, n: u64) -> Result<(), WasmTrap> {
         let t = self.table(instance, OperandValue::from(table));
-        let items = self.instances[instance as usize].elems[elem as usize].clone();
+        let items = &mc.fetch(&self.instances[instance as usize].elems[elem as usize]).get().0;
+        let cells = self.cells(mc, t);
         let (d, s, n) = (usize::try_from(d).unwrap_or(usize::MAX), usize::try_from(s).unwrap_or(usize::MAX), usize::try_from(n).unwrap_or(usize::MAX));
-        if s.checked_add(n).is_none_or(|e| e > items.len()) || d.checked_add(n).is_none_or(|e| e > self.tables[t].elems.len()) {
+        if s.checked_add(n).is_none_or(|e| e > items.len()) || d.checked_add(n).is_none_or(|e| e > cells.len()) {
             return Err(WasmTrap::OutOfBoundsTable);
         }
-        self.tables[t].elems[d..d + n].copy_from_slice(&items[s..s + n]);
+        for (c, i) in cells[d..d + n].iter().zip(&items[s..s + n]) {
+            c.set(mc.gc_scope(), i.get());
+        }
         Ok(())
     }
 
@@ -537,13 +648,14 @@ impl WasmStore {
         }
     }
 
-    fn grow_table(&mut self, t: usize, init: u64, delta: u64) -> u64 {
-        let table = &mut self.tables[t];
-        let old = u64::try_from(table.elems.len()).unwrap_or(0);
-        let limit = table.ty.limits.max.unwrap_or(u64::from(u32::MAX)).min(10_000_000);
+    fn grow_table(&mut self, mc: &Mutation<'_>, t: usize, init: u64, delta: u64) -> u64 {
+        let words: Vec<u64> = self.cells(mc, t).iter().map(WordSlot::get).collect();
+        let old = u64::try_from(words.len()).unwrap_or(0);
+        let limit = self.tables[t].ty.limits.max.unwrap_or(u64::from(u32::MAX)).min(MAX_TABLE);
         match old.checked_add(delta) {
             Some(n) if n <= limit => {
-                table.elems.resize(usize::try_from(n).unwrap_or(0), init);
+                let extra = usize::try_from(delta).unwrap_or(0);
+                self.tables[t].cells = mc.stash(WasmCells::alloc(mc, words.into_iter().chain(core::iter::repeat_n(init, extra))));
                 old
             }
             _ => u64::MAX,
@@ -555,13 +667,79 @@ impl WasmStore {
             return Err(WasmTrap::UninitializedElement);
         }
         let f = u32::try_from(r - 1).map_err(|_| WasmTrap::UndefinedElement)?;
-        let want = &self.instances[instance as usize].module.types[usize::try_from(type_index).unwrap_or(0)];
-        if self.funcs[f as usize].ty == *want { Ok(f) } else { Err(WasmTrap::IndirectCallTypeMismatch) }
+        let want = self.instances[instance as usize].types[usize::try_from(type_index).unwrap_or(0)];
+        if self.types.sub(self.funcs[f as usize].canon, want) { Ok(f) } else { Err(WasmTrap::IndirectCallTypeMismatch) }
+    }
+
+    fn throw(&mut self, mc: &Mutation<'_>, instance: u32, tag: OperandValue, base: usize) -> WasmTrap {
+        let addr = self.instances[instance as usize].tags[usize::try_from(tag).unwrap_or(0)];
+        let layout = self.tag_layout(addr);
+        let w = WasmObject::alloc(mc, addr, 1, &layout);
+        if let Some(obj) = WasmObject::get(w) {
+            for (i, &f) in layout.fields.iter().enumerate() {
+                obj.write(mc, f, 0, &layout, (self.stack[base + i], self.vstack[base + i]));
+            }
+        }
+        self.thrown = w;
+        WasmTrap::Exception
+    }
+
+    fn tag_layout(&self, addr: u32) -> Layout {
+        match &self.types.get(self.tags[addr as usize]).sub.composite {
+            WasmCompositeType::Func(f) => {
+                let storages: Vec<WasmStorageType> = f.params.iter().map(|&p| WasmStorageType::Val(p)).collect();
+                storages.iter().collect()
+            }
+            _ => Layout::default(),
+        }
+    }
+
+    fn catch(&mut self, frames: &mut Vec<Activation>) -> bool {
+        let Some(exn) = WasmObject::get(self.thrown) else { return false };
+        let tag = exn.head();
+        while let Some(f) = frames.last_mut() {
+            let at = f.pc.checked_sub(1).and_then(|i| f.code.ops.get(i)).map_or(u32::MAX, |d| u32::try_from(d.offset).unwrap_or(u32::MAX));
+            let inst = f.instance;
+            let found = f.code.handlers.iter().filter(|h| h.start <= at && at < h.end).flat_map(|h| h.catches.iter()).find(|c| match c.kind {
+                WasmCatchKind::Catch | WasmCatchKind::CatchRef => self.instances[inst as usize].tags[c.tag as usize] == tag,
+                WasmCatchKind::CatchAll | WasmCatchKind::CatchAllRef => true,
+            });
+            if let Some(&c) = found {
+                let (fp, pc) = (f.fp, f.code.at[c.target as usize] as usize);
+                f.pc = pc;
+                let mut land = fp + c.land as usize;
+                if matches!(c.kind, WasmCatchKind::Catch | WasmCatchKind::CatchRef) {
+                    let layout = self.tag_layout(tag);
+                    for &field in &layout.fields {
+                        let (s, v) = exn.read(field, 0, &layout);
+                        self.stack[land] = s;
+                        self.vstack[land] = v;
+                        land += 1;
+                    }
+                }
+                if matches!(c.kind, WasmCatchKind::CatchRef | WasmCatchKind::CatchAllRef) {
+                    self.stack[land] = self.thrown;
+                    self.vstack[land] = 0;
+                }
+                return true;
+            }
+            frames.pop();
+        }
+        false
+    }
+
+    fn call(&mut self, mc: &Mutation<'_>, func: u32, instance: u32, index: u32, fp: usize) -> Result<(), WasmTrap> {
+        let mut frames: Vec<Activation> = vec![self.frame(func, instance, index, fp)];
+        loop {
+            match self.run(mc, &mut frames) {
+                Err(WasmTrap::Exception) if self.catch(&mut frames) => {}
+                r => return r,
+            }
+        }
     }
 
     #[expect(clippy::too_many_lines, clippy::cast_possible_truncation, clippy::cast_sign_loss, clippy::cast_possible_wrap, clippy::cast_precision_loss, clippy::float_cmp, reason = "the interpreter loop: one arm per bytecode, with WebAssembly's wrapping and bit-level numeric semantics")]
-    fn call(&mut self, func: u32, instance: u32, index: u32, fp: usize) -> Result<(), WasmTrap> {
-        let mut frames: Vec<Activation> = vec![self.frame(func, instance, index, fp)];
+    fn run(&mut self, mc: &Mutation<'_>, frames: &mut Vec<Activation>) -> Result<(), WasmTrap> {
         macro_rules! r {
             ($f:expr, $o:expr) => {
                 self.stack[$f.fp + $o as usize]
@@ -661,7 +839,7 @@ impl WasmStore {
                         WasmBytecode::CallIndirect | WasmBytecode::ReturnCallIndirect => {
                             let t = self.table(inst, o[1]);
                             let i = self.table_index(t, r!(f, o[2]));
-                            let e = *self.tables[t].elems.get(usize::try_from(i).unwrap_or(usize::MAX)).ok_or(WasmTrap::UndefinedElement)?;
+                            let e = self.cells(mc, t).get(usize::try_from(i).unwrap_or(usize::MAX)).ok_or(WasmTrap::UndefinedElement)?.get();
                             (self.callee(inst, o[0], e)?, o[3])
                         }
                         _ => {
@@ -698,33 +876,35 @@ impl WasmStore {
                 }
                 WasmBytecode::GlobalGet => {
                     let g = self.instances[f.instance as usize].globals[o[1] as usize];
-                    r!(f, o[0]) = self.globals[g as usize].value;
-                    self.vstack[f.fp + o[0] as usize] = self.globals[g as usize].vector;
+                    let (s, v) = self.global_get(mc, g);
+                    r!(f, o[0]) = s;
+                    self.vstack[f.fp + o[0] as usize] = v;
                 }
                 WasmBytecode::GlobalSet => {
                     let g = self.instances[f.instance as usize].globals[o[0] as usize];
-                    self.globals[g as usize].value = r!(f, o[1]);
-                    self.globals[g as usize].vector = self.vstack[f.fp + o[1] as usize];
+                    let at = f.fp + o[1] as usize;
+                    let v = (self.stack[at], self.vstack[at]);
+                    self.global_set(mc, g, v);
                 }
                 WasmBytecode::TableGet => {
                     let t = self.table(f.instance, o[2]);
                     let i = self.table_index(t, r!(f, o[1]));
-                    r!(f, o[0]) = *self.tables[t].elems.get(usize::try_from(i).unwrap_or(usize::MAX)).ok_or(WasmTrap::OutOfBoundsTable)?;
+                    r!(f, o[0]) = self.cells(mc, t).get(usize::try_from(i).unwrap_or(usize::MAX)).ok_or(WasmTrap::OutOfBoundsTable)?.get();
                 }
                 WasmBytecode::TableSet => {
                     let t = self.table(f.instance, o[2]);
                     let i = self.table_index(t, r!(f, o[0]));
                     let v = r!(f, o[1]);
-                    *self.tables[t].elems.get_mut(usize::try_from(i).unwrap_or(usize::MAX)).ok_or(WasmTrap::OutOfBoundsTable)? = v;
+                    self.cells(mc, t).get(usize::try_from(i).unwrap_or(usize::MAX)).ok_or(WasmTrap::OutOfBoundsTable)?.set(mc.gc_scope(), v);
                 }
                 WasmBytecode::TableSize => {
                     let t = self.table(f.instance, o[1]);
-                    r!(f, o[0]) = self.tables[t].elems.len() as u64;
+                    r!(f, o[0]) = self.cells(mc, t).len() as u64;
                 }
                 WasmBytecode::TableGrow => {
                     let t = self.table(f.instance, o[3]);
                     let (init, n) = (r!(f, o[1]), self.table_index(t, r!(f, o[2])));
-                    let old = self.grow_table(t, init, n);
+                    let old = self.grow_table(mc, t, init, n);
                     r!(f, o[0]) = if self.tables[t].ty.table64 { old } else { old & u64::from(u32::MAX) };
                 }
                 WasmBytecode::TableFill => {
@@ -732,34 +912,55 @@ impl WasmStore {
                     let base = o[0] as usize;
                     let (i, v, n) = (self.table_index(t, self.stack[f.fp + base]), self.stack[f.fp + base + 1], self.table_index(t, self.stack[f.fp + base + 2]));
                     let (i, n) = (usize::try_from(i).unwrap_or(usize::MAX), usize::try_from(n).unwrap_or(usize::MAX));
-                    if i.checked_add(n).is_none_or(|e| e > self.tables[t].elems.len()) {
+                    let cells = self.cells(mc, t);
+                    if i.checked_add(n).is_none_or(|e| e > cells.len()) {
                         return Err(WasmTrap::OutOfBoundsTable);
                     }
-                    self.tables[t].elems[i..i + n].fill(v);
+                    for c in &cells[i..i + n] {
+                        c.set(mc.gc_scope(), v);
+                    }
                 }
                 WasmBytecode::TableCopy => {
                     let (dt, st) = (self.table(f.instance, o[3]), self.table(f.instance, o[4]));
                     let (dd, s, n) = (self.table_index(dt, r!(f, o[0])), self.table_index(st, r!(f, o[1])), r!(f, o[2]));
                     let n = if self.tables[dt].ty.table64 && self.tables[st].ty.table64 { n } else { n & u64::from(u32::MAX) };
                     let (dd, s, n) = (usize::try_from(dd).unwrap_or(usize::MAX), usize::try_from(s).unwrap_or(usize::MAX), usize::try_from(n).unwrap_or(usize::MAX));
-                    if s.checked_add(n).is_none_or(|e| e > self.tables[st].elems.len()) || dd.checked_add(n).is_none_or(|e| e > self.tables[dt].elems.len()) {
+                    let (dst, src) = (self.cells(mc, dt), self.cells(mc, st));
+                    if s.checked_add(n).is_none_or(|e| e > src.len()) || dd.checked_add(n).is_none_or(|e| e > dst.len()) {
                         return Err(WasmTrap::OutOfBoundsTable);
                     }
-                    if dt == st {
-                        self.tables[dt].elems.copy_within(s..s + n, dd);
-                    } else {
-                        let src: Vec<u64> = self.tables[st].elems[s..s + n].to_vec();
-                        self.tables[dt].elems[dd..dd + n].copy_from_slice(&src);
+                    let words: Vec<u64> = src[s..s + n].iter().map(WordSlot::get).collect();
+                    for (c, w) in dst[dd..dd + n].iter().zip(words) {
+                        c.set(mc.gc_scope(), w);
                     }
                 }
                 WasmBytecode::TableInit => {
                     let t = self.table(f.instance, o[3]);
                     let (dd, s, n) = (self.table_index(t, r!(f, o[0])), Slot(r!(f, o[1])).u32(), Slot(r!(f, o[2])).u32());
                     let inst = f.instance;
-                    self.table_init(inst, u32::try_from(o[3]).unwrap_or(0), u32::try_from(o[4]).unwrap_or(0), dd, u64::from(s), u64::from(n))?;
+                    self.table_init(mc, inst, u32::try_from(o[3]).unwrap_or(0), u32::try_from(o[4]).unwrap_or(0), dd, u64::from(s), u64::from(n))?;
                 }
                 WasmBytecode::ElemDrop => {
-                    self.instances[f.instance as usize].elems[o[0] as usize] = Rc::from([]);
+                    let inst = f.instance;
+                    self.drop_elem(mc, inst, o[0] as usize);
+                }
+                WasmBytecode::Throw => {
+                    let (inst, base) = (f.instance, f.fp + o[1] as usize);
+                    return Err(self.throw(mc, inst, o[0], base));
+                }
+                WasmBytecode::ThrowRef => {
+                    let w = r!(f, o[0]);
+                    if w == 0 {
+                        return Err(WasmTrap::NullReference);
+                    }
+                    self.thrown = w;
+                    return Err(WasmTrap::Exception);
+                }
+                WasmBytecode::BrOnCast | WasmBytecode::BrOnCastFail => {
+                    let ok = self.test(f.instance, r!(f, o[0]), o[3], o[1] & FLAG_TO_NULLABLE != 0);
+                    if ok == (d.bytecode == WasmBytecode::BrOnCast) {
+                        f.pc = f.code.target(d, o[4]);
+                    }
                 }
                 WasmBytecode::DataDrop => {
                     self.instances[f.instance as usize].data[o[0] as usize] = Rc::from([]);
@@ -1006,6 +1207,37 @@ impl WasmStore {
                 WasmBytecode::I32StoreMem16 | WasmBytecode::I64StoreMem16 => store!(f, o, 2),
                 b if b.page_prefix().is_none() && (b as u16) >> 8 == 1 => {
                     simd::Vector { store: self, fp: f.fp, instance: f.instance }.run(d, &f.code.bits)?;
+                }
+                WasmBytecode::StructNew
+                | WasmBytecode::StructNewDefault
+                | WasmBytecode::StructGet
+                | WasmBytecode::StructGetS
+                | WasmBytecode::StructGetU
+                | WasmBytecode::StructSet
+                | WasmBytecode::ArrayNew
+                | WasmBytecode::ArrayNewDefault
+                | WasmBytecode::ArrayNewFixed
+                | WasmBytecode::ArrayNewData
+                | WasmBytecode::ArrayNewElem
+                | WasmBytecode::ArrayGet
+                | WasmBytecode::ArrayGetS
+                | WasmBytecode::ArrayGetU
+                | WasmBytecode::ArraySet
+                | WasmBytecode::ArrayLen
+                | WasmBytecode::ArrayFill
+                | WasmBytecode::ArrayCopy
+                | WasmBytecode::ArrayInitData
+                | WasmBytecode::ArrayInitElem
+                | WasmBytecode::RefTest
+                | WasmBytecode::RefTestNull
+                | WasmBytecode::RefCast
+                | WasmBytecode::RefCastNull
+                | WasmBytecode::AnyConvertExtern
+                | WasmBytecode::ExternConvertAny
+                | WasmBytecode::RefI31
+                | WasmBytecode::I31GetS
+                | WasmBytecode::I31GetU => {
+                    Objects { store: self, mc, fp: f.fp, instance: f.instance }.run(d)?;
                 }
                 _ => return Err(WasmTrap::Unsupported),
             }

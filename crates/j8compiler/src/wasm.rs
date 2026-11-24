@@ -3,8 +3,8 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use j8bytecode::{Encoder, OperandValue, WasmBytecode, WasmData, WasmElement, WasmExport, WasmExternKind, WasmFuncType, WasmFunction, WasmGlobal, WasmGlobalType, WasmHeapType, WasmImport, WasmImportKind, WasmLimits, WasmMemoryType, WasmModule, WasmOperandType, WasmRefType, WasmSegmentMode, WasmTable, WasmTableType, WasmValType};
-use wasmparser::{AbstractHeapType, BinaryReaderError, BlockType, CompositeInnerType, ConstExpr, DataKind, ElementItems, ElementKind, ExternalKind, FuncValidator, FunctionBody, HeapType, MemoryType, Operator, Parser, Payload, RefType, TableInit, TableType, TypeRef, ValType, ValidPayload, Validator, ValidatorResources, WasmFeatures, WasmModuleResources};
+use j8bytecode::{Encoder, Opcode, OperandScale, OperandValue, WasmBytecode, WasmCatch, WasmCatchKind, WasmCompositeType, WasmData, WasmElement, WasmExport, WasmExternKind, WasmFieldType, WasmFuncType, WasmFunction, WasmHandler, WasmStorageType, WasmSubType, WasmGlobal, WasmGlobalType, WasmHeapType, WasmImport, WasmImportKind, WasmLimits, WasmMemoryType, WasmModule, WasmOperandType, WasmRefType, WasmSegmentMode, WasmTable, WasmTableType, WasmValType};
+use wasmparser::{AbstractHeapType, BinaryReaderError, BlockType, Catch, CompositeInnerType, StorageType, ConstExpr, DataKind, ElementItems, ElementKind, ExternalKind, FuncValidator, FunctionBody, HeapType, MemoryType, Operator, Parser, Payload, RefType, TableInit, TableType, TypeRef, ValType, ValidPayload, Validator, ValidatorResources, WasmFeatures, WasmModuleResources};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WasmErrorKind {
@@ -69,6 +69,12 @@ impl Convert<WasmRefType> for RefType {
     }
 }
 
+impl Convert<OperandValue> for HeapType {
+    fn convert(self) -> OperandValue {
+        OperandValue::from(RefType::new(true, self).map_or(WasmHeapType::None, |r| r.convert().heap))
+    }
+}
+
 impl Convert<WasmValType> for ValType {
     fn convert(self) -> WasmValType {
         match self {
@@ -86,6 +92,29 @@ impl Convert<WasmFuncType> for &wasmparser::FuncType {
     fn convert(self) -> WasmFuncType {
         let f = self;
         WasmFuncType { params: f.params().iter().map(|&t| t.convert()).collect(), results: f.results().iter().map(|&t| t.convert()).collect() }
+    }
+}
+
+impl Convert<WasmFieldType> for wasmparser::FieldType {
+    fn convert(self) -> WasmFieldType {
+        let storage = match self.element_type {
+            StorageType::I8 => WasmStorageType::I8,
+            StorageType::I16 => WasmStorageType::I16,
+            StorageType::Val(v) => WasmStorageType::Val(v.convert()),
+        };
+        WasmFieldType { storage, mutable: self.mutable }
+    }
+}
+
+impl Convert<WasmSubType> for &wasmparser::SubType {
+    fn convert(self) -> WasmSubType {
+        let composite = match &self.composite_type.inner {
+            CompositeInnerType::Func(f) => WasmCompositeType::Func(f.convert()),
+            CompositeInnerType::Struct(st) => WasmCompositeType::Struct(st.fields.iter().map(|f| f.convert()).collect()),
+            CompositeInnerType::Array(a) => WasmCompositeType::Array(a.0.convert()),
+            CompositeInnerType::Cont(_) => WasmCompositeType::Struct(Box::new([])),
+        };
+        WasmSubType { is_final: self.is_final, supertype: self.supertype_idxs.first().and_then(wasmparser::PackedIndex::as_module_index), composite }
     }
 }
 
@@ -138,6 +167,7 @@ struct Control {
     start: usize,
     exits: Vec<usize>,
     otherwise: Option<usize>,
+    catches: Option<Vec<WasmCatch>>,
 }
 
 impl Control {
@@ -147,12 +177,14 @@ impl Control {
 }
 
 const PLACEHOLDER: OperandValue = 0x7fff_ffff;
+const MEMORY_OFFSET_LIMIT: OperandValue = 0xffff_ffff;
 
 struct Emitter<'m> {
     module: &'m [u8],
     enc: Encoder,
     bits: Vec<u64>,
     tables: Vec<Box<[u32]>>,
+    handlers: Vec<WasmHandler>,
     locals: u32,
     registers: u32,
     controls: Vec<Control>,
@@ -160,7 +192,7 @@ struct Emitter<'m> {
 
 impl<'m> Emitter<'m> {
     fn new(module: &'m [u8], locals: u32) -> Self {
-        Self { module, enc: Encoder::default(), bits: Vec::new(), tables: Vec::new(), locals, registers: locals, controls: Vec::new() }
+        Self { module, enc: Encoder::default(), bits: Vec::new(), tables: Vec::new(), handlers: Vec::new(), locals, registers: locals, controls: Vec::new() }
     }
 
     fn reg(&mut self, slot: u32) -> OperandValue {
@@ -184,8 +216,9 @@ impl<'m> Emitter<'m> {
         if target.is_none() {
             self.enc.code.push(WasmBytecode::ExtraWide as u8);
             self.enc.code.push((b as u16).to_be_bytes()[1]);
-            for v in &all {
-                self.enc.code.extend_from_slice(&i32::try_from(*v).unwrap_or(0).to_le_bytes());
+            for (v, info) in all.iter().zip(b.operand_infos()) {
+                let n = info.size(OperandScale::Quadruple) as usize;
+                self.enc.code.extend_from_slice(&i32::try_from(*v).unwrap_or(0).to_le_bytes()[..n]);
             }
             return Ok(at);
         }
@@ -195,8 +228,8 @@ impl<'m> Emitter<'m> {
 
     fn patch(&mut self, at: usize, target: usize) {
         let b = WasmBytecode::from_page(0, self.enc.code[at + 1]).unwrap_or(WasmBytecode::Illegal);
-        let index = b.operand_types().len() - 1;
-        let pos = at + 2 + 4 * index;
+        let n = b.operand_types().len() - 1;
+        let pos = at + 2 + b.operand_infos().take(n).map(|i| i.size(OperandScale::Quadruple) as usize).sum::<usize>();
         let rel = i32::try_from(target).unwrap_or(0) - i32::try_from(at).unwrap_or(0);
         self.enc.code[pos..pos + 4].copy_from_slice(&rel.to_le_bytes());
     }
@@ -284,7 +317,12 @@ impl<'m> Emitter<'m> {
                     i += 2;
                     continue;
                 }
-                WasmOperandType::Lane => {
+                WasmOperandType::HeapType => {
+                    let (v, n) = Leb::s64(&self.module[at..]);
+                    at += n;
+                    out.push(v);
+                }
+                WasmOperandType::Lane | WasmOperandType::Flag8 => {
                     out.push(OperandValue::from(self.module[at]));
                     at += 1;
                 }
@@ -317,6 +355,16 @@ impl Leb {
         }
         (v, b.len().min(10))
     }
+
+    fn s64(b: &[u8]) -> (i64, usize) {
+        let (v, n) = Self::u64(b);
+        let bits = u32::try_from(7 * n).unwrap_or(64);
+        if bits < 64 && b.get(n - 1).is_some_and(|x| x & 0x40 != 0) {
+            ((v | (u64::MAX << bits)).cast_signed(), n)
+        } else {
+            (v.cast_signed(), n)
+        }
+    }
 }
 
 struct Body<'a, 'm> {
@@ -335,6 +383,13 @@ impl Body<'_, '_> {
                 (u32::try_from(f.params().len()).unwrap_or(0), u32::try_from(f.results().len()).unwrap_or(0))
             }),
         }
+    }
+
+    fn fields(&self, type_index: u32) -> u32 {
+        self.v.resources().sub_type_at(type_index).map_or(0, |t| match &t.composite_type.inner {
+            CompositeInnerType::Struct(st) => u32::try_from(st.fields.len()).unwrap_or(0),
+            _ => 0,
+        })
     }
 
     fn signature(&self, type_index: u32) -> (u32, u32) {
@@ -359,7 +414,7 @@ impl Body<'_, '_> {
         let total = self.v.len_locals();
         self.emitter.locals = total;
         self.emitter.registers = total;
-        self.emitter.controls.push(Control { frame: Frame::Block, base: 0, params: 0, results, start: 0, exits: Vec::new(), otherwise: None });
+        self.emitter.controls.push(Control { frame: Frame::Block, base: 0, params: 0, results, start: 0, exits: Vec::new(), otherwise: None, catches: None });
         let mut ops = self.func.get_operators_reader()?;
         while !ops.eof() {
             let (op, pos) = ops.read_with_offset()?;
@@ -373,7 +428,7 @@ impl Body<'_, '_> {
             return Err(WasmError { kind: WasmErrorKind::Invalid, message: "function body does not end".into(), offset: usize::try_from(ops.original_position()).unwrap_or(usize::MAX) });
         }
         let e = self.emitter;
-        Ok(WasmFunction { ty, params, results, registers: e.registers + 1, code: e.enc.code.into(), bits: e.bits.into(), tables: e.tables.into() })
+        Ok(WasmFunction { ty, params, results, registers: e.registers + 1, code: e.enc.code.into(), bits: e.bits.into(), tables: e.tables.into(), handlers: e.handlers.into() })
     }
 
     #[expect(clippy::too_many_lines, reason = "one arm per WebAssembly control and special-shape operator")]
@@ -397,7 +452,41 @@ impl Body<'_, '_> {
                     _ => Frame::Block,
                 };
                 let start = e.here();
-                e.controls.push(Control { frame, base: top.saturating_sub(p), params: p, results: r, start, exits: Vec::new(), otherwise });
+                e.controls.push(Control { frame, base: top.saturating_sub(p), params: p, results: r, start, exits: Vec::new(), otherwise, catches: None });
+            }
+            Operator::TryTable { ref try_table } => {
+                let (p, r) = self.arity(try_table.ty);
+                let land = h - p;
+                let mut catches = Vec::new();
+                let mut over = None;
+                if live {
+                    over = Some(self.emitter.jump(WasmBytecode::Jump, &[], None)?);
+                    for c in &try_table.catches {
+                        let (kind, tag, label) = match *c {
+                            Catch::One { tag, label } => (WasmCatchKind::Catch, tag, label),
+                            Catch::OneRef { tag, label } => (WasmCatchKind::CatchRef, tag, label),
+                            Catch::All { label } => (WasmCatchKind::CatchAll, 0, label),
+                            Catch::AllRef { label } => (WasmCatchKind::CatchAllRef, 0, label),
+                        };
+                        let params = match kind {
+                            WasmCatchKind::Catch | WasmCatchKind::CatchRef => self.v.resources().tag_at(tag).map_or(0, |t| u32::try_from(t.params().len()).unwrap_or(0)),
+                            _ => 0,
+                        };
+                        let n = params + u32::from(matches!(kind, WasmCatchKind::CatchRef | WasmCatchKind::CatchAllRef));
+                        let e = &mut self.emitter;
+                        let target = u32::try_from(e.here()).unwrap_or(0);
+                        let reg = e.reg(land);
+                        e.reg(land + n);
+                        e.branch(label, land + n)?;
+                        catches.push(WasmCatch { kind, tag, target, land: u32::try_from(reg).unwrap_or(0) });
+                    }
+                }
+                let e = &mut self.emitter;
+                let start = e.here();
+                if let Some(o) = over {
+                    e.patch(o, start);
+                }
+                e.controls.push(Control { frame: Frame::Block, base: land, params: p, results: r, start, exits: Vec::new(), otherwise: None, catches: live.then_some(catches) });
             }
             Operator::Else => {
                 if live {
@@ -415,6 +504,9 @@ impl Body<'_, '_> {
             Operator::End => {
                 let c = e.controls.pop().ok_or_else(|| WasmError::unsupported(at, "end"))?;
                 let here = e.here();
+                if let Some(catches) = c.catches {
+                    e.handlers.push(WasmHandler { start: u32::try_from(c.start).unwrap_or(0), end: u32::try_from(here).unwrap_or(0), catches: catches.into() });
+                }
                 for x in c.exits {
                     e.patch(x, here);
                 }
@@ -557,10 +649,15 @@ impl Body<'_, '_> {
                 let b = if matches!(op, Operator::CallRef { .. }) { WasmBytecode::CallRef } else { WasmBytecode::ReturnCallRef };
                 e.emit(b, &[OperandValue::from(type_index), callee, base])?;
             }
-            Operator::MemoryInit { .. } | Operator::MemoryCopy { .. } | Operator::MemoryFill { .. } | Operator::TableFill { .. } => {
+            Operator::MemoryInit { .. } | Operator::MemoryCopy { .. } | Operator::MemoryFill { .. } | Operator::TableFill { .. } | Operator::ArrayFill { .. } | Operator::ArrayCopy { .. } | Operator::ArrayInitData { .. } | Operator::ArrayInitElem { .. } => {
                 let (code, imm) = e.raw(at);
                 let b = WasmBytecode::from_wasm(code).ok_or_else(|| WasmError::unsupported(at, "bulk operator"))?;
-                let base = e.reg(h - 3);
+                let pops = match op {
+                    Operator::ArrayCopy { .. } => 5,
+                    Operator::ArrayFill { .. } | Operator::ArrayInitData { .. } | Operator::ArrayInitElem { .. } => 4,
+                    _ => 3,
+                };
+                let base = e.reg(h - pops);
                 e.reg(h - 1);
                 let mut ops = alloc::vec![base];
                 ops.extend(e.immediates(b, imm, 1));
@@ -580,14 +677,45 @@ impl Body<'_, '_> {
                 e.bits.extend([u64::try_from(v & u128::from(u64::MAX)).unwrap_or(0), u64::try_from(v >> 64).unwrap_or(0)]);
                 e.emit(WasmBytecode::I8x16Shuffle, &[dst, a, b, i])?;
             }
-            Operator::TryTable { .. } | Operator::Throw { .. } | Operator::ThrowRef => return Err(WasmError::unsupported(at, "exception handling")),
+            Operator::Throw { tag_index } => {
+                let n = self.v.resources().tag_at(tag_index).map_or(0, |t| u32::try_from(t.params().len()).unwrap_or(0));
+                let e = &mut self.emitter;
+                let base = e.reg(h - n);
+                e.emit(WasmBytecode::Throw, &[OperandValue::from(tag_index), base])?;
+            }
+            Operator::ThrowRef => {
+                let r = e.reg(h - 1);
+                e.emit(WasmBytecode::ThrowRef, &[r])?;
+            }
+            Operator::StructNew { struct_type_index } => {
+                let n = self.fields(struct_type_index);
+                let e = &mut self.emitter;
+                let base = e.reg(h - n);
+                e.emit(WasmBytecode::StructNew, &[base, OperandValue::from(struct_type_index), base])?;
+            }
+            Operator::ArrayNewFixed { array_type_index, array_size } => {
+                let base = e.reg(h - array_size);
+                e.emit(WasmBytecode::ArrayNewFixed, &[base, base, OperandValue::from(array_type_index), OperandValue::from(array_size)])?;
+            }
+            Operator::ArrayNewData { .. } | Operator::ArrayNewElem { .. } => {
+                let (code, imm) = e.raw(at);
+                let b = WasmBytecode::from_wasm(code).ok_or_else(|| WasmError::unsupported(at, "array operator"))?;
+                let base = e.reg(h - 2);
+                let mut ops = alloc::vec![base, base];
+                ops.extend(e.immediates(b, imm, 2));
+                e.emit(b, &ops)?;
+            }
+            Operator::BrOnCast { relative_depth, from_ref_type, to_ref_type } | Operator::BrOnCastFail { relative_depth, from_ref_type, to_ref_type } => {
+                let r = e.reg(h - 1);
+                let flags = OperandValue::from(u8::from(from_ref_type.is_nullable()) | (u8::from(to_ref_type.is_nullable()) << 1));
+                let cond = [r, flags, from_ref_type.heap_type().convert(), to_ref_type.heap_type().convert()];
+                let (on, off) = if matches!(op, Operator::BrOnCast { .. }) { (WasmBytecode::BrOnCast, WasmBytecode::BrOnCastFail) } else { (WasmBytecode::BrOnCastFail, WasmBytecode::BrOnCast) };
+                e.conditional(on, off, &cond, relative_depth, h)?;
+            }
             _ => {
                 let (code, imm) = e.raw(at);
                 let b = WasmBytecode::from_wasm(code).ok_or_else(|| WasmError::unsupported(at, format!("{op:?}")))?;
                 let types = b.operand_types();
-                if e.module[at] == 0xfb {
-                    return Err(WasmError::unsupported(at, format!("{op:?}")));
-                }
                 let k = types.iter().take_while(|t| **t == WasmOperandType::Reg).count();
                 let after = i64::from(self.height());
                 let d = after - i64::from(h);
@@ -600,10 +728,7 @@ impl Body<'_, '_> {
                 let mut ops: Vec<OperandValue> = (0..m).map(|i| e.reg(h - n + i)).collect();
                 ops.extend((0..n).map(|i| e.reg(h - n + i)));
                 let imms = e.immediates(b, imm, k);
-                if imms.iter().any(|&v| v > OperandValue::from(u32::MAX)) {
-                    return Err(WasmError::unsupported(at, "offset beyond 32 bits"));
-                }
-                ops.extend(imms);
+                ops.extend(imms.into_iter().map(|v| v.min(MEMORY_OFFSET_LIMIT)));
                 e.emit(b, &ops)?;
             }
         }
@@ -618,6 +743,7 @@ struct ModuleBuilder<'m> {
 }
 
 impl ModuleBuilder<'_> {
+    #[expect(clippy::too_many_lines, reason = "one arm per constant-expression operator")]
     fn init(&mut self, expr: &ConstExpr<'_>) -> Result<u32, WasmError> {
         let mut e = Emitter::new(self.bytes, 0);
         let mut h = 0u32;
@@ -681,12 +807,46 @@ impl ModuleBuilder<'_> {
                     e.emit(b, &[d, x, y])?;
                     h -= 1;
                 }
+                Operator::StructNew { struct_type_index } => {
+                    let n = match &self.module.types[struct_type_index as usize].composite {
+                        WasmCompositeType::Struct(fs) => u32::try_from(fs.len()).unwrap_or(0),
+                        _ => 0,
+                    };
+                    let base = e.reg(h - n);
+                    e.emit(WasmBytecode::StructNew, &[base, OperandValue::from(struct_type_index), base])?;
+                    h = h - n + 1;
+                }
+                Operator::StructNewDefault { struct_type_index } => {
+                    let d = e.reg(h);
+                    e.emit(WasmBytecode::StructNewDefault, &[d, OperandValue::from(struct_type_index)])?;
+                    h += 1;
+                }
+                Operator::ArrayNew { array_type_index } => {
+                    let (d, v, n) = (e.reg(h - 2), e.reg(h - 2), e.reg(h - 1));
+                    e.emit(WasmBytecode::ArrayNew, &[d, v, n, OperandValue::from(array_type_index)])?;
+                    h -= 1;
+                }
+                Operator::ArrayNewDefault { array_type_index } => {
+                    let (d, n) = (e.reg(h - 1), e.reg(h - 1));
+                    e.emit(WasmBytecode::ArrayNewDefault, &[d, n, OperandValue::from(array_type_index)])?;
+                }
+                Operator::ArrayNewFixed { array_type_index, array_size } => {
+                    let base = e.reg(h - array_size);
+                    e.emit(WasmBytecode::ArrayNewFixed, &[base, base, OperandValue::from(array_type_index), OperandValue::from(array_size)])?;
+                    h = h - array_size + 1;
+                }
+                Operator::RefI31 | Operator::AnyConvertExtern | Operator::ExternConvertAny => {
+                    let (code, _) = e.raw(at);
+                    let b = WasmBytecode::from_wasm(code).ok_or_else(|| WasmError::unsupported(at, "constant operator"))?;
+                    let (d, x) = (e.reg(h - 1), e.reg(h - 1));
+                    e.emit(b, &[d, x])?;
+                }
                 other => return Err(WasmError::unsupported(at, format!("constant expression {other:?}"))),
             }
         }
         let base = e.reg(0);
         e.emit(WasmBytecode::Return, &[base, 1])?;
-        let f = WasmFunction { ty: u32::MAX, params: 0, results: 1, registers: e.registers + 1, code: e.enc.code.into(), bits: e.bits.into(), tables: e.tables.into() };
+        let f = WasmFunction { ty: u32::MAX, params: 0, results: 1, registers: e.registers + 1, code: e.enc.code.into(), bits: e.bits.into(), tables: e.tables.into(), handlers: Box::new([]) };
         self.module.inits.push(f);
         Ok(u32::try_from(self.module.inits.len() - 1).unwrap_or(0))
     }
@@ -705,7 +865,7 @@ impl ModuleBuilder<'_> {
         if let ValidPayload::Func(func, body) = validator.payload(&payload)? {
             let index = u32::try_from(self.module.functions.len()).unwrap_or(0);
             let ty = self.functions.get(index as usize).copied().unwrap_or(0);
-            let sig = &self.module.types[ty as usize];
+            let sig = self.module.func_type(ty);
             let (params, results) = (u32::try_from(sig.params.len()).unwrap_or(0), u32::try_from(sig.results.len()).unwrap_or(0));
             let v = func.into_validator(wasmparser::FuncValidatorAllocations::default());
             let f = Body { emitter: Emitter::new(self.bytes, 0), v, func: body }.compile(ty, params, results)?;
@@ -715,13 +875,12 @@ impl ModuleBuilder<'_> {
         match payload {
             Payload::TypeSection(r) => {
                 for group in r {
-                    let group = group?;
-                    for (_, sub) in group.into_types_and_offsets() {
-                        match &sub.composite_type.inner {
-                            CompositeInnerType::Func(f) => self.module.types.push(f.convert()),
-                            _ => return Err(WasmError::unsupported(0, "GC types")),
-                        }
+                    let mut n = 0u32;
+                    for (_, sub) in group?.into_types_and_offsets() {
+                        self.module.types.push(sub.convert());
+                        n += 1;
                     }
+                    self.module.groups.push(n);
                 }
             }
             Payload::ImportSection(r) => {
