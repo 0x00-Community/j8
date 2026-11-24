@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::rc::Rc;
+use std::sync::Arc;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -7,8 +7,8 @@ use wast::lexer::Lexer;
 use wast::parser::{self, ParseBuffer};
 use j8bytecode::{WasmFuncType, WasmGlobalType, WasmHeapType, WasmLimits, WasmMemoryType, WasmModule, WasmRefType, WasmTableType, WasmValType};
 use j8compiler::{CompileWasm, WasmError, WasmErrorKind};
-use j8executor::{WasmExtern, WasmInstantiateError, WasmLinkError, WasmRef, WasmStore, WasmTrap, WasmValue};
-use j8framework::{CreateParams, Isolate};
+use j8executor::{FuncBrand, GlobalBrand, InstanceBrand, MemoryBrand, TableBrand, TagBrand, TypesBrand, WasmCompiled, WasmExtern, WasmFunc, WasmHost, WasmInstantiateError, WasmLinkError, WasmRef, WasmStore, WasmThrow, WasmTrap, WasmTypes, WasmValue};
+use j8framework::{CreateParams, Isolate, Mutation, ScopeGlobal};
 use j8platform::DefaultPlatform;
 use wast::core::{NanPattern, V128Pattern, WastArgCore, WastRetCore};
 use wast::token::{Id, F32, F64};
@@ -68,115 +68,185 @@ struct Case {
     outcome: Outcome,
 }
 
+enum Stashed<'p> {
+    Func(ScopeGlobal<'p, FuncBrand>),
+    Table(ScopeGlobal<'p, TableBrand>),
+    Memory(ScopeGlobal<'p, MemoryBrand>),
+    Global(ScopeGlobal<'p, GlobalBrand>),
+    Tag(ScopeGlobal<'p, TagBrand>),
+}
+
+impl Stashed<'_> {
+    fn stash<'s>(mc: &Mutation<'s>, e: WasmExtern<'s>) -> Self {
+        match e {
+            WasmExtern::Func(x) => Self::Func(mc.stash(x)),
+            WasmExtern::Table(x) => Self::Table(mc.stash(x)),
+            WasmExtern::Memory(x) => Self::Memory(mc.stash(x)),
+            WasmExtern::Global(x) => Self::Global(mc.stash(x)),
+            WasmExtern::Tag(x) => Self::Tag(mc.stash(x)),
+        }
+    }
+
+    fn fetch<'s>(&self, mc: &Mutation<'s>) -> WasmExtern<'s> {
+        match self {
+            Self::Func(x) => WasmExtern::Func(mc.fetch(x)),
+            Self::Table(x) => WasmExtern::Table(mc.fetch(x)),
+            Self::Memory(x) => WasmExtern::Memory(mc.fetch(x)),
+            Self::Global(x) => WasmExtern::Global(mc.fetch(x)),
+            Self::Tag(x) => WasmExtern::Tag(mc.fetch(x)),
+        }
+    }
+}
+
+struct SpecHost;
+
+impl<'s> WasmHost<'s> for SpecHost {
+    fn call(&mut self, _: &Mutation<'s>, _: &'s WasmFunc<'s>, _: &WasmFuncType, _: &[(u64, u128)]) -> Result<Vec<(u64, u128)>, WasmThrow> {
+        Ok(Vec::new())
+    }
+}
+
 struct Spec<'p> {
     isolate: Isolate<'p>,
-    store: WasmStore<'p>,
-    spectest: HashMap<&'static str, WasmExtern>,
-    modules: HashMap<String, Rc<WasmModule>>,
-    instances: HashMap<String, u32>,
-    registered: HashMap<String, u32>,
-    current: Option<u32>,
+    st: State<'p>,
+}
+
+struct State<'p> {
+    types: Option<ScopeGlobal<'p, TypesBrand>>,
+    spectest: HashMap<&'static str, Stashed<'p>>,
+    modules: HashMap<String, Arc<WasmCompiled>>,
+    instances: Vec<ScopeGlobal<'p, InstanceBrand>>,
+    named: HashMap<String, usize>,
+    registered: HashMap<String, usize>,
+    current: Option<usize>,
     collect: bool,
+}
+
+impl State<'_> {
+    fn import<'s>(&self, mc: &Mutation<'s>, module: &str, name: &str) -> Option<WasmExtern<'s>> {
+        if module == "spectest" {
+            return self.spectest.get(name).map(|e| e.fetch(mc));
+        }
+        let inst = mc.fetch(&self.instances[*self.registered.get(module)?]);
+        WasmStore::export(inst.get(), name)
+    }
 }
 
 enum Run {
     Values(Vec<WasmValue>),
-    Trap(WasmTrap),
+    Trap(WasmThrow),
     Broken,
 }
 
 impl<'p> Spec<'p> {
     fn new(platform: &'p DefaultPlatform) -> Self {
-        let mut s = Self { isolate: Isolate::new(platform, CreateParams::default()), store: WasmStore::default(), spectest: HashMap::new(), modules: HashMap::new(), instances: HashMap::new(), registered: HashMap::new(), current: None, collect: std::env::var_os(COLLECT_ENV).is_some() };
-        s.spectest();
+        let mut s = Self {
+            isolate: Isolate::new(platform, CreateParams::default()),
+            st: State {
+            types: None,
+            spectest: HashMap::new(),
+            modules: HashMap::new(),
+            instances: Vec::new(),
+            named: HashMap::new(),
+            registered: HashMap::new(),
+            current: None,
+            collect: std::env::var_os(COLLECT_ENV).is_some(),
+            },
+        };
+        s.reset();
         s
     }
 
     fn reset(&mut self) {
-        self.store = WasmStore::default();
-        self.spectest.clear();
-        self.modules.clear();
-        self.instances.clear();
-        self.registered.clear();
-        self.current = None;
-        self.spectest();
-    }
-
-    fn spectest(&mut self) {
-        let s = self;
+        self.st.spectest.clear();
+        self.st.modules.clear();
+        self.st.instances.clear();
+        self.st.named.clear();
+        self.st.registered.clear();
+        self.st.current = None;
         let i32t = WasmValType::I32;
-        let print = |s: &mut WasmStore<'p>, params: &[WasmValType]| WasmExtern::Func(s.host_func(WasmFuncType { params: params.into(), results: Box::new([]) }, Box::new(|_| Ok(Vec::new()))));
-        for (name, params) in [("print", &[][..]), ("print_i32", &[i32t][..]), ("print_i64", &[WasmValType::I64][..]), ("print_f32", &[WasmValType::F32][..]), ("print_f64", &[WasmValType::F64][..]), ("print_i32_f32", &[i32t, WasmValType::F32][..]), ("print_f64_f64", &[WasmValType::F64, WasmValType::F64][..])] {
-            let f = print(&mut s.store, params);
-            s.spectest.insert(name, f);
-        }
-        let (isolate, store) = (&mut s.isolate, &mut s.store);
+        let prints = [("print", &[][..]), ("print_i32", &[i32t][..]), ("print_i64", &[WasmValType::I64][..]), ("print_f32", &[WasmValType::F32][..]), ("print_f64", &[WasmValType::F64][..]), ("print_i32_f32", &[i32t, WasmValType::F32][..]), ("print_f64_f64", &[WasmValType::F64, WasmValType::F64][..])];
         let globals = [("global_i32", i32t, WasmValue::I32(666)), ("global_i64", WasmValType::I64, WasmValue::I64(666)), ("global_f32", WasmValType::F32, WasmValue::F32(666.6_f32.to_bits())), ("global_f64", WasmValType::F64, WasmValue::F64(666.6_f64.to_bits()))];
         let funcref = WasmRefType { nullable: true, heap: WasmHeapType::Func };
-        let tables = [("table", false), ("table64", true)];
-        isolate.scope(|mc| {
+        let spectest = &mut self.st.spectest;
+        self.st.types = Some(self.isolate.scope(|mc| {
+            let types = WasmTypes::alloc(mc);
+            let mut host = SpecHost;
+            let store = WasmStore::new(mc, types, &mut host);
+            for (name, params) in prints {
+                let f = store.host_func(&WasmFuncType { params: params.into(), results: Box::new([]) }, 0);
+                spectest.insert(name, Stashed::stash(mc, WasmExtern::Func(f)));
+            }
             for (name, content, v) in globals {
-                s.spectest.insert(name, WasmExtern::Global(store.host_global(mc, WasmGlobalType { content, mutable: false }, v)));
+                let g = store.host_global(WasmGlobalType { content, mutable: false }, v.words());
+                spectest.insert(name, Stashed::stash(mc, WasmExtern::Global(g)));
             }
-            for (name, table64) in tables {
-                let t = store.host_table(mc, WasmTableType { element: funcref, limits: WasmLimits { min: 10, max: Some(20) }, table64 }, WasmValue::Ref(WasmRef::Null));
-                s.spectest.insert(name, WasmExtern::Table(t));
+            for (name, table64) in [("table", false), ("table64", true)] {
+                let t = store.host_table(WasmTableType { element: funcref, limits: WasmLimits { min: 10, max: Some(20) }, table64 }, 0);
+                spectest.insert(name, Stashed::stash(mc, WasmExtern::Table(t)));
             }
-        });
-        let m = s.store.host_memory(WasmMemoryType { limits: WasmLimits { min: 1, max: Some(2) }, memory64: false, shared: false, page_size_log2: 16 });
-        s.spectest.insert("memory", WasmExtern::Memory(m));
+            let m = store.host_memory(WasmMemoryType { limits: WasmLimits { min: 1, max: Some(2) }, memory64: false, shared: false, page_size_log2: 16 });
+            spectest.insert("memory", Stashed::stash(mc, WasmExtern::Memory(m)));
+            mc.stash(types)
+        }));
     }
 
-    fn import(&self, module: &str, name: &str) -> Option<WasmExtern> {
-        if module == "spectest" {
-            return self.spectest.get(name).copied();
-        }
-        self.store.export(*self.registered.get(module)?, name)
+    fn with<R>(&mut self, f: impl for<'s> FnOnce(&Mutation<'s>, &mut WasmStore<'_, 's>, &State<'p>) -> R) -> R {
+        let this = &self.st;
+        self.isolate.scope(|mc| {
+            let Some(types) = &this.types else { unreachable!("reset stashes the type registry") };
+            let mut host = SpecHost;
+            let mut store = WasmStore::new(mc, mc.fetch(types), &mut host);
+            f(mc, &mut store, this)
+        })
     }
 
-    fn instantiate(&mut self, m: &Rc<WasmModule>) -> Result<u32, WasmInstantiateError> {
-        let imports: Option<Vec<WasmExtern>> = m.imports.iter().map(|i| self.import(&i.module, &i.name)).collect();
-        let imports = imports.ok_or(WasmInstantiateError::Link(WasmLinkError::MissingImport))?;
-        let store = &mut self.store;
-        self.isolate.scope(|mc| store.instantiate(mc, m, &imports))
+    fn instantiate(&mut self, m: &Arc<WasmCompiled>) -> Result<usize, WasmInstantiateError> {
+        let r = self.with(|mc, store, this| {
+            let imports: Option<Vec<WasmExtern<'_>>> = m.module.imports.iter().map(|i| this.import(mc, &i.module, &i.name)).collect();
+            let imports = imports.ok_or(WasmInstantiateError::Link(WasmLinkError::MissingImport))?;
+            store.instantiate(m, &imports).map(|i| mc.stash(i))
+        })?;
+        self.st.instances.push(r);
+        Ok(self.st.instances.len() - 1)
     }
 
-    fn compile(bytes: &[u8]) -> Result<Rc<WasmModule>, WasmError> {
-        WasmModule::compile_wasm(bytes).map(Rc::new)
+    fn compile(bytes: &[u8]) -> Result<Arc<WasmCompiled>, WasmError> {
+        WasmModule::compile_wasm(bytes).map(|m| Arc::new(WasmCompiled::from(m)))
     }
 
     fn module(&mut self, wat: &mut QuoteWat<'_>, define: bool) -> Outcome {
         let name = wat.name().map(|i| i.name().to_owned());
         let Ok(bytes) = wat.encode() else { return Outcome::Fail };
         let Ok(m) = Self::compile(&bytes) else {
-            self.current = None;
+            self.st.current = None;
             return Outcome::Unsupported;
         };
         if define {
             if let Some(n) = name {
-                self.modules.insert(n, m);
+                self.st.modules.insert(n, m);
             }
             return Outcome::Pass;
         }
         match self.instantiate(&m) {
             Ok(i) => {
-                self.current = Some(i);
+                self.st.current = Some(i);
                 if let Some(n) = name {
-                    self.instances.insert(n, i);
+                    self.st.named.insert(n, i);
                 }
                 Outcome::Pass
             }
             Err(_) => {
-                self.current = None;
+                self.st.current = None;
                 Outcome::Fail
             }
         }
     }
 
-    fn target(&self, module: Option<Id<'_>>) -> Option<u32> {
+    fn target(&self, module: Option<Id<'_>>) -> Option<usize> {
         match module {
-            Some(id) => self.instances.get(id.name()).copied(),
-            None => self.current,
+            Some(id) => self.st.named.get(id.name()).copied(),
+            None => self.st.current,
         }
     }
 
@@ -195,14 +265,17 @@ impl<'p> Spec<'p> {
 
     fn invoke(&mut self, inv: &WastInvoke<'_>) -> Run {
         let Some(inst) = self.target(inv.module) else { return Run::Broken };
-        let Some(WasmExtern::Func(f)) = self.store.export(inst, inv.name) else { return Run::Broken };
         let Some(args) = inv.args.iter().map(Self::arg).collect::<Option<Vec<_>>>() else { return Run::Broken };
-        let store = &mut self.store;
-        match self.isolate.scope(|mc| store.invoke(mc, f, &args)) {
-            Ok(v) => Run::Values(v),
-            Err(WasmTrap::Unsupported) => Run::Broken,
-            Err(t) => Run::Trap(t),
-        }
+        let args: Vec<(u64, u128)> = args.iter().map(|a| a.words()).collect();
+        self.with(|mc, store, this| {
+            let Some(WasmExtern::Func(f)) = WasmStore::export(mc.fetch(&this.instances[inst]).get(), inv.name) else { return Run::Broken };
+            let ty = store.func_type(f.get());
+            match store.invoke(f, &args) {
+                Ok(v) => Run::Values(ty.results.iter().zip(v).map(|(&t, w)| store.value(t, w)).collect()),
+                Err(WasmThrow::Trap(WasmTrap::Unsupported)) => Run::Broken,
+                Err(t) => Run::Trap(t),
+            }
+        })
     }
 
     fn execute(&mut self, exec: &mut WastExecute<'_>) -> Run {
@@ -210,13 +283,10 @@ impl<'p> Spec<'p> {
             WastExecute::Invoke(inv) => self.invoke(inv),
             WastExecute::Get { module, global, .. } => {
                 let Some(inst) = self.target(*module) else { return Run::Broken };
-                match self.store.export(inst, global) {
-                    Some(WasmExtern::Global(g)) => {
-                        let store = &self.store;
-                        Run::Values(vec![self.isolate.scope(|mc| store.global_value(mc, g))])
-                    }
+                self.with(|mc, store, this| match WasmStore::export(mc.fetch(&this.instances[inst]).get(), global) {
+                    Some(WasmExtern::Global(g)) => Run::Values(vec![store.value(g.get().ty.content, g.get().get())]),
                     _ => Run::Broken,
-                }
+                })
             }
             WastExecute::Wat(w) => {
                 let Ok(bytes) = w.encode() else { return Run::Broken };
@@ -266,7 +336,7 @@ impl<'p> Spec<'p> {
             (WastRetCore::F32(p), WasmValue::F32(b)) => Self::nan32(*p, b),
             (WastRetCore::F64(p), WasmValue::F64(b)) => Self::nan64(*p, b),
             (WastRetCore::RefNull(_), WasmValue::Ref(WasmRef::Null))
-            | (WastRetCore::RefFunc(_), WasmValue::Ref(WasmRef::Func(_)))
+            | (WastRetCore::RefFunc(_), WasmValue::Ref(WasmRef::Func))
             | (WastRetCore::RefI31 | WastRetCore::RefEq, WasmValue::Ref(WasmRef::I31(_)))
             | (WastRetCore::RefStruct | WastRetCore::RefEq, WasmValue::Ref(WasmRef::Struct))
             | (WastRetCore::RefArray | WastRetCore::RefEq, WasmValue::Ref(WasmRef::Array)) => true,
@@ -283,12 +353,12 @@ impl<'p> Spec<'p> {
             WastDirective::Module(m) => self.module(m, false),
             WastDirective::ModuleDefinition(m) => self.module(m, true),
             WastDirective::ModuleInstance { instance, module, .. } => {
-                let Some(m) = module.and_then(|id| self.modules.get(id.name()).cloned()) else { return Outcome::Unsupported };
+                let Some(m) = module.and_then(|id| self.st.modules.get(id.name()).cloned()) else { return Outcome::Unsupported };
                 match self.instantiate(&m) {
                     Ok(i) => {
-                        self.current = Some(i);
+                        self.st.current = Some(i);
                         if let Some(id) = instance {
-                            self.instances.insert(id.name().to_owned(), i);
+                            self.st.named.insert(id.name().to_owned(), i);
                         }
                         Outcome::Pass
                     }
@@ -297,7 +367,7 @@ impl<'p> Spec<'p> {
             }
             WastDirective::Register { name, module, .. } => match self.target(*module) {
                 Some(i) => {
-                    self.registered.insert((*name).to_owned(), i);
+                    self.st.registered.insert((*name).to_owned(), i);
                     Outcome::Pass
                 }
                 None => Outcome::Unsupported,
@@ -321,12 +391,12 @@ impl<'p> Spec<'p> {
                 Run::Broken => Outcome::Unsupported,
             },
             WastDirective::AssertException { exec, .. } => match self.execute(exec) {
-                Run::Trap(WasmTrap::Exception) => Outcome::Pass,
+                Run::Trap(WasmThrow::Exception(_)) => Outcome::Pass,
                 Run::Broken => Outcome::Unsupported,
                 _ => Outcome::Fail,
             },
             WastDirective::AssertExhaustion { call, .. } => match self.invoke(call) {
-                Run::Trap(WasmTrap::CallStackExhausted) => Outcome::Pass,
+                Run::Trap(WasmThrow::Trap(WasmTrap::CallStackExhausted)) => Outcome::Pass,
                 Run::Broken => Outcome::Unsupported,
                 _ => Outcome::Fail,
             },
@@ -364,7 +434,7 @@ impl<'p> Spec<'p> {
                 let (line, _) = d.span().linecol_in(&text);
                 let kind = Kind::from(&d);
                 let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.run(&mut d))).unwrap_or(Outcome::Fail);
-                if self.collect {
+                if self.st.collect {
                     self.isolate.collect();
                 }
                 Case { id: format!("{rel}:{}", line + 1), kind, outcome }

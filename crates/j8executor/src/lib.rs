@@ -22,7 +22,7 @@ mod event_loop;
 use module::EVAL_FILE;
 
 pub use cache::CodeCache;
-pub use wasm::{WasmExtern, WasmHost, WasmInstantiateError, WasmLinkError, WasmRef, WasmStore, WasmTrap, WasmValue};
+pub use wasm::{CellsBrand, FuncBrand, GlobalBrand, InstanceBrand, MemoryBrand, TableBrand, TagBrand, TypesBrand, WasmCells, WasmCompiled, WasmExtern, WasmFunc, WasmGlobal, WasmHost, WasmInstance, WasmInstantiateError, WasmLinkError, WasmMemory, WasmRef, WasmStore, WasmTable, WasmTag, WasmThrow, WasmTrap, WasmTypes, WasmValue};
 pub use event_loop::{EventLoop, EventLoopSet, Ticket, CHECK, SLICE};
 pub use jit::{DeoptFrame, Entry, FrameSlots, Function as JitFunction, GlobalFeedback, Insn as JitInsn, PropertyFeedback, Reg as JitReg, ScopeLayout, StringFeedback, Tier, Tiered};
 

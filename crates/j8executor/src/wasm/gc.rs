@@ -1,11 +1,13 @@
 use alloc::boxed::Box;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-use j8bytecode::{Decoded, OperandValue, WasmBytecode, WasmCompositeType, WasmHeapType, WasmStorageType, WasmValType};
-use j8framework::paragc::{WORD_POINTER_MIN, word_pointer};
-use j8framework::{Collect, IsoCell, Mutation, ScopeLocal, WordSlot, gc_from_raw};
+use j8bytecode::{Decoded, OperandValue, WasmBytecode, WasmStorageType, WasmValType};
+use j8framework::paragc::WORD_POINTER_MIN;
+use j8framework::{Collect, IsoCell, Mutation, ScopeLocal, WordSlot};
 
-use super::types::{Field, Hierarchy, Layout, Types};
+use super::entity::{Ptr, WasmInstance, WasmTag};
+use super::types::{Field, Hierarchy, Layout};
 use super::{Slot, WasmStore, WasmTrap};
 
 const I31_TAG: u64 = 1 << 62;
@@ -15,24 +17,15 @@ const I31_SIGN: u32 = 1 << 30;
 const HOST_MASK: u64 = HOST_TAG - 1;
 const BYTE_MASK: u64 = 0xff;
 const SHORT_MASK: u64 = 0xffff;
-
-#[derive(Collect)]
-#[collect(no_drop)]
-pub struct WasmCells<'scope>(pub Box<[WordSlot<'scope>]>);
-
-j8framework::paragc::brand!(pub CellsBrand = for<'heap, 'scope> WasmCells<'scope>);
-
-impl<'scope> WasmCells<'scope> {
-    pub fn alloc(mc: &Mutation<'scope>, words: impl IntoIterator<Item = u64>) -> ScopeLocal<'scope, Self> {
-        mc.alloc(Self(words.into_iter().map(WordSlot::new).collect()))
-    }
-}
+const EXCEPTION: u32 = u32::MAX;
 
 #[derive(Collect)]
 #[collect(no_drop)]
 pub struct WasmObject<'scope> {
     head: u32,
     len: u32,
+    aux: WordSlot<'scope>,
+    js: WordSlot<'scope>,
     refs: Box<[WordSlot<'scope>]>,
     data: Box<[IsoCell<u64>]>,
 }
@@ -43,15 +36,17 @@ pub enum Word {
     I31(i32),
     Host(u32),
     Object(u64),
-    Func(u32),
+    Func(u64),
+    Js(u64),
 }
 
 impl Word {
     pub fn decode(w: u64, h: Hierarchy) -> Self {
         match w {
             0 => Self::Null,
-            _ if h == Hierarchy::Func => Self::Func(u32::try_from(w - 1).unwrap_or(u32::MAX)),
-            _ if w >= WORD_POINTER_MIN => Self::Object(w),
+            _ if h == Hierarchy::Func => Self::Func(w),
+            _ if Ptr::is_wasm(w) => Self::Object(w),
+            _ if w >= WORD_POINTER_MIN => Self::Js(w),
             _ if w & I31_TAG != 0 => {
                 let v = u32::try_from(w & I31_MASK).unwrap_or(0);
                 Self::I31(if v & I31_SIGN == 0 { v.cast_signed() } else { (v | !u32::try_from(I31_MASK).unwrap_or(0)).cast_signed() })
@@ -67,27 +62,37 @@ impl From<Word> for u64 {
             Word::Null => 0,
             Word::I31(v) => I31_TAG | (u64::from(v.cast_unsigned()) & I31_MASK),
             Word::Host(n) => HOST_TAG | u64::from(n),
-            Word::Object(w) => w,
-            Word::Func(a) => u64::from(a) + 1,
+            Word::Object(w) | Word::Func(w) | Word::Js(w) => w,
         }
     }
 }
 
 impl<'scope> WasmObject<'scope> {
     pub fn get(w: u64) -> Option<&'scope Self> {
-        word_pointer(w).map(|p| unsafe { gc_from_raw::<Self>(p.cast()) }.get())
+        Ptr::get(w)
     }
 
     pub fn head(&self) -> u32 {
         self.head
     }
 
-    pub fn alloc(mc: &Mutation<'scope>, head: u32, len: u32, layout: &Layout) -> u64 {
+    pub fn aux(&self) -> u64 {
+        self.aux.get()
+    }
+
+    fn make(mc: &Mutation<'scope>, head: u32, aux: u64, len: u32, layout: &Layout) -> u64 {
         let n = len.max(1);
         let refs = (0..layout.refs * n).map(|_| WordSlot::new(0)).collect();
         let data = (0..layout.words * n).map(|_| IsoCell::new(0)).collect();
-        let o = mc.alloc(Self { head, len, refs, data });
-        WORD_POINTER_MIN | u64::try_from(o.as_ptr().expose_provenance()).unwrap_or(0)
+        Ptr::of(mc.alloc(Self { head, len, aux: WordSlot::new(aux), js: WordSlot::new(0), refs, data }))
+    }
+
+    pub fn alloc(mc: &Mutation<'scope>, head: u32, len: u32, layout: &Layout) -> u64 {
+        Self::make(mc, head, 0, len, layout)
+    }
+
+    pub fn exception(mc: &Mutation<'scope>, tag: ScopeLocal<'scope, WasmTag<'scope>>, layout: &Layout) -> u64 {
+        Self::make(mc, EXCEPTION, Ptr::of(tag), 1, layout)
     }
 
     fn at(f: Field, i: u32, layout: &Layout) -> usize {
@@ -122,11 +127,10 @@ impl<'scope> WasmObject<'scope> {
     }
 }
 
-pub struct Objects<'a, 'p, 's> {
-    pub store: &'a mut WasmStore<'p>,
-    pub mc: &'a Mutation<'s>,
+pub struct Objects<'a, 'b, 'scope> {
+    pub store: &'a mut WasmStore<'b, 'scope>,
     pub fp: usize,
-    pub instance: u32,
+    pub instance: &'scope WasmInstance<'scope>,
 }
 
 impl Objects<'_, '_, '_> {
@@ -142,12 +146,16 @@ impl Objects<'_, '_, '_> {
     }
 
     fn ty(&self, t: OperandValue) -> u32 {
-        self.store.instances[self.instance as usize].types[usize::try_from(t).unwrap_or(0)]
+        self.instance.ty(usize::try_from(t).unwrap_or(0))
+    }
+
+    fn layout(&self, id: u32) -> Arc<Layout> {
+        self.store.registry().get(id).layout.clone()
     }
 
     fn array(&self, t: OperandValue) -> (u32, Field) {
         let id = self.ty(t);
-        (id, self.store.types.get(id).layout.fields[0])
+        (id, self.layout(id).fields[0])
     }
 
     fn object<'s>(w: u64, null: WasmTrap) -> Result<&'s WasmObject<'s>, WasmTrap> {
@@ -180,18 +188,17 @@ impl Objects<'_, '_, '_> {
     }
 
     fn elems(&self, seg: OperandValue) -> Vec<u64> {
-        let g = &self.store.instances[self.instance as usize].elems[usize::try_from(seg).unwrap_or(0)];
-        self.mc.fetch(g).get().0.iter().map(WordSlot::get).collect()
+        self.instance.elem(usize::try_from(seg).unwrap_or(0)).iter().map(WordSlot::get).collect()
     }
 
     #[expect(clippy::too_many_lines, reason = "one arm per GC bytecode")]
     pub fn run(mut self, d: &Decoded<WasmBytecode>) -> Result<(), WasmTrap> {
         let o = d.operands;
-        let mc = self.mc;
+        let mc = self.store.mc;
         match d.bytecode {
             WasmBytecode::StructNew | WasmBytecode::StructNewDefault => {
                 let id = self.ty(o[1]);
-                let layout = self.store.types.get(id).layout.clone();
+                let layout = self.layout(id);
                 let w = WasmObject::alloc(mc, id, 1, &layout);
                 if let (WasmBytecode::StructNew, Some(obj)) = (d.bytecode, WasmObject::get(w)) {
                     for (i, &f) in layout.fields.iter().enumerate() {
@@ -202,14 +209,14 @@ impl Objects<'_, '_, '_> {
             }
             WasmBytecode::StructGet | WasmBytecode::StructGetS | WasmBytecode::StructGetU => {
                 let obj = Self::object(self.reg(o[1]).0, WasmTrap::NullStructure)?;
-                let layout = &self.store.types.get(obj.head).layout;
+                let layout = &*self.layout(obj.head);
                 let f = layout.fields[usize::try_from(o[3]).unwrap_or(0)];
                 let (s, v) = obj.read(f, 0, layout);
                 self.set(o[0], (Self::unpack(f, s, d.bytecode == WasmBytecode::StructGetS), v));
             }
             WasmBytecode::StructSet => {
                 let obj = Self::object(self.reg(o[0]).0, WasmTrap::NullStructure)?;
-                let layout = &self.store.types.get(obj.head).layout;
+                let layout = &*self.layout(obj.head);
                 let f = layout.fields[usize::try_from(o[3]).unwrap_or(0)];
                 obj.write(mc, f, 0, layout, self.reg(o[1]));
             }
@@ -217,7 +224,7 @@ impl Objects<'_, '_, '_> {
                 let (len_reg, ty) = if d.bytecode == WasmBytecode::ArrayNew { (o[2], o[3]) } else { (o[1], o[2]) };
                 let (id, f) = self.array(ty);
                 let n = Slot(self.reg(len_reg).0).u32();
-                let layout = self.store.types.get(id).layout.clone();
+                let layout = self.layout(id);
                 let w = WasmObject::alloc(mc, id, n, &layout);
                 if d.bytecode == WasmBytecode::ArrayNew
                     && let Some(obj) = WasmObject::get(w)
@@ -232,7 +239,7 @@ impl Objects<'_, '_, '_> {
             WasmBytecode::ArrayNewFixed => {
                 let (id, f) = self.array(o[2]);
                 let n = u32::try_from(o[3]).unwrap_or(0);
-                let layout = self.store.types.get(id).layout.clone();
+                let layout = self.layout(id);
                 let w = WasmObject::alloc(mc, id, n, &layout);
                 if let Some(obj) = WasmObject::get(w) {
                     for i in 0..n {
@@ -245,9 +252,9 @@ impl Objects<'_, '_, '_> {
                 let (id, f) = self.array(o[2]);
                 let (s, n) = (self.reg(o[1]).0, self.reg(o[1] + 1).0);
                 let (s, n) = (Slot(s).u32(), Slot(n).u32());
-                let layout = self.store.types.get(id).layout.clone();
+                let layout = self.layout(id);
                 let items: Vec<(u64, u128)> = if d.bytecode == WasmBytecode::ArrayNewData {
-                    let bytes = self.store.instances[self.instance as usize].data[usize::try_from(o[3]).unwrap_or(0)].clone();
+                    let bytes = self.instance.data(usize::try_from(o[3]).unwrap_or(0));
                     let size = f.bytes();
                     let (start, end) = (s as usize, (s as usize).checked_add((n as usize).checked_mul(size).ok_or(WasmTrap::OutOfBoundsMemory)?).ok_or(WasmTrap::OutOfBoundsMemory)?);
                     let chunk = bytes.get(start..end).ok_or(WasmTrap::OutOfBoundsMemory)?;
@@ -268,7 +275,7 @@ impl Objects<'_, '_, '_> {
             WasmBytecode::ArrayGet | WasmBytecode::ArrayGetS | WasmBytecode::ArrayGetU => {
                 let obj = Self::object(self.reg(o[1]).0, WasmTrap::NullArray)?;
                 let i = Self::range(obj.len, self.reg(o[2]).0, 1)?.0;
-                let layout = &self.store.types.get(obj.head).layout;
+                let layout = &*self.layout(obj.head);
                 let f = layout.fields[0];
                 let (s, v) = obj.read(f, i, layout);
                 self.set(o[0], (Self::unpack(f, s, d.bytecode == WasmBytecode::ArrayGetS), v));
@@ -276,7 +283,7 @@ impl Objects<'_, '_, '_> {
             WasmBytecode::ArraySet => {
                 let obj = Self::object(self.reg(o[0]).0, WasmTrap::NullArray)?;
                 let i = Self::range(obj.len, self.reg(o[1]).0, 1)?.0;
-                let layout = &self.store.types.get(obj.head).layout;
+                let layout = &*self.layout(obj.head);
                 obj.write(mc, layout.fields[0], i, layout, self.reg(o[2]));
             }
             WasmBytecode::ArrayLen => {
@@ -287,7 +294,7 @@ impl Objects<'_, '_, '_> {
                 let obj = Self::object(self.reg(o[0]).0, WasmTrap::NullArray)?;
                 let (at, n) = Self::range(obj.len, self.reg(o[0] + 1).0, self.reg(o[0] + 3).0)?;
                 let v = self.reg(o[0] + 2);
-                let layout = &self.store.types.get(obj.head).layout;
+                let layout = &*self.layout(obj.head);
                 for i in at..at + n {
                     obj.write(mc, layout.fields[0], i, layout, v);
                 }
@@ -298,10 +305,10 @@ impl Objects<'_, '_, '_> {
                 let n = self.reg(o[0] + 4).0;
                 let (da, n) = Self::range(dst.len, self.reg(o[0] + 1).0, n)?;
                 let (sa, _) = Self::range(src.len, self.reg(o[0] + 3).0, u64::from(n))?;
-                let layout = &self.store.types.get(src.head).layout;
+                let layout = &*self.layout(src.head);
                 let f = layout.fields[0];
                 let items: Vec<(u64, u128)> = (sa..sa + n).map(|i| src.read(f, i, layout)).collect();
-                let layout = &self.store.types.get(dst.head).layout;
+                let layout = &*self.layout(dst.head);
                 for (i, v) in (da..da + n).zip(items) {
                     dst.write(mc, layout.fields[0], i, layout, v);
                 }
@@ -310,10 +317,10 @@ impl Objects<'_, '_, '_> {
                 let obj = Self::object(self.reg(o[0]).0, WasmTrap::NullArray)?;
                 let (da, s, n) = (self.reg(o[0] + 1).0, Slot(self.reg(o[0] + 2).0).u32(), self.reg(o[0] + 3).0);
                 let (da, n) = Self::range(obj.len, da, n)?;
-                let layout = self.store.types.get(obj.head).layout.clone();
+                let layout = self.layout(obj.head);
                 let f = layout.fields[0];
                 let items: Vec<(u64, u128)> = if d.bytecode == WasmBytecode::ArrayInitData {
-                    let bytes = self.store.instances[self.instance as usize].data[usize::try_from(o[2]).unwrap_or(0)].clone();
+                    let bytes = self.instance.data(usize::try_from(o[2]).unwrap_or(0));
                     let size = f.bytes();
                     let end = (s as usize).checked_add(n as usize * size).ok_or(WasmTrap::OutOfBoundsMemory)?;
                     bytes.get(s as usize..end).ok_or(WasmTrap::OutOfBoundsMemory)?.chunks(size).map(|c| Self::element(f, c)).collect()
@@ -353,40 +360,5 @@ impl Objects<'_, '_, '_> {
             _ => return Err(WasmTrap::Unsupported),
         }
         Ok(())
-    }
-}
-
-impl WasmStore<'_> {
-    pub fn test(&self, instance: u32, w: u64, ht: OperandValue, nullable: bool) -> bool {
-        let heap = match WasmHeapType::from(ht) {
-            WasmHeapType::Concrete(i) => WasmHeapType::Concrete(self.instances[instance as usize].types[i as usize]),
-            h => h,
-        };
-        self.matches(w, heap, nullable)
-    }
-
-    pub fn matches(&self, w: u64, heap: WasmHeapType, nullable: bool) -> bool {
-        let types: &Types = &self.types;
-        let h = types.hierarchy(heap);
-        let actual = match Word::decode(w, h) {
-            Word::Null => return nullable,
-            Word::I31(_) => WasmHeapType::I31,
-            Word::Host(_) => return matches!(heap, WasmHeapType::Any | WasmHeapType::Extern),
-            Word::Func(f) => WasmHeapType::Concrete(self.funcs[f as usize].canon),
-            Word::Object(w) => match h {
-                Hierarchy::Exn => WasmHeapType::Exn,
-                Hierarchy::Extern => WasmHeapType::Extern,
-                _ => WasmObject::get(w).map_or(WasmHeapType::None, |o| WasmHeapType::Concrete(o.head)),
-            },
-        };
-        match h {
-            Hierarchy::Extern => heap == WasmHeapType::Extern,
-            Hierarchy::Exn => heap == WasmHeapType::Exn,
-            _ => types.heap_sub(actual, heap),
-        }
-    }
-
-    pub fn composite(&self, w: u64) -> Option<&WasmCompositeType> {
-        WasmObject::get(w).map(|o| &self.types.get(o.head).sub.composite)
     }
 }

@@ -1,5 +1,6 @@
 use j8bytecode::{Decoded, WasmBytecode};
 
+use super::entity::WasmInstance;
 use super::{Float, Slot, WasmStore, WasmTrap};
 
 pub trait Lane: Copy + Default {
@@ -76,13 +77,13 @@ impl Sat {
     }
 }
 
-pub struct Vector<'s, 'p> {
-    pub store: &'s mut WasmStore<'p>,
+pub struct Vector<'a, 'b, 'scope> {
+    pub store: &'a mut WasmStore<'b, 'scope>,
     pub fp: usize,
-    pub instance: u32,
+    pub instance: &'scope WasmInstance<'scope>,
 }
 
-impl Vector<'_, '_> {
+impl Vector<'_, '_, '_> {
     #[expect(clippy::too_many_lines, clippy::cast_possible_truncation, clippy::cast_sign_loss, clippy::cast_possible_wrap, clippy::cast_precision_loss, clippy::float_cmp, clippy::cast_lossless, reason = "one arm per SIMD bytecode, lane-wise with WebAssembly's wrapping semantics")]
     pub fn run(self, d: &Decoded<WasmBytecode>, bits: &[u64]) -> Result<(), WasmTrap> {
         let (fp, instance) = (self.fp, self.instance);
@@ -220,10 +221,10 @@ impl Vector<'_, '_> {
         }
         macro_rules! load {
             ($n:literal) => {{
-                let m = self.store.mem(instance, o[2]);
-                let a = self.store.address(m, s!(1), o[3], $n)?;
+                let m = instance.memory(o[2]);
+                let a = m.address(s!(1), o[3], $n)?;
                 let mut b = [0u8; $n];
-                b.copy_from_slice(&self.store.memories[m].bytes[a..a + $n]);
+                b.copy_from_slice(&m.data()[a..a + $n]);
                 b
             }};
         }
@@ -236,9 +237,9 @@ impl Vector<'_, '_> {
         }
         macro_rules! lane_load {
             ($t:ty, $n:literal) => {{
-                let m = self.store.mem(instance, o[3]);
-                let a = self.store.address(m, s!(1), o[4], <$t>::BYTES)?;
-                let x = <$t>::read(&self.store.memories[m].bytes[a..a + <$t>::BYTES]);
+                let m = instance.memory(o[3]);
+                let a = m.address(s!(1), o[4], <$t>::BYTES)?;
+                let x = <$t>::read(&m.data()[a..a + <$t>::BYTES]);
                 let mut l: [$t; $n] = Lane::split(v!(2));
                 l[o[5] as usize % $n] = x;
                 v!(0) = Lane::join(l);
@@ -246,10 +247,10 @@ impl Vector<'_, '_> {
         }
         macro_rules! lane_store {
             ($t:ty, $n:literal) => {{
-                let m = self.store.mem(instance, o[2]);
-                let a = self.store.address(m, s!(0), o[3], <$t>::BYTES)?;
+                let m = instance.memory(o[2]);
+                let a = m.address(s!(0), o[3], <$t>::BYTES)?;
                 let l: [$t; $n] = Lane::split(v!(1));
-                l[o[4] as usize % $n].write(&mut self.store.memories[m].bytes[a..a + <$t>::BYTES]);
+                l[o[4] as usize % $n].write(&mut m.data()[a..a + <$t>::BYTES]);
             }};
         }
         macro_rules! fma {
@@ -523,10 +524,10 @@ impl Vector<'_, '_> {
             WasmBytecode::S128Load32Lane => lane_load!(u32, 4),
             WasmBytecode::S128Load64Lane => lane_load!(u64, 2),
             WasmBytecode::S128StoreMem => {
-                let m = self.store.mem(instance, o[2]);
-                let a = self.store.address(m, s!(0), o[3], 16)?;
+                let m = instance.memory(o[2]);
+                let a = m.address(s!(0), o[3], 16)?;
                 let b = v!(1).to_le_bytes();
-                self.store.memories[m].bytes[a..a + 16].copy_from_slice(&b);
+                m.data()[a..a + 16].copy_from_slice(&b);
             }
             WasmBytecode::S128Store8Lane => lane_store!(u8, 16),
             WasmBytecode::S128Store16Lane => lane_store!(u16, 8),

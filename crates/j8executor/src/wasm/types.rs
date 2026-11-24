@@ -1,5 +1,6 @@
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use j8bytecode::{WasmCompositeType, WasmFieldType, WasmFuncType, WasmHeapType, WasmModule, WasmRefType, WasmStorageType, WasmSubType, WasmValType};
@@ -67,7 +68,7 @@ impl<'a> FromIterator<&'a WasmStorageType> for Layout {
 
 pub struct TypeInfo {
     pub sub: WasmSubType,
-    pub layout: Layout,
+    pub layout: Arc<Layout>,
 }
 
 #[derive(Default)]
@@ -110,7 +111,7 @@ impl Types {
                 WasmCompositeType::Array(f) => core::iter::once(&f.storage).collect(),
                 WasmCompositeType::Func(_) => Layout::default(),
             };
-            self.list.push(TypeInfo { sub, layout });
+            self.list.push(TypeInfo { sub, layout: Arc::new(layout) });
         }
         self.groups.insert(key, base);
         base
