@@ -74,6 +74,18 @@ impl<'scope> Mutation<'scope> {
         self.gc_scope().alloc(v)
     }
 
+    #[cfg(all(target_os = "linux", feature = "crossheap"))]
+    #[inline]
+    pub fn alloc_shareable<T: Trace + paragc::Shared + 'scope>(&self, v: T) -> ScopeLocal<'scope, T> {
+        self.gc_scope().alloc_shared(v)
+    }
+
+    #[cfg(not(all(target_os = "linux", feature = "crossheap")))]
+    #[inline]
+    pub fn alloc_shareable<T: Trace + 'scope>(&self, v: T) -> ScopeLocal<'scope, T> {
+        self.gc_scope().alloc(v)
+    }
+
     #[inline]
     pub fn generation(&self) -> u64 {
         self.generation
@@ -187,9 +199,17 @@ unsafe impl<T: Trace> Trace for Snap<T> {
 
 const WRITING: usize = 1 << (usize::BITS - 1);
 
+#[repr(C)]
 pub struct GcCell<'scope, T> {
     state: IsoCell<usize>,
     snap: Slot<'scope, Snap<T>>,
+}
+
+#[cfg(all(target_os = "linux", feature = "crossheap"))]
+unsafe impl<T: Send + Sync> paragc::Shared for GcCell<'_, T> {
+    fn edges(map: &mut paragc::EdgeMap, at: u32) {
+        <Slot<'_, Snap<T>> as paragc::Shared>::edges(map, at + paragc::EdgeMap::offset(core::mem::offset_of!(GcCell<'static, ()>, snap)));
+    }
 }
 
 impl<'scope, T: Trace + 'scope> GcCell<'scope, T> {
@@ -323,7 +343,24 @@ impl<T> Drop for CellMut<'_, T> {
     }
 }
 
+#[repr(transparent)]
 pub struct ValueCell<'scope>(WordSlot<'scope>);
+
+#[cfg(all(target_os = "linux", feature = "crossheap"))]
+unsafe impl paragc::Shared for ValueCell<'_> {
+    fn edges(map: &mut paragc::EdgeMap, at: u32) {
+        <WordSlot<'_> as paragc::Shared>::edges(map, at);
+    }
+}
+
+#[cfg(all(target_os = "linux", feature = "crossheap"))]
+unsafe impl<T: paragc::Shared + Copy + Send> paragc::Shared for IsoCell<T> {
+    const NO_EDGES: bool = T::NO_EDGES;
+
+    fn edges(map: &mut paragc::EdgeMap, at: u32) {
+        T::edges(map, at);
+    }
+}
 
 impl<'scope> ValueCell<'scope> {
     pub fn new(v: Value<'scope>) -> Self {

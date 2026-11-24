@@ -111,7 +111,7 @@ pub struct Shape<'scope> {
     digit_keys: u32,
 }
 
-const _: () = assert!(core::mem::size_of::<Shape<'static>>() % 8 == 0, "the key table starts right after the shape");
+const _: () = assert!(core::mem::size_of::<Shape<'static>>().is_multiple_of(8), "the key table starts right after the shape");
 
 unsafe impl crate::Trace for Shape<'_> {
     fn trace(&self, t: &mut crate::Tracer<'_>) {
@@ -205,7 +205,7 @@ impl<'scope> Shape<'scope> {
     }
 
     fn side(&self) -> Option<&ShapeSide<'scope>> {
-        self.side.get().map(|s| ScopeLocal::get(s))
+        self.side.get().map(ScopeLocal::get)
     }
 
     fn side_or_new(&self, mc: &Mutation<'scope>) -> &ShapeSide<'scope> {
@@ -245,7 +245,7 @@ impl<'scope> Shape<'scope> {
         Attrs(self.attr_bytes()[i])
     }
 
-    pub fn rooted(mc: &Mutation<'scope>, keys: Vec<(SmallStr, Attrs)>) -> ShapeRef<'scope> {
+    pub fn rooted(mc: &Mutation<'scope>, keys: &[(SmallStr, Attrs)]) -> ShapeRef<'scope> {
         Self::build(mc, keys.iter().map(|(k, a)| (&**k, *a)))
     }
 
@@ -296,11 +296,13 @@ impl Dict<'_> {
     }
 }
 
+#[repr(C)]
+#[cfg_attr(all(target_os = "linux", feature = "crossheap"), derive(paragc::Shared))]
 pub struct Props<'scope> {
-    shape: HandleSlot<'scope, Shape<'scope>>,
+    inline: [ValueCell<'scope>; INLINE],
     store: GcSlot<'scope, Erased>,
     dict: GcSlot<'scope, GcCell<'scope, Dict<'scope>>>,
-    inline: [ValueCell<'scope>; INLINE],
+    shape: HandleSlot<'scope, Shape<'scope>>,
 }
 
 impl Default for Props<'_> {
@@ -571,7 +573,7 @@ impl<'scope> Props<'scope> {
                 Some(f) => f.child(mc, key, attrs),
                 None => match root() {
                     Some(r) => r.child(mc, key, attrs),
-                    None => Shape::rooted(mc, alloc::vec![(SmallStr::from(key), attrs)]),
+                    None => Shape::rooted(mc, &[(SmallStr::from(key), attrs)]),
                 },
             };
             if self.advance(mc, from, to, prop.slot) {

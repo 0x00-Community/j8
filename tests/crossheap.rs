@@ -23,7 +23,6 @@ struct Local {
     value: u64,
 }
 
-#[test]
 fn shared_objects_are_signed_when_the_turn_ends() {
     let space = CrossHeapSpace::reserve_fixed().unwrap();
     let platform = DefaultPlatform::default();
@@ -56,4 +55,41 @@ fn shared_objects_are_signed_when_the_turn_ends() {
     assert_eq!(text(tickets.3), Some(("中文ñ😀".to_owned(), "中文ñ😀".encode_utf16().collect())), "a wide string keeps its UTF-16 units");
     isolate.collect();
     assert_eq!(read(&isolate), None, "a signature keeps nothing alive");
+}
+
+fn two_turns(setup: &str, check: &str) -> String {
+    let space = CrossHeapSpace::reserve_fixed().unwrap();
+    let platform = DefaultPlatform::default();
+    let mut isolate = Isolate::new(&platform, CreateParams::default());
+    isolate.attach_cross_heap(unsafe { space.create_anonymous_unchecked(THREADS) }.unwrap()).unwrap();
+    let executor = j8executor::Executor::default();
+    let cx = isolate.create_context(&j8builtins::Builtins);
+    executor.eval(&mut isolate, &cx, &j8framework::Source { text: setup, file: "setup.js" }).unwrap();
+    isolate.collect();
+    let r = executor.eval(&mut isolate, &cx, &j8framework::Source { text: check, file: "check.js" });
+    let out = isolate.enter(&cx, &executor, |scope| match r {
+        Ok(g) => scope.to_string(*scope.mc.fetch(&g)).map_or_else(|_| String::from("?"), |s| String::from(&**s)),
+        Err(e) => {
+            let v = scope.take_exception();
+            format!("error {e:?}: {}", scope.to_string(v).map_or_else(|_| String::from("?"), |s| String::from(&**s)))
+        }
+    });
+    isolate.collect();
+    out
+}
+
+fn js_objects_keep_working_after_promotion() {
+    assert_eq!(two_turns("var o = {a: 1, b: 'x', c: [1, 2, {d: true}]};", "o.a + o.b + o.c[2].d + o.c.length"), "1xtrue3");
+    assert_eq!(two_turns("var o = {f: function () { return 5; }};", "o.f()"), "5");
+    assert_eq!(two_turns("function F() {} F.prototype.g = function () { return 6; }; var o = new F();", "o.g()"), "6");
+    assert_eq!(two_turns("var o = {};", "o.toString()"), "[object Object]");
+    assert_eq!(two_turns("var a = [3, 1, 2];", "a.sort().join()"), "1,2,3");
+    assert_eq!(two_turns("var z = 1;", "Object.getOwnPropertyNames(JSON).join() + JSON.stringify({a: [1, 'x']})"), "parse,stringify{\"a\":[1,\"x\"]}");
+    assert_eq!(two_turns("var o = {a: 1}; o.b = 2; delete o.a;", "o.c = 3; Object.keys(o).join()"), "b,c");
+}
+
+#[test]
+fn cross_heap_scenarios() {
+    shared_objects_are_signed_when_the_turn_ends();
+    js_objects_keep_working_after_promotion();
 }

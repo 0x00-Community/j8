@@ -30,6 +30,7 @@ const MIN_LEAF: usize = 2;
 
 #[repr(C)]
 #[derive(Collect)]
+#[cfg_attr(all(target_os = "linux", feature = "crossheap"), derive(paragc::Shared))]
 struct Leaf<'scope, const N: usize> {
     head: usize,
     cells: [ValueCell<'scope>; N],
@@ -37,6 +38,7 @@ struct Leaf<'scope, const N: usize> {
 
 #[repr(C)]
 #[derive(Collect)]
+#[cfg_attr(all(target_os = "linux", feature = "crossheap"), derive(paragc::Shared))]
 struct Node<'scope> {
     head: usize,
     kids: [GcSlot<'scope, Erased>; FAN],
@@ -57,7 +59,7 @@ pub struct StorePath {
 impl<'scope> Store<'scope> {
     fn leaf(mc: &Mutation<'scope>, cap: usize, init: &[Value<'scope>]) -> Self {
         fn make<'scope, const N: usize>(mc: &Mutation<'scope>, init: &[Value<'scope>]) -> ScopeLocal<'scope, Erased> {
-            erase(mc.alloc(Leaf::<N> { head: N, cells: core::array::from_fn(|i| ValueCell::new(init.get(i).copied().unwrap_or_default())) }))
+            erase(mc.alloc_shareable(Leaf::<N> { head: N, cells: core::array::from_fn(|i| ValueCell::new(init.get(i).copied().unwrap_or_default())) }))
         }
         Self(match cap.max(init.len()).max(MIN_LEAF).next_power_of_two() {
             2 => make::<2>(mc, init),
@@ -73,7 +75,7 @@ impl<'scope> Store<'scope> {
 
     fn node(mc: &Mutation<'scope>, level: usize, first: Option<Self>) -> Self {
         let kids = core::array::from_fn(|i| GcSlot::from(if i == 0 { first.map(|s| s.0) } else { None }));
-        Self(erase(mc.alloc(Node { head: NODE + level, kids, tail_meta: IsoCell::new(0), tail: GcSlot::default() })))
+        Self(erase(mc.alloc_shareable(Node { head: NODE + level, kids, tail_meta: IsoCell::new(0), tail: GcSlot::default() })))
     }
 
     fn head(self) -> usize {
@@ -282,9 +284,11 @@ impl<'scope> Store<'scope> {
 }
 
 #[derive(Default)]
+#[repr(C)]
+#[cfg_attr(all(target_os = "linux", feature = "crossheap"), derive(paragc::Shared))]
 pub struct ValueArray<'scope> {
-    len: IsoCell<u32>,
     root: GcSlot<'scope, Erased>,
+    len: IsoCell<u32>,
 }
 
 unsafe impl crate::Trace for ValueArray<'_> {
