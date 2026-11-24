@@ -44,7 +44,7 @@ Real hosts rarely handle isolates directly; they declare a runtime with `j8::run
 ## Running JS with dune
 
 ```sh
-curl -fsSL https://j8.app238.com/install | bash   # or npm i -g @jabberwocky238/dune, see Installing dune
+curl -fsSL https://j8.app238.com/install | bash   # or npm i -g @j8dune/dune, see Installing dune
 dune app.js                    # Node-compatible layer (default)
 dune --web app.mjs             # Web-standard APIs only
 dune -p '[1, 2, 3].map(x => x * 2)'

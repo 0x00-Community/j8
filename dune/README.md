@@ -25,7 +25,7 @@ This is a package of its own (not part of the j8 workspace) and depends on the p
 ```sh
 curl -fsSL https://j8.app238.com/install | bash               # macOS, Linux: into ~/.dune/bin
 powershell -c "irm https://j8.app238.com/install.ps1 | iex"   # Windows
-npm install -g @jabberwocky238/dune                            # prebuilt binary for your platform, dune and dunx
+npm install -g @j8dune/dune                            # prebuilt binary for your platform, dune and dunx
 cargo install j8dune      # or build it (the name dune is taken on crates.io); then ln -s dune ~/.cargo/bin/dunx
 dune upgrade              # replace itself with the latest GitHub release
 ```
@@ -36,8 +36,8 @@ with npm trusted publishing (`.github/workflows/dune-release.yml`); the same tag
 crates.io with the `CRATE_TOKEN` secret (`.github/workflows/j8-release.yml`, crates.io only), and the dune build waits for that j8. The install scripts are served from `mdbook/install/`.
 
 There is one executable. `dunx` is a link to `dune`, which tells the two apart by the name it is started under, as
-`bun` / `bunx` do. On npm, `@jabberwocky238/dune` carries placeholders and depends on one package per platform
-(`@jabberwocky238/dune-linux-x64`, `@jabberwocky238/dune-darwin-arm64`, `@jabberwocky238/dune-win32-x64`, ...); npm installs the one that
+`bun` / `bunx` do. On npm, `@j8dune/dune` carries placeholders and depends on one package per platform
+(`@j8dune/dune-linux-x64`, `@j8dune/dune-darwin-arm64`, `@j8dune/dune-win32-x64`, ...); npm installs the one that
 fits, and the postinstall script puts its binary in place of the placeholders and links `dunx` to it. `npm/` holds
 the main package and `npm/pack.js`, which lays out all the packages of a release from the built binaries.
 

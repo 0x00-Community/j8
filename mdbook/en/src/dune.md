@@ -9,14 +9,14 @@ published `j8` as an embedder would: it is itself the complete example of [embed
 ```sh
 curl -fsSL https://j8.app238.com/install | bash                 # macOS, Linux
 powershell -c "irm https://j8.app238.com/install.ps1 | iex"     # Windows
-npm install -g @jabberwocky238/dune
+npm install -g @j8dune/dune
 cargo install j8dune              # the name dune is taken on crates.io; then ln -s dune ~/.cargo/bin/dunx
 dune upgrade                      # replace itself with the latest GitHub release
 ```
 
-See [Installing dune](install.md) for every option. The npm channel works the way Bun's does (`dune/npm/`): the main package `@jabberwocky238/dune` carries placeholders and
-depends, through `optionalDependencies`, on one package per platform (`@jabberwocky238/dune-linux-x64`,
-`@jabberwocky238/dune-darwin-arm64`, `@jabberwocky238/dune-win32-x64` …). npm installs only the one that fits, and the postinstall script hard-links its
+See [Installing dune](install.md) for every option. The npm channel works the way Bun's does (`dune/npm/`): the main package `@j8dune/dune` carries placeholders and
+depends, through `optionalDependencies`, on one package per platform (`@j8dune/dune-linux-x64`,
+`@j8dune/dune-darwin-arm64`, `@j8dune/dune-win32-x64` …). npm installs only the one that fits, and the postinstall script hard-links its
 binary over the placeholders and links `dunx` to it, so `dune` starts without Node. With `--ignore-scripts` the
 placeholders start the binary through Node. `npm/pack.js` lays out every package of a release from the built binaries.
 
