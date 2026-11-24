@@ -782,7 +782,7 @@ pub enum ObjectKind<'scope> {
     Bound(Box<Bound<'scope>>),
     Iterator(IteratorState<'scope>),
     Coroutine(Box<Coroutine<'scope>>),
-    Promise { state: Settled<'scope>, reactions: Vec<Reaction<'scope>> },
+    Promise { state: Settled<'scope>, reactions: Vec<Reaction<'scope>>, handled: bool },
     Resolver { promise: JsObject<'scope>, reject: bool, done: ScopeLocal<'scope, core::sync::atomic::AtomicBool> },
     RegExp(RegExpData<'scope>),
     Primitive(Value<'scope>),

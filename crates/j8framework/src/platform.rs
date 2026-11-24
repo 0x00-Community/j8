@@ -26,4 +26,8 @@ pub trait Platform: Sync + Pool {
     }
 
     fn print(&self, line: &str);
+
+    fn unhandled_rejection<'scope>(&self, scope: &mut crate::Scope<'scope, '_>, promise: crate::JsObject<'scope>, reason: crate::Value<'scope>) {
+        let _ = (scope, promise, reason);
+    }
 }

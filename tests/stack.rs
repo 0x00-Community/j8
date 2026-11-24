@@ -1,4 +1,7 @@
-use j8::frame::{Error, Scope};
+use std::sync::Mutex;
+use std::time::Duration;
+
+use j8::frame::{Error, JsObject, Platform, Pool, Scope, Task, Value};
 use j8executor::Executor;
 use j8platform::DefaultPlatform;
 
@@ -14,6 +17,37 @@ impl Probe {
 j8::runtime! {
     Stacks {
         globals: [Probe],
+    }
+}
+
+#[derive(Default)]
+struct Recorder {
+    inner: DefaultPlatform,
+    rejections: Mutex<Vec<String>>,
+}
+
+impl Pool for Recorder {
+    fn threads(&self) -> usize {
+        self.inner.threads()
+    }
+
+    fn run(&self, jobs: Vec<Task<'_>>) {
+        self.inner.run(jobs);
+    }
+}
+
+impl Platform for Recorder {
+    fn now(&self) -> Duration {
+        self.inner.now()
+    }
+
+    fn print(&self, line: &str) {
+        self.inner.print(line);
+    }
+
+    fn unhandled_rejection<'scope>(&self, scope: &mut Scope<'scope, '_>, _: JsObject<'scope>, reason: Value<'scope>) {
+        let text = scope.stack_text(reason).map_or_else(|_| String::from("<threw>"), |s| String::from(&**s));
+        self.rejections.lock().expect("not poisoned").push(text);
     }
 }
 
@@ -74,6 +108,27 @@ fn host_reads_structured_call_sites() {
 fn uncaught_exception_text_carries_the_stack() {
     let got = eval("function f() {\n  return null.x;\n}\nf();", "main.js").expect_err("the script throws");
     assert!(got.ends_with("\n    at f (main.js:2:15)\n    at main.js:4:1"), "{got}");
+}
+
+#[test]
+fn unhandled_rejections_reach_the_platform() {
+    let platform = Stacks::platform(Recorder::default());
+    j8::EventLoopSet::scope(&platform, std::num::NonZeroUsize::MIN, |set| {
+        let rt = Stacks::runtime(set, Executor::default()).expect("runtime");
+        let script = "Promise.reject(new Error('lost'));
+Promise.reject(1).catch(() => {});
+async function work() {
+  await null;
+  throw new TypeError('async');
+}
+work();
+const late = Promise.reject(2);
+late.then(null, () => {});";
+        rt.eval(script, "async.js").expect("script runs");
+        rt.run_until_idle().expect("loop runs");
+    });
+    let seen = platform.inner().rejections.lock().expect("not poisoned").clone();
+    assert_eq!(seen, ["Error: lost\n    at async.js:1:16", "TypeError: async\n    at work (async.js:5:9)"]);
 }
 
 #[test]

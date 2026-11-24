@@ -420,7 +420,27 @@ For a JS callback that should run more than once (an event handler), keep a `j8:
 a future pending, and stop by settling it. A cleared timer should settle its promise (dune's `Timer::cancel`), or the
 loop waits for it.
 
-### 5.6 What the event loop does not do yet
+### 5.6 Unhandled rejections
+
+When the microtasks have drained, every promise that was rejected and still has no handler goes to
+`Platform::unhandled_rejection` (Node's `unhandledRejection`). The default does nothing; `HostPlatform` hands it to
+the platform it wraps:
+
+```rust,ignore
+impl Platform for MyPlatform {
+    fn unhandled_rejection<'scope>(&self, a: &mut Scope<'scope, '_>, _promise: JsObject<'scope>, reason: Value<'scope>) {
+        if let Ok(text) = a.stack_text(reason) {
+            eprintln!("Uncaught (in promise) {}", &**text);
+        }
+    }
+    // now, print, … as before
+}
+```
+
+A handler attached before the microtasks drain (`await`, `then`, `catch`) takes the promise off the list. One attached
+on a later turn does not take back a report.
+
+### 5.7 What the event loop does not do yet
 
 - **No reactor.** Futures that need tokio's (or another runtime's) reactor never wake. Run such work on a thread
   or a reactor of your own.
@@ -433,7 +453,7 @@ loop waits for it.
 - **A panic in a future propagates out of the loop** (out of `eval` / `run_until_idle`). An error while settling
   stops the loop with the remaining work still queued.
 - **Microtasks are not sliced.** A settlement drains its microtasks to the end in one turn.
-- **Not supported yet:** reporting unhandled rejections, top-level `await`.
+- **Not supported yet:** top-level `await`.
 
 ## 6. Modules
 

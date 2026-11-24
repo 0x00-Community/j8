@@ -30,6 +30,7 @@ pub trait Platform: Pool {
     fn wall_clock(&self) -> Duration;             // Date 用
     fn print(&self, line: &str);                  // console.log
     fn load_module(&self, referrer: &str, specifier: &str) -> Option<(String, String)>;  // (规范化名字, 源码)
+    fn unhandled_rejection(&self, scope: &mut Scope, promise: JsObject, reason: Value);           // 默认什么也不做
 }
 ```
 

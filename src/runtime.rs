@@ -56,6 +56,10 @@ impl<H: Host, P: Platform> Platform for HostPlatform<H, P> {
     fn print(&self, line: &str) {
         self.inner.print(line);
     }
+
+    fn unhandled_rejection<'scope>(&self, scope: &mut Scope<'scope, '_>, promise: j8framework::JsObject<'scope>, reason: Value<'scope>) {
+        self.inner.unhandled_rejection(scope, promise, reason);
+    }
 }
 
 pub struct Runtime<'p> {

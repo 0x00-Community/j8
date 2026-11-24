@@ -7,7 +7,7 @@ use crate::{Scope, Error, ErrorKind, HostReaction, Job, JsObject, ObjectData, Ob
 
 impl<'scope> Scope<'scope, '_> {
     pub fn new_promise(&self) -> JsObject<'scope> {
-        ObjectData { kind: ObjectKind::Promise { state: Settled::Pending, reactions: Vec::new() }, proto: Some(self.context.promise_proto), ..ObjectData::default() }.alloc(self.mc)
+        ObjectData { kind: ObjectKind::Promise { state: Settled::Pending, reactions: Vec::new(), handled: false }, proto: Some(self.context.promise_proto), ..ObjectData::default() }.alloc(self.mc)
     }
 
     pub fn is_promise(v: Value<'scope>) -> bool {
@@ -41,15 +41,18 @@ impl<'scope> Scope<'scope, '_> {
     }
 
     fn settle(&mut self, promise: JsObject<'scope>, value: Value<'scope>, rejected: bool) {
-        let reactions = {
+        let (reactions, handled) = {
             let mut d = promise.borrow_mut(self.mc);
-            let ObjectKind::Promise { state, reactions } = &mut d.kind else { return };
+            let ObjectKind::Promise { state, reactions, handled } = &mut d.kind else { return };
             if !matches!(state, Settled::Pending) {
                 return;
             }
             *state = if rejected { Settled::Rejected(value) } else { Settled::Fulfilled(value) };
-            core::mem::take(reactions)
+            (core::mem::take(reactions), *handled)
         };
+        if rejected && !handled {
+            self.context.rejections.push(self.mc, promise);
+        }
         for reaction in reactions {
             self.enqueue(Job::Reaction { reaction, value, rejected });
         }
@@ -87,7 +90,8 @@ impl<'scope> Scope<'scope, '_> {
     pub fn perform_then(&mut self, promise: JsObject<'scope>, reaction: Reaction<'scope>) {
         let settled = {
             let mut d = promise.borrow_mut(self.mc);
-            let ObjectKind::Promise { state, reactions } = &mut d.kind else { return };
+            let ObjectKind::Promise { state, reactions, handled } = &mut d.kind else { return };
+            *handled = true;
             match *state {
                 Settled::Pending => {
                     reactions.push(reaction);
@@ -258,8 +262,20 @@ impl<'scope> Scope<'scope, '_> {
             let job = self.context.jobs.pop(self.mc);
             match job {
                 Some(j) => self.run_job(j)?,
+                None if self.report_rejections() => {}
                 None => return Ok(()),
             }
         }
+    }
+
+    fn report_rejections(&mut self) -> bool {
+        let mut reported = false;
+        let platform = self.platform;
+        while let Some(promise) = self.context.rejections.pop(self.mc) {
+            let ObjectKind::Promise { state: Settled::Rejected(reason), handled: false, .. } = promise.borrow().kind else { continue };
+            platform.unhandled_rejection(self, promise, reason);
+            reported = true;
+        }
+        reported
     }
 }

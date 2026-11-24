@@ -31,6 +31,7 @@ pub trait Platform: Pool {
     fn wall_clock(&self) -> Duration;             // for Date
     fn print(&self, line: &str);                  // console.log
     fn load_module(&self, referrer: &str, specifier: &str) -> Option<(String, String)>;  // (normalized name, source)
+    fn unhandled_rejection(&self, scope: &mut Scope, promise: JsObject, reason: Value);           // default: nothing
 }
 ```
 
