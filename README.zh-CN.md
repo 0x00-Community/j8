@@ -100,6 +100,18 @@ J8_TEST262_VERBOSE=1  cargo test --release --test test262 -- <path>   # 列出�
 J8_TEST262_UPDATE=1   cargo test --release --test test262 -- <path>   # 结果写回基线
 ```
 
+## 🧪 WebAssembly 规范测试
+
+`tests/wasm-testsuite` 是 [WebAssembly/testsuite](https://github.com/WebAssembly/testsuite) 子模块；顶层的 `.wast`
+文件就是 WebAssembly 3.0 核心（模块加断言共 65,244 条）。WebAssembly 还在做（#70），目前一条都不过。
+
+```sh
+cargo test --release --test wasmspec                         # 跑基线 (tests/wasmspec.passing), 掉一条就失败
+cargo test --release --test wasmspec -- simd_ i32            # 只跑文件名以这些开头的
+J8_WASMSPEC_VERBOSE=1 cargo test --release --test wasmspec   # 列出失败的条目
+J8_WASMSPEC_UPDATE=1  cargo test --release --test wasmspec   # 结果写回基线
+```
+
 ## ✍️ 约定
 
 - 子模块私有 `mod`, 用 `pub use` 平铺导出; ⛔ `pub mod`

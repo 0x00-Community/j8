@@ -66,11 +66,18 @@ j8platform.workspace = true
 j8jit.workspace = true
 serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9"
+wast = "263"
 
 # test262 conformance (`harness = false`): `cargo test --release --test test262`
 [[test]]
 name = "test262"
 path = "tests/test262.rs"
+harness = false
+
+# WebAssembly spec testsuite (WebAssembly 3.0 core, `harness = false`): `cargo test --release --test wasmspec`
+[[test]]
+name = "wasmspec"
+path = "tests/wasmspec.rs"
 harness = false
 
 [[test]]
