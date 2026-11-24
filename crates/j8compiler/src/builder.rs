@@ -1,8 +1,10 @@
 #![allow(clippy::cast_possible_wrap, reason = "constant pool and feedback indices are far below i64::MAX")]
 use alloc::vec::Vec;
 
-use j8bytecode::{Bytecode, BytecodeArray, CatchPrediction, Constant, Encoder, FeedbackSlotKind, HandlerEntry, Intrinsic, NativeContextIndex, OperandScale, OperandValue, Register, Runtime};
+use j8bytecode::{Bytecode, BytecodeArray, CatchPrediction, Constant, Encoder, FeedbackSlotKind, HandlerEntry, Intrinsic, NativeContextIndex, OperandScale, OperandValue, Register, Runtime, SourcePosition};
 use j8framework::{BinaryOp, CompareOp};
+
+use crate::lines::Lines;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RegisterList {
@@ -38,6 +40,8 @@ pub struct Builder {
     enc: Encoder,
     constants: Vec<Constant>,
     handlers: Vec<HandlerEntry>,
+    positions: Vec<(u32, u32)>,
+    latent: Option<u32>,
     feedback: Vec<FeedbackSlotKind>,
     parameter_count: u16,
     locals: i32,
@@ -54,15 +58,20 @@ pub struct Builder {
 
 impl Builder {
     pub fn new(parameter_count: u16, locals: i32) -> Self {
-        Self { enc: Encoder::default(), constants: Vec::new(), handlers: Vec::new(), feedback: Vec::new(), parameter_count, locals, next: locals, max: locals, unbound: 0, reserved: 0, slot_cache: Vec::new(), boolean: false, stored: None, dead: false, new_target_or_generator: None }
+        Self { enc: Encoder::default(), constants: Vec::new(), handlers: Vec::new(), positions: Vec::new(), latent: None, feedback: Vec::new(), parameter_count, locals, next: locals, max: locals, unbound: 0, reserved: 0, slot_cache: Vec::new(), boolean: false, stored: None, dead: false, new_target_or_generator: None }
     }
 
-    pub fn finish(self) -> BytecodeArray {
+    pub fn finish(self, lines: &Lines<'_>) -> BytecodeArray {
         debug_assert_eq!(self.unbound, 0, "every label is bound");
+        let positions = self.positions.iter().map(|&(offset, pos)| {
+            let (line, column) = lines.locate(pos);
+            SourcePosition { offset, line, column }
+        }).collect();
         BytecodeArray {
             code: self.enc.code.into_boxed_slice(),
             constants: self.constants,
             handlers: self.handlers,
+            positions,
             parameter_count: self.parameter_count,
             register_count: u32::try_from(self.max).unwrap_or(0),
             feedback: self.feedback,
@@ -79,10 +88,19 @@ impl Builder {
             return self.offset();
         }
         let at = self.enc.emit(b, ops).expect("operands match the bytecode");
+        if let Some(pos) = self.latent.take()
+            && self.positions.last().is_none_or(|&(_, last)| last != pos)
+        {
+            self.positions.push((u32::try_from(at).unwrap_or(u32::MAX), pos));
+        }
         self.boolean = matches!(b, Bytecode::TestEqual | Bytecode::TestEqualStrict | Bytecode::TestLessThan | Bytecode::TestGreaterThan | Bytecode::TestLessThanOrEqual | Bytecode::TestGreaterThanOrEqual | Bytecode::TestReferenceEqual | Bytecode::TestInstanceOf | Bytecode::TestIn | Bytecode::TestUndetectable | Bytecode::TestNull | Bytecode::TestUndefined | Bytecode::TestTypeOf | Bytecode::LogicalNot | Bytecode::ToBooleanLogicalNot | Bytecode::LdaTrue | Bytecode::LdaFalse);
         self.stored = None;
         self.dead = matches!(b, Bytecode::Return | Bytecode::Throw | Bytecode::ReThrow | Bytecode::Jump | Bytecode::JumpConstant | Bytecode::JumpLoop | Bytecode::Abort);
         at
+    }
+
+    pub fn at(&mut self, pos: u32) {
+        self.latent = Some(pos);
     }
 
     pub fn reachable(&self) -> bool {
