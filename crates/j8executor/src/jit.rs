@@ -1,3 +1,4 @@
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::cell::Cell;
 
@@ -5,7 +6,7 @@ use j8bytecode::{Bytecode, Constant, OperandValue, SharedFunction};
 use j8framework::{Scope, Closure, Error, FuncId, JsEnv, JsObject, ShapeKey, Value};
 
 pub use crate::ic::{GlobalFeedback, PropertyFeedback, StringFeedback};
-use crate::{Args, Budget, Executor, Frame, Loaded, State, STACK_LIMIT};
+use crate::{Args, Budget, Executor, Frame, Loaded, State, STACK_LIMIT, WasmTier};
 
 pub trait Tier {
     fn enter(&self, e: &mut Entry<'_, '_, '_, '_, '_>) -> Tiered;
@@ -22,6 +23,10 @@ pub trait Tier {
     }
 
     fn entered(&self) {}
+
+    fn wasm(&self) -> Option<Arc<dyn WasmTier + Send + Sync>> {
+        None
+    }
 }
 
 #[derive(Debug)]

@@ -2,3 +2,7 @@
 	path = tests/test262
 	url = https://github.com/tc39/test262.git
 	shallow = true
+[submodule "tests/wasm-testsuite"]
+	path = tests/wasm-testsuite
+	url = https://github.com/WebAssembly/testsuite.git
+	shallow = true

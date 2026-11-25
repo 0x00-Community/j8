@@ -64,13 +64,27 @@ j8executor.workspace = true
 j8builtins.workspace = true
 j8platform.workspace = true
 j8jit.workspace = true
+j8bytecode.workspace = true
+j8compiler.workspace = true
 serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9"
+wast = "263"
 
 # test262 conformance (`harness = false`): `cargo test --release --test test262`
 [[test]]
 name = "test262"
 path = "tests/test262.rs"
+harness = false
+
+# WebAssembly spec testsuite (WebAssembly 3.0 core, `harness = false`): `cargo test --release --test wasmspec`
+[[test]]
+name = "wasmspec"
+path = "tests/wasmspec.rs"
+harness = false
+
+[[test]]
+name = "wasmjsapi"
+path = "tests/wasmjsapi.rs"
 harness = false
 
 [[test]]
@@ -199,6 +213,7 @@ oxc_span = "0.158"
 oxc_str = "0.158"
 oxc_semantic = "0.158"
 oxc_syntax = "0.158"
+wasmparser = { version = "0.263", default-features = false, features = ["std", "validate", "features", "simd", "hash-collections"] }
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }

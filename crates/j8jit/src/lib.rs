@@ -30,6 +30,7 @@ mod live;
 mod stitch;
 mod opt;
 mod runtime;
+mod wasm;
 mod x86_64;
 
 pub use build::Kind;
@@ -37,6 +38,7 @@ pub use compile::{Backend, CompileError, Compiler, MachineCode};
 pub use helper::Helper as NumberHelper;
 pub use aarch64::AArch64Emit;
 pub use x86_64::{X86_64Code, X86_64Emit, X86_64Reloc};
+pub use wasm::WasmJit;
 
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
@@ -133,6 +135,7 @@ pub struct Jit {
     entries: core::cell::Cell<u64>,
     st: RefCell<State>,
     stencils: core::cell::OnceCell<Option<stitch::Table>>,
+    wasm: alloc::sync::Arc<WasmJit>,
 }
 
 impl Default for Jit {
@@ -143,7 +146,7 @@ impl Default for Jit {
 
 impl From<u32> for Jit {
     fn from(threshold: u32) -> Self {
-        Self { threshold, debug: Debug::from_env(), ctx: core::cell::Cell::new(None), ctxs: RefCell::new(Vec::new()), floor: core::cell::Cell::new(0), epoch: core::cell::Cell::new(1), entries: core::cell::Cell::new(0), st: RefCell::new(State::default()), stencils: core::cell::OnceCell::new() }
+        Self { threshold, debug: Debug::from_env(), ctx: core::cell::Cell::new(None), ctxs: RefCell::new(Vec::new()), floor: core::cell::Cell::new(0), epoch: core::cell::Cell::new(1), entries: core::cell::Cell::new(0), st: RefCell::new(State::default()), stencils: core::cell::OnceCell::new(), wasm: alloc::sync::Arc::new(WasmJit::from(threshold.min(WasmJit::THRESHOLD))) }
     }
 }
 
@@ -594,6 +597,10 @@ impl Tier for Jit {
 
     fn entered(&self) {
         self.entries.set(self.entries.get().wrapping_add(1));
+    }
+
+    fn wasm(&self) -> Option<alloc::sync::Arc<dyn j8executor::WasmTier + Send + Sync>> {
+        Some(self.wasm.clone())
     }
 
     fn call<'scope>(&self, exe: &j8executor::Executor, a: &mut j8framework::Scope<'scope, '_>, f: FuncId, callee: Value<'scope>, this: Value<'scope>, args: &[Value<'scope>]) -> Option<Result<Value<'scope>, j8framework::Error>> {

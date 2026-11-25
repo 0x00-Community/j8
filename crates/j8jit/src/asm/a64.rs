@@ -471,6 +471,12 @@ impl Asm {
         self.fixups.push((at, l, Fix::Jump));
     }
 
+    pub fn call_r(&mut self, r: R) {
+        self.put(0xD63F_0000 | hw(r) << 5);
+        self.mov(hw(RAX), RET0);
+        self.mov(hw(RDX), RET1);
+    }
+
     pub fn call_abs(&mut self, target: u64) -> usize {
         self.put(0x5800_0040 | T0);
         self.put(0x1400_0003);

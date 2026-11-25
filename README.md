@@ -100,6 +100,33 @@ J8_TEST262_VERBOSE=1  cargo test --release --test test262 -- <path>   # why each
 J8_TEST262_UPDATE=1   cargo test --release --test test262 -- <path>   # write results back to the baseline
 ```
 
+## 🧪 WebAssembly spec tests
+
+`tests/wasm-testsuite` is the [WebAssembly/testsuite](https://github.com/WebAssembly/testsuite) submodule; its top-level
+`.wast` files are WebAssembly 3.0 core (65,244 directives). The interpreter (#70) passes all of them: SIMD and relaxed SIMD, GC
+(structs, arrays, i31, casts, recursive type groups) and exception handling.
+
+```sh
+cargo test --release --test wasmspec                         # the baseline (tests/wasmspec.passing), fails on any drop
+cargo test --release --test wasmspec -- simd_ i32            # files starting with these names
+J8_WASMSPEC_VERBOSE=1 cargo test --release --test wasmspec   # list failing directives
+J8_WASMSPEC_UPDATE=1  cargo test --release --test wasmspec   # write results back to the baseline
+J8_WASMSPEC_COLLECT=1 cargo test --release --test wasmspec   # a full collection after every directive (checks GC roots)
+J8_WASMSPEC_JIT=1     cargo test --release --test wasmspec   # every function through the wasm JIT on its first call
+```
+
+The `WebAssembly` JavaScript API is checked against `tests/wasm-jsapi`, the JS API tests of
+[WebAssembly/spec](https://github.com/WebAssembly/spec/tree/main/test/js-api) (the upstream of WPT `wasm/jsapi`), run
+with a small testharness (`tests/wasmjsapi.harness.js`), each file in its own process: 1,053 of 1,111 subtests pass.
+`j8::Runtime` (and so dune) installs `WebAssembly` on every context; with the JS JIT on, wasm goes through the wasm JIT too.
+
+```sh
+cargo test --release --test wasmjsapi                          # the baseline (tests/wasmjsapi.passing)
+J8_WASMJSAPI_VERBOSE=1 cargo test --release --test wasmjsapi   # list failing subtests
+J8_WASMJSAPI_UPDATE=1  cargo test --release --test wasmjsapi   # write results back to the baseline
+J8_WASMJSAPI_JIT=1     cargo test --release --test wasmjsapi   # with the wasm JIT
+```
+
 ## ✍️ Conventions
 
 - Private `mod`s, flat `pub use` exports; ⛔ `pub mod`

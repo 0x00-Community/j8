@@ -100,6 +100,32 @@ J8_TEST262_VERBOSE=1  cargo test --release --test test262 -- <path>   # 列出�
 J8_TEST262_UPDATE=1   cargo test --release --test test262 -- <path>   # 结果写回基线
 ```
 
+## 🧪 WebAssembly 规范测试
+
+`tests/wasm-testsuite` 是 [WebAssembly/testsuite](https://github.com/WebAssembly/testsuite) 子模块；顶层的 `.wast`
+文件就是 WebAssembly 3.0 核心（模块加断言共 65,244 条）。解释器（#70）全部通过：SIMD 与 relaxed SIMD、GC（struct、array、i31、类型转换、递归类型分组）和异常处理。
+
+```sh
+cargo test --release --test wasmspec                         # 跑基线 (tests/wasmspec.passing), 掉一条就失败
+cargo test --release --test wasmspec -- simd_ i32            # 只跑文件名以这些开头的
+J8_WASMSPEC_VERBOSE=1 cargo test --release --test wasmspec   # 列出失败的条目
+J8_WASMSPEC_UPDATE=1  cargo test --release --test wasmspec   # 结果写回基线
+J8_WASMSPEC_COLLECT=1 cargo test --release --test wasmspec   # 每条指令后做一次全量回收（检查 GC 根）
+J8_WASMSPEC_JIT=1     cargo test --release --test wasmspec   # 每个函数第一次调用就走 wasm JIT
+```
+
+`WebAssembly` JS API 用 `tests/wasm-jsapi` 检查，这是 [WebAssembly/spec](https://github.com/WebAssembly/spec/tree/main/test/js-api)
+的 JS API 测试（WPT `wasm/jsapi` 的上游），配一个精简的 testharness（`tests/wasmjsapi.harness.js`），每个文件单独一个进程：
+1,111 个子测试过 1,053 个。
+`j8::Runtime`（因而 dune）在每个 context 上装好 `WebAssembly`；开 JS JIT 时 wasm 也走 wasm JIT。
+
+```sh
+cargo test --release --test wasmjsapi                          # 基线（tests/wasmjsapi.passing）
+J8_WASMJSAPI_VERBOSE=1 cargo test --release --test wasmjsapi   # 列出失败的子测试
+J8_WASMJSAPI_UPDATE=1  cargo test --release --test wasmjsapi   # 结果写回基线
+J8_WASMJSAPI_JIT=1     cargo test --release --test wasmjsapi   # 开 wasm JIT
+```
+
 ## ✍️ 约定
 
 - 子模块私有 `mod`, 用 `pub use` 平铺导出; ⛔ `pub mod`

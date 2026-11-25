@@ -17,10 +17,12 @@ mod ic;
 mod jit;
 mod module;
 mod threaded;
+mod wasm;
 mod event_loop;
 use module::EVAL_FILE;
 
 pub use cache::CodeCache;
+pub use wasm::{CellsBrand, FuncBrand, GlobalBrand, InstanceBrand, MemoryBrand, TableBrand, TagBrand, TypesBrand, WasmCells, WasmCompiled, WasmExtern, WasmFunc, WasmGlobal, WasmHost, WasmInstance, WasmInstantiateError, WasmLinkError, WasmMemory, WasmRef, WasmStore, WasmTable, WasmTag, WasmThrow, WasmTrap, WasmTypes, WasmValue, WebAssembly, WasmCtx, WasmJitFunction, WasmMachine, WasmScalar, WasmTier};
 pub use event_loop::{EventLoop, EventLoopSet, Ticket, CHECK, SLICE};
 pub use jit::{DeoptFrame, Entry, FrameSlots, Function as JitFunction, GlobalFeedback, Insn as JitInsn, PropertyFeedback, Reg as JitReg, ScopeLayout, StringFeedback, Tier, Tiered};
 
@@ -518,6 +520,10 @@ impl Executor<'_> {
     pub fn with_tier(mut self, tier: impl Tier + Send + 'static) -> Self {
         self.tier = Some(Box::new(tier));
         self
+    }
+
+    pub fn wasm_tier(&self) -> Option<Arc<dyn WasmTier + Send + Sync>> {
+        self.tier.as_ref().and_then(|t| t.wasm())
     }
 
     #[must_use]

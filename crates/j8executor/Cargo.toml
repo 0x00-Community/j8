@@ -14,6 +14,8 @@ j8taskqueue.workspace = true
 j8bytecode.workspace = true
 j8compiler.workspace = true
 ryu-js.workspace = true
+num-bigint.workspace = true
+num-traits.workspace = true
 
 [dev-dependencies]
 j8platform.workspace = true

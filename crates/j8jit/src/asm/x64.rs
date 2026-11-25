@@ -231,6 +231,12 @@ impl Asm {
         self.fixups.push((at, l));
     }
 
+    pub fn call_r(&mut self, r: R) {
+        self.rex(false, 0, 0, r, false);
+        self.b(0xff);
+        self.b(0xd0 | (r & 7));
+    }
+
     pub fn call_abs(&mut self, target: u64) -> usize {
         self.b(0x48);
         self.b(0xb8);
