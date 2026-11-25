@@ -355,8 +355,10 @@ impl Executor<'_> {
         let l = self.code(&c);
         let args: Vec<Value<'scope>> = d.params.iter().skip(1).copied().chain(core::iter::repeat(Value::Undefined)).take(d.argc.max(d.params.len().saturating_sub(1))).collect();
         let this = d.params.first().copied().unwrap_or_default();
-        let (params, base) = Self::open_regs(a, &mut st.regs, l, c, d.callee, this, Args::Values(&args));
-        st.regs[params] = this;
+        let mut f = Self::open(a, &mut st.regs, l, c, d.callee, this, Args::Values(&args), crate::Opening::Call);
+        (f.pc, f.insn, f.argc) = (d.pc, d.pc, d.argc);
+        let base = f.base;
+        st.regs[f.params] = this;
         for (i, v) in d.regs.iter().enumerate() {
             st.regs[base + i] = *v;
         }
@@ -367,7 +369,7 @@ impl Executor<'_> {
             st.regs[base - Frame::NEW_TARGET] = nt;
             st.regs[base - Frame::NEW_THIS] = this;
         }
-        st.frames.push(Frame { func: d.func, loaded: crate::LoadedRef::from(l), pc: d.pc, insn: d.pc, params, base, argc: d.argc });
+        st.frames.push(f);
         st.acc = d.acc;
     }
 

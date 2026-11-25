@@ -1,7 +1,7 @@
 use j8bytecode::{Bytecode, Constant, OperandValue};
 use j8framework::{Scope, Env, Error, ErrorKind, Value, ValueBits};
 
-use crate::{Args, Budget, Executor, Flow, Frame, Insn, Loaded, Outcome, State};
+use crate::{Args, Budget, Executor, Flow, Frame, Insn, Loaded, Opening, Outcome, State};
 
 #[expect(private_interfaces, reason = "crate-internal types; the module is private")]
 pub struct Cx<'r, 'scope, 'x, 'b, 'p> {
@@ -362,7 +362,8 @@ fn enter<'r, 'scope>(cx: &mut Cx<'r, 'scope, '_, '_, '_>, pc: *const Insn, calle
             };
         }
     }
-    let base = cx.exe.push_open(cx.a, cx.st, l, c, callee, this, args);
+    let next = Executor::open(cx.a, &mut cx.st.regs, l, c, callee, this, args, Opening::Call);
+    let base = cx.st.push(next);
     cx.loaded = l;
     if cx.exe.tier.is_some() {
         return tier_enter(cx);
@@ -490,13 +491,8 @@ handlers! {
         };
         let first = Executor::slot_of(cx.st.f(), o[1]).unwrap_or(cx.st.regs.len());
         let args = Args::Regs { first, count: o[2] as usize };
-        let base = cx.exe.push_open(cx.a, cx.st, l, c, callee, this, args);
-        let regs = &mut cx.st.regs;
-        regs[base - Frame::NEW_TARGET] = acc;
-        regs[base - Frame::NEW_THIS] = this;
-        if let Some(r) = l.func.bytecode.new_target_or_generator {
-            regs[base + r as usize] = acc;
-        }
+        let next = Executor::open(cx.a, &mut cx.st.regs, l, c, callee, this, args, Opening::Construct(acc));
+        let base = cx.st.push(next);
         cx.loaded = l;
         if cx.exe.tier.is_some() {
             match tier_enter(cx) {

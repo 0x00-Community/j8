@@ -378,6 +378,12 @@ impl<'scope> State<'scope> {
     }
 
     #[inline]
+    fn push(&mut self, f: Frame) -> usize {
+        self.frames.push(f);
+        f.base
+    }
+
+    #[inline]
     fn room(&self) -> bool {
         self.level() + 1 < STACK_LIMIT
     }
@@ -415,6 +421,13 @@ impl<'scope> Outcome<'scope> {
             Outcome::Paused(_) => unreachable!("only the outermost execution pauses"),
         }
     }
+}
+
+#[derive(Clone, Copy)]
+enum Opening<'scope> {
+    Call,
+    Construct(Value<'scope>),
+    Resume(JsObject<'scope>),
 }
 
 #[derive(Clone, Copy)]
@@ -630,28 +643,12 @@ impl Executor<'_> {
         (!weak.is_cleared()).then(|| unsafe { code.get() })
     }
 
-    fn open<'scope>(&self, a: &mut Scope<'scope, '_>, regs: &mut Vec<Value<'scope>>, closure: Closure<'scope>, callee: Value<'scope>, this: Value<'scope>, args: &[Value<'scope>]) -> Frame {
-        self.open_with(a, regs, self.function(closure.func), closure, callee, this, Args::Values(args))
-    }
-
-    #[expect(clippy::too_many_arguments, reason = "the parts of a call")]
-    fn open_with<'scope>(&self, a: &mut Scope<'scope, '_>, regs: &mut Vec<Value<'scope>>, loaded: &Loaded, closure: Closure<'scope>, callee: Value<'scope>, this: Value<'scope>, args: Args<'_, 'scope>) -> Frame {
-        let (params, base) = Self::open_regs(a, regs, loaded, closure, callee, this, args);
-        Frame { func: closure.func, loaded: LoadedRef::from(loaded), pc: 0, insn: 0, params, base, argc: args.len() }
-    }
-
     #[expect(clippy::too_many_arguments, reason = "the parts of a call")]
     #[inline]
-    fn push_open<'scope>(&self, a: &mut Scope<'scope, '_>, st: &mut State<'scope>, loaded: &Loaded, closure: Closure<'scope>, callee: Value<'scope>, this: Value<'scope>, args: Args<'_, 'scope>) -> usize {
-        let (params, base) = Self::open_regs(a, &mut st.regs, loaded, closure, callee, this, args);
-        st.frames.push(Frame { func: closure.func, loaded: LoadedRef::from(loaded), pc: 0, insn: 0, params, base, argc: args.len() });
-        base
-    }
-
-    fn open_regs<'scope>(a: &mut Scope<'scope, '_>, regs: &mut Vec<Value<'scope>>, loaded: &Loaded, closure: Closure<'scope>, callee: Value<'scope>, this: Value<'scope>, args: Args<'_, 'scope>) -> (usize, usize) {
+    fn open<'scope>(a: &mut Scope<'scope, '_>, regs: &mut Vec<Value<'scope>>, loaded: &Loaded, closure: Closure<'scope>, callee: Value<'scope>, this: Value<'scope>, args: Args<'_, 'scope>, how: Opening<'scope>) -> Frame {
         let f = &loaded.func;
         a.profiler.enter(closure.func);
-        let this = match this.kind() {
+        let receiver = match this.kind() {
             _ if !loaded.wraps_this => this,
             ValueKind::Undefined | ValueKind::Null => Value::Object(a.context.global),
             ValueKind::Object(_) | ValueKind::Uninit => this,
@@ -660,22 +657,23 @@ impl Executor<'_> {
         let kept = if loaded.keeps_args { Value::Object(a.array(args.to_vec(regs))) } else { Value::Undefined };
         let params = regs.len();
         let formals = usize::from(f.bytecode.parameter_count).saturating_sub(1);
-        regs.push(this);
+        regs.push(receiver);
         for i in 0..formals {
             let v = args.get(regs, i);
             regs.push(v);
         }
-        regs.extend_from_slice(&[kept, Value::Uninit, Value::Undefined, callee, closure.env.map_or(Value::Undefined, Value::context)]);
+        let (new_this, new_target, register) = match how {
+            Opening::Call => (Value::Uninit, Value::Undefined, Value::Undefined),
+            Opening::Construct(nt) => (this, nt, nt),
+            Opening::Resume(co) => (Value::Uninit, Value::Undefined, co.into()),
+        };
+        regs.extend_from_slice(&[kept, new_this, new_target, callee, closure.env.map_or(Value::Undefined, Value::context)]);
         let base = regs.len();
         regs.resize(base + f.bytecode.register_count as usize, Value::Undefined);
-        (params, base)
-    }
-
-    fn set_new_target<'scope>(regs: &mut [Value<'scope>], f: &mut Frame, nt: Value<'scope>) {
-        f.set_slot(regs, Frame::NEW_TARGET, nt);
-        if let Some(r) = unsafe { f.loaded.get::<'_>() }.func.bytecode.new_target_or_generator {
-            regs[f.base + usize::try_from(r).unwrap_or(0)] = nt;
+        if let Some(r) = f.bytecode.new_target_or_generator {
+            regs[base + usize::try_from(r).unwrap_or(0)] = register;
         }
+        Frame { func: closure.func, loaded: LoadedRef::from(loaded), pc: 0, insn: 0, params, base, argc: args.len() }
     }
 
     #[inline]
@@ -812,16 +810,8 @@ impl Executor<'_> {
                     if !(loaded.constructs || loaded.class_constructor) {
                         break;
                     }
-                    let this = if loaded.derived {
-                        None
-                    } else {
-                        let this = Self::create_this(a, loaded, new_target)?;
-                        Some(Value::Object(this))
-                    };
-                    let mut f = self.open(a, regs, closure, callee, this.unwrap_or(Value::Uninit), &args);
-                    Self::set_new_target(regs, &mut f, new_target);
-                    f.set_slot(regs, Frame::NEW_THIS, this.unwrap_or(Value::Uninit));
-                    return Ok(Prepared::Frame(f));
+                    let this = if loaded.derived { Value::Uninit } else { Value::Object(Self::create_this(a, loaded, new_target)?) };
+                    return Ok(Prepared::Frame(Self::open(a, regs, loaded, closure, callee, this, Args::Values(&args), Opening::Construct(new_target))));
                 }
                 Ok(Err(native)) => {
                     if !native.constructor {
@@ -1285,7 +1275,7 @@ impl Executor<'_> {
         let env = self.script_context(a, main)?;
         let this = Value::Object(a.context.global);
         let mut regs = Vec::new();
-        let f = self.open(a, &mut regs, Closure::new(main, env), Value::Undefined, this, &[]);
+        let f = Self::open(a, &mut regs, self.function(main), Closure::new(main, env), Value::Undefined, this, Args::Values(&[]), Opening::Call);
         Ok(self.state(regs, f))
     }
 
@@ -1385,11 +1375,6 @@ impl Executor<'_> {
         }
     }
 
-    #[inline]
-    fn push_frame(st: &mut State<'_>, next: Frame) {
-        st.frames.push(next);
-    }
-
     fn call_from<'scope>(&self, a: &mut Scope<'scope, '_>, st: &mut State<'scope>, callee: Value<'scope>, this: Value<'scope>, args: Args<'_, 'scope>) -> Result<Flow<'scope>, Error> {
         let level = Self::within(a, st.level() + 1)?;
         if let ValueKind::Object(o) = callee.kind()
@@ -1397,8 +1382,8 @@ impl Executor<'_> {
         {
             let l = self.function(c.func);
             if !(l.class_constructor || l.generator || l.asynchronous) {
-                let next = self.open_with(a, &mut st.regs, l, c, callee, this, args);
-                Self::push_frame(st, next);
+                let next = Self::open(a, &mut st.regs, l, c, callee, this, args, Opening::Call);
+                st.push(next);
                 return Ok(Flow::Frame);
             }
         }
@@ -1416,8 +1401,8 @@ impl Executor<'_> {
         let args = args.to_vec(&st.regs);
         match self.resolve(a, callee, this, args, level)? {
             Callee::Closure { closure, callee, this, args } => {
-                let next = self.open(a, &mut st.regs, closure, callee, this, &args);
-                Self::push_frame(st, next);
+                let next = Self::open(a, &mut st.regs, self.function(closure.func), closure, callee, this, Args::Values(&args), Opening::Call);
+                st.push(next);
                 Ok(Flow::Frame)
             }
             Callee::Done(v) => {
@@ -1431,7 +1416,7 @@ impl Executor<'_> {
         let level = Self::within(a, st.level() + 1)?;
         match self.prepare(a, &mut st.regs, callee, args, new_target, level)? {
             Prepared::Frame(next) => {
-                Self::push_frame(st, next);
+                st.push(next);
                 Ok(Flow::Frame)
             }
             Prepared::Done(v) => {
@@ -2474,10 +2459,7 @@ impl Executor<'_> {
         regs.clear();
         let (this, args) = params.split_first().map_or((Value::Undefined, &[][..]), |(t, rest)| (*t, rest));
         self.note_user();
-        let f = self.open(a, &mut regs, closure, callee, this, args);
-        if let Some(r) = self.function(closure.func).func.bytecode.new_target_or_generator {
-            regs[f.base + usize::try_from(r).unwrap_or(0)] = co.into();
-        }
+        let f = Self::open(a, &mut regs, self.function(closure.func), closure, callee, this, Args::Values(args), Opening::Resume(co));
         Ok(Resumed::Frame(regs, f, level))
     }
 
@@ -2553,7 +2535,7 @@ impl<'scope> Invoke<'scope> for Executor<'_> {
             self.note_user();
             let mut regs = a.take_regs();
             regs.clear();
-            let f = self.open_with(a, &mut regs, l, c, callee, this, Args::Values(args));
+            let f = Self::open(a, &mut regs, l, c, callee, this, Args::Values(args), Opening::Call);
             return self.run_frame(a, regs, f, level);
         }
         if let ValueKind::Object(o) = callee.kind()
@@ -2568,7 +2550,7 @@ impl<'scope> Invoke<'scope> for Executor<'_> {
                 self.note_user();
                 let mut regs = a.take_regs();
                 regs.clear();
-                let f = self.open(a, &mut regs, closure, callee, this, &args);
+                let f = Self::open(a, &mut regs, self.function(closure.func), closure, callee, this, Args::Values(&args), Opening::Call);
                 self.run_frame(a, regs, f, level)
             }
         }
@@ -2810,7 +2792,7 @@ impl<'p> Executor<'p> {
                     self.note_user();
                     let mut regs = a.take_regs();
                     regs.clear();
-                    let f = self.open_with(a, &mut regs, l, c, handler, Value::Undefined, Args::Values(&[value]));
+                    let f = Self::open(a, &mut regs, l, c, handler, Value::Undefined, Args::Values(&[value]), Opening::Call);
                     return Ok(Some(Running { state: self.state(regs, f), after: After::Reaction(capability) }));
                 }
             }
@@ -2857,7 +2839,7 @@ impl<'p> Executor<'p> {
                 }
                 (Some(_), _, None) => {
                     let mut regs = Vec::new();
-                    let f = self.open(a, &mut regs, Closure::new(main, Some(env)), Value::Undefined, Value::Undefined, &[]);
+                    let f = Self::open(a, &mut regs, self.function(main), Closure::new(main, Some(env)), Value::Undefined, Value::Undefined, Args::Values(&[]), Opening::Call);
                     return Ok(Some((m, regs, f)));
                 }
             }
