@@ -26,7 +26,7 @@
 - **解析:** oxc.
 
 核心 ECMAScript 已覆盖, [PLAN.md](PLAN.md) 列为不做的除外 (Temporal、ShadowRealm 等).
-`Intl` (Collator、NumberFormat、DateTimeFormat、PluralRules、ListFormat、Segmenter、Locale、RelativeTimeFormat、DisplayNames) 是可选的 `intl` feature, 基于 ICU4X.
+`Intl` (Collator、NumberFormat、DateTimeFormat、PluralRules、ListFormat、Segmenter、Locale、RelativeTimeFormat、DisplayNames、DurationFormat) 是可选的 `intl` feature, 基于 ICU4X.
 
 | 项目 | 结果 |
 | --- | --- |

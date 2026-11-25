@@ -1,6 +1,7 @@
 mod collator;
 mod datetime;
 mod displaynames;
+mod durationformat;
 mod ilocale;
 mod listformat;
 mod locale;
@@ -24,6 +25,7 @@ pub(crate) use datetime::DateTimeFormats;
 use listformat::ListFormats;
 use ilocale::Locales;
 use displaynames::DisplayNamesBuiltins;
+use durationformat::DurationFormats;
 use locale::Tags;
 use relativetime::RelativeTimeFormats;
 use segmenter::{ITERATOR_PROTO_SLOT, SEGMENTS_PROTO_SLOT, Segmenters};
@@ -133,6 +135,11 @@ impl<'scope> Installer<'_, 'scope> {
         let names = self.service(intl, "DisplayNames", DisplayNamesBuiltins::construct, Some(DisplayNamesBuiltins::supported_locales_of), "Intl.DisplayNames", 2);
         self.method(names, "of", DisplayNamesBuiltins::of, 1);
         self.method(names, "resolvedOptions", DisplayNamesBuiltins::resolved_options, 0);
+
+        let duration = self.service(intl, "DurationFormat", DurationFormats::construct, Some(DurationFormats::supported_locales_of), "Intl.DurationFormat", 0);
+        self.method(duration, "format", DurationFormats::format, 1);
+        self.method(duration, "formatToParts", DurationFormats::format_to_parts, 1);
+        self.method(duration, "resolvedOptions", DurationFormats::resolved_options, 0);
 
         self.intl_locale(intl);
     }

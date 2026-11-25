@@ -50,7 +50,7 @@ pub(crate) struct Lists {
 }
 
 impl Lists {
-    fn new<'scope>(a: &mut Scope<'scope, '_>, locales: Value<'scope>, options: Value<'scope>) -> Result<Self, Error> {
+    pub(crate) fn new<'scope>(a: &mut Scope<'scope, '_>, locales: Value<'scope>, options: Value<'scope>) -> Result<Self, Error> {
         let requested = Tags::list(a, locales)?;
         let options = Options::object(a, options)?;
         options.matcher(a)?;
@@ -69,7 +69,7 @@ impl Lists {
         Ok(Self { formatter, locale: resolved.tag(), kind, style })
     }
 
-    fn pieces(&self, items: &[String]) -> Pieces {
+    pub(crate) fn pieces(&self, items: &[String]) -> Pieces {
         Pieces::marked(&self.formatter.format(items.iter().map(String::as_str)), icu_list::parts::ELEMENT, ELEMENT)
     }
 }
