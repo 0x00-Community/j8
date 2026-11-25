@@ -204,7 +204,7 @@ napi! {
         } else {
             Ffi::slice(str, length)?
         };
-        env.out(result, a.string(&alloc::string::String::from_utf16_lossy(units)).into())
+        env.out(result, a.string_units(units).into())
     }
 
     fn napi_get_value_string_utf8(env, value: Handle, buf: *mut c_char, bufsize: usize, result: *mut usize) {
@@ -220,7 +220,7 @@ napi! {
 
     fn napi_get_value_string_latin1(env, value: Handle, buf: *mut c_char, bufsize: usize, result: *mut usize) {
         let s = env.string(value)?;
-        let bytes: Vec<u8> = s.chars().map(|c| c as u8).collect();
+        let bytes: Vec<u8> = s.encode_utf16().map(|u| u as u8).collect();
         Env::write_units(&bytes, buf.cast::<u8>(), bufsize, result)
     }
 

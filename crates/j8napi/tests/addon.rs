@@ -21,6 +21,10 @@ unsafe extern "C" {
     fn napi_wrap(env: *mut Env, o: Handle, native: *mut c_void, fin: Fin, hint: *mut c_void, result: *mut *mut c_void) -> Status;
     fn napi_unwrap(env: *mut Env, o: Handle, result: *mut *mut c_void) -> Status;
     fn napi_throw_error(env: *mut Env, code: *const c_char, msg: *const c_char) -> Status;
+    fn napi_get_value_string_utf16(env: *mut Env, v: Handle, buf: *mut u16, bufsize: usize, result: *mut usize) -> Status;
+    fn napi_create_string_utf16(env: *mut Env, s: *const u16, len: usize, result: *mut Handle) -> Status;
+    fn napi_get_value_string_latin1(env: *mut Env, v: Handle, buf: *mut c_char, bufsize: usize, result: *mut usize) -> Status;
+    fn napi_create_string_latin1(env: *mut Env, s: *const c_char, len: usize, result: *mut Handle) -> Status;
 }
 
 struct Count(f64);
@@ -67,6 +71,30 @@ unsafe extern "C" fn boom(env: *mut Env, _: *mut CallbackInfo) -> Handle {
     Handle::default()
 }
 
+unsafe extern "C" fn utf16(env: *mut Env, info: *mut CallbackInfo) -> Handle {
+    let (mut argc, mut arg, mut r) = (1usize, Handle::default(), Handle::default());
+    let mut units = [0u16; 16];
+    let mut n = 0;
+    unsafe {
+        napi_get_cb_info(env, info, &raw mut argc, &raw mut arg, null_mut(), null_mut());
+        napi_get_value_string_utf16(env, arg, units.as_mut_ptr(), units.len(), &raw mut n);
+        napi_create_string_utf16(env, units.as_ptr(), n, &raw mut r);
+    }
+    r
+}
+
+unsafe extern "C" fn latin1(env: *mut Env, info: *mut CallbackInfo) -> Handle {
+    let (mut argc, mut arg, mut r) = (1usize, Handle::default(), Handle::default());
+    let mut bytes = [0 as c_char; 16];
+    let mut n = 0;
+    unsafe {
+        napi_get_cb_info(env, info, &raw mut argc, &raw mut arg, null_mut(), null_mut());
+        napi_get_value_string_latin1(env, arg, bytes.as_mut_ptr(), bytes.len(), &raw mut n);
+        napi_create_string_latin1(env, bytes.as_ptr(), n, &raw mut r);
+    }
+    r
+}
+
 unsafe extern "C" fn register(env: *mut Env, exports: Handle) -> Handle {
     let (mut f, mut g, mut class) = (Handle::default(), Handle::default(), Handle::default());
     let inc = PropertyDescriptor {
@@ -86,6 +114,11 @@ unsafe extern "C" fn register(env: *mut Env, exports: Handle) -> Handle {
         napi_set_named_property(env, exports, c"boom".as_ptr(), g);
         assert_eq!(napi_define_class(env, c"Counter".as_ptr(), usize::MAX, Some(counter_new), null_mut(), 1, &raw const inc, &raw mut class), Status::Ok);
         napi_set_named_property(env, exports, c"Counter".as_ptr(), class);
+        for (name, cb) in [(c"utf16", utf16 as unsafe extern "C" fn(*mut Env, *mut CallbackInfo) -> Handle), (c"latin1", latin1)] {
+            let mut h = Handle::default();
+            napi_create_function(env, name.as_ptr(), usize::MAX, Some(cb), null_mut(), &raw mut h);
+            napi_set_named_property(env, exports, name.as_ptr(), h);
+        }
     }
     exports
 }
@@ -101,17 +134,20 @@ fn functions_classes_and_errors() {
         a.set_named(a.context.global.into(), "addon", exports).expect("global");
     });
     let text = "
-        const { add, Counter, boom } = addon;
+        const { add, Counter, boom, utf16, latin1 } = addon;
         class Sub extends Counter { twice() { this.inc(); return this.inc(); } }
         const c = new Counter(); c.inc();
         let caught = '';
         try { boom(); } catch (e) { caught = `${e.code}:${e.message}:${e instanceof Error}`; }
-        [add(2, 3), c.inc(), new Sub().twice(), new Sub() instanceof Counter, Counter.name, caught].join(' ')
+        const lone = utf16('a\\uD800b\\uDC00');
+        const units = [...Array(lone.length).keys()].map((i) => lone.charCodeAt(i).toString(16)).join(',');
+        const bytes = [...latin1('\\uD800\\u00E9')].map((ch) => ch.charCodeAt(0).toString(16)).join(',');
+        [add(2, 3), c.inc(), new Sub().twice(), new Sub() instanceof Counter, Counter.name, caught, units, bytes].join(' ')
     ";
     let r = executor.eval(&mut isolate, &cx, &Source { text, file: "addon.js" }).expect("run");
     let got = isolate.enter(&cx, &executor, |a| {
         let v = a.local(&r);
         String::from(&**a.to_string(v).expect("ToString"))
     });
-    assert_eq!(got, "5 2 2 true Counter E_BOOM:boom:true");
+    assert_eq!(got, "5 2 2 true Counter E_BOOM:boom:true 61,d800,62,dc00 0,e9");
 }
