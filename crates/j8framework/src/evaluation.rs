@@ -110,16 +110,11 @@ impl<'scope> Scope<'scope, '_> {
                 self.update_module(dependency, |r| r.async_parents.push(m));
             }
         }
-        let record = &self.modules()[m as usize];
-        if record.evaluation.pending > 0 || record.info.top_level_await {
-            let order = self.context.async_evaluation_order.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-            let pending = record.evaluation.pending;
-            self.update_module(m, |r| r.evaluation.order = Some(order));
-            if pending == 0 {
-                self.execute_async_module(m)?;
-            }
-        } else {
-            self.execute_module(m)?;
+        let order = self.context.async_evaluation_order.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        let pending = self.modules()[m as usize].evaluation.pending;
+        self.update_module(m, |r| r.evaluation.order = Some(order));
+        if pending == 0 {
+            self.ready_module(m);
         }
         let record = &self.modules()[m as usize];
         if record.evaluation.dfs_ancestor == record.evaluation.dfs_index {
@@ -137,9 +132,52 @@ impl<'scope> Scope<'scope, '_> {
         Ok(index)
     }
 
-    fn execute_module(&mut self, m: u32) -> Result<(), Error> {
-        let function = self.modules()[m as usize].function;
-        self.call(function.into(), Value::Undefined, &[]).map(drop)
+    fn ready_module(&self, m: u32) {
+        let Some(order) = self.modules()[m as usize].evaluation.order else { return };
+        self.context.ready_modules.update(self.mc, |r| {
+            let mut r = r.0.clone();
+            r.insert((order, m));
+            crate::Static(r)
+        });
+    }
+
+    pub fn next_module_body(&self) -> Option<u32> {
+        let first = self.context.ready_modules.get().0.first().copied()?;
+        self.context.ready_modules.update(self.mc, |r| {
+            let mut r = r.0.clone();
+            r.remove(&first);
+            crate::Static(r)
+        });
+        Some(first.1)
+    }
+
+    pub fn module_body(&self, m: u32) -> (JsObject<'scope>, bool) {
+        let r = &self.modules()[m as usize];
+        (r.function, r.info.top_level_await)
+    }
+
+    pub fn run_module_body(&mut self, m: u32) -> Result<(), Error> {
+        let (function, top_level_await) = self.module_body(m);
+        if top_level_await {
+            return match self.execute_async_module(m) {
+                Err(Error::Exception) => self.module_body_done(m, Err(Error::Exception)),
+                r => r,
+            };
+        }
+        let r = self.call(function.into(), Value::Undefined, &[]);
+        self.module_body_done(m, r)
+    }
+
+    pub fn module_body_done(&mut self, m: u32, r: Result<Value<'scope>, Error>) -> Result<(), Error> {
+        match r {
+            Ok(_) => self.async_module_fulfilled(m),
+            Err(Error::Exception) => {
+                let error = self.take_exception();
+                self.async_module_rejected(m, error);
+                Ok(())
+            }
+            Err(e) => Err(e),
+        }
     }
 
     fn execute_async_module(&mut self, m: u32) -> Result<(), Error> {
@@ -185,18 +223,8 @@ impl<'scope> Scope<'scope, '_> {
         self.gather_available_ancestors(m, &mut list);
         list.sort_by_key(|&x| self.modules()[x as usize].evaluation.order);
         for x in list {
-            let record = &self.modules()[x as usize];
-            if record.status == ModuleStatus::Evaluated {
-                continue;
-            }
-            let executed = if record.info.top_level_await { self.execute_async_module(x) } else { self.execute_module(x).and_then(|()| self.module_evaluated(x)) };
-            match executed {
-                Ok(()) => {}
-                Err(Error::Exception) => {
-                    let error = self.take_exception();
-                    self.async_module_rejected(x, error);
-                }
-                Err(e) => return Err(e),
+            if self.modules()[x as usize].status != ModuleStatus::Evaluated {
+                self.ready_module(x);
             }
         }
         Ok(())

@@ -113,6 +113,7 @@ pub struct Context<'scope> {
     pub builtin_nexts: Cow<'scope, [Option<JsObject<'scope>>; 2]>,
     pub indexed_cache: AtomicU64,
     pub async_evaluation_order: AtomicU64,
+    pub ready_modules: Cow<'scope, crate::Static<alloc::collections::BTreeSet<(u64, u32)>>>,
 }
 
 #[derive(Clone, Collect)]
@@ -315,6 +316,7 @@ impl<'scope> Context<'scope> {
             builtin_nexts: Cow::new(mc, [None, None]),
             indexed_cache: AtomicU64::new(0),
             async_evaluation_order: AtomicU64::new(0),
+            ready_modules: Cow::new(mc, crate::Static(alloc::collections::BTreeSet::new())),
             symbol_registry: Cow::new(mc, alloc::vec::Vec::new()),
             modules: Cow::new(mc, alloc::vec::Vec::new()),
             random_state: AtomicU64::new(0),

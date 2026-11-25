@@ -290,6 +290,10 @@ impl<'scope> Scope<'scope, '_> {
 
     pub fn run_jobs(&mut self) -> Result<(), Error> {
         loop {
+            if let Some(m) = self.next_module_body() {
+                self.run_module_body(m)?;
+                continue;
+            }
             match self.next_job() {
                 Some(j) => self.run_job(j)?,
                 None if self.report_rejections() => {}
