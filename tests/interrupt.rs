@@ -42,6 +42,21 @@ fn an_interrupt_runs_while_the_event_loop_is_idle() {
     });
 }
 
+#[test]
+fn a_timer_set_by_an_interrupt_on_an_idle_loop_fires() {
+    let platform = DefaultPlatform::default();
+    EventLoopSet::scope(&platform, NonZeroUsize::MIN, |set| {
+        let rt = j8::Runtime::on::<Host>(set, Executor::default()).expect("runtime");
+        rt.run_until_idle().expect("idle");
+        let (tx, rx) = mpsc::channel();
+        rt.interrupter().interrupt(move |_, a| {
+            let (timer, _) = a.after(Duration::from_millis(1), true).expect("the loop has timers");
+            a.on_settled(timer.into(), j8framework::HostReaction::new(move |_, _, _| Ok(_ = tx.send(())))).expect("a promise");
+        });
+        assert_eq!(rx.recv_timeout(WAIT), Ok(()), "the loop took the timer the interrupt set and fired it");
+    });
+}
+
 fn interrupts_a_busy_promise_callback(jit: bool) {
     let platform = DefaultPlatform::default();
     EventLoopSet::scope(&platform, NonZeroUsize::MIN, |set| {
