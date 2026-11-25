@@ -2,9 +2,9 @@ use alloc::string::String;
 use j8compiler::Compile;
 use alloc::vec::Vec;
 
-use j8framework::{Scope, Closure, Error, ErrorKind, ImportName, ModuleStatus, ObjectData, Resolution, ResolvedBinding, Value};
+use j8framework::{Scope, Error, ErrorKind, ImportName, JsObject, ModuleStatus, ObjectData, Resolution, ResolvedBinding, Value};
 
-use crate::{Executor, Outcome};
+use crate::{Executor, Visit};
 
 pub const EVAL_FILE: &str = "[eval]";
 const SOURCE_URL: &str = "//# sourceURL=";
@@ -76,43 +76,13 @@ impl Executor<'_> {
         Ok(())
     }
 
-    pub fn evaluate(&self, a: &mut Scope<'_, '_>, m: u32, depth: usize) -> Result<(), Error> {
-        let (status, error, requested, main, env) = {
-            let r = &a.modules()[m as usize];
-            (r.status, r.error, r.requested.clone(), r.main, r.env)
-        };
-        match status {
-            ModuleStatus::Evaluated => return error.map_or(Ok(()), |e| Err(a.throw_value(e))),
-            ModuleStatus::Evaluating => return Ok(()),
-            ModuleStatus::Linked => {}
+    pub fn evaluate_nested(&self, a: &mut Scope<'_, '_>, m: u32) -> Result<(), Error> {
+        let mut stack = alloc::vec![Visit::from(m)];
+        while let Some((m, regs, f)) = self.evaluation_step(a, &mut stack)? {
+            let r = self.run_frame(a, regs, f, self.depth.get() + 1).map(drop);
+            Self::evaluated(a, &mut stack, m, r)?;
         }
-        a.update_module(m, |r| r.status = ModuleStatus::Evaluating);
-        let mut r = Ok(());
-        for &dep in &requested {
-            r = self.evaluate(a, dep, depth);
-            if r.is_err() {
-                break;
-            }
-        }
-        if r.is_ok() {
-            let saved = self.depth.replace(depth + 1);
-            let mut regs = Vec::new();
-            let f = self.open(a, &mut regs, Closure::new(main, Some(env)), Value::Undefined, Value::Undefined, &[]);
-            r = self.execute(a, self.state(regs, f), &mut None).map(Outcome::returned).map(drop);
-            self.depth.set(saved);
-        }
-        let error = match &r {
-            Err(Error::Exception) => Some(a.take_exception()),
-            _ => None,
-        };
-        a.update_module(m, |r| {
-            r.status = ModuleStatus::Evaluated;
-            r.error = error;
-        });
-        match error {
-            Some(v) => Err(a.throw_value(v)),
-            None => r,
-        }
+        Ok(())
     }
 
     pub fn load_script(&self, mc: &j8framework::Mutation<'_>, module: j8bytecode::Module, file: &str) -> j8framework::FuncId {
@@ -156,35 +126,30 @@ impl Executor<'_> {
         Ok(meta.into())
     }
 
-    pub fn run_module(&self, a: &mut Scope<'_, '_>, path: &str, text: &str, depth: usize) -> Result<u32, Error> {
-        let m = self.load_module(a, path, text)?;
-        Self::link(a, m, &mut Vec::new())?;
-        self.evaluate(a, m, depth)?;
-        Ok(m)
+    pub fn import<'scope>(&self, a: &mut Scope<'scope, '_>, path: &str, text: &str) -> Result<JsObject<'scope>, Error> {
+        let module = self.load_module(a, path, text)?;
+        Self::link(a, module, &mut Vec::new())?;
+        let promise = a.new_promise();
+        a.enqueue_job(j8framework::Job::Import { module, promise });
+        Ok(promise)
     }
 
-    pub fn dynamic_import<'scope>(&self, a: &mut Scope<'scope, '_>, referrer: &str, specifier: Value<'scope>, depth: usize) -> Result<Value<'scope>, Error> {
-        let promise = a.new_promise();
-        let r = (|| -> Result<Value<'scope>, Error> {
+    pub fn dynamic_import<'scope>(&self, a: &mut Scope<'scope, '_>, referrer: &str, specifier: Value<'scope>) -> Result<Value<'scope>, Error> {
+        let r = (|| -> Result<JsObject<'scope>, Error> {
             let spec = a.to_string(specifier)?;
             let Some((path, text)) = a.platform.load_module(referrer, &spec) else {
                 return Err(a.throw(ErrorKind::Type, &alloc::format!("Cannot find module '{}'", &**spec)));
             };
-            let m = self.run_module(a, &path, &text, depth)?;
-            Ok(a.module_namespace(m).into())
+            self.import(a, &path, &text)
         })();
-        match r {
-            Ok(ns) => a.resolve_promise(promise, ns)?,
-            Err(Error::Exception) => {
-                let reason = a.take_exception();
-                a.reject_promise(promise, reason);
-            }
-            Err(Error::Syntax(msg)) => {
-                let e = a.error(ErrorKind::Syntax, &msg);
-                a.reject_promise(promise, e.into());
-            }
+        let reason = match r {
+            Ok(promise) => return Ok(promise.into()),
+            Err(Error::Exception) => a.take_exception(),
+            Err(Error::Syntax(msg)) => a.error(ErrorKind::Syntax, &msg).into(),
             Err(e) => return Err(e),
-        }
+        };
+        let promise = a.new_promise();
+        a.reject_promise(promise, reason);
         Ok(promise.into())
     }
 }

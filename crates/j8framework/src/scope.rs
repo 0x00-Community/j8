@@ -52,6 +52,8 @@ pub trait Invoke<'scope> {
 
     fn resume(&self, agent: &mut Scope<'scope, '_>, coroutine: crate::JsObject<'scope>, mode: Resume, value: Value<'scope>) -> Result<Step<'scope>, Error>;
 
+    fn evaluate(&self, agent: &mut Scope<'scope, '_>, module: u32) -> Result<(), Error>;
+
     fn callback(&self, _agent: &mut Scope<'scope, '_>, callee: Value<'scope>, this: Value<'scope>) -> Callback<'scope> {
         Callback::from((callee, this))
     }
@@ -122,6 +124,7 @@ pub struct Scope<'scope, 'x> {
     pub new_target: Value<'scope>,
     pub invoke: &'x dyn Invoke<'scope>,
     pub spawned: Option<&'x j8lockfree::Fifo<crate::AsyncJob<'x>>>,
+    pub timers: Option<&'x crate::Timers<'x>>,
     pub stop: &'x crate::Termination,
     pub parked: &'x core::cell::RefCell<crate::Parked<'x>>,
     pub spare_regs: Vec<Vec<Value<'scope>>>,
@@ -132,6 +135,19 @@ pub struct Scope<'scope, 'x> {
 
 impl<'scope> Scope<'scope, '_> {
     const SPARE_REGS: usize = 8;
+
+    pub fn after(&self, delay: core::time::Duration, keep_alive: bool) -> Result<(crate::JsObject<'scope>, u64), Error> {
+        let Some(timers) = self.timers else { return Err(self.throw(crate::ErrorKind::Type, "timers need a runtime with an event loop (j8::Runtime::run_until_idle)")) };
+        let promise = self.new_promise();
+        let (resolve, _) = self.promise_resolvers(promise);
+        Ok((promise, timers.arm(self.platform.now().saturating_add(delay), keep_alive, self.global(resolve.into()))))
+    }
+
+    pub fn cancel_after(&self, id: u64) {
+        if let Some(timers) = self.timers {
+            timers.cancel(id);
+        }
+    }
 
     pub fn spawn<'i>(&self, job: crate::AsyncJob<'i>) -> Result<(), crate::AsyncJob<'i>> {
         match self.spawned {

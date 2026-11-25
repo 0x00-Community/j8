@@ -440,6 +440,11 @@ enum Callee<'scope> {
     Done(Value<'scope>),
 }
 
+enum Resumed<'scope> {
+    Step(Step<'scope>),
+    Frame(Vec<Value<'scope>>, Frame, usize),
+}
+
 enum Prepared<'scope> {
     Frame(Frame),
     Done(Value<'scope>),
@@ -2357,7 +2362,7 @@ impl Executor<'_> {
             }
             Runtime::DynamicImportCall => {
                 let referrer = self.referrer(a, loaded.base);
-                self.dynamic_import(a, &referrer, arg(1), self.depth.get() + 1)
+                self.dynamic_import(a, &referrer, arg(1))
             }
             Runtime::DeleteLookupSlot => {
                 let name = text(a, arg(0))?;
@@ -2404,6 +2409,87 @@ impl Executor<'_> {
         let mut spare = self.spare_frames.borrow_mut();
         if spare.len() < SPARE_FRAMES {
             spare.push(frames);
+        }
+    }
+
+    fn resume_open<'scope>(&self, a: &mut Scope<'scope, '_>, co: JsObject<'scope>, mode: Resume, value: Value<'scope>) -> Result<Resumed<'scope>, Error> {
+        use j8framework::{CoroutineState as S, Settlement, Waiting as W};
+        let level = self.depth.get() + 1;
+        if level >= STACK_LIMIT {
+            return Err(a.throw(ErrorKind::Range, "Maximum call stack size exceeded"));
+        }
+        let (state, waiting, async_generator) = Self::coroutine_mut(a, co, |c| (c.state, core::mem::replace(&mut c.waiting, W::Nothing), c.requests.is_some()));
+        let (mut mode, mut rethrow) = (mode, false);
+        match waiting {
+            W::Yield(_) if mode == Resume::Next => return Ok(Resumed::Step(Step::Yield(value))),
+            W::Yield(_) => rethrow = true,
+            W::Return => mode = if mode == Resume::Next { Resume::Return } else { Resume::Throw },
+            W::Nothing | W::Await(_) | W::Rethrow => {
+                if async_generator && mode == Resume::Return && state != S::Running {
+                    Self::coroutine_mut(a, co, |c| c.waiting = W::Return);
+                    return Ok(Resumed::Step(Step::Await(value)));
+                }
+            }
+        }
+        if state == S::Suspended {
+            Self::coroutine_mut(a, co, |c| {
+                c.state = S::Running;
+                c.mode = mode;
+                c.input = value;
+                c.settlement = Settlement::Nothing;
+                if rethrow {
+                    c.waiting = W::Rethrow;
+                }
+            });
+        }
+        match (state, mode) {
+            (S::Suspended, _) => {}
+            (S::Running, _) => return Err(a.throw(ErrorKind::Type, "Generator is already running")),
+            (S::Completed, Resume::Next) => return Ok(Resumed::Step(Step::Done(Value::Undefined))),
+            (S::Completed, Resume::Return) => return Ok(Resumed::Step(Step::Done(value))),
+            (S::Completed, Resume::Throw) => return Err(a.throw_value(value)),
+        }
+        let (callee, params) = Self::coroutine(co, |c| (c.frame.closure, c.frame.params.clone()));
+        let Some(closure) = callee.as_object().and_then(|o| match &o.borrow().kind {
+            ObjectKind::Function(c) => Some(*c),
+            _ => None,
+        }) else {
+            unreachable!("a generator's function")
+        };
+        let mut regs = a.take_regs();
+        regs.clear();
+        let (this, args) = params.split_first().map_or((Value::Undefined, &[][..]), |(t, rest)| (*t, rest));
+        self.note_user();
+        let f = self.open(a, &mut regs, closure, callee, this, args);
+        if let Some(r) = self.function(closure.func).func.bytecode.new_target_or_generator {
+            regs[f.base + usize::try_from(r).unwrap_or(0)] = co.into();
+        }
+        Ok(Resumed::Frame(regs, f, level))
+    }
+
+    fn resume_close<'scope>(&self, a: &mut Scope<'scope, '_>, co: JsObject<'scope>, r: Result<Value<'scope>, Error>) -> Result<Step<'scope>, Error> {
+        use j8framework::{CoroutineState as S, Settlement, Waiting as W};
+        let v = match r {
+            Ok(v) => v,
+            Err(e) => {
+                Self::coroutine_mut(a, co, |c| c.state = S::Completed);
+                return Err(e);
+            }
+        };
+        let (suspended, waiting, settlement) = Self::coroutine_mut(a, co, |c| {
+            let suspended = c.state == S::Suspended;
+            if !suspended {
+                c.state = S::Completed;
+            }
+            (suspended, c.waiting, core::mem::replace(&mut c.settlement, Settlement::Nothing))
+        });
+        match (suspended, waiting, settlement) {
+            (true, W::Await(w) | W::Yield(w), _) => Ok(Step::Await(w)),
+            (true, _, Settlement::Resolved(x)) => Ok(Step::Yield(x)),
+            (true, ..) => Ok(Step::Yield(v)),
+            (false, _, Settlement::Rejected(e)) => Err(a.throw_value(e)),
+            (false, _, Settlement::Resolved(x)) => Ok(Step::Done(x)),
+            (false, ..) => Ok(Step::Done(v)),
         }
     }
 
@@ -2526,80 +2612,17 @@ impl<'scope> Invoke<'scope> for Executor<'_> {
     }
 
     fn resume(&self, a: &mut Scope<'scope, '_>, co: JsObject<'scope>, mode: Resume, value: Value<'scope>) -> Result<Step<'scope>, Error> {
-        use j8framework::{CoroutineState as S, Settlement, Waiting as W};
-        let level = self.depth.get() + 1;
-        if level >= STACK_LIMIT {
-            return Err(a.throw(ErrorKind::Range, "Maximum call stack size exceeded"));
-        }
-        let (state, waiting, async_generator) = Self::coroutine_mut(a, co, |c| (c.state, core::mem::replace(&mut c.waiting, W::Nothing), c.requests.is_some()));
-        let (mut mode, mut rethrow) = (mode, false);
-        match waiting {
-            W::Yield(_) if mode == Resume::Next => return Ok(Step::Yield(value)),
-            W::Yield(_) => rethrow = true,
-            W::Return => mode = if mode == Resume::Next { Resume::Return } else { Resume::Throw },
-            W::Nothing | W::Await(_) | W::Rethrow => {
-                if async_generator && mode == Resume::Return && state != S::Running {
-                    Self::coroutine_mut(a, co, |c| c.waiting = W::Return);
-                    return Ok(Step::Await(value));
-                }
+        match self.resume_open(a, co, mode, value)? {
+            Resumed::Step(step) => Ok(step),
+            Resumed::Frame(regs, f, level) => {
+                let r = self.run_frame(a, regs, f, level);
+                self.resume_close(a, co, r)
             }
         }
-        if state == S::Suspended {
-            Self::coroutine_mut(a, co, |c| {
-                c.state = S::Running;
-                c.mode = mode;
-                c.input = value;
-                c.settlement = Settlement::Nothing;
-                if rethrow {
-                    c.waiting = W::Rethrow;
-                }
-            });
-        }
-        match (state, mode) {
-            (S::Suspended, _) => {}
-            (S::Running, _) => return Err(a.throw(ErrorKind::Type, "Generator is already running")),
-            (S::Completed, Resume::Next) => return Ok(Step::Done(Value::Undefined)),
-            (S::Completed, Resume::Return) => return Ok(Step::Done(value)),
-            (S::Completed, Resume::Throw) => return Err(a.throw_value(value)),
-        }
-        let (callee, params) = Self::coroutine(co, |c| (c.frame.closure, c.frame.params.clone()));
-        let Some(closure) = callee.as_object().and_then(|o| match &o.borrow().kind {
-            ObjectKind::Function(c) => Some(*c),
-            _ => None,
-        }) else {
-            unreachable!("a generator's function")
-        };
-        let mut regs = a.take_regs();
-        regs.clear();
-        let (this, args) = params.split_first().map_or((Value::Undefined, &[][..]), |(t, rest)| (*t, rest));
-        self.note_user();
-        let f = self.open(a, &mut regs, closure, callee, this, args);
-        if let Some(r) = self.function(closure.func).func.bytecode.new_target_or_generator {
-            regs[f.base + usize::try_from(r).unwrap_or(0)] = co.into();
-        }
-        let r = self.run_frame(a, regs, f, level);
-        let v = match r {
-            Ok(v) => v,
-            Err(e) => {
-                Self::coroutine_mut(a, co, |c| c.state = S::Completed);
-                return Err(e);
-            }
-        };
-        let (suspended, waiting, settlement) = Self::coroutine_mut(a, co, |c| {
-            let suspended = c.state == S::Suspended;
-            if !suspended {
-                c.state = S::Completed;
-            }
-            (suspended, c.waiting, core::mem::replace(&mut c.settlement, Settlement::Nothing))
-        });
-        match (suspended, waiting, settlement) {
-            (true, W::Await(w) | W::Yield(w), _) => Ok(Step::Await(w)),
-            (true, _, Settlement::Resolved(x)) => Ok(Step::Yield(x)),
-            (true, ..) => Ok(Step::Yield(v)),
-            (false, _, Settlement::Rejected(e)) => Err(a.throw_value(e)),
-            (false, _, Settlement::Resolved(x)) => Ok(Step::Done(x)),
-            (false, ..) => Ok(Step::Done(v)),
-        }
+    }
+
+    fn evaluate(&self, a: &mut Scope<'scope, '_>, module: u32) -> Result<(), Error> {
+        self.evaluate_nested(a, module)
     }
 
     fn construct(&self, a: &mut Scope<'scope, '_>, callee: Value<'scope>, args: &[Value<'scope>], new_target: Value<'scope>) -> Result<Value<'scope>, Error> {
@@ -2618,77 +2641,290 @@ impl<'scope> Invoke<'scope> for Executor<'_> {
     }
 }
 
+#[derive(Collect)]
+#[collect(no_drop)]
+enum After<'scope> {
+    Script,
+    Module(#[collect(require_static)] u32),
+    Reaction(Option<j8framework::Capability<'scope>>),
+    Await(JsObject<'scope>),
+}
+
+#[derive(Collect)]
+#[collect(no_drop)]
+struct Running<'scope> {
+    state: State<'scope>,
+    after: After<'scope>,
+}
+
 j8framework::paragc::brand!(
-    ParkedBrand = for<'heap, 'scope> j8framework::GcCell<'scope, Option<State<'scope>>>
+    ParkedBrand = for<'heap, 'scope> j8framework::GcCell<'scope, Option<Running<'scope>>>
 );
 
 type Parked<'p> = j8framework::ScopeGlobal<'p, ParkedBrand>;
 
-enum Slice<'p> {
-    Done(j8framework::ScopeGlobal<'p, j8framework::ValueBrand>),
-    Paused(Parked<'p>),
+#[derive(Clone, Copy)]
+struct Visit {
+    module: u32,
+    next: Option<usize>,
 }
 
-pub struct Job<'p>(Started<'p>);
+impl From<u32> for Visit {
+    fn from(module: u32) -> Self {
+        Self { module, next: None }
+    }
+}
 
-enum Started<'p> {
+enum Work<'p> {
     Script { module: Module, file: alloc::string::String },
-    Paused(Parked<'p>),
     Module { text: alloc::string::String, file: alloc::string::String },
+    Evaluate { stack: Vec<Visit>, module: u32, promise: j8framework::ScopeGlobal<'p, j8framework::ValueBrand> },
+    Drain,
     Spent,
+}
+
+enum Next<'scope> {
+    Run(Running<'scope>),
+    Paused,
+    Done,
+}
+
+pub struct Job<'p> {
+    work: Work<'p>,
+    parked: Option<Parked<'p>>,
+    value: Option<j8framework::ScopeGlobal<'p, j8framework::ValueBrand>>,
+    entry: Option<j8framework::ScopeGlobal<'p, j8framework::ValueBrand>>,
+}
+
+impl<'p> From<Work<'p>> for Job<'p> {
+    fn from(work: Work<'p>) -> Self {
+        Self { work, parked: None, value: None, entry: None }
+    }
 }
 
 impl<'p> Executor<'p> {
     pub const SLICE: usize = 10_000;
 
     pub fn start(&self, src: &j8framework::Source<'_>, kind: j8framework::ScriptKind) -> Result<Job<'p>, Error> {
-        Ok(Job(match kind {
-            j8framework::ScriptKind::Classic => Started::Script { module: Module::compile(src, j8framework::CodeKind::Script)?, file: src.file.into() },
-            j8framework::ScriptKind::Shared => Started::Script {
+        Ok(Job::from(match kind {
+            j8framework::ScriptKind::Classic => Work::Script { module: Module::compile(src, j8framework::CodeKind::Script)?, file: src.file.into() },
+            j8framework::ScriptKind::Shared => Work::Script {
                 module: match &self.cache {
                     Some(cache) => cache.script(src)?,
                     None => Module::compile(src, j8framework::CodeKind::Script)?,
                 },
                 file: src.file.into(),
             },
-            j8framework::ScriptKind::Module => Started::Module { text: src.text.into(), file: src.file.into() },
+            j8framework::ScriptKind::Module => Work::Module { text: src.text.into(), file: src.file.into() },
         }))
     }
 
+    pub fn checkpoint() -> Job<'p> {
+        Job::from(Work::Drain)
+    }
+
     pub fn resume(&self, isolate: &mut j8framework::Isolate<'p>, cx: &j8framework::ScopeGlobal<'p, j8framework::ContextBrand>, job: &mut Job<'p>, quota: &mut j8framework::Quota) -> Result<Option<j8framework::ScopeGlobal<'p, j8framework::ValueBrand>>, Error> {
-        let this = self;
-        let started = core::mem::replace(&mut job.0, Started::Spent);
         let mut budget = Some(quota.left());
-        let slice = isolate.enter(cx, this, |a| -> Result<Slice, Error> {
-            let st = match started {
-                Started::Script { module, file } => {
-                    let main = this.load_script(a.mc, module, &file);
-                    this.script_state(a, main)?
-                }
-                Started::Paused(root) => j8framework::CellExt::borrow_mut(a.mc.fetch(&root), a.mc).take().expect("a parked state"),
-                Started::Module { text, file } => {
-                    this.run_module(a, &file, &text, 0)?;
-                    a.run_jobs()?;
-                    return Ok(Slice::Done(a.global(Value::Undefined)));
-                }
-                Started::Spent => unreachable!("a finished job is not resumed"),
-            };
-            match this.execute(a, st, &mut budget)? {
-                Outcome::Paused(st) => Ok(Slice::Paused(a.mc.stash::<ParkedBrand>(a.mc.alloc(j8framework::GcCell::new(a.mc, Some(*st)))))),
-                Outcome::Return(v) => {
-                    a.run_jobs()?;
-                    Ok(Slice::Done(a.global(v)))
-                }
-            }
-        });
+        let done = isolate.enter(cx, self, |a| self.advance(a, job, &mut budget));
         quota.spend(quota.left() - budget.unwrap_or(0));
-        match slice? {
-            Slice::Done(g) => Ok(Some(g)),
-            Slice::Paused(root) => {
-                job.0 = Started::Paused(root);
-                Ok(None)
+        if done? {
+            return Ok(job.value.take());
+        }
+        quota.spend(quota.left());
+        Ok(None)
+    }
+
+    fn advance<'scope>(&self, a: &mut Scope<'scope, '_>, job: &mut Job<'p>, budget: &mut Option<usize>) -> Result<bool, Error> {
+        loop {
+            let running = match job.parked.take() {
+                Some(root) => j8framework::CellExt::borrow_mut(a.mc.fetch(&root), a.mc).take().expect("a parked execution"),
+                None => match self.next_running(a, job, budget)? {
+                    Next::Run(r) => r,
+                    Next::Paused => return Ok(false),
+                    Next::Done => {
+                        if let Some(entry) = job.entry.take()
+                            && let Some(promise) = a.local(&entry).as_object()
+                            && let ObjectKind::Promise { state: j8framework::Settled::Rejected(reason), .. } = promise.borrow().kind
+                        {
+                            return Err(a.throw_value(reason));
+                        }
+                        if job.value.is_none() {
+                            job.value = Some(a.global(Value::Undefined));
+                        }
+                        return Ok(true);
+                    }
+                },
+            };
+            let Running { state, after } = running;
+            match self.execute(a, state, budget) {
+                Ok(Outcome::Paused(state)) => {
+                    job.parked = Some(a.mc.stash::<ParkedBrand>(a.mc.alloc(j8framework::GcCell::new(a.mc, Some(Running { state: *state, after })))));
+                    return Ok(false);
+                }
+                Ok(Outcome::Return(v)) => self.finished(a, job, after, Ok(v))?,
+                Err(e) => self.finished(a, job, after, Err(e))?,
             }
         }
+    }
+
+    fn next_running<'scope>(&self, a: &mut Scope<'scope, '_>, job: &mut Job<'p>, budget: &mut Option<usize>) -> Result<Next<'scope>, Error> {
+        loop {
+            match &mut job.work {
+                Work::Script { .. } => {
+                    let Work::Script { module, file } = core::mem::replace(&mut job.work, Work::Drain) else { unreachable!("a script") };
+                    let main = self.load_script(a.mc, module, &file);
+                    return Ok(Next::Run(Running { state: self.script_state(a, main)?, after: After::Script }));
+                }
+                Work::Module { .. } => {
+                    let Work::Module { text, file } = core::mem::replace(&mut job.work, Work::Drain) else { unreachable!("a module") };
+                    let promise = self.import(a, &file, &text)?;
+                    job.entry = Some(a.global(promise.into()));
+                }
+                Work::Evaluate { stack, .. } => match self.evaluation_step(a, stack) {
+                    Ok(Some((m, regs, f))) => return Ok(Next::Run(Running { state: self.state(regs, f), after: After::Module(m) })),
+                    Ok(None) => Self::evaluation_done(a, job, Ok(()))?,
+                    Err(e) => Self::evaluation_done(a, job, Err(e))?,
+                },
+                Work::Drain => {
+                    if *budget == Some(0) {
+                        return Ok(Next::Paused);
+                    }
+                    *budget = budget.map(|b| b - 1);
+                    let Some(next) = a.next_job() else {
+                        job.work = Work::Spent;
+                        return Ok(Next::Done);
+                    };
+                    if let j8framework::Job::Import { module, promise } = next {
+                        job.work = Work::Evaluate { stack: alloc::vec![Visit::from(module)], module, promise: a.global(promise.into()) };
+                        continue;
+                    }
+                    if let Some(r) = self.job_running(a, next)? {
+                        return Ok(Next::Run(r));
+                    }
+                }
+                Work::Spent => return Ok(Next::Done),
+            }
+        }
+    }
+
+    fn job_running<'scope>(&self, a: &mut Scope<'scope, '_>, job: j8framework::Job<'scope>) -> Result<Option<Running<'scope>>, Error> {
+        use j8framework::{Job as J, Reaction as R};
+        match job {
+            J::Reaction { reaction: R::Then { on_fulfilled, on_rejected, capability }, value, rejected } => {
+                let handler = if rejected { on_rejected } else { on_fulfilled };
+                if let ValueKind::Object(o) = handler.kind()
+                    && let Some(c) = o.closure()
+                    && let l = self.code(&c)
+                    && !l.class_constructor
+                {
+                    self.note_user();
+                    let mut regs = a.take_regs();
+                    regs.clear();
+                    let f = self.open_with(a, &mut regs, l, c, handler, Value::Undefined, Args::Values(&[value]));
+                    return Ok(Some(Running { state: self.state(regs, f), after: After::Reaction(capability) }));
+                }
+            }
+            J::Reaction { reaction: R::Await { coroutine }, value, rejected } if !Self::coroutine(coroutine, |c| c.requests.is_some()) => {
+                let promise = Self::coroutine(coroutine, |c| c.promise);
+                let mode = if rejected { Resume::Throw } else { Resume::Next };
+                return match self.resume_open(a, coroutine, mode, value) {
+                    Ok(Resumed::Frame(regs, f, _)) => Ok(Some(Running { state: self.state(regs, f), after: After::Await(coroutine) })),
+                    Ok(Resumed::Step(step)) => a.driven(promise, Ok(step)).map(|()| None),
+                    Err(e) => a.driven(promise, Err(e)).map(|()| None),
+                };
+            }
+            _ => {}
+        }
+        a.run_job(job)?;
+        Ok(None)
+    }
+
+    fn evaluation_step<'scope>(&self, a: &mut Scope<'scope, '_>, stack: &mut Vec<Visit>) -> Result<Option<(u32, Vec<Value<'scope>>, Frame)>, Error> {
+        loop {
+            let Some(&Visit { module: m, next }) = stack.last() else { return Ok(None) };
+            let (status, error, dep, main, env) = {
+                let r = &a.modules()[m as usize];
+                (r.status, r.error, next.and_then(|i| r.requested.get(i).copied()), r.main, r.env)
+            };
+            match (next, status, dep) {
+                (None, j8framework::ModuleStatus::Evaluated, _) => {
+                    stack.pop();
+                    if let Some(e) = error {
+                        let e = a.throw_value(e);
+                        return Err(Self::unwind_evaluation(a, stack, e));
+                    }
+                }
+                (None, j8framework::ModuleStatus::Evaluating, _) => {
+                    stack.pop();
+                }
+                (None, j8framework::ModuleStatus::Linked, _) => {
+                    a.update_module(m, |r| r.status = j8framework::ModuleStatus::Evaluating);
+                    stack.last_mut().expect("the module being entered").next = Some(0);
+                }
+                (Some(i), _, Some(d)) => {
+                    stack.last_mut().expect("the module being entered").next = Some(i + 1);
+                    stack.push(Visit::from(d));
+                }
+                (Some(_), _, None) => {
+                    let mut regs = Vec::new();
+                    let f = self.open(a, &mut regs, Closure::new(main, Some(env)), Value::Undefined, Value::Undefined, &[]);
+                    return Ok(Some((m, regs, f)));
+                }
+            }
+        }
+    }
+
+    fn evaluated(a: &mut Scope<'_, '_>, stack: &mut Vec<Visit>, m: u32, r: Result<(), Error>) -> Result<(), Error> {
+        match r {
+            Ok(()) => {
+                stack.pop();
+                a.update_module(m, |r| {
+                    r.status = j8framework::ModuleStatus::Evaluated;
+                    r.error = None;
+                });
+                Ok(())
+            }
+            Err(e) => Err(Self::unwind_evaluation(a, stack, e)),
+        }
+    }
+
+    fn unwind_evaluation(a: &mut Scope<'_, '_>, stack: &mut Vec<Visit>, e: Error) -> Error {
+        let error = matches!(e, Error::Exception).then(|| a.take_exception());
+        for v in stack.drain(..) {
+            a.update_module(v.module, |r| {
+                r.status = j8framework::ModuleStatus::Evaluated;
+                r.error = error;
+            });
+        }
+        match error {
+            Some(v) => a.throw_value(v),
+            None => e,
+        }
+    }
+
+    fn evaluation_done(a: &mut Scope<'_, '_>, job: &mut Job<'p>, r: Result<(), Error>) -> Result<(), Error> {
+        let Work::Evaluate { module, promise, .. } = core::mem::replace(&mut job.work, Work::Drain) else { unreachable!("a module graph evaluates") };
+        let Some(promise) = a.local(&promise).as_object() else { unreachable!("an import promise") };
+        a.imported(module, promise, r)
+    }
+
+    fn finished<'scope>(&self, a: &mut Scope<'scope, '_>, job: &mut Job<'p>, after: After<'scope>, r: Result<Value<'scope>, Error>) -> Result<(), Error> {
+        match after {
+            After::Script => job.value = Some(a.global(r?)),
+            After::Module(m) => {
+                let Work::Evaluate { stack, .. } = &mut job.work else { unreachable!("a module body runs while its graph evaluates") };
+                if let Err(e) = Self::evaluated(a, stack, m, r.map(drop)) {
+                    Self::evaluation_done(a, job, Err(e))?;
+                }
+            }
+            After::Reaction(capability) => a.reacted(capability, r)?,
+            After::Await(co) => {
+                let promise = Self::coroutine(co, |c| c.promise);
+                let step = self.resume_close(a, co, r);
+                a.driven(promise, step)?;
+            }
+        }
+        Ok(())
     }
 
     pub fn eval(&self, isolate: &mut j8framework::Isolate<'p>, cx: &j8framework::ScopeGlobal<'p, j8framework::ContextBrand>, src: &j8framework::Source<'_>) -> Result<j8framework::ScopeGlobal<'p, j8framework::ValueBrand>, Error> {
