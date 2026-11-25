@@ -2927,6 +2927,7 @@ impl<'a> Compiler<'a, '_> {
             Statement::VariableDeclaration(d) => self.declaration(d)?,
             Statement::FunctionDeclaration(f) => self.annexb_copy(f),
             Statement::EmptyStatement(_) => {}
+            Statement::DebuggerStatement(_) => self.b().plain(Bytecode::Debugger),
             Statement::ClassDeclaration(c) => {
                 self.class(c, "")?;
                 if let Some(id) = &c.id {

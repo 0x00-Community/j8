@@ -2087,6 +2087,7 @@ impl Executor<'_> {
                     Flow::Done(Outcome::Return(v))
                 });
             }
+            B::Debugger => {}
             b => return Err(a.throw(ErrorKind::Syntax, &alloc::format!("bytecode {b:?} is not supported by the executor yet"))),
         }
         Ok(Flow::Next)

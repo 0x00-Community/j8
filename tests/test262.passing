@@ -37119,6 +37119,7 @@ language/statements/continue/simple-and-labeled.js
 language/statements/continue/static-init-with-label.js
 language/statements/continue/static-init-without-label.js
 language/statements/debugger/expression.js
+language/statements/debugger/statement.js
 language/statements/do-while/S12.6.1_A1.js
 language/statements/do-while/S12.6.1_A11.js
 language/statements/do-while/S12.6.1_A12.js
