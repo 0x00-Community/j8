@@ -1290,8 +1290,8 @@ impl Executor<'_> {
         let mut b = Budget::new(a.stop, *budget);
         let r = loop {
             match self.run(a, &mut st, base, &mut b) {
+                Ok(None | Some(Outcome::Paused(_))) if b.terminated => break Err(Error::Terminated),
                 Ok(Some(v)) => break Ok(Some(v)),
-                Ok(None) if b.terminated => break Err(Error::Terminated),
                 Ok(None) => break Ok(None),
                 Err(Error::Exception) => {
                     let v = a.take_exception();
