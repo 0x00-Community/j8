@@ -2797,9 +2797,11 @@ impl<'p> Executor<'p> {
                 }
                 Work::Module { .. } => {
                     let Work::Module { text, file } = core::mem::replace(&mut job.work, Work::Drain) else { unreachable!("a module") };
-                    let promise = self.import(a, &file, &text)?;
-                    a.set_promise_handled(promise, true);
-                    job.entry = Some(a.global(promise.into()));
+                    let module = self.load_module(a, &file, &text)?;
+                    Self::link(a, module, &mut Vec::new())?;
+                    let evaluation = a.evaluate_module(module)?;
+                    a.set_promise_handled(evaluation, true);
+                    job.entry = Some(a.global(evaluation.into()));
                 }
                 Work::Drain => {
                     if *budget == Some(0) {
