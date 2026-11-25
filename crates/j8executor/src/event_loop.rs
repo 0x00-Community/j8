@@ -532,6 +532,8 @@ impl<'p> Lane<'p> {
             let st = unsafe { self.js.state() };
             let JsState { isolate, engine, cx, .. } = st;
             isolate.enter(cx, engine, |a| engine.serve_interrupts(a));
+            let tasks = &mut self.tasks;
+            st.adopt(&self.js, |t| drop(tasks.add(t)));
         }
         self.take_in();
         self.tasks.set_slice(check);
