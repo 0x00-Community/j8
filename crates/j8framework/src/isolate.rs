@@ -1,5 +1,6 @@
 use alloc::sync::Arc;
 use core::num::NonZeroUsize;
+use core::cell::{Cell, RefCell};
 
 use j8lockfree::Fifo;
 
@@ -65,6 +66,40 @@ pub struct CreateParams {
     pub profile: bool,
     pub event_loop: bool,
     pub collector_threads: Option<NonZeroUsize>,
+    pub stack_size: Option<NonZeroUsize>,
+}
+
+impl CreateParams {
+    pub const DEFAULT_STACK_SIZE: usize = 984 << 10;
+}
+
+const COLLECT_FRACTION: usize = 2;
+
+pub type HeapLimitCallback<'p> = Box<dyn FnMut(usize, usize) -> usize + Send + 'p>;
+
+pub(crate) struct HeapLimit<'p> {
+    current: Cell<usize>,
+    initial: usize,
+    callback: RefCell<Option<HeapLimitCallback<'p>>>,
+    collected_at: Cell<usize>,
+}
+
+impl HeapLimit<'_> {
+    pub(crate) fn exceeded(&self, used: usize) -> bool {
+        let mut current = self.current.get();
+        if used <= current {
+            return false;
+        }
+        if let Some(callback) = self.callback.borrow_mut().as_mut() {
+            current = callback(current, self.initial);
+            self.current.set(current);
+        }
+        used > current
+    }
+
+    pub(crate) fn current(&self) -> usize {
+        self.current.get()
+    }
 }
 
 pub struct Isolate<'p> {
@@ -77,6 +112,8 @@ pub struct Isolate<'p> {
     stop: Arc<Termination>,
     exception: Option<ScopeGlobal<'p, ValueBrand>>,
     parked: core::cell::RefCell<Parked<'p>>,
+    heap_limit: Option<HeapLimit<'p>>,
+    stack_size: usize,
     #[cfg(all(target_os = "linux", feature = "crossheap"))]
     shares: Shares<'p>,
 }
@@ -97,6 +134,8 @@ impl<'p> Isolate<'p> {
             stop: Arc::default(),
             exception: None,
             parked: core::cell::RefCell::default(),
+            heap_limit: None,
+            stack_size: params.stack_size.map_or(CreateParams::DEFAULT_STACK_SIZE, NonZeroUsize::get),
             #[cfg(all(target_os = "linux", feature = "crossheap"))]
             shares: Shares::default(),
         }
@@ -151,10 +190,11 @@ impl<'p> Isolate<'p> {
     }
 
     pub fn enter<R>(&mut self, cx: &ScopeGlobal<'p, crate::ContextBrand>, invoke: &dyn for<'s> crate::Invoke<'s>, f: impl for<'scope> FnOnce(&mut Scope<'scope, '_>) -> R) -> R {
-        let (platform, profiler, generation, stop) = (self.platform, &mut self.profiler, self.generation, &*self.stop);
+        let (platform, profiler, generation, stop, stack_size) = (self.platform, &mut self.profiler, self.generation, &*self.stop, self.stack_size);
         let spawned = self.spawned.as_ref();
         let timers = self.timers.as_ref();
         let parked = &self.parked;
+        let heap_limit = self.heap_limit.as_ref();
         #[cfg(all(target_os = "linux", feature = "crossheap"))]
         let shares = &mut self.shares;
         let carried = self.exception.take();
@@ -178,6 +218,9 @@ impl<'p> Isolate<'p> {
                 stop,
                 parked: unsafe { rebrand_ref(parked) },
                 spare_regs: Vec::new(),
+                heap_limit: heap_limit.map(|l| unsafe { rebrand_ref(l) }),
+                stack_limit: Scope::stack_limit_here(stack_size),
+                joining: crate::Visiting::default(),
                 #[cfg(all(target_os = "linux", feature = "crossheap"))]
                 shares: unsafe { &mut *core::ptr::from_mut(shares).cast() },
             });
@@ -202,6 +245,30 @@ impl<'p> Isolate<'p> {
         if self.heap.collect_if_needed() {
             self.generation += 1;
         }
+        self.rearm_heap_limit();
+    }
+
+    pub fn heap_used(&self) -> usize {
+        self.heap.used()
+    }
+
+    pub fn set_heap_limit(&mut self, limit: Option<NonZeroUsize>, callback: Option<HeapLimitCallback<'p>>, interrupt: impl Fn() + Send + Sync + 'p) {
+        let used = self.heap_used();
+        self.heap_limit = limit.map(|l| HeapLimit { current: Cell::new(l.get()), initial: l.get(), callback: RefCell::new(callback), collected_at: Cell::new(used) });
+        self.heap.on_limit(interrupt);
+        self.heap.set_limit(limit.map(NonZeroUsize::get));
+    }
+
+    fn rearm_heap_limit(&mut self) {
+        let Some((current, collected_at)) = self.heap_limit.as_ref().map(|l| (l.current(), l.collected_at.get())) else { return };
+        if self.heap_used().saturating_sub(collected_at) >= current / COLLECT_FRACTION {
+            self.collect();
+            let used = self.heap_used();
+            if let Some(limit) = &self.heap_limit {
+                limit.collected_at.set(used);
+            }
+        }
+        self.heap.set_limit(Some(current));
     }
 
     pub fn collect(&mut self) {

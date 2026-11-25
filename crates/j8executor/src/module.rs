@@ -2,9 +2,9 @@ use alloc::string::String;
 use j8compiler::Compile;
 use alloc::vec::Vec;
 
-use j8framework::{Scope, Error, ErrorKind, ImportName, JsObject, ModuleStatus, ObjectData, Resolution, ResolvedBinding, Value};
+use j8framework::{Scope, Closure, Error, ErrorKind, ImportName, JsObject, ModuleStatus, ObjectData, Resolution, ResolvedBinding, Value};
 
-use crate::{Executor, Visit};
+use crate::Executor;
 
 pub const EVAL_FILE: &str = "[eval]";
 const SOURCE_URL: &str = "//# sourceURL=";
@@ -16,8 +16,8 @@ impl Executor<'_> {
         }
         let src = j8framework::Source { text, file: path };
         let (module, info) = match &self.cache {
-            Some(cache) => cache.module(&src)?,
-            None => <j8bytecode::Module as Compile>::compile_module(&src).map(|(m, info)| (m, alloc::sync::Arc::new(info)))?,
+            Some(cache) => cache.module(&src, self.debug_info())?,
+            None => <j8bytecode::Module as Compile>::compile_module(&src, self.debug_info()).map(|(m, info)| (m, alloc::sync::Arc::new(info)))?,
         };
         let main = self.load(a.mc, module);
         let mut slots = alloc::vec![Value::Undefined; usize::from(info.slots)];
@@ -25,7 +25,24 @@ impl Executor<'_> {
             slots[usize::from(s)] = Value::Uninit;
         }
         let env = j8framework::Env::new(slots, None).alloc(a.mc);
-        let record = j8framework::ModuleRecord { path: a.string(path), env, info: alloc::sync::Arc::clone(&info), main, code: self.function(main).code(), status: ModuleStatus::Linked, error: None, requested: Vec::new(), imports: Vec::new(), namespace: None, meta: None };
+        let function = self.function_object(a, Closure::new(main, Some(env)));
+        let record = j8framework::ModuleRecord {
+            path: a.string(path),
+            env,
+            info: alloc::sync::Arc::clone(&info),
+            main,
+            code: self.function(main).code(),
+            function,
+            status: ModuleStatus::Linked,
+            error: None,
+            evaluation: j8framework::Evaluation::default(),
+            async_parents: Vec::new(),
+            capability: None,
+            requested: Vec::new(),
+            imports: Vec::new(),
+            namespace: None,
+            meta: None,
+        };
         let index = a.push_module(&record);
         self.module_of.borrow_mut().insert(main.0 - j8bytecode::Module::MAIN, index);
         let mut requested = Vec::with_capacity(info.requests.len());
@@ -73,15 +90,6 @@ impl Executor<'_> {
             }
         }
         a.update_module(m, |r| r.imports.clone_from(&imports));
-        Ok(())
-    }
-
-    pub fn evaluate_nested(&self, a: &mut Scope<'_, '_>, m: u32) -> Result<(), Error> {
-        let mut stack = alloc::vec![Visit::from(m)];
-        while let Some((m, regs, f)) = self.evaluation_step(a, &mut stack)? {
-            let r = self.run_frame(a, regs, f, self.depth.get() + 1).map(drop);
-            Self::evaluated(a, &mut stack, m, r)?;
-        }
         Ok(())
     }
 

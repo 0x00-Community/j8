@@ -274,9 +274,9 @@ impl<'r, 'scope, 'x, 'p> Entry<'r, 'scope, 'x, '_, 'p> {
 
     pub fn spend(&mut self, n: usize) -> bool {
         let b = &mut *self.budget;
-        if self.a.stop.observe() {
-            b.terminated = true;
-            return true;
+        if b.stop.is_set() {
+            b.tick = 0;
+            return b.refill();
         }
         if n <= b.tick {
             b.tick -= n;

@@ -463,19 +463,30 @@ impl Arrays {
         if let Some(s) = Self::join_plain(a, o, len, &sep) {
             return Ok(a.string(&s).into());
         }
-        let mut out = String::new();
-        let mut k = 0.0;
-        while k < len {
-            if k > 0.0 {
-                out.push_str(&sep);
+        Self::unless_joining(a, o, |a| {
+            let mut out = String::new();
+            let mut k = 0.0;
+            while k < len {
+                if k > 0.0 {
+                    out.push_str(&sep);
+                }
+                let v = a.get_index(o.into(), k)?;
+                if !v.is_nullish() {
+                    out.push_str(&a.to_string(v)?);
+                }
+                k += 1.0;
             }
-            let v = a.get_index(o.into(), k)?;
-            if !v.is_nullish() {
-                out.push_str(&a.to_string(v)?);
-            }
-            k += 1.0;
+            Ok(out)
+        })
+    }
+
+    fn unless_joining<'scope, 'x>(a: &mut Scope<'scope, 'x>, o: JsObject<'scope>, join: impl FnOnce(&mut Scope<'scope, 'x>) -> Result<String, Error>) -> Result<Value<'scope>, Error> {
+        if !a.joining().enter(o) {
+            return Ok(a.string("").into());
         }
-        Ok(a.string(&out).into())
+        let joined = join(a);
+        a.joining().leave();
+        Ok(a.string(&joined?).into())
     }
 
     fn join_plain<'scope>(a: &Scope<'scope, '_>, o: JsObject<'scope>, len: f64, sep: &str) -> Option<String> {
@@ -538,23 +549,9 @@ impl Arrays {
         a.call(f, o.into(), &[])
     }
 
-    fn to_locale_string<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn to_locale_string<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let (o, len) = Self::target(a, this)?;
-        let mut out = String::new();
-        let mut k = 0.0;
-        while k < len {
-            if k > 0.0 {
-                out.push(',');
-            }
-            let v = a.get_index(o.into(), k)?;
-            if !v.is_nullish() {
-                let f = a.get_named(v, "toLocaleString")?;
-                let s = a.call(f, v, &[])?;
-                out.push_str(&a.to_string(s)?);
-            }
-            k += 1.0;
-        }
-        Ok(a.string(&out).into())
+        Self::unless_joining(a, o, |a| crate::LocaleJoin::join(a, o, len, args))
     }
 
     fn reverse<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
@@ -1137,6 +1134,7 @@ impl Arrays {
                 if depth > 0.0 && a.is_array(v)? {
                     let Some(inner) = v.as_object() else { unreachable!("arrays are objects") };
                     let inner_len = a.length_of_array_like(v)?;
+                    a.check_stack()?;
                     to = Self::flatten(a, target, inner, inner_len, to, depth - 1.0, Value::Undefined, Value::Undefined)?;
                 } else {
                     if to >= MAX_LENGTH {

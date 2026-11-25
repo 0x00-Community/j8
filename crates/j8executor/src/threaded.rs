@@ -27,7 +27,7 @@ pub type Handler = for<'r, 'scope, 'x, 'b, 'p> fn(&mut Cx<'r, 'scope, 'x, 'b, 'p
 macro_rules! next {
     ($cx:ident, $pc:expr, $regs:ident, $acc:expr) => {{
         let pc: *const Insn = $pc;
-        become (unsafe { (*pc).handler })($cx, pc, $regs, $acc)
+        become (unsafe { (*pc).handler.get() })($cx, pc, $regs, $acc)
     }};
 }
 
@@ -70,6 +70,20 @@ macro_rules! reg {
             Executor::reg(&$cx.st.regs, $cx.st.f(), k)
         }
     }};
+}
+
+#[cfg(tail_calls)]
+macro_rules! run {
+    ($h:ident, $cx:ident, $pc:ident, $regs:ident, $acc:ident) => {
+        become $h($cx, $pc, $regs, $acc)
+    };
+}
+
+#[cfg(not(tail_calls))]
+macro_rules! run {
+    ($h:ident, $cx:ident, $pc:ident, $regs:ident, $acc:ident) => {
+        $h($cx, $pc, $regs, $acc)
+    };
 }
 
 #[cfg(tail_calls)]
@@ -612,6 +626,33 @@ fn slow<'scope>(cx: &mut Cx<'_, 'scope, '_, '_, '_>, pc: *const Insn, _: *mut Va
     }
 }
 
+fn hold<'scope>(cx: &mut Cx<'_, 'scope, '_, '_, '_>, pc: *const Insn, acc: Value<'scope>) -> usize {
+    let at = usize::try_from(unsafe { pc.offset_from(cx.loaded.insns.as_ptr()) }).unwrap_or(0);
+    let f = cx.st.f_mut();
+    f.insn = at;
+    f.pc = at;
+    cx.st.acc = acc;
+    cx.st.level()
+}
+
+pub fn brk<'scope>(cx: &mut Cx<'_, 'scope, '_, '_, '_>, pc: *const Insn, _: *mut Value<'scope>, acc: Value<'scope>) -> Exit<'scope> {
+    let level = hold(cx, pc, acc);
+    cx.exe.debug_break(cx.a, cx.st, level, false);
+    let regs = cx.st.regs.as_mut_ptr().wrapping_add(cx.st.f().base);
+    let acc = cx.st.acc;
+    let h = Insn::handler(unsafe { (*pc).bytecode });
+    run!(h, cx, pc, regs, acc)
+}
+
+fn statement<'scope>(cx: &mut Cx<'_, 'scope, '_, '_, '_>, pc: *const Insn, _: *mut Value<'scope>, acc: Value<'scope>) -> Exit<'scope> {
+    let level = hold(cx, pc, acc);
+    cx.exe.debug_break(cx.a, cx.st, level, true);
+    #[cfg_attr(not(tail_calls), expect(unused_variables, reason = "the loop reloads the registers"))]
+    let regs = cx.st.regs.as_mut_ptr().wrapping_add(cx.st.f().base);
+    let acc = cx.st.acc;
+    next!(cx, step!(pc), regs, acc)
+}
+
 fn illegal<'scope>(cx: &mut Cx<'_, 'scope, '_, '_, '_>, _: *const Insn, _: *mut Value<'scope>, _: Value<'scope>) -> Exit<'scope> {
     Exit::Throw(cx.a.throw(ErrorKind::Syntax, "ran past the end of the bytecode"))
 }
@@ -689,6 +730,7 @@ impl Insn {
             B::ShiftRightSmi => shift_right_smi,
             B::ShiftRightLogicalSmi => shift_right_logical_smi,
             B::Illegal => illegal,
+            B::Debugger => statement,
             _ => slow,
         }
     }
@@ -720,7 +762,7 @@ impl Executor<'_> {
         let pc = &raw const cx.loaded.insns[st.f().pc];
         let regs = st.regs.as_mut_ptr().wrapping_add(st.f().base);
         let acc = st.acc;
-        let h = unsafe { (*pc).handler };
+        let h = unsafe { (*pc).handler.get() };
         #[cfg(tail_calls)]
         {
             h(cx, pc, regs, acc)
@@ -734,7 +776,7 @@ impl Executor<'_> {
                         pc = p;
                         acc = a;
                         regs = cx.st.regs.as_mut_ptr().wrapping_add(cx.st.f().base);
-                        h = unsafe { (*pc).handler };
+                        h = unsafe { (*pc).handler.get() };
                     }
                     e => return e,
                 }

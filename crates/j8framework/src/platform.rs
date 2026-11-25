@@ -11,6 +11,18 @@ pub struct AsyncJob<'i> {
     pub resolve: crate::ScopeGlobal<'i, crate::ValueBrand>,
     pub reject: crate::ScopeGlobal<'i, crate::ValueBrand>,
     pub future: core::pin::Pin<Box<dyn core::future::Future<Output = Settle> + Send>>,
+    pub keep_alive: bool,
+}
+
+impl<'i> AsyncJob<'i> {
+    pub fn new(resolve: crate::ScopeGlobal<'i, crate::ValueBrand>, reject: crate::ScopeGlobal<'i, crate::ValueBrand>, future: core::pin::Pin<Box<dyn core::future::Future<Output = Settle> + Send>>) -> Self {
+        Self { resolve, reject, future, keep_alive: true }
+    }
+
+    #[must_use]
+    pub fn unref(self) -> Self {
+        Self { keep_alive: false, ..self }
+    }
 }
 
 pub enum TimerRequest<'i> {
@@ -52,5 +64,17 @@ pub trait Platform: Sync + Pool {
         None
     }
 
+    fn locale(&self) -> Option<alloc::string::String> {
+        None
+    }
+
+    fn time_zone(&self) -> Option<alloc::string::String> {
+        None
+    }
+
     fn print(&self, line: &str);
+
+    fn unhandled_rejection<'scope>(&self, scope: &mut crate::Scope<'scope, '_>, promise: crate::JsObject<'scope>, reason: crate::Value<'scope>) {
+        let _ = (scope, promise, reason);
+    }
 }

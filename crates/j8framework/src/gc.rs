@@ -44,16 +44,28 @@ pub struct Mutation<'scope> {
     m: NonNull<GcScope<'scope>>,
     generation: u64,
     pending: core::cell::Cell<Option<Value<'scope>>>,
+    rethrown: core::cell::Cell<bool>,
 }
 
 impl<'scope> Mutation<'scope> {
     pub unsafe fn new(m: &GcScope<'scope>, generation: u64) -> Self {
-        Self { m: NonNull::from(m), generation, pending: core::cell::Cell::new(None) }
+        Self { m: NonNull::from(m), generation, pending: core::cell::Cell::new(None), rethrown: core::cell::Cell::new(false) }
     }
 
     pub fn raise(&self, v: Value<'scope>) -> crate::Error {
         self.pending.set(Some(v));
+        self.rethrown.set(false);
         crate::Error::Exception
+    }
+
+    pub fn rethrow(&self, v: Value<'scope>) -> crate::Error {
+        self.pending.set(Some(v));
+        self.rethrown.set(true);
+        crate::Error::Exception
+    }
+
+    pub fn rethrown(&self) -> bool {
+        self.rethrown.get()
     }
 
     pub fn take_exception(&self) -> Option<Value<'scope>> {
