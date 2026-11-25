@@ -1,5 +1,5 @@
 use alloc::string::String;
-use j8compiler::{Compile, DebugInfo};
+use j8compiler::Compile;
 use alloc::vec::Vec;
 
 use j8framework::{Scope, Closure, Error, ErrorKind, ImportName, ModuleStatus, ObjectData, Resolution, ResolvedBinding, Value};
@@ -16,8 +16,8 @@ impl Executor<'_> {
         }
         let src = j8framework::Source { text, file: path };
         let (module, info) = match &self.cache {
-            Some(cache) => cache.module(&src, DebugInfo::Omit)?,
-            None => <j8bytecode::Module as Compile>::compile_module(&src, DebugInfo::Omit).map(|(m, info)| (m, alloc::sync::Arc::new(info)))?,
+            Some(cache) => cache.module(&src, self.debug_info())?,
+            None => <j8bytecode::Module as Compile>::compile_module(&src, self.debug_info()).map(|(m, info)| (m, alloc::sync::Arc::new(info)))?,
         };
         let main = self.load(a.mc, module);
         let mut slots = alloc::vec![Value::Undefined; usize::from(info.slots)];

@@ -338,6 +338,10 @@ impl<'scope> Scope<'scope, '_> {
         self.mc.raise(v)
     }
 
+    pub fn rethrow(&self, v: Value<'scope>) -> Error {
+        self.mc.rethrow(v)
+    }
+
     pub fn take_exception(&self) -> Value<'scope> {
         self.mc.take_exception().unwrap_or_default()
     }

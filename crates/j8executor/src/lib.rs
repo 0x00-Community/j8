@@ -9,11 +9,12 @@ use core::cell::{Cell, RefCell};
 use core::ptr::NonNull;
 
 use j8bytecode::{Bytecode, Constant, Context, Decoded, FunctionKind, Intrinsic, LiteralValue, Module, NativeContextIndex, Operands, OperandValue, Register, Runtime, ScopeInfo, ScopeType, SharedFunction};
-use j8compiler::{Compile, DebugInfo};
+use j8compiler::Compile;
 use j8framework::{Scope, BinaryOp, Closure, Code, ShapeKey, SmallStr, Collect, CompareOp, ContextKind, ContextName, ContextShape, ShapeId, Env, Error, ErrorKind, FuncId, FunctionInfo, ScopeLocal, Lazy, Invoke, JsEnv, JsObject, Numbers, ObjectData, ObjectKind, Property, Resume, Slot, Step, Value, ValueKind};
 use j8lockfree::SegVec;
 
 mod cache;
+mod debug;
 mod ic;
 mod jit;
 mod module;
@@ -23,6 +24,7 @@ mod interrupt;
 use module::EVAL_FILE;
 
 pub use cache::CodeCache;
+pub use debug::{Action, Breakpoint, BreakpointId, Debugger, PauseOnExceptions, Paused, Reason, ScopeKind, ScopeView};
 pub use event_loop::{EventLoop, EventLoopSet, Ticket, CHECK, SLICE};
 pub use interrupt::Interrupter;
 pub use jit::{DeoptFrame, Entry, FrameSlots, Function as JitFunction, GlobalFeedback, Insn as JitInsn, PropertyFeedback, Reg as JitReg, ScopeLayout, StringFeedback, Tier, Tiered};
@@ -46,7 +48,7 @@ const CHECK_STEPS: usize = 1024;
 const TIER_CALLS: u32 = 64;
 
 struct Insn {
-    handler: threaded::Handler,
+    handler: Cell<threaded::Handler>,
     bytecode: Bytecode,
     operands: Operands,
     start: u32,
@@ -177,9 +179,9 @@ impl Loaded {
                 } else {
                     d.bytecode
                 };
-                Insn { handler: Insn::handler(bytecode), bytecode, operands, start: u32::try_from(d.start()).unwrap_or(u32::MAX), target }
+                Insn { handler: Cell::new(Insn::handler(bytecode)), bytecode, operands, start: u32::try_from(d.start()).unwrap_or(u32::MAX), target }
             })
-            .chain(core::iter::once(Insn { handler: Insn::handler(Bytecode::Illegal), bytecode: Bytecode::Illegal, operands: Operands::default(), start: u32::try_from(bc.code.len()).unwrap_or(u32::MAX), target: 0 }))
+            .chain(core::iter::once(Insn { handler: Cell::new(Insn::handler(Bytecode::Illegal)), bytecode: Bytecode::Illegal, operands: Operands::default(), start: u32::try_from(bc.code.len()).unwrap_or(u32::MAX), target: 0 }))
             .collect()
     }
 
@@ -521,6 +523,7 @@ pub struct Executor<'p> {
     spare_frames: RefCell<Vec<Vec<Frame>>>,
     active: Active,
     interrupts: interrupt::Interrupts<'p>,
+    debug: Option<Box<debug::Debug<'p>>>,
 }
 
 const _: () = {
@@ -1307,6 +1310,9 @@ impl Executor<'_> {
     }
 
     fn execute<'scope>(&self, a: &mut Scope<'scope, '_>, mut st: State<'scope>, budget: &mut Option<usize>) -> Result<Outcome<'scope>, Error> {
+        if self.debug.is_some() {
+            self.debug_new_code(a);
+        }
         let base = self.depth.get();
         let running = Running { state: NonNull::from(&st).cast(), outer: self.active.0.get() };
         self.active.0.set(Some(NonNull::from(&running)));
@@ -1317,9 +1323,13 @@ impl Executor<'_> {
                 Ok(None) if b.terminated => break Err(Error::Terminated),
                 Ok(None) => break Ok(None),
                 Err(Error::Exception) => {
+                    let reported = self.debug.is_none() || a.mc.rethrown();
                     let v = a.take_exception();
+                    if !reported {
+                        self.debug_throw(a, v, base + st.frames.len());
+                    }
                     if !Self::unwind(&mut st, v) {
-                        break Err(a.throw_value(v));
+                        break Err(a.rethrow(v));
                     }
                 }
                 Err(e) => break Err(e),
@@ -1987,7 +1997,8 @@ impl Executor<'_> {
                 Self::set_reg(regs, f, o[0], Value::Number(i + 1.0));
             }
             B::SetPendingMessage => core::mem::swap(acc, message),
-            B::Throw | B::ReThrow => return Err(a.throw_value(*acc)),
+            B::Throw => return Err(a.throw_value(*acc)),
+            B::ReThrow => return Err(a.rethrow(*acc)),
             B::ThrowReferenceErrorIfHole => {
                 if matches!(acc.kind(), ValueKind::Uninit) {
                     return Err(Self::uninitialized(a, Self::name_at(loaded, o[0])));
@@ -2382,7 +2393,7 @@ impl Executor<'_> {
                 }
                 let strict = arg(3).as_number().is_some_and(|x| x != 0.0);
                 let src = s.source_text();
-                let module = match Module::compile_direct(&j8framework::Source { text: &src, file: EVAL_FILE }, strict, s.lone_surrogates(), DebugInfo::Omit) {
+                let module = match Module::compile_direct(&j8framework::Source { text: &src, file: EVAL_FILE }, strict, s.lone_surrogates(), self.debug_info()) {
                     Ok(m) => m,
                     Err(Error::Syntax(m)) => return Err(a.throw(ErrorKind::Syntax, &m)),
                     Err(e) => return Err(e),
@@ -2568,7 +2579,7 @@ impl<'scope> Invoke<'scope> for Executor<'_> {
 
     fn eval_code(&self, a: &mut Scope<'scope, '_>, src: &str, kind: j8framework::CodeKind, hidden: bool) -> Result<Value<'scope>, Error> {
         let file = Executor::source_url(src).unwrap_or(EVAL_FILE);
-        let module = match Module::compile_eval(&j8framework::Source { text: src, file }, kind, hidden, DebugInfo::Omit) {
+        let module = match Module::compile_eval(&j8framework::Source { text: src, file }, kind, hidden, self.debug_info()) {
             Ok(m) => m,
             Err(Error::Syntax(m)) => return Err(a.throw(ErrorKind::Syntax, &m)),
             Err(e) => return Err(e),
@@ -2703,11 +2714,11 @@ impl<'p> Executor<'p> {
 
     pub fn start(&self, src: &j8framework::Source<'_>, kind: j8framework::ScriptKind) -> Result<Job<'p>, Error> {
         Ok(Job(match kind {
-            j8framework::ScriptKind::Classic => Started::Script { module: Module::compile(src, j8framework::CodeKind::Script, DebugInfo::Omit)?, file: src.file.into() },
+            j8framework::ScriptKind::Classic => Started::Script { module: Module::compile(src, j8framework::CodeKind::Script, self.debug_info())?, file: src.file.into() },
             j8framework::ScriptKind::Shared => Started::Script {
                 module: match &self.cache {
-                    Some(cache) => cache.script(src, DebugInfo::Omit)?,
-                    None => Module::compile(src, j8framework::CodeKind::Script, DebugInfo::Omit)?,
+                    Some(cache) => cache.script(src, self.debug_info())?,
+                    None => Module::compile(src, j8framework::CodeKind::Script, self.debug_info())?,
                 },
                 file: src.file.into(),
             },

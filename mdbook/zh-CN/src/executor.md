@@ -32,6 +32,8 @@ handler(cx, pc, regs, acc)  ─ 做完 ─▶  直接跳到下一条指令的 ha
 热门字节码有自己的处理函数；其余字节码、以及热门字节码离开快路时，经 `slow` 同步状态后走通用的 `Executor::step`。
 帧变化（调用、返回）、异常、执行结束时离开处理函数链。
 
+处理函数放在 `Cell` 里：[调试器](debugger.md)设断点时把它换掉，清除时换回，不碰的指令不做任何检查。
+
 ## 内联缓存
 
 `ic.rs`：每个 `GetNamedProperty` / `SetNamedProperty` / `DefineNamedOwnProperty` 点一个缓存。

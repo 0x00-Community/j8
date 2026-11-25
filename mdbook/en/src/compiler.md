@@ -79,3 +79,6 @@ use j8framework::{CodeKind, Source};
 let module = j8bytecode::Module::compile(&Source { text: "1 + 2", file: "a.js" }, CodeKind::Script, DebugInfo::Omit)?;
 let (module, info) = j8bytecode::Module::compile_module(&source, DebugInfo::Omit)?;   // an ES module, with its imports / exports
 ```
+
+`DebugInfo::Record` also keeps statement positions and local variable names for a [debugger](debugger.md)
+(`BytecodeArray::debug`); the executor asks for it only when a debugger is attached.

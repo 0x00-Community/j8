@@ -74,3 +74,5 @@ use j8framework::{CodeKind, Source};
 let module = j8bytecode::Module::compile(&Source { text: "1 + 2", file: "a.js" }, CodeKind::Script, DebugInfo::Omit)?;
 let (module, info) = j8bytecode::Module::compile_module(&source, DebugInfo::Omit)?;   // ES 模块，连同导入 / 导出信息
 ```
+
+`DebugInfo::Record` 另外为[调试器](debugger.md)记下语句位置和局部变量名（`BytecodeArray::debug`）；执行器只在接了调试器时才要它。

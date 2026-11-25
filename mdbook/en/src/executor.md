@@ -36,6 +36,9 @@ Hot bytecodes have handlers of their own; the rest, and hot ones off their fast 
 state and runs the general `Executor::step`. The chain is left when the frame changes (calls and returns), on an
 exception, or when the execution ends.
 
+The handler sits in a `Cell`: the [debugger](debugger.md) swaps it for a breakpoint and swaps it back, with no check on
+the instructions it leaves alone.
+
 ## Inline caches
 
 `ic.rs`: one cache per `GetNamedProperty` / `SetNamedProperty` / `DefineNamedOwnProperty` site.

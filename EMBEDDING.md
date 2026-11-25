@@ -269,6 +269,16 @@ Error: boom
   (`at async f`), and the frame to hide (`captureStackTrace`'s second argument). With the JIT on, the frame of a
   function running as compiled code can be missing or point at the line it was entered on.
 
+### 4.5 Debugging
+
+`Executor::with_debugger(&d)` attaches a `Debugger` the executor borrows: `set_breakpoint(scope, script, line, column)`
+/ `clear_breakpoint(id)`, `pause_on_exceptions(mode)`, and `d.paused(&mut Paused)` called on the JS thread at every
+stop, which reads the frames (`frames`, as `CallSite`s), their scopes (`scopes`) and `this`, evaluates in a frame
+(`evaluate`) and returns `Continue`, `StepInto`, `StepOver` or `StepOut`. `pause()` stops at the next statement; from
+another thread, reach the executor with an `Interrupter` (5.7). A debugger turns the JIT off for that executor and
+compiles with debug information (statement positions, local names); without one nothing changes. See the book's
+Debugger chapter for how it works.
+
 ## 5. Async work and the event loop
 
 j8 does not include an async runtime (no tokio). A `j8executor::EventLoop` is one JS event loop: an isolate, its
