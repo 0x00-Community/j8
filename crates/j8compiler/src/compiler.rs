@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use oxc_allocator::Allocator;
-use oxc_ast::ast::{Directive, BindingIdentifier, BindingPattern, CatchClause, BlockStatement, Class, ClassElement, Expression, MethodDefinitionKind, PropertyKey, ForStatementInit, FormalParameters, Function as AstFunction, ForInStatement, ForOfStatement, ForStatementLeft, Program, Statement, SwitchStatement, TryStatement, VariableDeclaration, VariableDeclarationKind};
+use oxc_ast::ast::{Directive, BindingIdentifier, BindingPattern, CatchClause, BlockStatement, Class, ClassElement, Expression, MethodDefinition, MethodDefinitionKind, PropertyKey, ForStatementInit, FormalParameters, Function as AstFunction, ForInStatement, ForOfStatement, ForStatementLeft, Program, Statement, SwitchStatement, TryStatement, VariableDeclaration, VariableDeclarationKind};
 use oxc_parser::{ParseOptions, Parser};
 use oxc_semantic::SemanticBuilder;
 use oxc_span::{GetSpan, SourceType, Span};
@@ -221,6 +221,7 @@ impl Frame<'_> {
             length: self.length,
             formal_parameters: self.formals,
             scope: self.scope,
+            source: None,
             bytecode: self.b.finish(),
         }
     }
@@ -255,6 +256,7 @@ pub struct Compiler<'a, 's> {
     for_init_text: Option<&'a str>,
     pub classes: Vec<ClassInfo<'a>>,
     pub next_home: Option<&'static str>,
+    pub next_source: Option<Span>,
     pub hidden: bool,
     debug: DebugInfo,
 }
@@ -422,7 +424,7 @@ impl Compiler<'_, '_> {
         let strict = kind == CodeKind::StrictEval || Flavor::use_strict(&program.directives);
         let local = (kind != CodeKind::Script).then(|| Decls::eval_local(&program.body, strict));
         let Resolver { captured, used, eval_fns, suspends, .. } = Resolver::script(&program.body, Decls::this_key(program.span), &allocator, local.as_ref(), strict, eval_scopes, None);
-        let mut c = Compiler { src, alloc: &allocator, captured, used, class_depth: 0, module: Vec::new(), frames: Vec::new(), levels: Vec::new(), chains: Vec::new(), eval_fns, suspends, completion_assign: HashSet::new(), completion_reset: HashSet::new(), for_init_text: None, classes: Vec::new(), next_home: None, hidden, debug };
+        let mut c = Compiler { src, alloc: &allocator, captured, used, class_depth: 0, module: Vec::new(), frames: Vec::new(), levels: Vec::new(), chains: Vec::new(), eval_fns, suspends, completion_assign: HashSet::new(), completion_reset: HashSet::new(), for_init_text: None, classes: Vec::new(), next_home: None, next_source: None, hidden, debug };
         c.script(program, local.as_ref(), strict, direct)?;
         Ok(Module { functions: c.module })
     }
@@ -532,7 +534,7 @@ impl Compiler<'_, '_> {
         let (names, info) = Compiler::module_layout(program);
         let order: Vec<&str> = names.iter().map(|&(n, _)| n).collect();
         let Resolver { captured, used, eval_fns, suspends, suspend_count, .. } = Resolver::script(&program.body, Decls::this_key(program.span), &allocator, None, true, eval_scopes, Some(&[order]));
-        let mut c = Compiler { src, alloc: &allocator, captured, used, class_depth: 0, module: Vec::new(), frames: Vec::new(), levels: Vec::new(), chains: Vec::new(), eval_fns, suspends, completion_assign: HashSet::new(), completion_reset: HashSet::new(), for_init_text: None, classes: Vec::new(), next_home: None, hidden: false, debug };
+        let mut c = Compiler { src, alloc: &allocator, captured, used, class_depth: 0, module: Vec::new(), frames: Vec::new(), levels: Vec::new(), chains: Vec::new(), eval_fns, suspends, completion_assign: HashSet::new(), completion_reset: HashSet::new(), for_init_text: None, classes: Vec::new(), next_home: None, next_source: None, hidden: false, debug };
         let bound = names
             .iter()
             .map(|&(name, n)| match n {
@@ -982,12 +984,13 @@ impl<'a> Compiler<'a, '_> {
         let count = params.map_or(0, |p| p.items.len());
         let n = u16::try_from(count).map_err(|_| self.unsupported(params.map_or(Span::default(), |p| p.span), "more than 65535 parameters"))?;
         let index = self.module.len();
-        self.module.push(SharedFunction { name: "".into(), kind: FunctionKind::NormalFunction, strict: false, length: 0, formal_parameters: 0, scope: None, bytecode: j8bytecode::BytecodeArray::default() });
+        self.module.push(SharedFunction { name: "".into(), kind: FunctionKind::NormalFunction, strict: false, length: 0, formal_parameters: 0, scope: None, source: None, bytecode: j8bytecode::BytecodeArray::default() });
         let length = u16::try_from(params.map_or(0, |p| p.items.iter().take_while(|i| i.initializer.is_none()).count())).unwrap_or(u16::MAX);
         let strict = flavor.strict || self.class_depth > 0 || self.frames.last().is_some_and(|f| f.strict);
         let default_constructor = matches!(body, Body::DefaultConstructor { .. });
         let simple_params = params.is_some_and(|p| p.rest.is_none() && p.items.iter().all(|i| i.initializer.is_none() && matches!(i.pattern, BindingPattern::BindingIdentifier(_))));
         let next_home = self.next_home.take();
+        let source = self.next_source.take();
         let home = if flavor.kind == Kind::Arrow { self.frames.last().and_then(|f| f.home) } else { next_home };
         self.frames.push(Frame {
             index,
@@ -1140,7 +1143,7 @@ impl<'a> Compiler<'a, '_> {
         self.levels.pop();
         let f = self.frames.pop().expect("the function's frame");
         let at = f.index;
-        self.module[at] = f.finish();
+        self.module[at] = SharedFunction { source: source.map(|s| s.start..s.end), ..f.finish() };
         Ok(u32::try_from(index).expect("fewer than 2^32 functions"))
     }
 
@@ -1887,6 +1890,7 @@ impl<'a> Compiler<'a, '_> {
         let flavor = Flavor::from((f, Kind::Normal));
         let body = f.body.as_ref().ok_or_else(|| self.unsupported(f.span, "a function without a body"))?;
         let name = f.id.as_ref().map_or(inferred, |id| id.name.as_str());
+        self.next_source = Some(f.span);
         self.function(name, flavor, Some(Decls::this_key(f.span)), if self_name { f.id.as_ref() } else { None }, Some(&f.params), Body::Statements(&body.statements))
     }
 
@@ -1984,11 +1988,31 @@ impl<'a> Compiler<'a, '_> {
         Ok(info)
     }
 
-    fn class_method(&mut self, name: &str, f: &'a AstFunction<'a>, kind: Kind, statik: bool) -> Result<u32, Error> {
-        let flavor = Flavor { statik, ..Flavor::from((f, kind)) };
+    fn class_method(&mut self, name: &str, m: &'a MethodDefinition<'a>, kind: Kind, statik: bool) -> Result<u32, Error> {
+        let f = &m.value;
+        let flavor = Flavor { statik, ..Flavor::from((&**f, kind)) };
         let body = f.body.as_ref().ok_or_else(|| self.unsupported(f.span, "a method without a body"))?;
         self.next_home = Some(if statik { Hidden::STATIC_HOME } else { Hidden::HOME });
+        self.next_source = Some(self.method_definition_text(m));
         self.function(name, flavor, Some(Decls::this_key(f.span)), None, Some(&f.params), Body::Statements(&body.statements))
+    }
+
+    fn method_definition_text(&self, m: &MethodDefinition<'_>) -> Span {
+        if !m.r#static {
+            return m.span;
+        }
+        let text = self.src.text.get(m.span.start as usize..m.span.end as usize).unwrap_or_default();
+        let mut rest = text.strip_prefix("static").unwrap_or(text);
+        loop {
+            let trimmed = rest.trim_start();
+            rest = if let Some(c) = trimmed.strip_prefix("//") {
+                c.find(['\n', '\r', '\u{2028}', '\u{2029}']).map_or("", |i| &c[i..])
+            } else if let Some(c) = trimmed.strip_prefix("/*") {
+                c.find("*/").map_or("", |i| &c[i + 2..])
+            } else {
+                break Span::new(m.span.end - u32::try_from(trimmed.len()).unwrap_or(0), m.span.end);
+            };
+        }
     }
 
     fn private_symbol(&mut self, create: Runtime, text: &str, binding: &'a str) {
@@ -2036,7 +2060,7 @@ impl<'a> Compiler<'a, '_> {
                 ClassElement::MethodDefinition(m) if matches!(m.kind, MethodDefinitionKind::Method) => {
                     if let PropertyKey::PrivateIdentifier(id) = &m.key {
                         let n = Hidden::private(self.alloc, id);
-                        let f = self.class_method(n, &m.value, Kind::Method, m.r#static)?;
+                        let f = self.class_method(n, m, Kind::Method, m.r#static)?;
                         self.closure(f);
                         self.store(n, true);
                     }
@@ -2060,10 +2084,12 @@ impl<'a> Compiler<'a, '_> {
         }) {
             Some(m) => {
                 self.next_home = Some(Hidden::HOME);
+                self.next_source = Some(c.span);
                 self.method(name, &m.value, kind)?
             }
             None => {
                 self.next_home = Some(Hidden::HOME);
+                self.next_source = Some(c.span);
                 let this = Decls::this_key(Span::new(c.body.span.end.saturating_sub(1), c.body.span.end));
                 self.function(name, kind.into(), Some(this), None, None, Body::DefaultConstructor { derived })?
             }
@@ -2094,7 +2120,7 @@ impl<'a> Compiler<'a, '_> {
                     };
                     let fname = self.method_name(&m.key, m.computed, m.kind);
                     let v = self.temp();
-                    let n = self.class_method(fname, &m.value, fkind, m.r#static)?;
+                    let n = self.class_method(fname, m, fkind, m.r#static)?;
                     self.closure(n);
                     self.b().star(v);
                     members.push(ClassMember { name: key.map(Into::into), kind: mkind, statik: m.r#static });
@@ -2141,7 +2167,7 @@ impl<'a> Compiler<'a, '_> {
                     Some(m) => {
                         let fname = self.method_name(&m.key, false, m.kind);
                         let kind = if want == MethodDefinitionKind::Get { Kind::Getter } else { Kind::Setter };
-                        let f = self.class_method(fname, &m.value, kind, statik)?;
+                        let f = self.class_method(fname, m, kind, statik)?;
                         self.closure(f);
                     }
                     None => self.b().load_null(),
@@ -2368,7 +2394,7 @@ impl<'a> Compiler<'a, '_> {
     fn module_body(&mut self, program: &'a Program<'a>, suspends: u32) -> Result<(), Error> {
         let asynchronous = suspends > 0;
         let kind = if asynchronous { FunctionKind::AsyncFunction } else { FunctionKind::Module };
-        self.module.push(SharedFunction { name: "".into(), kind, strict: true, length: 0, formal_parameters: 0, scope: None, bytecode: j8bytecode::BytecodeArray::default() });
+        self.module.push(SharedFunction { name: "".into(), kind, strict: true, length: 0, formal_parameters: 0, scope: None, source: None, bytecode: j8bytecode::BytecodeArray::default() });
         self.frames.push(Frame {
             index: 0,
             b: Builder::new(1, 0),
@@ -2482,7 +2508,7 @@ impl<'a> Compiler<'a, '_> {
 
     #[expect(clippy::too_many_lines, reason = "follows V8's GenerateBytecodeBody for a script / eval scope step by step")]
     fn script(&mut self, program: &'a Program<'a>, local: Option<&Decls<'a>>, strict: bool, direct: bool) -> Result<(), Error> {
-        self.module.push(SharedFunction { name: "".into(), kind: FunctionKind::NormalFunction, strict, length: 0, formal_parameters: 0, scope: None, bytecode: j8bytecode::BytecodeArray::default() });
+        self.module.push(SharedFunction { name: "".into(), kind: FunctionKind::NormalFunction, strict, length: 0, formal_parameters: 0, scope: None, source: None, bytecode: j8bytecode::BytecodeArray::default() });
         let eval = local.is_some();
         self.frames.push(Frame {
             index: 0,

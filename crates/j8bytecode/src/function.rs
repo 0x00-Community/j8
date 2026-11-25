@@ -211,6 +211,7 @@ pub struct SharedFunction {
     pub length: u16,
     pub formal_parameters: u16,
     pub scope: Option<ScopeInfo>,
+    pub source: Option<core::ops::Range<u32>>,
     pub bytecode: BytecodeArray,
 }
 

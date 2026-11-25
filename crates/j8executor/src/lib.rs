@@ -2634,6 +2634,12 @@ impl<'scope> Invoke<'scope> for Executor<'_> {
         j8framework::CallSite { function: loaded.func.name.clone(), script: self.referrer(a, loaded.base).into(), line, column, constructor: frame.constructor }
     }
 
+    fn source_text(&self, closure: &Closure<'scope>) -> Option<alloc::string::String> {
+        let loaded = self.code(closure);
+        let range = loaded.func.source.clone()?;
+        loaded.script()?.text(range).map(Into::into)
+    }
+
     fn constructs(&self, closure: &Closure<'scope>) -> bool {
         let loaded: &Loaded = unsafe { closure.code.expect("closures carry their code").get() };
         loaded.constructs || loaded.class_constructor

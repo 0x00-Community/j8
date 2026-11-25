@@ -500,6 +500,10 @@ impl Objects {
         if !a.is_callable(this) {
             return Err(a.throw(ErrorKind::Type, "Function.prototype.toString requires that 'this' be a Function"));
         }
+        let invoke = a.invoke;
+        if let Some(text) = this.as_object().and_then(|o| o.closure()).and_then(|c| invoke.source_text(&c)) {
+            return Ok(a.string(&text).into());
+        }
         let name = match this.kind() {
             ValueKind::Object(o) => match o.borrow().get_own(a.mc, "name").and_then(|p| p.value()).map(Value::kind) {
                 Some(ValueKind::String(s)) if Self::native_name(&s) => alloc::string::String::from(&**s),
