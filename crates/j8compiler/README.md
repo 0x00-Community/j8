@@ -9,7 +9,9 @@ with [oxc](https://oxc.rs). Every piece of JS goes through here before it runs â
 WebAssembly goes the same way: `CompileWasm::compile_wasm` validates a binary module with
 [wasmparser](https://crates.io/crates/wasmparser) (WebAssembly 3.0 features) and turns every function body into
 j8's WebAssembly register bytecode (`j8bytecode::WasmModule`). Each operand-stack slot is a fixed register above the
-locals, so block results already sit where they are expected; only branches move values. Constant expressions
+locals, so block results already sit where they are expected; only branches move values. `local.get` pushes a
+reference to the local rather than a copy (materialized only before control flow, calls or a write to that local), and
+`local.set` right after an instruction retargets that instruction's destination to the local. Constant expressions
 (global / table initializers, segment offsets and elements) are compiled into small functions too. Types keep their
 recursive groups and declared supertypes; `try_table` becomes a handler table plus one landing stub per catch clause.
 

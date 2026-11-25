@@ -7,7 +7,8 @@
 
 WebAssembly 走同一条路：`CompileWasm::compile_wasm` 用 [wasmparser](https://crates.io/crates/wasmparser)
 （WebAssembly 3.0 特性）校验二进制模块，把每个函数体编成 j8 的 WebAssembly 寄存器字节码（`j8bytecode::WasmModule`）。
-操作数栈的每个槽是局部变量之上的固定寄存器，所以块的结果本来就在该在的位置，只有跳转需要搬值。常量表达式（全局 /
+操作数栈的每个槽是局部变量之上的固定寄存器，所以块的结果本来就在该在的位置，只有跳转需要搬值。`local.get` 压的是对局部变量的
+引用而不是拷贝（只在控制流、调用或写这个局部变量之前才落地成拷贝），紧跟在一条指令后的 `local.set` 直接把那条指令的目的改成局部变量。常量表达式（全局 /
 表的初值、段偏移和段元素）也编成小函数。类型保留递归分组和声明的父类型；`try_table` 编成处理表，每个 catch 子句一段落地代码。
 
 ```text
