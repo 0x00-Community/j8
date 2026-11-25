@@ -936,7 +936,8 @@ impl<'a> Compiler<'a, '_> {
         if eval {
             self.resolve_possibly_direct_eval(callee, args, c.span);
         }
-        self.b().at(Self::call_position(&c.callee));
+        let at = self.call_position(&c.callee);
+        self.b().at(at);
         match (receiver, spread) {
             (_, Spread::Array) => {
                 let this = match receiver {
@@ -966,12 +967,12 @@ impl<'a> Compiler<'a, '_> {
         Ok(())
     }
 
-    fn call_position(callee: &Expression<'_>) -> u32 {
+    fn call_position(&self, callee: &Expression<'_>) -> u32 {
         match callee {
+            Expression::Identifier(id) => id.span.start,
             Expression::StaticMemberExpression(m) => m.property.span.start,
-            Expression::ComputedMemberExpression(m) => m.span.end,
             Expression::PrivateFieldExpression(p) => p.field.span.start,
-            e => e.span().start,
+            e => self.arguments_start(e.span().end),
         }
     }
 
