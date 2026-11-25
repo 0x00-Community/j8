@@ -36,6 +36,9 @@ Hot bytecodes have handlers of their own; the rest, and hot ones off their fast 
 state and runs the general `Executor::step`. The chain is left when the frame changes (calls and returns), on an
 exception, or when the execution ends.
 
+The handler sits in a `Cell`: the [debugger](debugger.md) swaps it for a breakpoint and swaps it back, with no check on
+the instructions it leaves alone.
+
 ## Inline caches
 
 `ic.rs`: one cache per `GetNamedProperty` / `SetNamedProperty` / `DefineNamedOwnProperty` site.
@@ -56,7 +59,7 @@ plus direct slot loads and stores.
 
 `Executor::eval` takes `&mut Isolate` and enters it in slices: at most ten thousand instructions each; between slices the
 execution state is rooted, the heap gets to collect, and the run continues. The environment survives slices as a
-`ScopeGlobal<'p, ContextBrand>`. Every 1024 instructions the budget and termination requests are checked; inside an event loop that is
+`ScopeGlobal<'p, ContextBrand>`. Every 1024 instructions the budget, termination and interrupt requests are checked; inside an event loop that is
 when the task queue is checked ([Event loops](event-loop.md)).
 
 Known deviation: JS re-entered from a host function (`map`'s callback) runs to completion inside the current slice,
@@ -76,9 +79,10 @@ through `j8framework`'s promise machinery; after a script, the microtask queue i
 
 ## ES modules
 
-`module.rs`: loading, linking and evaluation (synchronous: dependencies are read through `Platform::load_module`).
-Import bindings read the exporter's slots live; `ResolveExport` handles indirect exports, `export *` and ambiguity;
-namespace objects, dynamic `import()` and `import.meta` are supported. Top-level `await` is not yet.
+`module.rs`: loading and linking (synchronous: dependencies are read through `Platform::load_module`); evaluation,
+including top-level `await`, is `Scope::evaluate_module` in j8framework. Import bindings read the exporter's slots live;
+`ResolveExport` handles indirect exports, `export *` and ambiguity; namespace objects, dynamic `import()` and
+`import.meta` are supported.
 
 ## CodeCache
 

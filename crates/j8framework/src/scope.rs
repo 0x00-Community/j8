@@ -52,10 +52,16 @@ pub trait Invoke<'scope> {
 
     fn resume(&self, agent: &mut Scope<'scope, '_>, coroutine: crate::JsObject<'scope>, mode: Resume, value: Value<'scope>) -> Result<Step<'scope>, Error>;
 
-    fn evaluate(&self, agent: &mut Scope<'scope, '_>, module: u32) -> Result<(), Error>;
-
     fn callback(&self, _agent: &mut Scope<'scope, '_>, callee: Value<'scope>, this: Value<'scope>) -> Callback<'scope> {
         Callback::from((callee, this))
+    }
+
+    fn capture(&self, _agent: &Scope<'scope, '_>, _limit: usize) -> Vec<crate::Captured> {
+        Vec::new()
+    }
+
+    fn call_site(&self, _agent: &Scope<'scope, '_>, _frame: &crate::Captured) -> crate::CallSite {
+        crate::CallSite::default()
     }
 }
 
@@ -128,12 +134,23 @@ pub struct Scope<'scope, 'x> {
     pub stop: &'x crate::Termination,
     pub parked: &'x core::cell::RefCell<crate::Parked<'x>>,
     pub spare_regs: Vec<Vec<Value<'scope>>>,
+    pub(crate) heap_limit: Option<&'x crate::HeapLimit<'x>>,
     #[cfg(all(target_os = "linux", feature = "crossheap"))]
     pub shares: &'x mut crate::Shares<'x>,
 }
 
 
 impl<'scope> Scope<'scope, '_> {
+    pub fn check_heap_limit(&self) {
+        let Some(limit) = self.heap_limit else { return };
+        let gc = self.mc.gc_scope();
+        if limit.exceeded(gc.used()) {
+            self.stop.request();
+        } else {
+            gc.set_limit(Some(limit.current()));
+        }
+    }
+
     const SPARE_REGS: usize = 8;
 
     pub fn after(&self, delay: core::time::Duration, keep_alive: bool) -> Result<(crate::JsObject<'scope>, u64), Error> {

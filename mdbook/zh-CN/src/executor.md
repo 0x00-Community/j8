@@ -32,6 +32,8 @@ handler(cx, pc, regs, acc)  ─ 做完 ─▶  直接跳到下一条指令的 ha
 热门字节码有自己的处理函数；其余字节码、以及热门字节码离开快路时，经 `slow` 同步状态后走通用的 `Executor::step`。
 帧变化（调用、返回）、异常、执行结束时离开处理函数链。
 
+处理函数放在 `Cell` 里：[调试器](debugger.md)设断点时把它换掉，清除时换回，不碰的指令不做任何检查。
+
 ## 内联缓存
 
 `ic.rs`：每个 `GetNamedProperty` / `SetNamedProperty` / `DefineNamedOwnProperty` 点一个缓存。
@@ -47,7 +49,7 @@ handler(cx, pc, regs, acc)  ─ 做完 ─▶  直接跳到下一条指令的 ha
 ## 分片执行
 
 `Executor::eval` 拿 `&mut Isolate`，自己分片进入：每片最多一万条指令，停下时把执行状态挂到根上、让堆回收一段，
-再接着跑。执行环境以 `ScopeGlobal<'p, ContextBrand>` 跨片保留。每 1024 条指令检查一次预算与终止请求——在事件循环里，这就是检查
+再接着跑。执行环境以 `ScopeGlobal<'p, ContextBrand>` 跨片保留。每 1024 条指令检查一次预算、终止与中断请求——在事件循环里，这就是检查
 任务队列的时机（[事件循环](event-loop.md)）。
 
 已知偏差：宿主函数里重入的 JS（如 `map` 的回调）在当前片里跑完，期间不回收。`Function.prototype.call` / `apply`
@@ -64,9 +66,9 @@ handler(cx, pc, regs, acc)  ─ 做完 ─▶  直接跳到下一条指令的 ha
 
 ## ES 模块
 
-`module.rs`：加载、链接、求值（同步：依赖经 `Platform::load_module` 读进来）。import 绑定实时读导出方的槽，
-`ResolveExport` 处理间接导出、`export *` 与歧义；命名空间对象、动态 `import()`、`import.meta` 都支持。
-模块的顶层 `await` 还不支持。
+`module.rs`：加载、链接（同步：依赖经 `Platform::load_module` 读进来）；求值（含顶层 `await`）是 j8framework 的
+`Scope::evaluate_module`。import 绑定实时读导出方的槽，`ResolveExport` 处理间接导出、`export *` 与歧义；命名空间对象、
+动态 `import()`、`import.meta` 都支持。
 
 ## CodeCache
 

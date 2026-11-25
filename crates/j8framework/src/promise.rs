@@ -7,11 +7,18 @@ use crate::{Scope, Capability, Error, ErrorKind, HostReaction, Job, JsObject, Ob
 
 impl<'scope> Scope<'scope, '_> {
     pub fn new_promise(&self) -> JsObject<'scope> {
-        ObjectData { kind: ObjectKind::Promise { state: Settled::Pending, reactions: Vec::new() }, proto: Some(self.context.promise_proto), ..ObjectData::default() }.alloc(self.mc)
+        ObjectData { kind: ObjectKind::Promise { state: Settled::Pending, reactions: Vec::new(), handled: false }, proto: Some(self.context.promise_proto), ..ObjectData::default() }.alloc(self.mc)
     }
 
     pub fn is_promise(v: Value<'scope>) -> bool {
         matches!(v.kind(), ValueKind::Object(o) if matches!(o.borrow().kind, ObjectKind::Promise { .. }))
+    }
+
+    pub fn promise_state(v: Value<'scope>) -> Option<Settled<'scope>> {
+        match &v.as_object()?.borrow().kind {
+            ObjectKind::Promise { state, .. } => Some(*state),
+            _ => None,
+        }
     }
 
     pub fn promise_resolvers(&self, promise: JsObject<'scope>) -> (JsObject<'scope>, JsObject<'scope>) {
@@ -41,17 +48,26 @@ impl<'scope> Scope<'scope, '_> {
     }
 
     fn settle(&mut self, promise: JsObject<'scope>, value: Value<'scope>, rejected: bool) {
-        let reactions = {
+        let (reactions, handled) = {
             let mut d = promise.borrow_mut(self.mc);
-            let ObjectKind::Promise { state, reactions } = &mut d.kind else { return };
+            let ObjectKind::Promise { state, reactions, handled } = &mut d.kind else { return };
             if !matches!(state, Settled::Pending) {
                 return;
             }
             *state = if rejected { Settled::Rejected(value) } else { Settled::Fulfilled(value) };
-            core::mem::take(reactions)
+            (core::mem::take(reactions), *handled)
         };
+        if rejected && !handled {
+            self.context.rejections.push(self.mc, promise);
+        }
         for reaction in reactions {
             self.enqueue_job(Job::Reaction { reaction, value, rejected });
+        }
+    }
+
+    pub fn set_promise_handled(&self, promise: JsObject<'scope>, handled: bool) {
+        if let ObjectKind::Promise { handled: h, .. } = &mut promise.borrow_mut(self.mc).kind {
+            *h = handled;
         }
     }
 
@@ -87,7 +103,8 @@ impl<'scope> Scope<'scope, '_> {
     pub fn perform_then(&mut self, promise: JsObject<'scope>, reaction: Reaction<'scope>) {
         let settled = {
             let mut d = promise.borrow_mut(self.mc);
-            let ObjectKind::Promise { state, reactions } = &mut d.kind else { return };
+            let ObjectKind::Promise { state, reactions, handled } = &mut d.kind else { return };
+            *handled = true;
             match *state {
                 Settled::Pending => {
                     reactions.push(reaction);
@@ -211,10 +228,10 @@ impl<'scope> Scope<'scope, '_> {
         match job {
             Job::Reaction { reaction: Reaction::Await { coroutine }, value, rejected } => self.drive(coroutine, if rejected { Resume::Throw } else { Resume::Next }, value),
             Job::Reaction { reaction: Reaction::Host { hook }, value, rejected } => {
-                if let Some(reaction) = hook.0.try_borrow_mut().and_then(|mut h| h.take()) {
-                    (reaction.0)(self, value, rejected);
+                match hook.0.try_borrow_mut().and_then(|mut h| h.take()) {
+                    Some(reaction) => (reaction.0)(self, value, rejected),
+                    None => Ok(()),
                 }
-                Ok(())
             }
             Job::Reaction { reaction: Reaction::Then { on_fulfilled, on_rejected, capability }, value, rejected } => {
                 let handler = if rejected { on_rejected } else { on_fulfilled };
@@ -228,9 +245,9 @@ impl<'scope> Scope<'scope, '_> {
                 self.reacted(capability, outcome)
             }
             Job::Import { module, promise } => {
-                let invoke = self.invoke;
-                let r = invoke.evaluate(self, module);
-                self.imported(module, promise, r)
+                let evaluation = self.evaluate_module(module)?;
+                self.import_evaluated(evaluation, module, promise);
+                Ok(())
             }
             Job::Thenable { promise, thenable, then } => {
                 let (resolve, reject) = self.promise_resolvers(promise);
@@ -267,21 +284,6 @@ impl<'scope> Scope<'scope, '_> {
         }
     }
 
-    pub fn imported(&mut self, module: u32, promise: JsObject<'scope>, r: Result<(), Error>) -> Result<(), Error> {
-        match r {
-            Ok(()) => {
-                let namespace = self.module_namespace(module);
-                self.resolve_promise(promise, namespace.into())
-            }
-            Err(Error::Exception) => {
-                let reason = self.take_exception();
-                self.reject_promise(promise, reason);
-                Ok(())
-            }
-            Err(e) => Err(e),
-        }
-    }
-
     pub fn next_job(&self) -> Option<Job<'scope>> {
         self.context.jobs.pop(self.mc)
     }
@@ -290,8 +292,20 @@ impl<'scope> Scope<'scope, '_> {
         loop {
             match self.next_job() {
                 Some(j) => self.run_job(j)?,
+                None if self.report_rejections() => {}
                 None => return Ok(()),
             }
         }
+    }
+
+    fn report_rejections(&mut self) -> bool {
+        let mut reported = false;
+        let platform = self.platform;
+        while let Some(promise) = self.context.rejections.pop(self.mc) {
+            let ObjectKind::Promise { state: Settled::Rejected(reason), handled: false, .. } = promise.borrow().kind else { continue };
+            platform.unhandled_rejection(self, promise, reason);
+            reported = true;
+        }
+        reported
     }
 }

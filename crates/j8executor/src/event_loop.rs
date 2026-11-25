@@ -17,9 +17,10 @@ use std::thread::Thread;
 use j8lockfree::{AtomicRefCell, Fifo, Oneshot, Receiver, SegVec, Sender};
 use j8taskqueue::{Flow, ITask, ITaskPoll, Queue, Task, TaskId};
 
-use j8framework::{Scope, AsyncJob, TimerRequest, CreateParams, Error, ErrorKind, Intrinsics, Isolate, IsolateHandle, Platform, Quota, ContextBrand, ScopeGlobal, ScriptKind, Settle, Source, Value, ValueBrand};
+use j8framework::{Scope, AsyncJob, TimerRequest, CreateParams, Error, ErrorKind, Intrinsics, Isolate, IsolateHandle, HeapLimitCallback, Platform, Quota, ContextBrand, ScopeGlobal, ScriptKind, Settle, Source, Value, ValueBrand};
 
-use crate::{Executor, Job};
+use crate::interrupt::Interrupts;
+use crate::{Executor, Interrupter, Job};
 
 pub const SLICE: usize = 10_000;
 
@@ -84,7 +85,7 @@ impl Doors {
     }
 }
 
-struct Bell {
+pub(crate) struct Bell {
     doors: Arc<Doors>,
     home: AtomicUsize,
     slot: AtomicUsize,
@@ -109,6 +110,11 @@ impl Bell {
             door.wakes.push(Arc::clone(self));
             door.unpark();
         }
+    }
+
+    pub(crate) fn interrupt(self: &Arc<Self>) {
+        self.handle.0.interrupt();
+        self.ring();
     }
 
     fn begin(&self) {
@@ -214,6 +220,7 @@ struct Pending<'p> {
     reject: ScopeGlobal<'p, ValueBrand>,
     future: Pin<Box<dyn Future<Output = Settle> + Send>>,
     waker: Waker,
+    keep_alive: bool,
 }
 
 struct JsState<'p> {
@@ -278,26 +285,25 @@ impl<'p> JsState<'p> {
         {
             self.due.pop();
             if let Some((resolve, keep_alive)) = self.armed.remove(&id) {
-                if !keep_alive {
-                    self.bell.begin();
-                }
                 let js = Arc::clone(js);
-                self.chain(&mut add, |after| Box::new(SettleTask { js, after, resolve, reject: None, settle: Some(Box::new(|_| Ok(Value::Bool(true)))), checkpoint: None }));
+                self.chain(&mut add, |after| Box::new(SettleTask { js, after, resolve, reject: None, settle: Some(Box::new(|_| Ok(Value::Bool(true)))), checkpoint: None, keep_alive }));
             }
         }
     }
 
     fn adopt(&mut self, js: &Arc<Js<'p>>, mut add: impl FnMut(Task<'p>)) {
         self.take_timers();
-        for AsyncJob { resolve, reject, future } in self.isolate.take_spawned() {
+        for AsyncJob { resolve, reject, future, keep_alive } in self.isolate.take_spawned() {
             let job = self.holes.pop().unwrap_or(self.pending.len());
             let waker = Waker::from(Arc::new(JobWaker { job, bell: Arc::clone(&self.bell) }));
-            let p = Some(Pending { resolve, reject, future, waker });
+            let p = Some(Pending { resolve, reject, future, waker, keep_alive });
             match self.pending.get_mut(job) {
                 Some(hole) => *hole = p,
                 None => self.pending.push(p),
             }
-            self.bell.begin();
+            if keep_alive {
+                self.bell.begin();
+            }
             add(Box::new(PollTask { js: Arc::clone(js), job }));
         }
     }
@@ -399,6 +405,7 @@ struct SettleTask<'p> {
     reject: Option<ScopeGlobal<'p, ValueBrand>>,
     settle: Option<Settle>,
     checkpoint: Option<Job<'p>>,
+    keep_alive: bool,
 }
 
 impl<'p> ITask<'p> for SettleTask<'p> {
@@ -433,7 +440,7 @@ impl<'p> ITask<'p> for SettleTask<'p> {
         let mut add = add_to(poll);
         st.adopt(&self.js, |t| drop(add(t)));
         st.take_woken(&self.js, |t| drop(add(t)));
-        if flow == Flow::Done {
+        if flow == Flow::Done && self.keep_alive {
             st.bell.end();
         }
         flow
@@ -455,11 +462,11 @@ impl<'p> ITask<'p> for PollTask<'p> {
         let Some(Some(p)) = st.pending.get_mut(self.job) else { return Flow::Done };
         let ready = p.future.as_mut().poll(&mut Context::from_waker(&p.waker));
         if let Poll::Ready(settle) = ready
-            && let Some(Pending { resolve, reject, .. }) = st.pending[self.job].take()
+            && let Some(Pending { resolve, reject, keep_alive, .. }) = st.pending[self.job].take()
         {
             st.holes.push(self.job);
             let js = Arc::clone(&self.js);
-            st.chain(add_to(poll), |after| Box::new(SettleTask { js, after, resolve, reject: Some(reject), settle: Some(settle), checkpoint: None }));
+            st.chain(add_to(poll), |after| Box::new(SettleTask { js, after, resolve, reject: Some(reject), settle: Some(settle), checkpoint: None, keep_alive }));
         }
         Flow::Done
     }
@@ -521,6 +528,11 @@ impl<'p> Lane<'p> {
     }
 
     fn turn(&mut self, budget: NonZeroUsize, check: NonZeroUsize) -> u64 {
+        if self.bell.handle.0.has_interrupt() {
+            let st = unsafe { self.js.state() };
+            let JsState { isolate, engine, cx, .. } = st;
+            isolate.enter(cx, engine, |a| engine.serve_interrupts(a));
+        }
         self.take_in();
         self.tasks.set_slice(check);
         self.tasks.set_budget(budget);
@@ -861,6 +873,7 @@ impl<'p> Ticket<'p> {
 pub struct EventLoop<'p> {
     bell: Arc<Bell>,
     submitted: Arc<Fifo<Submitted<'p>>>,
+    interrupts: Interrupts<'p>,
     set: Arc<Set<'p>>,
 }
 
@@ -912,6 +925,22 @@ impl<'p> EventLoop<'p> {
 
     pub fn handle(&self) -> IsolateHandle {
         self.bell.handle.clone()
+    }
+
+    pub fn interrupter(&self) -> Interrupter<'p> {
+        Interrupter::new(Arc::clone(&self.bell), Arc::clone(&self.interrupts))
+    }
+
+    pub fn set_heap_limit(&self, limit: Option<NonZeroUsize>, callback: Option<HeapLimitCallback<'p>>) {
+        let interrupter = self.interrupter();
+        self.set.call(&self.bell, move |l| {
+            let interrupt = move || interrupter.interrupt(|exe, a| if exe.is_running() { a.check_heap_limit() });
+            unsafe { l.js.state() }.isolate.set_heap_limit(limit, callback, interrupt);
+        });
+    }
+
+    pub fn heap_used(&self) -> usize {
+        self.set.call(&self.bell, |l| unsafe { l.js.state() }.isolate.heap_used())
     }
 }
 
@@ -985,6 +1014,7 @@ impl<'p> EventLoopSet<'_, 'p> {
         let (tx, rx) = Oneshot::new();
         let reply = Reply(Some(tx));
         let platform = self.set.platform;
+        let interrupts = Arc::clone(&engine.interrupts);
         let make: OnThread<'_, 'p> = Box::new(move |s| {
             let lane = Lane::new(platform, engine, intrinsics, &s.set.doors, s.me);
             let submitted = Arc::clone(&lane.submitted);
@@ -993,7 +1023,7 @@ impl<'p> EventLoopSet<'_, 'p> {
         let make = unsafe { core::mem::transmute::<OnThread<'_, 'p>, OnThread<'p, 'p>>(make) };
         self.set.port(home).send(Msg::Spawn(make));
         let (bell, submitted) = block_on(rx).expect("the loop thread has shut down");
-        EventLoop { bell, submitted, set: Arc::clone(&self.set) }
+        EventLoop { bell, submitted, interrupts, set: Arc::clone(&self.set) }
     }
 
     pub fn rebalance(&self) -> usize {
