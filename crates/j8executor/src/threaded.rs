@@ -365,7 +365,10 @@ fn enter<'r, 'scope>(cx: &mut Cx<'r, 'scope, '_, '_, '_>, pc: *const Insn, calle
         && let Some(t) = &cx.exe.tier
         && let Args::Values(vals) = args
     {
-        let r = cx.exe.deep(cx.st.level() + 1, || t.call(cx.exe, cx.a, c.func, callee, this, vals));
+        let r = cx.exe.deep(cx.st.level() + 1, || {
+            let _raw = cx.exe.raw_frame(cx.a.stop);
+            t.call(cx.exe, cx.a, c.func, callee, this, vals)
+        });
         if let Some(r) = r {
             return match r {
                 Ok(v) => {

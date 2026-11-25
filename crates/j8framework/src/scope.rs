@@ -137,6 +137,8 @@ pub struct Scope<'scope, 'x> {
     pub(crate) heap_limit: Option<&'x crate::HeapLimit<'x>>,
     pub(crate) stack_limit: usize,
     pub(crate) joining: Visiting<'scope>,
+    pub gc_safe: core::cell::Cell<bool>,
+    pub handles: Vec<Value<'scope>>,
     #[cfg(all(target_os = "linux", feature = "crossheap"))]
     pub shares: &'x mut crate::Shares<'x>,
 }
@@ -162,6 +164,24 @@ impl<'scope> Visiting<'scope> {
 impl<'scope> Scope<'scope, '_> {
     pub fn check_heap_limit(&self) {
         let Some(limit) = self.heap_limit else { return };
+        let gc = self.mc.gc_scope();
+        if gc.used() > limit.current() {
+            limit.pending().set(true);
+            self.stop.request_collect();
+        } else {
+            gc.set_limit(Some(limit.current()));
+        }
+    }
+
+    pub fn heap_limit_pending(&self) -> bool {
+        self.heap_limit.is_some_and(|l| l.pending().get())
+    }
+
+    pub fn recheck_heap_limit(&self) {
+        let Some(limit) = self.heap_limit else { return };
+        if !limit.pending().replace(false) {
+            return;
+        }
         let gc = self.mc.gc_scope();
         if limit.exceeded(gc.used()) {
             self.stop.request();
@@ -242,6 +262,12 @@ impl<'scope> Scope<'scope, '_> {
 
 impl<'scope> Scope<'scope, '_> {
     pub fn call(&mut self, callee: Value<'scope>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+        let invoke = self.invoke;
+        invoke.call(self, callee, this, args)
+    }
+
+    pub fn call_safe(&mut self, callee: Value<'scope>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+        self.gc_safe.set(true);
         let invoke = self.invoke;
         invoke.call(self, callee, this, args)
     }

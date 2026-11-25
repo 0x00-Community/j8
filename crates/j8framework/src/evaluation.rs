@@ -43,7 +43,9 @@ impl<'scope> Scope<'scope, '_> {
         let promise = self.new_promise();
         self.update_module(module, |r| r.capability = Some(promise));
         let mut stack = Vec::new();
-        match self.inner_module_evaluation(module, &mut stack, 0) {
+        let evaluated = self.inner_module_evaluation(module, &mut stack, 0);
+        let Some(promise) = self.modules()[module as usize].capability else { unreachable!("the capability set above") };
+        match evaluated {
             Ok(_) => {
                 if self.modules()[module as usize].evaluation.order.is_none() {
                     self.resolve_promise(promise, Value::Undefined)?;
@@ -139,12 +141,12 @@ impl<'scope> Scope<'scope, '_> {
 
     fn execute_module(&mut self, m: u32) -> Result<(), Error> {
         let function = self.modules()[m as usize].function;
-        self.call(function.into(), Value::Undefined, &[]).map(drop)
+        self.call_safe(function.into(), Value::Undefined, &[]).map(drop)
     }
 
     fn execute_async_module(&mut self, m: u32) -> Result<(), Error> {
         let function = self.modules()[m as usize].function;
-        let done = self.call(function.into(), Value::Undefined, &[])?;
+        let done = self.call_safe(function.into(), Value::Undefined, &[])?;
         self.on_settled(
             done,
             HostReaction::new(move |a, value, rejected| {

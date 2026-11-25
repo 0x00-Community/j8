@@ -604,6 +604,47 @@ pub struct Executor<'p> {
     active: Active,
     interrupts: interrupt::Interrupts<'p>,
     debug: Option<Box<debug::Debug<'p>>>,
+    raw: Cell<usize>,
+    deferred: Cell<bool>,
+    safe_next: Cell<bool>,
+    roots: RefCell<Option<j8framework::ScopeGlobal<'p, RootsBrand>>>,
+}
+
+#[derive(Collect)]
+#[collect(no_drop)]
+struct RootCells<'scope>(Box<[j8framework::ValueCell<'scope>]>);
+
+j8framework::paragc::brand!(RootsBrand = for<'heap, 'scope> RootCells<'scope>);
+
+#[derive(Collect)]
+#[collect(no_drop)]
+struct FrameCodes(Box<[Code]>);
+
+j8framework::paragc::brand!(FrameCodesBrand = for<'heap, 'scope> FrameCodes);
+
+const MIN_ROOT_CELLS: usize = 64;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Halt {
+    Go,
+    Pause,
+    Collected,
+}
+
+struct RawFrame<'e> {
+    raw: &'e Cell<usize>,
+    deferred: &'e Cell<bool>,
+    stop: &'e j8framework::Termination,
+}
+
+impl Drop for RawFrame<'_> {
+    fn drop(&mut self) {
+        let n = self.raw.get() - 1;
+        self.raw.set(n);
+        if n == 0 && self.deferred.take() {
+            self.stop.request_collect();
+        }
+    }
 }
 
 const _: () = {
@@ -1372,6 +1413,7 @@ impl Executor<'_> {
         }
         st.outer = self.depth.get();
         let _depth = self.at_depth(st.outer);
+        let _raw = (budget.is_none() && !self.safe_next.take()).then(|| self.raw_frame(a.stop));
         let running = Running { state: NonNull::from(&st).cast(), outer: self.active.0.get() };
         self.active.0.set(Some(NonNull::from(&running)));
         let mut b = Budget::new(a.stop, *budget);
@@ -1407,7 +1449,7 @@ impl Executor<'_> {
 
     fn run<'scope>(&self, a: &mut Scope<'scope, '_>, st: &mut State<'scope>, budget: &mut Budget<'_>) -> Result<Option<Outcome<'scope>>, Error> {
         loop {
-            if self.halts(a, budget) {
+            if self.halts(a, budget) == Halt::Pause {
                 return Ok(None);
             }
             let loaded: &Loaded = unsafe { st.f().loaded.get() };
@@ -1423,14 +1465,109 @@ impl Executor<'_> {
     }
 
     #[inline]
-    fn halts(&self, a: &mut Scope<'_, '_>, budget: &mut Budget<'_>) -> bool {
-        while budget.spent() {
+    fn halts(&self, a: &mut Scope<'_, '_>, budget: &mut Budget<'_>) -> Halt {
+        let mut collected = false;
+        while budget.interrupted || budget.spent() {
             if !core::mem::take(&mut budget.interrupted) {
-                return true;
+                return Halt::Pause;
             }
             self.serve_interrupts(a);
+            collected |= self.serve_collect(a);
         }
-        false
+        if collected { Halt::Collected } else { Halt::Go }
+    }
+
+    fn raw_frame<'e>(&'e self, stop: &'e j8framework::Termination) -> RawFrame<'e> {
+        self.raw.set(self.raw.get() + 1);
+        RawFrame { raw: &self.raw, deferred: &self.deferred, stop }
+    }
+
+    fn serve_collect(&self, a: &mut Scope<'_, '_>) -> bool {
+        if !a.stop.take_collect() {
+            return false;
+        }
+        if self.raw.get() > 0 {
+            self.deferred.set(true);
+            return false;
+        }
+        self.collect_at_safepoint(a)
+    }
+
+    fn collect_at_safepoint<'scope>(&self, a: &mut Scope<'scope, '_>) -> bool {
+        let mut states: Vec<NonNull<State<'scope>>> = Vec::new();
+        let mut at = self.active.0.get();
+        while let Some(running) = at {
+            let running = unsafe { running.as_ref() };
+            states.push(running.state.cast());
+            at = running.outer;
+        }
+        let pending = a.mc.take_exception();
+        let mut values: Vec<Value<'scope>> = Vec::new();
+        for st in &states {
+            let st = unsafe { st.as_ref() };
+            values.extend_from_slice(&st.regs);
+            values.push(st.acc);
+            values.push(st.message);
+        }
+        values.extend_from_slice(&a.handles);
+        values.push(a.new_target);
+        values.push(pending.unwrap_or(Value::Undefined));
+        let context = a.mc.stash::<j8framework::ContextBrand>(a.context);
+        let codes: Box<[Code]> = states.iter().flat_map(|st| unsafe { st.as_ref() }.frames.iter().map(|f| f.loaded.0)).collect();
+        let codes = a.mc.stash::<FrameCodesBrand>(a.mc.alloc(FrameCodes(codes)));
+        let used = self.hold_roots(a, &values);
+        let full = a.heap_limit_pending();
+        let collected = if full {
+            unsafe { a.mc.collect_full_here() };
+            true
+        } else {
+            unsafe { a.mc.collect_here() }
+        };
+        let cells = self.root_cells(a);
+        let mut back = cells.0.iter().map(|c| c.get());
+        for st in &mut states {
+            let st = unsafe { st.as_mut() };
+            for (r, v) in st.regs.iter_mut().zip(&mut back) {
+                *r = v;
+            }
+            st.acc = back.next().unwrap_or_default();
+            st.message = back.next().unwrap_or_default();
+        }
+        for h in &mut a.handles {
+            *h = back.next().unwrap_or_default();
+        }
+        a.new_target = back.next().unwrap_or_default();
+        let thrown = back.next().unwrap_or_default();
+        for c in &cells.0[..used] {
+            c.set(a.mc, Value::Undefined);
+        }
+        if pending.is_some() {
+            let _ = a.mc.raise(thrown);
+        }
+        a.context = a.mc.fetch(&context);
+        drop(codes);
+        a.recheck_heap_limit();
+        collected
+    }
+
+    fn root_cells<'scope>(&self, a: &Scope<'scope, '_>) -> j8framework::ScopeLocal<'scope, RootCells<'scope>> {
+        let roots = self.roots.borrow();
+        let Some(g) = roots.as_ref() else { unreachable!("cells held before collecting") };
+        a.mc.fetch(g)
+    }
+
+    fn hold_roots<'scope>(&self, a: &Scope<'scope, '_>, values: &[Value<'scope>]) -> usize {
+        let fits = self.roots.borrow().as_ref().is_some_and(|g| a.mc.fetch(g).0.len() >= values.len());
+        if !fits {
+            let n = values.len().next_power_of_two().max(MIN_ROOT_CELLS);
+            let cells = RootCells((0..n).map(|_| j8framework::ValueCell::new(Value::Undefined)).collect());
+            *self.roots.borrow_mut() = Some(a.mc.stash::<RootsBrand>(a.mc.alloc(cells)));
+        }
+        let cells = self.root_cells(a);
+        for (c, v) in cells.0.iter().zip(values) {
+            c.set(a.mc, *v);
+        }
+        values.len()
     }
 
     #[inline]
@@ -1829,8 +1966,10 @@ impl Executor<'_> {
                         Tiered::Threw(e) => return Err(e),
                     }
                 }
-                if self.halts(a, budget) {
-                    return Ok(Flow::Done(Outcome::Paused(Box::new(core::mem::take(st)))));
+                match self.halts(a, budget) {
+                    Halt::Pause => return Ok(Flow::Done(Outcome::Paused(Box::new(core::mem::take(st))))),
+                    Halt::Collected => return Ok(Flow::Frame),
+                    Halt::Go => {}
                 }
             }
             B::SwitchOnSmiNoFeedback => {
@@ -2580,6 +2719,7 @@ enum Found<'scope> {
 
 impl<'scope> Invoke<'scope> for Executor<'_> {
     fn call(&self, a: &mut Scope<'scope, '_>, callee: Value<'scope>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+        let safe = a.gc_safe.replace(false);
         let level = self.deeper(a)?;
         a.check_stack()?;
         let (closure, callee, this, args) = match self.resolve(a, &[], callee, this, Args::Values(args), level)? {
@@ -2587,9 +2727,13 @@ impl<'scope> Invoke<'scope> for Executor<'_> {
             Callee::Closure { closure, callee, this, args } => (closure, callee, this, args),
         };
         let l = self.code(&closure);
-        if l.tier.get() != 0
+        if !safe
+            && l.tier.get() != 0
             && let Some(t) = &self.tier
-            && let Some(r) = self.deep(level, || t.call(self, a, closure.func, callee, this, args.slice(&[])))
+            && let Some(r) = self.deep(level, || {
+                let _raw = self.raw_frame(a.stop);
+                t.call(self, a, closure.func, callee, this, args.slice(&[]))
+            })
         {
             return r;
         }
@@ -2597,6 +2741,7 @@ impl<'scope> Invoke<'scope> for Executor<'_> {
         let mut regs = a.take_regs();
         regs.clear();
         let f = Self::open(a, &mut regs, l, closure, callee, this, args.args(), Opening::Call);
+        self.safe_next.set(safe);
         self.run_frame(a, regs, f, level)
     }
 
@@ -2674,6 +2819,43 @@ enum After<'scope> {
     Script,
     Reaction(Option<j8framework::Capability<'scope>>),
     Await(JsObject<'scope>),
+}
+
+#[derive(Clone, Copy)]
+enum Held {
+    Script,
+    Reaction(bool),
+    Await,
+}
+
+impl<'scope> After<'scope> {
+    fn hold(self, a: &mut Scope<'scope, '_>) -> Held {
+        match self {
+            After::Script => Held::Script,
+            After::Reaction(None) => Held::Reaction(false),
+            After::Reaction(Some(c)) => {
+                a.handles.extend([c.promise, c.resolve, c.reject]);
+                Held::Reaction(true)
+            }
+            After::Await(co) => {
+                a.handles.push(co.into());
+                Held::Await
+            }
+        }
+    }
+}
+
+impl Held {
+    fn restore<'scope>(self, a: &mut Scope<'scope, '_>, mark: usize) -> After<'scope> {
+        let held = a.handles.split_off(mark);
+        match (self, held.as_slice()) {
+            (Held::Reaction(true), &[promise, resolve, reject]) => After::Reaction(Some(j8framework::Capability { promise, resolve, reject })),
+            (Held::Await, &[co]) => After::Await(co.as_object().expect("a held coroutine")),
+            (Held::Reaction(false), &[]) => After::Reaction(None),
+            (Held::Script, &[]) => After::Script,
+            _ => unreachable!("the held values match what was held"),
+        }
+    }
 }
 
 #[derive(Collect)]
@@ -2776,7 +2958,11 @@ impl<'p> Executor<'p> {
                 },
             };
             let Execution { state, after } = running;
-            match self.execute(a, state, budget) {
+            let mark = a.handles.len();
+            let held = after.hold(a);
+            let r = self.execute(a, state, budget);
+            let after = held.restore(a, mark);
+            match r {
                 Ok(Outcome::Paused(state)) => {
                     job.parked = Some(a.mc.stash::<ParkedBrand>(a.mc.alloc(j8framework::GcCell::new(a.mc, Some(Execution { state: *state, after })))));
                     return Ok(false);
