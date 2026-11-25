@@ -88,15 +88,18 @@ pub(crate) struct HeapLimit<'p> {
 
 impl HeapLimit<'_> {
     pub(crate) fn exceeded(&self, used: usize) -> bool {
+        let mut callback = self.callback.borrow_mut();
         let mut current = self.current.get();
-        if used <= current {
-            return false;
+        while used > current {
+            let Some(raise) = callback.as_mut() else { return true };
+            let raised = raise(current, self.initial);
+            self.current.set(raised);
+            if raised <= current {
+                return true;
+            }
+            current = raised;
         }
-        if let Some(callback) = self.callback.borrow_mut().as_mut() {
-            current = callback(current, self.initial);
-            self.current.set(current);
-        }
-        used > current
+        false
     }
 
     pub(crate) fn current(&self) -> usize {

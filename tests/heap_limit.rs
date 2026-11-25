@@ -121,3 +121,31 @@ fn the_callback_raises_the_limit_and_it_goes_on() {
     });
     assert_eq!(*calls.lock().unwrap(), vec![(LIMIT, LIMIT), (LIMIT * 2, LIMIT)]);
 }
+
+fn raising_by_a_little(cap: usize, calls: &Arc<Mutex<Vec<usize>>>) -> HeapLimitCallback<'static> {
+    let seen = Arc::clone(calls);
+    Box::new(move |current, _initial| {
+        seen.lock().unwrap().push(current);
+        if current < cap { current + (1 << 20) } else { current }
+    })
+}
+
+#[test]
+fn the_callback_is_asked_again_while_it_raises_and_the_heap_is_still_over() {
+    let big = "globalThis.big = new Array(8 << 20).fill(0); for (let i = 0; i < 1e6; i++) globalThis.n = i";
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    limited(false, Some(raising_by_a_little(LIMIT * 8, &calls)), |js| {
+        let r = run(js, big, ScriptKind::Module);
+        assert!(r.is_ok(), "{:?}", r.err());
+    });
+    let asked = calls.lock().unwrap().len();
+    assert!(asked > 1, "one jump past the limit asks until the limit holds the heap: asked {asked} times");
+
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    limited(false, Some(raising_by_a_little(LIMIT + (4 << 20), &calls)), |js| {
+        let r = run(js, big, ScriptKind::Module);
+        assert!(matches!(r, Err(Error::Terminated)), "{:?}", r.as_ref().err());
+    });
+    let calls = calls.lock().unwrap();
+    assert_eq!(calls.last(), Some(&(LIMIT + (4 << 20))), "the callback saw the call it declined: {calls:?}");
+}
