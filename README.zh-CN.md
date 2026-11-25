@@ -26,7 +26,6 @@
 - **解析:** oxc.
 
 核心 ECMAScript 已覆盖, [PLAN.md](PLAN.md) 列为不做的除外 (Temporal、intl402 等).
-模块顶层 await 暂不支持.
 
 | 项目 | 结果 |
 | --- | --- |

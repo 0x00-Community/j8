@@ -542,12 +542,9 @@ impl Compiler<'_, '_> {
                 ModuleName::Import(i) => Bound { name, binding: Binding::Import(-1 - i32::from(i)), constant: true, ready: None, self_name: false },
             })
             .collect();
-        if suspend_count > 0 {
-            return Err(c.unsupported(program.span, "top-level await"));
-        }
         c.levels.push(Level { func: usize::MAX, names: bound, context: Some(Register::current_context()), scope: None, dynamic: false, mark: 0, switch: false, cells: false, locals: usize::MAX });
-        c.module_body(program)?;
-        Ok((Module { functions: c.module }, info))
+        c.module_body(program, suspend_count)?;
+        Ok((Module { functions: c.module }, ModuleInfo { top_level_await: suspend_count > 0, ..info }))
     }
 
     fn module_layout<'a>(program: &'a Program<'a>) -> (Vec<(&'a str, ModuleName)>, ModuleInfo) {
@@ -1136,15 +1133,7 @@ impl<'a> Compiler<'a, '_> {
                 }
                 c.function_body(body)
             }, |c, _| {
-                let g = c.frame().generator.expect("a generator register");
-                let args = c.b().new_register_list(2);
-                c.b().mov(g, args.first);
-                c.b().star(args.at(1));
-                c.b().load_the_hole();
-                c.b().plain(Bytecode::SetPendingMessage);
-                c.b().call_runtime(Runtime::InlineAsyncFunctionReject, args);
-                c.b().plain(Bytecode::Return);
-                c.release(args.first);
+                c.reject_async_function();
                 Ok(())
             })?;
         } else {
@@ -1155,6 +1144,18 @@ impl<'a> Compiler<'a, '_> {
         let at = f.index;
         self.module[at] = f.finish(&self.lines);
         Ok(u32::try_from(index).expect("fewer than 2^32 functions"))
+    }
+
+    fn reject_async_function(&mut self) {
+        let g = self.frame().generator.expect("a generator register");
+        let args = self.b().new_register_list(2);
+        self.b().mov(g, args.first);
+        self.b().star(args.at(1));
+        self.b().load_the_hole();
+        self.b().plain(Bytecode::SetPendingMessage);
+        self.b().call_runtime(Runtime::InlineAsyncFunctionReject, args);
+        self.b().plain(Bytecode::Return);
+        self.release(args.first);
     }
 
     fn function_body(&mut self, body: Body<'a>) -> Result<(), Error> {
@@ -2366,14 +2367,15 @@ impl<'a> Compiler<'a, '_> {
         self.plain_function(f, false, "")
     }
 
-    fn module_body(&mut self, program: &'a Program<'a>) -> Result<(), Error> {
-        use oxc_ast::ast::{Declaration, ExportDefaultDeclarationKind};
-        self.module.push(SharedFunction { name: "".into(), kind: FunctionKind::Module, strict: true, length: 0, formal_parameters: 0, scope: None, bytecode: j8bytecode::BytecodeArray::default() });
+    fn module_body(&mut self, program: &'a Program<'a>, suspends: u32) -> Result<(), Error> {
+        let asynchronous = suspends > 0;
+        let kind = if asynchronous { FunctionKind::AsyncFunction } else { FunctionKind::Module };
+        self.module.push(SharedFunction { name: "".into(), kind, strict: true, length: 0, formal_parameters: 0, scope: None, bytecode: j8bytecode::BytecodeArray::default() });
         self.frames.push(Frame {
             index: 0,
             b: Builder::new(1, 0),
             name: "".into(),
-            flavor: Flavor { strict: true, ..Flavor::default() },
+            flavor: Flavor { strict: true, asynchronous, ..Flavor::default() },
             default_constructor: false,
             length: 0,
             formals: 0,
@@ -2395,6 +2397,41 @@ impl<'a> Compiler<'a, '_> {
             prologue: false,
             simple_params: false,
         });
+        if !asynchronous {
+            self.module_statements(program)?;
+            self.b().load_undefined();
+            self.b().plain(Bytecode::Return);
+            self.finish_module();
+            return Ok(());
+        }
+        let g = self.temp();
+        self.b().new_target_or_generator = Some(g.0);
+        self.frame().generator = Some(g);
+        let mut table = self.b().jump_table(suspends, 0);
+        self.b().switch_on_generator_state(g, &mut table);
+        self.frame().resume_table = Some(table);
+        self.generator_object(Runtime::InlineAsyncFunctionEnter);
+        self.try_catch(j8bytecode::CatchPrediction::AsyncAwait, |c| {
+            c.module_statements(program)?;
+            c.b().load_undefined();
+            c.ret();
+            Ok(())
+        }, |c, _| {
+            c.reject_async_function();
+            Ok(())
+        })?;
+        self.finish_module();
+        Ok(())
+    }
+
+    fn finish_module(&mut self) {
+        let f = self.frames.pop().expect("the module's frame");
+        self.levels.clear();
+        self.module[0] = f.finish(&self.lines);
+    }
+
+    fn module_statements(&mut self, program: &'a Program<'a>) -> Result<(), Error> {
+        use oxc_ast::ast::{Declaration, ExportDefaultDeclarationKind};
         for s in &program.body {
             let (f, name, inferred) = match s {
                 Statement::FunctionDeclaration(f) => (f, f.id.as_ref().map(|i| i.name.as_str()), ""),
@@ -2442,11 +2479,6 @@ impl<'a> Compiler<'a, '_> {
                 s => self.statement(s)?,
             }
         }
-        self.b().load_undefined();
-        self.b().plain(Bytecode::Return);
-        let f = self.frames.pop().expect("the module's frame");
-        self.levels.clear();
-        self.module[0] = f.finish(&self.lines);
         Ok(())
     }
 

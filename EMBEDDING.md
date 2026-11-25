@@ -494,7 +494,6 @@ gone past the limit, not before:
 - **A panic in a future propagates out of the loop** (out of `eval` / `run_until_idle`). An error while settling
   stops the loop with the remaining work still queued.
 - **Microtasks are not sliced.** A settlement drains its microtasks to the end in one turn.
-- **Not supported yet:** top-level `await`.
 
 ## 6. Modules
 
@@ -503,6 +502,12 @@ gone past the limit, not before:
 `rt.eval_module(text, file)` runs `text` as an ES module. `DefaultPlatform` resolves `import` relative to the
 importing file (canonicalized paths, no `node_modules`). For other rules (packages, URLs, a virtual file system),
 write your own `Platform::load_module` (6.3).
+
+`eval_module` returns the promise for the module's evaluation. A module graph without top-level `await` has finished
+when `eval_module` returns, and the promise is already fulfilled. With top-level `await`, the promise settles once
+every awaiting module in the graph has finished: drive it with `run_until_idle`, then read its state with
+`Scope::promise_state`. A module that throws before it first suspends makes `eval_module` return
+`Err(Error::Exception)`, as before; one that throws later rejects the promise.
 
 ### 6.2 Native modules in Rust: `#[j8::module]`
 

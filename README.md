@@ -26,7 +26,6 @@ A JavaScript engine in Rust, layered like V8:
 - **Parsing:** oxc.
 
 Core ECMAScript is covered except what [PLAN.md](PLAN.md) puts out of scope (Temporal, intl402, …).
-Top-level await in modules is not supported yet.
 
 | Check | Result |
 | --- | --- |

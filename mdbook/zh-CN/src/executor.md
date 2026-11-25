@@ -66,9 +66,9 @@ handler(cx, pc, regs, acc)  ─ 做完 ─▶  直接跳到下一条指令的 ha
 
 ## ES 模块
 
-`module.rs`：加载、链接、求值（同步：依赖经 `Platform::load_module` 读进来）。import 绑定实时读导出方的槽，
-`ResolveExport` 处理间接导出、`export *` 与歧义；命名空间对象、动态 `import()`、`import.meta` 都支持。
-模块的顶层 `await` 还不支持。
+`module.rs`：加载、链接（同步：依赖经 `Platform::load_module` 读进来）；求值（含顶层 `await`）是 j8framework 的
+`Scope::evaluate_module`。import 绑定实时读导出方的槽，`ResolveExport` 处理间接导出、`export *` 与歧义；命名空间对象、
+动态 `import()`、`import.meta` 都支持。
 
 ## CodeCache
 

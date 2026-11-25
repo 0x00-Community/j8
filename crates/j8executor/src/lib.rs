@@ -2410,7 +2410,7 @@ impl Executor<'_> {
             }
             Runtime::DynamicImportCall => {
                 let referrer = self.referrer(a, loaded.base);
-                self.dynamic_import(a, &referrer, arg(1), self.depth.get() + 1)
+                self.dynamic_import(a, &referrer, arg(1))
             }
             Runtime::DeleteLookupSlot => {
                 let name = text(a, arg(0))?;
@@ -2744,9 +2744,12 @@ impl<'p> Executor<'p> {
                 }
                 Started::Paused(root) => j8framework::CellExt::borrow_mut(a.mc.fetch(&root), a.mc).take().expect("a parked state"),
                 Started::Module { text, file } => {
-                    this.run_module(a, &file, &text, 0)?;
+                    let (_, evaluation) = this.run_module(a, &file, &text)?;
                     a.run_jobs()?;
-                    return Ok(Slice::Done(a.global(Value::Undefined)));
+                    return match Scope::promise_state(evaluation.into()) {
+                        Some(j8framework::Settled::Rejected(error)) => Err(a.throw_value(error)),
+                        _ => Ok(Slice::Done(a.global(evaluation.into()))),
+                    };
                 }
                 Started::Spent => unreachable!("a finished job is not resumed"),
             };

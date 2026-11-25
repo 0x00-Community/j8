@@ -120,4 +120,3 @@ impl Math {
 - **`async fn` 不能收 `&self`**：用 `Glue::spawn`。
 - **future 里的 panic 会传出循环**（从 `eval` / `run_until_idle` 出去）；兑现时出错会停下循环，剩下的活留在队列里。
 - **微任务不分片**：一次兑现把它的微任务一口气排空。
-- **还不支持**：顶层 `await`。

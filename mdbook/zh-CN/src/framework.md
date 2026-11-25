@@ -128,6 +128,7 @@ JIT 机器码不在自己的帧里跑闭包：它在检查点去优化，由解�
 |---|---|
 | `promise.rs` | Promise 与微任务：resolve / reject、`then` 反应、驱动 async 协程、排空队列 |
 | `module.rs` | 模块记录、导入导出条目、`ResolvedBinding` |
+| `evaluation.rs` | 模块求值：循环模块记录的算法、顶层 `await` 与求值的 promise |
 | `proxy.rs` | Proxy：内部方法入口分派到 trap，带不变式检查 |
 | `typed.rs`、`backing.rs` | TypedArray 元素；ArrayBuffer 的字节放在哪（自己的、宿主映射的、几个 isolate 共享的） |
 | `text.rs` | 字符串（见[对象模型](objects.md)） |

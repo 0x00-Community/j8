@@ -142,6 +142,7 @@ bytes) is not counted.
 |---|---|
 | `promise.rs` | promises and microtasks: resolve / reject, `then` reactions, driving async coroutines, draining the queue |
 | `module.rs` | module records, import / export entries, `ResolvedBinding` |
+| `evaluation.rs` | module evaluation: the cyclic module record algorithm, top-level `await` and the evaluation promise |
 | `proxy.rs` | Proxy: internal-method entry points dispatched to traps, with invariant checks |
 | `typed.rs`, `backing.rs` | TypedArray elements; where an ArrayBuffer's bytes live (its own, host-mapped, shared between isolates) |
 | `text.rs` | strings (see the [object model](objects.md)) |

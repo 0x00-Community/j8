@@ -19,7 +19,7 @@ defer, decorators, source phase imports.
 
 ## Still to do
 
-- top-level `await` in modules, import defer / source phase;
+- import defer / source phase;
 - the conflict rule for `var arguments` declared by eval in parameter expressions;
 - Annex B block-level functions inside eval code;
 - string storage that can represent lone surrogates (UTF-8 for now);

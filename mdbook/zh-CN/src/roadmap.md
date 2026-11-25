@@ -17,7 +17,7 @@ j8 的主线是 test262 通过率（`PLAN.md`）。每一阶段：往语义表�
 
 ## 还差的
 
-- 模块的顶层 `await`、import defer / source phase；
+- import defer / source phase；
 - 形参表达式里 eval 声明 `var arguments` 的冲突规则；
 - eval 代码里的 annexB 块级函数；
 - 字符串改为能表示落单代理项的存储（当前 UTF-8）；

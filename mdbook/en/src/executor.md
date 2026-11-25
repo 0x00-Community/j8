@@ -79,9 +79,10 @@ through `j8framework`'s promise machinery; after a script, the microtask queue i
 
 ## ES modules
 
-`module.rs`: loading, linking and evaluation (synchronous: dependencies are read through `Platform::load_module`).
-Import bindings read the exporter's slots live; `ResolveExport` handles indirect exports, `export *` and ambiguity;
-namespace objects, dynamic `import()` and `import.meta` are supported. Top-level `await` is not yet.
+`module.rs`: loading and linking (synchronous: dependencies are read through `Platform::load_module`); evaluation,
+including top-level `await`, is `Scope::evaluate_module` in j8framework. Import bindings read the exporter's slots live;
+`ResolveExport` handles indirect exports, `export *` and ambiguity; namespace objects, dynamic `import()` and
+`import.meta` are supported.
 
 ## CodeCache
 

@@ -2,9 +2,9 @@ use alloc::string::String;
 use j8compiler::Compile;
 use alloc::vec::Vec;
 
-use j8framework::{Scope, Closure, Error, ErrorKind, ImportName, ModuleStatus, ObjectData, Resolution, ResolvedBinding, Value};
+use j8framework::{Scope, Closure, Error, ErrorKind, ImportName, JsObject, ModuleStatus, ObjectData, Resolution, ResolvedBinding, Value};
 
-use crate::{Executor, Outcome};
+use crate::Executor;
 
 pub const EVAL_FILE: &str = "[eval]";
 const SOURCE_URL: &str = "//# sourceURL=";
@@ -25,7 +25,24 @@ impl Executor<'_> {
             slots[usize::from(s)] = Value::Uninit;
         }
         let env = j8framework::Env::new(slots, None).alloc(a.mc);
-        let record = j8framework::ModuleRecord { path: a.string(path), env, info: alloc::sync::Arc::clone(&info), main, code: self.function(main).code(), status: ModuleStatus::Linked, error: None, requested: Vec::new(), imports: Vec::new(), namespace: None, meta: None };
+        let function = self.function_object(a, Closure::new(main, Some(env)));
+        let record = j8framework::ModuleRecord {
+            path: a.string(path),
+            env,
+            info: alloc::sync::Arc::clone(&info),
+            main,
+            code: self.function(main).code(),
+            function,
+            status: ModuleStatus::Linked,
+            error: None,
+            evaluation: j8framework::Evaluation::default(),
+            async_parents: Vec::new(),
+            capability: None,
+            requested: Vec::new(),
+            imports: Vec::new(),
+            namespace: None,
+            meta: None,
+        };
         let index = a.push_module(&record);
         self.module_of.borrow_mut().insert(main.0 - j8bytecode::Module::MAIN, index);
         let mut requested = Vec::with_capacity(info.requests.len());
@@ -76,45 +93,6 @@ impl Executor<'_> {
         Ok(())
     }
 
-    pub fn evaluate(&self, a: &mut Scope<'_, '_>, m: u32, depth: usize) -> Result<(), Error> {
-        let (status, error, requested, main, env) = {
-            let r = &a.modules()[m as usize];
-            (r.status, r.error, r.requested.clone(), r.main, r.env)
-        };
-        match status {
-            ModuleStatus::Evaluated => return error.map_or(Ok(()), |e| Err(a.throw_value(e))),
-            ModuleStatus::Evaluating => return Ok(()),
-            ModuleStatus::Linked => {}
-        }
-        a.update_module(m, |r| r.status = ModuleStatus::Evaluating);
-        let mut r = Ok(());
-        for &dep in &requested {
-            r = self.evaluate(a, dep, depth);
-            if r.is_err() {
-                break;
-            }
-        }
-        if r.is_ok() {
-            let saved = self.depth.replace(depth + 1);
-            let mut regs = Vec::new();
-            let f = self.open(a, &mut regs, Closure::new(main, Some(env)), Value::Undefined, Value::Undefined, &[]);
-            r = self.execute(a, self.state(regs, f), &mut None).map(Outcome::returned).map(drop);
-            self.depth.set(saved);
-        }
-        let error = match &r {
-            Err(Error::Exception) => Some(a.take_exception()),
-            _ => None,
-        };
-        a.update_module(m, |r| {
-            r.status = ModuleStatus::Evaluated;
-            r.error = error;
-        });
-        match error {
-            Some(v) => Err(a.throw_value(v)),
-            None => r,
-        }
-    }
-
     pub fn load_script(&self, mc: &j8framework::Mutation<'_>, module: j8bytecode::Module, file: &str) -> j8framework::FuncId {
         let main = self.load(mc, module);
         self.script_files.borrow_mut().insert(main.0 - j8bytecode::Module::MAIN, file.into());
@@ -156,25 +134,25 @@ impl Executor<'_> {
         Ok(meta.into())
     }
 
-    pub fn run_module(&self, a: &mut Scope<'_, '_>, path: &str, text: &str, depth: usize) -> Result<u32, Error> {
+    pub fn run_module<'scope>(&self, a: &mut Scope<'scope, '_>, path: &str, text: &str) -> Result<(u32, JsObject<'scope>), Error> {
         let m = self.load_module(a, path, text)?;
         Self::link(a, m, &mut Vec::new())?;
-        self.evaluate(a, m, depth)?;
-        Ok(m)
+        Ok((m, a.evaluate_module(m)?))
     }
 
-    pub fn dynamic_import<'scope>(&self, a: &mut Scope<'scope, '_>, referrer: &str, specifier: Value<'scope>, depth: usize) -> Result<Value<'scope>, Error> {
+    pub fn dynamic_import<'scope>(&self, a: &mut Scope<'scope, '_>, referrer: &str, specifier: Value<'scope>) -> Result<Value<'scope>, Error> {
         let promise = a.new_promise();
-        let r = (|| -> Result<Value<'scope>, Error> {
+        let r = (|| -> Result<(), Error> {
             let spec = a.to_string(specifier)?;
             let Some((path, text)) = a.platform.load_module(referrer, &spec) else {
                 return Err(a.throw(ErrorKind::Type, &alloc::format!("Cannot find module '{}'", &**spec)));
             };
-            let m = self.run_module(a, &path, &text, depth)?;
-            Ok(a.module_namespace(m).into())
+            let (m, evaluation) = self.run_module(a, &path, &text)?;
+            a.import_evaluated(evaluation, m, promise);
+            Ok(())
         })();
         match r {
-            Ok(ns) => a.resolve_promise(promise, ns)?,
+            Ok(()) => {}
             Err(Error::Exception) => {
                 let reason = a.take_exception();
                 a.reject_promise(promise, reason);

@@ -422,10 +422,10 @@ pub enum Reaction<'scope> {
 
 pub struct HostReaction(pub Box<HostReactionFn>);
 
-pub type HostReactionFn = dyn for<'g, 'x> FnOnce(&mut crate::Scope<'g, 'x>, Value<'g>, bool) + Send + Sync;
+pub type HostReactionFn = dyn for<'g, 'x> FnOnce(&mut crate::Scope<'g, 'x>, Value<'g>, bool) -> Result<(), crate::Error> + Send + Sync;
 
 impl HostReaction {
-    pub fn new(f: impl for<'g, 'x> FnOnce(&mut crate::Scope<'g, 'x>, Value<'g>, bool) + Send + Sync + 'static) -> Self {
+    pub fn new(f: impl for<'g, 'x> FnOnce(&mut crate::Scope<'g, 'x>, Value<'g>, bool) -> Result<(), crate::Error> + Send + Sync + 'static) -> Self {
         Self(Box::new(f))
     }
 }

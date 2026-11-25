@@ -14,6 +14,13 @@ impl<'scope> Scope<'scope, '_> {
         matches!(v.kind(), ValueKind::Object(o) if matches!(o.borrow().kind, ObjectKind::Promise { .. }))
     }
 
+    pub fn promise_state(v: Value<'scope>) -> Option<Settled<'scope>> {
+        match &v.as_object()?.borrow().kind {
+            ObjectKind::Promise { state, .. } => Some(*state),
+            _ => None,
+        }
+    }
+
     pub fn promise_resolvers(&self, promise: JsObject<'scope>) -> (JsObject<'scope>, JsObject<'scope>) {
         let done = self.mc.alloc(core::sync::atomic::AtomicBool::new(false));
         let make = |reject| {
@@ -210,10 +217,10 @@ impl<'scope> Scope<'scope, '_> {
         match job {
             Job::Reaction { reaction: Reaction::Await { coroutine }, value, rejected } => self.drive(coroutine, if rejected { Resume::Throw } else { Resume::Next }, value),
             Job::Reaction { reaction: Reaction::Host { hook }, value, rejected } => {
-                if let Some(reaction) = hook.0.try_borrow_mut().and_then(|mut h| h.take()) {
-                    (reaction.0)(self, value, rejected);
+                match hook.0.try_borrow_mut().and_then(|mut h| h.take()) {
+                    Some(reaction) => (reaction.0)(self, value, rejected),
+                    None => Ok(()),
                 }
-                Ok(())
             }
             Job::Reaction { reaction: Reaction::Then { on_fulfilled, on_rejected, capability }, value, rejected } => {
                 let handler = if rejected { on_rejected } else { on_fulfilled };

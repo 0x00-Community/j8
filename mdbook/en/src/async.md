@@ -135,4 +135,3 @@ does nothing and `HostPlatform` passes it to the platform it wraps. `scope.stack
 - **A panic in a future propagates out of the loop** (out of `eval` / `run_until_idle`); an error while settling stops
   the loop with the remaining work still queued.
 - **Microtasks aren't sliced**: a settlement drains its microtasks in one turn.
-- **Not supported yet**: top-level `await`.
