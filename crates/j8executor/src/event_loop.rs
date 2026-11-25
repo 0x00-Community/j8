@@ -15,7 +15,7 @@ use std::thread::Thread;
 use j8lockfree::{AtomicRefCell, Fifo, Oneshot, Receiver, SegVec, Sender};
 use j8taskqueue::{Flow, ITask, ITaskPoll, Queue, Task, TaskId};
 
-use j8framework::{Scope, AsyncJob, CreateParams, Error, ErrorKind, Intrinsics, Isolate, IsolateHandle, Platform, Quota, ContextBrand, ScopeGlobal, ScriptKind, Settle, Source, Value, ValueBrand};
+use j8framework::{Scope, AsyncJob, CreateParams, Error, ErrorKind, Intrinsics, Isolate, IsolateHandle, HeapLimitCallback, Platform, Quota, ContextBrand, ScopeGlobal, ScriptKind, Settle, Source, Value, ValueBrand};
 
 use crate::interrupt::Interrupts;
 use crate::{Executor, Interrupter, Job};
@@ -826,6 +826,18 @@ impl<'p> EventLoop<'p> {
 
     pub fn interrupter(&self) -> Interrupter<'p> {
         Interrupter::new(Arc::clone(&self.bell), Arc::clone(&self.interrupts))
+    }
+
+    pub fn set_heap_limit(&self, limit: Option<NonZeroUsize>, callback: Option<HeapLimitCallback<'p>>) {
+        let interrupter = self.interrupter();
+        self.set.call(&self.bell, move |l| {
+            let interrupt = move || interrupter.interrupt(|exe, a| if exe.is_running() { a.check_heap_limit() });
+            unsafe { l.js.state() }.isolate.set_heap_limit(limit, callback, interrupt);
+        });
+    }
+
+    pub fn heap_used(&self) -> usize {
+        self.set.call(&self.bell, |l| unsafe { l.js.state() }.isolate.heap_used())
     }
 }
 

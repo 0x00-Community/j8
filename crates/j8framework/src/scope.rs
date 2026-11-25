@@ -133,12 +133,23 @@ pub struct Scope<'scope, 'x> {
     pub stop: &'x crate::Termination,
     pub parked: &'x core::cell::RefCell<crate::Parked<'x>>,
     pub spare_regs: Vec<Vec<Value<'scope>>>,
+    pub(crate) heap_limit: Option<&'x crate::HeapLimit<'x>>,
     #[cfg(all(target_os = "linux", feature = "crossheap"))]
     pub shares: &'x mut crate::Shares<'x>,
 }
 
 
 impl<'scope> Scope<'scope, '_> {
+    pub fn check_heap_limit(&self) {
+        let Some(limit) = self.heap_limit else { return };
+        let gc = self.mc.gc_scope();
+        if limit.exceeded(gc.used()) {
+            self.stop.request();
+        } else {
+            gc.set_limit(Some(limit.current()));
+        }
+    }
+
     const SPARE_REGS: usize = 8;
 
     pub fn spawn<'i>(&self, job: crate::AsyncJob<'i>) -> Result<(), crate::AsyncJob<'i>> {

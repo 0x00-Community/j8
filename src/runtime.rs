@@ -1,8 +1,9 @@
 use std::marker::PhantomData;
+use std::num::NonZeroUsize;
 use std::time::Duration;
 
 use j8executor::{EventLoop, EventLoopSet, Executor};
-use j8framework::{Scope, Error, ErrorKind, Platform, Pool, ScopeGlobal, ScriptKind, Source, Task, Value, ValueBrand};
+use j8framework::{Scope, Error, ErrorKind, HeapLimitCallback, Platform, Pool, ScopeGlobal, ScriptKind, Source, Task, Value, ValueBrand};
 
 pub trait Host {
     fn install(a: &mut Scope<'_, '_>);
@@ -128,6 +129,14 @@ impl<'p> Runtime<'p> {
 
     pub fn interrupter(&self) -> j8executor::Interrupter<'p> {
         self.js.interrupter()
+    }
+
+    pub fn set_heap_limit(&self, limit: Option<NonZeroUsize>, callback: Option<HeapLimitCallback<'p>>) {
+        self.js.set_heap_limit(limit, callback);
+    }
+
+    pub fn heap_used(&self) -> usize {
+        self.js.heap_used()
     }
 }
 

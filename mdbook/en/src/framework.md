@@ -124,6 +124,18 @@ the pending interrupt. Termination only reads and changes its own bits, so it wo
 With nothing pending the checkpoints read the byte once, as before; both requests are handled behind the branch that a
 set byte already takes.
 
+## Heap limit
+
+`EventLoop::set_heap_limit(Some(bytes), callback)` limits the bytes the GC heap holds (paragc's `Heap::used`: blocks plus
+large objects). The isolate arms the limit in paragc, which checks it only when it takes a block or makes a large object;
+the first one past the limit calls the hook, and the event loop's hook queues an interrupt. On the JS thread
+`Scope::check_heap_limit` asks `callback(current, initial)` for the new limit (the shape of V8's near-heap-limit callback,
+but called after the limit is passed): JS goes on under it and is terminated over it, where V8 would crash out of
+memory. An interrupt served while no JS runs does nothing. At each safe point the isolate runs a full collection once the
+heap has grown by half the limit since the last one, then arms the limit again: garbage from earlier tasks does not
+count, and a heap whose live data stays large is not collected every turn. Memory outside the GC heap (`ArrayBuffer`
+bytes) is not counted.
+
 ## Other parts
 
 | File | Contents |

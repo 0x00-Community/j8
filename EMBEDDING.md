@@ -460,7 +460,27 @@ assumed. A long-running native builtin (a big `sort`, regular expression backtra
 until it returns. A debugger that sets a breakpoint or pauses a busy loop needs exactly this. Without a request the
 checks cost what they did before. See the book's Framework chapter.
 
-### 5.8 What the event loop does not do yet
+### 5.8 A heap limit
+
+`EventLoop::set_heap_limit(Some(bytes), callback)` (or `Runtime::set_heap_limit`) limits the bytes the GC heap holds
+(paragc's `Heap::used`: its blocks plus its large objects; `heap_used()` reports it). `callback` is
+`Box<dyn FnMut(current, initial) -> new_limit>`, the shape of V8's near-heap-limit callback, but it runs once the heap has
+gone past the limit, not before:
+
+- The block or large object taken past the limit interrupts the running JS (5.7). On the JS thread the callback returns
+  the new limit: JS goes on under it, and is terminated with `Error::Terminated` over it (also without a callback). V8
+  instead crashes with out of memory when the callback does not raise the limit; j8 stops the JS and keeps the process.
+  This reaches an allocating loop in a module body or a promise callback, which never reach a safe point.
+- An interrupt that arrives while no JS runs (the host allocated outside JS) does nothing; the next safe point takes over.
+- At each safe point (after a turn or a slice) the isolate runs a full collection once the heap has grown by half the
+  limit since the last one, then arms the limit again, so garbage left by earlier tasks does not count and a page whose
+  live data stays large is not collected every turn. A safe point never terminates anything.
+- Only the GC heap counts: memory objects own outside it (`ArrayBuffer` bytes, host objects' `Vec`s) does not. Within
+  one task garbage counts, because j8 collects only at safe points.
+- The limit needs an event loop: it is enforced by interrupts. `Isolate::set_heap_limit` is the piece the event loop
+  builds on; an isolate run without one only collects at safe points.
+
+### 5.9 What the event loop does not do yet
 
 - **No reactor.** Futures that need tokio's (or another runtime's) reactor never wake. Run such work on a thread
   or a reactor of your own.

@@ -510,6 +510,12 @@ struct Active(Cell<Option<NonNull<Running>>>);
 
 unsafe impl Send for Active {}
 
+impl Executor<'_> {
+    pub(crate) fn is_running(&self) -> bool {
+        self.active.0.get().is_some()
+    }
+}
+
 #[derive(Default)]
 pub struct Executor<'p> {
     tier: Option<Box<dyn Tier + Send>>,

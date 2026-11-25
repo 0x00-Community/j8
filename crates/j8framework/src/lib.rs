@@ -40,7 +40,8 @@ pub use error::Error;
 pub use lazy::Lazy;
 pub use layout::Layout;
 pub use handle::{ContextBrand, ValueBrand};
-pub use isolate::{CreateParams, Isolate, Parked};
+pub use isolate::{CreateParams, HeapLimitCallback, Isolate, Parked};
+pub(crate) use isolate::HeapLimit;
 #[cfg(all(target_os = "linux", feature = "crossheap"))]
 pub use isolate::{ErasedBrand, Shares};
 pub use backing::{Backing, External, SharedMemory};
