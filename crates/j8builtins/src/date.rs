@@ -641,6 +641,12 @@ impl Dates {
         Self::text(a, this, |a, t| Self::date_part(Self::local(a, t)))
     }
 
+    locale_method!(to_locale_string, crate::intl::DateTimeFormats::to_locale_string, Self::to_string);
+
+    locale_method!(to_locale_date_string, crate::intl::DateTimeFormats::to_locale_date_string, Self::to_date_string);
+
+    locale_method!(to_locale_time_string, crate::intl::DateTimeFormats::to_locale_time_string, Self::to_time_string);
+
     fn to_time_string<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         Self::text(a, this, Self::zoned_time_part)
     }
@@ -797,9 +803,9 @@ impl Installer<'_, '_> {
             ("toISOString", Dates::to_iso_string, 0),
             ("toUTCString", Dates::to_utc_string, 0),
             ("toJSON", Dates::to_json, 1),
-            ("toLocaleString", Dates::to_string, 0),
-            ("toLocaleDateString", Dates::to_date_string, 0),
-            ("toLocaleTimeString", Dates::to_time_string, 0),
+            ("toLocaleString", Dates::to_locale_string, 0),
+            ("toLocaleDateString", Dates::to_locale_date_string, 0),
+            ("toLocaleTimeString", Dates::to_locale_time_string, 0),
             ("valueOf", Dates::value_of, 0),
         ];
         for (name, f, n) in methods {

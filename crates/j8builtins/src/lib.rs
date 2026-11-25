@@ -1,6 +1,20 @@
 #![expect(clippy::unnecessary_wraps, reason = "host functions all share the NativeFn signature; Result can't be dropped just because one cannot fail")]
 extern crate alloc;
 
+macro_rules! locale_method {
+    ($name:ident, $intl:path, $plain:path) => {
+        #[cfg(feature = "intl")]
+        fn $name<'scope>(a: &mut j8framework::Scope<'scope, '_>, this: j8framework::Value<'scope>, args: &[j8framework::Value<'scope>]) -> Result<j8framework::Value<'scope>, j8framework::Error> {
+            $intl(a, this, args)
+        }
+
+        #[cfg(not(feature = "intl"))]
+        fn $name<'scope>(a: &mut j8framework::Scope<'scope, '_>, this: j8framework::Value<'scope>, args: &[j8framework::Value<'scope>]) -> Result<j8framework::Value<'scope>, j8framework::Error> {
+            $plain(a, this, args)
+        }
+    };
+}
+
 mod array;
 mod asyncgen;
 mod bigint;
@@ -160,7 +174,7 @@ impl<'scope> Installer<'_, 'scope> {
 struct LocaleJoin;
 
 impl LocaleJoin {
-    fn join<'scope>(a: &mut Scope<'scope, '_>, o: JsObject<'scope>, len: f64, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn join<'scope>(a: &mut Scope<'scope, '_>, o: JsObject<'scope>, len: f64, args: &[Value<'scope>]) -> Result<alloc::string::String, Error> {
         let passed: alloc::vec::Vec<Value<'scope>> = (0..LOCALE_ARGS).map(|i| args.at(i)).collect();
         let mut out = alloc::string::String::new();
         let mut k = 0.0;
@@ -176,7 +190,7 @@ impl LocaleJoin {
             }
             k += 1.0;
         }
-        Ok(a.string(&out).into())
+        Ok(out)
     }
 }
 

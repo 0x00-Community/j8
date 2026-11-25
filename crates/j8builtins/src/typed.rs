@@ -541,7 +541,8 @@ impl Typed {
 
     fn to_locale_string<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let (o, _, _, len) = Self::validate(a, this)?;
-        crate::LocaleJoin::join(a, o, Self::f(len), args)
+        let joined = crate::LocaleJoin::join(a, o, Self::f(len), args)?;
+        Ok(a.string(&joined).into())
     }
 
     fn elements<'scope>(a: &Scope<'scope, '_>, kind: ElementKind, view: &ViewData<'scope>, len: usize) -> Vec<Value<'scope>> {

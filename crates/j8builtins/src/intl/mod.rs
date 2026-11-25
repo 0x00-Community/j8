@@ -11,11 +11,14 @@ use alloc::vec::Vec;
 
 use j8framework::{Error, ErrorKind, JsObject, NativeClosure, ObjectData, ObjectKind, Property, Scope, Slot, Value};
 
-use crate::{Args, Installer, LocaleJoin};
-use collator::{Cases, Collation, Collators};
-use datetime::{DateTimeFormat, DateTimeFormats};
+use crate::{Args, Installer};
+use collator::Collation;
+pub(crate) use collator::{Cases, Collators};
+use datetime::DateTimeFormat;
+pub(crate) use datetime::DateTimeFormats;
 use locale::Tags;
-use number::{NumberFormat, NumberFormats};
+use number::NumberFormat;
+pub(crate) use number::NumberFormats;
 use plural::PluralRulesBuiltins;
 pub(crate) use zone::Zone;
 
@@ -27,11 +30,6 @@ impl Intl {
         Ok(Tags::strings(a, &list))
     }
 
-    fn array_to_locale_string<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
-        let o = a.to_object(this)?;
-        let len = a.length_of_array_like(o.into())?;
-        LocaleJoin::join(a, o, len, args)
-    }
 
     fn supported_values_of<'scope>(a: &mut Scope<'scope, '_>, _: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let key = a.to_string(args.at(0))?;
@@ -92,15 +90,5 @@ impl<'scope> Installer<'_, 'scope> {
         self.method(plural, "select", PluralRulesBuiltins::select, 1);
         self.method(plural, "selectRange", PluralRulesBuiltins::select_range, 2);
         self.method(plural, "resolvedOptions", PluralRulesBuiltins::resolved_options, 0);
-
-        self.method(r.string_proto, "localeCompare", Collators::locale_compare, 1);
-        self.method(r.string_proto, "toLocaleUpperCase", Cases::to_upper, 0);
-        self.method(r.string_proto, "toLocaleLowerCase", Cases::to_lower, 0);
-        self.method(r.array_proto, "toLocaleString", Intl::array_to_locale_string, 0);
-        self.method(r.number_proto, "toLocaleString", NumberFormats::number_to_locale_string, 0);
-        self.method(r.bigint_proto, "toLocaleString", NumberFormats::bigint_to_locale_string, 0);
-        self.method(r.date_proto, "toLocaleString", DateTimeFormats::to_locale_string, 0);
-        self.method(r.date_proto, "toLocaleDateString", DateTimeFormats::to_locale_date_string, 0);
-        self.method(r.date_proto, "toLocaleTimeString", DateTimeFormats::to_locale_time_string, 0);
     }
 }

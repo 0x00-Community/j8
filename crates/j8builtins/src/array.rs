@@ -538,23 +538,10 @@ impl Arrays {
         a.call(f, o.into(), &[])
     }
 
-    fn to_locale_string<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
+    fn to_locale_string<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let (o, len) = Self::target(a, this)?;
-        let mut out = String::new();
-        let mut k = 0.0;
-        while k < len {
-            if k > 0.0 {
-                out.push(',');
-            }
-            let v = a.get_index(o.into(), k)?;
-            if !v.is_nullish() {
-                let f = a.get_named(v, "toLocaleString")?;
-                let s = a.call(f, v, &[])?;
-                out.push_str(&a.to_string(s)?);
-            }
-            k += 1.0;
-        }
-        Ok(a.string(&out).into())
+        let joined = crate::LocaleJoin::join(a, o, len, args)?;
+        Ok(a.string(&joined).into())
     }
 
     fn reverse<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
