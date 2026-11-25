@@ -708,10 +708,23 @@ impl Arrays {
 
     #[expect(clippy::too_many_arguments, reason = "one step of a visiting loop")]
     #[inline]
-    fn drive<'scope>(a: &mut Scope<'scope, '_>, cb: &Callback<'scope>, how: Visit, source: JsObject<'scope>, out: Option<JsObject<'scope>>, fresh: bool, k: f64, idx: Option<u32>, run: &mut Option<j8framework::ElementRun<'scope>>, to: &mut f64) -> Result<Option<Value<'scope>>, Error> {
-        let Some(v) = Self::load(a, source, k, idx, run, true)? else { return Ok(None) };
-        let r = Self::apply(a, cb, 3, v, || Value::from(k), || source.into(), || Value::Undefined)?;
-        match (how, out) {
+    fn drive<'scope>(a: &mut Scope<'scope, '_>, cb: &mut Callback<'scope>, how: Visit, source: &mut JsObject<'scope>, out: &mut Option<JsObject<'scope>>, fresh: bool, k: f64, idx: Option<u32>, run: &mut Option<j8framework::ElementRun<'scope>>, to: &mut f64) -> Result<Option<Value<'scope>>, Error> {
+        let src = *source;
+        let Some(v) = Self::load(a, src, k, idx, run, true)? else { return Ok(None) };
+        let mut held = [src.into(), out.map_or(Value::Undefined, Into::into), v, cb.callee, cb.this];
+        let (r, moved) = a.holding(&mut held, |a| Self::apply(a, cb, 3, v, || Value::from(k), || src.into(), || Value::Undefined));
+        let r = r?;
+        let v = if moved {
+            let [s, o, v, callee, this] = held;
+            *source = s.as_object().expect("the held source");
+            *out = o.as_object();
+            *cb = a.callback(callee, this);
+            *run = None;
+            v
+        } else {
+            v
+        };
+        match (how, *out) {
             (Visit::Map, Some(arr)) => {
                 if !(fresh && idx.is_some_and(|i| Self::append_fresh(a, arr, r, i))) {
                     a.create_index(arr, k, r)?;
@@ -910,7 +923,8 @@ impl Arrays {
             }
             _ => (None, false),
         };
-        let cb = a.callback(f, this_arg);
+        let mut cb = a.callback(f, this_arg);
+        let (mut o, mut out) = (o, out);
         if o.is_array()
             && let Some(n) = Self::span(len)
             && let Some(arity) = cb.passed()
@@ -927,14 +941,14 @@ impl Arrays {
         let mut to = 0.0;
         if let Some(n) = Self::span(len) {
             for i in 0..n {
-                if let Some(done) = Self::drive(a, &cb, how, o, out, fresh, f64::from(i), Some(i), &mut run, &mut to)? {
+                if let Some(done) = Self::drive(a, &mut cb, how, &mut o, &mut out, fresh, f64::from(i), Some(i), &mut run, &mut to)? {
                     return Ok(done);
                 }
             }
         } else {
             let mut k = 0.0;
             while k < len {
-                if let Some(done) = Self::drive(a, &cb, how, o, out, fresh, k, None, &mut run, &mut to)? {
+                if let Some(done) = Self::drive(a, &mut cb, how, &mut o, &mut out, fresh, k, None, &mut run, &mut to)? {
                     return Ok(done);
                 }
                 k += 1.0;

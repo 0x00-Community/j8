@@ -67,6 +67,7 @@ pub struct CreateParams {
     pub event_loop: bool,
     pub collector_threads: Option<NonZeroUsize>,
     pub stack_size: Option<NonZeroUsize>,
+    pub collect_threshold: Option<NonZeroUsize>,
 }
 
 impl CreateParams {
@@ -82,6 +83,7 @@ pub(crate) struct HeapLimit<'p> {
     initial: usize,
     callback: RefCell<Option<HeapLimitCallback<'p>>>,
     collected_at: Cell<usize>,
+    pending: Cell<bool>,
 }
 
 impl HeapLimit<'_> {
@@ -99,6 +101,10 @@ impl HeapLimit<'_> {
 
     pub(crate) fn current(&self) -> usize {
         self.current.get()
+    }
+
+    pub(crate) fn pending(&self) -> &Cell<bool> {
+        &self.pending
     }
 }
 
@@ -122,8 +128,12 @@ impl<'p> Isolate<'p> {
     pub fn new(platform: &'p dyn Platform, params: CreateParams) -> Self {
         let mut profiler = Profiler::default();
         profiler.enable(params.profile);
-        let heap = unsafe { Heap::new_unchecked(params.collector_threads.unwrap_or_else(|| NonZeroUsize::new(platform.threads()).unwrap_or(NonZeroUsize::MIN))) };
+        let mut heap = unsafe { Heap::new_unchecked(params.collector_threads.unwrap_or_else(|| NonZeroUsize::new(platform.threads()).unwrap_or(NonZeroUsize::MIN))) };
         heap.set_parallel_drop(false);
+        let stop: Arc<Termination> = Arc::default();
+        let due = Arc::clone(&stop);
+        heap.on_collect_needed(move || due.request_collect());
+        heap.set_collect_threshold(params.collect_threshold);
         Self {
             platform,
             heap,
@@ -131,7 +141,7 @@ impl<'p> Isolate<'p> {
             profiler,
             spawned: params.event_loop.then(Fifo::default),
             timers: params.event_loop.then(crate::Timers::default),
-            stop: Arc::default(),
+            stop,
             exception: None,
             parked: core::cell::RefCell::default(),
             heap_limit: None,
@@ -199,6 +209,7 @@ impl<'p> Isolate<'p> {
         let shares = &mut self.shares;
         let carried = self.exception.take();
         let mut left = None;
+        let mut collected = generation;
         let r = self.heap.scope(|s| {
             let s: &paragc::Scope<'_, '_> = s;
             let mc = unsafe { Mutation::new(rebrand_ref(s), generation) };
@@ -221,14 +232,18 @@ impl<'p> Isolate<'p> {
                 heap_limit: heap_limit.map(|l| unsafe { rebrand_ref(l) }),
                 stack_limit: Scope::stack_limit_here(stack_size),
                 joining: crate::Visiting::default(),
+                gc_safe: core::cell::Cell::new(false),
+                handles: Vec::new(),
                 #[cfg(all(target_os = "linux", feature = "crossheap"))]
                 shares: unsafe { &mut *core::ptr::from_mut(shares).cast() },
             });
             if let Some(v) = mc.take_exception() {
                 left = Some(mc.stash::<ValueBrand>(mc.alloc(v)));
             }
+            collected = mc.generation();
             r
         });
+        self.generation = collected;
         self.exception = left.map(|g| unsafe { rebrand(g) });
         self.after_enter();
         r
@@ -254,7 +269,7 @@ impl<'p> Isolate<'p> {
 
     pub fn set_heap_limit(&mut self, limit: Option<NonZeroUsize>, callback: Option<HeapLimitCallback<'p>>, interrupt: impl Fn() + Send + Sync + 'p) {
         let used = self.heap_used();
-        self.heap_limit = limit.map(|l| HeapLimit { current: Cell::new(l.get()), initial: l.get(), callback: RefCell::new(callback), collected_at: Cell::new(used) });
+        self.heap_limit = limit.map(|l| HeapLimit { current: Cell::new(l.get()), initial: l.get(), callback: RefCell::new(callback), collected_at: Cell::new(used), pending: Cell::new(false) });
         self.heap.on_limit(interrupt);
         self.heap.set_limit(limit.map(NonZeroUsize::get));
     }

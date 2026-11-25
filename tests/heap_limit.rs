@@ -9,6 +9,7 @@ use j8platform::DefaultPlatform;
 const LIMIT: usize = 32 << 20;
 const GROW_IN_A_MODULE: &str = "(function () { const keep = []; for (let i = 0; i < 65536; i++) keep.push(new Array(1000).fill(0)) })()";
 const GROW_IN_A_CALLBACK: &str = "Promise.resolve().then(() => { const keep = []; for (let i = 0; i < 65536; i++) keep.push(new Array(1000).fill(0)) })";
+const GARBAGE_IN_ONE_MODULE: &str = "let n = 0; for (let i = 0; i < 20000; i++) n += new Array(1000).fill(0).length; globalThis.made = n;";
 const GARBAGE: &str = "(function () { let n = 0; for (let i = 0; i < 500; i++) n += new Array(1000).fill(0).length })()";
 
 fn limited<R>(jit: bool, callback: Option<HeapLimitCallback<'static>>, f: impl FnOnce(&EventLoop<'_>) -> R) -> R {
@@ -51,6 +52,17 @@ fn growing_in_a_module_stops_compiled() {
 #[test]
 fn growing_in_a_promise_callback_stops() {
     stops(GROW_IN_A_CALLBACK, false);
+}
+
+#[test]
+fn garbage_inside_one_module_is_collected_before_the_limit_stops_it() {
+    for jit in [false, true] {
+        limited(jit, None, |js| {
+            let r = run(js, GARBAGE_IN_ONE_MODULE, ScriptKind::Module);
+            assert!(r.is_ok(), "jit {jit}: {:?}", r.err());
+            assert!(js.heap_used() < LIMIT, "jit {jit}: {}", js.heap_used());
+        });
+    }
 }
 
 #[test]

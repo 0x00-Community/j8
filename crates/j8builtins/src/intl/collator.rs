@@ -69,7 +69,7 @@ impl LocaleData for CollatorData {
 }
 
 impl Collation<'_> {
-    fn has_type(value: &str, locale: &Locale) -> bool {
+    pub(crate) fn has_type(value: &str, locale: &Locale) -> bool {
         if matches!(value, "standard" | "search") || CollationType::try_from(&Keyword::try_from_str(value).unwrap_or_default()).is_err() {
             return false;
         }

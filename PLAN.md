@@ -55,4 +55,7 @@ Out of scope: Temporal, ShadowRealm, explicit resource management (using / Dispo
 - [x] `Intl.NumberFormat` (rounding, significant / fraction digits, scientific / engineering / compact notation, sign display, `formatToParts`), `Number` / `BigInt` `toLocaleString`
 - [x] `Intl.DateTimeFormat` (components, `dateStyle` / `timeStyle`, IANA time zones and offsets, `formatToParts`), `Date` `toLocale*String`, Date's local time zone
 - [x] `Intl.PluralRules` (`select`, `selectRange`)
-- [ ] `Intl.RelativeTimeFormat`, `formatRange` / `formatRangeToParts`, CLDR currency / unit / percent patterns, `Intl.Locale`, `Intl.DisplayNames`, `Intl.ListFormat`, `Intl.Segmenter`, the legacy `Intl.FallbackSymbol`
+- [x] `Intl.ListFormat`, `Intl.Segmenter` (grapheme / word / sentence, `containing`, segment iterators), `Intl.Locale` (options, getters, `maximize` / `minimize`, `getCalendars` / `getCollations` / `getHourCycles` / `getNumberingSystems` / `getTimeZones` / `getTextInfo` / `getWeekInfo`); ICU4X cannot hold 5–8 letter language subtags
+- [x] `Intl.RelativeTimeFormat`, `Intl.DisplayNames` (language / region / script names from icu_experimental; currency, calendar and dateTimeField fall back to the code)
+- [x] `Intl.DurationFormat` (PartitionDurationFormatPattern over NumberFormat + ListFormat), CLDR unit patterns for the duration / length / mass / volume / area units ICU4X ships
+- [ ] `formatRange` / `formatRangeToParts`, CLDR currency / percent patterns and the remaining units, the legacy `Intl.FallbackSymbol`

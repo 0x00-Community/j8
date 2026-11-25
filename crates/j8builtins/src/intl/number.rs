@@ -40,6 +40,7 @@ const INFINITY: &str = "∞";
 const EXPONENT: &str = "E";
 const PERCENT: &str = "%";
 const AFFIX_SPACE: &str = "\u{a0}";
+const UNIT_MARK: &str = "\u{0}";
 const PERCENT_SHIFT: i16 = 2;
 const ENGINEERING_STEP: i16 = 3;
 
@@ -609,17 +610,76 @@ impl NumberFormat {
         };
         match (&self.settings.currency, &self.settings.unit) {
             (Some((code, ..)), _) => Self::prefix_currency(out, code),
-            (_, Some((unit, _))) => {
-                out.push(LITERAL, AFFIX_SPACE);
-                out.push("unit", unit);
-                out
-            }
+            (_, Some((unit, display))) => match self.unit_pattern(unit, *display, x) {
+                Some((before, after)) => {
+                    let mut wrapped = Pieces::default();
+                    Self::affix(&mut wrapped, &before);
+                    for (k, t) in out.0 {
+                        wrapped.push(k, &t);
+                    }
+                    Self::affix(&mut wrapped, &after);
+                    wrapped
+                }
+                None => {
+                    out.push(LITERAL, AFFIX_SPACE);
+                    out.push("unit", unit);
+                    out
+                }
+            },
             _ if self.settings.style == Style::Percent => {
                 out.push("percentSign", PERCENT);
                 out
             }
             _ => out,
         }
+    }
+
+    fn affix(out: &mut Pieces, text: &str) {
+        let word = text.trim_matches(char::is_whitespace);
+        let Some(at) = text.find(word).filter(|_| !word.is_empty()) else {
+            out.push(LITERAL, text);
+            return;
+        };
+        out.push(LITERAL, &text[..at]);
+        out.push("unit", word);
+        out.push(LITERAL, &text[at + word.len()..]);
+    }
+
+    fn unit_pattern(&self, unit: &str, display: UnitDisplay, x: &Numeric) -> Option<(String, String)> {
+        use icu_experimental::dimension::provider::units::categorized_display_names as names;
+        let width = match display {
+            UnitDisplay::Short => "short",
+            UnitDisplay::Narrow => "narrow",
+            UnitDisplay::Long => "long",
+        };
+        let attribute = format!("{width}-{unit}");
+        let attributes = DataMarkerAttributes::try_from_str(&attribute).ok()?;
+        let locale = Tags::parse(&self.settings.locale)?;
+        let data_locale = DataLocale::from(&locale.id);
+        let mut metadata = DataRequestMetadata::default();
+        metadata.silent = true;
+        let req = DataRequest { id: DataIdentifierBorrowed::for_marker_attributes_and_locale(attributes, &data_locale), metadata };
+        let baked = &icu_experimental::provider::Baked;
+        macro_rules! first_loaded {
+            ($($marker:ident),*) => {
+                None$(.or_else(|| DataProvider::<names::$marker>::load(baked, req).ok().map(|r| r.payload.cast::<names::UnitsNamesDurationCoreV1>())))*
+            };
+        }
+        let payload = first_loaded!(
+            UnitsNamesDurationCoreV1, UnitsNamesDurationExtendedV1, UnitsNamesDurationOutlierV1,
+            UnitsNamesLengthCoreV1, UnitsNamesLengthExtendedV1, UnitsNamesLengthOutlierV1,
+            UnitsNamesMassCoreV1, UnitsNamesMassExtendedV1, UnitsNamesMassOutlierV1,
+            UnitsNamesVolumeCoreV1, UnitsNamesVolumeExtendedV1, UnitsNamesVolumeOutlierV1,
+            UnitsNamesAreaCoreV1, UnitsNamesAreaExtendedV1, UnitsNamesAreaOutlierV1
+        )?;
+        let rules = icu_plurals::PluralRules::try_new_cardinal(icu_plurals::PluralRulesPreferences::from(&locale)).ok()?;
+        let operands = match x {
+            Numeric::Finite(d) => icu_plurals::PluralOperands::from(&self.rounded(d).0),
+            _ => icu_plurals::PluralOperands::from(0u8),
+        };
+        let filled = payload.get().get(operands, &rules).interpolate_to_string([UNIT_MARK]);
+        let (before, after) = filled.split_once(UNIT_MARK)?;
+        Some((String::from(before), String::from(after)))
     }
 
     fn prefix_currency(number: Pieces, code: &str) -> Pieces {

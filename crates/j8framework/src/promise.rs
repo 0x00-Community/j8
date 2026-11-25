@@ -245,7 +245,9 @@ impl<'scope> Scope<'scope, '_> {
                 self.reacted(capability, outcome)
             }
             Job::Import { module, promise } => {
+                let held = self.global(promise.into());
                 let evaluation = self.evaluate_module(module)?;
+                let Some(promise) = self.local(&held).as_object() else { unreachable!("an import promise") };
                 self.import_evaluated(evaluation, module, promise);
                 Ok(())
             }

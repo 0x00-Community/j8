@@ -9,6 +9,7 @@ const REQUESTED: u8 = 1;
 const UNWINDING: u8 = 2;
 const TERMINATE: u8 = REQUESTED | UNWINDING;
 const INTERRUPT: u8 = 4;
+const COLLECT: u8 = 8;
 
 impl Termination {
     pub fn request(&self) {
@@ -49,6 +50,14 @@ impl Termination {
 
     pub fn take_interrupt(&self) -> bool {
         self.0.fetch_and(!INTERRUPT, Ordering::SeqCst) & INTERRUPT != 0
+    }
+
+    pub fn request_collect(&self) {
+        self.0.fetch_or(COLLECT, Ordering::SeqCst);
+    }
+
+    pub fn take_collect(&self) -> bool {
+        self.0.fetch_and(!COLLECT, Ordering::SeqCst) & COLLECT != 0
     }
 
     pub fn as_ptr(&self) -> *const u8 {
