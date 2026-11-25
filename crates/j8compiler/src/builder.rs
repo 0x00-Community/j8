@@ -45,6 +45,7 @@ pub struct Builder {
     latent: Option<u32>,
     statements: Vec<(u32, u32)>,
     latent_statement: Option<u32>,
+    latent_is_statement: bool,
     variables: Vec<LocalVariable>,
     feedback: Vec<FeedbackSlotKind>,
     parameter_count: u16,
@@ -62,7 +63,7 @@ pub struct Builder {
 
 impl Builder {
     pub fn new(parameter_count: u16, locals: i32) -> Self {
-        Self { enc: Encoder::default(), constants: Vec::new(), handlers: Vec::new(), positions: Vec::new(), latent: None, statements: Vec::new(), latent_statement: None, variables: Vec::new(), feedback: Vec::new(), parameter_count, locals, next: locals, max: locals, unbound: 0, reserved: 0, slot_cache: Vec::new(), boolean: false, stored: None, dead: false, new_target_or_generator: None }
+        Self { enc: Encoder::default(), constants: Vec::new(), handlers: Vec::new(), positions: Vec::new(), latent: None, statements: Vec::new(), latent_statement: None, latent_is_statement: false, variables: Vec::new(), feedback: Vec::new(), parameter_count, locals, next: locals, max: locals, unbound: 0, reserved: 0, slot_cache: Vec::new(), boolean: false, stored: None, dead: false, new_target_or_generator: None }
     }
 
     pub fn finish(self, lines: &Lines<'_>) -> BytecodeArray {
@@ -104,6 +105,7 @@ impl Builder {
         {
             self.positions.push((offset, pos));
         }
+        self.latent_is_statement = false;
         self.boolean = matches!(b, Bytecode::TestEqual | Bytecode::TestEqualStrict | Bytecode::TestLessThan | Bytecode::TestGreaterThan | Bytecode::TestLessThanOrEqual | Bytecode::TestGreaterThanOrEqual | Bytecode::TestReferenceEqual | Bytecode::TestInstanceOf | Bytecode::TestIn | Bytecode::TestUndetectable | Bytecode::TestNull | Bytecode::TestUndefined | Bytecode::TestTypeOf | Bytecode::LogicalNot | Bytecode::ToBooleanLogicalNot | Bytecode::LdaTrue | Bytecode::LdaFalse);
         self.stored = None;
         self.dead = matches!(b, Bytecode::Return | Bytecode::Throw | Bytecode::ReThrow | Bytecode::Jump | Bytecode::JumpConstant | Bytecode::JumpLoop | Bytecode::Abort);
@@ -111,12 +113,17 @@ impl Builder {
     }
 
     pub fn at(&mut self, pos: u32) {
-        self.latent = Some(pos);
+        if !self.latent_is_statement {
+            self.latent = Some(pos);
+        }
     }
 
-    pub fn at_statement(&mut self, pos: u32) {
-        self.latent_statement = Some(pos);
-        self.at(pos);
+    pub fn at_statement(&mut self, pos: u32, step: bool) {
+        if step {
+            self.latent_statement = Some(pos);
+        }
+        self.latent = Some(pos);
+        self.latent_is_statement = true;
     }
 
     pub fn open_local(&mut self, name: &str, register: Register) {
