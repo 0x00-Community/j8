@@ -42,6 +42,8 @@ compiler = ["dep:j8compiler", "bytecode"]
 executor = ["dep:j8executor", "compiler"]
 # j8::builtins: built-in objects (the Intrinsics implementation)
 builtins = ["dep:j8builtins"]
+# Intl (ECMA-402) on top of ICU4X compiled data: Collator, NumberFormat, DateTimeFormat and the toLocale* methods
+intl = ["builtins", "j8builtins/intl"]
 # j8::platform: the standard-library Platform
 platform = ["dep:j8platform"]
 # j8::taskqueue: lock-free dataflow task queue
@@ -54,14 +56,14 @@ jit = ["executor", "dep:j8jit"]
 json = ["j8binding/json"]
 # j8::napi: Node-API (the C interface native addons link against)
 napi = ["dep:j8napi"]
-full = ["runtime", "taskqueue", "lockfree", "jit", "json", "napi"]
+full = ["runtime", "taskqueue", "lockfree", "jit", "json", "napi", "intl"]
 # Cross-process JS objects (Linux only): a paragc cross-heap as the old generation, objects shared by signature
 crossheap = ["j8framework/crossheap"]
 
 [dev-dependencies]
 paragc.workspace = true
 j8executor.workspace = true
-j8builtins.workspace = true
+j8builtins = { workspace = true, features = ["intl"] }
 j8platform.workspace = true
 j8jit.workspace = true
 serde = { version = "1", features = ["derive"] }
@@ -223,6 +225,19 @@ oxc_span = "0.158"
 oxc_str = "0.158"
 oxc_semantic = "0.158"
 oxc_syntax = "0.158"
+icu_locale = { version = "~2.4", default-features = false, features = ["compiled_data"] }
+icu_locale_core = { version = "~2.4", default-features = false, features = ["alloc"] }
+icu_decimal = { version = "~2.4", default-features = false, features = ["compiled_data", "unstable"] }
+icu_datetime = { version = "~2.4", default-features = false, features = ["compiled_data", "unstable"] }
+icu_calendar = { version = "~2.4", default-features = false, features = ["compiled_data"] }
+icu_time = { version = "~2.4", default-features = false, features = ["compiled_data"] }
+icu_collator = { version = "~2.4", default-features = false, features = ["compiled_data"] }
+icu_casemap = { version = "~2.4", default-features = false, features = ["compiled_data"] }
+icu_plurals = { version = "~2.4", default-features = false, features = ["compiled_data", "unstable"] }
+icu_provider = { version = "~2.4", default-features = false, features = ["sync"] }
+fixed_decimal = { version = "~0.7", default-features = false, features = ["ryu"] }
+writeable = { version = "~0.6", default-features = false }
+jiff = { version = "~1.0", default-features = false, features = ["std", "tzdb-bundle-always"] }
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }

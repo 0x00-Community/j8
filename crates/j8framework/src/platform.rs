@@ -64,6 +64,14 @@ pub trait Platform: Sync + Pool {
         None
     }
 
+    fn locale(&self) -> Option<alloc::string::String> {
+        None
+    }
+
+    fn time_zone(&self) -> Option<alloc::string::String> {
+        None
+    }
+
     fn print(&self, line: &str);
 
     fn unhandled_rejection<'scope>(&self, scope: &mut crate::Scope<'scope, '_>, promise: crate::JsObject<'scope>, reason: crate::Value<'scope>) {
