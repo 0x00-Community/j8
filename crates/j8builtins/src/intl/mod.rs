@@ -1,5 +1,6 @@
 mod collator;
 mod datetime;
+mod displaynames;
 mod ilocale;
 mod listformat;
 mod locale;
@@ -22,6 +23,7 @@ use datetime::DateTimeFormat;
 pub(crate) use datetime::DateTimeFormats;
 use listformat::ListFormats;
 use ilocale::Locales;
+use displaynames::DisplayNamesBuiltins;
 use locale::Tags;
 use relativetime::RelativeTimeFormats;
 use segmenter::{ITERATOR_PROTO_SLOT, SEGMENTS_PROTO_SLOT, Segmenters};
@@ -56,19 +58,17 @@ impl Intl {
 }
 
 impl<'scope> Installer<'_, 'scope> {
-    fn service(&self, intl: JsObject<'scope>, name: &str, construct: j8framework::ClosureFn, supported: Option<j8framework::NativeFn>, tag: &str) -> JsObject<'scope> {
+    fn service(&self, intl: JsObject<'scope>, name: &str, construct: j8framework::ClosureFn, supported: Option<j8framework::NativeFn>, tag: &str, length: u32) -> JsObject<'scope> {
         let a = self.context;
         let proto = self.plain();
         let closure = NativeClosure { f: construct, slots: alloc::vec![proto.into()], constructor: true };
         let ctor = ObjectData { kind: ObjectKind::NativeClosure(closure), proto: Some(a.function_proto), ..ObjectData::default() }.alloc(self.mc);
-        a.name_function(self.mc, ctor, name, Some(0));
+        a.name_function(self.mc, ctor, name, Some(length));
         ctor.borrow_mut(self.mc).define("prototype", Property { slot: Slot::Data(proto.into()), enumerable: false, writable: false, configurable: false });
         self.set(proto, "constructor", ctor.into());
         self.set(intl, name, ctor.into());
         if let Some(supported) = supported {
             self.method(ctor, "supportedLocalesOf", supported, 1);
-        } else {
-            a.name_function(self.mc, ctor, name, Some(1));
         }
         let t = self.text(tag);
         proto.borrow_mut(self.mc).define_symbol(a.symbols.to_string_tag, Property { slot: Slot::Data(t), enumerable: false, writable: false, configurable: true });
@@ -84,31 +84,31 @@ impl<'scope> Installer<'_, 'scope> {
         self.method(intl, "getCanonicalLocales", Intl::get_canonical_locales, 1);
         self.method(intl, "supportedValuesOf", Intl::supported_values_of, 1);
 
-        let collator = self.service(intl, "Collator", Collators::construct, Some(Collators::supported_locales_of), "Intl.Collator");
+        let collator = self.service(intl, "Collator", Collators::construct, Some(Collators::supported_locales_of), "Intl.Collator", 0);
         self.getter(collator, "compare", Collators::compare);
         self.method(collator, "resolvedOptions", Collators::resolved_options, 0);
 
-        let number = self.service(intl, "NumberFormat", NumberFormats::construct, Some(NumberFormats::supported_locales_of), "Intl.NumberFormat");
+        let number = self.service(intl, "NumberFormat", NumberFormats::construct, Some(NumberFormats::supported_locales_of), "Intl.NumberFormat", 0);
         self.getter(number, "format", NumberFormats::format);
         self.method(number, "formatToParts", NumberFormats::format_to_parts, 1);
         self.method(number, "resolvedOptions", NumberFormats::resolved_options, 0);
 
-        let date = self.service(intl, "DateTimeFormat", DateTimeFormats::construct, Some(DateTimeFormats::supported_locales_of), "Intl.DateTimeFormat");
+        let date = self.service(intl, "DateTimeFormat", DateTimeFormats::construct, Some(DateTimeFormats::supported_locales_of), "Intl.DateTimeFormat", 0);
         self.getter(date, "format", DateTimeFormats::format);
         self.method(date, "formatToParts", DateTimeFormats::format_to_parts, 1);
         self.method(date, "resolvedOptions", DateTimeFormats::resolved_options, 0);
 
-        let plural = self.service(intl, "PluralRules", PluralRulesBuiltins::construct, Some(PluralRulesBuiltins::supported_locales_of), "Intl.PluralRules");
+        let plural = self.service(intl, "PluralRules", PluralRulesBuiltins::construct, Some(PluralRulesBuiltins::supported_locales_of), "Intl.PluralRules", 0);
         self.method(plural, "select", PluralRulesBuiltins::select, 1);
         self.method(plural, "selectRange", PluralRulesBuiltins::select_range, 2);
         self.method(plural, "resolvedOptions", PluralRulesBuiltins::resolved_options, 0);
 
-        let list = self.service(intl, "ListFormat", ListFormats::construct, Some(ListFormats::supported_locales_of), "Intl.ListFormat");
+        let list = self.service(intl, "ListFormat", ListFormats::construct, Some(ListFormats::supported_locales_of), "Intl.ListFormat", 0);
         self.method(list, "format", ListFormats::format, 1);
         self.method(list, "formatToParts", ListFormats::format_to_parts, 1);
         self.method(list, "resolvedOptions", ListFormats::resolved_options, 0);
 
-        let segmenter = self.service(intl, "Segmenter", Segmenters::construct, Some(Segmenters::supported_locales_of), "Intl.Segmenter");
+        let segmenter = self.service(intl, "Segmenter", Segmenters::construct, Some(Segmenters::supported_locales_of), "Intl.Segmenter", 0);
         let segments = self.plain();
         self.method(segments, "containing", Segmenters::containing, 1);
         let iterator = ObjectData { proto: Some(r.iterator_proto), ..ObjectData::default() }.alloc(self.mc);
@@ -125,17 +125,21 @@ impl<'scope> Installer<'_, 'scope> {
         self.set(segmenter, "segment", segment.into());
         self.method(segmenter, "resolvedOptions", Segmenters::resolved_options, 0);
 
-        let relative = self.service(intl, "RelativeTimeFormat", RelativeTimeFormats::construct, Some(RelativeTimeFormats::supported_locales_of), "Intl.RelativeTimeFormat");
+        let relative = self.service(intl, "RelativeTimeFormat", RelativeTimeFormats::construct, Some(RelativeTimeFormats::supported_locales_of), "Intl.RelativeTimeFormat", 0);
         self.method(relative, "format", RelativeTimeFormats::format, 2);
         self.method(relative, "formatToParts", RelativeTimeFormats::format_to_parts, 2);
         self.method(relative, "resolvedOptions", RelativeTimeFormats::resolved_options, 0);
+
+        let names = self.service(intl, "DisplayNames", DisplayNamesBuiltins::construct, Some(DisplayNamesBuiltins::supported_locales_of), "Intl.DisplayNames", 2);
+        self.method(names, "of", DisplayNamesBuiltins::of, 1);
+        self.method(names, "resolvedOptions", DisplayNamesBuiltins::resolved_options, 0);
 
         self.intl_locale(intl);
     }
 
     fn intl_locale(&self, intl: JsObject<'scope>) {
         let r = self.context;
-        let locale = self.service(intl, "Locale", Locales::construct, None, "Intl.Locale");
+        let locale = self.service(intl, "Locale", Locales::construct, None, "Intl.Locale", 1);
         for (name, f) in [("maximize", Locales::maximize as j8framework::ClosureFn), ("minimize", Locales::minimize)] {
             let c = ObjectData { kind: ObjectKind::NativeClosure(NativeClosure { f, slots: alloc::vec![locale.into()], constructor: false }), proto: Some(r.function_proto), ..ObjectData::default() }.alloc(self.mc);
             r.name_function(self.mc, c, name, Some(0));

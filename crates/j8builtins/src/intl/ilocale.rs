@@ -90,22 +90,22 @@ impl Keyed {
     }
 }
 
-struct Subtags;
+pub(crate) struct Subtags;
 
 impl Subtags {
-    fn language(s: &str) -> bool {
+    pub(crate) fn language(s: &str) -> bool {
         matches!(s.len(), 2 | 3 | 5..=8) && s.bytes().all(|b| b.is_ascii_alphabetic())
     }
 
-    fn script(s: &str) -> bool {
+    pub(crate) fn script(s: &str) -> bool {
         s.len() == 4 && s.bytes().all(|b| b.is_ascii_alphabetic())
     }
 
-    fn region(s: &str) -> bool {
+    pub(crate) fn region(s: &str) -> bool {
         (s.len() == REGION_LETTERS && s.bytes().all(|b| b.is_ascii_alphabetic())) || (s.len() == REGION_DIGITS && s.bytes().all(|b| b.is_ascii_digit()))
     }
 
-    fn variants(s: &str) -> Option<Variants> {
+    pub(crate) fn variants(s: &str) -> Option<Variants> {
         let mut seen: Vec<Variant> = Vec::new();
         for part in s.split('-') {
             let ok = match part.len() {

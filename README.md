@@ -26,7 +26,7 @@ A JavaScript engine in Rust, layered like V8:
 - **Parsing:** oxc.
 
 Core ECMAScript is covered except what [PLAN.md](PLAN.md) puts out of scope (Temporal, ShadowRealm, …).
-`Intl` (Collator, NumberFormat, DateTimeFormat, PluralRules, ListFormat, Segmenter, Locale, RelativeTimeFormat) is the opt-in `intl` feature, built on ICU4X.
+`Intl` (Collator, NumberFormat, DateTimeFormat, PluralRules, ListFormat, Segmenter, Locale, RelativeTimeFormat, DisplayNames) is the opt-in `intl` feature, built on ICU4X.
 
 | Check | Result |
 | --- | --- |

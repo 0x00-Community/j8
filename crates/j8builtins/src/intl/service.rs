@@ -14,6 +14,7 @@ use super::datetime::DateTimeFormat;
 use super::number::NumberFormat;
 use super::plural::Plurals;
 use super::listformat::Lists;
+use super::displaynames::DisplayNames;
 use super::relativetime::RelativeTimes;
 use super::segmenter::{SegmentCursor, Segmented, Segmenter};
 
@@ -23,6 +24,7 @@ pub(crate) enum Service<'scope> {
     DateTime(Box<DateTimeFormat>),
     Plural(Box<Plurals>),
     List(Box<Lists>),
+    DisplayNames(Box<DisplayNames>),
     RelativeTime(Box<RelativeTimes>),
     Segmenter(Box<Segmenter>),
     Segments(alloc::sync::Arc<Segmented>),
