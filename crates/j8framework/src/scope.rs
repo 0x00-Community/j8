@@ -52,6 +52,8 @@ pub trait Invoke<'scope> {
 
     fn resume(&self, agent: &mut Scope<'scope, '_>, coroutine: crate::JsObject<'scope>, mode: Resume, value: Value<'scope>) -> Result<Step<'scope>, Error>;
 
+    fn evaluate(&self, agent: &mut Scope<'scope, '_>, module: u32) -> Result<(), Error>;
+
     fn callback(&self, _agent: &mut Scope<'scope, '_>, callee: Value<'scope>, this: Value<'scope>) -> Callback<'scope> {
         Callback::from((callee, this))
     }

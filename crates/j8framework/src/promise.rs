@@ -36,7 +36,7 @@ impl<'scope> Scope<'scope, '_> {
         Ok(Value::Undefined)
     }
 
-    fn enqueue(&self, job: Job<'scope>) {
+    pub fn enqueue_job(&self, job: Job<'scope>) {
         self.context.jobs.push(self.mc, job);
     }
 
@@ -51,7 +51,7 @@ impl<'scope> Scope<'scope, '_> {
             core::mem::take(reactions)
         };
         for reaction in reactions {
-            self.enqueue(Job::Reaction { reaction, value, rejected });
+            self.enqueue_job(Job::Reaction { reaction, value, rejected });
         }
     }
 
@@ -76,7 +76,7 @@ impl<'scope> Scope<'scope, '_> {
                 Err(e) => return Err(e),
             };
             if self.is_callable(then) {
-                self.enqueue(Job::Thenable { promise, thenable: value, then });
+                self.enqueue_job(Job::Thenable { promise, thenable: value, then });
                 return Ok(());
             }
         }
@@ -98,7 +98,7 @@ impl<'scope> Scope<'scope, '_> {
             }
         };
         if let Some((value, rejected)) = settled {
-            self.enqueue(Job::Reaction { reaction, value, rejected });
+            self.enqueue_job(Job::Reaction { reaction, value, rejected });
         }
     }
 
@@ -227,6 +227,11 @@ impl<'scope> Scope<'scope, '_> {
                 };
                 self.reacted(capability, outcome)
             }
+            Job::Import { module, promise } => {
+                let invoke = self.invoke;
+                let r = invoke.evaluate(self, module);
+                self.imported(module, promise, r)
+            }
             Job::Thenable { promise, thenable, then } => {
                 let (resolve, reject) = self.promise_resolvers(promise);
                 match self.call(then, thenable, &[resolve.into(), reject.into()]) {
@@ -256,6 +261,21 @@ impl<'scope> Scope<'scope, '_> {
             Ok(_) => Ok(()),
             Err(Error::Exception) => {
                 self.take_exception();
+                Ok(())
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    pub fn imported(&mut self, module: u32, promise: JsObject<'scope>, r: Result<(), Error>) -> Result<(), Error> {
+        match r {
+            Ok(()) => {
+                let namespace = self.module_namespace(module);
+                self.resolve_promise(promise, namespace.into())
+            }
+            Err(Error::Exception) => {
+                let reason = self.take_exception();
+                self.reject_promise(promise, reason);
                 Ok(())
             }
             Err(e) => Err(e),

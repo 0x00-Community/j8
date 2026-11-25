@@ -2362,7 +2362,7 @@ impl Executor<'_> {
             }
             Runtime::DynamicImportCall => {
                 let referrer = self.referrer(a, loaded.base);
-                self.dynamic_import(a, &referrer, arg(1), self.depth.get() + 1)
+                self.dynamic_import(a, &referrer, arg(1))
             }
             Runtime::DeleteLookupSlot => {
                 let name = text(a, arg(0))?;
@@ -2621,6 +2621,10 @@ impl<'scope> Invoke<'scope> for Executor<'_> {
         }
     }
 
+    fn evaluate(&self, a: &mut Scope<'scope, '_>, module: u32) -> Result<(), Error> {
+        self.evaluate_nested(a, module)
+    }
+
     fn construct(&self, a: &mut Scope<'scope, '_>, callee: Value<'scope>, args: &[Value<'scope>], new_target: Value<'scope>) -> Result<Value<'scope>, Error> {
         let level = self.depth.get() + 1;
         if level >= STACK_LIMIT {
@@ -2671,10 +2675,10 @@ impl From<u32> for Visit {
     }
 }
 
-enum Work {
+enum Work<'p> {
     Script { module: Module, file: alloc::string::String },
     Module { text: alloc::string::String, file: alloc::string::String },
-    Evaluate(Vec<Visit>),
+    Evaluate { stack: Vec<Visit>, module: u32, promise: j8framework::ScopeGlobal<'p, j8framework::ValueBrand> },
     Drain,
     Spent,
 }
@@ -2686,14 +2690,15 @@ enum Next<'scope> {
 }
 
 pub struct Job<'p> {
-    work: Work,
+    work: Work<'p>,
     parked: Option<Parked<'p>>,
     value: Option<j8framework::ScopeGlobal<'p, j8framework::ValueBrand>>,
+    entry: Option<j8framework::ScopeGlobal<'p, j8framework::ValueBrand>>,
 }
 
-impl From<Work> for Job<'_> {
-    fn from(work: Work) -> Self {
-        Self { work, parked: None, value: None }
+impl<'p> From<Work<'p>> for Job<'p> {
+    fn from(work: Work<'p>) -> Self {
+        Self { work, parked: None, value: None, entry: None }
     }
 }
 
@@ -2737,6 +2742,12 @@ impl<'p> Executor<'p> {
                     Next::Run(r) => r,
                     Next::Paused => return Ok(false),
                     Next::Done => {
+                        if let Some(entry) = job.entry.take()
+                            && let Some(promise) = a.local(&entry).as_object()
+                            && let ObjectKind::Promise { state: j8framework::Settled::Rejected(reason), .. } = promise.borrow().kind
+                        {
+                            return Err(a.throw_value(reason));
+                        }
                         if job.value.is_none() {
                             job.value = Some(a.global(Value::Undefined));
                         }
@@ -2765,14 +2776,14 @@ impl<'p> Executor<'p> {
                     return Ok(Next::Run(Running { state: self.script_state(a, main)?, after: After::Script }));
                 }
                 Work::Module { .. } => {
-                    let Work::Module { text, file } = core::mem::replace(&mut job.work, Work::Spent) else { unreachable!("a module") };
-                    let m = self.load_module(a, &file, &text)?;
-                    Self::link(a, m, &mut Vec::new())?;
-                    job.work = Work::Evaluate(alloc::vec![Visit::from(m)]);
+                    let Work::Module { text, file } = core::mem::replace(&mut job.work, Work::Drain) else { unreachable!("a module") };
+                    let promise = self.import(a, &file, &text)?;
+                    job.entry = Some(a.global(promise.into()));
                 }
-                Work::Evaluate(stack) => match self.evaluation_step(a, stack)? {
-                    Some((m, state)) => return Ok(Next::Run(Running { state, after: After::Module(m) })),
-                    None => job.work = Work::Drain,
+                Work::Evaluate { stack, .. } => match self.evaluation_step(a, stack) {
+                    Ok(Some((m, regs, f))) => return Ok(Next::Run(Running { state: self.state(regs, f), after: After::Module(m) })),
+                    Ok(None) => Self::evaluation_done(a, job, Ok(()))?,
+                    Err(e) => Self::evaluation_done(a, job, Err(e))?,
                 },
                 Work::Drain => {
                     if *budget == Some(0) {
@@ -2783,6 +2794,10 @@ impl<'p> Executor<'p> {
                         job.work = Work::Spent;
                         return Ok(Next::Done);
                     };
+                    if let j8framework::Job::Import { module, promise } = next {
+                        job.work = Work::Evaluate { stack: alloc::vec![Visit::from(module)], module, promise: a.global(promise.into()) };
+                        continue;
+                    }
                     if let Some(r) = self.job_running(a, next)? {
                         return Ok(Next::Run(r));
                     }
@@ -2824,7 +2839,7 @@ impl<'p> Executor<'p> {
         Ok(None)
     }
 
-    fn evaluation_step<'scope>(&self, a: &mut Scope<'scope, '_>, stack: &mut Vec<Visit>) -> Result<Option<(u32, State<'scope>)>, Error> {
+    fn evaluation_step<'scope>(&self, a: &mut Scope<'scope, '_>, stack: &mut Vec<Visit>) -> Result<Option<(u32, Vec<Value<'scope>>, Frame)>, Error> {
         loop {
             let Some(&Visit { module: m, next }) = stack.last() else { return Ok(None) };
             let (status, error, dep, main, env) = {
@@ -2853,7 +2868,7 @@ impl<'p> Executor<'p> {
                 (Some(_), _, None) => {
                     let mut regs = Vec::new();
                     let f = self.open(a, &mut regs, Closure::new(main, Some(env)), Value::Undefined, Value::Undefined, &[]);
-                    return Ok(Some((m, self.state(regs, f))));
+                    return Ok(Some((m, regs, f)));
                 }
             }
         }
@@ -2887,12 +2902,20 @@ impl<'p> Executor<'p> {
         }
     }
 
+    fn evaluation_done(a: &mut Scope<'_, '_>, job: &mut Job<'p>, r: Result<(), Error>) -> Result<(), Error> {
+        let Work::Evaluate { module, promise, .. } = core::mem::replace(&mut job.work, Work::Drain) else { unreachable!("a module graph evaluates") };
+        let Some(promise) = a.local(&promise).as_object() else { unreachable!("an import promise") };
+        a.imported(module, promise, r)
+    }
+
     fn finished<'scope>(&self, a: &mut Scope<'scope, '_>, job: &mut Job<'p>, after: After<'scope>, r: Result<Value<'scope>, Error>) -> Result<(), Error> {
         match after {
             After::Script => job.value = Some(a.global(r?)),
             After::Module(m) => {
-                let Work::Evaluate(stack) = &mut job.work else { unreachable!("a module body runs while its graph evaluates") };
-                Self::evaluated(a, stack, m, r.map(drop))?;
+                let Work::Evaluate { stack, .. } = &mut job.work else { unreachable!("a module body runs while its graph evaluates") };
+                if let Err(e) = Self::evaluated(a, stack, m, r.map(drop)) {
+                    Self::evaluation_done(a, job, Err(e))?;
+                }
             }
             After::Reaction(capability) => a.reacted(capability, r)?,
             After::Await(co) => {

@@ -451,6 +451,11 @@ pub struct Capability<'scope> {
 pub enum Job<'scope> {
     Reaction { reaction: Reaction<'scope>, value: Value<'scope>, rejected: bool },
     Thenable { promise: JsObject<'scope>, thenable: Value<'scope>, then: Value<'scope> },
+    Import {
+        #[collect(require_static)]
+        module: u32,
+        promise: JsObject<'scope>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
