@@ -212,6 +212,7 @@ struct Pending<'p> {
     reject: ScopeGlobal<'p, ValueBrand>,
     future: Pin<Box<dyn Future<Output = Settle> + Send>>,
     waker: Waker,
+    keep_alive: bool,
 }
 
 struct JsState<'p> {
@@ -244,15 +245,17 @@ impl<'p> JsState<'p> {
     }
 
     fn adopt(&mut self, js: &Arc<Js<'p>>, mut add: impl FnMut(Task<'p>)) {
-        for AsyncJob { resolve, reject, future } in self.isolate.take_spawned() {
+        for AsyncJob { resolve, reject, future, keep_alive } in self.isolate.take_spawned() {
             let job = self.holes.pop().unwrap_or(self.pending.len());
             let waker = Waker::from(Arc::new(JobWaker { job, bell: Arc::clone(&self.bell) }));
-            let p = Some(Pending { resolve, reject, future, waker });
+            let p = Some(Pending { resolve, reject, future, waker, keep_alive });
             match self.pending.get_mut(job) {
                 Some(hole) => *hole = p,
                 None => self.pending.push(p),
             }
-            self.bell.begin();
+            if keep_alive {
+                self.bell.begin();
+            }
             add(Box::new(PollTask { js: Arc::clone(js), job }));
         }
     }
@@ -354,6 +357,7 @@ struct SettleTask<'p> {
     resolve: ScopeGlobal<'p, ValueBrand>,
     reject: ScopeGlobal<'p, ValueBrand>,
     settle: Option<Settle>,
+    keep_alive: bool,
 }
 
 impl<'p> ITask<'p> for SettleTask<'p> {
@@ -376,7 +380,9 @@ impl<'p> ITask<'p> for SettleTask<'p> {
         }
         let mut add = add_to(poll);
         st.adopt(&self.js, |t| drop(add(t)));
-        st.bell.end();
+        if self.keep_alive {
+            st.bell.end();
+        }
         Flow::Done
     }
 }
@@ -396,11 +402,11 @@ impl<'p> ITask<'p> for PollTask<'p> {
         let Some(Some(p)) = st.pending.get_mut(self.job) else { return Flow::Done };
         let ready = p.future.as_mut().poll(&mut Context::from_waker(&p.waker));
         if let Poll::Ready(settle) = ready
-            && let Some(Pending { resolve, reject, .. }) = st.pending[self.job].take()
+            && let Some(Pending { resolve, reject, keep_alive, .. }) = st.pending[self.job].take()
         {
             st.holes.push(self.job);
             let js = Arc::clone(&self.js);
-            st.chain(add_to(poll), |after| Box::new(SettleTask { js, after, resolve, reject, settle: Some(settle) }));
+            st.chain(add_to(poll), |after| Box::new(SettleTask { js, after, resolve, reject, settle: Some(settle), keep_alive }));
         }
         Flow::Done
     }

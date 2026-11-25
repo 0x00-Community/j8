@@ -11,6 +11,18 @@ pub struct AsyncJob<'i> {
     pub resolve: crate::ScopeGlobal<'i, crate::ValueBrand>,
     pub reject: crate::ScopeGlobal<'i, crate::ValueBrand>,
     pub future: core::pin::Pin<Box<dyn core::future::Future<Output = Settle> + Send>>,
+    pub keep_alive: bool,
+}
+
+impl<'i> AsyncJob<'i> {
+    pub fn new(resolve: crate::ScopeGlobal<'i, crate::ValueBrand>, reject: crate::ScopeGlobal<'i, crate::ValueBrand>, future: core::pin::Pin<Box<dyn core::future::Future<Output = Settle> + Send>>) -> Self {
+        Self { resolve, reject, future, keep_alive: true }
+    }
+
+    #[must_use]
+    pub fn unref(self) -> Self {
+        Self { keep_alive: false, ..self }
+    }
 }
 
 pub trait Platform: Sync + Pool {

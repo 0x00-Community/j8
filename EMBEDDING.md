@@ -110,7 +110,8 @@ The steps are always the same:
 4. `rt.eval(text, file)` runs a script. It returns a `ScopeGlobal<'p, ValueBrand>` (a root that outlives the
    call), which `rt.text(&g)` turns into a string with ToString.
 5. `rt.run_until_idle()` waits until no async host work is left. Call it after every `eval` if your
-   bindings have `async fn`s or return promises; otherwise those promises never settle.
+   bindings have `async fn`s or return promises; otherwise those promises never settle. A spawned job made
+   with `AsyncJob::new(..).unref()` (such as an unref'd Node-API thread-safe function) still settles, but is not waited for.
 
 ### What an `Error` means
 
