@@ -117,6 +117,7 @@ J8_WASMSPEC_JIT=1     cargo test --release --test wasmspec   # 每个函数第�
 `WebAssembly` JS API 用 `tests/wasm-jsapi` 检查，这是 [WebAssembly/spec](https://github.com/WebAssembly/spec/tree/main/test/js-api)
 的 JS API 测试（WPT `wasm/jsapi` 的上游），配一个精简的 testharness（`tests/wasmjsapi.harness.js`），每个文件单独一个进程：
 1,111 个子测试过 1,053 个。
+`j8::Runtime`（因而 dune）在每个 context 上装好 `WebAssembly`；开 JS JIT 时 wasm 也走 wasm JIT。
 
 ```sh
 cargo test --release --test wasmjsapi                          # 基线（tests/wasmjsapi.passing）

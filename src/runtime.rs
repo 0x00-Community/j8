@@ -1,7 +1,7 @@
 use std::marker::PhantomData;
 use std::time::Duration;
 
-use j8executor::{EventLoop, EventLoopSet, Executor};
+use j8executor::{EventLoop, EventLoopSet, Executor, WebAssembly};
 use j8framework::{Scope, Error, ErrorKind, Platform, Pool, ScopeGlobal, ScriptKind, Source, Task, Value, ValueBrand};
 
 pub trait Host {
@@ -64,7 +64,8 @@ pub struct Runtime<'p> {
 
 impl<'p> Runtime<'p> {
     pub fn on<H: Host>(set: &EventLoopSet<'_, 'p>, executor: Executor<'p>) -> Result<Self, Error> {
-        let rt = Self { js: set.spawn(executor, &j8builtins::Builtins) };
+        let wasm = WebAssembly::from(j8builtins::Builtins).with_tier(executor.wasm_tier());
+        let rt = Self { js: set.spawn(executor, &wasm) };
         rt.enter(|a| H::install(a));
         let mut preludes = Vec::new();
         H::preludes(&mut preludes);

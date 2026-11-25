@@ -118,6 +118,7 @@ J8_WASMSPEC_JIT=1     cargo test --release --test wasmspec   # every function th
 The `WebAssembly` JavaScript API is checked against `tests/wasm-jsapi`, the JS API tests of
 [WebAssembly/spec](https://github.com/WebAssembly/spec/tree/main/test/js-api) (the upstream of WPT `wasm/jsapi`), run
 with a small testharness (`tests/wasmjsapi.harness.js`), each file in its own process: 1,053 of 1,111 subtests pass.
+`j8::Runtime` (and so dune) installs `WebAssembly` on every context; with the JS JIT on, wasm goes through the wasm JIT too.
 
 ```sh
 cargo test --release --test wasmjsapi                          # the baseline (tests/wasmjsapi.passing)

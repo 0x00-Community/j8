@@ -522,6 +522,10 @@ impl Executor<'_> {
         self
     }
 
+    pub fn wasm_tier(&self) -> Option<Arc<dyn WasmTier + Send + Sync>> {
+        self.tier.as_ref().and_then(|t| t.wasm())
+    }
+
     #[must_use]
     pub fn with_cache(mut self, cache: Arc<CodeCache>) -> Self {
         self.cache = Some(cache);
