@@ -19,7 +19,7 @@ impl Executor<'_> {
             Some(cache) => cache.module(&src, self.debug_info())?,
             None => <j8bytecode::Module as Compile>::compile_module(&src, self.debug_info()).map(|(m, info)| (m, alloc::sync::Arc::new(info)))?,
         };
-        let main = self.load(a.mc, module);
+        let main = self.load(a.mc, module, alloc::sync::Arc::from(text));
         let mut slots = alloc::vec![Value::Undefined; usize::from(info.slots)];
         for &s in &info.lexical {
             slots[usize::from(s)] = Value::Uninit;
@@ -93,8 +93,8 @@ impl Executor<'_> {
         Ok(())
     }
 
-    pub fn load_script(&self, mc: &j8framework::Mutation<'_>, module: j8bytecode::Module, file: &str) -> j8framework::FuncId {
-        let main = self.load(mc, module);
+    pub fn load_script(&self, mc: &j8framework::Mutation<'_>, module: j8bytecode::Module, file: &str, text: alloc::sync::Arc<str>) -> j8framework::FuncId {
+        let main = self.load(mc, module, text);
         self.script_files.borrow_mut().insert(main.0 - j8bytecode::Module::MAIN, file.into());
         main
     }

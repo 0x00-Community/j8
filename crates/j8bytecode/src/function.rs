@@ -158,8 +158,7 @@ pub enum CatchPrediction {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SourcePosition {
     pub offset: u32,
-    pub line: u32,
-    pub column: u32,
+    pub source: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

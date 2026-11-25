@@ -7,7 +7,6 @@ use oxc_semantic::SemanticBuilder;
 use oxc_span::{GetSpan, SourceType, Span};
 use j8framework::{CodeKind, CompareOp, Error, ImportEntry, ImportName, ModuleInfo, Source};
 
-use crate::lines::Lines;
 use crate::builder::{Builder, JumpTable, Label, RegisterList};
 use crate::scope::{Decl, DeclKind, Decls, Hidden, Key, Resolver, NEW_TARGET, THIS};
 use j8bytecode::{Bytecode, ClassBoilerplate, ClassMember, Constant, Context, ContextVariable, MemberKind, CreateClosureFlags, FunctionKind, GlobalDeclaration, Module, Register, Runtime, ScopeInfo, ScopeType, SharedFunction, VariableMode, VariableRole, EvalDeclaration};
@@ -214,7 +213,7 @@ struct Frame<'a> {
 }
 
 impl Frame<'_> {
-    fn finish(self, lines: &Lines<'_>) -> SharedFunction {
+    fn finish(self) -> SharedFunction {
         SharedFunction {
             name: self.name,
             kind: self.flavor.v8_kind(self.default_constructor),
@@ -222,7 +221,7 @@ impl Frame<'_> {
             length: self.length,
             formal_parameters: self.formals,
             scope: self.scope,
-            bytecode: self.b.finish(lines),
+            bytecode: self.b.finish(),
         }
     }
 }
@@ -241,7 +240,6 @@ const RESUME_THROW: i32 = 2;
 
 pub struct Compiler<'a, 's> {
     src: &'s Source<'s>,
-    lines: Lines<'s>,
     pub alloc: &'a Allocator,
     used: HashSet<Key>,
     class_depth: u32,
@@ -424,7 +422,7 @@ impl Compiler<'_, '_> {
         let strict = kind == CodeKind::StrictEval || Flavor::use_strict(&program.directives);
         let local = (kind != CodeKind::Script).then(|| Decls::eval_local(&program.body, strict));
         let Resolver { captured, used, eval_fns, suspends, .. } = Resolver::script(&program.body, Decls::this_key(program.span), &allocator, local.as_ref(), strict, eval_scopes, None);
-        let mut c = Compiler { src, lines: Lines::from(src.text), alloc: &allocator, captured, used, class_depth: 0, module: Vec::new(), frames: Vec::new(), levels: Vec::new(), chains: Vec::new(), eval_fns, suspends, completion_assign: HashSet::new(), completion_reset: HashSet::new(), for_init_text: None, classes: Vec::new(), next_home: None, hidden, debug };
+        let mut c = Compiler { src, alloc: &allocator, captured, used, class_depth: 0, module: Vec::new(), frames: Vec::new(), levels: Vec::new(), chains: Vec::new(), eval_fns, suspends, completion_assign: HashSet::new(), completion_reset: HashSet::new(), for_init_text: None, classes: Vec::new(), next_home: None, hidden, debug };
         c.script(program, local.as_ref(), strict, direct)?;
         Ok(Module { functions: c.module })
     }
@@ -534,7 +532,7 @@ impl Compiler<'_, '_> {
         let (names, info) = Compiler::module_layout(program);
         let order: Vec<&str> = names.iter().map(|&(n, _)| n).collect();
         let Resolver { captured, used, eval_fns, suspends, suspend_count, .. } = Resolver::script(&program.body, Decls::this_key(program.span), &allocator, None, true, eval_scopes, Some(&[order]));
-        let mut c = Compiler { src, lines: Lines::from(src.text), alloc: &allocator, captured, used, class_depth: 0, module: Vec::new(), frames: Vec::new(), levels: Vec::new(), chains: Vec::new(), eval_fns, suspends, completion_assign: HashSet::new(), completion_reset: HashSet::new(), for_init_text: None, classes: Vec::new(), next_home: None, hidden: false, debug };
+        let mut c = Compiler { src, alloc: &allocator, captured, used, class_depth: 0, module: Vec::new(), frames: Vec::new(), levels: Vec::new(), chains: Vec::new(), eval_fns, suspends, completion_assign: HashSet::new(), completion_reset: HashSet::new(), for_init_text: None, classes: Vec::new(), next_home: None, hidden: false, debug };
         let bound = names
             .iter()
             .map(|&(name, n)| match n {
@@ -1142,7 +1140,7 @@ impl<'a> Compiler<'a, '_> {
         self.levels.pop();
         let f = self.frames.pop().expect("the function's frame");
         let at = f.index;
-        self.module[at] = f.finish(&self.lines);
+        self.module[at] = f.finish();
         Ok(u32::try_from(index).expect("fewer than 2^32 functions"))
     }
 
@@ -2427,7 +2425,7 @@ impl<'a> Compiler<'a, '_> {
     fn finish_module(&mut self) {
         let f = self.frames.pop().expect("the module's frame");
         self.levels.clear();
-        self.module[0] = f.finish(&self.lines);
+        self.module[0] = f.finish();
     }
 
     fn module_statements(&mut self, program: &'a Program<'a>) -> Result<(), Error> {
@@ -2622,7 +2620,7 @@ impl<'a> Compiler<'a, '_> {
         self.b().plain(Bytecode::Return);
         let f = self.frames.pop().expect("the script's frame");
         self.levels.clear();
-        self.module[0] = f.finish(&self.lines);
+        self.module[0] = f.finish();
         Ok(())
     }
 
