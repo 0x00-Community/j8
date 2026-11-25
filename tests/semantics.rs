@@ -11,6 +11,13 @@ const CASES: &[(&str, &str)] = &[
     // 显式 String() 允许把 Symbol 转成字符串（对应隐式 ToString 会抛错）
     ("String(Symbol('x'))", "Symbol(x)"),
     ("'' + Symbol('x')", "Uncaught TypeError: Cannot convert a Symbol value to a string"),
+    // 函数里 try、catch、finally、with 块中的 var 属于该函数（曾写错变量或触发编译器断言）
+    (
+        "(function () { var a = 0, b = 0, c = 0, d = 0; (function () { \
+         try { var a = 1; throw 0 } catch (e) { var b = 1 } finally { var c = 1 } \
+         with ({}) { var d = 1 } })(); return [a, b, c, d].join() })()",
+        "0,0,0,0",
+    ),
 ];
 
 fn outcome(text: &str) -> String {
