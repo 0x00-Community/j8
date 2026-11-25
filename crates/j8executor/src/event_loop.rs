@@ -1,5 +1,7 @@
 use alloc::boxed::Box;
-use alloc::collections::VecDeque;
+use alloc::collections::{BTreeMap, BinaryHeap, VecDeque};
+use core::cmp::Reverse;
+use core::time::Duration;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::task::Wake;
@@ -15,7 +17,7 @@ use std::thread::Thread;
 use j8lockfree::{AtomicRefCell, Fifo, Oneshot, Receiver, SegVec, Sender};
 use j8taskqueue::{Flow, ITask, ITaskPoll, Queue, Task, TaskId};
 
-use j8framework::{Scope, AsyncJob, CreateParams, Error, ErrorKind, Intrinsics, Isolate, IsolateHandle, Platform, Quota, ContextBrand, ScopeGlobal, ScriptKind, Settle, Source, Value, ValueBrand};
+use j8framework::{Scope, AsyncJob, TimerRequest, CreateParams, Error, ErrorKind, Intrinsics, Isolate, IsolateHandle, Platform, Quota, ContextBrand, ScopeGlobal, ScriptKind, Settle, Source, Value, ValueBrand};
 
 use crate::{Executor, Job};
 
@@ -124,6 +126,12 @@ impl Bell {
         self.wake_idle();
     }
 
+    fn fault_unless_terminated(&self, e: Error) {
+        if !matches!(e, Error::Terminated) {
+            self.fault(e);
+        }
+    }
+
     fn wake_idle(&self) {
         while let Some(t) = self.idle.pop() {
             t.unpark();
@@ -216,6 +224,9 @@ struct JsState<'p> {
     pending: Vec<Option<Pending<'p>>>,
     holes: Vec<usize>,
     last: Option<TaskId<'p>>,
+    platform: &'p dyn Platform,
+    due: BinaryHeap<Reverse<(Duration, u64)>>,
+    armed: BTreeMap<u64, (ScopeGlobal<'p, ValueBrand>, bool)>,
 }
 
 struct Js<'p> {
@@ -237,7 +248,47 @@ impl<'p> JsState<'p> {
         self.last = Some(add(make(after)));
     }
 
+    fn take_timers(&mut self) {
+        for request in self.isolate.take_timers() {
+            match request {
+                TimerRequest::Arm { id, due, keep_alive, resolve } => {
+                    if keep_alive {
+                        self.bell.begin();
+                    }
+                    self.due.push(Reverse((due, id)));
+                    self.armed.insert(id, (resolve, keep_alive));
+                }
+                TimerRequest::Cancel(id) => {
+                    if let Some((_, true)) = self.armed.remove(&id) {
+                        self.bell.end();
+                    }
+                }
+            }
+        }
+    }
+
+    fn next_due(&self) -> Option<Duration> {
+        self.due.peek().map(|Reverse((at, _))| *at)
+    }
+
+    fn fire_due(&mut self, js: &Arc<Js<'p>>, mut add: impl FnMut(Task<'p>) -> TaskId<'p>) {
+        let now = self.platform.now();
+        while let Some(&Reverse((at, id))) = self.due.peek()
+            && at <= now
+        {
+            self.due.pop();
+            if let Some((resolve, keep_alive)) = self.armed.remove(&id) {
+                if !keep_alive {
+                    self.bell.begin();
+                }
+                let js = Arc::clone(js);
+                self.chain(&mut add, |after| Box::new(SettleTask { js, after, resolve, reject: None, settle: Some(Box::new(|_| Ok(Value::Bool(true)))), checkpoint: None }));
+            }
+        }
+    }
+
     fn adopt(&mut self, js: &Arc<Js<'p>>, mut add: impl FnMut(Task<'p>)) {
+        self.take_timers();
         for AsyncJob { resolve, reject, future } in self.isolate.take_spawned() {
             let job = self.holes.pop().unwrap_or(self.pending.len());
             let waker = Waker::from(Arc::new(JobWaker { job, bell: Arc::clone(&self.bell) }));
@@ -260,24 +311,23 @@ impl<'p> JsState<'p> {
         }
     }
 
-    fn settle(&mut self, resolve: &ScopeGlobal<'p, ValueBrand>, reject: &ScopeGlobal<'p, ValueBrand>, settle: Settle) -> Result<(), Error> {
+    fn settle(&mut self, resolve: &ScopeGlobal<'p, ValueBrand>, reject: Option<&ScopeGlobal<'p, ValueBrand>>, settle: Settle) -> Result<(), Error> {
         self.enter(|a| {
             let (target, value) = match settle(a) {
                 Ok(v) => (resolve, v),
-                Err(Error::Exception) => (reject, a.take_exception()),
+                Err(Error::Exception) => (reject.ok_or(Error::Exception)?, a.take_exception()),
                 Err(Error::Parked(ticket)) => {
                     let _ = a.unpark(ticket);
-                    (reject, a.take_exception())
+                    (reject.ok_or(Error::Exception)?, a.take_exception())
                 }
                 Err(e) => {
                     let message = alloc::string::ToString::to_string(&e);
                     let _ = a.throw(ErrorKind::Error, &message);
-                    (reject, a.take_exception())
+                    (reject.ok_or(Error::Exception)?, a.take_exception())
                 }
             };
             let f = a.local(target);
-            a.call(f, Value::Undefined, &[value])?;
-            a.run_jobs()
+            a.call(f, Value::Undefined, &[value]).map(drop)
         })
     }
 
@@ -346,8 +396,9 @@ struct SettleTask<'p> {
     js: Arc<Js<'p>>,
     after: Vec<TaskId<'p>>,
     resolve: ScopeGlobal<'p, ValueBrand>,
-    reject: ScopeGlobal<'p, ValueBrand>,
+    reject: Option<ScopeGlobal<'p, ValueBrand>>,
     settle: Option<Settle>,
+    checkpoint: Option<Job<'p>>,
 }
 
 impl<'p> ITask<'p> for SettleTask<'p> {
@@ -361,17 +412,31 @@ impl<'p> ITask<'p> for SettleTask<'p> {
 
     fn exec(&mut self, poll: &mut dyn ITaskPoll<'p>, quota: &mut Quota) -> Flow {
         let st = unsafe { self.js.state() };
-        quota.spend(1);
-        if let Some(settle) = self.settle.take()
-            && let Err(e) = st.settle(&self.resolve, &self.reject, settle)
-            && !matches!(e, Error::Terminated)
-        {
-            st.bell.fault(e);
+        if let Some(settle) = self.settle.take() {
+            quota.spend(1);
+            match st.settle(&self.resolve, self.reject.as_ref(), settle) {
+                Ok(()) => self.checkpoint = Some(Executor::checkpoint()),
+                Err(e) => st.bell.fault_unless_terminated(e),
+            }
         }
+        let flow = match &mut self.checkpoint {
+            Some(job) => match st.engine.resume(&mut st.isolate, &st.cx, job, quota) {
+                Ok(None) => Flow::Yield,
+                Ok(Some(_)) => Flow::Done,
+                Err(e) => {
+                    st.bell.fault_unless_terminated(e);
+                    Flow::Done
+                }
+            },
+            None => Flow::Done,
+        };
         let mut add = add_to(poll);
         st.adopt(&self.js, |t| drop(add(t)));
-        st.bell.end();
-        Flow::Done
+        st.take_woken(&self.js, |t| drop(add(t)));
+        if flow == Flow::Done {
+            st.bell.end();
+        }
+        flow
     }
 }
 
@@ -394,7 +459,7 @@ impl<'p> ITask<'p> for PollTask<'p> {
         {
             st.holes.push(self.job);
             let js = Arc::clone(&self.js);
-            st.chain(add_to(poll), |after| Box::new(SettleTask { js, after, resolve, reject, settle: Some(settle) }));
+            st.chain(add_to(poll), |after| Box::new(SettleTask { js, after, resolve, reject: Some(reject), settle: Some(settle), checkpoint: None }));
         }
         Flow::Done
     }
@@ -424,12 +489,24 @@ impl<'p> Lane<'p> {
             spent: AtomicU64::new(0),
             handle: isolate.handle(),
         });
-        let state = JsState { bell: Arc::clone(&bell), isolate, engine, cx, pending: Vec::new(), holes: Vec::new(), last: None };
+        let state = JsState { bell: Arc::clone(&bell), isolate, engine, cx, pending: Vec::new(), holes: Vec::new(), last: None, platform, due: BinaryHeap::new(), armed: BTreeMap::new() };
         Box::new(Self { tasks: Queue::default(), js: Arc::new(Js { state: UnsafeCell::new(state) }), bell, submitted: Arc::default() })
     }
 
     fn has_work(&self) -> bool {
-        !self.tasks.is_empty() || !self.submitted.is_empty() || !self.bell.woken.is_empty()
+        !self.tasks.is_empty() || !self.submitted.is_empty() || !self.bell.woken.is_empty() || self.next_due().is_some_and(|at| at <= self.now())
+    }
+
+    fn state(&self) -> &JsState<'p> {
+        unsafe { self.js.state() }
+    }
+
+    fn next_due(&self) -> Option<Duration> {
+        self.state().next_due()
+    }
+
+    fn now(&self) -> Duration {
+        self.state().platform.now()
     }
 
     fn take_in(&mut self) {
@@ -440,6 +517,7 @@ impl<'p> Lane<'p> {
             st.chain(|t| tasks.add(t), |after| Box::new(ScriptTask { js, after, script: Some((text, file, kind)), job: None, reply: Some(reply) }));
         }
         st.take_woken(&self.js, |t| drop(tasks.add(t)));
+        st.fire_due(&self.js, |t| tasks.add(t));
     }
 
     fn turn(&mut self, budget: NonZeroUsize, check: NonZeroUsize) -> u64 {
@@ -711,6 +789,23 @@ impl<'p> LoopState<'p> {
         true
     }
 
+    fn wake_due(&mut self) -> Option<Duration> {
+        let now = self.set.platform.now();
+        let mut next: Option<Duration> = None;
+        let mut due = Vec::new();
+        for lane in self.lanes.iter().flatten() {
+            match lane.next_due() {
+                Some(at) if at <= now => due.push(Arc::clone(&lane.bell)),
+                Some(at) => next = Some(next.map_or(at, |n| n.min(at))),
+                None => {}
+            }
+        }
+        for bell in due {
+            self.schedule(&bell);
+        }
+        next
+    }
+
     fn pull(&self) {
         let n = self.set.threads();
         if n < 2 {
@@ -737,9 +832,16 @@ impl<'p> LoopState<'p> {
                 continue;
             }
             self.pull();
+            let next = self.wake_due();
+            if !self.ready.is_empty() {
+                continue;
+            }
             let port = self.set.port(self.me);
             if port.inbox.is_empty() && port.door.wakes.is_empty() {
-                std::thread::park();
+                match next {
+                    Some(at) => std::thread::park_timeout(at.saturating_sub(self.set.platform.now())),
+                    None => std::thread::park(),
+                }
             }
         }
     }

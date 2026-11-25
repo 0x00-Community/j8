@@ -2,9 +2,9 @@ use alloc::string::String;
 use j8compiler::Compile;
 use alloc::vec::Vec;
 
-use j8framework::{Scope, Closure, Error, ErrorKind, ImportName, ModuleStatus, ObjectData, Resolution, ResolvedBinding, Value};
+use j8framework::{Scope, Error, ErrorKind, ImportName, ModuleStatus, ObjectData, Resolution, ResolvedBinding, Value};
 
-use crate::{Executor, Outcome};
+use crate::{Executor, Outcome, Visit};
 
 pub const EVAL_FILE: &str = "[eval]";
 const SOURCE_URL: &str = "//# sourceURL=";
@@ -77,42 +77,14 @@ impl Executor<'_> {
     }
 
     pub fn evaluate(&self, a: &mut Scope<'_, '_>, m: u32, depth: usize) -> Result<(), Error> {
-        let (status, error, requested, main, env) = {
-            let r = &a.modules()[m as usize];
-            (r.status, r.error, r.requested.clone(), r.main, r.env)
-        };
-        match status {
-            ModuleStatus::Evaluated => return error.map_or(Ok(()), |e| Err(a.throw_value(e))),
-            ModuleStatus::Evaluating => return Ok(()),
-            ModuleStatus::Linked => {}
-        }
-        a.update_module(m, |r| r.status = ModuleStatus::Evaluating);
-        let mut r = Ok(());
-        for &dep in &requested {
-            r = self.evaluate(a, dep, depth);
-            if r.is_err() {
-                break;
-            }
-        }
-        if r.is_ok() {
+        let mut stack = alloc::vec![Visit::from(m)];
+        while let Some((m, state)) = self.evaluation_step(a, &mut stack)? {
             let saved = self.depth.replace(depth + 1);
-            let mut regs = Vec::new();
-            let f = self.open(a, &mut regs, Closure::new(main, Some(env)), Value::Undefined, Value::Undefined, &[]);
-            r = self.execute(a, self.state(regs, f), &mut None).map(Outcome::returned).map(drop);
+            let r = self.execute(a, state, &mut None).map(Outcome::returned).map(drop);
             self.depth.set(saved);
+            Self::evaluated(a, &mut stack, m, r)?;
         }
-        let error = match &r {
-            Err(Error::Exception) => Some(a.take_exception()),
-            _ => None,
-        };
-        a.update_module(m, |r| {
-            r.status = ModuleStatus::Evaluated;
-            r.error = error;
-        });
-        match error {
-            Some(v) => Err(a.throw_value(v)),
-            None => r,
-        }
+        Ok(())
     }
 
     pub fn load_script(&self, mc: &j8framework::Mutation<'_>, module: j8bytecode::Module, file: &str) -> j8framework::FuncId {

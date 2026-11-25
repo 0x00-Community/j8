@@ -3,7 +3,7 @@ use alloc::vec::Vec;
 
 use crate::ScopeLocal;
 
-use crate::{Scope, Error, ErrorKind, HostReaction, Job, JsObject, ObjectData, ObjectKind, Reaction, Request, Resume, Settled, Static, Step, Value};
+use crate::{Scope, Capability, Error, ErrorKind, HostReaction, Job, JsObject, ObjectData, ObjectKind, Reaction, Request, Resume, Settled, Static, Step, Value};
 
 impl<'scope> Scope<'scope, '_> {
     pub fn new_promise(&self) -> JsObject<'scope> {
@@ -129,7 +129,12 @@ impl<'scope> Scope<'scope, '_> {
         if async_generator {
             return self.drive_async_generator(coroutine, mode, value);
         }
-        match self.resume(coroutine, mode, value) {
+        let step = self.resume(coroutine, mode, value);
+        self.driven(promise, step)
+    }
+
+    pub fn driven(&mut self, promise: Option<JsObject<'scope>>, step: Result<Step<'scope>, Error>) -> Result<(), Error> {
+        match step {
             Ok(_) => Ok(()),
             Err(Error::Exception) => {
                 let reason = self.take_exception();
@@ -202,7 +207,7 @@ impl<'scope> Scope<'scope, '_> {
         }
     }
 
-    fn run_job(&mut self, job: Job<'scope>) -> Result<(), Error> {
+    pub fn run_job(&mut self, job: Job<'scope>) -> Result<(), Error> {
         match job {
             Job::Reaction { reaction: Reaction::Await { coroutine }, value, rejected } => self.drive(coroutine, if rejected { Resume::Throw } else { Resume::Next }, value),
             Job::Reaction { reaction: Reaction::Host { hook }, value, rejected } => {
@@ -214,30 +219,13 @@ impl<'scope> Scope<'scope, '_> {
             Job::Reaction { reaction: Reaction::Then { on_fulfilled, on_rejected, capability }, value, rejected } => {
                 let handler = if rejected { on_rejected } else { on_fulfilled };
                 let outcome = if self.is_callable(handler) {
-                    match self.call(handler, Value::Undefined, &[value]) {
-                        Ok(r) => Ok(r),
-                        Err(Error::Exception) => Err(self.take_exception()),
-                        Err(e) => return Err(e),
-                    }
+                    self.call(handler, Value::Undefined, &[value])
                 } else if rejected {
-                    Err(value)
+                    Err(self.throw_value(value))
                 } else {
                     Ok(value)
                 };
-                if let Some(cap) = capability {
-                    let r = match outcome {
-                        Ok(r) => self.call(cap.resolve, Value::Undefined, &[r]),
-                        Err(reason) => self.call(cap.reject, Value::Undefined, &[reason]),
-                    };
-                    match r {
-                        Ok(_) => {}
-                        Err(Error::Exception) => {
-                            self.take_exception();
-                        }
-                        Err(e) => return Err(e),
-                    }
-                }
-                Ok(())
+                self.reacted(capability, outcome)
             }
             Job::Thenable { promise, thenable, then } => {
                 let (resolve, reject) = self.promise_resolvers(promise);
@@ -253,10 +241,34 @@ impl<'scope> Scope<'scope, '_> {
         }
     }
 
+    pub fn reacted(&mut self, capability: Option<Capability<'scope>>, outcome: Result<Value<'scope>, Error>) -> Result<(), Error> {
+        let outcome = match outcome {
+            Ok(r) => Ok(r),
+            Err(Error::Exception) => Err(self.take_exception()),
+            Err(e) => return Err(e),
+        };
+        let Some(cap) = capability else { return Ok(()) };
+        let r = match outcome {
+            Ok(r) => self.call(cap.resolve, Value::Undefined, &[r]),
+            Err(reason) => self.call(cap.reject, Value::Undefined, &[reason]),
+        };
+        match r {
+            Ok(_) => Ok(()),
+            Err(Error::Exception) => {
+                self.take_exception();
+                Ok(())
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    pub fn next_job(&self) -> Option<Job<'scope>> {
+        self.context.jobs.pop(self.mc)
+    }
+
     pub fn run_jobs(&mut self) -> Result<(), Error> {
         loop {
-            let job = self.context.jobs.pop(self.mc);
-            match job {
+            match self.next_job() {
                 Some(j) => self.run_job(j)?,
                 None => return Ok(()),
             }

@@ -73,6 +73,7 @@ pub struct Isolate<'p> {
     generation: u64,
     profiler: Profiler,
     spawned: Option<Fifo<AsyncJob<'p>>>,
+    timers: Option<crate::Timers<'p>>,
     stop: Arc<Termination>,
     exception: Option<ScopeGlobal<'p, ValueBrand>>,
     parked: core::cell::RefCell<Parked<'p>>,
@@ -92,6 +93,7 @@ impl<'p> Isolate<'p> {
             generation: 0,
             profiler,
             spawned: params.event_loop.then(Fifo::default),
+            timers: params.event_loop.then(crate::Timers::default),
             stop: Arc::default(),
             exception: None,
             parked: core::cell::RefCell::default(),
@@ -129,6 +131,10 @@ impl<'p> Isolate<'p> {
         &self.profiler
     }
 
+    pub fn take_timers(&self) -> Vec<crate::TimerRequest<'p>> {
+        self.timers.as_ref().map(crate::Timers::take).unwrap_or_default()
+    }
+
     pub fn take_spawned(&self) -> Vec<AsyncJob<'p>> {
         self.spawned.as_ref().map(|q| core::iter::from_fn(|| q.pop()).collect()).unwrap_or_default()
     }
@@ -147,6 +153,7 @@ impl<'p> Isolate<'p> {
     pub fn enter<R>(&mut self, cx: &ScopeGlobal<'p, crate::ContextBrand>, invoke: &dyn for<'s> crate::Invoke<'s>, f: impl for<'scope> FnOnce(&mut Scope<'scope, '_>) -> R) -> R {
         let (platform, profiler, generation, stop) = (self.platform, &mut self.profiler, self.generation, &*self.stop);
         let spawned = self.spawned.as_ref();
+        let timers = self.timers.as_ref();
         let parked = &self.parked;
         #[cfg(all(target_os = "linux", feature = "crossheap"))]
         let shares = &mut self.shares;
@@ -167,6 +174,7 @@ impl<'p> Isolate<'p> {
                 new_target: crate::Value::Undefined,
                 invoke,
                 spawned: spawned.map(|q| unsafe { rebrand_ref(q) }),
+                timers: timers.map(|t| unsafe { rebrand_ref(t) }),
                 stop,
                 parked: unsafe { rebrand_ref(parked) },
                 spare_regs: Vec::new(),
