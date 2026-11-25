@@ -492,7 +492,7 @@ impl<'a, 'scope> WasmStore<'a, 'scope> {
                 let instance = inst.get();
                 let code = instance.module.code(func.index);
                 if let Some(m) = WasmJit::jitted(self, &code) {
-                    return WasmJit::machine(self, m.call, instance, code, fp);
+                    return WasmJit::machine(self, m.call, instance, &code, fp);
                 }
                 let frame = self.frame(instance, code, fp);
                 self.call(frame)
@@ -826,7 +826,7 @@ impl<'a, 'scope> WasmStore<'a, 'scope> {
                             let i = i.get();
                             let code = i.module.code(target.index);
                             if let Some(m) = WasmJit::jitted(self, &code) {
-                                WasmJit::machine(self, m.call, i, code, fp)?;
+                                WasmJit::machine(self, m.call, i, &code, fp)?;
                             } else {
                                 let a = self.frame(i, code, fp);
                                 frames.push(a);

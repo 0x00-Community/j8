@@ -24,35 +24,58 @@ native! { type Entry = fn(*mut WasmCtx, *mut u64) -> u64; }
 
 #[repr(C)]
 pub struct WasmCtx {
-    io: usize,
     mem_base: u64,
     mem_len: u64,
     status: u64,
     trap: u64,
-    store: usize,
-    frame: usize,
-    io_at: usize,
     depth: u64,
     osr: u64,
+    store: usize,
+    instance: usize,
 }
 
 impl WasmCtx {
-    pub const IO: i32 = 0;
-    pub const MEM_BASE: i32 = 8;
-    pub const MEM_LEN: i32 = 16;
-    pub const STATUS: i32 = 24;
-    pub const TRAP: i32 = 32;
-    pub const OSR: i32 = 72;
+    pub const MEM_BASE: i32 = 0;
+    pub const MEM_LEN: i32 = 8;
+    pub const STATUS: i32 = 16;
+    pub const TRAP: i32 = 24;
+    pub const DEPTH: i32 = 32;
+    pub const OSR: i32 = 40;
     pub const RETURNED: u64 = 0;
     pub const TRAPPED: u64 = 1;
     pub const THREW: u64 = 2;
     pub const OUT_OF_BOUNDS: u64 = WasmTrap::OutOfBoundsMemory as u64;
     pub const UNSUPPORTED: u64 = WasmTrap::Unsupported as u64;
-    const NEST: u64 = 96;
-    const NATIVE: usize = usize::MAX;
+    pub const NEST: u64 = 96;
+    const INLINE_IO: usize = 16;
 
     fn new() -> Self {
-        Self { io: 0, mem_base: 0, mem_len: 0, status: 0, trap: 0, store: 0, frame: 0, io_at: 0, depth: 0, osr: 0 }
+        Self { mem_base: 0, mem_len: 0, status: 0, trap: 0, depth: 0, osr: 0, store: 0, instance: 0 }
+    }
+
+    fn store(&self) -> &'static mut WasmStore<'static, 'static> {
+        unsafe { &mut *(self.store as *mut WasmStore<'static, 'static>) }
+    }
+
+    fn instance(&self) -> &'static WasmInstance<'static> {
+        unsafe { &*(self.instance as *const WasmInstance<'static>) }
+    }
+
+    fn enter(&mut self, instance: &WasmInstance<'_>) {
+        self.instance = core::ptr::from_ref(instance) as usize;
+        self.refresh();
+    }
+
+    fn refresh(&mut self) {
+        if self.instance == 0 {
+            return;
+        }
+        let (base, len) = self.instance().memories.first().and_then(j8framework::GcSlot::get).map_or((0, 0), |m| {
+            let d = m.get().data();
+            (d.as_mut_ptr() as usize as u64, d.len() as u64)
+        });
+        self.mem_base = base;
+        self.mem_len = len;
     }
 }
 
@@ -71,6 +94,9 @@ pub struct WasmJitFunction<'a> {
     pub results: u32,
     pub registers: u32,
     pub memory64: Option<bool>,
+    pub imports: u32,
+    pub entries: u64,
+    pub code: u64,
     pub step: u64,
     pub scalar: u64,
     pub call: u64,
@@ -89,11 +115,6 @@ pub trait WasmTier {
     fn threshold(&self) -> u32;
 
     fn compile(&self, f: &WasmJitFunction<'_>) -> Option<WasmMachine>;
-}
-
-struct Frame<'scope> {
-    instance: &'scope WasmInstance<'scope>,
-    code: Arc<Code>,
 }
 
 const TRAPS: [WasmTrap; 18] = [
@@ -127,8 +148,8 @@ pub struct WasmJit;
 
 impl WasmJit {
     native! {
-        fn step(ctx: *mut WasmCtx, pc: u64, regs: *mut u64) -> u64 {
-            unsafe { WasmJit::stepped(&mut *ctx, pc, regs) }
+        fn step(ctx: *mut WasmCtx, pc: u64, regs: *mut u64, code: *const Code) -> u64 {
+            unsafe { WasmJit::stepped(&mut *ctx, pc, regs, code) }
         }
     }
 
@@ -151,20 +172,20 @@ impl WasmJit {
 
     native! {
         fn call(ctx: *mut WasmCtx, index: u64, args: *mut u64) -> u64 {
-            unsafe { WasmJit::called(&mut *ctx, index, args) }
+            let ctx = unsafe { &mut *ctx };
+            let callee = ctx.instance().func(usize::try_from(index).unwrap_or(usize::MAX));
+            unsafe { WasmJit::invoke(ctx, callee, args) }
         }
     }
 
     native! {
         fn global(ctx: *mut WasmCtx, index: u64, value: u64, set: u64) -> u64 {
             let ctx = unsafe { &mut *ctx };
-            let store = unsafe { &mut *(ctx.store as *mut WasmStore<'static, 'static>) };
-            let frame = unsafe { &*(ctx.frame as *const Frame<'static>) };
-            let g = frame.instance.global(usize::try_from(index).unwrap_or(usize::MAX));
+            let g = ctx.instance().global(usize::try_from(index).unwrap_or(usize::MAX));
             if set == 0 {
                 g.get().0
             } else {
-                g.set(store.mc, (value, 0));
+                g.set(ctx.store().mc, (value, 0));
                 0
             }
         }
@@ -173,16 +194,15 @@ impl WasmJit {
     native! {
         fn indirect(ctx: *mut WasmCtx, packed: u64, at: u64, args: *mut u64) -> u64 {
             let ctx = unsafe { &mut *ctx };
-            let store = unsafe { &mut *(ctx.store as *mut WasmStore<'static, 'static>) };
-            let frame = unsafe { &*(ctx.frame as *const Frame<'static>) };
+            let instance = ctx.instance();
             let (table, ty) = (packed >> u32::BITS, packed & u64::from(u32::MAX));
-            let t = frame.instance.table(usize::try_from(table).unwrap_or(usize::MAX));
+            let t = instance.table(usize::try_from(table).unwrap_or(usize::MAX));
             let i = t.index(at);
             let callee = t
                 .cells()
                 .get(usize::try_from(i).unwrap_or(usize::MAX))
                 .ok_or(WasmTrap::UndefinedElement)
-                .and_then(|e| store.callee(frame.instance, j8bytecode::OperandValue::try_from(ty).unwrap_or(0), e.get()));
+                .and_then(|e| ctx.store().callee(instance, j8bytecode::OperandValue::try_from(ty).unwrap_or(0), e.get()));
             match callee {
                 Ok(c) => unsafe { WasmJit::invoke(ctx, c, args) },
                 Err(e) => WasmJit::status(ctx, Err(e)),
@@ -200,34 +220,20 @@ impl WasmJit {
         }
     }
 
-    unsafe fn called(ctx: &mut WasmCtx, index: u64, args: *mut u64) -> u64 {
-        let frame = unsafe { &*(ctx.frame as *const Frame<'static>) };
-        let callee = frame.instance.func(usize::try_from(index).unwrap_or(usize::MAX));
-        unsafe { WasmJit::invoke(ctx, callee, args) }
-    }
-
     unsafe fn invoke(ctx: &mut WasmCtx, callee: &'static super::WasmFunc<'static>, args: *mut u64) -> u64 {
-        let store = unsafe { &mut *(ctx.store as *mut WasmStore<'static, 'static>) };
-        let frame = unsafe { &*(ctx.frame as *const Frame<'static>) };
+        let store = ctx.store();
+        let caller = ctx.instance;
         if let Some(inst) = callee.instance.get() {
             let instance = inst.get();
             let code = instance.module.code(callee.index);
             if let Some(WasmMachine { call: e, .. }) = WasmJit::jitted(store, &code) {
-                let saved = (ctx.io, ctx.io_at, ctx.frame, ctx.mem_base, ctx.mem_len);
-                let inner = Frame { instance, code };
-                ctx.io = args as usize;
-                ctx.io_at = WasmCtx::NATIVE;
-                ctx.frame = core::ptr::from_ref(&inner) as usize;
-                WasmJit::refresh(ctx, &mut store.stack, instance);
+                ctx.enter(instance);
                 ctx.depth += 1;
                 let run: Entry = unsafe { core::mem::transmute::<usize, Entry>(usize::try_from(e).unwrap_or(0)) };
                 let status = unsafe { run(ctx, args) };
                 ctx.depth -= 1;
-                (ctx.io, ctx.io_at, ctx.frame, ctx.mem_base, ctx.mem_len) = saved;
-                WasmJit::refresh(ctx, &mut store.stack, frame.instance);
-                if status != WasmCtx::RETURNED {
-                    ctx.status = status;
-                }
+                ctx.instance = caller;
+                ctx.refresh();
                 return status;
             }
         }
@@ -244,7 +250,7 @@ impl WasmJit {
             out.copy_from_slice(&store.stack[fp..fp + results]);
         }
         store.truncate(fp);
-        WasmJit::refresh(ctx, &mut store.stack, frame.instance);
+        ctx.refresh();
         WasmJit::status(ctx, r)
     }
 
@@ -263,32 +269,23 @@ impl WasmJit {
         }
     }
 
-    unsafe fn stepped(ctx: &mut WasmCtx, pc: u64, regs: *mut u64) -> u64 {
-        let store = unsafe { &mut *(ctx.store as *mut WasmStore<'static, 'static>) };
-        let frame = unsafe { &*(ctx.frame as *const Frame<'static>) };
-        let n = frame.code.registers as usize;
+    unsafe fn stepped(ctx: &mut WasmCtx, pc: u64, regs: *mut u64, code: *const Code) -> u64 {
+        let store = ctx.store();
+        let code = unsafe {
+            Arc::increment_strong_count(code);
+            Arc::from_raw(code)
+        };
+        let n = code.registers as usize;
         let fp = store.stack.len();
         let regs = unsafe { core::slice::from_raw_parts_mut(regs, n) };
         store.stack.extend_from_slice(regs);
         store.vstack.resize(fp + n, 0);
-        let act = Activation { instance: frame.instance, code: frame.code.clone(), fp, pc: usize::try_from(pc).unwrap_or(usize::MAX) };
+        let act = Activation { instance: ctx.instance(), code, fp, pc: usize::try_from(pc).unwrap_or(usize::MAX) };
         let r = store.step(act);
         regs.copy_from_slice(&store.stack[fp..fp + n]);
         store.truncate(fp);
-        WasmJit::refresh(ctx, &mut store.stack, frame.instance);
+        ctx.refresh();
         WasmJit::status(ctx, r)
-    }
-
-    fn refresh(ctx: &mut WasmCtx, stack: &mut [u64], instance: &WasmInstance<'_>) {
-        if ctx.io_at != WasmCtx::NATIVE {
-            ctx.io = stack.as_mut_ptr().wrapping_add(ctx.io_at) as usize;
-        }
-        let (base, len) = instance.memories.first().and_then(j8framework::GcSlot::get).map_or((0, 0), |m| {
-            let d = m.get().data();
-            (d.as_mut_ptr() as usize as u64, d.len() as u64)
-        });
-        ctx.mem_base = base;
-        ctx.mem_len = len;
     }
 }
 
@@ -301,15 +298,15 @@ impl<'a> WasmStore<'a, '_> {
 }
 
 impl WasmJit {
-    pub fn jitted(store: &WasmStore<'_, '_>, code: &Code) -> Option<WasmMachine> {
+    pub fn jitted(store: &WasmStore<'_, '_>, code: &Arc<Code>) -> Option<WasmMachine> {
         WasmJit::hot(store, code, &code.calls)
     }
 
-    pub fn looped(store: &WasmStore<'_, '_>, code: &Code) -> Option<WasmMachine> {
+    pub fn looped(store: &WasmStore<'_, '_>, code: &Arc<Code>) -> Option<WasmMachine> {
         WasmJit::hot(store, code, &code.loops)
     }
 
-    fn hot(store: &WasmStore<'_, '_>, code: &Code, counter: &AtomicU32) -> Option<WasmMachine> {
+    fn hot(store: &WasmStore<'_, '_>, code: &Arc<Code>, counter: &AtomicU32) -> Option<WasmMachine> {
         let tier = store.tier?;
         if code.vector || !code.handlers.is_empty() || store.ctx.depth >= WasmCtx::NEST {
             return None;
@@ -329,6 +326,9 @@ impl WasmJit {
             results: code.results,
             registers: code.registers,
             memory64: code.memory64,
+            imports: code.imports,
+            entries: code.entries as u64,
+            code: Arc::as_ptr(code) as usize as u64,
             step: WasmJit::step as *const () as usize as u64,
             scalar: WasmJit::scalar as *const () as usize as u64,
             call: WasmJit::call as *const () as usize as u64,
@@ -336,49 +336,63 @@ impl WasmJit {
             indirect: WasmJit::indirect as *const () as usize as u64,
             call_ref: WasmJit::call_ref as *const () as usize as u64,
         };
-        let m = *code.jit.get_or_init(|| tier.compile(&f).unwrap_or_default());
+        let m = *code.jit.get_or_init(|| {
+            let m = tier.compile(&f).unwrap_or_default();
+            if let Some(cell) = code.entry() {
+                cell.store(m.call, Ordering::Release);
+            }
+            m
+        });
         (m.call != 0).then_some(m)
     }
 
-    pub fn machine<'scope>(store: &mut WasmStore<'_, 'scope>, entry: u64, instance: &'scope WasmInstance<'scope>, code: Arc<Code>, fp: usize) -> Result<(), WasmTrap> {
-        store.reserve(fp + code.params.max(code.results) as usize);
-        WasmJit::run(store, entry, instance, code, fp)
+    pub fn machine<'scope>(store: &mut WasmStore<'_, 'scope>, entry: u64, instance: &'scope WasmInstance<'scope>, code: &Code, fp: usize) -> Result<(), WasmTrap> {
+        let (params, results) = (code.params as usize, code.results as usize);
+        store.reserve(fp + results);
+        WasmJit::run(store, entry, instance, fp, [params, results])
     }
 
     pub fn osr<'scope>(store: &mut WasmStore<'_, 'scope>, frames: &mut Vec<Activation<'scope>>) -> Result<(), WasmTrap> {
         let Some(f) = frames.last() else { return Ok(()) };
         let Some(m) = WasmJit::looped(store, &f.code) else { return Ok(()) };
-        let (instance, code, fp) = (f.instance, f.code.clone(), f.fp);
+        let (instance, fp, n) = (f.instance, f.fp, f.code.registers as usize);
+        let results = f.code.results as usize;
         store.ctx.osr = u64::try_from(f.pc).unwrap_or(u64::MAX);
-        WasmJit::run(store, m.osr, instance, code, fp)?;
+        store.reserve(fp + results);
+        WasmJit::run(store, m.osr, instance, fp, [n, results])?;
         frames.pop();
         Ok(())
     }
 
-    fn run<'scope>(store: &mut WasmStore<'_, 'scope>, entry: u64, instance: &'scope WasmInstance<'scope>, code: Arc<Code>, fp: usize) -> Result<(), WasmTrap> {
-        let this = store;
-        let frame = Frame { instance, code };
-        let saved = (this.ctx.io, this.ctx.io_at, this.ctx.frame, this.ctx.mem_base, this.ctx.mem_len);
-        this.ctx.io_at = fp;
-        this.ctx.frame = core::ptr::from_ref(&frame) as usize;
-        this.ctx.store = core::ptr::from_mut(this) as usize;
-        this.ctx.status = WasmCtx::RETURNED;
-        WasmJit::refresh(&mut this.ctx, &mut this.stack, instance);
-        this.ctx.depth += 1;
+    fn run<'scope>(store: &mut WasmStore<'_, 'scope>, entry: u64, instance: &'scope WasmInstance<'scope>, fp: usize, [inputs, outputs]: [usize; 2]) -> Result<(), WasmTrap> {
+        let width = inputs.max(outputs);
+        let mut inline = [0u64; WasmCtx::INLINE_IO];
+        let mut heap = Vec::new();
+        let io: &mut [u64] = if width <= WasmCtx::INLINE_IO {
+            &mut inline[..width]
+        } else {
+            heap.resize(width, 0);
+            &mut heap
+        };
+        io[..inputs].copy_from_slice(&store.stack[fp..fp + inputs]);
+        let caller = store.ctx.instance;
+        store.ctx.store = core::ptr::from_mut(store) as usize;
+        store.ctx.status = WasmCtx::RETURNED;
+        store.ctx.enter(instance);
+        store.ctx.depth += 1;
         let run: Entry = unsafe { core::mem::transmute::<usize, Entry>(usize::try_from(entry).unwrap_or(0)) };
-        let ctx = core::ptr::from_mut(&mut *this.ctx);
-        let io = this.ctx.io as *mut u64;
-        let status = unsafe { run(ctx, io) };
-        this.ctx.depth -= 1;
-        (this.ctx.io, this.ctx.io_at, this.ctx.frame, this.ctx.mem_base, this.ctx.mem_len) = saved;
-        if this.ctx.frame != 0 {
-            let outer = unsafe { &*(this.ctx.frame as *const Frame<'_>) };
-            WasmJit::refresh(&mut this.ctx, &mut this.stack, outer.instance);
-        }
+        let ctx = core::ptr::from_mut(&mut *store.ctx);
+        let status = unsafe { run(ctx, io.as_mut_ptr()) };
+        store.ctx.depth -= 1;
+        store.ctx.instance = caller;
+        store.ctx.refresh();
         match status {
-            WasmCtx::RETURNED => Ok(()),
+            WasmCtx::RETURNED => {
+                store.stack[fp..fp + outputs].copy_from_slice(&io[..outputs]);
+                Ok(())
+            }
             WasmCtx::THREW => Err(WasmTrap::Exception),
-            _ => Err(WasmTrap::from(this.ctx.trap)),
+            _ => Err(WasmTrap::from(store.ctx.trap)),
         }
     }
 }

@@ -178,7 +178,9 @@ impl File {
         let executor = Executor::default();
         let mut wasm = WebAssembly::from(Builtins);
         if std::env::var_os(JIT_ENV).is_some() {
-            wasm = wasm.with_tier(std::sync::Arc::new(j8jit::WasmJit::from(0)));
+            let jit = j8jit::WasmJit::from(0);
+            assert!(jit.ready(), "the wasm JIT's stencils did not compile");
+            wasm = wasm.with_tier(std::sync::Arc::new(jit));
         }
         let cx = isolate.create_context(&wasm);
         let r = executor.eval(&mut isolate, &cx, &Source { text: &src, file: &self.rel });

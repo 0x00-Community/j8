@@ -2,7 +2,7 @@ use alloc::boxed::Box;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::cell::UnsafeCell;
-use core::sync::atomic::AtomicU32;
+use core::sync::atomic::{AtomicU32, AtomicU64};
 
 use j8bytecode::{Decoded, Decoder, OperandValue, WasmBytecode, WasmGlobalType, WasmHandler, WasmMemoryType, WasmModule, WasmTableType};
 use j8framework::paragc::{WORD_POINTER_MIN, word_pointer};
@@ -29,9 +29,16 @@ pub struct Code {
     pub jit: OnceBox<WasmMachine>,
     pub calls: AtomicU32,
     pub loops: AtomicU32,
+    pub imports: u32,
+    pub entries: usize,
+    entry: usize,
 }
 
 impl Code {
+    pub fn entry(&self) -> Option<&AtomicU64> {
+        (self.entry != 0).then(|| unsafe { &*(self.entry as *const AtomicU64) })
+    }
+
     pub fn target(&self, d: &Decoded<WasmBytecode>, rel: OperandValue) -> usize {
         let byte = usize::try_from(OperandValue::try_from(d.offset).unwrap_or(0) + rel).unwrap_or(0);
         self.at.get(byte).map_or(usize::MAX, |&i| i as usize)
@@ -39,13 +46,18 @@ impl Code {
 }
 
 impl Code {
-    fn new(f: &j8bytecode::WasmFunction, memory64: Option<bool>) -> Self {
+    fn new(f: &j8bytecode::WasmFunction, memory64: Option<bool>, imports: u32, entries: &[AtomicU64], index: Option<usize>) -> Self {
         let ops: Vec<Decoded<WasmBytecode>> = Decoder::<WasmBytecode>::from(&f.code[..]).map_while(Result::ok).collect();
         let mut at = alloc::vec![u32::MAX; f.code.len() + 1];
         for (i, d) in ops.iter().enumerate() {
             at[d.offset] = u32::try_from(i).unwrap_or(u32::MAX);
         }
-        Self { ops, at, bits: f.bits.clone(), tables: f.tables.clone(), handlers: f.handlers.clone(), params: f.params, results: f.results, registers: f.registers, vector: f.vector, memory64, jit: OnceBox::default(), calls: AtomicU32::new(0), loops: AtomicU32::new(0) }
+        Self { ops, at, bits: f.bits.clone(), tables: f.tables.clone(), handlers: f.handlers.clone(), params: f.params, results: f.results, registers: f.registers, vector: f.vector, memory64, jit: OnceBox::default(), calls: AtomicU32::new(0),
+            loops: AtomicU32::new(0),
+            imports,
+            entries: entries.as_ptr() as usize,
+            entry: index.and_then(|i| entries.get(i)).map_or(0, |c| core::ptr::from_ref(c) as usize),
+        }
     }
 }
 
@@ -53,13 +65,17 @@ pub struct WasmCompiled {
     pub module: WasmModule,
     code: Box<[OnceBox<Arc<Code>>]>,
     inits: Box<[OnceBox<Arc<Code>>]>,
+    entries: Box<[AtomicU64]>,
+    imports: u32,
 }
 
 impl From<WasmModule> for WasmCompiled {
     fn from(module: WasmModule) -> Self {
         let code = module.functions.iter().map(|_| OnceBox::default()).collect();
         let inits = module.inits.iter().map(|_| OnceBox::default()).collect();
-        Self { module, code, inits }
+        let entries = module.functions.iter().map(|_| AtomicU64::new(0)).collect();
+        let imports = u32::try_from(module.imports.iter().filter(|i| matches!(i.kind, j8bytecode::WasmImportKind::Func(_))).count()).unwrap_or(u32::MAX);
+        Self { module, code, inits, entries, imports }
     }
 }
 
@@ -70,11 +86,11 @@ impl WasmCompiled {
     }
 
     pub fn code(&self, index: u32) -> Arc<Code> {
-        self.code[index as usize].get_or_init(|| Arc::new(Code::new(&self.module.functions[index as usize], self.memory64()))).clone()
+        self.code[index as usize].get_or_init(|| Arc::new(Code::new(&self.module.functions[index as usize], self.memory64(), self.imports, &self.entries, Some(index as usize)))).clone()
     }
 
     pub fn init(&self, index: u32) -> Arc<Code> {
-        self.inits[index as usize].get_or_init(|| Arc::new(Code::new(&self.module.inits[index as usize], self.memory64()))).clone()
+        self.inits[index as usize].get_or_init(|| Arc::new(Code::new(&self.module.inits[index as usize], self.memory64(), self.imports, &[], None))).clone()
     }
 }
 

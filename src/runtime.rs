@@ -64,7 +64,11 @@ pub struct Runtime<'p> {
 
 impl<'p> Runtime<'p> {
     pub fn on<H: Host>(set: &EventLoopSet<'_, 'p>, executor: Executor<'p>) -> Result<Self, Error> {
-        let wasm = WebAssembly::from(j8builtins::Builtins).with_tier(executor.wasm_tier());
+        let wasm = WebAssembly::from(j8builtins::Builtins);
+        let wasm = match executor.wasm_tier() {
+            Some(t) => wasm.with_tier(t),
+            None => wasm,
+        };
         let rt = Self { js: set.spawn(executor, &wasm) };
         rt.enter(|a| H::install(a));
         let mut preludes = Vec::new();

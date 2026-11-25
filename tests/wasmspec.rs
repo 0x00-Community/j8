@@ -144,7 +144,11 @@ impl<'p> Spec<'p> {
     fn new(platform: &'p DefaultPlatform) -> Self {
         let mut s = Self {
             isolate: Isolate::new(platform, CreateParams::default()),
-            jit: std::env::var_os(JIT_ENV).map(|_| j8jit::WasmJit::from(0)),
+            jit: std::env::var_os(JIT_ENV).map(|_| {
+                let j = j8jit::WasmJit::from(0);
+                assert!(j.ready(), "the wasm JIT's stencils did not compile");
+                j
+            }),
             st: State {
             types: None,
             spectest: HashMap::new(),

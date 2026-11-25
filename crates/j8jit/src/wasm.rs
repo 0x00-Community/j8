@@ -9,7 +9,7 @@ use j8executor::{WasmCtx, WasmJitFunction, WasmMachine, WasmScalar, WasmTier};
 use j8lockfree::{AtomicRefCell, OnceBox};
 use mlirpass::{HoleKind, Stencil, Stencils};
 
-use crate::asm::{Asm, Cc, Label, RAX, RCX, RBP, RDI, RSI, R15};
+use crate::asm::{Alu, Asm, Cc, Label, RAX, RCX, RBP, RDI, RSI, R15};
 use crate::live::Template;
 use crate::runtime::Arena;
 use crate::Compiler;
@@ -267,11 +267,21 @@ impl Tpl {
         self.line(&format!("llvm.{op} {v} : {from} to i64"))
     }
 
-    fn ctx(&mut self, off: i32) -> String {
+    fn ctx_addr(&mut self, off: i32) -> String {
         let o = self.c64(u64::from(off.unsigned_abs()));
         let a = self.line(&format!("llvm.add %ctx, {o} : i64"));
-        let p = self.ptr(&a);
+        self.ptr(&a)
+    }
+
+    fn ctx(&mut self, off: i32) -> String {
+        let p = self.ctx_addr(off);
         self.line(&format!("llvm.load {p} : !llvm.ptr -> i64"))
+    }
+
+    fn check(&mut self, status: &str) {
+        let z = self.c64(0);
+        let bad = self.icmp("ne", status, &z, "i64");
+        self.jump_if(&bad, 0);
     }
 
     fn label(&mut self) -> String {
@@ -452,15 +462,20 @@ impl Tpl {
                 self.jump_if(&bad, 0);
                 self.write(&r);
             }
-            St::Step | St::Call => {
+            St::Step => {
                 let pc = self.hole(0);
                 let disp = self.hole(1);
+                let code = self.hole(2);
                 let regs = self.bin("add", "%fp", &disp, "i64");
-                let callee = if st == St::Step { STEP } else { CALL };
-                let r = self.line(&format!("llvm.call @{callee}(%ctx, {pc}, {regs}) : (i64, i64, i64) -> i64"));
-                let z = self.c64(0);
-                let bad = self.icmp("ne", &r, &z, "i64");
-                self.jump_if(&bad, 0);
+                let r = self.line(&format!("llvm.call @{STEP}(%ctx, {pc}, {regs}, {code}) : (i64, i64, i64, i64) -> i64"));
+                self.check(&r);
+            }
+            St::Call => {
+                let index = self.hole(0);
+                let disp = self.hole(1);
+                let regs = self.bin("add", "%fp", &disp, "i64");
+                let r = self.line(&format!("llvm.call @{CALL}(%ctx, {index}, {regs}) : (i64, i64, i64) -> i64"));
+                self.check(&r);
             }
             St::Global { set } => {
                 let index = self.hole(0);
@@ -610,6 +625,10 @@ impl<'t, 'f> Stitch<'t, 'f> {
         self.base + 8 * i32::try_from(r).unwrap_or(0)
     }
 
+    fn io(&self) -> i32 {
+        self.base - 8
+    }
+
     fn index(&self, d: &Decoded<WasmBytecode>, rel: OperandValue) -> Option<usize> {
         let byte = usize::try_from(OperandValue::try_from(d.offset).ok()? + rel).ok()?;
         Some(*self.f.at.get(byte)? as usize)
@@ -644,6 +663,7 @@ impl<'t, 'f> Stitch<'t, 'f> {
     fn prologue(&mut self, frame: i32, from: u32) -> Option<()> {
         self.a.enter(frame);
         self.a.mov_rr(R15, RDI);
+        self.a.store(RBP, self.io(), RSI);
         for i in 0..from {
             self.a.load(RAX, RSI, 8 * i32::try_from(i).ok()?);
             self.a.store(RBP, self.reg(OperandValue::from(i)), RAX);
@@ -691,7 +711,7 @@ impl<'t, 'f> Stitch<'t, 'f> {
     }
 
     fn ret(&mut self, first: OperandValue, n: u32) {
-        self.a.load(RCX, R15, WasmCtx::IO);
+        self.a.load(RCX, RBP, self.io());
         for i in 0..n {
             self.a.load(RAX, RBP, self.reg(first + OperandValue::from(i)));
             self.a.store(RCX, 8 * i32::try_from(i).unwrap_or(0), RAX);
@@ -703,7 +723,35 @@ impl<'t, 'f> Stitch<'t, 'f> {
     fn step(&mut self, pc: usize) -> Option<()> {
         let exit = self.exit;
         let disp = i64::from(self.base).cast_unsigned();
-        self.emit(St::Step, &[], None, vec![u64::try_from(pc).ok()?, disp], Some(exit))
+        self.emit(St::Step, &[], None, vec![u64::try_from(pc).ok()?, disp, self.f.code], Some(exit))
+    }
+
+    fn direct(&mut self, cell: u64, disp: u64, index: u64) -> Option<()> {
+        let (slow, done, exit) = (self.a.label(), self.a.label(), self.exit);
+        self.a.mov_ri(RAX, cell);
+        self.a.load(RAX, RAX, 0);
+        self.a.test_rr(true, RAX, RAX);
+        self.a.jcc(Cc::E, slow);
+        self.a.cmp_mi(true, R15, WasmCtx::DEPTH, i32::try_from(WasmCtx::NEST).ok()?);
+        self.a.jcc(Cc::Ae, slow);
+        self.depth(Alu::Add);
+        self.a.mov_rr(RDI, R15);
+        self.a.lea(RSI, RBP, i32::try_from(disp.cast_signed()).ok()?);
+        self.a.call_r(RAX);
+        self.depth(Alu::Sub);
+        self.a.test_rr(true, RAX, RAX);
+        self.a.jcc(Cc::Ne, exit);
+        self.a.jmp(done);
+        self.a.bind(slow);
+        self.emit(St::Call, &[], None, vec![index, disp], Some(exit))?;
+        self.a.bind(done);
+        Some(())
+    }
+
+    fn depth(&mut self, op: Alu) {
+        self.a.load(RCX, R15, WasmCtx::DEPTH);
+        self.a.alu_ri(op, true, RCX, 1);
+        self.a.store(R15, WasmCtx::DEPTH, RCX);
     }
 
     fn memory(&self, d: &Decoded<WasmBytecode>, at: usize) -> Option<bool> {
@@ -852,7 +900,11 @@ impl<'t, 'f> Stitch<'t, 'f> {
             B::CallFunction => {
                 let exit = self.exit;
                 let disp = i64::from(self.reg(o[1])).cast_unsigned();
-                self.emit(St::Call, &[], None, vec![u64::try_from(o[0]).ok()?, disp], Some(exit))?;
+                let index = u64::try_from(o[0]).ok()?;
+                match index.checked_sub(u64::from(self.f.imports)) {
+                    Some(local) => self.direct(self.f.entries + local * u64::from(u64::BITS / u8::BITS), disp, index)?,
+                    None => self.emit(St::Call, &[], None, vec![index, disp], Some(exit))?,
+                }
             }
             B::GlobalGet => self.emit(St::Global { set: false }, &[], Some(o[0]), vec![o[1].cast_unsigned()], None)?,
             B::GlobalSet => self.emit(St::Global { set: true }, &[o[1]], None, vec![o[0].cast_unsigned()], None)?,
@@ -882,7 +934,7 @@ impl<'t, 'f> Stitch<'t, 'f> {
     fn run(&mut self) -> Option<()> {
         let f = self.f;
         let regs = i32::try_from(f.registers).ok()?;
-        let n = Template::SPILL_WORDS + 1 + regs;
+        let n = Template::SPILL_WORDS + 2 + regs;
         let frame = (n * 8 + 15) / 16 * 16 + 8;
         self.prologue(frame, f.params)?;
         for (pc, d) in f.ops.iter().enumerate() {
@@ -949,6 +1001,22 @@ pub struct WasmJit {
 
 impl WasmJit {
     pub const THRESHOLD: u32 = 16;
+
+    fn table(&self) -> Option<&Table> {
+        self.table
+            .get_or_init(|| {
+                Table::compile()
+                    .map_err(|e| {
+                        std::eprintln!("j8jit: the wasm stencils did not compile: {e}");
+                    })
+                    .ok()
+            })
+            .as_ref()
+    }
+
+    pub fn ready(&self) -> bool {
+        self.table().is_some()
+    }
 }
 
 impl Default for WasmJit {
@@ -969,16 +1037,7 @@ impl WasmTier for WasmJit {
     }
 
     fn compile(&self, f: &WasmJitFunction<'_>) -> Option<WasmMachine> {
-        let table = self
-            .table
-            .get_or_init(|| {
-                Table::compile()
-                    .map_err(|e| {
-                        std::eprintln!("j8jit: the wasm stencils did not compile: {e}");
-                    })
-                    .ok()
-            })
-            .as_ref()?;
+        let table = self.table()?;
         let Stitched { bytes, relocs, osr } = Stitch::stitch(table, f)?;
         let sym = |s: Sym| match s {
             Sym::Step => f.step,

@@ -32,8 +32,8 @@ impl<I> From<I> for WebAssembly<I> {
 
 impl<I> WebAssembly<I> {
     #[must_use]
-    pub fn with_tier(mut self, tier: impl Into<Option<Tier>>) -> Self {
-        self.tier = tier.into();
+    pub fn with_tier(mut self, tier: Tier) -> Self {
+        self.tier = Some(tier);
         self
     }
 }
