@@ -188,21 +188,113 @@ struct Emitter<'m> {
     locals: u32,
     registers: u32,
     controls: Vec<Control>,
+    alias: Vec<Option<u32>>,
+    last: Option<Defined>,
+}
+
+struct Defined {
+    start: usize,
+    bytecode: WasmBytecode,
+    operands: Vec<OperandValue>,
 }
 
 impl<'m> Emitter<'m> {
     fn new(module: &'m [u8], locals: u32) -> Self {
-        Self { module, enc: Encoder::default(), bits: Vec::new(), tables: Vec::new(), handlers: Vec::new(), locals, registers: locals, controls: Vec::new() }
+        Self { module, enc: Encoder::default(), bits: Vec::new(), tables: Vec::new(), handlers: Vec::new(), locals, registers: locals, controls: Vec::new(), alias: Vec::new(), last: None }
     }
 
     fn reg(&mut self, slot: u32) -> OperandValue {
+        if let Some(a) = self.alias.get_mut(slot as usize) {
+            *a = None;
+        }
         let r = self.locals + slot;
         self.registers = self.registers.max(r + 1);
         OperandValue::from(r)
     }
 
+    fn src(&mut self, slot: u32) -> OperandValue {
+        match self.alias.get(slot as usize).copied().flatten() {
+            Some(local) => OperandValue::from(local),
+            None => self.reg(slot),
+        }
+    }
+
+    fn alias(&mut self, slot: u32, local: u32) {
+        let i = slot as usize;
+        if self.alias.len() <= i {
+            self.alias.resize(i + 1, None);
+        }
+        self.alias[i] = Some(local);
+    }
+
+    fn spill(&mut self, local: u32, below: u32) -> Result<(), WasmError> {
+        for s in 0..below.min(u32::try_from(self.alias.len()).unwrap_or(0)) {
+            if self.alias[s as usize] == Some(local) {
+                let d = self.reg(s);
+                self.emit(WasmBytecode::Mov, &[d, OperandValue::from(local)])?;
+            }
+        }
+        Ok(())
+    }
+
+    fn materialize(&mut self, below: u32) -> Result<(), WasmError> {
+        for s in 0..below.min(u32::try_from(self.alias.len()).unwrap_or(0)) {
+            if let Some(local) = self.alias[s as usize] {
+                let d = self.reg(s);
+                self.emit(WasmBytecode::Mov, &[d, OperandValue::from(local)])?;
+            }
+        }
+        self.forget();
+        Ok(())
+    }
+
+    fn forget(&mut self) {
+        self.alias.clear();
+        self.last = None;
+    }
+
     fn emit(&mut self, b: WasmBytecode, ops: &[OperandValue]) -> Result<usize, WasmError> {
+        self.last = None;
         self.enc.emit(b, ops).map_err(|_| WasmError::unsupported(0, format!("{b:?}: operands")))
+    }
+
+    fn define(&mut self, b: WasmBytecode, ops: &[OperandValue]) -> Result<(), WasmError> {
+        let start = self.enc.code.len();
+        self.emit(b, ops)?;
+        if (b as u16) >> u8::BITS == 0 {
+            self.last = Some(Defined { start, bytecode: b, operands: ops.to_vec() });
+        }
+        Ok(())
+    }
+
+    fn set_local(&mut self, local: u32, top: u32, tee: bool) -> Result<(), WasmError> {
+        let l = OperandValue::from(local);
+        if let Some(m) = self.alias.get(top as usize).copied().flatten() {
+            self.spill(local, top)?;
+            if m != local {
+                self.emit(WasmBytecode::Mov, &[l, OperandValue::from(m)])?;
+            }
+        } else {
+            let t = self.reg(top);
+            match self.last.take().filter(|d| d.operands.first() == Some(&t)) {
+                Some(mut d) => {
+                    self.enc.code.truncate(d.start);
+                    self.spill(local, top)?;
+                    d.operands[0] = l;
+                    self.emit(d.bytecode, &d.operands)?;
+                }
+                None => {
+                    self.spill(local, top)?;
+                    self.emit(WasmBytecode::Mov, &[l, t])?;
+                }
+            }
+        }
+        if tee {
+            self.alias(top, local);
+        } else if let Some(a) = self.alias.get_mut(top as usize) {
+            *a = None;
+        }
+        Ok(())
     }
 
     fn here(&self) -> usize {
@@ -210,6 +302,7 @@ impl<'m> Emitter<'m> {
     }
 
     fn jump(&mut self, b: WasmBytecode, ops: &[OperandValue], target: Option<usize>) -> Result<usize, WasmError> {
+        self.last = None;
         let at = self.here();
         let mut all: Vec<OperandValue> = ops.to_vec();
         all.push(target.map_or(PLACEHOLDER, |t| OperandValue::try_from(t).unwrap_or(0) - OperandValue::try_from(at).unwrap_or(0)));
@@ -227,6 +320,7 @@ impl<'m> Emitter<'m> {
     }
 
     fn patch(&mut self, at: usize, target: usize) {
+        self.last = None;
         let b = WasmBytecode::from_page(0, self.enc.code[at + 1]).unwrap_or(WasmBytecode::Illegal);
         let n = b.operand_types().len() - 1;
         let pos = at + 2 + b.operand_infos().take(n).map(|i| i.size(OperandScale::Quadruple) as usize).sum::<usize>();
@@ -404,6 +498,49 @@ impl Body<'_, '_> {
         self.v.get_control_frame(0).is_some_and(|f| !f.unreachable)
     }
 
+    fn shaped(op: &Operator<'_>) -> bool {
+        matches!(
+            op,
+            Operator::Block { .. }
+                | Operator::Loop { .. }
+                | Operator::If { .. }
+                | Operator::TryTable { .. }
+                | Operator::Else
+                | Operator::End
+                | Operator::Unreachable
+                | Operator::Br { .. }
+                | Operator::BrIf { .. }
+                | Operator::BrOnNull { .. }
+                | Operator::BrOnNonNull { .. }
+                | Operator::BrTable { .. }
+                | Operator::Return
+                | Operator::Call { .. }
+                | Operator::ReturnCall { .. }
+                | Operator::CallIndirect { .. }
+                | Operator::ReturnCallIndirect { .. }
+                | Operator::CallRef { .. }
+                | Operator::ReturnCallRef { .. }
+                | Operator::MemoryInit { .. }
+                | Operator::MemoryCopy { .. }
+                | Operator::MemoryFill { .. }
+                | Operator::TableFill { .. }
+                | Operator::ArrayFill { .. }
+                | Operator::ArrayCopy { .. }
+                | Operator::ArrayInitData { .. }
+                | Operator::ArrayInitElem { .. }
+                | Operator::V128Const { .. }
+                | Operator::I8x16Shuffle { .. }
+                | Operator::Throw { .. }
+                | Operator::ThrowRef
+                | Operator::StructNew { .. }
+                | Operator::ArrayNewFixed { .. }
+                | Operator::ArrayNewData { .. }
+                | Operator::ArrayNewElem { .. }
+                | Operator::BrOnCast { .. }
+                | Operator::BrOnCastFail { .. }
+        )
+    }
+
     fn compile(mut self, ty: u32, params: u32, results: u32) -> Result<WasmFunction, WasmError> {
         let mut locals = self.func.get_locals_reader()?;
         for _ in 0..locals.get_count() {
@@ -436,6 +573,11 @@ impl Body<'_, '_> {
     #[expect(clippy::too_many_lines, reason = "one arm per WebAssembly control and special-shape operator")]
     fn operator(&mut self, op: &Operator<'_>, at: usize, h: u32, live: bool) -> Result<(), WasmError> {
         let e = &mut self.emitter;
+        if !live {
+            e.forget();
+        } else if Body::shaped(op) {
+            e.materialize(h)?;
+        }
         match *op {
             Operator::Block { blockty } | Operator::Loop { blockty } | Operator::If { blockty } => {
                 let (p, r) = self.arity(blockty);
@@ -567,47 +709,46 @@ impl Body<'_, '_> {
                 e.emit(WasmBytecode::Return, &[base, OperandValue::from(n)])?;
             }
             Operator::LocalGet { local_index } => {
-                let d = e.reg(h);
-                e.emit(WasmBytecode::Mov, &[d, OperandValue::from(local_index)])?;
+                e.reg(h);
+                e.alias(h, local_index);
             }
-            Operator::LocalSet { local_index } | Operator::LocalTee { local_index } => {
-                let s = e.reg(h - 1);
-                e.emit(WasmBytecode::Mov, &[OperandValue::from(local_index), s])?;
-            }
+            Operator::LocalSet { local_index } => e.set_local(local_index, h - 1, false)?,
+            Operator::LocalTee { local_index } => e.set_local(local_index, h - 1, true)?,
             Operator::Select | Operator::TypedSelect { .. } | Operator::TypedSelectMulti { .. } => {
-                let (d, a, b, c) = (e.reg(h - 3), e.reg(h - 3), e.reg(h - 2), e.reg(h - 1));
-                e.emit(WasmBytecode::Select, &[d, a, b, c])?;
+                let (a, b, c) = (e.src(h - 3), e.src(h - 2), e.src(h - 1));
+                let d = e.reg(h - 3);
+                e.define(WasmBytecode::Select, &[d, a, b, c])?;
             }
             Operator::I32Const { value } => {
                 let d = e.reg(h);
-                e.emit(WasmBytecode::I32Const, &[d, OperandValue::from(value)])?;
+                e.define(WasmBytecode::I32Const, &[d, OperandValue::from(value)])?;
             }
             Operator::I64Const { value } => {
                 let d = e.reg(h);
                 if let Ok(v) = i32::try_from(value) {
-                    e.emit(WasmBytecode::I64Const, &[d, OperandValue::from(v)])?;
+                    e.define(WasmBytecode::I64Const, &[d, OperandValue::from(v)])?;
                 } else {
                     let i = OperandValue::try_from(e.bits.len()).unwrap_or(0);
                     e.bits.push(u64::from_ne_bytes(value.to_ne_bytes()));
-                    e.emit(WasmBytecode::I64ConstPool, &[d, i])?;
+                    e.define(WasmBytecode::I64ConstPool, &[d, i])?;
                 }
             }
             Operator::F32Const { value } => {
                 let d = e.reg(h);
-                e.emit(WasmBytecode::F32Const, &[d, OperandValue::from(i32::from_ne_bytes(value.bits().to_ne_bytes()))])?;
+                e.define(WasmBytecode::F32Const, &[d, OperandValue::from(i32::from_ne_bytes(value.bits().to_ne_bytes()))])?;
             }
             Operator::F64Const { value } => {
                 let d = e.reg(h);
                 let i = OperandValue::try_from(e.bits.len()).unwrap_or(0);
                 e.bits.push(value.bits());
-                e.emit(WasmBytecode::F64Const, &[d, i])?;
+                e.define(WasmBytecode::F64Const, &[d, i])?;
             }
             Operator::GlobalGet { global_index } => {
                 let d = e.reg(h);
-                e.emit(WasmBytecode::GlobalGet, &[d, OperandValue::from(global_index)])?;
+                e.define(WasmBytecode::GlobalGet, &[d, OperandValue::from(global_index)])?;
             }
             Operator::GlobalSet { global_index } => {
-                let s = e.reg(h - 1);
+                let s = e.src(h - 1);
                 e.emit(WasmBytecode::GlobalSet, &[OperandValue::from(global_index), s])?;
             }
             Operator::RefNull { .. } => {
@@ -727,11 +868,16 @@ impl Body<'_, '_> {
                 let n = u32::try_from(n).map_err(|_| WasmError::unsupported(at, format!("{op:?}: shape")))?;
                 let m = u32::try_from(m).map_err(|_| WasmError::unsupported(at, format!("{op:?}: shape")))?;
                 let e = &mut self.emitter;
+                let sources: Vec<OperandValue> = (0..n).map(|i| e.src(h - n + i)).collect();
                 let mut ops: Vec<OperandValue> = (0..m).map(|i| e.reg(h - n + i)).collect();
-                ops.extend((0..n).map(|i| e.reg(h - n + i)));
+                ops.extend(sources);
                 let imms = e.immediates(b, imm, k);
                 ops.extend(imms.into_iter().map(|v| v.min(MEMORY_OFFSET_LIMIT)));
-                e.emit(b, &ops)?;
+                if m == 1 {
+                    e.define(b, &ops)?;
+                } else {
+                    e.emit(b, &ops)?;
+                }
             }
         }
         Ok(())
