@@ -46,6 +46,7 @@ struct Level<'a> {
     dynamic: bool,
     mark: i32,
     switch: bool,
+    locals: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -257,6 +258,7 @@ pub struct Compiler<'a, 's> {
     pub classes: Vec<ClassInfo<'a>>,
     pub next_home: Option<&'static str>,
     pub hidden: bool,
+    debug: DebugInfo,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -369,36 +371,43 @@ impl Rewriter {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DebugInfo {
+    #[default]
+    Omit,
+    Record,
+}
+
 pub trait Compile: Sized {
-    fn compile(src: &Source<'_>, kind: CodeKind) -> Result<Self, Error>;
+    fn compile(src: &Source<'_>, kind: CodeKind, debug: DebugInfo) -> Result<Self, Error>;
 
-    fn compile_direct(src: &Source<'_>, strict: bool, hidden: bool) -> Result<Self, Error>;
+    fn compile_direct(src: &Source<'_>, strict: bool, hidden: bool, debug: DebugInfo) -> Result<Self, Error>;
 
-    fn compile_eval(src: &Source<'_>, kind: CodeKind, hidden: bool) -> Result<Self, Error>;
+    fn compile_eval(src: &Source<'_>, kind: CodeKind, hidden: bool, debug: DebugInfo) -> Result<Self, Error>;
 
-    fn compile_module(src: &Source<'_>) -> Result<(Self, ModuleInfo), Error>;
+    fn compile_module(src: &Source<'_>, debug: DebugInfo) -> Result<(Self, ModuleInfo), Error>;
 }
 
 impl Compile for Module {
-    fn compile(src: &Source<'_>, kind: CodeKind) -> Result<Self, Error> {
-        Compiler::compile_in(src, kind, false, false)
+    fn compile(src: &Source<'_>, kind: CodeKind, debug: DebugInfo) -> Result<Self, Error> {
+        Compiler::compile_in(src, kind, false, false, debug)
     }
 
-    fn compile_direct(src: &Source<'_>, strict: bool, hidden: bool) -> Result<Self, Error> {
-        Compiler::compile_in(src, if strict { CodeKind::StrictEval } else { CodeKind::Eval }, true, hidden)
+    fn compile_direct(src: &Source<'_>, strict: bool, hidden: bool, debug: DebugInfo) -> Result<Self, Error> {
+        Compiler::compile_in(src, if strict { CodeKind::StrictEval } else { CodeKind::Eval }, true, hidden, debug)
     }
 
-    fn compile_eval(src: &Source<'_>, kind: CodeKind, hidden: bool) -> Result<Self, Error> {
-        Compiler::compile_in(src, kind, false, hidden)
+    fn compile_eval(src: &Source<'_>, kind: CodeKind, hidden: bool, debug: DebugInfo) -> Result<Self, Error> {
+        Compiler::compile_in(src, kind, false, hidden, debug)
     }
 
-    fn compile_module(src: &Source<'_>) -> Result<(Self, ModuleInfo), Error> {
-        Compiler::compile_module(src)
+    fn compile_module(src: &Source<'_>, debug: DebugInfo) -> Result<(Self, ModuleInfo), Error> {
+        Compiler::compile_module(src, debug)
     }
 }
 
 impl Compiler<'_, '_> {
-    fn compile_in(src: &Source<'_>, kind: CodeKind, direct: bool, hidden: bool) -> Result<Module, Error> {
+    fn compile_in(src: &Source<'_>, kind: CodeKind, direct: bool, hidden: bool, debug: DebugInfo) -> Result<Module, Error> {
         let allocator = Allocator::default();
         let options = ParseOptions { parse_regular_expression: true, ..ParseOptions::default() };
         let ret = Parser::new(&allocator, src.text, SourceType::script()).with_options(options).parse();
@@ -415,7 +424,7 @@ impl Compiler<'_, '_> {
         let strict = kind == CodeKind::StrictEval || Flavor::use_strict(&program.directives);
         let local = (kind != CodeKind::Script).then(|| Decls::eval_local(&program.body, strict));
         let Resolver { captured, used, eval_fns, suspends, .. } = Resolver::script(&program.body, Decls::this_key(program.span), &allocator, local.as_ref(), strict, eval_scopes, None);
-        let mut c = Compiler { src, lines: Lines::from(src.text), alloc: &allocator, captured, used, class_depth: 0, module: Vec::new(), frames: Vec::new(), levels: Vec::new(), chains: Vec::new(), eval_fns, suspends, completion_assign: HashSet::new(), completion_reset: HashSet::new(), for_init_text: None, classes: Vec::new(), next_home: None, hidden };
+        let mut c = Compiler { src, lines: Lines::from(src.text), alloc: &allocator, captured, used, class_depth: 0, module: Vec::new(), frames: Vec::new(), levels: Vec::new(), chains: Vec::new(), eval_fns, suspends, completion_assign: HashSet::new(), completion_reset: HashSet::new(), for_init_text: None, classes: Vec::new(), next_home: None, hidden, debug };
         c.script(program, local.as_ref(), strict, direct)?;
         Ok(Module { functions: c.module })
     }
@@ -508,7 +517,7 @@ impl<'a> Layout<'a> {
 }
 
 impl Compiler<'_, '_> {
-    fn compile_module(src: &Source<'_>) -> Result<(Module, ModuleInfo), Error> {
+    fn compile_module(src: &Source<'_>, debug: DebugInfo) -> Result<(Module, ModuleInfo), Error> {
         let allocator = Allocator::default();
         let options = ParseOptions { parse_regular_expression: true, ..ParseOptions::default() };
         let ret = Parser::new(&allocator, src.text, SourceType::mjs()).with_options(options).parse();
@@ -525,7 +534,7 @@ impl Compiler<'_, '_> {
         let (names, info) = Compiler::module_layout(program);
         let order: Vec<&str> = names.iter().map(|&(n, _)| n).collect();
         let Resolver { captured, used, eval_fns, suspends, suspend_count, .. } = Resolver::script(&program.body, Decls::this_key(program.span), &allocator, None, true, eval_scopes, Some(&[order]));
-        let mut c = Compiler { src, lines: Lines::from(src.text), alloc: &allocator, captured, used, class_depth: 0, module: Vec::new(), frames: Vec::new(), levels: Vec::new(), chains: Vec::new(), eval_fns, suspends, completion_assign: HashSet::new(), completion_reset: HashSet::new(), for_init_text: None, classes: Vec::new(), next_home: None, hidden: false };
+        let mut c = Compiler { src, lines: Lines::from(src.text), alloc: &allocator, captured, used, class_depth: 0, module: Vec::new(), frames: Vec::new(), levels: Vec::new(), chains: Vec::new(), eval_fns, suspends, completion_assign: HashSet::new(), completion_reset: HashSet::new(), for_init_text: None, classes: Vec::new(), next_home: None, hidden: false, debug };
         let bound = names
             .iter()
             .map(|&(name, n)| match n {
@@ -536,7 +545,7 @@ impl Compiler<'_, '_> {
         if suspend_count > 0 {
             return Err(c.unsupported(program.span, "top-level await"));
         }
-        c.levels.push(Level { func: usize::MAX, names: bound, context: Some(Register::current_context()), scope: None, dynamic: false, mark: 0, switch: false, cells: false });
+        c.levels.push(Level { func: usize::MAX, names: bound, context: Some(Register::current_context()), scope: None, dynamic: false, mark: 0, switch: false, cells: false, locals: usize::MAX });
         c.module_body(program)?;
         Ok((Module { functions: c.module }, info))
     }
@@ -769,8 +778,9 @@ impl<'a> Compiler<'a, '_> {
             None
         };
         let bindings: Vec<Binding> = names.iter().map(|n| n.binding).collect();
-        self.levels.push(Level { func, names, context, scope, dynamic: false, mark, switch: false, cells: false });
         let decls: Vec<&Decl<'a>> = decls.0.iter().filter(|d| !(matches!(d.kind, DeclKind::NewTarget | DeclKind::Arguments) && !self.used.contains(&d.key))).collect();
+        let locals = self.open_locals(&decls, &bindings);
+        self.levels.push(Level { func, names, context, scope, dynamic: false, mark, switch: false, cells: false, locals });
         for (d, &b) in decls.iter().zip(&bindings) {
             let skip = self.for_init_text.is_some_and(|t| !t.contains(d.name)) && matches!(b, Binding::Reg(_));
             if d.ready.is_some() && !skip {
@@ -827,7 +837,21 @@ impl<'a> Compiler<'a, '_> {
             self.b().pop_context(saved);
             self.frame().contexts.pop();
         }
+        self.b().close_locals(l.locals);
         self.b().release_to(l.mark);
+    }
+
+    fn open_locals(&mut self, decls: &[&Decl<'a>], bindings: &[Binding]) -> usize {
+        let first = self.b().locals_len();
+        if self.debug == DebugInfo::Omit {
+            return first;
+        }
+        for (d, b) in decls.iter().zip(bindings) {
+            if let (Binding::Reg(r), false) = (b, matches!(d.kind, DeclKind::This | DeclKind::NewTarget)) {
+                self.b().open_local(d.name, *r);
+            }
+        }
+        first
     }
 
     fn scoped(&mut self, decls: &Decls<'a>, f: impl FnOnce(&mut Self) -> Result<(), Error>) -> Result<(), Error> {
@@ -2545,7 +2569,7 @@ impl<'a> Compiler<'a, '_> {
                 self.frame().scope = Some(ScopeInfo { scope_type: Some(ScopeType::ScriptScope), variables, has_extension: false });
             }
             let mark = self.b().mark();
-            self.levels.push(Level { func: 0, names: lexical, context: None, scope: None, dynamic: false, mark, switch: false, cells: true });
+            self.levels.push(Level { func: 0, names: lexical, context: None, scope: None, dynamic: false, mark, switch: false, cells: true, locals: usize::MAX });
             if !declarations.is_empty() {
                 let k = self.constant(Constant::Declarations(declarations));
                 let args = self.b().new_register_list(2);
@@ -2856,7 +2880,7 @@ impl<'a> Compiler<'a, '_> {
         self.b().push_context(saved);
         self.frame().contexts.push(saved);
         let names = alloc::vec![Bound { name, binding: Binding::Context(Context::MIN_SLOTS), constant: false, ready: None, self_name: false }];
-        self.levels.push(Level { func, names, context: Some(saved), scope: Some(k), dynamic: false, mark, switch: false, cells: false });
+        self.levels.push(Level { func, names, context: Some(saved), scope: Some(k), dynamic: false, mark, switch: false, cells: false, locals: usize::MAX });
         if matches!(p.pattern, BindingPattern::BindingIdentifier(_)) {
             self.block(&c.body)?;
         } else {
@@ -2881,7 +2905,11 @@ impl<'a> Compiler<'a, '_> {
 
     #[expect(clippy::too_many_lines, reason = "one arm per statement kind; splitting it would hurt readability")]
     fn statement(&mut self, s: &'a Statement<'a>) -> Result<(), Error> {
-        self.b().at(s.span().start);
+        if self.debug == DebugInfo::Record {
+            self.b().at_statement(s.span().start);
+        } else {
+            self.b().at(s.span().start);
+        }
         if let Some(c) = self.frame().completion
             && self.completion_reset.contains(&s.span().start)
         {
@@ -3023,7 +3051,7 @@ impl<'a> Compiler<'a, '_> {
                 self.frame().contexts.push(saved);
                 let mark = self.b().mark();
                 let func = self.frames.len() - 1;
-                self.levels.push(Level { func, names: Vec::new(), context: Some(saved), scope: None, dynamic: true, mark, switch: false, cells: false });
+                self.levels.push(Level { func, names: Vec::new(), context: Some(saved), scope: None, dynamic: true, mark, switch: false, cells: false, locals: usize::MAX });
                 self.statement(&w.body)?;
                 self.leave();
                 self.release(object);

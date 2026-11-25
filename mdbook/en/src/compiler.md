@@ -73,9 +73,9 @@ caller when nothing covers it. `finally` uses a pair of registers, completion ki
 Hosts rarely call the compiler; the executor does:
 
 ```rust,ignore
-use j8compiler::Compile;
+use j8compiler::{Compile, DebugInfo};
 use j8framework::{CodeKind, Source};
 
-let module = j8bytecode::Module::compile(&Source { text: "1 + 2", file: "a.js" }, CodeKind::Script)?;
-let (module, info) = j8bytecode::Module::compile_module(&source)?;   // an ES module, with its imports / exports
+let module = j8bytecode::Module::compile(&Source { text: "1 + 2", file: "a.js" }, CodeKind::Script, DebugInfo::Omit)?;
+let (module, info) = j8bytecode::Module::compile_module(&source, DebugInfo::Omit)?;   // an ES module, with its imports / exports
 ```

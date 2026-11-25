@@ -9,7 +9,7 @@ use core::cell::{Cell, RefCell};
 use core::ptr::NonNull;
 
 use j8bytecode::{Bytecode, Constant, Context, Decoded, FunctionKind, Intrinsic, LiteralValue, Module, NativeContextIndex, Operands, OperandValue, Register, Runtime, ScopeInfo, ScopeType, SharedFunction};
-use j8compiler::Compile;
+use j8compiler::{Compile, DebugInfo};
 use j8framework::{Scope, BinaryOp, Closure, Code, ShapeKey, SmallStr, Collect, CompareOp, ContextKind, ContextName, ContextShape, ShapeId, Env, Error, ErrorKind, FuncId, FunctionInfo, ScopeLocal, Lazy, Invoke, JsEnv, JsObject, Numbers, ObjectData, ObjectKind, Property, Resume, Slot, Step, Value, ValueKind};
 use j8lockfree::SegVec;
 
@@ -2381,7 +2381,7 @@ impl Executor<'_> {
                 }
                 let strict = arg(3).as_number().is_some_and(|x| x != 0.0);
                 let src = s.source_text();
-                let module = match Module::compile_direct(&j8framework::Source { text: &src, file: EVAL_FILE }, strict, s.lone_surrogates()) {
+                let module = match Module::compile_direct(&j8framework::Source { text: &src, file: EVAL_FILE }, strict, s.lone_surrogates(), DebugInfo::Omit) {
                     Ok(m) => m,
                     Err(Error::Syntax(m)) => return Err(a.throw(ErrorKind::Syntax, &m)),
                     Err(e) => return Err(e),
@@ -2567,7 +2567,7 @@ impl<'scope> Invoke<'scope> for Executor<'_> {
 
     fn eval_code(&self, a: &mut Scope<'scope, '_>, src: &str, kind: j8framework::CodeKind, hidden: bool) -> Result<Value<'scope>, Error> {
         let file = Executor::source_url(src).unwrap_or(EVAL_FILE);
-        let module = match Module::compile_eval(&j8framework::Source { text: src, file }, kind, hidden) {
+        let module = match Module::compile_eval(&j8framework::Source { text: src, file }, kind, hidden, DebugInfo::Omit) {
             Ok(m) => m,
             Err(Error::Syntax(m)) => return Err(a.throw(ErrorKind::Syntax, &m)),
             Err(e) => return Err(e),
@@ -2702,11 +2702,11 @@ impl<'p> Executor<'p> {
 
     pub fn start(&self, src: &j8framework::Source<'_>, kind: j8framework::ScriptKind) -> Result<Job<'p>, Error> {
         Ok(Job(match kind {
-            j8framework::ScriptKind::Classic => Started::Script { module: Module::compile(src, j8framework::CodeKind::Script)?, file: src.file.into() },
+            j8framework::ScriptKind::Classic => Started::Script { module: Module::compile(src, j8framework::CodeKind::Script, DebugInfo::Omit)?, file: src.file.into() },
             j8framework::ScriptKind::Shared => Started::Script {
                 module: match &self.cache {
-                    Some(cache) => cache.script(src)?,
-                    None => Module::compile(src, j8framework::CodeKind::Script)?,
+                    Some(cache) => cache.script(src, DebugInfo::Omit)?,
+                    None => Module::compile(src, j8framework::CodeKind::Script, DebugInfo::Omit)?,
                 },
                 file: src.file.into(),
             },
