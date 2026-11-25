@@ -1137,6 +1137,7 @@ impl Arrays {
                 if depth > 0.0 && a.is_array(v)? {
                     let Some(inner) = v.as_object() else { unreachable!("arrays are objects") };
                     let inner_len = a.length_of_array_like(v)?;
+                    a.check_stack()?;
                     to = Self::flatten(a, target, inner, inner_len, to, depth - 1.0, Value::Undefined, Value::Undefined)?;
                 } else {
                     if to >= MAX_LENGTH {

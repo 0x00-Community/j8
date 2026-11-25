@@ -8,7 +8,7 @@ autotests = false
 repository.workspace = true
 readme = "README.md"
 # Publish only the library: the tests/test262 submodule has over fifty thousand files, too many for crates.io
-include = ["/src", "/tests/binding.rs", "/tests/runtime.rs", "/tests/bindings_more.rs", "/tests/event_loop.rs", "/tests/terminate.rs", "/tests/jit_typeof.rs", "/tests/jit_lazy.rs", "/tests/jit_stack.rs", "/tests/regexp_fast.rs", "/tests/json_fast.rs", "/tests/jit_callbacks.rs", "/tests/jit_args.rs", "/tests/jit_intrinsics.rs", "/tests/jit_mod.rs", "/tests/jit_regexp.rs", "/tests/string_fast.rs", "/README.md", "/README.zh-CN.md", "/EMBEDDING.md", "/LICENSE"]
+include = ["/src", "/tests/binding.rs", "/tests/runtime.rs", "/tests/bindings_more.rs", "/tests/event_loop.rs", "/tests/terminate.rs", "/tests/jit_typeof.rs", "/tests/jit_lazy.rs", "/tests/jit_stack.rs", "/tests/native_stack.rs", "/tests/regexp_fast.rs", "/tests/json_fast.rs", "/tests/jit_callbacks.rs", "/tests/jit_args.rs", "/tests/jit_intrinsics.rs", "/tests/jit_mod.rs", "/tests/jit_regexp.rs", "/tests/string_fast.rs", "/README.md", "/README.zh-CN.md", "/EMBEDDING.md", "/LICENSE"]
 
 [lib]
 name = "j8"
@@ -117,6 +117,10 @@ path = "tests/jit_lazy.rs"
 [[test]]
 name = "jit_stack"
 path = "tests/jit_stack.rs"
+
+[[test]]
+name = "native_stack"
+path = "tests/native_stack.rs"
 
 [[test]]
 name = "regexp_fast"

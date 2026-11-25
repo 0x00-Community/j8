@@ -65,6 +65,11 @@ pub struct CreateParams {
     pub profile: bool,
     pub event_loop: bool,
     pub collector_threads: Option<NonZeroUsize>,
+    pub stack_size: Option<NonZeroUsize>,
+}
+
+impl CreateParams {
+    pub const DEFAULT_STACK_SIZE: usize = 984 << 10;
 }
 
 pub struct Isolate<'p> {
@@ -76,6 +81,7 @@ pub struct Isolate<'p> {
     stop: Arc<Termination>,
     exception: Option<ScopeGlobal<'p, ValueBrand>>,
     parked: core::cell::RefCell<Parked<'p>>,
+    stack_size: usize,
     #[cfg(all(target_os = "linux", feature = "crossheap"))]
     shares: Shares<'p>,
 }
@@ -95,6 +101,7 @@ impl<'p> Isolate<'p> {
             stop: Arc::default(),
             exception: None,
             parked: core::cell::RefCell::default(),
+            stack_size: params.stack_size.map_or(CreateParams::DEFAULT_STACK_SIZE, NonZeroUsize::get),
             #[cfg(all(target_os = "linux", feature = "crossheap"))]
             shares: Shares::default(),
         }
@@ -145,7 +152,7 @@ impl<'p> Isolate<'p> {
     }
 
     pub fn enter<R>(&mut self, cx: &ScopeGlobal<'p, crate::ContextBrand>, invoke: &dyn for<'s> crate::Invoke<'s>, f: impl for<'scope> FnOnce(&mut Scope<'scope, '_>) -> R) -> R {
-        let (platform, profiler, generation, stop) = (self.platform, &mut self.profiler, self.generation, &*self.stop);
+        let (platform, profiler, generation, stop, stack_size) = (self.platform, &mut self.profiler, self.generation, &*self.stop, self.stack_size);
         let spawned = self.spawned.as_ref();
         let parked = &self.parked;
         #[cfg(all(target_os = "linux", feature = "crossheap"))]
@@ -170,6 +177,7 @@ impl<'p> Isolate<'p> {
                 stop,
                 parked: unsafe { rebrand_ref(parked) },
                 spare_regs: Vec::new(),
+                stack_limit: Scope::stack_limit_here(stack_size),
                 #[cfg(all(target_os = "linux", feature = "crossheap"))]
                 shares: unsafe { &mut *core::ptr::from_mut(shares).cast() },
             });

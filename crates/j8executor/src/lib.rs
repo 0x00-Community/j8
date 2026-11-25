@@ -2445,6 +2445,7 @@ impl<'scope> Invoke<'scope> for Executor<'_> {
         if level >= STACK_LIMIT {
             return Err(a.throw(ErrorKind::Range, "Maximum call stack size exceeded"));
         }
+        a.check_stack()?;
         if let ValueKind::Object(o) = callee.kind()
             && let Some(c) = o.closure()
             && let l = self.code(&c)
@@ -2531,6 +2532,7 @@ impl<'scope> Invoke<'scope> for Executor<'_> {
         if level >= STACK_LIMIT {
             return Err(a.throw(ErrorKind::Range, "Maximum call stack size exceeded"));
         }
+        a.check_stack()?;
         let (state, waiting, async_generator) = Self::coroutine_mut(a, co, |c| (c.state, core::mem::replace(&mut c.waiting, W::Nothing), c.requests.is_some()));
         let (mut mode, mut rethrow) = (mode, false);
         match waiting {
@@ -2607,6 +2609,7 @@ impl<'scope> Invoke<'scope> for Executor<'_> {
         if level >= STACK_LIMIT {
             return Err(a.throw(ErrorKind::Range, "Maximum call stack size exceeded"));
         }
+        a.check_stack()?;
         let mut regs = Vec::new();
         match self.prepare(a, &mut regs, callee, args.to_vec(), new_target, level)? {
             Prepared::Done(v) => Ok(v),
