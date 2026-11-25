@@ -65,6 +65,12 @@ impl<'scope> Scope<'scope, '_> {
         }
     }
 
+    pub fn set_promise_handled(&self, promise: JsObject<'scope>, handled: bool) {
+        if let ObjectKind::Promise { handled: h, .. } = &mut promise.borrow_mut(self.mc).kind {
+            *h = handled;
+        }
+    }
+
     pub fn reject_promise(&mut self, promise: JsObject<'scope>, reason: Value<'scope>) {
         self.settle(promise, reason, true);
     }

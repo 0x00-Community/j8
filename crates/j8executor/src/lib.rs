@@ -2745,9 +2745,14 @@ impl<'p> Executor<'p> {
                 Started::Paused(root) => j8framework::CellExt::borrow_mut(a.mc.fetch(&root), a.mc).take().expect("a parked state"),
                 Started::Module { text, file } => {
                     let (_, evaluation) = this.run_module(a, &file, &text)?;
+                    a.set_promise_handled(evaluation, true);
                     a.run_jobs()?;
                     return match Scope::promise_state(evaluation.into()) {
                         Some(j8framework::Settled::Rejected(error)) => Err(a.throw_value(error)),
+                        Some(j8framework::Settled::Pending) => {
+                            a.set_promise_handled(evaluation, false);
+                            Ok(Slice::Done(a.global(evaluation.into())))
+                        }
                         _ => Ok(Slice::Done(a.global(evaluation.into()))),
                     };
                 }

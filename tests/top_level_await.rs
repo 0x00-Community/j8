@@ -1,6 +1,7 @@
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use j8::frame::{Platform, Pool, Scope, ScopeGlobal, Settled, Task, ValueBrand};
+use j8::frame::{JsObject, Platform, Pool, Scope, ScopeGlobal, Settled, Task, Value, ValueBrand};
 use j8executor::Executor;
 use j8platform::DefaultPlatform;
 
@@ -20,7 +21,8 @@ j8::runtime! {
     }
 }
 
-struct Sources(DefaultPlatform);
+#[derive(Default)]
+struct Sources(DefaultPlatform, AtomicUsize);
 
 impl Sources {
     const DEPENDENCY: &str = "globalThis.order = ['dependency starts']; export const value = await later.echo(20); order.push('dependency done');";
@@ -53,6 +55,10 @@ impl Platform for Sources {
     fn print(&self, line: &str) {
         self.0.print(line);
     }
+
+    fn unhandled_rejection<'scope>(&self, _: &mut Scope<'scope, '_>, _: JsObject<'scope>, _: Value<'scope>) {
+        self.1.fetch_add(1, Ordering::SeqCst);
+    }
 }
 
 fn state(rt: &j8::Runtime<'_>, evaluation: &ScopeGlobal<'_, ValueBrand>) -> String {
@@ -72,7 +78,7 @@ fn text<'scope>(a: &mut Scope<'scope, '_>, v: j8::frame::Value<'scope>) -> Strin
 
 #[test]
 fn module_evaluation_waits_for_top_level_await() {
-    let platform = Waiting::platform(Sources(DefaultPlatform::default()));
+    let platform = Waiting::platform(Sources::default());
     j8::EventLoopSet::scope(&platform, std::num::NonZeroUsize::MIN, |set| {
         let rt = Waiting::runtime(set, Executor::default()).expect("runtime");
         let src = "import { value } from './dependency.mjs'; order.push('main starts'); globalThis.result = value + await later.echo(22); order.push('main done');";
@@ -86,7 +92,7 @@ fn module_evaluation_waits_for_top_level_await() {
 
 #[test]
 fn module_evaluation_rejects_when_a_dependency_throws_after_await() {
-    let platform = Waiting::platform(Sources(DefaultPlatform::default()));
+    let platform = Waiting::platform(Sources::default());
     j8::EventLoopSet::scope(&platform, std::num::NonZeroUsize::MIN, |set| {
         let rt = Waiting::runtime(set, Executor::default()).expect("runtime");
         let evaluation = rt.eval_module("import './failing.mjs'; globalThis.reached = true;", "main.mjs").expect("module starts");
@@ -95,4 +101,16 @@ fn module_evaluation_rejects_when_a_dependency_throws_after_await() {
         let r = rt.eval("typeof reached", "check.js").expect("script runs");
         assert_eq!(rt.text(&r), "undefined");
     });
+}
+
+#[test]
+fn a_module_that_throws_is_reported_once_as_the_evaluation_error() {
+    let platform = Waiting::platform(Sources::default());
+    j8::EventLoopSet::scope(&platform, std::num::NonZeroUsize::MIN, |set| {
+        let rt = Waiting::runtime(set, Executor::default()).expect("runtime");
+        assert!(rt.eval_module("throw new Error('at the top');", "main.mjs").is_err(), "evaluation fails");
+        assert!(rt.eval_module("import './failing.mjs';", "sync-wait.mjs").is_ok(), "an awaiting module starts");
+        rt.run_until_idle().expect("loop runs");
+    });
+    assert_eq!(platform.inner().1.load(Ordering::SeqCst), 1, "only the rejection after await reaches the platform, once");
 }
