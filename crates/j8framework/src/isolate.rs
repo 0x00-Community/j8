@@ -170,6 +170,7 @@ impl<'p> Isolate<'p> {
                 stop,
                 parked: unsafe { rebrand_ref(parked) },
                 spare_regs: Vec::new(),
+                joining: crate::Visiting::default(),
                 #[cfg(all(target_os = "linux", feature = "crossheap"))]
                 shares: unsafe { &mut *core::ptr::from_mut(shares).cast() },
             });

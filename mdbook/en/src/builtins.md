@@ -32,7 +32,9 @@ through `Invoke`.
 ## Coverage
 
 - **Object / Array**: every method; Array methods generic over array-likes, species; `from` / `flat` / `toSorted` /
-  `with` …
+  `with` …; `join` / `toLocaleString` give `""` for an array already being joined (as V8 and SpiderMonkey do), keeping
+  the arrays being joined on the `Scope` (`Scope::joining`, a `Visiting` stack, the same one `JSON.stringify` uses to
+  find cycles);
 - **Reflection**: `Reflect`, `Proxy` (revocable too);
 - **Iterator helpers**: the global `Iterator`, `Iterator.from`, `map` / `filter` / `take` / `drop` / `flatMap` /
   `reduce` …; Set methods (`union` …), `Map.groupBy` / `Object.groupBy`;

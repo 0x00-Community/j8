@@ -125,13 +125,35 @@ pub struct Scope<'scope, 'x> {
     pub stop: &'x crate::Termination,
     pub parked: &'x core::cell::RefCell<crate::Parked<'x>>,
     pub spare_regs: Vec<Vec<Value<'scope>>>,
+    pub(crate) joining: Visiting<'scope>,
     #[cfg(all(target_os = "linux", feature = "crossheap"))]
     pub shares: &'x mut crate::Shares<'x>,
 }
 
 
+#[derive(Default)]
+pub struct Visiting<'scope>(Vec<JsObject<'scope>>);
+
+impl<'scope> Visiting<'scope> {
+    pub fn enter(&mut self, o: JsObject<'scope>) -> bool {
+        if self.0.iter().any(|&v| ScopeLocal::ptr_eq(v, o)) {
+            return false;
+        }
+        self.0.push(o);
+        true
+    }
+
+    pub fn leave(&mut self) {
+        self.0.pop();
+    }
+}
+
 impl<'scope> Scope<'scope, '_> {
     const SPARE_REGS: usize = 8;
+
+    pub fn joining(&mut self) -> &mut Visiting<'scope> {
+        &mut self.joining
+    }
 
     pub fn spawn<'i>(&self, job: crate::AsyncJob<'i>) -> Result<(), crate::AsyncJob<'i>> {
         match self.spawned {

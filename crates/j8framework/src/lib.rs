@@ -31,7 +31,7 @@ mod terminate;
 mod text;
 mod value;
 
-pub use scope::{Callback, CallbackRun, CodeKind, Invoke, Resume, Scope, Step};
+pub use scope::{Callback, CallbackRun, CodeKind, Invoke, Resume, Scope, Step, Visiting};
 pub use engine::{ScriptKind, Source};
 pub use j8taskqueue::Quota;
 pub use error::Error;
