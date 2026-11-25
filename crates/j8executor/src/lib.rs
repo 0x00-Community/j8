@@ -2672,7 +2672,6 @@ impl<'scope> Invoke<'scope> for Executor<'_> {
 #[collect(no_drop)]
 enum After<'scope> {
     Script,
-    Body(#[collect(require_static)] u32),
     Reaction(Option<j8framework::Capability<'scope>>),
     Await(JsObject<'scope>),
 }
@@ -2807,12 +2806,6 @@ impl<'p> Executor<'p> {
                         return Ok(Next::Paused);
                     }
                     *budget = budget.map(|b| b - 1);
-                    if let Some(m) = a.next_module_body() {
-                        if let Some(e) = self.body_running(a, m)? {
-                            return Ok(Next::Run(e));
-                        }
-                        continue;
-                    }
                     let Some(next) = a.next_job() else {
                         job.work = Work::Spent;
                         return Ok(Next::Done);
@@ -2824,21 +2817,6 @@ impl<'p> Executor<'p> {
                 Work::Spent => return Ok(Next::Done),
             }
         }
-    }
-
-    fn body_running<'scope>(&self, a: &mut Scope<'scope, '_>, m: u32) -> Result<Option<Execution<'scope>>, Error> {
-        let (function, top_level_await) = a.module_body(m);
-        if !top_level_await
-            && let Some(c) = function.closure()
-        {
-            self.note_user();
-            let mut regs = a.take_regs();
-            regs.clear();
-            let f = Self::open(a, &mut regs, self.code(&c), c, function.into(), Value::Undefined, Args::Values(&[]), Opening::Call);
-            return Ok(Some(Execution { state: self.state(regs, f), after: After::Body(m) }));
-        }
-        a.run_module_body(m)?;
-        Ok(None)
     }
 
     fn job_running<'scope>(&self, a: &mut Scope<'scope, '_>, job: j8framework::Job<'scope>) -> Result<Option<Execution<'scope>>, Error> {
@@ -2876,7 +2854,6 @@ impl<'p> Executor<'p> {
     fn finished<'scope>(&self, a: &mut Scope<'scope, '_>, job: &mut Job<'p>, after: After<'scope>, r: Result<Value<'scope>, Error>) -> Result<(), Error> {
         match after {
             After::Script => job.value = Some(a.global(r?)),
-            After::Body(m) => a.module_body_done(m, r)?,
             After::Reaction(capability) => a.reacted(capability, r)?,
             After::Await(co) => {
                 let promise = Self::coroutine(co, |c| c.promise);
