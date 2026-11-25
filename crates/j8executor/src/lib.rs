@@ -491,8 +491,30 @@ enum CallStep<'scope> {
     Bound(Value<'scope>, Value<'scope>, Vec<Value<'scope>>),
 }
 
-enum Callee<'scope> {
-    Closure { closure: Closure<'scope>, callee: Value<'scope>, this: Value<'scope>, args: Vec<Value<'scope>> },
+enum Argv<'a, 'scope> {
+    Same(Args<'a, 'scope>),
+    Owned(Vec<Value<'scope>>),
+}
+
+impl<'scope> Argv<'_, 'scope> {
+    fn slice<'r>(&'r self, regs: &'r [Value<'scope>]) -> &'r [Value<'scope>] {
+        match self {
+            Argv::Same(Args::Values(v)) => v,
+            Argv::Same(Args::Regs { first, count }) => &regs[*first..*first + *count],
+            Argv::Owned(v) => v,
+        }
+    }
+
+    fn args(&self) -> Args<'_, 'scope> {
+        match self {
+            Argv::Same(a) => *a,
+            Argv::Owned(v) => Args::Values(v),
+        }
+    }
+}
+
+enum Callee<'a, 'scope> {
+    Closure { closure: Closure<'scope>, callee: Value<'scope>, this: Value<'scope>, args: Argv<'a, 'scope> },
     Done(Value<'scope>),
 }
 
@@ -765,7 +787,8 @@ impl Executor<'_> {
         usize::try_from(slot).unwrap_or(0).saturating_sub(Context::MIN_SLOTS as usize)
     }
 
-    fn resolve<'scope>(&self, a: &mut Scope<'scope, '_>, mut callee: Value<'scope>, mut this: Value<'scope>, mut args: Vec<Value<'scope>>, level: usize) -> Result<Callee<'scope>, Error> {
+    fn resolve<'a, 'scope>(&self, a: &mut Scope<'scope, '_>, regs: &[Value<'scope>], mut callee: Value<'scope>, mut this: Value<'scope>, args: Args<'a, 'scope>, level: usize) -> Result<Callee<'a, 'scope>, Error> {
+        let mut args = Argv::Same(args);
         while let ValueKind::Object(o) = callee.kind() {
             let step = if let Some(c) = o.closure() {
                 CallStep::Closure(c)
@@ -787,33 +810,33 @@ impl Executor<'_> {
                 && a.is_callable(this)
             {
                 let target = this;
-                let mut rest = args.into_iter();
+                let mut rest = args.slice(regs).iter().copied();
                 this = rest.next().unwrap_or_default();
-                args = match n.forward {
+                let list = match n.forward {
                     j8framework::Forward::Apply => match rest.next().unwrap_or_default().kind() {
                         ValueKind::Undefined | ValueKind::Null => Vec::new(),
                         list => a.list_from_array_like(Value::from(list))?,
                     },
                     _ => rest.collect(),
                 };
-                callee = target;
+                (callee, args) = (target, Argv::Owned(list));
                 continue;
             }
             let r = match step {
                 CallStep::Closure(c) => {
-                    let loaded = self.function(c.func);
+                    let loaded = self.code(&c);
                     if loaded.class_constructor {
                         return Err(a.throw(ErrorKind::Type, &alloc::format!("Class constructor {} cannot be invoked without 'new'", loaded.func.name)));
                     }
                     return Ok(Callee::Closure { closure: c, callee, this, args });
                 }
-                CallStep::Resolver => self.deep(level, || a.run_resolver(o, args.first().copied().unwrap_or_default())),
-                CallStep::Proxy => self.deep(level, || a.proxy_call(o, this, &args)),
-                CallStep::NativeClosure(f) => self.native_at(a, level, Value::Undefined, |a| f(a, o, this, &args)),
-                CallStep::Native(n) | CallStep::Forward(n) => self.native_at(a, level, Value::Undefined, |a| (n.f)(a, this, &args)),
+                CallStep::Resolver => self.deep(level, || a.run_resolver(o, args.slice(regs).first().copied().unwrap_or_default())),
+                CallStep::Proxy => self.deep(level, || a.proxy_call(o, this, args.slice(regs))),
+                CallStep::NativeClosure(f) => self.native_at(a, level, Value::Undefined, |a| f(a, o, this, args.slice(regs))),
+                CallStep::Native(n) | CallStep::Forward(n) => self.native_at(a, level, Value::Undefined, |a| (n.f)(a, this, args.slice(regs))),
                 CallStep::Bound(target, bound_this, mut bound_args) => {
-                    bound_args.extend(args);
-                    (callee, this, args) = (target, bound_this, bound_args);
+                    bound_args.extend_from_slice(args.slice(regs));
+                    (callee, this, args) = (target, bound_this, Argv::Owned(bound_args));
                     continue;
                 }
             };
@@ -835,45 +858,40 @@ impl Executor<'_> {
 
     fn prepare<'scope>(&self, a: &mut Scope<'scope, '_>, regs: &mut Vec<Value<'scope>>, mut callee: Value<'scope>, mut args: Vec<Value<'scope>>, mut new_target: Value<'scope>, level: usize) -> Result<Prepared<'scope>, Error> {
         while let ValueKind::Object(o) = callee.kind() {
-            let kind = match &o.borrow().kind {
-                ObjectKind::Function(c) => Ok(Ok(*c)),
-                ObjectKind::Native(n) => Ok(Err(*n)),
-                ObjectKind::NativeClosure(c) if c.constructor => {
-                    let f = c.f;
-                    return self.deep(level, || Self::construct_closure(a, o, f, &args, new_target)).map(Prepared::Done);
-                }
-                ObjectKind::Bound(b) => Err(Some((b.target, b.args.clone()))),
-                ObjectKind::Proxy(p) if p.constructor => Err(None),
+            let step = match &o.borrow().kind {
+                ObjectKind::Function(c) => CallStep::Closure(*c),
+                ObjectKind::Native(n) if n.constructor => CallStep::Native(*n),
+                ObjectKind::NativeClosure(c) if c.constructor => CallStep::NativeClosure(c.f),
+                ObjectKind::Bound(b) => CallStep::Bound(b.target, b.this, b.args.clone()),
+                ObjectKind::Proxy(p) if p.constructor => CallStep::Proxy,
                 _ => break,
             };
-            match kind {
-                Ok(Ok(closure)) => {
-                    let loaded = self.function(closure.func);
+            return match step {
+                CallStep::Closure(closure) => {
+                    let loaded = self.code(&closure);
                     if !(loaded.constructs || loaded.class_constructor) {
                         break;
                     }
                     let this = if loaded.derived { Value::Uninit } else { Value::Object(Self::create_this(a, loaded, new_target)?) };
-                    return Ok(Prepared::Frame(Self::open(a, regs, loaded, closure, callee, this, Args::Values(&args), Opening::Construct(new_target))));
+                    Ok(Prepared::Frame(Self::open(a, regs, loaded, closure, callee, this, Args::Values(&args), Opening::Construct(new_target))))
                 }
-                Ok(Err(native)) => {
-                    if !native.constructor {
-                        break;
-                    }
-                    let r = self.native_at(a, level, new_target, |a| (native.f)(a, Value::Undefined, &args));
+                CallStep::Native(n) => {
+                    let r = self.native_at(a, level, new_target, |a| (n.f)(a, Value::Undefined, &args));
                     let Some(obj) = (r?).as_object() else { unreachable!("built-in constructors return objects") };
-                    return Ok(Prepared::Done(obj.into()));
+                    Ok(Prepared::Done(obj.into()))
                 }
-                Err(None) => {
-                    return self.deep(level, || a.proxy_construct(o, &args, new_target)).map(Prepared::Done);
-                }
-                Err(Some((target, mut bound_args))) => {
+                CallStep::NativeClosure(f) => self.deep(level, || Self::construct_closure(a, o, f, &args, new_target)).map(Prepared::Done),
+                CallStep::Proxy => self.deep(level, || a.proxy_construct(o, &args, new_target)).map(Prepared::Done),
+                CallStep::Bound(target, _, mut bound_args) => {
                     if matches!(new_target.kind(), ValueKind::Object(t) if ScopeLocal::ptr_eq(t, o)) {
                         new_target = target;
                     }
                     bound_args.extend(args);
                     (callee, args) = (target, bound_args);
+                    continue;
                 }
-            }
+                CallStep::Resolver | CallStep::Forward(_) => unreachable!("not built for construction"),
+            };
         }
         let what = a.describe(callee);
         Err(a.throw(ErrorKind::Type, &alloc::format!("{what} is not a constructor")))
@@ -1440,31 +1458,9 @@ impl Executor<'_> {
 
     fn call_from<'scope>(&self, a: &mut Scope<'scope, '_>, st: &mut State<'scope>, callee: Value<'scope>, this: Value<'scope>, args: Args<'_, 'scope>) -> Result<Flow<'scope>, Error> {
         let level = Self::within(a, st.level() + 1)?;
-        if let ValueKind::Object(o) = callee.kind()
-            && let Some(c) = o.closure()
-        {
-            let l = self.function(c.func);
-            if !(l.class_constructor || l.generator || l.asynchronous) {
-                let next = Self::open(a, &mut st.regs, l, c, callee, this, args, Opening::Call);
-                st.push(next);
-                return Ok(Flow::Frame);
-            }
-        }
-        if let ValueKind::Object(o) = callee.kind()
-            && let Some(n) = o.native()
-            && n.forward == j8framework::Forward::No
-        {
-            let args = match args {
-                Args::Values(v) => v,
-                Args::Regs { first, count } => &st.regs[first..first + count],
-            };
-            st.acc = self.native_at(a, level, Value::Undefined, |a| (n.f)(a, this, args))?;
-            return Ok(Flow::Next);
-        }
-        let args = args.to_vec(&st.regs);
-        match self.resolve(a, callee, this, args, level)? {
+        match self.resolve(a, &st.regs, callee, this, args, level)? {
             Callee::Closure { closure, callee, this, args } => {
-                let next = Self::open(a, &mut st.regs, self.function(closure.func), closure, callee, this, Args::Values(&args), Opening::Call);
+                let next = Self::open(a, &mut st.regs, self.code(&closure), closure, callee, this, args.args(), Opening::Call);
                 st.push(next);
                 Ok(Flow::Frame)
             }
@@ -2586,39 +2582,22 @@ impl<'scope> Invoke<'scope> for Executor<'_> {
     fn call(&self, a: &mut Scope<'scope, '_>, callee: Value<'scope>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         let level = self.deeper(a)?;
         a.check_stack()?;
-        if let ValueKind::Object(o) = callee.kind()
-            && let Some(c) = o.closure()
-            && let l = self.code(&c)
-            && !l.class_constructor
+        let (closure, callee, this, args) = match self.resolve(a, &[], callee, this, Args::Values(args), level)? {
+            Callee::Done(v) => return Ok(v),
+            Callee::Closure { closure, callee, this, args } => (closure, callee, this, args),
+        };
+        let l = self.code(&closure);
+        if l.tier.get() != 0
+            && let Some(t) = &self.tier
+            && let Some(r) = self.deep(level, || t.call(self, a, closure.func, callee, this, args.slice(&[])))
         {
-            if l.tier.get() != 0
-                && let Some(t) = &self.tier
-                && let Some(r) = self.deep(level, || t.call(self, a, c.func, callee, this, args))
-            {
-                return r;
-            }
-            self.note_user();
-            let mut regs = a.take_regs();
-            regs.clear();
-            let f = Self::open(a, &mut regs, l, c, callee, this, Args::Values(args), Opening::Call);
-            return self.run_frame(a, regs, f, level);
+            return r;
         }
-        if let ValueKind::Object(o) = callee.kind()
-            && let Some(n) = o.native()
-            && n.forward == j8framework::Forward::No
-        {
-            return self.native_at(a, level, Value::Undefined, |a| (n.f)(a, this, args));
-        }
-        match self.resolve(a, callee, this, args.to_vec(), level)? {
-            Callee::Done(v) => Ok(v),
-            Callee::Closure { closure, callee, this, args } => {
-                self.note_user();
-                let mut regs = a.take_regs();
-                regs.clear();
-                let f = Self::open(a, &mut regs, self.function(closure.func), closure, callee, this, Args::Values(&args), Opening::Call);
-                self.run_frame(a, regs, f, level)
-            }
-        }
+        self.note_user();
+        let mut regs = a.take_regs();
+        regs.clear();
+        let f = Self::open(a, &mut regs, l, closure, callee, this, args.args(), Opening::Call);
+        self.run_frame(a, regs, f, level)
     }
 
     fn callback(&self, a: &mut Scope<'scope, '_>, callee: Value<'scope>, this: Value<'scope>) -> j8framework::Callback<'scope> {

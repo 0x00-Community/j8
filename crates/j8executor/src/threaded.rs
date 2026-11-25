@@ -353,7 +353,7 @@ fn enter<'r, 'scope>(cx: &mut Cx<'r, 'scope, '_, '_, '_>, pc: *const Insn, calle
     let Some(o) = callee.as_object() else { return Entered::No };
     let Some(c) = o.closure() else { return Entered::No };
     let l: &'r Loaded = cx.exe.code(&c);
-    if l.class_constructor || l.generator || l.asynchronous || !cx.st.room() {
+    if l.class_constructor || !cx.st.room() {
         return Entered::No;
     }
     Executor::record_call(cx.loaded, fb, c.func);
