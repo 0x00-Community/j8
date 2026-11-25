@@ -220,6 +220,7 @@ impl<'p> Isolate<'p> {
                 spare_regs: Vec::new(),
                 heap_limit: heap_limit.map(|l| unsafe { rebrand_ref(l) }),
                 stack_limit: Scope::stack_limit_here(stack_size),
+                joining: crate::Visiting::default(),
                 #[cfg(all(target_os = "linux", feature = "crossheap"))]
                 shares: unsafe { &mut *core::ptr::from_mut(shares).cast() },
             });

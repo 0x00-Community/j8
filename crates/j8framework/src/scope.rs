@@ -136,10 +136,28 @@ pub struct Scope<'scope, 'x> {
     pub spare_regs: Vec<Vec<Value<'scope>>>,
     pub(crate) heap_limit: Option<&'x crate::HeapLimit<'x>>,
     pub(crate) stack_limit: usize,
+    pub(crate) joining: Visiting<'scope>,
     #[cfg(all(target_os = "linux", feature = "crossheap"))]
     pub shares: &'x mut crate::Shares<'x>,
 }
 
+
+#[derive(Default)]
+pub struct Visiting<'scope>(Vec<JsObject<'scope>>);
+
+impl<'scope> Visiting<'scope> {
+    pub fn enter(&mut self, o: JsObject<'scope>) -> bool {
+        if self.0.iter().any(|&v| ScopeLocal::ptr_eq(v, o)) {
+            return false;
+        }
+        self.0.push(o);
+        true
+    }
+
+    pub fn leave(&mut self) {
+        self.0.pop();
+    }
+}
 
 impl<'scope> Scope<'scope, '_> {
     pub fn check_heap_limit(&self) {
@@ -183,6 +201,10 @@ impl<'scope> Scope<'scope, '_> {
             return Err(self.throw(crate::ErrorKind::Range, "Maximum call stack size exceeded"));
         }
         Ok(())
+    }
+
+    pub fn joining(&mut self) -> &mut Visiting<'scope> {
+        &mut self.joining
     }
 
     pub fn spawn<'i>(&self, job: crate::AsyncJob<'i>) -> Result<(), crate::AsyncJob<'i>> {

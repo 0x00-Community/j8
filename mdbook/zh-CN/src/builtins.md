@@ -29,7 +29,9 @@ let cx = isolate.create_context(&j8builtins::Builtins);
 
 ## 覆盖范围
 
-- **Object / Array** 的全部方法：Array 方法对类数组通用、species；`from` / `flat` / `toSorted` / `with` ……
+- **Object / Array** 的全部方法：Array 方法对类数组通用、species；`from` / `flat` / `toSorted` / `with` ……；
+  `join` / `toLocaleString` 遇到正在 join 的数组给 `""`（和 V8、SpiderMonkey 一样），正在 join 的数组记在 `Scope` 上
+  （`Scope::joining`，一个 `Visiting` 栈，`JSON.stringify` 找环用的也是它）；
 - **反射**：`Reflect`、`Proxy`（含 revocable）；
 - **迭代器助手**：全局 `Iterator`、`Iterator.from`、`map` / `filter` / `take` / `drop` / `flatMap` / `reduce` ……；
   Set 方法（`union` 等）、`Map.groupBy` / `Object.groupBy`；

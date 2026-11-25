@@ -18,6 +18,13 @@ const CASES: &[(&str, &str)] = &[
          with ({}) { var d = 1 } })(); return [a, b, c, d].join() })()",
         "0,0,0,0",
     ),
+    // 正在 join 的数组再遇到自己时给空串，和 V8、SpiderMonkey 一样
+    ("var a = [1]; a.push(a, 2); String(a)", "1,,2"),
+    ("var a = [1]; a.push(a, 2); a.toLocaleString()", "1,,2"),
+    ("var a = [1]; var b = [a, [a, a]]; b.push(b); b.join(';')", "1;1,1;"),
+    // join 中途抛错后不留下正在 join 的记录
+    ("var bad = [{ toString() { throw 0; } }]; try { String(bad); } catch (e) {} bad[0] = 1; String([bad, bad])", "1,1"),
+    ("var o = {}; o.o = o; try { JSON.stringify(o); } catch (e) { e.name; }", "TypeError"),
 ];
 
 fn outcome(text: &str) -> String {
