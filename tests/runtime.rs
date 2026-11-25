@@ -125,3 +125,47 @@ fn rejections_keep_their_own_reasons() {
         assert_eq!(rt.text(&r), "a:first|b:second|clean");
     });
 }
+
+struct Refusing(DefaultPlatform);
+
+impl j8::frame::Pool for Refusing {
+    fn threads(&self) -> usize {
+        self.0.threads()
+    }
+
+    fn run(&self, jobs: Vec<j8::frame::Task<'_>>) {
+        self.0.run(jobs);
+    }
+}
+
+impl j8::frame::Platform for Refusing {
+    fn now(&self) -> std::time::Duration {
+        self.0.now()
+    }
+
+    fn load_module(&self, scope: &mut j8::frame::Scope<'_, '_>, referrer: &str, specifier: &str) -> Result<(String, String), j8::frame::Error> {
+        match specifier {
+            "./refused.mjs" => Err(scope.throw(j8::frame::ErrorKind::Range, &format!("{referrer} may not import {specifier}"))),
+            "./ok.mjs" => Ok((String::from("ok.mjs"), String::from("export const ok = 1;"))),
+            _ => Err(scope.module_not_found(referrer, specifier)),
+        }
+    }
+
+    fn print(&self, line: &str) {
+        self.0.print(line);
+    }
+}
+
+#[test]
+fn a_failed_module_load_throws_the_hosts_error() {
+    let platform = Base::platform(Refusing(DefaultPlatform::default()));
+    j8::EventLoopSet::scope(&platform, std::num::NonZeroUsize::MIN, |set| {
+        let rt = Base::runtime(set, Executor::default()).expect("runtime");
+        assert!(rt.eval_module("import './refused.mjs';", "main.mjs").is_err(), "a refused static import fails the module");
+        assert!(rt.exception_text().starts_with("RangeError: main.mjs may not import ./refused.mjs"), "{}", rt.exception_text());
+        rt.eval("globalThis.seen = []; for (const s of ['./refused.mjs', './missing.mjs', './ok.mjs']) import(s).then((m) => seen.push(m.ok), (e) => seen.push(`${e.name}: ${e.message}`));", "dynamic.js").expect("script runs");
+        rt.run_until_idle().expect("loop runs");
+        let r = rt.eval("seen.join('|')", "check.js").expect("script runs");
+        assert_eq!(rt.text(&r), "RangeError: dynamic.js may not import ./refused.mjs|TypeError: Cannot find module './missing.mjs' imported from 'dynamic.js'|1");
+    });
+}

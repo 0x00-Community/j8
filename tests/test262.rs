@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use j8builtins::Builtins;
 use j8executor::Executor;
-use j8framework::{CreateParams, Error, Isolate, Platform, Source, Task};
+use j8framework::{CreateParams, Error, Isolate, Platform, Scope, Source, Task};
 use serde::Deserialize;
 
 const ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/test262");
@@ -169,12 +169,11 @@ impl Platform for Capture {
         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default()
     }
 
-    fn load_module(&self, referrer: &str, specifier: &str) -> Option<(String, String)> {
-        let referrer = Suite::test_dir().join(referrer);
-        let base = referrer.parent()?;
-        let path = std::fs::canonicalize(base.join(specifier)).ok()?;
-        let text = std::fs::read_to_string(&path).ok()?;
-        Some((path.display().to_string(), text))
+    fn load_module(&self, scope: &mut Scope<'_, '_>, referrer: &str, specifier: &str) -> Result<(String, String), Error> {
+        let base = Suite::test_dir().join(referrer);
+        let read = base.parent().map(|dir| dir.join(specifier)).ok_or(()).and_then(|p| std::fs::canonicalize(p).map_err(drop));
+        let read = read.and_then(|path| Ok((path.display().to_string(), std::fs::read_to_string(&path).map_err(drop)?)));
+        read.map_err(|()| scope.module_not_found(referrer, specifier))
     }
 
     fn now(&self) -> Duration {

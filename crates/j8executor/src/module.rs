@@ -47,9 +47,8 @@ impl Executor<'_> {
         self.module_of.borrow_mut().insert(main.0 - j8bytecode::Module::MAIN, index);
         let mut requested = Vec::with_capacity(info.requests.len());
         for spec in &info.requests {
-            let Some((p, t)) = a.platform.load_module(path, spec) else {
-                return Err(Error::Syntax(alloc::format!("{path}: Cannot find module '{spec}'")));
-            };
+            let platform = a.platform;
+            let (p, t) = platform.load_module(a, path, spec)?;
             requested.push(self.load_module(a, &p, &t)?);
         }
         a.update_module(index, |r| r.requested.clone_from(&requested));
@@ -145,9 +144,8 @@ impl Executor<'_> {
     pub fn dynamic_import<'scope>(&self, a: &mut Scope<'scope, '_>, referrer: &str, specifier: Value<'scope>) -> Result<Value<'scope>, Error> {
         let r = (|| -> Result<JsObject<'scope>, Error> {
             let spec = a.to_string(specifier)?;
-            let Some((path, text)) = a.platform.load_module(referrer, &spec) else {
-                return Err(a.throw(ErrorKind::Type, &alloc::format!("Cannot find module '{}'", &**spec)));
-            };
+            let platform = a.platform;
+            let (path, text) = platform.load_module(a, referrer, &spec)?;
             self.import(a, &path, &text)
         })();
         let reason = match r {

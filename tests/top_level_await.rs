@@ -44,11 +44,11 @@ impl Platform for Sources {
         self.0.now()
     }
 
-    fn load_module(&self, _: &str, specifier: &str) -> Option<(String, String)> {
+    fn load_module(&self, scope: &mut Scope<'_, '_>, referrer: &str, specifier: &str) -> Result<(String, String), j8::frame::Error> {
         match specifier {
-            "./dependency.mjs" => Some((specifier.to_owned(), Self::DEPENDENCY.to_owned())),
-            "./failing.mjs" => Some((specifier.to_owned(), Self::FAILING.to_owned())),
-            _ => None,
+            "./dependency.mjs" => Ok((specifier.to_owned(), Self::DEPENDENCY.to_owned())),
+            "./failing.mjs" => Ok((specifier.to_owned(), Self::FAILING.to_owned())),
+            _ => Err(scope.module_not_found(referrer, specifier)),
         }
     }
 

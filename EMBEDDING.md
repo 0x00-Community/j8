@@ -501,7 +501,9 @@ gone past the limit, not before:
 
 `rt.eval_module(text, file)` runs `text` as an ES module. `DefaultPlatform` resolves `import` relative to the
 importing file (canonicalized paths, no `node_modules`). For other rules (packages, URLs, a virtual file system),
-write your own `Platform::load_module` (6.3).
+write your own `Platform::load_module` (6.3). It gets the importing module's name and the specifier and returns the
+module's normalized name and source, or the error to throw: a failed static `import` fails the importing module with
+that error and `import()` rejects with it, unchanged (`Scope::module_not_found` makes the default `TypeError`).
 
 `eval_module` returns the promise for the module's evaluation. A module graph without top-level `await` has finished
 when `eval_module` returns, and the promise is already fulfilled. With top-level `await`, the promise settles once
@@ -531,11 +533,11 @@ that re-exports an object from `__j8_native`, and passes every other specifier o
 
 ```rust,ignore
 impl<P: Platform> Platform for NodePlatform<P> {
-    fn load_module(&self, referrer: &str, specifier: &str) -> Option<(String, String)> {
+    fn load_module(&self, scope: &mut Scope<'_, '_>, referrer: &str, specifier: &str) -> Result<(String, String), Error> {
         match Builtin::try_from(specifier) {
             // "const m = globalThis.__j8_native.builtin(\"fs\"); export default m; export const readFileSync = m.readFileSync; …"
-            Ok(b) => Some((format!("node:{}", b.spec().0), b.source())),
-            Err(()) => self.inner.load_module(referrer, specifier),
+            Ok(b) => Ok((format!("node:{}", b.spec().0), b.source())),
+            Err(()) => self.inner.load_module(scope, referrer, specifier),
         }
     }
     fn now(&self) -> Duration { self.inner.now() }
