@@ -1,7 +1,7 @@
 use j8bytecode::{Bytecode, Constant, OperandValue};
 use j8framework::{Scope, Env, Error, ErrorKind, Value, ValueBits};
 
-use crate::{Args, Budget, Executor, Flow, Frame, Insn, Loaded, Outcome, State, STACK_LIMIT};
+use crate::{Args, Budget, Executor, Flow, Frame, Insn, Loaded, Opening, Outcome, State};
 
 #[expect(private_interfaces, reason = "crate-internal types; the module is private")]
 pub struct Cx<'r, 'scope, 'x, 'b, 'p> {
@@ -10,7 +10,6 @@ pub struct Cx<'r, 'scope, 'x, 'b, 'p> {
     pub st: &'r mut State<'scope>,
     pub loaded: &'r Loaded,
     pub budget: &'r mut Budget<'b>,
-    pub depth: usize,
 }
 
 #[expect(private_interfaces, reason = "crate-internal types; the module is private")]
@@ -354,7 +353,7 @@ fn enter<'r, 'scope>(cx: &mut Cx<'r, 'scope, '_, '_, '_>, pc: *const Insn, calle
     let Some(o) = callee.as_object() else { return Entered::No };
     let Some(c) = o.closure() else { return Entered::No };
     let l: &'r Loaded = cx.exe.code(&c);
-    if l.class_constructor || l.generator || l.asynchronous || cx.depth + cx.st.frames.len() + 1 >= STACK_LIMIT {
+    if l.class_constructor || l.generator || l.asynchronous || !cx.st.room() {
         return Entered::No;
     }
     Executor::record_call(cx.loaded, fb, c.func);
@@ -366,10 +365,7 @@ fn enter<'r, 'scope>(cx: &mut Cx<'r, 'scope, '_, '_, '_>, pc: *const Insn, calle
         && let Some(t) = &cx.exe.tier
         && let Args::Values(vals) = args
     {
-        let level = cx.depth + cx.st.frames.len();
-        let saved = cx.exe.depth.replace(level);
-        let r = t.call(cx.exe, cx.a, c.func, callee, this, vals);
-        cx.exe.depth.set(saved);
+        let r = cx.exe.deep(cx.st.level() + 1, || t.call(cx.exe, cx.a, c.func, callee, this, vals));
         if let Some(r) = r {
             return match r {
                 Ok(v) => {
@@ -380,7 +376,8 @@ fn enter<'r, 'scope>(cx: &mut Cx<'r, 'scope, '_, '_, '_>, pc: *const Insn, calle
             };
         }
     }
-    let base = cx.exe.push_open(cx.a, cx.st, l, c, callee, this, args);
+    let next = Executor::open(cx.a, &mut cx.st.regs, l, c, callee, this, args, Opening::Call);
+    let base = cx.st.push(next);
     cx.loaded = l;
     if cx.exe.tier.is_some() {
         return tier_enter(cx);
@@ -398,8 +395,7 @@ fn tier_enter<'scope>(cx: &mut Cx<'_, 'scope, '_, '_, '_>) -> Entered<'scope> {
         return Entered::At(l.insns.as_ptr(), cx.st.regs.as_mut_ptr().wrapping_add(base), Value::Undefined);
     }
     let Some(t) = &cx.exe.tier else { unreachable!("checked by the caller") };
-    let level = cx.depth + cx.st.frames.len();
-    let r = t.enter(&mut crate::Entry { exe: cx.exe, a: cx.a, st: cx.st, budget: cx.budget, level });
+    let r = t.enter(&mut crate::Entry { exe: cx.exe, a: cx.a, st: cx.st, budget: cx.budget });
     match r {
         crate::Tiered::Threw(e) => Entered::Throw(e),
         _ => {
@@ -416,17 +412,11 @@ fn native<'scope>(cx: &mut Cx<'_, 'scope, '_, '_, '_>, pc: *const Insn, callee: 
     let Some(o) = callee.as_object() else { return None };
     let n = o.native()?;
     Executor::record_native(cx.loaded, fb, n.f);
-    let level = cx.depth + cx.st.frames.len();
-    if n.forward != j8framework::Forward::No || level >= STACK_LIMIT {
+    if n.forward != j8framework::Forward::No || !cx.st.room() {
         return None;
     }
     sync(cx, pc);
-    let saved = cx.exe.depth.replace(level);
-    let outer = core::mem::replace(&mut cx.a.new_target, Value::Undefined);
-    let r = (n.f)(cx.a, this, args);
-    cx.a.new_target = outer;
-    cx.exe.depth.set(saved);
-    Some(r)
+    Some(cx.exe.native_at(cx.a, cx.st.level() + 1, Value::Undefined, |a| (n.f)(a, this, args)))
 }
 
 #[inline]
@@ -500,7 +490,7 @@ handlers! {
         let Some(ob) = callee.as_object() else { fall!(cx, pc, regs, acc) };
         let Some(c) = ob.closure() else { fall!(cx, pc, regs, acc) };
         let l = cx.exe.code(&c);
-        if !(l.constructs || l.class_constructor) || l.generator || l.asynchronous || cx.depth + cx.st.frames.len() + 1 >= STACK_LIMIT {
+        if !(l.constructs || l.class_constructor) || l.generator || l.asynchronous || !cx.st.room() {
             fall!(cx, pc, regs, acc)
         }
         Executor::record_call(cx.loaded, o[3], c.func);
@@ -515,13 +505,8 @@ handlers! {
         };
         let first = Executor::slot_of(cx.st.f(), o[1]).unwrap_or(cx.st.regs.len());
         let args = Args::Regs { first, count: o[2] as usize };
-        let base = cx.exe.push_open(cx.a, cx.st, l, c, callee, this, args);
-        let regs = &mut cx.st.regs;
-        regs[base - Frame::NEW_TARGET] = acc;
-        regs[base - Frame::NEW_THIS] = this;
-        if let Some(r) = l.func.bytecode.new_target_or_generator {
-            regs[base + r as usize] = acc;
-        }
+        let next = Executor::open(cx.a, &mut cx.st.regs, l, c, callee, this, args, Opening::Construct(acc));
+        let base = cx.st.push(next);
         cx.loaded = l;
         if cx.exe.tier.is_some() {
             match tier_enter(cx) {
@@ -597,28 +582,17 @@ handlers! {
     shift_right_smi(cx, pc, regs, acc, o) { bitwise!(cx, pc, regs, acc, acc, Value::Number(o[0] as f64), |x, y| x >> (y as u32 & 31)) }
     shift_right_logical_smi(cx, pc, regs, acc, o) { bitwise!(cx, pc, regs, acc, acc, Value::Number(o[0] as f64), |x, y| (x as u32) >> (y as u32 & 31)) }
     return_(cx, pc, regs, acc, o) {
-        let st = &mut *cx.st;
-        if st.frames.len() < 2 {
-            if st.frames.len() == 1 && unsafe { *regs.sub(Frame::NEW_TARGET) } == Value::Undefined {
-                st.frames.pop();
-                return Exit::Done(Outcome::Return(acc));
-            }
-            fall!(cx, pc, regs, acc)
-        }
-        let v = if unsafe { *regs.sub(Frame::NEW_TARGET) } == Value::Undefined || acc.as_object().is_some() {
+        let acc = if unsafe { *regs.sub(Frame::NEW_TARGET) } == Value::Undefined {
             acc
         } else {
-            match unsafe { *regs.sub(Frame::NEW_THIS) } {
-                t if t.as_object().is_some() => t,
-                _ => fall!(cx, pc, regs, acc),
-            }
+            let Some(ob) = acc.as_object().or_else(|| unsafe { *regs.sub(Frame::NEW_THIS) }.as_object()) else { fall!(cx, pc, regs, acc) };
+            cx.loaded.note_instance(ob);
+            ob.into()
         };
-        if let Some(ob) = v.as_object().filter(|_| unsafe { *regs.sub(Frame::NEW_TARGET) } != Value::Undefined) {
-            cx.loaded.instance_size.set(u8::try_from(ob.get().props().len()).unwrap_or(u8::MAX));
-        }
-        let acc = v;
         let st = &mut *cx.st;
-        st.pop_frame();
+        if !st.pop_frame() {
+            return Exit::Done(Outcome::Return(acc));
+        }
         let caller = st.f();
         let (at, base) = (caller.pc, caller.base);
         let l = unsafe { caller.loaded.get() };
@@ -638,9 +612,8 @@ fn slow<'scope>(cx: &mut Cx<'_, 'scope, '_, '_, '_>, pc: *const Insn, _: *mut Va
     f.insn = at;
     f.pc = at + 1;
     st.acc = acc;
-    let level = cx.depth + st.frames.len();
     let d = unsafe { &*pc };
-    match cx.exe.step(cx.a, st, cx.loaded, d, level, cx.budget) {
+    match cx.exe.step(cx.a, st, cx.loaded, d, cx.budget) {
         Ok(Flow::Next) => {
             #[cfg_attr(not(tail_calls), expect(unused_variables, reason = "the loop reloads the registers"))]
             let regs = st.regs.as_mut_ptr().wrapping_add(st.f().base);
@@ -659,7 +632,7 @@ fn hold<'scope>(cx: &mut Cx<'_, 'scope, '_, '_, '_>, pc: *const Insn, acc: Value
     f.insn = at;
     f.pc = at;
     cx.st.acc = acc;
-    cx.depth + cx.st.frames.len()
+    cx.st.level()
 }
 
 pub fn brk<'scope>(cx: &mut Cx<'_, 'scope, '_, '_, '_>, pc: *const Insn, _: *mut Value<'scope>, acc: Value<'scope>) -> Exit<'scope> {
@@ -773,9 +746,8 @@ impl Executor<'_> {
             } else if cx.loaded.tier.get() != 0
                 && let Some(t) = &cx.exe.tier
             {
-                let level = cx.depth + cx.st.frames.len();
                 let pc = cx.st.f().pc;
-                let r = t.resume(&mut crate::Entry { exe: cx.exe, a: cx.a, st: cx.st, budget: cx.budget, level }, pc);
+                let r = t.resume(&mut crate::Entry { exe: cx.exe, a: cx.a, st: cx.st, budget: cx.budget }, pc);
                 match r {
                     crate::Tiered::Threw(e) => return Exit::Throw(e),
                     crate::Tiered::Resumed => {

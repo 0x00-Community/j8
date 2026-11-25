@@ -520,10 +520,7 @@ fn deopt(ctx: *mut Ctx, id: u64) -> u64 {
             Some(other) => return ctx.fail(other),
             None => None,
         };
-        let saved = exe.jit_depth().get();
-        let r = exe.resume_frames(a, frames, thrown);
-        exe.jit_depth().set(saved);
-        return match r {
+        return match exe.resume_frames(a, frames, thrown) {
             Ok(v) => v.bits(),
             Err(err) => ctx.fail(err),
         };
