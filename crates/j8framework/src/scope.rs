@@ -135,6 +135,7 @@ pub struct Scope<'scope, 'x> {
     pub parked: &'x core::cell::RefCell<crate::Parked<'x>>,
     pub spare_regs: Vec<Vec<Value<'scope>>>,
     pub(crate) heap_limit: Option<&'x crate::HeapLimit<'x>>,
+    pub(crate) stack_limit: usize,
     #[cfg(all(target_os = "linux", feature = "crossheap"))]
     pub shares: &'x mut crate::Shares<'x>,
 }
@@ -164,6 +165,24 @@ impl<'scope> Scope<'scope, '_> {
         if let Some(timers) = self.timers {
             timers.cancel(id);
         }
+    }
+
+    #[inline]
+    fn stack_address() -> usize {
+        let marker = 0u8;
+        core::hint::black_box(core::ptr::addr_of!(marker)) as usize
+    }
+
+    pub(crate) fn stack_limit_here(size: usize) -> usize {
+        Self::stack_address().saturating_sub(size)
+    }
+
+    #[inline]
+    pub fn check_stack(&self) -> Result<(), Error> {
+        if Self::stack_address() < self.stack_limit {
+            return Err(self.throw(crate::ErrorKind::Range, "Maximum call stack size exceeded"));
+        }
+        Ok(())
     }
 
     pub fn spawn<'i>(&self, job: crate::AsyncJob<'i>) -> Result<(), crate::AsyncJob<'i>> {

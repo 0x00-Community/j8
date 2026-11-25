@@ -13,6 +13,14 @@ executor serves one isolate only; isolates share compiled code through a `CodeCa
 
 - **An explicit frame stack**: JS calling JS doesn't recurse on the host (Rust) stack; the executor keeps its own frame
   stack. The call depth limit is 10,000 (counting JS re-entered from host functions); beyond it, `RangeError`.
+- **The host stack has a limit of its own, in bytes**: the depth limit counts levels and guards the executor's frame
+  stack on the heap, but a host function that calls back into JS (`join` → `toString` → `join`, a Proxy trap,
+  `Function.prototype.call`) or recurses itself (`JSON.stringify` / `JSON.parse` / the reviver, `Array.prototype.flat`,
+  Proxies nested without traps) uses the host stack, and how much each level takes varies. `Scope::check_stack` throws
+  `RangeError` once the stack is `CreateParams::stack_size` below where the isolate was entered (default 984 KiB, V8's
+  `--stack-size`). It runs where host code calls into JS (`Invoke` call / construct / resume), at each Proxy trap
+  lookup, and in the recursive steps above. The thread that enters the isolate needs that much stack free below the
+  point of entry, plus some room for the host function that is running when the check fails: 1 MiB with the default.
 - **One register file** shared by all frames. A frame owns a stretch of it: the receiver, the formal parameters, the
   registers from r0. Register operands in the bytecode are V8 frame slots (r0 is −7, the receiver +2, the context −1,
   the closure −2) and are mapped onto that stretch at load time.

@@ -66,6 +66,11 @@ pub struct CreateParams {
     pub profile: bool,
     pub event_loop: bool,
     pub collector_threads: Option<NonZeroUsize>,
+    pub stack_size: Option<NonZeroUsize>,
+}
+
+impl CreateParams {
+    pub const DEFAULT_STACK_SIZE: usize = 984 << 10;
 }
 
 const COLLECT_FRACTION: usize = 2;
@@ -108,6 +113,7 @@ pub struct Isolate<'p> {
     exception: Option<ScopeGlobal<'p, ValueBrand>>,
     parked: core::cell::RefCell<Parked<'p>>,
     heap_limit: Option<HeapLimit<'p>>,
+    stack_size: usize,
     #[cfg(all(target_os = "linux", feature = "crossheap"))]
     shares: Shares<'p>,
 }
@@ -129,6 +135,7 @@ impl<'p> Isolate<'p> {
             exception: None,
             parked: core::cell::RefCell::default(),
             heap_limit: None,
+            stack_size: params.stack_size.map_or(CreateParams::DEFAULT_STACK_SIZE, NonZeroUsize::get),
             #[cfg(all(target_os = "linux", feature = "crossheap"))]
             shares: Shares::default(),
         }
@@ -183,7 +190,7 @@ impl<'p> Isolate<'p> {
     }
 
     pub fn enter<R>(&mut self, cx: &ScopeGlobal<'p, crate::ContextBrand>, invoke: &dyn for<'s> crate::Invoke<'s>, f: impl for<'scope> FnOnce(&mut Scope<'scope, '_>) -> R) -> R {
-        let (platform, profiler, generation, stop) = (self.platform, &mut self.profiler, self.generation, &*self.stop);
+        let (platform, profiler, generation, stop, stack_size) = (self.platform, &mut self.profiler, self.generation, &*self.stop, self.stack_size);
         let spawned = self.spawned.as_ref();
         let timers = self.timers.as_ref();
         let parked = &self.parked;
@@ -212,6 +219,7 @@ impl<'p> Isolate<'p> {
                 parked: unsafe { rebrand_ref(parked) },
                 spare_regs: Vec::new(),
                 heap_limit: heap_limit.map(|l| unsafe { rebrand_ref(l) }),
+                stack_limit: Scope::stack_limit_here(stack_size),
                 #[cfg(all(target_os = "linux", feature = "crossheap"))]
                 shares: unsafe { &mut *core::ptr::from_mut(shares).cast() },
             });
