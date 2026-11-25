@@ -639,9 +639,8 @@ struct RawFrame<'e> {
 
 impl Drop for RawFrame<'_> {
     fn drop(&mut self) {
-        let n = self.raw.get() - 1;
-        self.raw.set(n);
-        if n == 0 && self.deferred.take() {
+        self.raw.set(self.raw.get() - 1);
+        if self.deferred.take() {
             self.stop.request_collect();
         }
     }
@@ -700,8 +699,9 @@ impl Executor<'_> {
     fn native_at<'scope, 'x, R>(&self, a: &mut Scope<'scope, 'x>, level: usize, new_target: Value<'scope>, f: impl FnOnce(&mut Scope<'scope, 'x>) -> R) -> R {
         let _depth = self.at_depth(level);
         let outer = core::mem::replace(&mut a.new_target, new_target);
+        a.handles.push(outer);
         let r = f(a);
-        a.new_target = outer;
+        a.new_target = a.handles.pop().unwrap_or_default();
         r
     }
 
@@ -1453,7 +1453,8 @@ impl Executor<'_> {
                 return Ok(None);
             }
             let loaded: &Loaded = unsafe { st.f().loaded.get() };
-            let mut cx = threaded::Cx { exe: self, a, st, loaded, budget };
+            let generation = a.mc.generation();
+            let mut cx = threaded::Cx { exe: self, a, st, loaded, budget, generation };
             match Self::threaded(&mut cx) {
                 threaded::Exit::Frame => {}
                 threaded::Exit::Done(o) => return Ok(Some(o)),
@@ -1959,7 +1960,9 @@ impl Executor<'_> {
                 f.pc = d.target as usize;
                 if let Some(t) = &self.tier {
                     let at = f.insn;
+                    let raw = self.raw_frame(a.stop);
                     let r = t.osr(&mut Entry { exe: self, a, st, budget }, at);
+                    drop(raw);
                     match r {
                         Tiered::Interpret => {}
                         Tiered::Resumed => return Ok(Flow::Frame),

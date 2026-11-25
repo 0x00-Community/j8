@@ -10,6 +10,7 @@ pub struct Cx<'r, 'scope, 'x, 'b, 'p> {
     pub st: &'r mut State<'scope>,
     pub loaded: &'r Loaded,
     pub budget: &'r mut Budget<'b>,
+    pub generation: u64,
 }
 
 #[expect(private_interfaces, reason = "crate-internal types; the module is private")]
@@ -398,7 +399,9 @@ fn tier_enter<'scope>(cx: &mut Cx<'_, 'scope, '_, '_, '_>) -> Entered<'scope> {
         return Entered::At(l.insns.as_ptr(), cx.st.regs.as_mut_ptr().wrapping_add(base), Value::Undefined);
     }
     let Some(t) = &cx.exe.tier else { unreachable!("checked by the caller") };
+    let raw = cx.exe.raw_frame(cx.a.stop);
     let r = t.enter(&mut crate::Entry { exe: cx.exe, a: cx.a, st: cx.st, budget: cx.budget });
+    drop(raw);
     match r {
         crate::Tiered::Threw(e) => Entered::Throw(e),
         _ => {
@@ -470,6 +473,10 @@ macro_rules! call {
             Entered::At(pc, regs, acc) => next!($cx, pc, regs, acc),
             Entered::Throw(e) => return Exit::Throw(e),
             Entered::No => match native($cx, $pc, callee, $this, &args, $o[$fb]) {
+                Some(Ok(v)) if $cx.a.mc.generation() != $cx.generation => {
+                    $cx.st.acc = v;
+                    return Exit::Frame;
+                }
                 Some(Ok(v)) => {
                     let $regs = $cx.st.regs.as_mut_ptr().wrapping_add($cx.st.f().base);
                     next!($cx, $pc.wrapping_add(1), $regs, v)
@@ -617,6 +624,7 @@ fn slow<'scope>(cx: &mut Cx<'_, 'scope, '_, '_, '_>, pc: *const Insn, _: *mut Va
     st.acc = acc;
     let d = unsafe { &*pc };
     match cx.exe.step(cx.a, st, cx.loaded, d, cx.budget) {
+        Ok(Flow::Next) if cx.a.mc.generation() != cx.generation => Exit::Frame,
         Ok(Flow::Next) => {
             #[cfg_attr(not(tail_calls), expect(unused_variables, reason = "the loop reloads the registers"))]
             let regs = st.regs.as_mut_ptr().wrapping_add(st.f().base);
@@ -750,7 +758,9 @@ impl Executor<'_> {
                 && let Some(t) = &cx.exe.tier
             {
                 let pc = cx.st.f().pc;
+                let raw = cx.exe.raw_frame(cx.a.stop);
                 let r = t.resume(&mut crate::Entry { exe: cx.exe, a: cx.a, st: cx.st, budget: cx.budget }, pc);
+                drop(raw);
                 match r {
                     crate::Tiered::Threw(e) => return Exit::Throw(e),
                     crate::Tiered::Resumed => {

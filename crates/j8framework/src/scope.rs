@@ -266,6 +266,18 @@ impl<'scope> Scope<'scope, '_> {
         invoke.call(self, callee, this, args)
     }
 
+    pub fn holding<R>(&mut self, held: &mut [Value<'scope>], f: impl FnOnce(&mut Self) -> R) -> (R, bool) {
+        let mark = self.handles.len();
+        let before = self.mc.generation();
+        self.handles.extend_from_slice(held);
+        self.gc_safe.set(true);
+        let r = f(self);
+        self.gc_safe.set(false);
+        held.copy_from_slice(&self.handles[mark..mark + held.len()]);
+        self.handles.truncate(mark);
+        (r, self.mc.generation() != before)
+    }
+
     pub fn call_safe(&mut self, callee: Value<'scope>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
         self.gc_safe.set(true);
         let invoke = self.invoke;

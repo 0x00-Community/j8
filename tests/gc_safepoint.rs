@@ -84,3 +84,37 @@ fn a_script_survives_collections_while_it_runs() {
         assert_eq!(run_script(jit), SCRIPT_EXPECTED, "jit {jit}");
     }
 }
+
+const MAP_MODULE: &str = "
+const rows = Array.from({ length: 20000 }, (_, i) => i);
+const out = rows.map((r) => {
+  const kids = [];
+  for (let i = 0; i < 20; i++) kids.push({ key: r + ':' + i, children: [String(i)] });
+  return kids[19].key;
+});
+globalThis.result = out.length + ':' + out[19999] + ':' + out.filter((k, i) => k === i + ':19').length;
+";
+
+const MAP_EXPECTED: &str = "20000:19999:19:20000";
+
+#[test]
+fn a_map_callback_is_collected_while_it_runs() {
+    for jit in [false, true] {
+        let platform = DefaultPlatform::default();
+        let mut isolate = Isolate::new(&platform, CreateParams { collect_threshold: Some(THRESHOLD), ..CreateParams::default() });
+        let executor = if jit { Executor::default().with_tier(j8jit::Jit::default()) } else { Executor::default() };
+        let cx = isolate.create_context(&Builtins);
+        let before = isolate.gc_cycles();
+        executor.eval_module(&mut isolate, &cx, &Source { text: MAP_MODULE, file: "map.mjs" }).expect("the module runs");
+        let collections = isolate.gc_cycles() - before;
+        let result = executor.eval(&mut isolate, &cx, &Source { text: "result", file: "result.js" }).expect("the result");
+        let text = isolate.enter(&cx, &executor, |a| {
+            let v = a.local(&result);
+            String::from(&**a.to_string(v).expect("ToString"))
+        });
+        assert_eq!(text, MAP_EXPECTED, "jit {jit}");
+        if !jit {
+            assert!(collections >= MIN_COLLECTIONS, "only {collections} collections, so none ran inside the callbacks");
+        }
+    }
+}
