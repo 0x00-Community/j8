@@ -1,5 +1,6 @@
 use j8framework::ValueKind;
 use alloc::format;
+use alloc::borrow::Cow;
 use alloc::string::String;
 
 use j8framework::{Scope, Error, ErrorKind, Hint, JsObject, ObjectKind, Property, Slot, Value};
@@ -26,20 +27,41 @@ const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Au
 const UTC_NAME: &str = "Coordinated Universal Time";
 
 struct LocalZone {
-    offset: f64,
-    name: String,
+    #[cfg(feature = "intl")]
+    zone: crate::intl::Zone,
 }
 
 impl LocalZone {
     #[cfg(feature = "intl")]
-    fn at(a: &Scope<'_, '_>, t: f64) -> Self {
-        let (offset, name) = crate::intl::host_zone(a, t);
-        Self { offset, name: name.unwrap_or_else(|| String::from(UTC_NAME)) }
+    fn host(a: &Scope<'_, '_>) -> Self {
+        Self { zone: crate::intl::Zone::host(a.platform.time_zone()) }
     }
 
     #[cfg(not(feature = "intl"))]
-    fn at(_: &Scope<'_, '_>, _: f64) -> Self {
-        Self { offset: 0.0, name: String::from(UTC_NAME) }
+    fn host(_: &Scope<'_, '_>) -> Self {
+        Self {}
+    }
+
+    #[cfg(feature = "intl")]
+    fn offset(&self, t: f64) -> f64 {
+        f64::from(self.zone.offset_seconds(t)) * MS_PER_SECOND
+    }
+
+    #[cfg(not(feature = "intl"))]
+    #[expect(clippy::unused_self, reason = "the intl build reads the host zone through self")]
+    fn offset(&self, _: f64) -> f64 {
+        0.0
+    }
+
+    #[cfg(feature = "intl")]
+    fn name(&self, t: f64) -> Cow<'static, str> {
+        self.zone.abbreviation(t).map_or(Cow::Borrowed(UTC_NAME), Cow::Owned)
+    }
+
+    #[cfg(not(feature = "intl"))]
+    #[expect(clippy::unused_self, reason = "the intl build reads the host zone through self")]
+    fn name(&self, _: f64) -> Cow<'static, str> {
+        Cow::Borrowed(UTC_NAME)
     }
 }
 
@@ -213,39 +235,46 @@ impl Dates {
         format!("{wd} {} {:02} {}", MONTHS[Self::slot(m) % 12], Self::int(d), Self::year_text(Self::year_from_time(t)))
     }
 
-    fn time_part(local: f64, zone: &LocalZone) -> String {
-        let minutes = Self::int(zone.offset / MS_PER_MINUTE);
+    fn time_part(local: f64, offset: f64, name: &str) -> String {
+        let minutes = Self::int(offset / MS_PER_MINUTE);
         let sign = if minutes < 0 { '-' } else { '+' };
         format!(
-            "{:02}:{:02}:{:02} GMT{sign}{:02}{:02} ({})",
+            "{:02}:{:02}:{:02} GMT{sign}{:02}{:02} ({name})",
             Self::int(Self::field(local, Field::Hours)),
             Self::int(Self::field(local, Field::Minutes)),
             Self::int(Self::field(local, Field::Seconds)),
             minutes.abs() / 60,
             minutes.abs() % 60,
-            zone.name
         )
+    }
+
+    fn zoned_time_part(a: &Scope<'_, '_>, t: f64) -> String {
+        let zone = LocalZone::host(a);
+        let offset = zone.offset(t);
+        Self::time_part(t + offset, offset, &zone.name(t))
     }
 
     fn to_date_string_of(a: &Scope<'_, '_>, t: f64) -> String {
         if t.is_nan() {
             return String::from("Invalid Date");
         }
-        let zone = LocalZone::at(a, t);
-        let local = t + zone.offset;
-        format!("{} {}", Self::date_part(local), Self::time_part(local, &zone))
+        let zone = LocalZone::host(a);
+        let offset = zone.offset(t);
+        let local = t + offset;
+        format!("{} {}", Self::date_part(local), Self::time_part(local, offset, &zone.name(t)))
     }
 
     fn local(a: &Scope<'_, '_>, t: f64) -> f64 {
-        t + LocalZone::at(a, t).offset
+        t + LocalZone::host(a).offset(t)
     }
 
     fn utc(a: &Scope<'_, '_>, local: f64) -> f64 {
         if !local.is_finite() {
             return local;
         }
-        let guess = local - LocalZone::at(a, local).offset;
-        local - LocalZone::at(a, guess).offset
+        let zone = LocalZone::host(a);
+        let guess = local - zone.offset(local);
+        local - zone.offset(guess)
     }
 
     fn utc_string(t: f64) -> String {
@@ -613,10 +642,7 @@ impl Dates {
     }
 
     fn to_time_string<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
-        Self::text(a, this, |a, t| {
-            let zone = LocalZone::at(a, t);
-            Self::time_part(t + zone.offset, &zone)
-        })
+        Self::text(a, this, Self::zoned_time_part)
     }
 
     fn to_utc_string<'scope>(a: &mut Scope<'scope, '_>, this: Value<'scope>, _: &[Value<'scope>]) -> Result<Value<'scope>, Error> {

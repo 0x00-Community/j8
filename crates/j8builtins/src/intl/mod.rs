@@ -17,10 +17,7 @@ use datetime::{DateTimeFormat, DateTimeFormats};
 use locale::Tags;
 use number::{NumberFormat, NumberFormats};
 use plural::PluralRulesBuiltins;
-
-pub(crate) fn host_zone(a: &Scope<'_, '_>, t: f64) -> (f64, Option<String>) {
-    zone::Zone::host(a.platform.time_zone()).local(t)
-}
+pub(crate) use zone::Zone;
 
 struct Intl;
 
@@ -43,7 +40,7 @@ impl Intl {
             "collation" => Collation::types().iter().map(|s| String::from(*s)).collect(),
             "numberingSystem" => NumberFormat::numbering_systems().iter().map(|s| String::from(*s)).collect(),
             "unit" => NumberFormat::units().iter().map(|s| String::from(*s)).collect(),
-            "timeZone" => zone::Zone::names(),
+            "timeZone" => Zone::names(),
             "currency" => Vec::new(),
             _ => return Err(a.throw(ErrorKind::Range, &alloc::format!("Invalid key : {}", key.as_str()))),
         };
