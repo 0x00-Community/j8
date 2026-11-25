@@ -59,9 +59,8 @@ pub trait Platform: Sync + Pool {
         Duration::ZERO
     }
 
-    fn load_module(&self, referrer: &str, specifier: &str) -> Option<(alloc::string::String, alloc::string::String)> {
-        let _ = (referrer, specifier);
-        None
+    fn load_module(&self, scope: &mut crate::Scope<'_, '_>, referrer: &str, specifier: &str) -> Result<(alloc::string::String, alloc::string::String), crate::Error> {
+        Err(scope.module_not_found(referrer, specifier))
     }
 
     fn locale(&self) -> Option<alloc::string::String> {

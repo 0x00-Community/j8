@@ -334,6 +334,11 @@ impl<'scope> Scope<'scope, '_> {
         self.throw_value(self.error(kind, message).into())
     }
 
+    pub fn module_not_found(&self, referrer: &str, specifier: &str) -> Error {
+        let message = if referrer.is_empty() { alloc::format!("Cannot find module '{specifier}'") } else { alloc::format!("Cannot find module '{specifier}' imported from '{referrer}'") };
+        self.throw(ErrorKind::Type, &message)
+    }
+
     pub fn throw_value(&self, v: Value<'scope>) -> Error {
         self.mc.raise(v)
     }

@@ -33,7 +33,7 @@ pub trait Platform: Pool {
     fn now(&self) -> Duration;                    // monotonic clock
     fn wall_clock(&self) -> Duration;             // for Date
     fn print(&self, line: &str);                  // console.log
-    fn load_module(&self, referrer: &str, specifier: &str) -> Option<(String, String)>;  // (normalized name, source)
+    fn load_module(&self, scope: &mut Scope, referrer: &str, specifier: &str) -> Result<(String, String), Error>;  // (normalized name, source), or the error to throw
     fn unhandled_rejection(&self, scope: &mut Scope, promise: JsObject, reason: Value);           // default: nothing
     fn locale(&self) -> Option<String>;           // BCP 47 tag, default None (en-US)
     fn time_zone(&self) -> Option<String>;        // IANA name or ±HH:MM, default None (UTC)

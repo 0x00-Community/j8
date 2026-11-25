@@ -47,10 +47,10 @@ impl<H: Host, P: Platform> Platform for HostPlatform<H, P> {
         self.inner.wall_clock()
     }
 
-    fn load_module(&self, referrer: &str, specifier: &str) -> Option<(String, String)> {
+    fn load_module(&self, scope: &mut Scope<'_, '_>, referrer: &str, specifier: &str) -> Result<(String, String), Error> {
         match H::module_source(specifier) {
-            Some(text) => Some((specifier.to_owned(), text)),
-            None => self.inner.load_module(referrer, specifier),
+            Some(text) => Ok((specifier.to_owned(), text)),
+            None => self.inner.load_module(scope, referrer, specifier),
         }
     }
 

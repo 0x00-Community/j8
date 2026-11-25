@@ -2,7 +2,7 @@ use std::num::NonZeroUsize;
 use std::time::{Duration, Instant};
 
 use moremath::{Executor, ThreadMulti};
-use j8framework::{Platform, Task};
+use j8framework::{Error, Platform, Scope, Task};
 
 const LOCALE_VARS: [&str; 3] = ["LC_ALL", "LC_MESSAGES", "LANG"];
 
@@ -72,11 +72,10 @@ impl Platform for DefaultPlatform {
         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default()
     }
 
-    fn load_module(&self, referrer: &str, specifier: &str) -> Option<(String, String)> {
+    fn load_module(&self, scope: &mut Scope<'_, '_>, referrer: &str, specifier: &str) -> Result<(String, String), Error> {
         let base = std::path::Path::new(referrer).parent().unwrap_or_else(|| std::path::Path::new("."));
-        let path = dunce::canonicalize(base.join(specifier)).ok()?;
-        let text = std::fs::read_to_string(&path).ok()?;
-        Some((path.display().to_string(), text))
+        let read = dunce::canonicalize(base.join(specifier)).and_then(|path| Ok((path.display().to_string(), std::fs::read_to_string(&path)?)));
+        read.map_err(|_| scope.module_not_found(referrer, specifier))
     }
 
     fn locale(&self) -> Option<String> {

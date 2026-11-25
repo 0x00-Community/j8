@@ -5,6 +5,10 @@
 `rt.eval_module(text, file)` 把 `text` 当 ES 模块跑。`DefaultPlatform` 按引用方的文件解析 `import`（规范化路径，不处理
 `node_modules`）。别的规则（包、URL、虚拟文件系统）就自己写 `Platform::load_module`。
 
+`load_module` 拿到引用方模块的名字（`referrer`）和说明符，返回模块的规范化名字和源码，或者要抛出的错误。静态 `import`
+失败时，引用它的模块就以这个错误失败；`import()` 以它拒绝，原样不变。`Scope::module_not_found(referrer, specifier)` 给出
+常用的那个错误：`TypeError` "Cannot find module '…' imported from '…'"，默认实现抛的也是它。
+
 `eval_module` 返回这个模块求值的 promise。没有顶层 `await` 时，`eval_module` 返回时它已经兑现；有顶层 `await` 时，
 由 `run_until_idle` 推进等待中的模块，整张模块图跑完它才落定。模块在第一次挂起前抛出的错误，`eval_module` 仍然直接返回错误。
 
@@ -33,11 +37,11 @@ dune 的 `node:` 模块是序言建的 JavaScript 对象，不是 Rust 类型。
 
 ```rust,ignore
 impl<P: Platform> Platform for NodePlatform<P> {
-    fn load_module(&self, referrer: &str, specifier: &str) -> Option<(String, String)> {
+    fn load_module(&self, scope: &mut Scope<'_, '_>, referrer: &str, specifier: &str) -> Result<(String, String), Error> {
         match Builtin::try_from(specifier) {
             // "const m = globalThis.__j8_native.builtin(\"fs\"); export default m; export const readFileSync = m.readFileSync; …"
-            Ok(b) => Some((format!("node:{}", b.spec().0), b.source())),
-            Err(()) => self.inner.load_module(referrer, specifier),
+            Ok(b) => Ok((format!("node:{}", b.spec().0), b.source())),
+            Err(()) => self.inner.load_module(scope, referrer, specifier),
         }
     }
     fn now(&self) -> Duration { self.inner.now() }

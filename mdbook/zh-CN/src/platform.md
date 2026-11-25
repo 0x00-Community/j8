@@ -31,7 +31,7 @@ pub trait Platform: Pool {
     fn now(&self) -> Duration;                    // 单调时钟
     fn wall_clock(&self) -> Duration;             // Date 用
     fn print(&self, line: &str);                  // console.log
-    fn load_module(&self, referrer: &str, specifier: &str) -> Option<(String, String)>;  // (规范化名字, 源码)
+    fn load_module(&self, scope: &mut Scope, referrer: &str, specifier: &str) -> Result<(String, String), Error>;  // (规范化名字, 源码)，或要抛出的错误
     fn unhandled_rejection(&self, scope: &mut Scope, promise: JsObject, reason: Value);           // 默认什么也不做
     fn locale(&self) -> Option<String>;           // BCP 47 标签，默认 None（en-US）
     fn time_zone(&self) -> Option<String>;        // IANA 名或 ±HH:MM，默认 None（UTC）
