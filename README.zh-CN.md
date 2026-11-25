@@ -31,8 +31,8 @@
 | 项目 | 结果 |
 | --- | --- |
 | test262 基线 | **42,500** 条通过, 解释器与 JIT 都跑, 不许回归 |
-| 对 V8 jitless | 耗时 **0.6×** (11 个基准几何平均) |
-| 对 V8 (带 JIT) | 耗时 **1.7×**, 见 [benchmark.md](samples/benchv8/benchmark.md) |
+| 对 V8 jitless | 耗时 **0.4×** (11 个基准几何平均) |
+| 对 V8 (带 JIT) | 耗时 **1.1×**, 见 [benchmark.md](samples/benchv8/benchmark.md) |
 
 ## 📦 安装
 
