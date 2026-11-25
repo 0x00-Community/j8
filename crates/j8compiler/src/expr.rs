@@ -464,6 +464,7 @@ impl<'a> Compiler<'a, '_> {
             ArrowFunctionBody::FunctionBody(b) => Flavor::use_strict(&b.directives),
             _ => false,
         };
+        self.next_source = Some(a.span);
         let n = self.function(name, Flavor { kind: Kind::Arrow, generator: false, asynchronous: a.r#async, strict, statik: false }, None, None, Some(&a.params), body)?;
         self.closure(n);
         Ok(())
@@ -1447,6 +1448,7 @@ impl<'a> Compiler<'a, '_> {
                 if home {
                     self.next_home = Some(Hidden::HOME);
                 }
+                self.next_source = Some(p.span);
                 let n = self.method(fname, f, kind)?;
                 if accessor {
                     let args = self.b().new_register_list(5);

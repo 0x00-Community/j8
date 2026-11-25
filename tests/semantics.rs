@@ -27,6 +27,17 @@ const CASES: &[(&str, &str)] = &[
     // join 中途抛错后不留下正在 join 的记录
     ("var bad = [{ toString() { throw 0; } }]; try { String(bad); } catch (e) {} bad[0] = 1; String([bad, bad])", "1,1"),
     ("var o = {}; o.o = o; try { JSON.stringify(o); } catch (e) { e.name; }", "TypeError"),
+    // 用户函数的 toString 是它的源码；内建函数和绑定函数仍是 [native code]
+    ("(function f(a) { return a }).toString()", "function f(a) { return a }"),
+    ("((a, b) => a + b).toString()", "(a, b) => a + b"),
+    ("({ async *gen(x) {} }).gen.toString()", "async *gen(x) {}"),
+    (
+        "class A { m() {} static /* c */ s() {} get g() { return 1 } }; \
+         [A, A.prototype.m, A.s, Object.getOwnPropertyDescriptor(A.prototype, 'g').get].map(String).join('|')",
+        "class A { m() {} static /* c */ s() {} get g() { return 1 } }|m() {}|s() {}|get g() { return 1 }",
+    ),
+    ("new Function('a', 'return a').toString()", "function anonymous(a\n) {\nreturn a\n}"),
+    ("[Math.max, (function f() {}).bind(null)].map(String).join('|')", "function max() { [native code] }|function () { [native code] }"),
 ];
 
 struct Host {

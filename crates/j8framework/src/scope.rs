@@ -63,6 +63,10 @@ pub trait Invoke<'scope> {
     fn call_site(&self, _agent: &Scope<'scope, '_>, _frame: &crate::Captured) -> crate::CallSite {
         crate::CallSite::default()
     }
+
+    fn source_text(&self, _closure: &crate::Closure<'scope>) -> Option<alloc::string::String> {
+        None
+    }
 }
 
 pub type CallbackRun = for<'scope, 'x> unsafe fn(&mut Scope<'scope, 'x>, &Callback<'scope>, &[Value<'scope>]) -> Option<Result<Value<'scope>, Error>>;

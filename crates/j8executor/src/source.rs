@@ -20,6 +20,10 @@ impl Script {
         Self { text, lines: OnceBox::default() }
     }
 
+    pub(crate) fn text(&self, range: core::ops::Range<u32>) -> Option<&str> {
+        self.text.get(range.start as usize..range.end as usize)
+    }
+
     fn lines(&self) -> &Lines {
         self.lines.get_or_init(|| Lines::of(&self.text))
     }
