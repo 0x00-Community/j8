@@ -1,8 +1,11 @@
 mod collator;
 mod datetime;
+mod ilocale;
+mod listformat;
 mod locale;
 mod number;
 mod plural;
+mod segmenter;
 mod service;
 mod zone;
 
@@ -16,7 +19,10 @@ use collator::Collation;
 pub(crate) use collator::{Cases, Collators};
 use datetime::DateTimeFormat;
 pub(crate) use datetime::DateTimeFormats;
+use listformat::ListFormats;
+use ilocale::Locales;
 use locale::Tags;
+use segmenter::{ITERATOR_PROTO_SLOT, SEGMENTS_PROTO_SLOT, Segmenters};
 use number::NumberFormat;
 pub(crate) use number::NumberFormats;
 use plural::PluralRulesBuiltins;
@@ -48,7 +54,7 @@ impl Intl {
 }
 
 impl<'scope> Installer<'_, 'scope> {
-    fn service(&self, intl: JsObject<'scope>, name: &str, construct: j8framework::ClosureFn, supported: j8framework::NativeFn, tag: &str) -> JsObject<'scope> {
+    fn service(&self, intl: JsObject<'scope>, name: &str, construct: j8framework::ClosureFn, supported: Option<j8framework::NativeFn>, tag: &str) -> JsObject<'scope> {
         let a = self.context;
         let proto = self.plain();
         let closure = NativeClosure { f: construct, slots: alloc::vec![proto.into()], constructor: true };
@@ -57,7 +63,11 @@ impl<'scope> Installer<'_, 'scope> {
         ctor.borrow_mut(self.mc).define("prototype", Property { slot: Slot::Data(proto.into()), enumerable: false, writable: false, configurable: false });
         self.set(proto, "constructor", ctor.into());
         self.set(intl, name, ctor.into());
-        self.method(ctor, "supportedLocalesOf", supported, 1);
+        if let Some(supported) = supported {
+            self.method(ctor, "supportedLocalesOf", supported, 1);
+        } else {
+            a.name_function(self.mc, ctor, name, Some(1));
+        }
         let t = self.text(tag);
         proto.borrow_mut(self.mc).define_symbol(a.symbols.to_string_tag, Property { slot: Slot::Data(t), enumerable: false, writable: false, configurable: true });
         proto
@@ -72,23 +82,88 @@ impl<'scope> Installer<'_, 'scope> {
         self.method(intl, "getCanonicalLocales", Intl::get_canonical_locales, 1);
         self.method(intl, "supportedValuesOf", Intl::supported_values_of, 1);
 
-        let collator = self.service(intl, "Collator", Collators::construct, Collators::supported_locales_of, "Intl.Collator");
+        let collator = self.service(intl, "Collator", Collators::construct, Some(Collators::supported_locales_of), "Intl.Collator");
         self.getter(collator, "compare", Collators::compare);
         self.method(collator, "resolvedOptions", Collators::resolved_options, 0);
 
-        let number = self.service(intl, "NumberFormat", NumberFormats::construct, NumberFormats::supported_locales_of, "Intl.NumberFormat");
+        let number = self.service(intl, "NumberFormat", NumberFormats::construct, Some(NumberFormats::supported_locales_of), "Intl.NumberFormat");
         self.getter(number, "format", NumberFormats::format);
         self.method(number, "formatToParts", NumberFormats::format_to_parts, 1);
         self.method(number, "resolvedOptions", NumberFormats::resolved_options, 0);
 
-        let date = self.service(intl, "DateTimeFormat", DateTimeFormats::construct, DateTimeFormats::supported_locales_of, "Intl.DateTimeFormat");
+        let date = self.service(intl, "DateTimeFormat", DateTimeFormats::construct, Some(DateTimeFormats::supported_locales_of), "Intl.DateTimeFormat");
         self.getter(date, "format", DateTimeFormats::format);
         self.method(date, "formatToParts", DateTimeFormats::format_to_parts, 1);
         self.method(date, "resolvedOptions", DateTimeFormats::resolved_options, 0);
 
-        let plural = self.service(intl, "PluralRules", PluralRulesBuiltins::construct, PluralRulesBuiltins::supported_locales_of, "Intl.PluralRules");
+        let plural = self.service(intl, "PluralRules", PluralRulesBuiltins::construct, Some(PluralRulesBuiltins::supported_locales_of), "Intl.PluralRules");
         self.method(plural, "select", PluralRulesBuiltins::select, 1);
         self.method(plural, "selectRange", PluralRulesBuiltins::select_range, 2);
         self.method(plural, "resolvedOptions", PluralRulesBuiltins::resolved_options, 0);
+
+        let list = self.service(intl, "ListFormat", ListFormats::construct, Some(ListFormats::supported_locales_of), "Intl.ListFormat");
+        self.method(list, "format", ListFormats::format, 1);
+        self.method(list, "formatToParts", ListFormats::format_to_parts, 1);
+        self.method(list, "resolvedOptions", ListFormats::resolved_options, 0);
+
+        let segmenter = self.service(intl, "Segmenter", Segmenters::construct, Some(Segmenters::supported_locales_of), "Intl.Segmenter");
+        let segments = self.plain();
+        self.method(segments, "containing", Segmenters::containing, 1);
+        let iterator = ObjectData { proto: Some(r.iterator_proto), ..ObjectData::default() }.alloc(self.mc);
+        self.method(iterator, "next", Segmenters::next, 0);
+        let t = self.text("Segmenter String Iterator");
+        iterator.borrow_mut(self.mc).define_symbol(r.symbols.to_string_tag, Property { slot: Slot::Data(t), enumerable: false, writable: false, configurable: true });
+        let at = r.named_native(self.mc, Segmenters::iterator, "[Symbol.iterator]", 0);
+        segments.borrow_mut(self.mc).define_symbol(r.symbols.iterator, Property::hidden(at.into()));
+        let mut slots = alloc::vec![Value::Undefined; 2];
+        slots[SEGMENTS_PROTO_SLOT] = segments.into();
+        slots[ITERATOR_PROTO_SLOT] = iterator.into();
+        let segment = ObjectData { kind: ObjectKind::NativeClosure(NativeClosure { f: Segmenters::segment, slots, constructor: false }), proto: Some(r.function_proto), ..ObjectData::default() }.alloc(self.mc);
+        r.name_function(self.mc, segment, "segment", Some(1));
+        self.set(segmenter, "segment", segment.into());
+        self.method(segmenter, "resolvedOptions", Segmenters::resolved_options, 0);
+
+        self.intl_locale(intl);
+    }
+
+    fn intl_locale(&self, intl: JsObject<'scope>) {
+        let r = self.context;
+        let locale = self.service(intl, "Locale", Locales::construct, None, "Intl.Locale");
+        for (name, f) in [("maximize", Locales::maximize as j8framework::ClosureFn), ("minimize", Locales::minimize)] {
+            let c = ObjectData { kind: ObjectKind::NativeClosure(NativeClosure { f, slots: alloc::vec![locale.into()], constructor: false }), proto: Some(r.function_proto), ..ObjectData::default() }.alloc(self.mc);
+            r.name_function(self.mc, c, name, Some(0));
+            self.set(locale, name, c.into());
+        }
+        let methods: [(&str, j8framework::NativeFn); 9] = [
+            ("toString", Locales::to_string),
+            ("toJSON", Locales::to_json),
+            ("getCalendars", Locales::get_calendars),
+            ("getCollations", Locales::get_collations),
+            ("getHourCycles", Locales::get_hour_cycles),
+            ("getNumberingSystems", Locales::get_numbering_systems),
+            ("getTimeZones", Locales::get_time_zones),
+            ("getTextInfo", Locales::get_text_info),
+            ("getWeekInfo", Locales::get_week_info),
+        ];
+        for (name, f) in methods {
+            self.method(locale, name, f, 0);
+        }
+        let getters: [(&str, j8framework::NativeFn); 12] = [
+            ("baseName", Locales::base_name),
+            ("calendar", Locales::calendar),
+            ("caseFirst", Locales::case_first),
+            ("collation", Locales::collation),
+            ("firstDayOfWeek", Locales::first_day_of_week),
+            ("hourCycle", Locales::hour_cycle),
+            ("numeric", Locales::numeric),
+            ("numberingSystem", Locales::numbering_system),
+            ("language", Locales::language),
+            ("script", Locales::script),
+            ("region", Locales::region),
+            ("variants", Locales::variants),
+        ];
+        for (name, f) in getters {
+            self.getter(locale, name, f);
+        }
     }
 }

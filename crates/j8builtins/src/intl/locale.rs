@@ -56,6 +56,14 @@ impl<'scope> Options<'scope> {
         }
     }
 
+    pub(crate) fn object(a: &Scope<'scope, '_>, v: Value<'scope>) -> Result<Self, Error> {
+        match v.kind() {
+            ValueKind::Undefined => Ok(Self { object: None }),
+            ValueKind::Object(o) => Ok(Self { object: Some(o) }),
+            _ => Err(a.throw(ErrorKind::Type, "Options must be an object")),
+        }
+    }
+
     pub(crate) fn value(self, a: &mut Scope<'scope, '_>, name: &str) -> Result<Value<'scope>, Error> {
         match self.object {
             Some(o) => a.get_named(o.into(), name),
@@ -239,6 +247,9 @@ impl Tags {
         if !matches!(v.kind(), ValueKind::String(_) | ValueKind::Object(_)) {
             return Err(a.throw(ErrorKind::Type, "Language ID should be string or object."));
         }
+        if let Some(l) = super::ilocale::Locales::of(a, v) {
+            return Ok(l);
+        }
         let tag = a.to_string(v)?;
         Self::parse(tag.as_str()).ok_or_else(|| a.throw(ErrorKind::Range, &alloc::format!("Incorrect locale information provided: {}", tag.as_str())))
     }
@@ -252,6 +263,10 @@ impl Tags {
                 return Ok(seen);
             }
             _ => {}
+        }
+        if let Some(l) = super::ilocale::Locales::of(a, locales) {
+            seen.push(l);
+            return Ok(seen);
         }
         let o = a.to_object(locales)?;
         let len = a.length_of_array_like(o.into())?;

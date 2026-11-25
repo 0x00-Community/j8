@@ -576,3 +576,14 @@ impl DateTimeFormats {
         Self::date_text(a, this, args, Required::Time, Defaults::Time)
     }
 }
+
+impl DateTimeFormat {
+    pub(crate) fn preferred_cycle(locale: &Locale) -> Option<&'static str> {
+        let f = icu_datetime::NoCalendarFormatter::try_new(DateTimeFormatterPreferences::from(locale), icu_datetime::fieldsets::T::hm()).ok()?;
+        let afternoon = Time::try_new(PROBE_HOUR, 0, 0, 0).ok()?;
+        let pattern = f.format(&afternoon).pattern().write_to_string().into_owned();
+        Self::cycle_of(&pattern, None).map(Cycle::name)
+    }
+}
+
+const PROBE_HOUR: u8 = 13;

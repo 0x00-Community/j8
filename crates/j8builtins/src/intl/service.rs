@@ -13,12 +13,19 @@ use super::locale::Tags;
 use super::datetime::DateTimeFormat;
 use super::number::NumberFormat;
 use super::plural::Plurals;
+use super::listformat::Lists;
+use super::segmenter::{SegmentCursor, Segmented, Segmenter};
 
 pub(crate) enum Service<'scope> {
     Collator(Box<Collation<'scope>>),
     Number(Box<NumberFormat>),
     DateTime(Box<DateTimeFormat>),
     Plural(Box<Plurals>),
+    List(Box<Lists>),
+    Segmenter(Box<Segmenter>),
+    Segments(alloc::sync::Arc<Segmented>),
+    SegmentIterator(Box<SegmentCursor>),
+    Locale(Box<icu_locale_core::Locale>),
 }
 
 struct Brand;
@@ -168,6 +175,22 @@ impl Pieces {
             items.push(Value::from(o));
         }
         Ok(a.array_from_slice(&items).into())
+    }
+
+    pub(crate) fn marked(w: &impl Writeable, part: Part, kind: &'static str) -> Self {
+        let mut c = Collector::default();
+        let _ = w.write_to_parts(&mut c);
+        let mut marks: Vec<(usize, usize)> = c.spans.iter().filter(|s| s.part == part).map(|s| (s.start, s.end)).collect();
+        marks.sort_unstable();
+        let mut out = Self::default();
+        let mut at = 0;
+        for (start, end) in marks {
+            out.push(LITERAL, &c.text[at..start]);
+            out.0.push((kind, String::from(&c.text[start..end])));
+            at = end;
+        }
+        out.push(LITERAL, &c.text[at..]);
+        out
     }
 
     pub(crate) fn collect(w: &impl Writeable, pick: impl Fn(&[&Part]) -> &'static str) -> Self {
