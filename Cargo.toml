@@ -208,7 +208,7 @@ j8napi = { version = "0.5.1", path = "crates/j8napi" }
 j8 = { version = "0.5.1", path = "." }
 moremath = { version = "=0.2.3", default-features = false }
 libm = "0.2"
-paragc = "0.7.0"
+paragc = "0.7.1"
 j8lockfree = { version = "0.5.1", path = "crates/j8lockfree" }
 j8taskqueue = { version = "0.5.1", path = "crates/j8taskqueue" }
 hashbrown = { version = "0.17", default-features = false }
@@ -263,6 +263,3 @@ debug = "line-tables-only"
 
 [profile.dev.package."*"]
 debug = false
-
-[patch.crates-io]
-paragc = { git = "https://github.com/0x00-Community/paragc", rev = "67e3d6740b7801147b06c1282951a271e3b0c474" }
