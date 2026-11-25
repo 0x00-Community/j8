@@ -31,8 +31,8 @@ Core ECMAScript is covered except what [PLAN.md](PLAN.md) puts out of scope (Tem
 | Check | Result |
 | --- | --- |
 | test262 baseline | **42,500** passing, interpreter and JIT, no regression allowed |
-| vs V8 jitless | **0.6×** the time (geometric mean over 11 benchmarks) |
-| vs V8 (with JIT) | **1.7×** the time, see [benchmark.md](samples/benchv8/benchmark.md) |
+| vs V8 jitless | **0.4×** the time (geometric mean over 11 benchmarks) |
+| vs V8 (with JIT) | **1.1×** the time, see [benchmark.md](samples/benchv8/benchmark.md) |
 
 ## 📦 Install
 
