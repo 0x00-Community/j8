@@ -56,7 +56,7 @@ plus direct slot loads and stores.
 
 `Executor::eval` takes `&mut Isolate` and enters it in slices: at most ten thousand instructions each; between slices the
 execution state is rooted, the heap gets to collect, and the run continues. The environment survives slices as a
-`ScopeGlobal<'p, ContextBrand>`. Every 1024 instructions the budget and termination requests are checked; inside an event loop that is
+`ScopeGlobal<'p, ContextBrand>`. Every 1024 instructions the budget, termination and interrupt requests are checked; inside an event loop that is
 when the task queue is checked ([Event loops](event-loop.md)).
 
 Known deviation: JS re-entered from a host function (`map`'s callback) runs to completion inside the current slice,

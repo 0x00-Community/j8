@@ -440,7 +440,17 @@ impl Platform for MyPlatform {
 A handler attached before the microtasks drain (`await`, `then`, `catch`) takes the promise off the list. One attached
 on a later turn does not take back a report.
 
-### 5.7 What the event loop does not do yet
+### 5.7 Running code on the JS thread from another thread
+
+`EventLoop::interrupter()` (or `Runtime::interrupter()`) gives an `Interrupter`, `Clone + Send`. `interrupt(f)` runs
+`f(&Executor, &mut Scope)` on the event loop's thread: in the middle of running JS at its next check (every 1024
+instructions, back edges in JIT code; a busy loop in a callback included), or at the start of the next turn when the
+loop is idle. JIT code leaves to the interpreter at the check, so `f` may run JS that changes what the machine code
+assumed. A long-running native builtin (a big `sort`, regular expression backtracking, a big `JSON.parse`) delays `f`
+until it returns. A debugger that sets a breakpoint or pauses a busy loop needs exactly this. Without a request the
+checks cost what they did before. See the book's Framework chapter.
+
+### 5.8 What the event loop does not do yet
 
 - **No reactor.** Futures that need tokio's (or another runtime's) reactor never wake. Run such work on a thread
   or a reactor of your own.

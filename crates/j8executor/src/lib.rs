@@ -19,10 +19,12 @@ mod jit;
 mod module;
 mod threaded;
 mod event_loop;
+mod interrupt;
 use module::EVAL_FILE;
 
 pub use cache::CodeCache;
 pub use event_loop::{EventLoop, EventLoopSet, Ticket, CHECK, SLICE};
+pub use interrupt::Interrupter;
 pub use jit::{DeoptFrame, Entry, FrameSlots, Function as JitFunction, GlobalFeedback, Insn as JitInsn, PropertyFeedback, Reg as JitReg, ScopeLayout, StringFeedback, Tier, Tiered};
 
 const STACK_LIMIT: usize = 10_000;
@@ -455,11 +457,12 @@ struct Budget<'s> {
     left: Option<usize>,
     stop: &'s j8framework::Termination,
     terminated: bool,
+    interrupted: bool,
 }
 
 impl<'s> Budget<'s> {
     fn new(stop: &'s j8framework::Termination, left: Option<usize>) -> Self {
-        Self { tick: 0, left, stop, terminated: false }
+        Self { tick: 0, left, stop, terminated: false, interrupted: false }
     }
 
     fn remaining(&self) -> Option<usize> {
@@ -467,8 +470,9 @@ impl<'s> Budget<'s> {
     }
 
     fn refill(&mut self) -> bool {
-        if self.stop.observe() {
-            self.terminated = true;
+        if self.stop.is_set() {
+            self.terminated = self.stop.observe();
+            self.interrupted = !self.terminated;
             return true;
         }
         let take = match &mut self.left {
@@ -516,6 +520,7 @@ pub struct Executor<'p> {
     with_shape: Cell<Option<ShapeId>>,
     spare_frames: RefCell<Vec<Vec<Frame>>>,
     active: Active,
+    interrupts: interrupt::Interrupts<'p>,
 }
 
 const _: () = {
@@ -1335,7 +1340,7 @@ impl Executor<'_> {
 
     fn run<'scope>(&self, a: &mut Scope<'scope, '_>, st: &mut State<'scope>, depth: usize, budget: &mut Budget<'_>) -> Result<Option<Outcome<'scope>>, Error> {
         loop {
-            if budget.spent() {
+            if self.halts(a, budget) {
                 return Ok(None);
             }
             let loaded: &Loaded = unsafe { st.f().loaded.get() };
@@ -1348,6 +1353,17 @@ impl Executor<'_> {
                 threaded::Exit::Next(..) => unreachable!("the loop in `threaded` takes these"),
             }
         }
+    }
+
+    #[inline]
+    fn halts(&self, a: &mut Scope<'_, '_>, budget: &mut Budget<'_>) -> bool {
+        while budget.spent() {
+            if !core::mem::take(&mut budget.interrupted) {
+                return true;
+            }
+            self.serve_interrupts(a);
+        }
+        false
     }
 
     #[inline]
@@ -1781,8 +1797,8 @@ impl Executor<'_> {
                         Tiered::Threw(e) => return Err(e),
                     }
                 }
-                let State { regs, frames, acc, message } = st;
-                if budget.spent() {
+                if self.halts(a, budget) {
+                    let State { regs, frames, acc, message } = st;
                     return Ok(Flow::Done(Outcome::Paused(Box::new(State { regs: core::mem::take(regs), frames: core::mem::take(frames), acc: *acc, message: *message }))));
                 }
             }

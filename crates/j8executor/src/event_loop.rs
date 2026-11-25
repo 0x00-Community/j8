@@ -17,7 +17,8 @@ use j8taskqueue::{Flow, ITask, ITaskPoll, Queue, Task, TaskId};
 
 use j8framework::{Scope, AsyncJob, CreateParams, Error, ErrorKind, Intrinsics, Isolate, IsolateHandle, Platform, Quota, ContextBrand, ScopeGlobal, ScriptKind, Settle, Source, Value, ValueBrand};
 
-use crate::{Executor, Job};
+use crate::interrupt::Interrupts;
+use crate::{Executor, Interrupter, Job};
 
 pub const SLICE: usize = 10_000;
 
@@ -82,7 +83,7 @@ impl Doors {
     }
 }
 
-struct Bell {
+pub(crate) struct Bell {
     doors: Arc<Doors>,
     home: AtomicUsize,
     slot: AtomicUsize,
@@ -107,6 +108,11 @@ impl Bell {
             door.wakes.push(Arc::clone(self));
             door.unpark();
         }
+    }
+
+    pub(crate) fn interrupt(self: &Arc<Self>) {
+        self.handle.0.interrupt();
+        self.ring();
     }
 
     fn begin(&self) {
@@ -443,6 +449,11 @@ impl<'p> Lane<'p> {
     }
 
     fn turn(&mut self, budget: NonZeroUsize, check: NonZeroUsize) -> u64 {
+        if self.bell.handle.0.has_interrupt() {
+            let st = unsafe { self.js.state() };
+            let JsState { isolate, engine, cx, .. } = st;
+            isolate.enter(cx, engine, |a| engine.serve_interrupts(a));
+        }
         self.take_in();
         self.tasks.set_slice(check);
         self.tasks.set_budget(budget);
@@ -759,6 +770,7 @@ impl<'p> Ticket<'p> {
 pub struct EventLoop<'p> {
     bell: Arc<Bell>,
     submitted: Arc<Fifo<Submitted<'p>>>,
+    interrupts: Interrupts<'p>,
     set: Arc<Set<'p>>,
 }
 
@@ -810,6 +822,10 @@ impl<'p> EventLoop<'p> {
 
     pub fn handle(&self) -> IsolateHandle {
         self.bell.handle.clone()
+    }
+
+    pub fn interrupter(&self) -> Interrupter<'p> {
+        Interrupter::new(Arc::clone(&self.bell), Arc::clone(&self.interrupts))
     }
 }
 
@@ -883,6 +899,7 @@ impl<'p> EventLoopSet<'_, 'p> {
         let (tx, rx) = Oneshot::new();
         let reply = Reply(Some(tx));
         let platform = self.set.platform;
+        let interrupts = Arc::clone(&engine.interrupts);
         let make: OnThread<'_, 'p> = Box::new(move |s| {
             let lane = Lane::new(platform, engine, intrinsics, &s.set.doors, s.me);
             let submitted = Arc::clone(&lane.submitted);
@@ -891,7 +908,7 @@ impl<'p> EventLoopSet<'_, 'p> {
         let make = unsafe { core::mem::transmute::<OnThread<'_, 'p>, OnThread<'p, 'p>>(make) };
         self.set.port(home).send(Msg::Spawn(make));
         let (bell, submitted) = block_on(rx).expect("the loop thread has shut down");
-        EventLoop { bell, submitted, set: Arc::clone(&self.set) }
+        EventLoop { bell, submitted, interrupts, set: Arc::clone(&self.set) }
     }
 
     pub fn rebalance(&self) -> usize {

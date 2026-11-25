@@ -107,6 +107,23 @@ request at checkpoints (function entries, back edges; in JIT code, back edges) a
 a JS exception: `catch` / `finally` can't catch it, and it goes all the way out. Leaving the outermost entry resets it,
 so the isolate stays usable.
 
+## Interrupting execution
+
+An `Interrupter` (from `EventLoop::interrupter` or `Runtime::interrupter`) runs a closure on the event loop's JS thread
+from any thread (V8's `RequestInterrupt`): `interrupter.interrupt(|executor, scope| …)` queues it with the executor,
+sets the interrupt bit and rings the loop. Running JS sees the bit at the termination checkpoints (every 1024
+instructions; in JIT code, back edges), runs the queued closures with the executor and the current scope, and goes on.
+JIT code doesn't run them in its own frame: it deoptimizes at the check and the interpreter runs them and continues
+from the same instruction, so a closure that runs JS and changes globals or shapes can't break what the machine code
+assumed. An idle event loop runs them at the start of its next turn, so a closure doesn't wait for the next JS. A
+long-running native builtin (a big `sort`, regular expression backtracking, a big `JSON.parse`) has no checkpoints: an
+interrupt waits until it returns.
+
+The termination byte has two uses: its low bits hold the termination state (requested, unwinding) and one more bit is
+the pending interrupt. Termination only reads and changes its own bits, so it works as before alongside an interrupt.
+With nothing pending the checkpoints read the byte once, as before; both requests are handled behind the branch that a
+set byte already takes.
+
 ## Other parts
 
 | File | Contents |

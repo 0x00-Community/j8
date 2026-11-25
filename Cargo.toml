@@ -94,6 +94,10 @@ name = "terminate"
 path = "tests/terminate.rs"
 
 [[test]]
+name = "interrupt"
+path = "tests/interrupt.rs"
+
+[[test]]
 name = "crossheap"
 path = "tests/crossheap.rs"
 required-features = ["crossheap"]

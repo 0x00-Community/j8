@@ -125,6 +125,10 @@ impl<'p> Runtime<'p> {
     pub fn run_until_idle(&self) -> Result<(), Error> {
         self.js.run()
     }
+
+    pub fn interrupter(&self) -> j8executor::Interrupter<'p> {
+        self.js.interrupter()
+    }
 }
 
 #[macro_export]
