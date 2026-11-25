@@ -604,7 +604,7 @@ impl<'scope> Writer<'scope> {
             let wrote = match read {
                 Some(v) if self.replacer.is_none() && self.to_json_absent(v) => self.write_value(a, v, out)?,
                 _ => {
-                    let key = self.cached_shapes[hit].shape.key(i).clone();
+                    let key = SmallStr::from(self.cached_shapes[hit].shape.key(i));
                     self.property(a, o.into(), &key, read, out)?
                 }
             };

@@ -1,8 +1,7 @@
-use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::hash::BuildHasherDefault;
 
-use j8lockfree::{AtomicRefCell, OnceBox, Prefix};
+use j8lockfree::{AtomicRefCell, OnceBox};
 use crate::{Handle, HandleSlot, Weak};
 
 use crate::Collect;
@@ -91,31 +90,93 @@ paragc::brand!(pub ShapeBrand = for<'heap, 'scope> Shape<'scope>);
 
 type Transition<'scope> = (SmallStr, Attrs, Weak<'scope, ShapeBrand>);
 
-pub struct Shape<'scope> {
-    keys: Arc<Prefix<(SmallStr, Attrs)>>,
-    len: usize,
-    index: OnceBox<hashbrown::HashMap<SmallStr, u32, BuildHasherDefault<FxHasher>>>,
-    searches: IsoCell<u32>,
+pub struct ShapeSide<'scope> {
     transitions: AtomicRefCell<Vec<Transition<'scope>>>,
-    this: IsoCell<usize>,
-    digit_keys: bool,
+    index: OnceBox<hashbrown::HashMap<SmallStr, u32, BuildHasherDefault<FxHasher>>>,
 }
 
-unsafe impl crate::Trace for Shape<'_> {
+unsafe impl crate::Trace for ShapeSide<'_> {
     const NO_EDGES: bool = true;
 
     fn trace(&self, _: &mut crate::Tracer<'_>) {}
 }
 
-impl<'scope> Shape<'scope> {
-    fn new(keys: Arc<Prefix<(SmallStr, Attrs)>>, len: usize) -> Self {
-        let digit_keys = keys.prefix(len).iter().any(|(k, _)| k.as_bytes().first().is_some_and(u8::is_ascii_digit));
-        Self { keys, len, index: OnceBox::default(), searches: IsoCell::new(0), transitions: AtomicRefCell::new(Vec::new()), this: IsoCell::new(0), digit_keys }
+#[repr(C)]
+pub struct Shape<'scope> {
+    this: IsoCell<usize>,
+    side: GcSlot<'scope, ShapeSide<'scope>>,
+    len: u32,
+    bytes: u32,
+    searches: IsoCell<u32>,
+    digit_keys: u32,
+}
+
+const _: () = assert!(core::mem::size_of::<Shape<'static>>().is_multiple_of(8), "the key table starts right after the shape");
+
+unsafe impl crate::Trace for Shape<'_> {
+    fn trace(&self, t: &mut crate::Tracer<'_>) {
+        self.side.trace(t);
     }
 
-    fn alloc(mc: &Mutation<'scope>, keys: Arc<Prefix<(SmallStr, Attrs)>>, len: usize) -> ShapeRef<'scope> {
-        let h = mc.gc_scope().alloc_handle(Self::new(keys, len));
+    fn relocate(&mut self, t: &mut crate::Tracer<'_>) {
+        self.side.relocate(t);
+    }
+}
+
+#[cfg(all(target_os = "linux", feature = "crossheap"))]
+unsafe impl paragc::Shared for Shape<'_> {
+    fn edges(map: &mut paragc::EdgeMap, at: u32) {
+        <GcSlot<'_, ShapeSide<'_>> as paragc::Shared>::edges(map, at + paragc::EdgeMap::offset(core::mem::offset_of!(Shape<'static>, side)));
+    }
+}
+
+const KEY_END: usize = core::mem::size_of::<u32>();
+
+impl<'scope> Shape<'scope> {
+    fn tail(&self) -> *const u8 {
+        (&raw const *self).wrapping_add(1).cast()
+    }
+
+    fn ends(&self) -> &[u32] {
+        #[expect(clippy::cast_ptr_alignment, reason = "the tail starts at an 8-byte boundary")]
+        unsafe {
+            core::slice::from_raw_parts(self.tail().cast::<u32>(), self.len as usize)
+        }
+    }
+
+    fn attr_bytes(&self) -> &[u8] {
+        unsafe { core::slice::from_raw_parts(self.tail().add(KEY_END * self.len as usize), self.len as usize) }
+    }
+
+    fn text(&self) -> &[u8] {
+        unsafe { core::slice::from_raw_parts(self.tail().add((KEY_END + 1) * self.len as usize), self.bytes as usize) }
+    }
+
+    fn build<'k>(mc: &Mutation<'scope>, keys: impl Iterator<Item = (&'k str, Attrs)> + Clone) -> ShapeRef<'scope> {
+        let n = |x: usize| u32::try_from(x).expect("a shape is smaller than 4 GiB");
+        let (len, bytes) = keys.clone().fold((0, 0), |(l, b), (k, _)| (l + 1, b + k.len()));
+        let digit_keys = keys.clone().any(|(k, _)| k.as_bytes().first().is_some_and(u8::is_ascii_digit));
+        let s = Self { this: IsoCell::new(0), side: GcSlot::default(), len: n(len), bytes: n(bytes), searches: IsoCell::new(0), digit_keys: u32::from(digit_keys) };
+        let fill = |t: &mut [core::mem::MaybeUninit<u8>]| {
+            let (ends, rest) = t.split_at_mut(KEY_END * len);
+            let (attrs, text) = rest.split_at_mut(len);
+            let mut end = 0;
+            for (i, (k, a)) in keys.enumerate() {
+                text[end..end + k.len()].iter_mut().zip(k.as_bytes()).for_each(|(d, &b)| _ = d.write(b));
+                end += k.len();
+                ends[KEY_END * i..KEY_END * (i + 1)].iter_mut().zip(n(end).to_ne_bytes()).for_each(|(d, b)| _ = d.write(b));
+                attrs[i].write(a.0);
+            }
+        };
+        let tail = (KEY_END + 1) * len + bytes;
+        #[cfg(all(target_os = "linux", feature = "crossheap"))]
+        let h = mc.gc_scope().alloc_shared_handle_tail(s, tail, fill);
+        #[cfg(not(all(target_os = "linux", feature = "crossheap")))]
+        let h = mc.gc_scope().alloc_handle_tail(s, tail, fill);
         h.this.set(h.id());
+        if len > LINEAR {
+            h.get().side_or_new(mc);
+        }
         h
     }
 
@@ -128,55 +189,72 @@ impl<'scope> Shape<'scope> {
     }
 
     pub fn digit_keys(&self) -> bool {
-        self.digit_keys
-    }
-
-    fn keys(&self) -> &[(SmallStr, Attrs)] {
-        self.keys.prefix(self.len)
+        self.digit_keys != 0
     }
 
     pub fn len(&self) -> usize {
-        self.len
+        self.len as usize
     }
 
     pub fn is_empty(&self) -> bool {
         self.len == 0
     }
 
-    pub fn find(&self, key: &str) -> Option<usize> {
-        if let Some(m) = self.index.get() {
-            return m.get(key).map(|&i| i as usize);
-        }
-        if self.len > LINEAR && {
-            let n = self.searches.get();
-            self.searches.set(n.saturating_add(1));
-            n >= INDEX_AFTER
-        } {
-            let m = self.index.get_or_init(|| self.keys().iter().zip(0u32..).map(|((k, _), i)| (k.clone(), i)).collect());
-            return m.get(key).map(|&i| i as usize);
-        }
-        self.keys().iter().position(|(k, _)| **k == *key)
+    fn keys(&self) -> impl Iterator<Item = (&str, Attrs)> + Clone + '_ {
+        (0..self.len()).map(|i| (self.key(i), self.attrs(i)))
     }
 
-    pub fn key(&self, i: usize) -> &SmallStr {
-        &self.keys()[i].0
+    fn side(&self) -> Option<&ShapeSide<'scope>> {
+        self.side.get().map(ScopeLocal::get)
+    }
+
+    fn side_or_new(&self, mc: &Mutation<'scope>) -> &ShapeSide<'scope> {
+        if let Some(s) = self.side() {
+            return s;
+        }
+        let s = mc.alloc(ShapeSide { transitions: AtomicRefCell::new(Vec::new()), index: OnceBox::default() });
+        self.side.set(mc.gc_scope(), Some(s));
+        ScopeLocal::get(s)
+    }
+
+    pub fn find(&self, key: &str) -> Option<usize> {
+        if let Some(m) = self.side().and_then(|s| s.index.get()) {
+            return m.get(key).map(|&i| i as usize);
+        }
+        if self.len() > LINEAR
+            && let Some(side) = self.side()
+            && {
+                let n = self.searches.get();
+                self.searches.set(n.saturating_add(1));
+                n >= INDEX_AFTER
+            }
+        {
+            let m = side.index.get_or_init(|| self.keys().zip(0u32..).map(|((k, _), i)| (SmallStr::from(k), i)).collect());
+            return m.get(key).map(|&i| i as usize);
+        }
+        self.keys().position(|(k, _)| k == key)
+    }
+
+    pub fn key(&self, i: usize) -> &str {
+        let ends = self.ends();
+        let start = if i == 0 { 0 } else { ends[i - 1] as usize };
+        unsafe { core::str::from_utf8_unchecked(&self.text()[start..ends[i] as usize]) }
     }
 
     pub fn attrs(&self, i: usize) -> Attrs {
-        self.keys()[i].1
+        Attrs(self.attr_bytes()[i])
     }
 
-    pub fn rooted(mc: &Mutation<'scope>, keys: Vec<(SmallStr, Attrs)>) -> ShapeRef<'scope> {
-        let len = keys.len();
-        Self::alloc(mc, Prefix::new(keys), len)
+    pub fn rooted(mc: &Mutation<'scope>, keys: &[(SmallStr, Attrs)]) -> ShapeRef<'scope> {
+        Self::build(mc, keys.iter().map(|(k, a)| (&**k, *a)))
     }
 
     pub fn empty(mc: &Mutation<'scope>) -> ShapeRef<'scope> {
-        Self::rooted(mc, Vec::new())
+        Self::build(mc, core::iter::empty())
     }
 
     pub fn child(&self, mc: &Mutation<'scope>, key: &str, attrs: Attrs) -> ShapeRef<'scope> {
-        let mut ts = self.transitions.borrow_mut();
+        let mut ts = self.side_or_new(mc).transitions.borrow_mut();
         let mut found = None;
         ts.retain(|(k, a, w)| match mc.upgrade(w) {
             Some(c) => {
@@ -190,7 +268,7 @@ impl<'scope> Shape<'scope> {
         if let Some(c) = found {
             return c.get().handle(mc);
         }
-        let child = Self::alloc(mc, self.keys.extend(self.len, (SmallStr::from(key), attrs)), self.len + 1);
+        let child = Self::build(mc, self.keys().chain(core::iter::once((key, attrs))));
         ts.push((SmallStr::from(key), attrs, mc.weak::<ShapeBrand>(child.get())));
         child
     }
@@ -218,11 +296,13 @@ impl Dict<'_> {
     }
 }
 
+#[repr(C)]
+#[cfg_attr(all(target_os = "linux", feature = "crossheap"), derive(paragc::Shared))]
 pub struct Props<'scope> {
-    shape: HandleSlot<'scope, Shape<'scope>>,
+    inline: [ValueCell<'scope>; INLINE],
     store: GcSlot<'scope, Erased>,
     dict: GcSlot<'scope, GcCell<'scope, Dict<'scope>>>,
-    inline: [ValueCell<'scope>; INLINE],
+    shape: HandleSlot<'scope, Shape<'scope>>,
 }
 
 impl Default for Props<'_> {
@@ -325,7 +405,7 @@ impl<'scope> Props<'scope> {
     pub fn key(&self, i: usize) -> SmallStr {
         match self.dict_cell() {
             Some(d) => d.borrow().keys[i].0.clone(),
-            None => self.shape_ref().expect("a property's shape").key(i).clone(),
+            None => SmallStr::from(self.shape_ref().expect("a property's shape").key(i)),
         }
     }
 
@@ -411,8 +491,8 @@ impl<'scope> Props<'scope> {
                 (**k == *key).then(|| Property::from((d.slots[i], *a)))
             }
             None => {
-                let (k, a) = self.shape_ref()?.keys().get(i)?;
-                (**k == *key).then(|| Property::from((self.slot(i), *a)))
+                let shape = self.shape_ref()?;
+                (i < shape.len() && shape.key(i) == key).then(|| Property::from((self.slot(i), shape.attrs(i))))
             }
         }
     }
@@ -447,7 +527,7 @@ impl<'scope> Props<'scope> {
         let shape = self.shape_ref();
         let n = shape.map_or(0, Shape::len);
         let mut d = Dict {
-            keys: (0..n).map(|i| (shape.expect("a fast shape").key(i).clone(), shape.expect("a fast shape").attrs(i))).collect(),
+            keys: (0..n).map(|i| (SmallStr::from(shape.expect("a fast shape").key(i)), shape.expect("a fast shape").attrs(i))).collect(),
             index: None,
             slots: (0..n).map(|i| Slot::decode(self.cell(i).map_or(Value::Undefined, ValueCell::get))).collect(),
         };
@@ -493,7 +573,7 @@ impl<'scope> Props<'scope> {
                 Some(f) => f.child(mc, key, attrs),
                 None => match root() {
                     Some(r) => r.child(mc, key, attrs),
-                    None => Shape::rooted(mc, alloc::vec![(SmallStr::from(key), attrs)]),
+                    None => Shape::rooted(mc, &[(SmallStr::from(key), attrs)]),
                 },
             };
             if self.advance(mc, from, to, prop.slot) {

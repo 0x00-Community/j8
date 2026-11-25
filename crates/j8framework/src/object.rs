@@ -894,7 +894,7 @@ pub struct ObjectData<'scope> {
 
 impl<'scope> ObjectData<'scope> {
     pub fn ordinary(mc: &Mutation<'scope>, proto: Option<JsObject<'scope>>, capacity: usize) -> JsObject<'scope> {
-        mc.alloc(Object {
+        mc.alloc_shareable(Object {
             proto: GcSlot::from(proto),
             call: GcSlot::default(),
             props: crate::Props::with_capacity(mc, capacity),
@@ -915,7 +915,7 @@ impl<'scope> ObjectData<'scope> {
         let unit = Class::unit(&state);
         let class = Class::of(&state.kind) | unit.unwrap_or(0) | if state.symbols.is_empty() { 0 } else { Class::SYMBOLS };
         let call = Object::call_of(mc, &state.kind);
-        let o = mc.alloc(Object {
+        let o = mc.alloc_shareable(Object {
             proto: GcSlot::from(proto),
             call: GcSlot::from(call),
             props: crate::Props::with_capacity(mc, capacity),
@@ -1042,12 +1042,17 @@ impl Class {
 }
 
 #[crate::heap]
+#[repr(C)]
 pub struct Object<'scope> {
     #[mutable(set = write_proto)]
     proto: Option<JsObject<'scope>>,
     call: GcSlot<'scope, Fast<'scope>>,
     props: crate::Props<'scope>,
     elements: crate::ValueArray<'scope>,
+    shape_root: crate::HandleSlot<'scope, crate::Shape<'scope>>,
+    data: GcCell<'scope, ObjectState<'scope>>,
+    #[mutable]
+    sparse_length: u32,
     class: crate::IsoCell<u8>,
     #[mutable]
     non_extensible: bool,
@@ -1055,10 +1060,34 @@ pub struct Object<'scope> {
     length_readonly: bool,
     #[mutable]
     flags: u8,
-    #[mutable]
-    sparse_length: u32,
-    shape_root: crate::HandleSlot<'scope, crate::Shape<'scope>>,
-    data: GcCell<'scope, ObjectState<'scope>>,
+}
+
+#[cfg(all(target_os = "linux", feature = "crossheap"))]
+impl Object<'_> {
+    fn field_edges<T: paragc::Shared>(_: fn(&Self) -> &T, map: &mut paragc::EdgeMap, at: u32, offset: usize) {
+        T::edges(map, at + paragc::EdgeMap::offset(offset));
+    }
+}
+
+#[cfg(all(target_os = "linux", feature = "crossheap"))]
+unsafe impl paragc::Shared for Object<'_> {
+    fn edges(map: &mut paragc::EdgeMap, at: u32) {
+        use core::mem::offset_of;
+        Self::field_edges(|o| &o.proto, map, at, offset_of!(Object<'static>, proto));
+        Self::field_edges(|o| &o.call, map, at, offset_of!(Object<'static>, call));
+        Self::field_edges(|o| &o.props, map, at, offset_of!(Object<'static>, props));
+        Self::field_edges(|o| &o.elements, map, at, offset_of!(Object<'static>, elements));
+        Self::field_edges(|o| &o.shape_root, map, at, offset_of!(Object<'static>, shape_root));
+        Self::field_edges(|o| &o.data, map, at, offset_of!(Object<'static>, data));
+    }
+
+    fn shareable(&self) -> bool {
+        let class = self.class.get();
+        let unit = class & Class::UNIT_MASK;
+        let plain = class & (Class::PLAIN | Class::CALLABLE | Class::SYMBOLS) == Class::PLAIN;
+        let kind = (class & Class::ARRAY == 0 && unit == Class::UNIT_ORDINARY) || (class & Class::ARRAY != 0 && unit == Class::UNIT_DERIVED);
+        plain && kind && self.call.get().is_none() && !self.data.has_value() && !self.props.is_dict() && self.shape_root.get().is_none()
+    }
 }
 
 const _: () = assert!(!core::mem::needs_drop::<Object<'static>>(), "objects need no destructor: sweeping skips them");
@@ -1707,7 +1736,7 @@ impl<'scope> Object<'scope> {
         };
         let state = ObjectState { kind: ObjectKind::RegExp(data), ..ObjectState::default() };
         let class = Class::of(&state.kind) | Class::unit(&state).unwrap_or(0);
-        mc.alloc(Object {
+        mc.alloc_shareable(Object {
             proto: GcSlot::from(Some(proto)),
             call: GcSlot::from(Some(shared.0)),
             props: crate::Props::default(),

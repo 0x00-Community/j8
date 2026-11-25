@@ -513,8 +513,14 @@ for (ticket, signature) in isolate.take_signatures() {
 
 j8 collects only between turns, so a shared object is promoted and signed when the `enter` that shared it returns.
 A signature keeps nothing alive: the receiver opens the same heap (`CrossHeapSpace::open_fd` with a passed descriptor)
-and calls `CrossHeapScope::resolve`, which gives `None` once the object is gone. JS objects themselves are not
-shareable yet; that comes in later steps.
+and calls `CrossHeapScope::resolve`, which gives `None` once the object is gone.
+
+Plain JS objects and arrays (no symbol or private keys, not callable, not in dictionary mode, not a prototype), their
+property and element stores, strings and shapes are shareable too: with a cross-heap attached they move into it at the
+first young collection they survive. Shapes keep their identity (their handle entries live in the cross-heap). Edges
+from a shared object to private ones (its prototype, a function in a property) stay private addresses that the owner
+keeps alive; other processes read them as empty. `J8_TEST262_CROSSHEAP=1` runs test262 with the harness promoted into a
+cross-heap before each test.
 
 ## 10. Where to look in the samples
 

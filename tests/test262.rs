@@ -21,6 +21,8 @@ const VERBOSE_ENV: &str = "J8_TEST262_VERBOSE";
 
 const JIT_ENV: &str = "J8_TEST262_JIT";
 
+const CROSSHEAP_ENV: &str = "J8_TEST262_CROSSHEAP";
+
 const TIMEOUT: Duration = Duration::from_secs(10);
 
 const POLL: Duration = Duration::from_millis(2);
@@ -207,13 +209,22 @@ impl Case {
     }
 
     fn source(&self) -> Result<String, String> {
+        let (mut src, text) = self.parts()?;
+        if !self.has(Flag::Module) {
+            src.push_str(text);
+        }
+        Ok(src)
+    }
+
+    fn strict(&self) -> &'static str {
+        if self.has(Flag::OnlyStrict) { "\"use strict\";\n" } else { "" }
+    }
+
+    fn parts(&self) -> Result<(String, &str), String> {
         if self.has(Flag::Raw) {
-            return Ok(self.text.clone());
+            return Ok((String::new(), &self.text));
         }
-        let mut src = String::new();
-        if self.has(Flag::OnlyStrict) {
-            src.push_str("\"use strict\";\n");
-        }
+        let mut src = String::from(self.strict());
         src.push_str(HOST_262);
         let mut harness = vec!["assert.js", "sta.js"];
         if self.has(Flag::Async) {
@@ -225,10 +236,7 @@ impl Case {
             src.push_str(&std::fs::read_to_string(&p).map_err(|e| format!("{}: {e}", p.display()))?);
             src.push('\n');
         }
-        if !self.has(Flag::Module) {
-            src.push_str(&self.text);
-        }
-        Ok(src)
+        Ok((src, &self.text))
     }
 
     fn run(&self) -> (Outcome, String) {
@@ -238,6 +246,15 @@ impl Case {
         };
         let platform = Capture { start: Instant::now(), lines: Mutex::default() };
         let mut isolate = Isolate::new(&platform, CreateParams::default());
+        let crossheap = std::env::var_os(CROSSHEAP_ENV).is_some();
+        #[cfg(all(target_os = "linux", feature = "crossheap"))]
+        let space = crossheap.then(|| paragc::CrossHeapSpace::reserve_fixed().expect("the fixed-address region is free"));
+        #[cfg(all(target_os = "linux", feature = "crossheap"))]
+        if let Some(space) = &space {
+            isolate.attach_cross_heap(unsafe { space.create_anonymous_unchecked(core::num::NonZeroUsize::MIN) }.expect("a cross-heap")).expect("attached");
+        }
+        #[cfg(not(all(target_os = "linux", feature = "crossheap")))]
+        assert!(!crossheap, "{CROSSHEAP_ENV} needs the crossheap feature on Linux");
         let executor = if std::env::var_os(JIT_ENV).is_some() { Executor::default().with_tier(j8jit::Jit::from(0)) } else { Executor::default() };
         let file = self.path.strip_prefix(Suite::test_dir()).unwrap_or(&self.path).display().to_string();
         let expected = self.meta.negative.as_ref();
@@ -245,6 +262,18 @@ impl Case {
         let r = if self.has(Flag::Module) {
             match executor.eval(&mut isolate, &cx, &Source { text: &src, file: "[harness]" }) {
                 Ok(_) => executor.eval_module(&mut isolate, &cx, &Source { text: &self.text, file: &file }),
+                e => e,
+            }
+        } else if crossheap && !self.has(Flag::Raw) {
+            let (harness, text) = match self.parts() {
+                Ok(p) => p,
+                Err(e) => return (Outcome::Fail, e),
+            };
+            match executor.eval(&mut isolate, &cx, &Source { text: &harness, file: "[harness]" }) {
+                Ok(_) => {
+                    isolate.collect();
+                    executor.eval(&mut isolate, &cx, &Source { text: &format!("{}{text}", self.strict()), file: &file })
+                }
                 e => e,
             }
         } else {
@@ -273,6 +302,9 @@ impl Case {
                 (Ok(_), None) => (Outcome::Pass, String::new()),
             }
         });
+        if crossheap {
+            isolate.collect();
+        }
         if outcome == Outcome::Pass && self.has(Flag::Async) {
             let lines = std::mem::take(&mut *platform.lines.lock().expect("an unpoisoned log"));
             if !lines.iter().any(|l| l == ASYNC_DONE) {
