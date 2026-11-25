@@ -1,9 +1,11 @@
 use alloc::sync::Arc;
-use core::sync::atomic::Ordering;
+use core::sync::atomic::{AtomicU32, Ordering};
 
 use j8bytecode::{Decoded, WasmBytecode};
 
 use super::entity::{Code, WasmInstance};
+use alloc::vec::Vec;
+
 use super::{Activation, WasmScalar, WasmStore, WasmTrap};
 
 #[cfg(all(windows, target_arch = "x86_64"))]
@@ -31,6 +33,7 @@ pub struct WasmCtx {
     frame: usize,
     io_at: usize,
     depth: u64,
+    osr: u64,
 }
 
 impl WasmCtx {
@@ -39,15 +42,17 @@ impl WasmCtx {
     pub const MEM_LEN: i32 = 16;
     pub const STATUS: i32 = 24;
     pub const TRAP: i32 = 32;
+    pub const OSR: i32 = 72;
     pub const RETURNED: u64 = 0;
     pub const TRAPPED: u64 = 1;
     pub const THREW: u64 = 2;
     pub const OUT_OF_BOUNDS: u64 = WasmTrap::OutOfBoundsMemory as u64;
+    pub const UNSUPPORTED: u64 = WasmTrap::Unsupported as u64;
     const NEST: u64 = 96;
     const NATIVE: usize = usize::MAX;
 
     fn new() -> Self {
-        Self { io: 0, mem_base: 0, mem_len: 0, status: 0, trap: 0, store: 0, frame: 0, io_at: 0, depth: 0 }
+        Self { io: 0, mem_base: 0, mem_len: 0, status: 0, trap: 0, store: 0, frame: 0, io_at: 0, depth: 0, osr: 0 }
     }
 }
 
@@ -71,10 +76,16 @@ pub struct WasmJitFunction<'a> {
     pub call: u64,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WasmMachine {
+    pub call: u64,
+    pub osr: u64,
+}
+
 pub trait WasmTier {
     fn threshold(&self) -> u32;
 
-    fn compile(&self, f: &WasmJitFunction<'_>) -> Option<u64>;
+    fn compile(&self, f: &WasmJitFunction<'_>) -> Option<WasmMachine>;
 }
 
 struct Frame<'scope> {
@@ -148,7 +159,7 @@ impl WasmJit {
         if let Some(inst) = callee.instance.get() {
             let instance = inst.get();
             let code = instance.module.code(callee.index);
-            if let Some(e) = WasmJit::jitted(store, &code) {
+            if let Some(WasmMachine { call: e, .. }) = WasmJit::jitted(store, &code) {
                 let saved = (ctx.io, ctx.io_at, ctx.frame, ctx.mem_base, ctx.mem_len);
                 let inner = Frame { instance, code };
                 ctx.io = args as usize;
@@ -237,15 +248,23 @@ impl<'a> WasmStore<'a, '_> {
 }
 
 impl WasmJit {
-    pub fn jitted(store: &WasmStore<'_, '_>, code: &Code) -> Option<u64> {
+    pub fn jitted(store: &WasmStore<'_, '_>, code: &Code) -> Option<WasmMachine> {
+        WasmJit::hot(store, code, &code.calls)
+    }
+
+    pub fn looped(store: &WasmStore<'_, '_>, code: &Code) -> Option<WasmMachine> {
+        WasmJit::hot(store, code, &code.loops)
+    }
+
+    fn hot(store: &WasmStore<'_, '_>, code: &Code, counter: &AtomicU32) -> Option<WasmMachine> {
         let tier = store.tier?;
         if code.vector || !code.handlers.is_empty() || store.ctx.depth >= WasmCtx::NEST {
             return None;
         }
-        if let Some(&e) = code.jit.get() {
-            return (e != 0).then_some(e);
+        if let Some(&m) = code.jit.get() {
+            return (m.call != 0).then_some(m);
         }
-        if code.calls.fetch_add(1, Ordering::Relaxed) < tier.threshold() {
+        if counter.fetch_add(1, Ordering::Relaxed) < tier.threshold() {
             return None;
         }
         let f = WasmJitFunction {
@@ -261,13 +280,27 @@ impl WasmJit {
             scalar: WasmJit::scalar as *const () as usize as u64,
             call: WasmJit::call as *const () as usize as u64,
         };
-        let e = *code.jit.get_or_init(|| tier.compile(&f).unwrap_or(0));
-        (e != 0).then_some(e)
+        let m = *code.jit.get_or_init(|| tier.compile(&f).unwrap_or_default());
+        (m.call != 0).then_some(m)
     }
 
     pub fn machine<'scope>(store: &mut WasmStore<'_, 'scope>, entry: u64, instance: &'scope WasmInstance<'scope>, code: Arc<Code>, fp: usize) -> Result<(), WasmTrap> {
+        store.reserve(fp + code.params.max(code.results) as usize);
+        WasmJit::run(store, entry, instance, code, fp)
+    }
+
+    pub fn osr<'scope>(store: &mut WasmStore<'_, 'scope>, frames: &mut Vec<Activation<'scope>>) -> Result<(), WasmTrap> {
+        let Some(f) = frames.last() else { return Ok(()) };
+        let Some(m) = WasmJit::looped(store, &f.code) else { return Ok(()) };
+        let (instance, code, fp) = (f.instance, f.code.clone(), f.fp);
+        store.ctx.osr = u64::try_from(f.pc).unwrap_or(u64::MAX);
+        WasmJit::run(store, m.osr, instance, code, fp)?;
+        frames.pop();
+        Ok(())
+    }
+
+    fn run<'scope>(store: &mut WasmStore<'_, 'scope>, entry: u64, instance: &'scope WasmInstance<'scope>, code: Arc<Code>, fp: usize) -> Result<(), WasmTrap> {
         let this = store;
-        this.reserve(fp + code.params.max(code.results) as usize);
         let frame = Frame { instance, code };
         let saved = (this.ctx.io, this.ctx.io_at, this.ctx.frame, this.ctx.mem_base, this.ctx.mem_len);
         this.ctx.io_at = fp;

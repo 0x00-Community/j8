@@ -13,7 +13,7 @@ pub use entity::{CellsBrand, FuncBrand, GlobalBrand, InstanceBrand, MemoryBrand,
 use entity::{Code, Ptr};
 use gc::{Objects, WasmObject, Word};
 pub use js::WebAssembly;
-pub use jit::{WasmCtx, WasmJitFunction, WasmTier};
+pub use jit::{WasmCtx, WasmJitFunction, WasmMachine, WasmTier};
 use jit::WasmJit;
 use j8bytecode::{Decoded, OperandValue, WasmBytecode, WasmCatchKind, WasmCompositeType, WasmExternKind, WasmFuncType, WasmGlobalType, WasmImportKind, WasmMemoryType, WasmSegmentMode, WasmStorageType, WasmTableType, WasmValType};
 use j8framework::{GcSlot, IsoCell, Mutation, ScopeLocal, Static, WordSlot};
@@ -491,8 +491,8 @@ impl<'a, 'scope> WasmStore<'a, 'scope> {
             Some(inst) => {
                 let instance = inst.get();
                 let code = instance.module.code(func.index);
-                if let Some(e) = WasmJit::jitted(self, &code) {
-                    return WasmJit::machine(self, e, instance, code, fp);
+                if let Some(m) = WasmJit::jitted(self, &code) {
+                    return WasmJit::machine(self, m.call, instance, code, fp);
                 }
                 let frame = self.frame(instance, code, fp);
                 self.call(frame)
@@ -755,17 +755,20 @@ impl<'a, 'scope> WasmStore<'a, 'scope> {
             let Some(d) = f.code.ops.get(f.pc) else { return Err(WasmTrap::Unsupported) };
             let d: &Decoded<WasmBytecode> = d;
             let o = d.operands;
+            let at = f.pc;
             f.pc += 1;
             match d.bytecode {
-                WasmBytecode::Jump => f.pc = f.code.target(d, o[0]),
-                WasmBytecode::JumpIfZero => {
-                    if Slot(r!(f, o[0])).u32() == 0 {
-                        f.pc = f.code.target(d, o[1]);
-                    }
-                }
-                WasmBytecode::JumpIfNonZero => {
-                    if Slot(r!(f, o[0])).u32() != 0 {
-                        f.pc = f.code.target(d, o[1]);
+                WasmBytecode::Jump | WasmBytecode::JumpIfZero | WasmBytecode::JumpIfNonZero => {
+                    let taken = match d.bytecode {
+                        WasmBytecode::Jump => true,
+                        WasmBytecode::JumpIfZero => Slot(r!(f, o[0])).u32() == 0,
+                        _ => Slot(r!(f, o[0])).u32() != 0,
+                    };
+                    if taken {
+                        f.pc = f.code.target(d, if d.bytecode == WasmBytecode::Jump { o[0] } else { o[1] });
+                        if f.pc <= at && single.is_none() && self.tier.is_some() {
+                            WasmJit::osr(self, frames)?;
+                        }
                     }
                 }
                 WasmBytecode::BrOnNull => {
@@ -822,8 +825,8 @@ impl<'a, 'scope> WasmStore<'a, 'scope> {
                             }
                             let i = i.get();
                             let code = i.module.code(target.index);
-                            if let Some(e) = WasmJit::jitted(self, &code) {
-                                WasmJit::machine(self, e, i, code, fp)?;
+                            if let Some(m) = WasmJit::jitted(self, &code) {
+                                WasmJit::machine(self, m.call, i, code, fp)?;
                             } else {
                                 let a = self.frame(i, code, fp);
                                 frames.push(a);

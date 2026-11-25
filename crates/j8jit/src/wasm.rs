@@ -5,11 +5,11 @@ use alloc::vec::Vec;
 use core::fmt::Write;
 
 use j8bytecode::{Decoded, OperandValue, WasmBytecode};
-use j8executor::{WasmCtx, WasmJitFunction, WasmScalar, WasmTier};
+use j8executor::{WasmCtx, WasmJitFunction, WasmMachine, WasmScalar, WasmTier};
 use j8lockfree::{AtomicRefCell, OnceBox};
 use mlirpass::{HoleKind, Stencil, Stencils};
 
-use crate::asm::{Asm, Label, RAX, RCX, RBP, RDI, RSI, R15};
+use crate::asm::{Asm, Cc, Label, RAX, RCX, RBP, RDI, RSI, R15};
 use crate::live::Template;
 use crate::runtime::Arena;
 use crate::Compiler;
@@ -552,11 +552,13 @@ struct Stitch<'t, 'f> {
     oob: Label,
     exit: Label,
     epilogue: Label,
+    osr: Label,
 }
 
 struct Stitched {
     bytes: Vec<u8>,
     relocs: Vec<(usize, Sym)>,
+    osr: usize,
 }
 
 struct Use<'p> {
@@ -574,10 +576,49 @@ impl<'t, 'f> Stitch<'t, 'f> {
         self.base + 8 * i32::try_from(r).unwrap_or(0)
     }
 
-    fn target(&self, d: &Decoded<WasmBytecode>, rel: OperandValue) -> Option<Label> {
+    fn index(&self, d: &Decoded<WasmBytecode>, rel: OperandValue) -> Option<usize> {
         let byte = usize::try_from(OperandValue::try_from(d.offset).ok()? + rel).ok()?;
-        let i = *self.f.at.get(byte)? as usize;
+        Some(*self.f.at.get(byte)? as usize)
+    }
+
+    fn target(&self, d: &Decoded<WasmBytecode>, rel: OperandValue) -> Option<Label> {
+        let i = self.index(d, rel)?;
         self.labels.get(i).copied()
+    }
+
+    fn headers(&self) -> Vec<usize> {
+        use WasmBytecode as B;
+        let mut out: Vec<usize> = self
+            .f
+            .ops
+            .iter()
+            .enumerate()
+            .filter_map(|(pc, d)| {
+                let rel = match d.bytecode {
+                    B::Jump => d.operands[0],
+                    B::JumpIfZero | B::JumpIfNonZero => d.operands[1],
+                    _ => return None,
+                };
+                self.index(d, rel).filter(|&t| t <= pc)
+            })
+            .collect();
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
+    fn prologue(&mut self, frame: i32, from: u32) -> Option<()> {
+        self.a.enter(frame);
+        self.a.mov_rr(R15, RDI);
+        for i in 0..from {
+            self.a.load(RAX, RSI, 8 * i32::try_from(i).ok()?);
+            self.a.store(RBP, self.reg(OperandValue::from(i)), RAX);
+        }
+        self.a.mov_ri(RAX, 0);
+        for r in from..self.f.registers {
+            self.a.store(RBP, self.reg(OperandValue::from(r)), RAX);
+        }
+        Some(())
     }
 
     fn put(&mut self, u: &Use<'_>) {
@@ -796,16 +837,7 @@ impl<'t, 'f> Stitch<'t, 'f> {
         let regs = i32::try_from(f.registers).ok()?;
         let n = Template::SPILL_WORDS + 1 + regs;
         let frame = (n * 8 + 15) / 16 * 16 + 8;
-        self.a.enter(frame);
-        self.a.mov_rr(R15, RDI);
-        for i in 0..f.params {
-            self.a.load(RAX, RSI, 8 * i32::try_from(i).ok()?);
-            self.a.store(RBP, self.reg(OperandValue::from(i)), RAX);
-        }
-        self.a.mov_ri(RAX, 0);
-        for r in f.params..f.registers {
-            self.a.store(RBP, self.reg(OperandValue::from(r)), RAX);
-        }
+        self.prologue(frame, f.params)?;
         for (pc, d) in f.ops.iter().enumerate() {
             let l = self.labels[pc];
             self.a.bind(l);
@@ -820,6 +852,17 @@ impl<'t, 'f> Stitch<'t, 'f> {
         self.a.load(RAX, R15, WasmCtx::STATUS);
         self.a.bind(self.epilogue);
         self.a.leave();
+        self.a.bind(self.osr);
+        self.prologue(frame, f.registers)?;
+        for h in self.headers() {
+            self.a.cmp_mi(true, R15, WasmCtx::OSR, i32::try_from(h).ok()?);
+            self.a.jcc(Cc::E, self.labels[h]);
+        }
+        self.a.mov_ri(RAX, WasmCtx::UNSUPPORTED);
+        self.a.store(R15, WasmCtx::TRAP, RAX);
+        self.a.mov_ri(RAX, WasmCtx::TRAPPED);
+        self.a.store(R15, WasmCtx::STATUS, RAX);
+        self.a.jmp(self.exit);
         Some(())
     }
 
@@ -827,9 +870,9 @@ impl<'t, 'f> Stitch<'t, 'f> {
         let regs = i32::try_from(f.registers).ok()?;
         let mut a = Asm::default();
         let labels = (0..f.ops.len()).map(|_| a.label()).collect();
-        let (oob, exit, epilogue) = (a.label(), a.label(), a.label());
+        let (oob, exit, epilogue, osr) = (a.label(), a.label(), a.label(), a.label());
         let base = Self::FIRST_SLOT - 8 * (regs - 1).max(0);
-        let mut me = Stitch { table, f, a, base, labels, jumps: Vec::new(), relocs: Vec::new(), oob, exit, epilogue };
+        let mut me = Stitch { table, f, a, base, labels, jumps: Vec::new(), relocs: Vec::new(), oob, exit, epilogue, osr };
         me.run()?;
         let _ = me.a.finish();
         for &(at, l, kind) in &me.jumps {
@@ -840,7 +883,8 @@ impl<'t, 'f> Stitch<'t, 'f> {
                 Stencil::rel32(&mut me.a.bytes, at, to);
             }
         }
-        Some(Stitched { bytes: me.a.bytes, relocs: me.relocs })
+        let osr = me.a.at(me.osr)?;
+        Some(Stitched { bytes: me.a.bytes, relocs: me.relocs, osr })
     }
 }
 
@@ -877,7 +921,7 @@ impl WasmTier for WasmJit {
         self.threshold
     }
 
-    fn compile(&self, f: &WasmJitFunction<'_>) -> Option<u64> {
+    fn compile(&self, f: &WasmJitFunction<'_>) -> Option<WasmMachine> {
         let table = self
             .table
             .get_or_init(|| {
@@ -888,7 +932,7 @@ impl WasmTier for WasmJit {
                     .ok()
             })
             .as_ref()?;
-        let Stitched { bytes, relocs } = Stitch::stitch(table, f)?;
+        let Stitched { bytes, relocs, osr } = Stitch::stitch(table, f)?;
         let sym = |s: Sym| match s {
             Sym::Step => f.step,
             Sym::Scalar => f.scalar,
@@ -899,6 +943,7 @@ impl WasmTier for WasmJit {
                 buf[off..off + 8].copy_from_slice(&sym(s).to_le_bytes());
             }
         })?;
-        u64::try_from(addr).ok()
+        let call = u64::try_from(addr).ok()?;
+        Some(WasmMachine { call, osr: call + u64::try_from(osr).ok()? })
     }
 }

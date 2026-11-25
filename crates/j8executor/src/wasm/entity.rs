@@ -9,7 +9,7 @@ use j8framework::paragc::{WORD_POINTER_MIN, word_pointer};
 use j8framework::{Collect, GcSlot, IsoCell, Mutation, ScopeLocal, Static, WordSlot, gc_from_raw};
 use j8lockfree::{AtomicRefCell, OnceBox};
 
-use super::WasmTrap;
+use super::{WasmMachine, WasmTrap};
 use super::types::Types;
 
 pub const OBJECT_TAG: u64 = 0xFFFE << 48;
@@ -26,8 +26,9 @@ pub struct Code {
     pub registers: u32,
     pub vector: bool,
     pub memory64: Option<bool>,
-    pub jit: OnceBox<u64>,
+    pub jit: OnceBox<WasmMachine>,
     pub calls: AtomicU32,
+    pub loops: AtomicU32,
 }
 
 impl Code {
@@ -44,7 +45,7 @@ impl Code {
         for (i, d) in ops.iter().enumerate() {
             at[d.offset] = u32::try_from(i).unwrap_or(u32::MAX);
         }
-        Self { ops, at, bits: f.bits.clone(), tables: f.tables.clone(), handlers: f.handlers.clone(), params: f.params, results: f.results, registers: f.registers, vector: f.vector, memory64, jit: OnceBox::default(), calls: AtomicU32::new(0) }
+        Self { ops, at, bits: f.bits.clone(), tables: f.tables.clone(), handlers: f.handlers.clone(), params: f.params, results: f.results, registers: f.registers, vector: f.vector, memory64, jit: OnceBox::default(), calls: AtomicU32::new(0), loops: AtomicU32::new(0) }
     }
 }
 
