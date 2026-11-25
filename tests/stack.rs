@@ -83,6 +83,17 @@ fn engine_errors_point_at_the_failing_expression() {
 }
 
 #[test]
+fn calls_whose_callee_is_not_a_name_point_at_the_arguments() {
+    let column = |text: &str, call: &str| text.find(call).expect("the call") + call.find('(').expect("an argument list") + 1;
+    let iife = "(function () { notDefined; })();";
+    assert_eq!(frames(iife), format!("    at stack.js:1:16\n    at stack.js:1:{}", column(iife, ")();")));
+    let computed = "const o = { f() { notDefined; } };\no['f'] /* c */ ();";
+    assert_eq!(frames(computed), format!("    at f (stack.js:1:19)\n    at stack.js:2:{}", column(computed.lines().nth(1).expect("line 2"), "*/ (")));
+    let curried = "function f() { return () => { notDefined; }; }\nf()();";
+    assert_eq!(frames(curried), "    at stack.js:1:31\n    at stack.js:2:4");
+}
+
+#[test]
 fn stack_text_follows_v8() {
     let script = "Error.stackTraceLimit = 1;
 const one = new Error('one').stack.split('\\n').length;

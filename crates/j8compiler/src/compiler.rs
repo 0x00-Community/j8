@@ -1993,6 +1993,23 @@ impl<'a> Compiler<'a, '_> {
         self.function(name, flavor, Some(Decls::this_key(f.span)), None, Some(&f.params), Body::Statements(&body.statements))
     }
 
+    pub(crate) fn arguments_start(&self, from: u32) -> u32 {
+        let mut rest = self.src.text.get(from as usize..).unwrap_or_default();
+        loop {
+            let trimmed = rest.trim_start();
+            rest = if let Some(c) = trimmed.strip_prefix("//") {
+                c.find(['\n', '\r', '\u{2028}', '\u{2029}']).map_or("", |i| &c[i..])
+            } else if let Some(c) = trimmed.strip_prefix("/*") {
+                c.find("*/").map_or("", |i| &c[i + 2..])
+            } else if let Some(c) = trimmed.strip_prefix("?.") {
+                c
+            } else {
+                let at = self.src.text.len() - trimmed.len();
+                return if trimmed.starts_with('(') { u32::try_from(at).unwrap_or(from) } else { from };
+            };
+        }
+    }
+
     fn private_symbol(&mut self, create: Runtime, text: &str, binding: &'a str) {
         let k = self.name(text);
         let arg = self.temp();
