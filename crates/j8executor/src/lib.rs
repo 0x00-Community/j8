@@ -97,6 +97,10 @@ struct Loaded {
 }
 
 impl Loaded {
+    fn note_instance(&self, o: JsObject<'_>) {
+        self.instance_size.set(u8::try_from(o.borrow().props().len()).unwrap_or(u8::MAX));
+    }
+
     fn code(&self) -> Code {
         unsafe { Code::from_id(self.this.get()) }
     }
@@ -406,6 +410,14 @@ impl<'scope> State<'scope> {
         }
         self.regs.truncate(done.params);
         true
+    }
+
+    fn returned(&mut self, v: Value<'scope>) -> Flow<'scope> {
+        if !self.pop_frame() {
+            return Flow::Done(Outcome::Return(v));
+        }
+        self.acc = v;
+        Flow::Frame
     }
 }
 
@@ -853,11 +865,11 @@ impl Executor<'_> {
         Ok(ObjectData::ordinary(a.mc, Some(proto), usize::from(ctor.instance_size.get())))
     }
 
-    fn construct_result<'scope>(&self, a: &Scope<'scope, '_>, regs: &[Value<'scope>], f: &Frame, v: Value<'scope>) -> Result<Value<'scope>, Error> {
-        let loaded = self.function(f.func);
-        if v.as_object().is_some() {
+    fn return_value<'scope>(&self, a: &Scope<'scope, '_>, regs: &[Value<'scope>], f: &Frame, v: Value<'scope>) -> Result<Value<'scope>, Error> {
+        if f.slot(regs, Frame::NEW_TARGET) == Value::Undefined || v.as_object().is_some() {
             return Ok(v);
         }
+        let loaded = self.function(f.func);
         let r = match (loaded.derived, f.new_this(regs)) {
             (true, _) if v != Value::Undefined => Err(a.throw(ErrorKind::Type, "Derived constructors may only return object or undefined")),
             (true, None) => Err(a.throw(ErrorKind::Reference, "Must call super constructor in derived class before accessing 'this' or returning from derived constructor")),
@@ -865,7 +877,7 @@ impl Executor<'_> {
             (_, None) => Ok(v),
         };
         if let Ok(ValueKind::Object(o)) = r.as_ref().map(|v| v.kind()) {
-            loaded.instance_size.set(u8::try_from(o.borrow().props().len()).unwrap_or(u8::MAX));
+            loaded.note_instance(o);
         }
         r
     }
@@ -2033,12 +2045,7 @@ impl Executor<'_> {
                     c.state = j8framework::CoroutineState::Suspended;
                 });
                 let v = *acc;
-                return Ok(if st.pop_frame() {
-                    st.acc = v;
-                    Flow::Frame
-                } else {
-                    Flow::Done(Outcome::Return(v))
-                });
+                return Ok(st.returned(v));
             }
             B::ResumeGenerator => {
                 let Some(co) = r!(0).as_object() else { unreachable!("a generator object") };
@@ -2048,16 +2055,9 @@ impl Executor<'_> {
                 *acc = input;
             }
             B::Return => {
-                let v = *acc;
-                let v = if f.slot(regs, Frame::NEW_TARGET) == Value::Undefined { Ok(v) } else { self.construct_result(a, regs, f, v) };
-                let more = st.pop_frame();
-                let v = v?;
-                return Ok(if more {
-                    st.acc = v;
-                    Flow::Frame
-                } else {
-                    Flow::Done(Outcome::Return(v))
-                });
+                let v = self.return_value(a, regs, f, *acc);
+                let flow = st.returned(v.as_ref().copied().unwrap_or_default());
+                return v.map(|_| flow);
             }
             b => return Err(a.throw(ErrorKind::Syntax, &alloc::format!("bytecode {b:?} is not supported by the executor yet"))),
         }

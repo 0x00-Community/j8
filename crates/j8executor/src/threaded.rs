@@ -568,28 +568,17 @@ handlers! {
     shift_right_smi(cx, pc, regs, acc, o) { bitwise!(cx, pc, regs, acc, acc, Value::Number(o[0] as f64), |x, y| x >> (y as u32 & 31)) }
     shift_right_logical_smi(cx, pc, regs, acc, o) { bitwise!(cx, pc, regs, acc, acc, Value::Number(o[0] as f64), |x, y| (x as u32) >> (y as u32 & 31)) }
     return_(cx, pc, regs, acc, o) {
-        let st = &mut *cx.st;
-        if st.frames.len() < 2 {
-            if st.frames.len() == 1 && unsafe { *regs.sub(Frame::NEW_TARGET) } == Value::Undefined {
-                st.frames.pop();
-                return Exit::Done(Outcome::Return(acc));
-            }
-            fall!(cx, pc, regs, acc)
-        }
-        let v = if unsafe { *regs.sub(Frame::NEW_TARGET) } == Value::Undefined || acc.as_object().is_some() {
+        let acc = if unsafe { *regs.sub(Frame::NEW_TARGET) } == Value::Undefined {
             acc
         } else {
-            match unsafe { *regs.sub(Frame::NEW_THIS) } {
-                t if t.as_object().is_some() => t,
-                _ => fall!(cx, pc, regs, acc),
-            }
+            let Some(ob) = acc.as_object().or_else(|| unsafe { *regs.sub(Frame::NEW_THIS) }.as_object()) else { fall!(cx, pc, regs, acc) };
+            cx.loaded.note_instance(ob);
+            ob.into()
         };
-        if let Some(ob) = v.as_object().filter(|_| unsafe { *regs.sub(Frame::NEW_TARGET) } != Value::Undefined) {
-            cx.loaded.instance_size.set(u8::try_from(ob.get().props().len()).unwrap_or(u8::MAX));
-        }
-        let acc = v;
         let st = &mut *cx.st;
-        st.pop_frame();
+        if !st.pop_frame() {
+            return Exit::Done(Outcome::Return(acc));
+        }
         let caller = st.f();
         let (at, base) = (caller.pc, caller.base);
         let l = unsafe { caller.loaded.get() };
