@@ -284,18 +284,22 @@ impl<'scope> Scope<'scope, '_> {
         }
     }
 
-    pub fn next_job(&self) -> Option<Job<'scope>> {
-        self.context.jobs.pop(self.mc)
+    pub fn next_job(&mut self) -> Option<Job<'scope>> {
+        loop {
+            if let Some(job) = self.context.jobs.pop(self.mc) {
+                return Some(job);
+            }
+            if !self.report_rejections() {
+                return None;
+            }
+        }
     }
 
     pub fn run_jobs(&mut self) -> Result<(), Error> {
-        loop {
-            match self.next_job() {
-                Some(j) => self.run_job(j)?,
-                None if self.report_rejections() => {}
-                None => return Ok(()),
-            }
+        while let Some(job) = self.next_job() {
+            self.run_job(job)?;
         }
+        Ok(())
     }
 
     fn report_rejections(&mut self) -> bool {
