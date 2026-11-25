@@ -5,6 +5,7 @@ mod listformat;
 mod locale;
 mod number;
 mod plural;
+mod relativetime;
 mod segmenter;
 mod service;
 mod zone;
@@ -22,6 +23,7 @@ pub(crate) use datetime::DateTimeFormats;
 use listformat::ListFormats;
 use ilocale::Locales;
 use locale::Tags;
+use relativetime::RelativeTimeFormats;
 use segmenter::{ITERATOR_PROTO_SLOT, SEGMENTS_PROTO_SLOT, Segmenters};
 use number::NumberFormat;
 pub(crate) use number::NumberFormats;
@@ -122,6 +124,11 @@ impl<'scope> Installer<'_, 'scope> {
         r.name_function(self.mc, segment, "segment", Some(1));
         self.set(segmenter, "segment", segment.into());
         self.method(segmenter, "resolvedOptions", Segmenters::resolved_options, 0);
+
+        let relative = self.service(intl, "RelativeTimeFormat", RelativeTimeFormats::construct, Some(RelativeTimeFormats::supported_locales_of), "Intl.RelativeTimeFormat");
+        self.method(relative, "format", RelativeTimeFormats::format, 2);
+        self.method(relative, "formatToParts", RelativeTimeFormats::format_to_parts, 2);
+        self.method(relative, "resolvedOptions", RelativeTimeFormats::resolved_options, 0);
 
         self.intl_locale(intl);
     }

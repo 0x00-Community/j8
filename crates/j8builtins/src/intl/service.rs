@@ -14,6 +14,7 @@ use super::datetime::DateTimeFormat;
 use super::number::NumberFormat;
 use super::plural::Plurals;
 use super::listformat::Lists;
+use super::relativetime::RelativeTimes;
 use super::segmenter::{SegmentCursor, Segmented, Segmenter};
 
 pub(crate) enum Service<'scope> {
@@ -22,6 +23,7 @@ pub(crate) enum Service<'scope> {
     DateTime(Box<DateTimeFormat>),
     Plural(Box<Plurals>),
     List(Box<Lists>),
+    RelativeTime(Box<RelativeTimes>),
     Segmenter(Box<Segmenter>),
     Segments(alloc::sync::Arc<Segmented>),
     SegmentIterator(Box<SegmentCursor>),
@@ -165,13 +167,21 @@ impl Pieces {
     }
 
     pub(crate) fn array<'scope>(&self, a: &mut Scope<'scope, '_>) -> Result<Value<'scope>, Error> {
+        self.array_with(a, None)
+    }
+
+    pub(crate) fn array_with<'scope>(&self, a: &mut Scope<'scope, '_>, extra: Option<(&str, &str)>) -> Result<Value<'scope>, Error> {
         let mut items = Vec::with_capacity(self.0.len());
         for (kind, text) in &self.0 {
             let o = a.object();
-            let kind = a.string(kind).into();
-            Tags::put(a, o, "type", kind)?;
+            let kind_value = a.string(kind).into();
+            Tags::put(a, o, "type", kind_value)?;
             let text = a.string(text).into();
             Tags::put(a, o, "value", text)?;
+            if let Some((k, v)) = extra.filter(|_| *kind != LITERAL) {
+                let v = a.string(v).into();
+                Tags::put(a, o, k, v)?;
+            }
             items.push(Value::from(o));
         }
         Ok(a.array_from_slice(&items).into())
