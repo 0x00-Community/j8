@@ -5,7 +5,7 @@ use j8bytecode::{Bytecode, Constant, OperandValue, SharedFunction};
 use j8framework::{Scope, Closure, Error, FuncId, JsEnv, JsObject, ShapeKey, Value};
 
 pub use crate::ic::{GlobalFeedback, PropertyFeedback, StringFeedback};
-use crate::{Args, Budget, Executor, Frame, Loaded, State, STACK_LIMIT};
+use crate::{Args, Budget, Executor, Frame, Loaded, State};
 
 pub trait Tier {
     fn enter(&self, e: &mut Entry<'_, '_, '_, '_, '_>) -> Tiered;
@@ -225,7 +225,6 @@ pub struct Entry<'r, 'scope, 'x, 'b, 'p> {
     pub a: &'r mut Scope<'scope, 'x>,
     pub st: &'r mut State<'scope>,
     pub budget: &'r mut Budget<'b>,
-    pub level: usize,
 }
 
 impl<'r, 'scope, 'x, 'p> Entry<'r, 'scope, 'x, '_, 'p> {
@@ -270,7 +269,7 @@ impl<'r, 'scope, 'x, 'p> Entry<'r, 'scope, 'x, '_, 'p> {
     }
 
     pub fn depth(&self) -> usize {
-        self.level
+        self.st.level()
     }
 
     pub fn spend(&mut self, n: usize) -> bool {
@@ -373,13 +372,10 @@ impl Executor<'_> {
     }
 
     pub fn resume_frames<'scope>(&self, a: &mut Scope<'scope, '_>, frames: Vec<DeoptFrame<'scope>>, throw: Option<Value<'scope>>) -> Result<Value<'scope>, Error> {
-        let level = self.depth.get() + 1;
-        if level >= STACK_LIMIT {
-            return Err(a.throw(j8framework::ErrorKind::Range, "Maximum call stack size exceeded"));
-        }
+        let level = self.deeper(a)?;
         let mut regs = a.take_regs();
         regs.clear();
-        let mut st = State { regs, frames: self.spare_frames.borrow_mut().pop().unwrap_or_default(), acc: Value::Undefined, message: Value::Undefined };
+        let mut st = State { regs, frames: self.spare_frames.borrow_mut().pop().unwrap_or_default(), ..State::default() };
         st.frames.clear();
         for d in frames {
             self.push_deopt(a, &mut st, d);
@@ -391,10 +387,7 @@ impl Executor<'_> {
             return Err(a.throw_value(v));
         }
         self.note_user();
-        let saved = self.depth.replace(level);
-        let r = self.execute(a, st, &mut None).map(crate::Outcome::returned);
-        self.depth.set(saved);
-        r
+        self.deep(level, || self.execute(a, st, &mut None).map(crate::Outcome::returned))
     }
 
     pub fn jit_create_closure<'scope>(&self, a: &Scope<'scope, '_>, f: FuncId, k: OperandValue, env: Option<JsEnv<'scope>>) -> JsObject<'scope> {
@@ -414,9 +407,5 @@ impl Executor<'_> {
         let name = Self::name_at(l, k);
         let ic = l.globals.get(usize::try_from(slot).unwrap_or(usize::MAX)).ok_or_else(|| a.throw(j8framework::ErrorKind::Reference, "no global cache"))?;
         self.global_load(a, ic, name, inside_typeof)
-    }
-
-    pub fn jit_depth(&self) -> &Cell<usize> {
-        &self.depth
     }
 }

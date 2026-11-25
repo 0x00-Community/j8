@@ -1,7 +1,7 @@
 use j8bytecode::{Bytecode, Constant, OperandValue};
 use j8framework::{Scope, Env, Error, ErrorKind, Value, ValueBits};
 
-use crate::{Args, Budget, Executor, Flow, Frame, Insn, Loaded, Outcome, State, STACK_LIMIT};
+use crate::{Args, Budget, Executor, Flow, Frame, Insn, Loaded, Outcome, State};
 
 #[expect(private_interfaces, reason = "crate-internal types; the module is private")]
 pub struct Cx<'r, 'scope, 'x, 'b, 'p> {
@@ -10,7 +10,6 @@ pub struct Cx<'r, 'scope, 'x, 'b, 'p> {
     pub st: &'r mut State<'scope>,
     pub loaded: &'r Loaded,
     pub budget: &'r mut Budget<'b>,
-    pub depth: usize,
 }
 
 #[expect(private_interfaces, reason = "crate-internal types; the module is private")]
@@ -340,7 +339,7 @@ fn enter<'r, 'scope>(cx: &mut Cx<'r, 'scope, '_, '_, '_>, pc: *const Insn, calle
     let Some(o) = callee.as_object() else { return Entered::No };
     let Some(c) = o.closure() else { return Entered::No };
     let l: &'r Loaded = cx.exe.code(&c);
-    if l.class_constructor || l.generator || l.asynchronous || cx.depth + cx.st.frames.len() + 1 >= STACK_LIMIT {
+    if l.class_constructor || l.generator || l.asynchronous || !cx.st.room() {
         return Entered::No;
     }
     Executor::record_call(cx.loaded, fb, c.func);
@@ -352,10 +351,7 @@ fn enter<'r, 'scope>(cx: &mut Cx<'r, 'scope, '_, '_, '_>, pc: *const Insn, calle
         && let Some(t) = &cx.exe.tier
         && let Args::Values(vals) = args
     {
-        let level = cx.depth + cx.st.frames.len();
-        let saved = cx.exe.depth.replace(level);
-        let r = t.call(cx.exe, cx.a, c.func, callee, this, vals);
-        cx.exe.depth.set(saved);
+        let r = cx.exe.deep(cx.st.level() + 1, || t.call(cx.exe, cx.a, c.func, callee, this, vals));
         if let Some(r) = r {
             return match r {
                 Ok(v) => {
@@ -384,8 +380,7 @@ fn tier_enter<'scope>(cx: &mut Cx<'_, 'scope, '_, '_, '_>) -> Entered<'scope> {
         return Entered::At(l.insns.as_ptr(), cx.st.regs.as_mut_ptr().wrapping_add(base), Value::Undefined);
     }
     let Some(t) = &cx.exe.tier else { unreachable!("checked by the caller") };
-    let level = cx.depth + cx.st.frames.len();
-    let r = t.enter(&mut crate::Entry { exe: cx.exe, a: cx.a, st: cx.st, budget: cx.budget, level });
+    let r = t.enter(&mut crate::Entry { exe: cx.exe, a: cx.a, st: cx.st, budget: cx.budget });
     match r {
         crate::Tiered::Threw(e) => Entered::Throw(e),
         _ => {
@@ -402,17 +397,11 @@ fn native<'scope>(cx: &mut Cx<'_, 'scope, '_, '_, '_>, pc: *const Insn, callee: 
     let Some(o) = callee.as_object() else { return None };
     let n = o.native()?;
     Executor::record_native(cx.loaded, fb, n.f);
-    let level = cx.depth + cx.st.frames.len();
-    if n.forward != j8framework::Forward::No || level >= STACK_LIMIT {
+    if n.forward != j8framework::Forward::No || !cx.st.room() {
         return None;
     }
     sync(cx, pc);
-    let saved = cx.exe.depth.replace(level);
-    let outer = core::mem::replace(&mut cx.a.new_target, Value::Undefined);
-    let r = (n.f)(cx.a, this, args);
-    cx.a.new_target = outer;
-    cx.exe.depth.set(saved);
-    Some(r)
+    Some(cx.exe.native_at(cx.a, cx.st.level() + 1, Value::Undefined, |a| (n.f)(a, this, args)))
 }
 
 #[inline]
@@ -486,7 +475,7 @@ handlers! {
         let Some(ob) = callee.as_object() else { fall!(cx, pc, regs, acc) };
         let Some(c) = ob.closure() else { fall!(cx, pc, regs, acc) };
         let l = cx.exe.code(&c);
-        if !(l.constructs || l.class_constructor) || l.generator || l.asynchronous || cx.depth + cx.st.frames.len() + 1 >= STACK_LIMIT {
+        if !(l.constructs || l.class_constructor) || l.generator || l.asynchronous || !cx.st.room() {
             fall!(cx, pc, regs, acc)
         }
         Executor::record_call(cx.loaded, o[3], c.func);
@@ -624,9 +613,8 @@ fn slow<'scope>(cx: &mut Cx<'_, 'scope, '_, '_, '_>, pc: *const Insn, _: *mut Va
     f.insn = at;
     f.pc = at + 1;
     st.acc = acc;
-    let level = cx.depth + st.frames.len();
     let d = unsafe { &*pc };
-    match cx.exe.step(cx.a, st, cx.loaded, d, level, cx.budget) {
+    match cx.exe.step(cx.a, st, cx.loaded, d, cx.budget) {
         Ok(Flow::Next) => {
             #[cfg_attr(not(tail_calls), expect(unused_variables, reason = "the loop reloads the registers"))]
             let regs = st.regs.as_mut_ptr().wrapping_add(st.f().base);
@@ -731,9 +719,8 @@ impl Executor<'_> {
             } else if cx.loaded.tier.get() != 0
                 && let Some(t) = &cx.exe.tier
             {
-                let level = cx.depth + cx.st.frames.len();
                 let pc = cx.st.f().pc;
-                let r = t.resume(&mut crate::Entry { exe: cx.exe, a: cx.a, st: cx.st, budget: cx.budget, level }, pc);
+                let r = t.resume(&mut crate::Entry { exe: cx.exe, a: cx.a, st: cx.st, budget: cx.budget }, pc);
                 match r {
                     crate::Tiered::Threw(e) => return Exit::Throw(e),
                     crate::Tiered::Resumed => {

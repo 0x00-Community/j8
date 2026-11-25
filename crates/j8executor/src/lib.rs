@@ -26,6 +26,17 @@ pub use jit::{DeoptFrame, Entry, FrameSlots, Function as JitFunction, GlobalFeed
 
 const STACK_LIMIT: usize = 10_000;
 
+pub struct Depth<'e> {
+    cell: &'e Cell<usize>,
+    saved: usize,
+}
+
+impl Drop for Depth<'_> {
+    fn drop(&mut self) {
+        self.cell.set(self.saved);
+    }
+}
+
 const REGEXP_FLAGS: [(u8, u16); 8] = [(b'd', 1 << 7), (b'g', 1), (b'i', 1 << 1), (b'm', 1 << 2), (b's', 1 << 5), (b'u', 1 << 4), (b'v', 1 << 8), (b'y', 1 << 3)];
 
 const SCRIPT_THIS: &str = "this";
@@ -345,19 +356,30 @@ impl Frame {
     }
 }
 
-#[derive(Collect)]
+#[derive(Collect, Default)]
 #[collect(no_drop)]
 struct State<'scope> {
     regs: Vec<Value<'scope>>,
     frames: Vec<Frame>,
     acc: Value<'scope>,
     message: Value<'scope>,
+    outer: usize,
 }
 
 impl<'scope> State<'scope> {
     fn new(regs: Vec<Value<'scope>>, mut frames: Vec<Frame>, f: Frame) -> Self {
         frames.push(f);
-        Self { regs, frames, acc: Value::Undefined, message: Value::Undefined }
+        Self { regs, frames, ..Self::default() }
+    }
+
+    #[inline]
+    fn level(&self) -> usize {
+        self.outer + self.frames.len()
+    }
+
+    #[inline]
+    fn room(&self) -> bool {
+        self.level() + 1 < STACK_LIMIT
     }
 
     #[inline]
@@ -537,6 +559,34 @@ impl Executor<'_> {
         }
     }
 
+    fn within(a: &Scope<'_, '_>, level: usize) -> Result<usize, Error> {
+        if level >= STACK_LIMIT {
+            return Err(a.throw(ErrorKind::Range, "Maximum call stack size exceeded"));
+        }
+        Ok(level)
+    }
+
+    fn deeper(&self, a: &Scope<'_, '_>) -> Result<usize, Error> {
+        Self::within(a, self.depth.get() + 1)
+    }
+
+    pub fn at_depth(&self, level: usize) -> Depth<'_> {
+        Depth { cell: &self.depth, saved: self.depth.replace(level) }
+    }
+
+    fn deep<R>(&self, level: usize, f: impl FnOnce() -> R) -> R {
+        let _depth = self.at_depth(level);
+        f()
+    }
+
+    fn native_at<'scope, 'x, R>(&self, a: &mut Scope<'scope, 'x>, level: usize, new_target: Value<'scope>, f: impl FnOnce(&mut Scope<'scope, 'x>) -> R) -> R {
+        let _depth = self.at_depth(level);
+        let outer = core::mem::replace(&mut a.new_target, new_target);
+        let r = f(a);
+        a.new_target = outer;
+        r
+    }
+
     pub fn load(&self, mc: &j8framework::Mutation<'_>, module: Module) -> FuncId {
         let m = mc.gc_scope();
         let base = u32::try_from(self.code.len()).expect("fewer than 2^32 functions");
@@ -675,7 +725,7 @@ impl Executor<'_> {
         usize::try_from(slot).unwrap_or(0).saturating_sub(Context::MIN_SLOTS as usize)
     }
 
-    fn resolve<'scope>(&self, a: &mut Scope<'scope, '_>, mut callee: Value<'scope>, mut this: Value<'scope>, mut args: Vec<Value<'scope>>, depth: usize) -> Result<Callee<'scope>, Error> {
+    fn resolve<'scope>(&self, a: &mut Scope<'scope, '_>, mut callee: Value<'scope>, mut this: Value<'scope>, mut args: Vec<Value<'scope>>, level: usize) -> Result<Callee<'scope>, Error> {
         while let ValueKind::Object(o) = callee.kind() {
             let step = if let Some(c) = o.closure() {
                 CallStep::Closure(c)
@@ -709,38 +759,24 @@ impl Executor<'_> {
                 callee = target;
                 continue;
             }
-            let saved = self.depth.replace(depth);
             let r = match step {
                 CallStep::Closure(c) => {
-                    self.depth.set(saved);
                     let loaded = self.function(c.func);
                     if loaded.class_constructor {
                         return Err(a.throw(ErrorKind::Type, &alloc::format!("Class constructor {} cannot be invoked without 'new'", loaded.func.name)));
                     }
                     return Ok(Callee::Closure { closure: c, callee, this, args });
                 }
-                CallStep::Resolver => a.run_resolver(o, args.first().copied().unwrap_or_default()),
-                CallStep::Proxy => a.proxy_call(o, this, &args),
-                CallStep::NativeClosure(f) => {
-                    let outer = core::mem::replace(&mut a.new_target, Value::Undefined);
-                    let r = f(a, o, this, &args);
-                    a.new_target = outer;
-                    r
-                }
-                CallStep::Native(n) | CallStep::Forward(n) => {
-                    let outer = core::mem::replace(&mut a.new_target, Value::Undefined);
-                    let r = (n.f)(a, this, &args);
-                    a.new_target = outer;
-                    r
-                }
+                CallStep::Resolver => self.deep(level, || a.run_resolver(o, args.first().copied().unwrap_or_default())),
+                CallStep::Proxy => self.deep(level, || a.proxy_call(o, this, &args)),
+                CallStep::NativeClosure(f) => self.native_at(a, level, Value::Undefined, |a| f(a, o, this, &args)),
+                CallStep::Native(n) | CallStep::Forward(n) => self.native_at(a, level, Value::Undefined, |a| (n.f)(a, this, &args)),
                 CallStep::Bound(target, bound_this, mut bound_args) => {
-                    self.depth.set(saved);
                     bound_args.extend(args);
                     (callee, this, args) = (target, bound_this, bound_args);
                     continue;
                 }
             };
-            self.depth.set(saved);
             return r.map(Callee::Done);
         }
         let what = a.describe(callee);
@@ -757,17 +793,14 @@ impl Executor<'_> {
         Ok(if v.as_object().is_some() { v } else { this })
     }
 
-    fn prepare<'scope>(&self, a: &mut Scope<'scope, '_>, regs: &mut Vec<Value<'scope>>, mut callee: Value<'scope>, mut args: Vec<Value<'scope>>, mut new_target: Value<'scope>, depth: usize) -> Result<Prepared<'scope>, Error> {
+    fn prepare<'scope>(&self, a: &mut Scope<'scope, '_>, regs: &mut Vec<Value<'scope>>, mut callee: Value<'scope>, mut args: Vec<Value<'scope>>, mut new_target: Value<'scope>, level: usize) -> Result<Prepared<'scope>, Error> {
         while let ValueKind::Object(o) = callee.kind() {
             let kind = match &o.borrow().kind {
                 ObjectKind::Function(c) => Ok(Ok(*c)),
                 ObjectKind::Native(n) => Ok(Err(*n)),
                 ObjectKind::NativeClosure(c) if c.constructor => {
                     let f = c.f;
-                    let saved = self.depth.replace(depth);
-                    let r = Self::construct_closure(a, o, f, &args, new_target);
-                    self.depth.set(saved);
-                    return r.map(Prepared::Done);
+                    return self.deep(level, || Self::construct_closure(a, o, f, &args, new_target)).map(Prepared::Done);
                 }
                 ObjectKind::Bound(b) => Err(Some((b.target, b.args.clone()))),
                 ObjectKind::Proxy(p) if p.constructor => Err(None),
@@ -794,19 +827,12 @@ impl Executor<'_> {
                     if !native.constructor {
                         break;
                     }
-                    let saved = self.depth.replace(depth);
-                    let outer = core::mem::replace(&mut a.new_target, new_target);
-                    let r = (native.f)(a, Value::Undefined, &args);
-                    a.new_target = outer;
-                    self.depth.set(saved);
+                    let r = self.native_at(a, level, new_target, |a| (native.f)(a, Value::Undefined, &args));
                     let Some(obj) = (r?).as_object() else { unreachable!("built-in constructors return objects") };
                     return Ok(Prepared::Done(obj.into()));
                 }
                 Err(None) => {
-                    let saved = self.depth.replace(depth);
-                    let r = a.proxy_construct(o, &args, new_target);
-                    self.depth.set(saved);
-                    return r.map(Prepared::Done);
+                    return self.deep(level, || a.proxy_construct(o, &args, new_target)).map(Prepared::Done);
                 }
                 Err(Some((target, mut bound_args))) => {
                     if matches!(new_target.kind(), ValueKind::Object(t) if ScopeLocal::ptr_eq(t, o)) {
@@ -1291,10 +1317,11 @@ impl Executor<'_> {
     }
 
     fn execute<'scope>(&self, a: &mut Scope<'scope, '_>, mut st: State<'scope>, budget: &mut Option<usize>) -> Result<Outcome<'scope>, Error> {
-        let base = self.depth.get();
+        st.outer = self.depth.get();
+        let _depth = self.at_depth(st.outer);
         let mut b = Budget::new(a.stop, *budget);
         let r = loop {
-            match self.run(a, &mut st, base, &mut b) {
+            match self.run(a, &mut st, &mut b) {
                 Ok(Some(v)) => break Ok(Some(v)),
                 Ok(None) if b.terminated => break Err(Error::Terminated),
                 Ok(None) => break Ok(None),
@@ -1315,17 +1342,16 @@ impl Executor<'_> {
             }
         };
         *budget = b.remaining();
-        self.depth.set(base);
         r
     }
 
-    fn run<'scope>(&self, a: &mut Scope<'scope, '_>, st: &mut State<'scope>, depth: usize, budget: &mut Budget<'_>) -> Result<Option<Outcome<'scope>>, Error> {
+    fn run<'scope>(&self, a: &mut Scope<'scope, '_>, st: &mut State<'scope>, budget: &mut Budget<'_>) -> Result<Option<Outcome<'scope>>, Error> {
         loop {
             if budget.spent() {
                 return Ok(None);
             }
             let loaded: &Loaded = unsafe { st.f().loaded.get() };
-            let mut cx = threaded::Cx { exe: self, a, st, loaded, budget, depth };
+            let mut cx = threaded::Cx { exe: self, a, st, loaded, budget };
             match Self::threaded(&mut cx) {
                 threaded::Exit::Frame => {}
                 threaded::Exit::Done(o) => return Ok(Some(o)),
@@ -1364,10 +1390,8 @@ impl Executor<'_> {
         st.frames.push(next);
     }
 
-    fn call_from<'scope>(&self, a: &mut Scope<'scope, '_>, st: &mut State<'scope>, callee: Value<'scope>, this: Value<'scope>, args: Args<'_, 'scope>, level: usize) -> Result<Flow<'scope>, Error> {
-        if level >= STACK_LIMIT {
-            return Err(a.throw(ErrorKind::Range, "Maximum call stack size exceeded"));
-        }
+    fn call_from<'scope>(&self, a: &mut Scope<'scope, '_>, st: &mut State<'scope>, callee: Value<'scope>, this: Value<'scope>, args: Args<'_, 'scope>) -> Result<Flow<'scope>, Error> {
+        let level = Self::within(a, st.level() + 1)?;
         if let ValueKind::Object(o) = callee.kind()
             && let Some(c) = o.closure()
         {
@@ -1382,15 +1406,11 @@ impl Executor<'_> {
             && let Some(n) = o.native()
             && n.forward == j8framework::Forward::No
         {
-            let saved = self.depth.replace(level);
-            let outer = core::mem::replace(&mut a.new_target, Value::Undefined);
-            let r = match args {
-                Args::Values(v) => (n.f)(a, this, v),
-                Args::Regs { first, count } => (n.f)(a, this, &st.regs[first..first + count]),
+            let args = match args {
+                Args::Values(v) => v,
+                Args::Regs { first, count } => &st.regs[first..first + count],
             };
-            a.new_target = outer;
-            self.depth.set(saved);
-            st.acc = r?;
+            st.acc = self.native_at(a, level, Value::Undefined, |a| (n.f)(a, this, args))?;
             return Ok(Flow::Next);
         }
         let args = args.to_vec(&st.regs);
@@ -1407,10 +1427,8 @@ impl Executor<'_> {
         }
     }
 
-    fn construct_from<'scope>(&self, a: &mut Scope<'scope, '_>, st: &mut State<'scope>, callee: Value<'scope>, args: Vec<Value<'scope>>, new_target: Value<'scope>, level: usize) -> Result<Flow<'scope>, Error> {
-        if level >= STACK_LIMIT {
-            return Err(a.throw(ErrorKind::Range, "Maximum call stack size exceeded"));
-        }
+    fn construct_from<'scope>(&self, a: &mut Scope<'scope, '_>, st: &mut State<'scope>, callee: Value<'scope>, args: Vec<Value<'scope>>, new_target: Value<'scope>) -> Result<Flow<'scope>, Error> {
+        let level = Self::within(a, st.level() + 1)?;
         match self.prepare(a, &mut st.regs, callee, args, new_target, level)? {
             Prepared::Frame(next) => {
                 Self::push_frame(st, next);
@@ -1452,9 +1470,9 @@ impl Executor<'_> {
     }
 
     #[expect(clippy::too_many_lines, reason = "one arm per bytecode")]
-    fn step<'scope>(&self, a: &mut Scope<'scope, '_>, st: &mut State<'scope>, loaded: &Loaded, d: &Insn, level: usize, budget: &mut Budget<'_>) -> Result<Flow<'scope>, Error> {
+    fn step<'scope>(&self, a: &mut Scope<'scope, '_>, st: &mut State<'scope>, loaded: &Loaded, d: &Insn, budget: &mut Budget<'_>) -> Result<Flow<'scope>, Error> {
         let o = &d.operands;
-        let State { regs, frames, acc, message } = st;
+        let State { regs, frames, acc, message, .. } = st;
         let f = frames.last_mut().expect("a running frame");
         macro_rules! r {
             ($i:expr) => {
@@ -1760,16 +1778,15 @@ impl Executor<'_> {
                 f.pc = d.target as usize;
                 if let Some(t) = &self.tier {
                     let at = f.insn;
-                    let r = t.osr(&mut Entry { exe: self, a, st, budget, level }, at);
+                    let r = t.osr(&mut Entry { exe: self, a, st, budget }, at);
                     match r {
                         Tiered::Interpret => {}
                         Tiered::Resumed => return Ok(Flow::Frame),
                         Tiered::Threw(e) => return Err(e),
                     }
                 }
-                let State { regs, frames, acc, message } = st;
                 if budget.spent() {
-                    return Ok(Flow::Done(Outcome::Paused(Box::new(State { regs: core::mem::take(regs), frames: core::mem::take(frames), acc: *acc, message: *message }))));
+                    return Ok(Flow::Done(Outcome::Paused(Box::new(core::mem::take(st)))));
                 }
             }
             B::SwitchOnSmiNoFeedback => {
@@ -1794,7 +1811,7 @@ impl Executor<'_> {
                     B::CallUndefinedReceiver1 => (Value::Undefined, [r!(1), Value::Undefined], 1),
                     _ => (Value::Undefined, [r!(1), r!(2)], 2),
                 };
-                return self.call_from(a, st, callee, this, Args::Values(&buf[..n]), level + 1);
+                return self.call_from(a, st, callee, this, Args::Values(&buf[..n]));
             }
             B::CallProperty | B::CallAnyReceiver | B::CallUndefinedReceiver => {
                 let callee = r!(0);
@@ -1805,7 +1822,7 @@ impl Executor<'_> {
                     (_, 0) => (Value::Undefined, Args::Values(&[])),
                     _ => (regs[first], Args::Regs { first: first + 1, count: count - 1 }),
                 };
-                return self.call_from(a, st, callee, this, args, level + 1);
+                return self.call_from(a, st, callee, this, args);
             }
             B::CallWithSpread => {
                 let callee = r!(0);
@@ -1813,7 +1830,7 @@ impl Executor<'_> {
                 let spread = list.pop().unwrap_or_default();
                 let (this, mut args) = list.split_first().map_or((Value::Undefined, Vec::new()), |(t, rest)| (*t, rest.to_vec()));
                 args.extend(Self::spread(a, spread)?);
-                return self.call_from(a, st, callee, this, Args::Values(&args), level + 1);
+                return self.call_from(a, st, callee, this, Args::Values(&args));
             }
             B::Construct | B::ConstructWithSpread => {
                 let callee = r!(0);
@@ -1823,7 +1840,7 @@ impl Executor<'_> {
                     args.extend(Self::spread(a, spread)?);
                 }
                 let nt = *acc;
-                return self.construct_from(a, st, callee, args, nt, level + 1);
+                return self.construct_from(a, st, callee, args, nt);
             }
             B::CallJSRuntime => {
                 let list = Self::reg_list(regs, f, o[1], o[2]);
@@ -1831,12 +1848,12 @@ impl Executor<'_> {
                 return match NativeContextIndex::from_u8(u8::try_from(o[0]).unwrap_or(u8::MAX)) {
                     Some(NativeContextIndex::ReflectApply) => {
                         let args = a.list_from_array_like(arg(2))?;
-                        self.call_from(a, st, arg(0), arg(1), Args::Values(&args), level + 1)
+                        self.call_from(a, st, arg(0), arg(1), Args::Values(&args))
                     }
                     Some(NativeContextIndex::ReflectConstruct) => {
                         let args = a.list_from_array_like(arg(1))?;
                         let new_target = if list.len() > 2 { arg(2) } else { arg(0) };
-                        self.construct_from(a, st, arg(0), args, new_target, level + 1)
+                        self.construct_from(a, st, arg(0), args, new_target)
                     }
                     _ => Err(a.throw(ErrorKind::Type, "unsupported native context function")),
                 };
@@ -1994,7 +2011,7 @@ impl Executor<'_> {
                 let callee = r!(0);
                 let args = f.args(regs);
                 let nt = *acc;
-                return self.construct_from(a, st, callee, args, nt, level + 1);
+                return self.construct_from(a, st, callee, args, nt);
             }
             B::GetNamedPropertyFromSuper => {
                 let receiver = r!(0);
@@ -2414,10 +2431,7 @@ impl Executor<'_> {
 
     fn resume_open<'scope>(&self, a: &mut Scope<'scope, '_>, co: JsObject<'scope>, mode: Resume, value: Value<'scope>) -> Result<Resumed<'scope>, Error> {
         use j8framework::{CoroutineState as S, Settlement, Waiting as W};
-        let level = self.depth.get() + 1;
-        if level >= STACK_LIMIT {
-            return Err(a.throw(ErrorKind::Range, "Maximum call stack size exceeded"));
-        }
+        let level = self.deeper(a)?;
         let (state, waiting, async_generator) = Self::coroutine_mut(a, co, |c| (c.state, core::mem::replace(&mut c.waiting, W::Nothing), c.requests.is_some()));
         let (mut mode, mut rethrow) = (mode, false);
         match waiting {
@@ -2494,10 +2508,7 @@ impl Executor<'_> {
     }
 
     fn run_frame<'scope>(&self, a: &mut Scope<'scope, '_>, regs: Vec<Value<'scope>>, f: Frame, level: usize) -> Result<Value<'scope>, Error> {
-        let saved = self.depth.replace(level);
-        let r = self.execute(a, self.state(regs, f), &mut None).map(Outcome::returned);
-        self.depth.set(saved);
-        r
+        self.deep(level, || self.execute(a, self.state(regs, f), &mut None).map(Outcome::returned))
     }
 }
 
@@ -2527,10 +2538,7 @@ enum Found<'scope> {
 
 impl<'scope> Invoke<'scope> for Executor<'_> {
     fn call(&self, a: &mut Scope<'scope, '_>, callee: Value<'scope>, this: Value<'scope>, args: &[Value<'scope>]) -> Result<Value<'scope>, Error> {
-        let level = self.depth.get() + 1;
-        if level >= STACK_LIMIT {
-            return Err(a.throw(ErrorKind::Range, "Maximum call stack size exceeded"));
-        }
+        let level = self.deeper(a)?;
         if let ValueKind::Object(o) = callee.kind()
             && let Some(c) = o.closure()
             && let l = self.code(&c)
@@ -2538,13 +2546,9 @@ impl<'scope> Invoke<'scope> for Executor<'_> {
         {
             if l.tier.get() != 0
                 && let Some(t) = &self.tier
+                && let Some(r) = self.deep(level, || t.call(self, a, c.func, callee, this, args))
             {
-                let saved = self.depth.replace(level);
-                let r = t.call(self, a, c.func, callee, this, args);
-                self.depth.set(saved);
-                if let Some(r) = r {
-                    return r;
-                }
+                return r;
             }
             self.note_user();
             let mut regs = a.take_regs();
@@ -2556,12 +2560,7 @@ impl<'scope> Invoke<'scope> for Executor<'_> {
             && let Some(n) = o.native()
             && n.forward == j8framework::Forward::No
         {
-            let saved = self.depth.replace(level);
-            let outer = core::mem::replace(&mut a.new_target, Value::Undefined);
-            let r = (n.f)(a, this, args);
-            a.new_target = outer;
-            self.depth.set(saved);
-            return r;
+            return self.native_at(a, level, Value::Undefined, |a| (n.f)(a, this, args));
         }
         match self.resolve(a, callee, this, args.to_vec(), level)? {
             Callee::Done(v) => Ok(v),
@@ -2600,15 +2599,9 @@ impl<'scope> Invoke<'scope> for Executor<'_> {
             Err(e) => return Err(e),
         };
         let main = self.load_script(a.mc, module, file);
-        let level = self.depth.get() + 1;
-        if level >= STACK_LIMIT {
-            return Err(a.throw(ErrorKind::Range, "Maximum call stack size exceeded"));
-        }
+        let level = self.deeper(a)?;
         self.note_user();
-        let saved = self.depth.replace(level);
-        let r = self.run_script(a, main);
-        self.depth.set(saved);
-        r
+        self.deep(level, || self.run_script(a, main))
     }
 
     fn resume(&self, a: &mut Scope<'scope, '_>, co: JsObject<'scope>, mode: Resume, value: Value<'scope>) -> Result<Step<'scope>, Error> {
@@ -2626,10 +2619,7 @@ impl<'scope> Invoke<'scope> for Executor<'_> {
     }
 
     fn construct(&self, a: &mut Scope<'scope, '_>, callee: Value<'scope>, args: &[Value<'scope>], new_target: Value<'scope>) -> Result<Value<'scope>, Error> {
-        let level = self.depth.get() + 1;
-        if level >= STACK_LIMIT {
-            return Err(a.throw(ErrorKind::Range, "Maximum call stack size exceeded"));
-        }
+        let level = self.deeper(a)?;
         let mut regs = Vec::new();
         match self.prepare(a, &mut regs, callee, args.to_vec(), new_target, level)? {
             Prepared::Done(v) => Ok(v),
