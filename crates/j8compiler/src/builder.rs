@@ -5,8 +5,6 @@ use alloc::vec::Vec;
 use j8bytecode::{Bytecode, BytecodeArray, CatchPrediction, Constant, DebugTable, Encoder, FeedbackSlotKind, HandlerEntry, Intrinsic, LocalVariable, NativeContextIndex, OperandScale, OperandValue, Register, Runtime, SourcePosition};
 use j8framework::{BinaryOp, CompareOp};
 
-use crate::lines::Lines;
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RegisterList {
     pub first: Register,
@@ -41,9 +39,9 @@ pub struct Builder {
     enc: Encoder,
     constants: Vec<Constant>,
     handlers: Vec<HandlerEntry>,
-    positions: Vec<(u32, u32)>,
+    positions: Vec<SourcePosition>,
     latent: Option<u32>,
-    statements: Vec<(u32, u32)>,
+    statements: Vec<SourcePosition>,
     latent_statement: Option<u32>,
     variables: Vec<LocalVariable>,
     feedback: Vec<FeedbackSlotKind>,
@@ -65,19 +63,14 @@ impl Builder {
         Self { enc: Encoder::default(), constants: Vec::new(), handlers: Vec::new(), positions: Vec::new(), latent: None, statements: Vec::new(), latent_statement: None, variables: Vec::new(), feedback: Vec::new(), parameter_count, locals, next: locals, max: locals, unbound: 0, reserved: 0, slot_cache: Vec::new(), boolean: false, stored: None, dead: false, new_target_or_generator: None }
     }
 
-    pub fn finish(self, lines: &Lines<'_>) -> BytecodeArray {
+    pub fn finish(self) -> BytecodeArray {
         debug_assert_eq!(self.unbound, 0, "every label is bound");
-        let locate = |&(offset, pos): &(u32, u32)| {
-            let (line, column) = lines.locate(pos);
-            SourcePosition { offset, line, column }
-        };
-        let positions = self.positions.iter().map(locate).collect();
-        let debug = (!self.statements.is_empty() || !self.variables.is_empty()).then(|| Box::new(DebugTable { statements: self.statements.iter().map(locate).collect(), locals: self.variables }));
+        let debug = (!self.statements.is_empty() || !self.variables.is_empty()).then(|| Box::new(DebugTable { statements: self.statements, locals: self.variables }));
         BytecodeArray {
             code: self.enc.code.into_boxed_slice(),
             constants: self.constants,
             handlers: self.handlers,
-            positions,
+            positions: self.positions,
             debug,
             parameter_count: self.parameter_count,
             register_count: u32::try_from(self.max).unwrap_or(0),
@@ -96,13 +89,13 @@ impl Builder {
         }
         let at = self.enc.emit(b, ops).expect("operands match the bytecode");
         let offset = u32::try_from(at).unwrap_or(u32::MAX);
-        if let Some(pos) = self.latent_statement.take() {
-            self.statements.push((offset, pos));
+        if let Some(source) = self.latent_statement.take() {
+            self.statements.push(SourcePosition { offset, source });
         }
-        if let Some(pos) = self.latent.take()
-            && self.positions.last().is_none_or(|&(_, last)| last != pos)
+        if let Some(source) = self.latent.take()
+            && self.positions.last().is_none_or(|last| last.source != source)
         {
-            self.positions.push((offset, pos));
+            self.positions.push(SourcePosition { offset, source });
         }
         self.boolean = matches!(b, Bytecode::TestEqual | Bytecode::TestEqualStrict | Bytecode::TestLessThan | Bytecode::TestGreaterThan | Bytecode::TestLessThanOrEqual | Bytecode::TestGreaterThanOrEqual | Bytecode::TestReferenceEqual | Bytecode::TestInstanceOf | Bytecode::TestIn | Bytecode::TestUndetectable | Bytecode::TestNull | Bytecode::TestUndefined | Bytecode::TestTypeOf | Bytecode::LogicalNot | Bytecode::ToBooleanLogicalNot | Bytecode::LdaTrue | Bytecode::LdaFalse);
         self.stored = None;

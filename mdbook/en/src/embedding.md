@@ -200,7 +200,11 @@ Error: boom
   constructor }` (1-based, columns in UTF-16 units; `Display` prints the frame as `stack` does). `a.stack_text(v)` is a
   thrown value's `stack`, or its ToString without one; `Runtime::exception_text` uses it.
 - Positions come from a table the compiler writes next to the bytecode (`BytecodeArray::positions`, bytecode offset
-  ⇒ line and column), marked at statements, calls, `new` and property loads, as V8 does.
+  ⇒ byte offset in the source), marked at statements, calls, `new` and property loads, as V8 does. Compiling works out
+  no line or column: each loaded script keeps its source text next to its code (one `Arc<str>`, freed with the
+  script's functions), and the first time a position in it is asked for, its line starts are indexed with a checkpoint
+  every 4 KB. A lookup is then a binary search and at most 4 KB of counting, also in a minified script on one line.
+  The cost is the source text kept in memory, as V8 keeps it.
 - Not shown yet: built-in frames, receiver type names (`Object.method`), async frames, `captureStackTrace`'s frame to
   hide. With the JIT on, a function running as compiled code can be missing or point at the line it was entered on.
 

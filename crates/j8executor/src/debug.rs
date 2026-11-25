@@ -195,7 +195,7 @@ impl<'scope, 'p> Paused<'_, 'scope, '_, 'p> {
             Error::Syntax(m) => self.scope.throw(ErrorKind::Syntax, &m),
             e => e,
         })?;
-        let main = self.exe.load(self.scope.mc, module);
+        let main = self.exe.load(self.scope.mc, module, alloc::sync::Arc::from(source));
         let callee = Value::Object(self.exe.function_object(self.scope, Closure::new(main, Some(env))));
         self.scope.call(callee, this, &[])
     }
@@ -253,23 +253,24 @@ impl Executor<'_> {
 
     fn place(&self, a: &Scope<'_, '_>, r: &mut Request, from: u32) -> Option<CallSite> {
         let to = u32::try_from(self.code.len()).unwrap_or(u32::MAX);
-        let mut script: Option<(u32, bool)> = None;
-        let mut in_script = |l: &Loaded| match script {
-            Some((base, yes)) if base == l.base => yes,
+        let mut script: Option<(u32, Option<u32>)> = None;
+        let mut target = |l: &Loaded| match script {
+            Some((base, at)) if base == l.base => at,
             _ => {
-                let yes = *self.referrer(a, l.base) == *r.script;
-                script = Some((l.base, yes));
-                yes
+                let at = (*self.referrer(a, l.base) == *r.script).then(|| l.script().map(|s| s.offset(r.line, r.column))).flatten();
+                script = Some((l.base, at));
+                at
             }
         };
-        let functions = (from..to).filter_map(|f| Some((FuncId(f), self.live_function(FuncId(f))?))).filter(|(_, l)| in_script(l));
-        let (line, column, f, i) = functions.flat_map(|(f, l)| {
-            l.func.bytecode.statements().iter().filter(|p| (p.line, p.column) >= (r.line, r.column)).map(move |p| (p.line, p.column, f, l.index_of(p.offset as usize)))
-        }).min_by_key(|&(line, column, f, i)| (line, column, f.0, i))?;
+        let functions = (from..to).filter_map(|f| Some((FuncId(f), self.live_function(FuncId(f))?))).filter_map(|(f, l)| Some((f, l, target(l)?)));
+        let (source, f, i) = functions.flat_map(|(f, l, at)| {
+            l.func.bytecode.statements().iter().filter(move |p| p.source >= at).map(move |p| (p.source, f, l.index_of(p.offset as usize)))
+        }).min_by_key(|&(source, f, i)| (source, f.0, i))?;
         r.site = Some((f, i));
         self.arm((f, i));
-        let function = self.live_function(f).map(|l| l.func.name.clone()).unwrap_or_default();
-        Some(CallSite { function, script: r.script.clone(), line, column, constructor: false })
+        let loaded = self.live_function(f)?;
+        let (line, column) = loaded.script()?.locate(source);
+        Some(CallSite { function: loaded.func.name.clone(), script: r.script.clone(), line, column, constructor: false })
     }
 
     pub(crate) fn debug_new_code(&self, a: &Scope<'_, '_>) {

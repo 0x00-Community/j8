@@ -185,7 +185,7 @@ Error: boom
 - `stack` 照 TC39 提案是 `Error.prototype` 上的访问器属性（V8 则给每个错误各放一个）：读的时候按错误当时的 `name` 和 `message` 生成；赋一个字符串会在实例上放一个自有的 `stack` 挡在前面。`Error.stackTraceLimit`（10，建错误时从 `Error` 本身读）限制帧数；`Error.captureStackTrace(obj)` 给任意对象加上 `stack`。
 - 错误只记下帧（代码、字节码偏移、是否构造调用），函数名、脚本、行列等到读 `stack` 时才查，所以建了没人读的错误不花格式化的开销。
 - `a.stack_trace(limit)` 给出正在运行的 JS 帧，最内层在前，类型是 `CallSite { function, script, line, column, constructor }`（从 1 数，列按 UTF-16 码元；`Display` 按 `stack` 里的样子打印一帧）。`a.stack_text(v)` 取抛出值的 `stack`，没有时取 ToString；`Runtime::exception_text` 用的就是它。
-- 位置来自编译器写在字节码旁的表（`BytecodeArray::positions`，字节码偏移 ⇒ 行和列），和 V8 一样标在语句、调用、`new` 和属性读取上。
+- 位置来自编译器写在字节码旁的表（`BytecodeArray::positions`，字节码偏移 ⇒ 源码里的字节偏移），和 V8 一样标在语句、调用、`new` 和属性读取上。编译时不算行列：每个加载的脚本把源码和它的代码放在一起（一份 `Arc<str>`，随脚本的函数一起释放），第一次有人问这个脚本里的位置时，才为它建行首表，外加每 4 KB 一个检查点；之后每次查找是一次二分加最多 4 KB 的计数，压成一行的脚本也一样。代价是源码常驻内存，V8 也是这样。
 - 还不显示：内置函数的帧、接收者的类型名（`Object.method`）、异步帧、`captureStackTrace` 要隐藏的帧。打开 JIT 时，以编译代码运行的函数可能缺帧，或者指向进入它时的那一行。
 
 ## 在别的运行时上扩展

@@ -18,6 +18,7 @@ mod debug;
 mod ic;
 mod jit;
 mod module;
+mod source;
 mod threaded;
 mod event_loop;
 mod interrupt;
@@ -102,6 +103,10 @@ struct Loaded {
 }
 
 impl Loaded {
+    fn script(&self) -> Option<&source::Script> {
+        self.unit.get().map(|u| &unsafe { u.get::<Unit>() }.script)
+    }
+
     fn note_instance(&self, o: JsObject<'_>) {
         self.instance_size.set(u8::try_from(o.borrow().props().len()).unwrap_or(u8::MAX));
     }
@@ -316,11 +321,14 @@ unsafe impl j8framework::Trace for Loaded {
     }
 }
 
-struct Unit(Box<[Code]>);
+struct Unit {
+    codes: Box<[Code]>,
+    script: source::Script,
+}
 
 unsafe impl j8framework::Trace for Unit {
     fn trace(&self, t: &mut j8framework::Tracer<'_>) {
-        self.0.iter().for_each(|c| c.trace(t));
+        self.codes.iter().for_each(|c| c.trace(t));
     }
 
     fn relocate(&mut self, t: &mut j8framework::Tracer<'_>) {
@@ -664,7 +672,7 @@ impl Executor<'_> {
         r
     }
 
-    pub fn load(&self, mc: &j8framework::Mutation<'_>, module: Module) -> FuncId {
+    pub fn load(&self, mc: &j8framework::Mutation<'_>, module: Module, text: Arc<str>) -> FuncId {
         let m = mc.gc_scope();
         let base = u32::try_from(self.code.len()).expect("fewer than 2^32 functions");
         let mut codes = Vec::with_capacity(module.functions.len());
@@ -675,7 +683,7 @@ impl Executor<'_> {
             codes.push(Code::new(h));
             self.code.push((mc.weak::<LoadedBrand>(h.get()), Code::new(h)));
         }
-        let unit = Code::new(m.alloc_handle(Unit(codes.clone().into_boxed_slice())));
+        let unit = Code::new(m.alloc_handle(Unit { codes: codes.clone().into_boxed_slice(), script: source::Script::new(text) }));
         for c in &codes {
             unsafe { c.get::<Loaded>() }.unit.set(Some(unit));
         }
@@ -2407,7 +2415,7 @@ impl Executor<'_> {
                     Err(Error::Syntax(m)) => return Err(a.throw(ErrorKind::Syntax, &m)),
                     Err(e) => return Err(e),
                 };
-                let main = self.load(a.mc, module);
+                let main = self.load(a.mc, module, Arc::from(&*src));
                 let closure = Closure::new(main, st.f().env(&st.regs));
                 Ok(self.function_object(a, closure).into())
             }
@@ -2622,7 +2630,7 @@ impl<'scope> Invoke<'scope> for Executor<'_> {
 
     fn call_site(&self, a: &Scope<'scope, '_>, frame: &j8framework::Captured) -> j8framework::CallSite {
         let loaded: &Loaded = unsafe { frame.code.get() };
-        let (line, column) = loaded.func.bytecode.position_at(frame.at).map_or((0, 0), |p| (p.line, p.column));
+        let (line, column) = loaded.func.bytecode.position_at(frame.at).zip(loaded.script()).map_or((0, 0), |(p, s)| s.locate(p.source));
         j8framework::CallSite { function: loaded.func.name.clone(), script: self.referrer(a, loaded.base).into(), line, column, constructor: frame.constructor }
     }
 
@@ -2638,7 +2646,7 @@ impl<'scope> Invoke<'scope> for Executor<'_> {
             Err(Error::Syntax(m)) => return Err(a.throw(ErrorKind::Syntax, &m)),
             Err(e) => return Err(e),
         };
-        let main = self.load_script(a.mc, module, file);
+        let main = self.load_script(a.mc, module, file, Arc::from(src));
         let level = self.deeper(a)?;
         self.note_user();
         self.deep(level, || self.run_script(a, main))
@@ -2690,7 +2698,7 @@ j8framework::paragc::brand!(
 type Parked<'p> = j8framework::ScopeGlobal<'p, ParkedBrand>;
 
 enum Work {
-    Script { module: Module, file: alloc::string::String },
+    Script { module: Module, file: alloc::string::String, text: Arc<str> },
     Module { text: alloc::string::String, file: alloc::string::String },
     Drain,
     Spent,
@@ -2720,13 +2728,14 @@ impl<'p> Executor<'p> {
 
     pub fn start(&self, src: &j8framework::Source<'_>, kind: j8framework::ScriptKind) -> Result<Job<'p>, Error> {
         Ok(Job::from(match kind {
-            j8framework::ScriptKind::Classic => Work::Script { module: Module::compile(src, j8framework::CodeKind::Script, self.debug_info())?, file: src.file.into() },
+            j8framework::ScriptKind::Classic => Work::Script { module: Module::compile(src, j8framework::CodeKind::Script, self.debug_info())?, file: src.file.into(), text: src.text.into() },
             j8framework::ScriptKind::Shared => Work::Script {
                 module: match &self.cache {
                     Some(cache) => cache.script(src, self.debug_info())?,
                     None => Module::compile(src, j8framework::CodeKind::Script, self.debug_info())?,
                 },
                 file: src.file.into(),
+                text: src.text.into(),
             },
             j8framework::ScriptKind::Module => Work::Module { text: src.text.into(), file: src.file.into() },
         }))
@@ -2791,8 +2800,8 @@ impl<'p> Executor<'p> {
         loop {
             match &mut job.work {
                 Work::Script { .. } => {
-                    let Work::Script { module, file } = core::mem::replace(&mut job.work, Work::Drain) else { unreachable!("a script") };
-                    let main = self.load_script(a.mc, module, &file);
+                    let Work::Script { module, file, text } = core::mem::replace(&mut job.work, Work::Drain) else { unreachable!("a script") };
+                    let main = self.load_script(a.mc, module, &file, text);
                     return Ok(Next::Run(Execution { state: self.script_state(a, main)?, after: After::Script }));
                 }
                 Work::Module { .. } => {
