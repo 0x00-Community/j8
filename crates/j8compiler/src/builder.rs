@@ -52,7 +52,7 @@ pub struct Builder {
     next: i32,
     max: i32,
     unbound: usize,
-    reserved: usize,
+    free: Vec<usize>,
     slot_cache: Vec<(FeedbackSlotKind, alloc::string::String, usize)>,
     boolean: bool,
     stored: Option<Register>,
@@ -62,11 +62,16 @@ pub struct Builder {
 
 impl Builder {
     pub fn new(parameter_count: u16, locals: i32) -> Self {
-        Self { enc: Encoder::default(), constants: Vec::new(), handlers: Vec::new(), positions: Vec::new(), latent: None, statements: Vec::new(), latent_statement: None, variables: Vec::new(), feedback: Vec::new(), parameter_count, locals, next: locals, max: locals, unbound: 0, reserved: 0, slot_cache: Vec::new(), boolean: false, stored: None, dead: false, new_target_or_generator: None }
+        Self { enc: Encoder::default(), constants: Vec::new(), handlers: Vec::new(), positions: Vec::new(), latent: None, statements: Vec::new(), latent_statement: None, variables: Vec::new(), feedback: Vec::new(), parameter_count, locals, next: locals, max: locals, unbound: 0, free: Vec::new(), slot_cache: Vec::new(), boolean: false, stored: None, dead: false, new_target_or_generator: None }
     }
 
-    pub fn finish(self, lines: &Lines<'_>) -> BytecodeArray {
+    pub fn finish(mut self, lines: &Lines<'_>) -> BytecodeArray {
         debug_assert_eq!(self.unbound, 0, "every label is bound");
+        self.free.sort_unstable();
+        while self.free.last().is_some_and(|&i| i + 1 == self.constants.len()) {
+            self.free.pop();
+            self.constants.pop();
+        }
         let locate = |&(offset, pos): &(u32, u32)| {
             let (line, column) = lines.locate(pos);
             SourcePosition { offset, line, column }
@@ -169,8 +174,19 @@ impl Builder {
         if shared && let Some(i) = self.constants.iter().position(|x| *x == c) {
             return i;
         }
-        self.constants.push(c);
-        self.constants.len() - 1
+        let i = self.reserve();
+        self.constants[i] = c;
+        i
+    }
+
+    fn reserve(&mut self) -> usize {
+        match self.free.iter().enumerate().min_by_key(|&(_, &i)| i) {
+            Some((at, _)) => self.free.swap_remove(at),
+            None => {
+                self.constants.push(Constant::Reserved);
+                self.constants.len() - 1
+            }
+        }
     }
 
     pub fn name(&mut self, s: &str) -> usize {
@@ -508,8 +524,7 @@ impl Builder {
             (Bytecode::JumpIfToBooleanFalse, true) => Bytecode::JumpIfFalse,
             (b, _) => b,
         };
-        let entry = self.constants.len() + self.reserved;
-        self.reserved += 1;
+        let entry = self.reserve();
         let placeholder: OperandValue = match OperandScale::for_unsigned(u32::try_from(entry).unwrap_or(u32::MAX)) {
             OperandScale::Single => 0,
             OperandScale::Double => 0x100,
@@ -537,7 +552,7 @@ impl Builder {
         }
     }
 
-    fn patch(&mut self, at: usize, _entry: usize, target: usize) {
+    fn patch(&mut self, at: usize, entry: usize, target: usize) {
         let code = &mut self.enc.code;
         let (scale, start) = match Bytecode::from_u8(code[at]).and_then(Bytecode::prefix_scale) {
             Some(s) => (s, at + 1),
@@ -545,14 +560,14 @@ impl Builder {
         };
         let delta = u32::try_from(target - start).unwrap_or(u32::MAX);
         let width = usize::from(j8bytecode::OperandSize::from(scale));
-        self.reserved -= 1;
         let value = if OperandScale::for_unsigned(delta) <= scale {
+            self.free.push(entry);
             delta
         } else {
             let b = Bytecode::from_u8(code[start]).expect("a jump");
             code[start] = Self::with_constant_operand(b) as u8;
-            self.constants.push(Constant::Offset(delta));
-            u32::try_from(self.constants.len() - 1).unwrap_or(u32::MAX)
+            self.constants[entry] = Constant::Offset(delta);
+            u32::try_from(entry).unwrap_or(u32::MAX)
         };
         let code = &mut self.enc.code;
         code[start + 1..start + 1 + width].copy_from_slice(&value.to_le_bytes()[..width]);

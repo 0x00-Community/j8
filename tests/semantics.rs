@@ -27,6 +27,13 @@ const CASES: &[(&str, &str)] = &[
     // join 中途抛错后不留下正在 join 的记录
     ("var bad = [{ toString() { throw 0; } }]; try { String(bad); } catch (e) {} bad[0] = 1; String([bad, bad])", "1,1"),
     ("var o = {}; o.o = o; try { JSON.stringify(o); } catch (e) { e.name; }", "TypeError"),
+    // 常量池过 256 项后，之前发出的前向跳转仍跳到原定目标（曾截断常量下标，跳回函数开头）
+    (
+        "var s = ''; for (var i = 0; i < 300; i++) s += 'case \"k' + i + '\": return ' + i + '; '; \
+         var f = Function('k', 'var entered; if (entered) throw \"back at the start\"; entered = true; switch (k) { ' + s + '} return -1'); \
+         [f('k0'), f('k150'), f('k299'), f('none')].join()",
+        "0,150,299,-1",
+    ),
 ];
 
 struct Host {
