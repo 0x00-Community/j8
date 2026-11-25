@@ -94,6 +94,9 @@ enum St {
     Scalar,
     Step,
     Call,
+    Global { set: bool },
+    Indirect,
+    CallRef,
 }
 
 const IBS: [Ib; 9] = [Ib::Add, Ib::Sub, Ib::Mul, Ib::And, Ib::Or, Ib::Xor, Ib::Shl, Ib::ShrS, Ib::ShrU];
@@ -105,6 +108,9 @@ const STORE_WIDTHS: [u8; 4] = [1, 2, 4, 8];
 const STEP: &str = "j8_wasm_step";
 const SCALAR: &str = "j8_wasm_scalar";
 const CALL: &str = "j8_wasm_call";
+const GLOBAL: &str = "j8_wasm_global";
+const INDIRECT: &str = "j8_wasm_indirect";
+const CALL_REF: &str = "j8_wasm_call_ref";
 
 impl Ib {
     fn llvm(self) -> &'static str {
@@ -174,7 +180,7 @@ impl St {
         out.extend([St::Eqz32, St::Eqz64]);
         out.extend(FBS.map(St::FBin));
         out.extend(FCS.map(St::FCmp));
-        out.extend([St::Const, St::Select, St::BrEq, St::Scalar, St::Step, St::Call]);
+        out.extend([St::Const, St::Select, St::BrEq, St::Scalar, St::Step, St::Call, St::Global { set: false }, St::Global { set: true }, St::Indirect, St::CallRef]);
         for nonzero in [false, true] {
             for wide in [false, true] {
                 out.push(St::BrIf { nonzero, wide });
@@ -456,6 +462,25 @@ impl Tpl {
                 let bad = self.icmp("ne", &r, &z, "i64");
                 self.jump_if(&bad, 0);
             }
+            St::Global { set } => {
+                let index = self.hole(0);
+                let (v, flag) = if set { (self.read(0, "i64"), self.c64(1)) } else { (self.c64(0), self.c64(0)) };
+                let r = self.line(&format!("llvm.call @{GLOBAL}(%ctx, {index}, {v}, {flag}) : (i64, i64, i64, i64) -> i64"));
+                if !set {
+                    self.write(&r);
+                }
+            }
+            St::Indirect | St::CallRef => {
+                let packed = self.hole(0);
+                let disp = self.hole(1);
+                let regs = self.bin("add", "%fp", &disp, "i64");
+                let x = self.read(0, "i64");
+                let callee = if st == St::Indirect { INDIRECT } else { CALL_REF };
+                let r = self.line(&format!("llvm.call @{callee}(%ctx, {packed}, {x}, {regs}) : (i64, i64, i64, i64) -> i64"));
+                let z = self.c64(0);
+                let bad = self.icmp("ne", &r, &z, "i64");
+                self.jump_if(&bad, 0);
+            }
         }
     }
 }
@@ -465,6 +490,9 @@ enum Sym {
     Step,
     Scalar,
     Call,
+    Global,
+    Indirect,
+    CallRef,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -502,6 +530,12 @@ impl TryFrom<&Stencil> for Piece {
                 Fill::Sym(Sym::Scalar)
             } else if h.name == CALL {
                 Fill::Sym(Sym::Call)
+            } else if h.name == GLOBAL {
+                Fill::Sym(Sym::Global)
+            } else if h.name == INDIRECT {
+                Fill::Sym(Sym::Indirect)
+            } else if h.name == CALL_REF {
+                Fill::Sym(Sym::CallRef)
             } else {
                 return Err(format!("a wasm stencil refers to unknown @{}", h.name));
             };
@@ -820,6 +854,19 @@ impl<'t, 'f> Stitch<'t, 'f> {
                 let disp = i64::from(self.reg(o[1])).cast_unsigned();
                 self.emit(St::Call, &[], None, vec![u64::try_from(o[0]).ok()?, disp], Some(exit))?;
             }
+            B::GlobalGet => self.emit(St::Global { set: false }, &[], Some(o[0]), vec![o[1].cast_unsigned()], None)?,
+            B::GlobalSet => self.emit(St::Global { set: true }, &[o[1]], None, vec![o[0].cast_unsigned()], None)?,
+            B::CallIndirect => {
+                let exit = self.exit;
+                let packed = (o[1].cast_unsigned() << u32::BITS) | o[0].cast_unsigned();
+                let disp = i64::from(self.reg(o[3])).cast_unsigned();
+                self.emit(St::Indirect, &[o[2]], None, vec![packed, disp], Some(exit))?;
+            }
+            B::CallRef => {
+                let exit = self.exit;
+                let disp = i64::from(self.reg(o[2])).cast_unsigned();
+                self.emit(St::CallRef, &[o[1]], None, vec![0, disp], Some(exit))?;
+            }
             B::BrOnCast | B::BrOnCastFail => return None,
             op if (op as u16) >> 8 != 0 => return None,
             op if WasmScalar::handles(op) => {
@@ -937,6 +984,9 @@ impl WasmTier for WasmJit {
             Sym::Step => f.step,
             Sym::Scalar => f.scalar,
             Sym::Call => f.call,
+            Sym::Global => f.global,
+            Sym::Indirect => f.indirect,
+            Sym::CallRef => f.call_ref,
         };
         let addr = self.code.try_borrow_mut()?.0.place(&bytes, |buf, _| {
             for &(off, s) in &relocs {

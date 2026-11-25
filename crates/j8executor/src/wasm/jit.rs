@@ -74,6 +74,9 @@ pub struct WasmJitFunction<'a> {
     pub step: u64,
     pub scalar: u64,
     pub call: u64,
+    pub global: u64,
+    pub indirect: u64,
+    pub call_ref: u64,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -152,10 +155,60 @@ impl WasmJit {
         }
     }
 
+    native! {
+        fn global(ctx: *mut WasmCtx, index: u64, value: u64, set: u64) -> u64 {
+            let ctx = unsafe { &mut *ctx };
+            let store = unsafe { &mut *(ctx.store as *mut WasmStore<'static, 'static>) };
+            let frame = unsafe { &*(ctx.frame as *const Frame<'static>) };
+            let g = frame.instance.global(usize::try_from(index).unwrap_or(usize::MAX));
+            if set == 0 {
+                g.get().0
+            } else {
+                g.set(store.mc, (value, 0));
+                0
+            }
+        }
+    }
+
+    native! {
+        fn indirect(ctx: *mut WasmCtx, packed: u64, at: u64, args: *mut u64) -> u64 {
+            let ctx = unsafe { &mut *ctx };
+            let store = unsafe { &mut *(ctx.store as *mut WasmStore<'static, 'static>) };
+            let frame = unsafe { &*(ctx.frame as *const Frame<'static>) };
+            let (table, ty) = (packed >> u32::BITS, packed & u64::from(u32::MAX));
+            let t = frame.instance.table(usize::try_from(table).unwrap_or(usize::MAX));
+            let i = t.index(at);
+            let callee = t
+                .cells()
+                .get(usize::try_from(i).unwrap_or(usize::MAX))
+                .ok_or(WasmTrap::UndefinedElement)
+                .and_then(|e| store.callee(frame.instance, j8bytecode::OperandValue::try_from(ty).unwrap_or(0), e.get()));
+            match callee {
+                Ok(c) => unsafe { WasmJit::invoke(ctx, c, args) },
+                Err(e) => WasmJit::status(ctx, Err(e)),
+            }
+        }
+    }
+
+    native! {
+        fn call_ref(ctx: *mut WasmCtx, _unused: u64, r: u64, args: *mut u64) -> u64 {
+            let ctx = unsafe { &mut *ctx };
+            match super::entity::Ptr::get::<super::WasmFunc<'static>>(r) {
+                Some(c) => unsafe { WasmJit::invoke(ctx, c, args) },
+                None => WasmJit::status(ctx, Err(WasmTrap::NullReference)),
+            }
+        }
+    }
+
     unsafe fn called(ctx: &mut WasmCtx, index: u64, args: *mut u64) -> u64 {
-        let store = unsafe { &mut *(ctx.store as *mut WasmStore<'static, 'static>) };
         let frame = unsafe { &*(ctx.frame as *const Frame<'static>) };
         let callee = frame.instance.func(usize::try_from(index).unwrap_or(usize::MAX));
+        unsafe { WasmJit::invoke(ctx, callee, args) }
+    }
+
+    unsafe fn invoke(ctx: &mut WasmCtx, callee: &'static super::WasmFunc<'static>, args: *mut u64) -> u64 {
+        let store = unsafe { &mut *(ctx.store as *mut WasmStore<'static, 'static>) };
+        let frame = unsafe { &*(ctx.frame as *const Frame<'static>) };
         if let Some(inst) = callee.instance.get() {
             let instance = inst.get();
             let code = instance.module.code(callee.index);
@@ -279,6 +332,9 @@ impl WasmJit {
             step: WasmJit::step as *const () as usize as u64,
             scalar: WasmJit::scalar as *const () as usize as u64,
             call: WasmJit::call as *const () as usize as u64,
+            global: WasmJit::global as *const () as usize as u64,
+            indirect: WasmJit::indirect as *const () as usize as u64,
+            call_ref: WasmJit::call_ref as *const () as usize as u64,
         };
         let m = *code.jit.get_or_init(|| tier.compile(&f).unwrap_or_default());
         (m.call != 0).then_some(m)
