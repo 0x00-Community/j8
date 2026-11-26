@@ -1381,7 +1381,12 @@ impl Executor<'_> {
     }
 
     pub fn run_script<'scope>(&self, a: &mut Scope<'scope, '_>, main: FuncId) -> Result<Value<'scope>, Error> {
+        self.run_script_from(a, main, false)
+    }
+
+    fn run_script_from<'scope>(&self, a: &mut Scope<'scope, '_>, main: FuncId, safe: bool) -> Result<Value<'scope>, Error> {
         let st = self.script_state(a, main)?;
+        self.safe_next.set(safe);
         self.execute(a, st, &mut None).map(Outcome::returned)
     }
 
@@ -2790,8 +2795,7 @@ impl<'scope> Invoke<'scope> for Executor<'_> {
         let main = self.load_script(a.mc, module, file);
         let level = self.deeper(a)?;
         self.note_user();
-        self.safe_next.set(safe);
-        self.deep(level, || self.run_script(a, main))
+        self.deep(level, || self.run_script_from(a, main, safe))
     }
 
     fn resume(&self, a: &mut Scope<'scope, '_>, co: JsObject<'scope>, mode: Resume, value: Value<'scope>) -> Result<Step<'scope>, Error> {

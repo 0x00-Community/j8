@@ -147,3 +147,22 @@ fn a_script_evaluated_safely_from_rust_is_collected_while_it_runs() {
     assert_eq!(result, SCRIPT_EXPECTED);
     assert!(collections < MIN_COLLECTIONS, "eval_code is no safe point: {collections} collections inside the script");
 }
+
+#[test]
+fn a_safe_script_that_fails_before_it_runs_leaves_no_safe_mark() {
+    let platform = DefaultPlatform::default();
+    let mut isolate = Isolate::new(&platform, CreateParams { collect_threshold: Some(THRESHOLD), ..CreateParams::default() });
+    let executor = Executor::default();
+    let cx = isolate.create_context(&Builtins);
+    let make = format!("function Make() {{ {SCRIPT} }}");
+    executor.eval(&mut isolate, &cx, &Source { text: &make, file: "make.js" }).expect("Make is defined");
+    let before = isolate.gc_cycles();
+    isolate.enter(&cx, &executor, |a| {
+        assert!(a.eval_code_safe("let NaN = 2", CodeKind::Script).is_err(), "NaN is a global that cannot be redeclared");
+        _ = a.take_exception();
+        let make = a.get_named(a.context.global.into(), "Make").expect("Make");
+        a.construct(make, &[], make).map(drop).expect("Make runs");
+    });
+    let collections = isolate.gc_cycles() - before;
+    assert!(collections < MIN_COLLECTIONS, "the failed eval_code_safe made the next construct a safe point: {collections} collections");
+}
