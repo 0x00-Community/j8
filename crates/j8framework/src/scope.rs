@@ -327,6 +327,11 @@ impl<'scope> Scope<'scope, '_> {
         self.eval_text(src, kind, false)
     }
 
+    pub fn eval_code_safe(&mut self, src: &str, kind: CodeKind) -> Result<Value<'scope>, Error> {
+        self.gc_safe.set(true);
+        self.eval_text(src, kind, false)
+    }
+
     pub fn eval_text(&mut self, src: &str, kind: CodeKind, hidden: bool) -> Result<Value<'scope>, Error> {
         let invoke = self.invoke;
         invoke.eval_code(self, src, kind, hidden)

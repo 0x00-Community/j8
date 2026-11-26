@@ -2780,6 +2780,7 @@ impl<'scope> Invoke<'scope> for Executor<'_> {
     }
 
     fn eval_code(&self, a: &mut Scope<'scope, '_>, src: &str, kind: j8framework::CodeKind, hidden: bool) -> Result<Value<'scope>, Error> {
+        let safe = a.gc_safe.replace(false);
         let file = Executor::source_url(src).unwrap_or(EVAL_FILE);
         let module = match Module::compile_eval(&j8framework::Source { text: src, file }, kind, hidden, self.debug_info()) {
             Ok(m) => m,
@@ -2789,6 +2790,7 @@ impl<'scope> Invoke<'scope> for Executor<'_> {
         let main = self.load_script(a.mc, module, file);
         let level = self.deeper(a)?;
         self.note_user();
+        self.safe_next.set(safe);
         self.deep(level, || self.run_script(a, main))
     }
 
