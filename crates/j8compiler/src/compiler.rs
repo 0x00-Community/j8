@@ -914,6 +914,9 @@ impl<'a> Compiler<'a, '_> {
 
     pub fn load_at(&mut self, name: &'a str, pos: u32) {
         let r = self.resolve(name);
+        if matches!(r.place, Place::Global(_) | Place::Lookup(_)) || r.needs_check(pos) {
+            self.b().at(pos);
+        }
         match r.place {
             Place::Reg(reg) => self.b().ldar(reg),
             Place::Context { depth, slot, cells } => {
@@ -1162,6 +1165,7 @@ impl<'a> Compiler<'a, '_> {
         match body {
             Body::Statements(s) => self.statements(s)?,
             Body::Expression(e) => {
+                self.at_statement(e.span().start);
                 self.expr(e)?;
                 self.ret();
             }
@@ -2935,13 +2939,14 @@ impl<'a> Compiler<'a, '_> {
         self.b().jump_loop(header, depth);
     }
 
+    fn at_statement(&mut self, pos: u32) {
+        let step = self.debug == DebugInfo::Record;
+        self.b().at_statement(pos, step);
+    }
+
     #[expect(clippy::too_many_lines, reason = "one arm per statement kind; splitting it would hurt readability")]
     fn statement(&mut self, s: &'a Statement<'a>) -> Result<(), Error> {
-        if self.debug == DebugInfo::Record {
-            self.b().at_statement(s.span().start);
-        } else {
-            self.b().at(s.span().start);
-        }
+        self.at_statement(s.span().start);
         if let Some(c) = self.frame().completion
             && self.completion_reset.contains(&s.span().start)
         {

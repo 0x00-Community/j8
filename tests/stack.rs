@@ -83,6 +83,21 @@ fn engine_errors_point_at_the_failing_expression() {
 }
 
 #[test]
+fn a_name_that_is_not_defined_is_placed_where_v8_places_it() {
+    assert_eq!(frames("var a = 1;\na + notDefined;"), "    at stack.js:2:5");
+    assert_eq!(frames("function g() {}\ng(1, notDefined);"), "    at stack.js:2:6");
+    assert_eq!(frames("var o = { k: notDefined };"), "    at stack.js:1:14");
+    assert_eq!(frames("notDefined;"), "    at stack.js:1:1");
+    assert_eq!(frames("var q = 3; q = q + later; let later;"), "    at stack.js:1:20");
+}
+
+#[test]
+fn an_arrow_with_an_expression_body_has_positions() {
+    assert_eq!(frames("const f = () => notDefined;\nf();"), "    at f (stack.js:1:17)\n    at stack.js:2:1");
+    assert_eq!(frames("const f = () => 1 + notDefined;\nf();"), "    at f (stack.js:1:21)\n    at stack.js:2:1");
+}
+
+#[test]
 fn stack_text_follows_v8() {
     let script = "Error.stackTraceLimit = 1;
 const one = new Error('one').stack.split('\\n').length;
