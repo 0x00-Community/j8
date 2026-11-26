@@ -2,7 +2,7 @@ use std::num::NonZeroUsize;
 
 use j8builtins::Builtins;
 use j8executor::Executor;
-use j8framework::{CreateParams, Isolate, Source};
+use j8framework::{CodeKind, CreateParams, Isolate, Source};
 use j8platform::DefaultPlatform;
 
 const THRESHOLD: NonZeroUsize = NonZeroUsize::new(256 << 10).unwrap();
@@ -117,4 +117,33 @@ fn a_map_callback_is_collected_while_it_runs() {
             assert!(collections >= MIN_COLLECTIONS, "only {collections} collections, so none ran inside the callbacks");
         }
     }
+}
+
+fn eval_from_rust(safe: bool) -> (String, u64) {
+    let platform = DefaultPlatform::default();
+    let mut isolate = Isolate::new(&platform, CreateParams { collect_threshold: Some(THRESHOLD), ..CreateParams::default() });
+    let executor = Executor::default();
+    let cx = isolate.create_context(&Builtins);
+    let before = isolate.gc_cycles();
+    isolate.enter(&cx, &executor, |a| {
+        let r = if safe { a.eval_code_safe(SCRIPT, CodeKind::Script) } else { a.eval_code(SCRIPT, CodeKind::Script) };
+        r.map(drop).expect("the script runs");
+    });
+    let collections = isolate.gc_cycles() - before;
+    let result = executor.eval(&mut isolate, &cx, &Source { text: "result", file: "result.js" }).expect("the result");
+    let text = isolate.enter(&cx, &executor, |a| {
+        let v = a.local(&result);
+        String::from(&**a.to_string(v).expect("ToString"))
+    });
+    (text, collections)
+}
+
+#[test]
+fn a_script_evaluated_safely_from_rust_is_collected_while_it_runs() {
+    let (result, collections) = eval_from_rust(true);
+    assert_eq!(result, SCRIPT_EXPECTED);
+    assert!(collections >= MIN_COLLECTIONS, "only {collections} collections, so none ran inside the script");
+    let (result, collections) = eval_from_rust(false);
+    assert_eq!(result, SCRIPT_EXPECTED);
+    assert!(collections < MIN_COLLECTIONS, "eval_code is no safe point: {collections} collections inside the script");
 }

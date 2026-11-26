@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 
 use j8builtins::Builtins;
 use j8executor::{EventLoop, EventLoopSet, Executor};
-use j8framework::{Error, HeapLimitCallback, ScriptKind, Source, Value};
+use j8framework::{CodeKind, Error, HeapLimitCallback, ScriptKind, Source, Value};
 use j8platform::DefaultPlatform;
 
 const LIMIT: usize = 32 << 20;
@@ -120,4 +120,12 @@ fn the_callback_raises_the_limit_and_it_goes_on() {
         assert!(js.heap_used() > LIMIT * 2, "it ran on past the first limit: {}", js.heap_used());
     });
     assert_eq!(*calls.lock().unwrap(), vec![(LIMIT, LIMIT), (LIMIT * 2, LIMIT)]);
+}
+
+#[test]
+fn growing_in_a_script_evaluated_safely_from_rust_stops() {
+    limited(false, None, |js| {
+        let r = js.enter(|a| a.eval_code_safe("const keep = []; for (;;) keep.push(new Array(1000).fill(0))", CodeKind::Script).map(drop));
+        assert!(matches!(r, Err(Error::Terminated)), "{:?}", r.as_ref().err());
+    });
 }
